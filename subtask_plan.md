@@ -54,7 +54,7 @@ Phase 1 (並列品質確認)       → Phase 2 (gitコミット)
 | subtask_042b | requirements.md (011d) + executive_summary 整合性 | 足軽6(Opus) | L5 | なし | ✅完了 | 報告YAML |
 | subtask_042c | ファイル整合性チェック（前半8ファイル） | 足軽1(Sonnet) | L2 | なし | ✅完了 | 報告YAML |
 | subtask_042d | ファイル整合性チェック（後半8ファイル） | 足軽2(Sonnet) | L2 | なし | ✅完了 | 報告YAML |
-| subtask_042e | git初回コミット（全16ファイル） | 足軽3(Sonnet) | L3 | 042a-d | 🔄作業中 | gitコミット |
+| subtask_042e | git初回コミット（全16ファイル） | 足軽3(Sonnet) | L3 | 042a-d | ✅完了 | git commit 4a08dc5 |
 
 ## 品質レビュー結果サマリ
 
@@ -67,3 +67,60 @@ Phase 1 (並列品質確認)       → Phase 2 (gitコミット)
   - ライセンス: ES=MIT, requirements=Apache-2.0
   - → 殿の戦略判断事項として適切に整理されている
 - **ファイル整合性**: 全16ファイル問題なし（リンク切れ0、未完セクション0）
+
+---
+
+# cmd_043: solver戦略不整合の収束 — 構造化討論
+
+## 目的
+executive_summary.md（NLP/GPU特化・C++・MIT）と requirements.md（LP/MIP Phase1・Rust・Apache-2.0）の
+戦略不整合を、足軽間の構造化討論で収束させ、統一戦略を策定する。
+
+## 論点
+1. **参入領域**: NLP/GPU特化 vs LP/MIP Phase 1
+2. **実装言語**: C++ vs Rust vs Go（三つ巴）
+3. **ライセンス**: MIT vs Apache-2.0
+
+## 実行順序
+```
+Phase 1 (並列・開局)    → Phase 2 (並列・反駁)     → Phase 3 (並列・結辯)
+043a, 043b, 043c        → 043d, 043e, 043f          → 043g, 043h, 043i
+                                                        → Phase 4 (検収) → Phase 5 (commit)
+                                                          043j             043k
+```
+
+## Subtask一覧
+
+| ID | Phase | 内容 | 担当 | Bloom | 依存 | 状態 | 成果物 |
+|----|-------|------|------|-------|------|------|--------|
+| subtask_043a | 1 開局 | ES派 Opening (NLP/GPU + C++ + MIT) | 足軽1(Sonnet) | L5 | なし | 🔄作業中 | solver/debate_es_opening.md |
+| subtask_043b | 1 開局 | Req派 Opening (LP/MIP + Rust + Apache) | 足軽2(Sonnet) | L5 | なし | 🔄作業中 | solver/debate_req_opening.md |
+| subtask_043c | 1 開局 | Go派 Opening (実用主義 + Go) | 足軽3(Sonnet) | L5 | なし | 🔄作業中 | solver/debate_go_opening.md |
+| subtask_043d | 2 反駁 | ES派 Rebuttal | 足軽1(Sonnet) | L5 | 043a-c | ⏳待機 | solver/debate_es_rebuttal.md |
+| subtask_043e | 2 反駁 | Req派 Rebuttal | 足軽2(Sonnet) | L5 | 043a-c | ⏳待機 | solver/debate_req_rebuttal.md |
+| subtask_043f | 2 反駁 | Go派 Rebuttal | 足軽3(Sonnet) | L5 | 043a-c | ⏳待機 | solver/debate_go_rebuttal.md |
+| subtask_043g | 3 結辯 | ES派 Closing | 足軽1(Sonnet) | L5 | 043d-f | ⏳待機 | solver/debate_es_closing.md |
+| subtask_043h | 3 結辯 | Req派 Closing | 足軽2(Sonnet) | L5 | 043d-f | ⏳待機 | solver/debate_req_closing.md |
+| subtask_043i | 3 結辯 | Go派 Closing | 足軽3(Sonnet) | L5 | 043d-f | ⏳待機 | solver/debate_go_closing.md |
+| subtask_043j | 4 検収 | 統一戦略策定 (全議論読み→決定) | 足軽5(Opus) | L6 | 043g-i | ⏳待機 | solver/unified_strategy.md |
+| subtask_043k | 5 完了 | subtask_plan更新 + git commit | 足軽4(Sonnet) | L3 | 043j | ⏳待機 | git commit |
+
+## 依存関係図
+```
+043a ─┐
+043b ─┤→ (Phase1完了)
+043c ─┘
+         043d ─┐
+         043e ─┤→ (Phase2完了)
+         043f ─┘
+                   043g ─┐
+                   043h ─┤→ (Phase3完了) → 043j (Opus検収) → 043k (commit)
+                   043i ─┘
+```
+
+## 討論構造
+- Phase 1（開局）: 3派が独立にOpening Statement。相手の文書は読まない
+- Phase 2（反駁）: 全Phase 1文書を読み、相手への反論を構築
+- Phase 3（結辯）: Phase 1+2の全文書を読み、最終弁論+収束点の提示
+- Phase 4（検収）: Opus足軽が全9文書を読み、3論点それぞれに統一結論を出す
+- Phase 5（完了）: git commit + 本ファイル更新
