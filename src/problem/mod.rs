@@ -3,6 +3,17 @@
 use crate::sparse::CscMatrix;
 use std::fmt;
 
+/// Type of constraint in an LP problem
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConstraintType {
+    /// Less than or equal (<=)
+    Le,
+    /// Greater than or equal (>=)
+    Ge,
+    /// Equal (==)
+    Eq,
+}
+
 /// Status of the solver result
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveStatus {
@@ -54,10 +65,19 @@ pub struct LpProblem {
     pub num_vars: usize,
     /// Number of constraints
     pub num_constraints: usize,
+    /// Type of each constraint (length num_constraints)
+    pub constraint_types: Vec<ConstraintType>,
+    /// Bounds for each variable: (lower, upper) (length num_vars)
+    pub bounds: Vec<(f64, f64)>,
+    /// Optional problem name
+    pub name: Option<String>,
 }
 
 impl LpProblem {
-    /// Create a new LP problem with validation
+    /// Create a new LP problem with validation (backward compatible)
+    ///
+    /// Creates a standard LP: min c^T x  s.t.  Ax <= b,  x >= 0
+    /// All constraints are assumed to be <= and all variables have bounds [0, +inf)
     ///
     /// # Arguments
     /// * `c` - Objective function coefficients
@@ -68,6 +88,38 @@ impl LpProblem {
     /// * `Ok(LpProblem)` if dimensions are valid
     /// * `Err(String)` if validation fails
     pub fn new(c: Vec<f64>, a: CscMatrix, b: Vec<f64>) -> Result<Self, String> {
+        let num_vars = c.len();
+        let num_constraints = b.len();
+
+        // Set defaults for backward compatibility
+        let constraint_types = vec![ConstraintType::Le; num_constraints];
+        let bounds = vec![(0.0, f64::INFINITY); num_vars];
+        let name = None;
+
+        Self::new_general(c, a, b, constraint_types, bounds, name)
+    }
+
+    /// Create a new LP problem with full control over constraint types and bounds
+    ///
+    /// # Arguments
+    /// * `c` - Objective function coefficients
+    /// * `a` - Constraint matrix in CSC format
+    /// * `b` - Right-hand side of constraints
+    /// * `constraint_types` - Type of each constraint (Le, Ge, or Eq)
+    /// * `bounds` - Bounds for each variable (lower, upper)
+    /// * `name` - Optional problem name
+    ///
+    /// # Returns
+    /// * `Ok(LpProblem)` if dimensions are valid
+    /// * `Err(String)` if validation fails
+    pub fn new_general(
+        c: Vec<f64>,
+        a: CscMatrix,
+        b: Vec<f64>,
+        constraint_types: Vec<ConstraintType>,
+        bounds: Vec<(f64, f64)>,
+        name: Option<String>,
+    ) -> Result<Self, String> {
         // Validate dimensions
         if c.len() != a.ncols {
             return Err(format!(
@@ -83,6 +135,20 @@ impl LpProblem {
                 a.nrows
             ));
         }
+        if constraint_types.len() != b.len() {
+            return Err(format!(
+                "Dimension mismatch: constraint_types.len()={} but num_constraints={}",
+                constraint_types.len(),
+                b.len()
+            ));
+        }
+        if bounds.len() != c.len() {
+            return Err(format!(
+                "Dimension mismatch: bounds.len()={} but num_vars={}",
+                bounds.len(),
+                c.len()
+            ));
+        }
 
         Ok(LpProblem {
             num_vars: c.len(),
@@ -90,6 +156,9 @@ impl LpProblem {
             c,
             a,
             b,
+            constraint_types,
+            bounds,
+            name,
         })
     }
 }
