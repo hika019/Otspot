@@ -1,6 +1,124 @@
-//! Sparse matrix data structures (CSC format)
+//! Sparse matrix and vector data structures (CSC format)
 
 use std::collections::HashMap;
+
+/// Sparse vector representation (index-value pairs, sorted by index)
+#[derive(Debug, Clone)]
+pub struct SparseVec {
+    pub indices: Vec<usize>,
+    pub values: Vec<f64>,
+    pub len: usize, // logical length
+}
+
+const EPS: f64 = 1e-12;
+
+impl SparseVec {
+    /// Create an empty sparse vector of given logical length
+    pub fn new(len: usize) -> Self {
+        Self {
+            indices: Vec::new(),
+            values: Vec::new(),
+            len,
+        }
+    }
+
+    /// Create SparseVec from dense slice, keeping only non-zero entries (|v| > EPS)
+    pub fn from_dense(dense: &[f64]) -> Self {
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        for (i, &v) in dense.iter().enumerate() {
+            if v.abs() > EPS {
+                indices.push(i);
+                values.push(v);
+            }
+        }
+        Self {
+            indices,
+            values,
+            len: dense.len(),
+        }
+    }
+
+    /// Convert to dense vector
+    pub fn to_dense(&self) -> Vec<f64> {
+        let mut dense = vec![0.0; self.len];
+        for (k, &idx) in self.indices.iter().enumerate() {
+            dense[idx] = self.values[k];
+        }
+        dense
+    }
+
+    /// Get value at index (0.0 if not present)
+    pub fn get(&self, idx: usize) -> f64 {
+        match self.indices.binary_search(&idx) {
+            Ok(pos) => self.values[pos],
+            Err(_) => 0.0,
+        }
+    }
+
+    /// Set value at index. If val is near zero, remove the entry.
+    pub fn set(&mut self, idx: usize, val: f64) {
+        match self.indices.binary_search(&idx) {
+            Ok(pos) => {
+                if val.abs() <= EPS {
+                    self.indices.remove(pos);
+                    self.values.remove(pos);
+                } else {
+                    self.values[pos] = val;
+                }
+            }
+            Err(pos) => {
+                if val.abs() > EPS {
+                    self.indices.insert(pos, idx);
+                    self.values.insert(pos, val);
+                }
+            }
+        }
+    }
+
+    /// self += alpha * other
+    pub fn axpy(&mut self, alpha: f64, other: &SparseVec) {
+        // Use dense conversion for correctness
+        let mut dense = self.to_dense();
+        for (k, &idx) in other.indices.iter().enumerate() {
+            if idx < dense.len() {
+                dense[idx] += alpha * other.values[k];
+            }
+        }
+        let result = SparseVec::from_dense(&dense);
+        self.indices = result.indices;
+        self.values = result.values;
+    }
+
+    /// Dot product with another sparse vector
+    pub fn dot(&self, other: &SparseVec) -> f64 {
+        let mut result = 0.0;
+        let (mut i, mut j) = (0, 0);
+        while i < self.indices.len() && j < other.indices.len() {
+            if self.indices[i] == other.indices[j] {
+                result += self.values[i] * other.values[j];
+                i += 1;
+                j += 1;
+            } else if self.indices[i] < other.indices[j] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        result
+    }
+
+    /// Dot product with a dense vector
+    pub fn dot_dense(&self, dense: &[f64]) -> f64 {
+        let mut result = 0.0;
+        for (k, &idx) in self.indices.iter().enumerate() {
+            if idx < dense.len() {
+                result += self.values[k] * dense[idx];
+            }
+        }
+        result
+    }
+}
 
 /// Compressed Sparse Column (CSC) matrix format
 #[derive(Debug, Clone)]
@@ -362,5 +480,65 @@ mod tests {
     fn test_from_triplets_mismatched_lengths() {
         let result = CscMatrix::from_triplets(&[0, 1], &[0], &[1.0, 2.0], 2, 2);
         assert!(result.is_err());
+    }
+
+    // ---- SparseVec tests ----
+
+    #[test]
+    fn test_sparse_vec_from_dense_to_dense() {
+        let dense = vec![1.0, 0.0, 0.0, 3.5, 0.0, -2.0];
+        let sv = SparseVec::from_dense(&dense);
+        assert_eq!(sv.len, 6);
+        assert_eq!(sv.indices, vec![0, 3, 5]);
+        assert_eq!(sv.values, vec![1.0, 3.5, -2.0]);
+
+        let back = sv.to_dense();
+        assert_eq!(back, dense);
+    }
+
+    #[test]
+    fn test_sparse_vec_get_set() {
+        let mut sv = SparseVec::new(5);
+        assert_eq!(sv.get(0), 0.0);
+        assert_eq!(sv.get(4), 0.0);
+
+        sv.set(2, 7.0);
+        sv.set(4, -1.0);
+        assert_eq!(sv.get(2), 7.0);
+        assert_eq!(sv.get(4), -1.0);
+        assert_eq!(sv.get(3), 0.0);
+
+        // Overwrite
+        sv.set(2, 3.0);
+        assert_eq!(sv.get(2), 3.0);
+
+        // Remove by setting to zero
+        sv.set(2, 0.0);
+        assert_eq!(sv.get(2), 0.0);
+        assert_eq!(sv.indices, vec![4]);
+    }
+
+    #[test]
+    fn test_sparse_vec_dot() {
+        let a = SparseVec::from_dense(&[1.0, 0.0, 3.0, 0.0]);
+        let b = SparseVec::from_dense(&[2.0, 5.0, 4.0, 0.0]);
+        // 1*2 + 0*5 + 3*4 + 0*0 = 14
+        assert!((a.dot(&b) - 14.0).abs() < 1e-10);
+
+        // Dot with dense
+        let dense = vec![2.0, 5.0, 4.0, 0.0];
+        assert!((a.dot_dense(&dense) - 14.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparse_vec_axpy() {
+        let mut a = SparseVec::from_dense(&[1.0, 0.0, 3.0]);
+        let b = SparseVec::from_dense(&[0.0, 2.0, 1.0]);
+        a.axpy(2.0, &b);
+        // a = [1, 0, 3] + 2*[0, 2, 1] = [1, 4, 5]
+        let dense = a.to_dense();
+        assert!((dense[0] - 1.0).abs() < 1e-10);
+        assert!((dense[1] - 4.0).abs() < 1e-10);
+        assert!((dense[2] - 5.0).abs() < 1e-10);
     }
 }

@@ -6,3 +6,4 @@ pub mod sparse;
 pub mod problem;
 pub mod simplex;
 pub mod io;
+pub mod basis;
