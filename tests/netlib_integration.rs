@@ -3,6 +3,7 @@ use solver::io::mps::parse_mps_file;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::simplex::solve;
 use std::path::Path;
+use std::time::Instant;
 
 #[test]
 fn test_parse_afiro() {
@@ -141,4 +142,93 @@ fn test_solve_blend() {
         result.objective
     );
     println!("blend solved: obj={}", result.objective);
+}
+
+// --- Medium-scale Netlib problems (cmd_068 Phase D2) ---
+
+#[test]
+fn test_netlib_adlittle() {
+    let path = Path::new("tests/netlib/adlittle.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse adlittle.mps");
+
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.status, SolveStatus::Optimal, "adlittle should reach Optimal");
+
+    // adlittle optimal: 2.2549496316E+05
+    let expected = 225494.96316;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "adlittle: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "adlittle solve time should be < 10 sec, got {:?}",
+        elapsed
+    );
+
+    println!("adlittle solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_netlib_share2b() {
+    let path = Path::new("tests/netlib/share2b.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse share2b.mps");
+
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.status, SolveStatus::Optimal, "share2b should reach Optimal");
+
+    // share2b optimal: -4.1573224074E+02
+    let expected = -415.73224074;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "share2b: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "share2b solve time should be < 10 sec, got {:?}",
+        elapsed
+    );
+
+    println!("share2b solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_netlib_stocfor1() {
+    let path = Path::new("tests/netlib/stocfor1.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse stocfor1.mps");
+
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.status, SolveStatus::Optimal, "stocfor1 should reach Optimal");
+
+    // stocfor1 optimal: -4.1131976219E+04
+    let expected = -41131.976219;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "stocfor1: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "stocfor1 solve time should be < 10 sec, got {:?}",
+        elapsed
+    );
+
+    println!("stocfor1 solved: obj={}, time={:?}", result.objective, elapsed);
 }
