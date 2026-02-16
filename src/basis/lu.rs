@@ -10,7 +10,7 @@ const SINGULAR_TOL: f64 = 1e-12;
 /// LU factorization result: P_row * B * P_col^T = L * U
 /// L is unit lower triangular (CSC), U is upper triangular (CSR).
 #[derive(Debug, Clone)]
-pub(crate) struct LuFactorization {
+pub struct LuFactorization {
     pub l: SparseLowerCSC,
     pub u: SparseUpperCSR,
     /// Row permutation: permuted position i corresponds to original row p_row[i]
@@ -303,7 +303,7 @@ impl LuFactorization {
 /// 2. Forward substitution: L * z = P_row * rhs
 /// 3. Back substitution: U * y = z
 /// 4. Apply inverse column permutation: x = P_col^T * y
-pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
     // Step 1: Apply row permutation
@@ -330,7 +330,7 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
 /// 2. Forward substitution with U^T
 /// 3. Back substitution with L^T
 /// 4. Apply row permutation transpose
-pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
     // Step 1: Apply column permutation

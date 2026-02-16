@@ -7,3 +7,14 @@ description = "A high-performance mathematical optimization solver"
 readme = "README.md"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "lu_bench"
+harness = false
+
+[[bench]]
+name = "solve_bench"
+harness = false

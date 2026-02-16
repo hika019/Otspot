@@ -1,6 +1,6 @@
 //! Basis management for Revised Simplex method
 
-pub(crate) mod lu;
+pub mod lu;
 pub(crate) mod eta;
 pub(crate) mod refactor;
 
