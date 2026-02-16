@@ -27,19 +27,16 @@ pub(crate) struct LuBasis {
     lu: lu::LuFactorization,
     eta_file: eta::EtaFile,
     basis_indices: Vec<usize>,
-    m: usize,
 }
 
 impl LuBasis {
     /// Create a new LuBasis by factorizing the initial basis
     pub fn new(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
-        let m = basis.len();
         let lu = lu::LuFactorization::factorize(a, basis)?;
         Ok(Self {
             lu,
             eta_file: eta::EtaFile::new(50),
             basis_indices: basis.to_vec(),
-            m,
         })
     }
 }
@@ -60,8 +57,7 @@ impl BasisManager for LuBasis {
     }
 
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec) {
-        let pivot_dense = pivot_col.to_dense();
-        let eta = eta::add_eta(&pivot_dense, leaving_row);
+        let eta = eta::add_eta_sparse(pivot_col, leaving_row);
         self.eta_file.etas.push(eta);
         self.basis_indices[leaving_row] = entering_col;
     }

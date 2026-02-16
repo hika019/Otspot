@@ -294,6 +294,192 @@ impl CscMatrix {
     }
 }
 
+/// Compressed Sparse Row (CSR) matrix format
+#[derive(Debug, Clone)]
+pub struct CsrMatrix {
+    /// Row pointers (length nrows + 1)
+    pub row_ptr: Vec<usize>,
+    /// Column indices for each non-zero element
+    pub col_ind: Vec<usize>,
+    /// Values for each non-zero element
+    pub values: Vec<f64>,
+    /// Number of rows
+    pub nrows: usize,
+    /// Number of columns
+    pub ncols: usize,
+}
+
+impl CsrMatrix {
+    pub fn nnz(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn from_triplets(
+        rows: &[usize],
+        cols: &[usize],
+        vals: &[f64],
+        nrows: usize,
+        ncols: usize,
+    ) -> Result<Self, String> {
+        if rows.len() != cols.len() || rows.len() != vals.len() {
+            return Err("Triplet arrays must have same length".to_string());
+        }
+
+        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
+        for i in 0..rows.len() {
+            if rows[i] >= nrows {
+                return Err(format!("Row index {} out of bounds (nrows={})", rows[i], nrows));
+            }
+            if cols[i] >= ncols {
+                return Err(format!("Col index {} out of bounds (ncols={})", cols[i], ncols));
+            }
+            *map.entry((rows[i], cols[i])).or_insert(0.0) += vals[i];
+        }
+
+        let mut triplets: Vec<(usize, usize, f64)> = map
+            .into_iter()
+            .filter(|(_, v)| v.abs() > 1e-15)
+            .map(|((r, c), v)| (r, c, v))
+            .collect();
+        triplets.sort_by_key(|&(r, c, _)| (r, c));
+
+        let mut row_ptr = vec![0; nrows + 1];
+        let mut col_ind = Vec::new();
+        let mut values = Vec::new();
+
+        let mut current_row = 0;
+        for (r, c, v) in triplets {
+            while current_row < r {
+                current_row += 1;
+                row_ptr[current_row] = col_ind.len();
+            }
+            col_ind.push(c);
+            values.push(v);
+        }
+        while current_row < nrows {
+            current_row += 1;
+            row_ptr[current_row] = col_ind.len();
+        }
+
+        Ok(Self {
+            row_ptr,
+            col_ind,
+            values,
+            nrows,
+            ncols,
+        })
+    }
+
+    pub fn get_row(&self, i: usize) -> Result<(&[usize], &[f64]), String> {
+        if i >= self.nrows {
+            return Err(format!("Row index {} out of bounds (nrows={})", i, self.nrows));
+        }
+        let start = self.row_ptr[i];
+        let end = self.row_ptr[i + 1];
+        Ok((&self.col_ind[start..end], &self.values[start..end]))
+    }
+
+    pub fn from_csc(csc: &CscMatrix) -> Self {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..csc.ncols {
+            let start = csc.col_ptr[j];
+            let end = csc.col_ptr[j + 1];
+            for k in start..end {
+                rows.push(csc.row_ind[k]);
+                cols.push(j);
+                vals.push(csc.values[k]);
+            }
+        }
+        Self::from_triplets(&rows, &cols, &vals, csc.nrows, csc.ncols)
+            .expect("Conversion from valid CSC should never fail")
+    }
+}
+
+/// Sparse unit lower triangular matrix in CSC format.
+/// Diagonal is implicitly 1.0 (not stored).
+/// Column j has entries only at rows i > j.
+#[derive(Debug, Clone)]
+pub(crate) struct SparseLowerCSC {
+    pub col_ptr: Vec<usize>,
+    pub row_ind: Vec<usize>,
+    pub values: Vec<f64>,
+    pub n: usize,
+}
+
+impl SparseLowerCSC {
+    /// Forward substitution: solve L * x = b (in-place)
+    pub fn forward_solve(&self, rhs: &mut [f64]) {
+        for j in 0..self.n {
+            let x_j = rhs[j];
+            if x_j == 0.0 {
+                continue;
+            }
+            let start = self.col_ptr[j];
+            let end = self.col_ptr[j + 1];
+            for k in start..end {
+                rhs[self.row_ind[k]] -= self.values[k] * x_j;
+            }
+        }
+    }
+
+    /// Solve L^T * x = b (in-place). L^T is unit upper triangular.
+    pub fn solve_transpose(&self, rhs: &mut [f64]) {
+        for j in (0..self.n).rev() {
+            let start = self.col_ptr[j];
+            let end = self.col_ptr[j + 1];
+            let mut sum = 0.0;
+            for k in start..end {
+                sum += self.values[k] * rhs[self.row_ind[k]];
+            }
+            rhs[j] -= sum;
+        }
+    }
+}
+
+/// Sparse upper triangular matrix in CSR format.
+/// Diagonal stored separately; off-diagonal entries at columns j > i for row i.
+#[derive(Debug, Clone)]
+pub(crate) struct SparseUpperCSR {
+    pub row_ptr: Vec<usize>,
+    pub col_ind: Vec<usize>,
+    pub values: Vec<f64>,
+    pub diag: Vec<f64>,
+    pub n: usize,
+}
+
+impl SparseUpperCSR {
+    /// Backward substitution: solve U * x = b (in-place)
+    pub fn backward_solve(&self, rhs: &mut [f64]) {
+        for i in (0..self.n).rev() {
+            let start = self.row_ptr[i];
+            let end = self.row_ptr[i + 1];
+            let mut sum = 0.0;
+            for k in start..end {
+                sum += self.values[k] * rhs[self.col_ind[k]];
+            }
+            rhs[i] = (rhs[i] - sum) / self.diag[i];
+        }
+    }
+
+    /// Solve U^T * x = b (in-place). U^T is lower triangular.
+    pub fn solve_transpose(&self, rhs: &mut [f64]) {
+        for i in 0..self.n {
+            rhs[i] /= self.diag[i];
+            let x_i = rhs[i];
+            if x_i == 0.0 {
+                continue;
+            }
+            let start = self.row_ptr[i];
+            let end = self.row_ptr[i + 1];
+            for k in start..end {
+                rhs[self.col_ind[k]] -= self.values[k] * x_i;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +726,134 @@ mod tests {
         assert!((dense[0] - 1.0).abs() < 1e-10);
         assert!((dense[1] - 4.0).abs() < 1e-10);
         assert!((dense[2] - 5.0).abs() < 1e-10);
+    }
+
+    // ---- CsrMatrix tests ----
+
+    #[test]
+    fn test_csr_from_triplets() {
+        let rows = vec![0, 0, 1, 2, 2];
+        let cols = vec![0, 2, 1, 0, 2];
+        let vals = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let mat = CsrMatrix::from_triplets(&rows, &cols, &vals, 3, 3).unwrap();
+        assert_eq!(mat.nrows, 3);
+        assert_eq!(mat.ncols, 3);
+        assert_eq!(mat.nnz(), 5);
+
+        let (ci, v) = mat.get_row(0).unwrap();
+        assert_eq!(ci, &[0, 2]);
+        assert_eq!(v, &[1.0, 2.0]);
+
+        let (ci, v) = mat.get_row(1).unwrap();
+        assert_eq!(ci, &[1]);
+        assert_eq!(v, &[3.0]);
+
+        let (ci, v) = mat.get_row(2).unwrap();
+        assert_eq!(ci, &[0, 2]);
+        assert_eq!(v, &[4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_csr_from_csc() {
+        let rows = vec![0, 2, 1, 0, 2];
+        let cols = vec![0, 0, 1, 2, 2];
+        let vals = vec![1.0, 4.0, 3.0, 2.0, 5.0];
+        let csc = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 3).unwrap();
+        let csr = CsrMatrix::from_csc(&csc);
+
+        assert_eq!(csr.nrows, 3);
+        assert_eq!(csr.ncols, 3);
+        assert_eq!(csr.nnz(), 5);
+
+        let (ci, v) = csr.get_row(0).unwrap();
+        assert_eq!(ci, &[0, 2]);
+        assert_eq!(v, &[1.0, 2.0]);
+
+        let (ci, v) = csr.get_row(1).unwrap();
+        assert_eq!(ci, &[1]);
+        assert_eq!(v, &[3.0]);
+
+        let (ci, v) = csr.get_row(2).unwrap();
+        assert_eq!(ci, &[0, 2]);
+        assert_eq!(v, &[4.0, 5.0]);
+    }
+
+    // ---- SparseLowerCSC tests ----
+
+    #[test]
+    fn test_sparse_lower_forward_solve() {
+        // L = [[1, 0, 0], [2, 1, 0], [3, 4, 1]]
+        // CSC: col 0 has (row 1, 2.0), (row 2, 3.0); col 1 has (row 2, 4.0); col 2 empty
+        let l = SparseLowerCSC {
+            col_ptr: vec![0, 2, 3, 3],
+            row_ind: vec![1, 2, 2],
+            values: vec![2.0, 3.0, 4.0],
+            n: 3,
+        };
+        // Solve Lx = [1, 4, 18]
+        // x[0] = 1, x[1] = 4 - 2*1 = 2, x[2] = 18 - 3*1 - 4*2 = 7
+        let mut rhs = vec![1.0, 4.0, 18.0];
+        l.forward_solve(&mut rhs);
+        assert!((rhs[0] - 1.0).abs() < 1e-10);
+        assert!((rhs[1] - 2.0).abs() < 1e-10);
+        assert!((rhs[2] - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparse_lower_solve_transpose() {
+        // L = [[1, 0, 0], [2, 1, 0], [3, 4, 1]]
+        // L^T = [[1, 2, 3], [0, 1, 4], [0, 0, 1]]
+        // Solve L^T x = [11, 9, 1]: x[2]=1, x[1]=9-4*1=5, x[0]=11-2*5-3*1=11-10-3=-2
+        let l = SparseLowerCSC {
+            col_ptr: vec![0, 2, 3, 3],
+            row_ind: vec![1, 2, 2],
+            values: vec![2.0, 3.0, 4.0],
+            n: 3,
+        };
+        let mut rhs = vec![11.0, 9.0, 1.0];
+        l.solve_transpose(&mut rhs);
+        assert!((rhs[0] - (-2.0)).abs() < 1e-10);
+        assert!((rhs[1] - 5.0).abs() < 1e-10);
+        assert!((rhs[2] - 1.0).abs() < 1e-10);
+    }
+
+    // ---- SparseUpperCSR tests ----
+
+    #[test]
+    fn test_sparse_upper_backward_solve() {
+        // U = [[2, 1, 3], [0, 4, 2], [0, 0, 5]]
+        // CSR (off-diag): row 0 has (col 1, 1.0), (col 2, 3.0); row 1 has (col 2, 2.0); row 2 empty
+        let u = SparseUpperCSR {
+            row_ptr: vec![0, 2, 3, 3],
+            col_ind: vec![1, 2, 2],
+            values: vec![1.0, 3.0, 2.0],
+            diag: vec![2.0, 4.0, 5.0],
+            n: 3,
+        };
+        // Solve Ux = [11, 10, 5]: x[2]=5/5=1, x[1]=(10-2*1)/4=2, x[0]=(11-1*2-3*1)/2=3
+        let mut rhs = vec![11.0, 10.0, 5.0];
+        u.backward_solve(&mut rhs);
+        assert!((rhs[0] - 3.0).abs() < 1e-10);
+        assert!((rhs[1] - 2.0).abs() < 1e-10);
+        assert!((rhs[2] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparse_upper_solve_transpose() {
+        // U = [[2, 1, 3], [0, 4, 2], [0, 0, 5]]
+        // U^T = [[2, 0, 0], [1, 4, 0], [3, 2, 5]]
+        // Solve U^T x = [6, 9, 20]: x[0]=6/2=3, x[1]=(9-1*3)/4=1.5, x[2]=(20-3*3-2*1.5)/5=(20-9-3)/5=1.6
+        let u = SparseUpperCSR {
+            row_ptr: vec![0, 2, 3, 3],
+            col_ind: vec![1, 2, 2],
+            values: vec![1.0, 3.0, 2.0],
+            diag: vec![2.0, 4.0, 5.0],
+            n: 3,
+        };
+        let mut rhs = vec![6.0, 9.0, 20.0];
+        u.solve_transpose(&mut rhs);
+        assert!((rhs[0] - 3.0).abs() < 1e-10);
+        assert!((rhs[1] - 1.5).abs() < 1e-10);
+        assert!((rhs[2] - 1.6).abs() < 1e-10);
     }
 }
