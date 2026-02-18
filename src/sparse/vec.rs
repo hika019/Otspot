@@ -125,23 +125,57 @@ impl SparseVec {
 
     /// AXPY 演算: `self += alpha * other`
     ///
-    /// 内部では一旦密ベクトルに展開して演算し、結果を再び疎ベクトルに変換する。
-    /// 正確性を優先した実装（疎・疎のマージより若干コストが高い）。
+    /// 両ベクトルのインデックスリストをtwo-pointer mergeで走査し、
+    /// O(nnz_a + nnz_b) で演算する。ZERO_TOL 以下の結果はドロップする。
     ///
     /// # 引数
     /// - `alpha`: スカラー倍率
     /// - `other`: 加算する疎ベクトル
     pub fn axpy(&mut self, alpha: f64, other: &SparseVec) {
-        // Use dense conversion for correctness
-        let mut dense = self.to_dense();
-        for (k, &idx) in other.indices.iter().enumerate() {
-            if idx < dense.len() {
-                dense[idx] += alpha * other.values[k];
+        let mut new_indices = Vec::new();
+        let mut new_values = Vec::new();
+        let (mut i, mut j) = (0, 0);
+
+        while i < self.indices.len() && j < other.indices.len() {
+            if self.indices[i] == other.indices[j] {
+                let val = self.values[i] + alpha * other.values[j];
+                if val.abs() > ZERO_TOL {
+                    new_indices.push(self.indices[i]);
+                    new_values.push(val);
+                }
+                i += 1;
+                j += 1;
+            } else if self.indices[i] < other.indices[j] {
+                new_indices.push(self.indices[i]);
+                new_values.push(self.values[i]);
+                i += 1;
+            } else {
+                let val = alpha * other.values[j];
+                if val.abs() > ZERO_TOL {
+                    new_indices.push(other.indices[j]);
+                    new_values.push(val);
+                }
+                j += 1;
             }
         }
-        let result = SparseVec::from_dense(&dense);
-        self.indices = result.indices;
-        self.values = result.values;
+        // Drain remaining self
+        while i < self.indices.len() {
+            new_indices.push(self.indices[i]);
+            new_values.push(self.values[i]);
+            i += 1;
+        }
+        // Drain remaining other
+        while j < other.indices.len() {
+            let val = alpha * other.values[j];
+            if val.abs() > ZERO_TOL {
+                new_indices.push(other.indices[j]);
+                new_values.push(val);
+            }
+            j += 1;
+        }
+
+        self.indices = new_indices;
+        self.values = new_values;
     }
 
     /// 別の疎ベクトルとの内積を計算する
