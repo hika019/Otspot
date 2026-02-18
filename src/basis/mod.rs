@@ -89,6 +89,7 @@ impl BasisManager for LuBasis {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tolerances::*;
 
     fn assert_vec_near(a: &[f64], b: &[f64], tol: f64) {
         assert_eq!(a.len(), b.len());
@@ -107,7 +108,7 @@ mod tests {
         let mut vals = Vec::new();
         for i in 0..nrows {
             for j in 0..ncols {
-                if dense[i][j].abs() > 1e-15 {
+                if dense[i][j].abs() > DROP_TOL {
                     rows.push(i);
                     cols.push(j);
                     vals.push(dense[i][j]);

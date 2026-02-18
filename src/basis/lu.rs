@@ -18,9 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
-
-const MARKOWITZ_THRESHOLD: f64 = 0.1;
-const SINGULAR_TOL: f64 = 1e-12;
+use crate::tolerances::*;
 
 /// LU分解の結果を保持する構造体。
 ///
@@ -30,9 +28,9 @@ const SINGULAR_TOL: f64 = 1e-12;
 #[derive(Debug, Clone)]
 pub struct LuFactorization {
     /// L因子（単位下三角、CSC形式）
-    pub l: SparseLowerCSC,
+    pub(crate) l: SparseLowerCSC,
     /// U因子（上三角、CSR形式）
-    pub u: SparseUpperCSR,
+    pub(crate) u: SparseUpperCSR,
     /// 行順列: 消去ステップ i に対する元の行インデックス `p_row[i]`
     pub p_row: Vec<usize>,
     /// 列順列: 消去ステップ j に対する元の列インデックス `p_col[j]`
@@ -440,7 +438,7 @@ mod tests {
         let mut vals = Vec::new();
         for i in 0..nrows {
             for j in 0..ncols {
-                if dense[i][j].abs() > 1e-15 {
+                if dense[i][j].abs() > DROP_TOL {
                     rows.push(i);
                     cols.push(j);
                     vals.push(dense[i][j]);

@@ -5,6 +5,7 @@
 //! このモジュールは疎なイータ行列の生成・蓄積・適用（FTRAN/BTRAN）を提供する。
 
 use crate::sparse::SparseVec;
+use crate::tolerances::*;
 
 /// 単一のイータ行列: `E = I + (col - e_r) * e_r^T`
 ///
@@ -58,7 +59,7 @@ impl EtaFile {
 ///
 /// `pivot_col` は FTRAN 済みの入基列 `B^{-1} * a_entering` を表す。
 /// ピボット要素 `pivot_col[leaving_row]` でスケーリングし、
-/// 絶対値 `1e-12` 未満のエントリはゼロとして省略する。
+/// 絶対値 `ZERO_TOL` 未満のエントリはゼロとして省略する。
 ///
 /// # 引数
 /// * `pivot_col` - FTRAN済みピボット列（密スライス）
@@ -75,7 +76,7 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
         } else {
             -pivot_col[i] / pivot_element
         };
-        if val.abs() > 1e-12 {
+        if val.abs() > ZERO_TOL {
             indices.push(i);
             values.push(val);
         }
@@ -103,7 +104,7 @@ pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMa
     let mut values = Vec::new();
 
     // The leaving_row entry: 1/pivot
-    if inv_pivot.abs() > 1e-12 {
+    if inv_pivot.abs() > ZERO_TOL {
         indices.push(leaving_row);
         values.push(inv_pivot);
     }
@@ -114,7 +115,7 @@ pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMa
             continue;
         }
         let val = -pivot_col.values[k] / pivot_element;
-        if val.abs() > 1e-12 {
+        if val.abs() > ZERO_TOL {
             indices.push(idx);
             values.push(val);
         }
@@ -143,7 +144,7 @@ pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
     for eta in etas {
         let r = eta.leaving_row;
         let x_r = rhs[r];
-        if x_r.abs() < 1e-15 {
+        if x_r.abs() < DROP_TOL {
             continue;
         }
 

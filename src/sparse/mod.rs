@@ -26,12 +26,13 @@
 //! 同一 (行, 列) への重複エントリは自動的に加算される。
 
 use std::collections::HashMap;
+use crate::tolerances::*;
 
 /// 疎ベクトル（インデックス・値のペアリスト、インデックスで昇順ソート済み）
 ///
 /// ゼロでない要素のみをインデックスと値のペアで保持する。
 /// `indices` は常に昇順にソートされており、二分探索による O(log n) アクセスが可能。
-/// ゼロ近傍の値（絶対値が `EPS` 以下）は自動的に除去される。
+/// ゼロ近傍の値（絶対値が `ZERO_TOL` 以下）は自動的に除去される。
 #[derive(Debug, Clone)]
 pub struct SparseVec {
     /// 非ゼロ要素のインデックス（昇順ソート済み）
@@ -41,8 +42,6 @@ pub struct SparseVec {
     /// 論理的な長さ（ゼロ要素を含む全体の次元数）
     pub len: usize, // logical length
 }
-
-const EPS: f64 = 1e-12;
 
 impl SparseVec {
     /// 指定した論理長の空疎ベクトルを生成する
@@ -61,7 +60,7 @@ impl SparseVec {
 
     /// 密ベクトルから疎ベクトルを生成する
     ///
-    /// 絶対値が EPS（1e-12）を超える要素のみを保持し、残りは捨てる。
+    /// 絶対値が ZERO_TOL（1e-12）を超える要素のみを保持し、残りは捨てる。
     /// インデックスは元の配列の位置順（昇順）で格納される。
     ///
     /// # 引数
@@ -70,7 +69,7 @@ impl SparseVec {
         let mut indices = Vec::new();
         let mut values = Vec::new();
         for (i, &v) in dense.iter().enumerate() {
-            if v.abs() > EPS {
+            if v.abs() > ZERO_TOL {
                 indices.push(i);
                 values.push(v);
             }
@@ -110,17 +109,17 @@ impl SparseVec {
 
     /// 指定インデックスに値をセットする
     ///
-    /// `val` の絶対値が EPS 以下の場合、そのインデックスを非ゼロリストから削除する
+    /// `val` の絶対値が ZERO_TOL 以下の場合、そのインデックスを非ゼロリストから削除する
     /// （ゼロとみなす）。既存のエントリがない場合は挿入し、ある場合は上書きする。
     /// ソート順を維持するため、挿入位置は二分探索で決定する。
     ///
     /// # 引数
     /// - `idx`: セットするインデックス
-    /// - `val`: セットする値（EPS 以下なら削除）
+    /// - `val`: セットする値（ZERO_TOL 以下なら削除）
     pub fn set(&mut self, idx: usize, val: f64) {
         match self.indices.binary_search(&idx) {
             Ok(pos) => {
-                if val.abs() <= EPS {
+                if val.abs() <= ZERO_TOL {
                     self.indices.remove(pos);
                     self.values.remove(pos);
                 } else {
@@ -128,7 +127,7 @@ impl SparseVec {
                 }
             }
             Err(pos) => {
-                if val.abs() > EPS {
+                if val.abs() > ZERO_TOL {
                     self.indices.insert(pos, idx);
                     self.values.insert(pos, val);
                 }
@@ -250,7 +249,7 @@ impl CscMatrix {
     /// COO（座標形式）のトリプレットから CSC 行列を構築する
     ///
     /// 同一 (row, col) への重複エントリは自動的に加算される。
-    /// ゼロ近傍の結果値（絶対値 1e-15 以下）は格納しない。
+    /// ゼロ近傍の結果値（絶対値 DROP_TOL 以下）は格納しない。
     ///
     /// # 引数
     /// - `rows`: 各エントリの行インデックス
@@ -293,7 +292,7 @@ impl CscMatrix {
         // Convert to sorted triplets
         let mut triplets: Vec<(usize, usize, f64)> = map
             .into_iter()
-            .filter(|(_, v)| v.abs() > 1e-15) // Filter near-zero values
+            .filter(|(_, v)| v.abs() > DROP_TOL) // Filter near-zero values
             .map(|((r, c), v)| (c, r, v)) // Sort by column first, then row
             .collect();
         triplets.sort_by_key(|&(c, r, _)| (c, r));
@@ -462,7 +461,7 @@ impl CsrMatrix {
     /// COO（座標形式）のトリプレットから CSR 行列を構築する
     ///
     /// 同一 (row, col) への重複エントリは自動的に加算される。
-    /// ゼロ近傍の結果値（絶対値 1e-15 以下）は格納しない。
+    /// ゼロ近傍の結果値（絶対値 DROP_TOL 以下）は格納しない。
     ///
     /// # 引数
     /// - `rows`: 各エントリの行インデックス
@@ -498,7 +497,7 @@ impl CsrMatrix {
 
         let mut triplets: Vec<(usize, usize, f64)> = map
             .into_iter()
-            .filter(|(_, v)| v.abs() > 1e-15)
+            .filter(|(_, v)| v.abs() > DROP_TOL)
             .map(|((r, c), v)| (r, c, v))
             .collect();
         triplets.sort_by_key(|&(r, c, _)| (r, c));

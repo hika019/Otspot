@@ -43,3 +43,4 @@ pub mod problem;
 pub mod simplex;
 pub mod io;
 pub mod basis;
+pub mod tolerances;

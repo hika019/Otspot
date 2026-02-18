@@ -14,8 +14,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
-
-const EPS: f64 = 1e-8;
+use crate::tolerances::*;
 
 /// LU分解を用いた改訂シンプレックス法でLPを解く
 ///
@@ -36,7 +35,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
     // Edge case: no variables
     if n == 0 {
         for i in 0..m {
-            if problem.b[i] < -EPS {
+            if problem.b[i] < -PIVOT_TOL {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: 0.0,
@@ -54,7 +53,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
     // Edge case: no constraints
     if m == 0 {
         for j in 0..n {
-            if problem.c[j] < -EPS {
+            if problem.c[j] < -PIVOT_TOL {
                 return SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
@@ -204,7 +203,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut b = problem.b.clone();
     for j in 0..n_orig {
         let offset = orig_var_info[j].offset;
-        if offset.abs() > 1e-15 {
+        if offset.abs() > DROP_TOL {
             if let Ok((rows, vals)) = problem.a.get_column(j) {
                 for (k, &row) in rows.iter().enumerate() {
                     b[row] -= vals[k] * offset;
@@ -231,7 +230,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
     for i in 0..m_ext {
         match ctypes[i] {
             ConstraintType::Le => {
-                if b[i] < -EPS {
+                if b[i] < -PIVOT_TOL {
                     row_negated[i] = true;
                     b[i] = -b[i];
                     slack_coeff[i] = -1.0;
@@ -242,7 +241,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
                 n_slack += 1;
             }
             ConstraintType::Ge => {
-                if b[i] < -EPS {
+                if b[i] < -PIVOT_TOL {
                     row_negated[i] = true;
                     b[i] = -b[i];
                     slack_coeff[i] = 1.0; // -1 negated
@@ -253,7 +252,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
                 n_slack += 1;
             }
             ConstraintType::Eq => {
-                if b[i] < -EPS {
+                if b[i] < -PIVOT_TOL {
                     row_negated[i] = true;
                     b[i] = -b[i];
                 }
@@ -301,7 +300,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
                 let sign = if row_negated[row] { -1.0 } else { 1.0 };
                 for &(new_col, coeff) in &orig_var_info[j].new_vars {
                     let actual_val = sign * val * coeff;
-                    if actual_val.abs() > 1e-15 {
+                    if actual_val.abs() > DROP_TOL {
                         trip_rows.push(row);
                         trip_cols.push(new_col);
                         trip_vals.push(actual_val);
@@ -441,7 +440,7 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
         let max_iter = 100 * (m + n_ext) + 1000;
         match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, max_iter) {
             SimplexOutcome::Optimal(obj) => {
-                if obj > EPS {
+                if obj > PIVOT_TOL {
                     return SolverResult {
                         status: SolveStatus::Infeasible,
                         objective: 0.0,
@@ -583,7 +582,7 @@ fn revised_simplex_core(
 
         // 2. Pricing: find most negative reduced cost
         let mut entering = None;
-        let mut min_rc = -EPS;
+        let mut min_rc = -PIVOT_TOL;
 
         for j in 0..n_price {
             if is_basic[j] {
@@ -624,12 +623,12 @@ fn revised_simplex_core(
         let mut min_ratio = f64::INFINITY;
 
         for i in 0..m {
-            if d[i] > EPS {
+            if d[i] > PIVOT_TOL {
                 let ratio = x_b[i] / d[i];
-                if ratio < min_ratio - EPS {
+                if ratio < min_ratio - PIVOT_TOL {
                     min_ratio = ratio;
                     leaving = Some(i);
-                } else if (ratio - min_ratio).abs() < EPS {
+                } else if (ratio - min_ratio).abs() < PIVOT_TOL {
                     if let Some(prev) = leaving {
                         if basis[i] < basis[prev] {
                             leaving = Some(i);
@@ -706,15 +705,15 @@ mod tests {
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
-            (result.objective - (-4.0)).abs() < EPS,
+            (result.objective - (-4.0)).abs() < PIVOT_TOL,
             "Expected objective -4.0, got {}",
             result.objective
         );
         let x1 = result.solution[0];
         let x2 = result.solution[1];
-        assert!(x1 >= -EPS && x1 <= 3.0 + EPS, "x1={}", x1);
-        assert!(x2 >= -EPS && x2 <= 3.0 + EPS, "x2={}", x2);
-        assert!((x1 + x2 - 4.0).abs() < EPS);
+        assert!(x1 >= -PIVOT_TOL && x1 <= 3.0 + PIVOT_TOL, "x1={}", x1);
+        assert!(x2 >= -PIVOT_TOL && x2 <= 3.0 + PIVOT_TOL, "x2={}", x2);
+        assert!((x1 + x2 - 4.0).abs() < PIVOT_TOL);
     }
 
     #[test]
@@ -731,14 +730,14 @@ mod tests {
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
         let x = &result.solution;
-        assert!(x[0] >= -EPS);
-        assert!(x[1] >= -EPS);
-        assert!(x[2] >= -EPS);
-        assert!(x[0] + x[1] + x[2] <= 10.0 + EPS);
-        assert!(2.0 * x[0] + x[1] <= 14.0 + EPS);
-        assert!(x[1] + x[2] <= 8.0 + EPS);
+        assert!(x[0] >= -PIVOT_TOL);
+        assert!(x[1] >= -PIVOT_TOL);
+        assert!(x[2] >= -PIVOT_TOL);
+        assert!(x[0] + x[1] + x[2] <= 10.0 + PIVOT_TOL);
+        assert!(2.0 * x[0] + x[1] <= 14.0 + PIVOT_TOL);
+        assert!(x[1] + x[2] <= 8.0 + PIVOT_TOL);
         assert!(
-            (result.objective - (-28.0)).abs() < EPS,
+            (result.objective - (-28.0)).abs() < PIVOT_TOL,
             "Expected objective -28.0, got {}",
             result.objective
         );
@@ -772,7 +771,7 @@ mod tests {
         let lp = LpProblem::new(vec![], a, vec![]).unwrap();
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.objective).abs() < EPS);
+        assert!((result.objective).abs() < PIVOT_TOL);
     }
 
     #[test]
@@ -789,7 +788,7 @@ mod tests {
         let lp = LpProblem::new(vec![1.0], a, vec![]).unwrap();
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.objective).abs() < EPS);
+        assert!((result.objective).abs() < PIVOT_TOL);
     }
 
     #[test]
