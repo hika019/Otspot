@@ -1,4 +1,19 @@
-//! Sparse LU factorization with Markowitz threshold pivoting
+//! 疎LU分解モジュール（Markowitzしきい値ピボット法）
+//!
+//! # 概要
+//! 線形計画法の単体法（改訂単体法）で用いる基底行列 B に対して、疎LU分解を実施する。
+//! 分解式: `P_row × B × P_col^T = L × U`
+//! - L: 単位下三角疎行列（CSC形式）
+//! - U: 上三角疎行列（CSR形式、対角要素別保持）
+//! - P_row, P_col: 行・列の順列行列
+//!
+//! # Markowitz法によるピボット選択
+//! 各消去ステップで、以下の基準でピボット要素を選択する：
+//! 1. **しきい値条件**: `|a_{ij}| >= MARKOWITZ_THRESHOLD × max_col(j)`
+//! 2. **充填最小化**: Markowitz コスト `= (r_nnz - 1) × (c_nnz - 1)` を最小化
+//! 3. **タイブレーク**: 初期列非零要素数の昇順
+//!
+//! この戦略により、数値安定性を保ちながらフィルイン（fill-in）を抑制する。
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,28 +22,39 @@ use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
 const MARKOWITZ_THRESHOLD: f64 = 0.1;
 const SINGULAR_TOL: f64 = 1e-12;
 
-/// LU factorization result: P_row * B * P_col^T = L * U
-/// L is unit lower triangular (CSC), U is upper triangular (CSR).
+/// LU分解の結果を保持する構造体。
+///
+/// 分解式: `P_row × B × P_col^T = L × U`
+/// - L: 単位下三角疎行列（CSC形式）
+/// - U: 上三角疎行列（CSR形式）
 #[derive(Debug, Clone)]
 pub struct LuFactorization {
+    /// L因子（単位下三角、CSC形式）
     pub l: SparseLowerCSC,
+    /// U因子（上三角、CSR形式）
     pub u: SparseUpperCSR,
-    /// Row permutation: permuted position i corresponds to original row p_row[i]
+    /// 行順列: 消去ステップ i に対する元の行インデックス `p_row[i]`
     pub p_row: Vec<usize>,
-    /// Column permutation: permuted position j corresponds to original column p_col[j]
+    /// 列順列: 消去ステップ j に対する元の列インデックス `p_col[j]`
     pub p_col: Vec<usize>,
-    /// Dimension
+    /// 行列の次元 n
     pub n: usize,
 }
 
-/// Sparse working matrix for Gaussian elimination.
-/// Stores entries in row-major HashMaps with column-to-row index sets.
+/// ガウス消去法で用いる疎作業行列。
+///
+/// 各行を `HashMap<列インデックス, 値>` で表現し、
+/// 列ごとに非零行インデックスの `HashSet` を保持することで
+/// ピボット選択と消去を効率的に実行する。
 struct WorkingMatrix {
+    /// 行データ: `row_data[i]` = {列インデックス → 値} のマップ
     row_data: Vec<HashMap<usize, f64>>,
+    /// 列ごとの非零行集合: `col_rows[j]` = {行インデックス}
     col_rows: Vec<HashSet<usize>>,
 }
 
 impl WorkingMatrix {
+    /// n×n の空の作業行列を生成する。
     fn new(n: usize) -> Self {
         Self {
             row_data: (0..n).map(|_| HashMap::new()).collect(),
@@ -36,6 +62,9 @@ impl WorkingMatrix {
         }
     }
 
+    /// 要素 `(row, col)` に値 `val` を挿入する。
+    ///
+    /// `|val| <= SINGULAR_TOL` の場合は零扱いとして挿入しない。
     fn insert(&mut self, row: usize, col: usize, val: f64) {
         if val.abs() > SINGULAR_TOL {
             self.row_data[row].insert(col, val);
@@ -43,10 +72,12 @@ impl WorkingMatrix {
         }
     }
 
+    /// 要素 `(row, col)` の値を返す。存在しない場合は `0.0`。
     fn get(&self, row: usize, col: usize) -> f64 {
         *self.row_data[row].get(&col).unwrap_or(&0.0)
     }
 
+    /// 要素 `(row, col)` を削除し、列インデックス集合を更新する。
     fn remove(&mut self, row: usize, col: usize) {
         self.row_data[row].remove(&col);
         self.col_rows[col].remove(&row);
@@ -54,15 +85,31 @@ impl WorkingMatrix {
 }
 
 impl LuFactorization {
-    /// Factorize the basis matrix B (columns of A selected by `basis` indices).
-    /// Returns P_row * B * P_col^T = L * U
+    /// 基底行列 B を疎LU分解する。
+    ///
+    /// B は制約行列 `a` の列を `basis` インデックスで選択したもの。
+    /// 分解式: `P_row × B × P_col^T = L × U`
+    ///
+    /// # 引数
+    /// - `a`: 制約行列（CSC形式）
+    /// - `basis`: 基底列インデックスのスライス（長さ m）
+    ///
+    /// # 戻り値
+    /// - `Ok(LuFactorization)`: 分解成功
+    /// - `Err(String)`: 特異行列検出またはインデックス越境
+    ///
+    /// # アルゴリズム
+    /// 1. 基底列を疎作業行列に展開
+    /// 2. Markowitz法で各ステップのピボットを選択（しきい値条件 + 充填最小化）
+    /// 3. ガウス消去でL・Uの成分を収集
+    /// 4. 順列適用後に `SparseLowerCSC` / `SparseUpperCSR` を構築
     pub fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
         let m = basis.len();
         if m == 0 {
             return Err("Empty basis".to_string());
         }
 
-        // Extract basis columns into WorkingMatrix
+        // 基底列を作業行列に展開
         let mut work = WorkingMatrix::new(m);
         for (j, &col_idx) in basis.iter().enumerate() {
             if col_idx >= a.ncols {
@@ -81,7 +128,7 @@ impl LuFactorization {
             }
         }
 
-        // Initial column nnz for tie-breaking in Markowitz search
+        // Markowitzタイブレーク用の初期列非零要素数
         let initial_col_nnz: Vec<usize> = (0..m).map(|j| work.col_rows[j].len()).collect();
 
         let mut p_row = vec![0usize; m];
@@ -89,13 +136,13 @@ impl LuFactorization {
         let mut eliminated_rows = vec![false; m];
         let mut eliminated_cols = vec![false; m];
 
-        // Storage for L and U entries (in original indices)
+        // L・Uの成分を元インデックスで収集するバッファ
         let mut l_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         let mut u_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         let mut diag = vec![0.0f64; m];
 
         for step in 0..m {
-            // Find column maximum for threshold test (active entries only)
+            // しきい値判定用の列最大絶対値を計算（アクティブ要素のみ）
             let mut col_max: Vec<f64> = vec![0.0; m];
             for j in 0..m {
                 if eliminated_cols[j] {
@@ -112,8 +159,8 @@ impl LuFactorization {
                 }
             }
 
-            // Find pivot with minimum Markowitz count satisfying threshold.
-            // Tie-break by initial column nnz (ascending).
+            // Markowitzコスト最小のピボットを選択。
+            // タイブレークは初期列非零要素数の昇順。
             let mut best_pivot: Option<(usize, usize)> = None;
             let mut best_markowitz = usize::MAX;
             let mut best_col_order = usize::MAX;
@@ -169,7 +216,7 @@ impl LuFactorization {
             let pivot_val = work.get(pivot_row, pivot_col);
             diag[step] = pivot_val;
 
-            // Record U entries from pivot row (off-diagonal, active columns only)
+            // ピボット行からU成分を収集（対角以外のアクティブ列）
             for (&c, &val) in &work.row_data[pivot_row] {
                 if eliminated_cols[c] || c == pivot_col {
                     continue;
@@ -177,21 +224,21 @@ impl LuFactorization {
                 u_entries[step].push((c, val));
             }
 
-            // Collect active rows in pivot column (excluding pivot row)
+            // ピボット列のアクティブ行（ピボット行除く）を収集
             let active_rows_in_col: Vec<usize> = work.col_rows[pivot_col]
                 .iter()
                 .filter(|&&r| !eliminated_rows[r] && r != pivot_row)
                 .copied()
                 .collect();
 
-            // Collect pivot row entries (off-diagonal, active columns) for elimination
+            // 消去用にピボット行のアクティブ要素を収集（対角以外）
             let pivot_row_entries: Vec<(usize, f64)> = work.row_data[pivot_row]
                 .iter()
                 .filter(|(&c, _)| !eliminated_cols[c] && c != pivot_col)
                 .map(|(&c, &v)| (c, v))
                 .collect();
 
-            // Eliminate: for each active row with non-zero in pivot column
+            // ピボット列に非零を持つ各アクティブ行を消去
             for r_i in active_rows_in_col {
                 let val_ic = work.get(r_i, pivot_col);
                 if val_ic.abs() <= SINGULAR_TOL {
@@ -200,7 +247,7 @@ impl LuFactorization {
                 let multiplier = val_ic / pivot_val;
                 l_entries[step].push((r_i, multiplier));
 
-                // Update row r_i: work[r_i][c] -= multiplier * work[pivot_row][c]
+                // 行 r_i を更新: work[r_i][c] -= multiplier × work[pivot_row][c]
                 for &(c, u_val) in &pivot_row_entries {
                     let old_val = work.get(r_i, c);
                     let new_val = old_val - multiplier * u_val;
@@ -212,7 +259,7 @@ impl LuFactorization {
                     }
                 }
 
-                // Remove entry at pivot column
+                // ピボット列の要素を削除
                 work.remove(r_i, pivot_col);
             }
 
@@ -220,7 +267,7 @@ impl LuFactorization {
             eliminated_cols[pivot_col] = true;
         }
 
-        // Build inverse permutations
+        // 逆順列を構築
         let mut inv_perm_row = vec![0usize; m];
         let mut inv_perm_col = vec![0usize; m];
         for k in 0..m {
@@ -228,7 +275,7 @@ impl LuFactorization {
             inv_perm_col[p_col[k]] = k;
         }
 
-        // Build SparseLowerCSC from l_entries (convert original → permuted indices)
+        // l_entries（元インデックス）から SparseLowerCSC を構築（順列変換後）
         let mut l_col_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         for step in 0..m {
             for &(orig_row, multiplier) in &l_entries[step] {
@@ -257,7 +304,7 @@ impl LuFactorization {
             n: m,
         };
 
-        // Build SparseUpperCSR from u_entries (convert original → permuted indices)
+        // u_entries（元インデックス）から SparseUpperCSR を構築（順列変換後）
         let mut u_row_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         for step in 0..m {
             for &(orig_col, value) in &u_entries[step] {
@@ -297,55 +344,66 @@ impl LuFactorization {
     }
 }
 
-/// FTRAN: solve B * x = rhs using LU factors
-/// P_row * B * P_col^T = L * U
-/// 1. Apply row permutation to rhs
-/// 2. Forward substitution: L * z = P_row * rhs
-/// 3. Back substitution: U * y = z
-/// 4. Apply inverse column permutation: x = P_col^T * y
+/// FTRAN: 基底行列方程式 `B × x = rhs` を LU因子で解く。
+///
+/// 分解式 `P_row × B × P_col^T = L × U` を利用して、以下の順で計算する：
+/// 1. 行順列 P_row を rhs に適用
+/// 2. 前進代入: `L × z = P_row × rhs`
+/// 3. 後退代入: `U × y = z`
+/// 4. 列順列の逆適用: `x = P_col^T × y`
+///
+/// # 引数
+/// - `lu`: LU分解済み因子
+/// - `rhs`: 右辺ベクトル（計算結果で上書き）
 pub fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
-    // Step 1: Apply row permutation
+    // Step 1: 行順列を適用
     let orig = rhs.clone();
     for i in 0..n {
         rhs[i] = orig[lu.p_row[i]];
     }
 
-    // Step 2: Sparse forward substitution with L
+    // Step 2: L による疎前進代入
     lu.l.forward_solve(rhs);
 
-    // Step 3: Sparse backward substitution with U
+    // Step 3: U による疎後退代入
     lu.u.backward_solve(rhs);
 
-    // Step 4: Apply inverse column permutation
+    // Step 4: 列順列の逆適用
     let y = rhs.clone();
     for i in 0..n {
         rhs[lu.p_col[i]] = y[i];
     }
 }
 
-/// BTRAN: solve B^T * x = rhs using LU factors
-/// 1. Apply column permutation to rhs
-/// 2. Forward substitution with U^T
-/// 3. Back substitution with L^T
-/// 4. Apply row permutation transpose
+/// BTRAN: 転置方程式 `B^T × x = rhs` を LU因子で解く。
+///
+/// FTRAN の双対演算。分解式の転置を利用して、以下の順で計算する：
+/// 1. 列順列 P_col を rhs に適用
+/// 2. U^T による前進代入
+/// 3. L^T による後退代入
+/// 4. 行順列の転置を適用
+///
+/// # 引数
+/// - `lu`: LU分解済み因子
+/// - `rhs`: 右辺ベクトル（計算結果で上書き）
 pub fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
-    // Step 1: Apply column permutation
+    // Step 1: 列順列を適用
     let orig = rhs.clone();
     for i in 0..n {
         rhs[i] = orig[lu.p_col[i]];
     }
 
-    // Step 2: Forward substitution with U^T
+    // Step 2: U^T による前進代入
     lu.u.solve_transpose(rhs);
 
-    // Step 3: Back substitution with L^T
+    // Step 3: L^T による後退代入
     lu.l.solve_transpose(rhs);
 
-    // Step 4: Apply row permutation transpose
+    // Step 4: 行順列の転置を適用
     let w = rhs.clone();
     for i in 0..n {
         rhs[lu.p_row[i]] = w[i];

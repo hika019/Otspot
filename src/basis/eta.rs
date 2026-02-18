@@ -1,24 +1,44 @@
-//! Eta-factoring for basis updates in Revised Simplex
+//! 修正シンプレックス法における基底更新のイータ因子分解
+//!
+//! 修正シンプレックス法では基底行列 B を直接保持する代わりに、
+//! イータ行列 `E = I + (col - e_r) * e_r^T` の積で `B^{-1}` を逐次更新する。
+//! このモジュールは疎なイータ行列の生成・蓄積・適用（FTRAN/BTRAN）を提供する。
 
 use crate::sparse::SparseVec;
 
-/// Single eta matrix: E = I + (column - e_r) * e_r^T
-/// Stored sparsely: only non-zero entries of the inverse column.
+/// 単一のイータ行列: `E = I + (col - e_r) * e_r^T`
+///
+/// `B^{-1}` の1ステップ更新を疎表現で保持する。
+/// 非零エントリのみを `indices` / `values` に格納し、空間効率を確保する。
 #[derive(Debug, Clone)]
 pub(crate) struct EtaMatrix {
+    /// 離基行（ピボット行）のインデックス
     pub leaving_row: usize,
+    /// イータ列の非零エントリのインデックス（昇順）
     pub indices: Vec<usize>,
+    /// イータ列の非零エントリの値（`indices` と同順）
     pub values: Vec<f64>,
 }
 
-/// Collection of eta matrices accumulated since last refactorization
+/// 最後の再因子分解以降に蓄積されたイータ行列の集合
+///
+/// イータ行列が `max_etas` 個に達すると [`needs_refactor`] が `true` を返し、
+/// 完全再因子分解のタイミングを通知する。
+///
+/// [`needs_refactor`]: EtaFile::needs_refactor
 #[derive(Debug, Clone)]
 pub(crate) struct EtaFile {
+    /// 蓄積されたイータ行列のリスト（適用順）
     pub etas: Vec<EtaMatrix>,
+    /// 再因子分解を促すイータ行列の最大保持数
     pub max_etas: usize,
 }
 
 impl EtaFile {
+    /// 新しい `EtaFile` を生成する
+    ///
+    /// # 引数
+    /// * `max_etas` - 再因子分解を促すイータ行列の最大保持数
     pub fn new(max_etas: usize) -> Self {
         Self {
             etas: Vec::new(),
@@ -26,13 +46,23 @@ impl EtaFile {
         }
     }
 
+    /// 再因子分解が必要かどうかを判定する
+    ///
+    /// 蓄積されたイータ行列の数が `max_etas` 以上に達した場合に `true` を返す。
     pub fn needs_refactor(&self) -> bool {
         self.etas.len() >= self.max_etas
     }
 }
 
-/// Create a sparse eta matrix from the FTRAN'd pivot column (dense slice).
-/// pivot_col is the result of FTRAN on the entering column (B^{-1} * a_entering).
+/// 密スライスのピボット列からイータ行列を生成する（テスト専用）
+///
+/// `pivot_col` は FTRAN 済みの入基列 `B^{-1} * a_entering` を表す。
+/// ピボット要素 `pivot_col[leaving_row]` でスケーリングし、
+/// 絶対値 `1e-12` 未満のエントリはゼロとして省略する。
+///
+/// # 引数
+/// * `pivot_col` - FTRAN済みピボット列（密スライス）
+/// * `leaving_row` - 離基行のインデックス
 #[cfg(test)]
 pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
     let pivot_element = pivot_col[leaving_row];
@@ -58,7 +88,14 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
     }
 }
 
-/// Create a sparse eta matrix directly from a SparseVec (avoids to_dense).
+/// 疎ベクトル `SparseVec` からイータ行列を生成する
+///
+/// [`add_eta`] の疎版。密変換（`to_dense`）を回避してメモリ効率を高める。
+/// 結果はインデックス昇順にソートされる。
+///
+/// # 引数
+/// * `pivot_col` - FTRAN済みピボット列（`SparseVec`）
+/// * `leaving_row` - 離基行のインデックス
 pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMatrix {
     let pivot_element = pivot_col.get(leaving_row);
     let inv_pivot = 1.0 / pivot_element;
@@ -94,8 +131,14 @@ pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMa
     }
 }
 
-/// Apply eta matrices in forward order for FTRAN (sparse).
-/// Each eta applies E^{-1} to rhs, touching only non-zero entries.
+/// イータ行列を順方向に適用する（FTRAN: Forward Transformation）
+///
+/// `B^{-1} * rhs` に相当する操作を蓄積済みイータ行列の積で近似する。
+/// 各イータは `rhs[leaving_row]` のみを参照するため疎な更新が可能。
+///
+/// # 引数
+/// * `etas` - 適用するイータ行列のスライス（蓄積順）
+/// * `rhs` - 入出力ベクトル（インプレース更新）
 pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
     for eta in etas {
         let r = eta.leaving_row;
@@ -112,8 +155,14 @@ pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
     }
 }
 
-/// Apply eta matrices in reverse order for BTRAN (sparse).
-/// Each eta applies E^{-T} to rhs.
+/// イータ行列を逆方向に適用する（BTRAN: Backward Transformation）
+///
+/// `rhs^T * B^{-1}` に相当する操作を、イータ行列の転置積（逆順適用）で近似する。
+/// 各イータの `leaving_row` 行に対するドット積を計算してインプレース更新する。
+///
+/// # 引数
+/// * `etas` - 適用するイータ行列のスライス（蓄積順、逆順に適用）
+/// * `rhs` - 入出力ベクトル（インプレース更新）
 pub(crate) fn apply_btran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
     for eta in etas.iter().rev() {
         let r = eta.leaving_row;

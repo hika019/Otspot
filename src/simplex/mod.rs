@@ -1,5 +1,15 @@
-//! Primal Simplex algorithm for Linear Programming
-//! Phase I + Phase II (Revised Simplex Method)
+//! 線形計画法（LP）のための主シンプレックス法モジュール
+//!
+//! Phase I + Phase II の改訂シンプレックス法（Revised Simplex Method）を実装する。
+//! LU分解を用いた基底行列の効率的な操作により、数値的安定性と計算速度を両立する。
+//!
+//! # アルゴリズム概要
+//!
+//! 1. **Phase I**: 人工変数を導入し、初期実行可能基底解を探索する
+//! 2. **Phase II**: 実行可能解から最適解に向けて目的関数を改善する
+//!
+//! 改訂シンプレックス法では完全な単体表ではなく基底行列のLU分解を保持するため、
+//! 大規模疎行列に対して高い計算効率を発揮する。
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
@@ -7,7 +17,18 @@ use crate::sparse::{CscMatrix, SparseVec};
 
 const EPS: f64 = 1e-8;
 
-/// Solve an LP problem using Revised Simplex with LU factorization
+/// LU分解を用いた改訂シンプレックス法でLPを解く
+///
+/// 与えられた線形計画問題を標準形に変換し、2相シンプレックス法で最適解を求める。
+/// 変数変換（有界変数・符号制約）、スラック変数の追加、人工変数の導入を自動的に行う。
+///
+/// # 引数
+///
+/// * `problem` - 解くべき線形計画問題
+///
+/// # 戻り値
+///
+/// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
 pub fn solve(problem: &LpProblem) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
@@ -54,33 +75,72 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 
 // --- Data structures ---
 
+/// 元の変数の変換情報を保持する構造体
+///
+/// 各元変数がどのように標準形の変数群に対応しているかを記録する。
+/// 下限・上限制約によって変数分割や符号反転が生じた際に使用する。
 struct OrigVarInfo {
+    /// 変数変換のオフセット（下限 lb または上限 ub の値）
     offset: f64,
+    /// 新変数インデックスと係数のペアのリスト
+    ///
+    /// 通常は1要素（下限付き変数）または2要素（無制限変数を正部・負部に分割）
     new_vars: Vec<(usize, f64)>,
 }
 
+/// 線形計画問題の標準形表現
+///
+/// 元のLPを改訂シンプレックス法に適した形式に変換した結果を保持する。
+/// スラック変数の追加、変数変換（下限シフト・符号反転・分割）、
+/// 人工変数の要否判定を含む完全な変換済みデータを格納する。
 struct StandardForm {
+    /// 制約行列（疎CSC形式）
     a: CscMatrix,
+    /// 制約右辺ベクトル（変換済み）
     b: Vec<f64>,
+    /// 目的関数係数ベクトル（Phase II用）
     c: Vec<f64>,
+    /// 制約数（上限制約行も含む）
     m: usize,
+    /// 元変数を変換した新変数の数
     n_shifted: usize,
+    /// 全変数数（新変数 + スラック変数）
     n_total: usize,
+    /// 初期基底変数のインデックスリスト（行ごと）
     initial_basis: Vec<usize>,
+    /// 各制約行が人工変数を必要とするかのフラグ
     needs_artificial: Vec<bool>,
+    /// 人工変数の総数
     num_artificial: usize,
+    /// 変数変換による目的関数のオフセット
     obj_offset: f64,
+    /// 元の変数数
     n_orig: usize,
+    /// 元変数ごとの変換情報
     orig_var_info: Vec<OrigVarInfo>,
 }
 
+/// シンプレックス法コア関数の実行結果
 enum SimplexOutcome {
+    /// 最適解が得られた。値は最適目的関数値
     Optimal(f64),
+    /// 問題が非有界（unbounded）であった
     Unbounded,
 }
 
 // --- Standard form construction ---
 
+/// LPを改訂シンプレックス法用の標準形に変換する
+///
+/// 以下の7ステップで変換を行う:
+///
+/// 1. 変数変換（下限シフト・上限反転・無制限変数の正負分割）
+/// 2. 上限制約の追加
+/// 3. 調整済み右辺ベクトルの計算
+/// 4. 制約タイプの整理
+/// 5. 行の符号調整とスラック変数の設定
+/// 6. 初期基底と人工変数の決定
+/// 7. CSC疎行列の構築
 fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
@@ -293,6 +353,13 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
 // --- Two-phase simplex ---
 
+/// 2相シンプレックス法で標準形LPを解く
+///
+/// - 人工変数が不要な場合: Phase II に直接進む
+/// - 人工変数が必要な場合: Phase I で実行可能基底を求めてから Phase II を実行
+///
+/// Phase I の目的関数は人工変数の和の最小化。
+/// 最小値がゼロより大きければ元問題は実行不可能（Infeasible）。
 fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
     let m = sf.m;
 
@@ -409,6 +476,10 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
     }
 }
 
+/// 最適基底解から元の変数への解ベクトルを復元する
+///
+/// 標準形の最適解を、変数変換（オフセット・係数）を逆適用して
+/// 元問題の変数値に変換する。
 fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64> {
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
@@ -430,6 +501,29 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64>
 
 // --- Core Revised Simplex ---
 
+/// 改訂シンプレックス法のコアアルゴリズム
+///
+/// LU分解を用いて基底行列を管理し、以下の手順を繰り返す:
+///
+/// 1. **BTRAN**: 双対変数 `y = B^{-T} c_B` を計算
+/// 2. **価格付け（Pricing）**: 最も負の被縮小費用を持つ入基変数を選択
+/// 3. **FTRAN**: ピボット列 `d = B^{-1} a_j` を計算
+/// 4. **比率テスト**: Bland則を用いて離基変数を選択（退化サイクルの防止）
+/// 5. **基底更新**: `x_B` の更新と基底行列のrank-1更新
+///
+/// # 引数
+///
+/// * `a` - 制約行列（CSC疎行列形式）
+/// * `x_b` - 現在の基底解ベクトル（更新される）
+/// * `c` - 目的関数係数ベクトル
+/// * `basis` - 基底変数インデックスリスト（更新される）
+/// * `m` - 制約数
+/// * `n_cols` - 全列数
+/// * `n_price` - 価格付けの対象列数（人工変数を除く場合に `n_total` を指定）
+///
+/// # 戻り値
+///
+/// [`SimplexOutcome::Optimal`] — 最適目的関数値、または [`SimplexOutcome::Unbounded`]
 fn revised_simplex_core(
     a: &CscMatrix,
     x_b: &mut Vec<f64>,

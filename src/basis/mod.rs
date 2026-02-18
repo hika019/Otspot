@@ -1,4 +1,7 @@
-//! Basis management for Revised Simplex method
+//! 改訂単体法（Revised Simplex）の基底管理モジュール
+//!
+//! 基底行列 B の LU 分解を管理し、FTRAN・BTRAN ソルブと
+//! ピボット更新（eta ファイル）および定期的な再因子分解をサポートする。
 
 pub mod lu;
 pub(crate) mod eta;
@@ -6,23 +9,28 @@ pub(crate) mod refactor;
 
 use crate::sparse::{CscMatrix, SparseVec};
 
-/// Basis manager trait for Revised Simplex
-/// Manages LU factorization of the basis matrix B
+/// 改訂単体法の基底管理トレイト
+///
+/// 基底行列 B の LU 分解を管理し、FTRAN・BTRAN ソルブ、
+/// ピボット更新、再因子分解インターフェースを提供する。
 pub(crate) trait BasisManager: Send {
-    /// FTRAN: solve B * x = rhs, result stored in rhs
+    /// FTRAN: B * x = rhs を解く。結果は `rhs` に上書きされる
     fn ftran(&self, rhs: &mut SparseVec);
 
-    /// BTRAN: solve B^T * x = rhs, result stored in rhs
+    /// BTRAN: B^T * x = rhs を解く。結果は `rhs` に上書きされる
     fn btran(&self, rhs: &mut SparseVec);
 
-    /// Update basis after pivot: entering_col replaces leaving_row
+    /// ピボット後の基底更新: `entering_col` が `leaving_row` を置き換える
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec);
 
-    /// Check numerical stability and refactor if needed
+    /// 数値安定性を検査し、必要であれば基底行列を再因子分解する
     fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]);
 }
 
-/// LU-based basis manager with eta-file updates
+/// eta ファイル更新付きの LU 分解ベース基底管理構造体
+///
+/// 初期因子分解後は eta ファイルにより逐次更新し、
+/// 蓄積誤差が閾値を超えると全再因子分解（refactoring）を行う。
 pub(crate) struct LuBasis {
     lu: lu::LuFactorization,
     eta_file: eta::EtaFile,
@@ -30,7 +38,14 @@ pub(crate) struct LuBasis {
 }
 
 impl LuBasis {
-    /// Create a new LuBasis by factorizing the initial basis
+    /// 初期基底を LU 分解して `LuBasis` を作成する
+    ///
+    /// # 引数
+    /// - `a`: 全制約行列（CSC 形式）
+    /// - `basis`: 初期基底変数のインデックス列
+    ///
+    /// # エラー
+    /// 基底行列が特異または数値的に不安定な場合は `Err` を返す
     pub fn new(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
         let lu = lu::LuFactorization::factorize(a, basis)?;
         Ok(Self {
