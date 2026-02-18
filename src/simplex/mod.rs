@@ -1076,6 +1076,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_large_coefficient_lp() {
+        // 係数に 1e12 と 1e-12 を混合した問題 → Optimal or 適切なステータス（オーバーフローしない）
+        // min -1e12 * x1 + 1e-12 * x2, s.t. x1 + x2 <= 1, x1,x2 >= 0
+        // 最適解: x1=1, x2=0, obj=-1e12
+        let lp = make_lp(
+            vec![-1e12, 1e-12],
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            1,
+            2,
+            vec![1.0],
+        );
+        let result = solve(&lp);
+        assert!(
+            result.status == SolveStatus::Optimal || result.status == SolveStatus::MaxIterations,
+            "Expected Optimal or MaxIterations, got {:?}",
+            result.status
+        );
+        assert!(!result.objective.is_nan(), "Objective should not be NaN");
+        assert!(result.objective.is_finite(), "Objective should be finite for bounded LP");
+
+        // 全係数 0.0 の目的関数 → Optimal, objective=0.0
+        // min 0*x1 + 0*x2, s.t. x1 + x2 <= 2, x1 <= 1, x2 <= 1
+        let lp_zero = make_lp(
+            vec![0.0, 0.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![2.0, 1.0, 1.0],
+        );
+        let result_zero = solve(&lp_zero);
+        assert_eq!(result_zero.status, SolveStatus::Optimal, "Expected Optimal for zero-objective LP");
+        assert!(
+            result_zero.objective.abs() < PIVOT_TOL,
+            "Expected objective=0.0, got {}",
+            result_zero.objective
+        );
+    }
+
+    #[test]
+    fn test_highly_degenerate_lp() {
+        // 高度退化 LP: 3制約が (1,1) で交わる → 基底解が退化
+        // min -x1 - x2
+        // s.t. x1 + x2 <= 2, x1 <= 1, x2 <= 1
+        // 最適解: x1=1, x2=1, obj=-2（サイクリングせずに到達すること）
+        let lp = make_lp(
+            vec![-1.0, -1.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![2.0, 1.0, 1.0],
+        );
+        let result = solve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal, "Expected Optimal for degenerate LP");
+        assert!(
+            (result.objective - (-2.0)).abs() < PIVOT_TOL,
+            "Expected objective=-2.0, got {}",
+            result.objective
+        );
+        let x1 = result.solution[0];
+        let x2 = result.solution[1];
+        assert!((x1 - 1.0).abs() < PIVOT_TOL, "Expected x1=1.0, got {}", x1);
+        assert!((x2 - 1.0).abs() < PIVOT_TOL, "Expected x2=1.0, got {}", x2);
+    }
+
     /// 等式制約付きLPの双対解・スラック・被縮小費用を検証する
     ///
     /// 問題: min x1 + 2*x2

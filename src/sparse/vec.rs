@@ -281,4 +281,41 @@ mod tests {
         assert!((dense[1] - 4.0).abs() < 1e-10);
         assert!((dense[2] - 5.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn test_dot_different_len() {
+        // SparseVec{len:3} と SparseVec{len:5} の dot → 共通インデックス範囲のみで正しく計算
+        let a = SparseVec { indices: vec![0, 2], values: vec![1.0, 2.0], len: 3 };
+        let b = SparseVec {
+            indices: vec![0, 1, 2, 3, 4],
+            values: vec![3.0, 4.0, 5.0, 6.0, 7.0],
+            len: 5,
+        };
+        // 共通インデックス: 0→1.0*3.0=3.0, 2→2.0*5.0=10.0 → 合計13.0
+        assert!((a.dot(&b) - 13.0).abs() < 1e-10);
+
+        // 空ベクトル同士の dot → 0.0
+        let empty_a = SparseVec::new(3);
+        let empty_b = SparseVec::new(5);
+        assert_eq!(empty_a.dot(&empty_b), 0.0);
+    }
+
+    #[test]
+    fn test_axpy_different_len() {
+        // SparseVec{len:3} に SparseVec{len:5} を axpy → len:3の範囲内のインデックスで正しく加算
+        let mut a = SparseVec { indices: vec![0], values: vec![1.0], len: 3 };
+        let b = SparseVec { indices: vec![0, 2], values: vec![2.0, 3.0], len: 5 };
+        a.axpy(1.0, &b);
+        assert!((a.get(0) - 3.0).abs() < 1e-10, "index 0: expected 3.0, got {}", a.get(0));
+        assert!((a.get(2) - 3.0).abs() < 1e-10, "index 2: expected 3.0, got {}", a.get(2));
+        assert_eq!(a.get(1), 0.0, "index 1 should remain 0");
+
+        // 空ベクトルへの axpy → other の内容がコピーされること
+        let mut empty = SparseVec::new(3);
+        let src = SparseVec { indices: vec![1, 2], values: vec![4.0, 5.0], len: 3 };
+        empty.axpy(1.0, &src);
+        assert!((empty.get(1) - 4.0).abs() < 1e-10, "index 1: expected 4.0, got {}", empty.get(1));
+        assert!((empty.get(2) - 5.0).abs() < 1e-10, "index 2: expected 5.0, got {}", empty.get(2));
+        assert_eq!(empty.get(0), 0.0, "index 0 should be 0");
+    }
 }
