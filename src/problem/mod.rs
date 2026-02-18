@@ -50,6 +50,12 @@ pub struct SolverResult {
     pub objective: f64,
     /// 解ベクトル（最適解が存在する場合）
     pub solution: Vec<f64>,
+    /// 双対変数ベクトル（各制約の影価格、最適解が存在する場合）
+    pub dual_solution: Vec<f64>,
+    /// 被縮小費用ベクトル（各決定変数に対して、最適解が存在する場合）
+    pub reduced_costs: Vec<f64>,
+    /// スラック変数ベクトル（各制約のスラック b_i - a_i^T x、最適解が存在する場合）
+    pub slack: Vec<f64>,
 }
 
 impl fmt::Display for SolverResult {
@@ -246,6 +252,9 @@ mod tests {
             status: SolveStatus::Optimal,
             objective: 42.5,
             solution: vec![1.0, 2.0],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
         };
         let display = format!("{}", result);
         assert_eq!(display, "Status: Optimal, Objective: 42.5");

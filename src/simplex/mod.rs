@@ -40,6 +40,9 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: 0.0,
                     solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
                 };
             }
         }
@@ -47,6 +50,9 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
             status: SolveStatus::Optimal,
             objective: 0.0,
             solution: vec![],
+            dual_solution: vec![0.0; m],
+            reduced_costs: vec![],
+            slack: problem.b.clone(),
         };
     }
 
@@ -58,6 +64,9 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
                     solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
                 };
             }
         }
@@ -65,11 +74,14 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
             status: SolveStatus::Optimal,
             objective: 0.0,
             solution: vec![0.0; n],
+            dual_solution: vec![],
+            reduced_costs: problem.c.clone(),
+            slack: vec![],
         };
     }
 
     let sf = build_standard_form(problem);
-    two_phase_simplex(&sf)
+    two_phase_simplex(&sf, problem)
 }
 
 // --- Data structures ---
@@ -117,12 +129,14 @@ struct StandardForm {
     n_orig: usize,
     /// 元変数ごとの変換情報
     orig_var_info: Vec<OrigVarInfo>,
+    /// 各制約行が符号反転されているか（双対変数の符号調整に使用）
+    row_negated: Vec<bool>,
 }
 
 /// シンプレックス法コア関数の実行結果
 enum SimplexOutcome {
-    /// 最適解が得られた。値は最適目的関数値
-    Optimal(f64),
+    /// 最適解が得られた。値は最適目的関数値と最適時点の双対変数ベクトル
+    Optimal(f64, Vec<f64>),
     /// 問題が非有界（unbounded）であった
     Unbounded,
     /// 反復回数上限に到達した。値は打ち切り時点の目的関数値
@@ -349,10 +363,62 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
         obj_offset,
         n_orig,
         orig_var_info,
+        row_negated,
     }
 }
 
 // --- Two-phase simplex ---
+
+/// 双対変数・被縮小費用・スラックを元問題の情報から計算する
+///
+/// # 引数
+/// * `sf` - 標準形（行符号反転情報を含む）
+/// * `problem` - 元のLP問題（制約行列・右辺ベクトル・目的係数）
+/// * `y_std` - 標準形の双対変数ベクトル（長さ: sf.m）
+/// * `solution` - 元問題の解ベクトル（長さ: problem.num_vars）
+///
+/// # 戻り値
+/// `(dual_solution, reduced_costs, slack)` のタプル
+fn extract_dual_info(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    y_std: &[f64],
+    solution: &[f64],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let m_orig = problem.num_constraints;
+    let n_orig = problem.num_vars;
+
+    // 双対変数: y_std を行符号反転で調整して元制約に対応
+    let mut dual_solution = vec![0.0; m_orig];
+    for i in 0..m_orig {
+        let sign = if sf.row_negated[i] { -1.0 } else { 1.0 };
+        dual_solution[i] = sign * y_std[i];
+    }
+
+    // スラック: b - Ax（元問題の解から直接計算）
+    let mut slack = problem.b.clone();
+    for j in 0..n_orig {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                slack[row] -= vals[k] * solution[j];
+            }
+        }
+    }
+
+    // 被縮小費用: c_j - lambda^T A_j（元問題の変数に対して）
+    let mut reduced_costs = problem.c.clone();
+    for j in 0..n_orig {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                if row < m_orig {
+                    reduced_costs[j] -= dual_solution[row] * vals[k];
+                }
+            }
+        }
+    }
+
+    (dual_solution, reduced_costs, slack)
+}
 
 /// 2相シンプレックス法で標準形LPを解く
 ///
@@ -361,7 +427,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
 ///
 /// Phase I の目的関数は人工変数の和の最小化。
 /// 最小値がゼロより大きければ元問題は実行不可能（Infeasible）。
-fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
+fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem) -> SolverResult {
     let m = sf.m;
 
     if sf.num_artificial == 0 {
@@ -372,18 +438,26 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
         let max_iter = 100 * (m + sf.n_total) + 1000;
         match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total, max_iter)
         {
-            SimplexOutcome::Optimal(obj) => {
+            SimplexOutcome::Optimal(obj, y) => {
                 let solution = extract_solution(sf, &basis, &x_b);
+                let (dual_solution, reduced_costs, slack) =
+                    extract_dual_info(sf, problem, &y, &solution);
                 SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj + sf.obj_offset,
                     solution,
+                    dual_solution,
+                    reduced_costs,
+                    slack,
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
                 status: SolveStatus::Unbounded,
                 objective: f64::NEG_INFINITY,
                 solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
             },
             SimplexOutcome::MaxIterations(obj) => {
                 let solution = extract_solution(sf, &basis, &x_b);
@@ -391,6 +465,9 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                     status: SolveStatus::MaxIterations,
                     objective: obj + sf.obj_offset,
                     solution,
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
                 }
             }
         }
@@ -439,12 +516,15 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
 
         let max_iter = 100 * (m + n_ext) + 1000;
         match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, max_iter) {
-            SimplexOutcome::Optimal(obj) => {
+            SimplexOutcome::Optimal(obj, _) => {
                 if obj > PIVOT_TOL {
                     return SolverResult {
                         status: SolveStatus::Infeasible,
                         objective: 0.0,
                         solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
                     };
                 }
 
@@ -464,18 +544,26 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                     sf.n_total,
                     max_iter,
                 ) {
-                    SimplexOutcome::Optimal(obj2) => {
+                    SimplexOutcome::Optimal(obj2, y) => {
                         let solution = extract_solution(sf, &basis, &x_b);
+                        let (dual_solution, reduced_costs, slack) =
+                            extract_dual_info(sf, problem, &y, &solution);
                         SolverResult {
                             status: SolveStatus::Optimal,
                             objective: obj2 + sf.obj_offset,
                             solution,
+                            dual_solution,
+                            reduced_costs,
+                            slack,
                         }
                     }
                     SimplexOutcome::Unbounded => SolverResult {
                         status: SolveStatus::Unbounded,
                         objective: f64::NEG_INFINITY,
                         solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
                     },
                     SimplexOutcome::MaxIterations(obj2) => {
                         let solution = extract_solution(sf, &basis, &x_b);
@@ -483,6 +571,9 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                             status: SolveStatus::MaxIterations,
                             objective: obj2 + sf.obj_offset,
                             solution,
+                            dual_solution: vec![],
+                            reduced_costs: vec![],
+                            slack: vec![],
                         }
                     }
                 }
@@ -491,11 +582,17 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                 status: SolveStatus::Infeasible,
                 objective: 0.0,
                 solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
             },
             SimplexOutcome::MaxIterations(_) => SolverResult {
                 status: SolveStatus::MaxIterations,
                 objective: 0.0,
                 solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
             },
         }
     }
@@ -564,7 +661,7 @@ fn revised_simplex_core(
         Ok(bm) => bm,
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            return SimplexOutcome::Optimal(obj);
+            return SimplexOutcome::Optimal(obj, vec![0.0; m]);
         }
     };
 
@@ -611,7 +708,7 @@ fn revised_simplex_core(
         let entering_col = match entering {
             None => {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                return SimplexOutcome::Optimal(obj);
+                return SimplexOutcome::Optimal(obj, y_dense.clone());
             }
             Some(j) => j,
         };
@@ -830,6 +927,166 @@ mod tests {
         assert!(
             matches!(outcome, SimplexOutcome::MaxIterations(_)),
             "Expected MaxIterations, got something else"
+        );
+    }
+
+    /// 基本LP（Le制約のみ）の双対解・スラック・被縮小費用を検証する
+    ///
+    /// 問題: min -x1 - 2*x2
+    ///   s.t. x1 + x2 <= 4
+    ///        x1 <= 3
+    ///        x2 <= 3
+    ///        x1, x2 >= 0
+    ///
+    /// 最適解: x1=1, x2=3, obj=-7
+    /// 双対変数: y=[-1, 0, -1] (Le制約のshadow price、最小化LPでは<=0)
+    /// スラック: s=[0, 2, 0]
+    /// 被縮小費用: rc=[0, 0] (基底変数なのでゼロ)
+    #[test]
+    fn test_dual_solution_basic_le_constraints() {
+        let lp = make_lp(
+            vec![-1.0, -2.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![4.0, 3.0, 3.0],
+        );
+        let result = solve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - (-7.0)).abs() < PIVOT_TOL,
+            "Expected obj=-7.0, got {}",
+            result.objective
+        );
+
+        // 双対変数の検証
+        assert_eq!(result.dual_solution.len(), 3, "dual_solution should have 3 elements");
+        assert!(
+            (result.dual_solution[0] - (-1.0)).abs() < PIVOT_TOL,
+            "y[0] should be -1.0, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.dual_solution[1].abs() < PIVOT_TOL,
+            "y[1] should be 0.0 (non-binding), got {}",
+            result.dual_solution[1]
+        );
+        assert!(
+            (result.dual_solution[2] - (-1.0)).abs() < PIVOT_TOL,
+            "y[2] should be -1.0, got {}",
+            result.dual_solution[2]
+        );
+
+        // スラック変数の検証
+        assert_eq!(result.slack.len(), 3, "slack should have 3 elements");
+        assert!(
+            result.slack[0].abs() < PIVOT_TOL,
+            "slack[0] should be 0 (binding), got {}",
+            result.slack[0]
+        );
+        assert!(
+            (result.slack[1] - 2.0).abs() < PIVOT_TOL,
+            "slack[1] should be 2.0 (non-binding), got {}",
+            result.slack[1]
+        );
+        assert!(
+            result.slack[2].abs() < PIVOT_TOL,
+            "slack[2] should be 0 (binding), got {}",
+            result.slack[2]
+        );
+
+        // 被縮小費用の検証（基底変数なのでゼロ）
+        assert_eq!(result.reduced_costs.len(), 2, "reduced_costs should have 2 elements");
+        assert!(
+            result.reduced_costs[0].abs() < PIVOT_TOL,
+            "rc[0] should be 0 (basic), got {}",
+            result.reduced_costs[0]
+        );
+        assert!(
+            result.reduced_costs[1].abs() < PIVOT_TOL,
+            "rc[1] should be 0 (basic), got {}",
+            result.reduced_costs[1]
+        );
+    }
+
+    /// 等式制約付きLPの双対解・スラック・被縮小費用を検証する
+    ///
+    /// 問題: min x1 + 2*x2
+    ///   s.t. x1 + x2 = 6  (Eq)
+    ///        x2 <= 5       (Le)
+    ///        x1, x2 >= 0
+    ///
+    /// 最適解: x1=6, x2=0, obj=6
+    /// 双対変数: y=[1, 0] (Eq制約shadow price=1、x2<=5は非binding)
+    /// スラック: s=[0, 5] (等式制約は0、x2<=5は5余裕)
+    /// 被縮小費用: rc=[0, 1] (x1は基底でrc=0、x2は非基底でrc=1)
+    #[test]
+    fn test_dual_solution_equality_constraint() {
+        use crate::problem::ConstraintType;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 1],
+            &[1.0, 1.0, 1.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 2.0],
+            a,
+            vec![6.0, 5.0],
+            vec![ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let result = solve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - 6.0).abs() < PIVOT_TOL,
+            "Expected obj=6.0, got {}",
+            result.objective
+        );
+
+        // 双対変数の検証
+        assert_eq!(result.dual_solution.len(), 2, "dual_solution should have 2 elements");
+        assert!(
+            (result.dual_solution[0] - 1.0).abs() < PIVOT_TOL,
+            "y[0] (Eq constraint shadow price) should be 1.0, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.dual_solution[1].abs() < PIVOT_TOL,
+            "y[1] (Le constraint, non-binding) should be 0.0, got {}",
+            result.dual_solution[1]
+        );
+
+        // スラック変数の検証
+        assert_eq!(result.slack.len(), 2, "slack should have 2 elements");
+        assert!(
+            result.slack[0].abs() < PIVOT_TOL,
+            "slack[0] (Eq constraint) should be 0, got {}",
+            result.slack[0]
+        );
+        assert!(
+            (result.slack[1] - 5.0).abs() < PIVOT_TOL,
+            "slack[1] (x2<=5, non-binding) should be 5.0, got {}",
+            result.slack[1]
+        );
+
+        // 被縮小費用の検証
+        assert_eq!(result.reduced_costs.len(), 2, "reduced_costs should have 2 elements");
+        assert!(
+            result.reduced_costs[0].abs() < PIVOT_TOL,
+            "rc[0] (x1, basic) should be 0.0, got {}",
+            result.reduced_costs[0]
+        );
+        assert!(
+            (result.reduced_costs[1] - 1.0).abs() < PIVOT_TOL,
+            "rc[1] (x2, non-basic) should be 1.0, got {}",
+            result.reduced_costs[1]
         );
     }
 }
