@@ -44,3 +44,5 @@ pub mod simplex;
 pub mod io;
 pub mod basis;
 pub mod tolerances;
+pub mod options;
+pub use options::SolverOptions;

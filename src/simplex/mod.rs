@@ -12,14 +12,14 @@
 //! 大規模疎行列に対して高い計算効率を発揮する。
 
 use crate::basis::{BasisManager, LuBasis};
+use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 
-/// LU分解を用いた改訂シンプレックス法でLPを解く
+/// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
 ///
-/// 与えられた線形計画問題を標準形に変換し、2相シンプレックス法で最適解を求める。
-/// 変数変換（有界変数・符号制約）、スラック変数の追加、人工変数の導入を自動的に行う。
+/// デフォルトの [`SolverOptions`] を使用して [`solve_with`] を呼び出す。
 ///
 /// # 引数
 ///
@@ -29,13 +29,30 @@ use crate::tolerances::*;
 ///
 /// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
 pub fn solve(problem: &LpProblem) -> SolverResult {
+    solve_with(problem, &SolverOptions::default())
+}
+
+/// カスタム設定でLPを解く
+///
+/// 与えられた線形計画問題を標準形に変換し、2相シンプレックス法で最適解を求める。
+/// 変数変換（有界変数・符号制約）、スラック変数の追加、人工変数の導入を自動的に行う。
+///
+/// # 引数
+///
+/// * `problem` - 解くべき線形計画問題
+/// * `options` - ソルバー動作設定（許容誤差・反復上限・eta 保持数など）
+///
+/// # 戻り値
+///
+/// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
+pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
     // Edge case: no variables
     if n == 0 {
         for i in 0..m {
-            if problem.b[i] < -PIVOT_TOL {
+            if problem.b[i] < -options.primal_tol {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: 0.0,
@@ -59,7 +76,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
     // Edge case: no constraints
     if m == 0 {
         for j in 0..n {
-            if problem.c[j] < -PIVOT_TOL {
+            if problem.c[j] < -options.primal_tol {
                 return SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
@@ -81,7 +98,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
     }
 
     let sf = build_standard_form(problem);
-    two_phase_simplex(&sf, problem)
+    two_phase_simplex(&sf, problem, options)
 }
 
 // --- Data structures ---
@@ -427,7 +444,7 @@ fn extract_dual_info(
 ///
 /// Phase I の目的関数は人工変数の和の最小化。
 /// 最小値がゼロより大きければ元問題は実行不可能（Infeasible）。
-fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem) -> SolverResult {
+fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = sf.m;
 
     if sf.num_artificial == 0 {
@@ -435,8 +452,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem) -> SolverResult {
         let mut basis = sf.initial_basis.clone();
         let mut x_b = sf.b.clone();
 
-        let max_iter = 100 * (m + sf.n_total) + 1000;
-        match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total, max_iter)
+        match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total, options)
         {
             SimplexOutcome::Optimal(obj, y) => {
                 let solution = extract_solution(sf, &basis, &x_b);
@@ -514,8 +530,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem) -> SolverResult {
 
         let mut x_b = sf.b.clone();
 
-        let max_iter = 100 * (m + n_ext) + 1000;
-        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, max_iter) {
+        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, options) {
             SimplexOutcome::Optimal(obj, _) => {
                 if obj > PIVOT_TOL {
                     return SolverResult {
@@ -542,7 +557,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem) -> SolverResult {
                     m,
                     n_ext,
                     sf.n_total,
-                    max_iter,
+                    options,
                 ) {
                     SimplexOutcome::Optimal(obj2, y) => {
                         let solution = extract_solution(sf, &basis, &x_b);
@@ -642,7 +657,7 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64>
 /// * `m` - 制約数
 /// * `n_cols` - 全列数
 /// * `n_price` - 価格付けの対象列数（人工変数を除く場合に `n_total` を指定）
-/// * `max_iter` - 最大反復回数
+/// * `options` - ソルバー設定（反復上限・eta 保持数・クランプ閾値を含む）
 ///
 /// # 戻り値
 ///
@@ -655,9 +670,10 @@ fn revised_simplex_core(
     m: usize,
     n_cols: usize,
     n_price: usize,
-    max_iter: usize,
+    options: &SolverOptions,
 ) -> SimplexOutcome {
-    let mut basis_mgr = match LuBasis::new(a, basis, 50) {
+    let max_iter = options.max_iterations.unwrap_or(100 * (m + n_cols) + 1000);
+    let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
@@ -758,7 +774,7 @@ fn revised_simplex_core(
 
         // Clamp near-zero to prevent drift
         for val in x_b.iter_mut() {
-            if val.abs() < 1e-14 {
+            if val.abs() < options.clamp_tol {
                 *val = 0.0;
             }
         }
@@ -914,6 +930,10 @@ mod tests {
         let m = sf.m;
         let mut basis = sf.initial_basis.clone();
         let mut x_b = sf.b.clone();
+        let opts = SolverOptions {
+            max_iterations: Some(1),
+            ..SolverOptions::default()
+        };
         let outcome = revised_simplex_core(
             &sf.a,
             &mut x_b,
@@ -922,11 +942,56 @@ mod tests {
             m,
             sf.n_total,
             sf.n_total,
-            1, // max_iter=1 で強制打ち切り
+            &opts,
         );
         assert!(
             matches!(outcome, SimplexOutcome::MaxIterations(_)),
             "Expected MaxIterations, got something else"
+        );
+    }
+
+    #[test]
+    fn test_solve_with_custom_max_iterations() {
+        // max_iterations=1 で MaxIterations ステータスが返ること
+        let lp = make_lp(
+            vec![-1.0, -1.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![4.0, 3.0, 3.0],
+        );
+        let opts = SolverOptions {
+            max_iterations: Some(1),
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::MaxIterations,
+            "Expected MaxIterations with max_iterations=1"
+        );
+    }
+
+    #[test]
+    fn test_solve_with_default_options() {
+        // SolverOptions::default() で solve() と同じ結果が返ること
+        let lp = make_lp(
+            vec![-1.0, -2.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![4.0, 3.0, 3.0],
+        );
+        let result_default = solve(&lp);
+        let result_with = solve_with(&lp, &SolverOptions::default());
+        assert_eq!(result_default.status, result_with.status);
+        assert!(
+            (result_default.objective - result_with.objective).abs() < PIVOT_TOL,
+            "solve() and solve_with(default) should return same objective"
         );
     }
 
