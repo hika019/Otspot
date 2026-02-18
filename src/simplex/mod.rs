@@ -126,6 +126,8 @@ enum SimplexOutcome {
     Optimal(f64),
     /// 問題が非有界（unbounded）であった
     Unbounded,
+    /// 反復回数上限に到達した。値は打ち切り時点の目的関数値
+    MaxIterations(f64),
 }
 
 // --- Standard form construction ---
@@ -368,7 +370,8 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
         let mut basis = sf.initial_basis.clone();
         let mut x_b = sf.b.clone();
 
-        match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total)
+        let max_iter = 100 * (m + sf.n_total) + 1000;
+        match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total, max_iter)
         {
             SimplexOutcome::Optimal(obj) => {
                 let solution = extract_solution(sf, &basis, &x_b);
@@ -383,6 +386,14 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                 objective: f64::NEG_INFINITY,
                 solution: vec![],
             },
+            SimplexOutcome::MaxIterations(obj) => {
+                let solution = extract_solution(sf, &basis, &x_b);
+                SolverResult {
+                    status: SolveStatus::MaxIterations,
+                    objective: obj + sf.obj_offset,
+                    solution,
+                }
+            }
         }
     } else {
         // Phase I: build extended matrix with artificials
@@ -427,7 +438,8 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
 
         let mut x_b = sf.b.clone();
 
-        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext) {
+        let max_iter = 100 * (m + n_ext) + 1000;
+        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, max_iter) {
             SimplexOutcome::Optimal(obj) => {
                 if obj > EPS {
                     return SolverResult {
@@ -451,6 +463,7 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                     m,
                     n_ext,
                     sf.n_total,
+                    max_iter,
                 ) {
                     SimplexOutcome::Optimal(obj2) => {
                         let solution = extract_solution(sf, &basis, &x_b);
@@ -465,10 +478,23 @@ fn two_phase_simplex(sf: &StandardForm) -> SolverResult {
                         objective: f64::NEG_INFINITY,
                         solution: vec![],
                     },
+                    SimplexOutcome::MaxIterations(obj2) => {
+                        let solution = extract_solution(sf, &basis, &x_b);
+                        SolverResult {
+                            status: SolveStatus::MaxIterations,
+                            objective: obj2 + sf.obj_offset,
+                            solution,
+                        }
+                    }
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
                 status: SolveStatus::Infeasible,
+                objective: 0.0,
+                solution: vec![],
+            },
+            SimplexOutcome::MaxIterations(_) => SolverResult {
+                status: SolveStatus::MaxIterations,
                 objective: 0.0,
                 solution: vec![],
             },
@@ -520,6 +546,7 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64>
 /// * `m` - 制約数
 /// * `n_cols` - 全列数
 /// * `n_price` - 価格付けの対象列数（人工変数を除く場合に `n_total` を指定）
+/// * `max_iter` - 最大反復回数
 ///
 /// # 戻り値
 ///
@@ -532,6 +559,7 @@ fn revised_simplex_core(
     m: usize,
     n_cols: usize,
     n_price: usize,
+    max_iter: usize,
 ) -> SimplexOutcome {
     let mut basis_mgr = match LuBasis::new(a, basis) {
         Ok(bm) => bm,
@@ -540,8 +568,6 @@ fn revised_simplex_core(
             return SimplexOutcome::Optimal(obj);
         }
     };
-
-    let max_iter = 100 * (m + n_cols) + 1000;
 
     let mut is_basic = vec![false; n_cols];
     for &b in basis.iter() {
@@ -645,7 +671,7 @@ fn revised_simplex_core(
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    SimplexOutcome::Optimal(obj)
+    SimplexOutcome::MaxIterations(obj)
 }
 
 #[cfg(test)]
@@ -764,5 +790,38 @@ mod tests {
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!((result.objective).abs() < EPS);
+    }
+
+    #[test]
+    fn test_max_iter_returns_max_iterations() {
+        // min -x1 - x2  s.t.  x1 + x2 <= 4, x1 <= 3, x2 <= 3  (optimal: -4.0)
+        // max_iter=1 なら反復1回で打ち切られ MaxIterations が返る
+        let lp = make_lp(
+            vec![-1.0, -1.0],
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+            vec![4.0, 3.0, 3.0],
+        );
+        let sf = build_standard_form(&lp);
+        let m = sf.m;
+        let mut basis = sf.initial_basis.clone();
+        let mut x_b = sf.b.clone();
+        let outcome = revised_simplex_core(
+            &sf.a,
+            &mut x_b,
+            &sf.c,
+            &mut basis,
+            m,
+            sf.n_total,
+            sf.n_total,
+            1, // max_iter=1 で強制打ち切り
+        );
+        assert!(
+            matches!(outcome, SimplexOutcome::MaxIterations(_)),
+            "Expected MaxIterations, got something else"
+        );
     }
 }

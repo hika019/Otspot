@@ -26,6 +26,8 @@ pub enum SolveStatus {
     Infeasible,
     /// 問題が非有界（unbounded）
     Unbounded,
+    /// 反復回数上限に到達した（最適性未確認）
+    MaxIterations,
 }
 
 impl fmt::Display for SolveStatus {
@@ -34,6 +36,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Optimal => write!(f, "Optimal"),
             SolveStatus::Infeasible => write!(f, "Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
+            SolveStatus::MaxIterations => write!(f, "MaxIterations"),
         }
     }
 }
