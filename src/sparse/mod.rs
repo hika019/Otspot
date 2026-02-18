@@ -287,88 +287,59 @@ impl CscMatrix {
         if rows.len() != cols.len() || rows.len() != vals.len() {
             return Err("Triplet arrays must have same length".to_string());
         }
-
-        // Accumulate values for duplicate (row, col) pairs
-        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
-        for i in 0..rows.len() {
-            let r = rows[i];
-            let c = cols[i];
-            let v = vals[i];
-
-            if r >= nrows {
-                return Err(format!("Row index {} out of bounds (nrows={})", r, nrows));
-            }
-            if c >= ncols {
-                return Err(format!("Col index {} out of bounds (ncols={})", c, ncols));
-            }
-
-            *map.entry((r, c)).or_insert(0.0) += v;
-        }
-
-        // Convert to sorted triplets
-        let mut triplets: Vec<(usize, usize, f64)> = map
-            .into_iter()
-            .filter(|(_, v)| v.abs() > DROP_TOL) // Filter near-zero values
-            .map(|((r, c), v)| (c, r, v)) // Sort by column first, then row
-            .collect();
-        triplets.sort_by_key(|&(c, r, _)| (c, r));
-
-        // Build CSC format
-        let mut col_ptr = vec![0; ncols + 1];
-        let mut row_ind = Vec::new();
-        let mut values = Vec::new();
-
-        let mut current_col = 0;
-        for (c, r, v) in triplets {
-            // Fill col_ptr for empty columns
-            while current_col < c {
-                current_col += 1;
-                col_ptr[current_col] = row_ind.len();
-            }
-            row_ind.push(r);
-            values.push(v);
-        }
-
-        // Fill remaining col_ptr entries
-        while current_col < ncols {
-            current_col += 1;
-            col_ptr[current_col] = row_ind.len();
-        }
-
-        Ok(Self {
-            col_ptr,
-            row_ind,
-            values,
-            nrows,
-            ncols,
-        })
+        // CSC: 主軸=列、副軸=行
+        let (col_ptr, row_ind, values) =
+            build_compressed_format(ncols, nrows, cols, rows, vals)?;
+        Ok(Self { col_ptr, row_ind, values, nrows, ncols })
     }
 
     /// 転置行列を生成する（新しい CSC 行列として返す）
     ///
     /// 元の行列の行と列を入れ替えた行列を返す。
-    /// 内部ではトリプレット経由で再構築するため、O(nnz log nnz) の計算量となる。
+    /// counting sort を使用するため O(nnz) の計算量となる。
     pub fn transpose(&self) -> Self {
-        // Transpose CSC -> CSR of original -> CSC of transpose
-        // Collect triplets and rebuild
-        let mut triplets = Vec::new();
+        let nnz = self.nnz();
+        // Transposed matrix: (ncols x nrows)
+        // Step 1: count nnz per row of original (= nnz per col of transposed)
+        let mut row_count = vec![0usize; self.nrows];
+        for &r in &self.row_ind {
+            row_count[r] += 1;
+        }
+
+        // Step 2: prefix sum to build col_ptr of transposed matrix
+        let mut col_ptr = vec![0usize; self.nrows + 1];
+        for r in 0..self.nrows {
+            col_ptr[r + 1] = col_ptr[r] + row_count[r];
+        }
+
+        // Step 3: scatter non-zeros into transposed positions
+        // Process columns 0..ncols in order; for each (row, col, val) in original,
+        // write col as row_ind of transposed at position pos[row].
+        // Since col increases monotonically, row_ind within each transposed column
+        // is written in ascending order — no extra sort needed.
+        let mut row_ind = vec![0usize; nnz];
+        let mut values = vec![0.0f64; nnz];
+        let mut pos = col_ptr[..self.nrows].to_vec();
+
         for col in 0..self.ncols {
             let start = self.col_ptr[col];
             let end = self.col_ptr[col + 1];
-            for idx in start..end {
-                let row = self.row_ind[idx];
-                let val = self.values[idx];
-                triplets.push((row, col, val));
+            for k in start..end {
+                let row = self.row_ind[k];
+                let p = pos[row];
+                row_ind[p] = col;
+                values[p] = self.values[k];
+                pos[row] += 1;
             }
         }
 
-        // Build transposed matrix (swap nrows/ncols, swap row/col in triplets)
-        let rows: Vec<usize> = triplets.iter().map(|&(_, c, _)| c).collect();
-        let cols: Vec<usize> = triplets.iter().map(|&(r, _, _)| r).collect();
-        let vals: Vec<f64> = triplets.iter().map(|&(_, _, v)| v).collect();
-
-        Self::from_triplets(&rows, &cols, &vals, self.ncols, self.nrows)
-            .expect("Transpose should never fail on valid matrix")
+        Self {
+            col_ptr,
+            row_ind,
+            values,
+            nrows: self.ncols,
+            ncols: self.nrows,
+        }
     }
 
     /// 行列ベクトル積を計算する: y = A * x
@@ -499,50 +470,10 @@ impl CsrMatrix {
         if rows.len() != cols.len() || rows.len() != vals.len() {
             return Err("Triplet arrays must have same length".to_string());
         }
-
-        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
-        for i in 0..rows.len() {
-            if rows[i] >= nrows {
-                return Err(format!("Row index {} out of bounds (nrows={})", rows[i], nrows));
-            }
-            if cols[i] >= ncols {
-                return Err(format!("Col index {} out of bounds (ncols={})", cols[i], ncols));
-            }
-            *map.entry((rows[i], cols[i])).or_insert(0.0) += vals[i];
-        }
-
-        let mut triplets: Vec<(usize, usize, f64)> = map
-            .into_iter()
-            .filter(|(_, v)| v.abs() > DROP_TOL)
-            .map(|((r, c), v)| (r, c, v))
-            .collect();
-        triplets.sort_by_key(|&(r, c, _)| (r, c));
-
-        let mut row_ptr = vec![0; nrows + 1];
-        let mut col_ind = Vec::new();
-        let mut values = Vec::new();
-
-        let mut current_row = 0;
-        for (r, c, v) in triplets {
-            while current_row < r {
-                current_row += 1;
-                row_ptr[current_row] = col_ind.len();
-            }
-            col_ind.push(c);
-            values.push(v);
-        }
-        while current_row < nrows {
-            current_row += 1;
-            row_ptr[current_row] = col_ind.len();
-        }
-
-        Ok(Self {
-            row_ptr,
-            col_ind,
-            values,
-            nrows,
-            ncols,
-        })
+        // CSR: 主軸=行、副軸=列
+        let (row_ptr, col_ind, values) =
+            build_compressed_format(nrows, ncols, rows, cols, vals)?;
+        Ok(Self { row_ptr, col_ind, values, nrows, ncols })
     }
 
     /// 行 i の非ゼロ要素を取得する
@@ -739,6 +670,59 @@ impl SparseUpperCSR {
             }
         }
     }
+}
+
+/// COO トリプレットを圧縮形式（CSC/CSR 共通）に変換する内部ヘルパー
+///
+/// `major_indices` が主軸（CSC では列、CSR では行）、`minor_indices` が副軸。
+/// 重複エントリの加算・境界チェック・DROP_TOL フィルタリング・ソートを行い、
+/// `(major_ptr, minor_ind, values)` を返す。
+fn build_compressed_format(
+    n_major: usize,
+    n_minor: usize,
+    major_indices: &[usize],
+    minor_indices: &[usize],
+    vals: &[f64],
+) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), String> {
+    let mut map: HashMap<(usize, usize), f64> = HashMap::new();
+    for i in 0..major_indices.len() {
+        let maj = major_indices[i];
+        let min = minor_indices[i];
+        if maj >= n_major {
+            return Err(format!("Major index {} out of bounds (n_major={})", maj, n_major));
+        }
+        if min >= n_minor {
+            return Err(format!("Minor index {} out of bounds (n_minor={})", min, n_minor));
+        }
+        *map.entry((maj, min)).or_insert(0.0) += vals[i];
+    }
+
+    let mut triplets: Vec<(usize, usize, f64)> = map
+        .into_iter()
+        .filter(|(_, v)| v.abs() > DROP_TOL)
+        .map(|((maj, min), v)| (maj, min, v))
+        .collect();
+    triplets.sort_by_key(|&(maj, min, _)| (maj, min));
+
+    let mut major_ptr = vec![0; n_major + 1];
+    let mut minor_ind = Vec::new();
+    let mut values = Vec::new();
+
+    let mut current_major = 0;
+    for (maj, min, v) in triplets {
+        while current_major < maj {
+            current_major += 1;
+            major_ptr[current_major] = minor_ind.len();
+        }
+        minor_ind.push(min);
+        values.push(v);
+    }
+    while current_major < n_major {
+        current_major += 1;
+        major_ptr[current_major] = minor_ind.len();
+    }
+
+    Ok((major_ptr, minor_ind, values))
 }
 
 #[cfg(test)]

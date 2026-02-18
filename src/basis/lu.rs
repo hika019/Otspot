@@ -411,42 +411,7 @@ pub fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn assert_vec_near(a: &[f64], b: &[f64], tol: f64) {
-        assert_eq!(
-            a.len(),
-            b.len(),
-            "Vector lengths differ: {} vs {}",
-            a.len(),
-            b.len()
-        );
-        for i in 0..a.len() {
-            assert!(
-                (a[i] - b[i]).abs() < tol,
-                "Mismatch at index {}: {} vs {} (diff={})",
-                i,
-                a[i],
-                b[i],
-                (a[i] - b[i]).abs()
-            );
-        }
-    }
-
-    fn dense_to_csc(dense: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix {
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        for i in 0..nrows {
-            for j in 0..ncols {
-                if dense[i][j].abs() > DROP_TOL {
-                    rows.push(i);
-                    cols.push(j);
-                    vals.push(dense[i][j]);
-                }
-            }
-        }
-        CscMatrix::from_triplets(&rows, &cols, &vals, nrows, ncols).unwrap()
-    }
+    use crate::basis::test_utils::*;
 
     #[test]
     fn test_lu_identity() {
