@@ -43,14 +43,15 @@ impl LuBasis {
     /// # 引数
     /// - `a`: 全制約行列（CSC 形式）
     /// - `basis`: 初期基底変数のインデックス列
+    /// - `max_etas`: 再因子分解を促すイータ行列の最大保持数
     ///
     /// # エラー
     /// 基底行列が特異または数値的に不安定な場合は `Err` を返す
-    pub fn new(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
+    pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, String> {
         let lu = lu::LuFactorization::factorize(a, basis)?;
         Ok(Self {
             lu,
-            eta_file: eta::EtaFile::new(50),
+            eta_file: eta::EtaFile::new(max_etas),
             basis_indices: basis.to_vec(),
         })
     }
@@ -128,7 +129,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lb = LuBasis::new(&a, &basis).unwrap();
+        let lb = LuBasis::new(&a, &basis, 50).unwrap();
 
         // FTRAN test
         let rhs_orig = vec![3.0, 5.0, 3.0];
@@ -162,7 +163,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 4);
         let basis = vec![0, 1, 2];
-        let mut lb = LuBasis::new(&a, &basis).unwrap();
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
 
         // Simulate: entering col 3, leaving row 1
         // Step 1: FTRAN the entering column to get pivot column in basis space
@@ -201,7 +202,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let mut lb = LuBasis::new(&a, &basis).unwrap();
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
 
         // Set max_etas to 2 for easy testing
         lb.eta_file.max_etas = 2;

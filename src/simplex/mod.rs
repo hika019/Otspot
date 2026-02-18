@@ -560,7 +560,7 @@ fn revised_simplex_core(
     n_price: usize,
     max_iter: usize,
 ) -> SimplexOutcome {
-    let mut basis_mgr = match LuBasis::new(a, basis) {
+    let mut basis_mgr = match LuBasis::new(a, basis, 50) {
         Ok(bm) => bm,
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
@@ -573,12 +573,20 @@ fn revised_simplex_core(
         is_basic[b] = true;
     }
 
+    // Pre-allocate reusable buffers to avoid heap allocation inside the iteration loop
+    let mut c_b = vec![0.0f64; m];
+    let mut y_dense = vec![0.0f64; m];
+    let mut d_dense = vec![0.0f64; m];
+
     for _iter in 0..max_iter {
         // 1. Dual variables: y = BTRAN(c_B)
-        let c_b: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
+        for i in 0..m {
+            c_b[i] = c[basis[i]];
+        }
         let mut y_sv = SparseVec::from_dense(&c_b);
         basis_mgr.btran(&mut y_sv);
-        let y = y_sv.to_dense();
+        y_sv.to_dense_into(&mut y_dense);
+        let y = &y_dense;
 
         // 2. Pricing: find most negative reduced cost
         let mut entering = None;
@@ -616,7 +624,8 @@ fn revised_simplex_core(
             len: m,
         };
         basis_mgr.ftran(&mut d_sv);
-        let d = d_sv.to_dense();
+        d_sv.to_dense_into(&mut d_dense);
+        let d = &d_dense;
 
         // 4. Ratio test (Bland's rule for ties)
         let mut leaving = None;
