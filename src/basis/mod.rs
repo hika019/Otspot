@@ -169,6 +169,57 @@ mod tests {
     }
 
     #[test]
+    fn test_lu_basis_refactor_after_50_etas() {
+        // max_etas=50 で 50個のeta蓄積後にrefactorが発動すること
+        let dense = vec![
+            vec![2.0, 1.0, 0.0],
+            vec![1.0, 3.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let a = dense_to_csc(&dense, 3, 3);
+        let basis = vec![0, 1, 2];
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
+
+        // 初期状態ではrefactor不要
+        assert!(!lb.eta_file.needs_refactor(), "Initially should not need refactor");
+
+        // 50個のetaを追加（max_etas=50 → needs_refactor() が true になる）
+        for i in 0..50 {
+            let r = i % 3;
+            let mut pivot = vec![0.0f64, 0.0, 0.0];
+            pivot[r] = 1.0;
+            lb.eta_file.etas.push(eta::add_eta(&pivot, r));
+        }
+        assert!(
+            lb.eta_file.needs_refactor(),
+            "50 etas with max_etas=50 should trigger refactor"
+        );
+
+        // refactor後: etaクリア、ftran/btran正常動作
+        lb.refactor_if_needed(&a, &basis);
+        assert!(
+            !lb.eta_file.needs_refactor(),
+            "After refactor, should not need refactor"
+        );
+        assert_eq!(lb.eta_file.etas.len(), 0, "Etas should be cleared after refactor");
+
+        let rhs_orig = vec![3.0, 5.0, 3.0];
+        let mut rhs_sv = SparseVec::from_dense(&rhs_orig);
+        lb.ftran(&mut rhs_sv);
+        let x = rhs_sv.to_dense();
+        let check = a.mat_vec_mul(&x).unwrap();
+        assert_vec_near(&check, &rhs_orig, 1e-10);
+
+        // btranも確認
+        let bt = a.transpose();
+        let mut rhs_sv2 = SparseVec::from_dense(&rhs_orig);
+        lb.btran(&mut rhs_sv2);
+        let y = rhs_sv2.to_dense();
+        let check2 = bt.mat_vec_mul(&y).unwrap();
+        assert_vec_near(&check2, &rhs_orig, 1e-10);
+    }
+
+    #[test]
     fn test_lu_basis_refactor() {
         // Test that refactor_if_needed works correctly
         let dense = vec![

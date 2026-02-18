@@ -659,6 +659,42 @@ mod tests {
     }
 
     #[test]
+    fn test_lu_1x1() {
+        // 1x1 CSC行列 [[5.0]] のLU分解
+        let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[5.0f64], 1, 1).unwrap();
+        let basis = vec![0usize];
+        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+
+        assert_eq!(lu.n, 1);
+        // L は単位行列 → off-diagonal成分なし
+        assert_eq!(lu.l.values.len(), 0, "L should have no off-diagonal entries for 1x1");
+        // U の対角要素は 5.0
+        assert!(
+            (lu.u.diag[0] - 5.0).abs() < 1e-10,
+            "U diagonal should be 5.0, got {}",
+            lu.u.diag[0]
+        );
+
+        // solve_ftran: B * x = [1.0] → x = [0.2]
+        let mut rhs = vec![1.0f64];
+        solve_ftran(&lu, &mut rhs);
+        assert!(
+            (rhs[0] - 0.2).abs() < 1e-10,
+            "ftran: expected 0.2, got {}",
+            rhs[0]
+        );
+
+        // solve_btran: B^T * x = [1.0] → x = [0.2] (1x1なのでftranと同じ)
+        let mut rhs2 = vec![1.0f64];
+        solve_btran(&lu, &mut rhs2);
+        assert!(
+            (rhs2[0] - 0.2).abs() < 1e-10,
+            "btran: expected 0.2, got {}",
+            rhs2[0]
+        );
+    }
+
+    #[test]
     fn test_lu_ill_conditioned() {
         // Ill-conditioned 5x5 matrix
         let dense = vec![
