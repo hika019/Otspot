@@ -93,6 +93,22 @@ impl SparseVec {
         dense
     }
 
+    /// 事前確保済みバッファに密ベクトルを書き込む
+    ///
+    /// `buf` を一旦ゼロクリアしてから非ゼロ要素を書き込む。
+    /// ヒープ割り当てを行わないため、反復ループ内での再利用に適する。
+    ///
+    /// # 引数
+    /// - `buf`: 書き込み先バッファ（長さ >= `self.len` であること）
+    pub fn to_dense_into(&self, buf: &mut [f64]) {
+        for v in buf.iter_mut() {
+            *v = 0.0;
+        }
+        for (k, &idx) in self.indices.iter().enumerate() {
+            buf[idx] = self.values[k];
+        }
+    }
+
     /// 指定インデックスの値を取得する
     ///
     /// インデックスが非ゼロ要素として存在しない場合は `0.0` を返す。
@@ -551,25 +567,53 @@ impl CsrMatrix {
 
     /// CSC 行列を CSR 行列に変換する
     ///
-    /// 内部ではトリプレット経由で変換するため、O(nnz log nnz) の計算量となる。
+    /// 直接変換アルゴリズムを使用する。
+    /// Pass 1: 各行の非ゼロ要素数を数え、prefix sum で row_ptr を構築する。
+    /// Pass 2: 列を昇順に走査して col_ind/values を埋める。
+    /// 列を昇順で処理するため、各行の col_ind は自動的にソート済みとなる。
+    /// 計算量は O(nnz)（トリプレット経由の O(nnz log nnz) より高速）。
     ///
     /// # 引数
     /// - `csc`: 変換元の CSC 行列
     pub fn from_csc(csc: &CscMatrix) -> Self {
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        for j in 0..csc.ncols {
+        let nnz = csc.nnz();
+        let nrows = csc.nrows;
+        let ncols = csc.ncols;
+
+        // Pass 1: 各行の要素数をカウントし、prefix sum で row_ptr を構築する
+        let mut row_ptr = vec![0usize; nrows + 1];
+        for &r in &csc.row_ind {
+            row_ptr[r + 1] += 1;
+        }
+        for i in 0..nrows {
+            row_ptr[i + 1] += row_ptr[i];
+        }
+
+        // Pass 2: 列を昇順に走査して col_ind/values を配置する
+        // cur[i] = 行 i の次の書き込み位置
+        let mut col_ind = vec![0usize; nnz];
+        let mut values = vec![0.0f64; nnz];
+        let mut cur = row_ptr[..nrows].to_vec();
+
+        for j in 0..ncols {
             let start = csc.col_ptr[j];
             let end = csc.col_ptr[j + 1];
             for k in start..end {
-                rows.push(csc.row_ind[k]);
-                cols.push(j);
-                vals.push(csc.values[k]);
+                let r = csc.row_ind[k];
+                let pos = cur[r];
+                col_ind[pos] = j;
+                values[pos] = csc.values[k];
+                cur[r] += 1;
             }
         }
-        Self::from_triplets(&rows, &cols, &vals, csc.nrows, csc.ncols)
-            .expect("Conversion from valid CSC should never fail")
+
+        Self {
+            row_ptr,
+            col_ind,
+            values,
+            nrows,
+            ncols,
+        }
     }
 }
 
