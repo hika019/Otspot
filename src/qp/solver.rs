@@ -12,6 +12,70 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::*;
 use crate::{qp::kkt::extract_active_rows, simplex};
 
+/// 変数境界を明示的な不等式制約行に変換して A 行列に追加する
+///
+/// 各有限境界を追加制約として展開する:
+/// - x[j] <= ub[j] → 行インデックス m + k: [0,...,+1,...,0] <= ub[j]
+/// - x[j] >= lb[j] → 行インデックス m + k: [0,...,-1,...,0] <= -lb[j]
+///
+/// 境界が無限大の変数はスキップする。
+/// 返値は (augmented_A, augmented_b)。境界なしの場合は元の A, b をクローンして返す。
+fn augment_bounds_to_constraints(
+    a: &CscMatrix,
+    b: &[f64],
+    bounds: &[(f64, f64)],
+) -> (CscMatrix, Vec<f64>) {
+    let m = b.len();
+    let n = bounds.len();
+
+    // 追加する境界制約: (var_j, coeff, rhs)
+    let mut extra: Vec<(usize, f64, f64)> = Vec::new();
+    for (j, &(lb, ub)) in bounds.iter().enumerate() {
+        if ub.is_finite() {
+            extra.push((j, 1.0, ub));   // x[j] <= ub
+        }
+        if lb.is_finite() {
+            extra.push((j, -1.0, -lb)); // -x[j] <= -lb  (x[j] >= lb)
+        }
+    }
+
+    if extra.is_empty() {
+        return (a.clone(), b.to_vec());
+    }
+
+    let new_m = m + extra.len();
+    let mut new_b = b.to_vec();
+
+    // COO 形式で新 A 行列を構築
+    let mut rows_coo: Vec<usize> = Vec::new();
+    let mut cols_coo: Vec<usize> = Vec::new();
+    let mut vals_coo: Vec<f64> = Vec::new();
+
+    // 元の A 要素をコピー
+    for col in 0..n {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        for k in start..end {
+            rows_coo.push(a.row_ind[k]);
+            cols_coo.push(col);
+            vals_coo.push(a.values[k]);
+        }
+    }
+
+    // 境界制約行を追加
+    for (idx, &(j, coeff, rhs)) in extra.iter().enumerate() {
+        rows_coo.push(m + idx);
+        cols_coo.push(j);
+        vals_coo.push(coeff);
+        new_b.push(rhs);
+    }
+
+    let new_a = CscMatrix::from_triplets(&rows_coo, &cols_coo, &vals_coo, new_m, n)
+        .expect("augment_bounds_to_constraints: CSC construction failed");
+
+    (new_a, new_b)
+}
+
 /// QP求解の実装コア（Active Set法）
 pub(crate) fn qp_solve_impl(
     problem: &QpProblem,
@@ -165,12 +229,16 @@ fn active_set_loop(
     let m = problem.num_constraints;
     let max_iter = options.max_iterations.unwrap_or(100 * (n + m) + 1000);
 
+    // NC-BOUND1修正: 変数境界を明示的な制約行に変換する。
+    // これにより compute_step_size がブロッキング境界を working_set に追加できる。
+    let (aug_a, aug_b) = augment_bounds_to_constraints(&problem.a, &problem.b, &problem.bounds);
+
     for iter in 0..max_iter {
         // 勾配 grad = Qx + c を計算
         let grad = kkt::compute_gradient(&problem.q, &x, &problem.c);
 
-        // KKTシステムを構築して解く
-        let a_active = match extract_active_rows(&problem.a, working_set.indices()) {
+        // KKTシステムを構築して解く (aug_a を使用)
+        let a_active = match extract_active_rows(&aug_a, working_set.indices()) {
             Ok(a) => a,
             Err(_) => {
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
@@ -216,7 +284,7 @@ fn active_set_loop(
                         status: SolveStatus::Optimal,
                         objective: obj,
                         solution: x,
-                        dual_solution: lambda,
+                        dual_solution: vec![0.0; m],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter + 1,
                     };
@@ -228,11 +296,16 @@ fn active_set_loop(
             if min_lambda_val >= -PIVOT_TOL {
                 // KKT条件満足: 最適解
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                // dual_solutionを全制約数(m)に展開し、非活性制約は0.0で埋める
+                let mut full_dual = vec![0.0; m];
+                for (k, &ci) in working_set.indices().iter().enumerate() {
+                    full_dual[ci] = lambda[k];
+                }
                 return QpResult {
                     status: SolveStatus::Optimal,
                     objective: obj,
                     solution: x,
-                    dual_solution: lambda.clone(),
+                    dual_solution: full_dual,
                     active_set: working_set.indices().to_vec(),
                     iterations: iter + 1,
                 };
@@ -257,8 +330,8 @@ fn active_set_loop(
                 }
             }
         } else {
-            // d ≠ 0: ステップ幅計算
-            let alpha = compute_step_size(problem, &x, &d, &working_set, m);
+            // d ≠ 0: ステップ幅計算 (aug_a, aug_b を使用)
+            let alpha = compute_step_size(&aug_a, &aug_b, &x, &d, &working_set);
 
             // x を更新
             for i in 0..n {
@@ -334,33 +407,34 @@ struct StepResult {
 
 /// ステップ幅 α* を計算する（ライン探索）
 ///
-/// 非活性制約が活性化しないよう最大ステップ幅を計算する。
+/// 非活性制約（境界制約を含む）が活性化しないよう最大ステップ幅を計算する。
+/// aug_a / aug_b は変数境界を含む拡張制約行列を指定する（NC-BOUND1修正）。
 fn compute_step_size(
-    problem: &QpProblem,
+    aug_a: &CscMatrix,
+    aug_b: &[f64],
     x: &[f64],
     d: &[f64],
     working_set: &WorkingSet,
-    m: usize,
 ) -> StepResult {
-    let n = x.len();
+    let aug_m = aug_b.len();
     let mut alpha_crit = 1.0f64;
     let mut blocking: Option<usize> = None;
 
-    for i in 0..m {
+    for i in 0..aug_m {
         // 活性制約はスキップ
         if working_set.contains(i) {
             continue;
         }
 
         // a_i^T d を計算
-        let ai_d = dot_row_a(&problem.a, i, d);
+        let ai_d = dot_row_a(aug_a, i, d);
         if ai_d <= ZERO_TOL {
             continue; // この制約はブロックしない
         }
 
         // a_i^T x を計算
-        let ai_x = dot_row_a(&problem.a, i, x);
-        let slack = problem.b[i] - ai_x;
+        let ai_x = dot_row_a(aug_a, i, x);
+        let slack = aug_b[i] - ai_x;
 
         // α ≤ slack / (a_i^T d)
         let alpha_i = slack / ai_d;
@@ -373,27 +447,6 @@ fn compute_step_size(
                 if i < prev {
                     blocking = Some(i);
                 }
-            }
-        }
-    }
-
-    // 変数境界によるステップ制限
-    for j in 0..n {
-        let (lb, ub) = problem.bounds[j];
-        if d[j] > ZERO_TOL && ub.is_finite() {
-            let slack = ub - x[j];
-            let alpha_j = slack / d[j];
-            if alpha_j < alpha_crit {
-                alpha_crit = alpha_j;
-                // 変数境界はblockingに含めない（制約インデックスがないため）
-                blocking = None;
-            }
-        } else if d[j] < -ZERO_TOL && lb.is_finite() {
-            let slack = x[j] - lb;
-            let alpha_j = slack / (-d[j]);
-            if alpha_j < alpha_crit {
-                alpha_crit = alpha_j;
-                blocking = None;
             }
         }
     }
