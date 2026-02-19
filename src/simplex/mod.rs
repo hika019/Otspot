@@ -37,19 +37,27 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 
     // Edge case: no constraints
     if m == 0 {
+        let mut x = vec![0.0; n];
+        let mut obj = 0.0;
         for j in 0..n {
             if problem.c[j] < -EPS {
-                return SolverResult {
-                    status: SolveStatus::Unbounded,
-                    objective: f64::NEG_INFINITY,
-                    solution: vec![],
-                };
+                // BUG-simplex-001修正: ubが有限なら最大値(ub)に設定、無限ならUnbounded
+                let ub = problem.bounds[j].1;
+                if ub.is_infinite() {
+                    return SolverResult {
+                        status: SolveStatus::Unbounded,
+                        objective: f64::NEG_INFINITY,
+                        solution: vec![],
+                    };
+                }
+                x[j] = ub;
             }
+            obj += problem.c[j] * x[j];
         }
         return SolverResult {
             status: SolveStatus::Optimal,
-            objective: 0.0,
-            solution: vec![0.0; n],
+            objective: obj,
+            solution: x,
         };
     }
 
@@ -695,5 +703,35 @@ mod tests {
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!((result.objective).abs() < EPS);
+    }
+
+    #[test]
+    fn test_bug_simplex_001_finite_ub() {
+        // BUG-simplex-001修正確認: m=0, maximize x with lb=0, ub=3
+        // 修正前: Unbounded誤判定
+        // 修正後: x=3, obj=3 (maximize) または obj=-3 (minimize として内部処理)
+        use crate::problem::ConstraintType;
+        let a = CscMatrix::new(0, 1);
+        let lp = LpProblem::new_general(
+            vec![-1.0], // minimize -x (= maximize x)
+            a,
+            vec![],
+            vec![],
+            vec![(0.0, 3.0)], // lb=0, ub=3
+            None,
+        )
+        .unwrap();
+        let result = solve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.solution[0] - 3.0).abs() < EPS,
+            "Expected x=3, got {}",
+            result.solution[0]
+        );
+        assert!(
+            (result.objective - (-3.0)).abs() < EPS,
+            "Expected obj=-3, got {}",
+            result.objective
+        );
     }
 }
