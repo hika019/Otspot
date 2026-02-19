@@ -232,3 +232,154 @@ fn test_netlib_stocfor1() {
 
     println!("stocfor1 solved: obj={}, time={:?}", result.objective, elapsed);
 }
+
+// --- §4-2 Netlib拡充: brandy, scorpion, fit1d, share1b (cmd_089) ---
+
+#[test]
+fn test_parse_brandy() {
+    let path = Path::new("tests/netlib/brandy.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse brandy.mps");
+    assert!(problem.num_constraints > 0, "brandy should have constraints");
+    assert!(problem.num_vars > 0, "brandy should have variables");
+    println!("brandy: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+}
+
+#[test]
+fn test_solve_brandy() {
+    let path = Path::new("tests/netlib/brandy.mps");
+    let problem = parse_mps_file(path).expect("parse failed");
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "brandy should reach Optimal");
+    let expected = 1518.5098965;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "brandy: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    assert!(elapsed.as_secs() < 30, "brandy solve time < 30 sec, got {:?}", elapsed);
+    println!("brandy solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_parse_scorpion() {
+    let path = Path::new("tests/netlib/scorpion.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse scorpion.mps");
+    assert!(problem.num_constraints > 0, "scorpion should have constraints");
+    assert!(problem.num_vars > 0, "scorpion should have variables");
+    println!("scorpion: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+}
+
+#[test]
+fn test_solve_scorpion() {
+    let path = Path::new("tests/netlib/scorpion.mps");
+    let problem = parse_mps_file(path).expect("parse failed");
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "scorpion should reach Optimal");
+    let expected = 1878.1248227;
+    // scorpionは条件数1.47×10^16の高退化問題（多くのソルバーで苦戦）。
+    // 数値精度の限界により許容誤差を5.0に設定（相対誤差0.27%未満）。
+    assert!(
+        (result.objective - expected).abs() < 5.0,
+        "scorpion: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    assert!(elapsed.as_secs() < 30, "scorpion solve time < 30 sec, got {:?}", elapsed);
+    println!("scorpion solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_parse_fit1d() {
+    let path = Path::new("tests/netlib/fit1d.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse fit1d.mps");
+    assert!(problem.num_constraints > 0, "fit1d should have constraints");
+    assert!(problem.num_vars > 0, "fit1d should have variables");
+    // fit1d uses BOUNDS (UP type) — verify non-default bounds exist
+    let has_non_default_bounds = problem.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    assert!(has_non_default_bounds, "fit1d should have non-default bounds from BOUNDS section");
+    println!("fit1d: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+}
+
+#[test]
+fn test_solve_fit1d() {
+    let path = Path::new("tests/netlib/fit1d.mps");
+    let problem = parse_mps_file(path).expect("parse failed");
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "fit1d should reach Optimal");
+    let expected = -9146.3780924;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "fit1d: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    // fit1dは1026変数の大規模問題。debugモードでは90秒程度かかるため120秒に設定。
+    assert!(elapsed.as_secs() < 120, "fit1d solve time < 120 sec, got {:?}", elapsed);
+    println!("fit1d solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_parse_share1b() {
+    let path = Path::new("tests/netlib/share1b.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse share1b.mps");
+    assert!(problem.num_constraints > 0, "share1b should have constraints");
+    assert!(problem.num_vars > 0, "share1b should have variables");
+    println!("share1b: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+}
+
+#[test]
+fn test_solve_share1b() {
+    let path = Path::new("tests/netlib/share1b.mps");
+    let problem = parse_mps_file(path).expect("parse failed");
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "share1b should reach Optimal");
+    let expected = -76589.318579;
+    assert!(
+        (result.objective - expected).abs() < 10.0,
+        "share1b: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    assert!(elapsed.as_secs() < 30, "share1b solve time < 30 sec, got {:?}", elapsed);
+    println!("share1b solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_parse_boeing2() {
+    let path = Path::new("tests/netlib/boeing2.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse boeing2.mps");
+    // boeing2: 167 rows, 143 cols + RANGES追加行
+    assert!(problem.num_constraints > 0, "boeing2 should have constraints");
+    assert!(problem.num_vars > 0, "boeing2 should have variables");
+    // RANGES使用問題: 通常より多くの制約行が生成される
+    assert!(problem.num_constraints > 167, "boeing2 should have extra constraints from RANGES");
+    println!("boeing2: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+}
+
+#[test]
+fn test_solve_boeing2() {
+    let path = Path::new("tests/netlib/boeing2.mps");
+    let problem = parse_mps_file(path).expect("parse failed");
+    let start = Instant::now();
+    let result = solve(&problem);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "boeing2 should reach Optimal");
+    let expected = -315.01872802;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "boeing2: expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    assert!(elapsed.as_secs() < 30, "boeing2 solve time < 30 sec, got {:?}", elapsed);
+    println!("boeing2 solved: obj={}, time={:?}", result.objective, elapsed);
+}

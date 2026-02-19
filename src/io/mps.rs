@@ -533,32 +533,53 @@ impl MpsParser {
             rhs_vec.push(rhs_val);
         }
 
-        let num_constraints = row_map.len();
+        let base_num_constraints = row_map.len();
 
-        // RANGESの適用
+        // RANGESの適用: 区間制約（[lower, upper]）に変換する
+        // 各RANGE行を上限（Le）と下限（Ge）の2制約に分割する行分割アプローチ
+        //
+        // 仕様（IBM MPS標準）:
+        //   L制約: b - |r| <= Ax <= b
+        //   G制約: b <= Ax <= b + |r|
+        //   E制約(r>=0): b <= Ax <= b + |r|
+        //   E制約(r<0):  b - |r| <= Ax <= b
+        let mut range_extra_rows: Vec<(String, usize, f64)> = Vec::new();
         for (row_name, range_val) in &self.ranges {
             if let Some(&idx) = row_map.get(row_name) {
-                // RANGE解釈: 区間制約を作成
-                // L制約: b <= Ax <= b + range
-                // G制約: b - range <= Ax <= b
-                // E制約: L制約として扱い、上限を b + |range|
-                match constraint_types[idx] {
-                    ConstraintType::Le => {
-                        // Le制約のままRHSは変更なし
-                        // 上限は rhs + range（simplex未実装）
-                    }
-                    ConstraintType::Ge => {
-                        // RHSを b - range に調整
-                        rhs_vec[idx] -= range_val.abs();
-                    }
+                let b = rhs_vec[idx];
+                let abs_r = range_val.abs();
+
+                let (lower, upper) = match constraint_types[idx] {
+                    ConstraintType::Le => (b - abs_r, b),
+                    ConstraintType::Ge => (b, b + abs_r),
                     ConstraintType::Eq => {
-                        // Le制約に変換し、上限を拡張
-                        constraint_types[idx] = ConstraintType::Le;
-                        rhs_vec[idx] += range_val.abs();
+                        if *range_val >= 0.0 {
+                            (b, b + abs_r)
+                        } else {
+                            (b - abs_r, b)
+                        }
                     }
-                }
+                };
+
+                // 既存行をLe制約（上限側）に変更
+                constraint_types[idx] = ConstraintType::Le;
+                rhs_vec[idx] = upper;
+
+                // 下限側の追加行を記録（行名, 元インデックス, lower_bound）
+                range_extra_rows.push((row_name.clone(), idx, lower));
             }
         }
+
+        // RANGE追加行のインデックスマップと制約情報を構築
+        let mut range_row_map: HashMap<String, usize> = HashMap::new();
+        for (row_name, _orig_idx, lower_bound) in &range_extra_rows {
+            let new_idx = base_num_constraints + range_row_map.len();
+            range_row_map.insert(row_name.clone(), new_idx);
+            constraint_types.push(ConstraintType::Ge);
+            rhs_vec.push(*lower_bound);
+        }
+
+        let num_constraints = base_num_constraints + range_row_map.len();
 
         // 列名 → インデックスのマップ構築
         let mut col_map = HashMap::new();
@@ -601,6 +622,11 @@ impl MpsParser {
             })?;
 
             triplets.push((*row_idx, *col_idx, *value));
+
+            // RANGE追加行（下限側Ge制約）にも同じ係数を複製
+            if let Some(&range_row_idx) = range_row_map.get(row_name) {
+                triplets.push((range_row_idx, *col_idx, *value));
+            }
         }
 
         let rows: Vec<usize> = triplets.iter().map(|&(r, _, _)| r).collect();
@@ -884,9 +910,11 @@ RANGES
 ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
-        assert_eq!(lp.num_constraints, 1);
-        // L制約ではRANGEはRHSを変更しない（この実装の仕様）
-        assert_eq!(lp.b, vec![10.0]);
+        // §6-4: RANGE行は区間制約に展開される（Le上限 + Ge下限の2制約）
+        // L制約 + range=5.0: upper=10.0（Le）, lower=10.0-5.0=5.0（Ge）
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.b[0], 10.0); // Le制約のRHS（上限）
+        assert_eq!(lp.b[1], 5.0);  // Ge制約のRHS（下限）
     }
 
     #[test]
@@ -960,5 +988,130 @@ ENDATA
             Err(MpsError::InvalidRowType('X')) => {},
             _ => panic!("Expected InvalidRowType error"),
         }
+    }
+
+    /// Le制約 + 正のRANGE → [b-|r|, b] に変換されることを確認
+    #[test]
+    fn test_range_le_basic() {
+        let mps = r"NAME range_le
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+RANGES
+    rhs  c1  2.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // Le c1 with b=10, r=2 → Le(upper=10) + Ge(lower=8)
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(lp.b[0], 10.0);
+        assert_eq!(lp.b[1], 8.0);
+    }
+
+    /// Ge制約 + 正のRANGE → [b, b+|r|] に変換されることを確認
+    #[test]
+    fn test_range_ge_basic() {
+        let mps = r"NAME range_ge
+ROWS
+ N  obj
+ G  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  5.0
+RANGES
+    rhs  c1  3.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // Ge c1 with b=5, r=3 → Le(upper=8) + Ge(lower=5)
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(lp.b[0], 8.0);
+        assert_eq!(lp.b[1], 5.0);
+    }
+
+    /// Eq制約 + 正のRANGE → [b, b+|r|] に変換されることを確認
+    #[test]
+    fn test_range_eq_positive() {
+        let mps = r"NAME range_eq_pos
+ROWS
+ N  obj
+ E  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  7.0
+RANGES
+    rhs  c1  2.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // Eq c1 with b=7, r=2 (r>=0) → Le(upper=9) + Ge(lower=7)
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(lp.b[0], 9.0);
+        assert_eq!(lp.b[1], 7.0);
+    }
+
+    /// Eq制約 + 負のRANGE → [b-|r|, b] に変換されることを確認
+    #[test]
+    fn test_range_eq_negative() {
+        let mps = r"NAME range_eq_neg
+ROWS
+ N  obj
+ E  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  7.0
+RANGES
+    rhs  c1  -2.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // Eq c1 with b=7, r=-2 (r<0) → Le(upper=7) + Ge(lower=5)
+        assert_eq!(lp.num_constraints, 2);
+        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(lp.b[0], 7.0);
+        assert_eq!(lp.b[1], 5.0);
+    }
+
+    /// RANGE付き小規模LP を solve() で解き、最適値を検証
+    /// minimize x1 + x2  s.t. 3 <= x1 + x2 <= 7, x1,x2 >= 0
+    /// 最適解: x1=3, x2=0 (or x1=0, x2=3), 最適値=3
+    #[test]
+    fn test_range_solve_simple() {
+        use crate::problem::SolveStatus;
+        use crate::simplex::solve;
+
+        let mps = r"NAME range_solve
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+    x2  obj  1.0  c1  1.0
+RHS
+    rhs  c1  7.0
+RANGES
+    rhs  c1  4.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // Le c1 with b=7, r=4 → Le(upper=7) + Ge(lower=3)
+        assert_eq!(lp.num_constraints, 2);
+        let result = solve(&lp);
+        assert_eq!(result.status, SolveStatus::Optimal, "should reach Optimal");
+        assert!(
+            (result.objective - 3.0).abs() < 1e-6,
+            "expected obj=3.0, got {}",
+            result.objective
+        );
     }
 }
