@@ -304,6 +304,13 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
             Some(s_idx) => {
                 let col = n_shifted + s_idx;
                 if slack_coeff[i] > 0.0 {
+                    // Le: slack >= 0 → no artificial needed
+                    initial_basis[i] = col;
+                } else if b[i].abs() <= PIVOT_TOL {
+                    // Ge(b≈0): surplus at 0 is primal-feasible → no artificial needed.
+                    // Using an artificial here causes it to remain in the Phase II basis
+                    // (Phase I terminates immediately since obj=0), which allows the solver
+                    // to drift and violate this constraint. Use surplus directly.
                     initial_basis[i] = col;
                 } else {
                     needs_artificial[i] = true;
