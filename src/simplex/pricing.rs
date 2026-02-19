@@ -26,6 +26,7 @@ pub(crate) trait PricingStrategy {
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
+#[allow(dead_code)]
 pub(crate) struct DantzigPricing;
 
 impl PricingStrategy for DantzigPricing {
@@ -159,9 +160,6 @@ mod tests {
 
     #[test]
     fn test_steepest_edge_prefers_better_score() {
-        let pricing = SteepestEdgePricing {
-            weights: vec![1.0, 1.0, 100.0],
-        };
         // rc = [-1.0, -1.0, -10.0]
         // scores: 1.0, 1.0, 10.0/sqrt(100)=1.0 → all equal! But let's change:
         // scores: 1.0, 1.0, 10/10=1.0 — let's use different values

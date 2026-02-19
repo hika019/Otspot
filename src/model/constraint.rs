@@ -45,12 +45,20 @@ pub struct Constraint {
 /// - `constraint!((expr) <= rhs)` — parenthesised expression on the left
 ///
 /// For complex LHS expressions, wrap them in parentheses:
-/// ```rust,ignore
-/// constraint!((2.0 * x + 3.0 * y) <= 12.0)
+/// ```rust,no_run
+/// # use solver::model::{Model, constraint};
+/// # let mut model = Model::new("demo");
+/// # let x = model.add_var("x", 0.0, f64::INFINITY);
+/// # let y = model.add_var("y", 0.0, f64::INFINITY);
+/// model.add_constraint(constraint!((2.0 * x + 3.0 * y) <= 12.0));
 /// ```
 /// or use the method API directly:
-/// ```rust,ignore
-/// (2.0 * x + 3.0 * y).leq(12.0)
+/// ```rust,no_run
+/// # use solver::model::Model;
+/// # let mut model = Model::new("demo");
+/// # let x = model.add_var("x", 0.0, f64::INFINITY);
+/// # let y = model.add_var("y", 0.0, f64::INFINITY);
+/// model.add_constraint((2.0 * x + 3.0 * y).leq(12.0));
 /// ```
 #[macro_export]
 macro_rules! constraint {

@@ -117,7 +117,7 @@ impl RuizScaler {
     /// Unscale a primal solution vector.
     ///
     /// If the scaled problem solution is `x̃`, the original solution is:
-    ///   x_j = col_scale[j] * x̃_j
+    ///   `x_j = col_scale[j] * x̃_j`
     pub fn unscale_solution(x: &[f64], col_scale: &[f64]) -> Vec<f64> {
         x.iter()
             .zip(col_scale.iter())
@@ -128,7 +128,7 @@ impl RuizScaler {
     /// Unscale a dual solution vector.
     ///
     /// If the scaled problem dual is `ỹ`, the original dual is:
-    ///   y_i = row_scale[i] * ỹ_i
+    ///   `y_i = row_scale[i] * ỹ_i`
     pub fn unscale_dual(y: &[f64], row_scale: &[f64]) -> Vec<f64> {
         y.iter()
             .zip(row_scale.iter())

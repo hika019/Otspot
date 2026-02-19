@@ -230,7 +230,12 @@ impl ModelResult {
 /// Index a `ModelResult` by `Variable` to get the primal solution value.
 ///
 /// # Example
-/// ```ignore
+/// ```rust,no_run
+/// # use solver::model::Model;
+/// # let mut model = Model::new("demo");
+/// # let x = model.add_var("x", 0.0, f64::INFINITY);
+/// # model.minimize(x);
+/// # let result = model.solve().unwrap();
 /// println!("x = {}", result[x]);
 /// ```
 impl Index<Variable> for ModelResult {

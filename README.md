@@ -130,6 +130,48 @@ println!("reduced costs: {:?}", result.reduced_costs);
 println!("slacks:        {:?}", result.slack);
 ```
 
+### 二次計画法（QP）
+
+`solve_qp` APIで二次計画問題を解く:
+
+```rust
+use solver::qp::{solve_qp, QpProblem};
+use solver::sparse::CscMatrix;
+
+// min  x^2 + y^2
+// s.t. x + y >= 1
+// (「1/2あり」規約: Q = [[2,0],[0,2]], min 1/2 x^T Q x)
+fn main() {
+    let q = CscMatrix::from_triplets(
+        &[0, 1], &[0, 1], &[2.0, 2.0], 2, 2
+    ).unwrap();
+    let c = vec![0.0, 0.0];
+
+    // x + y >= 1 → -x - y <= -1 (Ax <= b 形式)
+    let a = CscMatrix::from_triplets(
+        &[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2
+    ).unwrap();
+    let b = vec![-1.0];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+
+    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let result = solve_qp(&problem);
+
+    println!("status:    {:?}", result.status);
+    println!("solution:  {:?}", result.solution);   // ≈ [0.5, 0.5]
+    println!("objective: {:.4}", result.objective); // ≈ 0.5
+}
+```
+
+**出力:**
+```
+status:    Optimal
+solution:  [0.5, 0.5]
+objective: 0.5000
+```
+
+SQP反復でのWarm-startには `solve_qp_warm` を使用する（前回解の活性集合を引き継ぎ収束を高速化）。
+
 ## 応用
 
 高性能が求められるアプリケーションでは、制約行列をCSCフォーマットで直接構築し、低レベルAPIを呼び出せ:
