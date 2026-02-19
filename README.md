@@ -1,33 +1,33 @@
 # solver
 
-A high-performance linear programming (LP) solver written in Rust.
+Rustで書かれた高性能な線形計画法（LP）ソルバー。
 
-Implements the **Revised Simplex method** with sparse LU decomposition, Ruiz equilibration scaling, and steepest-edge pricing for robust performance on real-world LP instances.
+疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定を備えた**修正シンプレックス法**を実装しており、実世界のLPインスタンスに対して高い性能を発揮する。
 
-## Features
+## 機能
 
-- **Algebraic modeling API** — express LP problems in natural mathematical notation
-- **Revised Simplex** — Phase I/II with sparse LU decomposition and Markowitz threshold pivoting
-- **Ruiz equilibration** — row/column scaling pre-processor for better numerical conditioning
-- **Steepest-edge pricing** — improved variable selection for faster convergence
-- **Dual solution output** — dual variables, reduced costs, and constraint slacks
-- **MPS file input** — reads industry-standard MPS format; validated on 23 Netlib instances
-- **Configurable options** — tolerance, iteration limit, LU refactorization threshold
-- **Benchmarks** — criterion-based benchmarks for scaling, LU factorization, and solve
-- **Fuzz testing** — proptest-based randomized testing
+- **代数モデリングAPI** — 自然な数式記法でLP問題を表現
+- **修正シンプレックス法** — 疎LU分解とMarkowitz閾値ピボットによるPhase I/II
+- **Ruiz均衡化** — 数値条件を改善するための行/列スケーリング前処理
+- **最急勾配価格決定** — 収束を高速化する改善された変数選択
+- **双対解出力** — 双対変数、簡約費用、制約スラック
+- **MPSファイル入力** — 業界標準MPSフォーマット読み込み；23件のNetlibインスタンスで検証済み
+- **設定可能なオプション** — 許容誤差、反復回数上限、LU再分解閾値
+- **ベンチマーク** — スケーリング、LU分解、ソルブのcriterionベースベンチマーク
+- **ファズテスト** — proptestベースのランダム化テスト
 
-## Quick Start
+## クイックスタート
 
-Add to your `Cargo.toml`:
+`Cargo.toml` に追加:
 
 ```toml
 [dependencies]
 solver = { path = "path/to/solver" }
 ```
 
-### Modeling API
+### モデリングAPI
 
-The recommended way to define and solve LP problems:
+LP問題を定義して解く推奨の方法:
 
 ```rust
 use solver::model::{Model, constraint};
@@ -54,16 +54,16 @@ fn main() {
 }
 ```
 
-**Output:**
+**出力:**
 ```
 objective = 3
 x = 3
 y = 0
 ```
 
-### `constraint!` macro
+### `constraint!` マクロ
 
-The `constraint!` macro supports natural inequality syntax for single variables and parenthesised expressions:
+`constraint!` マクロは、単一変数および括弧で囲まれた式に対して自然な不等式構文をサポートする:
 
 ```rust
 // Single variable
@@ -75,7 +75,7 @@ model.add_constraint(constraint!(x == 5.0));
 model.add_constraint(constraint!((2.0 * x + y) <= 10.0));
 ```
 
-Alternatively, use the method API directly on expressions:
+または、式に直接メソッドAPIを使用することもできる:
 
 ```rust
 model.add_constraint((x + 2.0 * y).leq(8.0));
@@ -83,7 +83,7 @@ model.add_constraint((x - y).geq(0.0));
 model.add_constraint((x + y).eq_constraint(5.0));
 ```
 
-### Maximization
+### 最大化
 
 ```rust
 let mut model = Model::new("revenue");
@@ -99,7 +99,7 @@ println!("max revenue = {}", result.objective());
 
 ### SolverOptions
 
-Fine-tune the solver behavior:
+ソルバーの動作を細かく調整する:
 
 ```rust
 use solver::SolverOptions;
@@ -116,9 +116,9 @@ let opts = SolverOptions {
 let result = simplex::solve_with(&problem, &opts);
 ```
 
-### Dual Solution
+### 双対解
 
-The low-level `simplex::solve` and `simplex::solve_with` return a `SolverResult` with full dual information:
+低レベルの `simplex::solve` と `simplex::solve_with` は完全な双対情報を含む `SolverResult` を返す:
 
 ```rust
 use solver::problem::SolverResult;
@@ -130,9 +130,9 @@ println!("reduced costs: {:?}", result.reduced_costs);
 println!("slacks:        {:?}", result.slack);
 ```
 
-## Advanced Usage
+## 応用
 
-For performance-critical applications, build the constraint matrix directly in CSC format and call the low-level API:
+高性能が求められるアプリケーションでは、制約行列をCSCフォーマットで直接構築し、低レベルAPIを呼び出せ:
 
 ```rust
 use solver::problem::LpProblem;
@@ -162,9 +162,9 @@ println!("objective: {}", result.objective); // -4
 println!("solution:  {:?}", result.solution);// [1.0, 3.0]
 ```
 
-## MPS Input
+## MPS入力
 
-Read LP problems from MPS files:
+MPSファイルからLP問題を読み込む:
 
 ```rust
 use std::path::Path;
@@ -176,11 +176,11 @@ let result = simplex::solve(&prob);
 println!("status: {}", result.status);
 ```
 
-The solver is validated against 23 Netlib benchmark instances (adlittle, afiro, sc50a, sc50b, kb2, brandy, scorpion, fit1d, share1b, and more).
+このソルバーは23件のNetlibベンチマークインスタンス（adlittle、afiro、sc50a、sc50b、kb2、brandy、scorpion、fit1d、share1bなど）で検証済みである。
 
-## Benchmarks
+## ベンチマーク
 
-Three criterion-based benchmark suites are included:
+3種類のcriterionベースベンチマークスイートが含まれている:
 
 ```bash
 # All benchmarks
@@ -192,9 +192,9 @@ cargo bench --bench lu_bench          # LU factorization throughput
 cargo bench --bench solve_bench       # End-to-end LP solve
 ```
 
-HTML reports are generated in `target/criterion/`.
+HTMLレポートは `target/criterion/` に生成される。
 
-## Testing
+## テスト
 
 ```bash
 # Full test suite (unit + Netlib + proptest)
@@ -210,46 +210,46 @@ cargo test netlib
 cargo test proptest
 ```
 
-The test suite includes:
-- **Unit tests** for all modules
-- **23 Netlib instances** for real-world validation
-- **3 proptest suites** for randomized fuzz testing
-- **Smoke tests** for basic API coverage
+テストスイートに含まれるもの:
+- 全モジュールの**ユニットテスト**
+- 実世界検証のための**23件のNetlibインスタンス**
+- ランダム化ファズテストのための**3種類のproptestスイート**
+- 基本的なAPIカバレッジのための**スモークテスト**
 
-## Project Structure
+## プロジェクト構造
 
 ```
 src/
-├── lib.rs              # Crate entry point
-├── model/              # High-level algebraic modeling API
-│   ├── mod.rs          # Model, ModelResult, ModelError
-│   ├── variable.rs     # Variable handle
-│   ├── expression.rs   # Linear expression (+, -, * operators)
-│   └── constraint.rs   # Constraint, constraint! macro
-├── simplex/            # Revised Simplex solver
+├── lib.rs              # クレートのエントリポイント
+├── model/              # 高レベル代数モデリングAPI
+│   ├── mod.rs          # Model、ModelResult、ModelError
+│   ├── variable.rs     # 変数ハンドル
+│   ├── expression.rs   # 線形式（+、-、*演算子）
+│   └── constraint.rs   # 制約、constraint!マクロ
+├── simplex/            # 修正シンプレックスソルバー
 │   ├── mod.rs          # solve() / solve_with()
-│   └── pricing.rs      # Steepest-edge pricing strategy
-├── presolve/           # Pre-processing
+│   └── pricing.rs      # 最急勾配価格決定戦略
+├── presolve/           # 前処理
 │   ├── mod.rs
-│   └── scaling.rs      # Ruiz equilibration scaling
-├── basis/              # LU decomposition basis management
-├── sparse/             # CSC sparse matrix and vector
-├── problem/            # LpProblem, SolverResult, SolveStatus
+│   └── scaling.rs      # Ruiz均衡スケーリング
+├── basis/              # LU分解基底管理
+├── sparse/             # CSC疎行列・疎ベクトル
+├── problem/            # LpProblem、SolverResult、SolveStatus
 ├── options.rs          # SolverOptions
-├── tolerances.rs       # Numerical tolerance constants
-├── error.rs            # SolverError enum
+├── tolerances.rs       # 数値許容誤差定数
+├── error.rs            # SolverErrorエナム
 └── io/
     ├── mod.rs
-    └── mps.rs          # MPS file parser
+    └── mps.rs          # MPSファイルパーサー
 benches/
 ├── scaling_pricing.rs
 ├── lu_bench.rs
 └── solve_bench.rs
 ```
 
-## License
+## ライセンス
 
-Dual-licensed under your choice of:
+以下のいずれかのライセンスで利用可能:
 
 - [Apache License 2.0](LICENSE-APACHE)
 - [MIT License](LICENSE-MIT)
