@@ -162,6 +162,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                 objective: obj,
                 solution: x,
                 dual_solution: result.dual_solution,
+                bound_duals: vec![],
                 active_set: active,
                 iterations: 0,
             }
@@ -172,6 +173,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             objective: f64::NEG_INFINITY,
             solution: vec![],
             dual_solution: vec![],
+            bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
         },
@@ -284,7 +286,8 @@ fn active_set_loop(
                         status: SolveStatus::Optimal,
                         objective: obj,
                         solution: x,
-                        dual_solution: vec![0.0; aug_b.len()],
+                        dual_solution: vec![0.0; m],
+                        bound_duals: vec![0.0; aug_b.len() - m],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter + 1,
                     };
@@ -296,16 +299,20 @@ fn active_set_loop(
             if min_lambda_val >= -PIVOT_TOL {
                 // KKT条件満足: 最適解
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                // dual_solutionをaug_b長に展開し、非活性制約は0.0で埋める（境界制約分を含む）
+                // full_dual: aug_b長（元の制約m + 境界制約数）の双対値ベクトル
                 let mut full_dual = vec![0.0; aug_b.len()];
                 for (k, &ci) in working_set.indices().iter().enumerate() {
                     full_dual[ci] = lambda[k];
                 }
+                // dual_solution[0..m]: 元の制約の双対値（公開API契約: 長さm）
+                // bound_duals[m..]: 変数境界の双対値
+                let (orig_dual, bounds_dual) = full_dual.split_at(m);
                 return QpResult {
                     status: SolveStatus::Optimal,
                     objective: obj,
                     solution: x,
-                    dual_solution: full_dual,
+                    dual_solution: orig_dual.to_vec(),
+                    bound_duals: bounds_dual.to_vec(),
                     active_set: working_set.indices().to_vec(),
                     iterations: iter + 1,
                 };

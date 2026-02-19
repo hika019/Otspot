@@ -94,8 +94,15 @@ pub struct QpResult {
     pub objective: f64,
     /// 最適解ベクトル x*（長さ: num_vars）
     pub solution: Vec<f64>,
-    /// ラグランジュ乗数ベクトル λ*（各制約、長さ: 活性制約数）
+    /// ラグランジュ乗数ベクトル λ*（Ax<=b 元の制約の双対値、長さ: num_constraints = m）
+    ///
+    /// 変数境界の双対値は含まない。境界の双対値は `bound_duals` を参照。
     pub dual_solution: Vec<f64>,
+    /// 変数境界の双対値（有限境界制約の双対値、長さ: 有限 bounds 制約数）
+    ///
+    /// `augment_bounds_to_constraints` で追加された境界制約に対応する双対値。
+    /// 境界なし問題（全変数が無限区間）では空ベクトル。
+    pub bound_duals: Vec<f64>,
     /// 最終反復での活性制約インデックス（warm-start用）
     pub active_set: Vec<usize>,
     /// WSR（Working Set Recalculations）実績回数
@@ -110,6 +117,7 @@ impl QpResult {
             objective: f64::INFINITY,
             solution: vec![],
             dual_solution: vec![],
+            bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
         }
@@ -122,6 +130,7 @@ impl QpResult {
             objective: obj,
             solution: x,
             dual_solution: vec![],
+            bound_duals: vec![],
             active_set: active,
             iterations: iters,
         }

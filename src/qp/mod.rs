@@ -122,6 +122,9 @@ mod tests {
         assert_close(result.solution[0], 0.5, EPS, "T1: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "T1: x[1]");
         assert_close(result.objective, 0.5, EPS, "T1: objective");
+        // NC-DUAL-LEN: 無限境界 → bound_duals空, dual_solution長さ == m == 1
+        assert!(result.bound_duals.is_empty(), "T1: infinite bounds → bound_duals empty");
+        assert_eq!(result.dual_solution.len(), 1, "T1: dual_solution length == m == 1");
     }
 
     /// T2: 等式制約付きQP
@@ -436,11 +439,14 @@ mod tests {
     /// 制約なし最小点: x*=2, y*=2 → 上界 ub=1 でクリップ
     /// 期待: x=1, y=1（ub境界が活性）
     /// obj = 1/2*2*(1+1) + (-4-4) = 2 - 8 = -6
+    ///
+    /// bound_duals順: [ub(x), lb(x), ub(y), lb(y)]
+    /// 活性: ub(x)=1, ub(y)=1 → bound_duals[0]>0, bound_duals[2]>0
     #[test]
     fn test_qp_box_constrained_upper_bound() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![-4.0, -4.0];
-        let a = CscMatrix::new(0, 2); // 制約なし
+        let a = CscMatrix::new(0, 2); // 制約なし（m=0）
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64); 2]; // lb=0, ub=1
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
@@ -450,6 +456,11 @@ mod tests {
         assert_close(result.solution[0], 1.0, EPS, "T11: x[0] at upper bound");
         assert_close(result.solution[1], 1.0, EPS, "T11: x[1] at upper bound");
         assert_close(result.objective, -6.0, EPS, "T11: objective");
+        // NC-DUAL-LEN: dual_solution 長さ == m == 0, bound_duals 長さ == 4 (2ub + 2lb)
+        assert_eq!(result.dual_solution.len(), 0, "T11: dual_solution length == m == 0");
+        assert_eq!(result.bound_duals.len(), 4, "T11: bound_duals length == 4");
+        assert!(result.bound_duals[0] > 0.0, "T11: ub dual of x[0] should be positive");
+        assert!(result.bound_duals[2] > 0.0, "T11: ub dual of x[1] should be positive");
     }
 
     /// T12: Box-constrained QP（下界境界が活性）
@@ -462,11 +473,15 @@ mod tests {
     /// 制約なし最小点: x*=-2, y*=0 → lb=0 でクリップ
     /// 期待: x=0（lb境界が活性）, y=0
     /// obj = 1/2*2*(0+0) + 4*0 = 0
+    ///
+    /// bound_duals順: [ub(x), lb(x), ub(y), lb(y)]
+    /// 活性: lb(x)=0 → bound_duals[1]>0
+    /// y=0 は無制約最小点なので lb(y) の双対は 0
     #[test]
     fn test_qp_box_constrained_lower_bound() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![4.0, 0.0];
-        let a = CscMatrix::new(0, 2); // 制約なし
+        let a = CscMatrix::new(0, 2); // 制約なし（m=0）
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64); 2]; // lb=0, ub=1
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
@@ -476,5 +491,9 @@ mod tests {
         assert_close(result.solution[0], 0.0, EPS, "T12: x[0] at lower bound");
         assert_close(result.solution[1], 0.0, EPS, "T12: x[1] unconstrained min");
         assert_close(result.objective, 0.0, EPS, "T12: objective");
+        // NC-DUAL-LEN: dual_solution 長さ == m == 0, bound_duals 長さ == 4
+        assert_eq!(result.dual_solution.len(), 0, "T12: dual_solution length == m == 0");
+        assert_eq!(result.bound_duals.len(), 4, "T12: bound_duals length == 4");
+        assert!(result.bound_duals[1] > 0.0, "T12: lb dual of x[0] should be positive");
     }
 }
