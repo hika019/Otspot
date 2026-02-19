@@ -284,7 +284,7 @@ fn active_set_loop(
                         status: SolveStatus::Optimal,
                         objective: obj,
                         solution: x,
-                        dual_solution: vec![0.0; m],
+                        dual_solution: vec![0.0; aug_b.len()],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter + 1,
                     };
@@ -296,8 +296,8 @@ fn active_set_loop(
             if min_lambda_val >= -PIVOT_TOL {
                 // KKT条件満足: 最適解
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                // dual_solutionを全制約数(m)に展開し、非活性制約は0.0で埋める
-                let mut full_dual = vec![0.0; m];
+                // dual_solutionをaug_b長に展開し、非活性制約は0.0で埋める（境界制約分を含む）
+                let mut full_dual = vec![0.0; aug_b.len()];
                 for (k, &ci) in working_set.indices().iter().enumerate() {
                     full_dual[ci] = lambda[k];
                 }

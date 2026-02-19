@@ -425,4 +425,56 @@ mod tests {
         assert_close(result.solution[1], 1.5, EPS, "T10: x[1]");
         assert_close(result.objective, -4.5, EPS, "T10: objective");
     }
+
+    /// T11: Box-constrained QP（上界境界が活性）
+    ///
+    /// min (x-2)^2 + (y-2)^2  [制約なし、境界あり]
+    /// = 1/2 * [[2,0],[0,2]] * [x,y] + [-4,-4] * [x,y]  + const
+    /// Q = [[2,0],[0,2]], c = [-4,-4]
+    /// bounds: 0 <= x <= 1, 0 <= y <= 1
+    ///
+    /// 制約なし最小点: x*=2, y*=2 → 上界 ub=1 でクリップ
+    /// 期待: x=1, y=1（ub境界が活性）
+    /// obj = 1/2*2*(1+1) + (-4-4) = 2 - 8 = -6
+    #[test]
+    fn test_qp_box_constrained_upper_bound() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![-4.0, -4.0];
+        let a = CscMatrix::new(0, 2); // 制約なし
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64); 2]; // lb=0, ub=1
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T11: status should be Optimal");
+        assert_close(result.solution[0], 1.0, EPS, "T11: x[0] at upper bound");
+        assert_close(result.solution[1], 1.0, EPS, "T11: x[1] at upper bound");
+        assert_close(result.objective, -6.0, EPS, "T11: objective");
+    }
+
+    /// T12: Box-constrained QP（下界境界が活性）
+    ///
+    /// min (x+2)^2 + y^2  [制約なし、境界あり]
+    /// = 1/2 * [[2,0],[0,2]] * [x,y] + [4,0] * [x,y]  + const
+    /// Q = [[2,0],[0,2]], c = [4,0]
+    /// bounds: 0 <= x <= 1, 0 <= y <= 1
+    ///
+    /// 制約なし最小点: x*=-2, y*=0 → lb=0 でクリップ
+    /// 期待: x=0（lb境界が活性）, y=0
+    /// obj = 1/2*2*(0+0) + 4*0 = 0
+    #[test]
+    fn test_qp_box_constrained_lower_bound() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![4.0, 0.0];
+        let a = CscMatrix::new(0, 2); // 制約なし
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64); 2]; // lb=0, ub=1
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T12: status should be Optimal");
+        assert_close(result.solution[0], 0.0, EPS, "T12: x[0] at lower bound");
+        assert_close(result.solution[1], 0.0, EPS, "T12: x[1] unconstrained min");
+        assert_close(result.objective, 0.0, EPS, "T12: objective");
+    }
 }
