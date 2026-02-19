@@ -1,203 +1,255 @@
 # solver
 
-Rustで実装された高性能数理最適化ソルバー
+A high-performance linear programming (LP) solver written in Rust.
 
-## プロジェクト概要
+Implements the **Revised Simplex method** with sparse LU decomposition, Ruiz equilibration scaling, and steepest-edge pricing for robust performance on real-world LP instances.
 
-`solver`は線形計画問題（LP）、混合整数計画問題（MIP）、非線形計画問題（NLP）を段階的に扱う次世代最適化ソルバーです。Rustによりメモリ安全性と高性能を両立し、並列処理を前提とした設計を採用しています。
+## Features
 
-**Phase 1 M1（現在）**: Primal Simplex法によるLP求解の基本実装が完了しています。
+- **Algebraic modeling API** — express LP problems in natural mathematical notation
+- **Revised Simplex** — Phase I/II with sparse LU decomposition and Markowitz threshold pivoting
+- **Ruiz equilibration** — row/column scaling pre-processor for better numerical conditioning
+- **Steepest-edge pricing** — improved variable selection for faster convergence
+- **Dual solution output** — dual variables, reduced costs, and constraint slacks
+- **MPS file input** — reads industry-standard MPS format; validated on 23 Netlib instances
+- **Configurable options** — tolerance, iteration limit, LU refactorization threshold
+- **Benchmarks** — criterion-based benchmarks for scaling, LU factorization, and solve
+- **Fuzz testing** — proptest-based randomized testing
 
-## 前提条件
+## Quick Start
 
-- Rust toolchain（1.70以降推奨）
+Add to your `Cargo.toml`:
 
-```bash
-# Rustのインストール（未導入の場合）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```toml
+[dependencies]
+solver = { path = "path/to/solver" }
 ```
 
-## ビルド方法
+### Modeling API
 
-```bash
-# リリースビルド
-cargo build --release
-
-# デバッグビルド
-cargo build
-```
-
-## テスト実行
-
-```bash
-# 全テスト実行
-cargo test
-
-# 詳細出力付き
-cargo test -- --nocapture
-```
-
-## 使い方
-
-### 基本的なLP問題の定義と求解
-
-以下は2変数の線形計画問題を解く例です:
-
-**問題**:
-```
-minimize    -x1 - x2
-subject to  x1 + x2 <= 4
-            x1 <= 3
-            x2 <= 3
-            x1, x2 >= 0
-```
-
-**実装例**:
+The recommended way to define and solve LP problems:
 
 ```rust
-use solver::problem::LpProblem;
-use solver::sparse::CscMatrix;
-use solver::simplex;
+use solver::model::{Model, constraint};
 
 fn main() {
-    // 目的関数ベクトル c: min c^T x
-    let c = vec![-1.0, -1.0];
+    // Problem:
+    //   minimize    x + 2y
+    //   subject to  2x + 3y <= 12
+    //               x  +  y >= 3
+    //               x in [0, +inf), y in [0, 10]
 
-    // 制約行列 A を疎行列（CSC形式）で定義
-    // 3行2列の行列（3つの制約、2つの変数）
-    let rows = vec![0, 0, 1, 2];  // 行インデックス
-    let cols = vec![0, 1, 0, 1];  // 列インデックス
-    let vals = vec![1.0, 1.0, 1.0, 1.0];  // 値
-    let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 2)
-        .expect("行列構築失敗");
+    let mut model = Model::new("production");
+    let x = model.add_var("x", 0.0, f64::INFINITY);
+    let y = model.add_var("y", 0.0, 10.0);
 
-    // 右辺ベクトル b: Ax <= b
-    let b = vec![4.0, 3.0, 3.0];
+    model.add_constraint(constraint!((2.0 * x + 3.0 * y) <= 12.0));
+    model.add_constraint(constraint!((x + y) >= 3.0));
+    model.minimize(x + 2.0 * y);
 
-    // LP問題の構築
-    let problem = LpProblem::new(c, a, b).expect("LP問題構築失敗");
-
-    // 求解
-    let result = simplex::solve(&problem);
-
-    // 結果の表示
-    println!("求解ステータス: {}", result.status);
-    println!("目的関数値: {}", result.objective);
-    println!("解: {:?}", result.solution);
+    let result = model.solve().unwrap();
+    println!("objective = {}", result.objective());
+    println!("x = {}", result[x]);
+    println!("y = {}", result[y]);
 }
 ```
 
-**出力例**:
+**Output:**
 ```
-求解ステータス: Optimal
-目的関数値: -4
-解: [1.0, 3.0]
+objective = 3
+x = 3
+y = 0
 ```
 
-### より複雑な例（3変数）
+### `constraint!` macro
+
+The `constraint!` macro supports natural inequality syntax for single variables and parenthesised expressions:
+
+```rust
+// Single variable
+model.add_constraint(constraint!(x <= 7.0));
+model.add_constraint(constraint!(y >= 0.0));
+model.add_constraint(constraint!(x == 5.0));
+
+// Expression on the left-hand side (wrap in parentheses)
+model.add_constraint(constraint!((2.0 * x + y) <= 10.0));
+```
+
+Alternatively, use the method API directly on expressions:
+
+```rust
+model.add_constraint((x + 2.0 * y).leq(8.0));
+model.add_constraint((x - y).geq(0.0));
+model.add_constraint((x + y).eq_constraint(5.0));
+```
+
+### Maximization
+
+```rust
+let mut model = Model::new("revenue");
+let x = model.add_var("x", 0.0, f64::INFINITY);
+let y = model.add_var("y", 0.0, f64::INFINITY);
+
+model.add_constraint(constraint!((x + y) <= 10.0));
+model.maximize(3.0 * x + 5.0 * y);
+
+let result = model.solve().unwrap();
+println!("max revenue = {}", result.objective());
+```
+
+### SolverOptions
+
+Fine-tune the solver behavior:
+
+```rust
+use solver::SolverOptions;
+use solver::problem::LpProblem;
+use solver::simplex;
+
+let opts = SolverOptions {
+    primal_tol: 1e-8,          // optimality / feasibility tolerance
+    max_iterations: Some(500), // None = auto (100*(m+n)+1000)
+    max_etas: 50,              // LU refactorization threshold
+    clamp_tol: 1e-14,          // solution micro-value clamp
+};
+
+let result = simplex::solve_with(&problem, &opts);
+```
+
+### Dual Solution
+
+The low-level `simplex::solve` and `simplex::solve_with` return a `SolverResult` with full dual information:
+
+```rust
+use solver::problem::SolverResult;
+
+let result: SolverResult = simplex::solve(&problem);
+println!("primal:        {:?}", result.solution);
+println!("dual (shadow): {:?}", result.dual_solution);
+println!("reduced costs: {:?}", result.reduced_costs);
+println!("slacks:        {:?}", result.slack);
+```
+
+## Advanced Usage
+
+For performance-critical applications, build the constraint matrix directly in CSC format and call the low-level API:
 
 ```rust
 use solver::problem::LpProblem;
 use solver::sparse::CscMatrix;
 use solver::simplex;
 
-fn solve_3var_problem() {
-    // 問題: min -2x1 - 3x2 - x3
-    //       s.t. x1 + x2 + x3 <= 10
-    //            2x1 + x2 <= 14
-    //            x2 + x3 <= 8
-    //            x1, x2, x3 >= 0
+// minimize  -x1 - x2
+// s.t.       x1 + x2 <= 4
+//            x1      <= 3
+//                 x2 <= 3
+//            x1, x2 >= 0
 
-    let c = vec![-2.0, -3.0, -1.0];
+let c = vec![-1.0, -1.0];
 
-    let rows = vec![0, 0, 0, 1, 1, 2, 2];
-    let cols = vec![0, 1, 2, 0, 1, 1, 2];
-    let vals = vec![1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0];
-    let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 3).unwrap();
+let rows = vec![0, 0, 1, 2];
+let cols = vec![0, 1, 0, 1];
+let vals = vec![1.0, 1.0, 1.0, 1.0];
+let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 2).unwrap();
 
-    let b = vec![10.0, 14.0, 8.0];
+let b = vec![4.0, 3.0, 3.0];
 
-    let problem = LpProblem::new(c, a, b).unwrap();
-    let result = simplex::solve(&problem);
+let problem = LpProblem::new(c, a, b).unwrap();
+let result = simplex::solve(&problem);
 
-    println!("{}", result);
-}
+println!("status:    {}", result.status);   // Optimal
+println!("objective: {}", result.objective); // -4
+println!("solution:  {:?}", result.solution);// [1.0, 3.0]
 ```
 
-### CSC疎行列の基本操作
+## MPS Input
+
+Read LP problems from MPS files:
 
 ```rust
-use solver::sparse::CscMatrix;
+use std::path::Path;
+use solver::io::mps;
+use solver::simplex;
 
-// 単位行列の生成
-let identity = CscMatrix::identity(3);
-
-// ベクトルとの乗算
-let x = vec![1.0, 2.0, 3.0];
-let y = identity.mat_vec_mul(&x).unwrap();
-assert_eq!(y, vec![1.0, 2.0, 3.0]);
-
-// 転置
-let matrix_t = identity.transpose();
+let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS parse error");
+let result = simplex::solve(&prob);
+println!("status: {}", result.status);
 ```
 
-## 現在の実装状況
+The solver is validated against 23 Netlib benchmark instances (adlittle, afiro, sc50a, sc50b, kb2, brandy, scorpion, fit1d, share1b, and more).
 
-**Phase 1 M1（完了）**:
-- ✅ Primal Simplex法（Phase I/II法による2段階アルゴリズム）
-- ✅ CSC（Compressed Sparse Column）形式の疎行列実装
-- ✅ LP問題の定義と求解API
-- ✅ 退化問題対応（Bland's rule）
-- ✅ 非実行可能・非有界問題の検出
+## Benchmarks
 
-## プロジェクト構成
+Three criterion-based benchmark suites are included:
+
+```bash
+# All benchmarks
+cargo bench
+
+# Individual suites
+cargo bench --bench scaling_pricing   # Ruiz scaling + steepest-edge pricing
+cargo bench --bench lu_bench          # LU factorization throughput
+cargo bench --bench solve_bench       # End-to-end LP solve
+```
+
+HTML reports are generated in `target/criterion/`.
+
+## Testing
+
+```bash
+# Full test suite (unit + Netlib + proptest)
+cargo test
+
+# Verbose output
+cargo test -- --nocapture
+
+# Netlib integration tests only
+cargo test netlib
+
+# Proptest fuzz tests only
+cargo test proptest
+```
+
+The test suite includes:
+- **Unit tests** for all modules
+- **23 Netlib instances** for real-world validation
+- **3 proptest suites** for randomized fuzz testing
+- **Smoke tests** for basic API coverage
+
+## Project Structure
 
 ```
 src/
-├── lib.rs           # クレートのエントリポイント
-├── sparse/
-│   └── mod.rs       # 疎行列（CscMatrix）の実装
-├── problem/
-│   └── mod.rs       # LP問題定義（LpProblem, SolverResult等）
-└── simplex/
-    └── mod.rs       # Primal Simplex法の実装
+├── lib.rs              # Crate entry point
+├── model/              # High-level algebraic modeling API
+│   ├── mod.rs          # Model, ModelResult, ModelError
+│   ├── variable.rs     # Variable handle
+│   ├── expression.rs   # Linear expression (+, -, * operators)
+│   └── constraint.rs   # Constraint, constraint! macro
+├── simplex/            # Revised Simplex solver
+│   ├── mod.rs          # solve() / solve_with()
+│   └── pricing.rs      # Steepest-edge pricing strategy
+├── presolve/           # Pre-processing
+│   ├── mod.rs
+│   └── scaling.rs      # Ruiz equilibration scaling
+├── basis/              # LU decomposition basis management
+├── sparse/             # CSC sparse matrix and vector
+├── problem/            # LpProblem, SolverResult, SolveStatus
+├── options.rs          # SolverOptions
+├── tolerances.rs       # Numerical tolerance constants
+├── error.rs            # SolverError enum
+└── io/
+    ├── mod.rs
+    └── mps.rs          # MPS file parser
+benches/
+├── scaling_pricing.rs
+├── lu_bench.rs
+└── solve_bench.rs
 ```
 
-### 主要なAPI
+## License
 
-- **`solver::sparse::CscMatrix`**: 疎行列（CSC形式）
-  - `new(nrows, ncols)`: 空行列生成
-  - `from_triplets(rows, cols, vals, nrows, ncols)`: COO形式から構築
-  - `mat_vec_mul(x)`: 行列ベクトル積
-  - `transpose()`: 転置行列
+Dual-licensed under your choice of:
 
-- **`solver::problem::LpProblem`**: LP問題定義
-  - `new(c, a, b)`: LP問題の構築（min c^T x, s.t. Ax <= b, x >= 0）
-
-- **`solver::simplex::solve(problem)`**: LP問題の求解
-  - 戻り値: `SolverResult`（status, objective, solution）
-
-## ライセンス
-
-このプロジェクトはデュアルライセンスです:
-
-- **Apache License 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
-- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
-
-どちらかを選択して使用できます。
-
-## 今後の開発予定
-
-### Phase 1（0-12ヶ月）: LP Simplex MVP
-- M1: Primal Simplex（完了）
-- M2: Dual Simplex（計画中、3-6ヶ月）
-- M3: Python bindings（PyO3、6-9ヶ月）
-- M4: PyPI公開とSciPy PR提出（9-12ヶ月）
-
-### Phase 2（12-24ヶ月）: MIP + 並列化
-- Branch-and-cut
-- 並列木探索（Rustの安全性を活用）
-- 切除平面法
-
-### Phase 3（24-36ヶ月）: NLP/GPU拡張
-- GPU対応LP/MIP、またはNLPソルバー（Phase 1-2の結果次第で判断）
+- [Apache License 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
