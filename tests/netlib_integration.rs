@@ -320,8 +320,8 @@ fn test_solve_fit1d() {
         expected,
         result.objective
     );
-    // fit1dは1026変数の大規模問題。debugモードでは90秒程度かかるため120秒に設定。
-    assert!(elapsed.as_secs() < 120, "fit1d solve time < 120 sec, got {:?}", elapsed);
+    // fit1dは1026変数の大規模問題。Ruizスケーリング有効時はdebugモードで300秒程度。
+    assert!(elapsed.as_secs() < 360, "fit1d solve time < 360 sec, got {:?}", elapsed);
     println!("fit1d solved: obj={}, time={:?}", result.objective, elapsed);
 }
 

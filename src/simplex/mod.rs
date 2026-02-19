@@ -11,11 +11,15 @@
 //! 改訂シンプレックス法では完全な単体表ではなく基底行列のLU分解を保持するため、
 //! 大規模疎行列に対して高い計算効率を発揮する。
 
+pub mod pricing;
+
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
+use crate::presolve::RuizScaler;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
+use pricing::{PricingStrategy, SteepestEdgePricing};
 
 /// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
 ///
@@ -408,6 +412,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
 /// * `problem` - 元のLP問題（制約行列・右辺ベクトル・目的係数）
 /// * `y_std` - 標準形の双対変数ベクトル（長さ: sf.m）
 /// * `solution` - 元問題の解ベクトル（長さ: problem.num_vars）
+/// * `row_scale` - Ruizスケーリングの行スケール因子（スケーリングなしの場合は空スライス）
 ///
 /// # 戻り値
 /// `(dual_solution, reduced_costs, slack)` のタプル
@@ -416,15 +421,17 @@ fn extract_dual_info(
     problem: &LpProblem,
     y_std: &[f64],
     solution: &[f64],
+    row_scale: &[f64],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let m_orig = problem.num_constraints;
     let n_orig = problem.num_vars;
 
-    // 双対変数: y_std を行符号反転で調整して元制約に対応
+    // 双対変数: y_std を行符号反転 + Ruiz行スケールで調整して元制約に対応
     let mut dual_solution = vec![0.0; m_orig];
     for i in 0..m_orig {
         let sign = if sf.row_negated[i] { -1.0 } else { 1.0 };
-        dual_solution[i] = sign * y_std[i];
+        let rs = row_scale.get(i).copied().unwrap_or(1.0);
+        dual_solution[i] = sign * rs * y_std[i];
     }
 
     // スラック: b - Ax（元問題の解から直接計算）
@@ -459,20 +466,25 @@ fn extract_dual_info(
 ///
 /// Phase I の目的関数は人工変数の和の最小化。
 /// 最小値がゼロより大きければ元問題は実行不可能（Infeasible）。
+/// Ruiz equilibration スケーリングを適用してから解く。
 fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = sf.m;
+
+    // Apply Ruiz equilibration scaling to the standard form
+    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
 
     if sf.num_artificial == 0 {
         // Direct Phase II
         let mut basis = sf.initial_basis.clone();
-        let mut x_b = sf.b.clone();
+        let mut x_b = b.clone();
+        let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&sf.a, &mut x_b, &sf.c, &mut basis, m, sf.n_total, sf.n_total, options)
+        match revised_simplex_core(&a, &mut x_b, &c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
         {
             SimplexOutcome::Optimal(obj, y) => {
-                let solution = extract_solution(sf, &basis, &x_b);
+                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 let (dual_solution, reduced_costs, slack) =
-                    extract_dual_info(sf, problem, &y, &solution);
+                    extract_dual_info(sf, problem, &y, &solution, &row_scale);
                 SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj + sf.obj_offset,
@@ -491,7 +503,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 slack: vec![],
             },
             SimplexOutcome::MaxIterations(obj) => {
-                let solution = extract_solution(sf, &basis, &x_b);
+                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 SolverResult {
                     status: SolveStatus::MaxIterations,
                     objective: obj + sf.obj_offset,
@@ -510,9 +522,9 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
         let mut trip_cols = Vec::new();
         let mut trip_vals = Vec::new();
 
-        // Copy existing matrix
-        for j in 0..sf.a.ncols {
-            if let Ok((r, v)) = sf.a.get_column(j) {
+        // Copy scaled matrix (not sf.a)
+        for j in 0..a.ncols {
+            if let Ok((r, v)) = a.get_column(j) {
                 for (k, &row) in r.iter().enumerate() {
                     trip_rows.push(row);
                     trip_cols.push(j);
@@ -537,15 +549,16 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
         let a_ext =
             CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
 
-        // Phase I cost
+        // Phase I cost: minimise sum of artificials
         let mut c_phase1 = vec![0.0; n_ext];
         for j in sf.n_total..n_ext {
             c_phase1[j] = 1.0;
         }
 
-        let mut x_b = sf.b.clone();
+        let mut x_b = b.clone();
+        let mut pricing1 = SteepestEdgePricing::new(n_ext);
 
-        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, options) {
+        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, &mut pricing1, options) {
             SimplexOutcome::Optimal(obj, _) => {
                 if obj > PIVOT_TOL {
                     return SolverResult {
@@ -559,11 +572,13 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 }
 
                 // Phase II: restrict pricing to non-artificial columns
+                // Use scaled c for Phase II cost
                 let mut c_phase2 = vec![0.0; n_ext];
                 for k in 0..sf.n_total {
-                    c_phase2[k] = sf.c[k];
+                    c_phase2[k] = c[k];
                 }
 
+                let mut pricing2 = SteepestEdgePricing::new(n_ext);
                 match revised_simplex_core(
                     &a_ext,
                     &mut x_b,
@@ -572,12 +587,13 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                     m,
                     n_ext,
                     sf.n_total,
+                    &mut pricing2,
                     options,
                 ) {
                     SimplexOutcome::Optimal(obj2, y) => {
-                        let solution = extract_solution(sf, &basis, &x_b);
+                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         let (dual_solution, reduced_costs, slack) =
-                            extract_dual_info(sf, problem, &y, &solution);
+                            extract_dual_info(sf, problem, &y, &solution, &row_scale);
                         SolverResult {
                             status: SolveStatus::Optimal,
                             objective: obj2 + sf.obj_offset,
@@ -596,7 +612,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                         slack: vec![],
                     },
                     SimplexOutcome::MaxIterations(obj2) => {
-                        let solution = extract_solution(sf, &basis, &x_b);
+                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         SolverResult {
                             status: SolveStatus::MaxIterations,
                             objective: obj2 + sf.obj_offset,
@@ -632,11 +648,13 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
 ///
 /// 標準形の最適解を、変数変換（オフセット・係数）を逆適用して
 /// 元問題の変数値に変換する。
-fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64> {
+/// `col_scale` はRuizスケーリングの列スケール因子。スケーリングを行わない場合は空スライスを渡す。
+fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
-            x_new[basis[i]] = x_b[i];
+            let scale = col_scale.get(basis[i]).copied().unwrap_or(1.0);
+            x_new[basis[i]] = x_b[i] * scale;
         }
     }
 
@@ -658,7 +676,7 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64>
 /// LU分解を用いて基底行列を管理し、以下の手順を繰り返す:
 ///
 /// 1. **BTRAN**: 双対変数 `y = B^{-T} c_B` を計算
-/// 2. **価格付け（Pricing）**: 最も負の被縮小費用を持つ入基変数を選択
+/// 2. **価格付け（Pricing）**: PricingStrategyにより入基変数を選択
 /// 3. **FTRAN**: ピボット列 `d = B^{-1} a_j` を計算
 /// 4. **比率テスト**: Bland則を用いて離基変数を選択（退化サイクルの防止）
 /// 5. **基底更新**: `x_B` の更新と基底行列のrank-1更新
@@ -672,12 +690,13 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64]) -> Vec<f64>
 /// * `m` - 制約数
 /// * `n_cols` - 全列数
 /// * `n_price` - 価格付けの対象列数（人工変数を除く場合に `n_total` を指定）
+/// * `pricing` - 価格付け戦略（DantzigPricing または SteepestEdgePricing）
 /// * `options` - ソルバー設定（反復上限・eta 保持数・クランプ閾値を含む）
 ///
 /// # 戻り値
 ///
-/// [`SimplexOutcome::Optimal`] — 最適目的関数値、または [`SimplexOutcome::Unbounded`]
-fn revised_simplex_core(
+/// [`SimplexOutcome::Optimal`] — 最適目的関数値と双対変数、または [`SimplexOutcome::Unbounded`]
+fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
     x_b: &mut Vec<f64>,
     c: &[f64],
@@ -685,6 +704,7 @@ fn revised_simplex_core(
     m: usize,
     n_cols: usize,
     n_price: usize,
+    pricing: &mut P,
     options: &SolverOptions,
 ) -> SimplexOutcome {
     let max_iter = options.max_iterations.unwrap_or(100 * (m + n_cols) + 1000);
@@ -705,6 +725,8 @@ fn revised_simplex_core(
     let mut c_b = vec![0.0f64; m];
     let mut y_dense = vec![0.0f64; m];
     let mut d_dense = vec![0.0f64; m];
+    // Pre-allocate RC vector (reused each iteration) for pricing strategy
+    let mut rc_vec = vec![0.0f64; n_price];
 
     for _iter in 0..max_iter {
         // 1. Dual variables: y = BTRAN(c_B)
@@ -716,12 +738,10 @@ fn revised_simplex_core(
         y_sv.to_dense_into(&mut y_dense);
         let y = &y_dense;
 
-        // 2. Pricing: find most negative reduced cost
-        let mut entering = None;
-        let mut min_rc = -PIVOT_TOL;
-
+        // 2. Compute reduced costs for all pricing candidates
         for j in 0..n_price {
             if is_basic[j] {
+                rc_vec[j] = 0.0;
                 continue;
             }
             let (rows, vals) = a.get_column(j).unwrap();
@@ -729,14 +749,11 @@ fn revised_simplex_core(
             for (k, &row) in rows.iter().enumerate() {
                 ya += y[row] * vals[k];
             }
-            let rc = c[j] - ya;
-            if rc < min_rc {
-                min_rc = rc;
-                entering = Some(j);
-            }
+            rc_vec[j] = c[j] - ya;
         }
 
-        let entering_col = match entering {
+        // 3. Select entering variable via pricing strategy
+        let entering_col = match pricing.select_entering(&rc_vec, n_price) {
             None => {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Optimal(obj, y_dense.clone());
@@ -744,7 +761,7 @@ fn revised_simplex_core(
             Some(j) => j,
         };
 
-        // 3. FTRAN: pivot column d = B^{-1} * a_entering
+        // 4. FTRAN: pivot column d = B^{-1} * a_entering
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
         let mut d_sv = SparseVec {
             indices: col_rows.to_vec(),
@@ -755,7 +772,7 @@ fn revised_simplex_core(
         d_sv.to_dense_into(&mut d_dense);
         let d = &d_dense;
 
-        // 4. Ratio test (Bland's rule for ties)
+        // 5. Ratio test (Bland's rule for ties)
         let mut leaving = None;
         let mut min_ratio = f64::INFINITY;
 
@@ -780,7 +797,7 @@ fn revised_simplex_core(
             Some(i) => i,
         };
 
-        // 5. Update x_b
+        // 6. Update x_b
         let step = x_b[leaving_row] / d[leaving_row];
         for i in 0..m {
             x_b[i] -= d[i] * step;
@@ -794,15 +811,21 @@ fn revised_simplex_core(
             }
         }
 
-        // 6. Update basis tracking
-        is_basic[basis[leaving_row]] = false;
+        // 7. Get leaving column index before updating basis
+        let leaving_col = basis[leaving_row];
+
+        // 8. Update pricing weights
+        pricing.update_weights(&basis_mgr, entering_col, leaving_col, d);
+
+        // 9. Update basis tracking
+        is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
 
-        // 7. Update basis manager
+        // 10. Update basis manager
         basis_mgr.update(entering_col, leaving_row, &d_sv);
         basis[leaving_row] = entering_col;
 
-        // 8. Refactor if needed
+        // 11. Refactor if needed
         basis_mgr.refactor_if_needed(a, basis);
     }
 
@@ -949,6 +972,7 @@ mod tests {
             max_iterations: Some(1),
             ..SolverOptions::default()
         };
+        let mut pricing = pricing::DantzigPricing;
         let outcome = revised_simplex_core(
             &sf.a,
             &mut x_b,
@@ -957,6 +981,7 @@ mod tests {
             m,
             sf.n_total,
             sf.n_total,
+            &mut pricing,
             &opts,
         );
         assert!(

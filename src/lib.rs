@@ -40,6 +40,7 @@
 
 pub mod error;
 pub use error::SolverError;
+pub mod presolve;
 pub mod sparse;
 pub mod problem;
 pub mod simplex;
