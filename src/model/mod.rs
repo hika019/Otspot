@@ -52,6 +52,9 @@ pub struct Model {
     constraints: Vec<Constraint>,
     objective: Option<Expression>,
     sense: OptimizationSense,
+    /// Quadratic objective Q matrix for QP problems (None = LP mode).
+    /// Convention: min 1/2 x^T Q x + c^T x  ("1/2あり" standard).
+    quadratic_objective: Option<CscMatrix>,
 }
 
 impl Model {
@@ -63,6 +66,7 @@ impl Model {
             constraints: Vec::new(),
             objective: None,
             sense: OptimizationSense::Minimize,
+            quadratic_objective: None,
         }
     }
 
@@ -102,6 +106,21 @@ impl Model {
     pub fn maximize(&mut self, obj: impl Into<Expression>) -> &mut Self {
         self.objective = Some(obj.into());
         self.sense = OptimizationSense::Maximize;
+        self
+    }
+
+    /// Set the quadratic objective Q matrix for QP problems.
+    ///
+    /// **Convention** ("1/2あり"): the objective is min 1/2 x^T Q x + c^T x
+    /// where c is specified via `minimize()` or `maximize()`.
+    ///
+    /// If Q is not set, `solve()` runs as a standard LP.
+    ///
+    /// # Note
+    /// For `maximize()` QP, Q must be negative semi-definite (NSD).
+    /// Providing a PSD Q with `maximize()` may yield an unbounded problem.
+    pub fn set_quadratic_objective(&mut self, q: CscMatrix) -> &mut Self {
+        self.quadratic_objective = Some(q);
         self
     }
 
@@ -165,7 +184,12 @@ impl Model {
             .map(|v| (v.lower_bound, v.upper_bound))
             .collect();
 
-        // --- Build and solve LpProblem ---
+        // --- QP path ---
+        if let Some(ref q_orig) = self.quadratic_objective.clone() {
+            return self.solve_qp_internal(c, a, b, bounds, q_orig.clone(), num_constraints);
+        }
+
+        // --- LP path (existing) ---
         let problem = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
             .map_err(|e| ModelError::Internal(e.to_string()))?;
 
@@ -189,9 +213,144 @@ impl Model {
                     slack: None,
                 })
             }
-            SolveStatus::Infeasible => Err(ModelError::SolveError(SolverError::Infeasible)),
-            SolveStatus::Unbounded => Err(ModelError::SolveError(SolverError::Unbounded)),
+            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
+            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
+        }
+    }
+
+    /// QP内部求解ロジック（制約型変換・QpProblem構築・結果変換）
+    fn solve_qp_internal(
+        &self,
+        c: Vec<f64>,
+        _lp_a: CscMatrix,
+        _lp_b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+        q_orig: CscMatrix,
+        num_model_constraints: usize,
+    ) -> Result<ModelResult, ModelError> {
+        use crate::qp::{QpProblem, solve_qp};
+
+        let num_vars = self.variables.len();
+
+        // maximize QP: negate Q (Q→-Q), c is already negated by solve()
+        let qp_q = if self.sense == OptimizationSense::Maximize {
+            let mut q_neg = q_orig.clone();
+            for v in q_neg.values.iter_mut() {
+                *v = -*v;
+            }
+            q_neg
+        } else {
+            q_orig
+        };
+
+        // --- 制約型変換: Le→そのまま, Ge→符号反転, Eq→2行展開 ---
+        // dual_map[i] = (qp_row_for_le_or_ge, Option<qp_row_for_eq_upper>)
+        //   Le: (row, None)    → dual[i] =  qp_dual[row]
+        //   Ge: (row, None)    → dual[i] = -qp_dual[row]
+        //   Eq: (row1, Some(row2)) → dual[i] = qp_dual[row1] - qp_dual[row2]
+        let mut qp_trip_rows: Vec<usize> = Vec::new();
+        let mut qp_trip_cols: Vec<usize> = Vec::new();
+        let mut qp_trip_vals: Vec<f64> = Vec::new();
+        let mut qp_b: Vec<f64> = Vec::new();
+        let mut dual_map: Vec<(usize, Option<usize>)> = Vec::with_capacity(num_model_constraints);
+        let mut qp_row = 0usize;
+
+        for con in &self.constraints {
+            match con.sense {
+                ConstraintSense::Le => {
+                    for (&var, &coeff) in &con.lhs.coefficients {
+                        qp_trip_rows.push(qp_row);
+                        qp_trip_cols.push(var.index);
+                        qp_trip_vals.push(coeff);
+                    }
+                    qp_b.push(con.rhs);
+                    dual_map.push((qp_row, None));
+                    qp_row += 1;
+                }
+                ConstraintSense::Ge => {
+                    // a_i x >= b_i → -a_i x <= -b_i
+                    for (&var, &coeff) in &con.lhs.coefficients {
+                        qp_trip_rows.push(qp_row);
+                        qp_trip_cols.push(var.index);
+                        qp_trip_vals.push(-coeff);
+                    }
+                    qp_b.push(-con.rhs);
+                    dual_map.push((qp_row, None));
+                    qp_row += 1;
+                }
+                ConstraintSense::Eq => {
+                    // a_i x = b_i → [a_i x <= b_i] AND [-a_i x <= -b_i]
+                    let row1 = qp_row;
+                    let row2 = qp_row + 1;
+                    for (&var, &coeff) in &con.lhs.coefficients {
+                        qp_trip_rows.push(row1);
+                        qp_trip_cols.push(var.index);
+                        qp_trip_vals.push(coeff);
+                        qp_trip_rows.push(row2);
+                        qp_trip_cols.push(var.index);
+                        qp_trip_vals.push(-coeff);
+                    }
+                    qp_b.push(con.rhs);
+                    qp_b.push(-con.rhs);
+                    dual_map.push((row1, Some(row2)));
+                    qp_row += 2;
+                }
+            }
+        }
+
+        let m_qp = qp_row;
+        let qp_a = if m_qp == 0 {
+            CscMatrix::new(0, num_vars)
+        } else {
+            CscMatrix::from_triplets(&qp_trip_rows, &qp_trip_cols, &qp_trip_vals, m_qp, num_vars)
+                .map_err(|e| ModelError::Internal(e.to_string()))?
+        };
+
+        let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds)
+            .map_err(|e| ModelError::Internal(e))?;
+
+        let qp_result = solve_qp(&qp_problem);
+
+        match qp_result.status {
+            SolveStatus::Optimal => {
+                let obj = if self.sense == OptimizationSense::Maximize {
+                    -qp_result.objective
+                } else {
+                    qp_result.objective
+                };
+
+                // dual_solution逆変換（元制約数ぶんのdualを復元）
+                let dual = if !qp_result.dual_solution.is_empty() && num_model_constraints > 0 {
+                    let mut d = vec![0.0; num_model_constraints];
+                    for (i, (idx1, idx2_opt)) in dual_map.iter().enumerate() {
+                        d[i] = match self.constraints[i].sense {
+                            ConstraintSense::Le => qp_result.dual_solution[*idx1],
+                            ConstraintSense::Ge => -qp_result.dual_solution[*idx1],
+                            ConstraintSense::Eq => {
+                                let idx2 = idx2_opt.unwrap();
+                                qp_result.dual_solution[*idx1] - qp_result.dual_solution[idx2]
+                            }
+                        };
+                    }
+                    Some(d)
+                } else {
+                    None
+                };
+
+                Ok(ModelResult {
+                    objective_value: obj,
+                    solution: qp_result.solution,
+                    dual_solution: dual,
+                    reduced_costs: None,
+                    slack: None,
+                })
+            }
+            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
+            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
+            SolveStatus::MaxIterations => {
+                Err(ModelError::Internal("QP iteration limit reached".to_string()))
+            }
         }
     }
 }
@@ -249,20 +408,20 @@ impl Index<Variable> for ModelResult {
 // Error types
 // ---------------------------------------------------------------------------
 
-/// Internal solver error kind.
+/// Solver termination status for QP/LP solve operations.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SolverError {
+pub enum SolveError {
     /// The problem has no feasible solution.
     Infeasible,
     /// The problem is unbounded.
     Unbounded,
 }
 
-impl fmt::Display for SolverError {
+impl fmt::Display for SolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SolverError::Infeasible => write!(f, "Problem is infeasible"),
-            SolverError::Unbounded => write!(f, "Problem is unbounded"),
+            SolveError::Infeasible => write!(f, "Problem is infeasible"),
+            SolveError::Unbounded => write!(f, "Problem is unbounded"),
         }
     }
 }
@@ -273,7 +432,7 @@ pub enum ModelError {
     /// `solve()` was called before `minimize()` or `maximize()`.
     NoObjective,
     /// The solver returned a non-optimal status.
-    SolveError(SolverError),
+    SolveError(SolveError),
     /// An internal error (e.g., dimension mismatch in matrix construction).
     Internal(String),
 }
@@ -299,7 +458,18 @@ impl std::error::Error for ModelError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ModelError, SolverError, Variable};
+    use super::{Model, ModelError, SolveError, Variable};
+    use crate::sparse::CscMatrix;
+
+    const EPS: f64 = 1e-5;
+
+    fn assert_close(a: f64, b: f64, name: &str) {
+        assert!(
+            (a - b).abs() < EPS,
+            "{}: expected {:.8}, got {:.8}",
+            name, b, a
+        );
+    }
 
     /// Helper: build the classic 2-variable LP:
     ///   min  x + 2y
@@ -361,7 +531,7 @@ mod tests {
 
         let err = model.solve().unwrap_err();
         assert!(
-            matches!(err, ModelError::SolveError(SolverError::Unbounded)),
+            matches!(err, ModelError::SolveError(SolveError::Unbounded)),
             "expected Unbounded, got {:?}",
             err
         );
@@ -382,7 +552,7 @@ mod tests {
 
         let err = model.solve().unwrap_err();
         assert!(
-            matches!(err, ModelError::SolveError(SolverError::Infeasible)),
+            matches!(err, ModelError::SolveError(SolveError::Infeasible)),
             "expected Infeasible, got {:?}",
             err
         );
@@ -489,5 +659,116 @@ mod tests {
             "expected obj=7, got {}",
             result.objective()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: Model QP basic – Q=2I, c=(-4,-4), no constraints, bounds=[0,∞)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_basic() {
+        // min 1/2*[[2,0],[0,2]]*[x,y] + [-4,-4]*[x,y] = x^2+y^2 - 4x - 4y
+        // Unconstrained min: x=y=2, obj = 4+4-8-8 = -8
+        let mut model = Model::new("qp_basic");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(-4.0 * x + -4.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 2.0, "T9: x");
+        assert_close(result[y], 2.0, "T9: y");
+        // obj = 1/2*2*(4+4) - 4*2 - 4*2 = 8 - 16 = -8
+        assert_close(result.objective_value, -8.0, "T9: obj");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Model QP with Eq constraint – Eq→2行変換の検証
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_equality() {
+        // min x^2+y^2  s.t. x+y=1, x,y ∈ (-∞,∞)
+        // Q=2I, c=[0,0], Eq: x+y=1
+        // Expected: x=y=0.5, obj=0.5
+        let mut model = Model::new("qp_eq");
+        let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+        let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
+        model.add_constraint((x + y).eq_constraint(1.0));
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(0.0 * x + 0.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 0.5, "T10: x");
+        assert_close(result[y], 0.5, "T10: y");
+        assert_close(result.objective_value, 0.5, "T10: obj");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Model QP with Ge constraint – Ge→符号反転変換の検証
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_ge_constraint() {
+        // min x^2+y^2  s.t. x+y >= 1, x,y ∈ (-∞,∞)
+        // Q=2I, c=[0,0], Ge: x+y>=1
+        // Same solution as equality case: x=y=0.5, obj=0.5
+        let mut model = Model::new("qp_ge");
+        let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+        let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
+        model.add_constraint((x + y).geq(1.0));
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(0.0 * x + 0.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 0.5, "T11: x");
+        assert_close(result[y], 0.5, "T11: y");
+        assert_close(result.objective_value, 0.5, "T11: obj");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Model QP maximize – max -(x^2+y^2) s.t. x+y>=1, x,y>=0
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_maximize() {
+        // max -(x^2+y^2)
+        // Q_orig = [[-2,0],[0,-2]] (NSD, "1/2あり": 1/2*(-2)*(x^2+y^2) = -(x^2+y^2))
+        // c_orig = [0, 0]
+        // constraint: x+y >= 1, x,y >= 0
+        // Expected: x=y=0.5, obj = -(0.25+0.25) = -0.5
+        let mut model = Model::new("qp_maximize");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.add_constraint((x + y).geq(1.0));
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.maximize(0.0 * x + 0.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 0.5, "T12: x");
+        assert_close(result[y], 0.5, "T12: y");
+        assert_close(result.objective_value, -0.5, "T12: obj");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: Model QP box bounds – bounds=[0,1], T11相当
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_box_bounds() {
+        // min (x-2)^2+(y-2)^2 = 1/2*[[2,0],[0,2]]*[x,y]^T + [-4,-4]*[x,y] + const
+        // Q=2I, c=[-4,-4], bounds=[0,1]
+        // Unconstrained min: x=y=2 → clipped to ub=1
+        // Expected: x=y=1, obj = 1/2*2*(1+1) + (-4-4)*1 = 2-8 = -6
+        let mut model = Model::new("qp_box");
+        let x = model.add_var("x", 0.0, 1.0);
+        let y = model.add_var("y", 0.0, 1.0);
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(-4.0 * x + -4.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result[x], 1.0, "T13: x");
+        assert_close(result[y], 1.0, "T13: y");
+        assert_close(result.objective_value, -6.0, "T13: obj");
     }
 }

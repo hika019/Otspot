@@ -12,7 +12,7 @@
 //! | [`problem`] | LP 問題の定義（目的関数・制約・変数境界） |
 //! | [`simplex`] | 改訂単体法ソルバー（Primal Simplex） |
 //! | [`io`] | MPS 形式ファイルの読み込み |
-//! | [`basis`] | LU 分解ベースの基底管理（内部使用） |
+//! | `basis` | LU 分解ベースの基底管理（内部実装・非公開） |
 //!
 //! ## 使用例
 //!
@@ -45,9 +45,15 @@ pub mod sparse;
 pub mod problem;
 pub mod simplex;
 pub mod io;
-pub mod basis;
+pub(crate) mod basis;
 pub mod model;
-pub mod tolerances;
+pub(crate) mod tolerances;
 pub mod options;
 pub use options::SolverOptions;
 pub mod qp;
+
+// --- re-export: ユーザーが最も使う型を最短パスで ---
+pub use sparse::CscMatrix;
+pub use problem::SolveStatus;
+pub use model::{Model, ModelResult, ModelError};
+pub use qp::{solve_qp, QpProblem, QpResult, QpWarmStart};

@@ -52,7 +52,7 @@ impl PricingStrategy for DantzigPricing {
 ///
 /// Selects the entering variable that maximises `|rc_j| / sqrt(γ_j)`,
 /// where `γ_j ≈ ‖B⁻¹ a_j‖²` is maintained via an approximate update rule.
-pub struct SteepestEdgePricing {
+pub(crate) struct SteepestEdgePricing {
     /// γ[j] ≈ ‖B⁻¹ a_j‖² for each non-basic column j
     weights: Vec<f64>,
 }
