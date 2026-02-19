@@ -155,7 +155,7 @@ impl Model {
             CscMatrix::new(0, num_vars)
         } else {
             CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, num_constraints, num_vars)
-                .map_err(|e| ModelError::Internal(e))?
+                .map_err(|e| ModelError::Internal(e.to_string()))?
         };
 
         // --- Variable bounds ---
@@ -167,7 +167,7 @@ impl Model {
 
         // --- Build and solve LpProblem ---
         let problem = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
-            .map_err(|e| ModelError::Internal(e))?;
+            .map_err(|e| ModelError::Internal(e.to_string()))?;
 
         let solver_result = simplex::solve(&problem);
 
@@ -191,6 +191,7 @@ impl Model {
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolverError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolverError::Unbounded)),
+            SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
         }
     }
 }

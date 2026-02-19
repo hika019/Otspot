@@ -15,3 +15,11 @@ proptest = "1.10.0"
 [[bench]]
 name = "scaling_pricing"
 harness = false
+
+[[bench]]
+name = "lu_bench"
+harness = false
+
+[[bench]]
+name = "solve_bench"
+harness = false

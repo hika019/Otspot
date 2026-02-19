@@ -1,28 +1,34 @@
-//! LP problem definition
+//! LP問題定義モジュール
+//!
+//! 線形計画問題（LP）の構造定義・制約種別・ソルバー結果の表現を提供する。
+//! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
+use crate::error::SolverError;
 use crate::sparse::CscMatrix;
 use std::fmt;
 
-/// Type of constraint in an LP problem
+/// LP問題における制約条件の種別
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstraintType {
-    /// Less than or equal (<=)
+    /// 以下（<=）
     Le,
-    /// Greater than or equal (>=)
+    /// 以上（>=）
     Ge,
-    /// Equal (==)
+    /// 等式（==）
     Eq,
 }
 
-/// Status of the solver result
+/// ソルバーの求解結果ステータス
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveStatus {
-    /// Optimal solution found
+    /// 最適解が求まった
     Optimal,
-    /// Problem is infeasible
+    /// 問題が実行不可能（infeasible）
     Infeasible,
-    /// Problem is unbounded
+    /// 問題が非有界（unbounded）
     Unbounded,
+    /// 反復回数上限に到達した（最適性未確認）
+    MaxIterations,
 }
 
 impl fmt::Display for SolveStatus {
@@ -31,19 +37,26 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Optimal => write!(f, "Optimal"),
             SolveStatus::Infeasible => write!(f, "Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
+            SolveStatus::MaxIterations => write!(f, "MaxIterations"),
         }
     }
 }
 
-/// Result of solving an LP problem
+/// LP問題の求解結果
 #[derive(Debug, Clone)]
 pub struct SolverResult {
-    /// Solve status
+    /// 求解ステータス
     pub status: SolveStatus,
-    /// Optimal objective value (if optimal)
+    /// 最適目的関数値（最適解が存在する場合）
     pub objective: f64,
-    /// Solution vector (if optimal)
+    /// 解ベクトル（最適解が存在する場合）
     pub solution: Vec<f64>,
+    /// 双対変数ベクトル（各制約の影価格、最適解が存在する場合）
+    pub dual_solution: Vec<f64>,
+    /// 被縮小費用ベクトル（各決定変数に対して、最適解が存在する場合）
+    pub reduced_costs: Vec<f64>,
+    /// スラック変数ベクトル（各制約のスラック b_i - a_i^T x、最適解が存在する場合）
+    pub slack: Vec<f64>,
 }
 
 impl fmt::Display for SolverResult {
@@ -52,42 +65,45 @@ impl fmt::Display for SolverResult {
     }
 }
 
-/// Linear Programming problem: min c^T x  s.t.  Ax <= b,  x >= 0
+/// 線形計画問題: min c^T x  s.t.  Ax {op} b,  x in [lb, ub]
+///
+/// 目的関数・制約行列・右辺ベクトル・変数上下限をまとめて保持する。
+/// 制約種別（`<=`, `>=`, `=`）と変数ごとの上下限を個別に指定できる。
 #[derive(Debug, Clone)]
 pub struct LpProblem {
-    /// Objective function coefficients (length num_vars)
+    /// 目的関数係数ベクトル（長さ: `num_vars`）
     pub c: Vec<f64>,
-    /// Constraint matrix in CSC format (num_constraints x num_vars)
+    /// 制約行列（CSC形式、サイズ: `num_constraints` x `num_vars`）
     pub a: CscMatrix,
-    /// Right-hand side of constraints (length num_constraints)
+    /// 制約右辺ベクトル（長さ: `num_constraints`）
     pub b: Vec<f64>,
-    /// Number of decision variables
+    /// 決定変数の数
     pub num_vars: usize,
-    /// Number of constraints
+    /// 制約式の数
     pub num_constraints: usize,
-    /// Type of each constraint (length num_constraints)
+    /// 各制約の種別（長さ: `num_constraints`）
     pub constraint_types: Vec<ConstraintType>,
-    /// Bounds for each variable: (lower, upper) (length num_vars)
+    /// 各変数の上下限 `(lower, upper)`（長さ: `num_vars`）
     pub bounds: Vec<(f64, f64)>,
-    /// Optional problem name
+    /// 問題名（オプション）
     pub name: Option<String>,
 }
 
 impl LpProblem {
-    /// Create a new LP problem with validation (backward compatible)
+    /// 新しいLP問題を検証付きで生成する（後方互換版）
     ///
-    /// Creates a standard LP: min c^T x  s.t.  Ax <= b,  x >= 0
-    /// All constraints are assumed to be <= and all variables have bounds [0, +inf)
+    /// 標準形 `min c^T x  s.t.  Ax <= b,  x >= 0` を作成する。
+    /// 全制約を `<=`、全変数の下限を 0・上限を `+∞` とする。
     ///
-    /// # Arguments
-    /// * `c` - Objective function coefficients
-    /// * `a` - Constraint matrix in CSC format
-    /// * `b` - Right-hand side of constraints
+    /// # 引数
+    /// * `c` - 目的関数係数ベクトル
+    /// * `a` - 制約行列（CSC形式）
+    /// * `b` - 制約右辺ベクトル
     ///
-    /// # Returns
-    /// * `Ok(LpProblem)` if dimensions are valid
-    /// * `Err(String)` if validation fails
-    pub fn new(c: Vec<f64>, a: CscMatrix, b: Vec<f64>) -> Result<Self, String> {
+    /// # 戻り値
+    /// * `Ok(LpProblem)` - 次元が有効な場合
+    /// * `Err(String)` - 次元不一致などの検証エラー時
+    pub fn new(c: Vec<f64>, a: CscMatrix, b: Vec<f64>) -> Result<Self, SolverError> {
         let num_vars = c.len();
         let num_constraints = b.len();
 
@@ -99,19 +115,19 @@ impl LpProblem {
         Self::new_general(c, a, b, constraint_types, bounds, name)
     }
 
-    /// Create a new LP problem with full control over constraint types and bounds
+    /// 制約種別と変数上下限を完全指定して新しいLP問題を生成する
     ///
-    /// # Arguments
-    /// * `c` - Objective function coefficients
-    /// * `a` - Constraint matrix in CSC format
-    /// * `b` - Right-hand side of constraints
-    /// * `constraint_types` - Type of each constraint (Le, Ge, or Eq)
-    /// * `bounds` - Bounds for each variable (lower, upper)
-    /// * `name` - Optional problem name
+    /// # 引数
+    /// * `c` - 目的関数係数ベクトル
+    /// * `a` - 制約行列（CSC形式）
+    /// * `b` - 制約右辺ベクトル
+    /// * `constraint_types` - 各制約の種別（`Le` / `Ge` / `Eq`）
+    /// * `bounds` - 各変数の上下限 `(lower, upper)`
+    /// * `name` - 問題名（オプション）
     ///
-    /// # Returns
-    /// * `Ok(LpProblem)` if dimensions are valid
-    /// * `Err(String)` if validation fails
+    /// # 戻り値
+    /// * `Ok(LpProblem)` - 次元が有効な場合
+    /// * `Err(String)` - 次元不一致などの検証エラー時
     pub fn new_general(
         c: Vec<f64>,
         a: CscMatrix,
@@ -119,35 +135,19 @@ impl LpProblem {
         constraint_types: Vec<ConstraintType>,
         bounds: Vec<(f64, f64)>,
         name: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SolverError> {
         // Validate dimensions
         if c.len() != a.ncols {
-            return Err(format!(
-                "Dimension mismatch: c.len()={} but a.ncols={}",
-                c.len(),
-                a.ncols
-            ));
+            return Err(SolverError::DimensionMismatch { field: "c", expected: a.ncols, got: c.len() });
         }
         if b.len() != a.nrows {
-            return Err(format!(
-                "Dimension mismatch: b.len()={} but a.nrows={}",
-                b.len(),
-                a.nrows
-            ));
+            return Err(SolverError::DimensionMismatch { field: "b", expected: a.nrows, got: b.len() });
         }
         if constraint_types.len() != b.len() {
-            return Err(format!(
-                "Dimension mismatch: constraint_types.len()={} but num_constraints={}",
-                constraint_types.len(),
-                b.len()
-            ));
+            return Err(SolverError::DimensionMismatch { field: "constraint_types", expected: b.len(), got: constraint_types.len() });
         }
         if bounds.len() != c.len() {
-            return Err(format!(
-                "Dimension mismatch: bounds.len()={} but num_vars={}",
-                bounds.len(),
-                c.len()
-            ));
+            return Err(SolverError::DimensionMismatch { field: "bounds", expected: c.len(), got: bounds.len() });
         }
 
         Ok(LpProblem {
@@ -176,6 +176,7 @@ impl fmt::Display for LpProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SolverError;
 
     #[test]
     fn test_lp_problem_new_valid() {
@@ -198,7 +199,7 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("c.len()"));
+        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "c", .. }));
     }
 
     #[test]
@@ -210,7 +211,7 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("b.len()"));
+        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "b", .. }));
     }
 
     #[test]
@@ -237,6 +238,9 @@ mod tests {
             status: SolveStatus::Optimal,
             objective: 42.5,
             solution: vec![1.0, 2.0],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
         };
         let display = format!("{}", result);
         assert_eq!(display, "Status: Optimal, Objective: 42.5");
