@@ -7,4 +7,4 @@ pub mod problem;
 pub mod simplex;
 pub mod io;
 pub mod basis;
-pub mod presolve;
+pub mod model;
