@@ -50,3 +50,4 @@ pub mod model;
 pub mod tolerances;
 pub mod options;
 pub use options::SolverOptions;
+pub mod qp;
