@@ -266,4 +266,163 @@ mod tests {
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Infeasible, "T6: should be Infeasible");
     }
+
+    /// T7: ポートフォリオ最適化（Markowitz平均分散モデル）
+    ///
+    /// 3銘柄、対称共分散行列 Sigma = diag(2,2,2)（独立等分散）
+    /// 目的: min 1/2 w^T Sigma w（リスク最小化）
+    /// 制約: w1+w2+w3=1（等式）、wi>=0（非負）
+    ///
+    /// 等式制約を2不等式に変換:
+    ///   w1+w2+w3 <= 1  と  -(w1+w2+w3) <= -1
+    /// 非負制約: -wi <= 0
+    ///
+    /// 対称性より最適解: w* = [1/3, 1/3, 1/3]
+    /// 目的関数: 1/2 * (2/9+2/9+2/9) = 1/3 ≈ 0.3333
+    #[test]
+    fn test_qp_portfolio_markowitz() {
+        // Q = Sigma = diag(2,2,2)
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[2.0, 2.0, 2.0],
+            3, 3,
+        ).unwrap();
+        let c = vec![0.0, 0.0, 0.0];
+
+        // A行列 (5行3列):
+        //   行0: [1,1,1] <= 1  (等式上界)
+        //   行1: [-1,-1,-1] <= -1  (等式下界)
+        //   行2: [-1,0,0] <= 0  (w1>=0)
+        //   行3: [0,-1,0] <= 0  (w2>=0)
+        //   行4: [0,0,-1] <= 0  (w3>=0)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 3, 4],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+            5, 3,
+        ).unwrap();
+        let b = vec![1.0, -1.0, 0.0, 0.0, 0.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T7: status should be Optimal");
+        let w_sum = result.solution[0] + result.solution[1] + result.solution[2];
+        assert_close(w_sum, 1.0, EPS, "T7: w sum = 1");
+        assert_close(result.solution[0], 1.0 / 3.0, EPS, "T7: w[0]");
+        assert_close(result.solution[1], 1.0 / 3.0, EPS, "T7: w[1]");
+        assert_close(result.solution[2], 1.0 / 3.0, EPS, "T7: w[2]");
+        assert_close(result.objective, 1.0 / 3.0, EPS, "T7: objective");
+    }
+
+    /// T8: 最小二乗法（Least Squares）
+    ///
+    /// min ||Ax - b||^2 を QP として定式化:
+    ///   Q = 2 * A^T A, c = -2 * A^T b  （「1/2あり」規約）
+    ///
+    /// A = [[2,1],[1,2]], b = [5,4]
+    ///   A^T A = [[5,4],[4,5]]
+    ///   A^T b = [14,13]
+    ///   Q = [[10,8],[8,10]], c = [-28,-26]
+    ///
+    /// 解析解: (A^T A) x = A^T b → x* = [2, 1]
+    /// QP目的関数値: 1/2 x^T Q x + c^T x = 41 - 82 = -41
+    #[test]
+    fn test_qp_least_squares() {
+        // Q = 2 * A^T A = [[10,8],[8,10]]
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[10.0, 8.0, 8.0, 10.0],
+            2, 2,
+        ).unwrap();
+        let c = vec![-28.0, -26.0]; // -2 * A^T b
+        let a = CscMatrix::new(0, 2); // 制約なし
+        let b_vec = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b_vec, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T8: status should be Optimal");
+        assert_close(result.solution[0], 2.0, EPS, "T8: x[0]");
+        assert_close(result.solution[1], 1.0, EPS, "T8: x[1]");
+        assert_close(result.objective, -41.0, EPS, "T8: objective");
+    }
+
+    /// T9: QP→LP退化テスト（Q=0の場合）
+    ///
+    /// Q = 0 として LP と同一解が得られることを確認。
+    /// LP問題: min 2x+y  s.t. x+y >= 1, x >= 0, y >= 0
+    /// Ax<=b 形式:
+    ///   -x-y <= -1  (x+y >= 1)
+    ///   -x   <= 0   (x >= 0)
+    ///   -y   <= 0   (y >= 0)
+    ///
+    /// 解析解: x*=[0,1], obj=1（y=1で最小化）
+    #[test]
+    fn test_qp_degenerate_to_lp() {
+        let n = 2;
+        let q = CscMatrix::new(n, n); // Q = 0（LP退化）
+        let c = vec![2.0, 1.0];       // min 2x + y
+
+        // A: [[-1,-1],[-1,0],[0,-1]], b: [-1,0,0]
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 2],
+            &[0, 1, 0, 1],
+            &[-1.0, -1.0, -1.0, -1.0],
+            3, 2,
+        ).unwrap();
+        let b = vec![-1.0, 0.0, 0.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T9: status should be Optimal");
+        // LP最適解: x*=[0,1], obj=0*2+1*1=1
+        assert_close(result.solution[0], 0.0, EPS, "T9: x[0]");
+        assert_close(result.solution[1], 1.0, EPS, "T9: x[1]");
+        assert_close(result.objective, 1.0, EPS, "T9: objective");
+    }
+
+    /// T10: 複合制約テスト（等式+不等式の組み合わせ）
+    ///
+    /// min (x-1)^2 + (y-2)^2 = 1/2*Q*x^T + c^T*x + const
+    /// Q = [[2,0],[0,2]], c = [-2,-4]
+    /// 等式制約: x+y=2 → [1,1]<=2, [-1,-1]<=-2
+    /// 不等式制約: x>=0 → [-1,0]<=0
+    ///
+    /// x+y=2直線上でmin (x-1)^2+(y-2)^2 = min (x-1)^2+(1-x)^2 = 2x^2-2x+2
+    /// → x*=1/2, y*=3/2
+    /// QP目的関数値: 1/2*2*(0.25+2.25) + (-2*0.5-4*1.5) = 2.5 - 7 = -4.5
+    #[test]
+    fn test_qp_mixed_constraints() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 1],
+            &[2.0, 2.0],
+            2, 2,
+        ).unwrap();
+        let c = vec![-2.0, -4.0];
+
+        // A行列 (3行2列):
+        //   行0: [1,1] <= 2  (等式上界)
+        //   行1: [-1,-1] <= -2  (等式下界)
+        //   行2: [-1,0] <= 0  (x>=0)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2],
+            &[0, 1, 0, 1, 0],
+            &[1.0, 1.0, -1.0, -1.0, -1.0],
+            3, 2,
+        ).unwrap();
+        let b = vec![2.0, -2.0, 0.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal, "T10: status should be Optimal");
+        assert_close(result.solution[0], 0.5, EPS, "T10: x[0]");
+        assert_close(result.solution[1], 1.5, EPS, "T10: x[1]");
+        assert_close(result.objective, -4.5, EPS, "T10: objective");
+    }
 }

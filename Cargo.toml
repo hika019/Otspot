@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name = "solve_bench"
 harness = false
+
+[[bench]]
+name = "qp_bench"
+harness = false
