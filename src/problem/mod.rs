@@ -3,6 +3,7 @@
 //! 線形計画問題（LP）の構造定義・制約種別・ソルバー結果の表現を提供する。
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
+use crate::error::SolverError;
 use crate::sparse::CscMatrix;
 use std::fmt;
 
@@ -102,7 +103,7 @@ impl LpProblem {
     /// # 戻り値
     /// * `Ok(LpProblem)` - 次元が有効な場合
     /// * `Err(String)` - 次元不一致などの検証エラー時
-    pub fn new(c: Vec<f64>, a: CscMatrix, b: Vec<f64>) -> Result<Self, String> {
+    pub fn new(c: Vec<f64>, a: CscMatrix, b: Vec<f64>) -> Result<Self, SolverError> {
         let num_vars = c.len();
         let num_constraints = b.len();
 
@@ -134,35 +135,19 @@ impl LpProblem {
         constraint_types: Vec<ConstraintType>,
         bounds: Vec<(f64, f64)>,
         name: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SolverError> {
         // Validate dimensions
         if c.len() != a.ncols {
-            return Err(format!(
-                "Dimension mismatch: c.len()={} but a.ncols={}",
-                c.len(),
-                a.ncols
-            ));
+            return Err(SolverError::DimensionMismatch { field: "c", expected: a.ncols, got: c.len() });
         }
         if b.len() != a.nrows {
-            return Err(format!(
-                "Dimension mismatch: b.len()={} but a.nrows={}",
-                b.len(),
-                a.nrows
-            ));
+            return Err(SolverError::DimensionMismatch { field: "b", expected: a.nrows, got: b.len() });
         }
         if constraint_types.len() != b.len() {
-            return Err(format!(
-                "Dimension mismatch: constraint_types.len()={} but num_constraints={}",
-                constraint_types.len(),
-                b.len()
-            ));
+            return Err(SolverError::DimensionMismatch { field: "constraint_types", expected: b.len(), got: constraint_types.len() });
         }
         if bounds.len() != c.len() {
-            return Err(format!(
-                "Dimension mismatch: bounds.len()={} but num_vars={}",
-                bounds.len(),
-                c.len()
-            ));
+            return Err(SolverError::DimensionMismatch { field: "bounds", expected: c.len(), got: bounds.len() });
         }
 
         Ok(LpProblem {
@@ -191,6 +176,7 @@ impl fmt::Display for LpProblem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SolverError;
 
     #[test]
     fn test_lp_problem_new_valid() {
@@ -213,7 +199,7 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("c.len()"));
+        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "c", .. }));
     }
 
     #[test]
@@ -225,7 +211,7 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("b.len()"));
+        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "b", .. }));
     }
 
     #[test]

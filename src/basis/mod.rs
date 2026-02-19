@@ -10,6 +10,7 @@ pub(crate) mod refactor;
 #[cfg(test)]
 pub(crate) mod test_utils;
 
+use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseVec};
 
 /// 改訂単体法の基底管理トレイト
@@ -50,7 +51,7 @@ impl LuBasis {
     ///
     /// # エラー
     /// 基底行列が特異または数値的に不安定な場合は `Err` を返す
-    pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, String> {
+    pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, SolverError> {
         let lu = lu::LuFactorization::factorize(a, basis)?;
         Ok(Self {
             lu,
@@ -83,7 +84,9 @@ impl BasisManager for LuBasis {
 
     fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]) {
         if self.eta_file.needs_refactor() {
-            self.lu = refactor::refactor(a, basis).expect("refactoring failed");
+            // TODO: solve()をResult化する際にResult伝播に置き換え
+        self.lu = refactor::refactor(a, basis)
+            .expect("basis refactoring failed: singular matrix");
             self.eta_file.etas.clear();
             self.basis_indices = basis.to_vec();
         }

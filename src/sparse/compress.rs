@@ -1,3 +1,4 @@
+use crate::error::SolverError;
 use crate::tolerances::DROP_TOL;
 use std::collections::HashMap;
 
@@ -12,16 +13,16 @@ pub(super) fn build_compressed_format(
     major_indices: &[usize],
     minor_indices: &[usize],
     vals: &[f64],
-) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), String> {
+) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), SolverError> {
     let mut map: HashMap<(usize, usize), f64> = HashMap::new();
     for i in 0..major_indices.len() {
         let maj = major_indices[i];
         let min = minor_indices[i];
         if maj >= n_major {
-            return Err(format!("Major index {} out of bounds (n_major={})", maj, n_major));
+            return Err(SolverError::IndexOutOfBounds { context: "major", index: maj, bound: n_major });
         }
         if min >= n_minor {
-            return Err(format!("Minor index {} out of bounds (n_minor={})", min, n_minor));
+            return Err(SolverError::IndexOutOfBounds { context: "minor", index: min, bound: n_minor });
         }
         *map.entry((maj, min)).or_insert(0.0) += vals[i];
     }

@@ -38,6 +38,8 @@
 //! - **M3 予定**: Dual Simplex
 //! - **将来**: 二次計画法（QP）、逐次二次計画法（SQP）
 
+pub mod error;
+pub use error::SolverError;
 pub mod sparse;
 pub mod problem;
 pub mod simplex;

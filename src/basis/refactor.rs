@@ -3,6 +3,7 @@
 //! eta ファイルが蓄積して数値精度が低下した際に、
 //! 基底行列を最初から LU 分解し直す機能を提供する。
 
+use crate::error::SolverError;
 use crate::sparse::CscMatrix;
 use super::lu::LuFactorization;
 
@@ -17,6 +18,6 @@ use super::lu::LuFactorization;
 ///
 /// # エラー
 /// LU 分解が失敗した場合（特異行列等）は `Err` を返す
-pub(crate) fn refactor(a: &CscMatrix, basis: &[usize]) -> Result<LuFactorization, String> {
+pub(crate) fn refactor(a: &CscMatrix, basis: &[usize]) -> Result<LuFactorization, SolverError> {
     LuFactorization::factorize(a, basis)
 }

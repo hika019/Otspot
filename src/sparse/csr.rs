@@ -1,5 +1,6 @@
 use super::compress::build_compressed_format;
 use super::csc::CscMatrix;
+use crate::error::SolverError;
 
 /// 行圧縮形式（CSR: Compressed Sparse Row）の疎行列
 ///
@@ -53,9 +54,9 @@ impl CsrMatrix {
         vals: &[f64],
         nrows: usize,
         ncols: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SolverError> {
         if rows.len() != cols.len() || rows.len() != vals.len() {
-            return Err("Triplet arrays must have same length".to_string());
+            return Err(SolverError::DimensionMismatch { field: "triplet_arrays", expected: rows.len(), got: vals.len() });
         }
         // CSR: 主軸=行、副軸=列
         let (row_ptr, col_ind, values) =
@@ -74,9 +75,9 @@ impl CsrMatrix {
     /// # 戻り値
     /// - `Ok((col_indices, values))`: 行 i の列インデックスと値のスライスペア
     /// - `Err`: `i` が範囲外の場合
-    pub fn get_row(&self, i: usize) -> Result<(&[usize], &[f64]), String> {
+    pub fn get_row(&self, i: usize) -> Result<(&[usize], &[f64]), SolverError> {
         if i >= self.nrows {
-            return Err(format!("Row index {} out of bounds (nrows={})", i, self.nrows));
+            return Err(SolverError::IndexOutOfBounds { context: "row", index: i, bound: self.nrows });
         }
         let start = self.row_ptr[i];
         let end = self.row_ptr[i + 1];

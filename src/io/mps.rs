@@ -694,7 +694,7 @@ impl MpsParser {
         )
         .map_err(|e| MpsError::ParseError {
             line: 0,
-            message: e,
+            message: e.to_string(),
         })
     }
 }

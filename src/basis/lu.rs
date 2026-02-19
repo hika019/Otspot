@@ -15,6 +15,7 @@
 //!
 //! この戦略により、数値安定性を保ちながらフィルイン（fill-in）を抑制する。
 
+use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
 use crate::tolerances::*;
 
@@ -117,20 +118,17 @@ impl LuFactorization {
     /// 2. Markowitz法で各ステップのピボットを選択（しきい値条件 + 充填最小化）
     /// 3. ガウス消去でL・Uの成分を収集
     /// 4. 順列適用後に `SparseLowerCSC` / `SparseUpperCSR` を構築
-    pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
+    pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
         let m = basis.len();
         if m == 0 {
-            return Err("Empty basis".to_string());
+            return Err(SolverError::EmptyInput { context: "basis" });
         }
 
         // 基底列を作業行列に展開
         let mut work = WorkingMatrix::new(m);
         for (j, &col_idx) in basis.iter().enumerate() {
             if col_idx >= a.ncols {
-                return Err(format!(
-                    "Basis column {} out of bounds (ncols={})",
-                    col_idx, a.ncols
-                ));
+                return Err(SolverError::IndexOutOfBounds { context: "basis_column", index: col_idx, bound: a.ncols });
             }
             let start = a.col_ptr[col_idx];
             let end = a.col_ptr[col_idx + 1];
@@ -222,7 +220,7 @@ impl LuFactorization {
 
             let (pivot_row, pivot_col) = match best_pivot {
                 Some(p) => p,
-                None => return Err(format!("Singular matrix detected at step {}", step)),
+                None => return Err(SolverError::SingularBasis { step }),
             };
 
             p_row[step] = pivot_row;

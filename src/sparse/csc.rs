@@ -1,4 +1,5 @@
 use super::compress::build_compressed_format;
+use crate::error::SolverError;
 
 /// 列圧縮形式（CSC: Compressed Sparse Column）の疎行列
 ///
@@ -69,9 +70,9 @@ impl CscMatrix {
         vals: &[f64],
         nrows: usize,
         ncols: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SolverError> {
         if rows.len() != cols.len() || rows.len() != vals.len() {
-            return Err("Triplet arrays must have same length".to_string());
+            return Err(SolverError::DimensionMismatch { field: "triplet_arrays", expected: rows.len(), got: vals.len() });
         }
         // CSC: 主軸=列、副軸=行
         let (col_ptr, row_ind, values) =
@@ -138,13 +139,9 @@ impl CscMatrix {
     /// # 戻り値
     /// - `Ok(y)`: 結果ベクトル（長さ: nrows）
     /// - `Err`: `x` の長さが `ncols` と一致しない場合
-    pub fn mat_vec_mul(&self, x: &[f64]) -> Result<Vec<f64>, String> {
+    pub fn mat_vec_mul(&self, x: &[f64]) -> Result<Vec<f64>, SolverError> {
         if x.len() != self.ncols {
-            return Err(format!(
-                "Vector length {} does not match ncols {}",
-                x.len(),
-                self.ncols
-            ));
+            return Err(SolverError::DimensionMismatch { field: "vector", expected: self.ncols, got: x.len() });
         }
 
         let mut y = vec![0.0; self.nrows];
@@ -171,9 +168,9 @@ impl CscMatrix {
     /// # 戻り値
     /// - `Ok((row_indices, values))`: 列 j の行インデックスと値のスライスペア
     /// - `Err`: `j` が範囲外の場合
-    pub fn get_column(&self, j: usize) -> Result<(&[usize], &[f64]), String> {
+    pub fn get_column(&self, j: usize) -> Result<(&[usize], &[f64]), SolverError> {
         if j >= self.ncols {
-            return Err(format!("Column index {} out of bounds (ncols={})", j, self.ncols));
+            return Err(SolverError::IndexOutOfBounds { context: "column", index: j, bound: self.ncols });
         }
         let start = self.col_ptr[j];
         let end = self.col_ptr[j + 1];
