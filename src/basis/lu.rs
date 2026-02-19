@@ -15,8 +15,6 @@
 //!
 //! この戦略により、数値安定性を保ちながらフィルイン（fill-in）を抑制する。
 
-use std::collections::{HashMap, HashSet};
-
 use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
 use crate::tolerances::*;
 
@@ -41,44 +39,62 @@ pub(crate) struct LuFactorization {
 
 /// ガウス消去法で用いる疎作業行列。
 ///
-/// 各行を `HashMap<列インデックス, 値>` で表現し、
-/// 列ごとに非零行インデックスの `HashSet` を保持することで
+/// 各行を `(列インデックス, 値)` のソート済み `Vec` で表現し、
+/// 列ごとに非零行インデックスのソート済み `Vec` を保持することで
 /// ピボット選択と消去を効率的に実行する。
+///
+/// `HashMap`/`HashSet` に比べてキャッシュ効率が高く、
+/// 行あたりの非零要素数が少ない小〜中規模 LP 問題では高速。
+/// 挿入・削除は `O(k)`（k = 行の非零要素数）だが、k が典型的に小さい
+/// ため、ハッシュ計算・メモリアロケーションのオーバーヘッドを上回る。
 struct WorkingMatrix {
-    /// 行データ: `row_data[i]` = {列インデックス → 値} のマップ
-    row_data: Vec<HashMap<usize, f64>>,
-    /// 列ごとの非零行集合: `col_rows[j]` = {行インデックス}
-    col_rows: Vec<HashSet<usize>>,
+    /// 行データ: `row_data[i]` = 列インデックスでソートされた `(列, 値)` リスト
+    row_data: Vec<Vec<(usize, f64)>>,
+    /// 列ごとの非零行インデックス（昇順ソート済み）: `col_rows[j]`
+    col_rows: Vec<Vec<usize>>,
 }
 
 impl WorkingMatrix {
     /// n×n の空の作業行列を生成する。
     fn new(n: usize) -> Self {
         Self {
-            row_data: (0..n).map(|_| HashMap::new()).collect(),
-            col_rows: (0..n).map(|_| HashSet::new()).collect(),
+            row_data: (0..n).map(|_| Vec::new()).collect(),
+            col_rows: (0..n).map(|_| Vec::new()).collect(),
         }
     }
 
-    /// 要素 `(row, col)` に値 `val` を挿入する。
+    /// 要素 `(row, col)` に値 `val` を挿入または更新する。
     ///
     /// `|val| <= SINGULAR_TOL` の場合は零扱いとして挿入しない。
+    /// ソート済みVecにバイナリサーチで挿入位置を決定する。
     fn insert(&mut self, row: usize, col: usize, val: f64) {
         if val.abs() > SINGULAR_TOL {
-            self.row_data[row].insert(col, val);
-            self.col_rows[col].insert(row);
+            match self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
+                Ok(idx) => self.row_data[row][idx].1 = val,
+                Err(idx) => self.row_data[row].insert(idx, (col, val)),
+            }
+            if let Err(idx) = self.col_rows[col].binary_search(&row) {
+                self.col_rows[col].insert(idx, row);
+            }
         }
     }
 
     /// 要素 `(row, col)` の値を返す。存在しない場合は `0.0`。
     fn get(&self, row: usize, col: usize) -> f64 {
-        *self.row_data[row].get(&col).unwrap_or(&0.0)
+        match self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
+            Ok(idx) => self.row_data[row][idx].1,
+            Err(_) => 0.0,
+        }
     }
 
-    /// 要素 `(row, col)` を削除し、列インデックス集合を更新する。
+    /// 要素 `(row, col)` を削除し、列インデックスリストを更新する。
     fn remove(&mut self, row: usize, col: usize) {
-        self.row_data[row].remove(&col);
-        self.col_rows[col].remove(&row);
+        if let Ok(idx) = self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
+            self.row_data[row].remove(idx);
+        }
+        if let Ok(idx) = self.col_rows[col].binary_search(&row) {
+            self.col_rows[col].remove(idx);
+        }
     }
 }
 
@@ -187,8 +203,8 @@ impl LuFactorization {
                         continue;
                     }
                     let r_nnz = work.row_data[r]
-                        .keys()
-                        .filter(|&&c| !eliminated_cols[c])
+                        .iter()
+                        .filter(|&&(c, _)| !eliminated_cols[c])
                         .count();
                     let markowitz =
                         r_nnz.saturating_sub(1) * c_nnz.saturating_sub(1);
@@ -215,7 +231,7 @@ impl LuFactorization {
             diag[step] = pivot_val;
 
             // ピボット行からU成分を収集（対角以外のアクティブ列）
-            for (&c, &val) in &work.row_data[pivot_row] {
+            for &(c, val) in &work.row_data[pivot_row] {
                 if eliminated_cols[c] || c == pivot_col {
                     continue;
                 }
@@ -232,8 +248,8 @@ impl LuFactorization {
             // 消去用にピボット行のアクティブ要素を収集（対角以外）
             let pivot_row_entries: Vec<(usize, f64)> = work.row_data[pivot_row]
                 .iter()
-                .filter(|(&c, _)| !eliminated_cols[c] && c != pivot_col)
-                .map(|(&c, &v)| (c, v))
+                .filter(|&&(c, _)| !eliminated_cols[c] && c != pivot_col)
+                .copied()
                 .collect();
 
             // ピボット列に非零を持つ各アクティブ行を消去
@@ -252,8 +268,7 @@ impl LuFactorization {
                     if new_val.abs() <= SINGULAR_TOL {
                         work.remove(r_i, c);
                     } else {
-                        work.row_data[r_i].insert(c, new_val);
-                        work.col_rows[c].insert(r_i);
+                        work.insert(r_i, c, new_val);
                     }
                 }
 
