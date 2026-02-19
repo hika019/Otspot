@@ -7,3 +7,10 @@ description = "A high-performance mathematical optimization solver"
 readme = "README.md"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scaling_pricing"
+harness = false
