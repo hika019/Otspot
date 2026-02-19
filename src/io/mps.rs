@@ -181,6 +181,21 @@ enum BoundType {
     BV,
 }
 
+/// 固定幅MPSフォーマットかどうかを判定する
+///
+/// MPSの固定幅フォーマットは、列15（0-indexed: 14）が空白であることで識別する。
+/// 以下のケースでは自由形式（false）として扱う:
+/// - 空行
+/// - 14文字以下の行（列15が存在しない）
+/// - タブ文字は空白として扱うため `is_whitespace()` で正しく判定される
+fn is_fixed_width_format(line: &str) -> bool {
+    // chars().nth(14) は15文字未満の行でNoneを返すため、
+    // 空行・短い行の境界ケースを自然に処理できる
+    line.chars()
+        .nth(14)
+        .map_or(false, |c| c.is_whitespace())
+}
+
 impl MpsParser {
     /// 新しい空の`MpsParser`を生成する
     fn new() -> Self {
@@ -322,8 +337,7 @@ impl MpsParser {
     /// 列位置を確認してフォーマットを自動判別し、
     /// 固定幅またはフリーフォーマットの対応関数に委譲します。
     fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        // 列14（0-indexed: 13）が空白であれば固定幅フォーマットと判定
-        let is_fixed_width = line.len() > 14 && line.chars().nth(14).map_or(false, |c| c.is_whitespace());
+        let is_fixed_width = is_fixed_width_format(line);
 
         if is_fixed_width {
             self.parse_columns_fixed(line, line_num)
@@ -1112,6 +1126,57 @@ ENDATA
             (result.objective - 3.0).abs() < 1e-6,
             "expected obj=3.0, got {}",
             result.objective
+        );
+    }
+
+    // ──────────────────────────────────────────────
+    // is_fixed_width_format のユニットテスト
+    // ──────────────────────────────────────────────
+
+    /// 典型的な固定幅行: 列15（index 14）がスペース → true
+    #[test]
+    fn test_is_fixed_width_typical_fixed() {
+        // 列5-12: col_name, 列15: space（固定幅の区切り）
+        // "    x1            obj  1.0" のように列14がスペース
+        let line = "    x1        obj   1.0";
+        //          0123456789012345...
+        //          列14（0-indexed）= 'o' ではなく、スペースが来るケース
+        // 実際に列14がスペースになる行を用意する
+        let fixed_line = "    x1          obj   1.0"; // index 14 = ' '
+        assert!(
+            is_fixed_width_format(fixed_line),
+            "列14がスペースの行は固定幅と判定すべき"
+        );
+        let _ = line; // unused warning回避
+    }
+
+    /// 典型的な自由形式行: 列15（index 14）がスペース以外 → false
+    #[test]
+    fn test_is_fixed_width_free_format() {
+        // フリーフォーマット: "    x1  obj  1.0" のように詰まっている
+        let line = "    x1  obj  1.0";
+        assert!(
+            !is_fixed_width_format(line),
+            "フリーフォーマット行は固定幅と判定してはならない"
+        );
+    }
+
+    /// 境界ケース: 14文字以下の行 → false（列15が存在しない）
+    #[test]
+    fn test_is_fixed_width_short_line() {
+        assert!(!is_fixed_width_format(""), "空行はfalse");
+        assert!(!is_fixed_width_format("    x1  c1 1"), "14文字以下はfalse");
+        assert!(!is_fixed_width_format("12345678901234"), "ちょうど14文字もfalse");
+    }
+
+    /// タブ文字を含む行: タブはis_whitespace()でtrueになる → 固定幅判定に影響しない
+    #[test]
+    fn test_is_fixed_width_with_tab() {
+        // 14文字の位置（index 14）にタブがある場合 → true
+        let line_with_tab = "    x1        \tobj  1.0"; // index 14 = '\t'
+        assert!(
+            is_fixed_width_format(line_with_tab),
+            "列14のタブは空白として扱い固定幅と判定すべき"
         );
     }
 }
