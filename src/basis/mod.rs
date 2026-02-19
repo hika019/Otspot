@@ -3,7 +3,7 @@
 //! 基底行列 B の LU 分解を管理し、FTRAN・BTRAN ソルブと
 //! ピボット更新（eta ファイル）および定期的な再因子分解をサポートする。
 
-pub mod lu;
+pub(crate) mod lu;
 pub(crate) mod eta;
 pub(crate) mod refactor;
 

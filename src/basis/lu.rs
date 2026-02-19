@@ -26,17 +26,17 @@ use crate::tolerances::*;
 /// - L: 単位下三角疎行列（CSC形式）
 /// - U: 上三角疎行列（CSR形式）
 #[derive(Debug, Clone)]
-pub struct LuFactorization {
+pub(crate) struct LuFactorization {
     /// L因子（単位下三角、CSC形式）
     pub(crate) l: SparseLowerCSC,
     /// U因子（上三角、CSR形式）
     pub(crate) u: SparseUpperCSR,
     /// 行順列: 消去ステップ i に対する元の行インデックス `p_row[i]`
-    pub p_row: Vec<usize>,
+    pub(crate) p_row: Vec<usize>,
     /// 列順列: 消去ステップ j に対する元の列インデックス `p_col[j]`
-    pub p_col: Vec<usize>,
+    pub(crate) p_col: Vec<usize>,
     /// 行列の次元 n
-    pub n: usize,
+    pub(crate) n: usize,
 }
 
 /// ガウス消去法で用いる疎作業行列。
@@ -101,7 +101,7 @@ impl LuFactorization {
     /// 2. Markowitz法で各ステップのピボットを選択（しきい値条件 + 充填最小化）
     /// 3. ガウス消去でL・Uの成分を収集
     /// 4. 順列適用後に `SparseLowerCSC` / `SparseUpperCSR` を構築
-    pub fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
+    pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, String> {
         let m = basis.len();
         if m == 0 {
             return Err("Empty basis".to_string());
@@ -353,7 +353,7 @@ impl LuFactorization {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
     // Step 1: 行順列を適用
@@ -386,7 +386,7 @@ pub fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     let n = lu.n;
 
     // Step 1: 列順列を適用

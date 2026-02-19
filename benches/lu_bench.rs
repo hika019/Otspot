@@ -1,120 +1,87 @@
-//! Benchmark for sparse LU factorization and solve operations
+//! Benchmark for LP solver performance
 //!
-//! This benchmark measures the performance of:
-//! - LU factorization (with Markowitz pivoting)
-//! - FTRAN (forward/backward substitution: solve B*x = rhs)
-//! - BTRAN (transposed solve: solve B^T*x = rhs)
+//! This benchmark measures the performance of `solve()` on random LP problems
+//! of varying sizes. The internal LU factorization, FTRAN, and BTRAN operations
+//! are exercised indirectly through the public API.
 //!
-//! Test matrices: Random sparse matrices (5% density) at sizes 50x50, 100x100, 200x200
+//! Note: Direct benchmarking of `LuFactorization` is not possible because it
+//! is an internal implementation detail (`pub(crate)`). This benchmark uses
+//! the public `solve()` API to capture end-to-end performance including LU
+//! factorization and simplex iterations.
+//!
+//! Test problems: Random diagonally dominant LP problems at sizes
+//! n=20, n=50, n=100 (variables/constraints)
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use solver::basis::lu::{solve_btran, solve_ftran, LuFactorization};
+use solver::problem::{ConstraintType, LpProblem};
+use solver::simplex::solve;
 use solver::sparse::CscMatrix;
 
-/// Generate a random sparse matrix with given density (0.0 to 1.0)
-/// The matrix is diagonally dominant to ensure non-singularity
-fn generate_sparse_matrix(n: usize, density: f64) -> CscMatrix {
-    use std::collections::HashSet;
+/// Generate a random diagonally dominant LP problem with n variables and m constraints.
+///
+/// Problem: minimize c^T x, subject to A x <= b, x >= 0
+/// The constraint matrix is sparse (10% density) with diagonal dominance
+/// to ensure feasibility and bounded optimal solution.
+fn generate_lp(n: usize, m: usize) -> LpProblem {
+    // Simple LCG for reproducibility
+    let mut rng = 12345u64;
+    let next = |rng: &mut u64| -> f64 {
+        *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*rng >> 33) as f64) / (u32::MAX as f64)
+    };
 
-    let target_nnz = ((n * n) as f64 * density) as usize;
+    // Objective: minimize c^T x, c_i in [0.5, 1.5]
+    let c: Vec<f64> = (0..n).map(|_| 0.5 + next(&mut rng)).collect();
+
+    // Constraint matrix A (m x n), sparse with ~10% density
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();
 
-    // Strong diagonal entries for non-singularity
-    for i in 0..n {
-        rows.push(i);
-        cols.push(i);
-        vals.push(10.0 + (i as f64) * 0.1);
-    }
-
-    // Random off-diagonal entries
-    let mut rng_state = 12345u64; // Simple LCG for reproducibility
-    let mut added = HashSet::new();
-
-    while rows.len() < target_nnz {
-        // Linear Congruential Generator
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        let r = (rng_state % (n as u64)) as usize;
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        let c = (rng_state % (n as u64)) as usize;
-
-        if r == c || added.contains(&(r, c)) {
-            continue;
+    for i in 0..m {
+        for j in 0..n {
+            if next(&mut rng) < 0.1 || i == j % m {
+                // Diagonal-ish entry for feasibility
+                rows.push(i);
+                cols.push(j);
+                let v = if i == j % m { 1.0 } else { next(&mut rng) * 0.5 };
+                vals.push(v);
+            }
         }
-        added.insert((r, c));
-
-        rows.push(r);
-        cols.push(c);
-        // Generate value in range [-2.0, 2.0]
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        let val = ((rng_state % 10000) as f64) / 10000.0 * 4.0 - 2.0;
-        vals.push(val);
     }
 
-    CscMatrix::from_triplets(&rows, &cols, &vals, n, n)
-        .expect("Matrix construction should not fail")
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n)
+        .expect("Matrix construction should not fail");
+
+    // RHS b_i in [n/2, n] to ensure feasibility (x=0 is feasible since b > 0)
+    let b: Vec<f64> = (0..m).map(|i| (n / 2 + i % (n / 2 + 1)) as f64).collect();
+
+    let constraint_types = vec![ConstraintType::Le; m];
+    let bounds = vec![(0.0_f64, f64::INFINITY); n];
+
+    LpProblem::new_general(c, a, b, constraint_types, bounds, Some("bench".to_string()))
+        .expect("LP construction should not fail")
 }
 
-/// Benchmark LU factorization for a given matrix size
-fn bench_lu_factorize(c: &mut Criterion, n: usize) {
-    let matrix = generate_sparse_matrix(n, 0.05);
-    let basis: Vec<usize> = (0..n).collect();
+fn bench_solve(c: &mut Criterion, n: usize, m: usize) {
+    let problem = generate_lp(n, m);
 
-    c.bench_function(&format!("LU factorize {}x{}", n, n), |b| {
+    c.bench_function(&format!("solve LP {}vars {}constraints", n, m), |b| {
         b.iter(|| {
-            let lu = LuFactorization::factorize(black_box(&matrix), black_box(&basis));
-            black_box(lu)
+            let result = solve(black_box(&problem));
+            black_box(result)
         })
     });
 }
 
-/// Benchmark FTRAN (solve B*x = rhs) for a given matrix size
-fn bench_ftran(c: &mut Criterion, n: usize) {
-    let matrix = generate_sparse_matrix(n, 0.05);
-    let basis: Vec<usize> = (0..n).collect();
-    let lu = LuFactorization::factorize(&matrix, &basis).expect("Factorization should succeed");
-
-    c.bench_function(&format!("FTRAN {}x{}", n, n), |b| {
-        b.iter(|| {
-            let mut rhs: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
-            solve_ftran(black_box(&lu), black_box(&mut rhs));
-            black_box(rhs)
-        })
-    });
+fn benchmark_solve_operations(c: &mut Criterion) {
+    // Small problem
+    bench_solve(c, 20, 10);
+    // Medium problem
+    bench_solve(c, 50, 25);
+    // Larger problem
+    bench_solve(c, 100, 50);
 }
 
-/// Benchmark BTRAN (solve B^T*x = rhs) for a given matrix size
-fn bench_btran(c: &mut Criterion, n: usize) {
-    let matrix = generate_sparse_matrix(n, 0.05);
-    let basis: Vec<usize> = (0..n).collect();
-    let lu = LuFactorization::factorize(&matrix, &basis).expect("Factorization should succeed");
-
-    c.bench_function(&format!("BTRAN {}x{}", n, n), |b| {
-        b.iter(|| {
-            let mut rhs: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
-            solve_btran(black_box(&lu), black_box(&mut rhs));
-            black_box(rhs)
-        })
-    });
-}
-
-fn benchmark_lu_operations(c: &mut Criterion) {
-    // Benchmark 50x50
-    bench_lu_factorize(c, 50);
-    bench_ftran(c, 50);
-    bench_btran(c, 50);
-
-    // Benchmark 100x100
-    bench_lu_factorize(c, 100);
-    bench_ftran(c, 100);
-    bench_btran(c, 100);
-
-    // Benchmark 200x200
-    bench_lu_factorize(c, 200);
-    bench_ftran(c, 200);
-    bench_btran(c, 200);
-}
-
-criterion_group!(benches, benchmark_lu_operations);
+criterion_group!(benches, benchmark_solve_operations);
 criterion_main!(benches);
