@@ -6,20 +6,15 @@
 use crate::tolerances::*;
 
 /// シンプレックス法の選択
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SimplexMethod {
     /// デフォルト: warm-startの有無で自動選択
+    #[default]
     Auto,
     /// 強制的にPrimal Simplex
     Primal,
     /// 強制的にDual Simplex
     Dual,
-}
-
-impl Default for SimplexMethod {
-    fn default() -> Self {
-        SimplexMethod::Auto
-    }
 }
 
 /// warm-start用の基底情報

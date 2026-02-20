@@ -46,6 +46,7 @@ pub mod problem;
 pub mod simplex;
 pub mod io;
 pub(crate) mod basis;
+pub(crate) mod backend;
 pub mod model;
 pub(crate) mod tolerances;
 pub mod options;

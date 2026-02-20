@@ -2,6 +2,8 @@ use crate::error::SolverError;
 use crate::tolerances::DROP_TOL;
 use std::collections::HashMap;
 
+type CompressedFormat = (Vec<usize>, Vec<usize>, Vec<f64>);
+
 /// COO トリプレットを圧縮形式（CSC/CSR 共通）に変換する内部ヘルパー
 ///
 /// `major_indices` が主軸（CSC では列、CSR では行）、`minor_indices` が副軸。
@@ -13,7 +15,7 @@ pub(super) fn build_compressed_format(
     major_indices: &[usize],
     minor_indices: &[usize],
     vals: &[f64],
-) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), SolverError> {
+) -> Result<CompressedFormat, SolverError> {
     let mut map: HashMap<(usize, usize), f64> = HashMap::new();
     for i in 0..major_indices.len() {
         let maj = major_indices[i];

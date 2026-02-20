@@ -84,7 +84,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
     if m == 0 {
         let mut x = vec![0.0; n];
         let mut obj = 0.0;
-        for j in 0..n {
+        for (j, x_j) in x.iter_mut().enumerate() {
             if problem.c[j] < -options.primal_tol {
                 // BUG-simplex-001修正: ubが有限なら最大値(ub)に設定、無限ならUnbounded
                 let ub = problem.bounds[j].1;
@@ -99,9 +99,9 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                         warm_start_basis: None,
                     };
                 }
-                x[j] = ub;
+                *x_j = ub;
             }
-            obj += problem.c[j] * x[j];
+            obj += problem.c[j] * *x_j;
         }
         return SolverResult {
             status: SolveStatus::Optimal,
@@ -247,11 +247,11 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
     // 2. Upper bound constraints
     let mut ub_constraints: Vec<(usize, f64)> = Vec::new();
-    for j in 0..n_orig {
+    for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
         let (lb, ub) = problem.bounds[j];
         if lb.is_finite() && ub.is_finite() {
             let effective_ub = ub - lb;
-            let new_idx = orig_var_info[j].new_vars[0].0;
+            let new_idx = info.new_vars[0].0;
             ub_constraints.push((new_idx, effective_ub));
         }
     }
@@ -260,8 +260,8 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
     // 3. Compute adjusted b
     let mut b = problem.b.clone();
-    for j in 0..n_orig {
-        let offset = orig_var_info[j].offset;
+    for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
+        let offset = info.offset;
         if offset.abs() > DROP_TOL {
             if let Ok((rows, vals)) = problem.a.get_column(j) {
                 for (k, &row) in rows.iter().enumerate() {
@@ -359,12 +359,12 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let mut trip_vals = Vec::new();
 
     // Original variable columns (transformed)
-    for j in 0..n_orig {
+    for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
         if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
             for (k, &row) in a_rows.iter().enumerate() {
                 let val = a_vals[k];
                 let sign = if row_negated[row] { -1.0 } else { 1.0 };
-                for &(new_col, coeff) in &orig_var_info[j].new_vars {
+                for &(new_col, coeff) in &info.new_vars {
                     let actual_val = sign * val * coeff;
                     if actual_val.abs() > DROP_TOL {
                         trip_rows.push(row);
@@ -398,9 +398,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
     // Cost vector for Phase II
     let mut c_ext = vec![0.0; n_total];
-    for k in 0..n_shifted {
-        c_ext[k] = new_c[k];
-    }
+    c_ext[..n_shifted].copy_from_slice(&new_c[..n_shifted]);
 
     StandardForm {
         a,
@@ -452,21 +450,21 @@ pub(crate) fn extract_dual_info(
 
     // スラック: b - Ax（元問題の解から直接計算）
     let mut slack = problem.b.clone();
-    for j in 0..n_orig {
+    for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
-                slack[row] -= vals[k] * solution[j];
+                slack[row] -= vals[k] * sol_j;
             }
         }
     }
 
     // 被縮小費用: c_j - lambda^T A_j（元問題の変数に対して）
     let mut reduced_costs = problem.c.clone();
-    for j in 0..n_orig {
+    for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
                 if row < m_orig {
-                    reduced_costs[j] -= dual_solution[row] * vals[k];
+                    *rc_j -= dual_solution[row] * vals[k];
                 }
             }
         }
@@ -493,6 +491,20 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         // Direct Phase II
         let mut basis = sf.initial_basis.clone();
         let mut x_b = b.clone();
+        // Correct x_b for Ruiz-scaled diagonal initial basis: x_b[i] = b_scaled[i] / B[i, basis[i]]
+        // After Ruiz equilibration, slack basis columns have scaled diagonal entries != 1.0,
+        // so the naive x_b = b_scaled is inconsistent with B * x_b = b_scaled.
+        for i in 0..m {
+            let col = basis[i];
+            if let Ok((rows, vals)) = a.get_column(col) {
+                for (k, &row) in rows.iter().enumerate() {
+                    if row == i && vals[k].abs() > 1e-14 {
+                        x_b[i] /= vals[k];
+                        break;
+                    }
+                }
+            }
+        }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
         match revised_simplex_core(&a, &mut x_b, &c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
@@ -556,12 +568,12 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         // Add artificial columns
         let mut basis = sf.initial_basis.clone();
         let mut art_col = sf.n_total;
-        for i in 0..m {
+        for (i, b) in basis.iter_mut().enumerate().take(m) {
             if sf.needs_artificial[i] {
                 trip_rows.push(i);
                 trip_cols.push(art_col);
                 trip_vals.push(1.0);
-                basis[i] = art_col;
+                *b = art_col;
                 art_col += 1;
             }
         }
@@ -571,11 +583,23 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
 
         // Phase I cost: minimise sum of artificials
         let mut c_phase1 = vec![0.0; n_ext];
-        for j in sf.n_total..n_ext {
-            c_phase1[j] = 1.0;
-        }
+        c_phase1[sf.n_total..].fill(1.0);
 
         let mut x_b = b.clone();
+        // Correct x_b for Ruiz-scaled diagonal initial basis: x_b[i] = b_scaled[i] / B[i, basis[i]]
+        // For artificial columns (added with entry 1.0), dividing by 1.0 is a no-op.
+        // For slack columns from a, the diagonal entry is row_scale[i] * col_scale[slack] != 1.0.
+        for i in 0..m {
+            let col = basis[i];
+            if let Ok((rows, vals)) = a_ext.get_column(col) {
+                for (k, &row) in rows.iter().enumerate() {
+                    if row == i && vals[k].abs() > 1e-14 {
+                        x_b[i] /= vals[k];
+                        break;
+                    }
+                }
+            }
+        }
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
 
         match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, &mut pricing1, options) {
@@ -595,9 +619,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 // Phase II: restrict pricing to non-artificial columns
                 // Use scaled c for Phase II cost
                 let mut c_phase2 = vec![0.0; n_ext];
-                for k in 0..sf.n_total {
-                    c_phase2[k] = c[k];
-                }
+                c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
                 match revised_simplex_core(
@@ -686,11 +708,11 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
     }
 
     let mut solution = vec![0.0; sf.n_orig];
-    for j in 0..sf.n_orig {
+    for (j, sol_j) in solution.iter_mut().enumerate() {
         let info = &sf.orig_var_info[j];
-        solution[j] = info.offset;
+        *sol_j = info.offset;
         for &(new_idx, coeff) in &info.new_vars {
-            solution[j] += coeff * x_new[new_idx];
+            *sol_j += coeff * x_new[new_idx];
         }
     }
     solution
@@ -723,11 +745,12 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
 /// # 戻り値
 ///
 /// [`SimplexOutcome::Optimal`] — 最適目的関数値と双対変数、または [`SimplexOutcome::Unbounded`]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
-    x_b: &mut Vec<f64>,
+    x_b: &mut [f64],
     c: &[f64],
-    basis: &mut Vec<usize>,
+    basis: &mut [usize],
     m: usize,
     n_cols: usize,
     n_price: usize,
@@ -1290,6 +1313,79 @@ mod tests {
             (result.reduced_costs[1] - 1.0).abs() < PIVOT_TOL,
             "rc[1] (x2, non-basic) should be 1.0, got {}",
             result.reduced_costs[1]
+        );
+    }
+
+    #[test]
+    fn test_free_variables_phase_i() {
+        // 全変数が自由境界（-INF/INF）のLP
+        // minimize x1 + x2
+        // s.t. x1 + x2 = 2
+        // x1, x2 in (-INF, INF)
+        // → Optimal（Infeasibleを返してはならない）
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![2.0],
+            vec![crate::problem::ConstraintType::Eq],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
+        let result = solve(&lp);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "Expected Optimal for free-variable LP with Eq constraint, got {:?}",
+            result.status
+        );
+        // 解の制約充足チェック: x1 + x2 = 2
+        assert!(
+            (result.solution[0] + result.solution[1] - 2.0).abs() < 1e-6,
+            "Expected x1+x2=2, got x1={}, x2={}, sum={}",
+            result.solution[0],
+            result.solution[1],
+            result.solution[0] + result.solution[1]
+        );
+    }
+
+    #[test]
+    fn test_hs51_feasibility_lp() {
+        // HS51の実行可能性LP: find_initial_feasible_pointが構築するLPを直接テスト
+        // 5変数(全自由), 6Le制約(等式制約を2不等式ペアに変換)
+        // b[1]=-4.0 (負のRHS) → build_standard_formで符号反転+人工変数追加
+        // 解は存在する(x=[1,1,1,1,1])のでOptimalを返すべき
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 4, 5, 2, 3, 2, 3, 2, 3, 4, 5],
+            &[0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4],
+            &[1.0, -1.0, 3.0, -3.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -2.0, 2.0, -1.0, 1.0],
+            6,
+            5,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0; 5],
+            a,
+            vec![4.0, -4.0, 0.0, 0.0, 0.0, 0.0],
+            vec![crate::problem::ConstraintType::Le; 6],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 5],
+            None,
+        )
+        .unwrap();
+        let result = solve(&lp);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "HS51 feasibility LP: Expected Optimal, got {:?}",
+            result.status
+        );
+        // 解が制約を満たすか検証 (x1+3x2=4 かつ x3+x4-2x5=0 かつ x2-x5=0)
+        let x = &result.solution;
+        assert!(
+            (x[0] + 3.0 * x[1] - 4.0).abs() < 1e-6,
+            "Constraint x1+3x2=4 violated: {}",
+            x[0] + 3.0 * x[1]
         );
     }
 

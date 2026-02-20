@@ -71,6 +71,7 @@ pub(crate) fn two_phase_dual_simplex(
 ///
 /// コスト摂動でDual実行可能性を確保し、Dual Phase I（主実行可能性の修復）後に
 /// Primal Phase II（目的関数の最適化）を実行する。
+#[allow(clippy::too_many_arguments)]
 fn cold_start_dual(
     sf: &StandardForm,
     problem: &LpProblem,
@@ -260,9 +261,9 @@ fn primal_outcome_to_result(
 /// - `MaxIterations`: 反復上限到達
 fn dual_simplex_core(
     a: &CscMatrix,
-    x_b: &mut Vec<f64>,
+    x_b: &mut [f64],
     c: &[f64],
-    basis: &mut Vec<usize>,
+    basis: &mut [usize],
     m: usize,
     n_price: usize,
     options: &SolverOptions,

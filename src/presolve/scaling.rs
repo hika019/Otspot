@@ -8,6 +8,7 @@ use crate::sparse::CscMatrix;
 /// Ruiz equilibration scaler
 ///
 /// Stores cumulative row and column scale factors from the iterative scaling.
+#[allow(dead_code)]
 pub struct RuizScaler {
     pub row_scale: Vec<f64>,
     pub col_scale: Vec<f64>,
@@ -52,13 +53,13 @@ impl RuizScaler {
 
             // Compute column maximums
             let mut col_max = vec![0.0f64; n];
-            for j in 0..n {
+            for (j, col_max_j) in col_max.iter_mut().enumerate().take(n) {
                 let start = a.col_ptr[j];
                 let end = a.col_ptr[j + 1];
                 for k in start..end {
                     let v = a.values[k].abs();
-                    if v > col_max[j] {
-                        col_max[j] = v;
+                    if v > *col_max_j {
+                        *col_max_j = v;
                     }
                 }
             }
@@ -81,12 +82,12 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
 
             // Apply scaling to matrix entries: a[i,j] *= row_factor[i] * col_factor[j]
-            for j in 0..n {
+            for (j, &cf) in col_factor.iter().enumerate().take(n) {
                 let start = a.col_ptr[j];
                 let end = a.col_ptr[j + 1];
                 for k in start..end {
                     let row = a.row_ind[k];
-                    a.values[k] *= row_factor[row] * col_factor[j];
+                    a.values[k] *= row_factor[row] * cf;
                 }
             }
 
@@ -118,6 +119,7 @@ impl RuizScaler {
     ///
     /// If the scaled problem solution is `x̃`, the original solution is:
     ///   `x_j = col_scale[j] * x̃_j`
+    #[allow(dead_code)]
     pub fn unscale_solution(x: &[f64], col_scale: &[f64]) -> Vec<f64> {
         x.iter()
             .zip(col_scale.iter())
@@ -129,6 +131,7 @@ impl RuizScaler {
     ///
     /// If the scaled problem dual is `ỹ`, the original dual is:
     ///   `y_i = row_scale[i] * ỹ_i`
+    #[allow(dead_code)]
     pub fn unscale_dual(y: &[f64], row_scale: &[f64]) -> Vec<f64> {
         y.iter()
             .zip(row_scale.iter())

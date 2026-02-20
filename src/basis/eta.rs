@@ -140,7 +140,7 @@ pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMa
 /// # 引数
 /// * `etas` - 適用するイータ行列のスライス（蓄積順）
 /// * `rhs` - 入出力ベクトル（インプレース更新）
-pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
+pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut [f64]) {
     for eta in etas {
         let r = eta.leaving_row;
         let x_r = rhs[r];
@@ -164,7 +164,7 @@ pub(crate) fn apply_ftran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
 /// # 引数
 /// * `etas` - 適用するイータ行列のスライス（蓄積順、逆順に適用）
 /// * `rhs` - 入出力ベクトル（インプレース更新）
-pub(crate) fn apply_btran(etas: &[EtaMatrix], rhs: &mut Vec<f64>) {
+pub(crate) fn apply_btran(etas: &[EtaMatrix], rhs: &mut [f64]) {
     for eta in etas.iter().rev() {
         let r = eta.leaving_row;
         let mut dot = 0.0;

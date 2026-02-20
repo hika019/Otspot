@@ -193,7 +193,7 @@ fn is_fixed_width_format(line: &str) -> bool {
     // 空行・短い行の境界ケースを自然に処理できる
     line.chars()
         .nth(14)
-        .map_or(false, |c| c.is_whitespace())
+        .is_some_and(|c| c.is_whitespace())
 }
 
 impl MpsParser {
@@ -232,10 +232,9 @@ impl MpsParser {
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
                     // NAMEとENDATAを除くセクションの重複チェック
-                    if section != Section::Name && section != Section::EndData {
-                        if seen_sections.contains(&section) {
-                            return Err(MpsError::DuplicateSection(format!("{:?}", section)));
-                        }
+                    if section != Section::Name && section != Section::EndData
+                        && seen_sections.contains(&section) {
+                        return Err(MpsError::DuplicateSection(format!("{:?}", section)));
                     }
                     // 出現済みセクションとして記録
                     seen_sections.insert(section);
@@ -243,12 +242,10 @@ impl MpsParser {
 
                     // NAMEセクション: 同一行から問題名を取得
                     // 書式: "NAME          problem_name"
-                    if section == Section::Name {
-                        if trimmed.len() > 4 {
-                            let name_part = trimmed[4..].trim();
-                            if !name_part.is_empty() {
-                                self.problem_name = Some(name_part.to_string());
-                            }
+                    if section == Section::Name && trimmed.len() > 4 {
+                        let name_part = trimmed[4..].trim();
+                        if !name_part.is_empty() {
+                            self.problem_name = Some(name_part.to_string());
                         }
                     }
                     continue;

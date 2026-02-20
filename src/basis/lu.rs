@@ -366,11 +366,11 @@ impl LuFactorization {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
     let n = lu.n;
 
     // Step 1: 行順列を適用
-    let orig = rhs.clone();
+    let orig = rhs.to_owned();
     for i in 0..n {
         rhs[i] = orig[lu.p_row[i]];
     }
@@ -382,7 +382,7 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     lu.u.backward_solve(rhs);
 
     // Step 4: 列順列の逆適用
-    let y = rhs.clone();
+    let y = rhs.to_owned();
     for i in 0..n {
         rhs[lu.p_col[i]] = y[i];
     }
@@ -399,11 +399,11 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
+pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
     let n = lu.n;
 
     // Step 1: 列順列を適用
-    let orig = rhs.clone();
+    let orig = rhs.to_owned();
     for i in 0..n {
         rhs[i] = orig[lu.p_col[i]];
     }
@@ -415,7 +415,7 @@ pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut Vec<f64>) {
     lu.l.solve_transpose(rhs);
 
     // Step 4: 行順列の転置を適用
-    let w = rhs.clone();
+    let w = rhs.to_owned();
     for i in 0..n {
         rhs[lu.p_row[i]] = w[i];
     }

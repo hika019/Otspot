@@ -308,7 +308,7 @@ impl Model {
         };
 
         let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds)
-            .map_err(|e| ModelError::Internal(e))?;
+            .map_err(ModelError::Internal)?;
 
         let qp_result = solve_qp(&qp_problem);
 

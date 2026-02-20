@@ -10,7 +10,8 @@ use crate::qp::kkt::{self, KktSolver};
 use crate::qp::problem::{QpProblem, QpResult, QpWarmStart};
 use crate::sparse::CscMatrix;
 use crate::tolerances::*;
-use crate::{qp::kkt::extract_active_rows, simplex};
+use crate::backend::{LpBackend, SimplexBackend};
+use crate::qp::kkt::extract_active_rows;
 
 /// 変数境界を明示的な不等式制約行に変換して A 行列に追加する
 ///
@@ -143,7 +144,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
         Err(_) => return QpResult::infeasible(),
     };
 
-    let result = simplex::solve_with(&lp, options);
+    let result = SimplexBackend.solve(&lp, options);
     match result.status {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
@@ -212,7 +213,7 @@ fn find_initial_feasible_point(
     )
     .ok()?;
 
-    let result = simplex::solve_with(&lp, options);
+    let result = SimplexBackend.solve(&lp, options);
     match result.status {
         SolveStatus::Optimal => Some(result.solution),
         _ => None,
@@ -423,11 +424,10 @@ fn compute_step_size(
     d: &[f64],
     working_set: &WorkingSet,
 ) -> StepResult {
-    let aug_m = aug_b.len();
     let mut alpha_crit = 1.0f64;
     let mut blocking: Option<usize> = None;
 
-    for i in 0..aug_m {
+    for (i, &b_i) in aug_b.iter().enumerate() {
         // 活性制約はスキップ
         if working_set.contains(i) {
             continue;
@@ -441,7 +441,7 @@ fn compute_step_size(
 
         // a_i^T x を計算
         let ai_x = dot_row_a(aug_a, i, x);
-        let slack = aug_b[i] - ai_x;
+        let slack = b_i - ai_x;
 
         // α ≤ slack / (a_i^T d)
         let alpha_i = slack / ai_d;

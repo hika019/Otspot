@@ -34,9 +34,9 @@ impl PricingStrategy for DantzigPricing {
         let limit = n_basic.min(reduced_costs.len());
         let mut min_rc = -EPS;
         let mut entering = None;
-        for j in 0..limit {
-            if reduced_costs[j] < min_rc {
-                min_rc = reduced_costs[j];
+        for (j, &rc) in reduced_costs.iter().enumerate().take(limit) {
+            if rc < min_rc {
+                min_rc = rc;
                 entering = Some(j);
             }
         }
@@ -74,8 +74,7 @@ impl PricingStrategy for SteepestEdgePricing {
         let mut best_score = -EPS;
         let mut entering = None;
 
-        for j in 0..limit {
-            let rc = reduced_costs[j];
+        for (j, &rc) in reduced_costs.iter().enumerate().take(limit) {
             if rc < -EPS {
                 let gamma = self.weights.get(j).copied().unwrap_or(1.0).max(1e-10);
                 // Score: how much improvement per unit step in the steepest-edge sense
