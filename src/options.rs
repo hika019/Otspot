@@ -50,6 +50,8 @@ pub struct SolverOptions {
     pub dual_tol: f64,
     /// warm-start基底情報（Noneの場合はコールドスタート）
     pub warm_start: Option<WarmStartBasis>,
+    /// Presolve有効/無効（デフォルト: true）
+    pub presolve: bool,
 }
 
 impl Default for SolverOptions {
@@ -62,6 +64,7 @@ impl Default for SolverOptions {
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
             warm_start: None,
+            presolve: true,
         }
     }
 }

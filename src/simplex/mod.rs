@@ -16,7 +16,7 @@ pub mod pricing;
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
-use crate::presolve::RuizScaler;
+use crate::presolve::{self, RuizScaler};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
@@ -40,7 +40,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 /// カスタム設定でLPを解く
 ///
 /// 与えられた線形計画問題を標準形に変換し、2相シンプレックス法で最適解を求める。
-/// 変数変換（有界変数・符号制約）、スラック変数の追加、人工変数の導入を自動的に行う。
+/// `options.presolve` が true の場合、求解前にPresolveを適用して問題を縮約する。
 ///
 /// # 引数
 ///
@@ -51,6 +51,56 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 ///
 /// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
 pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    // --- Presolve ---
+    if options.presolve {
+        match presolve::run_presolve(problem) {
+            Err(presolve::PresolveStatus::Infeasible) => {
+                return SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: 0.0,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                };
+            }
+            Err(presolve::PresolveStatus::Unbounded) => {
+                return SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                };
+            }
+            Ok(presolve_result) if presolve_result.was_reduced => {
+                // warm_start と presolve の組み合わせは未対応（presolve が変数インデックスを変える）
+                let opts_no_ws = if options.warm_start.is_some() {
+                    let mut o = options.clone();
+                    o.warm_start = None;
+                    o.presolve = false;
+                    Some(o)
+                } else {
+                    None
+                };
+                let eff_opts = opts_no_ws.as_ref().unwrap_or(options);
+                let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
+                return presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
+            }
+            Ok(_) => {
+                // 縮約不要: fallthrough して通常ルートで解く
+            }
+        }
+    }
+
+    solve_without_presolve(problem, options)
+}
+
+/// Presolve なしでLPを直接解く内部関数
+fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 

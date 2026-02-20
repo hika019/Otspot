@@ -1,7 +1,8 @@
 //! Integration tests: Parse Netlib MPS files and verify problem dimensions + solving
 use solver::io::mps::parse_mps_file;
+use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
-use solver::simplex::solve;
+use solver::simplex::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
 
@@ -309,9 +310,11 @@ fn test_parse_fit1d() {
 fn test_solve_fit1d() {
     let path = Path::new("tests/netlib/fit1d.mps");
     let problem = parse_mps_file(path).expect("parse failed");
-    let start = Instant::now();
+
+    // --- Presolve ON (デフォルト) ---
+    let start_on = Instant::now();
     let result = solve(&problem);
-    let elapsed = start.elapsed();
+    let elapsed_on = start_on.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "fit1d should reach Optimal");
     let expected = -9146.3780924;
     assert!(
@@ -321,8 +324,25 @@ fn test_solve_fit1d() {
         result.objective
     );
     // fit1dは1026変数の大規模問題。Ruizスケーリング有効時はdebugモードで300秒程度。
-    assert!(elapsed.as_secs() < 360, "fit1d solve time < 360 sec, got {:?}", elapsed);
-    println!("fit1d solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(elapsed_on.as_secs() < 360, "fit1d solve time < 360 sec, got {:?}", elapsed_on);
+
+    // --- Presolve OFF ---
+    let mut opts_off = SolverOptions::default();
+    opts_off.presolve = false;
+    let start_off = Instant::now();
+    let result_off = solve_with(&problem, &opts_off);
+    let elapsed_off = start_off.elapsed();
+    assert_eq!(result_off.status, SolveStatus::Optimal, "fit1d (no presolve) should reach Optimal");
+
+    // タイミング比較出力
+    eprintln!(
+        "[fit1d presolve timing] WITH presolve: {:?}  WITHOUT presolve: {:?}  speedup: {:.2}x",
+        elapsed_on,
+        elapsed_off,
+        elapsed_off.as_secs_f64() / elapsed_on.as_secs_f64().max(1e-6)
+    );
+    println!("fit1d solved: obj={}, time_with_presolve={:?}, time_without_presolve={:?}",
+        result.objective, elapsed_on, elapsed_off);
 }
 
 #[test]
