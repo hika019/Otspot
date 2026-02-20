@@ -4,6 +4,7 @@
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
 use crate::error::SolverError;
+use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;
 use std::fmt;
 
@@ -57,6 +58,8 @@ pub struct SolverResult {
     pub reduced_costs: Vec<f64>,
     /// スラック変数ベクトル（各制約のスラック b_i - a_i^T x、最適解が存在する場合）
     pub slack: Vec<f64>,
+    /// warm-start用の基底情報（Optimal時のみ Some）
+    pub warm_start_basis: Option<WarmStartBasis>,
 }
 
 impl fmt::Display for SolverResult {
@@ -241,6 +244,7 @@ mod tests {
             dual_solution: vec![],
             reduced_costs: vec![],
             slack: vec![],
+            warm_start_basis: None,
         };
         let display = format!("{}", result);
         assert_eq!(display, "Status: Optimal, Objective: 42.5");

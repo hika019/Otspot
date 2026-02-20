@@ -11,10 +11,11 @@
 //! 改訂シンプレックス法では完全な単体表ではなく基底行列のLU分解を保持するため、
 //! 大規模疎行列に対して高い計算効率を発揮する。
 
+pub mod dual;
 pub mod pricing;
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::options::SolverOptions;
+use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve::RuizScaler;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
@@ -64,6 +65,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     dual_solution: vec![],
                     reduced_costs: vec![],
                     slack: vec![],
+                    warm_start_basis: None,
                 };
             }
         }
@@ -74,6 +76,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
             dual_solution: vec![0.0; m],
             reduced_costs: vec![],
             slack: problem.b.clone(),
+            warm_start_basis: None,
         };
     }
 
@@ -93,6 +96,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                         dual_solution: vec![],
                         reduced_costs: vec![],
                         slack: vec![],
+                        warm_start_basis: None,
                     };
                 }
                 x[j] = ub;
@@ -106,11 +110,23 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
             dual_solution: vec![],
             reduced_costs: problem.c.clone(),
             slack: vec![],
+            warm_start_basis: None,
         };
     }
 
     let sf = build_standard_form(problem);
-    two_phase_simplex(&sf, problem, options)
+
+    match options.simplex_method {
+        SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
+        SimplexMethod::Dual => dual::two_phase_dual_simplex(&sf, problem, options),
+        SimplexMethod::Auto => {
+            if options.warm_start.is_some() {
+                dual::two_phase_dual_simplex(&sf, problem, options)
+            } else {
+                two_phase_simplex(&sf, problem, options)
+            }
+        }
+    }
 }
 
 // --- Data structures ---
@@ -119,7 +135,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
 ///
 /// 各元変数がどのように標準形の変数群に対応しているかを記録する。
 /// 下限・上限制約によって変数分割や符号反転が生じた際に使用する。
-struct OrigVarInfo {
+pub(crate) struct OrigVarInfo {
     /// 変数変換のオフセット（下限 lb または上限 ub の値）
     offset: f64,
     /// 新変数インデックスと係数のペアのリスト
@@ -133,7 +149,7 @@ struct OrigVarInfo {
 /// 元のLPを改訂シンプレックス法に適した形式に変換した結果を保持する。
 /// スラック変数の追加、変数変換（下限シフト・符号反転・分割）、
 /// 人工変数の要否判定を含む完全な変換済みデータを格納する。
-struct StandardForm {
+pub(crate) struct StandardForm {
     /// 制約行列（疎CSC形式）
     a: CscMatrix,
     /// 制約右辺ベクトル（変換済み）
@@ -163,7 +179,7 @@ struct StandardForm {
 }
 
 /// シンプレックス法コア関数の実行結果
-enum SimplexOutcome {
+pub(crate) enum SimplexOutcome {
     /// 最適解が得られた。値は最適目的関数値と最適時点の双対変数ベクトル
     Optimal(f64, Vec<f64>),
     /// 問題が非有界（unbounded）であった
@@ -185,7 +201,7 @@ enum SimplexOutcome {
 /// 5. 行の符号調整とスラック変数の設定
 /// 6. 初期基底と人工変数の決定
 /// 7. CSC疎行列の構築
-fn build_standard_form(problem: &LpProblem) -> StandardForm {
+pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
 
@@ -416,7 +432,7 @@ fn build_standard_form(problem: &LpProblem) -> StandardForm {
 ///
 /// # 戻り値
 /// `(dual_solution, reduced_costs, slack)` のタプル
-fn extract_dual_info(
+pub(crate) fn extract_dual_info(
     sf: &StandardForm,
     problem: &LpProblem,
     y_std: &[f64],
@@ -467,7 +483,7 @@ fn extract_dual_info(
 /// Phase I の目的関数は人工変数の和の最小化。
 /// 最小値がゼロより大きければ元問題は実行不可能（Infeasible）。
 /// Ruiz equilibration スケーリングを適用してから解く。
-fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = sf.m;
 
     // Apply Ruiz equilibration scaling to the standard form
@@ -485,6 +501,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 let (dual_solution, reduced_costs, slack) =
                     extract_dual_info(sf, problem, &y, &solution, &row_scale);
+                let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
                 SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj + sf.obj_offset,
@@ -492,6 +509,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                     dual_solution,
                     reduced_costs,
                     slack,
+                    warm_start_basis: Some(ws),
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -501,6 +519,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 dual_solution: vec![],
                 reduced_costs: vec![],
                 slack: vec![],
+                warm_start_basis: None,
             },
             SimplexOutcome::MaxIterations(obj) => {
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
@@ -511,6 +530,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                     dual_solution: vec![],
                     reduced_costs: vec![],
                     slack: vec![],
+                    warm_start_basis: None,
                 }
             }
         }
@@ -568,6 +588,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                         dual_solution: vec![],
                         reduced_costs: vec![],
                         slack: vec![],
+                        warm_start_basis: None,
                     };
                 }
 
@@ -594,6 +615,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         let (dual_solution, reduced_costs, slack) =
                             extract_dual_info(sf, problem, &y, &solution, &row_scale);
+                        let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
                         SolverResult {
                             status: SolveStatus::Optimal,
                             objective: obj2 + sf.obj_offset,
@@ -601,6 +623,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                             dual_solution,
                             reduced_costs,
                             slack,
+                            warm_start_basis: Some(ws),
                         }
                     }
                     SimplexOutcome::Unbounded => SolverResult {
@@ -610,6 +633,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                         dual_solution: vec![],
                         reduced_costs: vec![],
                         slack: vec![],
+                        warm_start_basis: None,
                     },
                     SimplexOutcome::MaxIterations(obj2) => {
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
@@ -620,6 +644,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                             dual_solution: vec![],
                             reduced_costs: vec![],
                             slack: vec![],
+                            warm_start_basis: None,
                         }
                     }
                 }
@@ -631,6 +656,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 dual_solution: vec![],
                 reduced_costs: vec![],
                 slack: vec![],
+                warm_start_basis: None,
             },
             SimplexOutcome::MaxIterations(_) => SolverResult {
                 status: SolveStatus::MaxIterations,
@@ -639,6 +665,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
                 dual_solution: vec![],
                 reduced_costs: vec![],
                 slack: vec![],
+                warm_start_basis: None,
             },
         }
     }
@@ -649,7 +676,7 @@ fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOpt
 /// 標準形の最適解を、変数変換（オフセット・係数）を逆適用して
 /// 元問題の変数値に変換する。
 /// `col_scale` はRuizスケーリングの列スケール因子。スケーリングを行わない場合は空スライスを渡す。
-fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
+pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
@@ -696,7 +723,7 @@ fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: 
 /// # 戻り値
 ///
 /// [`SimplexOutcome::Optimal`] — 最適目的関数値と双対変数、または [`SimplexOutcome::Unbounded`]
-fn revised_simplex_core<P: PricingStrategy>(
+pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
     x_b: &mut Vec<f64>,
     c: &[f64],

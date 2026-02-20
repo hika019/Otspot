@@ -114,6 +114,31 @@ impl PricingStrategy for SteepestEdgePricing {
     }
 }
 
+/// Dual Simplexの離基変数選択トレイト
+pub(crate) trait DualLeavingStrategy {
+    /// 最も主実行不可な基底変数の行インデックスを返す
+    /// x_B[i] >= -primal_tol なら全て実行可能 → None（最適）
+    fn select_leaving(&self, x_b: &[f64], primal_tol: f64) -> Option<usize>;
+}
+
+/// Most Infeasible Rule: 最も負のx_B[i]を選択
+pub(crate) struct MostInfeasibleLeaving;
+
+impl DualLeavingStrategy for MostInfeasibleLeaving {
+    fn select_leaving(&self, x_b: &[f64], primal_tol: f64) -> Option<usize> {
+        let mut best_row = None;
+        let mut max_violation = primal_tol;
+
+        for (i, &val) in x_b.iter().enumerate() {
+            if val < -max_violation {
+                max_violation = -val;
+                best_row = Some(i);
+            }
+        }
+        best_row
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
