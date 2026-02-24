@@ -148,12 +148,12 @@ mod tests {
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
-        for i in 0..nrows {
-            for j in 0..ncols {
-                if data[i][j].abs() > 1e-15 {
+        for (i, row) in data.iter().enumerate().take(nrows) {
+            for (j, &val) in row.iter().enumerate().take(ncols) {
+                if val.abs() > 1e-15 {
                     rows.push(i);
                     cols.push(j);
-                    vals.push(data[i][j]);
+                    vals.push(val);
                 }
             }
         }

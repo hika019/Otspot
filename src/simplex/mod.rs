@@ -1020,8 +1020,8 @@ mod tests {
         );
         let x1 = result.solution[0];
         let x2 = result.solution[1];
-        assert!(x1 >= -PIVOT_TOL && x1 <= 3.0 + PIVOT_TOL, "x1={}", x1);
-        assert!(x2 >= -PIVOT_TOL && x2 <= 3.0 + PIVOT_TOL, "x2={}", x2);
+        assert!((-PIVOT_TOL..=3.0 + PIVOT_TOL).contains(&x1), "x1={}", x1);
+        assert!((-PIVOT_TOL..=3.0 + PIVOT_TOL).contains(&x2), "x2={}", x2);
         assert!((x1 + x2 - 4.0).abs() < PIVOT_TOL);
     }
 
