@@ -354,6 +354,10 @@ fn dual_simplex_core(
         if pivot_element.abs() < PIVOT_TOL {
             // 数値的に不安定 → refactorして被縮小費用を再計算
             basis_mgr.refactor_if_needed(a, basis);
+            if basis_mgr.refactor_failed {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::MaxIterations(obj);
+            }
             reduced_costs =
                 compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
             continue;
@@ -402,6 +406,10 @@ fn dual_simplex_core(
         // Step 11: 必要に応じてrefactor + 被縮小費用リセット
         if basis_mgr_needs_refactor_approx(_iter) {
             basis_mgr.refactor_if_needed(a, basis);
+            if basis_mgr.refactor_failed {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::MaxIterations(obj);
+            }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
             reduced_costs =
                 compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);

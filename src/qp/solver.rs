@@ -91,26 +91,37 @@ pub(crate) fn qp_solve_impl(
     }
 
     // Phase I: 初期実行可能点の取得
+    // Phase1Result::MaxIterations は数値困難（refactor_failed 等）による早期打切りで
+    // 偽陽性の Infeasible を防ぐため QpResult::max_iterations() を返す。
     let initial_x = if let Some(ws) = warm_start {
         if let Some(ref x0) = ws.initial_point {
             if x0.len() == n {
                 x0.clone()
             } else {
                 match find_initial_feasible_point(problem, options) {
-                    Some(x) => x,
-                    None => return QpResult::infeasible(),
+                    Phase1Result::Feasible(x) => x,
+                    Phase1Result::Infeasible => return QpResult::infeasible(),
+                    Phase1Result::MaxIterations => {
+                        return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                    }
                 }
             }
         } else {
             match find_initial_feasible_point(problem, options) {
-                Some(x) => x,
-                None => return QpResult::infeasible(),
+                Phase1Result::Feasible(x) => x,
+                Phase1Result::Infeasible => return QpResult::infeasible(),
+                Phase1Result::MaxIterations => {
+                    return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                }
             }
         }
     } else {
         match find_initial_feasible_point(problem, options) {
-            Some(x) => x,
-            None => return QpResult::infeasible(),
+            Phase1Result::Feasible(x) => x,
+            Phase1Result::Infeasible => return QpResult::infeasible(),
+            Phase1Result::MaxIterations => {
+                return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+            }
         }
     };
 
@@ -182,11 +193,35 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     }
 }
 
+/// Phase I LP の結果を表す列挙型
+///
+/// `SolveStatus::MaxIterations` は数値困難（refactor_failed 等）による早期打切りで、
+/// 問題が実行不可能であることを意味しない。この場合は `QpResult::infeasible()` ではなく
+/// `QpResult::max_iterations()` を返して偽陽性の Infeasible を防ぐ。
+enum Phase1Result {
+    /// 初期実行可能点が見つかった
+    Feasible(Vec<f64>),
+    /// 問題は確実に実行不可能（LP が Infeasible を返した）
+    Infeasible,
+    /// 数値困難で打ち切り（LP が MaxIterations を返した）; 実行可能性は不明
+    MaxIterations,
+}
+
 /// Phase I: LP を使って初期実行可能点を求める
+///
+/// QPS パーサーは等式制約 (Eq) を 2 行の Le (Ax<=b, -Ax<=-b) に展開する。
+/// この展開形を全 Le として Phase I LP を解くと、連続ペア行が退化を引き起こし
+/// 基底が数値的に特異化 → refactor_failed → MaxIterations となる。
+///
+/// 対策: 連続ペア行 (b[i+1]=-b[i], A[i+1]=-A[i]) を検出して Eq 制約に再構成し、
+/// 半分のサイズ・退化なしの Phase I LP を作る。
+///
+/// 戻り値: `Phase1Result` で3状態を区別する。MaxIterations は偽陽性 Infeasible を防ぐために
+/// 呼び出し元が `QpResult::max_iterations()` を返すべきことを意味する。
 fn find_initial_feasible_point(
     problem: &QpProblem,
     options: &SolverOptions,
-) -> Option<Vec<f64>> {
+) -> Phase1Result {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
@@ -197,27 +232,145 @@ fn find_initial_feasible_point(
             .iter()
             .map(|&(lb, _ub)| if lb.is_finite() { lb } else { 0.0 })
             .collect();
-        return Some(x);
+        return Phase1Result::Feasible(x);
     }
 
-    // LP: min 0 s.t. Ax <= b, bounds （実行可能性判定）
-    let c_zero = vec![0.0f64; n];
-    let ct = vec![ConstraintType::Le; m];
-    let lp = LpProblem::new_general(
-        c_zero,
-        problem.a.clone(),
-        problem.b.clone(),
-        ct,
+    // 行ごとのスパースエントリを構築（CSC→行アクセスのため）
+    let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
+    for j in 0..n {
+        let start = problem.a.col_ptr[j];
+        let end = problem.a.col_ptr[j + 1];
+        for k in start..end {
+            let row = problem.a.row_ind[k];
+            row_entries[row].push((j, problem.a.values[k]));
+        }
+    }
+
+    // 連続ペア行 (i, i+1) を検出: b[i+1] ≈ -b[i] かつ A[i+1] ≈ -A[i]
+    // QPS パーサーが Eq→2Le に展開する際、常に連続ペアを生成する。
+    let mut is_eq_first = vec![false; m];   // row i: Eq 制約の代表行
+    let mut is_eq_second = vec![false; m];  // row i+1: スキップ（Eq に統合済み）
+    let mut i = 0;
+    while i + 1 < m {
+        let b_i = problem.b[i];
+        let b_j = problem.b[i + 1];
+        let tol = 1e-10 * (1.0 + b_i.abs());
+        if (b_i + b_j).abs() < tol && rows_are_negation(&row_entries[i], &row_entries[i + 1]) {
+            is_eq_first[i] = true;
+            is_eq_second[i + 1] = true;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    // 選択行インデックス（Eq 第2行をスキップ）と制約タイプを構築
+    let selected: Vec<usize> = (0..m).filter(|&r| !is_eq_second[r]).collect();
+    let new_m = selected.len();
+    let new_b: Vec<f64> = selected.iter().map(|&r| problem.b[r]).collect();
+    let new_ct: Vec<ConstraintType> = selected
+        .iter()
+        .map(|&r| if is_eq_first[r] { ConstraintType::Eq } else { ConstraintType::Le })
+        .collect();
+
+    // 新 A 行列を CSC 形式で構築（選択行のみ）
+    let row_remap: Vec<usize> = {
+        let mut remap = vec![usize::MAX; m];
+        for (new_r, &orig_r) in selected.iter().enumerate() {
+            remap[orig_r] = new_r;
+        }
+        remap
+    };
+    let mut trip_rows: Vec<usize> = Vec::new();
+    let mut trip_cols: Vec<usize> = Vec::new();
+    let mut trip_vals: Vec<f64> = Vec::new();
+    for j in 0..n {
+        let start = problem.a.col_ptr[j];
+        let end = problem.a.col_ptr[j + 1];
+        for k in start..end {
+            let orig_row = problem.a.row_ind[k];
+            let new_row = row_remap[orig_row];
+            if new_row != usize::MAX {
+                trip_rows.push(new_row);
+                trip_cols.push(j);
+                trip_vals.push(problem.a.values[k]);
+            }
+        }
+    }
+    let new_a = match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, new_m, n) {
+        Ok(a) => a,
+        Err(_) => return Phase1Result::MaxIterations,
+    };
+
+    let lp = match LpProblem::new_general(
+        vec![0.0f64; n],
+        new_a,
+        new_b,
+        new_ct,
         problem.bounds.clone(),
         None,
-    )
-    .ok()?;
+    ) {
+        Ok(lp) => lp,
+        Err(_) => return Phase1Result::MaxIterations,
+    };
 
-    let result = SimplexBackend.solve(&lp, options);
-    match result.status {
-        SolveStatus::Optimal => Some(result.solution),
-        _ => None,
+    // Phase I LP: まず presolve 無効で試行
+    // LP presolve は等式制約のある QP で初期実行可能点を誤った点に誘導することがある（DUALC2確認済み）。
+    // 等式制約の大規模系（QBORE3D, QBRANDY 等）は presolve 無効で Infeasible になるため、
+    // その場合のみ presolve 有効でフォールバック再試行する。
+    let mut phase1_opts = options.clone();
+    phase1_opts.presolve = false;
+
+    // MaxIterations が返った場合: refactor_failed など数値困難による早期打切り。
+    // 問題が実行不可能であることを意味しない → Phase1Result::MaxIterations で返す（偽陽性防止）。
+    let mut had_max_iterations = false;
+
+    let result = SimplexBackend.solve(&lp, &phase1_opts);
+    if result.status == SolveStatus::Optimal {
+        return Phase1Result::Feasible(result.solution);
     }
+    if result.status == SolveStatus::MaxIterations {
+        had_max_iterations = true;
+    }
+
+    // presolve 無効で失敗 → presolve 有効でフォールバック再試行
+    if options.presolve {
+        let result2 = SimplexBackend.solve(&lp, options);
+        if result2.status == SolveStatus::Optimal {
+            return Phase1Result::Feasible(result2.solution);
+        }
+        if result2.status == SolveStatus::MaxIterations {
+            had_max_iterations = true;
+        }
+    }
+
+    if had_max_iterations {
+        // 数値困難で実行可能点を見つけられなかった。実行不可能と断定しない。
+        Phase1Result::MaxIterations
+    } else {
+        Phase1Result::Infeasible
+    }
+}
+
+/// 2 行のスパースエントリが互いに符号反転関係かを判定する
+/// （同じ非零位置で val_i ≈ -val_j）
+fn rows_are_negation(
+    row_i: &[(usize, f64)],
+    row_j: &[(usize, f64)],
+) -> bool {
+    if row_i.len() != row_j.len() {
+        return false;
+    }
+    for ((ci, vi), (cj, vj)) in row_i.iter().zip(row_j.iter()) {
+        if ci != cj {
+            return false;
+        }
+        let tol = 1e-10 * (1.0 + vi.abs());
+        if (vi + vj).abs() > tol {
+            return false;
+        }
+    }
+    true
 }
 
 

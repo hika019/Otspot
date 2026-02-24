@@ -39,6 +39,9 @@ pub(crate) struct LuBasis {
     lu: lu::LuFactorization,
     eta_file: eta::EtaFile,
     basis_indices: Vec<usize>,
+    /// 再因子分解が特異基底により失敗した場合 true。
+    /// 呼び出し元はこのフラグを確認してsolverを安全に打ち切ること。
+    pub(crate) refactor_failed: bool,
 }
 
 impl LuBasis {
@@ -57,6 +60,7 @@ impl LuBasis {
             lu,
             eta_file: eta::EtaFile::new(max_etas),
             basis_indices: basis.to_vec(),
+            refactor_failed: false,
         })
     }
 }
@@ -84,11 +88,17 @@ impl BasisManager for LuBasis {
 
     fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]) {
         if self.eta_file.needs_refactor() {
-            // TODO: solve()をResult化する際にResult伝播に置き換え
-        self.lu = refactor::refactor(a, basis)
-            .expect("basis refactoring failed: singular matrix");
-            self.eta_file.etas.clear();
-            self.basis_indices = basis.to_vec();
+            match refactor::refactor(a, basis) {
+                Ok(new_lu) => {
+                    self.lu = new_lu;
+                    self.eta_file.etas.clear();
+                    self.basis_indices = basis.to_vec();
+                }
+                Err(_) => {
+                    // 特異基底: panicせずフラグを立てる。呼び出し元がsolverを安全に打ち切る
+                    self.refactor_failed = true;
+                }
+            }
         }
     }
 }

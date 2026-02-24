@@ -927,6 +927,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         // 11. Refactor if needed
         basis_mgr.refactor_if_needed(a, basis);
+        // 特異基底による再因子分解失敗 → panicせず打ち切り
+        if basis_mgr.refactor_failed {
+            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            return SimplexOutcome::MaxIterations(obj);
+        }
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
