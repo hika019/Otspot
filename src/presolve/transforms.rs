@@ -857,7 +857,7 @@ mod tests {
         // row_ub = 1*10 + 1*10 = 20 > 5 → not redundant
         // But bounds should be tightened: x_ub = min(10, 5) = 5, y_ub = min(10, 5) = 5
         // After tightening, row_ub = 1*5 + 1*5 = 10 > 5 → still not redundant
-        assert!(result.was_reduced || !result.was_reduced); // just check no crash
+        let _ = result.was_reduced; // just check no crash
         // The reduced problem should have both vars still
         assert_eq!(result.reduced_problem.num_vars, 2);
     }

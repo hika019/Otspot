@@ -17,7 +17,7 @@ fn main() {
         ("fit1d",    "tests/netlib/fit1d.mps"),
     ];
 
-    println!("{:<12} {:>6} {:>6} {:>12} {}", "Problem", "Rows", "Cols", "Time", "Status");
+    println!("{:<12} {:>6} {:>6} {:>12} Status", "Problem", "Rows", "Cols", "Time");
     println!("{}", "-".repeat(65));
 
     for (name, path) in &problems {
