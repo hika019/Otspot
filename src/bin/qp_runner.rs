@@ -167,6 +167,7 @@ fn main() {
         SolveStatus::Infeasible => "Infeasible",
         SolveStatus::Unbounded => "Unbounded",
         SolveStatus::MaxIterations => "MaxIterations",
+        SolveStatus::Timeout => "Timeout",
     };
 
     println!("{} {:.10e} {}", status_str, result.objective, result.iterations);

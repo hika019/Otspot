@@ -39,6 +39,7 @@ fn main() {
             SolveStatus::Infeasible => "Infeasible".to_string(),
             SolveStatus::Unbounded => "Unbounded".to_string(),
             SolveStatus::MaxIterations => "MaxIterations".to_string(),
+            SolveStatus::Timeout => "Timeout".to_string(),
         };
 
         let time_str = if elapsed.as_secs() > 0 {

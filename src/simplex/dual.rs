@@ -128,6 +128,17 @@ fn cold_start_dual(
                 warm_start_basis: None,
             };
         }
+        SimplexOutcome::Timeout(_) => {
+            return SolverResult {
+                status: SolveStatus::Timeout,
+                objective: 0.0,
+                solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+            };
+        }
         SimplexOutcome::Optimal(_, _) => {
             // Phase I完了: x_B ≥ 0 (主実行可能)
         }
@@ -194,6 +205,18 @@ fn warm_outcome_to_result(
                 warm_start_basis: None,
             }
         }
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+            }
+        }
     }
 }
 
@@ -237,6 +260,18 @@ fn primal_outcome_to_result(
             let solution = extract_solution(sf, basis, x_b, col_scale);
             SolverResult {
                 status: SolveStatus::MaxIterations,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+            }
+        }
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
                 objective: obj + sf.obj_offset,
                 solution,
                 dual_solution: vec![],
@@ -296,6 +331,14 @@ fn dual_simplex_core(
     let mut alpha_dense = vec![0.0f64; m];
 
     for _iter in 0..max_iter {
+        // タイムアウトチェック
+        if let Some(deadline) = options.deadline {
+            if std::time::Instant::now() >= deadline {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
+            }
+        }
+
         // Step 1: 離基変数選択 - 最も主実行不可な基底変数
         let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol) {
             None => {

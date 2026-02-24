@@ -236,6 +236,8 @@ pub(crate) enum SimplexOutcome {
     Unbounded,
     /// 反復回数上限に到達した。値は打ち切り時点の目的関数値
     MaxIterations(f64),
+    /// タイムアウト（timeout_secs を超過した）。値は打ち切り時点の目的関数値
+    Timeout(f64),
 }
 
 // --- Standard form construction ---
@@ -595,6 +597,18 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     warm_start_basis: None,
                 }
             }
+            SimplexOutcome::Timeout(obj) => {
+                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                SolverResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj + sf.obj_offset,
+                    solution,
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                }
+            }
         }
     } else {
         // Phase I: build extended matrix with artificials
@@ -719,6 +733,18 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             warm_start_basis: None,
                         }
                     }
+                    SimplexOutcome::Timeout(obj2) => {
+                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        SolverResult {
+                            status: SolveStatus::Timeout,
+                            objective: obj2 + sf.obj_offset,
+                            solution,
+                            dual_solution: vec![],
+                            reduced_costs: vec![],
+                            slack: vec![],
+                            warm_start_basis: None,
+                        }
+                    }
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -732,6 +758,15 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             },
             SimplexOutcome::MaxIterations(_) => SolverResult {
                 status: SolveStatus::MaxIterations,
+                objective: 0.0,
+                solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+            },
+            SimplexOutcome::Timeout(_) => SolverResult {
+                status: SolveStatus::Timeout,
                 objective: 0.0,
                 solution: vec![],
                 dual_solution: vec![],
@@ -829,6 +864,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut rc_vec = vec![0.0f64; n_price];
 
     for _iter in 0..max_iter {
+        // タイムアウトチェック
+        if let Some(deadline) = options.deadline {
+            if std::time::Instant::now() >= deadline {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
+            }
+        }
+
         // 1. Dual variables: y = BTRAN(c_B)
         for i in 0..m {
             c_b[i] = c[basis[i]];

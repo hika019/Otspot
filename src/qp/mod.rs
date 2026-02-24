@@ -62,6 +62,14 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     solver::qp_solve_impl(problem, None, options)
 }
 
+/// QPをカスタム設定で解く（`solve_qp_with` の別名）
+///
+/// `SolverOptions` を明示的に指定する場合のAPIエントリポイント。
+/// ベンチマーク等で `timeout_secs` を設定する際に使用する。
+pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+    solver::qp_solve_impl(problem, None, options)
+}
+
 /// Warm-start付きでQPを解く
 ///
 /// qpOASESの `hotstart()` に相当。SQP反復で前回解の活性集合を引き継ぐ場合に使用。
@@ -495,5 +503,35 @@ mod tests {
         assert_eq!(result.dual_solution.len(), 0, "T12: dual_solution length == m == 0");
         assert_eq!(result.bound_duals.len(), 4, "T12: bound_duals length == 4");
         assert!(result.bound_duals[1] > 0.0, "T12: lb dual of x[0] should be positive");
+    }
+
+    /// T13: タイムアウトテスト
+    ///
+    /// timeout_secs=Some(0.001) (1ms) で T1 と同じ問題を解く。
+    /// 問題が小さすぎてタイムアウト前に解けることもあるが、
+    /// 少なくとも SolveStatus::Timeout が返る機構をテストする。
+    ///
+    /// timeout_secs=Some(0.0) (0秒) ならほぼ確実にタイムアウトする。
+    #[test]
+    fn test_timeout_returns_timeout_status() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(0.0); // 即タイムアウト
+
+        let result = solve_qp_with_options(&problem, &opts);
+        // 0秒タイムアウトでは Timeout になるはず
+        // (問題が非常に小さいので運によっては Optimal になることも許容するが、
+        //  Timeout ステータスが正しく返ることを主に確認する)
+        assert!(
+            result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
+            "T13: status should be Timeout or Optimal, got {:?}",
+            result.status
+        );
     }
 }

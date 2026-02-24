@@ -8,7 +8,12 @@ readme = "README.md"
 keywords = ["linear-programming", "optimization", "simplex", "operations-research", "lp"]
 categories = ["science", "algorithms", "mathematics"]
 
+[features]
+default = []
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

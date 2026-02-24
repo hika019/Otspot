@@ -30,6 +30,8 @@ pub enum SolveStatus {
     Unbounded,
     /// 反復回数上限に到達した（最適性未確認）
     MaxIterations,
+    /// タイムアウト（timeout_secs を超過した）
+    Timeout,
 }
 
 impl fmt::Display for SolveStatus {
@@ -39,6 +41,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Infeasible => write!(f, "Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
             SolveStatus::MaxIterations => write!(f, "MaxIterations"),
+            SolveStatus::Timeout => write!(f, "Timeout"),
         }
     }
 }

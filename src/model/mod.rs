@@ -216,6 +216,7 @@ impl Model {
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
+            SolveStatus::Timeout => Err(ModelError::Internal("Solver timeout".to_string())),
         }
     }
 
@@ -350,6 +351,9 @@ impl Model {
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
                 Err(ModelError::Internal("QP iteration limit reached".to_string()))
+            }
+            SolveStatus::Timeout => {
+                Err(ModelError::Internal("QP solver timeout".to_string()))
             }
         }
     }

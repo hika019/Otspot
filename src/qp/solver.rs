@@ -12,6 +12,41 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::*;
 use crate::backend::{LpBackend, SimplexBackend};
 use crate::qp::kkt::extract_active_rows;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
+
+/// タイムアウト + キャンセルを一元管理するヘルパー
+struct TimeoutContext {
+    deadline: Option<Instant>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl TimeoutContext {
+    /// SolverOptions からコンテキストを構築する（最初の1回のみ呼ぶ）
+    fn from_options(options: &SolverOptions) -> Self {
+        let deadline = options.deadline.or_else(|| {
+            options
+                .timeout_secs
+                .map(|s| Instant::now() + Duration::from_secs_f64(s))
+        });
+        let cancel = options
+            .cancel_flag
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        Self { deadline, cancel }
+    }
+
+    #[inline]
+    fn should_stop(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+            || self
+                .deadline
+                .map_or(false, |d| Instant::now() >= d)
+    }
+}
 
 /// 変数境界を明示的な不等式制約行に変換して A 行列に追加する
 ///
@@ -77,6 +112,7 @@ fn augment_bounds_to_constraints(
     (new_a, new_b)
 }
 
+
 /// QP求解の実装コア（Active Set法）
 pub(crate) fn qp_solve_impl(
     problem: &QpProblem,
@@ -85,9 +121,99 @@ pub(crate) fn qp_solve_impl(
 ) -> QpResult {
     let n = problem.num_vars;
 
+    // deadline を一度だけ計算してオプションに設定（Simplex 内でも使用）
+    let mut opts_with_deadline;
+    let effective_opts: &SolverOptions = if options.timeout_secs.is_some() && options.deadline.is_none() {
+        opts_with_deadline = options.clone();
+        opts_with_deadline.deadline = Some(
+            Instant::now() + Duration::from_secs_f64(options.timeout_secs.unwrap()),
+        );
+        &opts_with_deadline
+    } else {
+        options
+    };
+
+    // TimeoutContext: deadline + cancel_flag を一元管理
+    let timeout = TimeoutContext::from_options(effective_opts);
+
     // Q=0 の退化ケース（LP問題）: LP solverに委譲
     if problem.is_zero_q() {
-        return solve_as_lp(problem, options);
+        return solve_as_lp(problem, effective_opts);
+    }
+
+    // 並列Active Set: Phase Iで実行可能点を取得後、N本並列でactive_set_loopを実行する。
+    // WS0/WS1/WS3 の初期ワーキングセット多様化で有意な並列化を実現する。
+    //
+    // 注意: warm_start.initial_pointをそのままactive_set_loopに渡すと実行不可能点から
+    // スタートする可能性があるため、並列ブロックでは必ずPhase Iで実行可能点を取得する。
+    #[cfg(feature = "parallel")]
+    {
+        if warm_start.is_none() && effective_opts.parallel_runs > 1 {
+            use rayon::prelude::*;
+
+            // Phase Iで実行可能点を1回取得
+            let feasible_x = match find_initial_feasible_point(problem, effective_opts) {
+                Phase1Result::Feasible(x) => x,
+                Phase1Result::Infeasible => return QpResult::infeasible(),
+                Phase1Result::MaxIterations => {
+                    return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                }
+                Phase1Result::Timeout => return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: f64::INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    bound_duals: vec![],
+                    active_set: vec![],
+                    iterations: 0,
+                },
+            };
+
+            // cancel フラグ（他ワーカーが Optimal を見つけたら残りを止める）
+            let cancel = Arc::new(AtomicBool::new(false));
+            let run_count = effective_opts.parallel_runs;
+
+            // 初期ワーキングセット多様化: WS0（空集合）/ WS1（境界アクティブ）/ WS3（ハッシュ乱択）
+            let initial_working_sets = build_initial_working_sets(problem, &feasible_x, run_count);
+
+            let result = initial_working_sets
+                .into_par_iter()
+                .find_map_any(|ws_indices| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    // 各ワーカー用の cancel_flag を共有
+                    let mut worker_opts = effective_opts.clone();
+                    worker_opts.cancel_flag = Some(cancel.clone());
+                    let worker_timeout = TimeoutContext::from_options(&worker_opts);
+
+                    let r = active_set_loop(
+                        problem,
+                        feasible_x.clone(),
+                        WorkingSet::from_indices(ws_indices),
+                        &worker_opts,
+                        &worker_timeout,
+                    );
+                    if r.status == SolveStatus::Optimal {
+                        cancel.store(true, Ordering::Relaxed);
+                        Some(r)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(r) = result {
+                return r;
+            }
+            // 全並列試行が失敗（Timeout / MaxIterations）→ 同じfeasible_xで直列実行
+            return active_set_loop(
+                problem,
+                feasible_x,
+                WorkingSet::from_indices(vec![]),
+                effective_opts,
+                &timeout,
+            );
+        }
     }
 
     // Phase I: 初期実行可能点の取得
@@ -98,30 +224,57 @@ pub(crate) fn qp_solve_impl(
             if x0.len() == n {
                 x0.clone()
             } else {
-                match find_initial_feasible_point(problem, options) {
+                match find_initial_feasible_point(problem, effective_opts) {
                     Phase1Result::Feasible(x) => x,
                     Phase1Result::Infeasible => return QpResult::infeasible(),
                     Phase1Result::MaxIterations => {
                         return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                     }
+                    Phase1Result::Timeout => return QpResult {
+                        status: SolveStatus::Timeout,
+                        objective: f64::INFINITY,
+                        solution: vec![],
+                        dual_solution: vec![],
+                        bound_duals: vec![],
+                        active_set: vec![],
+                        iterations: 0,
+                    },
                 }
             }
         } else {
-            match find_initial_feasible_point(problem, options) {
+            match find_initial_feasible_point(problem, effective_opts) {
                 Phase1Result::Feasible(x) => x,
                 Phase1Result::Infeasible => return QpResult::infeasible(),
                 Phase1Result::MaxIterations => {
                     return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                 }
+                Phase1Result::Timeout => return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: f64::INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    bound_duals: vec![],
+                    active_set: vec![],
+                    iterations: 0,
+                },
             }
         }
     } else {
-        match find_initial_feasible_point(problem, options) {
+        match find_initial_feasible_point(problem, effective_opts) {
             Phase1Result::Feasible(x) => x,
             Phase1Result::Infeasible => return QpResult::infeasible(),
             Phase1Result::MaxIterations => {
                 return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
             }
+            Phase1Result::Timeout => return QpResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                solution: vec![],
+                dual_solution: vec![],
+                bound_duals: vec![],
+                active_set: vec![],
+                iterations: 0,
+            },
         }
     };
 
@@ -134,7 +287,97 @@ pub(crate) fn qp_solve_impl(
         WorkingSet::from_indices(vec![])
     };
 
-    active_set_loop(problem, initial_x, initial_active, options)
+    active_set_loop(problem, initial_x, initial_active, effective_opts, &timeout)
+}
+
+/// 並列Active Set用の初期ワーキングセットを生成する（WS0 / WS1 / WS3）
+///
+/// - WS0: 空集合（標準的な Active Set の初期状態）
+/// - WS1: feasible_x で実際に活性(binding)な全制約（オリジナル + 境界制約）
+/// - WS3以降: WS1 からのハッシュベース疑似ランダムサブセット
+///
+/// # 安全性
+/// WS1/WS3 は feasible_x でバインドしている制約のみを含むため、
+/// Active Set 初期化として数値的に安全。
+#[cfg(feature = "parallel")]
+fn build_initial_working_sets(
+    problem: &QpProblem,
+    feasible_x: &[f64],
+    count: usize,
+) -> Vec<Vec<usize>> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let m = problem.num_constraints;
+    let n = feasible_x.len();
+    let tol = 1e-6;
+
+    // feasible_x で活性な制約インデックスを収集
+    let mut active: Vec<usize> = vec![];
+
+    // オリジナル制約: a_i^T x ≈ b_i なら活性
+    for i in 0..m {
+        let ai_x: f64 = (0..n)
+            .map(|j| get_a_element(&problem.a, i, j) * feasible_x.get(j).copied().unwrap_or(0.0))
+            .sum();
+        if (ai_x - problem.b[i]).abs() < tol {
+            active.push(i);
+        }
+    }
+
+    // 境界制約 (augment_bounds_to_constraints と同じ順序で aug インデックスを計算)
+    // ub: x[j] <= ub → row m + idx (coeff +1.0)
+    // lb: -x[j] <= -lb → row m + idx (coeff -1.0)
+    let mut aug_idx = m;
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        let xj = feasible_x.get(j).copied().unwrap_or(0.0);
+        if ub.is_finite() {
+            if (xj - ub).abs() < tol {
+                active.push(aug_idx);
+            }
+            aug_idx += 1;
+        }
+        if lb.is_finite() {
+            if (xj - lb).abs() < tol {
+                active.push(aug_idx);
+            }
+            aug_idx += 1;
+        }
+    }
+
+    let mut sets = Vec::with_capacity(count);
+
+    // WS0: 空集合
+    sets.push(vec![]);
+
+    // WS1: 全活性制約
+    if count >= 2 {
+        sets.push(active.clone());
+    }
+
+    // WS3以降: 活性制約のランダムサブセット
+    for i in 2..count {
+        if active.is_empty() {
+            sets.push(vec![]);
+            continue;
+        }
+        let k = (active.len() / 2 + 1).min(active.len());
+        let mut hasher = DefaultHasher::new();
+        i.hash(&mut hasher);
+        let seed = hasher.finish();
+        let mut ws: Vec<usize> = (0..k)
+            .map(|j| {
+                let mut h = DefaultHasher::new();
+                (seed, j).hash(&mut h);
+                active[(h.finish() as usize) % active.len()]
+            })
+            .collect();
+        ws.sort_unstable();
+        ws.dedup();
+        sets.push(ws);
+    }
+
+    sets
 }
 
 /// LP ソルバーに委譲してQP結果に変換（Q=0 ケース）
@@ -190,6 +433,15 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             iterations: 0,
         },
         SolveStatus::MaxIterations => QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0),
+        SolveStatus::Timeout => QpResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            active_set: vec![],
+            iterations: 0,
+        },
     }
 }
 
@@ -205,6 +457,8 @@ enum Phase1Result {
     Infeasible,
     /// 数値困難で打ち切り（LP が MaxIterations を返した）; 実行可能性は不明
     MaxIterations,
+    /// タイムアウト（Phase I LP が timeout_secs を超過した）
+    Timeout,
 }
 
 /// Phase I: LP を使って初期実行可能点を求める
@@ -329,6 +583,9 @@ fn find_initial_feasible_point(
     if result.status == SolveStatus::Optimal {
         return Phase1Result::Feasible(result.solution);
     }
+    if result.status == SolveStatus::Timeout {
+        return Phase1Result::Timeout;
+    }
     if result.status == SolveStatus::MaxIterations {
         had_max_iterations = true;
     }
@@ -338,6 +595,9 @@ fn find_initial_feasible_point(
         let result2 = SimplexBackend.solve(&lp, options);
         if result2.status == SolveStatus::Optimal {
             return Phase1Result::Feasible(result2.solution);
+        }
+        if result2.status == SolveStatus::Timeout {
+            return Phase1Result::Timeout;
         }
         if result2.status == SolveStatus::MaxIterations {
             had_max_iterations = true;
@@ -380,6 +640,7 @@ fn active_set_loop(
     mut x: Vec<f64>,
     mut working_set: WorkingSet,
     options: &SolverOptions,
+    timeout: &TimeoutContext,
 ) -> QpResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
@@ -390,6 +651,20 @@ fn active_set_loop(
     let (aug_a, aug_b) = augment_bounds_to_constraints(&problem.a, &problem.b, &problem.bounds);
 
     for iter in 0..max_iter {
+        // タイムアウト / キャンセルチェック
+        if timeout.should_stop() {
+            let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+            return QpResult {
+                status: SolveStatus::Timeout,
+                objective: obj,
+                solution: x,
+                dual_solution: vec![0.0; m],
+                bound_duals: vec![0.0; aug_b.len() - m],
+                active_set: working_set.indices().to_vec(),
+                iterations: iter,
+            };
+        }
+
         // 勾配 grad = Qx + c を計算
         let grad = kkt::compute_gradient(&problem.q, &x, &problem.c);
 

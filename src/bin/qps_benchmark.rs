@@ -1,19 +1,18 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
 //! Usage: qps_benchmark <data_dir>
-//! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp で実行し、
+//! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with_options で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!
-//! 各問題に10秒のウォールクロックタイムアウトを設ける。
+//! 各問題に10秒のタイムアウトを設ける（solver内部の協調的タイムアウト機構を使用）。
 
 use std::env;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use solver::io::qps::parse_qps;
-use solver::qp::solve_qp;
+use solver::options::SolverOptions;
+use solver::qp::solve_qp_with_options;
 use solver::problem::SolveStatus;
 
 fn main() {
@@ -59,16 +58,8 @@ fn main() {
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
 
-    // 結果行を収集して最後にもう一度出力
-    struct Row {
-        name: String,
-        n: usize,
-        m: usize,
-        status: String,
-        elapsed: f64,
-        note: String,
-    }
-    let mut rows: Vec<Row> = Vec::new();
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(10.0);
 
     for path in &qps_files {
         let name = path
@@ -87,14 +78,6 @@ fn main() {
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
                 );
                 n_error += 1;
-                rows.push(Row {
-                    name,
-                    n: 0,
-                    m: 0,
-                    status: "PARSE_ERR".to_string(),
-                    elapsed: 0.0,
-                    note,
-                });
                 continue;
             }
         };
@@ -102,69 +85,39 @@ fn main() {
         let n = prob.num_vars;
         let m = prob.num_constraints;
 
-        // solve in a thread with 10s timeout
-        let prob_clone = prob.clone();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let start = Instant::now();
-            let result = solve_qp(&prob_clone);
-            let elapsed = start.elapsed();
-            let _ = tx.send((result, elapsed));
-        });
+        let start = Instant::now();
+        let result = solve_qp_with_options(&prob, &opts);
+        let elapsed_s = start.elapsed().as_secs_f64();
 
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok((result, elapsed)) => {
-                let elapsed_s = elapsed.as_secs_f64();
-                let (status_str, note) = match result.status {
-                    SolveStatus::Optimal => {
-                        n_pass += 1;
-                        ("PASS".to_string(), format!("obj={:.6e}", result.objective))
-                    }
-                    SolveStatus::Infeasible => {
-                        n_fail += 1;
-                        ("FAIL:Infeasible".to_string(), String::new())
-                    }
-                    SolveStatus::Unbounded => {
-                        n_fail += 1;
-                        ("FAIL:Unbounded".to_string(), String::new())
-                    }
-                    SolveStatus::MaxIterations => {
-                        n_max_iter += 1;
-                        (
-                            "MAXITER".to_string(),
-                            format!("iters={}", result.iterations),
-                        )
-                    }
-                };
-                println!(
-                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
-                    name, n, m, status_str, elapsed_s, note
-                );
-                rows.push(Row {
-                    name,
-                    n,
-                    m,
-                    status: status_str,
-                    elapsed: elapsed_s,
-                    note,
-                });
+        let (status_str, note) = match result.status {
+            SolveStatus::Optimal => {
+                n_pass += 1;
+                ("PASS".to_string(), format!("obj={:.6e}", result.objective))
             }
-            Err(_) => {
+            SolveStatus::Infeasible => {
+                n_fail += 1;
+                ("FAIL:Infeasible".to_string(), String::new())
+            }
+            SolveStatus::Unbounded => {
+                n_fail += 1;
+                ("FAIL:Unbounded".to_string(), String::new())
+            }
+            SolveStatus::MaxIterations => {
+                n_max_iter += 1;
+                (
+                    "MAXITER".to_string(),
+                    format!("iters={}", result.iterations),
+                )
+            }
+            SolveStatus::Timeout => {
                 n_timeout += 1;
-                println!(
-                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
-                    name, n, m, "TIMEOUT", 10.0, "(10s wall clock exceeded)"
-                );
-                rows.push(Row {
-                    name,
-                    n,
-                    m,
-                    status: "TIMEOUT".to_string(),
-                    elapsed: 10.0,
-                    note: "10s wall clock exceeded".to_string(),
-                });
+                ("TIMEOUT".to_string(), format!("{:.3}s", elapsed_s))
             }
-        }
+        };
+        println!(
+            "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
+            name, n, m, status_str, elapsed_s, note
+        );
     }
 
     println!("{}", "-".repeat(75));

@@ -4,6 +4,11 @@
 //! 許容誤差・反復上限・リファクタリング頻度などを一元管理する。
 
 use crate::tolerances::*;
+use std::sync::{
+    atomic::AtomicBool,
+    Arc,
+};
+use std::time::Instant;
 
 /// シンプレックス法の選択
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,6 +57,14 @@ pub struct SolverOptions {
     pub warm_start: Option<WarmStartBasis>,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
+    /// 並列Active Set実行数（parallel feature有効時のみ使用。デフォルト4）
+    pub parallel_runs: usize,
+    /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
+    pub timeout_secs: Option<f64>,
+    /// 並列ワーカー間共有のキャンセルフラグ（内部使用）
+    pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
+    /// タイムアウト期限（内部使用。qp_solve_impl の先頭で timeout_secs から計算）
+    pub(crate) deadline: Option<Instant>,
 }
 
 impl Default for SolverOptions {
@@ -65,6 +78,10 @@ impl Default for SolverOptions {
             dual_tol: PIVOT_TOL,
             warm_start: None,
             presolve: true,
+            parallel_runs: 4,
+            timeout_secs: None,
+            cancel_flag: None,
+            deadline: None,
         }
     }
 }
