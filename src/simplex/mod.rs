@@ -21,6 +21,7 @@ use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use pricing::{PricingStrategy, SteepestEdgePricing};
+use std::sync::atomic::Ordering;
 
 /// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
 ///
@@ -864,12 +865,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut rc_vec = vec![0.0f64; n_price];
 
     for _iter in 0..max_iter {
-        // タイムアウトチェック
-        if let Some(deadline) = options.deadline {
-            if std::time::Instant::now() >= deadline {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                return SimplexOutcome::Timeout(obj);
-            }
+        // タイムアウト・キャンセルチェック
+        let timed_out = options.deadline.map_or(false, |d| std::time::Instant::now() >= d);
+        let cancelled = options.cancel_flag.as_ref().map_or(false, |f| f.load(Ordering::Relaxed));
+        if timed_out || cancelled {
+            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            return SimplexOutcome::Timeout(obj);
         }
 
         // 1. Dual variables: y = BTRAN(c_B)

@@ -22,6 +22,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
+use std::sync::atomic::Ordering;
 
 /// Dual Simplex法の2相実装エントリポイント
 ///
@@ -331,12 +332,12 @@ fn dual_simplex_core(
     let mut alpha_dense = vec![0.0f64; m];
 
     for _iter in 0..max_iter {
-        // タイムアウトチェック
-        if let Some(deadline) = options.deadline {
-            if std::time::Instant::now() >= deadline {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                return SimplexOutcome::Timeout(obj);
-            }
+        // タイムアウト・キャンセルチェック
+        let timed_out = options.deadline.map_or(false, |d| std::time::Instant::now() >= d);
+        let cancelled = options.cancel_flag.as_ref().map_or(false, |f| f.load(Ordering::Relaxed));
+        if timed_out || cancelled {
+            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            return SimplexOutcome::Timeout(obj);
         }
 
         // Step 1: 離基変数選択 - 最も主実行不可な基底変数
