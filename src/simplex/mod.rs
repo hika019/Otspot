@@ -52,6 +52,18 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 ///
 /// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
 pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    // timeout_secs → deadline 変換（qp_solve_impl と同様）
+    let mut opts_with_deadline;
+    let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
+        opts_with_deadline = options.clone();
+        opts_with_deadline.deadline = Some(
+            std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
+        );
+        &opts_with_deadline
+    } else {
+        options
+    };
+
     // --- Presolve ---
     if options.presolve {
         match presolve::run_presolve(problem) {
@@ -866,8 +878,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
     for _iter in 0..max_iter {
         // タイムアウト・キャンセルチェック
-        let timed_out = options.deadline.map_or(false, |d| std::time::Instant::now() >= d);
-        let cancelled = options.cancel_flag.as_ref().map_or(false, |f| f.load(Ordering::Relaxed));
+        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
             return SimplexOutcome::Timeout(obj);
@@ -1535,6 +1547,60 @@ mod tests {
         let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
         let opts = SolverOptions {
             deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Timeout);
+    }
+
+    #[test]
+    fn test_lp_timeout() {
+        // timeout_secs=0.0 (即時期限切れ) でLP実行 → SolveStatus::Timeout を確認
+        // HIGH-1: LP timeout 公開APIの動作検証
+        let n = 200usize;
+        let m = 100usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0);
+            }
+        }
+        let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
+        let opts = SolverOptions {
+            timeout_secs: Some(0.0),
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Timeout);
+    }
+
+    #[test]
+    fn test_lp_cancel() {
+        // cancel_flag を true にセットしてLP実行 → SolveStatus::Timeout を確認
+        // HIGH-1: LP cancel_flag 動作検証
+        use std::sync::Arc;
+        let n = 200usize;
+        let m = 100usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0);
+            }
+        }
+        let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            presolve: false,
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);

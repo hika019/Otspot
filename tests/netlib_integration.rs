@@ -1,6 +1,6 @@
 //! Integration tests: Parse Netlib MPS files and verify problem dimensions + solving
 use solver::io::mps::parse_mps_file;
-use solver::options::SolverOptions;
+use solver::options::{SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::simplex::{solve, solve_with};
 use std::path::Path;
@@ -402,4 +402,69 @@ fn test_solve_boeing2() {
     );
     assert!(elapsed.as_secs() < 30, "boeing2 solve time < 30 sec, got {:?}", elapsed);
     println!("boeing2 solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+// --- HIGH-2: Dual Simplex Netlib検証 (cmd_155) ---
+
+#[test]
+fn test_dual_simplex_netlib_1() {
+    // afiro: 27 constraints, 32 vars。Dual Simplex強制で最適解を確認
+    let path = Path::new("tests/netlib/afiro.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse afiro.mps");
+    let mut opts = SolverOptions::default();
+    opts.simplex_method = SimplexMethod::Dual;
+    let start = Instant::now();
+    let result = solve_with(&problem, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "afiro (Dual) should reach Optimal");
+    let expected = -464.7531428571429;
+    assert!(
+        (result.objective - expected).abs() < 0.01,
+        "afiro (Dual): expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    println!("afiro (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_dual_simplex_netlib_2() {
+    // sc50a: 50 constraints, 48 vars。Dual Simplex強制で最適解を確認
+    let path = Path::new("tests/netlib/sc50a.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse sc50a.mps");
+    let mut opts = SolverOptions::default();
+    opts.simplex_method = SimplexMethod::Dual;
+    let start = Instant::now();
+    let result = solve_with(&problem, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "sc50a (Dual) should reach Optimal");
+    let expected = -64.575077059;
+    assert!(
+        (result.objective - expected).abs() < 0.01,
+        "sc50a (Dual): expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    println!("sc50a (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_dual_simplex_netlib_3() {
+    // adlittle: ~55 constraints, ~97 vars。Dual Simplex強制で最適解を確認
+    let path = Path::new("tests/netlib/adlittle.mps");
+    let problem = parse_mps_file(path).expect("Failed to parse adlittle.mps");
+    let mut opts = SolverOptions::default();
+    opts.simplex_method = SimplexMethod::Dual;
+    let start = Instant::now();
+    let result = solve_with(&problem, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(result.status, SolveStatus::Optimal, "adlittle (Dual) should reach Optimal");
+    let expected = 225494.96316;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "adlittle (Dual): expected ~{}, got {}",
+        expected,
+        result.objective
+    );
+    println!("adlittle (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
 }
