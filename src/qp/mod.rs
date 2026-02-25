@@ -36,8 +36,10 @@ mod active_set;
 pub(crate) mod kkt;
 mod problem;
 mod solver;
+pub mod admm;
 
 pub use problem::{QpProblem, QpResult, QpWarmStart};
+pub use admm::solve_qp_admm;
 
 use crate::options::SolverOptions;
 

@@ -65,6 +65,20 @@ pub struct SolverOptions {
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
     /// タイムアウト期限（内部使用。qp_solve_impl の先頭で timeout_secs から計算）
     pub(crate) deadline: Option<Instant>,
+
+    // --- ADMM固有パラメータ ---
+    /// ADMM近接正則化パラメータ σ（デフォルト: 1e-6）
+    pub sigma: f64,
+    /// ADMMペナルティパラメータ ρ 初期値（デフォルト: 0.1）
+    pub rho: f64,
+    /// ADMM過緩和係数 α（デフォルト: 1.6）
+    pub alpha: f64,
+    /// ADMM絶対収束tolerance（デフォルト: 1e-3）
+    pub eps_abs: f64,
+    /// ADMM相対収束tolerance（デフォルト: 1e-3）
+    pub eps_rel: f64,
+    /// ADMMの最大反復回数（デフォルト: 4000）
+    pub max_iter_admm: usize,
 }
 
 impl Default for SolverOptions {
@@ -82,6 +96,12 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
+            sigma: 1e-6,
+            rho: 0.1,
+            alpha: 1.6,
+            eps_abs: 1e-3,
+            eps_rel: 1e-3,
+            max_iter_admm: 4000,
         }
     }
 }

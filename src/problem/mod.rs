@@ -32,6 +32,8 @@ pub enum SolveStatus {
     MaxIterations,
     /// タイムアウト（timeout_secs を超過した）
     Timeout,
+    /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
+    NumericalError,
 }
 
 impl fmt::Display for SolveStatus {
@@ -42,6 +44,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Unbounded => write!(f, "Unbounded"),
             SolveStatus::MaxIterations => write!(f, "MaxIterations"),
             SolveStatus::Timeout => write!(f, "Timeout"),
+            SolveStatus::NumericalError => write!(f, "NumericalError"),
         }
     }
 }

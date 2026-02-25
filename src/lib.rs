@@ -52,9 +52,10 @@ pub(crate) mod tolerances;
 pub mod options;
 pub use options::SolverOptions;
 pub mod qp;
+pub mod linalg;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
-pub use qp::{solve_qp, QpProblem, QpResult, QpWarmStart};
+pub use qp::{solve_qp, solve_qp_admm, QpProblem, QpResult, QpWarmStart};
