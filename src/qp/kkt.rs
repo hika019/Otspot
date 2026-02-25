@@ -12,6 +12,7 @@
 use crate::basis::lu;
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
+use std::time::Instant;
 
 /// KKTシステムソルバー
 ///
@@ -31,14 +32,24 @@ impl KktSolver {
     ///
     /// # エラー
     /// KKT行列が特異な場合はエラーを返す
+    #[allow(dead_code)]
     pub fn new(q: &CscMatrix, a_active: &CscMatrix) -> Result<Self, SolverError> {
+        Self::new_with_deadline(q, a_active, None)
+    }
+
+    /// deadline 付き KKT ソルバー構築
+    pub(crate) fn new_with_deadline(
+        q: &CscMatrix,
+        a_active: &CscMatrix,
+        deadline: Option<Instant>,
+    ) -> Result<Self, SolverError> {
         let n = q.ncols;
         let w = a_active.nrows;
         let size = n + w;
 
         let kkt = build_kkt_matrix(q, a_active, n, w)?;
         let basis: Vec<usize> = (0..size).collect();
-        let lu = lu::LuFactorization::factorize(&kkt, &basis)?;
+        let lu = lu::LuFactorization::factorize_timed(&kkt, &basis, deadline)?;
 
         Ok(KktSolver { lu, n, w })
     }

@@ -716,8 +716,20 @@ fn active_set_loop(
                     iterations: iter,
                 };
             }
-            match solve_unconstrained_direction(&problem.q, &grad) {
+            match solve_unconstrained_direction(&problem.q, &grad, timeout.deadline) {
                 Ok(d) => (d, vec![]),
+                Err(crate::error::SolverError::DeadlineExceeded) => {
+                    let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                    return QpResult {
+                        status: SolveStatus::Timeout,
+                        objective: obj,
+                        solution: x,
+                        dual_solution: vec![0.0; m],
+                        bound_duals: vec![0.0; aug_b.len() - m],
+                        active_set: working_set.indices().to_vec(),
+                        iterations: iter,
+                    };
+                }
                 Err(_) => {
                     // Q が特異: 停留点として扱う
                     (vec![0.0; n], vec![])
@@ -736,8 +748,20 @@ fn active_set_loop(
                     iterations: iter,
                 };
             }
-            let kkt_solver = match KktSolver::new(&problem.q, &a_active) {
+            let kkt_solver = match KktSolver::new_with_deadline(&problem.q, &a_active, timeout.deadline) {
                 Ok(s) => s,
+                Err(crate::error::SolverError::DeadlineExceeded) => {
+                    let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                    return QpResult {
+                        status: SolveStatus::Timeout,
+                        objective: obj,
+                        solution: x,
+                        dual_solution: vec![0.0; m],
+                        bound_duals: vec![0.0; aug_b.len() - m],
+                        active_set: working_set.indices().to_vec(),
+                        iterations: iter,
+                    };
+                }
                 Err(_) => {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
                     return QpResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
@@ -855,7 +879,8 @@ fn active_set_loop(
 fn solve_unconstrained_direction(
     q: &CscMatrix,
     grad: &[f64],
-) -> Result<Vec<f64>, ()> {
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<f64>, crate::error::SolverError> {
     let n = grad.len();
     let mut d = vec![0.0f64; n];
 
@@ -879,7 +904,7 @@ fn solve_unconstrained_direction(
         for i in 0..n {
             let q_ii = get_diagonal(q, i);
             if q_ii.abs() < 1e-12 {
-                return Err(()); // 特異
+                return Err(crate::error::SolverError::SingularBasis { step: i }); // 特異
             }
             d[i] = -grad[i] / q_ii;
         }
@@ -889,13 +914,9 @@ fn solve_unconstrained_direction(
     // 一般PSDの場合: LU分解で解く
     // 一時的にQをKKT行列として使用（活性制約なし）
     let a_empty = CscMatrix::new(0, n);
-    match KktSolver::new(q, &a_empty) {
-        Ok(solver) => match solver.solve(grad) {
-            Ok((d_result, _)) => Ok(d_result),
-            Err(_) => Err(()),
-        },
-        Err(_) => Err(()),
-    }
+    let solver = KktSolver::new_with_deadline(q, &a_empty, deadline)?;
+    let (d_result, _) = solver.solve(grad)?;
+    Ok(d_result)
 }
 
 /// ステップ幅計算の結果

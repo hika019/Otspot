@@ -47,6 +47,9 @@ pub enum SolverError {
         /// どの入力が空か（例: "basis"）
         context: &'static str,
     },
+
+    /// Deadline を超過した（タイムアウト）
+    DeadlineExceeded,
 }
 
 impl std::fmt::Display for SolverError {
@@ -64,6 +67,9 @@ impl std::fmt::Display for SolverError {
             }
             SolverError::EmptyInput { context } => {
                 write!(f, "Empty input: {}", context)
+            }
+            SolverError::DeadlineExceeded => {
+                write!(f, "Deadline exceeded during computation")
             }
         }
     }

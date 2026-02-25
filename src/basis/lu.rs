@@ -18,6 +18,7 @@
 use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
 use crate::tolerances::*;
+use std::time::Instant;
 
 /// LU分解の結果を保持する構造体。
 ///
@@ -119,6 +120,16 @@ impl LuFactorization {
     /// 3. ガウス消去でL・Uの成分を収集
     /// 4. 順列適用後に `SparseLowerCSC` / `SparseUpperCSR` を構築
     pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
+        Self::factorize_timed(a, basis, None)
+    }
+
+    /// deadline 付き LU 分解。Gaussian 消去ループ内で 100 ステップごとに deadline を確認し、
+    /// 超過時は `SolverError::DeadlineExceeded` を返す。
+    pub(crate) fn factorize_timed(
+        a: &CscMatrix,
+        basis: &[usize],
+        deadline: Option<Instant>,
+    ) -> Result<Self, SolverError> {
         let m = basis.len();
         if m == 0 {
             return Err(SolverError::EmptyInput { context: "basis" });
@@ -154,6 +165,11 @@ impl LuFactorization {
         let mut diag = vec![0.0f64; m];
 
         for step in 0..m {
+            // 10ステップごとにdeadlineチェック（大規模行列で1ステップが長時間になるため細粒度化）
+            if step % 10 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                return Err(SolverError::DeadlineExceeded);
+            }
+
             // しきい値判定用の列最大絶対値を計算（アクティブ要素のみ）
             let mut col_max: Vec<f64> = vec![0.0; m];
             for j in 0..m {
