@@ -25,6 +25,7 @@ pub use crate::constraint;
 
 use variable::VariableDefinition;
 
+use crate::options::QpSolverChoice;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::simplex;
 use crate::sparse::CscMatrix;
@@ -55,6 +56,10 @@ pub struct Model {
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
     /// Convention: min 1/2 x^T Q x + c^T x  ("1/2あり" standard).
     quadratic_objective: Option<CscMatrix>,
+    /// Timeout for QP solve in seconds (None = unlimited).
+    timeout_secs: Option<f64>,
+    /// QP solver choice (None = use default Auto).
+    qp_solver_choice: Option<QpSolverChoice>,
 }
 
 impl Model {
@@ -67,7 +72,19 @@ impl Model {
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
+            timeout_secs: None,
+            qp_solver_choice: None,
         }
+    }
+
+    /// Set a timeout for QP solve operations.
+    pub fn set_timeout(&mut self, secs: f64) {
+        self.timeout_secs = Some(secs);
+    }
+
+    /// Set the QP solver to use.
+    pub fn set_qp_solver_choice(&mut self, choice: QpSolverChoice) {
+        self.qp_solver_choice = Some(choice);
     }
 
     /// Add a decision variable to the model.
@@ -216,7 +233,7 @@ impl Model {
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
-            SolveStatus::Timeout => Err(ModelError::Internal("Solver timeout".to_string())),
+            SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::Internal("Numerical error".to_string())),
         }
     }
@@ -231,7 +248,7 @@ impl Model {
         q_orig: CscMatrix,
         num_model_constraints: usize,
     ) -> Result<ModelResult, ModelError> {
-        use crate::qp::{QpProblem, solve_qp};
+        use crate::qp::QpProblem;
 
         let num_vars = self.variables.len();
 
@@ -312,7 +329,14 @@ impl Model {
         let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds)
             .map_err(ModelError::Internal)?;
 
-        let qp_result = solve_qp(&qp_problem);
+        let mut opts = crate::options::SolverOptions::default();
+        if let Some(t) = self.timeout_secs {
+            opts.timeout_secs = Some(t);
+        }
+        if let Some(choice) = self.qp_solver_choice {
+            opts.qp_solver = choice;
+        }
+        let qp_result = crate::qp::solve_qp_with_options(&qp_problem, &opts);
 
         match qp_result.status {
             SolveStatus::Optimal => {
@@ -353,9 +377,7 @@ impl Model {
             SolveStatus::MaxIterations => {
                 Err(ModelError::Internal("QP iteration limit reached".to_string()))
             }
-            SolveStatus::Timeout => {
-                Err(ModelError::Internal("QP solver timeout".to_string()))
-            }
+            SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => {
                 Err(ModelError::Internal("QP numerical error".to_string()))
             }
@@ -441,6 +463,8 @@ pub enum ModelError {
     NoObjective,
     /// The solver returned a non-optimal status.
     SolveError(SolveError),
+    /// Solver timed out before finding an optimal solution.
+    Timeout,
     /// An internal error (e.g., dimension mismatch in matrix construction).
     Internal(String),
 }
@@ -453,6 +477,7 @@ impl fmt::Display for ModelError {
                 "No objective function defined. Call model.minimize() or model.maximize() before solve()."
             ),
             ModelError::SolveError(e) => write!(f, "Solve failed: {}", e),
+            ModelError::Timeout => write!(f, "Solver timed out"),
             ModelError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
@@ -467,6 +492,7 @@ impl std::error::Error for ModelError {}
 #[cfg(test)]
 mod tests {
     use super::{Model, ModelError, SolveError, Variable};
+    use crate::options::QpSolverChoice;
     use crate::sparse::CscMatrix;
 
     const EPS: f64 = 1e-5;
@@ -778,5 +804,52 @@ mod tests {
         assert_close(result[x], 1.0, "T13: x");
         assert_close(result[y], 1.0, "T13: y");
         assert_close(result.objective_value, -6.0, "T13: obj");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: Model QP timeout – timeout=0.001秒でTimeout返却
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_timeout() {
+        // Large QP that should trigger timeout with 0.001s limit.
+        // Use a well-defined small problem but set an extremely short timeout.
+        let mut model = Model::new("qp_timeout");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(-4.0 * x + -4.0 * y);
+        model.set_timeout(0.000_001); // 1 microsecond → always times out
+
+        let err = model.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::Timeout),
+            "expected Timeout, got {:?}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Model QP solver choice – QpSolverChoice::Admm で正常解
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_solver_choice() {
+        // Same as T9 but force ADMM solver
+        // min x^2+y^2 - 4x - 4y  s.t. x,y >= 0
+        // Expected: x=y=2, obj=-8
+        let mut model = Model::new("qp_admm_choice");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(-4.0 * x + -4.0 * y);
+        model.set_qp_solver_choice(QpSolverChoice::Admm);
+
+        let result = model.solve().unwrap();
+        // ADMM converges to eps_abs=1e-3, use looser tolerance
+        let admm_tol = 1e-2;
+        assert!((result[x] - 2.0).abs() < admm_tol, "T15: x={}", result[x]);
+        assert!((result[y] - 2.0).abs() < admm_tol, "T15: y={}", result[y]);
+        assert!((result.objective_value - (-8.0)).abs() < admm_tol, "T15: obj={}", result.objective_value);
     }
 }
