@@ -103,7 +103,7 @@ pub struct SolverOptions {
     /// Admm: 強制 ADMM
     /// ActiveSet: 強制 Active Set
     pub qp_solver: QpSolverChoice,
-    /// QP 自動切替の閾値（デフォルト: 3_000）
+    /// QP 自動切替の閾値（デフォルト: 10_000）
     pub qp_solver_threshold: usize,
 }
 
@@ -130,7 +130,7 @@ impl Default for SolverOptions {
             max_iter_admm: None,
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
-            qp_solver_threshold: 3_000,
+            qp_solver_threshold: 10_000,
         }
     }
 }
