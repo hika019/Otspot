@@ -12,6 +12,7 @@ pub(crate) mod test_utils;
 
 use crate::error::SolverError;
 use crate::sparse::{CscMatrix, SparseVec};
+use std::time::Instant;
 
 /// 改訂単体法の基底管理トレイト
 ///
@@ -62,6 +63,28 @@ impl LuBasis {
             basis_indices: basis.to_vec(),
             refactor_failed: false,
         })
+    }
+
+    /// 数値安定性を検査し、必要であれば deadline 付きで基底行列を再因子分解する。
+    ///
+    /// # cmd_171: timeout audit fix
+    /// refactor_if_needed の deadline 対応版。O(m²〜m³) の LU 再因子分解に
+    /// deadline を渡すことで大規模 Simplex でのハングを防止する。
+    /// 特異基底または deadline 超過どちらの場合も `refactor_failed = true` を設定する。
+    pub(crate) fn refactor_if_needed_timed(&mut self, a: &CscMatrix, basis: &[usize], deadline: Option<Instant>) {
+        if self.eta_file.needs_refactor() {
+            match refactor::refactor_timed(a, basis, deadline) {
+                Ok(new_lu) => {
+                    self.lu = new_lu;
+                    self.eta_file.etas.clear();
+                    self.basis_indices = basis.to_vec();
+                }
+                Err(_) => {
+                    // 特異基底または deadline 超過: フラグを立てて打ち切り
+                    self.refactor_failed = true;
+                }
+            }
+        }
     }
 }
 

@@ -4,12 +4,15 @@
 //! 入力行列は上三角のみCSC形式で与える。
 
 use crate::sparse::CscMatrix;
+use std::time::Instant;
 
 /// LDL分解エラー
 #[derive(Debug)]
 pub enum LdlError {
-    /// 対角要素がゼロまたは負（特異行列または不定行列）
+    /// 対角要素がゼロまたは負（特異行列または不定行値）
     SingularOrIndefinite,
+    /// deadline を超過した（タイムアウト）
+    DeadlineExceeded,
 }
 
 /// LDL^T分解の結果
@@ -172,6 +175,85 @@ pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
 
     let l_mat = CscMatrix { col_ptr, row_ind, values, nrows: n, ncols: n };
 
+    Ok(LdlFactorization { L: l_mat, D: d_vec, Dinv: dinv })
+}
+
+/// deadline 付き LDL^T 分解。外側ループ 1000 列ごとに deadline を確認し、
+/// 超過した場合は `Err(LdlError::DeadlineExceeded)` を返す。
+///
+/// # cmd_171: timeout audit fix
+/// n >= 10_000 の LDL 因子化は秒単位を要しうる。T1/T2 チェックは呼び出し元で
+/// 実施されるが、factorize 自体が 34 秒ハングした前例 (cmd_170) があるため
+/// 関数内部でも deadline を確認する。
+pub fn factorize_with_deadline(mat: &CscMatrix, deadline: Option<Instant>) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    assert_eq!(n, mat.ncols, "Matrix must be square");
+
+    let mut d_vec = vec![0.0f64; n];
+    let mut dinv = vec![0.0f64; n];
+    let mut y = vec![0.0f64; n];
+    let mut l_cols: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
+
+    for j in 0..n {
+        // cmd_171: timeout audit fix — 1000列ごとにdeadlineチェック
+        if j % 1000 == 0 {
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return Err(LdlError::DeadlineExceeded);
+                }
+            }
+        }
+
+        for idx in mat.col_ptr[j]..mat.col_ptr[j + 1] {
+            let i = mat.row_ind[idx];
+            let v = mat.values[idx];
+            if i == j {
+                y[j] = v;
+            } else if i < j {
+                y[i] = v;
+            }
+        }
+
+        for k in 0..j {
+            if y[k] == 0.0 {
+                continue;
+            }
+            let l_jk = y[k] * dinv[k];
+            y[j] -= l_jk * y[k];
+            l_cols[k].push((j, l_jk));
+            for &(m, l_mk) in &l_cols[k] {
+                if m >= j {
+                    break;
+                }
+                y[m] -= l_mk * y[k];
+            }
+        }
+
+        d_vec[j] = y[j];
+        if !d_vec[j].is_finite() || d_vec[j] <= 0.0 {
+            y[..=j].fill(0.0);
+            return Err(LdlError::SingularOrIndefinite);
+        }
+        dinv[j] = 1.0 / d_vec[j];
+        y[..=j].fill(0.0);
+    }
+
+    let nnz: usize = l_cols.iter().map(|c| c.len()).sum();
+    let mut col_ptr = vec![0usize; n + 1];
+    for k in 0..n {
+        col_ptr[k + 1] = col_ptr[k] + l_cols[k].len();
+    }
+    let mut row_ind = vec![0usize; nnz];
+    let mut values = vec![0.0f64; nnz];
+    for k in 0..n {
+        let start = col_ptr[k];
+        for (idx, &(row, val)) in l_cols[k].iter().enumerate() {
+            row_ind[start + idx] = row;
+            values[start + idx] = val;
+        }
+    }
+
+    let l_mat = CscMatrix { col_ptr, row_ind, values, nrows: n, ncols: n };
     Ok(LdlFactorization { L: l_mat, D: d_vec, Dinv: dinv })
 }
 

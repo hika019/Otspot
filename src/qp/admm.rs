@@ -231,16 +231,31 @@ fn build_k_upper(
 // LDL分解フォールバック
 // ---------------------------------------------------------------------------
 
+/// try_factorize の失敗種別
+#[derive(Debug)]
+enum TryFactorizeErr {
+    /// 全 σ 候補で行列が特異または不定
+    Numerical,
+    /// deadline を超過した（タイムアウト）
+    Timeout,
+}
+
 /// σ を段階的に増加させて LDL 分解を試みる（最大4段階）
 ///
 /// 成功: Ok((factorization, sigma_used))
-/// 全失敗: Err(())
+/// 数値失敗: Err(TryFactorizeErr::Numerical)
+/// タイムアウト: Err(TryFactorizeErr::Timeout)
+///
+/// # cmd_171: timeout audit fix
+/// n >= 10_000 の K 行列 LDL 因子化は秒単位を要しうる。
+/// deadline を factorize_with_deadline に渡すことで内部ハングを防止する。
 fn try_factorize(
     q: &CscMatrix,
     a: &CscMatrix,
     rho: f64,
     sigma_init: f64,
-) -> Result<(LdlFactorization, f64), ()> {
+    deadline: Option<Instant>,
+) -> Result<(LdlFactorization, f64), TryFactorizeErr> {
     let sigma_candidates = [
         sigma_init,
         sigma_init * 10.0,
@@ -248,14 +263,21 @@ fn try_factorize(
         sigma_init * 1000.0,
     ];
     for &sigma in &sigma_candidates {
+        // cmd_171: timeout audit fix — 各σ候補の前にもdeadlineチェック
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Err(TryFactorizeErr::Timeout);
+            }
+        }
         if let Ok(k_mat) = build_k_upper(q, a, sigma, rho) {
-            match ldl::factorize(&k_mat) {
+            match ldl::factorize_with_deadline(&k_mat, deadline) {
                 Ok(fac) => return Ok((fac, sigma)),
                 Err(LdlError::SingularOrIndefinite) => continue,
+                Err(LdlError::DeadlineExceeded) => return Err(TryFactorizeErr::Timeout),
             }
         }
     }
-    Err(())
+    Err(TryFactorizeErr::Numerical)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,9 +467,11 @@ fn solve_qp_admm_ldl(
     }
 
     // 初期 LDL 分解（σフォールバック付き）
-    let (mut fac, mut sigma_used) = match try_factorize(q, a, rho, sigma_init) {
+    // cmd_171: timeout audit fix — deadline を渡して内部ハングを防止
+    let (mut fac, mut sigma_used) = match try_factorize(q, a, rho, sigma_init, timeout_ctx.deadline) {
         Ok(v) => v,
-        Err(_) => return make_numerical_error_result(n, m),
+        Err(TryFactorizeErr::Numerical) => return make_numerical_error_result(n, m),
+        Err(TryFactorizeErr::Timeout) => return make_timeout_result(n, m, 0),
     };
 
     // T2: LDL後 timeout チェック
@@ -549,15 +573,31 @@ fn solve_qp_admm_ldl(
                         iterations: iter,
                     };
                 }
-                // K再構築 + LDL再分解（失敗時は旧ρで継続）
-                if let Ok((new_fac, new_sigma)) = try_factorize(q, a, rho_new, sigma_used) {
-                    let scale = rho / rho_new;
-                    for i in 0..m_aug {
-                        ws.y[i] *= scale;
+                // K再構築 + LDL再分解（失敗時は旧ρで継続、タイムアウト時は即リターン）
+                // cmd_171: timeout audit fix — deadline を渡してρ更新LDL内部ハングを防止
+                match try_factorize(q, a, rho_new, sigma_used, timeout_ctx.deadline) {
+                    Ok((new_fac, new_sigma)) => {
+                        let scale = rho / rho_new;
+                        for i in 0..m_aug {
+                            ws.y[i] *= scale;
+                        }
+                        fac = new_fac;
+                        sigma_used = new_sigma;
+                        rho = rho_new;
                     }
-                    fac = new_fac;
-                    sigma_used = new_sigma;
-                    rho = rho_new;
+                    Err(TryFactorizeErr::Timeout) => {
+                        let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+                        return QpResult {
+                            status: SolveStatus::Timeout,
+                            objective: obj,
+                            solution: ws.x.clone(),
+                            dual_solution: ws.y[..m].to_vec(),
+                            bound_duals: vec![],
+                            active_set: vec![],
+                            iterations: iter,
+                        };
+                    }
+                    Err(TryFactorizeErr::Numerical) => { /* 旧ρで継続 */ }
                 }
                 if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);

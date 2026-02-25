@@ -982,10 +982,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         basis[leaving_row] = entering_col;
 
         // 11. Refactor if needed
-        basis_mgr.refactor_if_needed(a, basis);
-        // 特異基底による再因子分解失敗 → panicせず打ち切り
+        // cmd_171: timeout audit fix — deadline 付きで LU 再因子分解を実行
+        basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+        // 特異基底または deadline 超過による再因子分解失敗 → 適切な結果を返す
         if basis_mgr.refactor_failed {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return SimplexOutcome::Timeout(obj);
+            }
             return SimplexOutcome::MaxIterations(obj);
         }
     }

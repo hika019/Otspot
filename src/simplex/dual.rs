@@ -397,9 +397,13 @@ fn dual_simplex_core(
         let pivot_element = alpha_dense[leaving_row];
         if pivot_element.abs() < PIVOT_TOL {
             // 数値的に不安定 → refactorして被縮小費用を再計算
-            basis_mgr.refactor_if_needed(a, basis);
+            // cmd_171: timeout audit fix — deadline 付きで LU 再因子分解
+            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return SimplexOutcome::Timeout(obj);
+                }
                 return SimplexOutcome::MaxIterations(obj);
             }
             reduced_costs =
@@ -449,9 +453,13 @@ fn dual_simplex_core(
 
         // Step 11: 必要に応じてrefactor + 被縮小費用リセット
         if basis_mgr_needs_refactor_approx(_iter) {
-            basis_mgr.refactor_if_needed(a, basis);
+            // cmd_171: timeout audit fix — deadline 付きで LU 再因子分解
+            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return SimplexOutcome::Timeout(obj);
+                }
                 return SimplexOutcome::MaxIterations(obj);
             }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
