@@ -152,13 +152,16 @@ pub(crate) fn qp_solve_impl(
             use rayon::prelude::*;
 
             // Phase Iで実行可能点を1回取得
+            eprintln!("DBG: parallel Phase1 start, deadline={:?}", effective_opts.deadline);
+            let phase1_start = std::time::Instant::now();
             let feasible_x = match find_initial_feasible_point(problem, effective_opts) {
-                Phase1Result::Feasible(x) => x,
-                Phase1Result::Infeasible => return QpResult::infeasible(),
+                Phase1Result::Feasible(x) => { eprintln!("DBG: Phase1 Feasible ({:.2}s)", phase1_start.elapsed().as_secs_f64()); x },
+                Phase1Result::Infeasible => { eprintln!("DBG: Phase1 Infeasible"); return QpResult::infeasible() },
                 Phase1Result::MaxIterations => {
+                    eprintln!("DBG: Phase1 MaxIterations");
                     return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                 }
-                Phase1Result::Timeout => return QpResult {
+                Phase1Result::Timeout => { eprintln!("DBG: Phase1 Timeout ({:.2}s)", phase1_start.elapsed().as_secs_f64()); return QpResult {
                     status: SolveStatus::Timeout,
                     objective: f64::INFINITY,
                     solution: vec![],
@@ -166,12 +169,14 @@ pub(crate) fn qp_solve_impl(
                     bound_duals: vec![],
                     active_set: vec![],
                     iterations: 0,
-                },
+                }},
             };
 
             // cancel フラグ（他ワーカーが Optimal を見つけたら残りを止める）
             let cancel = Arc::new(AtomicBool::new(false));
             let run_count = effective_opts.parallel_runs;
+            eprintln!("DBG: launching {} parallel workers, deadline_remaining={:.2}s", run_count,
+                effective_opts.deadline.map_or(-1.0, |d| (d - std::time::Instant::now()).as_secs_f64()));
 
             // 初期ワーキングセット多様化: WS0（空集合）/ WS1（境界アクティブ）/ WS3（ハッシュ乱択）
             let initial_working_sets = build_initial_working_sets(problem, &feasible_x, run_count);
@@ -186,6 +191,9 @@ pub(crate) fn qp_solve_impl(
                     let mut worker_opts = effective_opts.clone();
                     worker_opts.cancel_flag = Some(cancel.clone());
                     let worker_timeout = TimeoutContext::from_options(&worker_opts);
+                    eprintln!("DBG: worker start, ws_len={}, should_stop={}, deadline_remaining={:.3}s",
+                        ws_indices.len(), worker_timeout.should_stop(),
+                        worker_opts.deadline.map_or(-1.0, |d| (d - std::time::Instant::now()).as_secs_f64()));
 
                     let r = active_set_loop(
                         problem,
@@ -194,6 +202,7 @@ pub(crate) fn qp_solve_impl(
                         &worker_opts,
                         &worker_timeout,
                     );
+                    eprintln!("DBG: worker done, status={:?}, iters={}", r.status, r.iterations);
                     if r.status == SolveStatus::Optimal {
                         cancel.store(true, Ordering::Relaxed);
                         Some(r)
@@ -556,6 +565,11 @@ fn find_initial_feasible_point(
         Err(_) => return Phase1Result::MaxIterations,
     };
 
+    // CSC構築完了後、deadline到達なら即座にTimeoutを返す（防御的チェック）
+    if options.deadline.map_or(false, |d| std::time::Instant::now() >= d) {
+        return Phase1Result::Timeout;
+    }
+
     let lp = match LpProblem::new_general(
         vec![0.0f64; n],
         new_a,
@@ -651,6 +665,7 @@ fn active_set_loop(
     let (aug_a, aug_b) = augment_bounds_to_constraints(&problem.a, &problem.b, &problem.bounds);
 
     for iter in 0..max_iter {
+        if iter < 3 { eprintln!("DBG: active_set_loop iter={}, n={}, ws_len={}, should_stop={}", iter, n, working_set.len(), timeout.should_stop()); }
         // タイムアウト / キャンセルチェック
         if timeout.should_stop() {
             let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
@@ -679,6 +694,18 @@ fn active_set_loop(
 
         let (d, lambda) = if working_set.is_empty() {
             // 活性制約なし: 制約なし最適化方向
+            if timeout.should_stop() {
+                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj,
+                    solution: x,
+                    dual_solution: vec![0.0; m],
+                    bound_duals: vec![0.0; aug_b.len() - m],
+                    active_set: working_set.indices().to_vec(),
+                    iterations: iter,
+                };
+            }
             match solve_unconstrained_direction(&problem.q, &grad) {
                 Ok(d) => (d, vec![]),
                 Err(_) => {
@@ -687,6 +714,18 @@ fn active_set_loop(
                 }
             }
         } else {
+            if timeout.should_stop() {
+                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj,
+                    solution: x,
+                    dual_solution: vec![0.0; m],
+                    bound_duals: vec![0.0; aug_b.len() - m],
+                    active_set: working_set.indices().to_vec(),
+                    iterations: iter,
+                };
+            }
             let kkt_solver = match KktSolver::new(&problem.q, &a_active) {
                 Ok(s) => s,
                 Err(_) => {
@@ -767,7 +806,21 @@ fn active_set_loop(
             }
         } else {
             // d ≠ 0: ステップ幅計算 (aug_a, aug_b を使用)
-            let alpha = compute_step_size(&aug_a, &aug_b, &x, &d, &working_set);
+            let alpha = compute_step_size(&aug_a, &aug_b, &x, &d, &working_set, timeout);
+
+            // タイムアウト発生時は即座に返す
+            if alpha.timed_out {
+                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj,
+                    solution: x,
+                    dual_solution: vec![0.0; m],
+                    bound_duals: vec![0.0; aug_b.len() - m],
+                    active_set: working_set.indices().to_vec(),
+                    iterations: iter,
+                };
+            }
 
             // x を更新
             for i in 0..n {
@@ -839,6 +892,7 @@ fn solve_unconstrained_direction(
 struct StepResult {
     step: f64,
     blocking_constraint: Option<usize>,
+    timed_out: bool,
 }
 
 /// ステップ幅 α* を計算する（ライン探索）
@@ -851,11 +905,21 @@ fn compute_step_size(
     x: &[f64],
     d: &[f64],
     working_set: &WorkingSet,
+    timeout: &TimeoutContext,
 ) -> StepResult {
     let mut alpha_crit = 1.0f64;
     let mut blocking: Option<usize> = None;
 
     for (i, &b_i) in aug_b.iter().enumerate() {
+        // 1000行ごとにtimeoutチェック
+        if i % 1000 == 0 && timeout.should_stop() {
+            return StepResult {
+                step: alpha_crit.max(0.0),
+                blocking_constraint: blocking,
+                timed_out: true,
+            };
+        }
+
         // 活性制約はスキップ
         if working_set.contains(i) {
             continue;
@@ -889,6 +953,7 @@ fn compute_step_size(
     StepResult {
         step: alpha_crit.max(0.0),
         blocking_constraint: blocking,
+        timed_out: false,
     }
 }
 
@@ -930,4 +995,56 @@ fn get_diagonal(q: &CscMatrix, i: usize) -> f64 {
         }
     }
     0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
+    use crate::qp::{solve_qp_with_options, QpProblem};
+    use crate::sparse::CscMatrix;
+
+    /// compute_step_size 内 timeout 動作確認
+    ///
+    /// n=500, m=100 の合成 QP 問題を timeout_secs=0.001 (1ms) で解かせ、
+    /// SolveStatus::Timeout が返ることを確認する。
+    /// Phase I LP (n=500, m=100) の処理時間が 1ms を超えるため、
+    /// active_set_loop または compute_step_size の timeout チェックで停止する。
+    #[test]
+    fn test_compute_step_size_timeout() {
+        let n = 500usize;
+        let m = 100usize;
+
+        // Q = 2*I (n×n 対角、正定値)
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals: Vec<f64> = vec![2.0; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+
+        // c = ones (無制約最小点を x = -0.5 に設定)
+        let c = vec![1.0; n];
+
+        // A: 行 i に変数 i*5 の係数 1.0 を配置 (m=100 行, n=500 列)
+        let a_rows: Vec<usize> = (0..m).collect();
+        let a_cols: Vec<usize> = (0..m).map(|i| i * 5).collect();
+        let a_vals: Vec<f64> = vec![1.0; m];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
+
+        // b = 1.0: x[i*5] <= 1.0 (x=-0.5 は実行可能)
+        let b = vec![1.0; m];
+
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(0.001); // 1ms タイムアウト
+
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "test_compute_step_size_timeout: expected Timeout, got {:?}",
+            result.status
+        );
+    }
 }

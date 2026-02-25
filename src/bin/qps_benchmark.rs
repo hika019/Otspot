@@ -8,12 +8,32 @@
 
 use std::env;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use solver::io::qps::parse_qps;
+use solver::io::qps::{parse_qps, QpsError};
 use solver::options::SolverOptions;
-use solver::qp::solve_qp_with_options;
 use solver::problem::SolveStatus;
+use solver::qp::solve_qp_with_options;
+use solver::QpProblem;
+
+enum BenchError {
+    Parse(QpsError),
+    ParseTimeout,
+}
+
+fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, BenchError> {
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = parse_qps(&path);
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(prob)) => Ok(prob),
+        Ok(Err(e)) => Err(BenchError::Parse(e)),
+        Err(_) => Err(BenchError::ParseTimeout),
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -68,10 +88,13 @@ fn main() {
             .unwrap_or("?")
             .to_string();
 
-        // パース
-        let prob = match parse_qps(path) {
+        let parse_start = Instant::now();
+        println!("PARSE_START: {}", name);
+
+        // パース（30秒タイムアウト付き）
+        let prob = match parse_with_timeout(path, 30) {
             Ok(p) => p,
-            Err(e) => {
+            Err(BenchError::Parse(e)) => {
                 let note = format!("{}", e);
                 println!(
                     "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
@@ -80,14 +103,26 @@ fn main() {
                 n_error += 1;
                 continue;
             }
+            Err(BenchError::ParseTimeout) => {
+                println!(
+                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
+                    name, "?", "?", "PARSE_TIMEOUT", 0.0, ""
+                );
+                n_timeout += 1;
+                continue;
+            }
         };
+
+        println!("PARSE_DONE: {} ({:.2}s)", name, parse_start.elapsed().as_secs_f64());
 
         let n = prob.num_vars;
         let m = prob.num_constraints;
 
+        println!("SOLVE_START: {}", name);
         let start = Instant::now();
         let result = solve_qp_with_options(&prob, &opts);
         let elapsed_s = start.elapsed().as_secs_f64();
+        println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {

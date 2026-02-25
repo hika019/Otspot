@@ -815,4 +815,29 @@ mod tests {
             result.status
         );
     }
+
+    #[test]
+    fn test_dual_simplex_timeout() {
+        // コールドスタートLP、deadlineを過去に設定してTimeout確認
+        let n = 200usize;
+        let m = 100usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0);
+            }
+        }
+        let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
+        let opts = SolverOptions {
+            simplex_method: SimplexMethod::Dual,
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Timeout);
+    }
 }
