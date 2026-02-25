@@ -92,7 +92,7 @@ pub struct SolverOptions {
     /// ADMMの最大反復回数（None = デフォルト: 10000）
     pub max_iter_admm: Option<usize>,
     /// ADMM x-update のソルバー選択
-    /// None = Auto（n > LDL_THRESHOLD のとき自動的に CG を選択）
+    /// None = Auto（A^T*A 推定充填率 > 10% または n > LDL_MAX_N のとき自動的に CG を選択）
     /// Some(true) = 強制 CG
     /// Some(false) = 強制 LDL
     pub admm_use_cg: Option<bool>,
@@ -103,7 +103,7 @@ pub struct SolverOptions {
     /// Admm: 強制 ADMM
     /// ActiveSet: 強制 Active Set
     pub qp_solver: QpSolverChoice,
-    /// QP 自動切替の閾値（デフォルト: 10_000）
+    /// QP 自動切替の閾値（デフォルト: 3_000）
     pub qp_solver_threshold: usize,
 }
 
@@ -130,7 +130,7 @@ impl Default for SolverOptions {
             max_iter_admm: None,
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
-            qp_solver_threshold: 10_000,
+            qp_solver_threshold: 3_000,
         }
     }
 }

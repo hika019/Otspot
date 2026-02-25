@@ -583,7 +583,7 @@ mod tests {
 
     /// T14: 自動切替 - 小問題（Active Set選択）
     ///
-    /// n=100 < qp_solver_threshold=10_000 → Auto モードで Active Set が選択される
+    /// n=100 < qp_solver_threshold=3_000 → Auto モードで Active Set が選択される
     /// Q = 2*I_100, c = -ones(100), bounds = [0,1]^100
     /// 最適解: xi = 0.5（bounds内部点）, obj = -25.0
     #[test]
@@ -599,7 +599,7 @@ mod tests {
         let bounds = vec![(0.0f64, 1.0f64); n];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        // Auto mode: n=100 < threshold=10_000 → Active Set が選択される
+        // Auto mode: n=100 < threshold=3_000 → Active Set が選択される
         let opts = SolverOptions::default();
         let result = solve_qp_with_options(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T14: Auto小問題はOptimal");
