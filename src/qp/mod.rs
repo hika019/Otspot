@@ -61,7 +61,7 @@ fn dispatch_qp(
     let use_admm = match options.qp_solver {
         QpSolverChoice::Admm => true,
         QpSolverChoice::ActiveSet => false,
-        QpSolverChoice::Auto => problem.num_vars > options.qp_solver_threshold,
+        QpSolverChoice::Auto => problem.num_vars >= options.qp_solver_threshold,
     };
     if use_admm {
         admm::solve_qp_admm(problem, options)

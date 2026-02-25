@@ -127,7 +127,7 @@ impl Default for SolverOptions {
             alpha: 1.6,
             eps_abs: 1e-3,
             eps_rel: 1e-3,
-            max_iter_admm: 4000,
+            max_iter_admm: 10000,
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
             qp_solver_threshold: 10_000,

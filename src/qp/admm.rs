@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 
 /// n > LDL_THRESHOLD のとき CG パスを自動選択
-const LDL_THRESHOLD: usize = 10_000;
+const LDL_THRESHOLD: usize = 5_000;
 
 struct TimeoutCtx {
     deadline: Option<Instant>,
