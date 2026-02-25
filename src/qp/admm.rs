@@ -12,7 +12,7 @@
 //! # timeout組み込み
 //! T1（LDL前）、T2（LDL後）、T3（各反復先頭）で `TimeoutCtx::should_stop()` をチェックする。
 
-use crate::linalg::cg::CgWorkspace;
+use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl::{self, LdlError, LdlFactorization};
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 // タイムアウト管理
 // ---------------------------------------------------------------------------
+
+/// n > LDL_THRESHOLD のとき CG パスを自動選択
+const LDL_THRESHOLD: usize = 10_000;
 
 struct TimeoutCtx {
     deadline: Option<Instant>,
@@ -69,12 +72,9 @@ struct AdmmWorkspace {
     r_dual: Vec<f64>,  // n: dual residual Qx + c + C^T y
     tmp_n: Vec<f64>,   // n: scratch (Qx, C^T v partial, etc.)
     tmp_m: Vec<f64>,   // m_aug: scratch (ρz - y, etc.)
-    // CG用フィールド（CGパス用。C3統合まで未使用）
-    #[allow(dead_code)]
+    // CG用フィールド（CGパス用）
     cg_ws: CgWorkspace, // CGソルバー作業バッファ（サイズ n）
-    #[allow(dead_code)]
     m_inv: Vec<f64>,    // 対角前処理 1/diag(K)（サイズ n）
-    #[allow(dead_code)]
     kv_tmp: Vec<f64>,   // kv_mul用中間バッファ（サイズ m = m_aug - n）
 }
 
@@ -279,8 +279,8 @@ fn try_factorize(
 /// - `v`: 入力ベクトル（長さ n）
 /// - `result`: 出力 K*v（長さ n、上書き）
 /// - `tmp_m`: 中間バッファ（長さ m = a.nrows）
-// C3統合まで未使用。GPU移行設計 §4.3 G3準拠のインデックスループを維持。
-#[allow(dead_code, clippy::needless_range_loop)]
+// GPU移行設計 §4.3 G3準拠のインデックスループを維持。
+#[allow(clippy::needless_range_loop)]
 fn kv_mul(
     q: &CscMatrix,
     a: &CscMatrix,
@@ -327,8 +327,6 @@ fn kv_mul(
 /// - `a`: 制約行列 A（m×n CSC）
 /// - `sigma`, `rho`: ADMMパラメータ
 /// - `m_inv`: 出力 1/diag(K)（長さ n、上書き）
-// C3統合まで未使用。
-#[allow(dead_code)]
 fn build_preconditioner(
     q: &CscMatrix,
     a: &CscMatrix,
@@ -389,18 +387,39 @@ fn compute_objective(q: &CscMatrix, c: &[f64], x: &[f64], tmp: &mut [f64]) -> f6
 /// min 1/2 x^T Q x + c^T x
 /// s.t. Ax <= b,  lb <= x <= ub
 ///
-/// # アルゴリズム
-/// C = [A; I_n] として OSQP 標準形式に変換。
-/// K = Q + (σ+ρ)I + ρ A^T A を LDL^T 分解し反復求解。
-/// timeout は T1（LDL前）、T2（LDL後）、T3（各反復先頭）で検出。
+/// # アルゴリズム選択
+/// admm_use_cg=None の場合、n > LDL_THRESHOLD なら CG パス、それ以外は LDL パス。
+/// admm_use_cg=Some(true/false) で強制選択可能。
 pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let timeout = TimeoutCtx::from_options(options);
+    let use_cg = match options.admm_use_cg {
+        Some(b) => b,
+        None => problem.num_vars > LDL_THRESHOLD,
+    };
+    if use_cg {
+        solve_qp_admm_cg(problem, options, &timeout)
+    } else {
+        solve_qp_admm_ldl(problem, options, &timeout)
+    }
+}
 
+// ---------------------------------------------------------------------------
+// ADMM QPソルバー（LDLパス）
+// ---------------------------------------------------------------------------
+
+/// ADMM法でQPを解く（LDL x-update パス）
+///
+/// K = Q + (σ+ρ)I + ρ A^T A を LDL^T 分解し x-update を直接解く。
+/// timeout は T1（LDL前）、T2（LDL後）、T3（各反復先頭）で検出。
+fn solve_qp_admm_ldl(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    timeout_ctx: &TimeoutCtx,
+) -> QpResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     let m_aug = m + n;
 
-    // ADMMパラメータ
     let sigma_init = options.sigma;
     let mut rho = options.rho;
     let alpha = options.alpha;
@@ -408,18 +427,10 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let eps_rel = options.eps_rel;
     let max_iter = options.max_iter_admm;
 
-    // サイズガード: n > 10000は直接LDL不可（O(n²)実装のため）
-    if n > 10_000 {
-        return make_numerical_error_result(n, m);
-    }
-
     let a = &problem.a;
     let q = &problem.q;
     let c = &problem.c;
 
-    // z のボックス制約境界: C = [A; I_n]
-    // l[0..m] = -INF (Ax <= b の下界), u[0..m] = b
-    // l[m..m+n] = lb,                   u[m..m+n] = ub
     let mut l_bound = vec![f64::NEG_INFINITY; m_aug];
     let mut u_bound = vec![f64::INFINITY; m_aug];
     u_bound[..m].copy_from_slice(&problem.b[..m]);
@@ -429,7 +440,7 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     }
 
     // T1: LDL前 timeout チェック
-    if timeout.should_stop() {
+    if timeout_ctx.should_stop() {
         return make_timeout_result(n, m, 0);
     }
 
@@ -440,7 +451,7 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     };
 
     // T2: LDL後 timeout チェック
-    if timeout.should_stop() {
+    if timeout_ctx.should_stop() {
         return make_timeout_result(n, m, 0);
     }
 
@@ -453,7 +464,7 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 
     for iter in 0..max_iter {
         // T3: 各反復先頭の timeout チェック
-        if timeout.should_stop() {
+        if timeout_ctx.should_stop() {
             let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
             return QpResult {
                 status: SolveStatus::Timeout,
@@ -470,13 +481,10 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
         // rhs = σ*x_prev - c + C^T*(ρ*z - y)
         ws.x_prev.copy_from_slice(&ws.x);
 
-        // tmp_m = ρ*z - y
         for i in 0..m_aug {
             ws.tmp_m[i] = rho * ws.z[i] - ws.y[i];
         }
-        // rhs = C^T * tmp_m
         spmv_ct(a, &ws.tmp_m, &mut ws.rhs);
-        // rhs += σ*x_prev - c
         for (j, &cj) in c.iter().enumerate() {
             ws.rhs[j] += sigma_used * ws.x_prev[j] - cj;
         }
@@ -484,21 +492,17 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
         fac.solve(&ws.rhs, &mut ws.x);
 
         // --- z-update（over-relaxation in constraint space） ---
-        // cx = C*x
         spmv_c(a, &ws.x, &mut ws.cx);
-        // x_tilde = α*cx + (1-α)*z  （制約空間での過緩和）
         let one_minus_alpha = 1.0 - alpha;
         for i in 0..m_aug {
             ws.x_tilde[i] = alpha * ws.cx[i] + one_minus_alpha * ws.z[i];
         }
-        // z_new = clip(x_tilde + y/ρ, l, u)  （heap alloc なし: インライン clip）
         for i in 0..m_aug {
             let v = ws.x_tilde[i] + ws.y[i] / rho;
             ws.z[i] = v.max(l_bound[i]).min(u_bound[i]);
         }
 
         // --- y-update ---
-        // y += ρ*(x_tilde - z_new)
         for i in 0..m_aug {
             ws.y[i] += rho * (ws.x_tilde[i] - ws.z[i]);
         }
@@ -533,8 +537,7 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                 rho, eps_abs, m_aug,
             );
             if (rho_new / rho - 1.0).abs() > 0.1 {
-                // T1/T2 timeout check for LDL re-factorization
-                if timeout.should_stop() {
+                if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
                     return QpResult {
                         status: SolveStatus::Timeout,
@@ -548,7 +551,6 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                 }
                 // K再構築 + LDL再分解（失敗時は旧ρで継続）
                 if let Ok((new_fac, new_sigma)) = try_factorize(q, a, rho_new, sigma_used) {
-                    // y をスケール: y_new = y_old * (rho_old / rho_new)  (λ=y*ρ を保持)
                     let scale = rho / rho_new;
                     for i in 0..m_aug {
                         ws.y[i] *= scale;
@@ -557,7 +559,7 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                     sigma_used = new_sigma;
                     rho = rho_new;
                 }
-                if timeout.should_stop() {
+                if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
                     return QpResult {
                         status: SolveStatus::Timeout,
@@ -569,6 +571,182 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                         iterations: iter,
                     };
                 }
+            }
+        }
+    }
+
+    // max_iter 到達
+    let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+    QpResult {
+        status: SolveStatus::MaxIterations,
+        objective: obj,
+        solution: ws.x.clone(),
+        dual_solution: ws.y[..m].to_vec(),
+        bound_duals: vec![],
+        active_set: vec![],
+        iterations: max_iter,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADMM QPソルバー（CGパス）
+// ---------------------------------------------------------------------------
+
+/// ADMM法でQPを解く（Matrix-Free CG x-update パス）
+///
+/// K を明示的に構築せず PCG で x-update を解く。n > LDL_THRESHOLD 時または強制指定時。
+/// ρ適応: rho値変更 + preconditioner再構築のみ（K再構築・LDL再分解不要）。
+/// timeout は T1（preconditioner前）、T2（preconditioner後）、T3（各反復先頭）で検出。
+fn solve_qp_admm_cg(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    timeout_ctx: &TimeoutCtx,
+) -> QpResult {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    let m_aug = m + n;
+
+    let sigma = options.sigma;
+    let mut rho = options.rho;
+    let alpha = options.alpha;
+    let eps_abs = options.eps_abs;
+    let eps_rel = options.eps_rel;
+    let max_iter = options.max_iter_admm;
+
+    let a = &problem.a;
+    let q = &problem.q;
+    let c = &problem.c;
+
+    let mut l_bound = vec![f64::NEG_INFINITY; m_aug];
+    let mut u_bound = vec![f64::INFINITY; m_aug];
+    u_bound[..m].copy_from_slice(&problem.b[..m]);
+    for j in 0..n {
+        l_bound[m + j] = problem.bounds[j].0;
+        u_bound[m + j] = problem.bounds[j].1;
+    }
+
+    // T1: build_preconditioner前 timeout チェック
+    if timeout_ctx.should_stop() {
+        return make_timeout_result(n, m, 0);
+    }
+
+    let mut ws = AdmmWorkspace::new(n, m_aug);
+    build_preconditioner(q, a, sigma, rho, &mut ws.m_inv);
+
+    // T2: build_preconditioner後 timeout チェック
+    if timeout_ctx.should_stop() {
+        return make_timeout_result(n, m, 0);
+    }
+
+    // z の初期値をボックス制約にクランプ（可行点から開始）
+    for i in 0..m_aug {
+        ws.z[i] = 0.0_f64.max(l_bound[i]).min(u_bound[i]);
+    }
+
+    let cg_tol = (eps_abs * 0.1).max(1e-4);
+    let cg_max_iter = n.min(200);
+
+    for iter in 0..max_iter {
+        // T3: 各反復先頭 timeout チェック
+        if timeout_ctx.should_stop() {
+            let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+            return QpResult {
+                status: SolveStatus::Timeout,
+                objective: obj,
+                solution: ws.x.clone(),
+                dual_solution: ws.y[..m].to_vec(),
+                bound_duals: vec![],
+                active_set: vec![],
+                iterations: iter,
+            };
+        }
+
+        // --- x-update (PCG) ---
+        // rhs = σ*x_prev - c + C^T*(ρ*z - y)
+        ws.x_prev.copy_from_slice(&ws.x);
+        for i in 0..m_aug {
+            ws.tmp_m[i] = rho * ws.z[i] - ws.y[i];
+        }
+        spmv_ct(a, &ws.tmp_m, &mut ws.rhs);
+        for (j, &cj) in c.iter().enumerate() {
+            ws.rhs[j] += sigma * ws.x_prev[j] - cj;
+        }
+
+        // PCG: K*x = rhs。kv_tmp を closure 内スクラッチに使用（Rust 2021 disjoint capture）
+        {
+            let rho_cap = rho;
+            let mut kv_op = |v: &[f64], out: &mut [f64]| {
+                kv_mul(q, a, sigma, rho_cap, v, out, &mut ws.kv_tmp);
+            };
+            pcg_solve(&mut kv_op, &ws.m_inv, &ws.rhs, &mut ws.x, cg_max_iter, cg_tol, &mut ws.cg_ws);
+        }
+
+        // --- z-update（over-relaxation in constraint space） ---
+        spmv_c(a, &ws.x, &mut ws.cx);
+        let one_minus_alpha = 1.0 - alpha;
+        for i in 0..m_aug {
+            ws.x_tilde[i] = alpha * ws.cx[i] + one_minus_alpha * ws.z[i];
+        }
+        for i in 0..m_aug {
+            let v = ws.x_tilde[i] + ws.y[i] / rho;
+            ws.z[i] = v.max(l_bound[i]).min(u_bound[i]);
+        }
+
+        // --- y-update ---
+        for i in 0..m_aug {
+            ws.y[i] += rho * (ws.x_tilde[i] - ws.z[i]);
+        }
+
+        // --- 収束判定（10反復ごと） ---
+        if iter % 10 == 0
+            && check_convergence(
+                q, a, c, &ws.x, &ws.z, &ws.y,
+                &mut ws.r_prim, &mut ws.r_dual,
+                &mut ws.cx, &mut ws.tmp_n, &mut ws.tmp_m,
+                eps_abs, eps_rel, m, n, m_aug,
+            )
+        {
+            let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+            return QpResult {
+                status: SolveStatus::Optimal,
+                objective: obj,
+                solution: ws.x.clone(),
+                dual_solution: ws.y[..m].to_vec(),
+                bound_duals: vec![],
+                active_set: vec![],
+                iterations: iter + 1,
+            };
+        }
+
+        // --- ρ適応更新（25反復ごと, CGパス: rho変更 + preconditioner再構築のみ） ---
+        if iter % 25 == 0 && iter > 0 {
+            let rho_new = compute_rho_update(
+                q, a, c, &ws.x, &ws.z, &ws.y,
+                &mut ws.r_prim, &mut ws.r_dual,
+                &mut ws.cx, &mut ws.tmp_n, &mut ws.tmp_m,
+                rho, eps_abs, m_aug,
+            );
+            if (rho_new / rho - 1.0).abs() > 0.1 {
+                if timeout_ctx.should_stop() {
+                    let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+                    return QpResult {
+                        status: SolveStatus::Timeout,
+                        objective: obj,
+                        solution: ws.x.clone(),
+                        dual_solution: ws.y[..m].to_vec(),
+                        bound_duals: vec![],
+                        active_set: vec![],
+                        iterations: iter,
+                    };
+                }
+                // y スケール: y_new = y_old * (rho_old / rho_new)  (λ=y/ρ を保持)
+                let scale = rho / rho_new;
+                for i in 0..m_aug {
+                    ws.y[i] *= scale;
+                }
+                rho = rho_new;
+                // preconditioner 再構築（K再構築・LDL再分解は不要）
+                build_preconditioner(q, a, sigma, rho, &mut ws.m_inv);
             }
         }
     }
@@ -936,6 +1114,103 @@ mod tests {
                 j, kv_explicit[j], result[j], rel_err
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // C3: CGパス統合テスト
+    // -----------------------------------------------------------------------
+
+    /// test_admm_cg_simple_qp:
+    /// min 0.5*x^2 + x  s.t. x >= -2  （解: x=-1, obj=-0.5）
+    /// admm_use_cg=Some(true) で解いて Optimal 確認
+    #[test]
+    fn test_admm_cg_simple_qp() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let c = vec![1.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(-2.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = default_opts();
+        opts.admm_use_cg = Some(true);
+        let result = solve_qp_admm(&problem, &opts);
+
+        assert_eq!(
+            result.status, SolveStatus::Optimal,
+            "cg_simple_qp: expected Optimal, got {:?}", result.status
+        );
+        assert_close(result.solution[0], -1.0, 5e-3, "cg_simple_qp: x[0]");
+        assert_close(result.objective, -0.5, 5e-3, "cg_simple_qp: obj");
+        assert!(
+            result.solution[0] >= -2.0 - 1e-6,
+            "cg_simple_qp: feasibility x >= -2 violated, x={}",
+            result.solution[0]
+        );
+    }
+
+    /// test_admm_cg_vs_ldl_consistency:
+    /// n=500 の問題を LDL/CG 両方で解いて目的関数値が一致すること（rtol=1e-3）
+    /// Q = 2*I, c = [1..1], bounds = (-2, 2), 解: x_i = -0.5
+    #[test]
+    fn test_admm_cg_vs_ldl_consistency() {
+        let n = 500;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0_f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![1.0_f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(-2.0_f64, 2.0_f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts_ldl = default_opts();
+        opts_ldl.admm_use_cg = Some(false);
+        opts_ldl.eps_abs = 1e-4;
+        opts_ldl.eps_rel = 1e-4;
+        let result_ldl = solve_qp_admm(&problem, &opts_ldl);
+
+        let mut opts_cg = default_opts();
+        opts_cg.admm_use_cg = Some(true);
+        opts_cg.eps_abs = 1e-4;
+        opts_cg.eps_rel = 1e-4;
+        let result_cg = solve_qp_admm(&problem, &opts_cg);
+
+        assert_eq!(result_ldl.status, SolveStatus::Optimal, "LDL: expected Optimal");
+        assert_eq!(result_cg.status, SolveStatus::Optimal, "CG: expected Optimal");
+
+        let rtol = 1e-3;
+        let obj_ldl = result_ldl.objective;
+        let obj_cg = result_cg.objective;
+        let rel_diff = (obj_cg - obj_ldl).abs() / (obj_ldl.abs() + 1e-10);
+        assert!(
+            rel_diff < rtol,
+            "cg_vs_ldl: objective mismatch CG={:.6}, LDL={:.6}, rel_diff={:.2e}",
+            obj_cg, obj_ldl, rel_diff
+        );
+    }
+
+    /// test_admm_cg_timeout:
+    /// timeout_secs=0.0 で即停止 → Timeout または Optimal（CGパス）
+    #[test]
+    fn test_admm_cg_timeout() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = default_opts();
+        opts.admm_use_cg = Some(true);
+        opts.timeout_secs = Some(0.0); // 即タイムアウト
+
+        let result = solve_qp_admm(&problem, &opts);
+        assert!(
+            result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
+            "cg_timeout: expected Timeout or Optimal, got {:?}", result.status
+        );
     }
 
     /// test_build_preconditioner:

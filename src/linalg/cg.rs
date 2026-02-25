@@ -66,8 +66,10 @@ pub struct CgResult {
 ///     p = z_new + beta * p
 ///     z = z_new
 /// ```
+// GPU移行設計 §4.3 G3準拠: インデックスループを明示的 for で記述する
+#[allow(clippy::needless_range_loop)]
 pub fn pcg_solve<F>(
-    kv_op: &F,
+    kv_op: &mut F,
     m_inv: &[f64],
     rhs: &[f64],
     x: &mut [f64],
@@ -76,7 +78,7 @@ pub fn pcg_solve<F>(
     ws: &mut CgWorkspace,
 ) -> CgResult
 where
-    F: Fn(&[f64], &mut [f64]),
+    F: FnMut(&[f64], &mut [f64]),
 {
     let n = rhs.len();
     debug_assert_eq!(x.len(), n);
@@ -183,12 +185,12 @@ mod tests {
     fn test_cg_diagonal_3x3() {
         let diag = vec![1.0_f64, 2.0, 3.0];
         let m_inv: Vec<f64> = diag.iter().map(|&d| 1.0 / d).collect();
-        let kv = make_diag_kv(diag);
+        let mut kv = make_diag_kv(diag);
         let rhs = vec![1.0_f64, 2.0, 3.0];
         let mut x = vec![0.0_f64; 3];
         let mut ws = CgWorkspace::new(3);
 
-        let result = pcg_solve(&kv, &m_inv, &rhs, &mut x, 10, 1e-10, &mut ws);
+        let result = pcg_solve(&mut kv, &m_inv, &rhs, &mut x, 10, 1e-10, &mut ws);
 
         assert!(result.converged, "3x3 diagonal: not converged in {} iters", result.iterations);
         assert!(
@@ -213,7 +215,7 @@ mod tests {
     #[test]
     fn test_cg_sparse_spd() {
         // tridiagonal: K[i,i]=5+i, K[i,i±1]=0.5
-        let k_mat = |v: &[f64], out: &mut [f64]| {
+        let mut k_mat = |v: &[f64], out: &mut [f64]| {
             let n = v.len();
             for i in 0..n {
                 let diag = (5 + i) as f64;
@@ -228,7 +230,7 @@ mod tests {
         let mut x = vec![0.0_f64; 5];
         let mut ws = CgWorkspace::new(5);
 
-        let result = pcg_solve(&k_mat, &m_inv, &rhs, &mut x, 20, 1e-10, &mut ws);
+        let result = pcg_solve(&mut k_mat, &m_inv, &rhs, &mut x, 20, 1e-10, &mut ws);
 
         assert!(result.converged, "5x5 SPD: not converged in {} iters", result.iterations);
 
@@ -252,19 +254,19 @@ mod tests {
         let diag = vec![1.0_f64, 100.0, 10_000.0];
         let rhs = vec![1.0_f64, 100.0, 10_000.0];
 
-        let kv = make_diag_kv(diag.clone());
+        let mut kv = make_diag_kv(diag.clone());
 
         // 前処理なし: m_inv = [1, 1, 1]
         let m_inv_none = vec![1.0_f64; 3];
         let mut x_none = vec![0.0_f64; 3];
         let mut ws_none = CgWorkspace::new(3);
-        let result_none = pcg_solve(&kv, &m_inv_none, &rhs, &mut x_none, 100, 1e-10, &mut ws_none);
+        let result_none = pcg_solve(&mut kv, &m_inv_none, &rhs, &mut x_none, 100, 1e-10, &mut ws_none);
 
         // 前処理あり: m_inv = 1/diag(K)
         let m_inv_diag: Vec<f64> = diag.iter().map(|&d| 1.0 / d).collect();
         let mut x_prec = vec![0.0_f64; 3];
         let mut ws_prec = CgWorkspace::new(3);
-        let result_prec = pcg_solve(&kv, &m_inv_diag, &rhs, &mut x_prec, 100, 1e-10, &mut ws_prec);
+        let result_prec = pcg_solve(&mut kv, &m_inv_diag, &rhs, &mut x_prec, 100, 1e-10, &mut ws_prec);
 
         assert!(result_prec.converged, "preconditioned: not converged");
         assert!(result_none.converged, "unpreconditioned: not converged");
