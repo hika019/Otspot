@@ -42,12 +42,17 @@ pub use problem::{QpProblem, QpResult, QpWarmStart};
 pub use admm::solve_qp_admm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
+use crate::problem::SolveStatus;
 
 /// QP ソルバーをディスパッチする内部関数
 ///
 /// `options.qp_solver` に基づいて ADMM または Active Set を選択する。
 /// Auto モードでは `problem.num_vars > options.qp_solver_threshold` のとき ADMM を選択。
 /// ADMM 選択時は warm_start は無視される。
+///
+/// Auto モードで Active Set を選択した場合、Phase I LP が数値的に失敗
+/// （`MaxIterations`, `solution` 空, `iterations == 0`）したときは ADMM にフォールバックする。
+/// これにより QSCSD8・MOSARQP1 等の数値的に困難な問題でも ADMM が反復して解ける。
 fn dispatch_qp(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
@@ -61,7 +66,21 @@ fn dispatch_qp(
     if use_admm {
         admm::solve_qp_admm(problem, options)
     } else {
-        solver::qp_solve_impl(problem, warm_start, options)
+        let result = solver::qp_solve_impl(problem, warm_start, options);
+        // Auto モード専用フォールバック:
+        // Active Set Phase I LP が refactor_failed 等で失敗すると
+        //   status=MaxIterations, solution=空, iterations=0 を返す。
+        // このケースに限り ADMM で再試行する（Q≠0 かつ Auto モードのみ）。
+        if options.qp_solver == QpSolverChoice::Auto
+            && result.status == SolveStatus::MaxIterations
+            && result.solution.is_empty()
+            && result.iterations == 0
+            && !problem.is_zero_q()
+        {
+            admm::solve_qp_admm(problem, options)
+        } else {
+            result
+        }
     }
 }
 
