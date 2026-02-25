@@ -425,7 +425,7 @@ fn solve_qp_admm_ldl(
     let alpha = options.alpha;
     let eps_abs = options.eps_abs;
     let eps_rel = options.eps_rel;
-    let max_iter = options.max_iter_admm;
+    let max_iter = options.max_iter_admm.unwrap_or(10000);
 
     let a = &problem.a;
     let q = &problem.q;
@@ -611,7 +611,7 @@ fn solve_qp_admm_cg(
     let alpha = options.alpha;
     let eps_abs = options.eps_abs;
     let eps_rel = options.eps_rel;
-    let max_iter = options.max_iter_admm;
+    let max_iter = options.max_iter_admm.unwrap_or(10000);
 
     let a = &problem.a;
     let q = &problem.q;

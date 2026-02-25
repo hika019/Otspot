@@ -89,8 +89,8 @@ pub struct SolverOptions {
     pub eps_abs: f64,
     /// ADMM相対収束tolerance（デフォルト: 1e-3）
     pub eps_rel: f64,
-    /// ADMMの最大反復回数（デフォルト: 4000）
-    pub max_iter_admm: usize,
+    /// ADMMの最大反復回数（None = デフォルト: 10000）
+    pub max_iter_admm: Option<usize>,
     /// ADMM x-update のソルバー選択
     /// None = Auto（n > LDL_THRESHOLD のとき自動的に CG を選択）
     /// Some(true) = 強制 CG
@@ -127,7 +127,7 @@ impl Default for SolverOptions {
             alpha: 1.6,
             eps_abs: 1e-3,
             eps_rel: 1e-3,
-            max_iter_admm: 10000,
+            max_iter_admm: None,
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
             qp_solver_threshold: 10_000,

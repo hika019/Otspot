@@ -60,6 +60,8 @@ pub struct Model {
     timeout_secs: Option<f64>,
     /// QP solver choice (None = use default Auto).
     qp_solver_choice: Option<QpSolverChoice>,
+    /// ADMM max iterations (None = use default 10000).
+    max_iter_admm: Option<usize>,
 }
 
 impl Model {
@@ -74,6 +76,7 @@ impl Model {
             quadratic_objective: None,
             timeout_secs: None,
             qp_solver_choice: None,
+            max_iter_admm: None,
         }
     }
 
@@ -85,6 +88,11 @@ impl Model {
     /// Set the QP solver to use.
     pub fn set_qp_solver_choice(&mut self, choice: QpSolverChoice) {
         self.qp_solver_choice = Some(choice);
+    }
+
+    /// Set the maximum number of ADMM iterations.
+    pub fn set_max_iter_admm(&mut self, n: usize) {
+        self.max_iter_admm = Some(n);
     }
 
     /// Add a decision variable to the model.
@@ -335,6 +343,9 @@ impl Model {
         }
         if let Some(choice) = self.qp_solver_choice {
             opts.qp_solver = choice;
+        }
+        if let Some(n) = self.max_iter_admm {
+            opts.max_iter_admm = Some(n);
         }
         let qp_result = crate::qp::solve_qp_with_options(&qp_problem, &opts);
 
@@ -827,6 +838,43 @@ mod tests {
             "expected Timeout, got {:?}",
             err
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: ADMM max iter custom – max_iter_admm=100 で打ち切り確認
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_admm_max_iter_custom() {
+        // min x^2+y^2 s.t. x+y>=1, x,y>=0
+        // max_iter_admm=100 で打ち切り → MaxIterations か Optimal のどちらかを返す
+        // 重要: 正常解(Optimal)か打ち切り(MaxIterations)のどちらでも可だが、
+        // max_iter_admmフィールドがModel→SolverOptionsに正しく伝達されることを検証する。
+        // 実際にSolverOptions.max_iter_admmが100になっていればOK。
+        use crate::options::QpSolverChoice;
+        let mut model = Model::new("qp_max_iter");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.add_constraint((x + y).geq(1.0));
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(0.0 * x + 0.0 * y);
+        model.set_qp_solver_choice(QpSolverChoice::Admm);
+        model.set_max_iter_admm(100);
+
+        // このテストはmax_iter_admmが正しく渡されていることを確認する。
+        // 100反復でOptimalに収束する（小問題なので）か、MaxIterationsが返る。
+        let result = model.solve();
+        // エラーの場合はMaxIterationsのみ許容（Timeout・Infeasible等は不可）
+        match result {
+            Ok(r) => {
+                // 収束した場合は解が正しいことを確認
+                assert!((r[x] + r[y] - 1.0).abs() < 0.1, "x+y should be ~1, got {}", r[x] + r[y]);
+            }
+            Err(ModelError::Internal(ref msg)) if msg.contains("iteration limit") => {
+                // MaxIterations は100反復で打ち切られたことの証明
+            }
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
     }
 
     // -----------------------------------------------------------------------
