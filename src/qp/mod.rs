@@ -41,7 +41,29 @@ pub mod admm;
 pub use problem::{QpProblem, QpResult, QpWarmStart};
 pub use admm::solve_qp_admm;
 
-use crate::options::SolverOptions;
+use crate::options::{QpSolverChoice, SolverOptions};
+
+/// QP ソルバーをディスパッチする内部関数
+///
+/// `options.qp_solver` に基づいて ADMM または Active Set を選択する。
+/// Auto モードでは `problem.num_vars > options.qp_solver_threshold` のとき ADMM を選択。
+/// ADMM 選択時は warm_start は無視される。
+fn dispatch_qp(
+    problem: &QpProblem,
+    warm_start: Option<&QpWarmStart>,
+    options: &SolverOptions,
+) -> QpResult {
+    let use_admm = match options.qp_solver {
+        QpSolverChoice::Admm => true,
+        QpSolverChoice::ActiveSet => false,
+        QpSolverChoice::Auto => problem.num_vars > options.qp_solver_threshold,
+    };
+    if use_admm {
+        admm::solve_qp_admm(problem, options)
+    } else {
+        solver::qp_solve_impl(problem, warm_start, options)
+    }
+}
 
 /// QPを解く（デフォルト設定）
 ///
@@ -61,7 +83,7 @@ pub fn solve_qp(problem: &QpProblem) -> QpResult {
 ///
 /// qpOASESの `init()` に相当。`nWSR` は `options.max_iterations` で指定。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
-    solver::qp_solve_impl(problem, None, options)
+    dispatch_qp(problem, None, options)
 }
 
 /// QPをカスタム設定で解く（`solve_qp_with` の別名）
@@ -69,12 +91,13 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 /// `SolverOptions` を明示的に指定する場合のAPIエントリポイント。
 /// ベンチマーク等で `timeout_secs` を設定する際に使用する。
 pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> QpResult {
-    solver::qp_solve_impl(problem, None, options)
+    dispatch_qp(problem, None, options)
 }
 
 /// Warm-start付きでQPを解く
 ///
 /// qpOASESの `hotstart()` に相当。SQP反復で前回解の活性集合を引き継ぐ場合に使用。
+/// `qp_solver = Admm` または Auto で ADMM が選択された場合、warm_start は無視される。
 ///
 /// # 使用例（SQP典型パターン）
 /// ```rust,no_run
@@ -95,12 +118,13 @@ pub fn solve_qp_warm(
     warm_start: &QpWarmStart,
     options: &SolverOptions,
 ) -> QpResult {
-    solver::qp_solve_impl(problem, Some(warm_start), options)
+    dispatch_qp(problem, Some(warm_start), options)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::QpSolverChoice;
     use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
@@ -516,6 +540,7 @@ mod tests {
     /// timeout_secs=Some(0.0) (0秒) ならほぼ確実にタイムアウトする。
     #[test]
     fn test_timeout_returns_timeout_status() {
+
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
@@ -535,5 +560,114 @@ mod tests {
             "T13: status should be Timeout or Optimal, got {:?}",
             result.status
         );
+    }
+
+    /// T14: 自動切替 - 小問題（Active Set選択）
+    ///
+    /// n=100 < qp_solver_threshold=10_000 → Auto モードで Active Set が選択される
+    /// Q = 2*I_100, c = -ones(100), bounds = [0,1]^100
+    /// 最適解: xi = 0.5（bounds内部点）, obj = -25.0
+    #[test]
+    fn test_auto_switch_small_uses_active_set() {
+        let n = 100usize;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![-1.0f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0f64, 1.0f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // Auto mode: n=100 < threshold=10_000 → Active Set が選択される
+        let opts = SolverOptions::default();
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T14: Auto小問題はOptimal");
+        for xi in &result.solution {
+            assert!((xi - 0.5).abs() < 1e-4, "T14: xi ≈ 0.5 (got {})", xi);
+        }
+    }
+
+    /// T15: 自動切替 - 大問題（ADMM選択）
+    ///
+    /// n=200, qp_solver_threshold=100 → Auto モードで ADMM が選択される
+    /// Q = 2*I_200, c = -ones(200), bounds = [0,1]^200
+    /// 最適解: xi ≈ 0.5
+    #[test]
+    fn test_auto_switch_large_uses_admm() {
+        let n = 200usize;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![-1.0f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0f64, 1.0f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // Auto mode: n=200 > threshold=100 → ADMM が選択される
+        let mut opts = SolverOptions::default();
+        opts.qp_solver_threshold = 100;
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T15: Auto大問題はOptimal (ADMM)");
+        for xi in &result.solution {
+            assert!((xi - 0.5).abs() < 1e-2, "T15: xi ≈ 0.5 (got {})", xi);
+        }
+    }
+
+    /// T16: 強制ADMM（小問題）
+    ///
+    /// n=50 の小問題で qp_solver=Admm を強制指定
+    /// Q = 2*I_50, c = -ones(50), bounds = [0,1]^50
+    /// 最適解: xi ≈ 0.5
+    #[test]
+    fn test_force_admm_small() {
+        let n = 50usize;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![-1.0f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0f64, 1.0f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.qp_solver = QpSolverChoice::Admm;
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T16: 強制ADMMはOptimal");
+        for xi in &result.solution {
+            assert!((xi - 0.5).abs() < 1e-2, "T16: xi ≈ 0.5 (got {})", xi);
+        }
+    }
+
+    /// T17: 強制Active Set（中規模問題）
+    ///
+    /// n=500 の中規模問題で qp_solver=ActiveSet を強制指定
+    /// Q = 2*I_500, c = -ones(500), bounds = [0,1]^500
+    /// 最適解: xi = 0.5（bounds内部点）
+    #[test]
+    fn test_force_active_set_medium() {
+        let n = 500usize;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![-1.0f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0f64, 1.0f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.qp_solver = QpSolverChoice::ActiveSet;
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T17: 強制Active SetはOptimal");
+        for xi in &result.solution {
+            assert!((xi - 0.5).abs() < 1e-4, "T17: xi = 0.5 (got {})", xi);
+        }
     }
 }

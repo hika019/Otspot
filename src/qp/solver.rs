@@ -44,7 +44,7 @@ impl TimeoutContext {
         self.cancel.load(Ordering::Relaxed)
             || self
                 .deadline
-                .map_or(false, |d| Instant::now() >= d)
+                .is_some_and(|d| Instant::now() >= d)
     }
 }
 
@@ -123,11 +123,12 @@ pub(crate) fn qp_solve_impl(
 
     // deadline を一度だけ計算してオプションに設定（Simplex 内でも使用）
     let mut opts_with_deadline;
-    let effective_opts: &SolverOptions = if options.timeout_secs.is_some() && options.deadline.is_none() {
+    let effective_opts: &SolverOptions = if let (Some(secs), true) =
+        (options.timeout_secs, options.deadline.is_none())
+    {
         opts_with_deadline = options.clone();
-        opts_with_deadline.deadline = Some(
-            Instant::now() + Duration::from_secs_f64(options.timeout_secs.unwrap()),
-        );
+        opts_with_deadline.deadline =
+            Some(Instant::now() + Duration::from_secs_f64(secs));
         &opts_with_deadline
     } else {
         options
@@ -451,6 +452,15 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             active_set: vec![],
             iterations: 0,
         },
+        SolveStatus::NumericalError => QpResult {
+            status: SolveStatus::NumericalError,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            active_set: vec![],
+            iterations: 0,
+        },
     }
 }
 
@@ -566,7 +576,7 @@ fn find_initial_feasible_point(
     };
 
     // CSC構築完了後、deadline到達なら即座にTimeoutを返す（防御的チェック）
-    if options.deadline.map_or(false, |d| std::time::Instant::now() >= d) {
+    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return Phase1Result::Timeout;
     }
 

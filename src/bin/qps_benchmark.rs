@@ -148,6 +148,10 @@ fn main() {
                 n_timeout += 1;
                 ("TIMEOUT".to_string(), format!("{:.3}s", elapsed_s))
             }
+            SolveStatus::NumericalError => {
+                n_fail += 1;
+                ("FAIL:NumericalError".to_string(), String::new())
+            }
         };
         println!(
             "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",

@@ -333,8 +333,8 @@ fn dual_simplex_core(
 
     for _iter in 0..max_iter {
         // タイムアウト・キャンセルチェック
-        let timed_out = options.deadline.map_or(false, |d| std::time::Instant::now() >= d);
-        let cancelled = options.cancel_flag.as_ref().map_or(false, |f| f.load(Ordering::Relaxed));
+        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
             return SimplexOutcome::Timeout(obj);

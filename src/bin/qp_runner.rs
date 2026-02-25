@@ -168,7 +168,9 @@ fn main() {
         SolveStatus::Unbounded => "Unbounded",
         SolveStatus::MaxIterations => "MaxIterations",
         SolveStatus::Timeout => "Timeout",
+        SolveStatus::NumericalError => "NumericalError",
     };
 
     println!("{} {:.10e} {}", status_str, result.objective, result.iterations);
 }
+// temp check - remove later

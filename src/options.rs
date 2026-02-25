@@ -10,6 +10,18 @@ use std::sync::{
 };
 use std::time::Instant;
 
+/// QP ソルバー選択
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QpSolverChoice {
+    /// Auto: n > qp_solver_threshold のとき ADMM を選択、さもなくば Active Set
+    #[default]
+    Auto,
+    /// 強制 ADMM
+    Admm,
+    /// 強制 Active Set
+    ActiveSet,
+}
+
 /// シンプレックス法の選択
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SimplexMethod {
@@ -84,6 +96,15 @@ pub struct SolverOptions {
     /// Some(true) = 強制 CG
     /// Some(false) = 強制 LDL
     pub admm_use_cg: Option<bool>,
+
+    // --- QP solver 自動切替 ---
+    /// QP solver 選択（デフォルト: Auto）
+    /// Auto: n > qp_solver_threshold のとき ADMM を選択
+    /// Admm: 強制 ADMM
+    /// ActiveSet: 強制 Active Set
+    pub qp_solver: QpSolverChoice,
+    /// QP 自動切替の閾値（デフォルト: 10_000）
+    pub qp_solver_threshold: usize,
 }
 
 impl Default for SolverOptions {
@@ -108,6 +129,8 @@ impl Default for SolverOptions {
             eps_rel: 1e-3,
             max_iter_admm: 4000,
             admm_use_cg: None,
+            qp_solver: QpSolverChoice::Auto,
+            qp_solver_threshold: 10_000,
         }
     }
 }

@@ -217,6 +217,7 @@ impl Model {
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
             SolveStatus::Timeout => Err(ModelError::Internal("Solver timeout".to_string())),
+            SolveStatus::NumericalError => Err(ModelError::Internal("Numerical error".to_string())),
         }
     }
 
@@ -354,6 +355,9 @@ impl Model {
             }
             SolveStatus::Timeout => {
                 Err(ModelError::Internal("QP solver timeout".to_string()))
+            }
+            SolveStatus::NumericalError => {
+                Err(ModelError::Internal("QP numerical error".to_string()))
             }
         }
     }
