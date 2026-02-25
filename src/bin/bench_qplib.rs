@@ -142,8 +142,13 @@ fn main() {
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
-                n_pass += 1;
-                ("PASS".to_string(), format!("obj={:.6e}", result.objective))
+                if result.objective.is_finite() {
+                    n_pass += 1;
+                    ("PASS".to_string(), format!("obj={:.6e}", result.objective))
+                } else {
+                    n_fail += 1;
+                    ("FAIL:NumericalError".to_string(), format!("obj={}", result.objective))
+                }
             }
             SolveStatus::Infeasible => {
                 n_fail += 1;

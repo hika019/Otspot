@@ -148,8 +148,8 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     // 下三角トリプレット（1-indexed, i >= j）→ 対称化
     let mut q_triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(nqobj * 2);
     for _ in 0..nqobj {
-        let i = ts.read_usize()? - 1; // 0-indexed
-        let j = ts.read_usize()? - 1;
+        let i = ts.read_index_1based(n, "Q row")?;
+        let j = ts.read_index_1based(n, "Q col")?;
         let v = ts.read_f64()?;
         q_triplets.push((i, j, v));
         if i != j {
@@ -162,7 +162,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let mut c = vec![default_b0; n];
     let n_nondefault_b0 = ts.read_usize()?;
     for _ in 0..n_nondefault_b0 {
-        let i = ts.read_usize()? - 1;
+        let i = ts.read_index_1based(n, "linear obj index")?;
         let v = ts.read_f64()?;
         c[i] = v;
     }
@@ -175,8 +175,8 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     // k=constraint(1-indexed), i=variable(1-indexed), v=coefficient
     let mut a_triplets: HashMap<(usize, usize), f64> = HashMap::new();
     for _ in 0..n_con_lin_terms {
-        let k = ts.read_usize()? - 1; // 0-indexed
-        let i = ts.read_usize()? - 1;
+        let k = ts.read_index_1based(m, "constraint index")?;
+        let i = ts.read_index_1based(n, "variable index")?;
         let v = ts.read_f64()?;
         *a_triplets.entry((k, i)).or_insert(0.0) += v;
     }
@@ -191,7 +191,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let n_nondefault_lb_con = ts.read_usize()?;
     let mut lb_con = vec![lb_con_default; m];
     for _ in 0..n_nondefault_lb_con {
-        let k = ts.read_usize()? - 1;
+        let k = ts.read_index_1based(m, "lb_con index")?;
         let v = ts.read_f64()?;
         lb_con[k] = v;
     }
@@ -201,7 +201,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let n_nondefault_ub_con = ts.read_usize()?;
     let mut ub_con = vec![ub_con_default; m];
     for _ in 0..n_nondefault_ub_con {
-        let k = ts.read_usize()? - 1;
+        let k = ts.read_index_1based(m, "ub_con index")?;
         let v = ts.read_f64()?;
         ub_con[k] = v;
     }
@@ -211,7 +211,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let n_nondefault_lb_var = ts.read_usize()?;
     let mut lb_var = vec![lb_var_default; n];
     for _ in 0..n_nondefault_lb_var {
-        let i = ts.read_usize()? - 1;
+        let i = ts.read_index_1based(n, "lb_var index")?;
         let v = ts.read_f64()?;
         lb_var[i] = v;
     }
@@ -221,7 +221,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let n_nondefault_ub_var = ts.read_usize()?;
     let mut ub_var = vec![ub_var_default; n];
     for _ in 0..n_nondefault_ub_var {
-        let i = ts.read_usize()? - 1;
+        let i = ts.read_index_1based(n, "ub_var index")?;
         let v = ts.read_f64()?;
         ub_var[i] = v;
     }
@@ -387,6 +387,19 @@ impl TokenStream {
                 "unexpected end of file (expected float)".to_string(),
             )),
         }
+    }
+
+    /// 1-indexedの整数を読み込み、0-indexedに変換して返す。
+    /// 値が0またはmax_valを超える場合はParseErrorを返す。
+    fn read_index_1based(&mut self, max_val: usize, context: &str) -> Result<usize, QplibError> {
+        let raw = self.read_usize()?;
+        if raw == 0 || raw > max_val {
+            return Err(QplibError::ParseError(format!(
+                "{}: index {} out of range (expected 1..={})",
+                context, raw, max_val
+            )));
+        }
+        Ok(raw - 1)
     }
 }
 
