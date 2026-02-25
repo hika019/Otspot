@@ -105,6 +105,11 @@ pub struct SolverOptions {
     pub qp_solver: QpSolverChoice,
     /// QP 自動切替の閾値（デフォルト: 10_000）
     pub qp_solver_threshold: usize,
+
+    // --- Ruiz スケーリング ---
+    /// ADMM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
+    /// false のとき、スケーリングをスキップして従来通りに動作する。
+    pub use_ruiz_scaling: bool,
 }
 
 impl Default for SolverOptions {
@@ -131,6 +136,7 @@ impl Default for SolverOptions {
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
             qp_solver_threshold: 10_000,
+            use_ruiz_scaling: true,
         }
     }
 }

@@ -17,6 +17,7 @@ use crate::linalg::ldl::{self, LdlError, LdlFactorization};
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
 use crate::qp::problem::{QpProblem, QpResult};
+use crate::qp::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -412,16 +413,74 @@ fn compute_objective(q: &CscMatrix, c: &[f64], x: &[f64], tmp: &mut [f64]) -> f6
 /// # アルゴリズム選択
 /// admm_use_cg=None の場合、n > LDL_THRESHOLD なら CG パス、それ以外は LDL パス。
 /// admm_use_cg=Some(true/false) で強制選択可能。
+///
+/// # Ruiz スケーリング
+/// options.use_ruiz_scaling=true（デフォルト）のとき、ADMM実行前に Ruiz equilibration を
+/// 適用して数値安定性・CG収束を向上させる。false のとき従来通りに動作。
 pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let timeout = TimeoutCtx::from_options(options);
     let use_cg = match options.admm_use_cg {
         Some(b) => b,
         None => problem.num_vars > LDL_THRESHOLD,
     };
+
+    // Ruiz equilibration スケーリング（デフォルト有効）
+    // n=0 の場合はスキップ（ゼロ除算防止）
+    if options.use_ruiz_scaling && problem.num_vars > 0 {
+        let n = problem.num_vars;
+        let m = problem.num_constraints;
+
+        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
+        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+
+        let (q_s, a_s, c_s, b_s, bounds_s) =
+            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
+
+        // スケール済み QpProblem を構築（失敗時は非スケールにフォールバック）
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+            let scaled_result = if use_cg {
+                solve_qp_admm_cg(&scaled_problem, options, &timeout)
+            } else {
+                solve_qp_admm_ldl(&scaled_problem, options, &timeout)
+            };
+            // 解を元のスケールに逆変換して返す
+            return unscale_admm_result(scaled_result, &scaler);
+        }
+        // QpProblem::new 失敗 → 非スケールにフォールバック（以下続行）
+    }
+
     if use_cg {
         solve_qp_admm_cg(problem, options, &timeout)
     } else {
         solve_qp_admm_ldl(problem, options, &timeout)
+    }
+}
+
+/// スケール済み ADMM 結果を元のスケールに逆変換する
+///
+/// - 主変数: x[j] = d[j] * x_s[j]
+/// - 双対変数: y[i] = e[i] * y_s[i] / c
+/// - 目的関数: obj = obj_s / c  （スケール済み目的関数の定義より）
+///
+/// Optimal, Timeout, MaxIterations（部分解あり）は逆変換を適用。
+/// NumericalError などの失敗結果はそのまま返す。
+fn unscale_admm_result(result: QpResult, scaler: &RuizScaler) -> QpResult {
+    match result.status {
+        SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::MaxIterations => {
+            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            // obj_s = c * obj_orig → obj_orig = obj_s / c
+            let obj_orig = result.objective / scaler.c;
+            QpResult {
+                objective: obj_orig,
+                solution: x,
+                dual_solution: y,
+                ..result
+            }
+        }
+        _ => result,
     }
 }
 

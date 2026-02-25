@@ -62,6 +62,8 @@ pub struct Model {
     qp_solver_choice: Option<QpSolverChoice>,
     /// ADMM max iterations (None = use default 10000).
     max_iter_admm: Option<usize>,
+    /// Ruiz スケーリング有効/無効（None = default true）
+    use_ruiz_scaling: Option<bool>,
 }
 
 impl Model {
@@ -77,6 +79,7 @@ impl Model {
             timeout_secs: None,
             qp_solver_choice: None,
             max_iter_admm: None,
+            use_ruiz_scaling: None,
         }
     }
 
@@ -93,6 +96,11 @@ impl Model {
     /// Set the maximum number of ADMM iterations.
     pub fn set_max_iter_admm(&mut self, n: usize) {
         self.max_iter_admm = Some(n);
+    }
+
+    /// Ruiz equilibration スケーリングの有効/無効を設定する（デフォルト: true）
+    pub fn set_use_ruiz_scaling(&mut self, flag: bool) {
+        self.use_ruiz_scaling = Some(flag);
     }
 
     /// Add a decision variable to the model.
@@ -346,6 +354,9 @@ impl Model {
         }
         if let Some(n) = self.max_iter_admm {
             opts.max_iter_admm = Some(n);
+        }
+        if let Some(flag) = self.use_ruiz_scaling {
+            opts.use_ruiz_scaling = flag;
         }
         let qp_result = crate::qp::solve_qp_with_options(&qp_problem, &opts);
 
