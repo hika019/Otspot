@@ -12,6 +12,7 @@
 //! # timeout組み込み
 //! T1（LDL前）、T2（LDL後）、T3（各反復先頭）で `TimeoutCtx::should_stop()` をチェックする。
 
+use crate::linalg::cg::CgWorkspace;
 use crate::linalg::ldl::{self, LdlError, LdlFactorization};
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
@@ -68,10 +69,18 @@ struct AdmmWorkspace {
     r_dual: Vec<f64>,  // n: dual residual Qx + c + C^T y
     tmp_n: Vec<f64>,   // n: scratch (Qx, C^T v partial, etc.)
     tmp_m: Vec<f64>,   // m_aug: scratch (ρz - y, etc.)
+    // CG用フィールド（CGパス用。C3統合まで未使用）
+    #[allow(dead_code)]
+    cg_ws: CgWorkspace, // CGソルバー作業バッファ（サイズ n）
+    #[allow(dead_code)]
+    m_inv: Vec<f64>,    // 対角前処理 1/diag(K)（サイズ n）
+    #[allow(dead_code)]
+    kv_tmp: Vec<f64>,   // kv_mul用中間バッファ（サイズ m = m_aug - n）
 }
 
 impl AdmmWorkspace {
     fn new(n: usize, m_aug: usize) -> Self {
+        let m = m_aug.saturating_sub(n);
         Self {
             x: vec![0.0; n],
             z: vec![0.0; m_aug],
@@ -84,6 +93,9 @@ impl AdmmWorkspace {
             r_dual: vec![0.0; n],
             tmp_n: vec![0.0; n],
             tmp_m: vec![0.0; m_aug],
+            cg_ws: CgWorkspace::new(n),
+            m_inv: vec![1.0; n],
+            kv_tmp: vec![0.0; m],
         }
     }
 }
@@ -244,6 +256,114 @@ fn try_factorize(
         }
     }
     Err(())
+}
+
+// ---------------------------------------------------------------------------
+// Matrix-Free K*v operator（CGパス用）
+// ---------------------------------------------------------------------------
+
+/// Matrix-free K*v 演算
+///
+/// K = Q + (σ+ρ)I + ρ*A^T*A に対して result = K*v を計算する。
+/// K行列を明示的に構築せず、SpMV 2回 + ベクトル演算で完結する。
+///
+/// 計算手順:
+/// 1. tmp_m = A * v
+/// 2. result = A^T * tmp_m
+/// 3. result[j] = ρ*result[j] + (σ+ρ)*v[j] + (Q*v)[j]
+///
+/// # 引数
+/// - `q`: 目的関数の2次行列 Q（n×n CSC）
+/// - `a`: 制約行列 A（m×n CSC、C = [A; I_n] のA部分）
+/// - `sigma`, `rho`: ADMMパラメータ
+/// - `v`: 入力ベクトル（長さ n）
+/// - `result`: 出力 K*v（長さ n、上書き）
+/// - `tmp_m`: 中間バッファ（長さ m = a.nrows）
+// C3統合まで未使用。GPU移行設計 §4.3 G3準拠のインデックスループを維持。
+#[allow(dead_code, clippy::needless_range_loop)]
+fn kv_mul(
+    q: &CscMatrix,
+    a: &CscMatrix,
+    sigma: f64,
+    rho: f64,
+    v: &[f64],
+    result: &mut [f64],
+    tmp_m: &mut [f64],
+) {
+    let n = v.len();
+    debug_assert_eq!(result.len(), n);
+    debug_assert_eq!(tmp_m.len(), a.nrows);
+
+    // step 1: tmp_m = A * v
+    spmv_a(a, v, tmp_m);
+
+    // step 2: result = A^T * tmp_m
+    result.iter_mut().for_each(|x| *x = 0.0);
+    spmv_at_add(a, tmp_m, result);
+
+    // step 3: result[j] = ρ*result[j] + (σ+ρ)*v[j]
+    for j in 0..n {
+        result[j] = rho * result[j] + (sigma + rho) * v[j];
+    }
+
+    // step 4: result += Q * v （通常SpMV）
+    // Q*v を tmp_m[0..n] に一時格納して加算
+    // tmp_m のサイズが n 以上なら使い回し可能だが、サイズ m かもしれないため
+    // 直接加算する（CSC列走査で result に直接加算）
+    for (col, &vv) in v.iter().enumerate() {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            result[q.row_ind[k]] += q.values[k] * vv;
+        }
+    }
+}
+
+/// 対角前処理行列の構築
+///
+/// diag(K)_j = diag(Q)_j + (σ+ρ) + ρ * ||A[:,j]||²  を計算し、
+/// その逆数 1/diag(K)_j を m_inv に格納する。
+///
+/// # 引数
+/// - `q`: 目的関数の2次行列 Q（n×n CSC）
+/// - `a`: 制約行列 A（m×n CSC）
+/// - `sigma`, `rho`: ADMMパラメータ
+/// - `m_inv`: 出力 1/diag(K)（長さ n、上書き）
+// C3統合まで未使用。
+#[allow(dead_code)]
+fn build_preconditioner(
+    q: &CscMatrix,
+    a: &CscMatrix,
+    sigma: f64,
+    rho: f64,
+    m_inv: &mut [f64],
+) {
+    debug_assert_eq!(m_inv.len(), q.ncols);
+
+    // diag(K)_j = (σ+ρ) を基点に初期化
+    for v in m_inv.iter_mut() {
+        *v = sigma + rho;
+    }
+
+    // diag(Q)_j を加算（対角成分のみ）
+    for (col, v) in m_inv.iter_mut().enumerate() {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            if q.row_ind[k] == col {
+                *v += q.values[k];
+            }
+        }
+    }
+
+    // ρ * ||A[:,j]||² を加算（Aのj列の値の二乗和）
+    for (col, v) in m_inv.iter_mut().enumerate() {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        let col_sq: f64 = (start..end).map(|k| a.values[k] * a.values[k]).sum();
+        *v += rho * col_sq;
+    }
+
+    // 逆数化（ゼロ除算防止: 最小値 1e-8 に clamp）
+    for v in m_inv.iter_mut() {
+        *v = 1.0 / v.max(1e-8);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,5 +860,128 @@ mod tests {
             "numerical_error: expected Optimal/NumericalError/MaxIterations, got {:?}",
             result.status
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // C2: kv_mul / build_preconditioner テスト
+    // -----------------------------------------------------------------------
+
+    /// test_kv_mul_matches_explicit:
+    /// n=5, m=3 の小問題で kv_mul(v) と明示的 K 行列×v を比較（相対誤差 < 1e-12）
+    #[test]
+    fn test_kv_mul_matches_explicit() {
+        // Q = diag(1,2,3,4,5)
+        let q_rows: Vec<usize> = (0..5).collect();
+        let q_cols: Vec<usize> = (0..5).collect();
+        let q_vals: Vec<f64> = (1..=5).map(|x| x as f64).collect();
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, 5, 5).unwrap();
+
+        // A (3×5 sparse): 各行に2-3個の非ゼロ
+        // A[0,0]=1, A[0,1]=2
+        // A[1,1]=3, A[1,2]=1, A[1,3]=2
+        // A[2,3]=1, A[2,4]=4
+        let a_rows = vec![0usize, 0, 1, 1, 1, 2, 2];
+        let a_cols = vec![0usize, 1, 1, 2, 3, 3, 4];
+        let a_vals = vec![1.0f64, 2.0, 3.0, 1.0, 2.0, 1.0, 4.0];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 3, 5).unwrap();
+
+        let sigma = 1e-6_f64;
+        let rho = 0.1_f64;
+
+        // 明示的 K = Q + (σ+ρ)I + ρ*A^T*A を構築して K*v を計算
+        // A^T*A を密行列で計算 (5×5)
+        let mut ata = [[0.0_f64; 5]; 5];
+        // A^T*A を手動計算: 各 (j1, j2) に A[:,j1]^T * A[:,j2]
+        // 行 0: A[0,0]=1,A[0,1]=2
+        // 行 1: A[1,1]=3,A[1,2]=1,A[1,3]=2
+        // 行 2: A[2,3]=1,A[2,4]=4
+        let a_dense: [[f64; 5]; 3] = [
+            [1.0, 2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 1.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 4.0],
+        ];
+        for j1 in 0..5 {
+            for j2 in 0..5 {
+                for i in 0..3 {
+                    ata[j1][j2] += a_dense[i][j1] * a_dense[i][j2];
+                }
+            }
+        }
+
+        let v = vec![1.0_f64, -1.0, 2.0, 0.5, -0.5];
+        // K*v 明示的計算
+        let mut kv_explicit = [0.0_f64; 5];
+        let diag_q = [1.0_f64, 2.0, 3.0, 4.0, 5.0];
+        for j in 0..5 {
+            kv_explicit[j] = diag_q[j] * v[j] + (sigma + rho) * v[j];
+            for k in 0..5 {
+                kv_explicit[j] += rho * ata[j][k] * v[k];
+            }
+        }
+
+        // kv_mul で計算
+        let mut result = vec![0.0_f64; 5];
+        let mut tmp_m = vec![0.0_f64; 3];
+        kv_mul(&q, &a, sigma, rho, &v, &mut result, &mut tmp_m);
+
+        for j in 0..5 {
+            let rel_err = if kv_explicit[j].abs() > 1e-15 {
+                (result[j] - kv_explicit[j]).abs() / kv_explicit[j].abs()
+            } else {
+                (result[j] - kv_explicit[j]).abs()
+            };
+            assert!(
+                rel_err < 1e-12,
+                "kv_mul[{}]: explicit={:.12e}, got={:.12e}, rel_err={:.2e}",
+                j, kv_explicit[j], result[j], rel_err
+            );
+        }
+    }
+
+    /// test_build_preconditioner:
+    /// 小問題で build_preconditioner() の出力が 1/diag(K) に等しいこと確認
+    #[test]
+    fn test_build_preconditioner() {
+        // Q = diag(1,2,3,4,5)
+        let q_rows: Vec<usize> = (0..5).collect();
+        let q_cols: Vec<usize> = (0..5).collect();
+        let q_vals: Vec<f64> = (1..=5).map(|x| x as f64).collect();
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, 5, 5).unwrap();
+
+        // A (3×5): test_kv_mul と同じ行列
+        let a_rows = vec![0usize, 0, 1, 1, 1, 2, 2];
+        let a_cols = vec![0usize, 1, 1, 2, 3, 3, 4];
+        let a_vals = vec![1.0f64, 2.0, 3.0, 1.0, 2.0, 1.0, 4.0];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 3, 5).unwrap();
+
+        let sigma = 1e-6_f64;
+        let rho = 0.1_f64;
+
+        // diag(K) を明示的計算
+        // diag(K)_j = diag(Q)_j + (σ+ρ) + ρ * ||A[:,j]||²
+        let a_dense: [[f64; 5]; 3] = [
+            [1.0, 2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 1.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 4.0],
+        ];
+        let diag_q = [1.0_f64, 2.0, 3.0, 4.0, 5.0];
+        let mut expected_m_inv = [0.0_f64; 5];
+        for j in 0..5 {
+            let col_sq: f64 = (0..3).map(|i| a_dense[i][j] * a_dense[i][j]).sum();
+            let dk = diag_q[j] + (sigma + rho) + rho * col_sq;
+            expected_m_inv[j] = 1.0 / dk;
+        }
+
+        let mut m_inv = vec![0.0_f64; 5];
+        build_preconditioner(&q, &a, sigma, rho, &mut m_inv);
+
+        for j in 0..5 {
+            let rel_err = (m_inv[j] - expected_m_inv[j]).abs() / expected_m_inv[j].abs();
+            assert!(
+                rel_err < 1e-12,
+                "m_inv[{}]: expected={:.12e}, got={:.12e}, rel_err={:.2e}",
+                j, expected_m_inv[j], m_inv[j], rel_err
+            );
+        }
     }
 }
