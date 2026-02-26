@@ -99,5 +99,6 @@ pub fn run_postsolve(
         reduced_costs,
         slack,
         warm_start_basis: None, // presolve と warm-start の組み合わせは未対応
+        ..Default::default()
     }
 }

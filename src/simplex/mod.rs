@@ -76,6 +76,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+            ..Default::default()
                 };
             }
             Err(presolve::PresolveStatus::Unbounded) => {
@@ -87,6 +88,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+            ..Default::default()
                 };
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
@@ -129,6 +131,7 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+            ..Default::default()
                 };
             }
         }
@@ -140,6 +143,7 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
             reduced_costs: vec![],
             slack: problem.b.clone(),
             warm_start_basis: None,
+            ..Default::default()
         };
     }
 
@@ -160,6 +164,7 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+            ..Default::default()
                     };
                 }
                 *x_j = ub;
@@ -174,6 +179,7 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
             reduced_costs: problem.c.clone(),
             slack: vec![],
             warm_start_basis: None,
+            ..Default::default()
         };
     }
 
@@ -587,6 +593,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs,
                     slack,
                     warm_start_basis: Some(ws),
+            ..Default::default()
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -597,6 +604,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             },
             SimplexOutcome::MaxIterations(obj) => {
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
@@ -608,6 +616,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+            ..Default::default()
                 }
             }
             SimplexOutcome::Timeout(obj) => {
@@ -620,6 +629,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+            ..Default::default()
                 }
             }
         }
@@ -690,6 +700,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+            ..Default::default()
                     };
                 }
 
@@ -723,6 +734,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs,
                             slack,
                             warm_start_basis: Some(ws),
+            ..Default::default()
                         }
                     }
                     SimplexOutcome::Unbounded => SolverResult {
@@ -733,6 +745,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+            ..Default::default()
                     },
                     SimplexOutcome::MaxIterations(obj2) => {
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
@@ -744,6 +757,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs: vec![],
                             slack: vec![],
                             warm_start_basis: None,
+            ..Default::default()
                         }
                     }
                     SimplexOutcome::Timeout(obj2) => {
@@ -756,6 +770,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs: vec![],
                             slack: vec![],
                             warm_start_basis: None,
+            ..Default::default()
                         }
                     }
                 }
@@ -768,6 +783,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             },
             SimplexOutcome::MaxIterations(_) => SolverResult {
                 status: SolveStatus::MaxIterations,
@@ -777,6 +793,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             },
             SimplexOutcome::Timeout(_) => SolverResult {
                 status: SolveStatus::Timeout,
@@ -786,6 +803,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             },
         }
     }

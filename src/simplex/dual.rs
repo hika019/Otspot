@@ -116,6 +116,7 @@ fn cold_start_dual(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             };
         }
         SimplexOutcome::MaxIterations(_) => {
@@ -127,6 +128,7 @@ fn cold_start_dual(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             };
         }
         SimplexOutcome::Timeout(_) => {
@@ -138,6 +140,7 @@ fn cold_start_dual(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             };
         }
         SimplexOutcome::Optimal(_, _) => {
@@ -182,6 +185,7 @@ fn warm_outcome_to_result(
                 reduced_costs,
                 slack,
                 warm_start_basis: Some(ws),
+            ..Default::default()
             }
         }
         SimplexOutcome::Unbounded => SolverResult {
@@ -193,6 +197,7 @@ fn warm_outcome_to_result(
             reduced_costs: vec![],
             slack: vec![],
             warm_start_basis: None,
+            ..Default::default()
         },
         SimplexOutcome::MaxIterations(obj) => {
             let solution = extract_solution(sf, basis, x_b, col_scale);
@@ -204,6 +209,7 @@ fn warm_outcome_to_result(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             }
         }
         SimplexOutcome::Timeout(obj) => {
@@ -216,6 +222,7 @@ fn warm_outcome_to_result(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             }
         }
     }
@@ -246,6 +253,7 @@ fn primal_outcome_to_result(
                 reduced_costs,
                 slack,
                 warm_start_basis: Some(ws),
+            ..Default::default()
             }
         }
         SimplexOutcome::Unbounded => SolverResult {
@@ -256,6 +264,7 @@ fn primal_outcome_to_result(
             reduced_costs: vec![],
             slack: vec![],
             warm_start_basis: None,
+            ..Default::default()
         },
         SimplexOutcome::MaxIterations(obj) => {
             let solution = extract_solution(sf, basis, x_b, col_scale);
@@ -267,6 +276,7 @@ fn primal_outcome_to_result(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             }
         }
         SimplexOutcome::Timeout(obj) => {
@@ -279,6 +289,7 @@ fn primal_outcome_to_result(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+            ..Default::default()
             }
         }
     }
