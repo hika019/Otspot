@@ -23,7 +23,7 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
 use crate::qp::problem::{QpProblem, QpResult};
-use crate::qp::ruiz::RuizScaler;
+use crate::linalg::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
 
 // ---------------------------------------------------------------------------

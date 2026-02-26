@@ -317,7 +317,7 @@ mod tests {
     /// Q = diag(1,100,1,100,1)（意図的に悪くスケーリングされた問題）
     #[test]
     fn test_ruiz_scaling_correctness() {
-        use crate::qp::problem::QpProblem;
+        use crate::qp::QpProblem;
         use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
 
@@ -393,7 +393,7 @@ mod tests {
     /// use_ruiz_scaling=false で従来通りの動作（スケーリングなし）
     #[test]
     fn test_ruiz_disabled() {
-        use crate::qp::problem::QpProblem;
+        use crate::qp::QpProblem;
         use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
 

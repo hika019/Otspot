@@ -38,7 +38,6 @@ mod problem;
 mod solver;
 pub mod admm;
 pub mod ipm;
-pub mod ruiz;
 
 pub use problem::{QpProblem, QpResult, QpWarmStart};
 pub use admm::solve_qp_admm;
