@@ -44,7 +44,69 @@ pub use admm::solve_qp_admm;
 pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
-use crate::problem::SolveStatus;
+use crate::problem::{SolveStatus, SolverResult};
+
+/// QP ソルバーを統一的に扱うための trait
+///
+/// Active Set / ADMM / IPM の各ソルバーは `QpSolver` を実装しており、
+/// `Box<dyn QpSolver>` として統一的に扱うことができる。
+///
+/// # 例
+/// ```rust,no_run
+/// use solver::qp::{QpProblem, QpSolver, ActiveSetSolver};
+/// use solver::options::SolverOptions;
+/// # let problem = unimplemented!();
+/// let solver = ActiveSetSolver;
+/// let result = solver.solve(&problem, &SolverOptions::default());
+/// ```
+pub trait QpSolver {
+    /// QP 問題を解く
+    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult;
+    /// ソルバー名を返す
+    fn name(&self) -> &'static str;
+}
+
+/// Active Set 法 QP ソルバー
+///
+/// `QpSolver` trait を実装する。内部で [`solver::qp_solve_impl`] を呼ぶ。
+pub struct ActiveSetSolver;
+
+/// ADMM QP ソルバー
+///
+/// `QpSolver` trait を実装する。内部で [`admm::solve_qp_admm`] を呼ぶ。
+pub struct AdmmSolver;
+
+/// IPM（内点法）QP ソルバー
+///
+/// `QpSolver` trait を実装する。内部で [`ipm::solve_qp_ipm`] を呼ぶ。
+pub struct IpmSolver;
+
+impl QpSolver for ActiveSetSolver {
+    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+        solver::qp_solve_impl(problem, None, options)
+    }
+    fn name(&self) -> &'static str {
+        "ActiveSet"
+    }
+}
+
+impl QpSolver for AdmmSolver {
+    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+        admm::solve_qp_admm(problem, options)
+    }
+    fn name(&self) -> &'static str {
+        "ADMM"
+    }
+}
+
+impl QpSolver for IpmSolver {
+    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+        ipm::solve_qp_ipm(problem, options)
+    }
+    fn name(&self) -> &'static str {
+        "IPM"
+    }
+}
 
 /// AS / ADMM / IPM を並列実行し、最初に Optimal を返したものを採用する
 ///
@@ -159,6 +221,7 @@ fn solve_qp_concurrent(
         bound_duals: vec![],
         active_set: vec![],
         iterations: 0,
+        ..Default::default()
     })
 }
 
