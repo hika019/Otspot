@@ -253,8 +253,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 
 /// QPをカスタム設定で解く（`solve_qp_with` の別名）
 ///
-/// `SolverOptions` を明示的に指定する場合のAPIエントリポイント。
-/// ベンチマーク等で `timeout_secs` を設定する際に使用する。
+/// # Deprecated
+///
+/// `solve_qp_with` と同一実装のため非推奨。`solve_qp_with` を使用すること。
+#[deprecated(since = "0.1.0", note = "use `solve_qp_with` instead")]
 pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     dispatch_qp(problem, None, options)
 }
