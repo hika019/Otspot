@@ -161,83 +161,89 @@ fn build_extended_constraints(problem: &QpProblem) -> (CscMatrix, Vec<f64>, usiz
 }
 
 // ---------------------------------------------------------------------------
-// Schur complement 構築
+// augmented KKT system 構築
 // ---------------------------------------------------------------------------
 
-/// M = Q + δ_p·I + A_ext^T D^{-1} A_ext の上三角 CSC を構築する
+/// augmented KKT system の上三角 CSC を構築する
 ///
-/// M は正定値なので既存 LdlFactorization で分解できる。
-fn build_schur_complement(
+/// augmented system:
+/// ```text
+/// [ Q + δ_p·I     A_ext^T        ] [dx]   [rx]
+/// [ A_ext      -(Σ + δ_d·I)      ] [dy] = [ry]
+/// ```
+///
+/// サイズ: (n + m_ext) × (n + m_ext)
+///
+/// 上三角のみ CSC として返す（ldl::factorize_quasidefinite_with_deadline の入力形式）。
+///
+/// # 利点（Schur complement との比較）
+/// - 条件数 κ ≈ κ(A)（Schur complement の κ(A)^2 ではない）
+/// - IP-PMM 正則化で quasidefinite 保証 → LDL 常に成功
+/// - スパーシティ保存（A^T D^{-1} A で fill-in しない）
+fn build_augmented_system(
     q: &CscMatrix,
     a_ext: &CscMatrix,
-    d_inv: &[f64],
+    sigma_vec: &[f64],
     delta_p: f64,
+    delta_d: f64,
 ) -> CscMatrix {
     let n = q.nrows;
     let m_ext = a_ext.nrows;
+    let total = n + m_ext;
 
-    // 密行列で蓄積（コミット1: n が小さい問題用）
-    let mut m_dense = vec![0.0f64; n * n];
+    let mut rows: Vec<usize> = Vec::new();
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
 
-    // Q を加算（全要素格納 → 対称）
+    // Part 1: Q + δ_p·I (上三角のみ)
+    let mut diag_added = vec![false; n];
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
-            m_dense[row * n + col] += q.values[k];
-            if row != col {
-                m_dense[col * n + row] += q.values[k];
+            if row <= col {
+                let v = q.values[k] + if row == col { delta_p } else { 0.0 };
+                rows.push(row);
+                cols.push(col);
+                vals.push(v);
+                if row == col {
+                    diag_added[col] = true;
+                }
             }
         }
     }
-
-    // δ_p·I を加算
+    // Q に対角エントリがない場合は δ_p を追加
     for i in 0..n {
-        m_dense[i * n + i] += delta_p;
-    }
-
-    // A_ext^T D^{-1} A_ext を加算
-    // 行 i のエントリを取得するため行アクセス構造を事前構築
-    let mut row_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_ext];
-    for col in 0..n {
-        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
-            let row = a_ext.row_ind[k];
-            row_data[row].push((col, a_ext.values[k]));
+        if !diag_added[i] {
+            rows.push(i);
+            cols.push(i);
+            vals.push(delta_p);
         }
     }
 
-    for i in 0..m_ext {
-        let d = d_inv[i];
-        let row_i = &row_data[i];
-        for &(p, vp) in row_i {
-            for &(q_col, vq) in row_i {
-                m_dense[p * n + q_col] += d * vp * vq;
-            }
+    // Part 2: A_ext^T ブロック（右上、row < col 保証）
+    // a_ext は (m_ext × n) CSC: col j の entry は (row=k, val=A[k,j])
+    // augmented system では row=j, col=n+k (j < n ≤ n+k → 必ず上三角)
+    for j in 0..n {
+        for idx in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+            let k = a_ext.row_ind[idx]; // 制約インデックス
+            let v = a_ext.values[idx];
+            rows.push(j);
+            cols.push(n + k);
+            vals.push(v);
         }
     }
 
-    // 上三角のみ triplet として抽出
-    let mut out_rows = Vec::new();
-    let mut out_cols = Vec::new();
-    let mut out_vals = Vec::new();
-    for p in 0..n {
-        for q in p..n {
-            let v = m_dense[p * n + q];
-            if v != 0.0 {
-                out_rows.push(p);
-                out_cols.push(q);
-                out_vals.push(v);
-            }
-        }
+    // Part 3: -(Σ + δ_d)·I 対角ブロック（インデックス n..n+m_ext）
+    for k in 0..m_ext {
+        rows.push(n + k);
+        cols.push(n + k);
+        vals.push(-(sigma_vec[k] + delta_d));
     }
 
-    if out_rows.is_empty() {
-        // Q=0, A=0 のエッジケース: δ_p I
-        let diag_rows: Vec<usize> = (0..n).collect();
-        let diag_cols: Vec<usize> = (0..n).collect();
-        let diag_vals = vec![delta_p; n];
-        CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, n, n).unwrap()
+    if rows.is_empty() {
+        CscMatrix::new(total, total)
     } else {
-        CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, n, n).unwrap()
+        CscMatrix::from_triplets(&rows, &cols, &vals, total, total).unwrap()
     }
 }
 
@@ -492,22 +498,24 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
         let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
 
-        // Σ = diag(s_i / y_i),  D = Σ + δ_d
+        // Σ = diag(s_i / y_i)（両パスで共通）
         let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();
-        let d_vec: Vec<f64> = sigma_vec.iter().map(|&sg| sg + delta_d).collect();
-        let d_inv: Vec<f64> = d_vec.iter().map(|&d| 1.0 / d).collect();
 
         if !use_cg {
-            // ===== LDLパス: Schur complement を明示構築して LDL 分解 =====
+            // ===== LDLパス: augmented system + factorize_quasidefinite_with_deadline =====
+            //
+            // 変更点（D01-c）:
+            //   旧: d_inv計算 → 密Schur complement構築 → LDL → dx解く → dy逆代入
+            //   新: sigma計算 → augmented KKT構築 → LDLT → [dx;dy] 連立して解く
 
-            // T2: LDL 因子化前タイムアウトチェック
+            // T2: 因子化前タイムアウトチェック
             if timeout_ctx.should_stop() {
                 status = SolveStatus::Timeout;
                 final_iter = iter;
                 break;
             }
 
-            // ADMMと同パターン: δ_p を ×10 ずつ増やして最大4回リトライ
+            // augmented KKT行列構築 + factorize（delta_p リトライ最大4回）
             let mut delta_p_retry = delta_p;
             let mut fac_opt = None;
             for _retry in 0..4 {
@@ -516,8 +524,10 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                     final_iter = iter;
                     break;
                 }
-                let m_mat_retry = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p_retry);
-                match ldl::factorize_with_deadline(&m_mat_retry, timeout_ctx.deadline) {
+                let aug_mat = build_augmented_system(
+                    &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d,
+                );
+                match ldl::factorize_quasidefinite_with_deadline(&aug_mat, timeout_ctx.deadline) {
                     Ok(f) => { fac_opt = Some(f); break; }
                     Err(ldl::LdlError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
@@ -532,26 +542,25 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
             }
             let fac = match fac_opt {
                 Some(f) => f,
-                None => return numerical_error_result(n),  // 4回失敗後
+                None => return numerical_error_result(n),
             };
+
+            // augmented system の RHS: [r_d; r_p_mod]（size = n + m_ext）
+            let total = n + m_ext;
+            let mut rhs = vec![0.0f64; total];
+            let mut sol = vec![0.0f64; total];
 
             // --- Predictor ---
             let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
             let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter())
                 .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
-            let tmp_pred: Vec<f64> = r_p_mod_pred.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
-            let mut atmp = vec![0.0f64; n];
-            spmtv(&a_ext, &tmp_pred, &mut atmp);
-            let rhs_x_pred: Vec<f64> = r_d.iter().zip(atmp.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
-            let mut dx_pred = vec![0.0f64; n];
-            fac.solve(&rhs_x_pred, &mut dx_pred);
 
-            let mut a_dx_pred = vec![0.0f64; m_ext];
-            spmv(&a_ext, &dx_pred, &mut a_dx_pred);
-            let mut dy_pred = vec![0.0f64; m_ext];
-            for i in 0..m_ext {
-                dy_pred[i] = d_inv[i] * (a_dx_pred[i] - r_p_mod_pred[i]);
-            }
+            rhs[..n].copy_from_slice(&r_d);
+            rhs[n..].copy_from_slice(&r_p_mod_pred);
+            fac.solve(&rhs, &mut sol);
+            // augmented system: sol[..n]=dx_pred（未使用）, sol[n..]=dy_pred
+            let dy_pred = sol[n..].to_vec();
+
             let mut ds_pred = vec![0.0f64; m_ext];
             for i in 0..m_ext {
                 ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
@@ -570,21 +579,20 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                 .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi).collect();
             let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter())
                 .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
-            let tmp_corr: Vec<f64> = r_p_mod_corr.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
-            let mut atmp_corr = vec![0.0f64; n];
-            spmtv(&a_ext, &tmp_corr, &mut atmp_corr);
-            let rhs_x_corr: Vec<f64> = r_d.iter().zip(atmp_corr.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
-            fac.solve(&rhs_x_corr, &mut dx);
 
-            let mut a_dx_corr = vec![0.0f64; m_ext];
-            spmv(&a_ext, &dx, &mut a_dx_corr);
-            for i in 0..m_ext {
-                dy[i] = d_inv[i] * (a_dx_corr[i] - r_p_mod_corr[i]);
-            }
+            rhs[..n].copy_from_slice(&r_d);
+            rhs[n..].copy_from_slice(&r_p_mod_corr);
+            fac.solve(&rhs, &mut sol);
+            dx.copy_from_slice(&sol[..n]);
+            dy.copy_from_slice(&sol[n..]);
+
             for i in 0..m_ext {
                 ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
             }
         } else {
+            // CGパスは d_inv が必要（Schur complement 形式のまま維持 D01-d）
+            let d_vec: Vec<f64> = sigma_vec.iter().map(|&sg| sg + delta_d).collect();
+            let d_inv: Vec<f64> = d_vec.iter().map(|&d| 1.0 / d).collect();
             // ===== CGパス: Matrix-Free PCG で Schur complement を求解 =====
             let m_inv = compute_jacobi_precond_ipm(&problem.q, &a_ext, &d_inv, delta_p);
             let cg_ws = cg_ws_opt.as_mut().unwrap();
