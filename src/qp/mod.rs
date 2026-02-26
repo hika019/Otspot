@@ -90,19 +90,11 @@ fn solve_qp_concurrent(
     }
 
     // ADMM スレッド
-    // 注: eps_abs/eps_rel をデフォルト 1e-3 から 1e-6 に絞る。
-    // これにより AS (1e-8精度) との精度差を縮め、先着 Optimal の品質を保証する。
     {
         let cancel = Arc::clone(&cancel_flag);
         let prob = Arc::clone(&problem_arc);
         let mut opts = options.clone();
         opts.cancel_flag = Some(cancel);
-        if opts.eps_abs >= 1e-3 {
-            opts.eps_abs = 1e-6;
-        }
-        if opts.eps_rel >= 1e-3 {
-            opts.eps_rel = 1e-6;
-        }
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
             let r = admm::solve_qp_admm(&prob, &opts);
