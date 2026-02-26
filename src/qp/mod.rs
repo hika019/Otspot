@@ -190,26 +190,41 @@ fn dispatch_qp(
                 solve_qp_concurrent(problem, warm_start, options)
             }
             #[cfg(not(feature = "parallel"))]
-            if problem.num_vars >= options.qp_solver_threshold {
-                // 大規模問題: IPM を先に試みて、失敗時は ADMM にフォールバック
-                let ipm_result = ipm::solve_qp_ipm(problem, options);
-                match ipm_result.status {
-                    SolveStatus::Timeout
-                    | SolveStatus::MaxIterations
-                    | SolveStatus::NumericalError => admm::solve_qp_admm(problem, options),
-                    _ => ipm_result,
-                }
-            } else {
-                // 小規模問題: Active Set（Phase I 失敗時は ADMM にフォールバック）
-                let result = solver::qp_solve_impl(problem, warm_start, options);
-                if result.status == SolveStatus::MaxIterations
-                    && result.solution.is_empty()
-                    && result.iterations == 0
-                    && !problem.is_zero_q()
-                {
-                    admm::solve_qp_admm(problem, options)
+            {
+                // deadline を1回だけ計算して全フォールバックに渡す（二重カウント防止）
+                // IPM→ADMM フォールバック時に options.timeout_secs をそのまま渡すと
+                // ADMM が新規 deadline を生成し合計時間が2倍になる問題を修正する。
+                let mut effective_opts;
+                let opts = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
+                    effective_opts = options.clone();
+                    effective_opts.deadline = Some(
+                        std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
+                    );
+                    &effective_opts
                 } else {
-                    result
+                    options
+                };
+                if problem.num_vars >= opts.qp_solver_threshold {
+                    // 大規模問題: IPM を先に試みて、失敗時は ADMM にフォールバック
+                    let ipm_result = ipm::solve_qp_ipm(problem, opts);
+                    match ipm_result.status {
+                        SolveStatus::Timeout
+                        | SolveStatus::MaxIterations
+                        | SolveStatus::NumericalError => admm::solve_qp_admm(problem, opts),
+                        _ => ipm_result,
+                    }
+                } else {
+                    // 小規模問題: Active Set（Phase I 失敗時は ADMM にフォールバック）
+                    let result = solver::qp_solve_impl(problem, warm_start, opts);
+                    if result.status == SolveStatus::MaxIterations
+                        && result.solution.is_empty()
+                        && result.iterations == 0
+                        && !problem.is_zero_q()
+                    {
+                        admm::solve_qp_admm(problem, opts)
+                    } else {
+                        result
+                    }
                 }
             }
         }
