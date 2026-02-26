@@ -2,6 +2,13 @@
 //!
 //! [`SolverOptions`] を通じてシンプレックス法の動作を制御する。
 //! 許容誤差・反復上限・リファクタリング頻度などを一元管理する。
+//!
+//! ## ソルバー固有オプション
+//!
+//! ソルバー固有パラメータは各サブ構造体で管理する:
+//! - ADMM: [`SolverOptions::admm`] ([`AdmmOptions`])
+//! - IPM: [`SolverOptions::ipm`] ([`IpmOptions`])
+//! - Active Set: [`SolverOptions::active_set`] ([`ActiveSetOptions`])
 
 use crate::tolerances::*;
 use std::sync::{
@@ -49,12 +56,95 @@ pub struct WarmStartBasis {
     pub x_b: Vec<f64>,
 }
 
+/// ADMM（Alternating Direction Method of Multipliers）固有オプション
+///
+/// [`SolverOptions::admm`] フィールドに設定する。
+#[derive(Debug, Clone)]
+pub struct AdmmOptions {
+    /// 最大反復回数（None = デフォルト: 10000）
+    pub max_iter: Option<usize>,
+    /// 絶対収束tolerance（デフォルト: 1e-6）
+    pub eps_abs: f64,
+    /// 相対収束tolerance（デフォルト: 1e-6）
+    pub eps_rel: f64,
+    /// ペナルティパラメータ ρ 初期値（デフォルト: 0.1）
+    pub rho: f64,
+    /// 近接正則化パラメータ σ（デフォルト: 1e-6）
+    pub sigma: f64,
+    /// 過緩和係数 α（デフォルト: 1.6）
+    pub alpha: f64,
+    /// x-update のソルバー選択
+    /// None = Auto（A^T*A 推定充填率 > 10% または n > LDL_MAX_N のとき自動的に CG を選択）
+    /// Some(true) = 強制 CG
+    /// Some(false) = 強制 LDL
+    pub use_cg: Option<bool>,
+}
+
+impl Default for AdmmOptions {
+    fn default() -> Self {
+        Self {
+            max_iter: None,
+            eps_abs: 1e-6,
+            eps_rel: 1e-6,
+            rho: 0.1,
+            sigma: 1e-6,
+            alpha: 1.6,
+            use_cg: None,
+        }
+    }
+}
+
+/// IPM（内点法）固有オプション
+///
+/// [`SolverOptions::ipm`] フィールドに設定する。
+#[derive(Debug, Clone)]
+pub struct IpmOptions {
+    /// 最大反復数（デフォルト: 100）
+    pub max_iter: usize,
+    /// 収束 tolerance（デフォルト: 1e-8）
+    pub eps: f64,
+    /// 近接正則化下限 δ_min（デフォルト: 1e-8）
+    pub delta_min: f64,
+    /// 近接正則化初期値 δ_p（デフォルト: 1e-6）
+    pub delta_p_init: f64,
+    /// 近接正則化初期値 δ_d（デフォルト: 1e-6）
+    pub delta_d_init: f64,
+}
+
+impl Default for IpmOptions {
+    fn default() -> Self {
+        Self {
+            max_iter: 100,
+            eps: 1e-8,
+            delta_min: 1e-8,
+            delta_p_init: 1e-6,
+            delta_d_init: 1e-6,
+        }
+    }
+}
+
+/// Active Set 法固有オプション
+///
+/// [`SolverOptions::active_set`] フィールドに設定する。
+#[derive(Debug, Clone, Default)]
+pub struct ActiveSetOptions {
+    /// 最大反復回数（None = 自動: 100*(m+n)+1000）
+    /// 設定した場合、グローバルの `max_iterations` より優先される。
+    pub max_iter: Option<usize>,
+}
+
 /// ソルバーの動作設定
 ///
 /// 許容誤差・反復上限・リファクタリング頻度などを制御する。
 /// `Default` でtolerance.rsの標準値が設定される。
+///
+/// ## ソルバー固有パラメータ
+///
+/// `admm`・`ipm`・`active_set` フィールドの各サブ構造体を使用すること。
+/// 旧来のフラット形式（`sigma`, `rho` 等）は非推奨。
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
+    // --- 共通設定 ---
     /// シンプレックス法の最適性・実行可能性判定の閾値（デフォルト: 1e-8）
     pub primal_tol: f64,
     /// 最大反復回数（None = 自動計算: 100*(m+n)+1000）
@@ -80,52 +170,76 @@ pub struct SolverOptions {
     /// タイムアウト期限（内部使用。qp_solve_impl の先頭で timeout_secs から計算）
     pub(crate) deadline: Option<Instant>,
 
-    // --- ADMM固有パラメータ ---
-    /// ADMM近接正則化パラメータ σ（デフォルト: 1e-6）
-    pub sigma: f64,
-    /// ADMMペナルティパラメータ ρ 初期値（デフォルト: 0.1）
-    pub rho: f64,
-    /// ADMM過緩和係数 α（デフォルト: 1.6）
-    pub alpha: f64,
-    /// ADMM絶対収束tolerance（デフォルト: 1e-6）
-    pub eps_abs: f64,
-    /// ADMM相対収束tolerance（デフォルト: 1e-6）
-    pub eps_rel: f64,
-    /// ADMMの最大反復回数（None = デフォルト: 10000）
-    pub max_iter_admm: Option<usize>,
-    /// ADMM x-update のソルバー選択
-    /// None = Auto（A^T*A 推定充填率 > 10% または n > LDL_MAX_N のとき自動的に CG を選択）
-    /// Some(true) = 強制 CG
-    /// Some(false) = 強制 LDL
-    pub admm_use_cg: Option<bool>,
-
     // --- QP solver 自動切替 ---
     /// QP solver 選択（デフォルト: Auto）
-    /// Auto: n > qp_solver_threshold のとき ADMM を選択
-    /// Admm: 強制 ADMM
-    /// ActiveSet: 強制 Active Set
     pub qp_solver: QpSolverChoice,
     /// QP 自動切替の閾値（デフォルト: 10_000）
     pub qp_solver_threshold: usize,
 
     // --- Ruiz スケーリング ---
-    /// ADMM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
-    /// false のとき、スケーリングをスキップして従来通りに動作する。
+    /// ADMM/IPM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
     pub use_ruiz_scaling: bool,
 
-    // --- IPM固有パラメータ ---
-    /// IPM 最大反復数（デフォルト: 100）
+    // --- ソルバー固有オプション ---
+    /// ADMM 固有オプション
+    pub admm: AdmmOptions,
+    /// IPM 固有オプション
+    pub ipm: IpmOptions,
+    /// Active Set 固有オプション
+    pub active_set: ActiveSetOptions,
+
+    // --- 旧 ADMM 固有パラメータ（非推奨: `admm.*` を使用すること）---
+    /// # Deprecated
+    /// `admm.sigma` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.sigma` instead")]
+    pub sigma: f64,
+    /// # Deprecated
+    /// `admm.rho` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.rho` instead")]
+    pub rho: f64,
+    /// # Deprecated
+    /// `admm.alpha` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.alpha` instead")]
+    pub alpha: f64,
+    /// # Deprecated
+    /// `admm.eps_abs` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.eps_abs` instead")]
+    pub eps_abs: f64,
+    /// # Deprecated
+    /// `admm.eps_rel` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.eps_rel` instead")]
+    pub eps_rel: f64,
+    /// # Deprecated
+    /// `admm.max_iter` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.max_iter` instead")]
+    pub max_iter_admm: Option<usize>,
+    /// # Deprecated
+    /// `admm.use_cg` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `admm.use_cg` instead")]
+    pub admm_use_cg: Option<bool>,
+
+    // --- 旧 IPM 固有パラメータ（非推奨: `ipm.*` を使用すること）---
+    /// # Deprecated
+    /// `ipm.max_iter` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `ipm.max_iter` instead")]
     pub max_iter_ipm: usize,
-    /// IPM 収束 tolerance（デフォルト: 1e-8）
+    /// # Deprecated
+    /// `ipm.eps` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `ipm.eps` instead")]
     pub eps_ipm: f64,
-    /// IP-PMM 近接正則化初期値 δ_p（デフォルト: 1e-6）
+    /// # Deprecated
+    /// `ipm.delta_p_init` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `ipm.delta_p_init` instead")]
     pub delta_p: f64,
-    /// IP-PMM 近接正則化初期値 δ_d（デフォルト: 1e-6）
+    /// # Deprecated
+    /// `ipm.delta_d_init` を使用すること。
+    #[deprecated(since = "0.1.0", note = "use `ipm.delta_d_init` instead")]
     pub delta_d: f64,
 }
 
 impl Default for SolverOptions {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
             primal_tol: PIVOT_TOL, // 1e-8
             max_iterations: None,  // auto
@@ -139,6 +253,13 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
+            qp_solver: QpSolverChoice::Auto,
+            qp_solver_threshold: 10_000,
+            use_ruiz_scaling: true,
+            admm: AdmmOptions::default(),
+            ipm: IpmOptions::default(),
+            active_set: ActiveSetOptions::default(),
+            // Deprecated fields (backward compat)
             sigma: 1e-6,
             rho: 0.1,
             alpha: 1.6,
@@ -146,9 +267,6 @@ impl Default for SolverOptions {
             eps_rel: 1e-6,
             max_iter_admm: None,
             admm_use_cg: None,
-            qp_solver: QpSolverChoice::Auto,
-            qp_solver_threshold: 10_000,
-            use_ruiz_scaling: true,
             max_iter_ipm: 100,
             eps_ipm: 1e-8,
             delta_p: 1e-6,

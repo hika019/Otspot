@@ -444,9 +444,9 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
     let mut cg_ws_opt: Option<CgWorkspace> = if use_cg { Some(CgWorkspace::new(n)) } else { None };
 
     let mut status = SolveStatus::MaxIterations;
-    let mut final_iter = options.max_iter_ipm;
+    let mut final_iter = options.ipm.max_iter;
 
-    for iter in 0..options.max_iter_ipm {
+    for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
             status = SolveStatus::Timeout;
@@ -482,15 +482,15 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
         let dual_res = norm_inf(&r_d) / norm_c;
         let prim_res = norm_inf(&r_p) / norm_b;
 
-        if dual_res < options.eps_ipm && prim_res < options.eps_ipm && mu < options.eps_ipm {
+        if dual_res < options.ipm.eps && prim_res < options.ipm.eps && mu < options.ipm.eps {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
         }
 
         // δ を μ に追従して縮小（IP-PMM）
-        let delta_p = DELTA_MIN.max(options.delta_p * mu);
-        let delta_d = DELTA_MIN.max(options.delta_d * mu);
+        let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
+        let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
 
         // Σ = diag(s_i / y_i),  D = Σ + δ_d
         let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();

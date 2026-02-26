@@ -391,7 +391,7 @@ fn compute_objective(q: &CscMatrix, c: &[f64], x: &[f64], tmp: &mut [f64]) -> f6
 /// 適用して数値安定性・CG収束を向上させる。false のとき従来通りに動作。
 pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let timeout = TimeoutCtx::from_options(options);
-    let use_cg = match options.admm_use_cg {
+    let use_cg = match options.admm.use_cg {
         Some(b) => b,
         None => problem.num_vars > LDL_THRESHOLD,
     };
@@ -473,12 +473,12 @@ fn solve_qp_admm_ldl(
     let m = problem.num_constraints;
     let m_aug = m + n;
 
-    let sigma_init = options.sigma;
-    let mut rho = options.rho;
-    let alpha = options.alpha;
-    let eps_abs = options.eps_abs;
-    let eps_rel = options.eps_rel;
-    let max_iter = options.max_iter_admm.unwrap_or(10000);
+    let sigma_init = options.admm.sigma;
+    let mut rho = options.admm.rho;
+    let alpha = options.admm.alpha;
+    let eps_abs = options.admm.eps_abs;
+    let eps_rel = options.admm.eps_rel;
+    let max_iter = options.admm.max_iter.unwrap_or(10000);
 
     let a = &problem.a;
     let q = &problem.q;
@@ -683,12 +683,12 @@ fn solve_qp_admm_cg(
     let m = problem.num_constraints;
     let m_aug = m + n;
 
-    let sigma = options.sigma;
-    let mut rho = options.rho;
-    let alpha = options.alpha;
-    let eps_abs = options.eps_abs;
-    let eps_rel = options.eps_rel;
-    let max_iter = options.max_iter_admm.unwrap_or(10000);
+    let sigma = options.admm.sigma;
+    let mut rho = options.admm.rho;
+    let alpha = options.admm.alpha;
+    let eps_abs = options.admm.eps_abs;
+    let eps_rel = options.admm.eps_rel;
+    let max_iter = options.admm.max_iter.unwrap_or(10000);
 
     let a = &problem.a;
     let q = &problem.q;
