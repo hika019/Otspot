@@ -37,10 +37,12 @@ pub(crate) mod kkt;
 mod problem;
 mod solver;
 pub mod admm;
+pub mod ipm;
 pub mod ruiz;
 
 pub use problem::{QpProblem, QpResult, QpWarmStart};
 pub use admm::solve_qp_admm;
+pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::problem::SolveStatus;
