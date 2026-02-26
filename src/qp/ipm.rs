@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 /// fraction-to-boundary τ
 const TAU: f64 = 0.995;
 /// IP-PMM 正則化最小値
-const DELTA_MIN: f64 = 1e-13;
+const DELTA_MIN: f64 = 1e-8;
 /// n > LDL_THRESHOLD のとき CG パスを自動選択（ADMMと同じ閾値）
 const LDL_THRESHOLD: usize = 5_000;
 /// CG 最大反復数
@@ -532,7 +532,6 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
 
         if !use_cg {
             // ===== LDLパス: Schur complement を明示構築して LDL 分解 =====
-            let m_mat = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p);
 
             // T2: LDL 因子化前タイムアウトチェック
             if timeout_ctx.should_stop() {
@@ -541,16 +540,32 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                 break;
             }
 
-            let fac = match ldl::factorize_with_deadline(&m_mat, timeout_ctx.deadline) {
-                Ok(f) => f,
-                Err(e) => {
-                    if matches!(e, ldl::LdlError::DeadlineExceeded) {
+            // ADMMと同パターン: δ_p を ×10 ずつ増やして最大4回リトライ
+            let mut delta_p_retry = delta_p;
+            let mut fac_opt = None;
+            for _retry in 0..4 {
+                if timeout_ctx.should_stop() {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
+                let m_mat_retry = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p_retry);
+                match ldl::factorize_with_deadline(&m_mat_retry, timeout_ctx.deadline) {
+                    Ok(f) => { fac_opt = Some(f); break; }
+                    Err(ldl::LdlError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
                         final_iter = iter;
                         break;
                     }
-                    return numerical_error_result(n);
+                    Err(_) => { delta_p_retry *= 10.0; }
                 }
+            }
+            if status == SolveStatus::Timeout {
+                break;
+            }
+            let fac = match fac_opt {
+                Some(f) => f,
+                None => return numerical_error_result(n),  // 4回失敗後
             };
 
             // --- Predictor ---
