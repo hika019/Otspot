@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use solver::io::qps::{parse_qps, QpsError};
-use solver::options::SolverOptions;
+use solver::options::{QpSolverChoice, SolverOptions};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with_options;
 use solver::QpProblem;
@@ -37,11 +37,31 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let data_dir = if args.len() >= 2 {
-        args[1].clone()
-    } else {
-        "data/maros_meszaros".to_string()
-    };
+
+    // 引数パース: [data_dir] [--solver as|admm|ipm]
+    let mut data_dir = "data/maros_meszaros".to_string();
+    let mut solver_choice = QpSolverChoice::Auto;
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--solver" {
+            i += 1;
+            if i < args.len() {
+                solver_choice = match args[i].as_str() {
+                    "as" => QpSolverChoice::ActiveSet,
+                    "admm" => QpSolverChoice::Admm,
+                    "ipm" => QpSolverChoice::Ipm,
+                    other => {
+                        eprintln!("Unknown solver: {}. Use as|admm|ipm", other);
+                        std::process::exit(1);
+                    }
+                };
+            }
+        } else if !args[i].starts_with("--") {
+            data_dir = args[i].clone();
+        }
+        i += 1;
+    }
 
     let dir = Path::new(&data_dir);
     if !dir.exists() {
@@ -78,8 +98,17 @@ fn main() {
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
 
+    let solver_label = match solver_choice {
+        QpSolverChoice::Auto => "Auto",
+        QpSolverChoice::ActiveSet => "AS",
+        QpSolverChoice::Admm => "ADMM",
+        QpSolverChoice::Ipm => "IPM",
+    };
+    println!("Solver: {}", solver_label);
+
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(10.0);
+    opts.qp_solver = solver_choice;
 
     for path in &qps_files {
         let name = path
