@@ -19,16 +19,12 @@
 
 use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl;
+use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
 use crate::qp::problem::{QpProblem, QpResult};
 use crate::qp::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // IPM 固定パラメータ
@@ -44,35 +40,6 @@ const LDL_THRESHOLD: usize = 5_000;
 const CG_MAX_ITER: usize = 1_000;
 /// CG 収束判定（残差 L∞ノルム）
 const CG_TOL: f64 = 1e-6;
-
-// ---------------------------------------------------------------------------
-// タイムアウト管理
-// ---------------------------------------------------------------------------
-
-struct TimeoutCtx {
-    deadline: Option<Instant>,
-    cancel: Arc<AtomicBool>,
-}
-
-impl TimeoutCtx {
-    fn from_options(opts: &SolverOptions) -> Self {
-        let deadline = opts.deadline.or_else(|| {
-            opts.timeout_secs
-                .map(|s| Instant::now() + Duration::from_secs_f64(s))
-        });
-        let cancel = opts
-            .cancel_flag
-            .clone()
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        Self { deadline, cancel }
-    }
-
-    #[inline]
-    fn should_stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-            || self.deadline.is_some_and(|d| Instant::now() >= d)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 疎行列-ベクトル演算

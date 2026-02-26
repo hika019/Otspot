@@ -14,16 +14,13 @@
 
 use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl::{self, LdlError, LdlFactorization};
+use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
 use crate::qp::problem::{QpProblem, QpResult};
 use crate::qp::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // タイムアウト管理
@@ -31,31 +28,6 @@ use std::time::{Duration, Instant};
 
 /// n > LDL_THRESHOLD のとき CG パスを自動選択
 const LDL_THRESHOLD: usize = 5_000;
-
-struct TimeoutCtx {
-    deadline: Option<Instant>,
-    cancel: Arc<AtomicBool>,
-}
-
-impl TimeoutCtx {
-    fn from_options(opts: &SolverOptions) -> Self {
-        let deadline = opts.deadline.or_else(|| {
-            opts.timeout_secs
-                .map(|s| Instant::now() + Duration::from_secs_f64(s))
-        });
-        let cancel = opts
-            .cancel_flag
-            .clone()
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        Self { deadline, cancel }
-    }
-
-    #[inline]
-    fn should_stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-            || self.deadline.is_some_and(|d| Instant::now() >= d)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ADMMワークスペース（GPU移行設計 §4.3 G1-G2準拠: 全バッファをnew()で一括allocate）

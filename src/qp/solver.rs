@@ -3,6 +3,7 @@
 //! Phase I（初期実行可能点探索）と Phase II（Active Setメインループ）を実装する。
 //! NC1修正済み KktSolver を使用する。
 
+use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::qp::active_set::WorkingSet;
@@ -17,36 +18,6 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
-
-/// タイムアウト + キャンセルを一元管理するヘルパー
-struct TimeoutContext {
-    deadline: Option<Instant>,
-    cancel: Arc<AtomicBool>,
-}
-
-impl TimeoutContext {
-    /// SolverOptions からコンテキストを構築する（最初の1回のみ呼ぶ）
-    fn from_options(options: &SolverOptions) -> Self {
-        let deadline = options.deadline.or_else(|| {
-            options
-                .timeout_secs
-                .map(|s| Instant::now() + Duration::from_secs_f64(s))
-        });
-        let cancel = options
-            .cancel_flag
-            .clone()
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        Self { deadline, cancel }
-    }
-
-    #[inline]
-    fn should_stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-            || self
-                .deadline
-                .is_some_and(|d| Instant::now() >= d)
-    }
-}
 
 /// 変数境界を明示的な不等式制約行に変換して A 行列に追加する
 ///
@@ -134,8 +105,8 @@ pub(crate) fn qp_solve_impl(
         options
     };
 
-    // TimeoutContext: deadline + cancel_flag を一元管理
-    let timeout = TimeoutContext::from_options(effective_opts);
+    // TimeoutCtx: deadline + cancel_flag を一元管理
+    let timeout = TimeoutCtx::from_options(effective_opts);
 
     // Q=0 の退化ケース（LP問題）: LP solverに委譲
     if problem.is_zero_q() {
@@ -191,7 +162,7 @@ pub(crate) fn qp_solve_impl(
                     // 各ワーカー用の cancel_flag を共有
                     let mut worker_opts = effective_opts.clone();
                     worker_opts.cancel_flag = Some(cancel.clone());
-                    let worker_timeout = TimeoutContext::from_options(&worker_opts);
+                    let worker_timeout = TimeoutCtx::from_options(&worker_opts);
                     eprintln!("DBG: worker start, ws_len={}, should_stop={}, deadline_remaining={:.3}s",
                         ws_indices.len(), worker_timeout.should_stop(),
                         worker_opts.deadline.map_or(-1.0, |d| (d - std::time::Instant::now()).as_secs_f64()));
@@ -664,7 +635,7 @@ fn active_set_loop(
     mut x: Vec<f64>,
     mut working_set: WorkingSet,
     options: &SolverOptions,
-    timeout: &TimeoutContext,
+    timeout: &TimeoutCtx,
 ) -> QpResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
@@ -936,7 +907,7 @@ fn compute_step_size(
     x: &[f64],
     d: &[f64],
     working_set: &WorkingSet,
-    timeout: &TimeoutContext,
+    timeout: &TimeoutCtx,
 ) -> StepResult {
     let mut alpha_crit = 1.0f64;
     let mut blocking: Option<usize> = None;
