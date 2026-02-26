@@ -21,6 +21,7 @@ use crate::linalg::ldl;
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
 use crate::qp::problem::{QpProblem, QpResult};
+use crate::qp::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -32,14 +33,8 @@ use std::time::{Duration, Instant};
 // IPM 固定パラメータ
 // ---------------------------------------------------------------------------
 
-/// デフォルト最大反復数
-const MAX_ITER_IPM: usize = 100;
-/// 収束判定 tolerance
-const EPS_IPM: f64 = 1e-8;
 /// fraction-to-boundary τ
 const TAU: f64 = 0.995;
-/// IP-PMM 正則化初期値
-const DELTA_INIT: f64 = 1e-7;
 /// IP-PMM 正則化最小値
 const DELTA_MIN: f64 = 1e-13;
 
@@ -296,9 +291,54 @@ fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
 
 /// IPM (Mehrotra predictor-corrector + IP-PMM) で QP を解く
 ///
-/// 関数シグネチャは ADMM の `solve_qp_admm` と対応。
-/// コミット1: LDLパス（Schur complement形式）のみ。Ruiz・CG は後のコミットで追加。
+/// Ruiz equilibration スケーリングを適用してから内部ソルバーを呼ぶ。
+/// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
 pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+    // Ruiz equilibration スケーリング（デフォルト有効）
+    if options.use_ruiz_scaling && problem.num_vars > 0 {
+        let n = problem.num_vars;
+        let m = problem.num_constraints;
+
+        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
+        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+
+        let (q_s, a_s, c_s, b_s, bounds_s) =
+            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
+
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+            let scaled_result = solve_qp_ipm_inner(&scaled_problem, options);
+            return unscale_ipm_result(scaled_result, &scaler);
+        }
+        // QpProblem::new 失敗 → 非スケールにフォールバック
+    }
+
+    solve_qp_ipm_inner(problem, options)
+}
+
+/// スケール済み IPM 結果を元のスケールに逆変換する
+fn unscale_ipm_result(result: QpResult, scaler: &RuizScaler) -> QpResult {
+    match result.status {
+        SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::MaxIterations => {
+            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let obj_orig = result.objective / scaler.c;
+            QpResult {
+                objective: obj_orig,
+                solution: x,
+                dual_solution: y,
+                ..result
+            }
+        }
+        _ => result,
+    }
+}
+
+/// IPM内部ソルバー（Ruizスケーリング適用済みproblemを受け取る）
+///
+/// コミット1: LDLパス（Schur complement形式）のみ。CGは後のコミットで追加。
+fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::from_options(options);
 
@@ -342,9 +382,9 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let mut ds = vec![0.0f64; m_ext];
 
     let mut status = SolveStatus::MaxIterations;
-    let mut final_iter = MAX_ITER_IPM;
+    let mut final_iter = options.max_iter_ipm;
 
-    for iter in 0..MAX_ITER_IPM {
+    for iter in 0..options.max_iter_ipm {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
             status = SolveStatus::Timeout;
@@ -380,15 +420,15 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
         let dual_res = norm_inf(&r_d) / norm_c;
         let prim_res = norm_inf(&r_p) / norm_b;
 
-        if dual_res < EPS_IPM && prim_res < EPS_IPM && mu < EPS_IPM {
+        if dual_res < options.eps_ipm && prim_res < options.eps_ipm && mu < options.eps_ipm {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
         }
 
         // δ を μ に追従して縮小（IP-PMM）
-        let delta_p = DELTA_MIN.max(DELTA_INIT * mu);
-        let delta_d = DELTA_MIN.max(DELTA_INIT * mu);
+        let delta_p = DELTA_MIN.max(options.delta_p * mu);
+        let delta_d = DELTA_MIN.max(options.delta_d * mu);
 
         // Σ = diag(s_i / y_i),  D = Σ + δ_d
         let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();
@@ -850,8 +890,7 @@ mod tests {
         close(result.objective, 1.0 / 3.0, "IPM-T5: objective");
     }
 
-    /// IPM-T6: タイムアウト動作確認
-    /// timeout_secs=0 で即タイムアウト
+    /// IPM-T6: タイムアウト動作確認（極小 timeout で Timeout が返ること）
     #[test]
     fn test_ipm_timeout() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -861,14 +900,42 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
+        // 0.0001 秒（0.1ms）のタイムアウトで Timeout が返ることを確認
         let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(0.0);
+        opts.timeout_secs = Some(0.0001);
+        // use_ruiz_scaling を無効化して Ruiz 処理でタイムアウトが誤吸収されないようにする
+        opts.use_ruiz_scaling = false;
         let result = solve_qp_ipm(&problem, &opts);
-        // 0秒タイムアウト: Timeout か Optimal のどちらか
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPM-T6: expected Timeout or Optimal, got {:?}",
             result.status
         );
+    }
+
+    /// IPM-T7: Ruiz スケーリング有無で同一解が得られることを確認
+    /// T1 と同じ問題 (min x^2+y^2, s.t. x+y>=1) で比較
+    #[test]
+    fn test_ipm_ruiz_scaling_consistency() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // Ruiz 有効（デフォルト）
+        let result_ruiz = solve_qp_ipm(&problem, &SolverOptions::default());
+
+        // Ruiz 無効
+        let mut opts_no_ruiz = SolverOptions::default();
+        opts_no_ruiz.use_ruiz_scaling = false;
+        let result_no_ruiz = solve_qp_ipm(&problem, &opts_no_ruiz);
+
+        assert_eq!(result_ruiz.status, SolveStatus::Optimal, "IPM-T7: ruiz status");
+        assert_eq!(result_no_ruiz.status, SolveStatus::Optimal, "IPM-T7: no-ruiz status");
+        close(result_ruiz.solution[0], result_no_ruiz.solution[0], "IPM-T7: x[0]");
+        close(result_ruiz.solution[1], result_no_ruiz.solution[1], "IPM-T7: x[1]");
+        close(result_ruiz.objective, result_no_ruiz.objective, "IPM-T7: objective");
     }
 }

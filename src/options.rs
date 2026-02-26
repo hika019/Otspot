@@ -110,6 +110,16 @@ pub struct SolverOptions {
     /// ADMM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
     /// false のとき、スケーリングをスキップして従来通りに動作する。
     pub use_ruiz_scaling: bool,
+
+    // --- IPM固有パラメータ ---
+    /// IPM 最大反復数（デフォルト: 100）
+    pub max_iter_ipm: usize,
+    /// IPM 収束 tolerance（デフォルト: 1e-8）
+    pub eps_ipm: f64,
+    /// IP-PMM 近接正則化初期値 δ_p（デフォルト: 1e-6）
+    pub delta_p: f64,
+    /// IP-PMM 近接正則化初期値 δ_d（デフォルト: 1e-6）
+    pub delta_d: f64,
 }
 
 impl Default for SolverOptions {
@@ -137,6 +147,10 @@ impl Default for SolverOptions {
             qp_solver: QpSolverChoice::Auto,
             qp_solver_threshold: 10_000,
             use_ruiz_scaling: true,
+            max_iter_ipm: 100,
+            eps_ipm: 1e-8,
+            delta_p: 1e-6,
+            delta_d: 1e-6,
         }
     }
 }
