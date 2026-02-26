@@ -49,7 +49,11 @@ impl fmt::Display for SolveStatus {
     }
 }
 
-/// LP問題の求解結果
+/// LP/QP共通求解結果型
+///
+/// LP求解（Simplex等）と QP求解（AS/ADMM/IPM/Concurrent）の両方で使用できる統一結果型。
+/// LP固有フィールド（`reduced_costs`, `slack`, `warm_start_basis`）は QP求解時は空/None。
+/// QP固有フィールド（`bound_duals`, `active_set`, `iterations`）は LP求解時は空/0。
 #[derive(Debug, Clone)]
 pub struct SolverResult {
     /// 求解ステータス
@@ -60,12 +64,37 @@ pub struct SolverResult {
     pub solution: Vec<f64>,
     /// 双対変数ベクトル（各制約の影価格、最適解が存在する場合）
     pub dual_solution: Vec<f64>,
+    // --- LP固有フィールド ---
     /// 被縮小費用ベクトル（各決定変数に対して、最適解が存在する場合）
     pub reduced_costs: Vec<f64>,
     /// スラック変数ベクトル（各制約のスラック b_i - a_i^T x、最適解が存在する場合）
     pub slack: Vec<f64>,
     /// warm-start用の基底情報（Optimal時のみ Some）
     pub warm_start_basis: Option<WarmStartBasis>,
+    // --- QP固有フィールド ---
+    /// 変数境界の双対値（有限境界制約の双対値、長さ: 有限 bounds 制約数）
+    pub bound_duals: Vec<f64>,
+    /// 最終反復での活性制約インデックス（warm-start用）
+    pub active_set: Vec<usize>,
+    /// 反復回数（WSR実績回数）
+    pub iterations: usize,
+}
+
+impl Default for SolverResult {
+    fn default() -> Self {
+        SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            bound_duals: vec![],
+            active_set: vec![],
+            iterations: 0,
+        }
+    }
 }
 
 impl fmt::Display for SolverResult {
@@ -251,6 +280,7 @@ mod tests {
             reduced_costs: vec![],
             slack: vec![],
             warm_start_basis: None,
+            ..Default::default()
         };
         let display = format!("{}", result);
         assert_eq!(display, "Status: Optimal, Objective: 42.5");

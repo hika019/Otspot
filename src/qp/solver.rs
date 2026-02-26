@@ -141,7 +141,8 @@ pub(crate) fn qp_solve_impl(
                     bound_duals: vec![],
                     active_set: vec![],
                     iterations: 0,
-                }},
+                    ..Default::default()
+                } },
             };
 
             // cancel フラグ（他ワーカーが Optimal を見つけたら残りを止める）
@@ -219,6 +220,7 @@ pub(crate) fn qp_solve_impl(
                         bound_duals: vec![],
                         active_set: vec![],
                         iterations: 0,
+                        ..Default::default()
                     },
                 }
             }
@@ -237,6 +239,7 @@ pub(crate) fn qp_solve_impl(
                     bound_duals: vec![],
                     active_set: vec![],
                     iterations: 0,
+                    ..Default::default()
                 },
             }
         }
@@ -255,6 +258,7 @@ pub(crate) fn qp_solve_impl(
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: 0,
+                ..Default::default()
             },
         }
     };
@@ -401,6 +405,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                 bound_duals: vec![],
                 active_set: active,
                 iterations: 0,
+                ..Default::default()
             }
         }
         SolveStatus::Infeasible => QpResult::infeasible(),
@@ -412,6 +417,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
+            ..Default::default()
         },
         SolveStatus::MaxIterations => QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0),
         SolveStatus::Timeout => QpResult {
@@ -422,6 +428,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
+            ..Default::default()
         },
         SolveStatus::NumericalError => QpResult {
             status: SolveStatus::NumericalError,
@@ -431,6 +438,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
+            ..Default::default()
         },
     }
 }
@@ -658,6 +666,7 @@ fn active_set_loop(
                 bound_duals: vec![0.0; aug_b.len() - m],
                 active_set: working_set.indices().to_vec(),
                 iterations: iter,
+                ..Default::default()
             };
         }
 
@@ -685,6 +694,7 @@ fn active_set_loop(
                     bound_duals: vec![0.0; aug_b.len() - m],
                     active_set: working_set.indices().to_vec(),
                     iterations: iter,
+                    ..Default::default()
                 };
             }
             match solve_unconstrained_direction(&problem.q, &grad, timeout.deadline) {
@@ -699,6 +709,7 @@ fn active_set_loop(
                         bound_duals: vec![0.0; aug_b.len() - m],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter,
+                        ..Default::default()
                     };
                 }
                 Err(_) => {
@@ -717,6 +728,7 @@ fn active_set_loop(
                     bound_duals: vec![0.0; aug_b.len() - m],
                     active_set: working_set.indices().to_vec(),
                     iterations: iter,
+                    ..Default::default()
                 };
             }
             let kkt_solver = match KktSolver::new_with_deadline(&problem.q, &a_active, timeout.deadline) {
@@ -731,6 +743,7 @@ fn active_set_loop(
                         bound_duals: vec![0.0; aug_b.len() - m],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter,
+                        ..Default::default()
                     };
                 }
                 Err(_) => {
@@ -763,6 +776,7 @@ fn active_set_loop(
                         bound_duals: vec![0.0; aug_b.len() - m],
                         active_set: working_set.indices().to_vec(),
                         iterations: iter + 1,
+                        ..Default::default()
                     };
                 }
             }
@@ -788,6 +802,7 @@ fn active_set_loop(
                     bound_duals: bounds_dual.to_vec(),
                     active_set: working_set.indices().to_vec(),
                     iterations: iter + 1,
+                    ..Default::default()
                 };
             }
 
@@ -824,6 +839,7 @@ fn active_set_loop(
                     bound_duals: vec![0.0; aug_b.len() - m],
                     active_set: working_set.indices().to_vec(),
                     iterations: iter,
+                    ..Default::default()
                 };
             }
 

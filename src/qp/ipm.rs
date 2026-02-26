@@ -722,6 +722,7 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
         bound_duals: vec![],
         active_set: vec![],
         iterations: final_iter,
+        ..Default::default()
     }
 }
 
@@ -746,6 +747,7 @@ fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> QpResul
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
+            ..Default::default()
         };
     }
 
@@ -812,6 +814,7 @@ fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> QpResul
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: 1,
+                ..Default::default()
             }
         }
         Err(_) => numerical_error_result(n),
@@ -831,6 +834,7 @@ fn timeout_result(n: usize) -> QpResult {
         bound_duals: vec![],
         active_set: vec![],
         iterations: 0,
+        ..Default::default()
     }
 }
 
@@ -843,6 +847,7 @@ fn numerical_error_result(n: usize) -> QpResult {
         bound_duals: vec![],
         active_set: vec![],
         iterations: 0,
+        ..Default::default()
     }
 }
 

@@ -85,34 +85,18 @@ impl QpProblem {
     }
 }
 
-/// QP求解結果
-#[derive(Debug, Clone)]
-pub struct QpResult {
-    /// 求解ステータス（LP用 SolveStatus を共用）
-    pub status: SolveStatus,
-    /// 最適目的関数値 (1/2 x^T Q x + c^T x)
-    pub objective: f64,
-    /// 最適解ベクトル x*（長さ: num_vars）
-    pub solution: Vec<f64>,
-    /// ラグランジュ乗数ベクトル λ*（Ax<=b 元の制約の双対値、長さ: num_constraints = m）
-    ///
-    /// 変数境界の双対値は含まない。境界の双対値は `bound_duals` を参照。
-    pub dual_solution: Vec<f64>,
-    /// 変数境界の双対値（有限境界制約の双対値、長さ: 有限 bounds 制約数）
-    ///
-    /// `augment_bounds_to_constraints` で追加された境界制約に対応する双対値。
-    /// 境界なし問題（全変数が無限区間）では空ベクトル。
-    pub bound_duals: Vec<f64>,
-    /// 最終反復での活性制約インデックス（warm-start用）
-    pub active_set: Vec<usize>,
-    /// WSR（Working Set Recalculations）実績回数
-    pub iterations: usize,
-}
+/// QP求解結果（`SolverResult` の型エイリアス）
+///
+/// # Deprecated
+///
+/// `SolverResult` に統合された。`crate::problem::SolverResult` を直接使用すること。
+#[deprecated(since = "0.1.0", note = "use SolverResult (LP/QP unified result type) instead")]
+pub type QpResult = crate::problem::SolverResult;
 
-impl QpResult {
-    /// Infeasible結果を生成
+impl crate::problem::SolverResult {
+    /// Infeasible結果を生成（QP用）
     pub fn infeasible() -> Self {
-        QpResult {
+        crate::problem::SolverResult {
             status: SolveStatus::Infeasible,
             objective: f64::INFINITY,
             solution: vec![],
@@ -120,12 +104,13 @@ impl QpResult {
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
+            ..Default::default()
         }
     }
 
-    /// MaxIterations結果を生成
+    /// MaxIterations結果を生成（QP用）
     pub fn max_iterations(x: Vec<f64>, obj: f64, active: Vec<usize>, iters: usize) -> Self {
-        QpResult {
+        crate::problem::SolverResult {
             status: SolveStatus::MaxIterations,
             objective: obj,
             solution: x,
@@ -133,6 +118,7 @@ impl QpResult {
             bound_duals: vec![],
             active_set: active,
             iterations: iters,
+            ..Default::default()
         }
     }
 }

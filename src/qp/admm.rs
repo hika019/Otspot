@@ -529,6 +529,7 @@ fn solve_qp_admm_ldl(
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: iter,
+                ..Default::default()
             };
         }
 
@@ -580,6 +581,7 @@ fn solve_qp_admm_ldl(
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: iter + 1,
+                ..Default::default()
             };
         }
 
@@ -602,6 +604,7 @@ fn solve_qp_admm_ldl(
                         bound_duals: vec![],
                         active_set: vec![],
                         iterations: iter,
+                        ..Default::default()
                     };
                 }
                 // K再構築 + LDL再分解（失敗時は旧ρで継続、タイムアウト時は即リターン）
@@ -626,6 +629,7 @@ fn solve_qp_admm_ldl(
                             bound_duals: vec![],
                             active_set: vec![],
                             iterations: iter,
+                            ..Default::default()
                         };
                     }
                     Err(TryFactorizeErr::Numerical) => { /* 旧ρで継続 */ }
@@ -640,6 +644,7 @@ fn solve_qp_admm_ldl(
                         bound_duals: vec![],
                         active_set: vec![],
                         iterations: iter,
+                        ..Default::default()
                     };
                 }
             }
@@ -656,6 +661,7 @@ fn solve_qp_admm_ldl(
         bound_duals: vec![],
         active_set: vec![],
         iterations: max_iter,
+        ..Default::default()
     }
 }
 
@@ -729,6 +735,7 @@ fn solve_qp_admm_cg(
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: iter,
+                ..Default::default()
             };
         }
 
@@ -764,6 +771,7 @@ fn solve_qp_admm_cg(
                     bound_duals: vec![],
                     active_set: vec![],
                     iterations: iter,
+                    ..Default::default()
                 };
             }
         }
@@ -802,6 +810,7 @@ fn solve_qp_admm_cg(
                 bound_duals: vec![],
                 active_set: vec![],
                 iterations: iter + 1,
+                ..Default::default()
             };
         }
 
@@ -824,6 +833,7 @@ fn solve_qp_admm_cg(
                         bound_duals: vec![],
                         active_set: vec![],
                         iterations: iter,
+                        ..Default::default()
                     };
                 }
                 // y スケール: y_new = y_old * (rho_old / rho_new)  (λ=y/ρ を保持)
@@ -848,6 +858,7 @@ fn solve_qp_admm_cg(
         bound_duals: vec![],
         active_set: vec![],
         iterations: max_iter,
+        ..Default::default()
     }
 }
 
@@ -984,6 +995,7 @@ fn make_timeout_result(n: usize, m: usize, iters: usize) -> QpResult {
         bound_duals: vec![],
         active_set: vec![],
         iterations: iters,
+        ..Default::default()
     }
 }
 
@@ -996,6 +1008,7 @@ fn make_numerical_error_result(n: usize, m: usize) -> QpResult {
         bound_duals: vec![],
         active_set: vec![],
         iterations: 0,
+        ..Default::default()
     }
 }
 
