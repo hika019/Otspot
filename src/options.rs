@@ -13,13 +13,15 @@ use std::time::Instant;
 /// QP ソルバー選択
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QpSolverChoice {
-    /// Auto: n > qp_solver_threshold のとき ADMM を選択、さもなくば Active Set
+    /// Auto: n < qp_solver_threshold → Active Set, n >= threshold → IPM→ADMMフォールバック
     #[default]
     Auto,
     /// 強制 ADMM
     Admm,
     /// 強制 Active Set
     ActiveSet,
+    /// 強制 IPM (内点法)
+    Ipm,
 }
 
 /// シンプレックス法の選択

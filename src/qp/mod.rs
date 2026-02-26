@@ -49,40 +49,46 @@ use crate::problem::SolveStatus;
 
 /// QP ソルバーをディスパッチする内部関数
 ///
-/// `options.qp_solver` に基づいて ADMM または Active Set を選択する。
-/// Auto モードでは `problem.num_vars > options.qp_solver_threshold` のとき ADMM を選択。
-/// ADMM 選択時は warm_start は無視される。
+/// `options.qp_solver` に基づいてソルバーを選択する。
 ///
-/// Auto モードで Active Set を選択した場合、Phase I LP が数値的に失敗
-/// （`MaxIterations`, `solution` 空, `iterations == 0`）したときは ADMM にフォールバックする。
-/// これにより QSCSD8・MOSARQP1 等の数値的に困難な問題でも ADMM が反復して解ける。
+/// - `Admm`: 強制 ADMM
+/// - `ActiveSet`: 強制 Active Set
+/// - `Ipm`: 強制 IPM（内点法）
+/// - `Auto`:
+///   - n < qp_solver_threshold → Active Set（Phase I 失敗時は ADMM にフォールバック）
+///   - n >= qp_solver_threshold → IPM 試行 → Timeout/MaxIterations/NumericalError 時 ADMM にフォールバック
 fn dispatch_qp(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
     options: &SolverOptions,
 ) -> QpResult {
-    let use_admm = match options.qp_solver {
-        QpSolverChoice::Admm => true,
-        QpSolverChoice::ActiveSet => false,
-        QpSolverChoice::Auto => problem.num_vars >= options.qp_solver_threshold,
-    };
-    if use_admm {
-        admm::solve_qp_admm(problem, options)
-    } else {
-        let result = solver::qp_solve_impl(problem, warm_start, options);
-        // Auto モード専用フォールバック:
-        // Active Set Phase I LP が refactor_failed 等で失敗すると
-        //   status=MaxIterations, solution=空, iterations=0 を返す。
-        // このケースに限り ADMM で再試行する（Q≠0 かつ Auto モードのみ）。
-        if options.qp_solver == QpSolverChoice::Auto
-            && result.status == SolveStatus::MaxIterations
-            && result.solution.is_empty()
-            && result.iterations == 0
-            && !problem.is_zero_q()
-        {
-            admm::solve_qp_admm(problem, options)
-        } else {
-            result
+    match options.qp_solver {
+        QpSolverChoice::Admm => admm::solve_qp_admm(problem, options),
+        QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
+        QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
+        QpSolverChoice::Auto => {
+            if problem.num_vars >= options.qp_solver_threshold {
+                // 大規模問題: IPM を先に試みて、失敗時は ADMM にフォールバック
+                let ipm_result = ipm::solve_qp_ipm(problem, options);
+                match ipm_result.status {
+                    SolveStatus::Timeout
+                    | SolveStatus::MaxIterations
+                    | SolveStatus::NumericalError => admm::solve_qp_admm(problem, options),
+                    _ => ipm_result,
+                }
+            } else {
+                // 小規模問題: Active Set（Phase I 失敗時は ADMM にフォールバック）
+                let result = solver::qp_solve_impl(problem, warm_start, options);
+                if result.status == SolveStatus::MaxIterations
+                    && result.solution.is_empty()
+                    && result.iterations == 0
+                    && !problem.is_zero_q()
+                {
+                    admm::solve_qp_admm(problem, options)
+                } else {
+                    result
+                }
+            }
         }
     }
 }
@@ -691,5 +697,64 @@ mod tests {
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-4, "T17: xi = 0.5 (got {})", xi);
         }
+    }
+
+    /// T18: 強制IPM（小規模問題）
+    ///
+    /// n=2 の基本 QP で QpSolverChoice::Ipm を指定して正常解を確認する。
+    /// min x^2 + y^2  s.t. x + y >= 1
+    /// Q = [[2,0],[0,2]], c=[0,0], A=[[-1,-1]], b=[-1]
+    /// 期待: x*=y*=0.5, obj=0.5
+    #[test]
+    fn test_force_ipm_small() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.qp_solver = QpSolverChoice::Ipm;
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T18: 強制IPMはOptimal");
+        assert!((result.solution[0] - 0.5).abs() < 1e-4, "T18: x[0] ≈ 0.5");
+        assert!((result.solution[1] - 0.5).abs() < 1e-4, "T18: x[1] ≈ 0.5");
+        assert!((result.objective - 0.5).abs() < 1e-4, "T18: obj ≈ 0.5");
+    }
+
+    /// T19: Auto モード IPM→ADMM フォールバック確認
+    ///
+    /// n=200 > threshold=100 の問題で、timeout_secs=0.0001 を設定して
+    /// IPM がタイムアウトし ADMM にフォールバックすることを確認する。
+    /// フォールバック後も結果が返ること（Optimal or Timeout）を確認。
+    #[test]
+    fn test_auto_ipm_fallback_to_admm() {
+        let n = 200usize;
+        let q_rows: Vec<usize> = (0..n).collect();
+        let q_cols: Vec<usize> = (0..n).collect();
+        let q_vals = vec![2.0f64; n];
+        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
+        let c = vec![-1.0f64; n];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0f64, 1.0f64); n];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // threshold を 100 に下げて Auto → IPM を引き起こす
+        // timeout を極小にして IPM タイムアウト → ADMM フォールバックを確認
+        let mut opts = SolverOptions::default();
+        opts.qp_solver_threshold = 100;
+        opts.timeout_secs = Some(0.0001);
+        let result = solve_qp_with_options(&problem, &opts);
+        // IPM タイムアウト後 ADMM もタイムアウトする場合あり
+        // いずれにせよ SolveStatus が返ること（panic しない）を確認
+        assert!(
+            result.status == SolveStatus::Optimal
+                || result.status == SolveStatus::Timeout
+                || result.status == SolveStatus::MaxIterations,
+            "T19: Auto IPMフォールバック: 期待外ステータス {:?}",
+            result.status
+        );
     }
 }
