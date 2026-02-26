@@ -309,7 +309,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
         .collect();
 
     QpProblem::new(q, c, a_mat, b_vec, bounds)
-        .map_err(|e| QplibError::ParseError(e))
+        .map_err(QplibError::ParseError)
 }
 
 /// トークンストリーム（コメントを除去しながらフラットにトークン化）

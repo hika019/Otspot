@@ -5,18 +5,14 @@
 
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::active_set::WorkingSet;
 use crate::qp::kkt::{self, KktSolver};
-use crate::qp::problem::{QpProblem, QpResult, QpWarmStart};
+use crate::qp::problem::{QpProblem, QpWarmStart};
 use crate::sparse::CscMatrix;
 use crate::tolerances::*;
 use crate::backend::{LpBackend, SimplexBackend};
 use crate::qp::kkt::extract_active_rows;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::time::{Duration, Instant};
 
 /// 変数境界を明示的な不等式制約行に変換して A 行列に追加する
@@ -89,7 +85,7 @@ pub(crate) fn qp_solve_impl(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
     options: &SolverOptions,
-) -> QpResult {
+) -> SolverResult {
     let n = problem.num_vars;
 
     // deadline を一度だけ計算してオプションに設定（Simplex 内でも使用）
@@ -128,12 +124,12 @@ pub(crate) fn qp_solve_impl(
             let phase1_start = std::time::Instant::now();
             let feasible_x = match find_initial_feasible_point(problem, effective_opts) {
                 Phase1Result::Feasible(x) => { eprintln!("DBG: Phase1 Feasible ({:.2}s)", phase1_start.elapsed().as_secs_f64()); x },
-                Phase1Result::Infeasible => { eprintln!("DBG: Phase1 Infeasible"); return QpResult::infeasible() },
+                Phase1Result::Infeasible => { eprintln!("DBG: Phase1 Infeasible"); return SolverResult::infeasible() },
                 Phase1Result::MaxIterations => {
                     eprintln!("DBG: Phase1 MaxIterations");
-                    return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                    return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                 }
-                Phase1Result::Timeout => { eprintln!("DBG: Phase1 Timeout ({:.2}s)", phase1_start.elapsed().as_secs_f64()); return QpResult {
+                Phase1Result::Timeout => { eprintln!("DBG: Phase1 Timeout ({:.2}s)", phase1_start.elapsed().as_secs_f64()); return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: f64::INFINITY,
                     solution: vec![],
@@ -200,7 +196,7 @@ pub(crate) fn qp_solve_impl(
 
     // Phase I: 初期実行可能点の取得
     // Phase1Result::MaxIterations は数値困難（refactor_failed 等）による早期打切りで
-    // 偽陽性の Infeasible を防ぐため QpResult::max_iterations() を返す。
+    // 偽陽性の Infeasible を防ぐため SolverResult::max_iterations() を返す。
     let initial_x = if let Some(ws) = warm_start {
         if let Some(ref x0) = ws.initial_point {
             if x0.len() == n {
@@ -208,11 +204,11 @@ pub(crate) fn qp_solve_impl(
             } else {
                 match find_initial_feasible_point(problem, effective_opts) {
                     Phase1Result::Feasible(x) => x,
-                    Phase1Result::Infeasible => return QpResult::infeasible(),
+                    Phase1Result::Infeasible => return SolverResult::infeasible(),
                     Phase1Result::MaxIterations => {
-                        return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                        return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                     }
-                    Phase1Result::Timeout => return QpResult {
+                    Phase1Result::Timeout => return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: f64::INFINITY,
                         solution: vec![],
@@ -227,11 +223,11 @@ pub(crate) fn qp_solve_impl(
         } else {
             match find_initial_feasible_point(problem, effective_opts) {
                 Phase1Result::Feasible(x) => x,
-                Phase1Result::Infeasible => return QpResult::infeasible(),
+                Phase1Result::Infeasible => return SolverResult::infeasible(),
                 Phase1Result::MaxIterations => {
-                    return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                    return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                 }
-                Phase1Result::Timeout => return QpResult {
+                Phase1Result::Timeout => return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: f64::INFINITY,
                     solution: vec![],
@@ -246,11 +242,11 @@ pub(crate) fn qp_solve_impl(
     } else {
         match find_initial_feasible_point(problem, effective_opts) {
             Phase1Result::Feasible(x) => x,
-            Phase1Result::Infeasible => return QpResult::infeasible(),
+            Phase1Result::Infeasible => return SolverResult::infeasible(),
             Phase1Result::MaxIterations => {
-                return QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
             }
-            Phase1Result::Timeout => return QpResult {
+            Phase1Result::Timeout => return SolverResult {
                 status: SolveStatus::Timeout,
                 objective: f64::INFINITY,
                 solution: vec![],
@@ -366,7 +362,7 @@ fn build_initial_working_sets(
 }
 
 /// LP ソルバーに委譲してQP結果に変換（Q=0 ケース）
-fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
 
@@ -380,7 +376,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
         None,
     ) {
         Ok(lp) => lp,
-        Err(_) => return QpResult::infeasible(),
+        Err(_) => return SolverResult::infeasible(),
     };
 
     let result = SimplexBackend.solve(&lp, options);
@@ -397,7 +393,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                     (ax_i - problem.b[i]).abs() < PIVOT_TOL
                 })
                 .collect();
-            QpResult {
+            SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj,
                 solution: x,
@@ -408,8 +404,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
                 ..Default::default()
             }
         }
-        SolveStatus::Infeasible => QpResult::infeasible(),
-        SolveStatus::Unbounded => QpResult {
+        SolveStatus::Infeasible => SolverResult::infeasible(),
+        SolveStatus::Unbounded => SolverResult {
             status: SolveStatus::Unbounded,
             objective: f64::NEG_INFINITY,
             solution: vec![],
@@ -419,8 +415,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             iterations: 0,
             ..Default::default()
         },
-        SolveStatus::MaxIterations => QpResult::max_iterations(vec![], f64::INFINITY, vec![], 0),
-        SolveStatus::Timeout => QpResult {
+        SolveStatus::MaxIterations => SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0),
+        SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
             solution: vec![],
@@ -430,7 +426,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
             iterations: 0,
             ..Default::default()
         },
-        SolveStatus::NumericalError => QpResult {
+        SolveStatus::NumericalError => SolverResult {
             status: SolveStatus::NumericalError,
             objective: f64::INFINITY,
             solution: vec![],
@@ -446,8 +442,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 /// Phase I LP の結果を表す列挙型
 ///
 /// `SolveStatus::MaxIterations` は数値困難（refactor_failed 等）による早期打切りで、
-/// 問題が実行不可能であることを意味しない。この場合は `QpResult::infeasible()` ではなく
-/// `QpResult::max_iterations()` を返して偽陽性の Infeasible を防ぐ。
+/// 問題が実行不可能であることを意味しない。この場合は `SolverResult::infeasible()` ではなく
+/// `SolverResult::max_iterations()` を返して偽陽性の Infeasible を防ぐ。
 enum Phase1Result {
     /// 初期実行可能点が見つかった
     Feasible(Vec<f64>),
@@ -469,7 +465,7 @@ enum Phase1Result {
 /// 半分のサイズ・退化なしの Phase I LP を作る。
 ///
 /// 戻り値: `Phase1Result` で3状態を区別する。MaxIterations は偽陽性 Infeasible を防ぐために
-/// 呼び出し元が `QpResult::max_iterations()` を返すべきことを意味する。
+/// 呼び出し元が `SolverResult::max_iterations()` を返すべきことを意味する。
 fn find_initial_feasible_point(
     problem: &QpProblem,
     options: &SolverOptions,
@@ -644,7 +640,7 @@ fn active_set_loop(
     mut working_set: WorkingSet,
     options: &SolverOptions,
     timeout: &TimeoutCtx,
-) -> QpResult {
+) -> SolverResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     let max_iter = options.max_iterations.unwrap_or(100 * (n + m) + 1000);
@@ -658,7 +654,7 @@ fn active_set_loop(
         // タイムアウト / キャンセルチェック
         if timeout.should_stop() {
             let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-            return QpResult {
+            return SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj,
                 solution: x,
@@ -678,7 +674,7 @@ fn active_set_loop(
             Ok(a) => a,
             Err(_) => {
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return QpResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
             }
         };
 
@@ -686,7 +682,7 @@ fn active_set_loop(
             // 活性制約なし: 制約なし最適化方向
             if timeout.should_stop() {
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return QpResult {
+                return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj,
                     solution: x,
@@ -701,7 +697,7 @@ fn active_set_loop(
                 Ok(d) => (d, vec![]),
                 Err(crate::error::SolverError::DeadlineExceeded) => {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj,
                         solution: x,
@@ -720,7 +716,7 @@ fn active_set_loop(
         } else {
             if timeout.should_stop() {
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return QpResult {
+                return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj,
                     solution: x,
@@ -735,7 +731,7 @@ fn active_set_loop(
                 Ok(s) => s,
                 Err(crate::error::SolverError::DeadlineExceeded) => {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj,
                         solution: x,
@@ -748,14 +744,14 @@ fn active_set_loop(
                 }
                 Err(_) => {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return QpResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                    return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
                 }
             };
             match kkt_solver.solve(&grad) {
                 Ok(result) => result,
                 Err(_) => {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return QpResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                    return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
                 }
             }
         };
@@ -768,7 +764,7 @@ fn active_set_loop(
                 // 制約なし最適: 勾配が小さければ最適
                 if grad.iter().map(|&g| g * g).sum::<f64>().sqrt() < PIVOT_TOL {
                     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Optimal,
                         objective: obj,
                         solution: x,
@@ -794,7 +790,7 @@ fn active_set_loop(
                 // dual_solution[0..m]: 元の制約の双対値（公開API契約: 長さm）
                 // bound_duals[m..]: 変数境界の双対値
                 let (orig_dual, bounds_dual) = full_dual.split_at(m);
-                return QpResult {
+                return SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj,
                     solution: x,
@@ -831,7 +827,7 @@ fn active_set_loop(
             // タイムアウト発生時は即座に返す
             if alpha.timed_out {
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return QpResult {
+                return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj,
                     solution: x,
@@ -859,7 +855,7 @@ fn active_set_loop(
 
     // 反復上限超過
     let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-    QpResult::max_iterations(x, obj, working_set.indices().to_vec(), max_iter)
+    SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), max_iter)
 }
 
 /// 制約なしの探索方向: Q * d = -grad を解く（対角Q高速パス）

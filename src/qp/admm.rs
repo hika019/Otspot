@@ -16,8 +16,8 @@ use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl::{self, LdlError, LdlFactorization};
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::SolveStatus;
-use crate::qp::problem::{QpProblem, QpResult};
+use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::problem::QpProblem;
 use crate::linalg::ruiz::RuizScaler;
 use crate::sparse::CscMatrix;
 use std::time::Instant;
@@ -389,7 +389,7 @@ fn compute_objective(q: &CscMatrix, c: &[f64], x: &[f64], tmp: &mut [f64]) -> f6
 /// # Ruiz スケーリング
 /// options.use_ruiz_scaling=true（デフォルト）のとき、ADMM実行前に Ruiz equilibration を
 /// 適用して数値安定性・CG収束を向上させる。false のとき従来通りに動作。
-pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let timeout = TimeoutCtx::from_options(options);
     let use_cg = match options.admm.use_cg {
         Some(b) => b,
@@ -439,13 +439,13 @@ pub fn solve_qp_admm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 ///
 /// Optimal, Timeout, MaxIterations（部分解あり）は逆変換を適用。
 /// NumericalError などの失敗結果はそのまま返す。
-fn unscale_admm_result(result: QpResult, scaler: &RuizScaler) -> QpResult {
+fn unscale_admm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult {
     match result.status {
         SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::MaxIterations => {
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             // obj_s = c * obj_orig → obj_orig = obj_s / c
             let obj_orig = result.objective / scaler.c;
-            QpResult {
+            SolverResult {
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,
@@ -468,7 +468,7 @@ fn solve_qp_admm_ldl(
     problem: &QpProblem,
     options: &SolverOptions,
     timeout_ctx: &TimeoutCtx,
-) -> QpResult {
+) -> SolverResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     let m_aug = m + n;
@@ -521,7 +521,7 @@ fn solve_qp_admm_ldl(
         // T3: 各反復先頭の timeout チェック
         if timeout_ctx.should_stop() {
             let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-            return QpResult {
+            return SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj,
                 solution: ws.x.clone(),
@@ -573,7 +573,7 @@ fn solve_qp_admm_ldl(
             )
         {
             let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-            return QpResult {
+            return SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj,
                 solution: ws.x.clone(),
@@ -596,7 +596,7 @@ fn solve_qp_admm_ldl(
             if (rho_new / rho - 1.0).abs() > 0.1 {
                 if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj,
                         solution: ws.x.clone(),
@@ -621,7 +621,7 @@ fn solve_qp_admm_ldl(
                     }
                     Err(TryFactorizeErr::Timeout) => {
                         let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-                        return QpResult {
+                        return SolverResult {
                             status: SolveStatus::Timeout,
                             objective: obj,
                             solution: ws.x.clone(),
@@ -636,7 +636,7 @@ fn solve_qp_admm_ldl(
                 }
                 if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj,
                         solution: ws.x.clone(),
@@ -653,7 +653,7 @@ fn solve_qp_admm_ldl(
 
     // max_iter 到達
     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-    QpResult {
+    SolverResult {
         status: SolveStatus::MaxIterations,
         objective: obj,
         solution: ws.x.clone(),
@@ -678,7 +678,7 @@ fn solve_qp_admm_cg(
     problem: &QpProblem,
     options: &SolverOptions,
     timeout_ctx: &TimeoutCtx,
-) -> QpResult {
+) -> SolverResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     let m_aug = m + n;
@@ -727,7 +727,7 @@ fn solve_qp_admm_cg(
         // T3: 各反復先頭 timeout チェック
         if timeout_ctx.should_stop() {
             let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-            return QpResult {
+            return SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj,
                 solution: ws.x.clone(),
@@ -763,7 +763,7 @@ fn solve_qp_admm_cg(
             );
             if cg_result.timed_out {
                 let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-                return QpResult {
+                return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj,
                     solution: ws.x.clone(),
@@ -802,7 +802,7 @@ fn solve_qp_admm_cg(
             )
         {
             let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-            return QpResult {
+            return SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj,
                 solution: ws.x.clone(),
@@ -825,7 +825,7 @@ fn solve_qp_admm_cg(
             if (rho_new / rho - 1.0).abs() > 0.1 {
                 if timeout_ctx.should_stop() {
                     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-                    return QpResult {
+                    return SolverResult {
                         status: SolveStatus::Timeout,
                         objective: obj,
                         solution: ws.x.clone(),
@@ -850,7 +850,7 @@ fn solve_qp_admm_cg(
 
     // max_iter 到達
     let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
-    QpResult {
+    SolverResult {
         status: SolveStatus::MaxIterations,
         objective: obj,
         solution: ws.x.clone(),
@@ -986,8 +986,8 @@ fn compute_rho_update(
 // ファクトリ関数: エラー結果
 // ---------------------------------------------------------------------------
 
-fn make_timeout_result(n: usize, m: usize, iters: usize) -> QpResult {
-    QpResult {
+fn make_timeout_result(n: usize, m: usize, iters: usize) -> SolverResult {
+    SolverResult {
         status: SolveStatus::Timeout,
         objective: f64::INFINITY,
         solution: vec![0.0; n],
@@ -999,8 +999,8 @@ fn make_timeout_result(n: usize, m: usize, iters: usize) -> QpResult {
     }
 }
 
-fn make_numerical_error_result(n: usize, m: usize) -> QpResult {
-    QpResult {
+fn make_numerical_error_result(n: usize, m: usize) -> SolverResult {
+    SolverResult {
         status: SolveStatus::NumericalError,
         objective: f64::INFINITY,
         solution: vec![0.0; n],
@@ -1020,7 +1020,7 @@ fn make_numerical_error_result(n: usize, m: usize) -> QpResult {
 mod tests {
     use super::*;
     use crate::options::SolverOptions;
-    use crate::problem::SolveStatus;
+    use crate::problem::{SolveStatus, SolverResult};
     use crate::sparse::CscMatrix;
 
     fn default_opts() -> SolverOptions {

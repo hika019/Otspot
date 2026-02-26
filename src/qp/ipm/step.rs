@@ -9,8 +9,8 @@ use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::SolveStatus;
-use crate::qp::problem::{QpProblem, QpResult};
+use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 use super::kkt::{
     build_augmented_system, build_extended_constraints, compute_jacobi_precond_ipm,
@@ -44,7 +44,7 @@ pub(crate) fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
 ///
 /// n <= LDL_THRESHOLD: augmented KKT system + LDLT（D01-b/c）
 /// n >  LDL_THRESHOLD: Matrix-Free PCG（Jacobi 前処理）でSchur complementを求解（D01-d: CGパスは変更しない）
-pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let n = problem.num_vars;
     let use_cg = n > super::LDL_THRESHOLD;
     let timeout_ctx = TimeoutCtx::from_options(options);
@@ -334,7 +334,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 
     let dual_solution = y[..m_orig].to_vec();
 
-    QpResult {
+    SolverResult {
         status,
         objective,
         solution: x,
@@ -351,7 +351,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 // ---------------------------------------------------------------------------
 
 /// 制約なし QP を解く: Qx = -c（Q が PD でない場合は δ_p I で正則化）
-pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> QpResult {
+pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> SolverResult {
     let n = problem.num_vars;
 
     if timeout_ctx.should_stop() {
@@ -359,7 +359,7 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
     }
 
     if n == 0 {
-        return QpResult {
+        return SolverResult {
             status: SolveStatus::Optimal,
             objective: 0.0,
             solution: vec![],
@@ -414,7 +414,7 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
                 * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
                 + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
 
-            QpResult {
+            SolverResult {
                 status: SolveStatus::Optimal,
                 objective,
                 solution: x,
@@ -433,8 +433,8 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
 // ユーティリティ
 // ---------------------------------------------------------------------------
 
-pub(crate) fn timeout_result(n: usize) -> QpResult {
-    QpResult {
+pub(crate) fn timeout_result(n: usize) -> SolverResult {
+    SolverResult {
         status: SolveStatus::Timeout,
         objective: f64::INFINITY,
         solution: vec![0.0; n],
@@ -446,8 +446,8 @@ pub(crate) fn timeout_result(n: usize) -> QpResult {
     }
 }
 
-pub(crate) fn numerical_error_result(n: usize) -> QpResult {
-    QpResult {
+pub(crate) fn numerical_error_result(n: usize) -> SolverResult {
+    SolverResult {
         status: SolveStatus::NumericalError,
         objective: f64::INFINITY,
         solution: vec![0.0; n],

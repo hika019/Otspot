@@ -70,8 +70,8 @@ fn main() {
     println!("QPLIB Benchmark ({} files)", qplib_files.len());
     println!();
     println!(
-        "{:<24} {:>6} {:>6} {:>12} {:>10} {}",
-        "Problem", "n", "m", "Status", "Time(s)", "Note"
+        "{:<24} {:>6} {:>6} {:>12} {:>10} Note",
+        "Problem", "n", "m", "Status", "Time(s)"
     );
     println!("{}", "-".repeat(80));
 
@@ -117,8 +117,8 @@ fn main() {
             }
             Err(BenchError::ParseTimeout) => {
                 println!(
-                    "{:<24} {:>6} {:>6} {:>12} {:>10.3} {}",
-                    name, "?", "?", "PARSE_TIMEOUT", 0.0, ""
+                    "{:<24} {:>6} {:>6} {:>12} {:>10.3} ",
+                    name, "?", "?", "PARSE_TIMEOUT", 0.0
                 );
                 n_timeout += 1;
                 continue;

@@ -86,8 +86,8 @@ fn main() {
     println!("Maros-Meszaros QP Benchmark ({} files)", qps_files.len());
     println!();
     println!(
-        "{:<20} {:>6} {:>6} {:>12} {:>10} {}",
-        "Problem", "n", "m", "Status", "Time(s)", "Error"
+        "{:<20} {:>6} {:>6} {:>12} {:>10} Error",
+        "Problem", "n", "m", "Status", "Time(s)"
     );
     println!("{}", "-".repeat(75));
 
@@ -134,8 +134,8 @@ fn main() {
             }
             Err(BenchError::ParseTimeout) => {
                 println!(
-                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
-                    name, "?", "?", "PARSE_TIMEOUT", 0.0, ""
+                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} ",
+                    name, "?", "?", "PARSE_TIMEOUT", 0.0
                 );
                 n_timeout += 1;
                 continue;

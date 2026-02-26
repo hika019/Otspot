@@ -11,7 +11,7 @@
 //!
 //! # 使用例
 //! ```rust
-//! use solver::qp::{solve_qp, QpProblem, QpResult};
+//! use solver::qp::{solve_qp, QpProblem, SolverResult};
 //! use solver::sparse::CscMatrix;
 //!
 //! // min x^2 + y^2  s.t. x + y >= 1
@@ -39,12 +39,13 @@ mod solver;
 pub mod admm;
 pub mod ipm;
 
-pub use problem::{QpProblem, QpResult, QpWarmStart};
+pub use problem::{QpProblem, QpWarmStart};
+pub use crate::problem::SolverResult;
 pub use admm::solve_qp_admm;
 pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::SolveStatus;
 
 /// QP ソルバーを統一的に扱うための trait
 ///
@@ -118,7 +119,7 @@ fn solve_qp_concurrent(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
     options: &SolverOptions,
-) -> QpResult {
+) -> SolverResult {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -128,7 +129,7 @@ fn solve_qp_concurrent(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let problem_arc = Arc::new(problem.clone());
     let warm_start_cloned = warm_start.cloned();
-    let (tx, rx) = mpsc::sync_channel::<QpResult>(3);
+    let (tx, rx) = mpsc::sync_channel::<SolverResult>(3);
     let mut handles = Vec::with_capacity(3);
 
     // Active Set スレッド
@@ -180,8 +181,8 @@ fn solve_qp_concurrent(
 
     // Optimal を優先採用。非 Optimal はフォールバックとして保持する。
     // 先着が非 Optimal でも、後続の Optimal を見逃さないようにする。
-    let mut best: Option<QpResult> = None;     // 最初の Optimal
-    let mut fallback: Option<QpResult> = None; // 全滅時のフォールバック
+    let mut best: Option<SolverResult> = None;     // 最初の Optimal
+    let mut fallback: Option<SolverResult> = None; // 全滅時のフォールバック
     for result in rx {
         if result.status == SolveStatus::Optimal {
             if best.is_none() {
@@ -213,7 +214,7 @@ fn solve_qp_concurrent(
         let _ = h.join();
     }
 
-    best.or(fallback).unwrap_or_else(|| QpResult {
+    best.or(fallback).unwrap_or_else(|| SolverResult {
         status: SolveStatus::NumericalError,
         objective: f64::NAN,
         solution: vec![0.0; problem.num_vars],
@@ -241,7 +242,7 @@ fn dispatch_qp(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
     options: &SolverOptions,
-) -> QpResult {
+) -> SolverResult {
     match options.qp_solver {
         QpSolverChoice::Admm => admm::solve_qp_admm(problem, options),
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
@@ -302,15 +303,15 @@ fn dispatch_qp(
 /// - `problem`: 解くべき二次計画問題
 ///
 /// # 戻り値
-/// [`QpResult`] — ステータス・目的関数値・解・ラグランジュ乗数・活性集合・反復数
-pub fn solve_qp(problem: &QpProblem) -> QpResult {
+/// [`SolverResult`] — ステータス・目的関数値・解・ラグランジュ乗数・活性集合・反復数
+pub fn solve_qp(problem: &QpProblem) -> SolverResult {
     solve_qp_with(problem, &SolverOptions::default())
 }
 
 /// QPをカスタム設定で解く
 ///
 /// qpOASESの `init()` に相当。`nWSR` は `options.max_iterations` で指定。
-pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     dispatch_qp(problem, None, options)
 }
 
@@ -320,7 +321,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 ///
 /// `solve_qp_with` と同一実装のため非推奨。`solve_qp_with` を使用すること。
 #[deprecated(since = "0.1.0", note = "use `solve_qp_with` instead")]
-pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     dispatch_qp(problem, None, options)
 }
 
@@ -347,7 +348,7 @@ pub fn solve_qp_warm(
     problem: &QpProblem,
     warm_start: &QpWarmStart,
     options: &SolverOptions,
-) -> QpResult {
+) -> SolverResult {
     dispatch_qp(problem, Some(warm_start), options)
 }
 

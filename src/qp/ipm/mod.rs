@@ -14,8 +14,8 @@ pub(crate) mod step;
 
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
-use crate::problem::SolveStatus;
-use crate::qp::problem::{QpProblem, QpResult};
+use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::problem::QpProblem;
 
 // ---------------------------------------------------------------------------
 // IPM 固定パラメータ
@@ -41,7 +41,7 @@ pub(crate) const CG_TOL: f64 = 1e-6;
 ///
 /// Ruiz equilibration スケーリングを適用してから内部ソルバーを呼ぶ。
 /// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
-pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
+pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
         let m = problem.num_constraints;
@@ -66,12 +66,12 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> QpResult {
 }
 
 /// スケール済み IPM 結果を元のスケールに逆変換する
-fn unscale_ipm_result(result: QpResult, scaler: &RuizScaler) -> QpResult {
+fn unscale_ipm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult {
     match result.status {
         SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::MaxIterations => {
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let obj_orig = result.objective / scaler.c;
-            QpResult {
+            SolverResult {
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,

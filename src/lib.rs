@@ -58,5 +58,5 @@ pub mod linalg;
 pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
-pub use qp::{solve_qp, solve_qp_admm, QpProblem, QpResult, QpWarmStart};
+pub use qp::{solve_qp, solve_qp_admm, QpProblem, SolverResult, QpWarmStart};
 pub use qp::{QpSolver, ActiveSetSolver, AdmmSolver, IpmSolver};
