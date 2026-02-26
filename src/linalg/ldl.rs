@@ -178,6 +178,104 @@ pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
     Ok(LdlFactorization { L: l_mat, D: d_vec, Dinv: dinv })
 }
 
+/// quasidefinite 行列向けのピボットゼロ判定閾値
+const PIVOT_ZERO_THR: f64 = 1e-12;
+/// quasidefinite ピボット置換値（ゼロに近い場合の符号付き代替値）
+const PIVOT_DELTA: f64 = 1e-8;
+
+/// deadline 付き quasidefinite LDL^T 分解
+///
+/// IP-PMM の augmented KKT system（quasidefinite 行列）に対応した分解。
+/// 通常の `factorize_with_deadline` と異なり D[j] < 0 が正常として扱われる。
+///
+/// # 差異: factorize_with_deadline との比較
+/// - ピボットゼロ判定: `D[j] <= 0` ではなく `|D[j]| < PIVOT_ZERO_THR` を使用
+/// - ゼロに近いピボット: `Err` を返すのではなく `sign(D[j]) * PIVOT_DELTA` で置換（正則化）
+/// - 符号チェックなし: D[j] < 0 は正常（quasidefinite の dual ブロック）
+///
+/// # 引数
+/// - `mat`: 上三角のみ CSC 形式の対称行列
+/// - `deadline`: タイムアウト時刻
+pub fn factorize_quasidefinite_with_deadline(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    assert_eq!(n, mat.ncols, "Matrix must be square");
+
+    let mut d_vec = vec![0.0f64; n];
+    let mut dinv = vec![0.0f64; n];
+    let mut y = vec![0.0f64; n];
+    let mut l_cols: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
+
+    for j in 0..n {
+        if j % 1000 == 0 {
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return Err(LdlError::DeadlineExceeded);
+                }
+            }
+        }
+
+        for idx in mat.col_ptr[j]..mat.col_ptr[j + 1] {
+            let i = mat.row_ind[idx];
+            let v = mat.values[idx];
+            if i == j {
+                y[j] = v;
+            } else if i < j {
+                y[i] = v;
+            }
+        }
+
+        for k in 0..j {
+            if y[k] == 0.0 {
+                continue;
+            }
+            let l_jk = y[k] * dinv[k];
+            y[j] -= l_jk * y[k];
+            l_cols[k].push((j, l_jk));
+            for &(m, l_mk) in &l_cols[k] {
+                if m >= j {
+                    break;
+                }
+                y[m] -= l_mk * y[k];
+            }
+        }
+
+        d_vec[j] = y[j];
+
+        // NaN/Inf チェック（真の特異行列）
+        if !d_vec[j].is_finite() {
+            y[..=j].fill(0.0);
+            return Err(LdlError::SingularOrIndefinite);
+        }
+        // ピボットゼロに近い場合は符号を保ったまま正則化（quasidefinite 特有）
+        if d_vec[j].abs() < PIVOT_ZERO_THR {
+            d_vec[j] = if d_vec[j] >= 0.0 { PIVOT_DELTA } else { -PIVOT_DELTA };
+        }
+        dinv[j] = 1.0 / d_vec[j];
+        y[..=j].fill(0.0);
+    }
+
+    let nnz: usize = l_cols.iter().map(|c| c.len()).sum();
+    let mut col_ptr = vec![0usize; n + 1];
+    for k in 0..n {
+        col_ptr[k + 1] = col_ptr[k] + l_cols[k].len();
+    }
+    let mut row_ind = vec![0usize; nnz];
+    let mut values = vec![0.0f64; nnz];
+    for k in 0..n {
+        let start = col_ptr[k];
+        for (idx, &(row, val)) in l_cols[k].iter().enumerate() {
+            row_ind[start + idx] = row;
+            values[start + idx] = val;
+        }
+    }
+
+    let l_mat = CscMatrix { col_ptr, row_ind, values, nrows: n, ncols: n };
+    Ok(LdlFactorization { L: l_mat, D: d_vec, Dinv: dinv })
+}
+
 /// deadline 付き LDL^T 分解。外側ループ 1000 列ごとに deadline を確認し、
 /// 超過した場合は `Err(LdlError::DeadlineExceeded)` を返す。
 ///
@@ -424,5 +522,60 @@ mod tests {
         let eps = 1e-10;
         assert!((x[0] - 1.0 / 11.0).abs() < eps, "x[0]={}", x[0]);
         assert!((x[1] - 3.0 / 11.0).abs() < eps, "x[1]={}", x[1]);
+    }
+
+    // ---- factorize_quasidefinite_with_deadline テスト ----
+
+    /// quasidefinite: D[j] < 0 を含む 3×3 行列で LDL^T が成功することを確認
+    ///
+    /// augmented KKT: [ Q+δI, A^T; A, -D ] 形式の小例
+    ///   [[3, 1], [1, -2]] は quasidefinite (1,1)=3>0, (2,2)=-2<0
+    /// 上三角 CSC: (0,0,3), (0,1,1), (1,1,-2)
+    #[test]
+    fn test_ldl_quasidefinite_negative_diag() {
+        // [[3,1],[1,-2]] 上三角
+        let mat = upper_tri_csc(2, &[
+            (0, 0, 3.0),
+            (0, 1, 1.0),
+            (1, 1, -2.0),
+        ]);
+
+        let fac = factorize_quasidefinite_with_deadline(&mat, None)
+            .expect("quasidefinite factorize failed");
+
+        // D[0] should be 3.0 (positive)
+        // D[1] = -2 - L[1,0]^2 * D[0] = -2 - (1/3)^2 * 3 = -2 - 1/3 = -7/3
+        let eps = 1e-10;
+        assert!((fac.D[0] - 3.0).abs() < eps, "D[0]={}", fac.D[0]);
+        let expected_d1 = -2.0 - (1.0 / 3.0f64).powi(2) * 3.0;
+        assert!((fac.D[1] - expected_d1).abs() < eps, "D[1]={} expected {}", fac.D[1], expected_d1);
+
+        // L D L^T = A を確認
+        let a_rec = reconstruct_ldlt(&fac, 2);
+        let a_orig = [[3.0, 1.0], [1.0, -2.0]];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((a_rec[i][j] - a_orig[i][j]).abs() < eps,
+                    "A[{i},{j}]: expected {}, got {}", a_orig[i][j], a_rec[i][j]);
+            }
+        }
+    }
+
+    /// quasidefinite: ピボットゼロ近傍で正則化されること
+    #[test]
+    fn test_ldl_quasidefinite_pivot_regularization() {
+        // D[1] がゼロに近い行列: [[1,0],[0,1e-15]]
+        let mat = upper_tri_csc(2, &[
+            (0, 0, 1.0),
+            (1, 1, 1e-15),
+        ]);
+
+        let fac = factorize_quasidefinite_with_deadline(&mat, None)
+            .expect("should succeed with regularization");
+
+        // D[0] = 1.0 (正常)
+        assert!((fac.D[0] - 1.0).abs() < 1e-12, "D[0]={}", fac.D[0]);
+        // D[1] は PIVOT_DELTA (1e-8) に正則化される
+        assert!((fac.D[1] - PIVOT_DELTA).abs() < 1e-12, "D[1]={} expected PIVOT_DELTA", fac.D[1]);
     }
 }
