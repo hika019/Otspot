@@ -777,7 +777,23 @@ fn solve_qp_admm_cg(
             let mut kv_op = |v: &[f64], out: &mut [f64]| {
                 kv_mul(q, a, sigma, rho_cap, v, out, &mut ws.kv_tmp);
             };
-            pcg_solve(&mut kv_op, &ws.m_inv, &ws.rhs, &mut ws.x, cg_max_iter, cg_tol, &mut ws.cg_ws);
+            let cg_result = pcg_solve(
+                &mut kv_op, &ws.m_inv, &ws.rhs, &mut ws.x,
+                cg_max_iter, cg_tol, &mut ws.cg_ws,
+                timeout_ctx.deadline, Some(&timeout_ctx.cancel),
+            );
+            if cg_result.timed_out {
+                let obj = compute_objective(q, c, &ws.x, &mut ws.tmp_n);
+                return QpResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj,
+                    solution: ws.x.clone(),
+                    dual_solution: ws.y[..m].to_vec(),
+                    bound_duals: vec![],
+                    active_set: vec![],
+                    iterations: iter,
+                };
+            }
         }
 
         // --- z-update（over-relaxation in constraint space） ---

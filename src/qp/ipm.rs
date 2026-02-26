@@ -541,9 +541,14 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                 break;
             }
 
-            let fac = match ldl::factorize(&m_mat) {
+            let fac = match ldl::factorize_with_deadline(&m_mat, timeout_ctx.deadline) {
                 Ok(f) => f,
-                Err(_) => {
+                Err(e) => {
+                    if matches!(e, ldl::LdlError::DeadlineExceeded) {
+                        status = SolveStatus::Timeout;
+                        final_iter = iter;
+                        break;
+                    }
                     return numerical_error_result(n);
                 }
             };
@@ -622,7 +627,16 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                 let mut kv = |v: &[f64], o: &mut [f64]| {
                     mv_ipm_apply(&problem.q, &a_ext, &d_inv, delta_p, v, o);
                 };
-                pcg_solve(&mut kv, &m_inv, &rhs_x_pred, &mut dx_pred, CG_MAX_ITER, CG_TOL, cg_ws);
+                let cg_result = pcg_solve(
+                    &mut kv, &m_inv, &rhs_x_pred, &mut dx_pred,
+                    CG_MAX_ITER, CG_TOL, cg_ws,
+                    timeout_ctx.deadline, Some(&timeout_ctx.cancel),
+                );
+                if cg_result.timed_out {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
             }
 
             let mut a_dx_pred = vec![0.0f64; m_ext];
@@ -657,7 +671,16 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
                 let mut kv = |v: &[f64], o: &mut [f64]| {
                     mv_ipm_apply(&problem.q, &a_ext, &d_inv, delta_p, v, o);
                 };
-                pcg_solve(&mut kv, &m_inv, &rhs_x_corr, &mut dx, CG_MAX_ITER, CG_TOL, cg_ws);
+                let cg_result = pcg_solve(
+                    &mut kv, &m_inv, &rhs_x_corr, &mut dx,
+                    CG_MAX_ITER, CG_TOL, cg_ws,
+                    timeout_ctx.deadline, Some(&timeout_ctx.cancel),
+                );
+                if cg_result.timed_out {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
             }
 
             let mut a_dx_corr = vec![0.0f64; m_ext];

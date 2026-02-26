@@ -4,6 +4,9 @@
 //! Matrix-Free な線形ソルバーを実現する。
 //! ADMM x-update における K*x = rhs の求解に使用する。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
 // ---------------------------------------------------------------------------
 // ワークスペース・結果型
 // ---------------------------------------------------------------------------
@@ -33,6 +36,7 @@ pub struct CgResult {
     pub iterations: usize,
     pub residual_norm: f64, // ||r||_∞ at termination
     pub converged: bool,
+    pub timed_out: bool, // deadline/cancel により打ち切られた場合 true
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +53,8 @@ pub struct CgResult {
 /// - `max_iter`: 最大反復数。
 /// - `tol`: 収束判定: `||r||_∞ < tol`。
 /// - `ws`: 再利用可能なワークスペース（長さ n）。
+/// - `deadline`: タイムアウト期限（None = 無制限）。10反復ごとにチェック。
+/// - `cancel`: キャンセルフラグ（None = 無効）。10反復ごとにチェック。
 ///
 /// # アルゴリズム: Preconditioned CG (Polak-Ribière)
 /// ```text
@@ -76,6 +82,8 @@ pub fn pcg_solve<F>(
     max_iter: usize,
     tol: f64,
     ws: &mut CgWorkspace,
+    deadline: Option<Instant>,
+    cancel: Option<&AtomicBool>,
 ) -> CgResult
 where
     F: FnMut(&[f64], &mut [f64]),
@@ -106,11 +114,21 @@ where
         kv_op(&ws.p, &mut ws.kp);
 
         // alpha = (r·z) / (p·kp)
+        // 10反復ごとにdeadline/cancelチェック
+        if k % 10 == 0 && k > 0 {
+            let timed = deadline.is_some_and(|d| Instant::now() >= d)
+                || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+            if timed {
+                let res = norm_inf(&ws.r);
+                return CgResult { iterations: k, residual_norm: res, converged: false, timed_out: true };
+            }
+        }
+
         let pkp = dot(&ws.p, &ws.kp);
         if pkp.abs() < f64::EPSILON {
             // 退化: 収束とみなす
             let res = norm_inf(&ws.r);
-            return CgResult { iterations: k, residual_norm: res, converged: res < tol };
+            return CgResult { iterations: k, residual_norm: res, converged: res < tol, timed_out: false };
         }
         let alpha = rz / pkp;
 
@@ -125,7 +143,7 @@ where
 
         let res = norm_inf(&ws.r);
         if res < tol {
-            return CgResult { iterations: k + 1, residual_norm: res, converged: true };
+            return CgResult { iterations: k + 1, residual_norm: res, converged: true, timed_out: false };
         }
 
         // z_new = M^{-1} * r  (z フィールドを z_new として再利用)
@@ -145,7 +163,7 @@ where
     }
 
     let res = norm_inf(&ws.r);
-    CgResult { iterations: max_iter, residual_norm: res, converged: false }
+    CgResult { iterations: max_iter, residual_norm: res, converged: false, timed_out: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +208,7 @@ mod tests {
         let mut x = vec![0.0_f64; 3];
         let mut ws = CgWorkspace::new(3);
 
-        let result = pcg_solve(&mut kv, &m_inv, &rhs, &mut x, 10, 1e-10, &mut ws);
+        let result = pcg_solve(&mut kv, &m_inv, &rhs, &mut x, 10, 1e-10, &mut ws, None, None);
 
         assert!(result.converged, "3x3 diagonal: not converged in {} iters", result.iterations);
         assert!(
@@ -230,7 +248,7 @@ mod tests {
         let mut x = vec![0.0_f64; 5];
         let mut ws = CgWorkspace::new(5);
 
-        let result = pcg_solve(&mut k_mat, &m_inv, &rhs, &mut x, 20, 1e-10, &mut ws);
+        let result = pcg_solve(&mut k_mat, &m_inv, &rhs, &mut x, 20, 1e-10, &mut ws, None, None);
 
         assert!(result.converged, "5x5 SPD: not converged in {} iters", result.iterations);
 
@@ -260,13 +278,13 @@ mod tests {
         let m_inv_none = vec![1.0_f64; 3];
         let mut x_none = vec![0.0_f64; 3];
         let mut ws_none = CgWorkspace::new(3);
-        let result_none = pcg_solve(&mut kv, &m_inv_none, &rhs, &mut x_none, 100, 1e-10, &mut ws_none);
+        let result_none = pcg_solve(&mut kv, &m_inv_none, &rhs, &mut x_none, 100, 1e-10, &mut ws_none, None, None);
 
         // 前処理あり: m_inv = 1/diag(K)
         let m_inv_diag: Vec<f64> = diag.iter().map(|&d| 1.0 / d).collect();
         let mut x_prec = vec![0.0_f64; 3];
         let mut ws_prec = CgWorkspace::new(3);
-        let result_prec = pcg_solve(&mut kv, &m_inv_diag, &rhs, &mut x_prec, 100, 1e-10, &mut ws_prec);
+        let result_prec = pcg_solve(&mut kv, &m_inv_diag, &rhs, &mut x_prec, 100, 1e-10, &mut ws_prec, None, None);
 
         assert!(result_prec.converged, "preconditioned: not converged");
         assert!(result_none.converged, "unpreconditioned: not converged");
