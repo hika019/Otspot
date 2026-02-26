@@ -47,6 +47,130 @@ pub use ipm::solve_qp_ipm;
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::problem::SolveStatus;
 
+/// AS / ADMM / IPM を並列実行し、最初に Optimal を返したものを採用する
+///
+/// parallel feature ON 時のみコンパイルされる。
+/// 各スレッドは共有 `cancel_flag` を監視し、勝者決定後に停止する。
+/// warm_start は AS スレッドにのみ渡す（ADMM/IPM は warm_start 未対応）。
+#[cfg(feature = "parallel")]
+fn solve_qp_concurrent(
+    problem: &QpProblem,
+    warm_start: Option<&QpWarmStart>,
+    options: &SolverOptions,
+) -> QpResult {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let problem_arc = Arc::new(problem.clone());
+    let warm_start_cloned = warm_start.cloned();
+    let (tx, rx) = mpsc::sync_channel::<QpResult>(3);
+    let mut handles = Vec::with_capacity(3);
+
+    // Active Set スレッド
+    // 注: concurrent モードでは rayon 並列ワーカーを無効化 (parallel_runs=1) する。
+    // これにより小問題でのスレッドスポーン overhead を回避し、AS が先着しやすくなる。
+    // AS の結果は bound_duals を含むため、出力品質が最も高い。
+    // warm_start は AS のみに渡す。
+    {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        opts.parallel_runs = 1; // concurrent モードでは AS 内部の rayon 並列を無効化
+        let ws = warm_start_cloned;
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = solver::qp_solve_impl(&prob, ws.as_ref(), &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    // ADMM スレッド
+    // 注: eps_abs/eps_rel をデフォルト 1e-3 から 1e-6 に絞る。
+    // これにより AS (1e-8精度) との精度差を縮め、先着 Optimal の品質を保証する。
+    {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        if opts.eps_abs >= 1e-3 {
+            opts.eps_abs = 1e-6;
+        }
+        if opts.eps_rel >= 1e-3 {
+            opts.eps_rel = 1e-6;
+        }
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = admm::solve_qp_admm(&prob, &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    // IPM スレッド
+    {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = ipm::solve_qp_ipm(&prob, &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    drop(tx); // 全スレッドが tx を drop するまで rx.iter() は終了しない
+
+    // Optimal を優先採用。非 Optimal はフォールバックとして保持する。
+    // 先着が非 Optimal でも、後続の Optimal を見逃さないようにする。
+    let mut best: Option<QpResult> = None;     // 最初の Optimal
+    let mut fallback: Option<QpResult> = None; // 全滅時のフォールバック
+    for result in rx {
+        if result.status == SolveStatus::Optimal {
+            if best.is_none() {
+                // 最初の Optimal を採用し、他スレッドをキャンセル
+                cancel_flag.store(true, Ordering::Relaxed);
+                best = Some(result);
+            }
+            // 既に Optimal 確定済み → drain のみ
+        } else if best.is_none() {
+            // 非 Optimal の中では Infeasible を優先採用する。
+            // AS は Infeasible を MaxIterations として返すことがあり、
+            // ADMM/IPM の Infeasible 診断の方が確実。
+            let should_update = match &fallback {
+                None => true,
+                Some(f) => {
+                    result.status == SolveStatus::Infeasible
+                        && f.status != SolveStatus::Infeasible
+                }
+            };
+            if should_update {
+                fallback = Some(result);
+            }
+        }
+        // best 確定後の残メッセージは drain（tx を drop させるため）
+    }
+
+    // 全スレッドの後始末
+    for h in handles {
+        let _ = h.join();
+    }
+
+    best.or(fallback).unwrap_or_else(|| QpResult {
+        status: SolveStatus::NumericalError,
+        objective: f64::NAN,
+        solution: vec![0.0; problem.num_vars],
+        dual_solution: vec![],
+        bound_duals: vec![],
+        active_set: vec![],
+        iterations: 0,
+    })
+}
+
 /// QP ソルバーをディスパッチする内部関数
 ///
 /// `options.qp_solver` に基づいてソルバーを選択する。
@@ -55,8 +179,10 @@ use crate::problem::SolveStatus;
 /// - `ActiveSet`: 強制 Active Set
 /// - `Ipm`: 強制 IPM（内点法）
 /// - `Auto`:
-///   - n < qp_solver_threshold → Active Set（Phase I 失敗時は ADMM にフォールバック）
-///   - n >= qp_solver_threshold → IPM 試行 → Timeout/MaxIterations/NumericalError 時 ADMM にフォールバック
+///   - parallel feature ON → AS/ADMM/IPM を並列実行（`solve_qp_concurrent`）
+///   - parallel feature OFF:
+///     - n < qp_solver_threshold → Active Set（Phase I 失敗時は ADMM にフォールバック）
+///     - n >= qp_solver_threshold → IPM 試行 → Timeout/MaxIterations/NumericalError 時 ADMM にフォールバック
 fn dispatch_qp(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
@@ -67,6 +193,11 @@ fn dispatch_qp(
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
         QpSolverChoice::Auto => {
+            #[cfg(feature = "parallel")]
+            {
+                solve_qp_concurrent(problem, warm_start, options)
+            }
+            #[cfg(not(feature = "parallel"))]
             if problem.num_vars >= options.qp_solver_threshold {
                 // 大規模問題: IPM を先に試みて、失敗時は ADMM にフォールバック
                 let ipm_result = ipm::solve_qp_ipm(problem, options);
@@ -756,5 +887,28 @@ mod tests {
             "T19: Auto IPMフォールバック: 期待外ステータス {:?}",
             result.status
         );
+    }
+
+    /// T20: Concurrent Solver（parallel feature）
+    ///
+    /// parallel feature ON 時、Auto モードで AS/ADMM/IPM を並列実行し
+    /// 最初に Optimal を返した結果が採用されることを確認する。
+    /// min x^2 + y^2  s.t. x + y >= 1  → x*=y*=0.5, obj=0.5
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_solver_basic() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default(); // qp_solver = Auto
+        let result = solve_qp_with_options(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T20: concurrent should be Optimal");
+        assert!((result.solution[0] - 0.5).abs() < EPS, "T20: x[0] ≈ 0.5");
+        assert!((result.solution[1] - 0.5).abs() < EPS, "T20: x[1] ≈ 0.5");
+        assert!((result.objective - 0.5).abs() < EPS, "T20: obj ≈ 0.5");
     }
 }
