@@ -87,9 +87,9 @@ pub struct SolverOptions {
     pub rho: f64,
     /// ADMM過緩和係数 α（デフォルト: 1.6）
     pub alpha: f64,
-    /// ADMM絶対収束tolerance（デフォルト: 1e-3）
+    /// ADMM絶対収束tolerance（デフォルト: 1e-6）
     pub eps_abs: f64,
-    /// ADMM相対収束tolerance（デフォルト: 1e-3）
+    /// ADMM相対収束tolerance（デフォルト: 1e-6）
     pub eps_rel: f64,
     /// ADMMの最大反復回数（None = デフォルト: 10000）
     pub max_iter_admm: Option<usize>,
@@ -142,8 +142,8 @@ impl Default for SolverOptions {
             sigma: 1e-6,
             rho: 0.1,
             alpha: 1.6,
-            eps_abs: 1e-3,
-            eps_rel: 1e-3,
+            eps_abs: 1e-6,
+            eps_rel: 1e-6,
             max_iter_admm: None,
             admm_use_cg: None,
             qp_solver: QpSolverChoice::Auto,
