@@ -17,6 +17,7 @@
 //! KKT系: Schur complement M = Q + δ_p I + A_ext^T D^{-1} A_ext (PD行列)
 //! 既存 LdlFactorization をそのまま流用。
 
+use crate::linalg::cg::{pcg_solve, CgWorkspace};
 use crate::linalg::ldl;
 use crate::options::SolverOptions;
 use crate::problem::SolveStatus;
@@ -37,6 +38,12 @@ use std::time::{Duration, Instant};
 const TAU: f64 = 0.995;
 /// IP-PMM 正則化最小値
 const DELTA_MIN: f64 = 1e-13;
+/// n > LDL_THRESHOLD のとき CG パスを自動選択（ADMMと同じ閾値）
+const LDL_THRESHOLD: usize = 5_000;
+/// CG 最大反復数
+const CG_MAX_ITER: usize = 1_000;
+/// CG 収束判定（残差 L∞ノルム）
+const CG_TOL: f64 = 1e-6;
 
 // ---------------------------------------------------------------------------
 // タイムアウト管理
@@ -286,6 +293,90 @@ fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// CGパス用ヘルパー
+// ---------------------------------------------------------------------------
+
+/// M·v を計算する（matrix-free）
+///
+/// M = Q + δ_p I + A_ext^T D^{-1} A_ext
+///
+/// CGパスで Schur complement に対する行列-ベクトル積を提供するために使用。
+fn mv_ipm_apply(
+    q: &CscMatrix,
+    a_ext: &CscMatrix,
+    d_inv: &[f64],
+    delta_p: f64,
+    v: &[f64],
+    out: &mut [f64],
+) {
+    let n = v.len();
+    let m_ext = d_inv.len();
+
+    // out = Q*v + δ_p * v
+    spmv_q(q, v, out);
+    for i in 0..n {
+        out[i] += delta_p * v[i];
+    }
+
+    if m_ext == 0 {
+        return;
+    }
+
+    // av = A_ext * v
+    let mut av = vec![0.0f64; m_ext];
+    spmv(a_ext, v, &mut av);
+
+    // av = D^{-1} * av
+    for i in 0..m_ext {
+        av[i] *= d_inv[i];
+    }
+
+    // out += A_ext^T * av（spmtv は out をゼロ初期化するため一時バッファ経由）
+    let mut at_av = vec![0.0f64; n];
+    spmtv(a_ext, &av, &mut at_av);
+    for i in 0..n {
+        out[i] += at_av[i];
+    }
+}
+
+/// Jacobi（対角）前処理ベクトルを計算する
+///
+/// m_inv[j] = 1 / diag(M)[j]
+/// diag(M)[j] = Q[j,j] + δ_p + Σ_i d_inv[i] * A_ext[i,j]^2
+fn compute_jacobi_precond_ipm(
+    q: &CscMatrix,
+    a_ext: &CscMatrix,
+    d_inv: &[f64],
+    delta_p: f64,
+) -> Vec<f64> {
+    let n = q.nrows;
+    let mut diag = vec![delta_p; n];
+
+    // diag(Q) を加算
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            if q.row_ind[k] == col {
+                diag[col] += q.values[k];
+            }
+        }
+    }
+
+    // diag(A_ext^T D^{-1} A_ext)[j] = Σ_i d_inv[i] * A_ext[i,j]^2
+    for col in 0..a_ext.ncols {
+        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+            let row = a_ext.row_ind[k];
+            let v = a_ext.values[k];
+            diag[col] += d_inv[row] * v * v;
+        }
+    }
+
+    // 逆数（ゼロ除算ガード付き）
+    diag.iter()
+        .map(|&d| if d.abs() < 1e-14 { 1.0 } else { 1.0 / d })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // メイン求解関数
 // ---------------------------------------------------------------------------
 
@@ -337,9 +428,11 @@ fn unscale_ipm_result(result: QpResult, scaler: &RuizScaler) -> QpResult {
 
 /// IPM内部ソルバー（Ruizスケーリング適用済みproblemを受け取る）
 ///
-/// コミット1: LDLパス（Schur complement形式）のみ。CGは後のコミットで追加。
+/// n <= LDL_THRESHOLD: Schur complement を明示構築して LDL 分解（コミット1〜2実装）
+/// n >  LDL_THRESHOLD: Matrix-Free PCG（Jacobi 前処理）でSchur complementを求解（コミット3）
 fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult {
     let n = problem.num_vars;
+    let use_cg = n > LDL_THRESHOLD;
     let timeout_ctx = TimeoutCtx::from_options(options);
 
     // T1: 処理前タイムアウトチェック
@@ -380,6 +473,8 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
     let mut dx = vec![0.0f64; n];
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
+    // CGワークスペース（CGパス時のみ確保）
+    let mut cg_ws_opt: Option<CgWorkspace> = if use_cg { Some(CgWorkspace::new(n)) } else { None };
 
     let mut status = SolveStatus::MaxIterations;
     let mut final_iter = options.max_iter_ipm;
@@ -435,140 +530,144 @@ fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> QpResult 
         let d_vec: Vec<f64> = sigma_vec.iter().map(|&sg| sg + delta_d).collect();
         let d_inv: Vec<f64> = d_vec.iter().map(|&d| 1.0 / d).collect();
 
-        // Schur complement M = Q + δ_p I + A_ext^T D^{-1} A_ext
-        let m_mat = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p);
+        if !use_cg {
+            // ===== LDLパス: Schur complement を明示構築して LDL 分解 =====
+            let m_mat = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p);
 
-        // T2: LDL 因子化前タイムアウトチェック
-        if timeout_ctx.should_stop() {
-            status = SolveStatus::Timeout;
-            final_iter = iter;
-            break;
-        }
-
-        // LDL 因子化
-        let fac = match ldl::factorize(&m_mat) {
-            Ok(f) => f,
-            Err(_) => {
-                return numerical_error_result(n);
+            // T2: LDL 因子化前タイムアウトチェック
+            if timeout_ctx.should_stop() {
+                status = SolveStatus::Timeout;
+                final_iter = iter;
+                break;
             }
-        };
 
-        // ===== Predictor step (affine: μ_aff → 0) =====
-        // r_c_pred_i = -s_i * y_i  (σ = 0)
-        let r_c_pred: Vec<f64> = s
-            .iter()
-            .zip(y.iter())
-            .map(|(&si, &yi)| -si * yi)
-            .collect();
+            let fac = match ldl::factorize(&m_mat) {
+                Ok(f) => f,
+                Err(_) => {
+                    return numerical_error_result(n);
+                }
+            };
 
-        // r_p_mod = r_p - r_c_pred / y
-        // 導出: A_ext Δx - Σ Δy = r_p - r_c/y  (Schur complement 2行目の右辺)
-        let r_p_mod_pred: Vec<f64> = r_p
-            .iter()
-            .zip(r_c_pred.iter())
-            .zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi)
-            .collect();
+            // --- Predictor ---
+            let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
+            let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter())
+                .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+            let tmp_pred: Vec<f64> = r_p_mod_pred.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+            let mut atmp = vec![0.0f64; n];
+            spmtv(&a_ext, &tmp_pred, &mut atmp);
+            let rhs_x_pred: Vec<f64> = r_d.iter().zip(atmp.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+            let mut dx_pred = vec![0.0f64; n];
+            fac.solve(&rhs_x_pred, &mut dx_pred);
 
-        // rhs_x = r_d + A^T D^{-1} r_p_mod
-        let tmp_pred: Vec<f64> = r_p_mod_pred
-            .iter()
-            .zip(d_inv.iter())
-            .map(|(&ri, &di)| ri * di)
-            .collect();
-        let mut atmp = vec![0.0f64; n];
-        spmtv(&a_ext, &tmp_pred, &mut atmp);
-        let rhs_x_pred: Vec<f64> = r_d
-            .iter()
-            .zip(atmp.iter())
-            .map(|(&rdi, &ai)| rdi + ai)
-            .collect();
+            let mut a_dx_pred = vec![0.0f64; m_ext];
+            spmv(&a_ext, &dx_pred, &mut a_dx_pred);
+            let mut dy_pred = vec![0.0f64; m_ext];
+            for i in 0..m_ext {
+                dy_pred[i] = d_inv[i] * (a_dx_pred[i] - r_p_mod_pred[i]);
+            }
+            let mut ds_pred = vec![0.0f64; m_ext];
+            for i in 0..m_ext {
+                ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            }
 
-        // Solve M dx_pred = rhs_x_pred
-        let mut dx_pred = vec![0.0f64; n];
-        fac.solve(&rhs_x_pred, &mut dx_pred);
+            let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, TAU);
+            let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, TAU);
+            let alpha_pred = alpha_s_pred.min(alpha_y_pred);
+            let mu_aff: f64 = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+                .map(|(((&si, &yi), &dsi), &dyi)| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
+                .sum::<f64>() / m_ext as f64;
+            let sigma_center = if mu > 1e-15 { (mu_aff / mu).powi(3).min(1.0) } else { 0.0 };
 
-        // dy_pred = D^{-1} (A_ext dx_pred - r_p_mod)
-        let mut a_dx_pred = vec![0.0f64; m_ext];
-        spmv(&a_ext, &dx_pred, &mut a_dx_pred);
-        let mut dy_pred = vec![0.0f64; m_ext];
-        for i in 0..m_ext {
-            dy_pred[i] = d_inv[i] * (a_dx_pred[i] - r_p_mod_pred[i]);
-        }
+            // --- Corrector ---
+            let r_c_corr: Vec<f64> = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+                .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi).collect();
+            let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter())
+                .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+            let tmp_corr: Vec<f64> = r_p_mod_corr.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+            let mut atmp_corr = vec![0.0f64; n];
+            spmtv(&a_ext, &tmp_corr, &mut atmp_corr);
+            let rhs_x_corr: Vec<f64> = r_d.iter().zip(atmp_corr.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+            fac.solve(&rhs_x_corr, &mut dx);
 
-        // ds_pred = r_c_pred/y - Σ * dy_pred
-        let mut ds_pred = vec![0.0f64; m_ext];
-        for i in 0..m_ext {
-            ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
-        }
-
-        // α_pred: fraction-to-boundary
-        let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, TAU);
-        let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, TAU);
-        let alpha_pred = alpha_s_pred.min(alpha_y_pred);
-
-        // μ_aff
-        let mu_aff: f64 = s
-            .iter()
-            .zip(y.iter())
-            .zip(ds_pred.iter())
-            .zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
-            .sum::<f64>()
-            / m_ext as f64;
-
-        // σ = (μ_aff / μ)^3
-        let sigma_center = if mu > 1e-15 {
-            (mu_aff / mu).powi(3).min(1.0)
+            let mut a_dx_corr = vec![0.0f64; m_ext];
+            spmv(&a_ext, &dx, &mut a_dx_corr);
+            for i in 0..m_ext {
+                dy[i] = d_inv[i] * (a_dx_corr[i] - r_p_mod_corr[i]);
+            }
+            for i in 0..m_ext {
+                ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            }
         } else {
-            0.0
-        };
+            // ===== CGパス: Matrix-Free PCG で Schur complement を求解 =====
+            let m_inv = compute_jacobi_precond_ipm(&problem.q, &a_ext, &d_inv, delta_p);
+            let cg_ws = cg_ws_opt.as_mut().unwrap();
 
-        // ===== Corrector step =====
-        // r_c_corr = σμe - ΔS_pred ΔY_pred e - S Y e (complete complementarity RHS)
-        let r_c_corr: Vec<f64> = s
-            .iter()
-            .zip(y.iter())
-            .zip(ds_pred.iter())
-            .zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi)
-            .collect();
+            // T2: タイムアウトチェック（LDLパスのT2と同位置）
+            if timeout_ctx.should_stop() {
+                status = SolveStatus::Timeout;
+                final_iter = iter;
+                break;
+            }
 
-        // r_p_mod for corrector (同じ符号規則: r_p - r_c/y)
-        let r_p_mod_corr: Vec<f64> = r_p
-            .iter()
-            .zip(r_c_corr.iter())
-            .zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi)
-            .collect();
+            // --- Predictor ---
+            let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
+            let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter())
+                .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+            let tmp_pred: Vec<f64> = r_p_mod_pred.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+            let mut atmp = vec![0.0f64; n];
+            spmtv(&a_ext, &tmp_pred, &mut atmp);
+            let rhs_x_pred: Vec<f64> = r_d.iter().zip(atmp.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+            let mut dx_pred = vec![0.0f64; n];
+            {
+                let mut kv = |v: &[f64], o: &mut [f64]| {
+                    mv_ipm_apply(&problem.q, &a_ext, &d_inv, delta_p, v, o);
+                };
+                pcg_solve(&mut kv, &m_inv, &rhs_x_pred, &mut dx_pred, CG_MAX_ITER, CG_TOL, cg_ws);
+            }
 
-        // rhs_x for corrector
-        let tmp_corr: Vec<f64> = r_p_mod_corr
-            .iter()
-            .zip(d_inv.iter())
-            .map(|(&ri, &di)| ri * di)
-            .collect();
-        let mut atmp_corr = vec![0.0f64; n];
-        spmtv(&a_ext, &tmp_corr, &mut atmp_corr);
-        let rhs_x_corr: Vec<f64> = r_d
-            .iter()
-            .zip(atmp_corr.iter())
-            .map(|(&rdi, &ai)| rdi + ai)
-            .collect();
+            let mut a_dx_pred = vec![0.0f64; m_ext];
+            spmv(&a_ext, &dx_pred, &mut a_dx_pred);
+            let mut dy_pred = vec![0.0f64; m_ext];
+            for i in 0..m_ext {
+                dy_pred[i] = d_inv[i] * (a_dx_pred[i] - r_p_mod_pred[i]);
+            }
+            let mut ds_pred = vec![0.0f64; m_ext];
+            for i in 0..m_ext {
+                ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            }
 
-        // Solve M dx = rhs_x_corr (同じ因子化を再利用)
-        fac.solve(&rhs_x_corr, &mut dx);
+            let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, TAU);
+            let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, TAU);
+            let alpha_pred = alpha_s_pred.min(alpha_y_pred);
+            let mu_aff: f64 = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+                .map(|(((&si, &yi), &dsi), &dyi)| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
+                .sum::<f64>() / m_ext as f64;
+            let sigma_center = if mu > 1e-15 { (mu_aff / mu).powi(3).min(1.0) } else { 0.0 };
 
-        // dy = D^{-1} (A_ext dx - r_p_mod_corr)
-        let mut a_dx_corr = vec![0.0f64; m_ext];
-        spmv(&a_ext, &dx, &mut a_dx_corr);
-        for i in 0..m_ext {
-            dy[i] = d_inv[i] * (a_dx_corr[i] - r_p_mod_corr[i]);
-        }
+            // --- Corrector ---
+            let r_c_corr: Vec<f64> = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+                .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi).collect();
+            let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter())
+                .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+            let tmp_corr: Vec<f64> = r_p_mod_corr.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+            let mut atmp_corr = vec![0.0f64; n];
+            spmtv(&a_ext, &tmp_corr, &mut atmp_corr);
+            let rhs_x_corr: Vec<f64> = r_d.iter().zip(atmp_corr.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+            {
+                let mut kv = |v: &[f64], o: &mut [f64]| {
+                    mv_ipm_apply(&problem.q, &a_ext, &d_inv, delta_p, v, o);
+                };
+                pcg_solve(&mut kv, &m_inv, &rhs_x_corr, &mut dx, CG_MAX_ITER, CG_TOL, cg_ws);
+            }
 
-        // ds = r_c_corr/y - Σ * dy
-        for i in 0..m_ext {
-            ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            let mut a_dx_corr = vec![0.0f64; m_ext];
+            spmv(&a_ext, &dx, &mut a_dx_corr);
+            for i in 0..m_ext {
+                dy[i] = d_inv[i] * (a_dx_corr[i] - r_p_mod_corr[i]);
+            }
+            for i in 0..m_ext {
+                ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            }
         }
 
         // α: fraction-to-boundary (corrector)
@@ -910,6 +1009,70 @@ mod tests {
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPM-T6: expected Timeout or Optimal, got {:?}",
             result.status
+        );
+    }
+
+    /// IPM-CG-T1: mv_ipm_apply の正確性テスト
+    ///
+    /// Q=diag(2,2), A=[[-1,-1]] (1制約), d_inv=[0.5], delta_p=1e-7, v=[1,0]
+    /// M*v = Q*v + delta_p*v + A^T D^{-1} A*v
+    ///      = [2,0] + [1e-7,0] + [-1,-1]*0.5*(-1) = [2.5+1e-7, 0.5]
+    #[test]
+    fn test_ipm_mv_apply() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let d_inv = vec![0.5f64];
+        let delta_p = 1e-7_f64;
+        let v = vec![1.0_f64, 0.0];
+        let mut out = vec![0.0_f64; 2];
+
+        mv_ipm_apply(&q, &a, &d_inv, delta_p, &v, &mut out);
+
+        // Q*v = [2, 0]
+        // delta_p*v = [1e-7, 0]
+        // A*v = [-1]  →  D^{-1}*(A*v) = 0.5*[-1] = [-0.5]
+        // A^T*[-0.5] = [(-1)*(-0.5), (-1)*(-0.5)] = [0.5, 0.5]
+        // 合計: [2 + 1e-7 + 0.5, 0 + 0 + 0.5] = [2.5 + 1e-7, 0.5]
+        let eps = 1e-10_f64;
+        let expected0 = 2.5 + delta_p;
+        assert!(
+            (out[0] - expected0).abs() < eps,
+            "mv[0]: expected {}, got {} (diff={:.2e})",
+            expected0, out[0], (out[0] - expected0).abs()
+        );
+        assert!(
+            (out[1] - 0.5).abs() < eps,
+            "mv[1]: expected 0.5, got {} (diff={:.2e})",
+            out[1], (out[1] - 0.5).abs()
+        );
+    }
+
+    /// IPM-CG-T2: compute_jacobi_precond_ipm の正確性テスト
+    ///
+    /// Q=diag(2,2), A=[[-1,-1]], d_inv=[0.5], delta_p=1e-7
+    /// diag(M)[j] = Q[j,j] + delta_p + d_inv[0] * A[0,j]^2 = 2 + 1e-7 + 0.5*1 = 2.5 + 1e-7
+    /// m_inv[j] = 1 / (2.5 + 1e-7)
+    #[test]
+    fn test_ipm_jacobi_precond() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let d_inv = vec![0.5f64];
+        let delta_p = 1e-7_f64;
+
+        let m_inv = compute_jacobi_precond_ipm(&q, &a, &d_inv, delta_p);
+
+        let expected = 1.0 / (2.0 + delta_p + 0.5 * 1.0);
+        let eps = 1e-10_f64;
+        assert_eq!(m_inv.len(), 2, "m_inv length");
+        assert!(
+            (m_inv[0] - expected).abs() < eps,
+            "m_inv[0]: expected {:.10}, got {:.10}",
+            expected, m_inv[0]
+        );
+        assert!(
+            (m_inv[1] - expected).abs() < eps,
+            "m_inv[1]: expected {:.10}, got {:.10}",
+            expected, m_inv[1]
         );
     }
 
