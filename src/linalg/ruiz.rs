@@ -351,16 +351,16 @@ mod tests {
         // スケーリングなし
         let mut opts_no_scale = SolverOptions::default();
         opts_no_scale.use_ruiz_scaling = false;
-        opts_no_scale.eps_abs = 1e-4;
-        opts_no_scale.eps_rel = 1e-4;
+        opts_no_scale.admm.eps_abs = 1e-4;
+        opts_no_scale.admm.eps_rel = 1e-4;
         opts_no_scale.qp_solver = crate::options::QpSolverChoice::Admm;
         let r_no_scale = crate::qp::admm::solve_qp_admm(&problem, &opts_no_scale);
 
         // スケーリングあり
         let mut opts_scale = SolverOptions::default();
         opts_scale.use_ruiz_scaling = true;
-        opts_scale.eps_abs = 1e-4;
-        opts_scale.eps_rel = 1e-4;
+        opts_scale.admm.eps_abs = 1e-4;
+        opts_scale.admm.eps_rel = 1e-4;
         opts_scale.qp_solver = crate::options::QpSolverChoice::Admm;
         let r_scale = crate::qp::admm::solve_qp_admm(&problem, &opts_scale);
 

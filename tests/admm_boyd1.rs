@@ -31,7 +31,7 @@ fn test_boyd1_cg_path() {
     println!("BOYD1 parse: {:.2}s (n={}, m={})", start_parse.elapsed().as_secs_f64(), prob.num_vars, prob.num_constraints);
 
     let mut opts = SolverOptions::default();
-    opts.admm_use_cg = Some(true); // 強制 CG
+    opts.admm.use_cg = Some(true); // 強制 CG
     opts.timeout_secs = Some(30.0);
 
     let start_solve = Instant::now();
@@ -73,7 +73,7 @@ fn test_boyd1_auto_cg() {
     println!("BOYD1 parse: {:.2}s (n={}, m={})", start_parse.elapsed().as_secs_f64(), prob.num_vars, prob.num_constraints);
 
     let mut opts = SolverOptions::default();
-    opts.admm_use_cg = None; // Auto: n > LDL_THRESHOLD → CG
+    opts.admm.use_cg = None; // Auto: n > LDL_THRESHOLD → CG
     opts.timeout_secs = Some(30.0);
 
     let start_solve = Instant::now();
@@ -112,7 +112,7 @@ fn test_boyd2_cg_path() {
     println!("BOYD2 parse: {:.2}s (n={}, m={})", start_parse.elapsed().as_secs_f64(), prob.num_vars, prob.num_constraints);
 
     let mut opts = SolverOptions::default();
-    opts.admm_use_cg = Some(true); // 強制 CG
+    opts.admm.use_cg = Some(true); // 強制 CG
     opts.timeout_secs = Some(30.0);
 
     let start_solve = Instant::now();
@@ -151,7 +151,7 @@ fn test_boyd2_auto_cg() {
     println!("BOYD2 parse: {:.2}s (n={}, m={})", start_parse.elapsed().as_secs_f64(), prob.num_vars, prob.num_constraints);
 
     let mut opts = SolverOptions::default();
-    opts.admm_use_cg = None; // Auto
+    opts.admm.use_cg = None; // Auto
     opts.timeout_secs = Some(30.0);
 
     let start_solve = Instant::now();

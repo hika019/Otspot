@@ -790,7 +790,7 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(0.0); // 即タイムアウト
 
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         // 0秒タイムアウトでは Timeout になるはず
         // (問題が非常に小さいので運によっては Optimal になることも許容するが、
         //  Timeout ステータスが正しく返ることを主に確認する)
@@ -821,7 +821,7 @@ mod tests {
 
         // Auto mode: n=100 < threshold=3_000 → Active Set が選択される
         let opts = SolverOptions::default();
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T14: Auto小問題はOptimal");
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-4, "T14: xi ≈ 0.5 (got {})", xi);
@@ -849,7 +849,7 @@ mod tests {
         // Auto mode: n=200 > threshold=100 → ADMM が選択される
         let mut opts = SolverOptions::default();
         opts.qp_solver_threshold = 100;
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T15: Auto大問題はOptimal (ADMM)");
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-2, "T15: xi ≈ 0.5 (got {})", xi);
@@ -876,7 +876,7 @@ mod tests {
 
         let mut opts = SolverOptions::default();
         opts.qp_solver = QpSolverChoice::Admm;
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T16: 強制ADMMはOptimal");
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-2, "T16: xi ≈ 0.5 (got {})", xi);
@@ -903,7 +903,7 @@ mod tests {
 
         let mut opts = SolverOptions::default();
         opts.qp_solver = QpSolverChoice::ActiveSet;
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T17: 強制Active SetはOptimal");
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-4, "T17: xi = 0.5 (got {})", xi);
@@ -927,7 +927,7 @@ mod tests {
 
         let mut opts = SolverOptions::default();
         opts.qp_solver = QpSolverChoice::Ipm;
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T18: 強制IPMはOptimal");
         assert!((result.solution[0] - 0.5).abs() < 1e-4, "T18: x[0] ≈ 0.5");
         assert!((result.solution[1] - 0.5).abs() < 1e-4, "T18: x[1] ≈ 0.5");
@@ -957,7 +957,7 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.qp_solver_threshold = 100;
         opts.timeout_secs = Some(0.0001);
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         // IPM タイムアウト後 ADMM もタイムアウトする場合あり
         // いずれにせよ SolveStatus が返ること（panic しない）を確認
         assert!(
@@ -985,7 +985,7 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default(); // qp_solver = Auto
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T20: concurrent should be Optimal");
         assert!((result.solution[0] - 0.5).abs() < EPS, "T20: x[0] ≈ 0.5");
         assert!((result.solution[1] - 0.5).abs() < EPS, "T20: x[1] ≈ 0.5");

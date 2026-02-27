@@ -1083,8 +1083,8 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         let mut opts = default_opts();
-        opts.eps_abs = 1e-4;
-        opts.eps_rel = 1e-4;
+        opts.admm.eps_abs = 1e-4;
+        opts.admm.eps_rel = 1e-4;
         let result = solve_qp_admm(&problem, &opts);
         assert_eq!(
             result.status, SolveStatus::Optimal,
@@ -1233,7 +1233,7 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         let mut opts = default_opts();
-        opts.admm_use_cg = Some(true);
+        opts.admm.use_cg = Some(true);
         let result = solve_qp_admm(&problem, &opts);
 
         assert_eq!(
@@ -1266,15 +1266,15 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         let mut opts_ldl = default_opts();
-        opts_ldl.admm_use_cg = Some(false);
-        opts_ldl.eps_abs = 1e-4;
-        opts_ldl.eps_rel = 1e-4;
+        opts_ldl.admm.use_cg = Some(false);
+        opts_ldl.admm.eps_abs = 1e-4;
+        opts_ldl.admm.eps_rel = 1e-4;
         let result_ldl = solve_qp_admm(&problem, &opts_ldl);
 
         let mut opts_cg = default_opts();
-        opts_cg.admm_use_cg = Some(true);
-        opts_cg.eps_abs = 1e-4;
-        opts_cg.eps_rel = 1e-4;
+        opts_cg.admm.use_cg = Some(true);
+        opts_cg.admm.eps_abs = 1e-4;
+        opts_cg.admm.eps_rel = 1e-4;
         let result_cg = solve_qp_admm(&problem, &opts_cg);
 
         assert_eq!(result_ldl.status, SolveStatus::Optimal, "LDL: expected Optimal");
@@ -1303,7 +1303,7 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         let mut opts = default_opts();
-        opts.admm_use_cg = Some(true);
+        opts.admm.use_cg = Some(true);
         opts.timeout_secs = Some(0.0); // 即タイムアウト
 
         let result = solve_qp_admm(&problem, &opts);

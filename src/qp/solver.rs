@@ -1016,7 +1016,7 @@ fn get_diagonal(q: &CscMatrix, i: usize) -> f64 {
 mod tests {
     use crate::options::SolverOptions;
     use crate::problem::SolveStatus;
-    use crate::qp::{solve_qp_with_options, QpProblem};
+    use crate::qp::{solve_qp_with, QpProblem};
     use crate::sparse::CscMatrix;
 
     /// compute_step_size 内 timeout 動作確認
@@ -1054,7 +1054,7 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(0.001); // 1ms タイムアウト
 
-        let result = solve_qp_with_options(&problem, &opts);
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(
             result.status,
             SolveStatus::Timeout,
