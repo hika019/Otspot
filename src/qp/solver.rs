@@ -1051,8 +1051,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(0.001); // 1ms タイムアウト
+        let opts = SolverOptions { timeout_secs: Some(0.001), ..Default::default() }; // 1ms タイムアウト
 
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(

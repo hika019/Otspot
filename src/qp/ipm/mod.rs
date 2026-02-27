@@ -65,6 +65,36 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
     step::solve_qp_ipm_inner(problem, options)
 }
 
+/// IPM Schur complement パスで QP を解く
+///
+/// Concurrent Solver の 4 番目のバリアントとして使用。
+/// 通常の solve_qp_ipm（augmented system）の代替パス。
+/// n <= LDL_THRESHOLD の問題に対して Schur complement LDL パスを使用。
+#[cfg(feature = "parallel")]
+pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if options.use_ruiz_scaling && problem.num_vars > 0 {
+        let n = problem.num_vars;
+        let m = problem.num_constraints;
+
+        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
+        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+
+        let (q_s, a_s, c_s, b_s, bounds_s) =
+            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
+
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+            let scaled_result = step::solve_qp_ipm_schur_inner(&scaled_problem, options);
+            return unscale_ipm_result(scaled_result, &scaler);
+        }
+        // QpProblem::new 失敗 → 非スケールにフォールバック
+    }
+
+    step::solve_qp_ipm_schur_inner(problem, options)
+}
+
 /// スケール済み IPM 結果を元のスケールに逆変換する
 fn unscale_ipm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult {
     match result.status {
@@ -242,8 +272,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(0.0001);
+        let mut opts = SolverOptions { timeout_secs: Some(0.0001), ..Default::default() };
         opts.use_ruiz_scaling = false;
         let result = solve_qp_ipm(&problem, &opts);
         assert!(
@@ -325,8 +354,7 @@ mod tests {
 
         let result_ruiz = solve_qp_ipm(&problem, &SolverOptions::default());
 
-        let mut opts_no_ruiz = SolverOptions::default();
-        opts_no_ruiz.use_ruiz_scaling = false;
+        let opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let result_no_ruiz = solve_qp_ipm(&problem, &opts_no_ruiz);
 
         assert_eq!(result_ruiz.status, SolveStatus::Optimal, "IPM-T7: ruiz status");

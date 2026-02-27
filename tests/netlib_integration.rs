@@ -53,7 +53,7 @@ fn test_parse_blend() {
     assert!(problem.num_constraints > 0);
     assert!(problem.num_vars > 0);
     // blend has equality constraints
-    let has_eq = problem.constraint_types.iter().any(|ct| *ct == ConstraintType::Eq);
+    let has_eq = problem.constraint_types.contains(&ConstraintType::Eq);
     assert!(has_eq, "blend should have equality constraints");
     println!("blend: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
 }

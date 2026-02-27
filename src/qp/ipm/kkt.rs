@@ -215,6 +215,94 @@ pub(crate) fn build_augmented_system(
 }
 
 // ---------------------------------------------------------------------------
+// Schur complement 構築
+// ---------------------------------------------------------------------------
+
+/// M = Q + δ_p·I + A_ext^T D^{-1} A_ext の上三角 CSC を構築する
+///
+/// M は正定値（IP-PMM 正則化により保証）なので
+/// `ldl::factorize_with_deadline` で分解できる。
+///
+/// # 注意
+/// 密行列（n×n）で蓄積するため n が大きい場合メモリが O(n²) 必要。
+/// LDL_THRESHOLD (5000) でゲートされており大問題には使われない。
+#[cfg(feature = "parallel")]
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn build_schur_complement(
+    q: &CscMatrix,
+    a_ext: &CscMatrix,
+    d_inv: &[f64],
+    delta_p: f64,
+) -> CscMatrix {
+    let n = q.nrows;
+    let m_ext = a_ext.nrows;
+
+    // 密行列で蓄積（n が小さい問題用）
+    let mut m_dense = vec![0.0f64; n * n];
+
+    // Q を加算（全要素格納 → 対称）
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            m_dense[row * n + col] += q.values[k];
+            if row != col {
+                m_dense[col * n + row] += q.values[k];
+            }
+        }
+    }
+
+    // δ_p·I を加算
+    for i in 0..n {
+        m_dense[i * n + i] += delta_p;
+    }
+
+    // A_ext^T D^{-1} A_ext を加算
+    // 行 i のエントリを事前構築
+    let mut row_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_ext];
+    for col in 0..n {
+        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+            let row = a_ext.row_ind[k];
+            row_data[row].push((col, a_ext.values[k]));
+        }
+    }
+
+    for i in 0..m_ext {
+        let d = d_inv[i];
+        let row_i = &row_data[i];
+        for &(p, vp) in row_i {
+            for &(q_col, vq) in row_i {
+                m_dense[p * n + q_col] += d * vp * vq;
+            }
+        }
+    }
+
+    // 上三角のみ triplet として抽出
+    let mut out_rows = Vec::new();
+    let mut out_cols = Vec::new();
+    let mut out_vals = Vec::new();
+    for p in 0..n {
+        for q in p..n {
+            let v = m_dense[p * n + q];
+            if v != 0.0 {
+                out_rows.push(p);
+                out_cols.push(q);
+                out_vals.push(v);
+            }
+        }
+    }
+
+    if out_rows.is_empty() {
+        // Q=0, A=0 のエッジケース: δ_p I
+        let diag_rows: Vec<usize> = (0..n).collect();
+        let diag_cols: Vec<usize> = (0..n).collect();
+        let diag_vals = vec![delta_p; n];
+        CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, n, n).unwrap()
+    } else {
+        CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, n, n).unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CGパス用ヘルパー
 // ---------------------------------------------------------------------------
 

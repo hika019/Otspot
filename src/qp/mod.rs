@@ -129,8 +129,8 @@ fn solve_qp_concurrent(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let problem_arc = Arc::new(problem.clone());
     let warm_start_cloned = warm_start.cloned();
-    let (tx, rx) = mpsc::sync_channel::<SolverResult>(3);
-    let mut handles = Vec::with_capacity(3);
+    let (tx, rx) = mpsc::sync_channel::<SolverResult>(4);
+    let mut handles = Vec::with_capacity(4);
 
     // Active Set スレッド
     // 注: concurrent モードでは rayon 並列ワーカーを無効化 (parallel_runs=1) する。
@@ -173,6 +173,19 @@ fn solve_qp_concurrent(
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
             let r = ipm::solve_qp_ipm(&prob, &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    // IPM-Schur スレッド
+    {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = ipm::solve_qp_ipm_schur(&prob, &opts);
             let _ = tx.send(r);
         }));
     }
@@ -787,8 +800,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(0.0); // 即タイムアウト
+        let opts = SolverOptions { timeout_secs: Some(0.0), ..Default::default() }; // 即タイムアウト
 
         let result = solve_qp_with(&problem, &opts);
         // 0秒タイムアウトでは Timeout になるはず
@@ -847,8 +859,7 @@ mod tests {
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
         // Auto mode: n=200 > threshold=100 → ADMM が選択される
-        let mut opts = SolverOptions::default();
-        opts.qp_solver_threshold = 100;
+        let opts = SolverOptions { qp_solver_threshold: 100, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T15: Auto大問題はOptimal (ADMM)");
         for xi in &result.solution {
@@ -874,8 +885,7 @@ mod tests {
         let bounds = vec![(0.0f64, 1.0f64); n];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.qp_solver = QpSolverChoice::Admm;
+        let opts = SolverOptions { qp_solver: QpSolverChoice::Admm, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T16: 強制ADMMはOptimal");
         for xi in &result.solution {
@@ -901,8 +911,7 @@ mod tests {
         let bounds = vec![(0.0f64, 1.0f64); n];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.qp_solver = QpSolverChoice::ActiveSet;
+        let opts = SolverOptions { qp_solver: QpSolverChoice::ActiveSet, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T17: 強制Active SetはOptimal");
         for xi in &result.solution {
@@ -925,8 +934,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.qp_solver = QpSolverChoice::Ipm;
+        let opts = SolverOptions { qp_solver: QpSolverChoice::Ipm, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T18: 強制IPMはOptimal");
         assert!((result.solution[0] - 0.5).abs() < 1e-4, "T18: x[0] ≈ 0.5");
@@ -954,9 +962,7 @@ mod tests {
 
         // threshold を 100 に下げて Auto → IPM を引き起こす
         // timeout を極小にして IPM タイムアウト → ADMM フォールバックを確認
-        let mut opts = SolverOptions::default();
-        opts.qp_solver_threshold = 100;
-        opts.timeout_secs = Some(0.0001);
+        let opts = SolverOptions { qp_solver_threshold: 100, timeout_secs: Some(0.0001), ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
         // IPM タイムアウト後 ADMM もタイムアウトする場合あり
         // いずれにせよ SolveStatus が返ること（panic しない）を確認

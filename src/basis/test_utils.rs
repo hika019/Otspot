@@ -31,12 +31,12 @@ pub fn dense_to_csc(dense: &[Vec<f64>], nrows: usize, ncols: usize) -> CscMatrix
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();
-    for i in 0..nrows {
-        for j in 0..ncols {
-            if dense[i][j].abs() > DROP_TOL {
+    for (i, row) in dense.iter().enumerate().take(nrows) {
+        for (j, &v) in row.iter().enumerate().take(ncols) {
+            if v.abs() > DROP_TOL {
                 rows.push(i);
                 cols.push(j);
-                vals.push(dense[i][j]);
+                vals.push(v);
             }
         }
     }

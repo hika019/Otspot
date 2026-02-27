@@ -585,6 +585,7 @@ mod tests {
     use crate::problem::ConstraintType;
     use crate::sparse::CscMatrix;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_lp_general(
         c: Vec<f64>,
         rows: &[usize],

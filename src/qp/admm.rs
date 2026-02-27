@@ -1020,7 +1020,7 @@ fn make_numerical_error_result(n: usize, m: usize) -> SolverResult {
 mod tests {
     use super::*;
     use crate::options::SolverOptions;
-    use crate::problem::{SolveStatus, SolverResult};
+    use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
     fn default_opts() -> SolverOptions {
@@ -1180,8 +1180,8 @@ mod tests {
         ];
         for j1 in 0..5 {
             for j2 in 0..5 {
-                for i in 0..3 {
-                    ata[j1][j2] += a_dense[i][j1] * a_dense[i][j2];
+                for row in &a_dense {
+                    ata[j1][j2] += row[j1] * row[j2];
                 }
             }
         }

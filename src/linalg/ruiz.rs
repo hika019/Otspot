@@ -349,16 +349,14 @@ mod tests {
         let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
 
         // スケーリングなし
-        let mut opts_no_scale = SolverOptions::default();
-        opts_no_scale.use_ruiz_scaling = false;
+        let mut opts_no_scale = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         opts_no_scale.admm.eps_abs = 1e-4;
         opts_no_scale.admm.eps_rel = 1e-4;
         opts_no_scale.qp_solver = crate::options::QpSolverChoice::Admm;
         let r_no_scale = crate::qp::admm::solve_qp_admm(&problem, &opts_no_scale);
 
         // スケーリングあり
-        let mut opts_scale = SolverOptions::default();
-        opts_scale.use_ruiz_scaling = true;
+        let mut opts_scale = SolverOptions { use_ruiz_scaling: true, ..Default::default() };
         opts_scale.admm.eps_abs = 1e-4;
         opts_scale.admm.eps_rel = 1e-4;
         opts_scale.qp_solver = crate::options::QpSolverChoice::Admm;
@@ -407,8 +405,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions::default();
-        opts.use_ruiz_scaling = false;
+        let mut opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         opts.qp_solver = crate::options::QpSolverChoice::Admm;
 
         let result = crate::qp::admm::solve_qp_admm(&problem, &opts);

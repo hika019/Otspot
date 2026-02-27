@@ -13,9 +13,11 @@ use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 use super::kkt::{
-    build_augmented_system, build_extended_constraints, compute_jacobi_precond_ipm,
-    mv_ipm_apply, norm_inf, spmtv, spmv, spmv_q,
+    build_augmented_system, build_extended_constraints,
+    compute_jacobi_precond_ipm, mv_ipm_apply, norm_inf, spmtv, spmv, spmv_q,
 };
+#[cfg(feature = "parallel")]
+use super::kkt::build_schur_complement;
 use super::init::compute_initial_point;
 
 // ---------------------------------------------------------------------------
@@ -303,6 +305,232 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             for i in 0..m_ext {
                 ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
             }
+        }
+
+        // α: fraction-to-boundary (corrector)
+        let alpha_s = fraction_to_boundary(&s, &ds, super::TAU);
+        let alpha_y = fraction_to_boundary(&y, &dy, super::TAU);
+        let alpha = alpha_s.min(alpha_y);
+
+        // 変数更新
+        for i in 0..n {
+            x[i] += alpha * dx[i];
+        }
+        for i in 0..m_ext {
+            s[i] += alpha * ds[i];
+            y[i] += alpha * dy[i];
+            if s[i] <= 0.0 {
+                s[i] = 1e-12;
+            }
+            if y[i] <= 0.0 {
+                y[i] = 1e-12;
+            }
+        }
+    }
+
+    // 目的関数値
+    spmv_q(&problem.q, &x, &mut qx);
+    let objective = 0.5
+        * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
+        + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
+
+    let dual_solution = y[..m_orig].to_vec();
+
+    SolverResult {
+        status,
+        objective,
+        solution: x,
+        dual_solution,
+        bound_duals: vec![],
+        active_set: vec![],
+        iterations: final_iter,
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPM Schur complement 内部ソルバー
+// ---------------------------------------------------------------------------
+
+/// Schur complement LDL パスを使う IPM 内部ソルバー
+///
+/// n <= LDL_THRESHOLD 専用。n > LDL_THRESHOLD の場合は `solve_qp_ipm_inner` に委譲。
+#[cfg(feature = "parallel")]
+pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    let n = problem.num_vars;
+
+    // n > LDL_THRESHOLD → Schur は非効率なので augmented に委譲
+    if n > super::LDL_THRESHOLD {
+        return solve_qp_ipm_inner(problem, options);
+    }
+
+    let timeout_ctx = TimeoutCtx::from_options(options);
+
+    // T1: 処理前タイムアウトチェック
+    if timeout_ctx.should_stop() {
+        return timeout_result(n);
+    }
+
+    // 制約なし特殊ケース
+    if problem.num_constraints == 0
+        && problem.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
+    {
+        return solve_unconstrained(problem, &timeout_ctx);
+    }
+
+    // 拡張制約行列を構築
+    let (a_ext, b_ext, m_ext, m_orig, _n_lb) = build_extended_constraints(problem);
+
+    if m_ext == 0 {
+        return solve_unconstrained(problem, &timeout_ctx);
+    }
+
+    // 初期点
+    let (mut x, mut s, mut y) = compute_initial_point(n, &b_ext);
+
+    // 作業バッファ
+    let mut ax = vec![0.0f64; m_ext];
+    let mut aty = vec![0.0f64; n];
+    let mut qx = vec![0.0f64; n];
+    let mut r_d = vec![0.0f64; n];
+    let mut r_p = vec![0.0f64; m_ext];
+
+    let mut dx = vec![0.0f64; n];
+    let mut dy = vec![0.0f64; m_ext];
+    let mut ds = vec![0.0f64; m_ext];
+
+    let mut status = SolveStatus::MaxIterations;
+    let mut final_iter = options.ipm.max_iter;
+
+    for iter in 0..options.ipm.max_iter {
+        // T3: 反復先頭タイムアウトチェック
+        if timeout_ctx.should_stop() {
+            status = SolveStatus::Timeout;
+            final_iter = iter;
+            break;
+        }
+
+        // 残差計算
+        spmv(&a_ext, &x, &mut ax);
+        spmtv(&a_ext, &y, &mut aty);
+        spmv_q(&problem.q, &x, &mut qx);
+
+        for i in 0..n {
+            r_d[i] = -(qx[i] + problem.c[i] + aty[i]);
+        }
+        for i in 0..m_ext {
+            r_p[i] = b_ext[i] - ax[i] - s[i];
+        }
+
+        // μ = s^T y / m_ext（相補性ギャップ）
+        let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
+
+        // 収束判定
+        let norm_c = norm_inf(&problem.c).max(1.0);
+        let norm_b = norm_inf(&b_ext).max(1.0);
+        let dual_res = norm_inf(&r_d) / norm_c;
+        let prim_res = norm_inf(&r_p) / norm_b;
+
+        if dual_res < options.ipm.eps && prim_res < options.ipm.eps && mu < options.ipm.eps {
+            status = SolveStatus::Optimal;
+            final_iter = iter;
+            break;
+        }
+
+        // δ を μ に追従して縮小（IP-PMM）
+        let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
+        let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
+
+        // Σ = diag(s_i / y_i),  D = Σ + δ_d
+        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();
+        let d_vec: Vec<f64> = sigma_vec.iter().map(|&sg| sg + delta_d).collect();
+        let d_inv: Vec<f64> = d_vec.iter().map(|&d| 1.0 / d).collect();
+
+        // ===== LDLパス: Schur complement を明示構築して LDL 分解 =====
+
+        // T2: LDL 因子化前タイムアウトチェック
+        if timeout_ctx.should_stop() {
+            status = SolveStatus::Timeout;
+            final_iter = iter;
+            break;
+        }
+
+        // δ_p を ×10 ずつ増やして最大4回リトライ
+        let mut delta_p_retry = delta_p;
+        let mut fac_opt = None;
+        for _retry in 0..4 {
+            if timeout_ctx.should_stop() {
+                status = SolveStatus::Timeout;
+                final_iter = iter;
+                break;
+            }
+            let m_mat_retry = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p_retry);
+            match ldl::factorize_with_deadline(&m_mat_retry, timeout_ctx.deadline) {
+                Ok(f) => { fac_opt = Some(f); break; }
+                Err(ldl::LdlError::DeadlineExceeded) => {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
+                Err(_) => { delta_p_retry *= 10.0; }
+            }
+        }
+        if status == SolveStatus::Timeout {
+            break;
+        }
+        let fac = match fac_opt {
+            Some(f) => f,
+            None => return numerical_error_result(n),
+        };
+
+        // --- Predictor ---
+        let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
+        let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter())
+            .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+        let tmp_pred: Vec<f64> = r_p_mod_pred.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+        let mut atmp = vec![0.0f64; n];
+        spmtv(&a_ext, &tmp_pred, &mut atmp);
+        let rhs_x_pred: Vec<f64> = r_d.iter().zip(atmp.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+        let mut dx_pred = vec![0.0f64; n];
+        fac.solve(&rhs_x_pred, &mut dx_pred);
+
+        let mut a_dx_pred = vec![0.0f64; m_ext];
+        spmv(&a_ext, &dx_pred, &mut a_dx_pred);
+        let mut dy_pred = vec![0.0f64; m_ext];
+        for i in 0..m_ext {
+            dy_pred[i] = d_inv[i] * (a_dx_pred[i] - r_p_mod_pred[i]);
+        }
+        let mut ds_pred = vec![0.0f64; m_ext];
+        for i in 0..m_ext {
+            ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+        }
+
+        let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, super::TAU);
+        let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, super::TAU);
+        let alpha_pred = alpha_s_pred.min(alpha_y_pred);
+        let mu_aff: f64 = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+            .map(|(((&si, &yi), &dsi), &dyi)| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
+            .sum::<f64>() / m_ext as f64;
+        let sigma_center = if mu > 1e-15 { (mu_aff / mu).powi(3).min(1.0) } else { 0.0 };
+
+        // --- Corrector ---
+        let r_c_corr: Vec<f64> = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
+            .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi).collect();
+        let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter())
+            .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+        let tmp_corr: Vec<f64> = r_p_mod_corr.iter().zip(d_inv.iter()).map(|(&ri, &di)| ri * di).collect();
+        let mut atmp_corr = vec![0.0f64; n];
+        spmtv(&a_ext, &tmp_corr, &mut atmp_corr);
+        let rhs_x_corr: Vec<f64> = r_d.iter().zip(atmp_corr.iter()).map(|(&rdi, &ai)| rdi + ai).collect();
+        fac.solve(&rhs_x_corr, &mut dx);
+
+        let mut a_dx_corr = vec![0.0f64; m_ext];
+        spmv(&a_ext, &dx, &mut a_dx_corr);
+        for i in 0..m_ext {
+            dy[i] = d_inv[i] * (a_dx_corr[i] - r_p_mod_corr[i]);
+        }
+        for i in 0..m_ext {
+            ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
         }
 
         // α: fraction-to-boundary (corrector)

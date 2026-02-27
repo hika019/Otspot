@@ -70,11 +70,11 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
     let mut indices = Vec::new();
     let mut values = Vec::new();
 
-    for i in 0..pivot_col.len() {
+    for (i, &pc) in pivot_col.iter().enumerate() {
         let val = if i == leaving_row {
             1.0 / pivot_element
         } else {
-            -pivot_col[i] / pivot_element
+            -pc / pivot_element
         };
         if val.abs() > ZERO_TOL {
             indices.push(i);

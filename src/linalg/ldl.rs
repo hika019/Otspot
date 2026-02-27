@@ -390,6 +390,7 @@ mod tests {
     }
 
     /// L D L^T を密行列として復元し、元のAと比較する
+    #[allow(clippy::needless_range_loop)]
     fn reconstruct_ldlt(fac: &LdlFactorization, n: usize) -> Vec<Vec<f64>> {
         // L（単位下三角）を密行列に展開
         let mut l_dense = vec![vec![0.0f64; n]; n];

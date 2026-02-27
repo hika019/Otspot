@@ -670,7 +670,7 @@ mod tests {
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
 
         // Verify L has off-diagonal entries (fill-in)
-        assert!(lu.l.values.len() > 0, "L should have off-diagonal entries");
+        assert!(!lu.l.values.is_empty(), "L should have off-diagonal entries");
 
         // Verify correctness
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
