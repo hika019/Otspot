@@ -351,6 +351,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 // ---------------------------------------------------------------------------
 
 /// 制約なし QP を解く: Qx = -c（Q が PD でない場合は δ_p I で正則化）
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> SolverResult {
     let n = problem.num_vars;
 

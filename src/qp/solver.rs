@@ -118,6 +118,7 @@ pub(crate) fn qp_solve_impl(
     {
         if warm_start.is_none() && effective_opts.parallel_runs > 1 {
             use rayon::prelude::*;
+            use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
             // Phase Iで実行可能点を1回取得
             eprintln!("DBG: parallel Phase1 start, deadline={:?}", effective_opts.deadline);

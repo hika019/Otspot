@@ -91,6 +91,7 @@ impl QpProblem {
 ///
 /// `SolverResult` に統合された。`crate::problem::SolverResult` を直接使用すること。
 #[deprecated(since = "0.1.0", note = "use SolverResult (LP/QP unified result type) instead")]
+#[allow(unused)]
 pub type QpResult = crate::problem::SolverResult;
 
 impl crate::problem::SolverResult {

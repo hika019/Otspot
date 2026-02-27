@@ -19,6 +19,7 @@ use std::time::Instant;
 ///
 /// # エラー
 /// LU 分解が失敗した場合（特異行列等）は `Err` を返す
+#[allow(dead_code)]
 pub(crate) fn refactor(a: &CscMatrix, basis: &[usize]) -> Result<LuFactorization, SolverError> {
     LuFactorization::factorize(a, basis)
 }

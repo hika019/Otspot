@@ -41,7 +41,7 @@ fn parse_usize(s: &str) -> usize {
 
 fn main() {
     let stdin = io::stdin();
-    let mut lines = stdin.lock().lines().filter_map(|l| l.ok());
+    let mut lines = stdin.lock().lines().map_while(Result::ok);
 
     macro_rules! next_line {
         () => {

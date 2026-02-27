@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::SolverOptions;
 use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with_options;
+use solver::qp::solve_qp_with;
 use solver::QpProblem;
 
 enum BenchError {
@@ -136,7 +136,7 @@ fn main() {
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
-        let result = solve_qp_with_options(&prob, &opts);
+        let result = solve_qp_with(&prob, &opts);
         let elapsed_s = start.elapsed().as_secs_f64();
         println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
 

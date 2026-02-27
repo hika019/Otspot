@@ -73,7 +73,7 @@ pub struct CgResult {
 ///     z = z_new
 /// ```
 // GPU移行設計 §4.3 G3準拠: インデックスループを明示的 for で記述する
-#[allow(clippy::needless_range_loop)]
+#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 pub fn pcg_solve<F>(
     kv_op: &mut F,
     m_inv: &[f64],

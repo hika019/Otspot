@@ -14,6 +14,7 @@ use crate::sparse::CscMatrix;
 
 /// out = A * x（上書き）
 #[inline]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn spmv(a: &CscMatrix, x: &[f64], out: &mut [f64]) {
     out.iter_mut().for_each(|v| *v = 0.0);
     for col in 0..a.ncols {
@@ -26,6 +27,7 @@ pub(crate) fn spmv(a: &CscMatrix, x: &[f64], out: &mut [f64]) {
 
 /// out = A^T * v（上書き）
 #[inline]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn spmtv(a: &CscMatrix, v: &[f64], out: &mut [f64]) {
     out.iter_mut().for_each(|o| *o = 0.0);
     for col in 0..a.ncols {
@@ -39,6 +41,7 @@ pub(crate) fn spmtv(a: &CscMatrix, v: &[f64], out: &mut [f64]) {
 
 /// out = Q * x（全要素格納の対称 Q に対応）
 #[inline]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn spmv_q(q: &CscMatrix, x: &[f64], out: &mut [f64]) {
     out.iter_mut().for_each(|v| *v = 0.0);
     for col in 0..q.ncols {
@@ -146,6 +149,7 @@ pub(crate) fn build_extended_constraints(
 /// - 条件数 κ ≈ κ(A)（Schur complement の κ(A)^2 ではない）
 /// - IP-PMM 正則化で quasidefinite 保証 → LDLT 常に成功
 /// - スパーシティ保存（A^T D^{-1} A で fill-in しない）
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn build_augmented_system(
     q: &CscMatrix,
     a_ext: &CscMatrix,
@@ -253,6 +257,7 @@ pub(crate) fn mv_ipm_apply(
 /// Jacobi（対角）前処理ベクトルを計算する
 ///
 /// m_inv[j] = 1 / diag(M)[j]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn compute_jacobi_precond_ipm(
     q: &CscMatrix,
     a_ext: &CscMatrix,

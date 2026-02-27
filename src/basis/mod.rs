@@ -29,6 +29,7 @@ pub(crate) trait BasisManager: Send {
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec);
 
     /// 数値安定性を検査し、必要であれば基底行列を再因子分解する
+    #[allow(dead_code)]
     fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]);
 }
 

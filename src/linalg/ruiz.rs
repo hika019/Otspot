@@ -53,6 +53,7 @@ impl RuizScaler {
     ///
     /// l, u（変数境界）はAPIの完全性のため受け取るが、
     /// ノルム計算には使用しない（Q と A のみで均衡化する）。
+    #[allow(clippy::needless_range_loop)]
     pub fn compute(
         &mut self,
         q: &CscMatrix,
@@ -168,6 +169,7 @@ impl RuizScaler {
     /// - bounds_s[j] = (lb[j] / d[j], ub[j] / d[j])
     ///
     /// スケール済み問題の解は `unscale_solution` で元のスケールに戻すこと。
+    #[allow(clippy::type_complexity)]
     pub fn scale_problem(
         &self,
         q: &CscMatrix,

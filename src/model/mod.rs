@@ -353,12 +353,12 @@ impl Model {
             opts.qp_solver = choice;
         }
         if let Some(n) = self.max_iter_admm {
-            opts.max_iter_admm = Some(n);
+            opts.admm.max_iter = Some(n);
         }
         if let Some(flag) = self.use_ruiz_scaling {
             opts.use_ruiz_scaling = flag;
         }
-        let qp_result = crate::qp::solve_qp_with_options(&qp_problem, &opts);
+        let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
 
         match qp_result.status {
             SolveStatus::Optimal => {
