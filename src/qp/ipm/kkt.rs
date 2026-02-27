@@ -7,6 +7,8 @@
 
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
+#[cfg(feature = "parallel")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // 疎行列-ベクトル演算
@@ -233,7 +235,8 @@ pub(crate) fn build_schur_complement(
     a_ext: &CscMatrix,
     d_inv: &[f64],
     delta_p: f64,
-) -> CscMatrix {
+    cancel: &AtomicBool,
+) -> Option<CscMatrix> {
     let n = q.nrows;
     let m_ext = a_ext.nrows;
 
@@ -242,6 +245,9 @@ pub(crate) fn build_schur_complement(
 
     // Q を加算（全要素格納 → 対称）
     for col in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
             m_dense[row * n + col] += q.values[k];
@@ -260,6 +266,9 @@ pub(crate) fn build_schur_complement(
     // 行 i のエントリを事前構築
     let mut row_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_ext];
     for col in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
             let row = a_ext.row_ind[k];
             row_data[row].push((col, a_ext.values[k]));
@@ -267,6 +276,9 @@ pub(crate) fn build_schur_complement(
     }
 
     for i in 0..m_ext {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let d = d_inv[i];
         let row_i = &row_data[i];
         for &(p, vp) in row_i {
@@ -281,6 +293,9 @@ pub(crate) fn build_schur_complement(
     let mut out_cols = Vec::new();
     let mut out_vals = Vec::new();
     for p in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         for q in p..n {
             let v = m_dense[p * n + q];
             if v != 0.0 {
@@ -296,9 +311,9 @@ pub(crate) fn build_schur_complement(
         let diag_rows: Vec<usize> = (0..n).collect();
         let diag_cols: Vec<usize> = (0..n).collect();
         let diag_vals = vec![delta_p; n];
-        CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, n, n).unwrap()
+        Some(CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, n, n).unwrap())
     } else {
-        CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, n, n).unwrap()
+        Some(CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, n, n).unwrap())
     }
 }
 

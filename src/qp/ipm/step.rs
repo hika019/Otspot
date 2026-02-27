@@ -464,7 +464,14 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
                 final_iter = iter;
                 break;
             }
-            let m_mat_retry = build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p_retry);
+            let m_mat_retry = match build_schur_complement(&problem.q, &a_ext, &d_inv, delta_p_retry, &timeout_ctx.cancel) {
+                Some(m) => m,
+                None => {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
+            };
             match ldl::factorize_with_deadline(&m_mat_retry, timeout_ctx.deadline) {
                 Ok(f) => { fac_opt = Some(f); break; }
                 Err(ldl::LdlError::DeadlineExceeded) => {
