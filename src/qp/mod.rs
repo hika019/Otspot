@@ -38,8 +38,10 @@ mod problem;
 mod solver;
 pub mod admm;
 pub mod ipm;
+pub mod diagnose;
 
 pub use problem::{QpProblem, QpWarmStart};
+pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 pub use crate::problem::SolverResult;
 pub use admm::solve_qp_admm;
 pub use ipm::solve_qp_ipm;
