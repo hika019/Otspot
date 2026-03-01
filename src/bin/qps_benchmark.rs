@@ -103,6 +103,7 @@ fn main() {
         QpSolverChoice::ActiveSet => "AS",
         QpSolverChoice::Admm => "ADMM",
         QpSolverChoice::Ipm => "IPM",
+        QpSolverChoice::IpmCrossover => "IpmCrossover",
     };
     println!("Solver: {}", solver_label);
 

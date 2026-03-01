@@ -29,6 +29,8 @@ pub enum QpSolverChoice {
     ActiveSet,
     /// 強制 IPM (内点法)
     Ipm,
+    /// 強制 IPM→AS クロスオーバー
+    IpmCrossover,
 }
 
 /// シンプレックス法の選択
