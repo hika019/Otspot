@@ -51,8 +51,9 @@ fn main() {
                     "as" => QpSolverChoice::ActiveSet,
                     "admm" => QpSolverChoice::Admm,
                     "ipm" => QpSolverChoice::Ipm,
+                    "ipmcrossover" => QpSolverChoice::IpmCrossover,
                     other => {
-                        eprintln!("Unknown solver: {}. Use as|admm|ipm", other);
+                        eprintln!("Unknown solver: {}. Use as|admm|ipm|ipmcrossover", other);
                         std::process::exit(1);
                     }
                 };
