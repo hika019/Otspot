@@ -39,6 +39,7 @@ mod solver;
 pub mod admm;
 pub mod ipm;
 pub mod diagnose;
+pub mod crossover;
 
 pub use problem::{QpProblem, QpWarmStart};
 pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
