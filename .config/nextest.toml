@@ -1,0 +1,4 @@
+[profile.default]
+# 各テストを独立プロセスで並列実行
+# NOTE: doctestはnextest非対応。cargo test --doc で別途実行すること
+test-threads = "num-cpus"
