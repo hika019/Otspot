@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use solver::io::qplib::{parse_qplib, QplibError};
-use solver::options::SolverOptions;
+use solver::options::{QpSolverChoice, SolverOptions};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -41,11 +41,36 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let data_dir = if args.len() >= 2 {
-        args[1].clone()
-    } else {
-        "data/qplib".to_string()
-    };
+
+    // 引数パース: [data_dir] [--solver as|admm|ipm|ipmcrossover]
+    let mut data_dir = "data/qplib".to_string();
+    let mut solver_choice = QpSolverChoice::Auto;
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--help" || args[i] == "-h" {
+            println!("Usage: bench_qplib [data_dir] [--solver as|admm|ipm|ipmcrossover]");
+            println!("  --solver  Solver to use (default: concurrent/auto)");
+            std::process::exit(0);
+        } else if args[i] == "--solver" {
+            i += 1;
+            if i < args.len() {
+                solver_choice = match args[i].as_str() {
+                    "as" => QpSolverChoice::ActiveSet,
+                    "admm" => QpSolverChoice::Admm,
+                    "ipm" => QpSolverChoice::Ipm,
+                    "ipmcrossover" => QpSolverChoice::IpmCrossover,
+                    other => {
+                        eprintln!("Unknown solver: {}. Use as|admm|ipm|ipmcrossover", other);
+                        std::process::exit(1);
+                    }
+                };
+            }
+        } else if !args[i].starts_with("--") {
+            data_dir = args[i].clone();
+        }
+        i += 1;
+    }
 
     let dir = Path::new(&data_dir);
     if !dir.exists() {
@@ -69,6 +94,16 @@ fn main() {
 
     println!("QPLIB Benchmark ({} files)", qplib_files.len());
     println!();
+
+    let solver_label = match solver_choice {
+        QpSolverChoice::Auto => "Auto",
+        QpSolverChoice::ActiveSet => "AS",
+        QpSolverChoice::Admm => "ADMM",
+        QpSolverChoice::Ipm => "IPM",
+        QpSolverChoice::IpmCrossover => "IpmCrossover",
+    };
+    println!("Solver: {}", solver_label);
+
     println!(
         "{:<24} {:>6} {:>6} {:>12} {:>10} Note",
         "Problem", "n", "m", "Status", "Time(s)"
@@ -84,6 +119,7 @@ fn main() {
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(10.0);
+    opts.qp_solver = solver_choice;
 
     for path in &qplib_files {
         let name = path
