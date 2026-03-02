@@ -710,7 +710,7 @@ fn active_set_loop(
                     };
                 }
                 Err(_) => {
-                    // Q が特異: 停留点として扱う
+                    // Q が特異: d=0を設定し、後続の勾配チェックに委ねる
                     (vec![0.0; n], vec![])
                 }
             }
@@ -776,6 +776,9 @@ fn active_set_loop(
                         ..Default::default()
                     };
                 }
+                // Q特異かつ勾配≠0: AS法では解けない → フォールバック（IPM/ADMM）
+                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
+                return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
             }
 
             // 最小のラグランジュ乗数を確認
