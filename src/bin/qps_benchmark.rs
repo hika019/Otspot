@@ -21,6 +21,39 @@ enum BenchError {
     ParseTimeout,
 }
 
+/// PASS時の解品質指標を計算する
+///
+/// # 戻り値
+/// `(pfeas, bfeas)`: プライマル実行可能性違反・境界違反の最大値
+fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return (f64::NAN, f64::NAN);
+    }
+
+    // pfeas: Ax <= b の最大違反量
+    let pfeas = match prob.a.mat_vec_mul(solution) {
+        Ok(ax) => ax
+            .iter()
+            .zip(prob.b.iter())
+            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+            .fold(0.0_f64, f64::max),
+        Err(_) => f64::NAN,
+    };
+
+    // bfeas: lb <= x <= ub の最大違反量
+    let bfeas = solution
+        .iter()
+        .zip(prob.bounds.iter())
+        .map(|(&xi, &(lb, ub))| {
+            let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+            let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+            lb_viol.max(ub_viol)
+        })
+        .fold(0.0_f64, f64::max);
+
+    (pfeas, bfeas)
+}
+
 fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, BenchError> {
     let path = path.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -158,7 +191,14 @@ fn main() {
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 n_pass += 1;
-                ("PASS".to_string(), format!("obj={:.6e}", result.objective))
+                let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
+                (
+                    "PASS".to_string(),
+                    format!(
+                        "obj={:.2e} pfeas={:.1e} bfeas={:.1e}",
+                        result.objective, pfeas, bfeas
+                    ),
+                )
             }
             SolveStatus::Infeasible => {
                 n_fail += 1;
