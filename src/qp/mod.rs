@@ -51,35 +51,6 @@ pub use crossover::IpmCrossoverSolver;
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::problem::SolveStatus;
 
-/// Concurrent Solver が複数ソルバーの結果を比較するための解品質ランク
-///
-/// 順序: Optimal > Feasible > Approximate
-/// `PartialOrd/Ord` を実装することで `>` による比較が可能。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum QualityRank {
-    /// 近似解（eps緩和・Timeout後の途中解など）
-    Approximate = 0,
-    /// 実行可能解（制約は充足するが最適性は保証されていない）
-    /// 例: Active SetがMAXITERで停止した実行可能解
-    Feasible = 1,
-    /// 最適解（KKT条件を充足）
-    Optimal = 2,
-}
-
-#[cfg(feature = "parallel")]
-fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
-    match result.status {
-        SolveStatus::Optimal => Some(QualityRank::Optimal),
-        SolveStatus::MaxIterations if !result.solution.is_empty() => {
-            Some(QualityRank::Feasible)
-        }
-        SolveStatus::Timeout if !result.solution.is_empty() => {
-            Some(QualityRank::Approximate)
-        }
-        _ => None, // Infeasible / Unbounded / NumericalError / その他
-    }
-}
-
 /// QP ソルバーを統一的に扱うための trait
 ///
 /// Active Set / ADMM / IPM の各ソルバーは `QpSolver` を実装しており、
@@ -238,32 +209,34 @@ fn solve_qp_concurrent(
 
     drop(tx); // 全スレッドが tx を drop するまで rx.iter() は終了しない
 
-    // 解の品質ランク（Optimal > Feasible > Approximate）で最良解を選択する。
-    // cancel_flag は Optimal 到着時のみ立てる（Feasible で cancel すると
-    // 間もなく完了するはずの Optimal 解を取りこぼすため）。
-    let mut best_ranked: Option<(QualityRank, SolverResult)> = None;
-    let mut fallback: Option<SolverResult> = None; // ランク外（Infeasible等）のフォールバック
+    // Optimal を優先採用。非 Optimal はフォールバックとして保持する。
+    // 先着が非 Optimal でも、後続の Optimal を見逃さないようにする。
+    let mut best: Option<SolverResult> = None;     // 最初の Optimal
+    let mut fallback: Option<SolverResult> = None; // 全滅時のフォールバック
     for result in rx {
-        let rank = quality_rank_of(&result);
-        if let Some(r) = rank {
-            // 初めて Optimal が来た → cancel_flag を立てる
-            if r == QualityRank::Optimal
-                && best_ranked.as_ref().map(|(br, _)| *br) != Some(QualityRank::Optimal)
-            {
+        if result.status == SolveStatus::Optimal {
+            if best.is_none() {
+                // 最初の Optimal を採用し、他スレッドをキャンセル
                 cancel_flag.store(true, Ordering::Relaxed);
+                best = Some(result);
             }
-            // ランクが高い解で更新
-            let should_update = best_ranked.as_ref().map(|(br, _)| r > *br).unwrap_or(true);
-            if should_update {
-                best_ranked = Some((r, result));
-            }
-        } else if best_ranked.is_none() {
-            // ランク外（Infeasible/Unbounded/NumericalError）はフォールバック
+            // 既に Optimal 確定済み → drain のみ
+        } else if best.is_none() {
             // 非 Optimal の中では Infeasible を優先採用する。
-            if result.status == SolveStatus::Infeasible || fallback.is_none() {
+            // AS は Infeasible を MaxIterations として返すことがあり、
+            // ADMM/IPM の Infeasible 診断の方が確実。
+            let should_update = match &fallback {
+                None => true,
+                Some(f) => {
+                    result.status == SolveStatus::Infeasible
+                        && f.status != SolveStatus::Infeasible
+                }
+            };
+            if should_update {
                 fallback = Some(result);
             }
         }
+        // best 確定後の残メッセージは drain（tx を drop させるため）
     }
 
     // 全スレッドの後始末
@@ -271,24 +244,7 @@ fn solve_qp_concurrent(
         let _ = h.join();
     }
 
-    // 最終結果の選択:
-    // Optimal は常に優先。Feasible/Approximate より Infeasible の fallback を優先する。
-    // 理由: Infeasible は「問題が解けない」という確定的な情報であり、
-    //       複数のソルバー（ADMM/IPM）が Infeasible を返した場合は
-    //       AS の Feasible 停止解より信頼性が高い。
-    let best = match best_ranked {
-        Some((QualityRank::Optimal, result)) => Some(result),
-        Some((_, result)) => {
-            // Feasible/Approximate: Infeasible の fallback があれば fallback を優先
-            if fallback.as_ref().map(|f| f.status == SolveStatus::Infeasible).unwrap_or(false) {
-                fallback
-            } else {
-                Some(result)
-            }
-        }
-        None => fallback,
-    };
-    best.unwrap_or_else(|| SolverResult {
+    best.or(fallback).unwrap_or_else(|| SolverResult {
         status: SolveStatus::NumericalError,
         objective: f64::NAN,
         solution: vec![0.0; problem.num_vars],
@@ -1090,16 +1046,5 @@ mod tests {
         assert_eq!(result_xover.status, SolveStatus::Optimal, "T21: IpmCrossover Optimal");
         assert!((result_xover.solution[0] - 0.5).abs() < EPS, "T21: crossover x[0]");
         assert!((result_xover.objective - 0.5).abs() < EPS, "T21: crossover obj");
-    }
-
-    /// T22: QualityRank の Ord 比較
-    ///
-    /// Optimal > Feasible > Approximate の順序が正しいことを確認する。
-    #[test]
-    fn test_quality_rank_ordering() {
-        assert!(QualityRank::Optimal > QualityRank::Feasible, "T22: Optimal > Feasible");
-        assert!(QualityRank::Feasible > QualityRank::Approximate, "T22: Feasible > Approximate");
-        assert!(QualityRank::Optimal > QualityRank::Approximate, "T22: Optimal > Approximate");
-        assert_eq!(QualityRank::Optimal, QualityRank::Optimal, "T22: Optimal == Optimal");
     }
 }
