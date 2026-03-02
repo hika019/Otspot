@@ -117,7 +117,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         let dual_res = norm_inf(&r_d) / norm_c;
         let prim_res = norm_inf(&r_p) / norm_b;
 
-        if dual_res < options.ipm.eps && prim_res < options.ipm.eps && mu < options.ipm.eps {
+        if dual_res < options.ipm_eps() && prim_res < options.ipm_eps() && mu < options.ipm_eps() {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
@@ -431,7 +431,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         let dual_res = norm_inf(&r_d) / norm_c;
         let prim_res = norm_inf(&r_p) / norm_b;
 
-        if dual_res < options.ipm.eps && prim_res < options.ipm.eps && mu < options.ipm.eps {
+        if dual_res < options.ipm_eps() && prim_res < options.ipm_eps() && mu < options.ipm_eps() {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
