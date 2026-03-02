@@ -257,7 +257,7 @@ fn solve_qp_concurrent(
             if should_update {
                 best_ranked = Some((r, result));
             }
-        } else {
+        } else if best_ranked.is_none() {
             // ランク外（Infeasible/Unbounded/NumericalError）はフォールバック
             // 非 Optimal の中では Infeasible を優先採用する。
             if result.status == SolveStatus::Infeasible || fallback.is_none() {
