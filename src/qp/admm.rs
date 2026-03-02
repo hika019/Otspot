@@ -476,8 +476,8 @@ fn solve_qp_admm_ldl(
     let sigma_init = options.admm.sigma;
     let mut rho = options.admm.rho;
     let alpha = options.admm.alpha;
-    let eps_abs = options.admm.eps_abs;
-    let eps_rel = options.admm.eps_rel;
+    let eps_abs = options.admm_eps_abs();
+    let eps_rel = options.admm_eps_rel();
     let max_iter = options.admm.max_iter.unwrap_or(10000);
 
     let a = &problem.a;
@@ -686,8 +686,8 @@ fn solve_qp_admm_cg(
     let sigma = options.admm.sigma;
     let mut rho = options.admm.rho;
     let alpha = options.admm.alpha;
-    let eps_abs = options.admm.eps_abs;
-    let eps_rel = options.admm.eps_rel;
+    let eps_abs = options.admm_eps_abs();
+    let eps_rel = options.admm_eps_rel();
     let max_iter = options.admm.max_iter.unwrap_or(10000);
 
     let a = &problem.a;
