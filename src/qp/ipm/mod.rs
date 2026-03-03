@@ -27,7 +27,7 @@ pub(crate) const TAU: f64 = 0.995;
 #[allow(dead_code)]
 pub(crate) const DELTA_MIN: f64 = 1e-8;
 /// n > LDL_THRESHOLD のとき CG パスを自動選択
-pub(crate) const LDL_THRESHOLD: usize = 5_000;
+pub(crate) const LDL_THRESHOLD: usize = 20_000;
 /// CG 最大反復数
 pub(crate) const CG_MAX_ITER: usize = 1_000;
 /// CG 収束判定（残差 L∞ノルム）
