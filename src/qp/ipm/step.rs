@@ -745,10 +745,12 @@ fn build_q_delta(q: &CscMatrix, delta_p: f64, n: usize) -> CscMatrix {
     }
 }
 
-/// augmented KKT 系を MINRES + 制約前処理（M_cp）で解くヘルパー
+/// augmented KKT 系を MINRES + ハイブリッド制約前処理で解くヘルパー
 ///
 /// K = [Q+δ_p I, A^T; A, -D]  (対称不定値)
-/// M_cp = [(Q+δ_p I)^{-1}, 0; 0, S^{-1}]  (ブロック対角 SPD)
+/// M_cp = [(Q+δ_p I)^{-1}, 0, 0; 0, S_orig^{-1}, 0; 0, 0, D_bounds^{-1}]  (ブロック対角 SPD)
+///
+/// S_orig は元の問題制約のみの Schur 補元（m_orig×m_orig）。境界制約行は Jacobi 前処理。
 ///
 /// `rhs` = [r_d (n-dim); r_p_mod (m_ext-dim)]
 /// `x`   = [dx (n-dim);  dy (m_ext-dim)] （初期値を 0 に設定してから呼ぶこと）
@@ -757,6 +759,7 @@ fn build_q_delta(q: &CscMatrix, delta_p: f64, n: usize) -> CscMatrix {
 pub(crate) fn solve_kkt_minres_constraint_precond(
     n: usize,
     m_ext: usize,
+    m_orig: usize,
     q: &CscMatrix,
     q_fac: &LdlFactorizationAmd,
     s_fac: &LdlFactorizationAmd,
@@ -794,12 +797,20 @@ pub(crate) fn solve_kkt_minres_constraint_precond(
         }
     };
 
-    // M_cp^{-1} * v 演算: ブロック対角 [(Q+δI)^{-1}, 0; 0, S^{-1}]
+    // M_cp^{-1} * v 演算: ハイブリッドブロック対角
+    // - v[0..n]            → (Q+δI)^{-1} (LDL solve)
+    // - v[n..n+m_orig]     → S_orig^{-1} (LDL solve)
+    // - v[n+m_orig..total] → D_bounds^{-1} (Jacobi)
     let mut precond_op = |v: &[f64], out: &mut [f64]| {
         let (v1, v2) = v.split_at(n);
         let (out1, out2) = out.split_at_mut(n);
         q_fac.solve(v1, out1);
-        s_fac.solve(v2, out2);
+        // S_orig^{-1} for original constraint rows
+        s_fac.solve(&v2[..m_orig], &mut out2[..m_orig]);
+        // Jacobi for bound constraint rows
+        for i in m_orig..m_ext {
+            out2[i] = v2[i] / d_vec[i].max(1e-14);
+        }
     };
 
     pminres_solve(
@@ -939,9 +950,9 @@ pub(crate) fn solve_qp_ipm_minres_inner(
                     use_cg = true;
                 }
                 if !use_cg {
-                // S = D + A(Q+δI)^{-1}A^T を構築
+                // S_orig = D_orig + A_orig(Q+δI)^{-1}A_orig^T を構築（元の制約のみ、m_orig×m_orig）
                 let s_mat_opt =
-                    build_constraint_schur(&q_fac, &a_ext, &d_vec, &timeout_ctx.cancel, timeout_ctx.deadline);
+                    build_constraint_schur(&q_fac, &a_ext, &d_vec, m_orig, &timeout_ctx.cancel, timeout_ctx.deadline);
 
                 if let Some(s_mat) = s_mat_opt {
                     if timeout_ctx.should_stop() {
@@ -966,7 +977,7 @@ pub(crate) fn solve_qp_ipm_minres_inner(
                         minres_sol.iter_mut().for_each(|v| *v = 0.0);
 
                         let pred_res = solve_kkt_minres_constraint_precond(
-                            n, m_ext, &problem.q, &q_fac, &s_fac, &a_ext, &d_vec,
+                            n, m_ext, m_orig, &problem.q, &q_fac, &s_fac, &a_ext, &d_vec,
                             delta_p, &minres_rhs, &mut minres_sol,
                             MINRES_MAX_ITER, super::CG_TOL,
                             timeout_ctx.deadline, &timeout_ctx.cancel,
@@ -1030,7 +1041,7 @@ pub(crate) fn solve_qp_ipm_minres_inner(
                             minres_sol.iter_mut().for_each(|v| *v = 0.0);
 
                             let corr_res = solve_kkt_minres_constraint_precond(
-                                n, m_ext, &problem.q, &q_fac, &s_fac, &a_ext, &d_vec,
+                                n, m_ext, m_orig, &problem.q, &q_fac, &s_fac, &a_ext, &d_vec,
                                 delta_p, &minres_rhs, &mut minres_sol,
                                 MINRES_MAX_ITER, super::CG_TOL,
                                 timeout_ctx.deadline, &timeout_ctx.cancel,

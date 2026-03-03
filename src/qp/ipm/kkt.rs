@@ -399,71 +399,81 @@ pub(crate) fn compute_jacobi_precond_ipm(
 // 制約前処理 Schur 補元構築
 // ---------------------------------------------------------------------------
 
-/// 制約前処理の Schur 補元 S = D + A (Q+δI)^{-1} A^T を構築する
+/// 制約前処理の Schur 補元 S_orig = D_orig + A_orig (Q+δI)^{-1} A_orig^T を構築する
 ///
-/// M_cp = [(Q+δI)^{-1}, 0; 0, S^{-1}] が preconditioned MINRES の前処理行列となる。
-/// S を LDL+AMD で分解することで S^{-1} solve を効率化できる。
+/// m_orig は元の問題の制約数（境界制約を除く）。拡張制約行列 a_ext の先頭 m_orig 行のみを
+/// 用いて m_orig×m_orig の Schur 補元を構築する。境界制約行は Jacobi 前処理で扱う。
 ///
 /// # 引数
 /// - `q_fac`: Q + δ_p·I の LDL+AMD 分解（`factorize_with_amd` で事前構築）
-/// - `a_ext`: 拡張制約行列（m×n CSC）
-/// - `d_vec`: D = Σ + δ_d·I の対角（m 要素）
+/// - `a_ext`: 拡張制約行列（m_ext×n CSC）
+/// - `d_vec`: D = Σ + δ_d·I の対角（m_ext 要素）
+/// - `m_orig`: 元の問題制約数（<= m_ext）
 /// - `cancel`: キャンセルフラグ（10 列ごとにチェック）
 /// - `deadline`: タイムアウト期限（10 列ごとにチェック）
 ///
 /// # 返り値
-/// S の上三角 CSC 行列。m > 5000 の場合、またはタイムアウト/キャンセル時は `None`。
+/// S_orig の上三角 CSC 行列。m_orig > 5000 の場合、またはタイムアウト/キャンセル時は `None`。
 #[cfg(feature = "parallel")]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn build_constraint_schur(
     q_fac: &LdlFactorizationAmd,
     a_ext: &CscMatrix,
     d_vec: &[f64],
+    m_orig: usize,
     cancel: &AtomicBool,
     deadline: Option<Instant>,
 ) -> Option<CscMatrix> {
-    let m = a_ext.nrows;
+    let m_ext = a_ext.nrows;
     let n = a_ext.ncols;
 
-    // m > 5000: 密行列 m² が大きすぎるため CG パスに委譲
-    if m > 5000 {
+    // m_orig > 5000: 密行列 m_orig² が大きすぎるため CG パスに委譲
+    if m_orig > 5000 {
+        return None;
+    }
+
+    if m_orig == 0 {
         return None;
     }
 
     // CSC 列インデックスから行インデックスに変換（A の行ごとの非零エントリリスト）
-    let mut row_data: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
+    // 先頭 m_orig 行のみ収集（境界制約行は不要）
+    let mut row_data: Vec<Vec<(usize, f64)>> = vec![vec![]; m_orig];
     for col in 0..n {
         for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
             let row = a_ext.row_ind[k];
-            row_data[row].push((col, a_ext.values[k]));
+            if row < m_orig {
+                row_data[row].push((col, a_ext.values[k]));
+            }
         }
     }
 
-    // 密行列 m×m（row-major: s_dense[i*m + j] = S[i,j]）
-    let mut s_dense = vec![0.0f64; m * m];
+    // 密行列 m_orig×m_orig（row-major: s_dense[i*m_orig + j] = S[i,j]）
+    let mut s_dense = vec![0.0f64; m_orig * m_orig];
 
-    // D の対角成分を初期値として設定
-    for i in 0..m {
-        s_dense[i * m + i] = d_vec[i];
+    // D_orig の対角成分を初期値として設定
+    for i in 0..m_orig {
+        s_dense[i * m_orig + i] = d_vec[i];
     }
 
     // 作業バッファ（各反復で再利用）
     let mut a_j = vec![0.0f64; n];
     let mut z_j = vec![0.0f64; n];
-    let mut col_j = vec![0.0f64; m];
+    // col_j はフルサイズ (m_ext) で計算し、先頭 m_orig 分のみ使用
+    let mut col_j = vec![0.0f64; m_ext];
 
-    for j in 0..m {
+    for j in 0..m_orig {
         // 10 列ごとにキャンセル/デッドラインチェック
         if j % 10 == 0 {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            if deadline.map_or(false, |d| Instant::now() >= d) {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
                 return None;
             }
         }
 
-        // 行 j を密ベクトルに展開（a_j = A の j 行目, R^n）
+        // 行 j を密ベクトルに展開（a_j = A_orig の j 行目, R^n）
         a_j.iter_mut().for_each(|v| *v = 0.0);
         for &(col, val) in &row_data[j] {
             a_j[col] = val;
@@ -472,12 +482,12 @@ pub(crate) fn build_constraint_schur(
         // z_j = (Q+δI)^{-1} * a_j（LDL solve）
         q_fac.solve(&a_j, &mut z_j);
 
-        // col_j = A * z_j（S の j 列目の寄与）
+        // col_j = A_ext * z_j（全行計算、先頭 m_orig 行のみ使用）
         spmv(a_ext, &z_j, &mut col_j);
 
-        // S の j 列に累積（全 m 行）
-        for i in 0..m {
-            s_dense[i * m + j] += col_j[i];
+        // S の j 列に累積（先頭 m_orig 行のみ）
+        for i in 0..m_orig {
+            s_dense[i * m_orig + j] += col_j[i];
         }
     }
 
@@ -485,9 +495,9 @@ pub(crate) fn build_constraint_schur(
     let mut out_rows = Vec::new();
     let mut out_cols = Vec::new();
     let mut out_vals = Vec::new();
-    for j in 0..m {
+    for j in 0..m_orig {
         for i in 0..=j {
-            let v = s_dense[i * m + j];
+            let v = s_dense[i * m_orig + j];
             if v != 0.0 {
                 out_rows.push(i);
                 out_cols.push(j);
@@ -498,11 +508,11 @@ pub(crate) fn build_constraint_schur(
 
     if out_rows.is_empty() {
         // エッジケース: D のみの対角行列
-        let diag_rows: Vec<usize> = (0..m).collect();
-        let diag_cols: Vec<usize> = (0..m).collect();
-        let diag_vals: Vec<f64> = d_vec.to_vec();
-        Some(CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, m, m).unwrap())
+        let diag_rows: Vec<usize> = (0..m_orig).collect();
+        let diag_cols: Vec<usize> = (0..m_orig).collect();
+        let diag_vals: Vec<f64> = d_vec[..m_orig].to_vec();
+        Some(CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, m_orig, m_orig).unwrap())
     } else {
-        Some(CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, m, m).unwrap())
+        Some(CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, m_orig, m_orig).unwrap())
     }
 }
