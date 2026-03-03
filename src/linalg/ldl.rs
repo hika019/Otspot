@@ -3,6 +3,7 @@
 //! OSQPのQDLDL実装（C言語版）を参考にしたRust移植。
 //! 入力行列は上三角のみCSC形式で与える。
 
+use crate::linalg::amd::{amd, inv_permute_vec, permute_sym_upper, permute_vec};
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 
@@ -355,6 +356,63 @@ pub fn factorize_with_deadline(mat: &CscMatrix, deadline: Option<Instant>) -> Re
     Ok(LdlFactorization { L: l_mat, D: d_vec, Dinv: dinv })
 }
 
+// ── AMD 統合 ─────────────────────────────────────────────────────────────────
+
+/// AMD 再順序化を適用した LDL^T 分解の結果。
+///
+/// PAP^T = L * D * L^T を保持し、`solve` 時に置換・逆置換を自動適用する。
+pub struct LdlFactorizationAmd {
+    fac: LdlFactorization,
+    /// 置換ベクトル: perm[k] = i は新ノード k が元ノード i に対応
+    perm: Vec<usize>,
+}
+
+impl LdlFactorizationAmd {
+    /// AMD 付き LDL^T x = b を解く。
+    ///
+    /// 1. 右辺を前方置換: b_p\[k\] = b\[perm\[k\]\]
+    /// 2. (PAP^T) x_p = b_p を解く
+    /// 3. 解を逆置換: x\[perm\[k\]\] = x_p\[k\]
+    pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
+        let b_p = permute_vec(rhs, &self.perm);
+        let mut x_p = vec![0.0f64; rhs.len()];
+        self.fac.solve(&b_p, &mut x_p);
+        let x = inv_permute_vec(&x_p, &self.perm);
+        sol.copy_from_slice(&x);
+    }
+}
+
+/// AMD 再順序化付き LDL^T 分解（正定値行列用）。
+///
+/// 内部で `amd()` を呼んで P A P^T を計算し、`factorize()` に渡す。
+/// fill-in の削減により大規模疎行列の分解コストを低減する。
+pub fn factorize_with_amd(mat: &CscMatrix) -> Result<LdlFactorizationAmd, LdlError> {
+    let n = mat.nrows;
+    let perm = amd(n, &mat.col_ptr, &mat.row_ind);
+    let (new_col_ptr, new_row_ind, new_values) =
+        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &perm);
+    let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
+    let fac = factorize(&perm_mat)?;
+    Ok(LdlFactorizationAmd { fac, perm })
+}
+
+/// AMD 再順序化付き quasidefinite LDL^T 分解（deadline 対応）。
+///
+/// `factorize_quasidefinite_with_deadline` の前段で AMD を適用する。
+/// D\[j\] < 0 が正常として扱われる（augmented KKT system 向け）。
+pub fn factorize_quasidefinite_with_amd(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    let n = mat.nrows;
+    let perm = amd(n, &mat.col_ptr, &mat.row_ind);
+    let (new_col_ptr, new_row_ind, new_values) =
+        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &perm);
+    let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
+    let fac = factorize_quasidefinite_with_deadline(&perm_mat, deadline)?;
+    Ok(LdlFactorizationAmd { fac, perm })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +636,60 @@ mod tests {
         assert!((fac.D[0] - 1.0).abs() < 1e-12, "D[0]={}", fac.D[0]);
         // D[1] は PIVOT_DELTA (1e-8) に正則化される
         assert!((fac.D[1] - PIVOT_DELTA).abs() < 1e-12, "D[1]={} expected PIVOT_DELTA", fac.D[1]);
+    }
+
+    // ── AMD 統合テスト ─────────────────────────────────────────────────────────
+
+    /// AMD 付き分解で Ax=b が正しく解けること（3×3 正定値行列）
+    #[test]
+    fn test_ldl_with_amd_solve_3x3() {
+        // A = [[4,1,0],[1,3,2],[0,2,5]]
+        let mat = upper_tri_csc(3, &[
+            (0, 0, 4.0),
+            (0, 1, 1.0), (1, 1, 3.0),
+            (1, 2, 2.0), (2, 2, 5.0),
+        ]);
+
+        let fac = factorize_with_amd(&mat).expect("factorize_with_amd failed");
+
+        let b = [1.0f64, 2.0, 3.0];
+        let mut x = [0.0f64; 3];
+        fac.solve(&b, &mut x);
+
+        // residual: A*x = b
+        let ax0 = 4.0 * x[0] + 1.0 * x[1];
+        let ax1 = 1.0 * x[0] + 3.0 * x[1] + 2.0 * x[2];
+        let ax2 = 2.0 * x[1] + 5.0 * x[2];
+        let eps = 1e-10;
+        assert!((ax0 - b[0]).abs() < eps, "residual[0]={}", (ax0 - b[0]).abs());
+        assert!((ax1 - b[1]).abs() < eps, "residual[1]={}", (ax1 - b[1]).abs());
+        assert!((ax2 - b[2]).abs() < eps, "residual[2]={}", (ax2 - b[2]).abs());
+    }
+
+    /// AMD 付き分解が AMD なしと同じ解を返すこと
+    #[test]
+    fn test_ldl_amd_matches_plain() {
+        // A = [[5,2,0,0],[2,4,1,0],[0,1,6,3],[0,0,3,7]]
+        let mat = upper_tri_csc(4, &[
+            (0, 0, 5.0),
+            (0, 1, 2.0), (1, 1, 4.0),
+            (1, 2, 1.0), (2, 2, 6.0),
+            (2, 3, 3.0), (3, 3, 7.0),
+        ]);
+        let b = [1.0f64, 2.0, 3.0, 4.0];
+
+        let fac_plain = factorize(&mat).expect("plain factorize failed");
+        let mut x_plain = [0.0f64; 4];
+        fac_plain.solve(&b, &mut x_plain);
+
+        let fac_amd = factorize_with_amd(&mat).expect("amd factorize failed");
+        let mut x_amd = [0.0f64; 4];
+        fac_amd.solve(&b, &mut x_amd);
+
+        let eps = 1e-10;
+        for i in 0..4 {
+            assert!((x_plain[i] - x_amd[i]).abs() < eps,
+                "x[{}]: plain={} amd={}", i, x_plain[i], x_amd[i]);
+        }
     }
 }
