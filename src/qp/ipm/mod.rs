@@ -70,7 +70,6 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 /// Concurrent Solver の 4 番目のバリアントとして使用。
 /// 通常の solve_qp_ipm（augmented system）の代替パス。
 /// n <= LDL_THRESHOLD の問題に対して Schur complement LDL パスを使用。
-#[cfg(feature = "parallel")]
 pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;

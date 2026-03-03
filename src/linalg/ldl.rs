@@ -413,6 +413,23 @@ pub fn factorize_quasidefinite_with_amd(
     Ok(LdlFactorizationAmd { fac, perm })
 }
 
+/// AMD 再順序化付き quasidefinite LDL^T 分解（キャッシュ済み permutation 使用）。
+///
+/// `perm` が事前計算済みの場合は AMD を再計算せずに使う。
+/// スパースパターンが変わらない反復計算（IPM ループなど）での再利用を想定。
+pub fn factorize_quasidefinite_with_cached_perm(
+    mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    let n = mat.nrows;
+    let (new_col_ptr, new_row_ind, new_values) =
+        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, perm);
+    let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
+    let fac = factorize_quasidefinite_with_deadline(&perm_mat, deadline)?;
+    Ok(LdlFactorizationAmd { fac, perm: perm.to_vec() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

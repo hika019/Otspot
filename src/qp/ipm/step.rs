@@ -14,12 +14,13 @@ use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 use super::kkt::{
     build_augmented_system, build_extended_constraints,
+    build_schur_complement,
     compute_jacobi_precond_ipm, mv_ipm_apply, norm_inf, spmtv, spmv, spmv_q,
 };
-#[cfg(feature = "parallel")]
-use super::kkt::{build_constraint_schur, build_schur_complement};
-#[cfg(feature = "parallel")]
+use crate::linalg::amd::amd;
 use crate::linalg::ldl::LdlFactorizationAmd;
+#[cfg(feature = "parallel")]
+use super::kkt::build_constraint_schur;
 #[cfg(feature = "parallel")]
 use crate::linalg::minres::{pminres_solve, MinresWorkspace};
 #[cfg(feature = "parallel")]
@@ -90,6 +91,8 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
     let mut cg_ws_opt: Option<CgWorkspace> = if use_cg { Some(CgWorkspace::new(n)) } else { None };
+    // AMD permutation キャッシュ（augmented system のスパースパターンは反復間で不変）
+    let mut amd_perm_cache: Option<Vec<usize>> = None;
 
     let mut status = SolveStatus::MaxIterations;
     let mut final_iter = options.ipm.max_iter;
@@ -147,8 +150,9 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             }
 
             // augmented KKT行列構築 + factorize（delta_p リトライ最大4回）
+            // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
             let mut delta_p_retry = delta_p;
-            let mut fac_opt = None;
+            let mut fac_opt: Option<LdlFactorizationAmd> = None;
             for _retry in 0..4 {
                 if timeout_ctx.should_stop() {
                     status = SolveStatus::Timeout;
@@ -158,7 +162,12 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 let aug_mat = build_augmented_system(
                     &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d,
                 );
-                match ldl::factorize_quasidefinite_with_deadline(&aug_mat, timeout_ctx.deadline) {
+                // 初回のみ AMD permutation を計算してキャッシュ
+                if amd_perm_cache.is_none() {
+                    amd_perm_cache = Some(amd(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind));
+                }
+                let perm = amd_perm_cache.as_ref().unwrap();
+                match ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, perm, timeout_ctx.deadline) {
                     Ok(f) => { fac_opt = Some(f); break; }
                     Err(ldl::LdlError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
@@ -361,7 +370,6 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 /// Schur complement LDL パスを使う IPM 内部ソルバー
 ///
 /// n <= LDL_THRESHOLD 専用。n > LDL_THRESHOLD の場合は `solve_qp_ipm_inner` に委譲。
-#[cfg(feature = "parallel")]
 pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let n = problem.num_vars;
 

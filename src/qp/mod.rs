@@ -339,6 +339,7 @@ fn dispatch_qp(
         QpSolverChoice::IpmMinres => ipm::solve_qp_ipm_minres(problem, options),
         #[cfg(not(feature = "parallel"))]
         QpSolverChoice::IpmMinres => ipm::solve_qp_ipm(problem, options),
+        QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
         QpSolverChoice::Auto => {
             #[cfg(feature = "parallel")]
             {

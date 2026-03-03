@@ -7,10 +7,9 @@
 
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "parallel")]
 use crate::linalg::ldl::LdlFactorizationAmd;
-#[cfg(feature = "parallel")]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "parallel")]
 use std::time::Instant;
 
@@ -232,7 +231,6 @@ pub(crate) fn build_augmented_system(
 /// # 注意
 /// 密行列（n×n）で蓄積するため n が大きい場合メモリが O(n²) 必要。
 /// LDL_THRESHOLD (5000) でゲートされており大問題には使われない。
-#[cfg(feature = "parallel")]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn build_schur_complement(
     q: &CscMatrix,
