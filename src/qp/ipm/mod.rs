@@ -94,34 +94,6 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
     step::solve_qp_ipm_schur_inner(problem, options)
 }
 
-/// IPM MINRES + 制約前処理パスで QP を解く
-///
-/// Concurrent Solver の 6 番目のバリアントとして使用。
-/// n > LDL_THRESHOLD の大問題で MINRES+制約前処理を試み、失敗時は CG+Jacobi に委譲。
-#[cfg(feature = "parallel")]
-pub(crate) fn solve_qp_ipm_minres(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    if options.use_ruiz_scaling && problem.num_vars > 0 {
-        let n = problem.num_vars;
-        let m = problem.num_constraints;
-
-        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
-        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
-
-        let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
-
-        let (q_s, a_s, c_s, b_s, bounds_s) =
-            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
-
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
-            let scaled_result = step::solve_qp_ipm_minres_inner(&scaled_problem, options);
-            return unscale_ipm_result(scaled_result, &scaler);
-        }
-    }
-
-    step::solve_qp_ipm_minres_inner(problem, options)
-}
-
 /// スケール済み IPM 結果を元のスケールに逆変換する
 fn unscale_ipm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult {
     match result.status {

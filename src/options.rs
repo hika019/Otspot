@@ -29,10 +29,6 @@ pub enum QpSolverChoice {
     ActiveSet,
     /// 強制 IPM (内点法)
     Ipm,
-    /// 強制 IPM→AS クロスオーバー
-    IpmCrossover,
-    /// 強制 MINRES+制約前処理 IPM (n > LDL_THRESHOLD でも強制使用)
-    IpmMinres,
     /// 強制 IPM Schur complement パス（--features parallel なしでも動作）
     IpmSchur,
 }

@@ -39,14 +39,11 @@ mod solver;
 pub mod admm;
 pub mod ipm;
 pub mod diagnose;
-pub mod crossover;
-
 pub use problem::{QpProblem, QpWarmStart};
 pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 pub use crate::problem::SolverResult;
 pub use admm::solve_qp_admm;
 pub use ipm::solve_qp_ipm;
-pub use crossover::IpmCrossoverSolver;
 
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::problem::SolveStatus;
@@ -223,32 +220,6 @@ fn solve_qp_concurrent(
         }));
     }
 
-    // IPM-Crossover スレッド
-    {
-        let cancel = Arc::clone(&cancel_flag);
-        let prob = Arc::clone(&problem_arc);
-        let mut opts = options.clone();
-        opts.cancel_flag = Some(cancel);
-        let tx = tx.clone();
-        handles.push(std::thread::spawn(move || {
-            let r = crossover::solve_ipm_crossover(&prob, &opts);
-            let _ = tx.send(r);
-        }));
-    }
-
-    // IPM-MINRES スレッド（n > LDL_THRESHOLD の大問題のみ起動）
-    if problem.num_vars > ipm::LDL_THRESHOLD {
-        let cancel = Arc::clone(&cancel_flag);
-        let prob = Arc::clone(&problem_arc);
-        let mut opts = options.clone();
-        opts.cancel_flag = Some(cancel);
-        let tx = tx.clone();
-        handles.push(std::thread::spawn(move || {
-            let r = ipm::solve_qp_ipm_minres(&prob, &opts);
-            let _ = tx.send(r);
-        }));
-    }
-
     drop(tx); // 全スレッドが tx を drop するまで rx.iter() は終了しない
 
     // 解の品質ランク（Optimal > Feasible > Approximate）で最良解を選択する。
@@ -334,11 +305,6 @@ fn dispatch_qp(
         QpSolverChoice::Admm => admm::solve_qp_admm(problem, options),
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
-        QpSolverChoice::IpmCrossover => crossover::solve_ipm_crossover(problem, options),
-        #[cfg(feature = "parallel")]
-        QpSolverChoice::IpmMinres => ipm::solve_qp_ipm_minres(problem, options),
-        #[cfg(not(feature = "parallel"))]
-        QpSolverChoice::IpmMinres => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
         QpSolverChoice::Auto => {
             #[cfg(feature = "parallel")]
@@ -1076,38 +1042,6 @@ mod tests {
         assert!((result.solution[0] - 0.5).abs() < EPS, "T20: x[0] ≈ 0.5");
         assert!((result.solution[1] - 0.5).abs() < EPS, "T20: x[1] ≈ 0.5");
         assert!((result.objective - 0.5).abs() < EPS, "T20: obj ≈ 0.5");
-    }
-
-    /// T21: Concurrent Solver に IpmCrossover 第5スレッドが参加することを確認
-    ///
-    /// parallel feature ON 時、Auto モードで5スレッド並列実行される。
-    /// IpmCrossoverSolver を強制指定した場合も Optimal を返すことを確認。
-    /// min x^2 + y^2  s.t. x + y >= 1  → x*=y*=0.5, obj=0.5
-    #[cfg(feature = "parallel")]
-    #[test]
-    fn test_crossover_concurrent() {
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
-        let b = vec![-1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
-
-        // Auto モード（5スレッド並列）
-        let opts_auto = SolverOptions::default();
-        let result_auto = solve_qp_with(&problem, &opts_auto);
-        assert_eq!(result_auto.status, SolveStatus::Optimal, "T21: auto concurrent Optimal");
-        assert!((result_auto.solution[0] - 0.5).abs() < EPS, "T21: auto x[0]");
-
-        // IpmCrossover 強制指定
-        let opts_xover = SolverOptions {
-            qp_solver: QpSolverChoice::IpmCrossover,
-            ..Default::default()
-        };
-        let result_xover = solve_qp_with(&problem, &opts_xover);
-        assert_eq!(result_xover.status, SolveStatus::Optimal, "T21: IpmCrossover Optimal");
-        assert!((result_xover.solution[0] - 0.5).abs() < EPS, "T21: crossover x[0]");
-        assert!((result_xover.objective - 0.5).abs() < EPS, "T21: crossover obj");
     }
 
     /// T22: QualityRank の Ord 比較
