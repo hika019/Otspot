@@ -162,8 +162,8 @@ fn solve_qp_concurrent(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let problem_arc = Arc::new(problem.clone());
     let warm_start_cloned = warm_start.cloned();
-    let (tx, rx) = mpsc::sync_channel::<SolverResult>(5);
-    let mut handles = Vec::with_capacity(5);
+    let (tx, rx) = mpsc::sync_channel::<SolverResult>(6);
+    let mut handles = Vec::with_capacity(6);
 
     // Active Set スレッド
     // 注: concurrent モードでは rayon 並列ワーカーを無効化 (parallel_runs=1) する。
@@ -232,6 +232,19 @@ fn solve_qp_concurrent(
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
             let r = crossover::solve_ipm_crossover(&prob, &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    // IPM-MINRES スレッド（n > LDL_THRESHOLD の大問題のみ起動）
+    if problem.num_vars > ipm::LDL_THRESHOLD {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = ipm::solve_qp_ipm_minres(&prob, &opts);
             let _ = tx.send(r);
         }));
     }
