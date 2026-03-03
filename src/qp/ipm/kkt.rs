@@ -8,6 +8,8 @@
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 #[cfg(feature = "parallel")]
+use crate::linalg::ldl::LdlFactorizationAmd;
+#[cfg(feature = "parallel")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -389,4 +391,109 @@ pub(crate) fn compute_jacobi_precond_ipm(
     diag.iter()
         .map(|&d| if d.abs() < 1e-14 { 1.0 } else { 1.0 / d })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 制約前処理 Schur 補元構築
+// ---------------------------------------------------------------------------
+
+/// 制約前処理の Schur 補元 S = D + A (Q+δI)^{-1} A^T を構築する
+///
+/// M_cp = [(Q+δI)^{-1}, 0; 0, S^{-1}] が preconditioned MINRES の前処理行列となる。
+/// S を LDL+AMD で分解することで S^{-1} solve を効率化できる。
+///
+/// # 引数
+/// - `q_fac`: Q + δ_p·I の LDL+AMD 分解（`factorize_with_amd` で事前構築）
+/// - `a_ext`: 拡張制約行列（m×n CSC）
+/// - `d_vec`: D = Σ + δ_d·I の対角（m 要素）
+/// - `cancel`: キャンセルフラグ（10 列ごとにチェック）
+///
+/// # 返り値
+/// S の上三角 CSC 行列。m > 5000 の場合は `None`（メモリ保護）。
+#[cfg(feature = "parallel")]
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn build_constraint_schur(
+    q_fac: &LdlFactorizationAmd,
+    a_ext: &CscMatrix,
+    d_vec: &[f64],
+    cancel: &AtomicBool,
+) -> Option<CscMatrix> {
+    let m = a_ext.nrows;
+    let n = a_ext.ncols;
+
+    // m > 5000: 密行列 m² が大きすぎるため CG パスに委譲
+    if m > 5000 {
+        return None;
+    }
+
+    // CSC 列インデックスから行インデックスに変換（A の行ごとの非零エントリリスト）
+    let mut row_data: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
+    for col in 0..n {
+        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+            let row = a_ext.row_ind[k];
+            row_data[row].push((col, a_ext.values[k]));
+        }
+    }
+
+    // 密行列 m×m（row-major: s_dense[i*m + j] = S[i,j]）
+    let mut s_dense = vec![0.0f64; m * m];
+
+    // D の対角成分を初期値として設定
+    for i in 0..m {
+        s_dense[i * m + i] = d_vec[i];
+    }
+
+    // 作業バッファ（各反復で再利用）
+    let mut a_j = vec![0.0f64; n];
+    let mut z_j = vec![0.0f64; n];
+    let mut col_j = vec![0.0f64; m];
+
+    for j in 0..m {
+        // 10 列ごとにキャンセルチェック
+        if j % 10 == 0 && cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // 行 j を密ベクトルに展開（a_j = A の j 行目, R^n）
+        a_j.iter_mut().for_each(|v| *v = 0.0);
+        for &(col, val) in &row_data[j] {
+            a_j[col] = val;
+        }
+
+        // z_j = (Q+δI)^{-1} * a_j（LDL solve）
+        q_fac.solve(&a_j, &mut z_j);
+
+        // col_j = A * z_j（S の j 列目の寄与）
+        spmv(a_ext, &z_j, &mut col_j);
+
+        // S の j 列に累積（全 m 行）
+        for i in 0..m {
+            s_dense[i * m + j] += col_j[i];
+        }
+    }
+
+    // 上三角部分を triplet 形式で抽出
+    let mut out_rows = Vec::new();
+    let mut out_cols = Vec::new();
+    let mut out_vals = Vec::new();
+    for j in 0..m {
+        for i in 0..=j {
+            let v = s_dense[i * m + j];
+            if v != 0.0 {
+                out_rows.push(i);
+                out_cols.push(j);
+                out_vals.push(v);
+            }
+        }
+    }
+
+    if out_rows.is_empty() {
+        // エッジケース: D のみの対角行列
+        let diag_rows: Vec<usize> = (0..m).collect();
+        let diag_cols: Vec<usize> = (0..m).collect();
+        let diag_vals: Vec<f64> = d_vec.to_vec();
+        Some(CscMatrix::from_triplets(&diag_rows, &diag_cols, &diag_vals, m, m).unwrap())
+    } else {
+        Some(CscMatrix::from_triplets(&out_rows, &out_cols, &out_vals, m, m).unwrap())
+    }
 }
