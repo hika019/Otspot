@@ -11,6 +11,8 @@ use crate::sparse::CscMatrix;
 use crate::linalg::ldl::LdlFactorizationAmd;
 #[cfg(feature = "parallel")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "parallel")]
+use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // 疎行列-ベクトル演算
@@ -407,9 +409,10 @@ pub(crate) fn compute_jacobi_precond_ipm(
 /// - `a_ext`: 拡張制約行列（m×n CSC）
 /// - `d_vec`: D = Σ + δ_d·I の対角（m 要素）
 /// - `cancel`: キャンセルフラグ（10 列ごとにチェック）
+/// - `deadline`: タイムアウト期限（10 列ごとにチェック）
 ///
 /// # 返り値
-/// S の上三角 CSC 行列。m > 5000 の場合は `None`（メモリ保護）。
+/// S の上三角 CSC 行列。m > 5000 の場合、またはタイムアウト/キャンセル時は `None`。
 #[cfg(feature = "parallel")]
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn build_constraint_schur(
@@ -417,6 +420,7 @@ pub(crate) fn build_constraint_schur(
     a_ext: &CscMatrix,
     d_vec: &[f64],
     cancel: &AtomicBool,
+    deadline: Option<Instant>,
 ) -> Option<CscMatrix> {
     let m = a_ext.nrows;
     let n = a_ext.ncols;
@@ -449,9 +453,14 @@ pub(crate) fn build_constraint_schur(
     let mut col_j = vec![0.0f64; m];
 
     for j in 0..m {
-        // 10 列ごとにキャンセルチェック
-        if j % 10 == 0 && cancel.load(Ordering::Relaxed) {
-            return None;
+        // 10 列ごとにキャンセル/デッドラインチェック
+        if j % 10 == 0 {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if deadline.map_or(false, |d| Instant::now() >= d) {
+                return None;
+            }
         }
 
         // 行 j を密ベクトルに展開（a_j = A の j 行目, R^n）

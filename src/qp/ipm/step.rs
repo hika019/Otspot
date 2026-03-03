@@ -934,12 +934,23 @@ pub(crate) fn solve_qp_ipm_minres_inner(
             let q_fac_opt = ldl::factorize_with_amd(&q_delta).ok();
 
             if let Some(q_fac) = q_fac_opt {
+                // q_delta のLDL分解後にタイムアウトチェック
+                if timeout_ctx.should_stop() {
+                    use_cg = true;
+                }
+                if !use_cg {
                 // S = D + A(Q+δI)^{-1}A^T を構築
                 let s_mat_opt =
-                    build_constraint_schur(&q_fac, &a_ext, &d_vec, &timeout_ctx.cancel);
+                    build_constraint_schur(&q_fac, &a_ext, &d_vec, &timeout_ctx.cancel, timeout_ctx.deadline);
 
                 if let Some(s_mat) = s_mat_opt {
-                    if let Ok(s_fac) = ldl::factorize_with_amd(&s_mat) {
+                    if timeout_ctx.should_stop() {
+                        use_cg = true;
+                    } else if let Ok(s_fac) = ldl::factorize_with_amd(&s_mat) {
+                        // s_mat のLDL分解後にタイムアウトチェック
+                        if timeout_ctx.should_stop() {
+                            use_cg = true;
+                        } else {
                         // --- Predictor ---
                         let r_c_pred: Vec<f64> =
                             s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
@@ -1040,9 +1051,11 @@ pub(crate) fn solve_qp_ipm_minres_inner(
                             minres_solved = true;
                         }
                         // pred_res.converged == false: fall through to CG
+                        } // else { (timeout_ctx.should_stop() == false)
                     }
                 }
                 // s_mat_opt == None: fall through to CG
+                } // if !use_cg (after q_delta factorization)
             }
             // q_fac_opt == None: fall through to CG
 

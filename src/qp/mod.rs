@@ -335,6 +335,10 @@ fn dispatch_qp(
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
         QpSolverChoice::IpmCrossover => crossover::solve_ipm_crossover(problem, options),
+        #[cfg(feature = "parallel")]
+        QpSolverChoice::IpmMinres => ipm::solve_qp_ipm_minres(problem, options),
+        #[cfg(not(feature = "parallel"))]
+        QpSolverChoice::IpmMinres => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::Auto => {
             #[cfg(feature = "parallel")]
             {

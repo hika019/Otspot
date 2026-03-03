@@ -31,6 +31,8 @@ pub enum QpSolverChoice {
     Ipm,
     /// 強制 IPM→AS クロスオーバー
     IpmCrossover,
+    /// 強制 MINRES+制約前処理 IPM (n > LDL_THRESHOLD でも強制使用)
+    IpmMinres,
 }
 
 /// シンプレックス法の選択

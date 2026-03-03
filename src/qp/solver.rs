@@ -121,16 +121,13 @@ pub(crate) fn qp_solve_impl(
             use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
             // Phase Iで実行可能点を1回取得
-            eprintln!("DBG: parallel Phase1 start, deadline={:?}", effective_opts.deadline);
-            let phase1_start = std::time::Instant::now();
             let feasible_x = match find_initial_feasible_point(problem, effective_opts) {
-                Phase1Result::Feasible(x) => { eprintln!("DBG: Phase1 Feasible ({:.2}s)", phase1_start.elapsed().as_secs_f64()); x },
-                Phase1Result::Infeasible => { eprintln!("DBG: Phase1 Infeasible"); return SolverResult::infeasible() },
+                Phase1Result::Feasible(x) => { x },
+                Phase1Result::Infeasible => { return SolverResult::infeasible() },
                 Phase1Result::MaxIterations => {
-                    eprintln!("DBG: Phase1 MaxIterations");
                     return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
                 }
-                Phase1Result::Timeout => { eprintln!("DBG: Phase1 Timeout ({:.2}s)", phase1_start.elapsed().as_secs_f64()); return SolverResult {
+                Phase1Result::Timeout => { return SolverResult {
                     status: SolveStatus::Timeout,
                     objective: f64::INFINITY,
                     solution: vec![],
@@ -145,8 +142,6 @@ pub(crate) fn qp_solve_impl(
             // cancel フラグ（他ワーカーが Optimal を見つけたら残りを止める）
             let cancel = Arc::new(AtomicBool::new(false));
             let run_count = effective_opts.parallel_runs;
-            eprintln!("DBG: launching {} parallel workers, deadline_remaining={:.2}s", run_count,
-                effective_opts.deadline.map_or(-1.0, |d| (d - std::time::Instant::now()).as_secs_f64()));
 
             // 初期ワーキングセット多様化: WS0（空集合）/ WS1（境界アクティブ）/ WS3（ハッシュ乱択）
             let initial_working_sets = build_initial_working_sets(problem, &feasible_x, run_count);
@@ -161,9 +156,6 @@ pub(crate) fn qp_solve_impl(
                     let mut worker_opts = effective_opts.clone();
                     worker_opts.cancel_flag = Some(cancel.clone());
                     let worker_timeout = TimeoutCtx::from_options(&worker_opts);
-                    eprintln!("DBG: worker start, ws_len={}, should_stop={}, deadline_remaining={:.3}s",
-                        ws_indices.len(), worker_timeout.should_stop(),
-                        worker_opts.deadline.map_or(-1.0, |d| (d - std::time::Instant::now()).as_secs_f64()));
 
                     let r = active_set_loop(
                         problem,
@@ -172,7 +164,6 @@ pub(crate) fn qp_solve_impl(
                         &worker_opts,
                         &worker_timeout,
                     );
-                    eprintln!("DBG: worker done, status={:?}, iters={}", r.status, r.iterations);
                     if r.status == SolveStatus::Optimal {
                         cancel.store(true, Ordering::Relaxed);
                         Some(r)
@@ -651,7 +642,6 @@ fn active_set_loop(
     let (aug_a, aug_b) = augment_bounds_to_constraints(&problem.a, &problem.b, &problem.bounds);
 
     for iter in 0..max_iter {
-        if iter < 3 { eprintln!("DBG: active_set_loop iter={}, n={}, ws_len={}, should_stop={}", iter, n, working_set.len(), timeout.should_stop()); }
         // タイムアウト / キャンセルチェック
         if timeout.should_stop() {
             let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
