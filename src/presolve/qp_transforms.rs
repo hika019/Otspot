@@ -1168,9 +1168,9 @@ pub fn run_qp_presolve_phase1(
         None
     };
 
-    // Ruiz スケーリングを適用した場合、問題の表現空間が変わるため was_reduced = true に設定する。
-    // これにより warm_start の初期点（元空間）がスケール済み問題に不正に適用されることを防ぐ。
-    let was_reduced_final = was_reduced || ruiz_scaler_opt.is_some();
+    // was_reduced は変数削減（fixedVar/singletonRow/emptyCol等）が起きた時のみ true。
+    // Ruiz scaling は変数次元を変えないため was_reduced に含めない。
+    // warm_start の initial_point は solve_qp_warm 側で ruiz_scaler を使いスケールする。
 
     QpPresolveResult {
         reduced,
@@ -1180,7 +1180,7 @@ pub fn run_qp_presolve_phase1(
         obj_offset,
         q_linear_adjust,
         postsolve_stack,
-        was_reduced: was_reduced_final,
+        was_reduced,
         orig_num_vars: n,
         orig_num_constraints: m,
         presolve_status: QpPresolveStatus::Feasible,

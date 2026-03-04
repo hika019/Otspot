@@ -44,7 +44,7 @@ pub use crate::problem::SolverResult;
 pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
-use crate::presolve::{run_qp_presolve_phase1, postsolve_qp};
+use crate::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2, postsolve_qp};
 use crate::presolve::qp_transforms::QpPresolveStatus;
 use crate::problem::SolveStatus;
 
@@ -336,7 +336,8 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 /// qpOASESの `init()` に相当。`nWSR` は `options.max_iterations` で指定。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let presolve_result = if options.presolve {
-        run_qp_presolve_phase1(problem, options)
+        let phase1 = run_qp_presolve_phase1(problem, options);
+        run_qp_presolve_phase2(phase1, options)
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };
@@ -398,17 +399,34 @@ pub fn solve_qp_warm(
     options: &SolverOptions,
 ) -> SolverResult {
     let presolve_result = if options.presolve {
-        run_qp_presolve_phase1(problem, options)
+        let phase1 = run_qp_presolve_phase1(problem, options);
+        run_qp_presolve_phase2(phase1, options)
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };
     // warm_start は元問題の次元で記録されているため、
-    // presolve で縮約が発生した場合はインデックスが合わなくなる。
-    // 安全策として縮約ありの場合は warm_start を無効化する。
+    // 変数削減（was_reduced）が発生した場合はインデックスが合わなくなるため廃棄。
+    // Ruiz scaling のみの場合は次元は同じだが初期点をスケール空間に変換して渡す。
     if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
         return crate::problem::SolverResult::infeasible();
     }
-    let ws = if presolve_result.was_reduced { None } else { Some(warm_start) };
+    let scaled_ws_storage: Option<QpWarmStart> = if !presolve_result.was_reduced {
+        presolve_result.ruiz_scaler.as_ref().map(|scaler| QpWarmStart {
+            initial_active_set: warm_start.initial_active_set.clone(),
+            initial_point: warm_start.initial_point.as_ref().map(|x| {
+                x.iter().enumerate().map(|(j, &v)| v / scaler.d[j]).collect()
+            }),
+        })
+    } else {
+        None
+    };
+    let ws: Option<&QpWarmStart> = if presolve_result.was_reduced {
+        None
+    } else if let Some(ref scaled) = scaled_ws_storage {
+        Some(scaled)
+    } else {
+        Some(warm_start)
+    };
     let opts_no_ruiz;
     let dispatch_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
         opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..options.clone() };
