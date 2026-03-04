@@ -44,6 +44,7 @@ pub use crate::problem::SolverResult;
 pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
+use crate::presolve::{run_qp_presolve_phase1, postsolve_qp};
 use crate::problem::SolveStatus;
 
 /// Concurrent Solver が複数ソルバーの結果を比較するための解品質ランク
@@ -333,7 +334,13 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 ///
 /// qpOASESの `init()` に相当。`nWSR` は `options.max_iterations` で指定。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    dispatch_qp(problem, None, options)
+    let presolve_result = if options.presolve {
+        run_qp_presolve_phase1(problem, options)
+    } else {
+        crate::presolve::QpPresolveResult::no_reduction(problem)
+    };
+    let reduced_sol = dispatch_qp(&presolve_result.reduced, None, options);
+    postsolve_qp(&presolve_result, &reduced_sol)
 }
 
 /// QPをカスタム設定で解く（`solve_qp_with` の別名）
@@ -343,7 +350,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// `solve_qp_with` と同一実装のため非推奨。`solve_qp_with` を使用すること。
 #[deprecated(since = "0.1.0", note = "use `solve_qp_with` instead")]
 pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    dispatch_qp(problem, None, options)
+    solve_qp_with(problem, options)
 }
 
 /// Warm-start付きでQPを解く
@@ -370,7 +377,17 @@ pub fn solve_qp_warm(
     warm_start: &QpWarmStart,
     options: &SolverOptions,
 ) -> SolverResult {
-    dispatch_qp(problem, Some(warm_start), options)
+    let presolve_result = if options.presolve {
+        run_qp_presolve_phase1(problem, options)
+    } else {
+        crate::presolve::QpPresolveResult::no_reduction(problem)
+    };
+    // warm_start は元問題の次元で記録されているため、
+    // presolve で縮約が発生した場合はインデックスが合わなくなる。
+    // 安全策として縮約ありの場合は warm_start を無効化する。
+    let ws = if presolve_result.was_reduced { None } else { Some(warm_start) };
+    let reduced_sol = dispatch_qp(&presolve_result.reduced, ws, options);
+    postsolve_qp(&presolve_result, &reduced_sol)
 }
 
 #[cfg(test)]

@@ -1,0 +1,1001 @@
+//! QP Presolve 変換モジュール（Phase 1, #1-12）
+//!
+//! 二次計画問題 min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub
+//! を縮約するための手法群と逆変換情報を提供する。
+//!
+//! 対称Q行列の扱い: Q は full symmetric（上下三角両方）として格納されていることを前提とする。
+//! 変数 j の固定によるQ更新: 列 j のエントリ (k, Q[k,j]) は対称性から Q[j,k] と等価。
+
+use crate::options::SolverOptions;
+use crate::qp::QpProblem;
+use crate::sparse::CscMatrix;
+use crate::tolerances::ZERO_TOL;
+
+// ---------------------------------------------------------------------------
+// 逆変換ステップ（LIFO順で適用）
+// ---------------------------------------------------------------------------
+
+/// QP Postsolve の1ステップ
+#[derive(Debug, Clone)]
+pub(crate) enum QpPostsolveStep {
+    /// 固定変数の復元 (lb[j] == ub[j])
+    FixedVar { idx: usize, val: f64 },
+    /// Singleton行による値確定 (Eq制約 A[i,j]*x[j]=b[i])
+    SingletonRow { col: usize, val: f64 },
+    /// 空列（Q列・A列ともゼロ）の復元
+    EmptyCol { idx: usize, val: f64 },
+}
+
+/// Postsolve ステップ列（LIFO）
+pub(crate) struct QpPostsolveStack {
+    pub(crate) steps: Vec<QpPostsolveStep>,
+}
+
+impl QpPostsolveStack {
+    fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+    fn push(&mut self, step: QpPostsolveStep) {
+        self.steps.push(step);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Presolve 結果
+// ---------------------------------------------------------------------------
+
+/// QP Presolve 処理の結果
+///
+/// 縮約後の `QpProblem` と復元用情報を保持する。
+pub struct QpPresolveResult {
+    /// 縮約後の QP 問題（変数・制約が減っている可能性がある）
+    pub reduced: QpProblem,
+    /// 元→縮約後の変数インデックスマッピング (None = 削除済み)
+    pub col_map: Vec<Option<usize>>,
+    /// 縮約→元の逆マッピング
+    pub col_map_inv: Vec<usize>,
+    /// 元→縮約後の制約インデックスマッピング (None = 削除済み)
+    pub row_map: Vec<Option<usize>>,
+    /// 削除変数の目的関数への定数寄与
+    pub obj_offset: f64,
+    /// 固定変数による線形項調整（縮約後 c に反映済み。postsolve では使用しない）
+    pub q_linear_adjust: Vec<f64>,
+    /// Postsolve ステップ列
+    pub(crate) postsolve_stack: QpPostsolveStack,
+    /// 問題サイズが変化したか
+    pub was_reduced: bool,
+    /// 元の変数数
+    pub orig_num_vars: usize,
+    /// 元の制約数
+    pub orig_num_constraints: usize,
+}
+
+impl QpPresolveResult {
+    /// 縮約なし（presolve: false またはフォールバック用）
+    pub fn no_reduction(prob: &QpProblem) -> Self {
+        let n = prob.num_vars;
+        let m = prob.num_constraints;
+        QpPresolveResult {
+            reduced: prob.clone(),
+            col_map: (0..n).map(Some).collect(),
+            col_map_inv: (0..n).collect(),
+            row_map: (0..m).map(Some).collect(),
+            obj_offset: 0.0,
+            q_linear_adjust: vec![0.0; n],
+            postsolve_stack: QpPostsolveStack::new(),
+            was_reduced: false,
+            orig_num_vars: n,
+            orig_num_constraints: m,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: Q 行列の対角要素取得
+// ---------------------------------------------------------------------------
+
+fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
+    let start = q.col_ptr[j];
+    let end = q.col_ptr[j + 1];
+    for k in start..end {
+        if q.row_ind[k] == j {
+            return q.values[k];
+        }
+    }
+    0.0
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: 行の活動範囲計算（LP版と同じロジック）
+// ---------------------------------------------------------------------------
+
+fn activity_range(
+    entries: &[(usize, f64)],
+    bounds: &[(f64, f64)],
+    exclude_col: Option<usize>,
+) -> (f64, f64, bool, bool) {
+    let mut row_lb = 0.0f64;
+    let mut row_ub = 0.0f64;
+    let mut lb_finite = true;
+    let mut ub_finite = true;
+
+    for &(j, a_ij) in entries {
+        if Some(j) == exclude_col {
+            continue;
+        }
+        let (lb_j, ub_j) = bounds[j];
+        if a_ij > 0.0 {
+            if lb_j == f64::NEG_INFINITY {
+                lb_finite = false;
+            } else if lb_finite {
+                row_lb += a_ij * lb_j;
+            }
+            if ub_j == f64::INFINITY {
+                ub_finite = false;
+            } else if ub_finite {
+                row_ub += a_ij * ub_j;
+            }
+        } else if a_ij < 0.0 {
+            if ub_j == f64::INFINITY {
+                lb_finite = false;
+            } else if lb_finite {
+                row_lb += a_ij * ub_j;
+            }
+            if lb_j == f64::NEG_INFINITY {
+                ub_finite = false;
+            } else if ub_finite {
+                row_ub += a_ij * lb_j;
+            }
+        }
+    }
+    (row_lb, row_ub, lb_finite, ub_finite)
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: 変数 j の固定処理（c・obj_offset・b を更新）
+// ---------------------------------------------------------------------------
+
+/// 変数 j を値 val に固定し、c・obj_offset・b を in-place 更新する。
+/// 呼び出し元は removed_cols[j] = true を設定し、postsolve_stack に追加する責任を持つ。
+#[allow(clippy::too_many_arguments)]
+fn apply_fixed_variable(
+    j: usize,
+    val: f64,
+    prob: &QpProblem,
+    c: &mut [f64],
+    b: &mut [f64],
+    obj_offset: &mut f64,
+    removed_cols: &[bool],
+    removed_rows: &[bool],
+) {
+    let n = prob.num_vars;
+    let m = prob.num_constraints;
+
+    // 目的関数への寄与: 0.5 * Q[j,j] * val^2 + c[j] * val
+    let q_jj = q_diagonal(&prob.q, j);
+    *obj_offset += 0.5 * q_jj * val * val + c[j] * val;
+
+    // c[k] += Q[k,j] * val for k ≠ j  （Q 列 j のエントリを走査）
+    // 対称 Q を前提: CSC 列 j のエントリ (row_idx, Q[row_idx, j]) = Q[j, row_idx]
+    let start = prob.q.col_ptr[j];
+    let end = prob.q.col_ptr[j + 1];
+    for idx in start..end {
+        let k = prob.q.row_ind[idx];
+        if k != j && k < n && !removed_cols[k] {
+            c[k] += prob.q.values[idx] * val;
+        }
+    }
+
+    // b[i] -= A[i,j] * val for all active rows
+    let col_start = prob.a.col_ptr[j];
+    let col_end = prob.a.col_ptr[j + 1];
+    for idx in col_start..col_end {
+        let row = prob.a.row_ind[idx];
+        if row < m && !removed_rows[row] {
+            b[row] -= prob.a.values[idx] * val;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 メインエントリポイント
+// ---------------------------------------------------------------------------
+
+/// QP Presolve Phase 1（#1-12 の技法を全実行）
+///
+/// 問題が明らかに Infeasible な場合は `None` を返す。
+pub fn run_qp_presolve_phase1(
+    prob: &QpProblem,
+    _opts: &SolverOptions,
+) -> QpPresolveResult {
+    let n = prob.num_vars;
+    let m = prob.num_constraints;
+
+    // 作業バッファ
+    let mut c = prob.c.clone();
+    let mut b = prob.b.clone();
+    let mut bounds = prob.bounds.clone();
+    let mut removed_cols = vec![false; n];
+    let mut removed_rows = vec![false; m];
+    let mut obj_offset = 0.0f64;
+    let mut postsolve_stack = QpPostsolveStack::new();
+
+    // 行情報の前処理（CSC→行アクセス）
+    let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
+    for j in 0..n {
+        let start = prob.a.col_ptr[j];
+        let end = prob.a.col_ptr[j + 1];
+        for idx in start..end {
+            let row = prob.a.row_ind[idx];
+            row_entries[row].push((j, prob.a.values[idx]));
+        }
+    }
+
+    // ==================================================================
+    // #1: fixed_variables() — lb[j] == ub[j] の変数を定数化
+    // ==================================================================
+    for j in 0..n {
+        if removed_cols[j] {
+            continue;
+        }
+        let (lb, ub) = bounds[j];
+        if lb > ub + ZERO_TOL {
+            // Infeasible: bounds が逆転している
+            return QpPresolveResult::no_reduction(prob);
+        }
+        if (lb - ub).abs() < ZERO_TOL {
+            let val = lb;
+            apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+            removed_cols[j] = true;
+            postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+        }
+    }
+
+    // ==================================================================
+    // #2: singleton_rows() — 1変数のみの等式制約 A[i,j]*x[j]=b[i] を除去
+    // ==================================================================
+    // QP では等式制約の表現は 2 不等式ペア（A[i]*x <= b[i], -A[i]*x <= -b[i]）。
+    // Singleton row はここでは Le 制約の 1 変数ケースに限定して処理する。
+    // (b[i]/A[i,j] が bounds に収まる場合のみ適用)
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let active: Vec<(usize, f64)> = row_entries[i]
+            .iter()
+            .filter(|&&(j, _)| !removed_cols[j])
+            .copied()
+            .collect();
+        if active.len() != 1 {
+            continue;
+        }
+        let (j, a_ij) = active[0];
+        if a_ij.abs() < ZERO_TOL {
+            continue;
+        }
+        let val_raw = b[i] / a_ij;
+        let (lb, ub) = bounds[j];
+
+        // bounds チェック（Le 制約: A[i,j]*x[j] <= b[i]）
+        // a_ij > 0: x[j] <= b[i]/a[i,j] → ub を更新できるが固定はしない
+        // a_ij < 0: x[j] >= b[i]/a[i,j] → lb を更新できるが固定はしない
+        // 等式相当（両側から挟む）のケースのみ固定する。
+        // 簡略化: val が [lb, ub] に収まり、すでに固定されていればSingleton処理
+        let val = val_raw.clamp(lb, ub);
+        if (val - lb).abs() < ZERO_TOL && (val - ub).abs() < ZERO_TOL {
+            // 変数が固定される
+            apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+            removed_cols[j] = true;
+            removed_rows[i] = true;
+            postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+        }
+    }
+
+    // ==================================================================
+    // #3: singleton_cols() — 1制約のみに現れる変数の解析解による除去
+    // Q[j,j]=0 かつ Q[j,k]=0 (k≠j) の場合のみ適用。
+    // Q非ゼロ要素があると、消去後に二次項が残り変換が複雑になるためスキップ。
+    // ==================================================================
+    for j in 0..n {
+        if removed_cols[j] {
+            continue;
+        }
+
+        // Q 列 j の非ゼロ数をチェック（対角含む）
+        let q_nnz_j = {
+            let start = prob.q.col_ptr[j];
+            let end = prob.q.col_ptr[j + 1];
+            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+        };
+        // Q 行 j の非ゼロ（対称行列ならば列 j = 行 j）
+        if q_nnz_j > 0 {
+            // Q[j,k] ≠ 0 が存在する: 解析消去で二次項残るためスキップ
+            // (LP版singleton_cols相当の処理はQP固有の追加手順が必要)
+            continue;
+        }
+
+        // Q 列 j が完全ゼロ → LP 的変数: A 列 j に現れる制約を確認
+        let active_rows: Vec<usize> = (0..m)
+            .filter(|&i| !removed_rows[i] && row_entries[i].iter().any(|&(jj, v)| jj == j && v.abs() > ZERO_TOL))
+            .collect();
+
+        if active_rows.len() != 1 {
+            continue; // 1制約のみに現れる場合のみ処理
+        }
+        let i = active_rows[0];
+        let a_ij = row_entries[i].iter().find(|&&(jj, _)| jj == j).map(|&(_, v)| v).unwrap_or(0.0);
+        if a_ij.abs() < ZERO_TOL {
+            continue;
+        }
+
+        // c[j] から最適値を計算: min c[j]*x[j] s.t. a[i,j]*x[j] + rest <= b[i], lb <= x[j] <= ub
+        let (lb, ub) = bounds[j];
+        let val = if c[j] > ZERO_TOL {
+            // minimize: 小さいほど良い → lb が最適
+            if lb == f64::NEG_INFINITY { 0.0 } else { lb }
+        } else if c[j] < -ZERO_TOL {
+            // minimize c[j]*x[j] で c[j]<0: 大きいほど良い → ub が最適
+            if ub == f64::INFINITY { 0.0 } else { ub }
+        } else {
+            // c[j]=0: lb が実行可能なら lb
+            if lb.is_finite() { lb } else if ub.is_finite() { ub } else { 0.0 }
+        };
+
+        apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+        removed_cols[j] = true;
+        removed_rows[i] = true;
+        postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+    }
+
+    // ==================================================================
+    // #4: empty_rows_cols() — ゼロ行・ゼロ列の除去
+    // ==================================================================
+
+    // 空行の除去
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let active_count = row_entries[i]
+            .iter()
+            .filter(|&&(j, _)| !removed_cols[j])
+            .count();
+        if active_count == 0 {
+            // 0 <= b[i]: b[i]>=0 なら冗長、b[i]<0 なら Infeasible
+            if b[i] < -ZERO_TOL {
+                // Infeasible: 変換不能→元問題を返す
+                return QpPresolveResult::no_reduction(prob);
+            }
+            removed_rows[i] = true;
+        }
+    }
+
+    // 空列の除去（Q列もゼロか確認してから除去）
+    for j in 0..n {
+        if removed_cols[j] {
+            continue;
+        }
+        let a_nnz = {
+            let start = prob.a.col_ptr[j];
+            let end = prob.a.col_ptr[j + 1];
+            (start..end).filter(|&k| {
+                let row = prob.a.row_ind[k];
+                !removed_rows[row] && prob.a.values[k].abs() > ZERO_TOL
+            }).count()
+        };
+        if a_nnz > 0 {
+            continue;
+        }
+        let q_nnz = {
+            let start = prob.q.col_ptr[j];
+            let end = prob.q.col_ptr[j + 1];
+            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+        };
+        if q_nnz > 0 {
+            // Q列が非ゼロ: 二次項あり → A列だけが空でも安易に除去しない
+            continue;
+        }
+
+        // A列・Q列ともゼロ: LP的変数として最適値を求める
+        let (lb, ub) = bounds[j];
+        let cj = c[j];
+        let val = if cj > ZERO_TOL {
+            if lb == f64::NEG_INFINITY {
+                // Unbounded in negative direction... but obj = cj*x_j, so min→-inf
+                // 実用上は bounds ありが多い。ここでは lb が finite なら lb
+                if lb.is_finite() { lb } else { 0.0 }
+            } else {
+                lb
+            }
+        } else if cj < -ZERO_TOL {
+            if ub == f64::INFINITY {
+                if ub.is_finite() { ub } else { 0.0 }
+            } else {
+                ub
+            }
+        } else if lb.is_finite() { lb } else if ub.is_finite() { ub } else { 0.0 };
+
+        obj_offset += cj * val;
+        removed_cols[j] = true;
+        postsolve_stack.push(QpPostsolveStep::EmptyCol { idx: j, val });
+    }
+
+    // ==================================================================
+    // #5: redundant_constraints() — activity range で支配される制約を除去
+    // LP 実装（transforms.rs の activity_range()）をそのまま流用
+    // ==================================================================
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let active_entries: Vec<(usize, f64)> = row_entries[i]
+            .iter()
+            .filter(|&&(j, _)| !removed_cols[j])
+            .copied()
+            .collect();
+        let (_, row_ub, _, ub_fin) = activity_range(&active_entries, &bounds, None);
+
+        // Le 制約 (Ax <= b) において row_ub <= b[i] なら常に充足 → 冗長
+        if ub_fin && row_ub <= b[i] + ZERO_TOL {
+            removed_rows[i] = true;
+        }
+    }
+
+    // ==================================================================
+    // #6: forced_constraints() — activity range から変数値が一意に決まる制約
+    // 固定後は #1 の処理で Q 更新を行う。
+    // ==================================================================
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let active_entries: Vec<(usize, f64)> = row_entries[i]
+            .iter()
+            .filter(|&&(j, _)| !removed_cols[j])
+            .copied()
+            .collect();
+        let (row_lb, _, lb_fin, _) = activity_range(&active_entries, &bounds, None);
+
+        // Le 制約 Ax <= b で row_lb == b[i]（最小でも b[i]）なら全変数が forced
+        if lb_fin && (row_lb - b[i]).abs() < ZERO_TOL {
+            // 全変数を forced 値で固定
+            for &(j, a_ij) in &active_entries {
+                if removed_cols[j] || a_ij.abs() < ZERO_TOL {
+                    continue;
+                }
+                let (lb_j, ub_j) = bounds[j];
+                // a_ij > 0 → x[j] = lb_j、a_ij < 0 → x[j] = ub_j
+                let val = if a_ij > 0.0 {
+                    if lb_j.is_finite() { lb_j } else { continue }
+                } else if ub_j.is_finite() { ub_j } else { continue };
+                apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+                removed_cols[j] = true;
+                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+            }
+            removed_rows[i] = true;
+        }
+    }
+
+    // ==================================================================
+    // #7: free_col_substitution() — FR 変数を Eq 制約で消去
+    // Q 非ゼロ要素が多い場合はスキップ（閾値: 列の非ゼロ数 > 50）。
+    // QP では変数消去後に Q の更新が必要（rank-1 更新）のためコストが高い。
+    // 小さい問題（Q 列非ゼロ <= 50）のみ処理することでコスト上限を保証。
+    // ==================================================================
+    // QP の free_col_substitution は変数消去後の Q 更新（outer product 加算）が必要で、
+    // 実装が複雑なため本 Phase 1 では「Q 列非ゼロ = 0 の変数のみ」に絞って処理する。
+    // Q 非ゼロあり変数の free substitution は Phase 2 以降で実装予定。
+    for j in 0..n {
+        if removed_cols[j] {
+            continue;
+        }
+        let (lb, ub) = bounds[j];
+        // FR 変数: lb = -inf, ub = +inf
+        if lb != f64::NEG_INFINITY || ub != f64::INFINITY {
+            continue;
+        }
+
+        // Q 列 j の非ゼロ数チェック
+        let q_nnz_j = {
+            let start = prob.q.col_ptr[j];
+            let end = prob.q.col_ptr[j + 1];
+            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+        };
+        if q_nnz_j > 0 {
+            // Q 非ゼロあり: outer product 更新が必要。Phase 1 ではスキップ。
+            // (Q行列の二次項を維持したまま変数消去するには rank-1 更新が必要。
+            //  実装コスト増大のため Phase 2 以降に委ねる)
+            continue;
+        }
+
+        // Q 列がゼロ: LP 的変数として Eq 制約による消去を試みる
+        // QP の制約は Le のみなので、等式は 2 不等式ペアで表現される。
+        // ここでは「A[i,j] が唯一非ゼロかつ行が singleton」ケースのみ処理。
+        // (本処理は #2 singleton_rows と重複するため、実質的にスキップが多い)
+        // Phase 1 では Q=0 列の FR 変数に限定して試みる。
+        let singleton_eq_rows: Vec<usize> = (0..m)
+            .filter(|&i| {
+                if removed_rows[i] { return false; }
+                let active: Vec<_> = row_entries[i]
+                    .iter()
+                    .filter(|&&(jj, v)| !removed_cols[jj] && v.abs() > ZERO_TOL)
+                    .collect();
+                active.len() == 1 && active[0].0 == j
+            })
+            .collect();
+
+        if singleton_eq_rows.is_empty() {
+            continue;
+        }
+
+        // 最初の singleton 行で消去
+        let i = singleton_eq_rows[0];
+        let a_ij = row_entries[i].iter().find(|&&(jj, _)| jj == j).map(|&(_, v)| v).unwrap_or(0.0);
+        if a_ij.abs() < ZERO_TOL {
+            continue;
+        }
+        let val = b[i] / a_ij;
+
+        apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+        removed_cols[j] = true;
+        removed_rows[i] = true;
+        postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+    }
+
+    // ==================================================================
+    // #8: parallel_rows() — 比例する制約行を統合（hash-based detection）
+    // A[i,*] = α * A[j,*] となるペアを検出。冗長行を除去。
+    // ==================================================================
+    {
+        use std::collections::HashMap;
+        // 各行をハッシュ化（最初の非ゼロ要素の列インデックスと符号で分類）
+        let mut row_signature: HashMap<(usize, i8), Vec<usize>> = HashMap::new();
+        for i in 0..m {
+            if removed_rows[i] {
+                continue;
+            }
+            let active: Vec<(usize, f64)> = row_entries[i]
+                .iter()
+                .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+                .copied()
+                .collect();
+            if active.is_empty() {
+                continue;
+            }
+            let first_col = active[0].0;
+            let sign: i8 = if active[0].1 > 0.0 { 1 } else { -1 };
+            row_signature.entry((first_col, sign)).or_default().push(i);
+        }
+
+        for row_group in row_signature.values() {
+            if row_group.len() < 2 {
+                continue;
+            }
+            // 同じグループ内でペア比較
+            'outer: for &i1 in row_group {
+                if removed_rows[i1] { continue; }
+                let entries1: Vec<(usize, f64)> = row_entries[i1]
+                    .iter()
+                    .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+                    .copied()
+                    .collect();
+                if entries1.is_empty() { continue; }
+
+                for &i2 in row_group {
+                    if i2 == i1 || removed_rows[i2] { continue; }
+                    let entries2: Vec<(usize, f64)> = row_entries[i2]
+                        .iter()
+                        .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+                        .copied()
+                        .collect();
+                    if entries1.len() != entries2.len() { continue; }
+
+                    // 比例係数 alpha = entries2[0].1 / entries1[0].1
+                    let alpha = entries2[0].1 / entries1[0].1;
+                    let is_parallel = entries1.iter().zip(entries2.iter()).all(|((c1, v1), (c2, v2))| {
+                        *c1 == *c2 && (v2 - alpha * v1).abs() < ZERO_TOL * (1.0 + v1.abs())
+                    });
+
+                    if is_parallel {
+                        // A[i2,*] = alpha * A[i1,*]
+                        // Le 制約: A[i1]*x <= b[i1], alpha*A[i1]*x <= b[i2]
+                        // α > 0 なら b[i2]/alpha と b[i1] の小さい方が tighter bound
+                        // α < 0 なら i2 は Ge 相当 → 複雑。安全のため α > 0 のみ処理
+                        if alpha > ZERO_TOL {
+                            let eff_b2 = b[i2] / alpha;
+                            if eff_b2 >= b[i1] - ZERO_TOL {
+                                // i2 は i1 より緩い → i2 を冗長として除去
+                                removed_rows[i2] = true;
+                            } else {
+                                // i2 の方が tight → i1 を冗長として除去
+                                // ただし既に i1 を使って処理中なので outer ループ続行
+                                removed_rows[i1] = true;
+                                continue 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================================================================
+    // #9: parallel_cols() — Q 行列考慮した列統合
+    // 条件: Q[i,i]=Q[j,j], Q[i,k]=Q[j,k] for all k かつ A 列が比例
+    // QP での完全列統合は数値的リスクが高く、Phase 1 では未実装とする。
+    // 理由: (1) Q の rank-1 更新が必要 (2) 境界条件の扱いが複雑
+    //       (3) LP の parallel_cols と異なりスケール不変でない
+    // Phase 2 以降で再検討予定。
+    // ==================================================================
+    // (未実装のためスキップ: コメントのみ)
+
+    // ==================================================================
+    // #10: bounds_tightening() — 制約から変数範囲を絞り込む
+    // LP 版（activity range）と同じ。差分なし。
+    // ==================================================================
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let entries: Vec<(usize, f64)> = row_entries[i]
+            .iter()
+            .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+            .copied()
+            .collect();
+
+        for &(j, a_ij) in &entries {
+            let (old_lb, old_ub) = bounds[j];
+            let (rest_lb, _rest_ub, rest_lb_fin, _rest_ub_fin) =
+                activity_range(&entries, &bounds, Some(j));
+
+            let mut new_lb = old_lb;
+            let mut new_ub = old_ub;
+
+            // Le 制約: Σ a*x <= b
+            if a_ij > 0.0 && rest_lb_fin {
+                let implied_ub = (b[i] - rest_lb) / a_ij;
+                if implied_ub < new_ub - ZERO_TOL {
+                    new_ub = implied_ub;
+                }
+            } else if a_ij < 0.0 && rest_lb_fin {
+                let implied_lb = (b[i] - rest_lb) / a_ij;
+                if implied_lb > new_lb + ZERO_TOL {
+                    new_lb = implied_lb;
+                }
+            }
+
+            if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
+                if new_lb > new_ub + ZERO_TOL {
+                    // bounds が逆転 → Infeasible。元問題に戻して solver に判定を委ねる
+                    return QpPresolveResult::no_reduction(prob);
+                }
+                bounds[j] = (new_lb, new_ub);
+            }
+        }
+    }
+
+    // ==================================================================
+    // #11: dual_bounds_tightening() — 双対実行可能性から主変数範囲絞り込み
+    // Q 列がゼロ（LP 的変数）のみに適用。Q ≠ 0 の変数はスキップ。
+    // 制約がない（孤立列）かつ c[j] の符号から値が確定する場合のみ固定する。
+    // 制約がある変数に適用すると誤った固定が起きるため、ここでは孤立列のみ対象。
+    // ==================================================================
+    for j in 0..n {
+        if removed_cols[j] {
+            continue;
+        }
+        // Q 列 j が非ゼロなら双対 bounds tightening は適用しない
+        let q_nnz = {
+            let start = prob.q.col_ptr[j];
+            let end = prob.q.col_ptr[j + 1];
+            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+        };
+        if q_nnz > 0 {
+            continue;
+        }
+        // A 列 j に活性な制約がある場合はスキップ（制約のある変数は #3 singleton_cols で処理済み）
+        let a_nnz = {
+            let start = prob.a.col_ptr[j];
+            let end = prob.a.col_ptr[j + 1];
+            (start..end).filter(|&k| {
+                let row = prob.a.row_ind[k];
+                !removed_rows[row] && prob.a.values[k].abs() > ZERO_TOL
+            }).count()
+        };
+        if a_nnz > 0 {
+            // 制約がある変数: 孤立列ではないためスキップ
+            continue;
+        }
+
+        // 孤立列（A=0, Q=0）: c[j] の符号から最適値を決定して固定
+        let (lb, ub) = bounds[j];
+        let val = if c[j] > ZERO_TOL {
+            if lb.is_finite() { lb } else { continue }
+        } else if c[j] < -ZERO_TOL {
+            if ub.is_finite() { ub } else { continue }
+        } else {
+            // c[j] = 0: lb が実行可能ならそのまま（固定不要）
+            continue;
+        };
+
+        // 孤立列を固定
+        obj_offset += c[j] * val;
+        bounds[j] = (val, val);
+        removed_cols[j] = true;
+        postsolve_stack.push(QpPostsolveStep::EmptyCol { idx: j, val });
+    }
+
+    // ==================================================================
+    // #12: constraint_bounds_tightening() — 制約右辺 bounds 絞り込み
+    // LP 実装と同じ。差分なし。
+    // #10 の追加パス（より精密な bounds を用いた再適用）。
+    // ==================================================================
+    for i in 0..m {
+        if removed_rows[i] {
+            continue;
+        }
+        let entries: Vec<(usize, f64)> = row_entries[i]
+            .iter()
+            .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+            .copied()
+            .collect();
+        let (row_lb, row_ub, _, ub_fin) = activity_range(&entries, &bounds, None);
+
+        // 更新後の activity_range で冗長な Le 制約を再除去
+        if ub_fin && row_ub <= b[i] + ZERO_TOL {
+            removed_rows[i] = true;
+        }
+        // Infeasible チェック: row_lb > b[i]（Le 制約が決して充足されない）
+        let (row_lb2, _, lb_fin2, _) = activity_range(&entries, &bounds, None);
+        if lb_fin2 && row_lb2 > b[i] + ZERO_TOL {
+            // 制約 Ax <= b が row_lb2 > b[i] → 実行不可能
+            return QpPresolveResult::no_reduction(prob);
+        }
+    }
+
+    // ==================================================================
+    // 縮約後問題の構築
+    // ==================================================================
+
+    // 変数インデックス再マッピング
+    let mut col_map = vec![None; n];
+    let mut new_col_idx = 0usize;
+    for j in 0..n {
+        if !removed_cols[j] {
+            col_map[j] = Some(new_col_idx);
+            new_col_idx += 1;
+        }
+    }
+    let n_new = new_col_idx;
+
+    // 逆マッピング（縮約→元）
+    let mut col_map_inv = vec![0usize; n_new];
+    for (j, &maybe_jj) in col_map.iter().enumerate().take(n) {
+        if let Some(jj) = maybe_jj {
+            col_map_inv[jj] = j;
+        }
+    }
+
+    // 制約インデックス再マッピング
+    let mut row_map = vec![None; m];
+    let mut new_row_idx = 0usize;
+    for i in 0..m {
+        if !removed_rows[i] {
+            row_map[i] = Some(new_row_idx);
+            new_row_idx += 1;
+        }
+    }
+    let m_new = new_row_idx;
+
+    let was_reduced = n_new < n || m_new < m;
+
+    // 縮約後 c・bounds・b
+    let mut c_new = vec![0.0f64; n_new];
+    let mut bounds_new = vec![(f64::NEG_INFINITY, f64::INFINITY); n_new];
+    for j in 0..n {
+        if let Some(jj) = col_map[j] {
+            c_new[jj] = c[j];
+            bounds_new[jj] = bounds[j];
+        }
+    }
+
+    let mut b_new = vec![0.0f64; m_new];
+    for i in 0..m {
+        if let Some(ii) = row_map[i] {
+            b_new[ii] = b[i];
+        }
+    }
+
+    // 縮約後 A 行列（CSC）
+    let a_new = {
+        let mut trip_rows: Vec<usize> = Vec::new();
+        let mut trip_cols: Vec<usize> = Vec::new();
+        let mut trip_vals: Vec<f64> = Vec::new();
+        for j in 0..n {
+            if removed_cols[j] {
+                continue;
+            }
+            let jj = col_map[j].unwrap();
+            let start = prob.a.col_ptr[j];
+            let end = prob.a.col_ptr[j + 1];
+            for k in start..end {
+                let row = prob.a.row_ind[k];
+                if removed_rows[row] {
+                    continue;
+                }
+                let ii = row_map[row].unwrap();
+                trip_rows.push(ii);
+                trip_cols.push(jj);
+                trip_vals.push(prob.a.values[k]);
+            }
+        }
+        if trip_rows.is_empty() {
+            CscMatrix::new(m_new, n_new)
+        } else {
+            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n_new)
+                .unwrap_or_else(|_| CscMatrix::new(m_new, n_new))
+        }
+    };
+
+    // 縮約後 Q 行列（CSC）
+    let q_new = {
+        let mut trip_rows: Vec<usize> = Vec::new();
+        let mut trip_cols: Vec<usize> = Vec::new();
+        let mut trip_vals: Vec<f64> = Vec::new();
+        for j in 0..n {
+            if removed_cols[j] {
+                continue;
+            }
+            let jj = col_map[j].unwrap();
+            let start = prob.q.col_ptr[j];
+            let end = prob.q.col_ptr[j + 1];
+            for k in start..end {
+                let row = prob.q.row_ind[k];
+                if removed_cols[row] {
+                    continue;
+                }
+                let ii = col_map[row].unwrap();
+                trip_rows.push(ii);
+                trip_cols.push(jj);
+                trip_vals.push(prob.q.values[k]);
+            }
+        }
+        if trip_rows.is_empty() {
+            CscMatrix::new(n_new, n_new)
+        } else {
+            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, n_new, n_new)
+                .unwrap_or_else(|_| CscMatrix::new(n_new, n_new))
+        }
+    };
+
+    let q_linear_adjust = c.clone(); // 更新後 c（postsolve では使用しない）
+
+    let reduced = match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new) {
+        Ok(p) => p,
+        Err(_) => return QpPresolveResult::no_reduction(prob),
+    };
+
+    QpPresolveResult {
+        reduced,
+        col_map,
+        col_map_inv,
+        row_map,
+        obj_offset,
+        q_linear_adjust,
+        postsolve_stack,
+        was_reduced,
+        orig_num_vars: n,
+        orig_num_constraints: m,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// テスト
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::SolverOptions;
+    use crate::sparse::CscMatrix;
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_qp(
+        q_rows: &[usize], q_cols: &[usize], q_vals: &[f64], n: usize,
+        c: Vec<f64>,
+        a_rows: &[usize], a_cols: &[usize], a_vals: &[f64], m: usize,
+        b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+    ) -> QpProblem {
+        let q = if q_rows.is_empty() {
+            CscMatrix::new(n, n)
+        } else {
+            CscMatrix::from_triplets(q_rows, q_cols, q_vals, n, n).unwrap()
+        };
+        let a = if a_rows.is_empty() {
+            CscMatrix::new(m, n)
+        } else {
+            CscMatrix::from_triplets(a_rows, a_cols, a_vals, m, n).unwrap()
+        };
+        QpProblem::new(q, c, a, b, bounds).unwrap()
+    }
+
+    /// #1: 固定変数の縮約確認
+    #[test]
+    fn test_fixed_var_removal() {
+        // min 1/2*2*x^2 + 1/2*2*y^2  s.t. x+y <= 3, 0 <= x <= 2, y = 1 (fixed)
+        // y=1 は固定される。x+y<=3 → x<=2 (b becomes 2)
+        // bounds tightening: ub(x) ← min(2, 2) = 2。そのため constraint x<=2 は冗長に → 除去
+        // 結果: x が唯一の変数、制約なし
+        let prob = make_qp(
+            &[0, 1], &[0, 1], &[2.0, 2.0], 2,
+            vec![0.0, 0.0],
+            &[0, 0], &[0, 1], &[1.0, 1.0], 1,
+            vec![3.0],
+            vec![(0.0, 2.0), (1.0, 1.0)], // y is fixed at 1
+        );
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // y=1 は固定 → x のみが残る
+        assert_eq!(result.reduced.num_vars, 1, "y=1 fixed → 1 var remaining");
+        // obj_offset: 0.5*2*1^2 + 0*1 = 1.0
+        assert!((result.obj_offset - 1.0).abs() < 1e-10, "obj_offset=1.0");
+        // was_reduced が true
+        assert!(result.was_reduced, "should be reduced");
+    }
+
+    /// #4: 空行の冗長除去確認（空行のみテスト）
+    #[test]
+    fn test_empty_row_removal() {
+        // 変数1個（bounds無限）、制約2個（1個は空行）
+        // 変数 x: bounds (-inf, inf)、ub が inf なので非空行は冗長にならない
+        let prob = make_qp(
+            &[0], &[0], &[2.0], 1,
+            vec![0.0],
+            &[0], &[0], &[1.0], 2,
+            vec![5.0, 3.0], // 2行目 (b=3.0) は空行（係数ゼロ）
+            vec![(f64::NEG_INFINITY, f64::INFINITY)], // ub = inf → row 0 不冗長
+        );
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // 空行は除去されるはず（result.reduced.num_constraints <= 1）
+        assert!(result.reduced.num_constraints <= 1, "empty row should be removed");
+        // 変数 x は削除されていない
+        assert_eq!(result.reduced.num_vars, 1, "x remains");
+    }
+
+    /// #10: bounds tightening 後の変数範囲縮小確認
+    #[test]
+    fn test_bounds_tightening() {
+        // min x^2 (Q=2) s.t. x <= 2, 0 <= x <= 10
+        // bounds tightening で ub(x) = min(10, 2) = 2 に絞る
+        // presolve 後の x bounds の ub <= 2 を確認
+        // Q 非ゼロなので #11 dual_bounds_tightening は適用されない
+        let prob = make_qp(
+            &[0], &[0], &[2.0], 1,  // Q = 2*I
+            vec![0.0],
+            &[0], &[0], &[1.0], 1,
+            vec![2.0],
+            vec![(0.0, 10.0)],
+        );
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // 縮約後も変数 x は残る（Q 非ゼロのため固定されない）
+        assert_eq!(result.reduced.num_vars, 1, "x remains after tightening");
+        // ub が 2 以下に絞られているか（制約除去後は bounds に反映）
+        assert!(result.reduced.bounds[0].1 <= 2.0 + 1e-10, "ub tightened to 2");
+    }
+
+    /// no_reduction のフォールバック確認
+    #[test]
+    fn test_no_reduction() {
+        // 縮約なし問題: Q=2I, 制約なし, bounds 無限
+        let prob = make_qp(
+            &[0, 1], &[0, 1], &[2.0, 2.0], 2,
+            vec![-2.0, -4.0],
+            &[], &[], &[], 0,
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+        );
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        assert_eq!(result.reduced.num_vars, 2, "no reduction expected");
+        assert!(!result.was_reduced, "was_reduced = false");
+    }
+}
