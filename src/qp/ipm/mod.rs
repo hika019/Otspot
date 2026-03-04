@@ -26,14 +26,8 @@ pub(crate) const TAU: f64 = 0.995;
 /// IP-PMM 正則化最小値
 #[allow(dead_code)]
 pub(crate) const DELTA_MIN: f64 = 1e-8;
-/// n > LDL_THRESHOLD のとき CG パスを自動選択
+/// n > LDL_THRESHOLD のとき IPM-Schur を augmented に委譲
 pub(crate) const LDL_THRESHOLD: usize = 20_000;
-/// CG 最大反復数
-pub(crate) const CG_MAX_ITER: usize = 1_000;
-/// CG 収束判定（残差 L∞ノルム）
-pub(crate) const CG_TOL: f64 = 1e-6;
-/// Jacobi 前処理の対角最小値（ゼロ除算防止）
-pub(crate) const JACOBI_MIN_DIAG: f64 = 1e-14; // PARAM: 根拠=数値的安定性(ゼロ除算防止) | 要検証=なし
 
 // ---------------------------------------------------------------------------
 // 公開 API
@@ -120,7 +114,6 @@ fn unscale_ipm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::kkt::{mv_ipm_apply, compute_jacobi_precond_ipm};
     use crate::options::SolverOptions;
     use crate::sparse::CscMatrix;
 
@@ -283,64 +276,6 @@ mod tests {
         );
     }
 
-    /// IPM-CG-T1: mv_ipm_apply の正確性テスト
-    ///
-    /// Q=diag(2,2), A=[[-1,-1]] (1制約), d_inv=[0.5], delta_p=1e-7, v=[1,0]
-    /// M*v = Q*v + delta_p*v + A^T D^{-1} A*v
-    ///      = [2,0] + [1e-7,0] + [-1,-1]*0.5*(-1) = [2.5+1e-7, 0.5]
-    #[test]
-    fn test_ipm_mv_apply() {
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
-        let d_inv = vec![0.5f64];
-        let delta_p = 1e-7_f64;
-        let v = vec![1.0_f64, 0.0];
-        let mut out = vec![0.0_f64; 2];
-
-        mv_ipm_apply(&q, &a, &d_inv, delta_p, &v, &mut out);
-
-        let eps = 1e-10_f64;
-        let expected0 = 2.5 + delta_p;
-        assert!(
-            (out[0] - expected0).abs() < eps,
-            "mv[0]: expected {}, got {} (diff={:.2e})",
-            expected0, out[0], (out[0] - expected0).abs()
-        );
-        assert!(
-            (out[1] - 0.5).abs() < eps,
-            "mv[1]: expected 0.5, got {} (diff={:.2e})",
-            out[1], (out[1] - 0.5).abs()
-        );
-    }
-
-    /// IPM-CG-T2: compute_jacobi_precond_ipm の正確性テスト
-    ///
-    /// Q=diag(2,2), A=[[-1,-1]], d_inv=[0.5], delta_p=1e-7
-    /// diag(M)[j] = Q[j,j] + delta_p + d_inv[0] * A[0,j]^2 = 2 + 1e-7 + 0.5*1 = 2.5 + 1e-7
-    /// m_inv[j] = 1 / (2.5 + 1e-7)
-    #[test]
-    fn test_ipm_jacobi_precond() {
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
-        let d_inv = vec![0.5f64];
-        let delta_p = 1e-7_f64;
-
-        let m_inv = compute_jacobi_precond_ipm(&q, &a, &d_inv, delta_p);
-
-        let expected = 1.0 / (2.0 + delta_p + 0.5 * 1.0);
-        let eps = 1e-10_f64;
-        assert_eq!(m_inv.len(), 2, "m_inv length");
-        assert!(
-            (m_inv[0] - expected).abs() < eps,
-            "m_inv[0]: expected {:.10}, got {:.10}",
-            expected, m_inv[0]
-        );
-        assert!(
-            (m_inv[1] - expected).abs() < eps,
-            "m_inv[1]: expected {:.10}, got {:.10}",
-            expected, m_inv[1]
-        );
-    }
 
     /// IPM-T7: Ruiz スケーリング有無で同一解が得られることを確認
     /// T1 と同じ問題 (min x^2+y^2, s.t. x+y>=1) で比較
