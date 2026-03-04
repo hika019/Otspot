@@ -17,7 +17,7 @@ use super::kkt::{
     build_schur_complement,
     compute_jacobi_precond_ipm, mv_ipm_apply, norm_inf, spmtv, spmv, spmv_q,
 };
-use crate::linalg::amd::amd;
+use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl::LdlFactorizationAmd;
 #[cfg(feature = "parallel")]
 use super::kkt::build_constraint_schur;
@@ -55,7 +55,6 @@ pub(crate) fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
 /// n >  LDL_THRESHOLD: Matrix-Free PCG（Jacobi 前処理）でSchur complementを求解（D01-d: CGパスは変更しない）
 pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let n = problem.num_vars;
-    let use_cg = n > super::LDL_THRESHOLD;
     let timeout_ctx = TimeoutCtx::from_options(options);
 
     // T1: 処理前タイムアウトチェック
@@ -76,6 +75,11 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
     if m_ext == 0 {
         return solve_unconstrained(problem, &timeout_ctx);
     }
+
+    // use_cg: augmented system size (n + m_ext) > LDL_THRESHOLD
+    // n のみで判定すると、bound 制約が多い問題でaugmented systemが LDL_THRESHOLD を超過しても
+    // 直接LDLパスを選択してしまい、AMDがタイムアウトする原因となる（cmd_238d調査）
+    let use_cg = (n + m_ext) > super::LDL_THRESHOLD;
 
     // 初期点
     let (mut x, mut s, mut y) = compute_initial_point(n, &b_ext);
@@ -174,7 +178,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 );
                 // 初回のみ AMD permutation を計算してキャッシュ
                 if amd_perm_cache.is_none() {
-                    amd_perm_cache = Some(amd(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind));
+                    amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
                 }
                 let perm = amd_perm_cache.as_ref().unwrap();
                 match ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, perm, timeout_ctx.deadline) {

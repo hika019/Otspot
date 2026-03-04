@@ -5,27 +5,38 @@
 //! Simplified Minimum Degree アルゴリズム
 //! (George & Liu 1981 / Davis "Direct Methods for Sparse Linear Systems" 参照)。
 
-/// AMD 再順序化を計算する。
+use std::time::Instant;
+
+/// AMD 再順序化を計算する（deadline 付き）。
 ///
 /// # 引数
 /// - `n`: 行列サイズ
 /// - `col_ptr`: 上三角 CSC 形式の列ポインタ（対角を含んでも含まなくてもよい）
 /// - `row_ind`: 上三角 CSC 形式の行インデックス
+/// - `deadline`: タイムアウト時刻。超過した場合は残りノードを自然順で埋めた有効な置換を返す。
 ///
 /// # 戻り値
 /// 置換ベクトル `perm` で `perm[k] = i` は
 /// 消去ステップ `k` に元のノード `i` を割り当てることを意味する。
-/// `factorize_with_amd` では `perm` を用いて行列を P A P^T に並べ替える。
+/// deadline 超過時は部分的な AMD 順序 + identity フォールバックの有効な置換を返す。
 ///
 /// # アルゴリズム
 /// Simplified Minimum Degree (SMD):
 /// 1. 対称グラフの隣接リストを構築（上三角入力から対称化、対角除外）
-/// 2. n 回繰り返し:
+/// 2. n 回繰り返し（100回ごとに deadline チェック）:
 ///    a. 最小次数（未消去隣接数）のノードを選択
 ///    b. 置換に記録し消去済みにマーク
 ///    c. 全隣接ノードペア間にフィルインエッジを追加（完全グラフ化）
 ///    d. 影響を受けたノードの次数を再計算
 pub fn amd(n: usize, col_ptr: &[usize], row_ind: &[usize]) -> Vec<usize> {
+    amd_with_deadline(n, col_ptr, row_ind, None)
+}
+
+/// AMD 再順序化を計算する（deadline 付き）。
+///
+/// deadline が指定された場合、100イテレーションごとにチェックし、
+/// 超過時は残りノードを自然順で埋めた有効な置換を返す。
+pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadline: Option<Instant>) -> Vec<usize> {
     if n == 0 {
         return vec![];
     }
@@ -50,7 +61,23 @@ pub fn amd(n: usize, col_ptr: &[usize], row_ind: &[usize]) -> Vec<usize> {
     let mut degree: Vec<usize> = adj.iter().map(|a| a.len()).collect();
     let mut perm = vec![0usize; n];
 
-    for slot in perm.iter_mut() {
+    for (slot_idx, slot) in perm.iter_mut().enumerate() {
+        // 毎イテレーション deadline チェック（fill-in後は1イテレーションが数秒になりうるため）
+        // deadline=None の場合は if let が短絡評価されるためオーバーヘッドはゼロ
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                // deadline 超過: 残りの未消去ノードを自然順で埋めて有効な置換を返す
+                let mut remaining_slot = slot_idx;
+                for (i, &elim) in eliminated.iter().enumerate() {
+                    if !elim {
+                        perm[remaining_slot] = i;
+                        remaining_slot += 1;
+                    }
+                }
+                return perm;
+            }
+        }
+
         // 最小次数の未消去ノードを線形探索
         let min_node = (0..n)
             .filter(|&i| !eliminated[i])

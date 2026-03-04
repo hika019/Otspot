@@ -3,7 +3,7 @@
 //! OSQPのQDLDL実装（C言語版）を参考にしたRust移植。
 //! 入力行列は上三角のみCSC形式で与える。
 
-use crate::linalg::amd::{amd, inv_permute_vec, permute_sym_upper, permute_vec};
+use crate::linalg::amd::{amd, amd_with_deadline, inv_permute_vec, permute_sym_upper, permute_vec};
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 
@@ -368,6 +368,11 @@ pub struct LdlFactorizationAmd {
 }
 
 impl LdlFactorizationAmd {
+    /// L 因子の非ゼロ数を返す（デバッグ用）
+    pub fn nnz_l(&self) -> usize {
+        self.fac.L.values.len()
+    }
+
     /// AMD 付き LDL^T x = b を解く。
     ///
     /// 1. 右辺を前方置換: b_p\[k\] = b\[perm\[k\]\]
@@ -402,7 +407,13 @@ pub fn factorize_with_amd(mat: &CscMatrix) -> Result<LdlFactorizationAmd, LdlErr
 /// 1000 列ごとに deadline を確認し、超過した場合は `Err(LdlError::DeadlineExceeded)` を返す。
 pub fn factorize_with_amd_and_deadline(mat: &CscMatrix, deadline: Option<Instant>) -> Result<LdlFactorizationAmd, LdlError> {
     let n = mat.nrows;
-    let perm = amd(n, &mat.col_ptr, &mat.row_ind);
+    let perm = amd_with_deadline(n, &mat.col_ptr, &mat.row_ind, deadline);
+    // AMD が deadline を超過して早期リターンした場合
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
+        }
+    }
     let (new_col_ptr, new_row_ind, new_values) =
         permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &perm);
     let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
@@ -419,7 +430,13 @@ pub fn factorize_quasidefinite_with_amd(
     deadline: Option<Instant>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
     let n = mat.nrows;
-    let perm = amd(n, &mat.col_ptr, &mat.row_ind);
+    let perm = amd_with_deadline(n, &mat.col_ptr, &mat.row_ind, deadline);
+    // AMD が deadline を超過して早期リターンした場合
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
+        }
+    }
     let (new_col_ptr, new_row_ind, new_values) =
         permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &perm);
     let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
