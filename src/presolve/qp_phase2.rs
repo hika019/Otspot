@@ -1,0 +1,488 @@
+//! QP Presolve Phase 2 モジュール（#19-21）
+//!
+//! Phase 1（#1-18）の縮約後問題に対してさらに高度な前処理を適用する。
+//!
+//! - #19: equality_constraint_qr()     — 等式制約冗長行を QR/Gaussian 消去で除去
+//! - #20: near_zero_q_removal()        — Q 非対角の微小要素をゼロ化（疎性向上）
+//! - #21: constraint_precond_refactor()— 制約行の前処理（行正規化）presolve に集約
+
+use crate::options::SolverOptions;
+use crate::qp::QpProblem;
+use crate::sparse::CscMatrix;
+use crate::tolerances::ZERO_TOL;
+use super::qp_transforms::QpPresolveResult;
+
+// ---------------------------------------------------------------------------
+// #19: equality_constraint_qr — 等式制約の冗長行除去
+// ---------------------------------------------------------------------------
+
+/// 等式制約ペアを検出し、Gaussian 消去（部分ピボット）で線形独立な行を特定する。
+/// 冗長な等式制約ペアを削除して問題を縮小する。
+///
+/// 適用条件: m > n*2 （小問題はスキップ）
+/// PARAM: 適用閾値 m > n*2, 理由=QR分解コストが O(n²m) のため
+///
+/// 等式制約の検出: Le 制約 `A[i,*]x <= b[i]` と `A[j,*]x >= b[i]`
+/// （= `-A[j,*]x <= -b[i]`）が対になる行を等式制約ペアとして認識する。
+pub fn equality_constraint_qr(
+    prob: &QpProblem,
+    removed_rows: &mut [bool],
+) {
+    let n = prob.num_vars;
+    let m = prob.num_constraints;
+
+    // 条件チェック
+    if m <= n * 2 || n == 0 {
+        return;
+    }
+
+    // 行ごとの非ゼロエントリを収集
+    let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
+    for j in 0..n {
+        let start = prob.a.col_ptr[j];
+        let end = prob.a.col_ptr[j + 1];
+        for k in start..end {
+            let row = prob.a.row_ind[k];
+            if !removed_rows[row] {
+                row_entries[row].push((j, prob.a.values[k]));
+            }
+        }
+    }
+
+    // 等式制約ペアの検出
+    // 行 i の正規化方向ベクトルのハッシュを計算してペアを探す。
+    // 簡略化: 等式ペアは同一の非ゼロパターンかつ符号が逆の行。
+    let mut eq_pos_rows: Vec<usize> = Vec::new(); // 等式制約の「正」側行インデックス
+    let mut paired = vec![false; m];
+
+    for i in 0..m {
+        if removed_rows[i] || paired[i] || row_entries[i].is_empty() {
+            continue;
+        }
+        let entries_i = &row_entries[i];
+        let b_i = prob.b[i];
+
+        // 正規化基準: 最初の非ゼロ要素の列インデックスと大きさで候補を絞る
+        for j in (i + 1)..m {
+            if removed_rows[j] || paired[j] || row_entries[j].len() != entries_i.len() {
+                continue;
+            }
+            let entries_j = &row_entries[j];
+
+            // ペアの条件: A[j,*] = -A[i,*] かつ b[j] = -b[i]
+            if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) {
+                continue;
+            }
+
+            // 全要素のチェック
+            let is_neg_pair = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
+                *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
+            });
+
+            if is_neg_pair {
+                eq_pos_rows.push(i);
+                paired[i] = true;
+                paired[j] = true;
+                break;
+            }
+        }
+    }
+
+    // 等式制約数が少ない場合はスキップ
+    let m_eq = eq_pos_rows.len();
+    if m_eq == 0 {
+        return;
+    }
+
+    // 等式制約行列 Aeq (m_eq x n) を密行列として構築
+    let mut aeq = vec![vec![0.0f64; n]; m_eq];
+    for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
+        for &(col, val) in &row_entries[orig_row] {
+            aeq[row_idx][col] = val;
+        }
+    }
+
+    // Gaussian 消去（部分ピボット）で線形独立行を特定
+    // ピボット行のインデックス（eq_pos_rows における位置）を記録
+    let mut pivot_rows: Vec<bool> = vec![false; m_eq];
+    let mut pivot_count = 0usize;
+    let mut used_pivot_col = vec![false; n]; // 使用済みピボット列
+
+    let mut work = aeq.clone();
+
+    for col in 0..n {
+        // 未処理行から最大 |work[i][col]| を持つ行を探す
+        let mut max_val = 0.0f64;
+        let mut max_row = usize::MAX;
+        for row in 0..m_eq {
+            if pivot_rows[row] { continue; }
+            let v = work[row][col].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
+        }
+
+        if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
+            continue; // このcolはゼロ → skip
+        }
+
+        // max_row を pivot として採用
+        pivot_rows[max_row] = true;
+        used_pivot_col[col] = true;
+        pivot_count += 1;
+
+        let pivot = work[max_row][col];
+        // 他の行を消去
+        for k in 0..m_eq {
+            if k == max_row { continue; }
+            let factor = work[k][col] / pivot;
+            if factor.abs() < 1e-15 { continue; }
+            #[allow(clippy::needless_range_loop)]
+            for c in 0..n {
+                let delta = factor * work[max_row][c];
+                work[k][c] -= delta;
+            }
+        }
+
+        if pivot_count >= n {
+            break; // rank(Aeq) <= n: これ以上ピボットは出ない
+        }
+    }
+
+    // 非ピボット行（冗長な等式制約）を removed_rows に追加
+    // 各等式制約ペアについて: 冗長ならペア両行を除去
+    for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
+        if !pivot_rows[row_idx] {
+            // この等式制約は冗長 → 対応するペアの両行を除去する候補
+            // ただし paired[orig_row] = true → パートナー行も探して除去
+            removed_rows[orig_row] = true;
+            // パートナー行（负方向）も除去
+            let entries_i = &row_entries[orig_row];
+            let b_i = prob.b[orig_row];
+            for j in 0..m {
+                if j == orig_row || removed_rows[j] { continue; }
+                let entries_j = &row_entries[j];
+                if entries_j.len() != entries_i.len() { continue; }
+                if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) { continue; }
+                let is_neg = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
+                    *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
+                });
+                if is_neg {
+                    removed_rows[j] = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #20: near_zero_q_removal — Q 非対角微小要素のゼロ化
+// ---------------------------------------------------------------------------
+
+/// Q の非対角要素で |Q[i,j]| < eps_q のものをゼロ化する（疎性向上）。
+///
+/// PARAM: eps_q=1e-10, 理由=解の精度への影響は最小
+pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
+    const EPS_Q: f64 = 1e-10;
+
+    let mut new_col_ptr = vec![0usize; n + 1];
+    let mut new_row_ind: Vec<usize> = Vec::new();
+    let mut new_values: Vec<f64> = Vec::new();
+
+    for j in 0..n {
+        let start = q.col_ptr[j];
+        let end = q.col_ptr[j + 1];
+        for k in start..end {
+            let row = q.row_ind[k];
+            let val = q.values[k];
+            // 対角要素はゼロ化しない。非対角要素のみ eps_q でフィルタ。
+            if row == j || val.abs() >= EPS_Q {
+                new_row_ind.push(row);
+                new_values.push(val);
+            }
+        }
+        new_col_ptr[j + 1] = new_row_ind.len();
+    }
+
+    CscMatrix {
+        nrows: q.nrows,
+        ncols: n,
+        col_ptr: new_col_ptr,
+        row_ind: new_row_ind,
+        values: new_values,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #21: constraint_precond_refactor — 制約前処理の presolve への集約
+// ---------------------------------------------------------------------------
+
+/// 制約行を行ノルムで正規化する（制約前処理の presolve への集約）。
+///
+/// 各行 i: σ_i = max|A[i,*]|。σ_i > 1 なら A[i,*] と b[i] を σ_i で割る。
+///
+/// これにより KKT 行列の数値安定性が改善し、IPM-Schur の収束が向上する。
+/// IPM-Schur は presolve 済みの問題を受け取ることでこの前処理の恩恵を得る。
+///
+/// 戻り値: 行スケール係数（逆変換に使用。双対変数 y_i *= σ_i で元スケールに戻る）
+pub fn constraint_precond(
+    a: &mut CscMatrix,
+    b: &mut [f64],
+) -> Vec<f64> {
+    let m = a.nrows;
+    let n = a.ncols;
+
+    // 行ごとの max|A[i,*]|
+    let mut row_max = vec![0.0f64; m];
+    for col in 0..n {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        for k in start..end {
+            let row = a.row_ind[k];
+            let v = a.values[k].abs();
+            if v > row_max[row] { row_max[row] = v; }
+        }
+    }
+
+    // σ_i = 1/row_max[i] for rows with row_max > 1.0
+    let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
+        if mx > 1.0 + 1e-10 { 1.0 / mx } else { 1.0 }
+    }).collect();
+
+    let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
+    if !has_any {
+        return sigmas;
+    }
+
+    // A の値をスケール: A[i,j] *= σ_i
+    for col in 0..n {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        for k in start..end {
+            let row = a.row_ind[k];
+            a.values[k] *= sigmas[row];
+        }
+    }
+
+    // b[i] *= σ_i
+    for i in 0..m {
+        b[i] *= sigmas[i];
+    }
+
+    sigmas
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 エントリポイント
+// ---------------------------------------------------------------------------
+
+/// QP Presolve Phase 2（#19-21 の技法を適用）
+///
+/// Phase 1 の `QpPresolveResult` を受け取り、縮約後問題をさらに前処理して返す。
+///
+/// - #19: 等式制約の QR 分解による冗長行除去
+/// - #20: Q 非対角微小要素のゼロ化
+/// - #21: 制約行正規化（IPM-Schur の収束改善）
+pub fn run_qp_presolve_phase2(
+    phase1_result: QpPresolveResult,
+    _opts: &SolverOptions,
+) -> QpPresolveResult {
+    let prob = &phase1_result.reduced;
+    let n = prob.num_vars;
+    let m = prob.num_constraints;
+
+    if n == 0 || m == 0 {
+        return phase1_result;
+    }
+
+    // ==================================================================
+    // #20: near_zero_q_removal() — Q 非対角要素のゼロ化
+    // ==================================================================
+    let q_cleaned = near_zero_q_removal(&prob.q, n);
+
+    // ==================================================================
+    // #19: equality_constraint_qr() — 等式制約の冗長行除去
+    // 適用条件: m > n*2 の場合のみ実行
+    // ==================================================================
+    let mut removed_rows_phase2 = vec![false; m];
+    {
+        // #19 は prob の情報を元に removed_rows_phase2 を更新する
+        // (q_cleaned は row 除去に影響しない)
+        equality_constraint_qr(prob, &mut removed_rows_phase2);
+    }
+
+    // ==================================================================
+    // 縮約後問題の再構築（#19 で除去した行を反映）
+    // ==================================================================
+    let any_removed = removed_rows_phase2.iter().any(|&b| b);
+
+    let (a_new, b_new) = if any_removed {
+        let mut new_row_map = vec![None; m];
+        let mut new_row_idx = 0usize;
+        for i in 0..m {
+            if !removed_rows_phase2[i] {
+                new_row_map[i] = Some(new_row_idx);
+                new_row_idx += 1;
+            }
+        }
+        let m_new = new_row_idx;
+
+        // 新 A 行列（CSC）
+        let mut trip_rows: Vec<usize> = Vec::new();
+        let mut trip_cols: Vec<usize> = Vec::new();
+        let mut trip_vals: Vec<f64> = Vec::new();
+        for j in 0..n {
+            let start = prob.a.col_ptr[j];
+            let end = prob.a.col_ptr[j + 1];
+            for k in start..end {
+                let row = prob.a.row_ind[k];
+                if let Some(ii) = new_row_map[row] {
+                    trip_rows.push(ii);
+                    trip_cols.push(j);
+                    trip_vals.push(prob.a.values[k]);
+                }
+            }
+        }
+        let a_out = if trip_rows.is_empty() {
+            CscMatrix::new(m_new, n)
+        } else {
+            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_new, n)
+                .unwrap_or_else(|_| CscMatrix::new(m_new, n))
+        };
+
+        let b_out: Vec<f64> = (0..m)
+            .filter(|&i| !removed_rows_phase2[i])
+            .map(|i| prob.b[i])
+            .collect();
+
+        (a_out, b_out)
+    } else {
+        (prob.a.clone(), prob.b.clone())
+    };
+
+    // ==================================================================
+    // #21: constraint_precond_refactor() — 制約行正規化
+    // ==================================================================
+    let mut a_precond = a_new;
+    let mut b_precond = b_new;
+    let _sigmas = constraint_precond(&mut a_precond, &mut b_precond);
+    // 双対変数の逆変換係数 _sigmas は将来の postsolve 拡張のために保持
+
+    // 縮約後問題を再構築
+    let reduced_new = match QpProblem::new(q_cleaned, prob.c.clone(), a_precond, b_precond, prob.bounds.clone()) {
+        Ok(p) => p,
+        Err(_) => return phase1_result, // 構築失敗 → Phase 1 結果をそのまま返す
+    };
+
+    QpPresolveResult {
+        reduced: reduced_new,
+        was_reduced: phase1_result.was_reduced || any_removed,
+        ..phase1_result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// テスト
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::SolverOptions;
+    use crate::qp::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    fn make_qp_simple(n: usize, m: usize) -> QpProblem {
+        // 対角 Q=2I, c=0, A=I (truncated), b=1, bounds無限
+        let q = CscMatrix::from_triplets(
+            &(0..n).collect::<Vec<_>>(),
+            &(0..n).collect::<Vec<_>>(),
+            &vec![2.0; n],
+            n, n,
+        ).unwrap();
+        let a_m = m.min(n);
+        let a = CscMatrix::from_triplets(
+            &(0..a_m).collect::<Vec<_>>(),
+            &(0..a_m).collect::<Vec<_>>(),
+            &vec![1.0; a_m],
+            m, n,
+        ).unwrap();
+        let b = vec![1.0; m];
+        QpProblem::new(q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n]).unwrap()
+    }
+
+    #[test]
+    fn test_near_zero_q_removal_removes_small_offdiag() {
+        // Q = [[2.0, 1e-15], [1e-15, 2.0]] → 非対角を除去
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1e-15, 1e-15, 2.0], 2, 2
+        ).unwrap();
+        let q_clean = near_zero_q_removal(&q, 2);
+        // 非対角 (0,1)=(1,0) が除去されている
+        let diag_count = q_clean.values.iter().zip(q_clean.row_ind.iter()).filter(|(_, &_r)| {
+            // どの列かは不明なのでゼロ化された数を確認
+            true
+        }).count();
+        // 非対角2要素が除去され対角2要素のみ残る
+        assert_eq!(q_clean.values.len(), 2, "off-diag removed");
+        let _ = diag_count;
+    }
+
+    #[test]
+    fn test_constraint_precond_scales_large_rows() {
+        // A行列の行1の係数が大きい場合にスケールされること
+        let n = 2usize;
+        let m = 2usize;
+        let mut a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1],
+            &[1.0, 1.0, 1000.0, 1000.0],
+            m, n,
+        ).unwrap();
+        let mut b = vec![1.0, 1000.0];
+        let sigmas = constraint_precond(&mut a, &mut b);
+        // 行0: max=1.0 → σ=1.0（変化なし）
+        // 行1: max=1000.0 → σ=0.001
+        assert!((sigmas[0] - 1.0).abs() < 1e-10, "row0 unchanged");
+        assert!((sigmas[1] - 0.001).abs() < 1e-7, "row1 scaled: σ={}", sigmas[1]);
+        // b[1] がスケールされていること
+        assert!((b[1] - 1.0).abs() < 1e-7, "b[1] scaled: {}", b[1]);
+    }
+
+    #[test]
+    fn test_run_qp_presolve_phase2_no_crash() {
+        let prob = make_qp_simple(3, 2);
+        let opts = SolverOptions::default();
+        let phase1 = crate::presolve::run_qp_presolve_phase1(&prob, &opts);
+        let _phase2 = run_qp_presolve_phase2(phase1, &opts);
+        // クラッシュしなければ OK
+    }
+
+    #[test]
+    fn test_equality_constraint_qr_redundant_removal() {
+        // m=6, n=2: 3 等式制約ペア。うち2つは冗長（同一）。→ 1ペアのみ残す
+        // 等式: x+y=1 (redundant pair: 2つ), x-y=0 (1つ)
+        // Le 制約として:  x+y<=1, -(x+y)<=-1 × 2, x-y<=0, -(x-y)<=0
+        // → m=6 > n*2=4 → QR 適用
+        let n = 2usize;
+        let m = 6usize;
+        // rows 0,1: x+y<=1 と -(x+y)<=-1
+        // rows 2,3: x+y<=1 と -(x+y)<=-1 (重複)
+        // rows 4,5: x-y<=0 と -(x-y)<=0
+        let a = CscMatrix::from_triplets(
+            &[0,0, 1,1, 2,2, 3,3, 4,4, 5,5],
+            &[0,1, 0,1, 0,1, 0,1, 0,1, 0,1],
+            &[1.0,1.0, -1.0,-1.0, 1.0,1.0, -1.0,-1.0, 1.0,-1.0, -1.0,1.0],
+            m, n,
+        ).unwrap();
+        let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
+        let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[2.0,2.0], n, n).unwrap();
+        let prob = QpProblem::new(q, vec![0.0;n], a, b, vec![(f64::NEG_INFINITY,f64::INFINITY);n]).unwrap();
+        let mut removed = vec![false; m];
+        equality_constraint_qr(&prob, &mut removed);
+        // 少なくとも1行が除去されているべき（重複行）
+        let removed_count = removed.iter().filter(|&&b| b).count();
+        assert!(removed_count >= 2, "at least one redundant pair removed, got {}", removed_count);
+    }
+}

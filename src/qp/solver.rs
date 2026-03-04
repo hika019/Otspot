@@ -116,7 +116,7 @@ pub(crate) fn qp_solve_impl(
     // スタートする可能性があるため、並列ブロックでは必ずPhase Iで実行可能点を取得する。
     #[cfg(feature = "parallel")]
     {
-        if warm_start.is_none() && effective_opts.parallel_runs > 1 {
+        if warm_start.is_none() && effective_opts.active_set.num_parallel_workers > 1 {
             use rayon::prelude::*;
             use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
@@ -141,7 +141,7 @@ pub(crate) fn qp_solve_impl(
 
             // cancel フラグ（他ワーカーが Optimal を見つけたら残りを止める）
             let cancel = Arc::new(AtomicBool::new(false));
-            let run_count = effective_opts.parallel_runs;
+            let run_count = effective_opts.active_set.num_parallel_workers;
 
             // 初期ワーキングセット多様化: WS0（空集合）/ WS1（境界アクティブ）/ WS3（ハッシュ乱択）
             let initial_working_sets = build_initial_working_sets(problem, &feasible_x, run_count);

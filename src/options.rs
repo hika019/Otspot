@@ -114,11 +114,24 @@ impl Default for IpmOptions {
 /// Active Set 法固有オプション
 ///
 /// [`SolverOptions::active_set`] フィールドに設定する。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ActiveSetOptions {
     /// 最大反復回数（None = 自動: 100*(m+n)+1000）
     /// 設定した場合、グローバルの `max_iterations` より優先される。
     pub max_iter: Option<usize>,
+    /// rayon 並列ワーカー数（デフォルト: 4）。`parallel` feature 有効時のみ使用。
+    ///
+    /// Concurrent Solver モードでは 1 を設定して AS 内部の rayon を無効化する。
+    pub num_parallel_workers: usize,
+}
+
+impl Default for ActiveSetOptions {
+    fn default() -> Self {
+        Self {
+            max_iter: None,
+            num_parallel_workers: 4,
+        }
+    }
 }
 
 /// ソルバーの動作設定

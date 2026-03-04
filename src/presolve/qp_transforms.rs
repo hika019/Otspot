@@ -6,6 +6,7 @@
 //! 対称Q行列の扱い: Q は full symmetric（上下三角両方）として格納されていることを前提とする。
 //! 変数 j の固定によるQ更新: 列 j のエントリ (k, Q[k,j]) は対称性から Q[j,k] と等価。
 
+use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
@@ -14,6 +15,17 @@ use crate::tolerances::ZERO_TOL;
 // ---------------------------------------------------------------------------
 // 逆変換ステップ（LIFO順で適用）
 // ---------------------------------------------------------------------------
+
+/// QP Presolve の処理状態
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QpPresolveStatus {
+    /// 実行可能（通常）
+    Feasible,
+    /// Presolve 段階で実行不可能と確定
+    Infeasible,
+    /// Presolve 段階で非有界と確定
+    Unbounded,
+}
 
 /// QP Postsolve の1ステップ
 #[derive(Debug, Clone)]
@@ -24,6 +36,8 @@ pub(crate) enum QpPostsolveStep {
     SingletonRow { col: usize, val: f64 },
     /// 空列（Q列・A列ともゼロ）の復元
     EmptyCol { idx: usize, val: f64 },
+    /// 大係数スケーリングの行スケール（#14 逆変換用: 双対変数のみに影響）
+    LargeCoeffRowScale { #[allow(dead_code)] row_scales: Vec<f64> },
 }
 
 /// Postsolve ステップ列（LIFO）
@@ -68,6 +82,14 @@ pub struct QpPresolveResult {
     pub orig_num_vars: usize,
     /// 元の制約数
     pub orig_num_constraints: usize,
+    /// Presolve 処理の状態（#15 不整合検出結果）
+    pub presolve_status: QpPresolveStatus,
+    /// Q が対角行列か（#17 検出結果）
+    pub is_diagonal_q: bool,
+    /// 独立部分問題の数（#16 ブロック構造検出。1=分解不可）
+    pub block_components: usize,
+    /// Ruiz スケーリング情報（#13 スケーリング接続。Some = presolve でスケール済み）
+    pub ruiz_scaler: Option<RuizScaler>,
 }
 
 impl QpPresolveResult {
@@ -86,7 +108,18 @@ impl QpPresolveResult {
             was_reduced: false,
             orig_num_vars: n,
             orig_num_constraints: m,
+            presolve_status: QpPresolveStatus::Feasible,
+            is_diagonal_q: false,
+            block_components: 1,
+            ruiz_scaler: None,
         }
+    }
+
+    /// Infeasible と確定した場合のフォールバック
+    pub fn infeasible(prob: &QpProblem) -> Self {
+        let mut r = Self::no_reduction(prob);
+        r.presolve_status = QpPresolveStatus::Infeasible;
+        r
     }
 }
 
@@ -198,16 +231,206 @@ fn apply_fixed_variable(
 }
 
 // ---------------------------------------------------------------------------
+// ヘルパー: #15 不整合の早期検出
+// ---------------------------------------------------------------------------
+
+/// Bounds の逆転・目的関数の非有界を事前チェックする（#15 infeasibility_detection）。
+///
+/// PARAM: 検出基準は ZERO_TOL
+fn early_infeasibility_check(prob: &QpProblem) -> Option<QpPresolveStatus> {
+    // ① lb[j] > ub[j] → Infeasible
+    for &(lb, ub) in &prob.bounds {
+        if lb > ub + ZERO_TOL {
+            return Some(QpPresolveStatus::Infeasible);
+        }
+    }
+
+    // ② Q 非正定値かつ制約なし → Unbounded below
+    //    簡易判定: Q の全対角要素 < 0（非正定値の必要条件）かつ制約0・bounds無限
+    if prob.num_constraints == 0 && prob.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite()) {
+        let all_q_diag_neg = (0..prob.num_vars).all(|j| q_diagonal(&prob.q, j) < -ZERO_TOL);
+        if all_q_diag_neg && prob.num_vars > 0 {
+            return Some(QpPresolveStatus::Unbounded);
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: #16 ブロック構造検出（Union-Find）
+// ---------------------------------------------------------------------------
+
+/// Q+A の非ゼロパターンから変数の連結成分数を求める（#16 block_structure_detection）。
+///
+/// 各変数はノード、同一制約/Q要素に現れる変数ペアはエッジ。
+/// Union-Find で連結成分を特定して返す。
+fn count_block_components(q: &CscMatrix, a: &CscMatrix, n: usize) -> usize {
+    if n == 0 { return 0; }
+
+    // Union-Find
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+        if parent[x] != x { parent[x] = find(parent, parent[x]); }
+        parent[x]
+    }
+
+    fn union(parent: &mut Vec<usize>, x: usize, y: usize) {
+        let rx = find(parent, x);
+        let ry = find(parent, y);
+        if rx != ry { parent[rx] = ry; }
+    }
+
+    // Q の非ゼロパターン: 列 j に現れる行 k → (j, k) をエッジ化
+    for j in 0..n {
+        let start = q.col_ptr[j];
+        let end = q.col_ptr[j + 1];
+        for k in start..end {
+            let row = q.row_ind[k];
+            if row < n && row != j && q.values[k].abs() > ZERO_TOL {
+                union(&mut parent, j, row);
+            }
+        }
+    }
+
+    // A の非ゼロパターン: 同じ行に現れる複数変数をエッジ化
+    // まず行ごとに変数リストを構築
+    let m = a.nrows;
+    let mut row_vars: Vec<Vec<usize>> = vec![vec![]; m];
+    for j in 0..n.min(a.ncols) {
+        let start = a.col_ptr[j];
+        let end = a.col_ptr[j + 1];
+        for k in start..end {
+            let row = a.row_ind[k];
+            if row < m && a.values[k].abs() > ZERO_TOL {
+                row_vars[row].push(j);
+            }
+        }
+    }
+    for vars in &row_vars {
+        if vars.len() >= 2 {
+            let first = vars[0];
+            for &v in &vars[1..] {
+                union(&mut parent, first, v);
+            }
+        }
+    }
+
+    // 連結成分数を数える
+    let mut roots = std::collections::HashSet::new();
+    for j in 0..n {
+        roots.insert(find(&mut parent, j));
+    }
+    roots.len()
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: #17 対角 Q 検出
+// ---------------------------------------------------------------------------
+
+/// Q が対角行列（非対角要素がすべて閾値以下）か判定する（#17 diagonal_q_detection）。
+///
+/// PARAM: 対角判定閾値=1e-10, 理由=浮動小数点誤差許容
+fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
+    for j in 0..n {
+        let start = q.col_ptr[j];
+        let end = q.col_ptr[j + 1];
+        for k in start..end {
+            let row = q.row_ind[k];
+            if row != j && q.values[k].abs() > 1e-10 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// ヘルパー: #14 大係数再スケーリング
+// ---------------------------------------------------------------------------
+
+/// A または Q に max_abs > 1e6 の要素がある場合に追加スケーリングを適用する
+/// （#14 large_coeff_rescaling）。
+///
+/// 縮約後の問題に対してインプレースで適用する。
+/// 行スケール σ_i = 1/sqrt(max(|A[i,*]|)) を A の行と b[i] に乗算。
+///
+/// PARAM: 閾値=1e6, 理由=数値安定性のため
+/// 戻り値: 各制約行の σ_i（postsolve で双対変数の逆変換に使用）
+fn apply_large_coeff_rescaling(
+    a: &mut CscMatrix,
+    b: &mut [f64],
+    n: usize,
+) -> Vec<f64> {
+    let m = a.nrows;
+    // max_abs を確認: 1e6 超えがなければ何もしない
+    let has_large = a.values.iter().chain(std::iter::empty()).any(|&v| v.abs() > 1e6);
+    if !has_large {
+        return vec![1.0; m];
+    }
+
+    // 行ごとの max|A[i,*]|
+    let mut row_max = vec![0.0f64; m];
+    for col in 0..n.min(a.ncols) {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        for k in start..end {
+            let row = a.row_ind[k];
+            let v = a.values[k].abs();
+            if v > row_max[row] { row_max[row] = v; }
+        }
+    }
+
+    // σ_i = 1/sqrt(row_max[i]) for rows with row_max > 1.0
+    let row_scales: Vec<f64> = row_max.iter().map(|&mx| {
+        if mx > 1.0 { 1.0 / mx.sqrt() } else { 1.0 }
+    }).collect();
+
+    // A の値をスケール: A[i,j] *= σ_i
+    for col in 0..n.min(a.ncols) {
+        let start = a.col_ptr[col];
+        let end = a.col_ptr[col + 1];
+        for k in start..end {
+            let row = a.row_ind[k];
+            a.values[k] *= row_scales[row];
+        }
+    }
+
+    // b[i] *= σ_i
+    for i in 0..m {
+        b[i] *= row_scales[i];
+    }
+
+    row_scales
+}
+
+// ---------------------------------------------------------------------------
 // Phase 1 メインエントリポイント
 // ---------------------------------------------------------------------------
 
-/// QP Presolve Phase 1（#1-12 の技法を全実行）
+/// QP Presolve Phase 1（#1-18 の技法を全実行）
 ///
-/// 問題が明らかに Infeasible な場合は `None` を返す。
+/// #13: Ruiz スケーリング接続（縮約後問題に適用）
+/// #14: 大係数行列の再スケーリング
+/// #15: Presolve 段階での不整合検出
+/// #16: Block 構造検出
+/// #17: Diagonal Q 検出
+/// #18: #1-12 を収束まで反復適用（最大 10 回）
 pub fn run_qp_presolve_phase1(
     prob: &QpProblem,
     _opts: &SolverOptions,
 ) -> QpPresolveResult {
+    // ==================================================================
+    // #15: infeasibility_detection() — presolve 段階での不整合早期検出
+    // ==================================================================
+    if let Some(status) = early_infeasibility_check(prob) {
+        return QpPresolveResult {
+            presolve_status: status,
+            ..QpPresolveResult::no_reduction(prob)
+        };
+    }
+
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
@@ -232,6 +455,19 @@ pub fn run_qp_presolve_phase1(
     }
 
     // ==================================================================
+    // #18: iterative_presolve() — #1-12 を収束まで繰り返す（最大 10 回）
+    // PARAM: 最大反復数=10, 理由=実用問題で通常5回以内に収束
+    // ==================================================================
+    let mut prev_removed_count = 0usize;
+    for _iter_pass in 0..10 {
+        let cur_removed_count = removed_cols.iter().filter(|&&b| b).count()
+            + removed_rows.iter().filter(|&&b| b).count();
+        if _iter_pass > 0 && cur_removed_count == prev_removed_count {
+            break; // 削減なし → 収束
+        }
+        prev_removed_count = cur_removed_count;
+
+    // ==================================================================
     // #1: fixed_variables() — lb[j] == ub[j] の変数を定数化
     // ==================================================================
     for j in 0..n {
@@ -241,7 +477,7 @@ pub fn run_qp_presolve_phase1(
         let (lb, ub) = bounds[j];
         if lb > ub + ZERO_TOL {
             // Infeasible: bounds が逆転している
-            return QpPresolveResult::no_reduction(prob);
+            return QpPresolveResult::infeasible(prob);
         }
         if (lb - ub).abs() < ZERO_TOL {
             let val = lb;
@@ -364,7 +600,7 @@ pub fn run_qp_presolve_phase1(
             // 0 <= b[i]: b[i]>=0 なら冗長、b[i]<0 なら Infeasible
             if b[i] < -ZERO_TOL {
                 // Infeasible: 変換不能→元問題を返す
-                return QpPresolveResult::no_reduction(prob);
+                return QpPresolveResult::infeasible(prob);
             }
             removed_rows[i] = true;
         }
@@ -667,7 +903,7 @@ pub fn run_qp_presolve_phase1(
             if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
                 if new_lb > new_ub + ZERO_TOL {
                     // bounds が逆転 → Infeasible。元問題に戻して solver に判定を委ねる
-                    return QpPresolveResult::no_reduction(prob);
+                    return QpPresolveResult::infeasible(prob);
                 }
                 bounds[j] = (new_lb, new_ub);
             }
@@ -739,7 +975,7 @@ pub fn run_qp_presolve_phase1(
             .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
             .copied()
             .collect();
-        let (row_lb, row_ub, _, ub_fin) = activity_range(&entries, &bounds, None);
+        let (_row_lb, row_ub, _, ub_fin) = activity_range(&entries, &bounds, None);
 
         // 更新後の activity_range で冗長な Le 制約を再除去
         if ub_fin && row_ub <= b[i] + ZERO_TOL {
@@ -749,9 +985,11 @@ pub fn run_qp_presolve_phase1(
         let (row_lb2, _, lb_fin2, _) = activity_range(&entries, &bounds, None);
         if lb_fin2 && row_lb2 > b[i] + ZERO_TOL {
             // 制約 Ax <= b が row_lb2 > b[i] → 実行不可能
-            return QpPresolveResult::no_reduction(prob);
+            return QpPresolveResult::infeasible(prob);
         }
     }
+
+    } // end of #18 iterative loop
 
     // ==================================================================
     // 縮約後問題の構築
@@ -870,10 +1108,69 @@ pub fn run_qp_presolve_phase1(
 
     let q_linear_adjust = c.clone(); // 更新後 c（postsolve では使用しない）
 
-    let reduced = match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new) {
+    let mut reduced = match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new) {
         Ok(p) => p,
         Err(_) => return QpPresolveResult::no_reduction(prob),
     };
+
+    // ==================================================================
+    // #17: diagonal_q_detection() — Diagonal Q 検出
+    // PARAM: 対角判定閾値=1e-10, 理由=浮動小数点誤差許容
+    // ==================================================================
+    let detected_diagonal_q = is_diagonal_q(&reduced.q, n_new);
+
+    // ==================================================================
+    // #16: block_structure_detection() — Block 構造検出（Union-Find）
+    // 1成分しかない場合（分解不可）は通常パスへ。
+    // ==================================================================
+    let detected_block_components = count_block_components(&reduced.q, &reduced.a, n_new);
+
+    // ==================================================================
+    // #14: large_coeff_rescaling() — 大係数行列の再スケーリング
+    // PARAM: 閾値=1e6, 理由=数値安定性のため
+    // ==================================================================
+    let large_coeff_row_scales = {
+        let mut a_mut = reduced.a.clone();
+        let mut b_mut = reduced.b.clone();
+        let scales = apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new);
+        // 実際に変化があった場合のみ reduced を更新
+        let any_scaled = scales.iter().any(|&s| (s - 1.0).abs() > 1e-12);
+        if any_scaled {
+            reduced = match QpProblem::new(reduced.q.clone(), reduced.c.clone(), a_mut, b_mut, reduced.bounds.clone()) {
+                Ok(p) => p,
+                Err(_) => reduced,
+            };
+            // postsolve_stack に行スケール情報を追加（双対変数の逆変換用）
+            postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: scales });
+        }
+        any_scaled
+    };
+    let _ = large_coeff_row_scales; // 現在は双対逆変換の対象外
+
+    // ==================================================================
+    // #13: ruiz_scaling_connect() — Ruiz スケーリングをpresolveに接続
+    // PARAM: Ruiz反復数デフォルト=10, 理由=収束性と計算コストのバランス
+    // 適用条件: 縮約後問題が非空かつ _opts.use_ruiz_scaling = true
+    // ==================================================================
+    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 {
+        let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
+        let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
+        let mut scaler = RuizScaler::new(n_new, m_new);
+        scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals);
+        let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
+            &reduced.q, &reduced.a, &reduced.c, &reduced.b, &reduced.bounds
+        );
+        match QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+            Ok(p) => { reduced = p; Some(scaler) }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // Ruiz スケーリングを適用した場合、問題の表現空間が変わるため was_reduced = true に設定する。
+    // これにより warm_start の初期点（元空間）がスケール済み問題に不正に適用されることを防ぐ。
+    let was_reduced_final = was_reduced || ruiz_scaler_opt.is_some();
 
     QpPresolveResult {
         reduced,
@@ -883,9 +1180,13 @@ pub fn run_qp_presolve_phase1(
         obj_offset,
         q_linear_adjust,
         postsolve_stack,
-        was_reduced,
+        was_reduced: was_reduced_final,
         orig_num_vars: n,
         orig_num_constraints: m,
+        presolve_status: QpPresolveStatus::Feasible,
+        is_diagonal_q: detected_diagonal_q,
+        block_components: detected_block_components,
+        ruiz_scaler: ruiz_scaler_opt,
     }
 }
 
@@ -976,7 +1277,9 @@ mod tests {
             vec![2.0],
             vec![(0.0, 10.0)],
         );
-        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // use_ruiz_scaling=false: bounds tightening のみを検証（Ruiz による bounds 変換を除外）
+        let opts = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
+        let result = run_qp_presolve_phase1(&prob, &opts);
         // 縮約後も変数 x は残る（Q 非ゼロのため固定されない）
         assert_eq!(result.reduced.num_vars, 1, "x remains after tightening");
         // ub が 2 以下に絞られているか（制約除去後は bounds に反映）
@@ -994,7 +1297,8 @@ mod tests {
             vec![],
             vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
         );
-        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        let opts = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
+        let result = run_qp_presolve_phase1(&prob, &opts);
         assert_eq!(result.reduced.num_vars, 2, "no reduction expected");
         assert!(!result.was_reduced, "was_reduced = false");
     }

@@ -40,6 +40,8 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
             QpPostsolveStep::EmptyCol { idx, val } => {
                 solution[*idx] = *val;
             }
+            // #14 LargeCoeffRowScale は双対変数の逆変換のみ。主変数 x は影響しない。
+            QpPostsolveStep::LargeCoeffRowScale { .. } => {}
         }
     }
 

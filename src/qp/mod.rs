@@ -45,6 +45,7 @@ pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::presolve::{run_qp_presolve_phase1, postsolve_qp};
+use crate::presolve::qp_transforms::QpPresolveStatus;
 use crate::problem::SolveStatus;
 
 /// Concurrent Solver が複数ソルバーの結果を比較するための解品質ランク
@@ -148,7 +149,7 @@ fn solve_qp_concurrent(
     let mut handles = Vec::with_capacity(4);
 
     // Active Set スレッド
-    // 注: concurrent モードでは rayon 並列ワーカーを無効化 (parallel_runs=1) する。
+    // 注: concurrent モードでは rayon 並列ワーカーを無効化 (num_parallel_workers=1) する。
     // これにより小問題でのスレッドスポーン overhead を回避し、AS が先着しやすくなる。
     // AS の結果は bound_duals を含むため、出力品質が最も高い。
     // warm_start は AS のみに渡す。
@@ -157,7 +158,7 @@ fn solve_qp_concurrent(
         let prob = Arc::clone(&problem_arc);
         let mut opts = options.clone();
         opts.cancel_flag = Some(cancel);
-        opts.parallel_runs = 1; // concurrent モードでは AS 内部の rayon 並列を無効化
+        opts.active_set.num_parallel_workers = 1; // concurrent モードでは AS 内部の rayon 並列を無効化
         let ws = warm_start_cloned;
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
@@ -339,7 +340,26 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };
-    let reduced_sol = dispatch_qp(&presolve_result.reduced, None, options);
+    // #15: Infeasible/Unbounded が presolve 段階で確定した場合は直接返す
+    if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
+        return crate::problem::SolverResult::infeasible();
+    }
+    // #13: presolve で Ruiz スケーリング適用済みの場合 → IPM 側の Ruiz を無効化
+    let opts_no_ruiz;
+    let dispatch_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
+        opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..options.clone() };
+        &opts_no_ruiz
+    } else {
+        options
+    };
+    let mut reduced_sol = dispatch_qp(&presolve_result.reduced, None, dispatch_opts);
+    // #13: presolve Ruiz 適用済みなら解をスケール逆変換
+    if let Some(ref scaler) = presolve_result.ruiz_scaler {
+        let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
+        reduced_sol.solution = x;
+        reduced_sol.dual_solution = y;
+        if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
+    }
     postsolve_qp(&presolve_result, &reduced_sol)
 }
 
@@ -385,8 +405,24 @@ pub fn solve_qp_warm(
     // warm_start は元問題の次元で記録されているため、
     // presolve で縮約が発生した場合はインデックスが合わなくなる。
     // 安全策として縮約ありの場合は warm_start を無効化する。
+    if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
+        return crate::problem::SolverResult::infeasible();
+    }
     let ws = if presolve_result.was_reduced { None } else { Some(warm_start) };
-    let reduced_sol = dispatch_qp(&presolve_result.reduced, ws, options);
+    let opts_no_ruiz;
+    let dispatch_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
+        opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..options.clone() };
+        &opts_no_ruiz
+    } else {
+        options
+    };
+    let mut reduced_sol = dispatch_qp(&presolve_result.reduced, ws, dispatch_opts);
+    if let Some(ref scaler) = presolve_result.ruiz_scaler {
+        let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
+        reduced_sol.solution = x;
+        reduced_sol.dual_solution = y;
+        if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
+    }
     postsolve_qp(&presolve_result, &reduced_sol)
 }
 
