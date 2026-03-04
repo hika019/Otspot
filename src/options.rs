@@ -87,7 +87,7 @@ pub enum Tolerance {
 /// [`SolverOptions::ipm`] フィールドに設定する。
 #[derive(Debug, Clone)]
 pub struct IpmOptions {
-    /// 最大反復数（デフォルト: 100）
+    /// 最大反復数（デフォルト: 1000）。Gurobi barrier 相当。timeout が真のガード。
     pub max_iter: usize,
     /// 収束 tolerance（デフォルト: 1e-8）
     pub eps: f64,
@@ -102,7 +102,7 @@ pub struct IpmOptions {
 impl Default for IpmOptions {
     fn default() -> Self {
         Self {
-            max_iter: 100,
+            max_iter: 1000,
             eps: 1e-8,
             delta_min: 1e-8,
             delta_p_init: 1e-6,

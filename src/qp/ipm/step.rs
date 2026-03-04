@@ -250,7 +250,14 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             #[cfg(feature = "parallel")]
             if !use_cg_fallback {
                 let q_delta = build_q_delta(&problem.q, delta_p, n);
-                if let Ok(q_fac) = ldl::factorize_with_amd(&q_delta) {
+                let q_fac_opt = match ldl::factorize_with_amd_and_deadline(&q_delta, timeout_ctx.deadline) {
+                    Ok(f) => Some(f),
+                    Err(ldl::LdlError::DeadlineExceeded) => {
+                        status = SolveStatus::Timeout; final_iter = iter; break 'main_loop;
+                    }
+                    Err(_) => None,
+                };
+                if let Some(q_fac) = q_fac_opt {
                     if timeout_ctx.should_stop() {
                         status = SolveStatus::Timeout; final_iter = iter; break 'main_loop;
                     }
@@ -261,7 +268,14 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                         if timeout_ctx.should_stop() {
                             status = SolveStatus::Timeout; final_iter = iter; break 'main_loop;
                         }
-                        if let Ok(s_fac) = ldl::factorize_with_amd(&s_mat) {
+                        let s_fac_opt = match ldl::factorize_with_amd_and_deadline(&s_mat, timeout_ctx.deadline) {
+                            Ok(f) => Some(f),
+                            Err(ldl::LdlError::DeadlineExceeded) => {
+                                status = SolveStatus::Timeout; final_iter = iter; break 'main_loop;
+                            }
+                            Err(_) => None,
+                        };
+                        if let Some(s_fac) = s_fac_opt {
                             if timeout_ctx.should_stop() {
                                 status = SolveStatus::Timeout; final_iter = iter; break 'main_loop;
                             }

@@ -396,6 +396,20 @@ pub fn factorize_with_amd(mat: &CscMatrix) -> Result<LdlFactorizationAmd, LdlErr
     Ok(LdlFactorizationAmd { fac, perm })
 }
 
+/// AMD 再順序化付き LDL^T 分解（正定値行列用・deadline 対応）。
+///
+/// `factorize_with_amd` の deadline 対応版。内部で `factorize_with_deadline` を呼ぶため、
+/// 1000 列ごとに deadline を確認し、超過した場合は `Err(LdlError::DeadlineExceeded)` を返す。
+pub fn factorize_with_amd_and_deadline(mat: &CscMatrix, deadline: Option<Instant>) -> Result<LdlFactorizationAmd, LdlError> {
+    let n = mat.nrows;
+    let perm = amd(n, &mat.col_ptr, &mat.row_ind);
+    let (new_col_ptr, new_row_ind, new_values) =
+        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &perm);
+    let perm_mat = CscMatrix { col_ptr: new_col_ptr, row_ind: new_row_ind, values: new_values, nrows: n, ncols: n };
+    let fac = factorize_with_deadline(&perm_mat, deadline)?;
+    Ok(LdlFactorizationAmd { fac, perm })
+}
+
 /// AMD 再順序化付き quasidefinite LDL^T 分解（deadline 対応）。
 ///
 /// `factorize_quasidefinite_with_deadline` の前段で AMD を適用する。

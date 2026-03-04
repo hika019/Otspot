@@ -62,6 +62,8 @@ pub struct Model {
     qp_solver_choice: Option<QpSolverChoice>,
     /// Ruiz スケーリング有効/無効（None = default true）
     use_ruiz_scaling: Option<bool>,
+    /// IPM 最大反復数（None = default 1000）
+    max_iter_ipm: Option<usize>,
 }
 
 impl Model {
@@ -77,6 +79,7 @@ impl Model {
             timeout_secs: None,
             qp_solver_choice: None,
             use_ruiz_scaling: None,
+            max_iter_ipm: None,
         }
     }
 
@@ -93,6 +96,12 @@ impl Model {
     /// Ruiz equilibration スケーリングの有効/無効を設定する（デフォルト: true）
     pub fn set_use_ruiz_scaling(&mut self, flag: bool) {
         self.use_ruiz_scaling = Some(flag);
+    }
+
+    /// IPM の最大反復数を設定する（デフォルト: 1000, Gurobi barrier 相当）。
+    /// timeout が真のガードであり、この値は安全弁として機能する。
+    pub fn set_max_iter_ipm(&mut self, n: usize) {
+        self.max_iter_ipm = Some(n);
     }
 
     /// Add a decision variable to the model.
@@ -346,6 +355,9 @@ impl Model {
         }
         if let Some(flag) = self.use_ruiz_scaling {
             opts.use_ruiz_scaling = flag;
+        }
+        if let Some(n) = self.max_iter_ipm {
+            opts.ipm.max_iter = n;
         }
         let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
 
