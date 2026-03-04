@@ -766,7 +766,7 @@ fn active_set_loop(
                         ..Default::default()
                     };
                 }
-                // Q特異かつ勾配≠0: AS法では解けない → フォールバック（IPM/ADMM）
+                // Q特異かつ勾配≠0: AS法では解けない → フォールバック（IPM）
                 let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
                 return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
             }

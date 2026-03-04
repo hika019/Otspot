@@ -58,6 +58,6 @@ pub mod linalg;
 pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
-pub use qp::{solve_qp, solve_qp_admm, QpProblem, SolverResult, QpWarmStart};
-pub use qp::{QpSolver, ActiveSetSolver, AdmmSolver, IpmSolver};
+pub use qp::{solve_qp, QpProblem, SolverResult, QpWarmStart};
+pub use qp::{QpSolver, ActiveSetSolver, IpmSolver};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

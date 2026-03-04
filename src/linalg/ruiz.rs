@@ -229,7 +229,7 @@ impl RuizScaler {
         (q_s, a_s, q_vec_s, b_s, bounds_s)
     }
 
-    /// ADMM解を元のスケールに逆変換する
+    /// スケール済み解を元のスケールに逆変換する
     ///
     /// # 引数
     /// - `x_s`: スケール済み主変数（長さ n）
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn test_ruiz_scaling_correctness() {
         use crate::qp::QpProblem;
-        use crate::options::SolverOptions;
+        use crate::options::{SolverOptions, QpSolverChoice};
         use crate::problem::SolveStatus;
 
         // Q = diag(1, 100, 1, 100, 1) — 条件数が大きい
@@ -349,18 +349,12 @@ mod tests {
         let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
 
         // スケーリングなし
-        let mut opts_no_scale = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
-        opts_no_scale.admm.eps_abs = 1e-4;
-        opts_no_scale.admm.eps_rel = 1e-4;
-        opts_no_scale.qp_solver = crate::options::QpSolverChoice::Admm;
-        let r_no_scale = crate::qp::admm::solve_qp_admm(&problem, &opts_no_scale);
+        let opts_no_scale = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
+        let r_no_scale = crate::qp::solve_qp_with(&problem, &opts_no_scale);
 
         // スケーリングあり
-        let mut opts_scale = SolverOptions { use_ruiz_scaling: true, ..Default::default() };
-        opts_scale.admm.eps_abs = 1e-4;
-        opts_scale.admm.eps_rel = 1e-4;
-        opts_scale.qp_solver = crate::options::QpSolverChoice::Admm;
-        let r_scale = crate::qp::admm::solve_qp_admm(&problem, &opts_scale);
+        let opts_scale = SolverOptions { use_ruiz_scaling: true, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
+        let r_scale = crate::qp::solve_qp_with(&problem, &opts_scale);
 
         // 両方 Optimal
         assert!(
@@ -394,7 +388,7 @@ mod tests {
     #[test]
     fn test_ruiz_disabled() {
         use crate::qp::QpProblem;
-        use crate::options::SolverOptions;
+        use crate::options::{SolverOptions, QpSolverChoice};
         use crate::problem::SolveStatus;
 
         // 簡単な QP: min x^2 + y^2  s.t. x+y >= 1
@@ -405,10 +399,9 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
-        opts.qp_solver = crate::options::QpSolverChoice::Admm;
+        let opts = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
 
-        let result = crate::qp::admm::solve_qp_admm(&problem, &opts);
+        let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "disabled: {:?}", result.status);
         assert!((result.solution[0] - 0.5).abs() < 0.05, "x[0]={}", result.solution[0]);
         assert!((result.solution[1] - 0.5).abs() < 0.05, "x[1]={}", result.solution[1]);

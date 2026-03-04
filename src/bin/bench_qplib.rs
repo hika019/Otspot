@@ -42,14 +42,14 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver as|admm|ipm|ipmcrossover]
+    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur]
     let mut data_dir = "data/qplib".to_string();
     let mut solver_choice = QpSolverChoice::Auto;
 
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver as|admm|ipm|ipmcrossover]");
+            println!("Usage: bench_qplib [data_dir] [--solver as|ipm|ipm-schur]");
             println!("  --solver  Solver to use (default: concurrent/auto)");
             std::process::exit(0);
         } else if args[i] == "--solver" {
@@ -57,11 +57,10 @@ fn main() {
             if i < args.len() {
                 solver_choice = match args[i].as_str() {
                     "as" => QpSolverChoice::ActiveSet,
-                    "admm" => QpSolverChoice::Admm,
                     "ipm" => QpSolverChoice::Ipm,
                     "ipm-schur" => QpSolverChoice::IpmSchur,
                     other => {
-                        eprintln!("Unknown solver: {}. Use as|admm|ipm|ipm-schur", other);
+                        eprintln!("Unknown solver: {}. Use as|ipm|ipm-schur", other);
                         std::process::exit(1);
                     }
                 };
@@ -98,7 +97,6 @@ fn main() {
     let solver_label = match solver_choice {
         QpSolverChoice::Auto => "Auto",
         QpSolverChoice::ActiveSet => "AS",
-        QpSolverChoice::Admm => "ADMM",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
     };

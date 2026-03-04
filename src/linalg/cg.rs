@@ -2,7 +2,7 @@
 //!
 //! K を明示的に構築せず、closure で K*v 演算を提供することで
 //! Matrix-Free な線形ソルバーを実現する。
-//! ADMM x-update における K*x = rhs の求解に使用する。
+//! 線形系 K*x = rhs の Matrix-Free 求解に使用する。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;

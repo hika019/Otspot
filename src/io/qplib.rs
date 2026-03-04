@@ -132,8 +132,14 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let maximize = matches!(objsense.as_str(), "maximize" | "max");
 
     // 次元
+    // 制約タイプ 'L': n と m を読む（線形制約あり）
+    // 'N'（無制約）: m=0 がファイルに存在するので読む
+    // 'B'（box）: m フィールド自体が存在しない
     let n = ts.read_usize()?;
-    let m = ts.read_usize()?;
+    let m = match con_char {
+        'L' | 'N' => ts.read_usize()?,
+        _ => 0, // 'B': no m field in file
+    };
 
     // --- 目的関数二次項 ---
     // 目的タイプが 'L'（線形）でも nqobj 行は存在する（0になる）
@@ -170,15 +176,17 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     // 目的定数（無視）
     let _q0 = ts.read_f64()?;
 
-    // --- 制約線形項 ---
-    let n_con_lin_terms = ts.read_usize()?;
-    // k=constraint(1-indexed), i=variable(1-indexed), v=coefficient
+    // --- 制約線形項（L/N タイプ: ファイルに存在。B タイプ: 存在しない）---
     let mut a_triplets: HashMap<(usize, usize), f64> = HashMap::new();
-    for _ in 0..n_con_lin_terms {
-        let k = ts.read_index_1based(m, "constraint index")?;
-        let i = ts.read_index_1based(n, "variable index")?;
-        let v = ts.read_f64()?;
-        *a_triplets.entry((k, i)).or_insert(0.0) += v;
+    if matches!(con_char, 'L' | 'N') {
+        let n_con_lin_terms = ts.read_usize()?;
+        // k=constraint(1-indexed), i=variable(1-indexed), v=coefficient
+        for _ in 0..n_con_lin_terms {
+            let k = ts.read_index_1based(m, "constraint index")?;
+            let i = ts.read_index_1based(n, "variable index")?;
+            let v = ts.read_f64()?;
+            *a_triplets.entry((k, i)).or_insert(0.0) += v;
+        }
     }
 
     // --- 無限大の定義値 ---
@@ -186,24 +194,27 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let is_pos_inf = |x: f64| x >= inf_val * 0.99;
     let is_neg_inf = |x: f64| x <= -inf_val * 0.99;
 
-    // --- 制約下界 ---
-    let lb_con_default = ts.read_f64()?;
-    let n_nondefault_lb_con = ts.read_usize()?;
-    let mut lb_con = vec![lb_con_default; m];
-    for _ in 0..n_nondefault_lb_con {
-        let k = ts.read_index_1based(m, "lb_con index")?;
-        let v = ts.read_f64()?;
-        lb_con[k] = v;
-    }
+    // --- 制約下界・上界（L/N タイプ: ファイルに存在。B タイプ: 存在しない）---
+    let mut lb_con = vec![f64::NEG_INFINITY; m];
+    let mut ub_con = vec![f64::INFINITY; m];
+    if matches!(con_char, 'L' | 'N') {
+        let lb_con_default = ts.read_f64()?;
+        let n_nondefault_lb_con = ts.read_usize()?;
+        lb_con = vec![lb_con_default; m];
+        for _ in 0..n_nondefault_lb_con {
+            let k = ts.read_index_1based(m, "lb_con index")?;
+            let v = ts.read_f64()?;
+            lb_con[k] = v;
+        }
 
-    // --- 制約上界 ---
-    let ub_con_default = ts.read_f64()?;
-    let n_nondefault_ub_con = ts.read_usize()?;
-    let mut ub_con = vec![ub_con_default; m];
-    for _ in 0..n_nondefault_ub_con {
-        let k = ts.read_index_1based(m, "ub_con index")?;
-        let v = ts.read_f64()?;
-        ub_con[k] = v;
+        let ub_con_default = ts.read_f64()?;
+        let n_nondefault_ub_con = ts.read_usize()?;
+        ub_con = vec![ub_con_default; m];
+        for _ in 0..n_nondefault_ub_con {
+            let k = ts.read_index_1based(m, "ub_con index")?;
+            let v = ts.read_f64()?;
+            ub_con[k] = v;
+        }
     }
 
     // --- 変数下界 ---

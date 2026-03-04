@@ -1,6 +1,6 @@
 //! タイムアウト + キャンセル管理
 //!
-//! `TimeoutCtx` は AS/ADMM/IPM 全ソルバーで共通のタイムアウト管理ヘルパー。
+//! `TimeoutCtx` は AS/IPM 全ソルバーで共通のタイムアウト管理ヘルパー。
 //! `SolverOptions` から一度だけ構築し、各ソルバーループで `should_stop()` を呼ぶ。
 
 use crate::options::SolverOptions;

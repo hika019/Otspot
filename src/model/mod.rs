@@ -60,8 +60,6 @@ pub struct Model {
     timeout_secs: Option<f64>,
     /// QP solver choice (None = use default Auto).
     qp_solver_choice: Option<QpSolverChoice>,
-    /// ADMM max iterations (None = use default 10000).
-    max_iter_admm: Option<usize>,
     /// Ruiz スケーリング有効/無効（None = default true）
     use_ruiz_scaling: Option<bool>,
 }
@@ -78,7 +76,6 @@ impl Model {
             quadratic_objective: None,
             timeout_secs: None,
             qp_solver_choice: None,
-            max_iter_admm: None,
             use_ruiz_scaling: None,
         }
     }
@@ -91,11 +88,6 @@ impl Model {
     /// Set the QP solver to use.
     pub fn set_qp_solver_choice(&mut self, choice: QpSolverChoice) {
         self.qp_solver_choice = Some(choice);
-    }
-
-    /// Set the maximum number of ADMM iterations.
-    pub fn set_max_iter_admm(&mut self, n: usize) {
-        self.max_iter_admm = Some(n);
     }
 
     /// Ruiz equilibration スケーリングの有効/無効を設定する（デフォルト: true）
@@ -352,9 +344,6 @@ impl Model {
         if let Some(choice) = self.qp_solver_choice {
             opts.qp_solver = choice;
         }
-        if let Some(n) = self.max_iter_admm {
-            opts.admm.max_iter = Some(n);
-        }
         if let Some(flag) = self.use_ruiz_scaling {
             opts.use_ruiz_scaling = flag;
         }
@@ -517,7 +506,7 @@ mod tests {
     use crate::options::QpSolverChoice;
     use crate::sparse::CscMatrix;
 
-    // ADMM収束tolerance eps=1e-3に合わせた許容誤差（concurrent solver使用時）
+    // concurrent solver での許容誤差（AS/IPM/IPM-Schur 並列実行）
     const EPS: f64 = 2e-3;
 
     fn assert_close(a: f64, b: f64, name: &str) {
@@ -778,7 +767,6 @@ mod tests {
         model.minimize(0.0 * x + 0.0 * y);
 
         let result = model.solve().unwrap();
-        // ADMM収束tolerance eps=1e-3のため許容誤差は2e-3
         let qp_tol = 2e-3;
         assert!((result[x] - 0.5).abs() < qp_tol, "T11: x expected 0.5, got {}", result[x]);
         assert!((result[y] - 0.5).abs() < qp_tol, "T11: y expected 0.5, got {}", result[y]);
@@ -854,64 +842,4 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 16: ADMM max iter custom – max_iter_admm=100 で打ち切り確認
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_admm_max_iter_custom() {
-        // min x^2+y^2 s.t. x+y>=1, x,y>=0
-        // max_iter_admm=100 で打ち切り → MaxIterations か Optimal のどちらかを返す
-        // 重要: 正常解(Optimal)か打ち切り(MaxIterations)のどちらでも可だが、
-        // max_iter_admmフィールドがModel→SolverOptionsに正しく伝達されることを検証する。
-        // 実際にSolverOptions.max_iter_admmが100になっていればOK。
-        use crate::options::QpSolverChoice;
-        let mut model = Model::new("qp_max_iter");
-        let x = model.add_var("x", 0.0, f64::INFINITY);
-        let y = model.add_var("y", 0.0, f64::INFINITY);
-        model.add_constraint((x + y).geq(1.0));
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        model.set_quadratic_objective(q);
-        model.minimize(0.0 * x + 0.0 * y);
-        model.set_qp_solver_choice(QpSolverChoice::Admm);
-        model.set_max_iter_admm(100);
-
-        // このテストはmax_iter_admmが正しく渡されていることを確認する。
-        // 100反復でOptimalに収束する（小問題なので）か、MaxIterationsが返る。
-        let result = model.solve();
-        // エラーの場合はMaxIterationsのみ許容（Timeout・Infeasible等は不可）
-        match result {
-            Ok(r) => {
-                // 収束した場合は解が正しいことを確認
-                assert!((r[x] + r[y] - 1.0).abs() < 0.1, "x+y should be ~1, got {}", r[x] + r[y]);
-            }
-            Err(ModelError::Internal(ref msg)) if msg.contains("iteration limit") => {
-                // MaxIterations は100反復で打ち切られたことの証明
-            }
-            Err(e) => panic!("unexpected error: {:?}", e),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 15: Model QP solver choice – QpSolverChoice::Admm で正常解
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_model_qp_solver_choice() {
-        // Same as T9 but force ADMM solver
-        // min x^2+y^2 - 4x - 4y  s.t. x,y >= 0
-        // Expected: x=y=2, obj=-8
-        let mut model = Model::new("qp_admm_choice");
-        let x = model.add_var("x", 0.0, f64::INFINITY);
-        let y = model.add_var("y", 0.0, f64::INFINITY);
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        model.set_quadratic_objective(q);
-        model.minimize(-4.0 * x + -4.0 * y);
-        model.set_qp_solver_choice(QpSolverChoice::Admm);
-
-        let result = model.solve().unwrap();
-        // ADMM converges to eps_abs=1e-3, use looser tolerance
-        let admm_tol = 1e-2;
-        assert!((result[x] - 2.0).abs() < admm_tol, "T15: x={}", result[x]);
-        assert!((result[y] - 2.0).abs() < admm_tol, "T15: y={}", result[y]);
-        assert!((result.objective_value - (-8.0)).abs() < admm_tol, "T15: obj={}", result.objective_value);
-    }
 }

@@ -36,13 +36,11 @@ mod active_set;
 pub(crate) mod kkt;
 mod problem;
 mod solver;
-pub mod admm;
 pub mod ipm;
 pub mod diagnose;
 pub use problem::{QpProblem, QpWarmStart};
 pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 pub use crate::problem::SolverResult;
-pub use admm::solve_qp_admm;
 pub use ipm::solve_qp_ipm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
@@ -79,7 +77,7 @@ fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
 
 /// QP ソルバーを統一的に扱うための trait
 ///
-/// Active Set / ADMM / IPM の各ソルバーは `QpSolver` を実装しており、
+/// Active Set / IPM の各ソルバーは `QpSolver` を実装しており、
 /// `Box<dyn QpSolver>` として統一的に扱うことができる。
 ///
 /// # 例
@@ -102,11 +100,6 @@ pub trait QpSolver {
 /// `QpSolver` trait を実装する。内部で [`solver::qp_solve_impl`] を呼ぶ。
 pub struct ActiveSetSolver;
 
-/// ADMM QP ソルバー
-///
-/// `QpSolver` trait を実装する。内部で [`admm::solve_qp_admm`] を呼ぶ。
-pub struct AdmmSolver;
-
 /// IPM（内点法）QP ソルバー
 ///
 /// `QpSolver` trait を実装する。内部で [`ipm::solve_qp_ipm`] を呼ぶ。
@@ -121,15 +114,6 @@ impl QpSolver for ActiveSetSolver {
     }
 }
 
-impl QpSolver for AdmmSolver {
-    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-        admm::solve_qp_admm(problem, options)
-    }
-    fn name(&self) -> &'static str {
-        "ADMM"
-    }
-}
-
 impl QpSolver for IpmSolver {
     fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         ipm::solve_qp_ipm(problem, options)
@@ -139,11 +123,11 @@ impl QpSolver for IpmSolver {
     }
 }
 
-/// AS / ADMM / IPM を並列実行し、最初に Optimal を返したものを採用する
+/// AS / IPM / IPM-Schur を並列実行し、最初に Optimal を返したものを採用する
 ///
 /// parallel feature ON 時のみコンパイルされる。
 /// 各スレッドは共有 `cancel_flag` を監視し、勝者決定後に停止する。
-/// warm_start は AS スレッドにのみ渡す（ADMM/IPM は warm_start 未対応）。
+/// warm_start は AS スレッドにのみ渡す（IPM は warm_start 未対応）。
 #[cfg(feature = "parallel")]
 fn solve_qp_concurrent(
     problem: &QpProblem,
@@ -159,8 +143,8 @@ fn solve_qp_concurrent(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let problem_arc = Arc::new(problem.clone());
     let warm_start_cloned = warm_start.cloned();
-    let (tx, rx) = mpsc::sync_channel::<SolverResult>(6);
-    let mut handles = Vec::with_capacity(6);
+    let (tx, rx) = mpsc::sync_channel::<SolverResult>(4);
+    let mut handles = Vec::with_capacity(4);
 
     // Active Set スレッド
     // 注: concurrent モードでは rayon 並列ワーカーを無効化 (parallel_runs=1) する。
@@ -177,19 +161,6 @@ fn solve_qp_concurrent(
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
             let r = solver::qp_solve_impl(&prob, ws.as_ref(), &opts);
-            let _ = tx.send(r);
-        }));
-    }
-
-    // ADMM スレッド
-    {
-        let cancel = Arc::clone(&cancel_flag);
-        let prob = Arc::clone(&problem_arc);
-        let mut opts = options.clone();
-        opts.cancel_flag = Some(cancel);
-        let tx = tx.clone();
-        handles.push(std::thread::spawn(move || {
-            let r = admm::solve_qp_admm(&prob, &opts);
             let _ = tx.send(r);
         }));
     }
@@ -258,7 +229,7 @@ fn solve_qp_concurrent(
     // 最終結果の選択:
     // Optimal は常に優先。Feasible/Approximate より Infeasible の fallback を優先する。
     // 理由: Infeasible は「問題が解けない」という確定的な情報であり、
-    //       複数のソルバー（ADMM/IPM）が Infeasible を返した場合は
+    //       複数のソルバー（IPM等）が Infeasible を返した場合は
     //       AS の Feasible 停止解より信頼性が高い。
     let best = match best_ranked {
         Some((QualityRank::Optimal, result)) => Some(result),
@@ -288,21 +259,20 @@ fn solve_qp_concurrent(
 ///
 /// `options.qp_solver` に基づいてソルバーを選択する。
 ///
-/// - `Admm`: 強制 ADMM
 /// - `ActiveSet`: 強制 Active Set
 /// - `Ipm`: 強制 IPM（内点法）
+/// - `IpmSchur`: 強制 IPM Schur complement パス
 /// - `Auto`:
-///   - parallel feature ON → AS/ADMM/IPM を並列実行（`solve_qp_concurrent`）
+///   - parallel feature ON → AS/IPM/IPM-Schur を並列実行（`solve_qp_concurrent`）
 ///   - parallel feature OFF:
-///     - n < qp_solver_threshold → Active Set（Phase I 失敗時は ADMM にフォールバック）
-///     - n >= qp_solver_threshold → IPM 試行 → Timeout/MaxIterations/NumericalError 時 ADMM にフォールバック
+///     - n < qp_solver_threshold → Active Set（Phase I 失敗時は IPM にフォールバック）
+///     - n >= qp_solver_threshold → IPM
 fn dispatch_qp(
     problem: &QpProblem,
     warm_start: Option<&QpWarmStart>,
     options: &SolverOptions,
 ) -> SolverResult {
     match options.qp_solver {
-        QpSolverChoice::Admm => admm::solve_qp_admm(problem, options),
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
@@ -313,9 +283,7 @@ fn dispatch_qp(
             }
             #[cfg(not(feature = "parallel"))]
             {
-                // deadline を1回だけ計算して全フォールバックに渡す（二重カウント防止）
-                // IPM→ADMM フォールバック時に options.timeout_secs をそのまま渡すと
-                // ADMM が新規 deadline を生成し合計時間が2倍になる問題を修正する。
+                // deadline を1回だけ計算してフォールバックに渡す（二重カウント防止）
                 let mut effective_opts;
                 let opts = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
                     effective_opts = options.clone();
@@ -327,23 +295,17 @@ fn dispatch_qp(
                     options
                 };
                 if problem.num_vars >= opts.qp_solver_threshold {
-                    // 大規模問題: IPM を先に試みて、失敗時は ADMM にフォールバック
-                    let ipm_result = ipm::solve_qp_ipm(problem, opts);
-                    match ipm_result.status {
-                        SolveStatus::Timeout
-                        | SolveStatus::MaxIterations
-                        | SolveStatus::NumericalError => admm::solve_qp_admm(problem, opts),
-                        _ => ipm_result,
-                    }
+                    // 大規模問題: IPM
+                    ipm::solve_qp_ipm(problem, opts)
                 } else {
-                    // 小規模問題: Active Set（Phase I 失敗時は ADMM にフォールバック）
+                    // 小規模問題: Active Set（Phase I 失敗時は IPM にフォールバック）
                     let result = solver::qp_solve_impl(problem, warm_start, opts);
                     if result.status == SolveStatus::MaxIterations
                         && result.solution.is_empty()
                         && result.iterations == 0
                         && !problem.is_zero_q()
                     {
-                        admm::solve_qp_admm(problem, opts)
+                        ipm::solve_qp_ipm(problem, opts)
                     } else {
                         result
                     }
@@ -387,7 +349,7 @@ pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> So
 /// Warm-start付きでQPを解く
 ///
 /// qpOASESの `hotstart()` に相当。SQP反復で前回解の活性集合を引き継ぐ場合に使用。
-/// `qp_solver = Admm` または Auto で ADMM が選択された場合、warm_start は無視される。
+/// Auto で IPM が選択された場合、warm_start は無視される。
 ///
 /// # 使用例（SQP典型パターン）
 /// ```rust,no_run
@@ -418,7 +380,7 @@ mod tests {
     use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
-    // ADMM収束tolerance eps=1e-3に合わせた許容誤差（concurrent solver使用時）
+    // concurrent solver での許容誤差（AS/IPM/IPM-Schur を並列実行）
     // 目的関数は勾配スケールの影響で primal 誤差より大きくなる場合があるため 1e-2 を使用
     const EPS: f64 = 1e-2;
 
@@ -784,7 +746,6 @@ mod tests {
         assert_close(result.objective, -6.0, EPS, "T11: objective");
         // NC-DUAL-LEN: dual_solution 長さ == m == 0, bound_duals 長さ == 4 (2ub + 2lb)
         assert_eq!(result.dual_solution.len(), 0, "T11: dual_solution length == m == 0");
-        // concurrent solver では ADMM が勝った場合 bound_duals が空になる
         if !result.bound_duals.is_empty() {
             assert_eq!(result.bound_duals.len(), 4, "T11: bound_duals length == 4");
             assert!(result.bound_duals[0] > 0.0, "T11: ub dual of x[0] should be positive");
@@ -822,7 +783,6 @@ mod tests {
         assert_close(result.objective, 0.0, EPS, "T12: objective");
         // NC-DUAL-LEN: dual_solution 長さ == m == 0, bound_duals 長さ == 4
         assert_eq!(result.dual_solution.len(), 0, "T12: dual_solution length == m == 0");
-        // concurrent solver では ADMM が勝った場合 bound_duals が空になる
         if !result.bound_duals.is_empty() {
             assert_eq!(result.bound_duals.len(), 4, "T12: bound_duals length == 4");
             assert!(result.bound_duals[1] > 0.0, "T12: lb dual of x[0] should be positive");
@@ -886,13 +846,13 @@ mod tests {
         }
     }
 
-    /// T15: 自動切替 - 大問題（ADMM選択）
+    /// T15: 自動切替 - 大問題（IPM選択）
     ///
-    /// n=200, qp_solver_threshold=100 → Auto モードで ADMM が選択される
+    /// n=200, qp_solver_threshold=100 → Auto モードで IPM が選択される
     /// Q = 2*I_200, c = -ones(200), bounds = [0,1]^200
     /// 最適解: xi ≈ 0.5
     #[test]
-    fn test_auto_switch_large_uses_admm() {
+    fn test_auto_switch_large_uses_ipm() {
         let n = 200usize;
         let q_rows: Vec<usize> = (0..n).collect();
         let q_cols: Vec<usize> = (0..n).collect();
@@ -904,38 +864,12 @@ mod tests {
         let bounds = vec![(0.0f64, 1.0f64); n];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        // Auto mode: n=200 > threshold=100 → ADMM が選択される
+        // Auto mode: n=200 > threshold=100 → IPM が選択される
         let opts = SolverOptions { qp_solver_threshold: 100, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "T15: Auto大問題はOptimal (ADMM)");
+        assert_eq!(result.status, SolveStatus::Optimal, "T15: Auto大問題はOptimal (IPM)");
         for xi in &result.solution {
             assert!((xi - 0.5).abs() < 1e-2, "T15: xi ≈ 0.5 (got {})", xi);
-        }
-    }
-
-    /// T16: 強制ADMM（小問題）
-    ///
-    /// n=50 の小問題で qp_solver=Admm を強制指定
-    /// Q = 2*I_50, c = -ones(50), bounds = [0,1]^50
-    /// 最適解: xi ≈ 0.5
-    #[test]
-    fn test_force_admm_small() {
-        let n = 50usize;
-        let q_rows: Vec<usize> = (0..n).collect();
-        let q_cols: Vec<usize> = (0..n).collect();
-        let q_vals = vec![2.0f64; n];
-        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
-        let c = vec![-1.0f64; n];
-        let a = CscMatrix::new(0, n);
-        let b = vec![];
-        let bounds = vec![(0.0f64, 1.0f64); n];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
-
-        let opts = SolverOptions { qp_solver: QpSolverChoice::Admm, ..Default::default() };
-        let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "T16: 強制ADMMはOptimal");
-        for xi in &result.solution {
-            assert!((xi - 0.5).abs() < 1e-2, "T16: xi ≈ 0.5 (got {})", xi);
         }
     }
 
@@ -988,42 +922,9 @@ mod tests {
         assert!((result.objective - 0.5).abs() < 1e-4, "T18: obj ≈ 0.5");
     }
 
-    /// T19: Auto モード IPM→ADMM フォールバック確認
-    ///
-    /// n=200 > threshold=100 の問題で、timeout_secs=0.0001 を設定して
-    /// IPM がタイムアウトし ADMM にフォールバックすることを確認する。
-    /// フォールバック後も結果が返ること（Optimal or Timeout）を確認。
-    #[test]
-    fn test_auto_ipm_fallback_to_admm() {
-        let n = 200usize;
-        let q_rows: Vec<usize> = (0..n).collect();
-        let q_cols: Vec<usize> = (0..n).collect();
-        let q_vals = vec![2.0f64; n];
-        let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n).unwrap();
-        let c = vec![-1.0f64; n];
-        let a = CscMatrix::new(0, n);
-        let b = vec![];
-        let bounds = vec![(0.0f64, 1.0f64); n];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
-
-        // threshold を 100 に下げて Auto → IPM を引き起こす
-        // timeout を極小にして IPM タイムアウト → ADMM フォールバックを確認
-        let opts = SolverOptions { qp_solver_threshold: 100, timeout_secs: Some(0.0001), ..Default::default() };
-        let result = solve_qp_with(&problem, &opts);
-        // IPM タイムアウト後 ADMM もタイムアウトする場合あり
-        // いずれにせよ SolveStatus が返ること（panic しない）を確認
-        assert!(
-            result.status == SolveStatus::Optimal
-                || result.status == SolveStatus::Timeout
-                || result.status == SolveStatus::MaxIterations,
-            "T19: Auto IPMフォールバック: 期待外ステータス {:?}",
-            result.status
-        );
-    }
-
     /// T20: Concurrent Solver（parallel feature）
     ///
-    /// parallel feature ON 時、Auto モードで AS/ADMM/IPM を並列実行し
+    /// parallel feature ON 時、Auto モードで AS/IPM/IPM-Schur を並列実行し
     /// 最初に Optimal を返した結果が採用されることを確認する。
     /// min x^2 + y^2  s.t. x + y >= 1  → x*=y*=0.5, obj=0.5
     #[cfg(feature = "parallel")]

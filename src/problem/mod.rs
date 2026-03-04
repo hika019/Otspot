@@ -51,7 +51,7 @@ impl fmt::Display for SolveStatus {
 
 /// LP/QP共通求解結果型
 ///
-/// LP求解（Simplex等）と QP求解（AS/ADMM/IPM/Concurrent）の両方で使用できる統一結果型。
+/// LP求解（Simplex等）と QP求解（AS/IPM/Concurrent）の両方で使用できる統一結果型。
 /// LP固有フィールド（`reduced_costs`, `slack`, `warm_start_basis`）は QP求解時は空/None。
 /// QP固有フィールド（`bound_duals`, `active_set`, `iterations`）は LP求解時は空/0。
 #[derive(Debug, Clone)]
