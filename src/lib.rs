@@ -50,7 +50,7 @@ pub(crate) mod backend;
 pub mod model;
 pub(crate) mod tolerances;
 pub mod options;
-pub use options::{SolverOptions, QpSolverChoice};
+pub use options::{SolverOptions, QpSolverChoice, Tolerance};
 pub mod qp;
 pub mod linalg;
 
