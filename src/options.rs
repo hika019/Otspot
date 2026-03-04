@@ -148,7 +148,9 @@ pub struct SolverOptions {
     pub warm_start: Option<WarmStartBasis>,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
-    /// 並列Active Set実行数（parallel feature有効時のみ使用。デフォルト4）
+    /// Concurrent Solverでは使用されない。将来のバージョンで削除予定。
+    /// Concurrent Solverを使う場合、このフィールドは無視される。
+    #[deprecated(since = "0.1.0", note = "Concurrent Solver ignores this field")]
     pub parallel_runs: usize,
     /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
     pub timeout_secs: Option<f64>,
@@ -181,10 +183,6 @@ pub struct SolverOptions {
     pub active_set: ActiveSetOptions,
 
     // --- 旧 IPM 固有パラメータ（非推奨: `ipm.*` を使用すること）---
-    /// # Deprecated
-    /// `ipm.max_iter` を使用すること。
-    #[deprecated(since = "0.1.0", note = "use `ipm.max_iter` instead")]
-    pub max_iter_ipm: usize,
     /// # Deprecated
     /// `ipm.eps` を使用すること。
     #[deprecated(since = "0.1.0", note = "use `ipm.eps` instead")]
@@ -222,7 +220,6 @@ impl Default for SolverOptions {
             ipm: IpmOptions::default(),
             active_set: ActiveSetOptions::default(),
             // Deprecated fields (backward compat)
-            max_iter_ipm: 100,
             eps_ipm: 1e-8,
             delta_p: 1e-6,
             delta_d: 1e-6,

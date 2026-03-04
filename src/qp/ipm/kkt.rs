@@ -389,7 +389,7 @@ pub(crate) fn compute_jacobi_precond_ipm(
     }
 
     diag.iter()
-        .map(|&d| if d.abs() < 1e-14 { 1.0 } else { 1.0 / d })
+        .map(|&d| if d.abs() < super::JACOBI_MIN_DIAG { 1.0 } else { 1.0 / d })
         .collect()
 }
 

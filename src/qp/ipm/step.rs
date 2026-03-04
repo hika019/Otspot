@@ -830,7 +830,7 @@ pub(crate) fn numerical_error_result(n: usize) -> SolverResult {
 
 /// MINRES の最大反復数（制約前処理付き）
 #[cfg(feature = "parallel")]
-const MINRES_MAX_ITER: usize = 50;
+const MINRES_MAX_ITER: usize = 500; // PARAM: 根拠=CG_MAX_ITER(1000)の半分・大規模問題の収束余裕確保 | 要検証=収束速度への影響
 
 /// Q + δ_p·I の上三角 CSC を構築するヘルパー
 #[cfg(feature = "parallel")]
@@ -932,7 +932,7 @@ pub(crate) fn solve_kkt_minres_constraint_precond(
         s_fac.solve(&v2[..m_orig], &mut out2[..m_orig]);
         // Jacobi for bound constraint rows
         for i in m_orig..m_ext {
-            out2[i] = v2[i] / d_vec[i].max(1e-14);
+            out2[i] = v2[i] / d_vec[i].max(super::JACOBI_MIN_DIAG);
         }
     };
 

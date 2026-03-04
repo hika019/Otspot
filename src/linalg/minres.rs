@@ -380,7 +380,7 @@ mod tests {
         );
 
         // 解の検証: A*x ≈ rhs
-        let expected = vec![2.0_f64, 3.0, 4.0, 5.0];
+        let expected = [2.0_f64, 3.0, 4.0, 5.0];
         for (i, (&xi, &ei)) in x.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (xi - ei).abs() < 1e-6,

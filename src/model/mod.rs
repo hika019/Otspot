@@ -25,7 +25,7 @@ pub use crate::constraint;
 
 use variable::VariableDefinition;
 
-use crate::options::QpSolverChoice;
+use crate::options::{QpSolverChoice, Tolerance};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::simplex;
 use crate::sparse::CscMatrix;
@@ -64,6 +64,8 @@ pub struct Model {
     use_ruiz_scaling: Option<bool>,
     /// IPM 最大反復数（None = default 1000）
     max_iter_ipm: Option<usize>,
+    /// 収束精度プリセット（None = デフォルト Medium = 1e-8）
+    tolerance: Option<Tolerance>,
 }
 
 impl Model {
@@ -80,6 +82,7 @@ impl Model {
             qp_solver_choice: None,
             use_ruiz_scaling: None,
             max_iter_ipm: None,
+            tolerance: None,
         }
     }
 
@@ -102,6 +105,12 @@ impl Model {
     /// timeout が真のガードであり、この値は安全弁として機能する。
     pub fn set_max_iter_ipm(&mut self, n: usize) {
         self.max_iter_ipm = Some(n);
+    }
+
+    /// 精度プリセットを設定する。
+    pub fn set_tolerance(&mut self, tol: Tolerance) -> &mut Self {
+        self.tolerance = Some(tol);
+        self
     }
 
     /// Add a decision variable to the model.
@@ -359,6 +368,9 @@ impl Model {
         if let Some(n) = self.max_iter_ipm {
             opts.ipm.max_iter = n;
         }
+        if let Some(tol) = self.tolerance {
+            opts.tolerance = Some(tol);
+        }
         let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
 
         match qp_result.status {
@@ -515,7 +527,6 @@ impl std::error::Error for ModelError {}
 #[cfg(test)]
 mod tests {
     use super::{Model, ModelError, SolveError, Variable};
-    use crate::options::QpSolverChoice;
     use crate::sparse::CscMatrix;
 
     // concurrent solver での許容誤差（AS/IPM/IPM-Schur 並列実行）

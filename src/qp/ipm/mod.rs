@@ -32,6 +32,8 @@ pub(crate) const LDL_THRESHOLD: usize = 20_000;
 pub(crate) const CG_MAX_ITER: usize = 1_000;
 /// CG 収束判定（残差 L∞ノルム）
 pub(crate) const CG_TOL: f64 = 1e-6;
+/// Jacobi 前処理の対角最小値（ゼロ除算防止）
+pub(crate) const JACOBI_MIN_DIAG: f64 = 1e-14; // PARAM: 根拠=数値的安定性(ゼロ除算防止) | 要検証=なし
 
 // ---------------------------------------------------------------------------
 // 公開 API
