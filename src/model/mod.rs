@@ -515,7 +515,6 @@ impl std::error::Error for ModelError {}
 #[cfg(test)]
 mod tests {
     use super::{Model, ModelError, SolveError, Variable};
-    use crate::options::QpSolverChoice;
     use crate::sparse::CscMatrix;
 
     // concurrent solver での許容誤差（AS/IPM/IPM-Schur 並列実行）
