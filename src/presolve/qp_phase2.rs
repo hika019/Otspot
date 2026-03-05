@@ -28,15 +28,21 @@ pub fn equality_constraint_qr(
     prob: &QpProblem,
     removed_rows: &mut [bool],
 ) {
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // 条件チェック
-    if m <= n * 2 || n == 0 {
+    // (C) 大規模問題 (m > 閾値) では #19 をスキップして HANG を防止
+    // QPLIB_8602 は m=105966 → 旧実装で 5.6Bops の Gaussian 消去が発生していた
+    const EQ_QR_MAX_M: usize = 10_000;
+    if m > EQ_QR_MAX_M || m <= n * 2 || n == 0 {
         return;
     }
 
-    // 行ごとの非ゼロエントリを収集
+    // 行ごとの非ゼロエントリを収集 (列順に格納されるため列優先でイテレート)
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
         let start = prob.a.col_ptr[j];
@@ -49,46 +55,66 @@ pub fn equality_constraint_qr(
         }
     }
 
-    // 等式制約ペアの検出
-    // 行 i の正規化方向ベクトルのハッシュを計算してペアを探す。
-    // 簡略化: 等式ペアは同一の非ゼロパターンかつ符号が逆の行。
-    let mut eq_pos_rows: Vec<usize> = Vec::new(); // 等式制約の「正」側行インデックス
-    let mut paired = vec![false; m];
+    // (A) ハッシュベースのペア検出: O(m × nnz_per_row)
+    // ペア条件: A[j,*] = -A[i,*] かつ b[j] = -b[i]
+    //   → 同じ列パターン・同じ |b| の行をグループ化し、グループ内のみ比較
 
+    // 列パターンハッシュ (値を除いた列インデックスのハッシュ)
+    let col_pattern_hash = |entries: &[(usize, f64)]| -> u64 {
+        let mut h = DefaultHasher::new();
+        for &(col, _) in entries {
+            col.hash(&mut h);
+        }
+        h.finish()
+    };
+
+    // グループキー: (nnz_count, col_pattern_hash, |b| 量子化)
+    let mut groups: HashMap<(usize, u64, i64), Vec<usize>> = HashMap::new();
     for i in 0..m {
-        if removed_rows[i] || paired[i] || row_entries[i].is_empty() {
+        if removed_rows[i] || row_entries[i].is_empty() {
             continue;
         }
-        let entries_i = &row_entries[i];
-        let b_i = prob.b[i];
+        let ch = col_pattern_hash(&row_entries[i]);
+        let bk = (prob.b[i].abs() * 1e9).round() as i64;
+        groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
+    }
 
-        // 正規化基準: 最初の非ゼロ要素の列インデックスと大きさで候補を絞る
-        for j in (i + 1)..m {
-            if removed_rows[j] || paired[j] || row_entries[j].len() != entries_i.len() {
+    // グループ内でペアを検出 (グループは通常2〜数行と小さい)
+    let mut eq_pos_rows: Vec<usize> = Vec::new();
+    let mut paired = vec![false; m];
+    let mut pair_partner: Vec<usize> = vec![usize::MAX; m]; // i のペア相手 j
+
+    for group in groups.values() {
+        for &i in group {
+            if paired[i] {
                 continue;
             }
-            let entries_j = &row_entries[j];
+            for &j in group {
+                if j <= i || paired[j] {
+                    continue;
+                }
+                let entries_i = &row_entries[i];
+                let entries_j = &row_entries[j];
+                let b_i = prob.b[i];
 
-            // ペアの条件: A[j,*] = -A[i,*] かつ b[j] = -b[i]
-            if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) {
-                continue;
-            }
-
-            // 全要素のチェック
-            let is_neg_pair = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
-                *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
-            });
-
-            if is_neg_pair {
-                eq_pos_rows.push(i);
-                paired[i] = true;
-                paired[j] = true;
-                break;
+                // A[j] = -A[i] かつ b[j] = -b[i] を厳密チェック
+                if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) {
+                    continue;
+                }
+                let is_neg = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
+                    *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
+                });
+                if is_neg {
+                    eq_pos_rows.push(i);
+                    paired[i] = true;
+                    paired[j] = true;
+                    pair_partner[i] = j;
+                    break;
+                }
             }
         }
     }
 
-    // 等式制約数が少ない場合はスキップ
     let m_eq = eq_pos_rows.len();
     if m_eq == 0 {
         return;
@@ -103,19 +129,18 @@ pub fn equality_constraint_qr(
     }
 
     // Gaussian 消去（部分ピボット）で線形独立行を特定
-    // ピボット行のインデックス（eq_pos_rows における位置）を記録
     let mut pivot_rows: Vec<bool> = vec![false; m_eq];
     let mut pivot_count = 0usize;
-    let mut used_pivot_col = vec![false; n]; // 使用済みピボット列
-
+    let mut used_pivot_col = vec![false; n];
     let mut work = aeq.clone();
 
     for col in 0..n {
-        // 未処理行から最大 |work[i][col]| を持つ行を探す
         let mut max_val = 0.0f64;
         let mut max_row = usize::MAX;
         for row in 0..m_eq {
-            if pivot_rows[row] { continue; }
+            if pivot_rows[row] {
+                continue;
+            }
             let v = work[row][col].abs();
             if v > max_val {
                 max_val = v;
@@ -124,20 +149,22 @@ pub fn equality_constraint_qr(
         }
 
         if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
-            continue; // このcolはゼロ → skip
+            continue;
         }
 
-        // max_row を pivot として採用
         pivot_rows[max_row] = true;
         used_pivot_col[col] = true;
         pivot_count += 1;
 
         let pivot = work[max_row][col];
-        // 他の行を消去
         for k in 0..m_eq {
-            if k == max_row { continue; }
+            if k == max_row {
+                continue;
+            }
             let factor = work[k][col] / pivot;
-            if factor.abs() < 1e-15 { continue; }
+            if factor.abs() < 1e-15 {
+                continue;
+            }
             #[allow(clippy::needless_range_loop)]
             for c in 0..n {
                 let delta = factor * work[max_row][c];
@@ -146,32 +173,18 @@ pub fn equality_constraint_qr(
         }
 
         if pivot_count >= n {
-            break; // rank(Aeq) <= n: これ以上ピボットは出ない
+            break;
         }
     }
 
-    // 非ピボット行（冗長な等式制約）を removed_rows に追加
-    // 各等式制約ペアについて: 冗長ならペア両行を除去
+    // 非ピボット行（冗長な等式制約ペア）を除去
+    // pair_partner を使って O(m_eq) で完結（旧実装の O(m²) パートナー探索を廃止）
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
         if !pivot_rows[row_idx] {
-            // この等式制約は冗長 → 対応するペアの両行を除去する候補
-            // ただし paired[orig_row] = true → パートナー行も探して除去
             removed_rows[orig_row] = true;
-            // パートナー行（负方向）も除去
-            let entries_i = &row_entries[orig_row];
-            let b_i = prob.b[orig_row];
-            for j in 0..m {
-                if j == orig_row || removed_rows[j] { continue; }
-                let entries_j = &row_entries[j];
-                if entries_j.len() != entries_i.len() { continue; }
-                if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) { continue; }
-                let is_neg = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
-                    *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
-                });
-                if is_neg {
-                    removed_rows[j] = true;
-                    break;
-                }
+            let partner = pair_partner[orig_row];
+            if partner != usize::MAX {
+                removed_rows[partner] = true;
             }
         }
     }
