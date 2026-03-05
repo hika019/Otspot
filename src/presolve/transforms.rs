@@ -342,7 +342,7 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     }
 
     // ==========================================================
-    // Step 5: Bounds tightening (1パス)
+    // Step 5: Bounds tightening (1パス, O(m×n) 増分更新)
     //
     // 符号による導出:
     //   Le: a_j*x_j + rest <= b
@@ -351,6 +351,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     //   Ge: a_j*x_j + rest >= b
     //     a_j > 0: x_j >= (b - rest_ub) / a_j  [rest <= rest_ub なので b-rest >= b-rest_ub]
     //     a_j < 0: x_j <= (b - rest_ub) / a_j  [存在条件: rest_ub >= b - a_j*x_j]
+    //
+    // 最適化: 行全体の activity_range を O(n) で1回計算し、
+    //   変数j除外時は O(1) 増分減算で rest を得る。
+    //   旧実装は各変数でO(n)全走査 → O(m×n²)。BOYD1で127s超の原因。
     // ==========================================================
     for i in 0..m {
         if removed_rows[i] {
@@ -363,14 +367,93 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
             .copied()
             .collect();
 
+        if entries.is_empty() {
+            continue;
+        }
+
+        // --- Phase A: 行全体の activity_range を O(n) で事前計算 ---
+        // PARAM: 各エントリのlb/ub寄与を記録し、除外時にO(1)で引けるようにする
+        let mut row_lb_sum = 0.0f64;  // 有限なlb寄与の合計
+        let mut row_ub_sum = 0.0f64;  // 有限なub寄与の合計
+        let mut inf_lb_count = 0usize; // lb無限大にする寄与の数
+        let mut inf_ub_count = 0usize; // ub無限大にする寄与の数
+        // 各エントリが lb/ub に与える寄与（有限分のみ）と無限大フラグ
+        let mut entry_lb_contrib = Vec::with_capacity(entries.len());
+        let mut entry_ub_contrib = Vec::with_capacity(entries.len());
+        let mut entry_lb_inf = Vec::with_capacity(entries.len());
+        let mut entry_ub_inf = Vec::with_capacity(entries.len());
+
         for &(j, a_ij) in &entries {
+            let (lb_j, ub_j) = bounds[j];
+            if a_ij > 0.0 {
+                // lb への寄与: a_ij * lb_j (lb_j が -∞ なら無限大)
+                if lb_j == f64::NEG_INFINITY {
+                    inf_lb_count += 1;
+                    entry_lb_inf.push(true);
+                    entry_lb_contrib.push(0.0);
+                } else {
+                    entry_lb_inf.push(false);
+                    let c = a_ij * lb_j;
+                    entry_lb_contrib.push(c);
+                    row_lb_sum += c;
+                }
+                // ub への寄与: a_ij * ub_j (ub_j が +∞ なら無限大)
+                if ub_j == f64::INFINITY {
+                    inf_ub_count += 1;
+                    entry_ub_inf.push(true);
+                    entry_ub_contrib.push(0.0);
+                } else {
+                    entry_ub_inf.push(false);
+                    let c = a_ij * ub_j;
+                    entry_ub_contrib.push(c);
+                    row_ub_sum += c;
+                }
+            } else if a_ij < 0.0 {
+                // lb への寄与: a_ij * ub_j (負係数 × 上界 → 下界方向)
+                if ub_j == f64::INFINITY {
+                    inf_lb_count += 1;
+                    entry_lb_inf.push(true);
+                    entry_lb_contrib.push(0.0);
+                } else {
+                    entry_lb_inf.push(false);
+                    let c = a_ij * ub_j;
+                    entry_lb_contrib.push(c);
+                    row_lb_sum += c;
+                }
+                // ub への寄与: a_ij * lb_j (負係数 × 下界 → 上界方向)
+                if lb_j == f64::NEG_INFINITY {
+                    inf_ub_count += 1;
+                    entry_ub_inf.push(true);
+                    entry_ub_contrib.push(0.0);
+                } else {
+                    entry_ub_inf.push(false);
+                    let c = a_ij * lb_j;
+                    entry_ub_contrib.push(c);
+                    row_ub_sum += c;
+                }
+            } else {
+                // a_ij == 0: 寄与なし
+                entry_lb_inf.push(false);
+                entry_ub_inf.push(false);
+                entry_lb_contrib.push(0.0);
+                entry_ub_contrib.push(0.0);
+            }
+        }
+
+        // --- Phase B: 各変数について O(1) でrestを計算 ---
+        for (k, &(j, a_ij)) in entries.iter().enumerate() {
             if a_ij.abs() < ZERO_TOL {
                 continue;
             }
             let (old_lb, old_ub) = bounds[j];
-            // rest = 変数j以外の寄与の範囲
-            let (rest_lb, rest_ub, rest_lb_fin, rest_ub_fin) =
-                activity_range(&entries, &bounds, Some(j));
+
+            // rest = 行全体 - j の寄与 (O(1))
+            let rest_inf_lb = if entry_lb_inf[k] { inf_lb_count - 1 } else { inf_lb_count };
+            let rest_inf_ub = if entry_ub_inf[k] { inf_ub_count - 1 } else { inf_ub_count };
+            let rest_lb = row_lb_sum - entry_lb_contrib[k];
+            let rest_ub = row_ub_sum - entry_ub_contrib[k];
+            let rest_lb_fin = rest_inf_lb == 0;
+            let rest_ub_fin = rest_inf_ub == 0;
 
             let mut new_lb = old_lb;
             let mut new_ub = old_ub;
