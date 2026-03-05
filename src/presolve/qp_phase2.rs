@@ -35,10 +35,11 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // (C) 大規模問題 (m > 閾値) では #19 をスキップして HANG を防止
-    // QPLIB_8602 は m=105966 → 旧実装で 5.6Bops の Gaussian 消去が発生していた
-    const EQ_QR_MAX_M: usize = 10_000;
-    if m > EQ_QR_MAX_M || m <= n * 2 || n == 0 {
+    // (C) 計算量が過大な問題では #19 をスキップして HANG を防止
+    // QPLIB_8602 は m=105966, n≈1000 → 旧閾値 m>10000 でスキップ済み。
+    // 計算量ベース閾値 m*n > 1e8 に変更: m=10000,n=100 の問題では実行可能になる。
+    // PARAM: 閾値 1e8 = O(m_eq * n) の推定計算量ベース（Gaussian消去コスト）
+    if m * n > 100_000_000 || m <= n * 2 || n == 0 {
         return;
     }
 

@@ -923,12 +923,16 @@ pub fn run_qp_presolve_phase1(
             // Le 制約: Σ a*x <= b
             if a_ij > 0.0 && rest_lb_fin {
                 let implied_ub = (b[i] - rest_lb) / a_ij;
-                if implied_ub < new_ub - ZERO_TOL {
+                // PARAM: 1e8 — implied_ub サニティ閾値。
+                // 元のubがINFかつ|implied|>1e8の場合はスキップ（範囲を「狭めた」とは言えず数値的に有害）。
+                // a_ij が微小な場合（例: 1e-12）に implied_ub ≈ 5e14 が生成されKKT条件数を悪化させる。
+                if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
                     new_ub = implied_ub;
                 }
             } else if a_ij < 0.0 && rest_lb_fin {
                 let implied_lb = (b[i] - rest_lb) / a_ij;
-                if implied_lb > new_lb + ZERO_TOL {
+                // PARAM: 1e8 — implied_lb サニティ閾値（上記と対称）。
+                if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
                     new_lb = implied_lb;
                 }
             }
