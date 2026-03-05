@@ -867,7 +867,10 @@ pub fn run_qp_presolve_phase1(
 
     // ==================================================================
     // #10: bounds_tightening() — 制約から変数範囲を絞り込む
-    // LP 版（activity range）と同じ。差分なし。
+    // O(n) 増分更新: 行全体の activity_range を1回 O(k) で計算し、
+    // 各変数除外時は O(1) 減算で rest_lb を得る。
+    // 旧実装は各変数で O(k) 全走査 → O(m×k²)。BOYD1 で 127s の原因。
+    // QP は Ax <= b のみ（Le 制約）→ lb 方向のみ必要。
     // ==================================================================
     for i in 0..m {
         if removed_rows[i] {
@@ -879,10 +882,57 @@ pub fn run_qp_presolve_phase1(
             .copied()
             .collect();
 
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Phase A: 行全体の lb activity sum を O(k) で計算
+        let mut row_lb_sum = 0.0f64;
+        let mut inf_lb_count = 0usize;
+        let mut entry_lb_contrib: Vec<f64> = Vec::with_capacity(entries.len());
+        let mut entry_lb_inf: Vec<bool> = Vec::with_capacity(entries.len());
+
         for &(j, a_ij) in &entries {
+            let (lb_j, ub_j) = bounds[j];
+            if a_ij > 0.0 {
+                if lb_j == f64::NEG_INFINITY {
+                    inf_lb_count += 1;
+                    entry_lb_inf.push(true);
+                    entry_lb_contrib.push(0.0);
+                } else {
+                    let c = a_ij * lb_j;
+                    row_lb_sum += c;
+                    entry_lb_inf.push(false);
+                    entry_lb_contrib.push(c);
+                }
+            } else if a_ij < 0.0 {
+                // 負係数: lb への寄与 = a_ij * ub_j
+                if ub_j == f64::INFINITY {
+                    inf_lb_count += 1;
+                    entry_lb_inf.push(true);
+                    entry_lb_contrib.push(0.0);
+                } else {
+                    let c = a_ij * ub_j;
+                    row_lb_sum += c;
+                    entry_lb_inf.push(false);
+                    entry_lb_contrib.push(c);
+                }
+            } else {
+                entry_lb_inf.push(false);
+                entry_lb_contrib.push(0.0);
+            }
+        }
+
+        // Phase B: 各変数について O(1) で rest_lb を計算
+        for (k, &(j, a_ij)) in entries.iter().enumerate() {
+            if a_ij.abs() < ZERO_TOL {
+                continue;
+            }
             let (old_lb, old_ub) = bounds[j];
-            let (rest_lb, _rest_ub, rest_lb_fin, _rest_ub_fin) =
-                activity_range(&entries, &bounds, Some(j));
+
+            let rest_inf_lb = if entry_lb_inf[k] { inf_lb_count - 1 } else { inf_lb_count };
+            let rest_lb_fin = rest_inf_lb == 0;
+            let rest_lb = row_lb_sum - entry_lb_contrib[k];
 
             let mut new_lb = old_lb;
             let mut new_ub = old_ub;
