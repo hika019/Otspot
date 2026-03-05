@@ -507,6 +507,7 @@ fn find_initial_feasible_point(
     // 選択行インデックス（Eq 第2行をスキップ）と制約タイプを構築
     let selected: Vec<usize> = (0..m).filter(|&r| !is_eq_second[r]).collect();
     let new_m = selected.len();
+    let _eq_count = is_eq_first.iter().filter(|&&x| x).count();
     let new_b: Vec<f64> = selected.iter().map(|&r| problem.b[r]).collect();
     let new_ct: Vec<ConstraintType> = selected
         .iter()
@@ -891,7 +892,12 @@ fn solve_unconstrained_direction(
     // 一般PSDの場合: LU分解で解く
     // 一時的にQをKKT行列として使用（活性制約なし）
     let a_empty = CscMatrix::new(0, n);
-    let solver = KktSolver::new_with_deadline(q, &a_empty, deadline)?;
+    let solver = match KktSolver::new_with_deadline(q, &a_empty, deadline) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(e);
+        }
+    };
     let (d_result, _) = solver.solve(grad)?;
     Ok(d_result)
 }

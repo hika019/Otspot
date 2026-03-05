@@ -481,6 +481,21 @@ pub fn run_qp_presolve_phase1(
         }
         if (lb - ub).abs() < ZERO_TOL {
             let val = lb;
+            // large-b guard: val が大きく A[i,j] も大きい場合、b が ±大値になり
+            // IPM の収束が悪化する。代入をスキップし変数を tight bounds のまま残す。
+            // PARAM: 閾値 1e5 — この値を超える b 変化は数値的に危険。
+            const LARGE_B_THRESHOLD: f64 = 1e5;
+            let max_b_change: f64 = {
+                let col_start = prob.a.col_ptr[j];
+                let col_end = prob.a.col_ptr[j + 1];
+                (col_start..col_end)
+                    .filter(|&k| !removed_rows[prob.a.row_ind[k]])
+                    .map(|k| (prob.a.values[k] * val).abs())
+                    .fold(0.0f64, f64::max)
+            };
+            if max_b_change > LARGE_B_THRESHOLD {
+                continue; // b が過大になる代入はスキップ。IPM が bounds で自然に処理する。
+            }
             apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
             removed_cols[j] = true;
             postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
@@ -693,6 +708,10 @@ pub fn run_qp_presolve_phase1(
         let (row_lb, _, lb_fin, _) = activity_range(&active_entries, &bounds, None);
 
         // Le 制約 Ax <= b で row_lb == b[i]（最小でも b[i]）なら全変数が forced
+        // 空行（active_entries=0）は trivially satisfied なので除去しない（#4が担当）
+        if active_entries.is_empty() {
+            continue;
+        }
         if lb_fin && (row_lb - b[i]).abs() < ZERO_TOL {
             // 全変数を forced 値で固定
             for &(j, a_ij) in &active_entries {
@@ -1151,8 +1170,14 @@ pub fn run_qp_presolve_phase1(
     // #13: ruiz_scaling_connect() — Ruiz スケーリングをpresolveに接続
     // PARAM: Ruiz反復数デフォルト=10, 理由=収束性と計算コストのバランス
     // 適用条件: 縮約後問題が非空かつ _opts.use_ruiz_scaling = true
+    // スキップ条件: b 値が大きい場合（|b|_max > 1e4）。
+    //   大値 b が残っている問題では Ruiz が縮約後のスパース構造と干渉し IPM を発散させる。
+    //   スキップ時は dispatch（IPM）が自身の Ruiz を適用するため品質は維持される。
+    //   PARAM: 閾値 1e4 — この値を超える b は presolve Ruiz のスキップ対象。
     // ==================================================================
-    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 {
+    let b_max_abs = reduced.b.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
+    const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
+    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);

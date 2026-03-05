@@ -159,6 +159,98 @@ impl RuizScaler {
         }
     }
 
+    /// RHS（b）を含む行ノルムでRuiz equilibrationを実行（presolve用）
+    ///
+    /// `compute()` と同じだが、Step 1 の行ノルムに `|e[i]*b[i]|` を追加する。
+    /// presolve 後に b が A に対して大きくなる場合（固定変数代入による大値生成）に
+    /// b も含めて均衡化することで IPM の収束を改善する。
+    #[allow(clippy::needless_range_loop)]
+    pub fn compute_with_rhs(
+        &mut self,
+        q: &CscMatrix,
+        a: &CscMatrix,
+        q_vec: &[f64],
+        b: &[f64],
+    ) {
+        let n = q.ncols;
+        let m = a.nrows;
+        const EPS: f64 = 1e-6;
+        const NUM_ITER: usize = 10;
+
+        for _ in 0..NUM_ITER {
+            // Step 1: 行ノルム正規化（b を含む）
+            if m > 0 {
+                let mut row_norms = vec![0.0f64; m];
+                for col in 0..n {
+                    for k in a.col_ptr[col]..a.col_ptr[col + 1] {
+                        let i = a.row_ind[k];
+                        let val = (self.e[i] * a.values[k] * self.d[col]).abs();
+                        if val > row_norms[i] {
+                            row_norms[i] = val;
+                        }
+                    }
+                }
+                // b を行ノルムに追加
+                for i in 0..m.min(b.len()) {
+                    let b_val = (self.e[i] * b[i]).abs();
+                    if b_val > row_norms[i] {
+                        row_norms[i] = b_val;
+                    }
+                }
+                for i in 0..m {
+                    let norm = row_norms[i].max(EPS);
+                    self.e[i] /= norm.sqrt();
+                }
+            }
+
+            // Step 2: 列ノルム正規化（compute() と同じ）
+            let mut col_norms = vec![0.0f64; n];
+            for col in 0..n {
+                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+                    let row = q.row_ind[k];
+                    let val = (self.c * self.d[row] * q.values[k] * self.d[col]).abs();
+                    if val > col_norms[col] {
+                        col_norms[col] = val;
+                    }
+                }
+            }
+            if m > 0 {
+                for col in 0..n {
+                    for k in a.col_ptr[col]..a.col_ptr[col + 1] {
+                        let row = a.row_ind[k];
+                        let val = (self.e[row] * a.values[k] * self.d[col]).abs();
+                        if val > col_norms[col] {
+                            col_norms[col] = val;
+                        }
+                    }
+                }
+            }
+            for j in 0..n {
+                let norm = col_norms[j].max(EPS);
+                self.d[j] /= norm.sqrt();
+            }
+
+            // Step 3: コスト正規化（compute() と同じ）
+            let mut q_mat_inf = 0.0f64;
+            for col in 0..n {
+                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+                    let row = q.row_ind[k];
+                    let val = (self.c * self.d[row] * q.values[k] * self.d[col]).abs();
+                    if val > q_mat_inf {
+                        q_mat_inf = val;
+                    }
+                }
+            }
+            let q_vec_inf = q_vec
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| (self.c * self.d[j] * v).abs())
+                .fold(0.0f64, f64::max);
+            let denom = q_mat_inf.max(q_vec_inf).max(EPS);
+            self.c /= denom;
+        }
+    }
+
     /// 問題をスケーリング済みに変換する
     ///
     /// # 変換式
