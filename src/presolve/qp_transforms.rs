@@ -887,6 +887,15 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     // #10: bounds_tightening() — 制約から変数範囲を絞り込む
     // LP 版（activity range）と同じ。差分なし。
+    //
+    // 密行ガード: 行の活性変数数が DENSE_ROW_THRESHOLD を超える場合はスキップ。
+    // 理由: n>>m 問題（HUES-MOD/HUESTIS: n=10000, m=4）では各行に全変数が現れる。
+    // この場合、activity_range の残差 rest_lb=0（他の変数の最小貢献 = 0）となり
+    // implied_ub = b / a_ij という大雑把な値しか得られない。小さい a_ij（1e-12）に
+    // 対して implied_ub = b/1e-12 ≈ 5e14 という極大な上界が生成され、Ruiz スケーリング
+    // 後は 1e26 に拡大し KKT 条件数が悪化して IPM が TIMEOUT する。
+    // 密行では bounds_tightening の恩恵がなく、弊害のみ発生する。
+    const DENSE_ROW_THRESHOLD: usize = 500;
     // ==================================================================
     for i in 0..m {
         if removed_rows[i] {
@@ -897,6 +906,11 @@ pub fn run_qp_presolve_phase1(
             .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
             .copied()
             .collect();
+
+        // 密行は bounds_tightening をスキップ（IPM 条件数保護）
+        if entries.len() > DENSE_ROW_THRESHOLD {
+            continue;
+        }
 
         for &(j, a_ij) in &entries {
             let (old_lb, old_ub) = bounds[j];
