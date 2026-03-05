@@ -19,7 +19,7 @@
 //! (STATUS = Optimal | Infeasible | Unbounded | MaxIterations | Error)
 
 use std::io::{self, BufRead};
-use solver::{solve_qp, QpProblem, SolveStatus};
+use solver::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
 use solver::sparse::CscMatrix;
 
 const INF_THRESHOLD: f64 = 1e200;
@@ -40,6 +40,21 @@ fn parse_usize(s: &str) -> usize {
 }
 
 fn main() {
+    // Parse --eps VALUE from argv (default: 1e-8)
+    let args: Vec<String> = std::env::args().collect();
+    let mut eps: f64 = 1e-8;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--eps" {
+            if let Some(val) = args.get(i + 1) {
+                eps = val.parse().unwrap_or(1e-8);
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines().map_while(Result::ok);
 
@@ -160,7 +175,9 @@ fn main() {
         Err(_) => { println!("Error 0.0 0"); return; }
     };
 
-    let result = solve_qp(&problem);
+    let mut options = SolverOptions::default();
+    options.ipm.eps = eps;
+    let result = solve_qp_with(&problem, &options);
 
     let status_str = match result.status {
         SolveStatus::Optimal => "Optimal",
