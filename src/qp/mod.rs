@@ -229,20 +229,14 @@ fn solve_qp_concurrent(
     }
 
     // 最終結果の選択:
-    // Optimal は常に優先。Feasible/Approximate より Infeasible の fallback を優先する。
-    // 理由: Infeasible は「問題が解けない」という確定的な情報であり、
-    //       複数のソルバー（IPM等）が Infeasible を返した場合は
-    //       AS の Feasible 停止解より信頼性が高い。
+    // ランク付き結果（Optimal/Feasible/Approximate）は fallback（Infeasible/NumericalError）より常に優先。
+    // 理由: AS の Phase I LP が数値的に不安定な問題（大きな変数下界など）で
+    //       誤って Infeasible を返すケースがある（QPLIB_9002等）。
+    //       IPM が Approximate（Timeout with partial solution）を返している場合は、
+    //       AS の Infeasible より IPM の Approximate の方が信頼性が高い。
+    //       全ソルバーがランク外の結果を返した場合のみ fallback を使用する。
     let best = match best_ranked {
-        Some((QualityRank::Optimal, result)) => Some(result),
-        Some((_, result)) => {
-            // Feasible/Approximate: Infeasible の fallback があれば fallback を優先
-            if fallback.as_ref().map(|f| f.status == SolveStatus::Infeasible).unwrap_or(false) {
-                fallback
-            } else {
-                Some(result)
-            }
-        }
+        Some((_, result)) => Some(result),
         None => fallback,
     };
     best.unwrap_or_else(|| SolverResult {
