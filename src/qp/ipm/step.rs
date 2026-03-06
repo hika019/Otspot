@@ -224,6 +224,73 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         let alpha_y = fraction_to_boundary(&y, &dy, super::TAU);
         let alpha = alpha_s.min(alpha_y);
 
+        // ========== Gondzio Multiple Centrality Correctors (Augmented path) ==========
+        let mut alpha = alpha;
+        if alpha < 0.999 {
+            let mut alpha_prev = alpha;
+            for _k in 0..options.ipm.max_correctors {
+                // (1) 目標step sizeとμ
+                let alpha_target = (alpha_prev + super::BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
+                let mu_target: f64 = s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter()))
+                    .map(|((&si, &yi), (&dsi, &dyi))| {
+                        (si + alpha_target * dsi) * (yi + alpha_target * dyi)
+                    })
+                    .sum::<f64>() / m_ext as f64;
+                let mu_target = mu_target.max(0.0);
+
+                // (2) 各complementarity pairの目標範囲
+                let target_lo = super::GAMMA_L * mu_target;
+                let target_hi = super::GAMMA_U * mu_target;
+
+                // (3) Gondzio corrector RHS構築
+                //     v_i = (s_i + α·ds_i)(y_i + α·dy_i) を[target_lo, target_hi]に射影
+                let mut r_c_gondzio = vec![0.0f64; m_ext];
+                for i in 0..m_ext {
+                    let si_new = s[i] + alpha_prev * ds[i];
+                    let yi_new = y[i] + alpha_prev * dy[i];
+                    let v_i = si_new * yi_new;
+                    let v_target = if v_i < target_lo {
+                        target_lo - v_i
+                    } else if v_i > target_hi {
+                        target_hi - v_i
+                    } else {
+                        0.0
+                    };
+                    r_c_gondzio[i] = r_c_corr[i] + v_target;
+                }
+
+                // (4) 修正RHS構築 & LDL因子再利用solve
+                let r_p_mod_gondzio: Vec<f64> = r_p.iter().zip(r_c_gondzio.iter()).zip(y.iter())
+                    .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+                rhs[..n].copy_from_slice(&r_d);
+                rhs[n..].copy_from_slice(&r_p_mod_gondzio);
+                fac.solve(&rhs, &mut sol);
+                let dx_new = sol[..n].to_vec();
+                let dy_new = sol[n..].to_vec();
+                let ds_new: Vec<f64> = (0..m_ext)
+                    .map(|i| r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i])
+                    .collect();
+
+                // (5) 新しいstep sizeを計算
+                let alpha_s_new = fraction_to_boundary(&s, &ds_new, super::TAU);
+                let alpha_y_new = fraction_to_boundary(&y, &dy_new, super::TAU);
+                let alpha_new = alpha_s_new.min(alpha_y_new);
+
+                // (6) 改善判定: 改善なしならbreak
+                if alpha_new < alpha_prev + super::ALPHA_IMPROVE_THRESHOLD {
+                    break;
+                }
+
+                // (7) 改善あり → 方向を更新
+                dx.copy_from_slice(&dx_new);
+                dy.copy_from_slice(&dy_new);
+                ds.copy_from_slice(&ds_new);
+                alpha_prev = alpha_new;
+            }
+            alpha = alpha_prev;
+        }
+        // ========== Gondzio Correctors End ==========
+
         // 変数更新
         for i in 0..n {
             x[i] += alpha * dx[i];
@@ -455,6 +522,82 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         let alpha_s = fraction_to_boundary(&s, &ds, super::TAU);
         let alpha_y = fraction_to_boundary(&y, &dy, super::TAU);
         let alpha = alpha_s.min(alpha_y);
+
+        // ========== Gondzio Multiple Centrality Correctors (Schur path) ==========
+        let mut alpha = alpha;
+        if alpha < 0.999 {
+            let mut alpha_prev = alpha;
+            for _k in 0..options.ipm.max_correctors {
+                // (1) 目標step sizeとμ
+                let alpha_target = (alpha_prev + super::BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
+                let mu_target: f64 = s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter()))
+                    .map(|((&si, &yi), (&dsi, &dyi))| {
+                        (si + alpha_target * dsi) * (yi + alpha_target * dyi)
+                    })
+                    .sum::<f64>() / m_ext as f64;
+                let mu_target = mu_target.max(0.0);
+
+                // (2) 各complementarity pairの目標範囲
+                let target_lo = super::GAMMA_L * mu_target;
+                let target_hi = super::GAMMA_U * mu_target;
+
+                // (3) Gondzio corrector RHS構築
+                let mut r_c_gondzio = vec![0.0f64; m_ext];
+                for i in 0..m_ext {
+                    let si_new = s[i] + alpha_prev * ds[i];
+                    let yi_new = y[i] + alpha_prev * dy[i];
+                    let v_i = si_new * yi_new;
+                    let v_target = if v_i < target_lo {
+                        target_lo - v_i
+                    } else if v_i > target_hi {
+                        target_hi - v_i
+                    } else {
+                        0.0
+                    };
+                    r_c_gondzio[i] = r_c_corr[i] + v_target;
+                }
+
+                // (4) Schur版: 修正RHS構築 & LDL因子再利用solve
+                let r_p_mod_gondzio: Vec<f64> = r_p.iter().zip(r_c_gondzio.iter()).zip(y.iter())
+                    .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+                let tmp_gon: Vec<f64> = r_p_mod_gondzio.iter().zip(d_inv.iter())
+                    .map(|(&ri, &di)| ri * di).collect();
+                let mut atmp_gon = vec![0.0f64; n];
+                spmtv(&a_ext, &tmp_gon, &mut atmp_gon);
+                let rhs_x_gon: Vec<f64> = r_d.iter().zip(atmp_gon.iter())
+                    .map(|(&rdi, &ai)| rdi + ai).collect();
+                let mut dx_new = vec![0.0f64; n];
+                fac.solve(&rhs_x_gon, &mut dx_new);
+
+                let mut a_dx_gon = vec![0.0f64; m_ext];
+                spmv(&a_ext, &dx_new, &mut a_dx_gon);
+                let mut dy_new = vec![0.0f64; m_ext];
+                for i in 0..m_ext {
+                    dy_new[i] = d_inv[i] * (a_dx_gon[i] - r_p_mod_gondzio[i]);
+                }
+                let ds_new: Vec<f64> = (0..m_ext)
+                    .map(|i| r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i])
+                    .collect();
+
+                // (5) 新しいstep sizeを計算
+                let alpha_s_new = fraction_to_boundary(&s, &ds_new, super::TAU);
+                let alpha_y_new = fraction_to_boundary(&y, &dy_new, super::TAU);
+                let alpha_new = alpha_s_new.min(alpha_y_new);
+
+                // (6) 改善判定: 改善なしならbreak
+                if alpha_new < alpha_prev + super::ALPHA_IMPROVE_THRESHOLD {
+                    break;
+                }
+
+                // (7) 改善あり → 方向を更新
+                dx.copy_from_slice(&dx_new);
+                dy.copy_from_slice(&dy_new);
+                ds.copy_from_slice(&ds_new);
+                alpha_prev = alpha_new;
+            }
+            alpha = alpha_prev;
+        }
+        // ========== Gondzio Correctors End ==========
 
         // 変数更新
         for i in 0..n {

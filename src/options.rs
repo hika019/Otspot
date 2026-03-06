@@ -94,6 +94,9 @@ pub struct IpmOptions {
     pub delta_p_init: f64,
     /// 近接正則化初期値 δ_d（デフォルト: 1e-6）
     pub delta_d_init: f64,
+    /// Gondzio多重修正子の最大corrector数（デフォルト: 3）
+    /// PARAM: 根拠=Gondzio(1997)推奨値(2-5) | 要検証=大規模問題
+    pub max_correctors: usize,
 }
 
 impl Default for IpmOptions {
@@ -104,6 +107,7 @@ impl Default for IpmOptions {
             delta_min: 1e-8,
             delta_p_init: 1e-6,
             delta_d_init: 1e-6,
+            max_correctors: 3,
         }
     }
 }

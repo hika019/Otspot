@@ -30,6 +30,19 @@ pub(crate) const DELTA_MIN: f64 = 1e-8;
 pub(crate) const LDL_THRESHOLD: usize = 20_000;
 
 // ---------------------------------------------------------------------------
+// Gondzio multiple centrality correctors パラメータ
+// ---------------------------------------------------------------------------
+
+/// Gondzio: target step size factor β // PARAM: β=1.0でα=1.0(最大ステップ)を目指す | 要検証=β<1.0の効果
+pub(crate) const BETA_GONDZIO: f64 = 1.0;
+/// Gondzio: complementarity lower bound factor // PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題
+pub(crate) const GAMMA_L: f64 = 0.1;
+/// Gondzio: complementarity upper bound factor // PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題
+pub(crate) const GAMMA_U: f64 = 10.0;
+/// Gondzio: step size 改善の最小閾値 // PARAM: これ未満の改善は誤差程度 | 要検証=タイトな問題
+pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
+
+// ---------------------------------------------------------------------------
 // 公開 API
 // ---------------------------------------------------------------------------
 
