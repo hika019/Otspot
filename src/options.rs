@@ -102,7 +102,7 @@ pub struct IpmOptions {
 impl Default for IpmOptions {
     fn default() -> Self {
         Self {
-            max_iter: 1000,
+            max_iter: usize::MAX,
             eps: 1e-8,
             delta_min: 1e-8,
             delta_p_init: 1e-6,
