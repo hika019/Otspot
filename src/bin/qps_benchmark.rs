@@ -71,22 +71,29 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>]
+    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>] [--timeout <secs>]
     let mut data_dir = "data/maros_meszaros".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
     let mut eps: f64 = 1e-8;
+    let mut timeout_secs: f64 = 10.0;
 
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: qps_benchmark [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>]");
-            println!("  --solver  Solver to use (default: concurrent/auto)");
-            println!("  --eps     Convergence tolerance (default: 1e-8)");
+            println!("Usage: qps_benchmark [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>] [--timeout <secs>]");
+            println!("  --solver   Solver to use (default: concurrent/auto)");
+            println!("  --eps      Convergence tolerance (default: 1e-8)");
+            println!("  --timeout  Solver timeout in seconds (default: 10.0)");
             std::process::exit(0);
         } else if args[i] == "--eps" {
             i += 1;
             if i < args.len() {
                 eps = args[i].parse().unwrap_or(1e-8);
+            }
+        } else if args[i] == "--timeout" {
+            i += 1;
+            if i < args.len() {
+                timeout_secs = args[i].parse().unwrap_or(10.0);
             }
         } else if args[i] == "--solver" {
             i += 1;
@@ -151,7 +158,7 @@ fn main() {
     println!("Solver: {}", solver_label);
 
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(10.0);
+    opts.timeout_secs = Some(timeout_secs);
     opts.qp_solver = solver_choice;
     opts.ipm.eps = eps;
 
