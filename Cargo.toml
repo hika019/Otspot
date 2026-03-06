@@ -34,3 +34,6 @@ harness = false
 [[bench]]
 name = "qp_bench"
 harness = false
+
+[profile.test]
+opt-level = 3
