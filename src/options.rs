@@ -158,10 +158,6 @@ pub struct SolverOptions {
     pub warm_start: Option<WarmStartBasis>,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
-    /// Concurrent Solverでは使用されない。将来のバージョンで削除予定。
-    /// Concurrent Solverを使う場合、このフィールドは無視される。
-    #[deprecated(since = "0.1.0", note = "Concurrent Solver ignores this field")]
-    pub parallel_runs: usize,
     /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
     pub timeout_secs: Option<f64>,
     /// 並列ワーカー間共有のキャンセルフラグ（内部使用）
@@ -192,24 +188,10 @@ pub struct SolverOptions {
     /// Active Set 固有オプション
     pub active_set: ActiveSetOptions,
 
-    // --- 旧 IPM 固有パラメータ（非推奨: `ipm.*` を使用すること）---
-    /// # Deprecated
-    /// `ipm.eps` を使用すること。
-    #[deprecated(since = "0.1.0", note = "use `ipm.eps` instead")]
-    pub eps_ipm: f64,
-    /// # Deprecated
-    /// `ipm.delta_p_init` を使用すること。
-    #[deprecated(since = "0.1.0", note = "use `ipm.delta_p_init` instead")]
-    pub delta_p: f64,
-    /// # Deprecated
-    /// `ipm.delta_d_init` を使用すること。
-    #[deprecated(since = "0.1.0", note = "use `ipm.delta_d_init` instead")]
-    pub delta_d: f64,
 }
 
 impl Default for SolverOptions {
     fn default() -> Self {
-        #[allow(deprecated)]
         Self {
             primal_tol: PIVOT_TOL, // 1e-8
             max_etas: 50,
@@ -218,7 +200,6 @@ impl Default for SolverOptions {
             dual_tol: PIVOT_TOL,
             warm_start: None,
             presolve: true,
-            parallel_runs: 4,
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
@@ -228,10 +209,6 @@ impl Default for SolverOptions {
             tolerance: None,
             ipm: IpmOptions::default(),
             active_set: ActiveSetOptions::default(),
-            // Deprecated fields (backward compat)
-            eps_ipm: 1e-8,
-            delta_p: 1e-6,
-            delta_d: 1e-6,
         }
     }
 }
