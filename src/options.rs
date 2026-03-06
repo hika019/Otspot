@@ -61,8 +61,8 @@ pub struct WarmStartBasis {
 ///
 /// | Tolerance | IPM eps |
 /// |-----------|---------|
-/// | High      | 1e-10   |
-/// | Medium    | 1e-8    |
+/// | High      | 1e-8    |
+/// | Medium    | 1e-6    |
 /// | Fast      | 1e-6    |
 /// | Custom(v) | v       |
 ///
@@ -71,7 +71,7 @@ pub struct WarmStartBasis {
 pub enum Tolerance {
     /// 高精度: 精密な解が必要な研究・検証用途向け
     High,
-    /// 中精度（デフォルト）: 汎用的な実用問題向け (IPM: 1e-8)
+    /// 中精度（デフォルト）: 汎用的な実用問題向け (IPM: 1e-6)
     Medium,
     /// 高速: 計算速度優先、精度を緩める (IPM: 1e-6)
     Fast,
@@ -189,8 +189,8 @@ impl SolverOptions {
     /// IPM の eps を取得（tolerance が Some の場合は変換して返す）
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {
-            Some(Tolerance::High)      => 1e-10,
-            Some(Tolerance::Medium)    => 1e-8,
+            Some(Tolerance::High)      => 1e-8,
+            Some(Tolerance::Medium)    => 1e-6,
             Some(Tolerance::Fast)      => 1e-6,
             Some(Tolerance::Custom(v)) => v,
             None => self.ipm.eps,
@@ -207,11 +207,11 @@ mod tests {
     fn test_tolerance_translation() {
         // High
         let opts_high = SolverOptions { tolerance: Some(Tolerance::High), ..Default::default() };
-        assert_eq!(opts_high.ipm_eps(), 1e-10, "High: ipm_eps");
+        assert_eq!(opts_high.ipm_eps(), 1e-8, "High: ipm_eps");
 
         // Medium
         let opts_med = SolverOptions { tolerance: Some(Tolerance::Medium), ..Default::default() };
-        assert_eq!(opts_med.ipm_eps(), 1e-8, "Medium: ipm_eps");
+        assert_eq!(opts_med.ipm_eps(), 1e-6, "Medium: ipm_eps");
 
         // Fast
         let opts_fast = SolverOptions { tolerance: Some(Tolerance::Fast), ..Default::default() };

@@ -62,7 +62,7 @@ pub struct Model {
     qp_solver_choice: Option<QpSolverChoice>,
     /// Ruiz スケーリング有効/無効（None = default true）
     use_ruiz_scaling: Option<bool>,
-    /// 収束精度プリセット（None = デフォルト Medium = 1e-8）
+    /// 収束精度プリセット（None = デフォルト Medium = 1e-6）
     tolerance: Option<Tolerance>,
 }
 
