@@ -42,16 +42,23 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur]
+    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>]
     let mut data_dir = "data/qplib".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
+    let mut eps: f64 = 1e-8;
 
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver as|ipm|ipm-schur]");
+            println!("Usage: bench_qplib [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>]");
             println!("  --solver  Solver to use (default: concurrent/auto)");
+            println!("  --eps     Convergence tolerance (default: 1e-8)");
             std::process::exit(0);
+        } else if args[i] == "--eps" {
+            i += 1;
+            if i < args.len() {
+                eps = args[i].parse().unwrap_or(1e-8);
+            }
         } else if args[i] == "--solver" {
             i += 1;
             if i < args.len() {
@@ -118,6 +125,7 @@ fn main() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(10.0);
     opts.qp_solver = solver_choice;
+    opts.ipm.eps = eps;
 
     for path in &qplib_files {
         let name = path
