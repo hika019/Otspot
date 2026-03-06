@@ -59,5 +59,5 @@ pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
-pub use qp::{QpSolver, ActiveSetSolver, IpmSolver};
+pub use qp::{QpSolver, IpmSolver};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

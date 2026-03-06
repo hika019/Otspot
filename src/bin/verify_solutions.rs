@@ -166,7 +166,6 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     solver_choice = match args[i].as_str() {
-                        "as" => QpSolverChoice::ActiveSet,
                         "ipm" => QpSolverChoice::Ipm,
                         "ipm-schur" => QpSolverChoice::IpmSchur,
                         other => {
@@ -204,7 +203,6 @@ fn main() {
 
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
-        QpSolverChoice::ActiveSet => "AS",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
     };

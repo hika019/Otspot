@@ -51,7 +51,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>] [--timeout <secs>]");
+            println!("Usage: bench_qplib [data_dir] [--solver ipm|ipm-schur] [--eps <value>] [--timeout <secs>]");
             println!("  --solver   Solver to use (default: concurrent/auto)");
             println!("  --eps      Convergence tolerance (default: 1e-8)");
             println!("  --timeout  Solver timeout in seconds (default: 10.0)");
@@ -70,11 +70,10 @@ fn main() {
             i += 1;
             if i < args.len() {
                 solver_choice = match args[i].as_str() {
-                    "as" => QpSolverChoice::ActiveSet,
                     "ipm" => QpSolverChoice::Ipm,
                     "ipm-schur" => QpSolverChoice::IpmSchur,
                     other => {
-                        eprintln!("Unknown solver: {}. Use as|ipm|ipm-schur", other);
+                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur", other);
                         std::process::exit(1);
                     }
                 };
@@ -110,7 +109,6 @@ fn main() {
 
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
-        QpSolverChoice::ActiveSet => "AS",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
     };

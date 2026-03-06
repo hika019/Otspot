@@ -7,7 +7,6 @@
 //!
 //! ソルバー固有パラメータは各サブ構造体で管理する:
 //! - IPM: [`SolverOptions::ipm`] ([`IpmOptions`])
-//! - Active Set: [`SolverOptions::active_set`] ([`ActiveSetOptions`])
 
 use crate::tolerances::*;
 use std::sync::{
@@ -22,8 +21,6 @@ pub enum QpSolverChoice {
     /// Concurrent: 全ソルバー並列実行、最速の解を返す（デフォルト）
     #[default]
     Concurrent,
-    /// 強制 Active Set
-    ActiveSet,
     /// 強制 IPM (内点法)
     Ipm,
     /// 強制 IPM Schur complement パス（--features parallel なしでも動作）
@@ -111,28 +108,6 @@ impl Default for IpmOptions {
     }
 }
 
-/// Active Set 法固有オプション
-///
-/// [`SolverOptions::active_set`] フィールドに設定する。
-#[derive(Debug, Clone)]
-pub struct ActiveSetOptions {
-    /// 最大反復回数（None = 無制限。timeout が実質的なガード）
-    pub max_iter: Option<usize>,
-    /// rayon 並列ワーカー数（デフォルト: 4）。`parallel` feature 有効時のみ使用。
-    ///
-    /// Concurrent Solver モードでは 1 を設定して AS 内部の rayon を無効化する。
-    pub num_parallel_workers: usize,
-}
-
-impl Default for ActiveSetOptions {
-    fn default() -> Self {
-        Self {
-            max_iter: None,
-            num_parallel_workers: 4,
-        }
-    }
-}
-
 /// ソルバーの動作設定
 ///
 /// 許容誤差・反復上限・リファクタリング頻度などを制御する。
@@ -140,7 +115,7 @@ impl Default for ActiveSetOptions {
 ///
 /// ## ソルバー固有パラメータ
 ///
-/// `ipm`・`active_set` フィールドの各サブ構造体を使用すること。
+/// `ipm` フィールドのサブ構造体を使用すること。
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
     // --- 共通設定 ---
@@ -162,14 +137,12 @@ pub struct SolverOptions {
     pub timeout_secs: Option<f64>,
     /// 並列ワーカー間共有のキャンセルフラグ（内部使用）
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
-    /// タイムアウト期限（内部使用。qp_solve_impl の先頭で timeout_secs から計算）
+    /// タイムアウト期限（内部使用。solve の先頭で timeout_secs から計算）
     pub(crate) deadline: Option<Instant>,
 
     // --- QP solver 選択 ---
     /// QP solver 選択（デフォルト: Concurrent）
     pub qp_solver: QpSolverChoice,
-    /// QP 自動切替の閾値（デフォルト: 10_000）
-    pub qp_solver_threshold: usize,
 
     // --- Ruiz スケーリング ---
     /// IPM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
@@ -185,9 +158,6 @@ pub struct SolverOptions {
     // --- ソルバー固有オプション ---
     /// IPM 固有オプション
     pub ipm: IpmOptions,
-    /// Active Set 固有オプション
-    pub active_set: ActiveSetOptions,
-
 }
 
 impl Default for SolverOptions {
@@ -204,11 +174,9 @@ impl Default for SolverOptions {
             cancel_flag: None,
             deadline: None,
             qp_solver: QpSolverChoice::Concurrent,
-            qp_solver_threshold: 10_000,
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),
-            active_set: ActiveSetOptions::default(),
         }
     }
 }
