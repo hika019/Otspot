@@ -873,7 +873,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     pricing: &mut P,
     options: &SolverOptions,
 ) -> SimplexOutcome {
-    let max_iter = options.max_iterations.unwrap_or(100 * (m + n_cols) + 1000);
+    let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
         Err(_) => {
@@ -1132,69 +1132,6 @@ mod tests {
         let result = solve(&lp);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!((result.objective).abs() < PIVOT_TOL);
-    }
-
-    #[test]
-    fn test_max_iter_returns_max_iterations() {
-        // min -x1 - x2  s.t.  x1 + x2 <= 4, x1 <= 3, x2 <= 3  (optimal: -4.0)
-        // max_iter=1 なら反復1回で打ち切られ MaxIterations が返る
-        let lp = make_lp(
-            vec![-1.0, -1.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            3,
-            2,
-            vec![4.0, 3.0, 3.0],
-        );
-        let sf = build_standard_form(&lp);
-        let m = sf.m;
-        let mut basis = sf.initial_basis.clone();
-        let mut x_b = sf.b.clone();
-        let opts = SolverOptions {
-            max_iterations: Some(1),
-            ..SolverOptions::default()
-        };
-        let mut pricing = pricing::DantzigPricing;
-        let outcome = revised_simplex_core(
-            &sf.a,
-            &mut x_b,
-            &sf.c,
-            &mut basis,
-            m,
-            sf.n_total,
-            sf.n_total,
-            &mut pricing,
-            &opts,
-        );
-        assert!(
-            matches!(outcome, SimplexOutcome::MaxIterations(_)),
-            "Expected MaxIterations, got something else"
-        );
-    }
-
-    #[test]
-    fn test_solve_with_custom_max_iterations() {
-        // max_iterations=1 で MaxIterations ステータスが返ること
-        let lp = make_lp(
-            vec![-1.0, -1.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            3,
-            2,
-            vec![4.0, 3.0, 3.0],
-        );
-        let opts = SolverOptions {
-            max_iterations: Some(1),
-            ..SolverOptions::default()
-        };
-        let result = solve_with(&lp, &opts);
-        assert_eq!(
-            result.status,
-            SolveStatus::MaxIterations,
-            "Expected MaxIterations with max_iterations=1"
-        );
     }
 
     #[test]

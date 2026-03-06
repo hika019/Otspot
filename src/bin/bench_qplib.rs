@@ -44,7 +44,7 @@ fn main() {
 
     // 引数パース: [data_dir] [--solver as|ipm|ipm-schur]
     let mut data_dir = "data/qplib".to_string();
-    let mut solver_choice = QpSolverChoice::Auto;
+    let mut solver_choice = QpSolverChoice::Concurrent;
 
     let mut i = 1;
     while i < args.len() {
@@ -95,7 +95,7 @@ fn main() {
     println!();
 
     let solver_label = match solver_choice {
-        QpSolverChoice::Auto => "Auto",
+        QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::ActiveSet => "AS",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",

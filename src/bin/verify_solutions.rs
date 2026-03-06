@@ -156,7 +156,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut use_qplib = false;
-    let mut solver_choice = QpSolverChoice::Auto;
+    let mut solver_choice = QpSolverChoice::Concurrent;
 
     let mut i = 1;
     while i < args.len() {
@@ -203,7 +203,7 @@ fn main() {
     files.sort();
 
     let solver_label = match solver_choice {
-        QpSolverChoice::Auto => "Concurrent",
+        QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::ActiveSet => "AS",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",

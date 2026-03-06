@@ -19,9 +19,9 @@ use std::time::Instant;
 /// QP ソルバー選択
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QpSolverChoice {
-    /// Auto: n < qp_solver_threshold → Active Set, n >= threshold → IPM
+    /// Concurrent: 全ソルバー並列実行、最速の解を返す（デフォルト）
     #[default]
-    Auto,
+    Concurrent,
     /// 強制 Active Set
     ActiveSet,
     /// 強制 IPM (内点法)
@@ -87,7 +87,7 @@ pub enum Tolerance {
 /// [`SolverOptions::ipm`] フィールドに設定する。
 #[derive(Debug, Clone)]
 pub struct IpmOptions {
-    /// 最大反復数（デフォルト: 1000）。Gurobi barrier 相当。timeout が真のガード。
+    /// 最大反復数（デフォルト: 1000）。IPMの安全弁。timeout が主ガード。
     pub max_iter: usize,
     /// 収束 tolerance（デフォルト: 1e-8）
     pub eps: f64,
@@ -116,8 +116,7 @@ impl Default for IpmOptions {
 /// [`SolverOptions::active_set`] フィールドに設定する。
 #[derive(Debug, Clone)]
 pub struct ActiveSetOptions {
-    /// 最大反復回数（None = 自動: 100*(m+n)+1000）
-    /// 設定した場合、グローバルの `max_iterations` より優先される。
+    /// 最大反復回数（None = 無制限。timeout が実質的なガード）
     pub max_iter: Option<usize>,
     /// rayon 並列ワーカー数（デフォルト: 4）。`parallel` feature 有効時のみ使用。
     ///
@@ -147,8 +146,6 @@ pub struct SolverOptions {
     // --- 共通設定 ---
     /// シンプレックス法の最適性・実行可能性判定の閾値（デフォルト: 1e-8）
     pub primal_tol: f64,
-    /// 最大反復回数（None = 自動計算: 100*(m+n)+1000）
-    pub max_iterations: Option<usize>,
     /// eta ファイルの最大保持数（リファクタリング閾値）
     pub max_etas: usize,
     /// 解の微小値クランプ閾値（デフォルト: 1e-14）
@@ -172,8 +169,8 @@ pub struct SolverOptions {
     /// タイムアウト期限（内部使用。qp_solve_impl の先頭で timeout_secs から計算）
     pub(crate) deadline: Option<Instant>,
 
-    // --- QP solver 自動切替 ---
-    /// QP solver 選択（デフォルト: Auto）
+    // --- QP solver 選択 ---
+    /// QP solver 選択（デフォルト: Concurrent）
     pub qp_solver: QpSolverChoice,
     /// QP 自動切替の閾値（デフォルト: 10_000）
     pub qp_solver_threshold: usize,
@@ -215,7 +212,6 @@ impl Default for SolverOptions {
         #[allow(deprecated)]
         Self {
             primal_tol: PIVOT_TOL, // 1e-8
-            max_iterations: None,  // auto
             max_etas: 50,
             clamp_tol: 1e-14,
             simplex_method: SimplexMethod::Auto,
@@ -226,7 +222,7 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
-            qp_solver: QpSolverChoice::Auto,
+            qp_solver: QpSolverChoice::Concurrent,
             qp_solver_threshold: 10_000,
             use_ruiz_scaling: true,
             tolerance: None,

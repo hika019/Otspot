@@ -124,8 +124,8 @@ pub(crate) fn qp_solve_impl(
             let feasible_x = match find_initial_feasible_point(problem, effective_opts) {
                 Phase1Result::Feasible(x) => { x },
                 Phase1Result::Infeasible => { return SolverResult::infeasible() },
-                Phase1Result::MaxIterations => {
-                    return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                Phase1Result::NumericalError => {
+                    return SolverResult::numerical_error()
                 }
                 Phase1Result::Timeout => { return SolverResult {
                     status: SolveStatus::Timeout,
@@ -187,8 +187,8 @@ pub(crate) fn qp_solve_impl(
     }
 
     // Phase I: 初期実行可能点の取得
-    // Phase1Result::MaxIterations は数値困難（refactor_failed 等）による早期打切りで
-    // 偽陽性の Infeasible を防ぐため SolverResult::max_iterations() を返す。
+    // Phase1Result::NumericalError は数値困難（refactor_failed 等）による早期打切りで
+    // 偽陽性の Infeasible を防ぐため SolverResult::numerical_error() を返す。
     let initial_x = if let Some(ws) = warm_start {
         if let Some(ref x0) = ws.initial_point {
             if x0.len() == n {
@@ -197,8 +197,8 @@ pub(crate) fn qp_solve_impl(
                 match find_initial_feasible_point(problem, effective_opts) {
                     Phase1Result::Feasible(x) => x,
                     Phase1Result::Infeasible => return SolverResult::infeasible(),
-                    Phase1Result::MaxIterations => {
-                        return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                    Phase1Result::NumericalError => {
+                        return SolverResult::numerical_error()
                     }
                     Phase1Result::Timeout => return SolverResult {
                         status: SolveStatus::Timeout,
@@ -216,8 +216,8 @@ pub(crate) fn qp_solve_impl(
             match find_initial_feasible_point(problem, effective_opts) {
                 Phase1Result::Feasible(x) => x,
                 Phase1Result::Infeasible => return SolverResult::infeasible(),
-                Phase1Result::MaxIterations => {
-                    return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+                Phase1Result::NumericalError => {
+                    return SolverResult::numerical_error()
                 }
                 Phase1Result::Timeout => return SolverResult {
                     status: SolveStatus::Timeout,
@@ -235,8 +235,8 @@ pub(crate) fn qp_solve_impl(
         match find_initial_feasible_point(problem, effective_opts) {
             Phase1Result::Feasible(x) => x,
             Phase1Result::Infeasible => return SolverResult::infeasible(),
-            Phase1Result::MaxIterations => {
-                return SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0)
+            Phase1Result::NumericalError => {
+                return SolverResult::numerical_error()
             }
             Phase1Result::Timeout => return SolverResult {
                 status: SolveStatus::Timeout,
@@ -407,7 +407,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             iterations: 0,
             ..Default::default()
         },
-        SolveStatus::MaxIterations => SolverResult::max_iterations(vec![], f64::INFINITY, vec![], 0),
+        SolveStatus::MaxIterations => SolverResult::numerical_error(),
         SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -433,16 +433,16 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
 
 /// Phase I LP の結果を表す列挙型
 ///
-/// `SolveStatus::MaxIterations` は数値困難（refactor_failed 等）による早期打切りで、
+/// `NumericalError` は数値困難（refactor_failed 等）による早期打切りで、
 /// 問題が実行不可能であることを意味しない。この場合は `SolverResult::infeasible()` ではなく
-/// `SolverResult::max_iterations()` を返して偽陽性の Infeasible を防ぐ。
+/// `SolverResult::numerical_error()` を返して偽陽性の Infeasible を防ぐ。
 enum Phase1Result {
     /// 初期実行可能点が見つかった
     Feasible(Vec<f64>),
     /// 問題は確実に実行不可能（LP が Infeasible を返した）
     Infeasible,
-    /// 数値困難で打ち切り（LP が MaxIterations を返した）; 実行可能性は不明
-    MaxIterations,
+    /// 数値困難で打ち切り（KKT分解失敗・LP が MaxIterations を返した等）; 実行可能性は不明
+    NumericalError,
     /// タイムアウト（Phase I LP が timeout_secs を超過した）
     Timeout,
 }
@@ -540,7 +540,7 @@ fn find_initial_feasible_point(
     }
     let new_a = match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, new_m, n) {
         Ok(a) => a,
-        Err(_) => return Phase1Result::MaxIterations,
+        Err(_) => return Phase1Result::NumericalError,
     };
 
     // CSC構築完了後、deadline到達なら即座にTimeoutを返す（防御的チェック）
@@ -557,7 +557,7 @@ fn find_initial_feasible_point(
         None,
     ) {
         Ok(lp) => lp,
-        Err(_) => return Phase1Result::MaxIterations,
+        Err(_) => return Phase1Result::NumericalError,
     };
 
     // Phase I LP: まず presolve 無効で試行
@@ -568,8 +568,8 @@ fn find_initial_feasible_point(
     phase1_opts.presolve = false;
 
     // MaxIterations が返った場合: refactor_failed など数値困難による早期打切り。
-    // 問題が実行不可能であることを意味しない → Phase1Result::MaxIterations で返す（偽陽性防止）。
-    let mut had_max_iterations = false;
+    // 問題が実行不可能であることを意味しない → Phase1Result::NumericalError で返す（偽陽性防止）。
+    let mut had_numerical_error = false;
 
     let result = SimplexBackend.solve(&lp, &phase1_opts);
     if result.status == SolveStatus::Optimal {
@@ -579,7 +579,7 @@ fn find_initial_feasible_point(
         return Phase1Result::Timeout;
     }
     if result.status == SolveStatus::MaxIterations {
-        had_max_iterations = true;
+        had_numerical_error = true;
     }
 
     // presolve 無効で失敗 → presolve 有効でフォールバック再試行
@@ -592,13 +592,13 @@ fn find_initial_feasible_point(
             return Phase1Result::Timeout;
         }
         if result2.status == SolveStatus::MaxIterations {
-            had_max_iterations = true;
+            had_numerical_error = true;
         }
     }
 
-    if had_max_iterations {
+    if had_numerical_error {
         // 数値困難で実行可能点を見つけられなかった。実行不可能と断定しない。
-        Phase1Result::MaxIterations
+        Phase1Result::NumericalError
     } else {
         Phase1Result::Infeasible
     }
@@ -636,7 +636,7 @@ fn active_set_loop(
 ) -> SolverResult {
     let n = problem.num_vars;
     let m = problem.num_constraints;
-    let max_iter = options.max_iterations.unwrap_or(100 * (n + m) + 1000);
+    let max_iter = options.active_set.max_iter.unwrap_or(usize::MAX);
 
     // NC-BOUND1修正: 変数境界を明示的な制約行に変換する。
     // これにより compute_step_size がブロッキング境界を working_set に追加できる。
@@ -665,8 +665,8 @@ fn active_set_loop(
         let a_active = match extract_active_rows(&aug_a, working_set.indices()) {
             Ok(a) => a,
             Err(_) => {
-                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                // 行抽出失敗: 数値困難
+                return SolverResult::numerical_error();
             }
         };
 
@@ -735,15 +735,15 @@ fn active_set_loop(
                     };
                 }
                 Err(_) => {
-                    let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                    // KKT行列因子化失敗: 数値困難
+                    return SolverResult::numerical_error();
                 }
             };
             match kkt_solver.solve(&grad) {
                 Ok(result) => result,
                 Err(_) => {
-                    let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                    return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                    // KKTシステム求解失敗: 数値困難
+                    return SolverResult::numerical_error();
                 }
             }
         };
@@ -767,9 +767,8 @@ fn active_set_loop(
                         ..Default::default()
                     };
                 }
-                // Q特異かつ勾配≠0: AS法では解けない → フォールバック（IPM）
-                let obj = kkt::compute_objective(&problem.q, &x, &problem.c);
-                return SolverResult::max_iterations(x, obj, working_set.indices().to_vec(), iter);
+                // Q特異かつ勾配≠0: AS法では解けない → NumericalError（IPMフォールバック推奨）
+                return SolverResult::numerical_error();
             }
 
             // 最小のラグランジュ乗数を確認

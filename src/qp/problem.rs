@@ -109,7 +109,7 @@ impl crate::problem::SolverResult {
         }
     }
 
-    /// MaxIterations結果を生成（QP用）
+    /// MaxIterations結果を生成（QP用）。真のイテレーション上限到達時のみ使用すること。
     pub fn max_iterations(x: Vec<f64>, obj: f64, active: Vec<usize>, iters: usize) -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::MaxIterations,
@@ -119,6 +119,20 @@ impl crate::problem::SolverResult {
             bound_duals: vec![],
             active_set: active,
             iterations: iters,
+            ..Default::default()
+        }
+    }
+
+    /// NumericalError結果を生成（KKT分解失敗・Q特異・Phase1数値困難時）
+    pub fn numerical_error() -> Self {
+        crate::problem::SolverResult {
+            status: SolveStatus::NumericalError,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            active_set: vec![],
+            iterations: 0,
             ..Default::default()
         }
     }

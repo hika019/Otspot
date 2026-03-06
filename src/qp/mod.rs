@@ -278,7 +278,7 @@ fn dispatch_qp(
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::ActiveSet => solver::qp_solve_impl(problem, warm_start, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
-        QpSolverChoice::Auto => {
+        QpSolverChoice::Concurrent => {
             #[cfg(feature = "parallel")]
             {
                 solve_qp_concurrent(problem, warm_start, options)
@@ -333,7 +333,7 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 
 /// QPをカスタム設定で解く
 ///
-/// qpOASESの `init()` に相当。`nWSR` は `options.max_iterations` で指定。
+/// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let presolve_result = if options.presolve {
         let phase1 = run_qp_presolve_phase1(problem, options);

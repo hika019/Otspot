@@ -315,7 +315,7 @@ fn dual_simplex_core(
     n_price: usize,
     options: &SolverOptions,
 ) -> SimplexOutcome {
-    let max_iter = options.max_iterations.unwrap_or(100 * (m + n_price) + 1000);
+    let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
 
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
@@ -790,49 +790,6 @@ mod tests {
                 "Reduced cost {rc} should be ≥ 0 at optimality (dual feasibility)"
             );
         }
-    }
-
-    /// max_iter=1でMaxIterationsが返ることを検証
-    #[test]
-    fn test_dual_max_iterations() {
-        let lp = make_lp(
-            vec![-1.0, -1.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            3,
-            2,
-            vec![4.0, 3.0, 3.0],
-        );
-        // LP1を解いてwarm startを取得
-        let result1 = solve_with(&lp, &SolverOptions::default());
-
-        // RHS変更LP (修復に複数反復必要な例を作るため大きく変更)
-        let lp2 = make_lp(
-            vec![-1.0, -1.0],
-            &[0, 0, 1, 2],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-            3,
-            2,
-            vec![10.0, 8.0, 8.0],
-        );
-
-        let opts = SolverOptions {
-            max_iterations: Some(1),
-            warm_start: result1.warm_start_basis.clone(),
-            simplex_method: SimplexMethod::Dual,
-            ..SolverOptions::default()
-        };
-        let result = solve_with(&lp2, &opts);
-        // max_iter=1では最適に到達できない可能性がある
-        // Optimal OR MaxIterations を受け入れる（問題サイズ次第）
-        assert!(
-            result.status == SolveStatus::Optimal
-                || result.status == SolveStatus::MaxIterations,
-            "Expected Optimal or MaxIterations, got {:?}",
-            result.status
-        );
     }
 
     #[test]
