@@ -113,6 +113,13 @@ impl QpSolver for IpmSolver {
 ///
 /// parallel feature ON 時のみコンパイルされる。
 /// 各スレッドは共有 `cancel_flag` を監視し、勝者決定後に停止する。
+///
+/// # Timeout accuracy
+/// The actual elapsed time may exceed `timeout_secs` by at most one LDL
+/// factorization step. For typical QP problems this overhead is negligible,
+/// but for very large problems (n > 100_000) the overhead may reach tens of
+/// seconds. This is consistent with other solvers (Gurobi, Clarabel, OSQP)
+/// which also check timeout at iteration boundaries.
 #[cfg(feature = "parallel")]
 fn solve_qp_concurrent(
     problem: &QpProblem,
@@ -204,9 +211,18 @@ fn solve_qp_concurrent(
         }
     }
 
-    for h in handles {
-        let _ = h.join();
+    if !timed_out {
+        for h in handles {
+            let _ = h.join();
+        }
     }
+    // On timeout: handles are dropped here, detaching threads.
+    // Threads will self-terminate when checking cancel_flag at the
+    // next iteration boundary. This is safe because cancel_flag is
+    // already set to true before we reach here.
+    // NOTE: timeout accuracy = at most 1 LDL factorization extra
+    //       (typically < 1s for small/medium problems, up to tens of
+    //        seconds for very large problems n>100k).
 
     let best = match best_ranked {
         Some((_, result)) => Some(result),
