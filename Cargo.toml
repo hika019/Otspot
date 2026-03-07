@@ -13,6 +13,7 @@ default = []
 parallel = ["dep:rayon"]
 
 [dependencies]
+faer = "0.24.0"
 rayon = { version = "1", optional = true }
 
 [dev-dependencies]
