@@ -134,7 +134,7 @@ fn solve_qp_concurrent(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let problem_arc = Arc::new(problem.clone());
     let (tx, rx) = mpsc::sync_channel::<SolverResult>(4);
-    let mut handles = Vec::with_capacity(2);
+    let mut handles = Vec::with_capacity(3);
 
     // IPM スレッド
     {
@@ -158,6 +158,19 @@ fn solve_qp_concurrent(
         let tx = tx.clone();
         handles.push(std::thread::spawn(move || {
             let r = ipm::solve_qp_ipm_schur(&prob, &opts);
+            let _ = tx.send(r);
+        }));
+    }
+
+    // IPM-Nyström スレッド（cmd_295: ランダム化前処理付き CG）
+    {
+        let cancel = Arc::clone(&cancel_flag);
+        let prob = Arc::clone(&problem_arc);
+        let mut opts = options.clone();
+        opts.cancel_flag = Some(cancel);
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let r = ipm::solve_qp_ipm_nystrom(&prob, &opts);
             let _ = tx.send(r);
         }));
     }
@@ -367,6 +380,7 @@ fn dispatch_qp(
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
+        QpSolverChoice::IpmNystrom => ipm::solve_qp_ipm_nystrom(problem, options),
         QpSolverChoice::Concurrent => {
             #[cfg(feature = "parallel")]
             {

@@ -1,4 +1,7 @@
 pub mod amd;
 pub mod ldl;
+pub mod nystrom;
+pub mod pcg;
+pub mod rng;
 pub mod ruiz;
 pub(crate) mod timeout;

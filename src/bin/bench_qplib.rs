@@ -111,6 +111,7 @@ fn main() {
         QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
+        QpSolverChoice::IpmNystrom => "IPM-Nystrom",
     };
     println!("Solver: {}", solver_label);
 
