@@ -1,7 +1,8 @@
-//! faer supernodal LDL^T wrapper for sparse linear systems (cmd_275)
+//! faer high-level LDL^T wrapper for sparse linear systems (cmd_275)
 //!
-//! Replaces the hand-written QDLDL implementation with faer's high-performance
-//! supernodal Cholesky (LDL^T variant) factorization.
+//! Uses faer's high-level Cholesky API (SymbolicCholesky + SupernodalThreshold::AUTO)
+//! to automatically select simplicial or supernodal factorization based on matrix structure.
+//! Banded/sparse matrices (LISWET etc.) → simplicial; dense fill (AUG2D etc.) → supernodal.
 //!
 //! Public API (backward-compatible):
 //! - `LdlFactorization`        — positive definite, no AMD
@@ -17,7 +18,11 @@ use crate::sparse::CscMatrix;
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
 use faer::reborrow::*;
-use faer::sparse::linalg::cholesky::{simplicial, supernodal};
+use faer::sparse::linalg::cholesky::{
+    factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRef, SymbolicCholesky,
+    SymmetricOrdering,
+};
+use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, Triplet};
 use std::time::Instant;
 
@@ -32,9 +37,10 @@ pub enum LdlError {
 
 // ── LdlFactorization (positive definite, no AMD) ──────────────────────────────
 
-/// faer supernodal LDL^T factorization for positive definite matrices (no AMD).
+/// faer high-level LDL^T factorization for positive definite matrices (no AMD).
+/// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
 pub struct LdlFactorization {
-    symbolic: supernodal::SymbolicSupernodalCholesky<usize>,
+    symbolic: SymbolicCholesky<usize>,
     l_values: Vec<f64>,
     n: usize,
 }
@@ -44,13 +50,10 @@ impl LdlFactorization {
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         sol.copy_from_slice(rhs);
         let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(self.n, faer::Par::Seq),
+            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
         );
         let stack = MemStack::new(&mut mem);
-        let ldlt = supernodal::SupernodalLdltRef::<'_, usize, f64>::new(
-            &self.symbolic,
-            &self.l_values,
-        );
+        let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
         let mut sol_mat =
             faer::MatMut::from_column_major_slice_mut(sol, self.n, 1);
         ldlt.solve_in_place_with_conj(
@@ -64,9 +67,10 @@ impl LdlFactorization {
 
 // ── LdlFactorizationAmd (quasidefinite, with AMD permutation) ─────────────────
 
-/// faer supernodal LDL^T factorization for quasidefinite matrices with AMD ordering.
+/// faer high-level LDL^T factorization for quasidefinite matrices with AMD ordering.
+/// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
 pub struct LdlFactorizationAmd {
-    symbolic: supernodal::SymbolicSupernodalCholesky<usize>,
+    symbolic: SymbolicCholesky<usize>,
     l_values: Vec<f64>,
     /// AMD permutation: perm[k] = original index of reordered index k
     perm: Vec<usize>,
@@ -105,7 +109,7 @@ impl LdlFactorizationAmd {
             nrows: n,
             ncols: n,
         };
-        let a_lower = csc_upper_to_faer_lower(&perm_mat);
+        let a_upper = csc_upper_to_faer_upper(&perm_mat);
         let signs = extract_diagonal_signs(&perm_mat);
         let regularization = LdltRegularization {
             dynamic_regularization_signs: Some(&signs),
@@ -113,25 +117,22 @@ impl LdlFactorizationAmd {
             dynamic_regularization_epsilon: 1e-13,
         };
         let mut mem = MemBuffer::new(StackReq::any_of(&[
-            supernodal::factorize_supernodal_numeric_ldlt_scratch::<usize, f64>(
-                &self.symbolic,
-                faer::Par::Seq,
-                Default::default(),
-            ),
-            self.symbolic.solve_in_place_scratch::<f64>(n, faer::Par::Seq),
+            self.symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
+            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
         ]));
         let stack = MemStack::new(&mut mem);
         let mut new_l_values = vec![0.0f64; self.symbolic.len_val()];
-        supernodal::factorize_supernodal_numeric_ldlt::<usize, f64>(
-            &mut new_l_values,
-            a_lower.rb(),
-            regularization,
-            &self.symbolic,
-            faer::Par::Seq,
-            stack,
-            Default::default(),
-        )
-        .map_err(|_| LdlError::SingularOrIndefinite)?;
+        self.symbolic
+            .factorize_numeric_ldlt(
+                &mut new_l_values,
+                a_upper.rb(),
+                faer::Side::Upper,
+                regularization,
+                faer::Par::Seq,
+                stack,
+                Default::default(),
+            )
+            .map_err(|_| LdlError::SingularOrIndefinite)?;
         self.l_values = new_l_values;
         Ok(())
     }
@@ -139,7 +140,7 @@ impl LdlFactorizationAmd {
     /// AMD 付き LDL^T x = b を解く。
     ///
     /// 1. 右辺を前方置換: b_p[k] = rhs[perm[k]]
-    /// 2. (PAP^T) x_p = b_p を faer supernodal で解く
+    /// 2. (PAP^T) x_p = b_p を faer で解く（simplicial/supernodal は AUTO 選択）
     /// 3. 解を逆置換: sol[perm[k]] = x_p[k]
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         let n = self.n;
@@ -147,13 +148,10 @@ impl LdlFactorizationAmd {
         let mut x_p = b_p;
 
         let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(n, faer::Par::Seq),
+            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
         );
         let stack = MemStack::new(&mut mem);
-        let ldlt = supernodal::SupernodalLdltRef::<'_, usize, f64>::new(
-            &self.symbolic,
-            &self.l_values,
-        );
+        let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
         let mut sol_mat =
             faer::MatMut::from_column_major_slice_mut(&mut x_p, n, 1);
         ldlt.solve_in_place_with_conj(
@@ -170,23 +168,22 @@ impl LdlFactorizationAmd {
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
 
-/// 上三角 CscMatrix を faer SparseColMat（下三角）に変換する。
+/// 上三角 CscMatrix を faer SparseColMat（上三角）に変換する。
 ///
-/// 上三角エントリ (i, j) with i ≤ j → 下三角エントリ (j, i)。
-/// 対称行列の上三角のみを格納した CscMatrix から下三角の faer 行列を作る。
-fn csc_upper_to_faer_lower(mat: &CscMatrix) -> SparseColMat<usize, f64> {
+/// 上三角エントリ (i, j) with i ≤ j をそのまま faer 形式に変換する。
+/// 高レベル API に Side::Upper で渡すために使用する。
+fn csc_upper_to_faer_upper(mat: &CscMatrix) -> SparseColMat<usize, f64> {
     let n = mat.nrows;
     let mut triplets = Vec::with_capacity(mat.values.len());
     for j in 0..n {
         for k in mat.col_ptr[j]..mat.col_ptr[j + 1] {
             let i = mat.row_ind[k];
             let v = mat.values[k];
-            // upper tri (i, j) → lower tri (j, i)
-            triplets.push(Triplet::new(j, i, v));
+            triplets.push(Triplet::new(i, j, v));
         }
     }
     SparseColMat::try_new_from_triplets(n, n, &triplets)
-        .expect("csc_upper_to_faer_lower: failed to build SparseColMat")
+        .expect("csc_upper_to_faer_upper: failed to build SparseColMat")
 }
 
 /// 対角要素の符号ベクトルを抽出する（LdltRegularization sign-aware 用）。
@@ -208,60 +205,35 @@ fn extract_diagonal_signs(mat: &CscMatrix) -> Vec<i8> {
     signs
 }
 
-/// 下三角 faer SparseColMat から supernodal symbolic 因子を計算する。
-fn build_symbolic(
-    n: usize,
-    a_lower: &SparseColMat<usize, f64>,
-) -> Result<supernodal::SymbolicSupernodalCholesky<usize>, LdlError> {
-    let a_nnz = a_lower.compute_nnz();
-
-    // Supernodal symbolic analysis は上三角（下三角の転置）を必要とする
-    let a_upper_sym = a_lower
-        .rb()
-        .transpose()
-        .symbolic()
-        .to_col_major()
-        .map_err(|_| LdlError::SingularOrIndefinite)?;
-
-    let mut mem = MemBuffer::new(StackReq::any_of(&[
-        simplicial::prefactorize_symbolic_cholesky_scratch::<usize>(n, a_nnz),
-        supernodal::factorize_supernodal_symbolic_cholesky_scratch::<usize>(n),
-    ]));
-    let stack = MemStack::new(&mut mem);
-
-    let mut etree = vec![0isize; n];
-    let mut col_counts = vec![0usize; n];
-
-    simplicial::prefactorize_symbolic_cholesky(
-        &mut etree,
-        &mut col_counts,
-        a_upper_sym.rb(),
-        stack,
-    );
-
-    supernodal::factorize_supernodal_symbolic_cholesky(
-        a_upper_sym.rb(),
-        unsafe { simplicial::EliminationTreeRef::from_inner(&etree) },
-        &col_counts,
-        stack,
-        faer::sparse::linalg::SymbolicSupernodalParams {
-            relax: None, // Use faer DEFAULT_RELAX (auto-select simplicial for LISWET etc.)
+/// 高レベル API で SymbolicCholesky を計算する（SupernodalThreshold::AUTO）。
+///
+/// Side::Upper で渡すため a_upper は上三角 faer SparseColMat であること。
+/// SymmetricOrdering::Identity: AMD は外部で処理済みのため faer 内部では行わない。
+fn build_symbolic_hl(
+    a_upper: &SparseColMat<usize, f64>,
+) -> Result<SymbolicCholesky<usize>, LdlError> {
+    factorize_symbolic_cholesky(
+        a_upper.symbolic(),
+        faer::Side::Upper,
+        SymmetricOrdering::Identity,
+        CholeskySymbolicParams {
+            supernodal_flop_ratio_threshold: SupernodalThreshold::AUTO,
+            ..Default::default()
         },
     )
     .map_err(|_| LdlError::SingularOrIndefinite)
 }
 
-/// 数値因子化を実行する共通処理。
+/// 高レベル API で symbolic + numeric 因子化を実行する共通処理。
 ///
 /// `signs`: Some → quasidefinite sign-aware regularization
 ///          None → sign-unaware regularization (positive definite 向け)
 fn do_numeric_factorize(
     mat: &CscMatrix,
     signs: Option<&[i8]>,
-) -> Result<(supernodal::SymbolicSupernodalCholesky<usize>, Vec<f64>), LdlError> {
-    let n = mat.nrows;
-    let a_lower = csc_upper_to_faer_lower(mat);
-    let symbolic = build_symbolic(n, &a_lower)?;
+) -> Result<(SymbolicCholesky<usize>, Vec<f64>), LdlError> {
+    let a_upper = csc_upper_to_faer_upper(mat);
+    let symbolic = build_symbolic_hl(&a_upper)?;
 
     let regularization = LdltRegularization {
         dynamic_regularization_signs: signs,
@@ -269,27 +241,24 @@ fn do_numeric_factorize(
         dynamic_regularization_epsilon: 1e-13,
     };
 
+    let mut l_values = vec![0.0f64; symbolic.len_val()];
     let mut mem = MemBuffer::new(StackReq::any_of(&[
-        supernodal::factorize_supernodal_numeric_ldlt_scratch::<usize, f64>(
-            &symbolic,
-            faer::Par::Seq,
-            Default::default(),
-        ),
-        symbolic.solve_in_place_scratch::<f64>(n, faer::Par::Seq),
+        symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
+        symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
     ]));
     let stack = MemStack::new(&mut mem);
 
-    let mut l_values = vec![0.0f64; symbolic.len_val()];
-    supernodal::factorize_supernodal_numeric_ldlt::<usize, f64>(
-        &mut l_values,
-        a_lower.rb(),
-        regularization,
-        &symbolic,
-        faer::Par::Seq,
-        stack,
-        Default::default(),
-    )
-    .map_err(|_| LdlError::SingularOrIndefinite)?;
+    symbolic
+        .factorize_numeric_ldlt(
+            &mut l_values,
+            a_upper.rb(),
+            faer::Side::Upper,
+            regularization,
+            faer::Par::Seq,
+            stack,
+            Default::default(),
+        )
+        .map_err(|_| LdlError::SingularOrIndefinite)?;
 
     Ok((symbolic, l_values))
 }
@@ -371,6 +340,7 @@ pub fn factorize_quasidefinite_with_amd(
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+    use faer::sparse::linalg::cholesky::{simplicial, supernodal};
 
     /// 上三角 CSC 行列をエントリリストから構築するヘルパー
     fn upper_tri_csc(n: usize, entries: &[(usize, usize, f64)]) -> CscMatrix {
