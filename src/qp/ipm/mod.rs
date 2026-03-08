@@ -131,7 +131,7 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
     step::solve_qp_ipm_schur_inner(problem, options)
 }
 
-/// lb <= x <= ub の違反量を検証し、超過していれば MaxIterations に降格する
+/// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する
 ///
 /// 閾値: eps*(1+bnd_norm)。pfeas検証と同一スケール設計。
 /// lb/ub が ±∞ の成分はスキップする。
@@ -166,7 +166,7 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
 /// スケール済み IPM 結果を元のスケールに逆変換する
 ///
 /// Optimal ステータスの場合、元空間で pfeas と bfeas を再計算し、
-/// それぞれの許容誤差を超えていれば MaxIterations に降格する（偽Optimal防止）。
+/// それぞれの許容誤差を超えていれば SuboptimalSolution に降格する（偽Optimal防止）。
 fn unscale_ipm_result(
     result: SolverResult,
     scaler: &RuizScaler,
