@@ -206,15 +206,29 @@ fn main() {
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
-                n_pass += 1;
                 let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
-                (
-                    "PASS".to_string(),
-                    format!(
-                        "obj={:.2e} pfeas={:.1e} bfeas={:.1e}",
-                        result.objective, pfeas, bfeas
-                    ),
-                )
+                // 絶対値チェック: ソルバー内部は相対許容誤差を使うため、大規模問題では
+                // 絶対残差が eps を大幅に超えてもOptimalと報告される場合がある（例: BOYD2 pfeas≈2.4）。
+                // ベンチ判定では pfeas/bfeas <= eps の絶対値チェックを追加する。
+                if pfeas > eps || bfeas > eps {
+                    n_fail += 1;
+                    (
+                        "FAIL:AbsTol".to_string(),
+                        format!(
+                            "pfeas={:.1e} bfeas={:.1e} (eps={:.0e})",
+                            pfeas, bfeas, eps
+                        ),
+                    )
+                } else {
+                    n_pass += 1;
+                    (
+                        "PASS".to_string(),
+                        format!(
+                            "obj={:.2e} pfeas={:.1e} bfeas={:.1e}",
+                            result.objective, pfeas, bfeas
+                        ),
+                    )
+                }
             }
             SolveStatus::Infeasible => {
                 n_fail += 1;
