@@ -1,1 +1,8 @@
 /target
+/data
+/reports
+/scripts/__pycache__
+DONE
+echo
+EXIT:*
+=== *
