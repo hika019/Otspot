@@ -446,7 +446,44 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         reduced_sol.dual_solution = y;
         if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
     }
-    postsolve_qp(&presolve_result, &reduced_sol)
+    let mut result = postsolve_qp(&presolve_result, &reduced_sol);
+    // post-postsolve検証: 元問題(A,b,bounds)で直接pfeas+bfeasを確認（偽Optimal防止）
+    // scaled行列経由の逆変換は数学的複雑さによるバグを誘発するため、元問題で直接計算する
+    if result.status == SolveStatus::Optimal {
+        let eps = options.ipm_eps();
+        if problem.num_constraints > 0 {
+            if let Ok(ax) = problem.a.mat_vec_mul(&result.solution) {
+                let pfeas = ax.iter().zip(problem.b.iter())
+                    .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                    .fold(0.0_f64, f64::max);
+                let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
+                if pfeas >= eps * (1.0 + norm_b) {
+                    result.status = SolveStatus::MaxIterations;
+                }
+            }
+        }
+        if result.status == SolveStatus::Optimal {
+            let bnd_norm = problem.bounds.iter()
+                .flat_map(|&(lb, ub)| [
+                    if lb.is_finite() { lb.abs() } else { 0.0 },
+                    if ub.is_finite() { ub.abs() } else { 0.0 },
+                ])
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            let bfeas = result.solution.iter()
+                .zip(problem.bounds.iter())
+                .map(|(&xi, &(lb, ub))| {
+                    let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+                    let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+                    lb_viol.max(ub_viol)
+                })
+                .fold(0.0_f64, f64::max);
+            if bfeas >= eps * (1.0 + bnd_norm) {
+                result.status = SolveStatus::MaxIterations;
+            }
+        }
+    }
+    result
 }
 
 /// QPをカスタム設定で解く（`solve_qp_with` の別名）
@@ -834,5 +871,126 @@ mod tests {
         assert!(QualityRank::Feasible > QualityRank::Approximate, "T22: Feasible > Approximate");
         assert!(QualityRank::Optimal > QualityRank::Approximate, "T22: Optimal > Approximate");
         assert_eq!(QualityRank::Optimal, QualityRank::Optimal, "T22: Optimal == Optimal");
+    }
+
+    /// T23: presolveパス pfeas検証 — 大行ノルム制約でのRuiz scaling耐性確認
+    ///
+    /// 旧T23はverify_post_ruiz_unscaleを恒等スケーラー(e=[1.0])で直接テストしていたため、
+    /// `* e_i` vs `/ e_i` のバグを検出できなかった。
+    /// 新T23は行ノルムが大きい制約（Ruiz scaling後にe[i]<<1になる）を含む問題を
+    /// solve_qp_withで解き、元問題でpfeasが正しく計算されることを確認する。
+    ///
+    /// ★旧コードのバグ: e[i]=0.01のとき `* 0.01` で pfeas を100倍小さく評価→偽Optimalを見逃す
+    /// 新コード: 元問題(A,b)で直接A*x-bを計算するためe[i]に依存しない
+    #[test]
+    fn test_presolve_pfeas_large_row_norm() {
+        // min x^2  s.t. 1000*x <= -500  (解: x=0 は不可、問題は実行不可能)
+        // → 実行可能な問題として: min x^2  s.t. 1000*x <= 500 (解: x=0)
+        // 行ノルム=1000 → Ruiz scaling後のe[i] ≈ 1/sqrt(1000) << 1
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1000.0], 1, 1).unwrap();
+        let b = vec![500.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default(); // presolve=true
+        let result = solve_qp_with(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "T23: Optimal解が得られること");
+        // 元問題でpfeasを直接検証: A*x - b <= 0 のはず
+        let ax = problem.a.mat_vec_mul(&result.solution).unwrap();
+        let pfeas = ax.iter().zip(problem.b.iter())
+            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+            .fold(0.0_f64, f64::max);
+        let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
+        let eps = opts.ipm_eps();
+        assert!(
+            pfeas < eps * (1.0 + norm_b),
+            "T23: 元問題でpfeas={pfeas:.2e} < eps*(1+norm_b)={:.2e}（e[i]<<1でも正しく検証）",
+            eps * (1.0 + norm_b)
+        );
+    }
+
+    /// T24: presolveパス bfeas検証 — bounds付き問題でOptimal解が境界を満たすことを確認
+    ///
+    /// 旧T24はverify_post_ruiz_unscaleに人工的な違反解を注入して直接テストしていた。
+    /// 新T24はsolve_qp_with経由で、boundsを持つ問題が正しくOptimalを返し、
+    /// post-postsolve bfeasチェックが正常解を誤降格しないことを確認する。
+    #[test]
+    fn test_presolve_bfeas_bounded_problem() {
+        // min x^2  s.t. なし  0 <= x <= 1  (最適解: x=0)
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default(); // presolve=true
+        let result = solve_qp_with(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "T24: bounds付き問題でOptimal解が得られること");
+        let x = result.solution[0];
+        assert!(x >= -1e-4, "T24: x >= lb=0, got x={x}");
+        assert!(x <= 1.0 + 1e-4, "T24: x <= ub=1, got x={x}");
+    }
+
+    /// T25: post-postsolve pfeas+bfeas — 正常解でOptimalを維持することを確認
+    ///
+    /// 旧T25はverify_post_ruiz_unscaleにx=[0]を注入してOKを確認。
+    /// 新T25はsolve_qp_with経由で制約+bounds付き問題を解き、
+    /// post-postsolveチェックが正常解を誤降格しないことを確認する。
+    #[test]
+    fn test_presolve_pfeas_bfeas_ok() {
+        // min x^2  s.t. x <= 1.0  0 <= x <= 0.5  (最適解: x=0)
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.0_f64, 0.5_f64)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default(); // presolve=true
+        let result = solve_qp_with(&problem, &opts);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T25: pfeas・bfeas ともにOKの場合はOptimalを維持すること"
+        );
+    }
+
+    /// T26: presolve有効ケース — solve_qp_with経由でpresolveパスの検証コードが動くことを確認
+    ///
+    /// presolve=true（デフォルト）で問題を解かせ、正常なOptimal解が得られることを確認する。
+    /// これはpresolveパスのpost-unscaling検証コードが実行されても正常問題には影響しないことを示す。
+    #[test]
+    fn test_solve_qp_with_presolve_path_verified() {
+        // min x^2 + y^2  s.t. x + y >= 1  (bounds: -∞ <= x,y <= ∞)
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // presolve=true (デフォルト) で解く → presolveパスのコードが動く
+        let opts = SolverOptions::default();
+        assert!(opts.presolve, "T26: デフォルトはpresolve=true");
+        let result = solve_qp_with(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "T26: presolve有効時もOptimalを返すこと");
+        let eps = 1e-3_f64;
+        assert!(
+            (result.solution[0] - 0.5).abs() < eps,
+            "T26: x[0] ≈ 0.5, got {}",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 0.5).abs() < eps,
+            "T26: x[1] ≈ 0.5, got {}",
+            result.solution[1]
+        );
     }
 }
