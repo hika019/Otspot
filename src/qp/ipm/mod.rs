@@ -163,9 +163,54 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
     }
 }
 
+/// QPの双対実現可能性 (dfeas) を検証し、超過していれば SuboptimalSolution に降格する
+///
+/// dfeas = ||Q*x + A^T*y + c||_inf
+/// 無制約QP（A=0）では A^T*y = 0 として計算する。
+///
+/// # 引数
+/// `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
+///
+/// # 適用条件
+/// 有限な bounds が存在する場合、dual_solution には bounds の双対変数
+/// （境界制約のラグランジュ乗数）が含まれないため dfeas の計算が不完全になる。
+/// その場合は検証をスキップして Optimal を返す（安全側）。
+fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], threshold: f64) -> SolveStatus {
+    // 有限な bounds が存在する場合: bound duals が dual_solution に含まれないため
+    // dfeas = ||Q*x + A^T*y + c||_inf が不完全になる。検証をスキップする（安全側）
+    if !problem.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite()) {
+        return SolveStatus::Optimal;
+    }
+    let n = x.len();
+    // Q*x
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return SolveStatus::Optimal, // 計算失敗時はstatusを保持（安全側）
+    };
+    // A^T*y（無制約QPではa.nrows==0なのでzeroベクトル）
+    let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
+        match problem.a.transpose().mat_vec_mul(y) {
+            Ok(v) => v,
+            Err(_) => return SolveStatus::Optimal, // 計算失敗時はstatusを保持（安全側）
+        }
+    } else {
+        vec![0.0; n]
+    };
+    // dfeas = ||Q*x + A^T*y + c||_inf
+    let dfeas = (0..n)
+        .map(|i| (qx[i] + aty[i] + problem.c[i]).abs())
+        .fold(0.0_f64, f64::max);
+    if dfeas < threshold {
+        SolveStatus::Optimal
+    } else {
+        // dfeas違反: 双対実現可能性を満たさない偽Optimal
+        SolveStatus::SuboptimalSolution
+    }
+}
+
 /// スケール済み IPM 結果を元のスケールに逆変換する
 ///
-/// Optimal ステータスの場合、元空間で pfeas と bfeas を再計算し、
+/// Optimal ステータスの場合、元空間で pfeas・bfeas・dfeas を再計算し、
 /// それぞれの許容誤差を超えていれば SuboptimalSolution に降格する（偽Optimal防止）。
 fn unscale_ipm_result(
     result: SolverResult,
@@ -180,6 +225,20 @@ fn unscale_ipm_result(
             // post-unscaling検証: 元空間で primal feasibility (pfeas) と
             // bounds feasibility (bfeas) を確認。
             // scaled空間でeps以下でも、unscale後に残差が増幅される問題（偽Optimal）を検出する
+            // dfeas閾値: Ruizスケーリングの増幅係数を考慮して計算する。
+            // dfeas_orig ≤ eps * (1+norm_c_s) / (scaler.c * d_min) の理論上限に
+            // 安全係数10を掛けて浮動小数点誤差とIPM停止タイミングのずれを吸収する。
+            // norm_c_s = scaled空間でのcノルム = scaler.c * max_j |scaler.d[j] * c[j]|
+            let d_min = if scaler.d.is_empty() {
+                1.0
+            } else {
+                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+            };
+            let norm_c_s = scaler.d.iter().enumerate()
+                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -190,8 +249,13 @@ fn unscale_ipm_result(
                             .fold(0.0_f64, f64::max);
                         let norm_b = norm_inf(&problem.b).max(1.0);
                         if pfeas < eps * (1.0 + norm_b) {
-                            // pfeas OK: bfeas も検証
-                            check_bfeas_status(&x, &problem.bounds, eps)
+                            // pfeas OK: bfeas → dfeas の順で検証
+                            let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
+                            if bfeas_status == SolveStatus::Optimal {
+                                check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                            } else {
+                                bfeas_status
+                            }
                         } else {
                             // 偽Optimal検出: scaled空間での収束判定を元空間で再検証した結果、不合格
                             SolveStatus::SuboptimalSolution
@@ -200,8 +264,13 @@ fn unscale_ipm_result(
                     Err(_) => SolveStatus::Optimal, // mat_vec_mul失敗時はstatusを保持（安全側）
                 }
             } else {
-                // 制約なし問題: pfeas検証不要だがbfeasは検証
-                check_bfeas_status(&x, &problem.bounds, eps)
+                // 制約なし問題: pfeas検証不要だがbfeas → dfeas は検証
+                let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
+                if bfeas_status == SolveStatus::Optimal {
+                    check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                } else {
+                    bfeas_status
+                }
             };
             SolverResult {
                 objective: obj_orig,
@@ -576,6 +645,95 @@ mod tests {
         );
     }
 
+    /// IPM-T12: post-unscaling dfeas違反の検出テスト
+    ///
+    /// dfeas = ||Q*x + A^T*y + c||_inf が閾値を大幅超過する mock 解を渡したとき
+    /// unscale_ipm_result が Optimal を返さないことを確認する。
+    ///
+    /// 設定:
+    ///   問題: min x^2 + x  (Q=[[2.0]], c=[1.0], 制約なし)
+    ///   真の最適解: x* = -0.5 (dfeas=0)
+    ///   mock解: x=[10.0], y=[]
+    ///   dfeas = |2*10 + 1| = 21 >> eps*(1+1) ≈ 2e-6
+    #[test]
+    fn test_ipm_dfeas_violation_detected() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c_vec = vec![1.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        // 恒等スケーラー
+        let scaler = RuizScaler::new(1, 0);
+
+        // mock解: x=10.0 → dfeas = |2*10 + 1| = 21 >> eps*(1+1)
+        let mock_result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![10.0],
+            dual_solution: vec![],
+            objective: 110.0,
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
+
+        // dfeas 超過 → 偽Optimal → SuboptimalSolution に降格
+        assert_ne!(
+            result.status,
+            SolveStatus::Optimal,
+            "IPM-T12: dfeas違反でOptimalを返してはならない。got {:?}",
+            result.status
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::SuboptimalSolution,
+            "IPM-T12: 降格先はSuboptimalSolutionであること"
+        );
+    }
+
+    /// IPM-T13: post-unscaling dfeas正常（Optimal維持）テスト
+    ///
+    /// dfeas が閾値内に収まる真の最適解を mock で渡したとき
+    /// unscale_ipm_result が Optimal を維持することを確認する。
+    ///
+    /// 設定:
+    ///   問題: min x^2 + x  (Q=[[2.0]], c=[1.0], 制約なし)
+    ///   mock解: x=-0.5 (真の最適解)
+    ///   dfeas = |2*(-0.5) + 1| = 0 < eps*(1+1)
+    #[test]
+    fn test_ipm_dfeas_within_tolerance_preserved() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c_vec = vec![1.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        // 恒等スケーラー
+        let scaler = RuizScaler::new(1, 0);
+
+        // mock解: x=-0.5 → dfeas = |2*(-0.5) + 1| = 0.0 < eps*(1+1)
+        let mock_result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![-0.5],
+            dual_solution: vec![],
+            objective: -0.25,
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
+
+        // dfeas = 0 < eps*(1+1) → 真のOptimal → Optimalを維持すること
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "IPM-T13: dfeas許容内の解はOptimalを維持すること"
+        );
+    }
+
     /// IPM-T7: Ruiz スケーリング有無で同一解が得られることを確認
     /// T1 と同じ問題 (min x^2+y^2, s.t. x+y>=1) で比較
     #[test]
@@ -598,4 +756,5 @@ mod tests {
         close(result_ruiz.solution[1], result_no_ruiz.solution[1], "IPM-T7: x[1]");
         close(result_ruiz.objective, result_no_ruiz.objective, "IPM-T7: objective");
     }
+
 }
