@@ -239,7 +239,7 @@ fn unscale_ipm_result(
                 .fold(0.0_f64, f64::max)
                 .max(1.0);
             let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
-            let status = if problem.num_constraints > 0 {
+            let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
                         let pfeas: f64 = ax
@@ -248,7 +248,9 @@ fn unscale_ipm_result(
                             .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
                             .fold(0.0_f64, f64::max);
                         let norm_b = norm_inf(&problem.b).max(1.0);
-                        if pfeas < eps * (1.0 + norm_b) {
+                        // 元空間pfeasでfinal_residualsを更新（dfeas/gapはscaled値を流用）
+                        let orig_resid = result.final_residuals.map(|(_, d, g)| (pfeas, d, g));
+                        let status = if pfeas < eps * (1.0 + norm_b) {
                             // pfeas OK: bfeas → dfeas の順で検証
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
@@ -259,24 +261,27 @@ fn unscale_ipm_result(
                         } else {
                             // 偽Optimal検出: scaled空間での収束判定を元空間で再検証した結果、不合格
                             SolveStatus::SuboptimalSolution
-                        }
+                        };
+                        (status, orig_resid)
                     }
-                    Err(_) => SolveStatus::Optimal, // mat_vec_mul失敗時はstatusを保持（安全側）
+                    Err(_) => (SolveStatus::Optimal, result.final_residuals), // mat_vec_mul失敗時はstatusを保持（安全側）
                 }
             } else {
                 // 制約なし問題: pfeas検証不要だがbfeas → dfeas は検証
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                if bfeas_status == SolveStatus::Optimal {
+                let status = if bfeas_status == SolveStatus::Optimal {
                     check_dfeas_status(problem, &x, &y, dfeas_threshold)
                 } else {
                     bfeas_status
-                }
+                };
+                (status, result.final_residuals)
             };
             SolverResult {
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,
                 status,
+                final_residuals: orig_residuals,
                 ..result
             }
         }

@@ -62,6 +62,24 @@ pub enum QualityRank {
     Optimal = 2,
 }
 
+/// 両Optimal時の残差比較スコアを計算する（小さいほど良い解）。
+///
+/// score = max(pfeas/(1+norm_b), dfeas/(1+norm_c))
+/// final_residualsがNoneの場合はf64::INFINITYを返す（最低優先）。
+#[cfg(feature = "parallel")]
+fn residual_score(result: &SolverResult, problem: &QpProblem) -> f64 {
+    match result.final_residuals {
+        Some((pfeas, dfeas, _gap)) => {
+            let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
+            let norm_c = problem.c.iter().fold(0.0_f64, |a, &ci| a.max(ci.abs())).max(1.0);
+            let pfeas_norm = pfeas / (1.0 + norm_b);
+            let dfeas_norm = dfeas / (1.0 + norm_c);
+            pfeas_norm.max(dfeas_norm)
+        }
+        None => f64::INFINITY,
+    }
+}
+
 #[cfg(feature = "parallel")]
 fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
     match result.status {
@@ -207,7 +225,22 @@ fn solve_qp_concurrent(
                     {
                         cancel_flag.store(true, Ordering::Relaxed);
                     }
-                    let should_update = best_ranked.as_ref().map(|(br, _)| r > *br).unwrap_or(true);
+                    let should_update = match &best_ranked {
+                        None => true,
+                        Some((br, prev_result)) => {
+                            if r > *br {
+                                true
+                            } else if r == *br {
+                                // 同ランク: 正規化最大残差で比較（小さい方が良い）
+                                // score差 < 1e-12 なら先着を維持（ケース5: 決定論性保証）
+                                let score_new = residual_score(&result, problem);
+                                let score_prev = residual_score(prev_result, problem);
+                                score_new < score_prev - 1e-12
+                            } else {
+                                false
+                            }
+                        }
+                    };
                     if should_update {
                         best_ranked = Some((r, result));
                     }
@@ -867,6 +900,163 @@ mod tests {
         assert!((result.solution[0] - 0.5).abs() < EPS, "T20: x[0] ≈ 0.5");
         assert!((result.solution[1] - 0.5).abs() < EPS, "T20: x[1] ≈ 0.5");
         assert!((result.objective - 0.5).abs() < EPS, "T20: obj ≈ 0.5");
+    }
+
+    /// T-Concurrent-1: residual_score 単体テスト — score計算の正確性確認
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_residual_score_calculation() {
+        use crate::problem::SolveStatus;
+        // min x^2 + y^2  s.t. x+y >= 1（T1問題）
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // pfeas=0.01, dfeas=0.02 → score = max(0.01/2, 0.02/2) = 0.01
+        let result_good = SolverResult {
+            status: SolveStatus::Optimal,
+            final_residuals: Some((0.01, 0.02, 0.001)),
+            ..Default::default()
+        };
+        // pfeas=0.05, dfeas=0.02 → score = max(0.05/2, 0.02/2) = 0.025
+        let result_bad = SolverResult {
+            status: SolveStatus::Optimal,
+            final_residuals: Some((0.05, 0.02, 0.001)),
+            ..Default::default()
+        };
+        let score_good = residual_score(&result_good, &problem);
+        let score_bad = residual_score(&result_bad, &problem);
+        assert!(
+            score_good < score_bad,
+            "T-Concurrent-1: pfeas小さい方がscore小さいこと: good={score_good:.4e} < bad={score_bad:.4e}"
+        );
+
+        // final_residuals=None → INFINITY
+        let result_none = SolverResult {
+            status: SolveStatus::Optimal,
+            final_residuals: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            residual_score(&result_none, &problem),
+            f64::INFINITY,
+            "T-Concurrent-1: final_residuals=NoneならINFINITYを返すこと"
+        );
+    }
+
+    /// T-Concurrent-2: 両Optimal・scoreが同値（eps以内）→ 先着維持
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_residual_score_same_value_keeps_first() {
+        use crate::problem::SolveStatus;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        // 全く同じスコアの2つの結果
+        let result_first = SolverResult {
+            status: SolveStatus::Optimal,
+            final_residuals: Some((0.01, 0.01, 0.001)),
+            ..Default::default()
+        };
+        let result_second = SolverResult {
+            status: SolveStatus::Optimal,
+            final_residuals: Some((0.01, 0.01, 0.001)),
+            ..Default::default()
+        };
+        let score_first = residual_score(&result_first, &problem);
+        let score_second = residual_score(&result_second, &problem);
+        // score差 < 1e-12 なら先着維持（should_update = false）
+        let should_update = score_second < score_first - 1e-12;
+        assert!(
+            !should_update,
+            "T-Concurrent-2: score同値の場合は先着を維持すること（should_update=false）"
+        );
+    }
+
+    /// T-Concurrent-3: Optimal + Feasible → score不問でOptimalが採用される
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_quality_rank_optimal_beats_feasible() {
+        use crate::problem::SolveStatus;
+        // QualityRankはOptimal > Feasibleなのでrankで比較すればOptimalが勝つ
+        let result_optimal = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.5, 0.5],
+            final_residuals: Some((0.9, 0.9, 0.001)), // score高いがOptimal
+            ..Default::default()
+        };
+        let result_feasible = SolverResult {
+            status: SolveStatus::MaxIterations,
+            solution: vec![0.5, 0.5],
+            final_residuals: Some((0.0, 0.0, 0.0)),
+            ..Default::default()
+        };
+        let rank_opt = quality_rank_of(&result_optimal);
+        let rank_feas = quality_rank_of(&result_feasible);
+        assert_eq!(rank_opt, Some(QualityRank::Optimal), "T-Concurrent-3: Optimal rankはOptimal");
+        assert_eq!(rank_feas, Some(QualityRank::Feasible), "T-Concurrent-3: MaxIterations rankはFeasible");
+        assert!(
+            rank_opt.unwrap() > rank_feas.unwrap(),
+            "T-Concurrent-3: Optimal > Feasible なのでrankでOptimalが勝つこと"
+        );
+    }
+
+    /// T-Concurrent-4: 片方Optimal・片方NumericalError → Optimal側採用
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_quality_rank_optimal_beats_numerical_error() {
+        use crate::problem::SolveStatus;
+        let result_optimal = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.5, 0.5],
+            ..Default::default()
+        };
+        let result_err = SolverResult {
+            status: SolveStatus::NumericalError,
+            solution: vec![],
+            ..Default::default()
+        };
+        let rank_opt = quality_rank_of(&result_optimal);
+        let rank_err = quality_rank_of(&result_err);
+        assert_eq!(rank_opt, Some(QualityRank::Optimal), "T-Concurrent-4: Optimal rankはOptimal");
+        assert_eq!(rank_err, None, "T-Concurrent-4: NumericalError rankはNone");
+        // None は Some より小さい（should_update=trueになる）
+        assert!(
+            rank_opt > rank_err,
+            "T-Concurrent-4: Optimal(Some) > NumericalError(None)"
+        );
+    }
+
+    /// T-Concurrent-5: 片方Optimal・片方Infeasible → Optimal側採用
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_quality_rank_optimal_beats_infeasible() {
+        use crate::problem::SolveStatus;
+        let result_optimal = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.5, 0.5],
+            ..Default::default()
+        };
+        let result_infeas = SolverResult {
+            status: SolveStatus::Infeasible,
+            solution: vec![],
+            ..Default::default()
+        };
+        let rank_opt = quality_rank_of(&result_optimal);
+        let rank_inf = quality_rank_of(&result_infeas);
+        assert_eq!(rank_opt, Some(QualityRank::Optimal), "T-Concurrent-5: Optimal rankはOptimal");
+        assert_eq!(rank_inf, None, "T-Concurrent-5: Infeasible rankはNone（fallbackに回る）");
+        assert!(
+            rank_opt > rank_inf,
+            "T-Concurrent-5: Optimal(Some) > Infeasible(None)"
+        );
     }
 
     /// T22: QualityRank の Ord 比較
