@@ -29,6 +29,8 @@ pub(crate) const TAU: f64 = 0.995;
 pub(crate) const DELTA_MIN: f64 = 1e-8;
 /// n > LDL_THRESHOLD のとき IPM-Schur を augmented に委譲
 pub(crate) const LDL_THRESHOLD: usize = 20_000;
+/// eps事前調整の下限（数値精度限界）
+const EPS_FLOOR: f64 = 1e-12;
 
 // ---------------------------------------------------------------------------
 // Gondzio multiple centrality correctors パラメータ
@@ -66,7 +68,11 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
-            let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, options);
+            let amplification = compute_amplification(&scaler);
+            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
+            let mut adjusted_opts = options.clone();
+            adjusted_opts.ipm.eps = adjusted_eps;
+            let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts);
             return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
@@ -94,7 +100,11 @@ pub(crate) fn solve_qp_ipm_nystrom(problem: &QpProblem, options: &SolverOptions)
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
-            let scaled_result = step::solve_qp_ipm_nystrom_inner(&scaled_problem, options);
+            let amplification = compute_amplification(&scaler);
+            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
+            let mut adjusted_opts = options.clone();
+            adjusted_opts.ipm.eps = adjusted_eps;
+            let scaled_result = step::solve_qp_ipm_nystrom_inner(&scaled_problem, &adjusted_opts);
             return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
     }
@@ -122,13 +132,35 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
-            let scaled_result = step::solve_qp_ipm_schur_inner(&scaled_problem, options);
+            let amplification = compute_amplification(&scaler);
+            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
+            let mut adjusted_opts = options.clone();
+            adjusted_opts.ipm.eps = adjusted_eps;
+            let scaled_result = step::solve_qp_ipm_schur_inner(&scaled_problem, &adjusted_opts);
             return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
     step::solve_qp_ipm_schur_inner(problem, options)
+}
+
+/// Ruizスケーリングによる残差増幅率を計算する。
+///
+/// pfeas増幅: 1/e_min、dfeas増幅: 1/(c * d_min) の最大を返す。
+/// IPM内部のepsをtighterに設定するために使用する。
+fn compute_amplification(scaler: &RuizScaler) -> f64 {
+    let e_min = if scaler.e.is_empty() {
+        1.0
+    } else {
+        scaler.e.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+    };
+    let d_min = if scaler.d.is_empty() {
+        1.0
+    } else {
+        scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+    };
+    (1.0 / e_min).max(1.0 / (scaler.c * d_min))
 }
 
 /// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する
@@ -736,6 +768,44 @@ mod tests {
             result.status,
             SolveStatus::Optimal,
             "IPM-T13: dfeas許容内の解はOptimalを維持すること"
+        );
+    }
+
+    /// IPM-T14: compute_amplification 計算検証
+    ///
+    /// e_min=0.1, d_min=0.01, c=1.0 → amplification=max(1/0.1, 1/(1.0*0.01))=max(10.0, 100.0)=100.0
+    #[test]
+    fn test_compute_amplification_calculation() {
+        let mut scaler = RuizScaler::new(2, 2);
+        scaler.d = vec![0.01, 1.0]; // d_min=0.01
+        scaler.e = vec![0.1, 1.0]; // e_min=0.1
+        scaler.c = 1.0;
+        let amp = compute_amplification(&scaler);
+        assert!(
+            (amp - 100.0).abs() < 1e-10,
+            "IPM-T14: expected amplification=100.0, got {:.6}",
+            amp
+        );
+    }
+
+    /// IPM-T15: 強スケーリング環境での adjusted_eps 確認
+    ///
+    /// amplification > 1.0 → adjusted_eps = user_eps / amplification < user_eps であること
+    #[test]
+    fn test_adjusted_eps_less_than_user_eps() {
+        let mut scaler = RuizScaler::new(2, 1);
+        scaler.d = vec![0.1, 0.5]; // d_min=0.1
+        scaler.e = vec![0.5];      // e_min=0.5
+        scaler.c = 1.0;
+        let amp = compute_amplification(&scaler);
+        assert!(amp > 1.0, "IPM-T15: amplification > 1.0 を期待, got {:.6}", amp);
+        let user_eps = 1e-6_f64;
+        let adjusted_eps = (user_eps / amp).max(EPS_FLOOR);
+        assert!(
+            adjusted_eps < user_eps,
+            "IPM-T15: adjusted_eps ({:.2e}) < user_eps ({:.2e}) であること",
+            adjusted_eps,
+            user_eps
         );
     }
 
