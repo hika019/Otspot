@@ -112,13 +112,16 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         // μ = s^T y / m_ext（相補性ギャップ）
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
 
-        // 収束判定
+        // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
+        // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
-        let dual_res = norm_inf(&r_d) / norm_c;
-        let prim_res = norm_inf(&r_p) / norm_b;
+        let eps = options.ipm_eps();
 
-        if dual_res < options.ipm_eps() && prim_res < options.ipm_eps() && mu < options.ipm_eps() {
+        if norm_inf(&r_d) < eps * (1.0 + norm_c)
+            && norm_inf(&r_p) < eps * (1.0 + norm_b)
+            && mu < eps
+        {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
@@ -405,13 +408,16 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         // μ = s^T y / m_ext（相補性ギャップ）
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
 
-        // 収束判定
+        // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
+        // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
-        let dual_res = norm_inf(&r_d) / norm_c;
-        let prim_res = norm_inf(&r_p) / norm_b;
+        let eps = options.ipm_eps();
 
-        if dual_res < options.ipm_eps() && prim_res < options.ipm_eps() && mu < options.ipm_eps() {
+        if norm_inf(&r_d) < eps * (1.0 + norm_c)
+            && norm_inf(&r_p) < eps * (1.0 + norm_b)
+            && mu < eps
+        {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
@@ -722,12 +728,16 @@ pub(crate) fn solve_qp_ipm_nystrom_inner(
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>()
             / m_ext as f64;
 
+        // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
+        // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
-        let dual_res = norm_inf(&r_d) / norm_c;
-        let prim_res = norm_inf(&r_p) / norm_b;
+        let eps = options.ipm_eps();
 
-        if dual_res < options.ipm_eps() && prim_res < options.ipm_eps() && mu < options.ipm_eps() {
+        if norm_inf(&r_d) < eps * (1.0 + norm_c)
+            && norm_inf(&r_p) < eps * (1.0 + norm_b)
+            && mu < eps
+        {
             status = SolveStatus::Optimal;
             final_iter = iter;
             break;
