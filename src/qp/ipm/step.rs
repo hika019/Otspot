@@ -676,6 +676,10 @@ pub(crate) fn solve_qp_ipm_nystrom_inner(
     }
 
     // 小規模問題は Schur path の DirectLDL に委譲（Nyström のオーバーヘッドを避ける）
+    // 根拠: 効率性基準（数学的精度要件ではない）
+    //   n < 500: Schur+LDL の直接法が安価（O(n^3) でも n≤500 なら高速）かつ安定
+    //   n ≥ 500: LDL 因子化コストが増大し、Nyström PCG（低ランク近似+CG反復）が有利になる
+    //   値 500 は実験的に定めた効率境界であり、Nyström の近似精度が n に依存するわけではない。
     const NYSTROM_THRESHOLD: usize = 500;
     if n < NYSTROM_THRESHOLD {
         return solve_qp_ipm_schur_inner(problem, options);
