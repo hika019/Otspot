@@ -16,6 +16,7 @@ use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
+use self::kkt::norm_inf;
 
 // ---------------------------------------------------------------------------
 // IPM 固定パラメータ
@@ -66,7 +67,7 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, options);
-            return unscale_ipm_result(scaled_result, &scaler);
+            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
@@ -94,7 +95,7 @@ pub(crate) fn solve_qp_ipm_nystrom(problem: &QpProblem, options: &SolverOptions)
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let scaled_result = step::solve_qp_ipm_nystrom_inner(&scaled_problem, options);
-            return unscale_ipm_result(scaled_result, &scaler);
+            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
     }
 
@@ -122,7 +123,7 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let scaled_result = step::solve_qp_ipm_schur_inner(&scaled_problem, options);
-            return unscale_ipm_result(scaled_result, &scaler);
+            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
@@ -131,9 +132,51 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
 }
 
 /// スケール済み IPM 結果を元のスケールに逆変換する
-fn unscale_ipm_result(result: SolverResult, scaler: &RuizScaler) -> SolverResult {
+///
+/// Optimal ステータスの場合、元空間で pfeas = max(0, max_i(A_i*x - b_i)) を再計算し、
+/// eps*(1+norm_b_original) を超えていれば MaxIterations に降格する（偽Optimal防止）。
+fn unscale_ipm_result(
+    result: SolverResult,
+    scaler: &RuizScaler,
+    problem: &QpProblem,
+    eps: f64,
+) -> SolverResult {
     match result.status {
-        SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::MaxIterations => {
+        SolveStatus::Optimal => {
+            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let obj_orig = result.objective / scaler.c;
+            // post-unscaling検証: 元空間で primal feasibility を確認
+            // scaled空間でeps以下でも、unscale後に残差が増幅される問題（偽Optimal）を検出する
+            let status = if problem.num_constraints > 0 {
+                match problem.a.mat_vec_mul(&x) {
+                    Ok(ax) => {
+                        let pfeas: f64 = ax
+                            .iter()
+                            .zip(problem.b.iter())
+                            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            .fold(0.0_f64, f64::max);
+                        let norm_b = norm_inf(&problem.b).max(1.0);
+                        if pfeas < eps * (1.0 + norm_b) {
+                            SolveStatus::Optimal
+                        } else {
+                            // 偽Optimal検出: scaled空間での収束判定を元空間で再検証した結果、不合格
+                            SolveStatus::MaxIterations
+                        }
+                    }
+                    Err(_) => SolveStatus::Optimal, // mat_vec_mul失敗時はstatusを保持（安全側）
+                }
+            } else {
+                SolveStatus::Optimal // 制約なし問題はpost-unscaling検証不要
+            };
+            SolverResult {
+                objective: obj_orig,
+                solution: x,
+                dual_solution: y,
+                status,
+                ..result
+            }
+        }
+        SolveStatus::Timeout | SolveStatus::MaxIterations => {
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let obj_orig = result.objective / scaler.c;
             SolverResult {
@@ -316,6 +359,101 @@ mod tests {
         );
     }
 
+
+    /// IPM-T8: post-unscaling 偽Optimal検出テスト
+    ///
+    /// scaled空間での収束を満たしているが元空間で許容誤差を超過する SolverResult を
+    /// unscale_ipm_result に渡し、Optimal が返らないことを確認する。
+    ///
+    /// 設定:
+    ///   問題: min x^2  s.t. x <= 0.5  (n=1, m=1, A=[[1.0]], b=[0.5])
+    ///   RuizScaler: d=[2.0], e=[1.0], c=1.0
+    ///   mock解: x_scaled=[1.0]  → x_orig = d[0]*x_s[0] = 2.0
+    ///   pfeas = A*x_orig - b = 2.0 - 0.5 = 1.5  >> eps*(1+0.5) ≈ 1.5e-6
+    #[test]
+    fn test_ipm_post_unscaling_false_optimal_detection() {
+        // 問題構築: min x^2  s.t. x <= 0.5
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c_vec = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![0.5];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        // RuizScaler を手動設定: d=[2.0] により x_orig = 2.0*x_scaled
+        let mut scaler = RuizScaler::new(1, 1);
+        scaler.d = vec![2.0];
+        scaler.e = vec![1.0];
+        scaler.c = 1.0;
+
+        // scaled解 x_scaled=[1.0] → x_orig=2.0  は  x<=0.5  を大幅違反
+        let mock_result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],      // scaled x_s
+            dual_solution: vec![0.0], // scaled y_s
+            objective: 1.0,
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
+
+        // pfeas = 2.0 - 0.5 = 1.5 >> eps*(1+0.5) → 偽Optimal → MaxIterations に降格
+        assert_ne!(
+            result.status,
+            SolveStatus::Optimal,
+            "IPM-T8: 偽Optimal（元空間pfeas超過）でOptimalを返してはならない。got {:?}",
+            result.status
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::MaxIterations,
+            "IPM-T8: 降格先はMaxIterationsであること"
+        );
+        // unscale後の解が正しいことも確認
+        close(result.solution[0], 2.0, "IPM-T8: x[0] unscaled");
+    }
+
+    /// IPM-T9: post-unscaling 正常Optimal確認テスト
+    ///
+    /// 元空間でも許容誤差内に収まる場合、Optimal がそのまま維持されることを確認。
+    ///
+    /// 設定:
+    ///   問題: min x^2  s.t. x <= 1.0  (n=1, m=1, A=[[1.0]], b=[1.0])
+    ///   RuizScaler: d=[1.0], e=[1.0], c=1.0 (恒等変換)
+    ///   mock解: x_scaled=[0.0]  → x_orig=0.0  pfeas=max(0, 0-1)=0 < eps
+    #[test]
+    fn test_ipm_post_unscaling_genuine_optimal_preserved() {
+        // 問題構築: min x^2  s.t. x <= 1.0
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c_vec = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        // 恒等スケーラー
+        let scaler = RuizScaler::new(1, 1);
+
+        // x_orig=0.0 は x<=1.0 を満たす (pfeas=0)
+        let mock_result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            objective: 0.0,
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
+
+        // pfeas = 0 < eps*(1+1) → 真のOptimal → そのままOptimalを返すべき
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "IPM-T9: 真のOptimal（元空間pfeas許容内）でOptimalが維持されること"
+        );
+    }
 
     /// IPM-T7: Ruiz スケーリング有無で同一解が得られることを確認
     /// T1 と同じ問題 (min x^2+y^2, s.t. x+y>=1) で比較
