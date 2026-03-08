@@ -22,6 +22,7 @@ const ZERO_B_TOL: f64 = 1e-12;
 // ───────────────────────── 型定義 ─────────────────────────
 
 /// 重要度
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
     /// 実行不可能または ill-posed。solve() は失敗する可能性が極めて高い
@@ -33,6 +34,7 @@ pub enum Severity {
 }
 
 /// 診断コード
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticCode {
     /// Q の対角要素が負 → Q は PSD でない可能性が高い（Error）

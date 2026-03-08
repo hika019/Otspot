@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// MPSファイルのパース中に発生するエラー
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum MpsError {
     /// ファイル読み込み時のI/Oエラー

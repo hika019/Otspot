@@ -448,13 +448,17 @@ mod tests {
         let opts_scale = SolverOptions { use_ruiz_scaling: true, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
         let r_scale = crate::qp::solve_qp_with(&problem, &opts_scale);
 
-        // 両方 Optimal
+        // 両方 Optimal (偽Optimal検出時はSuboptimalSolutionも許容)
         assert!(
-            r_no_scale.status == SolveStatus::Optimal || r_no_scale.status == SolveStatus::MaxIterations,
+            r_no_scale.status == SolveStatus::Optimal
+                || r_no_scale.status == SolveStatus::MaxIterations
+                || r_no_scale.status == SolveStatus::SuboptimalSolution,
             "no_scale: {:?}", r_no_scale.status
         );
         assert!(
-            r_scale.status == SolveStatus::Optimal || r_scale.status == SolveStatus::MaxIterations,
+            r_scale.status == SolveStatus::Optimal
+                || r_scale.status == SolveStatus::MaxIterations
+                || r_scale.status == SolveStatus::SuboptimalSolution,
             "scale: {:?}", r_scale.status
         );
 

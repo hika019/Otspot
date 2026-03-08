@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// QPSファイルのパース中に発生するエラー
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum QpsError {
     /// ファイルI/Oエラー
@@ -793,7 +794,7 @@ impl QpsParser {
 
         QpProblem::new(q, c, a, b, bounds).map_err(|e| QpsError::ParseError {
             line: 0,
-            message: e,
+            message: e.to_string(),
         })
     }
 }

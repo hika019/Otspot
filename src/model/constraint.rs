@@ -3,6 +3,7 @@
 use super::expression::Expression;
 
 /// Sense (direction) of a linear constraint.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstraintSense {
     /// Less-than-or-equal: `lhs <= rhs`

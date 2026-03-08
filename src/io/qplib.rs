@@ -53,6 +53,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// QPLIBパース中に発生するエラー
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum QplibError {
     /// ファイルI/Oエラー
@@ -320,7 +321,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
         .collect();
 
     QpProblem::new(q, c, a_mat, b_vec, bounds)
-        .map_err(QplibError::ParseError)
+        .map_err(|e| QplibError::ParseError(e.to_string()))
 }
 
 /// トークンストリーム（コメントを除去しながらフラットにトークン化）

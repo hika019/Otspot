@@ -51,6 +51,7 @@ use crate::tolerances::PIVOT_TOL;
 ///
 /// 順序: Optimal > Feasible > Approximate
 /// `PartialOrd/Ord` を実装することで `>` による比較が可能。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum QualityRank {
     /// 近似解（eps緩和・Timeout後の途中解など）
@@ -66,6 +67,9 @@ fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
     match result.status {
         SolveStatus::Optimal => Some(QualityRank::Optimal),
         SolveStatus::MaxIterations if !result.solution.is_empty() => {
+            Some(QualityRank::Feasible)
+        }
+        SolveStatus::SuboptimalSolution if !result.solution.is_empty() => {
             Some(QualityRank::Feasible)
         }
         SolveStatus::Timeout if !result.solution.is_empty() => {
@@ -322,6 +326,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             ..Default::default()
         },
         SolveStatus::MaxIterations => SolverResult::numerical_error(),
+        SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
         SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -458,7 +463,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     .fold(0.0_f64, f64::max);
                 let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
                 if pfeas >= eps * (1.0 + norm_b) {
-                    result.status = SolveStatus::MaxIterations;
+                    result.status = SolveStatus::SuboptimalSolution;
                 }
             }
         }
@@ -479,7 +484,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 })
                 .fold(0.0_f64, f64::max);
             if bfeas >= eps * (1.0 + bnd_norm) {
-                result.status = SolveStatus::MaxIterations;
+                result.status = SolveStatus::SuboptimalSolution;
             }
         }
     }

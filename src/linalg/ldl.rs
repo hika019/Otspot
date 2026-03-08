@@ -27,6 +27,7 @@ use faer::sparse::{SparseColMat, Triplet};
 use std::time::Instant;
 
 /// LDL分解エラー
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum LdlError {
     /// 行列が特異または不定（faer regularization でも処理不能な場合）

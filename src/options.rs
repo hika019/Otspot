@@ -16,6 +16,7 @@ use std::sync::{
 use std::time::Instant;
 
 /// QP ソルバー選択
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QpSolverChoice {
     /// Concurrent: 全ソルバー並列実行、最速の解を返す（デフォルト）
@@ -30,6 +31,7 @@ pub enum QpSolverChoice {
 }
 
 /// シンプレックス法の選択
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SimplexMethod {
     /// デフォルト: warm-startの有無で自動選択
@@ -69,6 +71,7 @@ pub struct WarmStartBasis {
 /// | Custom(v) | v       |
 ///
 /// `Medium` はデフォルト値（Gurobi と同等の精度水準 `eps=1e-6`）。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tolerance {
     /// 高精度: 精密な解が必要な研究・検証用途向け

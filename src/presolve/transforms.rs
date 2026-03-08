@@ -63,6 +63,7 @@ pub struct PresolveResult {
 }
 
 /// Presolve段階で検出された問題のステータス
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PresolveStatus {
     Infeasible,

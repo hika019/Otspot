@@ -9,6 +9,7 @@ use crate::sparse::CscMatrix;
 use std::fmt;
 
 /// LP問題における制約条件の種別
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstraintType {
     /// 以下（<=）
@@ -20,6 +21,7 @@ pub enum ConstraintType {
 }
 
 /// ソルバーの求解結果ステータス
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveStatus {
     /// 最適解が求まった
@@ -30,6 +32,8 @@ pub enum SolveStatus {
     Unbounded,
     /// 反復回数上限に到達した（最適性未確認）
     MaxIterations,
+    /// 解は見つかったが精度基準未達（偽Optimal検出: スケール解除後の残差超過）
+    SuboptimalSolution,
     /// タイムアウト（timeout_secs を超過した）
     Timeout,
     /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
@@ -43,6 +47,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Infeasible => write!(f, "Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
             SolveStatus::MaxIterations => write!(f, "MaxIterations"),
+            SolveStatus::SuboptimalSolution => write!(f, "SuboptimalSolution"),
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
         }

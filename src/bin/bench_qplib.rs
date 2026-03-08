@@ -113,6 +113,7 @@ fn main() {
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
         QpSolverChoice::IpmNystrom => "IPM-Nystrom",
+        _ => "Unknown",
     };
     println!("Solver: {}", solver_label);
 
@@ -207,6 +208,7 @@ fn main() {
             Some(QpSolverChoice::IpmSchur) => "ipm-schur",
             Some(QpSolverChoice::IpmNystrom) => "ipm-nystrom",
             Some(QpSolverChoice::Concurrent) => "concurrent",
+            Some(_) => "other",
             None => "-",
         };
         let resid_str = match result.final_residuals {
@@ -235,6 +237,10 @@ fn main() {
                 n_max_iter += 1;
                 ("MAXITER".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
             }
+            SolveStatus::SuboptimalSolution => {
+                n_max_iter += 1;
+                ("SUBOPTIMAL".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
+            }
             SolveStatus::Timeout => {
                 n_timeout += 1;
                 ("TIMEOUT".to_string(), format!("[{}] {:.3}s iters={}", method_label, elapsed_s, result.iterations))
@@ -242,6 +248,10 @@ fn main() {
             SolveStatus::NumericalError => {
                 n_fail += 1;
                 ("FAIL:NumericalError".to_string(), format!("[{}]", method_label))
+            }
+            _ => {
+                n_fail += 1;
+                ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
             }
         };
         println!(

@@ -7,6 +7,7 @@ use crate::io::mps::MpsError;
 ///
 /// 注意: Infeasible/Unbounded/MaxIterations は数学的結果であり、
 /// エラーではないため [`SolveStatus`](crate::problem::SolveStatus) で表現する。
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum SolverError {
     /// MPSファイルのパースエラー

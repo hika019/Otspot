@@ -184,8 +184,10 @@ fn main() {
         SolveStatus::Infeasible => "Infeasible",
         SolveStatus::Unbounded => "Unbounded",
         SolveStatus::MaxIterations => "MaxIterations",
+        SolveStatus::SuboptimalSolution => "SuboptimalSolution",
         SolveStatus::Timeout => "Timeout",
         SolveStatus::NumericalError => "NumericalError",
+        _ => "Unknown",
     };
 
     println!("{} {:.10e} {}", status_str, result.objective, result.iterations);

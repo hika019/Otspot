@@ -159,7 +159,7 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
         SolveStatus::Optimal
     } else {
         // bfeas違反: 境界制約を満たさない偽Optimal
-        SolveStatus::MaxIterations
+        SolveStatus::SuboptimalSolution
     }
 }
 
@@ -194,7 +194,7 @@ fn unscale_ipm_result(
                             check_bfeas_status(&x, &problem.bounds, eps)
                         } else {
                             // 偽Optimal検出: scaled空間での収束判定を元空間で再検証した結果、不合格
-                            SolveStatus::MaxIterations
+                            SolveStatus::SuboptimalSolution
                         }
                     }
                     Err(_) => SolveStatus::Optimal, // mat_vec_mul失敗時はstatusを保持（安全側）
@@ -433,7 +433,7 @@ mod tests {
         let eps = 1e-6_f64;
         let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
 
-        // pfeas = 2.0 - 0.5 = 1.5 >> eps*(1+0.5) → 偽Optimal → MaxIterations に降格
+        // pfeas = 2.0 - 0.5 = 1.5 >> eps*(1+0.5) → 偽Optimal → SuboptimalSolution に降格
         assert_ne!(
             result.status,
             SolveStatus::Optimal,
@@ -442,8 +442,8 @@ mod tests {
         );
         assert_eq!(
             result.status,
-            SolveStatus::MaxIterations,
-            "IPM-T8: 降格先はMaxIterationsであること"
+            SolveStatus::SuboptimalSolution,
+            "IPM-T8: 降格先はSuboptimalSolutionであること"
         );
         // unscale後の解が正しいことも確認
         close(result.solution[0], 2.0, "IPM-T8: x[0] unscaled");
@@ -524,7 +524,7 @@ mod tests {
         let eps = 1e-6_f64;
         let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
 
-        // bfeas = 0.5 >> eps*(1+0.5) ≈ 1.5e-6 → 偽Optimal → MaxIterations に降格
+        // bfeas = 0.5 >> eps*(1+0.5) ≈ 1.5e-6 → 偽Optimal → SuboptimalSolution に降格
         assert_ne!(
             result.status,
             SolveStatus::Optimal,
@@ -533,8 +533,8 @@ mod tests {
         );
         assert_eq!(
             result.status,
-            SolveStatus::MaxIterations,
-            "IPM-T10: 降格先はMaxIterationsであること"
+            SolveStatus::SuboptimalSolution,
+            "IPM-T10: 降格先はSuboptimalSolutionであること"
         );
     }
 

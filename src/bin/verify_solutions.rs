@@ -206,6 +206,7 @@ fn main() {
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
         QpSolverChoice::IpmNystrom => "IPM-Nystrom",
+        _ => "Unknown",
     };
 
     let dataset = if use_qplib { "QPLIB" } else { "Maros-Meszaros" };

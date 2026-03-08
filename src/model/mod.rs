@@ -251,6 +251,7 @@ impl Model {
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
+            SolveStatus::SuboptimalSolution => Err(ModelError::Internal("Suboptimal solution: precision criteria not met".to_string())),
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::Internal("Numerical error".to_string())),
         }
@@ -345,7 +346,7 @@ impl Model {
         };
 
         let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds)
-            .map_err(ModelError::Internal)?;
+            .map_err(|e| ModelError::Internal(e.to_string()))?;
 
         let mut opts = crate::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
@@ -400,6 +401,9 @@ impl Model {
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
                 Err(ModelError::Internal("QP iteration limit reached".to_string()))
+            }
+            SolveStatus::SuboptimalSolution => {
+                Err(ModelError::Internal("QP suboptimal solution: precision criteria not met".to_string()))
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => {
@@ -463,6 +467,7 @@ impl Index<Variable> for ModelResult {
 // ---------------------------------------------------------------------------
 
 /// Solver termination status for QP/LP solve operations.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SolveError {
     /// The problem has no feasible solution.
@@ -481,6 +486,7 @@ impl fmt::Display for SolveError {
 }
 
 /// Errors that can occur when building or solving a `Model`.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ModelError {
     /// `solve()` was called before `minimize()` or `maximize()`.

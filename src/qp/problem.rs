@@ -6,6 +6,24 @@
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
 
+/// [`QpProblem::new`] が返す専用エラー型
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum QpProblemError {
+    /// 行列・ベクトルの次元が不一致
+    DimensionMismatch(String),
+}
+
+impl std::fmt::Display for QpProblemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QpProblemError::DimensionMismatch(msg) => write!(f, "dimension mismatch: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for QpProblemError {}
+
 /// 二次計画問題: min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub
 #[derive(Debug, Clone)]
 pub struct QpProblem {
@@ -33,17 +51,23 @@ impl QpProblem {
         a: CscMatrix,
         b: Vec<f64>,
         bounds: Vec<(f64, f64)>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, QpProblemError> {
         let n = c.len();
         let m = b.len();
         if q.nrows != n || q.ncols != n {
-            return Err(format!("Q must be {}x{}, got {}x{}", n, n, q.nrows, q.ncols));
+            return Err(QpProblemError::DimensionMismatch(
+                format!("Q must be {}x{}, got {}x{}", n, n, q.nrows, q.ncols)
+            ));
         }
         if a.nrows != m || a.ncols != n {
-            return Err(format!("A must be {}x{}, got {}x{}", m, n, a.nrows, a.ncols));
+            return Err(QpProblemError::DimensionMismatch(
+                format!("A must be {}x{}, got {}x{}", m, n, a.nrows, a.ncols)
+            ));
         }
         if bounds.len() != n {
-            return Err(format!("bounds length must be {}, got {}", n, bounds.len()));
+            return Err(QpProblemError::DimensionMismatch(
+                format!("bounds length must be {}, got {}", n, bounds.len())
+            ));
         }
         Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m })
     }

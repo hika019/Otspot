@@ -17,6 +17,7 @@ use crate::tolerances::ZERO_TOL;
 // ---------------------------------------------------------------------------
 
 /// QP Presolve の処理状態
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QpPresolveStatus {
     /// 実行可能（通常）
