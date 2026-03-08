@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::{QpSolverChoice, SolverOptions};
+use solver::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -181,6 +182,19 @@ fn main() {
 
         let n = prob.num_vars;
         let m = prob.num_constraints;
+        let nnz_before = prob.q.nnz() + prob.a.nnz();
+
+        // presolve削減量を取得（ベンチ計装のみ）
+        let (n_after, m_after, nnz_after) = if opts.presolve {
+            let phase1 = run_qp_presolve_phase1(&prob, &opts);
+            let presolve_result = run_qp_presolve_phase2(phase1, &opts);
+            let rn = presolve_result.reduced.num_vars;
+            let rm = presolve_result.reduced.num_constraints;
+            let rnnz = presolve_result.reduced.q.nnz() + presolve_result.reduced.a.nnz();
+            (rn, rm, rnnz)
+        } else {
+            (n, m, nnz_before)
+        };
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
@@ -188,14 +202,25 @@ fn main() {
         let elapsed_s = start.elapsed().as_secs_f64();
         println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
 
+        let method_label = match result.solver_used {
+            Some(QpSolverChoice::Ipm) => "ipm",
+            Some(QpSolverChoice::IpmSchur) => "ipm-schur",
+            Some(QpSolverChoice::IpmNystrom) => "ipm-nystrom",
+            Some(QpSolverChoice::Concurrent) => "concurrent",
+            None => "-",
+        };
+        let resid_str = match result.final_residuals {
+            Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
+            None => String::new(),
+        };
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {
                     n_pass += 1;
-                    ("PASS".to_string(), format!("obj={:.6e}", result.objective))
+                    ("PASS".to_string(), format!("[{}] obj={:.6e}", method_label, result.objective))
                 } else {
                     n_fail += 1;
-                    ("FAIL:NumericalError".to_string(), format!("obj={}", result.objective))
+                    ("FAIL:NumericalError".to_string(), format!("[{}] obj={}", method_label, result.objective))
                 }
             }
             SolveStatus::Infeasible => {
@@ -208,20 +233,33 @@ fn main() {
             }
             SolveStatus::MaxIterations => {
                 n_max_iter += 1;
-                ("MAXITER".to_string(), format!("iters={}", result.iterations))
+                ("MAXITER".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;
-                ("TIMEOUT".to_string(), format!("{:.3}s", elapsed_s))
+                ("TIMEOUT".to_string(), format!("[{}] {:.3}s iters={}", method_label, elapsed_s, result.iterations))
             }
             SolveStatus::NumericalError => {
                 n_fail += 1;
-                ("FAIL:NumericalError".to_string(), String::new())
+                ("FAIL:NumericalError".to_string(), format!("[{}]", method_label))
             }
         };
         println!(
             "{:<24} {:>6} {:>6} {:>12} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note
+        );
+        // 追加情報行: solver詳細 + presolve削減量
+        let presolve_info = if n_after != n || m_after != m || nnz_after != nnz_before {
+            format!(
+                "n={}→{} m={}→{} nnz={}→{}",
+                n, n_after, m, m_after, nnz_before, nnz_after
+            )
+        } else {
+            format!("n={} m={} nnz={} (no reduction)", n, m, nnz_before)
+        };
+        println!(
+            "  => solver={} iters={} {} | presolve: {}",
+            method_label, result.iterations, resid_str, presolve_info
         );
     }
 

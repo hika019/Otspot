@@ -88,6 +88,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 
     let mut status = SolveStatus::MaxIterations;
     let mut final_iter = options.ipm.max_iter;
+    let mut final_residuals: Option<(f64, f64, f64)> = None;
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
@@ -111,6 +112,9 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 
         // μ = s^T y / m_ext（相補性ギャップ）
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
+
+        // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
+        final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
 
         // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
         // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
@@ -328,6 +332,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         bound_duals: vec![],
         active_set: vec![],
         iterations: final_iter,
+        final_residuals,
         ..Default::default()
     }
 }
@@ -384,6 +389,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
 
     let mut status = SolveStatus::MaxIterations;
     let mut final_iter = options.ipm.max_iter;
+    let mut final_residuals: Option<(f64, f64, f64)> = None;
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
@@ -407,6 +413,9 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
 
         // μ = s^T y / m_ext（相補性ギャップ）
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
+
+        // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
+        final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
 
         // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
         // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
@@ -639,6 +648,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         bound_duals: vec![],
         active_set: vec![],
         iterations: final_iter,
+        final_residuals,
         ..Default::default()
     }
 }
@@ -704,6 +714,7 @@ pub(crate) fn solve_qp_ipm_nystrom_inner(
 
     let mut status = SolveStatus::MaxIterations;
     let mut final_iter = options.ipm.max_iter;
+    let mut final_residuals: Option<(f64, f64, f64)> = None;
     let mut iter_seed: u64 = 0xdeadbeef;
 
     for iter in 0..options.ipm.max_iter {
@@ -727,6 +738,9 @@ pub(crate) fn solve_qp_ipm_nystrom_inner(
 
         let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>()
             / m_ext as f64;
+
+        // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
+        final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
 
         // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
         // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
@@ -1031,6 +1045,7 @@ pub(crate) fn solve_qp_ipm_nystrom_inner(
         bound_duals: vec![],
         active_set: vec![],
         iterations: final_iter,
+        final_residuals,
         ..Default::default()
     }
 }
