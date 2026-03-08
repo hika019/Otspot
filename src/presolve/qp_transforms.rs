@@ -37,7 +37,7 @@ pub(crate) enum QpPostsolveStep {
     /// 空列（Q列・A列ともゼロ）の復元
     EmptyCol { idx: usize, val: f64 },
     /// 大係数スケーリングの行スケール（#14 逆変換用: 双対変数のみに影響）
-    LargeCoeffRowScale { #[allow(dead_code)] row_scales: Vec<f64> },
+    LargeCoeffRowScale { row_scales: Vec<f64> },
 }
 
 /// Postsolve ステップ列（LIFO）
@@ -1182,7 +1182,7 @@ pub fn run_qp_presolve_phase1(
         }
         any_scaled
     };
-    let _ = large_coeff_row_scales; // 現在は双対逆変換の対象外
+    let _ = large_coeff_row_scales; // bool 戻り値を明示的に破棄（scales は postsolve_stack 内）
 
     // ==================================================================
     // #13: ruiz_scaling_connect() — Ruiz スケーリングをpresolveに接続
