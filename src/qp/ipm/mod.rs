@@ -81,37 +81,6 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
     step::solve_qp_ipm_inner(problem, options)
 }
 
-/// IPM Nyström PCG パスで QP を解く（cmd_295）
-///
-/// 正規方程式を Nyström 前処理付き CG で解く。n >= 500 の問題に有効。
-/// n < 500 では Schur+LDL に委譲。PCG 非収束時も DirectLDL にフォールバック。
-pub(crate) fn solve_qp_ipm_nystrom(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    if options.use_ruiz_scaling && problem.num_vars > 0 {
-        let n = problem.num_vars;
-        let m = problem.num_constraints;
-
-        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
-        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
-
-        let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
-
-        let (q_s, a_s, c_s, b_s, bounds_s) =
-            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
-
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
-            let amplification = compute_amplification(&scaler);
-            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
-            let mut adjusted_opts = options.clone();
-            adjusted_opts.ipm.eps = adjusted_eps;
-            let scaled_result = step::solve_qp_ipm_nystrom_inner(&scaled_problem, &adjusted_opts);
-            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
-        }
-    }
-
-    step::solve_qp_ipm_nystrom_inner(problem, options)
-}
-
 /// IPM Schur complement パスで QP を解く
 ///
 /// Concurrent Solver の 4 番目のバリアントとして使用。

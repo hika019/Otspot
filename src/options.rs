@@ -26,8 +26,6 @@ pub enum QpSolverChoice {
     Ipm,
     /// 強制 IPM Schur complement パス（--features parallel なしでも動作）
     IpmSchur,
-    /// 強制 IPM Nyström PCG パス（cmd_295: ランダム化前処理付き共役勾配法）
-    IpmNystrom,
 }
 
 /// シンプレックス法の選択

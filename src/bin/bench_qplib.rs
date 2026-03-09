@@ -112,7 +112,6 @@ fn main() {
         QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
-        QpSolverChoice::IpmNystrom => "IPM-Nystrom",
         _ => "Unknown",
     };
     println!("Solver: {}", solver_label);
@@ -206,7 +205,6 @@ fn main() {
         let method_label = match result.solver_used {
             Some(QpSolverChoice::Ipm) => "ipm",
             Some(QpSolverChoice::IpmSchur) => "ipm-schur",
-            Some(QpSolverChoice::IpmNystrom) => "ipm-nystrom",
             Some(QpSolverChoice::Concurrent) => "concurrent",
             Some(_) => "other",
             None => "-",
