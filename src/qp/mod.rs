@@ -155,37 +155,8 @@ fn solve_qp_concurrent(
     };
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    let problem_arc = Arc::new(problem.clone());
+    // Arc::new(problem.clone()) は不要: thread::scope により参照渡しが可能
     let (tx, rx) = mpsc::sync_channel::<SolverResult>(4);
-    let mut handles = Vec::with_capacity(2);
-
-    // IPM スレッド
-    {
-        let cancel = Arc::clone(&cancel_flag);
-        let prob = Arc::clone(&problem_arc);
-        let mut opts = options.clone();
-        opts.cancel_flag = Some(cancel);
-        let tx = tx.clone();
-        handles.push(std::thread::spawn(move || {
-            let r = ipm::solve_qp_ipm(&prob, &opts);
-            let _ = tx.send(r);
-        }));
-    }
-
-    // IPM-Schur スレッド
-    {
-        let cancel = Arc::clone(&cancel_flag);
-        let prob = Arc::clone(&problem_arc);
-        let mut opts = options.clone();
-        opts.cancel_flag = Some(cancel);
-        let tx = tx.clone();
-        handles.push(std::thread::spawn(move || {
-            let r = ipm::solve_qp_ipm_schur(&prob, &opts);
-            let _ = tx.send(r);
-        }));
-    }
-
-    drop(tx); // 全スレッドが tx を drop するまで rx.iter() は終了しない
 
     // 残り時間を計算（deadline が設定されている場合はその時点まで、なければ十分大きい値）
     let deadline = options.deadline.or_else(|| {
@@ -198,69 +169,92 @@ fn solve_qp_concurrent(
     let mut best_ranked: Option<(QualityRank, SolverResult)> = None;
     let mut fallback: Option<SolverResult> = None;
     let mut timed_out = false;
-    loop {
-        let remaining = deadline.map(|d| {
-            let now = std::time::Instant::now();
-            if d > now { d - now } else { std::time::Duration::ZERO }
-        }).unwrap_or(std::time::Duration::from_secs(3600));
 
-        match rx.recv_timeout(remaining) {
-            Ok(result) => {
-                let rank = quality_rank_of(&result);
-                if let Some(r) = rank {
-                    if r == QualityRank::Optimal
-                        && best_ranked.as_ref().map(|(br, _)| *br) != Some(QualityRank::Optimal)
-                    {
-                        cancel_flag.store(true, Ordering::Relaxed);
-                    }
-                    let should_update = match &best_ranked {
-                        None => true,
-                        Some((br, prev_result)) => {
-                            if r > *br {
-                                true
-                            } else if r == *br {
-                                // 同ランク: 正規化最大残差で比較（小さい方が良い）
-                                // score差 < 1e-12 なら先着を維持（ケース5: 決定論性保証）
-                                let score_new = residual_score(&result, problem);
-                                let score_prev = residual_score(prev_result, problem);
-                                score_new < score_prev - 1e-12
-                            } else {
-                                false
-                            }
+    // thread::scope を使用: スコープ終了時に全スレッドが確実にjoinされる。
+    // タイムアウト時も detach せずjoin → LDL因子化終了後にメモリが解放される。
+    // これにより 138問バッチ処理でのメモリ蓄積（旧実装: ~500-630MB/問）を解消する。
+    std::thread::scope(|s| {
+        // IPM スレッド
+        {
+            let cancel = Arc::clone(&cancel_flag);
+            let mut opts = options.clone();
+            opts.cancel_flag = Some(cancel);
+            let tx = tx.clone();
+            s.spawn(move || {
+                let r = ipm::solve_qp_ipm(problem, &opts);
+                let _ = tx.send(r);
+            });
+        }
+
+        // IPM-Schur スレッド
+        {
+            let cancel = Arc::clone(&cancel_flag);
+            let mut opts = options.clone();
+            opts.cancel_flag = Some(cancel);
+            let tx = tx.clone();
+            s.spawn(move || {
+                let r = ipm::solve_qp_ipm_schur(problem, &opts);
+                let _ = tx.send(r);
+            });
+        }
+
+        drop(tx); // 全スレッドが tx を drop するまで rx.recv_timeout が Disconnected を返さない
+
+        loop {
+            let remaining = deadline.map(|d| {
+                let now = std::time::Instant::now();
+                if d > now { d - now } else { std::time::Duration::ZERO }
+            }).unwrap_or(std::time::Duration::from_secs(3600));
+
+            match rx.recv_timeout(remaining) {
+                Ok(result) => {
+                    let rank = quality_rank_of(&result);
+                    if let Some(r) = rank {
+                        if r == QualityRank::Optimal
+                            && best_ranked.as_ref().map(|(br, _)| *br) != Some(QualityRank::Optimal)
+                        {
+                            cancel_flag.store(true, Ordering::Relaxed);
                         }
-                    };
-                    if should_update {
-                        best_ranked = Some((r, result));
+                        let should_update = match &best_ranked {
+                            None => true,
+                            Some((br, prev_result)) => {
+                                if r > *br {
+                                    true
+                                } else if r == *br {
+                                    // 同ランク: 正規化最大残差で比較（小さい方が良い）
+                                    // score差 < 1e-12 なら先着を維持（ケース5: 決定論性保証）
+                                    let score_new = residual_score(&result, problem);
+                                    let score_prev = residual_score(prev_result, problem);
+                                    score_new < score_prev - 1e-12
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+                        if should_update {
+                            best_ranked = Some((r, result));
+                        }
+                    } else if result.status == SolveStatus::Infeasible || fallback.is_none() {
+                        fallback = Some(result);
                     }
-                } else if result.status == SolveStatus::Infeasible || fallback.is_none() {
-                    fallback = Some(result);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // deadline 到達: cancel して残りスレッドを止める
+                    cancel_flag.store(true, Ordering::Relaxed);
+                    timed_out = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // 全スレッド完了
+                    break;
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // deadline 到達: cancel して残りスレッドを止める
-                cancel_flag.store(true, Ordering::Relaxed);
-                timed_out = true;
-                break;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // 全スレッド完了
-                break;
-            }
         }
-    }
-
-    if !timed_out {
-        for h in handles {
-            let _ = h.join();
-        }
-    }
-    // On timeout: handles are dropped here, detaching threads.
-    // Threads will self-terminate when checking cancel_flag at the
-    // next iteration boundary. This is safe because cancel_flag is
-    // already set to true before we reach here.
-    // NOTE: timeout accuracy = at most 1 LDL factorization extra
-    //       (typically < 1s for small/medium problems, up to tens of
-    //        seconds for very large problems n>100k).
+        // スコープ終了: 全スレッドが自動joinされる（timeout時も同様）
+        // NOTE: timeout accuracy = at most 1 LDL factorization extra
+        //       (typically < 1s for small/medium problems, up to tens of
+        //        seconds for very large problems n>100k).
+    });
 
     let best = match best_ranked {
         Some((_, result)) => Some(result),
