@@ -580,22 +580,38 @@ pub fn run_qp_presolve_phase1(
             continue;
         }
 
-        // c[j] から最適値を計算: min c[j]*x[j] s.t. a[i,j]*x[j] + rest <= b[i], lb <= x[j] <= ub
+        // c[j] と制約方向を考慮した最適値を計算（cmd_353 バグ修正: 正しい再実装）
+        // 制約: a[i,j]*x[j] + rest <= b[i], lb <= x[j] <= ub
+        // "aligned"ケース: 目的方向と制約緩和方向が一致 → 安全に固定可能
+        // "conflicting"ケース: 制約を締める方向に目的が引く → スキップ（IPMに委ねる）
         let (lb, ub) = bounds[j];
-        let val = if c[j] > ZERO_TOL {
-            // minimize: 小さいほど良い → lb が最適
+        let val = if c[j] > ZERO_TOL && a_ij > ZERO_TOL {
+            // aligned: c>0 (minimize x_j) かつ a>0 (小さいx_jは制約を緩める: b_new = b - a*lb ≥ b - a*ub)
+            // → val = lb（最小化 AND 制約緩和）
             if lb == f64::NEG_INFINITY { 0.0 } else { lb }
-        } else if c[j] < -ZERO_TOL {
-            // minimize c[j]*x[j] で c[j]<0: 大きいほど良い → ub が最適
+        } else if c[j] < -ZERO_TOL && a_ij < -ZERO_TOL {
+            // aligned: c<0 (maximize x_j) かつ a<0 (大きいx_jは制約を緩める: a<0ならa*ub < a*lb)
+            // → val = ub（最大化 AND 制約緩和）
             if ub == f64::INFINITY { 0.0 } else { ub }
+        } else if c[j].abs() <= ZERO_TOL {
+            // c=0: 制約を最も緩める方向に固定（b_newを最大化）
+            if a_ij > ZERO_TOL {
+                // b_new = b - a*x: xを小さくするとb_newが大きい → val = lb
+                if lb == f64::NEG_INFINITY { 0.0 } else { lb }
+            } else {
+                // b_new = b - a*x: a<0でxを大きくするとb_new = b - a*ub = b + |a|*ub が大きい → val = ub
+                if ub == f64::INFINITY { 0.0 } else { ub }
+            }
         } else {
-            // c[j]=0: lb が実行可能なら lb
-            if lb.is_finite() { lb } else if ub.is_finite() { ub } else { 0.0 }
+            // conflicting case: 目的と制約方向が相反するため、安全に固定できない
+            // → スキップしてIPMに委ねる
+            continue;
         };
 
         apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
         removed_cols[j] = true;
-        removed_rows[i] = true;
+        // removed_rows[i] は設定しない: 行 i は他変数への制約として保持 (cmd_353 バグ修正)
+        // 行 i が空になった場合は後続の #4 empty_rows_cols で除去される
         postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
     }
 
