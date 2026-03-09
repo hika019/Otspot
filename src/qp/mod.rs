@@ -450,6 +450,7 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let start_time = std::time::Instant::now();
     let mut current_opts = options.clone();
+    let mut first_result: Option<SolverResult> = None; // C-1: Ruiz無し再ソルブ失敗時フォールバック用
     loop {
         let presolve_result = if current_opts.presolve {
             let phase1 = run_qp_presolve_phase1(problem, &current_opts);
@@ -585,8 +586,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             };
             if has_time {
                 // 残り時間をdeadlineとして設定（二重カウント防止）
-                if let Some(d) = current_opts.deadline {
-                    current_opts.deadline = Some(d);
+                if current_opts.deadline.is_some() {
+                    // C-2: deadline自己代入（no-op）を削除。timeout_secs=Noneのみ設定
                     current_opts.timeout_secs = None;
                 } else if let Some(secs) = current_opts.timeout_secs {
                     let elapsed = start_time.elapsed().as_secs_f64();
@@ -596,8 +597,17 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     );
                     current_opts.timeout_secs = None;
                 }
+                first_result = Some(result); // C-1: 1st solve結果を保持（2nd solve失敗時フォールバック用）
                 current_opts.use_ruiz_scaling = false;
                 continue;
+            }
+        }
+        // C-1: Ruiz無し2nd solve結果の条件付き採用
+        // Optimal/SuboptimalSolutionのみ採用。Timeout/NumericalError/FAILは1st結果にフォールバック
+        if let Some(saved) = first_result.take() {
+            match result.status {
+                SolveStatus::Optimal | SolveStatus::SuboptimalSolution => {} // 2nd solve成功: resultを使用
+                _ => return saved, // 2nd solve失敗: 1st solve結果（SuboptimalSolution）を保持
             }
         }
         return result;
