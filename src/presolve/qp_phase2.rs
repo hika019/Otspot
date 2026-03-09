@@ -39,7 +39,8 @@ pub fn equality_constraint_qr(
     // QPLIB_8602 は m=105966, n≈1000 → 旧閾値 m>10000 でスキップ済み。
     // 計算量ベース閾値 m*n > 1e8 に変更: m=10000,n=100 の問題では実行可能になる。
     // PARAM: 閾値 1e8 = O(m_eq * n) の推定計算量ベース（Gaussian消去コスト）
-    if m * n > 100_000_000 || m <= n * 2 || n == 0 {
+    const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
+    if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * 2 || n == 0 {
         return;
     }
 
