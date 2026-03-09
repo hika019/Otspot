@@ -129,6 +129,17 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             break;
         }
 
+        // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
+        // （delta_min=1e-6 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        if mu < options.ipm.delta_min * 1e-2
+            && norm_inf(&r_d) < options.ipm.delta_min * 100.0
+            && norm_inf(&r_p) < options.ipm.delta_min * 100.0
+        {
+            status = SolveStatus::SuboptimalSolution;
+            final_iter = iter;
+            break;
+        }
+
         // δ を μ に追従して縮小（IP-PMM）
         let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
@@ -145,11 +156,11 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             break;
         }
 
-        // augmented KKT行列構築 + factorize（delta_p リトライ最大4回）
+        // augmented KKT行列構築 + factorize（delta_p リトライ最大10回, 上限1e0）
         // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
         let mut delta_p_retry = delta_p;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
-        for _retry in 0..4 {
+        for _retry in 0..10 {
             if timeout_ctx.should_stop() {
                 status = SolveStatus::Timeout;
                 final_iter = iter;
@@ -170,7 +181,10 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                     final_iter = iter;
                     break;
                 }
-                Err(_) => { delta_p_retry *= 10.0; }
+                Err(_) => {
+                    if delta_p_retry >= 1e0 { break; } // 上限到達→あきらめ
+                    delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+                }
             }
         }
         if status == SolveStatus::Timeout {
@@ -430,6 +444,17 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
             break;
         }
 
+        // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
+        // （delta_min=1e-6 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        if mu < options.ipm.delta_min * 1e-2
+            && norm_inf(&r_d) < options.ipm.delta_min * 100.0
+            && norm_inf(&r_p) < options.ipm.delta_min * 100.0
+        {
+            status = SolveStatus::SuboptimalSolution;
+            final_iter = iter;
+            break;
+        }
+
         // δ を μ に追従して縮小（IP-PMM）
         let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
@@ -448,10 +473,10 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
             break;
         }
 
-        // δ_p を ×10 ずつ増やして最大4回リトライ
+        // δ_p を ×10 ずつ増やして最大10回リトライ（上限1e0）
         let mut delta_p_retry = delta_p;
         let mut fac_opt = None;
-        for _retry in 0..4 {
+        for _retry in 0..10 {
             if timeout_ctx.should_stop() {
                 status = SolveStatus::Timeout;
                 final_iter = iter;
@@ -472,7 +497,10 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
                     final_iter = iter;
                     break;
                 }
-                Err(_) => { delta_p_retry *= 10.0; }
+                Err(_) => {
+                    if delta_p_retry >= 1e0 { break; } // 上限到達→あきらめ
+                    delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+                }
             }
         }
         if status == SolveStatus::Timeout {
