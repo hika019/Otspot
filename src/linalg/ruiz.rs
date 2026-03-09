@@ -157,6 +157,18 @@ impl RuizScaler {
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
         }
+
+        // Phase1: e[i]・d[j]下限クリッピング（最大増幅率1e4制限, cmd_340）
+        // 全反復完了後に一度だけ適用する（反復中に適用すると均衡化が不完全になる）
+        // unscale後の増幅率 = 1/e[i] を最大1e4に制限する
+        let e_floor: f64 = 1e-4;
+        for i in 0..m {
+            self.e[i] = self.e[i].max(e_floor);
+        }
+        let d_floor: f64 = 1e-4;
+        for j in 0..n {
+            self.d[j] = self.d[j].max(d_floor);
+        }
     }
 
     /// RHS（b）を含む行ノルムでRuiz equilibrationを実行（presolve用）
@@ -248,6 +260,16 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
+        }
+
+        // Phase1: e[i]・d[j]下限クリッピング（最大増幅率1e4制限, cmd_340）
+        let e_floor: f64 = 1e-4;
+        for i in 0..m {
+            self.e[i] = self.e[i].max(e_floor);
+        }
+        let d_floor: f64 = 1e-4;
+        for j in 0..n {
+            self.d[j] = self.d[j].max(d_floor);
         }
     }
 

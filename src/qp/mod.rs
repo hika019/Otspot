@@ -462,6 +462,7 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 ///
 /// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    let start_time = std::time::Instant::now();
     let presolve_result = if options.presolve {
         let phase1 = run_qp_presolve_phase1(problem, options);
         run_qp_presolve_phase2(phase1, options)
@@ -580,6 +581,39 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 result.bound_duals = z;
             }
             // else: bfeas起因のSuboptimalSolution維持
+        }
+    }
+    // Phase2: SuboptimalSolution時のRuiz無し再ソルブ（cmd_340）
+    // Ruiz unscale増幅起因のSuboptimalSolutionに対して、use_ruiz_scaling=falseで再ソルブを試みる
+    if result.status == SolveStatus::SuboptimalSolution && options.use_ruiz_scaling {
+        let has_time = if let Some(d) = options.deadline {
+            d > std::time::Instant::now() + std::time::Duration::from_secs_f64(0.5)
+        } else if let Some(secs) = options.timeout_secs {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            secs - elapsed > 0.5
+        } else {
+            true // タイムアウト設定なし → 制限なく再ソルブ
+        };
+        if has_time {
+            let mut opts_no_ruiz = options.clone();
+            opts_no_ruiz.use_ruiz_scaling = false;
+            // 残り時間をdeadlineとして設定（二重カウント防止）
+            if let Some(d) = options.deadline {
+                opts_no_ruiz.deadline = Some(d);
+                opts_no_ruiz.timeout_secs = None;
+            } else if let Some(secs) = options.timeout_secs {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let remaining = (secs - elapsed).max(0.0);
+                opts_no_ruiz.deadline = Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs_f64(remaining),
+                );
+                opts_no_ruiz.timeout_secs = None;
+            }
+            let result2 = solve_qp_with(problem, &opts_no_ruiz);
+            if result2.status == SolveStatus::Optimal {
+                return result2; // Ruiz無しで改善成功
+            }
+            // 改善しなければ元の結果を返す（安全）
         }
     }
     result

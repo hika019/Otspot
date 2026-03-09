@@ -123,8 +123,8 @@ mod tests {
             &mut x,
         );
         assert!(ok, "PCG should converge");
-        for i in 0..n {
-            assert!((x[i] - 1.0).abs() < 1e-8, "x[{i}]={}", x[i]);
+        for (i, &xi) in x.iter().enumerate() {
+            assert!((xi - 1.0).abs() < 1e-8, "x[{i}]={xi}");
         }
     }
 
