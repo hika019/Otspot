@@ -710,45 +710,6 @@ pub fn run_qp_presolve_phase1(
     }
 
     // ==================================================================
-    // #6: forced_constraints() — activity range から変数値が一意に決まる制約
-    // 固定後は #1 の処理で Q 更新を行う。
-    // ==================================================================
-    for i in 0..m {
-        if removed_rows[i] {
-            continue;
-        }
-        let active_entries: Vec<(usize, f64)> = row_entries[i]
-            .iter()
-            .filter(|&&(j, _)| !removed_cols[j])
-            .copied()
-            .collect();
-        let (row_lb, _, lb_fin, _) = activity_range(&active_entries, &bounds, None);
-
-        // Le 制約 Ax <= b で row_lb == b[i]（最小でも b[i]）なら全変数が forced
-        // 空行（active_entries=0）は trivially satisfied なので除去しない（#4が担当）
-        if active_entries.is_empty() {
-            continue;
-        }
-        if lb_fin && (row_lb - b[i]).abs() < ZERO_TOL {
-            // 全変数を forced 値で固定
-            for &(j, a_ij) in &active_entries {
-                if removed_cols[j] || a_ij.abs() < ZERO_TOL {
-                    continue;
-                }
-                let (lb_j, ub_j) = bounds[j];
-                // a_ij > 0 → x[j] = lb_j、a_ij < 0 → x[j] = ub_j
-                let val = if a_ij > 0.0 {
-                    if lb_j.is_finite() { lb_j } else { continue }
-                } else if ub_j.is_finite() { ub_j } else { continue };
-                apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
-                removed_cols[j] = true;
-                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
-            }
-            removed_rows[i] = true;
-        }
-    }
-
-    // ==================================================================
     // #7: free_col_substitution() — FR 変数を Eq 制約で消去
     // Q 非ゼロ要素が多い場合はスキップ（閾値: 列の非ゼロ数 > 50）。
     // QP では変数消去後に Q の更新が必要（rank-1 更新）のためコストが高い。
@@ -902,64 +863,56 @@ pub fn run_qp_presolve_phase1(
     // (未実装のためスキップ: コメントのみ)
 
     // ==================================================================
-    // #10: bounds_tightening() — 制約から変数範囲を絞り込む
-    // LP 版（activity range）と同じ。差分なし。
-    //
-    // 密行ガード: 行の活性変数数が DENSE_ROW_THRESHOLD を超える場合はスキップ。
-    // 理由: n>>m 問題（HUES-MOD/HUESTIS: n=10000, m=4）では各行に全変数が現れる。
-    // この場合、activity_range の残差 rest_lb=0（他の変数の最小貢献 = 0）となり
-    // implied_ub = b / a_ij という大雑把な値しか得られない。小さい a_ij（1e-12）に
-    // 対して implied_ub = b/1e-12 ≈ 5e14 という極大な上界が生成され、Ruiz スケーリング
-    // 後は 1e26 に拡大し KKT 条件数が悪化して IPM が TIMEOUT する。
-    // 密行では bounds_tightening の恩恵がなく、弊害のみ発生する。
-    const DENSE_ROW_THRESHOLD: usize = 500;
+    // #10: check_bounds_infeasibility() — implied bounds から lb>ub 逆転を検出
+    // bounds 更新は行わない（案A: infeasibility 検出専用）。
+    // 密行ガード: DENSE_ROW_THRESHOLD を超える行はスキップ（数値安定性のため）。
     // ==================================================================
-    for i in 0..m {
-        if removed_rows[i] {
-            continue;
-        }
-        let entries: Vec<(usize, f64)> = row_entries[i]
-            .iter()
-            .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
-            .copied()
-            .collect();
+    {
+        const DENSE_ROW_THRESHOLD: usize = 500;
+        // implied bounds: 制約から計算した各変数の implied lb/ub を追跡（実際の bounds は変更しない）
+        let mut impl_bounds: Vec<(f64, f64)> = bounds.clone();
 
-        // 密行は bounds_tightening をスキップ（IPM 条件数保護）
-        if entries.len() > DENSE_ROW_THRESHOLD {
-            continue;
-        }
+        for i in 0..m {
+            if removed_rows[i] {
+                continue;
+            }
+            let entries: Vec<(usize, f64)> = row_entries[i]
+                .iter()
+                .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
+                .copied()
+                .collect();
 
-        for &(j, a_ij) in &entries {
-            let (old_lb, old_ub) = bounds[j];
-            let (rest_lb, _rest_ub, rest_lb_fin, _rest_ub_fin) =
-                activity_range(&entries, &bounds, Some(j));
-
-            let mut new_lb = old_lb;
-            let mut new_ub = old_ub;
-
-            // Le 制約: Σ a*x <= b
-            if a_ij > 0.0 && rest_lb_fin {
-                let implied_ub = (b[i] - rest_lb) / a_ij;
-                // PARAM: 1e8 — implied_ub サニティ閾値。
-                // 元のubがINFかつ|implied|>1e8の場合はスキップ（範囲を「狭めた」とは言えず数値的に有害）。
-                // a_ij が微小な場合（例: 1e-12）に implied_ub ≈ 5e14 が生成されKKT条件数を悪化させる。
-                if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
-                    new_ub = implied_ub;
-                }
-            } else if a_ij < 0.0 && rest_lb_fin {
-                let implied_lb = (b[i] - rest_lb) / a_ij;
-                // PARAM: 1e8 — implied_lb サニティ閾値（上記と対称）。
-                if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
-                    new_lb = implied_lb;
-                }
+            if entries.len() > DENSE_ROW_THRESHOLD {
+                continue;
             }
 
-            if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
-                if new_lb > new_ub + ZERO_TOL {
-                    // bounds が逆転 → Infeasible。元問題に戻して solver に判定を委ねる
-                    return QpPresolveResult::infeasible(prob);
+            for &(j, a_ij) in &entries {
+                let (old_lb, old_ub) = impl_bounds[j];
+                let (rest_lb, _rest_ub, rest_lb_fin, _rest_ub_fin) =
+                    activity_range(&entries, &impl_bounds, Some(j));
+
+                let mut new_lb = old_lb;
+                let mut new_ub = old_ub;
+
+                if a_ij > 0.0 && rest_lb_fin {
+                    let implied_ub = (b[i] - rest_lb) / a_ij;
+                    if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
+                        new_ub = implied_ub;
+                    }
+                } else if a_ij < 0.0 && rest_lb_fin {
+                    let implied_lb = (b[i] - rest_lb) / a_ij;
+                    if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
+                        new_lb = implied_lb;
+                    }
                 }
-                bounds[j] = (new_lb, new_ub);
+
+                if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
+                    if new_lb > new_ub + ZERO_TOL {
+                        // implied bounds が逆転 → 問題は Infeasible
+                        return QpPresolveResult::infeasible(prob);
+                    }
+                    impl_bounds[j] = (new_lb, new_ub);
+                }
             }
         }
     }
@@ -1288,7 +1241,7 @@ mod tests {
     fn test_fixed_var_removal() {
         // min 1/2*2*x^2 + 1/2*2*y^2  s.t. x+y <= 3, 0 <= x <= 2, y = 1 (fixed)
         // y=1 は固定される。x+y<=3 → x<=2 (b becomes 2)
-        // bounds tightening: ub(x) ← min(2, 2) = 2。そのため constraint x<=2 は冗長に → 除去
+        // #5 redundant_constraints: ub(x)=2.0 <= b[0]=2.0 → 制約冗長→除去
         // 結果: x が唯一の変数、制約なし
         let prob = make_qp(
             &[0, 1], &[0, 1], &[2.0, 2.0], 2,
@@ -1323,29 +1276,6 @@ mod tests {
         assert!(result.reduced.num_constraints <= 1, "empty row should be removed");
         // 変数 x は削除されていない
         assert_eq!(result.reduced.num_vars, 1, "x remains");
-    }
-
-    /// #10: bounds tightening 後の変数範囲縮小確認
-    #[test]
-    fn test_bounds_tightening() {
-        // min x^2 (Q=2) s.t. x <= 2, 0 <= x <= 10
-        // bounds tightening で ub(x) = min(10, 2) = 2 に絞る
-        // presolve 後の x bounds の ub <= 2 を確認
-        // Q 非ゼロなので #11 dual_bounds_tightening は適用されない
-        let prob = make_qp(
-            &[0], &[0], &[2.0], 1,  // Q = 2*I
-            vec![0.0],
-            &[0], &[0], &[1.0], 1,
-            vec![2.0],
-            vec![(0.0, 10.0)],
-        );
-        // use_ruiz_scaling=false: bounds tightening のみを検証（Ruiz による bounds 変換を除外）
-        let opts = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
-        let result = run_qp_presolve_phase1(&prob, &opts);
-        // 縮約後も変数 x は残る（Q 非ゼロのため固定されない）
-        assert_eq!(result.reduced.num_vars, 1, "x remains after tightening");
-        // ub が 2 以下に絞られているか（制約除去後は bounds に反映）
-        assert!(result.reduced.bounds[0].1 <= 2.0 + 1e-10, "ub tightened to 2");
     }
 
     /// no_reduction のフォールバック確認
