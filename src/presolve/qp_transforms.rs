@@ -1195,6 +1195,8 @@ pub fn run_qp_presolve_phase1(
     //   PARAM: 閾値 1e4 — この値を超える b は presolve Ruiz のスキップ対象。
     // ==================================================================
     let b_max_abs = reduced.b.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
+    // PARAM: 1e4 — 経験的閾値。|b|_max > 1e4 で presolve Ruiz をスキップ（dispatch段のRuizが処理）。
+    //   LARGE_B_THRESHOLD(1e5)とは目的が異なる: こちらはpresolve Ruiz干渉防止、あちらはfixed-var代入スキップ。
     const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
     let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
