@@ -52,6 +52,7 @@ pub fn iterative_refine(
         Err(_) => return false,
     };
 
+    let mut prev_pfeas = f64::INFINITY;
     for _ in 0..max_steps {
         // Step 1: r_p = A*x - b
         let ax = match problem.a.mat_vec_mul(x) {
@@ -67,6 +68,12 @@ pub fn iterative_refine(
         if pfeas < eps * (1.0 + norm_b) {
             return true;
         }
+
+        // 対策D: 発散防止 — pfeasが10%超増加したら打ち切り [cmd_337]
+        if pfeas > prev_pfeas * 1.1 {
+            break;
+        }
+        prev_pfeas = pfeas;
 
         // Step 3: rhs = -A^T * r_p
         // (A^T * r_p)[i] = sum_k A[k][i] * r_p[k]

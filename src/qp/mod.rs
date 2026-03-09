@@ -479,6 +479,34 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         options
     };
     let mut reduced_sol = dispatch_qp(&presolve_result.reduced, dispatch_opts);
+    // 対策B: IRをRuiz-scaled空間で実行（unscale前）[cmd_337]
+    // pfeas増幅前に補正することでIRの効果を最大化する
+    if !reduced_sol.solution.is_empty() && presolve_result.ruiz_scaler.is_some() {
+        let reduced_problem = &presolve_result.reduced;
+        let eps = options.ipm_eps();
+        if reduced_problem.num_constraints > 0 {
+            if let Ok(ax) = reduced_problem.a.mat_vec_mul(&reduced_sol.solution) {
+                let pfeas_scaled = ax.iter().zip(reduced_problem.b.iter())
+                    .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                    .fold(0.0_f64, f64::max);
+                let norm_b_scaled = reduced_problem.b.iter()
+                    .fold(0.0_f64, |a, &bi| a.max(bi.abs()))
+                    .max(1.0);
+                if pfeas_scaled >= eps * (1.0 + norm_b_scaled) {
+                    let mut y_tmp = reduced_sol.dual_solution.clone();
+                    let mut z_tmp = reduced_sol.bound_duals.clone();
+                    refine::iterative_refine(
+                        reduced_problem,
+                        &mut reduced_sol.solution,
+                        &mut y_tmp,
+                        &mut z_tmp,
+                        3,
+                        eps,
+                    );
+                }
+            }
+        }
+    }
     if let Some(ref scaler) = presolve_result.ruiz_scaler {
         let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
         reduced_sol.solution = x;
@@ -530,9 +558,28 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         let mut y = result.dual_solution.clone();
         let mut z = result.bound_duals.clone();
         if refine::iterative_refine(problem, &mut result.solution, &mut y, &mut z, 3, eps) {
-            result.status = SolveStatus::Optimal;
-            result.dual_solution = y;
-            result.bound_duals = z;
+            // 対策A: bfeas再チェック — IRはpfeasのみ修正。bfeas起因のSuboptimalSolutionは維持 [cmd_337]
+            let bnd_norm = problem.bounds.iter()
+                .flat_map(|&(lb, ub)| [
+                    if lb.is_finite() { lb.abs() } else { 0.0 },
+                    if ub.is_finite() { ub.abs() } else { 0.0 },
+                ])
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            let bfeas_after = result.solution.iter()
+                .zip(problem.bounds.iter())
+                .map(|(&xi, &(lb, ub))| {
+                    let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+                    let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+                    lb_viol.max(ub_viol)
+                })
+                .fold(0.0_f64, f64::max);
+            if bfeas_after < eps * (1.0 + bnd_norm) {
+                result.status = SolveStatus::Optimal;
+                result.dual_solution = y;
+                result.bound_duals = z;
+            }
+            // else: bfeas起因のSuboptimalSolution維持
         }
     }
     result
