@@ -89,7 +89,7 @@ pub enum Tolerance {
 pub struct IpmOptions {
     /// 最大反復数（デフォルト: 1000）。IPMの安全弁。timeout が主ガード。
     pub max_iter: usize,
-    /// 収束 tolerance（デフォルト: 1e-8）
+    /// 収束 tolerance（デフォルト: 1e-6）
     pub eps: f64,
     /// 近接正則化下限 δ_min（デフォルト: 1e-8）
     pub delta_min: f64,
@@ -106,7 +106,7 @@ impl Default for IpmOptions {
     fn default() -> Self {
         Self {
             max_iter: usize::MAX,
-            eps: 1e-8,
+            eps: 1e-6,
             delta_min: 1e-8,
             delta_p_init: 1e-6,
             delta_d_init: 1e-6,
@@ -226,6 +226,6 @@ mod tests {
 
         // None → ipm.eps のデフォルト値を返す
         let opts_none = SolverOptions::default();
-        assert_eq!(opts_none.ipm_eps(), 1e-8, "None: ipm_eps (default)");
+        assert_eq!(opts_none.ipm_eps(), 1e-6, "None: ipm_eps (default)");
     }
 }

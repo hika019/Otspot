@@ -40,14 +40,14 @@ fn parse_usize(s: &str) -> usize {
 }
 
 fn main() {
-    // Parse --eps VALUE from argv (default: 1e-8)
+    // Parse --eps VALUE from argv (default: 1e-6)
     let args: Vec<String> = std::env::args().collect();
-    let mut eps: f64 = 1e-8;
+    let mut eps: f64 = 1e-6;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--eps" {
             if let Some(val) = args.get(i + 1) {
-                eps = val.parse().unwrap_or(1e-8);
+                eps = val.parse().unwrap_or(1e-6);
             }
             i += 2;
         } else {
