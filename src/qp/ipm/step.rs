@@ -130,7 +130,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         }
 
         // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
-        // （delta_min=1e-6 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        // （delta_min=1e-8 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
         if mu < options.ipm.delta_min * 1e-2
             && norm_inf(&r_d) < options.ipm.delta_min * 100.0
             && norm_inf(&r_p) < options.ipm.delta_min * 100.0
@@ -445,7 +445,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         }
 
         // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
-        // （delta_min=1e-6 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        // （delta_min=1e-8 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
         if mu < options.ipm.delta_min * 1e-2
             && norm_inf(&r_d) < options.ipm.delta_min * 100.0
             && norm_inf(&r_p) < options.ipm.delta_min * 100.0

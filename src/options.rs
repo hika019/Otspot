@@ -91,7 +91,7 @@ pub struct IpmOptions {
     pub max_iter: usize,
     /// 収束 tolerance（デフォルト: 1e-6）
     pub eps: f64,
-    /// 近接正則化下限 δ_min（デフォルト: 1e-6）
+    /// 近接正則化下限 δ_min（デフォルト: 1e-8）
     pub delta_min: f64,
     /// 近接正則化初期値 δ_p（デフォルト: 1e-6）
     pub delta_p_init: f64,
@@ -107,7 +107,7 @@ impl Default for IpmOptions {
         Self {
             max_iter: usize::MAX,
             eps: 1e-6,
-            delta_min: 1e-6,
+            delta_min: 1e-8,
             delta_p_init: 1e-6,
             delta_d_init: 1e-6,
             max_correctors: 3,
