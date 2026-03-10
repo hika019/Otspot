@@ -547,13 +547,26 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         }
                     }
                 }
-                // Ruizパスかつ失敗、かつ再試行余地あり → 次のattemptへ
+                // Ruizパスかつ失敗、かつ再試行余地あり → dfeas/gap確認後にretry判断 [cmd_400-hotfix1]
+                // retry有効条件: IPM内部残差(Ruiz-scaled空間)が次のeps水準以下
+                // - dfeas/gap > eps_next なら pv_try+1 でも収束不可（delta_min正則化スタック）
+                // - dfeas/gap ≤ eps_next なら tighter eps で Optimal 収束の余地あり（DTOC3/QPCBOEI2事例）
+                // - QFORPLAN事例: pv_try=0でdfeassが大（eps_next超） → retry無駄 → SUBOPTIMAL返却
                 if r.status == SolveStatus::SuboptimalSolution
                     && presolve_result.ruiz_scaler.is_some()
                     && pv_try + 1 < PV_RETRY_MAX
                 {
-                    pv_last = Some(r);
-                    continue;
+                    let tighten_next = 10f64.powi(pv_try as i32 + 1);
+                    let eps_next = (current_opts.ipm_eps() / tighten_next).max(1e-15);
+                    // IPM内部残差: 次のepsより十分小さければretry有効
+                    let (ipm_dfeas, ipm_gap) = r.final_residuals
+                        .map(|(_, d, g)| (d, g))
+                        .unwrap_or((f64::INFINITY, f64::INFINITY));
+                    if ipm_dfeas.max(ipm_gap) <= eps_next {
+                        pv_last = Some(r);
+                        continue;
+                    }
+                    // dfeas/gap大 → retryスキップしてSuboptimalSolution返却
                 }
                 pv_last = Some(r);
                 break;
