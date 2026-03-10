@@ -455,85 +455,111 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
             return crate::problem::SolverResult::infeasible();
         }
-        let dispatch_opts_owned;
-        let dispatch_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
-            dispatch_opts_owned = SolverOptions { use_ruiz_scaling: false, ..current_opts.clone() };
-            &dispatch_opts_owned
-        } else {
-            &current_opts
+        // post-verification retry ループ（cmd_400）
+        // Ruiz unscale 増幅によるpfeas/bfeas失敗を、tighter eps の再dispatch で解消する。
+        // Ruizパスなし（presolve_result.ruiz_scaler.is_none()）のときは pv_try=0 のみ実行。
+        const PV_RETRY_MAX: usize = 3;
+        let mut result = {
+            let mut pv_last: Option<SolverResult> = None;
+            for pv_try in 0..PV_RETRY_MAX {
+                let pv_opts_owned;
+                let pv_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
+                    let tighten = 10f64.powi(pv_try as i32);
+                    let adjusted_eps = (current_opts.ipm_eps() / tighten).max(1e-15);
+                    let mut adj = current_opts.clone();
+                    adj.ipm.eps = adjusted_eps;
+                    adj.use_ruiz_scaling = false;
+                    pv_opts_owned = adj;
+                    &pv_opts_owned
+                } else {
+                    &current_opts
+                };
+                let mut reduced_sol = dispatch_qp(&presolve_result.reduced, pv_opts);
+                // IR補正（Ruiz-scaled空間）[cmd_337]
+                if !reduced_sol.solution.is_empty() && presolve_result.ruiz_scaler.is_some() {
+                    let reduced_problem = &presolve_result.reduced;
+                    let eps = current_opts.ipm_eps();
+                    if reduced_problem.num_constraints > 0 {
+                        if let Ok(ax) = reduced_problem.a.mat_vec_mul(&reduced_sol.solution) {
+                            let pfeas_scaled = ax.iter().zip(reduced_problem.b.iter())
+                                .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                                .fold(0.0_f64, f64::max);
+                            let norm_b_scaled = reduced_problem.b.iter()
+                                .fold(0.0_f64, |a, &bi| a.max(bi.abs()))
+                                .max(1.0);
+                            if pfeas_scaled >= eps * (1.0 + norm_b_scaled) {
+                                let mut y_tmp = reduced_sol.dual_solution.clone();
+                                let mut z_tmp = reduced_sol.bound_duals.clone();
+                                refine::iterative_refine(
+                                    reduced_problem,
+                                    &mut reduced_sol.solution,
+                                    &mut y_tmp,
+                                    &mut z_tmp,
+                                    3,
+                                    eps,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Ruiz unscale
+                if let Some(ref scaler) = presolve_result.ruiz_scaler {
+                    let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
+                    reduced_sol.solution = x;
+                    reduced_sol.dual_solution = y;
+                    if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
+                }
+                let mut r = postsolve_qp(&presolve_result, &reduced_sol);
+                // Ruiz unscale増幅由来のbounds微小違反を補正（clip）[cmd_400 (B)]
+                // scaled空間では境界内だがunscale後に微小違反が生じるケース（例: QPCBOEI2）に対応
+                if presolve_result.ruiz_scaler.is_some() && !r.solution.is_empty() {
+                    for (xi, &(lb, ub)) in r.solution.iter_mut().zip(problem.bounds.iter()) {
+                        if lb.is_finite() { *xi = xi.max(lb); }
+                        if ub.is_finite() { *xi = xi.min(ub); }
+                    }
+                }
+                // post-postsolve検証: 元問題(A,b,bounds)で直接pfeas+bfeasを確認（偽Optimal防止）
+                // scaled行列経由の逆変換は数学的複雑さによるバグを誘発するため、元問題で直接計算する
+                if r.status == SolveStatus::Optimal {
+                    let eps = current_opts.ipm_eps();
+                    if problem.num_constraints > 0 {
+                        if let Ok(ax) = problem.a.mat_vec_mul(&r.solution) {
+                            let pfeas = ax.iter().zip(problem.b.iter())
+                                .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                                .fold(0.0_f64, f64::max);
+                            let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
+                            if pfeas >= eps * (1.0 + norm_b) {
+                                r.status = SolveStatus::SuboptimalSolution;
+                            }
+                        }
+                    }
+                    if r.status == SolveStatus::Optimal {
+                        let bfeas = r.solution.iter()
+                            .zip(problem.bounds.iter())
+                            .map(|(&xi, &(lb, ub))| {
+                                let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+                                let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+                                lb_viol.max(ub_viol)
+                            })
+                            .fold(0.0_f64, f64::max);
+                        if bfeas >= eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
+                            r.status = SolveStatus::SuboptimalSolution;
+                        }
+                    }
+                }
+                // Ruizパスかつ失敗、かつ再試行余地あり → 次のattemptへ
+                if r.status == SolveStatus::SuboptimalSolution
+                    && presolve_result.ruiz_scaler.is_some()
+                    && pv_try + 1 < PV_RETRY_MAX
+                {
+                    pv_last = Some(r);
+                    continue;
+                }
+                pv_last = Some(r);
+                break;
+            }
+            pv_last.expect("PV_RETRY_MAX >= 1")
         };
-        let mut reduced_sol = dispatch_qp(&presolve_result.reduced, dispatch_opts);
-        // 対策B: IRをRuiz-scaled空間で実行（unscale前）[cmd_337]
-        // pfeas増幅前に補正することでIRの効果を最大化する
-        if !reduced_sol.solution.is_empty() && presolve_result.ruiz_scaler.is_some() {
-            let reduced_problem = &presolve_result.reduced;
-            let eps = current_opts.ipm_eps();
-            if reduced_problem.num_constraints > 0 {
-                if let Ok(ax) = reduced_problem.a.mat_vec_mul(&reduced_sol.solution) {
-                    let pfeas_scaled = ax.iter().zip(reduced_problem.b.iter())
-                        .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
-                        .fold(0.0_f64, f64::max);
-                    let norm_b_scaled = reduced_problem.b.iter()
-                        .fold(0.0_f64, |a, &bi| a.max(bi.abs()))
-                        .max(1.0);
-                    if pfeas_scaled >= eps * (1.0 + norm_b_scaled) {
-                        let mut y_tmp = reduced_sol.dual_solution.clone();
-                        let mut z_tmp = reduced_sol.bound_duals.clone();
-                        refine::iterative_refine(
-                            reduced_problem,
-                            &mut reduced_sol.solution,
-                            &mut y_tmp,
-                            &mut z_tmp,
-                            3,
-                            eps,
-                        );
-                    }
-                }
-            }
-        }
-        if let Some(ref scaler) = presolve_result.ruiz_scaler {
-            let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
-            reduced_sol.solution = x;
-            reduced_sol.dual_solution = y;
-            if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
-        }
-        let mut result = postsolve_qp(&presolve_result, &reduced_sol);
-        // post-postsolve検証: 元問題(A,b,bounds)で直接pfeas+bfeasを確認（偽Optimal防止）
-        // scaled行列経由の逆変換は数学的複雑さによるバグを誘発するため、元問題で直接計算する
-        if result.status == SolveStatus::Optimal {
-            let eps = current_opts.ipm_eps();
-            if problem.num_constraints > 0 {
-                if let Ok(ax) = problem.a.mat_vec_mul(&result.solution) {
-                    let pfeas = ax.iter().zip(problem.b.iter())
-                        .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
-                        .fold(0.0_f64, f64::max);
-                    let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
-                    if pfeas >= eps * (1.0 + norm_b) {
-                        result.status = SolveStatus::SuboptimalSolution;
-                    }
-                }
-            }
-            if result.status == SolveStatus::Optimal {
-                let bnd_norm = problem.bounds.iter()
-                    .flat_map(|&(lb, ub)| [
-                        if lb.is_finite() { lb.abs() } else { 0.0 },
-                        if ub.is_finite() { ub.abs() } else { 0.0 },
-                    ])
-                    .fold(0.0_f64, f64::max)
-                    .max(1.0);
-                let bfeas = result.solution.iter()
-                    .zip(problem.bounds.iter())
-                    .map(|(&xi, &(lb, ub))| {
-                        let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-                        let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
-                        lb_viol.max(ub_viol)
-                    })
-                    .fold(0.0_f64, f64::max);
-                if bfeas >= eps * (1.0 + bnd_norm) {
-                    result.status = SolveStatus::SuboptimalSolution;
-                }
-            }
-        }
         // iterative refinement: SuboptimalSolutionのとき、原問題空間でpfeasを改善（cmd_330）
         // n <= 300 の問題のみ対象（refine::iterative_refine 内でチェック）
         // Concurrent Solver経由でも solve_qp_with を通るため自動的に適用される（§6.2参照）
@@ -543,13 +569,6 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             let mut z = result.bound_duals.clone();
             if refine::iterative_refine(problem, &mut result.solution, &mut y, &mut z, 3, eps) {
                 // 対策A: bfeas再チェック — IRはpfeasのみ修正。bfeas起因のSuboptimalSolutionは維持 [cmd_337]
-                let bnd_norm = problem.bounds.iter()
-                    .flat_map(|&(lb, ub)| [
-                        if lb.is_finite() { lb.abs() } else { 0.0 },
-                        if ub.is_finite() { ub.abs() } else { 0.0 },
-                    ])
-                    .fold(0.0_f64, f64::max)
-                    .max(1.0);
                 let bfeas_after = result.solution.iter()
                     .zip(problem.bounds.iter())
                     .map(|(&xi, &(lb, ub))| {
@@ -558,7 +577,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         lb_viol.max(ub_viol)
                     })
                     .fold(0.0_f64, f64::max);
-                if bfeas_after < eps * (1.0 + bnd_norm) {
+                if bfeas_after < eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
                     result.status = SolveStatus::Optimal;
                     result.dual_solution = y;
                     result.bound_duals = z;

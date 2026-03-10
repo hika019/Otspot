@@ -129,11 +129,13 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             break;
         }
 
-        // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
-        // （delta_min=1e-8 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        // μ が正則化下限以下まで収縮し、残差も eps 水準以下なら SuboptimalSolution
+        // （delta_min バイアスにより完全収束不能だが実用精度に達している状態を検出）
+        // 閾値を eps*(1+norm) に統一: post-verification再ソルブ時に adjusted_eps が締まれば
+        // この判定も締まり、早期終了せずに Optimal 収束を目指せる（DTOC3対策）
         if mu < options.ipm.delta_min * 1e-2
-            && norm_inf(&r_d) < options.ipm.delta_min * 100.0
-            && norm_inf(&r_p) < options.ipm.delta_min * 100.0
+            && norm_inf(&r_d) < eps * (1.0 + norm_c)
+            && norm_inf(&r_p) < eps * (1.0 + norm_b)
         {
             status = SolveStatus::SuboptimalSolution;
             final_iter = iter;
@@ -444,11 +446,11 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
             break;
         }
 
-        // μ が正則化下限以下まで収縮し、残差も正則化レベル相当以下なら SuboptimalSolution
-        // （delta_min=1e-8 のバイアスにより完全収束不能だが実用精度に達している状態を検出）
+        // μ が正則化下限以下まで収縮し、残差も eps 水準以下なら SuboptimalSolution
+        // （augmented パスと同一設計: 閾値を eps*(1+norm) に統一）
         if mu < options.ipm.delta_min * 1e-2
-            && norm_inf(&r_d) < options.ipm.delta_min * 100.0
-            && norm_inf(&r_p) < options.ipm.delta_min * 100.0
+            && norm_inf(&r_d) < eps * (1.0 + norm_c)
+            && norm_inf(&r_p) < eps * (1.0 + norm_b)
         {
             status = SolveStatus::SuboptimalSolution;
             final_iter = iter;

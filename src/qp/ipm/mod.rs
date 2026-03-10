@@ -31,6 +31,8 @@ pub(crate) const DELTA_MIN: f64 = 1e-8;
 pub(crate) const LDL_THRESHOLD: usize = 20_000;
 /// eps事前調整の下限（数値精度限界）
 const EPS_FLOOR: f64 = 1e-12;
+/// post-verification失敗時の再ソルブ上限回数（1回目=通常, 2〜N回目=10倍ずつ厳格化）
+const POST_VERIFY_MAX_RESOLV: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Gondzio multiple centrality correctors パラメータ
@@ -69,16 +71,36 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let amplification = compute_amplification(&scaler);
-            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
-            let mut adjusted_opts = options.clone();
-            adjusted_opts.ipm.eps = adjusted_eps;
-            let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts);
-            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
+            let mut last_result: Option<SolverResult> = None;
+            // post-verification再ソルブループ:
+            // unscale後のeps検証が不合格（SuboptimalSolution）なら
+            // scaled空間のepsを10倍ずつ厳格化して最大POST_VERIFY_MAX_RESOLV回まで再試行。
+            // DTOC3/QPCBOEI2のようなRuiz scaling増幅問題に有効。
+            for attempt in 0..POST_VERIFY_MAX_RESOLV {
+                let tighten = 10f64.powi(attempt as i32); // 1.0, 10.0, 100.0
+                let adjusted_eps =
+                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
+                let mut adjusted_opts = options.clone();
+                adjusted_opts.ipm.eps = adjusted_eps;
+                let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts);
+                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
+                // 再ソルブ条件: 原空間で SuboptimalSolution かつ残り試行回数がある場合。
+                // unscale_ipm_result が SuboptimalSolution/Optimalを原空間で判定するため
+                // scaled側のステータスを別途確認する必要はない。
+                if result.status == SolveStatus::SuboptimalSolution
+                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
+                {
+                    last_result = Some(result);
+                    continue;
+                }
+                return result;
+            }
+            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    step::solve_qp_ipm_inner(problem, options)
+    post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps())
 }
 
 /// IPM Schur complement パスで QP を解く
@@ -102,16 +124,81 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
 
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let amplification = compute_amplification(&scaler);
-            let adjusted_eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
-            let mut adjusted_opts = options.clone();
-            adjusted_opts.ipm.eps = adjusted_eps;
-            let scaled_result = step::solve_qp_ipm_schur_inner(&scaled_problem, &adjusted_opts);
-            return unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
+            let mut last_result: Option<SolverResult> = None;
+            for attempt in 0..POST_VERIFY_MAX_RESOLV {
+                let tighten = 10f64.powi(attempt as i32);
+                let adjusted_eps =
+                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
+                let mut adjusted_opts = options.clone();
+                adjusted_opts.ipm.eps = adjusted_eps;
+                let scaled_result =
+                    step::solve_qp_ipm_schur_inner(&scaled_problem, &adjusted_opts);
+                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
+                if result.status == SolveStatus::SuboptimalSolution
+                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
+                {
+                    last_result = Some(result);
+                    continue;
+                }
+                return result;
+            }
+            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    step::solve_qp_ipm_schur_inner(problem, options)
+    post_verify_solution(
+        step::solve_qp_ipm_schur_inner(problem, options),
+        problem,
+        options.ipm_eps(),
+    )
+}
+
+/// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
+/// pfeas・bfeas・dfeas が eps 基準を満たすなら Optimal に昇格する。
+///
+/// Ruiz scaling なしのフォールバックパスで使用。
+/// Ruiz ありパスは unscale_ipm_result の SuboptimalSolution ブランチが担当。
+fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> SolverResult {
+    if result.status != SolveStatus::SuboptimalSolution || result.solution.is_empty() {
+        return result;
+    }
+    let x = &result.solution;
+    let y = &result.dual_solution;
+    let d_min = 1.0_f64; // スケーリングなし: d_min=1
+    let norm_c_s = norm_inf(&problem.c).max(1.0);
+    let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / d_min;
+    let status = if problem.num_constraints > 0 {
+        match problem.a.mat_vec_mul(x) {
+            Ok(ax) => {
+                let pfeas: f64 = ax
+                    .iter()
+                    .zip(problem.b.iter())
+                    .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                    .fold(0.0_f64, f64::max);
+                let norm_b = norm_inf(&problem.b).max(1.0);
+                if pfeas < eps * (1.0 + norm_b) {
+                    let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
+                    if bfeas_status == SolveStatus::Optimal {
+                        check_dfeas_status(problem, x, y, dfeas_threshold)
+                    } else {
+                        bfeas_status
+                    }
+                } else {
+                    SolveStatus::SuboptimalSolution
+                }
+            }
+            Err(_) => SolveStatus::SuboptimalSolution,
+        }
+    } else {
+        let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
+        if bfeas_status == SolveStatus::Optimal {
+            check_dfeas_status(problem, x, y, dfeas_threshold)
+        } else {
+            bfeas_status
+        }
+    };
+    SolverResult { status, ..result }
 }
 
 /// Ruizスケーリングによる残差増幅率を計算する。
@@ -134,19 +221,9 @@ fn compute_amplification(scaler: &RuizScaler) -> f64 {
 
 /// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する
 ///
-/// 閾値: eps*(1+bnd_norm)。pfeas検証と同一スケール設計。
+/// 閾値: eps（絶対値基準）。qps_benchmarkの検証基準と統一。
 /// lb/ub が ±∞ の成分はスキップする。
 fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus {
-    let bnd_norm = bounds
-        .iter()
-        .flat_map(|&(lb, ub)| {
-            [
-                if lb.is_finite() { lb.abs() } else { 0.0 },
-                if ub.is_finite() { ub.abs() } else { 0.0 },
-            ]
-        })
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
     let bfeas: f64 = x
         .iter()
         .zip(bounds.iter())
@@ -156,7 +233,7 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
             lb_viol.max(ub_viol)
         })
         .fold(0.0_f64, f64::max);
-    if bfeas < eps * (1.0 + bnd_norm) {
+    if bfeas < eps {
         SolveStatus::Optimal
     } else {
         // bfeas違反: 境界制約を満たさない偽Optimal
@@ -293,6 +370,59 @@ fn unscale_ipm_result(
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,
+                ..result
+            }
+        }
+        SolveStatus::SuboptimalSolution => {
+            // scaled空間でSuboptimalSolutionだった場合も unscale して原空間で再検証する。
+            // 原空間の pfeas・bfeas が eps 基準を満たせば Optimal に昇格する（DTOC3対策）。
+            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let obj_orig = result.objective / scaler.c;
+            let d_min = if scaler.d.is_empty() {
+                1.0
+            } else {
+                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+            };
+            let norm_c_s = scaler.d.iter().enumerate()
+                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
+                .fold(0.0_f64, f64::max)
+                .max(1.0);
+            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
+            let status = if problem.num_constraints > 0 {
+                match problem.a.mat_vec_mul(&x) {
+                    Ok(ax) => {
+                        let pfeas: f64 = ax
+                            .iter()
+                            .zip(problem.b.iter())
+                            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            .fold(0.0_f64, f64::max);
+                        let norm_b = norm_inf(&problem.b).max(1.0);
+                        if pfeas < eps * (1.0 + norm_b) {
+                            let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
+                            if bfeas_status == SolveStatus::Optimal {
+                                check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                            } else {
+                                bfeas_status
+                            }
+                        } else {
+                            SolveStatus::SuboptimalSolution
+                        }
+                    }
+                    Err(_) => SolveStatus::SuboptimalSolution,
+                }
+            } else {
+                let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
+                if bfeas_status == SolveStatus::Optimal {
+                    check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                } else {
+                    bfeas_status
+                }
+            };
+            SolverResult {
+                objective: obj_orig,
+                solution: x,
+                dual_solution: y,
+                status,
                 ..result
             }
         }
