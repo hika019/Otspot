@@ -178,7 +178,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
-            match ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, perm, timeout_ctx.deadline) {
+            match ldl::factorize_quasidefinite_with_cached_perm_threaded(&aug_mat, perm, timeout_ctx.deadline) {
                 Ok(f) => { fac_opt = Some(f); break; }
                 Err(ldl::LdlError::DeadlineExceeded) => {
                     status = SolveStatus::Timeout;
@@ -496,7 +496,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
                     break;
                 }
             };
-            match ldl::factorize_with_deadline(&m_mat_retry, timeout_ctx.deadline) {
+            match ldl::factorize_with_deadline_threaded(&m_mat_retry, timeout_ctx.deadline) {
                 Ok(f) => { fac_opt = Some(f); break; }
                 Err(ldl::LdlError::DeadlineExceeded) => {
                     status = SolveStatus::Timeout;

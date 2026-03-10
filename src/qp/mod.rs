@@ -446,14 +446,70 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     let mut current_opts = options.clone();
     let mut first_result: Option<SolverResult> = None; // C-1: Ruiz無し再ソルブ失敗時フォールバック用
     loop {
+        // presolve_ran_threaded: trueならpresolve後にdeadline変換を行う
+        // 大規模問題（n+m > 50_000）のみスレッド化してdeadlineで打ち切る。
+        // 小規模問題はpresolveが速いためスレッドオーバーヘッドを避け、timeout_secsをそのまま保持。
+        let mut presolve_ran_threaded = false;
         let presolve_result = if current_opts.presolve {
-            let phase1 = run_qp_presolve_phase1(problem, &current_opts);
-            run_qp_presolve_phase2(phase1, &current_opts)
+            const PRESOLVE_THREAD_THRESHOLD: usize = 50_000;
+            let use_thread = problem.num_vars + problem.num_constraints > PRESOLVE_THREAD_THRESHOLD;
+            let presolve_deadline = if use_thread {
+                current_opts.deadline.or_else(|| {
+                    current_opts.timeout_secs.map(|s| {
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let remaining = (s - elapsed).max(0.0);
+                        std::time::Instant::now() + std::time::Duration::from_secs_f64(remaining)
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some(d) = presolve_deadline {
+                presolve_ran_threaded = true;
+                let now = std::time::Instant::now();
+                if now >= d {
+                    crate::presolve::QpPresolveResult::no_reduction(problem)
+                } else {
+                    let remaining = d - now;
+                    let problem_owned = problem.clone();
+                    let opts_owned = current_opts.clone();
+                    let (tx, rx) = std::sync::mpsc::channel::<crate::presolve::QpPresolveResult>();
+                    // スタックサイズを64MBに設定（大規模問題でのpresolve内スタック溢れ防止）
+                    std::thread::Builder::new()
+                        .stack_size(64 * 1024 * 1024)
+                        .spawn(move || {
+                            // 短期対処。presolve内部へのdeadline伝播はcmd_403以降の課題。
+                            let phase1 = run_qp_presolve_phase1(&problem_owned, &opts_owned);
+                            let _ = tx.send(run_qp_presolve_phase2(phase1, &opts_owned));
+                        })
+                        .expect("presolveスレッド起動失敗");
+                    match rx.recv_timeout(remaining) {
+                        Ok(r) => r,
+                        Err(_) => crate::presolve::QpPresolveResult::no_reduction(problem),
+                    }
+                }
+            } else {
+                let phase1 = run_qp_presolve_phase1(problem, &current_opts);
+                run_qp_presolve_phase2(phase1, &current_opts)
+            }
         } else {
             crate::presolve::QpPresolveResult::no_reduction(problem)
         };
         if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
             return crate::problem::SolverResult::infeasible();
+        }
+        // 大規模問題でpresolveをスレッド化した場合のみdeadline変換を行う。
+        // 小規模問題ではtimeout_secsをそのまま保持し、ソルバーが独立したdeadlineを計算する。
+        // これにより、presolveに時間がかかった大規模問題でも合計時間がtimeout_secsを超えない。
+        if presolve_ran_threaded && current_opts.deadline.is_none() {
+            if let Some(secs) = current_opts.timeout_secs {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let remaining = (secs - elapsed).max(0.0);
+                current_opts.deadline = Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs_f64(remaining),
+                );
+                current_opts.timeout_secs = None;
+            }
         }
         // post-verification retry ループ（cmd_400）
         // Ruiz unscale 増幅によるpfeas/bfeas失敗を、tighter eps の再dispatch で解消する。

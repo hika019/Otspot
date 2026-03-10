@@ -185,7 +185,9 @@ fn main() {
         let nnz_before = prob.q.nnz() + prob.a.nnz();
 
         // presolve削減量を取得（ベンチ計装のみ）
-        let (n_after, m_after, nnz_after) = if opts.presolve {
+        // 大規模問題はpresolveに長時間かかるためスキップ（タイムアウト計測の精度を確保）
+        const PRESOLVE_INSTR_MAX: usize = 50_000;
+        let (n_after, m_after, nnz_after) = if opts.presolve && n <= PRESOLVE_INSTR_MAX && m <= PRESOLVE_INSTR_MAX {
             let phase1 = run_qp_presolve_phase1(&prob, &opts);
             let presolve_result = run_qp_presolve_phase2(phase1, &opts);
             let rn = presolve_result.reduced.num_vars;

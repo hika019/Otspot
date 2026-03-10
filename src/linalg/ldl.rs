@@ -24,6 +24,7 @@ use faer::sparse::linalg::cholesky::{
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, Triplet};
+use std::sync::mpsc;
 use std::time::Instant;
 
 /// LDL分解エラー
@@ -291,6 +292,39 @@ pub fn factorize_with_deadline(
     factorize(mat)
 }
 
+/// deadline 付き正定値疎行列の LDL^T 分解（スレッド版）。
+///
+/// 因子化をバックグラウンドスレッドで実行し recv_timeout でタイムアウト制限する。
+/// タイムアウト後もスレッドは実行を継続する（read-only 計算、いずれ完了する）。
+///
+/// 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+pub fn factorize_with_deadline_threaded(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+) -> Result<LdlFactorization, LdlError> {
+    let remaining = match deadline {
+        None => return factorize(mat),
+        Some(d) => {
+            let now = Instant::now();
+            if now >= d {
+                return Err(LdlError::DeadlineExceeded);
+            }
+            d - now
+        }
+    };
+    let mat_owned = mat.clone();
+    let (tx, rx) = mpsc::channel::<Result<LdlFactorization, LdlError>>();
+    std::thread::spawn(move || {
+        // 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+        // タイムアウト後もスレッドは実行を継続する（read-only 計算）。
+        let _ = tx.send(factorize(&mat_owned));
+    });
+    match rx.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(_) => Err(LdlError::DeadlineExceeded),
+    }
+}
+
 /// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解。
 ///
 /// `mat`: 元の（未置換の）augmented KKT 行列（上三角 CSC）
@@ -319,6 +353,41 @@ pub fn factorize_quasidefinite_with_cached_perm(
     let signs = extract_diagonal_signs(&perm_mat);
     let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs))?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+}
+
+/// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解（スレッド版）。
+///
+/// 因子化をバックグラウンドスレッドで実行し recv_timeout でタイムアウト制限する。
+/// タイムアウト後もスレッドは実行を継続する（read-only 計算、いずれ完了する）。
+///
+/// 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+pub fn factorize_quasidefinite_with_cached_perm_threaded(
+    mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    let remaining = match deadline {
+        None => return factorize_quasidefinite_with_cached_perm(mat, perm, None),
+        Some(d) => {
+            let now = Instant::now();
+            if now >= d {
+                return Err(LdlError::DeadlineExceeded);
+            }
+            d - now
+        }
+    };
+    let mat_owned = mat.clone();
+    let perm_owned = perm.to_vec();
+    let (tx, rx) = mpsc::channel::<Result<LdlFactorizationAmd, LdlError>>();
+    std::thread::spawn(move || {
+        // 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+        // タイムアウト後もスレッドは実行を継続する（read-only 計算）。
+        let _ = tx.send(factorize_quasidefinite_with_cached_perm(&mat_owned, &perm_owned, None));
+    });
+    match rx.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(_) => Err(LdlError::DeadlineExceeded),
+    }
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算）。
