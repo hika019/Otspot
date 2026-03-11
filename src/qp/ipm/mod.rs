@@ -110,7 +110,13 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps())
+    // BUG-A1修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
+    let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps());
+    if raw.status == SolveStatus::SuboptimalSolution {
+        SolverResult { status: SolveStatus::Timeout, ..raw }
+    } else {
+        raw
+    }
 }
 
 /// IPM Schur complement パスで QP を解く
@@ -167,11 +173,17 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    post_verify_solution(
+    // BUG-A2修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
+    let raw = post_verify_solution(
         step::solve_qp_ipm_schur_inner(problem, options),
         problem,
         options.ipm_eps(),
-    )
+    );
+    if raw.status == SolveStatus::SuboptimalSolution {
+        SolverResult { status: SolveStatus::Timeout, ..raw }
+    } else {
+        raw
+    }
 }
 
 /// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
