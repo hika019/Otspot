@@ -131,10 +131,10 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
 
         // μ が正則化下限以下まで収縮し、残差も eps 水準以下なら SuboptimalSolution
         // （delta_min バイアスにより完全収束不能だが実用精度に達している状態を検出）
-        // 閾値 = max(eps*(1+norm), delta_min*100): delta_min=1e-8 でも最低閾値=1e-6 を保持
-        // post-verification再ソルブ時に adjusted_eps が締まっても早期終了できる（QFORPLAN対策）[cmd_400-hotfix1]
-        let thr_d = (eps * (1.0 + norm_c)).max(options.ipm.delta_min * 100.0);
-        let thr_p = (eps * (1.0 + norm_b)).max(options.ipm.delta_min * 100.0);
+        // 閾値 = max(eps*(1+norm), delta_min*10): 正則化限界(~delta_min)の10倍をフロアとする
+        // delta_min*100(旧)はpv_retry時にeps連動を阻害しDTOC3退行を引き起こした[cmd_441]
+        let thr_d = (eps * (1.0 + norm_c)).max(options.ipm.delta_min * 10.0);
+        let thr_p = (eps * (1.0 + norm_b)).max(options.ipm.delta_min * 10.0);
         if mu < options.ipm.delta_min * 1e-2
             && norm_inf(&r_d) < thr_d
             && norm_inf(&r_p) < thr_p
@@ -449,9 +449,9 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         }
 
         // μ が正則化下限以下まで収縮し、残差も eps 水準以下なら SuboptimalSolution
-        // （augmented パスと同一設計: 閾値 = max(eps*(1+norm), delta_min*100)）[cmd_400-hotfix1]
-        let thr_d = (eps * (1.0 + norm_c)).max(options.ipm.delta_min * 100.0);
-        let thr_p = (eps * (1.0 + norm_b)).max(options.ipm.delta_min * 100.0);
+        // （augmented パスと同一設計: 閾値 = max(eps*(1+norm), delta_min*10)）[cmd_441]
+        let thr_d = (eps * (1.0 + norm_c)).max(options.ipm.delta_min * 10.0);
+        let thr_p = (eps * (1.0 + norm_b)).max(options.ipm.delta_min * 10.0);
         if mu < options.ipm.delta_min * 1e-2
             && norm_inf(&r_d) < thr_d
             && norm_inf(&r_p) < thr_p

@@ -603,26 +603,28 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         }
                     }
                 }
-                // Ruizパスかつ失敗、かつ再試行余地あり → dfeas/gap確認後にretry判断 [cmd_400-hotfix1]
-                // retry有効条件: IPM内部残差(Ruiz-scaled空間)が次のeps水準以下
-                // - dfeas/gap > eps_next なら pv_try+1 でも収束不可（delta_min正則化スタック）
-                // - dfeas/gap ≤ eps_next なら tighter eps で Optimal 収束の余地あり（DTOC3/QPCBOEI2事例）
-                // - QFORPLAN事例: pv_try=0でdfeassが大（eps_next超） → retry無駄 → SUBOPTIMAL返却
+                // Ruizパスかつ SuboptimalSolution → 常にretry（tighter epsで精度改善の機会を与える）
+                // 旧: dfeas/gap > eps_nextならretryスキップしていたが、DTOC3の有効retryまでブロックしていた
+                // QFORPLAN保護は退行防止ガード(下記)が担当 [cmd_441]
                 if r.status == SolveStatus::SuboptimalSolution
                     && presolve_result.ruiz_scaler.is_some()
                     && pv_try + 1 < PV_RETRY_MAX
                 {
-                    let tighten_next = 10f64.powi(pv_try as i32 + 1);
-                    let eps_next = (current_opts.ipm_eps() / tighten_next).max(1e-15);
-                    // IPM内部残差: 次のepsより十分小さければretry有効
-                    let (ipm_dfeas, ipm_gap) = r.final_residuals
-                        .map(|(_, d, g)| (d, g))
-                        .unwrap_or((f64::INFINITY, f64::INFINITY));
-                    if ipm_dfeas.max(ipm_gap) <= eps_next {
-                        pv_last = Some(r);
-                        continue;
+                    pv_last = Some(r);
+                    continue;
+                }
+                // 退行防止ガード: retry後にOptimal/SubOptimal以外(NE/Timeout等)が返った場合、
+                // pv_lastにSubOptimalが残っていればそちらを採用。
+                // QFORPLAN事例: retry→NE(0iters) → 前回SubOptimalにフォールバック →
+                // 後段のIR/Ruiz再ソルブで最終PASS化 [cmd_441]
+                if pv_try > 0 {
+                    if let Some(ref prev) = pv_last {
+                        if prev.status == SolveStatus::SuboptimalSolution
+                            && !matches!(r.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution)
+                        {
+                            break; // pv_lastのSubOptimal結果を保持
+                        }
                     }
-                    // dfeas/gap大 → retryスキップしてSuboptimalSolution返却
                 }
                 pv_last = Some(r);
                 break;
