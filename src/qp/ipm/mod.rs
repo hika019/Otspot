@@ -93,7 +93,17 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                     last_result = Some(result);
                     continue;
                 }
-                return result;
+                // Fix-D相当: Timeout/MaxIterationsはそのまま返す
+                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                    return result;
+                }
+                // Fix-D相当: SuboptimalSolution → Timeout（Optimal|Timeout 2択を保証）
+                let final_status = if result.status == SolveStatus::SuboptimalSolution {
+                    SolveStatus::Timeout
+                } else {
+                    result.status
+                };
+                return SolverResult { status: final_status, ..result };
             }
             return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
@@ -140,7 +150,17 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
                     last_result = Some(result);
                     continue;
                 }
-                return result;
+                // Fix-D相当: Timeout/MaxIterationsはそのまま返す
+                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                    return result;
+                }
+                // Fix-D相当: SuboptimalSolution → Timeout（Optimal|Timeout 2択を保証）
+                let final_status = if result.status == SolveStatus::SuboptimalSolution {
+                    SolveStatus::Timeout
+                } else {
+                    result.status
+                };
+                return SolverResult { status: final_status, ..result };
             }
             return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
