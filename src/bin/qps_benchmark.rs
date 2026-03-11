@@ -235,11 +235,15 @@ fn main() {
                     )
                 } else {
                     n_pass += 1;
+                    let inner_str = match result.final_residuals {
+                        Some((pf, df, g)) => format!(" pf={:.1e} df={:.1e} gap={:.1e}", pf, df, g),
+                        None => String::new(),
+                    };
                     (
                         "PASS".to_string(),
                         format!(
-                            "[{}] obj={:.2e} pfeas={:.1e} bfeas={:.1e}",
-                            method_label, result.objective, pfeas, bfeas
+                            "[{}] obj={:.2e} pfeas={:.1e} bfeas={:.1e}{}",
+                            method_label, result.objective, pfeas, bfeas, inner_str
                         ),
                     )
                 }

@@ -349,6 +349,9 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         active_set: vec![],
         iterations: final_iter,
         final_residuals,
+        pfeas: final_residuals.map(|(pf, _, _)| pf),
+        dfeas: final_residuals.map(|(_, df, _)| df),
+        gap: final_residuals.map(|(_, _, g)| g),
         ..Default::default()
     }
 }
@@ -681,6 +684,9 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         active_set: vec![],
         iterations: final_iter,
         final_residuals,
+        pfeas: final_residuals.map(|(pf, _, _)| pf),
+        dfeas: final_residuals.map(|(_, df, _)| df),
+        gap: final_residuals.map(|(_, _, g)| g),
         ..Default::default()
     }
 }

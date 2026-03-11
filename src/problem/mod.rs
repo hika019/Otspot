@@ -87,6 +87,12 @@ pub struct SolverResult {
     pub solver_used: Option<QpSolverChoice>,
     /// 最終反復の残差実値 (pfeas, dfeas, duality_gap)。Optimal/MaxIterations時のみ Some。
     pub final_residuals: Option<(f64, f64, f64)>,
+    /// 主実行可能性残差 (||Ax - b||_inf)。final_residuals と同値。デバッグ可視性向上用。
+    pub pfeas: Option<f64>,
+    /// 双対実行可能性残差。final_residuals と同値。デバッグ可視性向上用。
+    pub dfeas: Option<f64>,
+    /// 双対ギャップ (mu)。final_residuals と同値。デバッグ可視性向上用。
+    pub gap: Option<f64>,
 }
 
 impl Default for SolverResult {
@@ -104,6 +110,9 @@ impl Default for SolverResult {
             iterations: 0,
             solver_used: None,
             final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
         }
     }
 }
