@@ -198,6 +198,19 @@ fn solve_qp_concurrent(
             });
         }
 
+        // IP-PMM 独立実装スレッド（ippmm_new feature 有効時のみ）
+        #[cfg(feature = "ippmm_new")]
+        {
+            let cancel = Arc::clone(&cancel_flag);
+            let mut opts = options.clone();
+            opts.cancel_flag = Some(cancel);
+            let tx = tx.clone();
+            s.spawn(move || {
+                let r = ipm::solve_qp_ippmm(problem, &opts);
+                let _ = tx.send(r);
+            });
+        }
+
         drop(tx); // 全スレッドが tx を drop するまで rx.recv_timeout が Disconnected を返さない
 
         loop {
