@@ -413,6 +413,8 @@ fn dispatch_qp(
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
+        #[cfg(feature = "ippmm_new")]
+        QpSolverChoice::IpPmmNew => ipm::solve_qp_ippmm(problem, options),
         QpSolverChoice::Concurrent => {
             #[cfg(feature = "parallel")]
             {

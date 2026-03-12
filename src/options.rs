@@ -26,6 +26,9 @@ pub enum QpSolverChoice {
     Ipm,
     /// 強制 IPM Schur complement パス（--features parallel なしでも動作）
     IpmSchur,
+    /// IP-PMM 新実装（完全独立実装、単独実行。feature gate: ippmm_new）
+    #[cfg(feature = "ippmm_new")]
+    IpPmmNew,
 }
 
 /// シンプレックス法の選択
