@@ -153,7 +153,10 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         })
         .collect();
 
-    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。下限を 1.0 でクランプ（D1修正）
+    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。
+    // 下限を 1.0 でクランプ（D1修正）。
+    // ★ cmd_499教訓: max(1.0, |bi|+1.0) は bi依存項がQSHELL pfeasを劣化させた。
+    //    max(1.0)固定（問題依存なし）が安全。Ruizスケーリング後は|bi|≈1.0のためclampは最小限。
     let mut ax0 = vec![0.0f64; m_ext];
     for col in 0..n {
         for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
