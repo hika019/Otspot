@@ -578,6 +578,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     let (x, y) = scaler.unscale_solution(&reduced_sol.solution, &reduced_sol.dual_solution);
                     reduced_sol.solution = x;
                     reduced_sol.dual_solution = y;
+                    // ★追加: bound_duals もアンスケール
+                    reduced_sol.bound_duals = scaler.unscale_bound_duals(
+                        &reduced_sol.bound_duals,
+                        &presolve_result.reduced.bounds,
+                    );
                     if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
                 }
                 let mut r = postsolve_qp(&presolve_result, &reduced_sol);

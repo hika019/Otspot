@@ -343,6 +343,43 @@ impl RuizScaler {
         (q_s, a_s, q_vec_s, b_s, bounds_s)
     }
 
+    /// スケール済み境界双対変数を元のスケールに逆変換する
+    ///
+    /// # 変換式
+    /// KKT条件: Q*x + q + A^T*y - y_lb + y_ub = 0
+    /// スケール後KKT: c*D*Q*D*x_s + c*D*q + D*A^T*E*y_s - (c*D)*y_lb_s + (c*D)*y_ub_s = 0
+    /// 両辺を c*D で割る: y_lb = y_lb_s / (c * d[j]), y_ub = y_ub_s / (c * d[j])
+    ///
+    /// # 引数
+    /// - `bound_duals_s`: スケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順で格納
+    /// - `bounds`: 元問題の変数境界
+    pub fn unscale_bound_duals(&self, bound_duals_s: &[f64], bounds: &[(f64, f64)]) -> Vec<f64> {
+        // 空入力（bound_dualsが未計算の場合）は空を返す
+        if bound_duals_s.is_empty() {
+            return vec![];
+        }
+        let mut result = Vec::with_capacity(bound_duals_s.len());
+        let mut idx = 0;
+        // 下界分（lb が有限な変数、変数番号昇順）
+        for (j, &(lb, _)) in bounds.iter().enumerate() {
+            if lb.is_finite() {
+                result.push(bound_duals_s[idx] / (self.c * self.d[j]));
+                idx += 1;
+                debug_assert!(idx <= bound_duals_s.len(), "bound_duals_s index out of bounds (lb)");
+            }
+        }
+        // 上界分（ub が有限な変数、変数番号昇順）
+        for (j, &(_, ub)) in bounds.iter().enumerate() {
+            if ub.is_finite() {
+                result.push(bound_duals_s[idx] / (self.c * self.d[j]));
+                idx += 1;
+                debug_assert!(idx <= bound_duals_s.len(), "bound_duals_s index out of bounds (ub)");
+            }
+        }
+        debug_assert_eq!(idx, bound_duals_s.len(), "unscale_bound_duals: idx != bound_duals_s.len()");
+        result
+    }
+
     /// スケール済み解を元のスケールに逆変換する
     ///
     /// # 引数

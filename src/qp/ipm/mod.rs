@@ -260,6 +260,7 @@ fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> 
     }
     let x = &result.solution;
     let y = &result.dual_solution;
+    let bound_duals = &result.bound_duals;
     let d_min = 1.0_f64; // スケーリングなし: d_min=1
     let norm_c_s = norm_inf(&problem.c).max(1.0);
     let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / d_min;
@@ -275,7 +276,7 @@ fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> 
                 if pfeas < eps * (1.0 + norm_b) {
                     let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
                     if bfeas_status == SolveStatus::Optimal {
-                        check_dfeas_status(problem, x, y, dfeas_threshold)
+                        check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
                     } else {
                         bfeas_status
                     }
@@ -288,7 +289,7 @@ fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> 
     } else {
         let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
         if bfeas_status == SolveStatus::Optimal {
-            check_dfeas_status(problem, x, y, dfeas_threshold)
+            check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
         } else {
             bfeas_status
         }
@@ -338,22 +339,13 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
 
 /// QPの双対実現可能性 (dfeas) を検証し、超過していれば SuboptimalSolution に降格する
 ///
-/// dfeas = ||Q*x + A^T*y + c||_inf
-/// 無制約QP（A=0）では A^T*y = 0 として計算する。
+/// dfeas = ||Q*x + A^T*y - y_lb + y_ub + c||_inf
+/// 無制約QP（A=0, bounds=all infinite）では A^T*y = 0, bound_contrib = 0 として計算する。
 ///
 /// # 引数
-/// `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
-///
-/// # 適用条件
-/// 有限な bounds が存在する場合、dual_solution には bounds の双対変数
-/// （境界制約のラグランジュ乗数）が含まれないため dfeas の計算が不完全になる。
-/// その場合は検証をスキップして Optimal を返す（安全側）。
-fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], threshold: f64) -> SolveStatus {
-    // 有限な bounds が存在する場合: bound duals が dual_solution に含まれないため
-    // dfeas = ||Q*x + A^T*y + c||_inf が不完全になる。検証をスキップする（安全側）
-    if !problem.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite()) {
-        return SolveStatus::Optimal;
-    }
+/// - `bound_duals`: アンスケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順
+/// - `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
+fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], bound_duals: &[f64], threshold: f64) -> SolveStatus {
     let n = x.len();
     // Q*x
     let qx = match problem.q.mat_vec_mul(x) {
@@ -369,9 +361,31 @@ fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], threshold: f64)
     } else {
         vec![0.0; n]
     };
-    // dfeas = ||Q*x + A^T*y + c||_inf
+    // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
+    // KKT: Q*x + c + A^T*y - y_lb + y_ub = 0
+    let mut bound_contrib = vec![0.0f64; n];
+    if !bound_duals.is_empty() {
+        let mut bd_idx = 0usize;
+        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
+            if lb.is_finite() {
+                if bd_idx < bound_duals.len() {
+                    bound_contrib[j] -= bound_duals[bd_idx];
+                    bd_idx += 1;
+                }
+            }
+        }
+        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
+            if ub.is_finite() {
+                if bd_idx < bound_duals.len() {
+                    bound_contrib[j] += bound_duals[bd_idx];
+                    bd_idx += 1;
+                }
+            }
+        }
+    }
+    // dfeas = ||Q*x + A^T*y + bound_contrib + c||_inf
     let dfeas = (0..n)
-        .map(|i| (qx[i] + aty[i] + problem.c[i]).abs())
+        .map(|i| (qx[i] + aty[i] + bound_contrib[i] + problem.c[i]).abs())
         .fold(0.0_f64, f64::max);
     if dfeas < threshold {
         SolveStatus::Optimal
@@ -394,6 +408,7 @@ fn unscale_ipm_result(
     match result.status {
         SolveStatus::Optimal => {
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             // post-unscaling検証: 元空間で primal feasibility (pfeas) と
             // bounds feasibility (bfeas) を確認。
@@ -427,7 +442,7 @@ fn unscale_ipm_result(
                             // pfeas OK: bfeas → dfeas の順で検証
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
                             } else {
                                 bfeas_status
                             }
@@ -443,7 +458,7 @@ fn unscale_ipm_result(
                 // 制約なし問題: pfeas検証不要だがbfeas → dfeas は検証
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                 let status = if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
                 } else {
                     bfeas_status
                 };
@@ -453,6 +468,7 @@ fn unscale_ipm_result(
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,
+                bound_duals,
                 status,
                 final_residuals: orig_residuals,
                 ..result
@@ -472,6 +488,7 @@ fn unscale_ipm_result(
             // scaled空間でSuboptimalSolutionだった場合も unscale して原空間で再検証する。
             // 原空間の pfeas・bfeas が eps 基準を満たせば Optimal に昇格する（DTOC3対策）。
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             let d_min = if scaler.d.is_empty() {
                 1.0
@@ -495,7 +512,7 @@ fn unscale_ipm_result(
                         if pfeas < eps * (1.0 + norm_b) {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
                             } else {
                                 bfeas_status
                             }
@@ -508,7 +525,7 @@ fn unscale_ipm_result(
             } else {
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                 if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, dfeas_threshold)
+                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
                 } else {
                     bfeas_status
                 }
@@ -517,6 +534,7 @@ fn unscale_ipm_result(
                 objective: obj_orig,
                 solution: x,
                 dual_solution: y,
+                bound_duals,
                 status,
                 ..result
             }
@@ -838,14 +856,18 @@ mod tests {
         );
     }
 
-    /// IPM-T11: bfeas OK（bounds内）→ Optimal 維持テスト
+    /// IPM-T11: bfeas OK かつ dfeas OK → Optimal 維持テスト
     ///
-    /// lb/ubを持つ問題に対し、境界内に収まるmock解を渡した場合に
+    /// lb/ubを持つ問題に対し、KKT最適解のmock解を渡した場合に
     /// unscale_ipm_result が Optimal を維持することを確認する。
     ///
     /// 設定:
     ///   問題: min x^2  bounds: -1.0 <= x <= 1.0
-    ///   mock解: x=[0.5]  → lb_viol=0, ub_viol=0 → Optimal維持
+    ///   mock解: x=[0.0] (KKT最適解: ∇f(0)=0, bounds非活性 → bound_duals=0)
+    ///   dfeas = |Q*x + c + bound_contrib| = |2*0 + 0 + 0| = 0 < threshold
+    ///
+    /// NOTE: このテストは bound_duals修正(cmd_503)後にdfeasチェックが有効になった。
+    /// KKT最適解x=0を使用（旧x=0.5はdfeas=1.0でSUBに降格するため修正）。
     #[test]
     fn test_ipm_bfeas_within_bounds_preserved() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
@@ -857,12 +879,12 @@ mod tests {
 
         let scaler = RuizScaler::new(1, 0);
 
-        // mock解: x=0.5 → bounds内
+        // mock解: x=0.0 (KKT最適解。dfeas = |2*0 + 0| = 0 < threshold)
         let mock_result = SolverResult {
             status: SolveStatus::Optimal,
-            solution: vec![0.5],
+            solution: vec![0.0],
             dual_solution: vec![],
-            objective: 0.25,
+            objective: 0.0,
             ..SolverResult::default()
         };
 
@@ -872,7 +894,7 @@ mod tests {
         assert_eq!(
             result.status,
             SolveStatus::Optimal,
-            "IPM-T11: bounds内の解はOptimalを維持すること"
+            "IPM-T11: KKT最適解はOptimalを維持すること"
         );
     }
 
@@ -1000,6 +1022,124 @@ mod tests {
             "IPM-T15: adjusted_eps ({:.2e}) < user_eps ({:.2e}) であること",
             adjusted_eps,
             user_eps
+        );
+    }
+
+    /// IPM-T16: lb-only 活性ケースの bound_duals 値検証（TC-01, TC-02対応）
+    ///
+    /// min x s.t. x >= 1.0  (lb活性: x*=1, y_lb=1.0 > 0)
+    /// Q=[[1]], c=[0] → 実際には Q=[[2]]（「1/2あり」規約: min 1/2*2*x^2 = min x^2, min x には c=[-1] 相当）
+    ///
+    /// 問題: min x s.t. x >= 1.0
+    /// Q=[[0]] (zero, 線形問題), c=[1.0]（min x）, bounds=[(1.0, +∞)]
+    /// ただし Q=0 はIPMに不安定。代わりに:
+    /// min 1/2*ε*x^2 + x s.t. x >= 1 (ε→0+, lb活性)
+    /// KKT: ε*x + 1 - y_lb = 0, x=1 → y_lb = ε + 1 ≈ 1.0
+    /// → bound_duals[0] ≈ 1.0 (lb dual)
+    ///
+    /// NOTE: bound_duals修正(cmd_503)後。y[m_orig..m_ext]が正しく計算される。
+    #[test]
+    fn test_ipm_bound_duals_lb_only_active() {
+        // min 1/2*0.001*x^2 + x s.t. x >= 1.0
+        // Q = [[0.001]] (ε = 0.001), c = [1.0], bounds = [(1.0, +∞)]
+        // KKT at x=1: 0.001*1 + 1 - y_lb = 0 → y_lb = 1.001
+        let q = CscMatrix::from_triplets(&[0], &[0], &[0.001], 1, 1).unwrap();
+        let c_vec = vec![1.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(1.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let result = solve_qp_ipm(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "IPM-T16: status should be Optimal");
+        assert!(
+            (result.solution[0] - 1.0).abs() < 1e-4,
+            "IPM-T16: x*≈1.0, got {:.6}", result.solution[0]
+        );
+        // bound_duals[0] = y_lb ≈ 1.001 (lb dual at x=1)
+        assert!(!result.bound_duals.is_empty(), "IPM-T16: bound_duals should be non-empty");
+        assert!(
+            (result.bound_duals[0] - 1.001).abs() < 0.1,
+            "IPM-T16: bound_duals[0] (lb dual) ≈ 1.001, got {:.6}", result.bound_duals[0]
+        );
+    }
+
+    /// IPM-T17: ub-only 活性ケースの bound_duals 値検証（TC-01, TC-02対応）
+    ///
+    /// min -x s.t. x <= 0.5  (ub活性: x*=0.5, y_ub=1.0 > 0)
+    /// Q=[[ε]] (小さい正則化), c=[-1.0], bounds=[(-∞, 0.5)]
+    /// KKT: ε*x - 1 + y_ub = 0, x=0.5 → y_ub = 1 - ε*0.5 ≈ 1.0
+    ///
+    /// NOTE: bound_duals修正(cmd_503)後。lb有限変数なし→ub分のみ格納。
+    #[test]
+    fn test_ipm_bound_duals_ub_only_active() {
+        // min 1/2*0.001*x^2 - x s.t. x <= 0.5
+        // KKT at x=0.5: 0.001*0.5 - 1 + y_ub = 0 → y_ub = 1 - 0.0005 = 0.9995
+        let q = CscMatrix::from_triplets(&[0], &[0], &[0.001], 1, 1).unwrap();
+        let c_vec = vec![-1.0];
+        let a = CscMatrix::new(0, 1);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, 0.5_f64)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let result = solve_qp_ipm(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "IPM-T17: status should be Optimal");
+        assert!(
+            (result.solution[0] - 0.5).abs() < 1e-4,
+            "IPM-T17: x*≈0.5, got {:.6}", result.solution[0]
+        );
+        // bound_duals[0] = y_ub ≈ 0.9995 (ub dual. lb-infiniteのためindex=0がub dual)
+        assert!(!result.bound_duals.is_empty(), "IPM-T17: bound_duals should be non-empty");
+        assert!(
+            (result.bound_duals[0] - 1.0).abs() < 0.1,
+            "IPM-T17: bound_duals[0] (ub dual) ≈ 1.0, got {:.6}", result.bound_duals[0]
+        );
+    }
+
+    /// IPM-T18: 両端有限 lb活性ケース — T12のbound_dualsアサート追加（TC-01対応）
+    ///
+    /// T4と同じ問題: min (x-2)^2 + (y-2)^2 s.t. 0<=x<=1, 0<=y<=1
+    /// x*=y*=1 (ub活性), ub duals > 0, lb duals = 0 (lb非活性)
+    ///
+    /// NOTE: bound_duals修正(cmd_503)後。
+    /// bound_duals格納順: lb_x, lb_y (index 0,1), ub_x, ub_y (index 2,3)
+    /// x=y=1 (ub活性) → ub_duals > 0, lb_duals ≈ 0
+    #[test]
+    fn test_ipm_bound_duals_box_constrained() {
+        // min (x-2)^2+(y-2)^2 = 1/2*4*(x^2+y^2) - 4x - 4y + const
+        // Q=[[2,0],[0,2]] (「1/2あり」: 1/2*2*x^2=x^2, grad=2x), c=[-4,-4]
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c_vec = vec![-4.0, -4.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)];
+        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let result = solve_qp_ipm(&problem, &opts);
+
+        // NOTE: bound_duals修正(cmd_503)後もstatus=Optimalを維持することを確認。
+        // もしSUBに変化する場合はKKT解析で原因を確認すること。
+        assert_eq!(result.status, SolveStatus::Optimal, "IPM-T18: status");
+        assert!((result.solution[0] - 1.0).abs() < 0.01, "IPM-T18: x*≈1.0");
+        assert!((result.solution[1] - 1.0).abs() < 0.01, "IPM-T18: y*≈1.0");
+
+        // bound_duals格納順: [lb_x, lb_y, ub_x, ub_y] (全4変数×両端有限)
+        // x=y=1はub活性 → ub_duals(index 2,3) > 0
+        // x=y=1はlb非活性 → lb_duals(index 0,1) ≈ 0 (interior point法では正の値になるが小さい)
+        assert_eq!(result.bound_duals.len(), 4, "IPM-T18: 4 bound duals expected");
+        // KKT: 2*x - 4 - y_lb_x + y_ub_x = 0 → y_ub_x = 4 - 2*1 + y_lb_x ≈ 2
+        assert!(
+            result.bound_duals[2] > 0.5,
+            "IPM-T18: ub_dual_x should be positive (active), got {:.6}", result.bound_duals[2]
+        );
+        assert!(
+            result.bound_duals[3] > 0.5,
+            "IPM-T18: ub_dual_y should be positive (active), got {:.6}", result.bound_duals[3]
         );
     }
 
