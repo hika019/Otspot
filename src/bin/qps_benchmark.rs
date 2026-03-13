@@ -101,8 +101,9 @@ fn main() {
                 solver_choice = match args[i].as_str() {
                     "ipm" => QpSolverChoice::Ipm,
                     "ipm-schur" => QpSolverChoice::IpmSchur,
+                    "concurrent" => QpSolverChoice::Concurrent,
                     other => {
-                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur", other);
+                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur|concurrent", other);
                         std::process::exit(1);
                     }
                 };
@@ -147,6 +148,7 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_suboptimal = 0usize;
 
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
@@ -264,7 +266,7 @@ fn main() {
                 )
             }
             SolveStatus::SuboptimalSolution => {
-                n_max_iter += 1;
+                n_suboptimal += 1;
                 (
                     "SUBOPTIMAL".to_string(),
                     format!("[{}] iters={} {}", method_label, result.iterations, resid_str),
@@ -300,7 +302,8 @@ fn main() {
     println!("  PASS:    {}", n_pass);
     println!("  FAIL:    {}", n_fail);
     println!("  MAXITER: {}", n_max_iter);
+    println!("  SUBOPTIMAL: {}", n_suboptimal);
     println!("  TIMEOUT: {}", n_timeout);
     println!("  ERROR:   {}", n_error);
-    println!("  TOTAL:   {}", n_pass + n_fail + n_max_iter + n_timeout + n_error);
+    println!("  TOTAL:   {}", n_pass + n_fail + n_max_iter + n_suboptimal + n_timeout + n_error);
 }

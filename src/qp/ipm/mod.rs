@@ -118,6 +118,8 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 
     // BUG-A1修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
     let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps());
+    // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
+    // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
     if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
         SolverResult { status: SolveStatus::Timeout, ..raw }
     } else {
@@ -191,6 +193,8 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
         problem,
         options.ipm_eps(),
     );
+    // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
+    // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
     if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
         SolverResult { status: SolveStatus::Timeout, ..raw }
     } else {
