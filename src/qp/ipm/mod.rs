@@ -95,8 +95,14 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                     last_result = Some(result);
                     continue;
                 }
-                // Fix-D相当: Timeout/MaxIterationsはそのまま返す
-                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                // Fix-D相当: MaxIterations → Timeout 変換
+                if result.status == SolveStatus::MaxIterations {
+                    return SolverResult { status: SolveStatus::Timeout, ..result };
+                }
+                // Timeout / Infeasible / Unbounded はそのまま返す
+                if result.status == SolveStatus::Timeout
+                    || matches!(result.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+                {
                     return result;
                 }
                 // Fix-D相当: SuboptimalSolution → Timeout（Optimal|Timeout 2択を保証）
@@ -114,7 +120,9 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 
     // BUG-A1修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
     let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps());
-    if raw.status == SolveStatus::SuboptimalSolution {
+    // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
+    // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
+    if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
         SolverResult { status: SolveStatus::Timeout, ..raw }
     } else {
         raw
@@ -158,8 +166,14 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
                     last_result = Some(result);
                     continue;
                 }
-                // Fix-D相当: Timeout/MaxIterationsはそのまま返す
-                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                // Fix-D相当: MaxIterations → Timeout 変換
+                if result.status == SolveStatus::MaxIterations {
+                    return SolverResult { status: SolveStatus::Timeout, ..result };
+                }
+                // Timeout / Infeasible / Unbounded はそのまま返す
+                if result.status == SolveStatus::Timeout
+                    || matches!(result.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
+                {
                     return result;
                 }
                 // Fix-D相当: SuboptimalSolution → Timeout（Optimal|Timeout 2択を保証）
@@ -181,7 +195,9 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
         problem,
         options.ipm_eps(),
     );
-    if raw.status == SolveStatus::SuboptimalSolution {
+    // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
+    // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
+    if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
         SolverResult { status: SolveStatus::Timeout, ..raw }
     } else {
         raw
@@ -474,7 +490,7 @@ fn unscale_ipm_result(
                 ..result
             }
         }
-        SolveStatus::Timeout | SolveStatus::MaxIterations => {
+        SolveStatus::Timeout => {
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let obj_orig = result.objective / scaler.c;
             SolverResult {

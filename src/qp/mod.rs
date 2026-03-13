@@ -85,9 +85,6 @@ fn residual_score(result: &SolverResult, problem: &QpProblem) -> f64 {
 fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
     match result.status {
         SolveStatus::Optimal => Some(QualityRank::Optimal),
-        SolveStatus::MaxIterations if !result.solution.is_empty() => {
-            Some(QualityRank::Feasible)
-        }
         SolveStatus::SuboptimalSolution if !result.solution.is_empty() => {
             Some(QualityRank::Feasible)
         }
@@ -353,8 +350,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             iterations: 0,
             ..Default::default()
         },
-        SolveStatus::MaxIterations => SolverResult::numerical_error(),
-        SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
+        SolveStatus::MaxIterations | SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
         SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -1187,7 +1183,7 @@ mod tests {
             ..Default::default()
         };
         let result_feasible = SolverResult {
-            status: SolveStatus::MaxIterations,
+            status: SolveStatus::SuboptimalSolution,
             solution: vec![0.5, 0.5],
             final_residuals: Some((0.0, 0.0, 0.0)),
             ..Default::default()
@@ -1195,7 +1191,7 @@ mod tests {
         let rank_opt = quality_rank_of(&result_optimal);
         let rank_feas = quality_rank_of(&result_feasible);
         assert_eq!(rank_opt, Some(QualityRank::Optimal), "T-Concurrent-3: Optimal rankはOptimal");
-        assert_eq!(rank_feas, Some(QualityRank::Feasible), "T-Concurrent-3: MaxIterations rankはFeasible");
+        assert_eq!(rank_feas, Some(QualityRank::Feasible), "T-Concurrent-3: SuboptimalSolution rankはFeasible");
         assert!(
             rank_opt.unwrap() > rank_feas.unwrap(),
             "T-Concurrent-3: Optimal > Feasible なのでrankでOptimalが勝つこと"
