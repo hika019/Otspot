@@ -876,7 +876,7 @@ fn norm_inf_ippmm(v: &[f64]) -> f64 {
 
 /// Farkas 条件と双対不実行可能条件で Infeasible / Unbounded を判定する。
 ///
-/// step.rs の check_infeasible_or_unbounded と同等のロジック。
+/// Farkas 条件と双対不実行可能条件を用いた Infeasible/Unbounded 判定（独立実装）。
 /// ippmm.rs 内ヘルパーのみを使用（step.rs/kkt.rs 依存なし）。
 ///
 /// # 引数
@@ -1175,6 +1175,91 @@ mod tests {
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPPMM-T5: expected Timeout or Optimal, got {:?}",
             result.status
+        );
+    }
+
+    /// IPPMM-T-INF1: iter < MIN_ITER(=5) の場合 None が返ること
+    #[test]
+    fn test_iter_guard_ippmm() {
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let c = vec![-1.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let dx = vec![1.0]; // MIN_DIR_NORM を超える大きさだが iter ガードが先
+        let dy: Vec<f64> = vec![];
+        // iter=4 < MIN_ITER=5 → None
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 4),
+            None,
+            "IPPMM-T-INF1: iter < MIN_ITER は None であること"
+        );
+    }
+
+    /// IPPMM-T-INF2: ||Δx||_inf <= MIN_DIR_NORM(=1e-3) の場合 None が返ること
+    #[test]
+    fn test_min_dir_norm_guard_ippmm() {
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let c = vec![-1.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let dx = vec![5e-4]; // ||dx||_inf = 5e-4 <= MIN_DIR_NORM = 1e-3
+        let dy: Vec<f64> = vec![];
+        // 収束時偽陽性防止: dx が小さすぎる → None
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            None,
+            "IPPMM-T-INF2: ||dx||_inf <= MIN_DIR_NORM は None であること"
+        );
+    }
+
+    /// IPPMM-T-INF3: Farkas dual ray 条件を満たすベクトルで Infeasible 判定を確認
+    ///
+    /// A_orig = 0 (1x2 ゼロ行列), b = [-1], dy_orig = [2.0]
+    /// ① ||A^T * dy_orig|| = 0 < ε ✓
+    /// ② b · dy_orig = -2 < -ε ✓
+    /// → Infeasible
+    #[test]
+    fn test_primal_infeasible_ippmm() {
+        let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap();
+        let c = vec![1.0, 0.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap(); // 1x2 ゼロ行列
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap();
+        let dx = vec![1e-10, 1e-10]; // 非常に小さい → dual チェックはスキップ
+        let dy = vec![2.0]; // norm = 2.0 > MIN_DIR_NORM
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 1, 1, 10),
+            Some(SolveStatus::Infeasible),
+            "IPPMM-T-INF3: Farkas ray 条件 → Infeasible であること"
+        );
+    }
+
+    /// IPPMM-T-INF4: LP (Q=0) で c·Δx < 0 条件の Unbounded 判定を確認
+    ///
+    /// n=1, m_orig=0: c=[-1], dx=[1.0] → c·dx/norm_dx = -1 < -ε → Unbounded
+    #[test]
+    fn test_dual_infeasible_lp_ippmm() {
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap(); // Q=0 (LP)
+        let c = vec![-1.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(); // 制約なし
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let dx = vec![1.0]; // c·dx = -1 < -ε, m_ext=0 なので dual guard は無効
+        let dy: Vec<f64> = vec![];
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            Some(SolveStatus::Unbounded),
+            "IPPMM-T-INF4: LP dual infeasibility → Unbounded であること"
         );
     }
 }
