@@ -21,6 +21,117 @@ use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
 
 // ---------------------------------------------------------------------------
+// Infeasibility / Unboundedness 検出
+// ---------------------------------------------------------------------------
+
+/// Gondzio corrector 後のステップ方向 (Δx, Δy) から実行不能または非有界を検出する。
+///
+/// MIN_DIR_NORM より小さい方向ベクトルでの検出は行わない（収束時の誤検知防止）。
+///
+/// **実行不能 (Primal Infeasibility)**:
+/// ||Δy_orig||_inf > MIN_DIR_NORM かつ:
+///   ① ||A_orig^T * Δy_orig|| / max(1, ||Δy||) < ε_inf
+///   ② b_orig · Δy_orig / max(1, ||Δy||) < -ε_inf
+///
+/// **非有界 (Dual Infeasibility / Unboundedness)**:
+/// ||Δx||_inf > MIN_DIR_NORM かつ:
+///   ③ c · Δx / max(1, ||Δx||) < -ε_inf  (LP: Q=0)
+///      ||(Q*Δx + c)|| / max(1, ||Δx||) < ε_inf  (QP: Q≠0)
+///   ④ ||A_orig * Δx|| / max(1, ||Δx||) < ε_inf
+fn check_infeasible_or_unbounded(
+    dx: &[f64],
+    dy: &[f64],
+    problem: &QpProblem,
+    a_ext: &CscMatrix,
+    m_orig: usize,
+    m_ext: usize,
+    iter: usize,
+) -> Option<SolveStatus> {
+    const EPS_INF: f64 = 1e-8;
+    const MIN_ITER: usize = 5;
+    /// 収束時の偽陽性防止: 方向ベクトルが MIN_DIR_NORM 以下は検出スキップ。
+    /// 収束時は Δx→0, Δy→0 なので norm=max(1,||Δ||)=1 となり比率が偶然ε未満になる。
+    const MIN_DIR_NORM: f64 = 1e-3;
+
+    if iter < MIN_ITER {
+        return None;
+    }
+
+    let n = dx.len();
+    let _ = m_ext; // 将来の拡張用（n_ub計算等）
+
+    // --- Primal Infeasibility check ---
+    // ||Δy_orig|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
+    if m_orig > 0 {
+        let dy_orig = &dy[..m_orig];
+        let norm_dy_inf = norm_inf(dy_orig);
+        if norm_dy_inf > MIN_DIR_NORM {
+            let norm_dy = norm_dy_inf.max(1.0);
+            // ① A_orig^T * Δy_orig: a_ext は CSC, 行インデックス < m_orig のエントリのみ使用
+            let mut at_dy = vec![0.0f64; n];
+            for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
+                for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+                    let row = a_ext.row_ind[ptr];
+                    if row < m_orig {
+                        *at_dy_j += a_ext.values[ptr] * dy_orig[row];
+                    }
+                }
+            }
+            let cond_a = norm_inf(&at_dy) / norm_dy < EPS_INF;
+            // ② b_orig · Δy_orig
+            let b_dy: f64 = problem.b.iter().zip(dy_orig.iter()).map(|(&bi, &dyi)| bi * dyi).sum();
+            let cond_b = b_dy / norm_dy < -EPS_INF;
+            if cond_a && cond_b {
+                return Some(SolveStatus::Infeasible);
+            }
+        }
+    }
+
+    // --- Dual Infeasibility / Unboundedness check ---
+    // ||Δx|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
+    let norm_dx_inf = norm_inf(dx);
+    if norm_dx_inf <= MIN_DIR_NORM {
+        return None;
+    }
+    let norm_dx = norm_dx_inf.max(1.0);
+
+    // ③ 目的関数方向条件: LP(Q=0) → c·Δx < -ε*norm_dx; QP(Q≠0) → ||Q*Δx+c||/norm_dx < ε
+    let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
+    let cond_obj = if is_lp {
+        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
+        c_dx / norm_dx < -EPS_INF
+    } else {
+        let mut qdx = vec![0.0f64; n];
+        spmv_q(&problem.q, dx, &mut qdx);
+        let qdx_plus_c_norm: f64 = qdx.iter().zip(problem.c.iter())
+            .map(|(&qi, &ci)| (qi + ci).abs())
+            .fold(0.0_f64, f64::max);
+        qdx_plus_c_norm / norm_dx < EPS_INF
+    };
+    if !cond_obj {
+        return None;
+    }
+
+    // ④ ||A_orig * Δx|| / norm_dx < ε
+    if m_orig > 0 {
+        let mut a_dx = vec![0.0f64; m_orig];
+        for (j, &dxj) in dx.iter().enumerate() {
+            for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+                let row = a_ext.row_ind[ptr];
+                if row < m_orig {
+                    a_dx[row] += a_ext.values[ptr] * dxj;
+                }
+            }
+        }
+        if norm_inf(&a_dx) / norm_dx >= EPS_INF {
+            return None;
+        }
+    }
+
+    Some(SolveStatus::Unbounded)
+}
+
+// ---------------------------------------------------------------------------
 // fraction-to-boundary
 // ---------------------------------------------------------------------------
 
@@ -84,7 +195,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
     // AMD permutation キャッシュ（augmented system のスパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
 
-    let mut status = SolveStatus::MaxIterations;
+    let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
@@ -191,7 +302,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 }
             }
         }
-        if status == SolveStatus::Timeout {
+        if status == SolveStatus::Timeout && fac_opt.is_none() {
             break;
         }
         let fac = match fac_opt {
@@ -316,6 +427,15 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         }
         // ========== Gondzio Correctors End ==========
 
+        // Infeasibility / Unboundedness 検出（augmented パス）
+        if let Some(infeas_status) = check_infeasible_or_unbounded(
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
+        ) {
+            status = infeas_status;
+            final_iter = iter;
+            break;
+        }
+
         // 変数更新
         for i in 0..n {
             x[i] += alpha * dx[i];
@@ -407,7 +527,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
 
-    let mut status = SolveStatus::MaxIterations;
+    let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
@@ -513,7 +633,7 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
                 }
             }
         }
-        if status == SolveStatus::Timeout {
+        if status == SolveStatus::Timeout && fac_opt.is_none() {
             break;
         }
         let fac = match fac_opt {
@@ -651,6 +771,15 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
             alpha = alpha_prev;
         }
         // ========== Gondzio Correctors End ==========
+
+        // Infeasibility / Unboundedness 検出（Schur パス）
+        if let Some(infeas_status) = check_infeasible_or_unbounded(
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
+        ) {
+            status = infeas_status;
+            final_iter = iter;
+            break;
+        }
 
         // 変数更新
         for i in 0..n {
