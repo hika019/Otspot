@@ -147,15 +147,17 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         })
         .collect();
 
-    // s0: compute_initial_point 方式 (s >= 1.0 を保証)
-    // 理由: s0 が小さい (1e-4) と sigma_vec = s/y が tiny になり
-    //       augmented KKT の下三角ブロック -(sigma + delta) が
-    //       A^T A 項に負けて準正定値性が崩れ LDL 因子化が失敗する。
-    // 解: sigma_vec >= 1.0 を初期から確保することで因子化を安定化。
-    // 参考: src/qp/ipm/init.rs compute_initial_point (s = max(1, |b|+1))
+    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。下限を 1e-4 でクランプ
+    let mut ax0 = vec![0.0f64; m_ext];
+    for col in 0..n {
+        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+            ax0[a_ext.row_ind[k]] += a_ext.values[k] * x0[col];
+        }
+    }
     let s0: Vec<f64> = b_ext
         .iter()
-        .map(|&bi| 1.0_f64.max(bi.abs() + 1.0))
+        .zip(ax0.iter())
+        .map(|(&bi, &axi)| (bi - axi).max(1e-4))
         .collect();
     let y0: Vec<f64> = vec![1.0; m_ext];
 
