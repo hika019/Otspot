@@ -511,6 +511,15 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
             break;
         }
 
+        // Infeasibility / Unboundedness 検出（IP-PMM パス）
+        if let Some(infeas_status) = check_infeasible_or_unbounded_ippmm(
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
+        ) {
+            status = infeas_status;
+            final_iter = iter;
+            break;
+        }
+
         for i in 0..n {
             x[i] += alpha * dx[i];
         }
@@ -859,6 +868,129 @@ fn spmv_q_ippmm(q: &CscMatrix, x: &[f64], out: &mut [f64]) {
 #[inline]
 fn norm_inf_ippmm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |a, &x| a.max(x.abs()))
+}
+
+// ---------------------------------------------------------------------------
+// Infeasibility / Unboundedness 検出（IP-PMM パス）
+// ---------------------------------------------------------------------------
+
+/// Farkas 条件と双対不実行可能条件で Infeasible / Unbounded を判定する。
+///
+/// step.rs の check_infeasible_or_unbounded と同等のロジック。
+/// ippmm.rs 内ヘルパーのみを使用（step.rs/kkt.rs 依存なし）。
+///
+/// # 引数
+/// - `dx`, `dy`: Gondzio補正後の探索方向
+/// - `m_orig`: 元の等式/不等式制約数（境界制約を除く）
+/// - `m_ext`: 拡張制約数（境界スラック含む）
+/// - `iter`: 現在の反復番号（MIN_ITER 未満はスキップ）
+fn check_infeasible_or_unbounded_ippmm(
+    dx: &[f64],
+    dy: &[f64],
+    problem: &QpProblem,
+    a_ext: &CscMatrix,
+    m_orig: usize,
+    m_ext: usize,
+    iter: usize,
+) -> Option<SolveStatus> {
+    const EPS_INF: f64 = 1e-8;
+    const MIN_ITER: usize = 5;
+    /// 収束時の偽陽性防止: 方向ベクトルが MIN_DIR_NORM 以下は検出スキップ。
+    /// 収束時は Δx→0, Δy→0 なので norm=max(1,||Δ||)=1 となり比率が偶然ε未満になる。
+    const MIN_DIR_NORM: f64 = 1e-3;
+
+    if iter < MIN_ITER {
+        return None;
+    }
+
+    let n = dx.len();
+
+    // --- Primal Infeasibility check ---
+    // ||Δy_orig|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
+    if m_orig > 0 {
+        let dy_orig = &dy[..m_orig];
+        let norm_dy_inf = norm_inf_ippmm(dy_orig);
+        if norm_dy_inf > MIN_DIR_NORM {
+            let norm_dy = norm_dy_inf.max(1.0);
+            // A_orig^T * Δy_orig: a_ext は CSC, 行インデックス < m_orig のエントリのみ使用
+            let mut at_dy = vec![0.0f64; n];
+            for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
+                for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+                    let row = a_ext.row_ind[ptr];
+                    if row < m_orig {
+                        *at_dy_j += a_ext.values[ptr] * dy_orig[row];
+                    }
+                }
+            }
+            let cond_a = norm_inf_ippmm(&at_dy) / norm_dy < EPS_INF;
+            // b_orig · Δy_orig
+            let b_dy: f64 = problem
+                .b
+                .iter()
+                .zip(dy_orig.iter())
+                .map(|(&bi, &dyi)| bi * dyi)
+                .sum();
+            let cond_b = b_dy / norm_dy < -EPS_INF;
+            if cond_a && cond_b {
+                return Some(SolveStatus::Infeasible);
+            }
+        }
+    }
+
+    // --- Dual Infeasibility / Unboundedness check ---
+    // m_orig=0 かつ m_ext>0 の場合（境界制約のみの問題）はチェック全体をスキップ。
+    // 等式制約なし問題は通常 bounded のため偽陽性回避を優先する。
+    if m_orig == 0 && m_ext > 0 {
+        return None;
+    }
+    // ||Δx|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
+    let norm_dx_inf = norm_inf_ippmm(dx);
+    if norm_dx_inf <= MIN_DIR_NORM {
+        return None;
+    }
+    let norm_dx = norm_dx_inf.max(1.0);
+
+    // 目的関数方向条件: LP(Q=0) → c·Δx < -ε*norm_dx; QP(Q≠0) → ||Q*Δx+c||/norm_dx < ε
+    let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
+    let cond_obj = if is_lp {
+        let c_dx: f64 = problem
+            .c
+            .iter()
+            .zip(dx.iter())
+            .map(|(&ci, &dxi)| ci * dxi)
+            .sum();
+        c_dx / norm_dx < -EPS_INF
+    } else {
+        let mut qdx = vec![0.0f64; n];
+        spmv_q_ippmm(&problem.q, dx, &mut qdx);
+        let qdx_plus_c_norm: f64 = qdx
+            .iter()
+            .zip(problem.c.iter())
+            .map(|(&qi, &ci)| (qi + ci).abs())
+            .fold(0.0_f64, f64::max);
+        qdx_plus_c_norm / norm_dx < EPS_INF
+    };
+    if !cond_obj {
+        return None;
+    }
+
+    // ||A_orig * Δx|| / norm_dx < ε
+    if m_orig > 0 {
+        let mut a_dx = vec![0.0f64; m_orig];
+        for (j, &dxj) in dx.iter().enumerate() {
+            for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+                let row = a_ext.row_ind[ptr];
+                if row < m_orig {
+                    a_dx[row] += a_ext.values[ptr] * dxj;
+                }
+            }
+        }
+        if norm_inf_ippmm(&a_dx) / norm_dx >= EPS_INF {
+            return None;
+        }
+    }
+
+    Some(SolveStatus::Unbounded)
 }
 
 // ---------------------------------------------------------------------------
