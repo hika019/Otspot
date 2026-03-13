@@ -479,12 +479,26 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         }
 
         // ── 変数更新 ──────────────────────────────────────────────
+        // NaN/Inf ガード: ステップにNaNが含まれる場合は現在のx,y,sで停止。
+        // sigma_max=1e17-1e19の問題で補正ステップの壊滅的キャンセルによりNaNが
+        // 発生した際に、直前の有効な解でSuboptimalSolutionを返す。
+        // unscale_ipm_result がpfeas/bfeas/dfeasを原空間で再検証してOptimalに昇格する。
+        if dx.iter().any(|v| !v.is_finite())
+            || dy.iter().any(|v| !v.is_finite())
+            || ds.iter().any(|v| !v.is_finite())
+        {
+            status = SolveStatus::SuboptimalSolution;
+            final_iter = iter;
+            break;
+        }
+
         for i in 0..n {
             x[i] += alpha * dx[i];
         }
         for i in 0..m_ext {
             s[i] += alpha * ds[i];
             y[i] += alpha * dy[i];
+            // 下限: 負への転落を防ぐ（元の実装と同じ）
             if s[i] <= 0.0 {
                 s[i] = 1e-12;
             }
