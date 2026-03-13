@@ -43,11 +43,17 @@ use crate::sparse::CscMatrix;
 /// PMM 初期 rho（primal proximal）
 /// PARAM: 根拠=mu-tracking初期値と整合する程度の小値（8.0はGondzio2021参照実装だが
 ///        わしらの単一ループ実装には大きすぎてKKT解を狂わせる）
-const RHO_INIT: f64 = 1e-3;
+/// Ruizスケーリング後の単位スケール問題を前提とした値。
+/// 非スケール問題（フォールバックパス）では条件数が増大する可能性あり。
+/// augmented KKT κ≈1e8、LDLT安定範囲内
+const RHO_INIT: f64 = 1e-4;
 
 /// PMM 初期 delta（dual proximal）
-/// PARAM: rhoと対称に設定
-const DELTA_INIT: f64 = 1e-3;
+/// PARAM: RHO_INITと対称に設定
+/// Ruizスケーリング後の単位スケール問題を前提とした値。
+/// 非スケール問題（フォールバックパス）では条件数が増大する可能性あり。
+/// augmented KKT κ≈1e8、RHO_INITと対称
+const DELTA_INIT: f64 = 1e-4;
 
 /// PMM パラメータ下限（reg_limit）
 /// PARAM: 根拠=数値安定性のための最小正則化値(0=完全収束) | 要検証=大規模問題での充足性
@@ -147,7 +153,7 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         })
         .collect();
 
-    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。下限を 1e-4 でクランプ
+    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。下限を 1.0 でクランプ（D1修正）
     let mut ax0 = vec![0.0f64; m_ext];
     for col in 0..n {
         for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
@@ -157,7 +163,7 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
     let s0: Vec<f64> = b_ext
         .iter()
         .zip(ax0.iter())
-        .map(|(&bi, &axi)| (bi - axi).max(1e-4))
+        .map(|(&bi, &axi)| (bi - axi).max(1.0))
         .collect();
     let y0: Vec<f64> = vec![1.0; m_ext];
 
