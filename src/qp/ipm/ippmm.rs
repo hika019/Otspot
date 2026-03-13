@@ -558,13 +558,14 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
 
     let dual_solution = y[..m_orig].to_vec();
+    let bound_duals = y[m_orig..].to_vec();
 
     SolverResult {
         status,
         objective,
         solution: x,
         dual_solution,
-        bound_duals: vec![],
+        bound_duals,
         active_set: vec![],
         iterations: final_iter,
         final_residuals,
