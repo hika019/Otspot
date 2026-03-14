@@ -387,20 +387,28 @@ fn get_a_element(a: &CscMatrix, row: usize, col: usize) -> f64 {
 /// 全ピボットが正なら PSD、負のピボットが出た時点で false を返す（非凸QP）。
 /// n > CHECK_SIZE_LIMIT の場合は高コストを避けてスキップ（true を返す）。
 /// Q は上三角CSC形式で渡す（IPMの内部表現と同じ）。
-fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
+///
+/// # Limitations
+/// - n > 1000 の問題はスキップし true（PSD扱い）を返す。
+///   大規模非凸QPを検出できない可能性がある。
+///   現在のQPLIBターゲット問題は n ≤ 500 のためこのケースは存在しない。
+pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     let n = q.nrows;
     if n == 0 {
         return true;
     }
 
-    // 大規模行列は O(n^3) コレスキーが高コストなためスキップ。
-    // 非凸QPLIBターゲット問題は n≤500 なのでこの範囲で十分。
+    // n > 1000: O(n³) コスト回避のためスキップ。
+    // 大規模非凸QPをNonConvexと判定できない可能性がある（現状ターゲット問題はn≤500）。
     const CHECK_SIZE_LIMIT: usize = 1000;
     if n > CHECK_SIZE_LIMIT {
         return true;
     }
 
-    let eps = 1e-8;
+    // eps: double precision 機械イプシロン (~2e-16) の約10^8倍。
+    // PSD境界判定の数値的余裕として設定。半正定値Q（最小固有値=0）は
+    // Q+eps*I の最小ピボット = eps > 0 → PSD判定される設計。
+    let eps = 1e-8_f64;
 
     // 上三角CSC から密対称行列を構築（Q + eps*I）
     let mut a = vec![0.0f64; n * n];
@@ -1441,5 +1449,59 @@ mod tests {
             "T26: x[1] ≈ 0.5, got {}",
             result.solution[1]
         );
+    }
+
+    /// T27: 不定Q行列（対角に負値）→ NonConvex返却
+    /// Q = diag(-1.0, 1.0, 1.0) → 最小固有値 = -1.0 → 非凸QP
+    /// 期待: SolveStatus::NonConvex(...)
+    #[test]
+    fn test_qp_nonconvex_indefinite_q() {
+        // Q = diag(-1.0, 1.0, 1.0)（不定行列: 対角に負値）
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[-1.0, 1.0, 1.0],
+            3,
+            3,
+        ).unwrap();
+        let c = vec![0.0, 0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert!(
+            matches!(result.status, SolveStatus::NonConvex(_)),
+            "T27: 不定Q行列はNonConvexを返すこと。got: {:?}", result.status
+        );
+    }
+
+    /// T28: 半正定値Q行列（最小固有値=0）→ PSD判定（NonConvexでないこと）
+    /// Q = diag(0.0, 1.0, 1.0) → Q+eps*I の全ピボット > 0 → PSD判定
+    /// 期待: check_q_positive_semidefinite が true を返す
+    #[test]
+    fn test_qp_psd_semidefinite_q() {
+        // Q = diag(0.0, 1.0, 1.0)（半正定値行列: 最小固有値=0）
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[0.0, 1.0, 1.0],
+            3,
+            3,
+        ).unwrap();
+        assert!(
+            check_q_positive_semidefinite(&q),
+            "T28: 半正定値Q（最小固有値=0）はPSD判定されること"
+        );
+    }
+
+    /// T29: SolveStatus::NonConvex の Display 確認
+    /// 期待: format!("{}", NonConvex(msg)) == "NonConvex(msg)"
+    #[test]
+    fn test_solve_status_display_nonconvex() {
+        let msg = "Q matrix is indefinite".to_string();
+        let status = SolveStatus::NonConvex(msg.clone());
+        assert_eq!(format!("{}", status), format!("NonConvex({})", msg));
     }
 }
