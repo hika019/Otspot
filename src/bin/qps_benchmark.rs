@@ -147,6 +147,7 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_nonconvex = 0usize;
 
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
@@ -278,6 +279,10 @@ fn main() {
                 n_fail += 1;
                 ("FAIL:NumericalError".to_string(), format!("[{}]", method_label))
             }
+            SolveStatus::NonConvex(_) => {
+                n_nonconvex += 1;
+                ("NONCONVEX".to_string(), format!("[{}] Q not PSD", method_label))
+            }
             _ => {
                 n_fail += 1;
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
@@ -297,10 +302,11 @@ fn main() {
     println!("{}", "-".repeat(75));
     println!();
     println!("=== Summary ===");
-    println!("  PASS:    {}", n_pass);
-    println!("  FAIL:    {}", n_fail);
-    println!("  MAXITER: {}", n_max_iter);
-    println!("  TIMEOUT: {}", n_timeout);
-    println!("  ERROR:   {}", n_error);
-    println!("  TOTAL:   {}", n_pass + n_fail + n_max_iter + n_timeout + n_error);
+    println!("  PASS:      {}", n_pass);
+    println!("  FAIL:      {}", n_fail);
+    println!("  MAXITER:   {}", n_max_iter);
+    println!("  TIMEOUT:   {}", n_timeout);
+    println!("  NONCONVEX: {}", n_nonconvex);
+    println!("  ERROR:     {}", n_error);
+    println!("  TOTAL:     {}", n_pass + n_fail + n_max_iter + n_timeout + n_nonconvex + n_error);
 }

@@ -254,6 +254,7 @@ impl Model {
             SolveStatus::SuboptimalSolution => Err(ModelError::Internal("Suboptimal solution: precision criteria not met".to_string())),
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::Internal("Numerical error".to_string())),
+            SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
         }
     }
 
@@ -408,6 +409,9 @@ impl Model {
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => {
                 Err(ModelError::Internal("QP numerical error".to_string()))
+            }
+            SolveStatus::NonConvex(msg) => {
+                Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
             }
         }
     }

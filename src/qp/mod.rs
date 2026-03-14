@@ -362,6 +362,10 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             iterations: 0,
             ..Default::default()
         },
+        SolveStatus::NonConvex(_) => SolverResult {
+            status: result.status,
+            ..Default::default()
+        },
     }
 }
 
@@ -375,6 +379,67 @@ fn get_a_element(a: &CscMatrix, row: usize, col: usize) -> f64 {
         }
     }
     0.0
+}
+
+/// Q行列が正半定値かどうかを確認する。
+///
+/// Q + epsilon*I を密行列コレスキー分解で確認する。
+/// 全ピボットが正なら PSD、負のピボットが出た時点で false を返す（非凸QP）。
+/// n > CHECK_SIZE_LIMIT の場合は高コストを避けてスキップ（true を返す）。
+/// Q は上三角CSC形式で渡す（IPMの内部表現と同じ）。
+fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
+    let n = q.nrows;
+    if n == 0 {
+        return true;
+    }
+
+    // 大規模行列は O(n^3) コレスキーが高コストなためスキップ。
+    // 非凸QPLIBターゲット問題は n≤500 なのでこの範囲で十分。
+    const CHECK_SIZE_LIMIT: usize = 1000;
+    if n > CHECK_SIZE_LIMIT {
+        return true;
+    }
+
+    let eps = 1e-8;
+
+    // 上三角CSC から密対称行列を構築（Q + eps*I）
+    let mut a = vec![0.0f64; n * n];
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            if row <= col {
+                let v = q.values[k];
+                a[row * n + col] = v;
+                if row != col {
+                    a[col * n + row] = v;
+                }
+            }
+        }
+    }
+    for i in 0..n {
+        a[i * n + i] += eps;
+    }
+
+    // 密コレスキー L L^T 分解。負のピボットが出たら non-PSD。
+    for j in 0..n {
+        let mut d = a[j * n + j];
+        for k in 0..j {
+            d -= a[j * n + k] * a[j * n + k];
+        }
+        if d <= 0.0 {
+            return false;
+        }
+        let sqrt_d = d.sqrt();
+        a[j * n + j] = sqrt_d;
+        for i in (j + 1)..n {
+            let mut l_ij = a[i * n + j];
+            for k in 0..j {
+                l_ij -= a[i * n + k] * a[j * n + k];
+            }
+            a[i * n + j] = l_ij / sqrt_d;
+        }
+    }
+    true
 }
 
 /// QP ソルバーをディスパッチする内部関数
@@ -395,6 +460,16 @@ fn dispatch_qp(
     // Q=0 退化ケース（LP 問題）: LP ソルバーに委譲
     if problem.is_zero_q() {
         return solve_as_lp(problem, options);
+    }
+
+    // Q不定値チェック（非凸QP検出）: IPMはQ正半定値を前提とするため早期終了
+    if !check_q_positive_semidefinite(&problem.q) {
+        return SolverResult {
+            status: SolveStatus::NonConvex(
+                "Q matrix is indefinite (non-convex QP). IPM requires Q to be positive semidefinite.".to_string()
+            ),
+            ..Default::default()
+        };
     }
 
     match options.qp_solver {

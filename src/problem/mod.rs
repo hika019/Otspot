@@ -38,6 +38,8 @@ pub enum SolveStatus {
     Timeout,
     /// 数値エラー（LDL分解失敗等、問題が数値的に解けない）
     NumericalError,
+    /// Q行列が不定（非凸QP）。IPMはQ正半定値を前提とする。
+    NonConvex(String),
 }
 
 impl fmt::Display for SolveStatus {
@@ -50,6 +52,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::SuboptimalSolution => write!(f, "SuboptimalSolution"),
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
+            SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
         }
     }
 }
