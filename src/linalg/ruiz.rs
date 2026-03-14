@@ -510,13 +510,13 @@ mod tests {
         // 両方 Optimal (偽Optimal検出時はSuboptimalSolutionも許容)
         assert!(
             r_no_scale.status == SolveStatus::Optimal
-                || r_no_scale.status == SolveStatus::MaxIterations
+                || r_no_scale.status == SolveStatus::Timeout
                 || r_no_scale.status == SolveStatus::SuboptimalSolution,
             "no_scale: {:?}", r_no_scale.status
         );
         assert!(
             r_scale.status == SolveStatus::Optimal
-                || r_scale.status == SolveStatus::MaxIterations
+                || r_scale.status == SolveStatus::Timeout
                 || r_scale.status == SolveStatus::SuboptimalSolution,
             "scale: {:?}", r_scale.status
         );

@@ -127,6 +127,7 @@ fn main() {
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
     let mut n_max_iter = 0usize;
+    let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
     let mut n_nonconvex = 0usize;
 
@@ -239,7 +240,7 @@ fn main() {
                 ("MAXITER".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
             }
             SolveStatus::SuboptimalSolution => {
-                n_max_iter += 1;
+                n_suboptimal += 1;
                 ("SUBOPTIMAL".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
             }
             SolveStatus::Timeout => {
@@ -284,12 +285,13 @@ fn main() {
     println!("  PASS:      {}", n_pass);
     println!("  FAIL:      {}", n_fail);
     println!("  MAXITER:   {}", n_max_iter);
+    println!("  SUBOPTIMAL: {}", n_suboptimal);
     println!("  TIMEOUT:   {}", n_timeout);
     println!("  NONCONVEX: {}", n_nonconvex);
     println!("  ERROR:     {}", n_error);
     println!("  SKIP:      {}", n_skip);
     println!(
         "  TOTAL:     {}",
-        n_pass + n_fail + n_max_iter + n_timeout + n_nonconvex + n_error + n_skip
+        n_pass + n_fail + n_max_iter + n_suboptimal + n_timeout + n_nonconvex + n_error + n_skip
     );
 }
