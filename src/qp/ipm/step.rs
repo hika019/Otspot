@@ -14,7 +14,9 @@ use crate::sparse::CscMatrix;
 use super::kkt::{
     build_augmented_system, build_extended_constraints,
     build_schur_complement,
-    norm_inf, spmtv, spmv, spmv_q,
+    collect_part1_diag_indices, collect_part3_diag_indices,
+    collect_q_diag_base, update_augmented_values,
+    norm_inf, spmtv, spmv, spmv_q, KktCache,
 };
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl::LdlFactorizationAmd;
@@ -198,6 +200,9 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
     let mut ds = vec![0.0f64; m_ext];
     // AMD permutation キャッシュ（augmented system のスパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
+    // KKT 差分更新キャッシュ（方式 D: values 直接更新 + refactorize_numeric 再利用）
+    let mut kkt_cache: Option<KktCache> = None;
+    let mut fac_cache: Option<LdlFactorizationAmd> = None;
 
     let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
@@ -276,43 +281,87 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         }
 
         // augmented KKT行列構築 + factorize（delta_p リトライ最大10回, 上限1e0）
+        // 方式 D: 初回は full 構築 + symbolic/numeric 全因子化、2反復目以降は values 差分更新
+        //         + refactorize_numeric（symbolic 再利用）で O(nnz log nnz) → O(n + m_ext) に削減。
         // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
         let mut delta_p_retry = delta_p;
-        let mut fac_opt: Option<LdlFactorizationAmd> = None;
-        for _retry in 0..10 {
+        let mut retry_timeout = false;
+        'retry: for _retry in 0..10 {
             if timeout_ctx.should_stop() {
                 status = SolveStatus::Timeout;
                 final_iter = iter;
-                break;
+                retry_timeout = true;
+                break 'retry;
             }
-            let aug_mat = build_augmented_system(
-                &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d,
-            );
-            // 初回のみ AMD permutation を計算してキャッシュ
-            if amd_perm_cache.is_none() {
-                amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
-            }
-            let perm = amd_perm_cache.as_ref().unwrap();
-            match ldl::factorize_quasidefinite_with_cached_perm_threaded(&aug_mat, perm, timeout_ctx.deadline) {
-                Ok(f) => { fac_opt = Some(f); break; }
-                Err(ldl::LdlError::DeadlineExceeded) => {
-                    status = SolveStatus::Timeout;
-                    final_iter = iter;
-                    break;
+            if let Some(cache) = kkt_cache.as_mut() {
+                // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
+                update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d);
+                let f = fac_cache.as_mut().unwrap();
+                match f.refactorize_numeric_threaded(&cache.mat, timeout_ctx.deadline) {
+                    Ok(()) => { break 'retry; }
+                    Err(ldl::LdlError::DeadlineExceeded) => {
+                        status = SolveStatus::Timeout;
+                        final_iter = iter;
+                        retry_timeout = true;
+                        break 'retry;
+                    }
+                    Err(_) => {
+                        // SingularOrIndefinite → delta_p 増加してリトライ
+                        if delta_p_retry >= 1e0 { break 'retry; }
+                        delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+                        // symbolic は delta_p 変更で無効にならないのでキャッシュ維持
+                        continue;
+                    }
                 }
-                Err(_) => {
-                    if delta_p_retry >= 1e0 { break; } // 上限到達→あきらめ
-                    delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+            } else {
+                // 初回: KKT 行列を full 構築し、インデックスを収集
+                let aug_mat = build_augmented_system(
+                    &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d,
+                );
+                // 初回のみ AMD permutation を計算してキャッシュ
+                if amd_perm_cache.is_none() {
+                    amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
+                }
+                let perm = amd_perm_cache.as_ref().unwrap();
+                // Part 1/3 のインデックスを収集して KktCache を構築
+                let part1_idx = collect_part1_diag_indices(&aug_mat, n);
+                let part3_idx = collect_part3_diag_indices(&aug_mat, n, m_ext);
+                let q_diag_base = collect_q_diag_base(&problem.q, n);
+                kkt_cache = Some(KktCache {
+                    mat: aug_mat,
+                    part1_diag_idx: part1_idx,
+                    q_diag_base,
+                    part3_diag_idx: part3_idx,
+                    part1_updated_idx: (0..n).collect(),
+                });
+                // 初回は symbolic + numeric の全因子化
+                match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                    &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline
+                ) {
+                    Ok(f) => { fac_cache = Some(f); break 'retry; }
+                    Err(ldl::LdlError::DeadlineExceeded) => {
+                        status = SolveStatus::Timeout;
+                        final_iter = iter;
+                        retry_timeout = true;
+                        break 'retry;
+                    }
+                    Err(_) => {
+                        kkt_cache = None; // 初回失敗時はキャッシュをリセット
+                        if delta_p_retry >= 1e0 { break 'retry; }
+                        delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+                    }
                 }
             }
         }
-        if status == SolveStatus::Timeout && fac_opt.is_none() {
+        // retry ループ後: Timeout が発生した場合は外ループを抜ける
+        if retry_timeout {
             break;
         }
-        let fac = match fac_opt {
-            Some(f) => f,
-            None => return numerical_error_result(n),
-        };
+        // M-02: fac_cache が None なら全リトライ失敗 → NumericalError
+        if fac_cache.is_none() {
+            return numerical_error_result(n);
+        }
+        let fac = fac_cache.as_ref().unwrap();
 
         // augmented system の RHS: [r_d; r_p_mod]（size = n + m_ext）
         let total = n + m_ext;

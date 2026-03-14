@@ -215,6 +215,83 @@ pub(crate) fn build_augmented_system(
 }
 
 // ---------------------------------------------------------------------------
+// KKT 差分更新キャッシュ (cmd_512)
+// ---------------------------------------------------------------------------
+
+/// KKT 行列の差分更新キャッシュ。
+///
+/// augmented system のスパースパターンは IPM 反復間で完全固定。
+/// 初回構築後は values のみを更新することで `from_triplets` の O(nnz log nnz) を回避する。
+pub(crate) struct KktCache {
+    /// 初回 `build_augmented_system` で構築した CSC 行列（パターン固定）
+    pub mat: CscMatrix,
+    /// Part 1 対角要素の mat.values インデックス（n 個）
+    pub part1_diag_idx: Vec<usize>,
+    /// Q 対角の元値（`q_diag_base[i] + delta_p` で書き込む）
+    pub q_diag_base: Vec<f64>,
+    /// Part 3 対角の mat.values インデックス（m_ext 個）
+    pub part3_diag_idx: Vec<usize>,
+    /// 更新対象の列インデックス（全 n 列）
+    pub part1_updated_idx: Vec<usize>,
+}
+
+/// augmented KKT 行列の Part 1（Q + δ_p·I）対角要素の values インデックスを収集する。
+///
+/// 上三角 CSC では列 i の対角要素（row = i）が列内最大行インデックスとなるため
+/// `col_ptr[i+1] - 1` の位置にある。
+pub(crate) fn collect_part1_diag_indices(aug_mat: &CscMatrix, n: usize) -> Vec<usize> {
+    (0..n).map(|i| aug_mat.col_ptr[i + 1] - 1).collect()
+}
+
+/// augmented KKT 行列の Part 3（-(Σ + δ_d·I)）対角要素の values インデックスを収集する。
+///
+/// 列 n+k の対角要素（row = n+k）は列内最大行インデックスなので `col_ptr[n+k+1] - 1`。
+pub(crate) fn collect_part3_diag_indices(
+    aug_mat: &CscMatrix,
+    n: usize,
+    m_ext: usize,
+) -> Vec<usize> {
+    (0..m_ext).map(|k| aug_mat.col_ptr[n + k + 1] - 1).collect()
+}
+
+/// Q の対角要素値を収集する（delta_p 更新のベースライン）。
+///
+/// Q に対角要素がない列は 0.0 とする。
+pub(crate) fn collect_q_diag_base(q: &CscMatrix, n: usize) -> Vec<f64> {
+    let mut base = vec![0.0f64; n];
+    for (col, val) in base.iter_mut().enumerate().take(n) {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            if q.row_ind[k] == col {
+                *val = q.values[k];
+                break;
+            }
+        }
+    }
+    base
+}
+
+/// `KktCache` の mat.values を差分更新する（O(n + m_ext)）。
+///
+/// `build_augmented_system` の代替として IPM ループ内で呼ぶ。
+/// スパースパターンは不変なので values のみ更新する。
+pub(crate) fn update_augmented_values(
+    cache: &mut KktCache,
+    sigma_vec: &[f64],
+    delta_p: f64,
+    delta_d: f64,
+) {
+    // Part 1: Q_ii + delta_p を更新（n 要素）
+    for &i in &cache.part1_updated_idx {
+        let idx = cache.part1_diag_idx[i];
+        cache.mat.values[idx] = cache.q_diag_base[i] + delta_p;
+    }
+    // Part 3: -(sigma_k + delta_d) を更新（m_ext 要素）
+    for (k, &idx) in cache.part3_diag_idx.iter().enumerate() {
+        cache.mat.values[idx] = -(sigma_vec[k] + delta_d);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Schur complement 構築
 // ---------------------------------------------------------------------------
 
@@ -314,3 +391,119 @@ pub(crate) fn build_schur_complement(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 上三角 CscMatrix をエントリリストから構築するヘルパー
+    fn upper_tri_csc(n: usize, entries: &[(usize, usize, f64)]) -> CscMatrix {
+        let rows: Vec<usize> = entries.iter().map(|&(r, _, _)| r).collect();
+        let cols: Vec<usize> = entries.iter().map(|&(_, c, _)| c).collect();
+        let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
+        CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+    }
+
+    /// collect_part1_diag_indices: n=2 の小規模問題でインデックス正確性を確認
+    #[test]
+    fn test_collect_part1_diag_indices() {
+        // Q: 2x2 対称行列 [[2.0, 0.5], [0.5, 3.0]]（上三角格納）
+        let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 0.5), (1, 1, 3.0)]);
+        // A_ext: 2x2 単位行列
+        let a_rows = vec![0usize, 1];
+        let a_cols = vec![0usize, 1];
+        let a_vals = vec![1.0f64, 1.0];
+        let a_ext = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 2, 2).unwrap();
+
+        let sigma_vec = [0.5f64, 0.8];
+        let aug = build_augmented_system(&q, &a_ext, &sigma_vec, 0.1, 0.05);
+        let n = 2;
+
+        let diag_idx = collect_part1_diag_indices(&aug, n);
+        // 各列の対角要素が col_ptr[i+1]-1 の位置にあることを確認
+        for i in 0..n {
+            let idx = diag_idx[i];
+            assert_eq!(
+                aug.row_ind[idx], i,
+                "列 {i} の対角インデックス aug.row_ind[{idx}]={} が対角でない",
+                aug.row_ind[idx]
+            );
+        }
+        // 値も確認: Q[0,0]+delta_p = 2.1, Q[1,1]+delta_p = 3.1
+        assert!((aug.values[diag_idx[0]] - 2.1).abs() < 1e-14);
+        assert!((aug.values[diag_idx[1]] - 3.1).abs() < 1e-14);
+    }
+
+    /// collect_part3_diag_indices: m_ext=2 の小規模問題で対角インデックス正確性を確認
+    #[test]
+    fn test_collect_part3_diag_indices() {
+        let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 0.5), (1, 1, 3.0)]);
+        let a_rows = vec![0usize, 1];
+        let a_cols = vec![0usize, 1];
+        let a_vals = vec![1.0f64, 1.0];
+        let a_ext = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 2, 2).unwrap();
+
+        let sigma_vec = [0.5f64, 0.8];
+        let aug = build_augmented_system(&q, &a_ext, &sigma_vec, 0.1, 0.05);
+        let n = 2;
+        let m_ext = 2;
+
+        let diag_idx = collect_part3_diag_indices(&aug, n, m_ext);
+        for k in 0..m_ext {
+            let idx = diag_idx[k];
+            assert_eq!(
+                aug.row_ind[idx],
+                n + k,
+                "Part3 列 {k} の対角インデックス aug.row_ind[{idx}]={} が対角でない",
+                aug.row_ind[idx]
+            );
+        }
+        // 値: -(sigma[0]+delta_d) = -0.55, -(sigma[1]+delta_d) = -0.85
+        assert!((aug.values[diag_idx[0]] - (-0.55)).abs() < 1e-14);
+        assert!((aug.values[diag_idx[1]] - (-0.85)).abs() < 1e-14);
+    }
+
+    /// update_augmented_values: 更新後の values が build_augmented_system 結果と一致
+    #[test]
+    fn test_update_augmented_values_matches_build() {
+        let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 0.5), (1, 1, 3.0)]);
+        let a_rows = vec![0usize, 1];
+        let a_cols = vec![0usize, 1];
+        let a_vals = vec![1.0f64, 1.0];
+        let a_ext = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 2, 2).unwrap();
+
+        let n = 2;
+        let m_ext = 2;
+        // 初回構築（delta_p=0.1, delta_d=0.05, sigma=[0.5, 0.8]）
+        let sigma1 = [0.5f64, 0.8];
+        let aug_init = build_augmented_system(&q, &a_ext, &sigma1, 0.1, 0.05);
+
+        let part1_idx = collect_part1_diag_indices(&aug_init, n);
+        let part3_idx = collect_part3_diag_indices(&aug_init, n, m_ext);
+        let q_base = collect_q_diag_base(&q, n);
+        let mut cache = KktCache {
+            mat: aug_init,
+            part1_diag_idx: part1_idx,
+            q_diag_base: q_base,
+            part3_diag_idx: part3_idx,
+            part1_updated_idx: (0..n).collect(),
+        };
+
+        // 2回目以降の更新パラメータ
+        let sigma2 = [1.2f64, 0.3];
+        let dp2 = 0.02f64;
+        let dd2 = 0.01f64;
+        update_augmented_values(&mut cache, &sigma2, dp2, dd2);
+
+        // 参照: 同じパラメータで build_augmented_system を直接実行
+        let aug_ref = build_augmented_system(&q, &a_ext, &sigma2, dp2, dd2);
+
+        // values が完全一致することを確認
+        assert_eq!(cache.mat.values.len(), aug_ref.values.len());
+        for (i, (&got, &expected)) in cache.mat.values.iter().zip(aug_ref.values.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-14,
+                "values[{i}]: got={got} expected={expected}"
+            );
+        }
+    }
+}

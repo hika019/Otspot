@@ -166,6 +166,33 @@ impl LdlFactorizationAmd {
         let x = inv_permute_vec(&x_p, &self.perm);
         sol.copy_from_slice(&x);
     }
+
+    /// Symbolic を再利用して数値因子化のみを実行する（スレッドなし版）。
+    ///
+    /// # スレッドなし設計の理由
+    /// `SymbolicSupernodalCholesky<I>` が `Clone` 未実装のためスレッドへの渡しが困難。
+    /// `Arc<SymbolicCholesky>` 化は将来タスク。
+    ///
+    /// # deadline 超過リスク
+    /// スレッドなし実装のため LDLT 計算中は deadline チェックができない（現行と同等）。
+    ///
+    /// # 引数
+    /// - `mat`: スパースパターンが初回と同一の CSC 行列（values のみ更新済み）
+    /// - `deadline`: タイムアウト期限（None の場合は無制限で実行）
+    pub fn refactorize_numeric_threaded(
+        &mut self,
+        mat: &CscMatrix,
+        deadline: Option<Instant>,
+    ) -> Result<(), LdlError> {
+        // deadline 事前チェック
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Err(LdlError::DeadlineExceeded);
+            }
+        }
+        // スレッドなしで直接呼ぶ（SymbolicSupernodalCholesky<I> が Clone 未実装のため）
+        self.refactorize_numeric(mat, None)
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────────

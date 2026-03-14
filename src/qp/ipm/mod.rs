@@ -320,19 +320,15 @@ fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], bound_duals: &[
     if !bound_duals.is_empty() {
         let mut bd_idx = 0usize;
         for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() {
-                if bd_idx < bound_duals.len() {
-                    bound_contrib[j] -= bound_duals[bd_idx];
-                    bd_idx += 1;
-                }
+            if lb.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] -= bound_duals[bd_idx];
+                bd_idx += 1;
             }
         }
         for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() {
-                if bd_idx < bound_duals.len() {
-                    bound_contrib[j] += bound_duals[bd_idx];
-                    bd_idx += 1;
-                }
+            if ub.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] += bound_duals[bd_idx];
+                bd_idx += 1;
             }
         }
     }
