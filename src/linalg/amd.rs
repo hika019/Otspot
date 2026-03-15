@@ -2,8 +2,8 @@
 //!
 //! 対称疎行列の LDL^T 分解前に適用し、フィルイン (fill-in) を最小化する
 //! 列並べ替えを計算する。
-//! Simplified Minimum Degree アルゴリズム
-//! (George & Liu 1981 / Davis "Direct Methods for Sparse Linear Systems" 参照)。
+//! faer の AMD-2 アルゴリズム（`faer::sparse::linalg::amd::order`）を内部で使用する。
+//! O(n + nnz) の高速 AMD で、独自 SMD 実装を置き換えた。
 
 use std::time::Instant;
 
@@ -25,21 +25,19 @@ use faer::sparse::SymbolicSparseColMatRef;
 /// deadline 超過時は部分的な AMD 順序 + identity フォールバックの有効な置換を返す。
 ///
 /// # アルゴリズム
-/// Simplified Minimum Degree (SMD):
-/// 1. 対称グラフの隣接リストを構築（上三角入力から対称化、対角除外）
-/// 2. n 回繰り返し（100回ごとに deadline チェック）:
-///    a. 最小次数（未消去隣接数）のノードを選択
-///    b. 置換に記録し消去済みにマーク
-///    c. 全隣接ノードペア間にフィルインエッジを追加（完全グラフ化）
-///    d. 影響を受けたノードの次数を再計算
+/// faer AMD-2 (`faer::sparse::linalg::amd::order`) を呼び出す。
+/// O(n + nnz) で動作するため、独自 SMD より大幅に高速。
+/// deadline 超過時は `amd_with_deadline` が identity fallback を返す。
+/// amd::order() がエラーを返した場合も identity fallback (0..n) を返す。
 pub fn amd(n: usize, col_ptr: &[usize], row_ind: &[usize]) -> Vec<usize> {
     amd_with_deadline(n, col_ptr, row_ind, None)
 }
 
 /// AMD 再順序化を計算する（deadline 付き）。
 ///
-/// deadline が指定された場合、100イテレーションごとにチェックし、
-/// 超過時は残りノードを自然順で埋めた有効な置換を返す。
+/// deadline が指定された場合、faer AMD-2 呼び出し前に1回チェックし、
+/// 超過時は identity 置換 (0..n) を返す。
+/// faer amd::order() がエラーを返した場合も identity fallback を返す。
 pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadline: Option<Instant>) -> Vec<usize> {
     if n == 0 {
         return vec![];
@@ -68,7 +66,9 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
     let mut mem = MemBuffer::new(req);
     let stack = MemStack::new(&mut mem);
 
-    let _ = amd::order(&mut perm, &mut perm_inv, a, amd::Control::default(), stack);
+    if amd::order(&mut perm, &mut perm_inv, a, amd::Control::default(), stack).is_err() {
+        return (0..n).collect(); // identity fallback（deadline超過時と同じパターン）
+    }
 
     perm
 }
@@ -155,6 +155,15 @@ pub fn inv_permute_vec(v: &[f64], perm: &[usize]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_amd_n1() {
+        // n=1のケース: identity permutation が返ること
+        let col_ptr = vec![0usize, 0];
+        let row_ind: Vec<usize> = vec![];
+        let perm = amd_with_deadline(1, &col_ptr, &row_ind, None);
+        assert_eq!(perm, vec![0]);
+    }
 
     #[test]
     fn test_amd_star_graph() {
