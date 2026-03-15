@@ -5,7 +5,6 @@
 //! - fraction-to-boundary
 //! - ユーティリティ
 
-use std::time::Instant as StdInstant;
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -297,16 +296,10 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             }
             if let Some(cache) = kkt_cache.as_mut() {
                 // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
-                let _t_upd = StdInstant::now();
                 update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d_retry);
-                let _upd_us = _t_upd.elapsed().as_micros();
-                eprintln!("[TIMING iter={iter}] update_augmented_values: {_upd_us}us");
                 let f = fac_cache.as_mut().unwrap();
-                let _t_refac = StdInstant::now();
                 match f.refactorize_numeric_threaded(&cache.mat, timeout_ctx.deadline) {
                     Ok(()) => {
-                        let _refac_ms = _t_refac.elapsed().as_millis();
-                        eprintln!("[TIMING iter={iter}] refactorize_numeric_threaded: {_refac_ms}ms (symbolic reused)");
                         break 'retry;
                     }
                     Err(ldl::LdlError::DeadlineExceeded) => {
@@ -331,12 +324,9 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 }
             } else {
                 // 初回: KKT 行列を full 構築し、インデックスを収集
-                let _t_build = StdInstant::now();
                 let aug_mat = build_augmented_system(
                     &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d_retry,
                 );
-                let _build_ms = _t_build.elapsed().as_millis();
-                eprintln!("[TIMING iter={iter}] build_augmented_system (from_triplets): {_build_ms}ms");
                 // 初回のみ AMD permutation を計算してキャッシュ
                 if amd_perm_cache.is_none() {
                     // 第1防御: Quasidefinite-aware block ordering（primalブロックのみAMD）
