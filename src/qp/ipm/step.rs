@@ -307,7 +307,12 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                     }
                     Err(_) => {
                         // SingularOrIndefinite → delta_p 増加してリトライ
-                        if delta_p_retry >= 1e0 { break 'retry; }
+                        if delta_p_retry >= 1e0 {
+                            // GQ-01: 高速パス全リトライ失敗時 fac_cache を無効化
+                            // → M-02 チェックで NumericalError を返す（stale cache で solve しない）
+                            fac_cache = None;
+                            break 'retry;
+                        }
                         delta_p_retry = (delta_p_retry * 10.0).min(1e0);
                         // symbolic は delta_p 変更で無効にならないのでキャッシュ維持
                         continue;
