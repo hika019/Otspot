@@ -7,6 +7,10 @@
 
 use std::time::Instant;
 
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::sparse::linalg::amd;
+use faer::sparse::SymbolicSparseColMatRef;
+
 /// AMD 再順序化を計算する（deadline 付き）。
 ///
 /// # 引数
@@ -41,80 +45,30 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
         return vec![];
     }
 
-    // 対称隣接リスト構築（対角除外）
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for j in 0..n {
-        for &i in &row_ind[col_ptr[j]..col_ptr[j + 1]] {
-            if i != j {
-                // 上三角入力: i < j が前提。対称グラフに両方向追加
-                adj[i].push(j);
-                adj[j].push(i);
-            }
+    // deadline チェック（faer AMD は O(n+nnz) で高速なため呼び出し前1回で十分）
+    if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+            return (0..n).collect();
         }
     }
-    for a in adj.iter_mut() {
-        a.sort_unstable();
-        a.dedup();
-    }
 
-    let mut eliminated = vec![false; n];
-    let mut degree: Vec<usize> = adj.iter().map(|a| a.len()).collect();
+    let nnz = col_ptr[n];
+
+    // faer AMD 呼び出し
     let mut perm = vec![0usize; n];
+    let mut perm_inv = vec![0usize; n];
 
-    for (slot_idx, slot) in perm.iter_mut().enumerate() {
-        // 毎イテレーション deadline チェック（fill-in後は1イテレーションが数秒になりうるため）
-        // deadline=None の場合は if let が短絡評価されるためオーバーヘッドはゼロ
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                // deadline 超過: 残りの未消去ノードを自然順で埋めて有効な置換を返す
-                let mut remaining_slot = slot_idx;
-                for (i, &elim) in eliminated.iter().enumerate() {
-                    if !elim {
-                        perm[remaining_slot] = i;
-                        remaining_slot += 1;
-                    }
-                }
-                return perm;
-            }
-        }
+    let a = unsafe {
+        SymbolicSparseColMatRef::<usize>::new_unchecked(
+            n, n, col_ptr, None, row_ind,
+        )
+    };
 
-        // 最小次数の未消去ノードを線形探索
-        let min_node = (0..n)
-            .filter(|&i| !eliminated[i])
-            .min_by_key(|&i| degree[i])
-            .unwrap();
+    let req = amd::order_scratch::<usize>(n, nnz);
+    let mut mem = MemBuffer::new(req);
+    let stack = MemStack::new(&mut mem);
 
-        *slot = min_node;
-        eliminated[min_node] = true;
-
-        // 未消去の隣接ノード一覧を収集
-        let neighbors: Vec<usize> = adj[min_node]
-            .iter()
-            .copied()
-            .filter(|&nb| !eliminated[nb])
-            .collect();
-
-        // フィルインエッジを追加: 全隣接ノードペア間を完全グラフ化
-        // adj は Vec<Vec<usize>> であり異なるインデックスへの逐次アクセスは安全
-        for i in 0..neighbors.len() {
-            for j in (i + 1)..neighbors.len() {
-                let u = neighbors[i];
-                let v = neighbors[j];
-                adj[u].push(v);
-                adj[v].push(u);
-            }
-        }
-        // 追加後に sort & dedup（重複除去）
-        for &u in &neighbors {
-            adj[u].sort_unstable();
-            adj[u].dedup();
-        }
-
-        // 影響を受けたノードの次数を再計算（消去済みを除外）
-        for &u in &neighbors {
-            degree[u] = adj[u].iter().filter(|&&nb| !eliminated[nb]).count();
-        }
-    }
+    let _ = amd::order(&mut perm, &mut perm_inv, a, amd::Control::default(), stack);
 
     perm
 }
