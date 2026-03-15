@@ -5,6 +5,7 @@
 //! - fraction-to-boundary
 //! - ユーティリティ
 
+use std::time::Instant as StdInstant;
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -18,7 +19,7 @@ use super::kkt::{
     collect_q_diag_base, update_augmented_values,
     norm_inf, spmtv, spmv, spmv_q, KktCache,
 };
-use crate::linalg::amd::amd_with_deadline;
+use crate::linalg::amd::amd_block_ordering;
 use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
 
@@ -280,11 +281,12 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             break;
         }
 
-        // augmented KKT行列構築 + factorize（delta_p リトライ最大10回, 上限1e0）
+        // augmented KKT行列構築 + factorize（delta_p/delta_d リトライ最大10回, 上限1e0）
         // 方式 D: 初回は full 構築 + symbolic/numeric 全因子化、2反復目以降は values 差分更新
         //         + refactorize_numeric（symbolic 再利用）で O(nnz log nnz) → O(n + m_ext) に削減。
         // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
         let mut delta_p_retry = delta_p;
+        let mut delta_d_retry = delta_d;
         let mut retry_timeout = false;
         'retry: for _retry in 0..10 {
             if timeout_ctx.should_stop() {
@@ -295,10 +297,18 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
             }
             if let Some(cache) = kkt_cache.as_mut() {
                 // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
-                update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d);
+                let _t_upd = StdInstant::now();
+                update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d_retry);
+                let _upd_us = _t_upd.elapsed().as_micros();
+                eprintln!("[TIMING iter={iter}] update_augmented_values: {_upd_us}us");
                 let f = fac_cache.as_mut().unwrap();
+                let _t_refac = StdInstant::now();
                 match f.refactorize_numeric_threaded(&cache.mat, timeout_ctx.deadline) {
-                    Ok(()) => { break 'retry; }
+                    Ok(()) => {
+                        let _refac_ms = _t_refac.elapsed().as_millis();
+                        eprintln!("[TIMING iter={iter}] refactorize_numeric_threaded: {_refac_ms}ms (symbolic reused)");
+                        break 'retry;
+                    }
                     Err(ldl::LdlError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
                         final_iter = iter;
@@ -314,18 +324,23 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                             break 'retry;
                         }
                         delta_p_retry = (delta_p_retry * 10.0).min(1e0);
-                        // symbolic は delta_p 変更で無効にならないのでキャッシュ維持
+                        delta_d_retry = (delta_d_retry * 10.0).min(1e0);
+                        // symbolic は delta_p/delta_d 変更で無効にならないのでキャッシュ維持
                         continue;
                     }
                 }
             } else {
                 // 初回: KKT 行列を full 構築し、インデックスを収集
+                let _t_build = StdInstant::now();
                 let aug_mat = build_augmented_system(
-                    &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d,
+                    &problem.q, &a_ext, &sigma_vec, delta_p_retry, delta_d_retry,
                 );
+                let _build_ms = _t_build.elapsed().as_millis();
+                eprintln!("[TIMING iter={iter}] build_augmented_system (from_triplets): {_build_ms}ms");
                 // 初回のみ AMD permutation を計算してキャッシュ
                 if amd_perm_cache.is_none() {
-                    amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
+                    // 第1防御: Quasidefinite-aware block ordering（primalブロックのみAMD）
+                    amd_perm_cache = Some(amd_block_ordering(n, aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
                 }
                 let perm = amd_perm_cache.as_ref().unwrap();
                 // Part 1/3 のインデックスを収集して KktCache を構築
@@ -354,6 +369,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                         kkt_cache = None; // 初回失敗時はキャッシュをリセット
                         if delta_p_retry >= 1e0 { break 'retry; }
                         delta_p_retry = (delta_p_retry * 10.0).min(1e0);
+                        delta_d_retry = (delta_d_retry * 10.0).min(1e0);
                     }
                 }
             }
@@ -362,6 +378,41 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         if retry_timeout {
             break;
         }
+        // 第3防御: Identity fallback — 全リトライ失敗時に identity perm + 大きな delta で再試行
+        // amd_perm_cache を無効化し、次の反復で block AMD が再計算されるようにする
+        if fac_cache.is_none() {
+            amd_perm_cache = None;
+            drop(kkt_cache.take()); // 旧キャッシュを解放し、次行で再構築
+            let delta_fallback = 1e-2_f64.max(delta_p).max(delta_d);
+            let aug_mat_fb = build_augmented_system(
+                &problem.q, &a_ext, &sigma_vec, delta_fallback, delta_fallback,
+            );
+            let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
+            let part1_idx = collect_part1_diag_indices(&aug_mat_fb, n);
+            let part3_idx = collect_part3_diag_indices(&aug_mat_fb, n, m_ext);
+            let q_diag_base = collect_q_diag_base(&problem.q, n);
+            kkt_cache = Some(KktCache {
+                mat: aug_mat_fb,
+                part1_diag_idx: part1_idx,
+                q_diag_base,
+                part3_diag_idx: part3_idx,
+                part1_updated_idx: (0..n).collect(),
+            });
+            match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline
+            ) {
+                Ok(f) => { fac_cache = Some(f); }
+                Err(ldl::LdlError::DeadlineExceeded) => {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                    break;
+                }
+                Err(_) => {
+                    // identity fallback も失敗 → fac_cache は None のまま → M-02
+                }
+            }
+        }
+
         // M-02: fac_cache が None なら全リトライ失敗 → NumericalError
         if fac_cache.is_none() {
             return numerical_error_result(n);
