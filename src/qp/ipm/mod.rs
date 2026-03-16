@@ -11,6 +11,8 @@
 pub(crate) mod init;
 pub(crate) mod kkt;
 pub(crate) mod step;
+#[cfg(feature = "ippmm_new")]
+pub(crate) mod ippmm;
 
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
@@ -196,6 +198,67 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
     // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
     // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
     if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
+        SolverResult { status: SolveStatus::Timeout, ..raw }
+    } else {
+        raw
+    }
+}
+
+/// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
+///
+/// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
+#[cfg(feature = "ippmm_new")]
+pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if options.use_ruiz_scaling && problem.num_vars > 0 {
+        let n = problem.num_vars;
+        let m = problem.num_constraints;
+
+        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
+        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+
+        let (q_s, a_s, c_s, b_s, bounds_s) =
+            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
+
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+            let amplification = compute_amplification(&scaler);
+            let mut last_result: Option<SolverResult> = None;
+            for attempt in 0..POST_VERIFY_MAX_RESOLV {
+                let tighten = 10f64.powi(attempt as i32);
+                let adjusted_eps =
+                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
+                let mut adjusted_opts = options.clone();
+                adjusted_opts.ipm.eps = adjusted_eps;
+                let scaled_result = ippmm::solve_ippmm_inner(&scaled_problem, &adjusted_opts);
+                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
+                if result.status == SolveStatus::SuboptimalSolution
+                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
+                {
+                    last_result = Some(result);
+                    continue;
+                }
+                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                    return result;
+                }
+                let final_status = if result.status == SolveStatus::SuboptimalSolution {
+                    SolveStatus::Timeout
+                } else {
+                    result.status
+                };
+                return SolverResult { status: final_status, ..result };
+            }
+            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
+        }
+    }
+
+    let raw = post_verify_solution(
+        ippmm::solve_ippmm_inner(problem, options),
+        problem,
+        options.ipm_eps(),
+    );
+    if raw.status == SolveStatus::SuboptimalSolution {
         SolverResult { status: SolveStatus::Timeout, ..raw }
     } else {
         raw

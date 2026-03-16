@@ -11,6 +11,7 @@ categories = ["science", "algorithms", "mathematics"]
 [features]
 default = []
 parallel = ["dep:rayon"]
+ippmm_new = []
 
 [dependencies]
 faer = "0.24.0"
