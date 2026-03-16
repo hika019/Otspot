@@ -18,7 +18,7 @@ use super::kkt::{
     collect_q_diag_base, update_augmented_values,
     norm_inf, spmtv, spmv, spmv_q, KktCache,
 };
-use crate::linalg::amd::amd_block_ordering;
+use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
 
@@ -329,8 +329,8 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
                 );
                 // 初回のみ AMD permutation を計算してキャッシュ
                 if amd_perm_cache.is_none() {
-                    // 第1防御: Quasidefinite-aware block ordering（primalブロックのみAMD）
-                    amd_perm_cache = Some(amd_block_ordering(n, aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
+                    // 第1防御: full AMD（primal/dual交互消去でfill-in最小化）
+                    amd_perm_cache = Some(amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, timeout_ctx.deadline));
                 }
                 let perm = amd_perm_cache.as_ref().unwrap();
                 // Part 1/3 のインデックスを収集して KktCache を構築

@@ -92,6 +92,7 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
 ///
 /// # 戻り値
 /// `[perm_primal[0..n_primal] | n_primal+0, n_primal+1, ..., n_primal+n_dual-1]`
+#[allow(dead_code)]
 pub fn amd_block_ordering(
     n_primal: usize,
     n_total: usize,
