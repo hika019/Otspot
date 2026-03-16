@@ -296,8 +296,9 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
             break;
         }
 
-        // rho_matrix リトライ（因子化失敗時に ×10 して最大 1e0 まで）
+        // rho_matrix/delta_matrix リトライ（因子化失敗時に ×10 して最大 1e0 まで）
         let mut rho_retry = rho_matrix;
+        let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
         for _retry in 0..10 {
             if timeout_ctx.should_stop() {
@@ -306,7 +307,7 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
                 break;
             }
             let aug_mat =
-                build_aug_ippmm(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix);
+                build_aug_ippmm(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix_retry);
             // AMD は 1 回だけ計算してキャッシュ（スパースパターン不変のため）
             if amd_perm_cache.is_none() {
                 amd_perm_cache = Some(amd_with_deadline(
@@ -336,13 +337,40 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
                         break; // 上限到達 → あきらめ
                     }
                     rho_retry = (rho_retry * 10.0).min(1e0);
-                    // AMD キャッシュは rho 変化でもスパース構造不変なので再利用可
+                    delta_matrix_retry = (delta_matrix_retry * 10.0).min(1e0);
+                    // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
                 }
             }
         }
         if status == SolveStatus::Timeout {
             break;
         }
+        // 第3防御: Identity fallback — 全リトライ失敗時に identity perm + 大きな delta で再試行
+        if fac_opt.is_none() {
+            amd_perm_cache = None;
+            let delta_fallback = 1e-2_f64.max(rho_retry).max(delta_matrix_retry);
+            let aug_mat_fb =
+                build_aug_ippmm(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_fallback);
+            let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
+            match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                &aug_mat_fb,
+                &identity_perm,
+                timeout_ctx.deadline,
+            ) {
+                Ok(f) => {
+                    fac_opt = Some(f);
+                }
+                Err(ldl::LdlError::DeadlineExceeded) => {
+                    status = SolveStatus::Timeout;
+                    final_iter = iter;
+                }
+                Err(_) => {} // identity fallback も失敗 → fac_opt は None のまま → M-02
+            }
+        }
+        if status == SolveStatus::Timeout {
+            break;
+        }
+        // M-02: fac_opt が None なら全リトライ失敗 → NumericalError
         let fac = match fac_opt {
             Some(f) => f,
             None => return numerical_error_result(n),
