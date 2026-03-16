@@ -32,14 +32,14 @@ use super::init::compute_initial_point;
 ///
 /// **実行不能 (Primal Infeasibility)**:
 /// ||Δy_orig||_inf > MIN_DIR_NORM かつ:
-///   ① ||A_orig^T * Δy_orig|| / max(1, ||Δy||) < ε_inf
-///   ② b_orig · Δy_orig / max(1, ||Δy||) < -ε_inf
+///   ① ||A_orig^T * Δy_orig|| / ||Δy|| < ε_inf
+///   ② b_orig · Δy_orig / ||Δy|| < -ε_inf
 ///
 /// **非有界 (Dual Infeasibility / Unboundedness)**:
 /// ||Δx||_inf > MIN_DIR_NORM かつ:
-///   ③ c · Δx / max(1, ||Δx||) < -ε_inf  (LP: Q=0)
-///      ||(Q*Δx + c)|| / max(1, ||Δx||) < ε_inf  (QP: Q≠0)
-///   ④ ||A_orig * Δx|| / max(1, ||Δx||) < ε_inf
+///   ③ c · Δx / ||Δx|| < -ε_inf  (LP: Q=0)
+///      ||(Q*Δx + c)|| / ||Δx|| < ε_inf  (QP: Q≠0)
+///   ④ ||A_orig * Δx|| / ||Δx|| < ε_inf
 fn check_infeasible_or_unbounded(
     dx: &[f64],
     dy: &[f64],
@@ -52,7 +52,7 @@ fn check_infeasible_or_unbounded(
     const EPS_INF: f64 = 1e-8;
     const MIN_ITER: usize = 5;
     /// 収束時の偽陽性防止: 方向ベクトルが MIN_DIR_NORM 以下は検出スキップ。
-    /// 収束時は Δx→0, Δy→0 なので norm=max(1,||Δ||)=1 となり比率が偶然ε未満になる。
+    /// 収束時は Δx→0, Δy→0 なので ||Δ|| が MIN_DIR_NORM 以下となり検出をスキップする。
     const MIN_DIR_NORM: f64 = 1e-3;
 
     if iter < MIN_ITER {
