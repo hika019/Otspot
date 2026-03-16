@@ -67,7 +67,7 @@ fn check_infeasible_or_unbounded(
         let dy_orig = &dy[..m_orig];
         let norm_dy_inf = norm_inf(dy_orig);
         if norm_dy_inf > MIN_DIR_NORM {
-            let norm_dy = norm_dy_inf.max(1.0);
+            let norm_dy = norm_dy_inf;
             // ① A_orig^T * Δy_orig: a_ext は CSC, 行インデックス < m_orig のエントリのみ使用
             let mut at_dy = vec![0.0f64; n];
             for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
@@ -99,7 +99,7 @@ fn check_infeasible_or_unbounded(
     if norm_dx_inf <= MIN_DIR_NORM {
         return None;
     }
-    let norm_dx = norm_dx_inf.max(1.0);
+    let norm_dx = norm_dx_inf;
 
     // ③ 目的関数方向条件: LP(Q=0) → c·Δx < -ε*norm_dx; QP(Q≠0) → ||Q*Δx+c||/norm_dx < ε
     let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
