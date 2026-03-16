@@ -30,6 +30,7 @@
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl;
 use crate::linalg::ldl::LdlFactorizationAmd;
+use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
@@ -113,7 +114,13 @@ struct PmmState {
 /// IP-PMM 内部ソルバー（Ruiz スケーリング適用済み problem を受け取る）
 ///
 /// augmented KKT + LDLT 直接法 + PMM 参照点更新
-pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_ippmm_inner(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    scaler: Option<&RuizScaler>,
+    orig_problem: Option<&QpProblem>,
+    eps_orig: f64,
+) -> SolverResult {
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::from_options(options);
 
@@ -245,6 +252,40 @@ pub(crate) fn solve_ippmm_inner(problem: &QpProblem, options: &SolverOptions) ->
         let thr_d = (eps * (1.0 + norm_c)).max(REG_LIMIT * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(REG_LIMIT * 10.0);
         if mu < REG_LIMIT * 1e-2 && nr_d < thr_d && nr_p < thr_p {
+            // ── Method C: 原空間pfeasチェック（Clarabel方式）──
+            if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
+                let m_orig_check = orig.b.len();
+                let pfeas_orig = if m_orig_check == 0 {
+                    0.0
+                } else {
+                    let n_orig = orig.num_vars;
+                    let mut ax_orig = vec![0.0_f64; m_orig_check];
+                    for (j, (&dj, &xj)) in sc.d[..n_orig].iter().zip(x[..n_orig].iter()).enumerate() {
+                        let dj_xj = dj * xj;
+                        for ptr in orig.a.col_ptr[j]..orig.a.col_ptr[j + 1] {
+                            let row = orig.a.row_ind[ptr];
+                            if row < m_orig_check {
+                                ax_orig[row] += orig.a.values[ptr] * dj_xj;
+                            }
+                        }
+                    }
+                    ax_orig
+                        .iter()
+                        .zip(orig.b.iter())
+                        .map(|(&axi, &bi)| (axi - bi).abs())
+                        .fold(0.0_f64, f64::max)
+                };
+                let norm_b_orig = norm_inf_ippmm(&orig.b).max(1.0);
+                if pfeas_orig < eps_orig * (1.0 + norm_b_orig)
+                    && nr_d < eps_orig * (1.0 + norm_c)
+                    && mu < eps_orig
+                {
+                    status = SolveStatus::Optimal;
+                    final_iter = iter;
+                    break;
+                }
+            }
+            // Method Cで昇格できなかった場合 or scaler=None → SuboptimalSolution
             status = SolveStatus::SuboptimalSolution;
             final_iter = iter;
             break;
@@ -1111,7 +1152,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts());
+        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T1: status");
         close(result.solution[0], 0.5, "IPPMM-T1: x[0]");
         close(result.solution[1], 0.5, "IPPMM-T1: x[1]");
@@ -1130,7 +1171,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts());
+        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T2: status");
         close(result.solution[0], 3.0, "IPPMM-T2: x[0]");
         close(result.solution[1], 4.0, "IPPMM-T2: x[1]");
@@ -1156,7 +1197,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts());
+        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T3: status");
         close(result.solution[0], 0.5, "IPPMM-T3: x[0]");
         close(result.solution[1], 0.5, "IPPMM-T3: x[1]");
@@ -1175,7 +1216,7 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts());
+        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T4: status");
         close(result.solution[0], 1.0, "IPPMM-T4: x[0]");
         close(result.solution[1], 1.0, "IPPMM-T4: x[1]");
@@ -1198,7 +1239,7 @@ mod tests {
             use_ruiz_scaling: false,
             ..Default::default()
         };
-        let result = solve_ippmm_inner(&problem, &opts);
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPPMM-T5: expected Timeout or Optimal, got {:?}",

@@ -84,7 +84,7 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
-                let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts);
+                let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
                 let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
                 // 再ソルブ条件: 原空間で SuboptimalSolution かつ残り試行回数がある場合。
                 // unscale_ipm_result が SuboptimalSolution/Optimalを原空間で判定するため
@@ -119,7 +119,7 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
     }
 
     // BUG-A1修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
-    let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options), problem, options.ipm_eps());
+    let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps());
     // MaxIterations: Simplex（solve_as_lp）はMaxIterationsを返す場合がある。
     // IPMパスからは返らないが、as_lpパス（SimplexSolver）を経由した場合に対応するため意図的に残存。
     if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
@@ -158,7 +158,7 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
                 let scaled_result =
-                    step::solve_qp_ipm_schur_inner(&scaled_problem, &adjusted_opts);
+                    step::solve_qp_ipm_schur_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
                 let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
                 if result.status == SolveStatus::SuboptimalSolution
                     && attempt + 1 < POST_VERIFY_MAX_RESOLV
@@ -191,7 +191,7 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
 
     // BUG-A2修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
     let raw = post_verify_solution(
-        step::solve_qp_ipm_schur_inner(problem, options),
+        step::solve_qp_ipm_schur_inner(problem, options, None, None, options.ipm_eps()),
         problem,
         options.ipm_eps(),
     );
@@ -231,7 +231,7 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
-                let scaled_result = ippmm::solve_ippmm_inner(&scaled_problem, &adjusted_opts);
+                let scaled_result = ippmm::solve_ippmm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
                 let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
                 if result.status == SolveStatus::SuboptimalSolution
                     && attempt + 1 < POST_VERIFY_MAX_RESOLV
@@ -254,7 +254,7 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
     }
 
     let raw = post_verify_solution(
-        ippmm::solve_ippmm_inner(problem, options),
+        ippmm::solve_ippmm_inner(problem, options, None, None, options.ipm_eps()),
         problem,
         options.ipm_eps(),
     );
