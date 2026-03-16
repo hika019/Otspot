@@ -373,7 +373,7 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         if fac_cache.is_none() {
             amd_perm_cache = None;
             drop(kkt_cache.take()); // 旧キャッシュを解放し、次行で再構築
-            let delta_fallback = 1e-2_f64.max(delta_p).max(delta_d);
+            let delta_fallback = 1e-2_f64.max(delta_p_retry).max(delta_d_retry);
             let aug_mat_fb = build_augmented_system(
                 &problem.q, &a_ext, &sigma_vec, delta_fallback, delta_fallback,
             );
