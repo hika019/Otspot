@@ -269,7 +269,15 @@ pub(crate) fn solve_qp_ipm_inner(problem: &QpProblem, options: &SolverOptions) -
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
 
         // Σ = diag(s_i / y_i)（両パスで共通）
-        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();
+        // y→0 のとき si/yi→Inf になる場合がある。faerはInf値を行列要素として処理できないため
+        // sigma_max = 1/delta_min でクリップ（ippmm.rs L278-284と同等）
+        let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
+        let sigma_vec: Vec<f64> = s.iter().zip(y.iter())
+            .map(|(&si, &yi)| {
+                let v = si / yi;
+                if v.is_finite() { v } else { sigma_max }
+            })
+            .collect();
 
         // ===== LDLパス: augmented system + factorize_quasidefinite_with_deadline =====
 
@@ -689,7 +697,14 @@ pub(crate) fn solve_qp_ipm_schur_inner(problem: &QpProblem, options: &SolverOpti
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
 
         // Σ = diag(s_i / y_i),  D = Σ + δ_d
-        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| si / yi).collect();
+        // y→0 のとき si/yi→Inf になる場合がある。sigma_max = 1/delta_min でクリップ（ippmm.rs同等）
+        let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
+        let sigma_vec: Vec<f64> = s.iter().zip(y.iter())
+            .map(|(&si, &yi)| {
+                let v = si / yi;
+                if v.is_finite() { v } else { sigma_max }
+            })
+            .collect();
         let d_vec: Vec<f64> = sigma_vec.iter().map(|&sg| sg + delta_d).collect();
         let d_inv: Vec<f64> = d_vec.iter().map(|&d| 1.0 / d).collect();
 
