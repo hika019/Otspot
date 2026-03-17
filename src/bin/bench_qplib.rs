@@ -73,10 +73,11 @@ fn main() {
                 solver_choice = match args[i].as_str() {
                     "ipm" => QpSolverChoice::Ipm,
                     "ipm-schur" => QpSolverChoice::IpmSchur,
+                    "concurrent" => QpSolverChoice::Concurrent,
                     #[cfg(feature = "ippmm_new")]
                     "ippmm_new" => QpSolverChoice::IpPmmNew,
                     other => {
-                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur|ippmm_new", other);
+                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur|concurrent|ippmm_new", other);
                         std::process::exit(1);
                     }
                 };
