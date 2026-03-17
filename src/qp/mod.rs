@@ -183,18 +183,6 @@ fn solve_qp_concurrent(
             });
         }
 
-        // IPM-Schur スレッド
-        {
-            let cancel = Arc::clone(&cancel_flag);
-            let mut opts = options.clone();
-            opts.cancel_flag = Some(cancel);
-            let tx = tx.clone();
-            s.spawn(move || {
-                let r = ipm::solve_qp_ipm_schur(problem, &opts);
-                let _ = tx.send(r);
-            });
-        }
-
         // IP-PMM 独立実装スレッド
         {
             let cancel = Arc::clone(&cancel_flag);
@@ -463,9 +451,8 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
 /// `options.qp_solver` に基づいてソルバーを選択する。
 ///
 /// - `Ipm`: 強制 IPM（内点法）
-/// - `IpmSchur`: 強制 IPM Schur complement パス
 /// - `Concurrent`:
-///   - parallel feature ON → IPM/IPM-Schur を並列実行（`solve_qp_concurrent`）
+///   - parallel feature ON → IPM/IPM-PMM を並列実行（`solve_qp_concurrent`）
 ///   - parallel feature OFF → IPM
 ///
 /// Q=0 の場合は LP ソルバーに委譲する。
@@ -490,7 +477,6 @@ fn dispatch_qp(
 
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
-        QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
         QpSolverChoice::IpPmmNew => ipm::solve_qp_ippmm(problem, options),
         QpSolverChoice::Concurrent => {
             #[cfg(feature = "parallel")]

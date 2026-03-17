@@ -43,7 +43,7 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver as|ipm|ipm-schur] [--eps <value>] [--timeout <secs>]
+    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]
     let mut data_dir = "data/qplib".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
     let mut eps: f64 = 1e-6;
@@ -52,7 +52,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver ipm|ipm-schur] [--eps <value>] [--timeout <secs>]");
+            println!("Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]");
             println!("  --solver   Solver to use (default: concurrent/auto)");
             println!("  --eps      Convergence tolerance (default: 1e-6)");
             println!("  --timeout  Solver timeout in seconds (default: 10.0)");
@@ -72,11 +72,10 @@ fn main() {
             if i < args.len() {
                 solver_choice = match args[i].as_str() {
                     "ipm" => QpSolverChoice::Ipm,
-                    "ipm-schur" => QpSolverChoice::IpmSchur,
                     "concurrent" => QpSolverChoice::Concurrent,
                     "ippmm_new" => QpSolverChoice::IpPmmNew,
                     other => {
-                        eprintln!("Unknown solver: {}. Use ipm|ipm-schur|concurrent|ippmm_new", other);
+                        eprintln!("Unknown solver: {}. Use ipm|concurrent|ippmm_new", other);
                         std::process::exit(1);
                     }
                 };
@@ -113,7 +112,6 @@ fn main() {
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::Ipm => "IPM",
-        QpSolverChoice::IpmSchur => "IPM-Schur",
         QpSolverChoice::IpPmmNew => "IP-PMM-New",
         _ => "Unknown",
     };
@@ -211,7 +209,6 @@ fn main() {
 
         let method_label = match result.solver_used {
             Some(QpSolverChoice::Ipm) => "ipm",
-            Some(QpSolverChoice::IpmSchur) => "ipm-schur",
             Some(QpSolverChoice::Concurrent) => "concurrent",
             Some(QpSolverChoice::IpPmmNew) => "ippmm_new",
             Some(_) => "other",

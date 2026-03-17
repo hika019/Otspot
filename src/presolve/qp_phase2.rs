@@ -238,8 +238,7 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
 ///
 /// 各行 i: σ_i = max|A[i,*]|。σ_i > 1 なら A[i,*] と b[i] を σ_i で割る。
 ///
-/// これにより KKT 行列の数値安定性が改善し、IPM-Schur の収束が向上する。
-/// IPM-Schur は presolve 済みの問題を受け取ることでこの前処理の恩恵を得る。
+/// これにより KKT 行列の数値安定性が改善し、IPM の収束が向上する。
 ///
 /// 戻り値: 行スケール係数（逆変換に使用。双対変数 y_i *= σ_i で元スケールに戻る）
 pub fn constraint_precond(
@@ -299,7 +298,7 @@ pub fn constraint_precond(
 ///
 /// - #19: 等式制約の QR 分解による冗長行除去
 /// - #20: Q 非対角微小要素のゼロ化
-/// - #21: 制約行正規化（IPM-Schur の収束改善）
+/// - #21: 制約行正規化（IPM の収束改善）
 pub fn run_qp_presolve_phase2(
     phase1_result: QpPresolveResult,
     _opts: &SolverOptions,

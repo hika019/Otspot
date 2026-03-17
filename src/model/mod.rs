@@ -528,7 +528,7 @@ mod tests {
     use super::{Model, ModelError, SolveError, Variable};
     use crate::sparse::CscMatrix;
 
-    // concurrent solver での許容誤差（AS/IPM/IPM-Schur 並列実行）
+    // concurrent solver での許容誤差（IPM/IP-PMM 並列実行）
     const EPS: f64 = 2e-3;
 
     fn assert_close(a: f64, b: f64, name: &str) {

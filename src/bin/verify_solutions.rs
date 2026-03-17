@@ -167,7 +167,8 @@ fn main() {
                 if i < args.len() {
                     solver_choice = match args[i].as_str() {
                         "ipm" => QpSolverChoice::Ipm,
-                        "ipm-schur" => QpSolverChoice::IpmSchur,
+                        "ippmm_new" => QpSolverChoice::IpPmmNew,
+                        "concurrent" => QpSolverChoice::Concurrent,
                         other => {
                             eprintln!("Unknown solver: {}", other);
                             std::process::exit(1);
@@ -204,7 +205,7 @@ fn main() {
     let solver_label = match solver_choice {
         QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::Ipm => "IPM",
-        QpSolverChoice::IpmSchur => "IPM-Schur",
+        QpSolverChoice::IpPmmNew => "IP-PMM-New",
         _ => "Unknown",
     };
 
