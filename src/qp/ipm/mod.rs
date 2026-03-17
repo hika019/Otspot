@@ -11,7 +11,6 @@
 pub(crate) mod init;
 pub(crate) mod kkt;
 pub(crate) mod step;
-#[cfg(feature = "ippmm_new")]
 pub(crate) mod ippmm;
 
 use crate::linalg::ruiz::RuizScaler;
@@ -207,7 +206,6 @@ pub(crate) fn solve_qp_ipm_schur(problem: &QpProblem, options: &SolverOptions) -
 /// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
 ///
 /// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
-#[cfg(feature = "ippmm_new")]
 pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;

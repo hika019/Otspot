@@ -195,8 +195,7 @@ fn solve_qp_concurrent(
             });
         }
 
-        // IP-PMM 独立実装スレッド（ippmm_new feature 有効時のみ）
-        #[cfg(feature = "ippmm_new")]
+        // IP-PMM 独立実装スレッド
         {
             let cancel = Arc::clone(&cancel_flag);
             let mut opts = options.clone();
@@ -492,7 +491,6 @@ fn dispatch_qp(
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm::solve_qp_ipm(problem, options),
         QpSolverChoice::IpmSchur => ipm::solve_qp_ipm_schur(problem, options),
-        #[cfg(feature = "ippmm_new")]
         QpSolverChoice::IpPmmNew => ipm::solve_qp_ippmm(problem, options),
         QpSolverChoice::Concurrent => {
             #[cfg(feature = "parallel")]

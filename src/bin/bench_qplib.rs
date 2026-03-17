@@ -74,7 +74,6 @@ fn main() {
                     "ipm" => QpSolverChoice::Ipm,
                     "ipm-schur" => QpSolverChoice::IpmSchur,
                     "concurrent" => QpSolverChoice::Concurrent,
-                    #[cfg(feature = "ippmm_new")]
                     "ippmm_new" => QpSolverChoice::IpPmmNew,
                     other => {
                         eprintln!("Unknown solver: {}. Use ipm|ipm-schur|concurrent|ippmm_new", other);
@@ -115,7 +114,6 @@ fn main() {
         QpSolverChoice::Concurrent => "Concurrent",
         QpSolverChoice::Ipm => "IPM",
         QpSolverChoice::IpmSchur => "IPM-Schur",
-        #[cfg(feature = "ippmm_new")]
         QpSolverChoice::IpPmmNew => "IP-PMM-New",
         _ => "Unknown",
     };
@@ -215,7 +213,6 @@ fn main() {
             Some(QpSolverChoice::Ipm) => "ipm",
             Some(QpSolverChoice::IpmSchur) => "ipm-schur",
             Some(QpSolverChoice::Concurrent) => "concurrent",
-            #[cfg(feature = "ippmm_new")]
             Some(QpSolverChoice::IpPmmNew) => "ippmm_new",
             Some(_) => "other",
             None => "-",
