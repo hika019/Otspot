@@ -394,8 +394,21 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
         return true;
     }
 
-    // n > 1000: O(n³) コスト回避のためスキップ。
-    // 大規模非凸QPをNonConvexと判定できない可能性がある（現状ターゲット問題はn≤500）。
+    // ★ 追加: 対角チェック (O(nnz), サイズ非依存)
+    // 対角に負値があれば → 非PSD確定（十分条件）
+    // 上三角CSCなのでrow == colが対角要素
+    // 閾値: < -1e-10（数値ノイズ -1e-15程度を除外）
+    // ★ SAFETY: この閾値は慎重に設定。変更要注意。
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            if q.row_ind[k] == col && q.values[k] < -1e-10 {
+                return false;  // 対角負値 → 非PSD確定
+            }
+        }
+    }
+
+    // n > 1000: Cholesky分解はO(n³)コスト過大のため省略を維持
+    // （対角チェック済みのため、対角負値は検出完了）
     const CHECK_SIZE_LIMIT: usize = 1000;
     if n > CHECK_SIZE_LIMIT {
         return true;
@@ -1498,5 +1511,71 @@ mod tests {
         let msg = "Q matrix is indefinite".to_string();
         let status = SolveStatus::NonConvex(msg.clone());
         assert_eq!(format!("{}", status), format!("NonConvex({})", msg));
+    }
+
+    /// T_NEW1: n=1001(>1000) の対角負値行列 → NonConvex検出（案A）
+    /// Q = diag(-1.0, 1.0, ..., 1.0), n=1001 → Q[0,0]=-1.0 < -1e-10 → 非PSD確定
+    #[test]
+    fn test_qp_nonconvex_large_diagonal_negative() {
+        let n = 1001_usize;
+        let rows: Vec<usize> = (0..n).collect();
+        let cols: Vec<usize> = (0..n).collect();
+        let vals: Vec<f64> = std::iter::once(-1.0_f64)
+            .chain(std::iter::repeat(1.0_f64).take(n - 1))
+            .collect();
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        assert!(
+            !check_q_positive_semidefinite(&q),
+            "n>1000の対角負値行列はNonPSD（NonConvex）を返すこと"
+        );
+    }
+
+    /// T_NEW2: n=1001 の対角全正値行列 → PSD（偽陽性防止）
+    /// Q = diag(1.0, 1.0, ..., 1.0), n=1001 → 対角に負値なし → true（PSD）
+    #[test]
+    fn test_qp_psd_large_diagonal_positive() {
+        let n = 1001_usize;
+        let rows: Vec<usize> = (0..n).collect();
+        let cols: Vec<usize> = (0..n).collect();
+        let vals: Vec<f64> = vec![1.0_f64; n];
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        assert!(
+            check_q_positive_semidefinite(&q),
+            "n>1000の対角全正値行列はPSD判定されること（偽陽性なし）"
+        );
+    }
+
+    /// T_NEW3: 境界値 Q[0,0]=-1e-11（閾値 -1e-10 より大きい） → PSD（数値ノイズ無視）
+    /// -1e-11 > -1e-10 のため閾値未満と判定され、非凸検出しない
+    #[test]
+    fn test_qp_diagonal_boundary_below_threshold() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[-1e-11_f64, 1.0, 1.0],
+            3,
+            3,
+        ).unwrap();
+        assert!(
+            check_q_positive_semidefinite(&q),
+            "Q[0,0]=-1e-11 は閾値 -1e-10 より大きいため非凸検出しないこと"
+        );
+    }
+
+    /// T_NEW4: 境界値 Q[0,0]=-1e-9（閾値 -1e-10 を超える） → NonConvex
+    /// -1e-9 < -1e-10 のため対角負値として検出される
+    #[test]
+    fn test_qp_diagonal_boundary_above_threshold() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[-1e-9_f64, 1.0, 1.0],
+            3,
+            3,
+        ).unwrap();
+        assert!(
+            !check_q_positive_semidefinite(&q),
+            "Q[0,0]=-1e-9 は閾値 -1e-10 を超えるため非凸検出されること"
+        );
     }
 }
