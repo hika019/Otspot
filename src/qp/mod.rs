@@ -388,6 +388,10 @@ fn get_a_element(a: &CscMatrix, row: usize, col: usize) -> f64 {
 /// - n > 1000 の問題はスキップし true（PSD扱い）を返す。
 ///   大規模非凸QPを検出できない可能性がある。
 ///   現在のQPLIBターゲット問題は n ≤ 500 のためこのケースは存在しない。
+///
+/// # 既知制限
+/// 対角チェックは対角負値（Q[i,i] < -1e-10）のみ検出する。
+/// 対角全正の不定行列はn≤1000ではCholeskyで検出、n>1000では未検出（既知制限）。
 pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     let n = q.nrows;
     if n == 0 {
@@ -1559,6 +1563,23 @@ mod tests {
         assert!(
             check_q_positive_semidefinite(&q),
             "Q[0,0]=-1e-11 は閾値 -1e-10 より大きいため非凸検出しないこと"
+        );
+    }
+
+    /// T_NEW3b: 境界値 Q[0,0]=-1e-10 exact（閾値ちょうど） → PSD（非凸検出しない）
+    /// チェック条件は q < -1e-10。-1e-10 == -1e-10 のため条件を満たさず PSD を返す
+    #[test]
+    fn test_qp_diagonal_boundary_exact_threshold() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2],
+            &[0, 1, 2],
+            &[-1e-10_f64, 1.0, 1.0],
+            3,
+            3,
+        ).unwrap();
+        assert!(
+            check_q_positive_semidefinite(&q),
+            "Q[0,0]=-1e-10 は閾値ちょうどのため非凸検出しないこと（条件は < -1e-10）"
         );
     }
 
