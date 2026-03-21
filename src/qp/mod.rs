@@ -616,6 +616,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 let pv_opts_owned;
                 let pv_opts: &SolverOptions = if presolve_result.ruiz_scaler.is_some() {
                     let tighten = 10f64.powi(pv_try as i32);
+                    // PARAM: 1e-15 — post-verification の eps 調整下限（実装的根拠）。
+                    // EPS_FLOOR=1e-12 より 1000 倍厳しい。double 精度限界（~2.2e-16）付近。
+                    // tighten=10^pv_try の各段階で eps を 10 倍ずつ厳格化する際の安全弁。
+                    // 承認=家老承認済み（cmd_576）
                     let adjusted_eps = (current_opts.ipm_eps() / tighten).max(1e-15);
                     let mut adj = current_opts.clone();
                     adj.ipm.eps = adjusted_eps;

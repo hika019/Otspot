@@ -157,6 +157,11 @@ where
     // L_G = chol(G)
     if !chol_factorize(&mut g, l) {
         // Retry with stronger regularisation
+        // PARAM: 1e6 — Cholesky 失敗時の緊急正則化倍率（経験値・要検証）。G が SPD でない
+        // 場合に nu を 1e6 倍に強化して再試行。nu.max(1e-8) * 1e6 = 最低 1e-2 を保証。
+        // Clarabel/OSQP は Nyström 前処理を使わず比較不能。Frangella(2023) 等の論文は
+        // 固定小値（1e-6〜1e-8）を推奨するが、本実装は緊急安全弁として 1e6 倍を採用。
+        // ベンチ実測での妥当性検証を推奨。承認=要検証
         let nu2 = nu.max(1e-8) * 1e6;
         let mut g2 = vec![0.0f64; l * l];
         for i in 0..l {

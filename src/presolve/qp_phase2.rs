@@ -77,6 +77,10 @@ pub fn equality_constraint_qr(
             continue;
         }
         let ch = col_pattern_hash(&row_entries[i]);
+        // PARAM: 1e9 — |b| 量子化スケール（経験値）。b 値の 10^-9 精度での量子化により
+        // 同一制約の |b| 値が丸め誤差以内で一致する行をグループ化するためのハッシュキー。
+        // HiGHS は b 値をハッシュキーに使わず係数正規化ハッシュのみ使用。本実装独自。
+        // 承認=家老承認済み（cmd_576）
         let bk = (prob.b[i].abs() * 1e9).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }
@@ -150,6 +154,8 @@ pub fn equality_constraint_qr(
             }
         }
 
+        // PARAM: 1e-10 — ピボット選択の最小値（実装的根拠）。EPS_Q と同値。
+        // 小さすぎるピボットは数値不安定を引き起こすためスキップ。承認=家老承認済み（cmd_576）
         if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
             continue;
         }
@@ -164,6 +170,8 @@ pub fn equality_constraint_qr(
                 continue;
             }
             let factor = work[k][col] / pivot;
+            // PARAM: 1e-15 — ほぼゼロな因子のスキップ閾値（実装的根拠）。DROP_TOL と同値。
+            // 数値誤差以下の消去は不要。承認=家老承認済み（cmd_576）
             if factor.abs() < 1e-15 {
                 continue;
             }

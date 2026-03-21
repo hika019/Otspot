@@ -12,6 +12,10 @@ const DIAG_TOL: f64 = 1e-10;
 /// lb > ub 判定の許容誤差
 const BOUND_TOL: f64 = 1e-10;
 /// スケーリング比の警告閾値
+/// PARAM: 根拠=IPM の KKT 行列条件数の経験的許容上限（1e8 超で数値的に不安定化しやすい）。
+///        implied bounds ガード（qp_transforms.rs:1e8）と同値だが目的は独立
+///        （こちらはユーザー向け診断警告のみ。bounds 更新には不使用）。
+///        承認=家老承認済み（cmd_576）
 const SCALE_WARN_THRESHOLD: f64 = 1e8;
 /// A 行の「非ゼロ」判定閾値（現在は nnz==0 で判定するため未使用だが定義を保持）
 #[allow(dead_code)]

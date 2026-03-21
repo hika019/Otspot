@@ -357,7 +357,9 @@ fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
 /// 縮約後の問題に対してインプレースで適用する。
 /// 行スケール σ_i = 1/sqrt(max(|A[i,*]|)) を A の行と b[i] に乗算。
 ///
-/// PARAM: 閾値=1e6, 理由=数値安定性のため
+/// PARAM: 閾値=1e6（実装的根拠）。max(|A[i,*]|) > 1e6 の制約行を大係数行とみなし
+/// 行スケーリングを適用。1e6 は SCALE_WARN_THRESHOLD(1e8) より 100 倍小さく、
+/// Ruiz 収束前にスケールを整える早期介入の目安値。承認=家老承認済み（cmd_576）
 /// 戻り値: 各制約行の σ_i（postsolve で双対変数の逆変換に使用）
 fn apply_large_coeff_rescaling(
     a: &mut CscMatrix,
@@ -484,7 +486,12 @@ pub fn run_qp_presolve_phase1(
             let val = lb;
             // large-b guard: val が大きく A[i,j] も大きい場合、b が ±大値になり
             // IPM の収束が悪化する。代入をスキップし変数を tight bounds のまま残す。
-            // PARAM: 閾値 1e5 — この値を超える b 変化は数値的に危険。
+            // PARAM: 閾値 1e5 — 経験値。max(|A[i,j]| * val) > 1e5 となる fixed-var 代入を
+            // スキップし IPM が bounds で自然に処理する。QFORPLAN バグ修正で実測設定（cmd_253）。
+            // 他 solver（Clarabel/OSQP/HiGHS）に類似ガードなし。本実装独自。
+            // RUIZ_SKIP_LARGE_B_THRESHOLD(1e4) とは目的が異なる: こちらは fixed-var 代入時の
+            // b 過大化防止、あちらは presolve Ruiz 干渉防止。
+            // 承認=家老承認済み（cmd_576）
             const LARGE_B_THRESHOLD: f64 = 1e5;
             let max_b_change: f64 = {
                 let col_start = prob.a.col_ptr[j];
@@ -866,6 +873,12 @@ pub fn run_qp_presolve_phase1(
     // #10: check_bounds_infeasibility() — implied bounds から lb>ub 逆転を検出
     // bounds 更新は行わない（案A: infeasibility 検出専用）。
     // 密行ガード: DENSE_ROW_THRESHOLD を超える行はスキップ（数値安定性のため）。
+    // PARAM: DENSE_ROW_THRESHOLD=500 — 経験値。n>>m 問題（HUES-MOD/HUESTIS: n=10000, m=4）
+    // で各行に全変数が現れ、activity_range の残差 rest_lb=0 から
+    // implied = b/a_ij（a_ij=1e-12 なら ≈5e14）が生成されて Ruiz スケール後に 1e26 へ
+    // 拡大し IPM の KKT 条件数が悪化して TIMEOUT する問題で設定（cmd_253）。
+    // HiGHS は max(1000, num_col/20) の適応閾値を使用。500 は固定で同程度のオーダー。
+    // 承認=家老承認済み（cmd_576）
     // ==================================================================
     {
         const DENSE_ROW_THRESHOLD: usize = 500;
@@ -896,11 +909,18 @@ pub fn run_qp_presolve_phase1(
 
                 if a_ij > 0.0 && rest_lb_fin {
                     let implied_ub = (b[i] - rest_lb) / a_ij;
+                    // PARAM: 1e8 — implied bound サニティ閾値（経験値）。元の bound が INF かつ
+                    // |implied| > 1e8 の場合はスキップ。a_ij が微小（例: 1e-12）な場合に
+                    // implied ≈ 5e14 が生成されKKT条件数が悪化するのを防ぐ（cmd_253）。
+                    // HiGHS は feastol/kHighsTiny = 1e7 を使用。本実装は 10 倍緩い設定。
+                    // 承認=家老承認済み（cmd_576）
                     if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
                         new_ub = implied_ub;
                     }
                 } else if a_ij < 0.0 && rest_lb_fin {
                     let implied_lb = (b[i] - rest_lb) / a_ij;
+                    // PARAM: 1e8 — implied_lb サニティ閾値（implied_ub と対称。根拠同上）。
+                    // 承認=家老承認済み（cmd_576）
                     if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
                         new_lb = implied_lb;
                     }
