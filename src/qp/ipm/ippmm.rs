@@ -249,6 +249,7 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // μ が REG_LIMIT 以下で残差も eps 水準 → SuboptimalSolution
+        // PARAM(REG_LIMIT*1e-2): 根拠=経験値(μがREG_LIMITの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
         let thr_d = (eps * (1.0 + norm_c)).max(REG_LIMIT * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(REG_LIMIT * 10.0);
         if mu < REG_LIMIT * 1e-2 && nr_d < thr_d && nr_p < thr_p {
@@ -377,6 +378,7 @@ pub(crate) fn solve_ippmm_inner(
                     if rho_retry >= 1e0 {
                         break; // 上限到達 → あきらめ
                     }
+                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10はClarabel/OSQPの慣用倍率、上限1e0は条件数悪化問題が起きない経験的上限) | 承認=cmd_520実装時設定・要検証
                     rho_retry = (rho_retry * 10.0).min(1e0);
                     delta_matrix_retry = (delta_matrix_retry * 10.0).min(1e0);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
@@ -596,6 +598,7 @@ pub(crate) fn solve_ippmm_inner(
             s[i] += alpha * ds[i];
             y[i] += alpha * dy[i];
             // 下限: 負への転落を防ぐ（元の実装と同じ）
+            // PARAM(s/y floor=1e-12): 根拠=経験値(内点法の相補条件s*y>0維持のための数値フロア。LOQOは1e-4、OSQPは別方式を採用。1e-12は丸め誤差水準の最小値) | 承認=cmd_493実装時設定・要検証
             if s[i] <= 0.0 {
                 s[i] = 1e-12;
             }
@@ -607,6 +610,7 @@ pub(crate) fn solve_ippmm_inner(
         // ── PMM パラメータ更新 ──────────────────────────────────────
         // gunshi指摘(3): mu_rate=0時は固定倍率0.1で減衰（cycling防止）
         // mu_rate≈0の場合に rho が減らなくなる問題を防ぐ
+        /// PARAM: 根拠=経験値(mu_rate≈0時のρ固着cycling防止。Pougkakiotis&Gondzio2021論文記載なし、gunshi指摘(3)対応) | 承認=cmd_493実装時設定・要検証
         const PMM_MIN_DECAY: f64 = 0.1;
         let effective_rate = mu_rate.max(PMM_MIN_DECAY);
 
@@ -962,10 +966,13 @@ fn check_infeasible_or_unbounded_ippmm(
     m_ext: usize,
     iter: usize,
 ) -> Option<SolveStatus> {
+    /// PARAM: 根拠=経験値(OSQP:1e-4より厳格、1e-8は内点法の収束精度水準と整合) | 承認=cmd_506実装時設定・要検証
     const EPS_INF: f64 = 1e-8;
+    /// PARAM: 根拠=経験値(序盤の探索方向が不安定なため偽陽性を防ぐ最小反復数) | 承認=cmd_506実装時設定・要検証
     const MIN_ITER: usize = 5;
     /// 収束時の偽陽性防止: 方向ベクトルが MIN_DIR_NORM 以下は検出スキップ。
     /// 収束時は Δx→0, Δy→0 なので norm=max(1,||Δ||)=1 となり比率が偶然ε未満になる。
+    /// PARAM: 根拠=経験値(収束時のΔx/Δy→0に対する偽陽性回避フィルタ、論文記載なし) | 承認=cmd_506実装時設定・要検証
     const MIN_DIR_NORM: f64 = 1e-3;
 
     if iter < MIN_ITER {
