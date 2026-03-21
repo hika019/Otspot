@@ -1114,12 +1114,12 @@ mod tests {
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "T9 sanity: expected Timeout or Optimal, got {:?}", result.status
         );
-        // T9修正前は最大POST_VERIFY_MAX_RESOLV×timeout倍の超過が起きる可能性あり
-        // 修正後は超過量が大幅に削減されるはず（5倍はloose bound）
+        // T9修正後: deadline固定によりPOST_VERIFYループの超過は最大1イテレーション分のみ
+        // 2.0×で十分厳格（バグ残存なら3×超過し検出できる）
         assert!(
-            elapsed < timeout_secs * 5.0,
-            "T9 sanity: elapsed({:.3}s) > timeout×5({:.3}s). T9バグが残存している可能性",
-            elapsed, timeout_secs * 5.0
+            elapsed < timeout_secs * 2.0,
+            "T9 sanity: elapsed({:.3}s) > timeout×2({:.3}s). T9バグが残存している可能性",
+            elapsed, timeout_secs * 2.0
         );
     }
 
