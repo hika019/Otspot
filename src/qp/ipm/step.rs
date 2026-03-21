@@ -345,9 +345,16 @@ pub(crate) fn solve_qp_ipm_inner(
             if let Some(cache) = kkt_cache.as_mut() {
                 // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
                 update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d_retry);
-                let f = fac_cache.as_mut().unwrap();
-                match f.refactorize_numeric_threaded(&cache.mat, timeout_ctx.deadline) {
-                    Ok(()) => {
+                // Bug-T1修正 (cmd_575): refactorize_numeric_threaded は事実上同期実行であり
+                // 大規模行列の再因子化中は deadline チェック不可（157s超過の主因）。
+                // factorize_quasidefinite_with_cached_perm_threaded（真のスレッド版）に統一する。
+                // symbolic 再計算コストは増えるが deadline 安全性が保証される。
+                let perm = amd_perm_cache.as_ref().unwrap();
+                match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                    &cache.mat, perm, timeout_ctx.deadline
+                ) {
+                    Ok(f) => {
+                        fac_cache = Some(f);
                         break 'retry;
                     }
                     Err(ldl::LdlError::DeadlineExceeded) => {
@@ -366,7 +373,6 @@ pub(crate) fn solve_qp_ipm_inner(
                         }
                         delta_p_retry = (delta_p_retry * 10.0).min(1e0);
                         delta_d_retry = (delta_d_retry * 10.0).min(1e0);
-                        // symbolic は delta_p/delta_d 変更で無効にならないのでキャッシュ維持
                         continue;
                     }
                 }

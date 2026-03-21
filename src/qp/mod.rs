@@ -541,10 +541,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     let mut current_opts = options.clone();
     let mut first_result: Option<SolverResult> = None; // C-1: Ruiz無し再ソルブ失敗時フォールバック用
     loop {
-        // presolve_ran_threaded: trueならpresolve後にdeadline変換を行う
-        // 大規模問題（n+m > 50_000）のみスレッド化してdeadlineで打ち切る。
-        // 小規模問題はpresolveが速いためスレッドオーバーヘッドを避け、timeout_secsをそのまま保持。
-        let mut presolve_ran_threaded = false;
+        // 大規模問題（n+m > 50_000）のみpresolveをスレッド化してdeadlineで打ち切る。
+        // 小規模問題はpresolveが速いためスレッドオーバーヘッドを避ける。
         let presolve_result = if current_opts.presolve {
             const PRESOLVE_THREAD_THRESHOLD: usize = 50_000;
             let use_thread = problem.num_vars + problem.num_constraints > PRESOLVE_THREAD_THRESHOLD;
@@ -560,7 +558,6 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 None
             };
             if let Some(d) = presolve_deadline {
-                presolve_ran_threaded = true;
                 let now = std::time::Instant::now();
                 if now >= d {
                     crate::presolve::QpPresolveResult::no_reduction(problem)
@@ -593,10 +590,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
             return crate::problem::SolverResult::infeasible();
         }
-        // 大規模問題でpresolveをスレッド化した場合のみdeadline変換を行う。
-        // 小規模問題ではtimeout_secsをそのまま保持し、ソルバーが独立したdeadlineを計算する。
-        // これにより、presolveに時間がかかった大規模問題でも合計時間がtimeout_secsを超えない。
-        if presolve_ran_threaded && current_opts.deadline.is_none() {
+        // Bug-T2修正 (cmd_575): presolve後の残余時間を常にdeadlineとして設定する。
+        // 大小規模問わず全ケースで残り時間を計算してdeadlineに変換することで、
+        // presolve時間がtimeout予算に確実に算入される（UBH1 17.6s超過の原因を修正）。
+        if current_opts.deadline.is_none() {
             if let Some(secs) = current_opts.timeout_secs {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let remaining = (secs - elapsed).max(0.0);
