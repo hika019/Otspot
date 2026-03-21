@@ -455,6 +455,10 @@ pub(crate) fn solve_qp_ipm_inner(
                     // identity fallback も失敗 → fac_cache は None のまま → M-02
                 }
             }
+            // C1バグ修正 (cmd_575): identity perm で因子化したため kkt_cache と
+            // amd_perm_cache は整合しない（amd_perm_cache=None, kkt_cache=Some の状態）。
+            // kkt_cache を None にリセットし、次反復で AMD 再計算＋フル初期化させる。
+            kkt_cache = None;
         }
 
         // M-02: fac_cache が None なら全リトライ失敗 → NumericalError
