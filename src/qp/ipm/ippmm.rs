@@ -342,6 +342,7 @@ pub(crate) fn solve_ippmm_inner(
         let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
+        // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 承認=cmd_520実装時設定・要検証
         for _retry in 0..10 {
             if timeout_ctx.should_stop() {
                 status = SolveStatus::Timeout;
@@ -378,7 +379,7 @@ pub(crate) fn solve_ippmm_inner(
                     if rho_retry >= 1e0 {
                         break; // 上限到達 → あきらめ
                     }
-                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10はClarabel/OSQPの慣用倍率、上限1e0は条件数悪化問題が起きない経験的上限) | 承認=cmd_520実装時設定・要検証
+                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10は10進指数的探索の自然な選択（具体的倍率はソルバー実装依存）、上限1e0は条件数悪化問題が起きない経験的上限) | 承認=cmd_520実装時設定・要検証
                     rho_retry = (rho_retry * 10.0).min(1e0);
                     delta_matrix_retry = (delta_matrix_retry * 10.0).min(1e0);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
