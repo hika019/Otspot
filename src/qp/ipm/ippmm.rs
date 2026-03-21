@@ -634,6 +634,14 @@ pub(crate) fn solve_ippmm_inner(
         pmm.prev_nr_d = nr_d;
     }
 
+    // T10修正(殿指示C): MaxIterations発生経路廃止。
+    // ループ内のshould_stop()チェックとの整合を保つため初期値はMaxIterationsのまま維持し、
+    // ループ脱出後にMaxIterationsが残存していた場合（max_iter=usize::MAXで理論上不可能）にTimeoutへ変換。
+    // これにより殿指示(C)「IPM/ippmm_newからMaxIterationsが漏れるパスをゼロに」を達成する。
+    if status == SolveStatus::MaxIterations {
+        status = SolveStatus::Timeout;
+    }
+
     // 目的関数値
     spmv_q_ippmm(&problem.q, &x, &mut qx);
     let objective = 0.5

@@ -14,6 +14,7 @@ pub(crate) mod step;
 pub(crate) mod ippmm;
 
 use crate::linalg::ruiz::RuizScaler;
+use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
@@ -71,6 +72,11 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let amplification = compute_amplification(&scaler);
             let mut last_result: Option<SolverResult> = None;
+            // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
+            // APIユーザーがtimeout_secs=Some(t), deadline=Noneで呼び出した場合、
+            // ループごとにtimeout_secsから新しいdeadlineを計算すると最大3×timeout_secsの超過が起きる。
+            // TimeoutCtx::from_optionsを使って既存パターンに統一（再発明を避ける）。
+            let effective_deadline = TimeoutCtx::from_options(options).deadline;
             // post-verification再ソルブループ:
             // unscale後のeps検証が不合格（SuboptimalSolution）なら
             // scaled空間のepsを10倍ずつ厳格化して最大POST_VERIFY_MAX_RESOLV回まで再試行。
@@ -81,6 +87,8 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
+                adjusted_opts.deadline = effective_deadline;  // T9: 固定deadline（二重タイムアウト防止）
+                adjusted_opts.timeout_secs = None;            // T9: 二重計算防止
                 let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
                 let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
                 // 再ソルブ条件: 原空間で SuboptimalSolution かつ残り試行回数がある場合。
@@ -146,12 +154,16 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
         if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
             let amplification = compute_amplification(&scaler);
             let mut last_result: Option<SolverResult> = None;
+            // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
+            let effective_deadline = TimeoutCtx::from_options(options).deadline;
             for attempt in 0..POST_VERIFY_MAX_RESOLV {
                 let tighten = 10f64.powi(attempt as i32);
                 let adjusted_eps =
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
+                adjusted_opts.deadline = effective_deadline;  // T9: 固定deadline（二重タイムアウト防止）
+                adjusted_opts.timeout_secs = None;            // T9: 二重計算防止
                 let scaled_result = ippmm::solve_ippmm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
                 let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
                 if result.status == SolveStatus::SuboptimalSolution
@@ -1073,6 +1085,41 @@ mod tests {
         assert!(
             result.bound_duals[3] > 0.5,
             "IPM-T18: ub_dual_y should be positive (active), got {:.6}", result.bound_duals[3]
+        );
+    }
+
+    /// T9 sanityチェック: Ruiz有効時のPOST_VERIFYループがtimeoutを大幅超過しないこと。
+    /// 注意: このテストはT9修正のsanityチェック。
+    /// 実問題での効果確認はベンチ（Step5 Maros/QPLIB）で行う。
+    #[test]
+    fn test_ipm_post_verify_timeout_stays_within_budget() {
+        // 適度なサイズの問題でRuiz scaling有効 + 短めのtimeout
+        // use_ruiz_scaling=true → POST_VERIFYループを通るパス
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
+        let c = vec![0.0; 3];
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[-1.0, -1.0, -1.0], 1, 3).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+
+        let timeout_secs = 0.01;
+        let mut opts = SolverOptions { timeout_secs: Some(timeout_secs), ..Default::default() };
+        opts.use_ruiz_scaling = true;  // POST_VERIFYループを通るパス（T9修正対象）
+
+        let start = std::time::Instant::now();
+        let result = solve_qp_ipm(&problem, &opts);
+        let elapsed = start.elapsed().as_secs_f64();
+
+        assert!(
+            result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
+            "T9 sanity: expected Timeout or Optimal, got {:?}", result.status
+        );
+        // T9修正前は最大POST_VERIFY_MAX_RESOLV×timeout倍の超過が起きる可能性あり
+        // 修正後は超過量が大幅に削減されるはず（5倍はloose bound）
+        assert!(
+            elapsed < timeout_secs * 5.0,
+            "T9 sanity: elapsed({:.3}s) > timeout×5({:.3}s). T9バグが残存している可能性",
+            elapsed, timeout_secs * 5.0
         );
     }
 
