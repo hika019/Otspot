@@ -204,14 +204,17 @@ pub(crate) fn solve_ippmm_inner(
     // AMD permutation キャッシュ（スパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
 
-    let mut status = SolveStatus::MaxIterations;
+    // 殿指示(C): MaxIterationsを発生させる経路自体を消す。
+    // None = 「まだ収束もタイムアウトも起きていない」を型で表現。
+    // ループ出口は「収束→Some(Optimal)」「timeout→Some(Timeout)」の2つだけ。
+    let mut status: Option<SolveStatus> = None;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
-            status = SolveStatus::Timeout;
+            status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
         }
@@ -243,7 +246,7 @@ pub(crate) fn solve_ippmm_inner(
         let eps = options.ipm_eps();
 
         if nr_d < eps * (1.0 + norm_c) && nr_p < eps * (1.0 + norm_b) && mu < eps {
-            status = SolveStatus::Optimal;
+            status = Some(SolveStatus::Optimal);
             final_iter = iter;
             break;
         }
@@ -281,13 +284,13 @@ pub(crate) fn solve_ippmm_inner(
                     && nr_d < eps_orig * (1.0 + norm_c)
                     && mu < eps_orig
                 {
-                    status = SolveStatus::Optimal;
+                    status = Some(SolveStatus::Optimal);
                     final_iter = iter;
                     break;
                 }
             }
             // Method Cで昇格できなかった場合 or scaler=None → SuboptimalSolution
-            status = SolveStatus::SuboptimalSolution;
+            status = Some(SolveStatus::SuboptimalSolution);
             final_iter = iter;
             break;
         }
@@ -333,7 +336,7 @@ pub(crate) fn solve_ippmm_inner(
         // ── augmented KKT 構築 + 因子化 ────────────────────────────
         // T2: 因子化前タイムアウトチェック
         if timeout_ctx.should_stop() {
-            status = SolveStatus::Timeout;
+            status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
         }
@@ -345,7 +348,7 @@ pub(crate) fn solve_ippmm_inner(
         // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 承認=cmd_520実装時設定・要検証
         for _retry in 0..10 {
             if timeout_ctx.should_stop() {
-                status = SolveStatus::Timeout;
+                status = Some(SolveStatus::Timeout);
                 final_iter = iter;
                 break;
             }
@@ -371,7 +374,7 @@ pub(crate) fn solve_ippmm_inner(
                     break;
                 }
                 Err(ldl::LdlError::DeadlineExceeded) => {
-                    status = SolveStatus::Timeout;
+                    status = Some(SolveStatus::Timeout);
                     final_iter = iter;
                     break;
                 }
@@ -386,7 +389,7 @@ pub(crate) fn solve_ippmm_inner(
                 }
             }
         }
-        if status == SolveStatus::Timeout {
+        if matches!(status, Some(SolveStatus::Timeout)) {
             break;
         }
         // 第3防御: Identity fallback — 全リトライ失敗時に identity perm + 大きな delta で再試行
@@ -405,13 +408,13 @@ pub(crate) fn solve_ippmm_inner(
                     fac_opt = Some(f);
                 }
                 Err(ldl::LdlError::DeadlineExceeded) => {
-                    status = SolveStatus::Timeout;
+                    status = Some(SolveStatus::Timeout);
                     final_iter = iter;
                 }
                 Err(_) => {} // identity fallback も失敗 → fac_opt は None のまま → M-02
             }
         }
-        if status == SolveStatus::Timeout {
+        if matches!(status, Some(SolveStatus::Timeout)) {
             break;
         }
         // M-02: fac_opt が None なら全リトライ失敗 → NumericalError
@@ -578,7 +581,7 @@ pub(crate) fn solve_ippmm_inner(
             || dy.iter().any(|v| !v.is_finite())
             || ds.iter().any(|v| !v.is_finite())
         {
-            status = SolveStatus::SuboptimalSolution;
+            status = Some(SolveStatus::SuboptimalSolution);
             final_iter = iter;
             break;
         }
@@ -587,7 +590,7 @@ pub(crate) fn solve_ippmm_inner(
         if let Some(infeas_status) = check_infeasible_or_unbounded_ippmm(
             &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
         ) {
-            status = infeas_status;
+            status = Some(infeas_status);
             final_iter = iter;
             break;
         }
@@ -634,13 +637,9 @@ pub(crate) fn solve_ippmm_inner(
         pmm.prev_nr_d = nr_d;
     }
 
-    // T10修正(殿指示C): MaxIterations発生経路廃止。
-    // ループ内のshould_stop()チェックとの整合を保つため初期値はMaxIterationsのまま維持し、
-    // ループ脱出後にMaxIterationsが残存していた場合（max_iter=usize::MAXで理論上不可能）にTimeoutへ変換。
-    // これにより殿指示(C)「IPM/ippmm_newからMaxIterationsが漏れるパスをゼロに」を達成する。
-    if status == SolveStatus::MaxIterations {
-        status = SolveStatus::Timeout;
-    }
+    // 殿指示(C): None→Timeout変換。「MaxIterations→Timeout変換」ではなく「未決定→Timeout」。
+    // max_iter=usize::MAXで収束もtimeoutも起きなかった場合（理論上不可能）にTimeoutを返す。
+    let status = status.unwrap_or(SolveStatus::Timeout);
 
     // 目的関数値
     spmv_q_ippmm(&problem.q, &x, &mut qx);
