@@ -119,18 +119,6 @@ fn cold_start_dual(
             ..Default::default()
             };
         }
-        SimplexOutcome::MaxIterations(_) => {
-            return SolverResult {
-                status: SolveStatus::MaxIterations,
-                objective: 0.0,
-                solution: vec![],
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            };
-        }
         SimplexOutcome::Timeout(_) => {
             return SolverResult {
                 status: SolveStatus::Timeout,
@@ -199,19 +187,6 @@ fn warm_outcome_to_result(
             warm_start_basis: None,
             ..Default::default()
         },
-        SimplexOutcome::MaxIterations(obj) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            SolverResult {
-                status: SolveStatus::MaxIterations,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            }
-        }
         SimplexOutcome::Timeout(obj) => {
             let solution = extract_solution(sf, basis, x_b, col_scale);
             SolverResult {
@@ -266,19 +241,6 @@ fn primal_outcome_to_result(
             warm_start_basis: None,
             ..Default::default()
         },
-        SimplexOutcome::MaxIterations(obj) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            SolverResult {
-                status: SolveStatus::MaxIterations,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            }
-        }
         SimplexOutcome::Timeout(obj) => {
             let solution = extract_solution(sf, basis, x_b, col_scale);
             SolverResult {
@@ -305,7 +267,7 @@ fn primal_outcome_to_result(
 /// # 戻り値
 /// - `Optimal`: 主実行可能性達成（最適）
 /// - `Unbounded`: 双対比率テストで候補なし（双対非有界 = 主実行不可）
-/// - `MaxIterations`: 反復上限到達
+/// - `Timeout`: refactor_failed（数値障害）またはmax_iter到達（事実上不到達）
 fn dual_simplex_core(
     a: &CscMatrix,
     x_b: &mut [f64],
@@ -412,10 +374,8 @@ fn dual_simplex_core(
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                    return SimplexOutcome::Timeout(obj);
-                }
-                return SimplexOutcome::MaxIterations(obj);
+                // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
+                return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
                 compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
@@ -468,10 +428,8 @@ fn dual_simplex_core(
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                    return SimplexOutcome::Timeout(obj);
-                }
-                return SimplexOutcome::MaxIterations(obj);
+                // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
+                return SimplexOutcome::Timeout(obj);
             }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
             reduced_costs =
@@ -480,7 +438,8 @@ fn dual_simplex_core(
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    SimplexOutcome::MaxIterations(obj)
+    // max_iter=usize::MAX のためここには事実上到達しない
+    SimplexOutcome::Timeout(obj)
 }
 
 /// refactor_if_neededの呼び出し頻度を制御するヘルパー

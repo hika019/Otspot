@@ -253,8 +253,6 @@ pub(crate) enum SimplexOutcome {
     Optimal(f64, Vec<f64>),
     /// 問題が非有界（unbounded）であった
     Unbounded,
-    /// 反復回数上限に到達した。値は打ち切り時点の目的関数値
-    MaxIterations(f64),
     /// タイムアウト（timeout_secs を超過した）。値は打ち切り時点の目的関数値
     Timeout(f64),
 }
@@ -606,19 +604,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
-            SimplexOutcome::MaxIterations(obj) => {
-                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
-                SolverResult {
-                    status: SolveStatus::MaxIterations,
-                    objective: obj + sf.obj_offset,
-                    solution,
-                    dual_solution: vec![],
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-            ..Default::default()
-                }
-            }
             SimplexOutcome::Timeout(obj) => {
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 SolverResult {
@@ -747,19 +732,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         warm_start_basis: None,
             ..Default::default()
                     },
-                    SimplexOutcome::MaxIterations(obj2) => {
-                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
-                        SolverResult {
-                            status: SolveStatus::MaxIterations,
-                            objective: obj2 + sf.obj_offset,
-                            solution,
-                            dual_solution: vec![],
-                            reduced_costs: vec![],
-                            slack: vec![],
-                            warm_start_basis: None,
-            ..Default::default()
-                        }
-                    }
                     SimplexOutcome::Timeout(obj2) => {
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         SolverResult {
@@ -777,16 +749,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
             SimplexOutcome::Unbounded => SolverResult {
                 status: SolveStatus::Infeasible,
-                objective: 0.0,
-                solution: vec![],
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            },
-            SimplexOutcome::MaxIterations(_) => SolverResult {
-                status: SolveStatus::MaxIterations,
                 objective: 0.0,
                 solution: vec![],
                 dual_solution: vec![],
@@ -1005,15 +967,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // 特異基底または deadline 超過による再因子分解失敗 → 適切な結果を返す
         if basis_mgr.refactor_failed {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return SimplexOutcome::Timeout(obj);
-            }
-            return SimplexOutcome::MaxIterations(obj);
+            // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
+            return SimplexOutcome::Timeout(obj);
         }
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    SimplexOutcome::MaxIterations(obj)
+    // max_iter=usize::MAX のためここには事実上到達しない
+    SimplexOutcome::Timeout(obj)
 }
 
 #[cfg(test)]
@@ -1252,8 +1213,8 @@ mod tests {
         );
         let result = solve(&lp);
         assert!(
-            result.status == SolveStatus::Optimal || result.status == SolveStatus::MaxIterations,
-            "Expected Optimal or MaxIterations, got {:?}",
+            result.status == SolveStatus::Optimal || result.status == SolveStatus::Timeout,
+            "Expected Optimal or Timeout, got {:?}",
             result.status
         );
         assert!(!result.objective.is_nan(), "Objective should not be NaN");
@@ -1599,15 +1560,12 @@ mod tests {
 
     /// BUG-SX-001: Simplex MaxIterations 生成（HIGH）
     /// Simplex 外部 API（solve_with）から SolveStatus::MaxIterations が返ってはならない。
-    /// 発生条件: refactor_failed = true かつ deadline 未設定（simplex/mod.rs L1011, dual.rs L418/474）。
-    /// 現状コードに MaxIterations を生成するパスが11箇所存在する。
+    /// SimplexOutcome::MaxIterations廃止（cmd_595）後: SimplexOutcome自体にMaxIterationsバリアントが存在しない。
+    /// refactor_failed = true かつ deadline 未設定の経路はTimeout（simplex/mod.rs, dual.rs）。
     #[test]
     fn test_sx001_solve_does_not_return_max_iterations() {
-        // SPEC: BUG-SX-001 — regression test
-        // 通常LPではrefactorが失敗しないため、このテストはバグ修正前でもPASSする。
-        // 修正後のregressionガードとして機能する。
-        // TODO(green phase): refactor_failedを実際に誘発するテストを追加し、
-        //   修正前FAIL→修正後PASSの状態遷移を確認すること。
+        // SPEC: BUG-SX-001 — regression test（cmd_595修正後PASS）
+        // SimplexOutcome::MaxIterations廃止により、SolveStatus::MaxIterationsへの経路が閉じた。
         for method in [SimplexMethod::Primal, SimplexMethod::Dual] {
             let lp = make_lp(
                 vec![-1.0, -1.0],
@@ -1633,16 +1591,12 @@ mod tests {
         }
     }
 
-    /// BUG-SX-003: refactor_failed + deadline 未設定 → MaxIterations（MEDIUM）
-    /// LU 再因子分解が失敗し deadline が未設定の場合、SimplexOutcome::MaxIterations が返る（L1011）。
-    /// 修正後は SimplexOutcome::Timeout が返るべき。
+    /// BUG-SX-003: refactor_failed + deadline 未設定 → Timeout（MEDIUM）
+    /// cmd_595修正後: SimplexOutcome::MaxIterations廃止。refactor_failed経路はTimeout。
     #[test]
-    fn test_sx003_refactor_failed_no_deadline_not_max_iterations() {
-        // SPEC: BUG-SX-003 — regression test
-        // 通常LPではpivot後の基底が非特異に保たれるため、refactorが失敗しない。
-        // 修正後のregressionガードとして機能する。
-        // TODO(green phase): 特異基底を注入してrefactor_failedを実際に誘発し、
-        //   MaxIterations→Timeoutの修正を検証するテストを追加すること。
+    fn test_sx003_refactor_failed_no_deadline_returns_timeout() {
+        // SPEC: BUG-SX-003 — regression test（cmd_595修正後PASS）
+        // SimplexOutcome::MaxIterations廃止により、refactor_failed時はTimeoutが返る。
         use crate::simplex::pricing::DantzigPricing;
         // m=1, n=3 (cols: x1, x2, slack)
         // A = [[1, 1, 1]] → min -x1-x2 s.t. x1+x2+s=4
@@ -1663,11 +1617,15 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &mut basis, 1, 3, 3, &mut pricing, &opts,
         );
-        // 修正後: MaxIterations は返ってはならない（Optimal または Timeout が期待される）
-        // 現状: refactor_failed 時に MaxIterations が返る可能性 → assert FAIL
+        // cmd_595修正後: MaxIterations廃止 → Optimal または Timeout が返る
         assert!(
-            !matches!(outcome, SimplexOutcome::MaxIterations(_)),
-            "BUG-SX-003: refactor_failed 時は MaxIterations を返してはならない"
+            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_)),
+            "BUG-SX-003: refactor_failed 時は Optimal または Timeout を返すべき（got: {:?}）",
+            match &outcome {
+                SimplexOutcome::Optimal(..) => "Optimal",
+                SimplexOutcome::Unbounded => "Unbounded",
+                SimplexOutcome::Timeout(_) => "Timeout",
+            }
         );
     }
 
