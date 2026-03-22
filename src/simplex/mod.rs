@@ -1603,13 +1603,12 @@ mod tests {
     /// 発生条件: refactor_failed = true かつ deadline 未設定（simplex/mod.rs L1011, dual.rs L418/474）。
     /// 現状コードに MaxIterations を生成するパスが11箇所存在する。
     #[test]
-    #[ignore = "BUG-SX-001: Simplex MaxIterations generated. Will pass after fix."]
     fn test_sx001_solve_does_not_return_max_iterations() {
-        // SPEC: BUG-SX-001
-        // 縮退した LP を Primal/Dual 両方で解いて MaxIterations が返らないことを確認する。
-        // refactor_failed + deadline 未設定のケースで MaxIterations が返る可能性がある。
-        // 注: 通常の LP では refactor が失敗しないため、このテストは通常 PASS する。
-        // バグの存在を記録し、修正後の regression 確認に使用する。
+        // SPEC: BUG-SX-001 — regression test
+        // 通常LPではrefactorが失敗しないため、このテストはバグ修正前でもPASSする。
+        // 修正後のregressionガードとして機能する。
+        // TODO(green phase): refactor_failedを実際に誘発するテストを追加し、
+        //   修正前FAIL→修正後PASSの状態遷移を確認すること。
         for method in [SimplexMethod::Primal, SimplexMethod::Dual] {
             let lp = make_lp(
                 vec![-1.0, -1.0],
@@ -1639,13 +1638,12 @@ mod tests {
     /// LU 再因子分解が失敗し deadline が未設定の場合、SimplexOutcome::MaxIterations が返る（L1011）。
     /// 修正後は SimplexOutcome::Timeout が返るべき。
     #[test]
-    #[ignore = "BUG-SX-003: refactor_failed + no deadline → MaxIterations. Will pass after fix."]
     fn test_sx003_refactor_failed_no_deadline_not_max_iterations() {
-        // SPEC: BUG-SX-003
-        // max_etas=1 で revised_simplex_core を呼び出し、refactor が発生するように設定する。
-        // refactor_failed が起きた場合、MaxIterations ではなく Timeout が返ることを確認する。
-        // 注: 通常の LP では pivot 後の基底が非特異に保たれるため refactor が失敗しない。
-        // このテストはバグの存在を記録し、修正後の regression 確認として機能する。
+        // SPEC: BUG-SX-003 — regression test
+        // 通常LPではpivot後の基底が非特異に保たれるため、refactorが失敗しない。
+        // 修正後のregressionガードとして機能する。
+        // TODO(green phase): 特異基底を注入してrefactor_failedを実際に誘発し、
+        //   MaxIterations→Timeoutの修正を検証するテストを追加すること。
         use crate::simplex::pricing::DantzigPricing;
         // m=1, n=3 (cols: x1, x2, slack)
         // A = [[1, 1, 1]] → min -x1-x2 s.t. x1+x2+s=4
@@ -1678,14 +1676,12 @@ mod tests {
     /// simplex/mod.rs L69: presolve が deadline なしで実行される。
     /// timeout_secs=0 でも presolve は全実行されるバグ。
     #[test]
-    #[ignore = "BUG-PRE-001: Simplex presolve deadline not referenced. Will pass after fix."]
     fn test_pre001_presolve_does_not_respect_deadline() {
-        // SPEC: BUG-PRE-001
-        // LP を timeout_secs=0, presolve=true で実行。
-        // 期待: presolve も deadline を参照して即 Timeout（修正後）。
-        // 現状: presolve は deadline を無視し inner solver に依存するため、
-        //       小さな問題では結果として Timeout が返る。このテストは通常 PASS するが
-        //       大きな問題では presolve が予算を超過するバグが残存する。
+        // SPEC: BUG-PRE-001 — regression test
+        // 小問題ではinner solverがTimeoutを返すためPASSする。
+        // 大規模問題ではpresolveが予算を超過するバグが残存。
+        // TODO(green phase): 大規模問題でpresolveが予算超過するケースのテストを追加し、
+        //   presolve→deadline伝搬の修正を検証すること。
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();

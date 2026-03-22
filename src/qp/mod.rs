@@ -1610,13 +1610,11 @@ mod tests {
     /// MaxIterations 自体がバグステータスのため、NumericalError への変換もバグ。
     /// 修正後: NumericalError を返してはならない。
     #[test]
-    #[ignore = "BUG-QP-001: solve_as_lp MaxIterations→NumericalError conversion. Will pass after fix."]
     fn test_qp001_solve_as_lp_no_numerical_error() {
-        // SPEC: BUG-QP-001
-        // Q=0 (LP問題) の QP を solve_qp_with で解く
-        // LP として解いても NumericalError が返ってはならない
-        // 注: 通常の LP では MaxIterations が発生しないためこのテストは通常 PASS する。
-        // バグの存在を記録し修正後の regression 確認に使用する。
+        // SPEC: BUG-QP-001 — regression test
+        // 通常LPではMaxIterationsが発生しないためPASSする。
+        // TODO(green phase): MaxIterationsを発生させてNumericalError変換を確認し、
+        //   変換ロジック修正後のFAIL→PASSを検証するテストを追加すること。
         let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap(); // Q=0 → LP
         let c = vec![-1.0, -1.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
