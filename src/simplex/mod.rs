@@ -878,7 +878,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         Ok(bm) => bm,
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            return SimplexOutcome::Optimal(obj, vec![0.0; m]);
+            return SimplexOutcome::Timeout(obj); // BUG-SX-002: LU分解失敗は偽OptimalではなくTimeout
         }
     };
 
@@ -1575,7 +1575,6 @@ mod tests {
     /// LuBasis::new が Err → 現状 SimplexOutcome::Optimal（偽）が返る。
     /// 修正後は Timeout が返るべき。
     #[test]
-    #[ignore = "BUG-SX-002: LuBasis::new Err returns false Optimal. Will pass after fix."]
     fn test_sx002_lu_basis_err_should_return_timeout_not_optimal() {
         // SPEC: BUG-SX-002
         use crate::simplex::pricing::DantzigPricing;
