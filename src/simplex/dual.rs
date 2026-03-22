@@ -320,9 +320,9 @@ fn dual_simplex_core(
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
         Err(_) => {
-            // 基底が特異: 現在の値で最適を返す（エラー処理）
+            // BUG-SX-002: LU分解失敗は偽OptimalではなくTimeout
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            return SimplexOutcome::Optimal(obj, vec![0.0; m]);
+            return SimplexOutcome::Timeout(obj);
         }
     };
 
@@ -815,5 +815,32 @@ mod tests {
         };
         let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Timeout);
+    }
+
+    /// BUG-SX-002 (dual): LuBasis::new Err → 偽Optimal廃止
+    /// dual_simplex_core で特異初期基底を渡し、Timeout が返ることを確認。
+    #[test]
+    fn test_sx002_dual_lu_basis_err_should_return_timeout() {
+        use crate::simplex::dual::dual_simplex_core;
+        use crate::simplex::SimplexOutcome;
+
+        // 2×2 行列: 列0 = [1; 0]
+        // basis = [0, 0] → B = [[1, 1]; [0, 0]] → rank 1 → 特異 → LuBasis::new Err
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let mut x_b = vec![1.0, 0.0];
+        let mut basis = vec![0usize, 0]; // 同一列 → 特異基底
+        let opts = SolverOptions::default();
+        let outcome = dual_simplex_core(
+            &a, &mut x_b, &c, &mut basis, 2, 2, &opts,
+        );
+        assert!(
+            !matches!(outcome, SimplexOutcome::Optimal(..)),
+            "BUG-SX-002 (dual): LuBasis::new Err 時は Optimal を返してはならない"
+        );
+        assert!(
+            matches!(outcome, SimplexOutcome::Timeout(..)),
+            "BUG-SX-002 (dual): LuBasis::new Err 時は Timeout を返すべき"
+        );
     }
 }
