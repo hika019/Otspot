@@ -1146,4 +1146,90 @@ mod tests {
         close(result_ruiz.objective, result_no_ruiz.objective, "IPM-T7: objective");
     }
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // cmd_589 TDD赤フェーズ: テスト不足 (△) 項目
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// A2-T02: timeout_secs=0 で即停止（IPM版）
+    /// Given: timeout_secs=0, When: solve_qp_ipm, Then: 即 Timeout
+    #[test]
+    fn test_a2t02_ipm_timeout_zero_returns_immediately() {
+        // SPEC: A2-T02
+        // timeout_secs=0 → deadline = now() → 最初の should_stop() で Timeout
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { timeout_secs: Some(0.0), ..SolverOptions::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_ipm(&problem, &opts);
+        let elapsed = start.elapsed().as_secs_f64();
+        // timeout_secs=0 → Timeout または Optimal（初期化中に偶然解けた場合）
+        assert!(
+            result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
+            "A2-T02: timeout_secs=0 は Timeout または Optimal を返すこと。got: {:?}", result.status
+        );
+        assert!(
+            elapsed < 0.5,
+            "A2-T02: timeout_secs=0 は即座に返るべき。elapsed={:.3}s", elapsed
+        );
+    }
+
+    /// A5-S01: Ruiz scaling 前後で解が等価（別問題でも確認）
+    /// 既存 test_ipm_ruiz_scaling_consistency とは異なる制約条件の問題で確認
+    #[test]
+    fn test_a5s01_scaling_solution_equivalence_constrained() {
+        // SPEC: A5-S01
+        // 制約あり問題（T2: 等式制約 x+y=1）で scaling 有無で解が一致することを確認
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // x+y = 1 を Ax <= b 形式で: x+y<=1 かつ -(x+y)<=-1
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2,
+        ).unwrap();
+        let b = vec![1.0, -1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let result_ruiz = solve_qp_ipm(&problem, &SolverOptions::default());
+        let opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
+        let result_no_ruiz = solve_qp_ipm(&problem, &opts_no_ruiz);
+        assert_eq!(result_ruiz.status, SolveStatus::Optimal, "A5-S01: ruiz=true → Optimal");
+        assert_eq!(result_no_ruiz.status, SolveStatus::Optimal, "A5-S01: ruiz=false → Optimal");
+        assert!(
+            (result_ruiz.solution[0] - result_no_ruiz.solution[0]).abs() < 1e-4,
+            "A5-S01: scaling 有無で x[0] が一致すること"
+        );
+        assert!(
+            (result_ruiz.solution[1] - result_no_ruiz.solution[1]).abs() < 1e-4,
+            "A5-S01: scaling 有無で x[1] が一致すること"
+        );
+    }
+
+    /// A5-S02: POST_VERIFY で SuboptimalSolution を外部 API から返さない
+    /// IPM/IPPMM パスでは SuboptimalSolution → Timeout 変換済み（cmd_582 以降）
+    #[test]
+    fn test_a5s02_post_verify_no_false_optimal() {
+        // SPEC: A5-S02
+        // Ruiz scaling で POST_VERIFY が SuboptimalSolution を検出した場合、
+        // Timeout に変換されることを確認。
+        // 小さな問題では通常 Optimal が返るため、「SuboptimalSolution が返らない」を確認。
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { use_ruiz_scaling: true, ..SolverOptions::default() };
+        let result = solve_qp_ipm(&problem, &opts);
+        // SuboptimalSolution はバグステータス。返ってはならない。
+        assert_ne!(
+            result.status,
+            SolveStatus::SuboptimalSolution,
+            "A5-S02: SuboptimalSolution は外部 API から返ってはならない"
+        );
+        assert_eq!(result.status, SolveStatus::Optimal, "A5-S02: 正常ケースは Optimal");
+    }
+
 }

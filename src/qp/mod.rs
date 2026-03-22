@@ -1600,4 +1600,258 @@ mod tests {
             "Q[0,0]=-1e-9 は閾値 -1e-10 を超えるため非凸検出されること"
         );
     }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // cmd_589 TDD赤フェーズ: バグ再現テスト (#[ignore]付き)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// BUG-QP-001: solve_as_lp が MaxIterations→NumericalError 変換（MEDIUM）
+    /// qp/mod.rs L340: MaxIterations | SuboptimalSolution → NumericalError
+    /// MaxIterations 自体がバグステータスのため、NumericalError への変換もバグ。
+    /// 修正後: NumericalError を返してはならない。
+    #[test]
+    #[ignore = "BUG-QP-001: solve_as_lp MaxIterations→NumericalError conversion. Will pass after fix."]
+    fn test_qp001_solve_as_lp_no_numerical_error() {
+        // SPEC: BUG-QP-001
+        // Q=0 (LP問題) の QP を solve_qp_with で解く
+        // LP として解いても NumericalError が返ってはならない
+        // 注: 通常の LP では MaxIterations が発生しないためこのテストは通常 PASS する。
+        // バグの存在を記録し修正後の regression 確認に使用する。
+        let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap(); // Q=0 → LP
+        let c = vec![-1.0, -1.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![4.0];
+        let bounds = vec![(0.0f64, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            qp_solver: QpSolverChoice::Ipm,
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        // NumericalError はバグステータス。返ってはならない。
+        assert_ne!(
+            result.status,
+            SolveStatus::NumericalError,
+            "BUG-QP-001: solve_as_lp は NumericalError を返してはならない"
+        );
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // cmd_589 TDD赤フェーズ: テスト不足 (△) 項目
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// A2-T03: QP timeout_secs=None で有限ステップ収束
+    #[test]
+    fn test_a2t03_qp_no_deadline_converges() {
+        // SPEC: A2-T03 (QP版)
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { timeout_secs: None, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "A2-T03: QP タイムアウトなしで収束すること");
+    }
+
+    /// A3-C02: cancel_flag 事前設定で即停止（QP版）
+    #[test]
+    fn test_a3c02_cancel_flag_preset_qp_returns_timeout() {
+        // SPEC: A3-C02 (QP版)
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true)); // 事前に true
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::clone(&cancel)),
+            qp_solver: QpSolverChoice::Ipm,
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "A3-C02: cancel_flag 事前設定で Timeout が返ること"
+        );
+    }
+
+    /// A4-P01: presolve の透過性（presolve 有無で解が一致）
+    #[test]
+    fn test_a4p01_presolve_transparency_qp() {
+        // SPEC: A4-P01
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts_with = SolverOptions {
+            presolve: true,
+            qp_solver: QpSolverChoice::Ipm,
+            ..SolverOptions::default()
+        };
+        let opts_without = SolverOptions {
+            presolve: false,
+            qp_solver: QpSolverChoice::Ipm,
+            ..SolverOptions::default()
+        };
+        let result_with = solve_qp_with(&problem, &opts_with);
+        let result_without = solve_qp_with(&problem, &opts_without);
+        assert_eq!(result_with.status, SolveStatus::Optimal, "A4-P01: presolve=true → Optimal");
+        assert_eq!(result_without.status, SolveStatus::Optimal, "A4-P01: presolve=false → Optimal");
+        assert!(
+            (result_with.solution[0] - result_without.solution[0]).abs() < 1e-3,
+            "A4-P01: presolve 有無で x[0] が一致すること"
+        );
+        assert!(
+            (result_with.solution[1] - result_without.solution[1]).abs() < 1e-3,
+            "A4-P01: presolve 有無で x[1] が一致すること"
+        );
+    }
+
+    /// A6-I03: n>1000 で NonConvex 検出がスキップされること（既知の制限）
+    #[test]
+    fn test_a6i03_nonconvex_skip_for_large_n() {
+        // SPEC: A6-I03
+        // n=1001 > CHECK_SIZE_LIMIT=1000: Cholesky 省略 + 対角チェックのみ
+        // 対角負値は n に関係なく対角チェックで検出される
+        let n = 1001usize;
+        // case1: 対角負値 → 対角チェックで検出（n>1000 でも有効）
+        let mut rows = vec![0usize];
+        let mut cols = vec![0usize];
+        let mut vals = vec![-1e-9_f64]; // -1e-9 < -1e-10 → 検出
+        for i in 1..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
+        }
+        let q1 = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        assert!(!check_q_positive_semidefinite(&q1), "A6-I03: n=1001 対角負値は NonConvex を検出");
+
+        // case2: 非対角の非 PSD（対角チェックには引っかからない）→ n>1000 でスキップ
+        let mut rows2: Vec<usize> = (0..n).collect();
+        let mut cols2: Vec<usize> = (0..n).collect();
+        let mut vals2: Vec<f64> = vec![1.0; n]; // 全て正の対角
+        // 非対角に負値追加（非 PSD だが対角チェックには引っかからない）
+        rows2.push(0); cols2.push(1); vals2.push(-2.0);
+        let q2 = CscMatrix::from_triplets(&rows2, &cols2, &vals2, n, n).unwrap();
+        // n>1000 では Cholesky 省略 → 対角チェックのみ → true を返す（スキップ）
+        assert!(
+            check_q_positive_semidefinite(&q2),
+            "A6-I03: n>1000 の非対角非 PSD は NonConvex 検出をスキップする（既知の制限）"
+        );
+    }
+
+    /// A7-CS04: バグステータスのフィルタリング（SuboptimalSolution → Feasible バグ）
+    /// quality_rank_of で SuboptimalSolution が Feasible として残ることを確認
+    #[cfg(feature = "parallel")]
+    #[test]
+    #[ignore = "BUG-CS04: SuboptimalSolution should be filtered by quality_rank_of. Will pass after fix."]
+    fn test_a7cs04_suboptimal_not_filtered_bug() {
+        // SPEC: A7-CS04 / BUG
+        // quality_rank_of で SuboptimalSolution は None を返すべき（バグステータスとして除外）
+        // 現状: Some(QualityRank::Feasible) が返る → assert FAIL
+        let result = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![0.5, 0.5], // 非空（現状フィルタリングされない）
+            ..Default::default()
+        };
+        let rank = quality_rank_of(&result);
+        // 修正後: SuboptimalSolution は None（除外）になるべき
+        assert!(
+            rank.is_none(),
+            "A7-CS04: SuboptimalSolution は quality_rank_of から除外されるべき。現状 {:?} が返る",
+            rank
+        );
+    }
+
+    /// A7-CS02: concurrent solver スレッド安全性（cancel_flag 経由の停止）
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_a7cs02_concurrent_cancel_flag_thread_safety() {
+        // SPEC: A7-CS02
+        // concurrent solver で Optimal を発見したとき cancel_flag でリソースリーク・
+        // データ競合なしに停止することを確認（10回繰り返してクラッシュなし）
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        for _ in 0..10 {
+            let opts = SolverOptions {
+                qp_solver: QpSolverChoice::Concurrent,
+                ..SolverOptions::default()
+            };
+            let result = solve_qp_with(&problem, &opts);
+            assert_eq!(
+                result.status,
+                SolveStatus::Optimal,
+                "A7-CS02: concurrent solver はスレッド安全に Optimal を返すこと"
+            );
+        }
+    }
+
+    /// A7-CS03: 全スレッド Timeout の場合 Timeout が返ること
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_a7cs03_concurrent_all_timeout_returns_timeout() {
+        // SPEC: A7-CS03
+        // timeout_secs=0 で concurrent solver → 全スレッドが Timeout → Timeout が返る
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions {
+            qp_solver: QpSolverChoice::Concurrent,
+            timeout_secs: Some(0.0), // 即座にタイムアウト
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "A7-CS03: 全スレッド Timeout のとき Timeout が返ること"
+        );
+    }
+
+    /// A3-C01: cancel_flag 即停止 / A3-C03: cancel_flag スレッド間共有（concurrent）
+    /// 現状: concurrent solver は L154 で内部 cancel_flag を新規作成するため
+    /// 外部から渡した cancel_flag が無視される → Timeout ではなく Optimal が返る
+    #[cfg(feature = "parallel")]
+    #[test]
+    #[ignore = "A3-C01/C03: concurrent solver ignores external cancel_flag (L154 creates new flag). Needs fix."]
+    fn test_a3c01_cancel_flag_concurrent_returns_timeout() {
+        // SPEC: A3-C01 / A3-C03
+        // concurrent solver で cancel_flag=true（事前設定）→ Timeout が返ること
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true)); // 事前 true
+        let opts = SolverOptions {
+            qp_solver: QpSolverChoice::Concurrent,
+            cancel_flag: Some(Arc::clone(&cancel)),
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "A3-C01/C03: cancel_flag 事前設定で concurrent solver は Timeout を返すこと"
+        );
+    }
 }
