@@ -581,10 +581,11 @@ fn apply_api_boundary_conversion(
 /// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
 ///
 /// # cancel_flag の注意事項
-/// `options.cancel_flag` を指定した場合、内部で `store(true)` される可能性がある
-/// （Optimal検出時・deadline到達時）。同一 flag を複数の `solve_qp_with` 呼び出しに
-/// 使い回す場合は、各呼び出し前に `cancel_flag.store(false, Relaxed)` でリセットするか、
-/// 問題ごとに新しい `Arc<AtomicBool>` を生成すること。
+/// `Concurrent` ソルバー（`parallel` feature 有効時のみ）では、`options.cancel_flag`
+/// を指定した場合、内部で `store(true)` される可能性がある（Optimal検出時・deadline到達時）。
+/// 同一 flag を複数の `solve_qp_with` 呼び出しに使い回す場合は、各呼び出し前に
+/// `cancel_flag.store(false, Relaxed)` でリセットするか、問題ごとに新しい
+/// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let start_time = std::time::Instant::now();
     let mut current_opts = options.clone();
