@@ -110,28 +110,16 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                 {
                     return result;
                 }
-                // Fix-D相当: SuboptimalSolution → Timeout（Optimal|Timeout 2択を保証）
-                let final_status = if result.status == SolveStatus::SuboptimalSolution {
-                    SolveStatus::Timeout
-                } else {
-                    result.status
-                };
-                return SolverResult { status: final_status, ..result };
+                // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
+                return result;
             }
             return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    // BUG-A1修正: 非RuizパスのFix-D漏れ（SuboptimalSolution→Timeout変換）
-    let raw = post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps());
-    // MaxIterations: cmd_595でSimplexOutcome::MaxIterations廃止済み。as_lpパスからは到達不能。
-    // SuboptimalSolution変換は引き続き必要。MaxIterations側はガードとして残存（SolveStatus enumは未削除）。
-    if raw.status == SolveStatus::MaxIterations || raw.status == SolveStatus::SuboptimalSolution {
-        SolverResult { status: SolveStatus::Timeout, ..raw }
-    } else {
-        raw
-    }
+    // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
+    post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps())
 }
 
 /// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
@@ -175,27 +163,19 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
                 if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
                     return result;
                 }
-                let final_status = if result.status == SolveStatus::SuboptimalSolution {
-                    SolveStatus::Timeout
-                } else {
-                    result.status
-                };
-                return SolverResult { status: final_status, ..result };
+                // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
+                return result;
             }
             return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
     }
 
-    let raw = post_verify_solution(
+    // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
+    post_verify_solution(
         ippmm::solve_ippmm_inner(problem, options, None, None, options.ipm_eps()),
         problem,
         options.ipm_eps(),
-    );
-    if raw.status == SolveStatus::SuboptimalSolution {
-        SolverResult { status: SolveStatus::Timeout, ..raw }
-    } else {
-        raw
-    }
+    )
 }
 
 /// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
@@ -203,7 +183,7 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
 ///
 /// Ruiz scaling なしのフォールバックパスで使用。
 /// Ruiz ありパスは unscale_ipm_result の SuboptimalSolution ブランチが担当。
-fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> SolverResult {
+pub(crate) fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> SolverResult {
     if result.status != SolveStatus::SuboptimalSolution || result.solution.is_empty() {
         return result;
     }
@@ -268,7 +248,7 @@ fn compute_amplification(scaler: &RuizScaler) -> f64 {
 ///
 /// 閾値: eps（絶対値基準）。qps_benchmarkの検証基準と統一。
 /// lb/ub が ±∞ の成分はスキップする。
-fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus {
+pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus {
     let bfeas: f64 = x
         .iter()
         .zip(bounds.iter())
@@ -294,7 +274,7 @@ fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus
 /// # 引数
 /// - `bound_duals`: アンスケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順
 /// - `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
-fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], bound_duals: &[f64], threshold: f64) -> SolveStatus {
+pub(crate) fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], bound_duals: &[f64], threshold: f64) -> SolveStatus {
     let n = x.len();
     // Q*x
     let qx = match problem.q.mat_vec_mul(x) {

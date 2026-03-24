@@ -533,6 +533,34 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
     solve_qp_with(problem, &SolverOptions::default())
 }
 
+/// API境界でSuboptimalSolutionをOptimalまたはTimeoutに変換する
+///
+/// solve_qp_withの全returnパスから呼び出す。内部ではSubを保持し、ここで最終変換を行う。
+/// - Sub（有効解あり）→ Optimal
+/// - Sub（精度未達）→ Timeout（解なし）
+/// - その他のステータス → 変換なし（パススルー）
+fn apply_api_boundary_conversion(
+    result: SolverResult,
+    problem: &QpProblem,
+    opts: &SolverOptions,
+) -> SolverResult {
+    if result.status != SolveStatus::SuboptimalSolution {
+        return result;
+    }
+    let eps = opts.ipm_eps();
+    let verified = ipm::post_verify_solution(result, problem, eps);
+    if verified.status == SolveStatus::Optimal {
+        verified
+    } else {
+        // Sub（精度未達）→ Timeout
+        SolverResult {
+            status: SolveStatus::Timeout,
+            solution: vec![],
+            ..verified
+        }
+    }
+}
+
 /// QPをカスタム設定で解く
 ///
 /// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
@@ -792,10 +820,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         if let Some(saved) = first_result.take() {
             match result.status {
                 SolveStatus::Optimal | SolveStatus::SuboptimalSolution => {} // 2nd solve成功: resultを使用
-                _ => return saved, // 2nd solve失敗: 1st solve結果（SuboptimalSolution）を保持
+                _ => return apply_api_boundary_conversion(saved, problem, &current_opts), // 2nd solve失敗: 1st solve結果（SuboptimalSolution）を保持
             }
         }
-        return result;
+        return apply_api_boundary_conversion(result, problem, &current_opts);
     }
 }
 
