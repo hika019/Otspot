@@ -140,7 +140,11 @@ fn activity_range(
 /// LPをPresolveして縮約問題を返す。
 ///
 /// 問題が明らかにInfeasible/Unboundedな場合はErrを返す。
-pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatus> {
+/// deadline を超過した場合は早期終了し `was_reduced: false` を返す（案B: 残余時間渡し）。
+pub fn run_presolve(
+    problem: &LpProblem,
+    deadline: Option<std::time::Instant>,
+) -> Result<PresolveResult, PresolveStatus> {
     let n = problem.num_vars;
     let m = problem.num_constraints;
 
@@ -165,6 +169,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     // ==========================================================
     // Step 1: Fixed variable removal (lb == ub)
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for j in 0..n {
         if removed_cols[j] {
             continue;
@@ -192,6 +200,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     // ==========================================================
     // Step 2: Singleton row (Eq制約、変数1つ → 値確定)
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for i in 0..m {
         if removed_rows[i] {
             continue;
@@ -237,6 +249,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     // ==========================================================
     // Step 3a: Empty row removal (全係数ゼロ行)
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for i in 0..m {
         if removed_rows[i] {
             continue;
@@ -272,6 +288,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     // ==========================================================
     // Step 3b: Empty column removal (全係数ゼロ列)
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for j in 0..n {
         if removed_cols[j] {
             continue;
@@ -315,6 +335,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     // ==========================================================
     // Step 4: Redundant constraint removal
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for i in 0..m {
         if removed_rows[i] {
             continue;
@@ -357,6 +381,10 @@ pub fn run_presolve(problem: &LpProblem) -> Result<PresolveResult, PresolveStatu
     //   変数j除外時は O(1) 増分減算で rest を得る。
     //   旧実装は各変数でO(n)全走査 → O(m×n²)。BOYD1で127s超の原因。
     // ==========================================================
+    // deadline チェック: 超過した場合は presolve 未適用で返す
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
     for i in 0..m {
         if removed_rows[i] {
             continue;
@@ -727,7 +755,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(2.0, 2.0), (0.0, f64::INFINITY)],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // x1 is fixed at 2, so it's removed
         assert_eq!(result.reduced_problem.num_vars, 1, "x1 should be removed");
         assert_eq!(result.reduced_problem.num_constraints, 1);
@@ -751,7 +779,7 @@ mod tests {
             vec![],
             vec![(3.0, 2.0)],
         );
-        assert!(matches!(run_presolve(&lp), Err(PresolveStatus::Infeasible)));
+        assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
     }
 
     // -----------------------------------------------------------
@@ -774,7 +802,7 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, f64::INFINITY)],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         assert_eq!(result.reduced_problem.num_constraints, 1);
     }
 
@@ -792,7 +820,7 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, f64::INFINITY)],
         );
-        assert!(matches!(run_presolve(&lp), Err(PresolveStatus::Infeasible)));
+        assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
     }
 
     #[test]
@@ -810,7 +838,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // Both columns are empty (no constraints) → removed
         assert_eq!(result.reduced_problem.num_vars, 0);
         assert!((result.obj_offset - 1.0).abs() < 1e-10); // x1=0, x2=1 → offset=1
@@ -828,7 +856,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(matches!(run_presolve(&lp), Err(PresolveStatus::Unbounded)));
+        assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Unbounded)));
     }
 
     // -----------------------------------------------------------
@@ -851,7 +879,7 @@ mod tests {
             vec![ConstraintType::Eq, ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // x1 removed (fixed at 3), row 0 removed
         assert_eq!(result.reduced_problem.num_vars, 1);
         // b[1] updated: 10 - 1*3 = 7
@@ -873,7 +901,7 @@ mod tests {
             vec![ConstraintType::Eq],
             vec![(0.0, 1.0)],
         );
-        assert!(matches!(run_presolve(&lp), Err(PresolveStatus::Infeasible)));
+        assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
     }
 
     // -----------------------------------------------------------
@@ -897,7 +925,7 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, 3.0), (0.0, 3.0)],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // 全制約が冗長 → 縮約後制約数 = 0
         assert_eq!(result.reduced_problem.num_constraints, 0, "all 3 constraints should be redundant");
         assert_eq!(result.reduced_problem.num_vars, 2, "vars retained");
@@ -915,7 +943,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 10.0)],
         );
-        let result2 = run_presolve(&lp2).unwrap();
+        let result2 = run_presolve(&lp2, None).unwrap();
         assert_eq!(result2.reduced_problem.num_constraints, 1, "x1+x2<=2 is not redundant");
     }
 
@@ -937,7 +965,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 10.0)],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // Constraint is redundant? x+y <= 5 with x,y in [0,10]:
         // row_ub = 1*10 + 1*10 = 20 > 5 → not redundant
         // But bounds should be tightened: x_ub = min(10, 5) = 5, y_ub = min(10, 5) = 5
@@ -963,7 +991,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 3.0)],
         );
-        assert!(run_presolve(&lp).is_ok(), "x - y <= 5 should be feasible");
+        assert!(run_presolve(&lp, None).is_ok(), "x - y <= 5 should be feasible");
     }
 
     /// 負係数Ge制約のbounds tighteningで偽陽性Infeasibleが出ないことを確認
@@ -982,7 +1010,7 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0, 5.0), (0.0, 8.0)],
         );
-        assert!(run_presolve(&lp).is_ok(), "-x + y >= 3 should be feasible");
+        assert!(run_presolve(&lp, None).is_ok(), "-x + y >= 3 should be feasible");
     }
 
     // -----------------------------------------------------------
@@ -1001,7 +1029,7 @@ mod tests {
             3,
             vec![4.0, 3.0, 3.0, 3.0],
         );
-        let result = run_presolve(&lp).unwrap();
+        let result = run_presolve(&lp, None).unwrap();
         // No reductions expected (no fixed vars, no empty rows/cols, not redundant)
         assert_eq!(result.reduced_problem.num_vars, 3);
         assert_eq!(result.reduced_problem.num_constraints, 4);

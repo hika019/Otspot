@@ -66,7 +66,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
 
     // --- Presolve ---
     if options.presolve {
-        match presolve::run_presolve(problem) {
+        match presolve::run_presolve(problem, options.deadline) {
             Err(presolve::PresolveStatus::Infeasible) => {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
@@ -1664,6 +1664,47 @@ mod tests {
             result.status,
             SolveStatus::Timeout,
             "BUG-PRE-001: timeout_secs=0 は Timeout を返すべき"
+        );
+    }
+
+    /// BUG-PRE-001 大規模問題: presolve が deadline を超過しないことを確認
+    /// deadline=過去のInstant（即座にTimeout）で n=2000, m=1000 の問題を実行し、
+    /// presolve の deadline チェックで early return されることを検証する。
+    #[test]
+    fn test_pre001_large_scale_presolve_respects_deadline() {
+        // SPEC: BUG-PRE-001 — green phase test（設計書 §6 Step E）
+        // presolveにdeadline=過去のInstantを渡し、Step 1前のチェックで即early returnされることを確認
+        let n = 2000usize;
+        let m = 1000usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0);
+            }
+        }
+        let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
+        let start = std::time::Instant::now();
+        let opts = SolverOptions {
+            timeout_secs: Some(0.0), // 即座にタイムアウト → presolve deadline チェックで early return
+            presolve: true,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "BUG-PRE-001 大規模: timeout_secs=0 は Timeout を返すべき"
+        );
+        // presolve の早期終了により、大規模問題でも短時間（< 0.5s）で完了するはず
+        assert!(
+            elapsed.as_secs_f64() < 0.5,
+            "BUG-PRE-001 大規模: presolve が deadline を超過した (elapsed={:.3}s)",
+            elapsed.as_secs_f64()
         );
     }
 

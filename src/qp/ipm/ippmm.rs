@@ -165,6 +165,7 @@ pub(crate) fn solve_ippmm_inner(
     // ★ cmd_499教訓: max(1.0, |bi|+1.0) は bi依存項がQSHELL pfeasを劣化させた。
     //    max(1.0)固定（問題依存なし）が安全。Ruizスケーリング後は|bi|≈1.0のためclampは最小限。
     let mut ax0 = vec![0.0f64; m_ext];
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n {
         for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
             ax0[a_ext.row_ind[k]] += a_ext.values[k] * x0[col];
@@ -470,7 +471,7 @@ pub(crate) fn solve_ippmm_inner(
 
         // PMM update で使う mu_rate（barrier 減少率の推定値）
         let mu_rate = if mu > 1e-15 {
-            (mu_aff / mu).min(1.0).max(0.0)
+            (mu_aff / mu).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -849,6 +850,7 @@ fn solve_unconstrained_ippmm(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> S
     let mut triplet_vals: Vec<f64> = Vec::new();
     let mut diag_added = vec![false; n];
 
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n {
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
             let row = problem.q.row_ind[k];
@@ -863,8 +865,8 @@ fn solve_unconstrained_ippmm(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> S
             }
         }
     }
-    for i in 0..n {
-        if !diag_added[i] {
+    for (i, &added) in diag_added.iter().enumerate() {
+        if !added {
             triplet_rows.push(i);
             triplet_cols.push(i);
             triplet_vals.push(unc_delta);
