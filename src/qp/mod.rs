@@ -122,7 +122,9 @@ pub struct IpmSolver;
 
 impl QpSolver for IpmSolver {
     fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-        ipm::solve_qp_ipm(problem, options)
+        let mut forced_opts = options.clone();
+        forced_opts.qp_solver = QpSolverChoice::Ipm; // IpmSolverの意味論を維持
+        solve_qp_with(problem, &forced_opts)
     }
     fn name(&self) -> &'static str {
         "IPM"
@@ -273,7 +275,7 @@ fn solve_qp_concurrent(
             SolverResult {
                 status: SolveStatus::NumericalError,
                 objective: f64::NAN,
-                solution: vec![0.0; problem.num_vars],
+                solution: vec![],
                 dual_solution: vec![],
                 bound_duals: vec![],
                 active_set: vec![],
