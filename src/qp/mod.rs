@@ -352,7 +352,12 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             iterations: 0,
             ..Default::default()
         },
-        SolveStatus::MaxIterations | SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
+        SolveStatus::MaxIterations => {
+            // DEAD PATH: SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能。
+            // SolveStatus enum variant自体は未削除（別cmd対応）。
+            unreachable!("MaxIterations is dead code - not reachable via simplex path")
+        }
+        SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
         SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -1652,19 +1657,16 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: バグ再現テスト (#[ignore]付き)
+    // cmd_589 TDD赤フェーズ: バグ再現テスト（cmd_607で修正済み）
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// BUG-QP-001: solve_as_lp が MaxIterations→NumericalError 変換（MEDIUM）
-    /// qp/mod.rs L340: MaxIterations | SuboptimalSolution → NumericalError
-    /// MaxIterations 自体がバグステータスのため、NumericalError への変換もバグ。
-    /// 修正後: NumericalError を返してはならない。
+    /// 修正（cmd_607）: qp/mod.rs の MaxIterations branch を unreachable!() に置換。
+    /// MaxIterations は SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能なdead path。
     #[test]
     fn test_qp001_solve_as_lp_no_numerical_error() {
         // SPEC: BUG-QP-001 — regression test
-        // 通常LPではMaxIterationsが発生しないためPASSする。
-        // TODO(green phase): MaxIterationsを発生させてNumericalError変換を確認し、
-        //   変換ロジック修正後のFAIL→PASSを検証するテストを追加すること。
+        // MaxIterationsはsimplexパスから到達不能（cmd_595/cmd_607確認）のためPASS。
         let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap(); // Q=0 → LP
         let c = vec![-1.0, -1.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
