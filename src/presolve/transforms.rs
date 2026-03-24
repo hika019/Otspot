@@ -1034,4 +1034,30 @@ mod tests {
         assert_eq!(result.reduced_problem.num_vars, 3);
         assert_eq!(result.reduced_problem.num_constraints, 4);
     }
+
+    // -----------------------------------------------------------
+    // BUG-PRE-001: deadline チェック直接検証
+    // -----------------------------------------------------------
+    #[test]
+    fn test_pre001_deadline_fires_immediately() {
+        // 任意のLP問題（fixed variable が存在する → Step 1 で削減対象あり）
+        let lp = make_lp_general(
+            vec![1.0, 1.0],
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            1,
+            2,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(2.0, 2.0), (0.0, f64::INFINITY)],
+        );
+        // 1秒過去の deadline を渡す → Step 1 先頭の deadline チェックが即座に発火する
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let result = run_presolve(&lp, Some(expired)).unwrap();
+        assert!(
+            !result.was_reduced,
+            "期限切れ deadline では early-exit し was_reduced=false を返すこと"
+        );
+    }
 }
