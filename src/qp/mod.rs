@@ -357,7 +357,10 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             // SolveStatus enum variant自体は未削除（別cmd対応）。
             unreachable!("MaxIterations is dead code - not reachable via simplex path")
         }
-        SolveStatus::SuboptimalSolution => SolverResult::numerical_error(),
+        SolveStatus::SuboptimalSolution => {
+            // DEAD PATH: SuboptimalSolution is not reachable via current simplex implementation
+            SolverResult::numerical_error()
+        }
         SolveStatus::Timeout => SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
