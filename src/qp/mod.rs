@@ -136,6 +136,12 @@ impl QpSolver for IpmSolver {
 /// parallel feature ON 時のみコンパイルされる。
 /// 各スレッドは共有 `cancel_flag` を監視し、勝者決定後に停止する。
 ///
+/// # cancel_flag の契約
+/// `options.cancel_flag` が指定されている場合、Optimal 検出時・deadline 到達時に
+/// `cancel_flag.store(true, Relaxed)` が呼ばれる。同一 flag を複数問題に使い回す場合は、
+/// 各呼び出し前に `cancel_flag.store(false, Relaxed)` でリセットするか、
+/// 問題ごとに新しい `Arc<AtomicBool>` を生成すること。
+///
 /// # Timeout accuracy
 /// The actual elapsed time may exceed `timeout_secs` by at most one LDL
 /// factorization step. For typical QP problems this overhead is negligible,
@@ -153,7 +159,14 @@ fn solve_qp_concurrent(
         mpsc,
     };
 
-    let cancel_flag = Arc::new(AtomicBool::new(false));
+    // 外部 cancel_flag がある場合は Arc::clone で共有（BUG-CONC-001修正）。
+    // 外部 cancel_flag がない場合は従来通り内部で新規作成。
+    // Note: Optimal検出時・deadline到達時に store(true) されるため、同一 flag を
+    // 複数回の solve_qp_with 呼び出しに使い回す場合は各呼び出し前にリセットすること。
+    let cancel_flag = options.cancel_flag
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     // Arc::new(problem.clone()) は不要: thread::scope により参照渡しが可能
     let (tx, rx) = mpsc::sync_channel::<SolverResult>(4);
 
@@ -566,6 +579,12 @@ fn apply_api_boundary_conversion(
 /// QPをカスタム設定で解く
 ///
 /// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
+///
+/// # cancel_flag の注意事項
+/// `options.cancel_flag` を指定した場合、内部で `store(true)` される可能性がある
+/// （Optimal検出時・deadline到達時）。同一 flag を複数の `solve_qp_with` 呼び出しに
+/// 使い回す場合は、各呼び出し前に `cancel_flag.store(false, Relaxed)` でリセットするか、
+/// 問題ごとに新しい `Arc<AtomicBool>` を生成すること。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let start_time = std::time::Instant::now();
     let mut current_opts = options.clone();
@@ -1853,11 +1872,9 @@ mod tests {
     }
 
     /// A3-C01: cancel_flag 即停止 / A3-C03: cancel_flag スレッド間共有（concurrent）
-    /// 現状: concurrent solver は L154 で内部 cancel_flag を新規作成するため
-    /// 外部から渡した cancel_flag が無視される → Timeout ではなく Optimal が返る
+    /// BUG-CONC-001修正済み: 外部 cancel_flag が concurrent solver に正しく伝搬される。
     #[cfg(feature = "parallel")]
     #[test]
-    #[ignore = "A3-C01/C03: concurrent solver ignores external cancel_flag (L154 creates new flag). Needs fix."]
     fn test_a3c01_cancel_flag_concurrent_returns_timeout() {
         // SPEC: A3-C01 / A3-C03
         // concurrent solver で cancel_flag=true（事前設定）→ Timeout が返ること
