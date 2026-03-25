@@ -85,13 +85,10 @@ fn residual_score(result: &SolverResult, problem: &QpProblem) -> f64 {
 fn quality_rank_of(result: &SolverResult) -> Option<QualityRank> {
     match result.status {
         SolveStatus::Optimal => Some(QualityRank::Optimal),
-        SolveStatus::SuboptimalSolution if !result.solution.is_empty() => {
-            Some(QualityRank::Feasible)
-        }
         SolveStatus::Timeout if !result.solution.is_empty() => {
             Some(QualityRank::Approximate)
         }
-        _ => None, // Infeasible / Unbounded / NumericalError / その他
+        _ => None, // Infeasible / Unbounded / NumericalError / SuboptimalSolution / その他
     }
 }
 
@@ -301,22 +298,19 @@ fn solve_qp_concurrent(
 
 /// Q=0 退化ケース（LP 問題）を LP ソルバーに委譲して QP 結果に変換する
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // Eq/Ge制約を全Le形式に変換してからSimplexに渡す。
-    // SimplexはEq+b=0のケースでPhase I即終了後に人工変数が残留する問題があるため、
-    // to_all_le()でEq→2Le展開することで安全に処理する。
-    let orig_m = problem.num_constraints;
-    let (work_problem, expansion_map) = problem.to_all_le();
-    let lp_problem = &work_problem;
-    let n = lp_problem.num_vars;
-    let m_expanded = lp_problem.num_constraints;
+    // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
+    // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
+    // 旧実装の to_all_le() + 全Le方式は Eq→2Le展開で同一係数行が生まれ、
+    // 基底の数値的不安定を引き起こすため廃止。
+    let m = problem.num_constraints;
+    let n = problem.num_vars;
 
-    let ct = lp_problem.constraint_types.clone();
     let lp = match LpProblem::new_general(
-        lp_problem.c.clone(),
-        lp_problem.a.clone(),
-        lp_problem.b.clone(),
-        ct,
-        lp_problem.bounds.clone(),
+        problem.c.clone(),
+        problem.a.clone(),
+        problem.b.clone(),
+        problem.constraint_types.clone(),
+        problem.bounds.clone(),
         None,
     ) {
         Ok(lp) => lp,
@@ -328,8 +322,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
             let obj = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum();
-            // active_setは展開前の制約インデックスで返す
-            let active: Vec<usize> = (0..orig_m)
+            // active_set: 元問題の制約インデックスで活性制約を返す
+            let active: Vec<usize> = (0..m)
                 .filter(|&i| {
                     let ax_i: f64 = (0..n)
                         .map(|j| get_a_element(&problem.a, i, j) * x[j])
@@ -337,9 +331,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                     (ax_i - problem.b[i]).abs() < PIVOT_TOL
                 })
                 .collect();
-            // 双対解を展開前の制約インデックス空間に逆変換
-            let dual = map_dual_back(&result.dual_solution, &expansion_map, orig_m,
-                &problem.constraint_types, m_expanded);
+            // 双対解はSimplex出力をそのまま使用（展開なし）
+            let dual = result.dual_solution.clone();
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj,
@@ -400,6 +393,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
 
 /// to_all_le()で展開された双対解を元の制約インデックス空間に逆変換する。
 /// Le→そのまま, Eq→2Le展開の差分, Ge→符号反転。
+#[allow(dead_code)]
 fn map_dual_back(
     y_expanded: &[f64],
     map: &crate::qp::problem::LeExpansionMap,
@@ -600,6 +594,41 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
     solve_qp_with(problem, &SolverOptions::default())
 }
 
+/// Eq/Ge制約のdual逆変換ヘルパー
+///
+/// IPM内部で `to_all_le()` 展開された dual を元制約空間に折り畳む。
+/// - Le:  expanded[rows[0]] そのまま
+/// - Ge:  -expanded[rows[0]] （to_all_le で符号反転されているため）
+/// - Eq:  expanded[rows[0]] - expanded[rows[1]]
+///
+/// 展開後のサイズと dual_expanded のサイズが一致しない場合はそのまま返す。
+pub(crate) fn collapse_le_expansion_dual(
+    dual_expanded: &[f64],
+    le_map: &crate::qp::problem::LeExpansionMap,
+    orig_types: &[crate::problem::ConstraintType],
+) -> Vec<f64> {
+    use crate::problem::ConstraintType;
+    let m_orig = orig_types.len();
+    let total_expanded: usize = le_map.original_to_expanded.iter().map(|rows| rows.len()).sum();
+    if dual_expanded.len() < total_expanded {
+        // サイズ不一致: フォールバックとして直接使用
+        return dual_expanded.to_vec();
+    }
+    let mut collapsed = vec![0.0f64; m_orig];
+    for (i, (ct, rows)) in orig_types.iter().zip(le_map.original_to_expanded.iter()).enumerate() {
+        collapsed[i] = match ct {
+            ConstraintType::Le => dual_expanded[rows[0]],
+            ConstraintType::Ge => -dual_expanded[rows[0]],
+            ConstraintType::Eq => {
+                let mu1 = dual_expanded[rows[0]];
+                let mu2 = if rows.len() > 1 { dual_expanded[rows[1]] } else { 0.0 };
+                mu1 - mu2
+            }
+        };
+    }
+    collapsed
+}
+
 /// API境界でSuboptimalSolutionをOptimalまたはTimeoutに変換する
 ///
 /// solve_qp_withの全returnパスから呼び出す。内部ではSubを保持し、ここで最終変換を行う。
@@ -767,6 +796,14 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         &presolve_result.reduced.bounds,
                     );
                     if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
+                }
+                // Eq/Ge dual逆変換: IPM内部の to_all_le() 展開で増えたdualを元制約空間に折り畳む。
+                // postsolve_qp の row_map は 1:1 マッピング前提のため、展開前に折り畳む必要がある。
+                if presolve_result.reduced.constraint_types.iter().any(|ct| !matches!(ct, crate::problem::ConstraintType::Le)) {
+                    let (_, le_map) = presolve_result.reduced.to_all_le();
+                    reduced_sol.dual_solution = collapse_le_expansion_dual(
+                        &reduced_sol.dual_solution, &le_map, &presolve_result.reduced.constraint_types,
+                    );
                 }
                 let mut r = postsolve_qp(&presolve_result, &reduced_sol);
                 // Ruiz unscale増幅由来のbounds微小違反を補正（clip）[cmd_400 (B)]
@@ -1378,10 +1415,10 @@ mod tests {
         let rank_opt = quality_rank_of(&result_optimal);
         let rank_feas = quality_rank_of(&result_feasible);
         assert_eq!(rank_opt, Some(QualityRank::Optimal), "T-Concurrent-3: Optimal rankはOptimal");
-        assert_eq!(rank_feas, Some(QualityRank::Feasible), "T-Concurrent-3: SuboptimalSolution rankはFeasible");
+        assert_eq!(rank_feas, None, "T-Concurrent-3: SuboptimalSolution はランク外（None）");
         assert!(
-            rank_opt.unwrap() > rank_feas.unwrap(),
-            "T-Concurrent-3: Optimal > Feasible なのでrankでOptimalが勝つこと"
+            rank_opt > rank_feas,
+            "T-Concurrent-3: Optimal(Some) > SuboptimalSolution(None) でOptimalが勝つこと"
         );
     }
 
@@ -1850,7 +1887,6 @@ mod tests {
     /// quality_rank_of で SuboptimalSolution が Feasible として残ることを確認
     #[cfg(feature = "parallel")]
     #[test]
-    #[ignore = "BUG-CS04: SuboptimalSolution should be filtered by quality_rank_of. Will pass after fix."]
     fn test_a7cs04_suboptimal_not_filtered_bug() {
         // SPEC: A7-CS04 / BUG
         // quality_rank_of で SuboptimalSolution は None を返すべき（バグステータスとして除外）
@@ -1949,4 +1985,5 @@ mod tests {
             "A3-C01/C03: cancel_flag 事前設定で concurrent solver は Timeout を返すこと"
         );
     }
+
 }

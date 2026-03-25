@@ -586,6 +586,14 @@ pub fn run_qp_presolve_phase1(
             continue; // 1制約のみに現れる場合のみ処理
         }
         let i = active_rows[0];
+
+        // Eq/Ge 制約はスキップ: 以下の val 計算は Le 前提（aligned case）のため Eq/Ge に適用すると
+        // 誤った値で b[i] を更新し、後続の empty_rows_cols で Infeasible 誤検知を引き起こす。
+        // Eq 制約の singleton 変数は free_col_substitution (#7) または Simplex Phase I に委ねる。
+        if prob.constraint_types[i] != crate::problem::ConstraintType::Le {
+            continue;
+        }
+
         let a_ij = row_entries[i].iter().find(|&&(jj, _)| jj == j).map(|&(_, v)| v).unwrap_or(0.0);
         if a_ij.abs() < ZERO_TOL {
             continue;
@@ -1201,7 +1209,14 @@ pub fn run_qp_presolve_phase1(
     // PARAM: 1e4 — 経験的閾値。|b|_max > 1e4 で presolve Ruiz をスキップ（dispatch段のRuizが処理）。
     //   LARGE_B_THRESHOLD(1e5)とは目的が異なる: こちらはpresolve Ruiz干渉防止、あちらはfixed-var代入スキップ。
     const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
-    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
+    // Eq/Ge 制約が残っている場合は presolve Ruiz をスキップ。
+    // 理由: presolve Ruiz は m_new（to_all_le 前の行数）で scaler.e を構築するが、
+    // dispatch（IPM）内部で to_all_le() が呼ばれると dual の長さが m_expanded に増える。
+    // 外側の unscale_solution が scaler.e.len() != dual.len() でパニックするため。
+    // スキップ時は IPM 内の Ruiz（to_all_le 後の正しい m で構築）が代わりに適用される。
+    let has_non_le = reduced.constraint_types.iter()
+        .any(|ct| !matches!(ct, crate::problem::ConstraintType::Le));
+    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD && !has_non_le {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);

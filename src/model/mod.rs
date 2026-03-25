@@ -283,59 +283,29 @@ impl Model {
             q_orig
         };
 
-        // --- 制約型変換: Le→そのまま, Ge→符号反転, Eq→2行展開 ---
-        // dual_map[i] = (qp_row_for_le_or_ge, Option<qp_row_for_eq_upper>)
-        //   Le: (row, None)    → dual[i] =  qp_dual[row]
-        //   Ge: (row, None)    → dual[i] = -qp_dual[row]
-        //   Eq: (row1, Some(row2)) → dual[i] = qp_dual[row1] - qp_dual[row2]
+        // --- 制約型変換: Le/Ge/Eq をそのまま QpProblem に渡す ---
+        // QP ソルバー内部で to_all_le() が呼ばれる。
+        // dual 逆変換は LeExpansionMap を使って行う（Ge→符号反転, Eq→差分）。
         let mut qp_trip_rows: Vec<usize> = Vec::new();
         let mut qp_trip_cols: Vec<usize> = Vec::new();
         let mut qp_trip_vals: Vec<f64> = Vec::new();
         let mut qp_b: Vec<f64> = Vec::new();
-        let mut dual_map: Vec<(usize, Option<usize>)> = Vec::with_capacity(num_model_constraints);
+        let mut qp_constraint_types: Vec<ConstraintType> = Vec::new();
         let mut qp_row = 0usize;
 
         for con in &self.constraints {
-            match con.sense {
-                ConstraintSense::Le => {
-                    for (&var, &coeff) in &con.lhs.coefficients {
-                        qp_trip_rows.push(qp_row);
-                        qp_trip_cols.push(var.index);
-                        qp_trip_vals.push(coeff);
-                    }
-                    qp_b.push(con.rhs);
-                    dual_map.push((qp_row, None));
-                    qp_row += 1;
-                }
-                ConstraintSense::Ge => {
-                    // a_i x >= b_i → -a_i x <= -b_i
-                    for (&var, &coeff) in &con.lhs.coefficients {
-                        qp_trip_rows.push(qp_row);
-                        qp_trip_cols.push(var.index);
-                        qp_trip_vals.push(-coeff);
-                    }
-                    qp_b.push(-con.rhs);
-                    dual_map.push((qp_row, None));
-                    qp_row += 1;
-                }
-                ConstraintSense::Eq => {
-                    // a_i x = b_i → [a_i x <= b_i] AND [-a_i x <= -b_i]
-                    let row1 = qp_row;
-                    let row2 = qp_row + 1;
-                    for (&var, &coeff) in &con.lhs.coefficients {
-                        qp_trip_rows.push(row1);
-                        qp_trip_cols.push(var.index);
-                        qp_trip_vals.push(coeff);
-                        qp_trip_rows.push(row2);
-                        qp_trip_cols.push(var.index);
-                        qp_trip_vals.push(-coeff);
-                    }
-                    qp_b.push(con.rhs);
-                    qp_b.push(-con.rhs);
-                    dual_map.push((row1, Some(row2)));
-                    qp_row += 2;
-                }
+            for (&var, &coeff) in &con.lhs.coefficients {
+                qp_trip_rows.push(qp_row);
+                qp_trip_cols.push(var.index);
+                qp_trip_vals.push(coeff);
             }
+            qp_b.push(con.rhs);
+            qp_constraint_types.push(match con.sense {
+                ConstraintSense::Le => ConstraintType::Le,
+                ConstraintSense::Ge => ConstraintType::Ge,
+                ConstraintSense::Eq => ConstraintType::Eq,
+            });
+            qp_row += 1;
         }
 
         let m_qp = qp_row;
@@ -346,8 +316,6 @@ impl Model {
                 .map_err(|e| ModelError::Internal(e.to_string()))?
         };
 
-        // model APIではEq→2Le展開済みのため全行Le
-        let qp_constraint_types = vec![ConstraintType::Le; m_qp];
         let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
             .map_err(|e| ModelError::Internal(e.to_string()))?;
 
@@ -374,20 +342,15 @@ impl Model {
                     qp_result.objective
                 };
 
-                // dual_solution逆変換（元制約数ぶんのdualを復元）
-                let dual = if !qp_result.dual_solution.is_empty() && num_model_constraints > 0 {
-                    let mut d = vec![0.0; num_model_constraints];
-                    for (i, (idx1, idx2_opt)) in dual_map.iter().enumerate() {
-                        d[i] = match self.constraints[i].sense {
-                            ConstraintSense::Le => qp_result.dual_solution[*idx1],
-                            ConstraintSense::Ge => -qp_result.dual_solution[*idx1],
-                            ConstraintSense::Eq => {
-                                let idx2 = idx2_opt.unwrap();
-                                qp_result.dual_solution[*idx1] - qp_result.dual_solution[idx2]
-                            }
-                        };
-                    }
-                    Some(d)
+                // solve_qp_with は Eq/Ge の dual を元制約空間に折り畳んで返す。
+                // （Le: そのまま, Ge: 符号反転済み, Eq: μ1-μ2 計算済み）
+                // 長さが num_model_constraints と一致する場合はそのまま使用。
+                let dual = if qp_result.dual_solution.len() == num_model_constraints {
+                    Some(qp_result.dual_solution.clone())
+                } else if !qp_result.dual_solution.is_empty() && num_model_constraints > 0 {
+                    // 長さ不一致: 先頭を切り取るフォールバック
+                    let take = num_model_constraints.min(qp_result.dual_solution.len());
+                    Some(qp_result.dual_solution[..take].to_vec())
                 } else {
                     None
                 };
@@ -863,6 +826,58 @@ mod tests {
             matches!(err, ModelError::Timeout),
             "expected Timeout, got {:?}",
             err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T8-1: LP with Eq constraint (Q=0 path: solve_as_lp)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_lp_equality() {
+        // min x + 2y  s.t. x + y = 4, x,y >= 0
+        // Optimal: x=4, y=0, obj=4
+        let mut model = Model::new("lp_eq");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.add_constraint((x + y).eq_constraint(4.0));
+        model.minimize(x + 2.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result.objective_value, 4.0, "T8-1: obj");
+        // x+y=4 かつ obj=x+2y=4 → x=4,y=0 が最適
+        assert_close(result[x] + result[y], 4.0, "T8-1: x+y=4");
+    }
+
+    // -----------------------------------------------------------------------
+    // T8-2: Eq制約のdual solution（LeExpansionMap逆変換の検証）
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_eq_dual_solution() {
+        // min x^2 + y^2  s.t. x + y = 1, x,y in (-inf, inf)
+        // Lagrangian: x^2+y^2 + λ(x+y-1)
+        // KKT: 2x + λ = 0, 2y + λ = 0 → x=y=-λ/2
+        // x+y=1 → -λ=1 → λ=-1, x=y=0.5
+        // dual of Eq constraint (shadow price) = λ = -1
+        let mut model = Model::new("qp_eq_dual");
+        let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+        let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
+        model.add_constraint((x + y).eq_constraint(1.0));
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        model.set_quadratic_objective(q);
+        model.minimize(0.0 * x + 0.0 * y);
+
+        let result = model.solve().unwrap();
+        assert_close(result.objective_value, 0.5, "T8-2: obj");
+        assert_close(result[x], 0.5, "T8-2: x");
+        assert_close(result[y], 0.5, "T8-2: y");
+
+        // dual検証: Eq制約のshadow price = -1
+        let dual = result.dual_solution.as_ref().expect("T8-2: dual_solution is None");
+        assert!(dual.len() == 1, "T8-2: dual length expected 1, got {}", dual.len());
+        assert!(
+            (dual[0] - (-1.0)).abs() < EPS,
+            "T8-2: dual[0] expected -1.0, got {}",
+            dual[0]
         );
     }
 
