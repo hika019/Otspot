@@ -43,7 +43,7 @@ pub use ipm::solve_qp_ipm;
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2, postsolve_qp};
 use crate::presolve::qp_transforms::QpPresolveStatus;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::problem::{LpProblem, SolveStatus};
 use crate::backend::{LpBackend, SimplexBackend};
 use crate::sparse::CscMatrix;
 use crate::tolerances::PIVOT_TOL;
@@ -301,16 +301,22 @@ fn solve_qp_concurrent(
 
 /// Q=0 退化ケース（LP 問題）を LP ソルバーに委譲して QP 結果に変換する
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    let n = problem.num_vars;
-    let m = problem.num_constraints;
+    // Eq/Ge制約を全Le形式に変換してからSimplexに渡す。
+    // SimplexはEq+b=0のケースでPhase I即終了後に人工変数が残留する問題があるため、
+    // to_all_le()でEq→2Le展開することで安全に処理する。
+    let orig_m = problem.num_constraints;
+    let (work_problem, expansion_map) = problem.to_all_le();
+    let lp_problem = &work_problem;
+    let n = lp_problem.num_vars;
+    let m_expanded = lp_problem.num_constraints;
 
-    let ct = vec![ConstraintType::Le; m];
+    let ct = lp_problem.constraint_types.clone();
     let lp = match LpProblem::new_general(
-        problem.c.clone(),
-        problem.a.clone(),
-        problem.b.clone(),
+        lp_problem.c.clone(),
+        lp_problem.a.clone(),
+        lp_problem.b.clone(),
         ct,
-        problem.bounds.clone(),
+        lp_problem.bounds.clone(),
         None,
     ) {
         Ok(lp) => lp,
@@ -322,7 +328,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
             let obj = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum();
-            let active: Vec<usize> = (0..m)
+            // active_setは展開前の制約インデックスで返す
+            let active: Vec<usize> = (0..orig_m)
                 .filter(|&i| {
                     let ax_i: f64 = (0..n)
                         .map(|j| get_a_element(&problem.a, i, j) * x[j])
@@ -330,11 +337,14 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                     (ax_i - problem.b[i]).abs() < PIVOT_TOL
                 })
                 .collect();
+            // 双対解を展開前の制約インデックス空間に逆変換
+            let dual = map_dual_back(&result.dual_solution, &expansion_map, orig_m,
+                &problem.constraint_types, m_expanded);
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj,
                 solution: x,
-                dual_solution: result.dual_solution,
+                dual_solution: dual,
                 bound_duals: vec![],
                 active_set: active,
                 iterations: 0,
@@ -386,6 +396,40 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             ..Default::default()
         },
     }
+}
+
+/// to_all_le()で展開された双対解を元の制約インデックス空間に逆変換する。
+/// Le→そのまま, Eq→2Le展開の差分, Ge→符号反転。
+fn map_dual_back(
+    y_expanded: &[f64],
+    map: &crate::qp::problem::LeExpansionMap,
+    orig_m: usize,
+    orig_types: &[crate::problem::ConstraintType],
+    m_expanded: usize,
+) -> Vec<f64> {
+    use crate::problem::ConstraintType;
+    if y_expanded.len() != m_expanded || y_expanded.len() == orig_m {
+        // 展開なし（全Le）またはサイズ一致: そのまま返す
+        return y_expanded.to_vec();
+    }
+    let mut y_orig = vec![0.0; orig_m];
+    for i in 0..orig_m {
+        let rows = &map.original_to_expanded[i];
+        match orig_types[i] {
+            ConstraintType::Le => {
+                y_orig[i] = y_expanded[rows[0]];
+            }
+            ConstraintType::Eq => {
+                // Ax<=b と -Ax<=-b の2つのLe行に分解。双対は差分。
+                y_orig[i] = y_expanded[rows[0]] - y_expanded[rows[1]];
+            }
+            ConstraintType::Ge => {
+                // -Ax<=-b に変換済み。符号反転。
+                y_orig[i] = -y_expanded[rows[0]];
+            }
+        }
+    }
+    y_orig
 }
 
 /// 行列 A の (row, col) 要素を返す

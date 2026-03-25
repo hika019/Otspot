@@ -56,6 +56,9 @@ pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 /// Ruiz equilibration スケーリングを適用してから内部ソルバーを呼ぶ。
 /// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
 pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
+    let (work_problem, _) = problem.to_all_le();
+    let problem = &work_problem;
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
         let m = problem.num_constraints;
@@ -126,6 +129,9 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 ///
 /// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
 pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
+    let (work_problem, _) = problem.to_all_le();
+    let problem = &work_problem;
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
         let m = problem.num_constraints;

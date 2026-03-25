@@ -376,7 +376,14 @@ impl QpsParser {
         // 3トークン以上: 値位置(2,4,6,...)がf64かチェック（COLUMNS と同様のhybrid判定）
         //   is_free=true  → 自由形式（parts[0]=rhs_name, pairs from parts[1..]）
         //   is_free=false → 固定幅MPS（行名にスペース含む場合 / rhs_name省略+行名がf64非解釈）
-        let is_free = {
+        //
+        // 固定幅強制判定: Field2(4:12)=rhs_name が空かつ Field3(14:22)=row_name1 が非空なら
+        // rhs_name省略固定幅形式と確定する。数値行名("65"等)がparts[2]に見えるため
+        // is_free=trueと誤判定されるバグを回避するためのチェック。
+        let force_fixed = mps_field(line, 4, 12).is_empty() && !mps_field(line, 14, 22).is_empty();
+        let is_free = if force_fixed {
+            false
+        } else {
             let mut ok = true;
             let mut vi = 2usize;
             while vi < parts.len() {
