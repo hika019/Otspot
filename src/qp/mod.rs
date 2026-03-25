@@ -391,41 +391,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     }
 }
 
-/// to_all_le()で展開された双対解を元の制約インデックス空間に逆変換する。
-/// Le→そのまま, Eq→2Le展開の差分, Ge→符号反転。
-#[allow(dead_code)]
-fn map_dual_back(
-    y_expanded: &[f64],
-    map: &crate::qp::problem::LeExpansionMap,
-    orig_m: usize,
-    orig_types: &[crate::problem::ConstraintType],
-    m_expanded: usize,
-) -> Vec<f64> {
-    use crate::problem::ConstraintType;
-    if y_expanded.len() != m_expanded || y_expanded.len() == orig_m {
-        // 展開なし（全Le）またはサイズ一致: そのまま返す
-        return y_expanded.to_vec();
-    }
-    let mut y_orig = vec![0.0; orig_m];
-    for i in 0..orig_m {
-        let rows = &map.original_to_expanded[i];
-        match orig_types[i] {
-            ConstraintType::Le => {
-                y_orig[i] = y_expanded[rows[0]];
-            }
-            ConstraintType::Eq => {
-                // Ax<=b と -Ax<=-b の2つのLe行に分解。双対は差分。
-                y_orig[i] = y_expanded[rows[0]] - y_expanded[rows[1]];
-            }
-            ConstraintType::Ge => {
-                // -Ax<=-b に変換済み。符号反転。
-                y_orig[i] = -y_expanded[rows[0]];
-            }
-        }
-    }
-    y_orig
-}
-
 /// 行列 A の (row, col) 要素を返す
 fn get_a_element(a: &CscMatrix, row: usize, col: usize) -> f64 {
     let start = a.col_ptr[col];
@@ -820,8 +785,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     let eps = current_opts.ipm_eps();
                     if problem.num_constraints > 0 {
                         if let Ok(ax) = problem.a.mat_vec_mul(&r.solution) {
-                            let pfeas = ax.iter().zip(problem.b.iter())
-                                .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            let pfeas = ax.iter().zip(problem.b.iter()).zip(problem.constraint_types.iter())
+                                .map(|((&ax_i, &b_i), ct)| {
+                                    if matches!(ct, crate::problem::ConstraintType::Eq) { (ax_i - b_i).abs() }
+                                    else { (ax_i - b_i).max(0.0) }
+                                })
                                 .fold(0.0_f64, f64::max);
                             let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
                             if pfeas >= eps * (1.0 + norm_b) {

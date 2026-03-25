@@ -57,7 +57,15 @@ pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 /// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
 pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
-    let (work_problem, _) = problem.to_all_le();
+    let (work_problem, le_map) = problem.to_all_le();
+    let orig_types = &problem.constraint_types;
+    let collapse = |r: SolverResult| -> SolverResult {
+        if r.dual_solution.is_empty() { return r; }
+        SolverResult {
+            dual_solution: crate::qp::collapse_le_expansion_dual(&r.dual_solution, &le_map, orig_types),
+            ..r
+        }
+    };
     let problem = &work_problem;
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
@@ -105,24 +113,24 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                 }
                 // Fix-D相当: MaxIterations → Timeout 変換
                 if result.status == SolveStatus::MaxIterations {
-                    return SolverResult { status: SolveStatus::Timeout, ..result };
+                    return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
                 }
                 // Timeout / Infeasible / Unbounded はそのまま返す
                 if result.status == SolveStatus::Timeout
                     || matches!(result.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
                 {
-                    return result;
+                    return collapse(result);
                 }
                 // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return result;
+                return collapse(result);
             }
-            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
+            return collapse(last_result.expect("POST_VERIFY_MAX_RESOLV >= 1"));
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
     // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps())
+    collapse(post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps()))
 }
 
 /// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
@@ -130,7 +138,15 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
 /// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
 pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
-    let (work_problem, _) = problem.to_all_le();
+    let (work_problem, le_map) = problem.to_all_le();
+    let orig_types = &problem.constraint_types;
+    let collapse = |r: SolverResult| -> SolverResult {
+        if r.dual_solution.is_empty() { return r; }
+        SolverResult {
+            dual_solution: crate::qp::collapse_le_expansion_dual(&r.dual_solution, &le_map, orig_types),
+            ..r
+        }
+    };
     let problem = &work_problem;
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
@@ -167,21 +183,21 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
                     continue;
                 }
                 if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
-                    return result;
+                    return collapse(result);
                 }
                 // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return result;
+                return collapse(result);
             }
-            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
+            return collapse(last_result.expect("POST_VERIFY_MAX_RESOLV >= 1"));
         }
     }
 
     // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    post_verify_solution(
+    collapse(post_verify_solution(
         ippmm::solve_ippmm_inner(problem, options, None, None, options.ipm_eps()),
         problem,
         options.ipm_eps(),
-    )
+    ))
 }
 
 /// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
