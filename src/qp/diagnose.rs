@@ -307,7 +307,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        QpProblem::new(q, c, a, b, bounds).unwrap()
+        QpProblem::new_all_le(q, c, a, b, bounds).unwrap()
     }
 
     // T1: 正常問題 → QNegativeDiagonal なし
@@ -329,7 +329,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         assert!(report.has_error, "has_error=true");
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::QNegativeDiagonal);
@@ -360,7 +360,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::QNotSymmetric);
         assert!(w.is_some(), "QNotSymmetric が検出される");
@@ -385,7 +385,7 @@ mod tests {
         let b = vec![];
         // x[1]: lb=2 > ub=1 → 矛盾
         let bounds = vec![(0.0, 1.0), (2.0, 1.0)];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         assert!(report.has_error, "has_error=true");
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::VariableBoundsConflict);
@@ -411,7 +411,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::PoorScaling);
         assert!(w.is_some(), "PoorScaling が検出される");
@@ -437,7 +437,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[1, 1], &[0, 1], &[-1.0, -1.0], 2, 2).unwrap();
         let b = vec![0.0, -1.0]; // b[0]=0 (冗長), b[1]=-1
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::ZeroRowInA);
         assert!(w.is_some(), "ZeroRowInA が検出される");
@@ -454,7 +454,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[1, 1], &[0, 1], &[-1.0, -1.0], 2, 2).unwrap();
         let b = vec![-1.0, -1.0]; // b[0]=-1 < 0 → infeasible
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         assert!(report.has_error, "has_error=true");
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::ZeroRowInA);
@@ -487,7 +487,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(5.0, 1.0), (0.0, 1.0)]; // x[0]: lb=5 > ub=1 → 矛盾
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let report = diagnose(&prob);
         assert!(report.has_error, "has_error=true");
         let errors: Vec<_> = report.warnings.iter()

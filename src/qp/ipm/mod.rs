@@ -69,7 +69,7 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone()) {
             let amplification = compute_amplification(&scaler);
             let mut last_result: Option<SolverResult> = None;
             // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
@@ -139,7 +139,7 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone()) {
             let amplification = compute_amplification(&scaler);
             let mut last_result: Option<SolverResult> = None;
             // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
@@ -506,7 +506,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp_ipm(&problem, &default_opts());
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T1: status");
@@ -526,7 +526,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp_ipm(&problem, &default_opts());
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T2: status");
@@ -553,7 +553,7 @@ mod tests {
         .unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp_ipm(&problem, &default_opts());
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T3: status");
@@ -573,7 +573,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp_ipm(&problem, &default_opts());
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T4: status");
@@ -607,7 +607,7 @@ mod tests {
         .unwrap();
         let b = vec![1.0, -1.0, 0.0, 0.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp_ipm(&problem, &default_opts());
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T5: status");
@@ -625,7 +625,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let mut opts = SolverOptions { timeout_secs: Some(0.0001), ..Default::default() };
         opts.use_ruiz_scaling = false;
@@ -656,7 +656,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let b = vec![0.5];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         // RuizScaler を手動設定: d=[2.0] により x_orig = 2.0*x_scaled
         let mut scaler = RuizScaler::new(1, 1);
@@ -708,7 +708,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let b = vec![1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         // 恒等スケーラー
         let scaler = RuizScaler::new(1, 1);
@@ -750,7 +750,7 @@ mod tests {
         let a = CscMatrix::new(0, 1); // 制約なし（boundsのみ）
         let b = vec![];
         let bounds = vec![(0.0_f64, 0.5_f64)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         // 恒等スケーラー（Ruiz変換なし相当）
         let scaler = RuizScaler::new(1, 0);
@@ -800,7 +800,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(-1.0_f64, 1.0_f64)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         let scaler = RuizScaler::new(1, 0);
 
@@ -840,7 +840,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         // 恒等スケーラー
         let scaler = RuizScaler::new(1, 0);
@@ -887,7 +887,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         // 恒等スケーラー
         let scaler = RuizScaler::new(1, 0);
@@ -973,7 +973,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(1.0_f64, f64::INFINITY)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let result = solve_qp_ipm(&problem, &opts);
@@ -1007,7 +1007,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, 0.5_f64)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let result = solve_qp_ipm(&problem, &opts);
@@ -1042,7 +1042,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)];
-        let problem = QpProblem::new(q, c_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
         let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let result = solve_qp_ipm(&problem, &opts);
@@ -1080,7 +1080,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[-1.0, -1.0, -1.0], 1, 3).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let timeout_secs = 0.01;
         let mut opts = SolverOptions { timeout_secs: Some(timeout_secs), ..Default::default() };
@@ -1112,7 +1112,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result_ruiz = solve_qp_ipm(&problem, &SolverOptions::default());
 
@@ -1141,7 +1141,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions { timeout_secs: Some(0.0), ..SolverOptions::default() };
         let start = std::time::Instant::now();
         let result = solve_qp_ipm(&problem, &opts);
@@ -1171,7 +1171,7 @@ mod tests {
         ).unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let result_ruiz = solve_qp_ipm(&problem, &SolverOptions::default());
         let opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
         let result_no_ruiz = solve_qp_ipm(&problem, &opts_no_ruiz);
@@ -1200,7 +1200,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions { use_ruiz_scaling: true, ..SolverOptions::default() };
         let result = solve_qp_ipm(&problem, &opts);
         // SuboptimalSolution はバグステータス。返ってはならない。

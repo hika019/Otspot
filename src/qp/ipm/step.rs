@@ -767,7 +767,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let b: Vec<f64> = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let dx = vec![1.0]; // MIN_DIR_NORM を超える大きさだが iter ガードが先
         let dy: Vec<f64> = vec![];
@@ -787,7 +787,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let b: Vec<f64> = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let dx = vec![5e-4]; // ||dx||_inf = 5e-4 <= MIN_DIR_NORM = 1e-3
         let dy: Vec<f64> = vec![];
@@ -812,7 +812,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap(); // 1x2 ゼロ行列
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let a_ext = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap();
         let dx = vec![1e-10, 1e-10]; // 非常に小さい → dual チェックはスキップ
         let dy = vec![2.0]; // norm = 2.0 > MIN_DIR_NORM
@@ -833,7 +833,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(); // 制約なし
         let b: Vec<f64> = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let dx = vec![1.0]; // c·dx = -1 < -ε, m_ext=0 なので dual guard は無効
         let dy: Vec<f64> = vec![];

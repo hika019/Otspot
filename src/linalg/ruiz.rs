@@ -497,7 +497,7 @@ mod tests {
         let b = vec![2.0, 2.0, 2.0];
         let bounds = vec![(0.0f64, f64::INFINITY); n];
 
-        let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
         // スケーリングなし
         let opts_no_scale = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
@@ -552,7 +552,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, q_vec, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
         let opts = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::Ipm, ..Default::default() };
 

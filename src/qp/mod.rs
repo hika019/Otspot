@@ -26,7 +26,7 @@
 //! ).unwrap();
 //! let b = vec![-1.0];
 //! let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-//! let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+//! let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 //! let result = solve_qp(&problem);
 //! // result.solution ≈ [0.5, 0.5], result.objective ≈ 0.5
 //! ```
@@ -910,7 +910,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T1: status should be Optimal");
@@ -938,7 +938,7 @@ mod tests {
         .unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T2: status should be Optimal");
@@ -965,7 +965,7 @@ mod tests {
         .unwrap();
         let b = vec![0.0, 0.0, 4.0, 6.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T3: status should be Optimal");
@@ -983,7 +983,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T4: status should be Optimal");
@@ -1002,8 +1002,8 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a.clone(), b.clone(), bounds.clone()).unwrap();
-        let problem2 = QpProblem::new(
+        let problem = QpProblem::new_all_le(q, c, a.clone(), b.clone(), bounds.clone()).unwrap();
+        let problem2 = QpProblem::new_all_le(
             CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap(),
             vec![0.0, 0.0],
             a,
@@ -1036,7 +1036,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[-1.0, 1.0], 2, 1).unwrap();
         let b = vec![-1.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Infeasible, "T6: should be Infeasible");
@@ -1060,7 +1060,7 @@ mod tests {
         ).unwrap();
         let b = vec![1.0, -1.0, 0.0, 0.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T7: status should be Optimal");
@@ -1085,7 +1085,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b_vec = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b_vec, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b_vec, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T8: status should be Optimal");
@@ -1108,7 +1108,7 @@ mod tests {
         ).unwrap();
         let b = vec![-1.0, 0.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T9: status should be Optimal");
@@ -1135,7 +1135,7 @@ mod tests {
         ).unwrap();
         let b = vec![2.0, -2.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T10: status should be Optimal");
@@ -1152,7 +1152,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T11: status should be Optimal");
@@ -1169,7 +1169,7 @@ mod tests {
         let a = CscMatrix::new(0, 2);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert_eq!(result.status, SolveStatus::Optimal, "T12: status should be Optimal");
@@ -1186,7 +1186,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions { timeout_secs: Some(0.0), ..Default::default() };
 
@@ -1206,7 +1206,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions { qp_solver: QpSolverChoice::Ipm, ..Default::default() };
         let result = solve_qp_with(&problem, &opts);
@@ -1225,7 +1225,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
@@ -1246,7 +1246,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // pfeas=0.01, dfeas=0.02 → score = max(0.01/2, 0.02/2) = 0.01
         let result_good = SolverResult {
@@ -1290,7 +1290,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // 全く同じスコアの2つの結果
         let result_first = SolverResult {
@@ -1420,7 +1420,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1000.0], 1, 1).unwrap();
         let b = vec![500.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default(); // presolve=true
         let result = solve_qp_with(&problem, &opts);
@@ -1453,7 +1453,7 @@ mod tests {
         let a = CscMatrix::new(0, 1);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default(); // presolve=true
         let result = solve_qp_with(&problem, &opts);
@@ -1477,7 +1477,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let b = vec![1.0];
         let bounds = vec![(0.0_f64, 0.5_f64)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default(); // presolve=true
         let result = solve_qp_with(&problem, &opts);
@@ -1501,7 +1501,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // presolve=true (デフォルト) で解く → presolveパスのコードが動く
         let opts = SolverOptions::default();
@@ -1539,7 +1539,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
         assert!(
@@ -1675,7 +1675,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![4.0];
         let bounds = vec![(0.0f64, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions {
             presolve: false,
             qp_solver: QpSolverChoice::Ipm,
@@ -1703,7 +1703,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions { timeout_secs: None, ..SolverOptions::default() };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "A2-T03: QP タイムアウトなしで収束すること");
@@ -1720,7 +1720,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let cancel = Arc::new(AtomicBool::new(true)); // 事前に true
         let opts = SolverOptions {
             cancel_flag: Some(Arc::clone(&cancel)),
@@ -1744,7 +1744,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts_with = SolverOptions {
             presolve: true,
             qp_solver: QpSolverChoice::Ipm,
@@ -1837,7 +1837,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         for _ in 0..10 {
             let opts = SolverOptions {
                 qp_solver: QpSolverChoice::Concurrent,
@@ -1863,7 +1863,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions {
             qp_solver: QpSolverChoice::Concurrent,
             timeout_secs: Some(0.0), // 即座にタイムアウト
@@ -1891,7 +1891,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let cancel = Arc::new(AtomicBool::new(true)); // 事前 true
         let opts = SolverOptions {
             qp_solver: QpSolverChoice::Concurrent,

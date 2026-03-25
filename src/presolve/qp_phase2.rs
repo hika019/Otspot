@@ -395,8 +395,12 @@ pub fn run_qp_presolve_phase2(
     let _sigmas = constraint_precond(&mut a_precond, &mut b_precond);
     // 双対変数の逆変換係数 _sigmas は将来の postsolve 拡張のために保持
 
-    // 縮約後問題を再構築
-    let reduced_new = match QpProblem::new(q_cleaned, prob.c.clone(), a_precond, b_precond, prob.bounds.clone()) {
+    // 縮約後問題を再構築（constraint_typesをremoved_rows_phase2でフィルタリング）
+    let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
+        .filter(|&i| !removed_rows_phase2[i])
+        .map(|i| prob.constraint_types[i])
+        .collect();
+    let reduced_new = match QpProblem::new(q_cleaned, prob.c.clone(), a_precond, b_precond, prob.bounds.clone(), constraint_types_new) {
         Ok(p) => p,
         Err(_) => return phase1_result, // 構築失敗 → Phase 1 結果をそのまま返す
     };
@@ -435,7 +439,7 @@ mod tests {
             m, n,
         ).unwrap();
         let b = vec![1.0; m];
-        QpProblem::new(q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n]).unwrap()
+        QpProblem::new_all_le(q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n]).unwrap()
     }
 
     #[test]
@@ -503,7 +507,7 @@ mod tests {
         ).unwrap();
         let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
         let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[2.0,2.0], n, n).unwrap();
-        let prob = QpProblem::new(q, vec![0.0;n], a, b, vec![(f64::NEG_INFINITY,f64::INFINITY);n]).unwrap();
+        let prob = QpProblem::new_all_le(q, vec![0.0;n], a, b, vec![(f64::NEG_INFINITY,f64::INFINITY);n]).unwrap();
         let mut removed = vec![false; m];
         equality_constraint_qr(&prob, &mut removed);
         // 少なくとも1行が除去されているべき（重複行）

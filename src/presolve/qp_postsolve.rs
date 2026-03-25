@@ -106,7 +106,7 @@ mod tests {
         let a = CscMatrix::new(0, n);
         let b = vec![];
         let bounds = vec![(0.0_f64, 1.0_f64), (0.5_f64, 0.5_f64)]; // y is fixed
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default();
         let presolve_result = run_qp_presolve_phase1(&prob, &opts);
@@ -141,7 +141,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], m, n).unwrap();
         let b = vec![3.0f64, 5.0f64];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default();
         let presolve_result = run_qp_presolve_phase1(&prob, &opts);
@@ -172,7 +172,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], m, n).unwrap();
         let b = vec![2.0f64];
         let bounds = vec![(0.0_f64, f64::INFINITY); n];
-        let prob = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let opts = SolverOptions::default();
         let result = solve_qp_with(&prob, &opts);

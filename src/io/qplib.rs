@@ -47,6 +47,7 @@
 //! - a^T x <= ub （ubが有限の場合）
 //! - -a^T x <= -lb（lbが有限の場合）
 
+use crate::problem::ConstraintType;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;
@@ -272,17 +273,28 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let mut aug_ub_row: Vec<Option<usize>> = vec![None; m];
     let mut aug_lb_row: Vec<Option<usize>> = vec![None; m];
     let mut b_vec: Vec<f64> = Vec::new();
+    let mut constraint_types: Vec<ConstraintType> = Vec::new();
 
     for k in 0..m {
         let lb = lb_con[k];
         let ub = ub_con[k];
-        if !is_pos_inf(ub) {
+        if !is_pos_inf(ub) && !is_neg_inf(lb) && (lb - ub).abs() < 1e-15 {
+            // 等式制約: 1行Eqとして格納
             aug_ub_row[k] = Some(b_vec.len());
             b_vec.push(ub);
-        }
-        if !is_neg_inf(lb) {
-            aug_lb_row[k] = Some(b_vec.len());
-            b_vec.push(-lb);
+            constraint_types.push(ConstraintType::Eq);
+        } else {
+            // 範囲制約・不等式: 従来通り2Le展開
+            if !is_pos_inf(ub) {
+                aug_ub_row[k] = Some(b_vec.len());
+                b_vec.push(ub);
+                constraint_types.push(ConstraintType::Le);
+            }
+            if !is_neg_inf(lb) {
+                aug_lb_row[k] = Some(b_vec.len());
+                b_vec.push(-lb);
+                constraint_types.push(ConstraintType::Le);
+            }
         }
     }
 
@@ -320,7 +332,7 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
         })
         .collect();
 
-    QpProblem::new(q, c, a_mat, b_vec, bounds)
+    QpProblem::new(q, c, a_mat, b_vec, bounds, constraint_types)
         .map_err(|e| QplibError::ParseError(e.to_string()))
 }
 
@@ -458,8 +470,9 @@ minimize
 ";
         let prob = parse_qplib_str(qplib).unwrap();
         assert_eq!(prob.num_vars, 2);
-        // 等式制約 x1+x2=1 → 2行に展開（ub行 + lb行）
-        assert_eq!(prob.num_constraints, 2);
+        // 等式制約 x1+x2=1 → 1行Eqとして保持（2Le展開しない）
+        assert_eq!(prob.num_constraints, 1);
+        assert_eq!(prob.constraint_types[0], crate::problem::ConstraintType::Eq);
         // Q = I_2（「1/2あり」規約で min 1/2*x^T*I*x）
         assert_eq!(prob.q.nnz(), 2);
     }

@@ -23,8 +23,9 @@
 //! `QpProblem`は`Ax <= b`のみをサポートするため、MPSの各制約タイプを変換:
 //! - Le (Ax <= b): そのまま
 //! - Ge (Ax >= b): 両辺を否定 → -Ax <= -b
-//! - Eq (Ax == b): 2行に展開 → Ax <= b, -Ax <= -b
+//! - Eq (Ax == b): 1行Eqとして保持（ConstraintType::Eq）
 
+use crate::problem::ConstraintType;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;
@@ -646,25 +647,30 @@ impl QpsParser {
             base_rows.push(row);
         }
 
-        // Ax<=b 形式に展開（Ge→否定, Eq→2行）
+        // Ax<=b 形式に展開（G型→符号反転Le, E型→1行Eq保持）
         // 各行に対して (sign, rhs) を生成
         struct AugRow {
             name: String,
-            sign: f64,  // 1.0 = Le, -1.0 = Ge(否定)
+            sign: f64,  // 1.0 = Le/Eq, -1.0 = G(否定)
             rhs: f64,
         }
         let mut aug_rows: Vec<AugRow> = Vec::new();
+        let mut constraint_types: Vec<ConstraintType> = Vec::new();
         for row in base_rows {
             match row.rtype {
                 RowType::L => {
                     aug_rows.push(AugRow { name: row.name, sign: 1.0, rhs: row.rhs });
+                    constraint_types.push(ConstraintType::Le);
                 }
                 RowType::G => {
+                    // G型は符号反転してLeとして格納（現行動作を維持）
                     aug_rows.push(AugRow { name: row.name, sign: -1.0, rhs: -row.rhs });
+                    constraint_types.push(ConstraintType::Le);
                 }
                 RowType::E => {
-                    aug_rows.push(AugRow { name: row.name.clone(), sign: 1.0, rhs: row.rhs });
-                    aug_rows.push(AugRow { name: row.name, sign: -1.0, rhs: -row.rhs });
+                    // 1行のみ。展開しない
+                    aug_rows.push(AugRow { name: row.name, sign: 1.0, rhs: row.rhs });
+                    constraint_types.push(ConstraintType::Eq);
                 }
                 RowType::N => {}
             }
@@ -792,7 +798,7 @@ impl QpsParser {
             })?
         };
 
-        QpProblem::new(q, c, a, b, bounds).map_err(|e| QpsError::ParseError {
+        QpProblem::new(q, c, a, b, bounds, constraint_types).map_err(|e| QpsError::ParseError {
             line: 0,
             message: e.to_string(),
         })
@@ -857,9 +863,10 @@ ENDATA
         assert!(prob.is_zero_q());
     }
 
-    /// 等式制約付きQPS（Eq → 2行に展開）
+    /// 等式制約付きQPS（Eq → 1行Eqとして保持）
     #[test]
     fn test_parse_qps_eq_constraint() {
+        use crate::problem::ConstraintType;
         let qps = r"NAME          EQ_TEST
 ROWS
  N  obj
@@ -876,8 +883,9 @@ ENDATA
 ";
         let prob = parse_qps_str(qps).unwrap();
         assert_eq!(prob.num_vars, 2);
-        // Eq制約 → 2行
-        assert_eq!(prob.num_constraints, 2);
+        // Eq制約 → 1行Eq（2Le展開しない）
+        assert_eq!(prob.num_constraints, 1);
+        assert_eq!(prob.constraint_types[0], ConstraintType::Eq);
     }
 
     /// 小規模QPS問題を実際に解く

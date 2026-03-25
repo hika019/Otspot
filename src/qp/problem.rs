@@ -3,7 +3,7 @@
 //! 二次計画問題 min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub の
 //! 構造体と求解結果を定義する。
 
-use crate::problem::SolveStatus;
+use crate::problem::{ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
 /// [`QpProblem::new`] が返す専用エラー型
@@ -24,7 +24,7 @@ impl std::fmt::Display for QpProblemError {
 
 impl std::error::Error for QpProblemError {}
 
-/// 二次計画問題: min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub
+/// 二次計画問題: min 1/2 x^T Q x + c^T x  s.t. Ax {<=,=} b, lb <= x <= ub
 #[derive(Debug, Clone)]
 pub struct QpProblem {
     /// 目的関数二次項: n×n PSD行列（全要素格納）
@@ -33,7 +33,7 @@ pub struct QpProblem {
     pub c: Vec<f64>,
     /// 制約行列: m×n（CSC形式）
     pub a: CscMatrix,
-    /// 制約右辺: m次元ベクトル（Ax <= b）
+    /// 制約右辺: m次元ベクトル
     pub b: Vec<f64>,
     /// 変数境界 (lb, ub): n個。lb = -INF/ub = +INF は無制限
     pub bounds: Vec<(f64, f64)>,
@@ -41,6 +41,8 @@ pub struct QpProblem {
     pub num_vars: usize,
     /// 制約数
     pub num_constraints: usize,
+    /// 制約種別: m個。Le/Ge/Eq のいずれか
+    pub constraint_types: Vec<ConstraintType>,
 }
 
 impl QpProblem {
@@ -51,6 +53,7 @@ impl QpProblem {
         a: CscMatrix,
         b: Vec<f64>,
         bounds: Vec<(f64, f64)>,
+        constraint_types: Vec<ConstraintType>,
     ) -> Result<Self, QpProblemError> {
         let n = c.len();
         let m = b.len();
@@ -69,7 +72,25 @@ impl QpProblem {
                 format!("bounds length must be {}, got {}", n, bounds.len())
             ));
         }
-        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m })
+        if constraint_types.len() != m {
+            return Err(QpProblemError::DimensionMismatch(
+                format!("constraint_types length must be {}, got {}", m, constraint_types.len())
+            ));
+        }
+        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types })
+    }
+
+    /// 全制約をLe（Ax <= b）として構築するヘルパー。
+    /// 既存テスト・手動QpProblem構築コード向け。
+    pub fn new_all_le(
+        q: CscMatrix,
+        c: Vec<f64>,
+        a: CscMatrix,
+        b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+    ) -> Result<Self, QpProblemError> {
+        let m = b.len();
+        Self::new(q, c, a, b, bounds, vec![ConstraintType::Le; m])
     }
 
     /// Q が全ゼロかどうかを検査する（LP退化ケース判定）

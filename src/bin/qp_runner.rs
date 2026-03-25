@@ -170,7 +170,7 @@ fn main() {
     };
 
     // Build and solve
-    let problem = match QpProblem::new(q, c, a, b, bounds) {
+    let problem = match QpProblem::new_all_le(q, c, a, b, bounds) {
         Ok(p) => p,
         Err(_) => { println!("Error 0.0 0"); return; }
     };

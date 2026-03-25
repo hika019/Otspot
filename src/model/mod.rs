@@ -346,7 +346,9 @@ impl Model {
                 .map_err(|e| ModelError::Internal(e.to_string()))?
         };
 
-        let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds)
+        // model APIではEq→2Le展開済みのため全行Le
+        let qp_constraint_types = vec![ConstraintType::Le; m_qp];
+        let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
             .map_err(|e| ModelError::Internal(e.to_string()))?;
 
         let mut opts = crate::options::SolverOptions::default();

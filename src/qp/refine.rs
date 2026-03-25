@@ -243,7 +243,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // 初期解 x=[0.3, 0.3]: pfeas = 0.4 > eps
         let mut x = vec![0.3, 0.3];
@@ -272,7 +272,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
         let b = vec![-0.5];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // 初期解 x=0.0: pfeas = (-1*0.0) - (-0.5) = 0.5 > eps
         let mut x = vec![0.0];
@@ -304,7 +304,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, n).unwrap();
         let b = vec![-0.5];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-        let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // 初期解 x[0]=0.0: pfeas = (-1*0.0) - (-0.5) = 0.5 > eps
         let mut x = vec![0.0; n];

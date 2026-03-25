@@ -513,11 +513,15 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     // #2: singleton_rows() — 1変数のみの等式制約 A[i,j]*x[j]=b[i] を除去
     // ==================================================================
-    // QP では等式制約の表現は 2 不等式ペア（A[i]*x <= b[i], -A[i]*x <= -b[i]）。
     // Singleton row はここでは Le 制約の 1 変数ケースに限定して処理する。
+    // Eq 制約（ConstraintType::Eq）はスキップ: IPM の to_all_le() で展開される。
     // (b[i]/A[i,j] が bounds に収まる場合のみ適用)
     for i in 0..m {
         if removed_rows[i] {
+            continue;
+        }
+        // Eq 制約はスキップ（to_all_le経由でIPMが処理する）
+        if prob.constraint_types[i] == crate::problem::ConstraintType::Eq {
             continue;
         }
         let active: Vec<(usize, f64)> = row_entries[i]
@@ -1137,7 +1141,15 @@ pub fn run_qp_presolve_phase1(
 
     let q_linear_adjust = c.clone(); // 更新後 c（postsolve では使用しない）
 
-    let mut reduced = match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new) {
+    // constraint_types を row_map でフィルタリング
+    let mut constraint_types_new = vec![crate::problem::ConstraintType::Le; m_new];
+    for (i, &maybe_ii) in row_map.iter().enumerate().take(m) {
+        if let Some(ii) = maybe_ii {
+            constraint_types_new[ii] = prob.constraint_types[i];
+        }
+    }
+
+    let mut reduced = match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new, constraint_types_new) {
         Ok(p) => p,
         Err(_) => return QpPresolveResult::no_reduction(prob),
     };
@@ -1165,7 +1177,7 @@ pub fn run_qp_presolve_phase1(
         // 実際に変化があった場合のみ reduced を更新
         let any_scaled = scales.iter().any(|&s| (s - 1.0).abs() > 1e-12);
         if any_scaled {
-            reduced = match QpProblem::new(reduced.q.clone(), reduced.c.clone(), a_mut, b_mut, reduced.bounds.clone()) {
+            reduced = match QpProblem::new(reduced.q.clone(), reduced.c.clone(), a_mut, b_mut, reduced.bounds.clone(), reduced.constraint_types.clone()) {
                 Ok(p) => p,
                 Err(_) => reduced,
             };
@@ -1197,7 +1209,7 @@ pub fn run_qp_presolve_phase1(
         let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
             &reduced.q, &reduced.a, &reduced.c, &reduced.b, &reduced.bounds
         );
-        match QpProblem::new(q_s, c_s, a_s, b_s, bounds_s) {
+        match QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, reduced.constraint_types.clone()) {
             Ok(p) => { reduced = p; Some(scaler) }
             Err(_) => None,
         }
@@ -1255,7 +1267,7 @@ mod tests {
         } else {
             CscMatrix::from_triplets(a_rows, a_cols, a_vals, m, n).unwrap()
         };
-        QpProblem::new(q, c, a, b, bounds).unwrap()
+        QpProblem::new_all_le(q, c, a, b, bounds).unwrap()
     }
 
     /// #1: 固定変数の縮約確認

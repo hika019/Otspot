@@ -48,7 +48,7 @@ fn test_hs21() {
     let b = vec![-2.0];
     // bounds: 2 <= x1 <= 10,  -10 <= x2 <= 10
     let bounds = vec![(2.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "HS21: status should be Optimal");
@@ -91,7 +91,7 @@ fn test_hs35() {
         CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 2.0], 1, n).unwrap();
     let b = vec![3.0];
     let bounds = vec![(0.0_f64, f64::INFINITY); n];
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "HS35: status should be Optimal");
@@ -168,7 +168,7 @@ fn test_hs51() {
     .unwrap();
     let b = vec![4.0, -4.0, 0.0, 0.0, 0.0, 0.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     // Phase I LP は全自由変数（-INF/INF）で未界を誤検知する場合がある。
     // 既知の実行可能点 x*=[1,...,1] を warm-start として Phase I をバイパスする。
@@ -217,7 +217,7 @@ fn test_cvxqp1_s() {
     let a = CscMatrix::from_triplets(&a_rows, &a_cols, &vec![1.0_f64; n], 1, n).unwrap();
     let b = vec![5.0];
     let bounds = vec![(0.0_f64, f64::INFINITY); n];
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "CVXQP1_S: status should be Optimal");
@@ -275,7 +275,7 @@ fn test_qpcstair_like() {
     .unwrap();
     let b = vec![2.0, 2.0, 2.0];
     let bounds = vec![(0.0_f64, f64::INFINITY); n];
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "QPCSTAIR: status should be Optimal");
