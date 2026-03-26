@@ -338,10 +338,17 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 objective: obj,
                 solution: x,
                 dual_solution: dual,
+                reduced_costs: result.reduced_costs.clone(),
+                slack: result.slack.clone(),
+                warm_start_basis: result.warm_start_basis.clone(),
                 bound_duals: vec![],
                 active_set: active,
-                iterations: 0,
-                ..Default::default()
+                iterations: result.iterations,
+                solver_used: None,
+                final_residuals: None,
+                pfeas: None,
+                dfeas: None,
+                gap: None,
             }
         }
         SolveStatus::Infeasible => SolverResult::infeasible(),
@@ -350,10 +357,17 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             objective: f64::NEG_INFINITY,
             solution: vec![],
             dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
-            ..Default::default()
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
         },
         SolveStatus::MaxIterations => {
             // DEAD PATH: SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能。
@@ -369,24 +383,51 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             objective: f64::INFINITY,
             solution: vec![],
             dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
-            ..Default::default()
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
         },
         SolveStatus::NumericalError => SolverResult {
             status: SolveStatus::NumericalError,
             objective: f64::INFINITY,
             solution: vec![],
             dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
             bound_duals: vec![],
             active_set: vec![],
             iterations: 0,
-            ..Default::default()
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
         },
         SolveStatus::NonConvex(_) => SolverResult {
             status: result.status,
-            ..Default::default()
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            bound_duals: vec![],
+            active_set: vec![],
+            iterations: 0,
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
         },
     }
 }
@@ -1952,6 +1993,27 @@ mod tests {
             SolveStatus::Timeout,
             "A3-C01/C03: cancel_flag 事前設定で concurrent solver は Timeout を返すこと"
         );
+    }
+
+    /// Q=0のQP（実質LP）をsolve_qp_withで解き、reduced_costsが非空であることを確認
+    #[test]
+    fn test_solve_as_lp_preserves_reduced_costs() {
+        // min x + 2y  s.t. x + y >= 1, x >= 0, y >= 0
+        // → LP: 最適 x=1, y=0, obj=1
+        let n = 2usize;
+        let q = CscMatrix::new(n, n); // ゼロ行列 → LP経路
+        let c = vec![1.0, 2.0];
+        // x + y >= 1  →  -x - y <= -1
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, n).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(0.0_f64, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(!result.reduced_costs.is_empty(),
+            "LP path must preserve reduced_costs from Simplex");
     }
 
 }

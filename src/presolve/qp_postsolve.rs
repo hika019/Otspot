@@ -81,7 +81,12 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         iterations: reduced_sol.iterations,
         solver_used: reduced_sol.solver_used,
         final_residuals: reduced_sol.final_residuals,
-        ..Default::default()
+        pfeas: reduced_sol.pfeas,
+        dfeas: reduced_sol.dfeas,
+        gap: reduced_sol.gap,
+        reduced_costs: reduced_sol.reduced_costs.clone(),
+        slack: reduced_sol.slack.clone(),
+        warm_start_basis: reduced_sol.warm_start_basis.clone(),
     }
 }
 
@@ -185,5 +190,43 @@ mod tests {
         // 最適値付近では dual ≈ 1.0
         assert!((result.dual_solution[0] - 1.0).abs() < 1e-4,
             "dual ≈ 1.0, got {}", result.dual_solution[0]);
+    }
+
+    /// postsolve後にpfeas/dfeas/gapがfinal_residualsと整合して伝搬されることを確認
+    #[test]
+    fn test_postsolve_preserves_residuals() {
+        // min 1/2*(x^2 + y^2) - 2x - 2y  s.t. x + y <= 2, x >= 0, y >= 0
+        // presolve → IPM solve → postsolve のフルパイプラインで
+        // pfeas/dfeas/gap が None でないこと + final_residuals との値一致を検証
+        let n = 2usize;
+        let m = 1usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
+        let c = vec![-2.0f64, -2.0f64];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], m, n).unwrap();
+        let b = vec![2.0f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY); n];
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions::default();
+
+        // presolve
+        let presolve_result = run_qp_presolve_phase1(&prob, &opts);
+
+        // 縮約後問題を解く
+        let reduced_sol = solve_qp_with(&presolve_result.reduced, &opts);
+        assert_eq!(reduced_sol.status, SolveStatus::Optimal);
+
+        // postsolve
+        let final_sol = postsolve_qp(&presolve_result, &reduced_sol);
+
+        // final_residuals が Some なら pfeas/dfeas/gap も Some で値一致
+        if let Some((pf, df, g)) = final_sol.final_residuals {
+            assert!(final_sol.pfeas.is_some(), "pfeas must be preserved after postsolve");
+            assert!(final_sol.dfeas.is_some(), "dfeas must be preserved after postsolve");
+            assert!(final_sol.gap.is_some(), "gap must be preserved after postsolve");
+            assert_eq!(final_sol.pfeas.unwrap(), pf, "pfeas must match final_residuals");
+            assert_eq!(final_sol.dfeas.unwrap(), df, "dfeas must match final_residuals");
+            assert_eq!(final_sol.gap.unwrap(), g, "gap must match final_residuals");
+        }
     }
 }
