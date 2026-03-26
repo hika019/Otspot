@@ -802,6 +802,16 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         &presolve_result.reduced.bounds,
                     );
                     if scaler.c.abs() > 1e-300 { reduced_sol.objective /= scaler.c; }
+                    // reduced_costs を逆変換: rc_orig[j] = rc_scaled[j] / (d[j] * c)
+                    // LP経路(Q=0)でのみ reduced_costs が非空になる
+                    if scaler.c.abs() > 1e-300 && !reduced_sol.reduced_costs.is_empty() {
+                        for (j, rc) in reduced_sol.reduced_costs.iter_mut().enumerate() {
+                            let d_j = scaler.d.get(j).copied().unwrap_or(1.0);
+                            if d_j.abs() > 1e-300 {
+                                *rc /= d_j * scaler.c;
+                            }
+                        }
+                    }
                 }
                 // Eq/Ge dual逆変換: IPM内部の to_all_le() 展開で増えたdualを元制約空間に折り畳む。
                 // postsolve_qp の row_map は 1:1 マッピング前提のため、展開前に折り畳む必要がある。
@@ -1995,11 +2005,20 @@ mod tests {
         );
     }
 
-    /// Q=0のQP（実質LP）をsolve_qp_withで解き、reduced_costsが非空であることを確認
+    /// Q=0のQP（実質LP）をsolve_qp_withで解き、reduced_costsが非空かつ理論値に一致することを確認
     #[test]
     fn test_solve_as_lp_preserves_reduced_costs() {
         // min x + 2y  s.t. x + y >= 1, x >= 0, y >= 0
         // → LP: 最適 x=1, y=0, obj=1
+        //
+        // reduced_costs 理論値（手計算）:
+        //   制約行列 A = [-1, -1]（1×2）, b = [-1]
+        //   最適基底: {x}（x=1が基底変数, y=0が非基底）
+        //   B = A[:,{x}] = [-1], B^{-1} = -1
+        //   双対変数: λ = c_B * B^{-1} = 1.0 * (-1) = -1.0
+        //   rc_x = c_x - λ * A[0,x] = 1.0 - (-1.0)(-1.0) = 1.0 - 1.0 = 0.0  (基底変数)
+        //   rc_y = c_y - λ * A[0,y] = 2.0 - (-1.0)(-1.0) = 2.0 - 1.0 = 1.0  (非基底変数)
+        //   → reduced_costs = [0.0, 1.0]
         let n = 2usize;
         let q = CscMatrix::new(n, n); // ゼロ行列 → LP経路
         let c = vec![1.0, 2.0];
@@ -2012,8 +2031,19 @@ mod tests {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!(!result.reduced_costs.is_empty(),
+        assert_eq!(result.reduced_costs.len(), n,
             "LP path must preserve reduced_costs from Simplex");
+
+        // 値一致アサーション（許容誤差 1e-8）
+        let expected = [0.0_f64, 1.0_f64];
+        let tol = 1e-8_f64;
+        for (j, (&got, &exp)) in result.reduced_costs.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < tol,
+                "reduced_costs[{}]: expected {}, got {} (diff={})",
+                j, exp, got, (got - exp).abs()
+            );
+        }
     }
 
 }
