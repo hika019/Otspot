@@ -353,9 +353,6 @@ fn main() {
         _ => "Unknown",
     };
     println!("Solver: {}", solver_label);
-    if !known_optimal.is_empty() {
-        println!("Known optimal values loaded: {} problems", known_optimal.len());
-    }
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
