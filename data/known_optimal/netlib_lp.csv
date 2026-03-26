@@ -23,7 +23,7 @@ d6cube,3.1549166667e+02,Netlib/HagerUFL/Gurobi10
 degen2,-1.4351780000e+03,Netlib/HagerUFL/Gurobi10
 degen3,-9.8729400000e+02,Netlib/HagerUFL/Gurobi10
 dfl001,1.1266396047e+07,HagerUFL/Gurobi10
-e226,-1.8751929066e+01,Netlib
+e226,-2.5864929066e+01,Netlib+obj_offset(-7.113)
 etamacro,-7.5571523337e+02,HagerUFL/Gurobi10
 fffff800,5.5567956482e+05,HagerUFL/Gurobi10
 finnis,1.7279106560e+05,HagerUFL/Gurobi10
