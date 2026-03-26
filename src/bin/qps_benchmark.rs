@@ -305,6 +305,10 @@ fn main() {
             load_known_optimal(fallback)
         }
     };
+    eprintln!("Known optimal values loaded: {} problems", known_optimal.len());
+    if known_optimal.is_empty() {
+        eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
+    }
 
     // QPSファイル一覧を取得（ファイル名でソート）
     let mut qps_files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
