@@ -6,13 +6,14 @@
 //!
 //! 各問題に10秒のタイムアウトを設ける（solver内部の協調的タイムアウト機構を使用）。
 
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SolverOptions};
-use solver::problem::SolveStatus;
+use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
 
@@ -21,26 +22,30 @@ enum BenchError {
     ParseTimeout,
 }
 
-/// PASS時の解品質指標を計算する
+/// §2.1: pfeas両側チェック + bfeas（設計書準拠）
 ///
-/// # 戻り値
-/// `(pfeas, bfeas)`: プライマル実行可能性違反・境界違反の最大値
+/// Eq制約: |Ax_i - b_i|（両方向）
+/// Ge制約: max(0, b_i - Ax_i)（下方向）
+/// Le制約: max(0, Ax_i - b_i)（上方向、デフォルト）
 fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     if solution.is_empty() || solution.len() != prob.num_vars {
         return (f64::NAN, f64::NAN);
     }
 
-    // pfeas: Ax <= b の最大違反量
     let pfeas = match prob.a.mat_vec_mul(solution) {
         Ok(ax) => ax
             .iter()
             .zip(prob.b.iter())
-            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+            .enumerate()
+            .map(|(i, (&ax_i, &b_i))| match prob.constraint_types.get(i) {
+                Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            })
             .fold(0.0_f64, f64::max),
         Err(_) => f64::NAN,
     };
 
-    // bfeas: lb <= x <= ub の最大違反量
     let bfeas = solution
         .iter()
         .zip(prob.bounds.iter())
@@ -52,6 +57,76 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
         .fold(0.0_f64, f64::max);
 
     (pfeas, bfeas)
+}
+
+/// §2.2: dfeasチェック（solver内部値を使用）
+///
+/// result.dfeas が Some(v) ならそのまま返す。None → NAN（スキップ扱い）。
+/// transpose_mat_vec_mul が未実装のため外部再計算はスキップ。
+fn get_dfeas(result: &solver::problem::SolverResult) -> f64 {
+    result.dfeas.unwrap_or(f64::NAN)
+}
+
+/// §2.3: 相補性チェック（LP限定。QPスキップ）
+///
+/// max_i |x_i * s_i| （s_i = reduced_costs_i）
+fn compute_complementarity(solution: &[f64], reduced_costs: &[f64]) -> f64 {
+    if solution.is_empty() || reduced_costs.is_empty() {
+        return f64::NAN;
+    }
+    let n = solution.len().min(reduced_costs.len());
+    (0..n)
+        .map(|i| (solution[i] * reduced_costs[i]).abs())
+        .fold(0.0_f64, f64::max)
+}
+
+/// §2.4: 正解値照合
+enum ObjCheckResult {
+    Ok { rel_err: f64 },
+    Mismatch { rel_err: f64 },
+    NoRef,
+}
+
+fn check_known_optimal(
+    solver_obj: f64,
+    known: &HashMap<String, f64>,
+    problem_name: &str,
+    eps_obj: f64,
+) -> ObjCheckResult {
+    match known.get(problem_name) {
+        Some(&known_obj) => {
+            let denom = 1.0_f64.max(known_obj.abs());
+            let rel_err = (solver_obj - known_obj).abs() / denom;
+            if rel_err > eps_obj {
+                ObjCheckResult::Mismatch { rel_err }
+            } else {
+                ObjCheckResult::Ok { rel_err }
+            }
+        }
+        None => ObjCheckResult::NoRef,
+    }
+}
+
+/// 正解値CSVを読み込む
+fn load_known_optimal(csv_path: &Path) -> HashMap<String, f64> {
+    let mut map = HashMap::new();
+    let content = match std::fs::read_to_string(csv_path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("problem_name") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 2 {
+            if let Ok(val) = parts[1].trim().parse::<f64>() {
+                map.insert(parts[0].trim().to_string(), val);
+            }
+        }
+    }
+    map
 }
 
 fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, BenchError> {
@@ -120,6 +195,29 @@ fn main() {
         std::process::exit(1);
     }
 
+    // §2.4: 正解値CSV読み込み
+    // バイナリの実行パスからdata/known_optimal/netlib_lp.csvを探す
+    let known_optimal = {
+        let mut csv_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+            .unwrap_or_default();
+        // target/release から solver ルートに遡る
+        csv_path = csv_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let csv = csv_path.join("data/known_optimal/netlib_lp.csv");
+        if csv.exists() {
+            load_known_optimal(&csv)
+        } else {
+            // フォールバック: カレントディレクトリ基準
+            let fallback = Path::new("data/known_optimal/netlib_lp.csv");
+            load_known_optimal(fallback)
+        }
+    };
+
     // QPSファイル一覧を取得（ファイル名でソート）
     let mut qps_files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .expect("Failed to read directory")
@@ -137,13 +235,18 @@ fn main() {
     println!("Maros-Meszaros QP Benchmark ({} files)", qps_files.len());
     println!();
     println!(
-        "{:<20} {:>6} {:>6} {:>12} {:>10} Error",
+        "{:<20} {:>6} {:>6} {:>15} {:>10} Details",
         "Problem", "n", "m", "Status", "Time(s)"
     );
-    println!("{}", "-".repeat(75));
+    println!("{}", "-".repeat(80));
 
-    // 集計
+    // 集計 — §2.5の7カテゴリ + 既存カテゴリ
     let mut n_pass = 0usize;
+    let mut n_pass_noref = 0usize;
+    let mut n_pfeas_fail = 0usize;
+    let mut n_dfeas_fail = 0usize;
+    let mut n_suboptimal_comp = 0usize;
+    let mut n_obj_mismatch = 0usize;
     let mut n_fail = 0usize;
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
@@ -158,11 +261,17 @@ fn main() {
         _ => "Unknown",
     };
     println!("Solver: {}", solver_label);
+    if !known_optimal.is_empty() {
+        println!("Known optimal values loaded: {} problems", known_optimal.len());
+    }
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
     opts.qp_solver = solver_choice;
     opts.ipm.eps = eps;
+
+    // QP問題かどうかの判定用定数
+    let eps_obj: f64 = 1e-2; // §2.4: 1%閾値
 
     for path in &qps_files {
         let name = path
@@ -180,7 +289,7 @@ fn main() {
             Err(BenchError::Parse(e)) => {
                 let note = format!("{}", e);
                 println!(
-                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
+                    "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
                 );
                 n_error += 1;
@@ -188,7 +297,7 @@ fn main() {
             }
             Err(BenchError::ParseTimeout) => {
                 println!(
-                    "{:<20} {:>6} {:>6} {:>12} {:>10.3} ",
+                    "{:<20} {:>6} {:>6} {:>15} {:>10.3} ",
                     name, "?", "?", "PARSE_TIMEOUT", 0.0
                 );
                 n_timeout += 1;
@@ -196,17 +305,25 @@ fn main() {
             }
         };
 
-        println!("PARSE_DONE: {} ({:.2}s)", name, parse_start.elapsed().as_secs_f64());
+        println!(
+            "PARSE_DONE: {} ({:.2}s)",
+            name,
+            parse_start.elapsed().as_secs_f64()
+        );
 
         let n = prob.num_vars;
         let m = prob.num_constraints;
         let nnz_before = prob.q.nnz() + prob.a.nnz();
+        let is_qp = prob.q.nnz() > 0;
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
         let result = solve_qp_with(&prob, &opts);
         let elapsed_s = start.elapsed().as_secs_f64();
-        println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
+        println!(
+            "SOLVE_DONE: {} {:?} ({:.3}s)",
+            name, result.status, elapsed_s
+        );
 
         let method_label = match result.solver_used {
             Some(QpSolverChoice::Ipm) => "ipm",
@@ -219,36 +336,150 @@ fn main() {
             Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
             None => String::new(),
         };
+
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
+                // §2.5 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
+
+                // Step 3: pfeas（両側チェック）
                 let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
-                // 混合許容誤差チェック: ソルバー内部と同じ基準 eps_abs + eps_rel * norm_b (Gurobi方式)
-                // pfeas: ||Ax - b||_inf < eps * (1 + norm_b) — 大規模問題(例: BOYD2 norm_b≈2.4e6)でPASS可能
-                // bfeas: 境界制約違反は絶対値基準 (eps) のまま維持
-                let norm_b = prob.b.iter().map(|&x| x.abs()).fold(0.0_f64, f64::max).max(1.0);
+                let norm_b = prob
+                    .b
+                    .iter()
+                    .map(|&x| x.abs())
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0);
                 let pfeas_tol = eps * (1.0 + norm_b);
+
+                // Step 4: pfeasチェック
                 if pfeas > pfeas_tol || bfeas > eps {
-                    n_fail += 1;
+                    n_pfeas_fail += 1;
                     (
-                        "FAIL:AbsTol".to_string(),
+                        "PFEAS_FAIL".to_string(),
                         format!(
-                            "[{}] pfeas={:.1e} bfeas={:.1e} (pfeas_tol={:.1e} eps={:.0e})",
-                            method_label, pfeas, bfeas, pfeas_tol, eps
+                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} (pfeas_tol={:.1e})",
+                            method_label, result.objective, pfeas, bfeas, pfeas_tol
                         ),
                     )
                 } else {
-                    n_pass += 1;
-                    let inner_str = match result.final_residuals {
-                        Some((pf, df, g)) => format!(" pf={:.1e} df={:.1e} gap={:.1e}", pf, df, g),
-                        None => String::new(),
-                    };
-                    (
-                        "PASS".to_string(),
-                        format!(
-                            "[{}] obj={:.2e} pfeas={:.1e} bfeas={:.1e}{}",
-                            method_label, result.objective, pfeas, bfeas, inner_str
-                        ),
-                    )
+                    // Step 5: dfeasチェック
+                    let dfeas = get_dfeas(&result);
+                    let norm_c = prob
+                        .c
+                        .iter()
+                        .map(|&x| x.abs())
+                        .fold(0.0_f64, f64::max)
+                        .max(1.0);
+                    let dfeas_tol = eps * (1.0 + norm_c);
+
+                    if !dfeas.is_nan() && dfeas > dfeas_tol {
+                        n_dfeas_fail += 1;
+                        (
+                            "DFEAS_FAIL".to_string(),
+                            format!(
+                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} (dfeas_tol={:.1e})",
+                                method_label, result.objective, pfeas, dfeas, dfeas_tol
+                            ),
+                        )
+                    } else {
+                        // Step 7-8: 相補性チェック（LP限定、QPスキップ）
+                        let comp = if !is_qp {
+                            compute_complementarity(&result.solution, &result.reduced_costs)
+                        } else {
+                            f64::NAN // QPでは相補性スキップ
+                        };
+                        let norm_x = result
+                            .solution
+                            .iter()
+                            .map(|&x| x.abs())
+                            .fold(0.0_f64, f64::max)
+                            .max(1.0);
+                        let comp_tol = eps * (1.0 + norm_c * norm_x);
+
+                        if !comp.is_nan() && comp > comp_tol {
+                            n_suboptimal_comp += 1;
+                            (
+                                "SUBOPTIMAL".to_string(),
+                                format!(
+                                    "[{}] obj={:.2e} pf={:.1e} comp={:.1e} (comp_tol={:.1e})",
+                                    method_label, result.objective, pfeas, comp, comp_tol
+                                ),
+                            )
+                        } else {
+                            // Step 9: 正解値照合
+                            match check_known_optimal(
+                                result.objective,
+                                &known_optimal,
+                                &name,
+                                eps_obj,
+                            ) {
+                                ObjCheckResult::Mismatch { rel_err } => {
+                                    n_obj_mismatch += 1;
+                                    (
+                                        "OBJ_MISMATCH".to_string(),
+                                        format!(
+                                            "[{}] obj={:.2e} known={:.2e} err={:.1}%",
+                                            method_label,
+                                            result.objective,
+                                            known_optimal.get(&name).unwrap(),
+                                            rel_err * 100.0
+                                        ),
+                                    )
+                                }
+                                ObjCheckResult::Ok { rel_err } => {
+                                    n_pass += 1;
+                                    let df_str = if dfeas.is_nan() {
+                                        "df=NA".to_string()
+                                    } else {
+                                        format!("df={:.1e}", dfeas)
+                                    };
+                                    let comp_str = if comp.is_nan() {
+                                        "comp=NA".to_string()
+                                    } else {
+                                        format!("comp={:.1e}", comp)
+                                    };
+                                    (
+                                        "PASS".to_string(),
+                                        format!(
+                                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
+                                            method_label,
+                                            result.objective,
+                                            pfeas,
+                                            bfeas,
+                                            df_str,
+                                            comp_str,
+                                            rel_err * 100.0
+                                        ),
+                                    )
+                                }
+                                ObjCheckResult::NoRef => {
+                                    n_pass_noref += 1;
+                                    let df_str = if dfeas.is_nan() {
+                                        "df=NA".to_string()
+                                    } else {
+                                        format!("df={:.1e}", dfeas)
+                                    };
+                                    let comp_str = if comp.is_nan() {
+                                        "comp=NA".to_string()
+                                    } else {
+                                        format!("comp={:.1e}", comp)
+                                    };
+                                    (
+                                        "PASS[no_ref]".to_string(),
+                                        format!(
+                                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} {} {}",
+                                            method_label,
+                                            result.objective,
+                                            pfeas,
+                                            bfeas,
+                                            df_str,
+                                            comp_str
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
             SolveStatus::Infeasible => {
@@ -263,27 +494,45 @@ fn main() {
                 n_max_iter += 1;
                 (
                     "MAXITER".to_string(),
-                    format!("[{}] iters={} {}", method_label, result.iterations, resid_str),
+                    format!(
+                        "[{}] iters={} {}",
+                        method_label, result.iterations, resid_str
+                    ),
                 )
             }
             SolveStatus::SuboptimalSolution => {
                 n_suboptimal += 1;
                 (
                     "SUBOPTIMAL".to_string(),
-                    format!("[{}] iters={} {}", method_label, result.iterations, resid_str),
+                    format!(
+                        "[{}] iters={} {}",
+                        method_label, result.iterations, resid_str
+                    ),
                 )
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;
-                ("TIMEOUT".to_string(), format!("[{}] {:.3}s iters={}", method_label, elapsed_s, result.iterations))
+                (
+                    "TIMEOUT".to_string(),
+                    format!(
+                        "[{}] {:.3}s iters={}",
+                        method_label, elapsed_s, result.iterations
+                    ),
+                )
             }
             SolveStatus::NumericalError => {
                 n_fail += 1;
-                ("FAIL:NumericalError".to_string(), format!("[{}]", method_label))
+                (
+                    "FAIL:NumericalError".to_string(),
+                    format!("[{}]", method_label),
+                )
             }
             SolveStatus::NonConvex(_) => {
                 n_nonconvex += 1;
-                ("NONCONVEX".to_string(), format!("[{}] Q not PSD", method_label))
+                (
+                    "NONCONVEX".to_string(),
+                    format!("[{}] Q not PSD", method_label),
+                )
             }
             _ => {
                 n_fail += 1;
@@ -291,7 +540,7 @@ fn main() {
             }
         };
         println!(
-            "{:<20} {:>6} {:>6} {:>12} {:>10.3} {}",
+            "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note
         );
         // 追加情報行: solver詳細 + 問題サイズ
@@ -301,15 +550,33 @@ fn main() {
         );
     }
 
-    println!("{}", "-".repeat(75));
+    println!("{}", "-".repeat(80));
     println!();
     println!("=== Summary ===");
-    println!("  PASS:      {}", n_pass);
-    println!("  FAIL:      {}", n_fail);
-    println!("  MAXITER:   {}", n_max_iter);
-    println!("  SUBOPTIMAL: {}", n_suboptimal);
-    println!("  TIMEOUT:   {}", n_timeout);
-    println!("  NONCONVEX: {}", n_nonconvex);
-    println!("  ERROR:     {}", n_error);
-    println!("  TOTAL:     {}", n_pass + n_fail + n_max_iter + n_suboptimal + n_timeout + n_nonconvex + n_error);
+    println!("  PASS:           {}", n_pass);
+    println!("  PASS[no_ref]:   {}", n_pass_noref);
+    println!("  PFEAS_FAIL:     {}", n_pfeas_fail);
+    println!("  DFEAS_FAIL:     {}", n_dfeas_fail);
+    println!("  SUBOPTIMAL:     {}", n_suboptimal + n_suboptimal_comp);
+    println!("  OBJ_MISMATCH:   {}", n_obj_mismatch);
+    println!("  MAXITER:        {}", n_max_iter);
+    println!("  TIMEOUT:        {}", n_timeout);
+    println!("  NONCONVEX:      {}", n_nonconvex);
+    println!("  FAIL:           {}", n_fail);
+    println!("  ERROR:          {}", n_error);
+    println!(
+        "  TOTAL:          {}",
+        n_pass
+            + n_pass_noref
+            + n_pfeas_fail
+            + n_dfeas_fail
+            + n_suboptimal_comp
+            + n_obj_mismatch
+            + n_fail
+            + n_max_iter
+            + n_suboptimal
+            + n_timeout
+            + n_nonconvex
+            + n_error
+    );
 }
