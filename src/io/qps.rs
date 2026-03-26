@@ -966,4 +966,92 @@ ENDATA
         // 要素数: 4 (対角2 + 非対角2)
         assert_eq!(prob.q.values.len(), 4);
     }
+
+    /// N-row RHS値がobj_offsetとして格納される
+    #[test]
+    fn test_parse_qps_obj_offset() {
+        let qps = r"NAME          OBJ_OFFSET_TEST
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1    obj    1.0    c1    1.0
+RHS
+    rhs   obj    -7.5
+    rhs   c1    10.0
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        assert!(
+            (prob.obj_offset - (-7.5)).abs() < 1e-10,
+            "expected obj_offset=-7.5, got {}",
+            prob.obj_offset
+        );
+    }
+
+    /// e226.QPS実ファイルでobj_offset=-7.113が取得される
+    #[test]
+    fn test_e226_obj_offset() {
+        let path = std::path::Path::new(
+            "/Users/hika019/Develop/solver/data/lp_problems/e226.QPS",
+        );
+        if !path.exists() {
+            eprintln!("e226.QPS not found, skip");
+            return;
+        }
+        let prob = parse_qps(path).unwrap();
+        assert!(
+            (prob.obj_offset - (-7.113)).abs() < 1e-3,
+            "expected obj_offset≈-7.113, got {}",
+            prob.obj_offset
+        );
+    }
+
+    /// N-row RHS値がNaN/Infの場合にQpsErrorが返される
+    #[test]
+    fn test_obj_offset_nan_inf_guard() {
+        // Rust の f64 パーサーは "inf" を f64::INFINITY としてパースする。
+        // build_qp_problem 内の guard が InvalidObjectiveOffset を返すことを確認。
+        let qps = "NAME          INF_TEST\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1    obj    1.0    c1    1.0\nRHS\n    rhs   obj    inf\n    rhs   c1    10.0\nENDATA\n";
+        let result = parse_qps_str(qps);
+        assert!(
+            matches!(result, Err(QpsError::InvalidObjectiveOffset(_))),
+            "expected InvalidObjectiveOffset error, got {:?}",
+            result.err()
+        );
+    }
+
+    /// obj_offsetがSolverResult.objectiveに反映される（統合テスト）
+    #[test]
+    fn test_solve_with_obj_offset() {
+        // min x1 + x2 s.t. x1 + x2 >= 3, x1,x2 >= 0, N-row RHS = -7.0
+        // 最適解: x1+x2=3 → 生objective=3、obj_offset=-7.0 → 最終objective=-4.0
+        let qps = r"NAME          OFFSET_INTEG
+ROWS
+ N  obj
+ G  sum1
+COLUMNS
+    x1    obj    1.0    sum1    1.0
+    x2    obj    1.0    sum1    1.0
+RHS
+    rhs   obj    -7.0
+    rhs   sum1    3.0
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        assert!((prob.obj_offset - (-7.0)).abs() < 1e-10);
+        let result = solve_qp(&prob);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "expected Optimal, got {:?}",
+            result.status
+        );
+        // 最終objective = 3 + (-7.0) = -4.0
+        assert!(
+            (result.objective - (-4.0)).abs() < 1e-3,
+            "expected objective≈-4.0, got {}",
+            result.objective
+        );
+    }
 }

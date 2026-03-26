@@ -143,6 +143,94 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solver::problem::ConstraintType;
+    use solver::sparse::CscMatrix;
+
+    /// Eq制約の下方向違反がpfeasに反映される
+    #[test]
+    fn test_pfeas_eq_constraint_violation() {
+        // Ax = b: A=[[1.0]], b=[5.0]
+        // x=[3.0] → |1*3 - 5| = 2.0 (下方向違反)
+        // x=[7.0] → |1*7 - 5| = 2.0 (上方向違反)
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![5.0];
+        let bounds = vec![(0.0, f64::INFINITY)];
+        let mut prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            b,
+            bounds,
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        prob.obj_offset = 0.0;
+
+        // 下方向違反: x=3 < b=5
+        let (pfeas_down, _) = compute_primal_quality(&prob, &[3.0]);
+        assert!(
+            (pfeas_down - 2.0).abs() < 1e-10,
+            "Eq下方向違反: expected pfeas=2.0, got {}",
+            pfeas_down
+        );
+
+        // 上方向違反: x=7 > b=5
+        let (pfeas_up, _) = compute_primal_quality(&prob, &[7.0]);
+        assert!(
+            (pfeas_up - 2.0).abs() < 1e-10,
+            "Eq上方向違反: expected pfeas=2.0, got {}",
+            pfeas_up
+        );
+
+        // 境界: x=5 → 違反なし
+        let (pfeas_ok, _) = compute_primal_quality(&prob, &[5.0]);
+        assert!(
+            pfeas_ok < 1e-10,
+            "Eq充足: expected pfeas≈0.0, got {}",
+            pfeas_ok
+        );
+    }
+
+    /// Ge制約の違反計算が正しい
+    #[test]
+    fn test_pfeas_ge_constraint() {
+        // Ge制約: Ax >= b → A=[[1.0]], b=[5.0]
+        // x=[3.0] → max(0, 5-3) = 2.0 (違反)
+        // x=[7.0] → max(0, 5-7) = 0.0 (充足)
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![5.0];
+        let bounds = vec![(0.0, f64::INFINITY)];
+        let prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            b,
+            bounds,
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+
+        // 違反: x=3 < b=5
+        let (pfeas_viol, _) = compute_primal_quality(&prob, &[3.0]);
+        assert!(
+            (pfeas_viol - 2.0).abs() < 1e-10,
+            "Ge違反: expected pfeas=2.0, got {}",
+            pfeas_viol
+        );
+
+        // 充足: x=7 >= b=5
+        let (pfeas_ok, _) = compute_primal_quality(&prob, &[7.0]);
+        assert!(
+            pfeas_ok < 1e-10,
+            "Ge充足: expected pfeas=0.0, got {}",
+            pfeas_ok
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
