@@ -43,6 +43,10 @@ pub struct QpProblem {
     pub num_constraints: usize,
     /// 制約種別: m個。Le/Ge/Eq のいずれか
     pub constraint_types: Vec<ConstraintType>,
+    /// QPSファイルのN-row（目的関数行）に設定されたRHS定数項。
+    /// 目的関数値 = 1/2 x^T Q x + c^T x + obj_offset
+    /// QPSファイルにN-row RHS値がない場合は 0.0（後方互換性維持）。
+    pub obj_offset: f64,
 }
 
 impl QpProblem {
@@ -77,7 +81,7 @@ impl QpProblem {
                 format!("constraint_types length must be {}, got {}", m, constraint_types.len())
             ));
         }
-        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types })
+        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, obj_offset: 0.0 })
     }
 
     /// 全制約をLe（Ax <= b）として構築するヘルパー。
@@ -175,7 +179,7 @@ impl QpProblem {
 
         let new_a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, new_row, n)
             .expect("to_all_le: CscMatrix::from_triplets failed");
-        let new_problem = QpProblem::new(
+        let mut new_problem = QpProblem::new(
             self.q.clone(),
             self.c.clone(),
             new_a,
@@ -183,6 +187,7 @@ impl QpProblem {
             self.bounds.clone(),
             new_ct,
         ).expect("to_all_le: QpProblem::new failed");
+        new_problem.obj_offset = self.obj_offset;
 
         (new_problem, LeExpansionMap { original_to_expanded })
     }

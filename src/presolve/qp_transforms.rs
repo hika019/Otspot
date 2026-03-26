@@ -103,7 +103,7 @@ impl QpPresolveResult {
             col_map: (0..n).map(Some).collect(),
             col_map_inv: (0..n).collect(),
             row_map: (0..m).map(Some).collect(),
-            obj_offset: 0.0,
+            obj_offset: prob.obj_offset,
             q_linear_adjust: vec![0.0; n],
             postsolve_stack: QpPostsolveStack::new(),
             was_reduced: false,
@@ -443,7 +443,7 @@ pub fn run_qp_presolve_phase1(
     let mut bounds = prob.bounds.clone();
     let mut removed_cols = vec![false; n];
     let mut removed_rows = vec![false; m];
-    let mut obj_offset = 0.0f64;
+    let mut obj_offset = prob.obj_offset;
     let mut postsolve_stack = QpPostsolveStack::new();
 
     // 行情報の前処理（CSC→行アクセス）

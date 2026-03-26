@@ -43,6 +43,8 @@ pub enum QpsError {
     MissingSection(String),
     /// 未定義の列名または行名が参照された
     UndefinedReference { kind: String, name: String },
+    /// N-row RHS値（obj_offset）がNaNまたはInf
+    InvalidObjectiveOffset(f64),
 }
 
 impl std::fmt::Display for QpsError {
@@ -55,6 +57,9 @@ impl std::fmt::Display for QpsError {
             QpsError::MissingSection(s) => write!(f, "Missing required section: {}", s),
             QpsError::UndefinedReference { kind, name } => {
                 write!(f, "Undefined {} reference: {}", kind, name)
+            }
+            QpsError::InvalidObjectiveOffset(val) => {
+                write!(f, "Invalid objective offset (NaN/Inf): {}", val)
             }
         }
     }
@@ -805,10 +810,21 @@ impl QpsParser {
             })?
         };
 
-        QpProblem::new(q, c, a, b, bounds, constraint_types).map_err(|e| QpsError::ParseError {
+        // N-row RHS値をobj_offsetとして取得
+        let obj_offset = match &self.obj_row {
+            Some(obj_row_name) => self.rhs.get(obj_row_name).copied().unwrap_or(0.0),
+            None => 0.0,
+        };
+        if !obj_offset.is_finite() {
+            return Err(QpsError::InvalidObjectiveOffset(obj_offset));
+        }
+
+        let mut prob = QpProblem::new(q, c, a, b, bounds, constraint_types).map_err(|e| QpsError::ParseError {
             line: 0,
             message: e.to_string(),
-        })
+        })?;
+        prob.obj_offset = obj_offset;
+        Ok(prob)
     }
 }
 
