@@ -715,6 +715,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         // Ruiz unscale 増幅によるpfeas/bfeas失敗を、tighter eps の再dispatch で解消する。
         // Ruizパスなし（presolve_result.ruiz_scaler.is_none()）のときは pv_try=0 のみ実行。
         const PV_RETRY_MAX: usize = 3;
+        // 行ノルム正規化pfeasチェック用: 行列Aはリトライ中に変わらないためループ外で1回だけ計算 [cmd_680]
+        let row_norms = problem.a.row_infinity_norms();
         let mut result = {
             let mut pv_last: Option<SolverResult> = None;
             for pv_try in 0..PV_RETRY_MAX {
@@ -827,20 +829,29 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     let eps = current_opts.ipm_eps();
                     if problem.num_constraints > 0 {
                         // ax_opt（slack計算済み）があれば再利用（M5: 2重計算排除）、なければ独立計算
+                        // 行ノルム正規化pfeasチェック [cmd_680]
+                        // 判定式: max_k [ violation_k / (1 + ||a_k||_∞ + |b_k|) ] ≥ eps → SubOptimal
+                        // row_norms はpv_retryループ外で1回だけ計算済み
                         let ax_for_pfeas = if let Some(ref ax) = ax_opt {
                             Some(ax.clone())
                         } else {
                             problem.a.mat_vec_mul(&r.solution).ok()
                         };
                         if let Some(ax) = ax_for_pfeas {
-                            let pfeas = ax.iter().zip(problem.b.iter()).zip(problem.constraint_types.iter())
-                                .map(|((&ax_i, &b_i), ct)| {
-                                    if matches!(ct, crate::problem::ConstraintType::Eq) { (ax_i - b_i).abs() }
-                                    else { (ax_i - b_i).max(0.0) }
+                            let pfeas_normalized = ax.iter()
+                                .zip(problem.b.iter())
+                                .zip(problem.constraint_types.iter())
+                                .zip(row_norms.iter())
+                                .map(|(((&ax_i, &b_i), ct), &rn)| {
+                                    let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
+                                        (ax_i - b_i).abs()
+                                    } else {
+                                        (ax_i - b_i).max(0.0)
+                                    };
+                                    violation / (1.0 + rn + b_i.abs())
                                 })
                                 .fold(0.0_f64, f64::max);
-                            let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
-                            if pfeas >= eps * (1.0 + norm_b) {
+                            if pfeas_normalized >= eps {
                                 r.status = SolveStatus::SuboptimalSolution;
                             }
                         }
@@ -2405,6 +2416,106 @@ mod tests {
                 j, exp, got, (got - exp).abs()
             );
         }
+    }
+
+    /// CscMatrix::row_infinity_norms の基本テスト
+    #[test]
+    fn test_row_infinity_norms_basic() {
+        // 2x3行列:
+        // [ 1.0  0.0  -3.0 ]
+        // [ 0.0  2.5   0.0 ]
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0],    // rows
+            &[0, 1, 2],    // cols
+            &[1.0, 2.5, -3.0], // vals
+            2, 3,
+        ).unwrap();
+        let norms = a.row_infinity_norms();
+        assert_eq!(norms.len(), 2);
+        assert!((norms[0] - 3.0).abs() < 1e-15, "row0 norm: expected 3.0, got {}", norms[0]);
+        assert!((norms[1] - 2.5).abs() < 1e-15, "row1 norm: expected 2.5, got {}", norms[1]);
+    }
+
+    /// 大係数行と小係数行が混在するケースで行ノルム正規化pfeasが正しく機能するテスト [cmd_680]
+    ///
+    /// 行ノルム正規化なしでは大係数行の残差が全体のpfeasを支配して偽SubOptimalになるが、
+    /// 行ノルム正規化ありでは正規化残差が小さく正しくOptimal判定されることを確認
+    #[test]
+    fn test_pfeas_row_norm_mixed_scale() {
+        // 問題: min x^2  s.t. x <= 1 (小係数), 1000*x <= 1000 (大係数)
+        // 最適解: x = 0（制約内）
+        // 大係数行で微小な数値誤差 x=1e-7 → violation = 1000*1e-7 - 0 = 1e-4
+        // 旧方式: pfeas = 1e-4, threshold = eps*(1+1000) ≈ 1e-3 → PASS（この例では旧方式でもPASS）
+        // 別の例: x = 1+1e-7 → 大係数行 violation = 1000*(1+1e-7)-1000 = 1e-4
+        //         小係数行 violation = (1+1e-7)-1 = 1e-7
+        //
+        // 行ノルム正規化: 1e-4 / (1+1000+1000) = 5e-8 < eps → PASS
+
+        // 直接row_infinity_normsの正しさを検証
+        let a = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 0],
+            &[1.0, 1000.0],
+            2, 1,
+        ).unwrap();
+        let norms = a.row_infinity_norms();
+        assert!((norms[0] - 1.0).abs() < 1e-15);
+        assert!((norms[1] - 1000.0).abs() < 1e-15);
+
+        // 正規化判定のロジック検証
+        let b: Vec<f64> = vec![1.0, 1000.0];
+        let x_val: f64 = 1.0 + 1e-7; // 微小な制約違反
+        let ax: Vec<f64> = vec![x_val, 1000.0 * x_val]; // [1.0000001, 1000.0001]
+        let eps: f64 = 1e-6;
+
+        // 旧方式: max violation
+        let pfeas_old = ax.iter().zip(b.iter())
+            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+            .fold(0.0_f64, f64::max);
+        // pfeas_old = max(1e-7, 1e-4) = 1e-4
+        assert!(pfeas_old > 1e-5, "旧方式pfeasは大係数行に引きずられるべき: {}", pfeas_old);
+
+        // 新方式: 行ノルム正規化
+        let pfeas_normalized = ax.iter().zip(b.iter()).zip(norms.iter())
+            .map(|((&ax_i, &b_i), &rn)| {
+                let violation = (ax_i - b_i).max(0.0);
+                violation / (1.0 + rn + b_i.abs())
+            })
+            .fold(0.0_f64, f64::max);
+        // 大係数行: 1e-4 / (1+1000+1000) = 5e-8
+        // 小係数行: 1e-7 / (1+1+1) = 3.3e-8
+        assert!(pfeas_normalized < eps, "正規化pfeasはeps未満であるべき: {}", pfeas_normalized);
+    }
+
+    /// 正規化なしでは判定が歪むが正規化ありで正しく判定できるケース [cmd_680]
+    #[test]
+    fn test_pfeas_row_norm_false_suboptimal_prevention() {
+        // b=0の大係数行: 1e6*x = 0 (等号制約として)
+        // x = 1e-9 → violation = |1e6 * 1e-9 - 0| = 1e-3
+        // 旧方式: pfeas = 1e-3, threshold = eps*(1+0).max(1.0) = eps*1 = 1e-6 → FAIL (偽SubOptimal)
+        // 新方式: 1e-3 / (1 + 1e6 + 0) ≈ 1e-9 < eps → PASS (正しくOptimal)
+
+        let a = CscMatrix::from_triplets(
+            &[0],
+            &[0],
+            &[1e6],
+            1, 1,
+        ).unwrap();
+        let norms = a.row_infinity_norms();
+        assert!((norms[0] - 1e6).abs() < 1e-9);
+
+        let b_val: f64 = 0.0;
+        let ax_val: f64 = 1e6 * 1e-9; // = 1e-3
+        let eps: f64 = 1e-6;
+
+        // 旧方式: 偽SubOptimal
+        let norm_b = b_val.abs().max(1.0); // max(|b|, 1.0) = 1.0
+        let pfeas_old = (ax_val - b_val).abs();
+        assert!(pfeas_old >= eps * (1.0 + norm_b), "旧方式では偽SubOptimalになるべき");
+
+        // 新方式: 正しくOptimal
+        let pfeas_norm = (ax_val - b_val).abs() / (1.0 + norms[0] + b_val.abs());
+        assert!(pfeas_norm < eps, "正規化方式ではOptimalであるべき: {}", pfeas_norm);
     }
 
 }
