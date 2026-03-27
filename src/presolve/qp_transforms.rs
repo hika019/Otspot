@@ -37,7 +37,9 @@ pub(crate) enum QpPostsolveStep {
     SingletonRow { col: usize, val: f64 },
     /// 空列（Q列・A列ともゼロ）の復元
     EmptyCol { idx: usize, val: f64 },
-    /// 大係数スケーリングの行スケール（#14 逆変換用: 双対変数のみに影響）
+    /// 大係数スケーリングの行スケール（#14 逆変換用）。
+    /// postsolve_qpでは双対変数の逆変換に使用。
+    /// slackへの影響はmod.rs側のb-Ax再計算で回避（LP経路でslackが非空になるケースに対応）。
     LargeCoeffRowScale { row_scales: Vec<f64> },
 }
 

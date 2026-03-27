@@ -71,6 +71,29 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
     // 目的関数値 = 縮約後 objective + presolve で除いた変数の定数寄与
     let objective = reduced_sol.objective + presolve_result.obj_offset;
 
+    // reduced_costs を元変数空間に展開（削除変数は 0）
+    // LP postsolve (postsolve.rs:82-89) と同方式
+    // presolveで除去された変数のrc=0は実装デフォルト（数学的近似）
+    let reduced_costs = if !reduced_sol.reduced_costs.is_empty() {
+        // LP経路 + 縮約後問題に変数あり: col_mapで展開
+        let mut rc = vec![0.0f64; n];
+        for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
+            if let Some(jj) = maybe_jj {
+                if jj < reduced_sol.reduced_costs.len() {
+                    rc[j] = reduced_sol.reduced_costs[jj];
+                }
+            }
+        }
+        rc
+    } else if presolve_result.reduced.num_vars == 0 && n > 0 {
+        // LP経路 + 全変数がpresolveで除去済み（singleton_col最適化等）
+        // 除去変数は全て最適境界値に固定されているため rc=0
+        vec![0.0f64; n]
+    } else {
+        // QP/IPM経路: IPMはreduced_costsを計算しない → 空を維持
+        vec![]
+    };
+
     SolverResult {
         status: reduced_sol.status.clone(),
         objective,
@@ -84,7 +107,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         pfeas: reduced_sol.pfeas,
         dfeas: reduced_sol.dfeas,
         gap: reduced_sol.gap,
-        reduced_costs: reduced_sol.reduced_costs.clone(),
+        reduced_costs,
         slack: reduced_sol.slack.clone(),
         warm_start_basis: reduced_sol.warm_start_basis.clone(),
     }

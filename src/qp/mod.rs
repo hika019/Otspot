@@ -801,12 +801,38 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         if ub.is_finite() { *xi = xi.min(ub); }
                     }
                 }
+                // slack再計算: postsolve_qp はorig_problemを持たないため、呼び出し元で b-Ax を直接計算。
+                // LP postsolve (postsolve.rs:71-79) と同方式。Ruiz/LCS/row_map の問題を全て回避。
+                // ax_opt は下記 pfeas 計算（M5: 2重計算排除）と共有する。
+                // 将来 postsolve_qp に orig_problem 引数を追加する際に移動可能。
+                //
+                // guard条件: LP経路の場合にのみ再計算する。
+                //   (a) reduced_sol.slack が非空 = LP経路（Simplexがslackを返した）
+                //   (b) reduced.num_vars == 0 = LP経路で全変数がpresolve除去済み
+                //       → Simplexはn=0でslack=[]を返すが、solutionは正しい（postsolve後）
+                //   QP/IPM経路: reduced.num_vars>0かつslack=[] → Noneのまま（slack=[]を維持）
+                let ax_opt = if problem.num_constraints > 0 &&
+                    (!reduced_sol.slack.is_empty() || presolve_result.reduced.num_vars == 0)
+                {
+                    problem.a.mat_vec_mul(&r.solution).ok()
+                } else {
+                    None
+                };
+                if let Some(ref ax) = ax_opt {
+                    r.slack = problem.b.iter().zip(ax.iter()).map(|(&b, &a)| b - a).collect();
+                }
                 // post-postsolve検証: 元問題(A,b,bounds)で直接pfeas+bfeasを確認（偽Optimal防止）
                 // scaled行列経由の逆変換は数学的複雑さによるバグを誘発するため、元問題で直接計算する
                 if r.status == SolveStatus::Optimal {
                     let eps = current_opts.ipm_eps();
                     if problem.num_constraints > 0 {
-                        if let Ok(ax) = problem.a.mat_vec_mul(&r.solution) {
+                        // ax_opt（slack計算済み）があれば再利用（M5: 2重計算排除）、なければ独立計算
+                        let ax_for_pfeas = if let Some(ref ax) = ax_opt {
+                            Some(ax.clone())
+                        } else {
+                            problem.a.mat_vec_mul(&r.solution).ok()
+                        };
+                        if let Some(ax) = ax_for_pfeas {
                             let pfeas = ax.iter().zip(problem.b.iter()).zip(problem.constraint_types.iter())
                                 .map(|((&ax_i, &b_i), ct)| {
                                     if matches!(ct, crate::problem::ConstraintType::Eq) { (ax_i - b_i).abs() }
@@ -1976,6 +2002,369 @@ mod tests {
             "A3-C01/C03: cancel_flag 事前設定で concurrent solver は Timeout を返すこと"
         );
     }
+
+    // ========== postsolve F1/F2修正検証テスト (T1-T7 + E1-E4) ==========
+    // 設計書: /Users/hika019/Develop/solver/reports/cmd667_postsolve_fix_design.md §5
+    // T1: presolve OFF 基準線
+    // T2: FixedVar + col_mapリマップ（核心テスト）
+    // T3: SingletonRow + row_map
+    // T4: FixedVar + 小Ruiz
+    // T5: FixedVar+LCS + 大Ruiz（C1指摘の核心ケース）
+    // T6: EmptyCol
+    // T7: QP IPM（slack=[], rc=[]）
+    // E1-E4: エッジケース
+
+    /// T1: presolve OFF 基準線
+    /// min 2x+3y  s.t. x+y<=4, x<=3, x,y>=0
+    /// presolve=false → postsolve経路（identity mapping）
+    /// 期待: solution=[0,0], obj=0, slack=[4,3], reduced_costs=[2,3]
+    #[test]
+    fn test_postsolve_t1_presolve_off_baseline() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n); // Q=0 → LP path
+        let c = vec![2.0, 3.0];
+        // x+y<=4, x<=3
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 0],
+            &[1.0, 1.0, 1.0],
+            2, n,
+        ).unwrap();
+        let b = vec![4.0, 3.0];
+        let bounds = vec![(0.0_f64, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T1: status");
+        let tol = 1e-8_f64;
+        // solution
+        assert!((result.solution[0]).abs() < tol, "T1: x≈0");
+        assert!((result.solution[1]).abs() < tol, "T1: y≈0");
+        // obj
+        assert!((result.objective).abs() < tol, "T1: obj=0");
+        // slack = b - Ax
+        assert_eq!(result.slack.len(), 2, "T1: slack.len");
+        assert!((result.slack[0] - 4.0).abs() < tol, "T1: slack[0]=4");
+        assert!((result.slack[1] - 3.0).abs() < tol, "T1: slack[1]=3");
+        // reduced_costs
+        assert_eq!(result.reduced_costs.len(), n, "T1: rc.len");
+        assert!((result.reduced_costs[0] - 2.0).abs() < tol, "T1: rc[0]=2");
+        assert!((result.reduced_costs[1] - 3.0).abs() < tol, "T1: rc[1]=3");
+    }
+
+    /// T2: FixedVar + col_mapリマップ（核心テスト）
+    /// min 2x+3y+z  s.t. x+y<=4, x+2y<=6, x,y>=0, z=5 (lb=ub=5)
+    /// presolve: z除去(FixedVar)。x,yは2制約に登場するためsingletonCol除去されない。
+    /// → 縮約後n=2でSimplexがrc=[2,3]を返し、postsolveでrc=[2,3,0]に展開されるF2テスト。
+    #[test]
+    fn test_postsolve_t2_fixed_var_col_map() {
+        let n = 3usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0, 3.0, 1.0];
+        // x+y<=4, x+2y<=6 (z not in constraints)
+        // x,yが2制約に登場 → singletonCol最適化の対象外 → 縮約後問題に残る
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 2.0],
+            2, n,
+        ).unwrap();
+        let b = vec![4.0, 6.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (5.0, 5.0)]; // z fixed
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T2: status");
+        let tol = 1e-6_f64;
+        // solution: x=0, y=0, z=5 (全て非負コスト、lb=0が最適)
+        assert_eq!(result.solution.len(), 3, "T2: solution.len");
+        assert!((result.solution[0]).abs() < tol, "T2: x≈0");
+        assert!((result.solution[1]).abs() < tol, "T2: y≈0");
+        assert!((result.solution[2] - 5.0).abs() < tol, "T2: z=5");
+        // obj = 2*0+3*0+1*5 = 5
+        assert!((result.objective - 5.0).abs() < tol, "T2: obj=5");
+        // reduced_costs: len=3 (F2: col_mapリマップ検証), rc[2]=0 (FixedVar除去)
+        assert_eq!(result.reduced_costs.len(), 3, "T2: rc.len=3 (F2 col_map)");
+        assert!((result.reduced_costs[0] - 2.0).abs() < tol, "T2: rc[0]=2 (x non-basic at lb)");
+        assert!((result.reduced_costs[1] - 3.0).abs() < tol, "T2: rc[1]=3 (y non-basic at lb)");
+        assert!((result.reduced_costs[2]).abs() < tol, "T2: rc[2]=0 (z fixed by FixedVar)");
+        // slack = b - Ax
+        assert_eq!(result.slack.len(), 2, "T2: slack.len=2");
+        assert!((result.slack[0] - 4.0).abs() < tol, "T2: slack[0]=4");
+        assert!((result.slack[1] - 6.0).abs() < tol, "T2: slack[1]=6");
+        // 相補性: x[j]*rc[j] ≈ 0
+        for j in 0..3 {
+            assert!((result.solution[j] * result.reduced_costs[j]).abs() < 1e-7,
+                "T2: complementarity x[{}]*rc[{}]", j, j);
+        }
+    }
+
+    /// T3: SingletonRow + row_map
+    /// min x+y  s.t. x=2 (Eq singleton), y<=3, x,y>=0
+    /// presolve: x除去(SingletonRow), 行0除去
+    /// 期待: solution=[2,0], slack.len()=2, slack[0]=0 (Eq制約)
+    #[test]
+    fn test_postsolve_t3_singleton_row() {
+        use crate::problem::ConstraintType;
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        // x=2 (Eq), y<=3 (Le)
+        let rows = &[0usize, 1usize];
+        let cols = &[0usize, 1usize];
+        let vals = &[1.0, 1.0];
+        let a = CscMatrix::from_triplets(rows, cols, vals, 2, n).unwrap();
+        let b = vec![2.0, 3.0];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Eq, ConstraintType::Le],
+        ).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T3: status");
+        let tol = 1e-6_f64;
+        // solution: x=2, y=0
+        assert_eq!(result.solution.len(), 2, "T3: solution.len");
+        assert!((result.solution[0] - 2.0).abs() < tol, "T3: x=2");
+        assert!((result.solution[1]).abs() < tol, "T3: y=0");
+        // slack sizes
+        assert_eq!(result.slack.len(), 2, "T3: slack.len=2");
+        assert!((result.slack[0]).abs() < tol, "T3: slack[0]=0 (Eq)");
+        // reduced_costs size
+        assert_eq!(result.reduced_costs.len(), 2, "T3: rc.len=2");
+    }
+
+    /// T4: Ruiz + FixedVar複合
+    /// min 2x+3y+z  s.t. 10x+y<=10, x<=3, x,y>=0, z=5
+    /// Ruizスケール + FixedVar
+    /// 期待: solution=[0,0,5], obj=5, slack=[10,3], rc=[2,3,0]
+    #[test]
+    fn test_postsolve_t4_ruiz_fixed_var() {
+        let n = 3usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0, 3.0, 1.0];
+        // 10x+y<=10, x<=3 (z not in constraints)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 0],
+            &[10.0, 1.0, 1.0],
+            2, n,
+        ).unwrap();
+        let b = vec![10.0, 3.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (5.0, 5.0)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T4: status");
+        let tol = 1e-6_f64;
+        assert_eq!(result.solution.len(), 3, "T4: solution.len");
+        assert!((result.solution[0]).abs() < tol, "T4: x≈0");
+        assert!((result.solution[1]).abs() < tol, "T4: y≈0");
+        assert!((result.solution[2] - 5.0).abs() < tol, "T4: z=5");
+        assert!((result.objective - 5.0).abs() < tol, "T4: obj=5");
+        // slack = [10-0, 3-0]
+        assert_eq!(result.slack.len(), 2, "T4: slack.len=2");
+        assert!((result.slack[0] - 10.0).abs() < tol, "T4: slack[0]=10");
+        assert!((result.slack[1] - 3.0).abs() < tol, "T4: slack[1]=3");
+        assert_eq!(result.reduced_costs.len(), 3, "T4: rc.len=3");
+        assert!((result.reduced_costs[2]).abs() < tol, "T4: rc[2]=0 (fixed)");
+    }
+
+    /// T5: FixedVar+LCS + 大Ruiz（C1指摘の核心ケース）
+    /// min x+y+z  s.t. 1e7*x+y<=1e7, x+y<=2, z=0.5 (fixed), x,y,z>=0
+    /// LCS閾値 >1e6 → 1e7係数でLCS発動。b-Ax再計算でLCS逆変換問題を回避。
+    /// 期待: slack[0] = 1e7 - 1e7*x - y（元問題空間で正確）
+    #[test]
+    fn test_postsolve_t5_lcs_ruiz_fixed_var() {
+        let n = 3usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0, 1.0];
+        // 1e7*x+y<=1e7, x+y<=2 (z not in constraints)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1e7, 1.0, 1.0, 1.0],
+            2, n,
+        ).unwrap();
+        let b = vec![1e7, 2.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (0.5, 0.5)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T5: status");
+        let x = result.solution[0];
+        let y = result.solution[1];
+        // slack精度: b[i] - (Ax)[i] で元問題空間で直接計算して照合
+        assert_eq!(result.slack.len(), 2, "T5: slack.len=2");
+        let slack0_expected = 1e7 - 1e7*x - y;
+        let slack1_expected = 2.0 - x - y;
+        // 相対誤差で確認（LCS+Ruizで1e7スケールのため絶対誤差は大きくなりうる）
+        let tol_rel = 1e-5_f64;
+        assert!(
+            (result.slack[0] - slack0_expected).abs() <= tol_rel * slack0_expected.abs().max(1.0),
+            "T5: slack[0]={} expected={} (LCS b-Ax精度)", result.slack[0], slack0_expected
+        );
+        assert!(
+            (result.slack[1] - slack1_expected).abs() <= tol_rel * slack1_expected.abs().max(1.0),
+            "T5: slack[1]={} expected={}", result.slack[1], slack1_expected
+        );
+        // reduced_costs.len = 3
+        assert_eq!(result.reduced_costs.len(), 3, "T5: rc.len=3");
+        assert!((result.reduced_costs[2]).abs() < 1e-6, "T5: rc[2]=0 (fixed z)");
+    }
+
+    /// T6: EmptyCol（空列除去）
+    /// min 2x+3y+z  s.t. x+y<=4, x<=3, x,y>=0, 0<=z<=3 (z制約行列ゼロ)
+    /// presolve: zはEmptyCol→z=lb=0 に固定
+    /// 期待: solution=[0,0,0], obj=0, slack=[4,3], rc=[2,3,0]
+    #[test]
+    fn test_postsolve_t6_empty_col() {
+        let n = 3usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0, 3.0, 1.0];
+        // x+y<=4, x<=3 (z absent from constraints)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 0],
+            &[1.0, 1.0, 1.0],
+            2, n,
+        ).unwrap();
+        let b = vec![4.0, 3.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (0.0, 3.0)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T6: status");
+        let tol = 1e-8_f64;
+        assert_eq!(result.solution.len(), 3, "T6: solution.len=3");
+        assert!((result.solution[0]).abs() < tol, "T6: x≈0");
+        assert!((result.solution[1]).abs() < tol, "T6: y≈0");
+        assert!((result.solution[2]).abs() < tol, "T6: z≈0 (EmptyCol→lb)");
+        assert!((result.objective).abs() < tol, "T6: obj=0");
+        assert_eq!(result.slack.len(), 2, "T6: slack.len=2");
+        assert!((result.slack[0] - 4.0).abs() < tol, "T6: slack[0]=4");
+        assert!((result.slack[1] - 3.0).abs() < tol, "T6: slack[1]=3");
+        assert_eq!(result.reduced_costs.len(), 3, "T6: rc.len=3");
+        assert!((result.reduced_costs[2]).abs() < tol, "T6: rc[2]=0 (empty col fixed)");
+    }
+
+    /// T7: QP IPM経路（slack=[], rc=[]）
+    /// min 1/2*(x^2+y^2)  s.t. x+y<=2, x,y>=0
+    /// IPM経路 → slack空、reduced_costs空を確認
+    #[test]
+    fn test_postsolve_t7_qp_ipm_empty_slack_rc() {
+        let n = 2usize;
+        // Q = [[2,0],[0,2]] (1/2規約で min 1/2*2*x^2 = min x^2)
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![2.0];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "T7: status");
+        // IPM経路ではslack空・reduced_costs空
+        assert!(result.slack.is_empty(), "T7: slack=[] for IPM path");
+        assert!(result.reduced_costs.is_empty(), "T7: rc=[] for IPM path");
+    }
+
+    /// E1: 全変数固定（全てFixedVar）
+    /// min x+y  s.t. x,y free, x=1 (lb=ub=1), y=2 (lb=ub=2)
+    /// 制約なし（A=0x2空行列）
+    /// 期待: solution=[1,2], rc.len()=2, slack.len()=0
+    #[test]
+    fn test_postsolve_e1_all_vars_fixed() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(1.0_f64, 1.0_f64), (2.0_f64, 2.0_f64)]; // both fixed
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "E1: status");
+        assert_eq!(result.solution.len(), 2, "E1: solution.len=2");
+        assert_eq!(result.reduced_costs.len(), 2, "E1: rc.len=2 (元変数空間)");
+        assert_eq!(result.slack.len(), 0, "E1: slack.len=0 (no constraints)");
+    }
+
+    /// E2: 全制約除去（A=0 all-redundant）
+    /// 制約なし問題: min 2x+3y, x,y >= 0
+    /// slack.len()=0, rc.len()=2
+    #[test]
+    fn test_postsolve_e2_no_constraints() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0, 3.0];
+        let a = CscMatrix::new(0, n);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        // 制約なし、目的関数最小化 → x=y=0
+        assert_eq!(result.status, SolveStatus::Optimal, "E2: status");
+        let tol = 1e-8_f64;
+        assert_eq!(result.slack.len(), 0, "E2: slack.len=0 (no constraints)");
+        assert_eq!(result.reduced_costs.len(), n, "E2: rc.len=2");
+        assert!((result.solution[0]).abs() < tol, "E2: x=0");
+        assert!((result.solution[1]).abs() < tol, "E2: y=0");
+    }
+
+    /// E3: presolve発動なし（presolve=true but no reduction）
+    /// min x+y  s.t. x+y<=2, x>=0, y>=0
+    /// 変数除去なし → col_map = [Some(0), Some(1)] (identity)
+    /// rc.len()=2, slack.len()=1
+    #[test]
+    fn test_postsolve_e3_presolve_no_reduction() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![2.0];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default(); // presolve=true but no reduction expected
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "E3: status");
+        assert_eq!(result.reduced_costs.len(), n, "E3: rc.len=2");
+        assert_eq!(result.slack.len(), 1, "E3: slack.len=1");
+        let tol = 1e-8_f64;
+        // b-Ax: slack[0] = 2 - x - y = 2 - 0 = 2 (optimal at x=y=0)
+        assert!((result.slack[0] - 2.0).abs() < tol, "E3: slack[0]=2");
+    }
+
+    /// E4: LCS発動 + presolve変数除去なし
+    /// min x+y  s.t. 1e7*x+y<=1e7, x>=0, y>=0
+    /// LCS発動でslack精度問題発生しうる → b-Ax再計算で回避
+    #[test]
+    fn test_postsolve_e4_lcs_no_presolve_elimination() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1e7, 1.0], 1, n).unwrap();
+        let b = vec![1e7];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "E4: status");
+        let x = result.solution[0];
+        let y = result.solution[1];
+        assert_eq!(result.slack.len(), 1, "E4: slack.len=1");
+        // slack = 1e7 - 1e7*x - y（b-Ax, 元問題空間で正確）
+        let slack_expected = 1e7 - 1e7*x - y;
+        let tol_rel = 1e-5_f64;
+        assert!(
+            (result.slack[0] - slack_expected).abs() <= tol_rel * slack_expected.abs().max(1.0),
+            "E4: slack[0]={} expected={} (LCS b-Ax精度)", result.slack[0], slack_expected
+        );
+        assert_eq!(result.reduced_costs.len(), n, "E4: rc.len=2");
+    }
+    // ========== ここまで postsolve F1/F2修正検証テスト ==========
 
     /// Q=0のQP（実質LP）をsolve_qp_withで解き、reduced_costsが非空かつ理論値に一致することを確認
     #[test]
