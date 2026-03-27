@@ -46,7 +46,7 @@ use crate::presolve::qp_transforms::QpPresolveStatus;
 use crate::problem::{LpProblem, SolveStatus};
 use crate::backend::{LpBackend, SimplexBackend};
 use crate::sparse::CscMatrix;
-use crate::tolerances::PIVOT_TOL;
+
 
 /// Concurrent Solver が複数ソルバーの結果を比較するための解品質ランク
 ///
@@ -277,7 +277,7 @@ fn solve_qp_concurrent(
                 solution: vec![],
                 dual_solution: vec![],
                 bound_duals: vec![],
-                active_set: vec![],
+
                 iterations: 0,
                 ..Default::default()
             }
@@ -288,7 +288,7 @@ fn solve_qp_concurrent(
                 solution: vec![],
                 dual_solution: vec![],
                 bound_duals: vec![],
-                active_set: vec![],
+
                 iterations: 0,
                 ..Default::default()
             }
@@ -302,9 +302,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
     // 旧実装の to_all_le() + 全Le方式は Eq→2Le展開で同一係数行が生まれ、
     // 基底の数値的不安定を引き起こすため廃止。
-    let m = problem.num_constraints;
-    let n = problem.num_vars;
-
     let lp = match LpProblem::new_general(
         problem.c.clone(),
         problem.a.clone(),
@@ -322,15 +319,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
             let obj = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum();
-            // active_set: 元問題の制約インデックスで活性制約を返す
-            let active: Vec<usize> = (0..m)
-                .filter(|&i| {
-                    let ax_i: f64 = (0..n)
-                        .map(|j| get_a_element(&problem.a, i, j) * x[j])
-                        .sum();
-                    (ax_i - problem.b[i]).abs() < PIVOT_TOL
-                })
-                .collect();
             // 双対解はSimplex出力をそのまま使用（展開なし）
             let dual = result.dual_solution.clone();
             SolverResult {
@@ -342,7 +330,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 slack: result.slack.clone(),
                 warm_start_basis: result.warm_start_basis.clone(),
                 bound_duals: vec![],
-                active_set: active,
                 iterations: result.iterations,
                 solver_used: None,
                 final_residuals: None,
@@ -361,7 +348,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             slack: vec![],
             warm_start_basis: None,
             bound_duals: vec![],
-            active_set: vec![],
             iterations: 0,
             solver_used: None,
             final_residuals: None,
@@ -387,7 +373,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             slack: vec![],
             warm_start_basis: None,
             bound_duals: vec![],
-            active_set: vec![],
             iterations: 0,
             solver_used: None,
             final_residuals: None,
@@ -404,7 +389,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             slack: vec![],
             warm_start_basis: None,
             bound_duals: vec![],
-            active_set: vec![],
             iterations: 0,
             solver_used: None,
             final_residuals: None,
@@ -421,7 +405,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             slack: vec![],
             warm_start_basis: None,
             bound_duals: vec![],
-            active_set: vec![],
             iterations: 0,
             solver_used: None,
             final_residuals: None,
@@ -430,18 +413,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             gap: None,
         },
     }
-}
-
-/// 行列 A の (row, col) 要素を返す
-fn get_a_element(a: &CscMatrix, row: usize, col: usize) -> f64 {
-    let start = a.col_ptr[col];
-    let end = a.col_ptr[col + 1];
-    for k in start..end {
-        if a.row_ind[k] == row {
-            return a.values[k];
-        }
-    }
-    0.0
 }
 
 /// Q行列が正半定値かどうかを確認する。
@@ -1116,7 +1087,7 @@ mod tests {
         assert_eq!(result1.status, SolveStatus::Optimal, "T5: cold start should be Optimal");
 
         let ws = crate::qp::QpWarmStart {
-            initial_active_set: result1.active_set.clone(),
+            initial_active_set: vec![],
             initial_point: Some(result1.solution.clone()),
         };
         let result2 = solve_qp_warm(&problem2, &ws, &SolverOptions::default());

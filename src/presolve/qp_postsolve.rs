@@ -77,7 +77,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         solution,
         dual_solution,
         bound_duals: reduced_sol.bound_duals.clone(),
-        active_set: reduced_sol.active_set.clone(),
+
         iterations: reduced_sol.iterations,
         solver_used: reduced_sol.solver_used,
         final_residuals: reduced_sol.final_residuals,

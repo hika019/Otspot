@@ -263,21 +263,20 @@ impl crate::problem::SolverResult {
             solution: vec![],
             dual_solution: vec![],
             bound_duals: vec![],
-            active_set: vec![],
+
             iterations: 0,
             ..Default::default()
         }
     }
 
     /// MaxIterations結果を生成（QP用）。真のイテレーション上限到達時のみ使用すること。
-    pub fn max_iterations(x: Vec<f64>, obj: f64, active: Vec<usize>, iters: usize) -> Self {
+    pub fn max_iterations(x: Vec<f64>, obj: f64, iters: usize) -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::MaxIterations,
             objective: obj,
             solution: x,
             dual_solution: vec![],
             bound_duals: vec![],
-            active_set: active,
             iterations: iters,
             ..Default::default()
         }
@@ -291,7 +290,7 @@ impl crate::problem::SolverResult {
             solution: vec![],
             dual_solution: vec![],
             bound_duals: vec![],
-            active_set: vec![],
+
             iterations: 0,
             ..Default::default()
         }

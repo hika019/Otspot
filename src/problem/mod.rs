@@ -61,7 +61,7 @@ impl fmt::Display for SolveStatus {
 ///
 /// LP求解（Simplex等）と QP求解（AS/IPM/Concurrent）の両方で使用できる統一結果型。
 /// LP固有フィールド（`reduced_costs`, `slack`, `warm_start_basis`）は QP求解時は空/None。
-/// QP固有フィールド（`bound_duals`, `active_set`, `iterations`）は LP求解時は空/0。
+/// QP固有フィールド（`bound_duals`, `iterations`）は LP求解時は空/0。
 #[derive(Debug, Clone)]
 pub struct SolverResult {
     /// 求解ステータス
@@ -82,8 +82,6 @@ pub struct SolverResult {
     // --- QP固有フィールド ---
     /// 変数境界の双対値（有限境界制約の双対値、長さ: 有限 bounds 制約数）
     pub bound_duals: Vec<f64>,
-    /// 最終反復での活性制約インデックス（warm-start用）
-    pub active_set: Vec<usize>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,
     /// 使用したソルバー方式（Concurrent時: 勝者; 直接指定時: 指定値; 不明時: None）
@@ -109,7 +107,6 @@ impl Default for SolverResult {
             slack: vec![],
             warm_start_basis: None,
             bound_duals: vec![],
-            active_set: vec![],
             iterations: 0,
             solver_used: None,
             final_residuals: None,

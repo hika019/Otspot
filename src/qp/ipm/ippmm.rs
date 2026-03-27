@@ -657,7 +657,7 @@ pub(crate) fn solve_ippmm_inner(
         solution: x,
         dual_solution,
         bound_duals,
-        active_set: vec![],
+
         iterations: final_iter,
         final_residuals,
         pfeas: final_residuals.map(|(pf, _, _)| pf),
@@ -836,7 +836,7 @@ fn solve_unconstrained_ippmm(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> S
             solution: vec![],
             dual_solution: vec![],
             bound_duals: vec![],
-            active_set: vec![],
+    
             iterations: 0,
             ..Default::default()
         };
@@ -894,7 +894,7 @@ fn solve_unconstrained_ippmm(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> S
                 solution: x,
                 dual_solution: vec![],
                 bound_duals: vec![],
-                active_set: vec![],
+        
                 iterations: 1,
                 ..Default::default()
             }
@@ -1108,7 +1108,7 @@ pub(crate) fn timeout_result(n: usize) -> SolverResult {
         solution: vec![0.0; n],
         dual_solution: vec![],
         bound_duals: vec![],
-        active_set: vec![],
+
         iterations: 0,
         ..Default::default()
     }
@@ -1121,7 +1121,7 @@ pub(crate) fn numerical_error_result(n: usize) -> SolverResult {
         solution: vec![0.0; n],
         dual_solution: vec![],
         bound_duals: vec![],
-        active_set: vec![],
+
         iterations: 0,
         ..Default::default()
     }
