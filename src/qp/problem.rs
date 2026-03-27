@@ -298,10 +298,15 @@ impl crate::problem::SolverResult {
 }
 
 /// Warm-start情報: SQP等で前反復の活性集合を次反復に引き継ぐ
+///
+/// 注意: 現在の実装では `solve_qp_warm` が `warm_start` を無視するため、
+/// いずれのフィールドも使用されない。公開 API 互換性のためフィールドは保持している。
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
     /// 初期活性制約インデックス（QpResult.active_set から取得して渡す）
+    /// 現在未使用: `solve_qp_warm` が warm_start を無視するため参照されない
     pub initial_active_set: Vec<usize>,
-    /// 初期点 x_0（None のときは LP Phase I で計算）
+    /// 初期点 x_0
+    /// 現在未使用: `solve_qp_warm` が warm_start を無視するため参照されない
     pub initial_point: Option<Vec<f64>>,
 }

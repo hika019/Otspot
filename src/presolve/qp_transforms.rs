@@ -1234,7 +1234,6 @@ pub fn run_qp_presolve_phase1(
 
     // was_reduced は変数削減（fixedVar/singletonRow/emptyCol等）が起きた時のみ true。
     // Ruiz scaling は変数次元を変えないため was_reduced に含めない。
-    // warm_start の initial_point は solve_qp_warm 側で ruiz_scaler を使いスケールする。
 
     QpPresolveResult {
         reduced,

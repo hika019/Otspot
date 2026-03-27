@@ -941,8 +941,9 @@ pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> So
 /// Warm-start付きでQPを解く
 ///
 /// qpOASESの `hotstart()` に相当。SQP反復で前回解の情報を引き継ぐ場合に使用。
-/// IPM は warm_start の `initial_point` を初期値のヒントとして利用できるが、
-/// `initial_active_set` は無視される。
+///
+/// 注意: 現在の実装では `warm_start` は使用されない（`solve_qp_with` に委譲するため、
+/// `initial_point` および `initial_active_set` は共に無視される）。
 pub fn solve_qp_warm(
     problem: &QpProblem,
     _warm_start: &QpWarmStart,
