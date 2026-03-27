@@ -916,9 +916,37 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     })
                     .fold(0.0_f64, f64::max);
                 if bfeas_after < eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
-                    result.status = SolveStatus::Optimal;
-                    result.dual_solution = y;
-                    result.bound_duals = z;
+                    // IR後pfeas_normalized再検証 [cmd_680 QC-C1修正]
+                    // IR内部は旧方式(norm_b)で収束判定するため、新方式(行ノルム正規化)で
+                    // 再検証しないと偽Optimalがバイパスされる。
+                    // row_normsはpv_retryループ外(L719)で計算済みを再利用。
+                    let mut ir_pfeas_ok = true;
+                    if problem.num_constraints > 0 {
+                        if let Ok(ax) = problem.a.mat_vec_mul(&result.solution) {
+                            let pfeas_normalized_post_ir = ax.iter()
+                                .zip(problem.b.iter())
+                                .zip(problem.constraint_types.iter())
+                                .zip(row_norms.iter())
+                                .map(|(((&ax_i, &b_i), ct), &rn)| {
+                                    let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
+                                        (ax_i - b_i).abs()
+                                    } else {
+                                        (ax_i - b_i).max(0.0)
+                                    };
+                                    violation / (1.0 + rn + b_i.abs())
+                                })
+                                .fold(0.0_f64, f64::max);
+                            if pfeas_normalized_post_ir >= eps {
+                                ir_pfeas_ok = false;
+                            }
+                        }
+                    }
+                    if ir_pfeas_ok {
+                        result.status = SolveStatus::Optimal;
+                        result.dual_solution = y;
+                        result.bound_duals = z;
+                    }
+                    // else: IR後もpfeas_normalized不足 → SuboptimalSolution維持
                 }
                 // else: bfeas起因のSuboptimalSolution維持
             }
