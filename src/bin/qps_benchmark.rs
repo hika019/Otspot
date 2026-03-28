@@ -59,6 +59,38 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
+/// §2.1b: 行ノルム正規化pfeas（本体ipm/mod.rsと同方式）
+///
+/// max_k [ violation_k / (1 + ||a_k||_∞ + |b_k|) ]
+/// 本体の post_verify_solution と同一の正規化式を使用。
+fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    if prob.num_constraints == 0 {
+        return 0.0;
+    }
+    match prob.a.mat_vec_mul(solution) {
+        Ok(ax) => {
+            let row_norms = prob.a.row_infinity_norms();
+            ax.iter()
+                .zip(prob.b.iter())
+                .enumerate()
+                .zip(row_norms.iter())
+                .map(|((i, (&ax_i, &b_i)), &rn)| {
+                    let violation = match prob.constraint_types.get(i) {
+                        Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                        Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                        _ => (ax_i - b_i).max(0.0),
+                    };
+                    violation / (1.0 + rn + b_i.abs())
+                })
+                .fold(0.0_f64, f64::max)
+        }
+        Err(_) => f64::NAN,
+    }
+}
+
 /// §2.2: dfeasチェック（solver内部値を使用）
 ///
 /// result.dfeas が Some(v) ならそのまま返す。None → NAN（スキップ扱い）。
@@ -430,24 +462,18 @@ fn main() {
             SolveStatus::Optimal => {
                 // §2.5 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
 
-                // Step 3: pfeas（両側チェック）
+                // Step 3: pfeas（行ノルム正規化版、本体ipm/mod.rsと同方式）
                 let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);
-                let norm_b = prob
-                    .b
-                    .iter()
-                    .map(|&x| x.abs())
-                    .fold(0.0_f64, f64::max)
-                    .max(1.0);
-                let pfeas_tol = eps * (1.0 + norm_b);
+                let pfeas_normalized = compute_pfeas_normalized(&prob, &result.solution);
 
-                // Step 4: pfeasチェック
-                if pfeas > pfeas_tol || bfeas > eps {
+                // Step 4: pfeasチェック（正規化済み違反 > eps で失敗）
+                if pfeas_normalized > eps || bfeas > eps {
                     n_pfeas_fail += 1;
                     (
                         "PFEAS_FAIL".to_string(),
                         format!(
-                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} (pfeas_tol={:.1e})",
-                            method_label, result.objective, pfeas, bfeas, pfeas_tol
+                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} bf={:.1e}",
+                            method_label, result.objective, pfeas, pfeas_normalized, bfeas
                         ),
                     )
                 } else {
