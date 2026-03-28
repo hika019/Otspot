@@ -793,6 +793,84 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     );
                 }
                 let mut r = postsolve_qp(&presolve_result, &reduced_sol);
+                // bound_duals リマップ: 縮約後空間 → 元問題空間 [cmd_689]
+                // IPM/IPPMMが返すbound_dualsは縮約後の有限境界変数に対して格納されているため、
+                // presolveで除去された変数を含む元問題空間に展開する。
+                // 処理順序: Ruiz unscale(完了済み) → postsolve_qp → 本リマップ → bounds clip
+                if presolve_result.was_reduced {
+                    let orig_bounds = &problem.bounds;
+                    let n_lb_orig = orig_bounds.iter().filter(|(lb, _)| lb.is_finite()).count();
+                    let n_ub_orig = orig_bounds.iter().filter(|(_, ub)| ub.is_finite()).count();
+
+                    if n_lb_orig + n_ub_orig > 0 {
+                        let reduced_bounds = &presolve_result.reduced.bounds;
+                        let n_lb_reduced = reduced_bounds.iter()
+                            .filter(|(lb, _)| lb.is_finite()).count();
+
+                        // 縮約後変数jj → bound_duals配列内のlb/ubインデックスを構築
+                        let n_reduced = reduced_bounds.len();
+                        let mut lb_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
+                        let mut ub_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
+                        {
+                            let mut li = 0;
+                            for (jj, &(lb, _)) in reduced_bounds.iter().enumerate() {
+                                if lb.is_finite() {
+                                    lb_bd_idx[jj] = Some(li);
+                                    li += 1;
+                                }
+                            }
+                            let mut ui = 0;
+                            for (jj, &(_, ub)) in reduced_bounds.iter().enumerate() {
+                                if ub.is_finite() {
+                                    ub_bd_idx[jj] = Some(n_lb_reduced + ui);
+                                    ui += 1;
+                                }
+                            }
+                        }
+
+                        // 元問題空間のbound_dualsを構築（初期値0.0 = 除去変数のデフォルト）
+                        let mut new_bd = vec![0.0f64; n_lb_orig + n_ub_orig];
+
+                        // bound_dualsが非空の場合のみ値をコピー
+                        // （空の場合: EmptyCol等で全有限境界変数が除去 → new_bd全要素0.0のまま）
+                        if !r.bound_duals.is_empty() {
+                            // lb部分: 元問題の各lb有限変数についてcol_map経由でマップ
+                            let mut orig_li = 0;
+                            for (j, &(lb, _)) in orig_bounds.iter().enumerate() {
+                                if lb.is_finite() {
+                                    if let Some(jj) = presolve_result.col_map[j] {
+                                        if let Some(bd_idx) = lb_bd_idx[jj] {
+                                            debug_assert!(bd_idx < r.bound_duals.len(),
+                                                "bound_duals lb index out of range: {} >= {}",
+                                                bd_idx, r.bound_duals.len());
+                                            new_bd[orig_li] = r.bound_duals[bd_idx];
+                                        }
+                                    }
+                                    // col_map[j] == None → 除去変数 → 0.0（初期値）
+                                    orig_li += 1;
+                                }
+                            }
+
+                            // ub部分: 元問題の各ub有限変数についてcol_map経由でマップ
+                            let mut orig_ui = 0;
+                            for (j, &(_, ub)) in orig_bounds.iter().enumerate() {
+                                if ub.is_finite() {
+                                    if let Some(jj) = presolve_result.col_map[j] {
+                                        if let Some(bd_idx) = ub_bd_idx[jj] {
+                                            debug_assert!(bd_idx < r.bound_duals.len(),
+                                                "bound_duals ub index out of range: {} >= {}",
+                                                bd_idx, r.bound_duals.len());
+                                            new_bd[n_lb_orig + orig_ui] = r.bound_duals[bd_idx];
+                                        }
+                                    }
+                                    orig_ui += 1;
+                                }
+                            }
+                        }
+
+                        r.bound_duals = new_bd;
+                    }
+                }
                 // Ruiz unscale増幅由来のbounds微小違反を補正（clip）[cmd_400 (B)]
                 // scaled空間では境界内だがunscale後に微小違反が生じるケース（例: QPCBOEI2）に対応
                 if presolve_result.ruiz_scaler.is_some() && !r.solution.is_empty() {
@@ -2405,6 +2483,202 @@ mod tests {
                 j, exp, got, (got - exp).abs()
             );
         }
+    }
+
+    // ===== bound_duals col_mapリマップ テスト (BD-T1〜BD-T6) [cmd_689] =====
+
+    /// BD-T1: baseline（presolve OFF, 全変数有限境界あり）
+    /// min 1/2*(0.001*x^2 + 0.001*y^2) + x + y
+    /// s.t. x + y <= 10, 0 <= x <= 5, 0 <= y <= 5
+    /// → 最適解: x=0, y=0（下界活性、上界非活性）
+    /// → bound_duals.len() == 4 (lb_x, lb_y, ub_x, ub_y)
+    #[test]
+    fn test_bd_t1_baseline_presolve_off() {
+        let n = 2usize;
+        // Q = diag(0.001, 0.001)
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[0.001, 0.001], n, n).unwrap();
+        let c = vec![1.0, 1.0];
+        // x + y <= 10
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![10.0];
+        let bounds = vec![(0.0_f64, 5.0_f64); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T1: status");
+        let sol_tol = 1e-3_f64;
+        let tol = 1e-4_f64;
+        // 解: x=0, y=0
+        assert!((result.solution[0]).abs() < sol_tol, "BD-T1: x≈0 (got {})", result.solution[0]);
+        assert!((result.solution[1]).abs() < sol_tol, "BD-T1: y≈0 (got {})", result.solution[1]);
+        // bound_duals長: n_lb_orig=2 + n_ub_orig=2 = 4
+        assert_eq!(result.bound_duals.len(), 4, "BD-T1: bound_duals.len()==4");
+        // x=0=lb活性 → lb_dual > 0
+        assert!(result.bound_duals[0] > tol, "BD-T1: lb_x>0 (active lower)");
+        // y=0=lb活性 → lb_dual > 0
+        assert!(result.bound_duals[1] > tol, "BD-T1: lb_y>0 (active lower)");
+        // x上界非活性 → ub_dual ≈ 0
+        assert!(result.bound_duals[2].abs() < tol, "BD-T1: ub_x≈0 (inactive)");
+        // y上界非活性 → ub_dual ≈ 0
+        assert!(result.bound_duals[3].abs() < tol, "BD-T1: ub_y≈0 (inactive)");
+    }
+
+    /// BD-T2: FixedVar + bound_dualsリマップ（核心テスト、非対称化済み）
+    /// min 1/2*(0.001*x^2 + 0.001*y^2 + 0.001*z^2) + 2*x + y + z
+    /// s.t. x + y <= 10, 0 <= x <= 5, 0 <= y <= 5, z=3 (fixed)
+    /// presolve: z除去（FixedVar）
+    /// → リマップ後bound_duals長: 6 (lb_x, lb_y, lb_z=0, ub_x, ub_y, ub_z=0)
+    #[test]
+    fn test_bd_t2_fixed_var_remap_core() {
+        let n = 3usize;
+        // Q = diag(0.001, 0.001, 0.001)
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let c = vec![2.0, 1.0, 1.0];
+        // x + y <= 10
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![10.0];
+        // z=3 → lb=ub=3（FixedVar）
+        let bounds = vec![(0.0_f64, 5.0_f64), (0.0_f64, 5.0_f64), (3.0_f64, 3.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T2: status");
+        let sol_tol = 5e-3_f64; // IPM解の精度（primal解は双対精度より粗め）
+        let tol = 1e-4_f64;     // bound_duals精度（符号・大小比較用）
+        // 解: x≈0, y≈0, z≈3
+        assert!((result.solution[0]).abs() < sol_tol, "BD-T2: x≈0 (got {})", result.solution[0]);
+        assert!((result.solution[1]).abs() < sol_tol, "BD-T2: y≈0 (got {})", result.solution[1]);
+        assert!((result.solution[2] - 3.0).abs() < sol_tol, "BD-T2: z≈3 (got {})", result.solution[2]);
+        // bound_duals長: n_lb_orig=3 + n_ub_orig=3 = 6
+        assert_eq!(result.bound_duals.len(), 6, "BD-T2: bound_duals.len()==6");
+        // x=0=lb活性 → lb_dual ≈ 2 (目的関数x係数=2)
+        assert!(result.bound_duals[0] > tol, "BD-T2: lb_x>0");
+        // y=0=lb活性 → lb_dual ≈ 1 (目的関数y係数=1)
+        assert!(result.bound_duals[1] > tol, "BD-T2: lb_y>0");
+        // 非対称検証: lb_x ≠ lb_y（変数順序バグ検出）
+        assert!((result.bound_duals[0] - result.bound_duals[1]).abs() > tol,
+            "BD-T2: lb_x({}) != lb_y({}) — 変数順序バグ検出",
+            result.bound_duals[0], result.bound_duals[1]);
+        // z除去変数 → lb_dual = 0.0
+        assert!((result.bound_duals[2]).abs() < tol, "BD-T2: lb_z==0 (removed)");
+        // x上界非活性 → ub_dual ≈ 0（IPM精度のため5e-3まで許容）
+        assert!(result.bound_duals[3].abs() < 5e-3, "BD-T2: ub_x≈0 (got {})", result.bound_duals[3]);
+        // y上界非活性 → ub_dual ≈ 0
+        assert!(result.bound_duals[4].abs() < 5e-3, "BD-T2: ub_y≈0 (got {})", result.bound_duals[4]);
+        // z除去変数 → ub_dual = 0.0
+        assert!((result.bound_duals[5]).abs() < tol, "BD-T2: ub_z==0 (removed)");
+        // S2: KKT停止性検証（全変数で ∇f[j] - (A^T y)[j] - lb_dual[j] + ub_dual[j] ≈ 0）
+        // ∇f(x*)_x = 0.001*0 + 2 = 2, ∇f(x*)_y = 0.001*0 + 1 = 1
+        // dual_solution: x+y<=10 の双対変数（最適解x=y=0なので制約非活性→ dual≈0）
+        let dual = if result.dual_solution.is_empty() { 0.0 } else { result.dual_solution[0] };
+        // KKT for x: 2 - dual - lb_x + ub_x ≈ 0 → lb_x ≈ 2
+        let kkt_x = 2.0 - dual - result.bound_duals[0] + result.bound_duals[3];
+        assert!(kkt_x.abs() < 1e-3, "BD-T2: KKT_x≈0, got {}", kkt_x);
+        // KKT for y: 1 - dual - lb_y + ub_y ≈ 0 → lb_y ≈ 1
+        let kkt_y = 1.0 - dual - result.bound_duals[1] + result.bound_duals[4];
+        assert!(kkt_y.abs() < 1e-3, "BD-T2: KKT_y≈0, got {}", kkt_y);
+    }
+
+    /// BD-T3: FixedVar + lb_only変数
+    /// min 1/2*(0.001*x^2 + 0.001*y^2) + x + y
+    /// s.t. x + y <= 10, x >= 0 (ub=∞), y=2 (fixed)
+    /// presolve: y除去 → n_lb_orig=2, n_ub_orig=1 → bound_duals.len()==3
+    #[test]
+    fn test_bd_t3_fixed_var_lb_only() {
+        let n = 2usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[0.001, 0.001], n, n).unwrap();
+        let c = vec![1.0, 1.0];
+        // x + y <= 10
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![10.0];
+        // x: [0, ∞), y: [2, 2] (fixed)
+        let bounds = vec![(0.0_f64, f64::INFINITY), (2.0_f64, 2.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T3: status");
+        // 元問題: lb有限=2(x:0, y:2), ub有限=1(y:2) → bound_duals.len()==3
+        assert_eq!(result.bound_duals.len(), 3, "BD-T3: bound_duals.len()==3");
+    }
+
+    /// BD-T4: EmptyCol + lb+ub変数（bound_duals空 → 0埋め展開）
+    /// min 1/2*(0.001*x^2 + 0.001*y^2) - x - y + z
+    /// s.t. x + y <= 4, x,y∈(-∞,∞), 0 <= z <= 3
+    /// z は制約に登場しない → EmptyCol → z=lb=0
+    /// → IPMが返すbound_duals空 → リマップ後: bound_duals.len()==2, 全0.0
+    #[test]
+    fn test_bd_t4_empty_col_zero_fill() {
+        let n = 3usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[0.001, 0.001], n, n).unwrap();
+        let c = vec![-1.0, -1.0, 1.0];
+        // x + y <= 4
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![4.0];
+        // x: (-∞, ∞), y: (-∞, ∞), z: [0, 3]
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY), (0.0_f64, 3.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T4: status");
+        // n_lb_orig=1(z:0), n_ub_orig=1(z:3) → bound_duals.len()==2
+        assert_eq!(result.bound_duals.len(), 2, "BD-T4: bound_duals.len()==2");
+        let tol = 1e-8_f64;
+        assert!((result.bound_duals[0]).abs() < tol, "BD-T4: z_lb==0.0");
+        assert!((result.bound_duals[1]).abs() < tol, "BD-T4: z_ub==0.0");
+    }
+
+    /// BD-T5: 無境界（全変数±∞ → bound_duals空）
+    /// min 1/2*(x^2 + y^2)  s.t. x + y <= 10
+    /// x, y ∈ (-∞, +∞)
+    #[test]
+    fn test_bd_t5_unbounded_vars_empty() {
+        let n = 2usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![10.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T5: status");
+        assert!(result.bound_duals.is_empty(), "BD-T5: bound_duals empty for unbounded vars");
+    }
+
+    /// BD-T6: FixedVar + ub活性変数（ub_dual非ゼロ × presolve残存変数）
+    /// min 1/2*(0.001*x^2 + 0.001*y^2 + 0.001*z^2) - x - y + z
+    /// s.t. x + y <= 10, 0 <= x <= 3, 0 <= y <= 5, z=2 (fixed)
+    /// → 最適解: x=3(ub活性), y=5(ub活性), z=2
+    /// → bound_duals[3]>0 (ub_x活性), bound_duals[4]>0 (ub_y活性)
+    #[test]
+    fn test_bd_t6_ub_active_with_presolve() {
+        let n = 3usize;
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let c = vec![-1.0, -1.0, 1.0];
+        // x + y <= 10
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![10.0];
+        // z=2 → fixed
+        let bounds = vec![(0.0_f64, 3.0_f64), (0.0_f64, 5.0_f64), (2.0_f64, 2.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T6: status");
+        let sol_tol = 1e-3_f64; // IPM primal解精度
+        let tol = 1e-4_f64;     // bound_duals符号・大小比較精度
+        // 最適解: x=3, y=5, z=2
+        assert!((result.solution[0] - 3.0).abs() < sol_tol, "BD-T6: x≈3 (got {})", result.solution[0]);
+        assert!((result.solution[1] - 5.0).abs() < sol_tol, "BD-T6: y≈5 (got {})", result.solution[1]);
+        assert!((result.solution[2] - 2.0).abs() < sol_tol, "BD-T6: z≈2 (got {})", result.solution[2]);
+        // bound_duals長: n_lb_orig=3 + n_ub_orig=3 = 6
+        assert_eq!(result.bound_duals.len(), 6, "BD-T6: bound_duals.len()==6");
+        // x=3=ub活性 → lb_dual≈0, ub_dual>0
+        assert!(result.bound_duals[0].abs() < tol, "BD-T6: lb_x≈0 (inactive)");
+        assert!(result.bound_duals[1].abs() < tol, "BD-T6: lb_y≈0 (inactive)");
+        assert!((result.bound_duals[2]).abs() < tol, "BD-T6: lb_z==0 (removed)");
+        assert!(result.bound_duals[3] > tol, "BD-T6: ub_x>0 (active upper)");
+        assert!(result.bound_duals[4] > tol, "BD-T6: ub_y>0 (active upper)");
+        assert!((result.bound_duals[5]).abs() < tol, "BD-T6: ub_z==0 (removed)");
     }
 
 }
