@@ -218,13 +218,22 @@ pub(crate) fn post_verify_solution(result: SolverResult, problem: &QpProblem, ep
     let status = if problem.num_constraints > 0 {
         match problem.a.mat_vec_mul(x) {
             Ok(ax) => {
-                let pfeas: f64 = ax
+                let row_norms = problem.a.row_infinity_norms();
+                let pfeas_normalized: f64 = ax
                     .iter()
                     .zip(problem.b.iter())
-                    .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                    .zip(problem.constraint_types.iter())
+                    .zip(row_norms.iter())
+                    .map(|(((&ax_i, &b_i), ct), &rn)| {
+                        let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
+                            (ax_i - b_i).abs()
+                        } else {
+                            (ax_i - b_i).max(0.0)
+                        };
+                        violation / (1.0 + rn + b_i.abs())
+                    })
                     .fold(0.0_f64, f64::max);
-                let norm_b = norm_inf(&problem.b).max(1.0);
-                if pfeas < eps * (1.0 + norm_b) {
+                if pfeas_normalized < eps {
                     let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
                     if bfeas_status == SolveStatus::Optimal {
                         check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
@@ -382,10 +391,24 @@ fn unscale_ipm_result(
                             .zip(problem.b.iter())
                             .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
                             .fold(0.0_f64, f64::max);
-                        let norm_b = norm_inf(&problem.b).max(1.0);
+                        let row_norms = problem.a.row_infinity_norms();
+                        let pfeas_normalized: f64 = ax
+                            .iter()
+                            .zip(problem.b.iter())
+                            .zip(problem.constraint_types.iter())
+                            .zip(row_norms.iter())
+                            .map(|(((&ax_i, &b_i), ct), &rn)| {
+                                let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
+                                    (ax_i - b_i).abs()
+                                } else {
+                                    (ax_i - b_i).max(0.0)
+                                };
+                                violation / (1.0 + rn + b_i.abs())
+                            })
+                            .fold(0.0_f64, f64::max);
                         // 元空間pfeasでfinal_residualsを更新（dfeas/gapはscaled値を流用）
                         let orig_resid = result.final_residuals.map(|(_, d, g)| (pfeas, d, g));
-                        let status = if pfeas < eps * (1.0 + norm_b) {
+                        let status = if pfeas_normalized < eps {
                             // pfeas OK: bfeas → dfeas の順で検証
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
@@ -450,13 +473,22 @@ fn unscale_ipm_result(
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
-                        let pfeas: f64 = ax
+                        let row_norms = problem.a.row_infinity_norms();
+                        let pfeas_normalized: f64 = ax
                             .iter()
                             .zip(problem.b.iter())
-                            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            .zip(problem.constraint_types.iter())
+                            .zip(row_norms.iter())
+                            .map(|(((&ax_i, &b_i), ct), &rn)| {
+                                let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
+                                    (ax_i - b_i).abs()
+                                } else {
+                                    (ax_i - b_i).max(0.0)
+                                };
+                                violation / (1.0 + rn + b_i.abs())
+                            })
                             .fold(0.0_f64, f64::max);
-                        let norm_b = norm_inf(&problem.b).max(1.0);
-                        if pfeas < eps * (1.0 + norm_b) {
+                        if pfeas_normalized < eps {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
                                 check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
