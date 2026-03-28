@@ -2681,4 +2681,61 @@ mod tests {
         assert!((result.bound_duals[5]).abs() < tol, "BD-T6: ub_z==0 (removed)");
     }
 
+    /// BD-T7: constraint active × lb_dual nonzero × KKT照合 [cmd_689]
+    ///
+    /// min 1/2*(x^2 + y^2)
+    /// s.t. -x - y <= -3  (等価: x + y >= 3, 常にactive at optimal)
+    ///      x >= 2, y >= 0 (x の下界が活性)
+    ///
+    /// 最適解: x=2, y=1
+    ///   - 制約 -x-y=-3 (active) → dual_solution[0] ≈ 1.0 ≠ 0
+    ///   - x=2=lb (active)       → bound_duals[0] (lb_x) ≈ 1.0 ≠ 0
+    ///   - y=1 > lb=0 (inactive) → bound_duals[1] (lb_y) ≈ 0.0
+    ///
+    /// KKT停止性 (r_d = -(Qx + c + A_ext^T y_ext) = 0):
+    ///   A[0,x]=-1, A[0,y]=-1 なので:
+    ///   x: x* + (-1)*dual - lb_x = 0 → 2 - dual - lb_x ≈ 0
+    ///   y: y* + (-1)*dual - lb_y = 0 → 1 - dual - lb_y ≈ 0
+    #[test]
+    fn test_bd_t7_constraint_active_lb_dual_nonzero_kkt() {
+        let n = 2usize;
+        // Q = I (係数1: 双対値が明確に非ゼロになるよう tiny Q は避ける)
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
+        let c = vec![0.0, 0.0];
+        // -x - y <= -3  (x + y >= 3)
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, n).unwrap();
+        let b = vec![-3.0];
+        // x ∈ [2, ∞), y ∈ [0, ∞) → n_lb=2, n_ub=0 → bound_duals.len()==2
+        let bounds = vec![(2.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "BD-T7: status");
+        let sol_tol = 1e-3_f64;
+        let tol = 1e-4_f64;
+        // 最適解: x=2, y=1
+        assert!((result.solution[0] - 2.0).abs() < sol_tol,
+            "BD-T7: x≈2 (got {})", result.solution[0]);
+        assert!((result.solution[1] - 1.0).abs() < sol_tol,
+            "BD-T7: y≈1 (got {})", result.solution[1]);
+        // bound_duals長: n_lb_orig=2(x,y), n_ub_orig=0 → len==2
+        assert_eq!(result.bound_duals.len(), 2, "BD-T7: bound_duals.len()==2");
+        // 制約dual ≠ 0 (constraint active)
+        let dual = if result.dual_solution.is_empty() { 0.0 } else { result.dual_solution[0] };
+        assert!(dual > tol, "BD-T7: constraint dual>0 (active), got {}", dual);
+        // lb_x ≠ 0 (x=2=lb, active)
+        assert!(result.bound_duals[0] > tol,
+            "BD-T7: lb_x>0 (active lower bound), got {}", result.bound_duals[0]);
+        // lb_y ≈ 0 (y=1 > lb=0, inactive)
+        assert!(result.bound_duals[1].abs() < tol,
+            "BD-T7: lb_y≈0 (inactive lower bound), got {}", result.bound_duals[1]);
+        // KKT停止性: A[0,j]=-1 なので A^T y の寄与は -dual
+        // x: x* - dual - lb_x ≈ 0 → 2 - dual - lb_x
+        let kkt_x = result.solution[0] - dual - result.bound_duals[0];
+        assert!(kkt_x.abs() < 1e-3, "BD-T7: KKT_x≈0, got {}", kkt_x);
+        // y: y* - dual - lb_y ≈ 0 → 1 - dual - lb_y
+        let kkt_y = result.solution[1] - dual - result.bound_duals[1];
+        assert!(kkt_y.abs() < 1e-3, "BD-T7: KKT_y≈0, got {}", kkt_y);
+    }
+
 }
