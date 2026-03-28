@@ -1266,4 +1266,104 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Optimal, "A5-S02: 正常ケースは Optimal");
     }
 
+    /// IPM-T13: 大係数行と小係数行の混在ケースで小行の違反を行ノルム正規化で正しく検出
+    ///
+    /// 背景 (cmd_680 QC-C M1 指摘):
+    ///   旧方式（norm_b: 全行を最大|b_i|で正規化）では、大係数行が norm_b を支配するため
+    ///   小係数行の微小違反が eps 未満に見えて偽PASSになっていた。
+    ///   新方式（行ノルム正規化: 各行を自身の行ノルムで正規化）ではこの問題が解消される。
+    ///
+    /// 問題:
+    ///   min x0^2 + x1^2  (Q=2I, c=[0,0])
+    ///   s.t. 1e6*x0 = 1e6  (row 0: 大係数、rn_0=1e6)
+    ///        x1     = 1    (row 1: 小係数、rn_1=1.0)
+    ///   bounds: (-INF, INF)
+    ///
+    /// mock解: x=[1.0, 1.0+1e-5] (row0は満足、row1は delta=1e-5 の違反)
+    ///
+    /// 行ノルム正規化 (新方式):
+    ///   pfeas_1 = 1e-5 / (1 + rn_1 + |b_1|) = 1e-5 / 3 ≈ 3.3e-6 > eps=1e-6 → 違反検出
+    ///
+    /// 旧方式 (norm_b = max(|b_i|) = 1e6 を全行に適用):
+    ///   pfeas_1_old = 1e-5 / (1 + 1e6) ≈ 1e-11 < eps → 偽PASS (新方式で修正済み)
+    #[test]
+    fn test_post_verify_row_norm_rejects_small_row_violation() {
+        use crate::problem::ConstraintType;
+
+        // 問題構築: 大係数行(row0) + 小係数行(row1) の等式制約
+        // A = [[1e6, 0], [0, 1]], b = [1e6, 1]
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // CSC: col0→row0(1e6), col1→row1(1.0)
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e6_f64, 1.0], 2, 2).unwrap();
+        let b = vec![1e6_f64, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+        ).unwrap();
+
+        // mock解: row0 は正確に満足、row1 は delta=1e-5 の違反
+        let delta = 1e-5_f64;
+        let mock_result = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![1.0, 1.0 + delta],
+            dual_solution: vec![0.0, 0.0],
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = post_verify_solution(mock_result, &problem, eps);
+
+        // 行ノルム正規化: pfeas_1 = 1e-5/3 ≈ 3.3e-6 > eps → SuboptimalSolution のまま
+        assert_eq!(
+            result.status,
+            SolveStatus::SuboptimalSolution,
+            "IPM-T13: 小係数行(row1)の delta=1e-5 違反を行ノルム正規化で検出し SuboptimalSolution を返すべき。\
+             旧 norm_b 方式では pfeas_old≈1e-11<eps で偽PASSとなる。got {:?}",
+            result.status
+        );
+    }
+
+    /// IPM-T14: 大係数行と小係数行の混在ケースで正確な解をOptimalと判定
+    ///
+    /// IPM-T13 の逆ケース: 全制約を正確に満足する解は Optimal に昇格すること。
+    /// 行ノルム正規化が偽陰性（真のOptimalを拒否）を引き起こさないことを確認。
+    ///
+    /// 問題: IPM-T13 と同一
+    /// mock解: x=[1.0, 1.0] (全制約満足)、y=[-2e-6, -2.0] (KKT双対変数)
+    #[test]
+    fn test_post_verify_row_norm_accepts_exact_solution() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e6_f64, 1.0], 2, 2).unwrap();
+        let b = vec![1e6_f64, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+        ).unwrap();
+
+        // KKT双対変数: Q*x + c + A^T*y = 0 → [2 + 1e6*y0, 2 + y1] = 0 → y=[-2e-6, -2]
+        let mock_result = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![1.0, 1.0],
+            dual_solution: vec![-2e-6_f64, -2.0],
+            ..SolverResult::default()
+        };
+
+        let eps = 1e-6_f64;
+        let result = post_verify_solution(mock_result, &problem, eps);
+
+        // pfeas_normalized = 0 (完全満足) → bfeas OK (無制限) → dfeas ≈ 0 < threshold → Optimal
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "IPM-T14: 全制約を正確に満足する解は Optimal に昇格すべき。got {:?}",
+            result.status
+        );
+    }
+
 }
