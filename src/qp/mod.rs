@@ -2876,6 +2876,5 @@ mod tests {
         let pfeas_norm = (ax_val - b_val).abs() / (1.0 + norms[0] + b_val.abs());
         assert!(pfeas_norm < eps, "正規化方式ではOptimalであるべき: {}", pfeas_norm);
     }
-    }
 
 }
