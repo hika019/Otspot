@@ -101,14 +101,26 @@ fn get_dfeas(result: &solver::problem::SolverResult) -> f64 {
 
 /// §2.3: 相補性チェック（LP限定。QPスキップ）
 ///
-/// max_i |x_i * s_i| （s_i = reduced_costs_i）
-fn compute_complementarity(solution: &[f64], reduced_costs: &[f64]) -> f64 {
+/// 双対相補性: max_i |(x_i - lb_i)*max(rc_i,0) + (ub_i - x_i)*max(-rc_i,0)|
+fn compute_complementarity(
+    solution: &[f64],
+    reduced_costs: &[f64],
+    bounds: &[(f64, f64)],
+) -> f64 {
     if solution.is_empty() || reduced_costs.is_empty() {
         return f64::NAN;
     }
     let n = solution.len().min(reduced_costs.len());
     (0..n)
-        .map(|i| (solution[i] * reduced_costs[i]).abs())
+        .map(|i| {
+            let (lb, ub) = if i < bounds.len() { bounds[i] } else { (0.0, f64::INFINITY) };
+            let rc = reduced_costs[i];
+            // 双対相補性: 下限側 + 上限側（上限無限の場合はスキップ）
+            let lower_comp = (solution[i] - lb) * rc.max(0.0);
+            let upper_comp = if ub.is_finite() { (ub - solution[i]) * (-rc).max(0.0) } else { 0.0 };
+            lower_comp + upper_comp
+        })
+        .map(|v| v.abs())
         .fold(0.0_f64, f64::max)
 }
 
@@ -499,7 +511,7 @@ fn main() {
                     } else {
                         // Step 7-8: 相補性チェック（LP限定、QPスキップ）
                         let comp = if !is_qp {
-                            compute_complementarity(&result.solution, &result.reduced_costs)
+                            compute_complementarity(&result.solution, &result.reduced_costs, &prob.bounds)
                         } else {
                             f64::NAN // QPでは相補性スキップ
                         };
