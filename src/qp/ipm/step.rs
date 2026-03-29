@@ -101,18 +101,22 @@ fn check_infeasible_or_unbounded(
     }
     let norm_dx = norm_dx_inf;
 
-    // ③ 目的関数方向条件: LP(Q=0) → c·Δx < -ε*norm_dx; QP(Q≠0) → ||Q*Δx+c||/norm_dx < ε
+    // ③ 目的関数方向条件:
+    //    LP(Q=0): c·Δx / norm_dx < -ε
+    //    QP(Q≠0): ||Q*Δx||/norm_dx < ε (条件1: Δx∈null(Q)) AND c^T*Δx/norm_dx < -ε (条件2: 目的減少)
+    // 参照: ippmm.rs の check_infeasible_or_unbounded_ippmm も同一ロジックを使用（同期修正必須）
     let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
     let cond_obj = if is_lp {
         let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
         c_dx / norm_dx < -EPS_INF
     } else {
+        // QP Unbounded条件: 後退光線 d の存在 = (Q*d≈0) AND (c^T*d < 0)
+        // c=0の場合は条件2が0≥0→偽となり、Q≥0なら自動的にUnbounded不判定（正しい挙動）
         let mut qdx = vec![0.0f64; n];
         spmv_q(&problem.q, dx, &mut qdx);
-        let qdx_plus_c_norm: f64 = qdx.iter().zip(problem.c.iter())
-            .map(|(&qi, &ci)| (qi + ci).abs())
-            .fold(0.0_f64, f64::max);
-        qdx_plus_c_norm / norm_dx < EPS_INF
+        let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
+        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
+        (norm_qdx / norm_dx < EPS_INF) && (c_dx / norm_dx < -EPS_INF)
     };
     if !cond_obj {
         return None;

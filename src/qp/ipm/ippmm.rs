@@ -1036,7 +1036,10 @@ fn check_infeasible_or_unbounded_ippmm(
     }
     let norm_dx = norm_dx_inf;
 
-    // 目的関数方向条件: LP(Q=0) → c·Δx < -ε*norm_dx; QP(Q≠0) → ||Q*Δx+c||/norm_dx < ε
+    // 目的関数方向条件:
+    //   LP(Q=0): c·Δx / norm_dx < -ε
+    //   QP(Q≠0): ||Q*Δx||/norm_dx < ε (条件1: Δx∈null(Q)) AND c^T*Δx/norm_dx < -ε (条件2: 目的減少)
+    // 参照: step.rs の check_infeasible_or_unbounded も同一ロジックを使用（同期修正必須）
     let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
     let cond_obj = if is_lp {
         let c_dx: f64 = problem
@@ -1047,14 +1050,18 @@ fn check_infeasible_or_unbounded_ippmm(
             .sum();
         c_dx / norm_dx < -EPS_INF
     } else {
+        // QP Unbounded条件: 後退光線 d の存在 = (Q*d≈0) AND (c^T*d < 0)
+        // c=0の場合は条件2が0≥0→偽となり、Q≥0なら自動的にUnbounded不判定（正しい挙動）
         let mut qdx = vec![0.0f64; n];
         spmv_q_ippmm(&problem.q, dx, &mut qdx);
-        let qdx_plus_c_norm: f64 = qdx
+        let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
+        let c_dx: f64 = problem
+            .c
             .iter()
-            .zip(problem.c.iter())
-            .map(|(&qi, &ci)| (qi + ci).abs())
-            .fold(0.0_f64, f64::max);
-        qdx_plus_c_norm / norm_dx < EPS_INF
+            .zip(dx.iter())
+            .map(|(&ci, &dxi)| ci * dxi)
+            .sum();
+        (norm_qdx / norm_dx < EPS_INF) && (c_dx / norm_dx < -EPS_INF)
     };
     if !cond_obj {
         return None;
@@ -1346,6 +1353,57 @@ mod tests {
             check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
             Some(SolveStatus::Unbounded),
             "IPPMM-T-INF4: LP dual infeasibility → Unbounded であること"
+        );
+    }
+
+    /// IPPMM-T-INF5: QP c=0 のとき Unbounded を返さないことを確認（QPLIB_9002バグ回帰防止）
+    ///
+    /// Q = diag([0, 2]) (1エントリのみ → is_lp=false)
+    /// c = [0, 0], dx = [1.0, 0.0]
+    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
+    /// 条件2: c^T*dx / norm_dx = 0 → NOT < -EPS_INF → 不成立
+    /// → cond_obj = false → None (Unbounded不判定)
+    #[test]
+    fn test_qp_c_zero_not_unbounded() {
+        // Q に (1,1)=2.0 のエントリのみ → is_lp=false (Q.values=[2.0]≠0)
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0]; // c=0
+        let a = CscMatrix::new(0, 2);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::new(0, 2);
+        let dx = vec![1.0, 0.0]; // Q*dx = [0,0], norm_qdx=0 < EPS_INF, c_dx=0 ≥ -EPS_INF
+        let dy: Vec<f64> = vec![];
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            None,
+            "IPPMM-T-INF5: QP c=0 → Unbounded不判定（QPLIB_9002回帰防止）"
+        );
+    }
+
+    /// IPPMM-T-INF6: QP c≠0 の真のUnbounded問題で正しく Unbounded を返すことを確認
+    ///
+    /// Q = diag([0, 2]) (is_lp=false), c = [-1, 0], dx = [1.0, 0.0]
+    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
+    /// 条件2: c^T*dx / norm_dx = -1 < -EPS_INF → 通過
+    /// → cond_obj = true, m_orig=0 → Unbounded
+    #[test]
+    fn test_qp_c_nonzero_true_unbounded() {
+        // Q に (1,1)=2.0 のエントリのみ → is_lp=false
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
+        let c = vec![-1.0, 0.0]; // c≠0、x[0]方向に目的減少
+        let a = CscMatrix::new(0, 2);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::new(0, 2);
+        let dx = vec![1.0, 0.0]; // Q*dx=[0,0] → 条件1通過; c_dx=-1 → 条件2通過
+        let dy: Vec<f64> = vec![];
+        assert_eq!(
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            Some(SolveStatus::Unbounded),
+            "IPPMM-T-INF6: QP c≠0 真Unbounded → Unbounded判定"
         );
     }
 }
