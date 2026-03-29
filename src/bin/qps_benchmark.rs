@@ -83,8 +83,10 @@ fn compute_complementarity(
         .map(|i| {
             let (lb, ub) = if i < bounds.len() { bounds[i] } else { (0.0, f64::INFINITY) };
             let rc = reduced_costs[i];
-            // 双対相補性: 下限側 + 上限側
-            (solution[i] - lb) * rc.max(0.0) + (ub - solution[i]) * (-rc).max(0.0)
+            // 双対相補性: 下限側 + 上限側（上限無限の場合はスキップ）
+            let lower_comp = (solution[i] - lb) * rc.max(0.0);
+            let upper_comp = if ub.is_finite() { (ub - solution[i]) * (-rc).max(0.0) } else { 0.0 };
+            lower_comp + upper_comp
         })
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max)
