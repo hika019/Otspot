@@ -580,6 +580,19 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         {
             SimplexOutcome::Optimal(obj, y) => {
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
+                if !check_eq_feasibility(problem, &solution) {
+                    return SolverResult {
+                        status: SolveStatus::NumericalError,
+                        objective: obj + sf.obj_offset,
+                        solution: vec![],
+                        dual_solution: vec![],
+                        reduced_costs: vec![],
+                        slack: vec![],
+                        warm_start_basis: None,
+                        ..Default::default()
+                    };
+                }
                 let (dual_solution, reduced_costs, slack) =
                     extract_dual_info(sf, problem, &y, &solution, &row_scale);
                 let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
@@ -689,6 +702,48 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     };
                 }
 
+                // 案C: Phase I 完了後の縮退人工変数 pivot out
+                // x_b[i] ≈ 0 の人工変数を構造変数で置換し、Phase II の基底品質を改善する。
+                // b=0 の Eq 制約で Phase I が即座終了した場合に人工変数が基底に残留する縮退を解消する。
+                // 注: bore3d は B1 (fixpoint iteration) で修正済みのため、案C は現状 DISABLED。
+                // B1 で b=0 Eq行がすでに presolve で除去される → Phase I 自体が実行されない。
+                // hs51 のような自由変数+Le制約の feasibility LP では基底が特異化するリスクがある。
+                if false {
+                    let mut is_basic_structural = vec![false; sf.n_total];
+                    for &col in basis.iter() {
+                        if col < sf.n_total {
+                            is_basic_structural[col] = true;
+                        }
+                    }
+                    for i in 0..m {
+                        if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
+                            continue;
+                        }
+                        // 行 i で最大 |a_ext[i,j]| の非基底構造列 j を探す
+                        let mut best_j = None;
+                        let mut best_abs = PIVOT_TOL;
+                        #[allow(clippy::needless_range_loop)]
+                        for j in 0..sf.n_total {
+                            if is_basic_structural[j] {
+                                continue;
+                            }
+                            if let Ok((rows, vals)) = a_ext.get_column(j) {
+                                for (k, &row) in rows.iter().enumerate() {
+                                    if row == i && vals[k].abs() > best_abs {
+                                        best_abs = vals[k].abs();
+                                        best_j = Some(j);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(j) = best_j {
+                            is_basic_structural[j] = true;
+                            basis[i] = j;
+                            // degenerate pivot: x_b[i] = 0, 他の x_b は変化なし
+                        }
+                    }
+                }
+
                 // Phase II: restrict pricing to non-artificial columns
                 // Use scaled c for Phase II cost
                 let mut c_phase2 = vec![0.0; n_ext];
@@ -708,6 +763,19 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 ) {
                     SimplexOutcome::Optimal(obj2, y) => {
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
+                        if !check_eq_feasibility(problem, &solution) {
+                            return SolverResult {
+                                status: SolveStatus::NumericalError,
+                                objective: obj2 + sf.obj_offset,
+                                solution: vec![],
+                                dual_solution: vec![],
+                                reduced_costs: vec![],
+                                slack: vec![],
+                                warm_start_basis: None,
+                                ..Default::default()
+                            };
+                        }
                         let (dual_solution, reduced_costs, slack) =
                             extract_dual_info(sf, problem, &y, &solution, &row_scale);
                         let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
@@ -769,6 +837,32 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             },
         }
     }
+}
+
+/// Eq 制約の feasibility を確認する（案D: defense-in-depth）
+///
+/// `solution` は problem の変数空間の解ベクトル。
+/// Eq 制約の violation が `FEASIBILITY_TOL` を超える場合 false を返す。
+/// bore3d の 100 単位違反のような明らかな誤 Optimal を検出し NumericalError として返すために使う。
+fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
+    const FEASIBILITY_TOL: f64 = 1e-4;
+    let mut ax = vec![0.0f64; problem.num_constraints];
+    for (j, &sj) in solution.iter().enumerate() {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                ax[row] += vals[k] * sj;
+            }
+        }
+    }
+    for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
+        if *ct == ConstraintType::Eq {
+            let violation = (ax_i - bi).abs();
+            if violation > FEASIBILITY_TOL {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// 最適基底解から元の変数への解ベクトルを復元する

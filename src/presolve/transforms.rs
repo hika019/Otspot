@@ -145,6 +145,11 @@ pub fn run_presolve(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
 ) -> Result<PresolveResult, PresolveStatus> {
+    // 最初の deadline チェック: row_entries 構築前に超過していれば即 early return
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Ok(PresolveResult::no_reduction(problem));
+    }
+
     let n = problem.num_vars;
     let m = problem.num_constraints;
 
@@ -165,6 +170,19 @@ pub fn run_presolve(
     let mut bounds = problem.bounds.clone();
     let mut postsolve_stack: Vec<PostsolveStep> = vec![];
     let mut obj_offset = 0.0f64;
+
+    const MAX_PRESOLVE_ITER: usize = 50;
+    let mut pass = 0usize;
+    loop {
+        if pass >= MAX_PRESOLVE_ITER {
+            eprintln!("presolve: MAX_PRESOLVE_ITER ({MAX_PRESOLVE_ITER}) reached without convergence");
+            break;
+        }
+        let prev_removed = removed_cols.iter().filter(|&&r| r).count()
+            + removed_rows.iter().filter(|&&r| r).count();
+        // Step 5 で新たに固定された変数数（lb == ub になったもの）を追跡する。
+        // 単なる bounds 収縮（lb ≠ ub）はループ継続の理由にしない — 双対解の精度を保護するため。
+        let mut new_fixed_by_step5 = 0usize;
 
     // ==========================================================
     // Step 1: Fixed variable removal (lb == ub)
@@ -589,9 +607,27 @@ pub fn run_presolve(
                     old_ub,
                 });
                 bounds[j] = (new_lb, new_ub);
+                // 変数が新たに固定された（lb == ub）場合のみカウント
+                // 次の pass の Step 1 でこの変数が除去される → cascade 継続が必要
+                if (new_lb - new_ub).abs() < ZERO_TOL {
+                    new_fixed_by_step5 += 1;
+                }
             }
         }
     }
+
+        // Fixpoint 収束チェック:
+        // - 構造的除去 (reduction > 0): Step 1-4 が変数/制約を除去 → 継続
+        // - 新規固定変数 (new_fixed_by_step5 > 0): Step 5 が lb==ub を作成 → 次 pass の Step 1 で除去
+        // - 単なる bounds 収縮のみ: 双対解への影響を避けるため継続しない
+        let curr_removed = removed_cols.iter().filter(|&&r| r).count()
+            + removed_rows.iter().filter(|&&r| r).count();
+        let reduction = curr_removed - prev_removed;
+        if reduction == 0 && new_fixed_by_step5 == 0 {
+            break;
+        }
+        pass += 1;
+    } // end fixpoint loop
 
     // ==========================================================
     // 縮約後問題の構築
@@ -756,11 +792,10 @@ mod tests {
             vec![(2.0, 2.0), (0.0, f64::INFINITY)],
         );
         let result = run_presolve(&lp, None).unwrap();
-        // x1 is fixed at 2, so it's removed
-        assert_eq!(result.reduced_problem.num_vars, 1, "x1 should be removed");
-        assert_eq!(result.reduced_problem.num_constraints, 1);
-        // b should be updated: 5.0 - 1.0*2 = 3.0
-        assert!((result.reduced_problem.b[0] - 3.0).abs() < 1e-10);
+        // Fixpoint: x1 removed (fixed at 2) → x2≤3 → redundant (ub=3) → x2 empty col → removed
+        // Final: 0 vars, 0 constraints; obj_offset = 2 (x1=2, x2=0)
+        assert_eq!(result.reduced_problem.num_vars, 0);
+        assert_eq!(result.reduced_problem.num_constraints, 0);
         assert!(result.was_reduced);
         assert!((result.obj_offset - 2.0).abs() < 1e-10); // c[0]*2 = 1*2
     }
@@ -803,7 +838,9 @@ mod tests {
             vec![(0.0, f64::INFINITY)],
         );
         let result = run_presolve(&lp, None).unwrap();
-        assert_eq!(result.reduced_problem.num_constraints, 1);
+        // Fixpoint: empty row removed → x≤3 (ub tightened) → redundant → x empty col removed
+        // Final: 0 vars, 0 constraints
+        assert_eq!(result.reduced_problem.num_constraints, 0);
     }
 
     #[test]
@@ -880,10 +917,10 @@ mod tests {
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         let result = run_presolve(&lp, None).unwrap();
-        // x1 removed (fixed at 3), row 0 removed
-        assert_eq!(result.reduced_problem.num_vars, 1);
-        // b[1] updated: 10 - 1*3 = 7
-        assert!((result.reduced_problem.b[0] - 7.0).abs() < 1e-10);
+        // Fixpoint: x1=3 (singleton Eq) → x2≤7 (ub tightened) → redundant → x2 empty col removed
+        // Final: 0 vars, 0 constraints; obj_offset = 3 (x1=3, x2=0)
+        assert_eq!(result.reduced_problem.num_vars, 0);
+        assert_eq!(result.reduced_problem.num_constraints, 0);
         assert!((result.obj_offset - 3.0).abs() < 1e-10); // c[0]*3 = 1*3
     }
 
@@ -928,7 +965,8 @@ mod tests {
         let result = run_presolve(&lp, None).unwrap();
         // 全制約が冗長 → 縮約後制約数 = 0
         assert_eq!(result.reduced_problem.num_constraints, 0, "all 3 constraints should be redundant");
-        assert_eq!(result.reduced_problem.num_vars, 2, "vars retained");
+        // Fixpoint: constraints removed → x1/x2 become empty cols (c>0, lb=0) → removed
+        assert_eq!(result.reduced_problem.num_vars, 0, "vars removed as empty cols after constraints gone");
 
         // 独立した非冗長制約のテスト: x1+x2<=2 with x1,x2 in [0,10]
         // row_ub = 10+10=20 > 2 → NOT redundant
