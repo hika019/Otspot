@@ -724,9 +724,43 @@ pub fn run_qp_presolve_phase1(
             .collect();
         let (_, row_ub, _, ub_fin) = activity_range(&active_entries, &bounds, None);
 
-        // Le 制約 (Ax <= b) において row_ub <= b[i] なら常に充足 → 冗長
-        if ub_fin && row_ub <= b[i] + ZERO_TOL {
-            removed_rows[i] = true;
+        match prob.constraint_types[i] {
+            crate::problem::ConstraintType::Le => {
+                // Le 制約 (Ax <= b) において row_ub <= b[i] なら常に充足 → 冗長
+                if ub_fin && row_ub <= b[i] + ZERO_TOL {
+                    removed_rows[i] = true;
+                }
+            }
+            crate::problem::ConstraintType::Eq => {
+                // Eq 制約: row_ub < b[i] → 実行不可能（達成不能）
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
+                    return QpPresolveResult::infeasible(prob);
+                }
+                // Eq 制約: row_ub = b[i] → 全変数が最大値に固定される
+                if ub_fin && (row_ub - b[i]).abs() <= ZERO_TOL {
+                    let fixes: Vec<(usize, f64)> = active_entries.iter().filter_map(|&(j, a_ij)| {
+                        let (lb_j, ub_j) = bounds[j];
+                        if a_ij > 0.0 {
+                            if ub_j.is_finite() { Some((j, ub_j)) } else { None }
+                        } else if a_ij < 0.0 {
+                            if lb_j.is_finite() { Some((j, lb_j)) } else { None }
+                        } else {
+                            None
+                        }
+                    }).collect();
+                    if fixes.len() == active_entries.len() {
+                        for (j, val) in fixes {
+                            if !removed_cols[j] {
+                                apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+                                removed_cols[j] = true;
+                                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+                            }
+                        }
+                        removed_rows[i] = true;
+                    }
+                }
+            }
+            crate::problem::ConstraintType::Ge => {}
         }
     }
 
@@ -1020,9 +1054,41 @@ pub fn run_qp_presolve_phase1(
             .collect();
         let (_row_lb, row_ub, _, ub_fin) = activity_range(&entries, &bounds, None);
 
-        // 更新後の activity_range で冗長な Le 制約を再除去
-        if ub_fin && row_ub <= b[i] + ZERO_TOL {
-            removed_rows[i] = true;
+        // 更新後の activity_range で冗長な制約を再除去（型別処理）
+        match prob.constraint_types[i] {
+            crate::problem::ConstraintType::Le => {
+                if ub_fin && row_ub <= b[i] + ZERO_TOL {
+                    removed_rows[i] = true;
+                }
+            }
+            crate::problem::ConstraintType::Eq => {
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
+                    return QpPresolveResult::infeasible(prob);
+                }
+                if ub_fin && (row_ub - b[i]).abs() <= ZERO_TOL {
+                    let fixes: Vec<(usize, f64)> = entries.iter().filter_map(|&(j, a_ij)| {
+                        let (lb_j, ub_j) = bounds[j];
+                        if a_ij > 0.0 {
+                            if ub_j.is_finite() { Some((j, ub_j)) } else { None }
+                        } else if a_ij < 0.0 {
+                            if lb_j.is_finite() { Some((j, lb_j)) } else { None }
+                        } else {
+                            None
+                        }
+                    }).collect();
+                    if fixes.len() == entries.len() {
+                        for (j, val) in fixes {
+                            if !removed_cols[j] {
+                                apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+                                removed_cols[j] = true;
+                                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+                            }
+                        }
+                        removed_rows[i] = true;
+                    }
+                }
+            }
+            crate::problem::ConstraintType::Ge => {}
         }
         // Infeasible チェック: row_lb > b[i]（Le 制約が決して充足されない）
         let (row_lb2, _, lb_fin2, _) = activity_range(&entries, &bounds, None);

@@ -1,7 +1,9 @@
 //! Integration tests: Parse Netlib MPS files and verify problem dimensions + solving
 use solver::io::mps::parse_mps_file;
+use solver::io::qps::parse_qps;
 use solver::options::{SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
+use solver::qp::solve_qp_with;
 use solver::simplex::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
@@ -467,5 +469,60 @@ fn test_dual_simplex_netlib_3() {
         result.objective
     );
     println!("adlittle (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+// --- bore3d: QP Presolve Eq制約修正確認 (cmd_703) ---
+
+#[test]
+fn test_solve_bore3d_primal() {
+    // T1: bore3d を Primal Simplex 経路（QP presolve → LP simplex）で解く
+    // 正常修正後: Optimal, obj ≈ 1373.08
+    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    let prob = parse_qps(path).expect("Failed to parse bore3d.QPS");
+    let opts = SolverOptions::default();
+    let start = Instant::now();
+    let result = solve_qp_with(&prob, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "bore3d (Primal): expected Optimal, got {:?}",
+        result.status
+    );
+    let expected = 1373.08;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "bore3d (Primal): expected obj ≈ {}, got {}",
+        expected,
+        result.objective
+    );
+    println!("bore3d (Primal Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+}
+
+#[test]
+fn test_solve_bore3d_dual() {
+    // T4: bore3d を Dual Simplex 経路で解く
+    // 正常修正後: Optimal, obj ≈ 1373.08
+    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    let prob = parse_qps(path).expect("Failed to parse bore3d.QPS");
+    let mut opts = SolverOptions::default();
+    opts.simplex_method = SimplexMethod::Dual;
+    let start = Instant::now();
+    let result = solve_qp_with(&prob, &opts);
+    let elapsed = start.elapsed();
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "bore3d (Dual): expected Optimal, got {:?}",
+        result.status
+    );
+    let expected = 1373.08;
+    assert!(
+        (result.objective - expected).abs() < 1.0,
+        "bore3d (Dual): expected obj ≈ {}, got {}",
+        expected,
+        result.objective
+    );
+    println!("bore3d (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
