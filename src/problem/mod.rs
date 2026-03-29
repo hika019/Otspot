@@ -80,7 +80,15 @@ pub struct SolverResult {
     /// warm-start用の基底情報（Optimal時のみ Some）
     pub warm_start_basis: Option<WarmStartBasis>,
     // --- QP固有フィールド ---
-    /// 変数境界の双対値（有限境界制約の双対値、長さ: 有限 bounds 制約数）
+    /// Bound dual values (shadow prices for variable bounds).
+    ///
+    /// Maps to original variable indices via col_map.
+    /// Empty if no bound constraints are active.
+    ///
+    /// 仕様 (§2.5):
+    /// - 除去変数 (presolveで固定された変数) の bound_dual = 0.0 (近似)
+    /// - presolve tightening で追加された境界の dual は報告しない（元問題基準）
+    /// - 配列順: `[lb_dual(j0), ..., lb_dual(j_{n_lb-1}), ub_dual(j0), ..., ub_dual(j_{n_ub-1})]`
     pub bound_duals: Vec<f64>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,

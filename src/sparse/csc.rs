@@ -49,6 +49,21 @@ impl CscMatrix {
         self.values.len()
     }
 
+    /// 各行の∞ノルム（行ごとの最大絶対値）を一括計算する: O(nnz)
+    ///
+    /// CSC格式では行方向アクセスが非効率だが、全非ゼロ要素を1回走査して
+    /// 各行の最大絶対値を収集することで O(nnz) で完了する。
+    pub fn row_infinity_norms(&self) -> Vec<f64> {
+        let mut norms = vec![0.0_f64; self.nrows];
+        for (&val, &row) in self.values.iter().zip(self.row_ind.iter()) {
+            let abs_val = val.abs();
+            if abs_val > norms[row] {
+                norms[row] = abs_val;
+            }
+        }
+        norms
+    }
+
     /// COO（座標形式）のトリプレットから CSC 行列を構築する
     ///
     /// 同一 (row, col) への重複エントリは自動的に加算される。
