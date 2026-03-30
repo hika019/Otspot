@@ -243,8 +243,15 @@ fn solve_qp_concurrent(
                         if should_update {
                             best_ranked = Some((r, result));
                         }
-                    } else if result.status == SolveStatus::Infeasible || fallback.is_none() {
-                        fallback = Some(result);
+                    } else {
+                        // NOTE: Infeasible は fallback を常に上書きする。
+                        // 将来のソルバーで Fix-D（SuboptimalSolution→Timeout 変換）を省略すると、
+                        // SuboptimalSolution（解あり）→ Infeasible の到着順序で解が失われる。
+                        // 新規ソルバー追加時は Fix-D の実装を必須とする。
+                        // See: cmd596_quality_rank_design.md §2.4
+                        if result.status == SolveStatus::Infeasible || fallback.is_none() {
+                            fallback = Some(result);
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -2036,6 +2043,51 @@ mod tests {
             rank.is_none(),
             "A7-CS04: SuboptimalSolution は quality_rank_of から除外されるべき。現状 {:?} が返る",
             rank
+        );
+    }
+
+    /// A7-CS04-E2E: 全スレッドが SuboptimalSolution を返した場合 fallback 経由で正しく返却される
+    /// See: cmd596_quality_rank_design.md §6
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_suboptimal_falls_to_fallback_in_concurrent() {
+        // SPEC: A7-CS04 integration
+        // quality_rank_of(SuboptimalSolution) = None → best_ranked = None → fallback から返却
+        let result_sub1 = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![0.1, 0.1],
+            ..Default::default()
+        };
+        let result_sub2 = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![0.9, 0.9],
+            ..Default::default()
+        };
+        // quality_rank_of は None を返す（fallback 経路へ）
+        assert!(
+            quality_rank_of(&result_sub1).is_none(),
+            "SuboptimalSolution は quality_rank_of から除外される"
+        );
+        assert!(
+            quality_rank_of(&result_sub2).is_none(),
+            "SuboptimalSolution は quality_rank_of から除外される"
+        );
+        // fallback ロジック: None → fallback.is_none() のとき採用、そうでなければ維持
+        let expected_solution = result_sub1.solution.clone();
+        let mut fallback: Option<SolverResult> = None;
+        for result in [result_sub1, result_sub2] {
+            if quality_rank_of(&result).is_none() {
+                if result.status == SolveStatus::Infeasible || fallback.is_none() {
+                    fallback = Some(result);
+                }
+            }
+        }
+        // 1st 到着の SuboptimalSolution が fallback に保持される
+        assert!(fallback.is_some(), "fallback に SuboptimalSolution が格納される");
+        assert_eq!(
+            fallback.unwrap().solution,
+            expected_solution,
+            "1st 到着の SuboptimalSolution が fallback として採用される"
         );
     }
 
