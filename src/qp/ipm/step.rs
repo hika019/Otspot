@@ -218,6 +218,9 @@ pub(crate) fn solve_qp_ipm_inner(
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
+    // C-1: mu非依存proximal正則化（rho_ipmフロア）
+    let mut rho_ipm = 1e-4_f64;
+
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
@@ -311,6 +314,8 @@ pub(crate) fn solve_qp_ipm_inner(
         // δ を μ に追従して縮小（IP-PMM）
         let delta_p = options.ipm.delta_min.max(options.ipm.delta_p_init * mu);
         let delta_d = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
+        // C-1: rho_ipmフロアによるmu非依存proximal正則化
+        let effective_delta_p = delta_p.max(rho_ipm);
 
         // Σ = diag(s_i / y_i)（両パスで共通）
         // y→0 のとき si/yi→Inf になる場合がある。faerはInf値を行列要素として処理できないため
@@ -336,7 +341,7 @@ pub(crate) fn solve_qp_ipm_inner(
         // 方式 D: 初回は full 構築 + symbolic/numeric 全因子化、2反復目以降は values 差分更新
         //         + refactorize_numeric（symbolic 再利用）で O(nnz log nnz) → O(n + m_ext) に削減。
         // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
-        let mut delta_p_retry = delta_p;
+        let mut delta_p_retry = effective_delta_p;
         let mut delta_d_retry = delta_d;
         let mut retry_timeout = false;
         'retry: for _retry in 0..10 {
@@ -611,6 +616,8 @@ pub(crate) fn solve_qp_ipm_inner(
                 y[i] = 1e-12;
             }
         }
+        // C-1: rho_ipm減衰（RHO_IPM_DECAY=0.9, RHO_IPM_MIN=1e-9）
+        rho_ipm = (rho_ipm * 0.9_f64).max(1e-9_f64);
     }
 
     // 目的関数値
