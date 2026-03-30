@@ -589,7 +589,7 @@ pub(crate) fn solve_ippmm_inner(
 
         // Infeasibility / Unboundedness 検出（IP-PMM パス）
         if let Some(infeas_status) = check_infeasible_or_unbounded_ippmm(
-            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
         ) {
             status = Some(infeas_status);
             final_iter = iter;
@@ -967,6 +967,7 @@ fn norm_inf_ippmm(v: &[f64]) -> f64 {
 /// - `m_orig`: 元の等式/不等式制約数（境界制約を除く）
 /// - `m_ext`: 拡張制約数（境界スラック含む）
 /// - `iter`: 現在の反復番号（MIN_ITER 未満はスキップ）
+#[allow(clippy::too_many_arguments)]
 fn check_infeasible_or_unbounded_ippmm(
     dx: &[f64],
     dy: &[f64],
@@ -975,6 +976,7 @@ fn check_infeasible_or_unbounded_ippmm(
     m_orig: usize,
     m_ext: usize,
     iter: usize,
+    delta_p: f64,
 ) -> Option<SolveStatus> {
     /// PARAM: 根拠=経験値(OSQP:1e-4より厳格、1e-8は内点法の収束精度水準と整合) | 承認=cmd_506実装時設定・要検証
     const EPS_INF: f64 = 1e-8;
@@ -1054,6 +1056,10 @@ fn check_infeasible_or_unbounded_ippmm(
         // c=0の場合は条件2が0≥0→偽となり、Q≥0なら自動的にUnbounded不判定（正しい挙動）
         let mut qdx = vec![0.0f64; n];
         spmv_q_ippmm(&problem.q, dx, &mut qdx);
+        // C-3修正: 正則化項を加算し KKT系と整合: ||(Q+delta_p·I)·Δx||
+        for i in 0..n {
+            qdx[i] += delta_p * dx[i];
+        }
         let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
         let c_dx: f64 = problem
             .c
@@ -1285,7 +1291,7 @@ mod tests {
         let dy: Vec<f64> = vec![];
         // iter=4 < MIN_ITER=5 → None
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 4),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 4, 0.0),
             None,
             "IPPMM-T-INF1: iter < MIN_ITER は None であること"
         );
@@ -1305,7 +1311,7 @@ mod tests {
         let dy: Vec<f64> = vec![];
         // 収束時偽陽性防止: dx が小さすぎる → None
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             None,
             "IPPMM-T-INF2: ||dx||_inf <= MIN_DIR_NORM は None であること"
         );
@@ -1329,7 +1335,7 @@ mod tests {
         let dx = vec![1e-10, 1e-10]; // 非常に小さい → dual チェックはスキップ
         let dy = vec![2.0]; // norm = 2.0 > MIN_DIR_NORM
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 1, 1, 10),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 1, 1, 10, 0.0),
             Some(SolveStatus::Infeasible),
             "IPPMM-T-INF3: Farkas ray 条件 → Infeasible であること"
         );
@@ -1350,7 +1356,7 @@ mod tests {
         let dx = vec![1.0]; // c·dx = -1 < -ε, m_ext=0 なので dual guard は無効
         let dy: Vec<f64> = vec![];
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             Some(SolveStatus::Unbounded),
             "IPPMM-T-INF4: LP dual infeasibility → Unbounded であること"
         );
@@ -1376,7 +1382,7 @@ mod tests {
         let dx = vec![1.0, 0.0]; // Q*dx = [0,0], norm_qdx=0 < EPS_INF, c_dx=0 ≥ -EPS_INF
         let dy: Vec<f64> = vec![];
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             None,
             "IPPMM-T-INF5: QP c=0 → Unbounded不判定（QPLIB_9002回帰防止）"
         );
@@ -1401,7 +1407,7 @@ mod tests {
         let dx = vec![1.0, 0.0]; // Q*dx=[0,0] → 条件1通過; c_dx=-1 → 条件2通過
         let dy: Vec<f64> = vec![];
         assert_eq!(
-            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded_ippmm(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             Some(SolveStatus::Unbounded),
             "IPPMM-T-INF6: QP c≠0 真Unbounded → Unbounded判定"
         );

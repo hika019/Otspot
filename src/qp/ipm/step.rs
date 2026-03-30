@@ -40,6 +40,7 @@ use super::init::compute_initial_point;
 ///   ③ c · Δx / ||Δx|| < -ε_inf  (LP: Q=0)
 ///      ||(Q*Δx + c)|| / ||Δx|| < ε_inf  (QP: Q≠0)
 ///   ④ ||A_orig * Δx|| / ||Δx|| < ε_inf
+#[allow(clippy::too_many_arguments)]
 fn check_infeasible_or_unbounded(
     dx: &[f64],
     dy: &[f64],
@@ -48,6 +49,7 @@ fn check_infeasible_or_unbounded(
     m_orig: usize,
     m_ext: usize,
     iter: usize,
+    delta_p: f64,
 ) -> Option<SolveStatus> {
     const EPS_INF: f64 = 1e-8;
     const MIN_ITER: usize = 5;
@@ -114,6 +116,10 @@ fn check_infeasible_or_unbounded(
         // c=0の場合は条件2が0≥0→偽となり、Q≥0なら自動的にUnbounded不判定（正しい挙動）
         let mut qdx = vec![0.0f64; n];
         spmv_q(&problem.q, dx, &mut qdx);
+        // C-3修正: 正則化項を加算し KKT系と整合: ||(Q+delta_p·I)·Δx||
+        for i in 0..n {
+            qdx[i] += delta_p * dx[i];
+        }
         let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
         let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
         (norm_qdx / norm_dx < EPS_INF) && (c_dx / norm_dx < -EPS_INF)
@@ -595,7 +601,7 @@ pub(crate) fn solve_qp_ipm_inner(
 
         // Infeasibility / Unboundedness 検出（augmented パス）
         if let Some(infeas_status) = check_infeasible_or_unbounded(
-            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter,
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, delta_p_retry,
         ) {
             status = infeas_status;
             final_iter = iter;
@@ -784,7 +790,7 @@ mod tests {
         let dy: Vec<f64> = vec![];
         // iter=4 < MIN_ITER=5 → None
         assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 4),
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 4, 0.0),
             None,
             "STEP-T1: iter < MIN_ITER は None であること"
         );
@@ -804,7 +810,7 @@ mod tests {
         let dy: Vec<f64> = vec![];
         // 収束時偽陽性防止: dx が小さすぎる → None
         assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             None,
             "STEP-T2: ||dx||_inf <= MIN_DIR_NORM は None であること"
         );
@@ -828,7 +834,7 @@ mod tests {
         let dx = vec![1e-10, 1e-10]; // 非常に小さい → dual チェックはスキップ
         let dy = vec![2.0]; // norm = 2.0 > MIN_DIR_NORM
         assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 1, 1, 10),
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 1, 1, 10, 0.0),
             Some(SolveStatus::Infeasible),
             "STEP-T3: Farkas ray 条件 → Infeasible であること"
         );
@@ -849,7 +855,7 @@ mod tests {
         let dx = vec![1.0]; // c·dx = -1 < -ε, m_ext=0 なので dual guard は無効
         let dy: Vec<f64> = vec![];
         assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10),
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
             Some(SolveStatus::Unbounded),
             "STEP-T4: LP dual infeasibility → Unbounded であること"
         );
