@@ -1463,6 +1463,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "faer",
+ "log",
  "proptest",
  "rayon",
 ]

@@ -18,6 +18,7 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve::{self, RuizScaler};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use log::warn;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use pricing::{PricingStrategy, SteepestEdgePricing};
@@ -536,6 +537,28 @@ pub(crate) fn extract_dual_info(
                     *rc_j -= dual_solution[row] * vals[k];
                 }
             }
+        }
+    }
+
+    // ★追加: 上限制約dual (mu_j) の減算
+    // build_standard_form と同じ順序で有限上下限変数を列挙し、
+    // 対応する y_std[m_orig + k] を reduced_costs から減算する。
+    // j は reduced_costs と problem.bounds の両方に使うため range loop が必要。
+    let mut ub_idx = 0usize;
+    #[allow(clippy::needless_range_loop)]
+    for j in 0..n_orig {
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && ub.is_finite() {
+            let row = m_orig + ub_idx;
+            if row < y_std.len() {
+                let sign = if sf.row_negated[row] { -1.0 } else { 1.0 };
+                let rs = row_scale.get(row).copied().unwrap_or(1.0);
+                let mu_j = sign * rs * y_std[row];
+                reduced_costs[j] -= mu_j;
+            } else {
+                warn!("extract_dual_info: y_std too short for ub constraint row {}, expected >= {}", row, row + 1);
+            }
+            ub_idx += 1;
         }
     }
 
@@ -1775,5 +1798,55 @@ mod tests {
         };
         let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "A2-T03: タイムアウトなしで収束すること");
+    }
+
+    /// extract_dual_info が上限制約dual(mu_j)を正しく減算することを検証する
+    ///
+    /// 問題:
+    ///   min -2*x1 - x2
+    ///   s.t. x1 + x2 <= 4
+    ///        0 <= x1 <= 2,  0 <= x2 <= 3
+    ///
+    /// 最適解: x1=2 (bounds上限活性), x2=2 (制約活性, 上限非活性)
+    ///
+    /// KKT条件:
+    ///   rc[0] = c_0 - lambda_1*1 - mu_0 = 0  (x1 at upper bound)
+    ///   rc[1] = c_1 - lambda_1*1       = 0  (x2 strictly between bounds)
+    ///
+    /// mu_j欠落の場合: rc[0] = -2 - lambda_1 != 0 (補正漏れが相補性誤差を生む)
+    #[test]
+    fn test_extract_dual_info_ub_dual() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let problem = LpProblem::new_general(
+            vec![-2.0, -1.0],
+            a,
+            vec![4.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 2.0), (0.0, 3.0)],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions { timeout_secs: None, presolve: false, ..SolverOptions::default() };
+        let result = solve_with(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "status should be Optimal");
+
+        let x = &result.solution;
+        assert!((x[0] - 2.0).abs() < 1e-6, "x[0]={} should be at upper bound 2.0", x[0]);
+        assert!((x[1] - 2.0).abs() < 1e-6, "x[1]={} should be 2.0", x[1]);
+
+        let rc = &result.reduced_costs;
+
+        // x[0] is at upper bound (x[0] = ub = 2) → rc[0] ≤ 0
+        // If mu_j subtraction is missing, rc[0] = c[0] - lambda*a[0,0] = -1 - (-2) = 1 > 0
+        assert!(rc[0] <= 1e-6, "rc[0]={} should be <= 0 (x[0] at upper bound; mu_j subtraction required)", rc[0]);
+
+        // x[1] is strictly between bounds (0 < x[1]=2 < 3) → x[1] is basic → rc[1] ≈ 0
+        assert!(rc[1].abs() < 1e-6, "rc[1]={} should be ≈ 0 (x[1] is basic)", rc[1]);
+
+        // Upper complementarity for x[0]: (ub - x[0]) * max(-rc[0], 0) ≈ 0
+        let ub0 = 2.0_f64;
+        let upper_comp = (ub0 - x[0]) * (-rc[0]).max(0.0);
+        assert!(upper_comp.abs() < 1e-8, "upper complementarity={} should be ≈ 0", upper_comp);
     }
 }
