@@ -144,6 +144,12 @@ if [[ -n "$FEATURES" ]]; then
   FEATURES_EXTRA="--features $FEATURES"
 fi
 
+# 外部タイムアウトをグループ規模に合わせて設定（デフォルト120sでは不足）
+MAX_PER_GROUP=$(( (TOTAL_FILES + JOBS - 1) / JOBS ))
+EXTERNAL_TIMEOUT=$(( TIMEOUT * MAX_PER_GROUP + 300 ))
+export EXTERNAL_TIMEOUT
+echo "[bench_parallel.sh] EXTERNAL_TIMEOUT: ${EXTERNAL_TIMEOUT}s (${MAX_PER_GROUP}問 × ${TIMEOUT}s + 300s余裕)"
+
 # 各グループを並列起動
 declare -a PIDS
 declare -a LOGS
