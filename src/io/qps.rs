@@ -537,11 +537,18 @@ impl QpsParser {
             self.bounds.push((bound_type, col_name, value));
             return Ok(());
         }
-        let col_name = parts[2].to_string();
-        let value = if parts.len() >= 4 {
-            parts[3].parse::<f64>().ok()
+        let (col_name, value) = if parts.len() >= 4 {
+            // 4トークン: type bname cname value
+            (parts[2].to_string(), parts[3].parse::<f64>().ok())
         } else {
-            None
+            // 3トークン: type cname value (bound名省略) OR type bname cname (FR/MI等)
+            // parts[2]が数値ならbound名省略形式: col=parts[1], value=parts[2]
+            // parts[2]が非数値ならFR/MI等: col=parts[2], value=None
+            if let Ok(v) = parts[2].parse::<f64>() {
+                (parts[1].to_string(), Some(v))
+            } else {
+                (parts[2].to_string(), None)
+            }
         };
         self.bounds.push((bound_type, col_name, value));
         Ok(())
@@ -1053,5 +1060,69 @@ ENDATA
             "expected objective≈-4.0, got {}",
             result.objective
         );
+    }
+
+    #[test]
+    fn test_parse_bounds_3token_no_bname() {
+        // 3トークン(A): bound名省略形式 (バグ修正の核心ケース)
+        let qps = r"NAME  TEST
+ROWS
+ N  obj
+COLUMNS
+    x1  obj  1.0
+    x2  obj  1.0
+RHS
+BOUNDS
+ LO  x1  70000.
+ UP  x2  100000.
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        // x1のlbが70000に設定されていること
+        assert_eq!(prob.bounds[0].0, 70000.0, "x1 lb should be 70000.0");
+        // x2のubが100000に設定されていること
+        assert_eq!(prob.bounds[1].1, 100000.0, "x2 ub should be 100000.0");
+    }
+
+    #[test]
+    fn test_parse_bounds_3token_fr_bname() {
+        // 3トークン(B): FR + bound名あり (退行確認)
+        let qps = r"NAME  TEST
+ROWS
+ N  obj
+COLUMNS
+    x  obj  1.0
+    y  obj  1.0
+RHS
+BOUNDS
+ FR BND  x
+ MI BND  y
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        // xはFR: lb=-∞, ub=+∞
+        assert_eq!(prob.bounds[0].0, f64::NEG_INFINITY, "x lb should be -inf (FR)");
+        assert_eq!(prob.bounds[0].1, f64::INFINITY, "x ub should be +inf (FR)");
+        // yはMI: lb=-∞
+        assert_eq!(prob.bounds[1].0, f64::NEG_INFINITY, "y lb should be -inf (MI)");
+    }
+
+    #[test]
+    fn test_parse_bounds_4token_with_bname() {
+        // 4トークン: bound名あり (退行確認 — 既存動作維持)
+        let qps = r"NAME  TEST
+ROWS
+ N  obj
+COLUMNS
+    x1  obj  1.0
+RHS
+BOUNDS
+ LO BND  x1  2.0
+ UP BND  x1  50.0
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        assert_eq!(prob.bounds[0].0, 2.0, "x1 lb should be 2.0");
+        assert_eq!(prob.bounds[0].1, 50.0, "x1 ub should be 50.0");
     }
 }
