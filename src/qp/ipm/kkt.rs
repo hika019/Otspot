@@ -357,6 +357,54 @@ mod tests {
         assert!((aug.values[diag_idx[1]] - (-0.85)).abs() < 1e-14);
     }
 
+    /// spmv: 2x2行列ベクトル積の正確性確認
+    #[test]
+    fn test_spmv_basic() {
+        // A = [[1,2],[3,4]] (CSC形式), x = [1, 1] → Ax = [3, 7]
+        let rows = vec![0usize, 1, 0, 1];
+        let cols = vec![0usize, 0, 1, 1];
+        let vals = vec![1.0f64, 3.0, 2.0, 4.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 2, 2).unwrap();
+        let x = [1.0f64, 1.0];
+        let mut out = [0.0f64, 0.0];
+        spmv(&a, &x, &mut out);
+        assert!((out[0] - 3.0).abs() < 1e-14, "out[0]={}", out[0]);
+        assert!((out[1] - 7.0).abs() < 1e-14, "out[1]={}", out[1]);
+    }
+
+    /// norm_inf: 各種入力での無限ノルム確認
+    #[test]
+    fn test_norm_inf_basic() {
+        assert!((norm_inf(&[3.0, -5.0, 2.0]) - 5.0).abs() < 1e-15);
+        assert!((norm_inf(&[0.0, 0.0]) - 0.0).abs() < 1e-15);
+        assert!((norm_inf(&[-7.0]) - 7.0).abs() < 1e-15);
+    }
+
+    /// build_extended_constraints: 境界あり問題での行列サイズ確認
+    #[test]
+    fn test_build_extended_constraints_dimensions() {
+        use crate::qp::problem::QpProblem;
+        // QP: 2変数, Le制約1本: x0 + x1 <= 3
+        // bounds: x0 in [0, inf), x1 in [0, inf) → n_lb=2, n_ub=0
+        // m_ext = 1 + 2 + 0 = 3
+        let a = CscMatrix::from_triplets(&[0usize, 0], &[0usize, 1], &[1.0f64, 1.0], 1, 2).unwrap();
+        let q = CscMatrix::new(2, 2);
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; 2],
+            a,
+            vec![3.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        let (a_ext, b_ext, m_ext, m_orig, n_lb) = build_extended_constraints(&prob);
+        assert_eq!(m_orig, 1, "m_orig should be 1");
+        assert_eq!(n_lb, 2, "n_lb should be 2 (both lower bounds finite)");
+        assert_eq!(m_ext, 3, "m_ext = m + n_lb + n_ub = 1+2+0 = 3");
+        assert_eq!(a_ext.nrows, 3, "a_ext.nrows should be m_ext=3");
+        assert_eq!(a_ext.ncols, 2, "a_ext.ncols should be n=2");
+        assert_eq!(b_ext.len(), 3, "b_ext.len() should be m_ext=3");
+    }
+
     /// update_augmented_values: 更新後の values が build_augmented_system 結果と一致
     #[test]
     fn test_update_augmented_values_matches_build() {

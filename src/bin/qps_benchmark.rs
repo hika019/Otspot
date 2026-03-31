@@ -151,6 +151,27 @@ fn check_known_optimal(
     }
 }
 
+/// data_dir名とオーバーライドからCSVパスを決定する
+fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path) -> std::path::PathBuf {
+    if let Some(p) = override_path {
+        return std::path::PathBuf::from(p);
+    }
+    let data_lower = data_dir.to_lowercase();
+    let csv_name = if data_lower.contains("maros") {
+        "maros_meszaros.csv"
+    } else if data_lower.contains("qplib") {
+        "qplib.csv"
+    } else {
+        "netlib_lp.csv"
+    };
+    let candidate = root.join("data/known_optimal").join(csv_name);
+    if candidate.exists() {
+        return candidate;
+    }
+    // フォールバック: カレントディレクトリ基準
+    std::path::PathBuf::from("data/known_optimal").join(csv_name)
+}
+
 /// 正解値CSVを読み込む
 fn load_known_optimal(csv_path: &Path) -> HashMap<String, f64> {
     let mut map = HashMap::new();
@@ -278,20 +299,27 @@ mod tests {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]
+    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
     let mut data_dir = "data/maros_meszaros".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
+    let mut known_optimal_override: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: qps_benchmark [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]");
-            println!("  --solver   Solver to use (default: concurrent/auto)");
-            println!("  --eps      Convergence tolerance (default: 1e-6)");
-            println!("  --timeout  Solver timeout in seconds (default: 10.0)");
+            println!("Usage: qps_benchmark [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
+            println!("  --solver        Solver to use (default: concurrent/auto)");
+            println!("  --eps           Convergence tolerance (default: 1e-6)");
+            println!("  --timeout       Solver timeout in seconds (default: 10.0)");
+            println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
             std::process::exit(0);
+        } else if args[i] == "--known-optimal" {
+            i += 1;
+            if i < args.len() {
+                known_optimal_override = Some(args[i].clone());
+            }
         } else if args[i] == "--eps" {
             i += 1;
             if i < args.len() {
@@ -328,26 +356,19 @@ fn main() {
     }
 
     // §2.4: 正解値CSV読み込み
-    // バイナリの実行パスからdata/known_optimal/netlib_lp.csvを探す
+    // バイナリの実行パスからCSVを探す（--known-optimal指定またはdata_dir名から自動選択）
     let known_optimal = {
-        let mut csv_path = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
-            .unwrap_or_default();
-        // target/release から solver ルートに遡る
-        csv_path = csv_path
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let csv = csv_path.join("data/known_optimal/netlib_lp.csv");
-        if csv.exists() {
-            load_known_optimal(&csv)
-        } else {
-            // フォールバック: カレントディレクトリ基準
-            let fallback = Path::new("data/known_optimal/netlib_lp.csv");
-            load_known_optimal(fallback)
-        }
+        let root = {
+            let mut p = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+                .unwrap_or_default();
+            // target/release から solver ルートに遡る
+            p = p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default();
+            p
+        };
+        let csv = detect_csv_path(&data_dir, known_optimal_override.as_deref(), &root);
+        load_known_optimal(&csv)
     };
     eprintln!("Known optimal values loaded: {} problems", known_optimal.len());
     if known_optimal.is_empty() {
