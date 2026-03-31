@@ -520,7 +520,8 @@ mod tests {
     use super::super::common::check_infeasible_or_unbounded;
     use crate::problem::SolveStatus;
     use crate::qp::problem::QpProblem;
-    
+    use crate::CscMatrix;
+
     /// STEP-T1: iter < MIN_ITER(=5) の場合 None が返ること
     #[test]
     fn test_iter_guard() {
