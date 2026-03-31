@@ -64,6 +64,21 @@ fi
 
 DATA_DIR=$(realpath "$DATA_DIR")
 
+# 元の DATA_DIR 名から正解値CSVパスを決定
+DATA_DIR_LOWER=$(echo "$DATA_DIR" | tr '[:upper:]' '[:lower:]')
+SOLVER_ROOT="${SOLVER_DIR:-$(pwd)}"
+if echo "$DATA_DIR_LOWER" | grep -q "maros"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/maros_meszaros.csv"
+elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
+else
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
+fi
+
+if [[ ! -f "$KNOWN_OPTIMAL" ]]; then
+  echo "警告: 正解値CSV '$KNOWN_OPTIMAL' が見つからない。PASS[no_ref]になる可能性あり" >&2
+fi
+
 # ファイル拡張子の自動判別
 QPS_COUNT=$(find "$DATA_DIR" -maxdepth 1 \( -iname "*.qps" \) | wc -l | tr -d ' ')
 QPLIB_COUNT=$(find "$DATA_DIR" -maxdepth 1 -name "*.qplib" | wc -l | tr -d ' ')
@@ -164,12 +179,20 @@ fi
 for i in $(seq 1 "$JOBS"); do
   LOG="$TMPDIR_BASE/group_$i.log"
   LOGS+=("$LOG")
+  # bench_qplib は --known-optimal 未サポート（渡すとdata_dir上書きで異常終了）
+  # qps_benchmark のみに渡す
+  KNOWN_OPTIMAL_ARG=()
+  if [[ "$BIN" == "qps_benchmark" && -n "$KNOWN_OPTIMAL" ]]; then
+    KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
+  fi
+
   # ★ --eps は solver_bench.sh が自動注入する（1e-6固定）。ここでは渡さない（二重防止）
   _BENCH_PARALLEL_CALLER=1 \
   SOLVER_DIR="${SOLVER_DIR:-$(pwd)}" \
   bash "$SCRIPT_DIR/solver_bench.sh" "$BIN" "$TMPDIR_BASE/group_$i" \
     "${SOLVER_ARGS[@]}" \
     --timeout "$TIMEOUT" \
+    "${KNOWN_OPTIMAL_ARG[@]}" \
     ${FEATURES_EXTRA} > "$LOG" 2>&1 &
   PIDS+=($!)
   echo "[bench_parallel.sh] グループ $i 開始 (PID=$!)"
