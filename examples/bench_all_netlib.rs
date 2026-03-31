@@ -31,7 +31,7 @@ fn main() {
         let cols = lp.a.ncols;
 
         let start = Instant::now();
-        let result = solver::simplex::solve(&lp);
+        let result = solver::solve(&lp);
         let elapsed = start.elapsed();
 
         let status = match result.status {

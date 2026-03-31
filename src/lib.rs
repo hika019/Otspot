@@ -21,13 +21,12 @@
 //! ```rust,no_run
 //! use std::path::Path;
 //! use solver::io::mps;
-//! use solver::simplex;
 //!
 //! // MPS ファイルを読み込む
 //! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
 //!
 //! // 単体法で求解
-//! let result = simplex::solve(&prob);
+//! let result = solver::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
 //!
@@ -40,10 +39,10 @@
 
 pub mod error;
 pub use error::SolverError;
-pub mod presolve;
+pub(crate) mod presolve;
 pub mod sparse;
 pub mod problem;
-pub mod simplex;
+pub(crate) mod simplex;
 pub mod io;
 pub(crate) mod basis;
 pub(crate) mod backend;
@@ -52,12 +51,15 @@ pub(crate) mod tolerances;
 pub mod options;
 pub use options::{SolverOptions, QpSolverChoice, Tolerance};
 pub mod qp;
-pub mod linalg;
+#[allow(dead_code)]
+pub(crate) mod linalg;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
+pub use simplex::{solve, solve_with};
+pub use presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 pub use qp::{QpSolver, IpmSolver};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

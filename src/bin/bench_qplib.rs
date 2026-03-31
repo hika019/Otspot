@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::{QpSolverChoice, SolverOptions};
-use solver::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
+use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;

@@ -4,7 +4,7 @@ use solver::io::qps::parse_qps;
 use solver::options::{SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::solve_qp_with;
-use solver::simplex::{solve, solve_with};
+use solver::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
 

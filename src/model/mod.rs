@@ -250,10 +250,27 @@ impl Model {
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
-            SolveStatus::MaxIterations => Err(ModelError::Internal("Iteration limit reached".to_string())),
-            SolveStatus::SuboptimalSolution => Err(ModelError::Internal("Suboptimal solution: precision criteria not met".to_string())),
+            SolveStatus::MaxIterations => Err(ModelError::Timeout), // DEAD PATH (cmd_595) but handle gracefully
+            SolveStatus::SuboptimalSolution => {
+                if solver_result.solution.is_empty() {
+                    Err(ModelError::Timeout)
+                } else {
+                    let obj = if self.sense == OptimizationSense::Maximize {
+                        -solver_result.objective
+                    } else {
+                        solver_result.objective
+                    };
+                    Ok(ModelResult {
+                        objective_value: obj,
+                        solution: solver_result.solution,
+                        dual_solution: None,
+                        reduced_costs: None,
+                        slack: None,
+                    })
+                }
+            }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => Err(ModelError::Internal("Numerical error".to_string())),
+            SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽: 内部事情をユーザーに見せない
             SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
         }
     }
@@ -365,16 +382,29 @@ impl Model {
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
-            SolveStatus::MaxIterations => {
-                Err(ModelError::Internal("QP iteration limit reached".to_string()))
-            }
+            SolveStatus::MaxIterations => Err(ModelError::Timeout), // DEAD PATH (cmd_595) but handle gracefully
             SolveStatus::SuboptimalSolution => {
-                Err(ModelError::Internal("QP suboptimal solution: precision criteria not met".to_string()))
+                // apply_api_boundary_conversion が通常 Optimal/Timeout に変換済み。
+                // このアームは予備。解ありなら Optimal 相当、なしなら Timeout。
+                if qp_result.solution.is_empty() {
+                    Err(ModelError::Timeout)
+                } else {
+                    let obj = if self.sense == OptimizationSense::Maximize {
+                        -qp_result.objective
+                    } else {
+                        qp_result.objective
+                    };
+                    Ok(ModelResult {
+                        objective_value: obj,
+                        solution: qp_result.solution,
+                        dual_solution: None,
+                        reduced_costs: None,
+                        slack: None,
+                    })
+                }
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => {
-                Err(ModelError::Internal("QP numerical error".to_string()))
-            }
+            SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽
             SolveStatus::NonConvex(msg) => {
                 Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
             }

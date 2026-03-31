@@ -722,7 +722,7 @@ pub fn run_qp_presolve_phase1(
             .filter(|&&(j, _)| !removed_cols[j])
             .copied()
             .collect();
-        let (_, row_ub, _, ub_fin) = activity_range(&active_entries, &bounds, None);
+        let (row_lb, row_ub, lb_fin, ub_fin) = activity_range(&active_entries, &bounds, None);
 
         match prob.constraint_types[i] {
             crate::problem::ConstraintType::Le => {
@@ -760,7 +760,16 @@ pub fn run_qp_presolve_phase1(
                     }
                 }
             }
-            crate::problem::ConstraintType::Ge => {}
+            crate::problem::ConstraintType::Ge => {
+                // Ge 制約 (Ax >= b) において row_lb >= b[i] なら常に充足 → 冗長
+                if lb_fin && row_lb >= b[i] - ZERO_TOL {
+                    removed_rows[i] = true;
+                }
+                // row_ub < b[i] → Ge 制約が決して充足されない → Infeasible
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
+                    return QpPresolveResult::infeasible(prob);
+                }
+            }
         }
     }
 
@@ -1052,7 +1061,7 @@ pub fn run_qp_presolve_phase1(
             .filter(|&&(j, v)| !removed_cols[j] && v.abs() > ZERO_TOL)
             .copied()
             .collect();
-        let (_row_lb, row_ub, _, ub_fin) = activity_range(&entries, &bounds, None);
+        let (row_lb, row_ub, lb_fin, ub_fin) = activity_range(&entries, &bounds, None);
 
         // 更新後の activity_range で冗長な制約を再除去（型別処理）
         match prob.constraint_types[i] {
@@ -1088,13 +1097,30 @@ pub fn run_qp_presolve_phase1(
                     }
                 }
             }
-            crate::problem::ConstraintType::Ge => {}
+            crate::problem::ConstraintType::Ge => {
+                // Ge 制約 (Ax >= b) において row_lb >= b[i] なら常に充足 → 冗長
+                if lb_fin && row_lb >= b[i] - ZERO_TOL {
+                    removed_rows[i] = true;
+                }
+                // row_ub < b[i] → Ge 制約が決して充足されない → Infeasible
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
+                    return QpPresolveResult::infeasible(prob);
+                }
+            }
         }
-        // Infeasible チェック: row_lb > b[i]（Le 制約が決して充足されない）
-        let (row_lb2, _, lb_fin2, _) = activity_range(&entries, &bounds, None);
-        if lb_fin2 && row_lb2 > b[i] + ZERO_TOL {
-            // 制約 Ax <= b が row_lb2 > b[i] → 実行不可能
-            return QpPresolveResult::infeasible(prob);
+        // Infeasible チェック: row_lb > b[i]（Le/Eq 制約が決して充足されない）
+        // Ge 制約で冗長除去済みの行はスキップ（row_lb >= b[i] は冗長であり Infeasible ではない）
+        if !removed_rows[i] && lb_fin && row_lb > b[i] + ZERO_TOL {
+            match prob.constraint_types[i] {
+                crate::problem::ConstraintType::Le | crate::problem::ConstraintType::Eq => {
+                    // 制約 Ax <= b または Ax = b が row_lb > b[i] → 実行不可能
+                    return QpPresolveResult::infeasible(prob);
+                }
+                crate::problem::ConstraintType::Ge => {
+                    // Ge 制約 Ax >= b において row_lb > b[i] → 常に充足（冗長）
+                    removed_rows[i] = true;
+                }
+            }
         }
     }
 
@@ -1409,5 +1435,65 @@ mod tests {
         let result = run_qp_presolve_phase1(&prob, &opts);
         assert_eq!(result.reduced.num_vars, 2, "no reduction expected");
         assert!(!result.was_reduced, "was_reduced = false");
+    }
+
+    /// P3: Ge制約 - 冗長除去テスト
+    /// x >= 0 で x の下界が 0 → 常に充足 → 冗長除去
+    /// minimize x^2, s.t. x >= 0, 0 <= x <= 10
+    #[test]
+    fn test_ge_constraint_redundant_removal() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![0.0]; // x >= 0
+        let bounds = vec![(0.0, 10.0)];
+        let prob = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![crate::problem::ConstraintType::Ge],
+        ).unwrap();
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // Ge制約 x >= 0 は x の下界 0 >= 0 → 冗長 → 制約が除去される
+        assert_eq!(result.reduced.num_constraints, 0, "Ge制約 x>=0 は冗長 → 除去");
+    }
+
+    /// P3: Ge制約 - Infeasible検出テスト
+    /// x >= 5 で x の上界が 3 → 充足不能 → Infeasible
+    /// minimize x^2, s.t. x >= 5, 0 <= x <= 3
+    #[test]
+    fn test_ge_constraint_infeasible_detection() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![5.0]; // x >= 5
+        let bounds = vec![(0.0, 3.0)]; // x の上界 = 3 < 5
+        let prob = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![crate::problem::ConstraintType::Ge],
+        ).unwrap();
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // Ge制約 x >= 5 は row_ub=3 < 5 → Infeasible
+        assert!(
+            matches!(result.presolve_status, QpPresolveStatus::Infeasible),
+            "Ge制約 x>=5, x<=3 → Infeasible"
+        );
+    }
+
+    /// P3: Ge制約 - 通常ケース（冗長でも実行不可能でもない）
+    /// x >= 2 で x の範囲 [0, 10] → 制約は残る、解は x=2
+    #[test]
+    fn test_ge_constraint_not_redundant_not_infeasible() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![2.0]; // x >= 2
+        let bounds = vec![(0.0, 10.0)];
+        let prob = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![crate::problem::ConstraintType::Ge],
+        ).unwrap();
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        // Ge制約 x >= 2 は冗長でも Infeasible でもない → 除去されない
+        assert!(!matches!(result.presolve_status, QpPresolveStatus::Infeasible), "Infeasible でないこと");
+        assert_eq!(result.reduced.num_constraints, 1, "Ge制約は除去されない");
     }
 }

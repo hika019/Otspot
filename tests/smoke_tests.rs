@@ -4,8 +4,17 @@
 mod smoke_tests {
     #[test]
     fn scaling_module_exists() {
-        use solver::presolve::RuizScaler;
-        let _ = std::mem::size_of::<RuizScaler>();
+        // presolve は pub(crate) のため外部から型参照不可。
+        // solve() を通じて presolve (RuizScaler) が動作することを確認。
+        use solver::problem::LpProblem;
+        use solver::sparse::CscMatrix;
+        use solver::solve;
+        let a = CscMatrix::new(0, 1);
+        let prob = LpProblem::new_general(
+            vec![1.0], a, vec![], vec![], vec![(0.0, 1.0)], None
+        ).unwrap();
+        // solve() 内部で presolve (RuizScaler) が呼ばれる
+        let _ = solve(&prob);
     }
 
     #[test]
@@ -14,11 +23,11 @@ mod smoke_tests {
         // simplex::solve を通じて pricing が動作することを確認。
         use solver::problem::LpProblem;
         use solver::sparse::CscMatrix;
-        use solver::simplex;
+        use solver::solve;
         let a = CscMatrix::new(0, 1);
         let prob = LpProblem::new_general(
             vec![1.0], a, vec![], vec![], vec![(0.0, 1.0)], None
         ).unwrap();
-        let _ = simplex::solve(&prob);
+        let _ = solve(&prob);
     }
 }
