@@ -1,3 +1,7 @@
+# 出典: 自ソルバーの計測値（ベンチマーク実行結果）。外部参照の最適値ではない。
+# 用途: 退行検知（過去の自己ベストとの比較）。
+# Source: measured by this solver's benchmark runs. NOT externally verified optimal values.
+# Purpose: regression detection (comparison against own historical best).
 problem_name,optimal_obj,source
 QPLIB_10034,-6.600767e-2,bench_722g_ippmm_1000s
 QPLIB_10038,-5.400120e-2,bench_722g_ippmm_1000s

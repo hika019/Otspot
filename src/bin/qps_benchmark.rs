@@ -131,7 +131,7 @@ enum ObjCheckResult {
     NoRef,
 }
 
-fn check_known_optimal(
+fn check_baseline_objective(
     solver_obj: f64,
     known: &HashMap<String, f64>,
     problem_name: &str,
@@ -164,16 +164,16 @@ fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path) -> 
     } else {
         "netlib_lp.csv"
     };
-    let candidate = root.join("data/known_optimal").join(csv_name);
+    let candidate = root.join("data/baseline_objectives").join(csv_name);
     if candidate.exists() {
         return candidate;
     }
     // フォールバック: カレントディレクトリ基準
-    std::path::PathBuf::from("data/known_optimal").join(csv_name)
+    std::path::PathBuf::from("data/baseline_objectives").join(csv_name)
 }
 
 /// 正解値CSVを読み込む
-fn load_known_optimal(csv_path: &Path) -> HashMap<String, f64> {
+fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     let content = match std::fs::read_to_string(csv_path) {
         Ok(c) => c,
@@ -304,7 +304,7 @@ fn main() {
     let mut solver_choice = QpSolverChoice::Concurrent;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
-    let mut known_optimal_override: Option<String> = None;
+    let mut baseline_override: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -318,7 +318,7 @@ fn main() {
         } else if args[i] == "--known-optimal" {
             i += 1;
             if i < args.len() {
-                known_optimal_override = Some(args[i].clone());
+                baseline_override = Some(args[i].clone());
             }
         } else if args[i] == "--eps" {
             i += 1;
@@ -357,7 +357,7 @@ fn main() {
 
     // §2.4: 正解値CSV読み込み
     // バイナリの実行パスからCSVを探す（--known-optimal指定またはdata_dir名から自動選択）
-    let known_optimal = {
+    let baseline_objectives = {
         let root = {
             let mut p = std::env::current_exe()
                 .ok()
@@ -367,11 +367,11 @@ fn main() {
             p = p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default();
             p
         };
-        let csv = detect_csv_path(&data_dir, known_optimal_override.as_deref(), &root);
-        load_known_optimal(&csv)
+        let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
+        load_baseline_objectives(&csv)
     };
-    eprintln!("Known optimal values loaded: {} problems", known_optimal.len());
-    if known_optimal.is_empty() {
+    eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
+    if baseline_objectives.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
     }
 
@@ -555,9 +555,9 @@ fn main() {
                             )
                         } else {
                             // Step 9: 正解値照合
-                            match check_known_optimal(
+                            match check_baseline_objective(
                                 result.objective,
-                                &known_optimal,
+                                &baseline_objectives,
                                 &name,
                                 eps_obj,
                             ) {
@@ -569,7 +569,7 @@ fn main() {
                                             "[{}] obj={:.2e} known={:.2e} err={:.1}%",
                                             method_label,
                                             result.objective,
-                                            known_optimal.get(&name).unwrap(),
+                                            baseline_objectives.get(&name).unwrap(),
                                             rel_err * 100.0
                                         ),
                                     )
