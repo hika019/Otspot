@@ -179,10 +179,8 @@ fi
 for i in $(seq 1 "$JOBS"); do
   LOG="$TMPDIR_BASE/group_$i.log"
   LOGS+=("$LOG")
-  # bench_qplib は --known-optimal 未サポート（渡すとdata_dir上書きで異常終了）
-  # qps_benchmark のみに渡す
   KNOWN_OPTIMAL_ARG=()
-  if [[ "$BIN" == "qps_benchmark" && -n "$KNOWN_OPTIMAL" ]]; then
+  if [[ -n "$KNOWN_OPTIMAL" ]]; then
     KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
   fi
 

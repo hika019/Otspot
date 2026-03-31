@@ -6,11 +6,11 @@
 //!
 //! 各問題に10秒のタイムアウトを設ける（solver内部の協調的タイムアウト機構を使用）。
 
-use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
@@ -122,76 +122,6 @@ fn compute_complementarity(
         })
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max)
-}
-
-/// §2.4: 正解値照合
-enum ObjCheckResult {
-    Ok { rel_err: f64 },
-    Mismatch { rel_err: f64 },
-    NoRef,
-}
-
-fn check_baseline_objective(
-    solver_obj: f64,
-    known: &HashMap<String, f64>,
-    problem_name: &str,
-    eps_obj: f64,
-) -> ObjCheckResult {
-    match known.get(problem_name) {
-        Some(&known_obj) => {
-            let denom = 1.0_f64.max(known_obj.abs());
-            let rel_err = (solver_obj - known_obj).abs() / denom;
-            if rel_err > eps_obj {
-                ObjCheckResult::Mismatch { rel_err }
-            } else {
-                ObjCheckResult::Ok { rel_err }
-            }
-        }
-        None => ObjCheckResult::NoRef,
-    }
-}
-
-/// data_dir名とオーバーライドからCSVパスを決定する
-fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path) -> std::path::PathBuf {
-    if let Some(p) = override_path {
-        return std::path::PathBuf::from(p);
-    }
-    let data_lower = data_dir.to_lowercase();
-    let csv_name = if data_lower.contains("maros") {
-        "maros_meszaros.csv"
-    } else if data_lower.contains("qplib") {
-        "qplib.csv"
-    } else {
-        "netlib_lp.csv"
-    };
-    let candidate = root.join("data/baseline_objectives").join(csv_name);
-    if candidate.exists() {
-        return candidate;
-    }
-    // フォールバック: カレントディレクトリ基準
-    std::path::PathBuf::from("data/baseline_objectives").join(csv_name)
-}
-
-/// 正解値CSVを読み込む
-fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
-    let mut map = HashMap::new();
-    let content = match std::fs::read_to_string(csv_path) {
-        Ok(c) => c,
-        Err(_) => return map,
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with("problem_name") {
-            continue;
-        }
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() >= 2 {
-            if let Ok(val) = parts[1].trim().parse::<f64>() {
-                map.insert(parts[0].trim().to_string(), val);
-            }
-        }
-    }
-    map
 }
 
 fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, BenchError> {
@@ -556,9 +486,9 @@ fn main() {
                         } else {
                             // Step 9: 正解値照合
                             match check_baseline_objective(
+                                &name,
                                 result.objective,
                                 &baseline_objectives,
-                                &name,
                                 eps_obj,
                             ) {
                                 ObjCheckResult::Mismatch { rel_err } => {

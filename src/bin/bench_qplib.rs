@@ -1,6 +1,6 @@
 //! QPLIBベンチマーク
 //!
-//! Usage: bench_qplib [data_dir]
+//! Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
 //! 指定ディレクトリ内の全 *.qplib ファイルを parse_qplib → solve_qp_with_options で実行し、
 //! 結果テーブルを stdout に出力する。
 //!
@@ -12,6 +12,7 @@ use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, ObjCheckResult};
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::{QpSolverChoice, SolverOptions};
 use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
@@ -43,53 +44,83 @@ fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, Bench
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]
+    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
     let mut data_dir = "data/qplib".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
+    let mut baseline_override: Option<String> = None;
 
-    let mut i = 1;
+    // known flagリスト（値を持つフラグ）
+    const KNOWN_FLAGS_WITH_VALUE: &[&str] = &[
+        "--solver", "--eps", "--timeout", "--known-optimal",
+    ];
+
+    let mut i = 1usize;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>]");
-            println!("  --solver   Solver to use (default: concurrent/auto)");
-            println!("  --eps      Convergence tolerance (default: 1e-6)");
-            println!("  --timeout  Solver timeout in seconds (default: 10.0)");
+            println!("Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
+            println!("  --solver        Solver to use (default: concurrent/auto)");
+            println!("  --eps           Convergence tolerance (default: 1e-6)");
+            println!("  --timeout       Solver timeout in seconds (default: 10.0)");
+            println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
             std::process::exit(0);
-        } else if args[i] == "--eps" {
+        } else if KNOWN_FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
+            // known flag: 次引数が値 → i+=2で消費
             i += 1;
             if i < args.len() {
-                eps = args[i].parse().unwrap_or(1e-6);
-            }
-        } else if args[i] == "--timeout" {
-            i += 1;
-            if i < args.len() {
-                timeout_secs = args[i].parse().unwrap_or(10.0);
-            }
-        } else if args[i] == "--solver" {
-            i += 1;
-            if i < args.len() {
-                solver_choice = match args[i].as_str() {
-                    "ipm" => QpSolverChoice::Ipm,
-                    "concurrent" => QpSolverChoice::Concurrent,
-                    "ippmm_new" => QpSolverChoice::IpPmmNew,
-                    other => {
-                        eprintln!("Unknown solver: {}. Use ipm|concurrent|ippmm_new", other);
-                        std::process::exit(1);
+                match args[i - 1].as_str() {
+                    "--solver" => {
+                        solver_choice = match args[i].as_str() {
+                            "ipm" => QpSolverChoice::Ipm,
+                            "concurrent" => QpSolverChoice::Concurrent,
+                            "ippmm_new" => QpSolverChoice::IpPmmNew,
+                            other => {
+                                eprintln!("Unknown solver: {}. Use ipm|concurrent|ippmm_new", other);
+                                std::process::exit(1);
+                            }
+                        };
                     }
-                };
+                    "--eps" => { eps = args[i].parse().unwrap_or(1e-6); }
+                    "--timeout" => { timeout_secs = args[i].parse().unwrap_or(10.0); }
+                    "--known-optimal" => { baseline_override = Some(args[i].clone()); }
+                    _ => {}
+                }
             }
-        } else if !args[i].starts_with("--") {
+            i += 1;
+        } else if args[i].starts_with("--") {
+            // 未知フラグ: 値は消費しない → i+=1のみ
+            eprintln!("Warning: unknown flag '{}', ignoring", args[i]);
+            i += 1;
+        } else {
+            // positional引数: 最初の非フラグ引数がdata_dir
             data_dir = args[i].clone();
+            i += 1;
         }
-        i += 1;
     }
 
     let dir = Path::new(&data_dir);
     if !dir.exists() {
         eprintln!("Directory not found: {}", data_dir);
         std::process::exit(1);
+    }
+
+    // 正解値CSV読み込み
+    let baseline_objectives = {
+        let root = {
+            let p = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+                .unwrap_or_default();
+            // target/release から solver ルートに遡る
+            p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
+        load_baseline_objectives(&csv)
+    };
+    eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
+    if baseline_objectives.is_empty() {
+        eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
     }
 
     // .qplib ファイル一覧（ファイル名でソート）
@@ -118,12 +149,14 @@ fn main() {
     println!("Solver: {}", solver_label);
 
     println!(
-        "{:<24} {:>6} {:>6} {:>12} {:>10} Note",
+        "{:<24} {:>6} {:>6} {:>15} {:>10} Note",
         "Problem", "n", "m", "Status", "Time(s)"
     );
     println!("{}", "-".repeat(80));
 
     let mut n_pass = 0usize;
+    let mut n_pass_noref = 0usize;
+    let mut n_obj_mismatch = 0usize;
     let mut n_fail = 0usize;
     let mut n_error = 0usize;
     let mut n_timeout = 0usize;
@@ -131,6 +164,12 @@ fn main() {
     let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
     let mut n_nonconvex = 0usize;
+
+    // QPLIBベンチでは実行可能性判定なし → 常に0
+    let n_dfeas_fail: usize = 0;
+    let n_pfeas_fail: usize = 0;
+
+    let eps_obj: f64 = 1e-2; // §2.4: 1%閾値
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
@@ -152,7 +191,7 @@ fn main() {
             Err(BenchError::Unsupported(msg)) => {
                 let note = msg.chars().take(40).collect::<String>();
                 println!(
-                    "{:<24} {:>6} {:>6} {:>12} {:>10.3} {}",
+                    "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
                     name, "-", "-", "SKIP", 0.0, note
                 );
                 n_skip += 1;
@@ -161,7 +200,7 @@ fn main() {
             Err(BenchError::Parse(e)) => {
                 let note = format!("{}", e);
                 println!(
-                    "{:<24} {:>6} {:>6} {:>12} {:>10.3} {}",
+                    "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
                 );
                 n_error += 1;
@@ -169,7 +208,7 @@ fn main() {
             }
             Err(BenchError::ParseTimeout) => {
                 println!(
-                    "{:<24} {:>6} {:>6} {:>12} {:>10.3} ",
+                    "{:<24} {:>6} {:>6} {:>15} {:>10.3} ",
                     name, "?", "?", "PARSE_TIMEOUT", 0.0
                 );
                 n_timeout += 1;
@@ -221,8 +260,43 @@ fn main() {
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {
-                    n_pass += 1;
-                    ("PASS".to_string(), format!("[{}] obj={:.6e}", method_label, result.objective))
+                    match check_baseline_objective(
+                        &name,
+                        result.objective,
+                        &baseline_objectives,
+                        eps_obj,
+                    ) {
+                        ObjCheckResult::Ok { rel_err } => {
+                            n_pass += 1;
+                            (
+                                "PASS".to_string(),
+                                format!(
+                                    "[{}] obj={:.6e} obj_err={:.3}%",
+                                    method_label, result.objective, rel_err * 100.0
+                                ),
+                            )
+                        }
+                        ObjCheckResult::Mismatch { rel_err } => {
+                            n_obj_mismatch += 1;
+                            (
+                                "OBJ_MISMATCH".to_string(),
+                                format!(
+                                    "[{}] obj={:.6e} known={:.6e} err={:.1}%",
+                                    method_label,
+                                    result.objective,
+                                    baseline_objectives.get(&name).unwrap(),
+                                    rel_err * 100.0
+                                ),
+                            )
+                        }
+                        ObjCheckResult::NoRef => {
+                            n_pass_noref += 1;
+                            (
+                                "PASS[no_ref]".to_string(),
+                                format!("[{}] obj={:.6e}", method_label, result.objective),
+                            )
+                        }
+                    }
                 } else {
                     n_fail += 1;
                     ("FAIL:NumericalError".to_string(), format!("[{}] obj={}", method_label, result.objective))
@@ -262,7 +336,7 @@ fn main() {
             }
         };
         println!(
-            "{:<24} {:>6} {:>6} {:>12} {:>10.3} {}",
+            "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
             name, n, m, status_str, elapsed_s, note
         );
         // 追加情報行: solver詳細 + presolve削減量
@@ -283,16 +357,21 @@ fn main() {
     println!("{}", "-".repeat(80));
     println!();
     println!("=== Summary ===");
-    println!("  PASS:      {}", n_pass);
-    println!("  FAIL:      {}", n_fail);
-    println!("  MAXITER:   {}", n_max_iter);
-    println!("  SUBOPTIMAL: {}", n_suboptimal);
-    println!("  TIMEOUT:   {}", n_timeout);
-    println!("  NONCONVEX: {}", n_nonconvex);
-    println!("  ERROR:     {}", n_error);
-    println!("  SKIP:      {}", n_skip);
+    println!("  PASS:           {}", n_pass);
+    println!("  PASS[no_ref]:   {}", n_pass_noref);
+    println!("  TIMEOUT:        {}", n_timeout);
+    println!("  FAIL:           {}", n_fail);
+    println!("  DFEAS_FAIL:     {}", n_dfeas_fail);
+    println!("  PFEAS_FAIL:     {}", n_pfeas_fail);
+    println!("  OBJ_MISMATCH:   {}", n_obj_mismatch);
+    println!("  NONCONVEX:      {}", n_nonconvex);
+    println!("  SUBOPTIMAL:     {}", n_suboptimal);
+    println!("  MAXITER:        {}", n_max_iter);
+    println!("  ERROR:          {}", n_error);
+    println!("  SKIP:           {}", n_skip);
     println!(
-        "  TOTAL:     {}",
-        n_pass + n_fail + n_max_iter + n_suboptimal + n_timeout + n_nonconvex + n_error + n_skip
+        "  TOTAL:          {}",
+        n_pass + n_pass_noref + n_timeout + n_fail + n_obj_mismatch
+            + n_nonconvex + n_suboptimal + n_max_iter + n_error + n_skip
     );
 }
