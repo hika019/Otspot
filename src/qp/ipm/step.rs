@@ -11,7 +11,6 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use super::kkt::{
     build_augmented_system, build_extended_constraints,
     collect_part1_diag_indices, collect_part3_diag_indices,
@@ -21,149 +20,9 @@ use super::kkt::{
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
+use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary, timeout_result, numerical_error_result};
 
-// ---------------------------------------------------------------------------
-// Infeasibility / Unboundedness 検出
-// ---------------------------------------------------------------------------
 
-/// Gondzio corrector 後のステップ方向 (Δx, Δy) から実行不能または非有界を検出する。
-///
-/// MIN_DIR_NORM より小さい方向ベクトルでの検出は行わない（収束時の誤検知防止）。
-///
-/// **実行不能 (Primal Infeasibility)**:
-/// ||Δy_orig||_inf > MIN_DIR_NORM かつ:
-///   ① ||A_orig^T * Δy_orig|| / ||Δy|| < ε_inf
-///   ② b_orig · Δy_orig / ||Δy|| < -ε_inf
-///
-/// **非有界 (Dual Infeasibility / Unboundedness)**:
-/// ||Δx||_inf > MIN_DIR_NORM かつ:
-///   ③ c · Δx / ||Δx|| < -ε_inf  (LP: Q=0)
-///      ||(Q*Δx + c)|| / ||Δx|| < ε_inf  (QP: Q≠0)
-///   ④ ||A_orig * Δx|| / ||Δx|| < ε_inf
-#[allow(clippy::too_many_arguments)]
-fn check_infeasible_or_unbounded(
-    dx: &[f64],
-    dy: &[f64],
-    problem: &QpProblem,
-    a_ext: &CscMatrix,
-    m_orig: usize,
-    m_ext: usize,
-    iter: usize,
-    delta_p: f64,
-) -> Option<SolveStatus> {
-    const EPS_INF: f64 = 1e-8;
-    const MIN_ITER: usize = 5;
-    /// 収束時の偽陽性防止: 方向ベクトルが MIN_DIR_NORM 以下は検出スキップ。
-    /// 収束時は Δx→0, Δy→0 なので ||Δ|| が MIN_DIR_NORM 以下となり検出をスキップする。
-    const MIN_DIR_NORM: f64 = 1e-3;
-
-    if iter < MIN_ITER {
-        return None;
-    }
-
-    let n = dx.len();
-
-    // --- Primal Infeasibility check ---
-    // ||Δy_orig|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
-    if m_orig > 0 {
-        let dy_orig = &dy[..m_orig];
-        let norm_dy_inf = norm_inf(dy_orig);
-        if norm_dy_inf > MIN_DIR_NORM {
-            let norm_dy = norm_dy_inf;
-            // ① A_orig^T * Δy_orig: a_ext は CSC, 行インデックス < m_orig のエントリのみ使用
-            let mut at_dy = vec![0.0f64; n];
-            for (j, at_dy_j) in at_dy.iter_mut().enumerate() {
-                for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-                    let row = a_ext.row_ind[ptr];
-                    if row < m_orig {
-                        *at_dy_j += a_ext.values[ptr] * dy_orig[row];
-                    }
-                }
-            }
-            let cond_a = norm_inf(&at_dy) / norm_dy < EPS_INF;
-            // ② b_orig · Δy_orig
-            let b_dy: f64 = problem.b.iter().zip(dy_orig.iter()).map(|(&bi, &dyi)| bi * dyi).sum();
-            let cond_b = b_dy / norm_dy < -EPS_INF;
-            if cond_a && cond_b {
-                return Some(SolveStatus::Infeasible);
-            }
-        }
-    }
-
-    // --- Dual Infeasibility / Unboundedness check ---
-    // m_orig=0 かつ m_ext>0 の場合（境界制約のみの問題）はチェック全体をスキップ。
-    // 等式制約なし問題は通常 bounded のため偽陽性回避を優先する。
-    if m_orig == 0 && m_ext > 0 {
-        return None;
-    }
-    // ||Δx|| が MIN_DIR_NORM より小さければスキップ（収束時偽陽性防止）。
-    let norm_dx_inf = norm_inf(dx);
-    if norm_dx_inf <= MIN_DIR_NORM {
-        return None;
-    }
-    let norm_dx = norm_dx_inf;
-
-    // ③ 目的関数方向条件:
-    //    LP(Q=0): c·Δx / norm_dx < -ε
-    //    QP(Q≠0): ||Q*Δx||/norm_dx < ε (条件1: Δx∈null(Q)) AND c^T*Δx/norm_dx < -ε (条件2: 目的減少)
-    // 参照: ippmm.rs の check_infeasible_or_unbounded_ippmm も同一ロジックを使用（同期修正必須）
-    let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
-    let cond_obj = if is_lp {
-        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
-        c_dx / norm_dx < -EPS_INF
-    } else {
-        // QP Unbounded条件: 後退光線 d の存在 = (Q*d≈0) AND (c^T*d < 0)
-        // c=0の場合は条件2が0≥0→偽となり、Q≥0なら自動的にUnbounded不判定（正しい挙動）
-        let mut qdx = vec![0.0f64; n];
-        spmv_q(&problem.q, dx, &mut qdx);
-        // C-3修正: 正則化項を加算し KKT系と整合: ||(Q+delta_p·I)·Δx||
-        for i in 0..n {
-            qdx[i] += delta_p * dx[i];
-        }
-        let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
-        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
-        (norm_qdx / norm_dx < EPS_INF) && (c_dx / norm_dx < -EPS_INF)
-    };
-    if !cond_obj {
-        return None;
-    }
-
-    // ④ ||A_orig * Δx|| / norm_dx < ε
-    if m_orig > 0 {
-        let mut a_dx = vec![0.0f64; m_orig];
-        for (j, &dxj) in dx.iter().enumerate() {
-            for ptr in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
-                let row = a_ext.row_ind[ptr];
-                if row < m_orig {
-                    a_dx[row] += a_ext.values[ptr] * dxj;
-                }
-            }
-        }
-        if norm_inf(&a_dx) / norm_dx >= EPS_INF {
-            return None;
-        }
-    }
-
-    Some(SolveStatus::Unbounded)
-}
-
-// ---------------------------------------------------------------------------
-// fraction-to-boundary
-// ---------------------------------------------------------------------------
-
-/// α = min(1, τ · min_i { -v_i / Δv_i }  for Δv_i < 0 )
-pub(crate) fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
-    let mut alpha = 1.0_f64;
-    for (&vi, &dvi) in v.iter().zip(dv.iter()) {
-        if dvi < 0.0 {
-            let step = tau * vi / (-dvi);
-            if step < alpha {
-                alpha = step;
-            }
-        }
-    }
-    alpha
-}
 
 // ---------------------------------------------------------------------------
 // IPM 内部ソルバー
@@ -651,119 +510,6 @@ pub(crate) fn solve_qp_ipm_inner(
     }
 }
 
-// ---------------------------------------------------------------------------
-// 制約なし QP
-// ---------------------------------------------------------------------------
-
-/// 制約なし QP を解く: Qx = -c（Q が PD でない場合は δ_p I で正則化）
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> SolverResult {
-    let n = problem.num_vars;
-
-    if timeout_ctx.should_stop() {
-        return timeout_result(n);
-    }
-
-    if n == 0 {
-        return SolverResult {
-            status: SolveStatus::Optimal,
-            objective: 0.0,
-            solution: vec![],
-            dual_solution: vec![],
-            bound_duals: vec![],
-    
-            iterations: 0,
-            ..Default::default()
-        };
-    }
-
-    let delta_p = 1e-7;
-    let mut triplet_rows: Vec<usize> = Vec::new();
-    let mut triplet_cols: Vec<usize> = Vec::new();
-    let mut triplet_vals: Vec<f64> = Vec::new();
-    let mut diag_added = vec![false; n];
-
-    for col in 0..n {
-        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            let row = problem.q.row_ind[k];
-            if row <= col {
-                triplet_rows.push(row);
-                triplet_cols.push(col);
-                let v = problem.q.values[k] + if row == col { delta_p } else { 0.0 };
-                triplet_vals.push(v);
-                if row == col {
-                    diag_added[col] = true;
-                }
-            }
-        }
-    }
-    for i in 0..n {
-        if !diag_added[i] {
-            triplet_rows.push(i);
-            triplet_cols.push(i);
-            triplet_vals.push(delta_p);
-        }
-    }
-
-    let q_reg = CscMatrix::from_triplets(&triplet_rows, &triplet_cols, &triplet_vals, n, n)
-        .unwrap();
-
-    match ldl::factorize(&q_reg) {
-        Ok(fac) => {
-            let rhs: Vec<f64> = problem.c.iter().map(|&ci| -ci).collect();
-            let mut x = vec![0.0f64; n];
-            fac.solve(&rhs, &mut x);
-
-            let mut qx = vec![0.0f64; n];
-            spmv_q(&problem.q, &x, &mut qx);
-            let objective = 0.5
-                * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
-                + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
-
-            SolverResult {
-                status: SolveStatus::Optimal,
-                objective,
-                solution: x,
-                dual_solution: vec![],
-                bound_duals: vec![],
-        
-                iterations: 1,
-                ..Default::default()
-            }
-        }
-        Err(_) => numerical_error_result(n),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ユーティリティ
-// ---------------------------------------------------------------------------
-
-pub(crate) fn timeout_result(n: usize) -> SolverResult {
-    SolverResult {
-        status: SolveStatus::Timeout,
-        objective: f64::INFINITY,
-        solution: vec![0.0; n],
-        dual_solution: vec![],
-        bound_duals: vec![],
-
-        iterations: 0,
-        ..Default::default()
-    }
-}
-
-pub(crate) fn numerical_error_result(n: usize) -> SolverResult {
-    SolverResult {
-        status: SolveStatus::NumericalError,
-        objective: f64::INFINITY,
-        solution: vec![0.0; n],
-        dual_solution: vec![],
-        bound_duals: vec![],
-
-        iterations: 0,
-        ..Default::default()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // テスト
@@ -771,10 +517,10 @@ pub(crate) fn numerical_error_result(n: usize) -> SolverResult {
 
 #[cfg(test)]
 mod tests {
-    use super::check_infeasible_or_unbounded;
+    use super::super::common::check_infeasible_or_unbounded;
     use crate::problem::SolveStatus;
     use crate::qp::problem::QpProblem;
-    use crate::sparse::CscMatrix;
+    use crate::CscMatrix;
 
     /// STEP-T1: iter < MIN_ITER(=5) の場合 None が返ること
     #[test]
