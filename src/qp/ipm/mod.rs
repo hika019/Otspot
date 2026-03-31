@@ -8,6 +8,7 @@
 //! - `step.rs`: メインループ（`solve_qp_ipm_inner`）・fraction-to-boundary・ユーティリティ
 //! - `init.rs`: 初期点計算（Mehrotra heuristic）
 
+pub(crate) mod common;
 pub(crate) mod init;
 pub(crate) mod kkt;
 pub(crate) mod step;
