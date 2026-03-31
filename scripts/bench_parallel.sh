@@ -62,6 +62,8 @@ if [[ ! -d "$DATA_DIR" ]]; then
   exit 1
 fi
 
+DATA_DIR=$(realpath "$DATA_DIR")
+
 # ファイル拡張子の自動判別
 QPS_COUNT=$(find "$DATA_DIR" -maxdepth 1 \( -iname "*.qps" \) | wc -l | tr -d ' ')
 QPLIB_COUNT=$(find "$DATA_DIR" -maxdepth 1 -name "*.qplib" | wc -l | tr -d ' ')
@@ -281,6 +283,14 @@ done
     echo "  (詳細なし)"
   fi
 } | tee "$OUTPUT"
+
+# TOTAL整合性チェック
+CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_PASS_NO_REF + TOTAL_TIMEOUT + TOTAL_FAIL + \
+  TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_NONCONVEX + \
+  TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
+if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then
+  echo "警告: カテゴリ合算($CATEGORY_SUM) ≠ TOTAL($TOTAL_PROBLEMS)" >&2
+fi
 
 echo ""
 echo "[bench_parallel.sh] 結果を $OUTPUT に出力した"
