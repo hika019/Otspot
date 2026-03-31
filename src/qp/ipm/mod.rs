@@ -112,9 +112,14 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                     last_result = Some(result);
                     continue;
                 }
-                // Fix-D相当: MaxIterations → Timeout 変換
+                // MaxIterations: 概要設計に従い有効解の有無で分岐
                 if result.status == SolveStatus::MaxIterations {
-                    return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
+                    if !result.solution.is_empty() {
+                        // 有効解あり → SuboptimalSolutionに変換してAPI境界変換に委ねる
+                        return collapse(SolverResult { status: SolveStatus::SuboptimalSolution, ..result });
+                    } else {
+                        return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
+                    }
                 }
                 // Timeout / Infeasible / Unbounded はそのまま返す
                 if result.status == SolveStatus::Timeout
@@ -183,8 +188,15 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
                     last_result = Some(result);
                     continue;
                 }
-                if matches!(result.status, SolveStatus::Timeout | SolveStatus::MaxIterations) {
+                if result.status == SolveStatus::Timeout {
                     return collapse(result);
+                }
+                if result.status == SolveStatus::MaxIterations {
+                    if !result.solution.is_empty() {
+                        return collapse(SolverResult { status: SolveStatus::SuboptimalSolution, ..result });
+                    } else {
+                        return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
+                    }
                 }
                 // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
                 return collapse(result);

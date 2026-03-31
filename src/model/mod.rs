@@ -250,7 +250,26 @@ impl Model {
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
-            SolveStatus::MaxIterations => Err(ModelError::Timeout), // DEAD PATH (cmd_595) but handle gracefully
+            SolveStatus::MaxIterations => {
+                // DEAD PATH (cmd_595) but handle gracefully: 概要設計に従い有効解の有無で分岐
+                if solver_result.solution.is_empty() {
+                    Err(ModelError::Timeout)
+                } else {
+                    // SuboptimalSolutionと同パターン: 有効解があればOptimal相当で返す
+                    let obj = if self.sense == OptimizationSense::Maximize {
+                        -solver_result.objective
+                    } else {
+                        solver_result.objective
+                    };
+                    Ok(ModelResult {
+                        objective_value: obj,
+                        solution: solver_result.solution.clone(),
+                        dual_solution: None,
+                        reduced_costs: None,
+                        slack: None,
+                    })
+                }
+            }
             SolveStatus::SuboptimalSolution => {
                 if solver_result.solution.is_empty() {
                     Err(ModelError::Timeout)
@@ -382,7 +401,26 @@ impl Model {
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
-            SolveStatus::MaxIterations => Err(ModelError::Timeout), // DEAD PATH (cmd_595) but handle gracefully
+            SolveStatus::MaxIterations => {
+                // DEAD PATH (cmd_595) but handle gracefully: 概要設計に従い有効解の有無で分岐
+                if qp_result.solution.is_empty() {
+                    Err(ModelError::Timeout)
+                } else {
+                    // SuboptimalSolutionと同パターン: 有効解があればOptimal相当で返す
+                    let obj = if self.sense == OptimizationSense::Maximize {
+                        -qp_result.objective
+                    } else {
+                        qp_result.objective
+                    };
+                    Ok(ModelResult {
+                        objective_value: obj,
+                        solution: qp_result.solution.clone(),
+                        dual_solution: None,
+                        reduced_costs: None,
+                        slack: None,
+                    })
+                }
+            }
             SolveStatus::SuboptimalSolution => {
                 // apply_api_boundary_conversion が通常 Optimal/Timeout に変換済み。
                 // このアームは予備。解ありなら Optimal 相当、なしなら Timeout。
