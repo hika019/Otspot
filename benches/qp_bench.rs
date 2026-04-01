@@ -6,6 +6,7 @@
 //! - LP問題をQP(Q=0)として解いたときの速度
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use solver::problem::ConstraintType;
 use solver::qp::{solve_qp, QpProblem};
 use solver::sparse::CscMatrix;
 
@@ -18,7 +19,8 @@ fn make_qp_2vars() -> QpProblem {
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
     let b = vec![-1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-    QpProblem::new(q, c, a, b, bounds).unwrap()
+    let constraint_types = vec![ConstraintType::Le; 1];
+    QpProblem::new(q, c, a, b, bounds, constraint_types).unwrap()
 }
 
 /// QP中規模問題（8変数）
@@ -65,7 +67,8 @@ fn make_qp_8vars() -> QpProblem {
     let mut b = vec![1.0, -1.0];
     b.extend(vec![0.0; n]);
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    QpProblem::new(q, c, a, b, bounds).unwrap()
+    let constraint_types = vec![ConstraintType::Le; nrows];
+    QpProblem::new(q, c, a, b, bounds, constraint_types).unwrap()
 }
 
 /// LP問題をQP(Q=0)として定式化
@@ -82,7 +85,8 @@ fn make_qp_as_lp() -> QpProblem {
     ).unwrap();
     let b = vec![-1.0, 0.0, 0.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    QpProblem::new(q, c, a, b, bounds).unwrap()
+    let constraint_types = vec![ConstraintType::Le; 3];
+    QpProblem::new(q, c, a, b, bounds, constraint_types).unwrap()
 }
 
 fn bench_qp_2vars(c: &mut Criterion) {

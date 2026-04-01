@@ -10,7 +10,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use solver::io::mps::parse_mps_file;
-use solver::simplex::solve;
+use solver::solve;
 use std::path::Path;
 
 /// Benchmark solving afiro.mps (27 constraints, 32 variables)

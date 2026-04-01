@@ -6,7 +6,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use solver::problem::LpProblem;
-use solver::simplex::solve;
+use solver::solve;
 use solver::sparse::CscMatrix;
 
 /// Build a simple LP: max sum(x_i) s.t. sum(x_i) <= 100, x_i <= 10

@@ -14,7 +14,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use solver::problem::{ConstraintType, LpProblem};
-use solver::simplex::solve;
+use solver::solve;
 use solver::sparse::CscMatrix;
 
 /// Generate a random diagonally dominant LP problem with n variables and m constraints.
