@@ -87,7 +87,7 @@ pub enum Tolerance {
 /// [`SolverOptions::ipm`] フィールドに設定する。
 #[derive(Debug, Clone)]
 pub struct IpmOptions {
-    /// 最大反復数（デフォルト: 1000）。IPMの安全弁。timeout が主ガード。
+    /// 最大反復数（デフォルト: usize::MAX = 上限なし）。timeout が主ガード。
     pub max_iter: usize,
     /// 収束 tolerance（デフォルト: 1e-6）
     pub eps: f64,
