@@ -320,8 +320,7 @@ impl Model {
         };
 
         // --- 制約型変換: Le/Ge/Eq をそのまま QpProblem に渡す ---
-        // QP ソルバー内部で to_all_le() が呼ばれる。
-        // dual 逆変換は LeExpansionMap を使って行う（Ge→符号反転, Eq→差分）。
+        // QP/IPMソルバーは ConstraintType をネイティブに処理する（cmd_770で to_all_le() 廃止済み）。
         let mut qp_trip_rows: Vec<usize> = Vec::new();
         let mut qp_trip_cols: Vec<usize> = Vec::new();
         let mut qp_trip_vals: Vec<f64> = Vec::new();

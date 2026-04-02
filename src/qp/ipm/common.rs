@@ -109,9 +109,29 @@ pub(crate) fn check_infeasible_or_unbounded(
 // ---------------------------------------------------------------------------
 
 /// α = min(1, τ · min_i { -v_i / Δv_i }  for Δv_i < 0 )
+#[allow(dead_code)]
 pub(crate) fn fraction_to_boundary(v: &[f64], dv: &[f64], tau: f64) -> f64 {
     let mut alpha = 1.0_f64;
     for (&vi, &dvi) in v.iter().zip(dv.iter()) {
+        if dvi < 0.0 {
+            let step = tau * vi / (-dvi);
+            if step < alpha {
+                alpha = step;
+            }
+        }
+    }
+    alpha
+}
+
+/// 等式行をスキップする fraction-to-boundary
+///
+/// skip_mask[i] == true の行をスキップしてステップサイズを計算
+pub(crate) fn fraction_to_boundary_masked(v: &[f64], dv: &[f64], tau: f64, skip_mask: &[bool]) -> f64 {
+    let mut alpha = 1.0_f64;
+    for (i, (&vi, &dvi)) in v.iter().zip(dv.iter()).enumerate() {
+        if skip_mask[i] {
+            continue;
+        }
         if dvi < 0.0 {
             let step = tau * vi / (-dvi);
             if step < alpha {

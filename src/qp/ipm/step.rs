@@ -20,7 +20,8 @@ use super::kkt::{
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
-use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary, timeout_result, numerical_error_result};
+use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary_masked, timeout_result, numerical_error_result};
+use super::kkt::collapse_extended_dual;
 
 
 
@@ -53,15 +54,19 @@ pub(crate) fn solve_qp_ipm_inner(
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
-    // 拡張制約行列を構築
-    let (a_ext, b_ext, m_ext, m_orig, _n_lb) = build_extended_constraints(problem);
+    // 拡張制約行列を構築（6-tuple: is_eq_ext追加）
+    let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(problem);
 
     if m_ext == 0 {
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
-    // 初期点
-    let (mut x, mut s, mut y) = compute_initial_point(n, &b_ext);
+    // 等式行数と不等式行数
+    let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
+    let m_ineq = m_ext - eq_count;
+
+    // 初期点（eq行: s=0, y=0）
+    let (mut x, mut s, mut y) = compute_initial_point(n, &b_ext, &is_eq_ext);
 
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
@@ -106,8 +111,15 @@ pub(crate) fn solve_qp_ipm_inner(
             r_p[i] = b_ext[i] - ax[i] - s[i];
         }
 
-        // μ = s^T y / m_ext（相補性ギャップ）
-        let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>() / m_ext as f64;
+        // μ = s^T y / m_ineq（相補性ギャップ、等式行除外）
+        let mu: f64 = if m_ineq > 0 {
+            s.iter().zip(y.iter()).zip(is_eq_ext.iter())
+                .filter(|&(_, &eq)| !eq)
+                .map(|((&si, &yi), _)| si * yi)
+                .sum::<f64>() / m_ineq as f64
+        } else {
+            0.0
+        };
 
         // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
         final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
@@ -182,14 +194,17 @@ pub(crate) fn solve_qp_ipm_inner(
         // C-1: rho_ipmフロアによるmu非依存proximal正則化
         let effective_delta_p = delta_p.max(rho_ipm);
 
-        // Σ = diag(s_i / y_i)（両パスで共通）
-        // y→0 のとき si/yi→Inf になる場合がある。faerはInf値を行列要素として処理できないため
-        // sigma_max = 1/delta_min でクリップ（ippmm.rs L278-284と同等）
+        // Σ = diag(s_i / y_i)（等式行は0）
+        // y→0 のとき si/yi→Inf になる場合がある。sigma_max = 1/delta_min でクリップ
         let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
-        let sigma_vec: Vec<f64> = s.iter().zip(y.iter())
-            .map(|(&si, &yi)| {
-                let v = si / yi;
-                if v.is_finite() { v } else { sigma_max }
+        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).enumerate()
+            .map(|(i, (&si, &yi))| {
+                if is_eq_ext[i] {
+                    0.0
+                } else {
+                    let v: f64 = si / yi;
+                    if v.is_finite() { v } else { sigma_max }
+                }
             })
             .collect();
 
@@ -347,9 +362,13 @@ pub(crate) fn solve_qp_ipm_inner(
         let mut sol = vec![0.0f64; total];
 
         // --- Predictor ---
-        let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
-        let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+        let r_c_pred: Vec<f64> = s.iter().zip(y.iter()).enumerate()
+            .map(|(i, (&si, &yi))| if is_eq_ext[i] { 0.0 } else { -si * yi })
+            .collect();
+        let r_p_mod_pred: Vec<f64> = r_p.iter().zip(r_c_pred.iter()).zip(y.iter()).enumerate()
+            .map(|(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+            }).collect();
 
         rhs[..n].copy_from_slice(&r_d);
         rhs[n..].copy_from_slice(&r_p_mod_pred);
@@ -359,22 +378,35 @@ pub(crate) fn solve_qp_ipm_inner(
 
         let mut ds_pred = vec![0.0f64; m_ext];
         for i in 0..m_ext {
-            ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            if is_eq_ext[i] {
+                ds_pred[i] = 0.0;
+            } else {
+                ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            }
         }
 
-        let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, super::TAU);
-        let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, super::TAU);
+        let alpha_s_pred = fraction_to_boundary_masked(&s, &ds_pred, super::TAU, &is_eq_ext);
+        let alpha_y_pred = fraction_to_boundary_masked(&y, &dy_pred, super::TAU, &is_eq_ext);
         let alpha_pred = alpha_s_pred.min(alpha_y_pred);
-        let mu_aff: f64 = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
-            .sum::<f64>() / m_ext as f64;
+        let mu_aff: f64 = if m_ineq > 0 {
+            s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter()).enumerate()
+                .filter(|&(i, _)| !is_eq_ext[i])
+                .map(|(_, (((&si, &yi), &dsi), &dyi))| (si + alpha_pred * dsi) * (yi + alpha_pred * dyi))
+                .sum::<f64>() / m_ineq as f64
+        } else {
+            0.0
+        };
         let sigma_center = if mu > 1e-15 { (mu_aff / mu).powi(3).min(1.0) } else { 0.0 };
 
         // --- Corrector ---
-        let r_c_corr: Vec<f64> = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi).collect();
-        let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+        let r_c_corr: Vec<f64> = s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter()).enumerate()
+            .map(|(i, (((&si, &yi), &dsi), &dyi))| {
+                if is_eq_ext[i] { 0.0 } else { sigma_center * mu - si * yi - dsi * dyi }
+            }).collect();
+        let r_p_mod_corr: Vec<f64> = r_p.iter().zip(r_c_corr.iter()).zip(y.iter()).enumerate()
+            .map(|(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+            }).collect();
 
         rhs[..n].copy_from_slice(&r_d);
         rhs[n..].copy_from_slice(&r_p_mod_corr);
@@ -383,12 +415,16 @@ pub(crate) fn solve_qp_ipm_inner(
         dy.copy_from_slice(&sol[n..]);
 
         for i in 0..m_ext {
-            ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            if is_eq_ext[i] {
+                ds[i] = 0.0;
+            } else {
+                ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            }
         }
 
-                // α: fraction-to-boundary (corrector)
-        let alpha_s = fraction_to_boundary(&s, &ds, super::TAU);
-        let alpha_y = fraction_to_boundary(&y, &dy, super::TAU);
+                // α: fraction-to-boundary (corrector, eq行スキップ)
+        let alpha_s = fraction_to_boundary_masked(&s, &ds, super::TAU, &is_eq_ext);
+        let alpha_y = fraction_to_boundary_masked(&y, &dy, super::TAU, &is_eq_ext);
         let alpha = alpha_s.min(alpha_y);
 
         // ========== Gondzio Multiple Centrality Correctors (Augmented path) ==========
@@ -396,23 +432,32 @@ pub(crate) fn solve_qp_ipm_inner(
         if alpha < 0.999 {
             let mut alpha_prev = alpha;
             for _k in 0..options.ipm.max_correctors {
-                // (1) 目標step sizeとμ
+                // (1) 目標step sizeとμ（不等式行のみ）
                 let alpha_target = (alpha_prev + super::BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
-                let mu_target: f64 = s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter()))
-                    .map(|((&si, &yi), (&dsi, &dyi))| {
-                        (si + alpha_target * dsi) * (yi + alpha_target * dyi)
-                    })
-                    .sum::<f64>() / m_ext as f64;
+                let mu_target: f64 = if m_ineq > 0 {
+                    s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter())).enumerate()
+                        .filter(|&(i, _)| !is_eq_ext[i])
+                        .map(|(_, ((&si, &yi), (&dsi, &dyi)))| {
+                            (si + alpha_target * dsi) * (yi + alpha_target * dyi)
+                        })
+                        .sum::<f64>() / m_ineq as f64
+                } else {
+                    0.0
+                };
                 let mu_target = mu_target.max(0.0);
 
                 // (2) 各complementarity pairの目標範囲
                 let target_lo = super::GAMMA_L * mu_target;
                 let target_hi = super::GAMMA_U * mu_target;
 
-                // (3) Gondzio corrector RHS構築
+                // (3) Gondzio corrector RHS構築（eq行=0）
                 //     v_i = (s_i + α·ds_i)(y_i + α·dy_i) を[target_lo, target_hi]に射影
                 let mut r_c_gondzio = vec![0.0f64; m_ext];
                 for i in 0..m_ext {
+                    if is_eq_ext[i] {
+                        r_c_gondzio[i] = 0.0;
+                        continue;
+                    }
                     let si_new = s[i] + alpha_prev * ds[i];
                     let yi_new = y[i] + alpha_prev * dy[i];
                     let v_i = si_new * yi_new;
@@ -427,20 +472,24 @@ pub(crate) fn solve_qp_ipm_inner(
                 }
 
                 // (4) 修正RHS構築 & LDL因子再利用solve
-                let r_p_mod_gondzio: Vec<f64> = r_p.iter().zip(r_c_gondzio.iter()).zip(y.iter())
-                    .map(|((&rpi, &rci), &yi)| rpi - rci / yi).collect();
+                let r_p_mod_gondzio: Vec<f64> = r_p.iter().zip(r_c_gondzio.iter()).zip(y.iter()).enumerate()
+                    .map(|(i, ((&rpi, &rci), &yi))| {
+                        if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+                    }).collect();
                 rhs[..n].copy_from_slice(&r_d);
                 rhs[n..].copy_from_slice(&r_p_mod_gondzio);
                 fac.solve(&rhs, &mut sol);
                 let dx_new = sol[..n].to_vec();
                 let dy_new = sol[n..].to_vec();
                 let ds_new: Vec<f64> = (0..m_ext)
-                    .map(|i| r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i])
+                    .map(|i| {
+                        if is_eq_ext[i] { 0.0 } else { r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i] }
+                    })
                     .collect();
 
-                // (5) 新しいstep sizeを計算
-                let alpha_s_new = fraction_to_boundary(&s, &ds_new, super::TAU);
-                let alpha_y_new = fraction_to_boundary(&y, &dy_new, super::TAU);
+                // (5) 新しいstep sizeを計算（eq行スキップ）
+                let alpha_s_new = fraction_to_boundary_masked(&s, &ds_new, super::TAU, &is_eq_ext);
+                let alpha_y_new = fraction_to_boundary_masked(&y, &dy_new, super::TAU, &is_eq_ext);
                 let alpha_new = alpha_s_new.min(alpha_y_new);
 
                 // (6) 改善判定: 改善なしならbreak
@@ -472,13 +521,18 @@ pub(crate) fn solve_qp_ipm_inner(
             x[i] += alpha * dx[i];
         }
         for i in 0..m_ext {
-            s[i] += alpha * ds[i];
-            y[i] += alpha * dy[i];
-            if s[i] <= 0.0 {
-                s[i] = 1e-12;
-            }
-            if y[i] <= 0.0 {
-                y[i] = 1e-12;
+            if is_eq_ext[i] {
+                // 等式行: s=0のまま、yは自由変数として更新
+                y[i] += alpha * dy[i];
+            } else {
+                s[i] += alpha * ds[i];
+                y[i] += alpha * dy[i];
+                if s[i] <= 0.0 {
+                    s[i] = 1e-12;
+                }
+                if y[i] <= 0.0 {
+                    y[i] = 1e-12;
+                }
             }
         }
         // C-1: rho_ipm減衰（RHO_IPM_DECAY=0.9, RHO_IPM_MIN=1e-9）
@@ -491,7 +545,7 @@ pub(crate) fn solve_qp_ipm_inner(
         * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
         + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
 
-    let dual_solution = y[..m_orig].to_vec();
+    let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..m_ext].to_vec();
 
     SolverResult {

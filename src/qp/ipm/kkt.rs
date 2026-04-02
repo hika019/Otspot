@@ -4,6 +4,7 @@
 //! - augmented KKT system 構築 (`build_augmented_system`)
 //! - 疎行列-ベクトル演算ヘルパー
 
+use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 
@@ -61,13 +62,15 @@ pub(crate) fn norm_inf(v: &[f64]) -> f64 {
 // 拡張制約行列構築
 // ---------------------------------------------------------------------------
 
-/// Ax <= b + lb/ub 境界を含む拡張制約を構築する
+/// 制約行列を拡張する（Eq/Le/Geネイティブ対応）
 ///
-/// 戻り値: (A_ext, b_ext, m_ext, m_orig, n_lb)
-/// 順序: [original inequalities | lower bound rows | upper bound rows]
+/// 戻り値: (A_ext, b_ext, m_ext, m_orig, n_lb, is_eq_ext)
+/// - is_eq_ext: 各拡張行が等式制約かどうか（true=等式、スラック不要）
+/// - Ge行は符号反転してLe扱いで格納（is_eq_ext=false）
+/// 順序: [original constraints | lower bound rows | upper bound rows]
 pub(crate) fn build_extended_constraints(
     problem: &QpProblem,
-) -> (CscMatrix, Vec<f64>, usize, usize, usize) {
+) -> (CscMatrix, Vec<f64>, usize, usize, usize, Vec<bool>) {
     let n = problem.num_vars;
     let m = problem.num_constraints;
 
@@ -87,16 +90,39 @@ pub(crate) fn build_extended_constraints(
     let mut cols: Vec<usize> = Vec::new();
     let mut vals: Vec<f64> = Vec::new();
     let mut b_ext = Vec::with_capacity(m_ext);
+    let mut is_eq_ext = Vec::with_capacity(m_ext);
 
-    // 元の不等式制約 A x <= b
+    // 元の制約（Eq/Le/Geをネイティブ処理）
     for col in 0..n {
         for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            rows.push(problem.a.row_ind[k]);
+            let row = problem.a.row_ind[k];
+            let sign = if problem.constraint_types[row] == ConstraintType::Ge {
+                -1.0
+            } else {
+                1.0
+            };
+            rows.push(row);
             cols.push(col);
-            vals.push(problem.a.values[k]);
+            vals.push(problem.a.values[k] * sign);
         }
     }
-    b_ext.extend_from_slice(&problem.b);
+    for i in 0..m {
+        match problem.constraint_types[i] {
+            ConstraintType::Eq => {
+                b_ext.push(problem.b[i]);
+                is_eq_ext.push(true);
+            }
+            ConstraintType::Le => {
+                b_ext.push(problem.b[i]);
+                is_eq_ext.push(false);
+            }
+            ConstraintType::Ge => {
+                // Ge: -a·x <= -b として格納
+                b_ext.push(-problem.b[i]);
+                is_eq_ext.push(false);
+            }
+        }
+    }
 
     // 下界制約: x_j >= lb_j → -x_j <= -lb_j
     let mut lb_row = m;
@@ -106,6 +132,7 @@ pub(crate) fn build_extended_constraints(
             cols.push(j);
             vals.push(-1.0);
             b_ext.push(-lb);
+            is_eq_ext.push(false);
             lb_row += 1;
         }
     }
@@ -118,6 +145,7 @@ pub(crate) fn build_extended_constraints(
             cols.push(j);
             vals.push(1.0);
             b_ext.push(ub);
+            is_eq_ext.push(false);
             ub_row += 1;
         }
     }
@@ -128,7 +156,27 @@ pub(crate) fn build_extended_constraints(
         CscMatrix::from_triplets(&rows, &cols, &vals, m_ext, n).unwrap()
     };
 
-    (a_ext, b_ext, m_ext, m, n_lb)
+    (a_ext, b_ext, m_ext, m, n_lb, is_eq_ext)
+}
+
+/// 拡張dualベクトルから元制約空間(m_orig長)のdualを復元する
+///
+/// 境界行を除去し、Ge行の符号を反転して元の制約空間に戻す
+pub(crate) fn collapse_extended_dual(
+    dual: &[f64],
+    m_orig: usize,
+    constraint_types: &[ConstraintType],
+) -> Vec<f64> {
+    let mut result = Vec::with_capacity(m_orig);
+    for i in 0..m_orig {
+        let d = dual[i];
+        if constraint_types[i] == ConstraintType::Ge {
+            result.push(-d);
+        } else {
+            result.push(d);
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -396,13 +444,14 @@ mod tests {
             vec![3.0],
             vec![(0.0, f64::INFINITY); 2],
         ).unwrap();
-        let (a_ext, b_ext, m_ext, m_orig, n_lb) = build_extended_constraints(&prob);
+        let (a_ext, b_ext, m_ext, m_orig, n_lb, is_eq_ext) = build_extended_constraints(&prob);
         assert_eq!(m_orig, 1, "m_orig should be 1");
         assert_eq!(n_lb, 2, "n_lb should be 2 (both lower bounds finite)");
         assert_eq!(m_ext, 3, "m_ext = m + n_lb + n_ub = 1+2+0 = 3");
         assert_eq!(a_ext.nrows, 3, "a_ext.nrows should be m_ext=3");
         assert_eq!(a_ext.ncols, 2, "a_ext.ncols should be n=2");
         assert_eq!(b_ext.len(), 3, "b_ext.len() should be m_ext=3");
+        assert_eq!(is_eq_ext, vec![false, false, false], "all Le constraints");
     }
 
     /// update_augmented_values: 更新後の values が build_augmented_system 結果と一致

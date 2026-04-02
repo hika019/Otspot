@@ -57,17 +57,7 @@ pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 /// Ruiz equilibration スケーリングを適用してから内部ソルバーを呼ぶ。
 /// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
 pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
-    let (work_problem, le_map) = problem.to_all_le();
-    let orig_types = &problem.constraint_types;
-    let collapse = |r: SolverResult| -> SolverResult {
-        if r.dual_solution.is_empty() { return r; }
-        SolverResult {
-            dual_solution: crate::qp::collapse_le_expansion_dual(&r.dual_solution, &le_map, orig_types),
-            ..r
-        }
-    };
-    let problem = &work_problem;
+    // cmd_770: to_all_le()廃止。IPMはEq/Geをネイティブ処理する。
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
         let m = problem.num_constraints;
@@ -116,44 +106,34 @@ pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResul
                 if result.status == SolveStatus::MaxIterations {
                     if !result.solution.is_empty() {
                         // 有効解あり → SuboptimalSolutionに変換してAPI境界変換に委ねる
-                        return collapse(SolverResult { status: SolveStatus::SuboptimalSolution, ..result });
+                        return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
                     } else {
-                        return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
+                        return SolverResult { status: SolveStatus::Timeout, ..result };
                     }
                 }
                 // Timeout / Infeasible / Unbounded はそのまま返す
                 if result.status == SolveStatus::Timeout
                     || matches!(result.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
                 {
-                    return collapse(result);
+                    return result;
                 }
                 // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return collapse(result);
+                return result;
             }
-            return collapse(last_result.expect("POST_VERIFY_MAX_RESOLV >= 1"));
+            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
     // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    collapse(post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps()))
+    post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps())
 }
 
 /// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
 ///
 /// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
 pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // Eq/Ge制約を全Le形式に変換（IPM内部はLe前提）
-    let (work_problem, le_map) = problem.to_all_le();
-    let orig_types = &problem.constraint_types;
-    let collapse = |r: SolverResult| -> SolverResult {
-        if r.dual_solution.is_empty() { return r; }
-        SolverResult {
-            dual_solution: crate::qp::collapse_le_expansion_dual(&r.dual_solution, &le_map, orig_types),
-            ..r
-        }
-    };
-    let problem = &work_problem;
+    // cmd_770: to_all_le()廃止。IP-PMMはEq/Geをネイティブ処理する。
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
         let m = problem.num_constraints;
@@ -189,28 +169,28 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
                     continue;
                 }
                 if result.status == SolveStatus::Timeout {
-                    return collapse(result);
+                    return result;
                 }
                 if result.status == SolveStatus::MaxIterations {
                     if !result.solution.is_empty() {
-                        return collapse(SolverResult { status: SolveStatus::SuboptimalSolution, ..result });
+                        return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
                     } else {
-                        return collapse(SolverResult { status: SolveStatus::Timeout, ..result });
+                        return SolverResult { status: SolveStatus::Timeout, ..result };
                     }
                 }
                 // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return collapse(result);
+                return result;
             }
-            return collapse(last_result.expect("POST_VERIFY_MAX_RESOLV >= 1"));
+            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
         }
     }
 
     // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    collapse(post_verify_solution(
+    post_verify_solution(
         ippmm::solve_ippmm_inner(problem, options, None, None, options.ipm_eps()),
         problem,
         options.ipm_eps(),
-    ))
+    )
 }
 
 /// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、

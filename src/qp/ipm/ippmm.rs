@@ -36,7 +36,8 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
-use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary, timeout_result, numerical_error_result};
+use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary_masked, timeout_result, numerical_error_result};
+use super::kkt::collapse_extended_dual;
 
 // ---------------------------------------------------------------------------
 // PMM パラメータ定数（§35 PARAM マーカー）
@@ -136,12 +137,16 @@ pub(crate) fn solve_ippmm_inner(
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
-    // 拡張制約行列を構築（独自実装: kkt.rs 不使用）
-    let (a_ext, b_ext, m_ext, m_orig, _n_lb) = build_extended_constraints(problem);
+    // 拡張制約行列を構築（6-tuple: is_eq_ext追加）
+    let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(problem);
 
     if m_ext == 0 {
         return solve_unconstrained(problem, &timeout_ctx);
     }
+
+    // 等式行数と不等式行数
+    let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
+    let m_ineq = m_ext - eq_count;
 
     // 初期点（有界変数はボックス中点から開始して primal feasibility を確保）
     // 初期点 x0 = ボックス中点（lb+ub)/2）。無限界変数は 0。
@@ -162,9 +167,7 @@ pub(crate) fn solve_ippmm_inner(
         .collect();
 
     // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。
-    // 下限を 1.0 でクランプ（D1修正）。
-    // ★ cmd_499教訓: max(1.0, |bi|+1.0) は bi依存項がQSHELL pfeasを劣化させた。
-    //    max(1.0)固定（問題依存なし）が安全。Ruizスケーリング後は|bi|≈1.0のためclampは最小限。
+    // 等式行: s=0（スラックなし）、不等式行: 下限 1.0 でクランプ
     let mut ax0 = vec![0.0f64; m_ext];
     #[allow(clippy::needless_range_loop)]
     for col in 0..n {
@@ -175,9 +178,14 @@ pub(crate) fn solve_ippmm_inner(
     let s0: Vec<f64> = b_ext
         .iter()
         .zip(ax0.iter())
-        .map(|(&bi, &axi)| (bi - axi).max(1.0))
+        .enumerate()
+        .map(|(i, (&bi, &axi))| {
+            if is_eq_ext[i] { 0.0 } else { (bi - axi).max(1.0) }
+        })
         .collect();
-    let y0: Vec<f64> = vec![1.0; m_ext];
+    let y0: Vec<f64> = (0..m_ext)
+        .map(|i| if is_eq_ext[i] { 0.0 } else { 1.0 })
+        .collect();
 
     let mut x = x0.clone();
     let mut s = s0.clone();
@@ -233,9 +241,15 @@ pub(crate) fn solve_ippmm_inner(
             r_p[i] = b_ext[i] - ax[i] - s[i];
         }
 
-        // μ = sᵀy / m_ext
-        let mu: f64 = s.iter().zip(y.iter()).map(|(&si, &yi)| si * yi).sum::<f64>()
-            / m_ext as f64;
+        // μ = sᵀy / m_ineq（等式行除外）
+        let mu: f64 = if m_ineq > 0 {
+            s.iter().zip(y.iter()).zip(is_eq_ext.iter())
+                .filter(|&(_, &eq)| !eq)
+                .map(|((&si, &yi), _)| si * yi)
+                .sum::<f64>() / m_ineq as f64
+        } else {
+            0.0
+        };
 
         // 残差ノルム記録
         let nr_p = norm_inf(&r_p);
@@ -317,16 +331,16 @@ pub(crate) fn solve_ippmm_inner(
             r_p_pmm[i] -= delta_prox * (y[i] - pmm.y_ref[i]);
         }
 
-        // Σ = diag(s_i / y_i)
-        // sigma = s/y: Infになる場合（y→1e-12フロアかつsが大きい）は
-        // 大きな有限値にクリップ。faerはInfをマトリクス値として処理できない。
-        // 大きなsigmaは -(sigma+delta) >> 0 を保証し因子化はむしろ安定する。
-        // SIGMA_MAX = 1/delta_min = 1e8 (delta_min=1e-8時)
+        // Σ = diag(s_i / y_i)（等式行は0）
         let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
-        let sigma_vec: Vec<f64> = s.iter().zip(y.iter())
-            .map(|(&si, &yi)| {
-                let v = si / yi;
-                if v.is_finite() { v } else { sigma_max }
+        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).enumerate()
+            .map(|(i, (&si, &yi))| {
+                if is_eq_ext[i] {
+                    0.0
+                } else {
+                    let v: f64 = si / yi;
+                    if v.is_finite() { v } else { sigma_max }
+                }
             })
             .collect();
 
@@ -431,12 +445,16 @@ pub(crate) fn solve_ippmm_inner(
         let mut sol = vec![0.0f64; total];
 
         let r_c_pred: Vec<f64> =
-            s.iter().zip(y.iter()).map(|(&si, &yi)| -si * yi).collect();
+            s.iter().zip(y.iter()).enumerate()
+            .map(|(i, (&si, &yi))| if is_eq_ext[i] { 0.0 } else { -si * yi }).collect();
         let r_p_mod_pred: Vec<f64> = r_p_pmm
             .iter()
             .zip(r_c_pred.iter())
             .zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi)
+            .enumerate()
+            .map(|(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+            })
             .collect();
 
         rhs[..n].copy_from_slice(&r_d_pmm);
@@ -446,23 +464,27 @@ pub(crate) fn solve_ippmm_inner(
 
         let mut ds_pred = vec![0.0f64; m_ext];
         for i in 0..m_ext {
-            ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            if is_eq_ext[i] {
+                ds_pred[i] = 0.0;
+            } else {
+                ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+            }
         }
 
-        let alpha_s_pred = fraction_to_boundary(&s, &ds_pred, TAU);
-        let alpha_y_pred = fraction_to_boundary(&y, &dy_pred, TAU);
+        let alpha_s_pred = fraction_to_boundary_masked(&s, &ds_pred, TAU, &is_eq_ext);
+        let alpha_y_pred = fraction_to_boundary_masked(&y, &dy_pred, TAU, &is_eq_ext);
         let alpha_pred = alpha_s_pred.min(alpha_y_pred);
 
-        let mu_aff: f64 = s
-            .iter()
-            .zip(y.iter())
-            .zip(ds_pred.iter())
-            .zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| {
-                (si + alpha_pred * dsi) * (yi + alpha_pred * dyi)
-            })
-            .sum::<f64>()
-            / m_ext as f64;
+        let mu_aff: f64 = if m_ineq > 0 {
+            s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter()).enumerate()
+                .filter(|&(i, _)| !is_eq_ext[i])
+                .map(|(_, (((&si, &yi), &dsi), &dyi))| {
+                    (si + alpha_pred * dsi) * (yi + alpha_pred * dyi)
+                })
+                .sum::<f64>() / m_ineq as f64
+        } else {
+            0.0
+        };
 
         let sigma_center = if mu > 1e-15 {
             (mu_aff / mu).powi(3).min(1.0)
@@ -483,13 +505,19 @@ pub(crate) fn solve_ippmm_inner(
             .zip(y.iter())
             .zip(ds_pred.iter())
             .zip(dy_pred.iter())
-            .map(|(((&si, &yi), &dsi), &dyi)| sigma_center * mu - si * yi - dsi * dyi)
+            .enumerate()
+            .map(|(i, (((&si, &yi), &dsi), &dyi))| {
+                if is_eq_ext[i] { 0.0 } else { sigma_center * mu - si * yi - dsi * dyi }
+            })
             .collect();
         let r_p_mod_corr: Vec<f64> = r_p_pmm
             .iter()
             .zip(r_c_corr.iter())
             .zip(y.iter())
-            .map(|((&rpi, &rci), &yi)| rpi - rci / yi)
+            .enumerate()
+            .map(|(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+            })
             .collect();
 
         rhs[..n].copy_from_slice(&r_d_pmm);
@@ -499,11 +527,15 @@ pub(crate) fn solve_ippmm_inner(
         dy.copy_from_slice(&sol[n..]);
 
         for i in 0..m_ext {
-            ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            if is_eq_ext[i] {
+                ds[i] = 0.0;
+            } else {
+                ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+            }
         }
 
-        let alpha_s = fraction_to_boundary(&s, &ds, TAU);
-        let alpha_y = fraction_to_boundary(&y, &dy, TAU);
+        let alpha_s = fraction_to_boundary_masked(&s, &ds, TAU, &is_eq_ext);
+        let alpha_y = fraction_to_boundary_masked(&y, &dy, TAU, &is_eq_ext);
         let alpha = alpha_s.min(alpha_y);
 
         // ── Gondzio multiple centrality correctors ──────────────────
@@ -513,15 +545,16 @@ pub(crate) fn solve_ippmm_inner(
             for _k in 0..options.ipm.max_correctors {
                 let alpha_target =
                     (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
-                let mu_target: f64 = s
-                    .iter()
-                    .zip(y.iter())
-                    .zip(ds.iter().zip(dy.iter()))
-                    .map(|((&si, &yi), (&dsi, &dyi))| {
-                        (si + alpha_target * dsi) * (yi + alpha_target * dyi)
-                    })
-                    .sum::<f64>()
-                    / m_ext as f64;
+                let mu_target: f64 = if m_ineq > 0 {
+                    s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter())).enumerate()
+                        .filter(|&(i, _)| !is_eq_ext[i])
+                        .map(|(_, ((&si, &yi), (&dsi, &dyi)))| {
+                            (si + alpha_target * dsi) * (yi + alpha_target * dyi)
+                        })
+                        .sum::<f64>() / m_ineq as f64
+                } else {
+                    0.0
+                };
                 let mu_target = mu_target.max(0.0);
 
                 let target_lo = GAMMA_L * mu_target;
@@ -529,6 +562,10 @@ pub(crate) fn solve_ippmm_inner(
 
                 let mut r_c_gondzio = vec![0.0f64; m_ext];
                 for i in 0..m_ext {
+                    if is_eq_ext[i] {
+                        r_c_gondzio[i] = 0.0;
+                        continue;
+                    }
                     let si_new = s[i] + alpha_prev * ds[i];
                     let yi_new = y[i] + alpha_prev * dy[i];
                     let v_i = si_new * yi_new;
@@ -546,7 +583,10 @@ pub(crate) fn solve_ippmm_inner(
                     .iter()
                     .zip(r_c_gondzio.iter())
                     .zip(y.iter())
-                    .map(|((&rpi, &rci), &yi)| rpi - rci / yi)
+                    .enumerate()
+                    .map(|(i, ((&rpi, &rci), &yi))| {
+                        if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+                    })
                     .collect();
 
                 rhs[..n].copy_from_slice(&r_d_pmm);
@@ -555,11 +595,13 @@ pub(crate) fn solve_ippmm_inner(
                 let dx_new = sol[..n].to_vec();
                 let dy_new = sol[n..].to_vec();
                 let ds_new: Vec<f64> = (0..m_ext)
-                    .map(|i| r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i])
+                    .map(|i| {
+                        if is_eq_ext[i] { 0.0 } else { r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i] }
+                    })
                     .collect();
 
-                let alpha_s_new = fraction_to_boundary(&s, &ds_new, TAU);
-                let alpha_y_new = fraction_to_boundary(&y, &dy_new, TAU);
+                let alpha_s_new = fraction_to_boundary_masked(&s, &ds_new, TAU, &is_eq_ext);
+                let alpha_y_new = fraction_to_boundary_masked(&y, &dy_new, TAU, &is_eq_ext);
                 let alpha_new = alpha_s_new.min(alpha_y_new);
 
                 if alpha_new < alpha_prev + ALPHA_IMPROVE_THRESHOLD {
@@ -601,15 +643,18 @@ pub(crate) fn solve_ippmm_inner(
             x[i] += alpha * dx[i];
         }
         for i in 0..m_ext {
-            s[i] += alpha * ds[i];
-            y[i] += alpha * dy[i];
-            // 下限: 負への転落を防ぐ（元の実装と同じ）
-            // PARAM(s/y floor=1e-12): 根拠=経験値(内点法の相補条件s*y>0維持のための数値フロア。LOQOは1e-4、OSQPは別方式を採用。1e-12は丸め誤差水準の最小値) | 承認=cmd_493実装時設定・要検証
-            if s[i] <= 0.0 {
-                s[i] = 1e-12;
-            }
-            if y[i] <= 0.0 {
-                y[i] = 1e-12;
+            if is_eq_ext[i] {
+                // 等式行: s=0のまま、yは自由変数として更新
+                y[i] += alpha * dy[i];
+            } else {
+                s[i] += alpha * ds[i];
+                y[i] += alpha * dy[i];
+                if s[i] <= 0.0 {
+                    s[i] = 1e-12;
+                }
+                if y[i] <= 0.0 {
+                    y[i] = 1e-12;
+                }
             }
         }
 
@@ -649,7 +694,7 @@ pub(crate) fn solve_ippmm_inner(
         * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
         + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
 
-    let dual_solution = y[..m_orig].to_vec();
+    let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..].to_vec();
 
     SolverResult {

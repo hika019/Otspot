@@ -513,17 +513,12 @@ pub fn run_qp_presolve_phase1(
     }
 
     // ==================================================================
-    // #2: singleton_rows() — 1変数のみの等式制約 A[i,j]*x[j]=b[i] を除去
+    // #2: singleton_rows() — 1変数のみの制約を除去
     // ==================================================================
-    // Singleton row はここでは Le 制約の 1 変数ケースに限定して処理する。
-    // Eq 制約（ConstraintType::Eq）はスキップ: IPM の to_all_le() で展開される。
-    // (b[i]/A[i,j] が bounds に収まる場合のみ適用)
+    // Eq制約: a[i,j]*x[j] = b[i] → x[j] = b[i]/a[i,j] で変数固定除去
+    // Le/Ge制約: 従来通り境界更新
     for i in 0..m {
         if removed_rows[i] {
-            continue;
-        }
-        // Eq 制約はスキップ（to_all_le経由でIPMが処理する）
-        if prob.constraint_types[i] == crate::problem::ConstraintType::Eq {
             continue;
         }
         let active: Vec<(usize, f64)> = row_entries[i]
@@ -536,6 +531,19 @@ pub fn run_qp_presolve_phase1(
         }
         let (j, a_ij) = active[0];
         if a_ij.abs() < ZERO_TOL {
+            continue;
+        }
+        // Eq制約のsingleton: a[i,j]*x[j] = b[i] → x[j] = b[i]/a[i,j] で変数固定
+        if prob.constraint_types[i] == crate::problem::ConstraintType::Eq {
+            let val = b[i] / a_ij;
+            let (lb, ub) = bounds[j];
+            if val >= lb - ZERO_TOL && val <= ub + ZERO_TOL {
+                let val = val.clamp(lb, ub);
+                apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
+                removed_cols[j] = true;
+                removed_rows[i] = true;
+                postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+            }
             continue;
         }
         let val_raw = b[i] / a_ij;
@@ -1303,14 +1311,9 @@ pub fn run_qp_presolve_phase1(
     // PARAM: 1e4 — 経験的閾値。|b|_max > 1e4 で presolve Ruiz をスキップ（dispatch段のRuizが処理）。
     //   LARGE_B_THRESHOLD(1e5)とは目的が異なる: こちらはpresolve Ruiz干渉防止、あちらはfixed-var代入スキップ。
     const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
-    // Eq/Ge 制約が残っている場合は presolve Ruiz をスキップ。
-    // 理由: presolve Ruiz は m_new（to_all_le 前の行数）で scaler.e を構築するが、
-    // dispatch（IPM）内部で to_all_le() が呼ばれると dual の長さが m_expanded に増える。
-    // 外側の unscale_solution が scaler.e.len() != dual.len() でパニックするため。
-    // スキップ時は IPM 内の Ruiz（to_all_le 後の正しい m で構築）が代わりに適用される。
-    let has_non_le = reduced.constraint_types.iter()
-        .any(|ct| !matches!(ct, crate::problem::ConstraintType::Le));
-    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD && !has_non_le {
+    // cmd_770: to_all_le()廃止により、Eq/Ge制約があってもdual長は変わらない。
+    // presolve Ruizの適用条件からhas_non_leを除外。
+    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);

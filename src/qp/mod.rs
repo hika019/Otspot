@@ -307,8 +307,7 @@ fn solve_qp_concurrent(
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
-    // 旧実装の to_all_le() + 全Le方式は Eq→2Le展開で同一係数行が生まれ、
-    // 基底の数値的不安定を引き起こすため廃止。
+    // cmd_770: to_all_le()は全パスで廃止済み。IPMもSimplexもConstraintTypeをネイティブ処理。
     let lp = match LpProblem::new_general(
         problem.c.clone(),
         problem.a.clone(),
@@ -586,6 +585,8 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 /// - Eq:  expanded[rows[0]] - expanded[rows[1]]
 ///
 /// 展開後のサイズと dual_expanded のサイズが一致しない場合はそのまま返す。
+#[deprecated(note = "cmd_770: to_all_le()廃止に伴いcollapse_extended_dualを使用")]
+#[allow(dead_code, deprecated)]
 pub(crate) fn collapse_le_expansion_dual(
     dual_expanded: &[f64],
     le_map: &crate::qp::problem::LeExpansionMap,
@@ -793,14 +794,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         }
                     }
                 }
-                // Eq/Ge dual逆変換: IPM内部の to_all_le() 展開で増えたdualを元制約空間に折り畳む。
-                // postsolve_qp の row_map は 1:1 マッピング前提のため、展開前に折り畳む必要がある。
-                if presolve_result.reduced.constraint_types.iter().any(|ct| !matches!(ct, crate::problem::ConstraintType::Le)) {
-                    let (_, le_map) = presolve_result.reduced.to_all_le();
-                    reduced_sol.dual_solution = collapse_le_expansion_dual(
-                        &reduced_sol.dual_solution, &le_map, &presolve_result.reduced.constraint_types,
-                    );
-                }
+                // cmd_770: IPMが等式ネイティブ化され、collapse_extended_dualでm_orig長のdualを返すため、
+                // to_all_le()ベースのdual折り畳みは不要。
                 let mut r = postsolve_qp(&presolve_result, &reduced_sol);
                 // bound_duals リマップ: 縮約後空間 → 元問題空間 [cmd_689]
                 // IPM/IPPMMが返すbound_dualsは縮約後の有限境界変数に対して格納されているため、
