@@ -214,13 +214,6 @@ pub(crate) fn solve_ippmm_inner(
     // AMD permutation キャッシュ（スパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
 
-    // mu非依存proximal正則化（infeasibility/unboundedness判定用フロア）
-    // PMM の rho/delta は mu_rate に応じて急速に減衰しうるが、
-    // check_infeasible_or_unbounded の delta_p は Q の正則化を反映するため、
-    // 小さすぎると PSD（非PD）な Q で偽 Unbounded が発火する。
-    // step.rs と同様に独立した緩やかな減衰パラメータでフロアを設ける。
-    let mut rho_ipm = 1e-4_f64;
-
     // 殿指示(C): MaxIterationsを発生させる経路自体を消す。
     // None = 「まだ収束もタイムアウトも起きていない」を型で表現。
     // ループ出口は「収束→Some(Optimal)」「timeout→Some(Timeout)」の2つだけ。
@@ -351,14 +344,10 @@ pub(crate) fn solve_ippmm_inner(
             })
             .collect();
 
-        // KKT行列の正則化: PMM rho/delta + mu-tracking + rho_ipmフロア
-        // Part 1 (Q + rho*I): PMM rhoに加え、rho_ipmフロアで十分な正則化を保持
-        // Part 3 (-(Σ+delta*I)): mu-trackingベース（step.rsと同等）で等式行の正則化を適切に制御
-        //   PMM delta はRHSのproximal項のみで使用。行列にはmu-trackingを使う。
-        //   根拠: DELTA_INIT(1e-4)は等式行Part 3に対して大きすぎ、等式制約強制力が弱まり
-        //         primal residualが改善せずmu増加を引き起こす（QSCAGR/QSCFXM退行の原因）
-        let rho_matrix = pmm.rho.max(options.ipm.delta_min).max(rho_ipm);
-        let delta_matrix = options.ipm.delta_min.max(options.ipm.delta_d_init * mu);
+        // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
+        // rho/deltaはPMMが管理する。mu依存フロアは使わない
+        let rho_matrix = pmm.rho.max(options.ipm.delta_min);
+        let delta_matrix = pmm.delta.max(options.ipm.delta_min);
 
         // ── augmented KKT 構築 + 因子化 ────────────────────────────
         // T2: 因子化前タイムアウトチェック
@@ -642,11 +631,8 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // Infeasibility / Unboundedness 検出（IP-PMM パス）
-        // rho_ipm フロア適用: PMM rho が急速に減衰しても判定用正則化は十分な大きさを保つ
-        // Infeasibility / Unboundedness 検出（IP-PMM パス）
-        // rho_ipm フロア適用: PMM rho が急速に減衰しても判定用正則化は十分な大きさを保つ
         if let Some(infeas_status) = check_infeasible_or_unbounded(
-            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry.max(rho_ipm),
+            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
         ) {
             status = Some(infeas_status);
             final_iter = iter;
@@ -696,9 +682,6 @@ pub(crate) fn solve_ippmm_inner(
         // 残差記録（次反復の改善判定用）
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
-
-        // rho_ipm減衰（step.rsと同等: 0.9x/iter, floor 1e-9）
-        rho_ipm = (rho_ipm * 0.9_f64).max(1e-9_f64);
     }
 
     // 殿指示(C): None→Timeout変換。「MaxIterations→Timeout変換」ではなく「未決定→Timeout」。
