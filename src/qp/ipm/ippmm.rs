@@ -48,19 +48,16 @@ use super::kkt::collapse_extended_dual;
 // ---------------------------------------------------------------------------
 
 /// PMM 初期 rho（primal proximal）
-/// PARAM: 根拠=mu-tracking初期値と整合する程度の小値（8.0はGondzio2021参照実装だが
-///        わしらの単一ループ実装には大きすぎてKKT解を狂わせる）
+/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) §5.1 論文値 8.0
 /// Ruizスケーリング後の単位スケール問題を前提とした値。
-/// 非スケール問題（フォールバックパス）では条件数が増大する可能性あり。
-/// augmented KKT κ≈1e8、LDLT安定範囲内
-const RHO_INIT: f64 = 1e-4;
+/// N1修正後は減衰が正しく機能するため論文値8.0が適切。
+const RHO_INIT: f64 = 8.0;
 
 /// PMM 初期 delta（dual proximal）
-/// PARAM: RHO_INITと対称に設定
+/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) §5.1 論文値 8.0
 /// Ruizスケーリング後の単位スケール問題を前提とした値。
-/// 非スケール問題（フォールバックパス）では条件数が増大する可能性あり。
-/// augmented KKT κ≈1e8、RHO_INITと対称
-const DELTA_INIT: f64 = 1e-4;
+/// N1修正後は減衰が正しく機能するため論文値8.0が適切。
+const DELTA_INIT: f64 = 8.0;
 
 /// PMM パラメータ下限（reg_limit）
 /// PARAM: 根拠=数値安定性のための最小正則化値(0=完全収束) | 要検証=大規模問題での充足性
