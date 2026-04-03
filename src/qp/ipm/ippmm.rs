@@ -22,10 +22,14 @@
 //!   r_d_pmm = r_d - ρ*(x - x_ref)   (dual  residual with proximal primal term)
 //!   r_p_pmm = r_p - δ*(y - y_ref)   (primal residual with dual augmented Lagrangian)
 //!
-//! PMM update rule (Gondzio MATLAB 参照実装より):
-//!   improved = (0.95 * prev_nr_p > nr_p) || (0.95 * prev_nr_d > nr_d)
-//!   if improved: x_ref = x, y_ref = y; ρ *= (1 - mu_rate); δ *= (1 - mu_rate)
-//!   else:        ρ *= (1 - 0.666 * mu_rate); δ *= (1 - 0.666 * mu_rate)
+//! PMM update rule (Algorithm PEU §5.1.4, Pougkakiotis & Gondzio 2021):
+//!   r = |μ_k - μ_{k+1}| / μ_k   (変数更新後の実μで計算)
+//!   primal_improved = (0.95 * prev_nr_p > nr_p)
+//!   dual_improved   = (0.95 * prev_nr_d > nr_d)
+//!   if primal_improved: y_ref = y; δ *= (1 - r)
+//!   else:               δ *= (1 - r/3)
+//!   if dual_improved:   x_ref = x; ρ *= (1 - r)
+//!   else:               ρ *= (1 - r/3)
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::ldl;
@@ -67,8 +71,8 @@ const REG_LIMIT: f64 = 1e-9;
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 
 /// PMM 遅い減衰率（改善なし時に rho/delta をゆっくり減らす係数）
-/// PARAM: 根拠=Gondzio2021 MATLAB実装(0.666 * mu_rate) | 要検証=収束速度への影響
-const PMM_SLOW_RATE: f64 = 0.666;
+/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) Algorithm PEU §5.1.4 p.27 Step 1/2: (1-r/3)
+const PMM_SLOW_RATE: f64 = 1.0 / 3.0;
 
 /// fraction-to-boundary τ
 /// PARAM: 根拠=Mehrotra(1992)標準値 0.995 | 要検証=なし
@@ -312,8 +316,9 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // ── PMM 改善判定（前反復の残差と比較）──────────────────────
-        let improved = (PMM_IMPROVE_THRESHOLD * pmm.prev_nr_p > nr_p)
-            || (PMM_IMPROVE_THRESHOLD * pmm.prev_nr_d > nr_d);
+        // Algorithm PEU: primal/dual改善を独立に判定
+        let primal_improved = PMM_IMPROVE_THRESHOLD * pmm.prev_nr_p > nr_p;
+        let dual_improved = PMM_IMPROVE_THRESHOLD * pmm.prev_nr_d > nr_d;
 
         // ── PMM 修正済み残差を計算 ──────────────────────────────────
         // r_d_pmm = r_d - ρ*(x - x_ref)
@@ -492,12 +497,7 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // PMM update で使う mu_rate（barrier 減少率の推定値）
-        let mu_rate = if mu > 1e-15 {
-            (mu_aff / mu).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
 
         // ── Corrector ──────────────────────────────────────────────
         let r_c_corr: Vec<f64> = s
@@ -659,24 +659,42 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // ── PMM パラメータ更新 ──────────────────────────────────────
-        // gunshi指摘(3): mu_rate=0時は固定倍率0.1で減衰（cycling防止）
-        // mu_rate≈0の場合に rho が減らなくなる問題を防ぐ
-        /// PARAM: 根拠=経験値(mu_rate≈0時のρ固着cycling防止。Pougkakiotis&Gondzio2021論文記載なし、gunshi指摘(3)対応) | 承認=cmd_493実装時設定・要検証
-        const PMM_MIN_DECAY: f64 = 0.1;
-        let effective_rate = mu_rate.max(PMM_MIN_DECAY);
+        // Algorithm PEU Step 0: r = |μ_k - μ_{k+1}| / μ_k
+        // μ_new = 変数更新後の実際のμ（corrector + line search 後）
+        let mu_new: f64 = if m_ineq > 0 {
+            s.iter().zip(y.iter()).zip(is_eq_ext.iter())
+                .filter(|&(_, &eq)| !eq)
+                .map(|((&si, &yi), _)| si * yi)
+                .sum::<f64>() / m_ineq as f64
+        } else {
+            0.0
+        };
+        let r = if mu > 1e-15 {
+            ((mu - mu_new).abs() / mu).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
-        // improved: 前反復の残差を参照（変数更新前の nr_p, nr_d と比較）
-        if improved {
-            // 新しい点を参照点として採用（変数更新後）
-            pmm.x_ref.copy_from_slice(&x);
-            pmm.y_ref.copy_from_slice(&y);
-            // 積極的減衰: ρ *= (1 - effective_rate)
-            pmm.rho = (pmm.rho * (1.0 - effective_rate)).max(REG_LIMIT);
+        // gunshi指摘(3): r≈0時は固定倍率0.1で減衰（cycling防止）
+        // r≈0の場合に rho が減らなくなる問題を防ぐ
+        /// PARAM: 根拠=経験値(r≈0時のρ固着cycling防止。論文記載なし、gunshi指摘(3)対応) | 承認=cmd_493実装時設定・要検証
+        const PMM_MIN_DECAY: f64 = 0.1;
+        let effective_rate = r.max(PMM_MIN_DECAY);
+
+        // Algorithm PEU Step 1: δ（dual proximal）はprimal残差改善に連動
+        if primal_improved {
+            pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
             pmm.delta = (pmm.delta * (1.0 - effective_rate)).max(REG_LIMIT);
         } else {
-            // 緩慢減衰: ρ *= (1 - 0.666 * effective_rate)
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * effective_rate)).max(REG_LIMIT);
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * effective_rate)).max(REG_LIMIT);
+        }
+
+        // Algorithm PEU Step 2: ρ（primal proximal）はdual残差改善に連動
+        if dual_improved {
+            pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
+            pmm.rho = (pmm.rho * (1.0 - effective_rate)).max(REG_LIMIT);
+        } else {
+            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * effective_rate)).max(REG_LIMIT);
         }
 
         // 残差記録（次反復の改善判定用）
