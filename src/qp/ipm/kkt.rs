@@ -67,7 +67,7 @@ pub(crate) fn norm_inf(v: &[f64]) -> f64 {
 /// 戻り値: (A_ext, b_ext, m_ext, m_orig, n_lb, is_eq_ext)
 /// - is_eq_ext: 各拡張行が等式制約かどうか（true=等式、スラック不要）
 /// - Ge行は符号反転してLe扱いで格納（is_eq_ext=false）
-/// 順序: [original constraints | lower bound rows | upper bound rows]
+///   順序: [original constraints | lower bound rows | upper bound rows]
 pub(crate) fn build_extended_constraints(
     problem: &QpProblem,
 ) -> (CscMatrix, Vec<f64>, usize, usize, usize, Vec<bool>) {
