@@ -666,32 +666,31 @@ pub(crate) fn solve_ippmm_inner(
         } else {
             0.0
         };
-        let r = if mu > 1e-15 {
-            ((mu - mu_new).abs() / mu).clamp(0.0, 1.0)
+        let r = if mu > 1e-15 || mu_new > 1e-15 {
+            (mu - mu_new).abs() / mu.max(mu_new).max(1e-15)
         } else {
             0.0
         };
 
-        // gunshi指摘(3): r≈0時は固定倍率0.1で減衰（cycling防止）
-        // r≈0の場合に rho が減らなくなる問題を防ぐ
-        /// PARAM: 根拠=経験値(r≈0時のρ固着cycling防止。論文記載なし、gunshi指摘(3)対応) | 承認=cmd_493実装時設定・要検証
-        const PMM_MIN_DECAY: f64 = 0.1;
-        let effective_rate = r.max(PMM_MIN_DECAY);
+        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でREG_LIMIT)
+        /// PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠 | 承認=cmd_783
+        let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
+        let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
         // Algorithm PEU Step 1: δ（dual proximal）はprimal残差改善に連動
         if primal_improved {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
-            pmm.delta = (pmm.delta * (1.0 - effective_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(REG_LIMIT);
         } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * effective_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
         }
 
         // Algorithm PEU Step 2: ρ（primal proximal）はdual残差改善に連動
         if dual_improved {
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
-            pmm.rho = (pmm.rho * (1.0 - effective_rate)).max(REG_LIMIT);
+            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(REG_LIMIT);
         } else {
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * effective_rate)).max(REG_LIMIT);
+            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
         }
 
         // 残差記録（次反復の改善判定用）
