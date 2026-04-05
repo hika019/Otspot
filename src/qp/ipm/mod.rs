@@ -602,7 +602,8 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_qp_ipm(&problem, &default_opts());
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        let result = solve_qp_ipm(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T3: status");
         close(result.solution[0], 0.5, "IPM-T3: x[0]");
         close(result.solution[1], 0.5, "IPM-T3: x[1]");
@@ -622,7 +623,8 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_qp_ipm(&problem, &default_opts());
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        let result = solve_qp_ipm(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T4: status");
         close(result.solution[0], 1.0, "IPM-T4: x[0]");
         close(result.solution[1], 1.0, "IPM-T4: x[1]");
@@ -1357,6 +1359,54 @@ mod tests {
             "IPM-T14: 全制約を正確に満足する解は Optimal に昇格すべき。got {:?}",
             result.status
         );
+    }
+
+    /// C-IPM 防御テスト: Ge制約付きQP
+    /// min x²+y²  s.t. x+y≥1 (ConstraintType::Ge)
+    /// timeout_secs=5.0、wall-clock 6秒ガード
+    /// 期待: Optimal, x*=y*=0.5
+    #[test]
+    fn test_ipm_ge_defensive() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..SolverOptions::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_ipm(&problem, &opts);
+        let elapsed = start.elapsed().as_secs_f64();
+
+        assert_eq!(result.status, SolveStatus::Optimal, "C-IPM Ge: status");
+        close(result.solution[0], 0.5, "C-IPM Ge: x[0]");
+        close(result.solution[1], 0.5, "C-IPM Ge: x[1]");
+        assert!(
+            elapsed < 6.0,
+            "C-IPM Ge: wall-clock guard 6秒超過。elapsed={:.3}s",
+            elapsed
+        );
+    }
+
+    /// F-IPM 退化ケース: 空制約×IPM
+    /// Q=I(2x2), c=[-1,-1], A=空(0×2), b=[], timeout_secs=5.0
+    /// 期待: Optimal
+    #[test]
+    fn test_ipm_empty_constraints() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let c = vec![-1.0, -1.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..SolverOptions::default() };
+        let result = solve_qp_ipm(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "F-IPM 空制約: status");
     }
 
 }
