@@ -677,20 +677,18 @@ pub(crate) fn solve_ippmm_inner(
         let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
-        // Algorithm PEU Step 1: δ（dual proximal）はprimal残差改善に連動
-        if primal_improved {
+        // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
+        // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
+        // 根拠: cmd_793設計書§A.5 | 承認=cmd_794
+        let either_improved = primal_improved || dual_improved;
+        if either_improved {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
+            pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(REG_LIMIT);
+            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(REG_LIMIT);
         } else {
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
-        }
-
-        // Algorithm PEU Step 2: ρ（primal proximal）はdual残差改善に連動
-        if dual_improved {
-            pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
-            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(REG_LIMIT);
-        } else {
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
+            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
         }
 
         // 残差記録（次反復の改善判定用）
@@ -829,7 +827,6 @@ mod tests {
     /// min (x-2)^2 + (y-2)^2  s.t. 0 <= x <= 1, 0 <= y <= 1
     /// 期待: x*=y*=1, obj=-6
     #[test]
-    #[ignore] // クランプ+OR条件未実装のため一時ignore（cmd_794で復活予定）
     fn test_ippmm_box_constrained() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![-4.0, -4.0];
