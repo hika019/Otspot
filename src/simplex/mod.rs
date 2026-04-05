@@ -1233,6 +1233,59 @@ mod tests {
         );
     }
 
+    /// Ge制約防御テスト
+    ///
+    /// 問題: min -x - y
+    ///   s.t. x + y >= 1 (ConstraintType::Ge)
+    ///        0 <= x <= 10
+    ///        0 <= y <= 10
+    /// 最適解: x=10, y=10, obj=-20
+    #[test]
+    fn test_simplex_ge_defensive() {
+        use crate::problem::ConstraintType;
+        let a = CscMatrix::from_triplets(
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            1,
+            2,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![-1.0, -1.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 10.0), (0.0, 10.0)],
+            None,
+        )
+        .unwrap();
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(5.0);
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "Status should be Optimal");
+        assert!(
+            (result.objective - (-20.0)).abs() < PIVOT_TOL,
+            "Expected obj=-20.0, got {}",
+            result.objective
+        );
+        assert!(
+            result.solution[0] >= -PIVOT_TOL && result.solution[0] <= 10.0 + PIVOT_TOL,
+            "x should be in [0, 10], got {}",
+            result.solution[0]
+        );
+        assert!(
+            result.solution[1] >= -PIVOT_TOL && result.solution[1] <= 10.0 + PIVOT_TOL,
+            "y should be in [0, 10], got {}",
+            result.solution[1]
+        );
+        assert!(
+            (result.solution[0] + result.solution[1] - 20.0).abs() < PIVOT_TOL,
+            "x + y should be 20.0, got {}",
+            result.solution[0] + result.solution[1]
+        );
+    }
+
     /// 基本LP（Le制約のみ）の双対解・スラック・被縮小費用を検証する
     ///
     /// 問題: min -x1 - 2*x2
@@ -1256,7 +1309,9 @@ mod tests {
             2,
             vec![4.0, 3.0, 3.0],
         );
-        let result = solve(&lp);
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(10.0);
+        let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
             (result.objective - (-7.0)).abs() < PIVOT_TOL,
@@ -1416,7 +1471,9 @@ mod tests {
             None,
         )
         .unwrap();
-        let result = solve(&lp);
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(10.0);
+        let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
             (result.objective - 6.0).abs() < PIVOT_TOL,
