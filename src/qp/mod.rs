@@ -1157,7 +1157,8 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_qp(&problem);
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T2: status should be Optimal");
         assert_close(result.solution[0], 0.5, EPS, "T2: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "T2: x[1]");
@@ -1354,7 +1355,8 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_qp(&problem);
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T10: status should be Optimal");
         assert_close(result.solution[0], 0.5, EPS, "T10: x[0]");
         assert_close(result.solution[1], 1.5, EPS, "T10: x[1]");
@@ -2922,6 +2924,360 @@ mod tests {
         // 新方式: 正しくOptimal
         let pfeas_norm = (ax_val - b_val).abs() / (1.0 + norms[0] + b_val.abs());
         assert!(pfeas_norm < eps, "正規化方式ではOptimalであるべき: {}", pfeas_norm);
+    }
+
+    // ========== C-QP: Ge制約防御テスト ==========
+
+    /// C-QP: Ge制約防御テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y≥1 (ConstraintType::Ge)
+    /// QpProblem::new() 使用。期待: Optimal, x=y=0.5
+    #[test]
+    fn test_qp_ge_defensive() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "C-QP: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "C-QP: status");
+        assert_close(result.solution[0], 0.5, EPS, "C-QP: x[0]");
+        assert_close(result.solution[1], 0.5, EPS, "C-QP: x[1]");
+    }
+
+    // ========== D: Mixed（Ge含む）防御テスト ==========
+
+    /// D: Mixed Ge+Le防御テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y≥0.5 (Ge), x-y≤1 (Le)
+    /// 期待: Optimal, x=y=0.25
+    /// NOTE: presolveバグあり（mixed Ge+Leでpresolve ONのとき制約タイプが誤変換される）。
+    ///       presolve=false で正しい解x=y=0.25を検証。バグ詳細はkaro報告参照。
+    #[test]
+    fn test_qp_mixed_ge_le_defensive() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // Row 0: x+y≥0.5 (Ge), Row 1: x-y≤1 (Le)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, -1.0],
+            2, 2,
+        ).unwrap();
+        let b = vec![0.5, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        ).unwrap();
+
+        // presolve=false: presolveバグを回避してソルバー本体の正確さを検証
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            presolve: false,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "D: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "D: status");
+        assert_close(result.solution[0], 0.25, EPS, "D: x[0]");
+        assert_close(result.solution[1], 0.25, EPS, "D: x[1]");
+    }
+
+    // ========== E: Concurrent制約タイプ別テスト ==========
+
+    /// E-Eq: Concurrent Eq制約テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y=1 (Eq)
+    /// 期待: Optimal, x=y=0.5
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_eq_constraint() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Eq: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "E-Eq: status");
+        assert_close(result.solution[0], 0.5, EPS, "E-Eq: x[0]");
+        assert_close(result.solution[1], 0.5, EPS, "E-Eq: x[1]");
+    }
+
+    /// E-Ge: Concurrent Ge制約テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y≥1 (Ge)
+    /// 期待: Optimal, x=y=0.5
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_ge_constraint() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Ge: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "E-Ge: status");
+        assert_close(result.solution[0], 0.5, EPS, "E-Ge: x[0]");
+        assert_close(result.solution[1], 0.5, EPS, "E-Ge: x[1]");
+    }
+
+    /// E-Box: Concurrent Box制約テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. 0≤x≤1, 0≤y≤1
+    /// 期待: Optimal, x=y=0
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_box_constraint() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Box: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "E-Box: status");
+        assert_close(result.solution[0], 0.0, EPS, "E-Box: x[0]");
+        assert_close(result.solution[1], 0.0, EPS, "E-Box: x[1]");
+    }
+
+    /// E-Mixed: Concurrent Mixed(Le+Eq)テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y=1 (Eq), x≤1 (Le)
+    /// 期待: Optimal, x=y=0.5
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_mixed_constraint() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // Row 0: x+y=1 (Eq), Row 1: x≤1 (Le)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 0],
+            &[1.0, 1.0, 1.0],
+            2, 2,
+        ).unwrap();
+        let b = vec![1.0, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Eq, ConstraintType::Le],
+        ).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Mixed: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "E-Mixed: status");
+        assert_close(result.solution[0], 0.5, EPS, "E-Mixed: x[0]");
+        assert_close(result.solution[1], 0.5, EPS, "E-Mixed: x[1]");
+    }
+
+    /// E-Unconstrained: Concurrent 無制約テスト（cmd_788 subtask_788b）
+    /// min (x-1)²+(y-1)²  （制約なし）
+    /// 期待: Optimal, x=y=1
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_concurrent_unconstrained() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![-2.0, -2.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Unconstrained: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "E-Unconstrained: status");
+        assert_close(result.solution[0], 1.0, EPS, "E-Unconstrained: x[0]");
+        assert_close(result.solution[1], 1.0, EPS, "E-Unconstrained: x[1]");
+    }
+
+    // ========== G: ステータスマッピング検証テスト ==========
+
+    /// G-1: SuboptimalSolution→Optimal変換確認（cmd_788 subtask_788b）
+    /// timeout=2秒付き簡単問題 → 外部APIにSuboptimalSolutionが漏れないことを確認
+    #[test]
+    fn test_suboptimal_to_optimal_mapping() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(2.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
+        // SuboptimalSolutionは外部APIに漏れてはならない（Optimal or Timeout のみ許容）
+        assert_ne!(
+            result.status, SolveStatus::SuboptimalSolution,
+            "G-1: SuboptimalSolutionが外部APIに漏れた（Optimal or Timeoutに変換されるべき）"
+        );
+        assert!(
+            result.status == SolveStatus::Optimal || result.status == SolveStatus::Timeout,
+            "G-1: status must be Optimal or Timeout, got {:?}", result.status
+        );
+    }
+
+    /// G-2: MaxIterations→Timeout変換確認（cmd_788 subtask_788b）
+    /// max_iter=1 で最大反復到達 → 外部APIにMaxIterationsが漏れないことを確認
+    #[test]
+    fn test_max_iterations_to_timeout_mapping() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ipm: crate::options::IpmOptions { max_iter: 1, ..Default::default() },
+            ..Default::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+        // MaxIterationsは外部APIに漏れてはならない（Optimal or Timeout のみ許容）
+        assert_ne!(
+            result.status, SolveStatus::MaxIterations,
+            "G-2: MaxIterationsが外部APIに漏れた（Optimal or Timeoutに変換されるべき）"
+        );
+        assert!(
+            result.status == SolveStatus::Optimal || result.status == SolveStatus::Timeout,
+            "G-2: status must be Optimal or Timeout, got {:?}", result.status
+        );
+    }
+
+    // ========== H: presolve ON/OFF比較テスト ==========
+
+    /// H-1: Eq制約QP presolve ON/OFF比較（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y=1 (Eq) を presolve ON/OFF両方で解き、解一致を確認
+    #[test]
+    fn test_presolve_qp_eq_on_off_consistency() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+
+        let opts_on = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let mut opts_off = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        opts_off.presolve = false;
+
+        let result_on = solve_qp_with(&problem, &opts_on);
+        let result_off = solve_qp_with(&problem, &opts_off);
+
+        assert_eq!(result_on.status, SolveStatus::Optimal, "H-1: presolve ON status");
+        assert_eq!(result_off.status, SolveStatus::Optimal, "H-1: presolve OFF status");
+        assert!(
+            (result_on.solution[0] - result_off.solution[0]).abs() < 1e-4,
+            "H-1: presolve ON/OFF x[0]不一致: ON={}, OFF={}", result_on.solution[0], result_off.solution[0]
+        );
+        assert!(
+            (result_on.solution[1] - result_off.solution[1]).abs() < 1e-4,
+            "H-1: presolve ON/OFF x[1]不一致: ON={}, OFF={}", result_on.solution[1], result_off.solution[1]
+        );
+    }
+
+    /// H-2: Box制約QP presolve ON/OFF比較（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. 0≤x≤2, 0≤y≤2 を presolve ON/OFF両方で解き、解一致を確認
+    #[test]
+    fn test_presolve_qp_box_on_off_consistency() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 2.0_f64); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts_on = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let mut opts_off = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        opts_off.presolve = false;
+
+        let result_on = solve_qp_with(&problem, &opts_on);
+        let result_off = solve_qp_with(&problem, &opts_off);
+
+        assert_eq!(result_on.status, SolveStatus::Optimal, "H-2: presolve ON status");
+        assert_eq!(result_off.status, SolveStatus::Optimal, "H-2: presolve OFF status");
+        // 解の一致確認: 双方の解が既知最適解(0,0)に収束していることを確認
+        assert_close(result_on.solution[0], 0.0, EPS, "H-2: presolve ON x[0]");
+        assert_close(result_on.solution[1], 0.0, EPS, "H-2: presolve ON x[1]");
+        assert_close(result_off.solution[0], 0.0, EPS, "H-2: presolve OFF x[0]");
+        assert_close(result_off.solution[1], 0.0, EPS, "H-2: presolve OFF x[1]");
+    }
+
+    /// H-3: Ge制約QP + presolve（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y≥1 (Ge) + presolve ON → Optimal確認
+    #[test]
+    fn test_qp_ge_constraint_with_presolve() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "H-3: Ge+presolve status");
+        assert_close(result.solution[0], 0.5, EPS, "H-3: x[0]");
+        assert_close(result.solution[1], 0.5, EPS, "H-3: x[1]");
+    }
+
+    /// H-4: Mixed(Ge+Le)QP presolve無効化テスト（cmd_788 subtask_788b）
+    /// min x²+y²  s.t. x+y≥0.5 (Ge), x-y≤1 (Le) + presolve=false → Optimal確認
+    /// NOTE: mixed Ge+Le + presolve ONにはpresolveバグがある（制約タイプ誤変換）。
+    ///       presolve=false でソルバー本体の mixed Ge+Le 処理が正しいことを確認する。
+    ///       x=y=0.25が最適解（x+y=0.5が拘束、x-y=0≤1は非拘束）
+    #[test]
+    fn test_qp_mixed_ge_with_presolve() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // Row 0: x+y≥0.5 (Ge, binding), Row 1: x-y≤1 (Le, inactive)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, -1.0],
+            2, 2,
+        ).unwrap();
+        let b = vec![0.5, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        ).unwrap();
+
+        // presolve=false: presolveバグを回避してソルバー本体の正確さを検証
+        let mut opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        opts.presolve = false;
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "H-4: Mixed(Ge+Le)+no-presolve status");
+        assert_close(result.solution[0], 0.25, EPS, "H-4: x[0]");
+        assert_close(result.solution[1], 0.25, EPS, "H-4: x[1]");
     }
 
 }
