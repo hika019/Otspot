@@ -1262,7 +1262,9 @@ mod tests {
         .unwrap();
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(5.0);
+        let start = std::time::Instant::now();
         let result = solve_with(&lp, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "test_simplex_ge_defensive: wall-clock 6秒超過");
         assert_eq!(result.status, SolveStatus::Optimal, "Status should be Optimal");
         assert!(
             (result.objective - (-20.0)).abs() < PIVOT_TOL,

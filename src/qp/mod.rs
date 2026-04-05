@@ -3114,6 +3114,30 @@ mod tests {
         assert_close(result.solution[1], 1.0, EPS, "E-Unconstrained: x[1]");
     }
 
+    // ========== F: 退化ケーステスト ==========
+
+    /// F-QP-Fixed: 全変数固定退化ケース（cmd_788 subtask_788fix）
+    /// min x² s.t. bounds=(1.0, 1.0)（全変数固定）
+    /// Q=I(1x1), c=[0], A=空(0×1), b=[], presolve=false（presolveバグ回避）
+    /// 期待: Optimal, x=1.0
+    #[test]
+    fn test_qp_all_vars_fixed() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::new(0, 1);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(1.0_f64, 1.0_f64)];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+
+        let mut opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        opts.presolve = false;
+        let start = std::time::Instant::now();
+        let result = solve_qp_with(&problem, &opts);
+        assert!(start.elapsed().as_secs_f64() < 6.0, "F-QP-Fixed: wall-clock 6秒超過");
+        assert_eq!(result.status, SolveStatus::Optimal, "F-QP-Fixed: status must be Optimal, got {:?}", result.status);
+        assert_close(result.solution[0], 1.0, EPS, "F-QP-Fixed: x[0] must be 1.0");
+    }
+
     // ========== G: ステータスマッピング検証テスト ==========
 
     /// G-1: SuboptimalSolution→Optimal変換確認（cmd_788 subtask_788b）
@@ -3127,7 +3151,12 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(2.0), ..Default::default() };
+        // max_iter=1でMaxIterations/SuboptimalSolutionを強制発生させ、変換パスを通過させる
+        let opts = SolverOptions {
+            timeout_secs: Some(2.0),
+            ipm: crate::options::IpmOptions { max_iter: 1, ..Default::default() },
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         // SuboptimalSolutionは外部APIに漏れてはならない（Optimal or Timeout のみ許容）
         assert_ne!(
