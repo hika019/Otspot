@@ -737,6 +737,7 @@ pub(crate) fn solve_ippmm_inner(
 mod tests {
     use super::*;
     use crate::options::SolverOptions;
+    use crate::problem::ConstraintType;
     use crate::qp::ipm::common::check_infeasible_or_unbounded;
     use crate::sparse::CscMatrix;
 
@@ -755,6 +756,7 @@ mod tests {
 
     fn default_opts() -> SolverOptions {
         SolverOptions {
+            timeout_secs: Some(10.0),
             use_ruiz_scaling: false,
             ..Default::default()
         }
@@ -1001,5 +1003,136 @@ mod tests {
             Some(SolveStatus::Unbounded),
             "IPPMM-T-INF6: QP c≠0 真Unbounded → Unbounded判定"
         );
+    }
+
+    /// IPPMM-T-conv1: 等式制約収束確認
+    /// min x²+y² s.t. x+y=1 (ConstraintType::Eq)
+    /// QpProblem::new() を使用
+    /// 期待: 5秒以内にOptimal、x*=y*=0.5
+    #[test]
+    fn test_ippmm_eq_convergence_check() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+        assert_eq!(result.status, SolveStatus::Optimal, "conv-eq: status");
+        close(result.solution[0], 0.5, "conv-eq: x[0]");
+        close(result.solution[1], 0.5, "conv-eq: x[1]");
+    }
+
+    /// IPPMM-T-conv2: 不等式制約収束確認
+    /// min x²+y² s.t. x+y>=1 (Le形式: -x-y <= -1、ConstraintType::Le)
+    /// QpProblem::new() を使用
+    /// 期待: 5秒以内にOptimal、x*=y*=0.5
+    #[test]
+    fn test_ippmm_le_convergence_check() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+        assert_eq!(result.status, SolveStatus::Optimal, "conv-le: status");
+        close(result.solution[0], 0.5, "conv-le: x[0]");
+        close(result.solution[1], 0.5, "conv-le: x[1]");
+    }
+
+    /// IPPMM-T-Ge1: Ge制約防御テスト
+    /// min x²+y² s.t. x+y≥1 (ConstraintType::Ge)
+    /// QpProblem::new() を使用
+    /// 期待: 5秒以内にOptimal、x*=y*=0.5
+    #[test]
+    fn test_ippmm_ge_defensive() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+        assert_eq!(result.status, SolveStatus::Optimal, "ge-defensive: status");
+        close(result.solution[0], 0.5, "ge-defensive: x[0]");
+        close(result.solution[1], 0.5, "ge-defensive: x[1]");
+    }
+
+    /// IPPMM-T-F1: 空制約退化ケース
+    /// min 0.5*(x²+y²) - x - y (Q=I, c=[-1,-1], 制約なし)
+    /// 期待: Optimal、x*=y*=1.0
+    #[test]
+    fn test_ippmm_empty_constraints() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
+        let c = vec![-1.0, -1.0];
+        let a = CscMatrix::new(0, 2);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        assert_eq!(result.status, SolveStatus::Optimal, "empty-constraints: status");
+        close(result.solution[0], 1.0, "empty-constraints: x[0]");
+        close(result.solution[1], 1.0, "empty-constraints: x[1]");
+    }
+
+    /// IPPMM-T-F2: 複数等式制約退化ケース
+    /// min x²+y²+z² s.t. x+y=1 (Eq), y+z=1 (Eq)
+    /// 期待: Optimal、x*=z*=1/3、y*=2/3
+    #[test]
+    fn test_ippmm_multiple_equality_constraints() {
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
+        let c = vec![0.0, 0.0, 0.0];
+        // A = [[1,1,0],[0,1,1]]
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            2, 3,
+        ).unwrap();
+        let b = vec![1.0, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq, ConstraintType::Eq]).unwrap();
+
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
+        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        assert_eq!(result.status, SolveStatus::Optimal, "multi-eq: status");
+        close(result.solution[0], 1.0 / 3.0, "multi-eq: x[0]");
+        close(result.solution[1], 2.0 / 3.0, "multi-eq: x[1]");
+        close(result.solution[2], 1.0 / 3.0, "multi-eq: x[2]");
     }
 }

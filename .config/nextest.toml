@@ -2,3 +2,5 @@
 # 各テストを独立プロセスで並列実行
 # NOTE: doctestはnextest非対応。cargo test --doc で別途実行すること
 test-threads = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 2 }
+test-timeout = "120s"
