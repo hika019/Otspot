@@ -39,6 +39,7 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
+use crate::sparse::CscMatrix;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary_masked, timeout_result, numerical_error_result};
 use super::kkt::collapse_extended_dual;
@@ -59,9 +60,9 @@ const RHO_INIT: f64 = 8.0;
 /// N1修正後は減衰が正しく機能するため論文値8.0が適切。
 const DELTA_INIT: f64 = 8.0;
 
-/// PMM パラメータ下限（reg_limit）
-/// PARAM: 根拠=数値安定性のための最小正則化値(0=完全収束) | 要検証=大規模問題での充足性
-const REG_LIMIT: f64 = 1e-9;
+// PMM パラメータ下限（reg_limit）は動的計算に移行（cmd_793設計書§B.5）
+// compute_reg_limit() を参照。固定値1e-9は廃止。
+// const REG_LIMIT: f64 = 1e-9;
 
 /// PMM 改善判定閾値（5% 以上の残差減少で改善とみなす）
 /// PARAM: 根拠=Gondzio2021 MATLAB実装(0.95*prev > current) | 要検証=閾値の感度
@@ -90,6 +91,36 @@ const GAMMA_U: f64 = 10.0;
 /// Gondzio corrector: step size 改善の最小閾値
 /// PARAM: 根拠=改善なしの打ち切り判定(数値誤差以下は改善とみなさない) | 要検証=タイトな問題
 const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
+
+// ---------------------------------------------------------------------------
+// reg_limit 動的計算（MATLABオリジナル版準拠、cmd_793設計書§B.5）
+// ---------------------------------------------------------------------------
+
+/// CSC行列の無限大ノルム（各行の絶対値和の最大値）を計算する: O(nnz)
+fn matrix_infinity_norm(mat: &CscMatrix) -> f64 {
+    let mut row_sums = vec![0.0_f64; mat.nrows];
+    for (&val, &row) in mat.values.iter().zip(mat.row_ind.iter()) {
+        row_sums[row] += val.abs();
+    }
+    row_sums.iter().cloned().fold(0.0_f64, f64::max)
+}
+
+/// PMM正則化パラメータの動的下限を計算する（MATLABオリジナル版準拠）
+///
+/// reg_limit = max(5 * tol / max(‖A‖_∞², ‖Q‖_∞²), 5e-10)
+///
+/// スケーリング後の行列（Ruiz適用済み）で呼ぶこと。
+fn compute_reg_limit(a: &CscMatrix, q: &CscMatrix, tol: f64) -> f64 {
+    let norm_a = matrix_infinity_norm(a);
+    let norm_q = matrix_infinity_norm(q);
+    let max_norm_sq = (norm_a * norm_a).max(norm_q * norm_q);
+    let dynamic = if max_norm_sq > 1e-30 {
+        5.0 * tol / max_norm_sq
+    } else {
+        5e-10
+    };
+    dynamic.max(5e-10)
+}
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -202,6 +233,10 @@ pub(crate) fn solve_ippmm_inner(
         prev_nr_d: f64::INFINITY,
     };
 
+    // reg_limit動的計算（MATLABオリジナル版準拠、cmd_793設計書§B.5）
+    // スケーリング済みproblem.a, problem.qで計算。ループ前1回のみ。
+    let reg_limit = compute_reg_limit(&problem.a, &problem.q, options.ipm_eps());
+
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
     let mut aty = vec![0.0f64; n];
@@ -268,11 +303,11 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // μ が REG_LIMIT 以下で残差も eps 水準 → SuboptimalSolution
-        // PARAM(REG_LIMIT*1e-2): 根拠=経験値(μがREG_LIMITの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
-        let thr_d = (eps * (1.0 + norm_c)).max(REG_LIMIT * 10.0);
-        let thr_p = (eps * (1.0 + norm_b)).max(REG_LIMIT * 10.0);
-        if mu < REG_LIMIT * 1e-2 && nr_d < thr_d && nr_p < thr_p {
+        // μ が reg_limit 以下で残差も eps 水準 → SuboptimalSolution
+        // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
+        let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
+        let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
+        if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p {
             // ── Method C: 原空間pfeasチェック（Clarabel方式）──
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
                 let m_orig_check = orig.b.len();
@@ -672,7 +707,7 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でREG_LIMIT)
+        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でreg_limit)
         // PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠 | 承認=cmd_783
         let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
@@ -684,11 +719,11 @@ pub(crate) fn solve_ippmm_inner(
         if either_improved {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
-            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(REG_LIMIT);
-            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
+            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
         } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
-            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
+            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
         }
 
         // 残差記録（次反復の改善判定用）
