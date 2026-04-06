@@ -1,7 +1,7 @@
 #!/bin/bash
-# bench_parallel.sh — 汎用ベンチ並列実行スクリプト
+# bench_parallel.sh — 汎用ベンチ並列実行スクリプト (ワークプール方式)
 #
-# solver_bench.sh経由で --jobs 数のグループを並列実行し、結果を集計する。
+# solver_bench.sh経由で --jobs 数のワーカーが問題キューを処理し、結果を集計する。
 # .qps / .qplib の両形式に対応。
 #
 # 使い方:
@@ -18,6 +18,7 @@
 # 注意:
 # - solver_bench.sh 経由（§43準拠）。直接バイナリ呼び出し禁止
 # - .qps と .qplib の混在ディレクトリは非対応（エラーで終了）
+# - ワークプール方式: 問題を3問/グループに分割し、Nワーカーが動的に取得
 
 set -e
 
@@ -119,10 +120,14 @@ echo "[bench_parallel.sh] solver_dir: ${SOLVER_DIR:-$(pwd)}"
 echo "[bench_parallel.sh] timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "[bench_parallel.sh] 対象: $TOTAL_FILES 件 (bin=$BIN, solver=${SOLVER:-default}, timeout=${TIMEOUT}s, eps=$EPS, jobs=$JOBS)"
 
-# jobs をファイル数に合わせて調整
-if [[ $JOBS -gt $TOTAL_FILES ]]; then
-  JOBS=$TOTAL_FILES
-  echo "[bench_parallel.sh] jobs を $JOBS に調整（ファイル数未満）"
+# ワークプールのグループサイズ (固定3問/グループ)
+GROUP_SIZE=3
+TOTAL_GROUPS=$(( (TOTAL_FILES + GROUP_SIZE - 1) / GROUP_SIZE ))
+
+# jobs をグループ数に合わせて調整
+if [[ $JOBS -gt $TOTAL_GROUPS ]]; then
+  JOBS=$TOTAL_GROUPS
+  echo "[bench_parallel.sh] jobs を $JOBS に調整（グループ数未満）"
 fi
 
 # 一時ディレクトリ作成
@@ -135,24 +140,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# グループディレクトリ作成
-for i in $(seq 1 "$JOBS"); do
-  mkdir -p "$TMPDIR_BASE/group_$i"
+# グループディレクトリ作成（3問ずつ）
+for g in $(seq 1 "$TOTAL_GROUPS"); do
+  mkdir -p "$TMPDIR_BASE/group_$(printf '%03d' "$g")"
 done
 
-# ファイルをラウンドロビンで分配
+# ファイルを3問ずつグループに分配
 for idx in "${!FILES[@]}"; do
   f="${FILES[$idx]}"
-  group_num=$(( idx % JOBS + 1 ))
-  ln -sf "$f" "$TMPDIR_BASE/group_$group_num/$(basename "$f")"
+  group_num=$(( idx / GROUP_SIZE + 1 ))
+  ln -sf "$f" "$TMPDIR_BASE/group_$(printf '%03d' "$group_num")/$(basename "$f")"
 done
 
-# 分割状況を表示
-echo "[bench_parallel.sh] グループ分割:"
-for i in $(seq 1 "$JOBS"); do
-  count=$(ls "$TMPDIR_BASE/group_$i" 2>/dev/null | wc -l | tr -d ' ')
-  echo "  グループ $i: $count 件"
-done
+echo "[bench_parallel.sh] グループ分割: ${TOTAL_GROUPS}グループ (最大${GROUP_SIZE}問/グループ, ${JOBS}ワーカー)"
 
 
 # features 引数の構築
@@ -161,53 +161,94 @@ if [[ -n "$FEATURES" ]]; then
   FEATURES_EXTRA="--features $FEATURES"
 fi
 
-# 外部タイムアウトをグループ規模に合わせて設定（デフォルト120sでは不足）
-MAX_PER_GROUP=$(( (TOTAL_FILES + JOBS - 1) / JOBS ))
-EXTERNAL_TIMEOUT=$(( TIMEOUT * MAX_PER_GROUP + 300 ))
+# 外部タイムアウト (1ワーカーが最大GROUP_SIZE問担当)
+EXTERNAL_TIMEOUT=$(( TIMEOUT * GROUP_SIZE + 300 ))
 export EXTERNAL_TIMEOUT
-echo "[bench_parallel.sh] EXTERNAL_TIMEOUT: ${EXTERNAL_TIMEOUT}s (${MAX_PER_GROUP}問 × ${TIMEOUT}s + 300s余裕)"
+echo "[bench_parallel.sh] EXTERNAL_TIMEOUT: ${EXTERNAL_TIMEOUT}s (${GROUP_SIZE}問 × ${TIMEOUT}s + 300s余裕)"
 
-# 各グループを並列起動
-declare -a PIDS
-declare -a LOGS
+# ワーカープール設定
+COUNTER_FILE="$TMPDIR_BASE/counter"
+COUNTER_LOCK="$TMPDIR_BASE/counter.lock"
+echo "1" > "$COUNTER_FILE"
+: > "$COUNTER_LOCK"
+FAILED_GROUPS_FILE="$TMPDIR_BASE/failed_groups.txt"
+: > "$FAILED_GROUPS_FILE"
+
 set +e  # 子プロセスの終了コードを個別に確認するため
 SOLVER_ARGS=()
 if [[ -n "$SOLVER" ]]; then
   SOLVER_ARGS=(--solver "$SOLVER")
 fi
 
-for i in $(seq 1 "$JOBS"); do
-  LOG="$TMPDIR_BASE/group_$i.log"
-  LOGS+=("$LOG")
-  KNOWN_OPTIMAL_ARG=()
-  if [[ -n "$KNOWN_OPTIMAL" ]]; then
-    KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
-  fi
+KNOWN_OPTIMAL_ARG=()
+if [[ -n "$KNOWN_OPTIMAL" ]]; then
+  KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
+fi
 
-  # ★ --eps は solver_bench.sh が自動注入する（1e-6固定）。ここでは渡さない（二重防止）
-  _BENCH_PARALLEL_CALLER=1 \
-  SOLVER_DIR="${SOLVER_DIR:-$(pwd)}" \
-  bash "$SCRIPT_DIR/solver_bench.sh" "$BIN" "$TMPDIR_BASE/group_$i" \
-    "${SOLVER_ARGS[@]}" \
-    --timeout "$TIMEOUT" \
-    "${KNOWN_OPTIMAL_ARG[@]}" \
-    ${FEATURES_EXTRA} > "$LOG" 2>&1 &
-  PIDS+=($!)
-  echo "[bench_parallel.sh] グループ $i 開始 (PID=$!)"
+# ワーカー関数：キューからグループを取得して処理
+worker_func() {
+  local worker_id="$1"
+  while true; do
+    # アトミックに次のグループ番号を取得
+    local group_num
+    group_num=$(
+      (
+        flock -x 9
+        n=$(cat "$COUNTER_FILE")
+        echo $(( n + 1 )) > "$COUNTER_FILE"
+        echo "$n"
+      ) 9>"$COUNTER_LOCK"
+    )
+
+    if [[ $group_num -gt $TOTAL_GROUPS ]]; then
+      break
+    fi
+
+    local group_name
+    group_name="group_$(printf '%03d' "$group_num")"
+    local group_dir="$TMPDIR_BASE/$group_name"
+    local log="$TMPDIR_BASE/${group_name}.log"
+
+    echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 開始"
+
+    local exit_code=0
+    _BENCH_PARALLEL_CALLER=1 \
+    SOLVER_DIR="${SOLVER_DIR:-$(pwd)}" \
+    bash "$SCRIPT_DIR/solver_bench.sh" "$BIN" "$group_dir" \
+      "${SOLVER_ARGS[@]}" \
+      --timeout "$TIMEOUT" \
+      "${KNOWN_OPTIMAL_ARG[@]}" \
+      ${FEATURES_EXTRA} > "$log" 2>&1 || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+      echo "$group_name" >> "$FAILED_GROUPS_FILE"
+      echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 異常終了 (exit=$exit_code)" >&2
+    else
+      echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 完了"
+    fi
+  done
+}
+
+# N個のワーカーを起動
+declare -a WORKER_PIDS
+for w in $(seq 1 "$JOBS"); do
+  worker_func "$w" &
+  WORKER_PIDS+=($!)
+  echo "[bench_parallel.sh] ワーカー $w 起動 (PID=$!)"
 done
 
-# 全グループの完了待ち
+# 全ワーカーの完了待ち
+for pid in "${WORKER_PIDS[@]}"; do
+  wait "$pid"
+done
+
+# 失敗グループ収集
 FAILED_GROUPS=()
-for i in "${!PIDS[@]}"; do
-  pid="${PIDS[$i]}"
-  group_num=$(( i + 1 ))
-  if wait "$pid"; then
-    echo "[bench_parallel.sh] グループ $group_num 完了"
-  else
-    echo "[bench_parallel.sh] グループ $group_num 異常終了 (exit=$?)" >&2
-    FAILED_GROUPS+=("$group_num")
-  fi
-done
+if [[ -s "$FAILED_GROUPS_FILE" ]]; then
+  while IFS= read -r g; do
+    [[ -n "$g" ]] && FAILED_GROUPS+=("$g")
+  done < "$FAILED_GROUPS_FILE"
+fi
 
 # 集計
 TOTAL_PASS=0
@@ -228,10 +269,11 @@ TOTAL_SUBOPTIMAL=0
 PROBLEM_DETAIL_FILE="$TMPDIR_BASE/problem_details.txt"
 : > "$PROBLEM_DETAIL_FILE"
 
-for i in $(seq 1 "$JOBS"); do
-  LOG="$TMPDIR_BASE/group_$i.log"
+for g in $(seq 1 "$TOTAL_GROUPS"); do
+  group_name="group_$(printf '%03d' "$g")"
+  LOG="$TMPDIR_BASE/${group_name}.log"
   if [[ ! -f "$LOG" ]]; then
-    echo "[bench_parallel.sh] 警告: グループ $i のログが存在しない" >&2
+    echo "[bench_parallel.sh] 警告: $group_name のログが存在しない" >&2
     continue
   fi
 
