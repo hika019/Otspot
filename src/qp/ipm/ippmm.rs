@@ -59,17 +59,13 @@ const RHO_INIT: f64 = 8.0;
 /// N1修正後は減衰が正しく機能するため論文値8.0が適切。
 const DELTA_INIT: f64 = 8.0;
 
-/// PMM パラメータ下限（reg_limit）
-/// PARAM: 根拠=数値安定性のための最小正則化値(0=完全収束) | 要検証=大規模問題での充足性
-const REG_LIMIT: f64 = 1e-9;
-
 /// PMM 改善判定閾値（5% 以上の残差減少で改善とみなす）
 /// PARAM: 根拠=Gondzio2021 MATLAB実装(0.95*prev > current) | 要検証=閾値の感度
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 
 /// PMM 遅い減衰率（改善なし時に rho/delta をゆっくり減らす係数）
-/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) Algorithm PEU §5.1.4 p.27 Step 1/2: (1-r/3)
-const PMM_SLOW_RATE: f64 = 1.0 / 3.0;
+/// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）| 承認=cmd_794 Phase 3
+const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
 /// fraction-to-boundary τ
 /// PARAM: 根拠=Mehrotra(1992)標準値 0.995 | 要検証=なし
@@ -202,6 +198,13 @@ pub(crate) fn solve_ippmm_inner(
         prev_nr_d: f64::INFINITY,
     };
 
+    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
+    let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
+        5e-10  // LP: MATLAB拡張版準拠
+    } else {
+        5e-8   // QP: MATLAB拡張版準拠
+    };
+
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
     let mut aty = vec![0.0f64; n];
@@ -268,11 +271,11 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // μ が REG_LIMIT 以下で残差も eps 水準 → SuboptimalSolution
-        // PARAM(REG_LIMIT*1e-2): 根拠=経験値(μがREG_LIMITの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
-        let thr_d = (eps * (1.0 + norm_c)).max(REG_LIMIT * 10.0);
-        let thr_p = (eps * (1.0 + norm_b)).max(REG_LIMIT * 10.0);
-        if mu < REG_LIMIT * 1e-2 && nr_d < thr_d && nr_p < thr_p {
+        // μ が reg_limit 以下で残差も eps 水準 → SuboptimalSolution
+        // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
+        let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
+        let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
+        if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p {
             // ── Method C: 原空間pfeasチェック（Clarabel方式）──
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
                 let m_orig_check = orig.b.len();
@@ -672,25 +675,23 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でREG_LIMIT)
+        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でreg_limit)
         // PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠 | 承認=cmd_783
         let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
-        // Algorithm PEU Step 1: δ（dual proximal）はprimal残差改善に連動
-        if primal_improved {
+        // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
+        // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
+        // 根拠: cmd_793設計書§A.5 | 承認=cmd_794
+        let either_improved = primal_improved || dual_improved;
+        if either_improved {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
-            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(REG_LIMIT);
-        } else {
-            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
-        }
-
-        // Algorithm PEU Step 2: ρ（primal proximal）はdual残差改善に連動
-        if dual_improved {
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
-            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
+            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
         } else {
-            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(REG_LIMIT);
+            pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
+            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
         }
 
         // 残差記録（次反復の改善判定用）
@@ -829,7 +830,6 @@ mod tests {
     /// min (x-2)^2 + (y-2)^2  s.t. 0 <= x <= 1, 0 <= y <= 1
     /// 期待: x*=y*=1, obj=-6
     #[test]
-    #[ignore] // クランプ+OR条件未実装のため一時ignore（cmd_794で復活予定）
     fn test_ippmm_box_constrained() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![-4.0, -4.0];
