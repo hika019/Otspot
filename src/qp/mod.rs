@@ -751,8 +751,14 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     let eps = current_opts.ipm_eps();
                     if reduced_problem.num_constraints > 0 {
                         if let Ok(ax) = reduced_problem.a.mat_vec_mul(&reduced_sol.solution) {
-                            let pfeas_scaled = ax.iter().zip(reduced_problem.b.iter())
-                                .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            let pfeas_scaled = ax.iter()
+                                .zip(reduced_problem.b.iter())
+                                .zip(reduced_problem.constraint_types.iter())
+                                .map(|((&ax_i, &b_i), ct)| match ct {
+                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                    _ => (ax_i - b_i).max(0.0),
+                                })
                                 .fold(0.0_f64, f64::max);
                             let norm_b_scaled = reduced_problem.b.iter()
                                 .fold(0.0_f64, |a, &bi| a.max(bi.abs()))
@@ -923,10 +929,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                                 .zip(problem.constraint_types.iter())
                                 .zip(row_norms.iter())
                                 .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                    let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
-                                        (ax_i - b_i).abs()
-                                    } else {
-                                        (ax_i - b_i).max(0.0)
+                                    let violation = match ct {
+                                        crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                        crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                        _ => (ax_i - b_i).max(0.0),
                                     };
                                     violation / (1.0 + rn + b_i.abs())
                                 })
@@ -948,6 +954,20 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         if bfeas >= eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
                             r.status = SolveStatus::SuboptimalSolution;
                         }
+                    }
+                    // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証。
+                    // 適用条件:
+                    //   (a) 真のQP (Q≠0): LP(Q=0)はSimplex経由でbound_duals=[]となりdfeas計算不可
+                    //   (b) presolveで変数消去なし: 変数消去があるとbound_dualsが縮退し原問題の
+                    //       KKT条件を正しく検証できない（postsolve後のbound_duals再構成が未実装）
+                    // スケーリング情報はpostsolve後に失われるためd_min=1として閾値を計算 [cmd_800]
+                    if r.status == SolveStatus::Optimal
+                        && !problem.is_zero_q()
+                        && presolve_result.reduced.num_vars == problem.num_vars
+                    {
+                        let norm_c_s = problem.c.iter().fold(0.0_f64, |a, &x| a.max(x.abs())).max(1.0);
+                        let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s);
+                        r.status = ipm::check_dfeas_status(problem, &r.solution, &r.dual_solution, &r.bound_duals, dfeas_threshold);
                     }
                 }
                 // Ruizパスかつ SuboptimalSolution → 常にretry（tighter epsで精度改善の機会を与える）
@@ -3307,6 +3327,44 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Optimal, "H-4: Mixed(Ge+Le)+no-presolve status");
         assert_close(result.solution[0], 0.25, EPS, "H-4: x[0]");
         assert_close(result.solution[1], 0.25, EPS, "H-4: x[1]");
+    }
+
+    /// H-5: Mixed(Ge+Le)QP presolve=ON + Ruiz=ON regression test [cmd_800]
+    ///
+    /// pfeas不等号バグ修正の回帰テスト。
+    /// バグ再現条件: presolve=ON + Ruiz=ON + Ge+Le混在（B-1パターン直接再現）
+    ///
+    /// 問題: min x²+y²  s.t. x+y≥0.5 (Ge), x-y≤1 (Le)
+    /// 最適解: x=y=0.25 (x+y=0.5が拘束、x-y=0≤1は非拘束)
+    ///
+    /// 修正前: pfeas計算でGe違反を検出できず偽OptimalまたはSuboptimalSolutionを返していた。
+    /// 修正後: Ge違反 = max(b - ax, 0) で正しく計算され、Optimalが確認できる。
+    #[test]
+    fn test_qp_mixed_ge_le_presolve_ruiz_regression() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        // Row 0: x+y≥0.5 (Ge, binding), Row 1: x-y≤1 (Le, inactive)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, -1.0],
+            2, 2,
+        ).unwrap();
+        let b = vec![0.5, 1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        ).unwrap();
+
+        // presolve=ON + Ruiz=ON（デフォルト）でバグが再現していたパターン
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "H-5: Mixed(Ge+Le)+presolve=ON+Ruiz=ON status. got {:?}", result.status);
+        assert_close(result.solution[0], 0.25, EPS, "H-5: x[0]");
+        assert_close(result.solution[1], 0.25, EPS, "H-5: x[1]");
     }
 
 }
