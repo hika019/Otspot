@@ -39,7 +39,6 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use crate::sparse::CscMatrix;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary_masked, timeout_result, numerical_error_result};
 use super::kkt::collapse_extended_dual;
@@ -60,17 +59,13 @@ const RHO_INIT: f64 = 8.0;
 /// N1修正後は減衰が正しく機能するため論文値8.0が適切。
 const DELTA_INIT: f64 = 8.0;
 
-// PMM パラメータ下限（reg_limit）は動的計算に移行（cmd_793設計書§B.5）
-// compute_reg_limit() を参照。固定値1e-9は廃止。
-// const REG_LIMIT: f64 = 1e-9;
-
 /// PMM 改善判定閾値（5% 以上の残差減少で改善とみなす）
 /// PARAM: 根拠=Gondzio2021 MATLAB実装(0.95*prev > current) | 要検証=閾値の感度
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 
 /// PMM 遅い減衰率（改善なし時に rho/delta をゆっくり減らす係数）
-/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) Algorithm PEU §5.1.4 p.27 Step 1/2: (1-r/3)
-const PMM_SLOW_RATE: f64 = 1.0 / 3.0;
+/// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）| 承認=cmd_794 Phase 3
+const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
 /// fraction-to-boundary τ
 /// PARAM: 根拠=Mehrotra(1992)標準値 0.995 | 要検証=なし
@@ -91,36 +86,6 @@ const GAMMA_U: f64 = 10.0;
 /// Gondzio corrector: step size 改善の最小閾値
 /// PARAM: 根拠=改善なしの打ち切り判定(数値誤差以下は改善とみなさない) | 要検証=タイトな問題
 const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
-
-// ---------------------------------------------------------------------------
-// reg_limit 動的計算（MATLABオリジナル版準拠、cmd_793設計書§B.5）
-// ---------------------------------------------------------------------------
-
-/// CSC行列の無限大ノルム（各行の絶対値和の最大値）を計算する: O(nnz)
-fn matrix_infinity_norm(mat: &CscMatrix) -> f64 {
-    let mut row_sums = vec![0.0_f64; mat.nrows];
-    for (&val, &row) in mat.values.iter().zip(mat.row_ind.iter()) {
-        row_sums[row] += val.abs();
-    }
-    row_sums.iter().cloned().fold(0.0_f64, f64::max)
-}
-
-/// PMM正則化パラメータの動的下限を計算する（MATLABオリジナル版準拠）
-///
-/// reg_limit = max(5 * tol / max(‖A‖_∞², ‖Q‖_∞²), 5e-10)
-///
-/// スケーリング後の行列（Ruiz適用済み）で呼ぶこと。
-fn compute_reg_limit(a: &CscMatrix, q: &CscMatrix, tol: f64) -> f64 {
-    let norm_a = matrix_infinity_norm(a);
-    let norm_q = matrix_infinity_norm(q);
-    let max_norm_sq = (norm_a * norm_a).max(norm_q * norm_q);
-    let dynamic = if max_norm_sq > 1e-30 {
-        5.0 * tol / max_norm_sq
-    } else {
-        5e-10
-    };
-    dynamic.max(5e-10)
-}
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -233,9 +198,12 @@ pub(crate) fn solve_ippmm_inner(
         prev_nr_d: f64::INFINITY,
     };
 
-    // reg_limit動的計算（MATLABオリジナル版準拠、cmd_793設計書§B.5）
-    // スケーリング済みproblem.a, problem.qで計算。ループ前1回のみ。
-    let reg_limit = compute_reg_limit(&problem.a, &problem.q, options.ipm_eps());
+    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
+    let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
+        5e-10  // LP: MATLAB拡張版準拠
+    } else {
+        5e-8   // QP: MATLAB拡張版準拠
+    };
 
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
