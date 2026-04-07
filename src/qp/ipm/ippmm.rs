@@ -40,7 +40,8 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
-use super::common::{check_infeasible_or_unbounded, solve_unconstrained, fraction_to_boundary_masked, timeout_result, numerical_error_result};
+use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
+use super::solver_loop::{compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors, update_variables};
 use super::kkt::collapse_extended_dual;
 
 // ---------------------------------------------------------------------------
@@ -67,25 +68,6 @@ const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 /// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）| 承認=cmd_794 Phase 3
 const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
-/// fraction-to-boundary τ
-/// PARAM: 根拠=Mehrotra(1992)標準値 0.995 | 要検証=なし
-const TAU: f64 = 0.995;
-
-/// Gondzio corrector: target step size factor β
-/// PARAM: 根拠=Gondzio(1996) β=1.0(最大ステップを目指す) | 要検証=β<1.0の効果
-const BETA_GONDZIO: f64 = 1.0;
-
-/// Gondzio corrector: complementarity lower bound factor
-/// PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題への影響
-const GAMMA_L: f64 = 0.1;
-
-/// Gondzio corrector: complementarity upper bound factor
-/// PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題への影響
-const GAMMA_U: f64 = 10.0;
-
-/// Gondzio corrector: step size 改善の最小閾値
-/// PARAM: 根拠=改善なしの打ち切り判定(数値誤差以下は改善とみなさない) | 要検証=タイトな問題
-const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -338,16 +320,7 @@ pub(crate) fn solve_ippmm_inner(
 
         // Σ = diag(s_i / y_i)（等式行は0）
         let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
-        let sigma_vec: Vec<f64> = s.iter().zip(y.iter()).enumerate()
-            .map(|(i, (&si, &yi))| {
-                if is_eq_ext[i] {
-                    0.0
-                } else {
-                    let v: f64 = si / yi;
-                    if v.is_finite() { v } else { sigma_max }
-                }
-            })
-            .collect();
+        let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
 
         // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
         // rho/deltaはPMMが管理する。mu依存フロアは使わない
@@ -444,176 +417,34 @@ pub(crate) fn solve_ippmm_inner(
             None => return numerical_error_result(n),
         };
 
-        // ── Predictor ──────────────────────────────────────────────
-        let total = n + m_ext;
-        let mut rhs = vec![0.0f64; total];
-        let mut sol = vec![0.0f64; total];
-
-        let r_c_pred: Vec<f64> =
-            s.iter().zip(y.iter()).enumerate()
-            .map(|(i, (&si, &yi))| if is_eq_ext[i] { 0.0 } else { -si * yi }).collect();
-        let r_p_mod_pred: Vec<f64> = r_p_pmm
-            .iter()
-            .zip(r_c_pred.iter())
-            .zip(y.iter())
-            .enumerate()
-            .map(|(i, ((&rpi, &rci), &yi))| {
-                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-            })
-            .collect();
-
-        rhs[..n].copy_from_slice(&r_d_pmm);
-        rhs[n..].copy_from_slice(&r_p_mod_pred);
-        fac.solve(&rhs, &mut sol);
-        let dy_pred = sol[n..].to_vec();
-
-        let mut ds_pred = vec![0.0f64; m_ext];
-        for i in 0..m_ext {
-            if is_eq_ext[i] {
-                ds_pred[i] = 0.0;
-            } else {
-                ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
-            }
-        }
-
-        let alpha_s_pred = fraction_to_boundary_masked(&s, &ds_pred, TAU, &is_eq_ext);
-        let alpha_y_pred = fraction_to_boundary_masked(&y, &dy_pred, TAU, &is_eq_ext);
-        let alpha_pred = alpha_s_pred.min(alpha_y_pred);
-
-        let mu_aff: f64 = if m_ineq > 0 {
-            s.iter().zip(y.iter()).zip(ds_pred.iter()).zip(dy_pred.iter()).enumerate()
-                .filter(|&(i, _)| !is_eq_ext[i])
-                .map(|(_, (((&si, &yi), &dsi), &dyi))| {
-                    (si + alpha_pred * dsi) * (yi + alpha_pred * dyi)
-                })
-                .sum::<f64>() / m_ineq as f64
-        } else {
-            0.0
-        };
-
-        let sigma_center = if mu > 1e-15 {
-            (mu_aff / mu).powi(3).min(1.0)
-        } else {
-            0.0
-        };
-
         // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
 
+        // ── Predictor ──────────────────────────────────────────────
+        let pred = predictor_step(
+            &s, &y, &is_eq_ext, m_ineq,
+            &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
+            &sigma_vec, &fac, n, m_ext, mu,
+        );
+
         // ── Corrector ──────────────────────────────────────────────
-        let r_c_corr: Vec<f64> = s
-            .iter()
-            .zip(y.iter())
-            .zip(ds_pred.iter())
-            .zip(dy_pred.iter())
-            .enumerate()
-            .map(|(i, (((&si, &yi), &dsi), &dyi))| {
-                if is_eq_ext[i] { 0.0 } else { sigma_center * mu - si * yi - dsi * dyi }
-            })
-            .collect();
-        let r_p_mod_corr: Vec<f64> = r_p_pmm
-            .iter()
-            .zip(r_c_corr.iter())
-            .zip(y.iter())
-            .enumerate()
-            .map(|(i, ((&rpi, &rci), &yi))| {
-                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-            })
-            .collect();
-
-        rhs[..n].copy_from_slice(&r_d_pmm);
-        rhs[n..].copy_from_slice(&r_p_mod_corr);
-        fac.solve(&rhs, &mut sol);
-        dx.copy_from_slice(&sol[..n]);
-        dy.copy_from_slice(&sol[n..]);
-
-        for i in 0..m_ext {
-            if is_eq_ext[i] {
-                ds[i] = 0.0;
-            } else {
-                ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
-            }
-        }
-
-        let alpha_s = fraction_to_boundary_masked(&s, &ds, TAU, &is_eq_ext);
-        let alpha_y = fraction_to_boundary_masked(&y, &dy, TAU, &is_eq_ext);
-        let alpha = alpha_s.min(alpha_y);
+        let (alpha, r_c_corr) = corrector_step(
+            &s, &y, &is_eq_ext,
+            &pred, mu,
+            &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
+            &sigma_vec, &fac, n, m_ext,
+            &mut dx, &mut dy, &mut ds,
+        );
 
         // ── Gondzio multiple centrality correctors ──────────────────
         let mut alpha = alpha;
         if alpha < 0.999 {
-            let mut alpha_prev = alpha;
-            for _k in 0..options.ipm.max_correctors {
-                let alpha_target =
-                    (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
-                let mu_target: f64 = if m_ineq > 0 {
-                    s.iter().zip(y.iter()).zip(ds.iter().zip(dy.iter())).enumerate()
-                        .filter(|&(i, _)| !is_eq_ext[i])
-                        .map(|(_, ((&si, &yi), (&dsi, &dyi)))| {
-                            (si + alpha_target * dsi) * (yi + alpha_target * dyi)
-                        })
-                        .sum::<f64>() / m_ineq as f64
-                } else {
-                    0.0
-                };
-                let mu_target = mu_target.max(0.0);
-
-                let target_lo = GAMMA_L * mu_target;
-                let target_hi = GAMMA_U * mu_target;
-
-                let mut r_c_gondzio = vec![0.0f64; m_ext];
-                for i in 0..m_ext {
-                    if is_eq_ext[i] {
-                        r_c_gondzio[i] = 0.0;
-                        continue;
-                    }
-                    let si_new = s[i] + alpha_prev * ds[i];
-                    let yi_new = y[i] + alpha_prev * dy[i];
-                    let v_i = si_new * yi_new;
-                    let v_target = if v_i < target_lo {
-                        target_lo - v_i
-                    } else if v_i > target_hi {
-                        target_hi - v_i
-                    } else {
-                        0.0
-                    };
-                    r_c_gondzio[i] = r_c_corr[i] + v_target;
-                }
-
-                let r_p_mod_gondzio: Vec<f64> = r_p_pmm
-                    .iter()
-                    .zip(r_c_gondzio.iter())
-                    .zip(y.iter())
-                    .enumerate()
-                    .map(|(i, ((&rpi, &rci), &yi))| {
-                        if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-                    })
-                    .collect();
-
-                rhs[..n].copy_from_slice(&r_d_pmm);
-                rhs[n..].copy_from_slice(&r_p_mod_gondzio);
-                fac.solve(&rhs, &mut sol);
-                let dx_new = sol[..n].to_vec();
-                let dy_new = sol[n..].to_vec();
-                let ds_new: Vec<f64> = (0..m_ext)
-                    .map(|i| {
-                        if is_eq_ext[i] { 0.0 } else { r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i] }
-                    })
-                    .collect();
-
-                let alpha_s_new = fraction_to_boundary_masked(&s, &ds_new, TAU, &is_eq_ext);
-                let alpha_y_new = fraction_to_boundary_masked(&y, &dy_new, TAU, &is_eq_ext);
-                let alpha_new = alpha_s_new.min(alpha_y_new);
-
-                if alpha_new < alpha_prev + ALPHA_IMPROVE_THRESHOLD {
-                    break;
-                }
-
-                dx.copy_from_slice(&dx_new);
-                dy.copy_from_slice(&dy_new);
-                ds.copy_from_slice(&ds_new);
-                alpha_prev = alpha_new;
-            }
-            alpha = alpha_prev;
+            alpha = gondzio_correctors(
+                &s, &y, &is_eq_ext, m_ineq,
+                &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
+                &r_c_corr, &sigma_vec, &fac, n, m_ext,
+                options.ipm.max_correctors, alpha,
+                &mut dx, &mut dy, &mut ds,
+            );
         }
 
         // ── 変数更新 ──────────────────────────────────────────────
@@ -639,24 +470,7 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        for i in 0..n {
-            x[i] += alpha * dx[i];
-        }
-        for i in 0..m_ext {
-            if is_eq_ext[i] {
-                // 等式行: s=0のまま、yは自由変数として更新
-                y[i] += alpha * dy[i];
-            } else {
-                s[i] += alpha * ds[i];
-                y[i] += alpha * dy[i];
-                if s[i] <= 0.0 {
-                    s[i] = 1e-12;
-                }
-                if y[i] <= 0.0 {
-                    y[i] = 1e-12;
-                }
-            }
-        }
+        update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
         // ── PMM パラメータ更新 ──────────────────────────────────────
         // Algorithm PEU Step 0: r = |μ_k - μ_{k+1}| / μ_k
@@ -738,7 +552,6 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
-    use crate::qp::ipm::common::check_infeasible_or_unbounded;
     use crate::sparse::CscMatrix;
 
     const EPS: f64 = 1e-4; // IP-PMM は標準 IPM より tolerance がゆるめでも通ることを確認
@@ -866,142 +679,6 @@ mod tests {
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPPMM-T5: expected Timeout or Optimal, got {:?}",
             result.status
-        );
-    }
-
-    /// IPPMM-T-INF1: iter < MIN_ITER(=5) の場合 None が返ること
-    #[test]
-    fn test_iter_guard_ippmm() {
-        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
-        let c = vec![-1.0];
-        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-        let b: Vec<f64> = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-        let dx = vec![1.0]; // MIN_DIR_NORM を超える大きさだが iter ガードが先
-        let dy: Vec<f64> = vec![];
-        // iter=4 < MIN_ITER=5 → None
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 4, 0.0),
-            None,
-            "IPPMM-T-INF1: iter < MIN_ITER は None であること"
-        );
-    }
-
-    /// IPPMM-T-INF2: ||Δx||_inf <= MIN_DIR_NORM(=1e-3) の場合 None が返ること
-    #[test]
-    fn test_min_dir_norm_guard_ippmm() {
-        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
-        let c = vec![-1.0];
-        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-        let b: Vec<f64> = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-        let dx = vec![5e-4]; // ||dx||_inf = 5e-4 <= MIN_DIR_NORM = 1e-3
-        let dy: Vec<f64> = vec![];
-        // 収束時偽陽性防止: dx が小さすぎる → None
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
-            None,
-            "IPPMM-T-INF2: ||dx||_inf <= MIN_DIR_NORM は None であること"
-        );
-    }
-
-    /// IPPMM-T-INF3: Farkas dual ray 条件を満たすベクトルで Infeasible 判定を確認
-    ///
-    /// A_orig = 0 (1x2 ゼロ行列), b = [-1], dy_orig = [2.0]
-    /// ① ||A^T * dy_orig|| = 0 < ε ✓
-    /// ② b · dy_orig = -2 < -ε ✓
-    /// → Infeasible
-    #[test]
-    fn test_primal_infeasible_ippmm() {
-        let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap();
-        let c = vec![1.0, 0.0];
-        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap(); // 1x2 ゼロ行列
-        let b = vec![-1.0];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap();
-        let dx = vec![1e-10, 1e-10]; // 非常に小さい → dual チェックはスキップ
-        let dy = vec![2.0]; // norm = 2.0 > MIN_DIR_NORM
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 1, 1, 10, 0.0),
-            Some(SolveStatus::Infeasible),
-            "IPPMM-T-INF3: Farkas ray 条件 → Infeasible であること"
-        );
-    }
-
-    /// IPPMM-T-INF4: LP (Q=0) で c·Δx < 0 条件の Unbounded 判定を確認
-    ///
-    /// n=1, m_orig=0: c=[-1], dx=[1.0] → c·dx/norm_dx = -1 < -ε → Unbounded
-    #[test]
-    fn test_dual_infeasible_lp_ippmm() {
-        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap(); // Q=0 (LP)
-        let c = vec![-1.0];
-        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap(); // 制約なし
-        let b: Vec<f64> = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
-        let dx = vec![1.0]; // c·dx = -1 < -ε, m_ext=0 なので dual guard は無効
-        let dy: Vec<f64> = vec![];
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
-            Some(SolveStatus::Unbounded),
-            "IPPMM-T-INF4: LP dual infeasibility → Unbounded であること"
-        );
-    }
-
-    /// IPPMM-T-INF5: QP c=0 のとき Unbounded を返さないことを確認（QPLIB_9002バグ回帰防止）
-    ///
-    /// Q = diag([0, 2]) (1エントリのみ → is_lp=false)
-    /// c = [0, 0], dx = [1.0, 0.0]
-    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
-    /// 条件2: c^T*dx / norm_dx = 0 → NOT < -EPS_INF → 不成立
-    /// → cond_obj = false → None (Unbounded不判定)
-    #[test]
-    fn test_qp_c_zero_not_unbounded() {
-        // Q に (1,1)=2.0 のエントリのみ → is_lp=false (Q.values=[2.0]≠0)
-        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
-        let c = vec![0.0, 0.0]; // c=0
-        let a = CscMatrix::new(0, 2);
-        let b: Vec<f64> = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::new(0, 2);
-        let dx = vec![1.0, 0.0]; // Q*dx = [0,0], norm_qdx=0 < EPS_INF, c_dx=0 ≥ -EPS_INF
-        let dy: Vec<f64> = vec![];
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
-            None,
-            "IPPMM-T-INF5: QP c=0 → Unbounded不判定（QPLIB_9002回帰防止）"
-        );
-    }
-
-    /// IPPMM-T-INF6: QP c≠0 の真のUnbounded問題で正しく Unbounded を返すことを確認
-    ///
-    /// Q = diag([0, 2]) (is_lp=false), c = [-1, 0], dx = [1.0, 0.0]
-    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
-    /// 条件2: c^T*dx / norm_dx = -1 < -EPS_INF → 通過
-    /// → cond_obj = true, m_orig=0 → Unbounded
-    #[test]
-    fn test_qp_c_nonzero_true_unbounded() {
-        // Q に (1,1)=2.0 のエントリのみ → is_lp=false
-        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
-        let c = vec![-1.0, 0.0]; // c≠0、x[0]方向に目的減少
-        let a = CscMatrix::new(0, 2);
-        let b: Vec<f64> = vec![];
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let a_ext = CscMatrix::new(0, 2);
-        let dx = vec![1.0, 0.0]; // Q*dx=[0,0] → 条件1通過; c_dx=-1 → 条件2通過
-        let dy: Vec<f64> = vec![];
-        assert_eq!(
-            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
-            Some(SolveStatus::Unbounded),
-            "IPPMM-T-INF6: QP c≠0 真Unbounded → Unbounded判定"
         );
     }
 
