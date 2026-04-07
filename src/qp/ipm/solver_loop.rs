@@ -375,3 +375,56 @@ pub(crate) fn update_variables(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// テスト
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_sigma_vec, update_variables};
+
+    /// compute_sigma_vec: 等式制約行のsigmaは0になること
+    #[test]
+    fn test_compute_sigma_vec_eq_row_is_zero() {
+        let s = vec![2.0, 4.0];
+        let y = vec![1.0, 2.0];
+        // 1行目が等式（is_eq_ext[0]=true）
+        let is_eq_ext = vec![true, false];
+        let sigma_max = 1e6_f64;
+        let result = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
+        // 等式行 → 0.0
+        assert_eq!(result[0], 0.0, "等式行のsigmaは0であること");
+        // 不等式行 → s/y = 4/2 = 2.0
+        let expected = 4.0 / 2.0;
+        assert!(
+            (result[1] - expected).abs() < 1e-12,
+            "不等式行のsigma = s/y = {} (expected {})",
+            result[1],
+            expected
+        );
+    }
+
+    /// update_variables: alpha=1.0 でdx/ds/dyが完全適用・s正値制約を確認
+    #[test]
+    fn test_update_variables_alpha_one() {
+        let mut x = vec![1.0, 2.0];
+        let mut s = vec![0.5, 0.5];
+        let mut y = vec![1.0, 1.0];
+        let dx = vec![0.1, 0.2];
+        let ds = vec![0.3, -0.6]; // 2番目の不等式行: s[1]=0.5-0.6=-0.1 → クランプされ1e-12
+        let dy = vec![0.1, 0.1];
+        let is_eq_ext = vec![false, false];
+        update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, 1.0, &is_eq_ext);
+        // x の更新
+        assert!((x[0] - 1.1).abs() < 1e-12);
+        assert!((x[1] - 2.2).abs() < 1e-12);
+        // s[0]: 0.5 + 0.3 = 0.8
+        assert!((s[0] - 0.8).abs() < 1e-12);
+        // s[1]: 0.5 - 0.6 = -0.1 → 正値制約で 1e-12
+        assert_eq!(s[1], 1e-12, "s が負になった場合は 1e-12 にクランプされること");
+        // y の更新
+        assert!((y[0] - 1.1).abs() < 1e-12);
+        assert!((y[1] - 1.1).abs() < 1e-12);
+    }
+}
