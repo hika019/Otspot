@@ -132,10 +132,10 @@ pub(crate) fn post_verify_solution(
                     .zip(problem.constraint_types.iter())
                     .zip(row_norms.iter())
                     .map(|(((&ax_i, &b_i), ct), &rn)| {
-                        let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
-                            (ax_i - b_i).abs()
-                        } else {
-                            (ax_i - b_i).max(0.0)
+                        let violation = match ct {
+                            crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                            crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                            _ => (ax_i - b_i).max(0.0),
                         };
                         violation / (1.0 + rn + b_i.abs())
                     })
@@ -295,7 +295,12 @@ pub(crate) fn unscale_ipm_result(
                         let pfeas: f64 = ax
                             .iter()
                             .zip(problem.b.iter())
-                            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+                            .zip(problem.constraint_types.iter())
+                            .map(|((&ax_i, &b_i), ct)| match ct {
+                                crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                _ => (ax_i - b_i).max(0.0),
+                            })
                             .fold(0.0_f64, f64::max);
                         let row_norms = problem.a.row_infinity_norms();
                         let pfeas_normalized: f64 = ax
@@ -304,10 +309,10 @@ pub(crate) fn unscale_ipm_result(
                             .zip(problem.constraint_types.iter())
                             .zip(row_norms.iter())
                             .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
-                                    (ax_i - b_i).abs()
-                                } else {
-                                    (ax_i - b_i).max(0.0)
+                                let violation = match ct {
+                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                    _ => (ax_i - b_i).max(0.0),
                                 };
                                 violation / (1.0 + rn + b_i.abs())
                             })
@@ -381,10 +386,10 @@ pub(crate) fn unscale_ipm_result(
                             .zip(problem.constraint_types.iter())
                             .zip(row_norms.iter())
                             .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
-                                    (ax_i - b_i).abs()
-                                } else {
-                                    (ax_i - b_i).max(0.0)
+                                let violation = match ct {
+                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                    _ => (ax_i - b_i).max(0.0),
                                 };
                                 violation / (1.0 + rn + b_i.abs())
                             })
