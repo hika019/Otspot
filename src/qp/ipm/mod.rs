@@ -3,49 +3,50 @@
 //! Mehrotra predictor-corrector + IP-PMM 正則化による QP 求解。
 //!
 //! # ファイル構成
-//! - `mod.rs`:  公開 API・定数・Ruiz スケーリングラッパー・テスト
-//! - `kkt.rs`:  KKT 行列構築・疎行列演算ヘルパー
-//! - `step.rs`: メインループ（`solve_qp_ipm_inner`）・fraction-to-boundary・ユーティリティ
-//! - `init.rs`: 初期点計算（Mehrotra heuristic）
+//! - `mod.rs`:     公開 API・定数・テスト
+//! - `kkt.rs`:     KKT 行列構築・疎行列演算ヘルパー
+//! - `step.rs`:    IPM Mehrotra inner solver（solver_loop 使用）
+//! - `ippmm.rs`:   IP-PMM inner solver（solver_loop 使用）
+//! - `init.rs`:    初期点計算（Mehrotra heuristic）
+//! - `solver_loop.rs`: Predictor-Corrector-Gondzio 共通ループ部品
+//! - `scaling.rs`: Ruiz スケーリングラッパー・アンスケール・後検証
 
 pub(crate) mod common;
 pub(crate) mod init;
 pub(crate) mod kkt;
 pub(crate) mod step;
 pub(crate) mod ippmm;
+pub(crate) mod solver_loop;
+pub(crate) mod scaling;
 
-use crate::linalg::ruiz::RuizScaler;
-use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
-use self::kkt::norm_inf;
+
+// scaling モジュールの公開関数を ipm 名前空間に再エクスポート
+pub(crate) use scaling::post_verify_solution;
 
 // ---------------------------------------------------------------------------
 // IPM 固定パラメータ
 // ---------------------------------------------------------------------------
 
-/// fraction-to-boundary τ
+/// fraction-to-boundary τ（solver_loop.rs がこの定数を参照する）
 pub(crate) const TAU: f64 = 0.995;
 /// IP-PMM 正則化最小値
 #[allow(dead_code)]
 pub(crate) const DELTA_MIN: f64 = 1e-8;
-/// eps事前調整の下限（数値精度限界）
-const EPS_FLOOR: f64 = 1e-12;
-/// post-verification失敗時の再ソルブ上限回数（1回目=通常, 2〜N回目=10倍ずつ厳格化）
-const POST_VERIFY_MAX_RESOLV: usize = 3;
 
 // ---------------------------------------------------------------------------
-// Gondzio multiple centrality correctors パラメータ
+// Gondzio multiple centrality correctors パラメータ（solver_loop.rs が参照）
 // ---------------------------------------------------------------------------
 
-/// Gondzio: target step size factor β // PARAM: β=1.0でα=1.0(最大ステップ)を目指す | 要検証=β<1.0の効果
+/// Gondzio: target step size factor β
 pub(crate) const BETA_GONDZIO: f64 = 1.0;
-/// Gondzio: complementarity lower bound factor // PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題
+/// Gondzio: complementarity lower bound factor
 pub(crate) const GAMMA_L: f64 = 0.1;
-/// Gondzio: complementarity upper bound factor // PARAM: 根拠=Gondzio(1996) | 要検証=小規模問題
+/// Gondzio: complementarity upper bound factor
 pub(crate) const GAMMA_U: f64 = 10.0;
-/// Gondzio: step size 改善の最小閾値 // PARAM: これ未満の改善は誤差程度 | 要検証=タイトな問題
+/// Gondzio: step size 改善の最小閾値
 pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 
 // ---------------------------------------------------------------------------
@@ -57,467 +58,14 @@ pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 /// Ruiz equilibration スケーリングを適用してから内部ソルバーを呼ぶ。
 /// options.use_ruiz_scaling=false のときはスケーリングをスキップ。
 pub fn solve_qp_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // cmd_770: to_all_le()廃止。IPMはEq/Geをネイティブ処理する。
-    if options.use_ruiz_scaling && problem.num_vars > 0 {
-        let n = problem.num_vars;
-        let m = problem.num_constraints;
-
-        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
-        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
-
-        let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
-
-        let (q_s, a_s, c_s, b_s, bounds_s) =
-            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
-
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone()) {
-            let amplification = compute_amplification(&scaler);
-            let mut last_result: Option<SolverResult> = None;
-            // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
-            // APIユーザーがtimeout_secs=Some(t), deadline=Noneで呼び出した場合、
-            // ループごとにtimeout_secsから新しいdeadlineを計算すると最大3×timeout_secsの超過が起きる。
-            // TimeoutCtx::from_optionsを使って既存パターンに統一（再発明を避ける）。
-            let effective_deadline = TimeoutCtx::from_options(options).deadline;
-            // post-verification再ソルブループ:
-            // unscale後のeps検証が不合格（SuboptimalSolution）なら
-            // scaled空間のepsを10倍ずつ厳格化して最大POST_VERIFY_MAX_RESOLV回まで再試行。
-            // DTOC3/QPCBOEI2のようなRuiz scaling増幅問題に有効。
-            for attempt in 0..POST_VERIFY_MAX_RESOLV {
-                let tighten = 10f64.powi(attempt as i32); // 1.0, 10.0, 100.0
-                let adjusted_eps =
-                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
-                let mut adjusted_opts = options.clone();
-                adjusted_opts.ipm.eps = adjusted_eps;
-                adjusted_opts.deadline = effective_deadline;  // T9: 固定deadline（二重タイムアウト防止）
-                adjusted_opts.timeout_secs = None;            // T9: 二重計算防止
-                let scaled_result = step::solve_qp_ipm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
-                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
-                // 再ソルブ条件: 原空間で SuboptimalSolution かつ残り試行回数がある場合。
-                // unscale_ipm_result が SuboptimalSolution/Optimalを原空間で判定するため
-                // scaled側のステータスを別途確認する必要はない。
-                if result.status == SolveStatus::SuboptimalSolution
-                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
-                {
-                    last_result = Some(result);
-                    continue;
-                }
-                // MaxIterations: 概要設計に従い有効解の有無で分岐
-                if result.status == SolveStatus::MaxIterations {
-                    if !result.solution.is_empty() {
-                        // 有効解あり → SuboptimalSolutionに変換してAPI境界変換に委ねる
-                        return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
-                    } else {
-                        return SolverResult { status: SolveStatus::Timeout, ..result };
-                    }
-                }
-                // Timeout / Infeasible / Unbounded はそのまま返す
-                if result.status == SolveStatus::Timeout
-                    || matches!(result.status, SolveStatus::Infeasible | SolveStatus::Unbounded)
-                {
-                    return result;
-                }
-                // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return result;
-            }
-            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
-        }
-        // QpProblem::new 失敗 → 非スケールにフォールバック
-    }
-
-    // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    post_verify_solution(step::solve_qp_ipm_inner(problem, options, None, None, options.ipm_eps()), problem, options.ipm_eps())
+    scaling::solve_with_ruiz_scaling(problem, options, step::solve_qp_ipm_inner)
 }
 
 /// IP-PMM（Interior Point-Proximal Method of Multipliers）で QP を解く
 ///
 /// 完全独立実装（step.rs / kkt.rs 不使用）。Ruiz スケーリングラッパー付き。
 pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // cmd_770: to_all_le()廃止。IP-PMMはEq/Geをネイティブ処理する。
-    if options.use_ruiz_scaling && problem.num_vars > 0 {
-        let n = problem.num_vars;
-        let m = problem.num_constraints;
-
-        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
-        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
-
-        let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
-
-        let (q_s, a_s, c_s, b_s, bounds_s) =
-            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
-
-        if let Ok(scaled_problem) = QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone()) {
-            let amplification = compute_amplification(&scaler);
-            let mut last_result: Option<SolverResult> = None;
-            // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
-            let effective_deadline = TimeoutCtx::from_options(options).deadline;
-            for attempt in 0..POST_VERIFY_MAX_RESOLV {
-                let tighten = 10f64.powi(attempt as i32);
-                let adjusted_eps =
-                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
-                let mut adjusted_opts = options.clone();
-                adjusted_opts.ipm.eps = adjusted_eps;
-                adjusted_opts.deadline = effective_deadline;  // T9: 固定deadline（二重タイムアウト防止）
-                adjusted_opts.timeout_secs = None;            // T9: 二重計算防止
-                let scaled_result = ippmm::solve_ippmm_inner(&scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps());
-                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
-                if result.status == SolveStatus::SuboptimalSolution
-                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
-                {
-                    last_result = Some(result);
-                    continue;
-                }
-                if result.status == SolveStatus::Timeout {
-                    return result;
-                }
-                if result.status == SolveStatus::MaxIterations {
-                    if !result.solution.is_empty() {
-                        return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
-                    } else {
-                        return SolverResult { status: SolveStatus::Timeout, ..result };
-                    }
-                }
-                // SuboptimalSolution / Optimal はそのまま返す（API境界変換はqp/mod.rsで実施）
-                return result;
-            }
-            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
-        }
-    }
-
-    // 非Ruizパス: ステータス変換なし（API境界変換はqp/mod.rsで実施）
-    post_verify_solution(
-        ippmm::solve_ippmm_inner(problem, options, None, None, options.ipm_eps()),
-        problem,
-        options.ipm_eps(),
-    )
-}
-
-/// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
-/// pfeas・bfeas・dfeas が eps 基準を満たすなら Optimal に昇格する。
-///
-/// Ruiz scaling なしのフォールバックパスで使用。
-/// Ruiz ありパスは unscale_ipm_result の SuboptimalSolution ブランチが担当。
-pub(crate) fn post_verify_solution(result: SolverResult, problem: &QpProblem, eps: f64) -> SolverResult {
-    if result.status != SolveStatus::SuboptimalSolution || result.solution.is_empty() {
-        return result;
-    }
-    let x = &result.solution;
-    let y = &result.dual_solution;
-    let bound_duals = &result.bound_duals;
-    let d_min = 1.0_f64; // スケーリングなし: d_min=1
-    let norm_c_s = norm_inf(&problem.c).max(1.0);
-    let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / d_min;
-    let status = if problem.num_constraints > 0 {
-        match problem.a.mat_vec_mul(x) {
-            Ok(ax) => {
-                let row_norms = problem.a.row_infinity_norms();
-                let pfeas_normalized: f64 = ax
-                    .iter()
-                    .zip(problem.b.iter())
-                    .zip(problem.constraint_types.iter())
-                    .zip(row_norms.iter())
-                    .map(|(((&ax_i, &b_i), ct), &rn)| {
-                        let violation = match ct {
-                            crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                            crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                            _ => (ax_i - b_i).max(0.0),
-                        };
-                        violation / (1.0 + rn + b_i.abs())
-                    })
-                    .fold(0.0_f64, f64::max);
-                if pfeas_normalized < eps {
-                    let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
-                    if bfeas_status == SolveStatus::Optimal {
-                        check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
-                    } else {
-                        bfeas_status
-                    }
-                } else {
-                    SolveStatus::SuboptimalSolution
-                }
-            }
-            Err(_) => SolveStatus::SuboptimalSolution,
-        }
-    } else {
-        let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
-        if bfeas_status == SolveStatus::Optimal {
-            check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
-        } else {
-            bfeas_status
-        }
-    };
-    SolverResult { status, ..result }
-}
-
-/// Ruizスケーリングによる残差増幅率を計算する。
-///
-/// pfeas増幅: 1/e_min、dfeas増幅: 1/(c * d_min) の最大を返す。
-/// IPM内部のepsをtighterに設定するために使用する。
-fn compute_amplification(scaler: &RuizScaler) -> f64 {
-    let e_min = if scaler.e.is_empty() {
-        1.0
-    } else {
-        scaler.e.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-    };
-    let d_min = if scaler.d.is_empty() {
-        1.0
-    } else {
-        scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-    };
-    (1.0 / e_min).max(1.0 / (scaler.c * d_min))
-}
-
-/// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する
-///
-/// 閾値: eps（絶対値基準）。qps_benchmarkの検証基準と統一。
-/// lb/ub が ±∞ の成分はスキップする。
-pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus {
-    let bfeas: f64 = x
-        .iter()
-        .zip(bounds.iter())
-        .map(|(&xi, &(lb, ub))| {
-            let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-            let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
-            lb_viol.max(ub_viol)
-        })
-        .fold(0.0_f64, f64::max);
-    if bfeas < eps {
-        SolveStatus::Optimal
-    } else {
-        // bfeas違反: 境界制約を満たさない偽Optimal
-        SolveStatus::SuboptimalSolution
-    }
-}
-
-/// QPの双対実現可能性 (dfeas) を検証し、超過していれば SuboptimalSolution に降格する
-///
-/// dfeas = ||Q*x + A^T*y - y_lb + y_ub + c||_inf
-/// 無制約QP（A=0, bounds=all infinite）では A^T*y = 0, bound_contrib = 0 として計算する。
-///
-/// # 引数
-/// - `bound_duals`: アンスケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順
-/// - `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
-pub(crate) fn check_dfeas_status(problem: &QpProblem, x: &[f64], y: &[f64], bound_duals: &[f64], threshold: f64) -> SolveStatus {
-    let n = x.len();
-    // Q*x
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return SolveStatus::Optimal, // 計算失敗時はstatusを保持（安全側）
-    };
-    // A^T*y（無制約QPではa.nrows==0なのでzeroベクトル）
-    let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
-        match problem.a.transpose().mat_vec_mul(y) {
-            Ok(v) => v,
-            Err(_) => return SolveStatus::Optimal, // 計算失敗時はstatusを保持（安全側）
-        }
-    } else {
-        vec![0.0; n]
-    };
-    // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
-    // KKT: Q*x + c + A^T*y - y_lb + y_ub = 0
-    let mut bound_contrib = vec![0.0f64; n];
-    if !bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] -= bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] += bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    }
-    // dfeas = ||Q*x + A^T*y + bound_contrib + c||_inf
-    let dfeas = (0..n)
-        .map(|i| (qx[i] + aty[i] + bound_contrib[i] + problem.c[i]).abs())
-        .fold(0.0_f64, f64::max);
-    if dfeas < threshold {
-        SolveStatus::Optimal
-    } else {
-        // dfeas違反: 双対実現可能性を満たさない偽Optimal
-        SolveStatus::SuboptimalSolution
-    }
-}
-
-/// スケール済み IPM 結果を元のスケールに逆変換する
-///
-/// Optimal ステータスの場合、元空間で pfeas・bfeas・dfeas を再計算し、
-/// それぞれの許容誤差を超えていれば SuboptimalSolution に降格する（偽Optimal防止）。
-fn unscale_ipm_result(
-    result: SolverResult,
-    scaler: &RuizScaler,
-    problem: &QpProblem,
-    eps: f64,
-) -> SolverResult {
-    match result.status {
-        SolveStatus::Optimal => {
-            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
-            let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
-            let obj_orig = result.objective / scaler.c;
-            // post-unscaling検証: 元空間で primal feasibility (pfeas) と
-            // bounds feasibility (bfeas) を確認。
-            // scaled空間でeps以下でも、unscale後に残差が増幅される問題（偽Optimal）を検出する
-            // dfeas閾値: Ruizスケーリングの増幅係数を考慮して計算する。
-            // dfeas_orig ≤ eps * (1+norm_c_s) / (scaler.c * d_min) の理論上限に
-            // 安全係数10を掛けて浮動小数点誤差とIPM停止タイミングのずれを吸収する。
-            // norm_c_s = scaled空間でのcノルム = scaler.c * max_j |scaler.d[j] * c[j]|
-            let d_min = if scaler.d.is_empty() {
-                1.0
-            } else {
-                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-            };
-            let norm_c_s = scaler.d.iter().enumerate()
-                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
-            let (status, orig_residuals) = if problem.num_constraints > 0 {
-                match problem.a.mat_vec_mul(&x) {
-                    Ok(ax) => {
-                        let pfeas: f64 = ax
-                            .iter()
-                            .zip(problem.b.iter())
-                            .zip(problem.constraint_types.iter())
-                            .map(|((&ax_i, &b_i), ct)| match ct {
-                                crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                                crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                                _ => (ax_i - b_i).max(0.0),
-                            })
-                            .fold(0.0_f64, f64::max);
-                        let row_norms = problem.a.row_infinity_norms();
-                        let pfeas_normalized: f64 = ax
-                            .iter()
-                            .zip(problem.b.iter())
-                            .zip(problem.constraint_types.iter())
-                            .zip(row_norms.iter())
-                            .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = match ct {
-                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                                    _ => (ax_i - b_i).max(0.0),
-                                };
-                                violation / (1.0 + rn + b_i.abs())
-                            })
-                            .fold(0.0_f64, f64::max);
-                        // 元空間pfeasでfinal_residualsを更新（dfeas/gapはscaled値を流用）
-                        let orig_resid = result.final_residuals.map(|(_, d, g)| (pfeas, d, g));
-                        let status = if pfeas_normalized < eps {
-                            // pfeas OK: bfeas → dfeas の順で検証
-                            let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                            if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
-                            } else {
-                                bfeas_status
-                            }
-                        } else {
-                            // 偽Optimal検出: scaled空間での収束判定を元空間で再検証した結果、不合格
-                            SolveStatus::SuboptimalSolution
-                        };
-                        (status, orig_resid)
-                    }
-                    Err(_) => (SolveStatus::Optimal, result.final_residuals), // mat_vec_mul失敗時はstatusを保持（安全側）
-                }
-            } else {
-                // 制約なし問題: pfeas検証不要だがbfeas → dfeas は検証
-                let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                let status = if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
-                } else {
-                    bfeas_status
-                };
-                (status, result.final_residuals)
-            };
-            SolverResult {
-                objective: obj_orig,
-                solution: x,
-                dual_solution: y,
-                bound_duals,
-                status,
-                final_residuals: orig_residuals,
-                ..result
-            }
-        }
-        SolveStatus::Timeout => {
-            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
-            let obj_orig = result.objective / scaler.c;
-            SolverResult {
-                objective: obj_orig,
-                solution: x,
-                dual_solution: y,
-                ..result
-            }
-        }
-        SolveStatus::SuboptimalSolution => {
-            // scaled空間でSuboptimalSolutionだった場合も unscale して原空間で再検証する。
-            // 原空間の pfeas・bfeas が eps 基準を満たせば Optimal に昇格する（DTOC3対策）。
-            let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
-            let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
-            let obj_orig = result.objective / scaler.c;
-            let d_min = if scaler.d.is_empty() {
-                1.0
-            } else {
-                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-            };
-            let norm_c_s = scaler.d.iter().enumerate()
-                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
-            let status = if problem.num_constraints > 0 {
-                match problem.a.mat_vec_mul(&x) {
-                    Ok(ax) => {
-                        let row_norms = problem.a.row_infinity_norms();
-                        let pfeas_normalized: f64 = ax
-                            .iter()
-                            .zip(problem.b.iter())
-                            .zip(problem.constraint_types.iter())
-                            .zip(row_norms.iter())
-                            .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = match ct {
-                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                                    _ => (ax_i - b_i).max(0.0),
-                                };
-                                violation / (1.0 + rn + b_i.abs())
-                            })
-                            .fold(0.0_f64, f64::max);
-                        if pfeas_normalized < eps {
-                            let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                            if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
-                            } else {
-                                bfeas_status
-                            }
-                        } else {
-                            SolveStatus::SuboptimalSolution
-                        }
-                    }
-                    Err(_) => SolveStatus::SuboptimalSolution,
-                }
-            } else {
-                let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
-                } else {
-                    bfeas_status
-                }
-            };
-            SolverResult {
-                objective: obj_orig,
-                solution: x,
-                dual_solution: y,
-                bound_duals,
-                status,
-                ..result
-            }
-        }
-        _ => result,
-    }
+    scaling::solve_with_ruiz_scaling(problem, options, ippmm::solve_ippmm_inner)
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +75,10 @@ fn unscale_ipm_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::scaling::{unscale_ipm_result, compute_amplification, EPS_FLOOR};
+    use crate::linalg::ruiz::RuizScaler;
     use crate::options::SolverOptions;
+    use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
     const EPS: f64 = 1e-5;
