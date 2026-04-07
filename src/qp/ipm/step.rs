@@ -513,5 +513,56 @@ mod tests {
             "STEP-T4: LP dual infeasibility → Unbounded であること"
         );
     }
+
+    /// STEP-T5: QP c=0 のとき Unbounded を返さないことを確認（QPLIB_9002バグ回帰防止）
+    ///
+    /// Q = diag([0, 2]) (1エントリのみ → is_lp=false)
+    /// c = [0, 0], dx = [1.0, 0.0]
+    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
+    /// 条件2: c^T*dx / norm_dx = 0 → NOT < -EPS_INF → 不成立
+    /// → cond_obj = false → None (Unbounded不判定)
+    #[test]
+    fn test_qp_c_zero_not_unbounded() {
+        // Q に (1,1)=2.0 のエントリのみ → is_lp=false (Q.values=[2.0]≠0)
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0]; // c=0
+        let a = CscMatrix::new(0, 2);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::new(0, 2);
+        let dx = vec![1.0, 0.0]; // Q*dx = [0,0], norm_qdx=0 < EPS_INF, c_dx=0 ≥ -EPS_INF
+        let dy: Vec<f64> = vec![];
+        assert_eq!(
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
+            None,
+            "STEP-T5: QP c=0 → Unbounded不判定（QPLIB_9002回帰防止）"
+        );
+    }
+
+    /// STEP-T6: QP c≠0 の真のUnbounded問題で正しく Unbounded を返すことを確認
+    ///
+    /// Q = diag([0, 2]) (is_lp=false), c = [-1, 0], dx = [1.0, 0.0]
+    /// 条件1: ||Q*dx||/norm_dx = 0 < EPS_INF → 通過
+    /// 条件2: c^T*dx / norm_dx = -1 < -EPS_INF → 通過
+    /// → cond_obj = true, m_orig=0 → Unbounded
+    #[test]
+    fn test_qp_c_nonzero_true_unbounded() {
+        // Q に (1,1)=2.0 のエントリのみ → is_lp=false
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
+        let c = vec![-1.0, 0.0]; // c≠0、x[0]方向に目的減少
+        let a = CscMatrix::new(0, 2);
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let a_ext = CscMatrix::new(0, 2);
+        let dx = vec![1.0, 0.0]; // Q*dx=[0,0] → 条件1通過; c_dx=-1 → 条件2通過
+        let dy: Vec<f64> = vec![];
+        assert_eq!(
+            check_infeasible_or_unbounded(&dx, &dy, &problem, &a_ext, 0, 0, 10, 0.0),
+            Some(SolveStatus::Unbounded),
+            "STEP-T6: QP c≠0 真Unbounded → Unbounded判定"
+        );
+    }
 }
 
