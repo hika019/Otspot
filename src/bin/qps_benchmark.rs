@@ -6,6 +6,10 @@
 //!
 //! 各問題に10秒のタイムアウトを設ける（solver内部の協調的タイムアウト機構を使用）。
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
