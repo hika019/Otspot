@@ -18,6 +18,10 @@
 //! STATUS objective iterations
 //! (STATUS = Optimal | Infeasible | Unbounded | MaxIterations | Error)
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::io::{self, BufRead};
 use solver::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
 use solver::sparse::CscMatrix;

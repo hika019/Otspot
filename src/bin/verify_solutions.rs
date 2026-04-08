@@ -14,6 +14,10 @@
 //!   comp_slack  : max_i |y_i * (A_i*x - b_i)|       (制約の相補スラック)
 //!   dual_feas   : y_i の最小値（<0 なら双対非実行可能）
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};

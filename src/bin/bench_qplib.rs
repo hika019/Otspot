@@ -8,6 +8,10 @@
 //! 対応問題タイプ: *C*（連続変数）かつ L/B/N（線形/境界/無制約）。
 //! 非対応（整数変数・二次制約）は SKIP として記録する。
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
