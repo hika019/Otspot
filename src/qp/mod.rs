@@ -1028,10 +1028,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                                 .zip(problem.constraint_types.iter())
                                 .zip(row_norms.iter())
                                 .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                    let violation = if matches!(ct, crate::problem::ConstraintType::Eq) {
-                                        (ax_i - b_i).abs()
-                                    } else {
-                                        (ax_i - b_i).max(0.0)
+                                    let violation = match ct {
+                                        crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                        crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                        _ => (ax_i - b_i).max(0.0),
                                     };
                                     violation / (1.0 + rn + b_i.abs())
                                 })
@@ -3365,6 +3365,28 @@ mod tests {
             "H-5: Mixed(Ge+Le)+presolve=ON+Ruiz=ON status. got {:?}", result.status);
         assert_close(result.solution[0], 0.25, EPS, "H-5: x[0]");
         assert_close(result.solution[1], 0.25, EPS, "H-5: x[1]");
+        // pfeas直接assert: Ge違反 = max(b - ax, 0) が閾値未満であることを確認
+        let pfeas = {
+            let x = &result.solution;
+            // Row 0: x+y - 0.5 (Ge: violation = max(0.5 - (x+y), 0))
+            let ge_viol = (0.5_f64 - (x[0] + x[1])).max(0.0);
+            // Row 1: x-y - 1.0 (Le: violation = max((x-y) - 1.0, 0))
+            let le_viol = (x[0] - x[1] - 1.0_f64).max(0.0);
+            ge_viol.max(le_viol)
+        };
+        assert!(pfeas < 1e-6, "H-5: pfeas={:e} (期待値 < 1e-6)", pfeas);
+
+        // presolve=OFF比較: 同一問題でpresolve無効化時もOptimalかつ同一解であることを確認
+        let opts_no_presolve = SolverOptions {
+            timeout_secs: Some(10.0),
+            presolve: false,
+            ..Default::default()
+        };
+        let result_no_presolve = solve_qp_with(&problem, &opts_no_presolve);
+        assert_eq!(result_no_presolve.status, SolveStatus::Optimal,
+            "H-5: presolve=OFF status. got {:?}", result_no_presolve.status);
+        assert_close(result_no_presolve.solution[0], 0.25, EPS, "H-5(no-presolve): x[0]");
+        assert_close(result_no_presolve.solution[1], 0.25, EPS, "H-5(no-presolve): x[1]");
     }
 
 }

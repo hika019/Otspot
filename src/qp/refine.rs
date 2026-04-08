@@ -63,8 +63,14 @@ pub fn iterative_refine(
             .map(|(&ax_i, &b_i)| ax_i - b_i)
             .collect();
 
-        // Step 2: pfeas収束チェック
-        let pfeas = r_p.iter().map(|&r| r.max(0.0)).fold(0.0_f64, f64::max);
+        // Step 2: pfeas収束チェック（Ge対応: violation = max(b-ax, 0) = max(-r_p, 0)）
+        let pfeas = r_p.iter().zip(problem.constraint_types.iter())
+            .map(|(&r, ct)| match ct {
+                crate::problem::ConstraintType::Eq => r.abs(),
+                crate::problem::ConstraintType::Ge => (-r).max(0.0),
+                _ => r.max(0.0),
+            })
+            .fold(0.0_f64, f64::max);
         if pfeas < eps * (1.0 + norm_b) {
             return true;
         }
@@ -103,10 +109,14 @@ pub fn iterative_refine(
         }
     }
 
-    // 最終収束チェック（max_steps到達後）
+    // 最終収束チェック（max_steps到達後、Ge対応）
     if let Ok(ax) = problem.a.mat_vec_mul(x) {
-        let pfeas = ax.iter().zip(problem.b.iter())
-            .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
+        let pfeas = ax.iter().zip(problem.b.iter()).zip(problem.constraint_types.iter())
+            .map(|((&ax_i, &b_i), ct)| match ct {
+                crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            })
             .fold(0.0_f64, f64::max);
         if pfeas < eps * (1.0 + norm_b) {
             return true;
