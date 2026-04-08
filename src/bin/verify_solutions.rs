@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use solver::io::qps::parse_qps;
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::{QpSolverChoice, SolverOptions};
-use solver::problem::SolveStatus;
+use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
 
@@ -44,11 +44,16 @@ fn compute_kkt_residuals(prob: &QpProblem, x: &[f64], y: &[f64]) -> KktResiduals
     // 1. Ax を計算
     let ax = prob.a.mat_vec_mul(x).unwrap_or_else(|_| vec![f64::NAN; m]);
 
-    // primal_feas: max(0, Ax_i - b_i)
+    // primal_feas: Ge対応 (Ax >= b は (b - Ax).max(0), Eq は |Ax - b|, Le は (Ax - b).max(0))
     let primal_feas = ax
         .iter()
         .zip(prob.b.iter())
-        .map(|(&axi, &bi)| (axi - bi).max(0.0))
+        .zip(prob.constraint_types.iter())
+        .map(|((&axi, &bi), ct)| match ct {
+            ConstraintType::Eq => (axi - bi).abs(),
+            ConstraintType::Ge => (bi - axi).max(0.0),
+            _ => (axi - bi).max(0.0),
+        })
         .fold(0.0_f64, f64::max);
 
     // bound_feas: max violation of lb <= x <= ub

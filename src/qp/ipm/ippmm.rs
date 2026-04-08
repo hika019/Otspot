@@ -37,7 +37,7 @@ use crate::linalg::ldl::LdlFactorizationAmd;
 use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
@@ -278,7 +278,12 @@ pub(crate) fn solve_ippmm_inner(
                     ax_orig
                         .iter()
                         .zip(orig.b.iter())
-                        .map(|(&axi, &bi)| (axi - bi).abs())
+                        .zip(orig.constraint_types.iter())
+                        .map(|((&axi, &bi), ct)| match ct {
+                            ConstraintType::Eq => (axi - bi).abs(),
+                            ConstraintType::Ge => (bi - axi).max(0.0),
+                            _ => (axi - bi).max(0.0),
+                        })
                         .fold(0.0_f64, f64::max)
                 };
                 let norm_b_orig = norm_inf(&orig.b).max(1.0);
