@@ -12,6 +12,7 @@
 //! 大規模疎行列に対して高い計算効率を発揮する。
 
 pub mod dual;
+pub mod dual_advanced;
 pub mod pricing;
 
 use crate::basis::{BasisManager, LuBasis};
