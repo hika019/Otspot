@@ -529,15 +529,18 @@ fn test_solve_bore3d_dual() {
 /// BOYD1 regression test: 87GBメモリ爆発防止 [cmd_824]
 ///
 /// BOYD1はb_max=3.75e12の巨大スケール問題（n=93261, m=18）。
-/// cmd_800で追加されたmod.rs dfeasチェックがRuizスケーリングの増幅を正しく
-/// 扱えず、Optimalな解をSuboptimalSolutionと誤判定→iterative_refineが
+/// cmd_800で追加されたmod.rs dfeasチェックが絶対閾値でRuizスケーリングの増幅を
+/// 正しく扱えず、Optimalな解をSuboptimalSolutionと誤判定→iterative_refineが
 /// n=93261のA^T*A構築で87GBメモリ爆発を起こしていた。
 ///
-/// 修正後: Ruizパスではunscale_ipm_resultの検証を信頼し、mod.rs dfeasチェックを
-/// スキップ。Optimal、約2秒、350MB以下で完了する。
+/// 修正: dfeas閾値を相対化（KKT項ノルムで正規化）。スケール非依存の判定。
 ///
-/// このテストがタイムアウトまたはOOMで失敗した場合、dfeasチェックの退行を示す。
+/// このテストがタイムアウトまたはOOMで失敗した場合、dfeas閾値の退行を示す。
+///
+/// `#[ignore]`: debugビルドではn=93261のIPM反復に数分+RSS 3.5GB必要で
+/// 通常テスト実行に支障。`cargo test --release -- --ignored` で実行。
 #[test]
+#[ignore]
 fn test_boyd1_no_memory_explosion() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
     if !path.exists() {

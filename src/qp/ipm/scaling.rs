@@ -243,6 +243,66 @@ pub(crate) fn check_dfeas_status(
     }
 }
 
+/// 成分ごとの相対dfeasチェック [cmd_824]
+///
+/// pfeasの正規化パターン `violation / (1 + ||a_k|| + |b_k|)` に倣い、
+/// KKT双対残差を各成分のKKT項スケールで正規化する:
+/// ```text
+/// max_j |Qx_j + A^Ty_j + bound_contrib_j + c_j| / (1 + |Qx_j| + |A^Ty_j| + |bound_contrib_j| + |c_j|)
+/// ```
+/// グローバルノルムでは巨大項のキャンセレーション（BOYD1: Qx ≈ -A^Ty）を反映できないが、
+/// 成分ごとの正規化なら真の相対精度を測定できる。
+pub(crate) fn check_dfeas_status_relative(
+    problem: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    bound_duals: &[f64],
+    eps: f64,
+) -> SolveStatus {
+    let n = x.len();
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return SolveStatus::Optimal,
+    };
+    let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
+        match problem.a.transpose().mat_vec_mul(y) {
+            Ok(v) => v,
+            Err(_) => return SolveStatus::Optimal,
+        }
+    } else {
+        vec![0.0; n]
+    };
+    let mut bound_contrib = vec![0.0f64; n];
+    if !bound_duals.is_empty() {
+        let mut bd_idx = 0usize;
+        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
+            if lb.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] -= bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
+            if ub.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] += bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+    }
+    // 成分ごとの相対dfeas: pfeasと同パターン
+    let dfeas_relative = (0..n)
+        .map(|j| {
+            let residual = (qx[j] + aty[j] + bound_contrib[j] + problem.c[j]).abs();
+            let scale = 1.0 + qx[j].abs() + aty[j].abs() + bound_contrib[j].abs() + problem.c[j].abs();
+            residual / scale
+        })
+        .fold(0.0_f64, f64::max);
+    if dfeas_relative < eps {
+        SolveStatus::Optimal
+    } else {
+        SolveStatus::SuboptimalSolution
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 非公開関数
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
-use super::qp_transforms::QpPresolveResult;
+use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 // ---------------------------------------------------------------------------
 // #19: equality_constraint_qr — 等式制約の冗長行除去
@@ -392,24 +392,33 @@ pub fn run_qp_presolve_phase2(
     // ==================================================================
     let mut a_precond = a_new;
     let mut b_precond = b_new;
-    let _sigmas = constraint_precond(&mut a_precond, &mut b_precond);
-    // 双対変数の逆変換係数 _sigmas は将来の postsolve 拡張のために保持
+    let sigmas = constraint_precond(&mut a_precond, &mut b_precond);
 
     // 縮約後問題を再構築（constraint_typesをremoved_rows_phase2でフィルタリング）
     let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
         .filter(|&i| !removed_rows_phase2[i])
         .map(|i| prob.constraint_types[i])
         .collect();
-    let reduced_new = match QpProblem::new(q_cleaned, prob.c.clone(), a_precond, b_precond, prob.bounds.clone(), constraint_types_new) {
+    let c_clone = prob.c.clone();
+    let bounds_clone = prob.bounds.clone();
+    let reduced_new = match QpProblem::new(q_cleaned, c_clone, a_precond, b_precond, bounds_clone, constraint_types_new) {
         Ok(p) => p,
         Err(_) => return phase1_result, // 構築失敗 → Phase 1 結果をそのまま返す
     };
 
-    QpPresolveResult {
+    // constraint_precond の行スケーリングを postsolve_stack に記録（双対変数の逆変換に必要）
+    // Phase1の LargeCoeffRowScale に加え、Phase2の constraint_precond も
+    // postsolve_stack に積むことで、postsolve時に両方の行スケーリングが逆変換される。
+    let mut result = QpPresolveResult {
         reduced: reduced_new,
         was_reduced: phase1_result.was_reduced || any_removed,
         ..phase1_result
+    };
+    let has_precond_scaling = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
+    if has_precond_scaling {
+        result.postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: sigmas });
     }
+    result
 }
 
 // ---------------------------------------------------------------------------

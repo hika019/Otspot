@@ -52,7 +52,7 @@ impl QpPostsolveStack {
     fn new() -> Self {
         Self { steps: Vec::new() }
     }
-    fn push(&mut self, step: QpPostsolveStep) {
+    pub(crate) fn push(&mut self, step: QpPostsolveStep) {
         self.steps.push(step);
     }
 }

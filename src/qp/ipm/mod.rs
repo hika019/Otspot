@@ -25,6 +25,8 @@ use crate::qp::problem::QpProblem;
 
 // scaling モジュールの公開関数を ipm 名前空間に再エクスポート
 pub(crate) use scaling::post_verify_solution;
+pub(crate) use scaling::check_dfeas_status_relative;
+#[cfg(test)]
 pub(crate) use scaling::check_dfeas_status;
 
 // ---------------------------------------------------------------------------

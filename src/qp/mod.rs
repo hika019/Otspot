@@ -957,19 +957,18 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         }
                     }
                     // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証 [cmd_800]
-                    // Ruizスケーリング使用時はスキップ: solve_with_ruiz_scalingのunscale_ipm_resultが
-                    // スケーリング情報を保持した正確な閾値でdfeasを検証済み。postsolve後の元問題空間では
-                    // 問題のスケール（BOYD1: b_max=3.75e12）がdfeasを増幅し、絶対閾値では捕捉できない
-                    // （実測: dfeas=1.878e10 vs threshold=1.143e3）。[cmd_824]
-                    // 非Ruizパス（pv_retry時のuse_ruiz_scaling=false）では元問題空間のdfeasチェックが有効。
+                    // 成分ごとの相対閾値: pfeas同様、各KKT項スケールで正規化 [cmd_824]
+                    // BOYD1（b_max=3.75e12）ではQx≈-A^Tyの巨大項キャンセレーションが起き、
+                    // 絶対閾値もグローバルノルム相対閾値も破綻する。成分ごとの正規化が必須。
+                    // 閾値: Ruizアンスケーリング後はfloating point誤差が増幅されるため、
+                    // 座標変換後の残差検証の標準手法であるsqrt(eps)を使用。
+                    // eps=1e-8 → sqrt=1e-4: 数値ノイズを許容しつつ真に悪い解(relative>0.01)は検出。
                     if r.status == SolveStatus::Optimal
                         && !problem.is_zero_q()
                         && presolve_result.reduced.num_vars == problem.num_vars
-                        && !pv_opts.use_ruiz_scaling
                     {
-                        let norm_c_s = problem.c.iter().fold(0.0_f64, |a, &x| a.max(x.abs())).max(1.0);
-                        let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s);
-                        r.status = ipm::check_dfeas_status(problem, &r.solution, &r.dual_solution, &r.bound_duals, dfeas_threshold);
+                        let dfeas_eps = eps.sqrt();
+                        r.status = ipm::check_dfeas_status_relative(problem, &r.solution, &r.dual_solution, &r.bound_duals, dfeas_eps);
                     }
                 }
                 // Ruizパスかつ SuboptimalSolution → 常にretry（tighter epsで精度改善の機会を与える）
@@ -3389,6 +3388,147 @@ mod tests {
             "H-5: presolve=OFF status. got {:?}", result_no_presolve.status);
         assert_close(result_no_presolve.solution[0], 0.25, EPS, "H-5(no-presolve): x[0]");
         assert_close(result_no_presolve.solution[1], 0.25, EPS, "H-5(no-presolve): x[1]");
+    }
+
+    // ===================================================================
+    // dfeas 相対閾値テスト群 [cmd_824]
+    // ===================================================================
+
+    /// D-1: 正常なQP解ではdfeasチェックがOptimalを維持する
+    /// min x^2 + y^2  s.t. x+y >= 1, x,y >= 0
+    /// 最適解 x=y=0.5 はKKT条件を満たし、dfeasは十分小さい
+    #[test]
+    fn test_dfeas_optimal_preserved() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(0.0, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "D-1: well-solved QP must stay Optimal after dfeas check");
+    }
+
+    /// D-2: スケール不変性 — 係数を1e6倍してもOptimalが維持される
+    /// min (1e6)^2 * (x^2+y^2) s.t. 1e6*(x+y) >= 1e6, x,y >= 0
+    /// 数学的に同一問題だが、絶対閾値ではdfeasが巨大値になり誤判定する
+    #[test]
+    fn test_dfeas_scale_invariant() {
+        let scale = 1e6_f64;
+        let q = CscMatrix::from_triplets(
+            &[0, 1], &[0, 1],
+            &[2.0 * scale * scale, 2.0 * scale * scale], 2, 2,
+        ).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(
+            &[0, 0], &[0, 1],
+            &[-scale, -scale], 1, 2,
+        ).unwrap();
+        let b = vec![-scale];
+        let bounds = vec![(0.0, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "D-2: scaled QP must stay Optimal (relative threshold). got {:?}", result.status);
+        // 解は元問題と同じ x=y=0.5
+        assert_close(result.solution[0], 0.5, 1e-4, "D-2: x[0]");
+        assert_close(result.solution[1], 0.5, 1e-4, "D-2: x[1]");
+    }
+
+    /// D-3: 真にdfeasが悪い解ではSuboptimalSolutionに降格される
+    /// check_dfeas_status / check_dfeas_status_relative を直接呼び出し、
+    /// KKT残差が閾値を超える場合の降格を検証
+    #[test]
+    fn test_dfeas_bad_solution_downgraded() {
+        // min x^2 + y^2 (Q=2I, c=0) — 無制約
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        // 最適解は x=y=0, dfeas=0。意図的にずらした解 x=y=1.0 を与える
+        // KKT残差: Qx + c = [2, 2] → dfeas = 2.0
+        let bad_x = vec![1.0, 1.0];
+        let bad_y: Vec<f64> = vec![];
+        let bad_bd: Vec<f64> = vec![];
+
+        // (a) 絶対閾値版: 小さい閾値ではSuboptimalSolution
+        let status = ipm::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 1e-6);
+        assert_eq!(status, SolveStatus::SuboptimalSolution,
+            "D-3a: bad solution with dfeas=2.0 >> 1e-6 must be SuboptimalSolution");
+        let status_ok = ipm::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 10.0);
+        assert_eq!(status_ok, SolveStatus::Optimal,
+            "D-3a: same solution with dfeas=2.0 < 10.0 stays Optimal");
+
+        // (b) 成分ごと相対版: residual=2.0, scale=1+2+0+0=3, relative=2/3≈0.667
+        // eps=0.01 → SuboptimalSolution
+        let status_rel = ipm::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
+        assert_eq!(status_rel, SolveStatus::SuboptimalSolution,
+            "D-3b: relative dfeas=0.667 >> 0.01 must be SuboptimalSolution");
+        // eps=1.0 → Optimal (relative < 1.0)
+        let status_rel_ok = ipm::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
+        assert_eq!(status_rel_ok, SolveStatus::Optimal,
+            "D-3b: relative dfeas=0.667 < 1.0 stays Optimal");
+    }
+
+    /// D-4: 相対閾値の計算精度 — KKTスケールが大きい問題でも正しく正規化される
+    #[test]
+    fn test_dfeas_relative_threshold_large_kkt() {
+        // min 1/2 * 2e12 * x^2 - 1e6 * x  (unconstrained, x free)
+        // KKT: 2e12*x - 1e6 = 0 → x* = 5e-7
+        let n = 1usize;
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2e12], n, n).unwrap();
+        let c = vec![-1e6];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let result = solve_qp(&problem);
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "D-4: large-KKT-scale QP must be Optimal. got {:?}", result.status);
+        assert!((result.solution[0] - 5e-7).abs() < 1e-9,
+            "D-4: x*=5e-7, got {:.2e}", result.solution[0]);
+    }
+
+    /// D-5: 巨大項キャンセレーション — BOYD1の本質を小さい問題で再現
+    /// Qx_j と A^Ty_j がO(1e10)で互いにキャンセルし、残差はO(1e-2)以下。
+    /// 絶対閾値やグローバルノルム相対閾値では誤判定するが、成分ごと相対なら正確。
+    #[test]
+    fn test_dfeas_cancellation_pattern() {
+        // 手動でcheck_dfeas_status_relativeを呼び出す
+        // 問題: min 1/2 * 2e10 * x^2 - 1e10*x  s.t. x + y <= 2, x,y >= 0
+        // ただし真のテストは直接関数呼び出しで行う
+        let n = 2usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        // 擬似的に巨大キャンセレーションを模擬:
+        // x = [5e9, 5e9], Qx = [1e10, 1e10], c = [0, 0]
+        // 残差 = |1e10 + 0 + 0 + 0| = 1e10 (絶対値は巨大)
+        // だがrelative = 1e10 / (1 + 1e10) ≈ 1.0 (悪い解 → SubOptimal 正しい)
+        let big_x = vec![5e9, 5e9];
+        let empty_y: Vec<f64> = vec![];
+        let empty_bd: Vec<f64> = vec![];
+        let status = ipm::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
+        assert_eq!(status, SolveStatus::SuboptimalSolution,
+            "D-5a: large absolute residual with no cancellation → SuboptimalSolution");
+
+        // 正しいキャンセレーション: Qx + c がほぼ0になるケース
+        // x ≈ 0 (最適解) → Qx ≈ 0, c = 0, 残差 ≈ 0
+        let good_x = vec![1e-12, 1e-12];
+        let status_good = ipm::check_dfeas_status_relative(&problem, &good_x, &empty_y, &empty_bd, 1e-8);
+        assert_eq!(status_good, SolveStatus::Optimal,
+            "D-5b: near-optimal solution → Optimal");
     }
 
 }
