@@ -526,3 +526,49 @@ fn test_solve_bore3d_dual() {
     println!("bore3d (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
+/// BOYD1 regression test: 87GBメモリ爆発防止 [cmd_824]
+///
+/// BOYD1はb_max=3.75e12の巨大スケール問題（n=93261, m=18）。
+/// cmd_800で追加されたmod.rs dfeasチェックがRuizスケーリングの増幅を正しく
+/// 扱えず、Optimalな解をSuboptimalSolutionと誤判定→iterative_refineが
+/// n=93261のA^T*A構築で87GBメモリ爆発を起こしていた。
+///
+/// 修正後: Ruizパスではunscale_ipm_resultの検証を信頼し、mod.rs dfeasチェックを
+/// スキップ。Optimal、約2秒、350MB以下で完了する。
+///
+/// このテストがタイムアウトまたはOOMで失敗した場合、dfeasチェックの退行を示す。
+#[test]
+fn test_boyd1_no_memory_explosion() {
+    let path = Path::new("data/maros_meszaros/BOYD1.QPS");
+    if !path.exists() {
+        eprintln!("BOYD1.QPS not found, skipping");
+        return;
+    }
+    let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
+    assert_eq!(problem.num_vars, 93261, "BOYD1: expected 93261 vars");
+    assert_eq!(problem.num_constraints, 18, "BOYD1: expected 18 constraints");
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(30.0);
+    let start = Instant::now();
+    let result = solve_qp_with(&problem, &opts);
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "BOYD1: should be Optimal, got {:?} (elapsed={:?}). If SuboptimalSolution, dfeas check regression likely.",
+        result.status,
+        elapsed
+    );
+    assert!(
+        elapsed.as_secs() < 15,
+        "BOYD1: should complete in <15s, took {:?}. Memory explosion may be occurring.",
+        elapsed
+    );
+    println!(
+        "BOYD1: status={:?}, obj={:.6e}, time={:.3}s",
+        result.status, result.objective, elapsed.as_secs_f64()
+    );
+}
+

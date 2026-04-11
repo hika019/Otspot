@@ -342,6 +342,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 pfeas: None,
                 dfeas: None,
                 gap: None,
+
             }
         }
         SolveStatus::Infeasible => SolverResult::infeasible(),
@@ -955,15 +956,16 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                             r.status = SolveStatus::SuboptimalSolution;
                         }
                     }
-                    // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証。
-                    // 適用条件:
-                    //   (a) 真のQP (Q≠0): LP(Q=0)はSimplex経由でbound_duals=[]となりdfeas計算不可
-                    //   (b) presolveで変数消去なし: 変数消去があるとbound_dualsが縮退し原問題の
-                    //       KKT条件を正しく検証できない（postsolve後のbound_duals再構成が未実装）
-                    // スケーリング情報はpostsolve後に失われるためd_min=1として閾値を計算 [cmd_800]
+                    // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証 [cmd_800]
+                    // Ruizスケーリング使用時はスキップ: solve_with_ruiz_scalingのunscale_ipm_resultが
+                    // スケーリング情報を保持した正確な閾値でdfeasを検証済み。postsolve後の元問題空間では
+                    // 問題のスケール（BOYD1: b_max=3.75e12）がdfeasを増幅し、絶対閾値では捕捉できない
+                    // （実測: dfeas=1.878e10 vs threshold=1.143e3）。[cmd_824]
+                    // 非Ruizパス（pv_retry時のuse_ruiz_scaling=false）では元問題空間のdfeasチェックが有効。
                     if r.status == SolveStatus::Optimal
                         && !problem.is_zero_q()
                         && presolve_result.reduced.num_vars == problem.num_vars
+                        && !pv_opts.use_ruiz_scaling
                     {
                         let norm_c_s = problem.c.iter().fold(0.0_f64, |a, &x| a.max(x.abs())).max(1.0);
                         let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s);
