@@ -536,11 +536,7 @@ fn test_solve_bore3d_dual() {
 /// 修正: dfeas閾値を相対化（KKT項ノルムで正規化）。スケール非依存の判定。
 ///
 /// このテストがタイムアウトまたはOOMで失敗した場合、dfeas閾値の退行を示す。
-///
-/// `#[ignore]`: debugビルドではn=93261のIPM反復に数分+RSS 3.5GB必要で
-/// 通常テスト実行に支障。`cargo test --release -- --ignored` で実行。
 #[test]
-#[ignore]
 fn test_boyd1_no_memory_explosion() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
     if !path.exists() {
