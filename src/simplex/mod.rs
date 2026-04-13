@@ -732,7 +732,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 // 注: bore3d は B1 (fixpoint iteration) で修正済みのため、案C は現状 DISABLED。
                 // B1 で b=0 Eq行がすでに presolve で除去される → Phase I 自体が実行されない。
                 // hs51 のような自由変数+Le制約の feasibility LP では基底が特異化するリスクがある。
-                if false {
+                if true {
+                    // 変更前の基底を保存。LU検証失敗時にリバートするため。
+                    let basis_before_case_c = basis.clone();
                     let mut is_basic_structural = vec![false; sf.n_total];
                     for &col in basis.iter() {
                         if col < sf.n_total {
@@ -740,6 +742,11 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                     }
                     for i in 0..m {
+                        // Eq行のみ適用。Le/Ge行（符号反転済み含む）はスラック変数を持つため
+                        // sf.initial_basis[i] >= sf.n_shifted となりスキップする。
+                        if sf.initial_basis[i] >= sf.n_shifted {
+                            continue;
+                        }
                         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
                             continue;
                         }
@@ -765,6 +772,12 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             basis[i] = j;
                             // degenerate pivot: x_b[i] = 0, 他の x_b は変化なし
                         }
+                    }
+                    // 安全チェック: 修正後の基底がLU分解可能か検証。
+                    // 特異または高条件数の問題（SCORPION等）では案Cの置換が基底品質を
+                    // 悪化させる場合がある。LU失敗なら全置換をリバート。
+                    if LuBasis::new(&a_ext, &basis, options.max_etas).is_err() {
+                        basis.copy_from_slice(&basis_before_case_c);
                     }
                 }
 
@@ -2002,5 +2015,180 @@ mod tests {
         let ub0 = 2.0_f64;
         let upper_comp = (ub0 - x[0]) * (-rc[0]).max(0.0);
         assert!(upper_comp.abs() < 1e-8, "upper complementarity={} should be ≈ 0", upper_comp);
+    }
+
+    /// BUG-NE-001: maros NumericalError 再現防止テスト
+    ///
+    /// Phase I で Eq制約の縮退人工変数が残り、Phase II で check_eq_feasibility が通ること。
+    /// 問題構造: 2行 b=0 の Eq制約 + 1行 b=1 の Eq制約 + Le制約
+    ///
+    /// 案C有効化(if true)でNumericalErrorが解消されることを確認する。
+    /// 修正前(if false)ではNumericalErrorが発生していた。
+    ///
+    /// 問題:
+    ///   min -x4
+    ///   x1 + x2 = 0  (Eq, b=0) → degenerate artificial in Phase I
+    ///   x1 + x3 = 0  (Eq, b=0) → degenerate artificial in Phase I
+    ///   x2 + x4 = 1  (Eq, b=1) → normal artificial
+    ///   x1 + x4 <= 2 (Le)
+    ///   x >= 0
+    ///
+    /// 最適解: x=[0,0,0,1], obj=-1
+    #[test]
+    fn test_bug_ne001_maros_degenerate_eq_zero_rhs() {
+        use crate::problem::ConstraintType;
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 3, 0, 2, 1, 2, 3],
+            &[0, 0, 0, 1, 1, 2, 3, 3],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            4,
+            4,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, 0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 1.0, 2.0],
+            vec![
+                ConstraintType::Eq,
+                ConstraintType::Eq,
+                ConstraintType::Eq,
+                ConstraintType::Le,
+            ],
+            vec![(0.0, f64::INFINITY); 4],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_ne!(
+            result.status,
+            SolveStatus::NumericalError,
+            "BUG-NE-001: 縮退Eq制約(b=0)でNumericalErrorが発生してはならない"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "BUG-NE-001: Optimal を返すべき、got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - (-1.0)).abs() < 1e-6,
+            "BUG-NE-001: obj=-1.0 を期待、got {}",
+            result.objective
+        );
+    }
+
+    /// BUG-NE-002: wood1p NumericalError 再現防止テスト
+    ///
+    /// 243Eq+1G制約のうち242本がb=0という wood1p の縮退構造を小規模で再現する。
+    /// 問題構造: 3行 b=0 の Eq制約 + 1行 b=1 の Eq制約 + Le制約
+    ///
+    /// 問題:
+    ///   min -x5
+    ///   x1 + x2 = 0  (Eq, b=0)
+    ///   x2 + x3 = 0  (Eq, b=0)
+    ///   x3 + x4 = 0  (Eq, b=0)
+    ///   x1 + x5 = 1  (Eq, b=1)
+    ///   x1+x2+x3+x4+x5 <= 2 (Le)
+    ///   x >= 0
+    ///
+    /// 最適解: x=[0,0,0,0,1], obj=-1
+    #[test]
+    fn test_bug_ne002_wood1p_multiple_zero_rhs_eq() {
+        use crate::problem::ConstraintType;
+        let a = CscMatrix::from_triplets(
+            &[0, 3, 4, 0, 1, 4, 1, 2, 4, 2, 4, 3, 4],
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            5,
+            5,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, 0.0, 0.0, -1.0],
+            a,
+            vec![0.0, 0.0, 0.0, 1.0, 2.0],
+            vec![
+                ConstraintType::Eq,
+                ConstraintType::Eq,
+                ConstraintType::Eq,
+                ConstraintType::Eq,
+                ConstraintType::Le,
+            ],
+            vec![(0.0, f64::INFINITY); 5],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_ne!(
+            result.status,
+            SolveStatus::NumericalError,
+            "BUG-NE-002: 多数b=0 Eq制約でNumericalErrorが発生してはならない"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "BUG-NE-002: Optimal を返すべき、got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - (-1.0)).abs() < 1e-6,
+            "BUG-NE-002: obj=-1.0 を期待、got {}",
+            result.objective
+        );
+    }
+
+    /// BUG-NE-001/002 案C有効化後: hs51 regression test（基底特異化リスク確認）
+    ///
+    /// 自由変数 + Le制約の feasibility LP で 案C が基底特異化を引き起こさないことを確認。
+    /// best_j != None フォールバックにより hs51 パターンが安全に処理されること。
+    ///
+    /// hs51: 5変数(全自由), 6Le制約, 実行可能解 x=[1,1,1,1,1] が存在する。
+    /// 案C有効化後も Optimal が返ること（基底特異化しないこと）を検証する。
+    #[test]
+    fn test_bug_ne_case_c_hs51_regression() {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 4, 5, 2, 3, 2, 3, 2, 3, 4, 5],
+            &[0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4],
+            &[
+                1.0, -1.0, 3.0, -3.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -2.0, 2.0, -1.0, 1.0,
+            ],
+            6,
+            5,
+        )
+        .unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0; 5],
+            a,
+            vec![4.0, -4.0, 0.0, 0.0, 0.0, 0.0],
+            vec![crate::problem::ConstraintType::Le; 6],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 5],
+            None,
+        )
+        .unwrap();
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
+        let result = solve_with(&lp, &opts);
+        assert_ne!(
+            result.status,
+            SolveStatus::NumericalError,
+            "hs51 regression: 案C有効化後もNumericalErrorを返してはならない（基底特異化の兆候）"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "hs51 regression: 実行可能解が存在するのでOptimalを返すべき、got {:?}",
+            result.status
+        );
     }
 }
