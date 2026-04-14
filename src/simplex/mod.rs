@@ -742,6 +742,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                     }
                     for i in 0..m {
+                        // 注: build_standard_form では Eq行は slack_col_idx=None のため
+                        // initial_basis[i] が vec! 初期値0のまま残る。この0をセンチネル値として
+                        // Eq行判定に再利用している。初期化値を変更する場合は本フィルタも要修正。
+                        // (後続の basis[i] < sf.n_total が二重ガードとして機能)
                         // Eq行のみ適用。Le/Ge行（符号反転済み含む）はスラック変数を持つため
                         // sf.initial_basis[i] >= sf.n_shifted となりスキップする。
                         if sf.initial_basis[i] >= sf.n_shifted {
