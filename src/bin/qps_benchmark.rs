@@ -1,6 +1,6 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
-//! Usage: qps_benchmark <data_dir> [--solver ipm|ippmm_new|concurrent] [--eps <value>]
+//! Usage: qps_benchmark <data_dir> [--solver ipm|ippmm_new|concurrent|dualadvanced] [--eps <value>]
 //! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with_options で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
-use solver::options::{QpSolverChoice, SolverOptions};
+use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -236,6 +236,7 @@ fn main() {
     // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
     let mut data_dir = "data/maros_meszaros".to_string();
     let mut solver_choice = QpSolverChoice::Concurrent;
+    let mut dual_advanced_mode = false;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
@@ -243,7 +244,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: qps_benchmark [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
+            println!("Usage: qps_benchmark [data_dir] [--solver ipm|ippmm_new|concurrent|dualadvanced] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
             println!("  --solver        Solver to use (default: concurrent/auto)");
             println!("  --eps           Convergence tolerance (default: 1e-6)");
             println!("  --timeout       Solver timeout in seconds (default: 10.0)");
@@ -267,12 +268,16 @@ fn main() {
         } else if args[i] == "--solver" {
             i += 1;
             if i < args.len() {
-                solver_choice = match args[i].as_str() {
-                    "ipm" => QpSolverChoice::Ipm,
-                    "ippmm_new" => QpSolverChoice::IpPmmNew,
-                    "concurrent" => QpSolverChoice::Concurrent,
+                match args[i].as_str() {
+                    "ipm" => solver_choice = QpSolverChoice::Ipm,
+                    "ippmm_new" => solver_choice = QpSolverChoice::IpPmmNew,
+                    "concurrent" => solver_choice = QpSolverChoice::Concurrent,
+                    "dualadvanced" => {
+                        dual_advanced_mode = true;
+                        solver_choice = QpSolverChoice::Concurrent; // QP問題のフォールバック
+                    }
                     other => {
-                        eprintln!("Unknown solver: {}. Use ipm|ippmm_new|concurrent", other);
+                        eprintln!("Unknown solver: {}. Use ipm|ippmm_new|concurrent|dualadvanced", other);
                         std::process::exit(1);
                     }
                 };
@@ -345,11 +350,15 @@ fn main() {
     let mut n_nonconvex = 0usize;
     let mut n_suboptimal = 0usize;
 
-    let solver_label = match solver_choice {
-        QpSolverChoice::Concurrent => "Concurrent",
-        QpSolverChoice::Ipm => "IPM",
-        QpSolverChoice::IpPmmNew => "IP-PMM-New",
-        _ => "Unknown",
+    let solver_label = if dual_advanced_mode {
+        "DualAdvanced"
+    } else {
+        match solver_choice {
+            QpSolverChoice::Concurrent => "Concurrent",
+            QpSolverChoice::Ipm => "IPM",
+            QpSolverChoice::IpPmmNew => "IP-PMM-New",
+            _ => "Unknown",
+        }
     };
     println!("Solver: {}", solver_label);
 
@@ -357,6 +366,9 @@ fn main() {
     opts.timeout_secs = Some(timeout_secs);
     opts.qp_solver = solver_choice;
     opts.ipm.eps = eps;
+    if dual_advanced_mode {
+        opts.simplex_method = SimplexMethod::DualAdvanced;
+    }
 
     // QP問題かどうかの判定用定数
     let eps_obj: f64 = 1e-2; // §2.4: 1%閾値
