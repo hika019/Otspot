@@ -190,6 +190,10 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
     match options.simplex_method {
         SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
         SimplexMethod::Dual => dual::two_phase_dual_simplex(&sf, problem, options),
+        SimplexMethod::DualAdvanced => {
+            // 産業品質Dual Simplex（dual_advanced/を使用）
+            dual_advanced::solve_dual_advanced(&sf, problem, options)
+        }
         SimplexMethod::Auto => {
             if options.warm_start.is_some() {
                 dual::two_phase_dual_simplex(&sf, problem, options)

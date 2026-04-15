@@ -1,2 +1,137 @@
-// Phase 2で本体実装。Phase 1ではratio_testのみ公開
+//! 産業品質Dual Simplex法
+//!
+//! 既存dual.rs（warm-start基盤）を拡張し、Harris ratio test、
+//! Dual Steepest Edge、Big-M Phase Iを備えた高性能Dual Simplexを提供する。
+//!
+//! 設計書 §3.2 に準拠。
+
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::{SolverOptions, WarmStartBasis};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::presolve::RuizScaler;
+use crate::sparse::SparseVec;
+use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
+use super::pricing::MostInfeasibleLeaving;
+
+mod core;
+mod phase1;
 pub mod ratio_test;
+mod steepest_edge;
+mod bound_flip;
+
+/// Dual Simplex強化版エントリポイント
+///
+/// warm-start提供時: 基底からx_Bを再計算し、dual_simplex_core_advancedを実行
+/// cold-start: Phase 4（Big-M）未実装のため、dual::two_phase_dual_simplexにフォールバック
+pub(crate) fn solve_dual_advanced(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
+    let m = sf.m;
+    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+
+    if let Some(warm) = &options.warm_start {
+        // Warm start: 提供された基底でx_Bを新しいRHSから再計算
+        if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
+            let mut basis = warm.basis.clone();
+
+            match LuBasis::new(&a, &basis, options.max_etas) {
+                Ok(basis_mgr) => {
+                    // x_B = B^{-1} b_new (FTRANで計算)
+                    let mut x_b_sv = SparseVec::from_dense(&b);
+                    basis_mgr.ftran(&mut x_b_sv);
+                    let mut x_b = x_b_sv.to_dense();
+
+                    let leaving = MostInfeasibleLeaving;
+                    let outcome = core::dual_simplex_core_advanced(
+                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options, &leaving,
+                    );
+
+                    return outcome_to_result(
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                        true, // dual_unbounded → Infeasible
+                    );
+                }
+                Err(_) => {
+                    // 基底が特異 → cold-startにフォールバック
+                }
+            }
+        }
+    }
+
+    // cold-start: Phase 4未実装のため dual.rs の two_phase_dual_simplex にフォールバック
+    super::dual::two_phase_dual_simplex(sf, problem, options)
+}
+
+/// SimplexOutcome → SolverResult 変換
+///
+/// `dual_unbounded_is_infeasible`: trueの場合、Unbounded = 双対非有界 = 主実行不可
+fn outcome_to_result(
+    outcome: SimplexOutcome,
+    sf: &StandardForm,
+    problem: &LpProblem,
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+    row_scale: &[f64],
+    dual_unbounded_is_infeasible: bool,
+) -> SolverResult {
+    match outcome {
+        SimplexOutcome::Optimal(obj, y) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            let (dual_solution, reduced_costs, slack) =
+                extract_dual_info(sf, problem, &y, &solution, row_scale);
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution,
+                reduced_costs,
+                slack,
+                warm_start_basis: Some(ws),
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::Unbounded => {
+            if dual_unbounded_is_infeasible {
+                // 双対非有界 = 主実行不可
+                SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: 0.0,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            } else {
+                SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            }
+        }
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                ..Default::default()
+            }
+        }
+    }
+}

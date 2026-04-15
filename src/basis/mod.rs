@@ -66,6 +66,11 @@ impl LuBasis {
         })
     }
 
+    /// 再因子分解が必要かどうかを返す（eta蓄積数ベース）
+    pub(crate) fn needs_refactor(&self) -> bool {
+        self.eta_file.needs_refactor()
+    }
+
     /// 数値安定性を検査し、必要であれば deadline 付きで基底行列を再因子分解する。
     ///
     /// # cmd_171: timeout audit fix

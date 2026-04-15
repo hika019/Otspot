@@ -39,6 +39,8 @@ pub enum SimplexMethod {
     Primal,
     /// 強制的にDual Simplex
     Dual,
+    /// 産業品質Dual Simplex（dual_advanced/モジュール）
+    DualAdvanced,
 }
 
 /// warm-start用の基底情報
