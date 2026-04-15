@@ -67,6 +67,7 @@ pub(crate) fn solve_dual_advanced(
 /// SimplexOutcome → SolverResult 変換
 ///
 /// `dual_unbounded_is_infeasible`: trueの場合、Unbounded = 双対非有界 = 主実行不可
+#[allow(clippy::too_many_arguments)]
 fn outcome_to_result(
     outcome: SimplexOutcome,
     sf: &StandardForm,

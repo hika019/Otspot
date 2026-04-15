@@ -77,6 +77,7 @@ fn compute_dual_vars(
 ///
 /// # 戻り値
 /// SimplexOutcome (Optimal/Unbounded/Timeout)
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dual_simplex_core_advanced(
     a: &CscMatrix,
     x_b: &mut [f64],
