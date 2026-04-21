@@ -180,12 +180,36 @@ pub(crate) fn solve_ippmm_inner(
         prev_nr_d: f64::INFINITY,
     };
 
-    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
-    let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
-        5e-10  // LP: MATLAB拡張版準拠
-    } else {
-        5e-8   // QP: MATLAB拡張版準拠
+    // Pougkakiotis-Gondzio 原典 MATLAB (IP_PMM.m:151) 準拠
+    //   reg_limit = max(5·tol / max(‖A‖∞², ‖Q‖∞²), 5e-10)
+    // LP/QP 区別なし。stall>5 で /=10（floor 5e-13、L204-209）
+    // 根拠: github.com/spougkakiotis/IP_PMM/Matlab_code/IP_PMM.m
+    let eps_init = options.ipm_eps();
+    let norm_a_inf = {
+        let mut row_sums = vec![0.0_f64; problem.a.nrows];
+        for col in 0..problem.a.ncols {
+            for ptr in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                let row = problem.a.row_ind[ptr];
+                row_sums[row] += problem.a.values[ptr].abs();
+            }
+        }
+        row_sums.into_iter().fold(0.0_f64, f64::max)
     };
+    let norm_q_inf = {
+        let mut row_sums = vec![0.0_f64; problem.q.nrows];
+        for col in 0..problem.q.ncols {
+            for ptr in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
+                let row = problem.q.row_ind[ptr];
+                row_sums[row] += problem.q.values[ptr].abs();
+            }
+        }
+        row_sums.into_iter().fold(0.0_f64, f64::max)
+    };
+    let denom = norm_a_inf.powi(2).max(norm_q_inf.powi(2)).max(1e-30);
+    let mut reg_limit = (5.0 * eps_init / denom).max(5e-10);
+    const REG_LIMIT_FLOOR: f64 = 5e-13;
+    let mut primal_stall_count: usize = 0;
+    let mut dual_stall_count: usize = 0;
 
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
@@ -206,6 +230,15 @@ pub(crate) fn solve_ippmm_inner(
     let mut status: Option<SolveStatus> = None;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
+
+    // best-so-far: 残差スコア最良時の (x,y,s,iter,residuals) を保持。
+    // NaN guard 経路で崩壊解を返さないための保険。
+    let mut best_score = f64::INFINITY;
+    let mut best_x = x.clone();
+    let mut best_y = y.clone();
+    let mut best_s = s.clone();
+    let mut best_iter: usize = 0;
+    let mut best_residuals: (f64, f64, f64) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
@@ -242,12 +275,47 @@ pub(crate) fn solve_ippmm_inner(
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
 
+        // best-so-far 更新（NaN guard 経路で崩壊解を返さないための保険）
+        let norm_c_bs = norm_inf(&problem.c).max(1.0);
+        let norm_b_bs = norm_inf(&b_ext).max(1.0);
+        if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() {
+            let score = nr_p / (1.0 + norm_b_bs) + nr_d / (1.0 + norm_c_bs) + mu.abs();
+            if score < best_score {
+                best_score = score;
+                best_x.copy_from_slice(&x);
+                best_y.copy_from_slice(&y);
+                best_s.copy_from_slice(&s);
+                best_iter = iter;
+                best_residuals = (nr_p, nr_d, mu);
+            }
+        }
+
+        // Exp M trace [cmd_833 redo5, release-safe, env-gated]
+        if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+            let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
+                .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
+                .fold(0.0_f64, f64::max);
+            let prox_p_inf = y.iter().zip(pmm.y_ref.iter())
+                .map(|(&yi, &yref)| (pmm.delta * (yi - yref)).abs())
+                .fold(0.0_f64, f64::max);
+            let diff_x_inf = x.iter().zip(pmm.x_ref.iter())
+                .map(|(&xi, &xref)| (xi - xref).abs())
+                .fold(0.0_f64, f64::max);
+            eprintln!(
+                "IPPMM_TRACE iter={:4} mu={:.3e} pf={:.3e} df={:.3e} rho={:.3e} delta={:.3e} prox_d_inf={:.3e} prox_p_inf={:.3e} diff_x_inf={:.3e} reg_limit={:.3e}",
+                iter, mu, nr_p, nr_d, pmm.rho, pmm.delta, prox_d_inf, prox_p_inf, diff_x_inf, reg_limit
+            );
+        }
+
         // ── 収束判定 ──────────────────────────────────────────────
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
         let eps = options.ipm_eps();
 
         if nr_d < eps * (1.0 + norm_c) && nr_p < eps * (1.0 + norm_b) && mu < eps {
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("IPPMM_EXIT iter={} path=Optimal_main", iter);
+            }
             status = Some(SolveStatus::Optimal);
             final_iter = iter;
             break;
@@ -291,12 +359,17 @@ pub(crate) fn solve_ippmm_inner(
                     && nr_d < eps_orig * (1.0 + norm_c)
                     && mu < eps_orig
                 {
+                    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                        eprintln!("IPPMM_EXIT iter={} path=Optimal_MethodC pfeas_orig={:.3e}", iter, pfeas_orig);
+                    }
                     status = Some(SolveStatus::Optimal);
                     final_iter = iter;
                     break;
                 }
             }
-            // Method Cで昇格できなかった場合 or scaler=None → SuboptimalSolution
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("IPPMM_EXIT iter={} path=Suboptimal_mu_floor mu={:.3e} thr_d={:.3e} thr_p={:.3e}", iter, mu, thr_d, thr_p);
+            }
             status = Some(SolveStatus::SuboptimalSolution);
             final_iter = iter;
             break;
@@ -461,8 +534,26 @@ pub(crate) fn solve_ippmm_inner(
             || dy.iter().any(|v| !v.is_finite())
             || ds.iter().any(|v| !v.is_finite())
         {
+            // best-so-far 復帰: 崩壊した現在値ではなく最良残差時の解を返す
+            if best_score.is_finite() {
+                x.copy_from_slice(&best_x);
+                y.copy_from_slice(&best_y);
+                s.copy_from_slice(&best_s);
+                final_iter = best_iter;
+                final_residuals = Some(best_residuals);
+                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "IPPMM_EXIT iter={} path=Suboptimal_NaN_guard_bestsofar best_iter={} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                        iter, best_iter, best_residuals.0, best_residuals.1, best_residuals.2
+                    );
+                }
+            } else {
+                final_iter = iter;
+                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!("IPPMM_EXIT iter={} path=Suboptimal_NaN_guard (no best)", iter);
+                }
+            }
             status = Some(SolveStatus::SuboptimalSolution);
-            final_iter = iter;
             break;
         }
 
@@ -470,6 +561,31 @@ pub(crate) fn solve_ippmm_inner(
         if let Some(infeas_status) = check_infeasible_or_unbounded(
             &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
         ) {
+            // 真に Infeasible/Unbounded なら残差が小さい解には到達しない。
+            // best-so-far が Optimal 級の品質を保持していれば、方向検出による false positive とみなし格下げ。
+            let quality_threshold = 10.0 * eps_orig;
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite());
+            }
+            if best_score.is_finite() && best_score < quality_threshold {
+                x.copy_from_slice(&best_x);
+                y.copy_from_slice(&best_y);
+                s.copy_from_slice(&best_s);
+                final_iter = best_iter;
+                final_residuals = Some(best_residuals);
+                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "IPPMM_EXIT iter={} path=reject_false_{:?}_bestsofar best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                        iter, infeas_status, best_iter, best_score,
+                        best_residuals.0, best_residuals.1, best_residuals.2
+                    );
+                }
+                status = Some(SolveStatus::Optimal);
+                break;
+            }
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("IPPMM_EXIT iter={} path=check_infeas status={:?} best_score={:.3e}", iter, infeas_status, best_score);
+            }
             status = Some(infeas_status);
             final_iter = iter;
             break;
@@ -511,6 +627,23 @@ pub(crate) fn solve_ippmm_inner(
         } else {
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
             pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
+        }
+
+        // Pougkakiotis-Gondzio stall 脱出 (IP_PMM.m:204-209)
+        // primal または dual 改善が 5 反復連続で無ければ reg_limit /= 10 (floor 5e-13)
+        if primal_improved { primal_stall_count = 0; } else { primal_stall_count += 1; }
+        if dual_improved   { dual_stall_count = 0;   } else { dual_stall_count   += 1; }
+        if (primal_stall_count > 5 || dual_stall_count > 5) && reg_limit > REG_LIMIT_FLOOR {
+            let new_reg_limit = (reg_limit / 10.0).max(REG_LIMIT_FLOOR);
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "IPPMM_STALL iter={} reg_limit {:.3e}→{:.3e} (p_stall={}, d_stall={})",
+                    iter, reg_limit, new_reg_limit, primal_stall_count, dual_stall_count
+                );
+            }
+            reg_limit = new_reg_limit;
+            primal_stall_count = 0;
+            dual_stall_count = 0;
         }
 
         // 残差記録（次反復の改善判定用）
