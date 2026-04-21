@@ -180,36 +180,14 @@ pub(crate) fn solve_ippmm_inner(
         prev_nr_d: f64::INFINITY,
     };
 
-    // Pougkakiotis-Gondzio 原典 MATLAB (IP_PMM.m:151) 準拠
-    //   reg_limit = max(5·tol / max(‖A‖∞², ‖Q‖∞²), 5e-10)
-    // LP/QP 区別なし。stall>5 で /=10（floor 5e-13、L204-209）
-    // 根拠: github.com/spougkakiotis/IP_PMM/Matlab_code/IP_PMM.m
-    let eps_init = options.ipm_eps();
-    let norm_a_inf = {
-        let mut row_sums = vec![0.0_f64; problem.a.nrows];
-        for col in 0..problem.a.ncols {
-            for ptr in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                let row = problem.a.row_ind[ptr];
-                row_sums[row] += problem.a.values[ptr].abs();
-            }
-        }
-        row_sums.into_iter().fold(0.0_f64, f64::max)
+    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
+    // 【履歴】cmd_833 redo5 で論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
+    // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
+    let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
+        5e-10  // LP: MATLAB拡張版準拠
+    } else {
+        5e-8   // QP: MATLAB拡張版準拠
     };
-    let norm_q_inf = {
-        let mut row_sums = vec![0.0_f64; problem.q.nrows];
-        for col in 0..problem.q.ncols {
-            for ptr in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-                let row = problem.q.row_ind[ptr];
-                row_sums[row] += problem.q.values[ptr].abs();
-            }
-        }
-        row_sums.into_iter().fold(0.0_f64, f64::max)
-    };
-    let denom = norm_a_inf.powi(2).max(norm_q_inf.powi(2)).max(1e-30);
-    let mut reg_limit = (5.0 * eps_init / denom).max(5e-10);
-    const REG_LIMIT_FLOOR: f64 = 5e-13;
-    let mut primal_stall_count: usize = 0;
-    let mut dual_stall_count: usize = 0;
 
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
@@ -627,23 +605,6 @@ pub(crate) fn solve_ippmm_inner(
         } else {
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
             pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-        }
-
-        // Pougkakiotis-Gondzio stall 脱出 (IP_PMM.m:204-209)
-        // primal または dual 改善が 5 反復連続で無ければ reg_limit /= 10 (floor 5e-13)
-        if primal_improved { primal_stall_count = 0; } else { primal_stall_count += 1; }
-        if dual_improved   { dual_stall_count = 0;   } else { dual_stall_count   += 1; }
-        if (primal_stall_count > 5 || dual_stall_count > 5) && reg_limit > REG_LIMIT_FLOOR {
-            let new_reg_limit = (reg_limit / 10.0).max(REG_LIMIT_FLOOR);
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "IPPMM_STALL iter={} reg_limit {:.3e}→{:.3e} (p_stall={}, d_stall={})",
-                    iter, reg_limit, new_reg_limit, primal_stall_count, dual_stall_count
-                );
-            }
-            reg_limit = new_reg_limit;
-            primal_stall_count = 0;
-            dual_stall_count = 0;
         }
 
         // 残差記録（次反復の改善判定用）
