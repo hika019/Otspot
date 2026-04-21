@@ -39,6 +39,7 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
+use crate::sparse::CscMatrix;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
 use super::solver_loop::{compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors, update_variables};
@@ -170,15 +171,84 @@ pub(crate) fn solve_ippmm_inner(
     let mut s = s0.clone();
     let mut y = y0.clone();
 
+    // ── Mehrotra 風初期点射影（等式制約への最小ノルム補正）─────────
+    // 解く系: K_init [dx; dy] = [0; r_p_eq], K_init = [I, A_ext^T; A_ext, -I]
+    //   build_augmented_system に Q=0, Σ=0, ρ=δ=1 を渡して流用。
+    // 目的: x0（ボックス中点）を A_eq x = b_eq の近傍へ押し出し、初期 pf を下げる。
+    //       UBH1 のように FR 変数が多い問題で x=0 由来の pf 爆発を抑制する。
+    // 等式行の残差のみ RHS に入れ、box/ineq 行は 0（内点維持）。
+    {
+        let r_p_eq: Vec<f64> = b_ext.iter().zip(ax0.iter()).enumerate()
+            .map(|(i, (&bi, &axi))| if is_eq_ext[i] { bi - axi } else { 0.0 })
+            .collect();
+        let r_p_inf = r_p_eq.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        if r_p_inf > 1e-6 && !timeout_ctx.should_stop() {
+            let q_zero = CscMatrix::new(n, n);
+            let sigma_zero = vec![0.0_f64; m_ext];
+            let k_init = build_augmented_system(&q_zero, &a_ext, &sigma_zero, 1.0, 1.0);
+            let perm_init = amd_with_deadline(
+                k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
+            );
+            if let Ok(fac_init) = ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                &k_init, &perm_init, timeout_ctx.deadline,
+            ) {
+                let mut rhs_init = vec![0.0_f64; n + m_ext];
+                for i in 0..m_ext { rhs_init[n + i] = r_p_eq[i]; }
+                let mut sol_init = vec![0.0_f64; n + m_ext];
+                fac_init.solve(&rhs_init, &mut sol_init);
+                let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+                if dx_inf.is_finite() && dx_inf < 1e8 {
+                    for j in 0..n {
+                        let x_new = x[j] + sol_init[j];
+                        let (lb, ub) = problem.bounds[j];
+                        x[j] = match (lb.is_finite(), ub.is_finite()) {
+                            (true, true) => {
+                                // 狭い箱 (ub-lb が 2*margin 未満) では中点を返して panic 回避
+                                let range = ub - lb;
+                                let raw_margin = (range * 0.01).min(1.0);
+                                if raw_margin > 0.0 && range > 2.0 * raw_margin {
+                                    x_new.clamp(lb + raw_margin, ub - raw_margin)
+                                } else {
+                                    0.5 * (lb + ub)
+                                }
+                            }
+                            (true, false) => x_new.max(lb + 1.0),
+                            (false, true) => x_new.min(ub - 1.0),
+                            (false, false) => x_new,
+                        };
+                    }
+                    // s0 再計算（不等式行のみ、等式は 0 維持）
+                    let mut ax_new = vec![0.0_f64; m_ext];
+                    for col in 0..n {
+                        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+                            ax_new[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
+                        }
+                    }
+                    for i in 0..m_ext {
+                        s[i] = if is_eq_ext[i] { 0.0 } else { (b_ext[i] - ax_new[i]).max(1.0) };
+                    }
+                    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "IPPMM_INIT_PROJ: r_p_eq_inf={:.3e} dx_inf={:.3e} |x|_inf={:.3e}",
+                            r_p_inf, dx_inf,
+                            x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // PMM 状態初期化
     let mut pmm = PmmState {
-        x_ref: x0,
-        y_ref: y0,
+        x_ref: x.clone(),
+        y_ref: y.clone(),
         rho: RHO_INIT,
         delta: DELTA_INIT,
         prev_nr_p: f64::INFINITY,
         prev_nr_d: f64::INFINITY,
     };
+    let _ = x0; let _ = y0; let _ = s0;
 
     // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
     // 【履歴】cmd_833 redo5 で論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
@@ -290,9 +360,36 @@ pub(crate) fn solve_ippmm_inner(
         let norm_b = norm_inf(&b_ext).max(1.0);
         let eps = options.ipm_eps();
 
-        if nr_d < eps * (1.0 + norm_c) && nr_p < eps * (1.0 + norm_b) && mu < eps {
+        // 原空間双対残差: r_d_orig[j] = r_d_scaled[j] / (c · d[j])
+        // スケール済み残差だけで収束宣言すると真の最適でない basin で止まる（UBH1 obj=2.12 事例, cmd_841）
+        let nr_d_orig = if let Some(sc) = scaler {
+            let mut m = 0.0_f64;
+            let limit = r_d.len().min(sc.d.len());
+            for j in 0..limit {
+                let scale = sc.c * sc.d[j];
+                if scale.abs() > f64::MIN_POSITIVE {
+                    m = m.max((r_d[j] / scale).abs());
+                }
+            }
+            m
+        } else {
+            nr_d
+        };
+        let norm_c_orig = orig_problem
+            .map(|op| norm_inf(&op.c))
+            .unwrap_or(norm_c)
+            .max(1.0);
+
+        if nr_d < eps * (1.0 + norm_c)
+            && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
+            && nr_p < eps * (1.0 + norm_b)
+            && mu < eps
+        {
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("IPPMM_EXIT iter={} path=Optimal_main", iter);
+                eprintln!(
+                    "IPPMM_EXIT iter={} path=Optimal_main nr_d_orig={:.3e}",
+                    iter, nr_d_orig
+                );
             }
             status = Some(SolveStatus::Optimal);
             final_iter = iter;
@@ -334,11 +431,14 @@ pub(crate) fn solve_ippmm_inner(
                 };
                 let norm_b_orig = norm_inf(&orig.b).max(1.0);
                 if pfeas_orig < eps_orig * (1.0 + norm_b_orig)
-                    && nr_d < eps_orig * (1.0 + norm_c)
+                    && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
                     && mu < eps_orig
                 {
                     if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                        eprintln!("IPPMM_EXIT iter={} path=Optimal_MethodC pfeas_orig={:.3e}", iter, pfeas_orig);
+                        eprintln!(
+                            "IPPMM_EXIT iter={} path=Optimal_MethodC pfeas_orig={:.3e} nr_d_orig={:.3e}",
+                            iter, pfeas_orig, nr_d_orig
+                        );
                     }
                     status = Some(SolveStatus::Optimal);
                     final_iter = iter;
@@ -569,6 +669,18 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
+        // cmd_841: step magnitude trace（IPPMM_TRACE=1 のときのみ）
+        if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+            let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let nds = ds.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let nrdpmm = r_d_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let nrppmm = r_p_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            eprintln!(
+                "IPPMM_STEP iter={:4} alpha={:.6e} dx_inf={:.3e} dy_inf={:.3e} ds_inf={:.3e} rdpmm_inf={:.3e} rppmm_inf={:.3e}",
+                iter, alpha, ndx, ndy, nds, nrdpmm, nrppmm
+            );
+        }
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
         // ── PMM パラメータ更新 ──────────────────────────────────────
