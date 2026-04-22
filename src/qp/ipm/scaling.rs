@@ -161,6 +161,19 @@ pub(crate) fn post_verify_solution(
             bfeas_status
         }
     };
+    // [cmd_841 null-space] Suboptimal→Optimal 昇格ゲート（非スケールパス）。
+    // unscale_ipm_result 側と同じ方針。best-so-far の相対双対ギャップが閾値外なら
+    // pfeas/dfeas/bfeas が揃っていても Optimal に上げない。閾値 1e-1 の根拠は
+    // unscale_ipm_result の DUALITY_GAP_TOL コメント参照。
+    const DUALITY_GAP_TOL: f64 = 1e-1;
+    let status = if status == SolveStatus::Optimal {
+        match result.duality_gap_rel {
+            Some(g) if g.abs() >= DUALITY_GAP_TOL => SolveStatus::SuboptimalSolution,
+            _ => status,
+        }
+    } else {
+        status
+    };
     SolverResult { status, ..result }
 }
 
@@ -474,6 +487,22 @@ pub(crate) fn unscale_ipm_result(
                 } else {
                     bfeas_status
                 }
+            };
+            // [cmd_841 null-space] Suboptimal→Optimal 昇格ゲート。
+            // 内部 best-so-far の相対双対ギャップが閾値外なら Optimal に上げない。
+            // UBH1 のように PMM null-space 漂流で残差小・ギャップ大となった解を
+            // 見かけ上の Optimal として返さないための最終防壁。
+            // 閾値 1e-1: UBH1 (28%) は弾き、STADAT1 (0.1%)・YAO (9%) など
+            // mu_floor/NaN_guard 経路でも pf/bf/df 合格する真 Optimal を誤って弾かない。
+            // 内部収束判定 (Optimal_main, 1e-3) より緩く、post-hoc promotion 用途。
+            const DUALITY_GAP_TOL: f64 = 1e-1;
+            let status = if status == SolveStatus::Optimal {
+                match result.duality_gap_rel {
+                    Some(g) if g.abs() >= DUALITY_GAP_TOL => SolveStatus::SuboptimalSolution,
+                    _ => status,
+                }
+            } else {
+                status
             };
             SolverResult {
                 objective: obj_orig,

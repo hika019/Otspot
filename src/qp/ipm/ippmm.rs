@@ -291,6 +291,14 @@ pub(crate) fn solve_ippmm_inner(
     // reject_false_*_bestsofar 経路で偽 Optimal 昇格を防ぐためのゲート用。
     let mut best_rel_gap: f64 = f64::INFINITY;
 
+    // [cmd_841 null-space] alpha 停滞検出。
+    // UBH1 のように PMM proximal が null-space 方向に頭打ちし、line search が
+    // alpha≈0 で止まるケースで 2273 iters 無駄回りするのを防ぐ。
+    // 連続 ALPHA_STALL_N 回 alpha < ALPHA_STALL_EPS なら best-so-far で早期脱出。
+    const ALPHA_STALL_EPS: f64 = 1e-8;
+    const ALPHA_STALL_N: usize = 5;
+    let mut alpha_stall_count: usize = 0;
+
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
@@ -715,6 +723,36 @@ pub(crate) fn solve_ippmm_inner(
         }
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
+        // [cmd_841 null-space] alpha 停滞早期脱出。
+        // alpha=0 が続く＝line search が進まない＝数値飽和または null-space 漂流。
+        // best-so-far があればそれで Suboptimal 復帰、無ければ素で Suboptimal 脱出。
+        if alpha < ALPHA_STALL_EPS {
+            alpha_stall_count += 1;
+        } else {
+            alpha_stall_count = 0;
+        }
+        // stall 成立条件を best_score < eps に絞る。
+        // UBH1 (best_score=4.8e-7) のように真に収束後に動けなくなったケースでのみ早期脱出。
+        // QPILOTNO (best_score=2.5e-6) のような残差マージナルな問題では alpha-stall を発火させず、
+        // 通常の timeout フローに任せる（DFEAS_FAIL として偽 Optimal を返すのを防ぐ）。
+        let alpha_stall_converged = best_score.is_finite() && best_score < eps;
+        if alpha_stall_count >= ALPHA_STALL_N && alpha_stall_converged {
+            x.copy_from_slice(&best_x);
+            y.copy_from_slice(&best_y);
+            s.copy_from_slice(&best_s);
+            final_iter = best_iter;
+            final_residuals = Some(best_residuals);
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                    iter, alpha_stall_count, best_iter, best_score, best_rel_gap,
+                    best_residuals.0, best_residuals.1, best_residuals.2
+                );
+            }
+            status = Some(SolveStatus::SuboptimalSolution);
+            break;
+        }
+
         // ── PMM パラメータ更新 ──────────────────────────────────────
         // Algorithm PEU Step 0: r = |μ_k - μ_{k+1}| / μ_k
         // μ_new = 変数更新後の実際のμ（corrector + line search 後）
@@ -781,6 +819,10 @@ pub(crate) fn solve_ippmm_inner(
         pfeas: final_residuals.map(|(pf, _, _)| pf),
         dfeas: final_residuals.map(|(_, df, _)| df),
         gap: final_residuals.map(|(_, _, g)| g),
+        // [cmd_841 null-space] best-so-far の相対双対ギャップ。
+        // unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
+        // INFINITY なら未計測扱いで None を返す（全 iter で best 更新ゼロは異常系）。
+        duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },
         ..Default::default()
     }
 }

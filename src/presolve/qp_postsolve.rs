@@ -107,6 +107,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         pfeas: reduced_sol.pfeas,
         dfeas: reduced_sol.dfeas,
         gap: reduced_sol.gap,
+        duality_gap_rel: reduced_sol.duality_gap_rel,
         reduced_costs,
         slack: reduced_sol.slack.clone(),
         warm_start_basis: reduced_sol.warm_start_basis.clone(),

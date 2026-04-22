@@ -102,6 +102,10 @@ pub struct SolverResult {
     pub dfeas: Option<f64>,
     /// 双対ギャップ (mu)。final_residuals と同値。デバッグ可視性向上用。
     pub gap: Option<f64>,
+    /// 相対双対ギャップ (|p_obj - d_obj| / max(|p|,|d|,1))。
+    /// IPPMM 内部の best-so-far に紐づく値。unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
+    /// None = 未計測（LP simplex 等 gap を持たない経路）。
+    pub duality_gap_rel: Option<f64>,
 }
 
 impl Default for SolverResult {
@@ -121,6 +125,7 @@ impl Default for SolverResult {
             pfeas: None,
             dfeas: None,
             gap: None,
+            duality_gap_rel: None,
         }
     }
 }

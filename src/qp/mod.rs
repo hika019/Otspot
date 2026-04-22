@@ -342,7 +342,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 pfeas: None,
                 dfeas: None,
                 gap: None,
-
+                duality_gap_rel: None,
             }
         }
         SolveStatus::Infeasible => SolverResult::infeasible(),
@@ -361,6 +361,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             pfeas: None,
             dfeas: None,
             gap: None,
+            duality_gap_rel: None,
         },
         SolveStatus::MaxIterations => {
             // DEAD PATH: SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能。
@@ -386,6 +387,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             pfeas: None,
             dfeas: None,
             gap: None,
+            duality_gap_rel: None,
         },
         SolveStatus::NumericalError => SolverResult {
             status: SolveStatus::NumericalError,
@@ -402,6 +404,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             pfeas: None,
             dfeas: None,
             gap: None,
+            duality_gap_rel: None,
         },
         SolveStatus::NonConvex(_) => SolverResult {
             status: result.status,
@@ -418,6 +421,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             pfeas: None,
             dfeas: None,
             gap: None,
+            duality_gap_rel: None,
         },
     }
 }
@@ -1042,12 +1046,21 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                             }
                         }
                     }
-                    if ir_pfeas_ok {
+                    // [cmd_841 null-space] IR後 Suboptimal→Optimal 昇格ゲート。
+                    // 内部 best-so-far の相対双対ギャップが閾値外なら pfeas/bfeas OK でも Optimal に上げない。
+                    // IR は primal feasibility のみ改善するため、gap 大な null-space 解を昇格させてはならない。
+                    // 閾値 1e-1: scaling.rs 側の unscale_ipm_result と統一。詳細はそちらのコメント参照。
+                    const DUALITY_GAP_TOL_IR: f64 = 1e-1;
+                    let gap_ok = match result.duality_gap_rel {
+                        Some(g) => g.abs() < DUALITY_GAP_TOL_IR,
+                        None => true, // 未計測は従来通り許容（他 solver 経路互換）
+                    };
+                    if ir_pfeas_ok && gap_ok {
                         result.status = SolveStatus::Optimal;
                         result.dual_solution = y;
                         result.bound_duals = z;
                     }
-                    // else: IR後もpfeas_normalized不足 → SuboptimalSolution維持
+                    // else: IR後もpfeas_normalized不足 or gap 大 → SuboptimalSolution維持
                 }
                 // else: bfeas起因のSuboptimalSolution維持
             }
