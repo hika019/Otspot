@@ -131,6 +131,6 @@ STADAT3,-3.58e1,bench_722f_ippmm_1000s
 STCQP1,1.55e5,bench_722f_ippmm_1000s
 STCQP2,2.23e4,bench_722f_ippmm_1000s
 TAME,0.00e0,bench_722f_ippmm_1000s
-UBH1,2.07e0,bench_722f_ippmm_1000s
+UBH1,1.116e0,piqp_clarabel_osqp_crosscheck_20260422
 ZECEVIC2,-4.12e0,bench_722f_ippmm_1000s
 QSHELL,1.57e12,bench_740_concurrent_60s
