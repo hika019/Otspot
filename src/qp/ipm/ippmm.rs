@@ -380,15 +380,39 @@ pub(crate) fn solve_ippmm_inner(
             .unwrap_or(norm_c)
             .max(1.0);
 
+        // [cmd_841 Bug#1] 双対ギャップ検算 — 絶対残差 < eps だけでは不十分。
+        // UBH1 (||x||≈1459, c=0, Q rank-deficient) で r_stat=2e-6・mu=1e-30 なのに
+        // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（cmd_841 Phase A 検証）。
+        // 3 族独立 solver (PIQP/Clarabel/OSQP) で UBH1 真値 1.116 を確認済。
+        //
+        // 符号規約: 本 solver の r_d = -(Qx + c + A^T y) → Qx + c + A^T y = 0。
+        //           標準規約 (Qx + c - A^T y = 0) とは y の符号が逆。
+        //           よって dual obj = -0.5 x^T Q x - Σ b_ext[i] * y[i] （全 i）。
+        //           強双対 @ KKT で p = d となることを導出検証済。
+        // 閾値: 1e-3 (0.1%)。典型 QP の偽収束 (UBH1 rel_gap=129% 等) を確実に捕捉。
+        let qx_dot_x: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+        let c_dot_x: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+        let p_obj_s = 0.5 * qx_dot_x + c_dot_x;
+        let mut d_lin: f64 = 0.0;
+        for i in 0..m_ext {
+            d_lin -= b_ext[i] * y[i];
+        }
+        let d_obj_s = -0.5 * qx_dot_x + d_lin;
+        let gap_abs = p_obj_s - d_obj_s;
+        let gap_denom = p_obj_s.abs().max(d_obj_s.abs()).max(1.0);
+        let rel_gap = gap_abs / gap_denom;
+        const DUALITY_GAP_TOL: f64 = 1e-3;
+
         if nr_d < eps * (1.0 + norm_c)
             && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
             && nr_p < eps * (1.0 + norm_b)
             && mu < eps
+            && rel_gap.abs() < DUALITY_GAP_TOL
         {
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                 eprintln!(
-                    "IPPMM_EXIT iter={} path=Optimal_main nr_d_orig={:.3e}",
-                    iter, nr_d_orig
+                    "IPPMM_EXIT iter={} path=Optimal_main nr_d_orig={:.3e} rel_gap={:.3e}",
+                    iter, nr_d_orig, rel_gap
                 );
             }
             status = Some(SolveStatus::Optimal);
@@ -400,7 +424,7 @@ pub(crate) fn solve_ippmm_inner(
         // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
         let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
-        if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p {
+        if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p && rel_gap.abs() < DUALITY_GAP_TOL {
             // ── Method C: 原空間pfeasチェック（Clarabel方式）──
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
                 let m_orig_check = orig.b.len();
