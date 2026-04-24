@@ -14,7 +14,7 @@ QPLIB_8602,2.735339e4,bench_722g_ippmm_1000s
 QPLIB_8616,2.450685e2,bench_722g_ippmm_1000s
 QPLIB_8785,7.867491e3,bench_722g_ippmm_1000s
 QPLIB_8790,-4.299946e-1,bench_722g_ippmm_1000s
-QPLIB_8792,1.911063e0,bench_722g_ippmm_1000s
+QPLIB_8792,1.900968e0,piqp_clarabel_osqp_crosscheck_cmd843_20260424
 QPLIB_8845,1.345312e7,bench_722g_ippmm_1000s
 QPLIB_8906,3.014980e6,bench_722g_ippmm_1000s
 QPLIB_8938,-3.577945e1,bench_722g_ippmm_1000s
