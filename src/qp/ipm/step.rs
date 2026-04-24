@@ -88,6 +88,12 @@ pub(crate) fn solve_qp_ipm_inner(
     let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
+    // [cmd_845] 双対ギャップ（scaled）。毎反復更新し、return 時 SolverResult.duality_gap_rel に populate。
+    // ippmm.rs:340-350 と同一定義で、ipm 側の rel_gap ゲート非対称性を解消する。
+    let mut final_rel_gap: f64 = f64::INFINITY;
+
+    // [cmd_845] 収束判定に併用する相対ギャップ閾値。ippmm.rs 内部判定と同一。
+    const DUALITY_GAP_TOL: f64 = 1e-3;
 
     // C-1: mu非依存proximal正則化（rho_ipmフロア）
     let mut rho_ipm = 1e-4_f64;
@@ -125,6 +131,23 @@ pub(crate) fn solve_qp_ipm_inner(
         // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
         final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
 
+        // [cmd_845] 双対ギャップ（scaled）を算出。ippmm.rs:340-350 と同一定義。
+        // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
+        // UBH1 (||x||≈1459, c=0, Q rank-deficient) では r_stat=2e-6・mu=1e-30 でも
+        // duality_gap = 9.49（obj 91% 誤差）になる既知事例があり、rel_gap ゲートで棄却する。
+        let qx_dot_x: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+        let c_dot_x: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+        let p_obj_s = 0.5 * qx_dot_x + c_dot_x;
+        let mut d_lin: f64 = 0.0;
+        for i in 0..m_ext {
+            d_lin -= b_ext[i] * y[i];
+        }
+        let d_obj_s = -0.5 * qx_dot_x + d_lin;
+        let gap_abs = p_obj_s - d_obj_s;
+        let gap_denom = p_obj_s.abs().max(d_obj_s.abs()).max(1.0);
+        let rel_gap = gap_abs / gap_denom;
+        final_rel_gap = rel_gap;
+
         // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
         // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
         let norm_c = norm_inf(&problem.c).max(1.0);
@@ -134,6 +157,7 @@ pub(crate) fn solve_qp_ipm_inner(
         if norm_inf(&r_d) < eps * (1.0 + norm_c)
             && norm_inf(&r_p) < eps * (1.0 + norm_b)
             && mu < eps
+            && rel_gap.abs() < DUALITY_GAP_TOL
         {
             status = SolveStatus::Optimal;
             final_iter = iter;
@@ -149,6 +173,7 @@ pub(crate) fn solve_qp_ipm_inner(
         if mu < options.ipm.delta_min * 1e-2
             && norm_inf(&r_d) < thr_d
             && norm_inf(&r_p) < thr_p
+            && rel_gap.abs() < DUALITY_GAP_TOL
         {
             // ── Method C: 原空間pfeasチェック（Clarabel方式）──
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
@@ -182,6 +207,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 if pfeas_orig < eps_orig * (1.0 + norm_b_orig)
                     && norm_inf(&r_d) < eps_orig * (1.0 + norm_c)
                     && mu < eps_orig
+                    && rel_gap.abs() < DUALITY_GAP_TOL
                 {
                     status = SolveStatus::Optimal;
                     final_iter = iter;
@@ -418,6 +444,9 @@ pub(crate) fn solve_qp_ipm_inner(
         pfeas: final_residuals.map(|(pf, _, _)| pf),
         dfeas: final_residuals.map(|(_, df, _)| df),
         gap: final_residuals.map(|(_, _, g)| g),
+        // [cmd_845] scaling.rs の rel_gap ゲート (1e-1) を発火させるため populate。
+        // ippmm.rs:858 と対称。未計算 (INFINITY) は None のまま（従来挙動互換）。
+        duality_gap_rel: if final_rel_gap.is_finite() { Some(final_rel_gap) } else { None },
         ..Default::default()
     }
 }
