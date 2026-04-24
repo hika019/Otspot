@@ -798,6 +798,39 @@ pub(crate) fn solve_ippmm_inner(
     // max_iter=usize::MAXで収束もtimeoutも起きなかった場合（理論上不可能）にTimeoutを返す。
     let status = status.unwrap_or(SolveStatus::Timeout);
 
+    // [cmd_842] Timeout/MaxIterations の素の終了経路で best-so-far に復帰。
+    // Why: alpha_stall/reject_false/NaN_guard の 3 経路は best_x 復帰するが、
+    // 純粋な Timeout (timeout_ctx 検出) 経路はループ末尾の発散 x をそのまま返す。
+    // QPILOTNO のような残差マージナル問題で alpha-stall が発火しない場合、
+    // 最終 x が発散していても best_x (iter 199 相当) は pf=6.5e-6 で保持されている。
+    // best_score が有限かつ current より良ければ復帰させる（post-solve の IR/昇格機会を与える）。
+    if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations)
+        && best_score.is_finite()
+    {
+        let norm_b_bs = norm_inf(&b_ext).max(1.0);
+        let norm_c_bs = norm_inf(&problem.c).max(1.0);
+        let current_score = match final_residuals {
+            Some((nr_p, nr_d, mu)) if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() => {
+                nr_p / (1.0 + norm_b_bs) + nr_d / (1.0 + norm_c_bs) + mu.abs()
+            }
+            _ => f64::INFINITY,
+        };
+        if best_score < current_score {
+            x.copy_from_slice(&best_x);
+            y.copy_from_slice(&best_y);
+            s.copy_from_slice(&best_s);
+            final_iter = best_iter;
+            final_residuals = Some(best_residuals);
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "IPPMM_EXIT path=Timeout_bestsofar_fallback best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                    best_iter, best_score, best_rel_gap,
+                    best_residuals.0, best_residuals.1, best_residuals.2
+                );
+            }
+        }
+    }
+
     // 目的関数値
     spmv_q(&problem.q, &x, &mut qx);
     let objective = 0.5
