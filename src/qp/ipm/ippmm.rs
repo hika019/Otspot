@@ -297,6 +297,10 @@ pub(crate) fn solve_ippmm_inner(
     // 連続 ALPHA_STALL_N 回 alpha < ALPHA_STALL_EPS なら best-so-far で早期脱出。
     const ALPHA_STALL_EPS: f64 = 1e-8;
     const ALPHA_STALL_N: usize = 5;
+    // [cmd_846] deadlock 検出用（eps 非依存）: alpha=0 が長期継続＋rho/delta が reg_limit
+    // フロアに張り付いている場合、数値的に進めない状態。POST_VERIFY の eps 厳格化で
+    // best_score < eps が成立しなくなった UBH1 型の無限ループ対策。
+    const ALPHA_DEADLOCK_N: usize = 20;
     let mut alpha_stall_count: usize = 0;
 
     for iter in 0..options.ipm.max_iter {
@@ -736,16 +740,29 @@ pub(crate) fn solve_ippmm_inner(
         // QPILOTNO (best_score=2.5e-6) のような残差マージナルな問題では alpha-stall を発火させず、
         // 通常の timeout フローに任せる（DFEAS_FAIL として偽 Optimal を返すのを防ぐ）。
         let alpha_stall_converged = best_score.is_finite() && best_score < eps;
-        if alpha_stall_count >= ALPHA_STALL_N && alpha_stall_converged {
+        // [cmd_846] eps 非依存 deadlock gate。POST_VERIFY の eps 10x 厳格化で
+        // best_score < eps が成立しなくなり alpha_stall_converged が永久 false となる
+        // 病理（UBH1: 186 iter alpha=0 → さらに 24000+ iter alpha=0 継続）を断ち切る。
+        // 条件: alpha=0 が 2N 連続＋rho/delta が reg_limit 付近＋best_score 有限
+        // （rho/delta が floor = もうこれ以上 proximal を緩められない = 数値的に進めない）。
+        let alpha_stall_deadlock = alpha_stall_count >= ALPHA_DEADLOCK_N
+            && best_score.is_finite()
+            && pmm.rho <= reg_limit * 1.01
+            && pmm.delta <= reg_limit * 1.01;
+        if alpha_stall_count >= ALPHA_STALL_N
+            && (alpha_stall_converged || alpha_stall_deadlock)
+        {
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                let exit_reason = if alpha_stall_converged { "conv" } else { "deadlock" };
                 eprintln!(
-                    "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                    iter, alpha_stall_count, best_iter, best_score, best_rel_gap,
+                    "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar reason={} stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} rho={:.3e} reg_limit={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                    iter, exit_reason, alpha_stall_count, best_iter, best_score, best_rel_gap,
+                    pmm.rho, reg_limit,
                     best_residuals.0, best_residuals.1, best_residuals.2
                 );
             }

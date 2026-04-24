@@ -64,7 +64,15 @@ where
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
-                adjusted_opts.deadline = effective_deadline; // T9: 固定deadline
+                // [cmd_846 R3] POST_VERIFY 各 attempt の budget を均等分割。
+                // UBH1 型の病理（1 attempt が全予算を食い尽くし次 attempt に budget 残らない）回避。
+                // 残り時間 / 残り attempt 数 を per-attempt deadline とする。
+                adjusted_opts.deadline = effective_deadline.map(|total| {
+                    let now = std::time::Instant::now();
+                    let remaining_attempts = (POST_VERIFY_MAX_RESOLV - attempt) as u32;
+                    let remaining_time = total.saturating_duration_since(now);
+                    now + remaining_time / remaining_attempts.max(1)
+                });
                 adjusted_opts.timeout_secs = None;           // T9: 二重計算防止
 
                 let scaled_result = inner_solver(
