@@ -537,13 +537,24 @@ impl QpsParser {
             self.bounds.push((bound_type, col_name, value));
             return Ok(());
         }
-        let (col_name, value) = if parts.len() >= 4 {
+        // FR/MI/PL/BV は値を取らない bound type。これらは parts[2] が数値かどうかに
+        // 関わらず col_name として扱う（変数名が "1","2"... の数値文字列の場合の
+        // 誤判定を防ぐ — 例: DPKLO1）。
+        let value_taking = !matches!(
+            bound_type,
+            BoundType::FR | BoundType::MI | BoundType::PL | BoundType::BV
+        );
+        let (col_name, value) = if !value_taking {
+            // 値を取らない bound: 4 token なら parts[2]=col, 3 token も parts[2]=col
+            // (parts[1] は bound 名で常に無視)
+            (parts[2].to_string(), None)
+        } else if parts.len() >= 4 {
             // 4トークン: type bname cname value
             (parts[2].to_string(), parts[3].parse::<f64>().ok())
         } else {
-            // 3トークン: type cname value (bound名省略) OR type bname cname (FR/MI等)
-            // parts[2]が数値ならbound名省略形式: col=parts[1], value=parts[2]
-            // parts[2]が非数値ならFR/MI等: col=parts[2], value=None
+            // 3トークン: type cname value (bound名省略形)
+            // value_taking=true なので parts[2] は値であるべき。非数値なら parser エラー
+            // ではなく既存挙動 (col=parts[2], value=None) を維持してロバスト性を保つ。
             if let Ok(v) = parts[2].parse::<f64>() {
                 (parts[1].to_string(), Some(v))
             } else {
@@ -1124,5 +1135,58 @@ ENDATA
         let prob = parse_qps_str(qps).unwrap();
         assert_eq!(prob.bounds[0].0, 2.0, "x1 lb should be 2.0");
         assert_eq!(prob.bounds[0].1, 50.0, "x1 ub should be 50.0");
+    }
+
+    /// 数値文字列の変数名 + FR/MI/PL/BV の組合せ (DPKLO1 ケース)
+    ///
+    /// MPS 仕様で BOUNDS 行の 3 トークン形式 `<TYPE> <BNAME> <CNAME>` は、
+    /// FR/MI/PL/BV など値を取らない bound では `<CNAME>` が変数名。
+    /// しかし変数名が "1","2"... の数値文字列である場合、
+    /// `parts[2].parse::<f64>()` は Ok を返してしまい、
+    /// 旧実装は誤って bound 名省略形式 `<TYPE> <CNAME> <VALUE>` と解釈し、
+    /// `parts[1]` (= bound 名) を col_name として登録してしまう。
+    ///
+    /// 影響: DPKLO1 (133変数, 全 FR, 変数名 "1"〜"133") では全変数の bounds が
+    /// デフォルト (0, +∞) のまま残り、IPM が KKT 不整合で発散して TIMEOUT 化する。
+    #[test]
+    fn test_parse_bounds_fr_with_numeric_var_name() {
+        let qps = "NAME  DPKLO1_LIKE\nROWS\n N  obj\nCOLUMNS\n    1  obj  1.0\n    2  obj  1.0\n    3  obj  1.0\nRHS\nBOUNDS\n FR  BNDS  1\n FR  BNDS  2\n FR  BNDS  3\nENDATA\n";
+        let prob = parse_qps_str(qps).unwrap();
+        assert_eq!(prob.num_vars, 3, "expected 3 vars");
+        for j in 0..3 {
+            assert_eq!(
+                prob.bounds[j].0,
+                f64::NEG_INFINITY,
+                "var {} (named '{}'): lb should be -inf (FR), got {}",
+                j, j + 1, prob.bounds[j].0
+            );
+            assert_eq!(
+                prob.bounds[j].1,
+                f64::INFINITY,
+                "var {} (named '{}'): ub should be +inf (FR), got {}",
+                j, j + 1, prob.bounds[j].1
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_bounds_mi_with_numeric_var_name() {
+        let qps = "NAME  TEST\nROWS\n N  obj\nCOLUMNS\n    1  obj  1.0\nRHS\nBOUNDS\n MI  BNDS  1\nENDATA\n";
+        let prob = parse_qps_str(qps).unwrap();
+        assert_eq!(
+            prob.bounds[0].0,
+            f64::NEG_INFINITY,
+            "MI: lb should be -inf for numeric-named var, got {}",
+            prob.bounds[0].0
+        );
+    }
+
+    #[test]
+    fn test_parse_bounds_bv_with_numeric_var_name() {
+        // BV = binary variable (lb=0, ub=1)
+        let qps = "NAME  TEST\nROWS\n N  obj\nCOLUMNS\n    9  obj  1.0\nRHS\nBOUNDS\n BV  BNDS  9\nENDATA\n";
+        let prob = parse_qps_str(qps).unwrap();
+        assert_eq!(prob.bounds[0].0, 0.0, "BV: lb should be 0, got {}", prob.bounds[0].0);
+        assert_eq!(prob.bounds[0].1, 1.0, "BV: ub should be 1, got {}", prob.bounds[0].1);
     }
 }
