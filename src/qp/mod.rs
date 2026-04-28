@@ -1916,6 +1916,95 @@ mod tests {
         );
     }
 
+    /// UBH1 の Q が PSD か non-PSD かを sparse Cholesky で実証する診断テスト。
+    /// `check_q_positive_semidefinite` は n>1000 で密行列 Cholesky をスキップするため、
+    /// UBH1 (n=18009) のような大規模 Q の non-PSD は対角正値だけでは検出不能。
+    /// このテストは sparse LDL で実際の PSD 性を確認する（時間計測も兼ねる）。
+    ///
+    /// このテストの目的: bench で UBH1 が「pfeas/dfeas は eps 通過するのに obj が known と
+    /// 55% 乖離して OBJ_MISMATCH になる」事実の原因が Q non-PSD かを実証する。
+    /// non-PSD なら IPM は KKT 残差を満たす局所点（鞍点 or local opt）を返してしまい、
+    /// それが known global optimal と乖離するのは仕様通り。
+    #[test]
+    #[ignore] // 数十秒かかる可能性。手動で `cargo test test_ubh1_q_psd_diagnose -- --ignored --nocapture` 実行
+    fn test_ubh1_q_psd_diagnose() {
+        use crate::io::qps::parse_qps;
+        use crate::linalg::ldl;
+        use std::path::Path;
+        use std::time::Instant;
+
+        let path = Path::new("data/maros_meszaros/UBH1.QPS");
+        if !path.exists() {
+            eprintln!("UBH1.QPS not found, skipping");
+            return;
+        }
+        let prob = parse_qps(path).expect("parse UBH1");
+        eprintln!(
+            "UBH1: n={}, m={}, Q.nnz={}",
+            prob.num_vars, prob.num_constraints, prob.q.values.len()
+        );
+
+        // 対角 ε を変えて factorize を試行する。
+        // - eps=0: 真の Q をそのまま分解。失敗なら non-PSD or rank-deficient
+        // - eps>0: Q+εI を分解。failure-to-success の閾値が最小固有値の絶対値の目安
+        for eps in &[0.0_f64, 1e-15, 1e-12, 1e-10, 1e-8, 1e-6, 1e-3, 1.0] {
+            let q_reg = build_q_with_diag_reg(&prob.q, *eps);
+            let t = Instant::now();
+            match ldl::factorize(&q_reg) {
+                Ok(_) => eprintln!(
+                    "  eps={:.0e}: factorize OK (Q+εI PSD), {:.2}s",
+                    eps,
+                    t.elapsed().as_secs_f64()
+                ),
+                Err(e) => eprintln!(
+                    "  eps={:.0e}: factorize FAILED ({:?}), {:.2}s",
+                    eps,
+                    e,
+                    t.elapsed().as_secs_f64()
+                ),
+            }
+        }
+    }
+
+    /// UBH1 PSD 診断用ヘルパ: Q の対角に ε を加算した新しい CSC を返す。
+    #[cfg(test)]
+    fn build_q_with_diag_reg(q: &CscMatrix, eps_q: f64) -> CscMatrix {
+        let n = q.ncols;
+        let mut new_col_ptr = vec![0_usize; n + 1];
+        let mut new_row_ind: Vec<usize> = Vec::with_capacity(q.values.len() + n);
+        let mut new_values: Vec<f64> = Vec::with_capacity(q.values.len() + n);
+        for col in 0..n {
+            new_col_ptr[col] = new_row_ind.len();
+            let start = q.col_ptr[col];
+            let end = q.col_ptr[col + 1];
+            let mut diag_added = false;
+            for ptr in start..end {
+                let row = q.row_ind[ptr];
+                let val = q.values[ptr];
+                if row == col {
+                    new_row_ind.push(row);
+                    new_values.push(val + eps_q);
+                    diag_added = true;
+                } else {
+                    new_row_ind.push(row);
+                    new_values.push(val);
+                }
+            }
+            if !diag_added {
+                new_row_ind.push(col);
+                new_values.push(eps_q);
+            }
+        }
+        new_col_ptr[n] = new_row_ind.len();
+        CscMatrix {
+            col_ptr: new_col_ptr,
+            row_ind: new_row_ind,
+            values: new_values,
+            nrows: n,
+            ncols: n,
+        }
+    }
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // cmd_589 TDD赤フェーズ: バグ再現テスト（cmd_607で修正済み）
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
