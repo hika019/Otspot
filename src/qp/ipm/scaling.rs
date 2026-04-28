@@ -13,7 +13,6 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use super::kkt::norm_inf;
 
 /// post-verification 失敗時の再ソルブ上限回数（1回目=通常, 2〜N回目=10倍ずつ厳格化）
 const POST_VERIFY_MAX_RESOLV: usize = 3;
@@ -127,13 +126,9 @@ pub(crate) fn post_verify_solution(
     let x = &result.solution;
     let y = &result.dual_solution;
     let bound_duals = &result.bound_duals;
-    // 元空間 dfeas tolerance: bench (qps_benchmark::dfeas_tol) と完全一致。
-    // 旧コード: 10 * eps * (1+norm_c_s) — 10x 安全係数で偽 Optimal を量産していた
-    // (例: UBH1 dfeas=1.9e-1, QFORPLAN dfeas=1.5e9 等が「内部 OK」判定されていた)。
-    // bench は eps * (1+norm_c_orig) を真の判定基準としている。整合させて
-    // 「ソルバ Optimal 申告 = 真にユーザー精度を満たした解」という契約を成立させる。
-    let norm_c_orig = norm_inf(&problem.c).max(1.0);
-    let dfeas_threshold = eps * (1.0 + norm_c_orig);
+    // 元空間 KKT 判定: bench compute_dfeas_orig と同形の成分相対 dfeas。
+    // 旧 inf-norm 絶対基準は norm_c が huge な問題で tol が 1e-2 まで緩み偽 Optimal を量産。
+    // 成分相対化により「ソルバ Optimal 申告 = ユーザー精度を真に満たす」契約を成立させる。
     let status = if problem.num_constraints > 0 {
         match problem.a.mat_vec_mul(x) {
             Ok(ax) => {
@@ -155,7 +150,7 @@ pub(crate) fn post_verify_solution(
                 if pfeas_normalized < eps {
                     let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
                     if bfeas_status == SolveStatus::Optimal {
-                        check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
+                        check_dfeas_status_relative(problem, x, y, bound_duals, eps)
                     } else {
                         bfeas_status
                     }
@@ -168,7 +163,7 @@ pub(crate) fn post_verify_solution(
     } else {
         let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
         if bfeas_status == SolveStatus::Optimal {
-            check_dfeas_status(problem, x, y, bound_duals, dfeas_threshold)
+            check_dfeas_status_relative(problem, x, y, bound_duals, eps)
         } else {
             bfeas_status
         }
@@ -210,14 +205,16 @@ pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> 
     }
 }
 
-/// QPの双対実現可能性 (dfeas) を検証し、超過していれば SuboptimalSolution に降格する
+/// QPの双対実現可能性 (dfeas, inf-norm 絶対基準) を検証し、超過していれば SuboptimalSolution に降格する
 ///
-/// dfeas = ||Q*x + A^T*y - y_lb + y_ub + c||_inf
-/// 無制約QP（A=0, bounds=all infinite）では A^T*y = 0, bound_contrib = 0 として計算する。
+/// 注意: 本関数は inf-norm の絶対値で判定する。ill-conditioned な問題で偽 Optimal を量産していた
+/// ため、現在は `check_dfeas_status_relative` (成分相対化版) を使うのが推奨。
+/// 本関数は単体テスト互換のために保持。
 ///
 /// # 引数
-/// - `bound_duals`: アンスケール済み境界双対変数。lb有限変数の下界dual（昇順）、次にub有限変数の上界dual（昇順）の順
-/// - `threshold`: 呼び出し元で計算した許容閾値。Ruizスケーリングの増幅係数を考慮した値を渡すこと。
+/// - `bound_duals`: アンスケール済み境界双対変数。
+/// - `threshold`: 呼び出し元計算の許容閾値。
+#[allow(dead_code)]
 pub(crate) fn check_dfeas_status(
     problem: &QpProblem,
     x: &[f64],
@@ -366,11 +363,8 @@ pub(crate) fn unscale_ipm_result(
             let obj_orig = result.objective / scaler.c;
             // [整合性] check_dfeas_status は L405 で unscaled x,y,bound_duals を受け取り
             // 元空間で dfeas を計算する。よって threshold も元空間 (bench と同形)。
-            // 旧コード: 10 * eps * (1+norm_c_s) / (scaler.c * d_min) は scaled 空間 tol
-            // を unscaled に変換したつもりだったが、引数が既に unscaled なので二重変換相当で
-            // 緩すぎる threshold を生み、47 件の偽 Optimal を量産していた。
-            let norm_c_orig = norm_inf(&problem.c).max(1.0);
-            let dfeas_threshold = eps * (1.0 + norm_c_orig);
+            // 元空間 KKT 判定: 成分相対 dfeas (bench compute_dfeas_orig と同形)。
+            // 旧 inf-norm * (1+norm_c) tol は huge 問題で緩すぎ偽 Optimal を量産していた。
             let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -403,7 +397,7 @@ pub(crate) fn unscale_ipm_result(
                         let status = if pfeas_normalized < eps {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
+                                check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
                             } else {
                                 bfeas_status
                             }
@@ -417,7 +411,7 @@ pub(crate) fn unscale_ipm_result(
             } else {
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                 let status = if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
+                    check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
                 } else {
                     bfeas_status
                 };
@@ -449,8 +443,6 @@ pub(crate) fn unscale_ipm_result(
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             // [整合性] 上記 Optimal branch と同形。元空間 dfeas tol = bench tol。
-            let norm_c_orig = norm_inf(&problem.c).max(1.0);
-            let dfeas_threshold = eps * (1.0 + norm_c_orig);
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -472,7 +464,7 @@ pub(crate) fn unscale_ipm_result(
                         if pfeas_normalized < eps {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
+                                check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
                             } else {
                                 bfeas_status
                             }
@@ -485,7 +477,7 @@ pub(crate) fn unscale_ipm_result(
             } else {
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                 if bfeas_status == SolveStatus::Optimal {
-                    check_dfeas_status(problem, &x, &y, &bound_duals, dfeas_threshold)
+                    check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
                 } else {
                     bfeas_status
                 }
