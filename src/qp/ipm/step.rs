@@ -378,12 +378,13 @@ pub(crate) fn solve_qp_ipm_inner(
             return numerical_error_result(n);
         }
         let fac = fac_cache.as_ref().unwrap();
+        let aug_mat_for_ir = &kkt_cache.as_ref().expect("kkt_cache must be Some when fac is").mat;
 
         // --- Predictor ---
         let pred = predictor_step(
             &s, &y, &is_eq_ext, m_ineq,
             &r_d, &r_p,  // r_dual=r_d, r_primal=r_p (IPM)
-            &sigma_vec, fac, n, m_ext, mu,
+            &sigma_vec, fac, aug_mat_for_ir, n, m_ext, mu,
         );
 
         // --- Corrector ---
@@ -391,7 +392,7 @@ pub(crate) fn solve_qp_ipm_inner(
             &s, &y, &is_eq_ext,
             &pred, mu,
             &r_d, &r_p,  // r_dual=r_d, r_primal=r_p (IPM)
-            &sigma_vec, fac, n, m_ext,
+            &sigma_vec, fac, aug_mat_for_ir, n, m_ext,
             &mut dx, &mut dy, &mut ds,
         );
 
@@ -401,7 +402,7 @@ pub(crate) fn solve_qp_ipm_inner(
             alpha = gondzio_correctors(
                 &s, &y, &is_eq_ext, m_ineq,
                 &r_d, &r_p,  // r_dual=r_d, r_primal=r_p (IPM)
-                &r_c_corr, &sigma_vec, fac, n, m_ext,
+                &r_c_corr, &sigma_vec, fac, aug_mat_for_ir, n, m_ext,
                 options.ipm.max_correctors, alpha,
                 &mut dx, &mut dy, &mut ds,
             );

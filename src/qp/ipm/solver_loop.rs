@@ -11,8 +11,109 @@
 //! - `update_variables`: x, s, y 変数更新
 
 use crate::linalg::ldl::LdlFactorizationAmd;
+use crate::sparse::CscMatrix;
 use super::common::fraction_to_boundary_masked;
 use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
+
+/// [cmd_847] Iterative refinement of LDL solve.
+///
+/// fac.solve produces sol approximating K * sol = rhs. With LDL precision limit
+/// (rank-deficient K, large condition number), sol may have residual = rhs - K*sol
+/// of magnitude proportional to ||K|| * eps_machine.
+///
+/// One IR step:
+///   1. residual = rhs - K * sol
+///   2. correction = fac.solve(residual)
+///   3. sol += correction
+///
+/// Skipped if residual is already small (rhs_inf * 1e-13).
+/// aug_mat must be the symmetric upper-triangular CSC factorized into fac.
+pub(crate) fn solve_with_iterative_refinement(
+    fac: &LdlFactorizationAmd,
+    aug_mat: &CscMatrix,
+    rhs: &[f64],
+    sol: &mut [f64],
+    max_iters: usize,
+) {
+    let n = sol.len();
+    debug_assert_eq!(rhs.len(), n);
+    debug_assert_eq!(aug_mat.nrows, n);
+    debug_assert_eq!(aug_mat.ncols, n);
+
+    fac.solve(rhs, sol);
+
+    if max_iters == 0 {
+        return;
+    }
+
+    // [cmd_847] 大型問題では IR の overhead が deadline を圧迫する。
+    // BOYD2 (n+m_ext≈280k) で 1 反復 LDL ~30s なので IR で 2x 遅化 → 100s 予算超過。
+    // 100k を境界として大型問題は IR skip（baseline 動作維持）。
+    // 中小問題 (UBH1 30k / DPKLO1 0.2k 等) では IR を有効化して rank-deficient 対応。
+    const IR_SKIP_LARGE_THRESHOLD: usize = 100_000;
+    if n > IR_SKIP_LARGE_THRESHOLD {
+        return;
+    }
+
+    let rhs_inf = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+    let resid_skip_threshold = rhs_inf * 1e-13;
+
+    let mut kx = vec![0.0_f64; n];
+    let mut residual = vec![0.0_f64; n];
+    let mut correction = vec![0.0_f64; n];
+
+    for _ in 0..max_iters {
+        // K * sol (symmetric matvec, upper-triangular CSC).
+        for v in kx.iter_mut() {
+            *v = 0.0;
+        }
+        for col in 0..aug_mat.ncols {
+            for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
+                let row = aug_mat.row_ind[ptr];
+                let val = aug_mat.values[ptr];
+                kx[row] += val * sol[col];
+                if row != col {
+                    kx[col] += val * sol[row];
+                }
+            }
+        }
+
+        let mut resid_inf = 0.0_f64;
+        for i in 0..n {
+            residual[i] = rhs[i] - kx[i];
+            resid_inf = resid_inf.max(residual[i].abs());
+        }
+        if resid_inf <= resid_skip_threshold {
+            return;
+        }
+
+        for v in correction.iter_mut() {
+            *v = 0.0;
+        }
+        fac.solve(&residual, &mut correction);
+
+        // Backtrack guard: NaN/Inf protection
+        let any_bad = correction.iter().any(|v| !v.is_finite());
+        if any_bad {
+            return;
+        }
+
+        // [cmd_847] Adaptive guard: correction が現在の sol より大きい場合は不安定（LDL 精度を
+        // 超えた虚偽の補正）として skip。ill-conditioned KKT で IR が暴れる病理を防ぐ。
+        // 根拠: 真の補正は元 sol より小さい高次補正のはず。同等以上の補正は LDL の precision
+        // 限界を超えて誤った方向を出している証左。BOYD2/CONT-300/QSHELL 等で IR を入れて
+        // PASS→TIMEOUT 退行した症状の対策。
+        let correction_inf = correction.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let sol_inf = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+        if correction_inf > sol_inf {
+            return;
+        }
+
+        for i in 0..n {
+            sol[i] += correction[i];
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // データ構造
@@ -67,6 +168,7 @@ pub(crate) fn predictor_step(
     r_primal: &[f64],
     sigma_vec: &[f64],
     fac: &LdlFactorizationAmd,
+    aug_mat: &CscMatrix,
     n: usize,
     m_ext: usize,
     mu: f64,
@@ -96,7 +198,8 @@ pub(crate) fn predictor_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_pred);
-    fac.solve(&rhs, &mut sol);
+    // [cmd_847] Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
     // augmented system: sol[..n]=dx_pred（未使用）, sol[n..]=dy_pred
     let dy_pred = sol[n..].to_vec();
@@ -161,6 +264,7 @@ pub(crate) fn corrector_step(
     r_primal: &[f64],
     sigma_vec: &[f64],
     fac: &LdlFactorizationAmd,
+    aug_mat: &CscMatrix,
     n: usize,
     m_ext: usize,
     dx: &mut [f64],
@@ -200,7 +304,8 @@ pub(crate) fn corrector_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_corr);
-    fac.solve(&rhs, &mut sol);
+    // [cmd_847] Iterative refinement で LDL solve 精度向上
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
     dx.copy_from_slice(&sol[..n]);
     dy.copy_from_slice(&sol[n..]);
@@ -238,6 +343,7 @@ pub(crate) fn gondzio_correctors(
     r_c_corr: &[f64],
     sigma_vec: &[f64],
     fac: &LdlFactorizationAmd,
+    aug_mat: &CscMatrix,
     n: usize,
     m_ext: usize,
     max_correctors: usize,
@@ -307,7 +413,8 @@ pub(crate) fn gondzio_correctors(
 
         rhs[..n].copy_from_slice(r_dual);
         rhs[n..].copy_from_slice(&r_p_mod_gondzio);
-        fac.solve(&rhs, &mut sol);
+        // [cmd_847] Iterative refinement で LDL solve 精度向上
+        solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
         let dx_new = sol[..n].to_vec();
         let dy_new = sol[n..].to_vec();

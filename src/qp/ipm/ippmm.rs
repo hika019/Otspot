@@ -566,6 +566,7 @@ pub(crate) fn solve_ippmm_inner(
         let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
+        let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
         // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 承認=cmd_520実装時設定・要検証
         for _retry in 0..10 {
             if timeout_ctx.should_stop() {
@@ -592,6 +593,7 @@ pub(crate) fn solve_ippmm_inner(
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
+                    aug_mat_opt = Some(aug_mat);
                     break;
                 }
                 Err(ldl::LdlError::DeadlineExceeded) => {
@@ -627,6 +629,7 @@ pub(crate) fn solve_ippmm_inner(
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
+                    aug_mat_opt = Some(aug_mat_fb);
                 }
                 Err(ldl::LdlError::DeadlineExceeded) => {
                     status = Some(SolveStatus::Timeout);
@@ -643,6 +646,9 @@ pub(crate) fn solve_ippmm_inner(
             Some(f) => f,
             None => return numerical_error_result(n),
         };
+        let aug_mat_for_ir = aug_mat_opt
+            .as_ref()
+            .expect("aug_mat_opt must be set when fac_opt is set");
 
         // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
 
@@ -650,7 +656,7 @@ pub(crate) fn solve_ippmm_inner(
         let pred = predictor_step(
             &s, &y, &is_eq_ext, m_ineq,
             &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-            &sigma_vec, &fac, n, m_ext, mu,
+            &sigma_vec, &fac, aug_mat_for_ir, n, m_ext, mu,
         );
 
         // ── Corrector ──────────────────────────────────────────────
@@ -658,7 +664,7 @@ pub(crate) fn solve_ippmm_inner(
             &s, &y, &is_eq_ext,
             &pred, mu,
             &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-            &sigma_vec, &fac, n, m_ext,
+            &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
             &mut dx, &mut dy, &mut ds,
         );
 
@@ -668,7 +674,7 @@ pub(crate) fn solve_ippmm_inner(
             alpha = gondzio_correctors(
                 &s, &y, &is_eq_ext, m_ineq,
                 &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-                &r_c_corr, &sigma_vec, &fac, n, m_ext,
+                &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
                 options.ipm.max_correctors, alpha,
                 &mut dx, &mut dy, &mut ds,
             );
@@ -679,9 +685,16 @@ pub(crate) fn solve_ippmm_inner(
         // sigma_max=1e17-1e19の問題で補正ステップの壊滅的キャンセルによりNaNが
         // 発生した際に、直前の有効な解でSuboptimalSolutionを返す。
         // unscale_ipm_result がpfeas/bfeas/dfeasを原空間で再検証してOptimalに昇格する。
+        // [cmd_847] Catastrophic blow-up（finite だが極端値）も検出。
+        // UBH1 で reg_limit=5e-12 まで降下後、KKT system が semi-definite に近づき
+        // LDL solve が dx_inf=1e290+ を返す病理。これも NaN 同等扱いで best 復帰。
+        const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
+        let direction_finite_but_huge = dx.iter().chain(dy.iter()).chain(ds.iter())
+            .any(|v| v.is_finite() && v.abs() > DIRECTION_BLOWUP_THRESHOLD);
         if dx.iter().any(|v| !v.is_finite())
             || dy.iter().any(|v| !v.is_finite())
             || ds.iter().any(|v| !v.is_finite())
+            || direction_finite_but_huge
         {
             // best-so-far 復帰: 崩壊した現在値ではなく最良残差時の解を返す
             if best_score.is_finite() {
