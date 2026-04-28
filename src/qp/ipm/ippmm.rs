@@ -499,8 +499,10 @@ pub(crate) fn solve_ippmm_inner(
                         .fold(0.0_f64, f64::max)
                 };
                 let norm_b_orig = norm_inf(&orig.b).max(1.0);
+                // [偽 Optimal 修正] Optimal_MethodC 判定にも成分相対 dfeas を追加
                 if pfeas_orig < eps_orig * (1.0 + norm_b_orig)
                     && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
+                    && nr_d_rel_orig < eps_orig
                     && mu < eps_orig
                 {
                     if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
