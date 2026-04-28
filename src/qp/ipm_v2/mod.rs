@@ -62,8 +62,19 @@ mod tests {
         let opts = SolverOptions::default();
         let r = solve_qp_v2(&prob, &opts);
         eprintln!("HS21 v2: status={:?} obj={} iters={}", r.status, r.objective, r.iterations);
+        eprintln!("  solution = {:?}", r.solution);
+        eprintln!("  dual_solution = {:?}", r.dual_solution);
+        eprintln!("  bound_duals = {:?}", r.bound_duals);
+        // 元空間 KKT を直接計算して値を見る
+        let view = super::outcome::ProblemView {
+            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+        };
+        let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+        let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+        let bv = super::kkt::bound_violation(&prob.bounds, &r.solution);
+        eprintln!("  KKT_rel={:.3e}, primal_rel={:.3e}, bound_viol={:.3e}", kkt, pres, bv);
         assert_eq!(r.status, SolveStatus::Optimal, "HS21 v2 should be Optimal");
-        // HS21 真値 ≈ 100.04 (obj_offset=100 込み)
         assert!((r.objective - 100.04).abs() < 1e-2,
             "HS21 obj expected ~100.04, got {}", r.objective);
     }

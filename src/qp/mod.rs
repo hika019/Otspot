@@ -1162,6 +1162,76 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// FX (固定) 変数判定の許容差。lb と ub の差がこれ未満なら固定変数とみなす。
 const FX_TOL: f64 = 1e-12;
 
+/// presolve で縮約された bound_duals を元問題空間に展開する。
+/// reduced_bounds に対応する bound_duals を、orig_bounds に対応する形で再構築。
+/// 除去された変数の bound_dual は 0.0 (近似) で埋める。
+///
+/// 旧 mod.rs::solve_qp_with L815-887 と同等のロジックを v2 から再利用するため抽出。
+pub(crate) fn remap_bound_duals_to_orig(
+    presolve_result: &crate::presolve::QpPresolveResult,
+    orig_bounds: &[(f64, f64)],
+    reduced_bound_duals: &[f64],
+) -> Vec<f64> {
+    let n_lb_orig = orig_bounds.iter().filter(|(lb, _)| lb.is_finite()).count();
+    let n_ub_orig = orig_bounds.iter().filter(|(_, ub)| ub.is_finite()).count();
+    if n_lb_orig + n_ub_orig == 0 {
+        return Vec::new();
+    }
+    let reduced_bounds = &presolve_result.reduced.bounds;
+    let n_lb_reduced = reduced_bounds.iter().filter(|(lb, _)| lb.is_finite()).count();
+    let n_reduced = reduced_bounds.len();
+
+    let mut lb_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
+    let mut ub_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
+    {
+        let mut li = 0usize;
+        for (jj, &(lb, _)) in reduced_bounds.iter().enumerate() {
+            if lb.is_finite() {
+                lb_bd_idx[jj] = Some(li);
+                li += 1;
+            }
+        }
+        let mut ui = 0usize;
+        for (jj, &(_, ub)) in reduced_bounds.iter().enumerate() {
+            if ub.is_finite() {
+                ub_bd_idx[jj] = Some(n_lb_reduced + ui);
+                ui += 1;
+            }
+        }
+    }
+
+    let mut new_bd = vec![0.0_f64; n_lb_orig + n_ub_orig];
+    if !reduced_bound_duals.is_empty() {
+        let mut orig_li = 0usize;
+        for (j, &(lb, _)) in orig_bounds.iter().enumerate() {
+            if lb.is_finite() {
+                if let Some(jj) = presolve_result.col_map[j] {
+                    if let Some(bd_idx) = lb_bd_idx[jj] {
+                        if bd_idx < reduced_bound_duals.len() {
+                            new_bd[orig_li] = reduced_bound_duals[bd_idx];
+                        }
+                    }
+                }
+                orig_li += 1;
+            }
+        }
+        let mut orig_ui = 0usize;
+        for (j, &(_, ub)) in orig_bounds.iter().enumerate() {
+            if ub.is_finite() {
+                if let Some(jj) = presolve_result.col_map[j] {
+                    if let Some(bd_idx) = ub_bd_idx[jj] {
+                        if bd_idx < reduced_bound_duals.len() {
+                            new_bd[n_lb_orig + orig_ui] = reduced_bound_duals[bd_idx];
+                        }
+                    }
+                }
+                orig_ui += 1;
+            }
+        }
+    }
+    new_bd
+}
+
 /// AAT に対角ε を追加して rank-deficient 対策する正則化倍率。
 /// ε = AAT_REG_FACTOR * max_diag で対角に加算。f64 epsilon (~2e-16) より十分上、
 /// LDL の dynamic regularization (1e-8) より十分下で衝突しない。

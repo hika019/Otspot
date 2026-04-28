@@ -140,6 +140,23 @@ fn finalize_outcome(
         ..Default::default()
     };
     let mut final_sol = postsolve_qp(presolve_result, &reduced_sol);
+    // bound_duals を元問題空間に remap (postsolve_qp は reduced 空間のままコピーするため)
+    if presolve_result.was_reduced {
+        final_sol.bound_duals = crate::qp::remap_bound_duals_to_orig(
+            presolve_result,
+            &_problem.bounds,
+            &final_sol.bound_duals,
+        );
+    }
+    // bounds clip (Ruiz unscale 増幅由来の微小違反を補正)
+    for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(_problem.bounds.iter()) {
+        if lb.is_finite() {
+            *xi = xi.max(lb);
+        }
+        if ub.is_finite() {
+            *xi = xi.min(ub);
+        }
+    }
 
     // ── 単一 status 決定 (元空間 KKT で判定) ──
     // 元問題で再検証 (presolve 後の reduced で KKT OK でも postsolve で違反する可能性)
