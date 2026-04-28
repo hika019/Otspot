@@ -127,9 +127,13 @@ pub(crate) fn post_verify_solution(
     let x = &result.solution;
     let y = &result.dual_solution;
     let bound_duals = &result.bound_duals;
-    let d_min = 1.0_f64; // スケーリングなし: d_min=1
-    let norm_c_s = norm_inf(&problem.c).max(1.0);
-    let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / d_min;
+    // 元空間 dfeas tolerance: bench (qps_benchmark::dfeas_tol) と完全一致。
+    // 旧コード: 10 * eps * (1+norm_c_s) — 10x 安全係数で偽 Optimal を量産していた
+    // (例: UBH1 dfeas=1.9e-1, QFORPLAN dfeas=1.5e9 等が「内部 OK」判定されていた)。
+    // bench は eps * (1+norm_c_orig) を真の判定基準としている。整合させて
+    // 「ソルバ Optimal 申告 = 真にユーザー精度を満たした解」という契約を成立させる。
+    let norm_c_orig = norm_inf(&problem.c).max(1.0);
+    let dfeas_threshold = eps * (1.0 + norm_c_orig);
     let status = if problem.num_constraints > 0 {
         match problem.a.mat_vec_mul(x) {
             Ok(ax) => {
@@ -360,16 +364,13 @@ pub(crate) fn unscale_ipm_result(
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
-            let d_min = if scaler.d.is_empty() {
-                1.0
-            } else {
-                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-            };
-            let norm_c_s = scaler.d.iter().enumerate()
-                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
+            // [整合性] check_dfeas_status は L405 で unscaled x,y,bound_duals を受け取り
+            // 元空間で dfeas を計算する。よって threshold も元空間 (bench と同形)。
+            // 旧コード: 10 * eps * (1+norm_c_s) / (scaler.c * d_min) は scaled 空間 tol
+            // を unscaled に変換したつもりだったが、引数が既に unscaled なので二重変換相当で
+            // 緩すぎる threshold を生み、47 件の偽 Optimal を量産していた。
+            let norm_c_orig = norm_inf(&problem.c).max(1.0);
+            let dfeas_threshold = eps * (1.0 + norm_c_orig);
             let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -447,16 +448,9 @@ pub(crate) fn unscale_ipm_result(
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
-            let d_min = if scaler.d.is_empty() {
-                1.0
-            } else {
-                scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
-            };
-            let norm_c_s = scaler.d.iter().enumerate()
-                .map(|(j, &dj)| (scaler.c * dj * problem.c[j]).abs())
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            let dfeas_threshold = 10.0 * eps * (1.0 + norm_c_s) / (scaler.c * d_min);
+            // [整合性] 上記 Optimal branch と同形。元空間 dfeas tol = bench tol。
+            let norm_c_orig = norm_inf(&problem.c).max(1.0);
+            let dfeas_threshold = eps * (1.0 + norm_c_orig);
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {

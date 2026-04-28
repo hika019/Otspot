@@ -100,29 +100,30 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
 /// ソルバの `result.dfeas` は内部 (Ruiz scaled) 空間の値で、unscale 後の
 /// 元空間 dfeas とは異なる。bench は「ユーザー指定 eps を元空間で満たすか」を
 /// 検証する役割なので、元 problem.q / problem.a / problem.c と unscale 済み解で
-/// 直接 KKT 残差 dfeas = ||Q*x + A^T*y + bound_contrib + c||_∞ を計算する。
+/// 直接 KKT 残差を計算する。
 ///
-/// この修正前は scaled dfeas を eps と比較しており、UBH1 のように内部 OK でも
-/// 元空間で乖離が大きいケースで「pfeas/dfeas 通過なのに obj 55% 乖離」という
-/// 矛盾した PASS 判定が起きていた。
+/// 戻り値: (絶対残差 dfeas_abs, 相対残差 dfeas_rel)
+/// - dfeas_abs = ||Q*x + A^T*y + bound_contrib + c||_∞ — 表示用
+/// - dfeas_rel = max_j |residual_j| / (1 + |Qx_j| + |A^Ty_j| + |bound_j| + |c_j|)
+///   — 判定用（OSQP/Clarabel 流の成分ごと相対化、巨大項キャンセレーション対応）
 fn compute_dfeas_orig(
     prob: &QpProblem,
     solution: &[f64],
     dual_solution: &[f64],
     bound_duals: &[f64],
-) -> f64 {
+) -> (f64, f64) {
     if solution.is_empty() || solution.len() != prob.num_vars {
-        return f64::NAN;
+        return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
     let qx = match prob.q.mat_vec_mul(solution) {
         Ok(v) => v,
-        Err(_) => return f64::NAN,
+        Err(_) => return (f64::NAN, f64::NAN),
     };
     let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
         match prob.a.transpose().mat_vec_mul(dual_solution) {
             Ok(v) => v,
-            Err(_) => return f64::NAN,
+            Err(_) => return (f64::NAN, f64::NAN),
         }
     } else {
         vec![0.0; n]
@@ -145,9 +146,15 @@ fn compute_dfeas_orig(
             }
         }
     }
-    (0..n)
-        .map(|i| (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs())
-        .fold(0.0_f64, f64::max)
+    let mut dfeas_abs = 0.0_f64;
+    let mut dfeas_rel = 0.0_f64;
+    for i in 0..n {
+        let r = (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs();
+        let scale = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
+        dfeas_abs = dfeas_abs.max(r);
+        dfeas_rel = dfeas_rel.max(r / scale);
+    }
+    (dfeas_abs, dfeas_rel)
 }
 
 /// 旧: ソルバ申告 dfeas を返す（後方互換のため残置、現状未使用）。
@@ -523,37 +530,40 @@ fn main() {
                         ),
                     )
                 } else {
-                    // Step 5: dfeas チェック（元空間で独立再計算 — ソルバ申告値は scaled）
-                    let dfeas = compute_dfeas_orig(
+                    // Step 5: dfeas チェック（元空間 + 成分ごと相対化）
+                    // 判定は dfeas_rel < eps (OSQP/Clarabel 流). dfeas_abs は表示用。
+                    // 相対化により ill-conditioned 問題 (QFORPLAN: |Qx|≈|A^Ty|≈1e9 で
+                    // キャンセル後の残差 1e3) でも妥当な精度を測れる。
+                    let (dfeas_abs, dfeas_rel) = compute_dfeas_orig(
                         &prob,
                         &result.solution,
                         &result.dual_solution,
                         &result.bound_duals,
                     );
-                    let norm_c = prob
-                        .c
-                        .iter()
-                        .map(|&x| x.abs())
-                        .fold(0.0_f64, f64::max)
-                        .max(1.0);
-                    let dfeas_tol = eps * (1.0 + norm_c);
 
-                    if !dfeas.is_nan() && dfeas > dfeas_tol {
+                    if !dfeas_rel.is_nan() && dfeas_rel > eps {
                         n_dfeas_fail += 1;
                         (
                             "DFEAS_FAIL".to_string(),
                             format!(
-                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} (dfeas_tol={:.1e})",
-                                method_label, result.objective, pfeas, dfeas, dfeas_tol
+                                "[{}] obj={:.2e} pf={:.1e} df={:.1e} dfr={:.1e} (eps={:.1e})",
+                                method_label, result.objective, pfeas, dfeas_abs, dfeas_rel, eps
                             ),
                         )
                     } else {
+                        let dfeas = dfeas_abs;
                         // Step 7-8: 相補性チェック（LP限定、QPスキップ）
                         let comp = if !is_qp {
                             compute_complementarity(&result.solution, &result.reduced_costs, &prob.bounds)
                         } else {
                             f64::NAN // QPでは相補性スキップ
                         };
+                        let norm_c = prob
+                            .c
+                            .iter()
+                            .map(|&x| x.abs())
+                            .fold(0.0_f64, f64::max)
+                            .max(1.0);
                         let norm_x = result
                             .solution
                             .iter()
@@ -686,16 +696,16 @@ fn main() {
                 {
                     let (_, bfeas) = compute_primal_quality(&prob, &result.solution);
                     let pfeas_norm = compute_pfeas_normalized(&prob, &result.solution);
-                    let df = compute_dfeas_orig(
+                    let (df_abs, df_rel) = compute_dfeas_orig(
                         &prob,
                         &result.solution,
                         &result.dual_solution,
                         &result.bound_duals,
                     );
-                    let df_str = if df.is_nan() {
+                    let df_str = if df_abs.is_nan() {
                         "df=NA".to_string()
                     } else {
-                        format!("df={:.1e}", df)
+                        format!("df={:.1e} dfr={:.1e}", df_abs, df_rel)
                     };
                     format!(
                         " obj={:.2e} pfn={:.1e} bf={:.1e} {}",
