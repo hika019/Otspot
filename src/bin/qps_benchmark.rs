@@ -95,10 +95,63 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     }
 }
 
-/// §2.2: dfeasチェック（solver内部値を使用）
+/// §2.2: dfeas 元空間再計算（ソルバ申告値ではなく bench 側で独立計算）
 ///
-/// result.dfeas が Some(v) ならそのまま返す。None → NAN（スキップ扱い）。
-/// transpose_mat_vec_mul が未実装のため外部再計算はスキップ。
+/// ソルバの `result.dfeas` は内部 (Ruiz scaled) 空間の値で、unscale 後の
+/// 元空間 dfeas とは異なる。bench は「ユーザー指定 eps を元空間で満たすか」を
+/// 検証する役割なので、元 problem.q / problem.a / problem.c と unscale 済み解で
+/// 直接 KKT 残差 dfeas = ||Q*x + A^T*y + bound_contrib + c||_∞ を計算する。
+///
+/// この修正前は scaled dfeas を eps と比較しており、UBH1 のように内部 OK でも
+/// 元空間で乖離が大きいケースで「pfeas/dfeas 通過なのに obj 55% 乖離」という
+/// 矛盾した PASS 判定が起きていた。
+fn compute_dfeas_orig(
+    prob: &QpProblem,
+    solution: &[f64],
+    dual_solution: &[f64],
+    bound_duals: &[f64],
+) -> f64 {
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    let n = solution.len();
+    let qx = match prob.q.mat_vec_mul(solution) {
+        Ok(v) => v,
+        Err(_) => return f64::NAN,
+    };
+    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
+        match prob.a.transpose().mat_vec_mul(dual_solution) {
+            Ok(v) => v,
+            Err(_) => return f64::NAN,
+        }
+    } else {
+        vec![0.0; n]
+    };
+    // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
+    // bound_duals レイアウト: [lb 有限の y_lb...; ub 有限の y_ub...]
+    let mut bound_contrib = vec![0.0_f64; n];
+    if !bound_duals.is_empty() {
+        let mut bd_idx = 0usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] -= bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] += bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+    }
+    (0..n)
+        .map(|i| (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs())
+        .fold(0.0_f64, f64::max)
+}
+
+/// 旧: ソルバ申告 dfeas を返す（後方互換のため残置、現状未使用）。
+#[allow(dead_code)]
 fn get_dfeas(result: &solver::problem::SolverResult) -> f64 {
     result.dfeas.unwrap_or(f64::NAN)
 }
@@ -470,8 +523,13 @@ fn main() {
                         ),
                     )
                 } else {
-                    // Step 5: dfeasチェック
-                    let dfeas = get_dfeas(&result);
+                    // Step 5: dfeas チェック（元空間で独立再計算 — ソルバ申告値は scaled）
+                    let dfeas = compute_dfeas_orig(
+                        &prob,
+                        &result.solution,
+                        &result.dual_solution,
+                        &result.bound_duals,
+                    );
                     let norm_c = prob
                         .c
                         .iter()
@@ -628,7 +686,12 @@ fn main() {
                 {
                     let (_, bfeas) = compute_primal_quality(&prob, &result.solution);
                     let pfeas_norm = compute_pfeas_normalized(&prob, &result.solution);
-                    let df = get_dfeas(&result);
+                    let df = compute_dfeas_orig(
+                        &prob,
+                        &result.solution,
+                        &result.dual_solution,
+                        &result.bound_duals,
+                    );
                     let df_str = if df.is_nan() {
                         "df=NA".to_string()
                     } else {
