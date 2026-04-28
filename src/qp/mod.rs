@@ -1007,9 +1007,49 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             }
             pv_last.expect("PV_RETRY_MAX >= 1")
         };
-        // iterative refinement: SuboptimalSolutionのとき、原問題空間でpfeasを改善（cmd_330）
-        // n <= 300 の問題のみ対象（refine::iterative_refine 内でチェック）
-        // Concurrent Solver経由でも solve_qp_with を通るため自動的に適用される（§6.2参照）
+        // iterative refinement: pfeas が eps を超過していれば原問題空間で改善する（cmd_330 拡張）
+        // 旧実装は Sub のみ呼んでいたが、Optimal で出てきた解でも元空間 pfeas 不足のケースが
+        // 多発する事実が判明 (HS268 等)。Optimal でも pfeas 不足なら IR を呼んで改善する。
+        let needs_ir = if !result.solution.is_empty()
+            && matches!(result.status, SolveStatus::SuboptimalSolution | SolveStatus::Optimal)
+        {
+            let eps_check = current_opts.ipm_eps();
+            // pfeas を計算
+            if problem.num_constraints > 0 {
+                if let Ok(ax) = problem.a.mat_vec_mul(&result.solution) {
+                    let pfeas = ax
+                        .iter()
+                        .zip(problem.b.iter())
+                        .zip(problem.constraint_types.iter())
+                        .zip(row_norms.iter())
+                        .map(|(((&ax_i, &b_i), ct), &rn)| {
+                            let v = match ct {
+                                crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                                crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                                _ => (ax_i - b_i).max(0.0),
+                            };
+                            v / (1.0 + rn + b_i.abs())
+                        })
+                        .fold(0.0_f64, f64::max);
+                    pfeas >= eps_check
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if needs_ir {
+            let eps = current_opts.ipm_eps();
+            let mut y = result.dual_solution.clone();
+            let mut z = result.bound_duals.clone();
+            refine::iterative_refine(problem, &mut result.solution, &mut y, &mut z, 5, eps);
+            result.dual_solution = y;
+            result.bound_duals = z;
+        }
+
         if result.status == SolveStatus::SuboptimalSolution && !result.solution.is_empty() {
             let eps = current_opts.ipm_eps();
             let mut y = result.dual_solution.clone();
