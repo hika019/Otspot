@@ -69,6 +69,10 @@ const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 /// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）
 const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
+/// μ がゼロとみなされる閾値。f64 機械精度 (~2.2e-16) のすぐ上で「実質 0」と判定する境界。
+/// 等式問題で μ=0 の極限に到達したケースの mu_rate 切替に使われる。
+const MU_ZERO_THRESHOLD: f64 = 1e-15;
+
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -546,7 +550,7 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // Σ = diag(s_i / y_i)（等式行は0）
-        let sigma_max = 1.0 / options.ipm.delta_min.max(1e-15);
+        let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
 
         // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
@@ -827,15 +831,15 @@ pub(crate) fn solve_ippmm_inner(
         } else {
             0.0
         };
-        let r = if mu > 1e-15 || mu_new > 1e-15 {
-            (mu - mu_new).abs() / mu.max(mu_new).max(1e-15)
+        let r = if mu > MU_ZERO_THRESHOLD || mu_new > MU_ZERO_THRESHOLD {
+            (mu - mu_new).abs() / mu.max(mu_new).max(MU_ZERO_THRESHOLD)
         } else {
             0.0
         };
 
-        // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でreg_limit)
-        // PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠
-        let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
+        // mu=0 等式問題では高速減衰 (mu_rate=0.9 → 乗数 0.1 → ~8 反復で reg_limit)
+        // PARAM: §35-B1, MATLAB 拡張版 IP-PMM_QP_Solver 準拠
+        let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
         // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
