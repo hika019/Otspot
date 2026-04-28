@@ -111,6 +111,7 @@ fn compute_dfeas_orig(
     solution: &[f64],
     dual_solution: &[f64],
     bound_duals: &[f64],
+    reduced_costs: &[f64],
 ) -> (f64, f64) {
     if solution.is_empty() || solution.len() != prob.num_vars {
         return (f64::NAN, f64::NAN);
@@ -129,7 +130,10 @@ fn compute_dfeas_orig(
         vec![0.0; n]
     };
     // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
-    // bound_duals レイアウト: [lb 有限の y_lb...; ub 有限の y_ub...]
+    // - QP/IPM 経路: bound_duals が [y_lb 群; y_ub 群] レイアウトで渡る
+    // - LP/Simplex 経路: bound_duals が空、reduced_costs (n 長) が同等情報を持つ
+    //   stationarity: c + A^T y + reduced_cost = 0 (LP 双対理論)
+    //   よって bound_contrib[j] = reduced_costs[j] (符号は Simplex 出力慣例)
     let mut bound_contrib = vec![0.0_f64; n];
     if !bound_duals.is_empty() {
         let mut bd_idx = 0usize;
@@ -145,10 +149,24 @@ fn compute_dfeas_orig(
                 bd_idx += 1;
             }
         }
+    } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
+        // LP 経路: reduced_cost を負号で取り込む（c + A^T y - rc = 0 を 0 = c + A^T y + bound_contrib に整列）
+        for j in 0..n {
+            bound_contrib[j] = -reduced_costs[j];
+        }
     }
     let mut dfeas_abs = 0.0_f64;
     let mut dfeas_rel = 0.0_f64;
     for i in 0..n {
+        // FX (固定) 変数 lb==ub は presolve で除去され、bound_dual は postsolve で
+        // 0 埋めされる（実装上 "lagrange dual unknown for fixed vars"）。bench で
+        // FX 変数の stationarity を評価すると 0 埋めの dual で huge な missing 項が
+        // 出るため除外する。FX 変数の x[i] は固定値で obj/制約への寄与は確定しており、
+        // free 変数の KKT 残差のみが「真の dual feasibility」。
+        let (lb_i, ub_i) = prob.bounds[i];
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
+            continue;
+        }
         let r = (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs();
         let scale = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
         dfeas_abs = dfeas_abs.max(r);
@@ -539,6 +557,7 @@ fn main() {
                         &result.solution,
                         &result.dual_solution,
                         &result.bound_duals,
+                        &result.reduced_costs,
                     );
 
                     if !dfeas_rel.is_nan() && dfeas_rel > eps {
@@ -701,6 +720,7 @@ fn main() {
                         &result.solution,
                         &result.dual_solution,
                         &result.bound_duals,
+                        &result.reduced_costs,
                     );
                     let df_str = if df_abs.is_nan() {
                         "df=NA".to_string()
