@@ -83,7 +83,7 @@ pub fn equality_constraint_qr(
         // 注意: b > 9.22e9 のとき i64 飽和が発生する可能性。
         // 実用的なQP問題では通常b≤1e6程度なので実害は稀だが、スケーリング後の内部値に注意。
         // 飽和時は異なるb値の行が同一ハッシュに衝突するが、正確性への影響なし（QR消去で実値判定）。
-        // 承認=家老承認済み（cmd_576）
+        // 承認=家老承認済み
         let bk = (prob.b[i].abs() * 1e9).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }
@@ -158,7 +158,7 @@ pub fn equality_constraint_qr(
         }
 
         // PARAM: 1e-10 — ピボット選択の最小値（実装的根拠）。EPS_Q と同値。
-        // 小さすぎるピボットは数値不安定を引き起こすためスキップ。承認=家老承認済み（cmd_576）
+        // 小さすぎるピボットは数値不安定を引き起こすためスキップ。承認=家老承認済み
         if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
             continue;
         }
@@ -174,7 +174,7 @@ pub fn equality_constraint_qr(
             }
             let factor = work[k][col] / pivot;
             // PARAM: 1e-15 — ほぼゼロな因子のスキップ閾値（実装的根拠）。DROP_TOL と同値。
-            // 数値誤差以下の消去は不要。承認=家老承認済み（cmd_576）
+            // 数値誤差以下の消去は不要。承認=家老承認済み
             if factor.abs() < 1e-15 {
                 continue;
             }

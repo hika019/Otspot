@@ -26,6 +26,7 @@ use crate::qp::problem::QpProblem;
 // scaling モジュールの公開関数を ipm 名前空間に再エクスポート
 pub(crate) use scaling::post_verify_solution;
 pub(crate) use scaling::check_dfeas_status_relative;
+pub(crate) use scaling::PROMOTION_GAP_TOL;
 #[cfg(test)]
 pub(crate) use scaling::check_dfeas_status;
 
@@ -399,7 +400,7 @@ mod tests {
     ///   mock解: x=[0.0] (KKT最適解: ∇f(0)=0, bounds非活性 → bound_duals=0)
     ///   dfeas = |Q*x + c + bound_contrib| = |2*0 + 0 + 0| = 0 < threshold
     ///
-    /// NOTE: このテストは bound_duals修正(cmd_503)後にdfeasチェックが有効になった。
+    /// NOTE: このテストは bound_duals修正後にdfeasチェックが有効になった。
     /// KKT最適解x=0を使用（旧x=0.5はdfeas=1.0でSUBに降格するため修正）。
     #[test]
     fn test_ipm_bfeas_within_bounds_preserved() {
@@ -570,7 +571,7 @@ mod tests {
     /// KKT: ε*x + 1 - y_lb = 0, x=1 → y_lb = ε + 1 ≈ 1.0
     /// → bound_duals[0] ≈ 1.0 (lb dual)
     ///
-    /// NOTE: bound_duals修正(cmd_503)後。y[m_orig..m_ext]が正しく計算される。
+    /// NOTE: bound_duals修正後。y[m_orig..m_ext]が正しく計算される。
     #[test]
     fn test_ipm_bound_duals_lb_only_active() {
         // min 1/2*0.001*x^2 + x s.t. x >= 1.0
@@ -605,7 +606,7 @@ mod tests {
     /// Q=[[ε]] (小さい正則化), c=[-1.0], bounds=[(-∞, 0.5)]
     /// KKT: ε*x - 1 + y_ub = 0, x=0.5 → y_ub = 1 - ε*0.5 ≈ 1.0
     ///
-    /// NOTE: bound_duals修正(cmd_503)後。lb有限変数なし→ub分のみ格納。
+    /// NOTE: bound_duals修正後。lb有限変数なし→ub分のみ格納。
     #[test]
     fn test_ipm_bound_duals_ub_only_active() {
         // min 1/2*0.001*x^2 - x s.t. x <= 0.5
@@ -638,7 +639,7 @@ mod tests {
     /// T4と同じ問題: min (x-2)^2 + (y-2)^2 s.t. 0<=x<=1, 0<=y<=1
     /// x*=y*=1 (ub活性), ub duals > 0, lb duals = 0 (lb非活性)
     ///
-    /// NOTE: bound_duals修正(cmd_503)後。
+    /// NOTE: bound_duals修正後。
     /// bound_duals格納順: lb_x, lb_y (index 0,1), ub_x, ub_y (index 2,3)
     /// x=y=1 (ub活性) → ub_duals > 0, lb_duals ≈ 0
     #[test]
@@ -655,7 +656,7 @@ mod tests {
         let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let result = solve_qp_ipm(&problem, &opts);
 
-        // NOTE: bound_duals修正(cmd_503)後もstatus=Optimalを維持することを確認。
+        // NOTE: bound_duals修正後もstatus=Optimalを維持することを確認。
         // もしSUBに変化する場合はKKT解析で原因を確認すること。
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T18: status");
         assert!((result.solution[0] - 1.0).abs() < 0.01, "IPM-T18: x*≈1.0");
@@ -735,7 +736,7 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: テスト不足 (△) 項目
+    // TDD赤フェーズ: テスト不足 (△) 項目
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// A2-T02: timeout_secs=0 で即停止（IPM版）
@@ -796,7 +797,7 @@ mod tests {
     }
 
     /// A5-S02: POST_VERIFY で SuboptimalSolution を外部 API から返さない
-    /// IPM/IPPMM パスでは SuboptimalSolution → Timeout 変換済み（cmd_582 以降）
+    /// IPM/IPPMM パスでは SuboptimalSolution → Timeout 変換済み
     #[test]
     fn test_a5s02_post_verify_no_false_optimal() {
         // SPEC: A5-S02
@@ -822,7 +823,7 @@ mod tests {
 
     /// IPM-T13: 大係数行と小係数行の混在ケースで小行の違反を行ノルム正規化で正しく検出
     ///
-    /// 背景 (cmd_680 QC-C M1 指摘):
+    /// 背景:
     ///   旧方式（norm_b: 全行を最大|b_i|で正規化）では、大係数行が norm_b を支配するため
     ///   小係数行の微小違反が eps 未満に見えて偽PASSになっていた。
     ///   新方式（行ノルム正規化: 各行を自身の行ノルムで正規化）ではこの問題が解消される。

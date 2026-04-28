@@ -1,4 +1,4 @@
-//! Randomised Nyström preconditioner for SPD matrices (cmd_295)
+//! Randomised Nyström preconditioner for SPD matrices
 //!
 //! Implements the algorithm of Frangella, Tropp & Udell (SIAM J. Matrix Anal. Appl. 2023).
 //!

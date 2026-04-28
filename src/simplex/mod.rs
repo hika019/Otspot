@@ -1101,7 +1101,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         basis[leaving_row] = entering_col;
 
         // 11. Refactor if needed
-        // cmd_171: timeout audit fix — deadline 付きで LU 再因子分解を実行
+        // timeout audit fix — deadline 付きで LU 再因子分解を実行
         basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
         // 特異基底または deadline 超過による再因子分解失敗 → 適切な結果を返す
         if basis_mgr.refactor_failed {
@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: バグ再現テスト (#[ignore]付き)
+    // TDD赤フェーズ: バグ再現テスト (#[ignore]付き)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// BUG-SX-002: LuBasis::new Err → 偽 Optimal（CRITICAL）
@@ -1758,11 +1758,11 @@ mod tests {
 
     /// BUG-SX-001: Simplex MaxIterations 生成（HIGH）
     /// Simplex 外部 API（solve_with）から SolveStatus::MaxIterations が返ってはならない。
-    /// SimplexOutcome::MaxIterations廃止（cmd_595）後: SimplexOutcome自体にMaxIterationsバリアントが存在しない。
+    /// SimplexOutcome::MaxIterations廃止後: SimplexOutcome自体にMaxIterationsバリアントが存在しない。
     /// refactor_failed = true かつ deadline 未設定の経路はTimeout（simplex/mod.rs, dual.rs）。
     #[test]
     fn test_sx001_solve_does_not_return_max_iterations() {
-        // SPEC: BUG-SX-001 — regression test（cmd_595修正後PASS）
+        // SPEC: BUG-SX-001 — regression test（修正後PASS）
         // SimplexOutcome::MaxIterations廃止により、SolveStatus::MaxIterationsへの経路が閉じた。
         for method in [SimplexMethod::Primal, SimplexMethod::Dual] {
             let lp = make_lp(
@@ -1790,10 +1790,10 @@ mod tests {
     }
 
     /// BUG-SX-003: refactor_failed + deadline 未設定 → Timeout（MEDIUM）
-    /// cmd_595修正後: SimplexOutcome::MaxIterations廃止。refactor_failed経路はTimeout。
+    /// SimplexOutcome::MaxIterations廃止後: refactor_failed経路はTimeout。
     #[test]
     fn test_sx003_refactor_failed_no_deadline_returns_timeout() {
-        // SPEC: BUG-SX-003 — regression test（cmd_595修正後PASS）
+        // SPEC: BUG-SX-003 — regression test（修正後PASS）
         // SimplexOutcome::MaxIterations廃止により、refactor_failed時はTimeoutが返る。
         use crate::simplex::pricing::DantzigPricing;
         // m=1, n=3 (cols: x1, x2, slack)
@@ -1815,7 +1815,7 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &mut basis, 1, 3, 3, &mut pricing, &opts,
         );
-        // cmd_595修正後: MaxIterations廃止 → Optimal または Timeout が返る
+        // MaxIterations廃止後 → Optimal または Timeout が返る
         assert!(
             matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_)),
             "BUG-SX-003: refactor_failed 時は Optimal または Timeout を返すべき（got: {:?}）",
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: テスト不足 (△) 項目
+    // TDD赤フェーズ: テスト不足 (△) 項目
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// A2-T01: timeout_secs 設定時の停止保証（K=2.0 以内）
@@ -2201,7 +2201,7 @@ mod tests {
     }
 }
 
-/// DualAdvanced warm-start integration tests (cmd_821 QC-C NG-2対応)
+/// DualAdvanced warm-start integration tests
 ///
 /// warm-start経路（dual_simplex_core_advanced）が実際に呼ばれることを確認する。
 /// SimplexMethod::DualAdvanced + warm_start で LP を解き、Optimal + cold-start一致を検証。

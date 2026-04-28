@@ -1,7 +1,6 @@
 //! IPM/IP-PMM 共通関数
 //!
 //! step.rs (IPM Mehrotra) と ippmm.rs (IP-PMM) で重複していた関数の共通化。
-//! cmd_730 で導入。
 
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;

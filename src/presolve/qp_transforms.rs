@@ -361,7 +361,7 @@ fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
 ///
 /// PARAM: 閾値=1e6（実装的根拠）。max(|A[i,*]|) > 1e6 の制約行を大係数行とみなし
 /// 行スケーリングを適用。1e6 は SCALE_WARN_THRESHOLD(1e8) より 100 倍小さく、
-/// Ruiz 収束前にスケールを整える早期介入の目安値。承認=家老承認済み（cmd_576）
+/// Ruiz 収束前にスケールを整える早期介入の目安値。承認=家老承認済み
 /// 戻り値: 各制約行の σ_i（postsolve で双対変数の逆変換に使用）
 fn apply_large_coeff_rescaling(
     a: &mut CscMatrix,
@@ -489,11 +489,11 @@ pub fn run_qp_presolve_phase1(
             // large-b guard: val が大きく A[i,j] も大きい場合、b が ±大値になり
             // IPM の収束が悪化する。代入をスキップし変数を tight bounds のまま残す。
             // PARAM: 閾値 1e5 — 経験値。max(|A[i,j]| * val) > 1e5 となる fixed-var 代入を
-            // スキップし IPM が bounds で自然に処理する。QFORPLAN バグ修正で実測設定（cmd_253）。
+            // スキップし IPM が bounds で自然に処理する。QFORPLAN バグ修正で実測設定。
             // 他 solver（Clarabel/OSQP/HiGHS）に類似ガードなし。本実装独自。
             // RUIZ_SKIP_LARGE_B_THRESHOLD(1e4) とは目的が異なる: こちらは fixed-var 代入時の
             // b 過大化防止、あちらは presolve Ruiz 干渉防止。
-            // 承認=家老承認済み（cmd_576）
+            // 承認=家老承認済み
             const LARGE_B_THRESHOLD: f64 = 1e5;
             let max_b_change: f64 = {
                 let col_start = prob.a.col_ptr[j];
@@ -609,7 +609,7 @@ pub fn run_qp_presolve_phase1(
             continue;
         }
 
-        // c[j] と制約方向を考慮した最適値を計算（cmd_353 バグ修正: 正しい再実装）
+        // c[j] と制約方向を考慮した最適値を計算（バグ修正: 正しい再実装）
         // 制約: a[i,j]*x[j] + rest <= b[i], lb <= x[j] <= ub
         // "aligned"ケース: 目的方向と制約緩和方向が一致 → 安全に固定可能
         // "conflicting"ケース: 制約を締める方向に目的が引く → スキップ（IPMに委ねる）
@@ -639,7 +639,7 @@ pub fn run_qp_presolve_phase1(
 
         apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
         removed_cols[j] = true;
-        // removed_rows[i] は設定しない: 行 i は他変数への制約として保持 (cmd_353 バグ修正)
+        // removed_rows[i] は設定しない: 行 i は他変数への制約として保持（バグ修正）
         // 行 i が空になった場合は後続の #4 empty_rows_cols で除去される
         postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
     }
@@ -941,11 +941,11 @@ pub fn run_qp_presolve_phase1(
     // PARAM: DENSE_ROW_THRESHOLD=500 — 経験値。n>>m 問題（HUES-MOD/HUESTIS: n=10000, m=4）
     // で各行に全変数が現れ、activity_range の残差 rest_lb=0 から
     // implied = b/a_ij（a_ij=1e-12 なら ≈5e14）が生成されて Ruiz スケール後に 1e26 へ
-    // 拡大し IPM の KKT 条件数が悪化して TIMEOUT する問題で設定（cmd_253）。
+    // 拡大し IPM の KKT 条件数が悪化して TIMEOUT する問題で設定。
     // HiGHS は max(1000, num_col/20) の適応閾値を使用。500 は固定で同程度のオーダー。
     // 注意: 大規模問題(n>>m)でimplied boundsが全スキップされる可能性。
     // n=10000以上の問題では効果なし。将来的に問題規模比例閾値への変更を検討。
-    // 承認=家老承認済み（cmd_576）
+    // 承認=家老承認済み
     // ==================================================================
     {
         const DENSE_ROW_THRESHOLD: usize = 500;
@@ -978,16 +978,16 @@ pub fn run_qp_presolve_phase1(
                     let implied_ub = (b[i] - rest_lb) / a_ij;
                     // PARAM: 1e8 — implied bound サニティ閾値（経験値）。元の bound が INF かつ
                     // |implied| > 1e8 の場合はスキップ。a_ij が微小（例: 1e-12）な場合に
-                    // implied ≈ 5e14 が生成されKKT条件数が悪化するのを防ぐ（cmd_253）。
+                    // implied ≈ 5e14 が生成されKKT条件数が悪化するのを防ぐ。
                     // HiGHS は feastol/kHighsTiny = 1e7 を使用。本実装は 10 倍緩い設定。
-                    // 承認=家老承認済み（cmd_576）
+                    // 承認=家老承認済み
                     if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
                         new_ub = implied_ub;
                     }
                 } else if a_ij < 0.0 && rest_lb_fin {
                     let implied_lb = (b[i] - rest_lb) / a_ij;
                     // PARAM: 1e8 — implied_lb サニティ閾値（implied_ub と対称。根拠同上）。
-                    // 承認=家老承認済み（cmd_576）
+                    // 承認=家老承認済み
                     if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
                         new_lb = implied_lb;
                     }
@@ -1311,7 +1311,7 @@ pub fn run_qp_presolve_phase1(
     // PARAM: 1e4 — 経験的閾値。|b|_max > 1e4 で presolve Ruiz をスキップ（dispatch段のRuizが処理）。
     //   LARGE_B_THRESHOLD(1e5)とは目的が異なる: こちらはpresolve Ruiz干渉防止、あちらはfixed-var代入スキップ。
     const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
-    // cmd_770: to_all_le()廃止により、Eq/Ge制約があってもdual長は変わらない。
+    // to_all_le()廃止により、Eq/Ge制約があってもdual長は変わらない。
     // presolve Ruizの適用条件からhas_non_leを除外。
     let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();

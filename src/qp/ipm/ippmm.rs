@@ -66,7 +66,7 @@ const DELTA_INIT: f64 = 8.0;
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 
 /// PMM 遅い減衰率（改善なし時に rho/delta をゆっくり減らす係数）
-/// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）| 承認=cmd_794 Phase 3
+/// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）
 const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
 
@@ -250,8 +250,8 @@ pub(crate) fn solve_ippmm_inner(
     };
     let _ = x0; let _ = y0; let _ = s0;
 
-    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離 | 承認=cmd_794 Phase 3
-    // 【履歴】cmd_833 redo5 で論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
+    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離
+    // 【履歴】論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
     // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
     let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
         5e-10  // LP: MATLAB拡張版準拠
@@ -287,17 +287,17 @@ pub(crate) fn solve_ippmm_inner(
     let mut best_s = s.clone();
     let mut best_iter: usize = 0;
     let mut best_residuals: (f64, f64, f64) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    // [cmd_841 Bug#1] best-so-far の rel_gap も保持。
+    // best-so-far の rel_gap も保持。
     // reject_false_*_bestsofar 経路で偽 Optimal 昇格を防ぐためのゲート用。
     let mut best_rel_gap: f64 = f64::INFINITY;
 
-    // [cmd_841 null-space] alpha 停滞検出。
+    // null-space: alpha 停滞検出。
     // UBH1 のように PMM proximal が null-space 方向に頭打ちし、line search が
     // alpha≈0 で止まるケースで 2273 iters 無駄回りするのを防ぐ。
     // 連続 ALPHA_STALL_N 回 alpha < ALPHA_STALL_EPS なら best-so-far で早期脱出。
     const ALPHA_STALL_EPS: f64 = 1e-8;
     const ALPHA_STALL_N: usize = 5;
-    // [cmd_846] deadlock 検出用（eps 非依存）: alpha=0 が長期継続＋rho/delta が reg_limit
+    // deadlock 検出用（eps 非依存）: alpha=0 が長期継続＋rho/delta が reg_limit
     // フロアに張り付いている場合、数値的に進めない状態。POST_VERIFY の eps 厳格化で
     // best_score < eps が成立しなくなった UBH1 型の無限ループ対策。
     const ALPHA_DEADLOCK_N: usize = 20;
@@ -338,7 +338,7 @@ pub(crate) fn solve_ippmm_inner(
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
 
-        // [cmd_841 Bug#1] 双対ギャップを best-so-far 更新前に算出。
+        // 双対ギャップを best-so-far 更新前に算出。
         // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
         // best 更新時に gap も記録し、reject_false 経路の偽 Optimal 昇格を防ぐ。
         let qx_dot_x: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
@@ -370,7 +370,7 @@ pub(crate) fn solve_ippmm_inner(
             }
         }
 
-        // Exp M trace [cmd_833 redo5, release-safe, env-gated]
+        // Exp M trace [release-safe, env-gated]
         if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
             let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
                 .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
@@ -393,7 +393,7 @@ pub(crate) fn solve_ippmm_inner(
         let eps = options.ipm_eps();
 
         // 原空間双対残差: r_d_orig[j] = r_d_scaled[j] / (c · d[j])
-        // スケール済み残差だけで収束宣言すると真の最適でない basin で止まる（UBH1 obj=2.12 事例, cmd_841）
+        // スケール済み残差だけで収束宣言すると真の最適でない basin で止まる（UBH1 obj=2.12 事例）
         let nr_d_orig = if let Some(sc) = scaler {
             let mut m = 0.0_f64;
             let limit = r_d.len().min(sc.d.len());
@@ -442,9 +442,9 @@ pub(crate) fn solve_ippmm_inner(
             max_rel
         };
 
-        // [cmd_841 Bug#1] rel_gap / DUALITY_GAP_TOL は上のブロックで計算済（best-so-far 更新前）。
+        // rel_gap / DUALITY_GAP_TOL は上のブロックで計算済（best-so-far 更新前）。
         // UBH1 (||x||≈1459, c=0, Q rank-deficient) で r_stat=2e-6・mu=1e-30 なのに
-        // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（cmd_841 Phase A 検証）。
+        // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（Phase A 検証）。
         // 3 族独立 solver (PIQP/Clarabel/OSQP) で UBH1 真値 1.116 を確認済。
 
         if nr_d < eps * (1.0 + norm_c)
@@ -466,7 +466,7 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // μ が reg_limit 以下で残差も eps 水準 → SuboptimalSolution
-        // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 承認=cmd_493実装時設定・要検証
+        // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 要検証
         let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
         if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p && rel_gap.abs() < DUALITY_GAP_TOL {
@@ -567,7 +567,7 @@ pub(crate) fn solve_ippmm_inner(
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
-        // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 承認=cmd_520実装時設定・要検証
+        // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 要検証
         for _retry in 0..10 {
             if timeout_ctx.should_stop() {
                 status = Some(SolveStatus::Timeout);
@@ -605,7 +605,7 @@ pub(crate) fn solve_ippmm_inner(
                     if rho_retry >= 1e0 {
                         break; // 上限到達 → あきらめ
                     }
-                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10は10進指数的探索の自然な選択（具体的倍率はソルバー実装依存）、上限1e0は条件数悪化問題が起きない経験的上限) | 承認=cmd_520実装時設定・要検証
+                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10は10進指数的探索の自然な選択（具体的倍率はソルバー実装依存）、上限1e0は条件数悪化問題が起きない経験的上限) | 要検証
                     rho_retry = (rho_retry * 10.0).min(1e0);
                     delta_matrix_retry = (delta_matrix_retry * 10.0).min(1e0);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
@@ -685,7 +685,7 @@ pub(crate) fn solve_ippmm_inner(
         // sigma_max=1e17-1e19の問題で補正ステップの壊滅的キャンセルによりNaNが
         // 発生した際に、直前の有効な解でSuboptimalSolutionを返す。
         // unscale_ipm_result がpfeas/bfeas/dfeasを原空間で再検証してOptimalに昇格する。
-        // [cmd_847] Catastrophic blow-up（finite だが極端値）も検出。
+        // Catastrophic blow-up（finite だが極端値）も検出。
         // UBH1 で reg_limit=5e-12 まで降下後、KKT system が semi-definite に近づき
         // LDL solve が dx_inf=1e290+ を返す病理。これも NaN 同等扱いで best 復帰。
         const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
@@ -729,7 +729,7 @@ pub(crate) fn solve_ippmm_inner(
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                 eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite());
             }
-            // [cmd_841 Bug#1] best_score は残差 (pf+df+mu) のみを評価。
+            // best_score は残差 (pf+df+mu) のみを評価。
             // UBH1 のように残差小でも gap 大な状態を best として抱え込む可能性があるため、
             // best_rel_gap も閾値内でないと Optimal 昇格しない。
             if best_score.is_finite()
@@ -759,7 +759,7 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // cmd_841: step magnitude trace（IPPMM_TRACE=1 のときのみ）
+        // step magnitude trace（IPPMM_TRACE=1 のときのみ）
         if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
             let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
@@ -773,7 +773,7 @@ pub(crate) fn solve_ippmm_inner(
         }
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
-        // [cmd_841 null-space] alpha 停滞早期脱出。
+        // null-space: alpha 停滞早期脱出。
         // alpha=0 が続く＝line search が進まない＝数値飽和または null-space 漂流。
         // best-so-far があればそれで Suboptimal 復帰、無ければ素で Suboptimal 脱出。
         if alpha < ALPHA_STALL_EPS {
@@ -786,7 +786,7 @@ pub(crate) fn solve_ippmm_inner(
         // QPILOTNO (best_score=2.5e-6) のような残差マージナルな問題では alpha-stall を発火させず、
         // 通常の timeout フローに任せる（DFEAS_FAIL として偽 Optimal を返すのを防ぐ）。
         let alpha_stall_converged = best_score.is_finite() && best_score < eps;
-        // [cmd_846] eps 非依存 deadlock gate。POST_VERIFY の eps 10x 厳格化で
+        // eps 非依存 deadlock gate。POST_VERIFY の eps 10x 厳格化で
         // best_score < eps が成立しなくなり alpha_stall_converged が永久 false となる
         // 病理（UBH1: 186 iter alpha=0 → さらに 24000+ iter alpha=0 継続）を断ち切る。
         // 条件: alpha=0 が 2N 連続＋rho/delta が reg_limit 付近＋best_score 有限
@@ -834,13 +834,13 @@ pub(crate) fn solve_ippmm_inner(
         };
 
         // MATLAB拡張版準拠: mu=0等式問題では高速減衰(mu_rate=0.9 → 乗数0.1 → ~8反復でreg_limit)
-        // PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠 | 承認=cmd_783
+        // PARAM: §35-B1 mu<1e-15時mu_rate=0.9 | 根拠=MATLAB拡張版IP-PMM_QP_Solver準拠
         let mu_rate_raw = if mu < 1e-15 && mu_new < 1e-15 { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
         // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
         // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
-        // 根拠: cmd_793設計書§A.5 | 承認=cmd_794
+        // 根拠: 設計書§A.5
         let either_improved = primal_improved || dual_improved;
         if either_improved {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
@@ -861,7 +861,7 @@ pub(crate) fn solve_ippmm_inner(
     // max_iter=usize::MAXで収束もtimeoutも起きなかった場合（理論上不可能）にTimeoutを返す。
     let status = status.unwrap_or(SolveStatus::Timeout);
 
-    // [cmd_842] Timeout/MaxIterations の素の終了経路で best-so-far に復帰。
+    // Timeout/MaxIterations の素の終了経路で best-so-far に復帰。
     // Why: alpha_stall/reject_false/NaN_guard の 3 経路は best_x 復帰するが、
     // 純粋な Timeout (timeout_ctx 検出) 経路はループ末尾の発散 x をそのまま返す。
     // QPILOTNO のような残差マージナル問題で alpha-stall が発火しない場合、
@@ -915,7 +915,7 @@ pub(crate) fn solve_ippmm_inner(
         pfeas: final_residuals.map(|(pf, _, _)| pf),
         dfeas: final_residuals.map(|(_, df, _)| df),
         gap: final_residuals.map(|(_, _, g)| g),
-        // [cmd_841 null-space] best-so-far の相対双対ギャップ。
+        // null-space: best-so-far の相対双対ギャップ。
         // unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
         // INFINITY なら未計測扱いで None を返す（全 iter で best 更新ゼロは異常系）。
         duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },

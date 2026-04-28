@@ -100,7 +100,7 @@ impl QpProblem {
     /// IPM用: Eq→2Le展開、Ge→符号反転Le変換した新QpProblemを返す。
     /// 全制約がLeの場合はcloneして返す。
     /// 戻り値: (変換後QpProblem, 元行→展開後行のマッピング)
-    #[deprecated(note = "cmd_770: IPMは等式ネイティブ化。build_extended_constraintsを使用")]
+    #[deprecated(note = "IPMは等式ネイティブ化。build_extended_constraintsを使用")]
     #[allow(deprecated)]
     pub fn to_all_le(&self) -> (QpProblem, LeExpansionMap) {
         // 全Leの場合はfastパス
@@ -234,7 +234,7 @@ impl QpProblem {
 /// Eq/Ge→Le展開のマッピング情報。
 /// IPM呼び出し後にdual_solutionを元行数に逆変換する際に使用。
 /// Le行: [new_row], Eq行: [new_row_le, new_row_neg_le], Ge行: [new_row_neg]
-#[deprecated(note = "cmd_770: to_all_le()廃止に伴い不要")]
+#[deprecated(note = "to_all_le()廃止に伴い不要")]
 pub struct LeExpansionMap {
     pub original_to_expanded: Vec<Vec<usize>>,
 }

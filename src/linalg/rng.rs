@@ -1,4 +1,4 @@
-//! XorShift128+ PRNG + Box–Muller Gaussian sampling (zero-dep, cmd_295)
+//! XorShift128+ PRNG + Box–Muller Gaussian sampling (zero-dep)
 
 /// XorShift128+ pseudo-random number generator.
 pub struct Xorshift128Plus {

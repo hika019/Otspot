@@ -18,6 +18,10 @@ use crate::qp::problem::QpProblem;
 const POST_VERIFY_MAX_RESOLV: usize = 3;
 /// eps 事前調整の下限（数値精度限界）
 pub(crate) const EPS_FLOOR: f64 = 1e-12;
+/// Suboptimal→Optimal 昇格ゲートの双対ギャップ閾値。
+/// 内部収束判定 (Optimal_main, 1e-3) より緩く post-hoc promotion 用途。
+/// 真の Optimal の双対ギャップは通常 1% 以下、UBH1 型の偽 Optimal は ~28% で弾く。
+pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
 // ---------------------------------------------------------------------------
 // 公開関数
@@ -63,7 +67,7 @@ where
                     (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
                 let mut adjusted_opts = options.clone();
                 adjusted_opts.ipm.eps = adjusted_eps;
-                // [cmd_846 R3] POST_VERIFY 各 attempt の budget を均等分割。
+                // POST_VERIFY 各 attempt の budget を均等分割。
                 // UBH1 型の病理（1 attempt が全予算を食い尽くし次 attempt に budget 残らない）回避。
                 // 残り時間 / 残り attempt 数 を per-attempt deadline とする。
                 adjusted_opts.deadline = effective_deadline.map(|total| {
@@ -168,14 +172,10 @@ pub(crate) fn post_verify_solution(
             bfeas_status
         }
     };
-    // [cmd_841 null-space] Suboptimal→Optimal 昇格ゲート（非スケールパス）。
-    // unscale_ipm_result 側と同じ方針。best-so-far の相対双対ギャップが閾値外なら
-    // pfeas/dfeas/bfeas が揃っていても Optimal に上げない。閾値 1e-1 の根拠は
-    // unscale_ipm_result の DUALITY_GAP_TOL コメント参照。
-    const DUALITY_GAP_TOL: f64 = 1e-1;
+    // Suboptimal→Optimal 昇格ゲート: 双対ギャップ閾値外なら Optimal に上げない。
     let status = if status == SolveStatus::Optimal {
         match result.duality_gap_rel {
-            Some(g) if g.abs() >= DUALITY_GAP_TOL => SolveStatus::SuboptimalSolution,
+            Some(g) if g.abs() >= PROMOTION_GAP_TOL => SolveStatus::SuboptimalSolution,
             _ => status,
         }
     } else {
@@ -265,7 +265,7 @@ pub(crate) fn check_dfeas_status(
     }
 }
 
-/// 成分ごとの相対dfeasチェック [cmd_824]
+/// 成分ごとの相対dfeasチェック
 ///
 /// pfeasの正規化パターン `violation / (1 + ||a_k|| + |b_k|)` に倣い、
 /// KKT双対残差を各成分のKKT項スケールで正規化する:
@@ -482,17 +482,11 @@ pub(crate) fn unscale_ipm_result(
                     bfeas_status
                 }
             };
-            // [cmd_841 null-space] Suboptimal→Optimal 昇格ゲート。
-            // 内部 best-so-far の相対双対ギャップが閾値外なら Optimal に上げない。
-            // UBH1 のように PMM null-space 漂流で残差小・ギャップ大となった解を
-            // 見かけ上の Optimal として返さないための最終防壁。
-            // 閾値 1e-1: UBH1 (28%) は弾き、STADAT1 (0.1%)・YAO (9%) など
-            // mu_floor/NaN_guard 経路でも pf/bf/df 合格する真 Optimal を誤って弾かない。
-            // 内部収束判定 (Optimal_main, 1e-3) より緩く、post-hoc promotion 用途。
-            const DUALITY_GAP_TOL: f64 = 1e-1;
+            // Suboptimal→Optimal 昇格ゲート: 双対ギャップ閾値外なら Optimal に上げない。
+            // UBH1 型の null-space 漂流で残差小・ギャップ大となった解を弾く最終防壁。
             let status = if status == SolveStatus::Optimal {
                 match result.duality_gap_rel {
-                    Some(g) if g.abs() >= DUALITY_GAP_TOL => SolveStatus::SuboptimalSolution,
+                    Some(g) if g.abs() >= PROMOTION_GAP_TOL => SolveStatus::SuboptimalSolution,
                     _ => status,
                 }
             } else {

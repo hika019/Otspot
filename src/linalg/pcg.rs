@@ -1,4 +1,4 @@
-//! Preconditioned Conjugate Gradient (PCG) solver (cmd_295)
+//! Preconditioned Conjugate Gradient (PCG) solver
 //!
 //! Solves the SPD linear system M x = b using a caller-supplied preconditioner P.
 

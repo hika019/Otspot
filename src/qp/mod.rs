@@ -307,7 +307,7 @@ fn solve_qp_concurrent(
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
-    // cmd_770: to_all_le()は全パスで廃止済み。IPMもSimplexもConstraintTypeをネイティブ処理。
+    // to_all_le()は全パスで廃止済み。IPMもSimplexもConstraintTypeをネイティブ処理。
     let lp = match LpProblem::new_general(
         problem.c.clone(),
         problem.a.clone(),
@@ -364,8 +364,8 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             duality_gap_rel: None,
         },
         SolveStatus::MaxIterations => {
-            // DEAD PATH: SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能。
-            // SolveStatus enum variant自体は未削除（別cmd対応）。
+            // DEAD PATH: SimplexOutcome::MaxIterations廃止により到達不能。
+            // SolveStatus enum variant自体は未削除。
             unreachable!("MaxIterations is dead code - not reachable via simplex path")
         }
         SolveStatus::SuboptimalSolution => {
@@ -590,7 +590,7 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 /// - Eq:  expanded[rows[0]] - expanded[rows[1]]
 ///
 /// 展開後のサイズと dual_expanded のサイズが一致しない場合はそのまま返す。
-#[deprecated(note = "cmd_770: to_all_le()廃止に伴いcollapse_extended_dualを使用")]
+#[deprecated(note = "to_all_le()廃止に伴いcollapse_extended_dualを使用")]
 #[allow(dead_code, deprecated)]
 pub(crate) fn collapse_le_expansion_dual(
     dual_expanded: &[f64],
@@ -695,7 +695,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     std::thread::Builder::new()
                         .stack_size(64 * 1024 * 1024)
                         .spawn(move || {
-                            // 短期対処。presolve内部へのdeadline伝播はcmd_403以降の課題。
+                            // 短期対処。presolve内部へのdeadline伝播は今後の課題。
                             let phase1 = run_qp_presolve_phase1(&problem_owned, &opts_owned);
                             let _ = tx.send(run_qp_presolve_phase2(phase1, &opts_owned));
                         })
@@ -715,7 +715,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
             return crate::problem::SolverResult::infeasible();
         }
-        // Bug-T2修正 (cmd_575): presolve後の残余時間を常にdeadlineとして設定する。
+        // Bug-T2修正: presolve後の残余時間を常にdeadlineとして設定する。
         // 大小規模問わず全ケースで残り時間を計算してdeadlineに変換することで、
         // presolve時間がtimeout予算に確実に算入される（UBH1 17.6s超過の原因を修正）。
         if current_opts.deadline.is_none() {
@@ -728,11 +728,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 current_opts.timeout_secs = None;
             }
         }
-        // post-verification retry ループ（cmd_400）
+        // post-verification retry ループ
         // Ruiz unscale 増幅によるpfeas/bfeas失敗を、tighter eps の再dispatch で解消する。
         // Ruizパスなし（presolve_result.ruiz_scaler.is_none()）のときは pv_try=0 のみ実行。
         const PV_RETRY_MAX: usize = 3;
-        // 行ノルム正規化pfeasチェック用: 行列Aはリトライ中に変わらないためループ外で1回だけ計算 [cmd_680]
+        // 行ノルム正規化pfeasチェック用: 行列Aはリトライ中に変わらないためループ外で1回だけ計算
         let row_norms = problem.a.row_infinity_norms();
         let mut result = {
             let mut pv_last: Option<SolverResult> = None;
@@ -743,7 +743,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     // PARAM: 1e-15 — post-verification の eps 調整下限（実装的根拠）。
                     // EPS_FLOOR=1e-12 より 1000 倍厳しい。double 精度限界（~2.2e-16）付近。
                     // tighten=10^pv_try の各段階で eps を 10 倍ずつ厳格化する際の安全弁。
-                    // 承認=家老承認済み（cmd_576）
+                    // 承認=家老承認済み
                     let adjusted_eps = (current_opts.ipm_eps() / tighten).max(1e-15);
                     let mut adj = current_opts.clone();
                     adj.ipm.eps = adjusted_eps;
@@ -754,7 +754,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     &current_opts
                 };
                 let mut reduced_sol = dispatch_qp(&presolve_result.reduced, pv_opts);
-                // IR補正（Ruiz-scaled空間）[cmd_337]
+                // IR補正（Ruiz-scaled空間）
                 if !reduced_sol.solution.is_empty() && presolve_result.ruiz_scaler.is_some() {
                     let reduced_problem = &presolve_result.reduced;
                     let eps = current_opts.ipm_eps();
@@ -809,10 +809,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         }
                     }
                 }
-                // cmd_770: IPMが等式ネイティブ化され、collapse_extended_dualでm_orig長のdualを返すため、
+                // IPMが等式ネイティブ化され、collapse_extended_dualでm_orig長のdualを返すため、
                 // to_all_le()ベースのdual折り畳みは不要。
                 let mut r = postsolve_qp(&presolve_result, &reduced_sol);
-                // bound_duals リマップ: 縮約後空間 → 元問題空間 [cmd_689]
+                // bound_duals リマップ: 縮約後空間 → 元問題空間
                 // IPM/IPPMMが返すbound_dualsは縮約後の有限境界変数に対して格納されているため、
                 // presolveで除去された変数を含む元問題空間に展開する。
                 // 処理順序: Ruiz unscale(完了済み) → postsolve_qp → 本リマップ → bounds clip
@@ -890,7 +890,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         r.bound_duals = new_bd;
                     }
                 }
-                // Ruiz unscale増幅由来のbounds微小違反を補正（clip）[cmd_400 (B)]
+                // Ruiz unscale増幅由来のbounds微小違反を補正（clip）
                 // scaled空間では境界内だがunscale後に微小違反が生じるケース（例: QPCBOEI2）に対応
                 if presolve_result.ruiz_scaler.is_some() && !r.solution.is_empty() {
                     for (xi, &(lb, ub)) in r.solution.iter_mut().zip(problem.bounds.iter()) {
@@ -924,7 +924,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                     let eps = current_opts.ipm_eps();
                     if problem.num_constraints > 0 {
                         // ax_opt（slack計算済み）があれば再利用（M5: 2重計算排除）、なければ独立計算
-                        // 行ノルム正規化pfeasチェック [cmd_680]
+                        // 行ノルム正規化pfeasチェック
                         // 判定式: max_k [ violation_k / (1 + ||a_k||_∞ + |b_k|) ] ≥ eps → SubOptimal
                         // row_norms はpv_retryループ外で1回だけ計算済み
                         let ax_for_pfeas = if let Some(ref ax) = ax_opt {
@@ -960,12 +960,12 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                                 lb_viol.max(ub_viol)
                             })
                             .fold(0.0_f64, f64::max);
-                        if bfeas >= eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
+                        if bfeas >= eps {  // 絶対閾値 eps（bnd_norm 不使用）
                             r.status = SolveStatus::SuboptimalSolution;
                         }
                     }
-                    // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証 [cmd_800]
-                    // 成分ごとの相対閾値: pfeas同様、各KKT項スケールで正規化 [cmd_824]
+                    // post-postsolve dfeasチェック: 元問題（unscaled）でKKT双対実現可能性を検証
+                    // 成分ごとの相対閾値: pfeas同様、各KKT項スケールで正規化
                     // BOYD1（b_max=3.75e12）ではQx≈-A^Tyの巨大項キャンセレーションが起き、
                     // 絶対閾値もグローバルノルム相対閾値も破綻する。成分ごとの正規化が必須。
                     // 閾値: Ruizアンスケーリング後はfloating point誤差が増幅されるため、
@@ -981,7 +981,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 }
                 // Ruizパスかつ SuboptimalSolution → 常にretry（tighter epsで精度改善の機会を与える）
                 // 旧: dfeas/gap > eps_nextならretryスキップしていたが、DTOC3の有効retryまでブロックしていた
-                // QFORPLAN保護は退行防止ガード(下記)が担当 [cmd_441]
+                // QFORPLAN保護は退行防止ガード(下記)が担当
                 if r.status == SolveStatus::SuboptimalSolution
                     && presolve_result.ruiz_scaler.is_some()
                     && pv_try + 1 < PV_RETRY_MAX
@@ -992,7 +992,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 // 退行防止ガード: retry後にOptimal/SubOptimal以外(NE/Timeout等)が返った場合、
                 // pv_lastにSubOptimalが残っていればそちらを採用。
                 // QFORPLAN事例: retry→NE(0iters) → 前回SubOptimalにフォールバック →
-                // 後段のIR/Ruiz再ソルブで最終PASS化 [cmd_441]
+                // 後段のIR/Ruiz再ソルブで最終PASS化
                 if pv_try > 0 {
                     if let Some(ref prev) = pv_last {
                         if prev.status == SolveStatus::SuboptimalSolution
@@ -1007,7 +1007,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             }
             pv_last.expect("PV_RETRY_MAX >= 1")
         };
-        // iterative refinement: pfeas が eps を超過していれば原問題空間で改善する（cmd_330 拡張）
+        // iterative refinement: pfeas が eps を超過していれば原問題空間で改善する
         // 旧実装は Sub のみ呼んでいたが、Optimal で出てきた解でも元空間 pfeas 不足のケースが
         // 多発する事実が判明 (HS268 等)。Optimal でも pfeas 不足なら IR を呼んで改善する。
         let needs_ir = if !result.solution.is_empty()
@@ -1055,7 +1055,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             let mut y = result.dual_solution.clone();
             let mut z = result.bound_duals.clone();
             if refine::iterative_refine(problem, &mut result.solution, &mut y, &mut z, 3, eps) {
-                // 対策A: bfeas再チェック — IRはpfeasのみ修正。bfeas起因のSuboptimalSolutionは維持 [cmd_337]
+                // 対策A: bfeas再チェック — IRはpfeasのみ修正。bfeas起因のSuboptimalSolutionは維持
                 let bfeas_after = result.solution.iter()
                     .zip(problem.bounds.iter())
                     .map(|(&xi, &(lb, ub))| {
@@ -1064,8 +1064,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                         lb_viol.max(ub_viol)
                     })
                     .fold(0.0_f64, f64::max);
-                if bfeas_after < eps {  // 絶対閾値 eps（bnd_norm 不使用）[cmd_400 (B)]
-                    // IR後pfeas_normalized再検証 [cmd_680 QC-C1修正]
+                if bfeas_after < eps {  // 絶対閾値 eps（bnd_norm 不使用）
+                    // IR後pfeas_normalized再検証
                     // IR内部は旧方式(norm_b)で収束判定するため、新方式(行ノルム正規化)で
                     // 再検証しないと偽Optimalがバイパスされる。
                     // row_normsはpv_retryループ外(L719)で計算済みを再利用。
@@ -1090,13 +1090,10 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                             }
                         }
                     }
-                    // [cmd_841 null-space] IR後 Suboptimal→Optimal 昇格ゲート。
-                    // 内部 best-so-far の相対双対ギャップが閾値外なら pfeas/bfeas OK でも Optimal に上げない。
-                    // IR は primal feasibility のみ改善するため、gap 大な null-space 解を昇格させてはならない。
-                    // 閾値 1e-1: scaling.rs 側の unscale_ipm_result と統一。詳細はそちらのコメント参照。
-                    const DUALITY_GAP_TOL_IR: f64 = 1e-1;
+                    // IR 後 Suboptimal→Optimal 昇格ゲート: 双対ギャップ閾値外なら昇格しない。
+                    // IR は primal feasibility のみ改善するため、gap 大な解を Optimal にしてはならない。
                     let gap_ok = match result.duality_gap_rel {
-                        Some(g) => g.abs() < DUALITY_GAP_TOL_IR,
+                        Some(g) => g.abs() < ipm::PROMOTION_GAP_TOL,
                         None => true, // 未計測は従来通り許容（他 solver 経路互換）
                     };
                     if ir_pfeas_ok && gap_ok {
@@ -1109,7 +1106,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 // else: bfeas起因のSuboptimalSolution維持
             }
         }
-        // Phase2: SuboptimalSolution時のRuiz無し再ソルブ（cmd_340→cmd_372非再帰化）
+        // Phase2: SuboptimalSolution時のRuiz無し再ソルブ（非再帰化）
         // Ruiz unscale増幅起因のSuboptimalSolutionに対して、use_ruiz_scaling=falseで再ソルブを試みる
         // loop+フラグ方式で再帰呼び出しを排除（スタックフレーム削減）
         if result.status == SolveStatus::SuboptimalSolution && current_opts.use_ruiz_scaling {
@@ -1148,15 +1145,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
             }
         }
 
-        // [dual refinement] primal x が確定したら、ソルバ出力 y を LSQ で再計算する。
-        // IPPMM は scaled 空間の収束基準で exit するため、unscale 後の元空間 dual が
-        // KKT を満たさないケースが頻発する (HS268: y≈1e-86, KKT 残差≈1e-2)。
-        // x が真の最適 (primal Optimal) ならば、KKT を満たす真の y は次の LSQ で求まる:
-        //   A^T y = -(Q*x + c) - bound_contrib(z)
-        // bound_contrib は既存 z (z_lb, z_ub) から計算 (active な j で nonzero)。
-        // free な j (active でない) では r_j = (Q*x+c+A^T*y)_j が 0 になるよう y を決める。
-        // 制約 m 個に対し free 変数 (n - n_active_bd) の方程式があり、典型に under-determined
-        // → 最小ノルム解で最も小さい y を選ぶ。
+        // 確定した primal x に対し KKT を満たす dual y を LSQ で再計算する
+        // (IPPMM が scaled 空間判定で出した偽 dual を補正)
         if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution)
             && !result.solution.is_empty()
             && problem.num_constraints > 0
@@ -1168,17 +1158,20 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     }
 }
 
-/// primal 解 x から、KKT を満たす dual y を最小二乗で再計算する。
+/// FX (固定) 変数判定の許容差。lb と ub の差がこれ未満なら固定変数とみなす。
+const FX_TOL: f64 = 1e-12;
+
+/// AAT に対角ε を追加して rank-deficient 対策する正則化倍率。
+/// ε = AAT_REG_FACTOR * max_diag で対角に加算。f64 epsilon (~2e-16) より十分上、
+/// LDL の dynamic regularization (1e-8) より十分下で衝突しない。
+const AAT_REG_FACTOR: f64 = 1e-12;
+
+/// primal x から KKT を満たす dual y を最小二乗で再計算する。
+/// IPPMM が scaled 空間判定で出した偽 dual を補正する。
 ///
-/// IPPMM が scaled 空間 KKT で exit してしまい unscale 後の元空間で KKT を満たさない
-/// 偽 dual が露呈する問題への post-process 修正。
-///
-/// 仕組み:
-/// - r[j] = -(Q*x + c)_j - bound_contrib(existing z)_j
-///   bound active な j では既存 z を信じて bound_contrib に組み込む
-/// - free な j (= bound 非 active な j) について A_free^T y = r_free を LSQ で解く
-/// - 正規方程式 (A_free * A_free^T) * y = A_free * r_free を LDL で解く
-/// - 解けない場合は既存の y を維持（refine 失敗）
+/// 解法: A^T y = -(Q*x + c + bound_contrib) の最小ノルム解を
+/// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
+/// 既存 y より KKT 残差が改善した場合のみ採用する (退行防止)。
 fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
     let n = problem.num_vars;
     let m = problem.num_constraints;
@@ -1191,36 +1184,11 @@ fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResul
         Err(_) => return,
     };
 
-    // bound_contrib (既存 z から計算)
-    let mut bound_contrib = vec![0.0_f64; n];
-    if !result.bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < result.bound_duals.len() {
-                bound_contrib[j] -= result.bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < result.bound_duals.len() {
-                bound_contrib[j] += result.bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    }
-
-    // r[j] = -(Q*x + c + bound_contrib)_j  → A^T y = r で解く
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
     let r_full: Vec<f64> = (0..n)
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
 
-    // 正規方程式 A * A^T * y = A * r （A_full を使う、bound active 列は除外）
-    // bound active な j は r_j を z で吸収すべきで A^T y で吸収しない方針。
-    // ここでは「全 j で A^T y = r」として LSQ を解く（active set 情報は使わない）。
-    // この単純化で free 変数のみ問題は完全に解け、active 問題は「ソルバ z + LSQ y の組合せ」
-    // でカバー範囲が広がる。
-    //
-    // m × n の A に対し AAT (m×m) を構築し LDL 分解、LSQ y を解く
     let aat = match build_aat_upper_csc(&problem.a, n, m) {
         Some(m_) => m_,
         None => return,
@@ -1230,7 +1198,6 @@ fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResul
         Err(_) => return,
     };
 
-    // rhs = A * r (m vector)
     let mut rhs = vec![0.0_f64; m];
     for j in 0..n {
         let start = problem.a.col_ptr[j];
@@ -1243,30 +1210,24 @@ fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResul
         }
     }
 
-    // y_new = (AAT)^{-1} * rhs
     let mut y_new = vec![0.0_f64; m];
     factor.solve(&rhs, &mut y_new);
-
-    // 数値妥当性チェック: y_new に NaN/Inf がないか
     if y_new.iter().any(|v| !v.is_finite()) {
         return;
     }
 
-    // refine 結果が既存 y より良ければ採用
-    let qx_ref = qx;
     let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; n]);
     let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; n]);
 
     let mut max_resid_old = 0.0_f64;
     let mut max_resid_new = 0.0_f64;
     for j in 0..n {
-        // FX 変数は除外（その dual は z で扱う想定）
         let (lbj, ubj) = problem.bounds[j];
-        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < 1e-12 {
+        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
             continue;
         }
-        let r_old = (qx_ref[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
-        let r_new = (qx_ref[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
+        let r_old = (qx[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
+        let r_new = (qx[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
         max_resid_old = max_resid_old.max(r_old);
         max_resid_new = max_resid_new.max(r_new);
     }
@@ -1275,53 +1236,64 @@ fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResul
     }
 }
 
-/// AAT 上三角 CSC 行列構築（refine.rs::build_ata_upper_csc を A^T → A 用に流用）
+/// 境界 dual から KKT stationarity の bound 寄与 (-y_lb + y_ub) を成分ごと計算する。
+/// `bound_duals` は [lb 有限な変数の y_lb 群; ub 有限な変数の y_ub 群] レイアウト。
+fn compute_bound_contrib(bounds: &[(f64, f64)], bound_duals: &[f64], n: usize) -> Vec<f64> {
+    let mut contrib = vec![0.0_f64; n];
+    if bound_duals.is_empty() {
+        return contrib;
+    }
+    let mut idx = 0usize;
+    for (j, &(lb, _)) in bounds.iter().enumerate() {
+        if lb.is_finite() && idx < bound_duals.len() {
+            contrib[j] -= bound_duals[idx];
+            idx += 1;
+        }
+    }
+    for (j, &(_, ub)) in bounds.iter().enumerate() {
+        if ub.is_finite() && idx < bound_duals.len() {
+            contrib[j] += bound_duals[idx];
+            idx += 1;
+        }
+    }
+    contrib
+}
+
+/// A * A^T (m×m, 上三角 CSC) を構築する。LDL 分解前提で対角に ε 正則化を加える。
+/// rank-deficient な A (重複制約等) でも factorize 可能になる。
 fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<CscMatrix> {
-    // AAT[i, j] = sum_k A[i, k] * A[j, k] (k は列, i,j は行)
-    // (A^T が n x m なら AAT は m x m)
-    // A は m x n CSC. 列 k のエントリ (i, A[i,k]).
-    // AAT[i, j] = sum_k A[i, k] * A[j, k]: A の列 k で row i, j 両方に non-zero がある k で加算
     use std::collections::BTreeMap;
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for k in 0..n {
         let start = a.col_ptr[k];
         let end = a.col_ptr[k + 1];
-        // 列 k の row indices
         let cols_in_k: Vec<(usize, f64)> = (start..end)
             .map(|p| (a.row_ind[p], a.values[p]))
             .collect();
         for (idx_a, &(i, v_i)) in cols_in_k.iter().enumerate() {
             for &(j, v_j) in &cols_in_k[idx_a..] {
-                // 上三角: i <= j
                 let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
                 *acc.entry((hi, lo)).or_insert(0.0) += v_i * v_j;
             }
         }
     }
-    // 対角に正則化 ε を追加（rank-deficient 対策）
     let max_diag = (0..m)
         .filter_map(|i| acc.get(&(i, i)).copied())
         .map(f64::abs)
         .fold(0.0_f64, f64::max)
         .max(1.0);
-    let eps = 1e-12 * max_diag;
+    let reg = AAT_REG_FACTOR * max_diag;
     for i in 0..m {
-        *acc.entry((i, i)).or_insert(0.0) += eps;
+        *acc.entry((i, i)).or_insert(0.0) += reg;
     }
-    // BTreeMap key (col, row) で col-first に並ぶ → CSC 構築
     let mut col_ptr = vec![0_usize; m + 1];
     let mut row_ind: Vec<usize> = Vec::with_capacity(acc.len());
     let mut values: Vec<f64> = Vec::with_capacity(acc.len());
     for ((col, row), val) in acc {
-        while col_ptr.len() <= col + 1 {
-            // already initialized to 0
-        }
-        col_ptr[col + 1] = col_ptr[col + 1].max(row_ind.len()); // dummy update
         row_ind.push(row);
         values.push(val);
         col_ptr[col + 1] = row_ind.len();
     }
-    // col_ptr の単調性を保証（空 col の対応）
     for i in 1..=m {
         if col_ptr[i] < col_ptr[i - 1] {
             col_ptr[i] = col_ptr[i - 1];
@@ -2335,16 +2307,16 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: バグ再現テスト（cmd_607で修正済み）
+    // TDD赤フェーズ: バグ再現テスト（修正済み）
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// BUG-QP-001: solve_as_lp が MaxIterations→NumericalError 変換（MEDIUM）
-    /// 修正（cmd_607）: qp/mod.rs の MaxIterations branch を unreachable!() に置換。
-    /// MaxIterations は SimplexOutcome::MaxIterations廃止（cmd_595）により到達不能なdead path。
+    /// 修正: qp/mod.rs の MaxIterations branch を unreachable!() に置換。
+    /// MaxIterations は SimplexOutcome::MaxIterations廃止により到達不能なdead path。
     #[test]
     fn test_qp001_solve_as_lp_no_numerical_error() {
         // SPEC: BUG-QP-001 — regression test
-        // MaxIterationsはsimplexパスから到達不能（cmd_595/cmd_607確認）のためPASS。
+        // MaxIterationsはsimplexパスから到達不能のためPASS。
         let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap(); // Q=0 → LP
         let c = vec![-1.0, -1.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -2366,7 +2338,7 @@ mod tests {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // cmd_589 TDD赤フェーズ: テスト不足 (△) 項目
+    // TDD赤フェーズ: テスト不足 (△) 項目
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     /// A2-T03: QP timeout_secs=None で有限ステップ収束
@@ -3029,7 +3001,7 @@ mod tests {
         }
     }
 
-    // ===== bound_duals col_mapリマップ テスト (BD-T1〜BD-T6) [cmd_689] =====
+    // ===== bound_duals col_mapリマップ テスト (BD-T1〜BD-T6) =====
 
     /// BD-T1: baseline（presolve OFF, 全変数有限境界あり）
     /// min 1/2*(0.001*x^2 + 0.001*y^2) + x + y
@@ -3225,7 +3197,7 @@ mod tests {
         assert!((result.bound_duals[5]).abs() < tol, "BD-T6: ub_z==0 (removed)");
     }
 
-    /// BD-T7: constraint active × lb_dual nonzero × KKT照合 [cmd_689]
+    /// BD-T7: constraint active × lb_dual nonzero × KKT照合
     ///
     /// min 1/2*(x^2 + y^2)
     /// s.t. -x - y <= -3  (等価: x + y >= 3, 常にactive at optimal)
@@ -3300,7 +3272,7 @@ mod tests {
         assert!((norms[1] - 2.5).abs() < 1e-15, "row1 norm: expected 2.5, got {}", norms[1]);
     }
 
-    /// 大係数行と小係数行が混在するケースで行ノルム正規化pfeasが正しく機能するテスト [cmd_680]
+    /// 大係数行と小係数行が混在するケースで行ノルム正規化pfeasが正しく機能するテスト
     ///
     /// 行ノルム正規化なしでは大係数行の残差が全体のpfeasを支配して偽SubOptimalになるが、
     /// 行ノルム正規化ありでは正規化残差が小さく正しくOptimal判定されることを確認
@@ -3351,7 +3323,7 @@ mod tests {
         assert!(pfeas_normalized < eps, "正規化pfeasはeps未満であるべき: {}", pfeas_normalized);
     }
 
-    /// 正規化なしでは判定が歪むが正規化ありで正しく判定できるケース [cmd_680]
+    /// 正規化なしでは判定が歪むが正規化ありで正しく判定できるケース
     #[test]
     fn test_pfeas_row_norm_false_suboptimal_prevention() {
         // b=0の大係数行: 1e6*x = 0 (等号制約として)
@@ -3384,7 +3356,7 @@ mod tests {
 
     // ========== C-QP: Ge制約防御テスト ==========
 
-    /// C-QP: Ge制約防御テスト（cmd_788 subtask_788b）
+    /// C-QP: Ge制約防御テスト
     /// min x²+y²  s.t. x+y≥1 (ConstraintType::Ge)
     /// QpProblem::new() 使用。期待: Optimal, x=y=0.5
     #[test]
@@ -3408,7 +3380,7 @@ mod tests {
 
     // ========== D: Mixed（Ge含む）防御テスト ==========
 
-    /// D: Mixed Ge+Le防御テスト（cmd_788 subtask_788b）
+    /// D: Mixed Ge+Le防御テスト
     /// min x²+y²  s.t. x+y≥0.5 (Ge), x-y≤1 (Le)
     /// 期待: Optimal, x=y=0.25
     /// NOTE: presolveバグあり（mixed Ge+Leでpresolve ONのとき制約タイプが誤変換される）。
@@ -3448,7 +3420,7 @@ mod tests {
 
     // ========== E: Concurrent制約タイプ別テスト ==========
 
-    /// E-Eq: Concurrent Eq制約テスト（cmd_788 subtask_788b）
+    /// E-Eq: Concurrent Eq制約テスト
     /// min x²+y²  s.t. x+y=1 (Eq)
     /// 期待: Optimal, x=y=0.5
     #[cfg(feature = "parallel")]
@@ -3471,7 +3443,7 @@ mod tests {
         assert_close(result.solution[1], 0.5, EPS, "E-Eq: x[1]");
     }
 
-    /// E-Ge: Concurrent Ge制約テスト（cmd_788 subtask_788b）
+    /// E-Ge: Concurrent Ge制約テスト
     /// min x²+y²  s.t. x+y≥1 (Ge)
     /// 期待: Optimal, x=y=0.5
     #[cfg(feature = "parallel")]
@@ -3494,7 +3466,7 @@ mod tests {
         assert_close(result.solution[1], 0.5, EPS, "E-Ge: x[1]");
     }
 
-    /// E-Box: Concurrent Box制約テスト（cmd_788 subtask_788b）
+    /// E-Box: Concurrent Box制約テスト
     /// min x²+y²  s.t. 0≤x≤1, 0≤y≤1
     /// 期待: Optimal, x=y=0
     #[cfg(feature = "parallel")]
@@ -3516,7 +3488,7 @@ mod tests {
         assert_close(result.solution[1], 0.0, EPS, "E-Box: x[1]");
     }
 
-    /// E-Mixed: Concurrent Mixed(Le+Eq)テスト（cmd_788 subtask_788b）
+    /// E-Mixed: Concurrent Mixed(Le+Eq)テスト
     /// min x²+y²  s.t. x+y=1 (Eq), x≤1 (Le)
     /// 期待: Optimal, x=y=0.5
     #[cfg(feature = "parallel")]
@@ -3548,7 +3520,7 @@ mod tests {
         assert_close(result.solution[1], 0.5, EPS, "E-Mixed: x[1]");
     }
 
-    /// E-Unconstrained: Concurrent 無制約テスト（cmd_788 subtask_788b）
+    /// E-Unconstrained: Concurrent 無制約テスト
     /// min (x-1)²+(y-1)²  （制約なし）
     /// 期待: Optimal, x=y=1
     #[cfg(feature = "parallel")]
@@ -3572,7 +3544,7 @@ mod tests {
 
     // ========== F: 退化ケーステスト ==========
 
-    /// F-QP-Fixed: 全変数固定退化ケース（cmd_788 subtask_788fix）
+    /// F-QP-Fixed: 全変数固定退化ケース
     /// min x² s.t. bounds=(1.0, 1.0)（全変数固定）
     /// Q=I(1x1), c=[0], A=空(0×1), b=[], presolve=false（presolveバグ回避）
     /// 期待: Optimal, x=1.0
@@ -3596,7 +3568,7 @@ mod tests {
 
     // ========== G: ステータスマッピング検証テスト ==========
 
-    /// G-1: SuboptimalSolution→Optimal変換確認（cmd_788 subtask_788b）
+    /// G-1: SuboptimalSolution→Optimal変換確認
     /// timeout=2秒付き簡単問題 → 外部APIにSuboptimalSolutionが漏れないことを確認
     #[test]
     fn test_suboptimal_to_optimal_mapping() {
@@ -3625,7 +3597,7 @@ mod tests {
         );
     }
 
-    /// G-2: MaxIterations→Timeout変換確認（cmd_788 subtask_788b）
+    /// G-2: MaxIterations→Timeout変換確認
     /// max_iter=1 で最大反復到達 → 外部APIにMaxIterationsが漏れないことを確認
     #[test]
     fn test_max_iterations_to_timeout_mapping() {
@@ -3655,7 +3627,7 @@ mod tests {
 
     // ========== H: presolve ON/OFF比較テスト ==========
 
-    /// H-1: Eq制約QP presolve ON/OFF比較（cmd_788 subtask_788b）
+    /// H-1: Eq制約QP presolve ON/OFF比較
     /// min x²+y²  s.t. x+y=1 (Eq) を presolve ON/OFF両方で解き、解一致を確認
     #[test]
     fn test_presolve_qp_eq_on_off_consistency() {
@@ -3686,7 +3658,7 @@ mod tests {
         );
     }
 
-    /// H-2: Box制約QP presolve ON/OFF比較（cmd_788 subtask_788b）
+    /// H-2: Box制約QP presolve ON/OFF比較
     /// min x²+y²  s.t. 0≤x≤2, 0≤y≤2 を presolve ON/OFF両方で解き、解一致を確認
     #[test]
     fn test_presolve_qp_box_on_off_consistency() {
@@ -3713,7 +3685,7 @@ mod tests {
         assert_close(result_off.solution[1], 0.0, EPS, "H-2: presolve OFF x[1]");
     }
 
-    /// H-3: Ge制約QP + presolve（cmd_788 subtask_788b）
+    /// H-3: Ge制約QP + presolve
     /// min x²+y²  s.t. x+y≥1 (Ge) + presolve ON → Optimal確認
     #[test]
     fn test_qp_ge_constraint_with_presolve() {
@@ -3732,7 +3704,7 @@ mod tests {
         assert_close(result.solution[1], 0.5, EPS, "H-3: x[1]");
     }
 
-    /// H-4: Mixed(Ge+Le)QP presolve無効化テスト（cmd_788 subtask_788b）
+    /// H-4: Mixed(Ge+Le)QP presolve無効化テスト
     /// min x²+y²  s.t. x+y≥0.5 (Ge), x-y≤1 (Le) + presolve=false → Optimal確認
     /// NOTE: mixed Ge+Le + presolve ONにはpresolveバグがある（制約タイプ誤変換）。
     ///       presolve=false でソルバー本体の mixed Ge+Le 処理が正しいことを確認する。
@@ -3765,7 +3737,7 @@ mod tests {
         assert_close(result.solution[1], 0.25, EPS, "H-4: x[1]");
     }
 
-    /// H-5: Mixed(Ge+Le)QP presolve=ON + Ruiz=ON regression test [cmd_800]
+    /// H-5: Mixed(Ge+Le)QP presolve=ON + Ruiz=ON regression test
     ///
     /// pfeas不等号バグ修正の回帰テスト。
     /// バグ再現条件: presolve=ON + Ruiz=ON + Ge+Le混在（B-1パターン直接再現）
@@ -3826,7 +3798,7 @@ mod tests {
     }
 
     // ===================================================================
-    // dfeas 相対閾値テスト群 [cmd_824]
+    // dfeas 相対閾値テスト群
     // ===================================================================
 
     /// D-1: 正常なQP解ではdfeasチェックがOptimalを維持する

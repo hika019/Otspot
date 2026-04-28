@@ -1,4 +1,4 @@
-//! QPS/QPLIB → JSON dump utility（cmd_843 baseline校正用）
+//! QPS/QPLIB → JSON dump utility（baseline校正用）
 //!
 //! 外部 solver (PIQP/Clarabel/OSQP) に食わせるため、問題行列を JSON で吐き出す。
 //! 形式: {

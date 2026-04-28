@@ -73,7 +73,7 @@ impl LuBasis {
 
     /// 数値安定性を検査し、必要であれば deadline 付きで基底行列を再因子分解する。
     ///
-    /// # cmd_171: timeout audit fix
+    /// # timeout audit fix
     /// refactor_if_needed の deadline 対応版。O(m²〜m³) の LU 再因子分解に
     /// deadline を渡すことで大規模 Simplex でのハングを防止する。
     /// 特異基底または deadline 超過どちらの場合も `refactor_failed = true` を設定する。

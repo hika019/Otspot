@@ -15,7 +15,7 @@ use crate::sparse::CscMatrix;
 use super::common::fraction_to_boundary_masked;
 use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 
-/// [cmd_847] Iterative refinement of LDL solve.
+/// Iterative refinement of LDL solve.
 ///
 /// fac.solve produces sol approximating K * sol = rhs. With LDL precision limit
 /// (rank-deficient K, large condition number), sol may have residual = rhs - K*sol
@@ -46,7 +46,7 @@ pub(crate) fn solve_with_iterative_refinement(
         return;
     }
 
-    // [cmd_847] 大型問題では IR の overhead が deadline を圧迫する。
+    // 大型問題では IR の overhead が deadline を圧迫する。
     // BOYD2 (n+m_ext≈280k) で 1 反復 LDL ~30s なので IR で 2x 遅化 → 100s 予算超過。
     // 100k を境界として大型問題は IR skip（baseline 動作維持）。
     // 中小問題 (UBH1 30k / DPKLO1 0.2k 等) では IR を有効化して rank-deficient 対応。
@@ -98,7 +98,7 @@ pub(crate) fn solve_with_iterative_refinement(
             return;
         }
 
-        // [cmd_847] Adaptive guard: correction が現在の sol より大きい場合は不安定（LDL 精度を
+        // Adaptive guard: correction が現在の sol より大きい場合は不安定（LDL 精度を
         // 超えた虚偽の補正）として skip。ill-conditioned KKT で IR が暴れる病理を防ぐ。
         // 根拠: 真の補正は元 sol より小さい高次補正のはず。同等以上の補正は LDL の precision
         // 限界を超えて誤った方向を出している証左。BOYD2/CONT-300/QSHELL 等で IR を入れて
@@ -198,7 +198,7 @@ pub(crate) fn predictor_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_pred);
-    // [cmd_847] Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）
+    // Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）
     solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
     // augmented system: sol[..n]=dx_pred（未使用）, sol[n..]=dy_pred
@@ -304,7 +304,7 @@ pub(crate) fn corrector_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_corr);
-    // [cmd_847] Iterative refinement で LDL solve 精度向上
+    // Iterative refinement で LDL solve 精度向上
     solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
     dx.copy_from_slice(&sol[..n]);
@@ -413,7 +413,7 @@ pub(crate) fn gondzio_correctors(
 
         rhs[..n].copy_from_slice(r_dual);
         rhs[n..].copy_from_slice(&r_p_mod_gondzio);
-        // [cmd_847] Iterative refinement で LDL solve 精度向上
+        // Iterative refinement で LDL solve 精度向上
         solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
 
         let dx_new = sol[..n].to_vec();

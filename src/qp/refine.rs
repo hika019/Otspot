@@ -1,9 +1,9 @@
-//! Iterative Refinement for QP solutions (cmd_330)
+//! Iterative Refinement for QP solutions
 //!
 //! E2: Primal-only refinement — post-postsolve検証でSuboptimalSolutionと判定された解に対して
 //! 原問題空間で正規方程式 A^T*A*δx = -A^T*r_p を解き、primal feasibilityを改善する。
 //!
-//! cmd_332 C3対応: 疎A^T*A構築によりnサイズ制限を撤廃。
+//! 疎A^T*A構築によりnサイズ制限を撤廃。
 
 use crate::linalg::ldl;
 use crate::sparse::CscMatrix;
@@ -75,7 +75,7 @@ pub fn iterative_refine(
             return true;
         }
 
-        // 対策D: 発散防止 — pfeasが10%超増加したら打ち切り [cmd_337]
+        // 対策D: 発散防止 — pfeasが10%超増加したら打ち切り
         if pfeas > prev_pfeas * 1.1 {
             break;
         }

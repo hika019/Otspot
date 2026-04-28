@@ -88,11 +88,11 @@ pub(crate) fn solve_qp_ipm_inner(
     let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
-    // [cmd_845] 双対ギャップ（scaled）。毎反復更新し、return 時 SolverResult.duality_gap_rel に populate。
+    // 双対ギャップ（scaled）。毎反復更新し、return 時 SolverResult.duality_gap_rel に populate。
     // ippmm.rs:340-350 と同一定義で、ipm 側の rel_gap ゲート非対称性を解消する。
     let mut final_rel_gap: f64 = f64::INFINITY;
 
-    // [cmd_845] 収束判定に併用する相対ギャップ閾値。ippmm.rs 内部判定と同一。
+    // 収束判定に併用する相対ギャップ閾値。ippmm.rs 内部判定と同一。
     const DUALITY_GAP_TOL: f64 = 1e-3;
 
     // C-1: mu非依存proximal正則化（rho_ipmフロア）
@@ -131,7 +131,7 @@ pub(crate) fn solve_qp_ipm_inner(
         // 最終残差を更新（収束・MaxIterations・Timeout いずれの場合も最後の値を保持）
         final_residuals = Some((norm_inf(&r_p), norm_inf(&r_d), mu));
 
-        // [cmd_845] 双対ギャップ（scaled）を算出。ippmm.rs:340-350 と同一定義。
+        // 双対ギャップ（scaled）を算出。ippmm.rs:340-350 と同一定義。
         // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
         // UBH1 (||x||≈1459, c=0, Q rank-deficient) では r_stat=2e-6・mu=1e-30 でも
         // duality_gap = 9.49（obj 91% 誤差）になる既知事例があり、rel_gap ゲートで棄却する。
@@ -167,7 +167,7 @@ pub(crate) fn solve_qp_ipm_inner(
         // μ が正則化下限以下まで収縮し、残差も eps 水準以下なら SuboptimalSolution
         // （delta_min バイアスにより完全収束不能だが実用精度に達している状態を検出）
         // 閾値 = max(eps*(1+norm), delta_min*10): 正則化限界(~delta_min)の10倍をフロアとする
-        // delta_min*100(旧)はpv_retry時にeps連動を阻害しDTOC3退行を引き起こした[cmd_441]
+        // delta_min*100(旧)はpv_retry時にeps連動を阻害しDTOC3退行を引き起こした
         let thr_d = (eps * (1.0 + norm_c)).max(options.ipm.delta_min * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(options.ipm.delta_min * 10.0);
         if mu < options.ipm.delta_min * 1e-2
@@ -257,7 +257,7 @@ pub(crate) fn solve_qp_ipm_inner(
             if let Some(cache) = kkt_cache.as_mut() {
                 // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
                 update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d_retry);
-                // Bug-T1修正 (cmd_575): refactorize_numeric_threaded は事実上同期実行であり
+                // Bug-T1修正: refactorize_numeric_threaded は事実上同期実行であり
                 // 大規模行列の再因子化中は deadline チェック不可（157s超過の主因）。
                 // factorize_quasidefinite_with_cached_perm_threaded（真のスレッド版）に統一する。
                 // symbolic 再計算コストは増えるが deadline 安全性が保証される。
@@ -367,7 +367,7 @@ pub(crate) fn solve_qp_ipm_inner(
                     // identity fallback も失敗 → fac_cache は None のまま → M-02
                 }
             }
-            // C1バグ修正 (cmd_575): identity perm で因子化したため kkt_cache と
+            // C1バグ修正: identity perm で因子化したため kkt_cache と
             // amd_perm_cache は整合しない（amd_perm_cache=None, kkt_cache=Some の状態）。
             // kkt_cache を None にリセットし、次反復で AMD 再計算＋フル初期化させる。
             kkt_cache = None;
@@ -445,7 +445,7 @@ pub(crate) fn solve_qp_ipm_inner(
         pfeas: final_residuals.map(|(pf, _, _)| pf),
         dfeas: final_residuals.map(|(_, df, _)| df),
         gap: final_residuals.map(|(_, _, g)| g),
-        // [cmd_845] scaling.rs の rel_gap ゲート (1e-1) を発火させるため populate。
+        // scaling.rs の rel_gap ゲート (1e-1) を発火させるため populate。
         // ippmm.rs:858 と対称。未計算 (INFINITY) は None のまま（従来挙動互換）。
         duality_gap_rel: if final_rel_gap.is_finite() { Some(final_rel_gap) } else { None },
         ..Default::default()

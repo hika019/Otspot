@@ -1,4 +1,4 @@
-//! faer high-level LDL^T wrapper for sparse linear systems (cmd_275)
+//! faer high-level LDL^T wrapper for sparse linear systems
 //!
 //! Uses faer's high-level Cholesky API (SymbolicCholesky + SupernodalThreshold::AUTO)
 //! to automatically select simplicial or supernodal factorization based on matrix structure.
@@ -354,7 +354,7 @@ pub fn factorize_quasidefinite_with_cached_perm(
 /// 因子化をバックグラウンドスレッドで実行し recv_timeout でタイムアウト制限する。
 /// タイムアウト後もスレッドは実行を継続する（read-only 計算、いずれ完了する）。
 ///
-/// 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+/// 短期対処。Inexact IPM で根本解消予定。
 pub fn factorize_quasidefinite_with_cached_perm_threaded(
     mat: &CscMatrix,
     perm: &[usize],
@@ -374,7 +374,7 @@ pub fn factorize_quasidefinite_with_cached_perm_threaded(
     let perm_owned = perm.to_vec();
     let (tx, rx) = mpsc::channel::<Result<LdlFactorizationAmd, LdlError>>();
     std::thread::spawn(move || {
-        // 短期対処。cmd_403(Inexact IPM)で根本解消予定。
+        // 短期対処。Inexact IPM で根本解消予定。
         // タイムアウト後もスレッドは実行を継続する（read-only 計算）。
         let _ = tx.send(factorize_quasidefinite_with_cached_perm(&mat_owned, &perm_owned, None));
     });

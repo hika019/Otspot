@@ -251,7 +251,7 @@ impl Model {
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
-                // DEAD PATH (cmd_595) but handle gracefully: 概要設計に従い有効解の有無で分岐
+                // DEAD PATH but handle gracefully: 概要設計に従い有効解の有無で分岐
                 if solver_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
@@ -320,7 +320,7 @@ impl Model {
         };
 
         // --- 制約型変換: Le/Ge/Eq をそのまま QpProblem に渡す ---
-        // QP/IPMソルバーは ConstraintType をネイティブに処理する（cmd_770で to_all_le() 廃止済み）。
+        // QP/IPMソルバーは ConstraintType をネイティブに処理する（to_all_le() 廃止済み）。
         let mut qp_trip_rows: Vec<usize> = Vec::new();
         let mut qp_trip_cols: Vec<usize> = Vec::new();
         let mut qp_trip_vals: Vec<f64> = Vec::new();
@@ -401,7 +401,7 @@ impl Model {
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
-                // DEAD PATH (cmd_595) but handle gracefully: 概要設計に従い有効解の有無で分岐
+                // DEAD PATH but handle gracefully: 概要設計に従い有効解の有無で分岐
                 if qp_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {

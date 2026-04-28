@@ -26,7 +26,7 @@ pub(crate) fn refactor(a: &CscMatrix, basis: &[usize]) -> Result<LuFactorization
 
 /// deadline 付き基底行列再因子分解
 ///
-/// # cmd_171: timeout audit fix
+/// # timeout audit fix
 /// Simplex 反復中の LU 再因子分解 (refactor_if_needed) は O(m²〜m³) になりうる。
 /// deadline を factorize_timed に渡すことで大規模問題でのハングを防止する。
 ///
