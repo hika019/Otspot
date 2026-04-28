@@ -82,6 +82,13 @@ const LDL_REG_CEILING: f64 = 1.0;
 /// LDL 因子化最終 fallback の delta 下限 (identity ordering 経路用)。
 const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
+/// alpha 停滞検出: line search が `alpha < ALPHA_STALL_EPS` のときに stall とみなす。
+const ALPHA_STALL_EPS: f64 = 1e-8;
+/// alpha 停滞回数の早期脱出閾値 (best-so-far で復帰)。
+const ALPHA_STALL_N: usize = 5;
+/// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
+const ALPHA_DEADLOCK_N: usize = 20;
+
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -304,16 +311,7 @@ pub(crate) fn solve_ippmm_inner(
     // reject_false_*_bestsofar 経路で偽 Optimal 昇格を防ぐためのゲート用。
     let mut best_rel_gap: f64 = f64::INFINITY;
 
-    // null-space: alpha 停滞検出。
-    // UBH1 のように PMM proximal が null-space 方向に頭打ちし、line search が
-    // alpha≈0 で止まるケースで 2273 iters 無駄回りするのを防ぐ。
-    // 連続 ALPHA_STALL_N 回 alpha < ALPHA_STALL_EPS なら best-so-far で早期脱出。
-    const ALPHA_STALL_EPS: f64 = 1e-8;
-    const ALPHA_STALL_N: usize = 5;
-    // deadlock 検出用（eps 非依存）: alpha=0 が長期継続＋rho/delta が reg_limit
-    // フロアに張り付いている場合、数値的に進めない状態。POST_VERIFY の eps 厳格化で
-    // best_score < eps が成立しなくなった UBH1 型の無限ループ対策。
-    const ALPHA_DEADLOCK_N: usize = 20;
+    // alpha 停滞・deadlock 検出 (定数はモジュールレベルに集約)
     let mut alpha_stall_count: usize = 0;
 
     for iter in 0..options.ipm.max_iter {
