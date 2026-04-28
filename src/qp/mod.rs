@@ -623,7 +623,8 @@ pub(crate) fn collapse_le_expansion_dual(
 ///
 /// solve_qp_withの全returnパスから呼び出す。内部ではSubを保持し、ここで最終変換を行う。
 /// - Sub（有効解あり）→ Optimal
-/// - Sub（精度未達）→ Timeout（解なし）
+/// - Sub（精度未達）→ Timeout（**有効解は保持**: 後段の Concurrent solver や
+///   ライブラリユーザーが best-so-far 解として参照できるよう、solution を破棄しない）
 /// - その他のステータス → 変換なし（パススルー）
 fn apply_api_boundary_conversion(
     result: SolverResult,
@@ -638,10 +639,13 @@ fn apply_api_boundary_conversion(
     if verified.status == SolveStatus::Optimal {
         verified
     } else {
-        // Sub（精度未達）→ Timeout
+        // Sub（精度未達）→ Timeout だが solution は保持する。
+        // 旧実装は solution: vec![] で破棄していたが、これが quality_rank_of の
+        // `Timeout if !result.solution.is_empty() => Approximate` 判定を阻害し、
+        // Concurrent solver で Approximate 候補として best-so-far が拾えなくなっていた。
+        // bench code は status のみで判定するため、表示への影響はない。
         SolverResult {
             status: SolveStatus::Timeout,
-            solution: vec![],
             ..verified
         }
     }
