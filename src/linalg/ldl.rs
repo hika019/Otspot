@@ -27,12 +27,6 @@ use faer::sparse::{SparseColMat, Triplet};
 use std::sync::mpsc;
 use std::time::Instant;
 
-/// 大規模問題で supernodal Cholesky を抑制してメモリ爆発を防ぐ閾値 (行列の次元 n)。
-/// supernodal は dense block 演算で BLAS-3 高速だが、巨大スパース行列で fill-in が
-/// dense block にまとまるとメモリが爆発する (BOYD2 n=93k で OOM exit=137 を観測)。
-/// この閾値以上で SupernodalThreshold::FORCE_SIMPLICIAL を使い simplicial 強制する。
-const LARGE_PROBLEM_SIMPLICIAL_THRESHOLD: usize = 50_000;
-
 /// LDL分解エラー
 #[non_exhaustive]
 #[derive(Debug)]
@@ -247,19 +241,12 @@ fn extract_diagonal_signs(mat: &CscMatrix) -> Vec<i8> {
 fn build_symbolic_hl(
     a_upper: &SparseColMat<usize, f64>,
 ) -> Result<SymbolicCholesky<usize>, LdlError> {
-    // 大規模問題で supernodal は dense block fill-in でメモリ爆発する (OOM)。
-    // n > LARGE_PROBLEM_SIMPLICIAL_THRESHOLD で simplicial を強制する。
-    let threshold = if a_upper.nrows() > LARGE_PROBLEM_SIMPLICIAL_THRESHOLD {
-        SupernodalThreshold::FORCE_SIMPLICIAL
-    } else {
-        SupernodalThreshold::AUTO
-    };
     factorize_symbolic_cholesky(
         a_upper.symbolic(),
         faer::Side::Upper,
         SymmetricOrdering::Identity,
         CholeskySymbolicParams {
-            supernodal_flop_ratio_threshold: threshold,
+            supernodal_flop_ratio_threshold: SupernodalThreshold::AUTO,
             ..Default::default()
         },
     )
