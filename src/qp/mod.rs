@@ -1107,8 +1107,193 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
                 _ => return apply_api_boundary_conversion(saved, problem, &current_opts), // 2nd solve失敗: 1st solve結果（SuboptimalSolution）を保持
             }
         }
+
+        // [dual refinement] primal x が確定したら、ソルバ出力 y を LSQ で再計算する。
+        // IPPMM は scaled 空間の収束基準で exit するため、unscale 後の元空間 dual が
+        // KKT を満たさないケースが頻発する (HS268: y≈1e-86, KKT 残差≈1e-2)。
+        // x が真の最適 (primal Optimal) ならば、KKT を満たす真の y は次の LSQ で求まる:
+        //   A^T y = -(Q*x + c) - bound_contrib(z)
+        // bound_contrib は既存 z (z_lb, z_ub) から計算 (active な j で nonzero)。
+        // free な j (active でない) では r_j = (Q*x+c+A^T*y)_j が 0 になるよう y を決める。
+        // 制約 m 個に対し free 変数 (n - n_active_bd) の方程式があり、典型に under-determined
+        // → 最小ノルム解で最も小さい y を選ぶ。
+        if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution)
+            && !result.solution.is_empty()
+            && problem.num_constraints > 0
+        {
+            refine_dual_lsq(problem, &mut result);
+        }
+
         return apply_api_boundary_conversion(result, problem, &current_opts);
     }
+}
+
+/// primal 解 x から、KKT を満たす dual y を最小二乗で再計算する。
+///
+/// IPPMM が scaled 空間 KKT で exit してしまい unscale 後の元空間で KKT を満たさない
+/// 偽 dual が露呈する問題への post-process 修正。
+///
+/// 仕組み:
+/// - r[j] = -(Q*x + c)_j - bound_contrib(existing z)_j
+///   bound active な j では既存 z を信じて bound_contrib に組み込む
+/// - free な j (= bound 非 active な j) について A_free^T y = r_free を LSQ で解く
+/// - 正規方程式 (A_free * A_free^T) * y = A_free * r_free を LDL で解く
+/// - 解けない場合は既存の y を維持（refine 失敗）
+fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if m == 0 || result.solution.len() != n {
+        return;
+    }
+    let x = &result.solution;
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // bound_contrib (既存 z から計算)
+    let mut bound_contrib = vec![0.0_f64; n];
+    if !result.bound_duals.is_empty() {
+        let mut bd_idx = 0usize;
+        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
+            if lb.is_finite() && bd_idx < result.bound_duals.len() {
+                bound_contrib[j] -= result.bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
+            if ub.is_finite() && bd_idx < result.bound_duals.len() {
+                bound_contrib[j] += result.bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+    }
+
+    // r[j] = -(Q*x + c + bound_contrib)_j  → A^T y = r で解く
+    let r_full: Vec<f64> = (0..n)
+        .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
+        .collect();
+
+    // 正規方程式 A * A^T * y = A * r （A_full を使う、bound active 列は除外）
+    // bound active な j は r_j を z で吸収すべきで A^T y で吸収しない方針。
+    // ここでは「全 j で A^T y = r」として LSQ を解く（active set 情報は使わない）。
+    // この単純化で free 変数のみ問題は完全に解け、active 問題は「ソルバ z + LSQ y の組合せ」
+    // でカバー範囲が広がる。
+    //
+    // m × n の A に対し AAT (m×m) を構築し LDL 分解、LSQ y を解く
+    let aat = match build_aat_upper_csc(&problem.a, n, m) {
+        Some(m_) => m_,
+        None => return,
+    };
+    let factor = match crate::linalg::ldl::factorize(&aat) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    // rhs = A * r (m vector)
+    let mut rhs = vec![0.0_f64; m];
+    for j in 0..n {
+        let start = problem.a.col_ptr[j];
+        let end = problem.a.col_ptr[j + 1];
+        for k in start..end {
+            let i = problem.a.row_ind[k];
+            if i < m {
+                rhs[i] += problem.a.values[k] * r_full[j];
+            }
+        }
+    }
+
+    // y_new = (AAT)^{-1} * rhs
+    let mut y_new = vec![0.0_f64; m];
+    factor.solve(&rhs, &mut y_new);
+
+    // 数値妥当性チェック: y_new に NaN/Inf がないか
+    if y_new.iter().any(|v| !v.is_finite()) {
+        return;
+    }
+
+    // refine 結果が既存 y より良ければ採用
+    let qx_ref = qx;
+    let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; n]);
+    let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; n]);
+
+    let mut max_resid_old = 0.0_f64;
+    let mut max_resid_new = 0.0_f64;
+    for j in 0..n {
+        // FX 変数は除外（その dual は z で扱う想定）
+        let (lbj, ubj) = problem.bounds[j];
+        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < 1e-12 {
+            continue;
+        }
+        let r_old = (qx_ref[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
+        let r_new = (qx_ref[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
+        max_resid_old = max_resid_old.max(r_old);
+        max_resid_new = max_resid_new.max(r_new);
+    }
+    if max_resid_new < max_resid_old {
+        result.dual_solution = y_new;
+    }
+}
+
+/// AAT 上三角 CSC 行列構築（refine.rs::build_ata_upper_csc を A^T → A 用に流用）
+fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<CscMatrix> {
+    // AAT[i, j] = sum_k A[i, k] * A[j, k] (k は列, i,j は行)
+    // (A^T が n x m なら AAT は m x m)
+    // A は m x n CSC. 列 k のエントリ (i, A[i,k]).
+    // AAT[i, j] = sum_k A[i, k] * A[j, k]: A の列 k で row i, j 両方に non-zero がある k で加算
+    use std::collections::BTreeMap;
+    let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for k in 0..n {
+        let start = a.col_ptr[k];
+        let end = a.col_ptr[k + 1];
+        // 列 k の row indices
+        let cols_in_k: Vec<(usize, f64)> = (start..end)
+            .map(|p| (a.row_ind[p], a.values[p]))
+            .collect();
+        for (idx_a, &(i, v_i)) in cols_in_k.iter().enumerate() {
+            for &(j, v_j) in &cols_in_k[idx_a..] {
+                // 上三角: i <= j
+                let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+                *acc.entry((hi, lo)).or_insert(0.0) += v_i * v_j;
+            }
+        }
+    }
+    // 対角に正則化 ε を追加（rank-deficient 対策）
+    let max_diag = (0..m)
+        .filter_map(|i| acc.get(&(i, i)).copied())
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let eps = 1e-12 * max_diag;
+    for i in 0..m {
+        *acc.entry((i, i)).or_insert(0.0) += eps;
+    }
+    // BTreeMap key (col, row) で col-first に並ぶ → CSC 構築
+    let mut col_ptr = vec![0_usize; m + 1];
+    let mut row_ind: Vec<usize> = Vec::with_capacity(acc.len());
+    let mut values: Vec<f64> = Vec::with_capacity(acc.len());
+    for ((col, row), val) in acc {
+        while col_ptr.len() <= col + 1 {
+            // already initialized to 0
+        }
+        col_ptr[col + 1] = col_ptr[col + 1].max(row_ind.len()); // dummy update
+        row_ind.push(row);
+        values.push(val);
+        col_ptr[col + 1] = row_ind.len();
+    }
+    // col_ptr の単調性を保証（空 col の対応）
+    for i in 1..=m {
+        if col_ptr[i] < col_ptr[i - 1] {
+            col_ptr[i] = col_ptr[i - 1];
+        }
+    }
+    Some(CscMatrix {
+        col_ptr,
+        row_ind,
+        values,
+        nrows: m,
+        ncols: m,
+    })
 }
 
 /// QPをカスタム設定で解く（`solve_qp_with` の別名）
@@ -1962,6 +2147,110 @@ mod tests {
                     e,
                     t.elapsed().as_secs_f64()
                 ),
+            }
+        }
+    }
+
+    /// HS268 IPPMM 出力の dual 残差を成分ごとに分解して KKT 不整合の原因を特定する。
+    /// HS268 は n=5, m=5, 全 Ge 制約, 全 FR (free) 変数の小さな convex QP。
+    /// bench で df=4.9e-2 (eps=1e-6 を 4 桁超過) になる事実の数値的構造を実証する。
+    #[test]
+    #[ignore]
+    fn test_hs268_dual_residual_diagnose() {
+        use crate::io::qps::parse_qps;
+        use crate::options::SolverOptions;
+        use std::path::Path;
+
+        let path = Path::new("data/maros_meszaros/HS268.QPS");
+        if !path.exists() {
+            eprintln!("HS268.QPS not found, skipping");
+            return;
+        }
+        let prob = parse_qps(path).expect("parse HS268");
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
+        let result = solve_qp_with(&prob, &opts);
+        eprintln!("HS268 status={:?} obj={:.6e}", result.status, result.objective);
+        let x = &result.solution;
+        let y = &result.dual_solution;
+        let bd = &result.bound_duals;
+        eprintln!("  x = {:?}", x);
+        eprintln!("  y = {:?}", y);
+        eprintln!("  bound_duals = {:?} (len={})", bd, bd.len());
+        // 各成分の KKT 残差: Qx + c + A^T y + bound_contrib
+        let qx = prob.q.mat_vec_mul(x).unwrap();
+        let aty = if !y.is_empty() {
+            prob.a.transpose().mat_vec_mul(y).unwrap()
+        } else {
+            vec![0.0; prob.num_vars]
+        };
+        eprintln!("  per-component KKT residual:");
+        for j in 0..prob.num_vars {
+            let r = qx[j] + prob.c[j] + aty[j];
+            eprintln!(
+                "    j={}: Qx={:.3e} c={:.3e} (A^Ty)={:.3e} sum={:.3e}",
+                j, qx[j], prob.c[j], aty[j], r
+            );
+        }
+        // 真の dual を最小二乗で推定: A^T y = -(Qx + c)
+        // n=5, m=5 で正方系。dense 直接解ける。
+        let n = prob.num_vars;
+        let m = prob.num_constraints;
+        let mut at_dense = vec![vec![0.0_f64; m]; n];
+        // CSC 走査: A.col_ptr[j] .. A.col_ptr[j+1] が列 j の (row_idx, value) のペア
+        // A^T[j][i] = A[i][j]
+        for j in 0..n {
+            for k in prob.a.col_ptr[j]..prob.a.col_ptr[j + 1] {
+                let i = prob.a.row_ind[k];
+                let v = prob.a.values[k];
+                if i < m {
+                    at_dense[j][i] = v;
+                }
+            }
+        }
+        // rhs = -(Qx + c)
+        let rhs: Vec<f64> = (0..n).map(|j| -(qx[j] + prob.c[j])).collect();
+        // Solve at_dense * y = rhs (n x m, n=m=5 → square)
+        // Use simple Gauss elimination
+        let mut aug = at_dense.clone();
+        let mut b = rhs.clone();
+        for k in 0..n.min(m) {
+            // 部分 pivot
+            let mut max_row = k;
+            for i in (k + 1)..n {
+                if aug[i][k].abs() > aug[max_row][k].abs() {
+                    max_row = i;
+                }
+            }
+            aug.swap(k, max_row);
+            b.swap(k, max_row);
+            if aug[k][k].abs() < 1e-15 {
+                eprintln!("  singular at k={}", k);
+                return;
+            }
+            for i in (k + 1)..n {
+                let factor = aug[i][k] / aug[k][k];
+                for j in k..m {
+                    aug[i][j] -= factor * aug[k][j];
+                }
+                b[i] -= factor * b[k];
+            }
+        }
+        let mut y_recon = vec![0.0_f64; m];
+        for k in (0..n.min(m)).rev() {
+            let mut sum = b[k];
+            for j in (k + 1)..m {
+                sum -= aug[k][j] * y_recon[j];
+            }
+            y_recon[k] = sum / aug[k][k];
+        }
+        eprintln!("  reconstructed y (LSQ): {:?}", y_recon);
+        eprintln!("  ratio (solver_y / recon_y):");
+        for i in 0..m.min(y.len()) {
+            if y_recon[i].abs() > 1e-15 {
+                eprintln!("    i={}: ratio={:.4}", i, y[i] / y_recon[i]);
             }
         }
     }
