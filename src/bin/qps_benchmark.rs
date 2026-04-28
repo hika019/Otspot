@@ -150,7 +150,7 @@ fn compute_dfeas_orig(
             }
         }
     } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
-        // LP 経路: reduced_cost を負号で取り込む（c + A^T y - rc = 0 を 0 = c + A^T y + bound_contrib に整列）
+        // LP 経路: reduced_cost を負号で取り込む (c + A^T*y - rc = 0)
         for j in 0..n {
             bound_contrib[j] = -reduced_costs[j];
         }

@@ -73,6 +73,15 @@ const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 /// 等式問題で μ=0 の極限に到達したケースの mu_rate 切替に使われる。
 const MU_ZERO_THRESHOLD: f64 = 1e-15;
 
+/// LDL 因子化失敗時の正則化リトライ上限回数。経験値 (δ 探索空間 1e-4→1e0 は約 4 段階で到達)。
+const LDL_REG_RETRY_MAX: usize = 10;
+/// LDL 因子化失敗時の正則化倍率。各リトライで rho/delta を 10 倍する。
+const LDL_REG_GROWTH: f64 = 10.0;
+/// LDL 因子化リトライの正則化上限。条件数悪化を防ぐ経験的上限。
+const LDL_REG_CEILING: f64 = 1.0;
+/// LDL 因子化最終 fallback の delta 下限 (identity ordering 経路用)。
+const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
+
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -566,13 +575,12 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // rho_matrix/delta_matrix リトライ（因子化失敗時に ×10 して最大 1e0 まで）
+        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する
         let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
-        // PARAM(retry上限=10): 根拠=経験値(δ探索空間1e-4→1e0は4段階で到達、余裕をもった上限。論文記載なし) | 要検証
-        for _retry in 0..10 {
+        for _retry in 0..LDL_REG_RETRY_MAX {
             if timeout_ctx.should_stop() {
                 status = Some(SolveStatus::Timeout);
                 final_iter = iter;
@@ -606,12 +614,11 @@ pub(crate) fn solve_ippmm_inner(
                     break;
                 }
                 Err(_) => {
-                    if rho_retry >= 1e0 {
+                    if rho_retry >= LDL_REG_CEILING {
                         break; // 上限到達 → あきらめ
                     }
-                    // PARAM(retry×10, 上限1e0): 根拠=経験値(LDLT因子化失敗時の指数的正則化増加。×10は10進指数的探索の自然な選択（具体的倍率はソルバー実装依存）、上限1e0は条件数悪化問題が起きない経験的上限) | 要検証
-                    rho_retry = (rho_retry * 10.0).min(1e0);
-                    delta_matrix_retry = (delta_matrix_retry * 10.0).min(1e0);
+                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                    delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
                 }
             }
@@ -622,7 +629,7 @@ pub(crate) fn solve_ippmm_inner(
         // 第3防御: Identity fallback — 全リトライ失敗時に identity perm + 大きな delta で再試行
         if fac_opt.is_none() {
             amd_perm_cache = None;
-            let delta_fallback = 1e-2_f64.max(rho_retry).max(delta_matrix_retry);
+            let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_matrix_retry);
             let aug_mat_fb =
                 build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_fallback);
             let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
