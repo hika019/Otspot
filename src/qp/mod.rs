@@ -33,6 +33,7 @@
 
 mod problem;
 pub mod ipm;
+pub mod ipm_v2;
 pub mod diagnose;
 mod refine;
 pub use problem::{QpProblem, QpWarmStart};
@@ -1172,7 +1173,7 @@ const AAT_REG_FACTOR: f64 = 1e-12;
 /// 解法: A^T y = -(Q*x + c + bound_contrib) の最小ノルム解を
 /// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
 /// 既存 y より KKT 残差が改善した場合のみ採用する (退行防止)。
-fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if m == 0 || result.solution.len() != n {
