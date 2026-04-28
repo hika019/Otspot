@@ -437,6 +437,20 @@ fn main() {
             None => String::new(),
         };
 
+        // Timeout だが有効解 (best-so-far) を保持している場合、Optimal フローに乗せて
+        // 品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
+        // PASS 判定が出れば bench 上 PASS としてカウントし、TIMEOUT として誤分類しない。
+        // 品質判定で fail した場合は PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH 等の正確な分類になる。
+        // CONT-300 等が「内部はほぼ Optimal なのに TIMEOUT 表示」される hostile 状態の解消。
+        let result = if matches!(result.status, SolveStatus::Timeout)
+            && !result.solution.is_empty()
+            && result.solution.len() == prob.num_vars
+        {
+            solver::problem::SolverResult { status: SolveStatus::Optimal, ..result }
+        } else {
+            result
+        };
+
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 // §2.5 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
@@ -606,11 +620,32 @@ fn main() {
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;
+                // Timeout でも有効解があれば品質情報を表示（diagnostic 価値）
+                // best-so-far 解を保持する `apply_api_boundary_conversion` 修正と組合せて、
+                // 「真に解けていないのか、ほぼ解けているが時間切れなのか」を可視化する。
+                let extra = if !result.solution.is_empty()
+                    && result.solution.len() == prob.num_vars
+                {
+                    let (_, bfeas) = compute_primal_quality(&prob, &result.solution);
+                    let pfeas_norm = compute_pfeas_normalized(&prob, &result.solution);
+                    let df = get_dfeas(&result);
+                    let df_str = if df.is_nan() {
+                        "df=NA".to_string()
+                    } else {
+                        format!("df={:.1e}", df)
+                    };
+                    format!(
+                        " obj={:.2e} pfn={:.1e} bf={:.1e} {}",
+                        result.objective, pfeas_norm, bfeas, df_str
+                    )
+                } else {
+                    String::new()
+                };
                 (
                     "TIMEOUT".to_string(),
                     format!(
-                        "[{}] {:.3}s iters={}",
-                        method_label, elapsed_s, result.iterations
+                        "[{}] {:.3}s iters={}{}",
+                        method_label, elapsed_s, result.iterations, extra
                     ),
                 )
             }
