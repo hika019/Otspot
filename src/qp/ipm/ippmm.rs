@@ -412,6 +412,36 @@ pub(crate) fn solve_ippmm_inner(
             .unwrap_or(norm_c)
             .max(1.0);
 
+        // [偽 Optimal 修正] 元空間成分相対 dfeas (bench と同形)。
+        // 旧: nr_d_orig (inf-norm) < eps_orig * (1+norm_c_orig) は norm_c_orig ~ 1e4 で
+        //     tol が 1e-2 まで緩み、IPM が真の精度に到達せず偽 Optimal exit していた。
+        // 新: bench と同じ「max_j |r_d_orig|_j / (1 + |Qx|_j + |c|_j + |aty|_j)」< eps を使う。
+        // これで「ユーザー指定 eps を元空間で本当に満たすまで」反復継続する。
+        let nr_d_rel_orig = if let Some(sc) = scaler {
+            let mut max_rel = 0.0_f64;
+            for j in 0..n {
+                let scale_unscale = sc.c * sc.d[j];
+                if scale_unscale.abs() < f64::MIN_POSITIVE {
+                    continue;
+                }
+                let r_j = (r_d[j] / scale_unscale).abs();
+                let qx_j = (qx[j] / scale_unscale).abs();
+                let c_j = (problem.c[j] / scale_unscale).abs();
+                let aty_j = (aty[j] / scale_unscale).abs();
+                let scale = 1.0 + qx_j + c_j + aty_j;
+                max_rel = max_rel.max(r_j / scale);
+            }
+            max_rel
+        } else {
+            let mut max_rel = 0.0_f64;
+            for j in 0..n {
+                let r_j = r_d[j].abs();
+                let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs();
+                max_rel = max_rel.max(r_j / scale);
+            }
+            max_rel
+        };
+
         // [cmd_841 Bug#1] rel_gap / DUALITY_GAP_TOL は上のブロックで計算済（best-so-far 更新前）。
         // UBH1 (||x||≈1459, c=0, Q rank-deficient) で r_stat=2e-6・mu=1e-30 なのに
         // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（cmd_841 Phase A 検証）。
@@ -419,6 +449,7 @@ pub(crate) fn solve_ippmm_inner(
 
         if nr_d < eps * (1.0 + norm_c)
             && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
+            && nr_d_rel_orig < eps_orig
             && nr_p < eps * (1.0 + norm_b)
             && mu < eps
             && rel_gap.abs() < DUALITY_GAP_TOL
