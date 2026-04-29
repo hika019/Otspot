@@ -28,13 +28,23 @@ const LP_DISPATCH_BUDGET_SECS: f64 = 10.0;
 
 /// 統合 retry の attempt 配列。各 attempt で (use_ruiz, eps_tighten) を変える。
 /// 旧 PV_RETRY × POST_VERIFY = 9 attempts を 6 attempts に直線化する。
-const ATTEMPTS: &[(bool, f64)] = &[
+/// presolve 済みの場合は (true, X) と (false, X) が等価なので 4 attempts に縮約する
+/// (実装は `attempts_for` で動的選択)。
+const ATTEMPTS_FULL: &[(bool, f64)] = &[
     (true,  1.0),    // Ruiz on,  eps × 1
     (true,  10.0),   // Ruiz on,  eps × 1/10
     (true,  100.0),  // Ruiz on,  eps × 1/100
     (false, 1.0),    // Ruiz off, eps × 1
     (false, 10.0),   // Ruiz off, eps × 1/10
     (false, 100.0),  // Ruiz off, eps × 1/100
+];
+/// presolve_did_ruiz=true 時の attempt 配列。Ruiz on/off は等価なので tighten のみ変える。
+/// (false, 1000.0) を追加すると IPM が double 精度限界近くで full convergence できず
+/// むしろ悪化リスクがあるため 3 attempts に留める。
+const ATTEMPTS_PRESOLVE_RUIZ: &[(bool, f64)] = &[
+    (false, 1.0),
+    (false, 10.0),
+    (false, 100.0),
 ];
 /// eps 事前調整の下限 (double 精度限界近傍)
 const EPS_FLOOR: f64 = 1e-15;
@@ -82,9 +92,16 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
     // (2) LISWET 系で simplex が deadline を尊重せず長時間 stuck する副作用
     // により削除した。`run_lp_postprocess` 関数自体は残しており将来の warm-start IPM 用。
 
-    // ── retry 1 層: ATTEMPTS 配列を時間内で順に試行 ────────
+    // ── retry 1 層: 動的 attempt 配列を時間内で順に試行 ────────
+    // presolve_did_ruiz=true: (true, X) と (false, X) が等価なので 4 attempts に縮約 + (false,1000.0)
+    // presolve_did_ruiz=false: 6 attempts (Ruiz on/off × 3 tighten)
+    let attempts: &[(bool, f64)] = if presolve_did_ruiz {
+        ATTEMPTS_PRESOLVE_RUIZ
+    } else {
+        ATTEMPTS_FULL
+    };
 
-    for (idx, &(use_ruiz, tighten)) in ATTEMPTS.iter().enumerate() {
+    for (idx, &(use_ruiz, tighten)) in attempts.iter().enumerate() {
         if let Some(d) = total_deadline {
             let now = Instant::now();
             if now >= d {
@@ -101,7 +118,7 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
             opts.deadline = if idx == 0 {
                 total_deadline
             } else {
-                let remaining_attempts = (ATTEMPTS.len() - idx) as u32;
+                let remaining_attempts = (attempts.len() - idx) as u32;
                 Some(now + remaining / remaining_attempts.max(1))
             };
             opts.timeout_secs = None;
