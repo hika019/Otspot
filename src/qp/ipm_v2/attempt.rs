@@ -18,14 +18,6 @@ use super::core::run_ipm;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
 
-/// LP-dominant 検出閾値: ||Q||_F / (1 + ||c||) < この値なら LP として試行する。
-/// 1.0 なら ||Q||_F が ||c|| 同等以下 (Q が支配的でない) ケースを拾う。
-/// Q-dominant (ratio > 1) ケースでは LP 試行はほぼ無駄なのでスキップする。
-const LP_DISPATCH_RATIO_MAX: f64 = 1.0;
-/// LP 試行に許す時間上限 (秒)。LISWET 等の n=10000+ で simplex が長時間動くのを防ぐ。
-/// 副作用: LP として解けない問題でも dispatch コストが軽くなる。
-const LP_DISPATCH_BUDGET_SECS: f64 = 10.0;
-
 /// 統合 retry の attempt 配列。各 attempt で (use_ruiz, eps_tighten) を変える。
 /// 旧 PV_RETRY × POST_VERIFY = 9 attempts を 6 attempts に直線化する。
 /// presolve 済みの場合は (true, X) と (false, X) が等価なので 4 attempts に縮約する
@@ -165,76 +157,6 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
     // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
     finalize_outcome(outcome, user_eps, n_orig)
-}
-
-/// LP-dominant 問題 (||Q||_F / (1+||c||) < LP_DISPATCH_RATIO_MAX) を LP として解いてみる。
-///
-/// 現状 solve_qp_v2 からは呼ばれていない (副作用と効果不足により無効化)。
-/// 実装は将来の warm-start IPM 統合用に残してある。
-#[allow(dead_code)]
-fn try_solve_as_lp(
-    problem: &QpProblem,
-    options: &SolverOptions,
-    _user_eps: f64,
-) -> Option<IpmOutcome> {
-    // ratio 判定: Q が支配的でないことを確認
-    let q_fro: f64 = problem.q.values.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let c_norm: f64 = problem.c.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let ratio = q_fro / (1.0 + c_norm);
-    if ratio >= LP_DISPATCH_RATIO_MAX {
-        return None;
-    }
-
-    // Q を 0 にした LP として solve_qp_with 経路に流す (内部で is_zero_q → solve_as_lp)
-    let mut q_zero = problem.q.clone();
-    for v in q_zero.values.iter_mut() {
-        *v = 0.0;
-    }
-    let prob_lp = match QpProblem::new(
-        q_zero,
-        problem.c.clone(),
-        problem.a.clone(),
-        problem.b.clone(),
-        problem.bounds.clone(),
-        problem.constraint_types.clone(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-
-    // LP 試行用の短い deadline を設定 (大規模 LP で simplex が長時間化する副作用を回避)
-    let mut lp_opts = options.clone();
-    let now = Instant::now();
-    let lp_budget = std::time::Duration::from_secs_f64(LP_DISPATCH_BUDGET_SECS);
-    let lp_deadline_dur = if let Some(d) = options.deadline {
-        d.saturating_duration_since(now).min(lp_budget)
-    } else if let Some(secs) = options.timeout_secs {
-        std::time::Duration::from_secs_f64(secs.min(LP_DISPATCH_BUDGET_SECS))
-    } else {
-        lp_budget
-    };
-    lp_opts.deadline = Some(now + lp_deadline_dur);
-    lp_opts.timeout_secs = None;
-
-    let lp_result = crate::qp::solve_qp_with(&prob_lp, &lp_opts);
-    if !matches!(lp_result.status, SolveStatus::Optimal) {
-        return None;
-    }
-    if lp_result.solution.len() != problem.num_vars {
-        return None;
-    }
-
-    // LP 解 (x, dual, reduced_costs) で QP の post-processing を行い、元空間 KKT を計算する
-    let outcome = super::core::run_lp_postprocess(
-        problem,
-        lp_result.solution,
-        lp_result.dual_solution,
-        lp_result.reduced_costs,
-    );
-    if outcome.numerical_failure {
-        return None;
-    }
-    Some(outcome)
 }
 
 /// `IpmOutcome` から `SolverResult` (外部 status) への変換 — **status mutation 1 箇所**。
