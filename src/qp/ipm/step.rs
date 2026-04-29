@@ -81,7 +81,9 @@ pub(crate) fn solve_qp_ipm_inner(
     let mut ds = vec![0.0f64; m_ext];
     // AMD permutation キャッシュ（augmented system のスパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
-    // KKT 差分更新キャッシュ（方式 D: values 直接更新 + refactorize_numeric 再利用）
+    // KKT 行列の values を反復間で in-place 更新するためのキャッシュ。
+    // 因子化自体は毎反復 symbolic から再計算する (faer の symbolic は Clone 不可、
+    // refactorize_numeric は廃止)。AMD perm の再計算回避が主目的。
     let mut kkt_cache: Option<KktCache> = None;
     let mut fac_cache: Option<LdlFactorizationAmd> = None;
 
@@ -241,9 +243,9 @@ pub(crate) fn solve_qp_ipm_inner(
         }
 
         // augmented KKT行列構築 + factorize（delta_p/delta_d リトライ最大10回, 上限1e0）
-        // 方式 D: 初回は full 構築 + symbolic/numeric 全因子化、2反復目以降は values 差分更新
-        //         + refactorize_numeric（symbolic 再利用）で O(nnz log nnz) → O(n + m_ext) に削減。
-        // AMD permutation はスパースパターン不変なので初回のみ計算してキャッシュ
+        // 初回: KktCache を full 構築。以降: values を in-place 更新 (Q + sigma + reg だけ変わる)。
+        // 因子化は毎反復 symbolic から再計算 (faer の symbolic は Clone 不可で再利用が困難)。
+        // AMD permutation のみ初回計算してキャッシュ。
         let mut delta_p_retry = effective_delta_p;
         let mut delta_d_retry = delta_d;
         let mut retry_timeout = false;

@@ -84,66 +84,6 @@ impl LdlFactorizationAmd {
         self.symbolic.len_val()
     }
 
-    /// Symbolic を再利用して数値因子化のみを再実行する（高速パス）。
-    ///
-    /// mat のスパースパターンが初回と同一であることが前提。
-    /// IPM の反復内でスパースパターンが変わらない場合に使用する。
-    /// deadline は entry と numeric 開始前の 2 箇所でチェック。faer の numeric 因子化自体は
-    /// mid-cancel 不可のため、一旦開始したら超過完走する可能性がある。
-    pub fn refactorize_numeric(
-        &mut self,
-        mat: &CscMatrix,
-        deadline: Option<Instant>,
-    ) -> Result<(), LdlError> {
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return Err(LdlError::DeadlineExceeded);
-            }
-        }
-        let n = mat.nrows;
-        let (new_col_ptr, new_row_ind, new_values) =
-            permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, &self.perm);
-        let perm_mat = CscMatrix {
-            col_ptr: new_col_ptr,
-            row_ind: new_row_ind,
-            values: new_values,
-            nrows: n,
-            ncols: n,
-        };
-        let a_upper = csc_upper_to_faer_upper(&perm_mat);
-        let signs = extract_diagonal_signs(&perm_mat);
-        let regularization = LdltRegularization {
-            dynamic_regularization_signs: Some(&signs),
-            dynamic_regularization_delta: 1e-8,
-            dynamic_regularization_epsilon: 1e-13,
-        };
-        // 行列準備完了後・numeric 開始前に deadline 再チェック (numeric は最も時間がかかる)。
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return Err(LdlError::DeadlineExceeded);
-            }
-        }
-        let mut mem = MemBuffer::new(StackReq::any_of(&[
-            self.symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
-            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
-        ]));
-        let stack = MemStack::new(&mut mem);
-        let mut new_l_values = vec![0.0f64; self.symbolic.len_val()];
-        self.symbolic
-            .factorize_numeric_ldlt(
-                &mut new_l_values,
-                a_upper.rb(),
-                faer::Side::Upper,
-                regularization,
-                faer::Par::Seq,
-                stack,
-                Default::default(),
-            )
-            .map_err(|_| LdlError::SingularOrIndefinite)?;
-        self.l_values = new_l_values;
-        Ok(())
-    }
-
     /// AMD 付き LDL^T x = b を解く。
     ///
     /// 1. 右辺を前方置換: b_p[k] = rhs[perm[k]]
