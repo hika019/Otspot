@@ -410,7 +410,10 @@ pub(crate) fn unscale_ipm_result(
                         };
                         (status, orig_resid)
                     }
-                    Err(_) => (SolveStatus::Optimal, result.final_residuals),
+                    // mat_vec_mul は次元一致前提で失敗は API 契約違反。
+                    // 失敗時に Optimal を維持すると pfeas 検証なしで Optimal を返す
+                    // false-positive になるため SuboptimalSolution に降格 (status 隠蔽防止)。
+                    Err(_) => (SolveStatus::SuboptimalSolution, result.final_residuals),
                 }
             } else {
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
