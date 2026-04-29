@@ -106,6 +106,10 @@ pub fn run_ipm(
     // DUAL1/DUAL3/STCQP2 で PASS→DFEAS_FAIL の退行が発生 (60s bench 99 PASS, baseline 102)。
     // 構造的に「post-processing を 2 回走らせて KKT 改善時のみ採用」の guard が必要だが
     // 実装コスト高のため現状は無効化。X_SNAP_TOL 定数は将来の参考用に保持。
+    //
+    // primal IR 1 step (Δx = A^T (AA^T)^-1 (b-Ax)) も試行したが、LISWET9/12 (PFEAS_FAIL,
+    // pres=1.6e-6) の救済に失敗。IPM の barrier 終端値で pres が頭打ちで、postsolve 後の
+    // 修正では追い込めない。実装は `try_primal_ir_step` に保持 (将来 warm-start IPM 用)。
 
     // 元空間で dual refinement: y を LSQ refine + active-set z-refit。
     // 各ステップで KKT 比較し、改善時のみ採用 (LSQ は L2 vs KKT は max-rel で目的関数が違うため)。
@@ -384,6 +388,76 @@ fn refit_z_active_set(
         }
     }
     *bound_duals = new_bd;
+}
+
+/// primal IR 1 step: Δx = A^T (A A^T)^-1 (b - Ax) を計算し x ← x + Δx を試行する。
+///
+/// 等式制約のみ厳密一致を狙う。不等式 (Ge/Le) は緩和方向の violation のみ縮める形で扱う:
+///   r_i = b_i - Ax_i (Ge) なら Δx を Ax_i ↑ 方向、(Le) なら Ax_i ↓ 方向で縮める。
+/// 実装簡略化のため、Eq/Ge/Le 共通で `Ax = b` の最小ノルム解を求め、
+/// Ge/Le は violation のあるときのみ更新する変数とする。
+///
+/// 戻り値: ステップ計算成功なら true。失敗 (LDL 分解失敗等) は false。
+/// x は in-place で更新される (採用判定は呼出側で行う)。
+#[allow(dead_code)]
+fn try_primal_ir_step(problem: &QpProblem, x: &mut Vec<f64>) -> bool {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if m == 0 || x.len() != n {
+        return false;
+    }
+    let ax = match problem.a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    // r_i = b_i - Ax_i for Eq/Ge (b 上向き), Ax_i - b_i for Le (b 下向き) (符号統一: r = b - Ax)
+    // Ge: violation = max(0, r) → r > 0 のときのみ縮める
+    // Le: violation = max(0, -r) → r < 0 のときのみ縮める
+    // Eq: r をそのまま縮める
+    use crate::problem::ConstraintType;
+    let mut rhs = vec![0.0_f64; m];
+    let mut active_row = 0usize;
+    for i in 0..m {
+        let r = problem.b[i] - ax[i];
+        let take = match problem.constraint_types.get(i) {
+            Some(ConstraintType::Eq) => true,
+            Some(ConstraintType::Ge) => r > 0.0,
+            _ => r < 0.0, // Le
+        };
+        if take {
+            rhs[i] = r;
+            active_row += 1;
+        }
+    }
+    if active_row == 0 {
+        return false;
+    }
+
+    // (A A^T) Δλ = rhs を解いて Δx = A^T Δλ
+    let aat = match crate::qp::build_aat_upper_csc(&problem.a, n, m) {
+        Some(v) => v,
+        None => return false,
+    };
+    let factor = match crate::linalg::ldl::factorize(&aat) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut dlambda = vec![0.0_f64; m];
+    factor.solve(&rhs, &mut dlambda);
+    if dlambda.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let dx = match problem.a.transpose().mat_vec_mul(&dlambda) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if dx.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    for j in 0..n {
+        x[j] += dx[j];
+    }
+    true
 }
 
 /// 明示 active 集合を渡す版の KKT system Newton refinement (現状未使用、将来の LP-hint 統合用)。
