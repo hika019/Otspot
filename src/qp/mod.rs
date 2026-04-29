@@ -326,7 +326,10 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     match result.status {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
-            let obj = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum();
+            // c^T x + obj_offset (QPS の N-row RHS による定数項)。
+            // 旧実装は obj_offset を加算しておらず test_solve_with_obj_offset で fail していた既存バグ。
+            let obj: f64 = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>()
+                + problem.obj_offset;
             // 双対解はSimplex出力をそのまま使用（展開なし）
             let dual = result.dual_solution.clone();
             SolverResult {
