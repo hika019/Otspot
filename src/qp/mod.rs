@@ -433,18 +433,17 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
         }
         drop(tx); // 両 spawn の tx クローン保持の片方が落ちただけでは Disconnected にならない
 
-        // 結果を順次受信。Optimal が来た時点で cancel を立て、相方を協調停止。
+        // 結果を順次受信。priority が高い方を採用 (同値なら先着維持で決定論性確保)。
+        // Optimal を取った時点で cancel を立て、相方を協調停止する。
+        // Infeasible / Unbounded は確定的判定なので捨てず priority を高めに置く
+        // (status 隠蔽防止: 数値的に解けた解より、infeasibility 検出の方が情報価値が高い)。
         let mut best: Option<SolverResult> = None;
         for r in rx {
             let r_is_optimal = matches!(r.status, SolveStatus::Optimal);
+            let new_priority = result_priority(&r);
             let prefer_new = match &best {
                 None => true,
-                // Optimal が新しく到着 & 既存が非 Optimal → 上書き
-                Some(b) if r_is_optimal && !matches!(b.status, SolveStatus::Optimal) => true,
-                // 既存が Optimal → 維持 (先着優先で決定論性確保)
-                Some(b) if matches!(b.status, SolveStatus::Optimal) => false,
-                // 両者非 Optimal → 解を持っている方を優先
-                Some(b) => !r.solution.is_empty() && b.solution.is_empty(),
+                Some(b) => new_priority > result_priority(b),
             };
             if prefer_new {
                 if r_is_optimal {
@@ -458,6 +457,30 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
             ..Default::default()
         })
     })
+}
+
+/// Concurrent dispatch で複数 solver の結果を比較するための優先度。値が大きいほど採用優先。
+///
+/// 設計:
+/// - `Optimal` は最高 (確定 + 解あり)
+/// - `Infeasible`/`Unbounded` は次 (確定的判定: solver 都合で握りつぶさない)
+/// - `SuboptimalSolution` は内部収束判定通過 (解あり、KKT 緩和許容内)
+/// - `Timeout` は best-so-far 解の有無で 2 段階
+/// - `NumericalError` 等は最低
+///
+/// 同値なら先着維持で決定論性を確保する (`>` 比較で同値時 false)。
+#[cfg(feature = "parallel")]
+fn result_priority(result: &SolverResult) -> u8 {
+    match result.status {
+        SolveStatus::Optimal => 6,
+        SolveStatus::Infeasible | SolveStatus::Unbounded => 5,
+        SolveStatus::SuboptimalSolution => 4,
+        SolveStatus::Timeout if !result.solution.is_empty() => 3,
+        SolveStatus::Timeout => 2,
+        SolveStatus::MaxIterations => 2,
+        SolveStatus::NonConvex(_) => 1,
+        SolveStatus::NumericalError => 0,
+    }
 }
 
 /// Concurrent feature 無効時のフォールバック (IP-PMM 単独)。
