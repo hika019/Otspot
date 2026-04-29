@@ -576,11 +576,37 @@ pub(crate) fn collapse_le_expansion_dual(
 /// `cancel_flag.store(false, Relaxed)` でリセットするか、問題ごとに新しい
 /// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // 設計書 (docs/solver_overview_design.md) の 3 原則 (retry 1 層・status mutation 1 箇所・
-    // 元空間 KKT 直接判定) を全 variant に徹底するため、Ipm/IpPmmNew/Concurrent すべて
-    // ipm_v2::solve_qp_v2 に委譲する。
-    let _ = options.qp_solver; // variant 値は無視 (全 v2)
-    ipm_v2::solve_qp_v2(problem, options)
+    // QpSolverChoice variant に応じて 2 アルゴ (IPM/IPPMM) を dispatch:
+    //   - Ipm        → ipm::solve_qp_ipm (Mehrotra predictor-corrector)
+    //   - IpPmmNew   → ipm_v2::solve_qp_v2 (IP-PMM with retry 1 層 / status 1 箇所 / 元空間 KKT)
+    //   - Concurrent → 当面 IpPmmNew と同じ (将来 Mehrotra/IP-PMM 並行実行に拡張)
+    //
+    // Q=0 (LP 退化) と Q が PSD でない場合の前置きは各経路の入口で実施する
+    // (v2 は ipm_v2::solve_qp_v2 内、Mehrotra は ipm::solve_qp_ipm 内)。
+    match options.qp_solver {
+        QpSolverChoice::Ipm => {
+            // Q=0 退化 / 非凸 Q の前置きは IpmSolver 経路にも必要
+            if problem.is_zero_q() {
+                return solve_as_lp(problem, options);
+            }
+            if !check_q_positive_semidefinite(&problem.q) {
+                return SolverResult {
+                    status: SolveStatus::NonConvex(
+                        "Q matrix is indefinite (non-convex QP). IPM requires Q to be positive semidefinite.".to_string()
+                    ),
+                    ..Default::default()
+                };
+            }
+            ipm::solve_qp_ipm(problem, options)
+        }
+        QpSolverChoice::IpPmmNew => ipm_v2::solve_qp_v2(problem, options),
+        QpSolverChoice::Concurrent => {
+            // 並行実行 (旧 solve_qp_concurrent) は v1 retry と一緒に削除済 (eb3d11f)。
+            // 当面は IpPmmNew (v2) と同じ動作。将来 Mehrotra/IP-PMM 並行実行を再構築する場合は
+            // 各 thread が ipm::solve_qp_ipm / ipm_v2::solve_qp_v2 を呼ぶ薄い wrapper にする。
+            ipm_v2::solve_qp_v2(problem, options)
+        }
+    }
 }
 
 
