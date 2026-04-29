@@ -11,3 +11,5 @@ scripts/cmd843/__pycache__/
 **/.DS_Store
 /bench_results
 /results
+
+/.claude

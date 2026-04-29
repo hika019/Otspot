@@ -35,9 +35,6 @@ pub(crate) use scaling::check_dfeas_status_relative;
 
 /// fraction-to-boundary τ（solver_loop.rs がこの定数を参照する）
 pub(crate) const TAU: f64 = 0.995;
-/// IP-PMM 正則化最小値
-#[allow(dead_code)]
-pub(crate) const DELTA_MIN: f64 = 1e-8;
 
 // ---------------------------------------------------------------------------
 // Gondzio multiple centrality correctors パラメータ（solver_loop.rs が参照）
