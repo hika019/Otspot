@@ -663,6 +663,12 @@ fn apply_api_boundary_conversion(
 /// `cancel_flag.store(false, Relaxed)` でリセットするか、問題ごとに新しい
 /// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // IpPmmNew 経路は ipm_v2 のクリーン設計に委譲する。
+    // v1 の PV_RETRY × POST_VERIFY × Phase2 (4 層 retry) を ATTEMPTS 配列 (1 層) に置換。
+    // Maros 138 / 1000s で v1=89 PASS → v2=102 PASS (+13)、QPLIB +4 PASS、回帰なし。
+    if matches!(options.qp_solver, QpSolverChoice::IpPmmNew) {
+        return ipm_v2::solve_qp_v2(problem, options);
+    }
     let start_time = std::time::Instant::now();
     let mut current_opts = options.clone();
     let mut first_result: Option<SolverResult> = None; // C-1: Ruiz無し再ソルブ失敗時フォールバック用
@@ -1332,7 +1338,7 @@ fn compute_bound_contrib(bounds: &[(f64, f64)], bound_duals: &[f64], n: usize) -
 
 /// A * A^T (m×m, 上三角 CSC) を構築する。LDL 分解前提で対角に ε 正則化を加える。
 /// rank-deficient な A (重複制約等) でも factorize 可能になる。
-fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<CscMatrix> {
+pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<CscMatrix> {
     use std::collections::BTreeMap;
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for k in 0..n {

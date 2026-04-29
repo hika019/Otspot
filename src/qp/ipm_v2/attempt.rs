@@ -9,7 +9,7 @@
 
 use crate::options::SolverOptions;
 use crate::presolve::{
-    postsolve_qp, run_qp_presolve_phase1, run_qp_presolve_phase2,
+    run_qp_presolve_phase1, run_qp_presolve_phase2,
     qp_transforms::QpPresolveStatus,
 };
 use crate::problem::{SolveStatus, SolverResult};
@@ -17,6 +17,14 @@ use crate::qp::problem::QpProblem;
 use super::core::run_ipm;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
+
+/// LP-dominant 検出閾値: ||Q||_F / (1 + ||c||) < この値なら LP として試行する。
+/// 1.0 なら ||Q||_F が ||c|| 同等以下 (Q が支配的でない) ケースを拾う。
+/// Q-dominant (ratio > 1) ケースでは LP 試行はほぼ無駄なのでスキップする。
+const LP_DISPATCH_RATIO_MAX: f64 = 1.0;
+/// LP 試行に許す時間上限 (秒)。LISWET 等の n=10000+ で simplex が長時間動くのを防ぐ。
+/// 副作用: LP として解けない問題でも dispatch コストが軽くなる。
+const LP_DISPATCH_BUDGET_SECS: f64 = 10.0;
 
 /// 統合 retry の attempt 配列。各 attempt で (use_ruiz, eps_tighten) を変える。
 /// 旧 PV_RETRY × POST_VERIFY = 9 attempts を 6 attempts に直線化する。
@@ -64,9 +72,17 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
     let total_deadline = opts.deadline;
     let user_eps = opts.ipm_eps();
 
-    // ── retry 1 層: ATTEMPTS 配列を時間内で順に試行 ────────
-    let reduced = &presolve_result.reduced;
+    // presolve が既に Ruiz scaling を適用した場合、IPM 側で重ね掛けすると
+    // 二重スケールで解が誤った点に収束する (HS21 で観測: x=(4.31,0) vs 真値 (2,0))。
+    let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
+
+    // 注: LP-dominant 問題 (例: QSCRS8/QBORE3D) を Q=0 で LP として解く dispatch は試行したが、
+    // (1) LP の x で QP の KKT 残差が 0.5〜1.0 で eps=1e-6 未達、PASS 増加なし
+    // (2) LISWET 系で simplex が deadline を尊重せず長時間 stuck する副作用
+    // により削除した。`run_lp_postprocess` 関数自体は残しており将来の warm-start IPM 用。
+
+    // ── retry 1 層: ATTEMPTS 配列を時間内で順に試行 ────────
 
     for (idx, &(use_ruiz, tighten)) in ATTEMPTS.iter().enumerate() {
         if let Some(d) = total_deadline {
@@ -74,19 +90,27 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
             if now >= d {
                 break;
             }
-            // 残り時間を残 attempt 数で割って per-attempt deadline を算出
             let remaining = d.saturating_duration_since(now);
-            let remaining_attempts = (ATTEMPTS.len() - idx) as u32;
             if remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT {
                 break;
             }
-            opts.deadline = Some(now + remaining / remaining_attempts.max(1));
+            // attempt 0 は full deadline を使う (旧 v1 PV_RETRY pv_try=0 と同等の時間予算)。
+            // attempt 1+ は残り時間 / 残 attempt 数で公平に分配。
+            // attempt 0 を timeshare すると IPM が時間内に収束しきれず不完全解で best-so-far に
+            // 入ってしまう (HS21 で観測: deadline=total/6 だと x=(4.31, 0) で停止 vs full deadline で x=(2, 0))。
+            opts.deadline = if idx == 0 {
+                total_deadline
+            } else {
+                let remaining_attempts = (ATTEMPTS.len() - idx) as u32;
+                Some(now + remaining / remaining_attempts.max(1))
+            };
             opts.timeout_secs = None;
         }
         opts.ipm.eps = (user_eps / tighten).max(EPS_FLOOR);
-        opts.use_ruiz_scaling = use_ruiz;
+        // presolve が Ruiz scaling 済みなら IPM での再スケールは抑止する。
+        opts.use_ruiz_scaling = if presolve_did_ruiz { false } else { use_ruiz };
 
-        let outcome = run_ipm(reduced, &opts);
+        let outcome = run_ipm(problem, &presolve_result, &opts);
 
         // 早期終了: ユーザー指定精度を真に満たす解
         if outcome.satisfies_eps(user_eps) {
@@ -103,21 +127,90 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
         }
     }
 
-    // ── postsolve + status 変換 (1 箇所のみ) ───────────────
+    // ── status 変換 (1 箇所のみ) ───────────────
+    // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
-    finalize_outcome(outcome, &presolve_result, problem, user_eps, n_orig)
+    finalize_outcome(outcome, user_eps, n_orig)
+}
+
+/// LP-dominant 問題 (||Q||_F / (1+||c||) < LP_DISPATCH_RATIO_MAX) を LP として解いてみる。
+///
+/// 現状 solve_qp_v2 からは呼ばれていない (副作用と効果不足により無効化)。
+/// 実装は将来の warm-start IPM 統合用に残してある。
+#[allow(dead_code)]
+fn try_solve_as_lp(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    _user_eps: f64,
+) -> Option<IpmOutcome> {
+    // ratio 判定: Q が支配的でないことを確認
+    let q_fro: f64 = problem.q.values.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let c_norm: f64 = problem.c.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let ratio = q_fro / (1.0 + c_norm);
+    if ratio >= LP_DISPATCH_RATIO_MAX {
+        return None;
+    }
+
+    // Q を 0 にした LP として solve_qp_with 経路に流す (内部で is_zero_q → solve_as_lp)
+    let mut q_zero = problem.q.clone();
+    for v in q_zero.values.iter_mut() {
+        *v = 0.0;
+    }
+    let prob_lp = match QpProblem::new(
+        q_zero,
+        problem.c.clone(),
+        problem.a.clone(),
+        problem.b.clone(),
+        problem.bounds.clone(),
+        problem.constraint_types.clone(),
+    ) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    // LP 試行用の短い deadline を設定 (大規模 LP で simplex が長時間化する副作用を回避)
+    let mut lp_opts = options.clone();
+    let now = Instant::now();
+    let lp_budget = std::time::Duration::from_secs_f64(LP_DISPATCH_BUDGET_SECS);
+    let lp_deadline_dur = if let Some(d) = options.deadline {
+        d.saturating_duration_since(now).min(lp_budget)
+    } else if let Some(secs) = options.timeout_secs {
+        std::time::Duration::from_secs_f64(secs.min(LP_DISPATCH_BUDGET_SECS))
+    } else {
+        lp_budget
+    };
+    lp_opts.deadline = Some(now + lp_deadline_dur);
+    lp_opts.timeout_secs = None;
+
+    let lp_result = crate::qp::solve_qp_with(&prob_lp, &lp_opts);
+    if !matches!(lp_result.status, SolveStatus::Optimal) {
+        return None;
+    }
+    if lp_result.solution.len() != problem.num_vars {
+        return None;
+    }
+
+    // LP 解 (x, dual, reduced_costs) で QP の post-processing を行い、元空間 KKT を計算する
+    let outcome = super::core::run_lp_postprocess(
+        problem,
+        lp_result.solution,
+        lp_result.dual_solution,
+        lp_result.reduced_costs,
+    );
+    if outcome.numerical_failure {
+        return None;
+    }
+    Some(outcome)
 }
 
 /// `IpmOutcome` から `SolverResult` (外部 status) への変換 — **status mutation 1 箇所**。
+/// outcome.solution は既に元空間で postsolve / unscale / clip 済み。
 fn finalize_outcome(
     outcome: IpmOutcome,
-    presolve_result: &crate::presolve::QpPresolveResult,
-    _problem: &QpProblem,
     user_eps: f64,
     n_orig: usize,
 ) -> SolverResult {
     if outcome.solution.is_empty() {
-        // 解なし: timeout として返す
         return SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -129,61 +222,22 @@ fn finalize_outcome(
         };
     }
 
-    // reduced_sol を SolverResult 形式に詰めて postsolve_qp で元空間に展開
-    let reduced_sol = SolverResult {
-        status: SolveStatus::Optimal, // 仮 (postsolve は status を見ない)
+    let status = if outcome.satisfies_eps(user_eps) {
+        SolveStatus::Optimal
+    } else {
+        // ユーザー精度未達 → Timeout (設計書: 「内部で解を捨てない」 = solution は保持)
+        SolveStatus::Timeout
+    };
+
+    debug_assert_eq!(outcome.solution.len(), n_orig, "outcome solution dimension mismatch");
+
+    SolverResult {
+        status,
         objective: outcome.objective,
         solution: outcome.solution,
         dual_solution: outcome.dual_solution,
         bound_duals: outcome.bound_duals,
         iterations: outcome.iterations,
         ..Default::default()
-    };
-    let mut final_sol = postsolve_qp(presolve_result, &reduced_sol);
-    // bound_duals を元問題空間に remap (postsolve_qp は reduced 空間のままコピーするため)
-    if presolve_result.was_reduced {
-        final_sol.bound_duals = crate::qp::remap_bound_duals_to_orig(
-            presolve_result,
-            &_problem.bounds,
-            &final_sol.bound_duals,
-        );
     }
-    // bounds clip (Ruiz unscale 増幅由来の微小違反を補正)
-    for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(_problem.bounds.iter()) {
-        if lb.is_finite() {
-            *xi = xi.max(lb);
-        }
-        if ub.is_finite() {
-            *xi = xi.min(ub);
-        }
-    }
-
-    // ── 単一 status 決定 (元空間 KKT で判定) ──
-    // 元問題で再検証 (presolve 後の reduced で KKT OK でも postsolve で違反する可能性)
-    let final_view = super::outcome::ProblemView {
-        q: &_problem.q,
-        a: &_problem.a,
-        c: &_problem.c,
-        b: &_problem.b,
-        bounds: &_problem.bounds,
-        constraint_types: &_problem.constraint_types,
-    };
-    let kkt_orig = super::kkt::kkt_residual_rel(
-        &final_view,
-        &final_sol.solution,
-        &final_sol.dual_solution,
-        &final_sol.bound_duals,
-    );
-    let pres_orig = super::kkt::primal_residual_rel(&final_view, &final_sol.solution);
-    let bv_orig = super::kkt::bound_violation(_problem.bounds.as_slice(), &final_sol.solution);
-
-    final_sol.status = if kkt_orig <= user_eps && pres_orig <= user_eps && bv_orig <= user_eps {
-        SolveStatus::Optimal
-    } else {
-        // ユーザー精度未達 → Timeout (有効解なし扱い)
-        // 設計書: 「内部で解を捨てない」 = solution は保持して返す
-        SolveStatus::Timeout
-    };
-    debug_assert_eq!(final_sol.solution.len(), n_orig, "postsolve dimension mismatch");
-    final_sol
 }
