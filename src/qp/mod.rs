@@ -379,12 +379,20 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// 共有 `cancel_flag` で片方が Optimal を出した時点でもう片方を停止させる
 /// (cooperative cancel: 各 inner solver が iter 境界で `should_stop()` をチェック)。
 /// 両方が走り切った場合は Optimal > 非 Optimal、両 Optimal なら先着優先。
+///
+/// スタックサイズは macOS 主スレッドと同等の 8 MB を明示指定する。faer supernodal
+/// Cholesky は BOYD1 (n=93261) 級で深く再帰し、Rust の `s.spawn` デフォルト 2 MB
+/// スタックでは overflow するため。
 #[cfg(feature = "parallel")]
 fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     };
+
+    /// faer supernodal Cholesky の deepest stack 要求 (BOYD1 等の検証から経験的に決定)
+    /// + 安全マージン。OS 主スレッドの典型値 (macOS/Linux 8MB) と一致させる。
+    const SPAWN_STACK_SIZE: usize = 8 * 1024 * 1024;
 
     let cancel_flag = options
         .cancel_flag
@@ -396,16 +404,19 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
     let (tx, rx) = mpsc::channel::<SolverResult>();
 
     std::thread::scope(|s| {
+        let builder = || std::thread::Builder::new().stack_size(SPAWN_STACK_SIZE);
         // Mehrotra (v1_wrapped) スレッド
         {
             let cancel = Arc::clone(&cancel_flag);
             let mut opts = options.clone();
             opts.cancel_flag = Some(cancel);
             let tx = tx.clone();
-            s.spawn(move || {
-                let r = ipm_v2::solve_qp_v1_wrapped(problem, &opts);
-                let _ = tx.send(r);
-            });
+            builder()
+                .spawn_scoped(s, move || {
+                    let r = ipm_v2::solve_qp_v1_wrapped(problem, &opts);
+                    let _ = tx.send(r);
+                })
+                .expect("spawn Mehrotra thread");
         }
         // IP-PMM (v2) スレッド
         {
@@ -413,10 +424,12 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
             let mut opts = options.clone();
             opts.cancel_flag = Some(cancel);
             let tx = tx.clone();
-            s.spawn(move || {
-                let r = ipm_v2::solve_qp_v2(problem, &opts);
-                let _ = tx.send(r);
-            });
+            builder()
+                .spawn_scoped(s, move || {
+                    let r = ipm_v2::solve_qp_v2(problem, &opts);
+                    let _ = tx.send(r);
+                })
+                .expect("spawn IP-PMM thread");
         }
         drop(tx); // 両 spawn の tx クローン保持の片方が落ちただけでは Disconnected にならない
 
