@@ -257,16 +257,15 @@ pub(crate) fn solve_qp_ipm_inner(
             if let Some(cache) = kkt_cache.as_mut() {
                 // 2反復目以降: values のみ O(n + m_ext) で更新（高速パス）
                 update_augmented_values(cache, &sigma_vec, delta_p_retry, delta_d_retry);
-                // Bug-T1修正: refactorize_numeric_threaded は事実上同期実行であり
-                // 大規模行列の再因子化中は deadline チェック不可（157s超過の主因）。
-                // factorize_quasidefinite_with_cached_perm_threaded（真のスレッド版）に統一する。
-                // symbolic 再計算コストは増えるが deadline 安全性が保証される。
+                // factorize_quasidefinite_with_cached_perm は entry + symbolic 後の 2 段階で
+                // deadline をチェックする (numeric 中は faer 仕様で mid-cancel 不可)。
+                // symbolic 再計算コストは増えるが、numeric 直前で deadline を再確認できる。
                 let perm = amd_perm_cache.as_ref().unwrap();
                 // メモリピーク半減: 旧因子化(~数GB)を新因子化allocate前に破棄。
                 // 旧 fac_cache は前反復の sigma/delta 用で stale。retry 失敗時は
                 // 既存ロジック (line 283 の `fac_cache = None`) と同じ M-02 経路に乗る。
                 fac_cache.take();
-                match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                match ldl::factorize_quasidefinite_with_cached_perm(
                     &cache.mat, perm, timeout_ctx.deadline
                 ) {
                     Ok(f) => {
@@ -318,7 +317,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 // メモリピーク半減: identity fallback 経由で kkt_cache=None / fac_cache=Some に
                 // なるケース (line 373) があるため、新因子化前に旧 fac_cache を解放する。
                 fac_cache.take();
-                match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+                match ldl::factorize_quasidefinite_with_cached_perm(
                     &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline
                 ) {
                     Ok(f) => { fac_cache = Some(f); break 'retry; }
@@ -361,7 +360,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 part3_diag_idx: part3_idx,
                 part1_updated_idx: (0..n).collect(),
             });
-            match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+            match ldl::factorize_quasidefinite_with_cached_perm(
                 &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline
             ) {
                 Ok(f) => { fac_cache = Some(f); }

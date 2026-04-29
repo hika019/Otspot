@@ -209,7 +209,7 @@ pub(crate) fn solve_ippmm_inner(
             let perm_init = amd_with_deadline(
                 k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
             );
-            if let Ok(fac_init) = ldl::factorize_quasidefinite_with_cached_perm_threaded(
+            if let Ok(fac_init) = ldl::factorize_quasidefinite_with_cached_perm(
                 &k_init, &perm_init, timeout_ctx.deadline,
             ) {
                 let mut rhs_init = vec![0.0_f64; n + m_ext];
@@ -608,7 +608,7 @@ pub(crate) fn solve_ippmm_inner(
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
-            match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+            match ldl::factorize_quasidefinite_with_cached_perm(
                 &aug_mat,
                 perm,
                 timeout_ctx.deadline,
@@ -643,7 +643,7 @@ pub(crate) fn solve_ippmm_inner(
             let aug_mat_fb =
                 build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_fallback);
             let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
-            match ldl::factorize_quasidefinite_with_cached_perm_threaded(
+            match ldl::factorize_quasidefinite_with_cached_perm(
                 &aug_mat_fb,
                 &identity_perm,
                 timeout_ctx.deadline,

@@ -88,8 +88,8 @@ impl LdlFactorizationAmd {
     ///
     /// mat のスパースパターンが初回と同一であることが前提。
     /// IPM の反復内でスパースパターンが変わらない場合に使用する。
-    /// Note: deadline check is performed before factorization starts.
-    /// Factorization itself may exceed the deadline for large matrices.
+    /// deadline は entry と numeric 開始前の 2 箇所でチェック。faer の numeric 因子化自体は
+    /// mid-cancel 不可のため、一旦開始したら超過完走する可能性がある。
     pub fn refactorize_numeric(
         &mut self,
         mat: &CscMatrix,
@@ -117,6 +117,12 @@ impl LdlFactorizationAmd {
             dynamic_regularization_delta: 1e-8,
             dynamic_regularization_epsilon: 1e-13,
         };
+        // 行列準備完了後・numeric 開始前に deadline 再チェック (numeric は最も時間がかかる)。
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Err(LdlError::DeadlineExceeded);
+            }
+        }
         let mut mem = MemBuffer::new(StackReq::any_of(&[
             self.symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
             self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
@@ -166,32 +172,6 @@ impl LdlFactorizationAmd {
         sol.copy_from_slice(&x);
     }
 
-    /// Symbolic を再利用して数値因子化のみを実行する（スレッドなし版）。
-    ///
-    /// # スレッドなし設計の理由
-    /// `SymbolicSupernodalCholesky<I>` が `Clone` 未実装のためスレッドへの渡しが困難。
-    /// `Arc<SymbolicCholesky>` 化は将来タスク。
-    ///
-    /// # deadline 超過リスク
-    /// スレッドなし実装のため LDLT 計算中は deadline チェックができない（現行と同等）。
-    ///
-    /// # 引数
-    /// - `mat`: スパースパターンが初回と同一の CSC 行列（values のみ更新済み）
-    /// - `deadline`: タイムアウト期限（None の場合は無制限で実行）
-    pub fn refactorize_numeric_threaded(
-        &mut self,
-        mat: &CscMatrix,
-        deadline: Option<Instant>,
-    ) -> Result<(), LdlError> {
-        // deadline 事前チェック
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return Err(LdlError::DeadlineExceeded);
-            }
-        }
-        // スレッドなしで直接呼ぶ（SymbolicSupernodalCholesky<I> が Clone 未実装のため）
-        self.refactorize_numeric(mat, None)
-    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
@@ -256,12 +236,23 @@ fn build_symbolic_hl(
 ///
 /// `signs`: Some → quasidefinite sign-aware regularization
 ///          None → sign-unaware regularization (positive definite 向け)
+/// `deadline`: 指定時、symbolic 完了直後・numeric 開始前に再チェック。
+///             symbolic は O(nnz) で速いが numeric は O(L_nnz) で BOYD2 級では分単位。
+///             このチェックがないと numeric 中に deadline を尊重できない。
 fn do_numeric_factorize(
     mat: &CscMatrix,
     signs: Option<&[i8]>,
+    deadline: Option<Instant>,
 ) -> Result<(SymbolicCholesky<usize>, Vec<f64>), LdlError> {
     let a_upper = csc_upper_to_faer_upper(mat);
     let symbolic = build_symbolic_hl(&a_upper)?;
+
+    // symbolic 完了後・numeric 前に deadline 再チェック (numeric は最も時間がかかる)。
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
+        }
+    }
 
     let regularization = LdltRegularization {
         dynamic_regularization_signs: signs,
@@ -296,16 +287,15 @@ fn do_numeric_factorize(
 /// 正定値疎行列の LDL^T 分解を実行する。
 pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
     let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None)?;
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, None)?;
     Ok(LdlFactorization { symbolic, l_values, n })
 }
 
 /// deadline 付き正定値疎行列の LDL^T 分解。
 ///
-/// deadline チェックは factorize 前のみ実施
-/// （faer は mid-factorization キャンセルを持たないため）。
-/// Note: deadline check is performed before factorization starts.
-/// Factorization itself may exceed the deadline for large matrices.
+/// deadline は factorize 前と symbolic 完了後（numeric 開始前）の 2 箇所でチェック。
+/// faer の numeric 因子化自体は mid-factorization キャンセル不可のため、
+/// 一旦 numeric を開始したら deadline を超えて完走する可能性がある。
 pub fn factorize_with_deadline(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -315,7 +305,9 @@ pub fn factorize_with_deadline(
             return Err(LdlError::DeadlineExceeded);
         }
     }
-    factorize(mat)
+    let n = mat.nrows;
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline)?;
+    Ok(LdlFactorization { symbolic, l_values, n })
 }
 
 /// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解。
@@ -344,39 +336,8 @@ pub fn factorize_quasidefinite_with_cached_perm(
         ncols: n,
     };
     let signs = extract_diagonal_signs(&perm_mat);
-    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs))?;
+    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline)?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
-}
-
-/// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解（スレッド版）。
-///
-/// 因子化を `std::thread::scope` 内のスレッドで実行し、scope 終了時に必ず join する
-/// ことでスレッド由来のメモリ蓄積を防ぐ。
-///
-/// 旧実装は `std::thread::spawn` + `recv_timeout` で detach する設計だったが、
-/// 138 問バッチ処理 (Maros) で BOYD2 等の大規模 LDL (~2 GB) スレッドが順次蓄積し、
-/// RSS 4.7 GB / VSZ 518 GB / スワップ 83 GB に至るリークの主因だった
-/// (`solve_qp_concurrent` で 5c3e87d で同様の修正済み)。
-///
-/// トレードオフ: deadline 超過時もスレッドの完了を待つため、1 factorize 分の超過が
-/// 発生する可能性。これは累積メモリリークより許容範囲。
-pub fn factorize_quasidefinite_with_cached_perm_threaded(
-    mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    if let Some(d) = deadline {
-        if Instant::now() >= d {
-            return Err(LdlError::DeadlineExceeded);
-        }
-    }
-    // thread::scope: スコープ終了で必ず join → メモリ確実に解放。
-    std::thread::scope(|s| {
-        let handle = s.spawn(|| {
-            factorize_quasidefinite_with_cached_perm(mat, perm, None)
-        });
-        handle.join().unwrap_or(Err(LdlError::DeadlineExceeded))
-    })
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算）。
