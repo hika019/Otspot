@@ -262,6 +262,10 @@ pub(crate) fn solve_qp_ipm_inner(
                 // factorize_quasidefinite_with_cached_perm_threaded（真のスレッド版）に統一する。
                 // symbolic 再計算コストは増えるが deadline 安全性が保証される。
                 let perm = amd_perm_cache.as_ref().unwrap();
+                // メモリピーク半減: 旧因子化(~数GB)を新因子化allocate前に破棄。
+                // 旧 fac_cache は前反復の sigma/delta 用で stale。retry 失敗時は
+                // 既存ロジック (line 283 の `fac_cache = None`) と同じ M-02 経路に乗る。
+                fac_cache.take();
                 match ldl::factorize_quasidefinite_with_cached_perm_threaded(
                     &cache.mat, perm, timeout_ctx.deadline
                 ) {
@@ -311,6 +315,9 @@ pub(crate) fn solve_qp_ipm_inner(
                     part1_updated_idx: (0..n).collect(),
                 });
                 // 初回は symbolic + numeric の全因子化
+                // メモリピーク半減: identity fallback 経由で kkt_cache=None / fac_cache=Some に
+                // なるケース (line 373) があるため、新因子化前に旧 fac_cache を解放する。
+                fac_cache.take();
                 match ldl::factorize_quasidefinite_with_cached_perm_threaded(
                     &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline
                 ) {
