@@ -366,10 +366,15 @@ pub(crate) fn solve_ippmm_inner(
         const DUALITY_GAP_TOL: f64 = 1e-3;
 
         // best-so-far 更新（NaN guard 経路で崩壊解を返さないための保険）
+        // 各項を同じスケールで正規化 (mu は complementarity = sᵀy/m で dual variable と同スケール)。
+        // 旧式は mu のみ無正規化で 3 項のスケール不揃いにより、||c|| が大きい問題で
+        // best-so-far が「mu が小さい解」にバイアスされていた。
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let norm_b_bs = norm_inf(&b_ext).max(1.0);
         if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() {
-            let score = nr_p / (1.0 + norm_b_bs) + nr_d / (1.0 + norm_c_bs) + mu.abs();
+            let score = nr_p / (1.0 + norm_b_bs)
+                + nr_d / (1.0 + norm_c_bs)
+                + mu.abs() / (1.0 + norm_c_bs);
             if score < best_score {
                 best_score = score;
                 best_x.copy_from_slice(&x);
