@@ -318,14 +318,22 @@ pub(crate) fn check_dfeas_status_relative(
             }
         }
     }
-    // 成分ごとの相対dfeas: pfeasと同パターン
-    let dfeas_relative = (0..n)
-        .map(|j| {
-            let residual = (qx[j] + aty[j] + bound_contrib[j] + problem.c[j]).abs();
-            let scale = 1.0 + qx[j].abs() + aty[j].abs() + bound_contrib[j].abs() + problem.c[j].abs();
-            residual / scale
-        })
-        .fold(0.0_f64, f64::max);
+    // OSQP 流 全体相対化 (bench/v2/IPM 内部 nr_d_rel_orig / compute_pfeas_osqp と統一)。
+    // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定する欠陥があり、
+    // セッション 7 で 4 箇所統一済みだったが本関数は横展開漏れだった。
+    let mut max_r = 0.0_f64;
+    let mut max_qx = 0.0_f64;
+    let mut max_c = 0.0_f64;
+    let mut max_aty = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
+    for j in 0..n {
+        max_r = max_r.max((qx[j] + aty[j] + bound_contrib[j] + problem.c[j]).abs());
+        max_qx = max_qx.max(qx[j].abs());
+        max_c = max_c.max(problem.c[j].abs());
+        max_aty = max_aty.max(aty[j].abs());
+        max_bnd = max_bnd.max(bound_contrib[j].abs());
+    }
+    let dfeas_relative = max_r / (1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd));
     if dfeas_relative < eps {
         SolveStatus::Optimal
     } else {
