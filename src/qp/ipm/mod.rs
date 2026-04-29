@@ -24,11 +24,10 @@ use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
 
 // scaling モジュールの公開関数を ipm 名前空間に再エクスポート
-pub(crate) use scaling::post_verify_solution;
-pub(crate) use scaling::check_dfeas_status_relative;
-pub(crate) use scaling::PROMOTION_GAP_TOL;
 #[cfg(test)]
 pub(crate) use scaling::check_dfeas_status;
+#[cfg(test)]
+pub(crate) use scaling::check_dfeas_status_relative;
 
 // ---------------------------------------------------------------------------
 // IPM 固定パラメータ
@@ -79,7 +78,7 @@ pub(crate) fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> So
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::scaling::{unscale_ipm_result, compute_amplification, EPS_FLOOR};
+    use super::scaling::{unscale_ipm_result, compute_amplification, EPS_FLOOR, post_verify_solution};
     use crate::linalg::ruiz::RuizScaler;
     use crate::options::SolverOptions;
     use crate::problem::SolveStatus;
