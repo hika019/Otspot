@@ -184,7 +184,37 @@ mod tests {
         }
     }
 
-    /// OSQP 式評価で Marginal/Mid 問題が PASS するか直接確認する診断。
+    /// Catastrophic 9件 (Q-prefix LP 由来) の OSQP eval 化後の状態。
+    /// 1000s で救える見込みのある問題を特定する。
+    #[test]
+    #[ignore]
+    fn test_osqp_eval_catastrophic() {
+        let problems = [
+            "QADLITTL", "QBORE3D", "QCAPRI", "QETAMACR", "QFFFFF80",
+            "QPCBOEI1", "QSEBA", "QSHELL", "QSCRS8",
+        ];
+        for name in problems {
+            let path_str = format!("data/maros_meszaros/{}.QPS", name);
+            let path = Path::new(&path_str);
+            if !path.exists() { continue; }
+            let prob = parse_qps(path).expect(name);
+            let mut opts = SolverOptions::default();
+            opts.timeout_secs = Some(60.0);
+            let r = solve_qp_v2(&prob, &opts);
+            let view = super::outcome::ProblemView {
+                q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+                bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            };
+            let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+            let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+            let bv = super::kkt::bound_violation(&prob.bounds, &r.solution);
+            // 1000s で救える見込み: KKT < 1e-3 (1000s で更に IPM 進めば 1e-6 達成)
+            let prospect_1000s = kkt < 1e-3 && pres < 1e-3 && bv < 1e-6;
+            eprintln!("{:10} status={:?} kkt={:.3e} pres={:.3e} prospect_1000s={}",
+                name, r.status, kkt, pres, prospect_1000s);
+        }
+    }
+
     #[test]
     #[ignore]
     fn test_osqp_eval_marginal() {
