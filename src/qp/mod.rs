@@ -361,25 +361,96 @@ pub(crate) fn collapse_le_expansion_dual(
 /// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // QpSolverChoice variant に応じて 2 アルゴ (IPM/IPPMM) を dispatch:
-    //   - Ipm        → ipm::solve_qp_ipm (Mehrotra predictor-corrector)
-    //   - IpPmmNew   → ipm_v2::solve_qp_v2 (IP-PMM with retry 1 層 / status 1 箇所 / 元空間 KKT)
-    //   - Concurrent → 当面 IpPmmNew と同じ (将来 Mehrotra/IP-PMM 並行実行に拡張)
+    //   - Ipm        → Mehrotra predictor-corrector を v2 wrapper 経由で実行
+    //   - IpPmmNew   → IP-PMM を v2 wrapper 経由で実行
+    //   - Concurrent → 上記 2 経路を並行実行し、Optimal 到達順 / 残差優先で勝者選択
     //
-    // Q=0 (LP 退化) と Q が PSD でない場合の前置きは各経路の入口で実施する
-    // (v2 は ipm_v2::solve_qp_v2 内、Mehrotra は ipm::solve_qp_ipm 内)。
-    // 全 variant で v2 同等の retry 1 層 / status 1 箇所 / 元空間 KKT 直接判定 wrapper を経由。
-    // wrapper 内で is_zero_q LP dispatch / PSD check / presolve / unscale / postsolve / KKT 判定が
-    // 行われるため、ここでは inner solver の選択 (Mehrotra vs IP-PMM) のみ。
+    // 各 wrapper 内で Q=0 LP dispatch / PSD check / presolve / unscale / postsolve /
+    // 元空間 KKT 直接判定が一貫処理される (retry 1 層 / status 1 箇所変換)。
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm_v2::solve_qp_v1_wrapped(problem, options),
         QpSolverChoice::IpPmmNew => ipm_v2::solve_qp_v2(problem, options),
-        QpSolverChoice::Concurrent => {
-            // 並行実行 (旧 solve_qp_concurrent) は v1 retry と一緒に削除済 (eb3d11f)。
-            // 当面は IpPmmNew (v2) と同じ動作。将来 Mehrotra/IP-PMM 並行実行を再構築する場合は
-            // 各 thread が solve_qp_v1_wrapped / solve_qp_v2 を呼ぶ薄い wrapper にする。
-            ipm_v2::solve_qp_v2(problem, options)
-        }
+        QpSolverChoice::Concurrent => solve_qp_concurrent_dispatch(problem, options),
     }
+}
+
+/// Mehrotra (v1_wrapped) と IP-PMM (v2) を並行実行し、より良い結果を返す。
+///
+/// 共有 `cancel_flag` で片方が Optimal を出した時点でもう片方を停止させる
+/// (cooperative cancel: 各 inner solver が iter 境界で `should_stop()` をチェック)。
+/// 両方が走り切った場合は Optimal > 非 Optimal、両 Optimal なら先着優先。
+#[cfg(feature = "parallel")]
+fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+
+    let cancel_flag = options
+        .cancel_flag
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    // mpsc でスレッドからメイン側へ結果を渡す。送信は drop で完了通知。
+    let (tx, rx) = mpsc::channel::<SolverResult>();
+
+    std::thread::scope(|s| {
+        // Mehrotra (v1_wrapped) スレッド
+        {
+            let cancel = Arc::clone(&cancel_flag);
+            let mut opts = options.clone();
+            opts.cancel_flag = Some(cancel);
+            let tx = tx.clone();
+            s.spawn(move || {
+                let r = ipm_v2::solve_qp_v1_wrapped(problem, &opts);
+                let _ = tx.send(r);
+            });
+        }
+        // IP-PMM (v2) スレッド
+        {
+            let cancel = Arc::clone(&cancel_flag);
+            let mut opts = options.clone();
+            opts.cancel_flag = Some(cancel);
+            let tx = tx.clone();
+            s.spawn(move || {
+                let r = ipm_v2::solve_qp_v2(problem, &opts);
+                let _ = tx.send(r);
+            });
+        }
+        drop(tx); // 両 spawn の tx クローン保持の片方が落ちただけでは Disconnected にならない
+
+        // 結果を順次受信。Optimal が来た時点で cancel を立て、相方を協調停止。
+        let mut best: Option<SolverResult> = None;
+        for r in rx {
+            let r_is_optimal = matches!(r.status, SolveStatus::Optimal);
+            let prefer_new = match &best {
+                None => true,
+                // Optimal が新しく到着 & 既存が非 Optimal → 上書き
+                Some(b) if r_is_optimal && !matches!(b.status, SolveStatus::Optimal) => true,
+                // 既存が Optimal → 維持 (先着優先で決定論性確保)
+                Some(b) if matches!(b.status, SolveStatus::Optimal) => false,
+                // 両者非 Optimal → 解を持っている方を優先
+                Some(b) => !r.solution.is_empty() && b.solution.is_empty(),
+            };
+            if prefer_new {
+                if r_is_optimal {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                }
+                best = Some(r);
+            }
+        }
+        best.unwrap_or_else(|| SolverResult {
+            status: SolveStatus::NumericalError,
+            ..Default::default()
+        })
+    })
+}
+
+/// Concurrent feature 無効時のフォールバック (IP-PMM 単独)。
+#[cfg(not(feature = "parallel"))]
+fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    ipm_v2::solve_qp_v2(problem, options)
 }
 
 
