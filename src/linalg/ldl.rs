@@ -24,7 +24,6 @@ use faer::sparse::linalg::cholesky::{
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, Triplet};
-use std::sync::mpsc;
 use std::time::Instant;
 
 /// LDL分解エラー
@@ -351,37 +350,33 @@ pub fn factorize_quasidefinite_with_cached_perm(
 
 /// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解（スレッド版）。
 ///
-/// 因子化をバックグラウンドスレッドで実行し recv_timeout でタイムアウト制限する。
-/// タイムアウト後もスレッドは実行を継続する（read-only 計算、いずれ完了する）。
+/// 因子化を `std::thread::scope` 内のスレッドで実行し、scope 終了時に必ず join する
+/// ことでスレッド由来のメモリ蓄積を防ぐ。
 ///
-/// 短期対処。Inexact IPM で根本解消予定。
+/// 旧実装は `std::thread::spawn` + `recv_timeout` で detach する設計だったが、
+/// 138 問バッチ処理 (Maros) で BOYD2 等の大規模 LDL (~2 GB) スレッドが順次蓄積し、
+/// RSS 4.7 GB / VSZ 518 GB / スワップ 83 GB に至るリークの主因だった
+/// (`solve_qp_concurrent` で 5c3e87d で同様の修正済み)。
+///
+/// トレードオフ: deadline 超過時もスレッドの完了を待つため、1 factorize 分の超過が
+/// 発生する可能性。これは累積メモリリークより許容範囲。
 pub fn factorize_quasidefinite_with_cached_perm_threaded(
     mat: &CscMatrix,
     perm: &[usize],
     deadline: Option<Instant>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
-    let remaining = match deadline {
-        None => return factorize_quasidefinite_with_cached_perm(mat, perm, None),
-        Some(d) => {
-            let now = Instant::now();
-            if now >= d {
-                return Err(LdlError::DeadlineExceeded);
-            }
-            d - now
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
         }
-    };
-    let mat_owned = mat.clone();
-    let perm_owned = perm.to_vec();
-    let (tx, rx) = mpsc::channel::<Result<LdlFactorizationAmd, LdlError>>();
-    std::thread::spawn(move || {
-        // 短期対処。Inexact IPM で根本解消予定。
-        // タイムアウト後もスレッドは実行を継続する（read-only 計算）。
-        let _ = tx.send(factorize_quasidefinite_with_cached_perm(&mat_owned, &perm_owned, None));
-    });
-    match rx.recv_timeout(remaining) {
-        Ok(result) => result,
-        Err(_) => Err(LdlError::DeadlineExceeded),
     }
+    // thread::scope: スコープ終了で必ず join → メモリ確実に解放。
+    std::thread::scope(|s| {
+        let handle = s.spawn(|| {
+            factorize_quasidefinite_with_cached_perm(mat, perm, None)
+        });
+        handle.join().unwrap_or(Err(LdlError::DeadlineExceeded))
+    })
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算）。
