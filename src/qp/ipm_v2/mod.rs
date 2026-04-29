@@ -184,6 +184,39 @@ mod tests {
         }
     }
 
+    /// OSQP 式評価で Marginal/Mid 問題が PASS するか直接確認する診断。
+    #[test]
+    #[ignore]
+    fn test_osqp_eval_marginal() {
+        let problems = [
+            // Marginal 5件
+            "PRIMALC5", "QSCAGR25", "QSCAGR7", "QSHIP12L", "QSHIP12S",
+            // Mid sample
+            "QBANDM", "QSHARE1B",
+            // Catastrophic sample
+            "QADLITTL", "QSCRS8",
+        ];
+        for name in problems {
+            let path_str = format!("data/maros_meszaros/{}.QPS", name);
+            let path = Path::new(&path_str);
+            if !path.exists() { continue; }
+            let prob = parse_qps(path).expect(name);
+            let mut opts = SolverOptions::default();
+            opts.timeout_secs = Some(60.0);
+            let r = solve_qp_v2(&prob, &opts);
+            let view = super::outcome::ProblemView {
+                q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+                bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            };
+            let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+            let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+            let bv = super::kkt::bound_violation(&prob.bounds, &r.solution);
+            let pass = kkt < 1e-6 && pres < 1e-6 && bv < 1e-6;
+            eprintln!("{:10} status={:?} kkt={:.3e} pres={:.3e} bv={:.3e} PASS_eval={}",
+                name, r.status, kkt, pres, bv, pass);
+        }
+    }
+
     /// Marginal 問題で x が bound からどの程度離れているか診断する。
     /// snap_tol を決めるための事実確認。
     #[test]

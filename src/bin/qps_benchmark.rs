@@ -51,15 +51,24 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
         Err(_) => f64::NAN,
     };
 
-    let bfeas = solution
-        .iter()
-        .zip(prob.bounds.iter())
-        .map(|(&xi, &(lb, ub))| {
-            let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-            let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
-            lb_viol.max(ub_viol)
-        })
-        .fold(0.0_f64, f64::max);
+    // bfeas: OSQP 式の全体相対化 ||v||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))
+    // 旧実装は絶対値 max で、bound が 1e10 の問題で 1e-6 違反が PASS にならない過剰判定だった。
+    let mut max_v = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
+    for (&xi, &(lb, ub)) in solution.iter().zip(prob.bounds.iter()) {
+        let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+        let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+        max_v = max_v.max(lb_viol.max(ub_viol));
+        max_x = max_x.max(xi.abs());
+        if lb.is_finite() {
+            max_bnd = max_bnd.max(lb.abs());
+        }
+        if ub.is_finite() {
+            max_bnd = max_bnd.max(ub.abs());
+        }
+    }
+    let bfeas = max_v / (1.0 + max_x.max(max_bnd));
 
     (pfeas, bfeas)
 }
@@ -77,20 +86,23 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     }
     match prob.a.mat_vec_mul(solution) {
         Ok(ax) => {
-            let row_norms = prob.a.row_infinity_norms();
-            ax.iter()
-                .zip(prob.b.iter())
-                .enumerate()
-                .zip(row_norms.iter())
-                .map(|((i, (&ax_i, &b_i)), &rn)| {
-                    let violation = match prob.constraint_types.get(i) {
-                        Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
-                        Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
-                        _ => (ax_i - b_i).max(0.0),
-                    };
-                    violation / (1.0 + rn + b_i.abs())
-                })
-                .fold(0.0_f64, f64::max)
+            // OSQP 式: 全体相対化 ||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))。
+            // 旧実装の行ごと正規化は行ノルム小の制約で過剰に厳しい (Marginal の主因の 1 つ)。
+            let mut max_v = 0.0_f64;
+            let mut max_ax = 0.0_f64;
+            let mut max_b = 0.0_f64;
+            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
+                let violation = match prob.constraint_types.get(i) {
+                    Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                    Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                    _ => (ax_i - b_i).max(0.0),
+                };
+                max_v = max_v.max(violation);
+                max_ax = max_ax.max(ax_i.abs());
+                max_b = max_b.max(b_i.abs());
+            }
+            let scale = 1.0 + max_ax.max(max_b);
+            max_v / scale
         }
         Err(_) => f64::NAN,
     }
@@ -156,23 +168,32 @@ fn compute_dfeas_orig(
             bound_contrib[j] = -reduced_costs[j];
         }
     }
+    // OSQP 式: 全体相対化 (||r||_∞ / (1 + max(||Qx||, ||c||, ||A^T y||, ||z||)))
+    // 旧実装は成分ごと正規化 → max で、他項全部小さい変数 1 個で過剰判定になっていた
+    // (Marginal 5件で dfr=1.5e-6 越え)。OSQP/Gurobi 等の業界標準に合わせる。
     let mut dfeas_abs = 0.0_f64;
-    let mut dfeas_rel = 0.0_f64;
+    let mut max_qx = 0.0_f64;
+    let mut max_c = 0.0_f64;
+    let mut max_aty = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
     for i in 0..n {
         // FX (固定) 変数 lb==ub は presolve で除去され、bound_dual は postsolve で
         // 0 埋めされる（実装上 "lagrange dual unknown for fixed vars"）。bench で
         // FX 変数の stationarity を評価すると 0 埋めの dual で huge な missing 項が
-        // 出るため除外する。FX 変数の x[i] は固定値で obj/制約への寄与は確定しており、
-        // free 変数の KKT 残差のみが「真の dual feasibility」。
+        // 出るため除外する。
         let (lb_i, ub_i) = prob.bounds[i];
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
             continue;
         }
         let r = (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs();
-        let scale = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
         dfeas_abs = dfeas_abs.max(r);
-        dfeas_rel = dfeas_rel.max(r / scale);
+        max_qx = max_qx.max(qx[i].abs());
+        max_c = max_c.max(prob.c[i].abs());
+        max_aty = max_aty.max(aty[i].abs());
+        max_bnd = max_bnd.max(bound_contrib[i].abs());
     }
+    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+    let dfeas_rel = dfeas_abs / scale;
     (dfeas_abs, dfeas_rel)
 }
 

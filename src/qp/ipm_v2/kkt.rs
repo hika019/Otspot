@@ -36,7 +36,13 @@ fn compute_bound_contrib(
     contrib
 }
 
-/// 元空間 KKT stationarity 残差 (成分相対化, 最大値)。
+/// 元空間 KKT stationarity 残差 (OSQP 式: 全体相対化, 最大値)。
+///
+/// 旧実装は成分ごと正規化してから max を取ったが、これは「他項全部 0 に近い 1 変数」
+/// で簡単に膨らむ過剰判定だった (Marginal 5件で dfr=1.5e-6 越えの主因)。
+/// OSQP/Gurobi 等は `||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))` と
+/// 全体最大で正規化する標準形式を採用しており、本実装もそれに合わせる。
+///
 /// FX 変数は dual が postsolve で 0 埋めされる仕様のため評価から除外する。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     let n = prob.bounds.len();
@@ -56,20 +62,31 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
         vec![0.0; n]
     };
     let bound_contrib = compute_bound_contrib(prob.bounds, z, n);
-    let mut max_rel = 0.0_f64;
+    let mut max_r = 0.0_f64;
+    let mut max_qx = 0.0_f64;
+    let mut max_c = 0.0_f64;
+    let mut max_aty = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
             continue;
         }
         let r = (qx[j] + prob.c[j] + aty[j] + bound_contrib[j]).abs();
-        let scale = 1.0 + qx[j].abs() + prob.c[j].abs() + aty[j].abs() + bound_contrib[j].abs();
-        max_rel = max_rel.max(r / scale);
+        max_r = max_r.max(r);
+        max_qx = max_qx.max(qx[j].abs());
+        max_c = max_c.max(prob.c[j].abs());
+        max_aty = max_aty.max(aty[j].abs());
+        max_bnd = max_bnd.max(bound_contrib[j].abs());
     }
-    max_rel
+    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+    max_r / scale
 }
 
-/// 元空間 primal 残差 (行ノルム正規化, 最大値)。
+/// 元空間 primal 残差 (OSQP 式: 全体相対化, 最大値)。
+///
+/// 旧実装は行ごと `(1 + rn + |b_i|)` 正規化 → max で、行ノルム小の制約で過剰に厳しい。
+/// OSQP 標準: `||Ax - b||_∞ / (1 + max(||Ax||_∞, ||b||_∞))` (制約型ごと violation を取る)。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     if prob.a.nrows == 0 {
         return 0.0;
@@ -78,30 +95,47 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
         Ok(v) => v,
         Err(_) => return f64::INFINITY,
     };
-    let row_norms = prob.a.row_infinity_norms();
-    ax.iter()
+    let mut max_v = 0.0_f64;
+    let mut max_ax = 0.0_f64;
+    let mut max_b = 0.0_f64;
+    for (((&ax_i, &b_i), ct), _) in ax.iter()
         .zip(prob.b.iter())
         .zip(prob.constraint_types.iter())
-        .zip(row_norms.iter())
-        .map(|(((&ax_i, &b_i), ct), &rn)| {
-            let v = match ct {
-                ConstraintType::Eq => (ax_i - b_i).abs(),
-                ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                _ => (ax_i - b_i).max(0.0),
-            };
-            v / (1.0 + rn + b_i.abs())
-        })
-        .fold(0.0_f64, f64::max)
+        .zip(0..)
+    {
+        let v = match ct {
+            ConstraintType::Eq => (ax_i - b_i).abs(),
+            ConstraintType::Ge => (b_i - ax_i).max(0.0),
+            _ => (ax_i - b_i).max(0.0),
+        };
+        max_v = max_v.max(v);
+        max_ax = max_ax.max(ax_i.abs());
+        max_b = max_b.max(b_i.abs());
+    }
+    let scale = 1.0 + max_ax.max(max_b);
+    max_v / scale
 }
 
-/// 元空間 bounds 違反 (絶対値, 最大値)。
+/// 元空間 bounds 違反 (OSQP 式: 全体相対化, 最大値)。
+///
+/// 旧実装は絶対値 max でスケール無視 → bound が 1e10 の問題で 1e-6 違反が PASS にならない。
+/// OSQP 標準: `||violation||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))`。
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
-    x.iter()
-        .zip(bounds.iter())
-        .map(|(&xi, &(lb, ub))| {
-            let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-            let hi = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
-            lo.max(hi)
-        })
-        .fold(0.0_f64, f64::max)
+    let mut max_v = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
+    for (&xi, &(lb, ub)) in x.iter().zip(bounds.iter()) {
+        let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+        let hi = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+        max_v = max_v.max(lo.max(hi));
+        max_x = max_x.max(xi.abs());
+        if lb.is_finite() {
+            max_bnd = max_bnd.max(lb.abs());
+        }
+        if ub.is_finite() {
+            max_bnd = max_bnd.max(ub.abs());
+        }
+    }
+    let scale = 1.0 + max_x.max(max_bnd);
+    max_v / scale
 }
