@@ -23,6 +23,34 @@ pub(crate) const EPS_FLOOR: f64 = 1e-12;
 /// 真の Optimal の双対ギャップは通常 1% 以下、UBH1 型の偽 Optimal は ~28% で弾く。
 pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
+/// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
+/// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。
+/// 旧式 (行ノルム正規化) は行ノルム小の制約で過剰判定する欠陥があった (セッション 7 で判明)。
+fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
+    use crate::problem::ConstraintType;
+    if problem.num_constraints == 0 {
+        return 0.0;
+    }
+    let ax = match problem.a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let mut max_v = 0.0_f64;
+    let mut max_ax = 0.0_f64;
+    let mut max_b = 0.0_f64;
+    for (i, (&ax_i, &b_i)) in ax.iter().zip(problem.b.iter()).enumerate() {
+        let violation = match problem.constraint_types.get(i) {
+            Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+            Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+            _ => (ax_i - b_i).max(0.0),
+        };
+        max_v = max_v.max(violation);
+        max_ax = max_ax.max(ax_i.abs());
+        max_b = max_b.max(b_i.abs());
+    }
+    max_v / (1.0 + max_ax.max(max_b))
+}
+
 // ---------------------------------------------------------------------------
 // 公開関数
 // ---------------------------------------------------------------------------
@@ -130,39 +158,19 @@ pub(crate) fn post_verify_solution(
     let x = &result.solution;
     let y = &result.dual_solution;
     let bound_duals = &result.bound_duals;
-    // 元空間 KKT 判定: bench compute_dfeas_orig と同形の成分相対 dfeas。
-    // 旧 inf-norm 絶対基準は norm_c が huge な問題で tol が 1e-2 まで緩み偽 Optimal を量産。
-    // 成分相対化により「ソルバ Optimal 申告 = ユーザー精度を真に満たす」契約を成立させる。
+    // 元空間 KKT 判定: bench/v2 と同形の OSQP 流 全体相対化 pfeas。
+    // セッション 7 で旧 行ノルム正規化 → 全体相対化に統一 (横展開)。
     let status = if problem.num_constraints > 0 {
-        match problem.a.mat_vec_mul(x) {
-            Ok(ax) => {
-                let row_norms = problem.a.row_infinity_norms();
-                let pfeas_normalized: f64 = ax
-                    .iter()
-                    .zip(problem.b.iter())
-                    .zip(problem.constraint_types.iter())
-                    .zip(row_norms.iter())
-                    .map(|(((&ax_i, &b_i), ct), &rn)| {
-                        let violation = match ct {
-                            crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                            crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                            _ => (ax_i - b_i).max(0.0),
-                        };
-                        violation / (1.0 + rn + b_i.abs())
-                    })
-                    .fold(0.0_f64, f64::max);
-                if pfeas_normalized < eps {
-                    let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
-                    if bfeas_status == SolveStatus::Optimal {
-                        check_dfeas_status_relative(problem, x, y, bound_duals, eps)
-                    } else {
-                        bfeas_status
-                    }
-                } else {
-                    SolveStatus::SuboptimalSolution
-                }
+        let pfeas_normalized = compute_pfeas_osqp(problem, x);
+        if pfeas_normalized.is_finite() && pfeas_normalized < eps {
+            let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
+            if bfeas_status == SolveStatus::Optimal {
+                check_dfeas_status_relative(problem, x, y, bound_duals, eps)
+            } else {
+                bfeas_status
             }
-            Err(_) => SolveStatus::SuboptimalSolution,
+        } else {
+            SolveStatus::SuboptimalSolution
         }
     } else {
         let bfeas_status = check_bfeas_status(x, &problem.bounds, eps);
@@ -363,8 +371,7 @@ pub(crate) fn unscale_ipm_result(
             let obj_orig = result.objective / scaler.c;
             // [整合性] check_dfeas_status は L405 で unscaled x,y,bound_duals を受け取り
             // 元空間で dfeas を計算する。よって threshold も元空間 (bench と同形)。
-            // 元空間 KKT 判定: 成分相対 dfeas (bench compute_dfeas_orig と同形)。
-            // 旧 inf-norm * (1+norm_c) tol は huge 問題で緩すぎ偽 Optimal を量産していた。
+            // 元空間 KKT 判定: OSQP 流 全体相対化 pfeas (セッション 7 で横展開)。
             let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -378,23 +385,9 @@ pub(crate) fn unscale_ipm_result(
                                 _ => (ax_i - b_i).max(0.0),
                             })
                             .fold(0.0_f64, f64::max);
-                        let row_norms = problem.a.row_infinity_norms();
-                        let pfeas_normalized: f64 = ax
-                            .iter()
-                            .zip(problem.b.iter())
-                            .zip(problem.constraint_types.iter())
-                            .zip(row_norms.iter())
-                            .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = match ct {
-                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                                    _ => (ax_i - b_i).max(0.0),
-                                };
-                                violation / (1.0 + rn + b_i.abs())
-                            })
-                            .fold(0.0_f64, f64::max);
+                        let pfeas_normalized = compute_pfeas_osqp(problem, &x);
                         let orig_resid = result.final_residuals.map(|(_, d, g)| (pfeas, d, g));
-                        let status = if pfeas_normalized < eps {
+                        let status = if pfeas_normalized.is_finite() && pfeas_normalized < eps {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
                                 check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
@@ -443,25 +436,12 @@ pub(crate) fn unscale_ipm_result(
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             // [整合性] 上記 Optimal branch と同形。元空間 dfeas tol = bench tol。
+            // セッション 7 で OSQP 流 全体相対化に統一 (横展開)。
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
-                    Ok(ax) => {
-                        let row_norms = problem.a.row_infinity_norms();
-                        let pfeas_normalized: f64 = ax
-                            .iter()
-                            .zip(problem.b.iter())
-                            .zip(problem.constraint_types.iter())
-                            .zip(row_norms.iter())
-                            .map(|(((&ax_i, &b_i), ct), &rn)| {
-                                let violation = match ct {
-                                    crate::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                                    crate::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                                    _ => (ax_i - b_i).max(0.0),
-                                };
-                                violation / (1.0 + rn + b_i.abs())
-                            })
-                            .fold(0.0_f64, f64::max);
-                        if pfeas_normalized < eps {
+                    Ok(_ax) => {
+                        let pfeas_normalized = compute_pfeas_osqp(problem, &x);
+                        if pfeas_normalized.is_finite() && pfeas_normalized < eps {
                             let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
                             if bfeas_status == SolveStatus::Optimal {
                                 check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
