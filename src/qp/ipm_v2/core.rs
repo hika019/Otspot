@@ -49,6 +49,15 @@ fn run_ipm_with(
     let reduced = &presolve_result.reduced;
     let mut result = inner_solver(reduced, opts);
 
+    // 確定的 Infeasible / Unbounded は IpmOutcome に保持して finalize_outcome に伝える。
+    // ここで握りつぶすと外部 status は Timeout に丸められて status 隠蔽になる。
+    if matches!(
+        result.status,
+        SolveStatus::Infeasible | SolveStatus::Unbounded
+    ) {
+        return IpmOutcome::infeasibility(result.status);
+    }
+
     let invalid = result.solution.is_empty()
         || result.solution.iter().any(|v| !v.is_finite())
         || matches!(result.status, SolveStatus::NumericalError);
@@ -63,6 +72,7 @@ fn run_ipm_with(
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
             numerical_failure: true,
+            infeasibility_status: None,
         };
     }
 
@@ -147,5 +157,6 @@ fn run_ipm_with(
         primal_residual_rel: pres,
         bound_violation: bv,
         numerical_failure: false,
+        infeasibility_status: None,
     }
 }

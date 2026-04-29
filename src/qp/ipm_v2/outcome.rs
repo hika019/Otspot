@@ -6,7 +6,12 @@
 
 use crate::sparse::CscMatrix;
 
-/// 1 回の IPM attempt の結果。status は **持たない** — 残差から外部で判定する。
+/// 1 回の IPM attempt の結果。残差ベースの収束判定はここに集約 (`satisfies_eps`)。
+///
+/// 通常は status mutation を持たない設計だが、内部 solver が **確定的な Infeasible /
+/// Unbounded** を検出した場合のみ `infeasibility_status` でその事実を保持する。
+/// これがないと真の Infeasible が finalize_outcome で Timeout に丸められてしまい
+/// status 隠蔽が起きる (cmd_session8 で発見)。
 #[derive(Clone, Debug)]
 pub struct IpmOutcome {
     /// primal 解 x (n 長, 元空間)
@@ -27,6 +32,10 @@ pub struct IpmOutcome {
     pub bound_violation: f64,
     /// 内部数値エラー (NaN / Inf 等で解が無効) フラグ
     pub numerical_failure: bool,
+    /// 内部 solver が確定的に判定した Infeasible / Unbounded を保持する。
+    /// `None` = 通常 (収束/未収束)、`Some(Infeasible|Unbounded)` = 確定判定。
+    /// 他の status (Optimal/Timeout/...) はここに入れない (残差から外部で判定するため)。
+    pub infeasibility_status: Option<crate::problem::SolveStatus>,
 }
 
 impl IpmOutcome {
@@ -42,6 +51,23 @@ impl IpmOutcome {
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
             numerical_failure: false,
+            infeasibility_status: None,
+        }
+    }
+
+    /// 確定的 Infeasible / Unbounded を保持する outcome を構築する。
+    pub fn infeasibility(status: crate::problem::SolveStatus) -> Self {
+        debug_assert!(
+            matches!(
+                status,
+                crate::problem::SolveStatus::Infeasible | crate::problem::SolveStatus::Unbounded
+            ),
+            "infeasibility outcome must be Infeasible or Unbounded, got {:?}",
+            status
+        );
+        Self {
+            infeasibility_status: Some(status),
+            ..Self::empty()
         }
     }
 

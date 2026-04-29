@@ -186,6 +186,15 @@ fn finalize_outcome(
     user_eps: f64,
     n_orig: usize,
 ) -> SolverResult {
+    // 確定的 Infeasible / Unbounded は最優先で外部に伝える (status 隠蔽防止)。
+    if let Some(infeas) = outcome.infeasibility_status {
+        return SolverResult {
+            status: infeas,
+            iterations: outcome.iterations,
+            ..Default::default()
+        };
+    }
+
     if outcome.solution.is_empty() {
         return SolverResult {
             status: SolveStatus::Timeout,
