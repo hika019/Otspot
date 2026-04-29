@@ -55,6 +55,23 @@ const MIN_TIME_PER_ATTEMPT: f64 = 0.5;
 ///
 /// retry 1 層・status 1 箇所変換・元空間 KKT 判定 の 3 原則で動く。
 pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Q=0 退化ケース (LP 問題): LP ソルバー (Simplex) に委譲。
+    // IpPmmNew 経路は solve_qp_with から v2 へ直接 return されて dispatch_qp を通らないため
+    // 本関数で LP dispatch しないと Q=0 問題で v2 IPM が trivial 解を出せず Timeout になる。
+    if problem.is_zero_q() {
+        return crate::qp::solve_as_lp_pub(problem, options);
+    }
+
+    // Q 不定値チェック (非凸 QP 検出): IPM は Q 半正定値前提。
+    if !crate::qp::check_q_positive_semidefinite(&problem.q) {
+        return SolverResult {
+            status: SolveStatus::NonConvex(
+                "Q matrix is indefinite (non-convex QP). IPM requires Q to be positive semidefinite.".to_string()
+            ),
+            ..Default::default()
+        };
+    }
+
     let start_time = Instant::now();
     let mut opts = options.clone();
     let n_orig = problem.num_vars;

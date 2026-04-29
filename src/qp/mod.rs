@@ -305,6 +305,10 @@ fn solve_qp_concurrent(
 }
 
 /// Q=0 退化ケース（LP 問題）を LP ソルバーに委譲して QP 結果に変換する
+pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    solve_as_lp(problem, options)
+}
+
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
@@ -666,6 +670,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     // IpPmmNew 経路は ipm_v2 のクリーン設計に委譲する。
     // v1 の PV_RETRY × POST_VERIFY × Phase2 (4 層 retry) を ATTEMPTS 配列 (1 層) に置換。
     // Maros 138 / 1000s で v1=89 PASS → v2=102 PASS (+13)、QPLIB +4 PASS、回帰なし。
+    //
+    // 注: 全 variant を v2 に統一する試行は BD-T4 (rank-deficient Q + EmptyCol) で
+    // Timeout となった (v1 retry の post-verify が rank-deficient で動いていた)。
+    // 完全統一には v2 の rank-deficient 対応強化が必要。task #9 (v1 retry 削除) と
+    // 一括で次セッション扱いとする。
     if matches!(options.qp_solver, QpSolverChoice::IpPmmNew) {
         return ipm_v2::solve_qp_v2(problem, options);
     }

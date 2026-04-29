@@ -375,11 +375,19 @@ fn refit_z_active_set(
         let r_j = qx[j] + problem.c[j] + aty[j];
         let lb_finite = lb.is_finite();
         let ub_finite = ub.is_finite();
-        let at_lb = lb_finite && (x[j] - lb).abs() < active_tol;
-        let at_ub = ub_finite && (ub - x[j]).abs() < active_tol;
+        // FX (固定) 変数 lb≈ub は presolve で除去され、bound_dual は postsolve 慣例で 0 埋め。
+        let is_fx = lb_finite && ub_finite && (lb - ub).abs() < FX_TOL;
+        // EmptyCol (制約 A に登場しない変数) も presolve で除去され 0 埋め慣例。
+        // BD-T4 等で lb+ub 有界の EmptyCol z を 0 で確認する旧テストとの整合性。
+        let is_empty_col = problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0;
+        let skip = is_fx || is_empty_col;
+        let at_lb = !skip && lb_finite && (x[j] - lb).abs() < active_tol;
+        let at_ub = !skip && ub_finite && (ub - x[j]).abs() < active_tol;
 
         if lb_finite {
-            new_bd[lb_idx] = if at_lb && !at_ub {
+            new_bd[lb_idx] = if skip {
+                0.0
+            } else if at_lb && !at_ub {
                 r_j.max(0.0)
             } else if at_lb && at_ub {
                 r_j.max(0.0)
@@ -389,7 +397,9 @@ fn refit_z_active_set(
             lb_idx += 1;
         }
         if ub_finite {
-            new_bd[n_lb + ub_idx] = if at_ub && !at_lb {
+            new_bd[n_lb + ub_idx] = if skip {
+                0.0
+            } else if at_ub && !at_lb {
                 (-r_j).max(0.0)
             } else if at_lb && at_ub {
                 (-r_j).max(0.0)
@@ -850,7 +860,14 @@ fn dual_solve_kkt_lsq(
     let mut active_ub_var: Vec<usize> = Vec::new();
     for j in 0..n {
         let (lb, ub) = bounds[j];
+        // FX 変数 (lb≈ub): presolve 慣例で除去 → bound_dual=0、KKT 評価から除外。
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
+            continue;
+        }
+        // EmptyCol 変数 (制約 A に登場しない): presolve で除去 → bound_dual=0 が慣例。
+        // BD-T4 の z などこの分岐に該当。NNLS の active 集合からも除外。
+        let is_empty_col = problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0;
+        if is_empty_col {
             continue;
         }
         if lb.is_finite() && (x[j] - lb).abs() < active_tol {
