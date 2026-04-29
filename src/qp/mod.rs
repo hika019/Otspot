@@ -583,27 +583,16 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     //
     // Q=0 (LP 退化) と Q が PSD でない場合の前置きは各経路の入口で実施する
     // (v2 は ipm_v2::solve_qp_v2 内、Mehrotra は ipm::solve_qp_ipm 内)。
+    // 全 variant で v2 同等の retry 1 層 / status 1 箇所 / 元空間 KKT 直接判定 wrapper を経由。
+    // wrapper 内で is_zero_q LP dispatch / PSD check / presolve / unscale / postsolve / KKT 判定が
+    // 行われるため、ここでは inner solver の選択 (Mehrotra vs IP-PMM) のみ。
     match options.qp_solver {
-        QpSolverChoice::Ipm => {
-            // Q=0 退化 / 非凸 Q の前置きは IpmSolver 経路にも必要
-            if problem.is_zero_q() {
-                return solve_as_lp(problem, options);
-            }
-            if !check_q_positive_semidefinite(&problem.q) {
-                return SolverResult {
-                    status: SolveStatus::NonConvex(
-                        "Q matrix is indefinite (non-convex QP). IPM requires Q to be positive semidefinite.".to_string()
-                    ),
-                    ..Default::default()
-                };
-            }
-            ipm::solve_qp_ipm(problem, options)
-        }
+        QpSolverChoice::Ipm => ipm_v2::solve_qp_v1_wrapped(problem, options),
         QpSolverChoice::IpPmmNew => ipm_v2::solve_qp_v2(problem, options),
         QpSolverChoice::Concurrent => {
             // 並行実行 (旧 solve_qp_concurrent) は v1 retry と一緒に削除済 (eb3d11f)。
             // 当面は IpPmmNew (v2) と同じ動作。将来 Mehrotra/IP-PMM 並行実行を再構築する場合は
-            // 各 thread が ipm::solve_qp_ipm / ipm_v2::solve_qp_v2 を呼ぶ薄い wrapper にする。
+            // 各 thread が solve_qp_v1_wrapped / solve_qp_v2 を呼ぶ薄い wrapper にする。
             ipm_v2::solve_qp_v2(problem, options)
         }
     }

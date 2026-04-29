@@ -14,7 +14,8 @@ use crate::presolve::{
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use super::core::run_ipm;
+use super::core::{run_ipm, run_ipm_mehrotra};
+use crate::presolve::QpPresolveResult;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
 
@@ -43,13 +44,32 @@ const EPS_FLOOR: f64 = 1e-15;
 /// 1 attempt が消費してよい時間の最低割合 (deadline / 残 attempt 数 が これ以下なら break)
 const MIN_TIME_PER_ATTEMPT: f64 = 0.5;
 
-/// QP を v2 設計で解く。既存 `solve_qp_with` と同じ API シグネチャ。
+/// IpmOutcome を返す runner 関数の型 (run_ipm = IP-PMM、run_ipm_mehrotra = Mehrotra)
+type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
+
+/// QP を v2 設計で解く (IP-PMM 経路)。既存 `solve_qp_with` と同じ API シグネチャ。
 ///
 /// retry 1 層・status 1 箇所変換・元空間 KKT 判定 の 3 原則で動く。
 pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    solve_qp_v2_with_runner(problem, options, run_ipm)
+}
+
+/// QP を v2 設計で解く (Mehrotra 経路)。
+///
+/// `solve_qp_v2` と同じ retry/status/KKT 判定の 3 原則を Mehrotra IPM に適用した wrapper。
+/// 旧 `ipm::solve_qp_ipm` 直叩き経路では偽 Optimal が大量発生 (60s で OBJ_MISMATCH 24)
+/// していたが、本 wrapper で v2 同等の元空間 KKT 再判定により抑え込む。
+pub fn solve_qp_v1_wrapped(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    solve_qp_v2_with_runner(problem, options, run_ipm_mehrotra)
+}
+
+/// 一般化 wrapper: `runner` (IP-PMM or Mehrotra) を選択可能。
+fn solve_qp_v2_with_runner(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    runner: IpmRunner,
+) -> SolverResult {
     // Q=0 退化ケース (LP 問題): LP ソルバー (Simplex) に委譲。
-    // IpPmmNew 経路は solve_qp_with から v2 へ直接 return されて dispatch_qp を通らないため
-    // 本関数で LP dispatch しないと Q=0 問題で v2 IPM が trivial 解を出せず Timeout になる。
     if problem.is_zero_q() {
         return crate::qp::solve_as_lp_pub(problem, options);
     }
@@ -136,7 +156,7 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
         // presolve が Ruiz scaling 済みなら IPM での再スケールは抑止する。
         opts.use_ruiz_scaling = if presolve_did_ruiz { false } else { use_ruiz };
 
-        let outcome = run_ipm(problem, &presolve_result, &opts);
+        let outcome = runner(problem, &presolve_result, &opts);
 
         // 早期終了: ユーザー指定精度を真に満たす解
         if outcome.satisfies_eps(user_eps) {

@@ -16,14 +16,38 @@ use crate::qp::problem::QpProblem;
 use super::outcome::{IpmOutcome, ProblemView};
 use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
 
-/// 1 回の IPM 呼出 + 後処理。元空間の解と残差を返す。
+/// inner_solver の関数型 (Mehrotra / IP-PMM どちらでも受け取れる)
+pub type InnerSolver = fn(&QpProblem, &SolverOptions) -> crate::problem::SolverResult;
+
+/// 1 回の IPM 呼出 + 後処理 (IP-PMM 版)。元空間の解と残差を返す。
 pub fn run_ipm(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
+    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm::solve_qp_ippmm)
+}
+
+/// 1 回の IPM 呼出 + 後処理 (Mehrotra 版)。
+/// `solve_qp_v1_wrapped` から呼ばれて IPM (Mehrotra predictor-corrector) を v2 と同じ
+/// retry 1 層 / status 1 箇所 / 元空間 KKT 直接判定の枠組みで動かす。
+pub fn run_ipm_mehrotra(
+    orig_problem: &QpProblem,
+    presolve_result: &QpPresolveResult,
+    opts: &SolverOptions,
+) -> IpmOutcome {
+    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm::solve_qp_ipm)
+}
+
+/// 内部 solver を引数に取る一般化 wrapper。
+fn run_ipm_with(
+    orig_problem: &QpProblem,
+    presolve_result: &QpPresolveResult,
+    opts: &SolverOptions,
+    inner_solver: InnerSolver,
+) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
-    let mut result = crate::qp::ipm::solve_qp_ippmm(reduced, opts);
+    let mut result = inner_solver(reduced, opts);
 
     let invalid = result.solution.is_empty()
         || result.solution.iter().any(|v| !v.is_finite())

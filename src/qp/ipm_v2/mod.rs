@@ -38,7 +38,7 @@ pub mod kkt;
 pub mod core;
 pub mod attempt;
 
-pub use attempt::solve_qp_v2;
+pub use attempt::{solve_qp_v2, solve_qp_v1_wrapped};
 
 #[cfg(test)]
 mod tests {
