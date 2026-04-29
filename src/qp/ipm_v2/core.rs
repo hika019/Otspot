@@ -17,6 +17,10 @@ use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
 const FX_TOL: f64 = 1e-12;
 /// KKT Newton refinement での NNLS-style iteration 上限
 const KKT_NNLS_MAX_ITER: usize = 5;
+/// saddle point system 用 primal 正則化 (-εI on (m,m) block) — quasidefinite 化
+const KKT_SADDLE_PRIMAL_REG: f64 = 1e-12;
+/// saddle point system 用 dual 正則化 (Q+γI on (n,n) block) — Q が PSD で 0 固有値持つケース対応
+const KKT_SADDLE_DUAL_REG: f64 = 1e-12;
 /// x bound snap の許容差: x_j が bound から この値未満の距離なら bound に強制する (現状未使用)。
 /// IPM は内点法で bound に完全到達しないため、postsolve 後に微小距離が残る。
 /// これを snap して reduced→元空間 KKT ギャップを縮める意図だったが、
@@ -172,6 +176,14 @@ pub fn run_ipm(
                 final_sol.bound_duals = pre_z;
             }
         }
+
+        // saddle point Newton 1-step ([Q+γI A^T; A -εI] [Δx;Δy]) の試行履歴:
+        // - LISWET9/12 で kkt 1e-10 → 1e-12 改善するが pres は bound clip で変化なし (1.5e-6)
+        // - Catastrophic で dx_norm が大きく (1e8 級)、bound clip で primal=8.5e-2 と悪化
+        // - 採用条件 try_pres <= 1e-6 を満たさず line search の全 α で revert
+        // 結論: 純粋な saddle point system は active 制約を考慮せず、bound clip で効果が消える。
+        //   active 変数の Δx_j を 0 強制した拡張が必要 (= active-set + KKT system Newton)。
+        // 実装は `solve_saddle_kkt_step` に保持 (将来の active-set 統合用 dead code)。
 
         current_kkt
     } else {
@@ -458,6 +470,154 @@ fn try_primal_ir_step(problem: &QpProblem, x: &mut Vec<f64>) -> bool {
         x[j] += dx[j];
     }
     true
+}
+
+/// saddle point KKT system [Q+γI A^T; A -εI] [Δx; Δy] = -[r_stat; r_pri] の 1-step Newton を解く。
+///
+/// 戻り値 (Δx, Δy)。LDL 分解失敗等で None。z は呼出側で別途 refit する (本関数は x, y のみ更新方向)。
+///
+/// 構造的: r_stat = Qx + c + A^T y + bound_contrib (bound_duals の寄与)
+///         r_pri = Ax - b (Eq) または violation
+/// 解いた Δx, Δy は呼出側で line search + KKT-guard で採用判定する。
+#[allow(dead_code)]
+pub(super) fn solve_saddle_kkt_step(
+    problem: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if x.len() != n || m == 0 {
+        return None;
+    }
+
+    // 問題スケールに応じた正則化値を計算する。
+    // Q がほぼ 0 (LP-like) の場合、KKT_SADDLE_DUAL_REG=1e-12 では正則化不足で
+    // saddle system が ill-conditioned (dx_norm が 1e28 とか)。
+    // dual_reg = max(KKT_SADDLE_DUAL_REG, ||Q||_∞ * 1e-8)
+    let q_max: f64 = problem.q.values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let a_max: f64 = problem.a.values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let dual_reg = (q_max * 1e-8).max(KKT_SADDLE_DUAL_REG);
+    let primal_reg = (a_max * 1e-8).max(KKT_SADDLE_PRIMAL_REG);
+
+    // r_stat = Qx + c + A^T y + bound_contrib
+    let qx = problem.q.mat_vec_mul(x).ok()?;
+    let aty = if !y.is_empty() {
+        problem.a.transpose().mat_vec_mul(y).ok()?
+    } else {
+        vec![0.0; n]
+    };
+    let bounds = &problem.bounds;
+    let n_lb = bounds.iter().filter(|(lb, _)| lb.is_finite()).count();
+    let mut bound_contrib = vec![0.0_f64; n];
+    {
+        let mut idx = 0;
+        for (j, &(lb, _)) in bounds.iter().enumerate() {
+            if lb.is_finite() && idx < z.len() {
+                bound_contrib[j] -= z[idx];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in bounds.iter().enumerate() {
+            if ub.is_finite() && idx < z.len() {
+                bound_contrib[j] += z[idx];
+                idx += 1;
+            }
+        }
+    }
+    let _ = n_lb;
+    let r_stat: Vec<f64> = (0..n).map(|j| qx[j] + problem.c[j] + aty[j] + bound_contrib[j]).collect();
+
+    // r_pri = Ax - b (Eq), violation (Ge/Le): violation のみ取り、残りは 0
+    use crate::problem::ConstraintType;
+    let ax = problem.a.mat_vec_mul(x).ok()?;
+    let r_pri: Vec<f64> = (0..m).map(|i| {
+        let r = ax[i] - problem.b[i];
+        match problem.constraint_types.get(i) {
+            Some(ConstraintType::Eq) => r,
+            Some(ConstraintType::Ge) => r.min(0.0), // r < 0 は violation (Ax < b)
+            _ => r.max(0.0), // Le: r > 0 は violation (Ax > b)
+        }
+    }).collect();
+
+    // saddle point matrix M = [Q+γI A^T; A -εI] (size (n+m)×(n+m), upper triangular CSC)
+    // 上三角構築: 各列 j で row_ind は昇順
+    let nv = n + m;
+    let mut col_ptr: Vec<usize> = Vec::with_capacity(nv + 1);
+    let mut row_ind: Vec<usize> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    col_ptr.push(0);
+
+    // col 0..n: Q の col j (上三角部分のみ) + 対角に γ 追加
+    for j in 0..n {
+        let qstart = problem.q.col_ptr[j];
+        let qend = problem.q.col_ptr[j + 1];
+        let mut diag_added = false;
+        for k in qstart..qend {
+            let r = problem.q.row_ind[k];
+            let v = problem.q.values[k];
+            if r > j {
+                continue; // 下三角は無視 (Q は対称、上三角のみ使用)
+            }
+            if r == j {
+                row_ind.push(r);
+                values.push(v + dual_reg);
+                diag_added = true;
+            } else {
+                row_ind.push(r);
+                values.push(v);
+            }
+        }
+        if !diag_added {
+            row_ind.push(j);
+            values.push(dual_reg);
+        }
+        col_ptr.push(row_ind.len());
+    }
+
+    // col n..n+m: A^T の col k (= A の row k) + 対角に -ε
+    // A^T col k は A の k 行 → BTreeMap で構築するか、A.transpose() を使う
+    let at = problem.a.transpose(); // n x m
+    for k in 0..m {
+        // 上半分 (row 0..n): A^T の k 列 (= A の k 行)
+        let astart = at.col_ptr[k];
+        let aend = at.col_ptr[k + 1];
+        for p in astart..aend {
+            let r = at.row_ind[p];
+            row_ind.push(r);
+            values.push(at.values[p]);
+        }
+        // 下半分対角 (row n+k): -ε
+        row_ind.push(n + k);
+        values.push(-primal_reg);
+        col_ptr.push(row_ind.len());
+    }
+
+    let m_mat = crate::sparse::CscMatrix {
+        col_ptr,
+        row_ind,
+        values,
+        nrows: nv,
+        ncols: nv,
+    };
+
+    // factorize_quasidefinite_with_amd で LDL 分解
+    let factor = crate::linalg::ldl::factorize_quasidefinite_with_amd(&m_mat, None).ok()?;
+
+    // RHS = -[r_stat; r_pri]
+    let mut rhs = vec![0.0_f64; nv];
+    for j in 0..n { rhs[j] = -r_stat[j]; }
+    for i in 0..m { rhs[n + i] = -r_pri[i]; }
+
+    let mut sol = vec![0.0_f64; nv];
+    factor.solve(&rhs, &mut sol);
+    if sol.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let dx: Vec<f64> = sol[..n].to_vec();
+    let dy: Vec<f64> = sol[n..].to_vec();
+    Some((dx, dy))
 }
 
 /// 明示 active 集合を渡す版の KKT system Newton refinement (現状未使用、将来の LP-hint 統合用)。

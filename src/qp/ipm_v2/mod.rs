@@ -184,6 +184,90 @@ mod tests {
         }
     }
 
+    /// saddle KKT step が LISWET9/12 で効くか確認。
+    #[test]
+    #[ignore]
+    fn test_saddle_kkt_liswet() {
+        for name in ["LISWET9", "LISWET12"] {
+            let path_str = format!("data/maros_meszaros/{}.QPS", name);
+            let path = Path::new(&path_str);
+            if !path.exists() { continue; }
+            let prob = parse_qps(path).expect("parse");
+            let mut opts = SolverOptions::default();
+            opts.timeout_secs = Some(60.0);
+            let r = solve_qp_v2(&prob, &opts);
+            let view = super::outcome::ProblemView {
+                q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+                bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            };
+            let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+            let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+            eprintln!("{} after solve: kkt={:.3e} pres={:.3e} status={:?}", name, kkt, pres, r.status);
+            match super::core::solve_saddle_kkt_step(&prob, &r.solution, &r.dual_solution, &r.bound_duals) {
+                Some((dx, dy)) => {
+                    let dx_norm: f64 = dx.iter().map(|v| v*v).sum::<f64>().sqrt();
+                    eprintln!("  saddle step: dx_norm={:.3e}", dx_norm);
+                    for alpha in [1.0_f64, 0.5, 0.25] {
+                        let mut x_try: Vec<f64> = r.solution.iter().zip(dx.iter()).map(|(&a, &b)| a + alpha * b).collect();
+                        for (xi, &(lb, ub)) in x_try.iter_mut().zip(prob.bounds.iter()) {
+                            if lb.is_finite() { *xi = xi.max(lb); }
+                            if ub.is_finite() { *xi = xi.min(ub); }
+                        }
+                        let y_try: Vec<f64> = r.dual_solution.iter().zip(dy.iter()).map(|(&a, &b)| a + alpha * b).collect();
+                        let try_kkt = super::kkt::kkt_residual_rel(&view, &x_try, &y_try, &r.bound_duals);
+                        let try_pres = super::kkt::primal_residual_rel(&view, &x_try);
+                        eprintln!("  α={}: kkt={:.3e} pres={:.3e}", alpha, try_kkt, try_pres);
+                    }
+                }
+                None => eprintln!("  saddle step: None"),
+            }
+        }
+    }
+
+    /// saddle KKT step が採用されているか確認 (debug 用、QADLITTL を直接調査)。
+    #[test]
+    #[ignore]
+    fn test_saddle_kkt_qadlittl() {
+        let path = Path::new("data/maros_meszaros/QADLITTL.QPS");
+        if !path.exists() { return; }
+        let prob = parse_qps(path).expect("parse");
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(60.0);
+        let r = solve_qp_v2(&prob, &opts);
+        let view = super::outcome::ProblemView {
+            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+        };
+        let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+        let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+        let bv = super::kkt::bound_violation(&prob.bounds, &r.solution);
+        eprintln!("QADLITTL after solve_qp_v2: kkt={:.3e} pres={:.3e} bv={:.3e} status={:?}",
+            kkt, pres, bv, r.status);
+
+        // saddle step を直接試す
+        match super::core::solve_saddle_kkt_step(&prob, &r.solution, &r.dual_solution, &r.bound_duals) {
+            Some((dx, dy)) => {
+                let dx_norm: f64 = dx.iter().map(|v| v*v).sum::<f64>().sqrt();
+                let dy_norm: f64 = dy.iter().map(|v| v*v).sum::<f64>().sqrt();
+                eprintln!("  saddle step: dx_norm={:.3e} dy_norm={:.3e}", dx_norm, dy_norm);
+                // 各 α で試行
+                for alpha in [1.0_f64, 0.5, 0.25, 0.1] {
+                    let mut x_try: Vec<f64> = r.solution.iter().zip(dx.iter()).map(|(&a, &b)| a + alpha * b).collect();
+                    for (xi, &(lb, ub)) in x_try.iter_mut().zip(prob.bounds.iter()) {
+                        if lb.is_finite() { *xi = xi.max(lb); }
+                        if ub.is_finite() { *xi = xi.min(ub); }
+                    }
+                    let y_try: Vec<f64> = r.dual_solution.iter().zip(dy.iter()).map(|(&a, &b)| a + alpha * b).collect();
+                    let try_kkt = super::kkt::kkt_residual_rel(&view, &x_try, &y_try, &r.bound_duals);
+                    let try_pres = super::kkt::primal_residual_rel(&view, &x_try);
+                    let try_bv = super::kkt::bound_violation(&prob.bounds, &x_try);
+                    eprintln!("  α={}: kkt={:.3e} pres={:.3e} bv={:.3e}", alpha, try_kkt, try_pres, try_bv);
+                }
+            }
+            None => eprintln!("  saddle step: None (LDL fail)"),
+        }
+    }
+
     /// Catastrophic 9件 (Q-prefix LP 由来) の OSQP eval 化後の状態。
     /// 1000s で救える見込みのある問題を特定する。
     #[test]
