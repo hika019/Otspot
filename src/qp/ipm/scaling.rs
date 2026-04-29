@@ -231,16 +231,17 @@ pub(crate) fn check_dfeas_status(
     threshold: f64,
 ) -> SolveStatus {
     let n = x.len();
-    // Q*x
+    // Q*x. mat_vec_mul は次元一致前提で失敗は API 契約違反。
+    // 失敗時は Optimal 昇格できる根拠がないため SuboptimalSolution を返す (status 隠蔽防止)。
     let qx = match problem.q.mat_vec_mul(x) {
         Ok(v) => v,
-        Err(_) => return SolveStatus::Optimal, // 計算失敗時はstatusを保持（安全側）
+        Err(_) => return SolveStatus::SuboptimalSolution,
     };
     // A^T*y（無制約QPではa.nrows==0なのでzeroベクトル）
     let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
         match problem.a.transpose().mat_vec_mul(y) {
             Ok(v) => v,
-            Err(_) => return SolveStatus::Optimal,
+            Err(_) => return SolveStatus::SuboptimalSolution,
         }
     } else {
         vec![0.0; n]
@@ -290,14 +291,16 @@ pub(crate) fn check_dfeas_status_relative(
     eps: f64,
 ) -> SolveStatus {
     let n = x.len();
+    // mat_vec_mul は次元一致前提で失敗は API 契約違反。
+    // 失敗時は Optimal 昇格できる根拠がないため SuboptimalSolution を返す (status 隠蔽防止)。
     let qx = match problem.q.mat_vec_mul(x) {
         Ok(v) => v,
-        Err(_) => return SolveStatus::Optimal,
+        Err(_) => return SolveStatus::SuboptimalSolution,
     };
     let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
         match problem.a.transpose().mat_vec_mul(y) {
             Ok(v) => v,
-            Err(_) => return SolveStatus::Optimal,
+            Err(_) => return SolveStatus::SuboptimalSolution,
         }
     } else {
         vec![0.0; n]
