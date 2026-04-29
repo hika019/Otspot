@@ -69,7 +69,16 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     let mut max_bnd = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
+        // FX 変数 (lb≈ub): presolve 慣例で除去 → bound_dual=0、KKT 評価から除外。
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
+            continue;
+        }
+        // EmptyCol 変数 (制約 A に登場しない): presolve で除去、bound_dual=0 慣例。
+        // この変数の stationarity = c[j] が 0 にならないため KKT 評価から除外する
+        // (refit_z_active_set / dual_solve_kkt_lsq の skip と整合、BD-T4 等で必要)。
+        if prob.a.col_ptr.len() > j + 1
+            && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0
+        {
             continue;
         }
         let r = (qx[j] + prob.c[j] + aty[j] + bound_contrib[j]).abs();

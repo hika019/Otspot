@@ -184,6 +184,37 @@ mod tests {
         }
     }
 
+    /// BD-T4 (rank-deficient Q + EmptyCol) で v2 が何で詰まるか調査。
+    #[test]
+    #[ignore]
+    fn test_v2_bd_t4_diagnose() {
+        use crate::sparse::CscMatrix;
+        use crate::qp::problem::QpProblem;
+        let n = 3usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[0.001, 0.001], n, n).unwrap();
+        let c = vec![-1.0, -1.0, 1.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![4.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY), (0.0_f64, 3.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(5.0);
+        opts.qp_solver = crate::options::QpSolverChoice::IpPmmNew;
+        let r = solve_qp_v2(&problem, &opts);
+        eprintln!("BD-T4 v2: status={:?} obj={:.5e} iters={}", r.status, r.objective, r.iterations);
+        eprintln!("  x={:?}", r.solution);
+        eprintln!("  y={:?}", r.dual_solution);
+        eprintln!("  z={:?}", r.bound_duals);
+        let view = super::outcome::ProblemView {
+            q: &problem.q, a: &problem.a, c: &problem.c, b: &problem.b,
+            bounds: &problem.bounds, constraint_types: &problem.constraint_types,
+        };
+        let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+        let pres = super::kkt::primal_residual_rel(&view, &r.solution);
+        let bv = super::kkt::bound_violation(&problem.bounds, &r.solution);
+        eprintln!("  kkt={:.3e} pres={:.3e} bv={:.3e}", kkt, pres, bv);
+    }
+
     /// saddle KKT step が LISWET9/12 で効くか確認。
     #[test]
     #[ignore]

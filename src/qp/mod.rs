@@ -667,17 +667,15 @@ fn apply_api_boundary_conversion(
 /// `cancel_flag.store(false, Relaxed)` でリセットするか、問題ごとに新しい
 /// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // IpPmmNew 経路は ipm_v2 のクリーン設計に委譲する。
-    // v1 の PV_RETRY × POST_VERIFY × Phase2 (4 層 retry) を ATTEMPTS 配列 (1 層) に置換。
-    // Maros 138 / 1000s で v1=89 PASS → v2=102 PASS (+13)、QPLIB +4 PASS、回帰なし。
-    //
-    // 注: 全 variant を v2 に統一する試行は BD-T4 (rank-deficient Q + EmptyCol) で
-    // Timeout となった (v1 retry の post-verify が rank-deficient で動いていた)。
-    // 完全統一には v2 の rank-deficient 対応強化が必要。task #9 (v1 retry 削除) と
-    // 一括で次セッション扱いとする。
-    if matches!(options.qp_solver, QpSolverChoice::IpPmmNew) {
-        return ipm_v2::solve_qp_v2(problem, options);
-    }
+    // 設計書 (docs/solver_overview_design.md) の 3 原則 (retry 1 層・status mutation 1 箇所・
+    // 元空間 KKT 直接判定) を全 variant に徹底するため、Ipm/IpPmmNew/Concurrent すべて
+    // ipm_v2::solve_qp_v2 に委譲する。v1 retry 4 層と Mehrotra (step::solve_qp_ipm_inner) は
+    // dead code 化し別 commit で削除する。BD-T4 (rank-deficient Q + EmptyCol) は v2 の
+    // EmptyCol skip 修正で Optimal 判定可能になった (5d8a59a + 本コミット)。
+    let _ = options.qp_solver; // variant 値は無視 (全 v2)
+    return ipm_v2::solve_qp_v2(problem, options);
+
+    #[allow(unreachable_code)]
     let start_time = std::time::Instant::now();
     let mut current_opts = options.clone();
     let mut first_result: Option<SolverResult> = None; // C-1: Ruiz無し再ソルブ失敗時フォールバック用

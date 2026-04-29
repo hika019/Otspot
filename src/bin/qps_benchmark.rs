@@ -185,6 +185,13 @@ fn compute_dfeas_orig(
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
             continue;
         }
+        // EmptyCol 変数 (制約 A に登場しない) も presolve 除去・bound_dual=0 慣例。
+        // dfeas 評価から除外して v2 経路 (kkt_residual_rel) と整合させる。
+        if prob.a.col_ptr.len() > i + 1
+            && prob.a.col_ptr[i + 1] - prob.a.col_ptr[i] == 0
+        {
+            continue;
+        }
         let r = (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs();
         dfeas_abs = dfeas_abs.max(r);
         max_qx = max_qx.max(qx[i].abs());
