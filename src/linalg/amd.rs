@@ -73,67 +73,6 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
     perm
 }
 
-/// Quasidefinite-aware block ordering for KKT matrices.
-///
-/// augmented KKT 行列はプライマルブロック (0..n_primal) とデュアルブロック
-/// (n_primal..n_total) で構成される。faer AMD-2 をプライマルブロックのみに適用し、
-/// デュアルブロックは identity（自然順）で後置きする。
-///
-/// IPM 後半で σ = s/y → ∞ になると、プライマル/デュアル混在消去の AMD 順列では
-/// LDLT 因子化が数値的に破綻する（QPLIB_8515 iter=1158 で実測）。
-/// この関数はプライマル先消去を保証することで上記を防ぐ。
-///
-/// # 引数
-/// - `n_primal`: プライマルブロックサイズ（KKT 行列の左上 n×n ブロック）
-/// - `n_total`: KKT 行列全体のサイズ（n_primal + m_ext）
-/// - `col_ptr`: 上三角 CSC の列ポインタ（n_total+1 要素）
-/// - `row_ind`: 上三角 CSC の行インデックス
-/// - `deadline`: タイムアウト時刻。超過時は identity 置換を返す。
-///
-/// # 戻り値
-/// `[perm_primal[0..n_primal] | n_primal+0, n_primal+1, ..., n_primal+n_dual-1]`
-#[allow(dead_code)]
-pub fn amd_block_ordering(
-    n_primal: usize,
-    n_total: usize,
-    col_ptr: &[usize],
-    row_ind: &[usize],
-    deadline: Option<Instant>,
-) -> Vec<usize> {
-    if n_total == 0 {
-        return vec![];
-    }
-    if n_primal == 0 {
-        return (0..n_total).collect();
-    }
-
-    // deadline チェック
-    if let Some(dl) = deadline {
-        if Instant::now() >= dl {
-            return (0..n_total).collect();
-        }
-    }
-
-    // プライマルブロック (n_primal × n_primal) を抽出する。
-    // augmented KKT の列 0..n_primal にはプライマル-プライマルエントリのみが含まれる
-    // （build_augmented_system の Part1 = Q + δ_p·I 上三角のみ）。
-    // Part2（A_ext^T）は列 n..total に格納されるためここには現れない。
-    let sub_nnz = col_ptr[n_primal];
-    let sub_col_ptr = &col_ptr[0..n_primal + 1];
-    let sub_row_ind = &row_ind[0..sub_nnz];
-
-    // プライマルブロックに AMD を適用
-    let perm_primal = amd_with_deadline(n_primal, sub_col_ptr, sub_row_ind, deadline);
-
-    // 最終置換: [perm_primal | n_primal + 0..n_dual]
-    let n_dual = n_total - n_primal;
-    let mut perm = perm_primal;
-    for i in 0..n_dual {
-        perm.push(n_primal + i);
-    }
-    perm
-}
-
 /// 置換ベクトルの逆置換を計算する。
 ///
 /// `perm[k] = i` → `inv_perm[i] = k`
