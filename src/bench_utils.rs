@@ -64,6 +64,11 @@ pub fn check_baseline_objective(
 ) -> ObjCheckResult {
     match known.get(problem_name) {
         Some(&known_obj) => {
+            // NaN / Inf の solver_obj は無条件で Mismatch 扱いにする (rel_err 比較が
+            // NaN > eps = false で Ok に倒れて bug を見落とす false-positive を防ぐ)。
+            if !solver_obj.is_finite() {
+                return ObjCheckResult::Mismatch { rel_err: f64::INFINITY };
+            }
             let denom = 1.0_f64.max(known_obj.abs());
             let rel_err = (solver_obj - known_obj).abs() / denom;
             if rel_err > eps_obj {
