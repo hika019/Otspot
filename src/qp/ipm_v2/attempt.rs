@@ -69,10 +69,11 @@ fn solve_qp_v2_with_runner(
     options: &SolverOptions,
     runner: IpmRunner,
 ) -> SolverResult {
-    // Q=0 退化ケース (LP 問題): LP ソルバー (Simplex) に委譲。
-    if problem.is_zero_q() {
-        return crate::qp::solve_as_lp_pub(problem, options);
-    }
+    // ユーザーが指定したアルゴリズム (IPM / IP-PMM) で必ず解く。
+    // 旧実装は `is_zero_q()` で Q≈0 退化を検出して Simplex (LP) に dispatch していたが、
+    // これはユーザー mandate 違反 (qp_solver: IpPmmNew を指定しても Simplex に振り替わる)。
+    // IPM/IP-PMM は Q=0 を線形目的の特殊ケースとして扱える (barrier 経由の LP として解く)。
+    // 性能差があれば呼び出し側が `qp_solver: Concurrent` で並行実行を選べる。
 
     // Q 不定値チェック (非凸 QP 検出): IPM は Q 半正定値前提。
     if !crate::qp::check_q_positive_semidefinite(&problem.q) {

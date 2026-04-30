@@ -394,6 +394,15 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
     /// + 安全マージン。OS 主スレッドの典型値 (macOS/Linux 8MB) と一致させる。
     const SPAWN_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+    // Q=0 退化ケース: LP solver (Simplex) に委譲する高速化。
+    // **`Concurrent` 経路でのみ自動 dispatch を許容する**。明示的に `Ipm` / `IpPmmNew` を
+    // 指定したユーザーは「指定アルゴリズムで動かす」mandate に従い v2_wrapper 経路で
+    // そのまま IPM が走る。Gurobi/CPLEX/HiGHS が default モードで採用する慣習と同じ
+    // (default = 自動 dispatch、明示 Method 指定 = 尊重)。
+    if problem.is_zero_q() {
+        return solve_as_lp_pub(problem, options);
+    }
+
     let cancel_flag = options
         .cancel_flag
         .as_ref()
