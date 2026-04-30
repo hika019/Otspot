@@ -9,13 +9,10 @@
 //! - `check_dfeas_status`: 双対実現可能性検証
 
 use crate::linalg::ruiz::RuizScaler;
-use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// post-verification 失敗時の再ソルブ上限回数（1回目=通常, 2〜N回目=10倍ずつ厳格化）
-const POST_VERIFY_MAX_RESOLV: usize = 3;
 /// eps 事前調整の下限（数値精度限界）
 pub(crate) const EPS_FLOOR: f64 = 1e-12;
 /// Suboptimal→Optimal 昇格ゲートの双対ギャップ閾値。
@@ -82,54 +79,35 @@ where
         if let Ok(scaled_problem) = QpProblem::new(
             q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
         ) {
+            // Ruiz スケーリング増幅率を考慮し、scaled 空間での eps を amplification 倍だけ
+            // tighten する (元空間 eps を保証するため)。retry は外側 (ipm_v2 ATTEMPTS) に
+            // 委ねる: 旧 POST_VERIFY_MAX_RESOLV=3 ループは v2 wrapper の 6 attempts と
+            // 機能重複していて inner_solve を最大 18 回走らせる無駄があった。
             let amplification = compute_amplification(&scaler);
-            let mut last_result: Option<SolverResult> = None;
-            // T9修正: POST_VERIFYループ前にdeadlineを1回確定し、ループ内では固定値を使う。
-            // APIユーザーがtimeout_secs=Some(t), deadline=Noneで呼び出した場合、
-            // ループごとにtimeout_secsから新しいdeadlineを計算すると最大3×timeout_secsの超過が起きる。
-            let effective_deadline = TimeoutCtx::from_options(options).deadline;
+            let mut adjusted_opts = options.clone();
+            adjusted_opts.ipm.eps =
+                (options.ipm_eps() / amplification).max(EPS_FLOOR);
 
-            for attempt in 0..POST_VERIFY_MAX_RESOLV {
-                let tighten = 10f64.powi(attempt as i32); // 1.0, 10.0, 100.0
-                let adjusted_eps =
-                    (options.ipm_eps() / (amplification * tighten)).max(EPS_FLOOR);
-                let mut adjusted_opts = options.clone();
-                adjusted_opts.ipm.eps = adjusted_eps;
-                // POST_VERIFY 各 attempt の budget を均等分割。
-                // UBH1 型の病理（1 attempt が全予算を食い尽くし次 attempt に budget 残らない）回避。
-                // 残り時間 / 残り attempt 数 を per-attempt deadline とする。
-                adjusted_opts.deadline = effective_deadline.map(|total| {
-                    let now = std::time::Instant::now();
-                    let remaining_attempts = (POST_VERIFY_MAX_RESOLV - attempt) as u32;
-                    let remaining_time = total.saturating_duration_since(now);
-                    now + remaining_time / remaining_attempts.max(1)
-                });
-                adjusted_opts.timeout_secs = None;           // T9: 二重計算防止
+            let scaled_result = inner_solver(
+                &scaled_problem,
+                &adjusted_opts,
+                Some(&scaler),
+                Some(problem),
+                options.ipm_eps(),
+            );
+            let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
 
-                let scaled_result = inner_solver(
-                    &scaled_problem, &adjusted_opts, Some(&scaler), Some(problem), options.ipm_eps(),
-                );
-                let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
-
-                // 再ソルブ条件: SuboptimalSolution かつ残り試行回数がある場合
-                if result.status == SolveStatus::SuboptimalSolution
-                    && attempt + 1 < POST_VERIFY_MAX_RESOLV
-                {
-                    last_result = Some(result);
-                    continue;
+            // MaxIterations は概要設計に従い有効解の有無で外部 status に変換する
+            // (status 変換 1 箇所原則の例外: max_iter 到達は inner 内部判定で
+            //  外部 Timeout/Suboptimal どちらにも該当しうるため、ここで bridge する)
+            if result.status == SolveStatus::MaxIterations {
+                if !result.solution.is_empty() {
+                    return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
+                } else {
+                    return SolverResult { status: SolveStatus::Timeout, ..result };
                 }
-                // MaxIterations: 概要設計に従い有効解の有無で分岐
-                if result.status == SolveStatus::MaxIterations {
-                    if !result.solution.is_empty() {
-                        return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
-                    } else {
-                        return SolverResult { status: SolveStatus::Timeout, ..result };
-                    }
-                }
-                // Timeout / Infeasible / Unbounded / SuboptimalSolution / Optimal はそのまま返す
-                return result;
             }
-            return last_result.expect("POST_VERIFY_MAX_RESOLV >= 1");
+            return result;
         }
         // QpProblem::new 失敗 → 非スケールにフォールバック
     }
