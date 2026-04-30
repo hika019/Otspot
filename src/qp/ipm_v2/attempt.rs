@@ -186,10 +186,21 @@ fn finalize_outcome(
     user_eps: f64,
     n_orig: usize,
 ) -> SolverResult {
-    // 確定的 Infeasible / Unbounded は最優先で外部に伝える (status 隠蔽防止)。
+    // 確定的 Infeasible / Unbounded / NonConvex は最優先で外部に伝える (status 隠蔽防止)。
+    // objective は status に応じて意味のある値を設定:
+    //   Infeasible → +∞ (実行可能解なし、最小化では到達不能)
+    //   Unbounded  → -∞ (objective がいくらでも小さくなる方向あり)
+    //   NonConvex  → NaN (大域最適保証なし、値に意味がない)
+    // SolverResult::infeasible() の慣例 (objective: f64::INFINITY) と整合。
     if let Some(infeas) = outcome.infeasibility_status {
+        let objective = match infeas {
+            SolveStatus::Infeasible => f64::INFINITY,
+            SolveStatus::Unbounded => f64::NEG_INFINITY,
+            _ => f64::NAN,
+        };
         return SolverResult {
             status: infeas,
+            objective,
             iterations: outcome.iterations,
             ..Default::default()
         };
