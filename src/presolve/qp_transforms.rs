@@ -648,7 +648,12 @@ pub fn run_qp_presolve_phase1(
     // #4: empty_rows_cols() — ゼロ行・ゼロ列の除去
     // ==================================================================
 
-    // 空行の除去
+    // 空行の除去 — constraint_types で Infeasible 条件が異なる
+    //   Le (0 <= b): b >= 0 で冗長、b < 0 で Infeasible
+    //   Ge (0 >= b): b <= 0 で冗長、b > 0 で Infeasible
+    //   Eq (0 = b):  b == 0 で冗長、b != 0 で Infeasible
+    // 旧実装は Le 前提のみで Eq の正の b、Ge の正の b を「冗長」誤削除する false-negative
+    // Infeasibility バグがあった (cmd_752/753 の to_all_le 全廃以降混在状態で潜在化)。
     for i in 0..m {
         if removed_rows[i] {
             continue;
@@ -658,9 +663,12 @@ pub fn run_qp_presolve_phase1(
             .filter(|&&(j, _)| !removed_cols[j])
             .count();
         if active_count == 0 {
-            // 0 <= b[i]: b[i]>=0 なら冗長、b[i]<0 なら Infeasible
-            if b[i] < -ZERO_TOL {
-                // Infeasible: 変換不能→元問題を返す
+            let infeasible = match prob.constraint_types[i] {
+                crate::problem::ConstraintType::Le => b[i] < -ZERO_TOL,
+                crate::problem::ConstraintType::Ge => b[i] > ZERO_TOL,
+                crate::problem::ConstraintType::Eq => b[i].abs() > ZERO_TOL,
+            };
+            if infeasible {
                 return QpPresolveResult::infeasible(prob);
             }
             removed_rows[i] = true;
