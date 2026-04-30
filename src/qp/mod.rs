@@ -584,31 +584,55 @@ const AAT_REG_FACTOR: f64 = 1e-12;
 /// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
 /// 既存 y より KKT 残差が改善した場合のみ採用する (退行防止)。
 pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+    if let Some(y_new) = compute_lsq_dual_y(problem, result) {
+        let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; problem.num_vars]);
+        let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; problem.num_vars]);
+        let qx = match problem.q.mat_vec_mul(&result.solution) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, problem.num_vars);
+        let mut max_resid_old = 0.0_f64;
+        let mut max_resid_new = 0.0_f64;
+        for j in 0..problem.num_vars {
+            let (lbj, ubj) = problem.bounds[j];
+            if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
+                continue;
+            }
+            let r_old = (qx[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
+            let r_new = (qx[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
+            max_resid_old = max_resid_old.max(r_old);
+            max_resid_new = max_resid_new.max(r_new);
+        }
+        if max_resid_new < max_resid_old {
+            result.dual_solution = y_new;
+        }
+    }
+}
+
+/// LSQ で y を計算する核心ロジック (KKT-guard なし)。`refine_dual_lsq` の内部実装と
+/// 共有する。primal が動いた直後の force-update 用に外部からも呼べるよう pub(crate) 化。
+///
+/// 解法: A^T y = -(Q*x + c + bound_contrib) の最小ノルム解を
+/// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
+/// 失敗 (LDL 失敗 / NaN) 時は None を返す。
+pub(crate) fn compute_lsq_dual_y(
+    problem: &QpProblem,
+    result: &crate::problem::SolverResult,
+) -> Option<Vec<f64>> {
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if m == 0 || result.solution.len() != n {
-        return;
+        return None;
     }
     let x = &result.solution;
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
+    let qx = problem.q.mat_vec_mul(x).ok()?;
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
     let r_full: Vec<f64> = (0..n)
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
-
-    let aat = match build_aat_upper_csc(&problem.a, n, m) {
-        Some(m_) => m_,
-        None => return,
-    };
-    let factor = match crate::linalg::ldl::factorize(&aat) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
+    let aat = build_aat_upper_csc(&problem.a, n, m)?;
+    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
     let mut rhs = vec![0.0_f64; m];
     for j in 0..n {
         let start = problem.a.col_ptr[j];
@@ -620,31 +644,12 @@ pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::
             }
         }
     }
-
     let mut y_new = vec![0.0_f64; m];
     factor.solve(&rhs, &mut y_new);
     if y_new.iter().any(|v| !v.is_finite()) {
-        return;
+        return None;
     }
-
-    let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; n]);
-    let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; n]);
-
-    let mut max_resid_old = 0.0_f64;
-    let mut max_resid_new = 0.0_f64;
-    for j in 0..n {
-        let (lbj, ubj) = problem.bounds[j];
-        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
-            continue;
-        }
-        let r_old = (qx[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
-        let r_new = (qx[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
-        max_resid_old = max_resid_old.max(r_old);
-        max_resid_new = max_resid_new.max(r_new);
-    }
-    if max_resid_new < max_resid_old {
-        result.dual_solution = y_new;
-    }
+    Some(y_new)
 }
 
 /// 元空間 primal feasibility が borderline (LISWET9/12: pf ≈ 1e-6 で

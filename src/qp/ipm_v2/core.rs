@@ -195,7 +195,14 @@ fn run_ipm_with(
     let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
 
     let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // (A) x の primal projection — combined guard 付き (サイズ制限あり)
+        // (A) x の primal projection — combined guard 付き (サイズ制限あり)。
+        // LISWET 系で primal projection 後の dual LSQ refit は ill-conditioned A
+        // (near-rank-deficient AAT) で破綻する (|y_new| が IPM y の 5e4 倍に膨張)
+        // ため、ここでは primal x のみを射影し dual は IPM 値を保持する。
+        // 多くの問題で primal projection は KKT 改善せず combined guard で revert
+        // されるが、QRECIPE / 一部 borderline では効く。LISWET 系の precision floor
+        // 突破は IPM 内部の深い数値改修 (Mehrotra centering / step size scheduling)
+        // が必要 — 別タスク。
         if allow_primal_projection {
             let pre_x = final_sol.solution.clone();
             let pre_y_for_a = final_sol.dual_solution.clone();
@@ -204,7 +211,6 @@ fn run_ipm_with(
             let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             let pre_combined_a = pre_pres_a.max(pre_kkt_a);
             crate::qp::refine_primal_lsq(orig_problem, &mut final_sol);
-            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
             let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
