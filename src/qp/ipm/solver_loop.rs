@@ -15,6 +15,15 @@ use crate::sparse::CscMatrix;
 use super::common::fraction_to_boundary_masked;
 use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 
+/// Iterative refinement の反復回数。各反復は内部 guard
+/// (correction_inf > sol_inf, NaN/Inf, residual<threshold) で発散時 skip するため、
+/// 安定問題に副作用なし。大型問題 (n+m_ext > 100k) では IR 自体が skip される。
+///
+/// 3 は経験値: 1 では QPILOTNO の pf=3.6e-5→2.2e-5 改善が出ず、10 にしても
+/// LDL の f64 精度限界 (Σ dynamic range 1e18 × eps_f64 で相対精度 ~1e2 損失) で
+/// LISWET 系の改善はない。3 で QPILOTNO 改善・他コスト軽微の balance。
+pub(crate) const IR_MAX_ITERS: usize = 3;
+
 /// Iterative refinement of LDL solve.
 ///
 /// fac.solve produces sol approximating K * sol = rhs. With LDL precision limit
@@ -62,7 +71,12 @@ pub(crate) fn solve_with_iterative_refinement(
     let mut residual = vec![0.0_f64; n];
     let mut correction = vec![0.0_f64; n];
 
-    for _ in 0..max_iters {
+    let trace_ir = std::env::var("IR_TRACE").ok().as_deref() == Some("1");
+    if trace_ir {
+        let sol_inf_initial = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+        eprintln!("IR_START n={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e}", n, rhs_inf, sol_inf_initial, resid_skip_threshold);
+    }
+    for _ir_iter in 0..max_iters {
         // K * sol (symmetric matvec, upper-triangular CSC).
         for v in kx.iter_mut() {
             *v = 0.0;
@@ -84,6 +98,7 @@ pub(crate) fn solve_with_iterative_refinement(
             resid_inf = resid_inf.max(residual[i].abs());
         }
         if resid_inf <= resid_skip_threshold {
+            if trace_ir { eprintln!("IR iter={} EXIT_resid_small resid_inf={:.3e}", _ir_iter, resid_inf); }
             return;
         }
 
@@ -95,6 +110,7 @@ pub(crate) fn solve_with_iterative_refinement(
         // Backtrack guard: NaN/Inf protection
         let any_bad = correction.iter().any(|v| !v.is_finite());
         if any_bad {
+            if trace_ir { eprintln!("IR iter={} EXIT_nan resid_inf={:.3e}", _ir_iter, resid_inf); }
             return;
         }
 
@@ -105,7 +121,11 @@ pub(crate) fn solve_with_iterative_refinement(
         // PASS→TIMEOUT 退行した症状の対策。
         let correction_inf = correction.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let sol_inf = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+        if trace_ir {
+            eprintln!("IR iter={} resid_inf={:.3e} correction_inf={:.3e} sol_inf={:.3e}", _ir_iter, resid_inf, correction_inf, sol_inf);
+        }
         if correction_inf > sol_inf {
+            if trace_ir { eprintln!("IR iter={} EXIT_correction_too_large", _ir_iter); }
             return;
         }
 
@@ -198,8 +218,10 @@ pub(crate) fn predictor_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_pred);
-    // Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）
-    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
+    // Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）。
+    // max_iters=3: LISWET の proximal floor 突破には 1 回では足りず scaled pf~1e-6 で
+    // 止まる。3 回で 1 桁改善見込み。各反復は内部 guard で発散時 skip するため安全。
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
 
     // augmented system: sol[..n]=dx_pred（未使用）, sol[n..]=dy_pred
     let dy_pred = sol[n..].to_vec();
@@ -304,8 +326,8 @@ pub(crate) fn corrector_step(
 
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_corr);
-    // Iterative refinement で LDL solve 精度向上
-    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
+    // Iterative refinement で LDL solve 精度向上 (corrector も同じ精度を得る)
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
 
     dx.copy_from_slice(&sol[..n]);
     dy.copy_from_slice(&sol[n..]);
@@ -413,8 +435,8 @@ pub(crate) fn gondzio_correctors(
 
         rhs[..n].copy_from_slice(r_dual);
         rhs[n..].copy_from_slice(&r_p_mod_gondzio);
-        // Iterative refinement で LDL solve 精度向上
-        solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, 1);
+        // Iterative refinement で LDL solve 精度向上 (gondzio centering corrector)
+        solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
 
         let dx_new = sol[..n].to_vec();
         let dy_new = sol[n..].to_vec();

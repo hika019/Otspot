@@ -514,6 +514,19 @@ pub(crate) fn solve_ippmm_inner(
         // OSQP 形式の閾値 (bench/v2 と整合)
         let pfeas_thr = eps * (1.0 + pfeas_denom);
         let dfeas_thr = eps * (1.0 + dfeas_denom);
+        // [DIAG] Optimal_main 条件を全て出力 (env=IPPMM_OPT_DIAG=1)
+        if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
+            eprintln!(
+                "IPPMM_OPT iter={} pf={:.3e}/thr={:.3e}{} nrd={:.3e}/thr={:.3e}{} nrd_orig={:.3e}/thr={:.3e}{} nrd_rel_orig={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
+                iter,
+                nr_p, pfeas_thr, if nr_p < pfeas_thr { "✓" } else { "✗" },
+                nr_d, dfeas_thr, if nr_d < dfeas_thr { "✓" } else { "✗" },
+                nr_d_orig, eps_orig * (1.0 + norm_c_orig), if nr_d_orig < eps_orig * (1.0 + norm_c_orig) { "✓" } else { "✗" },
+                nr_d_rel_orig, eps_orig, if nr_d_rel_orig < eps_orig { "✓" } else { "✗" },
+                mu, eps, if mu < eps { "✓" } else { "✗" },
+                rel_gap, DUALITY_GAP_TOL, if rel_gap.abs() < DUALITY_GAP_TOL { "✓" } else { "✗" },
+            );
+        }
         if nr_d < dfeas_thr
             && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
             && nr_d_rel_orig < eps_orig
@@ -620,6 +633,31 @@ pub(crate) fn solve_ippmm_inner(
         // Σ = diag(s_i / y_i)（等式行は0）
         let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
+
+        // [DIAG] Σ の dynamic range 実測 (env=IPPMM_SIGMA_DIAG=1 のときのみ)
+        if std::env::var("IPPMM_SIGMA_DIAG").ok().as_deref() == Some("1") {
+            let mut sigma_min = f64::INFINITY;
+            let mut sigma_max_actual = 0.0_f64;
+            let mut s_min = f64::INFINITY;
+            let mut s_max = 0.0_f64;
+            let mut y_min = f64::INFINITY;
+            let mut y_max = 0.0_f64;
+            for (i, &sig) in sigma_vec.iter().enumerate() {
+                if !is_eq_ext[i] {
+                    if sig > 0.0 && sig.is_finite() {
+                        sigma_min = sigma_min.min(sig);
+                        sigma_max_actual = sigma_max_actual.max(sig);
+                    }
+                    if s[i] > 0.0 { s_min = s_min.min(s[i]); s_max = s_max.max(s[i]); }
+                    if y[i] > 0.0 { y_min = y_min.min(y[i]); y_max = y_max.max(y[i]); }
+                }
+            }
+            eprintln!(
+                "IPPMM_SIGMA iter={} mu={:.3e} Σ:[{:.3e},{:.3e}] range={:.3e} s:[{:.3e},{:.3e}] y:[{:.3e},{:.3e}]",
+                iter, mu, sigma_min, sigma_max_actual, sigma_max_actual / sigma_min.max(1e-300),
+                s_min, s_max, y_min, y_max
+            );
+        }
 
         // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
         // rho/deltaはPMMが管理する。mu依存フロアは使わない
@@ -925,7 +963,9 @@ pub(crate) fn solve_ippmm_inner(
         // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
         // 根拠: 設計書§A.5
         let either_improved = primal_improved || dual_improved;
-        if either_improved {
+        // [実験] env=IPPMM_FORCE_REF_UPDATE=1 で毎 iter 強制更新 → proximal effect ≈0
+        let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
+        if either_improved || force_ref_update {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
