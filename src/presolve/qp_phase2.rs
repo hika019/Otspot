@@ -343,16 +343,22 @@ pub fn run_qp_presolve_phase2(
     // ==================================================================
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
-    let (a_new, b_new) = if any_removed {
-        let mut new_row_map = vec![None; m];
-        let mut new_row_idx = 0usize;
+    // phase1 reduced row → phase2 reduced row 対応 (削除された行は None)。
+    // 外側スコープに置く: a/b 再構築だけでなく postsolve_stack の row_map / row_scales 同期にも使う。
+    let new_row_map: Vec<Option<usize>> = {
+        let mut map = vec![None; m];
+        let mut idx = 0usize;
         for i in 0..m {
             if !removed_rows_phase2[i] {
-                new_row_map[i] = Some(new_row_idx);
-                new_row_idx += 1;
+                map[i] = Some(idx);
+                idx += 1;
             }
         }
-        let m_new = new_row_idx;
+        map
+    };
+
+    let (a_new, b_new) = if any_removed {
+        let m_new = new_row_map.iter().filter(|o| o.is_some()).count();
 
         // 新 A 行列（CSC）
         let mut trip_rows: Vec<usize> = Vec::new();
@@ -414,6 +420,41 @@ pub fn run_qp_presolve_phase2(
         was_reduced: phase1_result.was_reduced || any_removed,
         ..phase1_result
     };
+
+    // Bug A 修正: phase2 で row 削除があった場合、result.row_map (元 row → reduced row)
+    // を new_row_map (phase1 reduced row → phase2 reduced row) で合成して更新する。
+    // 旧実装は phase1 の row_map のままで postsolve に渡しており、削除された行の dual を
+    // phase1 reduced index で引き当てて間違った位置に配置していた。
+    //
+    // Bug B 修正: phase1 で既に push された LargeCoeffRowScale の row_scales (size m_p1) を
+    // phase2 row 削除に同期して縮約する。同期しないと postsolve 逆変換で reduced_dual
+    // (size m_p2) と row_scales (size m_p1) のインデックス対応がずれて間違った scale が
+    // 適用される。
+    if any_removed {
+        // Bug A: row_map 合成
+        for entry in result.row_map.iter_mut() {
+            if let Some(phase1_i) = *entry {
+                *entry = if phase1_i < new_row_map.len() {
+                    new_row_map[phase1_i]
+                } else {
+                    None
+                };
+            }
+        }
+        // Bug B: 既存 LargeCoeffRowScale の row_scales を縮約
+        for step in result.postsolve_stack.steps.iter_mut() {
+            if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
+                if row_scales.len() == m {
+                    let compacted: Vec<f64> = (0..m)
+                        .filter(|&i| !removed_rows_phase2[i])
+                        .map(|i| row_scales[i])
+                        .collect();
+                    *row_scales = compacted;
+                }
+            }
+        }
+    }
+
     let has_precond_scaling = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
     if has_precond_scaling {
         result.postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: sigmas });
