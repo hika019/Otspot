@@ -577,6 +577,17 @@ pub(crate) fn remap_bound_duals_to_orig(
 /// LDL の dynamic regularization (1e-8) より十分下で衝突しない。
 const AAT_REG_FACTOR: f64 = 1e-12;
 
+/// `refine_dual_lsq` / `compute_lsq_dual_y` の size guard。n+m がこれを超える問題は
+/// AAT (m×m) の LDL factorization が数十 GB メモリを確保するため skip する。
+///
+/// 真因: BOYD2 (n=140k, m=186k → n+m=326k) で `refine_dual_lsq` が呼ばれると
+/// AAT 186k×186k に対する faer supernodal LDL が 30-40GB virtual memory を
+/// 確保する。concurrent solver で v1+v2 が並列に走ると倍 (60-80GB swap+RSS)。
+///
+/// 経験値: 50k は `refine_primal_lsq` の `PRIMAL_PROJECTION_SIZE_LIMIT` と統一。
+/// LISWET (n+m=20k) は guard 内、CONT-300 (n+m=180k) と BOYD2 (326k) は skip。
+const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
+
 /// primal x から KKT を満たす dual y を最小二乗で再計算する。
 /// IPPMM が scaled 空間判定で出した偽 dual を補正する。
 ///
@@ -623,6 +634,13 @@ pub(crate) fn compute_lsq_dual_y(
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if m == 0 || result.solution.len() != n {
+        return None;
+    }
+    // 大規模問題では A·A^T (m×m sparse、m=186k for BOYD2) の LDL factorization が
+    // 数十 GB メモリを確保するため skip。`refine_primal_lsq` の同名閾値と統一。
+    // refine_dual_lsq は IPM iterations=0 の timeout でも呼ばれるため (core.rs:86)、
+    // size guard なしだと BOYD2 で post-IPM AAT factorize が memory peak を倍増させる。
+    if n + m > LSQ_DUAL_SIZE_LIMIT {
         return None;
     }
     let x = &result.solution;
