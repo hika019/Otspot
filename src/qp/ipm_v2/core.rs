@@ -71,6 +71,7 @@ fn run_ipm_with(
             kkt_residual_rel: f64::INFINITY,
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
+            duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
         };
@@ -145,26 +146,33 @@ fn run_ipm_with(
     // 最適解を計算してしまい、cancel_flag セマンティクス (Timeout 期待) を破壊するのを防ぐ。
     let ipm_made_progress = result.iterations > 0;
 
+    // 大規模問題で refine_primal_lsq の AAT factorize が時間予算を圧迫するのを防ぐ。
+    // BOYD2 (n+m≈280k) では LDL 因子化に分単位かかり、bench の external timeout を
+    // 超える。実問題では LISWET (n+m≈20k) が現実的な上限。
+    const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
+    let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
+    let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
+
     let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // (A) x の primal projection — combined guard 付き
-        let pre_x = final_sol.solution.clone();
-        let pre_y_for_a = final_sol.dual_solution.clone();
-        let pre_z_for_a = final_sol.bound_duals.clone();
-        let pre_pres_a = primal_residual_rel(&view, &final_sol.solution);
-        let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        let pre_combined_a = pre_pres_a.max(pre_kkt_a);
-        crate::qp::refine_primal_lsq(orig_problem, &mut final_sol);
-        // primal projection 後の dual 再計算 (内部 KKT-guard 付き)
-        crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
-        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-        let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
-        let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        let post_combined_a = post_pres_a.max(post_kkt_a);
-        if post_combined_a > pre_combined_a {
-            // primal 改善が dual 退行を上回ったら全体 revert
-            final_sol.solution = pre_x;
-            final_sol.dual_solution = pre_y_for_a;
-            final_sol.bound_duals = pre_z_for_a;
+        // (A) x の primal projection — combined guard 付き (サイズ制限あり)
+        if allow_primal_projection {
+            let pre_x = final_sol.solution.clone();
+            let pre_y_for_a = final_sol.dual_solution.clone();
+            let pre_z_for_a = final_sol.bound_duals.clone();
+            let pre_pres_a = primal_residual_rel(&view, &final_sol.solution);
+            let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let pre_combined_a = pre_pres_a.max(pre_kkt_a);
+            crate::qp::refine_primal_lsq(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
+            let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let post_combined_a = post_pres_a.max(post_kkt_a);
+            if post_combined_a > pre_combined_a {
+                final_sol.solution = pre_x;
+                final_sol.dual_solution = pre_y_for_a;
+                final_sol.bound_duals = pre_z_for_a;
+            }
         }
 
         // (B) 念のためもう 1 度 y / z refit (stage A 内の内部 guard 後の再評価)
@@ -192,6 +200,7 @@ fn run_ipm_with(
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
+    let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
     IpmOutcome {
         solution: final_sol.solution,
@@ -202,7 +211,85 @@ fn run_ipm_with(
         kkt_residual_rel: kkt,
         primal_residual_rel: pres,
         bound_violation: bv,
+        duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,
     }
+}
+
+/// 元空間 双対ギャップ相対値: |primal_obj - dual_obj| / max(|p|, |d|, 1)
+///
+/// QP の弱双対性: dual_obj = -1/2 x^T Q x - b^T y + lb^T z_lb - ub^T z_ub
+///   (KKT 停留性 Qx + c + A^T y - z_lb + z_ub = 0 を Lagrangian に代入して導出)
+/// 真の Optimal では gap → 0。rank-deficient Q で KKT 残差が小さくても gap が
+/// 大きい偽 Optimal (UBH1: gap=9.49 で obj 54% 誤差) を弾くゲート。
+///
+/// FX (lb=ub) 変数は postsolve で bound_duals が 0 埋めされる慣例 + KKT 評価から
+/// 除外される設計のため、result.bound_duals[j] には FX 変数の正しい dual が入って
+/// いない。ここでは FX 変数の bound 寄与を「lb_j * 停留性」で解析的に置き換え、
+/// 偽の gap 検出を防ぐ (BD-T2: FX 変数 z=3 で gap=1.0 → 0 に修正される)。
+fn compute_duality_gap_rel(
+    problem: &crate::qp::QpProblem,
+    result: &crate::problem::SolverResult,
+) -> f64 {
+    let n = problem.num_vars;
+    if result.solution.len() != n {
+        return f64::INFINITY;
+    }
+    let x = &result.solution;
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
+        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
+            Ok(v) => v,
+            Err(_) => return f64::INFINITY,
+        }
+    } else {
+        vec![0.0_f64; n]
+    };
+    let xqx: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+    let cx: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
+    let primal_obj = 0.5 * xqx + cx + problem.obj_offset;
+
+    let mut by: f64 = 0.0;
+    for (&bi, &yi) in problem.b.iter().zip(result.dual_solution.iter()) {
+        by += bi * yi;
+    }
+
+    // bnd_term = lb^T z_lb - ub^T z_ub
+    // FX (lb=ub=val) は z_lb_j, z_ub_j が postsolve で 0 埋め (refit でも更新されない)
+    // のため、解析的に val * net_z_at_j (= val * -(qx+c+aty)) で置換する。
+    let mut bnd_term: f64 = 0.0;
+    let mut lb_idx = 0_usize;
+    let mut ub_idx = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        let lb_finite = lb.is_finite();
+        let ub_finite = ub.is_finite();
+        let is_fx = lb_finite && ub_finite && (lb - ub).abs() < crate::qp::FX_TOL;
+        if is_fx {
+            // FX: lb_j * z_lb_j - ub_j * z_ub_j = val * (z_lb - z_ub)。
+            // bound_contrib[j] = -z_lb + z_ub = -(qx + c + aty) (停留性) なので
+            //   val * (z_lb - z_ub) = -val * bound_contrib = val * (qx + c + aty)
+            let stat_no_bnd = qx[j] + problem.c[j] + aty[j];
+            bnd_term += lb * stat_no_bnd;
+            // bound_duals layout 上 idx は進める (FX 用 slot は使わない)
+            if lb_finite { lb_idx += 1; }
+            if ub_finite { ub_idx += 1; }
+        } else {
+            if lb_finite && lb_idx < result.bound_duals.len() {
+                bnd_term += lb * result.bound_duals[lb_idx];
+                lb_idx += 1;
+            }
+            if ub_finite && ub_idx < result.bound_duals.len() {
+                bnd_term -= ub * result.bound_duals[ub_idx];
+                ub_idx += 1;
+            }
+        }
+    }
+    let dual_obj = -0.5 * xqx - by + bnd_term + problem.obj_offset;
+    let gap_abs = (primal_obj - dual_obj).abs();
+    let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    if denom > 0.0 && gap_abs.is_finite() { gap_abs / denom } else { f64::INFINITY }
 }

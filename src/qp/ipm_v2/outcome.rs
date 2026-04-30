@@ -30,6 +30,10 @@ pub struct IpmOutcome {
     pub primal_residual_rel: f64,
     /// 元空間 bounds 違反 (max_j max(lb-x, x-ub))
     pub bound_violation: f64,
+    /// 元空間 双対ギャップ相対値 |primal_obj - dual_obj| / max(|p|, |d|, 1)。
+    /// rank-deficient Q (UBH1 等) で KKT 残差は小さいが obj が大きく外れる
+    /// 偽 Optimal を検出するためのゲート。
+    pub duality_gap_rel: f64,
     /// 内部数値エラー (NaN / Inf 等で解が無効) フラグ
     pub numerical_failure: bool,
     /// 内部 solver が確定的に判定した Infeasible / Unbounded を保持する。
@@ -50,6 +54,7 @@ impl IpmOutcome {
             kkt_residual_rel: f64::INFINITY,
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
+            duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
         }
@@ -75,13 +80,22 @@ impl IpmOutcome {
         }
     }
 
+    /// 双対ギャップ閾値: rank-deficient Q (UBH1) の偽 Optimal を弾く promotion gate。
+    /// IPM 内部 (ippmm.rs) の Optimal_main 判定でも DUALITY_GAP_TOL=1e-3 を使うが、
+    /// post-promotion (Suboptimal→Optimal の昇格) は IPM_PROMOTION_GAP_TOL=1e-1 で
+    /// より緩い (内部判定漏れの最終防壁、scaling.rs::PROMOTION_GAP_TOL と整合)。
+    pub const PROMOTION_GAP_TOL: f64 = 1e-1;
+
     /// ユーザー指定 eps を満たすか判定する (元空間, 成分相対化)。
+    /// rank-deficient Q (UBH1 等) では KKT 残差が小さくても obj が大きく外れるため、
+    /// duality_gap_rel < PROMOTION_GAP_TOL を最終防壁として加える。
     pub fn satisfies_eps(&self, eps: f64) -> bool {
         !self.solution.is_empty()
             && !self.numerical_failure
             && self.kkt_residual_rel <= eps
             && self.primal_residual_rel <= eps
             && self.bound_violation <= eps
+            && self.duality_gap_rel < Self::PROMOTION_GAP_TOL
     }
 
     /// 残差の合算 score (小さいほど良い)。retry での best-so-far 比較用。
