@@ -127,8 +127,14 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
-    // 元空間 dual refinement: y のみ refine_dual_lsq で再計算 (z は IPM 出力をそのまま使用)。
-    // KKT-guard で改善時のみ採用 (LSQ は L2 vs KKT は max-rel で目的関数が違うため)。
+    // 元空間 dual refinement (元 v8 セッション 8 と同形 + bound_duals refit を追加):
+    //   - y を refine_dual_lsq (LSQ + KKT-guard) で再計算
+    //   - z (bound_duals) を refit_bound_duals_kkt (analytic + KKT-guard) で再計算
+    //
+    // presolve が変数 fix / 行除去すると postsolve は dual_solution・bound_duals に 0 を
+    // 埋め込み KKT が破壊される。z の refit は QRECIPE 1 件 (T1.2) を Optimal 化する。
+    // 残りの Catastrophic 8 件は本 KKT-guard 後処理で完全復元できず、proper dual postsolve
+    // (各 presolve 変換ごとに dual を記録) が必要 — 別 PR 範囲。
     let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let pre_y = final_sol.dual_solution.clone();
@@ -138,6 +144,15 @@ fn run_ipm_with(
             current_kkt = post_kkt;
         } else {
             final_sol.dual_solution = pre_y;
+        }
+        // z refit (QRECIPE 効果): bound_duals が postsolve 0 埋めの修復
+        let pre_z = final_sol.bound_duals.clone();
+        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+        let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        if post_kkt <= current_kkt {
+            current_kkt = post_kkt;
+        } else {
+            final_sol.bound_duals = pre_z;
         }
         current_kkt
     } else {

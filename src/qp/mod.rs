@@ -647,6 +647,113 @@ pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::
     }
 }
 
+/// 元空間で primal x と constraint dual y から bound_duals を KKT で再計算する。
+///
+/// presolve が変数を fix した場合 (FixedVar / EmptyCol / SingletonRow), postsolve は
+/// `bound_duals[..]=0` を埋めるが、本来 active bound を持つ変数では bound_dual は非ゼロ。
+/// この欠落で KKT stationarity が破壊され、bench dfeas が 1e-1 級の偽 DFEAS_FAIL になる
+/// (Maros 9 件: QADLITTL/QBORE3D/QCAPRI/QETAMACR/QFFFFF80/QPCBOEI1/QRECIPE/QSEBA/QSHELL)。
+///
+/// 本関数は既存 IPM/IPPMM のアルゴリズムには介入せず、ソルバが返した x, y を不変としたまま
+/// bound_duals のみを KKT stationarity から導出する後処理 (refine_dual_lsq の z 版)。
+///
+/// 算法:
+///   target[j] = -(Qx[j] + c[j] + (A^T y)[j])  (KKT: bound_contrib[j] = target[j])
+///   bound_contrib[j] = -y_lb[j] + y_ub[j]
+///   - lb のみ有限: y_lb[j] = -target[j] (active 想定)
+///   - ub のみ有限: y_ub[j] = target[j]
+///   - 両端有限 + x が lb 近傍: y_lb[j] = -target[j], y_ub[j] = 0
+///   - 両端有限 + x が ub 近傍: y_lb[j] = 0,         y_ub[j] = target[j]
+///   - 両端有限 + interior:    y_lb = y_ub = 0 (residual はそのまま、KKT-guard で revert)
+///
+/// 既存 bound_duals より KKT 残差が改善した場合のみ採用する (退行防止 — refine_dual_lsq と同形)。
+pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+    let n = problem.num_vars;
+    if result.solution.len() != n {
+        return;
+    }
+    let x = &result.solution;
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
+        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
+            Ok(v) => v,
+            Err(_) => return,
+        }
+    } else {
+        vec![0.0_f64; n]
+    };
+
+    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub = problem.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    if n_lb + n_ub == 0 {
+        return;
+    }
+
+    let mut new_bd = vec![0.0_f64; n_lb + n_ub];
+    // active 判定の許容差。x が lb / ub の (1e-6 * (1 + |bound|)) 以内なら active 扱い。
+    // IPM の interior point は厳密に bound に到達しないため、tolerance が必要。
+    const ACTIVE_REL_TOL: f64 = 1e-6;
+
+    let mut lb_idx = 0_usize;
+    let mut ub_idx = n_lb;
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        let target = -(qx[j] + problem.c[j] + aty[j]);
+        let lb_finite = lb.is_finite();
+        let ub_finite = ub.is_finite();
+
+        let lb_active = lb_finite
+            && (x[j] - lb) <= ACTIVE_REL_TOL * (1.0 + lb.abs()).max(1.0);
+        let ub_active = ub_finite
+            && (ub - x[j]) <= ACTIVE_REL_TOL * (1.0 + ub.abs()).max(1.0);
+
+        if lb_finite && ub_finite {
+            if lb_active && !ub_active {
+                new_bd[lb_idx] = (-target).max(0.0);
+                // ub_idx 側はゼロのまま
+            } else if ub_active && !lb_active {
+                new_bd[ub_idx] = target.max(0.0);
+            } else if lb_active && ub_active {
+                // FX (lb≈ub): 符号で振り分け、両方 0 以上
+                if -target >= 0.0 { new_bd[lb_idx] = -target; }
+                else               { new_bd[ub_idx] = target; }
+            }
+            // interior (どちらも非 active): 0/0 のまま (residual はそのまま、KKT-guard が判断)
+            lb_idx += 1;
+            ub_idx += 1;
+        } else if lb_finite {
+            // lb のみ有限: bound_contrib = -y_lb = target → y_lb = -target
+            new_bd[lb_idx] = (-target).max(0.0);
+            lb_idx += 1;
+        } else if ub_finite {
+            new_bd[ub_idx] = target.max(0.0);
+            ub_idx += 1;
+        }
+    }
+
+    // KKT-guard: 元 bound_duals と比較し、KKT max-residual が改善した場合のみ採用
+    let pre_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let post_contrib = compute_bound_contrib(&problem.bounds, &new_bd, n);
+    let mut max_pre = 0.0_f64;
+    let mut max_post = 0.0_f64;
+    for j in 0..n {
+        let (lbj, ubj) = problem.bounds[j];
+        // FX 変数は postsolve で 0 埋め慣例なので KKT 評価から除外 (bench/v2 と整合)
+        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
+            continue;
+        }
+        let r_pre = (qx[j] + problem.c[j] + aty[j] + pre_contrib[j]).abs();
+        let r_post = (qx[j] + problem.c[j] + aty[j] + post_contrib[j]).abs();
+        max_pre = max_pre.max(r_pre);
+        max_post = max_post.max(r_post);
+    }
+    if max_post < max_pre {
+        result.bound_duals = new_bd;
+    }
+}
+
 /// 境界 dual から KKT stationarity の bound 寄与 (-y_lb + y_ub) を成分ごと計算する。
 /// `bound_duals` は [lb 有限な変数の y_lb 群; ub 有限な変数の y_ub 群] レイアウト。
 fn compute_bound_contrib(bounds: &[(f64, f64)], bound_duals: &[f64], n: usize) -> Vec<f64> {
@@ -2295,13 +2402,18 @@ mod tests {
         assert_eq!(result.bound_duals.len(), 3, "BD-T3: bound_duals.len()==3");
     }
 
-    /// BD-T4: EmptyCol + lb+ub変数（bound_duals空 → 0埋め展開）
+    /// BD-T4: EmptyCol 変数の bound_duals は KKT で正しい値が入る
     /// min 1/2*(0.001*x^2 + 0.001*y^2) - x - y + z
     /// s.t. x + y <= 4, x,y∈(-∞,∞), 0 <= z <= 3
-    /// z は制約に登場しない → EmptyCol → z=lb=0
-    /// → IPMが返すbound_duals空 → リマップ後: bound_duals.len()==2, 全0.0
+    /// z は制約に登場しない → EmptyCol → presolve で z=lb=0 に固定。
+    ///
+    /// 旧期待: 「postsolve は除去変数の bound_dual を 0 で埋める」→ z_lb=z_ub=0
+    /// 新期待: KKT 後処理 (refit_bound_duals_kkt) が presolve 0 埋めを修復し、
+    ///         lb 活性 (x=0) + c=1 から z_lb = 1 が復元される。z_ub=0 は不変。
+    /// ただし bench/v2 の dfeas は EmptyCol を skip するため、どちらでも PASS。
+    /// 本テストでは「KKT を満たす値」が入ることを保証する。
     #[test]
-    fn test_bd_t4_empty_col_zero_fill() {
+    fn test_bd_t4_empty_col_kkt_recovered() {
         let n = 3usize;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[0.001, 0.001], n, n).unwrap();
         let c = vec![-1.0, -1.0, 1.0];
@@ -2316,9 +2428,14 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T4: status");
         // n_lb_orig=1(z:0), n_ub_orig=1(z:3) → bound_duals.len()==2
         assert_eq!(result.bound_duals.len(), 2, "BD-T4: bound_duals.len()==2");
-        let tol = 1e-8_f64;
-        assert!((result.bound_duals[0]).abs() < tol, "BD-T4: z_lb==0.0");
-        assert!((result.bound_duals[1]).abs() < tol, "BD-T4: z_ub==0.0");
+        // z=0 (lb 活性) なので KKT: 0.001*0 + 1 - z_lb + z_ub = 0 → z_lb = 1, z_ub = 0
+        let z_lb = result.bound_duals[0];
+        let z_ub = result.bound_duals[1];
+        assert!(
+            (z_lb - 1.0).abs() < 1e-3,
+            "BD-T4: z_lb≈1 (KKT recovered for EmptyCol), got {}", z_lb
+        );
+        assert!(z_ub.abs() < 1e-3, "BD-T4: z_ub≈0 (ub inactive), got {}", z_ub);
     }
 
     /// BD-T5: 無境界（全変数±∞ → bound_duals空）
@@ -3116,4 +3233,180 @@ mod tests {
             "D-5b: near-optimal solution → Optimal");
     }
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // refit_bound_duals_kkt 単体テスト (T1.2 / T1.4 回帰防止)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// REFIT-T1: lb のみ有限な変数で x が lb に張り付き、c > 0 の場合
+    /// presolve で除去された変数の bound_dual を KKT で復元できること。
+    /// KKT: c + (-y_lb) = 0 → y_lb = c
+    #[test]
+    fn test_refit_bound_duals_lb_only_active() {
+        // min c*x s.t. (制約なし, ただし x>=0)
+        // n=1, c=[2.5], bounds=[(0, +∞)]
+        // 最適: x=0 (c>0 なので増やすほど obj 大), y_lb = 2.5
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.5_f64];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        // bound_dual=0 の状態で渡し、refit が y_lb=2.5 を復元するか
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            ..SolverResult::default()
+        };
+        refit_bound_duals_kkt(&problem, &mut result);
+        assert!(
+            (result.bound_duals[0] - 2.5).abs() < 1e-9,
+            "REFIT-T1: y_lb 復元 ≈ 2.5, got {}", result.bound_duals[0]
+        );
+    }
+
+    /// REFIT-T2: ub のみ有限な変数で x が ub に張り付き、c < 0 の場合
+    /// KKT: c + y_ub = 0 → y_ub = -c
+    #[test]
+    fn test_refit_bound_duals_ub_only_active() {
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![-3.0_f64];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, 5.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![5.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0],
+            objective: 0.0,
+            ..SolverResult::default()
+        };
+        refit_bound_duals_kkt(&problem, &mut result);
+        assert!(
+            (result.bound_duals[0] - 3.0).abs() < 1e-9,
+            "REFIT-T2: y_ub 復元 ≈ 3.0, got {}", result.bound_duals[0]
+        );
+    }
+
+    /// REFIT-T3: 内点 (interior) では y_lb=y_ub=0 を保つ (refit が誤って非ゼロ化しない)
+    #[test]
+    fn test_refit_bound_duals_interior_keeps_zero() {
+        // x=2 (中央), bounds=(0,5), Q=2I, c=-4 → 2*2-4=0 (KKT 満足)
+        let n = 1usize;
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], n, n).unwrap();
+        let c = vec![-4.0_f64];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 5.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![2.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0], // [y_lb, y_ub]
+            objective: -4.0,
+            ..SolverResult::default()
+        };
+        refit_bound_duals_kkt(&problem, &mut result);
+        assert!(result.bound_duals[0].abs() < 1e-9, "REFIT-T3: y_lb 維持 0");
+        assert!(result.bound_duals[1].abs() < 1e-9, "REFIT-T3: y_ub 維持 0");
+    }
+
+    /// REFIT-T4: KKT-guard で改善しない update は revert される
+    /// 既に正しい bound_duals が入っている状態で refit を呼んでも変わらない
+    #[test]
+    fn test_refit_bound_duals_kkt_guard_no_regression() {
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0_f64];
+        let a = CscMatrix::new(0, n);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        // 既に正しい状態 (y_lb=2.0): refit が壊さないこと
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![2.0],
+            objective: 0.0,
+            ..SolverResult::default()
+        };
+        refit_bound_duals_kkt(&problem, &mut result);
+        assert!(
+            (result.bound_duals[0] - 2.0).abs() < 1e-9,
+            "REFIT-T4: 既に正しい値は維持される, got {}", result.bound_duals[0]
+        );
+    }
+
+    /// REFIT-T5: 制約あり問題 (A^T y で aty が非ゼロ) の bound_dual 計算
+    /// min x s.t. x + y <= 5, 0 <= x, 0 <= y
+    /// 最適: x=0, y=0 (両 lb 活性)。dual_solution[0]=0 (制約非活性)。
+    /// KKT for x: 1 + 0 - z_lb_x = 0 → z_lb_x = 1
+    /// KKT for y: 0 + 0 - z_lb_y = 0 → z_lb_y = 0
+    #[test]
+    fn test_refit_bound_duals_with_constraint() {
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0_f64, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![5.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            ..SolverResult::default()
+        };
+        refit_bound_duals_kkt(&problem, &mut result);
+        assert!(
+            (result.bound_duals[0] - 1.0).abs() < 1e-9,
+            "REFIT-T5: z_lb_x ≈ 1.0, got {}", result.bound_duals[0]
+        );
+        assert!(
+            result.bound_duals[1].abs() < 1e-9,
+            "REFIT-T5: z_lb_y ≈ 0.0, got {}", result.bound_duals[1]
+        );
+    }
+
+    /// REFIT-T6: presolve で除去された変数 (EmptyCol) の bound_dual が KKT で復元される (統合テスト)
+    /// QRECIPE 的な状況: c>0 + 全 lb 有限 + EmptyCol 変数あり
+    #[test]
+    fn test_refit_integration_emptycol_recovery() {
+        // 3 変数: x, y は制約に登場、z は EmptyCol
+        // min 0.001(x^2+y^2+z^2) - x - y + 2*z
+        // s.t. x + y <= 5, 0 <= x,y,z, ub = 10 for z
+        let n = 3usize;
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let c = vec![-1.0, -1.0, 2.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
+        let b = vec![5.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY), (0.0_f64, 10.0_f64)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_qp_with(&problem, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "REFIT-T6: status");
+        // n_lb=3 (全 lb 有限), n_ub=1 (z のみ ub 有限) → bound_duals.len() = 4
+        assert_eq!(result.bound_duals.len(), 4);
+        // z=0 (lb 活性, c=2>0), KKT: 2 - z_lb_z = 0 → z_lb_z ≈ 2
+        let z_lb_z = result.bound_duals[2];
+        assert!(
+            (z_lb_z - 2.0).abs() < 1e-2,
+            "REFIT-T6: EmptyCol 変数 z_lb ≈ 2.0 (KKT 復元), got {}", z_lb_z
+        );
+    }
 }
