@@ -821,14 +821,14 @@ pub fn run_qp_presolve_phase1(
             continue;
         }
 
-        // Q 列がゼロ: LP 的変数として Eq 制約による消去を試みる
-        // QP の制約は Le のみなので、等式は 2 不等式ペアで表現される。
-        // ここでは「A[i,j] が唯一非ゼロかつ行が singleton」ケースのみ処理。
-        // (本処理は #2 singleton_rows と重複するため、実質的にスキップが多い)
-        // Phase 1 では Q=0 列の FR 変数に限定して試みる。
+        // Q 列がゼロ: LP 的変数として **Eq** 制約による消去を試みる。
+        // 旧実装は constraint_types を見ずに全 singleton 行で `x = b/a` 固定していたが、
+        // Le 制約の singleton では `x = b/a` は単なる上限/下限であり、固定すると目的を
+        // 改善できない suboptimal を強制する誤動作。Ge も同様。Eq のみ x=b/a 固定可能。
         let singleton_eq_rows: Vec<usize> = (0..m)
             .filter(|&i| {
                 if removed_rows[i] { return false; }
+                if prob.constraint_types[i] != crate::problem::ConstraintType::Eq { return false; }
                 let active: Vec<_> = row_entries[i]
                     .iter()
                     .filter(|&&(jj, v)| !removed_cols[jj] && v.abs() > ZERO_TOL)
