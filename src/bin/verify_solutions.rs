@@ -20,7 +20,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::env;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use solver::io::qps::parse_qps;
 use solver::io::qplib::{parse_qplib, QplibError};
@@ -128,36 +128,23 @@ fn check_violation(r: &KktResiduals) -> bool {
 enum ParseResult {
     Ok(Box<QpProblem>),
     ParseErr(String),
-    Timeout,
     Unsupported(String),
 }
 
-fn parse_qps_with_timeout(path: &Path, timeout_secs: u64) -> ParseResult {
-    let path = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let r = parse_qps(&path);
-        let _ = tx.send(r);
-    });
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Ok(p)) => ParseResult::Ok(Box::new(p)),
-        Ok(Err(e)) => ParseResult::ParseErr(format!("{}", e)),
-        Err(_) => ParseResult::Timeout,
+fn parse_qps_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
+    // 旧 thread::spawn + recv_timeout は detach でメモリ累積。gtimeout で外部 kill 統一。
+    match parse_qps(path) {
+        Ok(p) => ParseResult::Ok(Box::new(p)),
+        Err(e) => ParseResult::ParseErr(format!("{}", e)),
     }
 }
 
-fn parse_qplib_with_timeout(path: &Path, timeout_secs: u64) -> ParseResult {
-    let path = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let r = parse_qplib(&path);
-        let _ = tx.send(r);
-    });
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Ok(p)) => ParseResult::Ok(Box::new(p)),
-        Ok(Err(QplibError::UnsupportedType(msg))) => ParseResult::Unsupported(msg),
-        Ok(Err(e)) => ParseResult::ParseErr(format!("{:?}", e)),
-        Err(_) => ParseResult::Timeout,
+fn parse_qplib_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
+    // 旧 thread::spawn + recv_timeout は detach でメモリ累積。gtimeout で外部 kill 統一。
+    match parse_qplib(path) {
+        Ok(p) => ParseResult::Ok(Box::new(p)),
+        Err(QplibError::UnsupportedType(msg)) => ParseResult::Unsupported(msg),
+        Err(e) => ParseResult::ParseErr(format!("{:?}", e)),
     }
 }
 
@@ -257,22 +244,12 @@ fn main() {
                     n_skip += 1;
                     continue;
                 }
-                ParseResult::Timeout => {
-                    println!("{:<20} {:>8}  (parse timeout)", name, "ERR");
-                    n_skip += 1;
-                    continue;
-                }
             }
         } else {
             match parse_qps_with_timeout(path, 30) {
                 ParseResult::Ok(p) => *p,
                 ParseResult::ParseErr(e) => {
                     println!("{:<20} {:>8}  (parse error: {})", name, "ERR", &e[..e.len().min(40)]);
-                    n_skip += 1;
-                    continue;
-                }
-                ParseResult::Timeout => {
-                    println!("{:<20} {:>8}  (parse timeout)", name, "ERR");
                     n_skip += 1;
                     continue;
                 }

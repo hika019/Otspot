@@ -12,7 +12,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::env;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
@@ -24,7 +24,6 @@ use solver::QpProblem;
 
 enum BenchError {
     Parse(QpsError),
-    ParseTimeout,
 }
 
 /// §2.1: pfeas両側チェック + bfeas（設計書準拠）
@@ -235,18 +234,13 @@ fn compute_complementarity(
         .fold(0.0_f64, f64::max)
 }
 
-fn parse_with_timeout(path: &Path, timeout_secs: u64) -> Result<QpProblem, BenchError> {
-    let path = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = parse_qps(&path);
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Ok(prob)) => Ok(prob),
-        Ok(Err(e)) => Err(BenchError::Parse(e)),
-        Err(_) => Err(BenchError::ParseTimeout),
-    }
+fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
+    // 旧実装は thread::spawn + recv_timeout で parse をタイムアウトさせていたが、
+    // タイムアウト時にスレッドが detach されたまま継続実行され「不必要なメモリ」を
+    // 累積する mandate 違反。parse_qps 自体に cancellation API がないため、
+    // 単純な同期呼び出しに変更し、hang 時は bench_parallel.sh の外部 gtimeout で
+    // プロセスごと殺される設計に統一する (graceful failure)。
+    parse_qps(path).map_err(BenchError::Parse)
 }
 
 #[cfg(test)]
@@ -500,14 +494,6 @@ fn main() {
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
                 );
                 n_error += 1;
-                continue;
-            }
-            Err(BenchError::ParseTimeout) => {
-                println!(
-                    "{:<20} {:>6} {:>6} {:>15} {:>10.3} ",
-                    name, "?", "?", "PARSE_TIMEOUT", 0.0
-                );
-                n_timeout += 1;
                 continue;
             }
         };
