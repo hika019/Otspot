@@ -540,11 +540,9 @@ pub(crate) fn solve_ippmm_inner(
             // ── Method C: 原空間pfeasチェック（Clarabel方式）──
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
                 let m_orig_check = orig.b.len();
-                let pfeas_orig = if m_orig_check == 0 {
-                    0.0
-                } else {
-                    let n_orig = orig.num_vars;
-                    let mut ax_orig = vec![0.0_f64; m_orig_check];
+                let n_orig = orig.num_vars;
+                let mut ax_orig = vec![0.0_f64; m_orig_check];
+                if m_orig_check > 0 {
                     for (j, (&dj, &xj)) in sc.d[..n_orig].iter().zip(x[..n_orig].iter()).enumerate() {
                         let dj_xj = dj * xj;
                         for ptr in orig.a.col_ptr[j]..orig.a.col_ptr[j + 1] {
@@ -554,6 +552,10 @@ pub(crate) fn solve_ippmm_inner(
                             }
                         }
                     }
+                }
+                let pfeas_orig = if m_orig_check == 0 {
+                    0.0
+                } else {
                     ax_orig
                         .iter()
                         .zip(orig.b.iter())
@@ -565,9 +567,12 @@ pub(crate) fn solve_ippmm_inner(
                         })
                         .fold(0.0_f64, f64::max)
                 };
-                let norm_b_orig = norm_inf(&orig.b).max(1.0);
+                // OSQP 形式で b と Ax の両方を考慮 (旧 .max(1.0) は b≈0 で 2x 緩く偽 PASS)
+                let norm_ax_orig: f64 = ax_orig.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
+                let norm_b_orig = norm_inf(&orig.b);
+                let pfeas_thr_orig = eps_orig * (1.0 + norm_ax_orig.max(norm_b_orig));
                 // [偽 Optimal 修正] Optimal_MethodC 判定にも成分相対 dfeas を追加
-                if pfeas_orig < eps_orig * (1.0 + norm_b_orig)
+                if pfeas_orig < pfeas_thr_orig
                     && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
                     && nr_d_rel_orig < eps_orig
                     && mu < eps_orig
