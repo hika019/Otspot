@@ -150,14 +150,24 @@ pub(crate) fn solve_qp_ipm_inner(
         let rel_gap = gap_abs / gap_denom;
         final_rel_gap = rel_gap;
 
-        // 収束判定: 混合許容誤差 eps_abs + eps_rel * norm (Gurobi方式)
-        // prim: ||r_p|| < eps * (1 + norm_b), dual: ||r_d|| < eps * (1 + norm_c)
+        // 収束判定: OSQP 流の正規化 (bench/v2 と整合):
+        //   pfeas: ||r_p||_∞ <= eps * (1 + max(||Ax||, ||b||))
+        //   dfeas: ||r_d||_∞ <= eps * (1 + max(||Qx||, ||c||, ||A^T y||))
+        // 旧式 norm_b.max(1.0) は b≈0 で eps*1 → eps*2 に緩み偽 Optimal を出していた。
+        let norm_c_thr = norm_inf(&problem.c);
+        let norm_aty_thr = norm_inf(&aty);
+        let norm_qx_thr = norm_inf(&qx);
+        let norm_ax_thr = norm_inf(&ax);
+        let norm_b_thr = norm_inf(&b_ext);
+        let pfeas_thr = options.ipm_eps() * (1.0 + norm_ax_thr.max(norm_b_thr));
+        let dfeas_thr = options.ipm_eps() * (1.0 + norm_qx_thr.max(norm_c_thr).max(norm_aty_thr));
+        // 旧式互換変数 (Suboptimal 判定で参照)
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
         let eps = options.ipm_eps();
 
-        if norm_inf(&r_d) < eps * (1.0 + norm_c)
-            && norm_inf(&r_p) < eps * (1.0 + norm_b)
+        if norm_inf(&r_d) < dfeas_thr
+            && norm_inf(&r_p) < pfeas_thr
             && mu < eps
             && rel_gap.abs() < DUALITY_GAP_TOL
         {

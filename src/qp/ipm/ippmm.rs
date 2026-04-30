@@ -404,6 +404,23 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // ── 収束判定 ──────────────────────────────────────────────
+        // OSQP 流の正規化 (bench/v2 と整合):
+        //   pfeas: ||r_p||_∞ <= eps * (1 + max(||Ax||_∞, ||b||_∞))
+        //   dfeas: ||r_d||_∞ <= eps * (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
+        // 旧式 `norm_inf(&b_ext).max(1.0)` は b≈0 の問題 (LISWET / YAO) で
+        // 閾値を eps*1 → eps*2 に緩めて偽 Optimal を出していた (LISWET9: IPM が
+        // pf=1.58e-6 で収束申告するが bench eps=1e-6 で FAIL)。
+        let norm_c_orig_for_thr = norm_inf(&problem.c);
+        let norm_aty_for_thr = norm_inf(&aty);
+        let norm_qx_for_thr = norm_inf(&qx);
+        let norm_ax_for_thr = norm_inf(&ax);
+        let norm_b_for_thr = norm_inf(&b_ext);
+        // dfeas 分母: max(||Qx||, ||c||, ||A^T y||)
+        let dfeas_denom = norm_qx_for_thr.max(norm_c_orig_for_thr).max(norm_aty_for_thr);
+        // pfeas 分母: max(||Ax||, ||b||)
+        let pfeas_denom = norm_ax_for_thr.max(norm_b_for_thr);
+        // 旧式互換用: nr_d_orig 等の他箇所で使う norm_b/norm_c (scaled 空間 .max(1.0) を
+        // 残す。これらは目安で、最終 OSQP 判定は (dfeas/pfeas)_denom が支配する)。
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
         let eps = options.ipm_eps();
@@ -470,10 +487,13 @@ pub(crate) fn solve_ippmm_inner(
         // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（Phase A 検証）。
         // 3 族独立 solver (PIQP/Clarabel/OSQP) で UBH1 真値 1.116 を確認済。
 
-        if nr_d < eps * (1.0 + norm_c)
+        // OSQP 形式の閾値 (bench/v2 と整合)
+        let pfeas_thr = eps * (1.0 + pfeas_denom);
+        let dfeas_thr = eps * (1.0 + dfeas_denom);
+        if nr_d < dfeas_thr
             && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
             && nr_d_rel_orig < eps_orig
-            && nr_p < eps * (1.0 + norm_b)
+            && nr_p < pfeas_thr
             && mu < eps
             && rel_gap.abs() < DUALITY_GAP_TOL
         {
