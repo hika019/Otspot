@@ -903,21 +903,55 @@ pub fn run_qp_presolve_phase1(
 
                     if is_parallel {
                         // A[i2,*] = alpha * A[i1,*]
-                        // Le 制約: A[i1]*x <= b[i1], alpha*A[i1]*x <= b[i2]
-                        // α > 0 なら b[i2]/alpha と b[i1] の小さい方が tighter bound
-                        // α < 0 なら i2 は Ge 相当 → 複雑。安全のため α > 0 のみ処理
-                        if alpha > ZERO_TOL {
+                        // 旧実装は constraint_types を無視して b の大小比較で冗長判定していた。
+                        // Le-Le なら緩い方を削除で正しいが、Eq / Ge / 混在では:
+                        // - Eq + Eq (alpha=1 で b 等しい): 冗長 → 一方削除
+                        // - Eq + Eq (b 不一致): **Infeasible** (両式で異なる値が要求される)
+                        // - Eq + Le 混在: Eq が dominate するので Le 側を削除する必要、b 比較は不正確
+                        // - Ge + Ge: Le と逆方向なので tight/loose の判定も逆
+                        // 安全のため両方 Le かつ α > 0 のときだけ既存ロジックを適用する。
+                        // それ以外は冗長判定を行わず後続の数値解に委ねる (false-positive 削除を避ける)。
+                        let t1 = prob.constraint_types[i1];
+                        let t2 = prob.constraint_types[i2];
+                        let both_le = matches!(t1, crate::problem::ConstraintType::Le)
+                            && matches!(t2, crate::problem::ConstraintType::Le);
+                        let both_ge = matches!(t1, crate::problem::ConstraintType::Ge)
+                            && matches!(t2, crate::problem::ConstraintType::Ge);
+                        let both_eq = matches!(t1, crate::problem::ConstraintType::Eq)
+                            && matches!(t2, crate::problem::ConstraintType::Eq);
+
+                        if both_eq && alpha > ZERO_TOL {
+                            // 両方 Eq: A[i1]*x = b[i1], alpha*A[i1]*x = b[i2] → b[i2]/alpha = b[i1] が必要
+                            let eff_b2 = b[i2] / alpha;
+                            if (eff_b2 - b[i1]).abs() <= ZERO_TOL * (1.0 + b[i1].abs()) {
+                                // 同じ等式 → i2 を冗長として除去
+                                removed_rows[i2] = true;
+                            } else {
+                                // 等式の右辺が一致しない → 矛盾 → Infeasible
+                                return QpPresolveResult::infeasible(prob);
+                            }
+                        } else if both_le && alpha > ZERO_TOL {
+                            // 両方 Le: 緩い方を削除
                             let eff_b2 = b[i2] / alpha;
                             if eff_b2 >= b[i1] - ZERO_TOL {
+                                removed_rows[i2] = true;
+                            } else {
+                                removed_rows[i1] = true;
+                                continue 'outer;
+                            }
+                        } else if both_ge && alpha > ZERO_TOL {
+                            // 両方 Ge: A*x >= b、緩い方 (b 小) を削除
+                            let eff_b2 = b[i2] / alpha;
+                            if eff_b2 <= b[i1] + ZERO_TOL {
                                 // i2 は i1 より緩い → i2 を冗長として除去
                                 removed_rows[i2] = true;
                             } else {
-                                // i2 の方が tight → i1 を冗長として除去
-                                // ただし既に i1 を使って処理中なので outer ループ続行
                                 removed_rows[i1] = true;
                                 continue 'outer;
                             }
                         }
+                        // 混在 (Le+Eq, Eq+Ge, Le+Ge) または α ≤ 0 はスキップ。
+                        // 安全側: 数値解に委ねて誤削除を避ける。
                     }
                 }
             }
