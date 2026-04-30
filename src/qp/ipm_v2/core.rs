@@ -127,15 +127,47 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
-    // 元空間 dual refinement (元 v8 セッション 8 と同形 + bound_duals refit を追加):
-    //   - y を refine_dual_lsq (LSQ + KKT-guard) で再計算
-    //   - z (bound_duals) を refit_bound_duals_kkt (analytic + KKT-guard) で再計算
+    // 元空間 post-processing:
+    //   stage A: x の primal projection (LISWET 系 T1.3)
+    //   stage B: y を refine_dual_lsq で再計算
+    //   stage C: z (bound_duals) を refit_bound_duals_kkt で再計算 (T1.2 QRECIPE)
+    //
+    // primal を動かすと dual との整合が崩れるため、stage A は stage A〜C の combined
+    // (KKT max-rel + primal max-rel) で guard する。stage B/C は kkt_residual_rel で
+    // 個別 guard。
     //
     // presolve が変数 fix / 行除去すると postsolve は dual_solution・bound_duals に 0 を
-    // 埋め込み KKT が破壊される。z の refit は QRECIPE 1 件 (T1.2) を Optimal 化する。
-    // 残りの Catastrophic 8 件は本 KKT-guard 後処理で完全復元できず、proper dual postsolve
-    // (各 presolve 変換ごとに dual を記録) が必要 — 別 PR 範囲。
-    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
+    // 埋め込み KKT が破壊される。Catastrophic 8 件 (QADLITTL/QBORE3D/QCAPRI/QETAMACR/
+    // QFFFFF80/QPCBOEI1/QSEBA/QSHELL) は本後処理では完全復元できず、proper dual
+    // postsolve (各 presolve 変換ごとに dual を記録) が必要 — 別 PR で対応 (#11)。
+    // IPM が一度も iterate しなかった場合 (cancel_flag 即停止 / timeout=0 等) は
+    // post-processing をスキップ。post-processing が冷状態 x=[0,..0] から analytic に
+    // 最適解を計算してしまい、cancel_flag セマンティクス (Timeout 期待) を破壊するのを防ぐ。
+    let ipm_made_progress = result.iterations > 0;
+
+    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
+        // (A) x の primal projection — combined guard 付き
+        let pre_x = final_sol.solution.clone();
+        let pre_y_for_a = final_sol.dual_solution.clone();
+        let pre_z_for_a = final_sol.bound_duals.clone();
+        let pre_pres_a = primal_residual_rel(&view, &final_sol.solution);
+        let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let pre_combined_a = pre_pres_a.max(pre_kkt_a);
+        crate::qp::refine_primal_lsq(orig_problem, &mut final_sol);
+        // primal projection 後の dual 再計算 (内部 KKT-guard 付き)
+        crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
+        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+        let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
+        let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let post_combined_a = post_pres_a.max(post_kkt_a);
+        if post_combined_a > pre_combined_a {
+            // primal 改善が dual 退行を上回ったら全体 revert
+            final_sol.solution = pre_x;
+            final_sol.dual_solution = pre_y_for_a;
+            final_sol.bound_duals = pre_z_for_a;
+        }
+
+        // (B) 念のためもう 1 度 y / z refit (stage A 内の内部 guard 後の再評価)
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let pre_y = final_sol.dual_solution.clone();
         crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
@@ -145,7 +177,6 @@ fn run_ipm_with(
         } else {
             final_sol.dual_solution = pre_y;
         }
-        // z refit (QRECIPE 効果): bound_duals が postsolve 0 埋めの修復
         let pre_z = final_sol.bound_duals.clone();
         crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
         let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);

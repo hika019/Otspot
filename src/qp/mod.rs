@@ -647,6 +647,149 @@ pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::
     }
 }
 
+/// 元空間 primal feasibility が borderline (LISWET9/12: pf ≈ 1e-6 で
+/// bench eps=1e-6 を僅か超過) のとき、x を violating 制約方向に最小ノルム射影
+/// して pf を eps 内に押し込む post-processing。
+///
+/// 動機: IP-PMM は 10000 行級の LISWET で finite precision (f64) の構造的限界
+/// から pf を 1e-6 以下に下げきれない (104 反復 best が pf=9.9e-7、unscale 後
+/// 1.57e-6)。bench は同じ x で pfn=1.54e-6 と判定して PFEAS_FAIL となる。
+///
+/// 算法:
+///   v[i] = max(0, A[i,:]·x - b[i])  (Le 制約用、Ge / Eq も対応)
+///   active = {i : v[i] > tol}
+///   solve  A_active * δ = v_active  for δ ∈ R^n with min‖δ‖₂
+///   normal eq: (A_active A_active^T) λ = v_active, δ = A_active^T λ
+///   x_new = x - δ
+///   pf_new < pf_old なら採用、さもなくば revert (KKT-guard)。
+///
+/// objective 影響: ‖δ‖₂ ≈ pf ≈ 1e-6 程度で微小なので Q への影響は negligible。
+/// dual との整合は別途 refine_dual_lsq + refit_bound_duals_kkt が再評価する。
+pub(crate) fn refine_primal_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if m == 0 || result.solution.len() != n {
+        return;
+    }
+    let x = &mut result.solution;
+
+    // 違反量 v[i] を計算 (Le/Ge/Eq に応じて符号を統一して "Ax を b 方向に押す量")
+    use crate::problem::ConstraintType;
+    let ax = match problem.a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    /// 違反検出の許容差 (これ未満は active 扱いしない)
+    const PRIMAL_VIOLATION_TOL: f64 = 1e-12;
+    let mut v = vec![0.0_f64; m];
+    let mut max_v_pre = 0.0_f64;
+    for i in 0..m {
+        let raw = match problem.constraint_types[i] {
+            ConstraintType::Eq => ax[i] - problem.b[i],
+            ConstraintType::Ge => -(ax[i] - problem.b[i]),
+            ConstraintType::Le => ax[i] - problem.b[i],
+        };
+        // raw > 0: 違反量 (Le なら Ax > b、Ge なら Ax < b)
+        // raw <= 0: 充足
+        if raw > PRIMAL_VIOLATION_TOL {
+            v[i] = raw;
+            max_v_pre = max_v_pre.max(raw);
+        }
+    }
+    if max_v_pre <= PRIMAL_VIOLATION_TOL {
+        return;
+    }
+    // Ge 行で違反があった場合、δ を負方向に動かすために v[i] をそのまま使うが、
+    // δ = A^T λ で v_i 方向に動くようにするため、Ge 行は A の符号を逆にして扱う必要あり。
+    // ここでは行 i に応じて A_eff を構築する代わりに、効果的に
+    //   "A x' = ax - sign_i * v_i" を求める方式に変える:
+    //     Le: A x' = b → δ = x - x' で A δ = ax - b = +v (push down)
+    //     Ge: A x' = b → δ = x - x' で A δ = ax - b = -v (push up; sign_i = -1)
+    //     Eq: A x' = b → A δ = ax - b
+    // つまり target = ax - b そのものを使い、A δ = target を解く。
+    let target: Vec<f64> = (0..m).map(|i| {
+        match problem.constraint_types[i] {
+            ConstraintType::Eq => ax[i] - problem.b[i],
+            ConstraintType::Ge => {
+                // active のみ: 充足側 (ax >= b) なら 0, 違反 (ax < b) なら ax - b (負)
+                let r = ax[i] - problem.b[i];
+                if r < -PRIMAL_VIOLATION_TOL { r } else { 0.0 }
+            }
+            ConstraintType::Le => {
+                let r = ax[i] - problem.b[i];
+                if r > PRIMAL_VIOLATION_TOL { r } else { 0.0 }
+            }
+        }
+    }).collect();
+    let target_inf = target.iter().map(|t| t.abs()).fold(0.0_f64, f64::max);
+    if target_inf <= PRIMAL_VIOLATION_TOL {
+        return;
+    }
+
+    // (A A^T) λ = target を LDL で解く。AAT_REG_FACTOR で対角正則化済。
+    let aat = match build_aat_upper_csc(&problem.a, n, m) {
+        Some(mat) => mat,
+        None => return,
+    };
+    let factor = match crate::linalg::ldl::factorize(&aat) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut lambda = vec![0.0_f64; m];
+    factor.solve(&target, &mut lambda);
+    if lambda.iter().any(|v| !v.is_finite()) {
+        return;
+    }
+
+    // δ = A^T λ
+    let mut delta = vec![0.0_f64; n];
+    for j in 0..n {
+        let s = problem.a.col_ptr[j];
+        let e = problem.a.col_ptr[j + 1];
+        for k in s..e {
+            let i = problem.a.row_ind[k];
+            if i < m {
+                delta[j] += problem.a.values[k] * lambda[i];
+            }
+        }
+    }
+    if delta.iter().any(|v| !v.is_finite()) {
+        return;
+    }
+
+    // x_new = x - δ
+    let mut x_new = x.clone();
+    for j in 0..n {
+        x_new[j] -= delta[j];
+        // bounds clip (delta が bounds を破る場合は clamp)
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() {
+            x_new[j] = x_new[j].max(lb);
+        }
+        if ub.is_finite() {
+            x_new[j] = x_new[j].min(ub);
+        }
+    }
+
+    // 改善判定: 全制約での max violation が減ったか
+    let ax_new = match problem.a.mat_vec_mul(&x_new) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut max_v_post = 0.0_f64;
+    for i in 0..m {
+        let raw = match problem.constraint_types[i] {
+            ConstraintType::Eq => (ax_new[i] - problem.b[i]).abs(),
+            ConstraintType::Ge => (problem.b[i] - ax_new[i]).max(0.0),
+            ConstraintType::Le => (ax_new[i] - problem.b[i]).max(0.0),
+        };
+        max_v_post = max_v_post.max(raw);
+    }
+    if max_v_post < max_v_pre {
+        *x = x_new;
+    }
+}
+
 /// 元空間で primal x と constraint dual y から bound_duals を KKT で再計算する。
 ///
 /// presolve が変数を fix した場合 (FixedVar / EmptyCol / SingletonRow), postsolve は

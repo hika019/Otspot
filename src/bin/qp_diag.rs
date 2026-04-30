@@ -38,7 +38,10 @@ fn main() {
     let prob_box = parse_qps(&path).expect("parse failed");
     let prob: &QpProblem = &prob_box;
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(30.0);
+    let timeout = std::env::var("DIAG_TIMEOUT").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(30.0);
+    opts.timeout_secs = Some(timeout);
     opts.qp_solver = solver_choice;
     if std::env::var("DIAG_NO_RUIZ").ok().as_deref() == Some("1") {
         opts.use_ruiz_scaling = false;
@@ -51,6 +54,41 @@ fn main() {
     let result = solve_qp_with(prob, &opts);
 
     println!("status={:?} obj={:.6e} iters={}", result.status, result.objective, result.iterations);
+    // primal residual も併記 (T1.3 LISWET 系の診断用)
+    if !result.solution.is_empty() && prob.num_constraints > 0 {
+        let ax = prob.a.mat_vec_mul(&result.solution).expect("Ax");
+        let mut max_pf = 0.0_f64;
+        let mut max_ax = 0.0_f64;
+        let mut max_b = 0.0_f64;
+        for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
+            let v = match prob.constraint_types[i] {
+                solver::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                solver::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            };
+            let _ = i;
+            max_pf = max_pf.max(v);
+            max_ax = max_ax.max(ax_i.abs());
+            max_b = max_b.max(b_i.abs());
+        }
+        let pfn = max_pf / (1.0 + max_ax.max(max_b));
+        // 違反制約の分布を集計
+        let mut n_violated_above_eps = 0_usize;
+        let mut n_violated = 0_usize;
+        for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
+            let v = match prob.constraint_types[i] {
+                solver::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                solver::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            };
+            if v > 1e-12 { n_violated += 1; }
+            if v > 1e-6  { n_violated_above_eps += 1; }
+        }
+        println!("primal: pf_abs={:.3e} pf_rel={:.3e} max_ax={:.3e} max_b={:.3e}",
+            max_pf, pfn, max_ax, max_b);
+        println!("  violations: >1e-12: {} >1e-6: {} (total m={})",
+            n_violated, n_violated_above_eps, prob.num_constraints);
+    }
     println!("n={} m={} n_lb={} n_ub={}",
         prob.num_vars, prob.num_constraints,
         prob.bounds.iter().filter(|&&(lb, _): &&(f64, f64)| lb.is_finite()).count(),
