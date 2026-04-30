@@ -1,8 +1,8 @@
 //! 元空間 KKT 残差計算 (bench `compute_dfeas_orig` と同形)。
 //!
 //! 設計書「元問題基準で報告」原則に従い、scaled 空間ではなく必ず元 problem.q / a / c で計算する。
-//! 成分相対化 (`r_j / (1 + |Qx_j| + |c_j| + |aty_j| + |bound_j|)`) で
-//! ill-conditioned 問題でも妥当な精度判定が可能。
+//! OSQP 式の全体相対化 (`||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))`)
+//! を採用し、ill-conditioned 問題でも妥当な精度判定が可能。
 
 use crate::problem::ConstraintType;
 use super::outcome::ProblemView;
@@ -107,10 +107,9 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     let mut max_v = 0.0_f64;
     let mut max_ax = 0.0_f64;
     let mut max_b = 0.0_f64;
-    for (((&ax_i, &b_i), ct), _) in ax.iter()
+    for ((&ax_i, &b_i), ct) in ax.iter()
         .zip(prob.b.iter())
         .zip(prob.constraint_types.iter())
-        .zip(0..)
     {
         let v = match ct {
             ConstraintType::Eq => (ax_i - b_i).abs(),
