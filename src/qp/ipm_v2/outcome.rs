@@ -55,14 +55,18 @@ impl IpmOutcome {
         }
     }
 
-    /// 確定的 Infeasible / Unbounded を保持する outcome を構築する。
+    /// 確定的 Infeasible / Unbounded / NonConvex を保持する outcome を構築する。
+    /// これらは数値解の eps 判定では復元できない構造的判定なので、
+    /// IpmOutcome から SolverResult への変換時に最優先で外部 status に伝搬する。
     pub fn infeasibility(status: crate::problem::SolveStatus) -> Self {
         debug_assert!(
             matches!(
                 status,
-                crate::problem::SolveStatus::Infeasible | crate::problem::SolveStatus::Unbounded
+                crate::problem::SolveStatus::Infeasible
+                    | crate::problem::SolveStatus::Unbounded
+                    | crate::problem::SolveStatus::NonConvex(_)
             ),
-            "infeasibility outcome must be Infeasible or Unbounded, got {:?}",
+            "infeasibility outcome must be Infeasible / Unbounded / NonConvex, got {:?}",
             status
         );
         Self {

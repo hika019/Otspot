@@ -49,11 +49,11 @@ fn run_ipm_with(
     let reduced = &presolve_result.reduced;
     let mut result = inner_solver(reduced, opts);
 
-    // 確定的 Infeasible / Unbounded は IpmOutcome に保持して finalize_outcome に伝える。
-    // ここで握りつぶすと外部 status は Timeout に丸められて status 隠蔽になる。
+    // 確定的 Infeasible / Unbounded / NonConvex は IpmOutcome に保持して finalize_outcome に
+    // 伝える。ここで握りつぶすと外部 status は Timeout に丸められて status 隠蔽になる。
     if matches!(
         result.status,
-        SolveStatus::Infeasible | SolveStatus::Unbounded
+        SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
     ) {
         return IpmOutcome::infeasibility(result.status);
     }
