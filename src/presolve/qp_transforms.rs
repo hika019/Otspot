@@ -983,6 +983,12 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     {
         const DENSE_ROW_THRESHOLD: usize = 500;
+        // PARAM: 1e8 — implied bound サニティ閾値（経験値）。元の bound が INF かつ
+        // |implied| > 1e8 の場合はスキップ。a_ij が微小（例: 1e-12）な場合に
+        // implied ≈ 5e14 が生成されKKT条件数が悪化するのを防ぐ。
+        // HiGHS は feastol/kHighsTiny = 1e7 を使用。本実装は 10 倍緩い設定。
+        // 承認=家老承認済み
+        const IMPLIED_BOUND_SANITY: f64 = 1e8;
         // implied bounds: 制約から計算した各変数の implied lb/ub を追跡（実際の bounds は変更しない）
         let mut impl_bounds: Vec<(f64, f64)> = bounds.clone();
 
@@ -1000,30 +1006,64 @@ pub fn run_qp_presolve_phase1(
                 continue;
             }
 
+            // 制約タイプ別に implied bounds の方向を決定:
+            //   Le (Ax <= b): a_ij*x_j <= b - rest → x_j 側は「上限」(a>0) または「下限」(a<0)
+            //   Ge (Ax >= b): a_ij*x_j >= b - rest → x_j 側は「下限」(a>0) または「上限」(a<0)
+            //   Eq (Ax = b): 両方向 (Le 形式と Ge 形式の両方を適用)
+            // 旧実装は Le 前提のみで Ge/Eq では誤った bound 方向を計算し、false-positive Infeasible
+            // を起こす可能性があった (status 隠蔽の一種)。
+            let ct = prob.constraint_types[i];
+            let do_le_dir = matches!(
+                ct,
+                crate::problem::ConstraintType::Le | crate::problem::ConstraintType::Eq
+            );
+            let do_ge_dir = matches!(
+                ct,
+                crate::problem::ConstraintType::Ge | crate::problem::ConstraintType::Eq
+            );
+
             for &(j, a_ij) in &entries {
                 let (old_lb, old_ub) = impl_bounds[j];
-                let (rest_lb, _rest_ub, rest_lb_fin, _rest_ub_fin) =
+                let (rest_lb, rest_ub, rest_lb_fin, rest_ub_fin) =
                     activity_range(&entries, &impl_bounds, Some(j));
 
                 let mut new_lb = old_lb;
                 let mut new_ub = old_ub;
 
-                if a_ij > 0.0 && rest_lb_fin {
-                    let implied_ub = (b[i] - rest_lb) / a_ij;
-                    // PARAM: 1e8 — implied bound サニティ閾値（経験値）。元の bound が INF かつ
-                    // |implied| > 1e8 の場合はスキップ。a_ij が微小（例: 1e-12）な場合に
-                    // implied ≈ 5e14 が生成されKKT条件数が悪化するのを防ぐ。
-                    // HiGHS は feastol/kHighsTiny = 1e7 を使用。本実装は 10 倍緩い設定。
-                    // 承認=家老承認済み
-                    if (implied_ub.abs() <= 1e8 || !old_ub.is_infinite()) && implied_ub < new_ub - ZERO_TOL {
-                        new_ub = implied_ub;
+                // Le 方向: a*x <= b - rest_lb (rest を最小化したときに最も厳しい上限)
+                if do_le_dir && rest_lb_fin {
+                    if a_ij > 0.0 {
+                        let implied_ub = (b[i] - rest_lb) / a_ij;
+                        if (implied_ub.abs() <= IMPLIED_BOUND_SANITY || !old_ub.is_infinite())
+                            && implied_ub < new_ub - ZERO_TOL
+                        {
+                            new_ub = implied_ub;
+                        }
+                    } else if a_ij < 0.0 {
+                        let implied_lb = (b[i] - rest_lb) / a_ij;
+                        if (implied_lb.abs() <= IMPLIED_BOUND_SANITY || !old_lb.is_infinite())
+                            && implied_lb > new_lb + ZERO_TOL
+                        {
+                            new_lb = implied_lb;
+                        }
                     }
-                } else if a_ij < 0.0 && rest_lb_fin {
-                    let implied_lb = (b[i] - rest_lb) / a_ij;
-                    // PARAM: 1e8 — implied_lb サニティ閾値（implied_ub と対称。根拠同上）。
-                    // 承認=家老承認済み
-                    if (implied_lb.abs() <= 1e8 || !old_lb.is_infinite()) && implied_lb > new_lb + ZERO_TOL {
-                        new_lb = implied_lb;
+                }
+                // Ge 方向: a*x >= b - rest_ub (rest を最大化したときに最も厳しい下限)
+                if do_ge_dir && rest_ub_fin {
+                    if a_ij > 0.0 {
+                        let implied_lb = (b[i] - rest_ub) / a_ij;
+                        if (implied_lb.abs() <= IMPLIED_BOUND_SANITY || !old_lb.is_infinite())
+                            && implied_lb > new_lb + ZERO_TOL
+                        {
+                            new_lb = implied_lb;
+                        }
+                    } else if a_ij < 0.0 {
+                        let implied_ub = (b[i] - rest_ub) / a_ij;
+                        if (implied_ub.abs() <= IMPLIED_BOUND_SANITY || !old_ub.is_infinite())
+                            && implied_ub < new_ub - ZERO_TOL
+                        {
+                            new_ub = implied_ub;
+                        }
                     }
                 }
 
