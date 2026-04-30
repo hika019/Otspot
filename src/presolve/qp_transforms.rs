@@ -471,7 +471,9 @@ pub fn run_qp_presolve_phase1(
     // PARAM: 最大反復数=10, 理由=実用問題で通常5回以内に収束
     // ==================================================================
     let mut prev_removed_count = 0usize;
-    for _iter_pass in 0..10 {
+    let max_iter_pass = std::env::var("QP_PRESOLVE_MAX_PASS")
+        .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    for _iter_pass in 0..max_iter_pass {
         let cur_removed_count = removed_cols.iter().filter(|&&b| b).count()
             + removed_rows.iter().filter(|&&b| b).count();
         if _iter_pass > 0 && cur_removed_count == prev_removed_count {

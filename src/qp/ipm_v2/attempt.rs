@@ -180,6 +180,39 @@ fn solve_qp_v2_with_runner(
         }
     }
 
+    // ── presolve fall-back: best が eps を満たさず時間が残っているなら presolve=false で再試行 ────
+    //
+    // 動機: presolve の特定変換組み合わせ (例: #2 + #5 + #12) が稀に y_orig を破壊し、
+    // IPM 自体は解けるはずの問題 (no-presolve では PASS) でも DFEAS_FAIL になる病理がある
+    // (QBORE3D / QCAPRI 等で実証)。汎用 solver として「IPM で解ける問題を解けない」
+    // 状態を放置しないため、presolve 経路が失敗したら presolve なしで再試行する自己修復。
+    let need_retry_no_presolve = match &best {
+        Some(o) => !o.satisfies_eps(user_eps),
+        None => true,
+    } && options.presolve; // 元 options で presolve=true だった場合のみ
+    if need_retry_no_presolve {
+        let remaining = match total_deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        if remaining >= MIN_TIME_PER_ATTEMPT * 2.0 {
+            let presolve_result_np = crate::presolve::QpPresolveResult::no_reduction(problem);
+            let mut opts_np = options.clone();
+            opts_np.presolve = false;
+            opts_np.deadline = total_deadline;
+            opts_np.timeout_secs = None;
+            opts_np.ipm.eps = user_eps;
+            let outcome_np = runner(problem, &presolve_result_np, &opts_np);
+            let prefer_np = match &best {
+                None => true,
+                Some(prev) => outcome_np.quality_score() < prev.quality_score(),
+            };
+            if prefer_np {
+                best = Some(outcome_np);
+            }
+        }
+    }
+
     // ── status 変換 (1 箇所のみ) ───────────────
     // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
