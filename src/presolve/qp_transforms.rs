@@ -31,12 +31,19 @@ pub enum QpPresolveStatus {
 /// QP Postsolve の1ステップ
 #[derive(Debug, Clone)]
 pub(crate) enum QpPostsolveStep {
-    /// 固定変数の復元 (lb[j] == ub[j])
-    FixedVar { idx: usize, val: f64 },
-    /// Singleton行による値確定 (Eq制約 A[i,j]*x[j]=b[i])
-    SingletonRow { col: usize, val: f64 },
-    /// 空列（Q列・A列ともゼロ）の復元
+    /// 固定変数の復元 (lb[j] == ub[j] または fix_from_bounds 等)。
+    /// `bound_active`: postsolve で bound_dual を復元するときの活性側ヒント。
+    ///   `Some(false)` = lb 活性、`Some(true)` = ub 活性、`None` = 内部 (z=0)
+    FixedVar { idx: usize, val: f64, bound_active: Option<bool> },
+    /// Singleton行による値確定 (Eq制約 A[i,j]*x[j]=b[i])。
+    /// `row` を保持することで postsolve で y[row] を解析的に復元可能。
+    SingletonRow { row: usize, col: usize, val: f64 },
+    /// 空列（Q列・A列ともゼロ）の復元。c[idx] の符号で活性 bound を決定済み。
     EmptyCol { idx: usize, val: f64 },
+    /// 活性度域による redundant constraint Eq 締め込み (#5)。
+    /// 行 `row` が activity range に支配されて Eq 化、変数 `col` を `val` に固定。
+    /// SingletonRow と同形だが、複数変数同時 fix を行うため別 variant で区別。
+    RedundantRowFix { row: usize, col: usize, val: f64 },
     /// 大係数スケーリングの行スケール（#14 逆変換用）。
     /// postsolve_qpでは双対変数の逆変換に使用。
     /// slackへの影響はmod.rs側のb-Ax再計算で回避（LP経路でslackが非空になるケースに対応）。
@@ -508,7 +515,9 @@ pub fn run_qp_presolve_phase1(
             }
             apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
             removed_cols[j] = true;
-            postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+            // lb==ub 由来の fix なので bound_active 判定: val がどっちに張り付いてるかで決まる。
+            // ここでは lb==ub なので両方 active 扱い → bound_dual 復元時 net z で振り分け。
+            postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: None });
         }
     }
 
@@ -542,7 +551,7 @@ pub fn run_qp_presolve_phase1(
                 apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
                 removed_cols[j] = true;
                 removed_rows[i] = true;
-                postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+                postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
             }
             continue;
         }
@@ -560,7 +569,7 @@ pub fn run_qp_presolve_phase1(
             apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
             removed_cols[j] = true;
             removed_rows[i] = true;
-            postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+            postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
         }
     }
 
@@ -641,7 +650,12 @@ pub fn run_qp_presolve_phase1(
         removed_cols[j] = true;
         // removed_rows[i] は設定しない: 行 i は他変数への制約として保持（バグ修正）
         // 行 i が空になった場合は後続の #4 empty_rows_cols で除去される
-        postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+        // singleton_col 由来の fix: c[j] と a[i,j] の符号一致 (aligned) ケースで lb or ub 活性。
+        // val == lb → bound_active=Some(false), val == ub → Some(true)
+        let active = if (val - lb).abs() < ZERO_TOL { Some(false) }
+                     else if (val - ub).abs() < ZERO_TOL { Some(true) }
+                     else { None };
+        postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
     }
 
     // ==================================================================
@@ -765,11 +779,23 @@ pub fn run_qp_presolve_phase1(
                         }
                     }).collect();
                     if fixes.len() == active_entries.len() {
-                        for (j, val) in fixes {
+                        // 行 i は redundant_constraints (Eq tightening) で削除される。
+                        // 関連する fix を RedundantRowFix で記録し、postsolve で y[i] を復元する。
+                        for (k, (j, val)) in fixes.iter().enumerate() {
+                            let (j, val) = (*j, *val);
                             if !removed_cols[j] {
                                 apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
                                 removed_cols[j] = true;
-                                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+                                if k == 0 {
+                                    // 1 番目の fix だけ RedundantRowFix で記録 (y[row] 復元用)
+                                    postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
+                                } else {
+                                    let (lb_j, ub_j) = bounds[j];
+                                    let active = if (val - lb_j).abs() < ZERO_TOL { Some(false) }
+                                                 else if (val - ub_j).abs() < ZERO_TOL { Some(true) }
+                                                 else { None };
+                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
+                                }
                             }
                         }
                         removed_rows[i] = true;
@@ -852,7 +878,7 @@ pub fn run_qp_presolve_phase1(
         apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
         removed_cols[j] = true;
         removed_rows[i] = true;
-        postsolve_stack.push(QpPostsolveStep::SingletonRow { col: j, val });
+        postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
     }
 
     // ==================================================================
@@ -1176,11 +1202,22 @@ pub fn run_qp_presolve_phase1(
                         }
                     }).collect();
                     if fixes.len() == entries.len() {
-                        for (j, val) in fixes {
+                        // Phase2 内 redundant_constraints の Eq 締め込み (#5 と同じ振る舞い)。
+                        // 1 番目の fix を RedundantRowFix で記録し y[row] 復元用、残りは FixedVar。
+                        for (k, (j, val)) in fixes.iter().enumerate() {
+                            let (j, val) = (*j, *val);
                             if !removed_cols[j] {
                                 apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
                                 removed_cols[j] = true;
-                                postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+                                if k == 0 {
+                                    postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
+                                } else {
+                                    let (lb_j, ub_j) = bounds[j];
+                                    let active = if (val - lb_j).abs() < ZERO_TOL { Some(false) }
+                                                 else if (val - ub_j).abs() < ZERO_TOL { Some(true) }
+                                                 else { None };
+                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
+                                }
                             }
                         }
                         removed_rows[i] = true;

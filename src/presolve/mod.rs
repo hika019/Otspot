@@ -9,4 +9,4 @@ pub use scaling::RuizScaler;
 pub use transforms::{run_presolve, PresolveStatus};
 pub use qp_transforms::{run_qp_presolve_phase1, QpPresolveResult};
 pub use qp_phase2::run_qp_presolve_phase2;
-pub use qp_postsolve::postsolve_qp;
+pub use qp_postsolve::{postsolve_qp, postsolve_qp_with_dual_recovery};

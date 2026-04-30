@@ -10,7 +10,7 @@
 //! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
 
 use crate::options::SolverOptions;
-use crate::presolve::{postsolve_qp, QpPresolveResult};
+use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::SolveStatus;
 use crate::qp::problem::QpProblem;
 use super::outcome::{IpmOutcome, ProblemView};
@@ -96,8 +96,8 @@ fn run_ipm_with(
         }
     }
 
-    // postsolve: reduced 空間 → 元問題空間
-    let mut final_sol = postsolve_qp(presolve_result, &result);
+    // postsolve: reduced 空間 → 元問題空間。dual recovery 付き (T1.4 系列の真因対処)。
+    let mut final_sol = postsolve_qp_with_dual_recovery(presolve_result, &result, orig_problem);
 
     // bound_duals を元問題空間に remap
     if presolve_result.was_reduced {

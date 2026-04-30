@@ -4,6 +4,7 @@
 //! `QpPostsolveStack` を逆順（LIFO）に適用する。
 
 use crate::problem::SolverResult;
+use crate::qp::QpProblem;
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。
@@ -36,10 +37,13 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
     // PostsolveStack を逆順に適用して削除変数の値を復元
     for step in presolve_result.postsolve_stack.steps.iter().rev() {
         match step {
-            QpPostsolveStep::FixedVar { idx, val } => {
+            QpPostsolveStep::FixedVar { idx, val, .. } => {
                 solution[*idx] = *val;
             }
-            QpPostsolveStep::SingletonRow { col, val } => {
+            QpPostsolveStep::SingletonRow { col, val, .. } => {
+                solution[*col] = *val;
+            }
+            QpPostsolveStep::RedundantRowFix { col, val, .. } => {
                 solution[*col] = *val;
             }
             QpPostsolveStep::EmptyCol { idx, val } => {
@@ -112,6 +116,161 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         slack: reduced_sol.slack.clone(),
         warm_start_basis: reduced_sol.warm_start_basis.clone(),
     }
+}
+
+/// `postsolve_qp` の dual recovery 拡張版。
+///
+/// 既存 `postsolve_qp` は presolve で削除した行の `y` と固定変数の `z` を 0 で
+/// 埋めるが、これは KKT を破壊する (Catastrophic 9 件 + QRECIPE の真因)。
+/// 本関数は postsolve_stack を逆順に処理しながら、各 step に対応する
+/// `y[row]` / `z[idx]` を解析的に復元する。
+///
+/// # 復元式
+///
+/// **SingletonRow / RedundantRowFix { row, col, val }**:
+///   行 i = row は singleton (Eq) または activity-tightened Eq で削除済。
+///   変数 col は val に固定。元 KKT for col:
+///     Q[col,:]·x + c[col] + Σ_k A[k,col]·y[k] - z_lb[col] + z_ub[col] = 0
+///   col が bound 内部 (lb < val < ub) なら z=0 で確定:
+///     y[row] = -(Q[col,:]·x + c[col] + Σ_{k≠row} A[k,col]·y[k]) / A[row, col]
+///   col が boundary なら z を後段で再計算 (本関数では y[row] のみ復元)
+///
+/// **FixedVar { idx, val, bound_active }**:
+///   変数 idx を val に固定 (lb==ub または activity から)。
+///   元 KKT: Q[idx,:]·x + c[idx] + (A^T y)[idx] = z_lb[idx] - z_ub[idx]
+///   bound_active = Some(false) (lb 活性): z_lb[idx] = stat, z_ub[idx] = 0
+///   bound_active = Some(true) (ub 活性): z_ub[idx] = -stat, z_lb[idx] = 0
+///   bound_active = None (lb==ub):       net z で振り分け
+///
+/// **EmptyCol { idx, val }**:
+///   Q[idx,:]=0, A[:,idx]=0 で固定。KKT: c[idx] = z_lb[idx] - z_ub[idx]
+///   c[idx] > 0 → val=lb, z_lb=c, c<0 → val=ub, z_ub=-c
+pub fn postsolve_qp_with_dual_recovery(
+    presolve_result: &QpPresolveResult,
+    reduced_sol: &SolverResult,
+    orig_problem: &QpProblem,
+) -> SolverResult {
+    // まず通常 postsolve で solution / dual_solution / bound_duals (0 埋め含む) を作成
+    let mut sol = postsolve_qp(presolve_result, reduced_sol);
+
+    if sol.solution.len() != orig_problem.num_vars {
+        return sol;
+    }
+
+    let n = orig_problem.num_vars;
+    let _ = n;
+    // bound_duals レイアウトを正しく orig_problem の bounds に揃える。
+    // postsolve_qp は reduced 空間の bound_duals をそのまま clone してくるため、
+    // 元 bounds の lb/ub 数と長さが合わない場合がある。core.rs::run_ipm_with の
+    // remap_bound_duals_to_orig がこの修正を行うため、ここでは長さチェックのみ。
+
+    // postsolve_stack を逆順に処理して dual を復元
+    for step in presolve_result.postsolve_stack.steps.iter().rev() {
+        match step {
+            QpPostsolveStep::SingletonRow { row, col, .. }
+            | QpPostsolveStep::RedundantRowFix { row, col, .. } => {
+                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+            }
+            // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が一括で行う。
+            // (現 bound_duals レイアウトと orig_problem.bounds の対応関係が core.rs 側で
+            //  確定するため、ここで z を計算しても remap で上書きされてしまう。)
+            _ => {}
+        }
+    }
+
+    sol
+}
+
+/// SingletonRow / RedundantRowFix で削除された行 `row` の dual `y[row]` を
+/// 元 KKT 停留性から解析的に復元する。
+///
+/// 前提: 行 `row` は variable `col` のみが係数を持つ singleton。
+///   A[row, col] * x[col] = b[row] (Eq), x[col] = val
+fn recover_y_for_singleton_row(
+    row: usize,
+    col: usize,
+    orig: &QpProblem,
+    sol: &mut SolverResult,
+) {
+    if row >= orig.num_constraints || col >= orig.num_vars {
+        return;
+    }
+    if sol.dual_solution.len() != orig.num_constraints {
+        return;
+    }
+    // A[row, col] を取得 (CSC: col を走査して row を探す)
+    let mut a_row_col = 0.0_f64;
+    let s = orig.a.col_ptr[col];
+    let e = orig.a.col_ptr[col + 1];
+    for k in s..e {
+        if orig.a.row_ind[k] == row {
+            a_row_col = orig.a.values[k];
+            break;
+        }
+    }
+    if a_row_col.abs() < 1e-30 {
+        return;
+    }
+
+    // Q[col,:]·x_orig (対称 Q なら Q[col,:] = Q.col(col)、上三角格納のため両方走査)
+    let qx_col = compute_qx_at(&orig.q, &sol.solution, col);
+    // (A^T y)[col] = Σ_k A[k, col] * y[k] from current dual_solution
+    let aty_col_total: f64 = (s..e)
+        .map(|k| orig.a.values[k] * sol.dual_solution[orig.a.row_ind[k]])
+        .sum();
+    let aty_col_others = aty_col_total - a_row_col * sol.dual_solution[row];
+
+    // bound_contrib[col] from current bound_duals.
+    // bound_duals layout: [lb-finite vars in var order; ub-finite vars in var order]
+    // 現時点で bound_duals は postsolve_qp が clone してきた reduced 空間値で、
+    // 元空間と長さが合わない可能性あり。後段で core.rs::run_ipm_with が remap するため、
+    // ここでは内部点を仮定して z=0 として扱う (val が lb/ub に張り付いてないケース)。
+    //
+    // → 仮定: SingletonRow で fix された変数は通常 (b/a) で内部点。
+    //   boundary の場合は z 寄与を含むが、本関数では y[row] のみ復元。
+    let bound_contrib_col = 0.0_f64;
+
+    // KKT: Q[col,:]·x + c[col] + (A^T y)[col] + bound_contrib[col] = 0
+    // → A[row, col] * y[row] = -(qx_col + c[col] + aty_col_others + bound_contrib[col])
+    let target = -(qx_col + orig.c[col] + aty_col_others + bound_contrib_col);
+    let y_new = target / a_row_col;
+    if y_new.is_finite() {
+        sol.dual_solution[row] = y_new;
+    }
+}
+
+/// 対称行列 Q (上三角 CSC 格納) で Q[col, :] · x を計算する。
+///
+/// 上三角格納のため Q[col, :] は次の 2 部分の和:
+///   - 対角・上三角部分: Q[col, k] for k >= col → Q.col(col) の row_ind=col 以下
+///     (上三角なので Q[col,k] は col 行 k 列、row_ind <= col のエントリ)
+///   - 下三角は Q[k, col] = Q[col, k] (対称) → Q.col(col) の他のエントリで補完
+///
+/// 上三角 CSC では Q.col(col) のエントリは row_ind <= col。これらは Q[row_ind, col]、
+/// 対称性から Q[col, row_ind] でもある。よって Q[col, :] · x = Σ_k Q[k, col] * x[k] は
+/// Q.col(col) を全て walk すれば足りる **ただし Q[col, k] for k > col は Q.col(k) の
+/// row_ind=col エントリにある**。よって他の列も走査する。
+fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
+    let mut sum = 0.0_f64;
+    // Q[k, col] for k <= col: Q.col(col) のエントリ
+    let s = q.col_ptr[col];
+    let e = q.col_ptr[col + 1];
+    for ptr in s..e {
+        let k = q.row_ind[ptr];
+        sum += q.values[ptr] * x[k];
+    }
+    // Q[col, k] for k > col: Q.col(k) で row_ind=col のエントリ (対称)
+    for k in (col + 1)..q.ncols {
+        let ks = q.col_ptr[k];
+        let ke = q.col_ptr[k + 1];
+        for ptr in ks..ke {
+            if q.row_ind[ptr] == col {
+                sum += q.values[ptr] * x[k];
+                break;
+            }
+        }
+    }
+    sum
 }
 
 #[cfg(test)]
