@@ -44,14 +44,19 @@ pub fn equality_constraint_qr(
         return;
     }
 
-    // 行ごとの非ゼロエントリを収集 (列順に格納されるため列優先でイテレート)
+    // 行ごとの非ゼロエントリを収集 (列順に格納されるため列優先でイテレート)。
+    // ペア検出は Le 制約のみが対象 (`A[i]x <= b` と `-A[i]x <= -b` の組合せが等式)。
+    // Eq / Ge 制約を Le と誤ペア化すると冗長削除でない行を消して問題が壊れる
+    // (cmd_752/753 で to_all_le 全廃以降の混在状態で潜在化)。
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
         let start = prob.a.col_ptr[j];
         let end = prob.a.col_ptr[j + 1];
         for k in start..end {
             let row = prob.a.row_ind[k];
-            if !removed_rows[row] {
+            if !removed_rows[row]
+                && matches!(prob.constraint_types[row], crate::problem::ConstraintType::Le)
+            {
                 row_entries[row].push((j, prob.a.values[k]));
             }
         }
