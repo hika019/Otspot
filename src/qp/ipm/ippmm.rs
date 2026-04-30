@@ -270,14 +270,38 @@ pub(crate) fn solve_ippmm_inner(
     };
     let _ = x0; let _ = y0; let _ = s0;
 
-    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠。LP(Q=0)とQP(Q≠0)で分離
+    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠 (env QP_REG_LIMIT で診断 override 可)。
     // 【履歴】論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
     // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
-    let reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
-        5e-10  // LP: MATLAB拡張版準拠
-    } else {
-        5e-8   // QP: MATLAB拡張版準拠
-    };
+    let default_reg_qp = 5e-8;
+    let default_reg_lp = 5e-10;
+    let initial_reg_limit = std::env::var("QP_REG_LIMIT").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or_else(|| {
+            if problem.q.values.iter().all(|&v| v == 0.0) {
+                default_reg_lp
+            } else {
+                default_reg_qp
+            }
+        });
+    // Adaptive reg_limit: rank-deficient Q + c≈0 の問題 (UBH1) で rho が floor に
+    // 張り付いて proximal 項が df 残差を支配し、IPM が真の Optimal に到達できない
+    // 病理を解消するため、特定パターンで floor を動的に下げる。
+    //
+    // トリガーパターン (UBH1 シグネチャ):
+    //   max(|c|) < 1e-6 (cost vector が ≈ 0、Q が支配的)
+    //   かつ rho == reg_limit (decay が止まっている)
+    //   かつ proximal 項が df の半分以上を占める
+    // c が非ゼロな問題 (LISWET 等) ではトリガーしない。
+    let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let allow_adaptive_reg = c_max < 1e-6;
+    let mut reg_limit = initial_reg_limit;
+    /// 適応的 floor の最下限 (これ以上は数値不安定のリスク)
+    const REG_LIMIT_MIN: f64 = 1e-14;
+    /// 適応 trigger: prox_d_inf > df * PROX_DOMINATE_RATIO のとき floor を下げる
+    const PROX_DOMINATE_RATIO: f64 = 0.5;
+    /// 一度の調整で reg_limit を割る倍率
+    const REG_LIMIT_STEP: f64 = 1e-3;
 
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
@@ -878,6 +902,19 @@ pub(crate) fn solve_ippmm_inner(
         // PARAM: §35-B1, MATLAB 拡張版 IP-PMM_QP_Solver 準拠
         let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
+
+        // Adaptive reg_limit (UBH1 パターン限定: c≈0):
+        if allow_adaptive_reg
+            && (pmm.rho - reg_limit).abs() < reg_limit * 0.01
+            && reg_limit > REG_LIMIT_MIN
+        {
+            let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
+                .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
+                .fold(0.0_f64, f64::max);
+            if prox_d_inf > nr_d * PROX_DOMINATE_RATIO && nr_d > 0.0 {
+                reg_limit = (reg_limit * REG_LIMIT_STEP).max(REG_LIMIT_MIN);
+            }
+        }
 
         // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
         // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
