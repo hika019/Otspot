@@ -92,7 +92,13 @@ fn solve_qp_v2_with_runner(
     // ── presolve (1 回のみ) ─────────────────────────────
     let presolve_result = if opts.presolve {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
-        run_qp_presolve_phase2(phase1, &opts)
+        // DIAG: QP_PRESOLVE_PHASE2=0 で phase2 (equality_constraint_qr / Ruiz / 大係数 scale)
+        // を無効化。dual postsolve が phase2 の row 削除に追従できない場合の回避用。
+        if std::env::var("QP_PRESOLVE_PHASE2").ok().as_deref() == Some("0") {
+            phase1
+        } else {
+            run_qp_presolve_phase2(phase1, &opts)
+        }
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };

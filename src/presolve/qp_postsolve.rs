@@ -164,17 +164,31 @@ pub fn postsolve_qp_with_dual_recovery(
     // 元 bounds の lb/ub 数と長さが合わない場合がある。core.rs::run_ipm_with の
     // remap_bound_duals_to_orig がこの修正を行うため、ここでは長さチェックのみ。
 
-    // postsolve_stack を逆順に処理して dual を復元
-    for step in presolve_result.postsolve_stack.steps.iter().rev() {
-        match step {
-            QpPostsolveStep::SingletonRow { row, col, .. }
-            | QpPostsolveStep::RedundantRowFix { row, col, .. } => {
-                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+    // postsolve_stack を **forward 順** で処理し、さらに **反復** で連鎖依存を解消する。
+    //
+    // 動機: 単純な LIFO 逆順 1 回処理では「先に処理された step の y[row] 計算式に
+    // 後の step の y[row'] が必要だが未復元 (=0) のまま参照される」連鎖誤差で
+    // y が wrong stays。
+    //   例: forward 順で step A (row=10) → step B (row=20) と push された場合、
+    //       LIFO 逆処理: step B 先 (y[20] 計算で y[10]=0 を使い wrong) → step A
+    //   forward 順:    step A 先 (y[20]=0 を使うが、後で更新可能) → step B (y[10] 既知)
+    //   双方向依存で 1 pass では収束しないため反復する (2-3 pass で十分収束)。
+    /// 反復回数: 連鎖依存 (step A の y[row_A] が step B の col_B の KKT に登場し、
+    /// 互いに参照する場合) を解消するため複数 pass する。実問題では 3 pass で
+    /// 収束する経験。早期 break は局所収束に騙されるリスクがあるため固定回数。
+    const RECOVER_PASSES: usize = 5;
+    for _pass in 0..RECOVER_PASSES {
+        for step in presolve_result.postsolve_stack.steps.iter() {
+            match step {
+                QpPostsolveStep::SingletonRow { row, col, .. }
+                | QpPostsolveStep::RedundantRowFix { row, col, .. } => {
+                    recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+                }
+                // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が
+                // 一括で行う (bound_duals レイアウトが core.rs::remap で確定するため、
+                // ここで z を計算しても上書きされる)。
+                _ => {}
             }
-            // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が一括で行う。
-            // (現 bound_duals レイアウトと orig_problem.bounds の対応関係が core.rs 側で
-            //  確定するため、ここで z を計算しても remap で上書きされてしまう。)
-            _ => {}
         }
     }
 
@@ -186,11 +200,26 @@ pub fn postsolve_qp_with_dual_recovery(
 ///
 /// 前提: 行 `row` は variable `col` のみが係数を持つ singleton。
 ///   A[row, col] * x[col] = b[row] (Eq), x[col] = val
-fn recover_y_for_singleton_row(
+///
+/// `bound_contrib_col`: KKT for col の bound 寄与 (-z_lb + z_ub) で、
+/// bound_duals が orig 空間にレイアウト確定済みなら正しい値を渡す。
+/// reduced 空間レイアウトの段階では 0 を渡す (本関数の初回 pass)。
+pub(crate) fn recover_y_for_singleton_row(
     row: usize,
     col: usize,
     orig: &QpProblem,
     sol: &mut SolverResult,
+) {
+    recover_y_for_singleton_row_with_bound(row, col, orig, sol, 0.0);
+}
+
+/// `recover_y_for_singleton_row` の bound_contrib 明示版。
+pub(crate) fn recover_y_for_singleton_row_with_bound(
+    row: usize,
+    col: usize,
+    orig: &QpProblem,
+    sol: &mut SolverResult,
+    bound_contrib_col: f64,
 ) {
     if row >= orig.num_constraints || col >= orig.num_vars {
         return;
@@ -220,16 +249,6 @@ fn recover_y_for_singleton_row(
         .sum();
     let aty_col_others = aty_col_total - a_row_col * sol.dual_solution[row];
 
-    // bound_contrib[col] from current bound_duals.
-    // bound_duals layout: [lb-finite vars in var order; ub-finite vars in var order]
-    // 現時点で bound_duals は postsolve_qp が clone してきた reduced 空間値で、
-    // 元空間と長さが合わない可能性あり。後段で core.rs::run_ipm_with が remap するため、
-    // ここでは内部点を仮定して z=0 として扱う (val が lb/ub に張り付いてないケース)。
-    //
-    // → 仮定: SingletonRow で fix された変数は通常 (b/a) で内部点。
-    //   boundary の場合は z 寄与を含むが、本関数では y[row] のみ復元。
-    let bound_contrib_col = 0.0_f64;
-
     // KKT: Q[col,:]·x + c[col] + (A^T y)[col] + bound_contrib[col] = 0
     // → A[row, col] * y[row] = -(qx_col + c[col] + aty_col_others + bound_contrib[col])
     let target = -(qx_col + orig.c[col] + aty_col_others + bound_contrib_col);
@@ -237,6 +256,37 @@ fn recover_y_for_singleton_row(
     if y_new.is_finite() {
         sol.dual_solution[row] = y_new;
     }
+}
+
+/// orig 空間の bound_duals レイアウトから 1 変数の bound_contrib (-z_lb + z_ub) を取得。
+/// `bound_duals` 長 = n_lb + n_ub (orig.bounds 順)。
+pub(crate) fn bound_contrib_at_var(
+    bounds: &[(f64, f64)],
+    bound_duals: &[f64],
+    var: usize,
+) -> f64 {
+    if bound_duals.is_empty() {
+        return 0.0;
+    }
+    let n_lb_total = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let mut contrib = 0.0_f64;
+    let mut lb_idx = 0_usize;
+    let mut ub_idx = n_lb_total;
+    for (j, &(lb, ub)) in bounds.iter().enumerate() {
+        if lb.is_finite() {
+            if j == var && lb_idx < bound_duals.len() {
+                contrib -= bound_duals[lb_idx];
+            }
+            lb_idx += 1;
+        }
+        if ub.is_finite() {
+            if j == var && ub_idx < bound_duals.len() {
+                contrib += bound_duals[ub_idx];
+            }
+            ub_idx += 1;
+        }
+    }
+    contrib
 }
 
 /// 対称行列 Q (上三角 CSC 格納) で Q[col, :] · x を計算する。

@@ -10,7 +10,11 @@
 //! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
 
 use crate::options::SolverOptions;
-use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
+use crate::presolve::{
+    postsolve_qp_with_dual_recovery, QpPresolveResult,
+    recover_y_for_singleton_row_with_bound, bound_contrib_at_var,
+};
+use crate::presolve::qp_transforms::QpPostsolveStep;
 use crate::problem::SolveStatus;
 use crate::qp::problem::QpProblem;
 use super::outcome::{IpmOutcome, ProblemView};
@@ -115,6 +119,43 @@ fn run_ipm_with(
         }
         if ub.is_finite() {
             *xi = xi.min(ub);
+        }
+    }
+
+
+    // Stage 0: postsolve y/z 交互反復 (bound_duals が orig レイアウト確定後)。
+    //
+    // postsolve_qp_with_dual_recovery 内の forward pass は bound_contrib=0 仮定で
+    // y[row] を復元する。boundary に張り付いた fixed/empty 列が存在する場合、
+    // KKT 式の bound_contrib が非ゼロのため y[row] が wrong stays。
+    //
+    // 本反復で bound_duals (orig 空間) を refit_bound_duals_kkt で計算 → bound_contrib
+    // を取得 → recover_y_for_singleton_row_with_bound で y を更新、を交互に行うことで
+    // 連立を不動点で解く。実問題で 3 pass で収束する経験。
+    if result.iterations > 0
+        && presolve_result.was_reduced
+        && !presolve_result.postsolve_stack.steps.is_empty()
+        && final_sol.solution.len() == orig_problem.num_vars
+        && final_sol.dual_solution.len() == orig_problem.num_constraints
+    {
+        /// 連鎖依存解消の固定反復回数。各 pass で y / z を交互更新する。
+        const POSTSOLVE_RECOVERY_PASSES: usize = 5;
+        for _pass in 0..POSTSOLVE_RECOVERY_PASSES {
+            // (i) z (bound_duals) を current y に基づいて refit
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            // (ii) y[row] を SingletonRow / RedundantRowFix step で更新
+            //      bound_contrib を bound_duals から取得して KKT 完全式で解く
+            for step in presolve_result.postsolve_stack.steps.iter() {
+                let (row, col) = match step {
+                    QpPostsolveStep::SingletonRow { row, col, .. }
+                    | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),
+                    _ => continue,
+                };
+                let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
+                recover_y_for_singleton_row_with_bound(
+                    row, col, orig_problem, &mut final_sol, bc,
+                );
+            }
         }
     }
 

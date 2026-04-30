@@ -480,9 +480,18 @@ pub fn run_qp_presolve_phase1(
         prev_removed_count = cur_removed_count;
 
     // ==================================================================
+    // 各 step を env で個別 skip するための診断ヘルパ
+    fn skip_step(n: usize) -> bool {
+        std::env::var("QP_PRESOLVE_SKIP")
+            .ok()
+            .map(|v| v.split(',').any(|s| s.trim().parse::<usize>().ok() == Some(n)))
+            .unwrap_or(false)
+    }
+
     // #1: fixed_variables() — lb[j] == ub[j] の変数を定数化
     // ==================================================================
-    for j in 0..n {
+    'step1: for j in 0..n {
+        if skip_step(1) { break 'step1; }
         if removed_cols[j] {
             continue;
         }
@@ -526,7 +535,8 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     // Eq制約: a[i,j]*x[j] = b[i] → x[j] = b[i]/a[i,j] で変数固定除去
     // Le/Ge制約: 従来通り境界更新
-    for i in 0..m {
+    'step2: for i in 0..m {
+        if skip_step(2) { break 'step2; }
         if removed_rows[i] {
             continue;
         }
@@ -578,7 +588,8 @@ pub fn run_qp_presolve_phase1(
     // Q[j,j]=0 かつ Q[j,k]=0 (k≠j) の場合のみ適用。
     // Q非ゼロ要素があると、消去後に二次項が残り変換が複雑になるためスキップ。
     // ==================================================================
-    for j in 0..n {
+    'step3: for j in 0..n {
+        if skip_step(3) { break 'step3; }
         if removed_cols[j] {
             continue;
         }
@@ -668,7 +679,8 @@ pub fn run_qp_presolve_phase1(
     //   Eq (0 = b):  b == 0 で冗長、b != 0 で Infeasible
     // 旧実装は Le 前提のみで Eq の正の b、Ge の正の b を「冗長」誤削除する false-negative
     // Infeasibility バグがあった (cmd_752/753 の to_all_le 全廃以降混在状態で潜在化)。
-    for i in 0..m {
+    'step4: for i in 0..m {
+        if skip_step(4) { break 'step4; }
         if removed_rows[i] {
             continue;
         }
@@ -743,7 +755,8 @@ pub fn run_qp_presolve_phase1(
     // #5: redundant_constraints() — activity range で支配される制約を除去
     // LP 実装（transforms.rs の activity_range()）をそのまま流用
     // ==================================================================
-    for i in 0..m {
+    'step5: for i in 0..m {
+        if skip_step(5) { break 'step5; }
         if removed_rows[i] {
             continue;
         }
@@ -824,7 +837,8 @@ pub fn run_qp_presolve_phase1(
     // QP の free_col_substitution は変数消去後の Q 更新（outer product 加算）が必要で、
     // 実装が複雑なため本 Phase 1 では「Q 列非ゼロ = 0 の変数のみ」に絞って処理する。
     // Q 非ゼロあり変数の free substitution は Phase 2 以降で実装予定。
-    for j in 0..n {
+    'step7: for j in 0..n {
+        if skip_step(7) { break 'step7; }
         if removed_cols[j] {
             continue;
         }
@@ -885,7 +899,7 @@ pub fn run_qp_presolve_phase1(
     // #8: parallel_rows() — 比例する制約行を統合（hash-based detection）
     // A[i,*] = α * A[j,*] となるペアを検出。冗長行を除去。
     // ==================================================================
-    {
+    if !skip_step(8) {
         use std::collections::HashMap;
         // 各行をハッシュ化（最初の非ゼロ要素の列インデックスと符号で分類）
         let mut row_signature: HashMap<(usize, i8), Vec<usize>> = HashMap::new();
@@ -1113,6 +1127,8 @@ pub fn run_qp_presolve_phase1(
     }
 
     // ==================================================================
+    'step11_skip: { if skip_step(11) { break 'step11_skip; }
+    // ==================================================================
     // #11: dual_bounds_tightening() — 双対実行可能性から主変数範囲絞り込み
     // Q 列がゼロ（LP 的変数）のみに適用。Q ≠ 0 の変数はスキップ。
     // 制約がない（孤立列）かつ c[j] の符号から値が確定する場合のみ固定する。
@@ -1162,13 +1178,15 @@ pub fn run_qp_presolve_phase1(
         removed_cols[j] = true;
         postsolve_stack.push(QpPostsolveStep::EmptyCol { idx: j, val });
     }
+    } // end 'step11_skip
 
     // ==================================================================
     // #12: constraint_bounds_tightening() — 制約右辺 bounds 絞り込み
     // LP 実装と同じ。差分なし。
     // #10 の追加パス（より精密な bounds を用いた再適用）。
     // ==================================================================
-    for i in 0..m {
+    'step12: for i in 0..m {
+        if skip_step(12) { break 'step12; }
         if removed_rows[i] {
             continue;
         }
@@ -1402,7 +1420,12 @@ pub fn run_qp_presolve_phase1(
     let large_coeff_row_scales = {
         let mut a_mut = reduced.a.clone();
         let mut b_mut = reduced.b.clone();
-        let scales = apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new);
+        let scales = if std::env::var("QP_PRESOLVE_SKIP_LARGE_COEFF").ok().as_deref() == Some("1") {
+            // 診断用: 大係数 rescale を skip
+            vec![1.0; reduced.a.nrows]
+        } else {
+            apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new)
+        };
         // 実際に変化があった場合のみ reduced を更新
         let any_scaled = scales.iter().any(|&s| (s - 1.0).abs() > 1e-12);
         if any_scaled {
