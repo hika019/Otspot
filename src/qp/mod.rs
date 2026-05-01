@@ -813,6 +813,188 @@ pub(crate) fn refine_primal_lsq(problem: &QpProblem, result: &mut crate::problem
     }
 }
 
+/// Saddle-point KKT system に対する iterative refinement (Krylov refinement)。
+///
+/// 動機: LISWET 系の precision floor (pf=1.5e-6) は LDL backward error
+/// `eps × cond(K) × ‖dx‖` に由来。各 Newton step 内の LDL solve は cond ~1e10 で
+/// 6 桁の誤差が dx に乗り、これが accumulated して pf floor を作る。
+///
+/// 本関数は IPM 収束後の (x, y, z) を初期推定として:
+///   1. K = [Q+δp·I  A^T; A  -δd·I] を構築 (δp, δd 小)
+///   2. AMD + LDL factorize
+///   3. 各 iter で full-f64 で KKT residual r_d, r_p を計算
+///   4. K·du = -r を LDL solve、x ← x + dx, y ← y + dy
+///   5. bound clip + refit_bound_duals_kkt
+///   6. 改善判定 (pf 減少 AND df 悪化なし) で accept/break
+///
+/// 古典的 IR の収束理論: r_p は eps·‖A‖ レベルまで refine 可能 (cond の影響を受けない)。
+/// LISWET の floor 突破に効く可能性。
+///
+/// 安全装置:
+/// - サイズ制限 50_000 (refine_primal_lsq と統一、AAT factorize 同様の理由)
+/// - 各 iter で KKT 改善 guard、退行で revert + break
+/// - max_iters で停止 (発散時の保険)
+///
+/// 戻り値: 採用された refinement iter 数 (0 = no-op)
+pub(crate) fn refine_kkt_iterative(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    max_iters: usize,
+    target_pf: f64,
+) -> usize {
+    use crate::problem::ConstraintType;
+    use crate::presolve::bound_contrib_at_var;
+
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if m == 0 || result.solution.len() != n {
+        return 0;
+    }
+    if result.dual_solution.len() != m {
+        return 0;
+    }
+
+    // サイズ制限: refine_primal_lsq の PRIMAL_PROJECTION_SIZE_LIMIT と統一。
+    const REFINE_KKT_SIZE_LIMIT: usize = 50_000;
+    if n + m > REFINE_KKT_SIZE_LIMIT {
+        return 0;
+    }
+
+    // δp, δd: K の対角正則化。十分小さく (IR で eps·‖K‖ レベルまで refine 可)、
+    // LDL の数値安定性が確保される値。1e-10 は LISWET cond 1e10 で K cond 1e2 級。
+    const DELTA_P: f64 = 1e-10;
+    const DELTA_D: f64 = 1e-10;
+
+    let sigma_zero = vec![0.0_f64; m];
+    let k_mat = crate::qp::ipm::kkt::build_augmented_system(
+        &problem.q, &problem.a, &sigma_zero, DELTA_P, DELTA_D
+    );
+
+    let trace_pre = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
+    if trace_pre {
+        eprintln!("REFINE_KKT pre-factorize: n={} m={} K_nnz={}", n, m, k_mat.values.len());
+    }
+    let factor = match crate::linalg::ldl::factorize_quasidefinite_with_amd(&k_mat, None) {
+        Ok(f) => f,
+        Err(e) => {
+            if trace_pre { eprintln!("REFINE_KKT factorize failed: {:?}", e); }
+            return 0;
+        }
+    };
+
+    let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
+        let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
+        let aty = problem.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n]);
+        let mut r_d = vec![0.0_f64; n];
+        // codebase 規約: KKT stationarity = Qx + c + A^T·y + bound_contrib (kkt_residual_rel と整合)。
+        // canonical の Qx + c - A^T·y - z_lb + z_ub と符号が違うので注意。
+        for j in 0..n {
+            let bc = bound_contrib_at_var(&problem.bounds, z, j);
+            r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
+        }
+        let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
+        let mut r_p = vec![0.0_f64; m];
+        let mut pf = 0.0_f64;
+        for i in 0..m {
+            let raw = ax[i] - problem.b[i];
+            let v = match problem.constraint_types[i] {
+                ConstraintType::Eq => raw,
+                ConstraintType::Ge => if raw < 0.0 { raw } else { 0.0 },
+                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
+            };
+            r_p[i] = v;
+            pf = pf.max(v.abs());
+        }
+        let df = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+        (r_d, r_p, pf, df)
+    };
+
+    let pre_z = result.bound_duals.clone();
+    let (_, _, pre_pf, pre_df) = compute_residuals(&result.solution, &result.dual_solution, &pre_z);
+    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
+    if trace {
+        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e}",
+            n, m, pre_pf, pre_df, target_pf);
+    }
+    if pre_pf < target_pf {
+        if trace {
+            eprintln!("REFINE_KKT skip: pre_pf < target_pf");
+        }
+        return 0;
+    }
+
+    let mut accepted = 0_usize;
+    // df 悪化許容: pre_df の 2x まで。これ以上は revert (構造的悪化)。
+    // 経験値 (LISWET cond で IR が 1-2 iter で収束する想定で十分な余裕)。
+    const DF_TOLERANCE_FACTOR: f64 = 2.0;
+    let df_limit = (pre_df * DF_TOLERANCE_FACTOR).max(1e-7);
+
+    for iter in 0..max_iters {
+        let (r_d, r_p, pf_cur, df_cur) =
+            compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals);
+        if pf_cur < target_pf {
+            if trace { eprintln!("REFINE_KKT iter={} early: pf_cur={:.3e} < target", iter, pf_cur); }
+            break;
+        }
+
+        let mut rhs = vec![0.0_f64; n + m];
+        for j in 0..n { rhs[j] = -r_d[j]; }
+        for i in 0..m { rhs[n + i] = -r_p[i]; }
+
+        let mut sol = vec![0.0_f64; n + m];
+        factor.solve(&rhs, &mut sol);
+        if sol.iter().any(|v| !v.is_finite()) {
+            if trace { eprintln!("REFINE_KKT iter={} solve produced NaN", iter); }
+            break;
+        }
+
+        let dx_inf: f64 = sol[..n].iter().fold(0.0, |a, &v| a.max(v.abs()));
+        let dy_inf: f64 = sol[n..].iter().fold(0.0, |a, &v| a.max(v.abs()));
+
+        let mut x_new = result.solution.clone();
+        let mut y_new = result.dual_solution.clone();
+        let mut clip_amt = 0.0_f64;
+        for j in 0..n {
+            let raw = x_new[j] + sol[j];
+            let (lb, ub) = problem.bounds[j];
+            let mut clipped = raw;
+            if lb.is_finite() { clipped = clipped.max(lb); }
+            if ub.is_finite() { clipped = clipped.min(ub); }
+            clip_amt = clip_amt.max((raw - clipped).abs());
+            x_new[j] = clipped;
+        }
+        for i in 0..m {
+            y_new[i] += sol[n + i];
+        }
+
+        let mut tmp = result.clone();
+        tmp.solution = x_new;
+        tmp.dual_solution = y_new;
+        refit_bound_duals_kkt(problem, &mut tmp);
+
+        let (_, _, pf_new, df_new) =
+            compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
+
+        if trace {
+            eprintln!("REFINE_KKT iter={} pf={:.3e}->{:.3e} df={:.3e}->{:.3e} dx_inf={:.3e} dy_inf={:.3e} clip={:.3e}",
+                iter, pf_cur, pf_new, df_cur, df_new, dx_inf, dy_inf, clip_amt);
+        }
+
+        if pf_new < pf_cur && df_new < df_limit {
+            *result = tmp;
+            accepted += 1;
+        } else {
+            if trace {
+                eprintln!("REFINE_KKT iter={} REJECTED (pf_dec={} df_ok={})",
+                    iter, pf_new < pf_cur, df_new < df_limit);
+            }
+            break;
+        }
+    }
+
+    accepted
+}
+
 /// 元空間で primal x と constraint dual y から bound_duals を KKT で再計算する。
 ///
 /// presolve が変数を fix した場合 (FixedVar / EmptyCol / SingletonRow), postsolve は

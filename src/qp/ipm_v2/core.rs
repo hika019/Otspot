@@ -245,6 +245,28 @@ fn run_ipm_with(
         kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
     };
 
+    // (D) Krylov refinement on saddle-point KKT (Tier 1 (B) Krylov)
+    //
+    // 動機: LISWET 系の precision floor は LDL backward error eps×cond×‖dx‖ に由来。
+    //   IPM 内部の Newton step ごとの LDL 誤差が accumulate して pf=1.5e-6 で停滞。
+    //   IPM 収束後の (x, y, z) を初期推定として saddle-point K に対し古典的 IR を実行する。
+    //   各 iter で full-f64 残差を計算するため、cond の影響を受けず eps·‖A‖ レベルまで refine 可能。
+    //
+    // 実行条件: ipm_made_progress AND サイズ制限内 AND constraints あり (refine_kkt_iterative 内 guard)。
+    // 退行防止: 関数内で pf 厳密減少 AND df 許容内の guard、退行時 break。
+    if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
+        // max iter: LISWET 系の cond が高く per-iter 収束率 ~0.96 なので 30 iter で
+        // pf を 0.3 倍級まで引き下げる予算 (LISWET9 で 1.5e-6 → ~9e-7 想定)。
+        // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k なら数秒で完了。
+        const KRYLOV_MAX_ITERS: usize = 30;
+        let user_eps = opts.ipm_eps();
+        /// target_pf: ユーザー eps と整合 (PASS 判定相当)。pf < target で early exit。
+        let target_pf = user_eps;
+        let _refined = crate::qp::refine_kkt_iterative(
+            orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf,
+        );
+    }
+
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
