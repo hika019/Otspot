@@ -51,7 +51,52 @@ fn run_ipm_with(
     inner_solver: InnerSolver,
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
-    let mut result = inner_solver(reduced, opts);
+
+    // Tier 2: presolve スケーリングを考慮した IPM eps の事前調整。
+    //
+    // 動機: presolve の LargeCoeffRowScale (Phase1: σ=1/√rmax) + constraint_precond
+    //       (Phase2: σ=1/√rmax) で合成 σ_total = 1/orig_row_max 倍にスケーリングされる。
+    //       IPM が scaled 空間で eps を達成しても、unscale で 1/σ_total 倍に絶対残差が
+    //       増幅され、orig 空間で eps を満たさない (QPILOTNO で 6.77 桁悪化を実証)。
+    //
+    // 修正: IPM に渡す eps を eps × σ_total に厳しくして、unscale 後に orig eps を
+    //       満たす状態を IPM 完了時点で作る。
+    //
+    // 適用条件: σ_total < SIGMA_TIGHTEN_THRESHOLD のときのみ (大きな増幅が予想される問題)。
+    //   保守的な閾値: 0.01 (= 100 倍以上の増幅が予想される問題のみ調整)。
+    //   全問題で適用すると IPM の収束時間が無闇に増える可能性あり。
+    //
+    // 限界: σ_total が極端に小さいと eps_scaled が f64 の達成精度限界 (cond×u)
+    //       を下回り IPM が達成できない。その場合は IPM が SuboptimalSolution で
+    //       正直に申告 (現状動作と同じ)、嘘の Optimal は出さない。
+    const SIGMA_TIGHTEN_THRESHOLD: f64 = 0.01;
+    let mut sigma_total = 1.0_f64;
+    for step in presolve_result.postsolve_stack.steps.iter() {
+        if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
+            let local_min = row_scales.iter()
+                .filter(|&&v| v > 0.0 && v.is_finite())
+                .fold(f64::INFINITY, |a, &v| a.min(v));
+            if local_min.is_finite() {
+                sigma_total *= local_min;
+            }
+        }
+    }
+    let opts_for_ipm: SolverOptions = if sigma_total < SIGMA_TIGHTEN_THRESHOLD {
+        let mut tightened = opts.clone();
+        let eps_orig = opts.ipm_eps();
+        let eps_scaled = (eps_orig * sigma_total).max(f64::MIN_POSITIVE);
+        // tolerance を None にして ipm.eps を直接効かせる
+        tightened.tolerance = None;
+        tightened.ipm.eps = eps_scaled;
+        if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
+            eprintln!("POST_STAGE [IPM eps tighten] σ_total={:.3e} eps_orig={:.3e} → eps_scaled={:.3e}",
+                sigma_total, eps_orig, eps_scaled);
+        }
+        tightened
+    } else {
+        opts.clone()
+    };
+    let mut result = inner_solver(reduced, &opts_for_ipm);
 
     // 確定的 Infeasible / Unbounded / NonConvex は IpmOutcome に保持して finalize_outcome に
     // 伝える。ここで握りつぶすと外部 status は Timeout に丸められて status 隠蔽になる。
