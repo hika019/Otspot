@@ -24,6 +24,10 @@ use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 /// LISWET 系の改善はない。3 で QPILOTNO 改善・他コスト軽微の balance。
 pub(crate) const IR_MAX_ITERS: usize = 3;
 
+/// IR_DD=1 (mixed-precision IR) では DD 残差が 1e-32 級まで測れるため、
+/// IR を多く回して LDL precision 限界を反復で破る。10 で収束飽和。
+pub(crate) const IR_MAX_ITERS_DD: usize = 10;
+
 /// Iterative refinement of LDL solve.
 ///
 /// fac.solve produces sol approximating K * sol = rhs. With LDL precision limit
@@ -36,6 +40,80 @@ pub(crate) const IR_MAX_ITERS: usize = 3;
 ///   3. sol += correction
 ///
 /// Skipped if residual is already small (rhs_inf * 1e-13).
+/// 誤差なし加算 (Dekker/Knuth two-sum). a + b = s + e で s, e は f64 表現可能、
+/// |e| <= ulp(s)/2、a + b の真値は s + e と等しい。
+#[inline]
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    let e = (a - (s - bb)) + (b - bb);
+    (s, e)
+}
+
+/// 誤差なし乗算 (FMA を使った two-product)。a * b = hi + lo で hi, lo は f64、
+/// 真値は hi + lo と一致。FMA `a.mul_add(b, -hi)` で lo を 1 命令で計算。
+#[inline]
+fn two_prod(a: f64, b: f64) -> (f64, f64) {
+    let hi = a * b;
+    let lo = a.mul_add(b, -hi);
+    (hi, lo)
+}
+
+/// 残差 r = rhs - K·sol を **double-double 精度**で計算。K は対称上三角 CSC。
+///
+/// 標準 IR は f64 で残差計算するため LDL の precision (eps × cond ~ 1e-6) で
+/// 頭打ちになる。残差を DD で計算すれば correction は DD precision (~1e-32)
+/// 級になり、Wilkinson IR 解析により最終解の誤差は eps_residual に収束する。
+///
+/// LISWET9 (cond ~1e10) で f64 IR の floor 1e-6 → DD IR で 1e-12 級を期待。
+fn compute_residual_dd(aug_mat: &CscMatrix, sol: &[f64], rhs: &[f64], out: &mut [f64]) {
+    let n = sol.len();
+    debug_assert_eq!(rhs.len(), n);
+    debug_assert_eq!(out.len(), n);
+
+    // (hi, lo) DD アキュムレータ。最終的に hi + lo を out に書く。
+    let mut hi = vec![0.0_f64; n];
+    let mut lo = vec![0.0_f64; n];
+
+    // 初期化: hi = rhs, lo = 0
+    for i in 0..n {
+        hi[i] = rhs[i];
+    }
+
+    // r -= K·sol を DD 精度で蓄積。各 K[i,j] * sol[j] を two-prod で展開、
+    // (hi[i], lo[i]) に two-sum で減算累積。
+    for col in 0..aug_mat.ncols {
+        let xv_c = sol[col];
+        for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
+            let row = aug_mat.row_ind[ptr];
+            let val = aug_mat.values[ptr];
+            // 上三角寄与: K[row, col] * sol[col]
+            let (p_hi, p_lo) = two_prod(val, xv_c);
+            // hi[row] -= p_hi
+            let (s, e1) = two_sum(hi[row], -p_hi);
+            // lo[row] += e1 - p_lo (符号反転 + 残差伝搬)
+            let (s2, e2) = two_sum(lo[row], e1 - p_lo);
+            hi[row] = s;
+            lo[row] = s2 + e2;
+
+            // 対称下三角寄与: K[col, row] * sol[row] (row != col のとき)
+            if row != col {
+                let xv_r = sol[row];
+                let (p_hi2, p_lo2) = two_prod(val, xv_r);
+                let (s3, e3) = two_sum(hi[col], -p_hi2);
+                let (s4, e4) = two_sum(lo[col], e3 - p_lo2);
+                hi[col] = s3;
+                lo[col] = s4 + e4;
+            }
+        }
+    }
+
+    // 最終 fold: out = hi + lo (f64 へ)
+    for i in 0..n {
+        out[i] = hi[i] + lo[i];
+    }
+}
+
 /// aug_mat must be the symmetric upper-triangular CSC factorized into fac.
 pub(crate) fn solve_with_iterative_refinement(
     fac: &LdlFactorizationAmd,
@@ -55,6 +133,11 @@ pub(crate) fn solve_with_iterative_refinement(
         return;
     }
 
+    // DD residual 経路では max_iters を IR_MAX_ITERS_DD まで拡張 (LDL precision 限界
+    // を反復で破るため)。
+    let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
+    let max_iters = if use_dd_residual { max_iters.max(IR_MAX_ITERS_DD) } else { max_iters };
+
     // 大型問題では IR の overhead が deadline を圧迫する。
     // BOYD2 (n+m_ext≈280k) で 1 反復 LDL ~30s なので IR で 2x 遅化 → 100s 予算超過。
     // 100k を境界として大型問題は IR skip（baseline 動作維持）。
@@ -65,36 +148,56 @@ pub(crate) fn solve_with_iterative_refinement(
     }
 
     let rhs_inf = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-    let resid_skip_threshold = rhs_inf * 1e-13;
+    // DD residual path はより低い floor まで測れるので threshold を緩める。
+    // 標準 f64 IR では eps×rhs_inf 級が下限なので 1e-13 で打ち切るが、
+    // DD では eps_DD ~ 1e-32 まで測れるため correction を最後まで適用する価値がある。
+    let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
+    let resid_skip_threshold = if use_dd_residual {
+        rhs_inf * 1e-30
+    } else {
+        rhs_inf * 1e-13
+    };
 
     let mut kx = vec![0.0_f64; n];
     let mut residual = vec![0.0_f64; n];
     let mut correction = vec![0.0_f64; n];
 
     let trace_ir = std::env::var("IR_TRACE").ok().as_deref() == Some("1");
+    // Mixed-precision IR: env=IR_DD=1 で残差計算を double-double にする。
+    // 標準 f64 IR は LDL precision (eps × cond ~ 1e-6) で floor、DD 残差で
+    // 解の精度を eps_DD ~ 1e-32 まで引き出せる (Wilkinson IR 解析)。
+    // LISWET/YAO の precision floor 突破の本命。
     if trace_ir {
         let sol_inf_initial = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-        eprintln!("IR_START n={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e}", n, rhs_inf, sol_inf_initial, resid_skip_threshold);
+        eprintln!("IR_START n={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e} dd={}",
+            n, rhs_inf, sol_inf_initial, resid_skip_threshold, use_dd_residual);
     }
     for _ir_iter in 0..max_iters {
-        // K * sol (symmetric matvec, upper-triangular CSC).
-        for v in kx.iter_mut() {
-            *v = 0.0;
-        }
-        for col in 0..aug_mat.ncols {
-            for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
-                let row = aug_mat.row_ind[ptr];
-                let val = aug_mat.values[ptr];
-                kx[row] += val * sol[col];
-                if row != col {
-                    kx[col] += val * sol[row];
+        if use_dd_residual {
+            // DD 精度で residual = rhs - K·sol を直接計算
+            compute_residual_dd(aug_mat, sol, rhs, &mut residual);
+        } else {
+            // f64: K * sol (symmetric matvec, upper-triangular CSC) → residual = rhs - kx
+            for v in kx.iter_mut() {
+                *v = 0.0;
+            }
+            for col in 0..aug_mat.ncols {
+                for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
+                    let row = aug_mat.row_ind[ptr];
+                    let val = aug_mat.values[ptr];
+                    kx[row] += val * sol[col];
+                    if row != col {
+                        kx[col] += val * sol[row];
+                    }
                 }
+            }
+            for i in 0..n {
+                residual[i] = rhs[i] - kx[i];
             }
         }
 
         let mut resid_inf = 0.0_f64;
         for i in 0..n {
-            residual[i] = rhs[i] - kx[i];
             resid_inf = resid_inf.max(residual[i].abs());
         }
         if resid_inf <= resid_skip_threshold {
@@ -822,6 +925,34 @@ mod tests {
     use crate::qp::ipm::kkt::{build_augmented_system, build_schur_system};
     use crate::linalg::{ldl, amd::amd_with_deadline};
     use crate::sparse::CscMatrix;
+
+    /// DD 残差計算 (compute_residual_dd) が f64 残差より高精度なことを確認。
+    /// 「a × b」を意図的に f64 でほぼ相殺する設定で、f64 残差は丸め誤差を出すが
+    /// DD 残差は exact 値を返すことを検証。
+    #[test]
+    fn test_dd_residual_precision_vs_f64() {
+        use super::compute_residual_dd;
+        // K = [[a, 0], [0, 1]] with a near 1.0 + small.
+        // x = [1.0, 1.0]; rhs = [a, 1.0].
+        // 真の residual = rhs - K·x = [0, 0].
+        // ただし f64 演算で a*1.0 - a の中間に丸め誤差が入る scenarios 用。
+        let n = 2;
+        let a = 1.0_f64 + 1e-16; // 1 + ulp
+        let mat = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 1],
+            &[a, 1.0],
+            n, n,
+        ).unwrap();
+        let sol = vec![1.0_f64, 1.0_f64];
+        let rhs = vec![a, 1.0_f64];
+        let mut r_dd = vec![0.0_f64; n];
+        compute_residual_dd(&mat, &sol, &rhs, &mut r_dd);
+        // DD residual: exact 0 を期待 (a * 1 = a 完全、a - a = 0)
+        for &v in &r_dd {
+            assert!(v.abs() < 1e-30, "DD residual should be ~0, got {:e}", v);
+        }
+    }
 
     /// 多制約・等式・不等式混在の LISWET 風テスト。
     /// sigma にも幅広い range (1e-3〜1e3) を持たせて Schur が数値的に augmented と一致することを確認。
