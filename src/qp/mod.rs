@@ -882,6 +882,24 @@ pub(crate) fn refine_kkt_iterative(
         }
     };
 
+    // FX/EmptyCol 変数の判定 (kkt_residual_rel と整合):
+    //   FX (lb≈ub): presolve 慣例で bound_dual=0 埋め、stationarity 評価から除外
+    //   EmptyCol (制約 A に登場しない): bound_dual=0 慣例、Q∅ + c[j] != 0 のため除外
+    // これらを含めると orig 空間で huge cancellation noise (r_d_abs) が出て IR が壊れる。
+    const FX_TOL_REFINE: f64 = 1e-12;
+    let exclude_var: Vec<bool> = (0..n).map(|j| {
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL_REFINE {
+            return true;
+        }
+        if problem.a.col_ptr.len() > j + 1
+            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+        {
+            return true;
+        }
+        false
+    }).collect();
+
     let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
         let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
         let aty = problem.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n]);
@@ -889,6 +907,7 @@ pub(crate) fn refine_kkt_iterative(
         // codebase 規約: KKT stationarity = Qx + c + A^T·y + bound_contrib (kkt_residual_rel と整合)。
         // canonical の Qx + c - A^T·y - z_lb + z_ub と符号が違うので注意。
         for j in 0..n {
+            if exclude_var[j] { continue; }  // FX/EmptyCol は r_d=0 のまま
             let bc = bound_contrib_at_var(&problem.bounds, z, j);
             r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
         }
@@ -911,40 +930,10 @@ pub(crate) fn refine_kkt_iterative(
 
     let pre_z = result.bound_duals.clone();
     let (_, _, pre_pf, pre_df) = compute_residuals(&result.solution, &result.dual_solution, &pre_z);
-
-    // df の cancellation noise 検出: 絶対 df が大きいが相対 df が小さい場合 (YAO 系で
-    // pre_df_abs=132、pre_df_rel=8e-11) は r_d を RHS から除外し primal-only mode で IR。
-    // 動機: orig 空間で qx, aty, bound_contrib が 1e12 オーダーで打ち消す問題では、
-    // r_d 絶対値は丸め誤差由来で意味を持たない。これをそのまま RHS にすると LDL solve が
-    // 大きな dx を生成して primal を破壊する。相対 df が eps 以下なら dual は既に収束済みと
-    // みなし dx は A·dx = -r_p の最小ノルム解 (Q·dx ≈ 0 拘束付き) として求める。
-    // kkt_residual_rel と整合する scale: 1 + max(|Qx|, |c|, |A^T y|, |bound_contrib|)。
-    // bound_contrib を抜くと YAO のような bound active 問題で scale が 1e12 過小になる。
-    let scale = {
-        let qx = problem.q.mat_vec_mul(&result.solution).unwrap_or_else(|_| vec![0.0; n]);
-        let aty = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or_else(|_| vec![0.0; n]);
-        let mut max_qx = 0.0_f64;
-        let mut max_aty = 0.0_f64;
-        let mut max_c = 0.0_f64;
-        let mut max_bnd = 0.0_f64;
-        for j in 0..n {
-            max_qx = max_qx.max(qx[j].abs());
-            max_aty = max_aty.max(aty[j].abs());
-            max_c = max_c.max(problem.c[j].abs());
-            let bc = bound_contrib_at_var(&problem.bounds, &result.bound_duals, j);
-            max_bnd = max_bnd.max(bc.abs());
-        }
-        1.0_f64 + max_qx.max(max_aty).max(max_c).max(max_bnd)
-    };
-    let pre_df_rel = pre_df / scale;
-    /// dual residual を noise とみなす相対閾値 (eps レベルで既に収束済みと判定)。
-    const DF_REL_NOISE_THRESHOLD: f64 = 1e-6;
-    let primal_only_mode = pre_df_rel < DF_REL_NOISE_THRESHOLD;
-
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     if trace {
-        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} pre_df_rel={:.3e} primal_only={} target_pf={:.3e}",
-            n, m, pre_pf, pre_df, pre_df_rel, primal_only_mode, target_pf);
+        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e}",
+            n, m, pre_pf, pre_df, target_pf);
     }
     if pre_pf < target_pf {
         if trace {
@@ -968,10 +957,7 @@ pub(crate) fn refine_kkt_iterative(
         }
 
         let mut rhs = vec![0.0_f64; n + m];
-        if !primal_only_mode {
-            for j in 0..n { rhs[j] = -r_d[j]; }
-        }
-        // primal_only_mode: r_d を 0 として扱い、dx は A·dx = -r_p の最小ノルム解 (Q·dx ≈ 0 制約) になる。
+        for j in 0..n { rhs[j] = -r_d[j]; }
         for i in 0..m { rhs[n + i] = -r_p[i]; }
 
         let mut sol = vec![0.0_f64; n + m];
