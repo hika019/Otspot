@@ -98,6 +98,15 @@ const DIVERGENCE_GROWTH_RATIO: f64 = 1.3;
 const DIVERGENCE_N: usize = 5;
 /// 検出が動く最小 iter (initial warm-up を保護)。
 const DIVERGENCE_MIN_ITER: usize = 30;
+
+/// PMM proximal deadlock 検出: prox 寄与が残差を支配する状態。
+/// 発火条件: stall (連続 non-improvement) AND prox_inf > residual × ratio。
+/// stall 条件で過敏発火を防ぐ (drift 開始直後ではなく長期停滞後のみ発動)。
+const PROX_DEADLOCK_RATIO: f64 = 5.0;
+/// 連続 non-improvement で deadlock とみなす iter 数。短すぎると正常収束を阻害、
+/// 長すぎると発散開始後の発動が間に合わない。20 は YAO 実測 (iter 200-220 で stall)
+/// から余裕を持って設定。
+const PROX_DEADLOCK_STALL_N: usize = 20;
 /// alpha 停滞回数の早期脱出閾値 (best-so-far で復帰)。
 const ALPHA_STALL_N: usize = 5;
 /// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
@@ -355,6 +364,8 @@ pub(crate) fn solve_ippmm_inner(
     // QPILOTNO/YAO の暴発 pattern (best_iter 到達後に dy 幾何級数増大 → mu=1e35 → NaN_guard) 抑止。
     let mut divergence_count: usize = 0;
     let mut prev_dy_inf_for_div: f64 = 0.0;
+    // Proximal deadlock 検出用 stall counter (連続 non-improvement)。
+    let mut prox_no_improvement_count: usize = 0;
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
@@ -1065,18 +1076,25 @@ pub(crate) fn solve_ippmm_inner(
         // proximal injection (δ·diff_inf) が現在の残差を支配する状態。
         // これを放置すると Newton step が prox に支配され dy が幾何級数的に成長して
         // r_p, r_d に注入され続ける (YAO/QPILOTNO の発散 trigger 実測確認)。
-        // 5% 改善閾値で y_ref が更新されない deadlock を、prox-dominated 状態で
-        // 強制解除する。
+        //
+        // 発火条件 (両方必要):
+        //   1. 連続 non-improvement が PROX_DEADLOCK_STALL_N 以上 (drift が累積した状態)
+        //   2. prox 寄与 > 残差 × PROX_DEADLOCK_RATIO (drift が支配的)
+        //
+        // (1) で「単純に proximal が効いてる過渡期」を除外、(2) で「数値的危険水準」を確認。
+        // YAO で stall 条件無しで発火させると wrong basin に流れて obj 8.6% drift が出た。
+        if !either_improved {
+            prox_no_improvement_count += 1;
+        } else {
+            prox_no_improvement_count = 0;
+        }
         let prox_p_inf = y.iter().zip(pmm.y_ref.iter())
             .map(|(&yi, &yref)| (pmm.delta * (yi - yref)).abs())
             .fold(0.0_f64, f64::max);
         let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
             .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
             .fold(0.0_f64, f64::max);
-        // PROX_DEADLOCK_RATIO: prox 寄与が残差の 5x 以上で deadlock 判定。
-        // 経験値: 1x だと敏感すぎ過剰更新、10x だと検出遅れ。
-        const PROX_DEADLOCK_RATIO: f64 = 5.0;
-        let prox_deadlock = !either_improved
+        let prox_deadlock = prox_no_improvement_count >= PROX_DEADLOCK_STALL_N
             && (prox_p_inf > nr_p * PROX_DEADLOCK_RATIO || prox_d_inf > nr_d * PROX_DEADLOCK_RATIO);
         if either_improved || force_ref_update || prox_deadlock {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}

@@ -862,6 +862,7 @@ pub(crate) fn refine_kkt_iterative(
 
     // δp, δd: K の対角正則化。十分小さく (IR で eps·‖K‖ レベルまで refine 可)、
     // LDL の数値安定性が確保される値。1e-10 は LISWET cond 1e10 で K cond 1e2 級。
+    // YAO 系 (A rank-deficient) では LDL solve が暴走するが、accept guard で保護。
     const DELTA_P: f64 = 1e-10;
     const DELTA_D: f64 = 1e-10;
 
