@@ -667,30 +667,9 @@ pub(crate) fn solve_ippmm_inner(
         // rho/deltaはPMMが管理する。mu依存フロアは使わない
         // env QP_DELTA_MIN_OVERRIDE で options.ipm.delta_min を上書き (Session 12 検証用)。
         // Session 12 で発見: matrix block -(Σ+δI) の δ_matrix が r_p_new floor の主因。
-        let delta_min_eff_global = std::env::var("QP_DELTA_MIN_OVERRIDE").ok()
+        let delta_min_eff = std::env::var("QP_DELTA_MIN_OVERRIDE").ok()
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(options.ipm.delta_min);
-
-        // 【Session 12 後半】二段階 δ_matrix 制御:
-        //   env QP_LATE_DELTA_MIN_THRESHOLD=<mu> + QP_LATE_DELTA_MIN=<delta> で
-        //   mu < threshold (= optimum 近傍) になった後だけ δ_matrix を下げる。
-        //
-        // 動機: δ_matrix を最初から下げると K matrix が ill-conditioned で Newton
-        // 方向が変質、obj drift する (Session 12 実証: δ=1e-10 で 30% drift)。
-        // 一方 floor の正体は α·δ_matrix·dy なので δ を下げないと突破不可。
-        //
-        // 解: mu が小さくなって x が optimum 近傍に到達してから δ を下げる。
-        // この時点では x は既にほぼ最適なので、Newton 方向の variation が
-        // 小さい obj drift しか引き起こさない期待。
-        let late_threshold = std::env::var("QP_LATE_DELTA_MIN_THRESHOLD").ok()
-            .and_then(|s| s.parse::<f64>().ok());
-        let late_delta_min = std::env::var("QP_LATE_DELTA_MIN").ok()
-            .and_then(|s| s.parse::<f64>().ok());
-        let delta_min_eff = match (late_threshold, late_delta_min) {
-            (Some(thr), Some(late)) if mu < thr => late,
-            _ => delta_min_eff_global,
-        };
-
         let rho_matrix = pmm.rho.max(delta_min_eff);
         let delta_matrix = pmm.delta.max(delta_min_eff);
 
@@ -1034,49 +1013,20 @@ pub(crate) fn solve_ippmm_inner(
             }
         }
 
-        // [Session 12] Late-phase reg_limit reduction:
-        //   env QP_LATE_REG_LIMIT=<val> + QP_LATE_DELTA_MIN_THRESHOLD=<mu> で、
-        //   mu < threshold (= optimum 近傍) になったら reg_limit を val に下げる。
-        //
-        // 動機: pmm.delta は reg_limit に floor。delta_matrix=max(pmm.delta, delta_min)。
-        //   小さい delta_matrix で α·δ·dy floor を下げるには pmm.delta も下がる必要がある。
-        //
-        // QP_LATE_DELTA_MIN (matrix の delta_min override) と組合せで両 floor を下げる。
-        // mu small で x が optimum 近傍にいるため、obj drift を抑える期待。
-        if let (Some(thr), Some(late_reg)) = (late_threshold, std::env::var("QP_LATE_REG_LIMIT").ok().and_then(|s| s.parse::<f64>().ok())) {
-            if mu < thr && reg_limit > late_reg {
-                reg_limit = late_reg;
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("LATE_REG iter={} mu={:.3e} reg_limit lowered to {:.3e}", iter, mu, reg_limit);
-                }
-            }
-        }
-
         // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
         // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
         // 根拠: 設計書§A.5
         let either_improved = primal_improved || dual_improved;
         // [実験] env=IPPMM_FORCE_REF_UPDATE=1 で毎 iter 強制更新 → proximal effect ≈0
         let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
-
-        // [Session 12] ρ floor を δ と分離 (env QP_RHO_FLOOR で上書き)。
-        //
-        // 動機: LISWET 系で δ_matrix を下げて floor を破ろうとすると、x が
-        // 別の (degenerate) 最適点に動いて obj drift する。proximal ρ·(x-x_ref) で
-        // x を anchor すれば drift を抑えられる期待。
-        // 通常は reg_limit が ρ・δ 両方の floor を支配するが、本 env で ρ floor のみ
-        // 高く保てる。default では reg_limit を使う既存挙動。
-        let rho_floor = std::env::var("QP_RHO_FLOOR").ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(reg_limit);
         if either_improved || force_ref_update {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
-            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(rho_floor);
+            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
         } else {
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(rho_floor);
+            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
         }
 
         // 残差記録（次反復の改善判定用）
