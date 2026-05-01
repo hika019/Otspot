@@ -665,8 +665,13 @@ pub(crate) fn solve_ippmm_inner(
 
         // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
         // rho/deltaはPMMが管理する。mu依存フロアは使わない
-        let rho_matrix = pmm.rho.max(options.ipm.delta_min);
-        let delta_matrix = pmm.delta.max(options.ipm.delta_min);
+        // env QP_DELTA_MIN_OVERRIDE で options.ipm.delta_min を上書き (Session 12 検証用)。
+        // Session 12 で発見: matrix block -(Σ+δI) の δ_matrix が r_p_new floor の主因。
+        let delta_min_eff = std::env::var("QP_DELTA_MIN_OVERRIDE").ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(options.ipm.delta_min);
+        let rho_matrix = pmm.rho.max(delta_min_eff);
+        let delta_matrix = pmm.delta.max(delta_min_eff);
 
         // ── augmented KKT 構築 + 因子化 ────────────────────────────
         // T2: 因子化前タイムアウトチェック
