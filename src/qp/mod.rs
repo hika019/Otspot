@@ -985,13 +985,79 @@ pub(crate) fn refine_kkt_iterative(
             abs_max, abs_min_nz, abs_max / abs_min_nz.max(1e-300)
         );
     }
-    let factor = match crate::linalg::ldl::factorize_quasidefinite_with_amd(&k_mat, None) {
-        Ok(f) => f,
-        Err(e) => {
-            if trace_pre || diag_on {
-                eprintln!("REFINE_KKT factorize failed: {:?} (delta_p={:.1e} delta_d={:.1e})", e, delta_p, delta_d);
+    // factorize: SingularOrIndefinite で失敗したら δ を段階的に上げて再試行。
+    // QPILOTNO 系の K (LP-like, Q≈0 で δp=1e-10 が支配的に singular) を救う。
+    // factorize 成立する最小 δ を探す。LISWET 系 (factorize OK) は初回成功で影響なし。
+    //
+    // δ を上げるトレードオフ:
+    //   - 大きすぎ → IR の forward error 増 (cond×ε で δ が cond の代理)
+    //   - 小さすぎ → factorize fail
+    //   - 段階的に増やして「factorize 成立する最小 δ」を選ぶ
+    const FACTOR_RETRY_GROWTH: f64 = 10.0;
+    const FACTOR_RETRY_MAX: usize = 6;  // δ_init × 10^6 まで (1e-10 → 1e-4)
+    let factor = {
+        let mut current_delta_p = delta_p;
+        let mut current_delta_d = delta_d;
+        let mut current_k = k_mat.clone();
+        let mut result_factor: Option<crate::linalg::ldl::LdlFactorizationAmd> = None;
+        let mut retry_count = 0usize;
+        loop {
+            match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, None) {
+                Ok(f) => { result_factor = Some(f); break; }
+                Err(e) => {
+                    if retry_count >= FACTOR_RETRY_MAX {
+                        if trace_pre || diag_on {
+                            eprintln!("REFINE_KKT factorize failed after {} retries: {:?} (last delta_p={:.1e} delta_d={:.1e})",
+                                retry_count, e, current_delta_p, current_delta_d);
+                        }
+                        break;
+                    }
+                    retry_count += 1;
+                    current_delta_p *= FACTOR_RETRY_GROWTH;
+                    current_delta_d *= FACTOR_RETRY_GROWTH;
+                    current_k = crate::qp::ipm::kkt::build_augmented_system(
+                        &problem.q, &problem.a, &sigma_zero, current_delta_p, current_delta_d
+                    );
+                    // bound-active fix を再適用 (新しい K に対して)
+                    if active_fix_enabled {
+                        let mut k_diag_max_retry = 0.0_f64;
+                        for j in 0..(n + m) {
+                            let cs = current_k.col_ptr[j];
+                            let ce = current_k.col_ptr[j + 1];
+                            for k in cs..ce {
+                                if current_k.row_ind[k] == j {
+                                    k_diag_max_retry = k_diag_max_retry.max(current_k.values[k].abs());
+                                    break;
+                                }
+                            }
+                        }
+                        let active_penalty_retry = (k_diag_max_retry * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
+                        for j in 0..n {
+                            let x = result.solution[j];
+                            let (lb, ub) = problem.bounds[j];
+                            let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
+                                || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
+                            if !is_active { continue; }
+                            let cs = current_k.col_ptr[j];
+                            let ce = current_k.col_ptr[j + 1];
+                            for k in cs..ce {
+                                if current_k.row_ind[k] == j {
+                                    current_k.values[k] += active_penalty_retry;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            return 0;
+        }
+        if (trace_pre || diag_on) && retry_count > 0 && result_factor.is_some() {
+            eprintln!("REFINE_KKT factorize succeeded after {} retries (final delta_p={:.1e} delta_d={:.1e})",
+                retry_count, current_delta_p, current_delta_d);
+        }
+        match result_factor {
+            Some(f) => f,
+            None => return 0,
         }
     };
     if diag_on {
@@ -1063,12 +1129,92 @@ pub(crate) fn refine_kkt_iterative(
         (r_d, r_p, pf, df)
     };
 
+    // DD (double-double) residual: Wilkinson IR の "double the working precision" 実装。
+    // working precision IR の forward error は O(n × κ × ε)、これを超えるには residual を
+    // 倍精度で計算する必要がある (Wikipedia: Iterative refinement)。
+    //
+    // 本実装: Q*x, A^T*y, A*x の各積算を TwoFloat (DD ≈ 106 bit ≈ 31 桁) で実行。
+    // 各積を new_mul (Joldes 2017 Algorithm 2) で精密に計算、累積も DD で。
+    // LDL solve は f64 のまま (Wikipedia 通り、LDL の精度は cond × ε で十分)。
+    //
+    // env REFINE_KKT_DD=1 で有効化。default は f64 residual (高速)。
+    let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() == Some("1");
+    let compute_residuals_dd = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
+        use twofloat::TwoFloat;
+        let zero_dd = TwoFloat::from(0.0);
+        // qx[i] = sum_k Q[i,k] * x[k]  (Q は対称、上三角 CSC 格納)
+        let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for j in 0..n {
+            let cs = problem.q.col_ptr[j];
+            let ce = problem.q.col_ptr[j + 1];
+            for k in cs..ce {
+                let row = problem.q.row_ind[k];
+                let v = problem.q.values[k];
+                // 対角項
+                qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, x[j]);
+                // 対称項 (上三角格納で行 != 列のとき双方に加算)
+                if row != j {
+                    qx_dd[j] = qx_dd[j] + TwoFloat::new_mul(v, x[row]);
+                }
+            }
+        }
+        // aty[col] = sum_row A[row,col] * y[row]  (CSC で col 走査)
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                let v = problem.a.values[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, y[row]);
+            }
+        }
+        // r_d[j] = qx[j] + c[j] + aty[j] + bound_contrib[j]
+        let mut r_d = vec![0.0_f64; n];
+        for j in 0..n {
+            if exclude_var[j] { continue; }
+            let bc = bound_contrib_at_var(&problem.bounds, z, j);
+            let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
+            r_d[j] = f64::from(r);
+        }
+        // ax[row] = sum_col A[row,col] * x[col]  (CSC で col 走査して row に加算)
+        let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                let v = problem.a.values[k];
+                ax_dd[row] = ax_dd[row] + TwoFloat::new_mul(v, x[col]);
+            }
+        }
+        let mut r_p = vec![0.0_f64; m];
+        let mut pf = 0.0_f64;
+        for i in 0..m {
+            let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
+            let raw = f64::from(raw_dd);
+            let v = match problem.constraint_types[i] {
+                ConstraintType::Eq => raw,
+                ConstraintType::Ge => if raw < 0.0 { raw } else { 0.0 },
+                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
+            };
+            r_p[i] = v;
+            pf = pf.max(v.abs());
+        }
+        let df = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+        (r_d, r_p, pf, df)
+    };
+
     let pre_z = result.bound_duals.clone();
-    let (_, _, pre_pf, pre_df) = compute_residuals(&result.solution, &result.dual_solution, &pre_z);
+    let (_, _, pre_pf, pre_df) = if dd_mode {
+        compute_residuals_dd(&result.solution, &result.dual_solution, &pre_z)
+    } else {
+        compute_residuals(&result.solution, &result.dual_solution, &pre_z)
+    };
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     if trace {
-        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e}",
-            n, m, pre_pf, pre_df, target_pf);
+        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
+            n, m, pre_pf, pre_df, target_pf, dd_mode);
     }
     if pre_pf < target_pf {
         if trace {
@@ -1084,8 +1230,11 @@ pub(crate) fn refine_kkt_iterative(
     let df_limit = (pre_df * DF_TOLERANCE_FACTOR).max(1e-7);
 
     for iter in 0..max_iters {
-        let (r_d, r_p, pf_cur, df_cur) =
-            compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals);
+        let (r_d, r_p, pf_cur, df_cur) = if dd_mode {
+            compute_residuals_dd(&result.solution, &result.dual_solution, &result.bound_duals)
+        } else {
+            compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals)
+        };
         if pf_cur < target_pf {
             if trace { eprintln!("REFINE_KKT iter={} early: pf_cur={:.3e} < target", iter, pf_cur); }
             break;
@@ -1143,8 +1292,11 @@ pub(crate) fn refine_kkt_iterative(
         tmp.dual_solution = y_new;
         refit_bound_duals_kkt(problem, &mut tmp);
 
-        let (_, _, pf_new, df_new) =
-            compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
+        let (_, _, pf_new, df_new) = if dd_mode {
+            compute_residuals_dd(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
+        } else {
+            compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
+        };
 
         if trace {
             eprintln!("REFINE_KKT iter={} pf={:.3e}->{:.3e} df={:.3e}->{:.3e} dx_inf={:.3e} dy_inf={:.3e} clip={:.3e}",
