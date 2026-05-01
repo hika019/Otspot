@@ -169,6 +169,14 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
+    // [DIAG] post-IPM 各段階の KKT residual trace (env=POST_STAGE_TRACE=1)
+    let stage_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
+    if stage_trace {
+        let pf = primal_residual_rel(&view, &final_sol.solution);
+        let kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        eprintln!("POST_STAGE before_A: pf_rel={:.3e} kkt_rel={:.3e}", pf, kkt);
+    }
+
     // 元空間 post-processing:
     //   stage A: x の primal projection (LISWET 系 T1.3)
     //   stage B: y を refine_dual_lsq で再計算
