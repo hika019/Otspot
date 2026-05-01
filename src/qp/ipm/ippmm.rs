@@ -1061,7 +1061,24 @@ pub(crate) fn solve_ippmm_inner(
         let either_improved = primal_improved || dual_improved;
         // [実験] env=IPPMM_FORCE_REF_UPDATE=1 で毎 iter 強制更新 → proximal effect ≈0
         let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
-        if either_improved || force_ref_update {
+        // Proximal feedback loop 検出: y/x が y_ref/x_ref から十分離れて
+        // proximal injection (δ·diff_inf) が現在の残差を支配する状態。
+        // これを放置すると Newton step が prox に支配され dy が幾何級数的に成長して
+        // r_p, r_d に注入され続ける (YAO/QPILOTNO の発散 trigger 実測確認)。
+        // 5% 改善閾値で y_ref が更新されない deadlock を、prox-dominated 状態で
+        // 強制解除する。
+        let prox_p_inf = y.iter().zip(pmm.y_ref.iter())
+            .map(|(&yi, &yref)| (pmm.delta * (yi - yref)).abs())
+            .fold(0.0_f64, f64::max);
+        let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
+            .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
+            .fold(0.0_f64, f64::max);
+        // PROX_DEADLOCK_RATIO: prox 寄与が残差の 5x 以上で deadlock 判定。
+        // 経験値: 1x だと敏感すぎ過剰更新、10x だと検出遅れ。
+        const PROX_DEADLOCK_RATIO: f64 = 5.0;
+        let prox_deadlock = !either_improved
+            && (prox_p_inf > nr_p * PROX_DEADLOCK_RATIO || prox_d_inf > nr_d * PROX_DEADLOCK_RATIO);
+        if either_improved || force_ref_update || prox_deadlock {
             pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
             pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
