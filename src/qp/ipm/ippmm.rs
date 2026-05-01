@@ -88,16 +88,6 @@ const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
 /// alpha 停滞検出: line search が `alpha < ALPHA_STALL_EPS` のときに stall とみなす。
 const ALPHA_STALL_EPS: f64 = 1e-8;
-/// Newton step 発散検出: dy_inf が連続 N iter で `DIVERGENCE_GROWTH_RATIO` 倍超に
-/// 成長したら発散とみなす。
-/// QPILOTNO/YAO で観察された pattern: best 到達後に dy が 1.3-1.5x/iter で幾何級数増大、
-/// 最終的に Σ=1e35 級で NaN_guard まで暴走する。best 到達直後で stop すれば
-/// 余分な iter 消費 + 暴走復旧コストを回避できる。
-const DIVERGENCE_GROWTH_RATIO: f64 = 1.3;
-/// 連続成長 iter 数 (短すぎると正常な non-monotonic 挙動で誤検出、5 連続で確実に発散)。
-const DIVERGENCE_N: usize = 5;
-/// 検出が動く最小 iter (initial warm-up を保護)。
-const DIVERGENCE_MIN_ITER: usize = 30;
 /// alpha 停滞回数の早期脱出閾値 (best-so-far で復帰)。
 const ALPHA_STALL_N: usize = 5;
 /// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
@@ -351,10 +341,6 @@ pub(crate) fn solve_ippmm_inner(
 
     // alpha 停滞・deadlock 検出 (定数はモジュールレベルに集約)
     let mut alpha_stall_count: usize = 0;
-    // Newton step 発散検出: dy_inf が連続成長したら early exit。
-    // QPILOTNO/YAO の暴発 pattern (best_iter 到達後に dy 幾何級数増大 → mu=1e35 → NaN_guard) 抑止。
-    let mut divergence_count: usize = 0;
-    let mut prev_dy_inf_for_div: f64 = 0.0;
 
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
@@ -943,39 +929,6 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
-
-        // Newton step 発散検出: dy_inf が連続して幾何級数的に成長したら
-        // best-so-far に復帰して early exit。QPILOTNO/YAO の暴発 pattern (best 到達後に
-        // dy が 1.3x/iter で増大、最終的に Σ=1e35 級まで暴走) を防ぐ。
-        // best_score が有限 (= valid pre-divergence state あり) のときのみ発動。
-        if iter >= DIVERGENCE_MIN_ITER {
-            let dy_inf_now = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            if dy_inf_now > prev_dy_inf_for_div * DIVERGENCE_GROWTH_RATIO
-                && prev_dy_inf_for_div > 0.0
-                && best_score.is_finite()
-            {
-                divergence_count += 1;
-            } else {
-                divergence_count = 0;
-            }
-            prev_dy_inf_for_div = dy_inf_now;
-            if divergence_count >= DIVERGENCE_N {
-                x.copy_from_slice(&best_x);
-                y.copy_from_slice(&best_y);
-                s.copy_from_slice(&best_s);
-                final_iter = best_iter;
-                final_residuals = Some(best_residuals);
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "IPPMM_EXIT iter={} path=Suboptimal_divergence_bestsofar best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e}) dy_inf={:.3e}",
-                        iter, best_iter, best_score,
-                        best_residuals.0, best_residuals.1, best_residuals.2, dy_inf_now
-                    );
-                }
-                status = Some(SolveStatus::SuboptimalSolution);
-                break;
-            }
-        }
 
         // null-space: alpha 停滞早期脱出。
         // alpha=0 が続く＝line search が進まない＝数値飽和または null-space 漂流。
