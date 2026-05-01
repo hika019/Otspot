@@ -392,6 +392,7 @@ pub(crate) fn gondzio_correctors_schur(
 ) -> f64 {
     let mut alpha_prev = alpha_init;
     for _k in 0..max_correctors {
+        // (1) 目標 step size と mu (不等式行のみ) — augmented と完全一致
         let alpha_target = (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
         let mu_target: f64 = if m_ineq > 0 {
             s.iter()
@@ -409,25 +410,36 @@ pub(crate) fn gondzio_correctors_schur(
         };
         let mu_target = mu_target.max(0.0);
 
-        let r_c_gondzio: Vec<f64> = s
-            .iter()
-            .zip(y.iter())
-            .zip(ds.iter().zip(dy.iter()))
-            .zip(r_c_corr.iter())
-            .enumerate()
-            .map(|(i, (((&si, &yi), (&dsi, &dyi)), &rci))| {
-                if is_eq_ext[i] {
-                    0.0
-                } else {
-                    let raw = mu_target - (si + dsi) * (yi + dyi);
-                    let bound_lo = GAMMA_L * mu_target;
-                    let bound_hi = GAMMA_U * mu_target;
-                    let raw = raw.max(bound_lo).min(bound_hi);
-                    raw - rci
-                }
-            })
-            .collect();
+        // (2) 各 complementarity pair の目標範囲
+        let target_lo = GAMMA_L * mu_target;
+        let target_hi = GAMMA_U * mu_target;
 
+        // (3) Gondzio corrector RHS 構築 (augmented gondzio_correctors と完全一致):
+        //   si_new = s + alpha_prev * ds, yi_new = y + alpha_prev * dy
+        //   v_i = si_new * yi_new
+        //   v_target = (target_lo - v_i) if v_i < target_lo else
+        //              (target_hi - v_i) if v_i > target_hi else 0
+        //   r_c_gondzio = r_c_corr + v_target
+        let mut r_c_gondzio = vec![0.0_f64; m_ext];
+        for i in 0..m_ext {
+            if is_eq_ext[i] {
+                r_c_gondzio[i] = 0.0;
+                continue;
+            }
+            let si_new = s[i] + alpha_prev * ds[i];
+            let yi_new = y[i] + alpha_prev * dy[i];
+            let v_i = si_new * yi_new;
+            let v_target = if v_i < target_lo {
+                target_lo - v_i
+            } else if v_i > target_hi {
+                target_hi - v_i
+            } else {
+                0.0
+            };
+            r_c_gondzio[i] = r_c_corr[i] + v_target;
+        }
+
+        // (4) 修正 RHS と Schur solve
         let r_p_mod_gondzio: Vec<f64> = r_primal
             .iter()
             .zip(r_c_gondzio.iter())
@@ -444,14 +456,15 @@ pub(crate) fn gondzio_correctors_schur(
             s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_gondzio, &mut dx_new, &mut dy_new,
         );
 
-        let mut ds_new = vec![0.0_f64; m_ext];
-        for i in 0..m_ext {
-            if is_eq_ext[i] {
-                ds_new[i] = 0.0;
-            } else {
-                ds_new[i] = r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i];
-            }
-        }
+        let ds_new: Vec<f64> = (0..m_ext)
+            .map(|i| {
+                if is_eq_ext[i] {
+                    0.0
+                } else {
+                    r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i]
+                }
+            })
+            .collect();
 
         let alpha_s_new = fraction_to_boundary_masked(s, &ds_new, TAU, is_eq_ext);
         let alpha_y_new = fraction_to_boundary_masked(y, &dy_new, TAU, is_eq_ext);

@@ -794,6 +794,7 @@ pub(crate) fn solve_ippmm_inner(
                 &sigma_vec, &fac, aug_mat_for_ir, d_inv, &a_ext, n, m_ext,
                 &mut dx, &mut dy, &mut ds,
             );
+
             (pred, alpha, r_c_corr)
         } else {
             let pred = predictor_step(
@@ -833,6 +834,7 @@ pub(crate) fn solve_ippmm_inner(
                 )
             };
         }
+
         let _ = pred; // 未使用警告抑止
 
         // ── 変数更新 ──────────────────────────────────────────────
