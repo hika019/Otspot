@@ -862,25 +862,160 @@ pub(crate) fn refine_kkt_iterative(
 
     // δp, δd: K の対角正則化。十分小さく (IR で eps·‖K‖ レベルまで refine 可)、
     // LDL の数値安定性が確保される値。1e-10 は LISWET cond 1e10 で K cond 1e2 級。
-    const DELTA_P: f64 = 1e-10;
-    const DELTA_D: f64 = 1e-10;
+    // 診断用 env: REFINE_KKT_DELTA=<val> で δp=δd を上書き (QPILOTNO factorize 試験等)。
+    const DELTA_P_DEFAULT: f64 = 1e-10;
+    const DELTA_D_DEFAULT: f64 = 1e-10;
+    let (delta_p, delta_d) = match std::env::var("REFINE_KKT_DELTA")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        Some(v) if v > 0.0 => (v, v),
+        _ => (DELTA_P_DEFAULT, DELTA_D_DEFAULT),
+    };
 
     let sigma_zero = vec![0.0_f64; m];
-    let k_mat = crate::qp::ipm::kkt::build_augmented_system(
-        &problem.q, &problem.a, &sigma_zero, DELTA_P, DELTA_D
+    let mut k_mat = crate::qp::ipm::kkt::build_augmented_system(
+        &problem.q, &problem.a, &sigma_zero, delta_p, delta_d
     );
 
     let trace_pre = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
+    let diag_on = std::env::var("REFINE_KKT_DIAG").ok().as_deref() == Some("1");
+
+    // bound active 変数の dx を penalty で抑制 (近似 active set fix)。
+    //
+    // 動機: saddle-point K = [Q+δp·I, A^T; A, -δd·I] は bound 制約を陽に持たないため、
+    //       LDL solve は bound active な変数 (x が bound に張り付いている) にも自由に dx
+    //       を生成する。dx が bound を超えると refine ループ内で clip され、結果の x が
+    //       K·u=-r を満たさず pf 大幅悪化 → accept guard で reject。
+    //       YAO で実証: 通常 dx_inf=0.354 (active 2 変数に集中) → reject。
+    //       本処理を入れると dx_inf=0.150 → 7 iter で pf<target 達成 → PASS。
+    //
+    // 数値設計:
+    //   - ACTIVE_TOL = 1e-8: bound 近接判定 (ユーザー eps=1e-6 の 100 倍厳しい)
+    //   - PENALTY = K_diag_max × PENALTY_RATIO で K のスケールに自動適応
+    //   - PENALTY_RATIO = 1e8: 標準 RHS (~eps=1e-6) で dx_j ≈ K_max × 1e-14
+    //     (eps の 8 桁下、bound 違反十分小)。1e10 では過抑制で iter 1 で reject 観測。
+    //
+    // 真の active set fix (Lagrange multiplier or Schur complement) ではないが、
+    // 数値的に等価な効果を持ち実装最小。env=REFINE_KKT_REDUCED=0 で無効化可能。
+    const ACTIVE_TOL: f64 = 1e-8;
+    const ACTIVE_PENALTY_RATIO: f64 = 1e8;
+    let active_fix_enabled = std::env::var("REFINE_KKT_REDUCED").ok().as_deref() != Some("0");
+    if active_fix_enabled {
+        // K の対角の最大絶対値を取得 (penalty スケール用)
+        let mut k_diag_max = 0.0_f64;
+        for j in 0..(n + m) {
+            let cs = k_mat.col_ptr[j];
+            let ce = k_mat.col_ptr[j + 1];
+            for k in cs..ce {
+                if k_mat.row_ind[k] == j {
+                    k_diag_max = k_diag_max.max(k_mat.values[k].abs());
+                    break;
+                }
+            }
+        }
+        let active_penalty = (k_diag_max * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
+        let mut penalized = 0_usize;
+        for j in 0..n {
+            let x = result.solution[j];
+            let (lb, ub) = problem.bounds[j];
+            let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
+                || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
+            if !is_active { continue; }
+            let col_start = k_mat.col_ptr[j];
+            let col_end = k_mat.col_ptr[j + 1];
+            for k in col_start..col_end {
+                if k_mat.row_ind[k] == j {
+                    k_mat.values[k] += active_penalty;
+                    penalized += 1;
+                    break;
+                }
+            }
+        }
+        if (trace_pre || diag_on) && penalized > 0 {
+            eprintln!("REFINE_KKT bound-active fix: penalized {} vars (PENALTY={:.2e}, K_diag_max={:.2e})",
+                penalized, active_penalty, k_diag_max);
+        }
+    }
     if trace_pre {
-        eprintln!("REFINE_KKT pre-factorize: n={} m={} K_nnz={}", n, m, k_mat.values.len());
+        eprintln!("REFINE_KKT pre-factorize: n={} m={} K_nnz={} delta_p={:.1e} delta_d={:.1e}",
+            n, m, k_mat.values.len(), delta_p, delta_d);
+    }
+    if diag_on {
+        // K の対角分布を実測 (cond の代理指標として min/max/abs_min/abs_max)。
+        // K = [Q+δp·I, A^T; A, -δd·I] なので上 n 行は SPD 系、下 m 行は -δd·I + Σ.
+        // build_augmented_system は upper triangular CSC を返す。
+        let mut diag_top_min = f64::INFINITY;
+        let mut diag_top_max = f64::NEG_INFINITY;
+        let mut diag_top_abs_min = f64::INFINITY;
+        let mut diag_bot_min = f64::INFINITY;
+        let mut diag_bot_max = f64::NEG_INFINITY;
+        let mut diag_bot_abs_min = f64::INFINITY;
+        for j in 0..(n + m) {
+            let col_start = k_mat.col_ptr[j];
+            let col_end = k_mat.col_ptr[j + 1];
+            for k in col_start..col_end {
+                if k_mat.row_ind[k] == j {
+                    let v = k_mat.values[k];
+                    if j < n {
+                        diag_top_min = diag_top_min.min(v);
+                        diag_top_max = diag_top_max.max(v);
+                        diag_top_abs_min = diag_top_abs_min.min(v.abs());
+                    } else {
+                        diag_bot_min = diag_bot_min.min(v);
+                        diag_bot_max = diag_bot_max.max(v);
+                        diag_bot_abs_min = diag_bot_abs_min.min(v.abs());
+                    }
+                    break;
+                }
+            }
+        }
+        eprintln!(
+            "REFINE_KKT_DIAG K_diag top(Q+δp·I)=[min={:.3e} max={:.3e} abs_min={:.3e}] bot(-δd·I)=[min={:.3e} max={:.3e} abs_min={:.3e}]",
+            diag_top_min, diag_top_max, diag_top_abs_min,
+            diag_bot_min, diag_bot_max, diag_bot_abs_min
+        );
+        // 全要素の絶対値分布 (off-diag 含む) で K のスケール把握
+        let abs_max = k_mat.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let abs_min_nz = k_mat.values.iter()
+            .filter(|&&v| v != 0.0)
+            .fold(f64::INFINITY, |a, &v| a.min(v.abs()));
+        eprintln!(
+            "REFINE_KKT_DIAG K_all abs_max={:.3e} abs_min_nz={:.3e} ratio={:.3e}",
+            abs_max, abs_min_nz, abs_max / abs_min_nz.max(1e-300)
+        );
     }
     let factor = match crate::linalg::ldl::factorize_quasidefinite_with_amd(&k_mat, None) {
         Ok(f) => f,
         Err(e) => {
-            if trace_pre { eprintln!("REFINE_KKT factorize failed: {:?}", e); }
+            if trace_pre || diag_on {
+                eprintln!("REFINE_KKT factorize failed: {:?} (delta_p={:.1e} delta_d={:.1e})", e, delta_p, delta_d);
+            }
             return 0;
         }
     };
+    if diag_on {
+        // 因子化成功 → cond の代理: random RHS で solve した結果のノルム比 ||K^-1·r||_∞ / ||r||_∞.
+        // 大きいほど K が ill-conditioned (大きな inverse に増幅される)。
+        let mut rng_state: u64 = 0x9E3779B97F4A7C15;
+        let mut rhs = vec![0.0_f64; n + m];
+        for v in rhs.iter_mut() {
+            // xorshift64
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            *v = ((rng_state as f64) / (u64::MAX as f64)) * 2.0 - 1.0;
+        }
+        let rhs_inf = rhs.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let mut sol = vec![0.0_f64; n + m];
+        factor.solve(&rhs, &mut sol);
+        let sol_inf = sol.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let any_nan = sol.iter().any(|v| !v.is_finite());
+        eprintln!(
+            "REFINE_KKT_DIAG cond_proxy: ||K^-1·rand||_∞ / ||rand||_∞ = {:.3e} / {:.3e} = {:.3e} nan={}",
+            sol_inf, rhs_inf, sol_inf / rhs_inf.max(1e-300), any_nan
+        );
+    }
 
     // FX/EmptyCol 変数の判定 (kkt_residual_rel と整合):
     //   FX (lb≈ub): presolve 慣例で bound_dual=0 埋め、stationarity 評価から除外
@@ -973,14 +1108,31 @@ pub(crate) fn refine_kkt_iterative(
         let mut x_new = result.solution.clone();
         let mut y_new = result.dual_solution.clone();
         let mut clip_amt = 0.0_f64;
+        let mut clip_count = 0_usize;
+        let mut clip_top: Vec<(usize, f64)> = Vec::new();
         for j in 0..n {
             let raw = x_new[j] + sol[j];
             let (lb, ub) = problem.bounds[j];
             let mut clipped = raw;
             if lb.is_finite() { clipped = clipped.max(lb); }
             if ub.is_finite() { clipped = clipped.min(ub); }
-            clip_amt = clip_amt.max((raw - clipped).abs());
+            let amt = (raw - clipped).abs();
+            clip_amt = clip_amt.max(amt);
+            if amt > 0.0 {
+                clip_count += 1;
+                if diag_on {
+                    clip_top.push((j, amt));
+                }
+            }
             x_new[j] = clipped;
+        }
+        if diag_on && !clip_top.is_empty() {
+            clip_top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top5: Vec<String> = clip_top.iter().take(5)
+                .map(|(j, a)| format!("x[{}]={:.2e}", j, a))
+                .collect();
+            eprintln!("REFINE_KKT_DIAG iter={} clip_count={}/{} clip_max={:.3e} top5: {}",
+                iter, clip_count, n, clip_amt, top5.join(", "));
         }
         for i in 0..m {
             y_new[i] += sol[n + i];

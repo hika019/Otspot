@@ -86,8 +86,57 @@ fn run_ipm_with(
         crate::qp::refine_dual_lsq(reduced, &mut result);
     }
 
+    // [DIAG] POST_STAGE_TRACE: 後処理 chain で primal/kkt 残差がどこで膨らむか観測
+    let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
+    if post_trace {
+        let view_red = ProblemView {
+            q: &reduced.q,
+            a: &reduced.a,
+            c: &reduced.c,
+            b: &reduced.b,
+            bounds: &reduced.bounds,
+            constraint_types: &reduced.constraint_types,
+        };
+        let pres_red = primal_residual_rel(&view_red, &result.solution);
+        let kkt_red = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
+        // 絶対 pres と normalize denominator を計算
+        let ax_red = reduced.a.mat_vec_mul(&result.solution).unwrap_or_else(|_| vec![0.0; reduced.num_constraints]);
+        let mut pres_abs_red = 0.0_f64;
+        let mut max_ax_red = 0.0_f64;
+        let mut max_b_red = 0.0_f64;
+        use crate::problem::ConstraintType as CT;
+        for (i, (&ax_i, &b_i)) in ax_red.iter().zip(reduced.b.iter()).enumerate() {
+            let v = match reduced.constraint_types[i] {
+                CT::Eq => (ax_i - b_i).abs(),
+                CT::Ge => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            };
+            pres_abs_red = pres_abs_red.max(v);
+            max_ax_red = max_ax_red.max(ax_i.abs());
+            max_b_red = max_b_red.max(b_i.abs());
+        }
+        let denom_red = 1.0 + max_ax_red.max(max_b_red);
+        eprintln!("POST_STAGE [scaled+reduced after IPM+refine_dual_lsq] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
+            pres_red, pres_abs_red, denom_red, kkt_red, reduced.num_vars, reduced.num_constraints);
+    }
+
     // Ruiz unscale: presolve が scaling 適用済みの場合のみ。
     if let Some(scaler) = &presolve_result.ruiz_scaler {
+        if post_trace {
+            // Ruiz scaler の値域を観測 (scale factor が大きいと unscale で残差が増幅)。
+            // RuizScaler 構造: c (objective scale), r (row scale), s (col scale) を保持。
+            // 本診断では scaler 全要素を直接読まずアクセサ経由が必要だが、簡易に
+            // unscale 前後の解ノルム比を出すことで実効的な scale 増幅率を測る。
+            let x_pre_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let y_pre_inf = result.dual_solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let (x_unscaled, y_unscaled) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let x_post_inf = x_unscaled.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let y_post_inf = y_unscaled.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            eprintln!("POST_STAGE [Ruiz scale ratio] x_inf {:.3e}->{:.3e} (×{:.3e}) y_inf {:.3e}->{:.3e} (×{:.3e}) c_scale={:.3e}",
+                x_pre_inf, x_post_inf, x_post_inf / x_pre_inf.max(1e-300),
+                y_pre_inf, y_post_inf, y_post_inf / y_pre_inf.max(1e-300),
+                scaler.c);
+        }
         let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
         result.solution = x;
         result.dual_solution = y;
@@ -97,6 +146,59 @@ fn run_ipm_with(
         );
         if scaler.c.abs() > 1e-300 {
             result.objective /= scaler.c;
+        }
+    }
+    if post_trace {
+        // unscale 後 (まだ reduced space)、postsolve 前
+        let view_red = ProblemView {
+            q: &reduced.q,
+            a: &reduced.a,
+            c: &reduced.c,
+            b: &reduced.b,
+            bounds: &reduced.bounds,
+            constraint_types: &reduced.constraint_types,
+        };
+        let pres_red = primal_residual_rel(&view_red, &result.solution);
+        let kkt_red = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
+        eprintln!("POST_STAGE [unscaled (still reduced)] pres_rel={:.3e} kkt_rel={:.3e}",
+            pres_red, kkt_red);
+    }
+
+    if post_trace {
+        // presolve transform 内訳を実測 (postsolve で primal が悪化する機序仮説の検証)。
+        let mut n_fixed = 0; let mut n_singleton = 0; let mut n_empty = 0;
+        let mut n_redundant = 0; let mut n_largescale = 0;
+        let mut row_scales_for_diag: Option<Vec<f64>> = None;
+        for step in presolve_result.postsolve_stack.steps.iter() {
+            match step {
+                QpPostsolveStep::FixedVar { .. } => n_fixed += 1,
+                QpPostsolveStep::SingletonRow { .. } => n_singleton += 1,
+                QpPostsolveStep::EmptyCol { .. } => n_empty += 1,
+                QpPostsolveStep::RedundantRowFix { .. } => n_redundant += 1,
+                QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
+                    n_largescale += 1;
+                    row_scales_for_diag = Some(row_scales.clone());
+                }
+            }
+        }
+        eprintln!("POST_STAGE [presolve transforms] FixedVar={} SingletonRow={} EmptyCol={} RedundantRowFix={} LargeCoeffRowScale={} reduced_vars={} orig_vars={}",
+            n_fixed, n_singleton, n_empty, n_redundant, n_largescale,
+            reduced.num_vars, orig_problem.num_vars);
+        // LargeCoeffRowScale の row_scales 統計と極端値を出力
+        if let Some(scales) = &row_scales_for_diag {
+            let n_scaled = scales.iter().filter(|&&s| (s - 1.0).abs() > 1e-12).count();
+            let smin = scales.iter().fold(f64::INFINITY, |a, &v| a.min(v));
+            let smax = scales.iter().fold(f64::NEG_INFINITY, |a, &v| a.max(v));
+            // 最も小さい (= 最も増幅される) 5 row を抽出
+            let mut indexed: Vec<(usize, f64)> = scales.iter().enumerate()
+                .filter(|(_, &s)| (s - 1.0).abs() > 1e-12)
+                .map(|(i, &s)| (i, s)).collect();
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top5: Vec<String> = indexed.iter().take(5)
+                .map(|(i, s)| format!("row[{}]=σ:{:.3e}(amp:×{:.2e})", i, s, 1.0 / s))
+                .collect();
+            eprintln!("POST_STAGE [LargeCoeffRowScale] n_scaled={} σ_min={:.3e} σ_max={:.3e} smallest_5: {}",
+                n_scaled, smin, smax, top5.join(", "));
         }
     }
 
@@ -112,14 +214,141 @@ fn run_ipm_with(
         );
     }
 
+    if post_trace {
+        let view = ProblemView {
+            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
+            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+        };
+        let pres = primal_residual_rel(&view, &final_sol.solution);
+        let kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        // 絶対 pres と denom (orig 空間)
+        use crate::problem::ConstraintType;
+        let ax_orig = orig_problem.a.mat_vec_mul(&final_sol.solution).unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
+        let mut pres_abs_orig = 0.0_f64;
+        let mut max_ax_orig = 0.0_f64;
+        let mut max_b_orig = 0.0_f64;
+        for (i, (&ax_i, &b_i)) in ax_orig.iter().zip(orig_problem.b.iter()).enumerate() {
+            let v = match orig_problem.constraint_types[i] {
+                ConstraintType::Eq => (ax_i - b_i).abs(),
+                ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            };
+            pres_abs_orig = pres_abs_orig.max(v);
+            max_ax_orig = max_ax_orig.max(ax_i.abs());
+            max_b_orig = max_b_orig.max(b_i.abs());
+        }
+        let denom_orig = 1.0 + max_ax_orig.max(max_b_orig);
+        eprintln!("POST_STAGE [postsolve+remap (orig space, pre bounds-clip)] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
+            pres, pres_abs_orig, denom_orig, kkt, orig_problem.num_vars, orig_problem.num_constraints);
+        let ax = orig_problem.a.mat_vec_mul(&final_sol.solution)
+            .unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
+        let mut viol: Vec<(usize, f64)> = (0..orig_problem.num_constraints).map(|i| {
+            let raw = ax[i] - orig_problem.b[i];
+            let v = match orig_problem.constraint_types[i] {
+                ConstraintType::Eq => raw.abs(),
+                ConstraintType::Ge => if raw < 0.0 { -raw } else { 0.0 },
+                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
+            };
+            (i, v)
+        }).collect();
+        viol.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top10: Vec<String> = viol.iter().take(10)
+            .map(|(i, v)| format!("row[{}]={:.2e}", i, v)).collect();
+        let total_viol: f64 = viol.iter().map(|(_, v)| v).sum();
+        let top1_share = if total_viol > 0.0 { viol[0].1 / total_viol * 100.0 } else { 0.0 };
+        let top10_share: f64 = viol.iter().take(10).map(|(_, v)| v).sum::<f64>()
+            / total_viol.max(1e-300) * 100.0;
+        eprintln!("POST_STAGE [violation distribution] top1_share={:.1}% top10_share={:.1}% top10: {}",
+            top1_share, top10_share, top10.join(", "));
+        // top-1 違反 row の内訳: A[top_row,:] の各項を計算、x が presolve fix か IPM か区別
+        if !viol.is_empty() && viol[0].1 > 0.0 {
+            let top_row = viol[0].0;
+            let mut row_terms: Vec<(usize, f64, f64, bool)> = Vec::new();
+            for col in 0..orig_problem.num_vars {
+                let cs = orig_problem.a.col_ptr[col];
+                let ce = orig_problem.a.col_ptr[col + 1];
+                for k in cs..ce {
+                    if orig_problem.a.row_ind[k] == top_row {
+                        let a_val = orig_problem.a.values[k];
+                        let x_val = final_sol.solution[col];
+                        // col_map で reduced 空間にあるか (= IPM が解いた変数) を判定
+                        let is_reduced = presolve_result.col_map.get(col).copied().flatten().is_some();
+                        row_terms.push((col, a_val, x_val, is_reduced));
+                    }
+                }
+            }
+            row_terms.sort_by(|a, b| (b.1 * b.2).abs().partial_cmp(&(a.1 * a.2).abs())
+                .unwrap_or(std::cmp::Ordering::Equal));
+            let top_str: Vec<String> = row_terms.iter().take(8)
+                .map(|(c, a, x, red)| format!("col[{}]{}·{:.2e}·{:.2e}={:.2e}",
+                    c, if *red { "(IPM)" } else { "(FIXED)" }, a, x, a * x))
+                .collect();
+            let sum: f64 = row_terms.iter().map(|(_, a, x, _)| a * x).sum();
+            let n_fixed_in_row = row_terms.iter().filter(|(_, _, _, r)| !r).count();
+            let n_ipm_in_row = row_terms.iter().filter(|(_, _, _, r)| *r).count();
+            eprintln!("POST_STAGE [top-1 viol row {}] b={:.3e} A·x_sum={:.3e} viol={:.3e} (fixed_vars={} ipm_vars={}) top8: {}",
+                top_row, orig_problem.b[top_row], sum, sum - orig_problem.b[top_row],
+                n_fixed_in_row, n_ipm_in_row, top_str.join(", "));
+            // top-1 viol row が LargeCoeffRowScale 対象か確認 (row_map で reduced index 取得)
+            let red_row = presolve_result.row_map.get(top_row).copied().flatten();
+            let row_max_orig: f64 = {
+                let mut mx = 0.0_f64;
+                for col in 0..orig_problem.num_vars {
+                    let cs = orig_problem.a.col_ptr[col];
+                    let ce = orig_problem.a.col_ptr[col + 1];
+                    for k in cs..ce {
+                        if orig_problem.a.row_ind[k] == top_row {
+                            mx = mx.max(orig_problem.a.values[k].abs());
+                        }
+                    }
+                }
+                mx
+            };
+            // reduced.A の同一行で scaling 後の max を見る (presolve scaled A の影響)
+            let red_row_max: Option<f64> = red_row.map(|rr| {
+                let mut mx = 0.0_f64;
+                for col in 0..reduced.num_vars {
+                    let cs = reduced.a.col_ptr[col];
+                    let ce = reduced.a.col_ptr[col + 1];
+                    for k in cs..ce {
+                        if reduced.a.row_ind[k] == rr {
+                            mx = mx.max(reduced.a.values[k].abs());
+                        }
+                    }
+                }
+                mx
+            });
+            let scale_factor = match (row_max_orig, red_row_max) {
+                (o, Some(r)) if o > 0.0 => Some(r / o),
+                _ => None,
+            };
+            eprintln!("POST_STAGE [top-1 viol row {} mapping] orig→reduced={:?} orig_row_max={:.3e} reduced_row_max={:?} effective_σ={:?}",
+                top_row, red_row, row_max_orig, red_row_max, scale_factor);
+        }
+    }
+
     // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
+    let mut total_bound_clip = 0.0_f64;
+    let mut clip_count_pre = 0_usize;
     for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(orig_problem.bounds.iter()) {
-        if lb.is_finite() {
-            *xi = xi.max(lb);
+        let pre = *xi;
+        if lb.is_finite() { *xi = xi.max(lb); }
+        if ub.is_finite() { *xi = xi.min(ub); }
+        let amt = (pre - *xi).abs();
+        if amt > 0.0 {
+            clip_count_pre += 1;
+            total_bound_clip = total_bound_clip.max(amt);
         }
-        if ub.is_finite() {
-            *xi = xi.min(ub);
-        }
+    }
+    if post_trace {
+        let view = ProblemView {
+            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
+            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+        };
+        let pres = primal_residual_rel(&view, &final_sol.solution);
+        let kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        eprintln!("POST_STAGE [bounds clip applied] count={} max_amt={:.3e} pres_rel={:.3e} kkt_rel={:.3e}",
+            clip_count_pre, total_bound_clip, pres, kkt);
     }
 
 
@@ -194,6 +423,12 @@ fn run_ipm_with(
     let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
     let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
 
+    if post_trace {
+        let pres0 = primal_residual_rel(&view, &final_sol.solution);
+        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        eprintln!("POST_STAGE [pre Stage A/B/C/D] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
+    }
+
     let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
         // (A) x の primal projection — combined guard 付き (サイズ制限あり)。
         // LISWET 系で primal projection 後の dual LSQ refit は ill-conditioned A
@@ -262,9 +497,20 @@ fn run_ipm_with(
         let user_eps = opts.ipm_eps();
         /// target_pf: ユーザー eps と整合 (PASS 判定相当)。pf < target で early exit。
         let target_pf = user_eps;
+        if post_trace {
+            let pres_pre_d = primal_residual_rel(&view, &final_sol.solution);
+            let kkt_pre_d = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            eprintln!("POST_STAGE [pre Stage D Krylov] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre_d, kkt_pre_d);
+        }
         let _refined = crate::qp::refine_kkt_iterative(
             orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf,
         );
+        if post_trace {
+            let pres_post_d = primal_residual_rel(&view, &final_sol.solution);
+            let kkt_post_d = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            eprintln!("POST_STAGE [post Stage D Krylov] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
+                _refined, pres_post_d, kkt_post_d);
+        }
     }
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
