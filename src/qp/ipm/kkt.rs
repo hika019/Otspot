@@ -257,6 +257,104 @@ pub(crate) fn build_augmented_system(
     }
 }
 
+/// Schur complement system S = (Q + ρI) + A^T D^{-1} A を構築する (上三角 CSC、n×n SPD)。
+///
+/// augmented system:
+///   [Q+ρI  A^T] [dx]   [r_d]
+///   [A    -D  ] [dy] = [r_p]   where D = diag(sigma_vec) + δI
+///
+/// dy を消去 (dy = D^{-1}(A·dx − r_p)) して dx の n×n SPD system を得る:
+///   S·dx = r_d + A^T D^{-1} r_p
+///
+/// 利点:
+/// - サイズ削減 (n+m_ext → n)
+/// - SPD なので Cholesky で安定
+/// - cond(S) は cond(K) と異なる (LISWET 系で改善期待、要実測)
+///
+/// 戻り値: (S, d_inv) where d_inv[i] = 1/(sigma_vec[i] + δ_d)
+pub(crate) fn build_schur_system(
+    q: &CscMatrix,
+    a_ext: &CscMatrix,
+    sigma_vec: &[f64],
+    rho_p: f64,
+    delta_d: f64,
+) -> (CscMatrix, Vec<f64>) {
+    use std::collections::BTreeMap;
+
+    let n = q.nrows;
+    let m_ext = a_ext.nrows;
+
+    // d_inv[k] = 1 / (sigma_vec[k] + delta_d)
+    // 等式行は sigma=0 → d_inv = 1/delta_d (大きいが有限)。
+    // 不等式 active (sigma=0): d_inv = 1/delta_d 大、A^T D^{-1} A の寄与大。
+    // 不等式 inactive (sigma=∞): d_inv ≈ 0、寄与小。
+    let d_inv: Vec<f64> = sigma_vec
+        .iter()
+        .map(|&s| 1.0 / (s + delta_d))
+        .collect();
+
+    // A^T D^{-1} A の上三角を sparse 蓄積。
+    // a_t = A^T (n × m_ext) なので、a_t の col k = a_ext の row k (CSR 風アクセス)。
+    let a_t = a_ext.transpose();
+
+    let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+
+    for k in 0..m_ext {
+        let start = a_t.col_ptr[k];
+        let end = a_t.col_ptr[k + 1];
+        let row_entries: Vec<(usize, f64)> = (start..end)
+            .map(|p| (a_t.row_ind[p], a_t.values[p]))
+            .collect();
+        let dk = d_inv[k];
+        for (idx_a, &(i, v_i)) in row_entries.iter().enumerate() {
+            for &(j, v_j) in &row_entries[idx_a..] {
+                let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+                // 上三角 (col=hi, row=lo) で row ≤ col
+                *acc.entry((hi, lo)).or_insert(0.0) += dk * v_i * v_j;
+            }
+        }
+    }
+
+    // Q (上三角) を加算
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            if row <= col {
+                *acc.entry((col, row)).or_insert(0.0) += q.values[k];
+            }
+        }
+    }
+
+    // ρI を対角に加算
+    for i in 0..n {
+        *acc.entry((i, i)).or_insert(0.0) += rho_p;
+    }
+
+    // CSC 構築 (BTreeMap は (col, row) の lexicographic 順なので既に col-major)
+    let mut col_ptr = vec![0_usize; n + 1];
+    let mut row_ind: Vec<usize> = Vec::with_capacity(acc.len());
+    let mut values: Vec<f64> = Vec::with_capacity(acc.len());
+    for ((col, row), val) in acc {
+        row_ind.push(row);
+        values.push(val);
+        col_ptr[col + 1] = row_ind.len();
+    }
+    for i in 1..=n {
+        if col_ptr[i] < col_ptr[i - 1] {
+            col_ptr[i] = col_ptr[i - 1];
+        }
+    }
+
+    let s = CscMatrix {
+        col_ptr,
+        row_ind,
+        values,
+        nrows: n,
+        ncols: n,
+    };
+    (s, d_inv)
+}
+
 // ---------------------------------------------------------------------------
 // KKT 差分更新キャッシュ
 // ---------------------------------------------------------------------------

@@ -40,9 +40,13 @@ use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
-use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system};
+use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system, build_schur_system};
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
-use super::solver_loop::{compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors, update_variables};
+use super::solver_loop::{
+    compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors,
+    predictor_step_schur, corrector_step_schur, gondzio_correctors_schur,
+    update_variables,
+};
 use super::kkt::collapse_extended_dual;
 
 // ---------------------------------------------------------------------------
@@ -677,32 +681,47 @@ pub(crate) fn solve_ippmm_inner(
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<LdlFactorizationAmd> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
+        // [Schur path] env=QP_SCHUR=1 で Schur complement formulation を使う
+        // (n×n SPD、augmented n+m_ext の代替)。LISWET 系の precision floor 突破を狙う。
+        let use_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
+        let mut d_inv_opt: Option<Vec<f64>> = None;
         for _retry in 0..LDL_REG_RETRY_MAX {
             if timeout_ctx.should_stop() {
                 status = Some(SolveStatus::Timeout);
                 final_iter = iter;
                 break;
             }
-            let aug_mat =
-                build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix_retry);
+            let mat_for_factor = if use_schur {
+                let (s_mat, d_inv) = build_schur_system(
+                    &problem.q,
+                    &a_ext,
+                    &sigma_vec,
+                    rho_retry,
+                    delta_matrix_retry,
+                );
+                d_inv_opt = Some(d_inv);
+                s_mat
+            } else {
+                build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix_retry)
+            };
             // AMD は 1 回だけ計算してキャッシュ（スパースパターン不変のため）
             if amd_perm_cache.is_none() {
                 amd_perm_cache = Some(amd_with_deadline(
-                    aug_mat.nrows,
-                    &aug_mat.col_ptr,
-                    &aug_mat.row_ind,
+                    mat_for_factor.nrows,
+                    &mat_for_factor.col_ptr,
+                    &mat_for_factor.row_ind,
                     timeout_ctx.deadline,
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
             match ldl::factorize_quasidefinite_with_cached_perm(
-                &aug_mat,
+                &mat_for_factor,
                 perm,
                 timeout_ctx.deadline,
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
-                    aug_mat_opt = Some(aug_mat);
+                    aug_mat_opt = Some(mat_for_factor);
                     break;
                 }
                 Err(ldl::LdlError::DeadlineExceeded) => {
@@ -760,33 +779,61 @@ pub(crate) fn solve_ippmm_inner(
 
         // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
 
-        // ── Predictor ──────────────────────────────────────────────
-        let pred = predictor_step(
-            &s, &y, &is_eq_ext, m_ineq,
-            &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-            &sigma_vec, &fac, aug_mat_for_ir, n, m_ext, mu,
-        );
-
-        // ── Corrector ──────────────────────────────────────────────
-        let (alpha, r_c_corr) = corrector_step(
-            &s, &y, &is_eq_ext,
-            &pred, mu,
-            &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-            &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
-            &mut dx, &mut dy, &mut ds,
-        );
+        // ── Predictor / Corrector / Gondzio (Schur or augmented dispatch) ──
+        let (pred, alpha, r_c_corr) = if use_schur {
+            let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
+            let pred = predictor_step_schur(
+                &s, &y, &is_eq_ext, m_ineq,
+                &r_d_pmm, &r_p_pmm,
+                &sigma_vec, &fac, aug_mat_for_ir, d_inv, &a_ext, n, m_ext, mu,
+            );
+            let (alpha, r_c_corr) = corrector_step_schur(
+                &s, &y, &is_eq_ext,
+                &pred, mu,
+                &r_d_pmm, &r_p_pmm,
+                &sigma_vec, &fac, aug_mat_for_ir, d_inv, &a_ext, n, m_ext,
+                &mut dx, &mut dy, &mut ds,
+            );
+            (pred, alpha, r_c_corr)
+        } else {
+            let pred = predictor_step(
+                &s, &y, &is_eq_ext, m_ineq,
+                &r_d_pmm, &r_p_pmm,
+                &sigma_vec, &fac, aug_mat_for_ir, n, m_ext, mu,
+            );
+            let (alpha, r_c_corr) = corrector_step(
+                &s, &y, &is_eq_ext,
+                &pred, mu,
+                &r_d_pmm, &r_p_pmm,
+                &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
+                &mut dx, &mut dy, &mut ds,
+            );
+            (pred, alpha, r_c_corr)
+        };
 
         // ── Gondzio multiple centrality correctors ──────────────────
         let mut alpha = alpha;
         if alpha < 0.999 {
-            alpha = gondzio_correctors(
-                &s, &y, &is_eq_ext, m_ineq,
-                &r_d_pmm, &r_p_pmm,  // r_dual=r_d_pmm, r_primal=r_p_pmm (IPPMM)
-                &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
-                options.ipm.max_correctors, alpha,
-                &mut dx, &mut dy, &mut ds,
-            );
+            alpha = if use_schur {
+                let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
+                gondzio_correctors_schur(
+                    &s, &y, &is_eq_ext, m_ineq,
+                    &r_d_pmm, &r_p_pmm,
+                    &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, d_inv, &a_ext, n, m_ext,
+                    options.ipm.max_correctors, alpha,
+                    &mut dx, &mut dy, &mut ds,
+                )
+            } else {
+                gondzio_correctors(
+                    &s, &y, &is_eq_ext, m_ineq,
+                    &r_d_pmm, &r_p_pmm,
+                    &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
+                    options.ipm.max_correctors, alpha,
+                    &mut dx, &mut dy, &mut ds,
+                )
+            };
         }
+        let _ = pred; // 未使用警告抑止
 
         // ── 変数更新 ──────────────────────────────────────────────
         // NaN/Inf ガード: ステップにNaNが含まれる場合は現在のx,y,sで停止。

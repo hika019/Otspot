@@ -174,6 +174,300 @@ pub(crate) fn compute_sigma_vec(
         .collect()
 }
 
+/// Schur complement system 経由で KKT step (dx, dy) を解く。
+///
+/// augmented system [Q+ρI A^T; A −D] [dx; dy] = [r_d; r_p_mod] と数学的に等価:
+///   1. S·dx = r_d + A^T D^{-1} r_p_mod (Cholesky で解く)
+///   2. dy = D^{-1} (A·dx − r_p_mod)
+///
+/// 利点: S は n×n SPD で augmented (n+m_ext × n+m_ext) より小、Cholesky 高精度。
+pub(crate) fn solve_kkt_via_schur(
+    s_fac: &LdlFactorizationAmd,
+    s_mat: &CscMatrix,
+    d_inv: &[f64],
+    a_ext: &CscMatrix,
+    r_d: &[f64],
+    r_p_mod: &[f64],
+    dx_out: &mut [f64],
+    dy_out: &mut [f64],
+) {
+    use super::kkt::{spmtv, spmv};
+    let n = r_d.len();
+    let m_ext = r_p_mod.len();
+
+    // rhs_S = r_d + A^T D^{-1} r_p_mod
+    let mut d_inv_rp = vec![0.0_f64; m_ext];
+    for i in 0..m_ext {
+        d_inv_rp[i] = d_inv[i] * r_p_mod[i];
+    }
+    let mut at_d_inv_rp = vec![0.0_f64; n];
+    spmtv(a_ext, &d_inv_rp, &mut at_d_inv_rp);
+    let rhs_s: Vec<f64> = r_d
+        .iter()
+        .zip(at_d_inv_rp.iter())
+        .map(|(&r, &v)| r + v)
+        .collect();
+
+    // S·dx = rhs_S
+    s_fac.solve(&rhs_s, dx_out);
+    let _ = s_mat;
+    let _ = n;
+
+    // dy = D^{-1} (A·dx − r_p_mod)
+    let mut a_dx = vec![0.0_f64; m_ext];
+    spmv(a_ext, dx_out, &mut a_dx);
+    for i in 0..m_ext {
+        dy_out[i] = d_inv[i] * (a_dx[i] - r_p_mod[i]);
+    }
+}
+
+
+/// Predictor ステップ (Schur version)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predictor_step_schur(
+    s: &[f64],
+    y: &[f64],
+    is_eq_ext: &[bool],
+    m_ineq: usize,
+    r_dual: &[f64],
+    r_primal: &[f64],
+    sigma_vec: &[f64],
+    s_fac: &LdlFactorizationAmd,
+    s_mat: &CscMatrix,
+    d_inv: &[f64],
+    a_ext: &CscMatrix,
+    n: usize,
+    m_ext: usize,
+    mu: f64,
+) -> PredictorResult {
+    let r_c_pred: Vec<f64> = s
+        .iter()
+        .zip(y.iter())
+        .enumerate()
+        .map(|(i, (&si, &yi))| if is_eq_ext[i] { 0.0 } else { -si * yi })
+        .collect();
+
+    let r_p_mod_pred: Vec<f64> = r_primal
+        .iter()
+        .zip(r_c_pred.iter())
+        .zip(y.iter())
+        .enumerate()
+        .map(|(i, ((&rpi, &rci), &yi))| {
+            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+        })
+        .collect();
+
+    let mut dx = vec![0.0_f64; n];
+    let mut dy_pred = vec![0.0_f64; m_ext];
+    solve_kkt_via_schur(s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_pred, &mut dx, &mut dy_pred);
+
+    let mut ds_pred = vec![0.0_f64; m_ext];
+    for i in 0..m_ext {
+        if is_eq_ext[i] {
+            ds_pred[i] = 0.0;
+        } else {
+            ds_pred[i] = r_c_pred[i] / y[i] - sigma_vec[i] * dy_pred[i];
+        }
+    }
+
+    let alpha_s_pred = fraction_to_boundary_masked(s, &ds_pred, TAU, is_eq_ext);
+    let alpha_y_pred = fraction_to_boundary_masked(y, &dy_pred, TAU, is_eq_ext);
+    let alpha_pred = alpha_s_pred.min(alpha_y_pred);
+
+    let mu_aff: f64 = if m_ineq > 0 {
+        s.iter()
+            .zip(y.iter())
+            .zip(ds_pred.iter())
+            .zip(dy_pred.iter())
+            .enumerate()
+            .filter(|&(i, _)| !is_eq_ext[i])
+            .map(|(_, (((&si, &yi), &dsi), &dyi))| {
+                (si + alpha_pred * dsi) * (yi + alpha_pred * dyi)
+            })
+            .sum::<f64>()
+            / m_ineq as f64
+    } else {
+        0.0
+    };
+
+    let sigma_center = if mu > 1e-15 {
+        (mu_aff / mu).powi(3).min(1.0)
+    } else {
+        0.0
+    };
+
+    PredictorResult {
+        dy_pred,
+        ds_pred,
+        sigma_center,
+    }
+}
+
+/// Corrector ステップ (Schur version)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn corrector_step_schur(
+    s: &[f64],
+    y: &[f64],
+    is_eq_ext: &[bool],
+    pred: &PredictorResult,
+    mu: f64,
+    r_dual: &[f64],
+    r_primal: &[f64],
+    sigma_vec: &[f64],
+    s_fac: &LdlFactorizationAmd,
+    s_mat: &CscMatrix,
+    d_inv: &[f64],
+    a_ext: &CscMatrix,
+    n: usize,
+    m_ext: usize,
+    dx: &mut [f64],
+    dy: &mut [f64],
+    ds: &mut [f64],
+) -> (f64, Vec<f64>) {
+    let r_c_corr: Vec<f64> = s
+        .iter()
+        .zip(y.iter())
+        .zip(pred.ds_pred.iter())
+        .zip(pred.dy_pred.iter())
+        .enumerate()
+        .map(|(i, (((&si, &yi), &dsi), &dyi))| {
+            if is_eq_ext[i] {
+                0.0
+            } else {
+                pred.sigma_center * mu - si * yi - dsi * dyi
+            }
+        })
+        .collect();
+
+    let r_p_mod_corr: Vec<f64> = r_primal
+        .iter()
+        .zip(r_c_corr.iter())
+        .zip(y.iter())
+        .enumerate()
+        .map(|(i, ((&rpi, &rci), &yi))| {
+            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+        })
+        .collect();
+
+    solve_kkt_via_schur(s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy);
+    let _ = n;
+
+    for i in 0..m_ext {
+        if is_eq_ext[i] {
+            ds[i] = 0.0;
+        } else {
+            ds[i] = r_c_corr[i] / y[i] - sigma_vec[i] * dy[i];
+        }
+    }
+
+    let alpha_s = fraction_to_boundary_masked(s, ds, TAU, is_eq_ext);
+    let alpha_y = fraction_to_boundary_masked(y, dy, TAU, is_eq_ext);
+    let alpha = alpha_s.min(alpha_y);
+
+    (alpha, r_c_corr)
+}
+
+/// Gondzio multiple centrality correctors (Schur version)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gondzio_correctors_schur(
+    s: &[f64],
+    y: &[f64],
+    is_eq_ext: &[bool],
+    m_ineq: usize,
+    r_dual: &[f64],
+    r_primal: &[f64],
+    r_c_corr: &[f64],
+    sigma_vec: &[f64],
+    s_fac: &LdlFactorizationAmd,
+    s_mat: &CscMatrix,
+    d_inv: &[f64],
+    a_ext: &CscMatrix,
+    n: usize,
+    m_ext: usize,
+    max_correctors: usize,
+    alpha_init: f64,
+    dx: &mut [f64],
+    dy: &mut [f64],
+    ds: &mut [f64],
+) -> f64 {
+    let mut alpha_prev = alpha_init;
+    for _k in 0..max_correctors {
+        let alpha_target = (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
+        let mu_target: f64 = if m_ineq > 0 {
+            s.iter()
+                .zip(y.iter())
+                .zip(ds.iter().zip(dy.iter()))
+                .enumerate()
+                .filter(|&(i, _)| !is_eq_ext[i])
+                .map(|(_, ((&si, &yi), (&dsi, &dyi)))| {
+                    (si + alpha_target * dsi) * (yi + alpha_target * dyi)
+                })
+                .sum::<f64>()
+                / m_ineq as f64
+        } else {
+            0.0
+        };
+        let mu_target = mu_target.max(0.0);
+
+        let r_c_gondzio: Vec<f64> = s
+            .iter()
+            .zip(y.iter())
+            .zip(ds.iter().zip(dy.iter()))
+            .zip(r_c_corr.iter())
+            .enumerate()
+            .map(|(i, (((&si, &yi), (&dsi, &dyi)), &rci))| {
+                if is_eq_ext[i] {
+                    0.0
+                } else {
+                    let raw = mu_target - (si + dsi) * (yi + dyi);
+                    let bound_lo = GAMMA_L * mu_target;
+                    let bound_hi = GAMMA_U * mu_target;
+                    let raw = raw.max(bound_lo).min(bound_hi);
+                    raw - rci
+                }
+            })
+            .collect();
+
+        let r_p_mod_gondzio: Vec<f64> = r_primal
+            .iter()
+            .zip(r_c_gondzio.iter())
+            .zip(y.iter())
+            .enumerate()
+            .map(|(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
+            })
+            .collect();
+
+        let mut dx_new = vec![0.0_f64; n];
+        let mut dy_new = vec![0.0_f64; m_ext];
+        solve_kkt_via_schur(
+            s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_gondzio, &mut dx_new, &mut dy_new,
+        );
+
+        let mut ds_new = vec![0.0_f64; m_ext];
+        for i in 0..m_ext {
+            if is_eq_ext[i] {
+                ds_new[i] = 0.0;
+            } else {
+                ds_new[i] = r_c_gondzio[i] / y[i] - sigma_vec[i] * dy_new[i];
+            }
+        }
+
+        let alpha_s_new = fraction_to_boundary_masked(s, &ds_new, TAU, is_eq_ext);
+        let alpha_y_new = fraction_to_boundary_masked(y, &dy_new, TAU, is_eq_ext);
+        let alpha_new = alpha_s_new.min(alpha_y_new);
+
+        if alpha_new <= alpha_prev * ALPHA_IMPROVE_THRESHOLD {
+            break;
+        }
+        alpha_prev = alpha_new;
+        dx.copy_from_slice(&dx_new);
+        dy.copy_from_slice(&dy_new);
+        ds.copy_from_slice(&ds_new);
+    }
+    alpha_prev
+}
+
 /// Predictor ステップ
 ///
 /// - `r_dual`:   r_d (IPM) または r_d_pmm (IPPMM)
@@ -511,7 +805,172 @@ pub(crate) fn update_variables(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_sigma_vec, update_variables};
+    use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur};
+    use crate::qp::ipm::kkt::{build_augmented_system, build_schur_system};
+    use crate::linalg::{ldl, amd::amd_with_deadline};
+    use crate::sparse::CscMatrix;
+
+    /// 多制約・等式・不等式混在の LISWET 風テスト。
+    /// sigma にも幅広い range (1e-3〜1e3) を持たせて Schur が数値的に augmented と一致することを確認。
+    #[test]
+    fn test_schur_matches_augmented_realistic() {
+        // n=4, m_ext=6 (2 equality + 4 inequality)
+        let n = 4;
+        let m_ext = 6;
+
+        // Q diagonal: 2, 4, 0.5, 1.0
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2, 3],
+            &[0, 1, 2, 3],
+            &[2.0, 4.0, 0.5, 1.0],
+            n, n,
+        ).unwrap();
+
+        // A_ext: 6×4 にいくつかの非ゼロ
+        // 行 0: x0 + x1 (eq)
+        // 行 1: x2 + x3 (eq)
+        // 行 2: x0 (lb)
+        // 行 3: x1 (lb)
+        // 行 4: -x2 (ub)
+        // 行 5: x0 + x3 (mixed)
+        let rows = vec![0, 0, 1, 1, 2, 3, 4, 5, 5];
+        let cols = vec![0, 1, 2, 3, 0, 1, 2, 0, 3];
+        let vals = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0];
+        let a_ext = CscMatrix::from_triplets(&rows, &cols, &vals, m_ext, n).unwrap();
+
+        // sigma: equality は 0、inequality は様々な値 (LISWET 風 dynamic range)
+        let sigma_vec = vec![0.0, 0.0, 1e-3, 1e1, 1e3, 5e-2];
+        let rho_p = 0.05_f64;
+        let delta_d = 0.02_f64;
+
+        let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
+        let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
+        let aug_fac = ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &aug_perm, None).unwrap();
+
+        let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
+        let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_fac = ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap();
+
+        let r_d = vec![0.5, -1.0, 0.2, 0.8];
+        let r_p_mod = vec![0.1, 0.2, -0.3, 0.4, -0.5, 0.6];
+
+        let mut rhs_aug = vec![0.0_f64; n + m_ext];
+        let mut sol_aug = vec![0.0_f64; n + m_ext];
+        rhs_aug[..n].copy_from_slice(&r_d);
+        rhs_aug[n..].copy_from_slice(&r_p_mod);
+        aug_fac.solve(&rhs_aug, &mut sol_aug);
+        let dx_aug = sol_aug[..n].to_vec();
+        let dy_aug = sol_aug[n..].to_vec();
+
+        let mut dx_schur = vec![0.0_f64; n];
+        let mut dy_schur = vec![0.0_f64; m_ext];
+        solve_kkt_via_schur(
+            &s_fac, &s_mat, &d_inv, &a_ext, &r_d, &r_p_mod,
+            &mut dx_schur, &mut dy_schur,
+        );
+
+        eprintln!("dx_aug   = {:?}", dx_aug);
+        eprintln!("dx_schur = {:?}", dx_schur);
+        eprintln!("dy_aug   = {:?}", dy_aug);
+        eprintln!("dy_schur = {:?}", dy_schur);
+        for i in 0..n {
+            let diff = (dx_aug[i] - dx_schur[i]).abs();
+            let scale = dx_aug[i].abs().max(dx_schur[i].abs()).max(1e-12);
+            assert!(
+                diff / scale < 1e-6,
+                "dx[{}]: aug={}, schur={}, rel_diff={}",
+                i, dx_aug[i], dx_schur[i], diff / scale
+            );
+        }
+        for i in 0..m_ext {
+            let diff = (dy_aug[i] - dy_schur[i]).abs();
+            let scale = dy_aug[i].abs().max(dy_schur[i].abs()).max(1e-12);
+            assert!(
+                diff / scale < 1e-6,
+                "dy[{}]: aug={}, schur={}, rel_diff={}",
+                i, dy_aug[i], dy_schur[i], diff / scale
+            );
+        }
+    }
+
+    /// Schur と augmented LDL が同じ (dx, dy) を出すか検証する。
+    /// 簡単な 2 変数 + 1 制約の問題で数値的に等価性を確認する。
+    #[test]
+    fn test_schur_matches_augmented() {
+        // Q = diag(2, 4), A = [1, 1], b = 3
+        // Sigma = [0.5], rho=ρ=0.1, delta=0.05
+        let n = 2;
+        let m_ext = 1;
+
+        // Q 上三角 (full sym 慣例)
+        let q = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 1],
+            &[2.0, 4.0],
+            n, n,
+        ).unwrap();
+
+        // A_ext = [1, 1] (1×2)
+        let a_ext = CscMatrix::from_triplets(
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            m_ext, n,
+        ).unwrap();
+
+        let sigma_vec = vec![0.5_f64];
+        let rho_p = 0.1_f64;
+        let delta_d = 0.05_f64;
+
+        // augmented LDL を構築・factorize
+        let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
+        let perm: Vec<usize> = (0..aug_mat.nrows).collect();
+        let aug_fac = ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &perm, None).unwrap();
+
+        // Schur を構築・factorize
+        let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
+        let s_perm: Vec<usize> = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_fac = ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap();
+
+        // テスト RHS
+        let r_d = vec![1.0, 2.0];
+        let r_p_mod = vec![3.0];
+
+        // augmented 経由 (IR なし)
+        let mut rhs_aug = vec![0.0_f64; n + m_ext];
+        let mut sol_aug = vec![0.0_f64; n + m_ext];
+        rhs_aug[..n].copy_from_slice(&r_d);
+        rhs_aug[n..].copy_from_slice(&r_p_mod);
+        aug_fac.solve(&rhs_aug, &mut sol_aug);
+        let dx_aug = sol_aug[..n].to_vec();
+        let dy_aug = sol_aug[n..].to_vec();
+
+        // Schur 経由
+        let mut dx_schur = vec![0.0_f64; n];
+        let mut dy_schur = vec![0.0_f64; m_ext];
+        solve_kkt_via_schur(
+            &s_fac, &s_mat, &d_inv, &a_ext, &r_d, &r_p_mod,
+            &mut dx_schur, &mut dy_schur,
+        );
+
+        eprintln!("dx_aug = {:?}", dx_aug);
+        eprintln!("dx_schur = {:?}", dx_schur);
+        eprintln!("dy_aug = {:?}", dy_aug);
+        eprintln!("dy_schur = {:?}", dy_schur);
+        for i in 0..n {
+            assert!(
+                (dx_aug[i] - dx_schur[i]).abs() < 1e-9,
+                "dx[{}]: aug={}, schur={}", i, dx_aug[i], dx_schur[i]
+            );
+        }
+        for i in 0..m_ext {
+            assert!(
+                (dy_aug[i] - dy_schur[i]).abs() < 1e-9,
+                "dy[{}]: aug={}, schur={}", i, dy_aug[i], dy_schur[i]
+            );
+        }
+    }
+
 
     /// compute_sigma_vec: 等式制約行のsigmaは0になること
     #[test]
