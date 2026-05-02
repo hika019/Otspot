@@ -1451,13 +1451,14 @@ pub fn run_qp_presolve_phase1(
     //   スキップ時は dispatch（IPM）が自身の Ruiz を適用するため品質は維持される。
     //   PARAM: 閾値 1e4 — この値を超える b は presolve Ruiz のスキップ対象。
     // ==================================================================
-    let b_max_abs = reduced.b.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
-    // PARAM: 1e4 — 経験的閾値。|b|_max > 1e4 で presolve Ruiz をスキップ（dispatch段のRuizが処理）。
-    //   LARGE_B_THRESHOLD(1e5)とは目的が異なる: こちらはpresolve Ruiz干渉防止、あちらはfixed-var代入スキップ。
-    const RUIZ_SKIP_LARGE_B_THRESHOLD: f64 = 1e4;
-    // to_all_le()廃止により、Eq/Ge制約があってもdual長は変わらない。
-    // presolve Ruizの適用条件からhas_non_leを除外。
-    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 && b_max_abs <= RUIZ_SKIP_LARGE_B_THRESHOLD {
+    let _b_max_abs = reduced.b.iter().map(|&v| v.abs()).fold(0.0f64, f64::max);
+    // 旧: |b|>1e4 で Ruiz を skip していたが、QPLIB_9002 (|b|≈1e11) のように
+    // skip された問題で IPM 初期点 s0 = max(b - Ax0, 1.0) が b スケールで huge になり
+    // (s0_max=1.077e11 実測)、Σ = s/y が cond 1e11 級に膨らんで LDL solve 暴走
+    // → mu 増加 → dx 発散 → NaN_guard で best-so-far に巻き戻し、を引き起こしていた。
+    // 「Ruiz 干渉」の懸念は経験則で skip 条件を入れていたが、IPM 暴走の代償が大きい。
+    // skip を撤廃して Ruiz を常に適用する。退行時は再考。
+    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);
