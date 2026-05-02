@@ -534,13 +534,19 @@ fn main() {
             None => String::new(),
         };
 
-        // Timeout だが有効解 (best-so-far) を保持している場合、Optimal フローに乗せて
-        // 品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
-        // PASS 判定が出れば bench 上 PASS としてカウントし、TIMEOUT として誤分類しない。
-        // 品質判定で fail した場合は PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH 等の正確な分類になる。
-        // CONT-300 等が「内部はほぼ Optimal なのに TIMEOUT 表示」される hostile 状態の解消。
-        let result = if matches!(result.status, SolveStatus::Timeout)
-            && !result.solution.is_empty()
+        // Timeout / SuboptimalSolution だが有効解 (best-so-far) を保持している場合、
+        // Optimal フローに乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
+        // PASS 判定が出れば bench 上 PASS としてカウントし、品質判定で fail した場合は
+        // PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH 等の正確な分類になる。
+        //
+        // SuboptimalSolution 拡張動機: solver 側で「IPM 内部諦め (alpha_stall/mu_floor 等)
+        // で eps 未達」を Timeout から SuboptimalSolution に分離した (status 隠蔽解消、
+        // attempt.rs::finalize_outcome)。bench 側で同じ「solution あり + eps 未達」の扱いを
+        // 維持するため、SuboptimalSolution も格上げ対象に含める。
+        let result = if matches!(
+            result.status,
+            SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+        ) && !result.solution.is_empty()
             && result.solution.len() == prob.num_vars
         {
             solver::problem::SolverResult { status: SolveStatus::Optimal, ..result }
@@ -716,11 +722,20 @@ fn main() {
             }
             SolveStatus::SuboptimalSolution => {
                 n_suboptimal += 1;
+                let obj_str = if result.solution.is_empty() {
+                    "obj=NA solution=EMPTY".to_string()
+                } else if result.solution.len() != prob.num_vars {
+                    format!("obj={:.3e} sol_len={}/{}_MISMATCH",
+                        result.objective, result.solution.len(), prob.num_vars)
+                } else {
+                    let pfn = compute_pfeas_normalized(&prob, &result.solution);
+                    format!("obj={:.3e} pfn={:.1e}", result.objective, pfn)
+                };
                 (
                     "SUBOPTIMAL".to_string(),
                     format!(
-                        "[{}] iters={} {}",
-                        method_label, result.iterations, resid_str
+                        "[{}] iters={} {} {}",
+                        method_label, result.iterations, obj_str, resid_str
                     ),
                 )
             }

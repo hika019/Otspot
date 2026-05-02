@@ -309,7 +309,17 @@ fn main() {
             }
             SolveStatus::SuboptimalSolution => {
                 n_suboptimal += 1;
-                ("SUBOPTIMAL".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
+                let extra = if result.solution.is_empty() {
+                    "obj=NA solution=EMPTY".to_string()
+                } else if result.solution.len() != prob.num_vars {
+                    format!("obj={:.3e} sol_len={}/{}_MISMATCH",
+                        result.objective, result.solution.len(), prob.num_vars)
+                } else {
+                    let x_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+                    format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
+                };
+                ("SUBOPTIMAL".to_string(),
+                    format!("[{}] iters={} {} {}", method_label, result.iterations, extra, resid_str))
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;

@@ -216,15 +216,26 @@ fn solve_qp_v2_with_runner(
     // ── status 変換 (1 箇所のみ) ───────────────
     // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
-    finalize_outcome(outcome, user_eps, n_orig)
+    finalize_outcome(outcome, user_eps, n_orig, total_deadline)
 }
 
 /// `IpmOutcome` から `SolverResult` (外部 status) への変換 — **status mutation 1 箇所**。
 /// outcome.solution は既に元空間で postsolve / unscale / clip 済み。
+///
+/// status 分類 (status 隠蔽防止):
+///   - Optimal             : ユーザー精度 eps 達成
+///   - Timeout             : 外部 deadline 経過 (時間切れ、もっと時間あれば改善余地)
+///   - SuboptimalSolution  : deadline 内で IPM が内部終了 (alpha_stall/mu_floor/NaN_guard)、
+///                            best-so-far 解あり (eps 未達、IPM の数値的限界)
+///   - NumericalError      : best-so-far も無し (factorize 失敗 / 即時破綻)
+///
+/// 旧実装は「eps 未達は全て Timeout」で IPM 内部諦めと真の時間切れを混同していた。
+/// QPLIB_9002 で「2s iters=49 TIMEOUT」のような誤分類 (実際は IPM 早期諦め) を解消する。
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,
     n_orig: usize,
+    total_deadline: Option<Instant>,
 ) -> SolverResult {
     // 確定的 Infeasible / Unbounded / NonConvex は最優先で外部に伝える (status 隠蔽防止)。
     // objective は status に応じて意味のある値を設定:
@@ -246,9 +257,17 @@ fn finalize_outcome(
         };
     }
 
+    let timed_out = total_deadline.is_some_and(|d| Instant::now() >= d);
+
     if outcome.solution.is_empty() {
+        // best-so-far も無い: 真の時間切れ or 数値破綻 (factorize fail 等)。
+        let status = if timed_out {
+            SolveStatus::Timeout
+        } else {
+            SolveStatus::NumericalError
+        };
         return SolverResult {
-            status: SolveStatus::Timeout,
+            status,
             objective: f64::INFINITY,
             solution: Vec::new(),
             dual_solution: Vec::new(),
@@ -260,9 +279,13 @@ fn finalize_outcome(
 
     let status = if outcome.satisfies_eps(user_eps) {
         SolveStatus::Optimal
-    } else {
-        // ユーザー精度未達 → Timeout (設計書: 「内部で解を捨てない」 = solution は保持)
+    } else if timed_out {
+        // 外部 deadline 経過で精度未達 → 真の Timeout (時間あれば改善余地ありの可能性)
         SolveStatus::Timeout
+    } else {
+        // deadline 内で精度未達 → IPM が内部で諦めた (数値的限界)。
+        // best-so-far 解は保持。bench 側で SUBOPTIMAL として表示される。
+        SolveStatus::SuboptimalSolution
     };
 
     debug_assert_eq!(outcome.solution.len(), n_orig, "outcome solution dimension mismatch");
