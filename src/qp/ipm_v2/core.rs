@@ -81,6 +81,25 @@ fn run_ipm_with(
             }
         }
     }
+    // Ruiz scaler の row scale e[i] も含める。
+    //
+    // 動機: A_scaled = E × A × D, b_scaled = E × b の関係から、
+    //       r_p_scaled[i] = e[i] × r_p_orig[i]
+    //   →  ||r_p_orig||_inf ≤ ||r_p_scaled||_inf / min(e[i])
+    //   IPM は scaled 空間で eps を要求するが、unscale 後 orig 空間で 1/min(e[i]) 倍に
+    //   増幅される。LargeCoeffRowScale だけでなく Ruiz の e も Tier 2 で考慮すべき。
+    //
+    // 実証 (QPLIB_10034): IPM scaled pres_rel=3.6e-7 (eps=1e-6 達成) が orig 空間で
+    //   3.083e-4 (308 倍悪化)。原因は Ruiz の e min。Tier 2 拡張で eps_scaled を更に
+    //   厳しくして救う試行。
+    if let Some(scaler) = &presolve_result.ruiz_scaler {
+        let e_min = scaler.e.iter()
+            .filter(|&&v| v > 0.0 && v.is_finite())
+            .fold(f64::INFINITY, |a, &v| a.min(v));
+        if e_min.is_finite() {
+            sigma_total *= e_min;
+        }
+    }
     let opts_for_ipm: SolverOptions = if sigma_total < SIGMA_TIGHTEN_THRESHOLD {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
