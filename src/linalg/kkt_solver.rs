@@ -205,6 +205,122 @@ impl KktSolver for DirectLdl {
     }
 }
 
+// ── Iterative backend: PreconditionedMinres ──────────────────────────────────────
+
+/// 対角前処理付き MINRES による反復解法。LDL の fill-in を回避する代替経路。
+///
+/// 前処理 M は K の対角の絶対値: `M[i,i] = max(|K[i,i]|, MIN_DIAG)`。
+/// 不定値 K (鞍点系) で SPD M を構成するために絶対値を取る (Jacobi-style)。
+/// 高度な前処理 (block-diagonal、constraint preconditioner) は将来課題。
+///
+/// メモリ: K の保持 (nnz × 16B) + 数本のワークベクトル (n × 8B × 数本) のみ。
+/// fill-in は無いため、QPLIB_9008 級 (n=1M) でも GB 級メモリは不要。
+pub struct PreconditionedMinres {
+    /// K 行列の所有コピー (mat-vec 用)
+    k: CscMatrix,
+    /// M^{-1} の対角値 (= 1.0 / max(|K[i,i]|, MIN_DIAG))
+    m_inv_diag: Vec<f64>,
+    /// 最大反復数 (収束しない場合のフォールバック)
+    max_iter: usize,
+    /// 相対許容差
+    tol: f64,
+}
+
+/// 前処理対角の最小値 (これ未満は MIN_DIAG にクランプして M^{-1} を有限化)
+const MIN_DIAG: f64 = 1e-12;
+
+impl PreconditionedMinres {
+    /// 行列 K を持つ MINRES ソルバを構築する。
+    ///
+    /// `max_iter` のデフォルトは `2 * n` (= Krylov 部分空間が完全に満たされる
+    /// 上限、CG のような有限終了の保証は無いが実用上十分)。
+    /// `tol` はデフォルト `1e-9` (IPM Newton step の収束精度として標準)。
+    pub fn new(k: CscMatrix) -> Self {
+        let n = k.nrows;
+        let m_inv_diag = compute_jacobi_inv_diag(&k);
+        Self {
+            k,
+            m_inv_diag,
+            max_iter: 2 * n,
+            tol: 1e-9,
+        }
+    }
+
+    /// 反復回数上限と相対許容差をカスタム指定する。
+    pub fn with_params(k: CscMatrix, max_iter: usize, tol: f64) -> Self {
+        let m_inv_diag = compute_jacobi_inv_diag(&k);
+        Self { k, m_inv_diag, max_iter, tol }
+    }
+}
+
+/// K の対角絶対値から Jacobi 前処理 M^{-1} を構築する。
+fn compute_jacobi_inv_diag(k: &CscMatrix) -> Vec<f64> {
+    let n = k.nrows;
+    let mut diag_abs = vec![MIN_DIAG; n];
+    for j in 0..n {
+        for k_idx in k.col_ptr[j]..k.col_ptr[j + 1] {
+            if k.row_ind[k_idx] == j {
+                let v = k.values[k_idx].abs();
+                diag_abs[j] = v.max(MIN_DIAG);
+                break;
+            }
+        }
+    }
+    diag_abs.iter().map(|&d| 1.0 / d).collect()
+}
+
+impl KktSolver for PreconditionedMinres {
+    fn solve(
+        &mut self,
+        rhs: &[f64],
+        sol: &mut [f64],
+        deadline: Option<Instant>,
+    ) -> Result<(), KktError> {
+        // 解の初期推定はゼロ (warm-start サポートは将来課題)
+        for s in sol.iter_mut() { *s = 0.0; }
+        let k = &self.k;
+        let m_inv = &self.m_inv_diag;
+        let stats = crate::linalg::minres::pminres(
+            |v, y| crate::linalg::minres::matvec_sym_upper(k, v, y),
+            |r, z| {
+                for i in 0..r.len() {
+                    z[i] = r[i] * m_inv[i];
+                }
+            },
+            rhs,
+            sol,
+            self.tol,
+            self.max_iter,
+            || deadline.is_some_and(|d| Instant::now() >= d),
+        );
+        if stats.converged {
+            Ok(())
+        } else if deadline.is_some_and(|d| Instant::now() >= d) {
+            Err(KktError::DeadlineExceeded)
+        } else {
+            Err(KktError::DidNotConverge)
+        }
+    }
+
+    fn refactor(
+        &mut self,
+        k: &CscMatrix,
+        _deadline: Option<Instant>,
+    ) -> Result<(), KktError> {
+        if k.nrows != self.dim() || k.ncols != self.dim() {
+            return Err(KktError::SingularOrIndefinite);
+        }
+        // K の値が変わったので前処理を更新。fill-in は無いのでこれだけで OK。
+        self.m_inv_diag = compute_jacobi_inv_diag(k);
+        self.k = k.clone();
+        Ok(())
+    }
+
+    fn dim(&self) -> usize {
+        self.k.nrows
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +453,90 @@ mod tests {
         solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
         assert!((sol[0] - 1.0).abs() < 1e-10);
         assert!((sol[1] - 1.0).abs() < 1e-10);
+    }
+
+    /// PreconditionedMinres: 対称不定値 2x2 で正解を返す
+    #[test]
+    fn minres_kkt_2x2_indefinite() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let mut solver = PreconditionedMinres::new(k);
+        let mut sol = vec![0.0; 2];
+        solver.solve(&[3.0, 0.0], &mut sol, None).expect("MINRES solve");
+        assert!((sol[0] - 1.0).abs() < 1e-7);
+        assert!((sol[1] - 1.0).abs() < 1e-7);
+        assert_eq!(solver.dim(), 2);
+    }
+
+    /// PreconditionedMinres: 5x5 quasidef、DirectLdl と数値一致
+    #[test]
+    fn minres_kkt_5x5_matches_direct_ldl() {
+        let entries = [
+            (0, 0, 4.0), (0, 1, 0.5), (1, 1, 4.0), (1, 2, 0.5), (2, 2, 4.0),
+            (0, 3, 0.3),
+            (3, 3, -2.0), (3, 4, 0.4), (4, 4, -2.0),
+        ];
+        let rows: Vec<usize> = entries.iter().map(|(r, _, _)| *r).collect();
+        let cols: Vec<usize> = entries.iter().map(|(_, c, _)| *c).collect();
+        let vals: Vec<f64> = entries.iter().map(|(_, _, v)| *v).collect();
+        let k = CscMatrix::from_triplets(&rows, &cols, &vals, 5, 5).unwrap();
+        let b = vec![1.0, 2.0, -1.0, 0.5, -0.5];
+
+        let mut x_ldl = vec![0.0; 5];
+        let mut ldl_solver = DirectLdl::from_matrix(&k, None).unwrap();
+        ldl_solver.solve(&b, &mut x_ldl, None).unwrap();
+
+        let mut x_minres = vec![0.0; 5];
+        let mut minres_solver = PreconditionedMinres::new(k);
+        minres_solver.solve(&b, &mut x_minres, None).expect("MINRES solve");
+
+        for i in 0..5 {
+            assert!(
+                (x_ldl[i] - x_minres[i]).abs() < 1e-6,
+                "x[{}]: LDL={}, MINRES={}", i, x_ldl[i], x_minres[i]
+            );
+        }
+    }
+
+    /// PreconditionedMinres: refactor で K を更新できる
+    #[test]
+    fn minres_kkt_refactor() {
+        let k1 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, -1.0], 2, 2).unwrap();
+        let k2 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[4.0, -2.0], 2, 2).unwrap();
+        let mut solver = PreconditionedMinres::new(k1);
+        let mut sol = vec![0.0; 2];
+
+        solver.solve(&[2.0, -1.0], &mut sol, None).unwrap();
+        assert!((sol[0] - 1.0).abs() < 1e-7);
+        assert!((sol[1] - 1.0).abs() < 1e-7);
+
+        solver.refactor(&k2, None).expect("refactor");
+        solver.solve(&[4.0, -2.0], &mut sol, None).unwrap();
+        assert!((sol[0] - 1.0).abs() < 1e-7);
+        assert!((sol[1] - 1.0).abs() < 1e-7);
+    }
+
+    /// PreconditionedMinres: 過去 deadline で DeadlineExceeded
+    #[test]
+    fn minres_kkt_past_deadline() {
+        let k = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, -1.0], 2, 2).unwrap();
+        let mut solver = PreconditionedMinres::new(k);
+        let mut sol = vec![0.0; 2];
+        let past = Instant::now() - std::time::Duration::from_secs(1);
+        let result = solver.solve(&[1.0, 1.0], &mut sol, Some(past));
+        assert!(
+            matches!(result, Err(KktError::DeadlineExceeded)),
+            "past deadline should yield DeadlineExceeded, got {:?}", result.err()
+        );
+    }
+
+    /// PreconditionedMinres: trait object として動く (DirectLdl と同じ box に詰められる)
+    #[test]
+    fn minres_kkt_works_as_trait_object() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let mut solver: Box<dyn KktSolver> = Box::new(PreconditionedMinres::new(k));
+        let mut sol = vec![0.0; 2];
+        solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
+        assert!((sol[0] - 1.0).abs() < 1e-7);
+        assert!((sol[1] - 1.0).abs() < 1e-7);
     }
 }
