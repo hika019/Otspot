@@ -404,6 +404,7 @@ pub(crate) fn solve_qp_ipm_inner(
             &s, &y, &is_eq_ext, m_ineq,
             &r_d, &r_p,  // r_dual=r_d, r_primal=r_p (IPM)
             &sigma_vec, fac, aug_mat_for_ir, n, m_ext, mu,
+            timeout_ctx.deadline,
         );
 
         // --- Corrector ---
@@ -413,6 +414,7 @@ pub(crate) fn solve_qp_ipm_inner(
             &r_d, &r_p,  // r_dual=r_d, r_primal=r_p (IPM)
             &sigma_vec, fac, aug_mat_for_ir, n, m_ext,
             &mut dx, &mut dy, &mut ds,
+            timeout_ctx.deadline,
         );
 
         // --- Gondzio multiple centrality correctors ---
@@ -424,6 +426,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 &r_c_corr, &sigma_vec, fac, aug_mat_for_ir, n, m_ext,
                 options.ipm.max_correctors, alpha,
                 &mut dx, &mut dy, &mut ds,
+                timeout_ctx.deadline,
             );
         }
 

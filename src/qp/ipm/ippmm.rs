@@ -857,6 +857,7 @@ pub(crate) fn solve_ippmm_inner(
                 &s, &y, &is_eq_ext, m_ineq,
                 &r_d_pmm, &r_p_pmm,
                 &sigma_vec, &fac, aug_mat_for_ir, n, m_ext, mu,
+                timeout_ctx.deadline,
             );
             let (alpha, r_c_corr) = corrector_step(
                 &s, &y, &is_eq_ext,
@@ -864,6 +865,7 @@ pub(crate) fn solve_ippmm_inner(
                 &r_d_pmm, &r_p_pmm,
                 &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
                 &mut dx, &mut dy, &mut ds,
+                timeout_ctx.deadline,
             );
             (pred, alpha, r_c_corr)
         };
@@ -887,6 +889,7 @@ pub(crate) fn solve_ippmm_inner(
                     &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, n, m_ext,
                     options.ipm.max_correctors, alpha,
                     &mut dx, &mut dy, &mut ds,
+                    timeout_ctx.deadline,
                 )
             };
         }

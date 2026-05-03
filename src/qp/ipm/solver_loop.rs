@@ -121,15 +121,20 @@ pub(crate) fn solve_with_iterative_refinement(
     rhs: &[f64],
     sol: &mut [f64],
     max_iters: usize,
+    deadline: Option<std::time::Instant>,
 ) {
     let n = sol.len();
     debug_assert_eq!(rhs.len(), n);
     debug_assert_eq!(aug_mat.nrows, n);
     debug_assert_eq!(aug_mat.ncols, n);
 
-    fac.solve(rhs, sol);
+    fac.solve_with_deadline(rhs, sol, deadline);
 
     if max_iters == 0 {
+        return;
+    }
+    // deadline 切れなら IR をスキップ
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
 
@@ -173,6 +178,10 @@ pub(crate) fn solve_with_iterative_refinement(
             n, rhs_inf, sol_inf_initial, resid_skip_threshold, use_dd_residual);
     }
     for _ir_iter in 0..max_iters {
+        // deadline 切れなら IR を中断 (反復法 backend で最重要)
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         if use_dd_residual {
             // DD 精度で residual = rhs - K·sol を直接計算
             compute_residual_dd(aug_mat, sol, rhs, &mut residual);
@@ -208,7 +217,7 @@ pub(crate) fn solve_with_iterative_refinement(
         for v in correction.iter_mut() {
             *v = 0.0;
         }
-        fac.solve(&residual, &mut correction);
+        fac.solve_with_deadline(&residual, &mut correction, deadline);
 
         // Backtrack guard: NaN/Inf protection
         let any_bad = correction.iter().any(|v| !v.is_finite());
@@ -602,6 +611,7 @@ pub(crate) fn predictor_step(
     n: usize,
     m_ext: usize,
     mu: f64,
+    deadline: Option<std::time::Instant>,
 ) -> PredictorResult {
     let total = n + m_ext;
     let mut rhs = vec![0.0f64; total];
@@ -631,7 +641,7 @@ pub(crate) fn predictor_step(
     // Iterative refinement で LDL solve 精度向上（rank-deficient Q 対応）。
     // max_iters=3: LISWET の proximal floor 突破には 1 回では足りず scaled pf~1e-6 で
     // 止まる。3 回で 1 桁改善見込み。各反復は内部 guard で発散時 skip するため安全。
-    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS, deadline);
 
     // augmented system: sol[..n]=dx_pred（未使用）, sol[n..]=dy_pred
     let dy_pred = sol[n..].to_vec();
@@ -702,6 +712,7 @@ pub(crate) fn corrector_step(
     dx: &mut [f64],
     dy: &mut [f64],
     ds: &mut [f64],
+    deadline: Option<std::time::Instant>,
 ) -> (f64, Vec<f64>) {
     let total = n + m_ext;
     let mut rhs = vec![0.0f64; total];
@@ -737,7 +748,7 @@ pub(crate) fn corrector_step(
     rhs[..n].copy_from_slice(r_dual);
     rhs[n..].copy_from_slice(&r_p_mod_corr);
     // Iterative refinement で LDL solve 精度向上 (corrector も同じ精度を得る)
-    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
+    solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS, deadline);
 
     dx.copy_from_slice(&sol[..n]);
     dy.copy_from_slice(&sol[n..]);
@@ -783,6 +794,7 @@ pub(crate) fn gondzio_correctors(
     dx: &mut [f64],
     dy: &mut [f64],
     ds: &mut [f64],
+    deadline: Option<std::time::Instant>,
 ) -> f64 {
     let total = n + m_ext;
     let mut rhs = vec![0.0f64; total];
@@ -846,7 +858,7 @@ pub(crate) fn gondzio_correctors(
         rhs[..n].copy_from_slice(r_dual);
         rhs[n..].copy_from_slice(&r_p_mod_gondzio);
         // Iterative refinement で LDL solve 精度向上 (gondzio centering corrector)
-        solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS);
+        solve_with_iterative_refinement(fac, aug_mat, &rhs, &mut sol, IR_MAX_ITERS, deadline);
 
         let dx_new = sol[..n].to_vec();
         let dy_new = sol[n..].to_vec();

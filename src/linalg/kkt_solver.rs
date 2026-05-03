@@ -350,13 +350,24 @@ impl KktFactor {
     /// (既存 `LdlFactorizationAmd::solve` も数値破綻時は NaN を含む解を返すだけで
     /// 破綻自体を return しない infallible API のため、整合)
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
+        self.solve_with_deadline(rhs, sol, None);
+    }
+
+    /// deadline を伝搬する版 `solve`。反復法経路では deadline 超過で
+    /// 早期 break する (巨大問題で MINRES が無限ループに陥るのを防ぐ)。
+    /// 直接法経路では deadline は無視 (LDL solve は十分速い)。
+    pub fn solve_with_deadline(
+        &self,
+        rhs: &[f64],
+        sol: &mut [f64],
+        deadline: Option<Instant>,
+    ) {
         match self {
             KktFactor::Direct(ldl) => ldl.solve(rhs, sol),
             KktFactor::Iterative(minres) => {
                 // MINRES は Result を返すが、IPM 内部では最大努力 best-effort で十分。
-                // 収束しなくても sol には反復途中の状態が入る (LDL での「規則化失敗で
-                // NaN 残る」と同質の振る舞い)。エラーは無視する。
-                let _ = minres.solve(rhs, sol, None);
+                // deadline で早期 break しても sol には反復途中の状態が入る。
+                let _ = minres.solve(rhs, sol, deadline);
             }
         }
     }
