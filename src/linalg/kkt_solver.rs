@@ -321,6 +321,132 @@ impl KktSolver for PreconditionedMinres {
     }
 }
 
+// ── Auto dispatcher: try direct, fall back to iterative on memory budget ────────
+
+/// 最後に使用したバックエンド種別 (診断 / 検証用)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KktBackend {
+    /// 直接法 (LDL)
+    Direct,
+    /// 反復法 (MINRES + Jacobi)
+    Iterative,
+}
+
+/// 自動切替 dispatcher: 直接法 (LDL) を試し、メモリ予算超過時は反復法 (MINRES) に
+/// フォールバックする。
+///
+/// 判定:
+/// - `refactor` 内で DirectLdl を `max_l_nnz_from_budget()` 制限付きで試行
+/// - `WouldExceedMemory` を観測したら以降の `refactor` は反復法を使う
+///   (一度 budget を超えた問題は次 Newton step でも同じく超えるため、
+///    direct path を再度試みても無駄)
+/// - 数値特異 / deadline 切れは上位に伝搬 (反復法でも救えない)
+///
+/// fallback 後も deadline を共有する: direct で消費した時間は反復法の budget
+/// から自動的に減る (両方 deadline 引数で同じ Instant を見る)。
+///
+/// 「分岐は問題サイズの heuristic ではなく実測 L_nnz vs system memory の
+/// 比較」という設計のため、Maros 138 (小〜中問題) は direct 経路で性能維持、
+/// QPLIB_9008 (n=1M) は iterative 経路で OOM 回避という両立が自動で実現する。
+pub struct AutoKktSolver {
+    n: usize,
+    /// 直接法バックエンド。一度 WouldExceedMemory が出たら `None` にして以降スキップ
+    direct: Option<DirectLdl>,
+    /// 反復法バックエンド。lazy init (direct が成功している間は不要)
+    iterative: Option<PreconditionedMinres>,
+    /// 最後に使ったバックエンド (`solve` でどちらを呼ぶか決める)
+    last_used: Option<KktBackend>,
+}
+
+impl AutoKktSolver {
+    /// 既定の memory budget (`KKT_MEMORY_BUDGET_BYTES` env または 4 GiB) で
+    /// dispatcher を構築する。
+    pub fn new(n: usize) -> Self {
+        Self {
+            n,
+            direct: Some(DirectLdl::with_budget(n, max_l_nnz_from_budget())),
+            iterative: None,
+            last_used: None,
+        }
+    }
+
+    /// memory budget を明示指定するコンストラクタ (主にテスト用)。
+    pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
+        Self {
+            n,
+            direct: Some(DirectLdl::with_budget(n, max_l_nnz)),
+            iterative: None,
+            last_used: None,
+        }
+    }
+
+    /// 最後に使われたバックエンド種別を返す (診断用)。
+    pub fn last_backend(&self) -> Option<KktBackend> {
+        self.last_used
+    }
+}
+
+impl KktSolver for AutoKktSolver {
+    fn solve(
+        &mut self,
+        rhs: &[f64],
+        sol: &mut [f64],
+        deadline: Option<Instant>,
+    ) -> Result<(), KktError> {
+        match self.last_used {
+            Some(KktBackend::Direct) => self
+                .direct
+                .as_mut()
+                .ok_or(KktError::SingularOrIndefinite)?
+                .solve(rhs, sol, deadline),
+            Some(KktBackend::Iterative) => self
+                .iterative
+                .as_mut()
+                .ok_or(KktError::SingularOrIndefinite)?
+                .solve(rhs, sol, deadline),
+            None => Err(KktError::SingularOrIndefinite),
+        }
+    }
+
+    fn refactor(
+        &mut self,
+        k: &CscMatrix,
+        deadline: Option<Instant>,
+    ) -> Result<(), KktError> {
+        if k.nrows != self.n || k.ncols != self.n {
+            return Err(KktError::SingularOrIndefinite);
+        }
+
+        // Phase 1: direct を試す (まだ disable されていなければ)。
+        if let Some(direct) = self.direct.as_mut() {
+            match direct.refactor(k, deadline) {
+                Ok(()) => {
+                    self.last_used = Some(KktBackend::Direct);
+                    return Ok(());
+                }
+                Err(KktError::WouldExceedMemory) => {
+                    // 一度 budget 超えた問題は今後も超えるので direct を永久 disable。
+                    self.direct = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Phase 2: iterative にフォールバック (deadline は共有なので残時間で動く)。
+        if self.iterative.is_none() {
+            self.iterative = Some(PreconditionedMinres::new(k.clone()));
+        } else {
+            self.iterative.as_mut().unwrap().refactor(k, deadline)?;
+        }
+        self.last_used = Some(KktBackend::Iterative);
+        Ok(())
+    }
+
+    fn dim(&self) -> usize {
+        self.n
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +664,74 @@ mod tests {
         solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
         assert!((sol[0] - 1.0).abs() < 1e-7);
         assert!((sol[1] - 1.0).abs() < 1e-7);
+    }
+
+    /// AutoKktSolver: budget 十分なら direct を選ぶ
+    #[test]
+    fn auto_uses_direct_when_budget_sufficient() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        // budget 10000 entries (2x2 では絶対に超過しない)
+        let mut solver = AutoKktSolver::with_budget(2, 10000);
+        solver.refactor(&k, None).expect("refactor");
+        assert_eq!(solver.last_backend(), Some(KktBackend::Direct));
+
+        let mut sol = vec![0.0; 2];
+        solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve");
+        assert!((sol[0] - 1.0).abs() < 1e-9);
+        assert!((sol[1] - 1.0).abs() < 1e-9);
+    }
+
+    /// AutoKktSolver: budget 不足なら iterative にフォールバック
+    #[test]
+    fn auto_falls_back_to_iterative_when_budget_exceeded() {
+        let k = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4],
+            &[0, 1, 1, 2, 2, 3, 3, 4, 4],
+            &[4.0, 0.5, 4.0, 0.5, 4.0, 0.3, -2.0, 0.4, -2.0],
+            5, 5,
+        ).unwrap();
+        // budget 1 entry → 必ず超過 → iterative にフォールバック
+        let mut solver = AutoKktSolver::with_budget(5, 1);
+        solver.refactor(&k, None).expect("refactor (iterative)");
+        assert_eq!(solver.last_backend(), Some(KktBackend::Iterative));
+
+        let b = vec![1.0, 2.0, -1.0, 0.5, -0.5];
+        let mut sol = vec![0.0; 5];
+        solver.solve(&b, &mut sol, None).expect("solve");
+        // LDL 解と比較
+        let factor = crate::linalg::ldl::factorize_quasidefinite_with_amd(&k, None).unwrap();
+        let mut sol_ldl = vec![0.0; 5];
+        factor.solve(&b, &mut sol_ldl);
+        for i in 0..5 {
+            assert!(
+                (sol[i] - sol_ldl[i]).abs() < 1e-6,
+                "auto[{}]={} vs ldl[{}]={}", i, sol[i], i, sol_ldl[i]
+            );
+        }
+    }
+
+    /// AutoKktSolver: 一度 budget 超過したら以降の refactor も iterative を維持
+    #[test]
+    fn auto_remembers_iterative_after_first_overflow() {
+        let k1 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, -1.0], 2, 2).unwrap();
+        let k2 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[4.0, -2.0], 2, 2).unwrap();
+        let mut solver = AutoKktSolver::with_budget(2, 1);  // 必ず超過
+        solver.refactor(&k1, None).unwrap();
+        assert_eq!(solver.last_backend(), Some(KktBackend::Iterative));
+        solver.refactor(&k2, None).unwrap();
+        assert_eq!(solver.last_backend(), Some(KktBackend::Iterative),
+            "should stay iterative after first overflow");
+    }
+
+    /// AutoKktSolver: trait object として動く (IPM 配線で使う形)
+    #[test]
+    fn auto_works_as_trait_object() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let mut solver: Box<dyn KktSolver> = Box::new(AutoKktSolver::new(2));
+        solver.refactor(&k, None).unwrap();
+        let mut sol = vec![0.0; 2];
+        solver.solve(&[3.0, 0.0], &mut sol, None).unwrap();
+        assert!((sol[0] - 1.0).abs() < 1e-9);
+        assert!((sol[1] - 1.0).abs() < 1e-9);
     }
 }
