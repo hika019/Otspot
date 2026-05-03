@@ -349,9 +349,25 @@ pub(crate) fn collapse_le_expansion_dual(
     collapsed
 }
 
+/// faer supernodal Cholesky の deepest stack 要求 (BOYD1 n=93261 等の検証から経験的に決定)
+/// + 安全マージン。OS 主スレッドの典型値 (macOS/Linux 8 MB) と一致させる。
+///
+/// `solve_qp_with` の入口で必ずこのサイズの scoped thread に IPM 実行を載せる。
+/// Rust の `thread::spawn` デフォルトは 2 MB で、BOYD1 級の supernodal 再帰では
+/// overflow する。`Concurrent` の parallel 経路で内部 spawn する 2 子スレッドにも
+/// 同じ値を流用する (子は親の stack を継承しないため明示必須)。
+pub(crate) const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// QPをカスタム設定で解く
 ///
 /// qpOASESの `init()` に相当。timeout が反復制御の主ガード。
+///
+/// # スタック保護
+/// 入口で 8 MB の scoped thread に dispatch を載せる。faer supernodal Cholesky は
+/// BOYD1 級 (n=93261) で深く再帰するため、Rust デフォルトの 2 MB スタックでは
+/// `qp_solver: Ipm` / `IpPmmNew` 直接指定や `parallel` feature 無効ビルドの
+/// `Concurrent` 経路で stack overflow する (regression test
+/// `test_boyd1_no_memory_explosion` で検出)。
 ///
 /// # cancel_flag の注意事項
 /// `Concurrent` ソルバー（`parallel` feature 有効時のみ）では、`options.cancel_flag`
@@ -360,18 +376,51 @@ pub(crate) fn collapse_le_expansion_dual(
 /// `cancel_flag.store(false, Relaxed)` でリセットするか、問題ごとに新しい
 /// `Arc<AtomicBool>` を生成すること。他のソルバーモードでは flag の書き込みは行われない。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    // QpSolverChoice variant に応じて 2 アルゴ (IPM/IPPMM) を dispatch:
-    //   - Ipm        → Mehrotra predictor-corrector を v2 wrapper 経由で実行
-    //   - IpPmmNew   → IP-PMM を v2 wrapper 経由で実行
-    //   - Concurrent → 上記 2 経路を並行実行し、Optimal 到達順 / 残差優先で勝者選択
-    //
-    // 各 wrapper 内で Q=0 LP dispatch / PSD check / presolve / unscale / postsolve /
-    // 元空間 KKT 直接判定が一貫処理される (retry 1 層 / status 1 箇所変換)。
+    // すべての IPM 経路 (Ipm / IpPmmNew 直接, Concurrent parallel/no-parallel) を
+    // 8 MB スタック上で実行するため、入口で scoped thread に乗せる。
+    std::thread::scope(|s| {
+        let handle = std::thread::Builder::new()
+            .stack_size(SOLVE_STACK_SIZE)
+            .spawn_scoped(s, || dispatch_solve_qp(problem, options))
+            .expect("spawn QP solver thread");
+        handle.join().expect("QP solver thread panicked")
+    })
+}
+
+/// `solve_qp_with` 本体の dispatch。スタック保護は呼び出し側 (`solve_qp_with`) の
+/// scoped thread に任せ、本関数自体は通常関数として書く。
+///
+/// QpSolverChoice variant に応じて 2 アルゴ (IPM/IPPMM) を dispatch:
+///   - Ipm        → Mehrotra predictor-corrector を v2 wrapper 経由で実行
+///   - IpPmmNew   → IP-PMM を v2 wrapper 経由で実行
+///   - Concurrent → 上記 2 経路を並行実行し、Optimal 到達順 / 残差優先で勝者選択
+///
+/// 各 wrapper 内で Q=0 LP dispatch / PSD check / presolve / unscale / postsolve /
+/// 元空間 KKT 直接判定が一貫処理される (retry 1 層 / status 1 箇所変換)。
+fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     match options.qp_solver {
         QpSolverChoice::Ipm => ipm_v2::solve_qp_v1_wrapped(problem, options),
         QpSolverChoice::IpPmmNew => ipm_v2::solve_qp_v2(problem, options),
         QpSolverChoice::Concurrent => solve_qp_concurrent_dispatch(problem, options),
     }
+}
+
+/// `Concurrent` 経路の入口: Q=0 → Simplex 自動 dispatch + 並行 IPM 実行。
+///
+/// Q=0 退化ケース判定は `parallel` feature の有無に依存しない (純粋な routing)。
+/// 明示的に `Ipm` / `IpPmmNew` を指定したユーザーは別経路 (`solve_qp_with`) で
+/// IPM 直接実行のため本関数を通らない。Gurobi/CPLEX/HiGHS が default モードで
+/// 採用する慣習と同じ (default = 自動 dispatch、明示 Method 指定 = 尊重)。
+fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Q=0 退化ケース: LP solver (Simplex) に委譲する。
+    // - LP は Simplex の方が IPM より速く、`slack` / `reduced_costs` も自然に得られる
+    // - `parallel` feature OFF の build でも同じ dispatch を必須にする (この分岐が無いと
+    //   `Concurrent` default で Q=0 LP が QP IPM 経由になり、`reduced_costs` 空 +
+    //   `SuboptimalSolution` 状態で返るバグを誘発する)
+    if problem.is_zero_q() {
+        return solve_as_lp_pub(problem, options);
+    }
+    solve_qp_concurrent_ipm(problem, options)
 }
 
 /// Mehrotra (v1_wrapped) と IP-PMM (v2) を並行実行し、より良い結果を返す。
@@ -380,28 +429,14 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// (cooperative cancel: 各 inner solver が iter 境界で `should_stop()` をチェック)。
 /// 両方が走り切った場合は Optimal > 非 Optimal、両 Optimal なら先着優先。
 ///
-/// スタックサイズは macOS 主スレッドと同等の 8 MB を明示指定する。faer supernodal
-/// Cholesky は BOYD1 (n=93261) 級で深く再帰し、Rust の `s.spawn` デフォルト 2 MB
-/// スタックでは overflow するため。
+/// 子スレッドは `SOLVE_STACK_SIZE` (8 MB) で spawn する。Rust の `s.spawn` デフォルトは
+/// 2 MB で、`solve_qp_with` 入口の scoped thread の stack を継承しないため明示必須。
 #[cfg(feature = "parallel")]
-fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+fn solve_qp_concurrent_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     };
-
-    /// faer supernodal Cholesky の deepest stack 要求 (BOYD1 等の検証から経験的に決定)
-    /// + 安全マージン。OS 主スレッドの典型値 (macOS/Linux 8MB) と一致させる。
-    const SPAWN_STACK_SIZE: usize = 8 * 1024 * 1024;
-
-    // Q=0 退化ケース: LP solver (Simplex) に委譲する高速化。
-    // **`Concurrent` 経路でのみ自動 dispatch を許容する**。明示的に `Ipm` / `IpPmmNew` を
-    // 指定したユーザーは「指定アルゴリズムで動かす」mandate に従い v2_wrapper 経路で
-    // そのまま IPM が走る。Gurobi/CPLEX/HiGHS が default モードで採用する慣習と同じ
-    // (default = 自動 dispatch、明示 Method 指定 = 尊重)。
-    if problem.is_zero_q() {
-        return solve_as_lp_pub(problem, options);
-    }
 
     let cancel_flag = options
         .cancel_flag
@@ -413,7 +448,7 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
     let (tx, rx) = mpsc::channel::<SolverResult>();
 
     std::thread::scope(|s| {
-        let builder = || std::thread::Builder::new().stack_size(SPAWN_STACK_SIZE);
+        let builder = || std::thread::Builder::new().stack_size(SOLVE_STACK_SIZE);
         // Mehrotra (v1_wrapped) スレッド
         {
             let cancel = Arc::clone(&cancel_flag);
@@ -478,7 +513,6 @@ fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) ->
 /// - `NumericalError` 等は最低
 ///
 /// 同値なら先着維持で決定論性を確保する (`>` 比較で同値時 false)。
-#[cfg(feature = "parallel")]
 fn result_priority(result: &SolverResult) -> u8 {
     match result.status {
         SolveStatus::Optimal => 6,
@@ -492,10 +526,63 @@ fn result_priority(result: &SolverResult) -> u8 {
     }
 }
 
-/// Concurrent feature 無効時のフォールバック (IP-PMM 単独)。
+/// `parallel` feature 無効時のフォールバック: IP-PMM (v2) → Mehrotra (v1_wrapped) を
+/// 順次実行し、優先度の高い結果を返す (race ではなく逐次 best-of)。
+///
+/// 動機: parallel 有効時は v1/v2 を並行実行して片方が `Optimal` を出した瞬間に勝つ。
+/// 単純 fallback (v2 単独) では box-constrained / FixedVar+presolve のような
+/// v2 が `SuboptimalSolution` で止まる QP で v1 の救済機会が完全に失われ、
+/// `parallel` の有無でユーザー観測ステータスが変わる致命的乖離を生む。
+///
+/// 戦略:
+/// 1. v2 を deadline いっぱいで実行 (大規模 QP では v2 の方が PASS 数が多いため先行)
+/// 2. 確定結果 (`Optimal` / `Infeasible` / `Unbounded`) なら即返却
+/// 3. それ以外 (Suboptimal/Timeout/NumericalError) かつ deadline 残あれば v1_wrapped を実行
+/// 4. `result_priority` で勝者を選択 (parallel 経路と同じ判定)
+///
+/// なぜ v2 first か: parallel 経路は thread race により v1 がよく勝つが、本逐次経路で
+/// v1 を先に呼ぶと `timeout_secs: None` の小規模テスト (v1 が deadline なし収束に時間が
+/// かかる場合) で全体がハングする。v2 は no-deadline でも有限ステップで内部判定 (alpha_stall
+/// 等) により終了するため逐次経路の先行 solver として安全。BD-T6 のような bound_duals
+/// 質差ケースでは v2 が Suboptimal で止まり v1 fallback で救われる。
+///
+/// 共有 deadline により後段 solver が予算を食い潰さないことを保証する。
 #[cfg(not(feature = "parallel"))]
-fn solve_qp_concurrent_dispatch(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    ipm_v2::solve_qp_v2(problem, options)
+fn solve_qp_concurrent_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    use std::time::{Duration, Instant};
+
+    // timeout_secs を単一 deadline に変換し、両 solver 呼び出しで共有する。
+    // これにより v1 fallback が予算超過しないことを担保する (ipm_v2 内部も deadline を尊重する)。
+    let mut shared_opts = options.clone();
+    if shared_opts.deadline.is_none() {
+        if let Some(secs) = shared_opts.timeout_secs {
+            shared_opts.deadline = Some(Instant::now() + Duration::from_secs_f64(secs));
+            shared_opts.timeout_secs = None;
+        }
+    }
+
+    let r_v2 = ipm_v2::solve_qp_v2(problem, &shared_opts);
+    if matches!(
+        r_v2.status,
+        SolveStatus::Optimal | SolveStatus::Infeasible | SolveStatus::Unbounded
+    ) {
+        return r_v2;
+    }
+
+    // deadline が既に経過しているなら v1 fallback はスキップ (同じ Timeout を二度叩かない)
+    if shared_opts
+        .deadline
+        .is_some_and(|d| Instant::now() >= d)
+    {
+        return r_v2;
+    }
+
+    let r_v1 = ipm_v2::solve_qp_v1_wrapped(problem, &shared_opts);
+    if result_priority(&r_v1) > result_priority(&r_v2) {
+        r_v1
+    } else {
+        r_v2
+    }
 }
 
 
@@ -594,7 +681,18 @@ const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
 /// 解法: A^T y = -(Q*x + c + bound_contrib) の最小ノルム解を
 /// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
 /// 既存 y より KKT 残差が改善した場合のみ採用する (退行防止)。
-pub(crate) fn refine_dual_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+///
+/// `deadline` 経過時は no-op で即 return。AAT (m×m) factorize が m=10k 級で
+/// 数百秒かかる事例 (QPLIB_8505) があり、deadline 不在だと post-IPM が timeout
+/// 予算を完全に使い切れない。
+pub(crate) fn refine_dual_lsq(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
+) {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
     if let Some(y_new) = compute_lsq_dual_y(problem, result) {
         let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; problem.num_vars]);
         let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; problem.num_vars]);
@@ -688,7 +786,16 @@ pub(crate) fn compute_lsq_dual_y(
 ///
 /// objective 影響: ‖δ‖₂ ≈ pf ≈ 1e-6 程度で微小なので Q への影響は negligible。
 /// dual との整合は別途 refine_dual_lsq + refit_bound_duals_kkt が再評価する。
-pub(crate) fn refine_primal_lsq(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+///
+/// `deadline` 経過時は no-op で即 return。AAT factorize の重さは refine_dual_lsq と同じ。
+pub(crate) fn refine_primal_lsq(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
+) {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if m == 0 || result.solution.len() != n {
@@ -841,9 +948,16 @@ pub(crate) fn refine_kkt_iterative(
     result: &mut crate::problem::SolverResult,
     max_iters: usize,
     target_pf: f64,
+    deadline: Option<std::time::Instant>,
 ) -> usize {
     use crate::problem::ConstraintType;
     use crate::presolve::bound_contrib_at_var;
+
+    // deadline 経過なら即 no-op。post-IPM の Krylov refinement は IPM 後に呼ばれるため、
+    // ユーザー timeout が 10s 級の場合 IPM 既に消費済みでここでは時間切れの可能性あり。
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return 0;
+    }
 
     let n = problem.num_vars;
     let m = problem.num_constraints;
@@ -993,6 +1107,10 @@ pub(crate) fn refine_kkt_iterative(
     //   - 大きすぎ → IR の forward error 増 (cond×ε で δ が cond の代理)
     //   - 小さすぎ → factorize fail
     //   - 段階的に増やして「factorize 成立する最小 δ」を選ぶ
+    //
+    // **deadline 必須**: 30k×30k 級 K は 1 回の LDL factorize で 80 秒級に達する。
+    // 6 retry で QPLIB_8505 の SingularOrIndefinite が ~500 秒経過する事象を観測。
+    // factorize 内 (`factorize_quasidefinite_with_amd`) と retry 間の両方で時間切れを検査する。
     const FACTOR_RETRY_GROWTH: f64 = 10.0;
     const FACTOR_RETRY_MAX: usize = 6;  // δ_init × 10^6 まで (1e-10 → 1e-4)
     let factor = {
@@ -1002,7 +1120,14 @@ pub(crate) fn refine_kkt_iterative(
         let mut result_factor: Option<crate::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retry_count = 0usize;
         loop {
-            match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, None) {
+            // retry 直前で deadline 確認 (前回 factorize に時間を全部使った可能性あり)
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                if trace_pre || diag_on {
+                    eprintln!("REFINE_KKT factorize abandoned due to deadline at retry={}", retry_count);
+                }
+                break;
+            }
+            match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, deadline) {
                 Ok(f) => { result_factor = Some(f); break; }
                 Err(e) => {
                     if retry_count >= FACTOR_RETRY_MAX {
@@ -1230,6 +1355,11 @@ pub(crate) fn refine_kkt_iterative(
     let df_limit = (pre_df * DF_TOLERANCE_FACTOR).max(1e-7);
 
     for iter in 0..max_iters {
+        // 各 iter 先頭で deadline 確認 (LDL solve は n+m=30k で数秒級になり得る)
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            if trace { eprintln!("REFINE_KKT iter={} deadline reached", iter); }
+            break;
+        }
         let (r_d, r_p, pf_cur, df_cur) = if dd_mode {
             compute_residuals_dd(&result.solution, &result.dual_solution, &result.bound_duals)
         } else {
@@ -1381,17 +1511,15 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
             && (ub - x[j]) <= ACTIVE_REL_TOL * (1.0 + ub.abs()).max(1.0);
 
         if lb_finite && ub_finite {
-            if lb_active && !ub_active {
-                new_bd[lb_idx] = (-target).max(0.0);
-                // ub_idx 側はゼロのまま
-            } else if ub_active && !lb_active {
-                new_bd[ub_idx] = target.max(0.0);
-            } else if lb_active && ub_active {
-                // FX (lb≈ub): 符号で振り分け、両方 0 以上
-                if -target >= 0.0 { new_bd[lb_idx] = -target; }
-                else               { new_bd[ub_idx] = target; }
+            // FX variable (lb==ub): convention is 0-fill; KKT-guard also excludes FX
+            if (lb - ub).abs() >= FX_TOL {
+                if lb_active && !ub_active {
+                    new_bd[lb_idx] = (-target).max(0.0);
+                } else if ub_active && !lb_active {
+                    new_bd[ub_idx] = target.max(0.0);
+                }
+                // interior or both-active non-FX: 0/0 のまま
             }
-            // interior (どちらも非 active): 0/0 のまま (residual はそのまま、KKT-guard が判断)
             lb_idx += 1;
             ub_idx += 1;
         } else if lb_finite {
@@ -2957,6 +3085,76 @@ mod tests {
         }
     }
 
+    // ===== Concurrent default-build feature parity tests =====
+    //
+    // 動機: Q=0 LP dispatch と Mehrotra↔IP-PMM のフォールバック合流は
+    //   `parallel` feature の有無に関係なく `Concurrent` (default) で動かなければ
+    //   ならない (default build の `cargo test` が落ちる致命的乖離を防ぐ)。
+    // これらの分岐が cfg gate の中に閉じ込められるとデフォルトビルドのユーザー体験が
+    // 静かに壊れるため、明示的な regression test として 2 件を入れる。
+
+    /// CDP-1: `Concurrent` (default) で Q=0 LP が Simplex に dispatch され、
+    /// `reduced_costs` / `slack` が空でないこと。`parallel` feature 無効でも有効でも同じ
+    /// 結果になることを担保する (`solve_qp_concurrent_dispatch` の Q=0 経路が
+    /// cfg ガード外で動くこと)。
+    #[test]
+    fn test_concurrent_default_dispatches_zero_q_to_simplex() {
+        // min x + 2y  s.t. x + y >= 1, x>=0, y>=0  (Q=0 → LP path)
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0, 2.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, n).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(0.0_f64, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        // Concurrent (default)
+        let opts = SolverOptions {
+            qp_solver: QpSolverChoice::Concurrent,
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+
+        // Simplex 経由なら Optimal で `reduced_costs` / `slack` が埋まる。
+        // IPM 経由になると両方とも空 (この regression test の検出対象)。
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "CDP-1: Q=0 LP must reach Optimal via Simplex (got {:?})", result.status);
+        assert_eq!(result.reduced_costs.len(), n,
+            "CDP-1: reduced_costs must be populated by Simplex (was IPM dispatched?)");
+        assert_eq!(result.slack.len(), 1,
+            "CDP-1: slack must be populated by Simplex (was IPM dispatched?)");
+    }
+
+    /// CDP-2: `Concurrent` (default) で v2 (IP-PMM) 単独では `SuboptimalSolution` で止まる
+    /// box-constrained QP が Mehrotra (v1_wrapped) フォールバックで `Optimal` に到達することを
+    /// 担保する。`parallel` feature 無効でも逐次 best-of で同じ結論を返すことの regression test。
+    #[test]
+    fn test_concurrent_default_falls_back_to_mehrotra() {
+        // min x²+y² - 4x - 4y  s.t. 0 <= x,y <= 1
+        // 最適解: x=y=1 (両 ub 活性), obj = 2 - 8 = -6
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![-4.0, -4.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(0.0_f64, 1.0_f64); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+
+        let opts = SolverOptions {
+            qp_solver: QpSolverChoice::Concurrent,
+            timeout_secs: Some(10.0),
+            ..SolverOptions::default()
+        };
+        let result = solve_qp_with(&problem, &opts);
+
+        // v2 単独だと SuboptimalSolution、v1_wrapped 経由なら Optimal。
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "CDP-2: box-QP must reach Optimal (parallel/sequential fallback parity)");
+        let tol = 1e-4_f64;
+        assert!((result.solution[0] - 1.0).abs() < tol, "CDP-2: x[0]≈1");
+        assert!((result.solution[1] - 1.0).abs() < tol, "CDP-2: x[1]≈1");
+        assert!((result.objective + 6.0).abs() < tol, "CDP-2: obj≈-6");
+    }
+
     // ===== bound_duals col_mapリマップ テスト (BD-T1〜BD-T6) =====
 
     /// BD-T1: baseline（presolve OFF, 全変数有限境界あり）
@@ -3552,19 +3750,21 @@ mod tests {
             ..Default::default()
         };
         let result = solve_qp_with(&problem, &opts);
-        // SuboptimalSolutionは外部APIに漏れてはならない（Optimal or Timeout のみ許容）
+        // 6d10eaf以降 SuboptimalSolution は公開API上で有効なステータス。
+        // 検証: MaxIterations / NumericalError が直接漏れないこと。
         assert_ne!(
-            result.status, SolveStatus::SuboptimalSolution,
-            "G-1: SuboptimalSolutionが外部APIに漏れた（Optimal or Timeoutに変換されるべき）"
+            result.status, SolveStatus::MaxIterations,
+            "G-1: MaxIterationsが外部APIに漏れた"
         );
         assert!(
-            result.status == SolveStatus::Optimal || result.status == SolveStatus::Timeout,
-            "G-1: status must be Optimal or Timeout, got {:?}", result.status
+            matches!(result.status,
+                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution),
+            "G-1: status must be Optimal/Timeout/SuboptimalSolution, got {:?}", result.status
         );
     }
 
-    /// G-2: MaxIterations→Timeout変換確認
-    /// max_iter=1 で最大反復到達 → 外部APIにMaxIterationsが漏れないことを確認
+    /// G-2: MaxIterations が外部API に漏れないことを確認
+    /// max_iter=1 で最大反復到達 → Optimal/Timeout/SuboptimalSolution のいずれかになる
     #[test]
     fn test_max_iterations_to_timeout_mapping() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -3580,14 +3780,15 @@ mod tests {
             ..Default::default()
         };
         let result = solve_qp_with(&problem, &opts);
-        // MaxIterationsは外部APIに漏れてはならない（Optimal or Timeout のみ許容）
+        // MaxIterations は内部 status であり外部 API に漏れてはならない
         assert_ne!(
             result.status, SolveStatus::MaxIterations,
-            "G-2: MaxIterationsが外部APIに漏れた（Optimal or Timeoutに変換されるべき）"
+            "G-2: MaxIterationsが外部APIに漏れた"
         );
         assert!(
-            result.status == SolveStatus::Optimal || result.status == SolveStatus::Timeout,
-            "G-2: status must be Optimal or Timeout, got {:?}", result.status
+            matches!(result.status,
+                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution),
+            "G-2: status must be Optimal/Timeout/SuboptimalSolution, got {:?}", result.status
         );
     }
 

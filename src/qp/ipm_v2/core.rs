@@ -147,7 +147,7 @@ fn run_ipm_with(
 
     // dual の post-process refinement (LSQ): scaled 空間で動かす方が IPM 出力との整合性が高い。
     if reduced.num_constraints > 0 {
-        crate::qp::refine_dual_lsq(reduced, &mut result);
+        crate::qp::refine_dual_lsq(reduced, &mut result, opts.deadline);
     }
 
     // [DIAG] POST_STAGE_TRACE: 後処理 chain で primal/kkt 残差がどこで膨らむか観測
@@ -509,7 +509,7 @@ fn run_ipm_with(
             let pre_pres_a = primal_residual_rel(&view, &final_sol.solution);
             let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             let pre_combined_a = pre_pres_a.max(pre_kkt_a);
-            crate::qp::refine_primal_lsq(orig_problem, &mut final_sol);
+            crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
             let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
@@ -524,7 +524,7 @@ fn run_ipm_with(
         // (B) 念のためもう 1 度 y / z refit (stage A 内の内部 guard 後の再評価)
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let pre_y = final_sol.dual_solution.clone();
-        crate::qp::refine_dual_lsq(orig_problem, &mut final_sol);
+        crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
         let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         if post_kkt <= current_kkt {
             current_kkt = post_kkt;
@@ -559,7 +559,7 @@ fn run_ipm_with(
         // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k なら数秒で完了。
         const KRYLOV_MAX_ITERS: usize = 30;
         let user_eps = opts.ipm_eps();
-        /// target_pf: ユーザー eps と整合 (PASS 判定相当)。pf < target で early exit。
+        // target_pf: ユーザー eps と整合 (PASS 判定相当)。pf < target で early exit。
         let target_pf = user_eps;
         if post_trace {
             let pres_pre_d = primal_residual_rel(&view, &final_sol.solution);
@@ -567,7 +567,7 @@ fn run_ipm_with(
             eprintln!("POST_STAGE [pre Stage D Krylov] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre_d, kkt_pre_d);
         }
         let _refined = crate::qp::refine_kkt_iterative(
-            orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf,
+            orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf, opts.deadline,
         );
         if post_trace {
             let pres_post_d = primal_residual_rel(&view, &final_sol.solution);

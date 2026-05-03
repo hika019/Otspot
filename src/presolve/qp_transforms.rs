@@ -32,9 +32,9 @@ pub enum QpPresolveStatus {
 #[derive(Debug, Clone)]
 pub(crate) enum QpPostsolveStep {
     /// 固定変数の復元 (lb[j] == ub[j] または fix_from_bounds 等)。
-    /// `bound_active`: postsolve で bound_dual を復元するときの活性側ヒント。
-    ///   `Some(false)` = lb 活性、`Some(true)` = ub 活性、`None` = 内部 (z=0)
-    FixedVar { idx: usize, val: f64, bound_active: Option<bool> },
+    /// `bound_active` ヒントは設計上 postsolve で参照されない (z 復元は
+    /// `refit_bound_duals_kkt` が bound_duals レイアウト確定後に一括処理)。
+    FixedVar { idx: usize, val: f64 },
     /// Singleton行による値確定 (Eq制約 A[i,j]*x[j]=b[i])。
     /// `row` を保持することで postsolve で y[row] を解析的に復元可能。
     SingletonRow { row: usize, col: usize, val: f64 },
@@ -431,7 +431,7 @@ fn apply_large_coeff_rescaling(
 /// #18: #1-12 を収束まで反復適用（最大 10 回）
 pub fn run_qp_presolve_phase1(
     prob: &QpProblem,
-    _opts: &SolverOptions,
+    opts: &SolverOptions,
 ) -> QpPresolveResult {
     // ==================================================================
     // #15: infeasibility_detection() — presolve 段階での不整合早期検出
@@ -473,7 +473,12 @@ pub fn run_qp_presolve_phase1(
     let mut prev_removed_count = 0usize;
     let max_iter_pass = std::env::var("QP_PRESOLVE_MAX_PASS")
         .ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    let deadline = opts.deadline;
     for _iter_pass in 0..max_iter_pass {
+        // 各 pass 先頭で deadline チェック (100 万変数級では各 pass が秒単位)
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let cur_removed_count = removed_cols.iter().filter(|&&b| b).count()
             + removed_rows.iter().filter(|&&b| b).count();
         if _iter_pass > 0 && cur_removed_count == prev_removed_count {
@@ -526,9 +531,7 @@ pub fn run_qp_presolve_phase1(
             }
             apply_fixed_variable(j, val, prob, &mut c, &mut b, &mut obj_offset, &removed_cols, &removed_rows);
             removed_cols[j] = true;
-            // lb==ub 由来の fix なので bound_active 判定: val がどっちに張り付いてるかで決まる。
-            // ここでは lb==ub なので両方 active 扱い → bound_dual 復元時 net z で振り分け。
-            postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: None });
+            postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
         }
     }
 
@@ -663,12 +666,7 @@ pub fn run_qp_presolve_phase1(
         removed_cols[j] = true;
         // removed_rows[i] は設定しない: 行 i は他変数への制約として保持（バグ修正）
         // 行 i が空になった場合は後続の #4 empty_rows_cols で除去される
-        // singleton_col 由来の fix: c[j] と a[i,j] の符号一致 (aligned) ケースで lb or ub 活性。
-        // val == lb → bound_active=Some(false), val == ub → Some(true)
-        let active = if (val - lb).abs() < ZERO_TOL { Some(false) }
-                     else if (val - ub).abs() < ZERO_TOL { Some(true) }
-                     else { None };
-        postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
+        postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
     }
 
     // ==================================================================
@@ -805,11 +803,7 @@ pub fn run_qp_presolve_phase1(
                                     // 1 番目の fix だけ RedundantRowFix で記録 (y[row] 復元用)
                                     postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
                                 } else {
-                                    let (lb_j, ub_j) = bounds[j];
-                                    let active = if (val - lb_j).abs() < ZERO_TOL { Some(false) }
-                                                 else if (val - ub_j).abs() < ZERO_TOL { Some(true) }
-                                                 else { None };
-                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
+                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
                                 }
                             }
                         }
@@ -1232,11 +1226,7 @@ pub fn run_qp_presolve_phase1(
                                 if k == 0 {
                                     postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
                                 } else {
-                                    let (lb_j, ub_j) = bounds[j];
-                                    let active = if (val - lb_j).abs() < ZERO_TOL { Some(false) }
-                                                 else if (val - ub_j).abs() < ZERO_TOL { Some(true) }
-                                                 else { None };
-                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val, bound_active: active });
+                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
                                 }
                             }
                         }
@@ -1445,7 +1435,7 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     // #13: ruiz_scaling_connect() — Ruiz スケーリングをpresolveに接続
     // PARAM: Ruiz反復数デフォルト=10, 理由=収束性と計算コストのバランス
-    // 適用条件: 縮約後問題が非空かつ _opts.use_ruiz_scaling = true
+    // 適用条件: 縮約後問題が非空かつ opts.use_ruiz_scaling = true
     // スキップ条件: b 値が大きい場合（|b|_max > 1e4）。
     //   大値 b が残っている問題では Ruiz が縮約後のスパース構造と干渉し IPM を発散させる。
     //   スキップ時は dispatch（IPM）が自身の Ruiz を適用するため品質は維持される。
@@ -1458,7 +1448,7 @@ pub fn run_qp_presolve_phase1(
     // → mu 増加 → dx 発散 → NaN_guard で best-so-far に巻き戻し、を引き起こしていた。
     // 「Ruiz 干渉」の懸念は経験則で skip 条件を入れていたが、IPM 暴走の代償が大きい。
     // skip を撤廃して Ruiz を常に適用する。退行時は再考。
-    let ruiz_scaler_opt: Option<RuizScaler> = if _opts.use_ruiz_scaling && n_new > 0 {
+    let ruiz_scaler_opt: Option<RuizScaler> = if opts.use_ruiz_scaling && n_new > 0 {
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);

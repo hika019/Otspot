@@ -89,8 +89,29 @@ fn solve_qp_v2_with_runner(
     let mut opts = options.clone();
     let n_orig = problem.num_vars;
 
+    // ── deadline 確定を presolve よりも先に行う ──────────
+    // 動機: 100 万変数級 QPLIB (QPLIB_8547: n=1.0M, m=1.0M) では presolve 単体で
+    // timeout を超過する。deadline が presolve 後に設定されると、presolve 中の
+    // hot loop が timeout を尊重できず external gtimeout で force-kill される。
+    // deadline を冒頭で固定し、presolve 後/IPM 前後に経過判定を入れる。
+    if opts.deadline.is_none() {
+        if let Some(secs) = opts.timeout_secs {
+            opts.deadline = Some(start_time + std::time::Duration::from_secs_f64(secs));
+            opts.timeout_secs = None;
+        }
+    }
+    let total_deadline = opts.deadline;
+    let user_eps = opts.ipm_eps();
+
     // ── presolve (1 回のみ) ─────────────────────────────
-    let presolve_result = if opts.presolve {
+    // 100万変数級の QPLIB (8547/9008) では presolve 内ループが O(n*m) で deadline
+    // 到達前に巨大時間を消費する。bench 計装と同じ 50k 閾値で skip し、IPM 内 deadline
+    // チェックに任せる。閾値内では従来どおり presolve 適用 (Maros 138 PASS 数を維持)。
+    const PRESOLVE_SIZE_LIMIT: usize = 50_000;
+    let presolve_result = if opts.presolve
+        && problem.num_vars <= PRESOLVE_SIZE_LIMIT
+        && problem.num_constraints <= PRESOLVE_SIZE_LIMIT
+    {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
         // DIAG: QP_PRESOLVE_PHASE2=0 で phase2 (equality_constraint_qr / Ruiz / 大係数 scale)
         // を無効化。dual postsolve が phase2 の row 削除に追従できない場合の回避用。
@@ -106,17 +127,11 @@ fn solve_qp_v2_with_runner(
         return SolverResult::infeasible();
     }
 
-    // ── deadline 確定 (presolve 時間も timeout に算入) ─────
-    if opts.deadline.is_none() {
-        if let Some(secs) = opts.timeout_secs {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let remaining = (secs - elapsed).max(0.0);
-            opts.deadline = Some(Instant::now() + std::time::Duration::from_secs_f64(remaining));
-            opts.timeout_secs = None;
-        }
+    // presolve 自体が timeout を超過した場合 (巨大 QP)、IPM を走らせず即 Timeout。
+    // 解なしで返すため finalize_outcome 経由で `Timeout` (best-so-far なし) になる。
+    if total_deadline.is_some_and(|d| Instant::now() >= d) {
+        return finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false);
     }
-    let total_deadline = opts.deadline;
-    let user_eps = opts.ipm_eps();
 
     // presolve が既に Ruiz scaling を適用した場合、IPM 側で重ね掛けすると
     // 二重スケールで解が誤った点に収束する (HS21 で観測: x=(4.31,0) vs 真値 (2,0))。
@@ -216,7 +231,15 @@ fn solve_qp_v2_with_runner(
     // ── status 変換 (1 箇所のみ) ───────────────
     // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
-    finalize_outcome(outcome, user_eps, n_orig, total_deadline)
+    // cancel_flag が事前に立っていた / sibling thread が立てた場合も「外部から停止」
+    // として deadline 経過と同様に扱う。これがないと「cancel_flag 即停止」で IPM が
+    // 一切 iterate しないケースが NumericalError 扱いになり、`A3-C02` 系の cancel 契約
+    // (preset cancel → Timeout) を破る。
+    let cancelled = options
+        .cancel_flag
+        .as_ref()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+    finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled)
 }
 
 /// `IpmOutcome` から `SolverResult` (外部 status) への変換 — **status mutation 1 箇所**。
@@ -236,6 +259,7 @@ fn finalize_outcome(
     user_eps: f64,
     n_orig: usize,
     total_deadline: Option<Instant>,
+    cancelled: bool,
 ) -> SolverResult {
     // 確定的 Infeasible / Unbounded / NonConvex は最優先で外部に伝える (status 隠蔽防止)。
     // objective は status に応じて意味のある値を設定:
@@ -257,7 +281,9 @@ fn finalize_outcome(
         };
     }
 
-    let timed_out = total_deadline.is_some_and(|d| Instant::now() >= d);
+    // 外部停止 = deadline 経過 OR cancel_flag セット。後者は cancel_flag 事前設定での
+    // 即停止 / parallel sibling からの cooperative cancel をカバーする。
+    let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
 
     if outcome.solution.is_empty() {
         // best-so-far も無い: 真の時間切れ or 数値破綻 (factorize fail 等)。
@@ -280,7 +306,8 @@ fn finalize_outcome(
     let status = if outcome.satisfies_eps(user_eps) {
         SolveStatus::Optimal
     } else if timed_out {
-        // 外部 deadline 経過で精度未達 → 真の Timeout (時間あれば改善余地ありの可能性)
+        // 外部 deadline 経過 / cancel_flag セットで精度未達 → 真の Timeout
+        // (時間あれば改善余地ありの可能性)
         SolveStatus::Timeout
     } else {
         // deadline 内で精度未達 → IPM が内部で諦めた (数値的限界)。

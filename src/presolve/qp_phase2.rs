@@ -317,13 +317,19 @@ pub fn constraint_precond(
 /// - #21: 制約行正規化（IPM の収束改善）
 pub fn run_qp_presolve_phase2(
     phase1_result: QpPresolveResult,
-    _opts: &SolverOptions,
+    opts: &SolverOptions,
 ) -> QpPresolveResult {
     let prob = &phase1_result.reduced;
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
     if n == 0 || m == 0 {
+        return phase1_result;
+    }
+
+    // deadline 経過なら phase1 の結果をそのまま返す (Ruiz / 大係数 scale を skip)。
+    // 100 万変数級 QPLIB では Ruiz iteration が秒単位で deadline を圧迫する。
+    if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return phase1_result;
     }
 

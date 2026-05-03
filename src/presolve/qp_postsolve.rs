@@ -135,12 +135,9 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
 ///     y[row] = -(Q[col,:]·x + c[col] + Σ_{k≠row} A[k,col]·y[k]) / A[row, col]
 ///   col が boundary なら z を後段で再計算 (本関数では y[row] のみ復元)
 ///
-/// **FixedVar { idx, val, bound_active }**:
+/// **FixedVar { idx, val }**:
 ///   変数 idx を val に固定 (lb==ub または activity から)。
-///   元 KKT: Q[idx,:]·x + c[idx] + (A^T y)[idx] = z_lb[idx] - z_ub[idx]
-///   bound_active = Some(false) (lb 活性): z_lb[idx] = stat, z_ub[idx] = 0
-///   bound_active = Some(true) (ub 活性): z_ub[idx] = -stat, z_lb[idx] = 0
-///   bound_active = None (lb==ub):       net z で振り分け
+///   z 復元は `core.rs::refit_bound_duals_kkt` が一括で行う (本関数は val のみ書き戻す)。
 ///
 /// **EmptyCol { idx, val }**:
 ///   Q[idx,:]=0, A[:,idx]=0 で固定。KKT: c[idx] = z_lb[idx] - z_ub[idx]
