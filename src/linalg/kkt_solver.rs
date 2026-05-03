@@ -88,6 +88,12 @@ impl std::error::Error for KktError {}
 ///
 /// 実装は `factorize` (or `refactor`) で K を準備し、`solve` で 1 つ以上の
 /// 右辺について解を返す。
+///
+/// **&self vs &mut self 設計**:
+/// - `solve` は `&self`: predictor/corrector で同じ factorization に対し複数 RHS を
+///   解く際、IPM 側が `&fac` を持ち回って複数関数に渡せるようにするため。MINRES の
+///   reverberation 状態 (Lanczos vectors) は呼び出し毎にローカル確保。
+/// - `refactor` は `&mut self`: cached factorization を置き換えるため。
 pub trait KktSolver: Send {
     /// 1 つの右辺に対して `K · u = rhs` を解いて `sol` に書き込む。
     ///
@@ -95,7 +101,7 @@ pub trait KktSolver: Send {
     /// solve は速い)。実装は反復中に `Instant::now() >= deadline` を確認して
     /// 早期終了することを推奨。
     fn solve(
-        &mut self,
+        &self,
         rhs: &[f64],
         sol: &mut [f64],
         deadline: Option<Instant>,
@@ -158,7 +164,7 @@ impl DirectLdl {
 
 impl KktSolver for DirectLdl {
     fn solve(
-        &mut self,
+        &self,
         rhs: &[f64],
         sol: &mut [f64],
         _deadline: Option<Instant>,
@@ -271,7 +277,7 @@ fn compute_jacobi_inv_diag(k: &CscMatrix) -> Vec<f64> {
 
 impl KktSolver for PreconditionedMinres {
     fn solve(
-        &mut self,
+        &self,
         rhs: &[f64],
         sol: &mut [f64],
         deadline: Option<Instant>,
@@ -318,6 +324,74 @@ impl KktSolver for PreconditionedMinres {
 
     fn dim(&self) -> usize {
         self.k.nrows
+    }
+}
+
+// ── KktFactor: 直接法 / 反復法を統一した最小 API でラップする「factor 互換」型 ─────
+
+/// 既存の `LdlFactorizationAmd` 互換の `solve(&self, rhs, sol)` API を持ちつつ、
+/// 内部で直接法 / 反復法を切り替えられる factor 型。
+///
+/// `LdlFactorizationAmd` を直接持ち回っている既存の IPM コード (predictor/corrector/
+/// gondzio/IR) を最小変更で MINRES 対応にする目的で追加。trait オブジェクトでは
+/// なく enum dispatch で書くことで、既存コードの `&LdlFactorizationAmd` を
+/// `&KktFactor` に置換するだけで済む。
+pub enum KktFactor {
+    /// 直接法 (LDL) で因子化済み
+    Direct(crate::linalg::ldl::LdlFactorizationAmd),
+    /// 反復法 (MINRES + Jacobi) で K の値を保持
+    Iterative(PreconditionedMinres),
+}
+
+impl KktFactor {
+    /// `K · sol = rhs` を解いて `sol` に書き込む。LDL 互換の infallible API。
+    ///
+    /// 反復法側のエラー (収束失敗等) は内部で握り潰し、best-effort 解を返す。
+    /// (既存 `LdlFactorizationAmd::solve` も数値破綻時は NaN を含む解を返すだけで
+    /// 破綻自体を return しない infallible API のため、整合)
+    pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
+        match self {
+            KktFactor::Direct(ldl) => ldl.solve(rhs, sol),
+            KktFactor::Iterative(minres) => {
+                // MINRES は Result を返すが、IPM 内部では最大努力 best-effort で十分。
+                // 収束しなくても sol には反復途中の状態が入る (LDL での「規則化失敗で
+                // NaN 残る」と同質の振る舞い)。エラーは無視する。
+                let _ = minres.solve(rhs, sol, None);
+            }
+        }
+    }
+
+    /// 直接法/反復法のどちらが使われているか診断する
+    pub fn is_iterative(&self) -> bool {
+        matches!(self, KktFactor::Iterative(_))
+    }
+}
+
+/// 既存の `factorize_quasidefinite_with_cached_perm` 互換シグネチャで、内部的に
+/// budget 超過時に MINRES へフォールバックする factor を返す。
+///
+/// IPM の既存 LDL retry ループから 1:1 で差し替え可能なインターフェイス。
+/// (置換目安: `ldl::factorize_quasidefinite_with_cached_perm(K, perm, deadline)`
+///  → `factorize_kkt_with_cached_perm(K, perm, deadline, max_l_nnz_from_budget())`)
+pub fn factorize_kkt_with_cached_perm(
+    k: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: usize,
+) -> Result<KktFactor, KktError> {
+    match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
+        k, perm, deadline, Some(max_l_nnz),
+    ) {
+        Ok(f) => Ok(KktFactor::Direct(f)),
+        Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
+            // budget 超過: MINRES にフォールバック (deadline は呼び出し側に伝搬しないが、
+            // MINRES は solve 時に deadline 引数で制御される)
+            Ok(KktFactor::Iterative(PreconditionedMinres::new(k.clone())))
+        }
+        Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => Err(KktError::DeadlineExceeded),
+        Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
+            Err(KktError::SingularOrIndefinite)
+        }
     }
 }
 
@@ -388,7 +462,7 @@ impl AutoKktSolver {
 
 impl KktSolver for AutoKktSolver {
     fn solve(
-        &mut self,
+        &self,
         rhs: &[f64],
         sol: &mut [f64],
         deadline: Option<Instant>,
@@ -396,12 +470,12 @@ impl KktSolver for AutoKktSolver {
         match self.last_used {
             Some(KktBackend::Direct) => self
                 .direct
-                .as_mut()
+                .as_ref()
                 .ok_or(KktError::SingularOrIndefinite)?
                 .solve(rhs, sol, deadline),
             Some(KktBackend::Iterative) => self
                 .iterative
-                .as_mut()
+                .as_ref()
                 .ok_or(KktError::SingularOrIndefinite)?
                 .solve(rhs, sol, deadline),
             None => Err(KktError::SingularOrIndefinite),
@@ -721,6 +795,50 @@ mod tests {
         solver.refactor(&k2, None).unwrap();
         assert_eq!(solver.last_backend(), Some(KktBackend::Iterative),
             "should stay iterative after first overflow");
+    }
+
+    /// factorize_kkt_with_cached_perm: budget 十分なら Direct を返す
+    #[test]
+    fn factorize_kkt_chooses_direct_when_budget_sufficient() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
+        let factor = factorize_kkt_with_cached_perm(&k, &perm, None, 1000)
+            .expect("factor should succeed");
+        assert!(matches!(factor, KktFactor::Direct(_)));
+        assert!(!factor.is_iterative());
+
+        let mut sol = vec![0.0; 2];
+        factor.solve(&[3.0, 0.0], &mut sol);
+        assert!((sol[0] - 1.0).abs() < 1e-9);
+        assert!((sol[1] - 1.0).abs() < 1e-9);
+    }
+
+    /// factorize_kkt_with_cached_perm: budget 不足なら Iterative を返す
+    #[test]
+    fn factorize_kkt_chooses_iterative_when_budget_exceeded() {
+        let k = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2], &[0, 1, 1, 2, 2],
+            &[4.0, 0.5, 4.0, 0.5, -2.0], 3, 3
+        ).unwrap();
+        let perm = crate::linalg::amd::amd_with_deadline(3, &k.col_ptr, &k.row_ind, None);
+        let factor = factorize_kkt_with_cached_perm(&k, &perm, None, 1)
+            .expect("factor should succeed (fallback)");
+        assert!(matches!(factor, KktFactor::Iterative(_)));
+        assert!(factor.is_iterative());
+
+        let b = vec![1.0, 2.0, -1.0];
+        let mut sol = vec![0.0; 3];
+        factor.solve(&b, &mut sol);
+        // LDL 直接で解いた解と比較
+        let factor_ldl = crate::linalg::ldl::factorize_quasidefinite_with_amd(&k, None).unwrap();
+        let mut sol_ldl = vec![0.0; 3];
+        factor_ldl.solve(&b, &mut sol_ldl);
+        for i in 0..3 {
+            assert!(
+                (sol[i] - sol_ldl[i]).abs() < 1e-6,
+                "MINRES[{}]={} vs LDL[{}]={}", i, sol[i], i, sol_ldl[i]
+            );
+        }
     }
 
     /// AutoKktSolver: trait object として動く (IPM 配線で使う形)
