@@ -34,6 +34,14 @@ pub enum LdlError {
     SingularOrIndefinite,
     /// deadline を超過した
     DeadlineExceeded,
+    /// symbolic 段階で L_nnz が事前許可量を超えた (numeric 因子化は試みていない)。
+    /// 上位層は反復法フォールバックの判断材料として用いる。
+    WouldExceedBudget {
+        /// symbolic 段階で実測した L の非ゼロ数
+        l_nnz: usize,
+        /// 呼び出し側が許可した最大 L_nnz
+        max_l_nnz: usize,
+    },
 }
 
 // ── LdlFactorization (positive definite, no AMD) ──────────────────────────────
@@ -179,13 +187,25 @@ fn build_symbolic_hl(
 /// `deadline`: 指定時、symbolic 完了直後・numeric 開始前に再チェック。
 ///             symbolic は O(nnz) で速いが numeric は O(L_nnz) で BOYD2 級では分単位。
 ///             このチェックがないと numeric 中に deadline を尊重できない。
+/// `max_l_nnz`: 指定時、symbolic 完了直後の L_nnz と比較し超過なら numeric を
+///             試みず `WouldExceedBudget` を返す。上位は反復法フォールバックに使う。
 fn do_numeric_factorize(
     mat: &CscMatrix,
     signs: Option<&[i8]>,
     deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
 ) -> Result<(SymbolicCholesky<usize>, Vec<f64>), LdlError> {
     let a_upper = csc_upper_to_faer_upper(mat);
     let symbolic = build_symbolic_hl(&a_upper)?;
+
+    // symbolic 完了後・numeric 前に L_nnz チェック (memory budget)。
+    // 巨大問題 (QPLIB_9008 等) で OOM kill されるのを防ぐ早期検知ポイント。
+    let l_nnz = symbolic.len_val();
+    if let Some(max) = max_l_nnz {
+        if l_nnz > max {
+            return Err(LdlError::WouldExceedBudget { l_nnz, max_l_nnz: max });
+        }
+    }
 
     // symbolic 完了後・numeric 前に deadline 再チェック (numeric は最も時間がかかる)。
     if let Some(d) = deadline {
@@ -200,7 +220,7 @@ fn do_numeric_factorize(
         dynamic_regularization_epsilon: 1e-13,
     };
 
-    let mut l_values = vec![0.0f64; symbolic.len_val()];
+    let mut l_values = vec![0.0f64; l_nnz];
     let mut mem = MemBuffer::new(StackReq::any_of(&[
         symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
         symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
@@ -227,7 +247,7 @@ fn do_numeric_factorize(
 /// 正定値疎行列の LDL^T 分解を実行する。
 pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
     let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None, None)?;
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, None, None)?;
     Ok(LdlFactorization { symbolic, l_values, n })
 }
 
@@ -246,7 +266,7 @@ pub fn factorize_with_deadline(
         }
     }
     let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline)?;
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline, None)?;
     Ok(LdlFactorization { symbolic, l_values, n })
 }
 
@@ -276,7 +296,7 @@ pub fn factorize_quasidefinite_with_cached_perm(
         ncols: n,
     };
     let signs = extract_diagonal_signs(&perm_mat);
-    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline)?;
+    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline, None)?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
 }
 
@@ -286,6 +306,19 @@ pub fn factorize_quasidefinite_with_amd(
     mat: &CscMatrix,
     deadline: Option<Instant>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_with_amd_budget(mat, deadline, None)
+}
+
+/// AMD 再順序化付き quasidefinite LDL^T 分解、L_nnz が `max_l_nnz` を超えたら
+/// numeric を試みず `WouldExceedBudget` で早期 return する budget 版。
+///
+/// `max_l_nnz` が `None` のときは `factorize_quasidefinite_with_amd` と等価。
+/// 反復法フォールバック用 dispatcher (`KktSolver` 経路) から呼ばれる想定。
+pub fn factorize_quasidefinite_with_amd_budget(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+) -> Result<LdlFactorizationAmd, LdlError> {
     let n = mat.nrows;
     let perm = amd_with_deadline(n, &mat.col_ptr, &mat.row_ind, deadline);
     if let Some(d) = deadline {
@@ -293,7 +326,34 @@ pub fn factorize_quasidefinite_with_amd(
             return Err(LdlError::DeadlineExceeded);
         }
     }
-    factorize_quasidefinite_with_cached_perm(mat, &perm, deadline)
+    factorize_quasidefinite_with_cached_perm_budget(mat, &perm, deadline, max_l_nnz)
+}
+
+/// AMD キャッシュ済み置換 + budget 版。詳細は `factorize_quasidefinite_with_amd_budget`。
+pub fn factorize_quasidefinite_with_cached_perm_budget(
+    mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
+        }
+    }
+    let n = mat.nrows;
+    let (new_col_ptr, new_row_ind, new_values) =
+        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, perm);
+    let perm_mat = CscMatrix {
+        col_ptr: new_col_ptr,
+        row_ind: new_row_ind,
+        values: new_values,
+        nrows: n,
+        ncols: n,
+    };
+    let signs = extract_diagonal_signs(&perm_mat);
+    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz)?;
+    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
 }
 
 #[cfg(test)]

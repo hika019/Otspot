@@ -22,6 +22,35 @@
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 
+/// 1 つの線形解 (LDL の L 値配列) が消費してよい既定メモリ予算 (バイト)。
+///
+/// 4 GiB を既定とする (現代的なマシンの RAM 16〜64 GB の 1/4〜1/16 に相当、
+/// 同時に他プロセスが動いていてもクラッシュしない安全マージン)。
+///
+/// **これは「問題サイズの heuristic threshold」ではなくシステム resource policy**:
+/// n=10 でも n=10M でも同じ式 `L_nnz × 16B vs budget` で判定する。問題依存の
+/// マジックナンバー (例: `n+m ≥ 100k`) は使わない。
+///
+/// 環境変数 `KKT_MEMORY_BUDGET_BYTES` で上書き可。CI / 制約環境では小さく、
+/// hi-mem サーバでは大きく設定できる。
+const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+/// LDL の L 値 1 entry あたりのバイト数。f64 = 8B + row index usize = 8B (上限見積り)。
+const BYTES_PER_L_ENTRY: usize = 16;
+
+/// 現在の memory budget (バイト) を返す。env > default の優先順位。
+pub fn memory_budget_bytes() -> usize {
+    std::env::var("KKT_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+}
+
+/// memory budget を L_nnz 上限に変換する。
+pub fn max_l_nnz_from_budget() -> usize {
+    memory_budget_bytes() / BYTES_PER_L_ENTRY
+}
+
 /// `KktSolver::solve` / `refactor` が返すエラー。
 ///
 /// 上位の dispatcher は `WouldExceedMemory` / `SingularOrIndefinite` を見て
@@ -86,19 +115,31 @@ pub trait KktSolver: Send {
     fn dim(&self) -> usize;
 }
 
-/// 既存の `factorize_quasidefinite_with_amd` を `KktSolver` trait に適合させる薄い wrapper。
+/// 既存の `factorize_quasidefinite_with_amd_budget` を `KktSolver` trait に
+/// 適合させる薄い wrapper。
 ///
-/// 振る舞いは現行 LDL 経路と完全に同じ。trait abstraction を入れるだけで
-/// IPM / IPPMM のロジックは不変であることを担保する (commit #1 の責務)。
+/// `max_l_nnz` を `None` で構築すると budget チェック無しで現行と完全互換。
+/// `Some` で構築すると symbolic 段階で L_nnz が超過したとき
+/// `KktError::WouldExceedMemory` を返し、上位の dispatcher が反復法へ
+/// フォールバックする判断材料にする。
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
+    /// L_nnz 上限。`None` のとき budget チェックなし (現行互換)。
+    max_l_nnz: Option<usize>,
 }
 
 impl DirectLdl {
     /// 空の (まだ因子化されていない) `DirectLdl` を作る。`refactor` で使用可能になる。
+    /// budget チェックなし版。
     pub fn new(n: usize) -> Self {
-        Self { factor: None, n }
+        Self { factor: None, n, max_l_nnz: None }
+    }
+
+    /// memory budget を持つ `DirectLdl` を作る。symbolic 段階で L_nnz が
+    /// 超過したら `refactor` が `WouldExceedMemory` を返す。
+    pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
+        Self { factor: None, n, max_l_nnz: Some(max_l_nnz) }
     }
 
     /// 即座に行列 K を渡して因子化する (最初の Newton step 用ヘルパ)。
@@ -137,7 +178,9 @@ impl KktSolver for DirectLdl {
         if k.nrows != self.n || k.ncols != self.n {
             return Err(KktError::SingularOrIndefinite);
         }
-        match crate::linalg::ldl::factorize_quasidefinite_with_amd(k, deadline) {
+        match crate::linalg::ldl::factorize_quasidefinite_with_amd_budget(
+            k, deadline, self.max_l_nnz,
+        ) {
             Ok(f) => {
                 self.factor = Some(f);
                 Ok(())
@@ -149,6 +192,10 @@ impl KktSolver for DirectLdl {
             Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
                 self.factor = None;
                 Err(KktError::SingularOrIndefinite)
+            }
+            Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
+                self.factor = None;
+                Err(KktError::WouldExceedMemory)
             }
         }
     }
@@ -223,6 +270,59 @@ mod tests {
         let mut solver = DirectLdl::new(3); // 3x3 を期待しているが渡される K は 2x2
         let result = solver.refactor(&k, None);
         assert!(result.is_err(), "dim mismatch should yield Err");
+    }
+
+    /// memory budget を持つ DirectLdl: 巨大 L_nnz を要求する K で WouldExceedMemory を返す
+    #[test]
+    fn directldl_with_tight_budget_returns_would_exceed_memory() {
+        // 5x5 quasidefinite (上3 SPD, 下2 -SPD)
+        // K = diag(1,1,1,-1,-1) + 少しの off-diag で fill-in
+        let k = CscMatrix::from_triplets(
+            &[0, 0, 1, 0, 1, 2, 3, 3, 4],
+            &[0, 1, 1, 2, 2, 2, 3, 4, 4],
+            &[1.0, 0.1, 1.0, 0.1, 0.1, 1.0, -1.0, 0.1, -1.0],
+            5, 5,
+        ).unwrap();
+        // budget = 1 entry のみ → 必ず超過
+        let mut solver = DirectLdl::with_budget(5, 1);
+        let result = solver.refactor(&k, None);
+        assert!(
+            matches!(result, Err(KktError::WouldExceedMemory)),
+            "tight budget (1 entry) should trigger WouldExceedMemory, got {:?}",
+            result.err()
+        );
+    }
+
+    /// memory budget が None (= 既定の現行互換モード) では budget 超過を起こさない
+    #[test]
+    fn directldl_without_budget_is_unconstrained() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let mut solver = DirectLdl::new(2);  // budget なし
+        solver.refactor(&k, None).expect("no-budget refactor should always succeed for valid K");
+    }
+
+    /// memory_budget_bytes() は env 上書きが効くこと
+    #[test]
+    fn memory_budget_env_override() {
+        // SAFETY: 並列テストでも他テストが同じ env を読まないため安全 (本テストでセット&クリア)
+        // テスト並列実行で環境変数が干渉する可能性があるが、一意な値で観測する
+        let unique_value = "12345678";
+        std::env::set_var("KKT_MEMORY_BUDGET_BYTES", unique_value);
+        let observed = memory_budget_bytes();
+        std::env::remove_var("KKT_MEMORY_BUDGET_BYTES");
+        assert_eq!(observed, 12345678, "env override should be respected");
+        // 削除後は default に戻る
+        let after_unset = memory_budget_bytes();
+        assert_eq!(after_unset, 4 * 1024 * 1024 * 1024, "default = 4 GiB");
+    }
+
+    /// max_l_nnz_from_budget は budget をバイト→entry 数に変換する
+    #[test]
+    fn max_l_nnz_from_budget_conversion() {
+        std::env::set_var("KKT_MEMORY_BUDGET_BYTES", "1600");  // 1600 / 16 = 100 entries
+        let l = max_l_nnz_from_budget();
+        std::env::remove_var("KKT_MEMORY_BUDGET_BYTES");
+        assert_eq!(l, 100);
     }
 
     /// trait object として `Box<dyn KktSolver>` 経由で動くこと
