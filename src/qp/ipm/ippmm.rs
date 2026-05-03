@@ -32,8 +32,9 @@
 //!   else:               ρ *= (1 - r/3)
 
 use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::ldl;
-use crate::linalg::ldl::LdlFactorizationAmd;
+use crate::linalg::kkt_solver::{
+    factorize_kkt_with_cached_perm, max_l_nnz_from_budget, KktError, KktFactor,
+};
 use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -222,8 +223,8 @@ pub(crate) fn solve_ippmm_inner(
             let perm_init = amd_with_deadline(
                 k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
             );
-            if let Ok(fac_init) = ldl::factorize_quasidefinite_with_cached_perm(
-                &k_init, &perm_init, timeout_ctx.deadline,
+            if let Ok(fac_init) = factorize_kkt_with_cached_perm(
+                &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(),
             ) {
                 let mut rhs_init = vec![0.0_f64; n + m_ext];
                 for i in 0..m_ext { rhs_init[n + i] = r_p[i]; }
@@ -732,7 +733,7 @@ pub(crate) fn solve_ippmm_inner(
         // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する
         let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
-        let mut fac_opt: Option<LdlFactorizationAmd> = None;
+        let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
         // [Schur path] env=QP_SCHUR=1 で Schur complement formulation を使う
         // (n×n SPD、augmented n+m_ext の代替)。LISWET 系の precision floor 突破を狙う。
@@ -767,17 +768,18 @@ pub(crate) fn solve_ippmm_inner(
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
-            match ldl::factorize_quasidefinite_with_cached_perm(
+            match factorize_kkt_with_cached_perm(
                 &mat_for_factor,
                 perm,
                 timeout_ctx.deadline,
+                max_l_nnz_from_budget(),
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
                     aug_mat_opt = Some(mat_for_factor);
                     break;
                 }
-                Err(ldl::LdlError::DeadlineExceeded) => {
+                Err(KktError::DeadlineExceeded) => {
                     status = Some(SolveStatus::Timeout);
                     final_iter = iter;
                     break;
@@ -802,16 +804,17 @@ pub(crate) fn solve_ippmm_inner(
             let aug_mat_fb =
                 build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_fallback);
             let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
-            match ldl::factorize_quasidefinite_with_cached_perm(
+            match factorize_kkt_with_cached_perm(
                 &aug_mat_fb,
                 &identity_perm,
                 timeout_ctx.deadline,
+                max_l_nnz_from_budget(),
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
                     aug_mat_opt = Some(aug_mat_fb);
                 }
-                Err(ldl::LdlError::DeadlineExceeded) => {
+                Err(KktError::DeadlineExceeded) => {
                     status = Some(SolveStatus::Timeout);
                     final_iter = iter;
                 }

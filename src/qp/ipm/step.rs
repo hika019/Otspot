@@ -5,7 +5,9 @@
 //! - fraction-to-boundary
 //! - ユーティリティ
 
-use crate::linalg::ldl;
+use crate::linalg::kkt_solver::{
+    factorize_kkt_with_cached_perm, max_l_nnz_from_budget, KktError, KktFactor,
+};
 use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -18,7 +20,6 @@ use super::kkt::{
     norm_inf, spmtv, spmv, spmv_q, KktCache,
 };
 use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::ldl::LdlFactorizationAmd;
 use super::init::compute_initial_point;
 use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
 use super::solver_loop::{compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors, update_variables};
@@ -85,7 +86,7 @@ pub(crate) fn solve_qp_ipm_inner(
     // 因子化自体は毎反復 symbolic から再計算する (faer の symbolic は Clone 不可、
     // refactorize_numeric は廃止)。AMD perm の再計算回避が主目的。
     let mut kkt_cache: Option<KktCache> = None;
-    let mut fac_cache: Option<LdlFactorizationAmd> = None;
+    let mut fac_cache: Option<KktFactor> = None;
 
     let mut status = SolveStatus::Timeout;
     let mut final_iter = options.ipm.max_iter;
@@ -277,14 +278,14 @@ pub(crate) fn solve_qp_ipm_inner(
                 // 旧 fac_cache は前反復の sigma/delta 用で stale。retry 失敗時は
                 // 既存ロジック (line 283 の `fac_cache = None`) と同じ M-02 経路に乗る。
                 fac_cache.take();
-                match ldl::factorize_quasidefinite_with_cached_perm(
-                    &cache.mat, perm, timeout_ctx.deadline
+                match factorize_kkt_with_cached_perm(
+                    &cache.mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
                 ) {
                     Ok(f) => {
                         fac_cache = Some(f);
                         break 'retry;
                     }
-                    Err(ldl::LdlError::DeadlineExceeded) => {
+                    Err(KktError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
                         final_iter = iter;
                         retry_timeout = true;
@@ -329,11 +330,11 @@ pub(crate) fn solve_qp_ipm_inner(
                 // メモリピーク半減: identity fallback 経由で kkt_cache=None / fac_cache=Some に
                 // なるケース (line 373) があるため、新因子化前に旧 fac_cache を解放する。
                 fac_cache.take();
-                match ldl::factorize_quasidefinite_with_cached_perm(
-                    &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline
+                match factorize_kkt_with_cached_perm(
+                    &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
                 ) {
                     Ok(f) => { fac_cache = Some(f); break 'retry; }
-                    Err(ldl::LdlError::DeadlineExceeded) => {
+                    Err(KktError::DeadlineExceeded) => {
                         status = SolveStatus::Timeout;
                         final_iter = iter;
                         retry_timeout = true;
@@ -372,11 +373,11 @@ pub(crate) fn solve_qp_ipm_inner(
                 part3_diag_idx: part3_idx,
                 part1_updated_idx: (0..n).collect(),
             });
-            match ldl::factorize_quasidefinite_with_cached_perm(
-                &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline
+            match factorize_kkt_with_cached_perm(
+                &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
             ) {
                 Ok(f) => { fac_cache = Some(f); }
-                Err(ldl::LdlError::DeadlineExceeded) => {
+                Err(KktError::DeadlineExceeded) => {
                     status = SolveStatus::Timeout;
                     final_iter = iter;
                     break;
