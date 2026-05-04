@@ -776,14 +776,19 @@ pub(crate) fn solve_ippmm_inner(
                 Some(n),
             ) {
                 Ok(f) => {
-                    // 健全性プローブ: factorize は Ok を返したが、cond(K) が f64 LDL の精度上限
-                    // (≈ 1/ε_machine = 4.5e15) を超えると solve が桁外れな解を返す病理がある
-                    // (QPLIB_8515 iter 7 で sol_inf=2e21 ← rhs_inf=2.7 が観測)。
+                    // 健全性プローブ: factorize は Ok を返したが、cond(K) が大きいと LDL solve が
+                    // K·sol = rhs を満たさず Newton 方向が central path から逸脱する病理がある。
+                    // (QPLIB_8515 iter 7: dx_inf=3.35e10, alpha=5.72e-11、効果 step=1.92 でも
+                    // 翌 iter pf が 8e-6 → 1e3 に発散)。
                     //
-                    // 予測子 RHS の構造 [r_d_pmm; r_p_pmm + s]_eq (Mehrotra predictor) を probe し、
-                    // 相対増幅率 (sol_inf / rhs_inf) が f64 精度上限 (1/ε_machine) を超えるなら
-                    // 不健全とみなして delta を増やして再因子化する。閾値は f64 物理量 (機械精度の
-                    // 逆数) であり、問題集チューニングではない。
+                    // 旧プローブ: sol_inf/rhs_inf < 1/ε_machine = 4.5e15。これは sol の絶対サイズ
+                    // のみ見るため、sol_inf=3.94e5 (≪ 4.5e15) は通過するが、||K·sol − rhs|| は
+                    // 桁外れに大きい (= LDL は実際には rhs を解いていない) ケースを取りこぼす。
+                    //
+                    // 新プローブ: 実残差 ||K·sol − rhs||_∞ / ||rhs||_∞ ≤ LDL_HEALTH_REL_TOL を
+                    // 直接判定する。LDL_HEALTH_REL_TOL = 1e-3 は inexact Newton forcing term
+                    // η=0.1 より厳しく、外側 IPM の Newton ステップ品質を保証する閾値
+                    // (Wright IPM §11.7、Eisenstat-Walker)。問題集 tuning ではない。
                     //
                     // 反復法 (MINRES) backend では LDL 精度の概念が当てはまらない (相対 tol で
                     // 自分で収束) ため、probe を skip する。
@@ -793,8 +798,6 @@ pub(crate) fn solve_ippmm_inner(
                         probe_rhs[..n].copy_from_slice(&r_d_pmm);
                         // 予測子 RHS の下半分は r_p_mod_pred = r_p - r_c_pred/y で、不等式行
                         // では r_c_pred = -s*y → r_p_mod_pred = r_p + s。等式行はそのまま r_p。
-                        // |s| が dominant な iter 群 (QPLIB_8515 iter 7+) でこの構造が cond
-                        // 限界を露呈させる。
                         for (i, slot) in probe_rhs[n..].iter_mut().enumerate() {
                             *slot = if is_eq_ext[i] { r_p_pmm[i] } else { r_p_pmm[i] + s[i] };
                         }
@@ -802,10 +805,31 @@ pub(crate) fn solve_ippmm_inner(
                         if rhs_inf > 0.0 && rhs_inf.is_finite() {
                             let mut probe_sol = vec![0.0_f64; probe_dim];
                             f.solve(&probe_rhs, &mut probe_sol);
-                            let sol_inf = probe_sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-                            let f64_precision_ceiling = 1.0 / f64::EPSILON;
-                            let amplification = sol_inf / rhs_inf;
-                            if !amplification.is_finite() || amplification > f64_precision_ceiling {
+
+                            // 実残差 K·sol − rhs を計算 (上三角 sym matvec)。
+                            let mut kx = vec![0.0_f64; probe_dim];
+                            for col in 0..mat_for_factor.ncols {
+                                let cs = mat_for_factor.col_ptr[col];
+                                let ce = mat_for_factor.col_ptr[col + 1];
+                                for ptr in cs..ce {
+                                    let row = mat_for_factor.row_ind[ptr];
+                                    let val = mat_for_factor.values[ptr];
+                                    kx[row] += val * probe_sol[col];
+                                    if row != col {
+                                        kx[col] += val * probe_sol[row];
+                                    }
+                                }
+                            }
+                            let mut resid_inf = 0.0_f64;
+                            for i in 0..probe_dim {
+                                let r = (probe_rhs[i] - kx[i]).abs();
+                                if r > resid_inf { resid_inf = r; }
+                            }
+                            let rel_resid = resid_inf / rhs_inf;
+                            // LDL solve 品質閾値: 1e-3 = inexact Newton (η=0.1) より 100x 厳しく、
+                            // central path 追跡に十分な精度。物理量ベース。
+                            const LDL_HEALTH_REL_TOL: f64 = 1e-3;
+                            if !rel_resid.is_finite() || rel_resid > LDL_HEALTH_REL_TOL {
                                 if rho_retry >= LDL_REG_CEILING {
                                     break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
                                 }
