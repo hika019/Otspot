@@ -21,7 +21,7 @@ use super::kkt::{
 };
 use crate::linalg::amd::amd_with_deadline;
 use super::init::compute_initial_point;
-use super::common::{check_infeasible_or_unbounded, solve_unconstrained, timeout_result, numerical_error_result};
+use super::common::{check_infeasible_or_unbounded, check_x_unrepresentable, solve_unconstrained, timeout_result, numerical_error_result};
 use super::solver_loop::{compute_sigma_vec, predictor_step, corrector_step, gondzio_correctors, update_variables};
 use super::kkt::collapse_extended_dual;
 
@@ -448,6 +448,15 @@ pub(crate) fn solve_qp_ipm_inner(
 
         // 変数更新
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
+
+        // 数値的非有界検出: |x| が f64 representable 上限 (1/ε_machine) を超えたら
+        // 有限最適解が存在しないとみなして Unbounded で打ち切り。strict null-space
+        // チェックでは捕えられない numerical divergence (QFORPLAN 等) を救う。
+        if check_x_unrepresentable(&x) {
+            status = SolveStatus::Unbounded;
+            final_iter = iter;
+            break;
+        }
 
         // alpha 停滞検出: 数値的に進めなくなった iter が連続したら打ち切り。
         if alpha < ALPHA_STALL_EPS {
