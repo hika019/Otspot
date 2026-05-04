@@ -1423,12 +1423,19 @@ pub fn run_qp_presolve_phase1(
     // ==================================================================
     // #14: large_coeff_rescaling() — 大係数行列の再スケーリング
     // PARAM: 閾値=1e6, 理由=数値安定性のため
+    //
+    // Ruiz scaling が有効な場合は skip する: Ruiz は反復的に行・列を均衡化するので
+    // single-pass の large_coeff_rescaling は冗長。さらに直列適用すると合成 amp が
+    // 制御不能 (QPILOTNO 行 14: LCS σ=1e-3 × Ruiz e=1.7e-4 = 合成 amp 5.85e6) になり、
+    // unscale 後 user_eps=1e-6 を達成できない。Ruiz 単独なら e_floor=1e-4 で amp ≤ 1e4
+    // に収まる。Ruiz 無効時は Phase1 LCS が安全網として機能する (現状維持)。
     // ==================================================================
     let large_coeff_row_scales = {
         let mut a_mut = reduced.a.clone();
         let mut b_mut = reduced.b.clone();
-        let scales = if std::env::var("QP_PRESOLVE_SKIP_LARGE_COEFF").ok().as_deref() == Some("1") {
-            // 診断用: 大係数 rescale を skip
+        let skip_lcs = std::env::var("QP_PRESOLVE_SKIP_LARGE_COEFF").ok().as_deref() == Some("1")
+            || opts.use_ruiz_scaling;
+        let scales = if skip_lcs {
             vec![1.0; reduced.a.nrows]
         } else {
             apply_large_coeff_rescaling(&mut a_mut, &mut b_mut, n_new)

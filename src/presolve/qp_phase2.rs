@@ -276,9 +276,19 @@ pub fn constraint_precond(
         }
     }
 
-    // σ_i = 1/row_max[i] for rows with row_max > 1.0
+    // σ_i = max(1/row_max[i], SIGMA_FLOOR) for rows with row_max > 1.0
+    //
+    // SIGMA_FLOOR = 1e-3: phase1 apply_large_coeff_rescaling と同じ floor。
+    // この floor は IPPMM が scaled 空間で達成できる pres_rel ~ cond×ε から逆算され、
+    // user_eps=1e-6 を unscale 後達成するには合成 amp ≤ 1e3 が必要 (= 1/SIGMA_FLOOR)。
+    //
+    // 真因 (QPILOTNO): floor なし版は row_max=5.85e6 行に対し σ=1.71e-7 を生成。
+    // phase1 LCS (σ=1e-3) と直列で合成 amp=5.85e6 → unscale で scaled pres 1.7e-7 が
+    // orig 1.0 まで増幅 → pfn=1.1e-5 で PFEAS_FAIL。phase1 と同じ floor を適用して
+    // 単一 stage あたり amp ≤ 1e3 に統一する (アルゴ物理量、問題集 tuning ではない)。
+    const SIGMA_FLOOR: f64 = 1e-3;
     let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
-        if mx > 1.0 + 1e-10 { 1.0 / mx } else { 1.0 }
+        if mx > 1.0 + 1e-10 { (1.0 / mx).max(SIGMA_FLOOR) } else { 1.0 }
     }).collect();
 
     let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
