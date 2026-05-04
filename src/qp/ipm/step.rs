@@ -98,6 +98,13 @@ pub(crate) fn solve_qp_ipm_inner(
     // 収束判定に併用する相対ギャップ閾値。ippmm.rs 内部判定と同一。
     const DUALITY_GAP_TOL: f64 = 1e-3;
 
+    // alpha 停滞検出 (IPPMM 同等)。alpha が極小のまま N 反復続いたら数値的に
+    // 進めなくなったとみなして打ち切る。デフォルト max_iter = usize::MAX で
+    // QFORPLAN が 200万 iter 回って timeout する病理を断つ目的。
+    const ALPHA_STALL_EPS: f64 = 1e-8;
+    const ALPHA_DEADLOCK_N: usize = 20;
+    let mut alpha_stall_count: usize = 0;
+
     // C-1: mu非依存proximal正則化（rho_ipmフロア）
     let mut rho_ipm = 1e-4_f64;
 
@@ -441,6 +448,35 @@ pub(crate) fn solve_qp_ipm_inner(
 
         // 変数更新
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
+
+        // alpha 停滞検出: 数値的に進めなくなった iter が連続したら打ち切り。
+        if alpha < ALPHA_STALL_EPS {
+            alpha_stall_count += 1;
+        } else {
+            alpha_stall_count = 0;
+        }
+        if alpha_stall_count >= ALPHA_DEADLOCK_N {
+            status = SolveStatus::Timeout;
+            final_iter = iter;
+            break;
+        }
+
+        // primal residual 暴発検出: pf が実用域 (1e10) を超える状態で多数 iter 続くなら
+        // unboundedness を検出し損ねた発散とみなして Unbounded で打ち切る。
+        // 代表病理: QFORPLAN (LP) で check_infeasible_or_unbounded の cond_obj
+        // (norm_qdx/norm_dx<1e-8 && c_dx/norm_dx<-1e-8) が満たされない発散経路で
+        // 200万 iter 回って timeout する。pf=1e10 級発散は Unbounded の十分強い証左。
+        const PF_EXPLODE_LIMIT: f64 = 1e10;
+        const PF_EXPLODE_MIN_ITER: usize = 200;
+        if iter >= PF_EXPLODE_MIN_ITER {
+            if let Some((pf, _, _)) = final_residuals {
+                if pf > PF_EXPLODE_LIMIT {
+                    status = SolveStatus::Unbounded;
+                    final_iter = iter;
+                    break;
+                }
+            }
+        }
 
         // C-1: rho_ipm減衰（RHO_IPM_DECAY=0.9, RHO_IPM_MIN=1e-9）
         rho_ipm = (rho_ipm * 0.9_f64).max(1e-9_f64);
