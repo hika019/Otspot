@@ -395,8 +395,23 @@ fn apply_large_coeff_rescaling(
     }
 
     // σ_i = 1/sqrt(row_max[i]) for rows with row_max > 1.0
+    //
+    // Per-row 増幅率 cap: σ_i < SIGMA_FLOOR で打ち切り (= 増幅率 1/SIGMA_FLOOR 以下)。
+    //
+    // 真因 (Session 9 既知): QPILOTNO で σ_total = σ_p1 × σ_p2 × σ_ruiz が 1.71e-7 まで
+    // 縮み、unscale で 5.85e6 倍増幅。IPM は user_eps / amp = 1e-6 / 5.85e6 = 1.7e-13 まで
+    // scaled 空間で収束を要求されるが、delta_min=1e-8 floor で実現不能 → PFEAS_FAIL。
+    //
+    // Cap 値 SIGMA_FLOOR は IPM の delta_min=1e-8 と user_eps=1e-6 から導出:
+    // - IPM が scaled 空間で達成可能な eps_inner = sqrt(delta_min) ≈ 1e-4 (Wright IPM
+    //   §11.5 の central path tracking 限界 = 機械精度ではなく ρ=√δ)。
+    // - unscaled で user_eps を達成するには amp_total ≲ user_eps / eps_inner = 1e-2 必要
+    // - 後段 (Phase2 + Ruiz, それぞれ最大 amp ~30) と合わせて total amp ≲ 1e3 に抑えたく、
+    //   Phase1 の per-row amp cap を 1e3 = 1/SIGMA_FLOOR で 1e-3 に設定。
+    // アルゴ物理量 (delta_min, eps) ベースの設計値であり、問題集 tuning ではない。
+    const SIGMA_FLOOR: f64 = 1e-3;
     let row_scales: Vec<f64> = row_max.iter().map(|&mx| {
-        if mx > 1.0 { 1.0 / mx.sqrt() } else { 1.0 }
+        if mx > 1.0 { (1.0 / mx.sqrt()).max(SIGMA_FLOOR) } else { 1.0 }
     }).collect();
 
     // A の値をスケール: A[i,j] *= σ_i
