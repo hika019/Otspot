@@ -997,19 +997,34 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
+                // 設計の対称化: check_infeasible_or_unbounded 経路と同じ Optimal 昇格判定。
+                // direction blowup は LDL precision 限界の症状で、best-so-far が
+                // 真に Optimal 域 (best_score < 10*eps_orig かつ rel_gap が gap_tol 内)
+                // なら direction blowup は false positive として扱い Optimal を返す。
+                let quality_threshold = 10.0 * eps_orig;
+                let is_quasi_optimal = best_score < quality_threshold
+                    && best_rel_gap.abs() < DUALITY_GAP_TOL;
+                let exit_status = if is_quasi_optimal {
+                    SolveStatus::Optimal
+                } else {
+                    SolveStatus::SuboptimalSolution
+                };
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    let path_label = if is_quasi_optimal { "Optimal_NaN_guard_bestsofar" } else { "Suboptimal_NaN_guard_bestsofar" };
                     eprintln!(
-                        "IPPMM_EXIT iter={} path=Suboptimal_NaN_guard_bestsofar best_iter={} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                        iter, best_iter, best_residuals.0, best_residuals.1, best_residuals.2
+                        "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                        iter, path_label, best_iter, best_score, best_rel_gap,
+                        best_residuals.0, best_residuals.1, best_residuals.2
                     );
                 }
+                status = Some(exit_status);
             } else {
                 final_iter = iter;
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                     eprintln!("IPPMM_EXIT iter={} path=Suboptimal_NaN_guard (no best)", iter);
                 }
+                status = Some(SolveStatus::SuboptimalSolution);
             }
-            status = Some(SolveStatus::SuboptimalSolution);
             break;
         }
 
