@@ -449,11 +449,17 @@ pub(crate) fn solve_qp_ipm_inner(
         // 変数更新
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
-        // 数値的非有界検出: |x| が f64 representable 上限 (1/ε_machine) を超えたら
-        // 有限最適解が存在しないとみなして Unbounded で打ち切り。strict null-space
-        // チェックでは捕えられない numerical divergence (QFORPLAN 等) を救う。
+        // 数値的発散検出: |x| が f64 representable 上限 (1/ε_machine) を超えたら
+        // 内部状態が信用できないとみなして Timeout で打ち切る (上位 retry 経路で
+        // 別 attempt が救済する可能性を残す)。
+        //
+        // 真因: 真の Unbounded LP (QFORPLAN) と bounded だが numerical divergence
+        // (QPLIB_9002 bound=1e10 で |x| → 1e16 級) を |x| 単独では区別不能。
+        // Unbounded 確定は check_infeasible_or_unbounded の cond_obj に任せ、
+        // ここは「異常で打ち切る」だけにする (false-positive Unbounded で bench
+        // が wrong baseline 比較する病理を回避)。
         if check_x_unrepresentable(&x) {
-            status = SolveStatus::Unbounded;
+            status = SolveStatus::Timeout;
             final_iter = iter;
             break;
         }
