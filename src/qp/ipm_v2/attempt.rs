@@ -145,7 +145,12 @@ fn solve_qp_v2_with_runner(
                 break;
             }
             let remaining = d.saturating_duration_since(now);
-            if remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT {
+            // MIN_TIME_PER_ATTEMPT は「best-so-far がある時に新規 attempt を始めるか」のガード。
+            // idx=0 では best-so-far が無いため、たとえ残り時間が短くても 1 回は IPPMM を
+            // 呼ぶ必要がある (呼ばなければ outcome=empty + timed_out=false で NumericalError
+            // 誤判定になる)。短時間 deadline は IPPMM 内部の should_stop が尊重するので、
+            // ここで早期 break する必要はない。
+            if idx > 0 && remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT {
                 break;
             }
             // attempt 0 は full deadline を使う (旧 v1 PV_RETRY pv_try=0 と同等の時間予算)。

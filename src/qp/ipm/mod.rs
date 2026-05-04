@@ -159,8 +159,12 @@ mod tests {
     /// min (x-2)^2 + (y-2)^2  s.t. 0 <= x <= 1, 0 <= y <= 1
     /// Q=2I, c=[-4,-4], bounds=[0,1]^2
     /// 期待: x*=y*=1, obj=-6
+    ///
+    /// 注: 中央パス上の解は |x* - 1| ≈ μ ≈ ipm.eps となる。
+    /// objective は ∇obj ≈ 4 でスケールされるので |Δobj| ≈ 4·eps。
+    /// テスト close() の EPS=1e-5 を満たすため ipm.eps=1e-7 を指定する
+    /// (デフォルト 1e-6 → Δobj ≈ 2.3e-5 で test EPS を超える)。
     #[test]
-    #[ignore = "IPPMM bug: bound-only QP で x が中点に張り付く、別ブランチで調査"]
     fn test_ipm_box_constrained() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![-4.0, -4.0];
@@ -169,7 +173,8 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        let mut opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        opts.ipm.eps = 1e-7;
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "IPM-T4: status");
         close(result.solution[0], 1.0, "IPM-T4: x[0]");
@@ -214,7 +219,6 @@ mod tests {
 
     /// IPM-T6: タイムアウト動作確認（極小 timeout で Timeout が返ること）
     #[test]
-    #[ignore = "IPM 廃止後 NumericalError 化、別ブランチで調査"]
     fn test_ipm_timeout() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
@@ -668,7 +672,6 @@ mod tests {
     /// 注意: このテストはT9修正のsanityチェック。
     /// 実問題での効果確認はベンチ（Step5 Maros/QPLIB）で行う。
     #[test]
-    #[ignore = "IPM 廃止後 NumericalError 化、別ブランチで調査"]
     fn test_ipm_post_verify_timeout_stays_within_budget() {
         // 適度なサイズの問題でRuiz scaling有効 + 短めのtimeout
         // use_ruiz_scaling=true → POST_VERIFYループを通るパス

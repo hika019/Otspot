@@ -1069,10 +1069,10 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // step magnitude trace（IPPMM_TRACE=1 のときのみ）
+        let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let nds = ds.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-            let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let nds = ds.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let nrdpmm = r_d_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let nrppmm = r_p_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             eprintln!(
@@ -1080,6 +1080,29 @@ pub(crate) fn solve_ippmm_inner(
                 iter, alpha, ndx, ndy, nds, nrdpmm, nrppmm
             );
         }
+
+        // Trust-region 風 step magnitude cap:
+        // 各成分 (x, y, s) について alpha · |dv|_inf <= STEP_REL_CAP · max(|v|_inf, 1) を強制。
+        // これは fraction-to-boundary が捉えられない「方向自体の暴発」を抑える。
+        //
+        // 真因: 近 optimal iter で μ→0、Σ=s/y dynamic range 暴発、PMM rho が同時に縮小して
+        // K の正則化が弱まり、Newton 系から sol/rhs ≈ 1e7 級の huge dx が出る。
+        // fraction-to-boundary は s, y > 0 のみ保護、dx は無制約 → x が桁外れに飛ぶ。
+        // 結果、box-only QP で wrong vertex (中点) に張り付く病理あり。
+        //
+        // STEP_REL_CAP = 1e3 は central path 追跡の Newton ステップが 1反復で状態を 3 桁
+        // 以上変化させないという IPM 収束理論 (Wright 1997 §5.2) の経験則由来。問題集
+        // 依存ではなく、IPM iterate progression の物理上限。
+        const STEP_REL_CAP: f64 = 1e3;
+        let nx_safe = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
+        let ny_safe = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
+        let ns_safe = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
+        let alpha_x_cap = if ndx > 0.0 { (STEP_REL_CAP * nx_safe / ndx).min(1.0) } else { 1.0 };
+        let alpha_y_cap = if ndy > 0.0 { (STEP_REL_CAP * ny_safe / ndy).min(1.0) } else { 1.0 };
+        let alpha_s_cap = if nds > 0.0 { (STEP_REL_CAP * ns_safe / nds).min(1.0) } else { 1.0 };
+        let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
+        let alpha = alpha.min(alpha_tr);
+
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
         // null-space: alpha 停滞早期脱出。
