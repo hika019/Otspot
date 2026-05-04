@@ -224,7 +224,7 @@ pub(crate) fn solve_ippmm_inner(
                 k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
             );
             if let Ok(fac_init) = factorize_kkt_with_cached_perm(
-                &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(),
+                &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n),
             ) {
                 let mut rhs_init = vec![0.0_f64; n + m_ext];
                 for i in 0..m_ext { rhs_init[n + i] = r_p[i]; }
@@ -773,6 +773,7 @@ pub(crate) fn solve_ippmm_inner(
                 perm,
                 timeout_ctx.deadline,
                 max_l_nnz_from_budget(),
+                Some(n),
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
@@ -809,6 +810,7 @@ pub(crate) fn solve_ippmm_inner(
                 &identity_perm,
                 timeout_ctx.deadline,
                 max_l_nnz_from_budget(),
+                Some(n),
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);

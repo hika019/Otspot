@@ -133,6 +133,14 @@ pub(crate) fn solve_with_iterative_refinement(
     if max_iters == 0 {
         return;
     }
+    // 反復法 (MINRES) backend では IR をスキップする:
+    //   - LDL の IR は「LDL の backward error eps×cond を refine」する後処理。
+    //   - MINRES は元々反復解法で、tol まで自分で収束させる。
+    //   - IR を被せると同じ MINRES を deadline まで N 回呼び直すだけで純粋に無駄。
+    //   - 直接法経路では従来通り IR を実行 (LDL の精度限界突破に必要)。
+    if fac.is_iterative() {
+        return;
+    }
     // deadline 切れなら IR をスキップ
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;

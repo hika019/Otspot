@@ -279,7 +279,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 // 既存ロジック (line 283 の `fac_cache = None`) と同じ M-02 経路に乗る。
                 fac_cache.take();
                 match factorize_kkt_with_cached_perm(
-                    &cache.mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
+                    &cache.mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n),
                 ) {
                     Ok(f) => {
                         fac_cache = Some(f);
@@ -331,7 +331,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 // なるケース (line 373) があるため、新因子化前に旧 fac_cache を解放する。
                 fac_cache.take();
                 match factorize_kkt_with_cached_perm(
-                    &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
+                    &kkt_cache.as_ref().unwrap().mat, perm, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n),
                 ) {
                     Ok(f) => { fac_cache = Some(f); break 'retry; }
                     Err(KktError::DeadlineExceeded) => {
@@ -374,7 +374,7 @@ pub(crate) fn solve_qp_ipm_inner(
                 part1_updated_idx: (0..n).collect(),
             });
             match factorize_kkt_with_cached_perm(
-                &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline, max_l_nnz_from_budget(),
+                &kkt_cache.as_ref().unwrap().mat, &identity_perm, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n),
             ) {
                 Ok(f) => { fac_cache = Some(f); }
                 Err(KktError::DeadlineExceeded) => {
