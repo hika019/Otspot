@@ -62,5 +62,5 @@ pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use simplex::{solve, solve_with};
 pub use presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
-pub use qp::{QpSolver, IpmSolver};
+pub use qp::{QpSolver, IpPmmSolver};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

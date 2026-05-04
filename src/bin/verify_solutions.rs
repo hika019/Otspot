@@ -152,7 +152,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut use_qplib = false;
-    let mut solver_choice = QpSolverChoice::Concurrent;
+    let mut solver_choice = QpSolverChoice::IpPmm;
 
     let mut i = 1;
     while i < args.len() {
@@ -162,9 +162,9 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     solver_choice = match args[i].as_str() {
-                        "ipm" => QpSolverChoice::Ipm,
-                        "ippmm_new" => QpSolverChoice::IpPmmNew,
-                        "concurrent" => QpSolverChoice::Concurrent,
+                        "ipm" => QpSolverChoice::IpPmm,
+                        "ippmm_new" => QpSolverChoice::IpPmm,
+                        "concurrent" => QpSolverChoice::IpPmm,
                         other => {
                             eprintln!("Unknown solver: {}", other);
                             std::process::exit(1);
@@ -199,9 +199,9 @@ fn main() {
     files.sort();
 
     let solver_label = match solver_choice {
-        QpSolverChoice::Concurrent => "Concurrent",
-        QpSolverChoice::Ipm => "IPM",
-        QpSolverChoice::IpPmmNew => "IP-PMM-New",
+        QpSolverChoice::IpPmm => "Concurrent",
+        QpSolverChoice::IpPmm => "IPM",
+        QpSolverChoice::IpPmm => "IP-PMM-New",
         _ => "Unknown",
     };
 

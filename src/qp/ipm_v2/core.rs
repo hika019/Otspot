@@ -20,27 +20,16 @@ use crate::qp::problem::QpProblem;
 use super::outcome::{IpmOutcome, ProblemView};
 use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
 
-/// inner_solver の関数型 (Mehrotra / IP-PMM どちらでも受け取れる)
+/// inner_solver の関数型 (現在は IP-PMM のみ)
 pub type InnerSolver = fn(&QpProblem, &SolverOptions) -> crate::problem::SolverResult;
 
-/// 1 回の IPM 呼出 + 後処理 (IP-PMM 版)。元空間の解と残差を返す。
+/// 1 回の IPPMM 呼出 + 後処理。元空間の解と残差を返す。
 pub fn run_ipm(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
     run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm::solve_qp_ippmm)
-}
-
-/// 1 回の IPM 呼出 + 後処理 (Mehrotra 版)。
-/// `solve_qp_v1_wrapped` から呼ばれて IPM (Mehrotra predictor-corrector) を v2 と同じ
-/// retry 1 層 / status 1 箇所 / 元空間 KKT 直接判定の枠組みで動かす。
-pub fn run_ipm_mehrotra(
-    orig_problem: &QpProblem,
-    presolve_result: &QpPresolveResult,
-    opts: &SolverOptions,
-) -> IpmOutcome {
-    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm::solve_qp_ipm)
 }
 
 /// 内部 solver を引数に取る一般化 wrapper。

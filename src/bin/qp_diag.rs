@@ -29,9 +29,9 @@ fn main() {
     let path = PathBuf::from(&args[1]);
     let solver_name = args.get(2).cloned().unwrap_or_else(|| "ippmm_new".to_string());
     let solver_choice = match solver_name.as_str() {
-        "ipm" => QpSolverChoice::Ipm,
-        "ippmm_new" => QpSolverChoice::IpPmmNew,
-        "concurrent" => QpSolverChoice::Concurrent,
+        "ipm" => QpSolverChoice::IpPmm,
+        "ippmm_new" => QpSolverChoice::IpPmm,
+        "concurrent" => QpSolverChoice::IpPmm,
         _ => panic!("unknown solver: {}", solver_name),
     };
 

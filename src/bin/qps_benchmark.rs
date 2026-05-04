@@ -336,7 +336,7 @@ fn main() {
 
     // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
     let mut data_dir = "data/maros_meszaros".to_string();
-    let mut solver_choice = QpSolverChoice::Concurrent;
+    let mut solver_choice = QpSolverChoice::IpPmm;
     let mut dual_advanced_mode = false;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
@@ -370,12 +370,12 @@ fn main() {
             i += 1;
             if i < args.len() {
                 match args[i].as_str() {
-                    "ipm" => solver_choice = QpSolverChoice::Ipm,
-                    "ippmm_new" => solver_choice = QpSolverChoice::IpPmmNew,
-                    "concurrent" => solver_choice = QpSolverChoice::Concurrent,
+                    "ipm" => solver_choice = QpSolverChoice::IpPmm,
+                    "ippmm_new" => solver_choice = QpSolverChoice::IpPmm,
+                    "concurrent" => solver_choice = QpSolverChoice::IpPmm,
                     "dualadvanced" => {
                         dual_advanced_mode = true;
-                        solver_choice = QpSolverChoice::Concurrent; // QP問題のフォールバック
+                        solver_choice = QpSolverChoice::IpPmm; // QP問題のフォールバック
                     }
                     other => {
                         eprintln!("Unknown solver: {}. Use ipm|ippmm_new|concurrent|dualadvanced", other);
@@ -455,9 +455,9 @@ fn main() {
         "DualAdvanced"
     } else {
         match solver_choice {
-            QpSolverChoice::Concurrent => "Concurrent",
-            QpSolverChoice::Ipm => "IPM",
-            QpSolverChoice::IpPmmNew => "IP-PMM-New",
+            QpSolverChoice::IpPmm => "Concurrent",
+            QpSolverChoice::IpPmm => "IPM",
+            QpSolverChoice::IpPmm => "IP-PMM-New",
             _ => "Unknown",
         }
     };
@@ -523,9 +523,9 @@ fn main() {
         );
 
         let method_label = match result.solver_used {
-            Some(QpSolverChoice::Ipm) => "ipm",
-            Some(QpSolverChoice::Concurrent) => "concurrent",
-            Some(QpSolverChoice::IpPmmNew) => "ippmm_new",
+            Some(QpSolverChoice::IpPmm) => "ipm",
+            Some(QpSolverChoice::IpPmm) => "concurrent",
+            Some(QpSolverChoice::IpPmm) => "ippmm_new",
             Some(_) => "other",
             None => "-",
         };

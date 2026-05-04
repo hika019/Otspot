@@ -14,7 +14,7 @@ use crate::presolve::{
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
-use super::core::{run_ipm, run_ipm_mehrotra};
+use super::core::run_ipm;
 use crate::presolve::QpPresolveResult;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
@@ -44,7 +44,7 @@ const EPS_FLOOR: f64 = 1e-15;
 /// 1 attempt が消費してよい時間の最低割合 (deadline / 残 attempt 数 が これ以下なら break)
 const MIN_TIME_PER_ATTEMPT: f64 = 0.5;
 
-/// IpmOutcome を返す runner 関数の型 (run_ipm = IP-PMM、run_ipm_mehrotra = Mehrotra)
+/// IpmOutcome を返す runner 関数の型 (= run_ipm = IP-PMM のみ)
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
 /// QP を v2 設計で解く (IP-PMM 経路)。既存 `solve_qp_with` と同じ API シグネチャ。
@@ -54,28 +54,14 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
     solve_qp_v2_with_runner(problem, options, run_ipm)
 }
 
-/// QP を v2 設計で解く (Mehrotra 経路)。
-///
-/// `solve_qp_v2` と同じ retry/status/KKT 判定の 3 原則を Mehrotra IPM に適用した wrapper。
-/// 旧 `ipm::solve_qp_ipm` 直叩き経路では偽 Optimal が大量発生 (60s で OBJ_MISMATCH 24)
-/// していたが、本 wrapper で v2 同等の元空間 KKT 再判定により抑え込む。
-pub fn solve_qp_v1_wrapped(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    solve_qp_v2_with_runner(problem, options, run_ipm_mehrotra)
-}
-
-/// 一般化 wrapper: `runner` (IP-PMM or Mehrotra) を選択可能。
+/// 一般化 wrapper: 旧実装で IPM/IPPMM を切り替えていた wrapper。
+/// 現在 runner は IP-PMM のみ。
 fn solve_qp_v2_with_runner(
     problem: &QpProblem,
     options: &SolverOptions,
     runner: IpmRunner,
 ) -> SolverResult {
-    // ユーザーが指定したアルゴリズム (IPM / IP-PMM) で必ず解く。
-    // 旧実装は `is_zero_q()` で Q≈0 退化を検出して Simplex (LP) に dispatch していたが、
-    // これはユーザー mandate 違反 (qp_solver: IpPmmNew を指定しても Simplex に振り替わる)。
-    // IPM/IP-PMM は Q=0 を線形目的の特殊ケースとして扱える (barrier 経由の LP として解く)。
-    // 性能差があれば呼び出し側が `qp_solver: Concurrent` で並行実行を選べる。
-
-    // Q 不定値チェック (非凸 QP 検出): IPM は Q 半正定値前提。
+    // Q 不定値チェック (非凸 QP 検出): IPPMM は Q 半正定値前提。
     if !crate::qp::check_q_positive_semidefinite(&problem.q) {
         return SolverResult {
             status: SolveStatus::NonConvex(

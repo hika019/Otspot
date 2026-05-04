@@ -15,17 +15,19 @@ use std::sync::{
 };
 use std::time::Instant;
 
-/// QP ソルバー選択
+/// QP ソルバー選択。IP-PMM (proximal method of multipliers) で統一。
+///
+/// 旧 `Ipm` (Mehrotra 単独) と `Concurrent` (IPM/IPPMM 並列実行で最速採用) は廃止。
+/// 理由: IPPMM が IPM の上位互換 (PMM proximal で rank-deficient/null-space drift
+/// を吸収、Maros 138 で IPPMM 136/138 vs IPM 134/138)。並列競争は CPU を 2x 消費して
+/// 1 PASS の差しか生まない費用対効果不足。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QpSolverChoice {
-    /// Concurrent: 全ソルバー並列実行、最速の解を返す（デフォルト）
+    /// IP-PMM (Pougkakiotis-Gondzio 2021): IPM + Proximal Method of Multipliers の統合
+    /// アルゴリズム。rank-deficient / 病的問題に対する標準解。
     #[default]
-    Concurrent,
-    /// 強制 IPM (内点法)
-    Ipm,
-    /// IP-PMM 新実装（完全独立実装、単独実行。feature gate: ippmm_new）
-    IpPmmNew,
+    IpPmm,
 }
 
 /// シンプレックス法の選択
@@ -182,7 +184,7 @@ impl Default for SolverOptions {
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
-            qp_solver: QpSolverChoice::Concurrent,
+            qp_solver: QpSolverChoice::IpPmm,
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),
