@@ -461,27 +461,6 @@ pub(crate) fn solve_qp_ipm_inner(
             break;
         }
 
-        // primal residual 暴発検出: pf が実用域 (1e10) を超える状態で多数 iter 続くなら
-        // 数値発散とみなして Timeout で打ち切る (upper layer が別 attempt で救済する可能性を残す)。
-        //
-        // 代表病理: QFORPLAN (LP) で check_infeasible_or_unbounded の cond_obj が満たされない
-        // 発散経路で 200万 iter 暴走 → Timeout で抜けて attempt 1 (Ruiz on/off 変更) が PASS。
-        //
-        // status を Unbounded にしないのは、QPLIB_9002 (bound=1e10 の bounded QP) のように
-        // 初期点 |x|=1e10 から数値発散する問題で偽 Unbounded を返すのを防ぐため。
-        // Unbounded の確定判定は check_infeasible_or_unbounded の cond_obj に任せる。
-        const PF_EXPLODE_LIMIT: f64 = 1e10;
-        const PF_EXPLODE_MIN_ITER: usize = 200;
-        if iter >= PF_EXPLODE_MIN_ITER {
-            if let Some((pf, _, _)) = final_residuals {
-                if pf > PF_EXPLODE_LIMIT {
-                    status = SolveStatus::Timeout;
-                    final_iter = iter;
-                    break;
-                }
-            }
-        }
-
         // C-1: rho_ipm減衰（RHO_IPM_DECAY=0.9, RHO_IPM_MIN=1e-9）
         rho_ipm = (rho_ipm * 0.9_f64).max(1e-9_f64);
     }

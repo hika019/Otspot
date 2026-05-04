@@ -776,6 +776,45 @@ pub(crate) fn solve_ippmm_inner(
                 Some(n),
             ) {
                 Ok(f) => {
+                    // 健全性プローブ: factorize は Ok を返したが、cond(K) が f64 LDL の精度上限
+                    // (≈ 1/ε_machine = 4.5e15) を超えると solve が桁外れな解を返す病理がある
+                    // (QPLIB_8515 iter 7 で sol_inf=2e21 ← rhs_inf=2.7 が観測)。
+                    //
+                    // 予測子 RHS の構造 [r_d_pmm; r_p_pmm + s]_eq (Mehrotra predictor) を probe し、
+                    // 相対増幅率 (sol_inf / rhs_inf) が f64 精度上限 (1/ε_machine) を超えるなら
+                    // 不健全とみなして delta を増やして再因子化する。閾値は f64 物理量 (機械精度の
+                    // 逆数) であり、問題集チューニングではない。
+                    //
+                    // 反復法 (MINRES) backend では LDL 精度の概念が当てはまらない (相対 tol で
+                    // 自分で収束) ため、probe を skip する。
+                    if !f.is_iterative() {
+                        let probe_dim = mat_for_factor.nrows;
+                        let mut probe_rhs = vec![0.0_f64; probe_dim];
+                        probe_rhs[..n].copy_from_slice(&r_d_pmm);
+                        // 予測子 RHS の下半分は r_p_mod_pred = r_p - r_c_pred/y で、不等式行
+                        // では r_c_pred = -s*y → r_p_mod_pred = r_p + s。等式行はそのまま r_p。
+                        // |s| が dominant な iter 群 (QPLIB_8515 iter 7+) でこの構造が cond
+                        // 限界を露呈させる。
+                        for (i, slot) in probe_rhs[n..].iter_mut().enumerate() {
+                            *slot = if is_eq_ext[i] { r_p_pmm[i] } else { r_p_pmm[i] + s[i] };
+                        }
+                        let rhs_inf = probe_rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                        if rhs_inf > 0.0 && rhs_inf.is_finite() {
+                            let mut probe_sol = vec![0.0_f64; probe_dim];
+                            f.solve(&probe_rhs, &mut probe_sol);
+                            let sol_inf = probe_sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                            let f64_precision_ceiling = 1.0 / f64::EPSILON;
+                            let amplification = sol_inf / rhs_inf;
+                            if !amplification.is_finite() || amplification > f64_precision_ceiling {
+                                if rho_retry >= LDL_REG_CEILING {
+                                    break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
+                                }
+                                rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                                delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                                continue;
+                            }
+                        }
+                    }
                     fac_opt = Some(f);
                     aug_mat_opt = Some(mat_for_factor);
                     break;
