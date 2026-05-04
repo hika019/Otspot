@@ -826,10 +826,23 @@ pub(crate) fn solve_ippmm_inner(
                                 if r > resid_inf { resid_inf = r; }
                             }
                             let rel_resid = resid_inf / rhs_inf;
-                            // LDL solve 品質閾値: 1e-3 = inexact Newton (η=0.1) より 100x 厳しく、
-                            // central path 追跡に十分な精度。物理量ベース。
+                            let sol_inf = probe_sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                            let f64_precision_ceiling = 1.0 / f64::EPSILON;
+                            let amplification = sol_inf / rhs_inf;
+                            // 健全性条件 (両方満たす必要):
+                            //   (A) 実残差 ||K·sol − rhs|| / ||rhs|| ≤ LDL_HEALTH_REL_TOL = 1e-3
+                            //       (Wright IPM §11.7 の inexact Newton 品質、物理量)
+                            //   (B) sol 増幅率 sol_inf / rhs_inf ≤ 1/ε_machine = 4.5e15
+                            //       (cond(K) が f64 表現範囲内、物理量)
+                            // どちらか一方でも破れたら不健全 → delta bump で再因子化。
+                            // (A) は QPLIB_8515 iter 7 (residual 大) を捕捉、(B) は
+                            // QPLIB_9002 iter 36 (sol 桁外れ) を捕捉。
                             const LDL_HEALTH_REL_TOL: f64 = 1e-3;
-                            if !rel_resid.is_finite() || rel_resid > LDL_HEALTH_REL_TOL {
+                            let unhealthy = !rel_resid.is_finite()
+                                || rel_resid > LDL_HEALTH_REL_TOL
+                                || !amplification.is_finite()
+                                || amplification > f64_precision_ceiling;
+                            if unhealthy {
                                 if rho_retry >= LDL_REG_CEILING {
                                     break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
                                 }
