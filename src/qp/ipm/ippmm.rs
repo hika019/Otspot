@@ -94,6 +94,22 @@ const ALPHA_STALL_N: usize = 5;
 /// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
 const ALPHA_DEADLOCK_N: usize = 20;
 
+/// best_score 停滞検出 (alpha > 0 でも残差が改善しない病理向け):
+/// 直近 RESIDUAL_STALL_WINDOW 回の iter で best_score が
+/// `RESIDUAL_STALL_REL_DEC` 以上の相対減少を見せなければ停滞とみなす。
+///
+/// QPLIB_8500 (n=250k): iter 21 で best_score=2.4e-5 (eps=1e-6 を 24x 超え)。
+/// 以降 iter 22-682 (~905s) で alpha > 1e-8 を保ったまま residual 全く改善せず。
+/// 旧 alpha-stall は alpha < 1e-8 でしか発火せず、長時間 spin が放置されていた。
+///
+/// パラメータ根拠 (アルゴ物理量、問題集 tuning ではない):
+/// - WINDOW = 50: IPPMM の典型収束速度 (1 iter あたり residual 0.5x 程度) を 7-8 桁
+///   分に余裕を取った観測窓。50 iter で 0.5^50 = 9e-16 まで改善するのが正常。
+/// - REL_DEC = 1e-3: 50 iter で 1e-3 (千分の一) すら改善しないなら数値飽和。
+///   1e-1 (10%) は窓内で正常な改善ともマッチするので過剰検出。1e-3 は安全側。
+const RESIDUAL_STALL_WINDOW: usize = 50;
+const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
+
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -396,6 +412,11 @@ pub(crate) fn solve_ippmm_inner(
     // alpha 停滞・deadlock 検出 (定数はモジュールレベルに集約)
     let mut alpha_stall_count: usize = 0;
 
+    // residual 停滞検出: best_score が窓内で改善しないかを追跡。
+    // best_score が更新された iter 番号と、その時の値を保持。
+    let mut last_score_improvement_iter: usize = 0;
+    let mut last_score_improvement_value: f64 = f64::INFINITY;
+
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
@@ -465,6 +486,13 @@ pub(crate) fn solve_ippmm_inner(
                 best_iter = iter;
                 best_residuals = (nr_p, nr_d, mu);
                 best_rel_gap = rel_gap;
+            }
+            // residual 停滞検出: best_score が「有意に」減少したら improvement とみなす。
+            // 「有意」= last_score_improvement_value × (1 - RESIDUAL_STALL_REL_DEC) を下回る。
+            // この基準で改善が無いまま RESIDUAL_STALL_WINDOW iter 経過したら停滞と判定。
+            if score < last_score_improvement_value * (1.0 - RESIDUAL_STALL_REL_DEC) {
+                last_score_improvement_iter = iter;
+                last_score_improvement_value = score;
             }
         }
 
@@ -1141,6 +1169,35 @@ pub(crate) fn solve_ippmm_inner(
                     "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar reason={} stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} rho={:.3e} reg_limit={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
                     iter, exit_reason, alpha_stall_count, best_iter, best_score, best_rel_gap,
                     pmm.rho, reg_limit,
+                    best_residuals.0, best_residuals.1, best_residuals.2
+                );
+            }
+            status = Some(SolveStatus::SuboptimalSolution);
+            break;
+        }
+
+        // residual 停滞検出: alpha > 0 で line search 自体は動いているが、
+        // best_score が窓内で改善しない病理 (QPLIB_8500 iter 21 で score=2.4e-5 確定後
+        // ~660 iter spin)。alpha-stall とは独立。
+        // 条件:
+        //   (a) best_score 有限 (一度は更新された)
+        //   (b) iter - last_score_improvement_iter >= WINDOW (窓越え)
+        //   (c) best_score >= eps (まだ収束していない、これが満たせば Optimal 経路で抜ける)
+        // 真に収束途中の解は (c) を満たさず、ここでは発火しない。
+        let residual_stall = best_score.is_finite()
+            && iter >= last_score_improvement_iter + RESIDUAL_STALL_WINDOW
+            && best_score >= eps;
+        if residual_stall {
+            x.copy_from_slice(&best_x);
+            y.copy_from_slice(&best_y);
+            s.copy_from_slice(&best_s);
+            final_iter = best_iter;
+            final_residuals = Some(best_residuals);
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "IPPMM_EXIT iter={} path=Suboptimal_residual_stall_bestsofar window={} last_improve_iter={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                    iter, RESIDUAL_STALL_WINDOW, last_score_improvement_iter,
+                    best_iter, best_score, best_rel_gap,
                     best_residuals.0, best_residuals.1, best_residuals.2
                 );
             }
