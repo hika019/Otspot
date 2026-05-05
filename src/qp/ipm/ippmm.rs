@@ -169,17 +169,32 @@ pub(crate) fn solve_ippmm_inner(
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
-    // 初期点（有界変数はボックス中点から開始して primal feasibility を確保）
-    // 初期点 x0 = ボックス中点（lb+ub)/2）。無限界変数は 0。
+    // 初期点
+    //
+    // 旧: 有界変数はボックス中点 (lb+ub)/2 から開始。
+    // 真因 (QPLIB_9002): 巨大 bounds (|ub|=1e11) で midpoint=2.9e10 となり、初期 |x0|
+    // が桁外れに大きく pf=2e10 (b=0 に対し |Ax0|=2e10)。IPM は midpoint からスタートする
+    // と真の optimum (x≈0 級) に至るまで N 桁の縮小が必要で、line search が間に合わず
+    // 「wrong vertex」状態に張り付く。
+    //
+    // 修正: 0 が bounds に含まれる場合は x0=0 を優先 (multiplier-method の標準推奨)。
+    // 0 が含まれない場合のみ midpoint or 単側 ε シフトに退避。
+    // これにより c=0/b=0 問題で初期 pf=0 から開始でき、IPM が無駄な大域移動を回避。
     let x0: Vec<f64> = problem
         .bounds
         .iter()
         .map(|&(lb, ub)| {
-            if lb.is_finite() && ub.is_finite() {
+            let lb_fin = lb.is_finite();
+            let ub_fin = ub.is_finite();
+            // 0 が bounds 内なら 0 を優先
+            let zero_in_bounds = (!lb_fin || lb <= 0.0) && (!ub_fin || ub >= 0.0);
+            if zero_in_bounds {
+                0.0
+            } else if lb_fin && ub_fin {
                 (lb + ub) / 2.0
-            } else if lb.is_finite() {
+            } else if lb_fin {
                 lb + 1.0
-            } else if ub.is_finite() {
+            } else if ub_fin {
                 ub - 1.0
             } else {
                 0.0
