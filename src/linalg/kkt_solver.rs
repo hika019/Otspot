@@ -234,6 +234,17 @@ pub struct PreconditionedMinres {
     max_iter: usize,
     /// 相対許容差
     tol: f64,
+    /// 反復改良 (IR) ラウンド数。`solve()` 後に `r = rhs - K·sol` を計算し、
+    /// `K·δ = r` を再度 MINRES で解いて `sol += δ` を `ir_steps` 回繰り返す。
+    /// inexact MINRES (`tol = η`) の実効精度を `η^(ir_steps + 1)` まで押し下げる。
+    ///
+    /// 物理量根拠: MINRES は `||K·d̃ − r|| ≤ η·||r||` (relative) で停止するが、
+    /// Newton 方向誤差は `||d̃ − d|| ≤ η·||r||/σ_min(K)` で σ_min が小さい
+    /// (saddle point KKT で典型的) と桁外れの方向誤差になる。IR 1 ラウンドで
+    /// 残差を η 倍するため、桁数を線形に追加で稼げる (Wilkinson 1965)。
+    ///
+    /// デフォルト 0 (IR なし、後方互換)。`*_inexact` constructor は 2 を設定。
+    ir_steps: usize,
 }
 
 /// 前処理対角の最小値 (これ未満は MIN_DIAG にクランプして M^{-1} を有限化)
@@ -263,13 +274,48 @@ pub enum PreconditionerKind {
 /// (`factorize_kkt_with_cached_perm`) からのみ使われる。
 pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 0.1;
 
+/// inexact MINRES に施す反復改良 (IR) のデフォルト回数。
+///
+/// IPPMM の MINRES path は `tol = η = 0.1` で停止するため、Newton 方向は
+/// 相対残差 10% で saddle point KKT (σ_min(K) → 0) では絶対方向誤差が
+/// 桁外れになる (実測: QPLIB_8500 を MINRES 強制実行で iter 3-30 にかけて
+/// pf が 5x → 100x → 5e8 に発散)。1 ラウンド IR で残差を η 倍するため、
+/// 2 ラウンドで実効精度 η^3 = 1e-3、3 ラウンドで 1e-4 まで詰められる。
+///
+/// 既存の inexact 経路への破壊的変更を抑え、η^3 が「IPM 外側 Newton step
+/// 品質に十分」(Wright IPM §11.7 が要求する Newton tol < ζ_k) かつ
+/// 1 ラウンドあたり MINRES iter は元の 1-2 倍で済む実測なので、
+/// 計算量増は 3x 程度。
+const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 2;
+
+/// 実行時 η override (発散実験用)。`MINRES_ETA` env が `(0, 1]` の f64 として
+/// 解釈できれば該当値、それ以外は `MINRES_INEXACT_NEWTON_ETA` を返す。
+fn minres_eta_runtime() -> f64 {
+    std::env::var("MINRES_ETA")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
+        .unwrap_or(MINRES_INEXACT_NEWTON_ETA)
+}
+
+/// 実行時 IR ラウンド数 override (`MINRES_IR` env)。`0..=10` の usize として
+/// 解釈できれば該当値、それ以外は引数 `default` を返す (== `*_inexact` の
+/// デフォルト or 通常 constructor の 0)。
+fn minres_ir_runtime(default: usize) -> usize {
+    std::env::var("MINRES_IR")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|v| *v <= 10)
+        .unwrap_or(default)
+}
+
 impl PreconditionedMinres {
     /// 単純 Jacobi 前処理付き MINRES を構築する (旧 `new` 互換)。
     pub fn new(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9 }
+        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
     }
 
     /// 鞍点 K 用のブロック対角前処理付き MINRES を構築する。
@@ -282,31 +328,47 @@ impl PreconditionedMinres {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9 }
+        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
     }
 
-    /// IPM Newton 系用 (inexact Newton tol η = 0.1)。鞍点ブロック対角前処理。
+    /// IPM Newton 系用 (inexact Newton tol η = 0.1 + IR 2 ラウンド)。
+    /// 鞍点ブロック対角前処理。
     /// `factorize_kkt_with_cached_perm` の MINRES フォールバックから使う想定。
     pub fn with_block_diag_inexact(k: CscMatrix, n_top: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: MINRES_INEXACT_NEWTON_ETA }
+        Self {
+            k,
+            m_inv_diag,
+            kind,
+            max_iter: 2 * n,
+            tol: minres_eta_runtime(),
+            ir_steps: minres_ir_runtime(MINRES_INEXACT_NEWTON_IR_STEPS),
+        }
     }
 
-    /// IPM Newton 系用 (inexact Newton tol η = 0.1)。Jacobi 前処理 (n_top 不明時)。
+    /// IPM Newton 系用 (inexact Newton tol η = 0.1 + IR 2 ラウンド)。
+    /// Jacobi 前処理 (n_top 不明時)。
     pub fn new_inexact(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: MINRES_INEXACT_NEWTON_ETA }
+        Self {
+            k,
+            m_inv_diag,
+            kind,
+            max_iter: 2 * n,
+            tol: minres_eta_runtime(),
+            ir_steps: minres_ir_runtime(MINRES_INEXACT_NEWTON_IR_STEPS),
+        }
     }
 
     /// 反復回数上限と相対許容差をカスタム指定する (Jacobi 前処理)。
     pub fn with_params(k: CscMatrix, max_iter: usize, tol: f64) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
-        Self { k, m_inv_diag, kind, max_iter, tol }
+        Self { k, m_inv_diag, kind, max_iter, tol, ir_steps: 0 }
     }
 }
 
@@ -398,23 +460,79 @@ impl KktSolver for PreconditionedMinres {
         for s in sol.iter_mut() { *s = 0.0; }
         let k = &self.k;
         let m_inv = &self.m_inv_diag;
-        let stats = crate::linalg::minres::pminres(
-            |v, y| crate::linalg::minres::matvec_sym_upper(k, v, y),
-            |r, z| {
-                for i in 0..r.len() {
-                    z[i] = r[i] * m_inv[i];
-                }
-            },
-            rhs,
-            sol,
-            self.tol,
-            self.max_iter,
-            || deadline.is_some_and(|d| Instant::now() >= d),
-        );
-        if std::env::var("MINRES_TRACE").ok().as_deref() == Some("1") {
+        let n = k.nrows;
+        let do_minres = |sol: &mut [f64], rhs: &[f64]| {
+            crate::linalg::minres::pminres(
+                |v, y| crate::linalg::minres::matvec_sym_upper(k, v, y),
+                |r, z| {
+                    for i in 0..r.len() {
+                        z[i] = r[i] * m_inv[i];
+                    }
+                },
+                rhs,
+                sol,
+                self.tol,
+                self.max_iter,
+                || deadline.is_some_and(|d| Instant::now() >= d),
+            )
+        };
+        let stats = do_minres(sol, rhs);
+        let trace = std::env::var("MINRES_TRACE").ok().as_deref() == Some("1");
+        if trace {
             eprintln!("MINRES_SOLVE n={} iters={} max_iter={} tol={:.1e} resid={:.3e} conv={} kind={:?}",
-                k.nrows, stats.iters, self.max_iter, self.tol, stats.residual_estimate, stats.converged, self.kind);
+                n, stats.iters, self.max_iter, self.tol, stats.residual_estimate, stats.converged, self.kind);
         }
+
+        // ── 反復改良 (IR): MINRES 解 sol に対し r = rhs - K·sol を計算し、
+        //    K·δ = r を再度 MINRES で解いて sol += δ。`ir_steps` 回繰り返す。
+        //    MINRES の `tol = η` (relative) のもとで、IR 1 ラウンドあたり
+        //    残差を η 倍するため、実効精度を η^(ir_steps + 1) まで詰められる。
+        //    deadline 超過時は IR を中断 (途中の sol は MINRES 単体より悪化しない: IR
+        //    は加算更新で、最初の MINRES 解は破棄しない)。
+        if self.ir_steps > 0 {
+            let mut residual = vec![0.0_f64; n];
+            let mut delta = vec![0.0_f64; n];
+            for ir_iter in 0..self.ir_steps {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    if trace {
+                        eprintln!("MINRES_IR iter={} deadline reached, abort IR", ir_iter);
+                    }
+                    break;
+                }
+                // residual = rhs - K·sol
+                crate::linalg::minres::matvec_sym_upper(k, sol, &mut residual);
+                let mut r_norm_sq = 0.0_f64;
+                for i in 0..n {
+                    residual[i] = rhs[i] - residual[i];
+                    r_norm_sq += residual[i] * residual[i];
+                }
+                let r_norm = r_norm_sq.sqrt();
+                // 残差が機械精度近傍まで小さい場合のみ打ち切り (saddle point KKT は
+                // cond × relative_residual で direction error が増幅されるため、
+                // relative residual が tol² 程度では不十分。f64 の規範境界 1e-14
+                // を絶対下限とする)。
+                let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
+                if rhs_norm > 0.0 && r_norm <= 1e-14 * rhs_norm {
+                    if trace {
+                        eprintln!("MINRES_IR iter={} early-out: r/rhs={:.3e} at f64 floor", ir_iter, r_norm / rhs_norm);
+                    }
+                    break;
+                }
+                // δ を求めて sol に加算
+                for d in delta.iter_mut() { *d = 0.0; }
+                let ir_stats = do_minres(&mut delta, &residual);
+                for i in 0..n {
+                    sol[i] += delta[i];
+                }
+                if trace {
+                    eprintln!(
+                        "MINRES_IR iter={} pre_r={:.3e} ir_iters={} ir_resid={:.3e} ir_conv={}",
+                        ir_iter, r_norm, ir_stats.iters, ir_stats.residual_estimate, ir_stats.converged
+                    );
+                }
+            }
+        }
+
         if stats.converged {
             Ok(())
         } else if deadline.is_some_and(|d| Instant::now() >= d) {
