@@ -467,6 +467,46 @@ pub(crate) fn solve_ippmm_inner(
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
 
+        // mu underflow guard: f64 subnormal 範囲 (~5e-324) に突入すると
+        // 1/y、s/y、σ*mu などの後続計算で NaN/Inf が発生し、NaN_guard 経路で
+        // best-so-far に戻る挙動になる (QPLIB_8515 で実証: iter 140 で
+        // mu=3.77e-309)。subnormal 突入前に early-exit して best-so-far を
+        // SuboptimalSolution として返す。
+        //
+        // 閾値 MU_SUBNORMAL_THRESHOLD = 1e-300 の根拠 (物理量):
+        //   f64 subnormal range = (~2.2e-308, 5e-324)
+        //   normal の最小: 2.2e-308
+        //   1e-300 は normal range 内、step 計算で 1/mu = 1e300 が finite
+        //   かつ 1e300 × normal value ≤ 1e308 で overflow しない安全圏
+        //
+        // 動作: mu < 1e-300 で best-so-far が確定済みなら exit。
+        // m_ineq=0 (純等式制約) では mu=0 が正常なので発火させない。
+        // best_score < eps の場合は Optimal_main 経路で抜けるべきなので exit せず。
+        // (AUG2D 等の小問題で「mu 急速減少 + 同時に nr_p,nr_d も収束」のとき、
+        // mu_subnormal を早期発火させると Optimal_main を奪い PFEAS_FAIL になる)。
+        const MU_SUBNORMAL_THRESHOLD: f64 = 1e-300;
+        if m_ineq > 0
+            && mu.is_finite()
+            && mu < MU_SUBNORMAL_THRESHOLD
+            && best_score.is_finite()
+            && best_score >= options.ipm_eps()
+        {
+            x.copy_from_slice(&best_x);
+            y.copy_from_slice(&best_y);
+            s.copy_from_slice(&best_s);
+            final_iter = best_iter;
+            final_residuals = Some(best_residuals);
+            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "IPPMM_EXIT iter={} path=Suboptimal_mu_subnormal_bestsofar mu={:.3e} best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+                    iter, mu, best_iter, best_score,
+                    best_residuals.0, best_residuals.1, best_residuals.2
+                );
+            }
+            status = Some(SolveStatus::SuboptimalSolution);
+            break;
+        }
+
         // 双対ギャップを best-so-far 更新前に算出。
         // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
         // best 更新時に gap も記録し、reject_false 経路の偽 Optimal 昇格を防ぐ。

@@ -411,6 +411,10 @@ impl KktSolver for PreconditionedMinres {
             self.max_iter,
             || deadline.is_some_and(|d| Instant::now() >= d),
         );
+        if std::env::var("MINRES_TRACE").ok().as_deref() == Some("1") {
+            eprintln!("MINRES_SOLVE n={} iters={} max_iter={} tol={:.1e} resid={:.3e} conv={} kind={:?}",
+                k.nrows, stats.iters, self.max_iter, self.tol, stats.residual_estimate, stats.converged, self.kind);
+        }
         if stats.converged {
             Ok(())
         } else if deadline.is_some_and(|d| Instant::now() >= d) {
