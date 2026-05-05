@@ -454,8 +454,12 @@ impl KktSolver for PreconditionedMinres {
 /// なく enum dispatch で書くことで、既存コードの `&LdlFactorizationAmd` を
 /// `&KktFactor` に置換するだけで済む。
 pub enum KktFactor {
-    /// 直接法 (LDL) で因子化済み
+    /// 直接法 (LDL, f64) で因子化済み
     Direct(crate::linalg::ldl::LdlFactorizationAmd),
+    /// 直接法 (LDL, TwoFloat ≈ 106 bit) で因子化済み。
+    /// f64 の precision floor (cond × 2.2e-16) を超える ill-conditioned 系
+    /// (QPILOTNO cond 5e13 / QPLIB_10034 cond 1e7×amp 1170) 用。
+    DirectDd(crate::linalg::ldl_dd::LdlFactorizationDdAmd),
     /// 反復法 (MINRES + Jacobi) で K の値を保持
     Iterative(PreconditionedMinres),
 }
@@ -481,6 +485,7 @@ impl KktFactor {
     ) {
         match self {
             KktFactor::Direct(ldl) => ldl.solve(rhs, sol),
+            KktFactor::DirectDd(ldl_dd) => ldl_dd.solve(rhs, sol),
             KktFactor::Iterative(minres) => {
                 // MINRES は Result を返すが、IPM 内部では最大努力 best-effort で十分。
                 // deadline で早期 break しても sol には反復途中の状態が入る。
@@ -492,6 +497,11 @@ impl KktFactor {
     /// 直接法/反復法のどちらが使われているか診断する
     pub fn is_iterative(&self) -> bool {
         matches!(self, KktFactor::Iterative(_))
+    }
+
+    /// DD precision LDL を使っているか診断する
+    pub fn is_dd(&self) -> bool {
+        matches!(self, KktFactor::DirectDd(_))
     }
 }
 
@@ -512,6 +522,59 @@ pub fn factorize_kkt_with_cached_perm(
     max_l_nnz: usize,
     n_top: Option<usize>,
 ) -> Result<KktFactor, KktError> {
+    // env IPM_DD_LDL=1 が設定されているときは TwoFloat (≈106 bit) で因子化する。
+    // f64 LDL の forward error = cond × 2.2e-16 が eps を超える ill-cond 系
+    // (QPILOTNO cond 5e13 / QPLIB_10034 cond 1e7×amp 1170) 用。
+    // budget チェックは f64 経路と同等 (DD は係数行列構造が同じなので同じ AMD/etree)。
+    if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
+        // f64 で symbolic を済ませて budget 判定し、超過なら MINRES、超過しないなら DD numeric。
+        match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
+            k, perm, deadline, Some(max_l_nnz),
+        ) {
+            Ok(_) => {
+                // budget 内 → DD で再因子化
+                match crate::linalg::ldl_dd::factorize_quasidefinite_with_cached_perm_dd(
+                    k, perm, deadline,
+                ) {
+                    Ok(f) => {
+                        if std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1") {
+                            eprintln!(
+                                "IPM_DD_LDL_TRACE factorize OK n={} L_nnz={}",
+                                k.nrows,
+                                f.nnz_l()
+                            );
+                        }
+                        return Ok(KktFactor::DirectDd(f));
+                    }
+                    Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => {
+                        return Err(KktError::DeadlineExceeded);
+                    }
+                    Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
+                        return Err(KktError::SingularOrIndefinite);
+                    }
+                    Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
+                        // DD path は budget チェックなし。到達不可だが安全に MINRES へ。
+                    }
+                }
+            }
+            Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
+                // budget 超過 → DD でも同じく超過する。MINRES へフォールバック (下のロジック流用)。
+            }
+            Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => {
+                return Err(KktError::DeadlineExceeded);
+            }
+            Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
+                return Err(KktError::SingularOrIndefinite);
+            }
+        }
+        // budget 超過時のみここに来る → MINRES
+        let minres = match n_top {
+            Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
+            _ => PreconditionedMinres::new_inexact(k.clone()),
+        };
+        return Ok(KktFactor::Iterative(minres));
+    }
+
     match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
         k, perm, deadline, Some(max_l_nnz),
     ) {

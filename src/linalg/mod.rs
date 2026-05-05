@@ -1,6 +1,7 @@
 pub mod amd;
 pub mod kkt_solver;
 pub mod ldl;
+pub mod ldl_dd;
 pub mod minres;
 pub mod nystrom;
 pub mod pcg;
