@@ -110,6 +110,22 @@ const ALPHA_DEADLOCK_N: usize = 20;
 const RESIDUAL_STALL_WINDOW: usize = 50;
 const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 
+/// best-so-far が「最低限解の体をなす」と認める residual score の上限。
+///
+/// best_score = nr_p/(1+||b||) + nr_d/(1+||c||) + |mu|/(1+||c||) は
+/// 問題スケールで正規化した残差 (relative residual)。
+///
+/// 物理量根拠: score >= 1.0 は residual が問題スケールと同オーダ
+/// = constraint 違反が右辺と同じ大きさ = 解として qualitatively 誤り。
+/// この水準の best-so-far を `SuboptimalSolution` (= 「精度未達だが有効解」)
+/// として返すのは虚偽報告で、`NumericalError` が正しい分類。
+///
+/// score < 1.0 (例えば eps=1e-6 で 0.01) は残差が問題スケール未満で
+/// 物理的に意味のある近似解。SuboptimalSolution として返す。
+///
+/// 閾値 1.0 は dimensionless (problem-scale-relative) で問題集 tuning ではない。
+const BESTSOFAR_USEFUL_SCORE_MAX: f64 = 1.0;
+
 
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
@@ -1089,11 +1105,20 @@ pub(crate) fn solve_ippmm_inner(
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;
                 let exit_status = if is_quasi_optimal {
                     SolveStatus::Optimal
-                } else {
+                } else if best_score < BESTSOFAR_USEFUL_SCORE_MAX {
                     SolveStatus::SuboptimalSolution
+                } else {
+                    // best-so-far が問題スケール並の残差 (score >= 1.0) → 解の体をなさない。
+                    // best 復帰しても誤った Suboptimal を返すのは虚偽。NumericalError 化。
+                    SolveStatus::NumericalError
                 };
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    let path_label = if is_quasi_optimal { "Optimal_NaN_guard_bestsofar" } else { "Suboptimal_NaN_guard_bestsofar" };
+                    let path_label = match exit_status {
+                        SolveStatus::Optimal => "Optimal_NaN_guard_bestsofar",
+                        SolveStatus::SuboptimalSolution => "Suboptimal_NaN_guard_bestsofar",
+                        SolveStatus::NumericalError => "NumericalError_NaN_guard_diverged",
+                        _ => "NaN_guard_unknown",
+                    };
                     eprintln!(
                         "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
                         iter, path_label, best_iter, best_score, best_rel_gap,
@@ -1104,9 +1129,10 @@ pub(crate) fn solve_ippmm_inner(
             } else {
                 final_iter = iter;
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("IPPMM_EXIT iter={} path=Suboptimal_NaN_guard (no best)", iter);
+                    eprintln!("IPPMM_EXIT iter={} path=NumericalError_NaN_guard_no_best", iter);
                 }
-                status = Some(SolveStatus::SuboptimalSolution);
+                // best-so-far がない (即座に NaN) → 解なし。NumericalError 一択。
+                status = Some(SolveStatus::NumericalError);
             }
             break;
         }
