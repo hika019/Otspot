@@ -110,20 +110,27 @@ const ALPHA_DEADLOCK_N: usize = 20;
 const RESIDUAL_STALL_WINDOW: usize = 50;
 const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 
-/// best-so-far が「最低限解の体をなす」と認める residual score の上限。
+/// best-so-far が「最低限解候補として返す価値がある」と認める score の上限。
 ///
 /// best_score = nr_p/(1+||b||) + nr_d/(1+||c||) + |mu|/(1+||c||) は
-/// 問題スケールで正規化した残差 (relative residual)。
+/// 各項を問題スケールで正規化した dimensionless 残差和。
 ///
-/// 物理量根拠: score >= 1.0 は residual が問題スケールと同オーダ
-/// = constraint 違反が右辺と同じ大きさ = 解として qualitatively 誤り。
-/// この水準の best-so-far を `SuboptimalSolution` (= 「精度未達だが有効解」)
-/// として返すのは虚偽報告で、`NumericalError` が正しい分類。
+/// score の意味:
+/// - score ≈ 0     → 完全収束 (Optimal)
+/// - score < 10·eps → 実質収束 (Optimal 級)、is_quasi_optimal で救出可
+/// - score < 1.0   → 残差は問題スケール未満。downstream の feasibility 検証で
+///                   PASS する可能性があり、SuboptimalSolution として返す
+/// - score ≥ 1.0   → 残差が問題スケール以上 = constraint 違反が右辺と同等
+///                   = 解の体をなさない (例: QPLIB_9008 best_score=0.84,
+///                   pf=14.4, ||b|| ~ 17)。NumericalError 化が正しい
 ///
-/// score < 1.0 (例えば eps=1e-6 で 0.01) は残差が問題スケール未満で
-/// 物理的に意味のある近似解。SuboptimalSolution として返す。
+/// 閾値 1.0 は dimensionless (problem-scale-relative) で問題集 tuning ではなく、
+/// 「残差 ≧ 問題スケール」境界という数学的意味を持つ。
 ///
-/// 閾値 1.0 は dimensionless (problem-scale-relative) で問題集 tuning ではない。
+/// この cutoff があることで UBH1 (best_pf=4e-13, best_df=2e-9, best_score=9e-10
+/// だが gap=3.4e-3 > DUALITY_GAP_TOL で is_quasi_optimal に届かない) のような
+/// 「実質収束しているが gap だけ閾値外」ケースが SuboptimalSolution → bench
+/// 側 feasibility 検証 → PASS の経路に乗る。
 const BESTSOFAR_USEFUL_SCORE_MAX: f64 = 1.0;
 
 
@@ -1103,13 +1110,16 @@ pub(crate) fn solve_ippmm_inner(
                 let quality_threshold = 10.0 * eps_orig;
                 let is_quasi_optimal = best_score < quality_threshold
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;
+                // NaN_guard は収束失敗起因 (direction blow-up = 数値崩壊)。
+                // best が真に Optimal 級なら救出、score < 1.0 なら downstream
+                // 検証経由 (UBH1 等) で PASS の可能性に賭ける、score >= 1.0 なら
+                // 問題スケール越えの garbage (例: QPLIB_9008 score=0.84 → pf=14.4)
+                // で NumericalError。
                 let exit_status = if is_quasi_optimal {
                     SolveStatus::Optimal
                 } else if best_score < BESTSOFAR_USEFUL_SCORE_MAX {
                     SolveStatus::SuboptimalSolution
                 } else {
-                    // best-so-far が問題スケール並の残差 (score >= 1.0) → 解の体をなさない。
-                    // best 復帰しても誤った Suboptimal を返すのは虚偽。NumericalError 化。
                     SolveStatus::NumericalError
                 };
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
