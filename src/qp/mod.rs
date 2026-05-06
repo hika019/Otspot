@@ -1136,18 +1136,27 @@ pub(crate) fn refine_kkt_iterative(
         eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
             n, m, pre_pf, pre_df, target_pf, dd_mode);
     }
-    if pre_pf < target_pf {
+    // Gate: 元空間で pf も df も既に target 以下なら refine 不要 (短絡で skip)。
+    // 旧実装: `pre_pf < target_pf` のみで skip → 等式 QP (OSQP_EQ_QP_20: pf=1.8e-15,
+    // df=3.4e-5) のような「primal は機械精度だが dual が target を下回らない」ケースで
+    // refine をスキップして DFEAS_FAIL を量産していた。IR ステップは K [dx;dy]=-[r_d;r_p]
+    // を解くので primal/dual 両方を同時に reduce する。skip 条件を AND に変更し、
+    // どちらか一方でも target 超過なら refine を試みる。
+    if pre_pf < target_pf && pre_df < target_pf {
         if trace {
-            eprintln!("REFINE_KKT skip: pre_pf < target_pf");
+            eprintln!("REFINE_KKT skip: pre_pf and pre_df both < target_pf");
         }
         return 0;
     }
 
     let mut accepted = 0_usize;
-    // df 悪化許容: pre_df の 2x まで。これ以上は revert (構造的悪化)。
+    // 残差悪化許容: pre の 2x または 1e-7 (どちらか大きい方)。これ以上は revert (構造的悪化)。
     // 経験値 (LISWET cond で IR が 1-2 iter で収束する想定で十分な余裕)。
-    const DF_TOLERANCE_FACTOR: f64 = 2.0;
-    let df_limit = (pre_df * DF_TOLERANCE_FACTOR).max(1e-7);
+    // pf/df 双方に同じ guardrail を適用 — IR は両方を同時に reduce するため一方だけ
+    // 緩めると「片方が暴発しても accept」になる落とし穴がある (旧実装は df だけだった)。
+    const RESID_TOLERANCE_FACTOR: f64 = 2.0;
+    let pf_limit = (pre_pf * RESID_TOLERANCE_FACTOR).max(1e-7);
+    let df_limit = (pre_df * RESID_TOLERANCE_FACTOR).max(1e-7);
 
     for iter in 0..max_iters {
         // 各 iter 先頭で deadline 確認 (LDL solve は n+m=30k で数秒級になり得る)
@@ -1160,8 +1169,10 @@ pub(crate) fn refine_kkt_iterative(
         } else {
             compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals)
         };
-        if pf_cur < target_pf {
-            if trace { eprintln!("REFINE_KKT iter={} early: pf_cur={:.3e} < target", iter, pf_cur); }
+        // 早期 break: pf も df も target 以下 → 既に PASS 級。
+        // 旧実装は pf のみ判定 → df bottleneck 問題で refine 機会を逃していた。
+        if pf_cur < target_pf && df_cur < target_pf {
+            if trace { eprintln!("REFINE_KKT iter={} early: pf_cur={:.3e} df_cur={:.3e} both < target", iter, pf_cur, df_cur); }
             break;
         }
 
@@ -1228,13 +1239,24 @@ pub(crate) fn refine_kkt_iterative(
                 iter, pf_cur, pf_new, df_cur, df_new, dx_inf, dy_inf, clip_amt);
         }
 
-        if pf_new < pf_cur && df_new < df_limit {
+        // Acceptance criterion (joint primal/dual progress):
+        //   1. score (= max(pf, df)) が strictly 減少 → 全体として PASS 距離が縮まった
+        //   2. かつ pf, df のどちらも guardrail 内 (pre の 2x or 1e-7 floor) → 暴発無し
+        // 旧実装: `pf_new < pf_cur && df_new < df_limit` — pf strict 減少を要求し
+        //   pre_pf=1.8e-15 (機械精度) のケースで accept 不可能。score-based に改めて
+        //   pf が機械精度のままでも df を改善できれば accept する。
+        let score_cur = pf_cur.max(df_cur);
+        let score_new = pf_new.max(df_new);
+        let progress = score_new < score_cur;
+        let pf_safe = pf_new < pf_limit;
+        let df_safe = df_new < df_limit;
+        if progress && pf_safe && df_safe {
             *result = tmp;
             accepted += 1;
         } else {
             if trace {
-                eprintln!("REFINE_KKT iter={} REJECTED (pf_dec={} df_ok={})",
-                    iter, pf_new < pf_cur, df_new < df_limit);
+                eprintln!("REFINE_KKT iter={} REJECTED (progress={} pf_safe={} df_safe={} score:{:.3e}->{:.3e})",
+                    iter, progress, pf_safe, df_safe, score_cur, score_new);
             }
             break;
         }

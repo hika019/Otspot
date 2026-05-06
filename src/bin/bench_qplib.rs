@@ -250,6 +250,26 @@ fn main() {
             Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
             None => String::new(),
         };
+
+        // Timeout / SuboptimalSolution でも有効な best-so-far 解を持つなら Optimal 経路に
+        // 格上げし obj 照合で品質判定する。qps_benchmark.rs と整合させた挙動。
+        // 動機: bench_qplib は旧来 SuboptimalSolution を一律 SUBOPTIMAL として表示し、
+        //   obj 照合スキップ → 「解は合っているが SUBOPTIMAL」を抱え込んでいた
+        //   (QPLIB_10034: obj=-6.601e-2 vs baseline=-6.601e-2 で誤差 0.008% でも SUBOPTIMAL)。
+        //   solver 内 IPPMM が μ_floor / α_stall で内部諦め → SuboptimalSolution は珍しくない
+        //   ため、obj/finite で篩い、obj 不一致なら OBJ_MISMATCH に分類される設計。
+        let result = if matches!(
+            result.status,
+            SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+        ) && !result.solution.is_empty()
+            && result.solution.len() == prob.num_vars
+            && result.objective.is_finite()
+        {
+            solver::problem::SolverResult { status: SolveStatus::Optimal, ..result }
+        } else {
+            result
+        };
+
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {

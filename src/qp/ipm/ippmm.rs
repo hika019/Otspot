@@ -403,6 +403,36 @@ pub(crate) fn solve_ippmm_inner(
     /// 一度の調整で reg_limit を割る倍率
     const REG_LIMIT_STEP: f64 = 1e-3;
 
+    // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
+    // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
+    // 桁違いに離れている場合、reg_limit を下げて IPM が boundary を探索できる
+    // ようにする。
+    //
+    // 動機: OSQP_PORTFOLIO_100 (n=10100, m=20101, c≠0 で active boundary 構造)
+    // で δ=5e-8 floor が x を interior に張り付かせて obj=0.0297 (suboptimal,
+    // Clarabel: -2.63) で停滞。c が大きいので allow_adaptive_reg=false のまま
+    // この path を通せず、interior 解で false-positive Infeasible 検出される。
+    // pf 停滞検出により reg_limit を下げ、boundary に到達できる。
+    //
+    // LISWET など c≠0 でも pf が緩やかに減少する問題では PF_STUCK_RATIO=0.95
+    // を満たさず trigger しない (毎 iter 5%以上改善されている)。
+    /// pf 履歴を残す iter 数
+    const PF_HISTORY_LEN: usize = 5;
+    /// pf が改善とみなされる ratio 上限。pf_now / pf_5_iter_ago > この値なら停滞。
+    /// 0.95 = 5% 未満の改善 (5 iter に渡る) を停滞と判定。LISWET は 0.96/iter で 5 iter で 0.81、
+    /// 0.95 を下回るので trigger しない。一方 PORTFOLIO_100 は ratio≈1.0 で確実に trigger。
+    const PF_STUCK_RATIO: f64 = 0.95;
+    /// pf が target から離れていることを要求する係数 (target × この倍数)。
+    /// 1e2 = pf > 100·eps なら "まだ収束遠し" と判定。LISWET の pf=1.5e-6 (eps=1e-6) は
+    /// 1.5 < 100 で trigger しない。PORTFOLIO_100 の pf=3.4e-4 (eps=1e-6) は 340 > 100 で trigger。
+    const PF_FAR_FROM_TARGET_RATIO: f64 = 1e2;
+    let mut pf_history: Vec<f64> = Vec::with_capacity(PF_HISTORY_LEN);
+
+    // check_infeasible_or_unbounded の連続 fire 数。1 iter 単発 fire は noise の可能性が
+    // 高い (PMM regularization floor 付近の dy 方向揺らぎ等) ため、K iter 連続で
+    // 検出された場合のみ exit する。
+    let mut consecutive_infeas_triggers: usize = 0;
+
     // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
     let mut aty = vec![0.0f64; n];
@@ -1106,12 +1136,15 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                // best-so-far が真に Optimal 級なら救出、それ以外は NumericalError。
-                // 「Optimal 級」= 残差・gap で判定する is_quasi_optimal、または
-                //   個別 pf/df が両方 eps 以下 (KKT feasibility 同時成立)。
-                // 後者は UBH1 のように rel_gap が DUALITY_GAP_TOL を僅かに超えるが
-                // pf, df ともに eps 内のケースを救う (gap は dual gap norm で gap=0
-                // でなくても feasibility は満たし得る)。
+                // best-so-far が真に Optimal 級なら Optimal、そうでないなら IPM が数値破綻
+                // したが best 解は保持しているので SuboptimalSolution として下流に委ねる。
+                // bench 側で best の pf/df/obj から PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH/
+                // PASS のいずれかに正しく分類される。
+                //
+                // 旧実装は "Optimal 級でなければ NumericalError"。これは status 隠蔽:
+                // QPLIB_8515 (pf=1.99e-6, df=7.75e-6 — 双方 eps=1e-6 を僅かに超過) で
+                // best は eps 未達だが「数値破綻して best が garbage」という旧分類は不適切。
+                // best は valid な近似解なので SuboptimalSolution + bench の品質判定が正解。
                 let quality_threshold = 10.0 * eps_orig;
                 let combined_quasi = best_score < quality_threshold
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;
@@ -1121,13 +1154,13 @@ pub(crate) fn solve_ippmm_inner(
                 let exit_status = if is_quasi_optimal {
                     SolveStatus::Optimal
                 } else {
-                    SolveStatus::NumericalError
+                    SolveStatus::SuboptimalSolution
                 };
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                     let path_label = if is_quasi_optimal {
                         "Optimal_NaN_guard_bestsofar"
                     } else {
-                        "NumericalError_NaN_guard_diverged"
+                        "SuboptimalSolution_NaN_guard_diverged_bestsofar"
                     };
                     eprintln!(
                         "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
@@ -1148,18 +1181,36 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // Infeasibility / Unboundedness 検出（IP-PMM パス）
+        //
+        // 検出器 (check_infeasible_or_unbounded) は Newton step (dx, dy) の **方向**
+        // から Farkas-like 証明書を判定する。これは正規の Farkas 証明書 (recession
+        // direction) ではなく Newton 方向を使う近似なので、以下の **false-positive** が
+        // 起きうる:
+        //   - PMM regularization δ floor (5e-8) で primal が pf ≈ δ·‖y‖ に張り付く
+        //     OSQP_PORTFOLIO_100 (n=10100, m=20101) で確認: pf=3.4e-4, df=6e-11, ‖y‖≈6e3,
+        //     δ·‖y‖ ≈ 3e-4 — IPM は frozen 状態で dy/dx は noise を含み、
+        //     ||A^T dy||≈0 と b·dy<0 を偶然満たして Infeasible 誤判定。
+        //
+        // **対処方針**: 検出器が反応しても、best-so-far が finite (= IPM が iterate を
+        // 1 度でも改善した) ならその解を信頼し、status は **下流の finalize_outcome** に
+        // 委ねる (best_score < 10·eps なら Optimal 昇格、それ以外は SuboptimalSolution
+        // → bench 側で PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH に正しく分類)。
+        // 検出器を完全に無効化はしない: best が無い (pf 未収束のまま 1 回も best 更新が
+        // 起きていない、best_score=INFINITY) 場合のみ Infeasible/Unbounded を信じる。
+        //
+        // 真の Infeasible 問題では IPM が常に大きな pf を返すため best_score は常に
+        // 大きい finite 値 → SuboptimalSolution → bench 側で PFEAS_FAIL に分類される
+        // (pf が enormous なので "Infeasible" と区別する精緻さは bench 出力で確認可能)。
         if let Some(infeas_status) = check_infeasible_or_unbounded(
             &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
         ) {
-            // 真に Infeasible/Unbounded なら残差が小さい解には到達しない。
-            // best-so-far が Optimal 級の品質を保持していれば、方向検出による false positive とみなし格下げ。
+            consecutive_infeas_triggers += 1;
             let quality_threshold = 10.0 * eps_orig;
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite());
+                eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={} consecutive_infeas={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite(), consecutive_infeas_triggers);
             }
-            // best_score は残差 (pf+df+mu) のみを評価。
-            // UBH1 のように残差小でも gap 大な状態を best として抱え込む可能性があるため、
-            // best_rel_gap も閾値内でないと Optimal 昇格しない。
+            // best が Optimal-quality なら 1 回目の trigger でも即 rescue (false-positive を
+            // 早期に切り上げる、IPPMM 真の収束済み)。
             if best_score.is_finite()
                 && best_score < quality_threshold
                 && best_rel_gap.abs() < DUALITY_GAP_TOL
@@ -1179,12 +1230,55 @@ pub(crate) fn solve_ippmm_inner(
                 status = Some(SolveStatus::Optimal);
                 break;
             }
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("IPPMM_EXIT iter={} path=check_infeas status={:?} best_score={:.3e}", iter, infeas_status, best_score);
+            // 1 回の trigger では確信できないので、N 連続で fire するまで最大 K iter
+            // 待ってから demote/Infeasible 判定する。これにより:
+            //   - PMM regularization floor で primal が一時的に stuck し dy 方向がたまたま
+            //     Farkas-like を満たすケース (PORTFOLIO_100) で adaptive reg_limit が降りる
+            //     猶予を与える。
+            //   - 真の Infeasible (常に dy 方向が Farkas) は K iter 連続で fire し確実に exit。
+            // この window 中は status を立てずループ続行 (newton step / alpha 更新で進捗を
+            // 見守る)。
+            const MIN_CONSECUTIVE_INFEAS: usize = 3;
+            if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
+                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "IPPMM_DEBUG iter={} infeas trigger #{} (< {}), continue iterating",
+                        iter, consecutive_infeas_triggers, MIN_CONSECUTIVE_INFEAS
+                    );
+                }
+                // continue でなくループ続行: 後段の newton step / alpha 更新を実施して
+                // 次 iter で再判定する。
+            } else {
+                // K iter 連続 fire: best が finite なら SuboptimalSolution、そうでなければ
+                // 検出器に従い Infeasible/Unbounded.
+                if best_score.is_finite() {
+                    x.copy_from_slice(&best_x);
+                    y.copy_from_slice(&best_y);
+                    s.copy_from_slice(&best_s);
+                    final_iter = best_iter;
+                    final_residuals = Some(best_residuals);
+                    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                        eprintln!(
+                            "IPPMM_EXIT iter={} path=demote_{:?}_to_suboptimal_bestsofar best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e}) consecutive={}",
+                            iter, infeas_status, best_iter, best_score,
+                            best_residuals.0, best_residuals.1, best_residuals.2,
+                            consecutive_infeas_triggers
+                        );
+                    }
+                    status = Some(SolveStatus::SuboptimalSolution);
+                    break;
+                }
+                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!("IPPMM_EXIT iter={} path=check_infeas status={:?} best_score={:.3e} consecutive={}", iter, infeas_status, best_score, consecutive_infeas_triggers);
+                }
+                status = Some(infeas_status);
+                final_iter = iter;
+                break;
             }
-            status = Some(infeas_status);
-            final_iter = iter;
-            break;
+        } else {
+            // 検出器が反応しなかった iter で carry-over count をリセット。
+            // これにより「散発的な fire」は確証なしと判定。
+            consecutive_infeas_triggers = 0;
         }
 
         // step magnitude trace（IPPMM_TRACE=1 のときのみ）
@@ -1318,16 +1412,45 @@ pub(crate) fn solve_ippmm_inner(
         let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
-        // Adaptive reg_limit (UBH1 パターン限定: c≈0):
-        if allow_adaptive_reg
-            && (pmm.rho - reg_limit).abs() < reg_limit * 0.01
+        // pf 履歴を維持 (pf-stagnation 検出用、c≠0 問題でも適応的 reg_limit を可能に)
+        pf_history.push(nr_p);
+        if pf_history.len() > PF_HISTORY_LEN {
+            pf_history.remove(0);
+        }
+
+        // Adaptive reg_limit:
+        //   経路 A: c≈0 (UBH1 パターン) で proximal が dual residual を支配
+        //   経路 B: pf が PF_HISTORY_LEN iter にわたり停滞 + target から桁違いに遠い
+        // どちらの経路も「regularization floor が convergence をブロックしている」
+        // 状態を検出する。reg_limit を 1e-3 倍に下げて IPM の探索余地を広げる。
+        if (pmm.rho - reg_limit).abs() < reg_limit * 0.01
             && reg_limit > REG_LIMIT_MIN
         {
-            let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
-                .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
-                .fold(0.0_f64, f64::max);
-            if prox_d_inf > nr_d * PROX_DOMINATE_RATIO && nr_d > 0.0 {
+            let mut should_lower = false;
+            // 経路 A: 既存 trigger (c≈0, prox dominates)
+            if allow_adaptive_reg {
+                let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
+                    .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
+                    .fold(0.0_f64, f64::max);
+                if prox_d_inf > nr_d * PROX_DOMINATE_RATIO && nr_d > 0.0 {
+                    should_lower = true;
+                }
+            }
+            // 経路 B: pf 停滞検出 (c の値に依存しない)
+            if !should_lower
+                && pf_history.len() == PF_HISTORY_LEN
+                && pf_history[0] > 0.0
+                && nr_p > eps_orig * PF_FAR_FROM_TARGET_RATIO
+            {
+                let ratio = nr_p / pf_history[0];
+                if ratio > PF_STUCK_RATIO {
+                    should_lower = true;
+                }
+            }
+            if should_lower {
                 reg_limit = (reg_limit * REG_LIMIT_STEP).max(REG_LIMIT_MIN);
+                // 履歴をリセット (新しい reg_limit の下で改めて停滞判定する)
+                pf_history.clear();
             }
         }
 
