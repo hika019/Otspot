@@ -72,6 +72,10 @@ if echo "$DATA_DIR_LOWER" | grep -q "maros"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/maros_meszaros.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/osqp_bench.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "mpc[_-]?qp"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/mpc_qp.csv"
 else
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 fi

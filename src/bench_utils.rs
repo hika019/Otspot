@@ -22,6 +22,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         "maros_meszaros.csv"
     } else if data_lower.contains("qplib") {
         "qplib.csv"
+    } else if data_lower.contains("osqp_bench") || data_lower.contains("osqp-bench") {
+        "osqp_bench.csv"
+    } else if data_lower.contains("mpc_qp") || data_lower.contains("mpc-qp") {
+        "mpc_qp.csv"
     } else {
         "netlib_lp.csv"
     };
