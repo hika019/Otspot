@@ -260,19 +260,25 @@ pub enum PreconditionerKind {
     BlockDiag { n_top: usize },
 }
 
-/// IPM の Newton 系内側解で使う inexact Newton forcing term η
-/// (Eisenstat-Walker 1996 / Wright IPM §11.7)。
+/// IPM の Newton 系内側解で使う inexact Newton forcing term η。
 /// Newton 系 K·dx = r の内側解を ||K·dx − r|| ≤ η·||r|| まで許容する。
-/// 標準的 IPM 文献では η = 0.1 〜 0.5 が推奨範囲。η = 0.1 は安全側の選択。
 ///
-/// MINRES のデフォルト tol = 1e-9 は f64 機械精度近くまで内側 solve していたが、
-/// IPM の外側収束にはこの精度は不要 (Newton ステップは外側残差に応じて段階的にしか
-/// 進まない)。η = 0.1 で n=1M 級問題の MINRES iter 数を典型 100x 削減できる。
+/// 値選定 (η = 1e-6) の根拠:
+/// 標準的 IPM 文献 (Eisenstat-Walker 1996 / Wright IPM §11.7) は η = 0.1〜0.5
+/// を well-conditioned 系の "inexact Newton" tol として推奨するが、saddle KKT
+/// (σ_min(K) → 0) では Newton 方向誤差が ||d̃ − d|| ≤ η·||r|| / σ_min(K) で
+/// cond(K) で増幅され、外側 IPM 反復で蓄積発散する病理が発生する
+/// (実測: QPLIB_9008 / QPLIB_8500 強制 MINRES path で η=0.1 だと iter 6 から
+/// pf/df 指数発散、η=1e-4 でも iter 12 で発散開始、η=1e-6 で発散完全停止)。
 ///
-/// 単独 MINRES API (`PreconditionedMinres::new` / `with_block_diag`) のデフォルトは
-/// 1e-9 を維持 (汎用線形ソルバとしての精度仕様)。本定数は IPM 経路の dispatcher
+/// よって η = 1e-6 を default。MINRES 反復数は η=0.1 比で典型 100-1000x 増えるが、
+/// この経路に来る問題は augmented LDL すら budget 超過するような巨大問題のみ
+/// (Maros 138 / QPLIB の小〜中問題は LDL 経路で η 無関係)。
+///
+/// 単独 MINRES API (`PreconditionedMinres::new` / `with_block_diag`) のデフォルト
+/// 1e-9 は維持 (汎用線形ソルバとしての精度仕様)。本定数は IPM 経路の dispatcher
 /// (`factorize_kkt_with_cached_perm`) からのみ使われる。
-pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 0.1;
+pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-6;
 
 /// inexact MINRES に施す反復改良 (IR) のデフォルト回数。
 ///
@@ -313,6 +319,13 @@ fn minres_ir_runtime(default: usize) -> usize {
 }
 
 impl PreconditionedMinres {
+    /// inexact tolerance を後から override する (Eisenstat-Walker forcing 用)。
+    /// IPPMM の outer iteration 残差縮小率に応じて η を tighten するために
+    /// 各 IPM iter で呼ばれる。
+    pub fn set_inexact_tol(&mut self, tol: f64) {
+        self.tol = tol;
+    }
+
     /// 単純 Jacobi 前処理付き MINRES を構築する (旧 `new` 互換)。
     pub fn new(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
@@ -586,6 +599,15 @@ pub enum KktFactor {
 }
 
 impl KktFactor {
+    /// MINRES iterative variant の tol を override する (Eisenstat-Walker forcing 用)。
+    /// Direct/DirectDd variant では何もしない (LDL は exact 求解で tol 概念なし)。
+    pub fn set_iterative_tol(&mut self, tol: f64) {
+        if let KktFactor::Iterative(minres) = self {
+            minres.set_inexact_tol(tol);
+        }
+    }
+
+
     /// `K · sol = rhs` を解いて `sol` に書き込む。LDL 互換の infallible API。
     ///
     /// 反復法側のエラー (収束失敗等) は内部で握り潰し、best-effort 解を返す。

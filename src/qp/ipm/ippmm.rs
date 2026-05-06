@@ -473,6 +473,7 @@ pub(crate) fn solve_ippmm_inner(
     let mut last_score_improvement_iter: usize = 0;
     let mut last_score_improvement_value: f64 = f64::INFINITY;
 
+
     for iter in 0..options.ipm.max_iter {
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
