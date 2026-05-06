@@ -1045,20 +1045,35 @@ pub(crate) fn refine_kkt_iterative(
         false
     }).collect();
 
-    let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
+    // 残差は (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel) を返す。
+    // pf_rel/df_rel は OSQP-style 全体相対化で bench (`compute_dfeas_orig` /
+    // `kkt_residual_rel`) と整合。
+    //   pf_rel = max|r_p_i| / (1 + max(||Ax||_inf, ||b||_inf))
+    //   df_rel = max|r_d_j| / (1 + max(||Qx||_inf, ||c||_inf, ||A^Ty||_inf, ||z_bnd||_inf))
+    // gate / 早期 break / acceptance の判定は **rel** で行う (bench と統一)。
+    // abs 版は既存の guardrail (factor 2 以内) のために併せて返す。
+    let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
         let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
         let aty = problem.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n]);
         let mut r_d = vec![0.0_f64; n];
-        // codebase 規約: KKT stationarity = Qx + c + A^T·y + bound_contrib (kkt_residual_rel と整合)。
-        // canonical の Qx + c - A^T·y - z_lb + z_ub と符号が違うので注意。
+        let mut max_qx = 0.0_f64;
+        let mut max_c = 0.0_f64;
+        let mut max_aty = 0.0_f64;
+        let mut max_bnd = 0.0_f64;
         for j in 0..n {
-            if exclude_var[j] { continue; }  // FX/EmptyCol は r_d=0 のまま
+            if exclude_var[j] { continue; }
             let bc = bound_contrib_at_var(&problem.bounds, z, j);
             r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
+            max_qx = max_qx.max(qx[j].abs());
+            max_c = max_c.max(problem.c[j].abs());
+            max_aty = max_aty.max(aty[j].abs());
+            max_bnd = max_bnd.max(bc.abs());
         }
         let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
         let mut r_p = vec![0.0_f64; m];
-        let mut pf = 0.0_f64;
+        let mut pf_abs = 0.0_f64;
+        let mut max_ax = 0.0_f64;
+        let mut max_b = 0.0_f64;
         for i in 0..m {
             let raw = ax[i] - problem.b[i];
             let v = match problem.constraint_types[i] {
@@ -1067,10 +1082,16 @@ pub(crate) fn refine_kkt_iterative(
                 ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
             };
             r_p[i] = v;
-            pf = pf.max(v.abs());
+            pf_abs = pf_abs.max(v.abs());
+            max_ax = max_ax.max(ax[i].abs());
+            max_b = max_b.max(problem.b[i].abs());
         }
-        let df = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        (r_d, r_p, pf, df)
+        let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+        let pf_scale = 1.0 + max_ax.max(max_b);
+        let df_scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+        let pf_rel = pf_abs / pf_scale;
+        let df_rel = df_abs / df_scale;
+        (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)
     };
 
     // DD (double-double) residual: Wilkinson IR の "double the working precision" 実装。
@@ -1083,7 +1104,7 @@ pub(crate) fn refine_kkt_iterative(
     //
     // env REFINE_KKT_DD=1 で有効化。default は f64 residual (高速)。
     let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() == Some("1");
-    let compute_residuals_dd = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
+    let compute_residuals_dd = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
         use twofloat::TwoFloat;
         let zero_dd = TwoFloat::from(0.0);
         // qx[i] = sum_k Q[i,k] * x[k]  (Q は対称、上三角 CSC 格納)
@@ -1115,11 +1136,19 @@ pub(crate) fn refine_kkt_iterative(
         }
         // r_d[j] = qx[j] + c[j] + aty[j] + bound_contrib[j]
         let mut r_d = vec![0.0_f64; n];
+        let mut max_qx = 0.0_f64;
+        let mut max_c = 0.0_f64;
+        let mut max_aty = 0.0_f64;
+        let mut max_bnd = 0.0_f64;
         for j in 0..n {
             if exclude_var[j] { continue; }
             let bc = bound_contrib_at_var(&problem.bounds, z, j);
             let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
             r_d[j] = f64::from(r);
+            max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
+            max_c = max_c.max(problem.c[j].abs());
+            max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
+            max_bnd = max_bnd.max(bc.abs());
         }
         // ax[row] = sum_col A[row,col] * x[col]  (CSC で col 走査して row に加算)
         let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
@@ -1133,7 +1162,9 @@ pub(crate) fn refine_kkt_iterative(
             }
         }
         let mut r_p = vec![0.0_f64; m];
-        let mut pf = 0.0_f64;
+        let mut pf_abs = 0.0_f64;
+        let mut max_ax = 0.0_f64;
+        let mut max_b = 0.0_f64;
         for i in 0..m {
             let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
             let raw = f64::from(raw_dd);
@@ -1143,14 +1174,20 @@ pub(crate) fn refine_kkt_iterative(
                 ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
             };
             r_p[i] = v;
-            pf = pf.max(v.abs());
+            pf_abs = pf_abs.max(v.abs());
+            max_ax = max_ax.max(f64::from(ax_dd[i]).abs());
+            max_b = max_b.max(problem.b[i].abs());
         }
-        let df = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        (r_d, r_p, pf, df)
+        let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+        let pf_scale = 1.0 + max_ax.max(max_b);
+        let df_scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+        let pf_rel = pf_abs / pf_scale;
+        let df_rel = df_abs / df_scale;
+        (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)
     };
 
     let pre_z = result.bound_duals.clone();
-    let (_, _, pre_pf, pre_df) = if dd_mode {
+    let (_, _, pre_pf, pre_df, pre_pf_rel, pre_df_rel) = if dd_mode {
         compute_residuals_dd(&result.solution, &result.dual_solution, &pre_z)
     } else {
         compute_residuals(&result.solution, &result.dual_solution, &pre_z)
@@ -1160,27 +1197,35 @@ pub(crate) fn refine_kkt_iterative(
         eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
             n, m, pre_pf, pre_df, target_pf, dd_mode);
     }
-    // Gate: 元空間で pf も df も既に target 以下なら refine 不要 (短絡で skip)。
-    // 旧実装: `pre_pf < target_pf` のみで skip → 等式 QP (OSQP_EQ_QP_20: pf=1.8e-15,
-    // df=3.4e-5) のような「primal は機械精度だが dual が target を下回らない」ケースで
-    // refine をスキップして DFEAS_FAIL を量産していた。IR ステップは K [dx;dy]=-[r_d;r_p]
-    // を解くので primal/dual 両方を同時に reduce する。skip 条件を AND に変更し、
-    // どちらか一方でも target 超過なら refine を試みる。
-    if pre_pf < target_pf && pre_df < target_pf {
+    // Gate: bench (`compute_dfeas_orig` / `kkt_residual_rel`) と同じ **OSQP-style 相対**
+    // 残差で判定する。target_pf は bench の eps 通過判定 (pf_rel < eps && df_rel < eps)
+    // と統一。
+    //   旧実装: 絶対 pre_pf/pre_df < user_eps を gate にしていたため、||A^Ty|| が 1e8
+    //   級の問題 (Maros QPILOTNO) で「絶対 df=4.2e2 だが相対 dfr=3.4e-6」のように
+    //   bench の relative 基準では PASS に近いケースで refine を試みても absolute を
+    //   下げきれず、bench とは別の方向に最適化していた。
+    //   新実装: 相対残差 (pf_rel / df_rel) を bench と同じ式で計算し、それを判定軸とする。
+    //
+    // どちらか一方でも target 超過なら refine を試みる (IR は両方を同時に reduce する)。
+    if pre_pf_rel < target_pf && pre_df_rel < target_pf {
         if trace {
-            eprintln!("REFINE_KKT skip: pre_pf and pre_df both < target_pf");
+            eprintln!("REFINE_KKT skip: pre_pf_rel={:.3e} pre_df_rel={:.3e} both < target_pf",
+                pre_pf_rel, pre_df_rel);
         }
         return 0;
     }
 
     let mut accepted = 0_usize;
-    // 残差悪化許容: pre の 2x または 1e-7 (どちらか大きい方)。これ以上は revert (構造的悪化)。
-    // 経験値 (LISWET cond で IR が 1-2 iter で収束する想定で十分な余裕)。
-    // pf/df 双方に同じ guardrail を適用 — IR は両方を同時に reduce するため一方だけ
-    // 緩めると「片方が暴発しても accept」になる落とし穴がある (旧実装は df だけだった)。
+    // 残差悪化許容: pre_rel の 2x または target_pf×100 (どちらか大きい方)。これ以上は
+    // revert (構造的悪化)。pf_rel/df_rel どちらも guardrail で抑える。
+    //   target_pf×100 floor は「machine-precision 級の pre 値が事故で increase しても
+    //   target_pf×100 までは許容」する設計。target_pf=1e-6 なら 1e-4 が floor。
+    //   旧実装の absolute 1e-7 floor は ill-conditioned な問題で過剰に厳しかった。
     const RESID_TOLERANCE_FACTOR: f64 = 2.0;
-    let pf_limit = (pre_pf * RESID_TOLERANCE_FACTOR).max(1e-7);
-    let df_limit = (pre_df * RESID_TOLERANCE_FACTOR).max(1e-7);
+    const RESID_FLOOR_RATIO: f64 = 100.0;
+    let resid_floor = target_pf * RESID_FLOOR_RATIO;
+    let pf_limit = (pre_pf_rel * RESID_TOLERANCE_FACTOR).max(resid_floor);
+    let df_limit = (pre_df_rel * RESID_TOLERANCE_FACTOR).max(resid_floor);
 
     for iter in 0..max_iters {
         // 各 iter 先頭で deadline 確認 (LDL solve は n+m=30k で数秒級になり得る)
@@ -1188,17 +1233,17 @@ pub(crate) fn refine_kkt_iterative(
             if trace { eprintln!("REFINE_KKT iter={} deadline reached", iter); }
             break;
         }
-        let (r_d, r_p, pf_cur, df_cur) = if dd_mode {
+        let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) = if dd_mode {
             compute_residuals_dd(&result.solution, &result.dual_solution, &result.bound_duals)
         } else {
             compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals)
         };
-        // 早期 break: pf も df も target 以下 → 既に PASS 級。
-        // 旧実装は pf のみ判定 → df bottleneck 問題で refine 機会を逃していた。
+        // 早期 break: pf_rel も df_rel も target 以下 → bench で PASS 級。
         if pf_cur < target_pf && df_cur < target_pf {
-            if trace { eprintln!("REFINE_KKT iter={} early: pf_cur={:.3e} df_cur={:.3e} both < target", iter, pf_cur, df_cur); }
+            if trace { eprintln!("REFINE_KKT iter={} early: pf_rel={:.3e} df_rel={:.3e} both < target", iter, pf_cur, df_cur); }
             break;
         }
+        let _ = (pf_abs_cur, df_abs_cur); // abs 値は未使用 (trace 表示は rel ベース)
 
         let mut rhs = vec![0.0_f64; n + m];
         for j in 0..n { rhs[j] = -r_d[j]; }
@@ -1252,23 +1297,22 @@ pub(crate) fn refine_kkt_iterative(
         tmp.dual_solution = y_new;
         refit_bound_duals_kkt(problem, &mut tmp);
 
-        let (_, _, pf_new, df_new) = if dd_mode {
+        let (_, _, _pf_abs_new, _df_abs_new, pf_new, df_new) = if dd_mode {
             compute_residuals_dd(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
         } else {
             compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
         };
 
         if trace {
-            eprintln!("REFINE_KKT iter={} pf={:.3e}->{:.3e} df={:.3e}->{:.3e} dx_inf={:.3e} dy_inf={:.3e} clip={:.3e}",
+            eprintln!("REFINE_KKT iter={} pf_rel={:.3e}->{:.3e} df_rel={:.3e}->{:.3e} dx_inf={:.3e} dy_inf={:.3e} clip={:.3e}",
                 iter, pf_cur, pf_new, df_cur, df_new, dx_inf, dy_inf, clip_amt);
         }
 
-        // Acceptance criterion (joint primal/dual progress):
-        //   1. score (= max(pf, df)) が strictly 減少 → 全体として PASS 距離が縮まった
-        //   2. かつ pf, df のどちらも guardrail 内 (pre の 2x or 1e-7 floor) → 暴発無し
-        // 旧実装: `pf_new < pf_cur && df_new < df_limit` — pf strict 減少を要求し
-        //   pre_pf=1.8e-15 (機械精度) のケースで accept 不可能。score-based に改めて
-        //   pf が機械精度のままでも df を改善できれば accept する。
+        // Acceptance criterion (joint primal/dual progress, **rel** ベース):
+        //   1. score (= max(pf_rel, df_rel)) が strictly 減少 → bench PASS 距離が縮まった
+        //   2. かつ pf_rel, df_rel どちらも guardrail 内 → 暴発無し
+        // bench と同じ rel 残差で判定するため、pf が機械精度に張り付いていても df_rel
+        // が改善する余地があれば accept する。
         let score_cur = pf_cur.max(df_cur);
         let score_new = pf_new.max(df_new);
         let progress = score_new < score_cur;
