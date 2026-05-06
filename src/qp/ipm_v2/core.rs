@@ -510,23 +510,48 @@ fn run_ipm_with(
             }
         }
 
-        // (B) 念のためもう 1 度 y / z refit (stage A 内の内部 guard 後の再評価)
+        // (B) y / z refit — fixed point に達するまで反復。
+        //
+        // 各反復:
+        //   1. refine_dual_lsq: bound_duals を固定して y を LSQ で最適化
+        //   2. refit_bound_duals_kkt: y を固定して z (bound_duals) を再計算
+        // 反復間で y と z が双方向に依存するため、1 回では十分に reach されず、
+        // QPILOTNO のような ill-conditioned 問題で kkt_rel が 4.6e-5 で停滞していた
+        // (1 回 stage 後 3.4e-6、追加 stage で更に降りる余地あり)。
+        //
+        // 収束判定: kkt_rel の改善率が REFIT_CONVERGE_RATIO 未満になれば停止。
+        // 各 stage は KKT-guard 付きで悪化なら revert するため、安全に反復可能。
+        const REFIT_MAX_ITERS: usize = 8;
+        const REFIT_CONVERGE_RATIO: f64 = 0.99;
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        let pre_y = final_sol.dual_solution.clone();
-        crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
-        let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        if post_kkt <= current_kkt {
-            current_kkt = post_kkt;
-        } else {
-            final_sol.dual_solution = pre_y;
-        }
-        let pre_z = final_sol.bound_duals.clone();
-        crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-        let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        if post_kkt <= current_kkt {
-            current_kkt = post_kkt;
-        } else {
-            final_sol.bound_duals = pre_z;
+        for _refit_iter in 0..REFIT_MAX_ITERS {
+            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
+            let prev_kkt = current_kkt;
+
+            let pre_y = final_sol.dual_solution.clone();
+            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
+            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_kkt <= current_kkt {
+                current_kkt = post_kkt;
+            } else {
+                final_sol.dual_solution = pre_y;
+            }
+
+            let pre_z = final_sol.bound_duals.clone();
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_kkt <= current_kkt {
+                current_kkt = post_kkt;
+            } else {
+                final_sol.bound_duals = pre_z;
+            }
+
+            // 改善が止まれば早期 break (固定点)
+            if current_kkt >= prev_kkt * REFIT_CONVERGE_RATIO {
+                break;
+            }
         }
         current_kkt
     } else {
