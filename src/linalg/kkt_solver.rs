@@ -260,25 +260,35 @@ pub enum PreconditionerKind {
     BlockDiag { n_top: usize },
 }
 
-/// IPM の Newton 系内側解で使う inexact Newton forcing term η。
-/// Newton 系 K·dx = r の内側解を ||K·dx − r|| ≤ η·||r|| まで許容する。
+/// IPM の Newton 系内側解で使う inexact Newton forcing term η を eps から計算する。
 ///
-/// 値選定 (η = 1e-6) の根拠:
-/// 標準的 IPM 文献 (Eisenstat-Walker 1996 / Wright IPM §11.7) は η = 0.1〜0.5
-/// を well-conditioned 系の "inexact Newton" tol として推奨するが、saddle KKT
-/// (σ_min(K) → 0) では Newton 方向誤差が ||d̃ − d|| ≤ η·||r|| / σ_min(K) で
-/// cond(K) で増幅され、外側 IPM 反復で蓄積発散する病理が発生する
-/// (実測: QPLIB_9008 / QPLIB_8500 強制 MINRES path で η=0.1 だと iter 6 から
-/// pf/df 指数発散、η=1e-4 でも iter 12 で発散開始、η=1e-6 で発散完全停止)。
+/// 設計: η = eps × IPM_OUTER_VS_INNER_RATIO で **user 指定 eps に連動**させる。
+/// 物理量根拠 (問題集 tuning ではなく user 指定 tolerance 連動):
 ///
-/// よって η = 1e-6 を default。MINRES 反復数は η=0.1 比で典型 100-1000x 増えるが、
-/// この経路に来る問題は augmented LDL すら budget 超過するような巨大問題のみ
-/// (Maros 138 / QPLIB の小〜中問題は LDL 経路で η 無関係)。
+/// - IPM が outer tolerance ε まで収束するには、Newton 方向が ε 未満の精度で
+///   求まる必要がある (Newton 方向誤差 = η·||r||/σ_min(K) が ε を上回ると、
+///   outer は η × cond_factor で頭打ち = ε に到達不可)。
+/// - したがって η ≤ ε が必要条件、安全側で η = ε × 0.1 とする。
+/// - eps=1e-6 → η=1e-7、eps=1e-9 → η=1e-10、eps=1e-3 → η=1e-4 と自動調整。
 ///
-/// 単独 MINRES API (`PreconditionedMinres::new` / `with_block_diag`) のデフォルト
-/// 1e-9 は維持 (汎用線形ソルバとしての精度仕様)。本定数は IPM 経路の dispatcher
-/// (`factorize_kkt_with_cached_perm`) からのみ使われる。
-pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-6;
+/// 旧 default 0.1 (eps 非連動 hardcode) は QPLIB_9008 (n=1M, MINRES on Schur)
+/// で saddle KKT の cond 増幅により df 発散していた:
+///   実測: η=0.1 → 発散、η=1e-4 → iter 12 で発散開始、η=1e-7 → 発散完全停止
+///
+/// 下限 `IPM_INEXACT_ETA_FLOOR` は f64 機械精度 (≈2.2e-16) ベースで設定。
+/// これ未満は MINRES の収束判定が機械精度に支配されて意味を持たない。
+pub(crate) const IPM_OUTER_VS_INNER_RATIO: f64 = 0.1;
+/// inner η の絶対下限 (f64 限界由来)。これ未満の MINRES tol は意味なし。
+pub(crate) const IPM_INEXACT_ETA_FLOOR: f64 = 1e-13;
+
+/// user 指定 eps から inexact Newton forcing term η を計算する。
+pub fn inexact_eta_for_eps(eps: f64) -> f64 {
+    (eps * IPM_OUTER_VS_INNER_RATIO).max(IPM_INEXACT_ETA_FLOOR)
+}
+
+/// 旧互換 default (eps=1e-6 想定での η)。
+/// `inexact_eta_for_eps(1e-6)` と同値。eps を渡せない呼出元 (テスト等) 用。
+pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 
 /// inexact MINRES に施す反復改良 (IR) のデフォルト回数。
 ///

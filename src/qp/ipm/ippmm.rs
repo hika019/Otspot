@@ -33,7 +33,7 @@
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_with_cached_perm, max_l_nnz_from_budget, KktError, KktFactor,
+    factorize_kkt_with_cached_perm, inexact_eta_for_eps, max_l_nnz_from_budget, KktError, KktFactor,
 };
 use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
@@ -87,8 +87,13 @@ const LDL_REG_CEILING: f64 = 1.0;
 /// LDL 因子化最終 fallback の delta 下限 (identity ordering 経路用)。
 const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
-/// alpha 停滞検出: line search が `alpha < ALPHA_STALL_EPS` のときに stall とみなす。
-const ALPHA_STALL_EPS: f64 = 1e-8;
+/// alpha 停滞検出: line search が `alpha < alpha_stall_eps_for(eps)` のときに stall とみなす。
+/// user 指定 eps から計算する: tight eps では小さい alpha が正常収束局面なので、
+/// 停滞判定も eps スケールで緩める必要がある (eps=1e-6 → 1e-8 = 旧 default、
+/// eps=1e-9 → 1e-11、eps=1e-3 → 1e-5)。
+fn alpha_stall_eps_for(eps: f64) -> f64 {
+    (eps * 1e-2).max(1e-14)
+}
 /// alpha 停滞回数の早期脱出閾値 (best-so-far で復帰)。
 const ALPHA_STALL_N: usize = 5;
 /// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
@@ -410,6 +415,13 @@ pub(crate) fn solve_ippmm_inner(
 
     // AMD permutation キャッシュ（スパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
+
+    // inexact Newton forcing term η を user 指定 eps から計算する。
+    // η = eps × 0.1 (IPM_OUTER_VS_INNER_RATIO)、下限 1e-13 (f64 limit)。
+    // user が eps=1e-9 を要求すれば η=1e-10 となり、Newton 方向品質も
+    // それに見合う精度になる。MINRES (iterative) 経路でのみ反映、LDL 経路では
+    // forward error = cond × ε_machine が支配的なので η は無関係。
+    let inexact_eta = inexact_eta_for_eps(eps_orig);
 
     // [Schur auto-dispatch] augmented LDL が memory budget 超過 (= MINRES fallback)
     // になる場合は Schur (n×n SPD) に切替える。augmented MINRES path は
@@ -918,12 +930,17 @@ pub(crate) fn solve_ippmm_inner(
                             let amplification = sol_inf / rhs_inf;
                             // 健全性条件 (両方満たす必要):
                             //   (A) 実残差 ||K·sol − rhs|| / ||rhs|| ≤ LDL_HEALTH_REL_TOL = 1e-3
-                            //       (Wright IPM §11.7 の inexact Newton 品質、物理量)
+                            //       (LDL の大破綻検出 sanity threshold、eps 非連動)
                             //   (B) sol 増幅率 sol_inf / rhs_inf ≤ 1/ε_machine = 4.5e15
                             //       (cond(K) が f64 表現範囲内、物理量)
                             // どちらか一方でも破れたら不健全 → delta bump で再因子化。
                             // (A) は QPLIB_8515 iter 7 (residual 大) を捕捉、(B) は
                             // QPLIB_9002 iter 36 (sol 桁外れ) を捕捉。
+                            //
+                            // LDL_HEALTH_REL_TOL を eps 連動にすべきか検討したが、LDL
+                            // forward error は cond(K) × ε_machine で eps と独立に
+                            // 決まるため、eps 連動は誤った scaling。1e-3 は「LDL が 10x
+                            // 以上ズレる病理」を捕捉する sanity threshold として固定。
                             const LDL_HEALTH_REL_TOL: f64 = 1e-3;
                             let unhealthy = !rel_resid.is_finite()
                                 || rel_resid > LDL_HEALTH_REL_TOL
@@ -990,10 +1007,15 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
         // M-02: fac_opt が None なら全リトライ失敗 → NumericalError
-        let fac = match fac_opt {
+        let mut fac = match fac_opt {
             Some(f) => f,
             None => return numerical_error_result(n),
         };
+        // MINRES (iterative) 経路の tol を user 指定 eps から計算した η に上書きする。
+        // Direct/DirectDd では no-op。constructor 時に固定の η を使うのではなく、
+        // ここで都度設定するのは将来 dynamic forcing (cond 推定連動 等) を入れる
+        // 余地を残すため。
+        fac.set_iterative_tol(inexact_eta);
         let aug_mat_for_ir = aug_mat_opt
             .as_ref()
             .expect("aug_mat_opt must be set when fac_opt is set");
@@ -1205,7 +1227,7 @@ pub(crate) fn solve_ippmm_inner(
         // null-space: alpha 停滞早期脱出。
         // alpha=0 が続く＝line search が進まない＝数値飽和または null-space 漂流。
         // best-so-far があればそれで Suboptimal 復帰、無ければ素で Suboptimal 脱出。
-        if alpha < ALPHA_STALL_EPS {
+        if alpha < alpha_stall_eps_for(eps_orig) {
             alpha_stall_count += 1;
         } else {
             alpha_stall_count = 0;
