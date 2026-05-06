@@ -223,14 +223,27 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
         return true;
     }
 
-    // ★ 追加: 対角チェック (O(nnz), サイズ非依存)
-    // 対角に負値があれば → 非PSD確定（十分条件）
-    // 上三角CSCなのでrow == colが対角要素
-    // 閾値: < -1e-10（数値ノイズ -1e-15程度を除外）
-    // ★ SAFETY: この閾値は慎重に設定。変更要注意。
+    // ‖Q‖_max 推定: |対角| と |off-diag| の最大絶対値。閾値を相対化するスケール。
+    // QPS encoding は典型 6-7 桁精度なので、入力ノイズは ‖Q‖_max × 1e-6 オーダー。
+    let mut q_abs_max = 0.0_f64;
+    for &v in q.values.iter() {
+        let a = v.abs();
+        if a > q_abs_max { q_abs_max = a; }
+    }
+
+    // 対角チェック (O(nnz), サイズ非依存)
+    // 対角に有意に負な値があれば → 非PSD確定（十分条件）
+    // 閾値は QPS encoding noise を相対許容: ‖Q‖_max × QPS_NEG_TOL_RATIO。
+    // ‖Q‖_max=0 (Q=0 の LP) は absolute floor 1e-12 で扱う。
+    //
+    // 旧 absolute -1e-10 は ‖Q‖_max≫1 の問題で「相対 1e-13 級の noise」を
+    // 弾けず、逆に ‖Q‖_max=O(1) で encoded noise から生じる -1e-7 級の
+    // round-off を非PSDと誤判定し得た。relative threshold で回避。
+    const QPS_NEG_TOL_RATIO: f64 = 1e-6;
+    let neg_tol = (q_abs_max * QPS_NEG_TOL_RATIO).max(1e-12);
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            if q.row_ind[k] == col && q.values[k] < -1e-10 {
+            if q.row_ind[k] == col && q.values[k] < -neg_tol {
                 return false;  // 対角負値 → 非PSD確定
             }
         }
@@ -243,10 +256,21 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
         return true;
     }
 
-    // eps: double precision 機械イプシロン (~2e-16) の約10^8倍。
-    // PSD境界判定の数値的余裕として設定。半正定値Q（最小固有値=0）は
-    // Q+eps*I の最小ピボット = eps > 0 → PSD判定される設計。
-    let eps = 1e-8_f64;
+    // Cholesky 用 regularization eps:
+    //   Q が「数学的には PSD だが QPS の 6 桁丸めで僅かに不定」のケース
+    //   (Maros VALUES: ‖Q‖_max=1.0 で min eig=-1.27e-5 ≈ ‖Q‖×1.3e-5、
+    //    202×202 covariance 行列の rounding noise) を救うため、入力スケール
+    //    に応じた eps を採用する。‖Q‖_max × 1e-4 (rounding 噂値の上限を
+    //    数倍超えるマージン)。
+    //   absolute floor 1e-8 は ‖Q‖_max=0 / 極小ケースで Cholesky の数値安定を
+    //   担保 (旧仕様と互換)。
+    //
+    // 旧 absolute eps=1e-8 は ‖Q‖_max=O(1) で encoding rounding に対する許容が
+    // 不足し、本来 PSD だが round-off で僅かに不定な Q を弾いていた。
+    // QPLIB の本物の非凸 (例 0018: 大きな対角負値、2712: 明示的な不定 Q) は
+    // 上記閾値を越えるため、依然として正しく false を返す。
+    const CHOL_EPS_RATIO: f64 = 1e-4;
+    let eps = (q_abs_max * CHOL_EPS_RATIO).max(1e-8);
 
     // 上三角CSC から密対称行列を構築（Q + eps*I）
     let mut a = vec![0.0f64; n * n];
@@ -2036,8 +2060,9 @@ mod tests {
         );
     }
 
-    /// T_NEW3: 境界値 Q[0,0]=-1e-11（閾値 -1e-10 より大きい） → PSD（数値ノイズ無視）
-    /// -1e-11 > -1e-10 のため閾値未満と判定され、非凸検出しない
+    /// 閾値は ‖Q‖_max × 1e-6 (QPS encoding noise 相当の相対許容)。
+    /// ‖Q‖_max=1.0 なので neg_tol=1e-6。-1e-11 ≪ -1e-6 (= -neg_tol)
+    /// 条件 `q < -neg_tol` を満たさないので PSD として扱う。
     #[test]
     fn test_qp_diagonal_boundary_below_threshold() {
         let q = CscMatrix::from_triplets(
@@ -2049,41 +2074,42 @@ mod tests {
         ).unwrap();
         assert!(
             check_q_positive_semidefinite(&q),
-            "Q[0,0]=-1e-11 は閾値 -1e-10 より大きいため非凸検出しないこと"
+            "Q[0,0]=-1e-11 は noise 範囲内 (‖Q‖_max × 1e-6 = 1e-6 より小さい) のため PSD"
         );
     }
 
-    /// T_NEW3b: 境界値 Q[0,0]=-1e-10 exact（閾値ちょうど） → PSD（非凸検出しない）
-    /// チェック条件は q < -1e-10。-1e-10 == -1e-10 のため条件を満たさず PSD を返す
+    /// 境界値 Q[0,0]=-1e-7 < -neg_tol(=1e-6)? いえ、-1e-7 > -1e-6 なので閾値より小さい
+    /// (絶対値が小さい) → PSD と判定。‖Q‖_max=1 で 1e-7/1=1e-7 = noise 程度。
     #[test]
-    fn test_qp_diagonal_boundary_exact_threshold() {
+    fn test_qp_diagonal_boundary_at_noise_floor() {
         let q = CscMatrix::from_triplets(
             &[0, 1, 2],
             &[0, 1, 2],
-            &[-1e-10_f64, 1.0, 1.0],
+            &[-1e-7_f64, 1.0, 1.0],
             3,
             3,
         ).unwrap();
+        // -1e-7 > -1e-6 (= -neg_tol) なので非凸検出しない (noise 範囲)
         assert!(
             check_q_positive_semidefinite(&q),
-            "Q[0,0]=-1e-10 は閾値ちょうどのため非凸検出しないこと（条件は < -1e-10）"
+            "Q[0,0]=-1e-7 は閾値 (-‖Q‖_max × 1e-6 = -1e-6) 範囲内のため PSD"
         );
     }
 
-    /// T_NEW4: 境界値 Q[0,0]=-1e-9（閾値 -1e-10 を超える） → NonConvex
-    /// -1e-9 < -1e-10 のため対角負値として検出される
+    /// 境界値 Q[0,0]=-1e-4（閾値 -1e-6 を絶対値で超える） → NonConvex 検出。
+    /// 1e-4 / ‖Q‖_max=1 = 1e-4 > 1e-6 = encoded noise tolerance.
     #[test]
     fn test_qp_diagonal_boundary_above_threshold() {
         let q = CscMatrix::from_triplets(
             &[0, 1, 2],
             &[0, 1, 2],
-            &[-1e-9_f64, 1.0, 1.0],
+            &[-1e-4_f64, 1.0, 1.0],
             3,
             3,
         ).unwrap();
         assert!(
             !check_q_positive_semidefinite(&q),
-            "Q[0,0]=-1e-9 は閾値 -1e-10 を超えるため非凸検出されること"
+            "Q[0,0]=-1e-4 は閾値 (-‖Q‖_max × 1e-6 = -1e-6) を超えるため NonConvex 検出"
         );
     }
 
@@ -2397,10 +2423,12 @@ mod tests {
         // n=1001 > CHECK_SIZE_LIMIT=1000: Cholesky 省略 + 対角チェックのみ
         // 対角負値は n に関係なく対角チェックで検出される
         let n = 1001usize;
-        // case1: 対角負値 → 対角チェックで検出（n>1000 でも有効）
+        // case1: 対角負値 → 対角チェックで検出（n>1000 でも有効）。
+        // 閾値は ‖Q‖_max × 1e-6。‖Q‖_max=1 (off-diag 1.0) なので neg_tol=1e-6。
+        // -1e-3 < -1e-6 で検出。
         let mut rows = vec![0usize];
         let mut cols = vec![0usize];
-        let mut vals = vec![-1e-9_f64]; // -1e-9 < -1e-10 → 検出
+        let mut vals = vec![-1e-3_f64]; // -1e-3 < -1e-6 → 検出
         for i in 1..n {
             rows.push(i);
             cols.push(i);
