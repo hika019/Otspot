@@ -276,17 +276,20 @@ pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 0.1;
 
 /// inexact MINRES に施す反復改良 (IR) のデフォルト回数。
 ///
-/// IPPMM の MINRES path は `tol = η = 0.1` で停止するため、Newton 方向は
-/// 相対残差 10% で saddle point KKT (σ_min(K) → 0) では絶対方向誤差が
-/// 桁外れになる (実測: QPLIB_8500 を MINRES 強制実行で iter 3-30 にかけて
-/// pf が 5x → 100x → 5e8 に発散)。1 ラウンド IR で残差を η 倍するため、
-/// 2 ラウンドで実効精度 η^3 = 1e-3、3 ラウンドで 1e-4 まで詰められる。
+/// IR 機能自体は単体テストで動作確認済 (η^(IR+1) まで relative residual を
+/// 押し下げる、`minres_ir_actually_reduces_residual` テスト参照)。
 ///
-/// 既存の inexact 経路への破壊的変更を抑え、η^3 が「IPM 外側 Newton step
-/// 品質に十分」(Wright IPM §11.7 が要求する Newton tol < ζ_k) かつ
-/// 1 ラウンドあたり MINRES iter は元の 1-2 倍で済む実測なので、
-/// 計算量増は 3x 程度。
-const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 2;
+/// しかし saddle KKT で direction error = relative_residual × cond(K) で
+/// あり、IR で relative residual を η^(IR+1) まで詰めても cond の大きい系
+/// では direction quality は IPM 安定化に十分でない (実測: QPLIB_8500 強制
+/// MINRES で IR=2 でも iter 11-12 で pf 発散開始、IR=5 でも iter 11)。
+///
+/// 真の発散停止は cond 増幅の構造的回避 (`auto_schur` で saddle → SPD Schur
+/// 切替) で実現済 (`fix(qp/ipm): augmented LDL budget 超過時に Schur へ`)。
+/// その後の経路 (Schur SPD) では MINRES が CG 風に振る舞い IR は不要に近い。
+///
+/// よって default は 0 = IR 無効。`MINRES_IR=N` env で必要時に opt-in。
+const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 
 /// 実行時 η override (発散実験用)。`MINRES_ETA` env が `(0, 1]` の f64 として
 /// 解釈できれば該当値、それ以外は `MINRES_INEXACT_NEWTON_ETA` を返す。
@@ -1162,6 +1165,86 @@ mod tests {
                 "MINRES[{}]={} vs LDL[{}]={} (tol={})", i, sol[i], i, sol_ldl[i], tol
             );
         }
+    }
+
+    /// MINRES IR が機能しているか単体で検証する。
+    ///
+    /// η = 0.1 (relative tol) で 1 回 solve した時の relative residual が
+    /// 1 IR ラウンドあたり η 倍 (= 10x reduction) するか測定する。
+    /// 理論: ||r_k+1|| ≤ η × ||r_k|| (Wilkinson 1965)。
+    /// もし IR で reduction が出ていなければバグ。
+    #[test]
+    fn minres_ir_actually_reduces_residual() {
+        // 中サイズ ill-conditioned saddle (n=20 + m=10)。Q diagonal、A 密。
+        let n = 20usize;
+        let m = 10usize;
+        let dim = n + m;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        // Upper triangle of K = [diag(Q+ρ),  A^T;  A, -diag(σ+δ)]
+        // Q diag values vary (ill-cond):
+        for i in 0..n {
+            rows.push(i); cols.push(i);
+            vals.push(1.0 + 1e-3 * (i as f64).sqrt());
+        }
+        // A^T entries (col = n..n+m, row < n)
+        for k in 0..m {
+            for j in 0..n {
+                let v = ((k * 7 + j * 13) % 17) as f64 / 17.0 - 0.5;
+                if v.abs() > 0.1 {
+                    rows.push(j); cols.push(n + k); vals.push(v);
+                }
+            }
+        }
+        // -S diag
+        for i in 0..m {
+            rows.push(n + i); cols.push(n + i); vals.push(-1e-6 * (1.0 + i as f64));
+        }
+        let k = CscMatrix::from_triplets(&rows, &cols, &vals, dim, dim).unwrap();
+
+        let rhs: Vec<f64> = (0..dim).map(|i| ((i * 11) % 7) as f64 - 3.0).collect();
+        let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
+
+        // η = 0.1 で IR=0 (基準)
+        let mut solver_no_ir = PreconditionedMinres::with_block_diag(k.clone(), n);
+        solver_no_ir.tol = 0.1;
+        solver_no_ir.ir_steps = 0;
+        let mut sol_no_ir = vec![0.0_f64; dim];
+        let _ = solver_no_ir.solve(&rhs, &mut sol_no_ir, None);
+        let mut residual_no_ir = vec![0.0_f64; dim];
+        crate::linalg::minres::matvec_sym_upper(&k, &sol_no_ir, &mut residual_no_ir);
+        let r_no_ir: f64 = (0..dim)
+            .map(|i| (rhs[i] - residual_no_ir[i]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let rel_no_ir = r_no_ir / rhs_norm;
+
+        // η = 0.1 で IR=2 (理論上 η^3 = 1e-3 まで)
+        let mut solver_ir2 = PreconditionedMinres::with_block_diag(k.clone(), n);
+        solver_ir2.tol = 0.1;
+        solver_ir2.ir_steps = 2;
+        let mut sol_ir2 = vec![0.0_f64; dim];
+        let _ = solver_ir2.solve(&rhs, &mut sol_ir2, None);
+        let mut residual_ir2 = vec![0.0_f64; dim];
+        crate::linalg::minres::matvec_sym_upper(&k, &sol_ir2, &mut residual_ir2);
+        let r_ir2: f64 = (0..dim)
+            .map(|i| (rhs[i] - residual_ir2[i]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let rel_ir2 = r_ir2 / rhs_norm;
+
+        eprintln!(
+            "MINRES IR check: n={} dim={} ||rhs||={:.3e} no_ir_rel={:.3e} ir2_rel={:.3e} ratio={:.3e}",
+            n, dim, rhs_norm, rel_no_ir, rel_ir2, rel_ir2 / rel_no_ir.max(1e-300)
+        );
+
+        // IR=2 は IR=0 より少なくとも 5x reduce すべき (理論 η^2 = 100x、控えめ)
+        assert!(
+            rel_ir2 < rel_no_ir / 5.0,
+            "MINRES IR is not reducing residual: no_ir={:.3e} ir2={:.3e} (ratio {:.2e}, expected < 0.2)",
+            rel_no_ir, rel_ir2, rel_ir2 / rel_no_ir.max(1e-300)
+        );
     }
 
     /// AutoKktSolver: trait object として動く (IPM 配線で使う形)

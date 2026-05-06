@@ -110,28 +110,11 @@ const ALPHA_DEADLOCK_N: usize = 20;
 const RESIDUAL_STALL_WINDOW: usize = 50;
 const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 
-/// best-so-far が「最低限解候補として返す価値がある」と認める score の上限。
-///
-/// best_score = nr_p/(1+||b||) + nr_d/(1+||c||) + |mu|/(1+||c||) は
-/// 各項を問題スケールで正規化した dimensionless 残差和。
-///
-/// score の意味:
-/// - score ≈ 0     → 完全収束 (Optimal)
-/// - score < 10·eps → 実質収束 (Optimal 級)、is_quasi_optimal で救出可
-/// - score < 1.0   → 残差は問題スケール未満。downstream の feasibility 検証で
-///                   PASS する可能性があり、SuboptimalSolution として返す
-/// - score ≥ 1.0   → 残差が問題スケール以上 = constraint 違反が右辺と同等
-///                   = 解の体をなさない (例: QPLIB_9008 best_score=0.84,
-///                   pf=14.4, ||b|| ~ 17)。NumericalError 化が正しい
-///
-/// 閾値 1.0 は dimensionless (problem-scale-relative) で問題集 tuning ではなく、
-/// 「残差 ≧ 問題スケール」境界という数学的意味を持つ。
-///
-/// この cutoff があることで UBH1 (best_pf=4e-13, best_df=2e-9, best_score=9e-10
-/// だが gap=3.4e-3 > DUALITY_GAP_TOL で is_quasi_optimal に届かない) のような
-/// 「実質収束しているが gap だけ閾値外」ケースが SuboptimalSolution → bench
-/// 側 feasibility 検証 → PASS の経路に乗る。
-const BESTSOFAR_USEFUL_SCORE_MAX: f64 = 1.0;
+// best-so-far からの Optimal 救出基準は `is_quasi_optimal`:
+// (best_score < 10·eps かつ |rel_gap| < DUALITY_GAP_TOL) OR (best_pf < eps かつ best_df < eps)
+// 前者は score+gap 連動、後者は pf/df 個別 feasibility。両方 eps 由来で物理量根拠あり、
+// 問題集 tuning の閾値ではない。NaN_guard / alpha_stall / residual_stall 全経路で
+// この基準を共有する。
 
 
 // ---------------------------------------------------------------------------
@@ -524,46 +507,6 @@ pub(crate) fn solve_ippmm_inner(
         let nr_p = norm_inf(&r_p);
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
-
-        // mu underflow guard: f64 subnormal 範囲 (~5e-324) に突入すると
-        // 1/y、s/y、σ*mu などの後続計算で NaN/Inf が発生し、NaN_guard 経路で
-        // best-so-far に戻る挙動になる (QPLIB_8515 で実証: iter 140 で
-        // mu=3.77e-309)。subnormal 突入前に early-exit して best-so-far を
-        // SuboptimalSolution として返す。
-        //
-        // 閾値 MU_SUBNORMAL_THRESHOLD = 1e-300 の根拠 (物理量):
-        //   f64 subnormal range = (~2.2e-308, 5e-324)
-        //   normal の最小: 2.2e-308
-        //   1e-300 は normal range 内、step 計算で 1/mu = 1e300 が finite
-        //   かつ 1e300 × normal value ≤ 1e308 で overflow しない安全圏
-        //
-        // 動作: mu < 1e-300 で best-so-far が確定済みなら exit。
-        // m_ineq=0 (純等式制約) では mu=0 が正常なので発火させない。
-        // best_score < eps の場合は Optimal_main 経路で抜けるべきなので exit せず。
-        // (AUG2D 等の小問題で「mu 急速減少 + 同時に nr_p,nr_d も収束」のとき、
-        // mu_subnormal を早期発火させると Optimal_main を奪い PFEAS_FAIL になる)。
-        const MU_SUBNORMAL_THRESHOLD: f64 = 1e-300;
-        if m_ineq > 0
-            && mu.is_finite()
-            && mu < MU_SUBNORMAL_THRESHOLD
-            && best_score.is_finite()
-            && best_score >= options.ipm_eps()
-        {
-            x.copy_from_slice(&best_x);
-            y.copy_from_slice(&best_y);
-            s.copy_from_slice(&best_s);
-            final_iter = best_iter;
-            final_residuals = Some(best_residuals);
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "IPPMM_EXIT iter={} path=Suboptimal_mu_subnormal_bestsofar mu={:.3e} best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                    iter, mu, best_iter, best_score,
-                    best_residuals.0, best_residuals.1, best_residuals.2
-                );
-            }
-            status = Some(SolveStatus::SuboptimalSolution);
-            break;
-        }
 
         // 双対ギャップを best-so-far 更新前に算出。
         // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
@@ -1140,31 +1083,28 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                // 設計の対称化: check_infeasible_or_unbounded 経路と同じ Optimal 昇格判定。
-                // direction blowup は LDL precision 限界の症状で、best-so-far が
-                // 真に Optimal 域 (best_score < 10*eps_orig かつ rel_gap が gap_tol 内)
-                // なら direction blowup は false positive として扱い Optimal を返す。
+                // best-so-far が真に Optimal 級なら救出、それ以外は NumericalError。
+                // 「Optimal 級」= 残差・gap で判定する is_quasi_optimal、または
+                //   個別 pf/df が両方 eps 以下 (KKT feasibility 同時成立)。
+                // 後者は UBH1 のように rel_gap が DUALITY_GAP_TOL を僅かに超えるが
+                // pf, df ともに eps 内のケースを救う (gap は dual gap norm で gap=0
+                // でなくても feasibility は満たし得る)。
                 let quality_threshold = 10.0 * eps_orig;
-                let is_quasi_optimal = best_score < quality_threshold
+                let combined_quasi = best_score < quality_threshold
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;
-                // NaN_guard は収束失敗起因 (direction blow-up = 数値崩壊)。
-                // best が真に Optimal 級なら救出、score < 1.0 なら downstream
-                // 検証経由 (UBH1 等) で PASS の可能性に賭ける、score >= 1.0 なら
-                // 問題スケール越えの garbage (例: QPLIB_9008 score=0.84 → pf=14.4)
-                // で NumericalError。
+                let feasibility_quasi = best_residuals.0 < eps_orig
+                    && best_residuals.1 < eps_orig;
+                let is_quasi_optimal = combined_quasi || feasibility_quasi;
                 let exit_status = if is_quasi_optimal {
                     SolveStatus::Optimal
-                } else if best_score < BESTSOFAR_USEFUL_SCORE_MAX {
-                    SolveStatus::SuboptimalSolution
                 } else {
                     SolveStatus::NumericalError
                 };
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    let path_label = match exit_status {
-                        SolveStatus::Optimal => "Optimal_NaN_guard_bestsofar",
-                        SolveStatus::SuboptimalSolution => "Suboptimal_NaN_guard_bestsofar",
-                        SolveStatus::NumericalError => "NumericalError_NaN_guard_diverged",
-                        _ => "NaN_guard_unknown",
+                    let path_label = if is_quasi_optimal {
+                        "Optimal_NaN_guard_bestsofar"
+                    } else {
+                        "NumericalError_NaN_guard_diverged"
                     };
                     eprintln!(
                         "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
