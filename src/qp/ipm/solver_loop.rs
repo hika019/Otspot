@@ -301,6 +301,13 @@ pub(crate) fn compute_sigma_vec(
 ///   2. dy = D^{-1} (A·dx − r_p_mod)
 ///
 /// 利点: S は n×n SPD で augmented (n+m_ext × n+m_ext) より小、Cholesky 高精度。
+///
+/// 精度保護: 2. の back-substitution は active constraints (σ+δ → 0、|D⁻¹| 大)
+/// で `(A·dx − r_p_mod)` の f64 cancellation により |dy| が桁外れに増幅し、
+/// 外側 IPM の dual feasibility (df) が指数的に発散する病理がある
+/// (実測: QPLIB_9008 で df=0.03 → 2e4)。この cancellation を TwoFloat (DD,
+/// ≈106 bit) で計算することで relative 残差を ε_DD ≈ 5e-32 で抑え、|D⁻¹|
+/// による増幅後も dy の絶対誤差を f64 規範に保つ。
 pub(crate) fn solve_kkt_via_schur(
     s_fac: &KktFactor,
     s_mat: &CscMatrix,
@@ -311,7 +318,9 @@ pub(crate) fn solve_kkt_via_schur(
     dx_out: &mut [f64],
     dy_out: &mut [f64],
 ) {
-    use super::kkt::{spmtv, spmv};
+    use super::kkt::spmtv;
+    use twofloat::TwoFloat;
+
     let n = r_d.len();
     let m_ext = r_p_mod.len();
 
@@ -333,11 +342,25 @@ pub(crate) fn solve_kkt_via_schur(
     let _ = s_mat;
     let _ = n;
 
-    // dy = D^{-1} (A·dx − r_p_mod)
-    let mut a_dx = vec![0.0_f64; m_ext];
-    spmv(a_ext, dx_out, &mut a_dx);
+    // dy = D^{-1} (A·dx − r_p_mod) — DD precision で cancellation を防ぐ。
+    // A·dx の sparse matvec を TwoFloat で実行し、r_p_mod の引き算と
+    // d_inv 乗算も DD で行ってから f64 に丸める。
+    let zero_dd = TwoFloat::from(0.0);
+    let mut a_dx_dd: Vec<TwoFloat> = vec![zero_dd; m_ext];
+    for col in 0..n {
+        let cs = a_ext.col_ptr[col];
+        let ce = a_ext.col_ptr[col + 1];
+        let dx_col = dx_out[col];
+        for k in cs..ce {
+            let row = a_ext.row_ind[k];
+            let v = a_ext.values[k];
+            a_dx_dd[row] = a_dx_dd[row] + TwoFloat::new_mul(v, dx_col);
+        }
+    }
     for i in 0..m_ext {
-        dy_out[i] = d_inv[i] * (a_dx[i] - r_p_mod[i]);
+        let diff_dd = a_dx_dd[i] - TwoFloat::from(r_p_mod[i]);
+        let scaled = diff_dd * TwoFloat::from(d_inv[i]);
+        dy_out[i] = f64::from(scaled);
     }
 }
 

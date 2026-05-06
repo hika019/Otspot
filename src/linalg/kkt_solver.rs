@@ -648,6 +648,7 @@ pub fn factorize_kkt_with_cached_perm(
     // (QPILOTNO cond 5e13 / QPLIB_10034 cond 1e7×amp 1170) 用。
     // budget チェックは f64 経路と同等 (DD は係数行列構造が同じなので同じ AMD/etree)。
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
+        let trace = std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1");
         // f64 で symbolic を済ませて budget 判定し、超過なら MINRES、超過しないなら DD numeric。
         match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
             k, perm, deadline, Some(max_l_nnz),
@@ -658,7 +659,7 @@ pub fn factorize_kkt_with_cached_perm(
                     k, perm, deadline,
                 ) {
                     Ok(f) => {
-                        if std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1") {
+                        if trace {
                             eprintln!(
                                 "IPM_DD_LDL_TRACE factorize OK n={} L_nnz={}",
                                 k.nrows,
@@ -679,7 +680,9 @@ pub fn factorize_kkt_with_cached_perm(
                 }
             }
             Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
-                // budget 超過 → DD でも同じく超過する。MINRES へフォールバック (下のロジック流用)。
+                // budget 超過 → DD でも同じく超過する。MINRES へフォールバック。
+                // 注意: DD は LDL のみで、MINRES は f64 のまま。saddle / SPD の cond
+                // amplification は f64 MINRES では完全には抑え切れない (handover 参照)。
             }
             Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => {
                 return Err(KktError::DeadlineExceeded);
@@ -688,7 +691,7 @@ pub fn factorize_kkt_with_cached_perm(
                 return Err(KktError::SingularOrIndefinite);
             }
         }
-        // budget 超過時のみここに来る → MINRES
+        // budget 超過時のみここに来る → MINRES (f64)
         let minres = match n_top {
             Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
             _ => PreconditionedMinres::new_inexact(k.clone()),
