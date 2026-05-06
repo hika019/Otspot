@@ -428,6 +428,41 @@ pub(crate) fn solve_ippmm_inner(
     // AMD permutation キャッシュ（スパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
 
+    // [Schur auto-dispatch] augmented LDL が memory budget 超過 (= MINRES fallback)
+    // になる場合は Schur (n×n SPD) に切替える。augmented MINRES path は
+    // ill-cond saddle KKT で direction error = η × ||r|| / σ_min(K) が
+    // 発散するため (QPLIB_9008 で実証)、Schur SPD に切替で安定化する。
+    //
+    // 検出方法: 任意の sigma で symbolic augmented を構築 → L_nnz が budget
+    // 超過なら Schur に切替。symbolic factorize は O(nnz) で O(L_nnz) より速く、
+    // 値はパターンに無関係なので probe 用 sigma=1 で十分。
+    //
+    // sparse pattern は反復不変なので 1 回だけ probe する。
+    //
+    // env QP_SCHUR=1 (明示) があればそちら優先。
+    // env QP_NO_AUTO_SCHUR=1 でこの auto-switch を無効化 (回帰調査用)。
+    let explicit_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
+    let auto_schur_disabled = std::env::var("QP_NO_AUTO_SCHUR").ok().as_deref() == Some("1");
+    let auto_schur = if explicit_schur || auto_schur_disabled {
+        false // 明示 Schur or auto 無効なら probe しない
+    } else {
+        // probe 用に rho/delta は initial value、sigma は 1 を使う (パターン不変)
+        let probe_sigma: Vec<f64> = vec![1.0; m_ext];
+        let probe_rho = options.ipm.delta_min;
+        let probe_aug = build_augmented_system(&problem.q, &a_ext, &probe_sigma, probe_rho, probe_rho);
+        let probe_perm = amd_with_deadline(
+            probe_aug.nrows, &probe_aug.col_ptr, &probe_aug.row_ind, timeout_ctx.deadline,
+        );
+        let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
+            &probe_aug, &probe_perm, timeout_ctx.deadline, Some(max_l_nnz_from_budget()),
+        );
+        let exceeds = matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }));
+        if exceeds && std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+            eprintln!("IPPMM_AUTO_SCHUR: augmented L_nnz exceeds budget, switching to Schur formulation");
+        }
+        exceeds
+    };
+
     // 殿指示(C): MaxIterationsを発生させる経路自体を消す。
     // None = 「まだ収束もタイムアウトも起きていない」を型で表現。
     // ループ出口は「収束→Some(Optimal)」「timeout→Some(Timeout)」の2つだけ。
@@ -843,7 +878,9 @@ pub(crate) fn solve_ippmm_inner(
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
         // [Schur path] env=QP_SCHUR=1 で Schur complement formulation を使う
         // (n×n SPD、augmented n+m_ext の代替)。LISWET 系の precision floor 突破を狙う。
-        let use_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
+        // auto_schur (loop 入り口で probe 済) が true なら augmented MINRES 回避目的で
+        // 自動的に Schur に切替。
+        let use_schur = explicit_schur || auto_schur;
         let mut d_inv_opt: Option<Vec<f64>> = None;
         for _retry in 0..LDL_REG_RETRY_MAX {
             if timeout_ctx.should_stop() {
