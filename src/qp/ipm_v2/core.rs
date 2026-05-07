@@ -43,24 +43,16 @@ fn run_ipm_with(
 
     // presolve スケーリングを考慮した IPM eps の事前調整。
     //
-    // presolve の LargeCoeffRowScale (Phase1) + constraint_precond (Phase2) で行が
-    // σ 倍されるため、unscale 時に primal 残差が 1/σ 倍に増幅される。さらに presolve が
-    // Ruiz scaling を適用していれば、
-    //   r_p_scaled[i] = e[i] × r_p_orig[i]                 → ||r_p_orig|| ≤ ||r_p_scaled|| / e_min
-    //   r_d_scaled[j] = (c × d[j]) × r_d_orig[j]           → ||r_d_orig|| ≤ ||r_d_scaled|| / (c × d_min)
-    // のいずれの方向でも増幅される。
-    //
-    // IPM に渡す eps を `eps × min(σ_total, c × d_min, e_min)` に厳しくし、unscale 後の
-    // orig 空間で eps を満たす状態を IPM 完了時点で作る。dual 側 (c × d_min) を取りこぼすと
-    // QPILOTNO のように IPM が scaled 空間で nr_d_rel=1e-13 まで降りても unscale 後の
-    // 元空間で dfeas_rel=3.4e-6 と eps=1e-6 を超える事象が起きる。
-    //
-    // SIGMA_TIGHTEN_THRESHOLD: 100 倍以上の増幅が予想される問題のみ調整。閾値以上では
-    // 不要な eps tighten で IPM 収束が悪化するため適用しない。
+    // presolve の LargeCoeffRowScale + Ruiz E (行) / Ruiz D・c (列) で問題が σ 倍に
+    // 縮められると、unscale 時に残差が 1/σ 倍に増幅される。
+    //   r_p_scaled[i] = e[i] × r_p_orig[i]              → ||r_p_orig|| ≤ ||r_p_scaled|| / e_min
+    //   r_d_scaled[j] = (c × d[j]) × r_d_orig[j]        → ||r_d_orig|| ≤ ||r_d_scaled|| / (c × d_min)
+    // primal 側 e_min と LargeCoeffRowScale の積、dual 側 c × d_min の小さい方を
+    // sigma_total として、IPM に渡す eps を `user_eps × sigma_total` に厳しくする。
     //
     // 限界: σ_total が極端に小さいと eps_scaled が cond×u 限界を下回り IPM が達成できない。
     // その場合は IPM が SuboptimalSolution で正直に申告し、Optimal を偽装しない。
-    const SIGMA_TIGHTEN_THRESHOLD: f64 = 0.01;
+
     // 行ごとの primal scale の積 (LargeCoeffRowScale × Ruiz E の合成) の最小値で primal
     // 増幅率を推定。dual 増幅率は Ruiz の (c × d_min)。両者の小さい方を採用。
     let mut primal_row_scale_min = 1.0_f64;
@@ -90,11 +82,13 @@ fn run_ipm_with(
         }
     }
     let sigma_total = primal_row_scale_min.min(dual_col_scale_min);
-    let opts_for_ipm: SolverOptions = if sigma_total < SIGMA_TIGHTEN_THRESHOLD {
+    // sigma_total < 1.0 (= 任意のスケール縮小あり) なら常に eps tighten を適用する。
+    // 旧実装は < 0.01 のみ tighten していたが、sigma=0.05 級の中程度スケーリングでも
+    // unscale で 20x 増幅されて元空間 eps を超える事象がある (中間 KKT が緩むのを防ぐ)。
+    let opts_for_ipm: SolverOptions = if sigma_total < 1.0 && sigma_total > 0.0 {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
         let eps_scaled = (eps_orig * sigma_total).max(f64::MIN_POSITIVE);
-        // tolerance を None にして ipm.eps を直接効かせる
         tightened.tolerance = None;
         tightened.ipm.eps = eps_scaled;
         if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
