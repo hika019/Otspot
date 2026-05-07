@@ -24,6 +24,8 @@ use faer::sparse::linalg::cholesky::{
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
+#[cfg(test)]
+use faer::sparse::Triplet;
 use std::sync::Arc;
 use std::time::Instant;
 
