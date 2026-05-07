@@ -225,6 +225,121 @@ impl AugmentedKktCache {
             ncols: total,
         }
     }
+
+    /// AMD 置換を適用した permuted aug_mat キャッシュを生成する。
+    /// 1 回計算しておき、`PermutedAugmentedKkt::materialize` を反復毎に呼ぶ。
+    /// permute_sym_upper の sort/compress を回避する (BOYD2 で 15-20ms/call 削減)。
+    pub(crate) fn permute(&self, perm: &[usize]) -> PermutedAugmentedKkt {
+        let total = self.n + self.m_ext;
+        debug_assert_eq!(perm.len(), total);
+
+        // inv_perm[i] = 新しいインデックス k such that perm[k] = i
+        let mut inv_perm = vec![0usize; total];
+        for (k, &i) in perm.iter().enumerate() {
+            inv_perm[i] = k;
+        }
+
+        // 各 unpermuted slot s に対して: row=row_ind[s], col=実際の col (col_ptr で逆引き)
+        // permuted (new_row, new_col) を計算し、上三角に正規化。
+        // permuted の col_ptr/row_ind を組み立てつつ、permuted_slot[s] = 新しい slot を記録。
+        let nnz = self.row_ind.len();
+        let mut perm_entries: Vec<(usize, usize, usize)> = Vec::with_capacity(nnz); // (new_row, new_col, orig_slot)
+        for col in 0..total {
+            let cs = self.col_ptr[col];
+            let ce = self.col_ptr[col + 1];
+            let new_col_for_orig_col = inv_perm[col];
+            for s in cs..ce {
+                let row = self.row_ind[s];
+                let new_row = inv_perm[row];
+                let new_col = new_col_for_orig_col;
+                let (r, c) = if new_row <= new_col { (new_row, new_col) } else { (new_col, new_row) };
+                perm_entries.push((r, c, s));
+            }
+        }
+        // 列優先・行昇順でソート
+        perm_entries.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+
+        let mut new_col_ptr = Vec::with_capacity(total + 1);
+        let mut new_row_ind = Vec::with_capacity(nnz);
+        let mut new_static_values = Vec::with_capacity(nnz);
+        let mut orig_slot_for_new_slot = Vec::with_capacity(nnz);
+        let mut new_diag_var_slot = vec![usize::MAX; self.n];
+        let mut new_diag_con_slot = vec![usize::MAX; self.m_ext];
+
+        new_col_ptr.push(0);
+        let mut cur_col = 0usize;
+        for &(r, c, orig_s) in &perm_entries {
+            while cur_col < c {
+                new_col_ptr.push(new_row_ind.len());
+                cur_col += 1;
+            }
+            let new_slot = new_row_ind.len();
+            new_row_ind.push(r);
+            new_static_values.push(self.static_values[orig_s]);
+            orig_slot_for_new_slot.push(orig_s);
+            // permuted 上で対角の場合は new_slot を記録
+            if r == c {
+                // どの var/con の対角かは perm[c] で逆引き
+                let orig_idx = perm[c];
+                if orig_idx < self.n {
+                    new_diag_var_slot[orig_idx] = new_slot;
+                } else {
+                    new_diag_con_slot[orig_idx - self.n] = new_slot;
+                }
+            }
+        }
+        while cur_col < total {
+            new_col_ptr.push(new_row_ind.len());
+            cur_col += 1;
+        }
+
+        debug_assert!(new_diag_var_slot.iter().all(|&s| s != usize::MAX));
+        debug_assert!(new_diag_con_slot.iter().all(|&s| s != usize::MAX));
+
+        PermutedAugmentedKkt {
+            col_ptr: new_col_ptr,
+            row_ind: new_row_ind,
+            static_values: new_static_values,
+            diag_var_slot: new_diag_var_slot,
+            diag_con_slot: new_diag_con_slot,
+            n: self.n,
+            m_ext: self.m_ext,
+        }
+    }
+}
+
+/// AMD 置換適用済みの augmented KKT 構造キャッシュ。
+/// `factorize_quasidefinite_pre_permuted` に渡すと permute_sym_upper を skip できる。
+pub(crate) struct PermutedAugmentedKkt {
+    col_ptr: Vec<usize>,
+    row_ind: Vec<usize>,
+    static_values: Vec<f64>,
+    diag_var_slot: Vec<usize>,
+    diag_con_slot: Vec<usize>,
+    n: usize,
+    m_ext: usize,
+}
+
+impl PermutedAugmentedKkt {
+    /// 置換済み CSC を materialize する (σ/δ_p/δ_d を反映)。
+    pub(crate) fn materialize(&self, sigma_vec: &[f64], delta_p: f64, delta_d: f64) -> CscMatrix {
+        debug_assert_eq!(sigma_vec.len(), self.m_ext);
+        let mut values = self.static_values.clone();
+        for j in 0..self.n {
+            values[self.diag_var_slot[j]] += delta_p;
+        }
+        for k in 0..self.m_ext {
+            values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
+        }
+        let total = self.n + self.m_ext;
+        CscMatrix {
+            col_ptr: self.col_ptr.clone(),
+            row_ind: self.row_ind.clone(),
+            values,
+            nrows: total,
+            ncols: total,
+        }
+    }
 }
 
 /// `AugmentedKktCache` を構築する。Q/A の sparsity pattern を 1 回走査して

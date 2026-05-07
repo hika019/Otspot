@@ -751,6 +751,43 @@ pub fn factorize_kkt_with_cached_perm(
     }
 }
 
+/// `factorize_kkt_with_cached_perm` の pre-permuted 版。`pre_permuted_k` は AMD 置換を
+/// 既に適用した CSC で、内部で `permute_sym_upper` を skip する高速経路。
+///
+/// MINRES fallback は元 (unpermuted) 行列が必要なため、budget 超過時は
+/// `unpermuted_k` を使って MINRES を構築する。
+pub fn factorize_kkt_pre_permuted(
+    pre_permuted_k: &CscMatrix,
+    unpermuted_k: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: usize,
+    n_top: Option<usize>,
+) -> Result<KktFactor, KktError> {
+    // DD LDL 経路は pre-permuted を直接サポートしないため、要求時は通常経路にフォールバック。
+    if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
+        return factorize_kkt_with_cached_perm(unpermuted_k, perm, deadline, max_l_nnz, n_top);
+    }
+    match crate::linalg::ldl::factorize_quasidefinite_pre_permuted(
+        pre_permuted_k, perm, deadline, Some(max_l_nnz),
+    ) {
+        Ok(f) => Ok(KktFactor::Direct(f)),
+        Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
+            let minres = match n_top {
+                Some(n) if n <= unpermuted_k.nrows => {
+                    PreconditionedMinres::with_block_diag_inexact(unpermuted_k.clone(), n)
+                }
+                _ => PreconditionedMinres::new_inexact(unpermuted_k.clone()),
+            };
+            Ok(KktFactor::Iterative(minres))
+        }
+        Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => Err(KktError::DeadlineExceeded),
+        Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
+            Err(KktError::SingularOrIndefinite)
+        }
+    }
+}
+
 // ── Auto dispatcher: try direct, fall back to iterative on memory budget ────────
 
 /// 最後に使用したバックエンド種別 (診断 / 検証用)

@@ -33,7 +33,8 @@
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_with_cached_perm, inexact_eta_for_eps, max_l_nnz_from_budget, KktError, KktFactor,
+    factorize_kkt_pre_permuted, factorize_kkt_with_cached_perm, inexact_eta_for_eps,
+    max_l_nnz_from_budget, KktError, KktFactor,
 };
 use crate::linalg::ruiz::RuizScaler;
 use crate::linalg::timeout::TimeoutCtx;
@@ -450,6 +451,8 @@ pub(crate) fn solve_ippmm_inner(
     // col_ptr/row_ind/static_values を 1 度だけ確定し、以降は σ/δ 更新だけ行う。
     // use_schur 経路では使わない (Schur は別構造)。
     let aug_cache = super::kkt::build_augmented_cache(&problem.q, &a_ext);
+    // permuted 版キャッシュ。AMD perm 確定後 1 回だけ計算し、permute_sym_upper を回避する。
+    let mut aug_permuted_cache: Option<super::kkt::PermutedAugmentedKkt> = None;
 
     // inexact Newton forcing term η を user 指定 eps から計算する。
     // η = eps × 0.1 (IPM_OUTER_VS_INNER_RATIO)、下限 1e-13 (f64 limit)。
@@ -921,14 +924,35 @@ pub(crate) fn solve_ippmm_inner(
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
+            // augmented 経路では permuted cache を使って permute_sym_upper を skip する。
+            // Schur 経路 / DD LDL 経路 は通常経路を使う (pre-permuted 未対応)。
+            let dd_ldl = std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1");
+            let use_pre_permuted = !use_schur && !dd_ldl;
+            if use_pre_permuted && aug_permuted_cache.is_none() {
+                aug_permuted_cache = Some(aug_cache.permute(perm));
+            }
             let prof_t_factor = if prof { Some(std::time::Instant::now()) } else { None };
-            match factorize_kkt_with_cached_perm(
-                &mat_for_factor,
-                perm,
-                timeout_ctx.deadline,
-                max_l_nnz_from_budget(),
-                Some(n),
-            ) {
+            let factor_result = if use_pre_permuted {
+                let permuted_cache = aug_permuted_cache.as_ref().unwrap();
+                let pre_permuted = permuted_cache.materialize(&sigma_vec, rho_retry, delta_matrix_retry);
+                factorize_kkt_pre_permuted(
+                    &pre_permuted,
+                    &mat_for_factor,
+                    perm,
+                    timeout_ctx.deadline,
+                    max_l_nnz_from_budget(),
+                    Some(n),
+                )
+            } else {
+                factorize_kkt_with_cached_perm(
+                    &mat_for_factor,
+                    perm,
+                    timeout_ctx.deadline,
+                    max_l_nnz_from_budget(),
+                    Some(n),
+                )
+            };
+            match factor_result {
                 Ok(f) => {
                     if let Some(t) = prof_t_factor {
                         eprintln!("FACT_PROF section=factorize n={} t={:.3}ms", mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);

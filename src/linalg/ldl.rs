@@ -379,6 +379,28 @@ pub fn factorize_quasidefinite_with_cached_perm_budget(
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
 }
 
+/// 既に AMD 置換適用済みの行列を受け取り、`permute_sym_upper` を skip する版。
+/// IPM 反復で `PermutedAugmentedKkt::materialize` から得た matrix を直接渡せる。
+///
+/// `perm` は solve 時の置換に使う (factorize 自体は pre_permuted_mat だけで完結)。
+pub fn factorize_quasidefinite_pre_permuted(
+    pre_permuted_mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return Err(LdlError::DeadlineExceeded);
+        }
+    }
+    let n = pre_permuted_mat.nrows;
+    let signs = extract_diagonal_signs(pre_permuted_mat);
+    let (symbolic, l_values) =
+        do_numeric_factorize(pre_permuted_mat, Some(&signs), deadline, max_l_nnz)?;
+    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
