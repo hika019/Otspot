@@ -1499,29 +1499,50 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
         }
     }
 
-    // KKT-guard: 元 bound_duals と比較し、KKT max-residual が改善した場合のみ採用
+    // KKT-guard を per-col で適用する。max-based all-or-nothing 比較だと
+    // 「N 個の col のうち 1 個だけ refit が悪化させる」ケースで N-1 個の改善も
+    // 全部捨ててしまい、Stage 0 が refit を全 reject してしまう。
+    // col 単位で改善 (またはヒット) するなら採用、悪化するなら現値維持。
     let pre_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
     let post_contrib = compute_bound_contrib(&problem.bounds, &new_bd, n);
-    let mut max_pre = 0.0_f64;
-    let mut max_post = 0.0_f64;
-    for j in 0..n {
-        let (lbj, ubj) = problem.bounds[j];
-        // FX 変数は postsolve で 0 埋め慣例なので KKT 評価から除外 (bench/v2 と整合)
-        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
-            continue;
+    let mut accepted_bd = result.bound_duals.clone();
+    if accepted_bd.len() < new_bd.len() {
+        accepted_bd.resize(new_bd.len(), 0.0);
+    }
+    let mut updated_lb = 0usize;
+    let mut updated_ub = 0usize;
+    let mut lb_slot = 0usize;
+    let mut ub_slot = n_lb;
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        // FX 変数は postsolve で 0 埋め慣例なので KKT 評価から除外 (bench/v2 と整合)。
+        let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
+        let r_pre = if is_fx { 0.0 } else {
+            (qx[j] + problem.c[j] + aty[j] + pre_contrib[j]).abs()
+        };
+        let r_post = if is_fx { 0.0 } else {
+            (qx[j] + problem.c[j] + aty[j] + post_contrib[j]).abs()
+        };
+        let take_new = !is_fx && r_post <= r_pre;
+        if lb.is_finite() {
+            if take_new && lb_slot < new_bd.len() {
+                if accepted_bd[lb_slot] != new_bd[lb_slot] { updated_lb += 1; }
+                accepted_bd[lb_slot] = new_bd[lb_slot];
+            }
+            lb_slot += 1;
         }
-        let r_pre = (qx[j] + problem.c[j] + aty[j] + pre_contrib[j]).abs();
-        let r_post = (qx[j] + problem.c[j] + aty[j] + post_contrib[j]).abs();
-        max_pre = max_pre.max(r_pre);
-        max_post = max_post.max(r_post);
+        if ub.is_finite() {
+            if take_new && ub_slot < new_bd.len() {
+                if accepted_bd[ub_slot] != new_bd[ub_slot] { updated_ub += 1; }
+                accepted_bd[ub_slot] = new_bd[ub_slot];
+            }
+            ub_slot += 1;
+        }
     }
     if std::env::var("REFIT_BD_TRACE").ok().as_deref() == Some("1") {
-        eprintln!("REFIT_BD: max_pre={:.3e} max_post={:.3e} accepted={}",
-            max_pre, max_post, max_post < max_pre);
+        eprintln!("REFIT_BD per-col: updated_lb={} updated_ub={} (n={})",
+            updated_lb, updated_ub, n);
     }
-    if max_post < max_pre {
-        result.bound_duals = new_bd;
-    }
+    result.bound_duals = accepted_bd;
 }
 
 /// 境界 dual から KKT stationarity の bound 寄与 (-y_lb + y_ub) を成分ごと計算する。

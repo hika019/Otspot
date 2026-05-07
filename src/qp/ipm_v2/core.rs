@@ -441,9 +441,16 @@ fn run_ipm_with(
         && final_sol.solution.len() == orig_problem.num_vars
         && final_sol.dual_solution.len() == orig_problem.num_constraints
     {
-        /// 連鎖依存解消の固定反復回数。各 pass で y / z を交互更新する。
-        const POSTSOLVE_RECOVERY_PASSES: usize = 5;
-        for _pass in 0..POSTSOLVE_RECOVERY_PASSES {
+        /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
+        /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
+        const STAGE0_MAX_PASSES: usize = 16;
+        const STAGE0_CONVERGE_RATIO: f64 = 0.99;
+        let view0 = ProblemView {
+            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
+            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+        };
+        let mut prev_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        for pass in 0..STAGE0_MAX_PASSES {
             // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             // (ii) y[row] を SingletonRow / RedundantRowFix step で更新
@@ -459,6 +466,14 @@ fn run_ipm_with(
                     row, col, orig_problem, &mut final_sol, bc,
                 );
             }
+            let cur_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_trace {
+                eprintln!("POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}", pass, cur_kkt);
+            }
+            if cur_kkt >= prev_kkt * STAGE0_CONVERGE_RATIO {
+                break;
+            }
+            prev_kkt = cur_kkt;
         }
     }
 
