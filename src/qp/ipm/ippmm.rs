@@ -735,7 +735,8 @@ pub(crate) fn solve_ippmm_inner(
         let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
         let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
         if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p && rel_gap.abs() < DUALITY_GAP_TOL {
-            // ── Method C: 原空間pfeasチェック（Clarabel方式）──
+            // 原空間 pfeas を unscale 経由で再計算し、scaled 空間収束だけで誤って
+            // Optimal 昇格しない second gate (Clarabel 方式)。
             if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
                 let m_orig_check = orig.b.len();
                 let n_orig = orig.num_vars;
@@ -769,7 +770,7 @@ pub(crate) fn solve_ippmm_inner(
                 let norm_ax_orig: f64 = ax_orig.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
                 let norm_b_orig = norm_inf(&orig.b);
                 let pfeas_thr_orig = eps_orig * (1.0 + norm_ax_orig.max(norm_b_orig));
-                // [偽 Optimal 修正] Optimal_MethodC 判定にも成分相対 dfeas を追加
+                // 原空間 pfeas / dfeas / 成分相対 dfeas / mu の全てが eps を満たせば Optimal。
                 if pfeas_orig < pfeas_thr_orig
                     && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
                     && nr_d_rel_orig < eps_orig
@@ -777,7 +778,7 @@ pub(crate) fn solve_ippmm_inner(
                 {
                     if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                         eprintln!(
-                            "IPPMM_EXIT iter={} path=Optimal_MethodC pfeas_orig={:.3e} nr_d_orig={:.3e}",
+                            "IPPMM_EXIT iter={} path=Optimal_orig_recheck pfeas_orig={:.3e} nr_d_orig={:.3e}",
                             iter, pfeas_orig, nr_d_orig
                         );
                     }

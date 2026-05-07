@@ -276,9 +276,8 @@ fn run_ipm_with(
     }
 
     if post_trace {
-        // 純粋 postsolve (dual recovery + remap) 直後の orig 空間残差。
-        // ここから先の bounds clip / Stage A/B/C/D が「postsolve 由来 KKT 破壊」を
-        // どこまで補えるかを観測するための基準値。
+        // 純粋 postsolve (dual recovery + remap) 直後の元空間残差。
+        // 以後の bounds clip / 後処理が postsolve 段階の精度をどう動かすかの基準値。
         let view = ProblemView {
             q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
             bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
@@ -473,27 +472,21 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
-    // 元空間 post-processing:
-    //   stage A: x の primal projection (LISWET 系 T1.3)
-    //   stage B: y を refine_dual_lsq で再計算
-    //   stage C: z (bound_duals) を refit_bound_duals_kkt で再計算 (T1.2 QRECIPE)
+    // 元空間 post-processing は 3 段階で行う:
+    //   1. primal projection: x を violating 制約方向に最小ノルム射影 (refine_primal_lsq)
+    //   2. dual / bound-dual refit: y と z を交互に LSQ で再最適化
+    //   3. saddle-point Krylov refinement: K [x; y] = -[r_d; r_p] を IR で解く
     //
-    // primal を動かすと dual との整合が崩れるため、stage A は stage A〜C の combined
-    // (KKT max-rel + primal max-rel) で guard する。stage B/C は kkt_residual_rel で
-    // 個別 guard。
+    // primal projection は y との整合を崩しうるため、primal/KKT 双方の max で guard。
+    // dual/bound 個別 refit は kkt_residual_rel で個別 guard。
     //
-    // presolve が変数 fix / 行除去すると postsolve は dual_solution・bound_duals に 0 を
-    // 埋め込み KKT が破壊される。Catastrophic 8 件 (QADLITTL/QBORE3D/QCAPRI/QETAMACR/
-    // QFFFFF80/QPCBOEI1/QSEBA/QSHELL) は本後処理では完全復元できず、proper dual
-    // postsolve (各 presolve 変換ごとに dual を記録) が必要 — 別 PR で対応 (#11)。
     // IPM が一度も iterate しなかった場合 (cancel_flag 即停止 / timeout=0 等) は
-    // post-processing をスキップ。post-processing が冷状態 x=[0,..0] から analytic に
-    // 最適解を計算してしまい、cancel_flag セマンティクス (Timeout 期待) を破壊するのを防ぐ。
+    // 後処理をスキップ: 冷状態 x=[0,..,0] から後処理が独自の analytic な解を作って
+    // しまい、外部 cancel/Timeout セマンティクスを破壊するのを防ぐ。
     let ipm_made_progress = result.iterations > 0;
 
-    // 大規模問題で refine_primal_lsq の AAT factorize が時間予算を圧迫するのを防ぐ。
-    // BOYD2 (n+m≈280k) では LDL 因子化に分単位かかり、bench の external timeout を
-    // 超える。実問題では LISWET (n+m≈20k) が現実的な上限。
+    // refine_primal_lsq / refine_kkt_iterative の AAT/K factorize が時間予算を
+    // 圧迫しないようサイズ上限を設ける。LDL 因子化が分単位かかる規模では skip。
     const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
     let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
     let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
@@ -501,12 +494,11 @@ fn run_ipm_with(
     if post_trace {
         let pres0 = primal_residual_rel(&view, &final_sol.solution);
         let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        eprintln!("POST_STAGE [pre Stage A/B/C/D] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
+        eprintln!("POST_STAGE [pre post-processing] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
     }
 
-    // 既に IPM で eps を満たしている場合、Stage A/B/C は無駄 (改善余地なし)。
-    // QPLIB_8505 のような大規模問題 (n+m=30k) では各 LSQ が 250s かかり致命的なので
-    // skip 必須。元空間 KKT で判定する (ProblemView は orig_problem 基準)。
+    // 既に IPM で eps を満たしている場合、primal projection と dual/bound refit は無駄
+    // (改善余地なし)。大規模問題では LSQ が秒単位かかるため skip 必須。
     let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
         let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
@@ -517,44 +509,37 @@ fn run_ipm_with(
     };
 
     let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress && !kkt_already_pass {
-        // (A) x の primal projection — combined guard 付き (サイズ制限あり)。
-        // LISWET 系で primal projection 後の dual LSQ refit は ill-conditioned A
-        // (near-rank-deficient AAT) で破綻する (|y_new| が IPM y の 5e4 倍に膨張)
-        // ため、ここでは primal x のみを射影し dual は IPM 値を保持する。
-        // 多くの問題で primal projection は KKT 改善せず combined guard で revert
-        // されるが、QRECIPE / 一部 borderline では効く。LISWET 系の precision floor
-        // 突破は IPM 内部の深い数値改修 (Mehrotra centering / step size scheduling)
-        // が必要 — 別タスク。
+        // (1) primal projection: 違反制約に対して x を最小ノルム射影。
+        //     primal/KKT 合算の guard で悪化時 revert。near-rank-deficient AAT で
+        //     LSQ y refit が膨張する系統では primal のみ動かし dual は IPM 値を維持する。
         if allow_primal_projection {
             let pre_x = final_sol.solution.clone();
-            let pre_y_for_a = final_sol.dual_solution.clone();
-            let pre_z_for_a = final_sol.bound_duals.clone();
-            let pre_pres_a = primal_residual_rel(&view, &final_sol.solution);
-            let pre_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            let pre_combined_a = pre_pres_a.max(pre_kkt_a);
+            let pre_y = final_sol.dual_solution.clone();
+            let pre_z = final_sol.bound_duals.clone();
+            let pre_pres = primal_residual_rel(&view, &final_sol.solution);
+            let pre_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let pre_combined = pre_pres.max(pre_kkt);
             crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let post_pres_a = primal_residual_rel(&view, &final_sol.solution);
-            let post_kkt_a = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            let post_combined_a = post_pres_a.max(post_kkt_a);
-            if post_combined_a > pre_combined_a {
+            let post_pres = primal_residual_rel(&view, &final_sol.solution);
+            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_pres.max(post_kkt) > pre_combined {
                 final_sol.solution = pre_x;
-                final_sol.dual_solution = pre_y_for_a;
-                final_sol.bound_duals = pre_z_for_a;
+                final_sol.dual_solution = pre_y;
+                final_sol.bound_duals = pre_z;
             }
         }
 
-        // (B) y / z refit — fixed point に達するまで反復。
+        // (2) y / z 交互 refit — fixed point に達するまで反復。
         //
         // 各反復:
-        //   1. refine_dual_lsq: bound_duals を固定して y を LSQ で最適化
-        //   2. refit_bound_duals_kkt: y を固定して z (bound_duals) を再計算
-        // 反復間で y と z が双方向に依存するため、1 回では十分に reach されず、
-        // QPILOTNO のような ill-conditioned 問題で kkt_rel が 4.6e-5 で停滞していた
-        // (1 回 stage 後 3.4e-6、追加 stage で更に降りる余地あり)。
+        //   - refine_dual_lsq: bound_duals 固定で y を LSQ 最適化
+        //   - refit_bound_duals_kkt: y 固定で z (bound_duals) を KKT 停留性から再計算
+        // 双方向依存するため 1 回では届かず、ill-conditioned 系では数回反復で
+        // kkt_rel が桁単位で減ることがある。
         //
-        // 収束判定: kkt_rel の改善率が REFIT_CONVERGE_RATIO 未満になれば停止。
-        // 各 stage は KKT-guard 付きで悪化なら revert するため、安全に反復可能。
+        // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
+        // で悪化時 revert するため安全に反復できる。
         const REFIT_MAX_ITERS: usize = 8;
         const REFIT_CONVERGE_RATIO: f64 = 0.99;
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
@@ -592,36 +577,34 @@ fn run_ipm_with(
         kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
     };
 
-    // (D) Krylov refinement on saddle-point KKT (Tier 1 (B) Krylov)
+    // (3) saddle-point Krylov refinement: K [dx; dy] = -[r_d; r_p] を古典的 IR で解く。
     //
-    // 動機: LISWET 系の precision floor は LDL backward error eps×cond×‖dx‖ に由来。
-    //   IPM 内部の Newton step ごとの LDL 誤差が accumulate して pf=1.5e-6 で停滞。
-    //   IPM 収束後の (x, y, z) を初期推定として saddle-point K に対し古典的 IR を実行する。
-    //   各 iter で full-f64 残差を計算するため、cond の影響を受けず eps·‖A‖ レベルまで refine 可能。
+    // IPM 内部の Newton step ごとの LDL 誤差が accumulate して pf が IPM 段階で
+    // 下げきれない問題で、IPM 収束後の (x, y, z) を初期推定として saddle-point K
+    // に対する IR を回す。残差を full-f64 (or DD env=REFINE_KKT_DD=1) で再計算し、
+    // cond の影響を受けず eps·‖A‖ レベルまで refine する。
     //
-    // 実行条件: ipm_made_progress AND サイズ制限内 AND constraints あり (refine_kkt_iterative 内 guard)。
-    // 退行防止: 関数内で pf 厳密減少 AND df 許容内の guard、退行時 break。
+    // 実行条件: ipm_made_progress (cold-start を避ける) AND constraints あり。
+    // refine_kkt_iterative 内で size 制限・退行 guard・deadline を見る。
     if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // max iter: LISWET 系の cond が高く per-iter 収束率 ~0.96 なので 30 iter で
-        // pf を 0.3 倍級まで引き下げる予算 (LISWET9 で 1.5e-6 → ~9e-7 想定)。
-        // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k なら数秒で完了。
+        // per-iter 収束率は cond に依存するが経験的に ~0.96 級で 30 iter で 1 桁。
+        // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k で数秒程度。
         const KRYLOV_MAX_ITERS: usize = 30;
         let user_eps = opts.ipm_eps();
-        // target_pf: ユーザー eps と整合 (PASS 判定相当)。pf < target で early exit。
         let target_pf = user_eps;
         if post_trace {
-            let pres_pre_d = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_pre_d = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [pre Stage D Krylov] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre_d, kkt_pre_d);
+            let pres_pre = primal_residual_rel(&view, &final_sol.solution);
+            let kkt_pre = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            eprintln!("POST_STAGE [pre saddle-point IR] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre, kkt_pre);
         }
         let _refined = crate::qp::refine_kkt_iterative(
             orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf, opts.deadline,
         );
         if post_trace {
-            let pres_post_d = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_post_d = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [post Stage D Krylov] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
-                _refined, pres_post_d, kkt_post_d);
+            let pres_post = primal_residual_rel(&view, &final_sol.solution);
+            let kkt_post = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            eprintln!("POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
+                _refined, pres_post, kkt_post);
         }
     }
 
@@ -654,7 +637,7 @@ fn run_ipm_with(
 /// FX (lb=ub) 変数は postsolve で bound_duals が 0 埋めされる慣例 + KKT 評価から
 /// 除外される設計のため、result.bound_duals[j] には FX 変数の正しい dual が入って
 /// いない。ここでは FX 変数の bound 寄与を「lb_j * 停留性」で解析的に置き換え、
-/// 偽の gap 検出を防ぐ (BD-T2: FX 変数 z=3 で gap=1.0 → 0 に修正される)。
+/// 偽の gap 検出を防ぐ。
 fn compute_duality_gap_rel(
     problem: &crate::qp::QpProblem,
     result: &crate::problem::SolverResult,

@@ -331,10 +331,9 @@ fn solve_qp_v2_with_runner(
 
     // ── presolve fall-back: best が eps を満たさず時間が残っているなら presolve=false で再試行 ────
     //
-    // 動機: presolve の特定変換組み合わせ (例: #2 + #5 + #12) が稀に y_orig を破壊し、
-    // IPM 自体は解けるはずの問題 (no-presolve では PASS) でも DFEAS_FAIL になる病理がある
-    // (QBORE3D / QCAPRI 等で実証)。汎用 solver として「IPM で解ける問題を解けない」
-    // 状態を放置しないため、presolve 経路が失敗したら presolve なしで再試行する自己修復。
+    // 特定の presolve 変換組み合わせが稀に y の元空間復元を狂わせ、IPM 自体は解けるはずの
+    // 問題でも DFEAS_FAIL になる病理がある。presolve 経路が失敗したら presolve なしで
+    // 再試行する自己修復として残す。
     let need_retry_no_presolve = match &best {
         Some(o) => !o.satisfies_eps(user_eps),
         None => true,
