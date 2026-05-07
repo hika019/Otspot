@@ -173,3 +173,97 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     let scale = 1.0 + max_x.max(max_bnd);
     max_v / scale
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::CscMatrix;
+    use crate::problem::ConstraintType;
+
+    fn build_view<'a>(
+        q: &'a CscMatrix, a: &'a CscMatrix, c: &'a [f64], b: &'a [f64],
+        bounds: &'a [(f64, f64)], cts: &'a [ConstraintType],
+    ) -> ProblemView<'a> {
+        ProblemView { q, a, c, b, bounds, constraint_types: cts }
+    }
+
+    /// f64 sum のキャンセルで residual が見えなくなる入力で、kkt_residual_rel が
+    /// DD 計算で真の値を返すことを確認する。
+    ///
+    /// 設計: A の col 0 に [1.0, 1e16, -1e16] を CSC 順で入れ、y=[1,1,1] で aty[0] を取る。
+    /// f64 left-to-right sum (CSC walk): 0 + 1.0 = 1.0 → 1.0 + 1e16 = 1e16 (1.0 が ULP に
+    /// 吸収) → 1e16 + (-1e16) = 0 (真値 1.0 が消える)。DD sum なら 1.0 が保たれる。
+    #[test]
+    fn kkt_residual_rel_uses_dd_to_avoid_f64_cancellation() {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2], &[0, 0, 0], &[1.0_f64, 1.0e16, -1.0e16], 3, 1,
+        ).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![0.0_f64];
+        let b = vec![0.0_f64; 3];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq; 3];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let x = vec![0.0_f64];
+        let y = vec![1.0_f64, 1.0, 1.0];
+        let z: Vec<f64> = vec![];
+
+        // f64 mat_vec_mul は cancellation で 0 を返す (真値 1.0 を見失う)。
+        let aty_f64 = a.transpose().mat_vec_mul(&y).unwrap();
+        assert_eq!(aty_f64[0], 0.0, "f64 path loses the 1.0 residual via cancellation");
+
+        // DD 経路の kkt_residual_rel は 真値 1.0 / scale を返す。scale = 1 + |aty|_dd ≈ 2。
+        let r = kkt_residual_rel(&view, &x, &y, &z);
+        assert!(r > 0.4 && r < 0.6, "DD reveals 1.0 residual / scale ≈ 0.5; got r={:.3e}", r);
+    }
+
+    /// primal_residual_rel も DD 計算であることを同形のキャンセル入力で確認する。
+    #[test]
+    fn primal_residual_rel_uses_dd_to_avoid_f64_cancellation() {
+        // m=1, n=3。A = [[1.0, 1e16, -1e16]] (1 行)、x=[1,1,1]、b=[0]、Eq。
+        // CSC col 走査順 (col 0 → col 1 → col 2): 0 + 1.0 → 1.0 + 1e16 → 1e16 + (-1e16) = 0。
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0], &[0, 1, 2], &[1.0_f64, 1.0e16, -1.0e16], 1, 3,
+        ).unwrap();
+        let q = CscMatrix::new(3, 3);
+        let c = vec![0.0_f64; 3];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
+        let cts = vec![ConstraintType::Eq];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        let x = vec![1.0_f64, 1.0, 1.0];
+
+        // f64 mat_vec_mul は 0 を返す (真の violation 1.0 が見えない)。
+        let ax_f64 = a.mat_vec_mul(&x).unwrap();
+        assert_eq!(ax_f64[0], 0.0, "f64 path loses the 1.0 violation via cancellation");
+
+        // DD 経路の primal_residual_rel は 1.0 / scale を返す。scale = 1 + |Ax|_dd ≈ 2。
+        let r = primal_residual_rel(&view, &x);
+        assert!(r > 0.4 && r < 0.6, "DD reveals 1.0 violation / scale ≈ 0.5; got r={:.3e}", r);
+    }
+
+    /// FX (lb≈ub) と EmptyCol は KKT 評価から除外される慣例を確認。
+    #[test]
+    fn kkt_residual_rel_excludes_fx_and_empty_col() {
+        // 3 列: col 0 = FX (lb=ub=1.0)、col 1 = empty (A 列に登場しない)、col 2 = 普通。
+        let q = CscMatrix::new(3, 3);
+        let c = vec![1e10_f64, 1e10, 0.0]; // FX/empty 列の c は意図的に大きく
+        let a = CscMatrix::from_triplets(
+            &[0], &[2], &[1.0], 1, 3,
+        ).unwrap();
+        let b = vec![0.0];
+        let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        // x[0]=1 (固定)、x[1]=0、x[2]=0、y=[0]、z=[lb_for_col1, lb_for_col2, ub のうち有限分なし] → 0 埋め
+        let x = vec![1.0, 0.0, 0.0];
+        let y = vec![0.0];
+        let z = vec![0.0, 0.0]; // 両 lb 有限 var (col 1, 2) の lb dual
+        let r = kkt_residual_rel(&view, &x, &y, &z);
+        // FX (col 0) は除外、empty col (col 1) も除外、col 2 のみ評価。c[2]=0、qx=0、aty=0、bnd=0 → r=0。
+        assert!(r.abs() < 1e-15, "FX/empty col 除外で残差 0、got r={:.3e}", r);
+    }
+}

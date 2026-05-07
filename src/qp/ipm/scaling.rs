@@ -469,3 +469,37 @@ pub(crate) fn unscale_ipm_result(
         _ => result,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::ruiz::RuizScaler;
+
+    /// compute_amplification は primal 側 (1/e_min) と dual 側 (1/(c*d_min)) の
+    /// 大きい方を返す。dual 側を取りこぼすと QPILOTNO のような ill-conditioned 問題で
+    /// IPM 完了後の元空間 dfeas を eps 以下に保証できなくなる。
+    #[test]
+    fn compute_amplification_includes_dual_side() {
+        // primal amp = 1/e_min = 100、dual amp = 1/(c*d_min) = 10000 のケース。
+        // 期待: max(100, 10000) = 10000。
+        let mut scaler = RuizScaler::new(2, 2);
+        scaler.e = vec![0.01, 1.0]; // e_min = 0.01 → primal amp = 100
+        scaler.d = vec![0.001, 1.0]; // d_min = 0.001
+        scaler.c = 0.1; // c * d_min = 1e-4 → dual amp = 1e4
+        let amp = compute_amplification(&scaler);
+        assert!((amp - 10000.0).abs() < 1.0,
+            "dual amp 1/(c*d_min)=1e4 が支配するはず, got {:.3e}", amp);
+    }
+
+    /// primal 側が支配する場合の確認 (dual は十分小さい amp)。
+    #[test]
+    fn compute_amplification_primal_dominant() {
+        let mut scaler = RuizScaler::new(2, 2);
+        scaler.e = vec![1e-5, 1.0];  // primal amp = 1e5
+        scaler.d = vec![0.5, 1.0];   // d_min = 0.5
+        scaler.c = 1.0;              // c * d_min = 0.5 → dual amp = 2
+        let amp = compute_amplification(&scaler);
+        assert!((amp - 1e5).abs() < 10.0,
+            "primal amp 1/e_min=1e5 が支配するはず, got {:.3e}", amp);
+    }
+}

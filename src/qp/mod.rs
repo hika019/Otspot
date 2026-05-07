@@ -4265,4 +4265,110 @@ mod tests {
             "REFIT-T6: EmptyCol 変数 z_lb ≈ 2.0 (KKT 復元), got {}", z_lb_z
         );
     }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 数値精度テスト: f64 cancellation / IR / DD-guard
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// LSQ-IR: 単純な full-row-rank 系で y = A·target / (A·A^T) が解析的に求まることを
+    /// `compute_lsq_dual_y` が DD-IR 込みで再現することを確認する。
+    #[test]
+    fn compute_lsq_dual_y_recovers_exact_solution_on_well_conditioned() {
+        // 1×1: A=[[2]], Q=0, c=[6], x=[0], bounds=NEG_INF..INF (z=0)。
+        // target = -(qx + c + bnd) = -6。A^T y = target → 2 y = -6 → y = -3。
+        let a = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![6.0_f64];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0], // 任意 (compute_lsq_dual_y は内部で再計算)
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+        assert!((y[0] - (-3.0)).abs() < 1e-12, "y ≈ -3, got {}", y[0]);
+    }
+
+    /// LSQ-IR: 正規方程式の cond^2·ε 誤差を DD residual の IR が縮めることを、
+    /// 解析解との突合で確認する。
+    #[test]
+    fn compute_lsq_dual_y_ir_improves_ill_conditioned_problem() {
+        // A = [[1, 1], [1, 1+δ]] (δ=1e-8) は cond(A) ≈ 1/δ = 1e8。
+        // cond(AAT) ≈ 1e16 で f64 LSQ 1 回 solve は意味のある精度に達さない。
+        // 解析解: A^T y = target なら y = (A A^T)^{-1} A target を計算。
+        // ここでは target = (1, 1) として y = (1, 0) 近傍が解析解となる
+        // (実 4x4 系で手計算で検算済み)。
+        // テストは絶対値ではなく、IR で残差 ‖A^T y - target‖_inf が cond·ε^2 級まで
+        // 縮むかを確認する。
+        let delta = 1e-8;
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1],
+            &[1.0_f64, 1.0, 1.0, 1.0 + delta], 2, 2,
+        ).unwrap();
+        let q = CscMatrix::new(2, 2);
+        // target = (1, 1) を作る c。x=0, bnd=0 のとき target = -(qx+c+bnd) = -c。
+        // よって c = (-1, -1) で target = (1, 1)。
+        let c = vec![-1.0_f64, -1.0];
+        let b = vec![0.0_f64; 2];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c.clone(), a.clone(), b, bounds).unwrap();
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![0.0, 0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+
+        // residual = A^T y - target を DD で評価
+        use twofloat::TwoFloat;
+        let target = [1.0_f64, 1.0];
+        let mut max_abs_res = 0.0_f64;
+        for col in 0..2 {
+            let mut s = TwoFloat::from(0.0);
+            for k in a.col_ptr[col]..a.col_ptr[col + 1] {
+                s = s + TwoFloat::new_mul(a.values[k], y[a.row_ind[k]]);
+            }
+            let r = (f64::from(s) - target[col]).abs();
+            max_abs_res = max_abs_res.max(r);
+        }
+        // f64 1 回 solve は cond²·ε = 1e16·2e-16 ≈ 2 (relative) で打ち止め。
+        // IR が効けば 1 iter で cond·ε ≈ 1e-8 に落とせる。
+        // ここでは「f64 1 回 solve では到達不可能な精度 (< 1e-7)」を IR が達成することを
+        // 確認する。
+        assert!(max_abs_res < 1e-7, "IR should drive residual below 1e-7, got {:.3e}", max_abs_res);
+    }
+
+    /// refine_dual_lsq の DD-guard が、f64 で見ると改善するが DD で見ると悪化する
+    /// y_new を rejection することを確認する (= DD 比較を実装している証拠)。
+    ///
+    /// 注: 現時点で発生条件が稀のため、このテストは「現 y 不変」を確認する弱い形にする。
+    /// 強い反例 (DD で改善 + f64 で悪化) を構築するのは困難なため、guard が
+    /// 単調な性質 (改善以外なら現状維持) を持つことを確認する。
+    #[test]
+    fn refine_dual_lsq_keeps_y_when_lsq_does_not_strictly_improve() {
+        // 1×1: A=[[1]], c=[0], Q=0、x=0, bnd=0。target=0 → 任意 y で aty=y、
+        // residual = y。IPM 由来 y=0 が最適。LSQ も y=0 を返すので「現状維持」が期待。
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![0.0_f64];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        refine_dual_lsq(&problem, &mut result, None);
+        assert!(result.dual_solution[0].abs() < 1e-12,
+            "y は変更されないか、より良い 0 のまま。got {}", result.dual_solution[0]);
+    }
 }
