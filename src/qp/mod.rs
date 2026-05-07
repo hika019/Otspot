@@ -708,12 +708,19 @@ pub(crate) fn refine_primal_lsq(
     }
     let x = &mut result.solution;
 
-    // 違反量 v[i] を計算 (Le/Ge/Eq に応じて符号を統一して "Ax を b 方向に押す量")
+    // 違反量 v[i] を計算 (Le/Ge/Eq に応じて符号を統一して "Ax を b 方向に押す量")。
+    // ill-conditioned 系で f64 sum が cancellation で違反を見逃すのを防ぐため DD で積算。
     use crate::problem::ConstraintType;
-    let ax = match problem.a.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+    use twofloat::TwoFloat;
+    let zero_dd = TwoFloat::from(0.0);
+    let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+    for col in 0..n {
+        let xv = x[col];
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            ax_dd[problem.a.row_ind[k]] = ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+        }
+    }
+    let ax: Vec<f64> = ax_dd.iter().map(|&v| f64::from(v)).collect();
     /// 違反検出の許容差 (これ未満は active 扱いしない)
     const PRIMAL_VIOLATION_TOL: f64 = 1e-12;
     let mut v = vec![0.0_f64; m];
@@ -776,18 +783,19 @@ pub(crate) fn refine_primal_lsq(
         return;
     }
 
-    // δ = A^T λ
-    let mut delta = vec![0.0_f64; n];
+    // δ = A^T λ も DD で積算
+    let mut delta_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for j in 0..n {
         let s = problem.a.col_ptr[j];
         let e = problem.a.col_ptr[j + 1];
         for k in s..e {
             let i = problem.a.row_ind[k];
             if i < m {
-                delta[j] += problem.a.values[k] * lambda[i];
+                delta_dd[j] = delta_dd[j] + TwoFloat::new_mul(problem.a.values[k], lambda[i]);
             }
         }
     }
+    let delta: Vec<f64> = delta_dd.iter().map(|&v| f64::from(v)).collect();
     if delta.iter().any(|v| !v.is_finite()) {
         return;
     }
