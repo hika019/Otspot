@@ -1108,19 +1108,17 @@ pub(crate) fn refine_kkt_iterative(
         use twofloat::TwoFloat;
         let zero_dd = TwoFloat::from(0.0);
         // qx[i] = sum_k Q[i,k] * x[k]  (Q は対称、上三角 CSC 格納)
+        // Q 格納慣例 (spmv_q と同じ): **全要素格納の対称行列** (上下三角両方 stored)。
+        // symmetric duplication せず CSC 全エントリを直接走査する。
         let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for j in 0..n {
+            let xv = x[j];
             let cs = problem.q.col_ptr[j];
             let ce = problem.q.col_ptr[j + 1];
             for k in cs..ce {
                 let row = problem.q.row_ind[k];
                 let v = problem.q.values[k];
-                // 対角項
-                qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, x[j]);
-                // 対称項 (上三角格納で行 != 列のとき双方に加算)
-                if row != j {
-                    qx_dd[j] = qx_dd[j] + TwoFloat::new_mul(v, x[row]);
-                }
+                qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
             }
         }
         // aty[col] = sum_row A[row,col] * y[row]  (CSC で col 走査)
