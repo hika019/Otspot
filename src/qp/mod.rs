@@ -1188,8 +1188,10 @@ pub(crate) fn refine_kkt_iterative(
     // 各積を new_mul (Joldes 2017 Algorithm 2) で精密に計算、累積も DD で。
     // LDL solve は f64 のまま (Wikipedia 通り、LDL の精度は cond × ε で十分)。
     //
-    // env REFINE_KKT_DD=1 で有効化。default は f64 residual (高速)。
-    let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() == Some("1");
+    // ill-conditioned 系では f64 residual が cancellation で 0 に張り付き IR が
+    // progress 判定不能になるため、default で DD を使う。env REFINE_KKT_DD=0 で
+    // f64 fallback (パフォーマンス計測用、通常は使わない)。
+    let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() != Some("0");
     let compute_residuals_dd = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
         use twofloat::TwoFloat;
         let zero_dd = TwoFloat::from(0.0);

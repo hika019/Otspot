@@ -659,8 +659,11 @@ pub(crate) fn solve_ippmm_inner(
             .unwrap_or(norm_c)
             .max(1.0);
 
-        // 元空間 OSQP 流の全体相対化 dfeas (bench/v2 と同形)。
-        // ||r_d_orig||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
+        // OSQP 流の全体相対化 dfeas:
+        //   scaler=Some の場合は元空間 (r_d / (c·d[j])) で `||r_d_orig||_∞ / scale_orig`
+        //   scaler=None の場合は scaled 空間そのままの相対値
+        // どちらの空間で評価しているかは Optimal_main の eps と整合させて呼び出し側で
+        // 解釈する (eps_orig は scaler=Some なら orig 空間、None なら scaled 空間 eps)。
         let nr_d_rel_orig = if let Some(sc) = scaler {
             let mut max_r = 0.0_f64;
             let mut max_qx = 0.0_f64;
