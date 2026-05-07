@@ -426,15 +426,41 @@ fn run_ipm_with(
     }
 
 
+    // 元空間 dual の一括復元: postsolve_qp_with_dual_recovery は SingletonRow /
+    // RedundantRowFix の y[row] を col_first の停留性のみで復元するが、その row が
+    // 関与する他の固定 col の停留性は z で別途吸収しないと壊れたままになる。
+    // ここで refine_dual_lsq を 1 度走らせ、x と現在の z を固定して y を LSQ-optimal に
+    // 更新する。AAT factorize が小〜中規模 (n+m ≤ LSQ_DUAL_SIZE_LIMIT) でだけ走る。
+    if presolve_result.was_reduced
+        && !presolve_result.postsolve_stack.steps.is_empty()
+        && final_sol.solution.len() == orig_problem.num_vars
+        && final_sol.dual_solution.len() == orig_problem.num_constraints
+    {
+        let view0 = ProblemView {
+            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
+            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+        };
+        const POST_LSQ_MAX_PASSES: usize = 5;
+        const POST_LSQ_CONVERGE_RATIO: f64 = 0.5;
+        let mut prev = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        for pass in 0..POST_LSQ_MAX_PASSES {
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            let cur = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_trace {
+                eprintln!("POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}", pass, cur);
+            }
+            if cur >= prev * POST_LSQ_CONVERGE_RATIO {
+                break;
+            }
+            prev = cur;
+        }
+    }
+
     // Stage 0: postsolve y/z 交互反復 (bound_duals が orig レイアウト確定後)。
-    //
-    // postsolve_qp_with_dual_recovery 内の forward pass は bound_contrib=0 仮定で
-    // y[row] を復元する。boundary に張り付いた fixed/empty 列が存在する場合、
-    // KKT 式の bound_contrib が非ゼロのため y[row] が wrong stays。
-    //
-    // 本反復で bound_duals (orig 空間) を refit_bound_duals_kkt で計算 → bound_contrib
-    // を取得 → recover_y_for_singleton_row_with_bound で y を更新、を交互に行うことで
-    // 連立を不動点で解く。実問題で 3 pass で収束する経験。
+    // 上の一括 LSQ で残った fixed-row dofs (SingletonRow/RedundantRowFix) を col_first
+    // の停留性で正確に締める。
     if result.iterations > 0
         && presolve_result.was_reduced
         && !presolve_result.postsolve_stack.steps.is_empty()
