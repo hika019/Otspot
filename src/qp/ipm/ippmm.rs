@@ -33,7 +33,7 @@
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_pre_permuted, factorize_kkt_with_cached_perm, inexact_eta_for_eps,
+    factorize_kkt_pre_permuted_cached, factorize_kkt_with_cached_perm, inexact_eta_for_eps,
     max_l_nnz_from_budget, KktError, KktFactor,
 };
 use crate::linalg::ruiz::RuizScaler;
@@ -453,6 +453,10 @@ pub(crate) fn solve_ippmm_inner(
     let aug_cache = super::kkt::build_augmented_cache(&problem.q, &a_ext);
     // permuted 版キャッシュ。AMD perm 確定後 1 回だけ計算し、permute_sym_upper を回避する。
     let mut aug_permuted_cache: Option<super::kkt::PermutedAugmentedKkt> = None;
+    // SymbolicCholesky キャッシュ。最初の factorize 成功後に保持し、以降の反復で再利用する
+    // (build_symbolic_hl の ~5ms/call を削減)。pattern が変わる Schur/DD-LDL では None のまま。
+    let mut symbolic_cholesky_cache:
+        Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> = None;
 
     // inexact Newton forcing term η を user 指定 eps から計算する。
     // η = eps × 0.1 (IPM_OUTER_VS_INNER_RATIO)、下限 1e-13 (f64 limit)。
@@ -935,13 +939,14 @@ pub(crate) fn solve_ippmm_inner(
             let factor_result = if use_pre_permuted {
                 let permuted_cache = aug_permuted_cache.as_ref().unwrap();
                 let pre_permuted = permuted_cache.materialize(&sigma_vec, rho_retry, delta_matrix_retry);
-                factorize_kkt_pre_permuted(
+                factorize_kkt_pre_permuted_cached(
                     &pre_permuted,
                     &mat_for_factor,
                     perm,
                     timeout_ctx.deadline,
                     max_l_nnz_from_budget(),
                     Some(n),
+                    symbolic_cholesky_cache.clone(),
                 )
             } else {
                 factorize_kkt_with_cached_perm(
@@ -952,6 +957,12 @@ pub(crate) fn solve_ippmm_inner(
                     Some(n),
                 )
             };
+            // factor 成功後に symbolic を pull して以降の反復で再利用する。
+            if use_pre_permuted && symbolic_cholesky_cache.is_none() {
+                if let Ok(ref f) = factor_result {
+                    symbolic_cholesky_cache = f.symbolic_arc();
+                }
+            }
             match factor_result {
                 Ok(f) => {
                     if let Some(t) = prof_t_factor {

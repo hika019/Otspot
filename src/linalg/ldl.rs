@@ -24,6 +24,7 @@ use faer::sparse::linalg::cholesky::{
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// LDL分解エラー
@@ -49,7 +50,7 @@ pub enum LdlError {
 /// faer high-level LDL^T factorization for positive definite matrices (no AMD).
 /// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
 pub struct LdlFactorization {
-    symbolic: SymbolicCholesky<usize>,
+    symbolic: Arc<SymbolicCholesky<usize>>,
     l_values: Vec<f64>,
     n: usize,
 }
@@ -78,12 +79,23 @@ impl LdlFactorization {
 
 /// faer high-level LDL^T factorization for quasidefinite matrices with AMD ordering.
 /// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
+///
+/// `symbolic` は `Arc` 共有: IPM 反復で sparsity pattern が不変な場合、外部キャッシュ
+/// (`SymbolicCholeskyCache`) と factor 間で SymbolicCholesky を 1 度だけ計算して
+/// 再利用するため。clone は Arc::clone (refcount inc) のみ。
 pub struct LdlFactorizationAmd {
-    symbolic: SymbolicCholesky<usize>,
+    symbolic: Arc<SymbolicCholesky<usize>>,
     l_values: Vec<f64>,
     /// AMD permutation: perm[k] = original index of reordered index k
     perm: Vec<usize>,
     n: usize,
+}
+
+/// SymbolicCholesky の外部キャッシュ。IPM 反復で sparsity pattern が不変なとき、
+/// 1 度だけ symbolic を計算して `factorize_quasidefinite_pre_permuted_with_cache`
+/// で再利用する。
+pub struct SymbolicCholeskyCache {
+    inner: Arc<SymbolicCholesky<usize>>,
 }
 
 impl LdlFactorizationAmd {
@@ -201,14 +213,30 @@ fn do_numeric_factorize(
     signs: Option<&[i8]>,
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
-) -> Result<(SymbolicCholesky<usize>, Vec<f64>), LdlError> {
+) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
+    do_numeric_factorize_with_cache(mat, signs, deadline, max_l_nnz, None)
+}
+
+/// `do_numeric_factorize` の symbolic キャッシュ対応版。`cached_symbolic` が `Some` の
+/// ときは `build_symbolic_hl` を skip して numeric 因子化のみ実行する。
+/// pattern 不変な IPM 反復で 5ms/call 程度の symbolic コストを削れる。
+fn do_numeric_factorize_with_cache(
+    mat: &CscMatrix,
+    signs: Option<&[i8]>,
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
     // env=LDL_PROF=1: symbolic/numeric の所要時間を stderr に書き出す。
     let prof = std::env::var("LDL_PROF").ok().as_deref() == Some("1");
     let t0 = if prof { Some(Instant::now()) } else { None };
     let a_upper = csc_upper_to_faer_upper(mat);
     let t_convert = t0.map(|t| t.elapsed());
     let t1 = if prof { Some(Instant::now()) } else { None };
-    let symbolic = build_symbolic_hl(&a_upper)?;
+    let symbolic: Arc<SymbolicCholesky<usize>> = match cached_symbolic {
+        Some(s) => s,
+        None => Arc::new(build_symbolic_hl(&a_upper)?),
+    };
     let t_symbolic = t1.map(|t| t.elapsed());
 
     // symbolic 完了後・numeric 前に L_nnz チェック (memory budget)。
@@ -391,6 +419,22 @@ pub fn factorize_quasidefinite_pre_permuted(
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_pre_permuted_cached(
+        pre_permuted_mat, perm, deadline, max_l_nnz, None,
+    )
+}
+
+/// `factorize_quasidefinite_pre_permuted` の symbolic キャッシュ版。
+/// `cached_symbolic` が `Some` のときは `build_symbolic_hl` を skip する。
+/// 戻り値の `LdlFactorizationAmd` は内部で `Arc<SymbolicCholesky>` を保持しており、
+/// caller は `factor.symbolic_arc()` で取得して次回呼び出しに使い回せる。
+pub fn factorize_quasidefinite_pre_permuted_cached(
+    pre_permuted_mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+) -> Result<LdlFactorizationAmd, LdlError> {
     if let Some(d) = deadline {
         if Instant::now() >= d {
             return Err(LdlError::DeadlineExceeded);
@@ -398,9 +442,17 @@ pub fn factorize_quasidefinite_pre_permuted(
     }
     let n = pre_permuted_mat.nrows;
     let signs = extract_diagonal_signs(pre_permuted_mat);
-    let (symbolic, l_values) =
-        do_numeric_factorize(pre_permuted_mat, Some(&signs), deadline, max_l_nnz)?;
+    let (symbolic, l_values) = do_numeric_factorize_with_cache(
+        pre_permuted_mat, Some(&signs), deadline, max_l_nnz, cached_symbolic,
+    )?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+}
+
+impl LdlFactorizationAmd {
+    /// 内部の SymbolicCholesky を Arc として取得する (反復間でのキャッシュ用)。
+    pub fn symbolic_arc(&self) -> Arc<SymbolicCholesky<usize>> {
+        Arc::clone(&self.symbolic)
+    }
 }
 
 #[cfg(test)]

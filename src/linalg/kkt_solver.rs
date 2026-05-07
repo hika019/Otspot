@@ -764,12 +764,28 @@ pub fn factorize_kkt_pre_permuted(
     max_l_nnz: usize,
     n_top: Option<usize>,
 ) -> Result<KktFactor, KktError> {
+    factorize_kkt_pre_permuted_cached(
+        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, None,
+    )
+}
+
+/// `factorize_kkt_pre_permuted` の symbolic キャッシュ版。`cached_symbolic` が `Some` の
+/// ときは `build_symbolic_hl` を skip する。
+pub fn factorize_kkt_pre_permuted_cached(
+    pre_permuted_k: &CscMatrix,
+    unpermuted_k: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: usize,
+    n_top: Option<usize>,
+    cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
+) -> Result<KktFactor, KktError> {
     // DD LDL 経路は pre-permuted を直接サポートしないため、要求時は通常経路にフォールバック。
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
         return factorize_kkt_with_cached_perm(unpermuted_k, perm, deadline, max_l_nnz, n_top);
     }
-    match crate::linalg::ldl::factorize_quasidefinite_pre_permuted(
-        pre_permuted_k, perm, deadline, Some(max_l_nnz),
+    match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached(
+        pre_permuted_k, perm, deadline, Some(max_l_nnz), cached_symbolic,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
@@ -784,6 +800,17 @@ pub fn factorize_kkt_pre_permuted(
         Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => Err(KktError::DeadlineExceeded),
         Err(crate::linalg::ldl::LdlError::SingularOrIndefinite) => {
             Err(KktError::SingularOrIndefinite)
+        }
+    }
+}
+
+impl KktFactor {
+    /// Direct (LDL) factor の SymbolicCholesky を Arc として返す (反復間キャッシュ用)。
+    /// Iterative / DirectDd の場合は None。
+    pub fn symbolic_arc(&self) -> Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> {
+        match self {
+            KktFactor::Direct(f) => Some(f.symbolic_arc()),
+            _ => None,
         }
     }
 }
