@@ -21,27 +21,36 @@ pub(crate) const EPS_FLOOR: f64 = 1e-12;
 pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
 /// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
-/// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。
+/// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。A·x は DD で積算
+/// (cancellation で違反を見逃さないため)。
 fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     use crate::problem::ConstraintType;
+    use twofloat::TwoFloat;
     if problem.num_constraints == 0 {
         return 0.0;
     }
-    let ax = match problem.a.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
+    let m = problem.a.nrows;
+    let zero_dd = TwoFloat::from(0.0);
+    let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+    for col in 0..problem.a.ncols {
+        let xv = x[col];
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            ax_dd[problem.a.row_ind[k]] = ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+        }
+    }
     let mut max_v = 0.0_f64;
     let mut max_ax = 0.0_f64;
     let mut max_b = 0.0_f64;
-    for (i, (&ax_i, &b_i)) in ax.iter().zip(problem.b.iter()).enumerate() {
+    for (i, (ax_dd_i, &b_i)) in ax_dd.iter().zip(problem.b.iter()).enumerate() {
+        let raw_dd = *ax_dd_i - TwoFloat::from(b_i);
+        let raw = f64::from(raw_dd);
         let violation = match problem.constraint_types.get(i) {
-            Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
-            Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
-            _ => (ax_i - b_i).max(0.0),
+            Some(ConstraintType::Eq) => raw.abs(),
+            Some(ConstraintType::Ge) => (-raw).max(0.0),
+            _ => raw.max(0.0),
         };
         max_v = max_v.max(violation);
-        max_ax = max_ax.max(ax_i.abs());
+        max_ax = max_ax.max(f64::from(*ax_dd_i).abs());
         max_b = max_b.max(b_i.abs());
     }
     max_v / (1.0 + max_ax.max(max_b))
@@ -264,21 +273,24 @@ pub(crate) fn check_dfeas_status_relative(
     bound_duals: &[f64],
     eps: f64,
 ) -> SolveStatus {
+    use twofloat::TwoFloat;
     let n = x.len();
-    // mat_vec_mul は次元一致前提で失敗は API 契約違反。
-    // 失敗時は Optimal 昇格できる根拠がないため SuboptimalSolution を返す (status 隠蔽防止)。
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return SolveStatus::SuboptimalSolution,
-    };
-    let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
-        match problem.a.transpose().mat_vec_mul(y) {
-            Ok(v) => v,
-            Err(_) => return SolveStatus::SuboptimalSolution,
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = x[col];
+        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
+            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
-    } else {
-        vec![0.0; n]
-    };
+    }
+    let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    if problem.a.nrows > 0 && !y.is_empty() {
+        for col in 0..n {
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(problem.a.values[k], y[problem.a.row_ind[k]]);
+            }
+        }
+    }
     let mut bound_contrib = vec![0.0f64; n];
     if !bound_duals.is_empty() {
         let mut bd_idx = 0usize;
@@ -296,16 +308,18 @@ pub(crate) fn check_dfeas_status_relative(
         }
     }
     // OSQP 流 全体相対化 (bench/v2/IPM 内部 nr_d_rel_orig / compute_pfeas_osqp と統一)。
+    // qx + aty は DD で組み立て、cancellation で違反を見逃さない。
     let mut max_r = 0.0_f64;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;
     let mut max_aty = 0.0_f64;
     let mut max_bnd = 0.0_f64;
     for j in 0..n {
-        max_r = max_r.max((qx[j] + aty[j] + bound_contrib[j] + problem.c[j]).abs());
-        max_qx = max_qx.max(qx[j].abs());
+        let r_dd = qx_dd[j] + aty_dd[j] + TwoFloat::from(bound_contrib[j]) + TwoFloat::from(problem.c[j]);
+        max_r = max_r.max(f64::from(r_dd).abs());
+        max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
         max_c = max_c.max(problem.c[j].abs());
-        max_aty = max_aty.max(aty[j].abs());
+        max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
         max_bnd = max_bnd.max(bound_contrib[j].abs());
     }
     let dfeas_relative = max_r / (1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd));
