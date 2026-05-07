@@ -124,8 +124,11 @@ echo "[bench_parallel.sh] solver_dir: ${SOLVER_DIR:-$(pwd)}"
 echo "[bench_parallel.sh] timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "[bench_parallel.sh] 対象: $TOTAL_FILES 件 (bin=$BIN, solver=${SOLVER:-default}, timeout=${TIMEOUT}s, eps=$EPS, jobs=$JOBS)"
 
-# ワークプールのグループサイズ (固定3問/グループ)
-GROUP_SIZE=3
+# ワークプールのグループサイズ (1問/グループ)。
+# 重い問題を含むグループが timeout に到達すると、そのワーカーが長時間塞がれ
+# 他ワーカーが手伝えない non-work-stealing の弊害が大きいため、最小粒度で
+# 動的に分配する。問題数の log ファイルが増える代わりに最後まで JOBS が活用される。
+GROUP_SIZE=1
 TOTAL_GROUPS=$(( (TOTAL_FILES + GROUP_SIZE - 1) / GROUP_SIZE ))
 
 # jobs をグループ数に合わせて調整
