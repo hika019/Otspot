@@ -183,6 +183,141 @@ pub(crate) fn collapse_extended_dual(
 // augmented KKT system 構築
 // ---------------------------------------------------------------------------
 
+/// augmented KKT system の構造キャッシュ。`build_augmented_cache` で 1 回構築し、
+/// `materialize` で σ/δ_p/δ_d だけ反映した CscMatrix を生成する。
+///
+/// 動機: Q と A の sparsity pattern は IPM 反復間で不変。col_ptr/row_ind と
+/// 「変化しない値 (Q off-diag, Q diag, A^T)」を template として持ち、毎反復
+/// 「変化する値 (δ_p、Σ+δ_d)」だけ書き換える。`from_triplets` の sort/compress を回避し
+/// BOYD2 で per-call 71ms → ~5ms 程度を狙う。
+pub(crate) struct AugmentedKktCache {
+    col_ptr: Vec<usize>,
+    row_ind: Vec<usize>,
+    /// Q off-diag + A^T + Q diag (Q[j,j] そのまま) + constraint diag (placeholder 0)
+    /// 反復毎に clone() し、対角だけ書き換える。
+    static_values: Vec<f64>,
+    /// 変数 j ∈ 0..n の対角 slot (values[slot] に δ_p を加算する用)
+    diag_var_slot: Vec<usize>,
+    /// 制約 k ∈ 0..m_ext の対角 slot (values[slot] = -(σ_k + δ_d) で上書き)
+    diag_con_slot: Vec<usize>,
+    n: usize,
+    m_ext: usize,
+}
+
+impl AugmentedKktCache {
+    /// 反復毎に呼ぶ: σ/δ_p/δ_d を template に反映した CscMatrix を返す。
+    /// O(nnz + n + m_ext) — sort/compress を行わないため `from_triplets` より大幅に速い。
+    pub(crate) fn materialize(&self, sigma_vec: &[f64], delta_p: f64, delta_d: f64) -> CscMatrix {
+        debug_assert_eq!(sigma_vec.len(), self.m_ext);
+        let mut values = self.static_values.clone();
+        for j in 0..self.n {
+            values[self.diag_var_slot[j]] += delta_p;
+        }
+        for k in 0..self.m_ext {
+            values[self.diag_con_slot[k]] = -(sigma_vec[k] + delta_d);
+        }
+        let total = self.n + self.m_ext;
+        CscMatrix {
+            col_ptr: self.col_ptr.clone(),
+            row_ind: self.row_ind.clone(),
+            values,
+            nrows: total,
+            ncols: total,
+        }
+    }
+}
+
+/// `AugmentedKktCache` を構築する。Q/A の sparsity pattern を 1 回走査して
+/// col_ptr/row_ind/diag slot を確定する。`build_augmented_system` と同じ非ゼロ集合を生成する。
+///
+/// 制約: Q は上三角全要素格納 (build_augmented_system の前提と同じ)。
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn build_augmented_cache(q: &CscMatrix, a_ext: &CscMatrix) -> AugmentedKktCache {
+    let n = q.nrows;
+    let m_ext = a_ext.nrows;
+    let total = n + m_ext;
+
+    // 列ごとの (row, value) リストを集める。Part 1 (Q 上三角)、Part 2 (A^T)、Part 3 (Σ 対角) の
+    // 順に追加し、最後に列ごとに row 昇順で並べ替える。
+    let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); total];
+    let mut diag_var_present = vec![false; n];
+
+    // Part 1: Q 上三角 (row <= col、Q が完全格納でも上三角だけ取る)
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            if row <= col {
+                col_entries[col].push((row, q.values[k]));
+                if row == col {
+                    diag_var_present[col] = true;
+                }
+            }
+        }
+    }
+    // Q diag が無い列には placeholder 0 を追加 (materialize で δ_p が乗る)
+    for j in 0..n {
+        if !diag_var_present[j] {
+            col_entries[j].push((j, 0.0));
+        }
+    }
+
+    // Part 2: A_ext^T (右上ブロック、row=j ∈ 0..n, col=n+k)
+    for j in 0..n {
+        for idx in a_ext.col_ptr[j]..a_ext.col_ptr[j + 1] {
+            let k = a_ext.row_ind[idx];
+            col_entries[n + k].push((j, a_ext.values[idx]));
+        }
+    }
+
+    // Part 3: -(Σ + δ_d)·I 対角 (placeholder 0、materialize で上書き)
+    for k in 0..m_ext {
+        col_entries[n + k].push((n + k, 0.0));
+    }
+
+    // 列ごとに row 昇順で並べ替え (CSC 慣例)
+    for entries in col_entries.iter_mut() {
+        entries.sort_by_key(|&(r, _)| r);
+    }
+
+    // CSC 構造に組み直し、同時に diag slot を記録
+    let nnz: usize = col_entries.iter().map(|v| v.len()).sum();
+    let mut col_ptr = Vec::with_capacity(total + 1);
+    let mut row_ind = Vec::with_capacity(nnz);
+    let mut static_values = Vec::with_capacity(nnz);
+    let mut diag_var_slot = vec![usize::MAX; n];
+    let mut diag_con_slot = vec![usize::MAX; m_ext];
+
+    col_ptr.push(0);
+    for col in 0..total {
+        for &(row, val) in col_entries[col].iter() {
+            let slot = row_ind.len();
+            row_ind.push(row);
+            static_values.push(val);
+            if row == col {
+                if col < n {
+                    diag_var_slot[col] = slot;
+                } else {
+                    diag_con_slot[col - n] = slot;
+                }
+            }
+        }
+        col_ptr.push(row_ind.len());
+    }
+
+    debug_assert!(diag_var_slot.iter().all(|&s| s != usize::MAX));
+    debug_assert!(diag_con_slot.iter().all(|&s| s != usize::MAX));
+
+    AugmentedKktCache {
+        col_ptr,
+        row_ind,
+        static_values,
+        diag_var_slot,
+        diag_con_slot,
+        n,
+        m_ext,
+    }
+}
+
 /// augmented KKT system の上三角 CSC を構築する
 ///
 /// ```text

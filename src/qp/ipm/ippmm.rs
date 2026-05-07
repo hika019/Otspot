@@ -446,6 +446,11 @@ pub(crate) fn solve_ippmm_inner(
     // AMD permutation キャッシュ（スパースパターンは反復間で不変）
     let mut amd_perm_cache: Option<Vec<usize>> = None;
 
+    // augmented KKT 構造キャッシュ。Q/A の sparsity が反復間で不変なので
+    // col_ptr/row_ind/static_values を 1 度だけ確定し、以降は σ/δ 更新だけ行う。
+    // use_schur 経路では使わない (Schur は別構造)。
+    let aug_cache = super::kkt::build_augmented_cache(&problem.q, &a_ext);
+
     // inexact Newton forcing term η を user 指定 eps から計算する。
     // η = eps × 0.1 (IPM_OUTER_VS_INNER_RATIO)、下限 1e-13 (f64 limit)。
     // user が eps=1e-9 を要求すれば η=1e-10 となり、Newton 方向品質も
@@ -901,7 +906,7 @@ pub(crate) fn solve_ippmm_inner(
                 d_inv_opt = Some(d_inv);
                 s_mat
             } else {
-                build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix_retry)
+                aug_cache.materialize(&sigma_vec, rho_retry, delta_matrix_retry)
             };
             if let Some(t) = prof_t_build {
                 eprintln!("FACT_PROF section=build n={} nnz={} t={:.3}ms", mat_for_factor.nrows, mat_for_factor.values.len(), t.elapsed().as_secs_f64() * 1000.0);
@@ -1039,8 +1044,7 @@ pub(crate) fn solve_ippmm_inner(
         if fac_opt.is_none() {
             amd_perm_cache = None;
             let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_matrix_retry);
-            let aug_mat_fb =
-                build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_fallback);
+            let aug_mat_fb = aug_cache.materialize(&sigma_vec, rho_retry, delta_fallback);
             let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
             match factorize_kkt_with_cached_perm(
                 &aug_mat_fb,
