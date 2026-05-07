@@ -184,12 +184,36 @@ impl RuizScaler {
         q_vec: &[f64],
         b: &[f64],
     ) {
+        self.compute_with_rhs_floor(q, a, q_vec, b, 1e-4);
+    }
+
+    /// `compute_with_rhs` の floor 可変版。post-IPM refinement のように完全な
+    /// equilibration が必要な場合は floor=1e-15 (実質無制限) を渡す。
+    /// presolve 用は floor=1e-4 (旧仕様、IPM 安定性確保) を維持。
+    #[allow(clippy::needless_range_loop)]
+    pub fn compute_with_rhs_floor(
+        &mut self,
+        q: &CscMatrix,
+        a: &CscMatrix,
+        q_vec: &[f64],
+        b: &[f64],
+        scale_floor: f64,
+    ) {
         let n = q.ncols;
         let m = a.nrows;
         const EPS: f64 = 1e-6;
-        const NUM_ITER: usize = 10;
+        // Ruiz は cond(A) に対し O(log(cond)) 反復で収束する。Maros QPILOTNO のように
+        // A entries dynamic range が 1e12 (entries 2e-6 〜 5.85e6) では log10≈12 で
+        // 旧 10 sweep では未完。50 sweep に拡張し、収束したら早期 break で無駄反復回避。
+        // 各 sweep は O(nnz) で軽量。
+        const NUM_ITER: usize = 50;
+        // 各 sweep 後の row/col scaling 因子の変化率上限。1e-3 を切れば収束済とみなす。
+        const CONV_TOL: f64 = 1e-3;
 
-        for _ in 0..NUM_ITER {
+        let mut prev_e = self.e.clone();
+        let mut prev_d = self.d.clone();
+
+        for _iter in 0..NUM_ITER {
             // Step 1: 行ノルム正規化（b を含む）
             if m > 0 {
                 let mut row_norms = vec![0.0f64; m];
@@ -260,16 +284,32 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
+
+            // 収束判定: e, d の最大相対変化が CONV_TOL 未満なら停止 (固定点到達)。
+            // Maros QPILOTNO 等の cond≈1e6 級では ~30 sweep で収束、十分な問題は数回で済む。
+            let mut max_rel_change = 0.0_f64;
+            for i in 0..m {
+                let denom_i = prev_e[i].abs().max(1e-300);
+                max_rel_change = max_rel_change.max(((self.e[i] - prev_e[i]).abs()) / denom_i);
+            }
+            for j in 0..n {
+                let denom_j = prev_d[j].abs().max(1e-300);
+                max_rel_change = max_rel_change.max(((self.d[j] - prev_d[j]).abs()) / denom_j);
+            }
+            if _iter > 0 && max_rel_change < CONV_TOL {
+                break;
+            }
+            prev_e.clone_from(&self.e);
+            prev_d.clone_from(&self.d);
         }
 
-        // Phase1: e[i]・d[j]下限クリッピング（最大増幅率1e4制限）
-        let e_floor: f64 = 1e-4;
+        // 下限クリッピング: scale_floor (caller 指定) 以下の値を切り上げる。
+        // IPM 安定性のため presolve は 1e-4 を採用 (旧仕様)。
         for i in 0..m {
-            self.e[i] = self.e[i].max(e_floor);
+            self.e[i] = self.e[i].max(scale_floor);
         }
-        let d_floor: f64 = 1e-4;
         for j in 0..n {
-            self.d[j] = self.d[j].max(d_floor);
+            self.d[j] = self.d[j].max(scale_floor);
         }
     }
 
