@@ -564,4 +564,42 @@ mod tests {
             assert!(result.solution[j] <= ub + 1e-9);
         }
     }
+
+    /// unscale_q_diagonal: x = D x_s, y = y_s, z_orig = z_s / D の関係に従って
+    /// 解と bound dual を逆変換することを直接確認する。
+    #[test]
+    fn unscale_q_diagonal_reverses_x_and_bound_duals() {
+        use crate::sparse::CscMatrix;
+        let n = 3;
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2], &[0, 1, 2], &[1.0, 4.0, 9.0], n, n,
+        ).unwrap();
+        let prob = QpProblem::new_all_le(
+            q, vec![1.0_f64; n],
+            CscMatrix::new(0, n), vec![],
+            vec![(0.0, 5.0), (0.0, f64::INFINITY), (f64::NEG_INFINITY, 3.0)],
+        ).unwrap();
+        let col_scales = vec![2.0_f64, 0.5, 4.0];
+        // 仮想 scaled 結果: x_s = (1, 2, 3)、y 空、bound_duals: [lb_0, lb_1, ub_0, ub_2]
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0, 2.0, 3.0],
+            dual_solution: vec![],
+            bound_duals: vec![10.0, 20.0, 30.0, 40.0],
+            ..SolverResult::default()
+        };
+        unscale_q_diagonal(&mut result, &col_scales, &prob);
+        // 期待: x_orig = (2*1, 0.5*2, 4*3) = (2, 1, 12)
+        assert!((result.solution[0] - 2.0).abs() < 1e-12);
+        assert!((result.solution[1] - 1.0).abs() < 1e-12);
+        assert!((result.solution[2] - 12.0).abs() < 1e-12);
+        // 期待: lb_0 が col 0 の lb_dual (col_scales[0]=2.0 で割る)
+        //       lb_1 が col 1 の lb_dual (col_scales[1]=0.5 で割る)
+        //       ub_0 が col 0 の ub_dual (col_scales[0]=2.0 で割る)
+        //       ub_2 が col 2 の ub_dual (col_scales[2]=4.0 で割る)
+        assert!((result.bound_duals[0] - 5.0).abs() < 1e-12, "lb_0 / 2.0");
+        assert!((result.bound_duals[1] - 40.0).abs() < 1e-12, "lb_1 / 0.5");
+        assert!((result.bound_duals[2] - 15.0).abs() < 1e-12, "ub_0 / 2.0");
+        assert!((result.bound_duals[3] - 10.0).abs() < 1e-12, "ub_2 / 4.0");
+    }
 }
