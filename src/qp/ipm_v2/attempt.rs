@@ -467,3 +467,108 @@ fn finalize_outcome(
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::CscMatrix;
+
+    /// Q-diagonal scaling trigger 条件: 対角でない Q では scaling しない。
+    #[test]
+    fn test_q_diagonal_scaling_skips_non_diagonal_q() {
+        // Q = [[2, 1], [1, 2]] (off-diag あり)
+        let q = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        assert!(try_q_diagonal_scaling(&prob).is_none(), "off-diagonal Q では trigger しない");
+    }
+
+    /// Q-diagonal scaling trigger 条件: dynamic range が小さければ scaling しない。
+    #[test]
+    fn test_q_diagonal_scaling_skips_uniform_diagonal() {
+        // Q = diag(1.0, 2.0) — 範囲 2 で trigger 閾値 1e6 未満
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        assert!(try_q_diagonal_scaling(&prob).is_none(), "narrow Q range では trigger しない");
+    }
+
+    /// Q-diagonal scaling: ill-conditioned diagonal Q で scaling と unscale が
+    /// roundtrip で一致することを確認する (QPLIB_9002 系の base 検証)。
+    /// Q_OFFDIAG_TOL=1e-10 未満は zero 扱いとして range 計算から除外されるため、
+    /// 本テストは positive Q で 1e-7 〜 2.0 (range 2e7 > trigger 1e6) を使う。
+    #[test]
+    fn test_q_diagonal_scaling_roundtrip() {
+        // Q = diag(1e-7, 2.0) — range 2e7 で trigger
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e-7, 2.0], 2, 2).unwrap();
+        // c = [-3, -4] (適当な linear)
+        let c = vec![-3.0, -4.0];
+        // 1 つの Eq 制約: x0 + x1 = 1 (well-cond)
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
+        let prob = QpProblem::new(
+            q.clone(), c.clone(), a.clone(), b.clone(), bounds.clone(),
+            vec![crate::problem::ConstraintType::Eq],
+        ).unwrap();
+
+        let (scaled, col_scales) = try_q_diagonal_scaling(&prob)
+            .expect("ill-cond diag Q では trigger するべき");
+        // Q' diagonal は uniform 1.0 (within ε)
+        let q_s = &scaled.q;
+        for col in 0..2 {
+            for k in q_s.col_ptr[col]..q_s.col_ptr[col + 1] {
+                if q_s.row_ind[k] == col {
+                    assert!(
+                        (q_s.values[k] - 1.0).abs() < 1e-12,
+                        "Q' diag should be ~1.0, got {} at col {}", q_s.values[k], col
+                    );
+                }
+            }
+        }
+        // 実装の col_scales[j] = 1/sqrt(Q_jj) のとき:
+        //   bounds_s[j] = bounds[j] / col_scales[j]  (実装: scaled bounds = bounds / D)
+        // col 0: Q=1e-7, col_scales = 1/√(1e-7) ≈ 3162.3, bounds_s = 100 / 3162.3 ≈ 0.0316
+        // col 1: Q=2.0,  col_scales = 1/√2 ≈ 0.707,         bounds_s = 100 / 0.707 ≈ 141.4
+        assert!((col_scales[0] - 1.0 / (1e-7_f64).sqrt()).abs() < 1e-3);
+        assert!((col_scales[1] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-12);
+        assert!((scaled.bounds[0].1 - 100.0 / col_scales[0]).abs() < 1e-9);
+        assert!((scaled.bounds[1].1 - 100.0 / col_scales[1]).abs() < 1e-6);
+    }
+
+    /// Q-diagonal scaling: 解 x が unscale roundtrip で正しく復元される。
+    #[test]
+    fn test_q_diagonal_scaling_unscale_roundtrip() {
+        // Q = diag(1e-12, 2.0), c=[-3,-4], A=[1,1] x = 1, bounds=[0,100]
+        // Q-scaling 適用 → solve_qp_v2 で解いて、unscale 後に primal feas が
+        // 元問題で satisfied されるかを smoke check。
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e-12, 2.0], 2, 2).unwrap();
+        let c = vec![-3.0, -4.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
+        let prob = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![crate::problem::ConstraintType::Eq],
+        ).unwrap();
+
+        let opts = SolverOptions::default();
+        let result = solve_qp_v2(&prob, &opts);
+        assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+        // Ax = b 検証
+        let ax = prob.a.mat_vec_mul(&result.solution).unwrap();
+        assert!((ax[0] - 1.0).abs() < 1e-6, "Ax=b orig 空間で satisfied");
+        // bounds satisfied
+        for j in 0..2 {
+            let (lb, ub) = prob.bounds[j];
+            assert!(result.solution[j] >= lb - 1e-9);
+            assert!(result.solution[j] <= ub + 1e-9);
+        }
+    }
+}

@@ -422,6 +422,139 @@ mod tests {
             "dual ≈ 1.0, got {}", result.dual_solution[0]);
     }
 
+    /// SingletonRow で FR var が presolve で fix されたときの dual 復元が KKT を満たすか。
+    ///
+    /// Setup:
+    ///   3 vars (x, y, z) all FR
+    ///   Eq row 0: 3*x = 6           → singleton, x = 2 (presolve で fix)
+    ///   Eq row 1: x + y + z = 5     → 縮約後 y + z = 3
+    ///   Q = diag(0, 1, 1), c = [0, -2, -2]
+    ///   min 0.5(y² + z²) - 2y - 2z  s.t. above
+    ///
+    /// 解析解:
+    ///   y = z = 1.5 (Lagrangian: y - 2 + λ = 0, λ = 0.5)
+    ///   y_row1 = 0.5  (Eq dual)
+    ///   y_row0 = -1/6 (KKT for x: 3*y_row0 + 1*y_row1 = 0)
+    ///
+    /// バグ: postsolve は singleton row の y[row0] を 0 fill するため、
+    ///   x の KKT 残差 = 0 + 0 + 3*0 + 1*0.5 = 0.5 ≠ 0 になる。
+    /// 修正後は y_row0 が再構築されて r_d ≈ 0 になるべき。
+    #[test]
+    fn test_postsolve_singleton_row_dual_recovery() {
+        let n = 3usize;
+        let m = 2usize;
+        // Q = diag(0, 1, 1)。col 0 (x) は対角 Q なし、col 1,2 (y,z) は Q=1。
+        let q = CscMatrix::from_triplets(&[1, 2], &[1, 2], &[1.0, 1.0], n, n).unwrap();
+        let c = vec![0.0, -2.0, -2.0];
+        // A:
+        //   row 0: 3*x = 6           → A[0,0]=3
+        //   row 1: 1*x + 1*y + 1*z = 5  → A[1,0]=1, A[1,1]=1, A[1,2]=1
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 1, 1],
+            &[0, 0, 1, 2],
+            &[3.0, 1.0, 1.0, 1.0],
+            m, n,
+        ).unwrap();
+        let b = vec![6.0, 5.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n]; // 全 FR
+        let constraint_types = vec![
+            crate::problem::ConstraintType::Eq,
+            crate::problem::ConstraintType::Eq,
+        ];
+        let prob = QpProblem::new(q, c, a, b, bounds, constraint_types).unwrap();
+
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&prob, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "should converge");
+        // x ≈ 2, y ≈ z ≈ 1.5
+        assert!((result.solution[0] - 2.0).abs() < 1e-5, "x≈2 (fixed by singleton), got {}", result.solution[0]);
+        assert!((result.solution[1] - 1.5).abs() < 1e-5, "y≈1.5, got {}", result.solution[1]);
+        assert!((result.solution[2] - 1.5).abs() < 1e-5, "z≈1.5, got {}", result.solution[2]);
+
+        // KKT 残差を元空間で計算: r_d[j] = (Qx)[j] + c[j] + (A^T y)[j]
+        // (FR 変数なので bound_contrib = 0)
+        let qx = prob.q.mat_vec_mul(&result.solution).unwrap();
+        let aty = prob.a.transpose().mat_vec_mul(&result.dual_solution).unwrap();
+        let mut max_rd = 0.0_f64;
+        for j in 0..n {
+            let r = (qx[j] + prob.c[j] + aty[j]).abs();
+            max_rd = max_rd.max(r);
+        }
+        // x の stationarity: y_row0 が正しく復元されていれば |r_d[0]| < 1e-6
+        // バグ未修正状態では r_d[0] ≈ 0.5 (= y_row1 の漏れ)
+        assert!(
+            max_rd < 1e-6,
+            "max KKT residual should be ≈ 0, got {} (bug: postsolve dropped singleton-row dual)",
+            max_rd
+        );
+    }
+
+    /// Ill-scaled A での dual 復元精度: refine_dual_lsq は LDL(A·A^T) を使うため
+    /// cond(A·A^T) = cond(A)² で forward error が増幅される。cond(A)≈1e6 級では
+    /// LDL ε × cond² ≈ 2e-4 absolute、これが orig 空間の dual 残差に乗る。
+    ///
+    /// 本テストは「小規模だが ill-scaled な問題」で QPILOTNO 系の精度限界を
+    /// 再現する: presolve fix + ill-scaled A → LSQ の精度限界で KKT 残差残る。
+    /// QR-based LSQ への置換 / DD LDL solve で改善見込み (別タスク)。
+    #[test]
+    fn test_postsolve_dual_recovery_ill_scaled() {
+        // 4 vars (x1, x2, x3, x4) all FR, 3 Eq constraints.
+        //   row 0: 1e-3 * x1 = 1e-3       → singleton, x1 = 1 (presolve fix)
+        //   row 1: 1e6 * x1 + x2 = 1e6 + 1 → well-cond だが huge entry
+        //   row 2: x3 + x4 = 2
+        // Q = diag(0, 1, 1, 1), c = [0, -2, -2, -2]
+        //   y, z, w で 0.5y² + 0.5z² + 0.5w² - 2y - 2z - 2w を最小化。
+        // 解析解: x1=1, x2=1, x3=x4=1。dual y_row0 が大きな値で復元されることが必要。
+        let n = 4usize;
+        let m = 3usize;
+        let q = CscMatrix::from_triplets(&[1, 2, 3], &[1, 2, 3], &[1.0, 1.0, 1.0], n, n).unwrap();
+        let c = vec![0.0, -2.0, -2.0, -2.0];
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 1, 2, 2],
+            &[0, 0, 1, 2, 3],
+            &[1e-3, 1e6, 1.0, 1.0, 1.0],
+            m, n,
+        ).unwrap();
+        let b = vec![1e-3, 1e6 + 1.0, 2.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
+        let constraint_types = vec![crate::problem::ConstraintType::Eq; 3];
+        let prob = QpProblem::new(q, c, a, b, bounds, constraint_types).unwrap();
+
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&prob, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal);
+
+        // primal は OK
+        assert!((result.solution[0] - 1.0).abs() < 1e-5);
+        assert!((result.solution[1] - 1.0).abs() < 1e-5);
+        assert!((result.solution[2] - 1.0).abs() < 1e-5);
+        assert!((result.solution[3] - 1.0).abs() < 1e-5);
+
+        // KKT 残差 (元空間) 計算
+        let qx = prob.q.mat_vec_mul(&result.solution).unwrap();
+        let aty = prob.a.transpose().mat_vec_mul(&result.dual_solution).unwrap();
+        let mut max_rd = 0.0_f64;
+        let mut max_aty = 0.0_f64;
+        for j in 0..n {
+            let r = (qx[j] + prob.c[j] + aty[j]).abs();
+            max_rd = max_rd.max(r);
+            max_aty = max_aty.max(aty[j].abs());
+        }
+        // 相対 KKT 残差。eps=1e-6 通過を要求。
+        let denom = (1.0_f64).max(max_aty);
+        let rel = max_rd / denom;
+        // 現在の LDL(A·A^T) ベースの dual 復元では cond(A)≈1e6 で cond²=1e12 が
+        // ε≈2e-16 に乗り、abs error ≈ 2e-4 → relative ≈ 2e-10..1e-6 に落ちる。
+        // この閾値 1e-5 は「ill-scaled でも妥当な精度を維持」する目安として設定。
+        // QPILOTNO (cond≈3e12) はこの閾値も超える。
+        assert!(
+            rel < 1e-5,
+            "ill-scaled でも relative KKT 残差は 1e-5 以下を維持すべき (got {})",
+            rel
+        );
+    }
+
     /// postsolve後にpfeas/dfeas/gapがfinal_residualsと整合して伝搬されることを確認
     #[test]
     fn test_postsolve_preserves_residuals() {
