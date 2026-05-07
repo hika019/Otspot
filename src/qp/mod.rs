@@ -98,7 +98,6 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         SolveStatus::Optimal => {
             let x = result.solution.clone();
             // c^T x + obj_offset (QPS の N-row RHS による定数項)。
-            // 旧実装は obj_offset を加算しておらず test_solve_with_obj_offset で fail していた既存バグ。
             let obj: f64 = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>()
                 + problem.obj_offset;
             // 双対解はSimplex出力をそのまま使用（展開なし）
@@ -235,10 +234,6 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     // 対角に有意に負な値があれば → 非PSD確定（十分条件）
     // 閾値は QPS encoding noise を相対許容: ‖Q‖_max × QPS_NEG_TOL_RATIO。
     // ‖Q‖_max=0 (Q=0 の LP) は absolute floor 1e-12 で扱う。
-    //
-    // 旧 absolute -1e-10 は ‖Q‖_max≫1 の問題で「相対 1e-13 級の noise」を
-    // 弾けず、逆に ‖Q‖_max=O(1) で encoded noise から生じる -1e-7 級の
-    // round-off を非PSDと誤判定し得た。relative threshold で回避。
     const QPS_NEG_TOL_RATIO: f64 = 1e-6;
     let neg_tol = (q_abs_max * QPS_NEG_TOL_RATIO).max(1e-12);
     for col in 0..n {
@@ -256,19 +251,10 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
         return true;
     }
 
-    // Cholesky 用 regularization eps:
-    //   Q が「数学的には PSD だが QPS の 6 桁丸めで僅かに不定」のケース
-    //   (Maros VALUES: ‖Q‖_max=1.0 で min eig=-1.27e-5 ≈ ‖Q‖×1.3e-5、
-    //    202×202 covariance 行列の rounding noise) を救うため、入力スケール
-    //    に応じた eps を採用する。‖Q‖_max × 1e-4 (rounding 噂値の上限を
-    //    数倍超えるマージン)。
-    //   absolute floor 1e-8 は ‖Q‖_max=0 / 極小ケースで Cholesky の数値安定を
-    //   担保 (旧仕様と互換)。
-    //
-    // 旧 absolute eps=1e-8 は ‖Q‖_max=O(1) で encoding rounding に対する許容が
-    // 不足し、本来 PSD だが round-off で僅かに不定な Q を弾いていた。
-    // QPLIB の本物の非凸 (例 0018: 大きな対角負値、2712: 明示的な不定 Q) は
-    // 上記閾値を越えるため、依然として正しく false を返す。
+    // Cholesky 用 regularization eps: ‖Q‖_max × CHOL_EPS_RATIO で入力スケールに追従、
+    // ‖Q‖_max=0 ケースには absolute floor 1e-8。「数学的には PSD だが QPS 6 桁丸めで
+    // 僅かに不定」(Maros VALUES など) を救う。本物の非凸 (QPLIB 0018, 2712) は閾値を
+    // 越えて false を返す。
     const CHOL_EPS_RATIO: f64 = 1e-4;
     let eps = (q_abs_max * CHOL_EPS_RATIO).max(1e-8);
 
@@ -411,8 +397,6 @@ pub(crate) const FX_TOL: f64 = 1e-12;
 /// presolve で縮約された bound_duals を元問題空間に展開する。
 /// reduced_bounds に対応する bound_duals を、orig_bounds に対応する形で再構築。
 /// 除去された変数の bound_dual は 0.0 (近似) で埋める。
-///
-/// 旧 mod.rs::solve_qp_with L815-887 と同等のロジックを v2 から再利用するため抽出。
 pub(crate) fn remap_bound_duals_to_orig(
     presolve_result: &crate::presolve::QpPresolveResult,
     orig_bounds: &[(f64, f64)],
@@ -509,45 +493,83 @@ pub(crate) fn refine_dual_lsq(
     result: &mut crate::problem::SolverResult,
     deadline: Option<std::time::Instant>,
 ) {
+    use twofloat::TwoFloat;
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
-    if let Some(y_new) = compute_lsq_dual_y(problem, result) {
-        let aty_old = problem.a.transpose().mat_vec_mul(&result.dual_solution).unwrap_or(vec![0.0; problem.num_vars]);
-        let aty_new = problem.a.transpose().mat_vec_mul(&y_new).unwrap_or(vec![0.0; problem.num_vars]);
-        let qx = match problem.q.mat_vec_mul(&result.solution) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, problem.num_vars);
-        let mut max_resid_old = 0.0_f64;
-        let mut max_resid_new = 0.0_f64;
-        for j in 0..problem.num_vars {
-            let (lbj, ubj) = problem.bounds[j];
-            if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
-                continue;
+    let Some(y_new) = compute_lsq_dual_y(problem, result) else { return; };
+    let n = problem.num_vars;
+    // ill-conditioned 問題 (QPILOTNO: ‖A‖=5.85e6, cond=3e12) で f64 mat_vec の
+    // cancellation noise が真の残差より大きく、KKT-guard で IPM 由来の正しい y が
+    // LSQ y に置換される事故が起きる。bench (`compute_dfeas_orig`) と同じ DD で
+    // 比較する。
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = result.solution[col];
+        let cs = problem.q.col_ptr[col];
+        let ce = problem.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = problem.q.row_ind[k];
+            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(problem.q.values[k], xv);
+        }
+    }
+    let aty_dd = |y: &[f64]| -> Vec<TwoFloat> {
+        let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], y[row]);
             }
-            let r_old = (qx[j] + problem.c[j] + aty_old[j] + bound_contrib[j]).abs();
-            let r_new = (qx[j] + problem.c[j] + aty_new[j] + bound_contrib[j]).abs();
-            max_resid_old = max_resid_old.max(r_old);
-            max_resid_new = max_resid_new.max(r_new);
         }
-        if max_resid_new < max_resid_old {
-            result.dual_solution = y_new;
+        acc
+    };
+    let aty_old_dd = aty_dd(&result.dual_solution);
+    let aty_new_dd = aty_dd(&y_new);
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let mut max_resid_old = 0.0_f64;
+    let mut max_resid_new = 0.0_f64;
+    for j in 0..n {
+        let (lbj, ubj) = problem.bounds[j];
+        if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
+            continue;
         }
+        let r_old_dd = qx_dd[j]
+            + TwoFloat::from(problem.c[j])
+            + aty_old_dd[j]
+            + TwoFloat::from(bound_contrib[j]);
+        let r_new_dd = qx_dd[j]
+            + TwoFloat::from(problem.c[j])
+            + aty_new_dd[j]
+            + TwoFloat::from(bound_contrib[j]);
+        max_resid_old = max_resid_old.max(f64::from(r_old_dd).abs());
+        max_resid_new = max_resid_new.max(f64::from(r_new_dd).abs());
+    }
+    if max_resid_new < max_resid_old {
+        result.dual_solution = y_new;
     }
 }
 
-/// LSQ で y を計算する核心ロジック (KKT-guard なし)。`refine_dual_lsq` の内部実装と
-/// 共有する。primal が動いた直後の force-update 用に外部からも呼べるよう pub(crate) 化。
+/// LSQ で y を計算する核心ロジック (KKT-guard なし)。
 ///
-/// 解法: A^T y = -(Q*x + c + bound_contrib) の最小ノルム解を
-/// 正規方程式 (A * A^T) y = A * r で求める (LDL)。
-/// 失敗 (LDL 失敗 / NaN) 時は None を返す。
+/// 解法: A^T y = target ( = -(Q*x + c + bound_contrib) ) の最小二乗解を
+/// 正規方程式 (A·A^T) y = A·target を LDL で解いて求めたあと、
+/// **DD (TwoFloat) 精度の残差で iterative refinement** を行う。
+///
+/// IR の動機: ill-conditioned 問題 (QPILOTNO: cond(A)≈3e6 → cond(A·A^T)≈9e12) で
+/// 1 回 solve すると相対誤差が cond(A·A^T)·ε ≈ 2e-3 残り、bench DFEAS で `aty[col]`
+/// の真値 (DD 値) と f64 計算値が大きく乖離する。Wilkinson 流 IR で残差を DD 精度で
+/// 計算し直すと backward error は cond·ε² ≈ 5e-26 まで落ち、ill-conditioned でも
+/// f64 の限界近くまで refine できる。
+///
+/// 失敗 (size 上限・LDL 失敗・NaN) 時は None を返す。
 pub(crate) fn compute_lsq_dual_y(
     problem: &QpProblem,
     result: &crate::problem::SolverResult,
 ) -> Option<Vec<f64>> {
+    use twofloat::TwoFloat;
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if m == 0 || result.solution.len() != n {
@@ -555,36 +577,100 @@ pub(crate) fn compute_lsq_dual_y(
     }
     // 大規模問題では A·A^T (m×m sparse、m=186k for BOYD2) の LDL factorization が
     // 数十 GB メモリを確保するため skip。`refine_primal_lsq` の同名閾値と統一。
-    // refine_dual_lsq は IPM iterations=0 の timeout でも呼ばれるため (core.rs:86)、
-    // size guard なしだと BOYD2 で post-IPM AAT factorize が memory peak を倍増させる。
     if n + m > LSQ_DUAL_SIZE_LIMIT {
         return None;
     }
     let x = &result.solution;
-    let qx = problem.q.mat_vec_mul(x).ok()?;
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
-    let r_full: Vec<f64> = (0..n)
-        .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
-        .collect();
-    let aat = build_aat_upper_csc(&problem.a, n, m)?;
-    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
-    let mut rhs = vec![0.0_f64; m];
-    for j in 0..n {
-        let start = problem.a.col_ptr[j];
-        let end = problem.a.col_ptr[j + 1];
-        for k in start..end {
-            let i = problem.a.row_ind[k];
-            if i < m {
-                rhs[i] += problem.a.values[k] * r_full[j];
-            }
+
+    // target_dd[j] = -(Q*x + c + bound_contrib)[j] を DD で精密に組み立てる。
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = x[col];
+        let cs = problem.q.col_ptr[col];
+        let ce = problem.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = problem.q.row_ind[k];
+            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
-    let mut y_new = vec![0.0_f64; m];
-    factor.solve(&rhs, &mut y_new);
-    if y_new.iter().any(|v| !v.is_finite()) {
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let target_dd: Vec<TwoFloat> = (0..n)
+        .map(|j| {
+            -(qx_dd[j]
+                + TwoFloat::from(problem.c[j])
+                + TwoFloat::from(bound_contrib[j]))
+        })
+        .collect();
+
+    let aat = build_aat_upper_csc(&problem.a, n, m)?;
+    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
+
+    // Helper: rhs_i = sum_j A[i, j] * v[j]  (CSC で col 走査して row へ加算、DD)
+    let build_rhs_dd = |v_dd: &[TwoFloat]| -> Vec<f64> {
+        let mut acc: Vec<TwoFloat> = vec![zero_dd; m];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                if row < m {
+                    let v_f64 = f64::from(v_dd[col]);
+                    let lo = v_dd[col] - TwoFloat::from(v_f64);
+                    acc[row] = acc[row]
+                        + TwoFloat::new_mul(problem.a.values[k], v_f64)
+                        + TwoFloat::new_mul(problem.a.values[k], f64::from(lo));
+                }
+            }
+        }
+        acc.iter().map(|&v| f64::from(v)).collect()
+    };
+
+    // 初期 solve: y_0 = (A·A^T)^{-1} A · target
+    let rhs0 = build_rhs_dd(&target_dd);
+    let mut y_curr = vec![0.0_f64; m];
+    factor.solve(&rhs0, &mut y_curr);
+    if y_curr.iter().any(|v| !v.is_finite()) {
         return None;
     }
-    Some(y_new)
+
+    // IR: r = target - A^T y を DD で計算 → AAT dy = A r → y += dy。
+    // 反復ごとに r_inf の改善率が IR_STAGNATE_RATIO を割れば止める。
+    const IR_MAX_ITERS: usize = 5;
+    const IR_STAGNATE_RATIO: f64 = 0.5;
+    let mut prev_r_inf = f64::INFINITY;
+    for _ in 0..IR_MAX_ITERS {
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = problem.a.col_ptr[col];
+            let ce = problem.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = problem.a.row_ind[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(problem.a.values[k], y_curr[row]);
+            }
+        }
+        let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
+        let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
+        if !r_inf.is_finite() {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
+            break;
+        }
+        prev_r_inf = r_inf;
+
+        let rhs_dy = build_rhs_dd(&r_dd);
+        let mut dy = vec![0.0_f64; m];
+        factor.solve(&rhs_dy, &mut dy);
+        if dy.iter().any(|v| !v.is_finite()) {
+            break;
+        }
+        for i in 0..m {
+            y_curr[i] += dy[i];
+        }
+    }
+
+    Some(y_curr)
 }
 
 /// 元空間 primal feasibility が borderline (LISWET9/12: pf ≈ 1e-6 で
@@ -1195,16 +1281,9 @@ pub(crate) fn refine_kkt_iterative(
         eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
             n, m, pre_pf, pre_df, target_pf, dd_mode);
     }
-    // Gate: bench (`compute_dfeas_orig` / `kkt_residual_rel`) と同じ **OSQP-style 相対**
-    // 残差で判定する。target_pf は bench の eps 通過判定 (pf_rel < eps && df_rel < eps)
-    // と統一。
-    //   旧実装: 絶対 pre_pf/pre_df < user_eps を gate にしていたため、||A^Ty|| が 1e8
-    //   級の問題 (Maros QPILOTNO) で「絶対 df=4.2e2 だが相対 dfr=3.4e-6」のように
-    //   bench の relative 基準では PASS に近いケースで refine を試みても absolute を
-    //   下げきれず、bench とは別の方向に最適化していた。
-    //   新実装: 相対残差 (pf_rel / df_rel) を bench と同じ式で計算し、それを判定軸とする。
-    //
-    // どちらか一方でも target 超過なら refine を試みる (IR は両方を同時に reduce する)。
+    // Gate: bench (`compute_dfeas_orig` / `kkt_residual_rel`) と同じ OSQP-style 相対残差で
+    // 判定する。target_pf は bench の eps 通過判定 (pf_rel < eps && df_rel < eps) と統一。
+    // 片方でも target 超過なら refine を試みる (IR は両方を同時に reduce する)。
     if pre_pf_rel < target_pf && pre_df_rel < target_pf {
         if trace {
             eprintln!("REFINE_KKT skip: pre_pf_rel={:.3e} pre_df_rel={:.3e} both < target_pf",
@@ -1215,10 +1294,8 @@ pub(crate) fn refine_kkt_iterative(
 
     let mut accepted = 0_usize;
     // 残差悪化許容: pre_rel の 2x または target_pf×100 (どちらか大きい方)。これ以上は
-    // revert (構造的悪化)。pf_rel/df_rel どちらも guardrail で抑える。
-    //   target_pf×100 floor は「machine-precision 級の pre 値が事故で increase しても
-    //   target_pf×100 までは許容」する設計。target_pf=1e-6 なら 1e-4 が floor。
-    //   旧実装の absolute 1e-7 floor は ill-conditioned な問題で過剰に厳しかった。
+    // revert (構造的悪化)。target_pf×100 floor は machine-precision 級の pre 値が事故で
+    // 増えても target_pf×100 までは許容する設計 (target=1e-6 なら 1e-4 が floor)。
     const RESID_TOLERANCE_FACTOR: f64 = 2.0;
     const RESID_FLOOR_RATIO: f64 = 100.0;
     let resid_floor = target_pf * RESID_FLOOR_RATIO;
@@ -1272,9 +1349,7 @@ pub(crate) fn refine_kkt_iterative(
             clip_amt = clip_amt.max(amt);
             if amt > 0.0 {
                 clip_count += 1;
-                if diag_on {
-                    clip_top.push((j, amt));
-                }
+                if diag_on { clip_top.push((j, amt)); }
             }
             x_new[j] = clipped;
         }
@@ -1306,11 +1381,7 @@ pub(crate) fn refine_kkt_iterative(
                 iter, pf_cur, pf_new, df_cur, df_new, dx_inf, dy_inf, clip_amt);
         }
 
-        // Acceptance criterion (joint primal/dual progress, **rel** ベース):
-        //   1. score (= max(pf_rel, df_rel)) が strictly 減少 → bench PASS 距離が縮まった
-        //   2. かつ pf_rel, df_rel どちらも guardrail 内 → 暴発無し
-        // bench と同じ rel 残差で判定するため、pf が機械精度に張り付いていても df_rel
-        // が改善する余地があれば accept する。
+        // Acceptance criterion: max(pf_rel, df_rel) が strictly 減少 + 両者 guardrail 内。
         let score_cur = pf_cur.max(df_cur);
         let score_new = pf_new.max(df_new);
         let progress = score_new < score_cur;
@@ -1892,15 +1963,10 @@ mod tests {
         assert!((result.objective - 0.5).abs() < EPS, "T20: obj ≈ 0.5");
     }
 
-    /// T23: presolveパス pfeas検証 — 大行ノルム制約でのRuiz scaling耐性確認
+    /// T23: presolveパス pfeas検証 — 大行ノルム制約での Ruiz scaling 耐性確認
     ///
-    /// 旧T23はverify_post_ruiz_unscaleを恒等スケーラー(e=[1.0])で直接テストしていたため、
-    /// `* e_i` vs `/ e_i` のバグを検出できなかった。
-    /// 新T23は行ノルムが大きい制約（Ruiz scaling後にe[i]<<1になる）を含む問題を
-    /// solve_qp_withで解き、元問題でpfeasが正しく計算されることを確認する。
-    ///
-    /// ★旧コードのバグ: e[i]=0.01のとき `* 0.01` で pfeas を100倍小さく評価→偽Optimalを見逃す
-    /// 新コード: 元問題(A,b)で直接A*x-bを計算するためe[i]に依存しない
+    /// 行ノルムが大きい制約 (Ruiz scaling 後に e[i]<<1) を含む問題で、元問題 (A, b)
+    /// で直接 A*x - b を計算する pfeas 評価が e[i] に依存せず正しく動くことを確認する。
     #[test]
     fn test_presolve_pfeas_large_row_norm() {
         // min x^2  s.t. 1000*x <= -500  (解: x=0 は不可、問題は実行不可能)
@@ -1931,11 +1997,9 @@ mod tests {
         );
     }
 
-    /// T24: presolveパス bfeas検証 — bounds付き問題でOptimal解が境界を満たすことを確認
-    ///
-    /// 旧T24はverify_post_ruiz_unscaleに人工的な違反解を注入して直接テストしていた。
-    /// 新T24はsolve_qp_with経由で、boundsを持つ問題が正しくOptimalを返し、
-    /// post-postsolve bfeasチェックが正常解を誤降格しないことを確認する。
+    /// T24: presolveパス bfeas検証 — bounds付き問題で Optimal 解が境界を満たすことを確認。
+    /// solve_qp_with 経由で bounds を持つ問題を解き、post-postsolve bfeas チェックが
+    /// 正常解を誤降格しないことを確認する。
     #[test]
     fn test_presolve_bfeas_bounded_problem() {
         // min x^2  s.t. なし  0 <= x <= 1  (最適解: x=0)
@@ -1955,11 +2019,9 @@ mod tests {
         assert!(x <= 1.0 + 1e-4, "T24: x <= ub=1, got x={x}");
     }
 
-    /// T25: post-postsolve pfeas+bfeas — 正常解でOptimalを維持することを確認
-    ///
-    /// 旧T25はverify_post_ruiz_unscaleにx=[0]を注入してOKを確認。
-    /// 新T25はsolve_qp_with経由で制約+bounds付き問題を解き、
-    /// post-postsolveチェックが正常解を誤降格しないことを確認する。
+    /// T25: post-postsolve pfeas+bfeas — 正常解で Optimal を維持することを確認。
+    /// solve_qp_with 経由で制約 + bounds 付き問題を解き、post-postsolve チェックが
+    /// 正常解を誤降格しないことを確認する。
     #[test]
     fn test_presolve_pfeas_bfeas_ok() {
         // min x^2  s.t. x <= 1.0  0 <= x <= 0.5  (最適解: x=0)

@@ -38,28 +38,48 @@ fn compute_bound_contrib(
 
 /// 元空間 KKT stationarity 残差 (OSQP 式: 全体相対化, 最大値)。
 ///
-/// 旧実装は成分ごと正規化してから max を取ったが、これは「他項全部 0 に近い 1 変数」
-/// で簡単に膨らむ過剰判定だった (Marginal 5件で dfr=1.5e-6 越えの主因)。
-/// OSQP/Gurobi 等は `||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))` と
-/// 全体最大で正規化する標準形式を採用しており、本実装もそれに合わせる。
+/// `||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))` (OSQP 標準)。
+/// 成分ごと正規化版は「他項が 0 に近い 1 変数」で過剰判定する欠陥があった。
 ///
-/// FX 変数は dual が postsolve で 0 埋めされる仕様のため評価から除外する。
+/// **DD (TwoFloat) 精度** で計算する: ill-conditioned 問題 (QPILOTNO: cond≈3e12) で
+/// f64 mat_vec のキャンセル誤差が真の残差を埋もれさせ、bench `compute_dfeas_orig` (DD)
+/// と乖離する。同じ DD 演算で揃えないと Stage A/B/C/D の guard / 採否判定 / quality_score が
+/// noise を相手にして誤った収束判定をする。
+///
+/// FX 変数 (lb≈ub) と EmptyCol 変数は postsolve 慣例で bound_dual=0 埋めされるため
+/// KKT 評価から除外する (`compute_dfeas_orig` の除外条件と一致)。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
+    use twofloat::TwoFloat;
     let n = prob.bounds.len();
     if x.len() != n {
         return f64::INFINITY;
     }
-    let qx = match prob.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
-    let aty = if prob.a.nrows > 0 && !y.is_empty() {
-        match prob.a.transpose().mat_vec_mul(y) {
-            Ok(v) => v,
-            Err(_) => return f64::INFINITY,
+    let zero_dd = TwoFloat::from(0.0);
+    // qx[i] = sum_k Q[i, k] * x[k]
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = x[col];
+        let cs = prob.q.col_ptr[col];
+        let ce = prob.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = prob.q.row_ind[k];
+            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(prob.q.values[k], xv);
         }
+    }
+    // aty[col] = sum_row A[row, col] * y[row]
+    let aty_dd: Vec<TwoFloat> = if prob.a.nrows > 0 && !y.is_empty() {
+        let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = prob.a.col_ptr[col];
+            let ce = prob.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = prob.a.row_ind[k];
+                acc[col] = acc[col] + TwoFloat::new_mul(prob.a.values[k], y[row]);
+            }
+        }
+        acc
     } else {
-        vec![0.0; n]
+        vec![zero_dd; n]
     };
     let bound_contrib = compute_bound_contrib(prob.bounds, z, n);
     let mut max_r = 0.0_f64;
@@ -69,23 +89,22 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     let mut max_bnd = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
-        // FX 変数 (lb≈ub): presolve 慣例で除去 → bound_dual=0、KKT 評価から除外。
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
             continue;
         }
-        // EmptyCol 変数 (制約 A に登場しない): presolve で除去、bound_dual=0 慣例。
-        // この変数の stationarity = c[j] が 0 にならないため KKT 評価から除外する
-        // (refit_z_active_set / dual_solve_kkt_lsq の skip と整合、BD-T4 等で必要)。
         if prob.a.col_ptr.len() > j + 1
             && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0
         {
             continue;
         }
-        let r = (qx[j] + prob.c[j] + aty[j] + bound_contrib[j]).abs();
-        max_r = max_r.max(r);
-        max_qx = max_qx.max(qx[j].abs());
+        let r_dd = qx_dd[j]
+            + TwoFloat::from(prob.c[j])
+            + aty_dd[j]
+            + TwoFloat::from(bound_contrib[j]);
+        max_r = max_r.max(f64::from(r_dd).abs());
+        max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
         max_c = max_c.max(prob.c[j].abs());
-        max_aty = max_aty.max(aty[j].abs());
+        max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
         max_bnd = max_bnd.max(bound_contrib[j].abs());
     }
     let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
@@ -94,8 +113,7 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
 
 /// 元空間 primal 残差 (OSQP 式: 全体相対化, 最大値)。
 ///
-/// 旧実装は行ごと `(1 + rn + |b_i|)` 正規化 → max で、行ノルム小の制約で過剰に厳しい。
-/// OSQP 標準: `||Ax - b||_∞ / (1 + max(||Ax||_∞, ||b||_∞))` (制約型ごと violation を取る)。
+/// `||Ax - b||_∞ / (1 + max(||Ax||_∞, ||b||_∞))` (制約型ごと violation を取る)。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     if prob.a.nrows == 0 {
         return 0.0;
@@ -126,8 +144,7 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
 
 /// 元空間 bounds 違反 (OSQP 式: 全体相対化, 最大値)。
 ///
-/// 旧実装は絶対値 max でスケール無視 → bound が 1e10 の問題で 1e-6 違反が PASS にならない。
-/// OSQP 標準: `||violation||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))`。
+/// `||violation||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))`。
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     let mut max_v = 0.0_f64;
     let mut max_x = 0.0_f64;

@@ -41,54 +41,55 @@ fn run_ipm_with(
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
 
-    // Tier 2: presolve スケーリングを考慮した IPM eps の事前調整。
+    // presolve スケーリングを考慮した IPM eps の事前調整。
     //
-    // 動機: presolve の LargeCoeffRowScale (Phase1: σ=1/√rmax) + constraint_precond
-    //       (Phase2: σ=1/√rmax) で合成 σ_total = 1/orig_row_max 倍にスケーリングされる。
-    //       IPM が scaled 空間で eps を達成しても、unscale で 1/σ_total 倍に絶対残差が
-    //       増幅され、orig 空間で eps を満たさない (QPILOTNO で 6.77 桁悪化を実証)。
+    // presolve の LargeCoeffRowScale (Phase1) + constraint_precond (Phase2) で行が
+    // σ 倍されるため、unscale 時に primal 残差が 1/σ 倍に増幅される。さらに presolve が
+    // Ruiz scaling を適用していれば、
+    //   r_p_scaled[i] = e[i] × r_p_orig[i]                 → ||r_p_orig|| ≤ ||r_p_scaled|| / e_min
+    //   r_d_scaled[j] = (c × d[j]) × r_d_orig[j]           → ||r_d_orig|| ≤ ||r_d_scaled|| / (c × d_min)
+    // のいずれの方向でも増幅される。
     //
-    // 修正: IPM に渡す eps を eps × σ_total に厳しくして、unscale 後に orig eps を
-    //       満たす状態を IPM 完了時点で作る。
+    // IPM に渡す eps を `eps × min(σ_total, c × d_min, e_min)` に厳しくし、unscale 後の
+    // orig 空間で eps を満たす状態を IPM 完了時点で作る。dual 側 (c × d_min) を取りこぼすと
+    // QPILOTNO のように IPM が scaled 空間で nr_d_rel=1e-13 まで降りても unscale 後の
+    // 元空間で dfeas_rel=3.4e-6 と eps=1e-6 を超える事象が起きる。
     //
-    // 適用条件: σ_total < SIGMA_TIGHTEN_THRESHOLD のときのみ (大きな増幅が予想される問題)。
-    //   保守的な閾値: 0.01 (= 100 倍以上の増幅が予想される問題のみ調整)。
-    //   全問題で適用すると IPM の収束時間が無闇に増える可能性あり。
+    // SIGMA_TIGHTEN_THRESHOLD: 100 倍以上の増幅が予想される問題のみ調整。閾値以上では
+    // 不要な eps tighten で IPM 収束が悪化するため適用しない。
     //
-    // 限界: σ_total が極端に小さいと eps_scaled が f64 の達成精度限界 (cond×u)
-    //       を下回り IPM が達成できない。その場合は IPM が SuboptimalSolution で
-    //       正直に申告 (現状動作と同じ)、嘘の Optimal は出さない。
+    // 限界: σ_total が極端に小さいと eps_scaled が cond×u 限界を下回り IPM が達成できない。
+    // その場合は IPM が SuboptimalSolution で正直に申告し、Optimal を偽装しない。
     const SIGMA_TIGHTEN_THRESHOLD: f64 = 0.01;
-    let mut sigma_total = 1.0_f64;
+    // 行ごとの primal scale の積 (LargeCoeffRowScale × Ruiz E の合成) の最小値で primal
+    // 増幅率を推定。dual 増幅率は Ruiz の (c × d_min)。両者の小さい方を採用。
+    let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
             let local_min = row_scales.iter()
                 .filter(|&&v| v > 0.0 && v.is_finite())
                 .fold(f64::INFINITY, |a, &v| a.min(v));
             if local_min.is_finite() {
-                sigma_total *= local_min;
+                primal_row_scale_min *= local_min;
             }
         }
     }
-    // Ruiz scaler の row scale e[i] も含める。
-    //
-    // 動機: A_scaled = E × A × D, b_scaled = E × b の関係から、
-    //       r_p_scaled[i] = e[i] × r_p_orig[i]
-    //   →  ||r_p_orig||_inf ≤ ||r_p_scaled||_inf / min(e[i])
-    //   IPM は scaled 空間で eps を要求するが、unscale 後 orig 空間で 1/min(e[i]) 倍に
-    //   増幅される。LargeCoeffRowScale だけでなく Ruiz の e も Tier 2 で考慮すべき。
-    //
-    // 実証 (QPLIB_10034): IPM scaled pres_rel=3.6e-7 (eps=1e-6 達成) が orig 空間で
-    //   3.083e-4 (308 倍悪化)。原因は Ruiz の e min。Tier 2 拡張で eps_scaled を更に
-    //   厳しくして救う試行。
+    let mut dual_col_scale_min = f64::INFINITY;
     if let Some(scaler) = &presolve_result.ruiz_scaler {
         let e_min = scaler.e.iter()
             .filter(|&&v| v > 0.0 && v.is_finite())
             .fold(f64::INFINITY, |a, &v| a.min(v));
         if e_min.is_finite() {
-            sigma_total *= e_min;
+            primal_row_scale_min *= e_min;
+        }
+        let d_min = scaler.d.iter()
+            .filter(|&&v| v > 0.0 && v.is_finite())
+            .fold(f64::INFINITY, |a, &v| a.min(v));
+        if d_min.is_finite() && scaler.c.is_finite() && scaler.c > 0.0 {
+            dual_col_scale_min = scaler.c * d_min;
         }
     }
+    let sigma_total = primal_row_scale_min.min(dual_col_scale_min);
     let opts_for_ipm: SolverOptions = if sigma_total < SIGMA_TIGHTEN_THRESHOLD {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
@@ -134,29 +135,17 @@ fn run_ipm_with(
         };
     }
 
-    // dual の post-process refinement (LSQ): scaled 空間で動かす方が IPM 出力との整合性が高い。
+    // dual の post-process refinement (LSQ) は **元空間に戻してから** Stage B/C で行う。
     //
-    // IPM が既に reduced 空間で kkt_rel < user_eps を達成しているなら refinement は
-    // 無駄 (改善余地なし)。大規模問題では AAT factorize が分単位かかるため skip 必須
-    // (QPLIB_8505: m=10001 で refine_dual_lsq 1 回 250s × 後段 fixed-point loop 8 回で
-    // 計 506s 浪費していた; IPM 完了時に既に kkt_rel=2.6e-13)。
-    if reduced.num_constraints > 0 {
-        let view_red = ProblemView {
-            q: &reduced.q,
-            a: &reduced.a,
-            c: &reduced.c,
-            b: &reduced.b,
-            bounds: &reduced.bounds,
-            constraint_types: &reduced.constraint_types,
-        };
-        let kkt_pre = kkt_residual_rel(
-            &view_red, &result.solution, &result.dual_solution, &result.bound_duals,
-        );
-        let user_eps = opts.ipm_eps();
-        if kkt_pre >= user_eps {
-            crate::qp::refine_dual_lsq(reduced, &mut result, opts.deadline);
-        }
-    }
+    // scaled 空間 (Ruiz 適用後) で refine_dual_lsq を回すと、ill-conditioned 問題で
+    // 「scaled 空間では LSQ-y が IPM-y より小さい残差を持つが、unscale 後の元空間では
+    //  LSQ-y のほうが残差が大きくなる」現象が起きる (QPILOTNO で実測)。原因は LSQ が
+    // L2 ノルムを最小化するため、スケール固有の residual 分布最適化に過度に当たる。
+    // IPM-y は元空間で正しい構造を持つので、scaled での "improvement" を捨てて、
+    // unscale 後に元空間で 1 度だけ LSQ refine + Stage B/C 反復で詰めるほうが安全。
+    //
+    // 大規模問題で AAT factorize が分単位かかる遅延も同時に回避する
+    // (Stage B/C で必要に応じて 1 回 factorize するだけで済む)。
 
     // [DIAG] POST_STAGE_TRACE: 後処理 chain で primal/kkt 残差がどこで膨らむか観測
     let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
@@ -188,7 +177,7 @@ fn run_ipm_with(
             max_b_red = max_b_red.max(b_i.abs());
         }
         let denom_red = 1.0 + max_ax_red.max(max_b_red);
-        eprintln!("POST_STAGE [scaled+reduced after IPM+refine_dual_lsq] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
+        eprintln!("POST_STAGE [IPM exit (scaled+reduced)] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
             pres_red, pres_abs_red, denom_red, kkt_red, reduced.num_vars, reduced.num_constraints);
     }
 
