@@ -125,19 +125,43 @@ fn compute_dfeas_orig(
     bound_duals: &[f64],
     reduced_costs: &[f64],
 ) -> (f64, f64) {
+    use twofloat::TwoFloat;
     if solution.is_empty() || solution.len() != prob.num_vars {
         return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
-    let qx = match prob.q.mat_vec_mul(solution) {
-        Ok(v) => v,
-        Err(_) => return (f64::NAN, f64::NAN),
-    };
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
-        match prob.a.transpose().mat_vec_mul(dual_solution) {
-            Ok(v) => v,
-            Err(_) => return (f64::NAN, f64::NAN),
+    // ill-scaled 問題 (Maros QPILOTNO: ‖A‖=5.85e6, cond=3e12) で
+    // f64 cancellation noise が真の残差を埋もれさせるため、Q*x と A^T*y は
+    // double-double 精度で計算する。bench の判定 (PASS/DFEAS_FAIL) に直結するため
+    // 真の精度を見せる必要がある。
+    //
+    // Q 格納慣例: spmv_q (src/qp/ipm/kkt.rs) と同じく **全要素格納の対称行列**
+    // (上下三角両方 stored)。symmetric duplication しないように直接 col×row 走査。
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = solution[col];
+        let cs = prob.q.col_ptr[col];
+        let ce = prob.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = prob.q.row_ind[k];
+            let v = prob.q.values[k];
+            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
         }
+    }
+    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = prob.a.col_ptr[col];
+            let ce = prob.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = prob.a.row_ind[k];
+                let v = prob.a.values[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, dual_solution[row]);
+            }
+        }
+        aty_dd.iter().map(|&v| f64::from(v)).collect()
     } else {
         vec![0.0; n]
     };
@@ -191,7 +215,13 @@ fn compute_dfeas_orig(
         {
             continue;
         }
-        let r = (qx[i] + aty[i] + bound_contrib[i] + prob.c[i]).abs();
+        // r も DD で組み立てて f64 化。qx/aty は既に DD-from-f64 だが
+        // 4 項の和も f64 にすると桁落ちしうるので DD で組み立てる。
+        let r_dd = TwoFloat::from(qx[i])
+            + TwoFloat::from(aty[i])
+            + TwoFloat::from(bound_contrib[i])
+            + TwoFloat::from(prob.c[i]);
+        let r = f64::from(r_dd).abs();
         dfeas_abs = dfeas_abs.max(r);
         max_qx = max_qx.max(qx[i].abs());
         max_c = max_c.max(prob.c[i].abs());
