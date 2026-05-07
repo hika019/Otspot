@@ -1427,16 +1427,27 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
     if result.solution.len() != n {
         return;
     }
+    use twofloat::TwoFloat;
     let x = &result.solution;
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
-        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
-            Ok(v) => v,
-            Err(_) => return,
+    // ill-conditioned 系で f64 mat_vec のキャンセル誤差が target 計算を狂わせないよう
+    // Q*x と A^T*y は DD で積算する。
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = x[col];
+        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
+            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
+    }
+    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = if problem.a.nrows > 0 && !result.dual_solution.is_empty() {
+        let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], result.dual_solution[problem.a.row_ind[k]]);
+            }
+        }
+        acc.iter().map(|&v| f64::from(v)).collect()
     } else {
         vec![0.0_f64; n]
     };
@@ -1501,6 +1512,10 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
         let r_post = (qx[j] + problem.c[j] + aty[j] + post_contrib[j]).abs();
         max_pre = max_pre.max(r_pre);
         max_post = max_post.max(r_post);
+    }
+    if std::env::var("REFIT_BD_TRACE").ok().as_deref() == Some("1") {
+        eprintln!("REFIT_BD: max_pre={:.3e} max_post={:.3e} accepted={}",
+            max_pre, max_post, max_post < max_pre);
     }
     if max_post < max_pre {
         result.bound_duals = new_bd;

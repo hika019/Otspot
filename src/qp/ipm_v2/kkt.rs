@@ -114,28 +114,37 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
 /// 元空間 primal 残差 (OSQP 式: 全体相対化, 最大値)。
 ///
 /// `||Ax - b||_∞ / (1 + max(||Ax||_∞, ||b||_∞))` (制約型ごと violation を取る)。
+/// A·x は DD で積算: f64 sum のキャンセル誤差で実 violation が見えなくなるのを防ぐ。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
+    use twofloat::TwoFloat;
     if prob.a.nrows == 0 {
         return 0.0;
     }
-    let ax = match prob.a.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
+    let m = prob.a.nrows;
+    let zero_dd = TwoFloat::from(0.0);
+    let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+    for col in 0..prob.a.ncols {
+        let xv = x[col];
+        for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
+            ax_dd[prob.a.row_ind[k]] = ax_dd[prob.a.row_ind[k]] + TwoFloat::new_mul(prob.a.values[k], xv);
+        }
+    }
     let mut max_v = 0.0_f64;
     let mut max_ax = 0.0_f64;
     let mut max_b = 0.0_f64;
-    for ((&ax_i, &b_i), ct) in ax.iter()
+    for ((ax_i_dd, &b_i), ct) in ax_dd.iter()
         .zip(prob.b.iter())
         .zip(prob.constraint_types.iter())
     {
+        let raw_dd = *ax_i_dd - TwoFloat::from(b_i);
+        let raw = f64::from(raw_dd);
         let v = match ct {
-            ConstraintType::Eq => (ax_i - b_i).abs(),
-            ConstraintType::Ge => (b_i - ax_i).max(0.0),
-            _ => (ax_i - b_i).max(0.0),
+            ConstraintType::Eq => raw.abs(),
+            ConstraintType::Ge => (-raw).max(0.0),
+            _ => raw.max(0.0),
         };
         max_v = max_v.max(v);
-        max_ax = max_ax.max(ax_i.abs());
+        max_ax = max_ax.max(f64::from(*ax_i_dd).abs());
         max_b = max_b.max(b_i.abs());
     }
     let scale = 1.0 + max_ax.max(max_b);

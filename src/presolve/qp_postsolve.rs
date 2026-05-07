@@ -174,7 +174,12 @@ pub fn postsolve_qp_with_dual_recovery(
     /// 互いに参照する場合) を解消するため複数 pass する。実問題では 3 pass で
     /// 収束する経験。早期 break は局所収束に騙されるリスクがあるため固定回数。
     const RECOVER_PASSES: usize = 5;
-    for _pass in 0..RECOVER_PASSES {
+    let trace = std::env::var("POSTSOLVE_TRACE").ok().as_deref() == Some("1");
+    if trace {
+        let kkt = simple_kkt_inf(&orig_problem.q, &orig_problem.a, &orig_problem.c, &orig_problem.bounds, &sol);
+        eprintln!("POSTSOLVE [after dim expand, before recovery] kkt_inf={:.3e}", kkt);
+    }
+    for pass in 0..RECOVER_PASSES {
         for step in presolve_result.postsolve_stack.steps.iter() {
             match step {
                 QpPostsolveStep::SingletonRow { row, col, .. }
@@ -187,9 +192,53 @@ pub fn postsolve_qp_with_dual_recovery(
                 _ => {}
             }
         }
+        if trace {
+            let kkt = simple_kkt_inf(&orig_problem.q, &orig_problem.a, &orig_problem.c, &orig_problem.bounds, &sol);
+            eprintln!("POSTSOLVE [after recovery pass {}] kkt_inf={:.3e}", pass, kkt);
+        }
     }
 
     sol
+}
+
+/// postsolve diagnostic 用の stationarity inf-norm (DD)。bound_contrib は除く
+/// (この時点で bound_duals は reduced レイアウトの可能性があり、orig bounds への
+/// remap は呼び出し元で行われるため)。
+fn simple_kkt_inf(
+    q: &crate::sparse::CscMatrix,
+    a: &crate::sparse::CscMatrix,
+    c: &[f64],
+    bounds: &[(f64, f64)],
+    sol: &SolverResult,
+) -> f64 {
+    use twofloat::TwoFloat;
+    let n = bounds.len();
+    if sol.solution.len() != n { return f64::NAN; }
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = sol.solution[col];
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            qx_dd[q.row_ind[k]] = qx_dd[q.row_ind[k]] + TwoFloat::new_mul(q.values[k], xv);
+        }
+    }
+    let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    if a.nrows > 0 && !sol.dual_solution.is_empty() {
+        for col in 0..n {
+            for k in a.col_ptr[col]..a.col_ptr[col + 1] {
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(a.values[k], sol.dual_solution[a.row_ind[k]]);
+            }
+        }
+    }
+    let mut max_r = 0.0_f64;
+    for j in 0..n {
+        let (lb, ub) = bounds[j];
+        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < 1e-12 { continue; }
+        if a.col_ptr.len() > j + 1 && a.col_ptr[j + 1] - a.col_ptr[j] == 0 { continue; }
+        let r = qx_dd[j] + TwoFloat::from(c[j]) + aty_dd[j];
+        max_r = max_r.max(f64::from(r).abs());
+    }
+    max_r
 }
 
 /// SingletonRow / RedundantRowFix で削除された行 `row` の dual `y[row]` を
@@ -238,16 +287,20 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
         return;
     }
 
-    // Q[col,:]·x_orig (対称 Q なら Q[col,:] = Q.col(col)、上三角格納のため両方走査)
+    // Q[col,:]·x と (A^T y)[col] を DD で積算 (ill-conditioned 系で f64 cancellation
+    // が recover_y を狂わせる)。a_row_col × y[row] 部分は target から差し引く。
+    use twofloat::TwoFloat;
     let qx_col = compute_qx_at(&orig.q, &sol.solution, col);
-    // (A^T y)[col] = Σ_k A[k, col] * y[k] from current dual_solution
-    let aty_col_total: f64 = (s..e)
-        .map(|k| orig.a.values[k] * sol.dual_solution[orig.a.row_ind[k]])
-        .sum();
-    let aty_col_others = aty_col_total - a_row_col * sol.dual_solution[row];
+    let mut aty_others_dd = TwoFloat::from(0.0);
+    for k in s..e {
+        let r = orig.a.row_ind[k];
+        if r == row { continue; }
+        aty_others_dd = aty_others_dd + TwoFloat::new_mul(orig.a.values[k], sol.dual_solution[r]);
+    }
+    let aty_col_others = f64::from(aty_others_dd);
 
-    // KKT: Q[col,:]·x + c[col] + (A^T y)[col] + bound_contrib[col] = 0
-    // → A[row, col] * y[row] = -(qx_col + c[col] + aty_col_others + bound_contrib[col])
+    // KKT 停留性: Q[col,:]·x + c[col] + (A^T y)[col] + bound_contrib[col] = 0
+    // → A[row, col] * y[row] = -(qx_col + c[col] + aty_col_others + bound_contrib_col)
     let target = -(qx_col + orig.c[col] + aty_col_others + bound_contrib_col);
     let y_new = target / a_row_col;
     if y_new.is_finite() {
@@ -288,22 +341,23 @@ pub(crate) fn bound_contrib_at_var(
 
 /// 対称行列 Q (全要素格納の対称 Q、`spmv_q` と同じ慣例) で Q[col, :] · x を計算する。
 ///
-/// QPS parser (`src/io/qps.rs`) は対称 Q を `(i,j)` と `(j,i)` の両方に格納する慣例
-/// (`q_acc.entry((i,j))` と `q_acc.entry((j,i))` を加算)。よって Q.col(col) は対称行 col
-/// 全体を網羅しており、Q[col,:]·x = Σ_k Q[k,col] · x[k] は Q.col(col) を 1 回 walk すれば足りる。
+/// (Q*x)[col] を計算。
 ///
-/// 旧実装は上三角 CSC 想定で Q.col(col) を walk した後に他列の row_ind=col エントリを
-/// 探索する 2 段階方式だったが、これは全要素格納に対しては off-diagonal を 2 倍計上する
-/// バグだった (off-diagonal が無い QPILOTNO では露見しなかったが、Maros 一般で誤動作)。
+/// QPS parser (`src/io/qps.rs`) は対称 Q を (i,j) と (j,i) の両方に格納する慣例なので、
+/// Q.col(col) を 1 回 walk すれば Q[col,:]·x = Σ_k Q[k,col] · x[k] が得られる。
+///
+/// ill-conditioned 問題で f64 sum のキャンセル誤差が recover_y の精度を支配する事象を
+/// 防ぐため、和は DD (TwoFloat) で行う。
 fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
-    let mut sum = 0.0_f64;
+    use twofloat::TwoFloat;
+    let mut sum = TwoFloat::from(0.0);
     let s = q.col_ptr[col];
     let e = q.col_ptr[col + 1];
     for ptr in s..e {
         let k = q.row_ind[ptr];
-        sum += q.values[ptr] * x[k];
+        sum = sum + TwoFloat::new_mul(q.values[ptr], x[k]);
     }
-    sum
+    f64::from(sum)
 }
 
 #[cfg(test)]

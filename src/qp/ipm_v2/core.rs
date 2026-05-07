@@ -263,7 +263,7 @@ fn run_ipm_with(
         }
     }
 
-    // postsolve: reduced 空間 → 元問題空間。dual recovery 付き (T1.4 系列の真因対処)。
+    // postsolve: reduced 空間 → 元問題空間。eliminated 行 / 固定変数の dual 復元込み。
     let mut final_sol = postsolve_qp_with_dual_recovery(presolve_result, &result, orig_problem);
 
     // bound_duals を元問題空間に remap
@@ -273,6 +273,20 @@ fn run_ipm_with(
             &orig_problem.bounds,
             &final_sol.bound_duals,
         );
+    }
+
+    if post_trace {
+        // 純粋 postsolve (dual recovery + remap) 直後の orig 空間残差。
+        // ここから先の bounds clip / Stage A/B/C/D が「postsolve 由来 KKT 破壊」を
+        // どこまで補えるかを観測するための基準値。
+        let view = ProblemView {
+            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
+            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+        };
+        let pres_post = primal_residual_rel(&view, &final_sol.solution);
+        let kkt_post = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        eprintln!("POST_STAGE [postsolve+remap_bd (orig space)] pres_rel={:.3e} kkt_rel={:.3e}",
+            pres_post, kkt_post);
     }
 
     if post_trace {
