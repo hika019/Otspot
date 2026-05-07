@@ -846,4 +846,44 @@ mod tests {
             );
         }
     }
+
+    /// build_extended_constraints: 境界行 (-1 for lb, +1 for ub) と b_ext (lb 行 = -lb,
+    /// ub 行 = ub) が仕様通り構築されることを確認。bound_dual 経路で y[bound_row] が
+    /// stationarity に正しく寄与するための前提。
+    #[test]
+    fn test_build_extended_constraints_bound_rows() {
+        use crate::qp::problem::QpProblem;
+        let q = CscMatrix::new(2, 2);
+        let a = CscMatrix::new(0, 2);
+        let prob = QpProblem::new_all_le(
+            q, vec![0.0; 2], a, vec![],
+            vec![(0.0, 5.0), (f64::NEG_INFINITY, 10.0)],
+        ).unwrap();
+        let (a_ext, b_ext, m_ext, m_orig, n_lb, _) = build_extended_constraints(&prob);
+        assert_eq!(m_orig, 0);
+        assert_eq!(n_lb, 1);  // col 0 のみ lb 有限
+        assert_eq!(m_ext, 3); // 0 orig + 1 lb + 2 ub
+        assert_eq!(b_ext, vec![-0.0, 5.0, 10.0]); // [lb 群; ub 群]
+
+        let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m_ext];
+        for col in 0..a_ext.ncols {
+            for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+                row_entries[a_ext.row_ind[k]].push((col, a_ext.values[k]));
+            }
+        }
+        assert_eq!(row_entries[0], vec![(0, -1.0)], "lb row of col 0 has -1");
+        assert_eq!(row_entries[1], vec![(0, 1.0)],  "ub row of col 0 has +1");
+        assert_eq!(row_entries[2], vec![(1, 1.0)],  "ub row of col 1 has +1");
+    }
+
+    /// collapse_extended_dual: Ge 制約は拡張時に -1 倍されて格納されるため、
+    /// 元空間 dual 復元時に y[ge_row] の符号を反転する。Le/Eq はそのまま。
+    #[test]
+    fn test_collapse_extended_dual_ge_sign_flip() {
+        use crate::problem::ConstraintType as CT;
+        let dual_ext = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let cts = vec![CT::Le, CT::Ge, CT::Eq];
+        let collapsed = collapse_extended_dual(&dual_ext, 3, &cts);
+        assert_eq!(collapsed, vec![1.0, -2.0, 3.0]);
+    }
 }

@@ -632,4 +632,61 @@ mod tests {
             assert_eq!(final_sol.gap.unwrap(), g, "gap must match final_residuals");
         }
     }
+
+    /// recover_y_for_singleton_row: SingletonRow 削除時の y[row] を KKT 停留性で復元する
+    /// 解析公式が、y を入れ直すと col の stationarity が 0 になることを直接確認。
+    ///
+    /// 設計:
+    ///   2 行 1 列。row 0: 2·x = 4 (singleton で削除、x = 2 に固定)、row 1: x ≤ 10。
+    ///   c = 5、Q = 0、bounds = (-inf, inf)。
+    ///   KKT for col 0: 0 + 5 + 2·y[0] + 1·y[1] = 0
+    ///   y[1] (row 1 の dual) を 0 として recover_y → y[0] = -(5 + 0) / 2 = -2.5
+    #[test]
+    fn test_recover_y_for_singleton_row_zeroes_stationarity() {
+        use crate::problem::ConstraintType;
+        let n = 1usize;
+        let m = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![5.0_f64];
+        // A: row 0 = [2.0] (singleton), row 1 = [1.0]
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[2.0_f64, 1.0], m, n).unwrap();
+        let b = vec![4.0_f64, 10.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq, ConstraintType::Le];
+        let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        // x = 2 (singleton で固定された値)、y = [0, 0] (初期)、bound_contrib = 0
+        let mut sol = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![2.0],
+            dual_solution: vec![0.0, 0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        // row=0, col=0 を SingletonRow として復元
+        recover_y_for_singleton_row(0, 0, &prob, &mut sol);
+        // 期待: y[0] = -(qx + c + a_others_y + bnd) / A[0, 0]
+        //     = -(0 + 5 + 1*0 + 0) / 2 = -2.5
+        assert!((sol.dual_solution[0] - (-2.5)).abs() < 1e-12,
+            "y[0] should be -2.5, got {}", sol.dual_solution[0]);
+
+        // 復元後 stationarity = qx + c + (A^T y)[0] = 0 + 5 + (2·(-2.5) + 1·0) = 0
+        let aty0 = 2.0 * sol.dual_solution[0] + 1.0 * sol.dual_solution[1];
+        let stat = 0.0 + 5.0 + aty0;
+        assert!(stat.abs() < 1e-12, "stationarity zeroed after recovery, got {}", stat);
+    }
+
+    /// compute_qx_at: 対称 Q の col j に対して Σ_k Q[k,j]·x[k] を返すこと、かつ off-diag を
+    /// 二重計上しないこと。QPS parser の上下三角両方格納慣例下で正しく動くか確認。
+    #[test]
+    fn test_compute_qx_at_symmetric_q() {
+        // Q = [[2, 3], [3, 4]] (対称)、CSC は両方の (i, j) と (j, i) を格納する。
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 0, 1], &[0, 0, 1, 1], &[2.0_f64, 3.0, 3.0, 4.0], 2, 2,
+        ).unwrap();
+        let x = vec![1.0_f64, 1.0];
+        // (Q*x)[0] = 2·1 + 3·1 = 5; (Q*x)[1] = 3·1 + 4·1 = 7
+        assert!((compute_qx_at(&q, &x, 0) - 5.0).abs() < 1e-12);
+        assert!((compute_qx_at(&q, &x, 1) - 7.0).abs() < 1e-12);
+    }
 }

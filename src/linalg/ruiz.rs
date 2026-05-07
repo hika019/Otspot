@@ -601,4 +601,87 @@ mod tests {
         assert!((result.solution[0] - 0.5).abs() < 0.05, "x[0]={}", result.solution[0]);
         assert!((result.solution[1] - 0.5).abs() < 0.05, "x[1]={}", result.solution[1]);
     }
+
+    /// scale_problem → unscale_solution の round-trip が恒等であること。
+    /// これが破れると IPM が scaled 空間で正しく解いても元空間で解が狂う。
+    #[test]
+    fn scale_unscale_round_trip_identity() {
+        let n = 3usize;
+        let m = 2usize;
+        let q = CscMatrix::from_triplets(
+            &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 4.0], n, n,
+        ).unwrap();
+        let q_vec = vec![1.0, 2.0, 3.0];
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 2.0, 3.0, 4.0], m, n,
+        ).unwrap();
+        let b = vec![5.0, 6.0];
+        let bounds = vec![(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3]);
+
+        // 任意の orig 空間 (x, y) で round-trip を確認:
+        //   scaled_x = D^{-1} x  (公式: x = D x_s → x_s = D^{-1} x)
+        // ここでは scale_problem 後の bounds で scaled x_s を取り、unscale で戻す。
+        let (_q_s, _a_s, _q_s_vec, _b_s, bounds_s) =
+            scaler.scale_problem(&q, &a, &q_vec, &b, &bounds);
+        // x_s = midpoint of bounds_s
+        let x_s: Vec<f64> = bounds_s.iter().map(|&(l, u)| 0.5 * (l + u)).collect();
+        // y_s 任意
+        let y_s = vec![0.7_f64, -0.3];
+        let (x_orig, y_orig) = scaler.unscale_solution(&x_s, &y_s);
+
+        // 期待値: x = D x_s = d[j] * x_s[j], y = E y_s / c
+        for j in 0..n {
+            let expected = scaler.d[j] * x_s[j];
+            assert!((x_orig[j] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
+                "x_orig[{}]={} expected {}", j, x_orig[j], expected);
+        }
+        for i in 0..m {
+            let expected = scaler.e[i] * y_s[i] / scaler.c;
+            assert!((y_orig[i] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
+                "y_orig[{}]={} expected {}", i, y_orig[i], expected);
+        }
+    }
+
+    /// scaled 空間の KKT 残差は orig 空間の (c × d[j]) 倍である関係を確認。
+    /// (`r_d_orig[j] = r_d_scaled[j] / (c × d[j])`)
+    #[test]
+    fn dual_residual_unscale_factor_is_c_times_d() {
+        let n = 2usize;
+        let m = 1usize;
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
+        let q_vec = vec![1.0_f64, 2.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[3.0_f64, 4.0], m, n).unwrap();
+        let b = vec![5.0_f64];
+        let bounds = vec![(0.0_f64, 10.0); 2];
+
+        let mut scaler = RuizScaler::new(n, m);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2]);
+        let (q_s, a_s, q_s_vec, _b_s, _bounds_s) =
+            scaler.scale_problem(&q, &a, &q_vec, &b, &bounds);
+
+        // x_s, y_s 任意で stationarity を計算
+        let x_s = vec![0.3_f64, 0.4];
+        let y_s = vec![0.5_f64];
+
+        // r_d_scaled[j] = (Q_s x_s + q_s + A_s^T y_s)[j]
+        let qx_s = q_s.mat_vec_mul(&x_s).unwrap();
+        let aty_s = a_s.transpose().mat_vec_mul(&y_s).unwrap();
+        let r_d_s: Vec<f64> = (0..n).map(|j| qx_s[j] + q_s_vec[j] + aty_s[j]).collect();
+
+        // 元空間で同じ計算
+        let (x, y) = scaler.unscale_solution(&x_s, &y_s);
+        let qx = q.mat_vec_mul(&x).unwrap();
+        let aty = a.transpose().mat_vec_mul(&y).unwrap();
+        let r_d: Vec<f64> = (0..n).map(|j| qx[j] + q_vec[j] + aty[j]).collect();
+
+        // 関係: r_d[j] ≈ r_d_s[j] / (c * d[j])
+        for j in 0..n {
+            let expected = r_d_s[j] / (scaler.c * scaler.d[j]);
+            assert!((r_d[j] - expected).abs() < 1e-10 * (1.0 + expected.abs()),
+                "r_d[{}]={} expected {} (= r_d_s[{}] / (c×d[{}]))", j, r_d[j], expected, j, j);
+        }
+    }
 }
