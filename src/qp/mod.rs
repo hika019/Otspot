@@ -1801,10 +1801,6 @@ mod tests {
     }
 
     /// T11: Box-constrained QP（上界境界が活性）
-    /// 旧 IPPMM 単独経路で x が中点 0.5 で停止していた bug。
-    /// 2026-05-07 session の IPPMM 収束系修正 (consecutive_infeas guard, NaN_guard
-    /// demote, refine_kkt joint pf+df gate, Q-diagonal scaling 前処理) により解消、
-    /// #[ignore] を外して通常テスト化。
     #[test]
     fn test_qp_box_constrained_upper_bound() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -2168,7 +2164,6 @@ mod tests {
     /// non-PSD なら IPM は KKT 残差を満たす局所点（鞍点 or local opt）を返してしまい、
     /// それが known global optimal と乖離するのは仕様通り。
     #[test]
-    #[ignore] // 数十秒かかる可能性。手動で `cargo test test_ubh1_q_psd_diagnose -- --ignored --nocapture` 実行
     fn test_ubh1_q_psd_diagnose() {
         use crate::io::qps::parse_qps;
         use crate::linalg::ldl;
@@ -2212,7 +2207,6 @@ mod tests {
     /// HS268 は n=5, m=5, 全 Ge 制約, 全 FR (free) 変数の小さな convex QP。
     /// bench で df=4.9e-2 (eps=1e-6 を 4 桁超過) になる事実の数値的構造を実証する。
     #[test]
-    #[ignore]
     fn test_hs268_dual_residual_diagnose() {
         use crate::io::qps::parse_qps;
         use crate::options::SolverOptions;
@@ -3071,10 +3065,6 @@ mod tests {
     /// s.t. x + y <= 10, 0 <= x <= 5, 0 <= y <= 5, z=3 (fixed)
     /// presolve: z除去（FixedVar）
     /// → リマップ後bound_duals長: 6 (lb_x, lb_y, lb_z=0, ub_x, ub_y, ub_z=0)
-    ///
-    /// 旧: IPPMM が Optimal status に昇格しなかった bug。
-    /// 2026-05-07 session の IPPMM 修正 (false-positive Infeasible demote、
-    /// SuboptimalSolution → Optimal 経路) で解消、#[ignore] 解除。
     #[test]
     fn test_bd_t2_fixed_var_remap_core() {
         let n = 3usize;

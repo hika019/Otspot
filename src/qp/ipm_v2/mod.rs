@@ -50,7 +50,6 @@ mod tests {
 
     /// HS21 で v1 と v2 を直接比較する診断テスト。
     #[test]
-    #[ignore]
     fn test_v2_hs21_cmp_v1() {
         let path = Path::new("data/maros_meszaros/HS21.QPS");
         if !path.exists() {
@@ -81,9 +80,8 @@ mod tests {
         eprintln!("v2 KKT_rel={:.3e}", v2_kkt);
     }
 
-    /// HS21 で v2 が PASS することを確認 (smoke test)。次セッションで debug 完了後 #[ignore] 外す。
+    /// HS21 で v2 が PASS することを確認 (smoke test)。
     #[test]
-    #[ignore]
     fn test_v2_hs21() {
         let path = Path::new("data/maros_meszaros/HS21.QPS");
         if !path.exists() { return; }
@@ -97,7 +95,6 @@ mod tests {
     /// 現状: dfr=1.0e0 なのに obj は正解値と一致 → x は正しい、z が完全に外れている。
     /// このテストで z, y, r_j の詳細を出力し、どの bound で大きな寄与が出てるか把握する。
     #[test]
-    #[ignore]
     fn test_v2_qadlittl_diagnose() {
         let path = Path::new("data/maros_meszaros/QADLITTL.QPS");
         if !path.exists() {
@@ -153,7 +150,6 @@ mod tests {
     /// Catastrophic 9件 (Q-prefix LP 由来) と比較対象の Q 規模を出力する診断。
     /// task: Q≒0 検出基準を相対値に変更すべきか確認する。
     #[test]
-    #[ignore]
     fn test_q_magnitude_catastrophic() {
         let problems = [
             // Catastrophic 9件
@@ -186,7 +182,6 @@ mod tests {
 
     /// BD-T4 (rank-deficient Q + EmptyCol) で v2 が何で詰まるか調査。
     #[test]
-    #[ignore]
     fn test_v2_bd_t4_diagnose() {
         use crate::sparse::CscMatrix;
         use crate::qp::problem::QpProblem;
@@ -217,7 +212,6 @@ mod tests {
 
     /// 1000s で救える見込みのある問題を特定する。
     #[test]
-    #[ignore]
     fn test_osqp_eval_catastrophic() {
         let problems = [
             "QADLITTL", "QBORE3D", "QCAPRI", "QETAMACR", "QFFFFF80",
@@ -246,7 +240,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_osqp_eval_marginal() {
         let problems = [
             // Marginal 5件
@@ -280,7 +273,6 @@ mod tests {
     /// Marginal 問題で x が bound からどの程度離れているか診断する。
     /// snap_tol を決めるための事実確認。
     #[test]
-    #[ignore]
     fn test_marginal_x_bound_gap() {
         let problems = ["PRIMALC5", "QSCAGR25", "QSCAGR7", "QSHIP12L", "QSHIP12S"];
         for name in problems {
@@ -323,7 +315,6 @@ mod tests {
 
     /// DPKLO1 で parser bug 修正と v2 が両立することを確認 (timeout/optimal ok)。
     #[test]
-    #[ignore]
     fn test_v2_dpklo1() {
         let path = Path::new("data/maros_meszaros/DPKLO1.QPS");
         if !path.exists() {
