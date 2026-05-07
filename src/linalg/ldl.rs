@@ -23,7 +23,7 @@ use faer::sparse::linalg::cholesky::{
     SymmetricOrdering,
 };
 use faer::sparse::linalg::SupernodalThreshold;
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use std::time::Instant;
 
 /// LDL分解エラー
@@ -133,18 +133,20 @@ impl LdlFactorizationAmd {
 ///
 /// 上三角エントリ (i, j) with i ≤ j をそのまま faer 形式に変換する。
 /// 高レベル API に Side::Upper で渡すために使用する。
+///
+/// CSC は既に列優先・行昇順で整列されている前提なので、triplet を経由せず
+/// SymbolicSparseColMat::new_checked + SparseColMat::new で直接構築する。
+/// `try_new_from_triplets` の sort/compress を回避し、BOYD2 で 5ms → ~1ms 級。
 fn csc_upper_to_faer_upper(mat: &CscMatrix) -> SparseColMat<usize, f64> {
     let n = mat.nrows;
-    let mut triplets = Vec::with_capacity(mat.values.len());
-    for j in 0..n {
-        for k in mat.col_ptr[j]..mat.col_ptr[j + 1] {
-            let i = mat.row_ind[k];
-            let v = mat.values[k];
-            triplets.push(Triplet::new(i, j, v));
-        }
-    }
-    SparseColMat::try_new_from_triplets(n, n, &triplets)
-        .expect("csc_upper_to_faer_upper: failed to build SparseColMat")
+    let symbolic = SymbolicSparseColMat::new_checked(
+        n,
+        n,
+        mat.col_ptr.clone(),
+        None,
+        mat.row_ind.clone(),
+    );
+    SparseColMat::new(symbolic, mat.values.clone())
 }
 
 /// 対角要素の符号ベクトルを抽出する（LdltRegularization sign-aware 用）。
