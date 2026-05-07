@@ -286,36 +286,22 @@ pub(crate) fn bound_contrib_at_var(
     contrib
 }
 
-/// 対称行列 Q (上三角 CSC 格納) で Q[col, :] · x を計算する。
+/// 対称行列 Q (全要素格納の対称 Q、`spmv_q` と同じ慣例) で Q[col, :] · x を計算する。
 ///
-/// 上三角格納のため Q[col, :] は次の 2 部分の和:
-///   - 対角・上三角部分: Q[col, k] for k >= col → Q.col(col) の row_ind=col 以下
-///     (上三角なので Q[col,k] は col 行 k 列、row_ind <= col のエントリ)
-///   - 下三角は Q[k, col] = Q[col, k] (対称) → Q.col(col) の他のエントリで補完
+/// QPS parser (`src/io/qps.rs`) は対称 Q を `(i,j)` と `(j,i)` の両方に格納する慣例
+/// (`q_acc.entry((i,j))` と `q_acc.entry((j,i))` を加算)。よって Q.col(col) は対称行 col
+/// 全体を網羅しており、Q[col,:]·x = Σ_k Q[k,col] · x[k] は Q.col(col) を 1 回 walk すれば足りる。
 ///
-/// 上三角 CSC では Q.col(col) のエントリは row_ind <= col。これらは Q[row_ind, col]、
-/// 対称性から Q[col, row_ind] でもある。よって Q[col, :] · x = Σ_k Q[k, col] * x[k] は
-/// Q.col(col) を全て walk すれば足りる **ただし Q[col, k] for k > col は Q.col(k) の
-/// row_ind=col エントリにある**。よって他の列も走査する。
+/// 旧実装は上三角 CSC 想定で Q.col(col) を walk した後に他列の row_ind=col エントリを
+/// 探索する 2 段階方式だったが、これは全要素格納に対しては off-diagonal を 2 倍計上する
+/// バグだった (off-diagonal が無い QPILOTNO では露見しなかったが、Maros 一般で誤動作)。
 fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
     let mut sum = 0.0_f64;
-    // Q[k, col] for k <= col: Q.col(col) のエントリ
     let s = q.col_ptr[col];
     let e = q.col_ptr[col + 1];
     for ptr in s..e {
         let k = q.row_ind[ptr];
         sum += q.values[ptr] * x[k];
-    }
-    // Q[col, k] for k > col: Q.col(k) で row_ind=col のエントリ (対称)
-    for k in (col + 1)..q.ncols {
-        let ks = q.col_ptr[k];
-        let ke = q.col_ptr[k + 1];
-        for ptr in ks..ke {
-            if q.row_ind[ptr] == col {
-                sum += q.values[ptr] * x[k];
-                break;
-            }
-        }
     }
     sum
 }
