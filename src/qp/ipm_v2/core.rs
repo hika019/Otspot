@@ -135,8 +135,27 @@ fn run_ipm_with(
     }
 
     // dual の post-process refinement (LSQ): scaled 空間で動かす方が IPM 出力との整合性が高い。
+    //
+    // IPM が既に reduced 空間で kkt_rel < user_eps を達成しているなら refinement は
+    // 無駄 (改善余地なし)。大規模問題では AAT factorize が分単位かかるため skip 必須
+    // (QPLIB_8505: m=10001 で refine_dual_lsq 1 回 250s × 後段 fixed-point loop 8 回で
+    // 計 506s 浪費していた; IPM 完了時に既に kkt_rel=2.6e-13)。
     if reduced.num_constraints > 0 {
-        crate::qp::refine_dual_lsq(reduced, &mut result, opts.deadline);
+        let view_red = ProblemView {
+            q: &reduced.q,
+            a: &reduced.a,
+            c: &reduced.c,
+            b: &reduced.b,
+            bounds: &reduced.bounds,
+            constraint_types: &reduced.constraint_types,
+        };
+        let kkt_pre = kkt_residual_rel(
+            &view_red, &result.solution, &result.dual_solution, &result.bound_duals,
+        );
+        let user_eps = opts.ipm_eps();
+        if kkt_pre >= user_eps {
+            crate::qp::refine_dual_lsq(reduced, &mut result, opts.deadline);
+        }
     }
 
     // [DIAG] POST_STAGE_TRACE: 後処理 chain で primal/kkt 残差がどこで膨らむか観測
@@ -482,7 +501,19 @@ fn run_ipm_with(
         eprintln!("POST_STAGE [pre Stage A/B/C/D] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
     }
 
-    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
+    // 既に IPM で eps を満たしている場合、Stage A/B/C は無駄 (改善余地なし)。
+    // QPLIB_8505 のような大規模問題 (n+m=30k) では各 LSQ が 250s かかり致命的なので
+    // skip 必須。元空間 KKT で判定する (ProblemView は orig_problem 基準)。
+    let user_eps_for_skip = opts.ipm_eps();
+    let kkt_already_pass = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
+        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let pres0 = primal_residual_rel(&view, &final_sol.solution);
+        kkt0 < user_eps_for_skip && pres0 < user_eps_for_skip
+    } else {
+        false
+    };
+
+    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress && !kkt_already_pass {
         // (A) x の primal projection — combined guard 付き (サイズ制限あり)。
         // LISWET 系で primal projection 後の dual LSQ refit は ill-conditioned A
         // (near-rank-deficient AAT) で破綻する (|y_new| が IPM y の 5e4 倍に膨張)
