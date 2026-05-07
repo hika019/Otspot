@@ -515,8 +515,20 @@ pub(crate) fn solve_ippmm_inner(
     let mut last_score_improvement_iter: usize = 0;
     let mut last_score_improvement_value: f64 = f64::INFINITY;
 
+    // env=IPM_PROF=1: per-iter cost breakdown を最後に1行で emit。
+    let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
+    let mut prof_iters: usize = 0;
+    let mut prof_residual_ns: u128 = 0;
+    let mut prof_buildmat_ns: u128 = 0;
+    let mut prof_factor_ns: u128 = 0;
+    let mut prof_predcorr_ns: u128 = 0;
+    let mut prof_gondzio_ns: u128 = 0;
+    let mut prof_update_ns: u128 = 0;
+    let mut prof_other_ns: u128 = 0;
 
     for iter in 0..options.ipm.max_iter {
+        let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };
+        let mut prof_section_start = prof_iter_start;
         // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
@@ -854,6 +866,12 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
+        // ── PROF: residual+sigma 区間 ──
+        if let Some(t) = prof_section_start {
+            prof_residual_ns += t.elapsed().as_nanos();
+            prof_section_start = Some(std::time::Instant::now());
+        }
+
         // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する
         let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
@@ -871,6 +889,7 @@ pub(crate) fn solve_ippmm_inner(
                 final_iter = iter;
                 break;
             }
+            let prof_t_build = if prof { Some(std::time::Instant::now()) } else { None };
             let mat_for_factor = if use_schur {
                 let (s_mat, d_inv) = build_schur_system(
                     &problem.q,
@@ -884,6 +903,9 @@ pub(crate) fn solve_ippmm_inner(
             } else {
                 build_augmented_system(&problem.q, &a_ext, &sigma_vec, rho_retry, delta_matrix_retry)
             };
+            if let Some(t) = prof_t_build {
+                eprintln!("FACT_PROF section=build n={} nnz={} t={:.3}ms", mat_for_factor.nrows, mat_for_factor.values.len(), t.elapsed().as_secs_f64() * 1000.0);
+            }
             // AMD は 1 回だけ計算してキャッシュ（スパースパターン不変のため）
             if amd_perm_cache.is_none() {
                 amd_perm_cache = Some(amd_with_deadline(
@@ -894,6 +916,7 @@ pub(crate) fn solve_ippmm_inner(
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
+            let prof_t_factor = if prof { Some(std::time::Instant::now()) } else { None };
             match factorize_kkt_with_cached_perm(
                 &mat_for_factor,
                 perm,
@@ -902,6 +925,10 @@ pub(crate) fn solve_ippmm_inner(
                 Some(n),
             ) {
                 Ok(f) => {
+                    if let Some(t) = prof_t_factor {
+                        eprintln!("FACT_PROF section=factorize n={} t={:.3}ms", mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    let prof_t_probe = if prof { Some(std::time::Instant::now()) } else { None };
                     // 健全性プローブ: factorize は Ok を返したが、cond(K) が大きいと LDL solve が
                     // K·sol = rhs を満たさず Newton 方向が central path から逸脱する病理がある。
                     // (QPLIB_8515 iter 7: dx_inf=3.35e10, alpha=5.72e-11、効果 step=1.92 でも
@@ -983,6 +1010,9 @@ pub(crate) fn solve_ippmm_inner(
                             }
                         }
                     }
+                    if let Some(t) = prof_t_probe {
+                        eprintln!("FACT_PROF section=probe n={} t={:.3}ms", mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
+                    }
                     fac_opt = Some(f);
                     aug_mat_opt = Some(mat_for_factor);
                     break;
@@ -1047,6 +1077,12 @@ pub(crate) fn solve_ippmm_inner(
             .as_ref()
             .expect("aug_mat_opt must be set when fac_opt is set");
 
+        // ── PROF: factorize 区間 ──
+        if let Some(t) = prof_section_start {
+            prof_factor_ns += t.elapsed().as_nanos();
+            prof_section_start = Some(std::time::Instant::now());
+        }
+
         // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
 
         // ── Predictor / Corrector / Gondzio (Schur or augmented dispatch) ──
@@ -1083,6 +1119,12 @@ pub(crate) fn solve_ippmm_inner(
             );
             (pred, alpha, r_c_corr)
         };
+
+        // ── PROF: predictor+corrector 区間 ──
+        if let Some(t) = prof_section_start {
+            prof_predcorr_ns += t.elapsed().as_nanos();
+            prof_section_start = Some(std::time::Instant::now());
+        }
 
         // ── Gondzio multiple centrality correctors ──────────────────
         let mut alpha = alpha;
@@ -1313,6 +1355,12 @@ pub(crate) fn solve_ippmm_inner(
         let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
         let alpha = alpha.min(alpha_tr);
 
+        // ── PROF: gondzio 区間 ──
+        if let Some(t) = prof_section_start {
+            prof_gondzio_ns += t.elapsed().as_nanos();
+            prof_section_start = Some(std::time::Instant::now());
+        }
+
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
         // null-space: alpha 停滞早期脱出。
@@ -1470,6 +1518,35 @@ pub(crate) fn solve_ippmm_inner(
         // 残差記録（次反復の改善判定用）
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
+
+        // ── PROF: update + post-step (line search caps, alpha stall, residual stall, PMM update) ──
+        if let Some(t) = prof_section_start {
+            prof_update_ns += t.elapsed().as_nanos();
+        }
+        if let Some(t) = prof_iter_start {
+            let total = t.elapsed().as_nanos();
+            let accounted = prof_residual_ns + prof_factor_ns + prof_predcorr_ns + prof_gondzio_ns + prof_update_ns;
+            // accounted は累積、total は今回 iter のみ。other は概算。
+            let _ = accounted;
+            let _ = total;
+        }
+        prof_iters += 1;
+    }
+
+    if prof {
+        let total_ns = prof_residual_ns + prof_factor_ns + prof_predcorr_ns + prof_gondzio_ns + prof_update_ns + prof_other_ns;
+        let total_ms = total_ns as f64 / 1_000_000.0;
+        let frac = |v: u128| -> f64 { 100.0 * v as f64 / total_ns.max(1) as f64 };
+        eprintln!(
+            "IPM_PROF iters={} total={:.1}ms residual={:.1}ms({:.1}%) factor={:.1}ms({:.1}%) predcorr={:.1}ms({:.1}%) gondzio={:.1}ms({:.1}%) update={:.1}ms({:.1}%)",
+            prof_iters,
+            total_ms,
+            prof_residual_ns as f64 / 1e6, frac(prof_residual_ns),
+            prof_factor_ns as f64 / 1e6, frac(prof_factor_ns),
+            prof_predcorr_ns as f64 / 1e6, frac(prof_predcorr_ns),
+            prof_gondzio_ns as f64 / 1e6, frac(prof_gondzio_ns),
+            prof_update_ns as f64 / 1e6, frac(prof_update_ns),
+        );
     }
 
     // 殿指示(C): None→Timeout変換。「MaxIterations→Timeout変換」ではなく「未決定→Timeout」。

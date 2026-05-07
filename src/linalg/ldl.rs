@@ -98,6 +98,8 @@ impl LdlFactorizationAmd {
     /// 2. (PAP^T) x_p = b_p を faer で解く（simplicial/supernodal は AUTO 選択）
     /// 3. 解を逆置換: sol[perm[k]] = x_p[k]
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
+        let prof = std::env::var("LDL_PROF").ok().as_deref() == Some("1");
+        let t0 = if prof { Some(Instant::now()) } else { None };
         let n = self.n;
         let b_p = permute_vec(rhs, &self.perm);
         let mut x_p = b_p;
@@ -118,6 +120,9 @@ impl LdlFactorizationAmd {
 
         let x = inv_permute_vec(&x_p, &self.perm);
         sol.copy_from_slice(&x);
+        if let Some(t) = t0 {
+            eprintln!("LDL_SOLVE n={} t={:.3}ms", n, t.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
 }
@@ -195,8 +200,14 @@ fn do_numeric_factorize(
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
 ) -> Result<(SymbolicCholesky<usize>, Vec<f64>), LdlError> {
+    // env=LDL_PROF=1: symbolic/numeric の所要時間を stderr に書き出す。
+    let prof = std::env::var("LDL_PROF").ok().as_deref() == Some("1");
+    let t0 = if prof { Some(Instant::now()) } else { None };
     let a_upper = csc_upper_to_faer_upper(mat);
+    let t_convert = t0.map(|t| t.elapsed());
+    let t1 = if prof { Some(Instant::now()) } else { None };
     let symbolic = build_symbolic_hl(&a_upper)?;
+    let t_symbolic = t1.map(|t| t.elapsed());
 
     // symbolic 完了後・numeric 前に L_nnz チェック (memory budget)。
     // 巨大問題 (QPLIB_9008 等) で OOM kill されるのを防ぐ早期検知ポイント。
@@ -227,6 +238,7 @@ fn do_numeric_factorize(
     ]));
     let stack = MemStack::new(&mut mem);
 
+    let t2 = if prof { Some(Instant::now()) } else { None };
     symbolic
         .factorize_numeric_ldlt(
             &mut l_values,
@@ -238,6 +250,17 @@ fn do_numeric_factorize(
             Default::default(),
         )
         .map_err(|_| LdlError::SingularOrIndefinite)?;
+    if let (Some(tc), Some(ts), Some(tn)) = (t_convert, t_symbolic, t2.map(|t| t.elapsed())) {
+        eprintln!(
+            "LDL_PROF n={} nnz={} l_nnz={} convert={:.3}ms symbolic={:.3}ms numeric={:.3}ms",
+            mat.nrows,
+            mat.values.len(),
+            l_nnz,
+            tc.as_secs_f64() * 1000.0,
+            ts.as_secs_f64() * 1000.0,
+            tn.as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok((symbolic, l_values))
 }
