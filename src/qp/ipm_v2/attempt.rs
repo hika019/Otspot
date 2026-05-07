@@ -50,8 +50,157 @@ type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome
 /// QP を v2 設計で解く (IP-PMM 経路)。既存 `solve_qp_with` と同じ API シグネチャ。
 ///
 /// retry 1 層・status 1 箇所変換・元空間 KKT 判定 の 3 原則で動く。
+///
+/// 入口で Q-diagonal scaling 前処理を試みる:
+/// Q が対角でかつ diagonal entries の dynamic range が大きい (max/min > 1e6) 問題
+/// (QPLIB_9002: Q diag 9e-12 〜 2.0, var bounds 〜1e11) では、Ruiz だけでは Q'_jj
+/// を均等化できず IPM が ill-conditioned KKT 系で wrong stationary point に
+/// 収束する (obj=4.3e10 vs 真値 5.7e9)。
+///
+/// Pre-scaling: 各 column j で s_j = 1/√Q_jj (Q_jj > 0) を適用し
+///   x = D x', Q' = D Q D (対角 1.0 に均等化), A' = A D, c' = D c, bounds' = bounds/D
+/// 解いた後 x_orig = D x_scaled で復元する。Q が対角でない場合や dynamic range が
+/// 狭い場合は no-op (直接 solve_qp_v2_with_runner を呼ぶ)。
 pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
+        let mut result = solve_qp_v2_with_runner(&scaled_problem, options, run_ipm);
+        unscale_q_diagonal(&mut result, &col_scales, problem);
+        return result;
+    }
     solve_qp_v2_with_runner(problem, options, run_ipm)
+}
+
+/// Q が対角 + dynamic range > 1e6 のとき column scaling 因子を返す。
+/// それ以外は None。
+fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> {
+    let n = problem.num_vars;
+    if n == 0 { return None; }
+
+    // Q の対角要素を抽出 (上三角 CSC 格納で row==col が対角)。
+    let mut q_diag = vec![0.0_f64; n];
+    let mut q_offdiag_max = 0.0_f64;
+    for col in 0..n {
+        let cs = problem.q.col_ptr[col];
+        let ce = problem.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = problem.q.row_ind[k];
+            let v = problem.q.values[k];
+            if row == col {
+                q_diag[col] = v;
+            } else {
+                q_offdiag_max = q_offdiag_max.max(v.abs());
+            }
+        }
+    }
+
+    // Q が対角でないなら scaling すると off-diagonal が暴れる可能性 → skip
+    const Q_OFFDIAG_TOL: f64 = 1e-10;
+    if q_offdiag_max > Q_OFFDIAG_TOL {
+        return None;
+    }
+
+    // 対角の有限・正値の dynamic range を測る
+    let mut q_pos_min = f64::INFINITY;
+    let mut q_pos_max = 0.0_f64;
+    for &v in &q_diag {
+        if v > Q_OFFDIAG_TOL {
+            q_pos_min = q_pos_min.min(v);
+            q_pos_max = q_pos_max.max(v);
+        }
+    }
+    // 正対角がない (Q≡0 LP) または range が狭い場合 skip
+    if !q_pos_min.is_finite() || q_pos_max <= 0.0 {
+        return None;
+    }
+    const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
+    if q_pos_max / q_pos_min < Q_DIAG_RANGE_TRIGGER {
+        return None;
+    }
+
+    // s_j = 1/√Q_jj, ただし Q_jj=0 (LP-like 列) は s_j=1
+    // Q'_jj = Q_jj × s_j^2 = 1 で対角均等化
+    let mut col_scales = vec![1.0_f64; n];
+    for j in 0..n {
+        if q_diag[j] > Q_OFFDIAG_TOL {
+            col_scales[j] = 1.0 / q_diag[j].sqrt();
+        }
+    }
+
+    // scaled problem を構築
+    // Q' = D Q D: 各値を s_row × Q × s_col に。対角のみなので s_j^2 × Q_jj = 1.
+    let mut q_s = problem.q.clone();
+    for col in 0..n {
+        let cs = q_s.col_ptr[col];
+        let ce = q_s.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = q_s.row_ind[k];
+            q_s.values[k] *= col_scales[row] * col_scales[col];
+        }
+    }
+
+    // A' = A D (column-scale)
+    let mut a_s = problem.a.clone();
+    for col in 0..n {
+        let cs = a_s.col_ptr[col];
+        let ce = a_s.col_ptr[col + 1];
+        let s = col_scales[col];
+        for k in cs..ce {
+            a_s.values[k] *= s;
+        }
+    }
+
+    // c' = D c (column-scale)
+    let c_s: Vec<f64> = problem.c.iter().enumerate()
+        .map(|(j, &v)| v * col_scales[j])
+        .collect();
+
+    // bounds' = bounds / D (s_j > 0 なので符号変わらず)
+    let bounds_s: Vec<(f64, f64)> = problem.bounds.iter().enumerate()
+        .map(|(j, &(lb, ub))| (lb / col_scales[j], ub / col_scales[j]))
+        .collect();
+
+    // QpProblem を作る (b は不変、constraint_types も不変)
+    let scaled = match QpProblem::new(
+        q_s, c_s, a_s, problem.b.clone(), bounds_s, problem.constraint_types.clone(),
+    ) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    Some((scaled, col_scales))
+}
+
+/// `try_q_diagonal_scaling` で行った column scaling を逆変換する。
+/// x_orig = D × x_scaled, y は不変, y_lb/y_ub /= D.
+fn unscale_q_diagonal(
+    result: &mut SolverResult,
+    col_scales: &[f64],
+    orig_problem: &QpProblem,
+) {
+    let n = orig_problem.num_vars;
+    if result.solution.len() == n {
+        for j in 0..n {
+            result.solution[j] *= col_scales[j];
+        }
+    }
+    // dual_solution (y) は scaling 不変 (KKT 解析より)
+    // bound_duals: layout は [y_lb 群; y_ub 群] (lb 有限変数昇順, ub 有限変数昇順)
+    if !result.bound_duals.is_empty() {
+        let mut idx = 0_usize;
+        for (j, &(lb, _)) in orig_problem.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < result.bound_duals.len() {
+                result.bound_duals[idx] /= col_scales[j];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in orig_problem.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < result.bound_duals.len() {
+                result.bound_duals[idx] /= col_scales[j];
+                idx += 1;
+            }
+        }
+    }
+    // objective は不変 (cost は同じ問題)
 }
 
 /// 一般化 wrapper: 旧実装で IPM/IPPMM を切り替えていた wrapper。
