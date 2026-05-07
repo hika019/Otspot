@@ -1010,9 +1010,7 @@ ENDATA
     /// e226.QPS実ファイルでobj_offset=-7.113が取得される
     #[test]
     fn test_e226_obj_offset() {
-        let path = std::path::Path::new(
-            "/Users/hika019/Develop/solver/data/lp_problems/e226.QPS",
-        );
+        let path = std::path::Path::new("data/lp_problems/e226.QPS");
         if !path.exists() {
             eprintln!("e226.QPS not found, skip");
             return;

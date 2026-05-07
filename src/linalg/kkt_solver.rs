@@ -14,10 +14,8 @@
 //!
 //! 直接法と反復法の dispatcher は別モジュールで実装する (本 trait は機構のみ)。
 //!
-//! 設計時点 (2026-05-04, feature/kkt-iterative-2026-05-04) の用途想定:
-//! - Maros 138 PASS 数 ≥ 136 を退行させずに、QPLIB_9008 (n=1M) の OOM kill を
-//!   回避することが直接の目標。
-//! - 汎用的に「行列の疎構造とメモリ予算」で direct/iterative を自動選択する基盤。
+//! 用途: 行列の疎構造とメモリ予算で direct/iterative を自動選択する基盤。
+//! QPLIB_9008 (n=1M) の OOM kill 回避と Maros 138 級の通常問題で direct を維持する両立。
 
 use crate::sparse::CscMatrix;
 use std::time::Instant;

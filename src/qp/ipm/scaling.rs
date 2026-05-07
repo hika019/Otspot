@@ -22,7 +22,7 @@ pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
 /// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
 /// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。
-/// 旧式 (行ノルム正規化) は行ノルム小の制約で過剰判定する欠陥があった (セッション 7 で判明)。
+/// 旧式 (行ノルム正規化) は行ノルム小の制約で過剰判定する欠陥があった。
 fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     use crate::problem::ConstraintType;
     if problem.num_constraints == 0 {
@@ -137,7 +137,6 @@ pub(crate) fn post_verify_solution(
     let y = &result.dual_solution;
     let bound_duals = &result.bound_duals;
     // 元空間 KKT 判定: bench/v2 と同形の OSQP 流 全体相対化 pfeas。
-    // セッション 7 で旧 行ノルム正規化 → 全体相対化に統一 (横展開)。
     let status = if problem.num_constraints > 0 {
         let pfeas_normalized = compute_pfeas_osqp(problem, x);
         if pfeas_normalized.is_finite() && pfeas_normalized < eps {
@@ -300,8 +299,7 @@ pub(crate) fn check_dfeas_status_relative(
         }
     }
     // OSQP 流 全体相対化 (bench/v2/IPM 内部 nr_d_rel_orig / compute_pfeas_osqp と統一)。
-    // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定する欠陥があり、
-    // セッション 7 で 4 箇所統一済みだったが本関数は横展開漏れだった。
+    // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定する欠陥があった。
     let mut max_r = 0.0_f64;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;
@@ -360,7 +358,7 @@ pub(crate) fn unscale_ipm_result(
             let obj_orig = result.objective / scaler.c;
             // [整合性] check_dfeas_status は L405 で unscaled x,y,bound_duals を受け取り
             // 元空間で dfeas を計算する。よって threshold も元空間 (bench と同形)。
-            // 元空間 KKT 判定: OSQP 流 全体相対化 pfeas (セッション 7 で横展開)。
+            // 元空間 KKT 判定: OSQP 流 全体相対化 pfeas。
             let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -428,7 +426,6 @@ pub(crate) fn unscale_ipm_result(
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             // [整合性] 上記 Optimal branch と同形。元空間 dfeas tol = bench tol。
-            // セッション 7 で OSQP 流 全体相対化に統一 (横展開)。
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(_ax) => {

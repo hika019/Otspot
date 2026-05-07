@@ -2571,8 +2571,7 @@ mod tests {
         );
     }
 
-    // ========== postsolve F1/F2修正検証テスト (T1-T7 + E1-E4) ==========
-    // 設計書: /Users/hika019/Develop/solver/reports/cmd667_postsolve_fix_design.md §5
+    // ========== postsolve 修正検証テスト (T1-T7 + E1-E4) ==========
     // T1: presolve OFF 基準線
     // T2: FixedVar + col_mapリマップ（核心テスト）
     // T3: SingletonRow + row_map

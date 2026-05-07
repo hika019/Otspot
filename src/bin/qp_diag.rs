@@ -6,8 +6,6 @@
 //! 環境変数:
 //!   DIAG_NO_RUIZ=1     — Ruiz scaling 無効化
 //!   DIAG_NO_PRESOLVE=1 — presolve 無効化
-//!
-//! T1.2 QRECIPE / T1.4 Catastrophic 系の root-cause 診断で利用 (2026-04-30)。
 
 use mimalloc::MiMalloc;
 #[global_allocator]

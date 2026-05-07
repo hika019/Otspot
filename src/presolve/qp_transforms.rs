@@ -693,7 +693,7 @@ pub fn run_qp_presolve_phase1(
     //   Ge (0 >= b): b <= 0 で冗長、b > 0 で Infeasible
     //   Eq (0 = b):  b == 0 で冗長、b != 0 で Infeasible
     // 旧実装は Le 前提のみで Eq の正の b、Ge の正の b を「冗長」誤削除する false-negative
-    // Infeasibility バグがあった (cmd_752/753 の to_all_le 全廃以降混在状態で潜在化)。
+    // Infeasibility バグがあった。
     'step4: for i in 0..m {
         if skip_step(4) { break 'step4; }
         if removed_rows[i] {

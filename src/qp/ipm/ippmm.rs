@@ -654,12 +654,9 @@ pub(crate) fn solve_ippmm_inner(
             .unwrap_or(norm_c)
             .max(1.0);
 
-        // [偽 Optimal 修正] 元空間 OSQP 流の全体相対化 dfeas (bench/v2 と同形)。
-        // 2026-04-29 セッション 7: bench/v2 を OSQP 流の全体相対化に変更したため、
-        // IPM 内部の収束判定もこれに合わせる (横展開)。
-        // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定する欠陥があり、
-        // bench/v2 で Marginal 5件 + Mid 系の真因と判明していた。IPM 内部も同じ判定が
-        // 使われていたため、IPM が真の収束に達していてもこの式で「未収束」と判定し過剰反復していた。
+        // 元空間 OSQP 流の全体相対化 dfeas (bench/v2 と同形)。
+        // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定し、
+        // IPM が真の収束に達していても「未収束」と誤判定して過剰反復していた。
         // 新式: ||r_d_orig||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
         let nr_d_rel_orig = if let Some(sc) = scaler {
             let mut max_r = 0.0_f64;
