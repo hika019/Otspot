@@ -5,7 +5,7 @@
 //! - status 変換 1 箇所 (API 境界のみ)
 //! - 元空間 KKT 直接判定 (scaled OK で偽 Optimal 出さない)
 //!
-//! 既存 `solve_qp_with` は temporarily 並行運用。v2 が品質・性能で上回ったら旧版を削除する。
+//! 既存 `solve_qp_with` は temporarily 並行運用。v2 が品質・性能で上回ったら統合する。
 
 use crate::options::SolverOptions;
 use crate::presolve::{
@@ -20,9 +20,7 @@ use super::outcome::IpmOutcome;
 use std::time::Instant;
 
 /// 統合 retry の attempt 配列。各 attempt で (use_ruiz, eps_tighten) を変える。
-/// 旧 PV_RETRY × POST_VERIFY = 9 attempts を 6 attempts に直線化する。
-/// presolve 済みの場合は (true, X) と (false, X) が等価なので 4 attempts に縮約する
-/// (実装は `attempts_for` で動的選択)。
+/// presolve 済みの場合は IPM 側 Ruiz を抑止するので tighten のみ変える 3 attempts に縮約する。
 const ATTEMPTS_FULL: &[(bool, f64)] = &[
     (true,  1.0),    // Ruiz on,  eps × 1
     (true,  10.0),   // Ruiz on,  eps × 1/10
@@ -203,8 +201,7 @@ fn unscale_q_diagonal(
     // objective は不変 (cost は同じ問題)
 }
 
-/// 一般化 wrapper: 旧実装で IPM/IPPMM を切り替えていた wrapper。
-/// 現在 runner は IP-PMM のみ。
+/// 一般化 wrapper: runner は現在 IP-PMM のみ。
 fn solve_qp_v2_with_runner(
     problem: &QpProblem,
     options: &SolverOptions,
@@ -279,8 +276,6 @@ fn solve_qp_v2_with_runner(
     // により削除した。`run_lp_postprocess` 関数自体は残しており将来の warm-start IPM 用。
 
     // ── retry 1 層: 動的 attempt 配列を時間内で順に試行 ────────
-    // presolve_did_ruiz=true: (true, X) と (false, X) が等価なので 4 attempts に縮約 + (false,1000.0)
-    // presolve_did_ruiz=false: 6 attempts (Ruiz on/off × 3 tighten)
     let attempts: &[(bool, f64)] = if presolve_did_ruiz {
         ATTEMPTS_PRESOLVE_RUIZ
     } else {
@@ -302,10 +297,9 @@ fn solve_qp_v2_with_runner(
             if idx > 0 && remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT {
                 break;
             }
-            // attempt 0 は full deadline を使う (旧 v1 PV_RETRY pv_try=0 と同等の時間予算)。
-            // attempt 1+ は残り時間 / 残 attempt 数で公平に分配。
-            // attempt 0 を timeshare すると IPM が時間内に収束しきれず不完全解で best-so-far に
-            // 入ってしまう (HS21 で観測: deadline=total/6 だと x=(4.31, 0) で停止 vs full deadline で x=(2, 0))。
+            // attempt 0 は full deadline を使う。timeshare すると IPM が時間内に収束しきれず
+            // 不完全解で best-so-far に入る (HS21 で deadline=total/6 だと x=(4.31, 0) で停止 vs
+            // full deadline で x=(2, 0))。attempt 1+ は残り時間を残 attempt 数で均等分配。
             opts.deadline = if idx == 0 {
                 total_deadline
             } else {
@@ -392,8 +386,8 @@ fn solve_qp_v2_with_runner(
 ///                            best-so-far 解あり (eps 未達、IPM の数値的限界)
 ///   - NumericalError      : best-so-far も無し (factorize 失敗 / 即時破綻)
 ///
-/// 旧実装は「eps 未達は全て Timeout」で IPM 内部諦めと真の時間切れを混同していた。
-/// QPLIB_9002 で「2s iters=49 TIMEOUT」のような誤分類 (実際は IPM 早期諦め) を解消する。
+/// IPM 内部諦め (alpha_stall/mu_floor/NaN_guard) と真の時間切れを区別するため、
+/// best-so-far の有無と deadline 経過の両方を見る。
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,

@@ -89,9 +89,8 @@ const LDL_REG_CEILING: f64 = 1.0;
 const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
 /// alpha 停滞検出: line search が `alpha < alpha_stall_eps_for(eps)` のときに stall とみなす。
-/// user 指定 eps から計算する: tight eps では小さい alpha が正常収束局面なので、
-/// 停滞判定も eps スケールで緩める必要がある (eps=1e-6 → 1e-8 = 旧 default、
-/// eps=1e-9 → 1e-11、eps=1e-3 → 1e-5)。
+/// tight eps では小さい alpha が正常収束局面なので eps スケールで閾値を緩める
+/// (eps=1e-6 → 1e-8、eps=1e-9 → 1e-11、eps=1e-3 → 1e-5)。
 fn alpha_stall_eps_for(eps: f64) -> f64 {
     (eps * 1e-2).max(1e-14)
 }
@@ -104,9 +103,8 @@ const ALPHA_DEADLOCK_N: usize = 20;
 /// 直近 RESIDUAL_STALL_WINDOW 回の iter で best_score が
 /// `RESIDUAL_STALL_REL_DEC` 以上の相対減少を見せなければ停滞とみなす。
 ///
-/// QPLIB_8500 (n=250k): iter 21 で best_score=2.4e-5 (eps=1e-6 を 24x 超え)。
-/// 以降 iter 22-682 (~905s) で alpha > 1e-8 を保ったまま residual 全く改善せず。
-/// 旧 alpha-stall は alpha < 1e-8 でしか発火せず、長時間 spin が放置されていた。
+/// QPLIB_8500 (n=250k): iter 22-682 (~905s) で alpha > 1e-8 を保ったまま residual 改善せず。
+/// alpha-stall (alpha < 1e-8) では捕捉できないため、別途 best_score の停滞窓で検出する。
 ///
 /// パラメータ根拠 (アルゴ物理量、問題集 tuning ではない):
 /// - WINDOW = 50: IPPMM の典型収束速度 (1 iter あたり residual 0.5x 程度) を 7-8 桁
@@ -181,17 +179,10 @@ pub(crate) fn solve_ippmm_inner(
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
-    // 初期点
-    //
-    // 旧: 有界変数はボックス中点 (lb+ub)/2 から開始。
-    // 真因 (QPLIB_9002): 巨大 bounds (|ub|=1e11) で midpoint=2.9e10 となり、初期 |x0|
-    // が桁外れに大きく pf=2e10 (b=0 に対し |Ax0|=2e10)。IPM は midpoint からスタートする
-    // と真の optimum (x≈0 級) に至るまで N 桁の縮小が必要で、line search が間に合わず
-    // 「wrong vertex」状態に張り付く。
-    //
-    // 修正: 0 が bounds に含まれる場合は x0=0 を優先 (multiplier-method の標準推奨)。
-    // 0 が含まれない場合のみ midpoint or 単側 ε シフトに退避。
-    // これにより c=0/b=0 問題で初期 pf=0 から開始でき、IPM が無駄な大域移動を回避。
+    // 初期点: 0 が bounds 内なら 0 を優先 (multiplier-method 標準)。0 が含まれなければ
+    // midpoint または単側 ε シフトに退避。
+    // 巨大 bounds (QPLIB_9002 |ub|=1e11) で midpoint=2.9e10 から始めると pf=2e10 (b=0)
+    // で line search が追いつかず wrong vertex に張り付くため、0 優先で初期 pf=0 を実現。
     let x0: Vec<f64> = problem
         .bounds
         .iter()
@@ -241,18 +232,12 @@ pub(crate) fn solve_ippmm_inner(
 
     // ── Mehrotra 1992 標準初期点 (等式 + 不等式制約両方への射影 + 均一化補正) ─────
     //
-    // 旧実装: 等式制約のみ射影、不等式は s = max(b - A·x0, 1.0) のまま、y0 = 1.0 固定。
-    // 病理: QPLIB_9002 のような |b|≈1e11 級の問題で射影が等式のみだと x0 が
-    //   bound 中点(=0)のままで s0 = b ≈ 1e11 に膨らみ、Σ = s/y が cond 1e11 級
-    //   で K matrix 暴走 → mu 増加 → dx 発散 → NaN_guard 巻き戻し。
-    //
-    // 修正 (Mehrotra 1992 標準、Wright "Primal-Dual Interior-Point Methods" §5.1):
-    //   1. 全制約行 (等式 + 不等式) の残差を RHS に入れて Newton step で x̂ を取る
-    //      → s_hat = b - A·x̂ が小さくなる (x̂ が問題スケールに合う)
+    // Mehrotra 1992 / Wright "Primal-Dual Interior-Point Methods" §5.1 準拠:
+    //   1. 全制約行 (等式 + 不等式) の残差を RHS にして Newton step で x̂ を取り
+    //      s_hat = b - A·x̂ を問題スケールに合わせる
     //   2. δ_s, δ_y で正補正 (s, y ≥ 0 を保証)
-    //   3. δ_s_corr, δ_y_corr で sum 均一化 (s × y を平均化、Σ 分散を抑制)
-    //
-    // 論文準拠 (Pougkakiotis & Gondzio 2021 が前提とする Mehrotra 標準初期化)。
+    //   3. δ_s_corr, δ_y_corr で s × y を均一化 (Σ 分散抑制)
+    // |b|≈1e11 級の問題で等式のみ射影だと s0 ≈ 1e11 に膨らみ K matrix 暴走するのを防ぐ。
     {
         // 全制約行の残差を RHS に
         let r_p: Vec<f64> = b_ext.iter().zip(ax0.iter())
@@ -593,8 +578,8 @@ pub(crate) fn solve_ippmm_inner(
 
         // best-so-far 更新（NaN guard 経路で崩壊解を返さないための保険）
         // 各項を同じスケールで正規化 (mu は complementarity = sᵀy/m で dual variable と同スケール)。
-        // 旧式は mu のみ無正規化で 3 項のスケール不揃いにより、||c|| が大きい問題で
-        // best-so-far が「mu が小さい解」にバイアスされていた。
+        // mu を無正規化で混ぜると ||c|| が大きい問題で best-so-far が「mu が小さい解」に
+        // バイアスされるため、mu / (1+norm_c) で正規化する。
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let norm_b_bs = norm_inf(&b_ext).max(1.0);
         if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() {
@@ -640,9 +625,6 @@ pub(crate) fn solve_ippmm_inner(
         // OSQP 流の正規化 (bench/v2 と整合):
         //   pfeas: ||r_p||_∞ <= eps * (1 + max(||Ax||_∞, ||b||_∞))
         //   dfeas: ||r_d||_∞ <= eps * (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
-        // 旧式 `norm_inf(&b_ext).max(1.0)` は b≈0 の問題 (LISWET / YAO) で
-        // 閾値を eps*1 → eps*2 に緩めて偽 Optimal を出していた (LISWET9: IPM が
-        // pf=1.58e-6 で収束申告するが bench eps=1e-6 で FAIL)。
         let norm_c_orig_for_thr = norm_inf(&problem.c);
         let norm_aty_for_thr = norm_inf(&aty);
         let norm_qx_for_thr = norm_inf(&qx);
@@ -652,8 +634,7 @@ pub(crate) fn solve_ippmm_inner(
         let dfeas_denom = norm_qx_for_thr.max(norm_c_orig_for_thr).max(norm_aty_for_thr);
         // pfeas 分母: max(||Ax||, ||b||)
         let pfeas_denom = norm_ax_for_thr.max(norm_b_for_thr);
-        // 旧式互換用: nr_d_orig 等の他箇所で使う norm_b/norm_c (scaled 空間 .max(1.0) を
-        // 残す。これらは目安で、最終 OSQP 判定は (dfeas/pfeas)_denom が支配する)。
+        // nr_d_orig の閾値計算用 (scaled 空間 .max(1.0) を維持、目安)。
         let norm_c = norm_inf(&problem.c).max(1.0);
         let norm_b = norm_inf(&b_ext).max(1.0);
         let eps = options.ipm_eps();
@@ -679,9 +660,7 @@ pub(crate) fn solve_ippmm_inner(
             .max(1.0);
 
         // 元空間 OSQP 流の全体相対化 dfeas (bench/v2 と同形)。
-        // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定し、
-        // IPM が真の収束に達していても「未収束」と誤判定して過剰反復していた。
-        // 新式: ||r_d_orig||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
+        // ||r_d_orig||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
         let nr_d_rel_orig = if let Some(sc) = scaler {
             let mut max_r = 0.0_f64;
             let mut max_qx = 0.0_f64;
@@ -786,7 +765,7 @@ pub(crate) fn solve_ippmm_inner(
                         })
                         .fold(0.0_f64, f64::max)
                 };
-                // OSQP 形式で b と Ax の両方を考慮 (旧 .max(1.0) は b≈0 で 2x 緩く偽 PASS)
+                // OSQP 形式: max(||Ax||, ||b||) で正規化 (b≈0 でも適切な閾値)
                 let norm_ax_orig: f64 = ax_orig.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
                 let norm_b_orig = norm_inf(&orig.b);
                 let pfeas_thr_orig = eps_orig * (1.0 + norm_ax_orig.max(norm_b_orig));
@@ -969,19 +948,14 @@ pub(crate) fn solve_ippmm_inner(
                         eprintln!("FACT_PROF section=factorize n={} t={:.3}ms", mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
                     }
                     let prof_t_probe = if prof { Some(std::time::Instant::now()) } else { None };
-                    // 健全性プローブ: factorize は Ok を返したが、cond(K) が大きいと LDL solve が
-                    // K·sol = rhs を満たさず Newton 方向が central path から逸脱する病理がある。
-                    // (QPLIB_8515 iter 7: dx_inf=3.35e10, alpha=5.72e-11、効果 step=1.92 でも
-                    // 翌 iter pf が 8e-6 → 1e3 に発散)。
+                    // 健全性プローブ: factorize は Ok でも cond(K) が大きいと LDL solve が
+                    // K·sol = rhs を満たさず Newton 方向が central path から逸脱する病理がある
+                    // (QPLIB_8515: dx_inf=3.35e10, alpha=5.72e-11、翌 iter で pf が 8e-6→1e3 発散)。
                     //
-                    // 旧プローブ: sol_inf/rhs_inf < 1/ε_machine = 4.5e15。これは sol の絶対サイズ
-                    // のみ見るため、sol_inf=3.94e5 (≪ 4.5e15) は通過するが、||K·sol − rhs|| は
-                    // 桁外れに大きい (= LDL は実際には rhs を解いていない) ケースを取りこぼす。
-                    //
-                    // 新プローブ: 実残差 ||K·sol − rhs||_∞ / ||rhs||_∞ ≤ LDL_HEALTH_REL_TOL を
-                    // 直接判定する。LDL_HEALTH_REL_TOL = 1e-3 は inexact Newton forcing term
-                    // η=0.1 より厳しく、外側 IPM の Newton ステップ品質を保証する閾値
-                    // (Wright IPM §11.7、Eisenstat-Walker)。問題集 tuning ではない。
+                    // 実残差 ||K·sol − rhs||_∞ / ||rhs||_∞ ≤ LDL_HEALTH_REL_TOL を直接判定する。
+                    // LDL_HEALTH_REL_TOL = 1e-3 は inexact Newton forcing term η=0.1 より厳しく、
+                    // 外側 IPM の Newton ステップ品質を保証する閾値 (Wright IPM §11.7、
+                    // Eisenstat-Walker)。問題集 tuning ではない。
                     //
                     // 反復法 (MINRES) backend では LDL 精度の概念が当てはまらない (相対 tol で
                     // 自分で収束) ため、probe を skip する。
@@ -1214,15 +1188,9 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                // best-so-far が真に Optimal 級なら Optimal、そうでないなら IPM が数値破綻
-                // したが best 解は保持しているので SuboptimalSolution として下流に委ねる。
-                // bench 側で best の pf/df/obj から PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH/
-                // PASS のいずれかに正しく分類される。
-                //
-                // 旧実装は "Optimal 級でなければ NumericalError"。これは status 隠蔽:
-                // QPLIB_8515 (pf=1.99e-6, df=7.75e-6 — 双方 eps=1e-6 を僅かに超過) で
-                // best は eps 未達だが「数値破綻して best が garbage」という旧分類は不適切。
-                // best は valid な近似解なので SuboptimalSolution + bench の品質判定が正解。
+                // best-so-far が真に Optimal 級なら Optimal、そうでなければ SuboptimalSolution。
+                // best は valid な近似解として下流の bench 品質判定 (PFEAS_FAIL/DFEAS_FAIL/
+                // OBJ_MISMATCH/PASS) に委ねる。NumericalError 扱いは status 隠蔽になるため避ける。
                 let quality_threshold = 10.0 * eps_orig;
                 let combined_quasi = best_score < quality_threshold
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;

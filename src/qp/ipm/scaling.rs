@@ -22,7 +22,6 @@ pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
 /// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
 /// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。
-/// 旧式 (行ノルム正規化) は行ノルム小の制約で過剰判定する欠陥があった。
 fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     use crate::problem::ConstraintType;
     if problem.num_constraints == 0 {
@@ -79,10 +78,8 @@ where
         if let Ok(scaled_problem) = QpProblem::new(
             q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
         ) {
-            // Ruiz スケーリング増幅率を考慮し、scaled 空間での eps を amplification 倍だけ
-            // tighten する (元空間 eps を保証するため)。retry は外側 (ipm_v2 ATTEMPTS) に
-            // 委ねる: 旧 POST_VERIFY_MAX_RESOLV=3 ループは v2 wrapper の 6 attempts と
-            // 機能重複していて inner_solve を最大 18 回走らせる無駄があった。
+            // Ruiz スケーリング増幅率 (1/min(e_i), 1/(c × min(d_j))) で scaled 空間 eps を
+            // tighten し、unscale 後に元空間 eps を保証する。retry は外側 (ipm_v2 ATTEMPTS)。
             let amplification = compute_amplification(&scaler);
             let mut adjusted_opts = options.clone();
             adjusted_opts.ipm.eps =
@@ -299,7 +296,6 @@ pub(crate) fn check_dfeas_status_relative(
         }
     }
     // OSQP 流 全体相対化 (bench/v2/IPM 内部 nr_d_rel_orig / compute_pfeas_osqp と統一)。
-    // 旧式 (成分ごと正規化 → max) は「他項全部 0 に近い 1 変数」で過剰判定する欠陥があった。
     let mut max_r = 0.0_f64;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;

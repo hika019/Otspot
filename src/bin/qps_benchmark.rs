@@ -51,7 +51,6 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     };
 
     // bfeas: OSQP 式の全体相対化 ||v||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))
-    // 旧実装は絶対値 max で、bound が 1e10 の問題で 1e-6 違反が PASS にならない過剰判定だった。
     let mut max_v = 0.0_f64;
     let mut max_x = 0.0_f64;
     let mut max_bnd = 0.0_f64;
@@ -86,7 +85,6 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     match prob.a.mat_vec_mul(solution) {
         Ok(ax) => {
             // OSQP 式: 全体相対化 ||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))。
-            // 旧実装の行ごと正規化は行ノルム小の制約で過剰に厳しい (Marginal の主因の 1 つ)。
             let mut max_v = 0.0_f64;
             let mut max_ax = 0.0_f64;
             let mut max_b = 0.0_f64;
@@ -192,31 +190,25 @@ fn compute_dfeas_orig(
         }
     }
     // OSQP 式: 全体相対化 (||r||_∞ / (1 + max(||Qx||, ||c||, ||A^T y||, ||z||)))
-    // 旧実装は成分ごと正規化 → max で、他項全部小さい変数 1 個で過剰判定になっていた
-    // (Marginal 5件で dfr=1.5e-6 越え)。OSQP/Gurobi 等の業界標準に合わせる。
     let mut dfeas_abs = 0.0_f64;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;
     let mut max_aty = 0.0_f64;
     let mut max_bnd = 0.0_f64;
     for i in 0..n {
-        // FX (固定) 変数 lb==ub は presolve で除去され、bound_dual は postsolve で
-        // 0 埋めされる（実装上 "lagrange dual unknown for fixed vars"）。bench で
-        // FX 変数の stationarity を評価すると 0 埋めの dual で huge な missing 項が
-        // 出るため除外する。
+        // FX (lb≈ub) と EmptyCol (制約 A に登場しない) は presolve で除去され
+        // bound_dual=0 が埋められる慣例。stationarity 評価から除外して v2 経路
+        // (`kkt_residual_rel`) と整合させる。
         let (lb_i, ub_i) = prob.bounds[i];
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
             continue;
         }
-        // EmptyCol 変数 (制約 A に登場しない) も presolve 除去・bound_dual=0 慣例。
-        // dfeas 評価から除外して v2 経路 (kkt_residual_rel) と整合させる。
         if prob.a.col_ptr.len() > i + 1
             && prob.a.col_ptr[i + 1] - prob.a.col_ptr[i] == 0
         {
             continue;
         }
-        // r も DD で組み立てて f64 化。qx/aty は既に DD-from-f64 だが
-        // 4 項の和も f64 にすると桁落ちしうるので DD で組み立てる。
+        // 4 項の和も DD で組み立てる: f64 で和を取ると ill-conditioned 系で桁落ち。
         let r_dd = TwoFloat::from(qx[i])
             + TwoFloat::from(aty[i])
             + TwoFloat::from(bound_contrib[i])
@@ -231,12 +223,6 @@ fn compute_dfeas_orig(
     let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
     let dfeas_rel = dfeas_abs / scale;
     (dfeas_abs, dfeas_rel)
-}
-
-/// 旧: ソルバ申告 dfeas を返す（後方互換のため残置、現状未使用）。
-#[allow(dead_code)]
-fn get_dfeas(result: &solver::problem::SolverResult) -> f64 {
-    result.dfeas.unwrap_or(f64::NAN)
 }
 
 /// §2.3: 相補性チェック（LP限定。QPスキップ）
@@ -265,11 +251,8 @@ fn compute_complementarity(
 }
 
 fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
-    // 旧実装は thread::spawn + recv_timeout で parse をタイムアウトさせていたが、
-    // タイムアウト時にスレッドが detach されたまま継続実行され「不必要なメモリ」を
-    // 累積する mandate 違反。parse_qps 自体に cancellation API がないため、
-    // 単純な同期呼び出しに変更し、hang 時は bench_parallel.sh の外部 gtimeout で
-    // プロセスごと殺される設計に統一する (graceful failure)。
+    // parse_qps 自体に cancellation API がないため同期呼び出し。hang 時は
+    // bench_parallel.sh の外部 gtimeout でプロセスごと殺される設計。
     parse_qps(path).map_err(BenchError::Parse)
 }
 
