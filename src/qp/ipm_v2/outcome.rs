@@ -98,12 +98,25 @@ impl IpmOutcome {
             && self.duality_gap_rel < Self::PROMOTION_GAP_TOL
     }
 
-    /// 残差の合算 score (小さいほど良い)。retry での best-so-far 比較用。
+    /// 残差の最大値 score (小さいほど良い)。retry での best-so-far 比較用。
+    /// componentwise eps 判定 (`satisfies_eps` も max で判定) と整合させるため、
+    /// sum ではなく max を使う。sum だと「pf=0.16 + df=1e-9」と「pf=1e-10 + df=200」を
+    /// 比較したとき前者が小さく見えるが、実際の eps 達成度では後者の方が pf 1e-10 で
+    /// 「あと一歩」、前者は pf 1.6e-1 で「絶望的」。max 比較なら後者の 200 と前者の
+    /// 0.16 で前者が選ばれるが、いずれもユーザー eps を超えるため両方 SuboptimalSolution。
+    /// 違いは「pf を eps 内に押し込みやすいか」: 前者は primal が大きく外れている、
+    /// 後者は dual が大きく外れている。後段の refine_dual_lsq / refit_bound_duals_kkt は
+    /// dual 補正が効くので後者の方が回復見込みあり。max 比較では確かに前者を取って
+    /// しまうので一概に良くないが、sum 比較で「dual が huge でも sum 大きいから捨てる」
+    /// と「primal が huge」を取る方がさらに悪い。max は最悪値を見るので dual が極端に
+    /// 大きい解を弾くだけになる。
     pub fn quality_score(&self) -> f64 {
         if self.solution.is_empty() || self.numerical_failure {
             return f64::INFINITY;
         }
-        self.kkt_residual_rel + self.primal_residual_rel + self.bound_violation
+        self.kkt_residual_rel
+            .max(self.primal_residual_rel)
+            .max(self.bound_violation)
     }
 }
 
