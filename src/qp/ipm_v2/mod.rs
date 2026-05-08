@@ -313,6 +313,73 @@ mod tests {
         }
     }
 
+    /// QPILOTNO row 14 と row 130 の関係 (A 行ペア確認 + presolve 経路追跡)。
+    #[test]
+    fn test_v2_qpilotno_row_pair_check() {
+        let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
+        if !path.exists() { return; }
+        let prob = parse_qps(path).expect("parse QPILOTNO");
+        // 行 14 と 130 の非ゼロ要素を抽出
+        let extract_row = |row_target: usize| -> Vec<(usize, f64)> {
+            let mut entries = Vec::new();
+            for col in 0..prob.num_vars {
+                let cs = prob.a.col_ptr[col];
+                let ce = prob.a.col_ptr[col + 1];
+                for k in cs..ce {
+                    if prob.a.row_ind[k] == row_target {
+                        entries.push((col, prob.a.values[k]));
+                    }
+                }
+            }
+            entries
+        };
+        let r14 = extract_row(14);
+        let r130 = extract_row(130);
+        eprintln!("Row 14: nnz={} b={}", r14.len(), prob.b[14]);
+        for (c, v) in &r14[..5.min(r14.len())] { eprintln!("  col[{}] = {:+.5e}", c, v); }
+        eprintln!("Row 130: nnz={} b={}", r130.len(), prob.b[130]);
+        for (c, v) in &r130[..5.min(r130.len())] { eprintln!("  col[{}] = {:+.5e}", c, v); }
+        // pairwise 一致確認
+        if r14.len() == r130.len() {
+            let same_cols = r14.iter().zip(r130.iter()).all(|(a, b)| a.0 == b.0);
+            if same_cols {
+                let val_pattern: Vec<(f64, f64, f64)> = r14.iter().zip(r130.iter())
+                    .map(|((_, v1), (_, v2))| (*v1, *v2, v1 + v2)).collect();
+                eprintln!("Same column support. Sum (v1+v2): {:?}", &val_pattern[..5.min(val_pattern.len())]);
+                let max_sum = val_pattern.iter().map(|(_,_,s)| s.abs()).fold(0.0_f64, f64::max);
+                eprintln!("max |v1+v2| = {:.3e}  (0 → 行 14 = -行 130)", max_sum);
+            }
+        }
+    }
+
+    /// QPILOTNO の primal violation 集中行を特定する診断 (componentwise pfeas 化以後)。
+    #[test]
+    fn test_v2_qpilotno_primal_violation_diagnose() {
+        let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
+        if !path.exists() { return; }
+        let prob = parse_qps(path).expect("parse QPILOTNO");
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(10.0);
+        let r = solve_qp_v2(&prob, &opts);
+        eprintln!("QPILOTNO status={:?} obj={:.5e}", r.status, r.objective);
+        let ax = prob.a.mat_vec_mul(&r.solution).unwrap();
+        let mut violations: Vec<(usize, f64, f64, f64, f64)> = (0..prob.num_constraints).map(|i| {
+            let v = match prob.constraint_types[i] {
+                crate::problem::ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
+                crate::problem::ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
+                crate::problem::ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
+            };
+            let scale = 1.0 + ax[i].abs() + prob.b[i].abs();
+            (i, v, v / scale, ax[i], prob.b[i])
+        }).collect();
+        violations.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+        eprintln!("Top 10 primal violations (componentwise rel):");
+        for (i, v, rel, ax_i, b_i) in violations.iter().take(10) {
+            eprintln!("  i={:5} viol={:.3e} rel={:.3e} ax={:+.3e} b={:+.3e} type={:?}",
+                i, v, rel, ax_i, b_i, prob.constraint_types[*i]);
+        }
+    }
+
     /// DPKLO1 で parser bug 修正と v2 が両立することを確認 (timeout/optimal ok)。
     #[test]
     fn test_v2_dpklo1() {

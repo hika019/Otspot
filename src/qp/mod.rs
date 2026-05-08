@@ -529,11 +529,19 @@ pub(crate) fn refine_dual_lsq(
     let aty_old_dd = aty_dd(&result.dual_solution);
     let aty_new_dd = aty_dd(&y_new);
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
-    let mut max_resid_old = 0.0_f64;
-    let mut max_resid_new = 0.0_f64;
+    // 成分相対化で比較する。abs max では ill-scaled 問題で 1 列のみ大きく外れた残差が
+    // 巨大スケールに埋もれるため、componentwise rel = |r_j| / (1 + |Qx_j| + |c_j| + |Aty_j| + |z_j|)
+    // で旧/新を比較し、stricter 側を取る。
+    let mut max_rel_old = 0.0_f64;
+    let mut max_rel_new = 0.0_f64;
     for j in 0..n {
         let (lbj, ubj) = problem.bounds[j];
         if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
+            continue;
+        }
+        if problem.a.col_ptr.len() > j + 1
+            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+        {
             continue;
         }
         let r_old_dd = qx_dd[j]
@@ -544,10 +552,17 @@ pub(crate) fn refine_dual_lsq(
             + TwoFloat::from(problem.c[j])
             + aty_new_dd[j]
             + TwoFloat::from(bound_contrib[j]);
-        max_resid_old = max_resid_old.max(f64::from(r_old_dd).abs());
-        max_resid_new = max_resid_new.max(f64::from(r_new_dd).abs());
+        let qx_j = f64::from(qx_dd[j]).abs();
+        let aty_old_j = f64::from(aty_old_dd[j]).abs();
+        let aty_new_j = f64::from(aty_new_dd[j]).abs();
+        let scale_old = 1.0 + qx_j + problem.c[j].abs() + aty_old_j + bound_contrib[j].abs();
+        let scale_new = 1.0 + qx_j + problem.c[j].abs() + aty_new_j + bound_contrib[j].abs();
+        let rel_old = f64::from(r_old_dd).abs() / scale_old;
+        let rel_new = f64::from(r_new_dd).abs() / scale_new;
+        if rel_old > max_rel_old { max_rel_old = rel_old; }
+        if rel_new > max_rel_new { max_rel_new = rel_new; }
     }
-    if max_resid_new < max_resid_old {
+    if max_rel_new < max_rel_old {
         result.dual_solution = y_new;
     }
 }
@@ -814,21 +829,34 @@ pub(crate) fn refine_primal_lsq(
         }
     }
 
-    // 改善判定: 全制約での max violation が減ったか
+    // 改善判定: 成分相対化での max rel violation が減ったか
+    // (abs 比較は ill-scaled 行で 1 行のみ大きく外れた違反を見逃すため、
+    //  bench compute_pfeas_normalized componentwise と整合する metric を使う)。
     let ax_new = match problem.a.mat_vec_mul(&x_new) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let mut max_v_post = 0.0_f64;
+    let mut max_rel_pre = 0.0_f64;
+    let mut max_rel_post = 0.0_f64;
     for i in 0..m {
-        let raw = match problem.constraint_types[i] {
+        let raw_pre = match problem.constraint_types[i] {
+            ConstraintType::Eq => (ax[i] - problem.b[i]).abs(),
+            ConstraintType::Ge => (problem.b[i] - ax[i]).max(0.0),
+            ConstraintType::Le => (ax[i] - problem.b[i]).max(0.0),
+        };
+        let raw_post = match problem.constraint_types[i] {
             ConstraintType::Eq => (ax_new[i] - problem.b[i]).abs(),
             ConstraintType::Ge => (problem.b[i] - ax_new[i]).max(0.0),
             ConstraintType::Le => (ax_new[i] - problem.b[i]).max(0.0),
         };
-        max_v_post = max_v_post.max(raw);
+        let scale_pre = 1.0 + ax[i].abs() + problem.b[i].abs();
+        let scale_post = 1.0 + ax_new[i].abs() + problem.b[i].abs();
+        let rel_pre = raw_pre / scale_pre;
+        let rel_post = raw_post / scale_post;
+        if rel_pre > max_rel_pre { max_rel_pre = rel_pre; }
+        if rel_post > max_rel_post { max_rel_post = rel_post; }
     }
-    if max_v_post < max_v_pre {
+    if max_rel_post < max_rel_pre {
         *x = x_new;
     }
 }
