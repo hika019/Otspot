@@ -1,8 +1,9 @@
 //! 元空間 KKT 残差計算 (bench `compute_dfeas_orig` と同形)。
 //!
 //! 設計書「元問題基準で報告」原則に従い、scaled 空間ではなく必ず元 problem.q / a / c で計算する。
-//! OSQP 式の全体相対化 (`||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))`)
-//! を採用し、ill-conditioned 問題でも妥当な精度判定が可能。
+//! **成分相対化** (max_j |r_j| / (1 + |Qx_j| + |c_j| + |A^T y_j| + |z_j|)) を採用。
+//! 全体相対化 (OSQP 公式) は ill-scaled 問題で 1 成分のみ大きく外れた残差を見逃すため、
+//! ユーザー指定 eps の保証として不十分。+1 オフセットにより微小成分での過剰判定も抑制する。
 
 use crate::problem::ConstraintType;
 use super::outcome::ProblemView;
@@ -36,15 +37,18 @@ fn compute_bound_contrib(
     contrib
 }
 
-/// 元空間 KKT stationarity 残差 (OSQP 式: 全体相対化, 最大値)。
+/// 元空間 KKT stationarity 残差 (成分相対化, 最大値)。
 ///
-/// `||r||_∞ / (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞, ||z||_∞))` (OSQP 標準)。
-/// 成分ごと正規化版は「他項が 0 に近い 1 変数」で過剰判定する欠陥があった。
+/// `max_j |r_j| / (1 + |Qx_j| + |c_j| + |A^T y_j| + |z_j|)`。
+/// 全体相対化 (OSQP 公式) は ill-scaled 問題で 1 成分のみ大きく外れた残差を
+/// 巨大スケールで割って eps を満たすように見せてしまう欠陥があり、ユーザー指定
+/// 精度の保証として不十分なため成分相対化を採用する。+1 オフセットで微小成分の
+/// 過剰判定を抑制。
 ///
 /// **DD (TwoFloat) 精度** で計算する: ill-conditioned 問題 (QPILOTNO: cond≈3e12) で
 /// f64 mat_vec のキャンセル誤差が真の残差を埋もれさせ、bench `compute_dfeas_orig` (DD)
-/// と乖離する。同じ DD 演算で揃えないと Stage A/B/C/D の guard / 採否判定 / quality_score が
-/// noise を相手にして誤った収束判定をする。
+/// と乖離する。同じ DD 演算で揃えないと採否判定 / quality_score が noise を相手にして
+/// 誤った収束判定をする。
 ///
 /// FX 変数 (lb≈ub) と EmptyCol 変数は postsolve 慣例で bound_dual=0 埋めされるため
 /// KKT 評価から除外する (`compute_dfeas_orig` の除外条件と一致)。
@@ -82,11 +86,7 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
         vec![zero_dd; n]
     };
     let bound_contrib = compute_bound_contrib(prob.bounds, z, n);
-    let mut max_r = 0.0_f64;
-    let mut max_qx = 0.0_f64;
-    let mut max_c = 0.0_f64;
-    let mut max_aty = 0.0_f64;
-    let mut max_bnd = 0.0_f64;
+    let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
@@ -101,20 +101,23 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
             + TwoFloat::from(prob.c[j])
             + aty_dd[j]
             + TwoFloat::from(bound_contrib[j]);
-        max_r = max_r.max(f64::from(r_dd).abs());
-        max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
-        max_c = max_c.max(prob.c[j].abs());
-        max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
-        max_bnd = max_bnd.max(bound_contrib[j].abs());
+        let r = f64::from(r_dd).abs();
+        let qx_j = f64::from(qx_dd[j]).abs();
+        let aty_j = f64::from(aty_dd[j]).abs();
+        let scale_j = 1.0 + qx_j + prob.c[j].abs() + aty_j + bound_contrib[j].abs();
+        let rel_j = r / scale_j;
+        if rel_j > max_rel {
+            max_rel = rel_j;
+        }
     }
-    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
-    max_r / scale
+    max_rel
 }
 
-/// 元空間 primal 残差 (OSQP 式: 全体相対化, 最大値)。
+/// 元空間 primal 残差 (成分相対化, 最大値)。
 ///
-/// `||Ax - b||_∞ / (1 + max(||Ax||_∞, ||b||_∞))` (制約型ごと violation を取る)。
+/// `max_i violation_i / (1 + |Ax_i| + |b_i|)` (制約型ごと violation を取る)。
 /// A·x は DD で積算: f64 sum のキャンセル誤差で実 violation が見えなくなるのを防ぐ。
+/// 成分相対化により ill-scaled 行列で 1 行のみ違反が大きい場合も検出する。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     if prob.a.nrows == 0 {
@@ -129,9 +132,7 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
             ax_dd[prob.a.row_ind[k]] = ax_dd[prob.a.row_ind[k]] + TwoFloat::new_mul(prob.a.values[k], xv);
         }
     }
-    let mut max_v = 0.0_f64;
-    let mut max_ax = 0.0_f64;
-    let mut max_b = 0.0_f64;
+    let mut max_rel = 0.0_f64;
     for ((ax_i_dd, &b_i), ct) in ax_dd.iter()
         .zip(prob.b.iter())
         .zip(prob.constraint_types.iter())
@@ -143,35 +144,42 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
             ConstraintType::Ge => (-raw).max(0.0),
             _ => raw.max(0.0),
         };
-        max_v = max_v.max(v);
-        max_ax = max_ax.max(f64::from(*ax_i_dd).abs());
-        max_b = max_b.max(b_i.abs());
+        let ax_i_abs = f64::from(*ax_i_dd).abs();
+        let scale_i = 1.0 + ax_i_abs + b_i.abs();
+        let rel_i = v / scale_i;
+        if rel_i > max_rel {
+            max_rel = rel_i;
+        }
     }
-    let scale = 1.0 + max_ax.max(max_b);
-    max_v / scale
+    max_rel
 }
 
-/// 元空間 bounds 違反 (OSQP 式: 全体相対化, 最大値)。
+/// 元空間 bounds 違反 (成分相対化, 最大値)。
 ///
-/// `||violation||_∞ / (1 + max(||x||_∞, ||lb||_∞, ||ub||_∞))`。
+/// `max_j violation_j / (1 + |x_j| + |bound_j|)`。成分相対化により単一変数が
+/// 大きく境界を超えても見逃さない。
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
-    let mut max_v = 0.0_f64;
-    let mut max_x = 0.0_f64;
-    let mut max_bnd = 0.0_f64;
+    let mut max_rel = 0.0_f64;
     for (&xi, &(lb, ub)) in x.iter().zip(bounds.iter()) {
         let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
         let hi = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
-        max_v = max_v.max(lo.max(hi));
-        max_x = max_x.max(xi.abs());
-        if lb.is_finite() {
-            max_bnd = max_bnd.max(lb.abs());
-        }
-        if ub.is_finite() {
-            max_bnd = max_bnd.max(ub.abs());
+        let v = lo.max(hi);
+        let bnd = if lb.is_finite() && ub.is_finite() {
+            lb.abs().max(ub.abs())
+        } else if lb.is_finite() {
+            lb.abs()
+        } else if ub.is_finite() {
+            ub.abs()
+        } else {
+            0.0
+        };
+        let scale_j = 1.0 + xi.abs() + bnd;
+        let rel_j = v / scale_j;
+        if rel_j > max_rel {
+            max_rel = rel_j;
         }
     }
-    let scale = 1.0 + max_x.max(max_bnd);
-    max_v / scale
+    max_rel
 }
 
 #[cfg(test)]

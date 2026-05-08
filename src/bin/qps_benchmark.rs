@@ -71,10 +71,12 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
-/// §2.1b: 行ノルム正規化pfeas（本体ipm/mod.rsと同方式）
+/// §2.1b: pfeas を成分相対化で評価する (本体 kkt::primal_residual_rel と同形)。
 ///
-/// max_k [ violation_k / (1 + ||a_k||_∞ + |b_k|) ]
-/// 本体の post_verify_solution と同一の正規化式を使用。
+/// `max_i violation_i / (1 + |Ax_i| + |b_i|)`。
+/// OSQP 公式の全体相対化 (max_v / (1 + max(||Ax||_∞, ||b||_∞))) は ill-scaled 行列で
+/// 1 行のみ違反が大きい場合に巨大スケールで割って eps を満たすように見せる欠陥がある
+/// ため、成分相対化で 1 行ごとに精度を保証する。
 fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     if solution.is_empty() || solution.len() != prob.num_vars {
         return f64::NAN;
@@ -84,22 +86,20 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     }
     match prob.a.mat_vec_mul(solution) {
         Ok(ax) => {
-            // OSQP 式: 全体相対化 ||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))。
-            let mut max_v = 0.0_f64;
-            let mut max_ax = 0.0_f64;
-            let mut max_b = 0.0_f64;
+            let mut max_rel = 0.0_f64;
             for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
                 let violation = match prob.constraint_types.get(i) {
                     Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
                     Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
                     _ => (ax_i - b_i).max(0.0),
                 };
-                max_v = max_v.max(violation);
-                max_ax = max_ax.max(ax_i.abs());
-                max_b = max_b.max(b_i.abs());
+                let scale_i = 1.0 + ax_i.abs() + b_i.abs();
+                let rel_i = violation / scale_i;
+                if rel_i > max_rel {
+                    max_rel = rel_i;
+                }
             }
-            let scale = 1.0 + max_ax.max(max_b);
-            max_v / scale
+            max_rel
         }
         Err(_) => f64::NAN,
     }
@@ -190,7 +190,11 @@ fn compute_dfeas_orig(
         }
     }
     // OSQP 式: 全体相対化 (||r||_∞ / (1 + max(||Qx||, ||c||, ||A^T y||, ||z||)))
+    // および 成分相対化 (max_i |r_i| / (1 + |Qx_i| + |c_i| + |A^T y_i| + |z_i|))
+    // を併算する。前者は OSQP 公式仕様に準拠した緩い基準、後者は 1 成分でも
+    // 桁違いに外れたら検出する厳しい基準 (個別 stationarity の精度保証)。
     let mut dfeas_abs = 0.0_f64;
+    let mut dfeas_rel_componentwise = 0.0_f64;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;
     let mut max_aty = 0.0_f64;
@@ -217,6 +221,9 @@ fn compute_dfeas_orig(
             + TwoFloat::from(prob.c[i]);
         let r = f64::from(r_dd).abs();
         dfeas_abs = dfeas_abs.max(r);
+        let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
+        let r_rel_i = r / scale_i;
+        dfeas_rel_componentwise = dfeas_rel_componentwise.max(r_rel_i);
         max_qx = max_qx.max(qx[i].abs());
         max_c = max_c.max(prob.c[i].abs());
         max_aty = max_aty.max(aty[i].abs());
@@ -229,7 +236,8 @@ fn compute_dfeas_orig(
     let dfeas_rel = dfeas_abs / scale;
     if dump_top {
         per_col.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!("DFEAS_DUMP_TOP scale={:.3e} dfeas_abs={:.3e} dfeas_rel={:.3e}", scale, dfeas_abs, dfeas_rel);
+        eprintln!("DFEAS_DUMP_TOP scale={:.3e} dfeas_abs={:.3e} dfeas_rel={:.3e} dfeas_relC={:.3e}",
+            scale, dfeas_abs, dfeas_rel, dfeas_rel_componentwise);
         for k in 0..per_col.len().min(10) {
             let (i, r, qxi, atyi, bndi, ci) = per_col[k];
             let (lbi, ubi) = prob.bounds[i];
@@ -238,7 +246,132 @@ fn compute_dfeas_orig(
                 i, r, qxi, atyi, bndi, ci, xi, lbi, ubi);
         }
     }
-    (dfeas_abs, dfeas_rel)
+    // 判定は **成分相対化** (dfeas_rel_componentwise) を採用する。OSQP 公式の
+    // 全体相対化 (dfeas_rel) は ill-scaled 問題で 1 成分のみ大きく外れた残差を
+    // 巨大スケールで割って eps を満たすように見せる欠陥があり、ユーザー指定 eps の
+    // 保証として不十分。第 2 戻り値は厳しい側 (componentwise) に変更する。
+    let _ = dfeas_rel; // 表示用には DFEAS_DUMP_TOP で参照可
+    (dfeas_abs, dfeas_rel_componentwise)
+}
+
+/// 元空間 dfeas を成分相対化で評価する。OSQP 公式 (全体相対化) の dfeas_rel と
+/// 併算し、ill-scaled 問題で 1 成分のみ残差が大きい場合の精度劣化を検出するため
+/// に使う。dfeas_rel ≤ eps でも dfeas_relC > eps なら solver の収束が
+/// 「全体感では精度が出ているが、特定成分は eps を満たしていない」状態。
+fn compute_dfeas_componentwise(
+    prob: &QpProblem,
+    solution: &[f64],
+    dual_solution: &[f64],
+    bound_duals: &[f64],
+    reduced_costs: &[f64],
+) -> f64 {
+    use twofloat::TwoFloat;
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    let n = solution.len();
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = solution[col];
+        let cs = prob.q.col_ptr[col];
+        let ce = prob.q.col_ptr[col + 1];
+        for k in cs..ce {
+            let row = prob.q.row_ind[k];
+            let v = prob.q.values[k];
+            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
+        }
+    }
+    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let cs = prob.a.col_ptr[col];
+            let ce = prob.a.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = prob.a.row_ind[k];
+                let v = prob.a.values[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, dual_solution[row]);
+            }
+        }
+        aty_dd.iter().map(|&v| f64::from(v)).collect()
+    } else {
+        vec![0.0; n]
+    };
+    let mut bound_contrib = vec![0.0_f64; n];
+    if !bound_duals.is_empty() {
+        let mut bd_idx = 0usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] -= bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && bd_idx < bound_duals.len() {
+                bound_contrib[j] += bound_duals[bd_idx];
+                bd_idx += 1;
+            }
+        }
+    } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
+        for j in 0..n {
+            bound_contrib[j] = -reduced_costs[j];
+        }
+    }
+    let mut max_rel = 0.0_f64;
+    for i in 0..n {
+        let (lb_i, ub_i) = prob.bounds[i];
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
+            continue;
+        }
+        if prob.a.col_ptr.len() > i + 1
+            && prob.a.col_ptr[i + 1] - prob.a.col_ptr[i] == 0
+        {
+            continue;
+        }
+        let r_dd = TwoFloat::from(qx[i])
+            + TwoFloat::from(aty[i])
+            + TwoFloat::from(bound_contrib[i])
+            + TwoFloat::from(prob.c[i]);
+        let r = f64::from(r_dd).abs();
+        let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
+        let rel_i = r / scale_i;
+        if rel_i > max_rel {
+            max_rel = rel_i;
+        }
+    }
+    max_rel
+}
+
+/// pfeas を成分相対化で評価する: max_i [violation_i / (1 + |a_i·x| + |b_i|)]。
+/// OSQP 公式 dfeas_normalized (全体相対化) より厳しく、巨大行 1 つで他がゼロでも
+/// 精度を保証する。
+fn compute_pfeas_componentwise(prob: &QpProblem, solution: &[f64]) -> f64 {
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    if prob.num_constraints == 0 {
+        return 0.0;
+    }
+    match prob.a.mat_vec_mul(solution) {
+        Ok(ax) => {
+            let mut max_rel = 0.0_f64;
+            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
+                let violation = match prob.constraint_types.get(i) {
+                    Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                    Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                    _ => (ax_i - b_i).max(0.0),
+                };
+                let scale_i = 1.0 + ax_i.abs() + b_i.abs();
+                let rel_i = violation / scale_i;
+                if rel_i > max_rel {
+                    max_rel = rel_i;
+                }
+            }
+            max_rel
+        }
+        Err(_) => f64::NAN,
+    }
 }
 
 /// §2.3: 相補性チェック（LP限定。QPスキップ）
@@ -677,10 +810,21 @@ fn main() {
                                 }
                                 ObjCheckResult::Ok { rel_err } => {
                                     n_pass += 1;
+                                    // 判定値 (pfn 全体相対化, dfr 全体相対化) と
+                                    // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
+                                    // 同じ eps で見て componentwise も満たすか可視化する。
+                                    let pfc = compute_pfeas_componentwise(&prob, &result.solution);
+                                    let dfc = compute_dfeas_componentwise(
+                                        &prob,
+                                        &result.solution,
+                                        &result.dual_solution,
+                                        &result.bound_duals,
+                                        &result.reduced_costs,
+                                    );
                                     let df_str = if dfeas.is_nan() {
-                                        "df=NA".to_string()
+                                        "df=NA dfr=NA dfc=NA".to_string()
                                     } else {
-                                        format!("df={:.1e}", dfeas)
+                                        format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
                                     };
                                     let comp_str = if comp.is_nan() {
                                         "comp=NA".to_string()
@@ -690,10 +834,12 @@ fn main() {
                                     (
                                         "PASS".to_string(),
                                         format!(
-                                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
+                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
                                             method_label,
                                             result.objective,
                                             pfeas,
+                                            pfeas_normalized,
+                                            pfc,
                                             bfeas,
                                             df_str,
                                             comp_str,
@@ -703,10 +849,18 @@ fn main() {
                                 }
                                 ObjCheckResult::NoRef => {
                                     n_pass_noref += 1;
+                                    let pfc = compute_pfeas_componentwise(&prob, &result.solution);
+                                    let dfc = compute_dfeas_componentwise(
+                                        &prob,
+                                        &result.solution,
+                                        &result.dual_solution,
+                                        &result.bound_duals,
+                                        &result.reduced_costs,
+                                    );
                                     let df_str = if dfeas.is_nan() {
-                                        "df=NA".to_string()
+                                        "df=NA dfr=NA dfc=NA".to_string()
                                     } else {
-                                        format!("df={:.1e}", dfeas)
+                                        format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
                                     };
                                     let comp_str = if comp.is_nan() {
                                         "comp=NA".to_string()
@@ -716,10 +870,12 @@ fn main() {
                                     (
                                         "PASS[no_ref]".to_string(),
                                         format!(
-                                            "[{}] obj={:.2e} pf={:.1e} bf={:.1e} {} {}",
+                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {}",
                                             method_label,
                                             result.objective,
                                             pfeas,
+                                            pfeas_normalized,
+                                            pfc,
                                             bfeas,
                                             df_str,
                                             comp_str
