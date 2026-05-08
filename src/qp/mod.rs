@@ -1150,24 +1150,20 @@ pub(crate) fn refine_kkt_iterative(
         let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
         let aty = problem.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n]);
         let mut r_d = vec![0.0_f64; n];
-        let mut max_qx = 0.0_f64;
-        let mut max_c = 0.0_f64;
-        let mut max_aty = 0.0_f64;
-        let mut max_bnd = 0.0_f64;
+        let mut df_rel_componentwise = 0.0_f64;
         for j in 0..n {
             if exclude_var[j] { continue; }
             let bc = bound_contrib_at_var(&problem.bounds, z, j);
             r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
-            max_qx = max_qx.max(qx[j].abs());
-            max_c = max_c.max(problem.c[j].abs());
-            max_aty = max_aty.max(aty[j].abs());
-            max_bnd = max_bnd.max(bc.abs());
+            // 成分相対化 (bench compute_dfeas_orig componentwise と一致)。
+            let scale_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bc.abs();
+            let rel_j = r_d[j].abs() / scale_j;
+            if rel_j > df_rel_componentwise { df_rel_componentwise = rel_j; }
         }
         let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
         let mut r_p = vec![0.0_f64; m];
         let mut pf_abs = 0.0_f64;
-        let mut max_ax = 0.0_f64;
-        let mut max_b = 0.0_f64;
+        let mut pf_rel_componentwise = 0.0_f64;
         for i in 0..m {
             let raw = ax[i] - problem.b[i];
             let v = match problem.constraint_types[i] {
@@ -1177,15 +1173,13 @@ pub(crate) fn refine_kkt_iterative(
             };
             r_p[i] = v;
             pf_abs = pf_abs.max(v.abs());
-            max_ax = max_ax.max(ax[i].abs());
-            max_b = max_b.max(problem.b[i].abs());
+            // 成分相対化。
+            let scale_i = 1.0 + ax[i].abs() + problem.b[i].abs();
+            let rel_i = v.abs() / scale_i;
+            if rel_i > pf_rel_componentwise { pf_rel_componentwise = rel_i; }
         }
         let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        let pf_scale = 1.0 + max_ax.max(max_b);
-        let df_scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
-        let pf_rel = pf_abs / pf_scale;
-        let df_rel = df_abs / df_scale;
-        (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)
+        (r_d, r_p, pf_abs, df_abs, pf_rel_componentwise, df_rel_componentwise)
     };
 
     // DD (double-double) residual: Wilkinson IR の "double the working precision" 実装。
@@ -1257,8 +1251,7 @@ pub(crate) fn refine_kkt_iterative(
         }
         let mut r_p = vec![0.0_f64; m];
         let mut pf_abs = 0.0_f64;
-        let mut max_ax = 0.0_f64;
-        let mut max_b = 0.0_f64;
+        let mut pf_rel_componentwise = 0.0_f64;
         for i in 0..m {
             let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
             let raw = f64::from(raw_dd);
@@ -1269,15 +1262,30 @@ pub(crate) fn refine_kkt_iterative(
             };
             r_p[i] = v;
             pf_abs = pf_abs.max(v.abs());
-            max_ax = max_ax.max(f64::from(ax_dd[i]).abs());
-            max_b = max_b.max(problem.b[i].abs());
+            // 成分相対化: 各行ごとに正規化して max を取る (bench compute_pfeas_normalized と一致)。
+            let ax_i_abs = f64::from(ax_dd[i]).abs();
+            let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
+            let rel_i = v.abs() / scale_i;
+            if rel_i > pf_rel_componentwise { pf_rel_componentwise = rel_i; }
         }
         let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        let pf_scale = 1.0 + max_ax.max(max_b);
-        let df_scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
-        let pf_rel = pf_abs / pf_scale;
-        let df_rel = df_abs / df_scale;
-        (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)
+        // df_rel も成分相対化で計算 (bench compute_dfeas_orig componentwise と一致)。
+        // 全体相対化 (max_qx,max_c,max_aty,max_bnd の最大で割る) は ill-scaled で
+        // 1 成分のみ大きく外れた残差を見逃すため、saddle-point IR の skip 判定にも
+        // componentwise を使う必要がある (QBORE3D で global df_rel=1.6e-9 だが
+        // componentwise df_rel=7.06e-4 で IR が skip されていた)。
+        let mut df_rel_componentwise = 0.0_f64;
+        for j in 0..n {
+            if exclude_var[j] { continue; }
+            let qx_j = f64::from(qx_dd[j]).abs();
+            let aty_j = f64::from(aty_dd[j]).abs();
+            let bc = bound_contrib_at_var(&problem.bounds, z, j);
+            let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
+            let rel_j = r_d[j].abs() / scale_j;
+            if rel_j > df_rel_componentwise { df_rel_componentwise = rel_j; }
+        }
+        let _ = max_qx; let _ = max_c; let _ = max_aty; let _ = max_bnd;
+        (r_d, r_p, pf_abs, df_abs, pf_rel_componentwise, df_rel_componentwise)
     };
 
     let pre_z = result.bound_duals.clone();
@@ -1469,10 +1477,16 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
     }
 
     let mut new_bd = vec![0.0_f64; n_lb + n_ub];
-    // active 判定の許容差。x が lb / ub の (1e-6 * (1 + |bound|)) 以内なら active 扱い。
-    // IPM の interior point は厳密に bound に到達しないため、tolerance が必要。
-    const ACTIVE_REL_TOL: f64 = 1e-6;
-
+    // bound dual の **候補値** を target = -(Qx+c+Aty) の符号で決める。
+    // bound_contrib[j] = -z_lb[j] + z_ub[j] = target なので:
+    //   target > 0 → z_ub 候補 = target  (ub 側活性化)、z_lb = 0
+    //   target < 0 → z_lb 候補 = -target (lb 側活性化)、z_ub = 0
+    // 旧実装は ACTIVE_REL_TOL=1e-6 で「x が bound 近接か」を判定して activate していたが、
+    // QFORPLAN col 34 (x=7.2e-6 ≈ lb=0) のような「IPM が bound 近接で停止したが
+    // tol を僅かに超えている」ケースを見逃していた。
+    // ここでは **常に候補を提示** し、後段の per-col guard (r_post <= r_pre) で残差が
+    // 改善する場合のみ採用する。内部点で本当に z=0 が正しい場合は旧値が維持されるので
+    // 誤った activation は起きない。
     let mut lb_idx = 0_usize;
     let mut ub_idx = n_lb;
     for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
@@ -1480,28 +1494,23 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
         let lb_finite = lb.is_finite();
         let ub_finite = ub.is_finite();
 
-        let lb_active = lb_finite
-            && (x[j] - lb) <= ACTIVE_REL_TOL * (1.0 + lb.abs()).max(1.0);
-        let ub_active = ub_finite
-            && (ub - x[j]) <= ACTIVE_REL_TOL * (1.0 + ub.abs()).max(1.0);
-
         if lb_finite && ub_finite {
             // FX variable (lb==ub): convention is 0-fill; KKT-guard also excludes FX
             if (lb - ub).abs() >= FX_TOL {
-                if lb_active && !ub_active {
-                    new_bd[lb_idx] = (-target).max(0.0);
-                } else if ub_active && !lb_active {
-                    new_bd[ub_idx] = target.max(0.0);
+                if target > 0.0 {
+                    new_bd[ub_idx] = target;     // ub 側
+                } else {
+                    new_bd[lb_idx] = -target;    // lb 側
                 }
-                // interior or both-active non-FX: 0/0 のまま
             }
             lb_idx += 1;
             ub_idx += 1;
         } else if lb_finite {
-            // lb のみ有限: bound_contrib = -y_lb = target → y_lb = -target
+            // lb のみ有限: bound_contrib = -y_lb = target → y_lb = -target (target<0 のとき有効)
             new_bd[lb_idx] = (-target).max(0.0);
             lb_idx += 1;
         } else if ub_finite {
+            // ub のみ有限: bound_contrib = y_ub = target → y_ub = target (target>0 のとき有効)
             new_bd[ub_idx] = target.max(0.0);
             ub_idx += 1;
         }
