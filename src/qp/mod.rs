@@ -1590,6 +1590,169 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
     result.bound_duals = accepted_bd;
 }
 
+/// IRLS (iteratively reweighted least squares) で y を成分相対化基準で精緻化する。
+///
+/// 標準 LSQ (compute_lsq_dual_y) は ||A^T y - target||² (L2 norm) を最小化するので
+/// ill-scaled / overdetermined (n > m + rank issues) では特定成分に残差が集中する。
+/// componentwise eps 判定では「max 残差成分」が支配なので L2 LSQ では eps を超える
+/// ケースが残る (QSCRS8 col 1034 の dfc=8.8e-6 等)。
+///
+/// IRLS: 各 iter で残差成分 j の rel に応じて weight[j] を増やし、weighted LSQ
+/// `(A · diag(w) · A^T) y = A · diag(w) · target` を解く。これを繰り返すと
+/// L∞ 解 (max 残差を最小化する解) に漸近収束する。
+///
+/// 実装: A の列 k を sqrt(w_k) でスケールした A_w を作り、build_aat_upper_csc
+/// に渡すと A_w · A_w^T = A · diag(w) · A^T となる (既存 factorize 経路を流用)。
+///
+/// 制約: n+m > LSQ_DUAL_SIZE_LIMIT は AAT factorization のメモリ消費上限で skip。
+pub(crate) fn refine_dual_lsq_irls(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    eps_target: f64,
+    max_iters: usize,
+    deadline: Option<std::time::Instant>,
+) {
+    use twofloat::TwoFloat;
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) { return; }
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if m == 0 || result.solution.len() != n { return; }
+    if n + m > LSQ_DUAL_SIZE_LIMIT { return; }
+    if result.dual_solution.len() != m { return; }
+
+    let zero_dd = TwoFloat::from(0.0);
+
+    // Q*x を DD で精密に計算 (x は固定なので 1 回だけ)
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = result.solution[col];
+        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
+            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+        }
+    }
+    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let target: Vec<f64> = (0..n).map(|j| -(qx[j] + problem.c[j] + bound_contrib[j])).collect();
+
+    // FX / EmptyCol は KKT 評価から除外 (kkt_residual_rel と整合)
+    let exclude: Vec<bool> = (0..n).map(|j| {
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL { return true; }
+        problem.a.col_ptr.len() > j + 1
+            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+    }).collect();
+
+    let compute_aty = |y: &[f64]| -> Vec<f64> {
+        let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                let row = problem.a.row_ind[k];
+                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], y[row]);
+            }
+        }
+        acc.iter().map(|&v| f64::from(v)).collect()
+    };
+
+    let max_rel_with_aty = |aty_v: &[f64]| -> f64 {
+        let mut max_rel = 0.0_f64;
+        for j in 0..n {
+            if exclude[j] { continue; }
+            let r = qx[j] + problem.c[j] + aty_v[j] + bound_contrib[j];
+            let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
+            let rel = r.abs() / scale;
+            if rel > max_rel { max_rel = rel; }
+        }
+        max_rel
+    };
+
+    let mut y_curr = result.dual_solution.clone();
+    let initial_aty = compute_aty(&y_curr);
+    let initial_max_rel = max_rel_with_aty(&initial_aty);
+    if initial_max_rel < eps_target { return; }
+
+    let mut best_y = y_curr.clone();
+    let mut best_max_rel = initial_max_rel;
+    let mut prev_max_rel = initial_max_rel;
+
+    /// 単一成分の重み上限 (= rel/eps の上限)。これ以上上げると数値不安定 (cond(AAT_w) 爆発)。
+    const MAX_WEIGHT_RATIO: f64 = 1e4;
+    /// 改善停滞判定 (前回の何 % 改善あれば継続)。
+    const STAGNATE_RATIO: f64 = 0.95;
+
+    for irls_iter in 0..max_iters {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+
+        // 重み: rel > eps の成分に対して (rel/eps)² (LSQ 内部で 1/√w 倍として作用するため、
+        // 二乗で componentwise weighting 効果が出る)
+        let aty_v = compute_aty(&y_curr);
+        let mut weights: Vec<f64> = vec![1.0; n];
+        for j in 0..n {
+            if exclude[j] { continue; }
+            let r = qx[j] + problem.c[j] + aty_v[j] + bound_contrib[j];
+            let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
+            let rel = r.abs() / scale;
+            if rel > eps_target {
+                let ratio = (rel / eps_target).min(MAX_WEIGHT_RATIO);
+                weights[j] = ratio * ratio;
+            }
+        }
+
+        // A_scaled[i, k] = sqrt(weight[k]) * A[i, k] とすると
+        // A_scaled · A_scaled^T = A · diag(weight) · A^T
+        let mut a_scaled = problem.a.clone();
+        for k in 0..n {
+            let s = weights[k].sqrt();
+            if (s - 1.0).abs() < 1e-15 { continue; }
+            let cs = a_scaled.col_ptr[k];
+            let ce = a_scaled.col_ptr[k + 1];
+            for idx in cs..ce {
+                a_scaled.values[idx] *= s;
+            }
+        }
+
+        let aat_w = match build_aat_upper_csc(&a_scaled, n, m) {
+            Some(mat) => mat,
+            None => break,
+        };
+        let factor = match crate::linalg::ldl::factorize(&aat_w) {
+            Ok(f) => f,
+            Err(_) => break,
+        };
+
+        // RHS = A · diag(w) · target  (DD 積算)
+        let mut rhs_dd: Vec<TwoFloat> = vec![zero_dd; m];
+        for col in 0..n {
+            let wt = weights[col] * target[col];
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                let row = problem.a.row_ind[k];
+                rhs_dd[row] = rhs_dd[row] + TwoFloat::new_mul(problem.a.values[k], wt);
+            }
+        }
+        let rhs: Vec<f64> = rhs_dd.iter().map(|&v| f64::from(v)).collect();
+
+        let mut y_new = vec![0.0_f64; m];
+        factor.solve(&rhs, &mut y_new);
+        if y_new.iter().any(|v| !v.is_finite()) { break; }
+
+        let aty_new = compute_aty(&y_new);
+        let new_max_rel = max_rel_with_aty(&aty_new);
+
+        if new_max_rel < best_max_rel {
+            best_y = y_new.clone();
+            best_max_rel = new_max_rel;
+        }
+
+        if best_max_rel < eps_target { break; }
+        if irls_iter > 0 && new_max_rel >= prev_max_rel * STAGNATE_RATIO { break; }
+        prev_max_rel = new_max_rel;
+        y_curr = y_new;
+    }
+
+    if best_max_rel < initial_max_rel {
+        result.dual_solution = best_y;
+    }
+}
+
 /// 境界 dual から KKT stationarity の bound 寄与 (-y_lb + y_ub) を成分ごと計算する。
 /// `bound_duals` は [lb 有限な変数の y_lb 群; ub 有限な変数の y_ub 群] レイアウト。
 fn compute_bound_contrib(bounds: &[(f64, f64)], bound_duals: &[f64], n: usize) -> Vec<f64> {

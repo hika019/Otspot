@@ -607,6 +607,33 @@ fn run_ipm_with(
                 break;
             }
         }
+
+        // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
+        // QSCRS8 col 1034 の dfc=8.8e-6 のような「LSQ では特定 col のみ残差 eps 超過」
+        // ケースを救う。改善した場合は再度 z refit を回す。
+        let user_eps = opts.ipm_eps();
+        if current_kkt > user_eps {
+            let pre_y = final_sol.dual_solution.clone();
+            crate::qp::refine_dual_lsq_irls(
+                orig_problem, &mut final_sol, user_eps, 12, opts.deadline,
+            );
+            let post_kkt_irls = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if post_kkt_irls < current_kkt {
+                current_kkt = post_kkt_irls;
+                // y が変わった → z 再 refit で停留性を取り直し
+                let pre_z = final_sol.bound_duals.clone();
+                crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+                let post_kkt_z = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                if post_kkt_z <= current_kkt {
+                    current_kkt = post_kkt_z;
+                } else {
+                    final_sol.bound_duals = pre_z;
+                }
+            } else {
+                final_sol.dual_solution = pre_y;
+            }
+        }
+
         current_kkt
     } else {
         kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
