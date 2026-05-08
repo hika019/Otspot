@@ -805,8 +805,13 @@ pub fn run_qp_presolve_phase1(
 
         match prob.constraint_types[i] {
             crate::problem::ConstraintType::Le => {
-                // Le 制約 (Ax <= b) において row_ub <= b[i] なら常に充足 → 冗長
-                if ub_fin && row_ub <= b[i] + ZERO_TOL {
+                // Le 制約 (Ax <= b): row_ub が **strict slack** で b[i] 未満のときのみ
+                // 冗長として削除する。row_ub == b[i] (within tolerance) の marginally
+                // tight な行は最適 dual y[i] が非零でありえ、削除すると postsolve で
+                // y[i]=0 埋めされて KKT を破壊する (QPCBOEI1: dfc 7.2e-1 の真因)。
+                // 旧 `<= b[i] + ZERO_TOL` は意味的にも誤り (row_ub > b[i] わずかに超え
+                // でも redundant 扱いし、削除後の問題が原問題より緩くなる可能性)。
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
                     removed_rows[i] = true;
                 }
             }
@@ -815,41 +820,22 @@ pub fn run_qp_presolve_phase1(
                 if ub_fin && row_ub < b[i] - ZERO_TOL {
                     return QpPresolveResult::infeasible(prob);
                 }
-                // Eq 制約: row_ub = b[i] → 全変数が最大値に固定される
-                if ub_fin && (row_ub - b[i]).abs() <= ZERO_TOL {
-                    let fixes: Vec<(usize, f64)> = active_entries.iter().filter_map(|&(j, a_ij)| {
-                        let (lb_j, ub_j) = bounds[j];
-                        if a_ij > 0.0 {
-                            if ub_j.is_finite() { Some((j, ub_j)) } else { None }
-                        } else if a_ij < 0.0 {
-                            if lb_j.is_finite() { Some((j, lb_j)) } else { None }
-                        } else {
-                            None
-                        }
-                    }).collect();
-                    if fixes.len() == active_entries.len() {
-                        // 行 i は redundant_constraints (Eq tightening) で削除される。
-                        // 関連する fix を RedundantRowFix で記録し、postsolve で y[i] を復元する。
-                        for (k, (j, val)) in fixes.iter().enumerate() {
-                            let (j, val) = (*j, *val);
-                            if !removed_cols[j] {
-                                apply_fixed_variable(j, val, prob, &mut c, &mut c_comp, &mut b, &mut b_comp, &mut obj_offset, &mut obj_offset_comp, &removed_cols, &removed_rows);
-                                removed_cols[j] = true;
-                                if k == 0 {
-                                    // 1 番目の fix だけ RedundantRowFix で記録 (y[row] 復元用)
-                                    postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
-                                } else {
-                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
-                                }
-                            }
-                        }
-                        removed_rows[i] = true;
-                    }
-                }
+                // 旧実装: row_ub == b[i] のとき全変数を活性度 bound に pin して
+                // RedundantRowFix で記録、postsolve で y[i] を復元していた。
+                // 撤廃理由 (QPCBOEI1 真因対処):
+                //   行が複数変数を持つ場合、y[i] は単一スカラーで「全 col の KKT 停留性」を
+                //   同時に満たす必要があるが、recover_y_for_singleton_row_with_bound は
+                //   primary col 1 つの KKT しか満たさない。残り col の KKT 残差が
+                //   スカラー y[i] では 0 にできず、orig 空間 dual feasibility が破壊される。
+                //   refine_dual_lsq による事後 LSQ も A^T y = target がオーバー決定で
+                //   解消できず、kkt_rel が 0.99 級に張りつく。
+                // 圧縮の損失: Eq-tightening は 1-2 行/QP で稀。Maros 138 中 QPCBOEI1 で
+                //   2 行検出されるが、復元バグの代償の方が大きい。
             }
             crate::problem::ConstraintType::Ge => {
-                // Ge 制約 (Ax >= b) において row_lb >= b[i] なら常に充足 → 冗長
-                if lb_fin && row_lb >= b[i] - ZERO_TOL {
+                // Ge 制約 (Ax >= b): row_lb が **strict slack** で b[i] を超えるときのみ
+                // 冗長として削除 (Le 側と同理由 — marginally tight の y[i] 非零を保護)。
+                if lb_fin && row_lb > b[i] + ZERO_TOL {
                     removed_rows[i] = true;
                 }
                 // row_ub < b[i] → Ge 制約が決して充足されない → Infeasible
@@ -1229,10 +1215,12 @@ pub fn run_qp_presolve_phase1(
             .collect();
         let (row_lb, row_ub, lb_fin, ub_fin) = activity_range(&entries, &bounds, None);
 
-        // 更新後の activity_range で冗長な制約を再除去（型別処理）
+        // 更新後の activity_range で冗長な制約を再除去（#5 と同じ strict slack 規則）
         match prob.constraint_types[i] {
             crate::problem::ConstraintType::Le => {
-                if ub_fin && row_ub <= b[i] + ZERO_TOL {
+                // strict slack のみ削除 — marginally tight な行の y[i] 非零を保護
+                // (#5 の同様コメント参照)
+                if ub_fin && row_ub < b[i] - ZERO_TOL {
                     removed_rows[i] = true;
                 }
             }
@@ -1240,39 +1228,12 @@ pub fn run_qp_presolve_phase1(
                 if ub_fin && row_ub < b[i] - ZERO_TOL {
                     return QpPresolveResult::infeasible(prob);
                 }
-                if ub_fin && (row_ub - b[i]).abs() <= ZERO_TOL {
-                    let fixes: Vec<(usize, f64)> = entries.iter().filter_map(|&(j, a_ij)| {
-                        let (lb_j, ub_j) = bounds[j];
-                        if a_ij > 0.0 {
-                            if ub_j.is_finite() { Some((j, ub_j)) } else { None }
-                        } else if a_ij < 0.0 {
-                            if lb_j.is_finite() { Some((j, lb_j)) } else { None }
-                        } else {
-                            None
-                        }
-                    }).collect();
-                    if fixes.len() == entries.len() {
-                        // Phase2 内 redundant_constraints の Eq 締め込み (#5 と同じ振る舞い)。
-                        // 1 番目の fix を RedundantRowFix で記録し y[row] 復元用、残りは FixedVar。
-                        for (k, (j, val)) in fixes.iter().enumerate() {
-                            let (j, val) = (*j, *val);
-                            if !removed_cols[j] {
-                                apply_fixed_variable(j, val, prob, &mut c, &mut c_comp, &mut b, &mut b_comp, &mut obj_offset, &mut obj_offset_comp, &removed_cols, &removed_rows);
-                                removed_cols[j] = true;
-                                if k == 0 {
-                                    postsolve_stack.push(QpPostsolveStep::RedundantRowFix { row: i, col: j, val });
-                                } else {
-                                    postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
-                                }
-                            }
-                        }
-                        removed_rows[i] = true;
-                    }
-                }
+                // Eq-tightening (RedundantRowFix) は撤廃 (#5 と同じ理由 — y[i] スカラーで
+                // 全 col の KKT 停留性を満たす定式化が存在しない)。
             }
             crate::problem::ConstraintType::Ge => {
-                // Ge 制約 (Ax >= b) において row_lb >= b[i] なら常に充足 → 冗長
-                if lb_fin && row_lb >= b[i] - ZERO_TOL {
+                // strict slack のみ削除 — marginally tight な行の y[i] 非零を保護
+                if lb_fin && row_lb > b[i] + ZERO_TOL {
                     removed_rows[i] = true;
                 }
                 // row_ub < b[i] → Ge 制約が決して充足されない → Infeasible
@@ -1629,23 +1590,47 @@ mod tests {
         assert!(!result.was_reduced, "was_reduced = false");
     }
 
-    /// P3: Ge制約 - 冗長除去テスト
-    /// x >= 0 で x の下界が 0 → 常に充足 → 冗長除去
-    /// minimize x^2, s.t. x >= 0, 0 <= x <= 10
+    /// P3: Ge制約 - strict slack のみ冗長除去テスト
+    ///
+    /// 旧テストは「x >= 0, bounds [0, 10]」(row_lb=b=0 で marginally tight)
+    /// で削除される挙動を assert していたが、削除後 postsolve で y[i]=0 埋め
+    /// される real bug があり (QPCBOEI1 dfc 7.2e-1)、strict slack のみ削除する
+    /// 方針に変更した。本テストは strict slack ケース (row_lb > b + tol) で
+    /// 削除が起きることを検証する。
     #[test]
     fn test_ge_constraint_redundant_removal() {
+        // x >= -1, bounds [0, 10] → row_lb = 0 > -1 (strict slack 1.0) → 削除
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
         let c = vec![0.0];
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-        let b = vec![0.0]; // x >= 0
+        let b = vec![-1.0];
         let bounds = vec![(0.0, 10.0)];
         let prob = QpProblem::new(
             q, c, a, b, bounds,
             vec![crate::problem::ConstraintType::Ge],
         ).unwrap();
         let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
-        // Ge制約 x >= 0 は x の下界 0 >= 0 → 冗長 → 制約が除去される
-        assert_eq!(result.reduced.num_constraints, 0, "Ge制約 x>=0 は冗長 → 除去");
+        assert_eq!(result.reduced.num_constraints, 0,
+            "Ge x>=-1 は strict slack (row_lb=0 > b=-1) → 削除");
+    }
+
+    /// Ge制約 - marginally tight な行は保持される (QPCBOEI1 真因対処)
+    #[test]
+    fn test_ge_constraint_marginally_tight_kept() {
+        // x >= 0, bounds [0, 10] → row_lb = b = 0 (marginally tight) → 保持
+        // 旧 `>= b - ZERO_TOL` は削除していたが、最適 dual y[i] が非零でありえる。
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let c = vec![0.0];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let b = vec![0.0];
+        let bounds = vec![(0.0, 10.0)];
+        let prob = QpProblem::new(
+            q, c, a, b, bounds,
+            vec![crate::problem::ConstraintType::Ge],
+        ).unwrap();
+        let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+        assert_eq!(result.reduced.num_constraints, 1,
+            "Ge x>=0 は marginally tight (row_lb=b=0) → IPM に委ねる (削除しない)");
     }
 
     /// P3: Ge制約 - Infeasible検出テスト

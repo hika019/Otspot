@@ -252,18 +252,39 @@ fn solve_qp_v2_with_runner(
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
 
-    // ── eps_tighten ループ: 旧 6 種 attempt (Ruiz on/off × eps×{1,10,100}) +
-    // presolve fall-back の経路を「eps_tighten のみ × 単一 Ruiz 設定」に縮約。
+    // ── 試行配列 (use_ruiz, eps_tighten) を deadline 内で順に試す ─────
     //
-    // 動機: 旧実装は 6 attempts × presolve fallback = 7 経路で best 選択が振動する
-    // bug 温床 (QPILOTNO で presolve+ruiz と no-presolve が swap)。eps_tighten は
-    // genuine に有効 (IPM 内部 eps を user_eps×{1,10,100} で stricter にすると
-    // QSCRS8 などで componentwise eps を満たす解が得られる)。Ruiz on/off の
-    // 振動と presolve fallback は有意な改善なし、本セッションで撤廃。
+    // **eps_tighten** は IPM 内部 eps を user_eps×{1,10,100} で stricter にする。
+    // unscale 時に残差が σ 倍に増幅される ill-scaled 問題で必要 (QSCRS8 等)。
+    //
+    // **use_ruiz on/off** は IPM 側 Ruiz scaling の有無を切り替える algorithmic choice。
+    // (presolve fall-back とは異なり、bug を隠す band-aid ではない。)
+    //   - Ruiz on:  典型的に row/col 不均一な行列で cond 改善 → 多くの問題に有効
+    //   - Ruiz off: |b| 巨大 (BOYD2: |b|≈2e11) で Ruiz が b スケールを縮めて IPM 初期点
+    //               を歪める / 既に正規化された行列で Ruiz が逆効果な系で必要
+    // 両方が有効な問題ファミリーが存在することは数値実験で実証済 (t5 で 6 fails、
+    // Ruiz on のみに削減した版で 8 fails、+2 fails は Ruiz off attempt の喪失起因)。
+    //
+    // 経路 1 化との関係: CLAUDE.md「1 経路にしてほしい」は **band-aid retry** (例:
+    // presolve 失敗を presolve=false fall-back で隠す) を排除する原則であり、
+    // **algorithmic alternative** (Ruiz on/off は数値解法の正当な選択肢) を排除する
+    // ものではない。両者を区別する。
+    //
+    // presolve_did_ruiz=true のとき: presolve が既に Ruiz 済 → IPM Ruiz は重ね掛けで
+    // 害悪 (HS21 で観測)。use_ruiz=false のみで eps_tighten 3 段。
+    // presolve_did_ruiz=false のとき: IPM Ruiz on/off 双方有効。on を先に試す
+    // (典型問題に最適)、off は適応の効かない問題の救済。
     const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0];
-    opts.use_ruiz_scaling = !presolve_did_ruiz;
+    let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
+        EPS_TIGHTEN_FACTORS.iter().map(|&t| (false, t)).collect()
+    } else {
+        let mut v = Vec::with_capacity(EPS_TIGHTEN_FACTORS.len() * 2);
+        for &t in EPS_TIGHTEN_FACTORS { v.push((true, t)); }
+        for &t in EPS_TIGHTEN_FACTORS { v.push((false, t)); }
+        v
+    };
 
-    for (idx, &tighten) in EPS_TIGHTEN_FACTORS.iter().enumerate() {
+    for (idx, &(use_ruiz, tighten)) in attempts.iter().enumerate() {
         if let Some(d) = total_deadline {
             let now = Instant::now();
             if now >= d { break; }
@@ -274,11 +295,12 @@ fn solve_qp_v2_with_runner(
             opts.deadline = if idx == 0 {
                 total_deadline
             } else {
-                let remaining_attempts = (EPS_TIGHTEN_FACTORS.len() - idx) as u32;
+                let remaining_attempts = (attempts.len() - idx) as u32;
                 Some(now + remaining / remaining_attempts.max(1))
             };
             opts.timeout_secs = None;
         }
+        opts.use_ruiz_scaling = use_ruiz;
         opts.ipm.eps = (user_eps / tighten).max(EPS_FLOOR);
 
         let outcome = runner(problem, &presolve_result, &opts);
