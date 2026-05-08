@@ -19,24 +19,6 @@ use crate::presolve::QpPresolveResult;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
 
-/// 統合 retry の attempt 配列。各 attempt で (use_ruiz, eps_tighten) を変える。
-/// presolve 済みの場合は IPM 側 Ruiz を抑止するので tighten のみ変える 3 attempts に縮約する。
-const ATTEMPTS_FULL: &[(bool, f64)] = &[
-    (true,  1.0),    // Ruiz on,  eps × 1
-    (true,  10.0),   // Ruiz on,  eps × 1/10
-    (true,  100.0),  // Ruiz on,  eps × 1/100
-    (false, 1.0),    // Ruiz off, eps × 1
-    (false, 10.0),   // Ruiz off, eps × 1/10
-    (false, 100.0),  // Ruiz off, eps × 1/100
-];
-/// presolve_did_ruiz=true 時の attempt 配列。Ruiz on/off は等価なので tighten のみ変える。
-/// (false, 1000.0) を追加すると IPM が double 精度限界近くで full convergence できず
-/// むしろ悪化リスクがあるため 3 attempts に留める。
-const ATTEMPTS_PRESOLVE_RUIZ: &[(bool, f64)] = &[
-    (false, 1.0),
-    (false, 10.0),
-    (false, 100.0),
-];
 /// eps 事前調整の下限 (double 精度限界近傍)
 const EPS_FLOOR: f64 = 1e-15;
 /// 1 attempt が消費してよい時間の最低割合 (deadline / 残 attempt 数 が これ以下なら break)
@@ -270,56 +252,41 @@ fn solve_qp_v2_with_runner(
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
 
-    // 注: LP-dominant 問題 (例: QSCRS8/QBORE3D) を Q=0 で LP として解く dispatch は試行したが、
-    // (1) LP の x で QP の KKT 残差が 0.5〜1.0 で eps=1e-6 未達、PASS 増加なし
-    // (2) LISWET 系で simplex が deadline を尊重せず長時間 stuck する副作用
-    // により削除した。`run_lp_postprocess` 関数自体は残しており将来の warm-start IPM 用。
+    // ── eps_tighten ループ: 旧 6 種 attempt (Ruiz on/off × eps×{1,10,100}) +
+    // presolve fall-back の経路を「eps_tighten のみ × 単一 Ruiz 設定」に縮約。
+    //
+    // 動機: 旧実装は 6 attempts × presolve fallback = 7 経路で best 選択が振動する
+    // bug 温床 (QPILOTNO で presolve+ruiz と no-presolve が swap)。eps_tighten は
+    // genuine に有効 (IPM 内部 eps を user_eps×{1,10,100} で stricter にすると
+    // QSCRS8 などで componentwise eps を満たす解が得られる)。Ruiz on/off の
+    // 振動と presolve fallback は有意な改善なし、本セッションで撤廃。
+    const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0];
+    opts.use_ruiz_scaling = !presolve_did_ruiz;
 
-    // ── retry 1 層: 動的 attempt 配列を時間内で順に試行 ────────
-    let attempts: &[(bool, f64)] = if presolve_did_ruiz {
-        ATTEMPTS_PRESOLVE_RUIZ
-    } else {
-        ATTEMPTS_FULL
-    };
-
-    for (idx, &(use_ruiz, tighten)) in attempts.iter().enumerate() {
+    for (idx, &tighten) in EPS_TIGHTEN_FACTORS.iter().enumerate() {
         if let Some(d) = total_deadline {
             let now = Instant::now();
-            if now >= d {
-                break;
-            }
+            if now >= d { break; }
             let remaining = d.saturating_duration_since(now);
-            // MIN_TIME_PER_ATTEMPT は「best-so-far がある時に新規 attempt を始めるか」のガード。
-            // idx=0 では best-so-far が無いため、たとえ残り時間が短くても 1 回は IPPMM を
-            // 呼ぶ必要がある (呼ばなければ outcome=empty + timed_out=false で NumericalError
-            // 誤判定になる)。短時間 deadline は IPPMM 内部の should_stop が尊重するので、
-            // ここで早期 break する必要はない。
-            if idx > 0 && remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT {
-                break;
-            }
-            // attempt 0 は full deadline を使う。timeshare すると IPM が時間内に収束しきれず
-            // 不完全解で best-so-far に入る (HS21 で deadline=total/6 だと x=(4.31, 0) で停止 vs
-            // full deadline で x=(2, 0))。attempt 1+ は残り時間を残 attempt 数で均等分配。
+            if idx > 0 && remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT { break; }
+            // attempt 0 は full deadline (HS21 で timeshare すると不完全解で停止)。
+            // attempt 1+ は残り時間を残 attempt 数で均等分配。
             opts.deadline = if idx == 0 {
                 total_deadline
             } else {
-                let remaining_attempts = (attempts.len() - idx) as u32;
+                let remaining_attempts = (EPS_TIGHTEN_FACTORS.len() - idx) as u32;
                 Some(now + remaining / remaining_attempts.max(1))
             };
             opts.timeout_secs = None;
         }
         opts.ipm.eps = (user_eps / tighten).max(EPS_FLOOR);
-        // presolve が Ruiz scaling 済みなら IPM での再スケールは抑止する。
-        opts.use_ruiz_scaling = if presolve_did_ruiz { false } else { use_ruiz };
 
         let outcome = runner(problem, &presolve_result, &opts);
 
-        // 早期終了: ユーザー指定精度を真に満たす解
         if outcome.satisfies_eps(user_eps) {
             best = Some(outcome);
             break;
         }
-        // best-so-far を更新
         match &best {
             None => best = Some(outcome),
             Some(prev) if outcome.quality_score() < prev.quality_score() => {
@@ -329,40 +296,6 @@ fn solve_qp_v2_with_runner(
         }
     }
 
-    // ── presolve fall-back: best が eps を満たさず時間が残っているなら presolve=false で再試行 ────
-    //
-    // 特定の presolve 変換組み合わせが稀に y の元空間復元を狂わせ、IPM 自体は解けるはずの
-    // 問題でも DFEAS_FAIL になる病理がある。presolve 経路が失敗したら presolve なしで
-    // 再試行する自己修復として残す。
-    let need_retry_no_presolve = match &best {
-        Some(o) => !o.satisfies_eps(user_eps),
-        None => true,
-    } && options.presolve; // 元 options で presolve=true だった場合のみ
-    if need_retry_no_presolve {
-        let remaining = match total_deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
-        if remaining >= MIN_TIME_PER_ATTEMPT * 2.0 {
-            let presolve_result_np = crate::presolve::QpPresolveResult::no_reduction(problem);
-            let mut opts_np = options.clone();
-            opts_np.presolve = false;
-            opts_np.deadline = total_deadline;
-            opts_np.timeout_secs = None;
-            opts_np.ipm.eps = user_eps;
-            let outcome_np = runner(problem, &presolve_result_np, &opts_np);
-            let prefer_np = match &best {
-                None => true,
-                Some(prev) => outcome_np.quality_score() < prev.quality_score(),
-            };
-            if prefer_np {
-                best = Some(outcome_np);
-            }
-        }
-    }
-
-    // ── status 変換 (1 箇所のみ) ───────────────
-    // outcome は既に元空間 (run_ipm 内で unscale + postsolve 済み)。
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
     // cancel_flag が事前に立っていた / sibling thread が立てた場合も「外部から停止」
     // として deadline 経過と同様に扱う。これがないと「cancel_flag 即停止」で IPM が
