@@ -609,13 +609,18 @@ fn run_ipm_with(
         }
 
         // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
-        // QSCRS8 col 1034 の dfc=8.8e-6 のような「LSQ では特定 col のみ残差 eps 超過」
-        // ケースを救う。改善した場合は再度 z refit を回す。
+        // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
         let user_eps = opts.ipm_eps();
-        if current_kkt > user_eps {
+        const IRLS_OUTER_MAX_PASSES: usize = 5;
+        const IRLS_INNER_MAX_ITERS: usize = 30;
+        for _outer_pass in 0..IRLS_OUTER_MAX_PASSES {
+            if current_kkt <= user_eps { break; }
+            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+            let prev_kkt = current_kkt;
+
             let pre_y = final_sol.dual_solution.clone();
             crate::qp::refine_dual_lsq_irls(
-                orig_problem, &mut final_sol, user_eps, 12, opts.deadline,
+                orig_problem, &mut final_sol, user_eps, IRLS_INNER_MAX_ITERS, opts.deadline,
             );
             let post_kkt_irls = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             if post_kkt_irls < current_kkt {
@@ -631,7 +636,11 @@ fn run_ipm_with(
                 }
             } else {
                 final_sol.dual_solution = pre_y;
+                break; // IRLS が改善できなければ outer loop も終了
             }
+
+            // outer pass の収束判定 (10% 以上改善あれば継続)
+            if current_kkt >= prev_kkt * 0.9 { break; }
         }
 
         current_kkt

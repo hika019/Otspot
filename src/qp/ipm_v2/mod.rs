@@ -336,9 +336,9 @@ mod tests {
         let r14 = extract_row(14);
         let r130 = extract_row(130);
         eprintln!("Row 14: nnz={} b={}", r14.len(), prob.b[14]);
-        for (c, v) in &r14[..5.min(r14.len())] { eprintln!("  col[{}] = {:+.5e}", c, v); }
+        for (c, v) in &r14 { eprintln!("  col[{}] = {:+.5e}", c, v); }
         eprintln!("Row 130: nnz={} b={}", r130.len(), prob.b[130]);
-        for (c, v) in &r130[..5.min(r130.len())] { eprintln!("  col[{}] = {:+.5e}", c, v); }
+        for (c, v) in &r130 { eprintln!("  col[{}] = {:+.5e}", c, v); }
         // pairwise 一致確認
         if r14.len() == r130.len() {
             let same_cols = r14.iter().zip(r130.iter()).all(|(a, b)| a.0 == b.0);
@@ -352,16 +352,89 @@ mod tests {
         }
     }
 
+    /// QFORPLAN の dual residual 集中 col を特定する診断。
+    /// componentwise pfeas 化以後、col 15 等で Aty != 0 が残る現象を観察。
+    /// NO_PRESOLVE=1 で presolve 無効化、QFORPLAN_LONG=1 で 60s 動作。
+    #[test]
+    fn test_v2_qforplan_dual_residual_diagnose() {
+        let path = Path::new("data/maros_meszaros/QFORPLAN.QPS");
+        if !path.exists() { return; }
+        let prob = parse_qps(path).expect("parse QFORPLAN");
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(if std::env::var("QFORPLAN_LONG").ok().as_deref() == Some("1") { 60.0 } else { 10.0 });
+        if std::env::var("NO_PRESOLVE").ok().as_deref() == Some("1") {
+            opts.presolve = false;
+        }
+        let r = solve_qp_v2(&prob, &opts);
+        eprintln!("QFORPLAN status={:?} obj={:.5e} presolve={}", r.status, r.objective, opts.presolve);
+        // dual residual 上位 10 col を出力
+        use twofloat::TwoFloat;
+        let n = prob.num_vars;
+        let zero_dd = TwoFloat::from(0.0);
+        let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            let xv = r.solution[col];
+            for k in prob.q.col_ptr[col]..prob.q.col_ptr[col + 1] {
+                qx_dd[prob.q.row_ind[k]] = qx_dd[prob.q.row_ind[k]] + TwoFloat::new_mul(prob.q.values[k], xv);
+            }
+        }
+        let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
+        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for col in 0..n {
+            for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
+                let row = prob.a.row_ind[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(prob.a.values[k], r.dual_solution[row]);
+            }
+        }
+        let aty: Vec<f64> = aty_dd.iter().map(|&v| f64::from(v)).collect();
+        // bound contrib
+        let n_lb = prob.bounds.iter().filter(|(lb,_)| lb.is_finite()).count();
+        let mut bnd = vec![0.0_f64; n];
+        let mut idx = 0;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < r.bound_duals.len() {
+                bnd[j] -= r.bound_duals[idx];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < r.bound_duals.len() {
+                bnd[j] += r.bound_duals[idx];
+                idx += 1;
+            }
+        }
+        let mut entries: Vec<(usize, f64, f64, f64, f64, f64, f64, f64)> = (0..n).map(|j| {
+            let res = qx[j] + prob.c[j] + aty[j] + bnd[j];
+            let scale = 1.0 + qx[j].abs() + prob.c[j].abs() + aty[j].abs() + bnd[j].abs();
+            let rel = res.abs() / scale;
+            (j, res, qx[j], aty[j], bnd[j], prob.c[j], rel, r.solution[j])
+        }).collect();
+        entries.sort_by(|a, b| b.6.partial_cmp(&a.6).unwrap());
+        eprintln!("Top dual residual cols (componentwise rel):");
+        let _ = n_lb;
+        for (j, res, qx_j, aty_j, bnd_j, c_j, rel, x_j) in entries.iter().take(8) {
+            let (lb, ub) = prob.bounds[*j];
+            // 列 j に touching する row 集合のサイズ
+            let nrows = prob.a.col_ptr[j+1] - prob.a.col_ptr[*j];
+            eprintln!("  j={:5} rel={:.3e} r={:+.3e} qx={:+.3e} aty={:+.3e} bnd={:+.3e} c={:+.3e} x={:+.3e} lb={:+.2e} ub={:+.2e} nrows={}",
+                j, rel, res, qx_j, aty_j, bnd_j, c_j, x_j, lb, ub, nrows);
+        }
+    }
+
     /// QPILOTNO の primal violation 集中行を特定する診断 (componentwise pfeas 化以後)。
+    /// 環境変数 NO_PRESOLVE=1 で presolve 無効化して bug 切り分け。
     #[test]
     fn test_v2_qpilotno_primal_violation_diagnose() {
         let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse QPILOTNO");
         let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(10.0);
+        opts.timeout_secs = Some(30.0);
+        if std::env::var("NO_PRESOLVE").ok().as_deref() == Some("1") {
+            opts.presolve = false;
+        }
         let r = solve_qp_v2(&prob, &opts);
-        eprintln!("QPILOTNO status={:?} obj={:.5e}", r.status, r.objective);
+        eprintln!("QPILOTNO status={:?} obj={:.5e} presolve={}", r.status, r.objective, opts.presolve);
         let ax = prob.a.mat_vec_mul(&r.solution).unwrap();
         let mut violations: Vec<(usize, f64, f64, f64, f64)> = (0..prob.num_constraints).map(|i| {
             let v = match prob.constraint_types[i] {

@@ -784,6 +784,9 @@ pub(crate) fn refine_primal_lsq(
     }
 
     // (A A^T) λ = target を LDL で解く。AAT_REG_FACTOR で対角正則化済。
+    // ill-conditioned 問題 (QPILOTNO: ‖A‖=5.85e6, cond(AAT)≈3e13) で
+    // 1 回 solve だと λ に 2.2e-3 級の誤差が乗り δ=A^T λ が暴走 (≈1.3e4) する。
+    // Wilkinson IR (DD 精度の残差再計算) で λ を f64 epsilon × cond の限界まで refine。
     let aat = match build_aat_upper_csc(&problem.a, n, m) {
         Some(mat) => mat,
         None => return,
@@ -796,6 +799,48 @@ pub(crate) fn refine_primal_lsq(
     factor.solve(&target, &mut lambda);
     if lambda.iter().any(|v| !v.is_finite()) {
         return;
+    }
+    // Wilkinson IR: r = target - AAT·λ を DD で計算して dλ = AAT^{-1} r で λ += dλ。
+    // r_inf 改善率が IR_STAGNATE_RATIO を割れば停止 (収束飽和)。
+    const IR_MAX_ITERS: usize = 5;
+    const IR_STAGNATE_RATIO: f64 = 0.5;
+    let mut prev_r_inf = f64::INFINITY;
+    for _ir_iter in 0..IR_MAX_ITERS {
+        // AAT·λ を DD で計算: AAT·λ = A·(A^T·λ) = A·δ_dd
+        let mut atl_dd: Vec<TwoFloat> = vec![zero_dd; n];
+        for j in 0..n {
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                let i = problem.a.row_ind[k];
+                if i < m {
+                    atl_dd[j] = atl_dd[j] + TwoFloat::new_mul(problem.a.values[k], lambda[i]);
+                }
+            }
+        }
+        // r[i] = target[i] - sum_j A[i,j] · atl_dd[j]
+        let mut r_dd: Vec<TwoFloat> = (0..m).map(|i| TwoFloat::from(target[i])).collect();
+        for j in 0..n {
+            let atl_j_f64 = f64::from(atl_dd[j]);
+            let atl_j_lo = atl_dd[j] - TwoFloat::from(atl_j_f64);
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                let i = problem.a.row_ind[k];
+                if i < m {
+                    r_dd[i] = r_dd[i]
+                        - TwoFloat::new_mul(problem.a.values[k], atl_j_f64)
+                        - TwoFloat::new_mul(problem.a.values[k], f64::from(atl_j_lo));
+                }
+            }
+        }
+        let r_f64: Vec<f64> = r_dd.iter().map(|&v| f64::from(v)).collect();
+        let r_inf = r_f64.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        if !r_inf.is_finite() { break; }
+        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO { break; }
+        prev_r_inf = r_inf;
+        let mut dlambda = vec![0.0_f64; m];
+        factor.solve(&r_f64, &mut dlambda);
+        if dlambda.iter().any(|v| !v.is_finite()) { break; }
+        for i in 0..m {
+            lambda[i] += dlambda[i];
+        }
     }
 
     // δ = A^T λ も DD で積算
@@ -1674,7 +1719,10 @@ pub(crate) fn refine_dual_lsq_irls(
     let mut best_max_rel = initial_max_rel;
     let mut prev_max_rel = initial_max_rel;
 
-    /// 単一成分の重み上限 (= rel/eps の上限)。これ以上上げると数値不安定 (cond(AAT_w) 爆発)。
+    /// 単一成分の重み上限 (= rel/eps の上限)。
+    /// 1e4 を超えると LSQ が outlier 修正のために他成分を悪化させて oscillate する
+    /// (STADAT1 で 1e8 試験時に dfc 1.6e-3 → 7.8e-4 への改善が逆に 2.2e-4 → 7.8e-4 と
+    /// 悪化を観測)。AAT cond が ratio² に応じて悪化する物理量上限としても妥当。
     const MAX_WEIGHT_RATIO: f64 = 1e4;
     /// 改善停滞判定 (前回の何 % 改善あれば継続)。
     const STAGNATE_RATIO: f64 = 0.95;
