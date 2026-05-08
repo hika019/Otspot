@@ -420,84 +420,7 @@ fn run_ipm_with(
     }
 
 
-    // 元空間 dual の一括復元: postsolve_qp_with_dual_recovery は SingletonRow /
-    // RedundantRowFix の y[row] を col_first の停留性のみで復元するが、その row が
-    // 関与する他の固定 col の停留性は z で別途吸収しないと壊れたままになる。
-    // ここで refine_dual_lsq を 1 度走らせ、x と現在の z を固定して y を LSQ-optimal に
-    // 更新する。AAT factorize が小〜中規模 (n+m ≤ LSQ_DUAL_SIZE_LIMIT) でだけ走る。
-    if presolve_result.was_reduced
-        && !presolve_result.postsolve_stack.steps.is_empty()
-        && final_sol.solution.len() == orig_problem.num_vars
-        && final_sol.dual_solution.len() == orig_problem.num_constraints
-    {
-        let view0 = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
-        };
-        const POST_LSQ_MAX_PASSES: usize = 5;
-        const POST_LSQ_CONVERGE_RATIO: f64 = 0.5;
-        let mut prev = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for pass in 0..POST_LSQ_MAX_PASSES {
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let cur = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_trace {
-                eprintln!("POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}", pass, cur);
-            }
-            if cur >= prev * POST_LSQ_CONVERGE_RATIO {
-                break;
-            }
-            prev = cur;
-        }
-    }
-
-    // Stage 0: postsolve y/z 交互反復 (bound_duals が orig レイアウト確定後)。
-    // 上の一括 LSQ で残った fixed-row dofs (SingletonRow/RedundantRowFix) を col_first
-    // の停留性で正確に締める。
-    if result.iterations > 0
-        && presolve_result.was_reduced
-        && !presolve_result.postsolve_stack.steps.is_empty()
-        && final_sol.solution.len() == orig_problem.num_vars
-        && final_sol.dual_solution.len() == orig_problem.num_constraints
-    {
-        /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
-        /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
-        const STAGE0_MAX_PASSES: usize = 16;
-        const STAGE0_CONVERGE_RATIO: f64 = 0.99;
-        let view0 = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
-        };
-        let mut prev_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for pass in 0..STAGE0_MAX_PASSES {
-            // (i) z (bound_duals) を current y に基づいて refit
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            // (ii) y[row] を SingletonRow / RedundantRowFix step で更新
-            //      bound_contrib を bound_duals から取得して KKT 完全式で解く
-            for step in presolve_result.postsolve_stack.steps.iter() {
-                let (row, col) = match step {
-                    QpPostsolveStep::SingletonRow { row, col, .. }
-                    | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),
-                    _ => continue,
-                };
-                let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
-                recover_y_for_singleton_row_with_bound(
-                    row, col, orig_problem, &mut final_sol, bc,
-                );
-            }
-            let cur_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_trace {
-                eprintln!("POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}", pass, cur_kkt);
-            }
-            if cur_kkt >= prev_kkt * STAGE0_CONVERGE_RATIO {
-                break;
-            }
-            prev_kkt = cur_kkt;
-        }
-    }
-
-    // 元空間で KKT 残差を計算 (元空間判定ベース)
+    // 元空間 view (refine_componentwise 内で使用)
     let view = ProblemView {
         q: &orig_problem.q,
         a: &orig_problem.a,
@@ -507,177 +430,23 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
-    // 元空間 post-processing は 3 段階で行う:
-    //   1. primal projection: x を violating 制約方向に最小ノルム射影 (refine_primal_lsq)
-    //   2. dual / bound-dual refit: y と z を交互に LSQ で再最適化
-    //   3. saddle-point Krylov refinement: K [x; y] = -[r_d; r_p] を IR で解く
+    // ── 単一 refinement loop: 旧 5 ステージ (postsolve dual_lsq / Stage 0 recovery /
+    // primal projection / refit y-z / IRLS outer / saddle-point IR) を 1 経路に統合。
     //
-    // primal projection は y との整合を崩しうるため、primal/KKT 双方の max で guard。
-    // dual/bound 個別 refit は kkt_residual_rel で個別 guard。
+    // 各 outer pass で順に:
+    //   (a) postsolve recovery (SingletonRow / RedundantRowFix の y[row] 補正)
+    //   (b) refit z (bound dual を KKT stationarity から再計算、per-col guard)
+    //   (c) refit y (LSQ + IR、改善なければ revert)
+    //   (d) IRLS y (componentwise residual 重み付き、L∞ 風)
+    //   (e) refit x (primal LSQ projection、Wilkinson IR)
+    //   (f) saddle-point IR (K [dx; dy] = -[r_d; r_p]、最終手段)
+    // 各 inner step は内部で revert guard を持ち、改善しなければ no-op。
     //
-    // IPM が一度も iterate しなかった場合 (cancel_flag 即停止 / timeout=0 等) は
-    // 後処理をスキップ: 冷状態 x=[0,..,0] から後処理が独自の analytic な解を作って
-    // しまい、外部 cancel/Timeout セマンティクスを破壊するのを防ぐ。
-    let ipm_made_progress = result.iterations > 0;
-
-    // refine_primal_lsq / refine_kkt_iterative の AAT/K factorize が時間予算を
-    // 圧迫しないようサイズ上限を設ける。LDL 因子化が分単位かかる規模では skip。
-    const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
-    let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
-    let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
-
-    if post_trace {
-        let pres0 = primal_residual_rel(&view, &final_sol.solution);
-        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        eprintln!("POST_STAGE [pre post-processing] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
-    }
-
-    // 既に IPM で eps を満たしている場合、primal projection と dual/bound refit は無駄
-    // (改善余地なし)。大規模問題では LSQ が秒単位かかるため skip 必須。
-    let user_eps_for_skip = opts.ipm_eps();
-    let kkt_already_pass = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
-        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        let pres0 = primal_residual_rel(&view, &final_sol.solution);
-        kkt0 < user_eps_for_skip && pres0 < user_eps_for_skip
-    } else {
-        false
-    };
-
-    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress && !kkt_already_pass {
-        // (1) primal projection: 違反制約に対して x を最小ノルム射影。
-        //     primal/KKT 合算の guard で悪化時 revert。near-rank-deficient AAT で
-        //     LSQ y refit が膨張する系統では primal のみ動かし dual は IPM 値を維持する。
-        if allow_primal_projection {
-            let pre_x = final_sol.solution.clone();
-            let pre_y = final_sol.dual_solution.clone();
-            let pre_z = final_sol.bound_duals.clone();
-            let pre_pres = primal_residual_rel(&view, &final_sol.solution);
-            let pre_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            let pre_combined = pre_pres.max(pre_kkt);
-            crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let post_pres = primal_residual_rel(&view, &final_sol.solution);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_pres.max(post_kkt) > pre_combined {
-                final_sol.solution = pre_x;
-                final_sol.dual_solution = pre_y;
-                final_sol.bound_duals = pre_z;
-            }
-        }
-
-        // (2) y / z 交互 refit — fixed point に達するまで反復。
-        //
-        // 各反復:
-        //   - refine_dual_lsq: bound_duals 固定で y を LSQ 最適化
-        //   - refit_bound_duals_kkt: y 固定で z (bound_duals) を KKT 停留性から再計算
-        // 双方向依存するため 1 回では届かず、ill-conditioned 系では数回反復で
-        // kkt_rel が桁単位で減ることがある。
-        //
-        // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
-        // で悪化時 revert するため安全に反復できる。
-        const REFIT_MAX_ITERS: usize = 8;
-        const REFIT_CONVERGE_RATIO: f64 = 0.99;
-        let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for _refit_iter in 0..REFIT_MAX_ITERS {
-            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                break;
-            }
-            let prev_kkt = current_kkt;
-
-            let pre_y = final_sol.dual_solution.clone();
-            crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_kkt <= current_kkt {
-                current_kkt = post_kkt;
-            } else {
-                final_sol.dual_solution = pre_y;
-            }
-
-            let pre_z = final_sol.bound_duals.clone();
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_kkt <= current_kkt {
-                current_kkt = post_kkt;
-            } else {
-                final_sol.bound_duals = pre_z;
-            }
-
-            // 改善が止まれば早期 break (固定点)
-            if current_kkt >= prev_kkt * REFIT_CONVERGE_RATIO {
-                break;
-            }
-        }
-
-        // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
-        // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
-        let user_eps = opts.ipm_eps();
-        const IRLS_OUTER_MAX_PASSES: usize = 5;
-        const IRLS_INNER_MAX_ITERS: usize = 30;
-        for _outer_pass in 0..IRLS_OUTER_MAX_PASSES {
-            if current_kkt <= user_eps { break; }
-            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
-            let prev_kkt = current_kkt;
-
-            let pre_y = final_sol.dual_solution.clone();
-            crate::qp::refine_dual_lsq_irls(
-                orig_problem, &mut final_sol, user_eps, IRLS_INNER_MAX_ITERS, opts.deadline,
-            );
-            let post_kkt_irls = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_kkt_irls < current_kkt {
-                current_kkt = post_kkt_irls;
-                // y が変わった → z 再 refit で停留性を取り直し
-                let pre_z = final_sol.bound_duals.clone();
-                crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-                let post_kkt_z = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-                if post_kkt_z <= current_kkt {
-                    current_kkt = post_kkt_z;
-                } else {
-                    final_sol.bound_duals = pre_z;
-                }
-            } else {
-                final_sol.dual_solution = pre_y;
-                break; // IRLS が改善できなければ outer loop も終了
-            }
-
-            // outer pass の収束判定 (10% 以上改善あれば継続)
-            if current_kkt >= prev_kkt * 0.9 { break; }
-        }
-
-        current_kkt
-    } else {
-        kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
-    };
-
-    // (3) saddle-point Krylov refinement: K [dx; dy] = -[r_d; r_p] を古典的 IR で解く。
-    //
-    // IPM 内部の Newton step ごとの LDL 誤差が accumulate して pf が IPM 段階で
-    // 下げきれない問題で、IPM 収束後の (x, y, z) を初期推定として saddle-point K
-    // に対する IR を回す。残差を full-f64 (or DD env=REFINE_KKT_DD=1) で再計算し、
-    // cond の影響を受けず eps·‖A‖ レベルまで refine する。
-    //
-    // 実行条件: ipm_made_progress (cold-start を避ける) AND constraints あり。
-    // refine_kkt_iterative 内で size 制限・退行 guard・deadline を見る。
-    if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // per-iter 収束率は cond に依存するが経験的に ~0.96 級で 30 iter で 1 桁。
-        // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k で数秒程度。
-        const KRYLOV_MAX_ITERS: usize = 30;
-        let user_eps = opts.ipm_eps();
-        let target_pf = user_eps;
-        if post_trace {
-            let pres_pre = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_pre = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [pre saddle-point IR] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre, kkt_pre);
-        }
-        let _refined = crate::qp::refine_kkt_iterative(
-            orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf, opts.deadline,
-        );
-        if post_trace {
-            let pres_post = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_post = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
-                _refined, pres_post, kkt_post);
-        }
-    }
+    // outer 収束: max(kkt_rel, primal_rel, bound_viol) が user_eps を切るか改善停滞で break。
+    let kkt = refine_componentwise(
+        orig_problem, &mut final_sol, &view, presolve_result, opts.deadline,
+        opts.ipm_eps(), result.iterations > 0, post_trace,
+    );
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -773,4 +542,152 @@ fn compute_duality_gap_rel(
     let gap_abs = (primal_obj - dual_obj).abs();
     let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
     if denom > 0.0 && gap_abs.is_finite() { gap_abs / denom } else { f64::INFINITY }
+}
+
+/// post-IPM 後処理を 1 本のループで実行する。旧 5 ステージ (postsolve dual_lsq /
+/// Stage 0 recovery / primal projection / refit y-z / IRLS outer / saddle-point IR)
+/// を統合し、各 outer pass で順に refinement primitive を呼び、改善停滞で break する。
+///
+/// 各 step は内部で revert guard を持つので、改善しなければ no-op (= 安全に呼び続けられる)。
+fn refine_componentwise(
+    orig_problem: &QpProblem,
+    final_sol: &mut crate::problem::SolverResult,
+    view: &ProblemView,
+    presolve_result: &QpPresolveResult,
+    deadline: Option<std::time::Instant>,
+    user_eps: f64,
+    ipm_made_progress: bool,
+    post_trace: bool,
+) -> f64 {
+    /// 大規模問題で AAT/K factorize が時間予算を圧迫しないようサイズ上限。
+    const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
+    /// outer loop 最大 pass 数。各 pass で全 refinement primitive を 1 周する。
+    /// 旧 5 ステージ合計の iter budget (Stage 0 16 + 5 + REFIT 8 + IRLS 5 ≈ 30) を継承。
+    const OUTER_MAX_PASSES: usize = 30;
+    /// outer 収束判定: 改善率が CONVERGE_RATIO 未満で停滞とみなす。
+    /// QSHARE1B のような緩やかに改善する系で早期 break しないよう 0.999 (= 0.1% 未満で停滞)。
+    const OUTER_CONVERGE_RATIO: f64 = 0.999;
+    /// saddle-point IR の最大反復数 (LDL solve / iter)。
+    const KRYLOV_MAX_ITERS: usize = 30;
+    /// IRLS 内部反復数 (componentwise outlier 重み付き LSQ)。
+    const IRLS_INNER_MAX_ITERS: usize = 30;
+
+    let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
+    let allow_lsq_refine = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
+
+    if final_sol.solution.is_empty() || final_sol.solution.len() != orig_problem.num_vars {
+        return f64::INFINITY;
+    }
+
+    let max_score = |sol: &crate::problem::SolverResult| -> f64 {
+        let kkt = kkt_residual_rel(view, &sol.solution, &sol.dual_solution, &sol.bound_duals);
+        let pres = primal_residual_rel(view, &sol.solution);
+        let bv = bound_violation(orig_problem.bounds.as_slice(), &sol.solution);
+        kkt.max(pres).max(bv)
+    };
+
+    let has_postsolve_steps = presolve_result.was_reduced
+        && !presolve_result.postsolve_stack.steps.is_empty()
+        && final_sol.dual_solution.len() == orig_problem.num_constraints;
+
+    // ── unconditional 1 回 refit: 旧 Stage 0 / postsolve dual_lsq 相当 ─────
+    // postsolve は EmptyCol / FixedVar の bound_dual を 0-fill する慣例だが、
+    // KKT stationarity 上は c[j] ≠ 0 の EmptyCol で z_lb = c[j] が要求される
+    // (BD-T4: z_lb=1 from c=1)。kkt_residual_rel は EmptyCol を除外するので
+    // outer convergence loop だけだと early break で refit が走らないケースが
+    // ある。unconditional に 1 回走らせて 0-fill 慣例を KKT 値で上書きする。
+    if has_postsolve_steps {
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        for step in presolve_result.postsolve_stack.steps.iter() {
+            let (row, col) = match step {
+                QpPostsolveStep::SingletonRow { row, col, .. }
+                | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),
+                _ => continue,
+            };
+            let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
+            recover_y_for_singleton_row_with_bound(row, col, orig_problem, final_sol, bc);
+        }
+    }
+    crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+
+    let mut prev_score = max_score(final_sol);
+    if post_trace {
+        let kkt = kkt_residual_rel(view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let pres = primal_residual_rel(view, &final_sol.solution);
+        eprintln!("REFINE [pre] kkt_rel={:.3e} pres_rel={:.3e} score={:.3e}", kkt, pres, prev_score);
+    }
+
+    if !ipm_made_progress {
+        // IPM が一度も反復していない (cancel_flag 即停止 / timeout=0 等) は冷状態で
+        // refinement を回すと「analytic な独自解」を作って外部 cancel/Timeout セマンティクス
+        // を破壊するため skip。
+        return kkt_residual_rel(view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+    }
+
+    if orig_problem.num_constraints == 0 {
+        return kkt_residual_rel(view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+    }
+
+    for outer in 0..OUTER_MAX_PASSES {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        if prev_score <= user_eps { break; }
+
+        // (a) postsolve recovery: SingletonRow / RedundantRowFix の y[row] 補正
+        if has_postsolve_steps {
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+            for step in presolve_result.postsolve_stack.steps.iter() {
+                let (row, col) = match step {
+                    QpPostsolveStep::SingletonRow { row, col, .. }
+                    | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),
+                    _ => continue,
+                };
+                let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
+                recover_y_for_singleton_row_with_bound(row, col, orig_problem, final_sol, bc);
+            }
+        }
+
+        // (b) refit z: bound dual を KKT stationarity から再計算 (per-col guard)
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+
+        // (c) refit y: 標準 LSQ (Wilkinson IR 内蔵、internal componentwise guard で
+        //     悪化時 no-op)。
+        if allow_lsq_refine {
+            crate::qp::refine_dual_lsq(orig_problem, final_sol, deadline);
+        }
+
+        // (d) refit z 再度 (y が更新された可能性があるので停留性を取り直す)
+        crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+
+        // (e) IRLS y: outlier 集中残差を L∞ 風に balance (internal guard で no-op)
+        if allow_lsq_refine {
+            crate::qp::refine_dual_lsq_irls(
+                orig_problem, final_sol, user_eps, IRLS_INNER_MAX_ITERS, deadline,
+            );
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        }
+
+        // (f) refit x: primal LSQ projection (Wilkinson IR 内蔵、internal guard)
+        if allow_lsq_refine {
+            crate::qp::refine_primal_lsq(orig_problem, final_sol, deadline);
+            crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
+        }
+
+        // (g) saddle-point IR: K [dx; dy] Newton step、最終手段 (internal revert guard)
+        if allow_lsq_refine {
+            crate::qp::refine_kkt_iterative(
+                orig_problem, final_sol, KRYLOV_MAX_ITERS, user_eps, deadline,
+            );
+        }
+
+        let cur_score = max_score(final_sol);
+        if post_trace {
+            eprintln!("REFINE [pass {}] score={:.3e}", outer, cur_score);
+        }
+        if cur_score >= prev_score * OUTER_CONVERGE_RATIO {
+            break;
+        }
+        prev_score = cur_score;
+    }
+
+    kkt_residual_rel(view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
 }
