@@ -13,14 +13,12 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// 事前調整した IPM target eps の物理下限 (= `RuizScaler::IPM_F64_ACHIEVABLE_EPS`)。
-///
 /// `user_eps / amplification` が IPM の f64 LDL achievable backward error を下回ると
-/// IPM target が unreachable になり収束判定が破綻する。`ruiz.rs` の同一物理量を参照。
+/// target が unreachable になり収束判定が破綻するため、`IPM_F64_ACHIEVABLE_EPS` で抑える。
 pub(crate) const EPS_FLOOR: f64 = crate::linalg::ruiz::RuizScaler::IPM_F64_ACHIEVABLE_EPS;
-/// Suboptimal→Optimal 昇格ゲートの双対ギャップ閾値。
-/// 内部収束判定 (Optimal_main, 1e-3) より緩く post-hoc promotion 用途。
-/// 真の Optimal の双対ギャップは通常 1% 以下、UBH1 型の偽 Optimal は ~28% で弾く。
+
+/// Suboptimal → Optimal 昇格時の双対ギャップ閾値 (真の Optimal は通常 < 1%、
+/// 偽 Optimal は >> 10% で弾く)。
 pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
 /// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
@@ -90,8 +88,7 @@ where
         if let Ok(scaled_problem) = QpProblem::new(
             q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
         ) {
-            // Ruiz スケーリング増幅率 (1/min(e_i), 1/(c × min(d_j))) で scaled 空間 eps を
-            // tighten し、unscale 後に元空間 eps を保証する。retry は外側 (ipm_v2 ATTEMPTS)。
+            // scaled 空間 eps を amp 倍だけ tighten し、unscale 後に元空間 eps を保証。
             let amplification = compute_amplification(&scaler);
             let mut adjusted_opts = options.clone();
             adjusted_opts.ipm.eps =
@@ -106,9 +103,7 @@ where
             );
             let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
 
-            // MaxIterations は概要設計に従い有効解の有無で外部 status に変換する
-            // (status 変換 1 箇所原則の例外: max_iter 到達は inner 内部判定で
-            //  外部 Timeout/Suboptimal どちらにも該当しうるため、ここで bridge する)
+            // MaxIterations は外部 Timeout/Suboptimal に bridge する。
             if result.status == SolveStatus::MaxIterations {
                 if !result.solution.is_empty() {
                     return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
@@ -337,13 +332,9 @@ pub(crate) fn check_dfeas_status_relative(
 // 非公開関数
 // ---------------------------------------------------------------------------
 
-/// Ruiz スケーリングによる残差増幅率を計算する。
-///
-/// pfeas 増幅: 1/e_min、dfeas 増幅: 1/(c * d_min) の最大を返す。
-///
-/// e_min/d_min は Ruiz の `scale_floor_for_eps(user_eps)` で物理下限が保証されるため
-/// 通常 0 になり得ないが、Ruiz 不適用や数値破綻時の division by zero 防護として
-/// `f64::MIN_POSITIVE` で抑える。
+/// Ruiz スケーリング後の unscale 残差増幅率。
+/// pfeas 増幅 = `1/min(e)`、dfeas 増幅 = `1/(c × min(d))` の最大値。
+/// `f64::MIN_POSITIVE` は div0 防護 (Ruiz の `scale_floor_for_eps` で通常下限が保証される)。
 pub(crate) fn compute_amplification(scaler: &RuizScaler) -> f64 {
     let e_min = if scaler.e.is_empty() {
         1.0

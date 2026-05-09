@@ -1,11 +1,9 @@
-//! solve_qp_v2: 単一 retry 層 + 単一 status 変換 で解く新規 API。
+//! solve_qp_v2: 単一 retry 層 + 単一 status 変換で QP を解く API。
 //!
-//! 設計書 (`docs/solver_overview_design.md`) の 3 原則:
+//! 3 原則 (`docs/solver_overview_design.md` 参照):
 //! - retry 1 層 (時間内で eps 厳格化を直線的に進める)
 //! - status 変換 1 箇所 (API 境界のみ)
 //! - 元空間 KKT 直接判定 (scaled OK で偽 Optimal 出さない)
-//!
-//! 既存 `solve_qp_with` は temporarily 並行運用。v2 が品質・性能で上回ったら統合する。
 
 use crate::options::SolverOptions;
 use crate::presolve::{
@@ -19,43 +17,19 @@ use crate::presolve::QpPresolveResult;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
 
-/// 事前調整した IPM target eps の物理下限 (= `RuizScaler::IPM_F64_ACHIEVABLE_EPS`)。
-///
-/// `user_eps / tighten` が IPM の f64 LDL achievable backward error を下回ると IPM は
-/// 達成不能な目標を強制され、誤った収束判定や stagnation を引き起こす。`ruiz.rs` で
-/// 定義済の同一物理量を参照することで、Ruiz floor 導出 / IPM target floor が同じ
-/// f64 limit の異なる適用面であることを明示する。
-
 /// 1 attempt あたりの IPM 反復上限。
-///
-/// **役割:** marginal 問題 (pf が user_eps 周辺で slow progress) で attempt 0 が deadline
-/// 一杯まで僅かに改善し続け、attempts 1+ (Ruiz off / eps_tighten) の救済枠を奪うのを防ぐ。
-/// 実測: cap なしで YAO が pf=1.1e-6 で停滞 → PFEAS_FAIL (cap=500 では attempts 1+ が
-/// eps_tighten で救済して PASS)。
-///
-/// **値の選定理由 (empirical):** Mehrotra IPM の典型反復数は 30-200 (well-conditioned
-/// から hard 問題まで)。500 は 2-3x の安全側で、自己終了する問題は cap に届く前に抜け、
-/// stall 系問題のみ cap で止められる。typical 1 反復 ~10ms × 500 = 5s/attempt × 6 attempts
-/// = 30s で 1000s deadline 内に余裕。原則ベース derivation がない empirical safety net。
+/// marginal 問題で attempt 0 が deadline 一杯まで slow progress するのを防ぎ、
+/// 後続 attempt (Ruiz off / eps_tighten) の救済枠を確保する。
+/// Mehrotra IPM の典型反復数 30-200 の 2-3x の安全側。
 const MAX_ITER_PER_ATTEMPT: usize = 500;
 
-/// IpmOutcome を返す runner 関数の型 (= run_ipm = IP-PMM のみ)
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
-/// QP を v2 設計で解く (IP-PMM 経路)。既存 `solve_qp_with` と同じ API シグネチャ。
+/// QP を v2 経路 (IP-PMM) で解く。
 ///
-/// retry 1 層・status 1 箇所変換・元空間 KKT 判定 の 3 原則で動く。
-///
-/// 入口で Q-diagonal scaling 前処理を試みる:
-/// Q が対角でかつ diagonal entries の dynamic range が大きい (max/min > 1e6) 問題
-/// (QPLIB_9002: Q diag 9e-12 〜 2.0, var bounds 〜1e11) では、Ruiz だけでは Q'_jj
-/// を均等化できず IPM が ill-conditioned KKT 系で wrong stationary point に
-/// 収束する (obj=4.3e10 vs 真値 5.7e9)。
-///
-/// Pre-scaling: 各 column j で s_j = 1/√Q_jj (Q_jj > 0) を適用し
-///   x = D x', Q' = D Q D (対角 1.0 に均等化), A' = A D, c' = D c, bounds' = bounds/D
-/// 解いた後 x_orig = D x_scaled で復元する。Q が対角でない場合や dynamic range が
-/// 狭い場合は no-op (直接 solve_qp_v2_with_runner を呼ぶ)。
+/// Q が対角で diag dynamic range が広い (max/min > 1e6) 場合、Ruiz だけでは
+/// `Q'_jj` を均等化できないため、`s_j = 1/√Q_jj` の column scaling を入口で適用
+/// (`x = D x'`, `Q' = D Q D` を対角 1 に均等化し、解いた後 `x_orig = D x_scaled` で復元)。
 pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
         let mut result = solve_qp_v2_with_runner(&scaled_problem, options, run_ipm);
@@ -218,11 +192,8 @@ fn solve_qp_v2_with_runner(
     let mut opts = options.clone();
     let n_orig = problem.num_vars;
 
-    // ── deadline 確定を presolve よりも先に行う ──────────
-    // 動機: 100 万変数級 QPLIB (QPLIB_8547: n=1.0M, m=1.0M) では presolve 単体で
-    // timeout を超過する。deadline が presolve 後に設定されると、presolve 中の
-    // hot loop が timeout を尊重できず external gtimeout で force-kill される。
-    // deadline を冒頭で固定し、presolve 後/IPM 前後に経過判定を入れる。
+    // deadline は presolve より先に固定する: 巨大 QP の presolve 内 hot loop も
+    // deadline を見られるようにするため。
     if opts.deadline.is_none() {
         if let Some(secs) = opts.timeout_secs {
             opts.deadline = Some(start_time + std::time::Duration::from_secs_f64(secs));
@@ -232,18 +203,15 @@ fn solve_qp_v2_with_runner(
     let total_deadline = opts.deadline;
     let user_eps = opts.ipm_eps();
 
-    // ── presolve (1 回のみ) ─────────────────────────────
-    // 100万変数級の QPLIB (8547/9008) では presolve 内ループが O(n*m) で deadline
-    // 到達前に巨大時間を消費する。bench 計装と同じ 50k 閾値で skip し、IPM 内 deadline
-    // チェックに任せる。閾値内では従来どおり presolve 適用 (Maros 138 PASS 数を維持)。
+    // 50k 超の巨大問題は presolve を skip (内ループの O(n*m) で deadline を
+    // 食い切るため)。それ未満は通常 presolve 適用。
     const PRESOLVE_SIZE_LIMIT: usize = 50_000;
     let presolve_result = if opts.presolve
         && problem.num_vars <= PRESOLVE_SIZE_LIMIT
         && problem.num_constraints <= PRESOLVE_SIZE_LIMIT
     {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
-        // DIAG: QP_PRESOLVE_PHASE2=0 で phase2 (equality_constraint_qr / Ruiz / 大係数 scale)
-        // を無効化。dual postsolve が phase2 の row 削除に追従できない場合の回避用。
+        // QP_PRESOLVE_PHASE2=0 で phase2 (Ruiz / 大係数 scale) を無効化する DIAG hook。
         if std::env::var("QP_PRESOLVE_PHASE2").ok().as_deref() == Some("0") {
             phase1
         } else {
@@ -256,39 +224,22 @@ fn solve_qp_v2_with_runner(
         return SolverResult::infeasible();
     }
 
-    // presolve 自体が timeout を超過した場合 (巨大 QP)、IPM を走らせず即 Timeout。
-    // 解なしで返すため finalize_outcome 経由で `Timeout` (best-so-far なし) になる。
+    // 巨大 QP の presolve が deadline を食い切ったら IPM を走らせず即 Timeout。
     if total_deadline.is_some_and(|d| Instant::now() >= d) {
         return finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false);
     }
 
-    // presolve が既に Ruiz scaling を適用した場合、IPM 側で重ね掛けすると
-    // 二重スケールで解が誤った点に収束する (HS21 で観測: x=(4.31,0) vs 真値 (2,0))。
+    // presolve が Ruiz 済なら IPM 側で重ね掛けすると二重スケールで誤収束するため
+    // `use_ruiz=false` のみを試す。
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
 
-    // ── 試行配列 (use_ruiz, eps_tighten) を deadline 内で順に試す ─────
-    //
-    // **eps_tighten** は IPM 内部 eps を user_eps×{1,10,100} で stricter にする。
-    // unscale 時に残差が σ 倍に増幅される ill-scaled 問題で必要 (QSCRS8 等)。
-    //
-    // **use_ruiz on/off** は IPM 側 Ruiz scaling の有無を切り替える algorithmic choice。
-    // (presolve fall-back とは異なり、bug を隠す band-aid ではない。)
-    //   - Ruiz on:  典型的に row/col 不均一な行列で cond 改善 → 多くの問題に有効
-    //   - Ruiz off: |b| 巨大 (BOYD2: |b|≈2e11) で Ruiz が b スケールを縮めて IPM 初期点
-    //               を歪める / 既に正規化された行列で Ruiz が逆効果な系で必要
-    // 両方が有効な問題ファミリーが存在することは数値実験で実証済 (t5 で 6 fails、
-    // Ruiz on のみに削減した版で 8 fails、+2 fails は Ruiz off attempt の喪失起因)。
-    //
-    // 経路 1 化との関係: CLAUDE.md「1 経路にしてほしい」は **band-aid retry** (例:
-    // presolve 失敗を presolve=false fall-back で隠す) を排除する原則であり、
-    // **algorithmic alternative** (Ruiz on/off は数値解法の正当な選択肢) を排除する
-    // ものではない。両者を区別する。
-    //
-    // presolve_did_ruiz=true のとき: presolve が既に Ruiz 済 → IPM Ruiz は重ね掛けで
-    // 害悪 (HS21 で観測)。use_ruiz=false のみで eps_tighten 3 段。
-    // presolve_did_ruiz=false のとき: IPM Ruiz on/off 双方有効。on を先に試す
-    // (典型問題に最適)、off は適応の効かない問題の救済。
+    // 試行配列 `(use_ruiz, eps_tighten)`:
+    // - `eps_tighten`: IPM 内 eps を `user_eps × {1, 10, 100}` で締めて、unscale 残差
+    //   増幅 (ill-scaled 問題) を吸収する余裕を作る。
+    // - `use_ruiz` on/off: 行列形状による algorithmic alternative。
+    //     on  ... 典型 row/col 不均一行列で cond を改善
+    //     off ... `|b|` 巨大 (BOYD2 級) で Ruiz が初期点を歪める系の救済
     const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0];
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
         EPS_TIGHTEN_FACTORS.iter().map(|&t| (false, t)).collect()
@@ -300,14 +251,9 @@ fn solve_qp_v2_with_runner(
     };
 
     for &(use_ruiz, tighten) in attempts.iter() {
-        // total_deadline は hard cap として温存。past なら以降の attempt を即停止。
         if let Some(d) = total_deadline {
             if Instant::now() >= d { break; }
         }
-        // 旧実装の `remaining / 残 attempt 数` wall-clock 分配は CPU 競合下で非決定的
-        // だったため撤廃。各 attempt の予算は IPM 反復上限 `MAX_ITER_PER_ATTEMPT` で
-        // 確定的に与える。`total_deadline` は runaway 問題向けの outer hard cap として
-        // のみ機能する。
         opts.deadline = total_deadline;
         opts.timeout_secs = None;
         opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
@@ -330,10 +276,8 @@ fn solve_qp_v2_with_runner(
     }
 
     let outcome = best.unwrap_or_else(IpmOutcome::empty);
-    // cancel_flag が事前に立っていた / sibling thread が立てた場合も「外部から停止」
-    // として deadline 経過と同様に扱う。これがないと「cancel_flag 即停止」で IPM が
-    // 一切 iterate しないケースが NumericalError 扱いになり、`A3-C02` 系の cancel 契約
-    // (preset cancel → Timeout) を破る。
+    // cancel_flag を「外部停止」として deadline 経過と同様に扱う
+    // (preset cancel → Timeout 契約のため)。
     let cancelled = options
         .cancel_flag
         .as_ref()
@@ -341,18 +285,14 @@ fn solve_qp_v2_with_runner(
     finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled)
 }
 
-/// `IpmOutcome` から `SolverResult` (外部 status) への変換 — **status mutation 1 箇所**。
-/// outcome.solution は既に元空間で postsolve / unscale / clip 済み。
+/// `IpmOutcome` から `SolverResult` への単一 status 変換。
+/// solution は既に元空間で postsolve / unscale / clip 済み。
 ///
-/// status 分類 (status 隠蔽防止):
-///   - Optimal             : ユーザー精度 eps 達成
-///   - Timeout             : 外部 deadline 経過 (時間切れ、もっと時間あれば改善余地)
-///   - SuboptimalSolution  : deadline 内で IPM が内部終了 (alpha_stall/mu_floor/NaN_guard)、
-///                            best-so-far 解あり (eps 未達、IPM の数値的限界)
-///   - NumericalError      : best-so-far も無し (factorize 失敗 / 即時破綻)
-///
-/// IPM 内部諦め (alpha_stall/mu_floor/NaN_guard) と真の時間切れを区別するため、
-/// best-so-far の有無と deadline 経過の両方を見る。
+/// status 分類:
+/// - Optimal: ユーザー精度 eps 達成
+/// - Timeout: 外部 deadline 経過 (best-so-far の有無は問わない)
+/// - SuboptimalSolution: IPM が内部停止 (alpha_stall / mu_floor / NaN_guard) + best あり
+/// - NumericalError: best-so-far も無い (factorize 失敗 / 即時破綻)
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,
@@ -360,12 +300,8 @@ fn finalize_outcome(
     total_deadline: Option<Instant>,
     cancelled: bool,
 ) -> SolverResult {
-    // 確定的 Infeasible / Unbounded / NonConvex は最優先で外部に伝える (status 隠蔽防止)。
-    // objective は status に応じて意味のある値を設定:
-    //   Infeasible → +∞ (実行可能解なし、最小化では到達不能)
-    //   Unbounded  → -∞ (objective がいくらでも小さくなる方向あり)
-    //   NonConvex  → NaN (大域最適保証なし、値に意味がない)
-    // SolverResult::infeasible() の慣例 (objective: f64::INFINITY) と整合。
+    // 確定的 Infeasible / Unbounded / NonConvex は最優先で外部に伝える。
+    // objective: Infeasible → +∞ (到達不能), Unbounded → -∞, NonConvex → NaN。
     if let Some(infeas) = outcome.infeasibility_status {
         let objective = match infeas {
             SolveStatus::Infeasible => f64::INFINITY,
@@ -380,12 +316,10 @@ fn finalize_outcome(
         };
     }
 
-    // 外部停止 = deadline 経過 OR cancel_flag セット。後者は cancel_flag 事前設定での
-    // 即停止 / parallel sibling からの cooperative cancel をカバーする。
+    // 外部停止 = deadline 経過 OR cancel_flag セット。
     let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
 
     if outcome.solution.is_empty() {
-        // best-so-far も無い: 真の時間切れ or 数値破綻 (factorize fail 等)。
         let status = if timed_out {
             SolveStatus::Timeout
         } else {

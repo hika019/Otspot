@@ -35,44 +35,20 @@ pub struct RuizScaler {
 }
 
 impl RuizScaler {
-    /// Ruiz equilibration sweep 数。Ruiz の **f64 storage 精度** から導出。
-    ///
-    /// Ruiz iteration は contractive で、各 sweep で deviation が ~1/2 になる
-    /// (理論収束率)。`RuizScaler` の e/d/c は f64 で保持するため、storage 上の precision
-    /// は `2^-52`。52 sweep で deviation は f64 machine precision に到達し、それ以降の
-    /// sweep は noise しか動かさない。`MANTISSA_DIGITS = 53` で +1 マージン。
-    ///
-    /// **DD (double-double) との関係:** IR / 残差計算で DD 精度を使う箇所があるが、
-    /// Ruiz の出力は f64 storage に書き戻される時点で f64 精度に制限される。Ruiz 全体
-    /// を DD 化するなら storage 含む大規模 refactor が必要 (現状未実装)。
-    ///
-    /// 各 sweep は O(nnz) で軽量、早期 break しなくてもコストは μs オーダーで無視可。
+    /// Ruiz sweep 数 = f64 mantissa bit 数。各 sweep で deviation が ~1/2 になり、
+    /// 53 sweep で f64 machine precision に到達 (それ以降は finite precision noise)。
     pub const RUIZ_SWEEPS: usize = f64::MANTISSA_DIGITS as usize;
 
-    /// IPM で f64 LDL solve が確保できる KKT residual の下限 (実効 backward error)。
-    ///
-    /// 物理: `f64 EPSILON × cond(K_scaled)`。Ruiz equilibration 後の K_scaled は
-    /// 多くの問題で cond ≲ 1e4 まで圧縮され、backward error は 2.2e-16 × 1e4 ≈ 2e-12
-    /// 級。経験値として 1e-12 を採用する (IS_LASSO_100 系で実測 PASS の dfr=4e-7、
-    /// 旧 EPS_FLOOR=1e-12 で動作実績)。これより tight な eps を IPM に課しても f64 では
-    /// 達成不能。1e-10 にすると Ruiz floor が 1e-4 に緩和され equilibration 弱体化、
-    /// well-equilibrated 問題で必要な精度を出せず IS_LASSO regress (実測)。
-    ///
-    /// `scale_floor_for_eps` の出力を介して Ruiz の equilibration 強度を制限し、
-    /// unscale 後の残差 (= amp × IPM_eps) が `user_eps` を下回るようにする。
+    /// IPM が f64 LDL solve で達成可能な KKT residual の実効下限。
+    /// `f64 EPSILON × cond(K_scaled)` ≈ 2.2e-16 × 1e4 ≈ 2e-12。
+    /// これより tight な eps を IPM に課しても達成不能。
     pub const IPM_F64_ACHIEVABLE_EPS: f64 = 1e-12;
 
-    /// `user_eps` から導出する scaling 係数下限。
+    /// `user_eps` から scaling 係数下限を導出する。
     ///
-    /// 導出: unscale 後残差 ≤ `user_eps` を保証するには
-    ///       `amp × IPM_eps_target ≤ user_eps`、ここで `amp = 1/min(e,c·d)`。
-    ///       IPM_eps_target ≥ `IPM_F64_ACHIEVABLE_EPS` (f64 限界) なので
-    ///       `amp ≤ user_eps / IPM_F64_ACHIEVABLE_EPS`、よって
-    ///       `min(e,c·d) ≥ IPM_F64_ACHIEVABLE_EPS / user_eps`.
-    ///
-    /// 例: user_eps=1e-6 → floor=1e-4 (amp≤1e4)、user_eps=1e-3 → floor=1e-7 (amp≤1e7)。
-    /// user_eps が `IPM_F64_ACHIEVABLE_EPS` 以下になると floor≥1 (= no-scaling) で
-    /// 自然に縮退する。
+    /// unscale 後残差 ≤ `user_eps` を保証する条件:
+    ///   `amp × IPM_eps_target ≤ user_eps` かつ `IPM_eps_target ≥ IPM_F64_ACHIEVABLE_EPS`
+    ///   ⇒ `min(e, c·d) ≥ IPM_F64_ACHIEVABLE_EPS / user_eps`.
     pub fn scale_floor_for_eps(user_eps: f64) -> f64 {
         if user_eps > 0.0 {
             (Self::IPM_F64_ACHIEVABLE_EPS / user_eps).min(1.0)
@@ -81,7 +57,7 @@ impl RuizScaler {
         }
     }
 
-    /// 新規スケーラーを生成（初期値: 恒等変換 D=I, E=I, c=1）
+    /// 単位スケーラー (D = E = I, c = 1)。
     pub fn new(n: usize, m: usize) -> Self {
         RuizScaler {
             d: vec![1.0; n],
@@ -90,14 +66,8 @@ impl RuizScaler {
         }
     }
 
-    /// Ruiz equilibration を実行する (Q/A のみ、user_eps から floor 導出)。
-    ///
-    /// 各 sweep で行・列・コストノルムを順次正規化し、固定点 (相対変化 < CONV_TOL)
-    /// に達した時点で打ち切る。終了後、`scale_floor_for_eps(user_eps)` で
-    /// e[i] / d[j] の下限をクリップし、unscale 後の残差 ≤ user_eps を保証する。
-    ///
-    /// l, u（変数境界）はAPIの完全性のため受け取るが、
-    /// ノルム計算には使用しない（Q と A のみで均衡化する）。
+    /// Q と A のみで Ruiz equilibration を実行する。
+    /// l, u は API 完全性のため受け取るがノルム計算には使わない。
     #[allow(clippy::needless_range_loop)]
     pub fn compute(
         &mut self,
@@ -112,10 +82,7 @@ impl RuizScaler {
         self.compute_with_rhs_floor(q, a, q_vec, &[], floor);
     }
 
-    /// RHS（b）を含む行ノルムで Ruiz equilibration を実行 (presolve 用)。
-    ///
-    /// `compute()` と同じだが、Step 1 の行ノルムに `|e[i]*b[i]|` を追加する。
-    /// 終了後の floor も `scale_floor_for_eps(user_eps)` から導出。
+    /// b を行ノルムに含めた Ruiz equilibration (presolve 後に b が大きい場合用)。
     #[allow(clippy::needless_range_loop)]
     pub fn compute_with_rhs(
         &mut self,
@@ -129,7 +96,7 @@ impl RuizScaler {
         self.compute_with_rhs_floor(q, a, q_vec, b, floor);
     }
 
-    /// `compute_with_rhs` の floor 可変版。`scale_floor=0.0` でクリップ無効。
+    /// `scale_floor` を直接指定する Ruiz equilibration (`0.0` でクリップ無効)。
     #[allow(clippy::needless_range_loop)]
     pub fn compute_with_rhs_floor(
         &mut self,
@@ -142,11 +109,9 @@ impl RuizScaler {
         let n = q.ncols;
         let m = a.nrows;
         const EPS: f64 = 1e-6;
-        // 詳細は `RUIZ_SWEEPS` ドキュメント参照。
-        const NUM_ITER: usize = RuizScaler::RUIZ_SWEEPS;
 
-        for _iter in 0..NUM_ITER {
-            // Step 1: 行ノルム正規化（b を含む）
+        for _iter in 0..RuizScaler::RUIZ_SWEEPS {
+            // Step 1: 行ノルム正規化 (b を含む)
             if m > 0 {
                 let mut row_norms = vec![0.0f64; m];
                 for col in 0..n {
@@ -171,7 +136,7 @@ impl RuizScaler {
                 }
             }
 
-            // Step 2: 列ノルム正規化（compute() と同じ）
+            // Step 2: 列ノルム正規化
             let mut col_norms = vec![0.0f64; n];
             for col in 0..n {
                 for k in q.col_ptr[col]..q.col_ptr[col + 1] {
@@ -198,7 +163,7 @@ impl RuizScaler {
                 self.d[j] /= norm.sqrt();
             }
 
-            // Step 3: コスト正規化（compute() と同じ）
+            // Step 3: コスト正規化
             let mut q_mat_inf = 0.0f64;
             for col in 0..n {
                 for k in q.col_ptr[col]..q.col_ptr[col + 1] {
@@ -218,9 +183,6 @@ impl RuizScaler {
             self.c /= denom;
         }
 
-        // 下限クリッピング (scale_floor>0 のみ)。`scale_floor_for_eps(user_eps)` から
-        // 与えられ、`min(e, c·d) ≥ floor` を強制することで unscale 後残差 ≤ user_eps
-        // を保証する (詳細は `scale_floor_for_eps` ドキュメント参照)。
         if scale_floor > 0.0 {
             for i in 0..m {
                 self.e[i] = self.e[i].max(scale_floor);
