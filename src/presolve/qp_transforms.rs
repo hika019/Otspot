@@ -1459,7 +1459,7 @@ pub fn run_qp_presolve_phase1(
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);
-        scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals, opts.ipm_eps());
+        scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals);
         let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
             &reduced.q, &reduced.a, &reduced.c, &reduced.b, &reduced.bounds
         );

@@ -39,24 +39,6 @@ impl RuizScaler {
     /// 53 sweep で f64 machine precision に到達 (それ以降は finite precision noise)。
     pub const RUIZ_SWEEPS: usize = f64::MANTISSA_DIGITS as usize;
 
-    /// IPM が f64 LDL solve で達成可能な KKT residual の実効下限。
-    /// `f64 EPSILON × cond(K_scaled)` ≈ 2.2e-16 × 1e4 ≈ 2e-12。
-    /// これより tight な eps を IPM に課しても達成不能。
-    pub const IPM_F64_ACHIEVABLE_EPS: f64 = 1e-12;
-
-    /// `user_eps` から scaling 係数下限を導出する。
-    ///
-    /// unscale 後残差 ≤ `user_eps` を保証する条件:
-    ///   `amp × IPM_eps_target ≤ user_eps` かつ `IPM_eps_target ≥ IPM_F64_ACHIEVABLE_EPS`
-    ///   ⇒ `min(e, c·d) ≥ IPM_F64_ACHIEVABLE_EPS / user_eps`.
-    pub fn scale_floor_for_eps(user_eps: f64) -> f64 {
-        if user_eps > 0.0 {
-            (Self::IPM_F64_ACHIEVABLE_EPS / user_eps).min(1.0)
-        } else {
-            0.0
-        }
-    }
-
     /// 単位スケーラー (D = E = I, c = 1)。
     pub fn new(n: usize, m: usize) -> Self {
         RuizScaler {
@@ -76,10 +58,8 @@ impl RuizScaler {
         q_vec: &[f64],
         _l: &[f64],
         _u: &[f64],
-        user_eps: f64,
     ) {
-        let floor = Self::scale_floor_for_eps(user_eps);
-        self.compute_with_rhs_floor(q, a, q_vec, &[], floor);
+        self.compute_with_rhs(q, a, q_vec, &[]);
     }
 
     /// b を行ノルムに含めた Ruiz equilibration (presolve 後に b が大きい場合用)。
@@ -90,21 +70,6 @@ impl RuizScaler {
         a: &CscMatrix,
         q_vec: &[f64],
         b: &[f64],
-        user_eps: f64,
-    ) {
-        let floor = Self::scale_floor_for_eps(user_eps);
-        self.compute_with_rhs_floor(q, a, q_vec, b, floor);
-    }
-
-    /// `scale_floor` を直接指定する Ruiz equilibration (`0.0` でクリップ無効)。
-    #[allow(clippy::needless_range_loop)]
-    pub fn compute_with_rhs_floor(
-        &mut self,
-        q: &CscMatrix,
-        a: &CscMatrix,
-        q_vec: &[f64],
-        b: &[f64],
-        scale_floor: f64,
     ) {
         let n = q.ncols;
         let m = a.nrows;
@@ -181,15 +146,6 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
-        }
-
-        if scale_floor > 0.0 {
-            for i in 0..m {
-                self.e[i] = self.e[i].max(scale_floor);
-            }
-            for j in 0..n {
-                self.d[j] = self.d[j].max(scale_floor);
-            }
         }
     }
 
@@ -365,7 +321,7 @@ mod tests {
         let u = vec![1.0; n];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &l, &u, 1e-6);
+        scaler.compute(&q, &a, &q_vec, &l, &u);
 
         // d, e はほぼ 1.0（恒等変換に近い）
         for j in 0..n {
@@ -499,7 +455,7 @@ mod tests {
         let bounds = vec![(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3], 1e-6);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3]);
 
         // 任意の orig 空間 (x, y) で round-trip を確認:
         //   scaled_x = D^{-1} x  (公式: x = D x_s → x_s = D^{-1} x)
@@ -538,7 +494,7 @@ mod tests {
         let bounds = vec![(0.0_f64, 10.0); 2];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2], 1e-6);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2]);
         let (q_s, a_s, q_s_vec, _b_s, _bounds_s) =
             scaler.scale_problem(&q, &a, &q_vec, &b, &bounds);
 

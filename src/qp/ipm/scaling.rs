@@ -13,9 +13,9 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// `user_eps / amplification` が IPM の f64 LDL achievable backward error を下回ると
-/// target が unreachable になり収束判定が破綻するため、`IPM_F64_ACHIEVABLE_EPS` で抑える。
-pub(crate) const EPS_FLOOR: f64 = crate::linalg::ruiz::RuizScaler::IPM_F64_ACHIEVABLE_EPS;
+/// IPM target eps の f64 表現可能な絶対下限。`user_eps / amplification` がこの
+/// 値を下回ると target が完全に表現不能 (denormal/zero) になるため抑える。
+pub(crate) const EPS_FLOOR: f64 = f64::EPSILON;
 
 /// Suboptimal → Optimal 昇格時の双対ギャップ閾値 (真の Optimal は通常 < 1%、
 /// 偽 Optimal は >> 10% で弾く)。
@@ -80,7 +80,7 @@ where
         let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub, options.ipm_eps());
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
 
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
