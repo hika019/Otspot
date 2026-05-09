@@ -39,6 +39,12 @@ impl RuizScaler {
     /// 53 sweep で f64 machine precision に到達 (それ以降は finite precision noise)。
     pub const RUIZ_SWEEPS: usize = f64::MANTISSA_DIGITS as usize;
 
+    /// scaling 係数の絶対下限 (OSQP §5.1 標準値 `MIN_SCALING = 1e-4`)。
+    /// 完全 equilibration を許すと問題によっては e[i] が極小になり IPM が
+    /// scaled 空間で達成不能な target を強制される (実測: AUG3D / LISWET 系で
+    /// OBJ_MISMATCH)。1e-4 は OSQP コミュニティ標準で eps 不依存の固定値。
+    pub const SCALE_FLOOR: f64 = 1e-4;
+
     /// 単位スケーラー (D = E = I, c = 1)。
     pub fn new(n: usize, m: usize) -> Self {
         RuizScaler {
@@ -146,6 +152,13 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
+        }
+
+        for i in 0..m {
+            self.e[i] = self.e[i].max(Self::SCALE_FLOOR);
+        }
+        for j in 0..n {
+            self.d[j] = self.d[j].max(Self::SCALE_FLOOR);
         }
     }
 
