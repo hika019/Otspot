@@ -128,13 +128,15 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
         .map(|(j, &(lb, ub))| (lb / col_scales[j], ub / col_scales[j]))
         .collect();
 
-    // QpProblem を作る (b は不変、constraint_types も不変)
-    let scaled = match QpProblem::new(
+    // QpProblem を作る (b は不変、constraint_types も不変)。
+    // obj_offset は scaling 不変なため orig から引き継ぐ。
+    let mut scaled = match QpProblem::new(
         q_s, c_s, a_s, problem.b.clone(), bounds_s, problem.constraint_types.clone(),
     ) {
         Ok(p) => p,
         Err(_) => return None,
     };
+    scaled.obj_offset = problem.obj_offset;
 
     Some((scaled, col_scales))
 }
