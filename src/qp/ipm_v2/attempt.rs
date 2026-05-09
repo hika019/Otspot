@@ -37,7 +37,7 @@ type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome
 /// `Q'_jj` を均等化できないため、`s_j = 1/√Q_jj` の column scaling を入口で適用
 /// (`x = D x'`, `Q' = D Q D` を対角 1 に均等化し、解いた後 `x_orig = D x_scaled` で復元)。
 pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
+    if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem, options.ipm_eps()) {
         let mut result = solve_qp_v2_with_runner(&scaled_problem, options, run_ipm);
         unscale_q_diagonal(&mut result, &col_scales, problem);
         return result;
@@ -47,7 +47,7 @@ pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult
 
 /// Q が対角 + dynamic range > 1e6 のとき column scaling 因子を返す。
 /// それ以外は None。
-fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> {
+fn try_q_diagonal_scaling(problem: &QpProblem, user_eps: f64) -> Option<(QpProblem, Vec<f64>)> {
     let n = problem.num_vars;
     if n == 0 { return None; }
 
@@ -87,8 +87,10 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     if !q_pos_min.is_finite() || q_pos_max <= 0.0 {
         return None;
     }
-    const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
-    if q_pos_max / q_pos_min < Q_DIAG_RANGE_TRIGGER {
+    // Ruiz が equilibrate 可能な range = 1 / scale_floor。これを超える Q diag range の
+    // 問題は Ruiz だけでは IPM の cond を吸収しきれず、明示 col scaling が必要。
+    let ruiz_max_amp = 1.0 / crate::linalg::ruiz::RuizScaler::scale_floor_for_eps(user_eps);
+    if q_pos_max / q_pos_min < ruiz_max_amp {
         return None;
     }
 
@@ -382,7 +384,7 @@ mod tests {
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        assert!(try_q_diagonal_scaling(&prob).is_none(), "off-diagonal Q では trigger しない");
+        assert!(try_q_diagonal_scaling(&prob, 1e-6).is_none(), "off-diagonal Q では trigger しない");
     }
 
     /// Q-diagonal scaling trigger 条件: dynamic range が小さければ scaling しない。
@@ -395,7 +397,7 @@ mod tests {
         let b = vec![];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        assert!(try_q_diagonal_scaling(&prob).is_none(), "narrow Q range では trigger しない");
+        assert!(try_q_diagonal_scaling(&prob, 1e-6).is_none(), "narrow Q range では trigger しない");
     }
 
     /// Q-diagonal scaling: ill-conditioned diagonal Q で scaling と unscale が
@@ -417,7 +419,7 @@ mod tests {
             vec![crate::problem::ConstraintType::Eq],
         ).unwrap();
 
-        let (scaled, col_scales) = try_q_diagonal_scaling(&prob)
+        let (scaled, col_scales) = try_q_diagonal_scaling(&prob, 1e-6)
             .expect("ill-cond diag Q では trigger するべき");
         // Q' diagonal は uniform 1.0 (within ε)
         let q_s = &scaled.q;
