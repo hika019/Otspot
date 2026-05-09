@@ -18,9 +18,15 @@ use super::outcome::IpmOutcome;
 use std::time::Instant;
 
 /// 1 attempt あたりの IPM 反復上限。
-/// marginal 問題で attempt 0 が deadline 一杯まで slow progress するのを防ぎ、
-/// 後続 attempt (Ruiz off / eps_tighten) の救済枠を確保する。
-/// Mehrotra IPM の典型反復数 30-200 の 2-3x の安全側。
+///
+/// 役割: marginal 問題で attempt 0 の slow progress を打ち切り、後続 attempt
+/// (Ruiz off / eps_tighten) に救済機会を譲る。
+///
+/// 値の根拠: 実測ベース。理論的 `O(sqrt(n) * log(1/eps))` から導出する `4 * sqrt(n+m)
+/// * log10(1/eps)` を試したところ、LISWET12 / YAO で attempt 0 が cap 上限近くまで
+/// 走り誤った解に到達する non-monotonic な挙動を確認 (IPM 内 stagnation 検出の脆弱性)。
+/// 500 は Maros 138 / QPLIB 41 全 PASS 問題が convergent に収まる empirical
+/// sweet spot で、これより大きくも小さくもしない。
 const MAX_ITER_PER_ATTEMPT: usize = 500;
 
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
