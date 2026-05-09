@@ -245,12 +245,14 @@ fn solve_qp_v2_with_runner(
     let mut best: Option<IpmOutcome> = None;
 
     // 試行配列 `(use_ruiz, eps_tighten)`:
-    // - `eps_tighten`: IPM 内 eps を `user_eps × {1, 10, 100}` で締めて、unscale 残差
-    //   増幅 (ill-scaled 問題) を吸収する余裕を作る。
+    // - `eps_tighten`: IPM 内 eps を `user_eps × {1, 10, 100, 10000}` で締めて、
+    //   Ruiz unscale 残差増幅 (sigma_total ≪ 1) を吸収する余裕を作る。
+    //   QBORE3D: sigma=2.649e-4 → 100x: eps_scaled=2.649e-10 で kkt stall。
+    //   10000x: eps_scaled=2.649e-12 → kkt=2.809e-15 → PASS。
     // - `use_ruiz` on/off: 行列形状による algorithmic alternative。
     //     on  ... 典型 row/col 不均一行列で cond を改善
     //     off ... `|b|` 巨大 (BOYD2 級) で Ruiz が初期点を歪める系の救済
-    const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0];
+    const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0, 10000.0];
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
         EPS_TIGHTEN_FACTORS.iter().map(|&t| (false, t)).collect()
     } else {
