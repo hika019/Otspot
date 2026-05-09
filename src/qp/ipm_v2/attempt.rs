@@ -85,6 +85,14 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     if !q_pos_min.is_finite() || q_pos_max <= 0.0 {
         return None;
     }
+    // dynamic range が狭い Q (例: STADAT2/3 の uniform diag) で常時 pre-scaling すると、
+    // IPM の K-行列 conditioning を僅かに悪化させ pfeas が user_eps 周辺で stagnate する
+    // 実例あり。広 range (Maros QPLIB_9002 級) のときのみ effective なため、empirical
+    // 閾値で gate する。値 1e6 は user_eps 不依存。
+    const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
+    if q_pos_max / q_pos_min < Q_DIAG_RANGE_TRIGGER {
+        return None;
+    }
 
     // s_j = 1/√Q_jj, ただし Q_jj=0 (LP-like 列) は s_j=1
     // Q'_jj = Q_jj × s_j^2 = 1 で対角均等化
@@ -379,6 +387,18 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         assert!(try_q_diagonal_scaling(&prob).is_none(), "off-diagonal Q では trigger しない");
+    }
+
+    /// Q-diagonal scaling trigger 条件: dynamic range が狭ければ scaling しない。
+    #[test]
+    fn test_q_diagonal_scaling_skips_uniform_diagonal() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::new(0, 2);
+        let b = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        assert!(try_q_diagonal_scaling(&prob).is_none(), "narrow Q range では trigger しない");
     }
 
     /// Q-diagonal scaling: ill-conditioned diagonal Q で scaling と unscale が
