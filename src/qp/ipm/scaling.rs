@@ -85,9 +85,10 @@ where
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
 
-        if let Ok(scaled_problem) = QpProblem::new(
+        if let Ok(mut scaled_problem) = QpProblem::new(
             q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
         ) {
+            scaled_problem.obj_offset = problem.obj_offset;
             // scaled 空間 eps を amp 倍だけ tighten し、unscale 後に元空間 eps を保証。
             let amplification = compute_amplification(&scaler);
             let mut adjusted_opts = options.clone();
