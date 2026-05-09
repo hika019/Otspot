@@ -1,6 +1,6 @@
 #!/bin/zsh
 # solver_bench.sh — ベンチマークバイナリのラッパー
-# --release ビルドを強制し、標準条件 (--eps 1e-6) を注入する。
+# --release ビルドを強制する。`--eps` は呼出側 (bench_parallel.sh) から指定する。
 # qps_benchmark と bench_qplib の両方に対応。
 #
 # 使い方:
@@ -85,15 +85,15 @@ if [[ ! -f "target/release/$bin" ]] || [[ -n "$EXTRA_FEATURES" ]]; then
   cargo build --release --features "$BUILD_FEATURES" 2>&1
 fi
 
-echo "[solver_bench.sh] ./target/release/$bin $data_dir --eps 1e-6 ${BINARY_ARGS[*]}"
+echo "[solver_bench.sh] ./target/release/$bin $data_dir ${BINARY_ARGS[*]}"
 
 # T5修正: 外部タイムアウト安全網（ソルバー内部timeout未設定時の暴走防止）
 # macOS: gtimeout（brew install coreutils）、Linux: timeout
 TIMEOUT_CMD=$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo "")
 if [[ -n "$TIMEOUT_CMD" ]]; then
   echo "[solver_bench.sh] 外部timeout: ${TIMEOUT_CMD} ${EXTERNAL_TIMEOUT:-120}s"
-  exec "$TIMEOUT_CMD" "${EXTERNAL_TIMEOUT:-120}" "./target/release/$bin" "$data_dir" --eps 1e-6 "${BINARY_ARGS[@]}"
+  exec "$TIMEOUT_CMD" "${EXTERNAL_TIMEOUT:-120}" "./target/release/$bin" "$data_dir" "${BINARY_ARGS[@]}"
 else
   echo "[solver_bench.sh] 外部timeout: 利用不可（gtimeout/timeout コマンドが見つからない）"
-  exec "./target/release/$bin" "$data_dir" --eps 1e-6 "${BINARY_ARGS[@]}"
+  exec "./target/release/$bin" "$data_dir" "${BINARY_ARGS[@]}"
 fi

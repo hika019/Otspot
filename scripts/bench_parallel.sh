@@ -223,6 +223,7 @@ worker_func() {
     SOLVER_DIR="${SOLVER_DIR:-$(pwd)}" \
     bash "$SCRIPT_DIR/solver_bench.sh" "$BIN" "$group_dir" \
       "${SOLVER_ARGS[@]}" \
+      --eps "$EPS" \
       --timeout "$TIMEOUT" \
       "${KNOWN_OPTIMAL_ARG[@]}" \
       ${FEATURES_EXTRA} > "$log" 2>&1 || exit_code=$?
