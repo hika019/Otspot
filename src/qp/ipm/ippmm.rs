@@ -36,10 +36,10 @@ use crate::linalg::kkt_solver::{
     factorize_kkt_pre_permuted_cached, factorize_kkt_with_cached_perm, inexact_eta_for_eps,
     max_l_nnz_from_budget, KktError, KktFactor,
 };
-use crate::linalg::ruiz::RuizScaler;
+
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
-use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 use super::kkt::{spmv, spmtv, spmv_q, norm_inf, build_extended_constraints, build_augmented_system, build_schur_system};
@@ -120,7 +120,6 @@ const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 // 問題集 tuning の閾値ではない。NaN_guard / alpha_stall / residual_stall 全経路で
 // この基準を共有する。
 
-
 // ---------------------------------------------------------------------------
 // PMM 状態構造体
 // ---------------------------------------------------------------------------
@@ -150,8 +149,6 @@ struct PmmState {
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
-    scaler: Option<&RuizScaler>,
-    orig_problem: Option<&QpProblem>,
     eps_orig: f64,
 ) -> SolverResult {
     let n = problem.num_vars;
@@ -516,7 +513,7 @@ pub(crate) fn solve_ippmm_inner(
     let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
     let mut prof_iters: usize = 0;
     let mut prof_residual_ns: u128 = 0;
-    let mut prof_buildmat_ns: u128 = 0;
+
     let mut prof_factor_ns: u128 = 0;
     let mut prof_predcorr_ns: u128 = 0;
     let mut prof_gondzio_ns: u128 = 0;
@@ -622,110 +619,65 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // ── 収束判定 ──────────────────────────────────────────────
-        // OSQP 流の正規化 (bench/v2 と整合):
-        //   pfeas: ||r_p||_∞ <= eps * (1 + max(||Ax||_∞, ||b||_∞))
-        //   dfeas: ||r_d||_∞ <= eps * (1 + max(||Qx||_∞, ||c||_∞, ||A^T y||_∞))
-        let norm_c_orig_for_thr = norm_inf(&problem.c);
-        let norm_aty_for_thr = norm_inf(&aty);
-        let norm_qx_for_thr = norm_inf(&qx);
-        let norm_ax_for_thr = norm_inf(&ax);
-        let norm_b_for_thr = norm_inf(&b_ext);
-        // dfeas 分母: max(||Qx||, ||c||, ||A^T y||)
-        let dfeas_denom = norm_qx_for_thr.max(norm_c_orig_for_thr).max(norm_aty_for_thr);
-        // pfeas 分母: max(||Ax||, ||b||)
-        let pfeas_denom = norm_ax_for_thr.max(norm_b_for_thr);
-        // nr_d_orig の閾値計算用 (scaled 空間 .max(1.0) を維持、目安)。
-        let norm_c = norm_inf(&problem.c).max(1.0);
-        let norm_b = norm_inf(&b_ext).max(1.0);
+        //
+        // bench (`compute_pfeas_normalized` / `compute_dfeas_componentwise`) と同型の
+        // **per-row componentwise relative** で評価する:
+        //   primal: max_i |r_p[i]| / (1 + |ax[i]| + |b_ext[i]|)
+        //   dual:   max_j |r_d[j]| / (1 + |qx[j]| + |c[j]| + |aty[j]|)
+        //
+        // 旧実装は OSQP 全体正規化 `||r_p||_∞ / (1 + max(||ax||, ||b||))` (= pfeas_thr)
+        // を使い、`||b||` が大きい問題 (QPCBOEI2: ‖b_ext‖≈1e4) で threshold が
+        // user_eps の数千倍緩み、unscale 後の元空間 componentwise が user_eps に
+        // 届かない (bench で PFEAS_FAIL) 事例が出ていた。bench は per-row 判定なので
+        // IPM 終了条件も per-row に揃えれば、scaled→orig の (1+|ax_i|+|b_i|) 正規化
+        // 因子は ax_i, b_i が同じスケール (Ruiz は同 row を同係数で scale) なので
+        // 比例打ち消し → ほぼ scaling 不変。`nr_d_rel_orig` (旧 global OSQP, 名前と
+        // 内容が乖離) も廃して same-form per-row に統一する。
         let eps = options.ipm_eps();
-
-        // 原空間双対残差: r_d_orig[j] = r_d_scaled[j] / (c · d[j])
-        // スケール済み残差だけで収束宣言すると真の最適でない basin で止まる（UBH1 obj=2.12 事例）
-        let nr_d_orig = if let Some(sc) = scaler {
+        let nr_p_rel = {
             let mut m = 0.0_f64;
-            let limit = r_d.len().min(sc.d.len());
-            for j in 0..limit {
-                let scale = sc.c * sc.d[j];
-                if scale.abs() > f64::MIN_POSITIVE {
-                    m = m.max((r_d[j] / scale).abs());
-                }
+            for i in 0..m_ext {
+                let denom_i = 1.0 + ax[i].abs() + b_ext[i].abs();
+                let rel_i = r_p[i].abs() / denom_i;
+                if rel_i > m { m = rel_i; }
             }
             m
-        } else {
-            nr_d
         };
-        let norm_c_orig = orig_problem
-            .map(|op| norm_inf(&op.c))
-            .unwrap_or(norm_c)
-            .max(1.0);
+        let nr_d_rel = {
+            let mut m = 0.0_f64;
+            for j in 0..n {
+                let denom_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs();
+                let rel_j = r_d[j].abs() / denom_j;
+                if rel_j > m { m = rel_j; }
+            }
+            m
+        };
 
-        // OSQP 流の全体相対化 dfeas:
-        //   scaler=Some の場合は元空間 (r_d / (c·d[j])) で `||r_d_orig||_∞ / scale_orig`
-        //   scaler=None の場合は scaled 空間そのままの相対値
-        // どちらの空間で評価しているかは Optimal_main の eps と整合させて呼び出し側で
-        // 解釈する (eps_orig は scaler=Some なら orig 空間、None なら scaled 空間 eps)。
-        let nr_d_rel_orig = if let Some(sc) = scaler {
-            let mut max_r = 0.0_f64;
-            let mut max_qx = 0.0_f64;
-            let mut max_c = 0.0_f64;
-            let mut max_aty = 0.0_f64;
-            for j in 0..n {
-                let scale_unscale = sc.c * sc.d[j];
-                if scale_unscale.abs() < f64::MIN_POSITIVE {
-                    continue;
-                }
-                max_r = max_r.max((r_d[j] / scale_unscale).abs());
-                max_qx = max_qx.max((qx[j] / scale_unscale).abs());
-                max_c = max_c.max((problem.c[j] / scale_unscale).abs());
-                max_aty = max_aty.max((aty[j] / scale_unscale).abs());
-            }
-            max_r / (1.0 + max_qx.max(max_c).max(max_aty))
-        } else {
-            let mut max_r = 0.0_f64;
-            let mut max_qx = 0.0_f64;
-            let mut max_c = 0.0_f64;
-            let mut max_aty = 0.0_f64;
-            for j in 0..n {
-                max_r = max_r.max(r_d[j].abs());
-                max_qx = max_qx.max(qx[j].abs());
-                max_c = max_c.max(problem.c[j].abs());
-                max_aty = max_aty.max(aty[j].abs());
-            }
-            max_r / (1.0 + max_qx.max(max_c).max(max_aty))
-        };
+        // [DIAG] Optimal_main 条件を全て出力 (env=IPPMM_OPT_DIAG=1)
+        if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
+            eprintln!(
+                "IPPMM_OPT iter={} pf_rel={:.3e}/eps={:.3e}{} df_rel={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
+                iter,
+                nr_p_rel, eps, if nr_p_rel < eps { "✓" } else { "✗" },
+                nr_d_rel, eps, if nr_d_rel < eps { "✓" } else { "✗" },
+                mu, eps, if mu < eps { "✓" } else { "✗" },
+                rel_gap, DUALITY_GAP_TOL, if rel_gap.abs() < DUALITY_GAP_TOL { "✓" } else { "✗" },
+            );
+        }
 
         // rel_gap / DUALITY_GAP_TOL は上のブロックで計算済（best-so-far 更新前）。
         // UBH1 (||x||≈1459, c=0, Q rank-deficient) で r_stat=2e-6・mu=1e-30 なのに
         // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（Phase A 検証）。
         // 3 族独立 solver (PIQP/Clarabel/OSQP) で UBH1 真値 1.116 を確認済。
-
-        // OSQP 形式の閾値 (bench/v2 と整合)
-        let pfeas_thr = eps * (1.0 + pfeas_denom);
-        let dfeas_thr = eps * (1.0 + dfeas_denom);
-        // [DIAG] Optimal_main 条件を全て出力 (env=IPPMM_OPT_DIAG=1)
-        if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
-            eprintln!(
-                "IPPMM_OPT iter={} pf={:.3e}/thr={:.3e}{} nrd={:.3e}/thr={:.3e}{} nrd_orig={:.3e}/thr={:.3e}{} nrd_rel_orig={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
-                iter,
-                nr_p, pfeas_thr, if nr_p < pfeas_thr { "✓" } else { "✗" },
-                nr_d, dfeas_thr, if nr_d < dfeas_thr { "✓" } else { "✗" },
-                nr_d_orig, eps_orig * (1.0 + norm_c_orig), if nr_d_orig < eps_orig * (1.0 + norm_c_orig) { "✓" } else { "✗" },
-                nr_d_rel_orig, eps_orig, if nr_d_rel_orig < eps_orig { "✓" } else { "✗" },
-                mu, eps, if mu < eps { "✓" } else { "✗" },
-                rel_gap, DUALITY_GAP_TOL, if rel_gap.abs() < DUALITY_GAP_TOL { "✓" } else { "✗" },
-            );
-        }
-        if nr_d < dfeas_thr
-            && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
-            && nr_d_rel_orig < eps_orig
-            && nr_p < pfeas_thr
+        if nr_p_rel < eps
+            && nr_d_rel < eps
             && mu < eps
             && rel_gap.abs() < DUALITY_GAP_TOL
         {
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                 eprintln!(
-                    "IPPMM_EXIT iter={} path=Optimal_main nr_d_orig={:.3e} rel_gap={:.3e}",
-                    iter, nr_d_orig, rel_gap
+                    "IPPMM_EXIT iter={} path=Optimal_main pf_rel={:.3e} df_rel={:.3e} rel_gap={:.3e}",
+                    iter, nr_p_rel, nr_d_rel, rel_gap
                 );
             }
             status = Some(SolveStatus::Optimal);
@@ -733,70 +685,19 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // μ が reg_limit 以下で残差も eps 水準 → SuboptimalSolution
-        // PARAM(reg_limit*1e-2): 根拠=経験値(μがreg_limitの1/100以下=正則化下限の100倍収束で実質停滞とみなす。論文記載なし) | 要検証
-        let thr_d = (eps * (1.0 + norm_c)).max(reg_limit * 10.0);
-        let thr_p = (eps * (1.0 + norm_b)).max(reg_limit * 10.0);
-        if mu < reg_limit * 1e-2 && nr_d < thr_d && nr_p < thr_p && rel_gap.abs() < DUALITY_GAP_TOL {
-            // 原空間 pfeas を unscale 経由で再計算し、scaled 空間収束だけで誤って
-            // Optimal 昇格しない second gate (Clarabel 方式)。
-            if let (Some(sc), Some(orig)) = (scaler, orig_problem) {
-                let m_orig_check = orig.b.len();
-                let n_orig = orig.num_vars;
-                let mut ax_orig = vec![0.0_f64; m_orig_check];
-                if m_orig_check > 0 {
-                    for (j, (&dj, &xj)) in sc.d[..n_orig].iter().zip(x[..n_orig].iter()).enumerate() {
-                        let dj_xj = dj * xj;
-                        for ptr in orig.a.col_ptr[j]..orig.a.col_ptr[j + 1] {
-                            let row = orig.a.row_ind[ptr];
-                            if row < m_orig_check {
-                                ax_orig[row] += orig.a.values[ptr] * dj_xj;
-                            }
-                        }
-                    }
-                }
-                let pfeas_orig = if m_orig_check == 0 {
-                    0.0
-                } else {
-                    ax_orig
-                        .iter()
-                        .zip(orig.b.iter())
-                        .zip(orig.constraint_types.iter())
-                        .map(|((&axi, &bi), ct)| match ct {
-                            ConstraintType::Eq => (axi - bi).abs(),
-                            ConstraintType::Ge => (bi - axi).max(0.0),
-                            _ => (axi - bi).max(0.0),
-                        })
-                        .fold(0.0_f64, f64::max)
-                };
-                // OSQP 形式: max(||Ax||, ||b||) で正規化 (b≈0 でも適切な閾値)
-                let norm_ax_orig: f64 = ax_orig.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
-                let norm_b_orig = norm_inf(&orig.b);
-                let pfeas_thr_orig = eps_orig * (1.0 + norm_ax_orig.max(norm_b_orig));
-                // 原空間 pfeas / dfeas / 成分相対 dfeas / mu の全てが eps を満たせば Optimal。
-                if pfeas_orig < pfeas_thr_orig
-                    && nr_d_orig < eps_orig * (1.0 + norm_c_orig)
-                    && nr_d_rel_orig < eps_orig
-                    && mu < eps_orig
-                {
-                    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "IPPMM_EXIT iter={} path=Optimal_orig_recheck pfeas_orig={:.3e} nr_d_orig={:.3e}",
-                            iter, pfeas_orig, nr_d_orig
-                        );
-                    }
-                    status = Some(SolveStatus::Optimal);
-                    final_iter = iter;
-                    break;
-                }
-            }
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("IPPMM_EXIT iter={} path=Suboptimal_mu_floor mu={:.3e} thr_d={:.3e} thr_p={:.3e}", iter, mu, thr_d, thr_p);
-            }
-            status = Some(SolveStatus::SuboptimalSolution);
-            final_iter = iter;
-            break;
-        }
+        // 旧 Suboptimal_mu_floor / Optimal_orig_recheck path は削除した。理由:
+        //
+        // 1. Optimal_orig_recheck (旧 743 行) の orig 空間再計算は OSQP 全体正規化で
+        //    ill-scaled 問題で permissive すぎた (`pfeas_thr_orig = eps × (1+denom)`)。
+        //    新 per-row componentwise check (`nr_p_rel < eps`) は Ruiz 行スケーリングに
+        //    対してほぼ不変なので、orig 空間再計算は冗長。
+        //
+        // 2. Suboptimal_mu_floor の `nr_p < thr_p` (= max(eps×(1+norm_b), reg_limit×10))
+        //    も OSQP 全体正規化で同じ permissive 問題を抱えていた。「mu floor で停滞 +
+        //    componentwise が eps を満たす」 → 上の Optimal_main で Optimal を出す。
+        //    満たさず純粋に停滞しているケースは、後段の alpha_stall / residual_stall
+        //    検出 (eps スケール閾値) で SuboptimalSolution に降格される。同じ目的を
+        //    達成するゲートが二重に存在していたのを 1 つに統一した。
 
         // ── PMM 改善判定（前反復の残差と比較）──────────────────────
         // Algorithm PEU: primal/dual改善を独立に判定
@@ -1671,7 +1572,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
+        let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T1: status");
         close(result.solution[0], 0.5, "IPPMM-T1: x[0]");
         close(result.solution[1], 0.5, "IPPMM-T1: x[1]");
@@ -1690,7 +1591,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
+        let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T2: status");
         close(result.solution[0], 3.0, "IPPMM-T2: x[0]");
         close(result.solution[1], 4.0, "IPPMM-T2: x[1]");
@@ -1716,7 +1617,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
+        let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T3: status");
         close(result.solution[0], 0.5, "IPPMM-T3: x[0]");
         close(result.solution[1], 0.5, "IPPMM-T3: x[1]");
@@ -1735,7 +1636,7 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let result = solve_ippmm_inner(&problem, &default_opts(), None, None, default_opts().ipm_eps());
+        let result = solve_ippmm_inner(&problem, &default_opts(), default_opts().ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "IPPMM-T4: status");
         close(result.solution[0], 1.0, "IPPMM-T4: x[0]");
         close(result.solution[1], 1.0, "IPPMM-T4: x[1]");
@@ -1758,7 +1659,7 @@ mod tests {
             use_ruiz_scaling: false,
             ..Default::default()
         };
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
             "IPPMM-T5: expected Timeout or Optimal, got {:?}",
@@ -1785,7 +1686,7 @@ mod tests {
             ..Default::default()
         };
         let start = std::time::Instant::now();
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
         assert_eq!(result.status, SolveStatus::Optimal, "conv-eq: status");
         close(result.solution[0], 0.5, "conv-eq: x[0]");
@@ -1811,7 +1712,7 @@ mod tests {
             ..Default::default()
         };
         let start = std::time::Instant::now();
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
         assert_eq!(result.status, SolveStatus::Optimal, "conv-le: status");
         close(result.solution[0], 0.5, "conv-le: x[0]");
@@ -1837,7 +1738,7 @@ mod tests {
             ..Default::default()
         };
         let start = std::time::Instant::now();
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
         assert_eq!(result.status, SolveStatus::Optimal, "ge-defensive: status");
         close(result.solution[0], 0.5, "ge-defensive: x[0]");
@@ -1861,7 +1762,7 @@ mod tests {
             use_ruiz_scaling: false,
             ..Default::default()
         };
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "empty-constraints: status");
         close(result.solution[0], 1.0, "empty-constraints: x[0]");
         close(result.solution[1], 1.0, "empty-constraints: x[1]");
@@ -1890,7 +1791,7 @@ mod tests {
             use_ruiz_scaling: false,
             ..Default::default()
         };
-        let result = solve_ippmm_inner(&problem, &opts, None, None, opts.ipm_eps());
+        let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
         assert_eq!(result.status, SolveStatus::Optimal, "multi-eq: status");
         close(result.solution[0], 1.0 / 3.0, "multi-eq: x[0]");
         close(result.solution[1], 2.0 / 3.0, "multi-eq: x[1]");

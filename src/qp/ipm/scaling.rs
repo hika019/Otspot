@@ -63,14 +63,14 @@ fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
 
 /// Ruiz スケーリングラッパー（solve_qp_ipm / solve_qp_ippmm の共通処理）
 ///
-/// inner_solver は `solve_qp_ipm_inner` または `solve_ippmm_inner` を渡す。
+/// inner_solver は `solve_ippmm_inner` を渡す。
 pub(crate) fn solve_with_ruiz_scaling<F>(
     problem: &QpProblem,
     options: &SolverOptions,
     inner_solver: F,
 ) -> SolverResult
 where
-    F: Fn(&QpProblem, &SolverOptions, Option<&RuizScaler>, Option<&QpProblem>, f64) -> SolverResult,
+    F: Fn(&QpProblem, &SolverOptions, f64) -> SolverResult,
 {
     if options.use_ruiz_scaling && problem.num_vars > 0 {
         let n = problem.num_vars;
@@ -98,8 +98,6 @@ where
             let scaled_result = inner_solver(
                 &scaled_problem,
                 &adjusted_opts,
-                Some(&scaler),
-                Some(problem),
                 options.ipm_eps(),
             );
             let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
@@ -119,7 +117,7 @@ where
 
     // 非 Ruiz パス: SuboptimalSolution を原空間で再検証
     post_verify_solution(
-        inner_solver(problem, options, None, None, options.ipm_eps()),
+        inner_solver(problem, options, options.ipm_eps()),
         problem,
         options.ipm_eps(),
     )
