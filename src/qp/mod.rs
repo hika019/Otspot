@@ -1824,10 +1824,34 @@ fn compute_bound_contrib(bounds: &[(f64, f64)], bound_duals: &[f64], n: usize) -
     contrib
 }
 
+/// `build_aat_upper_csc` の BTreeMap ノードあたり実測バイト数 (key 16B + value 8B
+/// + ノードオーバーヘッド)。memory budget 推定の係数。
+const AAT_BUILD_BYTES_PER_ENTRY: u128 = 80;
+
 /// A * A^T (m×m, 上三角 CSC) を構築する。LDL 分解前提で対角に ε 正則化を加える。
 /// rank-deficient な A (重複制約等) でも factorize 可能になる。
+///
+/// メモリ予算超過時 (LASSO_150_S3 のような nnz(AAT) ≈ m²/2 = 117M 級で 9 GB BTreeMap
+/// が必要な問題) は `None` を返し、上位 (refine_dual_lsq 等) は no-op で skip する。
+/// 旧実装は `LSQ_DUAL_SIZE_LIMIT=50000` の n+m guard だけで密度を考慮せず、LASSO 系で
+/// 11 GB peak の RSS spike を起こしていた (handover 2026-05-09)。
 pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<CscMatrix> {
     use std::collections::BTreeMap;
+    // nnz(AAT_upper) <= min(m*(m+1)/2, Σ_k c_k(c_k+1)/2)。BTreeMap 構築時に各 unique
+    // entry がノード (~80 bytes) を確保するため、上限 × 80B が memory_budget を超えるなら
+    // 構築せず skip する。estimate は upper bound で実 nnz は更に小さくなりうるが、
+    // 上限で予算を超える時点で安全側に倒す。
+    let m_u = m as u128;
+    let mut col_pair_sum: u128 = 0;
+    for k in 0..n {
+        let c_k = (a.col_ptr[k + 1] - a.col_ptr[k]) as u128;
+        col_pair_sum = col_pair_sum.saturating_add(c_k.saturating_mul(c_k + 1) / 2);
+    }
+    let nnz_upper_bound = (m_u.saturating_mul(m_u + 1) / 2).min(col_pair_sum);
+    let bytes_estimate = nnz_upper_bound.saturating_mul(AAT_BUILD_BYTES_PER_ENTRY);
+    if bytes_estimate > crate::linalg::kkt_solver::memory_budget_bytes() as u128 {
+        return None;
+    }
     let mut acc: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for k in 0..n {
         let start = a.col_ptr[k];

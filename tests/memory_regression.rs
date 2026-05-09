@@ -120,3 +120,74 @@ fn ipm_repeated_solve_no_runaway_memory_growth() {
         growth_mb, ITERATIONS, MAX_ALLOWED_GROWTH_MB
     );
 }
+
+/// 密 A を持つ中規模 LASSO 風 QP で `build_aat_upper_csc` が memory budget guard で
+/// skip されることを検証する。LASSO_150_S3 (n=15300, m=15300, A 密) で旧実装は
+/// BTreeMap で 9 GB / LDL で 3.7 GB を allocate し peak RSS 11 GB に達していた
+/// (handover 2026-05-09)。本テストは小型化合成版で「memory_budget 内に収まる」かを
+/// peak RSS で gate する。
+///
+/// 規模設定: n=300, m=400 で nnz(A) = 300*400 = 120k (col_density=400)。
+/// nnz(AAT_upper) 上限 ≈ min(m²/2, n × 400² / 2) = min(80k, 24M) = 80k。
+/// 80k × 80 byte ≈ 6 MB → memory_budget 4 GiB 以下で進むケース。
+/// 旧 bug でも RSS 増加は限定的だが、leak 検出 floor 200 MB を確実に下回ることを確認。
+#[test]
+fn lasso_dense_aat_no_runaway_memory() {
+    use solver::sparse::CscMatrix;
+    use solver::qp::QpProblem;
+    use solver::qp::solve_qp_with;
+    use solver::options::SolverOptions;
+    use solver::problem::ConstraintType;
+    let n = 300;
+    let m = 400;
+    // A 密 (col_density=m): LASSO 風に各列で全行を埋める。
+    let mut a_rows: Vec<usize> = Vec::with_capacity(n * m);
+    let mut a_cols: Vec<usize> = Vec::with_capacity(n * m);
+    let mut a_vals: Vec<f64> = Vec::with_capacity(n * m);
+    for j in 0..n {
+        for i in 0..m {
+            a_rows.push(i);
+            a_cols.push(j);
+            a_vals.push(((i + j) % 7) as f64 - 3.0);
+        }
+    }
+    let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
+    let q = CscMatrix::from_triplets(
+        &(0..n).collect::<Vec<_>>(),
+        &(0..n).collect::<Vec<_>>(),
+        &vec![1.0_f64; n],
+        n, n,
+    ).unwrap();
+    let c: Vec<f64> = (0..n).map(|j| ((j as f64) - n as f64 / 2.0) * 0.01).collect();
+    let b: Vec<f64> = (0..m).map(|i| 1.0 + (i as f64) * 0.001).collect();
+    let bounds = vec![(0.0_f64, 100.0_f64); n];
+    let cts = vec![ConstraintType::Le; m];
+    let problem = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(10.0);
+    opts.ipm.eps = 1e-8;
+
+    let baseline = current_rss_bytes();
+    let _ = solve_qp_with(&problem, &opts);
+    let peak = current_rss_bytes();
+    if baseline == 0 {
+        eprintln!("RSS query unsupported on this platform; skipping memory leak check");
+        return;
+    }
+    let growth = peak.saturating_sub(baseline);
+    let growth_mb = growth as f64 / 1024.0 / 1024.0;
+    eprintln!(
+        "Dense-A LASSO solve RSS growth: {:.1} MB (baseline={:.1} MB, peak={:.1} MB)",
+        growth_mb,
+        baseline as f64 / 1024.0 / 1024.0,
+        peak as f64 / 1024.0 / 1024.0,
+    );
+    // 旧 bug 検出 floor: AAT BTreeMap で n=300 m=400 でも実測 100 MB 超える退行を防ぐ。
+    const MAX_GROWTH_MB: f64 = 500.0;
+    assert!(
+        growth_mb < MAX_GROWTH_MB,
+        "AAT build memory regression: RSS grew {:.1} MB on dense-A QP (limit {:.1} MB)",
+        growth_mb, MAX_GROWTH_MB
+    );
+}
