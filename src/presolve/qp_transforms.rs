@@ -1420,8 +1420,9 @@ pub fn run_qp_presolve_phase1(
     // Ruiz scaling が有効な場合は skip する: Ruiz は反復的に行・列を均衡化するので
     // single-pass の large_coeff_rescaling は冗長。さらに直列適用すると合成 amp が
     // 制御不能 (QPILOTNO 行 14: LCS σ=1e-3 × Ruiz e=1.7e-4 = 合成 amp 5.85e6) になり、
-    // unscale 後 user_eps=1e-6 を達成できない。Ruiz 単独なら e_floor=1e-4 で amp ≤ 1e4
-    // に収まる。Ruiz 無効時は Phase1 LCS が安全網として機能する (現状維持)。
+    // unscale 後 user_eps=1e-6 を達成できない。Ruiz 単独で Step1-3 を収束まで回して
+    // 完全 equilibration し、増幅率は IPM 側の adjusted_eps=max(eps/amp,EPS_FLOOR) で
+    // 吸収する。Ruiz 無効時は Phase1 LCS が安全網として機能する (現状維持)。
     // ==================================================================
     let large_coeff_row_scales = {
         let mut a_mut = reduced.a.clone();
@@ -1467,7 +1468,7 @@ pub fn run_qp_presolve_phase1(
         let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
         let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
         let mut scaler = RuizScaler::new(n_new, m_new);
-        scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals);
+        scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals, opts.ipm_eps());
         let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
             &reduced.q, &reduced.a, &reduced.c, &reduced.b, &reduced.bounds
         );

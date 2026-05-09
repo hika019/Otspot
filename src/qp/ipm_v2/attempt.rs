@@ -19,10 +19,25 @@ use crate::presolve::QpPresolveResult;
 use super::outcome::IpmOutcome;
 use std::time::Instant;
 
-/// eps 事前調整の下限 (double 精度限界近傍)
-const EPS_FLOOR: f64 = 1e-15;
-/// 1 attempt が消費してよい時間の最低割合 (deadline / 残 attempt 数 が これ以下なら break)
-const MIN_TIME_PER_ATTEMPT: f64 = 0.5;
+/// 事前調整した IPM target eps の物理下限 (= `RuizScaler::IPM_F64_ACHIEVABLE_EPS`)。
+///
+/// `user_eps / tighten` が IPM の f64 LDL achievable backward error を下回ると IPM は
+/// 達成不能な目標を強制され、誤った収束判定や stagnation を引き起こす。`ruiz.rs` で
+/// 定義済の同一物理量を参照することで、Ruiz floor 導出 / IPM target floor が同じ
+/// f64 limit の異なる適用面であることを明示する。
+
+/// 1 attempt あたりの IPM 反復上限。
+///
+/// **役割:** marginal 問題 (pf が user_eps 周辺で slow progress) で attempt 0 が deadline
+/// 一杯まで僅かに改善し続け、attempts 1+ (Ruiz off / eps_tighten) の救済枠を奪うのを防ぐ。
+/// 実測: cap なしで YAO が pf=1.1e-6 で停滞 → PFEAS_FAIL (cap=500 では attempts 1+ が
+/// eps_tighten で救済して PASS)。
+///
+/// **値の選定理由 (empirical):** Mehrotra IPM の典型反復数は 30-200 (well-conditioned
+/// から hard 問題まで)。500 は 2-3x の安全側で、自己終了する問題は cap に届く前に抜け、
+/// stall 系問題のみ cap で止められる。typical 1 反復 ~10ms × 500 = 5s/attempt × 6 attempts
+/// = 30s で 1000s deadline 内に余裕。原則ベース derivation がない empirical safety net。
+const MAX_ITER_PER_ATTEMPT: usize = 500;
 
 /// IpmOutcome を返す runner 関数の型 (= run_ipm = IP-PMM のみ)
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
@@ -284,24 +299,20 @@ fn solve_qp_v2_with_runner(
         v
     };
 
-    for (idx, &(use_ruiz, tighten)) in attempts.iter().enumerate() {
+    for &(use_ruiz, tighten) in attempts.iter() {
+        // total_deadline は hard cap として温存。past なら以降の attempt を即停止。
         if let Some(d) = total_deadline {
-            let now = Instant::now();
-            if now >= d { break; }
-            let remaining = d.saturating_duration_since(now);
-            if idx > 0 && remaining.as_secs_f64() < MIN_TIME_PER_ATTEMPT { break; }
-            // attempt 0 は full deadline (HS21 で timeshare すると不完全解で停止)。
-            // attempt 1+ は残り時間を残 attempt 数で均等分配。
-            opts.deadline = if idx == 0 {
-                total_deadline
-            } else {
-                let remaining_attempts = (attempts.len() - idx) as u32;
-                Some(now + remaining / remaining_attempts.max(1))
-            };
-            opts.timeout_secs = None;
+            if Instant::now() >= d { break; }
         }
+        // 旧実装の `remaining / 残 attempt 数` wall-clock 分配は CPU 競合下で非決定的
+        // だったため撤廃。各 attempt の予算は IPM 反復上限 `MAX_ITER_PER_ATTEMPT` で
+        // 確定的に与える。`total_deadline` は runaway 問題向けの outer hard cap として
+        // のみ機能する。
+        opts.deadline = total_deadline;
+        opts.timeout_secs = None;
+        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
         opts.use_ruiz_scaling = use_ruiz;
-        opts.ipm.eps = (user_eps / tighten).max(EPS_FLOOR);
+        opts.ipm.eps = (user_eps / tighten).max(crate::linalg::ruiz::RuizScaler::IPM_F64_ACHIEVABLE_EPS);
 
         let outcome = runner(problem, &presolve_result, &opts);
 

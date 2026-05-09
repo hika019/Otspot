@@ -13,8 +13,11 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// eps 事前調整の下限（数値精度限界）
-pub(crate) const EPS_FLOOR: f64 = 1e-12;
+/// 事前調整した IPM target eps の物理下限 (= `RuizScaler::IPM_F64_ACHIEVABLE_EPS`)。
+///
+/// `user_eps / amplification` が IPM の f64 LDL achievable backward error を下回ると
+/// IPM target が unreachable になり収束判定が破綻する。`ruiz.rs` の同一物理量を参照。
+pub(crate) const EPS_FLOOR: f64 = crate::linalg::ruiz::RuizScaler::IPM_F64_ACHIEVABLE_EPS;
 /// Suboptimal→Optimal 昇格ゲートの双対ギャップ閾値。
 /// 内部収束判定 (Optimal_main, 1e-3) より緩く post-hoc promotion 用途。
 /// 真の Optimal の双対ギャップは通常 1% 以下、UBH1 型の偽 Optimal は ~28% で弾く。
@@ -79,7 +82,7 @@ where
         let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub, options.ipm_eps());
 
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
@@ -337,16 +340,20 @@ pub(crate) fn check_dfeas_status_relative(
 /// Ruiz スケーリングによる残差増幅率を計算する。
 ///
 /// pfeas 増幅: 1/e_min、dfeas 増幅: 1/(c * d_min) の最大を返す。
+///
+/// e_min/d_min は Ruiz の `scale_floor_for_eps(user_eps)` で物理下限が保証されるため
+/// 通常 0 になり得ないが、Ruiz 不適用や数値破綻時の division by zero 防護として
+/// `f64::MIN_POSITIVE` で抑える。
 pub(crate) fn compute_amplification(scaler: &RuizScaler) -> f64 {
     let e_min = if scaler.e.is_empty() {
         1.0
     } else {
-        scaler.e.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+        scaler.e.iter().cloned().fold(f64::INFINITY, f64::min).max(f64::MIN_POSITIVE)
     };
     let d_min = if scaler.d.is_empty() {
         1.0
     } else {
-        scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(1e-12)
+        scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(f64::MIN_POSITIVE)
     };
     (1.0 / e_min).max(1.0 / (scaler.c * d_min))
 }

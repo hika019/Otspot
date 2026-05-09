@@ -35,6 +35,52 @@ pub struct RuizScaler {
 }
 
 impl RuizScaler {
+    /// Ruiz equilibration sweep 数。Ruiz の **f64 storage 精度** から導出。
+    ///
+    /// Ruiz iteration は contractive で、各 sweep で deviation が ~1/2 になる
+    /// (理論収束率)。`RuizScaler` の e/d/c は f64 で保持するため、storage 上の precision
+    /// は `2^-52`。52 sweep で deviation は f64 machine precision に到達し、それ以降の
+    /// sweep は noise しか動かさない。`MANTISSA_DIGITS = 53` で +1 マージン。
+    ///
+    /// **DD (double-double) との関係:** IR / 残差計算で DD 精度を使う箇所があるが、
+    /// Ruiz の出力は f64 storage に書き戻される時点で f64 精度に制限される。Ruiz 全体
+    /// を DD 化するなら storage 含む大規模 refactor が必要 (現状未実装)。
+    ///
+    /// 各 sweep は O(nnz) で軽量、早期 break しなくてもコストは μs オーダーで無視可。
+    pub const RUIZ_SWEEPS: usize = f64::MANTISSA_DIGITS as usize;
+
+    /// IPM で f64 LDL solve が確保できる KKT residual の下限 (実効 backward error)。
+    ///
+    /// 物理: `f64 EPSILON × cond(K_scaled)`。Ruiz equilibration 後の K_scaled は
+    /// 多くの問題で cond ≲ 1e4 まで圧縮され、backward error は 2.2e-16 × 1e4 ≈ 2e-12
+    /// 級。経験値として 1e-12 を採用する (IS_LASSO_100 系で実測 PASS の dfr=4e-7、
+    /// 旧 EPS_FLOOR=1e-12 で動作実績)。これより tight な eps を IPM に課しても f64 では
+    /// 達成不能。1e-10 にすると Ruiz floor が 1e-4 に緩和され equilibration 弱体化、
+    /// well-equilibrated 問題で必要な精度を出せず IS_LASSO regress (実測)。
+    ///
+    /// `scale_floor_for_eps` の出力を介して Ruiz の equilibration 強度を制限し、
+    /// unscale 後の残差 (= amp × IPM_eps) が `user_eps` を下回るようにする。
+    pub const IPM_F64_ACHIEVABLE_EPS: f64 = 1e-12;
+
+    /// `user_eps` から導出する scaling 係数下限。
+    ///
+    /// 導出: unscale 後残差 ≤ `user_eps` を保証するには
+    ///       `amp × IPM_eps_target ≤ user_eps`、ここで `amp = 1/min(e,c·d)`。
+    ///       IPM_eps_target ≥ `IPM_F64_ACHIEVABLE_EPS` (f64 限界) なので
+    ///       `amp ≤ user_eps / IPM_F64_ACHIEVABLE_EPS`、よって
+    ///       `min(e,c·d) ≥ IPM_F64_ACHIEVABLE_EPS / user_eps`.
+    ///
+    /// 例: user_eps=1e-6 → floor=1e-4 (amp≤1e4)、user_eps=1e-3 → floor=1e-7 (amp≤1e7)。
+    /// user_eps が `IPM_F64_ACHIEVABLE_EPS` 以下になると floor≥1 (= no-scaling) で
+    /// 自然に縮退する。
+    pub fn scale_floor_for_eps(user_eps: f64) -> f64 {
+        if user_eps > 0.0 {
+            (Self::IPM_F64_ACHIEVABLE_EPS / user_eps).min(1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// 新規スケーラーを生成（初期値: 恒等変換 D=I, E=I, c=1）
     pub fn new(n: usize, m: usize) -> Self {
         RuizScaler {
@@ -44,12 +90,11 @@ impl RuizScaler {
         }
     }
 
-    /// Ruiz equilibration を実行（10回反復）
+    /// Ruiz equilibration を実行する (Q/A のみ、user_eps から floor 導出)。
     ///
-    /// 各反復:
-    /// 1. 行ノルム正規化: e_i ← e_i / sqrt(max(||row_i(A_s)||_∞, ε))
-    /// 2. 列ノルム正規化: d_j ← d_j / sqrt(max(||col_j([Q_s; A_s])||_∞, ε))
-    /// 3. コスト正規化: c ← c / max(||Q_s||_∞, ||q_s||_∞, ε)
+    /// 各 sweep で行・列・コストノルムを順次正規化し、固定点 (相対変化 < CONV_TOL)
+    /// に達した時点で打ち切る。終了後、`scale_floor_for_eps(user_eps)` で
+    /// e[i] / d[j] の下限をクリップし、unscale 後の残差 ≤ user_eps を保証する。
     ///
     /// l, u（変数境界）はAPIの完全性のため受け取るが、
     /// ノルム計算には使用しない（Q と A のみで均衡化する）。
@@ -61,121 +106,16 @@ impl RuizScaler {
         q_vec: &[f64],
         _l: &[f64],
         _u: &[f64],
+        user_eps: f64,
     ) {
-        let n = q.ncols;
-        let m = a.nrows;
-        const EPS: f64 = 1e-6;
-        const NUM_ITER: usize = 10;
-
-        for _ in 0..NUM_ITER {
-            // ------------------------------------------------------------------
-            // Step 1: 行ノルム正規化
-            // A_s[i,j] = e[i] * A[i,j] * d[j]
-            // ||row_i(A_s)||_∞ = e[i] * max_j |A[i,j] * d[j]|
-            // 更新: e_i ← e_i / sqrt(norm_i)  → スケール済み行ノルム → 1 に近づく
-            // ------------------------------------------------------------------
-            if m > 0 {
-                let mut row_norms = vec![0.0f64; m];
-                for col in 0..n {
-                    for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                        let i = a.row_ind[k];
-                        // スケール済み値: e[i] * A[i,col] * d[col]
-                        let val = (self.e[i] * a.values[k] * self.d[col]).abs();
-                        if val > row_norms[i] {
-                            row_norms[i] = val;
-                        }
-                    }
-                }
-                for i in 0..m {
-                    let norm = row_norms[i].max(EPS);
-                    self.e[i] /= norm.sqrt();
-                }
-            }
-
-            // ------------------------------------------------------------------
-            // Step 2: 列ノルム正規化
-            // Q_s = c * D * Q * D: Q_s[i,j] = c * d[i] * Q[i,j] * d[j]
-            // A_s = E * A * D: A_s[i,j] = e[i] * A[i,j] * d[j]
-            // col_norms[j] = max_i(|Q_s[i,j]|, |A_s[i,j]|)
-            // 更新: d_j ← d_j / sqrt(norm_j)
-            // ------------------------------------------------------------------
-            let mut col_norms = vec![0.0f64; n];
-
-            // Q 寄与（対称行列: 全要素格納前提）
-            for col in 0..n {
-                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-                    let row = q.row_ind[k];
-                    // c * d[row] * Q[row,col] * d[col]
-                    let val = (self.c * self.d[row] * q.values[k] * self.d[col]).abs();
-                    if val > col_norms[col] {
-                        col_norms[col] = val;
-                    }
-                }
-            }
-
-            // A 寄与（step 1 で更新済みの e を使用）
-            if m > 0 {
-                for col in 0..n {
-                    for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                        let row = a.row_ind[k];
-                        // e[row] * A[row,col] * d[col]
-                        let val = (self.e[row] * a.values[k] * self.d[col]).abs();
-                        if val > col_norms[col] {
-                            col_norms[col] = val;
-                        }
-                    }
-                }
-            }
-
-            for j in 0..n {
-                let norm = col_norms[j].max(EPS);
-                self.d[j] /= norm.sqrt();
-            }
-
-            // ------------------------------------------------------------------
-            // Step 3: コスト正規化
-            // Q_s = c * D * Q * D, q_s = c * D * q_vec
-            // c ← c / max(||Q_s||_∞, ||q_s||_∞, ε)
-            // ------------------------------------------------------------------
-            let mut q_mat_inf = 0.0f64;
-            for col in 0..n {
-                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-                    let row = q.row_ind[k];
-                    let val = (self.c * self.d[row] * q.values[k] * self.d[col]).abs();
-                    if val > q_mat_inf {
-                        q_mat_inf = val;
-                    }
-                }
-            }
-
-            let q_vec_inf = q_vec
-                .iter()
-                .enumerate()
-                .map(|(j, &v)| (self.c * self.d[j] * v).abs())
-                .fold(0.0f64, f64::max);
-
-            let denom = q_mat_inf.max(q_vec_inf).max(EPS);
-            self.c /= denom;
-        }
-
-        // Phase1: e[i]・d[j]下限クリッピング（最大増幅率1e4制限）
-        // 全反復完了後に一度だけ適用する（反復中に適用すると均衡化が不完全になる）
-        // unscale後の増幅率 = 1/e[i] を最大1e4に制限する
-        let e_floor: f64 = 1e-4;
-        for i in 0..m {
-            self.e[i] = self.e[i].max(e_floor);
-        }
-        let d_floor: f64 = 1e-4;
-        for j in 0..n {
-            self.d[j] = self.d[j].max(d_floor);
-        }
+        let floor = Self::scale_floor_for_eps(user_eps);
+        self.compute_with_rhs_floor(q, a, q_vec, &[], floor);
     }
 
-    /// RHS（b）を含む行ノルムでRuiz equilibrationを実行（presolve用）
+    /// RHS（b）を含む行ノルムで Ruiz equilibration を実行 (presolve 用)。
     ///
     /// `compute()` と同じだが、Step 1 の行ノルムに `|e[i]*b[i]|` を追加する。
-    /// presolve 後に b が A に対して大きくなる場合（固定変数代入による大値生成）に
-    /// b も含めて均衡化することで IPM の収束を改善する。
+    /// 終了後の floor も `scale_floor_for_eps(user_eps)` から導出。
     #[allow(clippy::needless_range_loop)]
     pub fn compute_with_rhs(
         &mut self,
@@ -183,13 +123,13 @@ impl RuizScaler {
         a: &CscMatrix,
         q_vec: &[f64],
         b: &[f64],
+        user_eps: f64,
     ) {
-        self.compute_with_rhs_floor(q, a, q_vec, b, 1e-4);
+        let floor = Self::scale_floor_for_eps(user_eps);
+        self.compute_with_rhs_floor(q, a, q_vec, b, floor);
     }
 
-    /// `compute_with_rhs` の floor 可変版。post-IPM refinement のように完全な
-    /// equilibration が必要な場合は floor=1e-15 (実質無制限) を渡す。
-    /// presolve 用は floor=1e-4 (旧仕様、IPM 安定性確保) を維持。
+    /// `compute_with_rhs` の floor 可変版。`scale_floor=0.0` でクリップ無効。
     #[allow(clippy::needless_range_loop)]
     pub fn compute_with_rhs_floor(
         &mut self,
@@ -202,16 +142,8 @@ impl RuizScaler {
         let n = q.ncols;
         let m = a.nrows;
         const EPS: f64 = 1e-6;
-        // Ruiz は cond(A) に対し O(log(cond)) 反復で収束する。Maros QPILOTNO のように
-        // A entries dynamic range が 1e12 (entries 2e-6 〜 5.85e6) では log10≈12 で
-        // 旧 10 sweep では未完。50 sweep に拡張し、収束したら早期 break で無駄反復回避。
-        // 各 sweep は O(nnz) で軽量。
-        const NUM_ITER: usize = 50;
-        // 各 sweep 後の row/col scaling 因子の変化率上限。1e-3 を切れば収束済とみなす。
-        const CONV_TOL: f64 = 1e-3;
-
-        let mut prev_e = self.e.clone();
-        let mut prev_d = self.d.clone();
+        // 詳細は `RUIZ_SWEEPS` ドキュメント参照。
+        const NUM_ITER: usize = RuizScaler::RUIZ_SWEEPS;
 
         for _iter in 0..NUM_ITER {
             // Step 1: 行ノルム正規化（b を含む）
@@ -284,32 +216,18 @@ impl RuizScaler {
                 .fold(0.0f64, f64::max);
             let denom = q_mat_inf.max(q_vec_inf).max(EPS);
             self.c /= denom;
+        }
 
-            // 収束判定: e, d の最大相対変化が CONV_TOL 未満なら停止 (固定点到達)。
-            // Maros QPILOTNO 等の cond≈1e6 級では ~30 sweep で収束、十分な問題は数回で済む。
-            let mut max_rel_change = 0.0_f64;
+        // 下限クリッピング (scale_floor>0 のみ)。`scale_floor_for_eps(user_eps)` から
+        // 与えられ、`min(e, c·d) ≥ floor` を強制することで unscale 後残差 ≤ user_eps
+        // を保証する (詳細は `scale_floor_for_eps` ドキュメント参照)。
+        if scale_floor > 0.0 {
             for i in 0..m {
-                let denom_i = prev_e[i].abs().max(1e-300);
-                max_rel_change = max_rel_change.max(((self.e[i] - prev_e[i]).abs()) / denom_i);
+                self.e[i] = self.e[i].max(scale_floor);
             }
             for j in 0..n {
-                let denom_j = prev_d[j].abs().max(1e-300);
-                max_rel_change = max_rel_change.max(((self.d[j] - prev_d[j]).abs()) / denom_j);
+                self.d[j] = self.d[j].max(scale_floor);
             }
-            if _iter > 0 && max_rel_change < CONV_TOL {
-                break;
-            }
-            prev_e.clone_from(&self.e);
-            prev_d.clone_from(&self.d);
-        }
-
-        // 下限クリッピング: scale_floor (caller 指定) 以下の値を切り上げる。
-        // IPM 安定性のため presolve は 1e-4 を採用 (旧仕様)。
-        for i in 0..m {
-            self.e[i] = self.e[i].max(scale_floor);
-        }
-        for j in 0..n {
-            self.d[j] = self.d[j].max(scale_floor);
         }
     }
 
@@ -485,7 +403,7 @@ mod tests {
         let u = vec![1.0; n];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &l, &u);
+        scaler.compute(&q, &a, &q_vec, &l, &u, 1e-6);
 
         // d, e はほぼ 1.0（恒等変換に近い）
         for j in 0..n {
@@ -619,7 +537,7 @@ mod tests {
         let bounds = vec![(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3]);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3], 1e-6);
 
         // 任意の orig 空間 (x, y) で round-trip を確認:
         //   scaled_x = D^{-1} x  (公式: x = D x_s → x_s = D^{-1} x)
@@ -658,7 +576,7 @@ mod tests {
         let bounds = vec![(0.0_f64, 10.0); 2];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2]);
+        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2], 1e-6);
         let (q_s, a_s, q_s_vec, _b_s, _bounds_s) =
             scaler.scale_problem(&q, &a, &q_vec, &b, &bounds);
 
