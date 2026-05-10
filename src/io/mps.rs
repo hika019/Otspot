@@ -180,6 +180,8 @@ enum BoundType {
     MI,
     /// 2値変数 (Binary variable): x ∈ {0, 1}
     BV,
+    /// Plus infinity: x <= +∞ (upper bound = +∞, lower bound unchanged at default 0)
+    PL,
 }
 
 /// 固定幅MPSフォーマットかどうかを判定する
@@ -503,6 +505,7 @@ impl MpsParser {
             "FR" => BoundType::FR,
             "MI" => BoundType::MI,
             "BV" => BoundType::BV,
+            "PL" => BoundType::PL,
             _ => return Err(MpsError::InvalidBoundType(bound_type_str.to_string())),
         };
 
@@ -678,6 +681,11 @@ impl MpsParser {
                 }
                 BoundType::BV => {
                     bounds[*col_idx] = (0.0, 1.0);
+                }
+                BoundType::PL => {
+                    // PL: upper bound = +infinity (explicit, same as default).
+                    // Lower bound remains unchanged (default 0).
+                    bounds[*col_idx].1 = f64::INFINITY;
                 }
             }
         }

@@ -134,5 +134,6 @@ fn outcome_to_result(
                 ..Default::default()
             }
         }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }

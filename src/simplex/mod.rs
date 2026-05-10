@@ -105,6 +105,13 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 };
                 let eff_opts = opts_no_ws.as_ref().unwrap_or(options);
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
+                // Presolve で縮約された問題を Simplex が解けない場合 (SingularBasis / check_eq_feasibility 失敗):
+                // - capri: presolve 後の縮約問題が Phase I で SingularBasis (初期基底が特異)
+                // - forplan: Phase II 後の解が Eq 制約を大きく違反 (人工変数の数値ドリフト)
+                // いずれも元問題 (presolve なし) は Simplex で正しく解けるため、fallback する。
+                if raw.status == SolveStatus::NumericalError {
+                    return solve_without_presolve(problem, options);
+                }
                 return presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
             }
             Ok(_) => {
@@ -261,6 +268,8 @@ pub(crate) enum SimplexOutcome {
     Unbounded,
     /// タイムアウト（timeout_secs を超過した）。値は打ち切り時点の目的関数値
     Timeout(f64),
+    /// 基底行列が特異（サイクリック基底など）。IPM フォールバック用
+    SingularBasis,
 }
 
 // --- Standard form construction ---
@@ -369,6 +378,10 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
                     b[i] = -b[i];
                     slack_coeff[i] = -1.0;
                 } else {
+                    // b[i] が [-PIVOT_TOL, 0) の範囲にある場合: 変数下限シフト
+                    // (presolve 起因の丸め誤差など) による浮動小数点ノイズ。
+                    // slack の初期値が微小負になるのを防ぐため 0 にクランプ。
+                    if b[i] < 0.0 { b[i] = 0.0; }
                     slack_coeff[i] = 1.0;
                 }
                 slack_col_idx.push(Some(n_slack));
@@ -658,6 +671,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                 }
             }
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     } else {
         // Phase I: build extended matrix with artificials
@@ -731,39 +745,32 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
 
                 // 案C: Phase I 完了後の縮退人工変数 pivot out
-                // x_b[i] ≈ 0 の人工変数を構造変数で置換し、Phase II の基底品質を改善する。
-                // b=0 の Eq 制約で Phase I が即座終了した場合に人工変数が基底に残留する縮退を解消する。
-                // 注: bore3d は B1 (fixpoint iteration) で修正済みのため、案C は現状 DISABLED。
-                // B1 で b=0 Eq行がすでに presolve で除去される → Phase I 自体が実行されない。
-                // hs51 のような自由変数+Le制約の feasibility LP では基底が特異化するリスクがある。
-                if true {
+                // x_b[i] ≈ 0 の人工変数（basis[i] >= sf.n_total）を非人工列で置換し、
+                // Phase II が人工変数を基底に残したまま目的関数を最適化するのを防ぐ。
+                //
+                // Eq/Le/Ge 全行に適用:
+                // - Eq 行: 直接人工変数が basis に入る。x_b[i]=0 の縮退で残留。
+                // - Ge/Le 行 (b > 0): surplus 変数に加え人工変数も basis に入る。
+                //   Phase I が surplus を基底から追い出せず人工変数が縮退 0 で残留することがある。
+                // 置換候補: 非基底の非人工列 (j < sf.n_total) で行 i の係数が最大のもの。
+                // 安全チェック: LU 失敗なら全変更をリバート。
+                {
                     // 変更前の基底を保存。LU検証失敗時にリバートするため。
                     let basis_before_case_c = basis.clone();
-                    let mut is_basic_structural = vec![false; sf.n_total];
+                    let mut is_basic = vec![false; n_ext];
                     for &col in basis.iter() {
-                        if col < sf.n_total {
-                            is_basic_structural[col] = true;
-                        }
+                        is_basic[col] = true;
                     }
                     for i in 0..m {
-                        // 注: build_standard_form では Eq行は slack_col_idx=None のため
-                        // initial_basis[i] が vec! 初期値0のまま残る。この0をセンチネル値として
-                        // Eq行判定に再利用している。初期化値を変更する場合は本フィルタも要修正。
-                        // (後続の basis[i] < sf.n_total が二重ガードとして機能)
-                        // Eq行のみ適用。Le/Ge行（符号反転済み含む）はスラック変数を持つため
-                        // sf.initial_basis[i] >= sf.n_shifted となりスキップする。
-                        if sf.initial_basis[i] >= sf.n_shifted {
-                            continue;
-                        }
+                        // 行 i の基底が人工変数 (>= n_total) かつ縮退 (x_b ≈ 0) なら pivot out
                         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
                             continue;
                         }
-                        // 行 i で最大 |a_ext[i,j]| の非基底構造列 j を探す
+                        // 行 i で最大 |a_ext[i,j]| の非基底・非人工列 j を探す
                         let mut best_j = None;
                         let mut best_abs = PIVOT_TOL;
-                        #[allow(clippy::needless_range_loop)]
                         for j in 0..sf.n_total {
-                            if is_basic_structural[j] {
+                            if is_basic[j] {
                                 continue;
                             }
                             if let Ok((rows, vals)) = a_ext.get_column(j) {
@@ -776,7 +783,8 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             }
                         }
                         if let Some(j) = best_j {
-                            is_basic_structural[j] = true;
+                            is_basic[basis[i]] = false;
+                            is_basic[j] = true;
                             basis[i] = j;
                             // degenerate pivot: x_b[i] = 0, 他の x_b は変化なし
                         }
@@ -858,6 +866,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                         }
                     }
+                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -880,6 +889,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }
 }
@@ -900,11 +910,14 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
-        if *ct == ConstraintType::Eq {
-            let violation = (ax_i - bi).abs();
-            if violation > FEASIBILITY_TOL {
-                return false;
-            }
+        let violation = match ct {
+            ConstraintType::Eq => (ax_i - bi).abs(),
+            ConstraintType::Le => (ax_i - bi).max(0.0),
+            ConstraintType::Ge => (bi - ax_i).max(0.0),
+            _ => 0.0,
+        };
+        if violation > FEASIBILITY_TOL {
+            return false;
         }
     }
     true
@@ -977,9 +990,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
+        Err(crate::error::SolverError::SingularBasis { .. }) => {
+            // 初期基底が特異: 呼び出し元に NumericalError を伝搬して IPM フォールバックを促す
+            return SimplexOutcome::SingularBasis;
+        }
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            return SimplexOutcome::Timeout(obj); // BUG-SX-002: LU分解失敗は偽OptimalではなくTimeout
+            return SimplexOutcome::Timeout(obj); // DeadlineExceeded 等
         }
     };
 
@@ -1038,6 +1055,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         // 4. FTRAN: pivot column d = B^{-1} * a_entering
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        // 元の列 inf-ノルムを保存（borrow は d_sv の .to_vec() で終了）
+        let orig_col_norm = col_vals.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
         let mut d_sv = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),
@@ -1045,6 +1064,34 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         };
         basis_mgr.ftran(&mut d_sv);
         d_sv.to_dense_into(&mut d_dense);
+
+        // 4b. FTRAN 安定性チェック: eta 蓄積による数値誤差が d を汚染していないか確認する。
+        //     汚染シグナル: d 値が inf/NaN、または d の最大値が元の列ノルムの 1e12 倍超。
+        //     汚染検出時は即時再因子分解でリセット後に d を再計算する。
+        {
+            let d_max_abs = d_dense.iter().cloned().fold(0.0f64, |acc, v| {
+                if v.is_finite() { acc.max(v.abs()) } else { f64::INFINITY }
+            });
+            // 期待される d のノルムは原則として原列ノルムの数倍以内。
+            // 1e12 倍超は eta 蓄積による数値爆発とみなす（または inf/NaN）。
+            let d_corrupt = !d_max_abs.is_finite()
+                || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
+            if d_corrupt && basis_mgr.eta_count() > 0 {
+                basis_mgr.force_refactor_timed(a, basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    if basis_mgr.singular_basis {
+                        return SimplexOutcome::SingularBasis;
+                    }
+                    let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                    return SimplexOutcome::Timeout(obj);
+                }
+                // 新鮮な LU で d を再計算
+                let (cr2, cv2) = a.get_column(entering_col).unwrap();
+                d_sv = SparseVec { indices: cr2.to_vec(), values: cv2.to_vec(), len: m };
+                basis_mgr.ftran(&mut d_sv);
+                d_sv.to_dense_into(&mut d_dense);
+            }
+        }
         let d = &d_dense;
 
         // 5. Ratio test (Bland's rule for ties)
@@ -1096,17 +1143,36 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
 
-        // 10. Update basis manager
-        basis_mgr.update(entering_col, leaving_row, &d_sv);
+        // 10. Update basis index and check pivot stability
         basis[leaving_row] = entering_col;
 
-        // 11. Refactor if needed
-        // timeout audit fix — deadline 付きで LU 再因子分解を実行
-        basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+        // ピボット安定性チェック: |d[leaving_row]| / max(d) が閾値未満の場合、
+        // eta の inv_pivot が大きくなりすぎて FTRAN/BTRAN が数値爆発する。
+        // その場合は eta を追加せず即時再因子分解でリセットする（eta 蓄積誤差を防ぐ）。
+        let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
+            && basis_mgr.eta_count() > 0;
+
+        if pivot_unstable {
+            // 不安定ピボット: eta を追加せず直ちに再因子分解（新 basis で LU をリセット）
+            basis_mgr.force_refactor_timed(a, basis, options.deadline);
+        } else {
+            // 通常ピボット: eta で逐次更新
+            basis_mgr.update(entering_col, leaving_row, &d_sv);
+
+            // 11. Refactor if needed
+            // timeout audit fix — deadline 付きで LU 再因子分解を実行
+            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+        }
+
         // 特異基底または deadline 超過による再因子分解失敗 → 適切な結果を返す
         if basis_mgr.refactor_failed {
+            if basis_mgr.singular_basis {
+                // 特異基底（サイクリック構造など）: NumericalError として上流に伝搬
+                // 呼び出し元（two_phase_simplex）が IPM フォールバックを選択できる
+                return SimplexOutcome::SingularBasis;
+            }
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
             return SimplexOutcome::Timeout(obj);
         }
     }
@@ -1815,14 +1881,15 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &mut basis, 1, 3, 3, &mut pricing, &opts,
         );
-        // MaxIterations廃止後 → Optimal または Timeout が返る
+        // MaxIterations廃止後 → Optimal、Timeout、または SingularBasis が返る
         assert!(
-            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_)),
-            "BUG-SX-003: refactor_failed 時は Optimal または Timeout を返すべき（got: {:?}）",
+            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_) | SimplexOutcome::SingularBasis),
+            "BUG-SX-003: refactor_failed 時は Optimal/Timeout/SingularBasis を返すべき（got: {:?}）",
             match &outcome {
                 SimplexOutcome::Optimal(..) => "Optimal",
                 SimplexOutcome::Unbounded => "Unbounded",
                 SimplexOutcome::Timeout(_) => "Timeout",
+                SimplexOutcome::SingularBasis => "SingularBasis",
             }
         );
     }
