@@ -1094,8 +1094,19 @@ fn try_dual_only_ir(
     //      α が damp されるため、1 回 solve では df が半減程度。複数回 solve で
     //      残差を residual-update 方式で削っていく (Wilkinson IR と同形)。
     //      G α = r_d_free → α → δy = -A_free α → y += δy → 残差再計算 → 繰り返し
+    //
+    //      y を DD 精度で保持する理由:
+    //      Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
+    //      f64 での `y[i] += dy[i]` は |dy[i]| < eps_f64 × |y[i]| ≈ 2e-6 を切り捨てる。
+    //      iter 以降の dy_inf ≈ 1e-8 はこのケースに該当し、修正が吸収されて振動する。
+    //      y_dd を TwoFloat で保持することで 1e10 の y に 1e-8 の修正を正確に蓄積する。
     const DUAL_IR_INNER_MAX: usize = 50;
     let mut tmp = result.clone();
+    // y を DD 精度で保持 (f64 y への累積で精度が失われるのを防ぐ)。
+    // Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
+    // f64 での y[i] += dy[i] は |dy| < eps_f64 × |y| ≈ 2e-6 を切り捨てる。
+    // DD 精度 y_dd に TwoFloat で積算することで 1e10 の y に 1e-8 の修正も蓄積できる。
+    let mut y_dd: Vec<TwoFloat> = tmp.dual_solution.iter().map(|&v| TwoFloat::from(v)).collect();
     let mut df_rel_post = df_rel_pre;
     let mut df_abs_post = df_abs_pre;
     let mut total_dy_inf = 0.0_f64;
@@ -1109,20 +1120,23 @@ fn try_dual_only_ir(
             if trace { eprintln!("DUAL_IR inner={} solve NaN, abort", inner); }
             break;
         }
-        let mut dy = vec![0.0_f64; m];
+        // δy を DD で計算 (A_free × (-alpha))
+        let mut dy_dd = vec![TwoFloat::from(0.0); m];
         for (fi, &j) in free_idx.iter().enumerate() {
             let af = -alpha[fi];
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 let r = problem.a.row_ind[k];
-                dy[r] += problem.a.values[k] * af;
+                dy_dd[r] = dy_dd[r] + TwoFloat::new_mul(problem.a.values[k], af);
             }
         }
-        let dy_inf = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let dy_inf = dy_dd.iter().fold(0.0_f64, |a, v| a.max(f64::from(*v).abs()));
         if !dy_inf.is_finite() { break; }
-        for i in 0..m { tmp.dual_solution[i] += dy[i]; }
+        // y_dd に DD 精度で加算 (f64 の情報落ちを回避)
+        let y_dd_new: Vec<TwoFloat> = y_dd.iter().zip(dy_dd.iter()).map(|(&y, &d)| y + d).collect();
         total_dy_inf = total_dy_inf.max(dy_inf);
 
-        // 新 r_d_free を計算 (Q x は変化なし、aty のみ更新)
+        // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
+        let mut new_r_d_free = vec![0.0_f64; n_free];
         let mut new_df_rel = 0.0_f64;
         let mut new_df_abs = 0.0_f64;
         for (fi, &j) in free_idx.iter().enumerate() {
@@ -1131,34 +1145,39 @@ fn try_dual_only_ir(
                 let row = problem.q.row_ind[k];
                 qx += TwoFloat::new_mul(problem.q.values[k], tmp.solution[row]);
             }
-            let qx_f = f64::from(qx);
             let mut aty = TwoFloat::from(0.0);
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 let r = problem.a.row_ind[k];
-                aty += TwoFloat::new_mul(problem.a.values[k], tmp.dual_solution[r]);
+                // TwoFloat × f64: y_dd_new[r] の DD 精度を完全に使って aty を計算
+                aty = aty + y_dd_new[r] * problem.a.values[k];
             }
-            let aty_f = f64::from(aty);
             let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
-            let r_d = qx_f + problem.c[j] + aty_f + bc;
-            current_r_d_free[fi] = r_d;
+            let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
+            new_r_d_free[fi] = r_d;
+            let qx_f = f64::from(qx);
+            let aty_f = f64::from(aty);
             let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
             let rel = r_d.abs() / scale;
             if rel > new_df_rel { new_df_rel = rel; }
             if r_d.abs() > new_df_abs { new_df_abs = r_d.abs(); }
         }
-        // 退行検出: 残差が増えたら inner break (前回 tmp 維持)
+        // 退行検出: 残差が増えたら inner break (y_dd_new は破棄)
         if new_df_rel > df_rel_post * 1.001 {
             if trace { eprintln!("DUAL_IR inner={} regression, breaking (rel {:.3e} -> {:.3e})", inner, df_rel_post, new_df_rel); }
-            // 退行分は revert
-            for i in 0..m { tmp.dual_solution[i] -= dy[i]; }
             break;
         }
+        // 採用: y_dd を y_dd_new で更新
+        y_dd = y_dd_new;
+        for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
+        current_r_d_free = new_r_d_free;
         df_rel_post = new_df_rel;
         df_abs_post = new_df_abs;
         accepted_iters += 1;
         // 早期 break: target を達成したら終了
         if df_rel_post < target_pf { break; }
     }
+    // DD y → f64 に戻す (最終採用済み y_dd から変換)
+    for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
 
     if trace {
         eprintln!("DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
@@ -1217,12 +1236,29 @@ pub(crate) fn refine_kkt_iterative(
     //   δy = -A_free α,  G α = r_d_free,  G = A_free^T A_free (SPD)
     //   ⇒ A_free^T δy = -G α = -r_d_free  ⇒  r_d_free_new = 0
     // Q≠0 でも成立 (x を動かさないため)。
-    let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
-    if n_dual > 0 {
-        // y が更新されたので bound_duals (z) も KKT から再計算する。
-        // z を更新しないと bound-active 変数の r_d[j] = Qx[j]+c[j]+A^Ty[j]+z_old[j] ≠ 0 になる。
-        refit_bound_duals_kkt(problem, result);
-        return n_dual;
+    //
+    // 反復: G の条件数が大きい場合 (QFORPLAN: ~1e13)、1 回の try_dual_only_ir では
+    // 内部 50 iter で df が半減程度に留まる。target_pf を達成するまで繰り返す。
+    // max_iters を outer ループ上限として使う (デフォルト 10 で最大 10×50=500 inner iter)。
+    let mut n_dual_total = 0_usize;
+    for _outer in 0..max_iters.max(1) {
+        let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
+        if n_dual > 0 {
+            n_dual_total += n_dual;
+            // y が更新されたので bound_duals (z) も KKT から再計算する。
+            refit_bound_duals_kkt(problem, result);
+        }
+        // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
+        if n_dual == 0 { break; }
+        // target 達成チェック: try_dual_only_ir が target_pf を達成したら完了
+        // (try_dual_only_ir 内で early break しているため n_dual < DUAL_IR_INNER_MAX
+        // か、または 50 iter 使い切ったが target 未達)
+        // n_dual < 50 なら try_dual_only_ir が early break した ≒ target 達成か convergence
+        if n_dual < 50 { break; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+    }
+    if n_dual_total > 0 {
+        return n_dual_total;
     }
     // dual-only が改善できなかった場合 (df 既に < target / G singular / no improvement) は
     // existing penalty + saddle-point IR に fall-through
