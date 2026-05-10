@@ -473,9 +473,9 @@ fn run_ipm_with(
         for pass in 0..STAGE0_MAX_PASSES {
             // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            // (ii) y[row] を SingletonRow / RedundantRowFix step で更新
+            // (ii) y[row] を SingletonRow / RedundantRowFix step で更新 (逆順=後退代入)
             //      bound_contrib を bound_duals から取得して KKT 完全式で解く
-            for step in presolve_result.postsolve_stack.steps.iter() {
+            for step in presolve_result.postsolve_stack.steps.iter().rev() {
                 let (row, col) = match step {
                     QpPostsolveStep::SingletonRow { row, col, .. }
                     | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),

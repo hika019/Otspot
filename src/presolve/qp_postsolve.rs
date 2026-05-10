@@ -161,26 +161,21 @@ pub fn postsolve_qp_with_dual_recovery(
     // 元 bounds の lb/ub 数と長さが合わない場合がある。core.rs::run_ipm_with の
     // remap_bound_duals_to_orig がこの修正を行うため、ここでは長さチェックのみ。
 
-    // postsolve_stack を **forward 順** で処理し、さらに **反復** で連鎖依存を解消する。
+    // postsolve_stack を **逆順 (LIFO)** で 1 pass 処理する。
     //
-    // 動機: 単純な LIFO 逆順 1 回処理では「先に処理された step の y[row] 計算式に
-    // 後の step の y[row'] が必要だが未復元 (=0) のまま参照される」連鎖誤差で
-    // y が wrong stays。
-    //   例: forward 順で step A (row=10) → step B (row=20) と push された場合、
-    //       LIFO 逆処理: step B 先 (y[20] 計算で y[10]=0 を使い wrong) → step A
-    //   forward 順:    step A 先 (y[20]=0 を使うが、後で更新可能) → step B (y[10] 既知)
-    //   双方向依存で 1 pass では収束しないため反復する (2-3 pass で十分収束)。
-    /// 反復回数: 連鎖依存 (step A の y[row_A] が step B の col_B の KKT に登場し、
-    /// 互いに参照する場合) を解消するため複数 pass する。実問題では 3 pass で
-    /// 収束する経験。早期 break は局所収束に騙されるリスクがあるため固定回数。
-    const RECOVER_PASSES: usize = 5;
+    // 数学的根拠: singleton 結合行列 M[l,k] = A[r_k, j_l] は上三角 (k > l のみ非零)。
+    // - row r_k が step k でシングルトン化するとき、step l < k の col j_l はすでに除去済み
+    //   → active 問題では A[r_k, j_l] = 0 → 逆に k > l のとき A[r_k, j_l] ≠ 0 が許される
+    // 上三角系は後退代入 (逆順処理) で 1 pass 厳密に解ける。
+    // forward 順は下三角を仮定した前進代入であり、この問題では発散する。
+    const RECOVER_PASSES: usize = 1;
     let trace = std::env::var("POSTSOLVE_TRACE").ok().as_deref() == Some("1");
     if trace {
         let kkt = simple_kkt_inf(&orig_problem.q, &orig_problem.a, &orig_problem.c, &orig_problem.bounds, &sol);
         eprintln!("POSTSOLVE [after dim expand, before recovery] kkt_inf={:.3e}", kkt);
     }
     for pass in 0..RECOVER_PASSES {
-        for step in presolve_result.postsolve_stack.steps.iter() {
+        for step in presolve_result.postsolve_stack.steps.iter().rev() {
             match step {
                 QpPostsolveStep::SingletonRow { row, col, .. }
                 | QpPostsolveStep::RedundantRowFix { row, col, .. } => {
