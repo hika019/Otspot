@@ -175,6 +175,60 @@ fn run_ipm_with(
             pres_red, pres_abs_red, denom_red, kkt_red, reduced.num_vars, reduced.num_constraints);
     }
 
+    // scaled 空間 K-IR: Ruiz unscale の前に scaled+reduced 空間で K-IR を適用する。
+    //
+    // 背景:
+    //   QFORPLAN 等の ill-scaled 問題では Ruiz unscale 後に y が ×7e4 増幅 (y ≈ 1e10) し、
+    //   unscaled 空間での DUAL_IR / K-IR は f64 精度限界により kkt<1e-6 が達成困難。
+    //   一方 scaled 空間では y_s ≈ 1.677e5 で精度余裕があり、K-IR で kkt_scaled を
+    //   9.459e-7 → 3.962e-8 に改善できる。
+    //
+    // なぜ LSQ ではなく K-IR か:
+    //   scaled 空間 LSQ は L2 ノルム最小化のため「scaled で改善→unscale で悪化」が起きる
+    //   (QPILOTNO で実測済み、lines 132-142 コメント参照)。K-IR は saddle-point を
+    //   直接 refine するため distribution bias がなく、unscale 後の元空間残差も改善する。
+    //
+    // sigma_total が小さい (Ruiz 増幅あり) 場合のみ適用。増幅なし (sigma=1) は不要。
+    if presolve_result.ruiz_scaler.is_some() && sigma_total < 1.0 && !result.solution.is_empty() {
+        // 目標残差: user_eps × sigma_total。scaled 空間でこれを達成すれば
+        // unscale 後 kkt_orig < user_eps になる (amplification ≤ 1/sigma_total の場合)。
+        // sigma_total が極端に小さい (例: 1.379e-5) 場合、IPM 精度限界 (~9e-7) より
+        // 厳しい目標になるが、达成できる範囲で K-IR が残差を下げることを期待する。
+        //
+        // 複数パス: ill-conditioned 問題でシングルパスが oscillation で途中止まりになる
+        // 場合、新しい起点から再スタートして更なる改善を図る (最大 3 パス)。
+        let target_scaled = opts.ipm_eps() * sigma_total;
+        const SCALED_KIR_PASSES: usize = 3;
+        let mut kkt_best = f64::INFINITY;
+        for pass in 0..SCALED_KIR_PASSES {
+            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+            if post_trace {
+                let view_red = ProblemView {
+                    q: &reduced.q, a: &reduced.a, c: &reduced.c, b: &reduced.b,
+                    bounds: &reduced.bounds, constraint_types: &reduced.constraint_types,
+                };
+                let kkt_pre = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
+                eprintln!("POST_STAGE [pre scaled-KIR pass={}] kkt_scaled={:.3e} target={:.3e}", pass, kkt_pre, target_scaled);
+            }
+            let improved = crate::qp::refine_kkt_iterative(reduced, &mut result, 50, target_scaled, opts.deadline);
+            let view_red = ProblemView {
+                q: &reduced.q, a: &reduced.a, c: &reduced.c, b: &reduced.b,
+                bounds: &reduced.bounds, constraint_types: &reduced.constraint_types,
+            };
+            let kkt_now = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
+            if post_trace {
+                eprintln!("POST_STAGE [post scaled-KIR pass={}] kkt_scaled={:.3e} improved={}", pass, kkt_now, improved);
+            }
+            // 前パスより改善していればパスを続ける; no improvement → 打ち切り
+            if kkt_now < kkt_best {
+                kkt_best = kkt_now;
+            } else {
+                break;
+            }
+            if kkt_best < target_scaled { break; }
+        }
+    }
+
     // Ruiz unscale: presolve が scaling 適用済みの場合のみ。
     if let Some(scaler) = &presolve_result.ruiz_scaler {
         if post_trace {
