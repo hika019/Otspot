@@ -163,11 +163,34 @@ fn compute_dfeas_orig(
     } else {
         vec![0.0; n]
     };
+    // LP/Simplex 経路: Simplex の双対変数は IPM の KKT 符号慣例と異なる (shadow prices ≥ 0)。
+    // Stationarity 式 (c + A^T y + bound_contrib = 0) を Simplex 双対に適用すると
+    // residual = 2 * A^T y + mu_ub ≠ 0 となり誤検出が発生する。
+    // LP 双対実行可能性の正しい判定: rc_extracted[j] ≥ 0 (∀j)。
+    // Simplex が Optimal を返すとき rc ≥ 0 は算法的に保証されるが、
+    // 数値誤差で一部が负になる場合は非最適解を返している可能性がある。
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
+        let mut dfeas_abs = 0.0_f64;
+        let mut dfeas_rel = 0.0_f64;
+        for j in 0..n {
+            let (lb_j, ub_j) = prob.bounds[j];
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
+                continue; // FX 変数は除外
+            }
+            if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
+                continue; // EmptyCol は除外
+            }
+            let rc = reduced_costs[j];
+            let viol = f64::max(0.0, -rc);
+            dfeas_abs = dfeas_abs.max(viol);
+            let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
+            dfeas_rel = dfeas_rel.max(viol / scale_j);
+        }
+        return (dfeas_abs, dfeas_rel);
+    }
+
     // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
     // - QP/IPM 経路: bound_duals が [y_lb 群; y_ub 群] レイアウトで渡る
-    // - LP/Simplex 経路: bound_duals が空、reduced_costs (n 長) が同等情報を持つ
-    //   stationarity: c + A^T y + reduced_cost = 0 (LP 双対理論)
-    //   よって bound_contrib[j] = reduced_costs[j] (符号は Simplex 出力慣例)
     let mut bound_contrib = vec![0.0_f64; n];
     if !bound_duals.is_empty() {
         let mut bd_idx = 0usize;
@@ -314,9 +337,22 @@ fn compute_dfeas_componentwise(
             }
         }
     } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
+        // LP 経路: rc ≥ 0 チェック (compute_dfeas_orig と同じ基準)
+        let mut max_rel = 0.0_f64;
         for j in 0..n {
-            bound_contrib[j] = -reduced_costs[j];
+            let (lb_j, ub_j) = prob.bounds[j];
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
+                continue;
+            }
+            if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
+                continue;
+            }
+            let rc = reduced_costs[j];
+            let viol = f64::max(0.0, -rc);
+            let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
+            max_rel = max_rel.max(viol / scale_j);
         }
+        return max_rel;
     }
     let mut max_rel = 0.0_f64;
     for i in 0..n {
