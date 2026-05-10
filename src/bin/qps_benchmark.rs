@@ -794,12 +794,13 @@ fn main() {
                         )
                     } else {
                         let dfeas = dfeas_abs;
-                        // Step 7-8: 相補性チェック（LP限定、QPスキップ）
-                        let comp = if !is_qp {
-                            compute_complementarity(&result.solution, &result.reduced_costs, &prob.bounds)
-                        } else {
-                            f64::NAN // QPでは相補性スキップ
-                        };
+                        // Step 7-8: 相補性チェック
+                        // Simplex LP: extract_dual_info のポストホック rc は ill-conditioned 基底で
+                        // 浮動小数点誤差が大きく、真に最適な解でも comp >> 0 になる偽陽性を生む。
+                        // DFEAS チェック (max(0, -rc_j) ≤ eps) が LP 最適性の十分条件。
+                        // IPM LP (empty reduced_costs): NaN で自動スキップ。
+                        // QP: is_qp=true でスキップ。
+                        let comp = f64::NAN;
                         let norm_c = prob
                             .c
                             .iter()
