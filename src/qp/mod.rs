@@ -928,6 +928,243 @@ pub(crate) fn refine_primal_lsq(
 /// - 各 iter で KKT 改善 guard、退行で revert + break
 /// - max_iters で停止 (発散時の保険)
 ///
+/// dual-only IR: x を不変に保ち y のみ更新して r_d_free を厳密に 0 にする (LP/QP 共通)。
+///
+/// 数学:
+///   r_d_free = (Q x)_free + c_free + (A^T y)_free + bc_free
+///   目的: δy s.t. r_d_free + A_free^T δy = 0  ⇔  A_free^T δy = -r_d_free
+///   最小ノルム解: δy = -A_free α,  G α = r_d_free,  G = A_free^T A_free (SPD, n_free×n_free)
+///   x 不変 ⇒ Q x 項は変化せず、A^T y 項のみが δy で変動する。
+///   検算: A_free^T δy = -A_free^T A_free α = -G α = -r_d_free  ⇒  r_d_free_new = 0
+///
+/// active 変数 (x ≈ bound) は dx=0 のまま、refit_bound_duals_kkt で z (bound_dual) が再計算される。
+/// 戻り値: 1 (改善採用) または 0 (skip / no-op)
+fn try_dual_only_ir(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    target_pf: f64,
+    deadline: Option<std::time::Instant>,
+) -> usize {
+    use crate::presolve::bound_contrib_at_var;
+    use twofloat::TwoFloat;
+
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
+
+    // ACTIVE_TOL = sqrt(eps_machine) ≈ 1e-8: 古典的 active-set 判定 tol。
+    const ACTIVE_TOL_REL: f64 = 1e-8;
+    // n_free 上限: G が dense O(n_free²) になるため (~2000² = 4M doubles = 32 MB)。
+    const DUAL_IR_MAX_FREE: usize = 2000;
+    // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
+    // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
+    let dual_ir_reg = std::env::var("DUAL_IR_REG").ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1e-12);
+
+    // 1. free 変数の特定 (active = bound 近傍 or A col 空)
+    let mut free_idx: Vec<usize> = Vec::with_capacity(n);
+    for j in 0..n {
+        let xj = result.solution[j];
+        let tol = ACTIVE_TOL_REL * (1.0 + xj.abs());
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && (xj - lb).abs() < tol { continue; }
+        if ub.is_finite() && (ub - xj).abs() < tol { continue; }
+        // A col 空 (EmptyCol) は dual update で動かせないため除外
+        if problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 { continue; }
+        free_idx.push(j);
+    }
+    let n_free = free_idx.len();
+    if n_free == 0 || n_free > DUAL_IR_MAX_FREE {
+        if trace { eprintln!("DUAL_IR skip: n_free={} (limit={})", n_free, DUAL_IR_MAX_FREE); }
+        return 0;
+    }
+
+    // 2. r_d_free を DD で計算
+    //    r_d[j] = c[j] + (A^T y)[j] + bound_contrib[j]
+    //    free var の bound_contrib は通常 0 (z=0) だが念のため計算
+    let mut r_d_free = vec![0.0_f64; n_free];
+    let mut df_rel_pre = 0.0_f64;
+    let mut df_abs_pre = 0.0_f64;
+    let mut worst_idx = 0;
+    let mut worst_qx = 0.0_f64;
+    for (fi, &j) in free_idx.iter().enumerate() {
+        // r_d_free 用に Q x も加算する必要 (Q≠0 の QP で正確性必須)
+        let mut qx = TwoFloat::from(0.0);
+        for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
+            let row = problem.q.row_ind[k];
+            qx += TwoFloat::new_mul(problem.q.values[k], result.solution[row]);
+        }
+        let qx_f = f64::from(qx);
+        let mut aty = TwoFloat::from(0.0);
+        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+            let r = problem.a.row_ind[k];
+            aty += TwoFloat::new_mul(problem.a.values[k], result.dual_solution[r]);
+        }
+        let aty_f = f64::from(aty);
+        let bc = bound_contrib_at_var(&problem.bounds, &result.bound_duals, j);
+        let r_d = qx_f + problem.c[j] + aty_f + bc;
+        r_d_free[fi] = r_d;
+        let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
+        let rel = r_d.abs() / scale;
+        if rel > df_rel_pre {
+            df_rel_pre = rel;
+            worst_idx = j;
+            worst_qx = qx_f;
+        }
+        if r_d.abs() > df_abs_pre { df_abs_pre = r_d.abs(); }
+    }
+    if df_rel_pre < target_pf {
+        if trace { eprintln!("DUAL_IR skip: df_rel_pre={:.3e} < target {:.3e}", df_rel_pre, target_pf); }
+        return 0;
+    }
+    if trace {
+        eprintln!("DUAL_IR pre: n_free={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
+            n_free, df_abs_pre, df_rel_pre, worst_idx, worst_qx);
+    }
+
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return 0;
+    }
+
+    // 3. A_free dense (m × n_free) を構築 → G = A_free^T A_free (上三角)
+    let mut a_free = vec![0.0_f64; m * n_free];
+    for (fi, &j) in free_idx.iter().enumerate() {
+        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+            let r = problem.a.row_ind[k];
+            a_free[r * n_free + fi] = problem.a.values[k];
+        }
+    }
+    // G[fi, fj] for fi <= fj: Σ_r a_free[r,fi] * a_free[r,fj]
+    let mut g_dense = vec![0.0_f64; n_free * n_free];
+    for r in 0..m {
+        let row_off = r * n_free;
+        for fi in 0..n_free {
+            let aij = a_free[row_off + fi];
+            if aij == 0.0 { continue; }
+            for fj in fi..n_free {
+                let aik = a_free[row_off + fj];
+                if aik == 0.0 { continue; }
+                g_dense[fi * n_free + fj] += aij * aik;
+            }
+        }
+    }
+    // 対角に δ 加算 (数値安定化)
+    for fi in 0..n_free {
+        g_dense[fi * n_free + fi] += dual_ir_reg;
+    }
+
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return 0;
+    }
+
+    // 4. G を上三角 CSC に変換して Cholesky (LDL) factorize
+    let mut col_ptr: Vec<usize> = vec![0; n_free + 1];
+    let mut row_ind: Vec<usize> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    for fj in 0..n_free {
+        for fi in 0..=fj {
+            let v = g_dense[fi * n_free + fj];
+            if v != 0.0 {
+                row_ind.push(fi);
+                values.push(v);
+            }
+        }
+        col_ptr[fj + 1] = row_ind.len();
+    }
+    let g_csc = CscMatrix { col_ptr, row_ind, values, nrows: n_free, ncols: n_free };
+    let factor = match crate::linalg::ldl::factorize(&g_csc) {
+        Ok(f) => f,
+        Err(e) => {
+            if trace { eprintln!("DUAL_IR factorize failed: {:?}", e); }
+            return 0;
+        }
+    };
+
+    // 5-7. 反復解: 内側 IR (G 固定なので factor 再利用)。
+    //      LDLt 内部の dynamic regularization (delta=1e-8) で rank-deficient 成分の
+    //      α が damp されるため、1 回 solve では df が半減程度。複数回 solve で
+    //      残差を residual-update 方式で削っていく (Wilkinson IR と同形)。
+    //      G α = r_d_free → α → δy = -A_free α → y += δy → 残差再計算 → 繰り返し
+    const DUAL_IR_INNER_MAX: usize = 50;
+    let mut tmp = result.clone();
+    let mut df_rel_post = df_rel_pre;
+    let mut df_abs_post = df_abs_pre;
+    let mut total_dy_inf = 0.0_f64;
+    let mut accepted_iters = 0;
+    let mut current_r_d_free = r_d_free.clone();
+    for inner in 0..DUAL_IR_INNER_MAX {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        let mut alpha = vec![0.0_f64; n_free];
+        factor.solve(&current_r_d_free, &mut alpha);
+        if alpha.iter().any(|v| !v.is_finite()) {
+            if trace { eprintln!("DUAL_IR inner={} solve NaN, abort", inner); }
+            break;
+        }
+        let mut dy = vec![0.0_f64; m];
+        for (fi, &j) in free_idx.iter().enumerate() {
+            let af = -alpha[fi];
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                let r = problem.a.row_ind[k];
+                dy[r] += problem.a.values[k] * af;
+            }
+        }
+        let dy_inf = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        if !dy_inf.is_finite() { break; }
+        for i in 0..m { tmp.dual_solution[i] += dy[i]; }
+        total_dy_inf = total_dy_inf.max(dy_inf);
+
+        // 新 r_d_free を計算 (Q x は変化なし、aty のみ更新)
+        let mut new_df_rel = 0.0_f64;
+        let mut new_df_abs = 0.0_f64;
+        for (fi, &j) in free_idx.iter().enumerate() {
+            let mut qx = TwoFloat::from(0.0);
+            for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
+                let row = problem.q.row_ind[k];
+                qx += TwoFloat::new_mul(problem.q.values[k], tmp.solution[row]);
+            }
+            let qx_f = f64::from(qx);
+            let mut aty = TwoFloat::from(0.0);
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                let r = problem.a.row_ind[k];
+                aty += TwoFloat::new_mul(problem.a.values[k], tmp.dual_solution[r]);
+            }
+            let aty_f = f64::from(aty);
+            let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
+            let r_d = qx_f + problem.c[j] + aty_f + bc;
+            current_r_d_free[fi] = r_d;
+            let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
+            let rel = r_d.abs() / scale;
+            if rel > new_df_rel { new_df_rel = rel; }
+            if r_d.abs() > new_df_abs { new_df_abs = r_d.abs(); }
+        }
+        // 退行検出: 残差が増えたら inner break (前回 tmp 維持)
+        if new_df_rel > df_rel_post * 1.001 {
+            if trace { eprintln!("DUAL_IR inner={} regression, breaking (rel {:.3e} -> {:.3e})", inner, df_rel_post, new_df_rel); }
+            // 退行分は revert
+            for i in 0..m { tmp.dual_solution[i] -= dy[i]; }
+            break;
+        }
+        df_rel_post = new_df_rel;
+        df_abs_post = new_df_abs;
+        accepted_iters += 1;
+        // 早期 break: target を達成したら終了
+        if df_rel_post < target_pf { break; }
+    }
+
+    if trace {
+        eprintln!("DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
+            n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters);
+    }
+    if df_rel_post < df_rel_pre {
+        *result = tmp;
+        accepted_iters
+    } else {
+        if trace { eprintln!("DUAL_IR no improvement"); }
+        0
+    }
+}
+
 /// 戻り値: 採用された refinement iter 数 (0 = no-op)
 pub(crate) fn refine_kkt_iterative(
     problem: &QpProblem,
@@ -959,6 +1196,25 @@ pub(crate) fn refine_kkt_iterative(
     if n + m > REFINE_KKT_SIZE_LIMIT {
         return 0;
     }
+
+    // === Dual-only IR (LP/QP 共通) ===
+    //
+    // x を不変に保ち y のみ更新して r_d_free を厳密に 0 にする手法。
+    // saddle-point K の (1,1) ブロックが δp=1e-10 で ill-conditioned になる問題
+    // (QFORPLAN: cond ~1e13、dx 増幅で REJECT) を完全回避する。
+    //
+    // 数学: Q x 項は x 不変なので変化しない。dy 更新で A^T y のみ動かして:
+    //   r_d_free_new = (Q x)_free + c_free + (A^T (y+δy))_free + bc_free
+    //                = r_d_free + A_free^T δy
+    //   δy = -A_free α,  G α = r_d_free,  G = A_free^T A_free (SPD)
+    //   ⇒ A_free^T δy = -G α = -r_d_free  ⇒  r_d_free_new = 0
+    // Q≠0 でも成立 (x を動かさないため)。
+    let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
+    if n_dual > 0 {
+        return n_dual;
+    }
+    // dual-only が改善できなかった場合 (df 既に < target / G singular / no improvement) は
+    // existing penalty + saddle-point IR に fall-through
 
     // δp, δd: K の対角正則化。十分小さく (IR で eps·‖K‖ レベルまで refine 可)、
     // LDL の数値安定性が確保される値。1e-10 は LISWET cond 1e10 で K cond 1e2 級。

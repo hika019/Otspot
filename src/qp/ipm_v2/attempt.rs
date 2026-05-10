@@ -8,7 +8,7 @@
 use crate::options::SolverOptions;
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
-    qp_transforms::QpPresolveStatus,
+    qp_transforms::{QpPresolveStatus, QpPostsolveStep},
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
@@ -30,6 +30,87 @@ use std::time::Instant;
 const MAX_ITER_PER_ATTEMPT: usize = 500;
 
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
+
+/// presolve_result の Ruiz / LargeCoeffRowScale から sigma_total を計算する。
+///
+/// core.rs の同名計算と同一ロジック。sigma_total は presolve スケーリングで
+/// 問題が縮小された比率の下限: unscale 時に残差が 1/sigma_total 倍に増幅される。
+///
+/// 戻り値: sigma_total ∈ (0, +∞]。Ruiz も LargeCoeffRowScale も無ければ 1.0。
+fn compute_presolve_sigma_total(presolve_result: &QpPresolveResult) -> f64 {
+    let mut primal_row_scale_min = 1.0_f64;
+    for step in presolve_result.postsolve_stack.steps.iter() {
+        if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
+            let local_min = row_scales.iter()
+                .filter(|&&v| v > 0.0 && v.is_finite())
+                .fold(f64::INFINITY, |a, &v| a.min(v));
+            if local_min.is_finite() {
+                primal_row_scale_min *= local_min;
+            }
+        }
+    }
+    let mut dual_col_scale_min = f64::INFINITY;
+    if let Some(scaler) = &presolve_result.ruiz_scaler {
+        let e_min = scaler.e.iter()
+            .filter(|&&v| v > 0.0 && v.is_finite())
+            .fold(f64::INFINITY, |a, &v| a.min(v));
+        if e_min.is_finite() {
+            primal_row_scale_min *= e_min;
+        }
+        let d_min = scaler.d.iter()
+            .filter(|&&v| v > 0.0 && v.is_finite())
+            .fold(f64::INFINITY, |a, &v| a.min(v));
+        if d_min.is_finite() && scaler.c.is_finite() && scaler.c > 0.0 {
+            dual_col_scale_min = scaler.c * d_min;
+        }
+    }
+    primal_row_scale_min.min(dual_col_scale_min)
+}
+
+/// user_eps と sigma_total から eps_tighten の基底値を動的に計算する。
+///
+/// 問題の物理量:
+///   core.rs は `eps_scaled = (user_eps / tighten) × sigma_total` を IPM に渡す。
+///   IPM の `PF_FAR_FROM_TARGET_RATIO = 1e2` 閾値は `eps_orig × 100` で reg_limit
+///   適応を制御する。eps_orig が大きいとこの閾値も大きくなりデュアル停滞が起きる。
+///
+/// 実測 (QBORE3D, sigma=2.649e-4):
+///   - eps=1e-6: tighten=100 → eps_orig=1e-8 → Optimal_main (iter=149) ✓
+///   - eps=1e-6: tighten=1   → eps_orig=1e-6 → residual_stall (50 iter で打ち切り) ✗
+///   - eps=1e-8: tighten=1   → eps_orig=1e-8 → Optimal_main ✓  (tighten 不要)
+///   - eps=1e-8: tighten=100 → eps_orig=1e-10 → IPM floor 以下を要求、失敗 ✗
+///
+/// 結論: tighten が必要な量は `user_eps / REF_EPS` に比例。
+///   REF_EPS = 1e-8 は「tighten=1 で QBORE3D が解ける eps」。
+///   tighten = ceil_pow10(user_eps / REF_EPS)。
+///
+/// 例:
+///   user_eps=1e-6 → ratio=100   → tighten=100
+///   user_eps=1e-7 → ratio=10    → tighten=10
+///   user_eps=1e-8 → ratio=1     → tighten=1
+///   user_eps=1e-4 → ratio=10000 → tighten=10000 (但し上限 1000: IPM floor 制約)
+///
+/// sigma_total は現在の判定に使用しない: IPM stall は eps_orig の絶対値に依存し、
+/// sigma_total の大小に直接依存しない (sigma が変わっても eps_orig の適正値は変わらない)。
+/// sigma_total が 1.0 以上 (スケーリングなし) でも公式は同じ。
+///
+/// 戻り値: tighten ∈ [1, 1000] のべき10に切り上げた値。
+fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
+    // 参照 eps: この値以下の user_eps では tighten=1 で十分 (実測)
+    const REF_EPS: f64 = 1e-8;
+    let _ = sigma_total; // 現在の判定に不使用 (将来の拡張点として保持)
+    let ratio = user_eps / REF_EPS;
+    if ratio <= 1.0 {
+        return 1.0;
+    }
+    // ceil_pow10(ratio): ratio を上回る最小の 10 のべき乗
+    //   ratio=100   → log10=2.0 → ceil=2 → 100
+    //   ratio=61.4  → log10=1.788 → ceil=2 → 100
+    //   ratio=10    → log10=1.0 → ceil=1 → 10
+    let pow = ratio.log10().ceil();
+    // 上限 1000: tighten > 1000 では eps_orig が IPM 精度 floor 以下になり逆効果
+    10_f64.powf(pow.min(3.0))
+}
 
 /// QP を v2 経路 (IP-PMM) で解く。
 ///
@@ -245,19 +326,45 @@ fn solve_qp_v2_with_runner(
     let mut best: Option<IpmOutcome> = None;
 
     // 試行配列 `(use_ruiz, eps_tighten)`:
-    // - `eps_tighten`: IPM 内 eps を `user_eps × {1, 10, 100}` で締めて、unscale 残差
-    //   増幅 (ill-scaled 問題) を吸収する余裕を作る。
-    // - `use_ruiz` on/off: 行列形状による algorithmic alternative。
+    //
+    // `eps_tighten` の役割: `opts.ipm.eps = user_eps / tighten` → core.rs が
+    // `eps_scaled = (user_eps / tighten) × sigma_total` を IPM に渡す。
+    // sigma_total ≪ 1 の問題では IPM の PF_FAR_FROM_TARGET_RATIO 閾値 (eps_orig × 1e2)
+    // が大きくなり reg_limit 適応が鈍化してデュアル停滞する。tighten を sigma_total の
+    // 逆数オーダーに設定すると eps_orig が十分小さくなり reg_limit 適応が促進される。
+    //
+    // 動的 base_tighten: user_eps / REF_EPS(1e-8) から導出。
+    //   user_eps=1e-4 → ratio=10000 → base=10000。
+    //   user_eps=1e-6 → ratio=100   → base=100。
+    //   user_eps=1e-8 → ratio=1     → base=1 (tighten 不要)。
+    //
+    // `use_ruiz` on/off: 行列形状による algorithmic alternative。
     //     on  ... 典型 row/col 不均一行列で cond を改善
     //     off ... `|b|` 巨大 (BOYD2 級) で Ruiz が初期点を歪める系の救済
-    const EPS_TIGHTEN_FACTORS: &[f64] = &[1.0, 10.0, 100.0];
+    let sigma_total = compute_presolve_sigma_total(&presolve_result);
+    let base_tighten = dynamic_base_tighten(sigma_total, user_eps);
+    // 小バッファ: base × 10 を第2候補とする (sigma 推定誤差 + IPM 非線形余裕)。
+    // presolve Ruiz 済なら IPM 側 Ruiz は重複適用しない (use_ruiz=false のみ)。
+    // presolve Ruiz なしなら IPM 側 Ruiz on/off を試す。
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
-        EPS_TIGHTEN_FACTORS.iter().map(|&t| (false, t)).collect()
+        // presolve が Ruiz 済なら IPM 側で重ね掛けすると二重スケールで誤収束するため
+        // `use_ruiz=false` のみを試す。
+        vec![
+            (false, base_tighten),
+            (false, base_tighten * 10.0),
+        ]
     } else {
-        let mut v = Vec::with_capacity(EPS_TIGHTEN_FACTORS.len() * 2);
-        for &t in EPS_TIGHTEN_FACTORS { v.push((true, t)); }
-        for &t in EPS_TIGHTEN_FACTORS { v.push((false, t)); }
-        v
+        // presolve Ruiz なし: IPM 側 Ruiz on/off を試す。
+        // base_tighten=1.0 (sigma=1.0) の場合は {1, 10, 100} × {on, off}。
+        // sigma < 1.0 の LargeCoeffRowScale 由来なら base_tighten が補正済み。
+        vec![
+            (true,  base_tighten),
+            (false, base_tighten),
+            (true,  base_tighten * 10.0),
+            (false, base_tighten * 10.0),
+            (true,  base_tighten * 100.0),
+            (false, base_tighten * 100.0),
+        ]
     };
 
     for &(use_ruiz, tighten) in attempts.iter() {

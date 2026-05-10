@@ -10,9 +10,34 @@ use solver::qp::{solve_qp, solve_qp_warm, QpProblem, QpWarmStart};
 use solver::sparse::CscMatrix;
 use solver::SolveStatus;
 
-// ADMM収束tolerance eps=1e-3に合わせた許容誤差（concurrent solver使用時）
-// 目的関数は勾配スケールの影響で primal 誤差より大きくなる場合があるため 1e-2 を使用
-const EPS: f64 = 1e-2;
+// 解精度の許容値: default user_eps=1e-6 を基準に問題構造から導出する。
+//
+// 目的値: solver は relative gap = |pf-df| / (1 + |obj|) ≤ eps で収束判定する。
+//   → 目的値絶対誤差 ≤ eps × (1 + |obj|)。abs 比較ではなく relative 比較が正しい。
+//   assert_obj_close は relative eps=1e-6 で比較する。
+//
+// 解変数: 内点法の primal 精度は O(eps) ≈ 1e-6 (postsolve 後の丸め込みで数倍)
+//   EPS_SOL: 通常解変数の絶対許容値
+//
+// 退化境界 (λ*=0 かつ制約 active) の解変数: O(sqrt(eps)) ≈ 1e-3
+//   理由: 補完余裕 λ*s=mu で λ→0+ の場合、s≈sqrt(mu) で収束するため。
+//   例: CVXQP1_S (λ*=0, sum(x)=5 active) → xi 誤差≈sqrt(1e-6)/2 ≈ 5e-4
+
+// 解変数の絶対許容値 (postsolve 後の丸め ≈ 数×eps)
+const EPS_SOL: f64 = 1e-5;
+// 退化制約境界 (λ*=0) の解変数許容値
+const EPS_DEG: f64 = 5e-4;
+
+/// 目的値を相対誤差 eps=1e-6 で検証する。
+/// ソルバーの収束判定 relative gap ≤ 1e-6 に対応した正しい比較。
+fn assert_obj_close(actual: f64, expected: f64, name: &str) {
+    let rel = (actual - expected).abs() / (1.0 + expected.abs());
+    assert!(
+        rel < 1e-6,
+        "{}: expected {:.8}, got {:.8} (rel_err={:.2e})",
+        name, expected, actual, rel
+    );
+}
 
 fn assert_close(a: f64, b: f64, eps: f64, name: &str) {
     assert!(
@@ -52,10 +77,10 @@ fn test_hs21() {
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "HS21: status should be Optimal");
-    assert_close(result.solution[0], 10.0, EPS, "HS21: x1* = 10 (upper bound active)");
-    assert_close(result.solution[1], 0.5, EPS, "HS21: x2* = 0.5 (interior min)");
+    assert_close(result.solution[0], 10.0, EPS_SOL, "HS21: x1* = 10 (upper bound active)");
+    assert_close(result.solution[1], 0.5, EPS_SOL, "HS21: x2* = 0.5 (interior min)");
     // QP 目的関数値 = -99.25（原問題値と同一、定数項なし）
-    assert_close(result.objective, -99.25, EPS, "HS21: QP objective = -99.25");
+    assert_obj_close(result.objective, -99.25, "HS21: QP objective = -99.25");
 }
 
 /// HS35: Hock-Schittkowski Problem #35
@@ -95,11 +120,11 @@ fn test_hs35() {
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "HS35: status should be Optimal");
-    assert_close(result.solution[0], 4.0 / 3.0, EPS, "HS35: x1* = 4/3");
-    assert_close(result.solution[1], 7.0 / 9.0, EPS, "HS35: x2* = 7/9");
-    assert_close(result.solution[2], 4.0 / 9.0, EPS, "HS35: x3* = 4/9");
+    assert_close(result.solution[0], 4.0 / 3.0, EPS_SOL, "HS35: x1* = 4/3");
+    assert_close(result.solution[1], 7.0 / 9.0, EPS_SOL, "HS35: x2* = 7/9");
+    assert_close(result.solution[2], 4.0 / 9.0, EPS_SOL, "HS35: x3* = 4/9");
     // QP obj = -80/9 (原問題値 = QP obj + 定数9 = -80/9 + 81/9 = 1/9)
-    assert_close(result.objective, -80.0 / 9.0, EPS, "HS35: QP objective = -80/9");
+    assert_obj_close(result.objective, -80.0 / 9.0, "HS35: QP objective = -80/9");
 }
 
 /// HS51: Hock-Schittkowski Problem #51
@@ -182,12 +207,12 @@ fn test_hs51() {
         assert_close(
             result.solution[i],
             1.0,
-            EPS,
+            EPS_SOL,
             &format!("HS51: x{}* = 1.0", i + 1),
         );
     }
     // QP obj = -6 (原問題値 = QP obj + 定数6 = -6 + 6 = 0)
-    assert_close(result.objective, -6.0, EPS, "HS51: QP objective = -6");
+    assert_obj_close(result.objective, -6.0, "HS51: QP objective = -6");
 }
 
 /// CVXQP1_S: 10変数小型凸QP（Maros-Meszaros CVXQP1_S 相当の合成問題）
@@ -221,16 +246,18 @@ fn test_cvxqp1_s() {
 
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "CVXQP1_S: status should be Optimal");
+    // λ*=0 (制約境界上で dual が零): 解変数の精度は O(sqrt(eps)) ≈ 5e-4 (EPS_DEG)
+    // 目的値は O(eps) まで収束するので EPS_OBJ を使う
     for i in 0..n {
         assert_close(
             result.solution[i],
             0.5,
-            EPS,
+            EPS_DEG,
             &format!("CVXQP1_S: x{}* = 0.5", i + 1),
         );
     }
     // QP obj = 1/2*2*10*0.25 + (-10*0.5) = 2.5 - 5.0 = -2.5
-    assert_close(result.objective, -2.5, EPS, "CVXQP1_S: QP objective = -2.5");
+    assert_obj_close(result.objective, -2.5, "CVXQP1_S: QP objective = -2.5");
 }
 
 /// QPCSTAIR 類似: 6変数・階段構造 QP
@@ -280,8 +307,8 @@ fn test_qpcstair_like() {
     let result = solve_qp(&problem);
     assert_eq!(result.status, SolveStatus::Optimal, "QPCSTAIR: status should be Optimal");
     for k in 0..3 {
-        assert_close(result.solution[2 * k], 1.25, EPS, &format!("QPCSTAIR: x{}* = 1.25", 2*k+1));
-        assert_close(result.solution[2 * k + 1], 0.75, EPS, &format!("QPCSTAIR: x{}* = 0.75", 2*k+2));
+        assert_close(result.solution[2 * k], 1.25, EPS_SOL, &format!("QPCSTAIR: x{}* = 1.25", 2*k+1));
+        assert_close(result.solution[2 * k + 1], 0.75, EPS_SOL, &format!("QPCSTAIR: x{}* = 0.75", 2*k+2));
     }
-    assert_close(result.objective, -9.375, EPS, "QPCSTAIR: QP objective = -9.375");
+    assert_obj_close(result.objective, -9.375, "QPCSTAIR: QP objective = -9.375");
 }
