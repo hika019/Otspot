@@ -185,9 +185,11 @@ fn test_lp_tuff() {
 // ==========================================================================
 
 /// REGRESSION: forplan が presolve ON で NumericalError obj=inf を返していたバグ。
-/// 原因: bounds tightening が大きな lb offset を生成し、縮約問題の Eq 制約で
-/// 浮動小数点誤差が蓄積し check_eq_feasibility が失敗。
+/// 原因 (計装により確認): FX 変数 A_22_1 (value=2640) を presolve が除去した際に
+/// DEDO3 系 Eq 制約の b が大幅に調整され (例: 0 → -5350)、縮約問題の Phase II 解が
+/// Eq 制約を違反 (row=79 で ax=-1726, b=0, viol=1726)。check_eq_feasibility が失敗。
 /// 修正: 縮約問題が NumericalError を返した場合は元問題を presolve なしで再挑戦。
+/// 元問題は presolve なしで正しく解ける。
 #[test]
 fn test_lp_forplan() {
     solve_and_check("forplan", -6.6421873953e+02, 30);

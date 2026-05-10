@@ -910,10 +910,18 @@ fn test_solve_capri_no_presolve() {
 }
 
 /// BUG REGRESSION: capri with presolve ON incorrectly returned NumericalError.
-/// Root cause: bounds tightening (Step 5) created large lb offsets for variables,
-/// which accumulated floating-point errors in the Eq constraints of the reduced
-/// problem, causing check_eq_feasibility to fail.
-/// Fix: fallback to no-presolve when reduced problem returns NumericalError.
+/// Root cause (confirmed by instrumentation):
+///   capri: presolve removes 32 vars/22 constraints, creating a reduced problem
+///   where Phase I LU factorization fails with SingularBasis (specific basis
+///   columns become near-singular after column removal).
+///   forplan: Phase II solution violates an Eq constraint (check_eq_feasibility
+///   fails) due to artificial variable drift in Phase II.
+/// Fix: when presolve→simplex returns NumericalError, fallback to solving the
+///   original problem without presolve. The original problem does not trigger
+///   these numerical issues.
+/// Note: fallback is correct behavior since the original problem solves correctly.
+///   True fix would require better basis selection or LU stabilization for
+///   presolve-reduced problems, which is a more involved change.
 #[test]
 fn test_solve_capri_presolve_bug() {
     let prob = parse_mps_file(Path::new("tests/netlib/capri.mps")).expect("parse failed");

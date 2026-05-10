@@ -105,9 +105,10 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 };
                 let eff_opts = opts_no_ws.as_ref().unwrap_or(options);
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
-                // Presolve で bounds tightening が大きな offset を生成した場合、
-                // 縮約問題の Eq 制約で浮動小数点誤差が蓄積して check_eq_feasibility が失敗する。
-                // NumericalError が返った場合は元問題を presolve なしで再挑戦する (fallback)。
+                // Presolve で縮約された問題を Simplex が解けない場合 (SingularBasis / check_eq_feasibility 失敗):
+                // - capri: presolve 後の縮約問題が Phase I で SingularBasis (初期基底が特異)
+                // - forplan: Phase II 後の解が Eq 制約を大きく違反 (人工変数の数値ドリフト)
+                // いずれも元問題 (presolve なし) は Simplex で正しく解けるため、fallback する。
                 if raw.status == SolveStatus::NumericalError {
                     return solve_without_presolve(problem, options);
                 }
