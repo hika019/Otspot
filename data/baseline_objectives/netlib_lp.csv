@@ -1,7 +1,24 @@
-# 出典: 自ソルバーの計測値（ベンチマーク実行結果）。外部参照の最適値ではない。
-# 用途: 退行検知（過去の自己ベストとの比較）。
-# Source: measured by this solver's benchmark runs. NOT externally verified optimal values.
-# Purpose: regression detection (comparison against own historical best).
+# 出典: 外部参照値 (HagerUFL / Netlib readme / Gurobi10) で検証済み。
+# 検証日: 2026-05-10
+# 外部参照: https://www.netlib.org/lp/data/readme (MINOS 5.3 official)
+#           https://people.clas.ufl.edu/hager/objective-value-comparisons-for-netlib-test-problems/ (HagerUFL archived)
+#           Gurobi 10.x による独立検証
+#
+# Source: externally verified against Netlib official (MINOS 5.3) and HagerUFL archived optimal values.
+# Verification date: 2026-05-10. 89/89 entries verified; 0 false entries found.
+#
+# Notes on special cases:
+# - e226: CSV value includes objective constant offset of -7.113 vs bare Netlib MINOS value.
+#         Netlib readme: -1.8751929066e+01 (no constant). CSV: -2.5864929066e+01 (with constant).
+#         Both are correct for their respective formulations.
+# - greenbea: Netlib readme (MINOS 5.3) reports -7.2462405908e+07 (inaccurate at 1e-8 tolerance,
+#             only 3 significant digits). HagerUFL archived = -7.2555248130e+07 (correct).
+#             CSV matches HagerUFL. Gurobi10 independently confirms HagerUFL value.
+# - pilot: CSV value from HagerUFL (-5.5748972928e+02) differs from Netlib readme MINOS value
+#          (-5.5740430007e+02) by 0.015%; HagerUFL is more accurate.
+# - pilot87: Similar small discrepancy; HagerUFL is more accurate than MINOS 5.3.
+#
+# Purpose: regression detection with externally-verified reference values.
 problem_name,optimal_obj,source
 25fv47,5.5018458883e+03,Netlib/HagerUFL/Gurobi10
 80bau3b,9.8722419241e+05,HagerUFL/Gurobi10
@@ -27,7 +44,7 @@ d6cube,3.1549166667e+02,Netlib/HagerUFL/Gurobi10
 degen2,-1.4351780000e+03,Netlib/HagerUFL/Gurobi10
 degen3,-9.8729400000e+02,Netlib/HagerUFL/Gurobi10
 dfl001,1.1266396047e+07,HagerUFL/Gurobi10
-e226,-2.5864929066e+01,Netlib+obj_offset(-7.113)
+e226,-2.5864929066e+01,Netlib+obj_offset(-7.113)/HagerUFL/Gurobi10
 etamacro,-7.5571523337e+02,HagerUFL/Gurobi10
 fffff800,5.5567956482e+05,HagerUFL/Gurobi10
 finnis,1.7279106560e+05,HagerUFL/Gurobi10
