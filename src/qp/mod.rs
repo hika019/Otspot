@@ -101,6 +101,40 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         return ipm_v2::solve_qp_v2(problem, options);
     }
 
+    // Simplex が Optimal を返しても reduced_costs に負値が残る場合がある。
+    // これは LU 基底の数値精度劣化 (ill-conditioning) や退化縮退が原因で、
+    // primal feasible だが dual infeasible な解となる。
+    // bench の compute_dfeas_orig と同じ基準 (成分相対化) で dfr を検査し、
+    // dfr > eps ならば Simplex の解は双対非実行可能として IPM にフォールバックする。
+    if simplex_result.status == SolveStatus::Optimal {
+        let rc = &simplex_result.reduced_costs;
+        let n = lp.num_vars;
+        if !rc.is_empty() && rc.len() == n {
+            let mut dfr: f64 = 0.0;
+            for j in 0..n {
+                // FX 変数 (lb ≈ ub) は除外
+                let (lb_j, ub_j) = lp.bounds[j];
+                if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
+                    continue;
+                }
+                // EmptyCol (A の列が空) は除外
+                if lp.a.col_ptr.len() > j + 1 && lp.a.col_ptr[j + 1] - lp.a.col_ptr[j] == 0 {
+                    continue;
+                }
+                let rc_j = rc[j];
+                let viol = f64::max(0.0, -rc_j);
+                if viol > 0.0 {
+                    let scale_j = 1.0 + rc_j.abs() + lp.c[j].abs();
+                    dfr = dfr.max(viol / scale_j);
+                }
+            }
+            if dfr > options.ipm_eps() {
+                // Simplex の解は双対非実行可能 (dfr > eps)。IPM にフォールバックする。
+                return ipm_v2::solve_qp_v2(problem, options);
+            }
+        }
+    }
+
     let result = simplex_result;
     match result.status {
         SolveStatus::Optimal => {
