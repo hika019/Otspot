@@ -236,7 +236,9 @@ impl LuFactorization {
 
             let (pivot_row, pivot_col) = match best_pivot {
                 Some(p) => p,
-                None => return Err(SolverError::SingularBasis { step }),
+                None => {
+                    return Err(SolverError::SingularBasis { step });
+                }
             };
 
             p_row[step] = pivot_row;

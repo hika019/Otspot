@@ -91,6 +91,9 @@ pub(crate) fn dual_simplex_core_advanced(
     // Step 1: LuBasis初期化
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
+        Err(crate::error::SolverError::SingularBasis { .. }) => {
+            return SimplexOutcome::SingularBasis;
+        }
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
             return SimplexOutcome::Timeout(obj);
@@ -242,6 +245,9 @@ pub(crate) fn dual_simplex_core_advanced(
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
+                if basis_mgr.singular_basis {
+                    return SimplexOutcome::SingularBasis;
+                }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Timeout(obj);
             }

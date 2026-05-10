@@ -41,7 +41,11 @@ pub(crate) struct LuBasis {
     lu: lu::LuFactorization,
     eta_file: eta::EtaFile,
     basis_indices: Vec<usize>,
-    /// 再因子分解が特異基底により失敗した場合 true。
+    /// 再因子分解が特異基底（SingularBasis）により失敗した場合 true。
+    /// DeadlineExceeded では false のまま。
+    /// 呼び出し元はこのフラグを確認して適切な outcome を返すこと。
+    pub(crate) singular_basis: bool,
+    /// 再因子分解が失敗した場合 true（SingularBasis または DeadlineExceeded）。
     /// 呼び出し元はこのフラグを確認してsolverを安全に打ち切ること。
     pub(crate) refactor_failed: bool,
 }
@@ -62,6 +66,7 @@ impl LuBasis {
             lu,
             eta_file: eta::EtaFile::new(max_etas),
             basis_indices: basis.to_vec(),
+            singular_basis: false,
             refactor_failed: false,
         })
     }
@@ -69,6 +74,33 @@ impl LuBasis {
     /// 再因子分解が必要かどうかを返す（eta蓄積数ベース）
     pub(crate) fn needs_refactor(&self) -> bool {
         self.eta_file.needs_refactor()
+    }
+
+    /// 蓄積された eta 行列の数を返す
+    pub(crate) fn eta_count(&self) -> usize {
+        self.eta_file.etas.len()
+    }
+
+    /// eta ファイルをクリアして強制的に基底行列を再因子分解する。
+    ///
+    /// 数値的に不安定なピボット（|pivot| / max_col が極めて小さい）の場合に
+    /// 呼び出し元が使用する。成功すれば eta クリア + LU 更新、失敗は `refactor_failed = true`。
+    pub(crate) fn force_refactor_timed(&mut self, a: &CscMatrix, basis: &[usize], deadline: Option<Instant>) {
+        match refactor::refactor_timed(a, basis, deadline) {
+            Ok(new_lu) => {
+                self.lu = new_lu;
+                self.eta_file.etas.clear();
+                self.basis_indices = basis.to_vec();
+            }
+            Err(crate::error::SolverError::SingularBasis { .. }) => {
+                self.singular_basis = true;
+                self.refactor_failed = true;
+            }
+            Err(_) => {
+                // DeadlineExceeded など
+                self.refactor_failed = true;
+            }
+        }
     }
 
     /// 数値安定性を検査し、必要であれば deadline 付きで基底行列を再因子分解する。
@@ -85,8 +117,13 @@ impl LuBasis {
                     self.eta_file.etas.clear();
                     self.basis_indices = basis.to_vec();
                 }
+                Err(crate::error::SolverError::SingularBasis { .. }) => {
+                    // 特異基底: SingularBasis フラグを立て、呼び出し元が NumericalError を返せるようにする
+                    self.singular_basis = true;
+                    self.refactor_failed = true;
+                }
                 Err(_) => {
-                    // 特異基底または deadline 超過: フラグを立てて打ち切り
+                    // DeadlineExceeded など: refactor_failed のみ
                     self.refactor_failed = true;
                 }
             }

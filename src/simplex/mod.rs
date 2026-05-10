@@ -267,6 +267,8 @@ pub(crate) enum SimplexOutcome {
     Unbounded,
     /// タイムアウト（timeout_secs を超過した）。値は打ち切り時点の目的関数値
     Timeout(f64),
+    /// 基底行列が特異（サイクリック基底など）。IPM フォールバック用
+    SingularBasis,
 }
 
 // --- Standard form construction ---
@@ -668,6 +670,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                 }
             }
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     } else {
         // Phase I: build extended matrix with artificials
@@ -862,6 +865,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                         }
                     }
+                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -884,6 +888,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }
 }
@@ -984,9 +989,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
+        Err(crate::error::SolverError::SingularBasis { .. }) => {
+            // 初期基底が特異: 呼び出し元に NumericalError を伝搬して IPM フォールバックを促す
+            return SimplexOutcome::SingularBasis;
+        }
         Err(_) => {
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            return SimplexOutcome::Timeout(obj); // BUG-SX-002: LU分解失敗は偽OptimalではなくTimeout
+            return SimplexOutcome::Timeout(obj); // DeadlineExceeded 等
         }
     };
 
@@ -1045,6 +1054,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         // 4. FTRAN: pivot column d = B^{-1} * a_entering
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        // 元の列 inf-ノルムを保存（borrow は d_sv の .to_vec() で終了）
+        let orig_col_norm = col_vals.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
         let mut d_sv = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),
@@ -1052,6 +1063,34 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         };
         basis_mgr.ftran(&mut d_sv);
         d_sv.to_dense_into(&mut d_dense);
+
+        // 4b. FTRAN 安定性チェック: eta 蓄積による数値誤差が d を汚染していないか確認する。
+        //     汚染シグナル: d 値が inf/NaN、または d の最大値が元の列ノルムの 1e12 倍超。
+        //     汚染検出時は即時再因子分解でリセット後に d を再計算する。
+        {
+            let d_max_abs = d_dense.iter().cloned().fold(0.0f64, |acc, v| {
+                if v.is_finite() { acc.max(v.abs()) } else { f64::INFINITY }
+            });
+            // 期待される d のノルムは原則として原列ノルムの数倍以内。
+            // 1e12 倍超は eta 蓄積による数値爆発とみなす（または inf/NaN）。
+            let d_corrupt = !d_max_abs.is_finite()
+                || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
+            if d_corrupt && basis_mgr.eta_count() > 0 {
+                basis_mgr.force_refactor_timed(a, basis, options.deadline);
+                if basis_mgr.refactor_failed {
+                    if basis_mgr.singular_basis {
+                        return SimplexOutcome::SingularBasis;
+                    }
+                    let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                    return SimplexOutcome::Timeout(obj);
+                }
+                // 新鮮な LU で d を再計算
+                let (cr2, cv2) = a.get_column(entering_col).unwrap();
+                d_sv = SparseVec { indices: cr2.to_vec(), values: cv2.to_vec(), len: m };
+                basis_mgr.ftran(&mut d_sv);
+                d_sv.to_dense_into(&mut d_dense);
+            }
+        }
         let d = &d_dense;
 
         // 5. Ratio test (Bland's rule for ties)
@@ -1103,17 +1142,36 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;
 
-        // 10. Update basis manager
-        basis_mgr.update(entering_col, leaving_row, &d_sv);
+        // 10. Update basis index and check pivot stability
         basis[leaving_row] = entering_col;
 
-        // 11. Refactor if needed
-        // timeout audit fix — deadline 付きで LU 再因子分解を実行
-        basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+        // ピボット安定性チェック: |d[leaving_row]| / max(d) が閾値未満の場合、
+        // eta の inv_pivot が大きくなりすぎて FTRAN/BTRAN が数値爆発する。
+        // その場合は eta を追加せず即時再因子分解でリセットする（eta 蓄積誤差を防ぐ）。
+        let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
+            && basis_mgr.eta_count() > 0;
+
+        if pivot_unstable {
+            // 不安定ピボット: eta を追加せず直ちに再因子分解（新 basis で LU をリセット）
+            basis_mgr.force_refactor_timed(a, basis, options.deadline);
+        } else {
+            // 通常ピボット: eta で逐次更新
+            basis_mgr.update(entering_col, leaving_row, &d_sv);
+
+            // 11. Refactor if needed
+            // timeout audit fix — deadline 付きで LU 再因子分解を実行
+            basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+        }
+
         // 特異基底または deadline 超過による再因子分解失敗 → 適切な結果を返す
         if basis_mgr.refactor_failed {
+            if basis_mgr.singular_basis {
+                // 特異基底（サイクリック構造など）: NumericalError として上流に伝搬
+                // 呼び出し元（two_phase_simplex）が IPM フォールバックを選択できる
+                return SimplexOutcome::SingularBasis;
+            }
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-            // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
             return SimplexOutcome::Timeout(obj);
         }
     }
@@ -1822,14 +1880,15 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &mut basis, 1, 3, 3, &mut pricing, &opts,
         );
-        // MaxIterations廃止後 → Optimal または Timeout が返る
+        // MaxIterations廃止後 → Optimal、Timeout、または SingularBasis が返る
         assert!(
-            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_)),
-            "BUG-SX-003: refactor_failed 時は Optimal または Timeout を返すべき（got: {:?}）",
+            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_) | SimplexOutcome::SingularBasis),
+            "BUG-SX-003: refactor_failed 時は Optimal/Timeout/SingularBasis を返すべき（got: {:?}）",
             match &outcome {
                 SimplexOutcome::Optimal(..) => "Optimal",
                 SimplexOutcome::Unbounded => "Unbounded",
                 SimplexOutcome::Timeout(_) => "Timeout",
+                SimplexOutcome::SingularBasis => "SingularBasis",
             }
         );
     }

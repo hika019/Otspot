@@ -93,7 +93,15 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         Err(_) => return SolverResult::infeasible(),
     };
 
-    let result = SimplexBackend.solve(&lp, options);
+    let simplex_result = SimplexBackend.solve(&lp, options);
+
+    // 特異基底（サイクリック構造のネットワーク流 LP など）では Simplex が NumericalError を返す。
+    // Simplex は基底行列を必要とするが IPM は不要なので、IPM にフォールバックする。
+    if simplex_result.status == SolveStatus::NumericalError {
+        return ipm_v2::solve_qp_v2(problem, options);
+    }
+
+    let result = simplex_result;
     match result.status {
         SolveStatus::Optimal => {
             let x = result.solution.clone();

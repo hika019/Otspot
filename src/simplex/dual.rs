@@ -131,6 +131,9 @@ fn cold_start_dual(
             ..Default::default()
             };
         }
+        SimplexOutcome::SingularBasis => {
+            return SolverResult::numerical_error();
+        }
         SimplexOutcome::Optimal(_, _) => {
             // Phase I完了: x_B ≥ 0 (主実行可能)
         }
@@ -200,6 +203,7 @@ fn warm_outcome_to_result(
             ..Default::default()
             }
         }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }
 
@@ -254,6 +258,7 @@ fn primal_outcome_to_result(
             ..Default::default()
             }
         }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }
 
@@ -281,8 +286,10 @@ fn dual_simplex_core(
 
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
+        Err(crate::error::SolverError::SingularBasis { .. }) => {
+            return SimplexOutcome::SingularBasis;
+        }
         Err(_) => {
-            // BUG-SX-002: LU分解失敗は偽OptimalではなくTimeout
             let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
             return SimplexOutcome::Timeout(obj);
         }
@@ -370,11 +377,12 @@ fn dual_simplex_core(
         let pivot_element = alpha_dense[leaving_row];
         if pivot_element.abs() < PIVOT_TOL {
             // 数値的に不安定 → refactorして被縮小費用を再計算
-            // timeout audit fix — deadline 付きで LU 再因子分解
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
+                if basis_mgr.singular_basis {
+                    return SimplexOutcome::SingularBasis;
+                }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
@@ -424,11 +432,12 @@ fn dual_simplex_core(
 
         // Step 11: 必要に応じてrefactor + 被縮小費用リセット
         if basis_mgr_needs_refactor_approx(_iter) {
-            // timeout audit fix — deadline 付きで LU 再因子分解
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
+                if basis_mgr.singular_basis {
+                    return SimplexOutcome::SingularBasis;
+                }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                // refactor_failed: 数値障害による打ち切り → Timeout（deadline有無問わず）
                 return SimplexOutcome::Timeout(obj);
             }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
@@ -777,7 +786,8 @@ mod tests {
     }
 
     /// BUG-SX-002 (dual): LuBasis::new Err → 偽Optimal廃止
-    /// dual_simplex_core で特異初期基底を渡し、Timeout が返ることを確認。
+    /// dual_simplex_core で特異初期基底を渡し、Optimal 以外が返ることを確認。
+    /// SingularBasis が発生した場合は SingularBasis を返す（Timeout ではなく）。
     #[test]
     fn test_sx002_dual_lu_basis_err_should_return_timeout() {
         use crate::simplex::dual::dual_simplex_core;
@@ -797,9 +807,10 @@ mod tests {
             !matches!(outcome, SimplexOutcome::Optimal(..)),
             "BUG-SX-002 (dual): LuBasis::new Err 時は Optimal を返してはならない"
         );
+        // 特異基底は SingularBasis または Timeout を返す（Optimal は不可）
         assert!(
-            matches!(outcome, SimplexOutcome::Timeout(..)),
-            "BUG-SX-002 (dual): LuBasis::new Err 時は Timeout を返すべき"
+            matches!(outcome, SimplexOutcome::Timeout(..) | SimplexOutcome::SingularBasis),
+            "BUG-SX-002 (dual): LuBasis::new Err 時は Timeout または SingularBasis を返すべき"
         );
     }
 }
