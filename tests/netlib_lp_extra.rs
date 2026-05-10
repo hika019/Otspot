@@ -184,12 +184,11 @@ fn test_lp_tuff() {
 // === BUG regression test: forplan ===
 // ==========================================================================
 
-/// BUG: forplan が NumericalError obj=inf を返す。
-/// boeing1 / capri と並ぶ既知バグ (lp_coverage_screen で検出)。
-/// 推定原因: 大量 UP 境界 + 数値スケール広域 (1e0 ~ 1e7) で破綻。
-/// 修正されたら #[ignore] を外す。
+/// REGRESSION: forplan が presolve ON で NumericalError obj=inf を返していたバグ。
+/// 原因: bounds tightening が大きな lb offset を生成し、縮約問題の Eq 制約で
+/// 浮動小数点誤差が蓄積し check_eq_feasibility が失敗。
+/// 修正: 縮約問題が NumericalError を返した場合は元問題を presolve なしで再挑戦。
 #[test]
-#[ignore = "BUG: forplan NumericalError obj=inf. 大量UP+広域スケール"]
-fn test_lp_forplan_bug() {
+fn test_lp_forplan() {
     solve_and_check("forplan", -6.6421873953e+02, 30);
 }

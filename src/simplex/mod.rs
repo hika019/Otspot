@@ -105,6 +105,12 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 };
                 let eff_opts = opts_no_ws.as_ref().unwrap_or(options);
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
+                // Presolve で bounds tightening が大きな offset を生成した場合、
+                // 縮約問題の Eq 制約で浮動小数点誤差が蓄積して check_eq_feasibility が失敗する。
+                // NumericalError が返った場合は元問題を presolve なしで再挑戦する (fallback)。
+                if raw.status == SolveStatus::NumericalError {
+                    return solve_without_presolve(problem, options);
+                }
                 return presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
             }
             Ok(_) => {
@@ -369,6 +375,10 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
                     b[i] = -b[i];
                     slack_coeff[i] = -1.0;
                 } else {
+                    // b[i] が [-PIVOT_TOL, 0) の範囲にある場合: 変数下限シフト
+                    // (presolve 起因の丸め誤差など) による浮動小数点ノイズ。
+                    // slack の初期値が微小負になるのを防ぐため 0 にクランプ。
+                    if b[i] < 0.0 { b[i] = 0.0; }
                     slack_coeff[i] = 1.0;
                 }
                 slack_col_idx.push(Some(n_slack));
@@ -731,39 +741,32 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
 
                 // 案C: Phase I 完了後の縮退人工変数 pivot out
-                // x_b[i] ≈ 0 の人工変数を構造変数で置換し、Phase II の基底品質を改善する。
-                // b=0 の Eq 制約で Phase I が即座終了した場合に人工変数が基底に残留する縮退を解消する。
-                // 注: bore3d は B1 (fixpoint iteration) で修正済みのため、案C は現状 DISABLED。
-                // B1 で b=0 Eq行がすでに presolve で除去される → Phase I 自体が実行されない。
-                // hs51 のような自由変数+Le制約の feasibility LP では基底が特異化するリスクがある。
-                if true {
+                // x_b[i] ≈ 0 の人工変数（basis[i] >= sf.n_total）を非人工列で置換し、
+                // Phase II が人工変数を基底に残したまま目的関数を最適化するのを防ぐ。
+                //
+                // Eq/Le/Ge 全行に適用:
+                // - Eq 行: 直接人工変数が basis に入る。x_b[i]=0 の縮退で残留。
+                // - Ge/Le 行 (b > 0): surplus 変数に加え人工変数も basis に入る。
+                //   Phase I が surplus を基底から追い出せず人工変数が縮退 0 で残留することがある。
+                // 置換候補: 非基底の非人工列 (j < sf.n_total) で行 i の係数が最大のもの。
+                // 安全チェック: LU 失敗なら全変更をリバート。
+                {
                     // 変更前の基底を保存。LU検証失敗時にリバートするため。
                     let basis_before_case_c = basis.clone();
-                    let mut is_basic_structural = vec![false; sf.n_total];
+                    let mut is_basic = vec![false; n_ext];
                     for &col in basis.iter() {
-                        if col < sf.n_total {
-                            is_basic_structural[col] = true;
-                        }
+                        is_basic[col] = true;
                     }
                     for i in 0..m {
-                        // 注: build_standard_form では Eq行は slack_col_idx=None のため
-                        // initial_basis[i] が vec! 初期値0のまま残る。この0をセンチネル値として
-                        // Eq行判定に再利用している。初期化値を変更する場合は本フィルタも要修正。
-                        // (後続の basis[i] < sf.n_total が二重ガードとして機能)
-                        // Eq行のみ適用。Le/Ge行（符号反転済み含む）はスラック変数を持つため
-                        // sf.initial_basis[i] >= sf.n_shifted となりスキップする。
-                        if sf.initial_basis[i] >= sf.n_shifted {
-                            continue;
-                        }
+                        // 行 i の基底が人工変数 (>= n_total) かつ縮退 (x_b ≈ 0) なら pivot out
                         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
                             continue;
                         }
-                        // 行 i で最大 |a_ext[i,j]| の非基底構造列 j を探す
+                        // 行 i で最大 |a_ext[i,j]| の非基底・非人工列 j を探す
                         let mut best_j = None;
                         let mut best_abs = PIVOT_TOL;
-                        #[allow(clippy::needless_range_loop)]
                         for j in 0..sf.n_total {
-                            if is_basic_structural[j] {
+                            if is_basic[j] {
                                 continue;
                             }
                             if let Ok((rows, vals)) = a_ext.get_column(j) {
@@ -776,7 +779,8 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             }
                         }
                         if let Some(j) = best_j {
-                            is_basic_structural[j] = true;
+                            is_basic[basis[i]] = false;
+                            is_basic[j] = true;
                             basis[i] = j;
                             // degenerate pivot: x_b[i] = 0, 他の x_b は変化なし
                         }
@@ -900,11 +904,14 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
-        if *ct == ConstraintType::Eq {
-            let violation = (ax_i - bi).abs();
-            if violation > FEASIBILITY_TOL {
-                return false;
-            }
+        let violation = match ct {
+            ConstraintType::Eq => (ax_i - bi).abs(),
+            ConstraintType::Le => (ax_i - bi).max(0.0),
+            ConstraintType::Ge => (bi - ax_i).max(0.0),
+            _ => 0.0,
+        };
+        if violation > FEASIBILITY_TOL {
+            return false;
         }
     }
     true

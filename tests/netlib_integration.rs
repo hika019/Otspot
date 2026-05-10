@@ -909,18 +909,28 @@ fn test_solve_capri_no_presolve() {
     println!("capri (no presolve) solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
-/// BUG REGRESSION: capri with presolve ON incorrectly returns NumericalError.
-/// The presolve transformation corrupts the problem for capri (271 constraints, 353 vars).
-/// Once the presolve bug is fixed, this test should be updated to expect Optimal.
+/// BUG REGRESSION: capri with presolve ON incorrectly returned NumericalError.
+/// Root cause: bounds tightening (Step 5) created large lb offsets for variables,
+/// which accumulated floating-point errors in the Eq constraints of the reduced
+/// problem, causing check_eq_feasibility to fail.
+/// Fix: fallback to no-presolve when reduced problem returns NumericalError.
 #[test]
 fn test_solve_capri_presolve_bug() {
     let prob = parse_mps_file(Path::new("tests/netlib/capri.mps")).expect("parse failed");
     let result = solve(&prob); // presolve ON (default)
-    // KNOWN BUG: presolve returns NumericalError instead of Optimal for capri.
-    // When fixed, change this to assert_eq!(result.status, SolveStatus::Optimal).
-    println!("capri (presolve ON): status={:?}, obj={:.4} [expected Optimal ~2690.01]", result.status, result.objective);
-    // For now just verify it doesn't panic. The bug is documented.
-    // Once fixed: assert_eq!(result.status, SolveStatus::Optimal);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "capri (presolve ON) must return Optimal, got {:?} obj={:.4}",
+        result.status, result.objective
+    );
+    let expected_obj = 2690.012914;
+    let rel = (result.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
+    assert!(
+        rel < 1e-3,
+        "capri (presolve ON) obj={:.4} expected ~{:.4} (rel_err={:.2e})",
+        result.objective, expected_obj, rel
+    );
 }
 
 // --- boeing1: solver feasibility bug ---
