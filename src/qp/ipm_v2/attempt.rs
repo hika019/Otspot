@@ -346,25 +346,41 @@ fn solve_qp_v2_with_runner(
     // 小バッファ: base × 10 を第2候補とする (sigma 推定誤差 + IPM 非線形余裕)。
     // presolve Ruiz 済なら IPM 側 Ruiz は重複適用しない (use_ruiz=false のみ)。
     // presolve Ruiz なしなら IPM 側 Ruiz on/off を試す。
+    //
+    // 段階的 tighten: base → base×10 → base/10 → 1 の順で試す。
+    // base/10 は旧 EPS_TIGHTEN_FACTORS の中間値 (e.g. eps=1e-6 → base=100 → 10 も試す)。
+    // QGFRDXPN (sigma=9.577e-6) は tighten=10 (eps_scaled≈9.6e-13) で収束するが
+    // tighten=100 (eps_scaled≈9.6e-14) では IPM floor を下回り stall する。
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
-        // presolve が Ruiz 済なら IPM 側で重ね掛けすると二重スケールで誤収束するため
-        // `use_ruiz=false` のみを試す。
-        vec![
+        let mut v = vec![
             (false, base_tighten),
             (false, base_tighten * 10.0),
-        ]
+        ];
+        if base_tighten > 10.0 {
+            v.push((false, base_tighten / 10.0));
+        }
+        if base_tighten > 1.0 {
+            v.push((false, 1.0));
+        }
+        v
     } else {
-        // presolve Ruiz なし: IPM 側 Ruiz on/off を試す。
-        // base_tighten=1.0 (sigma=1.0) の場合は {1, 10, 100} × {on, off}。
-        // sigma < 1.0 の LargeCoeffRowScale 由来なら base_tighten が補正済み。
-        vec![
+        let mut v = vec![
             (true,  base_tighten),
             (false, base_tighten),
             (true,  base_tighten * 10.0),
             (false, base_tighten * 10.0),
             (true,  base_tighten * 100.0),
             (false, base_tighten * 100.0),
-        ]
+        ];
+        if base_tighten > 10.0 {
+            v.push((true,  base_tighten / 10.0));
+            v.push((false, base_tighten / 10.0));
+        }
+        if base_tighten > 1.0 {
+            v.push((true,  1.0));
+            v.push((false, 1.0));
+        }
+        v
     };
 
     for &(use_ruiz, tighten) in attempts.iter() {
