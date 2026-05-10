@@ -530,6 +530,13 @@ mod tests {
 }
 
 fn main() {
+    // bench_parallel.sh 経由でのみ実行可能（直接実行禁止）
+    if std::env::var("_BENCH_PARALLEL_CALLER").as_deref() != Ok("1") {
+        eprintln!("[qps_benchmark] エラー: 直接実行禁止。bench_parallel.sh 経由で実行せよ。");
+        eprintln!("[qps_benchmark] 使い方: bash scripts/bench_parallel.sh --data-dir DIR --solver SOLVER --timeout SEC --output FILE --jobs N");
+        std::process::exit(1);
+    }
+
     let args: Vec<String> = env::args().collect();
 
     // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
@@ -826,9 +833,11 @@ fn main() {
                             )
                         } else {
                             // Step 9: 正解値照合
+                            // ベースラインは obj_offset (N-row RHS) を含まないため除去して比較
+                            let obj_for_baseline = result.objective - prob.obj_offset;
                             match check_baseline_objective(
                                 &name,
-                                result.objective,
+                                obj_for_baseline,
                                 &baseline_objectives,
                                 eps_obj,
                             ) {
@@ -839,7 +848,7 @@ fn main() {
                                         format!(
                                             "[{}] obj={:.2e} known={:.2e} err={:.1}%",
                                             method_label,
-                                            result.objective,
+                                            obj_for_baseline,
                                             baseline_objectives.get(&name).unwrap(),
                                             rel_err * 100.0
                                         ),
@@ -873,7 +882,7 @@ fn main() {
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
                                             method_label,
-                                            result.objective,
+                                            obj_for_baseline,
                                             pfeas,
                                             pfeas_normalized,
                                             pfc,
