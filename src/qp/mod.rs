@@ -1219,6 +1219,9 @@ pub(crate) fn refine_kkt_iterative(
     // Q≠0 でも成立 (x を動かさないため)。
     let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
     if n_dual > 0 {
+        // y が更新されたので bound_duals (z) も KKT から再計算する。
+        // z を更新しないと bound-active 変数の r_d[j] = Qx[j]+c[j]+A^Ty[j]+z_old[j] ≠ 0 になる。
+        refit_bound_duals_kkt(problem, result);
         return n_dual;
     }
     // dual-only が改善できなかった場合 (df 既に < target / G singular / no improvement) は
