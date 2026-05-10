@@ -2,7 +2,7 @@
 name = "solver"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR MIT"
+license = "AGPL-3.0-only"
 description = "A high-performance linear programming solver using the Revised Simplex method with sparse LU decomposition"
 readme = "README.md"
 keywords = ["linear-programming", "optimization", "simplex", "operations-research", "lp"]
