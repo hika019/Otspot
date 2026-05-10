@@ -12,9 +12,9 @@ use solver::model::{Model, ModelError, SolveError};
 use solver::constraint;
 use solver::sparse::CscMatrix;
 
-// ユニットテスト許容誤差。LP はシンプレックスなので 1e-6、QP は IPM なので少し緩める。
-const LP_TOL: f64 = 1e-6;
-const QP_TOL: f64 = 2e-3;
+// ユニットテスト許容誤差。default user_eps=1e-6 に対して同じ基準を使う。
+// アルゴリズム (Simplex/IPM) による緩和は認めない: 簡単な問題で 1e-6 未達なら solver bug。
+const TOL: f64 = 1e-6;
 
 // ---------------------------------------------------------------------------
 // 1. README の production planning 問題 — 最もシンプルな入口テスト
@@ -41,15 +41,15 @@ fn model_lp_production_planning() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        (result.objective() - 3.0).abs() < LP_TOL,
+        (result.objective() - 3.0).abs() < TOL,
         "obj={} expected 3.0", result.objective()
     );
     assert!(
-        (result[x] - 3.0).abs() < LP_TOL,
+        (result[x] - 3.0).abs() < TOL,
         "x={} expected 3.0", result[x]
     );
     assert!(
-        result[y].abs() < LP_TOL,
+        result[y].abs() < TOL,
         "y={} expected 0.0", result[y]
     );
 }
@@ -77,16 +77,16 @@ fn model_lp_maximize() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        (result.objective() - 50.0).abs() < LP_TOL,
+        (result.objective() - 50.0).abs() < TOL,
         "obj={} expected 50.0", result.objective()
     );
     // 最適解は y=10, x=0。LP の退化はないのでユニーク。
     assert!(
-        result[x].abs() < LP_TOL,
+        result[x].abs() < TOL,
         "x={} expected 0.0", result[x]
     );
     assert!(
-        (result[y] - 10.0).abs() < LP_TOL,
+        (result[y] - 10.0).abs() < TOL,
         "y={} expected 10.0", result[y]
     );
 }
@@ -114,12 +114,12 @@ fn model_lp_equality_constraint() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        (result.objective() - 5.0).abs() < LP_TOL,
+        (result.objective() - 5.0).abs() < TOL,
         "obj={} expected 5.0", result.objective()
     );
     // 等式制約を満たしているか
     assert!(
-        (result[x] + result[y] - 5.0).abs() < LP_TOL,
+        (result[x] + result[y] - 5.0).abs() < TOL,
         "x+y={} should equal 5.0", result[x] + result[y]
     );
 }
@@ -149,15 +149,15 @@ fn model_lp_variable_bounds() {
 
     // 下限に張り付く
     assert!(
-        (result[x] - 2.0).abs() < LP_TOL,
+        (result[x] - 2.0).abs() < TOL,
         "x={} expected 2.0 (lower bound)", result[x]
     );
     assert!(
-        (result[y] - 1.0).abs() < LP_TOL,
+        (result[y] - 1.0).abs() < TOL,
         "y={} expected 1.0 (lower bound)", result[y]
     );
     assert!(
-        (result.objective() - 3.0).abs() < LP_TOL,
+        (result.objective() - 3.0).abs() < TOL,
         "obj={} expected 3.0", result.objective()
     );
 }
@@ -231,15 +231,15 @@ fn model_qp_simple() {
     let result = model.solve().expect("QP solve failed");
 
     assert!(
-        (result[x] - 2.0).abs() < QP_TOL,
+        (result[x] - 2.0).abs() < TOL,
         "x={} expected 2.0", result[x]
     );
     assert!(
-        (result[y] - 2.0).abs() < QP_TOL,
+        (result[y] - 2.0).abs() < TOL,
         "y={} expected 2.0", result[y]
     );
     assert!(
-        (result.objective() - (-8.0)).abs() < QP_TOL,
+        (result.objective() - (-8.0)).abs() < TOL,
         "obj={} expected -8.0", result.objective()
     );
 }
@@ -275,7 +275,7 @@ fn model_dual_variables() {
 
     // 主解の確認
     assert!(
-        (result[x] - 1.0).abs() < QP_TOL,
+        (result[x] - 1.0).abs() < TOL,
         "x={} expected 1.0", result[x]
     );
 
@@ -286,7 +286,7 @@ fn model_dual_variables() {
     assert_eq!(dual.len(), 1, "should have 1 dual variable for 1 constraint");
     // |dual| ≈ 1 (符号は実装規約に依存)
     assert!(
-        (dual[0].abs() - 1.0).abs() < QP_TOL,
+        (dual[0].abs() - 1.0).abs() < TOL,
         "|dual[0]|={} expected ≈1.0 (Ge の shadow price)", dual[0].abs()
     );
 }
@@ -314,15 +314,15 @@ fn model_constraint_macro_single_variable() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        result[x].abs() < LP_TOL,
+        result[x].abs() < TOL,
         "x={} expected 0.0", result[x]
     );
     assert!(
-        result[y].abs() < LP_TOL,
+        result[y].abs() < TOL,
         "y={} expected 0.0", result[y]
     );
     assert!(
-        result.objective().abs() < LP_TOL,
+        result.objective().abs() < TOL,
         "obj={} expected 0.0", result.objective()
     );
 }
@@ -351,15 +351,15 @@ fn model_method_api_constraints() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        (result.objective() - 4.0).abs() < LP_TOL,
+        (result.objective() - 4.0).abs() < TOL,
         "obj={} expected 4.0", result.objective()
     );
     assert!(
-        (result[x] - 4.0).abs() < LP_TOL,
+        (result[x] - 4.0).abs() < TOL,
         "x={} expected 4.0", result[x]
     );
     assert!(
-        result[y].abs() < LP_TOL,
+        result[y].abs() < TOL,
         "y={} expected 0.0", result[y]
     );
 }
@@ -388,19 +388,19 @@ fn model_lp_three_variables() {
     let result = model.solve().expect("solve failed");
 
     assert!(
-        (result.objective() - 6.0).abs() < LP_TOL,
+        (result.objective() - 6.0).abs() < TOL,
         "obj={} expected 6.0", result.objective()
     );
     assert!(
-        result[x].abs() < LP_TOL,
+        result[x].abs() < TOL,
         "x={} expected 0.0", result[x]
     );
     assert!(
-        result[y].abs() < LP_TOL,
+        result[y].abs() < TOL,
         "y={} expected 0.0", result[y]
     );
     assert!(
-        (result[z] - 6.0).abs() < LP_TOL,
+        (result[z] - 6.0).abs() < TOL,
         "z={} expected 6.0", result[z]
     );
 }
