@@ -1,6 +1,6 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
-//! Usage: qps_benchmark <data_dir> [--solver ipm|ippmm_new|concurrent|dualadvanced] [--eps <value>]
+//! Usage: qps_benchmark <data_dir> [--solver ipm|lp|ippmm_new|concurrent|dualadvanced] [--eps <value>]
 //! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with_options で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!
@@ -575,7 +575,7 @@ fn main() {
             i += 1;
             if i < args.len() {
                 match args[i].as_str() {
-                    "ipm" => solver_choice = QpSolverChoice::IpPmm,
+                    "ipm" | "lp" => solver_choice = QpSolverChoice::IpPmm,
                     "ippmm_new" => solver_choice = QpSolverChoice::IpPmm,
                     "concurrent" => solver_choice = QpSolverChoice::IpPmm,
                     "dualadvanced" => {
@@ -583,7 +583,7 @@ fn main() {
                         solver_choice = QpSolverChoice::IpPmm; // QP問題のフォールバック
                     }
                     other => {
-                        eprintln!("Unknown solver: {}. Use ipm|ippmm_new|concurrent|dualadvanced", other);
+                        eprintln!("Unknown solver: {}. Use ipm|lp|ippmm_new|concurrent|dualadvanced", other);
                         std::process::exit(1);
                     }
                 };
