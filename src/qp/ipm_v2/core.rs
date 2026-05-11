@@ -549,19 +549,27 @@ fn run_ipm_with(
         //     LSQ y refit が膨張する系統では primal のみ動かし dual は IPM 値を維持する。
         if allow_primal_projection {
             let pre_x = final_sol.solution.clone();
-            let pre_y = final_sol.dual_solution.clone();
-            let pre_z = final_sol.bound_duals.clone();
             let pre_pres = primal_residual_rel(&view, &final_sol.solution);
-            let pre_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            let pre_combined = pre_pres.max(pre_kkt);
             crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
-            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             let post_pres = primal_residual_rel(&view, &final_sol.solution);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_pres.max(post_kkt) > pre_combined {
+            if post_pres > pre_pres {
+                // primal projection made things worse — revert x.
+                // This guards against degenerate AAT factorizations that push x away from feasibility.
                 final_sol.solution = pre_x;
-                final_sol.dual_solution = pre_y;
-                final_sol.bound_duals = pre_z;
+            } else {
+                // Primal improved (or unchanged). Refit bound_duals to match the new x.
+                // refit_bound_duals_kkt may transiently increase kkt_residual because
+                // Q·δx (the perturbation from primal correction) affects the KKT stationarity.
+                // This is expected — the subsequent y/z refit loop and KKT IR stages will
+                // restore dual feasibility. We must NOT revert x here solely because kkt worsened.
+                crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            }
+            if std::env::var("PRIMAL_LSQ_TRACE").ok().as_deref() == Some("1") {
+                let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
+                let post_kkt2 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                eprintln!("PRIMAL_LSQ: pre_pres={:.3e} post_pres={:.3e} final_pres={:.3e} final_kkt={:.3e} guard={}",
+                    pre_pres, post_pres, post_pres2, post_kkt2,
+                    if post_pres > pre_pres { "REVERT" } else { "ACCEPT" });
             }
         }
 
@@ -658,9 +666,11 @@ fn run_ipm_with(
     // 実行条件: ipm_made_progress (cold-start を避ける) AND constraints あり。
     // refine_kkt_iterative 内で size 制限・退行 guard・deadline を見る。
     if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // per-iter 収束率は cond に依存するが経験的に ~0.96 級で 30 iter で 1 桁。
-        // 1 iter あたり LDL solve 1 回なので n+m ≤ 50k で数秒程度。
-        const KRYLOV_MAX_ITERS: usize = 30;
+        // per-iter 収束率は cond に依存する。LISWET 系 (cond~1e10, rate≈0.987/iter) では
+        // pf=1e-6 から 1e-8 に落とすには ~350 iter 必要。1 iter = LDL backward solve で
+        // LISWET (K nnz=50k) 約 2ms なので 400 iter ≈ 0.8s。各問題で deadline 監視済み。
+        // 早期 break 条件: score 改善なしで break するため、少 iter で収束した問題は影響なし。
+        const KRYLOV_MAX_ITERS: usize = 400;
         let user_eps = opts.ipm_eps();
         let target_pf = user_eps;
         if post_trace {
@@ -677,7 +687,43 @@ fn run_ipm_with(
             eprintln!("POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
                 _refined, pres_post, kkt_post);
         }
+
+        // (3b) Second primal projection: after KKT IR, if pres > eps, try one more
+        // refine_primal_lsq pass. Accept ONLY if both pres improves AND kkt stays <= user_eps.
+        // The strict kkt guard prevents the df regression seen when refit_bound_duals worsens kkt.
+        if allow_primal_projection && !opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            let pres_post_ir = primal_residual_rel(&view, &final_sol.solution);
+            let kkt_post_ir = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            if pres_post_ir > user_eps && kkt_post_ir <= user_eps {
+                // Save full state before 2nd primal projection
+                let pre_sol2 = final_sol.clone();
+                crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
+                let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
+                if post_pres2 < pres_post_ir {
+                    crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+                    let kkt_after2 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                    // Accept only if kkt stays within user_eps (strict dual feasibility guard)
+                    if kkt_after2 > user_eps {
+                        final_sol = pre_sol2;
+                    } else if post_trace {
+                        eprintln!("POST_STAGE [2nd primal proj] pre_pres={:.3e} post_pres={:.3e} kkt_after={:.3e} ACCEPT",
+                            pres_post_ir, post_pres2, kkt_after2);
+                    }
+                } else {
+                    final_sol = pre_sol2;
+                }
+            }
+        }
+
     }
+
+    // Recompute kkt after all post-processing stages (KKT IR may have improved it significantly).
+    // The `kkt` variable above was computed before the saddle-point IR and is now stale.
+    let kkt_final = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+    // Use the better of: pre-IR kkt (captures y/z refit quality) vs post-IR kkt (captures full pipeline).
+    // Always take the post-IR kkt since it reflects the actual final state.
+    let kkt_out = kkt_final;
+    let _ = kkt; // suppress warning; variable kept for readability of pre-IR value
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -689,7 +735,7 @@ fn run_ipm_with(
         bound_duals: final_sol.bound_duals,
         objective: final_sol.objective,
         iterations: result.iterations,
-        kkt_residual_rel: kkt,
+        kkt_residual_rel: kkt_out,
         primal_residual_rel: pres,
         bound_violation: bv,
         duality_gap_rel: dual_gap,
