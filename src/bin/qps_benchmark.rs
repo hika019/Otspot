@@ -337,7 +337,9 @@ fn compute_dfeas_componentwise(
             }
         }
     } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
-        // LP 経路: rc ≥ 0 チェック (compute_dfeas_orig と同じ基準)
+        // LP 経路: UB 非基底変数 (rc ≤ 0 が最適性条件) を考慮して dual infeasibility を計算。
+        // UB 非基底 (x_j ≈ ub_j): rc_j > 0 が違反。
+        // LB 非基底 / 自由 (x_j < ub_j): rc_j < 0 が違反。
         let mut max_rel = 0.0_f64;
         for j in 0..n {
             let (lb_j, ub_j) = prob.bounds[j];
@@ -348,7 +350,14 @@ fn compute_dfeas_componentwise(
                 continue;
             }
             let rc = reduced_costs[j];
-            let viol = f64::max(0.0, -rc);
+            let x_j = solution.get(j).copied().unwrap_or(0.0);
+            let at_ub = ub_j.is_finite()
+                && (x_j - ub_j).abs() <= 1e-8 * (1.0 + ub_j.abs());
+            let viol = if at_ub {
+                f64::max(0.0, rc)    // UB 非基底: rc_j > 0 が違反
+            } else {
+                f64::max(0.0, -rc)   // LB 非基底 / 自由: rc_j < 0 が違反
+            };
             let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
             max_rel = max_rel.max(viol / scale_j);
         }
@@ -661,8 +670,6 @@ fn main() {
     } else {
         match solver_choice {
             QpSolverChoice::IpPmm => "Concurrent",
-            QpSolverChoice::IpPmm => "IPM",
-            QpSolverChoice::IpPmm => "IP-PMM-New",
             _ => "Unknown",
         }
     };
@@ -729,8 +736,6 @@ fn main() {
 
         let method_label = match result.solver_used {
             Some(QpSolverChoice::IpPmm) => "ipm",
-            Some(QpSolverChoice::IpPmm) => "concurrent",
-            Some(QpSolverChoice::IpPmm) => "ippmm_new",
             Some(_) => "other",
             None => "-",
         };
