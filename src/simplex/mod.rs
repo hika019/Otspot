@@ -914,7 +914,6 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
             ConstraintType::Eq => (ax_i - bi).abs(),
             ConstraintType::Le => (ax_i - bi).max(0.0),
             ConstraintType::Ge => (bi - ax_i).max(0.0),
-            _ => 0.0,
         };
         if violation > FEASIBILITY_TOL {
             return false;

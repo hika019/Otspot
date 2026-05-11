@@ -670,8 +670,6 @@ fn main() {
     } else {
         match solver_choice {
             QpSolverChoice::IpPmm => "Concurrent",
-            QpSolverChoice::IpPmm => "IPM",
-            QpSolverChoice::IpPmm => "IP-PMM-New",
             _ => "Unknown",
         }
     };
@@ -738,8 +736,6 @@ fn main() {
 
         let method_label = match result.solver_used {
             Some(QpSolverChoice::IpPmm) => "ipm",
-            Some(QpSolverChoice::IpPmm) => "concurrent",
-            Some(QpSolverChoice::IpPmm) => "ippmm_new",
             Some(_) => "other",
             None => "-",
         };

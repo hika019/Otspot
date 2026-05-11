@@ -200,8 +200,6 @@ fn main() {
 
     let solver_label = match solver_choice {
         QpSolverChoice::IpPmm => "Concurrent",
-        QpSolverChoice::IpPmm => "IPM",
-        QpSolverChoice::IpPmm => "IP-PMM-New",
         _ => "Unknown",
     };
 
