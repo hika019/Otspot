@@ -78,6 +78,25 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
 }
 
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // Simplex と IPM fallback が同一の deadline を共有するよう、最初に deadline を確定する。
+    // これにより IPM fallback が fresh な timeout_secs を取得して二重タイムアウトになるのを防ぐ。
+    let opts_with_deadline;
+    let options: &SolverOptions = if options.deadline.is_none() {
+        if let Some(secs) = options.timeout_secs {
+            opts_with_deadline = {
+                let mut o = options.clone();
+                o.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs));
+                o.timeout_secs = None;
+                o
+            };
+            &opts_with_deadline
+        } else {
+            options
+        }
+    } else {
+        options
+    };
+
     // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
     // to_all_le()は全パスで廃止済み。IPMもSimplexもConstraintTypeをネイティブ処理。
@@ -106,8 +125,13 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // primal feasible だが dual infeasible な解となる。
     // bench の compute_dfeas_orig と同じ基準 (成分相対化) で dfr を検査し、
     // dfr > eps ならば Simplex の解は双対非実行可能として IPM にフォールバックする。
+    //
+    // LP 最適性条件 (双対): rc_j ≥ 0 for LB 非基底, rc_j ≤ 0 for UB 非基底, rc_j = 0 for 基底。
+    // UB 非基底 (x_j ≈ ub_j) は rc_j < 0 が正常。誤って負値を dual infeasible と判定しないよう
+    // 変数の状態に応じて符号チェックを切り替える。
     if simplex_result.status == SolveStatus::Optimal {
         let rc = &simplex_result.reduced_costs;
+        let sol = &simplex_result.solution;
         let n = lp.num_vars;
         if !rc.is_empty() && rc.len() == n {
             let mut dfr: f64 = 0.0;
@@ -122,25 +146,35 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                     continue;
                 }
                 let rc_j = rc[j];
-                let viol = f64::max(0.0, -rc_j);
+                // UB 非基底変数 (x_j ≈ ub_j) か判定。これらは rc_j ≤ 0 が最適性条件。
+                let x_j = sol.get(j).copied().unwrap_or(0.0);
+                let at_ub = ub_j.is_finite()
+                    && (x_j - ub_j).abs() <= 1e-8 * (1.0 + ub_j.abs());
+                let viol = if at_ub {
+                    f64::max(0.0, rc_j)   // UB 非基底: rc_j > 0 が違反
+                } else {
+                    f64::max(0.0, -rc_j)  // LB 非基底 / 自由: rc_j < 0 が違反
+                };
                 if viol > 0.0 {
                     let scale_j = 1.0 + rc_j.abs() + lp.c[j].abs();
                     dfr = dfr.max(viol / scale_j);
                 }
             }
             if dfr > options.ipm_eps() {
-                // Simplex の解は双対非実行可能 (dfr > eps)。IPM にフォールバックする。
                 return ipm_v2::solve_qp_v2(problem, options);
             }
         }
 
-        match simplex_primal_quality(problem, &simplex_result.solution) {
-            Some((pfeas_rel, bfeas_rel))
-                if pfeas_rel <= options.ipm_eps() && bfeas_rel <= options.ipm_eps() => {}
-            _ => {
-                // Simplex の basis 解が primal/bound feasible contract を満たさない場合は IPM で救済。
+        if let Some((pfeas_rel, bfeas_rel)) = simplex_primal_quality(problem, &simplex_result.solution) {
+            // simplex の check_eq_feasibility が FEASIBILITY_TOL=1e-4 以下を保証するので、
+            // pfeas_rel は常に 1e-4 未満。制約残差の閾値は FEASIBILITY_TOL を使い、
+            // 境界違反 (bfeas_rel) のみ ipm_eps で厳密チェックする。
+            const PFEAS_SIMPLEX_TOL: f64 = 1e-4;
+            if pfeas_rel > PFEAS_SIMPLEX_TOL || bfeas_rel > options.ipm_eps() {
                 return ipm_v2::solve_qp_v2(problem, options);
             }
+        } else {
+            return ipm_v2::solve_qp_v2(problem, options);
         }
     }
 

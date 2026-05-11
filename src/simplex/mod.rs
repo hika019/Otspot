@@ -1079,11 +1079,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             if d_corrupt && basis_mgr.eta_count() > 0 {
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
                 if basis_mgr.refactor_failed {
-                    // singular_basis の有無にかかわらず SingularBasis として上流に伝搬。
-                    // → solve_as_lp が IPM fallback を選択できる。
-                    // Timeout ではなく数値障害として扱う (timed-out deadline は次イテレーションの
-                    // deadline チェックで正しく Timeout に分類される)。
-                    return SimplexOutcome::SingularBasis;
+                    if basis_mgr.singular_basis {
+                        return SimplexOutcome::SingularBasis;
+                    } else {
+                        let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                        return SimplexOutcome::Timeout(obj);
+                    }
                 }
                 // 新鮮な LU で d を再計算
                 let (cr2, cv2) = a.get_column(entering_col).unwrap();
@@ -1165,9 +1166,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
         }
 
-        // 再因子分解失敗（特異基底または数値障害）→ SingularBasis として上流に伝搬
         if basis_mgr.refactor_failed {
-            return SimplexOutcome::SingularBasis;
+            if basis_mgr.singular_basis {
+                return SimplexOutcome::SingularBasis;
+            } else {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
+            }
         }
     }
 
