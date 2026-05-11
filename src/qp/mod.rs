@@ -41,7 +41,7 @@ pub use crate::problem::SolverResult;
 pub use ipm::solve_qp_ippmm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
-use crate::problem::{LpProblem, SolveStatus};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::backend::{LpBackend, SimplexBackend};
 use crate::sparse::CscMatrix;
 
@@ -130,6 +130,15 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             }
             if dfr > options.ipm_eps() {
                 // Simplex の解は双対非実行可能 (dfr > eps)。IPM にフォールバックする。
+                return ipm_v2::solve_qp_v2(problem, options);
+            }
+        }
+
+        match simplex_primal_quality(problem, &simplex_result.solution) {
+            Some((pfeas_rel, bfeas_rel))
+                if pfeas_rel <= options.ipm_eps() && bfeas_rel <= options.ipm_eps() => {}
+            _ => {
+                // Simplex の basis 解が primal/bound feasible contract を満たさない場合は IPM で救済。
                 return ipm_v2::solve_qp_v2(problem, options);
             }
         }
@@ -240,6 +249,48 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             gap: None,
             duality_gap_rel: None,
         },
+    }
+}
+
+fn simplex_primal_quality(problem: &QpProblem, solution: &[f64]) -> Option<(f64, f64)> {
+    if solution.is_empty() || solution.len() != problem.num_vars {
+        return None;
+    }
+
+    let pfeas_rel = if problem.num_constraints == 0 {
+        0.0
+    } else {
+        let ax = problem.a.mat_vec_mul(solution).ok()?;
+        let mut max_rel = 0.0_f64;
+        for (i, (&ax_i, &b_i)) in ax.iter().zip(problem.b.iter()).enumerate() {
+            let violation = match problem.constraint_types.get(i) {
+                Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                _ => (ax_i - b_i).max(0.0),
+            };
+            let scale_i = 1.0 + ax_i.abs() + b_i.abs();
+            max_rel = max_rel.max(violation / scale_i);
+        }
+        max_rel
+    };
+
+    let mut max_v = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
+    for (&xi, &(lb, ub)) in solution.iter().zip(problem.bounds.iter()) {
+        let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
+        let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+        max_v = max_v.max(lb_viol.max(ub_viol));
+        max_x = max_x.max(xi.abs());
+        if lb.is_finite() { max_bnd = max_bnd.max(lb.abs()); }
+        if ub.is_finite() { max_bnd = max_bnd.max(ub.abs()); }
+    }
+    let bfeas_rel = max_v / (1.0 + max_x.max(max_bnd));
+
+    if pfeas_rel.is_finite() && bfeas_rel.is_finite() {
+        Some((pfeas_rel, bfeas_rel))
+    } else {
+        None
     }
 }
 
