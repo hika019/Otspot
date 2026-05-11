@@ -833,11 +833,12 @@ fn main() {
                             )
                         } else {
                             // Step 9: 正解値照合
-                            // ベースラインは obj_offset (N-row RHS) を含まないため除去して比較
-                            let obj_for_baseline = result.objective - prob.obj_offset;
+                            // ベースライン CSV は result.objective (obj_offset 込み) を使って生成されているため、
+                            // result.objective をそのまま比較する。
+                            // (9e83748 で誤って obj_offset を引いていたが、ベースラインは offset 込み値で作成済み)
                             match check_baseline_objective(
                                 &name,
-                                obj_for_baseline,
+                                result.objective,
                                 &baseline_objectives,
                                 eps_obj,
                             ) {
@@ -848,7 +849,7 @@ fn main() {
                                         format!(
                                             "[{}] obj={:.2e} known={:.2e} err={:.1}%",
                                             method_label,
-                                            obj_for_baseline,
+                                            result.objective,
                                             baseline_objectives.get(&name).unwrap(),
                                             rel_err * 100.0
                                         ),
@@ -882,7 +883,7 @@ fn main() {
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
                                             method_label,
-                                            obj_for_baseline,
+                                            result.objective,
                                             pfeas,
                                             pfeas_normalized,
                                             pfc,
