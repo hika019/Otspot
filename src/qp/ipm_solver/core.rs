@@ -29,7 +29,7 @@ pub fn run_ipm(
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
-    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm::solve_qp_ippmm)
+    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm_core::solve_qp_ippmm)
 }
 
 /// 内部 solver を引数に取る一般化 wrapper。

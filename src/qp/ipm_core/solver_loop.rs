@@ -965,7 +965,7 @@ pub(crate) fn update_variables(
 #[cfg(test)]
 mod tests {
     use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur};
-    use crate::qp::ipm::kkt::{build_augmented_system, build_schur_system};
+    use crate::qp::ipm_core::kkt::{build_augmented_system, build_schur_system};
     use crate::linalg::{ldl, amd::amd_with_deadline};
     use crate::sparse::CscMatrix;
 
