@@ -434,9 +434,10 @@ fn run_ipm_with(
             q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
             bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
         };
-        const POST_LSQ_MAX_PASSES: usize = 5;
-        const POST_LSQ_CONVERGE_RATIO: f64 = 0.5;
+        const POST_LSQ_MAX_PASSES: usize = 64;
+        const POST_LSQ_PROGRESS_EPS: f64 = 1e-12;
         let mut prev = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let mut best_sol = final_sol.clone();
         for pass in 0..POST_LSQ_MAX_PASSES {
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
@@ -448,10 +449,12 @@ fn run_ipm_with(
             if post_trace {
                 eprintln!("POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}", pass, cur);
             }
-            if cur >= prev * POST_LSQ_CONVERGE_RATIO {
+            if cur + POST_LSQ_PROGRESS_EPS >= prev {
+                final_sol = best_sol;
                 break;
             }
             prev = cur;
+            best_sol = final_sol.clone();
         }
     }
 
@@ -466,13 +469,14 @@ fn run_ipm_with(
     {
         /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
         /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
-        const STAGE0_MAX_PASSES: usize = 16;
-        const STAGE0_CONVERGE_RATIO: f64 = 0.99;
+        const STAGE0_MAX_PASSES: usize = 64;
+        const STAGE0_PROGRESS_EPS: f64 = 1e-12;
         let view0 = ProblemView {
             q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
             bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
         };
         let mut prev_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let mut best_sol = final_sol.clone();
         for pass in 0..STAGE0_MAX_PASSES {
             // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
@@ -497,10 +501,12 @@ fn run_ipm_with(
             if post_trace {
                 eprintln!("POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}", pass, cur_kkt);
             }
-            if cur_kkt >= prev_kkt * STAGE0_CONVERGE_RATIO {
+            if cur_kkt + STAGE0_PROGRESS_EPS >= prev_kkt {
+                final_sol = best_sol;
                 break;
             }
             prev_kkt = cur_kkt;
+            best_sol = final_sol.clone();
         }
     }
 
@@ -541,8 +547,13 @@ fn run_ipm_with(
 
     // 既に IPM で eps を満たしている場合、primal projection と dual/bound refit は無駄
     // (改善余地なし)。大規模問題では LSQ が秒単位かかるため skip 必須。
+    // ただし Suboptimal/Timeout は global norm が小さくても component-wise dfr が
+    // 残っていることがあるため、Optimal 終了時だけ skip を許容する。
     let user_eps_for_skip = opts.ipm_eps();
-    let kkt_already_pass = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
+    let kkt_already_pass = if !final_sol.solution.is_empty()
+        && orig_problem.num_constraints > 0
+        && result.status == SolveStatus::Optimal
+    {
         let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let pres0 = primal_residual_rel(&view, &final_sol.solution);
         kkt0 < user_eps_for_skip && pres0 < user_eps_for_skip
@@ -590,8 +601,8 @@ fn run_ipm_with(
         //
         // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
         // で悪化時 revert するため安全に反復できる。
-        const REFIT_MAX_ITERS: usize = 8;
-        const REFIT_CONVERGE_RATIO: f64 = 0.99;
+        const REFIT_MAX_ITERS: usize = 32;
+        const REFIT_PROGRESS_EPS: f64 = 1e-12;
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         for _refit_iter in 0..REFIT_MAX_ITERS {
             if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -621,7 +632,7 @@ fn run_ipm_with(
             }
 
             // 改善が止まれば早期 break (固定点)
-            if current_kkt >= prev_kkt * REFIT_CONVERGE_RATIO {
+            if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
                 break;
             }
         }
@@ -629,7 +640,7 @@ fn run_ipm_with(
         // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
         // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
         let user_eps = opts.ipm_eps();
-        const IRLS_OUTER_MAX_PASSES: usize = 5;
+        const IRLS_OUTER_MAX_PASSES: usize = 16;
         const IRLS_INNER_MAX_ITERS: usize = 30;
         for _outer_pass in 0..IRLS_OUTER_MAX_PASSES {
             if current_kkt <= user_eps { break; }
@@ -661,7 +672,7 @@ fn run_ipm_with(
             }
 
             // outer pass の収束判定 (10% 以上改善あれば継続)
-            if current_kkt >= prev_kkt * 0.9 { break; }
+            if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt { break; }
         }
 
         current_kkt

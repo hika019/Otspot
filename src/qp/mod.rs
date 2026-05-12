@@ -619,9 +619,10 @@ pub(crate) fn refine_dual_projected_gradient(
             qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
+    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
     let target: Vec<f64> = (0..n)
-        .map(|j| -(f64::from(qx_dd[j]) + problem.c[j] + bound_contrib[j]))
+        .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
 
     let objective = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
@@ -639,7 +640,67 @@ pub(crate) fn refine_dual_projected_gradient(
         Some((obj, residual))
     };
 
-    let project = |y: &mut [f64]| {
+    let mut proj_lower = vec![f64::NEG_INFINITY; m];
+    let mut proj_upper = vec![f64::INFINITY; m];
+    for (i, ct) in problem.constraint_types.iter().enumerate() {
+        match ct {
+            crate::problem::ConstraintType::Le => proj_lower[i] = 0.0,
+            crate::problem::ConstraintType::Ge => proj_upper[i] = 0.0,
+            crate::problem::ConstraintType::Eq => {}
+        }
+    }
+    for j in 0..n {
+        let cs = problem.a.col_ptr[j];
+        let ce = problem.a.col_ptr[j + 1];
+        if ce - cs != 1 {
+            continue;
+        }
+        let row = problem.a.row_ind[cs];
+        let aij = problem.a.values[cs];
+        if !aij.is_finite() || aij == 0.0 {
+            continue;
+        }
+        let (lb, ub) = problem.bounds[j];
+        let lb_finite = lb.is_finite();
+        let ub_finite = ub.is_finite();
+        if lb_finite && ub_finite && (lb - ub).abs() < FX_TOL {
+            continue;
+        }
+        let rhs = -(qx[j] + problem.c[j]) / aij;
+        if !rhs.is_finite() {
+            continue;
+        }
+        match (lb_finite, ub_finite) {
+            (true, false) => {
+                if aij > 0.0 {
+                    proj_lower[row] = proj_lower[row].max(rhs);
+                } else {
+                    proj_upper[row] = proj_upper[row].min(rhs);
+                }
+            }
+            (false, true) => {
+                if aij > 0.0 {
+                    proj_upper[row] = proj_upper[row].min(rhs);
+                } else {
+                    proj_lower[row] = proj_lower[row].max(rhs);
+                }
+            }
+            _ => {}
+        }
+    }
+    for i in 0..m {
+        if proj_lower[i] > proj_upper[i] {
+            let (lo, hi) = match problem.constraint_types[i] {
+                crate::problem::ConstraintType::Le => (0.0, f64::INFINITY),
+                crate::problem::ConstraintType::Ge => (f64::NEG_INFINITY, 0.0),
+                crate::problem::ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
+            };
+            proj_lower[i] = lo;
+            proj_upper[i] = hi;
+        }
+    }
+
+    let project_feasible = |y: &mut [f64]| {
         for (i, ct) in problem.constraint_types.iter().enumerate() {
             match ct {
                 crate::problem::ConstraintType::Le => y[i] = y[i].max(0.0),
@@ -647,25 +708,34 @@ pub(crate) fn refine_dual_projected_gradient(
                 crate::problem::ConstraintType::Eq => {}
             }
         }
-        let mut tmp = crate::problem::SolverResult {
-            dual_solution: y.to_vec(),
-            solution: result.solution.clone(),
-            bound_duals: result.bound_duals.clone(),
-            ..crate::problem::SolverResult::default()
-        };
-        zero_inactive_inequality_duals(problem, &mut tmp);
-        project_duals_from_singleton_columns(problem, &mut tmp);
-        y.copy_from_slice(&tmp.dual_solution);
+        for i in 0..m {
+            y[i] = y[i].clamp(proj_lower[i], proj_upper[i]);
+        }
     };
 
-    let Some((mut obj_curr, mut residual_curr)) = objective(&result.dual_solution) else {
+    let mut y_start = result.dual_solution.clone();
+    project_feasible(&mut y_start);
+    let Some((mut obj_curr, mut residual_curr)) = objective(&y_start) else {
         return;
     };
-    let mut y_curr = result.dual_solution.clone();
-    const PG_MAX_ITERS: usize = 20;
-    const PG_MAX_BACKTRACKS: usize = 8;
-    for iter in 0..PG_MAX_ITERS {
+    let mut y_curr = y_start;
+    let mut y_best = y_curr.clone();
+    let mut obj_best = obj_curr;
+    let mut prev_obj = obj_curr;
+
+    let pg_max_iters = m.saturating_mul(2).clamp(200, 2000);
+    const PG_MAX_BACKTRACKS: usize = 12;
+    const ACCEPT_TOL_REL: f64 = 1e-12;
+    let obj_converge_thresh = 1e-16 * (n as f64).max(1.0);
+    const STAGNATE_WINDOW: usize = 20;
+    const STAGNATE_MIN_RATIO: f64 = 1e-7;
+    let mut stagnate_count = 0usize;
+
+    for iter in 0..pg_max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
+        if obj_curr < obj_converge_thresh {
             break;
         }
         let grad = match problem.a.mat_vec_mul(&residual_curr) {
@@ -673,11 +743,11 @@ pub(crate) fn refine_dual_projected_gradient(
             Err(_) => break,
         };
         let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        if !grad_inf.is_finite() || grad_inf < 1e-12 {
+        if !grad_inf.is_finite() || grad_inf < 1e-14 {
             break;
         }
         let grad_sq = grad.iter().map(|v| v * v).sum::<f64>();
-        if !grad_sq.is_finite() || grad_sq < 1e-24 {
+        if !grad_sq.is_finite() || grad_sq < 1e-28 {
             break;
         }
         let aty_grad = match problem.a.transpose().mat_vec_mul(&grad) {
@@ -685,22 +755,22 @@ pub(crate) fn refine_dual_projected_gradient(
             Err(_) => break,
         };
         let curvature = aty_grad.iter().map(|v| v * v).sum::<f64>();
-        if !curvature.is_finite() || curvature < 1e-24 {
+        if !curvature.is_finite() || curvature < 1e-28 {
             break;
         }
-        let base_step = (grad_sq / curvature).clamp(1e-12, 1e6);
+        let base_step = (grad_sq / curvature).clamp(1e-14, 1e8);
         let mut accepted = false;
         for bt in 0..PG_MAX_BACKTRACKS {
-            let step = base_step * 2.0_f64.powi(-(bt as i32));
+            let step = base_step * 0.5_f64.powi(bt as i32);
             let mut y_try = y_curr.clone();
             for i in 0..m {
                 y_try[i] -= step * grad[i];
             }
-            project(&mut y_try);
+            project_feasible(&mut y_try);
             let Some((obj_try, residual_try)) = objective(&y_try) else {
                 continue;
             };
-            if obj_try <= obj_curr {
+            if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
                 if trace {
                     eprintln!(
                         "DUAL_PG iter={} step={:.3e} base={:.3e} obj {:.3e}->{:.3e} grad_inf={:.3e}",
@@ -708,8 +778,12 @@ pub(crate) fn refine_dual_projected_gradient(
                     );
                 }
                 y_curr = y_try;
-                obj_curr = obj_try;
+                obj_curr = obj_try.min(obj_curr);
                 residual_curr = residual_try;
+                if obj_curr < obj_best {
+                    y_best = y_curr.clone();
+                    obj_best = obj_curr;
+                }
                 accepted = true;
                 break;
             }
@@ -723,10 +797,24 @@ pub(crate) fn refine_dual_projected_gradient(
             }
             break;
         }
+        let relative_improvement = if prev_obj > 0.0 {
+            (prev_obj - obj_curr) / prev_obj
+        } else {
+            0.0
+        };
+        if relative_improvement < STAGNATE_MIN_RATIO {
+            stagnate_count += 1;
+            if stagnate_count >= STAGNATE_WINDOW {
+                break;
+            }
+        } else {
+            stagnate_count = 0;
+        }
+        prev_obj = obj_curr;
     }
 
     let mut tmp = result.clone();
-    tmp.dual_solution = y_curr;
+    tmp.dual_solution = y_best;
     let view = crate::qp::ipm_solver::outcome::ProblemView {
         q: &problem.q,
         a: &problem.a,
@@ -796,74 +884,197 @@ pub(crate) fn compute_lsq_dual_y(
         })
         .collect();
 
-    let aat = build_aat_upper_csc(&problem.a, n, m)?;
-    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
+    let mut proj_lower = vec![f64::NEG_INFINITY; m];
+    let mut proj_upper = vec![f64::INFINITY; m];
+    for (i, ct) in problem.constraint_types.iter().enumerate() {
+        match ct {
+            crate::problem::ConstraintType::Le => proj_lower[i] = 0.0,
+            crate::problem::ConstraintType::Ge => proj_upper[i] = 0.0,
+            crate::problem::ConstraintType::Eq => {}
+        }
+    }
+    for j in 0..n {
+        let cs = problem.a.col_ptr[j];
+        let ce = problem.a.col_ptr[j + 1];
+        if ce - cs != 1 {
+            continue;
+        }
+        let row = problem.a.row_ind[cs];
+        let aij = problem.a.values[cs];
+        if !aij.is_finite() || aij == 0.0 {
+            continue;
+        }
+        let (lb, ub) = problem.bounds[j];
+        let lb_finite = lb.is_finite();
+        let ub_finite = ub.is_finite();
+        if lb_finite && ub_finite && (lb - ub).abs() < FX_TOL {
+            continue;
+        }
+        let qxj = f64::from(qx_dd[j]);
+        let rhs = -(qxj + problem.c[j]) / aij;
+        if !rhs.is_finite() {
+            continue;
+        }
+        match (lb_finite, ub_finite) {
+            (true, false) => {
+                if aij > 0.0 {
+                    proj_lower[row] = proj_lower[row].max(rhs);
+                } else {
+                    proj_upper[row] = proj_upper[row].min(rhs);
+                }
+            }
+            (false, true) => {
+                if aij > 0.0 {
+                    proj_upper[row] = proj_upper[row].min(rhs);
+                } else {
+                    proj_lower[row] = proj_lower[row].max(rhs);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut fixed_y: Vec<Option<f64>> = vec![None; m];
+    let mut n_fixed = 0usize;
+    for i in 0..m {
+        let lo = proj_lower[i];
+        let hi = proj_upper[i];
+        if lo.is_finite() && hi.is_finite() {
+            let scale = 1.0 + lo.abs().max(hi.abs());
+            if (lo - hi).abs() < 1e-10 * scale {
+                fixed_y[i] = Some((lo + hi) * 0.5);
+                n_fixed += 1;
+            }
+        }
+    }
 
-    // Helper: rhs_i = sum_j A[i, j] * v[j]  (CSC で col 走査して row へ加算、DD)
-    let build_rhs_dd = |v_dd: &[TwoFloat]| -> Vec<f64> {
-        let mut acc: Vec<TwoFloat> = vec![zero_dd; m];
-        for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                if row < m {
+    let solve_lsq_ir = |a_sub: &CscMatrix, m_sub: usize, v_dd: &[TwoFloat]| -> Option<Vec<f64>> {
+        let aat_sub = build_aat_upper_csc(a_sub, n, m_sub)?;
+        let factor = crate::linalg::ldl::factorize(&aat_sub).ok()?;
+        let build_rhs_sub = |v_dd: &[TwoFloat]| -> Vec<f64> {
+            let mut acc: Vec<TwoFloat> = vec![zero_dd; m_sub];
+            for col in 0..n {
+                let cs = a_sub.col_ptr[col];
+                let ce = a_sub.col_ptr[col + 1];
+                for k in cs..ce {
+                    let row = a_sub.row_ind[k];
                     let v_f64 = f64::from(v_dd[col]);
                     let lo = v_dd[col] - TwoFloat::from(v_f64);
                     acc[row] = acc[row]
-                        + TwoFloat::new_mul(problem.a.values[k], v_f64)
-                        + TwoFloat::new_mul(problem.a.values[k], f64::from(lo));
+                        + TwoFloat::new_mul(a_sub.values[k], v_f64)
+                        + TwoFloat::new_mul(a_sub.values[k], f64::from(lo));
+                }
+            }
+            acc.iter().map(|&v| f64::from(v)).collect()
+        };
+        let rhs0 = build_rhs_sub(v_dd);
+        let mut y_sub = vec![0.0_f64; m_sub];
+        factor.solve(&rhs0, &mut y_sub);
+        if y_sub.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        const IR_MAX_ITERS: usize = 5;
+        const IR_STAGNATE_RATIO: f64 = 0.5;
+        let mut prev_r_inf = f64::INFINITY;
+        for _ in 0..IR_MAX_ITERS {
+            let mut atysub_dd: Vec<TwoFloat> = vec![zero_dd; n];
+            for col in 0..n {
+                let cs = a_sub.col_ptr[col];
+                let ce = a_sub.col_ptr[col + 1];
+                for k in cs..ce {
+                    let row = a_sub.row_ind[k];
+                    atysub_dd[col] = atysub_dd[col]
+                        + TwoFloat::new_mul(a_sub.values[k], y_sub[row]);
+                }
+            }
+            let r_dd: Vec<TwoFloat> = (0..n).map(|j| v_dd[j] - atysub_dd[j]).collect();
+            let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
+            if !r_inf.is_finite() {
+                break;
+            }
+            if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
+                break;
+            }
+            prev_r_inf = r_inf;
+            let rhs_dy = build_rhs_sub(&r_dd);
+            let mut dy = vec![0.0_f64; m_sub];
+            factor.solve(&rhs_dy, &mut dy);
+            if dy.iter().any(|v| !v.is_finite()) {
+                break;
+            }
+            for i in 0..m_sub {
+                y_sub[i] += dy[i];
+            }
+        }
+        Some(y_sub)
+    };
+
+    if n_fixed == 0 {
+        return solve_lsq_ir(&problem.a, m, &target_dd);
+    }
+
+    let mut free_row_local = vec![usize::MAX; m];
+    let mut free_rows: Vec<usize> = Vec::with_capacity(m - n_fixed);
+    for (i, fy) in fixed_y.iter().enumerate() {
+        if fy.is_none() {
+            free_row_local[i] = free_rows.len();
+            free_rows.push(i);
+        }
+    }
+    let m_free = free_rows.len();
+    if m_free == 0 {
+        return Some(fixed_y.iter().map(|fy| fy.unwrap_or(0.0)).collect());
+    }
+
+    let mut a_free_col_ptr = vec![0usize; n + 1];
+    let mut a_free_row_ind: Vec<usize> = Vec::new();
+    let mut a_free_values: Vec<f64> = Vec::new();
+    for col in 0..n {
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let orig_row = problem.a.row_ind[k];
+            let local_row = free_row_local[orig_row];
+            if local_row != usize::MAX {
+                a_free_row_ind.push(local_row);
+                a_free_values.push(problem.a.values[k]);
+            }
+        }
+        a_free_col_ptr[col + 1] = a_free_row_ind.len();
+    }
+    let a_free = CscMatrix {
+        col_ptr: a_free_col_ptr,
+        row_ind: a_free_row_ind,
+        values: a_free_values,
+        nrows: m_free,
+        ncols: n,
+    };
+
+    let mut target_adj_dd = target_dd.clone();
+    for col in 0..n {
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let orig_row = problem.a.row_ind[k];
+            if let Some(yfi) = fixed_y[orig_row] {
+                if yfi != 0.0 {
+                    target_adj_dd[col] = target_adj_dd[col]
+                        - TwoFloat::new_mul(problem.a.values[k], yfi);
                 }
             }
         }
-        acc.iter().map(|&v| f64::from(v)).collect()
+    }
+
+    let y_free = match solve_lsq_ir(&a_free, m_free, &target_adj_dd) {
+        Some(v) => v,
+        None => return solve_lsq_ir(&problem.a, m, &target_dd),
     };
 
-    // 初期 solve: y_0 = (A·A^T)^{-1} A · target
-    let rhs0 = build_rhs_dd(&target_dd);
-    let mut y_curr = vec![0.0_f64; m];
-    factor.solve(&rhs0, &mut y_curr);
-    if y_curr.iter().any(|v| !v.is_finite()) {
-        return None;
+    let mut y_full = vec![0.0_f64; m];
+    for (local_idx, &orig_row) in free_rows.iter().enumerate() {
+        y_full[orig_row] = y_free[local_idx];
     }
-
-    // IR: r = target - A^T y を DD で計算 → AAT dy = A r → y += dy。
-    // 反復ごとに r_inf の改善率が IR_STAGNATE_RATIO を割れば止める。
-    const IR_MAX_ITERS: usize = 5;
-    const IR_STAGNATE_RATIO: f64 = 0.5;
-    let mut prev_r_inf = f64::INFINITY;
-    for _ in 0..IR_MAX_ITERS {
-        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-        for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(problem.a.values[k], y_curr[row]);
-            }
-        }
-        let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
-        let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
-        if !r_inf.is_finite() {
-            break;
-        }
-        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
-            break;
-        }
-        prev_r_inf = r_inf;
-
-        let rhs_dy = build_rhs_dd(&r_dd);
-        let mut dy = vec![0.0_f64; m];
-        factor.solve(&rhs_dy, &mut dy);
-        if dy.iter().any(|v| !v.is_finite()) {
-            break;
-        }
-        for i in 0..m {
-            y_curr[i] += dy[i];
+    for (i, fy) in fixed_y.iter().enumerate() {
+        if let Some(v) = fy {
+            y_full[i] = *v;
         }
     }
-
-    Some(y_curr)
+    Some(y_full)
 }
 
 /// 元空間 primal feasibility が borderline (LISWET9/12: pf ≈ 1e-6 で
@@ -1126,9 +1337,22 @@ fn try_dual_only_ir(
     use crate::presolve::bound_contrib_at_var;
     use twofloat::TwoFloat;
 
-    let n = problem.num_vars;
     let m = problem.num_constraints;
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
+    let view = crate::qp::ipm_solver::outcome::ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+    };
+    let kkt_pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
 
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
@@ -1360,15 +1584,28 @@ fn try_dual_only_ir(
     // DD y → f64 に戻す (最終採用済み y_dd から変換)
     for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
 
+    let kkt_post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &tmp.solution,
+        &tmp.dual_solution,
+        &tmp.bound_duals,
+    );
     if trace {
         eprintln!("DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
             n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters);
+        eprintln!("DUAL_IR kkt {:.3e}->{:.3e}", kkt_pre, kkt_post);
     }
-    if df_rel_post < df_rel_pre {
+    if df_rel_post < df_rel_pre && kkt_post <= kkt_pre {
         *result = tmp;
         accepted_iters
     } else {
-        if trace { eprintln!("DUAL_IR no improvement"); }
+        if trace {
+            eprintln!(
+                "DUAL_IR rejected: df_improved={} kkt_safe={}",
+                df_rel_post < df_rel_pre,
+                kkt_post <= kkt_pre
+            );
+        }
         0
     }
 }
@@ -5267,6 +5504,39 @@ mod tests {
         // ここでは「f64 1 回 solve では到達不可能な精度 (< 1e-7)」を IR が達成することを
         // 確認する。
         assert!(max_abs_res < 1e-7, "IR should drive residual below 1e-7, got {:.3e}", max_abs_res);
+    }
+
+    #[test]
+    fn compute_lsq_dual_y_respects_singleton_row_fixed_value() {
+        let a = CscMatrix::from_triplets(
+            &[0, 1], &[0, 1], &[-1.0_f64, 1.0], 2, 2,
+        ).unwrap();
+        let q = CscMatrix::new(2, 2);
+        let c = vec![0.0_f64, 5.0];
+        let b = vec![0.0_f64; 2];
+        let bounds = vec![(0.0_f64, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0, 0.0],
+            dual_solution: vec![50.0, 0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+
+        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+
+        assert_eq!(y.len(), 2);
+        assert!(
+            y[0].abs() < 1e-10,
+            "y[0] must be fixed to 0 by singleton constraint, got {}",
+            y[0]
+        );
+        assert!(
+            (y[1] - (-5.0)).abs() < 1e-8,
+            "y[1] should be -5 for the free row, got {}",
+            y[1]
+        );
     }
 
     /// refine_dual_lsq の DD-guard が、f64 で見ると改善するが DD で見ると悪化する
