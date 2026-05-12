@@ -540,6 +540,34 @@ pub(crate) fn project_duals_from_singleton_columns(
     }
 }
 
+/// 明確に slack のある不等式制約の dual を 0 に射影する。
+///
+/// Le 制約で `Ax < b`、Ge 制約で `Ax > b` が十分明確な行は、相補性より dual は 0。
+/// LSQ/IR は stationarity のみを見るため、slack 行に大きい dual を残すことがある。
+pub(crate) fn zero_inactive_inequality_duals(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+) {
+    if result.solution.len() != problem.num_vars || result.dual_solution.len() != problem.num_constraints {
+        return;
+    }
+    let Ok(ax) = problem.a.mat_vec_mul(&result.solution) else {
+        return;
+    };
+    const SLACK_TOL_REL: f64 = 1e-8;
+    for i in 0..problem.num_constraints {
+        let slack = match problem.constraint_types[i] {
+            crate::problem::ConstraintType::Le => problem.b[i] - ax[i],
+            crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
+            crate::problem::ConstraintType::Eq => continue,
+        };
+        let tol = SLACK_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+        if slack > tol {
+            result.dual_solution[i] = 0.0;
+        }
+    }
+}
+
 /// LSQ で y を計算する核心ロジック (KKT-guard なし)。
 ///
 /// 解法: A^T y = target ( = -(Q*x + c + bound_contrib) ) の最小二乗解を
@@ -927,14 +955,6 @@ fn try_dual_only_ir(
 
     // ACTIVE_TOL = sqrt(eps_machine) ≈ 1e-8: 古典的 active-set 判定 tol。
     const ACTIVE_TOL_REL: f64 = 1e-8;
-    // n_free 上限: G が dense O(n_free²) になるため、メモリ予算から逆算する。
-    // g_dense (n_free² f64) が主コストなので、既定では 128 MiB まで許容する。
-    // pilot87 の n_free=3342 (約 85 MiB) はここに入る一方、極端に大きい問題では skip する。
-    const DUAL_IR_DENSE_BYTES_LIMIT: usize = 128 * 1024 * 1024;
-    let dual_ir_max_free = std::env::var("DUAL_IR_MAX_FREE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or_else(|| ((DUAL_IR_DENSE_BYTES_LIMIT / std::mem::size_of::<f64>()) as f64).sqrt().floor() as usize);
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
     let dual_ir_reg = std::env::var("DUAL_IR_REG").ok()
@@ -954,8 +974,8 @@ fn try_dual_only_ir(
         free_idx.push(j);
     }
     let n_free = free_idx.len();
-    if n_free == 0 || n_free > dual_ir_max_free {
-        if trace { eprintln!("DUAL_IR skip: n_free={} (limit={})", n_free, dual_ir_max_free); }
+    if n_free == 0 {
+        if trace { eprintln!("DUAL_IR skip: n_free=0"); }
         return 0;
     }
 
@@ -1083,6 +1103,7 @@ fn try_dual_only_ir(
     let mut total_dy_inf = 0.0_f64;
     let mut accepted_iters = 0;
     let mut current_r_d_free = r_d_free.clone();
+    const DUAL_IR_MAX_BACKTRACKS: usize = 8;
     for inner in 0..DUAL_IR_INNER_MAX {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
         let mut alpha = vec![0.0_f64; n_free];
@@ -1102,48 +1123,72 @@ fn try_dual_only_ir(
         }
         let dy_inf = dy_dd.iter().fold(0.0_f64, |a, v| a.max(f64::from(*v).abs()));
         if !dy_inf.is_finite() { break; }
-        // y_dd に DD 精度で加算 (f64 の情報落ちを回避)
-        let y_dd_new: Vec<TwoFloat> = y_dd.iter().zip(dy_dd.iter()).map(|(&y, &d)| y + d).collect();
         total_dy_inf = total_dy_inf.max(dy_inf);
 
-        // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
-        let mut new_r_d_free = vec![0.0_f64; n_free];
-        let mut new_df_rel = 0.0_f64;
-        let mut new_df_abs = 0.0_f64;
-        for (fi, &j) in free_idx.iter().enumerate() {
-            let mut qx = TwoFloat::from(0.0);
-            for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
-                let row = problem.q.row_ind[k];
-                qx += TwoFloat::new_mul(problem.q.values[k], tmp.solution[row]);
+        let mut accepted = false;
+        let mut accepted_df_rel = df_rel_post;
+        let mut accepted_df_abs = df_abs_post;
+        let mut accepted_r_d_free = current_r_d_free.clone();
+        let mut accepted_y_dd = y_dd.clone();
+        let mut accepted_step_scale = 0.0_f64;
+        for bt in 0..DUAL_IR_MAX_BACKTRACKS {
+            let step_scale = 2.0_f64.powi(-(bt as i32));
+            let y_dd_new: Vec<TwoFloat> = y_dd.iter()
+                .zip(dy_dd.iter())
+                .map(|(&y, &d)| y + d * step_scale)
+                .collect();
+
+            // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
+            let mut new_r_d_free = vec![0.0_f64; n_free];
+            let mut new_df_rel = 0.0_f64;
+            let mut new_df_abs = 0.0_f64;
+            for (fi, &j) in free_idx.iter().enumerate() {
+                let mut qx = TwoFloat::from(0.0);
+                for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
+                    let row = problem.q.row_ind[k];
+                    qx += TwoFloat::new_mul(problem.q.values[k], tmp.solution[row]);
+                }
+                let mut aty = TwoFloat::from(0.0);
+                for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                    let r = problem.a.row_ind[k];
+                    aty = aty + y_dd_new[r] * problem.a.values[k];
+                }
+                let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
+                let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
+                new_r_d_free[fi] = r_d;
+                let qx_f = f64::from(qx);
+                let aty_f = f64::from(aty);
+                let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
+                let rel = r_d.abs() / scale;
+                if rel > new_df_rel { new_df_rel = rel; }
+                if r_d.abs() > new_df_abs { new_df_abs = r_d.abs(); }
             }
-            let mut aty = TwoFloat::from(0.0);
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                let r = problem.a.row_ind[k];
-                // TwoFloat × f64: y_dd_new[r] の DD 精度を完全に使って aty を計算
-                aty = aty + y_dd_new[r] * problem.a.values[k];
+            if new_df_rel <= df_rel_post * 1.001 {
+                accepted = true;
+                accepted_df_rel = new_df_rel;
+                accepted_df_abs = new_df_abs;
+                accepted_r_d_free = new_r_d_free;
+                accepted_y_dd = y_dd_new;
+                accepted_step_scale = step_scale;
+                break;
             }
-            let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
-            let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
-            new_r_d_free[fi] = r_d;
-            let qx_f = f64::from(qx);
-            let aty_f = f64::from(aty);
-            let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
-            let rel = r_d.abs() / scale;
-            if rel > new_df_rel { new_df_rel = rel; }
-            if r_d.abs() > new_df_abs { new_df_abs = r_d.abs(); }
         }
-        // 退行検出: 残差が増えたら inner break (y_dd_new は破棄)
-        if new_df_rel > df_rel_post * 1.001 {
-            if trace { eprintln!("DUAL_IR inner={} regression, breaking (rel {:.3e} -> {:.3e})", inner, df_rel_post, new_df_rel); }
+        if !accepted {
+            if trace {
+                eprintln!("DUAL_IR inner={} regression, breaking (rel {:.3e} -> rejected all backtracks)", inner, df_rel_post);
+            }
             break;
         }
-        // 採用: y_dd を y_dd_new で更新
-        y_dd = y_dd_new;
+
+        y_dd = accepted_y_dd;
         for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
-        current_r_d_free = new_r_d_free;
-        df_rel_post = new_df_rel;
-        df_abs_post = new_df_abs;
+        current_r_d_free = accepted_r_d_free;
+        df_rel_post = accepted_df_rel;
+        df_abs_post = accepted_df_abs;
         accepted_iters += 1;
+        if trace && accepted_step_scale < 1.0 {
+            eprintln!("DUAL_IR inner={} accepted with step_scale={:.3e}", inner, accepted_step_scale);
+        }
         // 早期 break: target を達成したら終了
         if df_rel_post < target_pf { break; }
     }
@@ -1222,12 +1267,34 @@ pub(crate) fn refine_kkt_iterative(
         constraint_types: &problem.constraint_types,
     };
     let mut prev_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
         let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
         if n_dual > 0 {
             n_dual_total += n_dual;
+            zero_inactive_inequality_duals(problem, result);
+            project_duals_from_singleton_columns(problem, result);
             // y が更新されたので bound_duals (z) も KKT から再計算する。
+            // ただし z refit は active bound 列では改善しても、別の列で悪化して
+            // dual-only IR の進捗を潰すことがあるため、全体 KKT で guard する。
+            let pre_z = result.bound_duals.clone();
+            let pre_refit_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
             refit_bound_duals_kkt(problem, result);
+            let post_refit_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+            if post_refit_kkt > pre_refit_kkt {
+                result.bound_duals = pre_z;
+                if trace {
+                    eprintln!(
+                        "DUAL_IR z-refit rejected: kkt {:.3e} -> {:.3e}",
+                        pre_refit_kkt, post_refit_kkt
+                    );
+                }
+            } else if trace {
+                eprintln!(
+                    "DUAL_IR z-refit accepted: kkt {:.3e} -> {:.3e}",
+                    pre_refit_kkt, post_refit_kkt
+                );
+            }
         }
         // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
         if n_dual == 0 { break; }
