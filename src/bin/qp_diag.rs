@@ -52,6 +52,16 @@ fn main() {
     let result = solve_qp_with(prob, &opts);
 
     println!("status={:?} obj={:.6e} iters={}", result.status, result.objective, result.iterations);
+    if result.solution.len() != prob.num_vars {
+        println!(
+            "[DIAG] solution unavailable: len={} expected={} dual_len={} bound_duals_len={}",
+            result.solution.len(),
+            prob.num_vars,
+            result.dual_solution.len(),
+            result.bound_duals.len(),
+        );
+        return;
+    }
     // primal residual も併記 (T1.3 LISWET 系の診断用)
     if !result.solution.is_empty() && prob.num_constraints > 0 {
         let ax = prob.a.mat_vec_mul(&result.solution).expect("Ax");
@@ -93,9 +103,9 @@ fn main() {
         prob.bounds.iter().filter(|&&(_, ub): &&(f64, f64)| ub.is_finite()).count(),
     );
     println!("|x|_inf={:.3e} |y|_inf={:.3e} |z|_inf={:.3e} (z=bound_duals.len={})",
-        result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs())),
-        result.dual_solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs())),
-        result.bound_duals.iter().fold(0.0_f64, |a, &v| a.max(v.abs())),
+        result.solution.iter().fold(0.0_f64, |a: f64, &v: &f64| a.max(v.abs())),
+        result.dual_solution.iter().fold(0.0_f64, |a: f64, &v: &f64| a.max(v.abs())),
+        result.bound_duals.iter().fold(0.0_f64, |a: f64, &v: &f64| a.max(v.abs())),
         result.bound_duals.len(),
     );
 
@@ -181,6 +191,39 @@ fn main() {
     println!("  qx_j={:.3e} c_j={:.3e} aty_j={:.3e} bound_contrib_j={:.3e}",
         qx[j], prob.c[j], aty[j], bound_contrib[j]);
     println!("  sum (residual)={:.3e}", qx[j] + prob.c[j] + aty[j] + bound_contrib[j]);
+    for k in prob.a.col_ptr[j]..prob.a.col_ptr[j + 1] {
+        let row = prob.a.row_ind[k];
+        let aij = prob.a.values[k];
+        let yi = result.dual_solution.get(row).copied().unwrap_or(0.0);
+        let mut row_lhs = 0.0_f64;
+        let mut row_nnz = 0usize;
+        let mut row_terms = Vec::new();
+        for col in 0..prob.num_vars {
+            for kk in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
+                if prob.a.row_ind[kk] == row {
+                    let coeff = prob.a.values[kk];
+                    let xcol = result.solution.get(col).copied().unwrap_or(0.0);
+                    row_lhs += coeff * xcol;
+                    row_nnz += 1;
+                    if row_terms.len() < 6 {
+                        row_terms.push(format!("col{}:{:.3e}*{:.3e}", col, coeff, xcol));
+                    }
+                }
+            }
+        }
+        println!(
+            "  A[row={}, j]={:.6e} ct={:?} y[row]={:.6e} contrib={:.6e} row_lhs={:.6e} b={:.6e} row_nnz={} terms=[{}]",
+            row,
+            aij,
+            prob.constraint_types[row],
+            yi,
+            aij * yi,
+            row_lhs,
+            prob.b[row],
+            row_nnz,
+            row_terms.join(", ")
+        );
+    }
     // bound_duals の中身を表示 (idx j_in_lb_only_layout)
     // QADLITTL は全 lb 有限・ub 無限なので bound_duals[j] は y_lb[j]
     let bd_lb_idx_for_j = {

@@ -440,6 +440,7 @@ fn run_ipm_with(
         for pass in 0..POST_LSQ_MAX_PASSES {
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             let cur = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             if post_trace {
@@ -486,6 +487,8 @@ fn run_ipm_with(
                     row, col, orig_problem, &mut final_sol, bc,
                 );
             }
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             let cur_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             if post_trace {
                 eprintln!("POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}", pass, cur_kkt);
@@ -594,6 +597,7 @@ fn run_ipm_with(
 
             let pre_y = final_sol.dual_solution.clone();
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
             let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             if post_kkt <= current_kkt {
                 current_kkt = post_kkt;
@@ -630,6 +634,7 @@ fn run_ipm_with(
             crate::qp::refine_dual_lsq_irls(
                 orig_problem, &mut final_sol, user_eps, IRLS_INNER_MAX_ITERS, opts.deadline,
             );
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
             let post_kkt_irls = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
             if post_kkt_irls < current_kkt {
                 current_kkt = post_kkt_irls;

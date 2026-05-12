@@ -438,6 +438,108 @@ pub(crate) fn refine_dual_lsq(
     }
 }
 
+/// singleton column (A の参照行が 1 本だけの列) から各 row dual の feasible interval を作り、
+/// 現在の y をその区間へ射影する。
+///
+/// 真因:
+/// `refine_dual_lsq` は `A^T y = target` の unconstrained LSQ なので、one-sided bound を持つ
+/// 列に対して「非負 bound dual では補正不能」な y を返すことがある。
+/// 例: lb-only 変数 x_j=0, c_j=0, A[row,j]=-1, y[row]>0 → qx+c+A^T y < 0 となり
+/// `z_lb = qx+c+A^T y` が負になって KKT を満たせない。
+///
+/// singleton column ではその列の停留性が 1 個の row dual によってのみ決まるため、
+/// bound 種別ごとに y[row] の必要条件を interval として導出できる。
+/// row ごとに全 singleton column の interval を交差し、現在値を最近傍へ射影する。
+pub(crate) fn project_duals_from_singleton_columns(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+) {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if result.solution.len() != n || result.dual_solution.len() != m {
+        return;
+    }
+
+    let qx = match problem.q.mat_vec_mul(&result.solution) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let mut lower = vec![f64::NEG_INFINITY; m];
+    let mut upper = vec![f64::INFINITY; m];
+
+    for (row, ct) in problem.constraint_types.iter().enumerate() {
+        match ct {
+            crate::problem::ConstraintType::Le => lower[row] = 0.0,
+            crate::problem::ConstraintType::Ge => upper[row] = 0.0,
+            crate::problem::ConstraintType::Eq => {}
+        }
+    }
+
+    for j in 0..n {
+        let cs = problem.a.col_ptr[j];
+        let ce = problem.a.col_ptr[j + 1];
+        if ce - cs != 1 {
+            continue;
+        }
+
+        let row = problem.a.row_ind[cs];
+        let aij = problem.a.values[cs];
+        if !aij.is_finite() || aij == 0.0 {
+            continue;
+        }
+
+        let (lb, ub) = problem.bounds[j];
+        let lb_finite = lb.is_finite();
+        let ub_finite = ub.is_finite();
+        let is_fx = lb_finite && ub_finite && (lb - ub).abs() < FX_TOL;
+        if is_fx {
+            continue;
+        }
+
+        let rhs = -(qx[j] + problem.c[j]) / aij;
+        if !rhs.is_finite() {
+            continue;
+        }
+
+        match (lb_finite, ub_finite) {
+            // lb-only: qx + c + a*y = z_lb >= 0
+            (true, false) => {
+                if aij > 0.0 {
+                    lower[row] = lower[row].max(rhs);
+                } else {
+                    upper[row] = upper[row].min(rhs);
+                }
+            }
+            // ub-only: qx + c + a*y = -z_ub <= 0
+            (false, true) => {
+                if aij > 0.0 {
+                    upper[row] = upper[row].min(rhs);
+                } else {
+                    lower[row] = lower[row].max(rhs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for row in 0..m {
+        let lo = lower[row];
+        let hi = upper[row];
+        if lo > hi {
+            // 交差が空なら singleton 列群だけでは整合 dual を作れない。
+            // この場合は現値を保持し、既存の LSQ / KKT guard に委ねる。
+            continue;
+        }
+        let y = &mut result.dual_solution[row];
+        if *y < lo {
+            *y = lo;
+        } else if *y > hi {
+            *y = hi;
+        }
+    }
+}
+
 /// LSQ で y を計算する核心ロジック (KKT-guard なし)。
 ///
 /// 解法: A^T y = target ( = -(Q*x + c + bound_contrib) ) の最小二乗解を
@@ -825,8 +927,14 @@ fn try_dual_only_ir(
 
     // ACTIVE_TOL = sqrt(eps_machine) ≈ 1e-8: 古典的 active-set 判定 tol。
     const ACTIVE_TOL_REL: f64 = 1e-8;
-    // n_free 上限: G が dense O(n_free²) になるため (~2000² = 4M doubles = 32 MB)。
-    const DUAL_IR_MAX_FREE: usize = 2000;
+    // n_free 上限: G が dense O(n_free²) になるため、メモリ予算から逆算する。
+    // g_dense (n_free² f64) が主コストなので、既定では 128 MiB まで許容する。
+    // pilot87 の n_free=3342 (約 85 MiB) はここに入る一方、極端に大きい問題では skip する。
+    const DUAL_IR_DENSE_BYTES_LIMIT: usize = 128 * 1024 * 1024;
+    let dual_ir_max_free = std::env::var("DUAL_IR_MAX_FREE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or_else(|| ((DUAL_IR_DENSE_BYTES_LIMIT / std::mem::size_of::<f64>()) as f64).sqrt().floor() as usize);
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
     let dual_ir_reg = std::env::var("DUAL_IR_REG").ok()
@@ -846,8 +954,8 @@ fn try_dual_only_ir(
         free_idx.push(j);
     }
     let n_free = free_idx.len();
-    if n_free == 0 || n_free > DUAL_IR_MAX_FREE {
-        if trace { eprintln!("DUAL_IR skip: n_free={} (limit={})", n_free, DUAL_IR_MAX_FREE); }
+    if n_free == 0 || n_free > dual_ir_max_free {
+        if trace { eprintln!("DUAL_IR skip: n_free={} (limit={})", n_free, dual_ir_max_free); }
         return 0;
     }
 
@@ -1065,6 +1173,7 @@ pub(crate) fn refine_kkt_iterative(
 ) -> usize {
     use crate::problem::ConstraintType;
     use crate::presolve::bound_contrib_at_var;
+    use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 
     // deadline 経過なら即 no-op。post-IPM の Krylov refinement は IPM 後に呼ばれるため、
     // ユーザー timeout が 10s 級の場合 IPM 既に消費済みでここでは時間切れの可能性あり。
@@ -1104,6 +1213,15 @@ pub(crate) fn refine_kkt_iterative(
     // 内部 50 iter で df が半減程度に留まる。target_pf を達成するまで繰り返す。
     // max_iters を outer ループ上限として使う (デフォルト 10 で最大 10×50=500 inner iter)。
     let mut n_dual_total = 0_usize;
+    let view = crate::qp::ipm_solver::outcome::ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+    };
+    let mut prev_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
     for _outer in 0..max_iters.max(1) {
         let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
         if n_dual > 0 {
@@ -1113,11 +1231,12 @@ pub(crate) fn refine_kkt_iterative(
         }
         // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
         if n_dual == 0 { break; }
-        // target 達成チェック: try_dual_only_ir が target_pf を達成したら完了
-        // (try_dual_only_ir 内で early break しているため n_dual < DUAL_IR_INNER_MAX
-        // か、または 50 iter 使い切ったが target 未達)
-        // n_dual < 50 なら try_dual_only_ir が early break した ≒ target 達成か convergence
-        if n_dual < 50 { break; }
+        let cur_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+        if cur_kkt < target_pf { break; }
+        if cur_kkt >= prev_kkt * 0.999 {
+            break;
+        }
+        prev_kkt = cur_kkt;
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
     }
     if n_dual_total > 0 {
@@ -4663,6 +4782,62 @@ mod tests {
             result.bound_duals[1].abs() < 1e-9,
             "REFIT-T5: z_lb_y ≈ 0.0, got {}", result.bound_duals[1]
         );
+    }
+
+    #[test]
+    fn test_project_duals_from_singleton_columns_clamps_infeasible_positive_le_dual() {
+        // row: -x0 + x1 <= 0, bounds x0,x1 >= 0, c = 0
+        // x0/x1 はともに lb に張り付いているので、正の Le dual は
+        // x0 列で qx+c+A^T y < 0 を作り、非負 z_lb では補正不能。
+        // singleton column 条件から row dual の feasible interval は {0} になり、
+        // projection 後に y=0, z=0, KKT residual=0 になるべき。
+        let n = 2usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![0.0_f64, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0_f64, 1.0], 1, n).unwrap();
+        let b = vec![0.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![5.0],
+            bound_duals: vec![0.0, 0.0],
+            ..SolverResult::default()
+        };
+
+        project_duals_from_singleton_columns(&problem, &mut result);
+        refit_bound_duals_kkt(&problem, &mut result);
+
+        assert!(result.dual_solution[0].abs() < 1e-12, "row dual should project to 0, got {}", result.dual_solution[0]);
+        assert!(result.bound_duals.iter().all(|v| v.abs() < 1e-12), "bound duals should stay zero, got {:?}", result.bound_duals);
+    }
+
+    #[test]
+    fn test_project_duals_from_singleton_columns_respects_lb_only_lower_bound() {
+        // x >= 0, c = -2, row: x <= 0.
+        // lb-only singleton column gives qx+c+a*y >= 0 -> -2 + y >= 0 -> y >= 2.
+        // projection は row dual を 2 まで引き上げ、z_lb は 0 のまま KKT を満たす。
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![-2.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, n).unwrap();
+        let b = vec![0.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0],
+            ..SolverResult::default()
+        };
+
+        project_duals_from_singleton_columns(&problem, &mut result);
+        refit_bound_duals_kkt(&problem, &mut result);
+
+        assert!((result.dual_solution[0] - 2.0).abs() < 1e-12, "row dual should project to 2, got {}", result.dual_solution[0]);
+        assert!(result.bound_duals[0].abs() < 1e-12, "z_lb should remain 0, got {}", result.bound_duals[0]);
     }
 
     /// REFIT-T7: rank-deficient Q + 多解 → 偽 Optimal を duality gap で検出
