@@ -12,6 +12,10 @@
 #   Updated to Netlib value -7.2462405908e+07.
 # Note: greenbeb baseline was previously -4.3022602612e+06 (0.003% error vs Netlib).
 #   Updated to Netlib value -4.3021476065e+06.
+# Note: pilot-ja, pilot-we, vtp-base – dot in name replaced with dash for filesystem compatibility.
+#   Optimal values from https://www.netlib.org/lp/data/readme (MINOS 5.3).
+# Note: Kennington problems (cre-a/b/c/d, ken-07/11/13/18, osa-07/14/30/60, pds-02/06/10/20) –
+#   Optimal values from https://www.netlib.org/lp/data/kennington/readme.
 problem_name,optimal_obj,source
 25fv47,5.5018458883e+03,https://www.netlib.org/lp/data/readme
 80bau3b,9.8723216072e+05,https://www.netlib.org/lp/data/readme
@@ -101,5 +105,26 @@ standmps,1.4060175000e+03,https://www.netlib.org/lp/data/readme
 stocfor1,-4.1131976219e+04,https://www.netlib.org/lp/data/readme
 stocfor2,-3.9024408538e+04,https://www.netlib.org/lp/data/readme
 tuff,2.9214776509e-01,https://www.netlib.org/lp/data/readme
+vtp-base,1.2983146246e+05,https://www.netlib.org/lp/data/readme
 wood1p,1.4429024116e+00,https://www.netlib.org/lp/data/readme
 woodw,1.3044763331e+00,https://www.netlib.org/lp/data/readme
+# Kennington problems (from https://www.netlib.org/lp/data/kennington/readme)
+cre-a,2.3595407e+07,https://www.netlib.org/lp/data/kennington/readme
+cre-b,2.3129640e+07,https://www.netlib.org/lp/data/kennington/readme
+cre-c,2.5275116e+07,https://www.netlib.org/lp/data/kennington/readme
+cre-d,2.4454970e+07,https://www.netlib.org/lp/data/kennington/readme
+ken-07,-6.7952044e+08,https://www.netlib.org/lp/data/kennington/readme
+ken-11,-6.9723823e+09,https://www.netlib.org/lp/data/kennington/readme
+ken-13,-1.0257395e+10,https://www.netlib.org/lp/data/kennington/readme
+ken-18,-5.2217025e+10,https://www.netlib.org/lp/data/kennington/readme
+osa-07,5.3572252e+05,https://www.netlib.org/lp/data/kennington/readme
+osa-14,1.1064628e+06,https://www.netlib.org/lp/data/kennington/readme
+osa-30,2.1421399e+06,https://www.netlib.org/lp/data/kennington/readme
+osa-60,4.0440725e+06,https://www.netlib.org/lp/data/kennington/readme
+pds-02,2.8857862e+10,https://www.netlib.org/lp/data/kennington/readme
+pds-06,2.7761038e+10,https://www.netlib.org/lp/data/kennington/readme
+pds-10,2.6727095e+10,https://www.netlib.org/lp/data/kennington/readme
+pds-20,2.3821659e+10,https://www.netlib.org/lp/data/kennington/readme
+# Netlib standard (dot-in-name renamed to dash)
+pilot-ja,-6.1131344111e+03,https://www.netlib.org/lp/data/readme
+pilot-we,-2.7201027439e+06,https://www.netlib.org/lp/data/readme
