@@ -620,8 +620,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         match revised_simplex_core(&a, &mut x_b, &c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
         {
             SimplexOutcome::Optimal(obj, mut y) => {
-                if reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas).is_err() {
-                    return SolverResult::numerical_error();
+                match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                    Ok(()) => {}
+                    Err(crate::error::SolverError::DeadlineExceeded) => {
+                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, ..Default::default() };
+                    }
+                    Err(_) => return SolverResult::numerical_error(),
                 }
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
@@ -795,7 +800,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     // 安全チェック: 修正後の基底がLU分解可能か検証。
                     // 特異または高条件数の問題（SCORPION等）では案Cの置換が基底品質を
                     // 悪化させる場合がある。LU失敗なら全置換をリバート。
-                    if LuBasis::new(&a_ext, &basis, options.max_etas).is_err() {
+                    if LuBasis::new_timed(&a_ext, &basis, options.max_etas, options.deadline).is_err() {
                         basis.copy_from_slice(&basis_before_case_c);
                     }
                 }
@@ -818,8 +823,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     options,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
-                        if reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas).is_err() {
-                            return SolverResult::numerical_error();
+                        match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                            Ok(()) => {}
+                            Err(crate::error::SolverError::DeadlineExceeded) => {
+                                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                                return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
+                            }
+                            Err(_) => return SolverResult::numerical_error(),
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
@@ -937,9 +947,10 @@ fn reconcile_final_basis_state(
     x_b: &mut [f64],
     y: &mut [f64],
     max_etas: usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<(), crate::error::SolverError> {
     let m = basis.len();
-    let basis_mgr = LuBasis::new(a, basis, max_etas)?;
+    let basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
 
     let mut x_b_sv = SparseVec::from_dense(b);
     basis_mgr.ftran(&mut x_b_sv);
@@ -1252,7 +1263,7 @@ mod tests {
         let mut x_b = vec![0.0, 0.0];
         let mut y = vec![0.0, 0.0];
 
-        reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, 50).unwrap();
+        reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, 50, None).unwrap();
 
         assert!((x_b[0] + 2.0).abs() < 1e-12, "x_b[0]={}", x_b[0]);
         assert!((x_b[1] - 5.0).abs() < 1e-12, "x_b[1]={}", x_b[1]);

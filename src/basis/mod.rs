@@ -61,7 +61,11 @@ impl LuBasis {
     /// # エラー
     /// 基底行列が特異または数値的に不安定な場合は `Err` を返す
     pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, SolverError> {
-        let lu = lu::LuFactorization::factorize(a, basis)?;
+        Self::new_timed(a, basis, max_etas, None)
+    }
+
+    pub fn new_timed(a: &CscMatrix, basis: &[usize], max_etas: usize, deadline: Option<std::time::Instant>) -> Result<Self, SolverError> {
+        let lu = lu::LuFactorization::factorize_timed(a, basis, deadline)?;
         Ok(Self {
             lu,
             eta_file: eta::EtaFile::new(max_etas),
