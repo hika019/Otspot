@@ -568,6 +568,183 @@ pub(crate) fn zero_inactive_inequality_duals(
     }
 }
 
+const DUAL_RECOVERY_ACTIVE_TOL_REL: f64 = 1e-8;
+
+fn collect_dual_recovery_free_columns(
+    problem: &QpProblem,
+    result: &crate::problem::SolverResult,
+) -> Vec<usize> {
+    let n = problem.num_vars;
+    let mut free_idx: Vec<usize> = Vec::with_capacity(n);
+    for j in 0..n {
+        let xj = result.solution[j];
+        let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs());
+        let (lb, ub) = problem.bounds[j];
+        if lb.is_finite() && (xj - lb).abs() < tol {
+            continue;
+        }
+        if ub.is_finite() && (ub - xj).abs() < tol {
+            continue;
+        }
+        if problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 {
+            continue;
+        }
+        free_idx.push(j);
+    }
+    free_idx
+}
+
+/// dual y を、不等式の符号制約・inactive row の 0 制約を守りつつ
+/// `||A^T y - target||^2` を projected gradient で下げる。
+pub(crate) fn refine_dual_projected_gradient(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
+) {
+    use twofloat::TwoFloat;
+    let trace = std::env::var("REFINE_DUAL_PG_TRACE").ok().as_deref() == Some("1");
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if result.solution.len() != n || result.dual_solution.len() != m {
+        return;
+    }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
+    let zero_dd = TwoFloat::from(0.0);
+    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+    for col in 0..n {
+        let xv = result.solution[col];
+        for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
+            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+        }
+    }
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let target: Vec<f64> = (0..n)
+        .map(|j| -(f64::from(qx_dd[j]) + problem.c[j] + bound_contrib[j]))
+        .collect();
+
+    let objective = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
+        let aty = if problem.a.nrows > 0 {
+            problem.a.transpose().mat_vec_mul(y).ok()?
+        } else {
+            vec![0.0_f64; n]
+        };
+        let mut residual = vec![0.0_f64; n];
+        let mut obj = 0.0_f64;
+        for j in 0..n {
+            residual[j] = aty[j] - target[j];
+            obj += 0.5 * residual[j] * residual[j];
+        }
+        Some((obj, residual))
+    };
+
+    let project = |y: &mut [f64]| {
+        for (i, ct) in problem.constraint_types.iter().enumerate() {
+            match ct {
+                crate::problem::ConstraintType::Le => y[i] = y[i].max(0.0),
+                crate::problem::ConstraintType::Ge => y[i] = y[i].min(0.0),
+                crate::problem::ConstraintType::Eq => {}
+            }
+        }
+        let mut tmp = crate::problem::SolverResult {
+            dual_solution: y.to_vec(),
+            solution: result.solution.clone(),
+            bound_duals: result.bound_duals.clone(),
+            ..crate::problem::SolverResult::default()
+        };
+        zero_inactive_inequality_duals(problem, &mut tmp);
+        project_duals_from_singleton_columns(problem, &mut tmp);
+        y.copy_from_slice(&tmp.dual_solution);
+    };
+
+    let Some((mut obj_curr, mut residual_curr)) = objective(&result.dual_solution) else {
+        return;
+    };
+    let mut y_curr = result.dual_solution.clone();
+    const PG_MAX_ITERS: usize = 20;
+    const PG_MAX_BACKTRACKS: usize = 8;
+    for iter in 0..PG_MAX_ITERS {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
+        let grad = match problem.a.mat_vec_mul(&residual_curr) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        if !grad_inf.is_finite() || grad_inf < 1e-12 {
+            break;
+        }
+        let grad_sq = grad.iter().map(|v| v * v).sum::<f64>();
+        if !grad_sq.is_finite() || grad_sq < 1e-24 {
+            break;
+        }
+        let aty_grad = match problem.a.transpose().mat_vec_mul(&grad) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let curvature = aty_grad.iter().map(|v| v * v).sum::<f64>();
+        if !curvature.is_finite() || curvature < 1e-24 {
+            break;
+        }
+        let base_step = (grad_sq / curvature).clamp(1e-12, 1e6);
+        let mut accepted = false;
+        for bt in 0..PG_MAX_BACKTRACKS {
+            let step = base_step * 2.0_f64.powi(-(bt as i32));
+            let mut y_try = y_curr.clone();
+            for i in 0..m {
+                y_try[i] -= step * grad[i];
+            }
+            project(&mut y_try);
+            let Some((obj_try, residual_try)) = objective(&y_try) else {
+                continue;
+            };
+            if obj_try <= obj_curr {
+                if trace {
+                    eprintln!(
+                        "DUAL_PG iter={} step={:.3e} base={:.3e} obj {:.3e}->{:.3e} grad_inf={:.3e}",
+                        iter, step, base_step, obj_curr, obj_try, grad_inf
+                    );
+                }
+                y_curr = y_try;
+                obj_curr = obj_try;
+                residual_curr = residual_try;
+                accepted = true;
+                break;
+            }
+        }
+        if !accepted {
+            if trace {
+                eprintln!(
+                    "DUAL_PG iter={} no acceptable step obj={:.3e} grad_inf={:.3e} base={:.3e}",
+                    iter, obj_curr, grad_inf, base_step
+                );
+            }
+            break;
+        }
+    }
+
+    let mut tmp = result.clone();
+    tmp.dual_solution = y_curr;
+    let view = crate::qp::ipm_solver::outcome::ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+    };
+    let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(&view, &tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
+    if trace {
+        eprintln!("DUAL_PG final kkt {:.3e}->{:.3e}", pre, post);
+    }
+    if post < pre {
+        result.dual_solution = tmp.dual_solution;
+    }
+}
+
 /// LSQ で y を計算する核心ロジック (KKT-guard なし)。
 ///
 /// 解法: A^T y = target ( = -(Q*x + c + bound_contrib) ) の最小二乗解を
@@ -953,8 +1130,6 @@ fn try_dual_only_ir(
     let m = problem.num_constraints;
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
 
-    // ACTIVE_TOL = sqrt(eps_machine) ≈ 1e-8: 古典的 active-set 判定 tol。
-    const ACTIVE_TOL_REL: f64 = 1e-8;
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
     let dual_ir_reg = std::env::var("DUAL_IR_REG").ok()
@@ -962,17 +1137,7 @@ fn try_dual_only_ir(
         .unwrap_or(1e-12);
 
     // 1. free 変数の特定 (active = bound 近傍 or A col 空)
-    let mut free_idx: Vec<usize> = Vec::with_capacity(n);
-    for j in 0..n {
-        let xj = result.solution[j];
-        let tol = ACTIVE_TOL_REL * (1.0 + xj.abs());
-        let (lb, ub) = problem.bounds[j];
-        if lb.is_finite() && (xj - lb).abs() < tol { continue; }
-        if ub.is_finite() && (ub - xj).abs() < tol { continue; }
-        // A col 空 (EmptyCol) は dual update で動かせないため除外
-        if problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 { continue; }
-        free_idx.push(j);
-    }
+    let free_idx = collect_dual_recovery_free_columns(problem, result);
     let n_free = free_idx.len();
     if n_free == 0 {
         if trace { eprintln!("DUAL_IR skip: n_free=0"); }
@@ -1274,6 +1439,7 @@ pub(crate) fn refine_kkt_iterative(
             n_dual_total += n_dual;
             zero_inactive_inequality_duals(problem, result);
             project_duals_from_singleton_columns(problem, result);
+            refine_dual_projected_gradient(problem, result, deadline);
             // y が更新されたので bound_duals (z) も KKT から再計算する。
             // ただし z refit は active bound 列では改善しても、別の列で悪化して
             // dual-only IR の進捗を潰すことがあるため、全体 KKT で guard する。
@@ -4905,6 +5071,54 @@ mod tests {
 
         assert!((result.dual_solution[0] - 2.0).abs() < 1e-12, "row dual should project to 2, got {}", result.dual_solution[0]);
         assert!(result.bound_duals[0].abs() < 1e-12, "z_lb should remain 0, got {}", result.bound_duals[0]);
+    }
+
+    #[test]
+    fn test_zero_inactive_inequality_duals_clears_slack_le_rows() {
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![0.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, n).unwrap();
+        let b = vec![10.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![3.0],
+            dual_solution: vec![7.0],
+            bound_duals: vec![0.0],
+            ..SolverResult::default()
+        };
+
+        zero_inactive_inequality_duals(&problem, &mut result);
+
+        assert!(result.dual_solution[0].abs() < 1e-12, "inactive Le row dual should be zeroed, got {}", result.dual_solution[0]);
+    }
+
+    #[test]
+    fn test_refine_dual_projected_gradient_uses_curvature_scaled_step() {
+        let n = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![-1.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1000.0_f64], 1, n).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0e-3],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0],
+            ..SolverResult::default()
+        };
+
+        refine_dual_projected_gradient(&problem, &mut result, None);
+
+        assert!(
+            (result.dual_solution[0] - 1.0e-3).abs() < 1e-9,
+            "projected gradient should take curvature-scaled step to y=1e-3, got {}",
+            result.dual_solution[0]
+        );
     }
 
     /// REFIT-T7: rank-deficient Q + 多解 → 偽 Optimal を duality gap で検出
