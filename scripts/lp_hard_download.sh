@@ -39,7 +39,7 @@
 #   curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
 #   cc -o /tmp/emps /tmp/emps.c
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOLVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -236,7 +236,7 @@ done
 echo "" >&2
 echo "=== 5. Rail set cover (rail507, rail516, rail582, rail2586, rail4284) ===" >&2
 for r in rail507 rail516 rail582 rail2586 rail4284; do
-    download_bz2_mps "$r" "${PLATO_BASE}/rail/${r}.mps.bz2"
+    download_bz2_emps "$r" "${PLATO_BASE}/rail/${r}.bz2"
 done
 
 # ----------------------------------------------------------------
