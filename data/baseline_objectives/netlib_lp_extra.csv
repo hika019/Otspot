@@ -1,0 +1,18 @@
+# Netlib/Mittelmann Large LP extra problem set
+# Source: http://plato.asu.edu/ftp/lptestset/
+# Purpose: Larger LP problems beyond the standard Netlib set.
+#   Category 1 (数値的に悪質): fome11, fome12 - stochastic LP (FOME model, Forest Management)
+#     These are ill-conditioned due to long planning horizons.
+#   Category 2 (Mittelmann Large LP): pds-30, qap15 - large-scale LP benchmarks.
+#     pds-30: patient distribution system (50k rows), extension of Kennington pds series.
+#     qap15: LP relaxation of 15x15 quadratic assignment problem (6331 rows, 22275 vars).
+#
+# optimal_obj: "no_ref" entries need to be replaced after first successful bench run.
+# Use: SOLVER_DIR=. bash scripts/bench_parallel.sh --data-dir data/lp_problems_extra \
+#        --solver concurrent --timeout 1000 --eps 1e-6 --jobs 4 --output /tmp/extra.txt
+#
+problem_name,optimal_obj,source
+fome11,no_ref,http://plato.asu.edu/ftp/lptestset/fome/
+fome12,no_ref,http://plato.asu.edu/ftp/lptestset/fome/
+pds-30,no_ref,http://plato.asu.edu/ftp/lptestset/pds/
+qap15,no_ref,http://plato.asu.edu/ftp/lptestset/qap15.mps.bz2

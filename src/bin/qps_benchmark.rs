@@ -14,7 +14,7 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use solver::bench_utils::{detect_csv_path, load_baseline_objectives, ObjCheckResult};
+use solver::bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
@@ -616,6 +616,29 @@ mod tests {
         );
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
     }
+
+    /// load_expected_statuses が INFEASIBLE エントリを正しく読む
+    #[test]
+    fn test_expected_status_infeasible_loaded() {
+        use solver::bench_utils::{load_expected_statuses, ExpectedStatus};
+        use std::io::Write;
+
+        let csv = "problem_name,optimal_obj,source\n\
+            galenet,INFEASIBLE,https://www.netlib.org/lp/infeas/readme\n\
+            klein1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme\n\
+            afiro,-4.6475314286e+02,https://www.netlib.org/lp/data/readme\n";
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(csv.as_bytes()).unwrap();
+        let statuses = load_expected_statuses(tmp.path());
+
+        assert_eq!(statuses.get("galenet"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(statuses.get("klein1"), Some(&ExpectedStatus::Infeasible));
+        // 数値エントリは Optimal
+        assert_eq!(statuses.get("afiro"), Some(&ExpectedStatus::Optimal));
+        // 存在しない問題は None
+        assert_eq!(statuses.get("nonexistent"), None);
+    }
 }
 
 fn main() {
@@ -705,8 +728,14 @@ fn main() {
     };
     let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
     let baseline_objectives = load_baseline_objectives(&baseline_csv);
+    let expected_statuses = load_expected_statuses(&baseline_csv);
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
-    if baseline_objectives.is_empty() {
+    let n_infeasible_ref = expected_statuses.values().filter(|s| **s == ExpectedStatus::Infeasible).count();
+    let n_unbounded_ref = expected_statuses.values().filter(|s| **s == ExpectedStatus::Unbounded).count();
+    if n_infeasible_ref > 0 || n_unbounded_ref > 0 {
+        eprintln!("  (うち INFEASIBLE: {}, UNBOUNDED: {})", n_infeasible_ref, n_unbounded_ref);
+    }
+    if baseline_objectives.is_empty() && expected_statuses.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
     }
 
@@ -732,9 +761,11 @@ fn main() {
     );
     println!("{}", "-".repeat(80));
 
-    // 集計 — §2.5の7カテゴリ + 既存カテゴリ
+    // 集計 — §2.5の7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
     let mut n_pass = 0usize;
     let mut n_pass_noref = 0usize;
+    let mut n_pass_infeasible = 0usize;   // 期待通り Infeasible と判定
+    let mut n_pass_unbounded = 0usize;    // 期待通り Unbounded と判定
     let mut n_pfeas_fail = 0usize;
     let mut n_dfeas_fail = 0usize;
     let mut n_suboptimal_comp = 0usize;
@@ -1023,12 +1054,40 @@ fn main() {
                 }
             }
             SolveStatus::Infeasible => {
-                n_fail += 1;
-                ("FAIL:Infeasible".to_string(), String::new())
+                // CSV に INFEASIBLE が記載されていれば正答 → PASS:Infeasible
+                // 記載なし (no_ref) または Optimal 期待の問題に Infeasible が返ったら FAIL
+                match expected_statuses.get(&name) {
+                    Some(ExpectedStatus::Infeasible) => {
+                        n_pass_infeasible += 1;
+                        ("PASS:Infeasible".to_string(), String::new())
+                    }
+                    Some(ExpectedStatus::Optimal) => {
+                        // 最適を期待していたのに Infeasible → 解けていない
+                        n_fail += 1;
+                        ("FAIL:Infeasible".to_string(), "(expected Optimal)".to_string())
+                    }
+                    _ => {
+                        // no_ref: 正解不明。FAIL として記録するが expected Optimal ではない
+                        n_fail += 1;
+                        ("FAIL:Infeasible".to_string(), String::new())
+                    }
+                }
             }
             SolveStatus::Unbounded => {
-                n_fail += 1;
-                ("FAIL:Unbounded".to_string(), String::new())
+                match expected_statuses.get(&name) {
+                    Some(ExpectedStatus::Unbounded) => {
+                        n_pass_unbounded += 1;
+                        ("PASS:Unbounded".to_string(), String::new())
+                    }
+                    Some(ExpectedStatus::Optimal) => {
+                        n_fail += 1;
+                        ("FAIL:Unbounded".to_string(), "(expected Optimal)".to_string())
+                    }
+                    _ => {
+                        n_fail += 1;
+                        ("FAIL:Unbounded".to_string(), String::new())
+                    }
+                }
             }
             SolveStatus::MaxIterations => {
                 n_max_iter += 1;
@@ -1129,21 +1188,25 @@ fn main() {
     println!("{}", "-".repeat(80));
     println!();
     println!("=== Summary ===");
-    println!("  PASS:           {}", n_pass);
-    println!("  PASS[no_ref]:   {}", n_pass_noref);
-    println!("  PFEAS_FAIL:     {}", n_pfeas_fail);
-    println!("  DFEAS_FAIL:     {}", n_dfeas_fail);
-    println!("  SUBOPTIMAL:     {}", n_suboptimal + n_suboptimal_comp);
-    println!("  OBJ_MISMATCH:   {}", n_obj_mismatch);
-    println!("  MAXITER:        {}", n_max_iter);
-    println!("  TIMEOUT:        {}", n_timeout);
-    println!("  NONCONVEX:      {}", n_nonconvex);
-    println!("  FAIL:           {}", n_fail);
-    println!("  ERROR:          {}", n_error);
+    println!("  PASS:              {}", n_pass);
+    println!("  PASS[no_ref]:      {}", n_pass_noref);
+    println!("  PASS:Infeasible:   {}", n_pass_infeasible);
+    println!("  PASS:Unbounded:    {}", n_pass_unbounded);
+    println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
+    println!("  DFEAS_FAIL:        {}", n_dfeas_fail);
+    println!("  SUBOPTIMAL:        {}", n_suboptimal + n_suboptimal_comp);
+    println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
+    println!("  MAXITER:           {}", n_max_iter);
+    println!("  TIMEOUT:           {}", n_timeout);
+    println!("  NONCONVEX:         {}", n_nonconvex);
+    println!("  FAIL:              {}", n_fail);
+    println!("  ERROR:             {}", n_error);
     println!(
-        "  TOTAL:          {}",
+        "  TOTAL:             {}",
         n_pass
             + n_pass_noref
+            + n_pass_infeasible
+            + n_pass_unbounded
             + n_pfeas_fail
             + n_dfeas_fail
             + n_suboptimal_comp
