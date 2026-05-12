@@ -474,16 +474,39 @@ pub(crate) fn project_duals_from_singleton_columns(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
 ) {
-    let n = problem.num_vars;
-    let m = problem.num_constraints;
-    if result.solution.len() != n || result.dual_solution.len() != m {
+    let Some((lower, upper)) = compute_dual_recovery_row_bounds(problem, &result.solution) else {
+        return;
+    };
+    if result.dual_solution.len() != problem.num_constraints {
         return;
     }
+    for row in 0..problem.num_constraints {
+        let lo = lower[row];
+        let hi = upper[row];
+        if lo > hi {
+            continue;
+        }
+        let y = &mut result.dual_solution[row];
+        if *y < lo {
+            *y = lo;
+        } else if *y > hi {
+            *y = hi;
+        }
+    }
+}
 
-    let qx = match problem.q.mat_vec_mul(&result.solution) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+fn compute_dual_recovery_row_bounds(
+    problem: &QpProblem,
+    solution: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if solution.len() != n {
+        return None;
+    }
+
+    let qx = problem.q.mat_vec_mul(solution).ok()?;
+    let ax = problem.a.mat_vec_mul(solution).ok()?;
 
     let mut lower = vec![f64::NEG_INFINITY; m];
     let mut upper = vec![f64::INFINITY; m];
@@ -493,6 +516,19 @@ pub(crate) fn project_duals_from_singleton_columns(
             crate::problem::ConstraintType::Le => lower[row] = 0.0,
             crate::problem::ConstraintType::Ge => upper[row] = 0.0,
             crate::problem::ConstraintType::Eq => {}
+        }
+    }
+    const SLACK_TOL_REL: f64 = 1e-8;
+    for i in 0..m {
+        let slack = match problem.constraint_types[i] {
+            crate::problem::ConstraintType::Le => problem.b[i] - ax[i],
+            crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
+            crate::problem::ConstraintType::Eq => continue,
+        };
+        let tol = SLACK_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+        if slack > tol {
+            lower[i] = 0.0;
+            upper[i] = 0.0;
         }
     }
 
@@ -543,21 +579,7 @@ pub(crate) fn project_duals_from_singleton_columns(
         }
     }
 
-    for row in 0..m {
-        let lo = lower[row];
-        let hi = upper[row];
-        if lo > hi {
-            // 交差が空なら singleton 列群だけでは整合 dual を作れない。
-            // この場合は現値を保持し、既存の LSQ / KKT guard に委ねる。
-            continue;
-        }
-        let y = &mut result.dual_solution[row];
-        if *y < lo {
-            *y = lo;
-        } else if *y > hi {
-            *y = hi;
-        }
-    }
+    Some((lower, upper))
 }
 
 /// 明確に slack のある不等式制約の dual を 0 に射影する。
@@ -954,6 +976,84 @@ pub(crate) fn refine_dual_worst_active_block(
         row_pos[row] = pos;
     }
 
+    let mut row_only_gram = vec![0.0_f64; rlen * rlen];
+    let mut row_only_rhs = vec![0.0_f64; rlen];
+    let mut current_local_residual = vec![0.0_f64; n];
+    for col in 0..n {
+        let residual = qx[col] + problem.c[col] + aty[col] + bound_contrib[col];
+        current_local_residual[col] = residual;
+        let mut col_vec = vec![0.0_f64; rlen];
+        let mut touches = false;
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let row = problem.a.row_ind[k];
+            let pos = row_pos[row];
+            if pos != usize::MAX {
+                col_vec[pos] = problem.a.values[k];
+                touches = true;
+            }
+        }
+        if !touches {
+            continue;
+        }
+        for i in 0..rlen {
+            row_only_rhs[i] -= col_vec[i] * residual;
+            for j in i..rlen {
+                row_only_gram[i * rlen + j] += col_vec[i] * col_vec[j];
+            }
+        }
+    }
+    let row_only_sol = {
+        let row_diag_max = (0..rlen)
+            .map(|i| row_only_gram[i * rlen + i].abs())
+            .fold(0.0_f64, f64::max);
+        let row_reg = f64::EPSILON * (1.0 + row_diag_max);
+        let mut row_col_ptr = vec![0usize; rlen + 1];
+        let mut row_ind = Vec::new();
+        let mut row_values = Vec::new();
+        for j in 0..rlen {
+            for i in 0..=j {
+                let mut v = row_only_gram[i * rlen + j];
+                if i == j {
+                    v += row_reg;
+                }
+                if v != 0.0 {
+                    row_ind.push(i);
+                    row_values.push(v);
+                }
+            }
+            row_col_ptr[j + 1] = row_ind.len();
+        }
+        let row_csc = CscMatrix {
+            col_ptr: row_col_ptr,
+            row_ind,
+            values: row_values,
+            nrows: rlen,
+            ncols: rlen,
+        };
+        crate::linalg::ldl::factorize(&row_csc)
+            .ok()
+            .map(|factor| {
+                let mut sol = vec![0.0_f64; rlen];
+                factor.solve(&row_only_rhs, &mut sol);
+                sol
+            })
+            .filter(|sol| sol.iter().all(|v| v.is_finite()))
+    };
+    let mut provisional_residual = current_local_residual.clone();
+    if let Some(ref delta_row) = row_only_sol {
+        for col in 0..n {
+            let mut delta = 0.0_f64;
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                let row = problem.a.row_ind[k];
+                let pos = row_pos[row];
+                if pos != usize::MAX {
+                    delta += problem.a.values[k] * delta_row[pos];
+                }
+            }
+            provisional_residual[col] += delta;
+        }
+    }
+
     let mut cols = Vec::new();
     for col in 0..n {
         let mut touches = false;
@@ -1015,83 +1115,6 @@ pub(crate) fn refine_dual_worst_active_block(
         }
     }
 
-    let mut local_aty_current = vec![0.0_f64; cols.len()];
-    let mut row_gram = vec![0.0_f64; rlen * rlen];
-    let mut row_rhs = vec![0.0_f64; rlen];
-    for (ci, &col) in cols.iter().enumerate() {
-        let mut col_vec = vec![0.0_f64; rlen];
-        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            let row = problem.a.row_ind[k];
-            let pos = row_pos[row];
-            if pos != usize::MAX {
-                let aij = problem.a.values[k];
-                local_aty_current[ci] += aij * result.dual_solution[row];
-                col_vec[pos] = aij;
-            }
-        }
-        let target_adj =
-            -(qx[col] + problem.c[col] + bound_contrib[col]) - (aty[col] - local_aty_current[ci]);
-        for i in 0..rlen {
-            row_rhs[i] += col_vec[i] * target_adj;
-            for j in i..rlen {
-                row_gram[i * rlen + j] += col_vec[i] * col_vec[j];
-            }
-        }
-    }
-    let row_diag_max = (0..rlen)
-        .map(|i| row_gram[i * rlen + i].abs())
-        .fold(0.0_f64, f64::max);
-    let row_reg = f64::EPSILON * (1.0 + row_diag_max);
-    let mut row_col_ptr = vec![0usize; rlen + 1];
-    let mut row_ind = Vec::new();
-    let mut row_values = Vec::new();
-    for j in 0..rlen {
-        for i in 0..=j {
-            let mut v = row_gram[i * rlen + j];
-            if i == j {
-                v += row_reg;
-            }
-            if v != 0.0 {
-                row_ind.push(i);
-                row_values.push(v);
-            }
-        }
-        row_col_ptr[j + 1] = row_ind.len();
-    }
-    let row_gram_csc = CscMatrix {
-        col_ptr: row_col_ptr,
-        row_ind,
-        values: row_values,
-        nrows: rlen,
-        ncols: rlen,
-    };
-    let row_only_sol = crate::linalg::ldl::factorize(&row_gram_csc)
-        .ok()
-        .map(|factor| {
-            let mut sol = vec![0.0_f64; rlen];
-            factor.solve(&row_rhs, &mut sol);
-            sol
-        })
-        .filter(|sol| sol.iter().all(|v| v.is_finite()));
-    let mut provisional_residual = vec![0.0_f64; n];
-    if let Some(ref sol) = row_only_sol {
-        for (ci, &col) in cols.iter().enumerate() {
-            let mut local_aty_trial = 0.0_f64;
-            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                let row = problem.a.row_ind[k];
-                let pos = row_pos[row];
-                if pos != usize::MAX {
-                    local_aty_trial += problem.a.values[k] * sol[pos];
-                }
-            }
-            provisional_residual[col] = qx[col]
-                + problem.c[col]
-                + (aty[col] - local_aty_current[ci])
-                + local_aty_trial
-                + bound_contrib[col];
-        }
-    }
-
     let mut local_bounds = Vec::new();
     for &col in &cols {
         let xj = result.solution[col];
@@ -1111,11 +1134,7 @@ pub(crate) fn refine_dual_worst_active_block(
                 || ub_slot_of_var[col]
                     .and_then(|slot| result.bound_duals.get(slot))
                     .is_some_and(|&z| z > 0.0));
-        let residual_j = if row_only_sol.is_some() {
-            provisional_residual[col]
-        } else {
-            qx[col] + problem.c[col] + aty[col] + bound_contrib[col]
-        };
+        let residual_j = provisional_residual[col];
         let lb_can_help = residual_j > 0.0
             || lb_slot_of_var[col]
                 .and_then(|slot| result.bound_duals.get(slot))
@@ -1205,11 +1224,8 @@ pub(crate) fn refine_dual_worst_active_block(
         }
     }
 
-    for (ci, &col) in cols.iter().enumerate() {
-        let target_adj = -(qx[col]
-            + problem.c[col]
-            + (aty[col] - local_aty[ci])
-            + (bound_contrib[col] - local_bound_contrib[ci]));
+    for &col in &cols {
+        let residual = qx[col] + problem.c[col] + aty[col] + bound_contrib[col];
         let mut col_vec = vec![0.0_f64; ulen];
         for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
             let row = problem.a.row_ind[k];
@@ -1223,7 +1239,7 @@ pub(crate) fn refine_dual_worst_active_block(
             col_vec[rlen + bpos] = local_bounds[bpos].coeff();
         }
         for i in 0..ulen {
-            rhs[i] += col_vec[i] * target_adj;
+            rhs[i] -= col_vec[i] * residual;
             for j in i..ulen {
                 gram[i * ulen + j] += col_vec[i] * col_vec[j];
             }
@@ -1266,26 +1282,6 @@ pub(crate) fn refine_dual_worst_active_block(
         return;
     }
 
-    let mut tmp = result.clone();
-    for (pos, &row) in rows.iter().enumerate() {
-        let mut v = block_sol[pos];
-        match problem.constraint_types[row] {
-            crate::problem::ConstraintType::Le => v = v.max(0.0),
-            crate::problem::ConstraintType::Ge => v = v.min(0.0),
-            crate::problem::ConstraintType::Eq => {}
-        }
-        tmp.dual_solution[row] = v;
-    }
-    for (pos, &bound) in local_bounds.iter().enumerate() {
-        let slot = bound.slot();
-        if slot >= tmp.bound_duals.len() {
-            continue;
-        }
-        tmp.bound_duals[slot] = block_sol[rlen + pos].max(0.0);
-    }
-    project_duals_from_singleton_columns(problem, &mut tmp);
-    zero_inactive_inequality_duals(problem, &mut tmp);
-
     let view = crate::qp::ipm_solver::outcome::ProblemView {
         q: &problem.q,
         a: &problem.a,
@@ -1300,18 +1296,55 @@ pub(crate) fn refine_dual_worst_active_block(
         &result.dual_solution,
         &result.bound_duals,
     );
-    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
-        &view,
-        &tmp.solution,
-        &tmp.dual_solution,
-        &tmp.bound_duals,
-    );
-    if trace {
-        eprintln!("DUAL_BLOCK kkt {:.3e}->{:.3e}", pre, post);
+    let Some((row_lower, row_upper)) = compute_dual_recovery_row_bounds(problem, &result.solution)
+    else {
+        return;
+    };
+    let mut best = result.clone();
+    let mut best_kkt = pre;
+    let mut step = 1.0_f64;
+    while step > 0.0 {
+        let mut tmp = result.clone();
+        for (pos, &row) in rows.iter().enumerate() {
+            let mut v = result.dual_solution[row] + step * block_sol[pos];
+            let lo = row_lower[row];
+            let hi = row_upper[row];
+            if lo <= hi {
+                v = v.clamp(lo, hi);
+            }
+            tmp.dual_solution[row] = v;
+        }
+        for (pos, &bound) in local_bounds.iter().enumerate() {
+            let slot = bound.slot();
+            if slot >= tmp.bound_duals.len() {
+                continue;
+            }
+            let z = result.bound_duals[slot] + step * block_sol[rlen + pos];
+            tmp.bound_duals[slot] = z.max(0.0);
+        }
+        let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &tmp.solution,
+            &tmp.dual_solution,
+            &tmp.bound_duals,
+        );
+        if post < best_kkt {
+            best = tmp;
+            best_kkt = post;
+            break;
+        }
+        let next_step = step * 0.5;
+        if next_step == step {
+            break;
+        }
+        step = next_step;
     }
-    if post < pre {
-        result.dual_solution = tmp.dual_solution;
-        result.bound_duals = tmp.bound_duals;
+    if trace {
+        eprintln!("DUAL_BLOCK kkt {:.3e}->{:.3e}", pre, best_kkt);
+    }
+    if best_kkt < pre {
+        result.dual_solution = best.dual_solution;
+        result.bound_duals = best.bound_duals;
     }
 }
 
@@ -1932,17 +1965,62 @@ fn try_dual_only_ir(
         return 0;
     }
 
-    // 3. A_free dense (m × n_free) を構築 → G = A_free^T A_free (上三角)
-    let mut a_free = vec![0.0_f64; m * n_free];
+    let row_bounds = match compute_dual_recovery_row_bounds(problem, &result.solution) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let (proj_lower, proj_upper) = (&row_bounds.0, &row_bounds.1);
+
+    let ax = match problem.a.mat_vec_mul(&result.solution) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let mut active_rows = Vec::with_capacity(m);
+    let mut active_row_pos = vec![usize::MAX; m];
+    for i in 0..m {
+        let is_active = match problem.constraint_types[i] {
+            crate::problem::ConstraintType::Eq => true,
+            crate::problem::ConstraintType::Le => {
+                let slack = problem.b[i] - ax[i];
+                let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+                slack.abs() <= tol || result.dual_solution[i] > 0.0
+            }
+            crate::problem::ConstraintType::Ge => {
+                let slack = ax[i] - problem.b[i];
+                let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+                slack.abs() <= tol || result.dual_solution[i] < 0.0
+            }
+        };
+        if is_active {
+            active_row_pos[i] = active_rows.len();
+            active_rows.push(i);
+        }
+    }
+    let m_active = active_rows.len();
+    if m_active == 0 {
+        if trace {
+            eprintln!("DUAL_IR skip: m_active=0");
+        }
+        return 0;
+    }
+    if trace && m_active < m {
+        eprintln!("DUAL_IR active_rows={}/{}", m_active, m);
+    }
+
+    // 3. A_free_active dense (m_active × n_free) を構築 → G = A_free^T A_free (上三角)
+    let mut a_free = vec![0.0_f64; m_active * n_free];
     for (fi, &j) in free_idx.iter().enumerate() {
         for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
             let r = problem.a.row_ind[k];
-            a_free[r * n_free + fi] = problem.a.values[k];
+            let pos = active_row_pos[r];
+            if pos != usize::MAX {
+                a_free[pos * n_free + fi] = problem.a.values[k];
+            }
         }
     }
     // G[fi, fj] for fi <= fj: Σ_r a_free[r,fi] * a_free[r,fj]
     let mut g_dense = vec![0.0_f64; n_free * n_free];
-    for r in 0..m {
+    for r in 0..m_active {
         let row_off = r * n_free;
         for fi in 0..n_free {
             let aij = a_free[row_off + fi];
@@ -2045,7 +2123,9 @@ fn try_dual_only_ir(
             let af = -alpha[fi];
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 let r = problem.a.row_ind[k];
-                dy_dd[r] = dy_dd[r] + TwoFloat::new_mul(problem.a.values[k], af);
+                if active_row_pos[r] != usize::MAX {
+                    dy_dd[r] = dy_dd[r] + TwoFloat::new_mul(problem.a.values[k], af);
+                }
             }
         }
         let dy_inf = dy_dd
@@ -2064,11 +2144,18 @@ fn try_dual_only_ir(
         let mut accepted_step_scale = 0.0_f64;
         let mut step_scale = 1.0_f64;
         while step_scale > 0.0 {
-            let y_dd_new: Vec<TwoFloat> = y_dd
+            let mut y_dd_new: Vec<TwoFloat> = y_dd
                 .iter()
                 .zip(dy_dd.iter())
                 .map(|(&y, &d)| y + d * step_scale)
                 .collect();
+            for &row in &active_rows {
+                let val = f64::from(y_dd_new[row]);
+                let lo = proj_lower[row];
+                let hi = proj_upper[row];
+                let clamped = if lo <= hi { val.clamp(lo, hi) } else { val };
+                y_dd_new[row] = TwoFloat::from(clamped);
+            }
 
             // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
             let mut new_r_d_free = vec![0.0_f64; n_free];
@@ -2263,13 +2350,75 @@ pub(crate) fn refine_kkt_iterative(
     );
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
+        let pre_outer = result.clone();
         let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
         if n_dual > 0 {
             n_dual_total += n_dual;
+            let after_dual_ir = result.clone();
+            let kkt_after_dual_ir = kkt_residual_rel(
+                &view,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            );
+            if trace {
+                eprintln!(
+                    "DUAL_IR outer: after try_dual_only_ir kkt {:.3e}",
+                    kkt_after_dual_ir
+                );
+            }
             zero_inactive_inequality_duals(problem, result);
+            if trace {
+                let kkt_after_zero = kkt_residual_rel(
+                    &view,
+                    &result.solution,
+                    &result.dual_solution,
+                    &result.bound_duals,
+                );
+                eprintln!(
+                    "DUAL_IR outer: after zero_inactive kkt {:.3e}",
+                    kkt_after_zero
+                );
+            }
             project_duals_from_singleton_columns(problem, result);
+            if trace {
+                let kkt_after_singleton = kkt_residual_rel(
+                    &view,
+                    &result.solution,
+                    &result.dual_solution,
+                    &result.bound_duals,
+                );
+                eprintln!(
+                    "DUAL_IR outer: after singleton projection kkt {:.3e}",
+                    kkt_after_singleton
+                );
+            }
             refine_dual_projected_gradient(problem, result, deadline);
+            if trace {
+                let kkt_after_pg = kkt_residual_rel(
+                    &view,
+                    &result.solution,
+                    &result.dual_solution,
+                    &result.bound_duals,
+                );
+                eprintln!(
+                    "DUAL_IR outer: after projected gradient kkt {:.3e}",
+                    kkt_after_pg
+                );
+            }
             refine_dual_worst_active_block(problem, result, deadline);
+            if trace {
+                let kkt_after_block = kkt_residual_rel(
+                    &view,
+                    &result.solution,
+                    &result.dual_solution,
+                    &result.bound_duals,
+                );
+                eprintln!(
+                    "DUAL_IR outer: after local block kkt {:.3e}",
+                    kkt_after_block
+                );
+            }
             // y が更新されたので bound_duals (z) も KKT から再計算する。
             // ただし z refit は active bound 列では改善しても、別の列で悪化して
             // dual-only IR の進捗を潰すことがあるため、全体 KKT で guard する。
@@ -2301,6 +2450,22 @@ pub(crate) fn refine_kkt_iterative(
                     pre_refit_kkt, post_refit_kkt
                 );
             }
+
+            let kkt_after_cleanup = kkt_residual_rel(
+                &view,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            );
+            if kkt_after_cleanup > kkt_after_dual_ir {
+                if trace {
+                    eprintln!(
+                        "DUAL_IR cleanup reverted: kkt {:.3e} -> {:.3e}",
+                        kkt_after_dual_ir, kkt_after_cleanup
+                    );
+                }
+                *result = after_dual_ir;
+            }
         }
         // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
         if n_dual == 0 {
@@ -2316,6 +2481,7 @@ pub(crate) fn refine_kkt_iterative(
             break;
         }
         if cur_kkt >= prev_kkt * 0.999 {
+            *result = pre_outer;
             break;
         }
         prev_kkt = cur_kkt;
@@ -6673,6 +6839,48 @@ mod tests {
             (result.bound_duals[1] - 1.0).abs() < 1e-9,
             "active y lower-bound dual should be recovered to 1, got {}",
             result.bound_duals[1]
+        );
+    }
+
+    #[test]
+    fn test_dual_only_ir_uses_active_rows_and_keeps_inactive_le_zero() {
+        let q = CscMatrix::new(1, 1);
+        let c = vec![-1.0_f64];
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0_f64, 1.0_f64], 2, 1).unwrap();
+        let b = vec![1.0_f64, 10.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new(
+            q,
+            c,
+            a,
+            b,
+            bounds,
+            vec![
+                crate::problem::ConstraintType::Eq,
+                crate::problem::ConstraintType::Le,
+            ],
+        )
+        .unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0_f64],
+            dual_solution: vec![0.0_f64, 0.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+
+        let accepted = try_dual_only_ir(&problem, &mut result, 1e-8, None);
+
+        assert!(accepted > 0, "DUAL_IR should accept at least one iteration");
+        assert!(
+            (result.dual_solution[0] - 1.0).abs() < 1e-9,
+            "equality row dual should move to 1, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.dual_solution[1].abs() < 1e-12,
+            "inactive Le row dual should stay zero, got {}",
+            result.dual_solution[1]
         );
     }
 

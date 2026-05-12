@@ -810,7 +810,7 @@ fn run_ipm_with(
             }
             let prev_kkt = current_kkt;
 
-            let pre_y = final_sol.dual_solution.clone();
+            let pre_dual_step = final_sol.clone();
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
             crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
             crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
@@ -825,7 +825,7 @@ fn run_ipm_with(
             if post_kkt <= current_kkt {
                 current_kkt = post_kkt;
             } else {
-                final_sol.dual_solution = pre_y;
+                final_sol = pre_dual_step;
             }
 
             let pre_z = final_sol.bound_duals.clone();
@@ -864,7 +864,7 @@ fn run_ipm_with(
             }
             let prev_kkt = current_kkt;
 
-            let pre_y = final_sol.dual_solution.clone();
+            let pre_dual_step = final_sol.clone();
             crate::qp::refine_dual_lsq_irls(
                 orig_problem,
                 &mut final_sol,
@@ -899,7 +899,7 @@ fn run_ipm_with(
                     final_sol.bound_duals = pre_z;
                 }
             } else {
-                final_sol.dual_solution = pre_y;
+                final_sol = pre_dual_step;
                 break; // IRLS が改善できなければ outer loop も終了
             }
 
