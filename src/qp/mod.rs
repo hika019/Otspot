@@ -32,13 +32,12 @@
 //! ```
 
 mod problem;
-pub mod ipm;
+pub(crate) mod ipm;
 pub mod ipm_v2;
 pub mod diagnose;
 pub use problem::{QpProblem, QpWarmStart};
 pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 pub use crate::problem::SolverResult;
-pub use ipm::solve_qp_ippmm;
 
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
