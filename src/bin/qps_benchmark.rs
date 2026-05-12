@@ -14,7 +14,7 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, ObjCheckResult};
+use solver::bench_utils::{detect_csv_path, load_baseline_objectives, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
@@ -102,6 +102,31 @@ fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
             max_rel
         }
         Err(_) => f64::NAN,
+    }
+}
+
+fn check_reported_objective(
+    problem_name: &str,
+    reported_objective: f64,
+    prob: &QpProblem,
+    baseline_csv_path: Option<&str>,
+    baseline_objectives: &std::collections::HashMap<String, f64>,
+    eps_obj: f64,
+) -> ObjCheckResult {
+    let expected = match baseline_objectives.get(problem_name) {
+        Some(v) => *v,
+        None => return ObjCheckResult::NoRef,
+    };
+    let expected_reported = match baseline_csv_path {
+        Some(path) if path.ends_with("netlib_lp.csv") => expected + prob.obj_offset,
+        _ => expected,
+    };
+    let denom = expected_reported.abs().max(1.0);
+    let rel_err = (reported_objective - expected_reported).abs() / denom;
+    if rel_err <= eps_obj {
+        ObjCheckResult::Ok { rel_err }
+    } else {
+        ObjCheckResult::Mismatch { rel_err }
     }
 }
 
@@ -453,6 +478,7 @@ fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, Benc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use solver::problem::ConstraintType;
     use solver::sparse::CscMatrix;
 
@@ -536,6 +562,60 @@ mod tests {
             pfeas_ok
         );
     }
+
+    #[test]
+    fn test_netlib_objective_check_adds_obj_offset_to_reference() {
+        let mut prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+            vec![],
+        )
+        .unwrap();
+        prob.obj_offset = -7.113;
+
+        let mut known = HashMap::new();
+        known.insert("e226".to_string(), -18.751_929_066);
+
+        let result = check_reported_objective(
+            "e226",
+            -25.864_929_066,
+            &prob,
+            Some("data/baseline_objectives/netlib_lp.csv"),
+            &known,
+            1e-9,
+        );
+        assert!(matches!(result, ObjCheckResult::Ok { .. }));
+    }
+
+    #[test]
+    fn test_non_netlib_objective_check_does_not_add_obj_offset() {
+        let mut prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+            vec![],
+        )
+        .unwrap();
+        prob.obj_offset = -7.113;
+
+        let mut known = HashMap::new();
+        known.insert("toy".to_string(), 12.5);
+
+        let result = check_reported_objective(
+            "toy",
+            12.5,
+            &prob,
+            Some("data/baseline_objectives/maros_meszaros.csv"),
+            &known,
+            1e-9,
+        );
+        assert!(matches!(result, ObjCheckResult::Ok { .. }));
+    }
 }
 
 fn main() {
@@ -611,7 +691,7 @@ fn main() {
 
     // §2.4: 正解値CSV読み込み
     // バイナリの実行パスからCSVを探す（--known-optimal指定またはdata_dir名から自動選択）
-    let baseline_objectives = {
+    let baseline_csv = {
         let root = {
             let mut p = std::env::current_exe()
                 .ok()
@@ -621,9 +701,10 @@ fn main() {
             p = p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default();
             p
         };
-        let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        load_baseline_objectives(&csv)
+        detect_csv_path(&data_dir, baseline_override.as_deref(), &root)
     };
+    let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
+    let baseline_objectives = load_baseline_objectives(&baseline_csv);
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
     if baseline_objectives.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
@@ -841,9 +922,11 @@ fn main() {
                             // ベースライン CSV は result.objective (obj_offset 込み) を使って生成されているため、
                             // result.objective をそのまま比較する。
                             // (9e83748 で誤って obj_offset を引いていたが、ベースラインは offset 込み値で作成済み)
-                            match check_baseline_objective(
+                            match check_reported_objective(
                                 &name,
                                 result.objective,
+                                &prob,
+                                Some(&baseline_csv_str),
                                 &baseline_objectives,
                                 eps_obj,
                             ) {

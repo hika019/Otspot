@@ -619,7 +619,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
 
         match revised_simplex_core(&a, &mut x_b, &c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
         {
-            SimplexOutcome::Optimal(obj, y) => {
+            SimplexOutcome::Optimal(obj, mut y) => {
+                if reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas).is_err() {
+                    return SolverResult::numerical_error();
+                }
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                 // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
                 if !check_eq_feasibility(problem, &solution) {
@@ -814,7 +817,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     &mut pricing2,
                     options,
                 ) {
-                    SimplexOutcome::Optimal(obj2, y) => {
+                    SimplexOutcome::Optimal(obj2, mut y) => {
+                        if reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas).is_err() {
+                            return SolverResult::numerical_error();
+                        }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
                         if !check_eq_feasibility(problem, &solution) {
@@ -920,6 +926,38 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     true
+}
+
+/// 最終基底に対して x_B = B^{-1}b, y = B^{-T}c_B を再計算する。
+fn reconcile_final_basis_state(
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    basis: &[usize],
+    x_b: &mut [f64],
+    y: &mut [f64],
+    max_etas: usize,
+) -> Result<(), crate::error::SolverError> {
+    let m = basis.len();
+    let basis_mgr = LuBasis::new(a, basis, max_etas)?;
+
+    let mut x_b_sv = SparseVec::from_dense(b);
+    basis_mgr.ftran(&mut x_b_sv);
+    x_b_sv.to_dense_into(x_b);
+    for value in x_b.iter_mut() {
+        if value.abs() < 1e-12 {
+            *value = 0.0;
+        }
+    }
+
+    let mut c_b = vec![0.0; m];
+    for i in 0..m {
+        c_b[i] = c[basis[i]];
+    }
+    let mut y_sv = SparseVec::from_dense(&c_b);
+    basis_mgr.btran(&mut y_sv);
+    y_sv.to_dense_into(y);
+    Ok(())
 }
 
 /// 最適基底解から元の変数への解ベクトルを復元する
@@ -1196,6 +1234,30 @@ mod tests {
     ) -> LpProblem {
         let a = CscMatrix::from_triplets(rows, cols, vals, nrows, ncols).unwrap();
         LpProblem::new(c, a, b).unwrap()
+    }
+
+    #[test]
+    fn test_reconcile_final_basis_state_recomputes_xb_and_y() {
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 2, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            3,
+        )
+        .unwrap();
+        let b = vec![3.0, 5.0];
+        let c = vec![4.0, 2.0, 1.0];
+        let basis = vec![0usize, 2usize];
+        let mut x_b = vec![0.0, 0.0];
+        let mut y = vec![0.0, 0.0];
+
+        reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, 50).unwrap();
+
+        assert!((x_b[0] + 2.0).abs() < 1e-12, "x_b[0]={}", x_b[0]);
+        assert!((x_b[1] - 5.0).abs() < 1e-12, "x_b[1]={}", x_b[1]);
+        assert!((y[0] - 4.0).abs() < 1e-12, "y[0]={}", y[0]);
+        assert!((y[1] + 3.0).abs() < 1e-12, "y[1]={}", y[1]);
     }
 
     #[test]
