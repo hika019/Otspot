@@ -31,19 +31,20 @@
 //! // result.solution ≈ [0.5, 0.5], result.objective ≈ 0.5
 //! ```
 
-mod problem;
+pub mod diagnose;
 pub(crate) mod ipm_core;
 pub mod ipm_solver;
-pub mod diagnose;
 mod lp_dispatch;
-pub use problem::{QpProblem, QpWarmStart};
-pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
+mod problem;
 pub use crate::problem::SolverResult;
+pub use diagnose::{
+    diagnose, DiagnosticCode, DiagnosticReport, DiagnosticWarning, ProblemInfo, Severity,
+};
 pub(crate) use lp_dispatch::solve_as_lp_pub;
+pub use problem::{QpProblem, QpWarmStart};
 
 use crate::options::{QpSolverChoice, SolverOptions};
 use crate::sparse::CscMatrix;
-
 
 /// QP ソルバーを統一的に扱うための trait
 ///
@@ -71,7 +72,6 @@ impl QpSolver for IpPmmSolver {
     }
 }
 
-
 /// Q行列が正半定値かどうかを確認する。
 ///
 /// Q + epsilon*I を密行列コレスキー分解で確認する。
@@ -98,7 +98,9 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     let mut q_abs_max = 0.0_f64;
     for &v in q.values.iter() {
         let a = v.abs();
-        if a > q_abs_max { q_abs_max = a; }
+        if a > q_abs_max {
+            q_abs_max = a;
+        }
     }
 
     // 対角チェック (O(nnz), サイズ非依存)
@@ -110,7 +112,7 @@ pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             if q.row_ind[k] == col && q.values[k] < -neg_tol {
-                return false;  // 対角負値 → 非PSD確定
+                return false; // 対角負値 → 非PSD確定
             }
         }
     }
@@ -200,19 +202,31 @@ pub(crate) fn collapse_le_expansion_dual(
 ) -> Vec<f64> {
     use crate::problem::ConstraintType;
     let m_orig = orig_types.len();
-    let total_expanded: usize = le_map.original_to_expanded.iter().map(|rows| rows.len()).sum();
+    let total_expanded: usize = le_map
+        .original_to_expanded
+        .iter()
+        .map(|rows| rows.len())
+        .sum();
     if dual_expanded.len() < total_expanded {
         // サイズ不一致: フォールバックとして直接使用
         return dual_expanded.to_vec();
     }
     let mut collapsed = vec![0.0f64; m_orig];
-    for (i, (ct, rows)) in orig_types.iter().zip(le_map.original_to_expanded.iter()).enumerate() {
+    for (i, (ct, rows)) in orig_types
+        .iter()
+        .zip(le_map.original_to_expanded.iter())
+        .enumerate()
+    {
         collapsed[i] = match ct {
             ConstraintType::Le => dual_expanded[rows[0]],
             ConstraintType::Ge => -dual_expanded[rows[0]],
             ConstraintType::Eq => {
                 let mu1 = dual_expanded[rows[0]];
-                let mu2 = if rows.len() > 1 { dual_expanded[rows[1]] } else { 0.0 };
+                let mu2 = if rows.len() > 1 {
+                    dual_expanded[rows[1]]
+                } else {
+                    0.0
+                };
                 mu1 - mu2
             }
         };
@@ -261,7 +275,6 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     }
 }
 
-
 /// FX (固定) 変数判定の許容差。lb と ub の差がこれ未満なら固定変数とみなす。
 pub(crate) const FX_TOL: f64 = 1e-12;
 
@@ -279,7 +292,10 @@ pub(crate) fn remap_bound_duals_to_orig(
         return Vec::new();
     }
     let reduced_bounds = &presolve_result.reduced.bounds;
-    let n_lb_reduced = reduced_bounds.iter().filter(|(lb, _)| lb.is_finite()).count();
+    let n_lb_reduced = reduced_bounds
+        .iter()
+        .filter(|(lb, _)| lb.is_finite())
+        .count();
     let n_reduced = reduced_bounds.len();
 
     let mut lb_bd_idx: Vec<Option<usize>> = vec![None; n_reduced];
@@ -368,7 +384,9 @@ pub(crate) fn refine_dual_lsq(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
-    let Some(y_new) = compute_lsq_dual_y(problem, result) else { return; };
+    let Some(y_new) = compute_lsq_dual_y(problem, result) else {
+        return;
+    };
     let n = problem.num_vars;
     // ill-conditioned 問題 (QPILOTNO: ‖A‖=5.85e6, cond=3e12) で f64 mat_vec の
     // cancellation noise が真の残差より大きく、KKT-guard で IPM 由来の正しい y が
@@ -410,9 +428,7 @@ pub(crate) fn refine_dual_lsq(
         if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
             continue;
         }
-        if problem.a.col_ptr.len() > j + 1
-            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
-        {
+        if problem.a.col_ptr.len() > j + 1 && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 {
             continue;
         }
         let r_old_dd = qx_dd[j]
@@ -430,8 +446,12 @@ pub(crate) fn refine_dual_lsq(
         let scale_new = 1.0 + qx_j + problem.c[j].abs() + aty_new_j + bound_contrib[j].abs();
         let rel_old = f64::from(r_old_dd).abs() / scale_old;
         let rel_new = f64::from(r_new_dd).abs() / scale_new;
-        if rel_old > max_rel_old { max_rel_old = rel_old; }
-        if rel_new > max_rel_new { max_rel_new = rel_new; }
+        if rel_old > max_rel_old {
+            max_rel_old = rel_old;
+        }
+        if rel_new > max_rel_new {
+            max_rel_new = rel_new;
+        }
     }
     if max_rel_new < max_rel_old {
         result.dual_solution = y_new;
@@ -548,7 +568,9 @@ pub(crate) fn zero_inactive_inequality_duals(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
 ) {
-    if result.solution.len() != problem.num_vars || result.dual_solution.len() != problem.num_constraints {
+    if result.solution.len() != problem.num_vars
+        || result.dual_solution.len() != problem.num_constraints
+    {
         return;
     }
     let Ok(ax) = problem.a.mat_vec_mul(&result.solution) else {
@@ -616,7 +638,8 @@ pub(crate) fn refine_dual_projected_gradient(
     for col in 0..n {
         let xv = result.solution[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] =
+                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -820,13 +843,475 @@ pub(crate) fn refine_dual_projected_gradient(
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
     };
-    let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
-    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(&view, &tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
+    let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &tmp.solution,
+        &tmp.dual_solution,
+        &tmp.bound_duals,
+    );
     if trace {
         eprintln!("DUAL_PG final kkt {:.3e}->{:.3e}", pre, post);
     }
     if post < pre {
         result.dual_solution = tmp.dual_solution;
+    }
+}
+
+/// worst residual 列に接続する active cluster を局所的に再最適化する。
+///
+/// 全体 LSQ / PG では改善が鈍いとき、worst 列に隣接する active rows と、
+/// その row cluster に触れる bound-active 列の bound dual をまとめて block として
+/// 取り出し、stationarity を局所的に取り直す。row dual だけを更新すると、近傍の
+/// bound-active 列が押し返して KKT が悪化するケースがあるため、局所系は
+/// `[active row duals ; active bound duals]` の連成で解く。
+pub(crate) fn refine_dual_worst_active_block(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
+) {
+    let trace = std::env::var("REFINE_DUAL_BLOCK_TRACE").ok().as_deref() == Some("1");
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
+    let n = problem.num_vars;
+    let m = problem.num_constraints;
+    if result.solution.len() != n || result.dual_solution.len() != m {
+        return;
+    }
+
+    let Ok(qx) = problem.q.mat_vec_mul(&result.solution) else {
+        return;
+    };
+    let aty = if problem.a.nrows > 0 {
+        match problem.a.transpose().mat_vec_mul(&result.dual_solution) {
+            Ok(v) => v,
+            Err(_) => return,
+        }
+    } else {
+        vec![0.0_f64; n]
+    };
+    let Ok(ax) = problem.a.mat_vec_mul(&result.solution) else {
+        return;
+    };
+    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+
+    let mut worst_j = None;
+    let mut worst_rel = 0.0_f64;
+    for j in 0..n {
+        let (lb, ub) = problem.bounds[j];
+        let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
+        let is_empty_col = problem.a.col_ptr[j + 1] == problem.a.col_ptr[j];
+        if is_fx || is_empty_col {
+            continue;
+        }
+        let r = qx[j] + problem.c[j] + aty[j] + bound_contrib[j];
+        let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bound_contrib[j].abs();
+        let rel = r.abs() / scale;
+        if rel > worst_rel {
+            worst_rel = rel;
+            worst_j = Some(j);
+        }
+    }
+    let Some(worst_j) = worst_j else {
+        return;
+    };
+
+    let mut rows = Vec::new();
+    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
+        let row = problem.a.row_ind[k];
+        let active = match problem.constraint_types[row] {
+            crate::problem::ConstraintType::Eq => true,
+            crate::problem::ConstraintType::Le => {
+                let slack = problem.b[row] - ax[row];
+                slack.abs()
+                    <= DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[row].abs() + ax[row].abs())
+            }
+            crate::problem::ConstraintType::Ge => {
+                let slack = ax[row] - problem.b[row];
+                slack.abs()
+                    <= DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[row].abs() + ax[row].abs())
+            }
+        };
+        if active {
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    let rlen = rows.len();
+
+    let mut row_pos = vec![usize::MAX; m];
+    for (pos, &row) in rows.iter().enumerate() {
+        row_pos[row] = pos;
+    }
+
+    let mut cols = Vec::new();
+    for col in 0..n {
+        let mut touches = false;
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            if row_pos[problem.a.row_ind[k]] != usize::MAX {
+                touches = true;
+                break;
+            }
+        }
+        if touches {
+            cols.push(col);
+        }
+    }
+    if cols.is_empty() {
+        return;
+    }
+
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let mut lb_slot_of_var = vec![None; n];
+    let mut ub_slot_of_var = vec![None; n];
+    let mut lb_slot = 0usize;
+    let mut ub_slot = n_lb;
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        if lb.is_finite() {
+            lb_slot_of_var[j] = Some(lb_slot);
+            lb_slot += 1;
+        }
+        if ub.is_finite() {
+            ub_slot_of_var[j] = Some(ub_slot);
+            ub_slot += 1;
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LocalBoundVar {
+        Lower { var: usize, slot: usize },
+        Upper { var: usize, slot: usize },
+    }
+    impl LocalBoundVar {
+        fn var(self) -> usize {
+            match self {
+                LocalBoundVar::Lower { var, .. } | LocalBoundVar::Upper { var, .. } => var,
+            }
+        }
+        fn slot(self) -> usize {
+            match self {
+                LocalBoundVar::Lower { slot, .. } | LocalBoundVar::Upper { slot, .. } => slot,
+            }
+        }
+        fn coeff(self) -> f64 {
+            match self {
+                LocalBoundVar::Lower { .. } => -1.0,
+                LocalBoundVar::Upper { .. } => 1.0,
+            }
+        }
+    }
+
+    let mut local_aty_current = vec![0.0_f64; cols.len()];
+    let mut row_gram = vec![0.0_f64; rlen * rlen];
+    let mut row_rhs = vec![0.0_f64; rlen];
+    for (ci, &col) in cols.iter().enumerate() {
+        let mut col_vec = vec![0.0_f64; rlen];
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let row = problem.a.row_ind[k];
+            let pos = row_pos[row];
+            if pos != usize::MAX {
+                let aij = problem.a.values[k];
+                local_aty_current[ci] += aij * result.dual_solution[row];
+                col_vec[pos] = aij;
+            }
+        }
+        let target_adj =
+            -(qx[col] + problem.c[col] + bound_contrib[col]) - (aty[col] - local_aty_current[ci]);
+        for i in 0..rlen {
+            row_rhs[i] += col_vec[i] * target_adj;
+            for j in i..rlen {
+                row_gram[i * rlen + j] += col_vec[i] * col_vec[j];
+            }
+        }
+    }
+    let row_diag_max = (0..rlen)
+        .map(|i| row_gram[i * rlen + i].abs())
+        .fold(0.0_f64, f64::max);
+    let row_reg = f64::EPSILON * (1.0 + row_diag_max);
+    let mut row_col_ptr = vec![0usize; rlen + 1];
+    let mut row_ind = Vec::new();
+    let mut row_values = Vec::new();
+    for j in 0..rlen {
+        for i in 0..=j {
+            let mut v = row_gram[i * rlen + j];
+            if i == j {
+                v += row_reg;
+            }
+            if v != 0.0 {
+                row_ind.push(i);
+                row_values.push(v);
+            }
+        }
+        row_col_ptr[j + 1] = row_ind.len();
+    }
+    let row_gram_csc = CscMatrix {
+        col_ptr: row_col_ptr,
+        row_ind,
+        values: row_values,
+        nrows: rlen,
+        ncols: rlen,
+    };
+    let row_only_sol = crate::linalg::ldl::factorize(&row_gram_csc)
+        .ok()
+        .map(|factor| {
+            let mut sol = vec![0.0_f64; rlen];
+            factor.solve(&row_rhs, &mut sol);
+            sol
+        })
+        .filter(|sol| sol.iter().all(|v| v.is_finite()));
+    let mut provisional_residual = vec![0.0_f64; n];
+    if let Some(ref sol) = row_only_sol {
+        for (ci, &col) in cols.iter().enumerate() {
+            let mut local_aty_trial = 0.0_f64;
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                let row = problem.a.row_ind[k];
+                let pos = row_pos[row];
+                if pos != usize::MAX {
+                    local_aty_trial += problem.a.values[k] * sol[pos];
+                }
+            }
+            provisional_residual[col] = qx[col]
+                + problem.c[col]
+                + (aty[col] - local_aty_current[ci])
+                + local_aty_trial
+                + bound_contrib[col];
+        }
+    }
+
+    let mut local_bounds = Vec::new();
+    for &col in &cols {
+        let xj = result.solution[col];
+        let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs());
+        let (lb, ub) = problem.bounds[col];
+        let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
+        if is_fx {
+            continue;
+        }
+        let lb_active = lb.is_finite()
+            && ((xj - lb).abs() <= tol
+                || lb_slot_of_var[col]
+                    .and_then(|slot| result.bound_duals.get(slot))
+                    .is_some_and(|&z| z > 0.0));
+        let ub_active = ub.is_finite()
+            && ((ub - xj).abs() <= tol
+                || ub_slot_of_var[col]
+                    .and_then(|slot| result.bound_duals.get(slot))
+                    .is_some_and(|&z| z > 0.0));
+        let residual_j = if row_only_sol.is_some() {
+            provisional_residual[col]
+        } else {
+            qx[col] + problem.c[col] + aty[col] + bound_contrib[col]
+        };
+        let lb_can_help = residual_j > 0.0
+            || lb_slot_of_var[col]
+                .and_then(|slot| result.bound_duals.get(slot))
+                .is_some_and(|&z| z > 0.0);
+        let ub_can_help = residual_j < 0.0
+            || ub_slot_of_var[col]
+                .and_then(|slot| result.bound_duals.get(slot))
+                .is_some_and(|&z| z > 0.0);
+        match (lb_active, ub_active) {
+            (true, false) => {
+                if lb_can_help {
+                    if let Some(slot) = lb_slot_of_var[col] {
+                        local_bounds.push(LocalBoundVar::Lower { var: col, slot });
+                    }
+                }
+            }
+            (false, true) => {
+                if ub_can_help {
+                    if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
+                    }
+                }
+            }
+            (true, true) => {
+                if lb_can_help && !ub_can_help {
+                    if let Some(slot) = lb_slot_of_var[col] {
+                        local_bounds.push(LocalBoundVar::Lower { var: col, slot });
+                    }
+                } else if ub_can_help && !lb_can_help {
+                    if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
+                    }
+                } else if lb_can_help && ub_can_help {
+                    let lb_dist = (xj - lb).abs();
+                    let ub_dist = (ub - xj).abs();
+                    if lb_dist <= ub_dist {
+                        if let Some(slot) = lb_slot_of_var[col] {
+                            local_bounds.push(LocalBoundVar::Lower { var: col, slot });
+                        }
+                    } else if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
+                    }
+                }
+            }
+            (false, false) => {}
+        }
+    }
+
+    let mut bound_pos_of_var = vec![usize::MAX; n];
+    for (pos, &bound) in local_bounds.iter().enumerate() {
+        bound_pos_of_var[bound.var()] = pos;
+    }
+
+    if trace {
+        eprintln!(
+            "DUAL_BLOCK worst_j={} worst_rel={:.3e} active_rows={} touched_cols={} local_bounds={}",
+            worst_j,
+            worst_rel,
+            rows.len(),
+            cols.len(),
+            local_bounds.len()
+        );
+    }
+
+    let ulen = rlen + local_bounds.len();
+    if ulen == 0 {
+        return;
+    }
+    let mut gram = vec![0.0_f64; ulen * ulen];
+    let mut rhs = vec![0.0_f64; ulen];
+    let mut local_aty = vec![0.0_f64; cols.len()];
+    let mut local_bound_contrib = vec![0.0_f64; cols.len()];
+    for (ci, &col) in cols.iter().enumerate() {
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let row = problem.a.row_ind[k];
+            let pos = row_pos[row];
+            if pos != usize::MAX {
+                local_aty[ci] += problem.a.values[k] * result.dual_solution[row];
+            }
+        }
+        let bpos = bound_pos_of_var[col];
+        if bpos != usize::MAX {
+            let bound = local_bounds[bpos];
+            if let Some(&z) = result.bound_duals.get(bound.slot()) {
+                local_bound_contrib[ci] += bound.coeff() * z;
+            }
+        }
+    }
+
+    for (ci, &col) in cols.iter().enumerate() {
+        let target_adj = -(qx[col]
+            + problem.c[col]
+            + (aty[col] - local_aty[ci])
+            + (bound_contrib[col] - local_bound_contrib[ci]));
+        let mut col_vec = vec![0.0_f64; ulen];
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let row = problem.a.row_ind[k];
+            let pos = row_pos[row];
+            if pos != usize::MAX {
+                col_vec[pos] = problem.a.values[k];
+            }
+        }
+        let bpos = bound_pos_of_var[col];
+        if bpos != usize::MAX {
+            col_vec[rlen + bpos] = local_bounds[bpos].coeff();
+        }
+        for i in 0..ulen {
+            rhs[i] += col_vec[i] * target_adj;
+            for j in i..ulen {
+                gram[i * ulen + j] += col_vec[i] * col_vec[j];
+            }
+        }
+    }
+
+    let diag_max = (0..ulen)
+        .map(|i| gram[i * ulen + i].abs())
+        .fold(0.0_f64, f64::max);
+    let reg = f64::EPSILON * (1.0 + diag_max);
+    let mut col_ptr = vec![0usize; ulen + 1];
+    let mut row_ind = Vec::new();
+    let mut values = Vec::new();
+    for j in 0..ulen {
+        for i in 0..=j {
+            let mut v = gram[i * ulen + j];
+            if i == j {
+                v += reg;
+            }
+            if v != 0.0 {
+                row_ind.push(i);
+                values.push(v);
+            }
+        }
+        col_ptr[j + 1] = row_ind.len();
+    }
+    let gram_csc = CscMatrix {
+        col_ptr,
+        row_ind,
+        values,
+        nrows: ulen,
+        ncols: ulen,
+    };
+    let Ok(factor) = crate::linalg::ldl::factorize(&gram_csc) else {
+        return;
+    };
+    let mut block_sol = vec![0.0_f64; ulen];
+    factor.solve(&rhs, &mut block_sol);
+    if block_sol.iter().any(|v| !v.is_finite()) {
+        return;
+    }
+
+    let mut tmp = result.clone();
+    for (pos, &row) in rows.iter().enumerate() {
+        let mut v = block_sol[pos];
+        match problem.constraint_types[row] {
+            crate::problem::ConstraintType::Le => v = v.max(0.0),
+            crate::problem::ConstraintType::Ge => v = v.min(0.0),
+            crate::problem::ConstraintType::Eq => {}
+        }
+        tmp.dual_solution[row] = v;
+    }
+    for (pos, &bound) in local_bounds.iter().enumerate() {
+        let slot = bound.slot();
+        if slot >= tmp.bound_duals.len() {
+            continue;
+        }
+        tmp.bound_duals[slot] = block_sol[rlen + pos].max(0.0);
+    }
+    project_duals_from_singleton_columns(problem, &mut tmp);
+    zero_inactive_inequality_duals(problem, &mut tmp);
+
+    let view = crate::qp::ipm_solver::outcome::ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+    };
+    let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        &view,
+        &tmp.solution,
+        &tmp.dual_solution,
+        &tmp.bound_duals,
+    );
+    if trace {
+        eprintln!("DUAL_BLOCK kkt {:.3e}->{:.3e}", pre, post);
+    }
+    if post < pre {
+        result.dual_solution = tmp.dual_solution;
+        result.bound_duals = tmp.bound_duals;
     }
 }
 
@@ -874,11 +1359,7 @@ pub(crate) fn compute_lsq_dual_y(
     }
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
     let target_dd: Vec<TwoFloat> = (0..n)
-        .map(|j| {
-            -(qx_dd[j]
-                + TwoFloat::from(problem.c[j])
-                + TwoFloat::from(bound_contrib[j]))
-        })
+        .map(|j| -(qx_dd[j] + TwoFloat::from(problem.c[j]) + TwoFloat::from(bound_contrib[j])))
         .collect();
 
     let mut proj_lower = vec![f64::NEG_INFINITY; m];
@@ -979,8 +1460,8 @@ pub(crate) fn compute_lsq_dual_y(
                 let ce = a_sub.col_ptr[col + 1];
                 for k in cs..ce {
                     let row = a_sub.row_ind[k];
-                    atysub_dd[col] = atysub_dd[col]
-                        + TwoFloat::new_mul(a_sub.values[k], y_sub[row]);
+                    atysub_dd[col] =
+                        atysub_dd[col] + TwoFloat::new_mul(a_sub.values[k], y_sub[row]);
                 }
             }
             let r_dd: Vec<TwoFloat> = (0..n).map(|j| v_dd[j] - atysub_dd[j]).collect();
@@ -1053,8 +1534,8 @@ pub(crate) fn compute_lsq_dual_y(
             let orig_row = problem.a.row_ind[k];
             if let Some(yfi) = fixed_y[orig_row] {
                 if yfi != 0.0 {
-                    target_adj_dd[col] = target_adj_dd[col]
-                        - TwoFloat::new_mul(problem.a.values[k], yfi);
+                    target_adj_dd[col] =
+                        target_adj_dd[col] - TwoFloat::new_mul(problem.a.values[k], yfi);
                 }
             }
         }
@@ -1121,7 +1602,8 @@ pub(crate) fn refine_primal_lsq(
     for col in 0..n {
         let xv = x[col];
         for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            ax_dd[problem.a.row_ind[k]] = ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+            ax_dd[problem.a.row_ind[k]] =
+                ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
         }
     }
     let ax: Vec<f64> = ax_dd.iter().map(|&v| f64::from(v)).collect();
@@ -1153,20 +1635,30 @@ pub(crate) fn refine_primal_lsq(
     //     Ge: A x' = b → δ = x - x' で A δ = ax - b = -v (push up; sign_i = -1)
     //     Eq: A x' = b → A δ = ax - b
     // つまり target = ax - b そのものを使い、A δ = target を解く。
-    let target: Vec<f64> = (0..m).map(|i| {
-        match problem.constraint_types[i] {
-            ConstraintType::Eq => ax[i] - problem.b[i],
-            ConstraintType::Ge => {
-                // active のみ: 充足側 (ax >= b) なら 0, 違反 (ax < b) なら ax - b (負)
-                let r = ax[i] - problem.b[i];
-                if r < -PRIMAL_VIOLATION_TOL { r } else { 0.0 }
+    let target: Vec<f64> = (0..m)
+        .map(|i| {
+            match problem.constraint_types[i] {
+                ConstraintType::Eq => ax[i] - problem.b[i],
+                ConstraintType::Ge => {
+                    // active のみ: 充足側 (ax >= b) なら 0, 違反 (ax < b) なら ax - b (負)
+                    let r = ax[i] - problem.b[i];
+                    if r < -PRIMAL_VIOLATION_TOL {
+                        r
+                    } else {
+                        0.0
+                    }
+                }
+                ConstraintType::Le => {
+                    let r = ax[i] - problem.b[i];
+                    if r > PRIMAL_VIOLATION_TOL {
+                        r
+                    } else {
+                        0.0
+                    }
+                }
             }
-            ConstraintType::Le => {
-                let r = ax[i] - problem.b[i];
-                if r > PRIMAL_VIOLATION_TOL { r } else { 0.0 }
-            }
-        }
-    }).collect();
+        })
+        .collect();
     let target_inf = target.iter().map(|t| t.abs()).fold(0.0_f64, f64::max);
     if target_inf <= PRIMAL_VIOLATION_TOL {
         return;
@@ -1221,13 +1713,21 @@ pub(crate) fn refine_primal_lsq(
         }
         let r_f64: Vec<f64> = r_dd.iter().map(|&v| f64::from(v)).collect();
         let r_inf = r_f64.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        if !r_inf.is_finite() { break; }
-        if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf { break; }
-        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO { break; }
+        if !r_inf.is_finite() {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
+            break;
+        }
         prev_r_inf = r_inf;
         let mut dlambda = vec![0.0_f64; m];
         factor.solve(&r_f64, &mut dlambda);
-        if dlambda.iter().any(|v| !v.is_finite()) { break; }
+        if dlambda.iter().any(|v| !v.is_finite()) {
+            break;
+        }
         for i in 0..m {
             lambda[i] += dlambda[i];
         }
@@ -1288,8 +1788,12 @@ pub(crate) fn refine_primal_lsq(
         let scale_post = 1.0 + ax_new[i].abs() + problem.b[i].abs();
         let rel_pre = raw_pre / scale_pre;
         let rel_post = raw_post / scale_post;
-        if rel_pre > max_rel_pre { max_rel_pre = rel_pre; }
-        if rel_post > max_rel_post { max_rel_post = rel_post; }
+        if rel_pre > max_rel_pre {
+            max_rel_pre = rel_pre;
+        }
+        if rel_post > max_rel_post {
+            max_rel_post = rel_post;
+        }
     }
     if max_rel_post < max_rel_pre {
         *x = x_new;
@@ -1357,7 +1861,8 @@ fn try_dual_only_ir(
 
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
-    let dual_ir_reg = std::env::var("DUAL_IR_REG").ok()
+    let dual_ir_reg = std::env::var("DUAL_IR_REG")
+        .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(1e-12);
 
@@ -1365,7 +1870,9 @@ fn try_dual_only_ir(
     let free_idx = collect_dual_recovery_free_columns(problem, result);
     let n_free = free_idx.len();
     if n_free == 0 {
-        if trace { eprintln!("DUAL_IR skip: n_free=0"); }
+        if trace {
+            eprintln!("DUAL_IR skip: n_free=0");
+        }
         return 0;
     }
 
@@ -1401,15 +1908,24 @@ fn try_dual_only_ir(
             worst_idx = j;
             worst_qx = qx_f;
         }
-        if r_d.abs() > df_abs_pre { df_abs_pre = r_d.abs(); }
+        if r_d.abs() > df_abs_pre {
+            df_abs_pre = r_d.abs();
+        }
     }
     if df_rel_pre < target_pf {
-        if trace { eprintln!("DUAL_IR skip: df_rel_pre={:.3e} < target {:.3e}", df_rel_pre, target_pf); }
+        if trace {
+            eprintln!(
+                "DUAL_IR skip: df_rel_pre={:.3e} < target {:.3e}",
+                df_rel_pre, target_pf
+            );
+        }
         return 0;
     }
     if trace {
-        eprintln!("DUAL_IR pre: n_free={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
-            n_free, df_abs_pre, df_rel_pre, worst_idx, worst_qx);
+        eprintln!(
+            "DUAL_IR pre: n_free={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
+            n_free, df_abs_pre, df_rel_pre, worst_idx, worst_qx
+        );
     }
 
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -1430,10 +1946,14 @@ fn try_dual_only_ir(
         let row_off = r * n_free;
         for fi in 0..n_free {
             let aij = a_free[row_off + fi];
-            if aij == 0.0 { continue; }
+            if aij == 0.0 {
+                continue;
+            }
             for fj in fi..n_free {
                 let aik = a_free[row_off + fj];
-                if aik == 0.0 { continue; }
+                if aik == 0.0 {
+                    continue;
+                }
                 g_dense[fi * n_free + fj] += aij * aik;
             }
         }
@@ -1461,11 +1981,19 @@ fn try_dual_only_ir(
         }
         col_ptr[fj + 1] = row_ind.len();
     }
-    let g_csc = CscMatrix { col_ptr, row_ind, values, nrows: n_free, ncols: n_free };
+    let g_csc = CscMatrix {
+        col_ptr,
+        row_ind,
+        values,
+        nrows: n_free,
+        ncols: n_free,
+    };
     let factor = match crate::linalg::ldl::factorize(&g_csc) {
         Ok(f) => f,
         Err(e) => {
-            if trace { eprintln!("DUAL_IR factorize failed: {:?}", e); }
+            if trace {
+                eprintln!("DUAL_IR factorize failed: {:?}", e);
+            }
             return 0;
         }
     };
@@ -1486,19 +2014,29 @@ fn try_dual_only_ir(
     // Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
     // f64 での y[i] += dy[i] は |dy| < eps_f64 × |y| ≈ 2e-6 を切り捨てる。
     // DD 精度 y_dd に TwoFloat で積算することで 1e10 の y に 1e-8 の修正も蓄積できる。
-    let mut y_dd: Vec<TwoFloat> = tmp.dual_solution.iter().map(|&v| TwoFloat::from(v)).collect();
+    let mut y_dd: Vec<TwoFloat> = tmp
+        .dual_solution
+        .iter()
+        .map(|&v| TwoFloat::from(v))
+        .collect();
     let mut df_rel_post = df_rel_pre;
     let mut df_abs_post = df_abs_pre;
     let mut total_dy_inf = 0.0_f64;
     let mut accepted_iters = 0;
     let mut current_r_d_free = r_d_free.clone();
+    const DUAL_IR_ACCEPT_REL_TOL: f64 = 1e-12;
+    const DUAL_IR_MIN_PROGRESS_RATIO: f64 = 1e-4;
     let mut inner = 0usize;
     loop {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let mut alpha = vec![0.0_f64; n_free];
         factor.solve(&current_r_d_free, &mut alpha);
         if alpha.iter().any(|v| !v.is_finite()) {
-            if trace { eprintln!("DUAL_IR inner={} solve NaN, abort", inner); }
+            if trace {
+                eprintln!("DUAL_IR inner={} solve NaN, abort", inner);
+            }
             break;
         }
         // δy を DD で計算 (A_free × (-alpha))
@@ -1510,8 +2048,12 @@ fn try_dual_only_ir(
                 dy_dd[r] = dy_dd[r] + TwoFloat::new_mul(problem.a.values[k], af);
             }
         }
-        let dy_inf = dy_dd.iter().fold(0.0_f64, |a, v| a.max(f64::from(*v).abs()));
-        if !dy_inf.is_finite() { break; }
+        let dy_inf = dy_dd
+            .iter()
+            .fold(0.0_f64, |a, v| a.max(f64::from(*v).abs()));
+        if !dy_inf.is_finite() {
+            break;
+        }
         total_dy_inf = total_dy_inf.max(dy_inf);
 
         let mut accepted = false;
@@ -1522,7 +2064,8 @@ fn try_dual_only_ir(
         let mut accepted_step_scale = 0.0_f64;
         let mut step_scale = 1.0_f64;
         while step_scale > 0.0 {
-            let y_dd_new: Vec<TwoFloat> = y_dd.iter()
+            let y_dd_new: Vec<TwoFloat> = y_dd
+                .iter()
                 .zip(dy_dd.iter())
                 .map(|(&y, &d)| y + d * step_scale)
                 .collect();
@@ -1549,10 +2092,14 @@ fn try_dual_only_ir(
                 let aty_f = f64::from(aty);
                 let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
                 let rel = r_d.abs() / scale;
-                if rel > new_df_rel { new_df_rel = rel; }
-                if r_d.abs() > new_df_abs { new_df_abs = r_d.abs(); }
+                if rel > new_df_rel {
+                    new_df_rel = rel;
+                }
+                if r_d.abs() > new_df_abs {
+                    new_df_abs = r_d.abs();
+                }
             }
-            if new_df_rel <= df_rel_post * 1.001 {
+            if new_df_rel <= df_rel_post + DUAL_IR_ACCEPT_REL_TOL * (1.0 + df_rel_post) {
                 accepted = true;
                 accepted_df_rel = new_df_rel;
                 accepted_df_abs = new_df_abs;
@@ -1569,26 +2116,54 @@ fn try_dual_only_ir(
         }
         if !accepted {
             if trace {
-                eprintln!("DUAL_IR inner={} regression, breaking (rel {:.3e} -> rejected all backtracks)", inner, df_rel_post);
+                eprintln!(
+                    "DUAL_IR inner={} regression, breaking (rel {:.3e} -> rejected all backtracks)",
+                    inner, df_rel_post
+                );
+            }
+            break;
+        }
+
+        let rel_improvement = (df_rel_post - accepted_df_rel).max(0.0);
+        let progress_ratio = if df_rel_post > 0.0 {
+            rel_improvement / df_rel_post
+        } else {
+            0.0
+        };
+        if accepted_iters > 0 && progress_ratio <= DUAL_IR_MIN_PROGRESS_RATIO {
+            if trace {
+                eprintln!(
+                    "DUAL_IR inner={} stagnated: df_rel {:.3e} -> {:.3e} ratio={:.3e}",
+                    inner, df_rel_post, accepted_df_rel, progress_ratio
+                );
             }
             break;
         }
 
         y_dd = accepted_y_dd;
-        for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
+        for i in 0..m {
+            tmp.dual_solution[i] = f64::from(y_dd[i]);
+        }
         current_r_d_free = accepted_r_d_free;
         df_rel_post = accepted_df_rel;
         df_abs_post = accepted_df_abs;
         accepted_iters += 1;
         inner += 1;
         if trace && accepted_step_scale < 1.0 {
-            eprintln!("DUAL_IR inner={} accepted with step_scale={:.3e}", inner, accepted_step_scale);
+            eprintln!(
+                "DUAL_IR inner={} accepted with step_scale={:.3e}",
+                inner, accepted_step_scale
+            );
         }
         // 早期 break: target を達成したら終了
-        if df_rel_post < target_pf { break; }
+        if df_rel_post < target_pf {
+            break;
+        }
     }
     // DD y → f64 に戻す (最終採用済み y_dd から変換)
-    for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
+    for i in 0..m {
+        tmp.dual_solution[i] = f64::from(y_dd[i]);
+    }
     // y-only 更新を stale な z で評価すると、bound stationarity のずれだけで
     // 全体 KKT が悪化したように見えて改善候補を落としてしまう。
     // 採用判定前に x 固定のまま z を KKT 停留性から取り直して評価する。
@@ -1601,8 +2176,10 @@ fn try_dual_only_ir(
         &tmp.bound_duals,
     );
     if trace {
-        eprintln!("DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
-            n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters);
+        eprintln!(
+            "DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
+            n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters
+        );
         eprintln!("DUAL_IR kkt {:.3e}->{:.3e}", kkt_pre, kkt_post);
     }
     if df_rel_post < df_rel_pre && kkt_post <= kkt_pre {
@@ -1628,8 +2205,8 @@ pub(crate) fn refine_kkt_iterative(
     target_pf: f64,
     deadline: Option<std::time::Instant>,
 ) -> usize {
-    use crate::problem::ConstraintType;
     use crate::presolve::bound_contrib_at_var;
+    use crate::problem::ConstraintType;
     use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 
     // deadline 経過なら即 no-op。post-IPM の Krylov refinement は IPM 後に呼ばれるため、
@@ -1678,7 +2255,12 @@ pub(crate) fn refine_kkt_iterative(
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
     };
-    let mut prev_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let mut prev_kkt = kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
         let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
@@ -1687,13 +2269,24 @@ pub(crate) fn refine_kkt_iterative(
             zero_inactive_inequality_duals(problem, result);
             project_duals_from_singleton_columns(problem, result);
             refine_dual_projected_gradient(problem, result, deadline);
+            refine_dual_worst_active_block(problem, result, deadline);
             // y が更新されたので bound_duals (z) も KKT から再計算する。
             // ただし z refit は active bound 列では改善しても、別の列で悪化して
             // dual-only IR の進捗を潰すことがあるため、全体 KKT で guard する。
             let pre_z = result.bound_duals.clone();
-            let pre_refit_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+            let pre_refit_kkt = kkt_residual_rel(
+                &view,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            );
             refit_bound_duals_kkt(problem, result);
-            let post_refit_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+            let post_refit_kkt = kkt_residual_rel(
+                &view,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            );
             if post_refit_kkt > pre_refit_kkt {
                 result.bound_duals = pre_z;
                 if trace {
@@ -1710,14 +2303,25 @@ pub(crate) fn refine_kkt_iterative(
             }
         }
         // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
-        if n_dual == 0 { break; }
-        let cur_kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
-        if cur_kkt < target_pf { break; }
+        if n_dual == 0 {
+            break;
+        }
+        let cur_kkt = kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        if cur_kkt < target_pf {
+            break;
+        }
         if cur_kkt >= prev_kkt * 0.999 {
             break;
         }
         prev_kkt = cur_kkt;
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
     }
     if n_dual_total > 0 {
         return n_dual_total;
@@ -1740,7 +2344,11 @@ pub(crate) fn refine_kkt_iterative(
 
     let sigma_zero = vec![0.0_f64; m];
     let mut k_mat = crate::qp::ipm_core::kkt::build_augmented_system(
-        &problem.q, &problem.a, &sigma_zero, delta_p, delta_d
+        &problem.q,
+        &problem.a,
+        &sigma_zero,
+        delta_p,
+        delta_d,
     );
 
     let trace_pre = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
@@ -1786,7 +2394,9 @@ pub(crate) fn refine_kkt_iterative(
             let (lb, ub) = problem.bounds[j];
             let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
                 || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
-            if !is_active { continue; }
+            if !is_active {
+                continue;
+            }
             let col_start = k_mat.col_ptr[j];
             let col_end = k_mat.col_ptr[j + 1];
             for k in col_start..col_end {
@@ -1803,8 +2413,14 @@ pub(crate) fn refine_kkt_iterative(
         }
     }
     if trace_pre {
-        eprintln!("REFINE_KKT pre-factorize: n={} m={} K_nnz={} delta_p={:.1e} delta_d={:.1e}",
-            n, m, k_mat.values.len(), delta_p, delta_d);
+        eprintln!(
+            "REFINE_KKT pre-factorize: n={} m={} K_nnz={} delta_p={:.1e} delta_d={:.1e}",
+            n,
+            m,
+            k_mat.values.len(),
+            delta_p,
+            delta_d
+        );
     }
     if diag_on {
         // K の対角分布を実測 (cond の代理指標として min/max/abs_min/abs_max)。
@@ -1842,12 +2458,16 @@ pub(crate) fn refine_kkt_iterative(
         );
         // 全要素の絶対値分布 (off-diag 含む) で K のスケール把握
         let abs_max = k_mat.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let abs_min_nz = k_mat.values.iter()
+        let abs_min_nz = k_mat
+            .values
+            .iter()
             .filter(|&&v| v != 0.0)
             .fold(f64::INFINITY, |a, &v| a.min(v.abs()));
         eprintln!(
             "REFINE_KKT_DIAG K_all abs_max={:.3e} abs_min_nz={:.3e} ratio={:.3e}",
-            abs_max, abs_min_nz, abs_max / abs_min_nz.max(1e-300)
+            abs_max,
+            abs_min_nz,
+            abs_max / abs_min_nz.max(1e-300)
         );
     }
     // factorize: SingularOrIndefinite で失敗したら δ を段階的に上げて再試行。
@@ -1863,7 +2483,7 @@ pub(crate) fn refine_kkt_iterative(
     // 6 retry で QPLIB_8505 の SingularOrIndefinite が ~500 秒経過する事象を観測。
     // factorize 内 (`factorize_quasidefinite_with_amd`) と retry 間の両方で時間切れを検査する。
     const FACTOR_RETRY_GROWTH: f64 = 10.0;
-    const FACTOR_RETRY_MAX: usize = 6;  // δ_init × 10^6 まで (1e-10 → 1e-4)
+    const FACTOR_RETRY_MAX: usize = 6; // δ_init × 10^6 まで (1e-10 → 1e-4)
     let factor = {
         let mut current_delta_p = delta_p;
         let mut current_delta_d = delta_d;
@@ -1874,12 +2494,18 @@ pub(crate) fn refine_kkt_iterative(
             // retry 直前で deadline 確認 (前回 factorize に時間を全部使った可能性あり)
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 if trace_pre || diag_on {
-                    eprintln!("REFINE_KKT factorize abandoned due to deadline at retry={}", retry_count);
+                    eprintln!(
+                        "REFINE_KKT factorize abandoned due to deadline at retry={}",
+                        retry_count
+                    );
                 }
                 break;
             }
             match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, deadline) {
-                Ok(f) => { result_factor = Some(f); break; }
+                Ok(f) => {
+                    result_factor = Some(f);
+                    break;
+                }
                 Err(e) => {
                     if retry_count >= FACTOR_RETRY_MAX {
                         if trace_pre || diag_on {
@@ -1892,7 +2518,11 @@ pub(crate) fn refine_kkt_iterative(
                     current_delta_p *= FACTOR_RETRY_GROWTH;
                     current_delta_d *= FACTOR_RETRY_GROWTH;
                     current_k = crate::qp::ipm_core::kkt::build_augmented_system(
-                        &problem.q, &problem.a, &sigma_zero, current_delta_p, current_delta_d
+                        &problem.q,
+                        &problem.a,
+                        &sigma_zero,
+                        current_delta_p,
+                        current_delta_d,
                     );
                     // bound-active fix を再適用 (新しい K に対して)
                     if active_fix_enabled {
@@ -1902,18 +2532,22 @@ pub(crate) fn refine_kkt_iterative(
                             let ce = current_k.col_ptr[j + 1];
                             for k in cs..ce {
                                 if current_k.row_ind[k] == j {
-                                    k_diag_max_retry = k_diag_max_retry.max(current_k.values[k].abs());
+                                    k_diag_max_retry =
+                                        k_diag_max_retry.max(current_k.values[k].abs());
                                     break;
                                 }
                             }
                         }
-                        let active_penalty_retry = (k_diag_max_retry * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
+                        let active_penalty_retry =
+                            (k_diag_max_retry * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
                         for j in 0..n {
                             let x = result.solution[j];
                             let (lb, ub) = problem.bounds[j];
                             let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
                                 || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
-                            if !is_active { continue; }
+                            if !is_active {
+                                continue;
+                            }
                             let cs = current_k.col_ptr[j];
                             let ce = current_k.col_ptr[j + 1];
                             for k in cs..ce {
@@ -1964,18 +2598,20 @@ pub(crate) fn refine_kkt_iterative(
     //   EmptyCol (制約 A に登場しない): bound_dual=0 慣例、Q∅ + c[j] != 0 のため除外
     // これらを含めると orig 空間で huge cancellation noise (r_d_abs) が出て IR が壊れる。
     const FX_TOL_REFINE: f64 = 1e-12;
-    let exclude_var: Vec<bool> = (0..n).map(|j| {
-        let (lb, ub) = problem.bounds[j];
-        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL_REFINE {
-            return true;
-        }
-        if problem.a.col_ptr.len() > j + 1
-            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
-        {
-            return true;
-        }
-        false
-    }).collect();
+    let exclude_var: Vec<bool> = (0..n)
+        .map(|j| {
+            let (lb, ub) = problem.bounds[j];
+            if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL_REFINE {
+                return true;
+            }
+            if problem.a.col_ptr.len() > j + 1
+                && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+            {
+                return true;
+            }
+            false
+        })
+        .collect();
 
     // 残差は (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel) を返す。
     // pf_rel/df_rel は OSQP-style 全体相対化で bench (`compute_dfeas_orig` /
@@ -1984,41 +2620,71 @@ pub(crate) fn refine_kkt_iterative(
     //   df_rel = max|r_d_j| / (1 + max(||Qx||_inf, ||c||_inf, ||A^Ty||_inf, ||z_bnd||_inf))
     // gate / 早期 break / acceptance の判定は **rel** で行う (bench と統一)。
     // abs 版は既存の guardrail (factor 2 以内) のために併せて返す。
-    let compute_residuals = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
-        let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
-        let aty = problem.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n]);
-        let mut r_d = vec![0.0_f64; n];
-        let mut df_rel_componentwise = 0.0_f64;
-        for j in 0..n {
-            if exclude_var[j] { continue; }
-            let bc = bound_contrib_at_var(&problem.bounds, z, j);
-            r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
-            // 成分相対化 (bench compute_dfeas_orig componentwise と一致)。
-            let scale_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bc.abs();
-            let rel_j = r_d[j].abs() / scale_j;
-            if rel_j > df_rel_componentwise { df_rel_componentwise = rel_j; }
-        }
-        let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
-        let mut r_p = vec![0.0_f64; m];
-        let mut pf_abs = 0.0_f64;
-        let mut pf_rel_componentwise = 0.0_f64;
-        for i in 0..m {
-            let raw = ax[i] - problem.b[i];
-            let v = match problem.constraint_types[i] {
-                ConstraintType::Eq => raw,
-                ConstraintType::Ge => if raw < 0.0 { raw } else { 0.0 },
-                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
-            };
-            r_p[i] = v;
-            pf_abs = pf_abs.max(v.abs());
-            // 成分相対化。
-            let scale_i = 1.0 + ax[i].abs() + problem.b[i].abs();
-            let rel_i = v.abs() / scale_i;
-            if rel_i > pf_rel_componentwise { pf_rel_componentwise = rel_i; }
-        }
-        let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        (r_d, r_p, pf_abs, df_abs, pf_rel_componentwise, df_rel_componentwise)
-    };
+    let compute_residuals =
+        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
+            let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
+            let aty = problem
+                .a
+                .transpose()
+                .mat_vec_mul(y)
+                .unwrap_or_else(|_| vec![0.0; n]);
+            let mut r_d = vec![0.0_f64; n];
+            let mut df_rel_componentwise = 0.0_f64;
+            for j in 0..n {
+                if exclude_var[j] {
+                    continue;
+                }
+                let bc = bound_contrib_at_var(&problem.bounds, z, j);
+                r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
+                // 成分相対化 (bench compute_dfeas_orig componentwise と一致)。
+                let scale_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bc.abs();
+                let rel_j = r_d[j].abs() / scale_j;
+                if rel_j > df_rel_componentwise {
+                    df_rel_componentwise = rel_j;
+                }
+            }
+            let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
+            let mut r_p = vec![0.0_f64; m];
+            let mut pf_abs = 0.0_f64;
+            let mut pf_rel_componentwise = 0.0_f64;
+            for i in 0..m {
+                let raw = ax[i] - problem.b[i];
+                let v = match problem.constraint_types[i] {
+                    ConstraintType::Eq => raw,
+                    ConstraintType::Ge => {
+                        if raw < 0.0 {
+                            raw
+                        } else {
+                            0.0
+                        }
+                    }
+                    ConstraintType::Le => {
+                        if raw > 0.0 {
+                            raw
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                r_p[i] = v;
+                pf_abs = pf_abs.max(v.abs());
+                // 成分相対化。
+                let scale_i = 1.0 + ax[i].abs() + problem.b[i].abs();
+                let rel_i = v.abs() / scale_i;
+                if rel_i > pf_rel_componentwise {
+                    pf_rel_componentwise = rel_i;
+                }
+            }
+            let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+            (
+                r_d,
+                r_p,
+                pf_abs,
+                df_abs,
+                pf_rel_componentwise,
+                df_rel_componentwise,
+            )
+        };
 
     // DD (double-double) residual: Wilkinson IR の "double the working precision" 実装。
     // working precision IR の forward error は O(n × κ × ε)、これを超えるには residual を
@@ -2032,99 +2698,130 @@ pub(crate) fn refine_kkt_iterative(
     // progress 判定不能になるため、default で DD を使う。env REFINE_KKT_DD=0 で
     // f64 fallback (パフォーマンス計測用、通常は使わない)。
     let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() != Some("0");
-    let compute_residuals_dd = |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
-        use twofloat::TwoFloat;
-        let zero_dd = TwoFloat::from(0.0);
-        // qx[i] = sum_k Q[i,k] * x[k]  (Q は対称、上三角 CSC 格納)
-        // Q 格納慣例 (spmv_q と同じ): **全要素格納の対称行列** (上下三角両方 stored)。
-        // symmetric duplication せず CSC 全エントリを直接走査する。
-        let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-        for j in 0..n {
-            let xv = x[j];
-            let cs = problem.q.col_ptr[j];
-            let ce = problem.q.col_ptr[j + 1];
-            for k in cs..ce {
-                let row = problem.q.row_ind[k];
-                let v = problem.q.values[k];
-                qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
+    let compute_residuals_dd =
+        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
+            use twofloat::TwoFloat;
+            let zero_dd = TwoFloat::from(0.0);
+            // qx[i] = sum_k Q[i,k] * x[k]  (Q は対称、上三角 CSC 格納)
+            // Q 格納慣例 (spmv_q と同じ): **全要素格納の対称行列** (上下三角両方 stored)。
+            // symmetric duplication せず CSC 全エントリを直接走査する。
+            let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
+            for j in 0..n {
+                let xv = x[j];
+                let cs = problem.q.col_ptr[j];
+                let ce = problem.q.col_ptr[j + 1];
+                for k in cs..ce {
+                    let row = problem.q.row_ind[k];
+                    let v = problem.q.values[k];
+                    qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
+                }
             }
-        }
-        // aty[col] = sum_row A[row,col] * y[row]  (CSC で col 走査)
-        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-        for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                let v = problem.a.values[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, y[row]);
+            // aty[col] = sum_row A[row,col] * y[row]  (CSC で col 走査)
+            let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
+            for col in 0..n {
+                let cs = problem.a.col_ptr[col];
+                let ce = problem.a.col_ptr[col + 1];
+                for k in cs..ce {
+                    let row = problem.a.row_ind[k];
+                    let v = problem.a.values[k];
+                    aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, y[row]);
+                }
             }
-        }
-        // r_d[j] = qx[j] + c[j] + aty[j] + bound_contrib[j]
-        let mut r_d = vec![0.0_f64; n];
-        let mut max_qx = 0.0_f64;
-        let mut max_c = 0.0_f64;
-        let mut max_aty = 0.0_f64;
-        let mut max_bnd = 0.0_f64;
-        for j in 0..n {
-            if exclude_var[j] { continue; }
-            let bc = bound_contrib_at_var(&problem.bounds, z, j);
-            let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
-            r_d[j] = f64::from(r);
-            max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
-            max_c = max_c.max(problem.c[j].abs());
-            max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
-            max_bnd = max_bnd.max(bc.abs());
-        }
-        // ax[row] = sum_col A[row,col] * x[col]  (CSC で col 走査して row に加算)
-        let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
-        for col in 0..n {
-            let cs = problem.a.col_ptr[col];
-            let ce = problem.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = problem.a.row_ind[k];
-                let v = problem.a.values[k];
-                ax_dd[row] = ax_dd[row] + TwoFloat::new_mul(v, x[col]);
+            // r_d[j] = qx[j] + c[j] + aty[j] + bound_contrib[j]
+            let mut r_d = vec![0.0_f64; n];
+            let mut max_qx = 0.0_f64;
+            let mut max_c = 0.0_f64;
+            let mut max_aty = 0.0_f64;
+            let mut max_bnd = 0.0_f64;
+            for j in 0..n {
+                if exclude_var[j] {
+                    continue;
+                }
+                let bc = bound_contrib_at_var(&problem.bounds, z, j);
+                let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
+                r_d[j] = f64::from(r);
+                max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
+                max_c = max_c.max(problem.c[j].abs());
+                max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
+                max_bnd = max_bnd.max(bc.abs());
             }
-        }
-        let mut r_p = vec![0.0_f64; m];
-        let mut pf_abs = 0.0_f64;
-        let mut pf_rel_componentwise = 0.0_f64;
-        for i in 0..m {
-            let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
-            let raw = f64::from(raw_dd);
-            let v = match problem.constraint_types[i] {
-                ConstraintType::Eq => raw,
-                ConstraintType::Ge => if raw < 0.0 { raw } else { 0.0 },
-                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
-            };
-            r_p[i] = v;
-            pf_abs = pf_abs.max(v.abs());
-            // 成分相対化: 各行ごとに正規化して max を取る (bench compute_pfeas_normalized と一致)。
-            let ax_i_abs = f64::from(ax_dd[i]).abs();
-            let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
-            let rel_i = v.abs() / scale_i;
-            if rel_i > pf_rel_componentwise { pf_rel_componentwise = rel_i; }
-        }
-        let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-        // df_rel も成分相対化で計算 (bench compute_dfeas_orig componentwise と一致)。
-        // 全体相対化 (max_qx,max_c,max_aty,max_bnd の最大で割る) は ill-scaled で
-        // 1 成分のみ大きく外れた残差を見逃すため、saddle-point IR の skip 判定にも
-        // componentwise を使う必要がある (QBORE3D で global df_rel=1.6e-9 だが
-        // componentwise df_rel=7.06e-4 で IR が skip されていた)。
-        let mut df_rel_componentwise = 0.0_f64;
-        for j in 0..n {
-            if exclude_var[j] { continue; }
-            let qx_j = f64::from(qx_dd[j]).abs();
-            let aty_j = f64::from(aty_dd[j]).abs();
-            let bc = bound_contrib_at_var(&problem.bounds, z, j);
-            let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
-            let rel_j = r_d[j].abs() / scale_j;
-            if rel_j > df_rel_componentwise { df_rel_componentwise = rel_j; }
-        }
-        let _ = max_qx; let _ = max_c; let _ = max_aty; let _ = max_bnd;
-        (r_d, r_p, pf_abs, df_abs, pf_rel_componentwise, df_rel_componentwise)
-    };
+            // ax[row] = sum_col A[row,col] * x[col]  (CSC で col 走査して row に加算)
+            let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
+            for col in 0..n {
+                let cs = problem.a.col_ptr[col];
+                let ce = problem.a.col_ptr[col + 1];
+                for k in cs..ce {
+                    let row = problem.a.row_ind[k];
+                    let v = problem.a.values[k];
+                    ax_dd[row] = ax_dd[row] + TwoFloat::new_mul(v, x[col]);
+                }
+            }
+            let mut r_p = vec![0.0_f64; m];
+            let mut pf_abs = 0.0_f64;
+            let mut pf_rel_componentwise = 0.0_f64;
+            for i in 0..m {
+                let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
+                let raw = f64::from(raw_dd);
+                let v = match problem.constraint_types[i] {
+                    ConstraintType::Eq => raw,
+                    ConstraintType::Ge => {
+                        if raw < 0.0 {
+                            raw
+                        } else {
+                            0.0
+                        }
+                    }
+                    ConstraintType::Le => {
+                        if raw > 0.0 {
+                            raw
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                r_p[i] = v;
+                pf_abs = pf_abs.max(v.abs());
+                // 成分相対化: 各行ごとに正規化して max を取る (bench compute_pfeas_normalized と一致)。
+                let ax_i_abs = f64::from(ax_dd[i]).abs();
+                let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
+                let rel_i = v.abs() / scale_i;
+                if rel_i > pf_rel_componentwise {
+                    pf_rel_componentwise = rel_i;
+                }
+            }
+            let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
+            // df_rel も成分相対化で計算 (bench compute_dfeas_orig componentwise と一致)。
+            // 全体相対化 (max_qx,max_c,max_aty,max_bnd の最大で割る) は ill-scaled で
+            // 1 成分のみ大きく外れた残差を見逃すため、saddle-point IR の skip 判定にも
+            // componentwise を使う必要がある (QBORE3D で global df_rel=1.6e-9 だが
+            // componentwise df_rel=7.06e-4 で IR が skip されていた)。
+            let mut df_rel_componentwise = 0.0_f64;
+            for j in 0..n {
+                if exclude_var[j] {
+                    continue;
+                }
+                let qx_j = f64::from(qx_dd[j]).abs();
+                let aty_j = f64::from(aty_dd[j]).abs();
+                let bc = bound_contrib_at_var(&problem.bounds, z, j);
+                let scale_j = 1.0 + qx_j + problem.c[j].abs() + aty_j + bc.abs();
+                let rel_j = r_d[j].abs() / scale_j;
+                if rel_j > df_rel_componentwise {
+                    df_rel_componentwise = rel_j;
+                }
+            }
+            let _ = max_qx;
+            let _ = max_c;
+            let _ = max_aty;
+            let _ = max_bnd;
+            (
+                r_d,
+                r_p,
+                pf_abs,
+                df_abs,
+                pf_rel_componentwise,
+                df_rel_componentwise,
+            )
+        };
 
     let pre_z = result.bound_duals.clone();
     let (_, _, pre_pf, pre_df, pre_pf_rel, pre_df_rel) = if dd_mode {
@@ -2134,16 +2831,20 @@ pub(crate) fn refine_kkt_iterative(
     };
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     if trace {
-        eprintln!("REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
-            n, m, pre_pf, pre_df, target_pf, dd_mode);
+        eprintln!(
+            "REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
+            n, m, pre_pf, pre_df, target_pf, dd_mode
+        );
     }
     // Gate: bench (`compute_dfeas_orig` / `kkt_residual_rel`) と同じ OSQP-style 相対残差で
     // 判定する。target_pf は bench の eps 通過判定 (pf_rel < eps && df_rel < eps) と統一。
     // 片方でも target 超過なら refine を試みる (IR は両方を同時に reduce する)。
     if pre_pf_rel < target_pf && pre_df_rel < target_pf {
         if trace {
-            eprintln!("REFINE_KKT skip: pre_pf_rel={:.3e} pre_df_rel={:.3e} both < target_pf",
-                pre_pf_rel, pre_df_rel);
+            eprintln!(
+                "REFINE_KKT skip: pre_pf_rel={:.3e} pre_df_rel={:.3e} both < target_pf",
+                pre_pf_rel, pre_df_rel
+            );
         }
         return 0;
     }
@@ -2161,7 +2862,9 @@ pub(crate) fn refine_kkt_iterative(
     for iter in 0..max_iters {
         // 各 iter 先頭で deadline 確認 (LDL solve は n+m=30k で数秒級になり得る)
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            if trace { eprintln!("REFINE_KKT iter={} deadline reached", iter); }
+            if trace {
+                eprintln!("REFINE_KKT iter={} deadline reached", iter);
+            }
             break;
         }
         let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) = if dd_mode {
@@ -2171,19 +2874,30 @@ pub(crate) fn refine_kkt_iterative(
         };
         // 早期 break: pf_rel も df_rel も target 以下 → bench で PASS 級。
         if pf_cur < target_pf && df_cur < target_pf {
-            if trace { eprintln!("REFINE_KKT iter={} early: pf_rel={:.3e} df_rel={:.3e} both < target", iter, pf_cur, df_cur); }
+            if trace {
+                eprintln!(
+                    "REFINE_KKT iter={} early: pf_rel={:.3e} df_rel={:.3e} both < target",
+                    iter, pf_cur, df_cur
+                );
+            }
             break;
         }
         let _ = (pf_abs_cur, df_abs_cur); // abs 値は未使用 (trace 表示は rel ベース)
 
         let mut rhs = vec![0.0_f64; n + m];
-        for j in 0..n { rhs[j] = -r_d[j]; }
-        for i in 0..m { rhs[n + i] = -r_p[i]; }
+        for j in 0..n {
+            rhs[j] = -r_d[j];
+        }
+        for i in 0..m {
+            rhs[n + i] = -r_p[i];
+        }
 
         let mut sol = vec![0.0_f64; n + m];
         factor.solve(&rhs, &mut sol);
         if sol.iter().any(|v| !v.is_finite()) {
-            if trace { eprintln!("REFINE_KKT iter={} solve produced NaN", iter); }
+            if trace {
+                eprintln!("REFINE_KKT iter={} solve produced NaN", iter);
+            }
             break;
         }
 
@@ -2199,23 +2913,37 @@ pub(crate) fn refine_kkt_iterative(
             let raw = x_new[j] + sol[j];
             let (lb, ub) = problem.bounds[j];
             let mut clipped = raw;
-            if lb.is_finite() { clipped = clipped.max(lb); }
-            if ub.is_finite() { clipped = clipped.min(ub); }
+            if lb.is_finite() {
+                clipped = clipped.max(lb);
+            }
+            if ub.is_finite() {
+                clipped = clipped.min(ub);
+            }
             let amt = (raw - clipped).abs();
             clip_amt = clip_amt.max(amt);
             if amt > 0.0 {
                 clip_count += 1;
-                if diag_on { clip_top.push((j, amt)); }
+                if diag_on {
+                    clip_top.push((j, amt));
+                }
             }
             x_new[j] = clipped;
         }
         if diag_on && !clip_top.is_empty() {
             clip_top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top5: Vec<String> = clip_top.iter().take(5)
+            let top5: Vec<String> = clip_top
+                .iter()
+                .take(5)
                 .map(|(j, a)| format!("x[{}]={:.2e}", j, a))
                 .collect();
-            eprintln!("REFINE_KKT_DIAG iter={} clip_count={}/{} clip_max={:.3e} top5: {}",
-                iter, clip_count, n, clip_amt, top5.join(", "));
+            eprintln!(
+                "REFINE_KKT_DIAG iter={} clip_count={}/{} clip_max={:.3e} top5: {}",
+                iter,
+                clip_count,
+                n,
+                clip_amt,
+                top5.join(", ")
+            );
         }
         for i in 0..m {
             y_new[i] += sol[n + i];
@@ -2278,7 +3006,10 @@ pub(crate) fn refine_kkt_iterative(
 ///   - 両端有限 + interior:    y_lb = y_ub = 0 (residual はそのまま、KKT-guard で revert)
 ///
 /// 既存 bound_duals より KKT 残差が改善した場合のみ採用する (退行防止 — refine_dual_lsq と同形)。
-pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::problem::SolverResult) {
+pub(crate) fn refit_bound_duals_kkt(
+    problem: &QpProblem,
+    result: &mut crate::problem::SolverResult,
+) {
     let n = problem.num_vars;
     if result.solution.len() != n {
         return;
@@ -2292,7 +3023,8 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
     for col in 0..n {
         let xv = x[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] =
+                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -2300,7 +3032,11 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], result.dual_solution[problem.a.row_ind[k]]);
+                acc[col] = acc[col]
+                    + TwoFloat::new_mul(
+                        problem.a.values[k],
+                        result.dual_solution[problem.a.row_ind[k]],
+                    );
             }
         }
         acc.iter().map(|&v| f64::from(v)).collect()
@@ -2308,8 +3044,16 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
         vec![0.0_f64; n]
     };
 
-    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
-    let n_ub = problem.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = problem
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
     if n_lb + n_ub == 0 {
         return;
     }
@@ -2336,9 +3080,9 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
             // FX variable (lb==ub): convention is 0-fill; KKT-guard also excludes FX
             if (lb - ub).abs() >= FX_TOL {
                 if target > 0.0 {
-                    new_bd[ub_idx] = target;     // ub 側
+                    new_bd[ub_idx] = target; // ub 側
                 } else {
-                    new_bd[lb_idx] = -target;    // lb 側
+                    new_bd[lb_idx] = -target; // lb 側
                 }
             }
             lb_idx += 1;
@@ -2371,31 +3115,41 @@ pub(crate) fn refit_bound_duals_kkt(problem: &QpProblem, result: &mut crate::pro
     for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
         // FX 変数は postsolve で 0 埋め慣例なので KKT 評価から除外 (bench/v2 と整合)。
         let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
-        let r_pre = if is_fx { 0.0 } else {
+        let r_pre = if is_fx {
+            0.0
+        } else {
             (qx[j] + problem.c[j] + aty[j] + pre_contrib[j]).abs()
         };
-        let r_post = if is_fx { 0.0 } else {
+        let r_post = if is_fx {
+            0.0
+        } else {
             (qx[j] + problem.c[j] + aty[j] + post_contrib[j]).abs()
         };
         let take_new = !is_fx && r_post <= r_pre;
         if lb.is_finite() {
             if take_new && lb_slot < new_bd.len() {
-                if accepted_bd[lb_slot] != new_bd[lb_slot] { updated_lb += 1; }
+                if accepted_bd[lb_slot] != new_bd[lb_slot] {
+                    updated_lb += 1;
+                }
                 accepted_bd[lb_slot] = new_bd[lb_slot];
             }
             lb_slot += 1;
         }
         if ub.is_finite() {
             if take_new && ub_slot < new_bd.len() {
-                if accepted_bd[ub_slot] != new_bd[ub_slot] { updated_ub += 1; }
+                if accepted_bd[ub_slot] != new_bd[ub_slot] {
+                    updated_ub += 1;
+                }
                 accepted_bd[ub_slot] = new_bd[ub_slot];
             }
             ub_slot += 1;
         }
     }
     if std::env::var("REFIT_BD_TRACE").ok().as_deref() == Some("1") {
-        eprintln!("REFIT_BD per-col: updated_lb={} updated_ub={} (n={})",
-            updated_lb, updated_ub, n);
+        eprintln!(
+            "REFIT_BD per-col: updated_lb={} updated_ub={} (n={})",
+            updated_lb, updated_ub, n
+        );
     }
     result.bound_duals = accepted_bd;
 }
@@ -2423,12 +3177,20 @@ pub(crate) fn refine_dual_lsq_irls(
     deadline: Option<std::time::Instant>,
 ) {
     use twofloat::TwoFloat;
-    if deadline.is_some_and(|d| std::time::Instant::now() >= d) { return; }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return;
+    }
     let n = problem.num_vars;
     let m = problem.num_constraints;
-    if m == 0 || result.solution.len() != n { return; }
-    if n + m > LSQ_DUAL_SIZE_LIMIT { return; }
-    if result.dual_solution.len() != m { return; }
+    if m == 0 || result.solution.len() != n {
+        return;
+    }
+    if n + m > LSQ_DUAL_SIZE_LIMIT {
+        return;
+    }
+    if result.dual_solution.len() != m {
+        return;
+    }
 
     let zero_dd = TwoFloat::from(0.0);
 
@@ -2437,20 +3199,26 @@ pub(crate) fn refine_dual_lsq_irls(
     for col in 0..n {
         let xv = result.solution[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] =
+                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
-    let target: Vec<f64> = (0..n).map(|j| -(qx[j] + problem.c[j] + bound_contrib[j])).collect();
+    let target: Vec<f64> = (0..n)
+        .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
+        .collect();
 
     // FX / EmptyCol は KKT 評価から除外 (kkt_residual_rel と整合)
-    let exclude: Vec<bool> = (0..n).map(|j| {
-        let (lb, ub) = problem.bounds[j];
-        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL { return true; }
-        problem.a.col_ptr.len() > j + 1
-            && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
-    }).collect();
+    let exclude: Vec<bool> = (0..n)
+        .map(|j| {
+            let (lb, ub) = problem.bounds[j];
+            if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
+                return true;
+            }
+            problem.a.col_ptr.len() > j + 1 && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+        })
+        .collect();
 
     let compute_aty = |y: &[f64]| -> Vec<f64> {
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
@@ -2466,11 +3234,16 @@ pub(crate) fn refine_dual_lsq_irls(
     let max_rel_with_aty = |aty_v: &[f64]| -> f64 {
         let mut max_rel = 0.0_f64;
         for j in 0..n {
-            if exclude[j] { continue; }
+            if exclude[j] {
+                continue;
+            }
             let r = qx[j] + problem.c[j] + aty_v[j] + bound_contrib[j];
-            let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
+            let scale =
+                1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
             let rel = r.abs() / scale;
-            if rel > max_rel { max_rel = rel; }
+            if rel > max_rel {
+                max_rel = rel;
+            }
         }
         max_rel
     };
@@ -2478,7 +3251,9 @@ pub(crate) fn refine_dual_lsq_irls(
     let mut y_curr = result.dual_solution.clone();
     let initial_aty = compute_aty(&y_curr);
     let initial_max_rel = max_rel_with_aty(&initial_aty);
-    if initial_max_rel < eps_target { return; }
+    if initial_max_rel < eps_target {
+        return;
+    }
 
     let mut best_y = y_curr.clone();
     let mut best_max_rel = initial_max_rel;
@@ -2493,16 +3268,21 @@ pub(crate) fn refine_dual_lsq_irls(
     const STAGNATE_RATIO: f64 = 0.95;
 
     for irls_iter in 0..max_iters {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
 
         // 重み: rel > eps の成分に対して (rel/eps)² (LSQ 内部で 1/√w 倍として作用するため、
         // 二乗で componentwise weighting 効果が出る)
         let aty_v = compute_aty(&y_curr);
         let mut weights: Vec<f64> = vec![1.0; n];
         for j in 0..n {
-            if exclude[j] { continue; }
+            if exclude[j] {
+                continue;
+            }
             let r = qx[j] + problem.c[j] + aty_v[j] + bound_contrib[j];
-            let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
+            let scale =
+                1.0 + qx[j].abs() + problem.c[j].abs() + aty_v[j].abs() + bound_contrib[j].abs();
             let rel = r.abs() / scale;
             if rel > eps_target {
                 let ratio = (rel / eps_target).min(MAX_WEIGHT_RATIO);
@@ -2515,7 +3295,9 @@ pub(crate) fn refine_dual_lsq_irls(
         let mut a_scaled = problem.a.clone();
         for k in 0..n {
             let s = weights[k].sqrt();
-            if (s - 1.0).abs() < 1e-15 { continue; }
+            if (s - 1.0).abs() < 1e-15 {
+                continue;
+            }
             let cs = a_scaled.col_ptr[k];
             let ce = a_scaled.col_ptr[k + 1];
             for idx in cs..ce {
@@ -2545,7 +3327,9 @@ pub(crate) fn refine_dual_lsq_irls(
 
         let mut y_new = vec![0.0_f64; m];
         factor.solve(&rhs, &mut y_new);
-        if y_new.iter().any(|v| !v.is_finite()) { break; }
+        if y_new.iter().any(|v| !v.is_finite()) {
+            break;
+        }
 
         let aty_new = compute_aty(&y_new);
         let new_max_rel = max_rel_with_aty(&aty_new);
@@ -2555,8 +3339,12 @@ pub(crate) fn refine_dual_lsq_irls(
             best_max_rel = new_max_rel;
         }
 
-        if best_max_rel < eps_target { break; }
-        if irls_iter > 0 && new_max_rel >= prev_max_rel * STAGNATE_RATIO { break; }
+        if best_max_rel < eps_target {
+            break;
+        }
+        if irls_iter > 0 && new_max_rel >= prev_max_rel * STAGNATE_RATIO {
+            break;
+        }
         prev_max_rel = new_max_rel;
         y_curr = y_new;
     }
@@ -2621,9 +3409,8 @@ pub(crate) fn build_aat_upper_csc(a: &CscMatrix, n: usize, m: usize) -> Option<C
     for k in 0..n {
         let start = a.col_ptr[k];
         let end = a.col_ptr[k + 1];
-        let cols_in_k: Vec<(usize, f64)> = (start..end)
-            .map(|p| (a.row_ind[p], a.values[p]))
-            .collect();
+        let cols_in_k: Vec<(usize, f64)> =
+            (start..end).map(|p| (a.row_ind[p], a.values[p])).collect();
         for (idx_a, &(i, v_i)) in cols_in_k.iter().enumerate() {
             for &(j, v_j) in &cols_in_k[idx_a..] {
                 let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
@@ -2701,7 +3488,10 @@ mod tests {
         assert!(
             (a - b).abs() < eps,
             "{}: expected {:.8}, got {:.8} (diff={:.2e})",
-            name, b, a, (a - b).abs()
+            name,
+            b,
+            a,
+            (a - b).abs()
         );
     }
 
@@ -2719,12 +3509,23 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T1: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T1: status should be Optimal"
+        );
         assert_close(result.solution[0], 0.5, EPS, "T1: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "T1: x[1]");
         assert_close(result.objective, 0.5, EPS, "T1: objective");
-        assert!(result.bound_duals.is_empty(), "T1: infinite bounds → bound_duals empty");
-        assert_eq!(result.dual_solution.len(), 1, "T1: dual_solution length == m == 1");
+        assert!(
+            result.bound_duals.is_empty(),
+            "T1: infinite bounds → bound_duals empty"
+        );
+        assert_eq!(
+            result.dual_solution.len(),
+            1,
+            "T1: dual_solution length == m == 1"
+        );
     }
 
     /// T2: 等式制約付きQP
@@ -2734,21 +3535,23 @@ mod tests {
     fn test_qp_equality_constraint() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, -1.0, -1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "T2: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T2: status should be Optimal"
+        );
         assert_close(result.solution[0], 0.5, EPS, "T2: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "T2: x[1]");
         assert_close(result.objective, 0.5, EPS, "T2: objective");
@@ -2775,7 +3578,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T3: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T3: status should be Optimal"
+        );
         assert_close(result.objective, 0.0, EPS, "T3: objective");
     }
 
@@ -2793,7 +3600,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T4: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T4: status should be Optimal"
+        );
         assert_close(result.solution[0], 3.0, EPS, "T4: x[0]");
         assert_close(result.solution[1], 4.0, EPS, "T4: x[1]");
         assert_close(result.objective, -25.0, EPS, "T4: objective");
@@ -2820,7 +3631,11 @@ mod tests {
         .unwrap();
 
         let result1 = solve_qp(&problem);
-        assert_eq!(result1.status, SolveStatus::Optimal, "T5: cold start should be Optimal");
+        assert_eq!(
+            result1.status,
+            SolveStatus::Optimal,
+            "T5: cold start should be Optimal"
+        );
 
         let ws = crate::qp::QpWarmStart {
             initial_active_set: vec![],
@@ -2828,7 +3643,11 @@ mod tests {
         };
         let result2 = solve_qp_warm(&problem2, &ws, &SolverOptions::default());
 
-        assert_eq!(result2.status, SolveStatus::Optimal, "T5: warm start should be Optimal");
+        assert_eq!(
+            result2.status,
+            SolveStatus::Optimal,
+            "T5: warm start should be Optimal"
+        );
         assert_close(result2.solution[0], 0.5, EPS, "T5: warm start x[0]");
         assert_close(result2.solution[1], 0.5, EPS, "T5: warm start x[1]");
     }
@@ -2846,31 +3665,36 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Infeasible, "T6: should be Infeasible");
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "T6: should be Infeasible"
+        );
     }
 
     /// T7: ポートフォリオ最適化（Markowitz平均分散モデル）
     #[test]
     fn test_qp_portfolio_markowitz() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[2.0, 2.0, 2.0],
-            3, 3,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
         let c = vec![0.0, 0.0, 0.0];
         let a = CscMatrix::from_triplets(
             &[0, 0, 0, 1, 1, 1, 2, 3, 4],
             &[0, 1, 2, 0, 1, 2, 0, 1, 2],
             &[1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0],
-            5, 3,
-        ).unwrap();
+            5,
+            3,
+        )
+        .unwrap();
         let b = vec![1.0, -1.0, 0.0, 0.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T7: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T7: status should be Optimal"
+        );
         let w_sum = result.solution[0] + result.solution[1] + result.solution[2];
         assert_close(w_sum, 1.0, EPS, "T7: w sum = 1");
         assert_close(result.solution[0], 1.0 / 3.0, EPS, "T7: w[0]");
@@ -2882,12 +3706,9 @@ mod tests {
     /// T8: 最小二乗法（Least Squares）
     #[test]
     fn test_qp_least_squares() {
-        let q = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[10.0, 8.0, 8.0, 10.0],
-            2, 2,
-        ).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[10.0, 8.0, 8.0, 10.0], 2, 2)
+                .unwrap();
         let c = vec![-28.0, -26.0];
         let a = CscMatrix::new(0, 2);
         let b_vec = vec![];
@@ -2895,7 +3716,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b_vec, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T8: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T8: status should be Optimal"
+        );
         assert_close(result.solution[0], 2.0, EPS, "T8: x[0]");
         assert_close(result.solution[1], 1.0, EPS, "T8: x[1]");
         assert_close(result.objective, -41.0, EPS, "T8: objective");
@@ -2911,14 +3736,20 @@ mod tests {
             &[0, 0, 1, 2],
             &[0, 1, 0, 1],
             &[-1.0, -1.0, -1.0, -1.0],
-            3, 2,
-        ).unwrap();
+            3,
+            2,
+        )
+        .unwrap();
         let b = vec![-1.0, 0.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T9: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T9: status should be Optimal"
+        );
         assert_close(result.solution[0], 0.0, EPS, "T9: x[0]");
         assert_close(result.solution[1], 1.0, EPS, "T9: x[1]");
         assert_close(result.objective, 1.0, EPS, "T9: objective");
@@ -2927,26 +3758,30 @@ mod tests {
     /// T10: 複合制約テスト（等式+不等式の組み合わせ）
     #[test]
     fn test_qp_mixed_constraints() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 1],
-            &[2.0, 2.0],
-            2, 2,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![-2.0, -4.0];
         let a = CscMatrix::from_triplets(
             &[0, 0, 1, 1, 2],
             &[0, 1, 0, 1, 0],
             &[1.0, 1.0, -1.0, -1.0, -1.0],
-            3, 2,
-        ).unwrap();
+            3,
+            2,
+        )
+        .unwrap();
         let b = vec![2.0, -2.0, 0.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "T10: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T10: status should be Optimal"
+        );
         assert_close(result.solution[0], 0.5, EPS, "T10: x[0]");
         assert_close(result.solution[1], 1.5, EPS, "T10: x[1]");
         assert_close(result.objective, -4.5, EPS, "T10: objective");
@@ -2964,8 +3799,12 @@ mod tests {
 
         let result = solve_qp(&problem);
         assert!(
-            matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution),
-            "T11: status should be Optimal or SuboptimalSolution (got {:?})", result.status
+            matches!(
+                result.status,
+                SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+            ),
+            "T11: status should be Optimal or SuboptimalSolution (got {:?})",
+            result.status
         );
         assert_close(result.solution[0], 1.0, EPS, "T11: x[0] at upper bound");
         assert_close(result.solution[1], 1.0, EPS, "T11: x[1] at upper bound");
@@ -2983,7 +3822,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal, "T12: status should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T12: status should be Optimal"
+        );
         assert_close(result.solution[0], 0.0, EPS, "T12: x[0] at lower bound");
         assert_close(result.solution[1], 0.0, EPS, "T12: x[1] unconstrained min");
         assert_close(result.objective, 0.0, EPS, "T12: objective");
@@ -2999,7 +3842,10 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(0.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(0.0),
+            ..Default::default()
+        };
 
         let result = solve_qp_with(&problem, &opts);
         assert!(
@@ -3019,7 +3865,10 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { qp_solver: QpSolverChoice::IpPmm, ..Default::default() };
+        let opts = SolverOptions {
+            qp_solver: QpSolverChoice::IpPmm,
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T18: 強制IPMはOptimal");
         assert!((result.solution[0] - 0.5).abs() < 1e-4, "T18: x[0] ≈ 0.5");
@@ -3040,7 +3889,11 @@ mod tests {
 
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "T20: concurrent should be Optimal");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T20: concurrent should be Optimal"
+        );
         assert!((result.solution[0] - 0.5).abs() < EPS, "T20: x[0] ≈ 0.5");
         assert!((result.solution[1] - 0.5).abs() < EPS, "T20: x[1] ≈ 0.5");
         assert!((result.objective - 0.5).abs() < EPS, "T20: obj ≈ 0.5");
@@ -3065,13 +3918,23 @@ mod tests {
         let opts = SolverOptions::default(); // presolve=true
         let result = solve_qp_with(&problem, &opts);
 
-        assert_eq!(result.status, SolveStatus::Optimal, "T23: Optimal解が得られること");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T23: Optimal解が得られること"
+        );
         // 元問題でpfeasを直接検証: A*x - b <= 0 のはず
         let ax = problem.a.mat_vec_mul(&result.solution).unwrap();
-        let pfeas = ax.iter().zip(problem.b.iter())
+        let pfeas = ax
+            .iter()
+            .zip(problem.b.iter())
             .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
             .fold(0.0_f64, f64::max);
-        let norm_b = problem.b.iter().fold(0.0_f64, |a, &bi| a.max(bi.abs())).max(1.0);
+        let norm_b = problem
+            .b
+            .iter()
+            .fold(0.0_f64, |a, &bi| a.max(bi.abs()))
+            .max(1.0);
         let eps = opts.ipm_eps();
         assert!(
             pfeas < eps * (1.0 + norm_b),
@@ -3096,7 +3959,11 @@ mod tests {
         let opts = SolverOptions::default(); // presolve=true
         let result = solve_qp_with(&problem, &opts);
 
-        assert_eq!(result.status, SolveStatus::Optimal, "T24: bounds付き問題でOptimal解が得られること");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T24: bounds付き問題でOptimal解が得られること"
+        );
         let x = result.solution[0];
         assert!(x >= -1e-4, "T24: x >= lb=0, got x={x}");
         assert!(x <= 1.0 + 1e-4, "T24: x <= ub=1, got x={x}");
@@ -3144,7 +4011,11 @@ mod tests {
         assert!(opts.presolve, "T26: デフォルトはpresolve=true");
         let result = solve_qp_with(&problem, &opts);
 
-        assert_eq!(result.status, SolveStatus::Optimal, "T26: presolve有効時もOptimalを返すこと");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "T26: presolve有効時もOptimalを返すこと"
+        );
         let eps = 1e-3_f64;
         assert!(
             (result.solution[0] - 0.5).abs() < eps,
@@ -3164,13 +4035,7 @@ mod tests {
     #[test]
     fn test_qp_nonconvex_indefinite_q() {
         // Q = diag(-1.0, 1.0, 1.0)（不定行列: 対角に負値）
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[-1.0, 1.0, 1.0],
-            3,
-            3,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1.0, 1.0, 1.0], 3, 3).unwrap();
         let c = vec![0.0, 0.0, 0.0];
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
         let b = vec![];
@@ -3180,7 +4045,8 @@ mod tests {
         let result = solve_qp(&problem);
         assert!(
             matches!(result.status, SolveStatus::NonConvex(_)),
-            "T27: 不定Q行列はNonConvexを返すこと。got: {:?}", result.status
+            "T27: 不定Q行列はNonConvexを返すこと。got: {:?}",
+            result.status
         );
     }
 
@@ -3190,13 +4056,7 @@ mod tests {
     #[test]
     fn test_qp_psd_semidefinite_q() {
         // Q = diag(0.0, 1.0, 1.0)（半正定値行列: 最小固有値=0）
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[0.0, 1.0, 1.0],
-            3,
-            3,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.0, 1.0, 1.0], 3, 3).unwrap();
         assert!(
             check_q_positive_semidefinite(&q),
             "T28: 半正定値Q（最小固有値=0）はPSD判定されること"
@@ -3249,13 +4109,8 @@ mod tests {
     /// 条件 `q < -neg_tol` を満たさないので PSD として扱う。
     #[test]
     fn test_qp_diagonal_boundary_below_threshold() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[-1e-11_f64, 1.0, 1.0],
-            3,
-            3,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-11_f64, 1.0, 1.0], 3, 3)
+            .unwrap();
         assert!(
             check_q_positive_semidefinite(&q),
             "Q[0,0]=-1e-11 は noise 範囲内 (‖Q‖_max × 1e-6 = 1e-6 より小さい) のため PSD"
@@ -3266,13 +4121,8 @@ mod tests {
     /// (絶対値が小さい) → PSD と判定。‖Q‖_max=1 で 1e-7/1=1e-7 = noise 程度。
     #[test]
     fn test_qp_diagonal_boundary_at_noise_floor() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[-1e-7_f64, 1.0, 1.0],
-            3,
-            3,
-        ).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-7_f64, 1.0, 1.0], 3, 3).unwrap();
         // -1e-7 > -1e-6 (= -neg_tol) なので非凸検出しない (noise 範囲)
         assert!(
             check_q_positive_semidefinite(&q),
@@ -3284,13 +4134,8 @@ mod tests {
     /// 1e-4 / ‖Q‖_max=1 = 1e-4 > 1e-6 = encoded noise tolerance.
     #[test]
     fn test_qp_diagonal_boundary_above_threshold() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[-1e-4_f64, 1.0, 1.0],
-            3,
-            3,
-        ).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-4_f64, 1.0, 1.0], 3, 3).unwrap();
         assert!(
             !check_q_positive_semidefinite(&q),
             "Q[0,0]=-1e-4 は閾値 (-‖Q‖_max × 1e-6 = -1e-6) を超えるため NonConvex 検出"
@@ -3321,7 +4166,9 @@ mod tests {
         let prob = parse_qps(path).expect("parse UBH1");
         eprintln!(
             "UBH1: n={}, m={}, Q.nnz={}",
-            prob.num_vars, prob.num_constraints, prob.q.values.len()
+            prob.num_vars,
+            prob.num_constraints,
+            prob.q.values.len()
         );
 
         // 対角 ε を変えて factorize を試行する。
@@ -3366,7 +4213,10 @@ mod tests {
             ..Default::default()
         };
         let result = solve_qp_with(&prob, &opts);
-        eprintln!("HS268 status={:?} obj={:.6e}", result.status, result.objective);
+        eprintln!(
+            "HS268 status={:?} obj={:.6e}",
+            result.status, result.objective
+        );
         let x = &result.solution;
         let y = &result.dual_solution;
         let bd = &result.bound_duals;
@@ -3533,17 +4383,24 @@ mod tests {
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { timeout_secs: None, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            timeout_secs: None,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "A2-T03: QP タイムアウトなしで収束すること");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "A2-T03: QP タイムアウトなしで収束すること"
+        );
     }
 
     /// A3-C02: cancel_flag 事前設定で即停止（QP版）
     #[test]
     fn test_a3c02_cancel_flag_preset_qp_returns_timeout() {
         // SPEC: A3-C02 (QP版)
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
@@ -3586,8 +4443,16 @@ mod tests {
         };
         let result_with = solve_qp_with(&problem, &opts_with);
         let result_without = solve_qp_with(&problem, &opts_without);
-        assert_eq!(result_with.status, SolveStatus::Optimal, "A4-P01: presolve=true → Optimal");
-        assert_eq!(result_without.status, SolveStatus::Optimal, "A4-P01: presolve=false → Optimal");
+        assert_eq!(
+            result_with.status,
+            SolveStatus::Optimal,
+            "A4-P01: presolve=true → Optimal"
+        );
+        assert_eq!(
+            result_without.status,
+            SolveStatus::Optimal,
+            "A4-P01: presolve=false → Optimal"
+        );
         assert!(
             (result_with.solution[0] - result_without.solution[0]).abs() < 1e-3,
             "A4-P01: presolve 有無で x[0] が一致すること"
@@ -3617,14 +4482,19 @@ mod tests {
             vals.push(1.0);
         }
         let q1 = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
-        assert!(!check_q_positive_semidefinite(&q1), "A6-I03: n=1001 対角負値は NonConvex を検出");
+        assert!(
+            !check_q_positive_semidefinite(&q1),
+            "A6-I03: n=1001 対角負値は NonConvex を検出"
+        );
 
         // case2: 非対角の非 PSD（対角チェックには引っかからない）→ n>1000 でスキップ
         let mut rows2: Vec<usize> = (0..n).collect();
         let mut cols2: Vec<usize> = (0..n).collect();
         let mut vals2: Vec<f64> = vec![1.0; n]; // 全て正の対角
-        // 非対角に負値追加（非 PSD だが対角チェックには引っかからない）
-        rows2.push(0); cols2.push(1); vals2.push(-2.0);
+                                                // 非対角に負値追加（非 PSD だが対角チェックには引っかからない）
+        rows2.push(0);
+        cols2.push(1);
+        vals2.push(-2.0);
         let q2 = CscMatrix::from_triplets(&rows2, &cols2, &vals2, n, n).unwrap();
         // n>1000 では Cholesky 省略 → 対角チェックのみ → true を返す（スキップ）
         assert!(
@@ -3692,8 +4562,8 @@ mod tests {
     fn test_a3c01_cancel_flag_concurrent_returns_timeout() {
         // SPEC: A3-C01 / A3-C03
         // concurrent solver で cancel_flag=true（事前設定）→ Timeout が返ること
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
@@ -3734,16 +4604,14 @@ mod tests {
         let q = CscMatrix::new(n, n); // Q=0 → LP path
         let c = vec![2.0, 3.0];
         // x+y<=4, x<=3
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 0],
-            &[1.0, 1.0, 1.0],
-            2, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, n).unwrap();
         let b = vec![4.0, 3.0];
         let bounds = vec![(0.0_f64, f64::INFINITY); n];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T1: status");
         let tol = 1e-8_f64;
@@ -3773,12 +4641,8 @@ mod tests {
         let c = vec![2.0, 3.0, 1.0];
         // x+y<=4, x+2y<=6 (z not in constraints)
         // x,yが2制約に登場 → singletonCol最適化の対象外 → 縮約後問題に残る
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 2.0],
-            2, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 2.0], 2, n)
+            .unwrap();
         let b = vec![4.0, 6.0];
         let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (5.0, 5.0)]; // z fixed
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -3795,17 +4659,30 @@ mod tests {
         assert!((result.objective - 5.0).abs() < tol, "T2: obj=5");
         // reduced_costs: len=3 (F2: col_mapリマップ検証), rc[2]=0 (FixedVar除去)
         assert_eq!(result.reduced_costs.len(), 3, "T2: rc.len=3 (F2 col_map)");
-        assert!((result.reduced_costs[0] - 2.0).abs() < tol, "T2: rc[0]=2 (x non-basic at lb)");
-        assert!((result.reduced_costs[1] - 3.0).abs() < tol, "T2: rc[1]=3 (y non-basic at lb)");
-        assert!((result.reduced_costs[2]).abs() < tol, "T2: rc[2]=0 (z fixed by FixedVar)");
+        assert!(
+            (result.reduced_costs[0] - 2.0).abs() < tol,
+            "T2: rc[0]=2 (x non-basic at lb)"
+        );
+        assert!(
+            (result.reduced_costs[1] - 3.0).abs() < tol,
+            "T2: rc[1]=3 (y non-basic at lb)"
+        );
+        assert!(
+            (result.reduced_costs[2]).abs() < tol,
+            "T2: rc[2]=0 (z fixed by FixedVar)"
+        );
         // slack = b - Ax
         assert_eq!(result.slack.len(), 2, "T2: slack.len=2");
         assert!((result.slack[0] - 4.0).abs() < tol, "T2: slack[0]=4");
         assert!((result.slack[1] - 6.0).abs() < tol, "T2: slack[1]=6");
         // 相補性: x[j]*rc[j] ≈ 0
         for j in 0..3 {
-            assert!((result.solution[j] * result.reduced_costs[j]).abs() < 1e-7,
-                "T2: complementarity x[{}]*rc[{}]", j, j);
+            assert!(
+                (result.solution[j] * result.reduced_costs[j]).abs() < 1e-7,
+                "T2: complementarity x[{}]*rc[{}]",
+                j,
+                j
+            );
         }
     }
 
@@ -3827,9 +4704,14 @@ mod tests {
         let b = vec![2.0, 3.0];
         let bounds = vec![(0.0, f64::INFINITY); n];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Eq, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T3: status");
@@ -3855,12 +4737,7 @@ mod tests {
         let q = CscMatrix::new(n, n);
         let c = vec![2.0, 3.0, 1.0];
         // 10x+y<=10, x<=3 (z not in constraints)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 0],
-            &[10.0, 1.0, 1.0],
-            2, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[10.0, 1.0, 1.0], 2, n).unwrap();
         let b = vec![10.0, 3.0];
         let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (5.0, 5.0)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -3891,12 +4768,8 @@ mod tests {
         let q = CscMatrix::new(n, n);
         let c = vec![1.0, 1.0, 1.0];
         // 1e7*x+y<=1e7, x+y<=2 (z not in constraints)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1e7, 1.0, 1.0, 1.0],
-            2, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1e7, 1.0, 1.0, 1.0], 2, n)
+            .unwrap();
         let b = vec![1e7, 2.0];
         let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (0.5, 0.5)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -3907,21 +4780,28 @@ mod tests {
         let y = result.solution[1];
         // slack精度: b[i] - (Ax)[i] で元問題空間で直接計算して照合
         assert_eq!(result.slack.len(), 2, "T5: slack.len=2");
-        let slack0_expected = 1e7 - 1e7*x - y;
+        let slack0_expected = 1e7 - 1e7 * x - y;
         let slack1_expected = 2.0 - x - y;
         // 相対誤差で確認（LCS+Ruizで1e7スケールのため絶対誤差は大きくなりうる）
         let tol_rel = 1e-5_f64;
         assert!(
             (result.slack[0] - slack0_expected).abs() <= tol_rel * slack0_expected.abs().max(1.0),
-            "T5: slack[0]={} expected={} (LCS b-Ax精度)", result.slack[0], slack0_expected
+            "T5: slack[0]={} expected={} (LCS b-Ax精度)",
+            result.slack[0],
+            slack0_expected
         );
         assert!(
             (result.slack[1] - slack1_expected).abs() <= tol_rel * slack1_expected.abs().max(1.0),
-            "T5: slack[1]={} expected={}", result.slack[1], slack1_expected
+            "T5: slack[1]={} expected={}",
+            result.slack[1],
+            slack1_expected
         );
         // reduced_costs.len = 3
         assert_eq!(result.reduced_costs.len(), 3, "T5: rc.len=3");
-        assert!((result.reduced_costs[2]).abs() < 1e-6, "T5: rc[2]=0 (fixed z)");
+        assert!(
+            (result.reduced_costs[2]).abs() < 1e-6,
+            "T5: rc[2]=0 (fixed z)"
+        );
     }
 
     /// T6: EmptyCol（空列除去）
@@ -3934,12 +4814,7 @@ mod tests {
         let q = CscMatrix::new(n, n);
         let c = vec![2.0, 3.0, 1.0];
         // x+y<=4, x<=3 (z absent from constraints)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 0],
-            &[1.0, 1.0, 1.0],
-            2, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, n).unwrap();
         let b = vec![4.0, 3.0];
         let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY), (0.0, 3.0)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -3956,7 +4831,10 @@ mod tests {
         assert!((result.slack[0] - 4.0).abs() < tol, "T6: slack[0]=4");
         assert!((result.slack[1] - 3.0).abs() < tol, "T6: slack[1]=3");
         assert_eq!(result.reduced_costs.len(), 3, "T6: rc.len=3");
-        assert!((result.reduced_costs[2]).abs() < tol, "T6: rc[2]=0 (empty col fixed)");
+        assert!(
+            (result.reduced_costs[2]).abs() < tol,
+            "T6: rc[2]=0 (empty col fixed)"
+        );
     }
 
     /// T7: QP IPM経路（slack=[], rc=[]）
@@ -4066,11 +4944,13 @@ mod tests {
         let y = result.solution[1];
         assert_eq!(result.slack.len(), 1, "E4: slack.len=1");
         // slack = 1e7 - 1e7*x - y（b-Ax, 元問題空間で正確）
-        let slack_expected = 1e7 - 1e7*x - y;
+        let slack_expected = 1e7 - 1e7 * x - y;
         let tol_rel = 1e-5_f64;
         assert!(
             (result.slack[0] - slack_expected).abs() <= tol_rel * slack_expected.abs().max(1.0),
-            "E4: slack[0]={} expected={} (LCS b-Ax精度)", result.slack[0], slack_expected
+            "E4: slack[0]={} expected={} (LCS b-Ax精度)",
+            result.slack[0],
+            slack_expected
         );
         assert_eq!(result.reduced_costs.len(), n, "E4: rc.len=2");
     }
@@ -4102,8 +4982,11 @@ mod tests {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert_eq!(result.reduced_costs.len(), n,
-            "LP path must preserve reduced_costs from Simplex");
+        assert_eq!(
+            result.reduced_costs.len(),
+            n,
+            "LP path must preserve reduced_costs from Simplex"
+        );
 
         // 値一致アサーション（許容誤差 1e-8）
         let expected = [0.0_f64, 1.0_f64];
@@ -4112,7 +4995,10 @@ mod tests {
             assert!(
                 (got - exp).abs() < tol,
                 "reduced_costs[{}]: expected {}, got {} (diff={})",
-                j, exp, got, (got - exp).abs()
+                j,
+                exp,
+                got,
+                (got - exp).abs()
             );
         }
     }
@@ -4149,12 +5035,22 @@ mod tests {
 
         // Simplex 経由なら Optimal で `reduced_costs` / `slack` が埋まる。
         // IPM 経由になると両方とも空 (この regression test の検出対象)。
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "CDP-1: Q=0 LP must reach Optimal via Simplex (got {:?})", result.status);
-        assert_eq!(result.reduced_costs.len(), n,
-            "CDP-1: reduced_costs must be populated by Simplex (was IPM dispatched?)");
-        assert_eq!(result.slack.len(), 1,
-            "CDP-1: slack must be populated by Simplex (was IPM dispatched?)");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "CDP-1: Q=0 LP must reach Optimal via Simplex (got {:?})",
+            result.status
+        );
+        assert_eq!(
+            result.reduced_costs.len(),
+            n,
+            "CDP-1: reduced_costs must be populated by Simplex (was IPM dispatched?)"
+        );
+        assert_eq!(
+            result.slack.len(),
+            1,
+            "CDP-1: slack must be populated by Simplex (was IPM dispatched?)"
+        );
     }
 
     // CDP-2 削除: Concurrent (Mehrotra+IPPMM 並列) の box-constrained QP fallback
@@ -4182,14 +5078,25 @@ mod tests {
         let b = vec![10.0];
         let bounds = vec![(0.0_f64, 5.0_f64); n];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T1: status");
         let sol_tol = 1e-3_f64;
         let tol = 1e-4_f64;
         // 解: x=0, y=0
-        assert!((result.solution[0]).abs() < sol_tol, "BD-T1: x≈0 (got {})", result.solution[0]);
-        assert!((result.solution[1]).abs() < sol_tol, "BD-T1: y≈0 (got {})", result.solution[1]);
+        assert!(
+            (result.solution[0]).abs() < sol_tol,
+            "BD-T1: x≈0 (got {})",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1]).abs() < sol_tol,
+            "BD-T1: y≈0 (got {})",
+            result.solution[1]
+        );
         // bound_duals長: n_lb_orig=2 + n_ub_orig=2 = 4
         assert_eq!(result.bound_duals.len(), 4, "BD-T1: bound_duals.len()==4");
         // x=0=lb活性 → lb_dual > 0
@@ -4197,9 +5104,15 @@ mod tests {
         // y=0=lb活性 → lb_dual > 0
         assert!(result.bound_duals[1] > tol, "BD-T1: lb_y>0 (active lower)");
         // x上界非活性 → ub_dual ≈ 0
-        assert!(result.bound_duals[2].abs() < tol, "BD-T1: ub_x≈0 (inactive)");
+        assert!(
+            result.bound_duals[2].abs() < tol,
+            "BD-T1: ub_x≈0 (inactive)"
+        );
         // y上界非活性 → ub_dual ≈ 0
-        assert!(result.bound_duals[3].abs() < tol, "BD-T1: ub_y≈0 (inactive)");
+        assert!(
+            result.bound_duals[3].abs() < tol,
+            "BD-T1: ub_y≈0 (inactive)"
+        );
     }
 
     /// BD-T2: FixedVar + bound_dualsリマップ（核心テスト、非対称化済み）
@@ -4211,7 +5124,8 @@ mod tests {
     fn test_bd_t2_fixed_var_remap_core() {
         let n = 3usize;
         // Q = diag(0.001, 0.001, 0.001)
-        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
         let c = vec![2.0, 1.0, 1.0];
         // x + y <= 10
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
@@ -4219,15 +5133,30 @@ mod tests {
         // z=3 → lb=ub=3（FixedVar）
         let bounds = vec![(0.0_f64, 5.0_f64), (0.0_f64, 5.0_f64), (3.0_f64, 3.0_f64)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T2: status");
         let sol_tol = 5e-3_f64; // IPM解の精度（primal解は双対精度より粗め）
-        let tol = 1e-4_f64;     // bound_duals精度（符号・大小比較用）
-        // 解: x≈0, y≈0, z≈3
-        assert!((result.solution[0]).abs() < sol_tol, "BD-T2: x≈0 (got {})", result.solution[0]);
-        assert!((result.solution[1]).abs() < sol_tol, "BD-T2: y≈0 (got {})", result.solution[1]);
-        assert!((result.solution[2] - 3.0).abs() < sol_tol, "BD-T2: z≈3 (got {})", result.solution[2]);
+        let tol = 1e-4_f64; // bound_duals精度（符号・大小比較用）
+                            // 解: x≈0, y≈0, z≈3
+        assert!(
+            (result.solution[0]).abs() < sol_tol,
+            "BD-T2: x≈0 (got {})",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1]).abs() < sol_tol,
+            "BD-T2: y≈0 (got {})",
+            result.solution[1]
+        );
+        assert!(
+            (result.solution[2] - 3.0).abs() < sol_tol,
+            "BD-T2: z≈3 (got {})",
+            result.solution[2]
+        );
         // bound_duals長: n_lb_orig=3 + n_ub_orig=3 = 6
         assert_eq!(result.bound_duals.len(), 6, "BD-T2: bound_duals.len()==6");
         // x=0=lb活性 → lb_dual ≈ 2 (目的関数x係数=2)
@@ -4235,21 +5164,42 @@ mod tests {
         // y=0=lb活性 → lb_dual ≈ 1 (目的関数y係数=1)
         assert!(result.bound_duals[1] > tol, "BD-T2: lb_y>0");
         // 非対称検証: lb_x ≠ lb_y（変数順序バグ検出）
-        assert!((result.bound_duals[0] - result.bound_duals[1]).abs() > tol,
+        assert!(
+            (result.bound_duals[0] - result.bound_duals[1]).abs() > tol,
             "BD-T2: lb_x({}) != lb_y({}) — 変数順序バグ検出",
-            result.bound_duals[0], result.bound_duals[1]);
+            result.bound_duals[0],
+            result.bound_duals[1]
+        );
         // z除去変数 → lb_dual = 0.0
-        assert!((result.bound_duals[2]).abs() < tol, "BD-T2: lb_z==0 (removed)");
+        assert!(
+            (result.bound_duals[2]).abs() < tol,
+            "BD-T2: lb_z==0 (removed)"
+        );
         // x上界非活性 → ub_dual ≈ 0（IPM精度のため5e-3まで許容）
-        assert!(result.bound_duals[3].abs() < 5e-3, "BD-T2: ub_x≈0 (got {})", result.bound_duals[3]);
+        assert!(
+            result.bound_duals[3].abs() < 5e-3,
+            "BD-T2: ub_x≈0 (got {})",
+            result.bound_duals[3]
+        );
         // y上界非活性 → ub_dual ≈ 0
-        assert!(result.bound_duals[4].abs() < 5e-3, "BD-T2: ub_y≈0 (got {})", result.bound_duals[4]);
+        assert!(
+            result.bound_duals[4].abs() < 5e-3,
+            "BD-T2: ub_y≈0 (got {})",
+            result.bound_duals[4]
+        );
         // z除去変数 → ub_dual = 0.0
-        assert!((result.bound_duals[5]).abs() < tol, "BD-T2: ub_z==0 (removed)");
+        assert!(
+            (result.bound_duals[5]).abs() < tol,
+            "BD-T2: ub_z==0 (removed)"
+        );
         // S2: KKT停止性検証（全変数で ∇f[j] - (A^T y)[j] - lb_dual[j] + ub_dual[j] ≈ 0）
         // ∇f(x*)_x = 0.001*0 + 2 = 2, ∇f(x*)_y = 0.001*0 + 1 = 1
         // dual_solution: x+y<=10 の双対変数（最適解x=y=0なので制約非活性→ dual≈0）
-        let dual = if result.dual_solution.is_empty() { 0.0 } else { result.dual_solution[0] };
+        let dual = if result.dual_solution.is_empty() {
+            0.0
+        } else {
+            result.dual_solution[0]
+        };
         // KKT for x: 2 - dual - lb_x + ub_x ≈ 0 → lb_x ≈ 2
         let kkt_x = 2.0 - dual - result.bound_duals[0] + result.bound_duals[3];
         assert!(kkt_x.abs() < 1e-3, "BD-T2: KKT_x≈0, got {}", kkt_x);
@@ -4273,7 +5223,10 @@ mod tests {
         // x: [0, ∞), y: [2, 2] (fixed)
         let bounds = vec![(0.0_f64, f64::INFINITY), (2.0_f64, 2.0_f64)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T3: status");
         // 元問題: lb有限=2(x:0, y:2), ub有限=1(y:2) → bound_duals.len()==3
@@ -4299,9 +5252,16 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
         let b = vec![4.0];
         // x: (-∞, ∞), y: (-∞, ∞), z: [0, 3]
-        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY), (0.0_f64, 3.0_f64)];
+        let bounds = vec![
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (0.0_f64, 3.0_f64),
+        ];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T4: status");
         // n_lb_orig=1(z:0), n_ub_orig=1(z:3) → bound_duals.len()==2
@@ -4311,9 +5271,14 @@ mod tests {
         let z_ub = result.bound_duals[1];
         assert!(
             (z_lb - 1.0).abs() < 1e-3,
-            "BD-T4: z_lb≈1 (KKT recovered for EmptyCol), got {}", z_lb
+            "BD-T4: z_lb≈1 (KKT recovered for EmptyCol), got {}",
+            z_lb
         );
-        assert!(z_ub.abs() < 1e-3, "BD-T4: z_ub≈0 (ub inactive), got {}", z_ub);
+        assert!(
+            z_ub.abs() < 1e-3,
+            "BD-T4: z_ub≈0 (ub inactive), got {}",
+            z_ub
+        );
     }
 
     /// BD-T5: 無境界（全変数±∞ → bound_duals空）
@@ -4331,7 +5296,10 @@ mod tests {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T5: status");
-        assert!(result.bound_duals.is_empty(), "BD-T5: bound_duals empty for unbounded vars");
+        assert!(
+            result.bound_duals.is_empty(),
+            "BD-T5: bound_duals empty for unbounded vars"
+        );
     }
 
     /// BD-T6: FixedVar + ub活性変数（ub_dual非ゼロ × presolve残存変数）
@@ -4342,7 +5310,8 @@ mod tests {
     #[test]
     fn test_bd_t6_ub_active_with_presolve() {
         let n = 3usize;
-        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
         let c = vec![-1.0, -1.0, 1.0];
         // x + y <= 10
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
@@ -4350,24 +5319,51 @@ mod tests {
         // z=2 → fixed
         let bounds = vec![(0.0_f64, 3.0_f64), (0.0_f64, 5.0_f64), (2.0_f64, 2.0_f64)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T6: status");
         let sol_tol = 1e-3_f64; // IPM primal解精度
-        let tol = 1e-4_f64;     // bound_duals符号・大小比較精度
-        // 最適解: x=3, y=5, z=2
-        assert!((result.solution[0] - 3.0).abs() < sol_tol, "BD-T6: x≈3 (got {})", result.solution[0]);
-        assert!((result.solution[1] - 5.0).abs() < sol_tol, "BD-T6: y≈5 (got {})", result.solution[1]);
-        assert!((result.solution[2] - 2.0).abs() < sol_tol, "BD-T6: z≈2 (got {})", result.solution[2]);
+        let tol = 1e-4_f64; // bound_duals符号・大小比較精度
+                            // 最適解: x=3, y=5, z=2
+        assert!(
+            (result.solution[0] - 3.0).abs() < sol_tol,
+            "BD-T6: x≈3 (got {})",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 5.0).abs() < sol_tol,
+            "BD-T6: y≈5 (got {})",
+            result.solution[1]
+        );
+        assert!(
+            (result.solution[2] - 2.0).abs() < sol_tol,
+            "BD-T6: z≈2 (got {})",
+            result.solution[2]
+        );
         // bound_duals長: n_lb_orig=3 + n_ub_orig=3 = 6
         assert_eq!(result.bound_duals.len(), 6, "BD-T6: bound_duals.len()==6");
         // x=3=ub活性 → lb_dual≈0, ub_dual>0
-        assert!(result.bound_duals[0].abs() < tol, "BD-T6: lb_x≈0 (inactive)");
-        assert!(result.bound_duals[1].abs() < tol, "BD-T6: lb_y≈0 (inactive)");
-        assert!((result.bound_duals[2]).abs() < tol, "BD-T6: lb_z==0 (removed)");
+        assert!(
+            result.bound_duals[0].abs() < tol,
+            "BD-T6: lb_x≈0 (inactive)"
+        );
+        assert!(
+            result.bound_duals[1].abs() < tol,
+            "BD-T6: lb_y≈0 (inactive)"
+        );
+        assert!(
+            (result.bound_duals[2]).abs() < tol,
+            "BD-T6: lb_z==0 (removed)"
+        );
         assert!(result.bound_duals[3] > tol, "BD-T6: ub_x>0 (active upper)");
         assert!(result.bound_duals[4] > tol, "BD-T6: ub_y>0 (active upper)");
-        assert!((result.bound_duals[5]).abs() < tol, "BD-T6: ub_z==0 (removed)");
+        assert!(
+            (result.bound_duals[5]).abs() < tol,
+            "BD-T6: ub_z==0 (removed)"
+        );
     }
 
     /// BD-T7: constraint active × lb_dual nonzero × KKT照合
@@ -4397,27 +5393,50 @@ mod tests {
         // x ∈ [2, ∞), y ∈ [0, ∞) → n_lb=2, n_ub=0 → bound_duals.len()==2
         let bounds = vec![(2.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: false, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: false,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "BD-T7: status");
         let sol_tol = 1e-3_f64;
         let tol = 1e-4_f64;
         // 最適解: x=2, y=1
-        assert!((result.solution[0] - 2.0).abs() < sol_tol,
-            "BD-T7: x≈2 (got {})", result.solution[0]);
-        assert!((result.solution[1] - 1.0).abs() < sol_tol,
-            "BD-T7: y≈1 (got {})", result.solution[1]);
+        assert!(
+            (result.solution[0] - 2.0).abs() < sol_tol,
+            "BD-T7: x≈2 (got {})",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 1.0).abs() < sol_tol,
+            "BD-T7: y≈1 (got {})",
+            result.solution[1]
+        );
         // bound_duals長: n_lb_orig=2(x,y), n_ub_orig=0 → len==2
         assert_eq!(result.bound_duals.len(), 2, "BD-T7: bound_duals.len()==2");
         // 制約dual ≠ 0 (constraint active)
-        let dual = if result.dual_solution.is_empty() { 0.0 } else { result.dual_solution[0] };
-        assert!(dual > tol, "BD-T7: constraint dual>0 (active), got {}", dual);
+        let dual = if result.dual_solution.is_empty() {
+            0.0
+        } else {
+            result.dual_solution[0]
+        };
+        assert!(
+            dual > tol,
+            "BD-T7: constraint dual>0 (active), got {}",
+            dual
+        );
         // lb_x ≠ 0 (x=2=lb, active)
-        assert!(result.bound_duals[0] > tol,
-            "BD-T7: lb_x>0 (active lower bound), got {}", result.bound_duals[0]);
+        assert!(
+            result.bound_duals[0] > tol,
+            "BD-T7: lb_x>0 (active lower bound), got {}",
+            result.bound_duals[0]
+        );
         // lb_y ≈ 0 (y=1 > lb=0, inactive)
-        assert!(result.bound_duals[1].abs() < tol,
-            "BD-T7: lb_y≈0 (inactive lower bound), got {}", result.bound_duals[1]);
+        assert!(
+            result.bound_duals[1].abs() < tol,
+            "BD-T7: lb_y≈0 (inactive lower bound), got {}",
+            result.bound_duals[1]
+        );
         // KKT停止性: A[0,j]=-1 なので A^T y の寄与は -dual
         // x: x* - dual - lb_x ≈ 0 → 2 - dual - lb_x
         let kkt_x = result.solution[0] - dual - result.bound_duals[0];
@@ -4434,15 +5453,25 @@ mod tests {
         // [ 1.0  0.0  -3.0 ]
         // [ 0.0  2.5   0.0 ]
         let a = CscMatrix::from_triplets(
-            &[0, 1, 0],    // rows
-            &[0, 1, 2],    // cols
+            &[0, 1, 0],        // rows
+            &[0, 1, 2],        // cols
             &[1.0, 2.5, -3.0], // vals
-            2, 3,
-        ).unwrap();
+            2,
+            3,
+        )
+        .unwrap();
         let norms = a.row_infinity_norms();
         assert_eq!(norms.len(), 2);
-        assert!((norms[0] - 3.0).abs() < 1e-15, "row0 norm: expected 3.0, got {}", norms[0]);
-        assert!((norms[1] - 2.5).abs() < 1e-15, "row1 norm: expected 2.5, got {}", norms[1]);
+        assert!(
+            (norms[0] - 3.0).abs() < 1e-15,
+            "row0 norm: expected 3.0, got {}",
+            norms[0]
+        );
+        assert!(
+            (norms[1] - 2.5).abs() < 1e-15,
+            "row1 norm: expected 2.5, got {}",
+            norms[1]
+        );
     }
 
     /// 大係数行と小係数行が混在するケースで行ノルム正規化pfeasが正しく機能するテスト
@@ -4461,12 +5490,7 @@ mod tests {
         // 行ノルム正規化: 1e-4 / (1+1000+1000) = 5e-8 < eps → PASS
 
         // 直接row_infinity_normsの正しさを検証
-        let a = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 0],
-            &[1.0, 1000.0],
-            2, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1000.0], 2, 1).unwrap();
         let norms = a.row_infinity_norms();
         assert!((norms[0] - 1.0).abs() < 1e-15);
         assert!((norms[1] - 1000.0).abs() < 1e-15);
@@ -4478,14 +5502,23 @@ mod tests {
         let eps: f64 = 1e-6;
 
         // 旧方式: max violation
-        let pfeas_old = ax.iter().zip(b.iter())
+        let pfeas_old = ax
+            .iter()
+            .zip(b.iter())
             .map(|(&ax_i, &b_i)| (ax_i - b_i).max(0.0))
             .fold(0.0_f64, f64::max);
         // pfeas_old = max(1e-7, 1e-4) = 1e-4
-        assert!(pfeas_old > 1e-5, "旧方式pfeasは大係数行に引きずられるべき: {}", pfeas_old);
+        assert!(
+            pfeas_old > 1e-5,
+            "旧方式pfeasは大係数行に引きずられるべき: {}",
+            pfeas_old
+        );
 
         // 新方式: 行ノルム正規化
-        let pfeas_normalized = ax.iter().zip(b.iter()).zip(norms.iter())
+        let pfeas_normalized = ax
+            .iter()
+            .zip(b.iter())
+            .zip(norms.iter())
             .map(|((&ax_i, &b_i), &rn)| {
                 let violation = (ax_i - b_i).max(0.0);
                 violation / (1.0 + rn + b_i.abs())
@@ -4493,7 +5526,11 @@ mod tests {
             .fold(0.0_f64, f64::max);
         // 大係数行: 1e-4 / (1+1000+1000) = 5e-8
         // 小係数行: 1e-7 / (1+1+1) = 3.3e-8
-        assert!(pfeas_normalized < eps, "正規化pfeasはeps未満であるべき: {}", pfeas_normalized);
+        assert!(
+            pfeas_normalized < eps,
+            "正規化pfeasはeps未満であるべき: {}",
+            pfeas_normalized
+        );
     }
 
     /// 正規化なしでは判定が歪むが正規化ありで正しく判定できるケース
@@ -4504,12 +5541,7 @@ mod tests {
         // 旧方式: pfeas = 1e-3, threshold = eps*(1+0).max(1.0) = eps*1 = 1e-6 → FAIL (偽SubOptimal)
         // 新方式: 1e-3 / (1 + 1e6 + 0) ≈ 1e-9 < eps → PASS (正しくOptimal)
 
-        let a = CscMatrix::from_triplets(
-            &[0],
-            &[0],
-            &[1e6],
-            1, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1e6], 1, 1).unwrap();
         let norms = a.row_infinity_norms();
         assert!((norms[0] - 1e6).abs() < 1e-9);
 
@@ -4520,11 +5552,18 @@ mod tests {
         // 旧方式: 偽SubOptimal
         let norm_b = b_val.abs().max(1.0); // max(|b|, 1.0) = 1.0
         let pfeas_old = (ax_val - b_val).abs();
-        assert!(pfeas_old >= eps * (1.0 + norm_b), "旧方式では偽SubOptimalになるべき");
+        assert!(
+            pfeas_old >= eps * (1.0 + norm_b),
+            "旧方式では偽SubOptimalになるべき"
+        );
 
         // 新方式: 正しくOptimal
         let pfeas_norm = (ax_val - b_val).abs() / (1.0 + norms[0] + b_val.abs());
-        assert!(pfeas_norm < eps, "正規化方式ではOptimalであるべき: {}", pfeas_norm);
+        assert!(
+            pfeas_norm < eps,
+            "正規化方式ではOptimalであるべき: {}",
+            pfeas_norm
+        );
     }
 
     // ========== C-QP: Ge制約防御テスト ==========
@@ -4542,10 +5581,16 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "C-QP: wall-clock 6秒超過");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "C-QP: wall-clock 6秒超過"
+        );
         assert_eq!(result.status, SolveStatus::Optimal, "C-QP: status");
         assert_close(result.solution[0], 0.5, EPS, "C-QP: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "C-QP: x[1]");
@@ -4564,18 +5609,20 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         // Row 0: x+y≥0.5 (Ge), Row 1: x-y≤1 (Le)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, -1.0],
-            2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![0.5, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Ge, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
 
         // presolve=false: presolveバグを回避してソルバー本体の正確さを検証
         let opts = SolverOptions {
@@ -4605,12 +5652,19 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Eq: wall-clock 6秒超過");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "E-Eq: wall-clock 6秒超過"
+        );
         assert_eq!(result.status, SolveStatus::Optimal, "E-Eq: status");
         assert_close(result.solution[0], 0.5, EPS, "E-Eq: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "E-Eq: x[1]");
@@ -4630,10 +5684,16 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Ge: wall-clock 6秒超過");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "E-Ge: wall-clock 6秒超過"
+        );
         assert_eq!(result.status, SolveStatus::Optimal, "E-Ge: status");
         assert_close(result.solution[0], 0.5, EPS, "E-Ge: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "E-Ge: x[1]");
@@ -4652,10 +5712,16 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Box: wall-clock 6秒超過");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "E-Box: wall-clock 6秒超過"
+        );
         assert_eq!(result.status, SolveStatus::Optimal, "E-Box: status");
         assert_close(result.solution[0], 0.0, EPS, "E-Box: x[0]");
         assert_close(result.solution[1], 0.0, EPS, "E-Box: x[1]");
@@ -4671,23 +5737,29 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         // Row 0: x+y=1 (Eq), Row 1: x≤1 (Le)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 0],
-            &[1.0, 1.0, 1.0],
-            2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[1.0, 1.0, 1.0], 2, 2).unwrap();
         let b = vec![1.0, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Eq, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Mixed: wall-clock 6秒超過");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "E-Mixed: wall-clock 6秒超過"
+        );
         assert_eq!(result.status, SolveStatus::Optimal, "E-Mixed: status");
         assert_close(result.solution[0], 0.5, EPS, "E-Mixed: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "E-Mixed: x[1]");
@@ -4706,11 +5778,21 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "E-Unconstrained: wall-clock 6秒超過");
-        assert_eq!(result.status, SolveStatus::Optimal, "E-Unconstrained: status");
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "E-Unconstrained: wall-clock 6秒超過"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "E-Unconstrained: status"
+        );
         assert_close(result.solution[0], 1.0, EPS, "E-Unconstrained: x[0]");
         assert_close(result.solution[1], 1.0, EPS, "E-Unconstrained: x[1]");
     }
@@ -4730,12 +5812,23 @@ mod tests {
         let bounds = vec![(1.0_f64, 1.0_f64)];
         let problem = QpProblem::new(q, c, a, b, bounds, vec![]).unwrap();
 
-        let mut opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+        let mut opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..Default::default()
+        };
         opts.presolve = false;
         let start = std::time::Instant::now();
         let result = solve_qp_with(&problem, &opts);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "F-QP-Fixed: wall-clock 6秒超過");
-        assert_eq!(result.status, SolveStatus::Optimal, "F-QP-Fixed: status must be Optimal, got {:?}", result.status);
+        assert!(
+            start.elapsed().as_secs_f64() < 6.0,
+            "F-QP-Fixed: wall-clock 6秒超過"
+        );
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "F-QP-Fixed: status must be Optimal, got {:?}",
+            result.status
+        );
         assert_close(result.solution[0], 1.0, EPS, "F-QP-Fixed: x[0] must be 1.0");
     }
 
@@ -4755,20 +5848,27 @@ mod tests {
         // max_iter=1でMaxIterations/SuboptimalSolutionを強制発生させ、変換パスを通過させる
         let opts = SolverOptions {
             timeout_secs: Some(2.0),
-            ipm: crate::options::IpmOptions { max_iter: 1, ..Default::default() },
+            ipm: crate::options::IpmOptions {
+                max_iter: 1,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = solve_qp_with(&problem, &opts);
         // 6d10eaf以降 SuboptimalSolution は公開API上で有効なステータス。
         // 検証: MaxIterations / NumericalError が直接漏れないこと。
         assert_ne!(
-            result.status, SolveStatus::MaxIterations,
+            result.status,
+            SolveStatus::MaxIterations,
             "G-1: MaxIterationsが外部APIに漏れた"
         );
         assert!(
-            matches!(result.status,
-                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution),
-            "G-1: status must be Optimal/Timeout/SuboptimalSolution, got {:?}", result.status
+            matches!(
+                result.status,
+                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+            ),
+            "G-1: status must be Optimal/Timeout/SuboptimalSolution, got {:?}",
+            result.status
         );
     }
 
@@ -4785,19 +5885,26 @@ mod tests {
 
         let opts = SolverOptions {
             timeout_secs: Some(5.0),
-            ipm: crate::options::IpmOptions { max_iter: 1, ..Default::default() },
+            ipm: crate::options::IpmOptions {
+                max_iter: 1,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = solve_qp_with(&problem, &opts);
         // MaxIterations は内部 status であり外部 API に漏れてはならない
         assert_ne!(
-            result.status, SolveStatus::MaxIterations,
+            result.status,
+            SolveStatus::MaxIterations,
             "G-2: MaxIterationsが外部APIに漏れた"
         );
         assert!(
-            matches!(result.status,
-                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution),
-            "G-2: status must be Optimal/Timeout/SuboptimalSolution, got {:?}", result.status
+            matches!(
+                result.status,
+                SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+            ),
+            "G-2: status must be Optimal/Timeout/SuboptimalSolution, got {:?}",
+            result.status
         );
     }
 
@@ -4813,24 +5920,43 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
 
-        let opts_on = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
-        let mut opts_off = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts_on = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
+        let mut opts_off = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         opts_off.presolve = false;
 
         let result_on = solve_qp_with(&problem, &opts_on);
         let result_off = solve_qp_with(&problem, &opts_off);
 
-        assert_eq!(result_on.status, SolveStatus::Optimal, "H-1: presolve ON status");
-        assert_eq!(result_off.status, SolveStatus::Optimal, "H-1: presolve OFF status");
+        assert_eq!(
+            result_on.status,
+            SolveStatus::Optimal,
+            "H-1: presolve ON status"
+        );
+        assert_eq!(
+            result_off.status,
+            SolveStatus::Optimal,
+            "H-1: presolve OFF status"
+        );
         assert!(
             (result_on.solution[0] - result_off.solution[0]).abs() < 1e-4,
-            "H-1: presolve ON/OFF x[0]不一致: ON={}, OFF={}", result_on.solution[0], result_off.solution[0]
+            "H-1: presolve ON/OFF x[0]不一致: ON={}, OFF={}",
+            result_on.solution[0],
+            result_off.solution[0]
         );
         assert!(
             (result_on.solution[1] - result_off.solution[1]).abs() < 1e-4,
-            "H-1: presolve ON/OFF x[1]不一致: ON={}, OFF={}", result_on.solution[1], result_off.solution[1]
+            "H-1: presolve ON/OFF x[1]不一致: ON={}, OFF={}",
+            result_on.solution[1],
+            result_off.solution[1]
         );
     }
 
@@ -4845,15 +5971,29 @@ mod tests {
         let bounds = vec![(0.0_f64, 2.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts_on = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
-        let mut opts_off = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts_on = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
+        let mut opts_off = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         opts_off.presolve = false;
 
         let result_on = solve_qp_with(&problem, &opts_on);
         let result_off = solve_qp_with(&problem, &opts_off);
 
-        assert_eq!(result_on.status, SolveStatus::Optimal, "H-2: presolve ON status");
-        assert_eq!(result_off.status, SolveStatus::Optimal, "H-2: presolve OFF status");
+        assert_eq!(
+            result_on.status,
+            SolveStatus::Optimal,
+            "H-2: presolve ON status"
+        );
+        assert_eq!(
+            result_off.status,
+            SolveStatus::Optimal,
+            "H-2: presolve OFF status"
+        );
         // 解の一致確認: 双方の解が既知最適解(0,0)に収束していることを確認
         assert_close(result_on.solution[0], 0.0, EPS, "H-2: presolve ON x[0]");
         assert_close(result_on.solution[1], 0.0, EPS, "H-2: presolve ON x[1]");
@@ -4873,9 +6013,16 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "H-3: Ge+presolve status");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "H-3: Ge+presolve status"
+        );
         assert_close(result.solution[0], 0.5, EPS, "H-3: x[0]");
         assert_close(result.solution[1], 0.5, EPS, "H-3: x[1]");
     }
@@ -4891,24 +6038,33 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         // Row 0: x+y≥0.5 (Ge, binding), Row 1: x-y≤1 (Le, inactive)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, -1.0],
-            2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![0.5, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Ge, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
 
         // presolve=false: presolveバグを回避してソルバー本体の正確さを検証
-        let mut opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let mut opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         opts.presolve = false;
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "H-4: Mixed(Ge+Le)+no-presolve status");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "H-4: Mixed(Ge+Le)+no-presolve status"
+        );
         assert_close(result.solution[0], 0.25, EPS, "H-4: x[0]");
         assert_close(result.solution[1], 0.25, EPS, "H-4: x[1]");
     }
@@ -4929,24 +6085,33 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         // Row 0: x+y≥0.5 (Ge, binding), Row 1: x-y≤1 (Le, inactive)
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, -1.0],
-            2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![0.5, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Ge, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
 
         // presolve=ON + Ruiz=ON（デフォルト）でバグが再現していたパターン
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "H-5: Mixed(Ge+Le)+presolve=ON+Ruiz=ON status. got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "H-5: Mixed(Ge+Le)+presolve=ON+Ruiz=ON status. got {:?}",
+            result.status
+        );
         assert_close(result.solution[0], 0.25, EPS, "H-5: x[0]");
         assert_close(result.solution[1], 0.25, EPS, "H-5: x[1]");
         // pfeas直接assert: Ge違反 = max(b - ax, 0) が閾値未満であることを確認
@@ -4967,10 +6132,24 @@ mod tests {
             ..Default::default()
         };
         let result_no_presolve = solve_qp_with(&problem, &opts_no_presolve);
-        assert_eq!(result_no_presolve.status, SolveStatus::Optimal,
-            "H-5: presolve=OFF status. got {:?}", result_no_presolve.status);
-        assert_close(result_no_presolve.solution[0], 0.25, EPS, "H-5(no-presolve): x[0]");
-        assert_close(result_no_presolve.solution[1], 0.25, EPS, "H-5(no-presolve): x[1]");
+        assert_eq!(
+            result_no_presolve.status,
+            SolveStatus::Optimal,
+            "H-5: presolve=OFF status. got {:?}",
+            result_no_presolve.status
+        );
+        assert_close(
+            result_no_presolve.solution[0],
+            0.25,
+            EPS,
+            "H-5(no-presolve): x[0]",
+        );
+        assert_close(
+            result_no_presolve.solution[1],
+            0.25,
+            EPS,
+            "H-5(no-presolve): x[1]",
+        );
     }
 
     // ===================================================================
@@ -4990,8 +6169,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "D-1: well-solved QP must stay Optimal after dfeas check");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "D-1: well-solved QP must stay Optimal after dfeas check"
+        );
     }
 
     /// D-2: スケール不変性 — 係数を1e6倍してもOptimalが維持される
@@ -5001,21 +6183,26 @@ mod tests {
     fn test_dfeas_scale_invariant() {
         let scale = 1e6_f64;
         let q = CscMatrix::from_triplets(
-            &[0, 1], &[0, 1],
-            &[2.0 * scale * scale, 2.0 * scale * scale], 2, 2,
-        ).unwrap();
+            &[0, 1],
+            &[0, 1],
+            &[2.0 * scale * scale, 2.0 * scale * scale],
+            2,
+            2,
+        )
+        .unwrap();
         let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(
-            &[0, 0], &[0, 1],
-            &[-scale, -scale], 1, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-scale, -scale], 1, 2).unwrap();
         let b = vec![-scale];
         let bounds = vec![(0.0, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "D-2: scaled QP must stay Optimal (relative threshold). got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "D-2: scaled QP must stay Optimal (relative threshold). got {:?}",
+            result.status
+        );
         // 解は元問題と同じ x=y=0.5
         assert_close(result.solution[0], 0.5, 1e-4, "D-2: x[0]");
         assert_close(result.solution[1], 0.5, 1e-4, "D-2: x[1]");
@@ -5042,21 +6229,35 @@ mod tests {
 
         // (a) 絶対閾値版: 小さい閾値ではSuboptimalSolution
         let status = ipm_core::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 1e-6);
-        assert_eq!(status, SolveStatus::SuboptimalSolution,
-            "D-3a: bad solution with dfeas=2.0 >> 1e-6 must be SuboptimalSolution");
+        assert_eq!(
+            status,
+            SolveStatus::SuboptimalSolution,
+            "D-3a: bad solution with dfeas=2.0 >> 1e-6 must be SuboptimalSolution"
+        );
         let status_ok = ipm_core::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 10.0);
-        assert_eq!(status_ok, SolveStatus::Optimal,
-            "D-3a: same solution with dfeas=2.0 < 10.0 stays Optimal");
+        assert_eq!(
+            status_ok,
+            SolveStatus::Optimal,
+            "D-3a: same solution with dfeas=2.0 < 10.0 stays Optimal"
+        );
 
         // (b) 成分ごと相対版: residual=2.0, scale=1+2+0+0=3, relative=2/3≈0.667
         // eps=0.01 → SuboptimalSolution
-        let status_rel = ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
-        assert_eq!(status_rel, SolveStatus::SuboptimalSolution,
-            "D-3b: relative dfeas=0.667 >> 0.01 must be SuboptimalSolution");
+        let status_rel =
+            ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
+        assert_eq!(
+            status_rel,
+            SolveStatus::SuboptimalSolution,
+            "D-3b: relative dfeas=0.667 >> 0.01 must be SuboptimalSolution"
+        );
         // eps=1.0 → Optimal (relative < 1.0)
-        let status_rel_ok = ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
-        assert_eq!(status_rel_ok, SolveStatus::Optimal,
-            "D-3b: relative dfeas=0.667 < 1.0 stays Optimal");
+        let status_rel_ok =
+            ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
+        assert_eq!(
+            status_rel_ok,
+            SolveStatus::Optimal,
+            "D-3b: relative dfeas=0.667 < 1.0 stays Optimal"
+        );
     }
 
     /// D-4: 相対閾値の計算精度 — KKTスケールが大きい問題でも正しく正規化される
@@ -5073,10 +6274,17 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "D-4: large-KKT-scale QP must be Optimal. got {:?}", result.status);
-        assert!((result.solution[0] - 5e-7).abs() < 1e-9,
-            "D-4: x*=5e-7, got {:.2e}", result.solution[0]);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "D-4: large-KKT-scale QP must be Optimal. got {:?}",
+            result.status
+        );
+        assert!(
+            (result.solution[0] - 5e-7).abs() < 1e-9,
+            "D-4: x*=5e-7, got {:.2e}",
+            result.solution[0]
+        );
     }
 
     /// D-5: 巨大項キャンセレーション — BOYD1の本質を小さい問題で再現
@@ -5102,16 +6310,24 @@ mod tests {
         let big_x = vec![5e9, 5e9];
         let empty_y: Vec<f64> = vec![];
         let empty_bd: Vec<f64> = vec![];
-        let status = ipm_core::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
-        assert_eq!(status, SolveStatus::SuboptimalSolution,
-            "D-5a: large absolute residual with no cancellation → SuboptimalSolution");
+        let status =
+            ipm_core::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
+        assert_eq!(
+            status,
+            SolveStatus::SuboptimalSolution,
+            "D-5a: large absolute residual with no cancellation → SuboptimalSolution"
+        );
 
         // 正しいキャンセレーション: Qx + c がほぼ0になるケース
         // x ≈ 0 (最適解) → Qx ≈ 0, c = 0, 残差 ≈ 0
         let good_x = vec![1e-12, 1e-12];
-        let status_good = ipm_core::check_dfeas_status_relative(&problem, &good_x, &empty_y, &empty_bd, 1e-8);
-        assert_eq!(status_good, SolveStatus::Optimal,
-            "D-5b: near-optimal solution → Optimal");
+        let status_good =
+            ipm_core::check_dfeas_status_relative(&problem, &good_x, &empty_y, &empty_bd, 1e-8);
+        assert_eq!(
+            status_good,
+            SolveStatus::Optimal,
+            "D-5b: near-optimal solution → Optimal"
+        );
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -5146,7 +6362,8 @@ mod tests {
         refit_bound_duals_kkt(&problem, &mut result);
         assert!(
             (result.bound_duals[0] - 2.5).abs() < 1e-9,
-            "REFIT-T1: y_lb 復元 ≈ 2.5, got {}", result.bound_duals[0]
+            "REFIT-T1: y_lb 復元 ≈ 2.5, got {}",
+            result.bound_duals[0]
         );
     }
 
@@ -5173,7 +6390,8 @@ mod tests {
         refit_bound_duals_kkt(&problem, &mut result);
         assert!(
             (result.bound_duals[0] - 3.0).abs() < 1e-9,
-            "REFIT-T2: y_ub 復元 ≈ 3.0, got {}", result.bound_duals[0]
+            "REFIT-T2: y_ub 復元 ≈ 3.0, got {}",
+            result.bound_duals[0]
         );
     }
 
@@ -5226,7 +6444,8 @@ mod tests {
         refit_bound_duals_kkt(&problem, &mut result);
         assert!(
             (result.bound_duals[0] - 2.0).abs() < 1e-9,
-            "REFIT-T4: 既に正しい値は維持される, got {}", result.bound_duals[0]
+            "REFIT-T4: 既に正しい値は維持される, got {}",
+            result.bound_duals[0]
         );
     }
 
@@ -5256,11 +6475,13 @@ mod tests {
         refit_bound_duals_kkt(&problem, &mut result);
         assert!(
             (result.bound_duals[0] - 1.0).abs() < 1e-9,
-            "REFIT-T5: z_lb_x ≈ 1.0, got {}", result.bound_duals[0]
+            "REFIT-T5: z_lb_x ≈ 1.0, got {}",
+            result.bound_duals[0]
         );
         assert!(
             result.bound_duals[1].abs() < 1e-9,
-            "REFIT-T5: z_lb_y ≈ 0.0, got {}", result.bound_duals[1]
+            "REFIT-T5: z_lb_y ≈ 0.0, got {}",
+            result.bound_duals[1]
         );
     }
 
@@ -5289,8 +6510,16 @@ mod tests {
         project_duals_from_singleton_columns(&problem, &mut result);
         refit_bound_duals_kkt(&problem, &mut result);
 
-        assert!(result.dual_solution[0].abs() < 1e-12, "row dual should project to 0, got {}", result.dual_solution[0]);
-        assert!(result.bound_duals.iter().all(|v| v.abs() < 1e-12), "bound duals should stay zero, got {:?}", result.bound_duals);
+        assert!(
+            result.dual_solution[0].abs() < 1e-12,
+            "row dual should project to 0, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.bound_duals.iter().all(|v| v.abs() < 1e-12),
+            "bound duals should stay zero, got {:?}",
+            result.bound_duals
+        );
     }
 
     #[test]
@@ -5316,8 +6545,16 @@ mod tests {
         project_duals_from_singleton_columns(&problem, &mut result);
         refit_bound_duals_kkt(&problem, &mut result);
 
-        assert!((result.dual_solution[0] - 2.0).abs() < 1e-12, "row dual should project to 2, got {}", result.dual_solution[0]);
-        assert!(result.bound_duals[0].abs() < 1e-12, "z_lb should remain 0, got {}", result.bound_duals[0]);
+        assert!(
+            (result.dual_solution[0] - 2.0).abs() < 1e-12,
+            "row dual should project to 2, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.bound_duals[0].abs() < 1e-12,
+            "z_lb should remain 0, got {}",
+            result.bound_duals[0]
+        );
     }
 
     #[test]
@@ -5339,7 +6576,11 @@ mod tests {
 
         zero_inactive_inequality_duals(&problem, &mut result);
 
-        assert!(result.dual_solution[0].abs() < 1e-12, "inactive Le row dual should be zeroed, got {}", result.dual_solution[0]);
+        assert!(
+            result.dual_solution[0].abs() < 1e-12,
+            "inactive Le row dual should be zeroed, got {}",
+            result.dual_solution[0]
+        );
     }
 
     #[test]
@@ -5365,6 +6606,73 @@ mod tests {
             (result.dual_solution[0] - 1.0e-3).abs() < 1e-9,
             "projected gradient should take curvature-scaled step to y=1e-3, got {}",
             result.dual_solution[0]
+        );
+    }
+
+    #[test]
+    fn test_refine_dual_worst_active_block_updates_row_and_bound_duals_together() {
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0_f64], 2, 2).unwrap();
+        let c = vec![-1.0_f64, 0.0_f64];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 1.0_f64], 1, 2).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+        };
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0_f64, 0.0_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![0.0_f64, 0.0_f64],
+            ..SolverResult::default()
+        };
+
+        let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        refine_dual_worst_active_block(&problem, &mut result, None);
+        let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+
+        assert!(
+            post < pre,
+            "DUAL_BLOCK should reduce KKT residual: pre={} post={}",
+            pre,
+            post
+        );
+        assert!(
+            post < 1e-12,
+            "DUAL_BLOCK should recover exact local KKT, got {}",
+            post
+        );
+        assert!(
+            (result.dual_solution[0] - 1.0).abs() < 1e-9,
+            "row dual should be recovered to 1, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            result.bound_duals[0].abs() < 1e-12,
+            "inactive x lower-bound dual should stay 0, got {}",
+            result.bound_duals[0]
+        );
+        assert!(
+            (result.bound_duals[1] - 1.0).abs() < 1e-9,
+            "active y lower-bound dual should be recovered to 1, got {}",
+            result.bound_duals[1]
         );
     }
 
@@ -5419,13 +6727,21 @@ mod tests {
         // min 0.001(x^2+y^2+z^2) - x - y + 2*z
         // s.t. x + y <= 5, 0 <= x,y,z, ub = 10 for z
         let n = 3usize;
-        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
         let c = vec![-1.0, -1.0, 2.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
         let b = vec![5.0_f64];
-        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY), (0.0_f64, 10.0_f64)];
+        let bounds = vec![
+            (0.0_f64, f64::INFINITY),
+            (0.0_f64, f64::INFINITY),
+            (0.0_f64, 10.0_f64),
+        ];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "REFIT-T6: status");
         // n_lb=3 (全 lb 有限), n_ub=1 (z のみ ub 有限) → bound_duals.len() = 4
@@ -5434,7 +6750,8 @@ mod tests {
         let z_lb_z = result.bound_duals[2];
         assert!(
             (z_lb_z - 2.0).abs() < 1e-2,
-            "REFIT-T6: EmptyCol 変数 z_lb ≈ 2.0 (KKT 復元), got {}", z_lb_z
+            "REFIT-T6: EmptyCol 変数 z_lb ≈ 2.0 (KKT 復元), got {}",
+            z_lb_z
         );
     }
 
@@ -5478,9 +6795,13 @@ mod tests {
         // 縮むかを確認する。
         let delta = 1e-8;
         let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1],
-            &[1.0_f64, 1.0, 1.0, 1.0 + delta], 2, 2,
-        ).unwrap();
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0_f64, 1.0, 1.0, 1.0 + delta],
+            2,
+            2,
+        )
+        .unwrap();
         let q = CscMatrix::new(2, 2);
         // target = (1, 1) を作る c。x=0, bnd=0 のとき target = -(qx+c+bnd) = -c。
         // よって c = (-1, -1) で target = (1, 1)。
@@ -5513,14 +6834,16 @@ mod tests {
         // IR が効けば 1 iter で cond·ε ≈ 1e-8 に落とせる。
         // ここでは「f64 1 回 solve では到達不可能な精度 (< 1e-7)」を IR が達成することを
         // 確認する。
-        assert!(max_abs_res < 1e-7, "IR should drive residual below 1e-7, got {:.3e}", max_abs_res);
+        assert!(
+            max_abs_res < 1e-7,
+            "IR should drive residual below 1e-7, got {:.3e}",
+            max_abs_res
+        );
     }
 
     #[test]
     fn compute_lsq_dual_y_respects_singleton_row_fixed_value() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1], &[0, 1], &[-1.0_f64, 1.0], 2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-1.0_f64, 1.0], 2, 2).unwrap();
         let q = CscMatrix::new(2, 2);
         let c = vec![0.0_f64, 5.0];
         let b = vec![0.0_f64; 2];
@@ -5573,7 +6896,10 @@ mod tests {
             ..SolverResult::default()
         };
         refine_dual_lsq(&problem, &mut result, None);
-        assert!(result.dual_solution[0].abs() < 1e-12,
-            "y は変更されないか、より良い 0 のまま。got {}", result.dual_solution[0]);
+        assert!(
+            result.dual_solution[0].abs() < 1e-12,
+            "y は変更されないか、より良い 0 のまま。got {}",
+            result.dual_solution[0]
+        );
     }
 }
