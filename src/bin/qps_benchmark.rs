@@ -18,7 +18,7 @@ use solver::bench_utils::{detect_csv_path, load_baseline_objectives, ObjCheckRes
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::ipm_v2::solve_qp_v2;
+use solver::qp::ipm_solver::solve_qp_v2;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
 

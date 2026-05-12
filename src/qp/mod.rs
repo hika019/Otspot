@@ -32,8 +32,8 @@
 //! ```
 
 mod problem;
-pub(crate) mod ipm;
-pub mod ipm_v2;
+pub(crate) mod ipm_core;
+pub mod ipm_solver;
 pub mod diagnose;
 pub use problem::{QpProblem, QpWarmStart};
 pub use diagnose::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
@@ -116,7 +116,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // 特異基底（サイクリック構造のネットワーク流 LP など）では Simplex が NumericalError を返す。
     // Simplex は基底行列を必要とするが IPM は不要なので、IPM にフォールバックする。
     if simplex_result.status == SolveStatus::NumericalError {
-        return ipm_v2::solve_qp_v2(problem, options);
+        return ipm_solver::solve_qp_v2(problem, options);
     }
 
     // Simplex が Optimal を返しても reduced_costs に負値が残る場合がある。
@@ -160,7 +160,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 }
             }
             if dfr > options.ipm_eps() {
-                return ipm_v2::solve_qp_v2(problem, options);
+                return ipm_solver::solve_qp_v2(problem, options);
             }
         }
 
@@ -170,10 +170,10 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             // 境界違反 (bfeas_rel) のみ ipm_eps で厳密チェックする。
             const PFEAS_SIMPLEX_TOL: f64 = 1e-4;
             if pfeas_rel > PFEAS_SIMPLEX_TOL || bfeas_rel > options.ipm_eps() {
-                return ipm_v2::solve_qp_v2(problem, options);
+                return ipm_solver::solve_qp_v2(problem, options);
             }
         } else {
-            return ipm_v2::solve_qp_v2(problem, options);
+            return ipm_solver::solve_qp_v2(problem, options);
         }
     }
 
@@ -512,7 +512,7 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         return solve_as_lp_pub(problem, options);
     }
     match options.qp_solver {
-        QpSolverChoice::IpPmm => ipm_v2::solve_qp_v2(problem, options),
+        QpSolverChoice::IpPmm => ipm_solver::solve_qp_v2(problem, options),
     }
 }
 
@@ -1395,7 +1395,7 @@ pub(crate) fn refine_kkt_iterative(
     };
 
     let sigma_zero = vec![0.0_f64; m];
-    let mut k_mat = crate::qp::ipm::kkt::build_augmented_system(
+    let mut k_mat = crate::qp::ipm_core::kkt::build_augmented_system(
         &problem.q, &problem.a, &sigma_zero, delta_p, delta_d
     );
 
@@ -1547,7 +1547,7 @@ pub(crate) fn refine_kkt_iterative(
                     retry_count += 1;
                     current_delta_p *= FACTOR_RETRY_GROWTH;
                     current_delta_d *= FACTOR_RETRY_GROWTH;
-                    current_k = crate::qp::ipm::kkt::build_augmented_system(
+                    current_k = crate::qp::ipm_core::kkt::build_augmented_system(
                         &problem.q, &problem.a, &sigma_zero, current_delta_p, current_delta_d
                     );
                     // bound-active fix を再適用 (新しい K に対して)
@@ -4697,20 +4697,20 @@ mod tests {
         let bad_bd: Vec<f64> = vec![];
 
         // (a) 絶対閾値版: 小さい閾値ではSuboptimalSolution
-        let status = ipm::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 1e-6);
+        let status = ipm_core::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 1e-6);
         assert_eq!(status, SolveStatus::SuboptimalSolution,
             "D-3a: bad solution with dfeas=2.0 >> 1e-6 must be SuboptimalSolution");
-        let status_ok = ipm::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 10.0);
+        let status_ok = ipm_core::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 10.0);
         assert_eq!(status_ok, SolveStatus::Optimal,
             "D-3a: same solution with dfeas=2.0 < 10.0 stays Optimal");
 
         // (b) 成分ごと相対版: residual=2.0, scale=1+2+0+0=3, relative=2/3≈0.667
         // eps=0.01 → SuboptimalSolution
-        let status_rel = ipm::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
+        let status_rel = ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
         assert_eq!(status_rel, SolveStatus::SuboptimalSolution,
             "D-3b: relative dfeas=0.667 >> 0.01 must be SuboptimalSolution");
         // eps=1.0 → Optimal (relative < 1.0)
-        let status_rel_ok = ipm::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
+        let status_rel_ok = ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
         assert_eq!(status_rel_ok, SolveStatus::Optimal,
             "D-3b: relative dfeas=0.667 < 1.0 stays Optimal");
     }
@@ -4758,14 +4758,14 @@ mod tests {
         let big_x = vec![5e9, 5e9];
         let empty_y: Vec<f64> = vec![];
         let empty_bd: Vec<f64> = vec![];
-        let status = ipm::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
+        let status = ipm_core::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
         assert_eq!(status, SolveStatus::SuboptimalSolution,
             "D-5a: large absolute residual with no cancellation → SuboptimalSolution");
 
         // 正しいキャンセレーション: Qx + c がほぼ0になるケース
         // x ≈ 0 (最適解) → Qx ≈ 0, c = 0, 残差 ≈ 0
         let good_x = vec![1e-12, 1e-12];
-        let status_good = ipm::check_dfeas_status_relative(&problem, &good_x, &empty_y, &empty_bd, 1e-8);
+        let status_good = ipm_core::check_dfeas_status_relative(&problem, &good_x, &empty_y, &empty_bd, 1e-8);
         assert_eq!(status_good, SolveStatus::Optimal,
             "D-5b: near-optimal solution → Optimal");
     }
