@@ -434,11 +434,15 @@ fn run_ipm_with(
             q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
             bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
         };
-        const POST_LSQ_MAX_PASSES: usize = 64;
         const POST_LSQ_PROGRESS_EPS: f64 = 1e-12;
         let mut prev = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let mut best_sol = final_sol.clone();
-        for pass in 0..POST_LSQ_MAX_PASSES {
+        let mut pass = 0usize;
+        loop {
+            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                final_sol = best_sol;
+                break;
+            }
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
             crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
@@ -455,6 +459,7 @@ fn run_ipm_with(
             }
             prev = cur;
             best_sol = final_sol.clone();
+            pass += 1;
         }
     }
 
@@ -469,7 +474,6 @@ fn run_ipm_with(
     {
         /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
         /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
-        const STAGE0_MAX_PASSES: usize = 64;
         const STAGE0_PROGRESS_EPS: f64 = 1e-12;
         let view0 = ProblemView {
             q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
@@ -477,7 +481,12 @@ fn run_ipm_with(
         };
         let mut prev_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
         let mut best_sol = final_sol.clone();
-        for pass in 0..STAGE0_MAX_PASSES {
+        let mut pass = 0usize;
+        loop {
+            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                final_sol = best_sol;
+                break;
+            }
             // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             // (ii) y[row] を SingletonRow / RedundantRowFix step で更新 (逆順=後退代入)
@@ -507,6 +516,7 @@ fn run_ipm_with(
             }
             prev_kkt = cur_kkt;
             best_sol = final_sol.clone();
+            pass += 1;
         }
     }
 
@@ -601,10 +611,9 @@ fn run_ipm_with(
         //
         // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
         // で悪化時 revert するため安全に反復できる。
-        const REFIT_MAX_ITERS: usize = 32;
         const REFIT_PROGRESS_EPS: f64 = 1e-12;
         let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for _refit_iter in 0..REFIT_MAX_ITERS {
+        loop {
             if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 break;
             }
@@ -640,9 +649,8 @@ fn run_ipm_with(
         // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
         // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
         let user_eps = opts.ipm_eps();
-        const IRLS_OUTER_MAX_PASSES: usize = 16;
         const IRLS_INNER_MAX_ITERS: usize = 30;
-        for _outer_pass in 0..IRLS_OUTER_MAX_PASSES {
+        loop {
             if current_kkt <= user_eps { break; }
             if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
             let prev_kkt = current_kkt;

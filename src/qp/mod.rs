@@ -724,12 +724,9 @@ pub(crate) fn refine_dual_projected_gradient(
     let mut prev_obj = obj_curr;
 
     let pg_max_iters = m.saturating_mul(2).clamp(200, 2000);
-    const PG_MAX_BACKTRACKS: usize = 12;
     const ACCEPT_TOL_REL: f64 = 1e-12;
     let obj_converge_thresh = 1e-16 * (n as f64).max(1.0);
-    const STAGNATE_WINDOW: usize = 20;
     const STAGNATE_MIN_RATIO: f64 = 1e-7;
-    let mut stagnate_count = 0usize;
 
     for iter in 0..pg_max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -760,8 +757,8 @@ pub(crate) fn refine_dual_projected_gradient(
         }
         let base_step = (grad_sq / curvature).clamp(1e-14, 1e8);
         let mut accepted = false;
-        for bt in 0..PG_MAX_BACKTRACKS {
-            let step = base_step * 0.5_f64.powi(bt as i32);
+        let mut step = base_step;
+        while step > 0.0 {
             let mut y_try = y_curr.clone();
             for i in 0..m {
                 y_try[i] -= step * grad[i];
@@ -787,6 +784,11 @@ pub(crate) fn refine_dual_projected_gradient(
                 accepted = true;
                 break;
             }
+            let next_step = step * 0.5;
+            if next_step == step {
+                break;
+            }
+            step = next_step;
         }
         if !accepted {
             if trace {
@@ -803,12 +805,7 @@ pub(crate) fn refine_dual_projected_gradient(
             0.0
         };
         if relative_improvement < STAGNATE_MIN_RATIO {
-            stagnate_count += 1;
-            if stagnate_count >= STAGNATE_WINDOW {
-                break;
-            }
-        } else {
-            stagnate_count = 0;
+            break;
         }
         prev_obj = obj_curr;
     }
@@ -972,10 +969,10 @@ pub(crate) fn compute_lsq_dual_y(
         if y_sub.iter().any(|v| !v.is_finite()) {
             return None;
         }
-        const IR_MAX_ITERS: usize = 5;
         const IR_STAGNATE_RATIO: f64 = 0.5;
+        const IR_PROGRESS_EPS: f64 = 1e-18;
         let mut prev_r_inf = f64::INFINITY;
-        for _ in 0..IR_MAX_ITERS {
+        loop {
             let mut atysub_dd: Vec<TwoFloat> = vec![zero_dd; n];
             for col in 0..n {
                 let cs = a_sub.col_ptr[col];
@@ -989,6 +986,9 @@ pub(crate) fn compute_lsq_dual_y(
             let r_dd: Vec<TwoFloat> = (0..n).map(|j| v_dd[j] - atysub_dd[j]).collect();
             let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
             if !r_inf.is_finite() {
+                break;
+            }
+            if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf {
                 break;
             }
             if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
@@ -1191,10 +1191,10 @@ pub(crate) fn refine_primal_lsq(
     }
     // Wilkinson IR: r = target - AAT·λ を DD で計算して dλ = AAT^{-1} r で λ += dλ。
     // r_inf 改善率が IR_STAGNATE_RATIO を割れば停止 (収束飽和)。
-    const IR_MAX_ITERS: usize = 5;
     const IR_STAGNATE_RATIO: f64 = 0.5;
+    const IR_PROGRESS_EPS: f64 = 1e-18;
     let mut prev_r_inf = f64::INFINITY;
-    for _ir_iter in 0..IR_MAX_ITERS {
+    loop {
         // AAT·λ を DD で計算: AAT·λ = A·(A^T·λ) = A·δ_dd
         let mut atl_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for j in 0..n {
@@ -1222,6 +1222,7 @@ pub(crate) fn refine_primal_lsq(
         let r_f64: Vec<f64> = r_dd.iter().map(|&v| f64::from(v)).collect();
         let r_inf = r_f64.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         if !r_inf.is_finite() { break; }
+        if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf { break; }
         if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO { break; }
         prev_r_inf = r_inf;
         let mut dlambda = vec![0.0_f64; m];
@@ -1480,7 +1481,6 @@ fn try_dual_only_ir(
     //      f64 での `y[i] += dy[i]` は |dy[i]| < eps_f64 × |y[i]| ≈ 2e-6 を切り捨てる。
     //      iter 以降の dy_inf ≈ 1e-8 はこのケースに該当し、修正が吸収されて振動する。
     //      y_dd を TwoFloat で保持することで 1e10 の y に 1e-8 の修正を正確に蓄積する。
-    const DUAL_IR_INNER_MAX: usize = 50;
     let mut tmp = result.clone();
     // y を DD 精度で保持 (f64 y への累積で精度が失われるのを防ぐ)。
     // Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
@@ -1492,8 +1492,8 @@ fn try_dual_only_ir(
     let mut total_dy_inf = 0.0_f64;
     let mut accepted_iters = 0;
     let mut current_r_d_free = r_d_free.clone();
-    const DUAL_IR_MAX_BACKTRACKS: usize = 8;
-    for inner in 0..DUAL_IR_INNER_MAX {
+    let mut inner = 0usize;
+    loop {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
         let mut alpha = vec![0.0_f64; n_free];
         factor.solve(&current_r_d_free, &mut alpha);
@@ -1520,8 +1520,8 @@ fn try_dual_only_ir(
         let mut accepted_r_d_free = current_r_d_free.clone();
         let mut accepted_y_dd = y_dd.clone();
         let mut accepted_step_scale = 0.0_f64;
-        for bt in 0..DUAL_IR_MAX_BACKTRACKS {
-            let step_scale = 2.0_f64.powi(-(bt as i32));
+        let mut step_scale = 1.0_f64;
+        while step_scale > 0.0 {
             let y_dd_new: Vec<TwoFloat> = y_dd.iter()
                 .zip(dy_dd.iter())
                 .map(|(&y, &d)| y + d * step_scale)
@@ -1561,6 +1561,11 @@ fn try_dual_only_ir(
                 accepted_step_scale = step_scale;
                 break;
             }
+            let next_step_scale = step_scale * 0.5;
+            if next_step_scale == step_scale {
+                break;
+            }
+            step_scale = next_step_scale;
         }
         if !accepted {
             if trace {
@@ -1575,6 +1580,7 @@ fn try_dual_only_ir(
         df_rel_post = accepted_df_rel;
         df_abs_post = accepted_df_abs;
         accepted_iters += 1;
+        inner += 1;
         if trace && accepted_step_scale < 1.0 {
             eprintln!("DUAL_IR inner={} accepted with step_scale={:.3e}", inner, accepted_step_scale);
         }
@@ -1583,6 +1589,10 @@ fn try_dual_only_ir(
     }
     // DD y → f64 に戻す (最終採用済み y_dd から変換)
     for i in 0..m { tmp.dual_solution[i] = f64::from(y_dd[i]); }
+    // y-only 更新を stale な z で評価すると、bound stationarity のずれだけで
+    // 全体 KKT が悪化したように見えて改善候補を落としてしまう。
+    // 採用判定前に x 固定のまま z を KKT 停留性から取り直して評価する。
+    refit_bound_duals_kkt(problem, &mut tmp);
 
     let kkt_post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,
