@@ -78,8 +78,12 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "mpc[_-]?qp"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/mpc_qp.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?infeas"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_infeas.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?hard"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_hard.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?extra"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_extra.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 else
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 fi

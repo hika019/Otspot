@@ -1,0 +1,71 @@
+# 数値困難 LP 問題セット + Mittelmann Large LP ハードベンチ
+# Source: https://plato.asu.edu/ftp/lptestset/
+# 正解値出典: Plato lpopt_logs (HiGHS/CLP ログ) — 符号は最小化基準
+#
+# HiGHS ログ参照: https://plato.asu.edu/ftp/lpopt_logs/hgs_results/
+# CLP  ログ参照: https://plato.asu.edu/ftp/lpopt_logs/clp_results/
+#
+# no_ref: ログなし (初回ベンチ後に更新すること)
+# 符号は最小化 (min c^T x) の正解値。
+# ベンチ実行: bash scripts/run_lp_bench.sh --suite hard --eps 1e-6
+#
+problem_name,optimal_obj,source
+# --- 1. FOME stochastic LP ---
+fome13,9.0131168373e+07,https://plato.asu.edu/ftp/lpopt_logs/clp_results/fome13.clp.gz
+fome21,no_ref,https://plato.asu.edu/ftp/lptestset/fome/fome21.bz2
+# --- 2. PDS Patient Distribution System ---
+pds-40,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-40.bz2
+pds-50,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-50.bz2
+pds-60,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-60.bz2
+pds-70,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-70.bz2
+pds-80,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-80.bz2
+pds-90,no_ref,https://plato.asu.edu/ftp/lptestset/pds/pds-90.bz2
+pds-100,1.0928229968e+10,https://plato.asu.edu/ftp/lpopt_logs/hgs_results/pds-100.hgo
+# --- 3. NUG QAP LP 緩和 ---
+nug08-3rd,2.14000000e+02,https://plato.asu.edu/ftp/lpopt_logs/clp_results/nug08-3rd.clp.gz
+nug20,no_ref,https://plato.asu.edu/ftp/lptestset/nug/nug20.bz2
+nug30,no_ref,https://plato.asu.edu/ftp/lptestset/nug/nug30.bz2
+# --- 4. Misc large LP ---
+stormG2_1000,1.5802591121e+07,https://plato.asu.edu/ftp/lpopt_logs/clp_results/stormG2_1000.clp.gz
+watson_1,no_ref,https://plato.asu.edu/ftp/lptestset/misc/watson_1.bz2
+watson_2,no_ref,https://plato.asu.edu/ftp/lptestset/misc/watson_2.bz2
+neos,-2.2542549220e+08,https://plato.asu.edu/ftp/lpopt_logs/clp_results/neos.clp.gz
+neos1,no_ref,https://plato.asu.edu/ftp/lptestset/misc/neos1.bz2
+neos2,no_ref,https://plato.asu.edu/ftp/lptestset/misc/neos2.bz2
+neos3,-2.7777777778e+04,https://plato.asu.edu/ftp/lpopt_logs/clp_results/neos3.clp.gz
+ns1687037,3.6360347190e+00,https://plato.asu.edu/ftp/lpopt_logs/clp_results/ns1687037.clp.gz
+ns1688926,2.6213581620e+02,https://plato.asu.edu/ftp/lpopt_logs/clp_results/ns1688926.clp.gz
+sgpf5y6,no_ref,https://plato.asu.edu/ftp/lptestset/misc/sgpf5y6.bz2
+cont1,8.7824860037e-03,https://plato.asu.edu/ftp/lpopt_logs/clp_results/cont1.clp.gz
+cont4,no_ref,https://plato.asu.edu/ftp/lptestset/misc/cont4.bz2
+cont11,6.1032413178e+01,https://plato.asu.edu/ftp/lpopt_logs/clp_results/cont11.clp.gz
+# --- 5. Rail set cover ---
+rail507,no_ref,https://plato.asu.edu/ftp/lptestset/rail/rail507.mps.bz2
+rail516,no_ref,https://plato.asu.edu/ftp/lptestset/rail/rail516.mps.bz2
+rail582,no_ref,https://plato.asu.edu/ftp/lptestset/rail/rail582.mps.bz2
+rail2586,no_ref,https://plato.asu.edu/ftp/lptestset/rail/rail2586.mps.bz2
+rail4284,1.0540544913e+03,https://plato.asu.edu/ftp/lpopt_logs/clp_results/rail4284.clp.gz
+# --- 6. FCTP Fixed-charge transportation ---
+n370a,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n370a.mps.bz2
+n370b,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n370b.mps.bz2
+n370c,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n370c.mps.bz2
+n370d,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n370d.mps.bz2
+n370e,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n370e.mps.bz2
+n3700,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3700.mps.bz2
+n3701,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3701.mps.bz2
+n3702,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3702.mps.bz2
+n3703,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3703.mps.bz2
+n3704,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3704.mps.bz2
+n3705,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3705.mps.bz2
+n3706,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3706.mps.bz2
+n3707,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3707.mps.bz2
+n3708,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3708.mps.bz2
+n3709,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/n3709.mps.bz2
+ran4x64,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran4x64.mps.bz2
+ran6x43,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran6x43.mps.bz2
+ran8x32,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran8x32.mps.bz2
+ran10x26,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran10x26.mps.bz2
+ran12x21,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran12x21.mps.bz2
+ran14x18,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran14x18.mps.bz2
+ran16x16,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran16x16.mps.bz2
+ran17x17,no_ref,https://plato.asu.edu/ftp/lptestset/fctp/ran17x17.mps.bz2
