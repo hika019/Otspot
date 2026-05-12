@@ -379,7 +379,11 @@ fn dual_simplex_core(
             // 数値的に不安定 → refactorして被縮小費用を再計算
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
-                return SimplexOutcome::SingularBasis;
+                if basis_mgr.singular_basis {
+                    return SimplexOutcome::SingularBasis;
+                }
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
                 compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
@@ -430,7 +434,11 @@ fn dual_simplex_core(
         if basis_mgr_needs_refactor_approx(_iter) {
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
-                return SimplexOutcome::SingularBasis;
+                if basis_mgr.singular_basis {
+                    return SimplexOutcome::SingularBasis;
+                }
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
             }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
             reduced_costs =
