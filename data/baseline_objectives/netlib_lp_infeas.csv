@@ -1,0 +1,43 @@
+# Netlib LP infeasible test set
+# Source: https://www.netlib.org/lp/infeas/readme
+# All problems in this set are known to be INFEASIBLE (primal infeasible).
+# Reference: Gay, D.M. (1993). "Infeasible linear programming test problems."
+#   http://www.netlib.org/lp/infeas/readme
+# Purpose: verify that the solver correctly detects infeasibility (PASS:Infeasible)
+#   rather than returning Optimal or Timeout.
+#
+# optimal_obj column: INFEASIBLE means primal infeasible (no feasible solution exists)
+# Solver should return SolveStatus::Infeasible for PASS.
+#
+# Note: These problems were originally collected by Gay (1993) and are standard
+# benchmarks for testing infeasibility detection (IIS analysis, etc.).
+problem_name,optimal_obj,source
+bgdbg1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+bgetam,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+bgindy,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+bgprtr,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+box1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+ceria3d,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+chemcom,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+cplex1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+cplex2,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+ex72a,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+ex73a,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+forest6,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+galenet,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+gosh,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+gran,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+greenbea,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+itest2,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+itest6,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+klein1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+klein2,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+klein3,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+mondou2,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+pang,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+pilot4i,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+qual,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+reactor,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+refinery,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+vol1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+woodinfe,INFEASIBLE,https://www.netlib.org/lp/infeas/readme

@@ -76,6 +76,14 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/osqp_bench.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "mpc[_-]?qp"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/mpc_qp.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?infeas"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_infeas.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?hard"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_hard.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?extra"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_extra.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 else
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 fi
@@ -269,6 +277,8 @@ TOTAL_PROBLEMS=0
 TOTAL_DFEAS_FAIL=0
 TOTAL_PFEAS_FAIL=0
 TOTAL_PASS_NO_REF=0
+TOTAL_PASS_INFEASIBLE=0
+TOTAL_PASS_UNBOUNDED=0
 TOTAL_OBJ_MISMATCH=0
 TOTAL_NONCONVEX=0
 TOTAL_SUBOPTIMAL=0
@@ -296,6 +306,8 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   dfeas_fail=$(grep -E "^\s+DFEAS_FAIL:" "$LOG" | awk '{print $2}' | head -1)
   pfeas_fail=$(grep -E "^\s+PFEAS_FAIL:" "$LOG" | awk '{print $2}' | head -1)
   pass_no_ref=$(grep -E "^\s+PASS\[no_ref\]:" "$LOG" | awk '{print $2}' | head -1)
+  pass_infeasible=$(grep -E "^\s+PASS:Infeasible:" "$LOG" | awk '{print $2}' | head -1)
+  pass_unbounded=$(grep -E "^\s+PASS:Unbounded:" "$LOG" | awk '{print $2}' | head -1)
   obj_mismatch=$(grep -E "^\s+OBJ_MISMATCH:" "$LOG" | awk '{print $2}' | head -1)
   nonconvex=$(grep -E "^\s+NONCONVEX:" "$LOG" | awk '{print $2}' | head -1)
   suboptimal=$(grep -E "^\s+SUBOPTIMAL:" "$LOG" | awk '{print $2}' | head -1)
@@ -310,12 +322,14 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_DFEAS_FAIL=$(( TOTAL_DFEAS_FAIL + ${dfeas_fail:-0} ))
   TOTAL_PFEAS_FAIL=$(( TOTAL_PFEAS_FAIL + ${pfeas_fail:-0} ))
   TOTAL_PASS_NO_REF=$(( TOTAL_PASS_NO_REF + ${pass_no_ref:-0} ))
+  TOTAL_PASS_INFEASIBLE=$(( TOTAL_PASS_INFEASIBLE + ${pass_infeasible:-0} ))
+  TOTAL_PASS_UNBOUNDED=$(( TOTAL_PASS_UNBOUNDED + ${pass_unbounded:-0} ))
   TOTAL_OBJ_MISMATCH=$(( TOTAL_OBJ_MISMATCH + ${obj_mismatch:-0} ))
   TOTAL_NONCONVEX=$(( TOTAL_NONCONVEX + ${nonconvex:-0} ))
   TOTAL_SUBOPTIMAL=$(( TOTAL_SUBOPTIMAL + ${suboptimal:-0} ))
 
   # 問題別詳細行（PARSE_/SOLVE_/=>行を除く、STATUS含む行）
-  grep -E "\s+(PASS(\[no_ref\])?|TIMEOUT|(DFEAS_FAIL|PFEAS_FAIL|FAIL)(:[A-Za-z]+)?|OBJ_MISMATCH|NONCONVEX|SUBOPTIMAL|MAXITER|ERROR)" "$LOG" \
+  grep -E "\s+(PASS((\[no_ref\])|(:Infeasible)|(:Unbounded))?|TIMEOUT|(DFEAS_FAIL|PFEAS_FAIL|FAIL)(:[A-Za-z]+)?|OBJ_MISMATCH|NONCONVEX|SUBOPTIMAL|MAXITER|ERROR)" "$LOG" \
     | grep -v -E "^(PARSE_|SOLVE_)" >> "$PROBLEM_DETAIL_FILE" 2>/dev/null || true
 done
 
@@ -333,19 +347,21 @@ done
     echo ""
   fi
   echo "=== Summary ==="
-  printf "  PASS:           %d\n" "$TOTAL_PASS"
-  printf "  PASS[no_ref]:   %d\n" "$TOTAL_PASS_NO_REF"
-  printf "  TIMEOUT:        %d\n" "$TOTAL_TIMEOUT"
-  printf "  FAIL:           %d\n" "$TOTAL_FAIL"
-  printf "  DFEAS_FAIL:     %d\n" "$TOTAL_DFEAS_FAIL"
-  printf "  PFEAS_FAIL:     %d\n" "$TOTAL_PFEAS_FAIL"
-  printf "  OBJ_MISMATCH:   %d\n" "$TOTAL_OBJ_MISMATCH"
-  printf "  NONCONVEX:      %d\n" "$TOTAL_NONCONVEX"
-  printf "  SUBOPTIMAL:     %d\n" "$TOTAL_SUBOPTIMAL"
-  printf "  MAXITER:        %d\n" "$TOTAL_MAXITER"
-  printf "  ERROR:          %d\n" "$TOTAL_ERROR"
-  printf "  SKIP:           %d\n" "$TOTAL_SKIP"
-  printf "  TOTAL:          %d\n" "$TOTAL_PROBLEMS"
+  printf "  PASS:              %d\n" "$TOTAL_PASS"
+  printf "  PASS[no_ref]:      %d\n" "$TOTAL_PASS_NO_REF"
+  printf "  PASS:Infeasible:   %d\n" "$TOTAL_PASS_INFEASIBLE"
+  printf "  PASS:Unbounded:    %d\n" "$TOTAL_PASS_UNBOUNDED"
+  printf "  TIMEOUT:           %d\n" "$TOTAL_TIMEOUT"
+  printf "  FAIL:              %d\n" "$TOTAL_FAIL"
+  printf "  DFEAS_FAIL:        %d\n" "$TOTAL_DFEAS_FAIL"
+  printf "  PFEAS_FAIL:        %d\n" "$TOTAL_PFEAS_FAIL"
+  printf "  OBJ_MISMATCH:      %d\n" "$TOTAL_OBJ_MISMATCH"
+  printf "  NONCONVEX:         %d\n" "$TOTAL_NONCONVEX"
+  printf "  SUBOPTIMAL:        %d\n" "$TOTAL_SUBOPTIMAL"
+  printf "  MAXITER:           %d\n" "$TOTAL_MAXITER"
+  printf "  ERROR:             %d\n" "$TOTAL_ERROR"
+  printf "  SKIP:              %d\n" "$TOTAL_SKIP"
+  printf "  TOTAL:             %d\n" "$TOTAL_PROBLEMS"
   echo ""
   echo "=== 問題別詳細 ==="
   if [[ -s "$PROBLEM_DETAIL_FILE" ]]; then
@@ -356,7 +372,8 @@ done
 } | tee "$OUTPUT"
 
 # TOTAL整合性チェック
-CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_PASS_NO_REF + TOTAL_TIMEOUT + TOTAL_FAIL + \
+CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_PASS_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
+  TOTAL_TIMEOUT + TOTAL_FAIL + \
   TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_NONCONVEX + \
   TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
 if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then

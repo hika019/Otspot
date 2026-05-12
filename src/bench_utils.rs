@@ -12,6 +12,58 @@ pub enum ObjCheckResult {
     NoRef,
 }
 
+/// CSVに記録された問題の期待ステータス
+///
+/// optimal_obj 列が INFEASIBLE / UNBOUNDED の文字列の場合に使用する。
+/// 数値の場合は Optimal (有限最適値あり)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedStatus {
+    /// 有限最適値 (通常問題)
+    Optimal,
+    /// 主問題が実行不可能
+    Infeasible,
+    /// 主問題が非有界
+    Unbounded,
+}
+
+/// CSVから問題の期待ステータス一覧を読み込む
+///
+/// 通常の float 行は Optimal、"INFEASIBLE"/"UNBOUNDED" 文字列行を
+/// それぞれ Infeasible / Unbounded として返す。
+pub fn load_expected_statuses(csv_path: &Path) -> HashMap<String, ExpectedStatus> {
+    let mut map = HashMap::new();
+    let content = match std::fs::read_to_string(csv_path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("problem_name") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let name = parts[0].trim().to_string();
+        let status_str = parts[1].trim();
+        let status = match status_str.to_uppercase().as_str() {
+            "INFEASIBLE" => ExpectedStatus::Infeasible,
+            "UNBOUNDED" => ExpectedStatus::Unbounded,
+            _ => {
+                // 数値なら Optimal (parse 失敗は skip)
+                if status_str.parse::<f64>().is_ok() {
+                    ExpectedStatus::Optimal
+                } else {
+                    continue;
+                }
+            }
+        };
+        map.insert(name, status);
+    }
+    map
+}
+
 /// data_dir名とオーバーライドパスからCSVパスを決定する
 pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path) -> PathBuf {
     if let Some(p) = override_path {
@@ -26,6 +78,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         "osqp_bench.csv"
     } else if data_lower.contains("mpc_qp") || data_lower.contains("mpc-qp") {
         "mpc_qp.csv"
+    } else if data_lower.contains("lp_problems_infeas") || data_lower.contains("lp-problems-infeas") {
+        "netlib_lp_infeas.csv"
+    } else if data_lower.contains("lp_problems_extra") || data_lower.contains("lp-problems-extra") {
+        "netlib_lp_extra.csv"
     } else {
         "netlib_lp.csv"
     };
@@ -57,6 +113,98 @@ pub fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_tmp_csv(content: &str) -> std::path::PathBuf {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
+        tmp.write_all(content.as_bytes()).unwrap();
+        let path = tmp.path().to_path_buf();
+        // keep alive by leaking (test only)
+        Box::leak(Box::new(tmp));
+        path
+    }
+
+    #[test]
+    fn test_load_expected_statuses_infeasible() {
+        // INFEASIBLE / UNBOUNDED エントリが正しく読み込まれるか
+        let csv = "problem_name,optimal_obj,source\n\
+            galenet,INFEASIBLE,https://example.com\n\
+            klein1,INFEASIBLE,https://example.com\n\
+            unbnd_toy,UNBOUNDED,https://example.com\n\
+            feasible_toy,1234.5,https://example.com\n\
+            noref_toy,no_ref,https://example.com\n";
+        let path = write_tmp_csv(csv);
+        let map = load_expected_statuses(&path);
+
+        assert_eq!(map.get("galenet"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("klein1"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("unbnd_toy"), Some(&ExpectedStatus::Unbounded));
+        assert_eq!(map.get("feasible_toy"), Some(&ExpectedStatus::Optimal));
+        // no_ref は parse 失敗でスキップ → None
+        assert_eq!(map.get("noref_toy"), None);
+    }
+
+    #[test]
+    fn test_load_expected_statuses_case_insensitive() {
+        // 大文字・小文字どちらでも認識
+        let csv = "problem_name,optimal_obj\n\
+            p1,infeasible\n\
+            p2,INFEASIBLE\n\
+            p3,Infeasible\n\
+            p4,unbounded\n\
+            p5,UNBOUNDED\n";
+        let path = write_tmp_csv(csv);
+        let map = load_expected_statuses(&path);
+
+        assert_eq!(map.get("p1"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("p2"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("p3"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("p4"), Some(&ExpectedStatus::Unbounded));
+        assert_eq!(map.get("p5"), Some(&ExpectedStatus::Unbounded));
+    }
+
+    #[test]
+    fn test_load_expected_statuses_skips_comments_and_header() {
+        let csv = "# comment line\n\
+            problem_name,optimal_obj\n\
+            p1,INFEASIBLE\n\
+            # another comment\n\
+            p2,1.5\n";
+        let path = write_tmp_csv(csv);
+        let map = load_expected_statuses(&path);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("p1"), Some(&ExpectedStatus::Infeasible));
+        assert_eq!(map.get("p2"), Some(&ExpectedStatus::Optimal));
+    }
+
+    #[test]
+    fn test_detect_csv_path_infeas() {
+        let root = std::path::Path::new("/solver");
+        let p = detect_csv_path("/data/lp_problems_infeas", None, root);
+        assert!(p.to_string_lossy().contains("netlib_lp_infeas.csv"),
+            "Expected netlib_lp_infeas.csv, got {:?}", p);
+    }
+
+    #[test]
+    fn test_detect_csv_path_extra() {
+        let root = std::path::Path::new("/solver");
+        let p = detect_csv_path("/data/lp_problems_extra", None, root);
+        assert!(p.to_string_lossy().contains("netlib_lp_extra.csv"),
+            "Expected netlib_lp_extra.csv, got {:?}", p);
+    }
+
+    #[test]
+    fn test_detect_csv_path_default_netlib() {
+        let root = std::path::Path::new("/solver");
+        let p = detect_csv_path("/data/lp_problems", None, root);
+        assert!(p.to_string_lossy().contains("netlib_lp.csv"),
+            "Expected netlib_lp.csv, got {:?}", p);
+    }
 }
 
 /// 正解値と照合する（1%閾値）
