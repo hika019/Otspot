@@ -42,7 +42,7 @@ pub(crate) fn two_phase_dual_simplex(
             let mut basis = warm.basis.clone();
 
             match LuBasis::new(&a, &basis, options.max_etas) {
-                Ok(basis_mgr) => {
+                Ok(mut basis_mgr) => {
                     // x_B = B^{-1} b_new (FTRANで計算)
                     let mut x_b_sv = SparseVec::from_dense(&b);
                     basis_mgr.ftran(&mut x_b_sv);
@@ -304,7 +304,7 @@ fn dual_simplex_core(
     }
 
     // 初期被縮小費用: r_j = c_j - y^T a_j (y = B^{-T} c_B)
-    let mut reduced_costs = compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+    let mut reduced_costs = compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
 
     let leaving_strategy = MostInfeasibleLeaving;
     let mut rho_dense = vec![0.0f64; m];
@@ -325,7 +325,7 @@ fn dual_simplex_core(
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                let y = compute_dual_vars(c, &basis_mgr, basis, m);
+                let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
                 return SimplexOutcome::Optimal(obj, y);
             }
             Some(p) => p,
@@ -386,7 +386,7 @@ fn dual_simplex_core(
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
-                compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             continue;
         }
 
@@ -442,7 +442,7 @@ fn dual_simplex_core(
             }
             // refactor後に被縮小費用を再計算（数値誤差リセット）
             reduced_costs =
-                compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
         }
     }
 
@@ -467,17 +467,15 @@ fn basis_mgr_needs_refactor_approx(iter: usize) -> bool {
 fn compute_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &LuBasis,
+    basis_mgr: &mut LuBasis,
     is_basic: &[bool],
     n_price: usize,
     m: usize,
     basis: &[usize],
 ) -> Vec<f64> {
-    // y = B^{-T} c_B
-    let c_b: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    let mut y_sv = SparseVec::from_dense(&c_b);
-    basis_mgr.btran(&mut y_sv);
-    let y = y_sv.to_dense();
+    // y = B^{-T} c_B (c_b は常に dense なので btran_dense で sparse 変換を省略)
+    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
+    basis_mgr.btran_dense(&mut y);
 
     // r_j = c_j - y^T a_j
     let mut reduced_costs = vec![0.0f64; n_price];
@@ -498,14 +496,14 @@ fn compute_reduced_costs(
 /// 双対変数を計算する: y = B^{-T} c_B
 fn compute_dual_vars(
     c: &[f64],
-    basis_mgr: &LuBasis,
+    basis_mgr: &mut LuBasis,
     basis: &[usize],
     m: usize,
 ) -> Vec<f64> {
-    let c_b: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    let mut y_sv = SparseVec::from_dense(&c_b);
-    basis_mgr.btran(&mut y_sv);
-    y_sv.to_dense()
+    // c_b は常に dense なので btran_dense で sparse 変換を省略
+    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
+    basis_mgr.btran_dense(&mut y);
+    y
 }
 
 /// 双対比率テスト: 入基変数を選択する

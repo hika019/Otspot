@@ -381,24 +381,22 @@ pub(crate) fn reconcile_final_basis_state(
     deadline: Option<std::time::Instant>,
 ) -> Result<(), crate::error::SolverError> {
     let m = basis.len();
-    let basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
+    let mut basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
 
-    let mut x_b_sv = SparseVec::from_dense(b);
-    basis_mgr.ftran(&mut x_b_sv);
-    x_b_sv.to_dense_into(x_b);
+    // x_B = B^{-1} b (b は dense なので ftran_dense で sparse 変換を省略)
+    x_b.copy_from_slice(b);
+    basis_mgr.ftran_dense(x_b);
     for value in x_b.iter_mut() {
         if value.abs() < 1e-12 {
             *value = 0.0;
         }
     }
 
-    let mut c_b = vec![0.0; m];
+    // y = B^{-T} c_B (c_b は常に dense なので btran_dense で sparse 変換を省略)
     for i in 0..m {
-        c_b[i] = c[basis[i]];
+        y[i] = c[basis[i]];
     }
-    let mut y_sv = SparseVec::from_dense(&c_b);
-    basis_mgr.btran(&mut y_sv);
-    y_sv.to_dense_into(y);
+    basis_mgr.btran_dense(y);
     Ok(())
 }
 
@@ -501,12 +499,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
 
         // 1. Dual variables: y = BTRAN(c_B)
+        // c_b は常に dense なので btran_dense で sparse 変換を省略する
         for i in 0..m {
             c_b[i] = c[basis[i]];
         }
-        let mut y_sv = SparseVec::from_dense(&c_b);
-        basis_mgr.btran(&mut y_sv);
-        y_sv.to_dense_into(&mut y_dense);
+        y_dense.copy_from_slice(&c_b);
+        basis_mgr.btran_dense(&mut y_dense);
         let y = &y_dense;
 
         // 2. Compute reduced costs for all pricing candidates

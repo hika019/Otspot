@@ -164,27 +164,22 @@ impl LuFactorization {
         let mut u_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         let mut diag = vec![0.0f64; m];
 
+        // BN-3: col_max をループ外で一度計算し、各消去ステップ後は影響を受けた列のみ再計算する。
+        // これにより O(m² × nnz) → O(m × nnz + ステップ × 影響列 × nnz) に削減する。
+        let mut col_max: Vec<f64> = vec![0.0; m];
+        for j in 0..m {
+            for &r in &work.col_rows[j] {
+                let abs_val = work.get(r, j).abs();
+                if abs_val > col_max[j] {
+                    col_max[j] = abs_val;
+                }
+            }
+        }
+
         for step in 0..m {
             // 10ステップごとにdeadlineチェック（大規模行列で1ステップが長時間になるため細粒度化）
             if step % 10 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Err(SolverError::DeadlineExceeded);
-            }
-
-            // しきい値判定用の列最大絶対値を計算（アクティブ要素のみ）
-            let mut col_max: Vec<f64> = vec![0.0; m];
-            for j in 0..m {
-                if eliminated_cols[j] {
-                    continue;
-                }
-                for &r in &work.col_rows[j] {
-                    if eliminated_rows[r] {
-                        continue;
-                    }
-                    let abs_val = work.get(r, j).abs();
-                    if abs_val > col_max[j] {
-                        col_max[j] = abs_val;
-                    }
-                }
             }
 
             // Markowitzコスト最小のピボットを選択。
@@ -294,6 +289,25 @@ impl LuFactorization {
 
             eliminated_rows[pivot_row] = true;
             eliminated_cols[pivot_col] = true;
+
+            // BN-3: ピボット行の列（消去で値が変わった列）と pivot_col の col_max のみ再計算する。
+            // eliminated_rows[pivot_row] が true になったので、それを除外してスキャンする。
+            col_max[pivot_col] = 0.0;
+            for &affected_col in pivot_row_entries.iter().map(|(c, _)| c) {
+                if eliminated_cols[affected_col] {
+                    continue;
+                }
+                col_max[affected_col] = 0.0;
+                for &r in &work.col_rows[affected_col] {
+                    if eliminated_rows[r] {
+                        continue;
+                    }
+                    let abs_val = work.get(r, affected_col).abs();
+                    if abs_val > col_max[affected_col] {
+                        col_max[affected_col] = abs_val;
+                    }
+                }
+            }
         }
 
         // 逆順列を構築
@@ -384,13 +398,15 @@ impl LuFactorization {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
+/// - `scratch`: 再利用可能な一時バッファ（ヒープアロケーション回避）
+pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut Vec<f64>) {
     let n = lu.n;
 
-    // Step 1: 行順列を適用
-    let orig = rhs.to_owned();
+    // Step 1: 行順列を適用（scratch に rhs をコピーしてアロケーション回避）
+    scratch.resize(n, 0.0);
+    scratch.copy_from_slice(rhs);
     for i in 0..n {
-        rhs[i] = orig[lu.p_row[i]];
+        rhs[i] = scratch[lu.p_row[i]];
     }
 
     // Step 2: L による疎前進代入
@@ -399,10 +415,10 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
     // Step 3: U による疎後退代入
     lu.u.backward_solve(rhs);
 
-    // Step 4: 列順列の逆適用
-    let y = rhs.to_owned();
+    // Step 4: 列順列の逆適用（scratch に rhs をコピーしてアロケーション回避）
+    scratch.copy_from_slice(rhs);
     for i in 0..n {
-        rhs[lu.p_col[i]] = y[i];
+        rhs[lu.p_col[i]] = scratch[i];
     }
 }
 
@@ -417,13 +433,15 @@ pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64]) {
 /// # 引数
 /// - `lu`: LU分解済み因子
 /// - `rhs`: 右辺ベクトル（計算結果で上書き）
-pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
+/// - `scratch`: 再利用可能な一時バッファ（ヒープアロケーション回避）
+pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut Vec<f64>) {
     let n = lu.n;
 
-    // Step 1: 列順列を適用
-    let orig = rhs.to_owned();
+    // Step 1: 列順列を適用（scratch に rhs をコピーしてアロケーション回避）
+    scratch.resize(n, 0.0);
+    scratch.copy_from_slice(rhs);
     for i in 0..n {
-        rhs[i] = orig[lu.p_col[i]];
+        rhs[i] = scratch[lu.p_col[i]];
     }
 
     // Step 2: U^T による前進代入
@@ -432,10 +450,10 @@ pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64]) {
     // Step 3: L^T による後退代入
     lu.l.solve_transpose(rhs);
 
-    // Step 4: 行順列の転置を適用
-    let w = rhs.to_owned();
+    // Step 4: 行順列の転置を適用（scratch に rhs をコピーしてアロケーション回避）
+    scratch.copy_from_slice(rhs);
     for i in 0..n {
-        rhs[lu.p_row[i]] = w[i];
+        rhs[lu.p_row[i]] = scratch[i];
     }
 }
 
@@ -449,12 +467,13 @@ mod tests {
         let a = CscMatrix::identity(3);
         let basis = vec![0, 1, 2];
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let mut scratch = Vec::new();
 
         for i in 0..3 {
             let mut rhs = vec![0.0; 3];
             rhs[i] = 1.0;
             let expected = rhs.clone();
-            solve_ftran(&lu, &mut rhs);
+            solve_ftran(&lu, &mut rhs, &mut scratch);
             assert_vec_near(&rhs, &expected, 1e-10);
         }
     }
@@ -469,10 +488,11 @@ mod tests {
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let mut scratch = Vec::new();
 
         let rhs_orig = vec![3.0, 5.0, 3.0];
         let mut rhs = rhs_orig.clone();
-        solve_ftran(&lu, &mut rhs);
+        solve_ftran(&lu, &mut rhs, &mut scratch);
 
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-10);
@@ -489,10 +509,11 @@ mod tests {
         let a = dense_to_csc(&dense, 4, 4);
         let basis = vec![0, 1, 2, 3];
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let mut scratch = Vec::new();
 
         let rhs_orig = vec![5.0, 5.0, 6.0, 7.0];
         let mut rhs = rhs_orig.clone();
-        solve_ftran(&lu, &mut rhs);
+        solve_ftran(&lu, &mut rhs, &mut scratch);
 
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-10);
@@ -511,7 +532,8 @@ mod tests {
 
         let rhs_orig = vec![3.0, 5.0, 3.0];
         let mut rhs = rhs_orig.clone();
-        solve_btran(&lu, &mut rhs);
+        let mut scratch = Vec::new();
+        solve_btran(&lu, &mut rhs, &mut scratch);
 
         let bt = a.transpose();
         let check = bt.mat_vec_mul(&rhs).unwrap();
@@ -544,7 +566,8 @@ mod tests {
 
         let rhs_orig = vec![1.001, 2.0, 2.0];
         let mut rhs = rhs_orig.clone();
-        solve_ftran(&lu, &mut rhs);
+        let mut scratch = Vec::new();
+        solve_ftran(&lu, &mut rhs, &mut scratch);
 
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-8);
@@ -563,12 +586,13 @@ mod tests {
 
         let b = vec![1.0, 2.0, 3.0];
         let c = vec![4.0, 5.0, 6.0];
+        let mut scratch = Vec::new();
 
         let mut x = b.clone();
-        solve_ftran(&lu, &mut x);
+        solve_ftran(&lu, &mut x, &mut scratch);
 
         let mut y = c.clone();
-        solve_btran(&lu, &mut y);
+        solve_btran(&lu, &mut y, &mut scratch);
 
         let xtc: f64 = x.iter().zip(c.iter()).map(|(a, b)| a * b).sum();
         let bty: f64 = b.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
@@ -619,6 +643,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let basis: Vec<usize> = (0..n).collect();
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let mut scratch = Vec::new();
 
         // Test FTRAN with multiple rhs
         for k in 0..3 {
@@ -626,7 +651,7 @@ mod tests {
                 .map(|i| ((i + k * 7) % 11) as f64 - 5.0)
                 .collect();
             let mut rhs = rhs_orig.clone();
-            solve_ftran(&lu, &mut rhs);
+            solve_ftran(&lu, &mut rhs, &mut scratch);
             let check = a.mat_vec_mul(&rhs).unwrap();
             assert_vec_near(&check, &rhs_orig, 1e-8);
         }
@@ -635,7 +660,7 @@ mod tests {
         let bt = a.transpose();
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i as f64) * 0.3 - 3.0).collect();
         let mut rhs = rhs_orig.clone();
-        solve_btran(&lu, &mut rhs);
+        solve_btran(&lu, &mut rhs, &mut scratch);
         let check = bt.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-8);
     }
@@ -677,14 +702,15 @@ mod tests {
         // Verify correctness
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
         let mut rhs = rhs_orig.clone();
-        solve_ftran(&lu, &mut rhs);
+        let mut scratch = Vec::new();
+        solve_ftran(&lu, &mut rhs, &mut scratch);
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-8);
 
         // BTRAN
         let bt = a.transpose();
         let mut rhs2 = rhs_orig.clone();
-        solve_btran(&lu, &mut rhs2);
+        solve_btran(&lu, &mut rhs2, &mut scratch);
         let check2 = bt.mat_vec_mul(&rhs2).unwrap();
         assert_vec_near(&check2, &rhs_orig, 1e-8);
     }
@@ -708,7 +734,8 @@ mod tests {
 
         // solve_ftran: B * x = [1.0] → x = [0.2]
         let mut rhs = vec![1.0f64];
-        solve_ftran(&lu, &mut rhs);
+        let mut scratch = Vec::new();
+        solve_ftran(&lu, &mut rhs, &mut scratch);
         assert!(
             (rhs[0] - 0.2).abs() < 1e-10,
             "ftran: expected 0.2, got {}",
@@ -717,7 +744,7 @@ mod tests {
 
         // solve_btran: B^T * x = [1.0] → x = [0.2] (1x1なのでftranと同じ)
         let mut rhs2 = vec![1.0f64];
-        solve_btran(&lu, &mut rhs2);
+        solve_btran(&lu, &mut rhs2, &mut scratch);
         assert!(
             (rhs2[0] - 0.2).abs() < 1e-10,
             "btran: expected 0.2, got {}",
@@ -738,17 +765,18 @@ mod tests {
         let a = dense_to_csc(&dense, 5, 5);
         let basis = vec![0, 1, 2, 3, 4];
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let mut scratch = Vec::new();
 
         let rhs_orig = vec![1.0001, 1.0001, 0.0001, 1.0001, 1.0001];
         let mut rhs = rhs_orig.clone();
-        solve_ftran(&lu, &mut rhs);
+        solve_ftran(&lu, &mut rhs, &mut scratch);
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-6);
 
         // BTRAN
         let bt = a.transpose();
         let mut rhs2 = rhs_orig.clone();
-        solve_btran(&lu, &mut rhs2);
+        solve_btran(&lu, &mut rhs2, &mut scratch);
         let check2 = bt.mat_vec_mul(&rhs2).unwrap();
         assert_vec_near(&check2, &rhs_orig, 1e-6);
     }

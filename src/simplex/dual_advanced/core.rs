@@ -22,16 +22,15 @@ use std::sync::atomic::Ordering;
 fn compute_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
-    basis_mgr: &LuBasis,
+    basis_mgr: &mut LuBasis,
     is_basic: &[bool],
     n_price: usize,
     m: usize,
     basis: &[usize],
 ) -> Vec<f64> {
-    let c_b: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    let mut y_sv = SparseVec::from_dense(&c_b);
-    basis_mgr.btran(&mut y_sv);
-    let y = y_sv.to_dense();
+    // y = B^{-T} c_B (c_b は常に dense なので btran_dense で sparse 変換を省略)
+    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
+    basis_mgr.btran_dense(&mut y);
 
     let mut reduced_costs = vec![0.0f64; n_price];
     for j in 0..n_price {
@@ -51,14 +50,14 @@ fn compute_reduced_costs(
 /// 双対変数を計算する: y = B^{-T} c_B
 fn compute_dual_vars(
     c: &[f64],
-    basis_mgr: &LuBasis,
+    basis_mgr: &mut LuBasis,
     basis: &[usize],
     m: usize,
 ) -> Vec<f64> {
-    let c_b: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    let mut y_sv = SparseVec::from_dense(&c_b);
-    basis_mgr.btran(&mut y_sv);
-    y_sv.to_dense()
+    // c_b は常に dense なので btran_dense で sparse 変換を省略
+    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
+    basis_mgr.btran_dense(&mut y);
+    y
 }
 
 /// Dual Simplexコアループ（強化版）
@@ -110,7 +109,7 @@ pub(crate) fn dual_simplex_core_advanced(
 
     // Step 2: 初期被縮小費用計算: r_j = c_j - y^T a_j
     let mut reduced_costs =
-        compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+        compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
 
     // Harris ratio test（Phase 2ではデフォルト）
     let ratio_tester = HarrisRatioTest::new(options.dual_tol, PIVOT_TOL);
@@ -137,7 +136,7 @@ pub(crate) fn dual_simplex_core_advanced(
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-                let y = compute_dual_vars(c, &basis_mgr, basis, m);
+                let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
                 return SimplexOutcome::Optimal(obj, y);
             }
             Some(p) => p,
@@ -198,7 +197,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
-                compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             continue;
         }
 
@@ -253,7 +252,7 @@ pub(crate) fn dual_simplex_core_advanced(
             }
             // refactor後は被縮小費用の数値誤差をリセット
             reduced_costs =
-                compute_reduced_costs(a, c, &basis_mgr, &is_basic, n_price, m, basis);
+                compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
         }
     }
 }
