@@ -20,10 +20,18 @@ use std::time::Instant;
 /// ピボット更新、再因子分解インターフェースを提供する。
 pub(crate) trait BasisManager: Send {
     /// FTRAN: B * x = rhs を解く。結果は `rhs` に上書きされる
-    fn ftran(&self, rhs: &mut SparseVec);
+    fn ftran(&mut self, rhs: &mut SparseVec);
 
     /// BTRAN: B^T * x = rhs を解く。結果は `rhs` に上書きされる
-    fn btran(&self, rhs: &mut SparseVec);
+    fn btran(&mut self, rhs: &mut SparseVec);
+
+    /// FTRAN（dense版）: B * x = rhs を解く。`rhs` は dense スライスのままで完結する。
+    /// sparse 変換を介さないため、常に dense な入力（c_B 等）に対して高速。
+    fn ftran_dense(&mut self, rhs: &mut [f64]);
+
+    /// BTRAN（dense版）: B^T * x = rhs を解く。`rhs` は dense スライスのままで完結する。
+    /// sparse 変換を介さないため、常に dense な入力（c_B 等）に対して高速。
+    fn btran_dense(&mut self, rhs: &mut [f64]);
 
     /// ピボット後の基底更新: `entering_col` が `leaving_row` を置き換える
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec);
@@ -48,6 +56,8 @@ pub(crate) struct LuBasis {
     /// 再因子分解が失敗した場合 true（SingularBasis または DeadlineExceeded）。
     /// 呼び出し元はこのフラグを確認してsolverを安全に打ち切ること。
     pub(crate) refactor_failed: bool,
+    /// FTRAN/BTRAN の順列適用で使う一時バッファ（毎回のヒープアロケーションを回避）
+    scratch: Vec<f64>,
 }
 
 impl LuBasis {
@@ -66,12 +76,14 @@ impl LuBasis {
 
     pub fn new_timed(a: &CscMatrix, basis: &[usize], max_etas: usize, deadline: Option<std::time::Instant>) -> Result<Self, SolverError> {
         let lu = lu::LuFactorization::factorize_timed(a, basis, deadline)?;
+        let n = lu.n;
         Ok(Self {
             lu,
             eta_file: eta::EtaFile::new(max_etas),
             basis_indices: basis.to_vec(),
             singular_basis: false,
             refactor_failed: false,
+            scratch: Vec::with_capacity(n),
         })
     }
 
@@ -136,18 +148,28 @@ impl LuBasis {
 }
 
 impl BasisManager for LuBasis {
-    fn ftran(&self, rhs: &mut SparseVec) {
+    fn ftran(&mut self, rhs: &mut SparseVec) {
         let mut dense = rhs.to_dense();
-        lu::solve_ftran(&self.lu, &mut dense);
+        lu::solve_ftran(&self.lu, &mut dense, &mut self.scratch);
         eta::apply_ftran(&self.eta_file.etas, &mut dense);
         *rhs = SparseVec::from_dense(&dense);
     }
 
-    fn btran(&self, rhs: &mut SparseVec) {
+    fn btran(&mut self, rhs: &mut SparseVec) {
         let mut dense = rhs.to_dense();
         eta::apply_btran(&self.eta_file.etas, &mut dense);
-        lu::solve_btran(&self.lu, &mut dense);
+        lu::solve_btran(&self.lu, &mut dense, &mut self.scratch);
         *rhs = SparseVec::from_dense(&dense);
+    }
+
+    fn ftran_dense(&mut self, rhs: &mut [f64]) {
+        lu::solve_ftran(&self.lu, rhs, &mut self.scratch);
+        eta::apply_ftran(&self.eta_file.etas, rhs);
+    }
+
+    fn btran_dense(&mut self, rhs: &mut [f64]) {
+        eta::apply_btran(&self.eta_file.etas, rhs);
+        lu::solve_btran(&self.lu, rhs, &mut self.scratch);
     }
 
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec) {
@@ -188,7 +210,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lb = LuBasis::new(&a, &basis, 50).unwrap();
+        let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
 
         // FTRAN test
         let rhs_orig = vec![3.0, 5.0, 3.0];

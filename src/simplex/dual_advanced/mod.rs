@@ -37,7 +37,7 @@ pub(crate) fn solve_dual_advanced(
             let mut basis = warm.basis.clone();
 
             match LuBasis::new(&a, &basis, options.max_etas) {
-                Ok(basis_mgr) => {
+                Ok(mut basis_mgr) => {
                     // x_B = B^{-1} b_new (FTRANで計算)
                     let mut x_b_sv = SparseVec::from_dense(&b);
                     basis_mgr.ftran(&mut x_b_sv);
