@@ -778,9 +778,14 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する。
-        // 不定 Q の場合も rho_matrix から始め、LDL 失敗時の retry で rho を増やす。
-        // (inertia_correction を下限にすると PSD 問題を誤って過大正則化する。)
-        let mut rho_retry = rho_matrix;
+        // 不定 Q の場合: rho_retry の初期値を inertia_correction で下限設定し、
+        // KKT (1,1) ブロック Q + ρI が初回から PSD となるよう保証する。
+        // PSD 問題では inertia_correction = 0 なので rho_matrix から始まり挙動は変わらない。
+        let mut rho_retry = rho_matrix.max(inertia_correction);
+        // inertia_correction が LDL_REG_CEILING を超える場合は天井も引き上げる。
+        // 不定 Q の必要最低 rho は -λ_min(Q) ≥ inertia_correction であり、その上限が 1.0 では
+        // 高不定行列 (QPLIB_0018: λ_min≈-398) で因子化が絶対に成功しない。
+        let ldl_reg_ceiling = LDL_REG_CEILING.max(inertia_correction);
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
@@ -931,11 +936,11 @@ pub(crate) fn solve_ippmm_inner(
                                 || !amplification.is_finite()
                                 || amplification > f64_precision_ceiling;
                             if unhealthy {
-                                if rho_retry >= LDL_REG_CEILING {
+                                if rho_retry >= ldl_reg_ceiling {
                                     break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
                                 }
-                                rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
-                                delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                                rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                                delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                                 continue;
                             }
                         }
@@ -953,11 +958,11 @@ pub(crate) fn solve_ippmm_inner(
                     break;
                 }
                 Err(_) => {
-                    if rho_retry >= LDL_REG_CEILING {
+                    if rho_retry >= ldl_reg_ceiling {
                         break; // 上限到達 → あきらめ
                     }
-                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
-                    delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                    delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
                 }
             }

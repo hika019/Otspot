@@ -16,11 +16,11 @@
 use crate::linalg::amd::{amd_with_deadline, inv_permute_vec, permute_sym_upper, permute_vec};
 use crate::sparse::CscMatrix;
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
-use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
+use faer::linalg::cholesky::ldlt::factor::{LdltError, LdltRegularization};
 use faer::reborrow::*;
 use faer::sparse::linalg::cholesky::{
     factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRef, SymbolicCholesky,
-    SymbolicCholeskyRaw, SymmetricOrdering, simplicial,
+    SymbolicCholeskyRaw, SymmetricOrdering, simplicial, supernodal,
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
@@ -399,49 +399,103 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
         Err(_) => return false,
     };
 
-    // SuperNode 経路では D 対角の位置が複雑 → 保守的に PSD と仮定して返す。
-    // 大規模問題では対角チェック済みなので、ここに到達する不定行列は
-    // 対角が全て非負の ill-conditioned なケースのみ（実用上まれ）。
-    let SymbolicCholeskyRaw::Simplicial(simp_sym) = symbolic.raw() else {
-        return true; // supernodal: assume PSD
-    };
-
-    let l_nnz = symbolic.len_val();
-    let mut l_values = vec![0.0f64; l_nnz];
-    let scratch_ldlt = simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n);
-    let scratch_solve = simp_sym.solve_in_place_scratch::<f64>(1);
-    let mut mem = MemBuffer::new(StackReq::any_of(&[scratch_ldlt, scratch_solve]));
-    let stack = MemStack::new(&mut mem);
+    // FP スレッショルド: PSD 行列でも浮動小数点誤差で D[j] が僅かに負になる場合がある。
+    // n×n 行列でエントリ最大値 q_abs_max の場合、LDL^T の蓄積誤差は
+    // O(n * q_abs_max * eps_machine) 程度。これ以上に負なら真の固有値の符号と判断する。
+    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
 
     // 正則化なし (delta=0, epsilon=0) で LDL^T を試みる
     let reg: LdltRegularization<f64> = LdltRegularization::default();
 
-    match simplicial::factorize_simplicial_numeric_ldlt::<usize, f64>(
-        &mut l_values,
-        a_upper.rb(),
-        reg,
-        simp_sym,
-        stack,
-    ) {
-        Err(_) => {
-            // ZeroPivot: D[j] = 0 → 零固有値 = PSD → 慣性修正不要
-            true
-        }
-        Ok(_) => {
-            // 成功: D 対角を検査する。
-            // Simplicial LDL^T では col_ptr[j] が列 j の最初のエントリ (= 対角 D[j]) を指す。
-            //
-            // FP スレッショルド: PSD 行列でも浮動小数点誤差で D[j] が僅かに負になる場合がある。
-            // n×n 行列でエントリ最大値 q_abs_max の場合、LDL^T の蓄積誤差は
-            // O(n * q_abs_max * eps_machine) 程度。これ以上に負なら真の固有値の符号と判断する。
-            let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
+    let l_nnz = symbolic.len_val();
+    let mut l_values = vec![0.0f64; l_nnz];
+
+    match symbolic.raw() {
+        SymbolicCholeskyRaw::Simplicial(simp_sym) => {
+            // Simplicial 経路: D 対角は col_ptr[j] 位置に格納されている。
+            let scratch_ldlt = simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n);
+            let scratch_solve = simp_sym.solve_in_place_scratch::<f64>(1);
+            let mut mem = MemBuffer::new(StackReq::any_of(&[scratch_ldlt, scratch_solve]));
+            let stack = MemStack::new(&mut mem);
+
+            let result = simplicial::factorize_simplicial_numeric_ldlt::<usize, f64>(
+                &mut l_values,
+                a_upper.rb(),
+                reg,
+                simp_sym,
+                stack,
+            );
+
+            // `up_to_col`: この列番号未満の列のみを検査する (ZeroPivot 前の計算済み範囲)。
             let col_ptr = simp_sym.col_ptr();
-            let has_negative_d = (0..n).any(|j| {
-                let pos = col_ptr[j]; // col_ptr は列 j の先頭 (= D[j]) を指す
-                l_values[pos] < -fp_threshold
+            let has_negative_d = |up_to_col: usize| -> bool {
+                (0..up_to_col).any(|j| l_values[col_ptr[j]] < -fp_threshold)
+            };
+
+            match result {
+                Err(LdltError::ZeroPivot { index }) => {
+                    // ZeroPivot: 列 index で D[index] = 0 (零固有値)。
+                    // ただし、index より前の列で D[j] < 0 が計算済みなら不定行列。
+                    // 例: 非ゼロ行が 1 行のみの Q (QPLIB_1055 型) では列 0 が D[0] > 0、
+                    // 列 1..k が D[j] < 0、列 k+1..n が D[j] = 0 (ZeroPivot) となる。
+                    // この場合、ZeroPivot で Err が来ても D[1..k] の負値を見落としてはならない。
+                    !has_negative_d(index) // false は不定行列、true は PSD
+                }
+                Ok(_) => {
+                    // 成功: 全列が完走。D 対角を全走査する。
+                    !has_negative_d(n)
+                }
+            }
+        }
+        SymbolicCholeskyRaw::Supernodal(sn_sym) => {
+            // Supernodal 経路: 高レベル API (SymbolicCholesky::factorize_numeric_ldlt) で
+            // Side::Upper を渡して因子化する。高レベル API は内部で Upper→Lower 変換を
+            // 行い supernodal::factorize_supernodal_numeric_ldlt に Lower を渡す。
+            //
+            // D 対角の読み出し:
+            // 各スーパーノード s について SupernodalLdltRef::supernode(s).val() は
+            // (s_nrows × s_ncols) の MatRef。val()[(j, j)] = D[s_start + j]。
+            let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default());
+            let mut mem = MemBuffer::new(scratch);
+            let stack = MemStack::new(&mut mem);
+
+            let result = symbolic.factorize_numeric_ldlt(
+                &mut l_values,
+                a_upper.rb(),
+                faer::Side::Upper,
+                reg,
+                faer::Par::Seq,
+                stack,
+                Default::default(),
+            );
+
+            // 因子化が失敗した場合 (ZeroPivot): 計算済みの l_values を走査する。
+            let check_up_to = match &result {
+                Ok(_) => n,
+                Err(LdltError::ZeroPivot { index }) => *index,
+            };
+
+            // スーパーノードを走査して D 対角を検出する。
+            // SupernodeRef の val() は (s_nrows × s_ncols) 行列でカラムメジャー。
+            // val()[(j, j)] = D[s_start + j]。
+            let ldlt_ref = supernodal::SupernodalLdltRef::<usize, f64>::new(sn_sym, &l_values);
+            let n_sn = sn_sym.n_supernodes();
+            let sn_begin = sn_sym.supernode_begin(); // len = n_sn
+            let sn_end = sn_sym.supernode_end();     // len = n_sn
+            let has_negative_d = (0..n_sn).any(|s| {
+                let s_start = sn_begin[s];
+                if s_start >= check_up_to {
+                    return false;
+                }
+                let s_end = sn_end[s];
+                let s_ncols = s_end - s_start;
+                let col_limit = s_ncols.min(check_up_to - s_start);
+                let node = ldlt_ref.supernode(s);
+                let ls = node.val(); // (s_nrows × s_ncols) MatRef
+                (0..col_limit).any(|j| ls[(j, j)] < -fp_threshold)
             });
-            // D[j] < -threshold があれば不定行列
+
             !has_negative_d
         }
     }
@@ -821,6 +875,52 @@ mod tests {
     fn test_is_q_psd_empty_matrix() {
         let q = CscMatrix::new(0, 0);
         assert!(is_q_psd_by_cholesky(&q), "Empty matrix should be identified as PSD");
+    }
+
+    /// is_q_psd_by_cholesky: QPLIB_1055 型パターン — 不定行列でも ZeroPivot が先に来るケース
+    ///
+    /// n=4, Q の非ゼロは行 0 のみ:
+    ///   Q = [[2,  1, -1,  0],
+    ///        [ 1,  0,  0,  0],
+    ///        [-1,  0,  0,  0],
+    ///        [ 0,  0,  0,  0]]
+    ///
+    /// 行 0 だけが非ゼロ。LDL^T:
+    ///   D[0] = 2 > 0
+    ///   D[1] = Q[1,1] - L[1,0]^2 * D[0] = 0 - (1/2)^2 * 2 = -0.5  < 0 (indefinite!)
+    ///   D[2] = Q[2,2] - L[2,0]^2 * D[0] = 0 - (1/2)^2 * 2 = -0.5  < 0
+    ///   D[3] = Q[3,3] = 0  → ZeroPivot
+    ///
+    /// 旧実装は ZeroPivot → true (誤判定)。修正後は D[1] < 0 を検出して false。
+    #[test]
+    fn test_is_q_psd_zeropivot_masks_negative_d() {
+        // 上三角形式: (row, col, val) with row <= col
+        // Q[0,0]=2, Q[0,1]=1, Q[0,2]=-1  (rows 1,2,3 have zero diagonal)
+        let q = upper_tri_csc(4, &[
+            (0, 0, 2.0),
+            (0, 1, 1.0),
+            (0, 2, -1.0),
+        ]);
+        // LDL^T: D[0]=2, D[1]=-0.5, D[2]=-0.5, D[3]=0 (ZeroPivot at col 3)
+        // D[1] < 0 → indefinite
+        assert!(!is_q_psd_by_cholesky(&q),
+            "Indefinite matrix (ZeroPivot masks earlier negative D) must return false");
+    }
+
+    /// is_q_psd_by_cholesky: ZeroPivot が来ても先行列が全て非負なら PSD
+    ///
+    /// n=3, Q = [[1, 0, 0], [0, 1, 0], [0, 0, 0]]
+    /// D[0]=1>0, D[1]=1>0, D[2]=0 → ZeroPivot at col 2, だが D[0..2] >= 0
+    /// → true (PSD, 零固有値あり)
+    #[test]
+    fn test_is_q_psd_zeropivot_all_nonneg_d_is_psd() {
+        let q = upper_tri_csc(3, &[
+            (0, 0, 1.0),
+            (1, 1, 1.0),
+            // col 2: no entry → D[2] = 0
+        ]);
+        assert!(is_q_psd_by_cholesky(&q),
+            "PSD matrix with zero eigenvalue (ZeroPivot) must return true");
     }
 
     #[test]
