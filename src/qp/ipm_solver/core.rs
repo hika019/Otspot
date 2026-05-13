@@ -9,16 +9,16 @@
 //! Active Set 法等は採用しない。post-processing は `refine_dual_lsq` (qp/mod.rs の
 //! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
 
+use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
+use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
-use crate::presolve::{
-    postsolve_qp_with_dual_recovery, QpPresolveResult,
-    recover_y_for_singleton_row_with_bound, bound_contrib_at_var,
-};
 use crate::presolve::qp_transforms::QpPostsolveStep;
+use crate::presolve::{
+    bound_contrib_at_var, postsolve_qp_with_dual_recovery, recover_y_for_singleton_row_with_bound,
+    QpPresolveResult,
+};
 use crate::problem::SolveStatus;
 use crate::qp::problem::QpProblem;
-use super::outcome::{IpmOutcome, ProblemView};
-use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
 
 /// inner_solver の関数型 (現在は IP-PMM のみ)
 pub type InnerSolver = fn(&QpProblem, &SolverOptions) -> crate::problem::SolverResult;
@@ -29,7 +29,12 @@ pub fn run_ipm(
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
-    run_ipm_with(orig_problem, presolve_result, opts, crate::qp::ipm_core::solve_qp_ippmm)
+    run_ipm_with(
+        orig_problem,
+        presolve_result,
+        opts,
+        crate::qp::ipm_core::solve_qp_ippmm,
+    )
 }
 
 /// 内部 solver を引数に取る一般化 wrapper。
@@ -58,7 +63,8 @@ fn run_ipm_with(
     let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
-            let local_min = row_scales.iter()
+            let local_min = row_scales
+                .iter()
                 .filter(|&&v| v > 0.0 && v.is_finite())
                 .fold(f64::INFINITY, |a, &v| a.min(v));
             if local_min.is_finite() {
@@ -68,13 +74,17 @@ fn run_ipm_with(
     }
     let mut dual_col_scale_min = f64::INFINITY;
     if let Some(scaler) = &presolve_result.ruiz_scaler {
-        let e_min = scaler.e.iter()
+        let e_min = scaler
+            .e
+            .iter()
             .filter(|&&v| v > 0.0 && v.is_finite())
             .fold(f64::INFINITY, |a, &v| a.min(v));
         if e_min.is_finite() {
             primal_row_scale_min *= e_min;
         }
-        let d_min = scaler.d.iter()
+        let d_min = scaler
+            .d
+            .iter()
             .filter(|&&v| v > 0.0 && v.is_finite())
             .fold(f64::INFINITY, |a, &v| a.min(v));
         if d_min.is_finite() && scaler.c.is_finite() && scaler.c > 0.0 {
@@ -92,8 +102,10 @@ fn run_ipm_with(
         tightened.tolerance = None;
         tightened.ipm.eps = eps_scaled;
         if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
-            eprintln!("POST_STAGE [IPM eps tighten] σ_total={:.3e} eps_orig={:.3e} → eps_scaled={:.3e}",
-                sigma_total, eps_orig, eps_scaled);
+            eprintln!(
+                "POST_STAGE [IPM eps tighten] σ_total={:.3e} eps_orig={:.3e} → eps_scaled={:.3e}",
+                sigma_total, eps_orig, eps_scaled
+            );
         }
         tightened
     } else {
@@ -153,9 +165,17 @@ fn run_ipm_with(
             constraint_types: &reduced.constraint_types,
         };
         let pres_red = primal_residual_rel(&view_red, &result.solution);
-        let kkt_red = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
+        let kkt_red = kkt_residual_rel(
+            &view_red,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
         // 絶対 pres と normalize denominator を計算
-        let ax_red = reduced.a.mat_vec_mul(&result.solution).unwrap_or_else(|_| vec![0.0; reduced.num_constraints]);
+        let ax_red = reduced
+            .a
+            .mat_vec_mul(&result.solution)
+            .unwrap_or_else(|_| vec![0.0; reduced.num_constraints]);
         let mut pres_abs_red = 0.0_f64;
         let mut max_ax_red = 0.0_f64;
         let mut max_b_red = 0.0_f64;
@@ -183,8 +203,12 @@ fn run_ipm_with(
             // 本診断では scaler 全要素を直接読まずアクセサ経由が必要だが、簡易に
             // unscale 前後の解ノルム比を出すことで実効的な scale 増幅率を測る。
             let x_pre_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let y_pre_inf = result.dual_solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let (x_unscaled, y_unscaled) = scaler.unscale_solution(&result.solution, &result.dual_solution);
+            let y_pre_inf = result
+                .dual_solution
+                .iter()
+                .fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let (x_unscaled, y_unscaled) =
+                scaler.unscale_solution(&result.solution, &result.dual_solution);
             let x_post_inf = x_unscaled.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let y_post_inf = y_unscaled.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             eprintln!("POST_STAGE [Ruiz scale ratio] x_inf {:.3e}->{:.3e} (×{:.3e}) y_inf {:.3e}->{:.3e} (×{:.3e}) c_scale={:.3e}",
@@ -195,10 +219,7 @@ fn run_ipm_with(
         let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
         result.solution = x;
         result.dual_solution = y;
-        result.bound_duals = scaler.unscale_bound_duals(
-            &result.bound_duals,
-            &reduced.bounds,
-        );
+        result.bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &reduced.bounds);
         if scaler.c.abs() > 1e-300 {
             result.objective /= scaler.c;
         }
@@ -214,15 +235,25 @@ fn run_ipm_with(
             constraint_types: &reduced.constraint_types,
         };
         let pres_red = primal_residual_rel(&view_red, &result.solution);
-        let kkt_red = kkt_residual_rel(&view_red, &result.solution, &result.dual_solution, &result.bound_duals);
-        eprintln!("POST_STAGE [unscaled (still reduced)] pres_rel={:.3e} kkt_rel={:.3e}",
-            pres_red, kkt_red);
+        let kkt_red = kkt_residual_rel(
+            &view_red,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        eprintln!(
+            "POST_STAGE [unscaled (still reduced)] pres_rel={:.3e} kkt_rel={:.3e}",
+            pres_red, kkt_red
+        );
     }
 
     if post_trace {
         // presolve transform 内訳を実測 (postsolve で primal が悪化する機序仮説の検証)。
-        let mut n_fixed = 0; let mut n_singleton = 0; let mut n_empty = 0;
-        let mut n_redundant = 0; let mut n_largescale = 0;
+        let mut n_fixed = 0;
+        let mut n_singleton = 0;
+        let mut n_empty = 0;
+        let mut n_redundant = 0;
+        let mut n_largescale = 0;
         let mut row_scales_for_diag: Option<Vec<f64>> = None;
         for step in presolve_result.postsolve_stack.steps.iter() {
             match step {
@@ -245,11 +276,16 @@ fn run_ipm_with(
             let smin = scales.iter().fold(f64::INFINITY, |a, &v| a.min(v));
             let smax = scales.iter().fold(f64::NEG_INFINITY, |a, &v| a.max(v));
             // 最も小さい (= 最も増幅される) 5 row を抽出
-            let mut indexed: Vec<(usize, f64)> = scales.iter().enumerate()
+            let mut indexed: Vec<(usize, f64)> = scales
+                .iter()
+                .enumerate()
                 .filter(|(_, &s)| (s - 1.0).abs() > 1e-12)
-                .map(|(i, &s)| (i, s)).collect();
+                .map(|(i, &s)| (i, s))
+                .collect();
             indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top5: Vec<String> = indexed.iter().take(5)
+            let top5: Vec<String> = indexed
+                .iter()
+                .take(5)
                 .map(|(i, s)| format!("row[{}]=σ:{:.3e}(amp:×{:.2e})", i, s, 1.0 / s))
                 .collect();
             eprintln!("POST_STAGE [LargeCoeffRowScale] n_scaled={} σ_min={:.3e} σ_max={:.3e} smallest_5: {}",
@@ -273,25 +309,48 @@ fn run_ipm_with(
         // 純粋 postsolve (dual recovery + remap) 直後の元空間残差。
         // 以後の bounds clip / 後処理が postsolve 段階の精度をどう動かすかの基準値。
         let view = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+            q: &orig_problem.q,
+            a: &orig_problem.a,
+            c: &orig_problem.c,
+            b: &orig_problem.b,
+            bounds: &orig_problem.bounds,
+            constraint_types: &orig_problem.constraint_types,
         };
         let pres_post = primal_residual_rel(&view, &final_sol.solution);
-        let kkt_post = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        eprintln!("POST_STAGE [postsolve+remap_bd (orig space)] pres_rel={:.3e} kkt_rel={:.3e}",
-            pres_post, kkt_post);
+        let kkt_post = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        eprintln!(
+            "POST_STAGE [postsolve+remap_bd (orig space)] pres_rel={:.3e} kkt_rel={:.3e}",
+            pres_post, kkt_post
+        );
     }
 
     if post_trace {
         let view = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+            q: &orig_problem.q,
+            a: &orig_problem.a,
+            c: &orig_problem.c,
+            b: &orig_problem.b,
+            bounds: &orig_problem.bounds,
+            constraint_types: &orig_problem.constraint_types,
         };
         let pres = primal_residual_rel(&view, &final_sol.solution);
-        let kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let kkt = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
         // 絶対 pres と denom (orig 空間)
         use crate::problem::ConstraintType;
-        let ax_orig = orig_problem.a.mat_vec_mul(&final_sol.solution).unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
+        let ax_orig = orig_problem
+            .a
+            .mat_vec_mul(&final_sol.solution)
+            .unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
         let mut pres_abs_orig = 0.0_f64;
         let mut max_ax_orig = 0.0_f64;
         let mut max_b_orig = 0.0_f64;
@@ -308,26 +367,53 @@ fn run_ipm_with(
         let denom_orig = 1.0 + max_ax_orig.max(max_b_orig);
         eprintln!("POST_STAGE [postsolve+remap (orig space, pre bounds-clip)] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
             pres, pres_abs_orig, denom_orig, kkt, orig_problem.num_vars, orig_problem.num_constraints);
-        let ax = orig_problem.a.mat_vec_mul(&final_sol.solution)
+        let ax = orig_problem
+            .a
+            .mat_vec_mul(&final_sol.solution)
             .unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
-        let mut viol: Vec<(usize, f64)> = (0..orig_problem.num_constraints).map(|i| {
-            let raw = ax[i] - orig_problem.b[i];
-            let v = match orig_problem.constraint_types[i] {
-                ConstraintType::Eq => raw.abs(),
-                ConstraintType::Ge => if raw < 0.0 { -raw } else { 0.0 },
-                ConstraintType::Le => if raw > 0.0 { raw } else { 0.0 },
-            };
-            (i, v)
-        }).collect();
+        let mut viol: Vec<(usize, f64)> = (0..orig_problem.num_constraints)
+            .map(|i| {
+                let raw = ax[i] - orig_problem.b[i];
+                let v = match orig_problem.constraint_types[i] {
+                    ConstraintType::Eq => raw.abs(),
+                    ConstraintType::Ge => {
+                        if raw < 0.0 {
+                            -raw
+                        } else {
+                            0.0
+                        }
+                    }
+                    ConstraintType::Le => {
+                        if raw > 0.0 {
+                            raw
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                (i, v)
+            })
+            .collect();
         viol.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let top10: Vec<String> = viol.iter().take(10)
-            .map(|(i, v)| format!("row[{}]={:.2e}", i, v)).collect();
+        let top10: Vec<String> = viol
+            .iter()
+            .take(10)
+            .map(|(i, v)| format!("row[{}]={:.2e}", i, v))
+            .collect();
         let total_viol: f64 = viol.iter().map(|(_, v)| v).sum();
-        let top1_share = if total_viol > 0.0 { viol[0].1 / total_viol * 100.0 } else { 0.0 };
-        let top10_share: f64 = viol.iter().take(10).map(|(_, v)| v).sum::<f64>()
-            / total_viol.max(1e-300) * 100.0;
-        eprintln!("POST_STAGE [violation distribution] top1_share={:.1}% top10_share={:.1}% top10: {}",
-            top1_share, top10_share, top10.join(", "));
+        let top1_share = if total_viol > 0.0 {
+            viol[0].1 / total_viol * 100.0
+        } else {
+            0.0
+        };
+        let top10_share: f64 =
+            viol.iter().take(10).map(|(_, v)| v).sum::<f64>() / total_viol.max(1e-300) * 100.0;
+        eprintln!(
+            "POST_STAGE [violation distribution] top1_share={:.1}% top10_share={:.1}% top10: {}",
+            top1_share,
+            top10_share,
+            top10.join(", ")
+        );
         // top-1 違反 row の内訳: A[top_row,:] の各項を計算、x が presolve fix か IPM か区別
         if !viol.is_empty() && viol[0].1 > 0.0 {
             let top_row = viol[0].0;
@@ -340,16 +426,35 @@ fn run_ipm_with(
                         let a_val = orig_problem.a.values[k];
                         let x_val = final_sol.solution[col];
                         // col_map で reduced 空間にあるか (= IPM が解いた変数) を判定
-                        let is_reduced = presolve_result.col_map.get(col).copied().flatten().is_some();
+                        let is_reduced = presolve_result
+                            .col_map
+                            .get(col)
+                            .copied()
+                            .flatten()
+                            .is_some();
                         row_terms.push((col, a_val, x_val, is_reduced));
                     }
                 }
             }
-            row_terms.sort_by(|a, b| (b.1 * b.2).abs().partial_cmp(&(a.1 * a.2).abs())
-                .unwrap_or(std::cmp::Ordering::Equal));
-            let top_str: Vec<String> = row_terms.iter().take(8)
-                .map(|(c, a, x, red)| format!("col[{}]{}·{:.2e}·{:.2e}={:.2e}",
-                    c, if *red { "(IPM)" } else { "(FIXED)" }, a, x, a * x))
+            row_terms.sort_by(|a, b| {
+                (b.1 * b.2)
+                    .abs()
+                    .partial_cmp(&(a.1 * a.2).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let top_str: Vec<String> = row_terms
+                .iter()
+                .take(8)
+                .map(|(c, a, x, red)| {
+                    format!(
+                        "col[{}]{}·{:.2e}·{:.2e}={:.2e}",
+                        c,
+                        if *red { "(IPM)" } else { "(FIXED)" },
+                        a,
+                        x,
+                        a * x
+                    )
+                })
                 .collect();
             let sum: f64 = row_terms.iter().map(|(_, a, x, _)| a * x).sum();
             let n_fixed_in_row = row_terms.iter().filter(|(_, _, _, r)| !r).count();
@@ -398,10 +503,18 @@ fn run_ipm_with(
     // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
     let mut total_bound_clip = 0.0_f64;
     let mut clip_count_pre = 0_usize;
-    for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(orig_problem.bounds.iter()) {
+    for (xi, &(lb, ub)) in final_sol
+        .solution
+        .iter_mut()
+        .zip(orig_problem.bounds.iter())
+    {
         let pre = *xi;
-        if lb.is_finite() { *xi = xi.max(lb); }
-        if ub.is_finite() { *xi = xi.min(ub); }
+        if lb.is_finite() {
+            *xi = xi.max(lb);
+        }
+        if ub.is_finite() {
+            *xi = xi.min(ub);
+        }
         let amt = (pre - *xi).abs();
         if amt > 0.0 {
             clip_count_pre += 1;
@@ -410,15 +523,23 @@ fn run_ipm_with(
     }
     if post_trace {
         let view = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+            q: &orig_problem.q,
+            a: &orig_problem.a,
+            c: &orig_problem.c,
+            b: &orig_problem.b,
+            bounds: &orig_problem.bounds,
+            constraint_types: &orig_problem.constraint_types,
         };
         let pres = primal_residual_rel(&view, &final_sol.solution);
-        let kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+        let kkt = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
         eprintln!("POST_STAGE [bounds clip applied] count={} max_amt={:.3e} pres_rel={:.3e} kkt_rel={:.3e}",
             clip_count_pre, total_bound_clip, pres, kkt);
     }
-
 
     // 元空間 dual の一括復元: postsolve_qp_with_dual_recovery は SingletonRow /
     // RedundantRowFix の y[row] を col_first の停留性のみで復元するが、その row が
@@ -431,24 +552,56 @@ fn run_ipm_with(
         && final_sol.dual_solution.len() == orig_problem.num_constraints
     {
         let view0 = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+            q: &orig_problem.q,
+            a: &orig_problem.a,
+            c: &orig_problem.c,
+            b: &orig_problem.b,
+            bounds: &orig_problem.bounds,
+            constraint_types: &orig_problem.constraint_types,
         };
-        const POST_LSQ_MAX_PASSES: usize = 5;
-        const POST_LSQ_CONVERGE_RATIO: f64 = 0.5;
-        let mut prev = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for pass in 0..POST_LSQ_MAX_PASSES {
+        const POST_LSQ_PROGRESS_EPS: f64 = 1e-12;
+        let mut prev = kkt_residual_rel(
+            &view0,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        let mut best_sol = final_sol.clone();
+        let mut pass = 0usize;
+        loop {
+            if opts
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                final_sol = best_sol;
+                break;
+            }
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_projected_gradient(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refine_dual_worst_active_block(orig_problem, &mut final_sol, opts.deadline);
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let cur = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let cur = kkt_residual_rel(
+                &view0,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
             if post_trace {
-                eprintln!("POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}", pass, cur);
+                eprintln!(
+                    "POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}",
+                    pass, cur
+                );
             }
-            if cur >= prev * POST_LSQ_CONVERGE_RATIO {
+            if cur + POST_LSQ_PROGRESS_EPS >= prev {
+                final_sol = best_sol;
                 break;
             }
             prev = cur;
+            best_sol = final_sol.clone();
+            pass += 1;
         }
     }
 
@@ -463,14 +616,31 @@ fn run_ipm_with(
     {
         /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
         /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
-        const STAGE0_MAX_PASSES: usize = 16;
-        const STAGE0_CONVERGE_RATIO: f64 = 0.99;
+        const STAGE0_PROGRESS_EPS: f64 = 1e-12;
         let view0 = ProblemView {
-            q: &orig_problem.q, a: &orig_problem.a, c: &orig_problem.c, b: &orig_problem.b,
-            bounds: &orig_problem.bounds, constraint_types: &orig_problem.constraint_types,
+            q: &orig_problem.q,
+            a: &orig_problem.a,
+            c: &orig_problem.c,
+            b: &orig_problem.b,
+            bounds: &orig_problem.bounds,
+            constraint_types: &orig_problem.constraint_types,
         };
-        let mut prev_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for pass in 0..STAGE0_MAX_PASSES {
+        let mut prev_kkt = kkt_residual_rel(
+            &view0,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        let mut best_sol = final_sol.clone();
+        let mut pass = 0usize;
+        loop {
+            if opts
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                final_sol = best_sol;
+                break;
+            }
             // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             // (ii) y[row] を SingletonRow / RedundantRowFix step で更新 (逆順=後退代入)
@@ -482,18 +652,32 @@ fn run_ipm_with(
                     _ => continue,
                 };
                 let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);
-                recover_y_for_singleton_row_with_bound(
-                    row, col, orig_problem, &mut final_sol, bc,
+                recover_y_for_singleton_row_with_bound(row, col, orig_problem, &mut final_sol, bc);
+            }
+            crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_projected_gradient(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refine_dual_worst_active_block(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
+            let cur_kkt = kkt_residual_rel(
+                &view0,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
+            if post_trace {
+                eprintln!(
+                    "POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}",
+                    pass, cur_kkt
                 );
             }
-            let cur_kkt = kkt_residual_rel(&view0, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            if post_trace {
-                eprintln!("POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}", pass, cur_kkt);
-            }
-            if cur_kkt >= prev_kkt * STAGE0_CONVERGE_RATIO {
+            if cur_kkt + STAGE0_PROGRESS_EPS >= prev_kkt {
+                final_sol = best_sol;
                 break;
             }
             prev_kkt = cur_kkt;
+            best_sol = final_sol.clone();
+            pass += 1;
         }
     }
 
@@ -528,22 +712,44 @@ fn run_ipm_with(
 
     if post_trace {
         let pres0 = primal_residual_rel(&view, &final_sol.solution);
-        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        eprintln!("POST_STAGE [pre post-processing] pres_rel={:.3e} kkt_rel={:.3e}", pres0, kkt0);
+        let kkt0 = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        eprintln!(
+            "POST_STAGE [pre post-processing] pres_rel={:.3e} kkt_rel={:.3e}",
+            pres0, kkt0
+        );
     }
 
     // 既に IPM で eps を満たしている場合、primal projection と dual/bound refit は無駄
     // (改善余地なし)。大規模問題では LSQ が秒単位かかるため skip 必須。
+    // ただし Suboptimal/Timeout は global norm が小さくても component-wise dfr が
+    // 残っていることがあるため、Optimal 終了時だけ skip を許容する。
     let user_eps_for_skip = opts.ipm_eps();
-    let kkt_already_pass = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 {
-        let kkt0 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+    let kkt_already_pass = if !final_sol.solution.is_empty()
+        && orig_problem.num_constraints > 0
+        && result.status == SolveStatus::Optimal
+    {
+        let kkt0 = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
         let pres0 = primal_residual_rel(&view, &final_sol.solution);
         kkt0 < user_eps_for_skip && pres0 < user_eps_for_skip
     } else {
         false
     };
 
-    let kkt = if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress && !kkt_already_pass {
+    let kkt = if !final_sol.solution.is_empty()
+        && orig_problem.num_constraints > 0
+        && ipm_made_progress
+        && !kkt_already_pass
+    {
         // (1) primal projection: 違反制約に対して x を最小ノルム射影。
         //     primal/KKT 合算の guard で悪化時 revert。near-rank-deficient AAT で
         //     LSQ y refit が膨張する系統では primal のみ動かし dual は IPM 値を維持する。
@@ -566,7 +772,12 @@ fn run_ipm_with(
             }
             if std::env::var("PRIMAL_LSQ_TRACE").ok().as_deref() == Some("1") {
                 let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
-                let post_kkt2 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                let post_kkt2 = kkt_residual_rel(
+                    &view,
+                    &final_sol.solution,
+                    &final_sol.dual_solution,
+                    &final_sol.bound_duals,
+                );
                 eprintln!("PRIMAL_LSQ: pre_pres={:.3e} post_pres={:.3e} final_pres={:.3e} final_kkt={:.3e} guard={}",
                     pre_pres, post_pres, post_pres2, post_kkt2,
                     if post_pres > pre_pres { "REVERT" } else { "ACCEPT" });
@@ -583,27 +794,48 @@ fn run_ipm_with(
         //
         // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
         // で悪化時 revert するため安全に反復できる。
-        const REFIT_MAX_ITERS: usize = 8;
-        const REFIT_CONVERGE_RATIO: f64 = 0.99;
-        let mut current_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-        for _refit_iter in 0..REFIT_MAX_ITERS {
-            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        const REFIT_PROGRESS_EPS: f64 = 1e-12;
+        let mut current_kkt = kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        );
+        loop {
+            if opts
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
                 break;
             }
             let prev_kkt = current_kkt;
 
-            let pre_y = final_sol.dual_solution.clone();
+            let pre_dual_step = final_sol.clone();
             crate::qp::refine_dual_lsq(orig_problem, &mut final_sol, opts.deadline);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_projected_gradient(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refine_dual_worst_active_block(orig_problem, &mut final_sol, opts.deadline);
+            let post_kkt = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
             if post_kkt <= current_kkt {
                 current_kkt = post_kkt;
             } else {
-                final_sol.dual_solution = pre_y;
+                final_sol = pre_dual_step;
             }
 
             let pre_z = final_sol.bound_duals.clone();
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            let post_kkt = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let post_kkt = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
             if post_kkt <= current_kkt {
                 current_kkt = post_kkt;
             } else {
@@ -611,7 +843,7 @@ fn run_ipm_with(
             }
 
             // 改善が止まれば早期 break (固定点)
-            if current_kkt >= prev_kkt * REFIT_CONVERGE_RATIO {
+            if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
                 break;
             }
         }
@@ -619,41 +851,72 @@ fn run_ipm_with(
         // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
         // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
         let user_eps = opts.ipm_eps();
-        const IRLS_OUTER_MAX_PASSES: usize = 5;
         const IRLS_INNER_MAX_ITERS: usize = 30;
-        for _outer_pass in 0..IRLS_OUTER_MAX_PASSES {
-            if current_kkt <= user_eps { break; }
-            if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) { break; }
+        loop {
+            if current_kkt <= user_eps {
+                break;
+            }
+            if opts
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                break;
+            }
             let prev_kkt = current_kkt;
 
-            let pre_y = final_sol.dual_solution.clone();
+            let pre_dual_step = final_sol.clone();
             crate::qp::refine_dual_lsq_irls(
-                orig_problem, &mut final_sol, user_eps, IRLS_INNER_MAX_ITERS, opts.deadline,
+                orig_problem,
+                &mut final_sol,
+                user_eps,
+                IRLS_INNER_MAX_ITERS,
+                opts.deadline,
             );
-            let post_kkt_irls = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            crate::qp::zero_inactive_inequality_duals(orig_problem, &mut final_sol);
+            crate::qp::project_duals_from_singleton_columns(orig_problem, &mut final_sol);
+            crate::qp::refine_dual_projected_gradient(orig_problem, &mut final_sol, opts.deadline);
+            crate::qp::refine_dual_worst_active_block(orig_problem, &mut final_sol, opts.deadline);
+            let post_kkt_irls = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
             if post_kkt_irls < current_kkt {
                 current_kkt = post_kkt_irls;
                 // y が変わった → z 再 refit で停留性を取り直し
                 let pre_z = final_sol.bound_duals.clone();
                 crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-                let post_kkt_z = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                let post_kkt_z = kkt_residual_rel(
+                    &view,
+                    &final_sol.solution,
+                    &final_sol.dual_solution,
+                    &final_sol.bound_duals,
+                );
                 if post_kkt_z <= current_kkt {
                     current_kkt = post_kkt_z;
                 } else {
                     final_sol.bound_duals = pre_z;
                 }
             } else {
-                final_sol.dual_solution = pre_y;
+                final_sol = pre_dual_step;
                 break; // IRLS が改善できなければ outer loop も終了
             }
 
             // outer pass の収束判定 (10% 以上改善あれば継続)
-            if current_kkt >= prev_kkt * 0.9 { break; }
+            if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
+                break;
+            }
         }
 
         current_kkt
     } else {
-        kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals)
+        kkt_residual_rel(
+            &view,
+            &final_sol.solution,
+            &final_sol.dual_solution,
+            &final_sol.bound_duals,
+        )
     };
 
     // (3) saddle-point Krylov refinement: K [dx; dy] = -[r_d; r_p] を古典的 IR で解く。
@@ -675,25 +938,53 @@ fn run_ipm_with(
         let target_pf = user_eps;
         if post_trace {
             let pres_pre = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_pre = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [pre saddle-point IR] pres_rel={:.3e} kkt_rel={:.3e}", pres_pre, kkt_pre);
+            let kkt_pre = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
+            eprintln!(
+                "POST_STAGE [pre saddle-point IR] pres_rel={:.3e} kkt_rel={:.3e}",
+                pres_pre, kkt_pre
+            );
         }
         let _refined = crate::qp::refine_kkt_iterative(
-            orig_problem, &mut final_sol, KRYLOV_MAX_ITERS, target_pf, opts.deadline,
+            orig_problem,
+            &mut final_sol,
+            KRYLOV_MAX_ITERS,
+            target_pf,
+            opts.deadline,
         );
         if post_trace {
             let pres_post = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_post = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
-            eprintln!("POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
-                _refined, pres_post, kkt_post);
+            let kkt_post = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
+            eprintln!(
+                "POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
+                _refined, pres_post, kkt_post
+            );
         }
 
         // (3b) Second primal projection: after KKT IR, if pres > eps, try one more
         // refine_primal_lsq pass. Accept ONLY if both pres improves AND kkt stays <= user_eps.
         // The strict kkt guard prevents the df regression seen when refit_bound_duals worsens kkt.
-        if allow_primal_projection && !opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if allow_primal_projection
+            && !opts
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             let pres_post_ir = primal_residual_rel(&view, &final_sol.solution);
-            let kkt_post_ir = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+            let kkt_post_ir = kkt_residual_rel(
+                &view,
+                &final_sol.solution,
+                &final_sol.dual_solution,
+                &final_sol.bound_duals,
+            );
             if pres_post_ir > user_eps && kkt_post_ir <= user_eps {
                 // Save full state before 2nd primal projection
                 let pre_sol2 = final_sol.clone();
@@ -701,7 +992,12 @@ fn run_ipm_with(
                 let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
                 if post_pres2 < pres_post_ir {
                     crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-                    let kkt_after2 = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+                    let kkt_after2 = kkt_residual_rel(
+                        &view,
+                        &final_sol.solution,
+                        &final_sol.dual_solution,
+                        &final_sol.bound_duals,
+                    );
                     // Accept only if kkt stays within user_eps (strict dual feasibility guard)
                     if kkt_after2 > user_eps {
                         final_sol = pre_sol2;
@@ -714,12 +1010,16 @@ fn run_ipm_with(
                 }
             }
         }
-
     }
 
     // Recompute kkt after all post-processing stages (KKT IR may have improved it significantly).
     // The `kkt` variable above was computed before the saddle-point IR and is now stale.
-    let kkt_final = kkt_residual_rel(&view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals);
+    let kkt_final = kkt_residual_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    );
     // Use the better of: pre-IR kkt (captures y/z refit quality) vs post-IR kkt (captures full pipeline).
     // Always take the post-IR kkt since it reflects the actual final state.
     let kkt_out = kkt_final;
@@ -790,7 +1090,11 @@ fn compute_duality_gap_rel(
     // のため、解析的に val * net_z_at_j (= val * -(qx+c+aty)) で置換する。
     let mut bnd_term: f64 = 0.0;
     let mut lb_idx = 0_usize;
-    let mut ub_idx = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let mut ub_idx = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
     for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
         let lb_finite = lb.is_finite();
         let ub_finite = ub.is_finite();
@@ -802,8 +1106,12 @@ fn compute_duality_gap_rel(
             let stat_no_bnd = qx[j] + problem.c[j] + aty[j];
             bnd_term += lb * stat_no_bnd;
             // bound_duals layout 上 idx は進める (FX 用 slot は使わない)
-            if lb_finite { lb_idx += 1; }
-            if ub_finite { ub_idx += 1; }
+            if lb_finite {
+                lb_idx += 1;
+            }
+            if ub_finite {
+                ub_idx += 1;
+            }
         } else {
             if lb_finite && lb_idx < result.bound_duals.len() {
                 bnd_term += lb * result.bound_duals[lb_idx];
@@ -818,5 +1126,9 @@ fn compute_duality_gap_rel(
     let dual_obj = -0.5 * xqx - by + bnd_term + problem.obj_offset;
     let gap_abs = (primal_obj - dual_obj).abs();
     let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
-    if denom > 0.0 && gap_abs.is_finite() { gap_abs / denom } else { f64::INFINITY }
+    if denom > 0.0 && gap_abs.is_finite() {
+        gap_abs / denom
+    } else {
+        f64::INFINITY
+    }
 }

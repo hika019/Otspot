@@ -24,7 +24,10 @@ fn assert_close(a: f64, b: f64, tol: f64, name: &str) {
     assert!(
         (a - b).abs() < tol * (1.0 + a.abs().max(b.abs())),
         "{}: api={:.6e} direct={:.6e} diff={:.3e}",
-        name, a, b, (a - b).abs()
+        name,
+        a,
+        b,
+        (a - b).abs()
     );
 }
 
@@ -44,7 +47,8 @@ fn lp_basic_ge_le() {
     // c = (1, 2), A = [[1, 1], [1, 2]], b = (3, 10), types = (Ge, Le), bounds = (0, inf) ×2
     let q = CscMatrix::new(2, 2);
     let c = vec![1.0, 2.0];
-    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
     let b = vec![3.0, 10.0];
     let bounds = vec![(0.0, f64::INFINITY); 2];
     let cts = vec![ConstraintType::Ge, ConstraintType::Le];
@@ -110,14 +114,14 @@ fn lp_equality() {
 #[test]
 fn lp_mixed_constraints_and_bounds() {
     let mut model = Model::new("lp_mixed");
-    let x1 = model.add_var("x1", 0.0, 100.0);     // lb=0 + ub
-    let x2 = model.add_var("x2", -10.0, 5.0);     // 両側、lb 負
-    let x3 = model.add_var("x3", -2.0, 8.0);      // 両側
-    let x4 = model.add_var("x4", -5.0, 5.0);      // 両側
+    let x1 = model.add_var("x1", 0.0, 100.0); // lb=0 + ub
+    let x2 = model.add_var("x2", -10.0, 5.0); // 両側、lb 負
+    let x3 = model.add_var("x3", -2.0, 8.0); // 両側
+    let x4 = model.add_var("x4", -5.0, 5.0); // 両側
 
-    model.add_constraint((x1 + x2 + x3 + x4).leq(20.0));  // Le
-    model.add_constraint((x1 - x2).geq(-3.0));             // Ge
-    model.add_constraint((x3 + x4).eq_constraint(2.0));    // Eq
+    model.add_constraint((x1 + x2 + x3 + x4).leq(20.0)); // Le
+    model.add_constraint((x1 - x2).geq(-3.0)); // Ge
+    model.add_constraint((x3 + x4).eq_constraint(2.0)); // Eq
     model.minimize(2.0 * x1 + x2 + 3.0 * x3 + x4);
     let r_api = model.solve().expect("API solve");
 
@@ -127,15 +131,12 @@ fn lp_mixed_constraints_and_bounds() {
         &[0, 0, 0, 0, 1, 1, 2, 2],
         &[0, 1, 2, 3, 0, 1, 2, 3],
         &[1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0],
-        3, 4,
-    ).unwrap();
+        3,
+        4,
+    )
+    .unwrap();
     let b = vec![20.0, -3.0, 2.0];
-    let bounds = vec![
-        (0.0, 100.0),
-        (-10.0, 5.0),
-        (-2.0, 8.0),
-        (-5.0, 5.0),
-    ];
+    let bounds = vec![(0.0, 100.0), (-10.0, 5.0), (-2.0, 8.0), (-5.0, 5.0)];
     let cts = vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Eq];
     let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
     let r_direct = solve_qp_with(&prob, &SolverOptions::default());
@@ -171,8 +172,11 @@ fn qp_diagonal_q_basic() {
     assert_close(r_api[x], r_direct.solution[0], TOL_X, "x");
     assert_close(r_api[y], r_direct.solution[1], TOL_X, "y");
     // 期待値検算: obj ≈ -6.5
-    assert!((r_api.objective_value - (-6.5)).abs() < 1e-3,
-        "obj should be ≈ -6.5, got {}", r_api.objective_value);
+    assert!(
+        (r_api.objective_value - (-6.5)).abs() < 1e-3,
+        "obj should be ≈ -6.5, got {}",
+        r_api.objective_value
+    );
 }
 
 /// QP: off-diagonal Q の取り扱い
@@ -183,12 +187,8 @@ fn qp_offdiagonal_q() {
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
     // Q = [[1, 0.5], [0.5, 1]] (対称、上下三角両方格納が QPS 慣例)
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 0, 1],
-        &[0, 0, 1, 1],
-        &[1.0, 0.5, 0.5, 1.0],
-        2, 2,
-    ).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 0.5, 0.5, 1.0], 2, 2)
+        .unwrap();
     model.set_quadratic_objective(q.clone());
     model.add_constraint((x + y).leq(4.0));
     model.minimize(-1.0 * x - 1.0 * y);
@@ -233,9 +233,16 @@ fn qp_eq_with_redundant_var() {
     // 期待: x = 0 (Q 最小化のため)、y = 1。obj = 0
     // IPM は厳密に boundary に到達しないため許容差は 1e-2 (Maros 全体と同レベル)
     assert!(r_api[x].abs() < 1e-2, "x should be ~0, got {}", r_api[x]);
-    assert!((r_api[y] - 1.0).abs() < 1e-2, "y should be ~1, got {}", r_api[y]);
-    assert!(r_api.objective_value.abs() < 1e-4,
-        "obj should be ~0, got {}", r_api.objective_value);
+    assert!(
+        (r_api[y] - 1.0).abs() < 1e-2,
+        "y should be ~1, got {}",
+        r_api[y]
+    );
+    assert!(
+        r_api.objective_value.abs() < 1e-4,
+        "obj should be ~0, got {}",
+        r_api.objective_value
+    );
 }
 
 /// QP maximize: API 仕様により **Q は NSD で渡す必要がある** (内部で -Q にされて
@@ -256,9 +263,16 @@ fn qp_maximize_concave() {
     model.maximize(x);
     let r_api = model.solve().expect("API solve (NSD Q for maximize)");
 
-    assert!((r_api[x] - 1.0).abs() < 1e-3, "x should be 1, got {}", r_api[x]);
-    assert!((r_api.objective_value - 0.5).abs() < 1e-3,
-        "obj should be 0.5, got {}", r_api.objective_value);
+    assert!(
+        (r_api[x] - 1.0).abs() < 1e-3,
+        "x should be 1, got {}",
+        r_api[x]
+    );
+    assert!(
+        (r_api.objective_value - 0.5).abs() < 1e-3,
+        "obj should be 0.5, got {}",
+        r_api.objective_value
+    );
 }
 
 /// **API 落とし穴の retrurn-test**: maximize に PSD Q を渡すと内部で NSD になり
@@ -277,8 +291,11 @@ fn qp_maximize_with_psd_q_returns_error() {
     model.add_constraint(solver::constraint!(x <= 5.0));
     model.maximize(x);
     let err = model.solve().expect_err("PSD Q with maximize should error");
-    assert!(matches!(err, ModelError::Internal(ref msg) if msg.contains("Non-convex")),
-        "expected Non-convex error, got {:?}", err);
+    assert!(
+        matches!(err, ModelError::Internal(ref msg) if msg.contains("Non-convex")),
+        "expected Non-convex error, got {:?}",
+        err
+    );
 }
 
 /// 制約なし QP (m = 0): bounds のみで定義
@@ -293,10 +310,17 @@ fn qp_no_constraints_only_bounds() {
     model.set_quadratic_objective(q);
     model.minimize(-1.0 * x);
     let r_api = model.solve().expect("API solve");
-    assert!((r_api[x] - 1.0).abs() < 1e-3, "x should be 1, got {}", r_api[x]);
+    assert!(
+        (r_api[x] - 1.0).abs() < 1e-3,
+        "x should be 1, got {}",
+        r_api[x]
+    );
     assert!(r_api[y].abs() < 1e-3, "y should be 0, got {}", r_api[y]);
-    assert!((r_api.objective_value - (-0.5)).abs() < 1e-3,
-        "obj should be -0.5, got {}", r_api.objective_value);
+    assert!(
+        (r_api.objective_value - (-0.5)).abs() < 1e-3,
+        "obj should be -0.5, got {}",
+        r_api.objective_value
+    );
 }
 
 /// Infeasible 検出が API 経由でも正しく Err として返るか
@@ -308,8 +332,11 @@ fn lp_infeasible_returns_err() {
     model.add_constraint(solver::constraint!(x <= 3.0));
     model.minimize(x);
     let err = model.solve().expect_err("should be infeasible");
-    assert!(matches!(err, ModelError::SolveError(SolveError::Infeasible)),
-        "expected SolveError(Infeasible), got {:?}", err);
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+        "expected SolveError(Infeasible), got {:?}",
+        err
+    );
 }
 
 /// Unbounded 検出
@@ -317,10 +344,13 @@ fn lp_infeasible_returns_err() {
 fn lp_unbounded_returns_err() {
     let mut model = Model::new("unbnd");
     let x = model.add_var("x", 0.0, f64::INFINITY);
-    model.minimize(-1.0 * x);  // x → ∞ で obj → -∞
+    model.minimize(-1.0 * x); // x → ∞ で obj → -∞
     let err = model.solve().expect_err("should be unbounded");
-    assert!(matches!(err, ModelError::SolveError(_)),
-        "expected SolveError, got {:?}", err);
+    assert!(
+        matches!(err, ModelError::SolveError(_)),
+        "expected SolveError, got {:?}",
+        err
+    );
 }
 
 /// Model API: dual_solution が QP 経路で取得できるか確認 (長さと magnitude)。
@@ -343,10 +373,56 @@ fn qp_dual_solution_available() {
     model.minimize(0.0 * x);
     let r_api = model.solve().expect("API solve");
 
-    assert!((r_api[x] - 1.0).abs() < 1e-3, "x should be 1, got {}", r_api[x]);
-    let dual = r_api.dual_solution.as_ref().expect("dual_solution should be Some for QP");
+    assert!(
+        (r_api[x] - 1.0).abs() < 1e-3,
+        "x should be 1, got {}",
+        r_api[x]
+    );
+    let dual = r_api
+        .dual_solution
+        .as_ref()
+        .expect("dual_solution should be Some for QP");
     assert_eq!(dual.len(), 1, "dual length should match constraints");
     // |dual| ≈ 1 で確認 (符号は実装規約に依存、現状 Ge は負)
-    assert!((dual[0].abs() - 1.0).abs() < 1e-2,
-        "|Ge dual| should be ≈ 1, got {} (本実装規約: Ge は負側)", dual[0]);
+    assert!(
+        (dual[0].abs() - 1.0).abs() < 1e-2,
+        "|Ge dual| should be ≈ 1, got {} (本実装規約: Ge は負側)",
+        dual[0]
+    );
+}
+
+#[test]
+fn qp_model_eq_and_bound_active_cluster_solves_consistently() {
+    let mut model = Model::new("qp_eq_bound_cluster");
+    let x = model.add_var("x", 0.0, f64::INFINITY);
+    let y = model.add_var("y", 0.0, f64::INFINITY);
+    let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
+    model.set_quadratic_objective(q);
+    model.add_constraint(solver::constraint!((x + y) == 1.0));
+    model.minimize(-1.0 * x);
+
+    let result = model.solve().expect("API solve");
+
+    assert!(
+        (result[x] - 1.0).abs() < 1e-6,
+        "x should be 1, got {}",
+        result[x]
+    );
+    assert!(result[y].abs() < 1e-6, "y should be 0, got {}", result[y]);
+    assert!(
+        (result.objective() + 1.0).abs() < 1e-6,
+        "objective should be -1, got {}",
+        result.objective()
+    );
+
+    let dual = result
+        .dual_solution
+        .as_ref()
+        .expect("dual_solution should be Some for QP");
+    assert_eq!(dual.len(), 1, "dual length should match constraints");
+    assert!(
+        (dual[0] - 1.0).abs() < 1e-5,
+        "equality dual should be 1, got {}",
+        dual[0]
+    );
 }

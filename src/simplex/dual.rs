@@ -20,7 +20,7 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::presolve::RuizScaler;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
-use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
+use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use std::sync::atomic::Ordering;
 
@@ -120,16 +120,7 @@ fn cold_start_dual(
             };
         }
         SimplexOutcome::Timeout(_) => {
-            return SolverResult {
-                status: SolveStatus::Timeout,
-                objective: 0.0,
-                solution: vec![],
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            };
+            return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale);
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();

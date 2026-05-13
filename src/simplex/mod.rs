@@ -272,6 +272,33 @@ pub(crate) enum SimplexOutcome {
     SingularBasis,
 }
 
+pub(crate) fn timeout_result_with_incumbent(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+) -> SolverResult {
+    let solution = extract_solution(sf, basis, x_b, col_scale);
+    let objective = problem
+        .c
+        .iter()
+        .zip(solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>()
+        + sf.obj_offset;
+    SolverResult {
+        status: SolveStatus::Timeout,
+        objective,
+        solution,
+        dual_solution: vec![],
+        reduced_costs: vec![],
+        slack: vec![],
+        warm_start_basis: None,
+        ..Default::default()
+    }
+}
+
 // --- Standard form construction ---
 
 /// LPを改訂シンプレックス法用の標準形に変換する
@@ -599,6 +626,36 @@ mod tests {
     ) -> LpProblem {
         let a = CscMatrix::from_triplets(rows, cols, vals, nrows, ncols).unwrap();
         LpProblem::new(c, a, b).unwrap()
+    }
+
+    #[test]
+    fn test_timeout_result_with_incumbent_uses_original_objective() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![3.0, 1.0],
+            a,
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let sf = build_standard_form(&lp);
+        let basis = sf.initial_basis.clone();
+        let x_b = sf.b.clone();
+        let col_scale = vec![1.0; sf.n_total];
+
+        let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale);
+
+        assert_eq!(result.status, SolveStatus::Timeout);
+        assert_eq!(result.solution.len(), 2);
+        let expected_obj = lp
+            .c
+            .iter()
+            .zip(result.solution.iter())
+            .map(|(&ci, &xi)| ci * xi)
+            .sum::<f64>();
+        assert!((result.objective - expected_obj).abs() < 1e-12, "obj={}", result.objective);
     }
 
     #[test]
