@@ -353,6 +353,14 @@ pub(crate) fn solve_ippmm_inner(
     };
     let _ = x0; let _ = y0; let _ = s0;
 
+    // 慣性修正量: Q が indefinite の場合、Gershgorin 円定理から
+    // λ_min(Q) の下界を導出し、Q + δ_ic·I を PSD にする最小量を計算する。
+    // 凸 QP では 0 が返るため既存の収束挙動は変わらない。
+    // この値は rho_retry の下限として使い、KKT (1,1) ブロックの正定値性を保証する。
+    let inertia_correction = super::kkt::compute_inertia_correction(&problem.q);
+    // Q が indefinite かどうかのフラグ (返却ステータスを LocallyOptimal にする判断に使う)
+    let q_is_indefinite = inertia_correction > 0.0;
+
     // PARAM: 根拠=MATLAB拡張版IP-PMM準拠 (env QP_REG_LIMIT で診断 override 可)。
     // 【履歴】論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
     // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
@@ -768,8 +776,10 @@ pub(crate) fn solve_ippmm_inner(
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する
-        let mut rho_retry = rho_matrix;
+        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する。
+        // 不定 Q の場合は inertia_correction を下限として適用し、
+        // KKT (1,1) ブロック Q + rho·I を正定値に保つ。
+        let mut rho_retry = rho_matrix.max(inertia_correction);
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
@@ -1507,8 +1517,17 @@ pub(crate) fn solve_ippmm_inner(
     let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..].to_vec();
 
+    // 不定 Q で IPM が Optimal に収束した場合、局所最適解（KKT 点）として報告する。
+    // 大域的最適性は慣性修正により失われるため、LocallyOptimal を返す。
+    // その他のステータス (Timeout, SuboptimalSolution, Infeasible 等) はそのまま。
+    let final_status = if q_is_indefinite && status == SolveStatus::Optimal {
+        SolveStatus::LocallyOptimal
+    } else {
+        status
+    };
+
     SolverResult {
-        status,
+        status: final_status,
         objective,
         solution: x,
         dual_solution,

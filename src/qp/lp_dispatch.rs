@@ -222,6 +222,9 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             gap: None,
             duality_gap_rel: None,
         },
+        // LocallyOptimal は LP path では発生しない (Q=0 なら Simplex を使うため)。
+        // exhaustive match のためのフォールバック。
+        SolveStatus::LocallyOptimal => SolverResult::numerical_error(),
     }
 }
 

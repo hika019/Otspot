@@ -40,6 +40,10 @@ pub struct IpmOutcome {
     /// `None` = 通常 (収束/未収束)、`Some(Infeasible|Unbounded)` = 確定判定。
     /// 他の status (Optimal/Timeout/...) はここに入れない (残差から外部で判定するため)。
     pub infeasibility_status: Option<crate::problem::SolveStatus>,
+    /// 不定 Q 行列に対して慣性修正付き IPM が走った場合に true。
+    /// 収束時に `Optimal` ではなく `LocallyOptimal` を返すためのフラグ。
+    /// 大域最適性は保証されず、KKT 点（局所最適解またはサドル点）が返される。
+    pub is_locally_optimal: bool,
 }
 
 impl IpmOutcome {
@@ -57,6 +61,7 @@ impl IpmOutcome {
             duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
+            is_locally_optimal: false,
         }
     }
 

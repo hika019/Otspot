@@ -342,6 +342,65 @@ impl PermutedAugmentedKkt {
     }
 }
 
+/// 不定 Q 行列に対して慣性修正量 δ_ic を計算する。
+///
+/// Gershgorin の円定理により、Q の最小固有値 λ_min は次の下界を持つ:
+///   λ_min(Q) >= min_j ( Q[j,j] - R_j )
+/// ここで R_j = Σ_{i≠j} |Q[i,j]| は行 j の対角外絶対値の和（row sum of off-diagonal absolute values）。
+///
+/// (1,1) ブロック Q + δ·I を正定値にするには δ >= max(0, -(min_j(Q[j,j] - R_j))) が必要。
+/// すなわち:
+///   δ_ic = max(0, max_j(R_j - Q[j,j]))
+///
+/// Q が上三角 CSC で格納されているため、対角外要素の走査は上三角と下三角の両方をカウントする
+/// （上三角要素 Q[i,j] (i < j) は行 i の R_i と行 j の R_j の両方に寄与する）。
+///
+/// 返り値: δ_ic >= 0。Q が PSD なら 0 を返す。
+///
+/// 根拠: IPOPT HSL MA27/MA57 の inertia correction と同じアプローチ。
+/// δ_ic は問題のスケールから導出され、マジックナンバーを持たない。
+pub(crate) fn compute_inertia_correction(q: &CscMatrix) -> f64 {
+    let n = q.nrows;
+    if n == 0 {
+        return 0.0;
+    }
+
+    // 各行の対角値と対角外要素絶対値の和を計算する。
+    // Q は上三角 CSC: Q[row, col] (row <= col) が格納されている。
+    // 対角外要素 Q[row, col] (row < col) は:
+    //   - 行 row の R_{row} に寄与（上三角側）
+    //   - 行 col の R_{col} に寄与（下三角の対称側）
+    let mut diag = vec![0.0_f64; n];
+    let mut row_offdiag_sum = vec![0.0_f64; n];
+
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            let val = q.values[k];
+            if row == col {
+                diag[col] = val;
+            } else if row < col {
+                // 上三角要素: 対称性により row の行と col の行の両方の offdiag sum に加える
+                let abs_val = val.abs();
+                row_offdiag_sum[row] += abs_val;
+                row_offdiag_sum[col] += abs_val;
+            }
+        }
+    }
+
+    // δ_ic = max(0, max_j(R_j - Q[j,j]))
+    // Gershgorin: λ_min >= min_j(diag[j] - row_offdiag_sum[j])
+    // → δ_ic を加えると λ_min(Q + δ_ic·I) >= 0
+    let mut delta_ic = 0.0_f64;
+    for j in 0..n {
+        let gershgorin_lower = diag[j] - row_offdiag_sum[j];
+        if gershgorin_lower < 0.0 {
+            delta_ic = delta_ic.max(-gershgorin_lower);
+        }
+    }
+    delta_ic
+}
+
 /// `AugmentedKktCache` を構築する。Q/A の sparsity pattern を 1 回走査して
 /// col_ptr/row_ind/diag slot を確定する。`build_augmented_system` と同じ非ゼロ集合を生成する。
 ///

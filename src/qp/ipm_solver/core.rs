@@ -110,6 +110,15 @@ fn run_ipm_with(
         return IpmOutcome::infeasibility(result.status);
     }
 
+    // 不定 Q に対して慣性修正付き IPM が収束した場合、LocallyOptimal フラグを保持する。
+    // post-processing 後も IpmOutcome を通じて finalize_outcome に伝搬する。
+    let is_locally_optimal = result.status == SolveStatus::LocallyOptimal;
+    // 後続の post-processing は Optimal と同じパスで行えるので、内部ステータスを
+    // Optimal に昇格させて処理する (LocallyOptimal フラグは別途保持)。
+    if is_locally_optimal {
+        result.status = SolveStatus::Optimal;
+    }
+
     let invalid = result.solution.is_empty()
         || result.solution.iter().any(|v| !v.is_finite())
         || matches!(result.status, SolveStatus::NumericalError);
@@ -126,6 +135,7 @@ fn run_ipm_with(
             duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
+            is_locally_optimal: false,
         };
     }
 
@@ -741,6 +751,7 @@ fn run_ipm_with(
         duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,
+        is_locally_optimal,
     }
 }
 

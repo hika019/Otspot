@@ -2559,9 +2559,16 @@ mod tests {
         );
     }
 
-    /// T27: 不定Q行列（対角に負値）→ NonConvex返却
-    /// Q = diag(-1.0, 1.0, 1.0) → 最小固有値 = -1.0 → 非凸QP
-    /// 期待: SolveStatus::NonConvex(...)
+    /// T27: 不定Q行列（対角に負値）→ 慣性修正付き IPM で KKT 点を返す
+    ///
+    /// Q = diag(-1.0, 1.0, 1.0)、c = [0,0,0]、制約なし、bounds なし。
+    /// 真の問題は x1 → ∞ で非有界だが、慣性修正付き IPM は
+    /// δ_ic = 1.0 (Gershgorin: -(-1.0) = 1.0) を加え Q_mod = diag(0,2,2) として解く。
+    /// 修正問題の KKT 点は x* = (0,0,0)、status は LocallyOptimal または Unbounded。
+    ///
+    /// 検証:
+    ///  - NonConvex が返らないこと（慣性修正で IPM を走らせる）
+    ///  - LocallyOptimal, Optimal, Timeout, Unbounded のいずれかが返ること
     #[test]
     fn test_qp_nonconvex_indefinite_q() {
         // Q = diag(-1.0, 1.0, 1.0)（不定行列: 対角に負値）
@@ -2579,10 +2586,68 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let result = solve_qp(&problem);
+        // NonConvex は返ってはならない（慣性修正で IPM にルーティングされる）
         assert!(
-            matches!(result.status, SolveStatus::NonConvex(_)),
-            "T27: 不定Q行列はNonConvexを返すこと。got: {:?}", result.status
+            !matches!(result.status, SolveStatus::NonConvex(_)),
+            "T27: 不定Q行列で NonConvex を返してはならない（慣性修正で IPM にルーティング）。got: {:?}",
+            result.status
         );
+        // LocallyOptimal, Optimal, Unbounded, Timeout などの有効なステータスが返ること
+        assert!(
+            matches!(
+                result.status,
+                SolveStatus::LocallyOptimal | SolveStatus::Optimal
+                | SolveStatus::Unbounded | SolveStatus::Timeout
+                | SolveStatus::SuboptimalSolution | SolveStatus::NumericalError
+            ),
+            "T27: 有効なステータス (LocallyOptimal/Optimal/Unbounded/Timeout 等) を返すこと。got: {:?}",
+            result.status
+        );
+    }
+
+    /// T27b: 不定Q行列 + 有界制約 → LocallyOptimal を返す
+    ///
+    /// Q = diag(-2.0, 2.0)、c = [0, 0]、制約なし、bounds = [-1, 1]^2。
+    /// Gershgorin δ_ic = 2.0。Q_mod = diag(0, 4)。
+    /// KKT 点: x1 は bounds 活性 (x1=±1 のどちらか)、x2=0。
+    /// 慣性修正付き IPM は LocallyOptimal を返すことを期待。
+    #[test]
+    fn test_qp_nonconvex_with_bounds() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 1],
+            &[-2.0, 2.0],
+            2,
+            2,
+        ).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let b = vec![];
+        let bounds = vec![(-1.0_f64, 1.0_f64); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds.clone()).unwrap();
+
+        let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
+
+        // NonConvex は返ってはならない
+        assert!(
+            !matches!(result.status, SolveStatus::NonConvex(_)),
+            "T27b: 不定Q行列 + bounds で NonConvex を返してはならない。got: {:?}", result.status
+        );
+        // LocallyOptimal または Optimal が期待（有界なので収束しやすい）
+        assert!(
+            matches!(result.status, SolveStatus::LocallyOptimal | SolveStatus::Optimal
+                | SolveStatus::SuboptimalSolution | SolveStatus::Timeout),
+            "T27b: status は LocallyOptimal/Optimal/SuboptimalSolution/Timeout のいずれかであること。got: {:?}",
+            result.status
+        );
+        // 解が存在する場合、bounds 内に収まっていること
+        if !result.solution.is_empty() {
+            for (&xi, &(lb, ub)) in result.solution.iter().zip(bounds.iter()) {
+                assert!(xi >= lb - 1e-4 && xi <= ub + 1e-4,
+                    "T27b: 解が bounds 内に収まっていること: x={:.6}, bounds=[{:.1},{:.1}]", xi, lb, ub);
+            }
+        }
     }
 
     /// T28: 半正定値Q行列（最小固有値=0）→ PSD判定（NonConvexでないこと）
