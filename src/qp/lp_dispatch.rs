@@ -120,29 +120,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let result = simplex_result;
     match result.status {
         SolveStatus::Optimal => {
-            let x = result.solution.clone();
-            // c^T x + obj_offset (QPS の N-row RHS による定数項)。
-            let obj: f64 = problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>()
-                + problem.obj_offset;
-            // 双対解はSimplex出力をそのまま使用（展開なし）
-            let dual = result.dual_solution.clone();
-            SolverResult {
-                status: SolveStatus::Optimal,
-                objective: obj,
-                solution: x,
-                dual_solution: dual,
-                reduced_costs: result.reduced_costs.clone(),
-                slack: result.slack.clone(),
-                warm_start_basis: result.warm_start_basis.clone(),
-                bound_duals: vec![],
-                iterations: result.iterations,
-                solver_used: None,
-                final_residuals: None,
-                pfeas: None,
-                dfeas: None,
-                gap: None,
-                duality_gap_rel: None,
-            }
+            convert_simplex_result(problem, result, SolveStatus::Optimal)
         }
         SolveStatus::Infeasible => SolverResult::infeasible(),
         SolveStatus::Unbounded => SolverResult {
@@ -171,23 +149,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             // DEAD PATH: SuboptimalSolution is not reachable via current simplex implementation
             SolverResult::numerical_error()
         }
-        SolveStatus::Timeout => SolverResult {
-            status: SolveStatus::Timeout,
-            objective: f64::INFINITY,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            bound_duals: vec![],
-            iterations: 0,
-            solver_used: None,
-            final_residuals: None,
-            pfeas: None,
-            dfeas: None,
-            gap: None,
-            duality_gap_rel: None,
-        },
+        SolveStatus::Timeout => convert_simplex_result(problem, result, SolveStatus::Timeout),
         SolveStatus::NumericalError => SolverResult {
             status: SolveStatus::NumericalError,
             objective: f64::INFINITY,
@@ -222,6 +184,62 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             gap: None,
             duality_gap_rel: None,
         },
+    }
+}
+
+fn convert_simplex_result(
+    problem: &QpProblem,
+    result: SolverResult,
+    status: SolveStatus,
+) -> SolverResult {
+    let has_optimal_status = status == SolveStatus::Optimal;
+    if result.solution.len() != problem.num_vars {
+        return SolverResult {
+            status,
+            objective: if has_optimal_status {
+                f64::NAN
+            } else {
+                f64::INFINITY
+            },
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            bound_duals: vec![],
+            iterations: result.iterations,
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
+            duality_gap_rel: None,
+        };
+    }
+
+    let obj = problem
+        .c
+        .iter()
+        .zip(result.solution.iter())
+        .map(|(&ci, &xi)| ci * xi)
+        .sum::<f64>()
+        + problem.obj_offset;
+    SolverResult {
+        status,
+        objective: obj,
+        solution: result.solution,
+        dual_solution: result.dual_solution,
+        reduced_costs: result.reduced_costs,
+        slack: result.slack,
+        warm_start_basis: result.warm_start_basis,
+        bound_duals: vec![],
+        iterations: result.iterations,
+        solver_used: None,
+        final_residuals: None,
+        pfeas: None,
+        dfeas: None,
+        gap: None,
+        duality_gap_rel: None,
     }
 }
 
@@ -264,5 +282,69 @@ fn simplex_primal_quality(problem: &QpProblem, solution: &[f64]) -> Option<(f64,
         Some((pfeas_rel, bfeas_rel))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::CscMatrix;
+
+    fn tiny_lp_problem() -> QpProblem {
+        let q = CscMatrix::new(2, 2);
+        let c = vec![1.0, 2.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap()
+    }
+
+    #[test]
+    fn timeout_conversion_keeps_simplex_incumbent() {
+        let problem = tiny_lp_problem();
+        let lp_like = SolverResult {
+            status: SolveStatus::Timeout,
+            objective: 123.0,
+            solution: vec![1.0, 0.0],
+            dual_solution: vec![0.5],
+            reduced_costs: vec![0.0, 1.0],
+            slack: vec![0.0],
+            warm_start_basis: None,
+            bound_duals: vec![],
+            iterations: 7,
+            solver_used: None,
+            final_residuals: None,
+            pfeas: None,
+            dfeas: None,
+            gap: None,
+            duality_gap_rel: None,
+        };
+
+        let converted = convert_simplex_result(&problem, lp_like, SolveStatus::Timeout);
+
+        assert_eq!(converted.status, SolveStatus::Timeout);
+        assert_eq!(converted.iterations, 7);
+        assert_eq!(converted.solution, vec![1.0, 0.0]);
+        assert_eq!(converted.dual_solution, vec![0.5]);
+        assert_eq!(converted.reduced_costs, vec![0.0, 1.0]);
+        assert_eq!(converted.objective, 1.0);
+    }
+
+    #[test]
+    fn timeout_conversion_without_incumbent_stays_empty() {
+        let problem = tiny_lp_problem();
+        let lp_like = SolverResult {
+            status: SolveStatus::Timeout,
+            iterations: 3,
+            ..Default::default()
+        };
+
+        let converted = convert_simplex_result(&problem, lp_like, SolveStatus::Timeout);
+
+        assert_eq!(converted.status, SolveStatus::Timeout);
+        assert_eq!(converted.iterations, 3);
+        assert!(converted.solution.is_empty());
+        assert!(converted.dual_solution.is_empty());
+        assert!(converted.reduced_costs.is_empty());
     }
 }

@@ -12,7 +12,7 @@ use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
-use super::{StandardForm, SimplexOutcome, extract_dual_info};
+use super::{StandardForm, SimplexOutcome, extract_dual_info, timeout_result_with_incumbent};
 
 /// 2相シンプレックス法で標準形LPを解く
 ///
@@ -326,16 +326,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
-            SimplexOutcome::Timeout(_) => SolverResult {
-                status: SolveStatus::Timeout,
-                objective: 0.0,
-                solution: vec![],
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            },
+            SimplexOutcome::Timeout(_) => timeout_result_with_incumbent(sf, problem, &basis, &x_b, &col_scale),
             SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }
