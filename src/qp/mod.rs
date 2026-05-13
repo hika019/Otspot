@@ -620,6 +620,136 @@ fn dual_recovery_progress_tol(prev_kkt: f64, cur_kkt: f64, target_pf: f64) -> f6
     64.0 * f64::EPSILON * scale
 }
 
+#[derive(Clone, Copy)]
+enum DualRecoveryBoundVar {
+    Lower { var: usize, slot: usize },
+    Upper { var: usize, slot: usize },
+}
+
+impl DualRecoveryBoundVar {
+    fn var(self) -> usize {
+        match self {
+            DualRecoveryBoundVar::Lower { var, .. } | DualRecoveryBoundVar::Upper { var, .. } => var,
+        }
+    }
+
+    fn slot(self) -> usize {
+        match self {
+            DualRecoveryBoundVar::Lower { slot, .. } | DualRecoveryBoundVar::Upper { slot, .. } => slot,
+        }
+    }
+
+    fn coeff(self) -> f64 {
+        match self {
+            DualRecoveryBoundVar::Lower { .. } => -1.0,
+            DualRecoveryBoundVar::Upper { .. } => 1.0,
+        }
+    }
+}
+
+fn select_dual_recovery_local_bounds(
+    problem: &QpProblem,
+    solution: &[f64],
+    bound_duals: &[f64],
+    cols: &[usize],
+    provisional_residual: &[f64],
+) -> (Vec<DualRecoveryBoundVar>, Vec<usize>) {
+    let n = problem.num_vars;
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let mut lb_slot_of_var = vec![None; n];
+    let mut ub_slot_of_var = vec![None; n];
+    let mut lb_slot = 0usize;
+    let mut ub_slot = n_lb;
+    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+        if lb.is_finite() {
+            lb_slot_of_var[j] = Some(lb_slot);
+            lb_slot += 1;
+        }
+        if ub.is_finite() {
+            ub_slot_of_var[j] = Some(ub_slot);
+            ub_slot += 1;
+        }
+    }
+
+    let mut local_bounds = Vec::new();
+    for &col in cols {
+        let xj = solution[col];
+        let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs());
+        let (lb, ub) = problem.bounds[col];
+        let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
+        if is_fx {
+            continue;
+        }
+        let lb_active = lb.is_finite()
+            && ((xj - lb).abs() <= tol
+                || lb_slot_of_var[col]
+                    .and_then(|slot| bound_duals.get(slot))
+                    .is_some_and(|&z| z > 0.0));
+        let ub_active = ub.is_finite()
+            && ((ub - xj).abs() <= tol
+                || ub_slot_of_var[col]
+                    .and_then(|slot| bound_duals.get(slot))
+                    .is_some_and(|&z| z > 0.0));
+        let residual_j = provisional_residual[col];
+        let lb_can_help = residual_j > 0.0
+            || lb_slot_of_var[col]
+                .and_then(|slot| bound_duals.get(slot))
+                .is_some_and(|&z| z > 0.0);
+        let ub_can_help = residual_j < 0.0
+            || ub_slot_of_var[col]
+                .and_then(|slot| bound_duals.get(slot))
+                .is_some_and(|&z| z > 0.0);
+        match (lb_active, ub_active) {
+            (true, false) => {
+                if lb_can_help {
+                    if let Some(slot) = lb_slot_of_var[col] {
+                        local_bounds.push(DualRecoveryBoundVar::Lower { var: col, slot });
+                    }
+                }
+            }
+            (false, true) => {
+                if ub_can_help {
+                    if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(DualRecoveryBoundVar::Upper { var: col, slot });
+                    }
+                }
+            }
+            (true, true) => {
+                if lb_can_help && !ub_can_help {
+                    if let Some(slot) = lb_slot_of_var[col] {
+                        local_bounds.push(DualRecoveryBoundVar::Lower { var: col, slot });
+                    }
+                } else if ub_can_help && !lb_can_help {
+                    if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(DualRecoveryBoundVar::Upper { var: col, slot });
+                    }
+                } else if lb_can_help && ub_can_help {
+                    let lb_dist = (xj - lb).abs();
+                    let ub_dist = (ub - xj).abs();
+                    if lb_dist <= ub_dist {
+                        if let Some(slot) = lb_slot_of_var[col] {
+                            local_bounds.push(DualRecoveryBoundVar::Lower { var: col, slot });
+                        }
+                    } else if let Some(slot) = ub_slot_of_var[col] {
+                        local_bounds.push(DualRecoveryBoundVar::Upper { var: col, slot });
+                    }
+                }
+            }
+            (false, false) => {}
+        }
+    }
+
+    let mut bound_pos_of_var = vec![usize::MAX; n];
+    for (pos, &bound) in local_bounds.iter().enumerate() {
+        bound_pos_of_var[bound.var()] = pos;
+    }
+    (local_bounds, bound_pos_of_var)
+}
+
 /// 明確に slack のある不等式制約の dual を 0 に射影する。
 ///
 /// Le 制約で `Ax < b`、Ge 制約で `Ax > b` が十分明確な行は、相補性より dual は 0。
@@ -1121,122 +1251,13 @@ pub(crate) fn refine_dual_worst_active_block(
         return;
     }
 
-    let n_lb = problem
-        .bounds
-        .iter()
-        .filter(|&&(lb, _)| lb.is_finite())
-        .count();
-    let mut lb_slot_of_var = vec![None; n];
-    let mut ub_slot_of_var = vec![None; n];
-    let mut lb_slot = 0usize;
-    let mut ub_slot = n_lb;
-    for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
-        if lb.is_finite() {
-            lb_slot_of_var[j] = Some(lb_slot);
-            lb_slot += 1;
-        }
-        if ub.is_finite() {
-            ub_slot_of_var[j] = Some(ub_slot);
-            ub_slot += 1;
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum LocalBoundVar {
-        Lower { var: usize, slot: usize },
-        Upper { var: usize, slot: usize },
-    }
-    impl LocalBoundVar {
-        fn var(self) -> usize {
-            match self {
-                LocalBoundVar::Lower { var, .. } | LocalBoundVar::Upper { var, .. } => var,
-            }
-        }
-        fn slot(self) -> usize {
-            match self {
-                LocalBoundVar::Lower { slot, .. } | LocalBoundVar::Upper { slot, .. } => slot,
-            }
-        }
-        fn coeff(self) -> f64 {
-            match self {
-                LocalBoundVar::Lower { .. } => -1.0,
-                LocalBoundVar::Upper { .. } => 1.0,
-            }
-        }
-    }
-
-    let mut local_bounds = Vec::new();
-    for &col in &cols {
-        let xj = result.solution[col];
-        let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + xj.abs());
-        let (lb, ub) = problem.bounds[col];
-        let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
-        if is_fx {
-            continue;
-        }
-        let lb_active = lb.is_finite()
-            && ((xj - lb).abs() <= tol
-                || lb_slot_of_var[col]
-                    .and_then(|slot| result.bound_duals.get(slot))
-                    .is_some_and(|&z| z > 0.0));
-        let ub_active = ub.is_finite()
-            && ((ub - xj).abs() <= tol
-                || ub_slot_of_var[col]
-                    .and_then(|slot| result.bound_duals.get(slot))
-                    .is_some_and(|&z| z > 0.0));
-        let residual_j = provisional_residual[col];
-        let lb_can_help = residual_j > 0.0
-            || lb_slot_of_var[col]
-                .and_then(|slot| result.bound_duals.get(slot))
-                .is_some_and(|&z| z > 0.0);
-        let ub_can_help = residual_j < 0.0
-            || ub_slot_of_var[col]
-                .and_then(|slot| result.bound_duals.get(slot))
-                .is_some_and(|&z| z > 0.0);
-        match (lb_active, ub_active) {
-            (true, false) => {
-                if lb_can_help {
-                    if let Some(slot) = lb_slot_of_var[col] {
-                        local_bounds.push(LocalBoundVar::Lower { var: col, slot });
-                    }
-                }
-            }
-            (false, true) => {
-                if ub_can_help {
-                    if let Some(slot) = ub_slot_of_var[col] {
-                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
-                    }
-                }
-            }
-            (true, true) => {
-                if lb_can_help && !ub_can_help {
-                    if let Some(slot) = lb_slot_of_var[col] {
-                        local_bounds.push(LocalBoundVar::Lower { var: col, slot });
-                    }
-                } else if ub_can_help && !lb_can_help {
-                    if let Some(slot) = ub_slot_of_var[col] {
-                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
-                    }
-                } else if lb_can_help && ub_can_help {
-                    let lb_dist = (xj - lb).abs();
-                    let ub_dist = (ub - xj).abs();
-                    if lb_dist <= ub_dist {
-                        if let Some(slot) = lb_slot_of_var[col] {
-                            local_bounds.push(LocalBoundVar::Lower { var: col, slot });
-                        }
-                    } else if let Some(slot) = ub_slot_of_var[col] {
-                        local_bounds.push(LocalBoundVar::Upper { var: col, slot });
-                    }
-                }
-            }
-            (false, false) => {}
-        }
-    }
-
-    let mut bound_pos_of_var = vec![usize::MAX; n];
-    for (pos, &bound) in local_bounds.iter().enumerate() {
-        bound_pos_of_var[bound.var()] = pos;
-    }
+    let (local_bounds, bound_pos_of_var) = select_dual_recovery_local_bounds(
+        problem,
+        &result.solution,
+        &result.bound_duals,
+        &cols,
+        &provisional_residual,
+    );
 
     if trace {
         eprintln!(
@@ -2088,86 +2109,8 @@ fn try_dual_only_ir(
         eprintln!("DUAL_IR cluster_free={}/{}", n_free, n_free_eval);
     }
 
-    // 3. A_free_active dense (m_active × n_free) を構築 → G = A_free^T A_free (上三角)
-    let mut a_free = vec![0.0_f64; m_active * n_free];
-    for (fi, &j) in free_idx.iter().enumerate() {
-        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-            let r = problem.a.row_ind[k];
-            let pos = active_row_pos[r];
-            if pos != usize::MAX {
-                a_free[pos * n_free + fi] = problem.a.values[k];
-            }
-        }
-    }
-    // G[fi, fj] for fi <= fj: Σ_r a_free[r,fi] * a_free[r,fj]
-    let mut g_dense = vec![0.0_f64; n_free * n_free];
-    for r in 0..m_active {
-        let row_off = r * n_free;
-        for fi in 0..n_free {
-            let aij = a_free[row_off + fi];
-            if aij == 0.0 {
-                continue;
-            }
-            for fj in fi..n_free {
-                let aik = a_free[row_off + fj];
-                if aik == 0.0 {
-                    continue;
-                }
-                g_dense[fi * n_free + fj] += aij * aik;
-            }
-        }
-    }
-    // 対角に δ 加算 (数値安定化)
-    for fi in 0..n_free {
-        g_dense[fi * n_free + fi] += dual_ir_reg;
-    }
-
-    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-        return 0;
-    }
-
-    // 4. G を上三角 CSC に変換して Cholesky (LDL) factorize
-    let mut col_ptr: Vec<usize> = vec![0; n_free + 1];
-    let mut row_ind: Vec<usize> = Vec::new();
-    let mut values: Vec<f64> = Vec::new();
-    for fj in 0..n_free {
-        for fi in 0..=fj {
-            let v = g_dense[fi * n_free + fj];
-            if v != 0.0 {
-                row_ind.push(fi);
-                values.push(v);
-            }
-        }
-        col_ptr[fj + 1] = row_ind.len();
-    }
-    let g_csc = CscMatrix {
-        col_ptr,
-        row_ind,
-        values,
-        nrows: n_free,
-        ncols: n_free,
-    };
-    let factor = match crate::linalg::ldl::factorize(&g_csc) {
-        Ok(f) => f,
-        Err(e) => {
-            if trace {
-                eprintln!("DUAL_IR factorize failed: {:?}", e);
-            }
-            return 0;
-        }
-    };
-
-    // 5-7. 反復解: 内側 IR (G 固定なので factor 再利用)。
-    //      LDLt 内部の dynamic regularization (delta=1e-8) で rank-deficient 成分の
-    //      α が damp されるため、1 回 solve では df が半減程度。複数回 solve で
-    //      残差を residual-update 方式で削っていく (Wilkinson IR と同形)。
-    //      G α = r_d_free → α → δy = -A_free α → y += δy → 残差再計算 → 繰り返し
-    //
-    //      y を DD 精度で保持する理由:
-    //      Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
-    //      f64 での `y[i] += dy[i]` は |dy[i]| < eps_f64 × |y[i]| ≈ 2e-6 を切り捨てる。
-    //      iter 以降の dy_inf ≈ 1e-8 はこのケースに該当し、修正が吸収されて振動する。
-    //      y_dd を TwoFloat で保持することで 1e10 の y に 1e-8 の修正を正確に蓄積する。
+    // y/z を連成で更新する。row-only だと active bound 列が押し返すため、
+    // free cluster 上で [row duals ; active bound duals] の局所 least squares を解く。
     let mut tmp = result.clone();
     // y を DD 精度で保持 (f64 y への累積で精度が失われるのを防ぐ)。
     // Ruiz presolve 後の unscale で y が 1e10 級に増幅される問題 (QFORPLAN) では、
@@ -2199,24 +2142,87 @@ fn try_dual_only_ir(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let mut alpha = vec![0.0_f64; n_free];
-        factor.solve(&current_r_d_free, &mut alpha);
-        if alpha.iter().any(|v| !v.is_finite()) {
+        let mut provisional_residual = vec![0.0_f64; problem.num_vars];
+        for (fi, &j) in free_idx.iter().enumerate() {
+            provisional_residual[j] = current_r_d_free[fi];
+        }
+        let (local_bounds, bound_pos_of_var) = select_dual_recovery_local_bounds(
+            problem,
+            &tmp.solution,
+            &tmp.bound_duals,
+            &free_idx,
+            &provisional_residual,
+        );
+        let ulen = m_active + local_bounds.len();
+        if ulen == 0 {
+            break;
+        }
+        let mut gram = vec![0.0_f64; ulen * ulen];
+        let mut rhs = vec![0.0_f64; ulen];
+        for (fi, &j) in free_idx.iter().enumerate() {
+            let residual = current_r_d_free[fi];
+            let mut col_vec = vec![0.0_f64; ulen];
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                let r = problem.a.row_ind[k];
+                let pos = active_row_pos[r];
+                if pos != usize::MAX {
+                    col_vec[pos] = problem.a.values[k];
+                }
+            }
+            let bpos = bound_pos_of_var[j];
+            if bpos != usize::MAX {
+                col_vec[m_active + bpos] = local_bounds[bpos].coeff();
+            }
+            for i in 0..ulen {
+                rhs[i] -= col_vec[i] * residual;
+                for j2 in i..ulen {
+                    gram[i * ulen + j2] += col_vec[i] * col_vec[j2];
+                }
+            }
+        }
+        for i in 0..ulen {
+            gram[i * ulen + i] += dual_ir_reg;
+        }
+        let mut col_ptr: Vec<usize> = vec![0; ulen + 1];
+        let mut row_ind: Vec<usize> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        for j in 0..ulen {
+            for i in 0..=j {
+                let v = gram[i * ulen + j];
+                if v != 0.0 {
+                    row_ind.push(i);
+                    values.push(v);
+                }
+            }
+            col_ptr[j + 1] = row_ind.len();
+        }
+        let gram_csc = CscMatrix {
+            col_ptr,
+            row_ind,
+            values,
+            nrows: ulen,
+            ncols: ulen,
+        };
+        let factor = match crate::linalg::ldl::factorize(&gram_csc) {
+            Ok(f) => f,
+            Err(e) => {
+                if trace {
+                    eprintln!("DUAL_IR factorize failed: {:?}", e);
+                }
+                break;
+            }
+        };
+        let mut delta = vec![0.0_f64; ulen];
+        factor.solve(&rhs, &mut delta);
+        if delta.iter().any(|v| !v.is_finite()) {
             if trace {
                 eprintln!("DUAL_IR inner={} solve NaN, abort", inner);
             }
             break;
         }
-        // δy を DD で計算 (A_free × (-alpha))
         let mut dy_dd = vec![TwoFloat::from(0.0); m];
-        for (fi, &j) in free_idx.iter().enumerate() {
-            let af = -alpha[fi];
-            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
-                let r = problem.a.row_ind[k];
-                if active_row_pos[r] != usize::MAX {
-                    dy_dd[r] = dy_dd[r] + TwoFloat::new_mul(problem.a.values[k], af);
-                }
-            }
+        for (pos, &row) in active_rows.iter().enumerate() {
+            dy_dd[row] = TwoFloat::from(delta[pos]);
         }
         let dy_inf = dy_dd
             .iter()
@@ -2231,6 +2237,7 @@ fn try_dual_only_ir(
         let mut accepted_df_abs = df_abs_post;
         let mut accepted_r_d_free = current_r_d_free.clone();
         let mut accepted_y_dd = y_dd.clone();
+        let mut accepted_bound_duals = tmp.bound_duals.clone();
         let mut accepted_step_scale = 0.0_f64;
         let mut step_scale = 1.0_f64;
         while step_scale > 0.0 {
@@ -2239,12 +2246,21 @@ fn try_dual_only_ir(
                 .zip(dy_dd.iter())
                 .map(|(&y, &d)| y + d * step_scale)
                 .collect();
+            let mut bound_duals_new = tmp.bound_duals.clone();
             for row in 0..m {
                 let val = f64::from(y_dd_new[row]);
                 let lo = proj_lower[row];
                 let hi = proj_upper[row];
                 let clamped = if lo <= hi { val.clamp(lo, hi) } else { val };
                 y_dd_new[row] = TwoFloat::from(clamped);
+            }
+            for (pos, &bound) in local_bounds.iter().enumerate() {
+                let slot = bound.slot();
+                if slot >= bound_duals_new.len() {
+                    continue;
+                }
+                let z = tmp.bound_duals[slot] + step_scale * delta[m_active + pos];
+                bound_duals_new[slot] = z.max(0.0);
             }
 
             // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
@@ -2262,7 +2278,7 @@ fn try_dual_only_ir(
                     let r = problem.a.row_ind[k];
                     aty = aty + y_dd_new[r] * problem.a.values[k];
                 }
-                let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
+                let bc = bound_contrib_at_var(&problem.bounds, &bound_duals_new, j);
                 let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
                 if let Some(local_pos) = free_idx.iter().position(|&jj| jj == j) {
                     new_r_d_free[local_pos] = r_d;
@@ -2284,6 +2300,7 @@ fn try_dual_only_ir(
                 accepted_df_abs = new_df_abs;
                 accepted_r_d_free = new_r_d_free;
                 accepted_y_dd = y_dd_new;
+                accepted_bound_duals = bound_duals_new;
                 accepted_step_scale = step_scale;
                 break;
             }
@@ -2323,6 +2340,7 @@ fn try_dual_only_ir(
         for i in 0..m {
             tmp.dual_solution[i] = f64::from(y_dd[i]);
         }
+        tmp.bound_duals = accepted_bound_duals;
         current_r_d_free = accepted_r_d_free;
         df_rel_post = accepted_df_rel;
         df_abs_post = accepted_df_abs;
@@ -7068,6 +7086,59 @@ mod tests {
             result.dual_solution[1].abs() < 1e-12,
             "inactive Le row dual should stay zero, got {}",
             result.dual_solution[1]
+        );
+    }
+
+    #[test]
+    fn test_dual_only_ir_couples_row_and_bound_duals() {
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0_f64], 2, 2).unwrap();
+        let c = vec![-1.0_f64, 0.0_f64];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 1.0_f64], 1, 2).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+        };
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0_f64, 0.0_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![0.0_f64, 0.0_f64],
+            ..SolverResult::default()
+        };
+
+        let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        let accepted = try_dual_only_ir(&problem, &mut result, 1e-8, None);
+        let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+
+        assert!(accepted > 0, "coupled DUAL_IR should accept on bound-coupled case");
+        assert!(post < pre, "coupled DUAL_IR should reduce KKT: pre={} post={}", pre, post);
+        assert!(
+            (result.dual_solution[0] - 1.0).abs() < 1e-6,
+            "row dual should be close to 1, got {}",
+            result.dual_solution[0]
+        );
+        assert!(
+            (result.bound_duals[1] - 1.0).abs() < 1e-6,
+            "active lower-bound dual should be close to 1, got {}",
+            result.bound_duals[1]
         );
     }
 
