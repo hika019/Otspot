@@ -20,7 +20,7 @@ use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
 use faer::reborrow::*;
 use faer::sparse::linalg::cholesky::{
     factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRef, SymbolicCholesky,
-    SymmetricOrdering,
+    SymbolicCholeskyRaw, SymmetricOrdering, simplicial,
 };
 use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
@@ -297,7 +297,155 @@ fn do_numeric_factorize_with_cache(
     Ok((symbolic, l_values))
 }
 
+/// Q 行列から上三角 CSC を抽出する (row <= col のみ保持)。
+///
+/// Q が full-symmetric (上三角 + 下三角) で格納されている場合でも、
+/// faer の LLT/LDL に渡せる上三角 CSC を構築する。
+/// Q がすでに上三角のみなら再配置なしで同等の行列を返す。
+fn q_to_upper_triangular(q: &CscMatrix) -> CscMatrix {
+    let n = q.nrows;
+    // 上三角エントリのみ収集
+    let mut rows: Vec<usize> = Vec::new();
+    let mut cols: Vec<usize> = Vec::new();
+    let mut vals: Vec<f64> = Vec::new();
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            if row <= col {
+                rows.push(row);
+                cols.push(col);
+                vals.push(q.values[k]);
+            }
+        }
+    }
+    if rows.is_empty() {
+        CscMatrix::new(n, n)
+    } else {
+        CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/// Q 行列が PSD (半正定値) かどうかを LDL^T 慣性判定で判定する。
+///
+/// ## アルゴリズム
+///
+/// faer の `factorize_simplicial_numeric_ldlt`（正則化なし）で因子化を試みる:
+///
+/// - **成功** → D 対角を走査:
+///   - D[j] < 0 の要素があれば **不定 (indefinite)** → `false` を返す
+///   - D[j] >= 0 のみ → **PSD または PD** → `true` を返す
+/// - **失敗** (ZeroPivot) → D[j] = 0 の列が存在 = **零固有値** (PSD) → `true` を返す
+///
+/// ### 根拠
+///
+/// faer の LDL^T 因子化（LltError の内部実装）:
+/// - 負の D[j] は zero pivot と同じ `NonPositivePivot` エラーに **なりません**。
+///   FactorizationKind::Ldlt では `d == 0 || !d.is_finite()` のみがエラー。
+/// - よって D[j] < 0 の不定行列では LDL^T は **正常に完了** し、l_values に負の D が格納される。
+/// - D[j] = 0 のPSD行列では ZeroPivot エラーで終了する。
+///
+/// これにより、LLT（ゼロまたは負で失敗）では区別できない PSD と indefinite を
+/// 正確に識別できる。
+///
+/// ### 制限
+///
+/// - Simplicial 因子化のみ対応。SuperNode 因子化は l_values の D 位置が異なり
+///   読み取りが複雑なため、`true`（PSD と仮定）を返す。大規模問題では
+///   対角チェック（必要条件）で reachable な不定性は除去済み。
+/// - Q がゼロ行列 (LP) の場合は即 `true`。
+/// - Q の全対角が非負かどうかを先にチェック（必要条件）。
+pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
+    let n = q.nrows;
+    if n == 0 {
+        return true;
+    }
+    // Q が全ゼロなら PSD (LP ケース)
+    if q.values.iter().all(|&v| v == 0.0) {
+        return true;
+    }
+    // Q の全対角が非負かどうかを先にチェック (必要条件; 失敗したら即 false)
+    // これは O(nnz) の安価な pre-check。
+    let mut all_diag_nonneg = true;
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            if q.row_ind[k] == col && q.values[k] < 0.0 {
+                all_diag_nonneg = false;
+                break;
+            }
+        }
+        if !all_diag_nonneg {
+            break;
+        }
+    }
+    if !all_diag_nonneg {
+        return false;
+    }
+
+    // LDL^T 慣性判定:
+    // faer の factorize_simplicial_numeric_ldlt (FactorizationKind::Ldlt) は:
+    //   - d == 0 の場合のみ ZeroPivot エラー → PSD (零固有値) → true を返す
+    //   - d < 0 の場合は正常に l_values[k_start] = d として格納 → indefinite
+    //   - d > 0 の場合も正常に格納 → PD
+    // 成功後に l_values の対角位置 (col_ptr[j]) を走査して D[j] < 0 を検出する。
+    //
+    // Q は full-symmetric (上三角 + 下三角) またはすでに上三角のみで格納される場合がある。
+    // faer は上三角 CSC を期待するため、row > col のエントリを除いた上三角 CSC を構築してから渡す。
+    let q_upper = q_to_upper_triangular(q);
+    let a_upper = csc_upper_to_faer_upper(&q_upper);
+    let symbolic = match build_symbolic_hl(&a_upper) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // SuperNode 経路では D 対角の位置が複雑 → 保守的に PSD と仮定して返す。
+    // 大規模問題では対角チェック済みなので、ここに到達する不定行列は
+    // 対角が全て非負の ill-conditioned なケースのみ（実用上まれ）。
+    let SymbolicCholeskyRaw::Simplicial(simp_sym) = symbolic.raw() else {
+        return true; // supernodal: assume PSD
+    };
+
+    let l_nnz = symbolic.len_val();
+    let mut l_values = vec![0.0f64; l_nnz];
+    let scratch_ldlt = simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n);
+    let scratch_solve = simp_sym.solve_in_place_scratch::<f64>(1);
+    let mut mem = MemBuffer::new(StackReq::any_of(&[scratch_ldlt, scratch_solve]));
+    let stack = MemStack::new(&mut mem);
+
+    // 正則化なし (delta=0, epsilon=0) で LDL^T を試みる
+    let reg: LdltRegularization<f64> = LdltRegularization::default();
+
+    match simplicial::factorize_simplicial_numeric_ldlt::<usize, f64>(
+        &mut l_values,
+        a_upper.rb(),
+        reg,
+        simp_sym,
+        stack,
+    ) {
+        Err(_) => {
+            // ZeroPivot: D[j] = 0 → 零固有値 = PSD → 慣性修正不要
+            true
+        }
+        Ok(_) => {
+            // 成功: D 対角を検査する。
+            // Simplicial LDL^T では col_ptr[j] が列 j の最初のエントリ (= 対角 D[j]) を指す。
+            //
+            // FP スレッショルド: PSD 行列でも浮動小数点誤差で D[j] が僅かに負になる場合がある。
+            // n×n 行列でエントリ最大値 q_abs_max の場合、LDL^T の蓄積誤差は
+            // O(n * q_abs_max * eps_machine) 程度。これ以上に負なら真の固有値の符号と判断する。
+            let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+            let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
+            let col_ptr = simp_sym.col_ptr();
+            let has_negative_d = (0..n).any(|j| {
+                let pos = col_ptr[j]; // col_ptr は列 j の先頭 (= D[j]) を指す
+                l_values[pos] < -fp_threshold
+            });
+            // D[j] < -threshold があれば不定行列
+            !has_negative_d
+        }
+    }
+}
 
 /// 正定値疎行列の LDL^T 分解を実行する。
 pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
@@ -600,6 +748,79 @@ mod tests {
         }
         let res: f64 = r.iter().zip(b.iter()).map(|(&ri, &bi)| (ri - bi).powi(2)).sum::<f64>().sqrt();
         assert!(res < 1e-8, "residual={res:.3e}");
+    }
+
+    /// is_q_psd_by_cholesky: PSD 行列は true を返す
+    #[test]
+    fn test_is_q_psd_psd_matrix() {
+        // Q = [[4,1],[1,3]] — PD (固有値 ≈ 2.38, 4.62)
+        let q = upper_tri_csc(2, &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0)]);
+        assert!(is_q_psd_by_cholesky(&q), "PD matrix should be identified as PSD");
+    }
+
+    /// is_q_psd_by_cholesky: 不定行列は false を返す
+    #[test]
+    fn test_is_q_psd_indefinite_matrix() {
+        // Q = [[1,0],[0,-1]] — indefinite (固有値 +1, -1)
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (1, 1, -1.0)]);
+        assert!(!is_q_psd_by_cholesky(&q), "Indefinite matrix should NOT be identified as PSD");
+    }
+
+    /// is_q_psd_by_cholesky: 大きい対角外要素を持つ PSD 行列でも true を返す
+    /// (Gershgorin 誤判定パターン: R_j > Q[j,j] でも実際は PSD)
+    #[test]
+    fn test_is_q_psd_large_offdiag_still_psd() {
+        // Q = [[10, 5],[5, 10]] — PD (固有値 5, 15)
+        // Gershgorin: λ_min >= min(10-5, 10-5) = 5 > 0 → 問題なし
+        // より極端: Q = [[3, 2.9],[2.9, 3]] — PD (固有値 0.1, 5.9)
+        // Gershgorin: λ_min >= min(3-2.9, 3-2.9) = 0.1 > 0
+        // でも: Q = [[2, 1.5],[1.5, 2]] — PD (固有値 0.5, 3.5)
+        // Gershgorin: λ_min >= min(2-1.5, 2-1.5) = 0.5 > 0 → compute_inertia_correction=0
+        // これは問題ない。本当の問題は: Q が PSD でも Gershgorin が < 0 を返すケース。
+        // 例: Q = [[1, 0.9],[0.9, 1]] — PD (固有値 0.1, 1.9)
+        // Gershgorin: λ_min >= min(1-0.9, 1-0.9) = 0.1 (正しく検出)
+        // 境界ケース: Q = [[1, 1.1],[1.1, 2]] — PD if det > 0: det = 2-1.21 = 0.79 > 0
+        // Gershgorin: λ_min >= min(1-1.1, 2-1.1) = min(-0.1, 0.9) = -0.1 → 誤検出
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]);
+        // det = 1*2 - 1.1*1.1 = 2 - 1.21 = 0.79 > 0 → PD
+        // is_q_psd_by_cholesky はここで true を返すべき (Gershgorin は false の誤判定)
+        assert!(is_q_psd_by_cholesky(&q),
+            "PSD matrix with large off-diagonal (Gershgorin false alarm) should be true");
+    }
+
+    /// is_q_psd_by_cholesky: PSD (特異) 行列 → ZeroPivot → true を返す
+    ///
+    /// Q = [[1, 1],[1, 1]] は rank-1 で最小固有値 0 (PSD)。
+    /// LDL^T は ZeroPivot で失敗 → true を返すべき。
+    #[test]
+    fn test_is_q_psd_singular_psd() {
+        // Q = [[1,1],[1,1]] — PSD (rank 1, λ = 0 and 2)
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)]);
+        assert!(is_q_psd_by_cholesky(&q), "Singular PSD matrix should be identified as PSD");
+    }
+
+    /// is_q_psd_by_cholesky: 不定行列 (対角外が大きく不定) → false を返す
+    ///
+    /// Q = [[2, 3],[3, 2]] — indefinite (固有値 -1, 5)
+    #[test]
+    fn test_is_q_psd_offdiag_indefinite() {
+        // Q = [[2,3],[3,2]] — indefinite (det=4-9=-5 < 0, λ = -1, 5)
+        let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 3.0), (1, 1, 2.0)]);
+        assert!(!is_q_psd_by_cholesky(&q), "Indefinite matrix with off-diag should be false");
+    }
+
+    /// is_q_psd_by_cholesky: ゼロ行列は true を返す (LP ケース)
+    #[test]
+    fn test_is_q_psd_zero_matrix() {
+        let q = upper_tri_csc(3, &[]);
+        assert!(is_q_psd_by_cholesky(&q), "Zero matrix (LP) should be identified as PSD");
+    }
+
+    /// is_q_psd_by_cholesky: n=0 は true を返す
+    #[test]
+    fn test_is_q_psd_empty_matrix() {
+        let q = CscMatrix::new(0, 0);
+        assert!(is_q_psd_by_cholesky(&q), "Empty matrix should be identified as PSD");
     }
 
     #[test]

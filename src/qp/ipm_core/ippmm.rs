@@ -356,7 +356,8 @@ pub(crate) fn solve_ippmm_inner(
     // 慣性修正量: Q が indefinite の場合、Gershgorin 円定理から
     // λ_min(Q) の下界を導出し、Q + δ_ic·I を PSD にする最小量を計算する。
     // 凸 QP では 0 が返るため既存の収束挙動は変わらない。
-    // この値は rho_retry の下限として使い、KKT (1,1) ブロックの正定値性を保証する。
+    // この値は q_is_indefinite フラグのみに使用する。rho_retry の下限には使わない
+    // (使うと PSD 問題でも過大正則化になり収束を阻害する)。
     let inertia_correction = super::kkt::compute_inertia_correction(&problem.q);
     // Q が indefinite かどうかのフラグ (返却ステータスを LocallyOptimal にする判断に使う)
     let q_is_indefinite = inertia_correction > 0.0;
@@ -777,9 +778,9 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する。
-        // 不定 Q の場合は inertia_correction を下限として適用し、
-        // KKT (1,1) ブロック Q + rho·I を正定値に保つ。
-        let mut rho_retry = rho_matrix.max(inertia_correction);
+        // 不定 Q の場合も rho_matrix から始め、LDL 失敗時の retry で rho を増やす。
+        // (inertia_correction を下限にすると PSD 問題を誤って過大正則化する。)
+        let mut rho_retry = rho_matrix;
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
