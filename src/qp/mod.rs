@@ -506,7 +506,7 @@ fn compute_dual_recovery_row_bounds(
     }
 
     let qx = problem.q.mat_vec_mul(solution).ok()?;
-    let ax = problem.a.mat_vec_mul(solution).ok()?;
+    let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, solution)?;
 
     let mut lower = vec![f64::NEG_INFINITY; m];
     let mut upper = vec![f64::INFINITY; m];
@@ -525,7 +525,7 @@ fn compute_dual_recovery_row_bounds(
             crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
             crate::problem::ConstraintType::Eq => continue,
         };
-        let tol = SLACK_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+        let tol = dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
         if slack > tol {
             lower[i] = 0.0;
             upper[i] = 0.0;
@@ -582,6 +582,44 @@ fn compute_dual_recovery_row_bounds(
     Some((lower, upper))
 }
 
+fn compute_dual_recovery_row_activity(
+    problem: &QpProblem,
+    solution: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let ax = problem.a.mat_vec_mul(solution).ok()?;
+    let mut row_abs_activity = vec![0.0_f64; problem.num_constraints];
+    for j in 0..problem.num_vars {
+        let xabs = solution[j].abs();
+        if xabs == 0.0 {
+            continue;
+        }
+        for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+            let row = problem.a.row_ind[k];
+            row_abs_activity[row] += problem.a.values[k].abs() * xabs;
+        }
+    }
+    Some((ax, row_abs_activity))
+}
+
+fn dual_recovery_row_slack_tol(
+    problem: &QpProblem,
+    row: usize,
+    ax: f64,
+    row_abs_activity: f64,
+    rel: f64,
+) -> f64 {
+    rel * (1.0 + problem.b[row].abs() + ax.abs() + row_abs_activity)
+}
+
+fn dual_recovery_progress_tol(prev_kkt: f64, cur_kkt: f64, target_pf: f64) -> f64 {
+    let scale = prev_kkt
+        .abs()
+        .max(cur_kkt.abs())
+        .max(target_pf.abs())
+        .max(1.0);
+    64.0 * f64::EPSILON * scale
+}
+
 /// 明確に slack のある不等式制約の dual を 0 に射影する。
 ///
 /// Le 制約で `Ax < b`、Ge 制約で `Ax > b` が十分明確な行は、相補性より dual は 0。
@@ -595,7 +633,7 @@ pub(crate) fn zero_inactive_inequality_duals(
     {
         return;
     }
-    let Ok(ax) = problem.a.mat_vec_mul(&result.solution) else {
+    let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
         return;
     };
     const SLACK_TOL_REL: f64 = 1e-8;
@@ -605,7 +643,7 @@ pub(crate) fn zero_inactive_inequality_duals(
             crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
             crate::problem::ConstraintType::Eq => continue,
         };
-        let tol = SLACK_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
+        let tol = dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
         if slack > tol {
             result.dual_solution[i] = 0.0;
         }
@@ -918,7 +956,7 @@ pub(crate) fn refine_dual_worst_active_block(
     } else {
         vec![0.0_f64; n]
     };
-    let Ok(ax) = problem.a.mat_vec_mul(&result.solution) else {
+    let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
         return;
     };
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
@@ -951,13 +989,25 @@ pub(crate) fn refine_dual_worst_active_block(
             crate::problem::ConstraintType::Eq => true,
             crate::problem::ConstraintType::Le => {
                 let slack = problem.b[row] - ax[row];
-                slack.abs()
-                    <= DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[row].abs() + ax[row].abs())
+                let tol = dual_recovery_row_slack_tol(
+                    problem,
+                    row,
+                    ax[row],
+                    row_abs_activity[row],
+                    DUAL_RECOVERY_ACTIVE_TOL_REL,
+                );
+                slack.abs() <= tol
             }
             crate::problem::ConstraintType::Ge => {
                 let slack = ax[row] - problem.b[row];
-                slack.abs()
-                    <= DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[row].abs() + ax[row].abs())
+                let tol = dual_recovery_row_slack_tol(
+                    problem,
+                    row,
+                    ax[row],
+                    row_abs_activity[row],
+                    DUAL_RECOVERY_ACTIVE_TOL_REL,
+                );
+                slack.abs() <= tol
             }
         };
         if active {
@@ -1900,9 +1950,9 @@ fn try_dual_only_ir(
         .unwrap_or(1e-12);
 
     // 1. free 変数の特定 (active = bound 近傍 or A col 空)
-    let free_idx = collect_dual_recovery_free_columns(problem, result);
-    let n_free = free_idx.len();
-    if n_free == 0 {
+    let free_eval_idx = collect_dual_recovery_free_columns(problem, result);
+    let n_free_eval = free_eval_idx.len();
+    if n_free_eval == 0 {
         if trace {
             eprintln!("DUAL_IR skip: n_free=0");
         }
@@ -1912,12 +1962,12 @@ fn try_dual_only_ir(
     // 2. r_d_free を DD で計算
     //    r_d[j] = c[j] + (A^T y)[j] + bound_contrib[j]
     //    free var の bound_contrib は通常 0 (z=0) だが念のため計算
-    let mut r_d_free = vec![0.0_f64; n_free];
+    let mut r_d_eval = vec![0.0_f64; n_free_eval];
     let mut df_rel_pre = 0.0_f64;
     let mut df_abs_pre = 0.0_f64;
     let mut worst_idx = 0;
     let mut worst_qx = 0.0_f64;
-    for (fi, &j) in free_idx.iter().enumerate() {
+    for (fi, &j) in free_eval_idx.iter().enumerate() {
         // r_d_free 用に Q x も加算する必要 (Q≠0 の QP で正確性必須)
         let mut qx = TwoFloat::from(0.0);
         for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
@@ -1933,7 +1983,7 @@ fn try_dual_only_ir(
         let aty_f = f64::from(aty);
         let bc = bound_contrib_at_var(&problem.bounds, &result.bound_duals, j);
         let r_d = qx_f + problem.c[j] + aty_f + bc;
-        r_d_free[fi] = r_d;
+        r_d_eval[fi] = r_d;
         let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
         let rel = r_d.abs() / scale;
         if rel > df_rel_pre {
@@ -1956,8 +2006,8 @@ fn try_dual_only_ir(
     }
     if trace {
         eprintln!(
-            "DUAL_IR pre: n_free={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
-            n_free, df_abs_pre, df_rel_pre, worst_idx, worst_qx
+            "DUAL_IR pre: n_free_eval={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
+            n_free_eval, df_abs_pre, df_rel_pre, worst_idx, worst_qx
         );
     }
 
@@ -1971,27 +2021,39 @@ fn try_dual_only_ir(
     };
     let (proj_lower, proj_upper) = (&row_bounds.0, &row_bounds.1);
 
-    let ax = match problem.a.mat_vec_mul(&result.solution) {
-        Ok(v) => v,
-        Err(_) => return 0,
+    let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
+        return 0;
     };
-    let mut active_rows = Vec::with_capacity(m);
+    let mut active_rows = Vec::new();
     let mut active_row_pos = vec![usize::MAX; m];
-    for i in 0..m {
+    for k in problem.a.col_ptr[worst_idx]..problem.a.col_ptr[worst_idx + 1] {
+        let i = problem.a.row_ind[k];
         let is_active = match problem.constraint_types[i] {
             crate::problem::ConstraintType::Eq => true,
             crate::problem::ConstraintType::Le => {
                 let slack = problem.b[i] - ax[i];
-                let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
-                slack.abs() <= tol || result.dual_solution[i] > 0.0
+                let tol = dual_recovery_row_slack_tol(
+                    problem,
+                    i,
+                    ax[i],
+                    row_abs_activity[i],
+                    DUAL_RECOVERY_ACTIVE_TOL_REL,
+                );
+                slack.abs() <= tol
             }
             crate::problem::ConstraintType::Ge => {
                 let slack = ax[i] - problem.b[i];
-                let tol = DUAL_RECOVERY_ACTIVE_TOL_REL * (1.0 + problem.b[i].abs() + ax[i].abs());
-                slack.abs() <= tol || result.dual_solution[i] < 0.0
+                let tol = dual_recovery_row_slack_tol(
+                    problem,
+                    i,
+                    ax[i],
+                    row_abs_activity[i],
+                    DUAL_RECOVERY_ACTIVE_TOL_REL,
+                );
+                slack.abs() <= tol
             }
         };
-        if is_active {
+        if is_active && active_row_pos[i] == usize::MAX {
             active_row_pos[i] = active_rows.len();
             active_rows.push(i);
         }
@@ -2003,8 +2065,27 @@ fn try_dual_only_ir(
         }
         return 0;
     }
-    if trace && m_active < m {
-        eprintln!("DUAL_IR active_rows={}/{}", m_active, m);
+    if trace {
+        eprintln!("DUAL_IR cluster_rows={}/{}", m_active, m);
+    }
+
+    let mut free_idx = Vec::new();
+    for &j in &free_eval_idx {
+        let touches_cluster = (problem.a.col_ptr[j]..problem.a.col_ptr[j + 1])
+            .any(|k| active_row_pos[problem.a.row_ind[k]] != usize::MAX);
+        if touches_cluster {
+            free_idx.push(j);
+        }
+    }
+    let n_free = free_idx.len();
+    if n_free == 0 {
+        if trace {
+            eprintln!("DUAL_IR skip: cluster has no free columns");
+        }
+        return 0;
+    }
+    if trace {
+        eprintln!("DUAL_IR cluster_free={}/{}", n_free, n_free_eval);
     }
 
     // 3. A_free_active dense (m_active × n_free) を構築 → G = A_free^T A_free (上三角)
@@ -2101,7 +2182,16 @@ fn try_dual_only_ir(
     let mut df_abs_post = df_abs_pre;
     let mut total_dy_inf = 0.0_f64;
     let mut accepted_iters = 0;
-    let mut current_r_d_free = r_d_free.clone();
+    let mut current_r_d_free: Vec<f64> = free_idx
+        .iter()
+        .map(|&j| {
+            let pos = free_eval_idx
+                .iter()
+                .position(|&jj| jj == j)
+                .expect("free cluster column must exist in eval set");
+            r_d_eval[pos]
+        })
+        .collect();
     const DUAL_IR_ACCEPT_REL_TOL: f64 = 1e-12;
     const DUAL_IR_MIN_PROGRESS_RATIO: f64 = 1e-4;
     let mut inner = 0usize;
@@ -2149,7 +2239,7 @@ fn try_dual_only_ir(
                 .zip(dy_dd.iter())
                 .map(|(&y, &d)| y + d * step_scale)
                 .collect();
-            for &row in &active_rows {
+            for row in 0..m {
                 let val = f64::from(y_dd_new[row]);
                 let lo = proj_lower[row];
                 let hi = proj_upper[row];
@@ -2161,7 +2251,7 @@ fn try_dual_only_ir(
             let mut new_r_d_free = vec![0.0_f64; n_free];
             let mut new_df_rel = 0.0_f64;
             let mut new_df_abs = 0.0_f64;
-            for (fi, &j) in free_idx.iter().enumerate() {
+            for &j in &free_eval_idx {
                 let mut qx = TwoFloat::from(0.0);
                 for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
                     let row = problem.q.row_ind[k];
@@ -2174,7 +2264,9 @@ fn try_dual_only_ir(
                 }
                 let bc = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
                 let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));
-                new_r_d_free[fi] = r_d;
+                if let Some(local_pos) = free_idx.iter().position(|&jj| jj == j) {
+                    new_r_d_free[local_pos] = r_d;
+                }
                 let qx_f = f64::from(qx);
                 let aty_f = f64::from(aty);
                 let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
@@ -2264,7 +2356,7 @@ fn try_dual_only_ir(
     );
     if trace {
         eprintln!(
-            "DUAL_IR n_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
+            "DUAL_IR cluster_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
             n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters
         );
         eprintln!("DUAL_IR kkt {:.3e}->{:.3e}", kkt_pre, kkt_post);
@@ -2281,6 +2373,122 @@ fn try_dual_only_ir(
             );
         }
         0
+    }
+}
+
+fn run_dual_recovery_postprocess(
+    problem: &QpProblem,
+    view: &crate::qp::ipm_solver::outcome::ProblemView<'_>,
+    result: &mut crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
+    trace: bool,
+) -> f64 {
+    let pre_cleanup = result.clone();
+    let kkt_before_cleanup = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    zero_inactive_inequality_duals(problem, result);
+    if trace {
+        let kkt_after_zero = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        eprintln!(
+            "DUAL_IR outer: after zero_inactive kkt {:.3e}",
+            kkt_after_zero
+        );
+    }
+    project_duals_from_singleton_columns(problem, result);
+    if trace {
+        let kkt_after_singleton = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        eprintln!(
+            "DUAL_IR outer: after singleton projection kkt {:.3e}",
+            kkt_after_singleton
+        );
+    }
+    refine_dual_projected_gradient(problem, result, deadline);
+    if trace {
+        let kkt_after_pg = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        eprintln!(
+            "DUAL_IR outer: after projected gradient kkt {:.3e}",
+            kkt_after_pg
+        );
+    }
+    refine_dual_worst_active_block(problem, result, deadline);
+    if trace {
+        let kkt_after_block = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        eprintln!(
+            "DUAL_IR outer: after local block kkt {:.3e}",
+            kkt_after_block
+        );
+    }
+
+    let pre_z = result.bound_duals.clone();
+    let pre_refit_kkt = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    refit_bound_duals_kkt(problem, result);
+    let post_refit_kkt = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    if post_refit_kkt > pre_refit_kkt {
+        result.bound_duals = pre_z;
+        if trace {
+            eprintln!(
+                "DUAL_IR z-refit rejected: kkt {:.3e} -> {:.3e}",
+                pre_refit_kkt, post_refit_kkt
+            );
+        }
+    } else if trace {
+        eprintln!(
+            "DUAL_IR z-refit accepted: kkt {:.3e} -> {:.3e}",
+            pre_refit_kkt, post_refit_kkt
+        );
+    }
+
+    let kkt_after_cleanup = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+        view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    if kkt_after_cleanup > kkt_before_cleanup {
+        if trace {
+            eprintln!(
+                "DUAL_IR cleanup reverted: kkt {:.3e} -> {:.3e}",
+                kkt_before_cleanup, kkt_after_cleanup
+            );
+        }
+        *result = pre_cleanup;
+        kkt_before_cleanup
+    } else {
+        kkt_after_cleanup
     }
 }
 
@@ -2348,13 +2556,16 @@ pub(crate) fn refine_kkt_iterative(
         &result.dual_solution,
         &result.bound_duals,
     );
+    let start_kkt = prev_kkt;
+    let mut best_kkt = prev_kkt;
+    let mut best_result = result.clone();
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
-        let pre_outer = result.clone();
+        let mut outer_made_progress = false;
         let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
         if n_dual > 0 {
             n_dual_total += n_dual;
-            let after_dual_ir = result.clone();
+            outer_made_progress = true;
             let kkt_after_dual_ir = kkt_residual_rel(
                 &view,
                 &result.solution,
@@ -2367,108 +2578,24 @@ pub(crate) fn refine_kkt_iterative(
                     kkt_after_dual_ir
                 );
             }
-            zero_inactive_inequality_duals(problem, result);
-            if trace {
-                let kkt_after_zero = kkt_residual_rel(
-                    &view,
-                    &result.solution,
-                    &result.dual_solution,
-                    &result.bound_duals,
-                );
-                eprintln!(
-                    "DUAL_IR outer: after zero_inactive kkt {:.3e}",
-                    kkt_after_zero
-                );
-            }
-            project_duals_from_singleton_columns(problem, result);
-            if trace {
-                let kkt_after_singleton = kkt_residual_rel(
-                    &view,
-                    &result.solution,
-                    &result.dual_solution,
-                    &result.bound_duals,
-                );
-                eprintln!(
-                    "DUAL_IR outer: after singleton projection kkt {:.3e}",
-                    kkt_after_singleton
-                );
-            }
-            refine_dual_projected_gradient(problem, result, deadline);
-            if trace {
-                let kkt_after_pg = kkt_residual_rel(
-                    &view,
-                    &result.solution,
-                    &result.dual_solution,
-                    &result.bound_duals,
-                );
-                eprintln!(
-                    "DUAL_IR outer: after projected gradient kkt {:.3e}",
-                    kkt_after_pg
-                );
-            }
-            refine_dual_worst_active_block(problem, result, deadline);
-            if trace {
-                let kkt_after_block = kkt_residual_rel(
-                    &view,
-                    &result.solution,
-                    &result.dual_solution,
-                    &result.bound_duals,
-                );
-                eprintln!(
-                    "DUAL_IR outer: after local block kkt {:.3e}",
-                    kkt_after_block
-                );
-            }
-            // y が更新されたので bound_duals (z) も KKT から再計算する。
-            // ただし z refit は active bound 列では改善しても、別の列で悪化して
-            // dual-only IR の進捗を潰すことがあるため、全体 KKT で guard する。
-            let pre_z = result.bound_duals.clone();
-            let pre_refit_kkt = kkt_residual_rel(
+            let _ = run_dual_recovery_postprocess(problem, &view, result, deadline, trace);
+        } else {
+            let pre_cleanup_kkt = kkt_residual_rel(
                 &view,
                 &result.solution,
                 &result.dual_solution,
                 &result.bound_duals,
             );
-            refit_bound_duals_kkt(problem, result);
-            let post_refit_kkt = kkt_residual_rel(
-                &view,
-                &result.solution,
-                &result.dual_solution,
-                &result.bound_duals,
-            );
-            if post_refit_kkt > pre_refit_kkt {
-                result.bound_duals = pre_z;
-                if trace {
-                    eprintln!(
-                        "DUAL_IR z-refit rejected: kkt {:.3e} -> {:.3e}",
-                        pre_refit_kkt, post_refit_kkt
-                    );
-                }
-            } else if trace {
-                eprintln!(
-                    "DUAL_IR z-refit accepted: kkt {:.3e} -> {:.3e}",
-                    pre_refit_kkt, post_refit_kkt
-                );
-            }
-
-            let kkt_after_cleanup = kkt_residual_rel(
-                &view,
-                &result.solution,
-                &result.dual_solution,
-                &result.bound_duals,
-            );
-            if kkt_after_cleanup > kkt_after_dual_ir {
-                if trace {
-                    eprintln!(
-                        "DUAL_IR cleanup reverted: kkt {:.3e} -> {:.3e}",
-                        kkt_after_dual_ir, kkt_after_cleanup
-                    );
-                }
-                *result = after_dual_ir;
+            let post_cleanup_kkt =
+                run_dual_recovery_postprocess(problem, &view, result, deadline, trace);
+            if post_cleanup_kkt + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
+                < pre_cleanup_kkt
+            {
+                outer_made_progress = true;
             }
         }
         // target 達成、または改善なし (n_dual=0 → G singular / no progress) なら終了
-        if n_dual == 0 {
+        if !outer_made_progress {
             break;
         }
         let cur_kkt = kkt_residual_rel(
@@ -2477,11 +2604,15 @@ pub(crate) fn refine_kkt_iterative(
             &result.dual_solution,
             &result.bound_duals,
         );
+        if cur_kkt < best_kkt {
+            best_kkt = cur_kkt;
+            best_result = result.clone();
+        }
         if cur_kkt < target_pf {
             break;
         }
-        if cur_kkt >= prev_kkt * 0.999 {
-            *result = pre_outer;
+        let progress_tol = dual_recovery_progress_tol(prev_kkt, cur_kkt, target_pf);
+        if cur_kkt + progress_tol >= prev_kkt {
             break;
         }
         prev_kkt = cur_kkt;
@@ -2490,10 +2621,20 @@ pub(crate) fn refine_kkt_iterative(
         }
     }
     if n_dual_total > 0 {
-        return n_dual_total;
+        *result = best_result;
+        if trace {
+            eprintln!(
+                "DUAL_IR outer: best_kkt {:.3e} (start {:.3e})",
+                best_kkt, start_kkt
+            );
+        }
+        if best_kkt < target_pf || deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return n_dual_total;
+        }
     }
     // dual-only が改善できなかった場合 (df 既に < target / G singular / no improvement) は
-    // existing penalty + saddle-point IR に fall-through
+    // existing penalty + saddle-point IR に fall-through。dual-only が一部だけ効いた
+    // 場合も、その良化状態を初期値として full KKT IR を継続する。
 
     // δp, δd: K の対角正則化。十分小さく (IR で eps·‖K‖ レベルまで refine 可)、
     // LDL の数値安定性が確保される値。1e-10 は LISWET cond 1e10 で K cond 1e2 級。
@@ -3015,7 +3156,7 @@ pub(crate) fn refine_kkt_iterative(
         return 0;
     }
 
-    let mut accepted = 0_usize;
+    let mut accepted = n_dual_total;
     // 残差悪化許容: pre_rel の 2x または target_pf×100 (どちらか大きい方)。これ以上は
     // revert (構造的悪化)。target_pf×100 floor は machine-precision 級の pre 値が事故で
     // 増えても target_pf×100 までは許容する設計 (target=1e-6 なら 1e-4 が floor)。
@@ -6839,6 +6980,52 @@ mod tests {
             (result.bound_duals[1] - 1.0).abs() < 1e-9,
             "active y lower-bound dual should be recovered to 1, got {}",
             result.bound_duals[1]
+        );
+    }
+
+    #[test]
+    fn test_dual_recovery_postprocess_can_improve_without_dual_ir() {
+        let q = CscMatrix::from_triplets(&[1], &[1], &[2.0_f64], 2, 2).unwrap();
+        let c = vec![-1.0_f64, 0.0_f64];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0_f64, 1.0_f64], 1, 2).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+        };
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0_f64, 0.0_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![0.0_f64, 0.0_f64],
+            ..SolverResult::default()
+        };
+
+        let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        let post = run_dual_recovery_postprocess(&problem, &view, &mut result, None, false);
+
+        assert!(
+            post < pre,
+            "standalone dual recovery postprocess should reduce KKT residual: pre={} post={}",
+            pre,
+            post
+        );
+        assert!(
+            post < 1e-12,
+            "standalone dual recovery postprocess should recover exact local KKT, got {}",
+            post
         );
     }
 
