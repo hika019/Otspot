@@ -72,6 +72,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
     let data_lower = data_dir.to_lowercase();
     let csv_name = if data_lower.contains("maros") {
         "maros_meszaros.csv"
+    } else if data_lower.contains("qp_unbounded") || data_lower.contains("qp-unbounded") {
+        "qp_unbounded.csv"
+    } else if data_lower.contains("qp_infeasible") || data_lower.contains("qp-infeasible") {
+        "qp_infeasible.csv"
     } else if data_lower.contains("qplib") {
         "qplib.csv"
     } else if data_lower.contains("osqp_bench") || data_lower.contains("osqp-bench") {

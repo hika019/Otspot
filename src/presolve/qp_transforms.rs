@@ -131,6 +131,13 @@ impl QpPresolveResult {
         r.presolve_status = QpPresolveStatus::Infeasible;
         r
     }
+
+    /// Unbounded と確定した場合のフォールバック
+    pub fn unbounded(prob: &QpProblem) -> Self {
+        let mut r = Self::no_reduction(prob);
+        r.presolve_status = QpPresolveStatus::Unbounded;
+        r
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -764,22 +771,26 @@ pub fn run_qp_presolve_phase1(
         }
 
         // A列・Q列ともゼロ: LP的変数として最適値を求める
+        // min c_j * x_j s.t. lb <= x_j <= ub の最適解:
+        //   c_j > 0: x_j → lb (最小化するには x_j を小さく)
+        //           lb = -∞ → -∞ に発散 → Unbounded
+        //   c_j < 0: x_j → ub (最小化するには x_j を大きく)
+        //           ub = +∞ → +∞ に発散 → Unbounded
+        //   c_j = 0: x_j は目的関数に寄与しない → lb または ub に設定
         let (lb, ub) = bounds[j];
         let cj = c[j];
+        if cj > ZERO_TOL && !lb.is_finite() {
+            // c_j > 0 かつ下界なし: min c_j * x_j → -∞ (x_j → -∞)
+            return QpPresolveResult::unbounded(prob);
+        }
+        if cj < -ZERO_TOL && !ub.is_finite() {
+            // c_j < 0 かつ上界なし: min c_j * x_j → -∞ (x_j → +∞)
+            return QpPresolveResult::unbounded(prob);
+        }
         let val = if cj > ZERO_TOL {
-            if lb == f64::NEG_INFINITY {
-                // Unbounded in negative direction... but obj = cj*x_j, so min→-inf
-                // 実用上は bounds ありが多い。ここでは lb が finite なら lb
-                if lb.is_finite() { lb } else { 0.0 }
-            } else {
-                lb
-            }
+            lb // lb は finite であることが上の guard で保証済み
         } else if cj < -ZERO_TOL {
-            if ub == f64::INFINITY {
-                if ub.is_finite() { ub } else { 0.0 }
-            } else {
-                ub
-            }
+            ub // ub は finite であることが上の guard で保証済み
         } else if lb.is_finite() { lb } else if ub.is_finite() { ub } else { 0.0 };
 
         obj_offset += cj * val;

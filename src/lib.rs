@@ -39,6 +39,7 @@
 
 pub mod error;
 pub use error::SolverError;
+#[doc(hidden)]
 pub mod bench_utils;
 pub(crate) mod presolve;
 pub mod sparse;

@@ -1216,9 +1216,18 @@ pub(crate) fn solve_ippmm_inner(
                 // continue でなくループ続行: 後段の newton step / alpha 更新を実施して
                 // 次 iter で再判定する。
             } else {
-                // K iter 連続 fire: best が finite なら SuboptimalSolution、そうでなければ
-                // 検出器に従い Infeasible/Unbounded.
-                if best_score.is_finite() {
+                // K iter 連続 fire: best が Optimal-quality (< quality_threshold) なら
+                // false-positive の可能性があるため SuboptimalSolution に降格する。
+                // best_score >= quality_threshold の場合は本物の Infeasible/Unbounded と
+                // みなして検出器に従う。
+                //
+                // 根拠: 真に実行可能な問題で PMM 正則化 floor (5e-8) により primal が
+                //   pf ≈ δ·‖y‖ に張り付くケース (PORTFOLIO_100) では、IPM 内部の
+                //   Newton 方向が Farkas-like を偶然満たすことがある。この場合 best_score は
+                //   delta * ||y|| ≈ 小さい有限値 (< quality_threshold) になる。
+                // 真の Infeasible/Unbounded 問題では primal 残差が構造的に非ゼロのため
+                //   best_score は常に >> quality_threshold = 10 * eps_orig ≈ 1e-5。
+                if best_score < quality_threshold {
                     x.copy_from_slice(&best_x);
                     y.copy_from_slice(&best_y);
                     s.copy_from_slice(&best_s);

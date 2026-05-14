@@ -273,6 +273,19 @@ impl crate::problem::SolverResult {
         }
     }
 
+    /// Unbounded結果を生成（QP用）
+    pub fn unbounded() -> Self {
+        crate::problem::SolverResult {
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            bound_duals: vec![],
+            iterations: 0,
+            ..Default::default()
+        }
+    }
+
     /// MaxIterations結果を生成（QP用）。真のイテレーション上限到達時のみ使用すること。
     pub fn max_iterations(x: Vec<f64>, obj: f64, iters: usize) -> Self {
         crate::problem::SolverResult {
