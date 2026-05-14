@@ -342,6 +342,78 @@ impl PermutedAugmentedKkt {
     }
 }
 
+/// 不定 Q 行列に対して慣性修正量 δ_ic を計算する。
+///
+/// 手順:
+/// 1. LLT 因子化（正則化なし）で Q が PSD かどうかを判定する。
+///    PSD であれば δ_ic = 0 を返す（Gershgorin の保守的誤判定を回避）。
+///
+/// 2. LLT 失敗（負のピボット）のとき: Gershgorin の円定理から
+///    λ_min(Q) の下界を導出し、Q + δ_ic·I を PSD にする最小量を返す。
+///    Gershgorin: λ_min(Q) >= min_j(Q[j,j] - R_j)
+///    δ_ic = max(0, max_j(R_j - Q[j,j]))
+///
+/// Q が上三角 CSC で格納されている前提。
+///
+/// 根拠:
+/// - PSD 判定を LLT で行うのは「Gershgorin が PSD 行列でも偽陽性を返す」問題を
+///   解消するため。Gershgorin は十分条件であり、PSD 行列でも R_j > Q[j,j] と
+///   なる（大きい対角外要素を持つ）場合は δ_ic > 0 を誤って返す。
+/// - LLT 成功 → Q が真に PSD → KKT の (1,1) ブロック Q + rho·I は rho > 0 で
+///   自動的に正定値 → 慣性修正不要。
+/// - LLT 失敗 → Q に負の固有値あり → Gershgorin bound で最小量を推定。
+pub(crate) fn compute_inertia_correction(q: &CscMatrix) -> f64 {
+    let n = q.nrows;
+    if n == 0 {
+        return 0.0;
+    }
+    // Q が全ゼロなら LP ケース → 慣性修正不要
+    if q.values.iter().all(|&v| v == 0.0) {
+        return 0.0;
+    }
+
+    // Step 1: LLT 因子化で PSD を判定する。
+    // PSD → δ_ic = 0（Gershgorin の誤検出を回避）。
+    if crate::linalg::ldl::is_q_psd_by_cholesky(q) {
+        return 0.0;
+    }
+
+    // Step 2: Q が indefinite → Gershgorin 円定理でδを推定する。
+    // Q は上三角 CSC: Q[row, col] (row <= col) が格納されている。
+    // 対角外要素 Q[row, col] (row < col) は:
+    //   - 行 row の R_{row} に寄与（上三角側）
+    //   - 行 col の R_{col} に寄与（下三角の対称側）
+    let mut diag = vec![0.0_f64; n];
+    let mut row_offdiag_sum = vec![0.0_f64; n];
+
+    for col in 0..n {
+        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+            let row = q.row_ind[k];
+            let val = q.values[k];
+            if row == col {
+                diag[col] = val;
+            } else if row < col {
+                // 上三角要素: 対称性により row の行と col の行の両方の offdiag sum に加える
+                let abs_val = val.abs();
+                row_offdiag_sum[row] += abs_val;
+                row_offdiag_sum[col] += abs_val;
+            }
+        }
+    }
+
+    // δ_ic = max(0, max_j(R_j - Q[j,j]))
+    // Gershgorin: λ_min >= min_j(diag[j] - row_offdiag_sum[j])
+    // → δ_ic を加えると λ_min(Q + δ_ic·I) >= 0
+    let mut delta_ic = 0.0_f64;
+    for j in 0..n {
+        let gershgorin_lower = diag[j] - row_offdiag_sum[j];
+        if gershgorin_lower < 0.0 {
+            delta_ic = delta_ic.max(-gershgorin_lower);
+        }
+    }
+    delta_ic
+}
+
 /// `AugmentedKktCache` を構築する。Q/A の sparsity pattern を 1 回走査して
 /// col_ptr/row_ind/diag slot を確定する。`build_augmented_system` と同じ非ゼロ集合を生成する。
 ///
@@ -692,6 +764,40 @@ mod tests {
         let cols: Vec<usize> = entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
         CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+    }
+
+    /// compute_inertia_correction: PSD 行列は 0 を返す (Gershgorin の誤検出を回避)
+    ///
+    /// Q = [[1, 1.1],[1.1, 2]] — PD (det = 2 - 1.21 = 0.79 > 0)
+    /// Gershgorin では R_0 = 1.1 > Q[0,0] = 1 → 下界 = -0.1 < 0 → δ=0.1 を誤って返す
+    /// LLT ベースの新実装では PSD を正しく検出し δ=0 を返すべき。
+    #[test]
+    fn test_compute_inertia_correction_psd_no_correction() {
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]);
+        let delta = compute_inertia_correction(&q);
+        assert_eq!(delta, 0.0,
+            "PSD matrix (det>0) should have inertia_correction=0, got {}", delta);
+    }
+
+    /// compute_inertia_correction: 不定行列は正の δ を返す
+    #[test]
+    fn test_compute_inertia_correction_indefinite() {
+        // Q = [[1, 0],[0, -2]] — indefinite (固有値 1, -2)
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (1, 1, -2.0)]);
+        let delta = compute_inertia_correction(&q);
+        assert!(delta > 0.0,
+            "Indefinite matrix should have inertia_correction > 0, got {}", delta);
+        // Gershgorin: λ_min >= min(1-0, -2-0) = -2 → δ = 2
+        assert!((delta - 2.0).abs() < 1e-10,
+            "Expected delta=2.0 for Q=diag(1,-2), got {}", delta);
+    }
+
+    /// compute_inertia_correction: ゼロ行列は 0 を返す (LP ケース)
+    #[test]
+    fn test_compute_inertia_correction_zero_matrix() {
+        let q = upper_tri_csc(3, &[]);
+        assert_eq!(compute_inertia_correction(&q), 0.0,
+            "Zero matrix (LP) should have inertia_correction=0");
     }
 
     /// collect_part1_diag_indices: n=2 の小規模問題でインデックス正確性を確認

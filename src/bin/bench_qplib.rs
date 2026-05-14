@@ -247,16 +247,18 @@ fn main() {
             None => String::new(),
         };
 
-        // Timeout / SuboptimalSolution でも有効な best-so-far 解を持つなら Optimal 経路に
-        // 格上げし obj 照合で品質判定する。qps_benchmark.rs と整合させた挙動。
+        // Timeout / SuboptimalSolution / LocallyOptimal でも有効な best-so-far 解を持つなら
+        // Optimal 経路に格上げし obj 照合で品質判定する。qps_benchmark.rs と整合させた挙動。
         // 動機: bench_qplib は旧来 SuboptimalSolution を一律 SUBOPTIMAL として表示し、
         //   obj 照合スキップ → 「解は合っているが SUBOPTIMAL」を抱え込んでいた
         //   (QPLIB_10034: obj=-6.601e-2 vs baseline=-6.601e-2 で誤差 0.008% でも SUBOPTIMAL)。
         //   solver 内 IPPMM が μ_floor / α_stall で内部諦め → SuboptimalSolution は珍しくない
         //   ため、obj/finite で篩い、obj 不一致なら OBJ_MISMATCH に分類される設計。
+        // LocallyOptimal: 不定 Q の KKT 点。凸ベンチでは原問題 Q が実は PSD なので
+        //   Optimal と同等に扱って品質確認する。
         let result = if matches!(
             result.status,
-            SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+            SolveStatus::Timeout | SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
         ) && !result.solution.is_empty()
             && result.solution.len() == prob.num_vars
             && result.objective.is_finite()

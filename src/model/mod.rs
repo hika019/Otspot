@@ -291,6 +291,8 @@ impl Model {
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽: 内部事情をユーザーに見せない
             SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
+            // LocallyOptimal は LP path では発生しないが、exhaustive match のために処理する
+            SolveStatus::LocallyOptimal => Err(ModelError::Internal("Unexpected LocallyOptimal on LP path".to_string())),
         }
     }
 
@@ -444,6 +446,26 @@ impl Model {
             SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽
             SolveStatus::NonConvex(msg) => {
                 Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
+            }
+            // LocallyOptimal: 不定 Q の KKT 点を解として返す（局所最適解）
+            SolveStatus::LocallyOptimal => {
+                let obj = if self.sense == OptimizationSense::Maximize {
+                    -qp_result.objective
+                } else {
+                    qp_result.objective
+                };
+                let dual = if qp_result.dual_solution.len() == num_model_constraints {
+                    Some(qp_result.dual_solution.clone())
+                } else {
+                    None
+                };
+                Ok(ModelResult {
+                    objective_value: obj,
+                    solution: qp_result.solution,
+                    dual_solution: dual,
+                    reduced_costs: None,
+                    slack: None,
+                })
             }
         }
     }

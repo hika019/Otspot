@@ -353,6 +353,15 @@ pub(crate) fn solve_ippmm_inner(
     };
     let _ = x0; let _ = y0; let _ = s0;
 
+    // 慣性修正量: Q が indefinite の場合、Gershgorin 円定理から
+    // λ_min(Q) の下界を導出し、Q + δ_ic·I を PSD にする最小量を計算する。
+    // 凸 QP では 0 が返るため既存の収束挙動は変わらない。
+    // この値は q_is_indefinite フラグのみに使用する。rho_retry の下限には使わない
+    // (使うと PSD 問題でも過大正則化になり収束を阻害する)。
+    let inertia_correction = super::kkt::compute_inertia_correction(&problem.q);
+    // Q が indefinite かどうかのフラグ (返却ステータスを LocallyOptimal にする判断に使う)
+    let q_is_indefinite = inertia_correction > 0.0;
+
     // PARAM: 根拠=MATLAB拡張版IP-PMM準拠 (env QP_REG_LIMIT で診断 override 可)。
     // 【履歴】論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
     // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
@@ -768,8 +777,15 @@ pub(crate) fn solve_ippmm_inner(
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する
-        let mut rho_retry = rho_matrix;
+        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する。
+        // 不定 Q の場合: rho_retry の初期値を inertia_correction で下限設定し、
+        // KKT (1,1) ブロック Q + ρI が初回から PSD となるよう保証する。
+        // PSD 問題では inertia_correction = 0 なので rho_matrix から始まり挙動は変わらない。
+        let mut rho_retry = rho_matrix.max(inertia_correction);
+        // inertia_correction が LDL_REG_CEILING を超える場合は天井も引き上げる。
+        // 不定 Q の必要最低 rho は -λ_min(Q) ≥ inertia_correction であり、その上限が 1.0 では
+        // 高不定行列 (QPLIB_0018: λ_min≈-398) で因子化が絶対に成功しない。
+        let ldl_reg_ceiling = LDL_REG_CEILING.max(inertia_correction);
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
@@ -920,11 +936,11 @@ pub(crate) fn solve_ippmm_inner(
                                 || !amplification.is_finite()
                                 || amplification > f64_precision_ceiling;
                             if unhealthy {
-                                if rho_retry >= LDL_REG_CEILING {
+                                if rho_retry >= ldl_reg_ceiling {
                                     break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
                                 }
-                                rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
-                                delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                                rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                                delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                                 continue;
                             }
                         }
@@ -942,11 +958,11 @@ pub(crate) fn solve_ippmm_inner(
                     break;
                 }
                 Err(_) => {
-                    if rho_retry >= LDL_REG_CEILING {
+                    if rho_retry >= ldl_reg_ceiling {
                         break; // 上限到達 → あきらめ
                     }
-                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
-                    delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(LDL_REG_CEILING);
+                    rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
+                    delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                     // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
                 }
             }
@@ -1507,8 +1523,17 @@ pub(crate) fn solve_ippmm_inner(
     let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..].to_vec();
 
+    // 不定 Q で IPM が Optimal に収束した場合、局所最適解（KKT 点）として報告する。
+    // 大域的最適性は慣性修正により失われるため、LocallyOptimal を返す。
+    // その他のステータス (Timeout, SuboptimalSolution, Infeasible 等) はそのまま。
+    let final_status = if q_is_indefinite && status == SolveStatus::Optimal {
+        SolveStatus::LocallyOptimal
+    } else {
+        status
+    };
+
     SolverResult {
-        status,
+        status: final_status,
         objective,
         solution: x,
         dual_solution,

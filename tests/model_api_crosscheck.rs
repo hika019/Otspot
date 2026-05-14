@@ -275,26 +275,35 @@ fn qp_maximize_concave() {
     );
 }
 
-/// **API 落とし穴の retrurn-test**: maximize に PSD Q を渡すと内部で NSD になり
-/// solver が NonConvex と認識する。エラー伝搬されることを確認 (ユーザーが気付ける)。
+/// **非凸 QP の maximize テスト**: maximize に PSD Q を渡すと内部で NSD になり
+/// solver が慣性修正付き IPM で KKT 点を探索し LocallyOptimal / Optimal を返す。
 ///
-/// この挙動は API のドキュメント (`set_quadratic_objective`) に記載済だが、
-/// docstring を読み飛ばしたユーザーが silent に間違った解を得るのを防ぐため
-/// 「PSD + maximize → エラー」が現状の動作であることを test で固定する。
+/// 問題: maximize 1/2 x^2  s.t. 0 <= x <= 5
+/// 等価: minimize -1/2 x^2  s.t. 0 <= x <= 5  (NSD Q = negative definite)
+/// 真の最大値は x=5 (境界), obj=17.5
+/// KKT 条件を満たす x=5 が LocallyOptimal として返る (また凸問題なら Optimal)。
 #[test]
 fn qp_maximize_with_psd_q_returns_error() {
     let mut model = Model::new("qp_max_psd");
     let x = model.add_var("x", 0.0, 5.0);
-    // PSD Q (誤った渡し方)
+    // PSD Q: maximize 時は内部で Q を符号反転して NSD (非正定値) になる
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
     model.add_constraint(solver::constraint!(x <= 5.0));
     model.maximize(x);
-    let err = model.solve().expect_err("PSD Q with maximize should error");
+    // 慣性修正付き IPM が KKT 点 (x=5) を発見し LocallyOptimal として返す。
+    // model は LocallyOptimal を有効解として ModelResult に変換する。
+    let result = model.solve().expect("maximize with NSD Q should return a LocallyOptimal KKT solution");
+    // x=5 が境界最適解
     assert!(
-        matches!(err, ModelError::Internal(ref msg) if msg.contains("Non-convex")),
-        "expected Non-convex error, got {:?}",
-        err
+        (result[x] - 5.0).abs() < 1e-3,
+        "maximize x^2/2 on [0,5]: x* should be 5.0, got {:.6}", result[x]
+    );
+    // maximize obj = x + 1/2*x^2 at x=5: 5 + 12.5 = 17.5
+    // (maximize(x) sets linear term, set_quadratic_objective sets 1/2*Q*x^2)
+    assert!(
+        (result.objective_value - 17.5).abs() < 1.0,
+        "maximize x + x^2/2 at x=5: obj should be ~17.5, got {:.6}", result.objective_value
     );
 }
 

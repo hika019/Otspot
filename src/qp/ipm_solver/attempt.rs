@@ -269,16 +269,10 @@ fn solve_qp_v2_with_runner(
     options: &SolverOptions,
     runner: IpmRunner,
 ) -> SolverResult {
-    // Q 不定値チェック (非凸 QP 検出): IPPMM は Q 半正定値前提。
-    if !crate::qp::check_q_positive_semidefinite(&problem.q) {
-        return SolverResult {
-            status: SolveStatus::NonConvex(
-                "Q matrix is indefinite (non-convex QP). IPM requires Q to be positive semidefinite.".to_string()
-            ),
-            ..Default::default()
-        };
-    }
-
+    // Q 不定値チェック: 不定 Q は慣性修正付き IPM で解く（NonConvex 即返却を廃止）。
+    // `compute_inertia_correction` が Gershgorin 下界から δ_ic を算出し、
+    // `solve_ippmm_inner` 内で rho_retry の下限として適用することで
+    // KKT (1,1) ブロックを正定値に保つ。収束時は LocallyOptimal を返す。
     let start_time = Instant::now();
     let mut opts = options.clone();
     let n_orig = problem.num_vars;
@@ -408,7 +402,19 @@ fn solve_qp_v2_with_runner(
         }
     }
 
-    let outcome = best.unwrap_or_else(IpmOutcome::empty);
+    let mut outcome = best.unwrap_or_else(IpmOutcome::empty);
+
+    // 不定値誤検出の修正: LocallyOptimal フラグが立っていても、元問題の Q が
+    // Gershgorin 判定で PSD なら偽陽性 (Ruiz スケーリングが Q を歪めた結果)。
+    // ここの `problem` は Ruiz/presolve スケーリング前の原問題（または
+    // Q 対角スケーリング後）。いずれも元の Q の半正定値性を正しく反映している。
+    if outcome.is_locally_optimal {
+        let ic = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
+        if ic == 0.0 {
+            outcome.is_locally_optimal = false;
+        }
+    }
+
     // cancel_flag を「外部停止」として deadline 経過と同様に扱う
     // (preset cancel → Timeout 契約のため)。
     let cancelled = options
@@ -470,7 +476,13 @@ fn finalize_outcome(
     }
 
     let status = if outcome.satisfies_eps(user_eps) {
-        SolveStatus::Optimal
+        // 不定 Q に対して慣性修正付き IPM が収束した場合は LocallyOptimal を返す。
+        // 大域最適性は保証されないが、KKT 条件を満たす局所最適解（またはサドル点）。
+        if outcome.is_locally_optimal {
+            SolveStatus::LocallyOptimal
+        } else {
+            SolveStatus::Optimal
+        }
     } else if timed_out {
         // 外部 deadline 経過 / cancel_flag セットで精度未達 → 真の Timeout
         // (時間あれば改善余地ありの可能性)

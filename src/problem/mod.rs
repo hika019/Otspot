@@ -26,6 +26,12 @@ pub enum ConstraintType {
 pub enum SolveStatus {
     /// 最適解が求まった
     Optimal,
+    /// 局所的最適解（非凸QP: 慣性修正付きIPMが収束したKKT点）
+    ///
+    /// Q行列が不定（indefinite）の場合、大域的最適性は保証されないが、
+    /// KKT条件を満たす局所最適解またはサドル点が返される。
+    /// 慣性修正（Gershgorin 評価から導出した δI 加算）により IPM を収束させた。
+    LocallyOptimal,
     /// 問題が実行不可能（infeasible）
     Infeasible,
     /// 問題が非有界（unbounded）
@@ -46,6 +52,7 @@ impl fmt::Display for SolveStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SolveStatus::Optimal => write!(f, "Optimal"),
+            SolveStatus::LocallyOptimal => write!(f, "LocallyOptimal"),
             SolveStatus::Infeasible => write!(f, "Infeasible"),
             SolveStatus::Unbounded => write!(f, "Unbounded"),
             SolveStatus::MaxIterations => write!(f, "MaxIterations"),
