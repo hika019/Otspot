@@ -3,9 +3,11 @@ name = "solver"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-description = "A high-performance linear programming solver using the Revised Simplex method with sparse LU decomposition"
+description = "High-performance LP (Revised Simplex) and QP (Interior Point / Mehrotra predictor-corrector) solver"
 readme = "README.md"
-keywords = ["linear-programming", "optimization", "simplex", "operations-research", "lp"]
+keywords = ["linear-programming", "quadratic-programming", "interior-point", "simplex", "optimization"]
+repository = "https://github.com/hika019/solver"
+homepage = "https://github.com/hika019/solver"
 categories = ["science", "algorithms", "mathematics"]
 
 [features]
