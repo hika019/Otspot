@@ -136,17 +136,21 @@ fn main() {
         }
     }
 
-    // FX/EmptyCol を skip した bench 形式
-    let mut max_r_skip = 0.0_f64;
+    // FX/EmptyCol を skip した bench 形式 (成分相対化 = bench の dfr と同式)
     let mut max_r_full = 0.0_f64;
     let mut argmax_full = 0usize;
-    let mut argmax_skip = 0usize;
     let mut max_qx = 0.0_f64;
     let mut max_c = 0.0_f64;
     let mut max_aty = 0.0_f64;
     let mut max_bnd = 0.0_f64;
     let mut n_fx_skipped = 0;
     let mut n_empty_skipped = 0;
+    // 成分相対化: bench の compute_dfeas_orig と同式
+    let mut dfeas_abs = 0.0_f64;
+    let mut dfeas_rel_componentwise = 0.0_f64;
+    let mut argmax_componentwise = 0usize;
+    // 上位 20 件を表示するためのバッファ
+    let mut per_col: Vec<(usize, f64, f64, f64, f64, f64, f64)> = Vec::new(); // (j, r_rel, r_abs, qx, aty, bnd, c)
     for j in 0..n {
         let (lb_j, ub_j): (f64, f64) = prob.bounds[j];
         let r = (qx[j] + aty[j] + bound_contrib[j] + prob.c[j]).abs();
@@ -159,27 +163,44 @@ fn main() {
             && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0;
         if is_fx { n_fx_skipped += 1; continue; }
         if is_empty_col { n_empty_skipped += 1; continue; }
-        if r > max_r_skip {
-            max_r_skip = r;
-            argmax_skip = j;
+        dfeas_abs = dfeas_abs.max(r);
+        let scale_j = 1.0 + qx[j].abs() + aty[j].abs() + bound_contrib[j].abs() + prob.c[j].abs();
+        let r_rel = r / scale_j;
+        if r_rel > dfeas_rel_componentwise {
+            dfeas_rel_componentwise = r_rel;
+            argmax_componentwise = j;
         }
         max_qx = max_qx.max(qx[j].abs());
         max_c = max_c.max(prob.c[j].abs());
         max_aty = max_aty.max(aty[j].abs());
         max_bnd = max_bnd.max(bound_contrib[j].abs());
+        per_col.push((j, r_rel, r, qx[j], aty[j], bound_contrib[j], prob.c[j]));
     }
-    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+    let scale_global = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+    // 成分相対化でソート
+    per_col.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     println!();
     println!("=== bench-style dfeas (skip FX/EmptyCol) ===");
-    println!("max_r_full={:.3e} argmax={} (no skip)", max_r_full, argmax_full);
-    println!("max_r_skip={:.3e} argmax={} (n_fx_skip={} n_empty_skip={})",
-        max_r_skip, argmax_skip, n_fx_skipped, n_empty_skipped);
+    println!("max_r_full={:.3e} argmax={} (no skip, n_fx_skip={} n_empty_skip={})",
+        max_r_full, argmax_full, n_fx_skipped, n_empty_skipped);
     println!("max_qx={:.3e} max_c={:.3e} max_aty={:.3e} max_bnd={:.3e}",
         max_qx, max_c, max_aty, max_bnd);
-    println!("scale=1+max(...)={:.3e} dfeas_rel={:.3e}", scale, max_r_skip / scale);
+    println!("global: scale={:.3e} dfeas_abs={:.3e} dfeas_rel_global={:.3e}",
+        scale_global, dfeas_abs, dfeas_abs / scale_global);
+    println!("componentwise (bench dfr): dfeas_rel={:.3e} argmax={}",
+        dfeas_rel_componentwise, argmax_componentwise);
+    println!();
+    println!("=== top 20 by component-wise residual ===");
+    for k in 0..per_col.len().min(20) {
+        let (j, r_rel, r, qxj, atyj, bndj, cj) = per_col[k];
+        let scale_j = 1.0 + qxj.abs() + atyj.abs() + bndj.abs() + cj.abs();
+        let (lbj, ubj) = prob.bounds[j];
+        println!("  j={} r_rel={:.3e} r={:.3e} scale={:.3e} | qx={:.3e} aty={:.3e} bnd={:.3e} c={:.3e} | bounds=[{:.3e},{:.3e}] x={:.3e}",
+            j, r_rel, r, scale_j, qxj, atyj, bndj, cj, lbj, ubj, result.solution[j]);
+    }
 
-    // worst variable の内訳
-    let j = argmax_skip;
+    // worst variable の内訳 (成分相対化 argmax)
+    let j = argmax_componentwise;
     let (lb, ub) = prob.bounds[j];
     let ct_count: usize = (0..prob.num_constraints).filter(|&i| {
         prob.a.col_ptr[j+1].saturating_sub(prob.a.col_ptr[j]) > 0

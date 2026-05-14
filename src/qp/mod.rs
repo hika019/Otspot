@@ -2161,6 +2161,24 @@ fn try_dual_only_ir(
         let mut rhs = vec![0.0_f64; ulen];
         for (fi, &j) in free_idx.iter().enumerate() {
             let residual = current_r_d_free[fi];
+
+            // Weight by 1/scale[j]^2 so Gram solves min sum_j (r_d[j]/scale[j])^2.
+            // Without weighting the LS minimizes |r_d|^2 (absolute), which can
+            // worsen the component-wise max (r_d[j]/scale[j]) by prioritising
+            // variables with large |r_d| but small scale over the true worst-case
+            // variable (small scale, moderate |r_d|).
+            let mut qx_j = 0.0_f64;
+            for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
+                qx_j += problem.q.values[k] * tmp.solution[problem.q.row_ind[k]];
+            }
+            let mut aty_j = 0.0_f64;
+            for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
+                aty_j += problem.a.values[k] * f64::from(y_dd[problem.a.row_ind[k]]);
+            }
+            let bc_j = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
+            let scale_j = (1.0 + qx_j.abs() + problem.c[j].abs() + aty_j.abs() + bc_j.abs()).max(1.0);
+            let inv_scale2 = 1.0 / (scale_j * scale_j);
+
             let mut col_vec = vec![0.0_f64; ulen];
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 let r = problem.a.row_ind[k];
@@ -2174,9 +2192,9 @@ fn try_dual_only_ir(
                 col_vec[m_active + bpos] = local_bounds[bpos].coeff();
             }
             for i in 0..ulen {
-                rhs[i] -= col_vec[i] * residual;
+                rhs[i] -= col_vec[i] * residual * inv_scale2;
                 for j2 in i..ulen {
-                    gram[i * ulen + j2] += col_vec[i] * col_vec[j2];
+                    gram[i * ulen + j2] += col_vec[i] * col_vec[j2] * inv_scale2;
                 }
             }
         }
@@ -2247,7 +2265,10 @@ fn try_dual_only_ir(
                 .map(|(&y, &d)| y + d * step_scale)
                 .collect();
             let mut bound_duals_new = tmp.bound_duals.clone();
-            for row in 0..m {
+            // dy_dd は active_rows のみ更新する。非アクティブ行の y_dd_new は y_dd と同値のため
+            // クランプ不要。全行クランプすると非アクティブ行の y が 0 に強制され、
+            // df_rel_pre (非クランプ y で計算) との比較が不整合になり、正当なステップが棄却される。
+            for &row in &active_rows {
                 let val = f64::from(y_dd_new[row]);
                 let lo = proj_lower[row];
                 let hi = proj_upper[row];
@@ -7203,6 +7224,82 @@ mod tests {
             (result.bound_duals[1] - 1.0).abs() < 1e-6,
             "active lower-bound dual should be close to 1, got {}",
             result.bound_duals[1]
+        );
+    }
+
+    /// DUAL_IR weighted Gram: scale[j=0]≈1 が component-wise 最悪のとき、
+    /// 絶対値では r_d[j=1] > r_d[j=0] でも、加重 LS が r_rel[j=0] を優先して削減する。
+    /// 無加重 LS だと r_d[j=1] を優先し r_rel[j=0] を悪化させる (STADAT1 パターン)。
+    #[test]
+    fn test_dual_only_ir_weighted_gram_prioritizes_worst_component() {
+        // Setup:
+        //   n=2, m=2, Q=diag(0,1), c=[0,3]
+        //   A=[[-1,-2],[1,1]], b=[-10,5]  (Eq at x=[0,5])
+        //   y=[8, 8+1e-6]
+        //
+        //   r_d[j=0] = (-1)*8 + 1*(8+1e-6) = 1e-6, scale≈1, r_rel=1e-6  (worst)
+        //   r_d[j=1] = 3 + 1*5 + (-2)*8 + 1*(8+1e-6) = 1e-6, scale=17, r_rel≈5.9e-8
+        //
+        //   The unweighted Gram minimizes r_d[0]^2 + r_d[1]^2 equally and would
+        //   not prioritise j=0 despite it having the larger component-wise residual.
+        //   The weighted Gram (weight 1/scale^2) reduces df_rel in one full step.
+        let q = CscMatrix::from_triplets(&[1], &[1], &[1.0_f64], 2, 2).unwrap();
+        let c = vec![0.0_f64, 3.0_f64];
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1, 0, 1],
+            &[0usize, 0, 1, 1],
+            &[-1.0_f64, 1.0, -2.0, 1.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let b = vec![-10.0_f64, 5.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new(
+            q,
+            c,
+            a,
+            b,
+            bounds,
+            vec![
+                crate::problem::ConstraintType::Eq,
+                crate::problem::ConstraintType::Eq,
+            ],
+        )
+        .unwrap();
+
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0_f64, 5.0_f64],
+            dual_solution: vec![8.0_f64, 8.0_f64 + 1e-6_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+
+        let target_pf = 5e-7;
+        let accepted = try_dual_only_ir(&problem, &mut result, target_pf, None);
+
+        assert!(accepted > 0, "DUAL_IR should accept at least one iteration");
+
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+        };
+        let df_rel = crate::qp::ipm_solver::kkt::kkt_residual_rel(
+            &view,
+            &result.solution,
+            &result.dual_solution,
+            &result.bound_duals,
+        );
+        assert!(
+            df_rel < target_pf,
+            "weighted Gram should reduce df_rel below target_pf={:.1e}: got {:.3e}",
+            target_pf,
+            df_rel
         );
     }
 
