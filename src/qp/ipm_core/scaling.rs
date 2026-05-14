@@ -304,22 +304,20 @@ pub(crate) fn check_dfeas_status_relative(
             }
         }
     }
-    // OSQP 流 全体相対化 (bench/v2/IPM 内部 nr_d_rel_orig / compute_pfeas_osqp と統一)。
-    // qx + aty は DD で組み立て、cancellation で違反を見逃さない。
-    let mut max_r = 0.0_f64;
-    let mut max_qx = 0.0_f64;
-    let mut max_c = 0.0_f64;
-    let mut max_aty = 0.0_f64;
-    let mut max_bnd = 0.0_f64;
+    // 成分ごとの相対化（bench の dfeas_rel_componentwise と整合）。
+    // 全体最大値スケールでは 1 成分のみ大きく外れた残差をマスクするため、
+    // 各成分 j を独立に正規化し max を取る。
+    let mut dfeas_relative = 0.0_f64;
     for j in 0..n {
         let r_dd = qx_dd[j] + aty_dd[j] + TwoFloat::from(bound_contrib[j]) + TwoFloat::from(problem.c[j]);
-        max_r = max_r.max(f64::from(r_dd).abs());
-        max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
-        max_c = max_c.max(problem.c[j].abs());
-        max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
-        max_bnd = max_bnd.max(bound_contrib[j].abs());
+        let r = f64::from(r_dd).abs();
+        let scale_j = 1.0
+            + f64::from(qx_dd[j]).abs()
+            + f64::from(aty_dd[j]).abs()
+            + bound_contrib[j].abs()
+            + problem.c[j].abs();
+        dfeas_relative = dfeas_relative.max(r / scale_j);
     }
-    let dfeas_relative = max_r / (1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd));
     if dfeas_relative < eps {
         SolveStatus::Optimal
     } else {
