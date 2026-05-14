@@ -120,6 +120,21 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
         }
     }
 
+    // presolve が deadline 超過で早期終了した場合（was_reduced=false）も
+    // deadline を超過していれば Timeout を返す（build_standard_form 前にチェック）
+    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return SolverResult {
+            status: SolveStatus::Timeout,
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        };
+    }
+
     solve_without_presolve(problem, options)
 }
 
@@ -202,11 +217,10 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
             dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
         SimplexMethod::Auto => {
-            if options.warm_start.is_some() {
-                dual::two_phase_dual_simplex(&sf, problem, options)
-            } else {
-                two_phase_simplex(&sf, problem, options)
-            }
+            // cold start / warm start いずれも Dual Simplex を使用する。
+            // 現代の商用ソルバー（Gurobi/CPLEX/HiGHS）と同様に Dual Simplex をデフォルトとする。
+            // Dual は Phase I/II 分離不要で退化に強く、cold start でも有利。
+            dual::two_phase_dual_simplex(&sf, problem, options)
         }
     }
 }
