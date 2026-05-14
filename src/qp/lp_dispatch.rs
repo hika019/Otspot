@@ -53,6 +53,15 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     };
 
     let simplex_result = SimplexBackend.solve(&lp, options);
+    if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
+        eprintln!(
+            "[LP_TRACE] simplex status={:?} obj={:.6e} sol_len={} rc_len={}",
+            simplex_result.status,
+            simplex_result.objective,
+            simplex_result.solution.len(),
+            simplex_result.reduced_costs.len(),
+        );
+    }
 
     // 特異基底（サイクリック構造のネットワーク流 LP など）では Simplex が NumericalError を返す。
     // Simplex は基底行列を必要とするが IPM は不要なので、IPM にフォールバックする。
@@ -101,6 +110,9 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 }
             }
             if dfr > options.ipm_eps() {
+                if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!("[LP_TRACE] fallback ipm due to dfr={:.3e} > eps={:.3e}", dfr, options.ipm_eps());
+                }
                 return ipm_solver::solve_qp_v2(problem, options);
             }
         }
@@ -111,9 +123,20 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
             // 境界違反 (bfeas_rel) のみ ipm_eps で厳密チェックする。
             const PFEAS_SIMPLEX_TOL: f64 = 1e-4;
             if pfeas_rel > PFEAS_SIMPLEX_TOL || bfeas_rel > options.ipm_eps() {
+                if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[LP_TRACE] fallback ipm due to primal quality pfeas_rel={:.3e} bfeas_rel={:.3e} eps={:.3e}",
+                        pfeas_rel,
+                        bfeas_rel,
+                        options.ipm_eps()
+                    );
+                }
                 return ipm_solver::solve_qp_v2(problem, options);
             }
         } else {
+            if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[LP_TRACE] fallback ipm due to missing primal quality");
+            }
             return ipm_solver::solve_qp_v2(problem, options);
         }
     }
