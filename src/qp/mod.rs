@@ -620,6 +620,110 @@ fn dual_recovery_progress_tol(prev_kkt: f64, cur_kkt: f64, target_pf: f64) -> f6
     64.0 * f64::EPSILON * scale
 }
 
+fn row_is_active_for_dual_recovery(
+    problem: &QpProblem,
+    row: usize,
+    ax: &[f64],
+    row_abs_activity: &[f64],
+    slack_tol_rel: f64,
+) -> bool {
+    match problem.constraint_types[row] {
+        crate::problem::ConstraintType::Eq => true,
+        crate::problem::ConstraintType::Le => {
+            let slack = problem.b[row] - ax[row];
+            let tol =
+                dual_recovery_row_slack_tol(problem, row, ax[row], row_abs_activity[row], slack_tol_rel);
+            slack.abs() <= tol
+        }
+        crate::problem::ConstraintType::Ge => {
+            let slack = ax[row] - problem.b[row];
+            let tol =
+                dual_recovery_row_slack_tol(problem, row, ax[row], row_abs_activity[row], slack_tol_rel);
+            slack.abs() <= tol
+        }
+    }
+}
+
+fn collect_dual_recovery_cluster_rows(
+    problem: &QpProblem,
+    candidate_cols: &[usize],
+    candidate_rel: &[f64],
+    ax: &[f64],
+    row_abs_activity: &[f64],
+    _target_pf: f64,
+) -> Option<(usize, Vec<usize>)> {
+    debug_assert_eq!(candidate_cols.len(), candidate_rel.len());
+    if candidate_cols.is_empty() {
+        return None;
+    }
+
+    let mut order: Vec<usize> = (0..candidate_cols.len()).collect();
+    order.sort_by(|&lhs, &rhs| {
+        candidate_rel[rhs]
+            .partial_cmp(&candidate_rel[lhs])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let worst_pos = order[0];
+    let worst_j = candidate_cols[worst_pos];
+    let worst_rel = candidate_rel[worst_pos];
+    if !worst_rel.is_finite() || worst_rel <= 0.0 {
+        return None;
+    }
+
+    const CLUSTER_REL_CUTOFF_RATIO: f64 = 0.25;
+    let rel_cutoff = worst_rel * CLUSTER_REL_CUTOFF_RATIO;
+
+    let m = problem.num_constraints;
+    let mut in_cluster = vec![false; m];
+    let mut rows = Vec::new();
+    let push_active_rows = |col: usize, in_cluster: &mut [bool], rows: &mut Vec<usize>| {
+        for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+            let row = problem.a.row_ind[k];
+            if !row_is_active_for_dual_recovery(
+                problem,
+                row,
+                ax,
+                row_abs_activity,
+                DUAL_RECOVERY_ACTIVE_TOL_REL,
+            ) {
+                continue;
+            }
+            if !in_cluster[row] {
+                in_cluster[row] = true;
+                rows.push(row);
+            }
+        }
+    };
+    push_active_rows(worst_j, &mut in_cluster, &mut rows);
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &pos in &order {
+            if candidate_rel[pos] < rel_cutoff {
+                break;
+            }
+            let col = candidate_cols[pos];
+            let touches_cluster = (problem.a.col_ptr[col]..problem.a.col_ptr[col + 1])
+                .any(|k| in_cluster[problem.a.row_ind[k]]);
+            if !touches_cluster {
+                continue;
+            }
+            let before = rows.len();
+            push_active_rows(col, &mut in_cluster, &mut rows);
+            if rows.len() > before {
+                changed = true;
+            }
+        }
+    }
+
+    rows.sort_unstable();
+    Some((worst_j, rows))
+}
+
 #[derive(Clone, Copy)]
 enum DualRecoveryBoundVar {
     Lower { var: usize, slot: usize },
@@ -1091,7 +1195,8 @@ pub(crate) fn refine_dual_worst_active_block(
     };
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
 
-    let mut worst_j = None;
+    let mut candidate_cols = Vec::new();
+    let mut candidate_rel = Vec::new();
     let mut worst_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
@@ -1103,52 +1208,25 @@ pub(crate) fn refine_dual_worst_active_block(
         let r = qx[j] + problem.c[j] + aty[j] + bound_contrib[j];
         let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bound_contrib[j].abs();
         let rel = r.abs() / scale;
+        candidate_cols.push(j);
+        candidate_rel.push(rel);
         if rel > worst_rel {
             worst_rel = rel;
-            worst_j = Some(j);
         }
     }
-    let Some(worst_j) = worst_j else {
+    let Some((worst_j, rows)) = collect_dual_recovery_cluster_rows(
+        problem,
+        &candidate_cols,
+        &candidate_rel,
+        &ax,
+        &row_abs_activity,
+        DUAL_RECOVERY_ACTIVE_TOL_REL,
+    ) else {
         return;
     };
-
-    let mut rows = Vec::new();
-    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
-        let row = problem.a.row_ind[k];
-        let active = match problem.constraint_types[row] {
-            crate::problem::ConstraintType::Eq => true,
-            crate::problem::ConstraintType::Le => {
-                let slack = problem.b[row] - ax[row];
-                let tol = dual_recovery_row_slack_tol(
-                    problem,
-                    row,
-                    ax[row],
-                    row_abs_activity[row],
-                    DUAL_RECOVERY_ACTIVE_TOL_REL,
-                );
-                slack.abs() <= tol
-            }
-            crate::problem::ConstraintType::Ge => {
-                let slack = ax[row] - problem.b[row];
-                let tol = dual_recovery_row_slack_tol(
-                    problem,
-                    row,
-                    ax[row],
-                    row_abs_activity[row],
-                    DUAL_RECOVERY_ACTIVE_TOL_REL,
-                );
-                slack.abs() <= tol
-            }
-        };
-        if active {
-            rows.push(row);
-        }
-    }
     if rows.is_empty() {
         return;
     }
-    rows.sort_unstable();
-    rows.dedup();
     let rlen = rows.len();
 
     let mut row_pos = vec![usize::MAX; m];
@@ -1984,6 +2062,7 @@ fn try_dual_only_ir(
     //    r_d[j] = c[j] + (A^T y)[j] + bound_contrib[j]
     //    free var の bound_contrib は通常 0 (z=0) だが念のため計算
     let mut r_d_eval = vec![0.0_f64; n_free_eval];
+    let mut r_d_rel_eval = vec![0.0_f64; n_free_eval];
     let mut df_rel_pre = 0.0_f64;
     let mut df_abs_pre = 0.0_f64;
     let mut worst_idx = 0;
@@ -2007,6 +2086,7 @@ fn try_dual_only_ir(
         r_d_eval[fi] = r_d;
         let scale = 1.0 + qx_f.abs() + problem.c[j].abs() + aty_f.abs() + bc.abs();
         let rel = r_d.abs() / scale;
+        r_d_rel_eval[fi] = rel;
         if rel > df_rel_pre {
             df_rel_pre = rel;
             worst_idx = j;
@@ -2045,39 +2125,22 @@ fn try_dual_only_ir(
     let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
         return 0;
     };
-    let mut active_rows = Vec::new();
-    let mut active_row_pos = vec![usize::MAX; m];
-    for k in problem.a.col_ptr[worst_idx]..problem.a.col_ptr[worst_idx + 1] {
-        let i = problem.a.row_ind[k];
-        let is_active = match problem.constraint_types[i] {
-            crate::problem::ConstraintType::Eq => true,
-            crate::problem::ConstraintType::Le => {
-                let slack = problem.b[i] - ax[i];
-                let tol = dual_recovery_row_slack_tol(
-                    problem,
-                    i,
-                    ax[i],
-                    row_abs_activity[i],
-                    DUAL_RECOVERY_ACTIVE_TOL_REL,
-                );
-                slack.abs() <= tol
-            }
-            crate::problem::ConstraintType::Ge => {
-                let slack = ax[i] - problem.b[i];
-                let tol = dual_recovery_row_slack_tol(
-                    problem,
-                    i,
-                    ax[i],
-                    row_abs_activity[i],
-                    DUAL_RECOVERY_ACTIVE_TOL_REL,
-                );
-                slack.abs() <= tol
-            }
-        };
-        if is_active && active_row_pos[i] == usize::MAX {
-            active_row_pos[i] = active_rows.len();
-            active_rows.push(i);
+    let Some((worst_j, active_rows)) = collect_dual_recovery_cluster_rows(
+        problem,
+        &free_eval_idx,
+        &r_d_rel_eval,
+        &ax,
+        &row_abs_activity,
+        target_pf,
+    ) else {
+        if trace {
+            eprintln!("DUAL_IR skip: no active row cluster");
         }
+        return 0;
+    };
+    let mut active_row_pos = vec![usize::MAX; m];
+    for (pos, &row) in active_rows.iter().enumerate() {
+        active_row_pos[row] = pos;
     }
     let m_active = active_rows.len();
     if m_active == 0 {
@@ -2087,7 +2150,10 @@ fn try_dual_only_ir(
         return 0;
     }
     if trace {
-        eprintln!("DUAL_IR cluster_rows={}/{}", m_active, m);
+        eprintln!(
+            "DUAL_IR cluster_rows={}/{} worst_j={} seed_worst_j={}",
+            m_active, m, worst_idx, worst_j
+        );
     }
 
     let mut free_idx = Vec::new();
