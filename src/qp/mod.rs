@@ -1195,8 +1195,7 @@ pub(crate) fn refine_dual_worst_active_block(
     };
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
 
-    let mut candidate_cols = Vec::new();
-    let mut candidate_rel = Vec::new();
+    let mut worst_j = None;
     let mut worst_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
@@ -1208,25 +1207,32 @@ pub(crate) fn refine_dual_worst_active_block(
         let r = qx[j] + problem.c[j] + aty[j] + bound_contrib[j];
         let scale = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bound_contrib[j].abs();
         let rel = r.abs() / scale;
-        candidate_cols.push(j);
-        candidate_rel.push(rel);
         if rel > worst_rel {
             worst_rel = rel;
+            worst_j = Some(j);
         }
     }
-    let Some((worst_j, rows)) = collect_dual_recovery_cluster_rows(
-        problem,
-        &candidate_cols,
-        &candidate_rel,
-        &ax,
-        &row_abs_activity,
-        DUAL_RECOVERY_ACTIVE_TOL_REL,
-    ) else {
+    let Some(worst_j) = worst_j else {
         return;
     };
+    let mut rows = Vec::new();
+    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
+        let row = problem.a.row_ind[k];
+        if row_is_active_for_dual_recovery(
+            problem,
+            row,
+            &ax,
+            &row_abs_activity,
+            DUAL_RECOVERY_ACTIVE_TOL_REL,
+        ) {
+            rows.push(row);
+        }
+    }
     if rows.is_empty() {
         return;
     }
+    rows.sort_unstable();
+    rows.dedup();
     let rlen = rows.len();
 
     let mut row_pos = vec![usize::MAX; m];
@@ -2138,6 +2144,23 @@ fn try_dual_only_ir(
         }
         return 0;
     };
+    let mut seed_rows = Vec::new();
+    for k in problem.a.col_ptr[worst_j]..problem.a.col_ptr[worst_j + 1] {
+        let row = problem.a.row_ind[k];
+        if row_is_active_for_dual_recovery(
+            problem,
+            row,
+            &ax,
+            &row_abs_activity,
+            DUAL_RECOVERY_ACTIVE_TOL_REL,
+        ) {
+            seed_rows.push(row);
+        }
+    }
+    seed_rows.sort_unstable();
+    seed_rows.dedup();
+
+    let mut active_rows = active_rows;
     let mut active_row_pos = vec![usize::MAX; m];
     for (pos, &row) in active_rows.iter().enumerate() {
         active_row_pos[row] = pos;
@@ -2162,6 +2185,29 @@ fn try_dual_only_ir(
             .any(|k| active_row_pos[problem.a.row_ind[k]] != usize::MAX);
         if touches_cluster {
             free_idx.push(j);
+        }
+    }
+    if !seed_rows.is_empty() && free_idx.len() * 2 > n_free_eval && active_rows.len() > seed_rows.len() {
+        if trace {
+            eprintln!(
+                "DUAL_IR cluster fallback: expanded_rows={} expanded_free={} seed_rows={}",
+                active_rows.len(),
+                free_idx.len(),
+                seed_rows.len()
+            );
+        }
+        active_rows = seed_rows;
+        active_row_pos.fill(usize::MAX);
+        for (pos, &row) in active_rows.iter().enumerate() {
+            active_row_pos[row] = pos;
+        }
+        free_idx.clear();
+        for &j in &free_eval_idx {
+            let touches_cluster = (problem.a.col_ptr[j]..problem.a.col_ptr[j + 1])
+                .any(|k| active_row_pos[problem.a.row_ind[k]] != usize::MAX);
+            if touches_cluster {
+                free_idx.push(j);
+            }
         }
     }
     let n_free = free_idx.len();
