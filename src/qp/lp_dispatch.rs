@@ -7,6 +7,7 @@ use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::backend::SimplexBackend;
 use crate::backend::LpBackend;
+use crate::qp::ipm_solver::kkt::kkt_residual_rel;
 
 use super::QpProblem;
 use super::ipm_solver;
@@ -246,7 +247,58 @@ fn convert_simplex_result(
         duality_gap_rel: None,
     };
     if is_timeout && !converted.solution.is_empty() {
-        super::refine_primal_lsq(problem, &mut converted, None);
+        let mut prev_quality = simplex_primal_quality(problem, &converted.solution);
+        loop {
+            let before_solution = converted.solution.clone();
+            super::refine_primal_lsq(problem, &mut converted, None);
+            if converted.solution == before_solution {
+                break;
+            }
+            let cur_quality = simplex_primal_quality(problem, &converted.solution);
+            let made_progress = match (prev_quality, cur_quality) {
+                (Some((prev_pf, prev_bf)), Some((cur_pf, cur_bf))) => {
+                    cur_pf < prev_pf || cur_bf < prev_bf
+                }
+                _ => false,
+            };
+            if !made_progress {
+                converted.solution = before_solution;
+                break;
+            }
+            prev_quality = cur_quality;
+        }
+        let view = crate::qp::ipm_solver::outcome::ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+        };
+        let pre_dual_kkt = kkt_residual_rel(
+            &view,
+            &converted.solution,
+            &converted.dual_solution,
+            &converted.bound_duals,
+        );
+        if converted.dual_solution.len() != problem.num_constraints {
+            converted.dual_solution = vec![0.0_f64; problem.num_constraints];
+        }
+        if let Some(y) = super::compute_lsq_dual_y(problem, &converted) {
+            let mut candidate = converted.clone();
+            candidate.dual_solution = y;
+            super::refit_bound_duals_kkt(problem, &mut candidate);
+            let post_dual_kkt = kkt_residual_rel(
+                &view,
+                &candidate.solution,
+                &candidate.dual_solution,
+                &candidate.bound_duals,
+            );
+            if post_dual_kkt < pre_dual_kkt {
+                converted.dual_solution = candidate.dual_solution;
+                converted.bound_duals = candidate.bound_duals;
+            }
+        }
         converted.objective = problem
             .c
             .iter()
