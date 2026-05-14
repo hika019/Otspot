@@ -12,7 +12,27 @@ use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
-use super::{StandardForm, SimplexOutcome, extract_dual_info, timeout_result_with_incumbent};
+use super::{StandardForm, SimplexOutcome, extract_dual_info};
+
+fn extract_timeout_solution_reconciled(
+    sf: &StandardForm,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+    max_etas: usize,
+    deadline: Option<std::time::Instant>,
+) -> Vec<f64> {
+    let mut x_b_reconciled = x_b.to_vec();
+    let mut y = vec![0.0_f64; basis.len()];
+    if reconcile_final_basis_state(a, b, c, basis, &mut x_b_reconciled, &mut y, max_etas, deadline).is_ok() {
+        extract_solution(sf, basis, &x_b_reconciled, col_scale)
+    } else {
+        extract_solution(sf, basis, x_b, col_scale)
+    }
+}
 
 /// 2相シンプレックス法で標準形LPを解く
 ///
@@ -54,7 +74,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
                     Ok(()) => {}
                     Err(crate::error::SolverError::DeadlineExceeded) => {
-                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        let solution = extract_timeout_solution_reconciled(
+                            sf,
+                            &a,
+                            &b,
+                            &c,
+                            &basis,
+                            &x_b,
+                            &col_scale,
+                            options.max_etas,
+                            options.deadline,
+                        );
                         return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, ..Default::default() };
                     }
                     Err(_) => return SolverResult::numerical_error(),
@@ -98,7 +128,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
             },
             SimplexOutcome::Timeout(obj) => {
-                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                let solution = extract_timeout_solution_reconciled(
+                    sf,
+                    &a,
+                    &b,
+                    &c,
+                    &basis,
+                    &x_b,
+                    &col_scale,
+                    options.max_etas,
+                    options.deadline,
+                );
                 SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj + sf.obj_offset,
@@ -257,7 +297,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
-                                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                                let solution = extract_timeout_solution_reconciled(
+                                    sf,
+                                    &a_ext,
+                                    &b,
+                                    &c_phase2,
+                                    &basis,
+                                    &x_b,
+                                    &col_scale,
+                                    options.max_etas,
+                                    options.deadline,
+                                );
                                 return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
                             }
                             Err(_) => return SolverResult::numerical_error(),
@@ -301,7 +351,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                     },
                     SimplexOutcome::Timeout(obj2) => {
-                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        let solution = extract_timeout_solution_reconciled(
+                            sf,
+                            &a_ext,
+                            &b,
+                            &c_phase2,
+                            &basis,
+                            &x_b,
+                            &col_scale,
+                            options.max_etas,
+                            options.deadline,
+                        );
                         SolverResult {
                             status: SolveStatus::Timeout,
                             objective: obj2 + sf.obj_offset,
@@ -326,7 +386,29 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
-            SimplexOutcome::Timeout(_) => timeout_result_with_incumbent(sf, problem, &basis, &x_b, &col_scale),
+            SimplexOutcome::Timeout(obj1) => {
+                let solution = extract_timeout_solution_reconciled(
+                    sf,
+                    &a_ext,
+                    &b,
+                    &c_phase1,
+                    &basis,
+                    &x_b,
+                    &col_scale,
+                    options.max_etas,
+                    options.deadline,
+                );
+                SolverResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj1 + sf.obj_offset,
+                    solution,
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            }
             SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }

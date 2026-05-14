@@ -196,6 +196,7 @@ fn convert_simplex_result(
     status: SolveStatus,
 ) -> SolverResult {
     let has_optimal_status = status == SolveStatus::Optimal;
+    let is_timeout = status == SolveStatus::Timeout;
     if result.solution.len() != problem.num_vars {
         return SolverResult {
             status,
@@ -227,7 +228,7 @@ fn convert_simplex_result(
         .map(|(&ci, &xi)| ci * xi)
         .sum::<f64>()
         + problem.obj_offset;
-    SolverResult {
+    let mut converted = SolverResult {
         status,
         objective: obj,
         solution: result.solution,
@@ -243,7 +244,18 @@ fn convert_simplex_result(
         dfeas: None,
         gap: None,
         duality_gap_rel: None,
+    };
+    if is_timeout && !converted.solution.is_empty() {
+        super::refine_primal_lsq(problem, &mut converted, None);
+        converted.objective = problem
+            .c
+            .iter()
+            .zip(converted.solution.iter())
+            .map(|(&ci, &xi)| ci * xi)
+            .sum::<f64>()
+            + problem.obj_offset;
     }
+    converted
 }
 
 fn simplex_primal_quality(problem: &QpProblem, solution: &[f64]) -> Option<(f64, f64)> {
@@ -349,5 +361,36 @@ mod tests {
         assert!(converted.solution.is_empty());
         assert!(converted.dual_solution.is_empty());
         assert!(converted.reduced_costs.is_empty());
+    }
+
+    #[test]
+    fn timeout_conversion_projects_primal_incumbent() {
+        let q = CscMatrix::new(1, 1);
+        let c = vec![1.0_f64];
+        let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let problem = QpProblem::new(
+            q,
+            c,
+            a,
+            b,
+            bounds,
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let lp_like = SolverResult {
+            status: SolveStatus::Timeout,
+            solution: vec![1.0_f64 + 1e-7],
+            objective: 1.0_f64 + 1e-7,
+            iterations: 11,
+            ..Default::default()
+        };
+
+        let converted = convert_simplex_result(&problem, lp_like, SolveStatus::Timeout);
+
+        assert_eq!(converted.status, SolveStatus::Timeout);
+        assert!((converted.solution[0] - 1.0_f64).abs() < 1e-12);
+        assert!((converted.objective - 1.0_f64).abs() < 1e-12);
     }
 }
