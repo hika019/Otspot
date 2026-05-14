@@ -207,59 +207,21 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
         }
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
-        let phase1_outcome = loop {
-            let phase1_opts;
-            let phase1_options = if let Some(deadline) = options.deadline {
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    let obj: f64 = (0..m).map(|i| c_phase1[basis[i]] * x_b[i]).sum();
-                    break SimplexOutcome::Timeout(obj);
-                }
-                let remaining = deadline.saturating_duration_since(now);
-                let probe_window = remaining.min(std::time::Duration::from_millis(50));
-                phase1_opts = {
-                    let mut o = options.clone();
-                    o.deadline = Some(now + probe_window);
-                    o
-                };
-                &phase1_opts
-            } else {
-                options
-            };
-            match revised_simplex_core(
-                &a_ext,
-                &mut x_b,
-                &c_phase1,
-                &mut basis,
-                m,
-                n_ext,
-                n_ext,
-                &mut pricing1,
-                phase1_options,
-            ) {
-                SimplexOutcome::Timeout(obj1) if options.deadline.is_some() => {
-                    let solution = extract_timeout_solution_reconciled(
-                        sf,
-                        &a_ext,
-                        &b,
-                        &c_phase1,
-                        &basis,
-                        &x_b,
-                        &col_scale,
-                        options.max_etas,
-                        options.deadline,
-                    );
-                    if check_eq_feasibility(problem, &solution) {
-                        break SimplexOutcome::Timeout(obj1);
-                    }
-                    if std::time::Instant::now() >= options.deadline.unwrap() {
-                        break SimplexOutcome::Timeout(obj1);
-                    }
-                    continue;
-                }
-                outcome => break outcome,
-            }
-        };
+        // Phase1 を全 deadline で一回だけ実行する。
+        // 50ms 刻みのプローブループは revised_simplex_core が呼ばれるたびに LuBasis::new
+        // (フル LU 因子分解) を行うため、大問題では全 window を LU で消費して pivot が
+        // 一切進まない。probe loop を廃止し、1 回の呼び出しで Phase1 を完走させる。
+        let phase1_outcome = revised_simplex_core(
+            &a_ext,
+            &mut x_b,
+            &c_phase1,
+            &mut basis,
+            m,
+            n_ext,
+            n_ext,
+            &mut pricing1,
+            options,
+        );
 
         match phase1_outcome {
             SimplexOutcome::Optimal(obj, _) => {
@@ -399,18 +361,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
             },
             SimplexOutcome::Timeout(obj1) => {
-                let solution = extract_timeout_solution_reconciled(
-                    sf,
-                    &a_ext,
-                    &b,
-                    &c_phase1,
-                    &basis,
-                    &x_b,
-                    &col_scale,
-                    options.max_etas,
-                    options.deadline,
-                );
-                if check_eq_feasibility(problem, &solution) {
+                // obj1 = Σ(人工変数値) ≤ PIVOT_TOL → 全人工変数が事実上ゼロ → 実行可能基底発見。
+                // check_eq_feasibility は絶対公差 1e-4 で偽陽性になりうるため使わない。
+                if obj1 <= PIVOT_TOL {
                     // x_b を B^{-1}b で再計算し、Phase1 反復で蓄積した数値誤差を除去する。
                     // これにより人工変数の真のゼロ値が PIVOT_TOL で正しく検出され、
                     // pivot_out_degenerate_artificials が確実に人工変数を除去できる。
@@ -432,7 +385,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             return SolverResult {
                                 status: SolveStatus::Timeout,
                                 objective: obj1 + sf.obj_offset,
-                                solution,
+                                solution: vec![],
                                 dual_solution: vec![],
                                 reduced_costs: vec![],
                                 slack: vec![],
@@ -527,10 +480,11 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
                     }
                 }
+                // obj1 > PIVOT_TOL: Phase1 が実行可能基底を発見できないまま時間切れ。
                 SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj1 + sf.obj_offset,
-                    solution,
+                    solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],
                     slack: vec![],
