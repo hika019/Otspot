@@ -308,6 +308,9 @@ fn solve_qp_v2_with_runner(
     if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
         return SolverResult::infeasible();
     }
+    if presolve_result.presolve_status == QpPresolveStatus::Unbounded {
+        return SolverResult::unbounded();
+    }
 
     // 巨大 QP の presolve が deadline を食い切ったら IPM を走らせず即 Timeout。
     if total_deadline.is_some_and(|d| Instant::now() >= d) {

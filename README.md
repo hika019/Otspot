@@ -291,7 +291,4 @@ benches/
 
 ## ライセンス
 
-以下のいずれかのライセンスで利用可能:
-
-- [Apache License 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
+[GNU Affero General Public License v3.0 (AGPL-3.0-only)](LICENSE)

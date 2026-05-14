@@ -70,6 +70,10 @@ DATA_DIR_LOWER=$(echo "$DATA_DIR" | tr '[:upper:]' '[:lower:]')
 SOLVER_ROOT="${SOLVER_DIR:-$(pwd)}"
 if echo "$DATA_DIR_LOWER" | grep -q "maros"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/maros_meszaros.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?unbounded"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_unbounded.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?infeasible"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_infeasible.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
