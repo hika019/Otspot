@@ -613,7 +613,7 @@ impl MpsParser {
             for (col_name, row_name, value) in &self.columns {
                 if row_name == obj_row_name {
                     if let Some(&col_idx) = col_map.get(col_name) {
-                        c[col_idx] = *value;
+                        c[col_idx] += *value;
                     }
                 }
             }
@@ -935,6 +935,23 @@ ENDATA
         assert_eq!(lp.num_constraints, 2);
         assert_eq!(lp.b[0], 10.0); // Le制約のRHS（上限）
         assert_eq!(lp.b[1], 5.0);  // Ge制約のRHS（下限）
+    }
+
+    #[test]
+    fn test_parse_mps_accumulates_duplicate_objective_entries() {
+        let mps = r"NAME dup_obj
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.5  c1  1.0
+    x1  obj  2.5
+RHS
+    rhs  c1  10.0
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        assert_eq!(lp.c, vec![4.0]);
     }
 
     #[test]

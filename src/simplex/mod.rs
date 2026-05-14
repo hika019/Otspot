@@ -683,6 +683,40 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_solution_uses_dd_for_split_variable_cancellation() {
+        let sf = StandardForm {
+            a: CscMatrix::new(3, 3),
+            b: vec![0.0, 0.0, 0.0],
+            c: vec![0.0, 0.0, 0.0],
+            m: 3,
+            n_shifted: 3,
+            n_total: 3,
+            initial_basis: vec![0, 1, 2],
+            needs_artificial: vec![false, false, false],
+            num_artificial: 0,
+            obj_offset: 0.0,
+            n_orig: 1,
+            orig_var_info: vec![OrigVarInfo {
+                offset: 0.0,
+                new_vars: vec![(0, 1.0), (1, 1.0), (2, -1.0)],
+            }],
+            row_negated: vec![false, false, false],
+        };
+        let basis = vec![0usize, 1usize, 2usize];
+        let x_b = vec![1.0_f64, 1.0e16_f64, 1.0e16_f64];
+        let col_scale = vec![1.0, 1.0, 1.0];
+
+        let solution = extract_solution(&sf, &basis, &x_b, &col_scale);
+
+        assert_eq!(solution.len(), 1);
+        assert!(
+            (solution[0] - 1.0).abs() < 1e-12,
+            "split-variable recomposition should preserve unit residual, got {}",
+            solution[0]
+        );
+    }
+
+    #[test]
     fn test_basic_2var() {
         let lp = make_lp(
             vec![-1.0, -1.0],

@@ -12,7 +12,27 @@ use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
-use super::{StandardForm, SimplexOutcome, extract_dual_info, timeout_result_with_incumbent};
+use super::{StandardForm, SimplexOutcome, extract_dual_info};
+
+fn extract_timeout_solution_reconciled(
+    sf: &StandardForm,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+    max_etas: usize,
+    deadline: Option<std::time::Instant>,
+) -> Vec<f64> {
+    let mut x_b_reconciled = x_b.to_vec();
+    let mut y = vec![0.0_f64; basis.len()];
+    if reconcile_final_basis_state(a, b, c, basis, &mut x_b_reconciled, &mut y, max_etas, deadline).is_ok() {
+        extract_solution(sf, basis, &x_b_reconciled, col_scale)
+    } else {
+        extract_solution(sf, basis, x_b, col_scale)
+    }
+}
 
 /// 2相シンプレックス法で標準形LPを解く
 ///
@@ -54,7 +74,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
                     Ok(()) => {}
                     Err(crate::error::SolverError::DeadlineExceeded) => {
-                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        let solution = extract_timeout_solution_reconciled(
+                            sf,
+                            &a,
+                            &b,
+                            &c,
+                            &basis,
+                            &x_b,
+                            &col_scale,
+                            options.max_etas,
+                            options.deadline,
+                        );
                         return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, ..Default::default() };
                     }
                     Err(_) => return SolverResult::numerical_error(),
@@ -98,7 +128,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
             },
             SimplexOutcome::Timeout(obj) => {
-                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                let solution = extract_timeout_solution_reconciled(
+                    sf,
+                    &a,
+                    &b,
+                    &c,
+                    &basis,
+                    &x_b,
+                    &col_scale,
+                    options.max_etas,
+                    options.deadline,
+                );
                 SolverResult {
                     status: SolveStatus::Timeout,
                     objective: obj + sf.obj_offset,
@@ -167,8 +207,23 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
         }
         let mut pricing1 = SteepestEdgePricing::new(n_ext);
+        // Phase1 を全 deadline で一回だけ実行する。
+        // 50ms 刻みのプローブループは revised_simplex_core が呼ばれるたびに LuBasis::new
+        // (フル LU 因子分解) を行うため、大問題では全 window を LU で消費して pivot が
+        // 一切進まない。probe loop を廃止し、1 回の呼び出しで Phase1 を完走させる。
+        let phase1_outcome = revised_simplex_core(
+            &a_ext,
+            &mut x_b,
+            &c_phase1,
+            &mut basis,
+            m,
+            n_ext,
+            n_ext,
+            &mut pricing1,
+            options,
+        );
 
-        match revised_simplex_core(&a_ext, &mut x_b, &c_phase1, &mut basis, m, n_ext, n_ext, &mut pricing1, options) {
+        match phase1_outcome {
             SimplexOutcome::Optimal(obj, _) => {
                 if obj > PIVOT_TOL {
                     return SolverResult {
@@ -193,48 +248,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 //   Phase I が surplus を基底から追い出せず人工変数が縮退 0 で残留することがある。
                 // 置換候補: 非基底の非人工列 (j < sf.n_total) で行 i の係数が最大のもの。
                 // 安全チェック: LU 失敗なら全変更をリバート。
-                {
-                    // 変更前の基底を保存。LU検証失敗時にリバートするため。
-                    let basis_before_case_c = basis.clone();
-                    let mut is_basic = vec![false; n_ext];
-                    for &col in basis.iter() {
-                        is_basic[col] = true;
-                    }
-                    for i in 0..m {
-                        // 行 i の基底が人工変数 (>= n_total) かつ縮退 (x_b ≈ 0) なら pivot out
-                        if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
-                            continue;
-                        }
-                        // 行 i で最大 |a_ext[i,j]| の非基底・非人工列 j を探す
-                        let mut best_j = None;
-                        let mut best_abs = PIVOT_TOL;
-                        for j in 0..sf.n_total {
-                            if is_basic[j] {
-                                continue;
-                            }
-                            if let Ok((rows, vals)) = a_ext.get_column(j) {
-                                for (k, &row) in rows.iter().enumerate() {
-                                    if row == i && vals[k].abs() > best_abs {
-                                        best_abs = vals[k].abs();
-                                        best_j = Some(j);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(j) = best_j {
-                            is_basic[basis[i]] = false;
-                            is_basic[j] = true;
-                            basis[i] = j;
-                            // degenerate pivot: x_b[i] = 0, 他の x_b は変化なし
-                        }
-                    }
-                    // 安全チェック: 修正後の基底がLU分解可能か検証。
-                    // 特異または高条件数の問題（SCORPION等）では案Cの置換が基底品質を
-                    // 悪化させる場合がある。LU失敗なら全置換をリバート。
-                    if LuBasis::new_timed(&a_ext, &basis, options.max_etas, options.deadline).is_err() {
-                        basis.copy_from_slice(&basis_before_case_c);
-                    }
-                }
+                pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
 
                 // Phase II: restrict pricing to non-artificial columns
                 // Use scaled c for Phase II cost
@@ -257,7 +271,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
-                                let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                                let solution = extract_timeout_solution_reconciled(
+                                    sf,
+                                    &a_ext,
+                                    &b,
+                                    &c_phase2,
+                                    &basis,
+                                    &x_b,
+                                    &col_scale,
+                                    options.max_etas,
+                                    options.deadline,
+                                );
                                 return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
                             }
                             Err(_) => return SolverResult::numerical_error(),
@@ -301,7 +325,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             ..Default::default()
                     },
                     SimplexOutcome::Timeout(obj2) => {
-                        let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                        let solution = extract_timeout_solution_reconciled(
+                            sf,
+                            &a_ext,
+                            &b,
+                            &c_phase2,
+                            &basis,
+                            &x_b,
+                            &col_scale,
+                            options.max_etas,
+                            options.deadline,
+                        );
                         SolverResult {
                             status: SolveStatus::Timeout,
                             objective: obj2 + sf.obj_offset,
@@ -326,7 +360,138 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 warm_start_basis: None,
             ..Default::default()
             },
-            SimplexOutcome::Timeout(_) => timeout_result_with_incumbent(sf, problem, &basis, &x_b, &col_scale),
+            SimplexOutcome::Timeout(obj1) => {
+                // obj1 = Σ(人工変数値) ≤ PIVOT_TOL → 全人工変数が事実上ゼロ → 実行可能基底発見。
+                // check_eq_feasibility は絶対公差 1e-4 で偽陽性になりうるため使わない。
+                if obj1 <= PIVOT_TOL {
+                    // x_b を B^{-1}b で再計算し、Phase1 反復で蓄積した数値誤差を除去する。
+                    // これにより人工変数の真のゼロ値が PIVOT_TOL で正しく検出され、
+                    // pivot_out_degenerate_artificials が確実に人工変数を除去できる。
+                    {
+                        let mut y_dummy = vec![0.0_f64; m];
+                        if reconcile_final_basis_state(
+                            &a_ext,
+                            &b,
+                            &c_phase1,
+                            &basis,
+                            &mut x_b,
+                            &mut y_dummy,
+                            options.max_etas,
+                            options.deadline,
+                        )
+                        .is_err()
+                        {
+                            // reconcile 失敗は基底が特異になった場合。Timeout として返す。
+                            return SolverResult {
+                                status: SolveStatus::Timeout,
+                                objective: obj1 + sf.obj_offset,
+                                solution: vec![],
+                                dual_solution: vec![],
+                                reduced_costs: vec![],
+                                slack: vec![],
+                                warm_start_basis: None,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                    pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+                    let mut c_phase2 = vec![0.0; n_ext];
+                    c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
+                    let mut pricing2 = SteepestEdgePricing::new(n_ext);
+                    match revised_simplex_core(
+                        &a_ext,
+                        &mut x_b,
+                        &c_phase2,
+                        &mut basis,
+                        m,
+                        n_ext,
+                        sf.n_total,
+                        &mut pricing2,
+                        options,
+                    ) {
+                        SimplexOutcome::Optimal(obj2, mut y) => {
+                            match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                                Ok(()) => {}
+                                Err(crate::error::SolverError::DeadlineExceeded) => {
+                                    let solution = extract_timeout_solution_reconciled(
+                                        sf,
+                                        &a_ext,
+                                        &b,
+                                        &c_phase2,
+                                        &basis,
+                                        &x_b,
+                                        &col_scale,
+                                        options.max_etas,
+                                        options.deadline,
+                                    );
+                                    return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
+                                }
+                                Err(_) => return SolverResult::numerical_error(),
+                            }
+                            let solution = extract_solution(sf, &basis, &x_b, &col_scale);
+                            if !check_eq_feasibility(problem, &solution) {
+                                return SolverResult::numerical_error();
+                            }
+                            let (dual_solution, reduced_costs, slack) =
+                                extract_dual_info(sf, problem, &y, &solution, &row_scale);
+                            let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                            return SolverResult {
+                                status: SolveStatus::Optimal,
+                                objective: obj2 + sf.obj_offset,
+                                solution,
+                                dual_solution,
+                                reduced_costs,
+                                slack,
+                                warm_start_basis: Some(ws),
+                                ..Default::default()
+                            };
+                        }
+                        SimplexOutcome::Timeout(obj2) => {
+                            let solution = extract_timeout_solution_reconciled(
+                                sf,
+                                &a_ext,
+                                &b,
+                                &c_phase2,
+                                &basis,
+                                &x_b,
+                                &col_scale,
+                                options.max_etas,
+                                options.deadline,
+                            );
+                            return SolverResult {
+                                status: SolveStatus::Timeout,
+                                objective: obj2 + sf.obj_offset,
+                                solution,
+                                ..Default::default()
+                            };
+                        }
+                        SimplexOutcome::Unbounded => {
+                            return SolverResult {
+                                status: SolveStatus::Unbounded,
+                                objective: f64::NEG_INFINITY,
+                                solution: vec![],
+                                dual_solution: vec![],
+                                reduced_costs: vec![],
+                                slack: vec![],
+                                warm_start_basis: None,
+                                ..Default::default()
+                            };
+                        }
+                        SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
+                    }
+                }
+                // obj1 > PIVOT_TOL: Phase1 が実行可能基底を発見できないまま時間切れ。
+                SolverResult {
+                    status: SolveStatus::Timeout,
+                    objective: obj1 + sf.obj_offset,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            }
             SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }
@@ -358,6 +523,48 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     true
+}
+
+fn pivot_out_degenerate_artificials(
+    a_ext: &CscMatrix,
+    basis: &mut [usize],
+    x_b: &[f64],
+    sf: &StandardForm,
+    options: &SolverOptions,
+) {
+    let basis_before = basis.to_vec();
+    let mut is_basic = vec![false; a_ext.ncols];
+    for &col in basis.iter() {
+        is_basic[col] = true;
+    }
+    for i in 0..basis.len() {
+        if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
+            continue;
+        }
+        let mut best_j = None;
+        let mut best_abs = PIVOT_TOL;
+        for j in 0..sf.n_total {
+            if is_basic[j] {
+                continue;
+            }
+            if let Ok((rows, vals)) = a_ext.get_column(j) {
+                for (k, &row) in rows.iter().enumerate() {
+                    if row == i && vals[k].abs() > best_abs {
+                        best_abs = vals[k].abs();
+                        best_j = Some(j);
+                    }
+                }
+            }
+        }
+        if let Some(j) = best_j {
+            is_basic[basis[i]] = false;
+            is_basic[j] = true;
+            basis[i] = j;
+        }
+    }
+    if LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline).is_err() {
+        basis.copy_from_slice(&basis_before);
+    }
 }
 
 /// 最終基底に対して x_B = B^{-1}b, y = B^{-T}c_B を再計算する。
@@ -397,6 +604,7 @@ pub(crate) fn reconcile_final_basis_state(
 /// 元問題の変数値に変換する。
 /// `col_scale` はRuizスケーリングの列スケール因子。スケーリングを行わない場合は空スライスを渡す。
 pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
+    use twofloat::TwoFloat;
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
@@ -408,10 +616,11 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
     let mut solution = vec![0.0; sf.n_orig];
     for (j, sol_j) in solution.iter_mut().enumerate() {
         let info = &sf.orig_var_info[j];
-        *sol_j = info.offset;
+        let mut value = TwoFloat::from(info.offset);
         for &(new_idx, coeff) in &info.new_vars {
-            *sol_j += coeff * x_new[new_idx];
+            value = value + TwoFloat::new_mul(coeff, x_new[new_idx]);
         }
+        *sol_j = f64::from(value);
     }
     solution
 }

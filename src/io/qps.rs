@@ -603,7 +603,7 @@ impl QpsParser {
             for (col_name, row_name, value) in &self.columns {
                 if row_name == obj_row_name {
                     if let Some(&col_idx) = col_map.get(col_name) {
-                        c[col_idx] = *value;
+                        c[col_idx] += *value;
                     }
                 }
             }
@@ -1005,6 +1005,21 @@ ENDATA
             "expected obj_offset=-7.5, got {}",
             prob.obj_offset
         );
+    }
+
+    #[test]
+    fn test_parse_qps_accumulates_duplicate_objective_entries() {
+        let qps = r"NAME          DUP_QP
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1    obj    1.5    c1    1.0
+    x1    obj    2.5
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        assert_eq!(prob.c, vec![4.0]);
     }
 
     /// e226.QPS実ファイルでobj_offset=-7.113が取得される
