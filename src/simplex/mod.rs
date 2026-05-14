@@ -217,10 +217,10 @@ fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> Solve
             dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
         SimplexMethod::Auto => {
-            // cold start / warm start いずれも Dual Simplex を使用する。
-            // 現代の商用ソルバー（Gurobi/CPLEX/HiGHS）と同様に Dual Simplex をデフォルトとする。
-            // Dual は Phase I/II 分離不要で退化に強く、cold start でも有利。
-            dual::two_phase_dual_simplex(&sf, problem, options)
+            // Auto: DualAdvanced（Harris ratio test + LuBasis::needs_refactor）を使用する。
+            // Le-only cold start は Harris dual simplex で高速化。
+            // Ge/Eq制約含む問題は DualAdvanced 内で two_phase_dual_simplex にフォールバック。
+            dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
     }
 }

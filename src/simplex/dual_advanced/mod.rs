@@ -22,7 +22,8 @@ mod bound_flip;
 /// Dual Simplex強化版エントリポイント
 ///
 /// warm-start提供時: 基底からx_Bを再計算し、dual_simplex_core_advancedを実行
-/// cold-start: Phase 4（Big-M）未実装のため、dual::two_phase_dual_simplexにフォールバック
+/// cold-start (Le-only): コスト摂動でDual実行可能性を確保し、Harris ratio testで最適化
+/// cold-start (Ge/Eq含む): dual::two_phase_dual_simplexにフォールバック
 pub(crate) fn solve_dual_advanced(
     sf: &StandardForm,
     problem: &LpProblem,
@@ -60,8 +61,122 @@ pub(crate) fn solve_dual_advanced(
         }
     }
 
-    // cold-start: Phase 4未実装のため dual.rs の two_phase_dual_simplex にフォールバック
+    // cold-start: Le-only問題（人工変数不要）はHarris dual simplexを使用
+    if sf.num_artificial == 0 {
+        return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
+    }
+
+    // cold-start: Ge/Eq制約を含む問題は dual::two_phase_dual_simplex にフォールバック
     super::dual::two_phase_dual_simplex(sf, problem, options)
+}
+
+/// Le-only cold startでHarris Dual Simplexを使用する
+///
+/// dual.rs::cold_start_dual と同じ構造だが、Phase 1で dual_simplex_core_advanced
+/// （Harris ratio test + LuBasis::needs_refactor）を使用する。
+#[allow(clippy::too_many_arguments)]
+fn cold_start_advanced(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &crate::sparse::CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+) -> SolverResult {
+    let m = sf.m;
+
+    // Le-only: スラック基底 B=I, x_B = b ≥ 0（標準形変換後）
+    let mut basis = sf.initial_basis.clone();
+    let mut x_b = b.to_vec();
+
+    // コスト摂動: c̃_j = max(c_j, 0) → スラック基底（y=0）で r̃_j = c̃_j ≥ 0 → 双対実行可能
+    let c_perturbed: Vec<f64> = c.iter().map(|&v| v.max(0.0)).collect();
+
+    let leaving = MostInfeasibleLeaving;
+
+    // Phase 1: Harris dual simplexで主実行可能性を修復
+    // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
+    let phase1_outcome = core::dual_simplex_core_advanced(
+        a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options, &leaving,
+    );
+
+    match phase1_outcome {
+        SimplexOutcome::Unbounded => {
+            // 双対非有界 = 主実行不可
+            return SolverResult {
+                status: SolveStatus::Infeasible,
+                objective: 0.0,
+                solution: vec![],
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                ..Default::default()
+            };
+        }
+        SimplexOutcome::Timeout(_) => {
+            return super::timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale);
+        }
+        SimplexOutcome::SingularBasis => {
+            return SolverResult::numerical_error();
+        }
+        SimplexOutcome::Optimal(_, _) => {
+            // Phase 1完了: x_B ≥ 0 (主実行可能)
+        }
+    }
+
+    // Phase 2: 元のコストで主実行可能点からPrimal Simplexで最適化
+    use super::pricing::SteepestEdgePricing;
+    let mut pricing = SteepestEdgePricing::new(sf.n_total);
+    let phase2_outcome = super::revised_simplex_core(
+        a, &mut x_b, c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
+    );
+
+    // Phase 2はPrimalなのでUnbounded=主非有界
+    match phase2_outcome {
+        SimplexOutcome::Optimal(obj, y) => {
+            let solution = extract_solution(sf, &basis, &x_b, col_scale);
+            let (dual_solution, reduced_costs, slack) =
+                extract_dual_info(sf, problem, &y, &solution, row_scale);
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution,
+                reduced_costs,
+                slack,
+                warm_start_basis: Some(ws),
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::Unbounded => SolverResult {
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        },
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution(sf, &basis, &x_b, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+    }
 }
 
 /// SimplexOutcome → SolverResult 変換
