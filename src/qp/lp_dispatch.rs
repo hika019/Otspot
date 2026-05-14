@@ -17,6 +17,24 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     solve_as_lp(problem, options)
 }
 
+/// Simplexのpricingステップが支配的になる変数数の閾値。
+/// Simplex反復ごとのpricing+BTRAN/FTRANコストはO(n + nnz(B^{-1}))。
+/// Dual Simplexの期待反復数 ≈ 3m 程度のため、総コスト ≈ 3m*(n + nnz)。
+/// IPMの反復数は通常30-50なので、n が大きいほどIPMが有利になる。
+/// Netlib標準問題の中央値 n≈800 の4倍程度を閾値とする。
+const SIMPLEX_PRICING_DOMINATES_N: usize = 3_000;
+
+/// Simplex基底LU分解が支配的になる制約数の閾値。
+/// LU再分解コストはO(m * nnz(L))で制約数mに線形スケールする。
+/// IPMの正規方程式(A A^T)コレスキーはm次元でO(nnz(A A^T)^1.5)だが、
+/// m < 2000 ではSimplexのほうが実測で高速な場合が多い。
+const SIMPLEX_LU_DOMINATES_M: usize = 2_000;
+
+/// 問題サイズに基づいてIPMを優先するかを判定する。
+fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
+    n > SIMPLEX_PRICING_DOMINATES_N || m > SIMPLEX_LU_DOMINATES_M
+}
+
 fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // Simplex と IPM fallback が同一の deadline を共有するよう、最初に deadline を確定する。
     // これにより IPM fallback が fresh な timeout_secs を取得して二重タイムアウトになるのを防ぐ。
@@ -36,6 +54,36 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     } else {
         options
     };
+
+    // 大規模問題はIPMに直接dispatch。SimplexのBTRAN/pricing反復コストより
+    // IPMの20-50反復のほうが有利。SimplexはIPMフォールバックとしてのみ使用する。
+    if prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
+        let ipm_result = ipm_solver::solve_qp_v2(problem, options);
+        match ipm_result.status {
+            SolveStatus::Optimal | SolveStatus::Infeasible => {
+                // 確定的な解 → Simplexフォールバック不要
+                return ipm_result;
+            }
+            SolveStatus::Unbounded => {
+                // LP問題でIPMがUnboundedを返す場合、Q=0の数値的問題がある可能性。
+                // Simplexで確認する（残余時間がある場合）。
+                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return ipm_result;
+                }
+                // フォールスルーしてSimplexで再試行
+            }
+            SolveStatus::Timeout | SolveStatus::NumericalError => {
+                // タイムアウト/数値エラー → Simplexで再試行（残余時間がある場合）
+                if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return ipm_result;
+                }
+                // フォールスルーしてSimplexで再試行
+            }
+            _ => {
+                // その他のステータス（SuboptimalSolution等）はフォールスルー
+            }
+        }
+    }
 
     // Eq/Ge/Le制約型をそのままSimplexに渡す（設計書§2.4）。
     // Simplexは ConstraintType::Eq を Phase I 人工変数で正しく処理する。
