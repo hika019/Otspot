@@ -1,4 +1,4 @@
-//! solve_qp_v2: 単一 retry 層 + 単一 status 変換で QP を解く API。
+//! solve_ipm: 単一 retry 層 + 単一 status 変換で QP を解く API。
 //!
 //! 3 原則 (`docs/solver_overview_design.md` 参照):
 //! - retry 1 層 (時間内で eps 厳格化を直線的に進める)
@@ -116,13 +116,13 @@ fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
 ///
 /// Q が対角の場合、`s_j = 1/√Q_jj` の column scaling を入口で適用して `Q'_jj` を 1 に
 /// 均等化する (`x = D x'`, `Q' = D Q D`)。解いた後 `x_orig = D x_scaled` で復元する。
-pub fn solve_qp_v2(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
-        let mut result = solve_qp_v2_with_runner(&scaled_problem, options, run_ipm);
+        let mut result = solve_ipm_with_runner(&scaled_problem, options, run_ipm);
         unscale_q_diagonal(&mut result, &col_scales, problem);
         return result;
     }
-    solve_qp_v2_with_runner(problem, options, run_ipm)
+    solve_ipm_with_runner(problem, options, run_ipm)
 }
 
 /// Q が対角のとき column scaling 因子を返す。それ以外は None。
@@ -264,7 +264,7 @@ fn unscale_q_diagonal(
 }
 
 /// 一般化 wrapper: runner は現在 IP-PMM のみ。
-fn solve_qp_v2_with_runner(
+fn solve_ipm_with_runner(
     problem: &QpProblem,
     options: &SolverOptions,
     runner: IpmRunner,
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn test_q_diagonal_scaling_unscale_roundtrip() {
         // Q = diag(1e-12, 2.0), c=[-3,-4], A=[1,1] x = 1, bounds=[0,100]
-        // Q-scaling 適用 → solve_qp_v2 で解いて、unscale 後に primal feas が
+        // Q-scaling 適用 → solve_ipm で解いて、unscale 後に primal feas が
         // 元問題で satisfied されるかを smoke check。
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1e-12, 2.0], 2, 2).unwrap();
         let c = vec![-3.0, -4.0];
@@ -597,7 +597,7 @@ mod tests {
         ).unwrap();
 
         let opts = SolverOptions::default();
-        let result = solve_qp_v2(&prob, &opts);
+        let result = solve_ipm(&prob, &opts);
         assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
         // Ax = b 検証
         let ax = prob.a.mat_vec_mul(&result.solution).unwrap();

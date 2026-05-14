@@ -271,7 +271,7 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         return solve_as_lp_pub(problem, options);
     }
     match options.qp_solver {
-        QpSolverChoice::IpPmm => ipm_solver::solve_qp_v2(problem, options),
+        QpSolverChoice::IpPmm => ipm_solver::solve_ipm(problem, options),
     }
 }
 

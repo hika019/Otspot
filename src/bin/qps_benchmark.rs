@@ -18,7 +18,7 @@ use solver::bench_utils::{detect_csv_path, load_baseline_objectives, load_expect
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::ipm_solver::solve_qp_v2;
+use solver::qp::ipm_solver::solve_ipm;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
 
@@ -836,7 +836,7 @@ fn main() {
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
         let result = if std::env::var("V2_SOLVER").is_ok() {
-            solve_qp_v2(&prob, &opts)
+            solve_ipm(&prob, &opts)
         } else {
             solve_qp_with(&prob, &opts)
         };

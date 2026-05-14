@@ -58,7 +58,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // 大規模問題はIPMに直接dispatch。SimplexのBTRAN/pricing反復コストより
     // IPMの20-50反復のほうが有利。SimplexはIPMフォールバックとしてのみ使用する。
     if prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
-        let ipm_result = ipm_solver::solve_qp_v2(problem, options);
+        let ipm_result = ipm_solver::solve_ipm(problem, options);
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::Infeasible => {
                 // 確定的な解 → Simplexフォールバック不要
@@ -114,7 +114,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // 特異基底（サイクリック構造のネットワーク流 LP など）では Simplex が NumericalError を返す。
     // Simplex は基底行列を必要とするが IPM は不要なので、IPM にフォールバックする。
     if simplex_result.status == SolveStatus::NumericalError {
-        return ipm_solver::solve_qp_v2(problem, options);
+        return ipm_solver::solve_ipm(problem, options);
     }
 
     // Simplex が Optimal を返しても reduced_costs に負値が残る場合がある。
@@ -161,7 +161,7 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                 if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
                     eprintln!("[LP_TRACE] fallback ipm due to dfr={:.3e} > eps={:.3e}", dfr, options.ipm_eps());
                 }
-                return ipm_solver::solve_qp_v2(problem, options);
+                return ipm_solver::solve_ipm(problem, options);
             }
         }
 
@@ -179,13 +179,13 @@ fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
                         options.ipm_eps()
                     );
                 }
-                return ipm_solver::solve_qp_v2(problem, options);
+                return ipm_solver::solve_ipm(problem, options);
             }
         } else {
             if std::env::var("LP_TRACE").ok().as_deref() == Some("1") {
                 eprintln!("[LP_TRACE] fallback ipm due to missing primal quality");
             }
-            return ipm_solver::solve_qp_v2(problem, options);
+            return ipm_solver::solve_ipm(problem, options);
         }
     }
 
