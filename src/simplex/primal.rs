@@ -479,6 +479,7 @@ pub(crate) fn reconcile_final_basis_state(
 /// 元問題の変数値に変換する。
 /// `col_scale` はRuizスケーリングの列スケール因子。スケーリングを行わない場合は空スライスを渡す。
 pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
+    use twofloat::TwoFloat;
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
         if basis[i] < sf.n_shifted {
@@ -490,10 +491,11 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
     let mut solution = vec![0.0; sf.n_orig];
     for (j, sol_j) in solution.iter_mut().enumerate() {
         let info = &sf.orig_var_info[j];
-        *sol_j = info.offset;
+        let mut value = TwoFloat::from(info.offset);
         for &(new_idx, coeff) in &info.new_vars {
-            *sol_j += coeff * x_new[new_idx];
+            value = value + TwoFloat::new_mul(coeff, x_new[new_idx]);
         }
+        *sol_j = f64::from(value);
     }
     solution
 }
