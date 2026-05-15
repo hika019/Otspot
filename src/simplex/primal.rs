@@ -194,11 +194,11 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             art_col += 1;
             actual_nondegen_art += 1;
         }
-        let n_price = art_col; // pricing window: structural + non-degen arts only
+        let n_price_nondegen = art_col; // upper bound of non-degen art range [sf.n_total, n_price_nondegen)
 
-        // Second: degenerate arts (b_scaled ≈ 0) — placed in [n_price, n_ext)
-        // Excluded from Phase I pricing; handled by pre-crash + pivot_out_degenerate_artificials.
+        // Second: degenerate arts (b_scaled ≈ 0) — placed in [n_price_nondegen, n_ext)
         let mut actual_degen_art = 0usize;
+        let mut is_degen_art_row = vec![false; m];
         for i in 0..m {
             if !sf.needs_artificial[i] || b[i].abs() > PIVOT_TOL {
                 continue;
@@ -209,14 +209,25 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             basis[i] = art_col;
             art_col += 1;
             actual_degen_art += 1;
+            is_degen_art_row[i] = true;
         }
         let n_ext = art_col;
 
         let a_ext =
             CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
 
-        // Phase I cost: only penalize non-degenerate arts (they need to reach 0)
-        // Degenerate arts (n_price..n_ext) have cost=0 and are excluded from pricing anyway
+        // Split strategy: only exclude degenerate arts from pricing when they are the majority
+        // (actual_degen_art > m/2). For predominantly-degenerate problems, excluding degen arts
+        // from pricing avoids thousands of degenerate cycles in Phase I (e.g. modszk1: 671/685).
+        // For mostly-non-degenerate problems (e.g. pilot4: 192/884), pricing all arts gives
+        // Phase I a more natural trajectory → better-conditioned Phase II starting basis.
+        //
+        // When using split: n_price = sf.n_total + actual_nondegen_art (only non-degen arts priced)
+        // When not using split: n_price = n_ext (all arts priced, as in pre-split behavior)
+        let use_degen_split = actual_degen_art > m / 2;
+        let n_price = if use_degen_split { n_price_nondegen } else { n_ext };
+
+        // Phase I cost: penalize all priced arts (non-degen only when split; all arts otherwise).
         let mut c_phase1 = vec![0.0; n_ext];
         c_phase1[sf.n_total..n_price].fill(1.0);
 
@@ -234,10 +245,11 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
 
         // Pre-crash: replace degenerate arts with structural columns before Phase I.
-        // This converts 169+ degenerate-pivot cycles into 0 cycles.
-        // pivot_out_degenerate_artificials only touches rows with basis[i] >= sf.n_total
-        // and x_b[i] ≈ 0 (i.e., exactly the degenerate art rows).
-        pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+        // Only used when the split is active (use_degen_split). Without split, Phase I prices
+        // all arts directly and degenerate arts are driven out via normal ratio-test pivots.
+        if use_degen_split {
+            pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+        }
 
         let trace = std::env::var("LP_PHASE1_TRACE").ok().as_deref() == Some("1");
         if trace {
@@ -258,10 +270,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             &mut basis,
             m,
             n_ext,
-            n_price,  // only price structural + non-degen arts
+            n_price,  // structural + (non-degen arts only if split; all arts otherwise)
             &mut pricing1,
             options,
-            true,     // Phase I: recompute x_b = B^{-1}b after refactor to prevent drift
+            use_degen_split, // recompute x_b after refactor when split active (drift prevention)
         );
         if trace { eprintln!("[TRACE] phase1_outcome={:?} m={} n_ext={} n_price={} nondegen_art={} degen_art={}", match &phase1_outcome { SimplexOutcome::Optimal(o,_)=>format!("Optimal({:.3e})",o), SimplexOutcome::Unbounded=>String::from("Unbounded"), SimplexOutcome::Timeout(o)=>format!("Timeout({:.3e})",o), SimplexOutcome::SingularBasis=>String::from("SingularBasis") }, m, n_ext, n_price, actual_nondegen_art, actual_degen_art); }
         match phase1_outcome {
@@ -307,7 +319,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     let mut pricing_retry = SteepestEdgePricing::new(n_price);
                     match revised_simplex_core(
                         &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
-                        m, n_ext, n_price, &mut pricing_retry, options, true,
+                        m, n_ext, n_price, &mut pricing_retry, options, use_degen_split,
                     ) {
                         SimplexOutcome::Optimal(_, _) => {} // check reconcile next iteration
                         SimplexOutcome::Unbounded => break 'retry,
@@ -340,7 +352,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     };
                 }
 
-                // Phase I feasible: pivot out any degenerate artificials
+                // Phase I feasible: pivot out any remaining degenerate artificials
                 pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
 
                 let mut c_phase2 = vec![0.0; n_ext];
@@ -360,6 +372,22 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
                         }
                         Err(_) => return SolverResult::numerical_error(),
+                    }
+                }
+                // Charnes perturbation for predominantly-degenerate problems (use_degen_split).
+                // When most rows have x_b[i]=0 after reconcile (e.g. modszk1: 671/685 rows),
+                // Phase II can only make degenerate pivots (step=0), cycling without progress.
+                // Perturbation x_b[i] = PIVOT_TOL * (i+1) gives each degenerate row a unique tiny
+                // positive value so Phase II can make non-degenerate progress.
+                // The final reconcile after Phase II restores exact x_b = B^{-1}b.
+                // Not applied when use_degen_split=false: for mostly-non-degenerate problems
+                // (e.g. perold: 331/1343, pilot4: 192/884), Phase II naturally finds
+                // non-degenerate pivots from the all-arts Phase I trajectory.
+                if use_degen_split {
+                    for i in 0..m {
+                        if is_degen_art_row[i] && x_b[i].abs() < PIVOT_TOL {
+                            x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
+                        }
                     }
                 }
                 for v in x_b.iter_mut() {
@@ -541,6 +569,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
                             }
                             Err(_) => return SolverResult::numerical_error(),
+                        }
+                    }
+                    if use_degen_split {
+                        for i in 0..m {
+                            if is_degen_art_row[i] && x_b[i].abs() < PIVOT_TOL {
+                                x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
+                            }
                         }
                     }
                     for v in x_b.iter_mut() {
@@ -951,7 +986,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 if recompute_xb_on_refactor {
                     x_b.copy_from_slice(b);
                     basis_mgr.ftran_dense(x_b);
-                    for v in x_b.iter_mut() { if *v < 1e-12 { *v = 0.0; } }
+                    for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
                 }
                 // 新鮮な LU で d を再計算
                 let (cr2, cv2) = a.get_column(entering_col).unwrap();
@@ -1075,7 +1110,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 // Clamp both near-zero and negative values: negatives in B^{-1}b after
                 // refactor represent drift (ratio test would select them as leaving,
                 // producing step < 0 and catastrophic x_b divergence).
-                for v in x_b.iter_mut() { if *v < 1e-12 { *v = 0.0; } }
+                for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
             }
         } else {
             // 通常ピボット: eta で逐次更新
@@ -1087,7 +1122,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             if recompute_xb_on_refactor && needs_refactor_now && !basis_mgr.refactor_failed {
                 x_b.copy_from_slice(b);
                 basis_mgr.ftran_dense(x_b);
-                for v in x_b.iter_mut() { if *v < 1e-12 { *v = 0.0; } }
+                for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
             }
         }
 
