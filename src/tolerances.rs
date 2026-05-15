@@ -24,3 +24,12 @@ pub const MARKOWITZ_THRESHOLD: f64 = 0.1;
 /// ピボット前に LU を再因子分解して eta 蓄積による数値誤差をリセットする。
 /// 値: 最大列エントリの 1% 未満のピボットを「不安定」と判定。
 pub const PIVOT_STABILITY_THRESHOLD: f64 = 0.01;
+
+/// 比率テストにおける近ゼロピボット検出の絶対閾値
+///
+/// 退化ステップ (step ≈ 0) で Bland 則が d < NEAR_ZERO_PIVOT_GUARD のピボット行を選んだ場合、
+/// eta ファイルに inv_pivot = 1/d >> 1 の巨大エントリが生じて後続 FTRAN を汚染する。
+/// この閾値以上の d を持つ代替行が存在すればそちらへオーバーライドする。
+/// PIVOT_TOL の 100 倍 — 比率テストの最小適格値 (PIVOT_TOL) の直上にある
+/// 事実上ゼロな d を捕捉する。
+pub const NEAR_ZERO_PIVOT_GUARD: f64 = PIVOT_TOL * 100.0;

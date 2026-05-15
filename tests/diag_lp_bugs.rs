@@ -380,3 +380,23 @@ fn diag_bland_rule_coverage() {
         _ => println!("  -> unexpected status: {:?}", result.status),
     }
 }
+
+/// modszk1 Primal: 旧ベースラインで10-18sで解けていた
+#[test]
+fn diag_modszk1_primal_baseline() {
+    let qps_path = std::path::Path::new("data/lp_problems/modszk1.QPS");
+    if !qps_path.exists() { return; }
+    let prob = solver::io::qps::parse_qps(qps_path).expect("parse modszk1 failed");
+    let known_obj = 3.21049143e2_f64;
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(60.0);
+    opts.simplex_method = SimplexMethod::Primal;
+    let t0 = std::time::Instant::now();
+    let result = solver::qp::solve_qp_with(&prob, &opts);
+    let elapsed = t0.elapsed().as_secs_f64();
+    println!("modszk1 Primal (a8faac6 state): status={:?} obj={:.6e} t={:.2}s", result.status, result.objective, elapsed);
+    if result.status == SolveStatus::Optimal {
+        let rel_err = (result.objective - known_obj).abs() / known_obj.abs().max(1.0);
+        println!("  rel_err={:.2e}", rel_err);
+    }
+}

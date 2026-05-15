@@ -68,7 +68,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&a, &mut x_b, &c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
+        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, false)
         {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -90,7 +90,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     Err(_) => return SolverResult::numerical_error(),
                 }
                 let solution = extract_solution(sf, &basis, &x_b, &col_scale);
-                // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
+                // Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
                 if !check_eq_feasibility(problem, &solution) {
                     return SolverResult {
                         status: SolveStatus::NumericalError,
@@ -153,14 +153,19 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     } else {
-        // Phase I: build extended matrix with artificials
-        let n_ext = sf.n_total + sf.num_artificial;
+        // Phase I + Phase II use Ruiz-scaled system.
+        //
+        // Key optimization for problems with many degenerate Eq constraints (b=0):
+        // Split artificials into two groups:
+        //   Non-degenerate (b_scaled > PIVOT_TOL): placed at sf.n_total..n_price; priced by Phase I
+        //   Degenerate (b_scaled ≈ 0): placed at n_price..n_ext; EXCLUDED from Phase I pricing
+        // A pre-crash (pivot_out_degenerate_artificials) replaces degenerate arts with structural
+        // columns before Phase I starts, eliminating thousands of degenerate pivot cycles.
+        let mut trip_rows: Vec<usize> = Vec::new();
+        let mut trip_cols: Vec<usize> = Vec::new();
+        let mut trip_vals: Vec<f64> = Vec::new();
 
-        let mut trip_rows = Vec::new();
-        let mut trip_cols = Vec::new();
-        let mut trip_vals = Vec::new();
-
-        // Copy scaled matrix (not sf.a)
+        // Structural columns (Ruiz-scaled)
         for j in 0..a.ncols {
             if let Ok((r, v)) = a.get_column(j) {
                 for (k, &row) in r.iter().enumerate() {
@@ -171,33 +176,65 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
         }
 
-        // Add artificial columns
         let mut basis = sf.initial_basis.clone();
+        let mut x_b = b.clone();
         let mut art_col = sf.n_total;
-        for (i, b) in basis.iter_mut().enumerate().take(m) {
-            if sf.needs_artificial[i] {
-                trip_rows.push(i);
-                trip_cols.push(art_col);
-                trip_vals.push(1.0);
-                *b = art_col;
-                art_col += 1;
+
+        // First: non-degenerate arts (b_scaled > 0) — placed in [sf.n_total, n_price)
+        // Phase I MUST drive these to zero.
+        let mut actual_nondegen_art = 0usize;
+        for i in 0..m {
+            if !sf.needs_artificial[i] || b[i].abs() <= PIVOT_TOL {
+                continue;
             }
+            trip_rows.push(i);
+            trip_cols.push(art_col);
+            trip_vals.push(1.0);
+            basis[i] = art_col;
+            art_col += 1;
+            actual_nondegen_art += 1;
         }
+        let n_price_nondegen = art_col; // upper bound of non-degen art range [sf.n_total, n_price_nondegen)
+
+        // Second: degenerate arts (b_scaled ≈ 0) — placed in [n_price_nondegen, n_ext)
+        let mut actual_degen_art = 0usize;
+        let mut is_degen_art_row = vec![false; m];
+        for i in 0..m {
+            if !sf.needs_artificial[i] || b[i].abs() > PIVOT_TOL {
+                continue;
+            }
+            trip_rows.push(i);
+            trip_cols.push(art_col);
+            trip_vals.push(1.0);
+            basis[i] = art_col;
+            art_col += 1;
+            actual_degen_art += 1;
+            is_degen_art_row[i] = true;
+        }
+        let n_ext = art_col;
 
         let a_ext =
             CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
 
-        // Phase I cost: minimise sum of artificials
-        let mut c_phase1 = vec![0.0; n_ext];
-        c_phase1[sf.n_total..].fill(1.0);
+        // Split strategy: only exclude degenerate arts from pricing when they are the majority
+        // (actual_degen_art > m/2). For predominantly-degenerate problems, excluding degen arts
+        // from pricing avoids thousands of degenerate cycles in Phase I (e.g. modszk1: 671/685).
+        // For mostly-non-degenerate problems (e.g. pilot4: 192/884), pricing all arts gives
+        // Phase I a more natural trajectory → better-conditioned Phase II starting basis.
+        //
+        // When using split: n_price = sf.n_total + actual_nondegen_art (only non-degen arts priced)
+        // When not using split: n_price = n_ext (all arts priced, as in pre-split behavior)
+        let use_degen_split = actual_degen_art > m / 2;
+        let n_price = if use_degen_split { n_price_nondegen } else { n_ext };
 
-        let mut x_b = b.clone();
-        // Correct x_b for Ruiz-scaled diagonal initial basis: x_b[i] = b_scaled[i] / B[i, basis[i]]
-        // For artificial columns (added with entry 1.0), dividing by 1.0 is a no-op.
-        // For slack columns from a, the diagonal entry is row_scale[i] * col_scale[slack] != 1.0.
+        // Phase I cost: penalize all priced arts (non-degen only when split; all arts otherwise).
+        let mut c_phase1 = vec![0.0; n_ext];
+        c_phase1[sf.n_total..n_price].fill(1.0);
+
+        // Correct x_b for diagonal entries of initial basis columns.
+        // Art cols have entry 1.0 → no change. Scaled slack cols → divide by diagonal.
         for i in 0..m {
-            let col = basis[i];
-            if let Ok((rows, vals)) = a_ext.get_column(col) {
+            if let Ok((rows, vals)) = a_ext.get_column(basis[i]) {
                 for (k, &row) in rows.iter().enumerate() {
                     if row == i && vals[k].abs() > 1e-14 {
                         x_b[i] /= vals[k];
@@ -206,26 +243,103 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
             }
         }
-        let mut pricing1 = SteepestEdgePricing::new(n_ext);
-        // Phase1 を全 deadline で一回だけ実行する。
-        // 50ms 刻みのプローブループは revised_simplex_core が呼ばれるたびに LuBasis::new
-        // (フル LU 因子分解) を行うため、大問題では全 window を LU で消費して pivot が
-        // 一切進まない。probe loop を廃止し、1 回の呼び出しで Phase1 を完走させる。
+
+        // Pre-crash: replace degenerate arts with structural columns before Phase I.
+        // Only used when the split is active (use_degen_split). Without split, Phase I prices
+        // all arts directly and degenerate arts are driven out via normal ratio-test pivots.
+        if use_degen_split {
+            pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+        }
+
+        let trace = std::env::var("LP_PHASE1_TRACE").ok().as_deref() == Some("1");
+        if trace {
+            let art_xb: Vec<_> = (0..m).filter(|&i| basis[i] >= sf.n_total).map(|i| (i, x_b[i])).take(10).collect();
+            let art_nonzero = (0..m).filter(|&i| basis[i] >= sf.n_total && x_b[i].abs() > PIVOT_TOL).count();
+            let init_obj: f64 = (0..m).filter(|&i| basis[i] >= sf.n_total && basis[i] < n_price).map(|i| x_b[i].max(0.0)).sum();
+            eprintln!("[TRACE] Phase I init: init_obj={:.3e} art_nonzero={} nondegen_art={} degen_art={} first_art_xb={:?}", init_obj, art_nonzero, actual_nondegen_art, actual_degen_art, art_xb);
+            let b_compare: Vec<_> = (0..m).filter(|&i| sf.needs_artificial[i]).map(|i| (i, sf.b[i], b[i])).filter(|&(_, sfb, _)| sfb.abs() > PIVOT_TOL).take(10).collect();
+            eprintln!("[TRACE] Art rows with sfb>0: (row, sfb, b_scaled)={:?}", b_compare);
+        }
+
+        let mut pricing1 = SteepestEdgePricing::new(n_price);
         let phase1_outcome = revised_simplex_core(
             &a_ext,
             &mut x_b,
             &c_phase1,
+            &b,
             &mut basis,
             m,
             n_ext,
-            n_ext,
+            n_price,  // structural + (non-degen arts only if split; all arts otherwise)
             &mut pricing1,
             options,
+            use_degen_split, // recompute x_b after refactor when split active (drift prevention)
         );
-
+        if trace { eprintln!("[TRACE] phase1_outcome={:?} m={} n_ext={} n_price={} nondegen_art={} degen_art={}", match &phase1_outcome { SimplexOutcome::Optimal(o,_)=>format!("Optimal({:.3e})",o), SimplexOutcome::Unbounded=>String::from("Unbounded"), SimplexOutcome::Timeout(o)=>format!("Timeout({:.3e})",o), SimplexOutcome::SingularBasis=>String::from("SingularBasis") }, m, n_ext, n_price, actual_nondegen_art, actual_degen_art); }
         match phase1_outcome {
-            SimplexOutcome::Optimal(obj, _) => {
-                if obj > PIVOT_TOL {
+            SimplexOutcome::Optimal(_obj, _) => {
+                // Reconcile + retry loop for Phase I premature termination.
+                //
+                // Primal Phase I sometimes reaches a state that is dual-feasible (all r_j ≥ 0)
+                // but primal-infeasible (x_b < 0 for some rows) due to LU eta drift.
+                // In that case primal simplex declares "Optimal" incorrectly.
+                // After fresh-LU reconcile reveals primal infeasibility, we switch to
+                // DUAL SIMPLEX to restore primal feasibility (dual simplex starts from
+                // dual-feasible, fixes primal infeasibility). Then re-check.
+                const MAX_PHASE1_RETRIES: usize = 8;
+                let mut phase1_feasible = false;
+                'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
+                    let mut y_dummy = vec![0.0f64; m];
+                    let rec_obj = match reconcile_final_basis_state(
+                        &a_ext, &b, &c_phase1, &basis, &mut x_b, &mut y_dummy,
+                        options.max_etas, options.deadline,
+                    ) {
+                        Ok(()) => {
+                            let v = (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum::<f64>();
+                            if trace { let art_in: Vec<_> = (0..m).filter(|&i| basis[i] >= sf.n_total).map(|i| (i, basis[i], x_b[i])).take(5).collect(); eprintln!("[TRACE] attempt={} rec_obj={:.3e} art_in_basis={:?}", attempt, v, art_in); }
+                            v
+                        }
+                        Err(e) => { if trace { eprintln!("[TRACE] reconcile err {:?}", e); } break 'retry; }
+                    };
+                    if rec_obj <= PIVOT_TOL { phase1_feasible = true; break 'retry; }
+                    if attempt == MAX_PHASE1_RETRIES { break 'retry; }
+
+                    // All x_b ≥ 0 but rec_obj > 0: positive artificials remain in basis.
+                    // Restart primal Phase I from the reconciled state to continue driving
+                    // artificials to zero. Fresh LU from reconcile gives accurate reduced costs.
+                    let has_neg_xb = x_b.iter().any(|&v| v < -PIVOT_TOL);
+                    if has_neg_xb {
+                        // Clamp small negatives from reconcile drift; genuinely negative means
+                        // the problem is infeasible (no feasible direction exists from this basis).
+                        if trace { eprintln!("[TRACE] attempt={} has_neg_xb → clamp to 0", attempt); }
+                        for v in x_b.iter_mut() {
+                            if *v < 0.0 { *v = 0.0; }
+                        }
+                    }
+                    let mut pricing_retry = SteepestEdgePricing::new(n_price);
+                    match revised_simplex_core(
+                        &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
+                        m, n_ext, n_price, &mut pricing_retry, options, use_degen_split,
+                    ) {
+                        SimplexOutcome::Optimal(_, _) => {} // check reconcile next iteration
+                        SimplexOutcome::Unbounded => break 'retry,
+                        SimplexOutcome::Timeout(obj1) => {
+                            return SolverResult {
+                                status: SolveStatus::Timeout,
+                                objective: obj1 + sf.obj_offset,
+                                solution: vec![],
+                                dual_solution: vec![],
+                                reduced_costs: vec![],
+                                slack: vec![],
+                                warm_start_basis: None,
+                                ..Default::default()
+                            };
+                        }
+                        SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
+                    }
+                }
+
+                if !phase1_feasible {
                     return SolverResult {
                         status: SolveStatus::Infeasible,
                         objective: 0.0,
@@ -234,38 +348,65 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
-            ..Default::default()
+                        ..Default::default()
                     };
                 }
 
-                // 案C: Phase I 完了後の縮退人工変数 pivot out
-                // x_b[i] ≈ 0 の人工変数（basis[i] >= sf.n_total）を非人工列で置換し、
-                // Phase II が人工変数を基底に残したまま目的関数を最適化するのを防ぐ。
-                //
-                // Eq/Le/Ge 全行に適用:
-                // - Eq 行: 直接人工変数が basis に入る。x_b[i]=0 の縮退で残留。
-                // - Ge/Le 行 (b > 0): surplus 変数に加え人工変数も basis に入る。
-                //   Phase I が surplus を基底から追い出せず人工変数が縮退 0 で残留することがある。
-                // 置換候補: 非基底の非人工列 (j < sf.n_total) で行 i の係数が最大のもの。
-                // 安全チェック: LU 失敗なら全変更をリバート。
+                // Phase I feasible: pivot out any remaining degenerate artificials
                 pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
 
-                // Phase II: restrict pricing to non-artificial columns
-                // Use scaled c for Phase II cost
                 let mut c_phase2 = vec![0.0; n_ext];
                 c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
+                {
+                    let mut y_transition = vec![0.0f64; m];
+                    match reconcile_final_basis_state(
+                        &a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y_transition,
+                        options.max_etas, options.deadline,
+                    ) {
+                        Ok(()) => {}
+                        Err(crate::error::SolverError::DeadlineExceeded) => {
+                            let solution = extract_timeout_solution_reconciled(
+                                sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
+                                options.max_etas, options.deadline,
+                            );
+                            return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
+                        }
+                        Err(_) => return SolverResult::numerical_error(),
+                    }
+                }
+                // Charnes perturbation for predominantly-degenerate problems (use_degen_split).
+                // When most rows have x_b[i]=0 after reconcile (e.g. modszk1: 671/685 rows),
+                // Phase II can only make degenerate pivots (step=0), cycling without progress.
+                // Perturbation x_b[i] = PIVOT_TOL * (i+1) gives each degenerate row a unique tiny
+                // positive value so Phase II can make non-degenerate progress.
+                // The final reconcile after Phase II restores exact x_b = B^{-1}b.
+                // Not applied when use_degen_split=false: for mostly-non-degenerate problems
+                // (e.g. perold: 331/1343, pilot4: 192/884), Phase II naturally finds
+                // non-degenerate pivots from the all-arts Phase I trajectory.
+                if use_degen_split {
+                    for i in 0..m {
+                        if is_degen_art_row[i] && x_b[i].abs() < PIVOT_TOL {
+                            x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
+                        }
+                    }
+                }
+                for v in x_b.iter_mut() {
+                    if *v < 0.0 { *v = 0.0; }
+                }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
                 match revised_simplex_core(
                     &a_ext,
                     &mut x_b,
                     &c_phase2,
+                    &b,
                     &mut basis,
                     m,
                     n_ext,
                     sf.n_total,
                     &mut pricing2,
                     options,
+                    false,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -287,7 +428,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             Err(_) => return SolverResult::numerical_error(),
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
-                        // 案D: Eq制約 feasibility check — 偽 Optimal 返却を防ぐ defense-in-depth
                         if !check_eq_feasibility(problem, &solution) {
                             return SolverResult {
                                 status: SolveStatus::NumericalError,
@@ -311,7 +451,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs,
                             slack,
                             warm_start_basis: Some(ws),
-            ..Default::default()
+                            ..Default::default()
                         }
                     }
                     SimplexOutcome::Unbounded => SolverResult {
@@ -322,7 +462,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
-            ..Default::default()
+                        ..Default::default()
                     },
                     SimplexOutcome::Timeout(obj2) => {
                         let solution = extract_timeout_solution_reconciled(
@@ -344,13 +484,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs: vec![],
                             slack: vec![],
                             warm_start_basis: None,
-            ..Default::default()
+                            ..Default::default()
                         }
                     }
                     SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
                 }
             }
-            SimplexOutcome::Unbounded => SolverResult {
+            SimplexOutcome::Unbounded => { if trace { eprintln!("[TRACE] Phase I Unbounded → Infeasible"); } SolverResult {
                 status: SolveStatus::Infeasible,
                 objective: 0.0,
                 solution: vec![],
@@ -358,15 +498,14 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
-            ..Default::default()
-            },
+                ..Default::default()
+            } },
             SimplexOutcome::Timeout(obj1) => {
-                // obj1 = Σ(人工変数値) ≤ PIVOT_TOL → 全人工変数が事実上ゼロ → 実行可能基底発見。
-                // check_eq_feasibility は絶対公差 1e-4 で偽陽性になりうるため使わない。
+                // obj1 ≤ PIVOT_TOL means non-degen arts appear near-zero at timeout.
+                // Reconcile with fresh LU to get accurate x_b = B^{-1}b, then
+                // re-verify feasibility. If reconcile shows arts > PIVOT_TOL, Phase I
+                // didn't truly achieve feasibility → return Timeout (not run Phase II).
                 if obj1 <= PIVOT_TOL {
-                    // x_b を B^{-1}b で再計算し、Phase1 反復で蓄積した数値誤差を除去する。
-                    // これにより人工変数の真のゼロ値が PIVOT_TOL で正しく検出され、
-                    // pivot_out_degenerate_artificials が確実に人工変数を除去できる。
                     {
                         let mut y_dummy = vec![0.0_f64; m];
                         if reconcile_final_basis_state(
@@ -381,7 +520,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         )
                         .is_err()
                         {
-                            // reconcile 失敗は基底が特異になった場合。Timeout として返す。
                             return SolverResult {
                                 status: SolveStatus::Timeout,
                                 objective: obj1 + sf.obj_offset,
@@ -394,20 +532,69 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             };
                         }
                     }
+                    // Post-reconcile feasibility check: if arts still > PIVOT_TOL,
+                    // Phase I hasn't converged. Return Timeout rather than running
+                    // Phase II from an infeasible starting point (which yields OBJ_MISMATCH).
+                    let rec_obj: f64 = (0..m)
+                        .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                        .sum();
+                    if rec_obj > PIVOT_TOL {
+                        return SolverResult {
+                            status: SolveStatus::Timeout,
+                            objective: obj1 + sf.obj_offset,
+                            solution: vec![],
+                            dual_solution: vec![],
+                            reduced_costs: vec![],
+                            slack: vec![],
+                            warm_start_basis: None,
+                            ..Default::default()
+                        };
+                    }
                     pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
+
                     let mut c_phase2 = vec![0.0; n_ext];
                     c_phase2[..sf.n_total].copy_from_slice(&c[..sf.n_total]);
+                    {
+                        let mut y_transition = vec![0.0f64; m];
+                        match reconcile_final_basis_state(
+                            &a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y_transition,
+                            options.max_etas, options.deadline,
+                        ) {
+                            Ok(()) => {}
+                            Err(crate::error::SolverError::DeadlineExceeded) => {
+                                let solution = extract_timeout_solution_reconciled(
+                                    sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
+                                    options.max_etas, options.deadline,
+                                );
+                                return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
+                            }
+                            Err(_) => return SolverResult::numerical_error(),
+                        }
+                    }
+                    if use_degen_split {
+                        for i in 0..m {
+                            if is_degen_art_row[i] && x_b[i].abs() < PIVOT_TOL {
+                                x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
+                            }
+                        }
+                    }
+                    for v in x_b.iter_mut() {
+                        if *v < 0.0 { *v = 0.0; }
+                    }
+
                     let mut pricing2 = SteepestEdgePricing::new(n_ext);
                     match revised_simplex_core(
                         &a_ext,
                         &mut x_b,
                         &c_phase2,
+                        &b,
                         &mut basis,
                         m,
                         n_ext,
                         sf.n_total,
                         &mut pricing2,
                         options,
+                        false, // Phase II
                     ) {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -532,36 +719,67 @@ fn pivot_out_degenerate_artificials(
     sf: &StandardForm,
     options: &SolverOptions,
 ) {
+    let m = basis.len();
     let basis_before = basis.to_vec();
+
+    // Build LuBasis from the Phase I final basis to enable FTRAN-based pivot selection.
+    // Using FTRAN (d = B^{-1} a_j) for pivot element selection instead of the raw matrix
+    // entry A[i,j] prevents ill-conditioned bases: raw entries ignore basis transformation,
+    // while |d[i]| directly measures the numerical stability of the entering pivot.
+    let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
+        Ok(mgr) => mgr,
+        Err(_) => return, // singular basis: leave artificials as-is
+    };
+
     let mut is_basic = vec![false; a_ext.ncols];
     for &col in basis.iter() {
         is_basic[col] = true;
     }
-    for i in 0..basis.len() {
+
+    for i in 0..m {
         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
             continue;
         }
+
+        // Find non-basic original column j maximising |d[i]| = |(B^{-1} a_j)[i]|.
+        // This is the true pivot element after the current basis transformation.
         let mut best_j = None;
         let mut best_abs = PIVOT_TOL;
+        let mut best_d_sv = SparseVec::new(m);
+
         for j in 0..sf.n_total {
             if is_basic[j] {
                 continue;
             }
             if let Ok((rows, vals)) = a_ext.get_column(j) {
+                let mut col_dense = vec![0.0_f64; m];
                 for (k, &row) in rows.iter().enumerate() {
-                    if row == i && vals[k].abs() > best_abs {
-                        best_abs = vals[k].abs();
-                        best_j = Some(j);
+                    if row < m {
+                        col_dense[row] = vals[k];
                     }
+                }
+                let mut d_sv = SparseVec::from_dense(&col_dense);
+                basis_mgr.ftran(&mut d_sv);
+                let d_i = d_sv.get(i).abs();
+                if d_i > best_abs {
+                    best_abs = d_i;
+                    best_j = Some(j);
+                    best_d_sv = d_sv;
                 }
             }
         }
+
         if let Some(j) = best_j {
             is_basic[basis[i]] = false;
             is_basic[j] = true;
             basis[i] = j;
+            // Rank-1 LU update: subsequent FTRANs use the updated (post-pivot) basis.
+            basis_mgr.update(j, i, &best_d_sv);
+            basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
         }
     }
+
+    // Final singularity check: restore on failure
     if LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline).is_err() {
         basis.copy_from_slice(&basis_before);
     }
@@ -657,18 +875,19 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
+    b: &[f64],
     basis: &mut [usize],
     m: usize,
     n_cols: usize,
     n_price: usize,
     pricing: &mut P,
     options: &SolverOptions,
+    recompute_xb_on_refactor: bool,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
         Err(crate::error::SolverError::SingularBasis { .. }) => {
-            // 初期基底が特異: 呼び出し元に NumericalError を伝搬して IPM フォールバックを促す
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
@@ -763,6 +982,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         return SimplexOutcome::Timeout(obj);
                     }
                 }
+                // d_corrupt 時も Phase I のみ x_b を再計算する (pivot_unstable と同じ理由)。
+                if recompute_xb_on_refactor {
+                    x_b.copy_from_slice(b);
+                    basis_mgr.ftran_dense(x_b);
+                    for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+                }
                 // 新鮮な LU で d を再計算
                 let (cr2, cv2) = a.get_column(entering_col).unwrap();
                 d_sv = SparseVec { indices: cr2.to_vec(), values: cv2.to_vec(), len: m };
@@ -772,13 +997,26 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
         let d = &d_dense;
 
-        // 5. Ratio test (Bland's rule for ties)
+        // 5. Ratio test (Bland's rule for ties, with degenerate near-zero pivot avoidance)
+        //
+        // Phase II: skip rows where basis[i] >= n_price (artificial variables in basis).
+        //
+        // Primary: Bland's rule (smallest basis index among ties) for anti-cycling.
+        // Override: on a degenerate step (step≈0), if Bland's selects a row with
+        //   d[row] < NEAR_ZERO_PIVOT_GUARD (near-machine-zero), prefer the Bland's-selected
+        //   row among rows where d[row] >= NEAR_ZERO_PIVOT_GUARD.
+        //   Degenerate steps don't change x_B so any tied leaving row is primal-feasible.
+        //   This prevents near-zero eta entries (inv_pivot → huge) that corrupt FTRAN.
+        //   Using an absolute threshold preserves Bland's anti-cycling guarantee for all
+        //   non-near-zero pivots (a relative threshold fires too broadly and breaks Bland's).
         let mut leaving = None;
         let mut min_ratio = f64::INFINITY;
+        let mut stable_leaving: Option<usize> = None;
 
         for i in 0..m {
             if d[i] > PIVOT_TOL {
                 let ratio = x_b[i] / d[i];
+                // Bland's rule (primary tie-breaking)
                 if ratio < min_ratio - PIVOT_TOL {
                     min_ratio = ratio;
                     leaving = Some(i);
@@ -789,6 +1027,23 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         }
                     }
                 }
+                // Track non-near-zero degenerate candidates for near-zero override.
+                // Use Bland's rule (smallest basis index) to maintain anti-cycling.
+                if ratio <= PIVOT_TOL && d[i] >= NEAR_ZERO_PIVOT_GUARD {
+                    match stable_leaving {
+                        None => stable_leaving = Some(i),
+                        Some(prev) if basis[i] < basis[prev] => stable_leaving = Some(i),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // On a degenerate step: if Bland's selected a near-zero pivot (d < NEAR_ZERO_PIVOT_GUARD),
+        // switch to a non-near-zero alternative to prevent singular eta entries.
+        if let (Some(bland), Some(stable)) = (leaving, stable_leaving) {
+            if min_ratio <= PIVOT_TOL && d[bland] < NEAR_ZERO_PIVOT_GUARD {
+                leaving = Some(stable);
             }
         }
 
@@ -808,6 +1063,17 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         for val in x_b.iter_mut() {
             if val.abs() < options.clamp_tol {
                 *val = 0.0;
+            }
+        }
+        // Phase I: enforce x_b ≥ 0 invariant.
+        // Eta-update drift can cause x_b to go negative. Without this, a drifted
+        // negative x_b[i] is selected as leaving row (negative ratio wins min-ratio),
+        // causing step < 0 → catastrophic x_b change in a single pivot.
+        if recompute_xb_on_refactor {
+            for val in x_b.iter_mut() {
+                if *val < 0.0 {
+                    *val = 0.0;
+                }
             }
         }
 
@@ -834,13 +1100,30 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         if pivot_unstable {
             // 不安定ピボット: eta を追加せず直ちに再因子分解（新 basis で LU をリセット）
             basis_mgr.force_refactor_timed(a, basis, options.deadline);
+            // Phase I のみ: force_refactor 後に x_b = B^{-1}*b を再計算し drift を防ぐ。
+            // Phase I では drift が ratio test を狂わせ誤った基底で終了する。
+            // Phase II では x_b drift が終了条件 (dual feasibility) に影響しないため
+            // 再計算不要。末尾の reconcile が Phase II 終了時に正確な x_b を復元する。
+            if recompute_xb_on_refactor && !basis_mgr.refactor_failed {
+                x_b.copy_from_slice(b);
+                basis_mgr.ftran_dense(x_b);
+                // Clamp both near-zero and negative values: negatives in B^{-1}b after
+                // refactor represent drift (ratio test would select them as leaving,
+                // producing step < 0 and catastrophic x_b divergence).
+                for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+            }
         } else {
             // 通常ピボット: eta で逐次更新
             basis_mgr.update(entering_col, leaving_row, &d_sv);
 
             // 11. Refactor if needed
-            // timeout audit fix — deadline 付きで LU 再因子分解を実行
+            let needs_refactor_now = basis_mgr.needs_refactor();
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
+            if recompute_xb_on_refactor && needs_refactor_now && !basis_mgr.refactor_failed {
+                x_b.copy_from_slice(b);
+                basis_mgr.ftran_dense(x_b);
+                for v in x_b.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+            }
         }
 
         if basis_mgr.refactor_failed {

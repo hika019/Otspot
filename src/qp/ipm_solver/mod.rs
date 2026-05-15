@@ -1,21 +1,17 @@
-//! IP-PMM v2 - クリーン設計の Mehrotra Interior Point Method
+//! IPM Solver - Mehrotra 予測子修正子内点法 (IP-PMM)
 //!
-//! 既存 `ipm/ippmm.rs` を温存しつつ、設計書 (`docs/solver_overview_design.md`) の
-//! 原則に厳密に従って新規実装する:
+//! 設計書 (`docs/solver_overview_design.md`) の原則:
 //!
 //! 1. **retry 1 層**: 時間内で eps 厳格化を直線的に進める。多層 retry を排除。
 //! 2. **status 変換 1 箇所**: 内部は `IpmOutcome` struct で残差・解を持ち、
-//!    API 境界 (`solve_qp_v2`) で `SolverResult` (外部 status) に変換する。
+//!    API 境界 (`solve_ipm`) で `SolverResult` (外部 status) に変換する。
 //! 3. **元空間 KKT 直接判定**: scaled 空間判定で偽 Optimal を出さない。
 //! 4. **大規模対応**: supernode-aware LDL を `linalg::ldl` 経由で直接利用。
-//!
-//! 既存 `solve_qp_with` の Concurrent solver 経路で v2 を選択肢として追加する。
-//! v2 が品質・性能で旧 ippmm を上回ったら旧版を削除する段階移行を行う。
 //!
 //! # アーキテクチャ
 //!
 //! ```text
-//! solve_qp_v2(prob, opts) -> SolverResult
+//! solve_ipm(prob, opts) -> SolverResult
 //!     ├── presolve(prob, deadline) -> reduced
 //!     ├── deadline = compute_deadline(opts)
 //!     ├── for attempt in 0.. while now() < deadline:
@@ -38,7 +34,7 @@ pub mod kkt;
 pub mod core;
 pub mod attempt;
 
-pub use attempt::solve_qp_v2;
+pub use attempt::solve_ipm;
 
 #[cfg(test)]
 mod tests {
@@ -50,7 +46,7 @@ mod tests {
 
     /// HS21 で v1 と v2 を直接比較する診断テスト。
     #[test]
-    fn test_v2_hs21_cmp_v1() {
+    fn test_ipm_hs21_cmp_full_solver() {
         let path = Path::new("data/maros_meszaros/HS21.QPS");
         if !path.exists() {
             eprintln!("HS21.QPS not found, skipping");
@@ -59,7 +55,7 @@ mod tests {
         let prob = parse_qps(path).expect("parse HS21");
         let opts = SolverOptions::default();
         let v1 = crate::qp::solve_qp_with(&prob, &opts);
-        let v2 = solve_qp_v2(&prob, &opts);
+        let v2 = solve_ipm(&prob, &opts);
         eprintln!("=== v1 ===");
         eprintln!("  status={:?} obj={} iters={}", v1.status, v1.objective, v1.iterations);
         eprintln!("  x={:?}", v1.solution);
@@ -87,7 +83,7 @@ mod tests {
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse HS21");
         let opts = SolverOptions::default();
-        let r = solve_qp_v2(&prob, &opts);
+        let r = solve_ipm(&prob, &opts);
         assert_eq!(r.status, SolveStatus::Optimal, "HS21 v2 should be Optimal");
     }
 
@@ -95,7 +91,7 @@ mod tests {
     /// 現状: dfr=1.0e0 なのに obj は正解値と一致 → x は正しい、z が完全に外れている。
     /// このテストで z, y, r_j の詳細を出力し、どの bound で大きな寄与が出てるか把握する。
     #[test]
-    fn test_v2_qadlittl_diagnose() {
+    fn test_ipm_qadlittl_diagnose() {
         let path = Path::new("data/maros_meszaros/QADLITTL.QPS");
         if !path.exists() {
             eprintln!("QADLITTL.QPS not found, skipping");
@@ -103,7 +99,7 @@ mod tests {
         }
         let prob = parse_qps(path).expect("parse QADLITTL");
         let opts = SolverOptions::default();
-        let r = solve_qp_v2(&prob, &opts);
+        let r = solve_ipm(&prob, &opts);
         eprintln!("=== QADLITTL v2 result ===");
         eprintln!("  status={:?} obj={:.6e} iters={}", r.status, r.objective, r.iterations);
         eprintln!("  n={} m={} n_lb={} n_ub={}", prob.num_vars, prob.num_constraints,
@@ -182,7 +178,7 @@ mod tests {
 
     /// BD-T4 (rank-deficient Q + EmptyCol) で v2 が何で詰まるか調査。
     #[test]
-    fn test_v2_bd_t4_diagnose() {
+    fn test_ipm_bd_t4_diagnose() {
         use crate::sparse::CscMatrix;
         use crate::qp::problem::QpProblem;
         let n = 3usize;
@@ -195,7 +191,7 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(5.0);
         opts.qp_solver = crate::options::QpSolverChoice::IpPmm;
-        let r = solve_qp_v2(&problem, &opts);
+        let r = solve_ipm(&problem, &opts);
         eprintln!("BD-T4 v2: status={:?} obj={:.5e} iters={}", r.status, r.objective, r.iterations);
         eprintln!("  x={:?}", r.solution);
         eprintln!("  y={:?}", r.dual_solution);
@@ -224,7 +220,7 @@ mod tests {
             let prob = parse_qps(path).expect(name);
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(60.0);
-            let r = solve_qp_v2(&prob, &opts);
+            let r = solve_ipm(&prob, &opts);
             let view = super::outcome::ProblemView {
                 q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
                 bounds: &prob.bounds, constraint_types: &prob.constraint_types,
@@ -256,7 +252,7 @@ mod tests {
             let prob = parse_qps(path).expect(name);
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(60.0);
-            let r = solve_qp_v2(&prob, &opts);
+            let r = solve_ipm(&prob, &opts);
             let view = super::outcome::ProblemView {
                 q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
                 bounds: &prob.bounds, constraint_types: &prob.constraint_types,
@@ -282,7 +278,7 @@ mod tests {
             let prob = parse_qps(path).expect(name);
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(60.0);
-            let r = solve_qp_v2(&prob, &opts);
+            let r = solve_ipm(&prob, &opts);
             let n = prob.num_vars;
             // 各変数の bound 距離を計算
             let mut gaps: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
@@ -315,7 +311,7 @@ mod tests {
 
     /// QPILOTNO row 14 と row 130 の関係 (A 行ペア確認 + presolve 経路追跡)。
     #[test]
-    fn test_v2_qpilotno_row_pair_check() {
+    fn test_ipm_qpilotno_row_pair_check() {
         let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse QPILOTNO");
@@ -356,7 +352,7 @@ mod tests {
     /// componentwise pfeas 化以後、col 15 等で Aty != 0 が残る現象を観察。
     /// NO_PRESOLVE=1 で presolve 無効化、QFORPLAN_LONG=1 で 60s 動作。
     #[test]
-    fn test_v2_qforplan_dual_residual_diagnose() {
+    fn test_ipm_qforplan_dual_residual_diagnose() {
         let path = Path::new("data/maros_meszaros/QFORPLAN.QPS");
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse QFORPLAN");
@@ -365,7 +361,7 @@ mod tests {
         if std::env::var("NO_PRESOLVE").ok().as_deref() == Some("1") {
             opts.presolve = false;
         }
-        let r = solve_qp_v2(&prob, &opts);
+        let r = solve_ipm(&prob, &opts);
         eprintln!("QFORPLAN status={:?} obj={:.5e} presolve={}", r.status, r.objective, opts.presolve);
         // dual residual 上位 10 col を出力
         use twofloat::TwoFloat;
@@ -424,7 +420,7 @@ mod tests {
     /// QPILOTNO の primal violation 集中行を特定する診断 (componentwise pfeas 化以後)。
     /// 環境変数 NO_PRESOLVE=1 で presolve 無効化して bug 切り分け。
     #[test]
-    fn test_v2_qpilotno_primal_violation_diagnose() {
+    fn test_ipm_qpilotno_primal_violation_diagnose() {
         let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse QPILOTNO");
@@ -433,7 +429,7 @@ mod tests {
         if std::env::var("NO_PRESOLVE").ok().as_deref() == Some("1") {
             opts.presolve = false;
         }
-        let r = solve_qp_v2(&prob, &opts);
+        let r = solve_ipm(&prob, &opts);
         eprintln!("QPILOTNO status={:?} obj={:.5e} presolve={}", r.status, r.objective, opts.presolve);
         let ax = prob.a.mat_vec_mul(&r.solution).unwrap();
         let mut violations: Vec<(usize, f64, f64, f64, f64)> = (0..prob.num_constraints).map(|i| {
@@ -455,7 +451,7 @@ mod tests {
 
     /// DPKLO1 で parser bug 修正と v2 が両立することを確認 (timeout/optimal ok)。
     #[test]
-    fn test_v2_dpklo1() {
+    fn test_ipm_dpklo1() {
         let path = Path::new("data/maros_meszaros/DPKLO1.QPS");
         if !path.exists() {
             eprintln!("DPKLO1.QPS not found, skipping");
@@ -464,7 +460,7 @@ mod tests {
         let prob = parse_qps(path).expect("parse DPKLO1");
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(5.0);
-        let r = solve_qp_v2(&prob, &opts);
+        let r = solve_ipm(&prob, &opts);
         eprintln!("DPKLO1 v2: status={:?} obj={} iters={}", r.status, r.objective, r.iterations);
         // DPKLO1 が timeout/optimal いずれかで返ってくることを確認 (v2 が hang しない)
         assert!(matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout));
