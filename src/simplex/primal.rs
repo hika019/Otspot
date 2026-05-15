@@ -204,23 +204,12 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
         }
 
-        // Degenerate art count determines Phase I strategy.
-        // When degenerate arts are the majority, Phase I would make thousands of step=0
-        // pivots (cycling). Charnes perturbation + pre-crash prevent this.
-        // When they are a minority (e.g. pilot4: 22%), the natural Phase I trajectory
-        // (with degenerate pivots handled by Bland's rule) produces a better-conditioned
-        // Phase II starting basis — Charnes would change the pivot order and break this.
-        let degen_art_count = (0..m)
-            .filter(|&i| basis[i] >= sf.n_total && x_b[i].abs() <= PIVOT_TOL)
-            .count();
-        let use_charnes_phase1 = degen_art_count > m / 2;
-
-        if use_charnes_phase1 {
-            pivot_out_degenerate_artificials(&a_ext, &mut basis, &x_b, sf, options);
-            for i in 0..m {
-                if basis[i] >= sf.n_total && x_b[i].abs() <= PIVOT_TOL {
-                    x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
-                }
+        // Charnes perturbation: give each degenerate artificial row a unique tiny
+        // positive x_b so ratio-test produces step>0 (prevents Phase I cycling).
+        // The final reconcile restores exact B^{-1}b.
+        for i in 0..m {
+            if basis[i] >= sf.n_total && x_b[i].abs() <= PIVOT_TOL {
+                x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
             }
         }
 
@@ -325,21 +314,16 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         Err(_) => return SolverResult::numerical_error(),
                     }
                 }
-                // Charnes perturbation for Phase II anti-cycling (same condition as Phase I).
-                // For predominantly-degenerate problems (degen_art_count > m/2), most rows
-                // have x_b=0 after Phase I and cause step=0 cycling in Phase II.
-                // Not applied when degen arts are a minority: those problems (e.g. grow22)
-                // have structural near-zero rows whose perturbation degrades solution precision.
-                // The final reconcile restores exact B^{-1}b after Phase II completes.
-                if use_charnes_phase1 {
-                    for i in 0..m {
-                        if x_b[i].abs() < PIVOT_TOL {
-                            x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
-                        }
+                // Charnes perturbation for Phase II anti-cycling.
+                // Rows with x_b ≈ 0 cause ratio-test step=0. The final reconcile restores
+                // exact B^{-1}b after Phase II completes.
+                for i in 0..m {
+                    if x_b[i].abs() < PIVOT_TOL {
+                        x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
                     }
-                    for v in x_b.iter_mut() {
-                        if *v < 0.0 { *v = 0.0; }
-                    }
+                }
+                for v in x_b.iter_mut() {
+                    if *v < 0.0 { *v = 0.0; }
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
@@ -518,15 +502,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             Err(_) => return SolverResult::numerical_error(),
                         }
                     }
-                    if use_charnes_phase1 {
-                        for i in 0..m {
-                            if x_b[i].abs() < PIVOT_TOL {
-                                x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
-                            }
+                    for i in 0..m {
+                        if x_b[i].abs() < PIVOT_TOL {
+                            x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
                         }
-                        for v in x_b.iter_mut() {
-                            if *v < 0.0 { *v = 0.0; }
-                        }
+                    }
+                    for v in x_b.iter_mut() {
+                        if *v < 0.0 { *v = 0.0; }
                     }
 
                     let mut pricing2 = SteepestEdgePricing::new(n_ext);
