@@ -133,7 +133,7 @@ fn cold_start_dual(
     // Primal Phase II: 元のコストで最適化（主実行可能点から）
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
-        a, &mut x_b, c, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
+        a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, false,
     );
 
     // Phase IIはPrimalなのでUnbounded=主非有界
@@ -264,7 +264,7 @@ fn primal_outcome_to_result(
 /// - `Optimal`: 主実行可能性達成（最適）
 /// - `Unbounded`: 双対比率テストで候補なし（双対非有界 = 主実行不可）
 /// - `Timeout`: refactor_failed（数値障害）またはmax_iter到達（事実上不到達）
-fn dual_simplex_core(
+pub(super) fn dual_simplex_core(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
