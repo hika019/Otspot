@@ -1344,7 +1344,7 @@ mod tests {
         let opts = SolverOptions::default();
         let b = vec![1.0, 0.0];
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts, false,
+            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts,
         );
         // 修正後: Timeout が期待される。現状: Optimal（偽）が返るのでこの assert は FAIL。
         assert!(
@@ -1411,7 +1411,7 @@ mod tests {
         };
         let b = vec![4.0];
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts, false,
+            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts,
         );
         // MaxIterations廃止後 → Optimal、Timeout、または SingularBasis が返る
         assert!(
