@@ -265,3 +265,52 @@ fn test_brandy_presolve_on_dual_feasibility_and_kkt() {
 fn test_scfxm1_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/scfxm1.QPS");
 }
+
+/// scorpion の y を presolve OFF / ON で比較し、cleanup LP の必要性を観察
+#[test]
+fn diag_scorpion_y_off_vs_on() {
+    let path = Path::new("data/lp_problems/scorpion.QPS");
+    if !path.exists() { eprintln!("[SKIP]"); return; }
+    let qp = parse_qps(path).expect("parse");
+    let lp = make_lp(&qp);
+    let n = lp.num_vars;
+    let m = lp.num_constraints;
+    println!("scorpion: n={} m={}", n, m);
+
+    let mut opts_off = SolverOptions::default();
+    opts_off.presolve = false;
+    opts_off.timeout_secs = Some(30.0);
+    let r_off = solve_qp_with(&qp, &opts_off);
+
+    let mut opts_on = SolverOptions::default();
+    opts_on.presolve = true;
+    opts_on.timeout_secs = Some(30.0);
+    let r_on = solve_qp_with(&qp, &opts_on);
+
+    println!("status off={:?} on={:?}", r_off.status, r_on.status);
+    println!("pf off={:e} on={:e}", max_pf(&lp, &r_off.solution), max_pf(&lp, &r_on.solution));
+    let max_y_off = r_off.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    let max_y_on = r_on.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    println!("max|y| off={:e} on={:e}", max_y_off, max_y_on);
+
+    let df_off = r_off.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    let df_on = r_on.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    println!("df (max(0,-rc)) off={:e} on={:e}", df_off, df_on);
+
+    let mut max_y_diff = 0.0f64;
+    let mut argmax_i = 0usize;
+    for i in 0..m {
+        let d = (r_off.dual_solution[i] - r_on.dual_solution[i]).abs();
+        if d > max_y_diff { max_y_diff = d; argmax_i = i; }
+    }
+    println!("max|y_off - y_on| = {:e} at i={} (y_off={} y_on={})",
+        max_y_diff, argmax_i, r_off.dual_solution[argmax_i], r_on.dual_solution[argmax_i]);
+
+    let mut min_rc_on = f64::INFINITY;
+    let mut argmin_j = 0usize;
+    for j in 0..n {
+        if r_on.reduced_costs[j] < min_rc_on { min_rc_on = r_on.reduced_costs[j]; argmin_j = j; }
+    }
+    println!("min rc on = {} at j={} (x[j]={}, bounds={:?})",
+        min_rc_on, argmin_j, r_on.solution[argmin_j], qp.bounds[argmin_j]);
+}

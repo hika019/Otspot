@@ -3,8 +3,160 @@
 //! Presolveで縮約した問題の解を元問題の解空間に復元する。
 //! PostsolveStackを逆順（LIFO）に適用する。
 
-use crate::problem::{ConstraintType, LpProblem, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
+use crate::options::SolverOptions;
 use super::transforms::{PostsolveStep, PresolveResult};
+
+/// cleanup LP の timeout 上限 (削除行数〜数百のため小規模、5秒で十分)。
+const CLEANUP_LP_TIMEOUT_SECS: f64 = 5.0;
+
+/// Cleanup LP を構築して解き、削除行の y_i を KKT 整合に決定する。
+///
+/// 構造:
+/// - 変数: 削除行の y_i (k 個)、constraint type の符号慣例で bound 設定
+/// - 制約: 未削除列 j で rc[j] = c[j] - Σ_i A_ij y_i = 0 or ≥ 0 or ≤ 0
+///   - x[j] at lb: rc ≥ 0 → Σ A_ij y_i ≤ rc_known[j]
+///   - x[j] at ub: rc ≤ 0 → Σ A_ij y_i ≥ rc_known[j]
+///   - interior:   rc = 0 → Σ A_ij y_i = rc_known[j]
+/// - 目的: min 0 (Phase I 風実行可能性のみ)
+/// - LinearSubstitution の y_piv: free 変数 rc=0 を Eq 制約で含める (orig_col の rc が 0)
+///
+/// 戻り値: 削除行ごとの y_i 値 (None なら cleanup LP 構築失敗 or 解けず)
+fn build_and_solve_cleanup_lp(
+    orig_problem: &LpProblem,
+    presolve_result: &PresolveResult,
+    solution: &[f64],
+    dual_solution_known: &[f64],
+) -> Option<Vec<f64>> {
+    let n = orig_problem.num_vars;
+    let m = orig_problem.num_constraints;
+    let deleted_rows: Vec<usize> = (0..m)
+        .filter(|&i| presolve_result.row_map[i].is_none())
+        .collect();
+    let k = deleted_rows.len();
+    if k == 0 { return None; }
+
+    let row_to_var: std::collections::HashMap<usize, usize> = deleted_rows
+        .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
+
+    // rc_known[j] = c[j] - Σ_{i: known} A_ij * ŷ_i
+    let mut rc_known = orig_problem.c.clone();
+    for j in 0..n {
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (kk, &row) in rows.iter().enumerate() {
+                if presolve_result.row_map[row].is_some() {
+                    rc_known[j] -= vals[kk] * dual_solution_known[row];
+                }
+            }
+        }
+    }
+
+    // 制約構築
+    let mut tri_rows: Vec<usize> = Vec::new();
+    let mut tri_cols: Vec<usize> = Vec::new();
+    let mut tri_vals: Vec<f64> = Vec::new();
+    let mut b_clean: Vec<f64> = Vec::new();
+    let mut ct_clean: Vec<ConstraintType> = Vec::new();
+
+    // (i) 未削除列 j の rc 符号制約
+    for j in 0..n {
+        let x_j = solution[j];
+        let (lb_j, ub_j) = orig_problem.bounds[j];
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_ACTIVE_TOL;
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        if fixed { continue; }
+
+        // 列 j の削除行エントリのみ抽出
+        let mut col_terms: Vec<(usize, f64)> = Vec::new();
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (kk, &row) in rows.iter().enumerate() {
+                if let Some(&var_idx) = row_to_var.get(&row) {
+                    col_terms.push((var_idx, vals[kk]));
+                }
+            }
+        }
+        if col_terms.is_empty() { continue; }
+
+        // interior 列 (どちらの bound にも hit せず、fixed でもない) は LP dual の
+        // 自由度で rc != 0 が自然に発生する。Eq 強制は cleanup LP を過剰制約化して
+        // infeasible にするためスキップ。
+        let ct = if at_lb && !at_ub {
+            ConstraintType::Le
+        } else if at_ub && !at_lb {
+            ConstraintType::Ge
+        } else {
+            continue;
+        };
+        let row_idx = b_clean.len();
+        for &(var_idx, a) in &col_terms {
+            tri_rows.push(row_idx);
+            tri_cols.push(var_idx);
+            tri_vals.push(a);
+        }
+        b_clean.push(rc_known[j]);
+        ct_clean.push(ct);
+    }
+
+    // (ii) LinearSubstitution の y_piv (orig_col の rc = 0 = free 変数最適性)
+    for step in &presolve_result.postsolve_stack {
+        if let PostsolveStep::LinearSubstitution { orig_col, .. } = step {
+            let j = *orig_col;
+            // rc[orig_col] = c[orig_col] - Σ_i A_{i,orig_col} * y_i = 0
+            //   ⇔ Σ_{i: deleted} A_{i,j} * y_i = rc_known[j] (free 変数 KKT)
+            let mut col_terms: Vec<(usize, f64)> = Vec::new();
+            if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+                for (kk, &row) in rows.iter().enumerate() {
+                    if let Some(&var_idx) = row_to_var.get(&row) {
+                        col_terms.push((var_idx, vals[kk]));
+                    }
+                }
+            }
+            if col_terms.is_empty() { continue; }
+            let row_idx = b_clean.len();
+            for &(var_idx, a) in &col_terms {
+                tri_rows.push(row_idx);
+                tri_cols.push(var_idx);
+                tri_vals.push(a);
+            }
+            b_clean.push(rc_known[j]);
+            ct_clean.push(ConstraintType::Eq);
+        }
+    }
+
+    if b_clean.is_empty() { return None; }
+
+    // y_i 変数 bound (constraint type 符号慣例)
+    let bounds_clean: Vec<(f64, f64)> = deleted_rows.iter().map(|&i| {
+        match orig_problem.constraint_types[i] {
+            ConstraintType::Le => (f64::NEG_INFINITY, 0.0),
+            ConstraintType::Ge => (0.0, f64::INFINITY),
+            ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
+        }
+    }).collect();
+    let c_clean = vec![0.0f64; k]; // feasibility のみ
+
+    let m_clean = b_clean.len();
+    let a_clean = CscMatrix::from_triplets(
+        &tri_rows, &tri_cols, &tri_vals, m_clean, k
+    ).ok()?;
+    let cleanup_lp = LpProblem::new_general(
+        c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
+    ).ok()?;
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.warm_start = None;
+    opts.timeout_secs = Some(CLEANUP_LP_TIMEOUT_SECS);
+    let r = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
+    let _ = m_clean;
+    if r.status == SolveStatus::Optimal && r.solution.len() == k {
+        Some(r.solution)
+    } else {
+        None
+    }
+}
 
 /// CSC 形式の orig_problem.a から行 i のエントリ (j, A_ij) を列挙する。
 /// O(nnz_total) の走査だが、一度だけ呼ばれる小規模問題用 (大規模では別途キャッシュ化)。
@@ -208,10 +360,25 @@ pub fn run_postsolve(
         }
     }
 
-    // 削除行の y を Gauss-Seidel 風反復で KKT 整合に収束させる。
-    // (a) 一般削除行 (RedundantConstraint/EmptyRow/SingletonRow): recover_removed_row_dual
-    // (b) LinearSubstitution の pivot 行: 専用 KKT 式 (c_orig - Σ A_ij*y_i)/pivot
-    // 両者を交互に更新することで LIFO 順序依存 (削除行 i を別 step が後で復元) を解消。
+    // Step 3: Cleanup LP で削除行の y を一括解決 (Plan 設計の核)。
+    // 失敗時は既存 Gauss-Seidel フォールバックを実行する。
+    let cleanup_solved = if let Some(y_clean) = build_and_solve_cleanup_lp(
+        orig_problem, presolve_result, &solution, &dual_solution,
+    ) {
+        let deleted_rows: Vec<usize> = (0..m)
+            .filter(|&i| presolve_result.row_map[i].is_none())
+            .collect();
+        for (var_idx, &i) in deleted_rows.iter().enumerate() {
+            dual_solution[i] = y_clean[var_idx];
+        }
+        true
+    } else {
+        false
+    };
+
+    // Gauss-Seidel 風反復 (cleanup LP 失敗時のみフォールバック)。
+    // cleanup_solved=true なら cleanup LP の解を保持 (上書きしない)。
+    if !cleanup_solved {
     let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for step in &presolve_result.postsolve_stack {
         if let PostsolveStep::LinearSubstitution { orig_row: Some(r), .. } = step {
@@ -253,6 +420,7 @@ pub fn run_postsolve(
         }
         if max_diff < conv_tol { break; }
     }
+    } // !cleanup_solved
 
     // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
     //   reduced_cost[j] = c[j] - Σ_i A_ij * y_i
