@@ -301,7 +301,7 @@ pub fn run_presolve(
     let m = problem.num_constraints;
     let mut st = PresolveState::from_problem(problem);
 
-    const MAX_PRESOLVE_ITER: usize = 50;
+    use crate::options::MAX_PRESOLVE_ITER;
     let mut pass = 0usize;
     loop {
         if pass >= MAX_PRESOLVE_ITER {

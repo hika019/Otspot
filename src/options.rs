@@ -171,11 +171,23 @@ pub struct SolverOptions {
     pub ipm: IpmOptions,
 }
 
+/// Simplex の eta-file 上限 (これを超えたら LU 再因子分解)。
+/// 大規模 m では小さすぎ (refactor 多発)、小規模 m では大きすぎ (eta drift)。
+/// 将来 m に応じた動的設定に拡張予定 (Plan 中期改善)。
+pub const DEFAULT_MAX_ETAS: usize = 50;
+
+/// Presolve fixpoint loop の最大反復数。これを超えても収束しない場合は警告して終了。
+/// 通常の Netlib LP では 5-15 回で収束、50 は安全マージン。
+pub const MAX_PRESOLVE_ITER: usize = 50;
+
+/// Phase I の retry 上限 (LU 数値誤差で「Optimal 判定だが reconcile で負残差」のケース)。
+pub const MAX_PHASE1_RETRIES: usize = 8;
+
 impl Default for SolverOptions {
     fn default() -> Self {
         Self {
             primal_tol: PIVOT_TOL, // 1e-8
-            max_etas: 50,
+            max_etas: DEFAULT_MAX_ETAS,
             clamp_tol: 1e-14,
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,

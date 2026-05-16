@@ -236,7 +236,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 // After fresh-LU reconcile reveals primal infeasibility, we switch to
                 // DUAL SIMPLEX to restore primal feasibility (dual simplex starts from
                 // dual-feasible, fixes primal infeasibility). Then re-check.
-                const MAX_PHASE1_RETRIES: usize = 8;
+                use crate::options::MAX_PHASE1_RETRIES;
                 let mut phase1_feasible = false;
                 'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
                     let mut y_dummy = vec![0.0f64; m];
