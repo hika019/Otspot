@@ -240,3 +240,28 @@ fn test_sc50a_presolve_on_dual_feasibility_and_kkt() {
 fn test_kb2_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/kb2.QPS");
 }
+
+#[test]
+fn test_recipe_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/recipe.QPS");
+}
+
+#[test]
+fn test_scorpion_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/scorpion.QPS");
+}
+
+#[test]
+fn test_share1b_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/share1b.QPS");
+}
+
+#[test]
+fn test_brandy_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/brandy.QPS");
+}
+
+#[test]
+fn test_scfxm1_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/scfxm1.QPS");
+}

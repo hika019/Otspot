@@ -22,14 +22,26 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
     out
 }
 
-/// 削除行 i の y_i を LP dual feasibility (rc[j] >= 0 ∀j) を満たすよう KKT 整合に復元する。
+/// bound active 判定の許容差 (x[j] が lb / ub にどれだけ近ければ active と見るか)。
+const BOUND_ACTIVE_TOL: f64 = 1e-6;
+
+/// 削除行 i の y_i を LP dual feasibility に整合的に復元する。
 ///
-/// y_i = 0 と仮定したときの rc_at_y0[j] = c[j] - Σ_k A_kj * y_k から、
-/// rc[j] = rc_at_y0[j] - A_ij * y_i >= 0 という不等式を全 j について連立し、
-/// y_i の許容範囲 [min_y_i, max_y_i] を求める。
-/// 制約タイプの符号慣例 (Le: y<=0, Ge: y>=0, Eq: free) を交差させ、
-/// 範囲内で 0 に最も近い値を採用する。
-fn recover_removed_row_dual(orig_problem: &LpProblem, i: usize, dual_solution: &[f64]) -> f64 {
+/// LP KKT (bound 考慮):
+///   x[j] at lb (lb finite, |x-lb|<TOL): rc[j] >= 0 が必要
+///   x[j] at ub (ub finite, |x-ub|<TOL): rc[j] <= 0 が必要
+///   x[j] interior: rc[j] ≈ 0 が必要
+///   x[j] fixed (lb==ub): rc[j] 任意
+///
+/// rc[j] = rc_at_y0[j] - A_ij * y_i (y_i 以外の y は確定済み) について、
+/// 各列の必要符号から y_i の許容範囲 [min_y_i, max_y_i] を導出し、
+/// 制約タイプ (Le: y<=0, Ge: y>=0, Eq: free) と交差して 0 に最も近い値を選ぶ。
+fn recover_removed_row_dual(
+    orig_problem: &LpProblem,
+    i: usize,
+    solution: &[f64],
+    dual_solution: &[f64],
+) -> f64 {
     let row_entries = collect_row_entries(orig_problem, i);
     let mut min_y_i = f64::NEG_INFINITY;
     let mut max_y_i = f64::INFINITY;
@@ -41,13 +53,35 @@ fn recover_removed_row_dual(orig_problem: &LpProblem, i: usize, dual_solution: &
                 rc_at_y0 -= vals[k] * dual_solution[row];
             }
         }
-        // dual_solution[i] は呼出時点 0 と仮定 (このパスでは未復元)
-        // rc[j] = rc_at_y0 - a_ij * y_i >= 0 ⇔ a_ij * y_i <= rc_at_y0
-        let bound = rc_at_y0 / a_ij;
-        if a_ij > 0.0 {
-            if bound < max_y_i { max_y_i = bound; }
+        // bound active 判定 (x[j] が lb / ub のどちらに hit しているか)
+        let x_j = solution[j];
+        let (lb_j, ub_j) = orig_problem.bounds[j];
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_ACTIVE_TOL;
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        if fixed { continue; } // 固定変数の rc は LP 上自由
+        // rc[j] = rc_at_y0 - a_ij * y_i に対する制約:
+        //   at_lb && !at_ub: rc >= 0 → a_ij * y_i <= rc_at_y0
+        //   at_ub && !at_lb: rc <= 0 → a_ij * y_i >= rc_at_y0
+        //   interior:        rc == 0 → a_ij * y_i == rc_at_y0
+        let bound_val = rc_at_y0 / a_ij;
+        if at_lb && !at_ub {
+            if a_ij > 0.0 {
+                if bound_val < max_y_i { max_y_i = bound_val; }
+            } else {
+                if bound_val > min_y_i { min_y_i = bound_val; }
+            }
+        } else if at_ub && !at_lb {
+            // 不等号が逆方向
+            if a_ij > 0.0 {
+                if bound_val > min_y_i { min_y_i = bound_val; }
+            } else {
+                if bound_val < max_y_i { max_y_i = bound_val; }
+            }
         } else {
-            if bound > min_y_i { min_y_i = bound; }
+            // interior or 両端 hit: rc == 0 (等号制約)
+            if bound_val < max_y_i { max_y_i = bound_val; }
+            if bound_val > min_y_i { min_y_i = bound_val; }
         }
     }
     let (sign_lb, sign_ub) = match orig_problem.constraint_types[i] {
@@ -113,16 +147,16 @@ pub fn run_postsolve(
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::SingletonRow { orig_col, orig_row, value, a_ij: _, c_j: _ } => {
                 solution[*orig_col] = *value;
                 // y_i を KKT 整合に復元 (RedundantConstraint と同様)。
                 // bound active 時も含めて rc[j]>=0 を満たす y_i を選ぶ。
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::BoundsTightened { .. } => {
                 // Bounds tightening は解の値そのものに影響しない（情報保持のみ）
@@ -192,7 +226,7 @@ pub fn run_postsolve(
         for i in 0..m {
             if presolve_result.row_map[i].is_some() { continue; }
             if linsub_rows.contains(&i) { continue; }
-            let new_y = recover_removed_row_dual(orig_problem, i, &dual_solution);
+            let new_y = recover_removed_row_dual(orig_problem, i, &solution, &dual_solution);
             let diff = (dual_solution[i] - new_y).abs();
             if diff > max_diff { max_diff = diff; }
             dual_solution[i] = new_y;
