@@ -34,6 +34,14 @@ pub(crate) fn two_phase_dual_simplex(
     options: &SolverOptions,
 ) -> SolverResult {
     let m = sf.m;
+
+    // 早期 fallback: warm_start なし & artificial > 0 は cold_start_dual 内
+    // L90-92 で primal に丸投げされるため、Ruiz scale が無駄。primal 側 (two_phase_simplex)
+    // でも独立に Ruiz scale するので二重スケール除去でもある。
+    if options.warm_start.is_none() && sf.num_artificial > 0 {
+        return super::two_phase_simplex(sf, problem, options);
+    }
+
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
