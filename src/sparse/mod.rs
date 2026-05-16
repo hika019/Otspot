@@ -5,13 +5,9 @@
 mod vec;
 mod csc;
 mod csr;
-mod triangular;
 mod compress;
 
 // Public re-exports
 pub use vec::SparseVec;
 pub use csc::CscMatrix;
 pub use csr::CsrMatrix;
-
-// Crate-internal re-exports
-pub(crate) use triangular::{SparseLowerCSC, SparseUpperCSR};

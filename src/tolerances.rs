@@ -12,12 +12,6 @@ pub const PIVOT_TOL: f64 = 1e-8;
 /// 行列構築時の微小値除去の閾値
 pub const DROP_TOL: f64 = 1e-15;
 
-/// LU 特異性判定の閾値
-pub const SINGULAR_TOL: f64 = 1e-12;
-
-/// Markowitz ピボット選択のしきい値
-pub const MARKOWITZ_THRESHOLD: f64 = 0.1;
-
 /// シンプレックス法のピボット安定性しきい値
 ///
 /// FTRAN 後の入基列で |d[leaving_row]| / max(|d|) < PIVOT_STABILITY_THRESHOLD の場合、
