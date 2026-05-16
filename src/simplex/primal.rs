@@ -239,6 +239,11 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 use crate::options::MAX_PHASE1_RETRIES;
                 let mut phase1_feasible = false;
                 'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
+                    // retry ループ先頭で deadline 検査。連続退化や数値誤差で
+                    // retry が予算を食いつぶす case を回避する。
+                    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        break 'retry;
+                    }
                     let mut y_dummy = vec![0.0f64; m];
                     let rec_obj = match reconcile_final_basis_state(
                         &a_ext, &b, &c_phase1, &basis, &mut x_b, &mut y_dummy,
