@@ -665,6 +665,12 @@ fn pivot_out_degenerate_artificials(
     }
 
     for i in 0..m {
+        // deadline チェック: pds-20 等の大規模で artificial 多数の場合、
+        // m_artificial × n_total 回 FTRAN で 1000 秒予算を簡単に消費する。
+        // 各 i 反復先頭で deadline 検査し、超過なら未処理 artificial を残して return。
+        if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
             continue;
         }
@@ -678,6 +684,10 @@ fn pivot_out_degenerate_artificials(
         for j in 0..sf.n_total {
             if is_basic[j] {
                 continue;
+            }
+            // 内側ループでも 1024 回ごとに deadline 検査 (pds-20 では n_total ≈ 33,798)。
+            if j & 0x3ff == 0 && options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return;
             }
             if let Ok((rows, vals)) = a_ext.get_column(j) {
                 let mut col_dense = vec![0.0_f64; m];
