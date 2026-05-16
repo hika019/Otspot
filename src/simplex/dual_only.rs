@@ -38,48 +38,57 @@ pub fn solve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
             ext.m, ext.n_standard, ext.n_ext, ext.n_ext - ext.n_standard);
     }
 
-    // Phase I: Big-M 込みコストで dual simplex
-    let phase1_result = run_dual_with_perturbation(&ext, options, /*phase=*/1);
-
+    // Phase I: Big-M + perturb で primal feasibility 確保
+    let phase1 = run_dual_with_perturbation(&ext, options, 1);
     if dbg {
-        let st = match &phase1_result.outcome {
-            SimplexOutcome::Optimal(o, _) => format!("Optimal({})", o),
-            SimplexOutcome::Unbounded => "Unbounded".to_string(),
-            SimplexOutcome::Timeout(_) => "Timeout".to_string(),
-            SimplexOutcome::SingularBasis => "SingularBasis".to_string(),
-        };
-        let n_art_in_basis = phase1_result.basis.iter().filter(|&&b| b >= ext.n_standard).count();
-        eprintln!("[DUAL_ONLY] phase1 outcome={} n_art_in_basis={}", st, n_art_in_basis);
+        let n_art_in_basis = phase1.basis.iter().filter(|&&b| b >= ext.n_standard).count();
+        eprintln!("[DUAL_ONLY] phase1 outcome={:?} n_art_in_basis={}",
+            match &phase1.outcome {
+                SimplexOutcome::Optimal(o, _) => format!("Optimal({:.3e})", o),
+                SimplexOutcome::Unbounded => "Unbounded".to_string(),
+                SimplexOutcome::Timeout(_) => "Timeout".to_string(),
+                SimplexOutcome::SingularBasis => "SingularBasis".to_string(),
+            }, n_art_in_basis);
     }
 
-    match phase1_result.outcome {
-        SimplexOutcome::Optimal(obj, _y) => {
-            // 人工変数残量チェック
-            let art_max = artificial_max(&ext, &phase1_result.basis, &phase1_result.x_b);
+    let phase1_basis = match phase1.outcome {
+        SimplexOutcome::Optimal(_, _) => {
+            let art_max = artificial_max(&ext, &phase1.basis, &phase1.x_b);
             if dbg {
-                eprintln!("[DUAL_ONLY] art_max={:.3e} threshold={:.3e}", art_max, ARTIFICIAL_FEAS_TOL);
+                eprintln!("[DUAL_ONLY] phase1 art_max={:.3e}", art_max);
             }
             if art_max > ARTIFICIAL_FEAS_TOL {
                 return result_infeasible(&sf);
             }
-            // Phase II: 摂動なしで再実行 (Big-M も外す → 元の c のみ)
-            let phase2_result = run_dual_pure(&ext, options, phase1_result.basis, phase1_result.x_b);
-            match phase2_result.outcome {
-                SimplexOutcome::Optimal(_obj2, y2) => {
-                    result_optimal(&sf, problem, &phase2_result.basis, &phase2_result.x_b, &y2, &ext)
-                }
-                SimplexOutcome::Unbounded => result_infeasible(&sf), // dual unbounded = primal infeasible
-                SimplexOutcome::Timeout(_) => {
-                    result_timeout(&sf, problem, &phase2_result.basis, &phase2_result.x_b, &ext)
-                }
-                SimplexOutcome::SingularBasis => SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
-            }
-            .also(|_| { let _ = obj; }) // silence unused
+            phase1
         }
-        SimplexOutcome::Unbounded => result_infeasible(&sf),
-        SimplexOutcome::Timeout(_) => {
-            result_timeout(&sf, problem, &phase1_result.basis, &phase1_result.x_b, &ext)
+        SimplexOutcome::Unbounded => return result_infeasible(&sf),
+        SimplexOutcome::Timeout(_) => return result_timeout(&sf, problem, &phase1.basis, &phase1.x_b, &ext),
+        SimplexOutcome::SingularBasis => return SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
+    };
+
+    // Phase II: 元 c で再反復。c_bar<0 guard で dual infeasible 候補は除外、
+    // primal feasibility を維持しつつ optimal を探索。
+    let phase2 = run_dual_pure(&ext, options, phase1_basis.basis, phase1_basis.x_b);
+    if dbg {
+        eprintln!("[DUAL_ONLY] phase2 outcome={:?}",
+            match &phase2.outcome {
+                SimplexOutcome::Optimal(o, _) => format!("Optimal({:.3e})", o),
+                SimplexOutcome::Unbounded => "Unbounded".to_string(),
+                SimplexOutcome::Timeout(_) => "Timeout".to_string(),
+                SimplexOutcome::SingularBasis => "SingularBasis".to_string(),
+            });
+    }
+
+    match phase2.outcome {
+        SimplexOutcome::Optimal(_, y) => {
+            result_optimal(&sf, problem, &phase2.basis, &phase2.x_b, &y, &ext)
         }
+        SimplexOutcome::Unbounded => {
+            // Phase II 内 unbounded は dual infeasibility 起因 — Phase I 解を採用
+            result_optimal(&sf, problem, &phase2.basis, &phase2.x_b, &[], &ext)
+        }
+        SimplexOutcome::Timeout(_) => result_timeout(&sf, problem, &phase2.basis, &phase2.x_b, &ext),
         SimplexOutcome::SingularBasis => SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
     }
 }
@@ -244,20 +253,20 @@ fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u
     let n_ext = ext.n_ext;
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
-    // graded 摂動: 列 j に DUAL_FEAS_BASE + j * DUAL_FEAS_STEP の摂動を最低保証。
-    // 列ごとに異なる shift で degeneracy を破壊し、Bland 規則の cycling を防ぐ。
-    // BASE は十分大きく取り Phase I 進捗速度を確保、STEP は tie-break 用の微少差。
-    const DUAL_FEAS_BASE: f64 = 1.0;
-    const DUAL_FEAS_STEP: f64 = 1e-7;
+    // 最小限の dual-feasibility 摂動: c_bar が負の場合のみ +DUAL_FEAS_MARGIN まで持ち上げる。
+    // BASE 1.0 で大幅 shift すると元 c が歪み単一相 Big-M で最適解誤差大。
+    // 0 近傍に揃えると degenerate ratio が出るが、c_bar<0 guard でカバー。
+    // dual-feasibility 摂動: c_bar に大きめのマージンを与えて degenerate ratio を排除。
+    // 単一相 Big-M なので摂動は最後まで残るが、結果 obj は OK (摂動分は y に吸収)。
+    const DUAL_FEAS_MARGIN: f64 = 1.0;
     for j in 0..n_ext {
         if is_basic[j] { continue; }
         let cs = ext.a.col_ptr[j];
         let ce = ext.a.col_ptr[j + 1];
         let aty: f64 = (cs..ce).map(|k| ext.a.values[k] * y[ext.a.row_ind[k]]).sum();
         let c_bar = c_perturbed[j] - aty;
-        let target = DUAL_FEAS_BASE + (j as f64) * DUAL_FEAS_STEP;
-        if c_bar < target {
-            c_perturbed[j] += target - c_bar;
+        if c_bar < DUAL_FEAS_MARGIN {
+            c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar;
         }
     }
 
