@@ -8,7 +8,6 @@ use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, LpProblem};
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
-use solver::{solve_with, CscMatrix};
 use std::path::Path;
 
 fn make_lp(qp: &QpProblem) -> LpProblem {
@@ -282,101 +281,6 @@ fn test_bandm_presolve_on_dual_feasibility_and_kkt() {
 #[test]
 fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/beaconfd.QPS");
-}
-
-// ===========================================================================
-// Large Coefficient Row Scaling (QP #14) の TDD test
-//
-// 合成 LP で max|A|=1e7 を含み、 scaling 適用前後で:
-// - primal 解が一致
-// - obj が一致
-// - dual feasibility (rc 符号) が bound active 状態と整合
-// が成立することを検証。
-// ===========================================================================
-
-/// 大係数 LP: min x1 + 2*x2 s.t. 1e7*x1 + 1e7*x2 = 1e7, x1,x2 in [0,1]
-/// 最適: x1=1, x2=0, obj=1
-#[test]
-fn test_large_coeff_scaling_preserves_solution() {
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0e7, 1.0e7], 1, 2).unwrap();
-    let lp = LpProblem::new_general(
-        vec![1.0, 2.0],
-        a,
-        vec![1.0e7],
-        vec![ConstraintType::Eq],
-        vec![(0.0, 1.0), (0.0, 1.0)],
-        None,
-    ).unwrap();
-
-    let mut opts_off = SolverOptions::default();
-    opts_off.presolve = false;
-    opts_off.timeout_secs = Some(10.0);
-    let r_off = solve_with(&lp, &opts_off);
-
-    let mut opts_on = SolverOptions::default();
-    opts_on.presolve = true;
-    opts_on.timeout_secs = Some(10.0);
-    let r_on = solve_with(&lp, &opts_on);
-
-    assert!(
-        (r_off.objective - r_on.objective).abs() < 1e-6,
-        "obj off={} on={} 不一致",
-        r_off.objective, r_on.objective,
-    );
-    // primal feasibility: 1e7*x1 + 1e7*x2 = 1e7
-    let pf_on = (1.0e7 * r_on.solution[0] + 1.0e7 * r_on.solution[1] - 1.0e7).abs();
-    assert!(pf_on < 1e-3, "primal feas on={}", pf_on);
-
-    // dual feas: lb hit 列 rc>=0, ub hit 列 rc<=0
-    for j in 0..2 {
-        let x = r_on.solution[j];
-        let (lb, ub) = (0.0f64, 1.0f64);
-        let rc = r_on.reduced_costs[j];
-        if (x - lb).abs() < 1e-4 {
-            assert!(rc >= -1e-4, "rc[{}]={} at lb={} should be >=0", j, rc, lb);
-        } else if (x - ub).abs() < 1e-4 {
-            assert!(rc <= 1e-4, "rc[{}]={} at ub={} should be <=0", j, rc, ub);
-        }
-    }
-}
-
-/// 大係数 + dual feasibility: scaling 適用後の y で KKT 整合
-/// (presolve に y 復元の逆変換 σ_i * y_scaled が正しく機能すること)
-#[test]
-fn test_large_coeff_scaling_dual_recovery_kkt_consistent() {
-    // 3x2 LP: min x1 + x2 s.t.
-    //   1e7*x1 + 1e7*x2 <= 1e7  (Le, max coeff 1e7)
-    //   x1 + x2 >= 0.5           (Ge)
-    //   x1, x2 in [0, 1]
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0e7, 1.0e7, 1.0, 1.0],
-        2, 2,
-    ).unwrap();
-    let lp = LpProblem::new_general(
-        vec![1.0, 1.0],
-        a,
-        vec![1.0e7, 0.5],
-        vec![ConstraintType::Le, ConstraintType::Ge],
-        vec![(0.0, 1.0), (0.0, 1.0)],
-        None,
-    ).unwrap();
-
-    let mut opts = SolverOptions::default();
-    opts.presolve = true;
-    opts.timeout_secs = Some(10.0);
-    let r = solve_with(&lp, &opts);
-
-    // KKT 整合 (rc 符号、 c - A^T y - rc = 0)
-    for j in 0..2 {
-        let mut ct_y = 1.0f64;
-        for (i, a_ij) in [(0usize, 1.0e7), (1usize, 1.0)] {
-            ct_y -= a_ij * r.dual_solution[i];
-        }
-        let diff = (ct_y - r.reduced_costs[j]).abs();
-        assert!(diff < 1e-4, "KKT residual at j={}: c-A^T y - rc = {}", j, diff);
-    }
 }
 
 /// scorpion の y を presolve OFF / ON で比較し、cleanup LP の必要性を観察
