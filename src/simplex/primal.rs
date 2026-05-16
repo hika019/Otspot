@@ -936,50 +936,53 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
         let d = &d_dense;
 
-        // 5. Harris 2-pass ratio test
+        // 5. Ratio test (Bland's rule for ties, with degenerate near-zero pivot avoidance)
         //
-        // Pass 1: Bland's min_ratio を計算 (主実行可能性の限界)。
-        // Pass 2: ratio ≤ min_ratio + PIVOT_TOL の row 群から |d[i]| が最大の row を選ぶ。
-        //         tie で Bland's (smallest basis index) → anti-cycling 保証。
+        // Phase II: skip rows where basis[i] >= n_price (artificial variables in basis).
         //
-        // 旧実装は Bland's rule のみで、不安定な小 pivot を選んでも事後 (L1020-) に
-        // force_refactor (LU 再因子分解, m=12k で 700ms) で救済していた。観測では
-        // per-iter cost の 96-99% が refactor だった。Harris は ratio test 段階で
-        // stable pivot を優先することで refactor 頻度を下げる algorithmic alternative。
+        // Primary: Bland's rule (smallest basis index among ties) for anti-cycling.
+        // Override: on a degenerate step (step≈0), if Bland's selects a row with
+        //   d[row] < NEAR_ZERO_PIVOT_GUARD (near-machine-zero), prefer the Bland's-selected
+        //   row among rows where d[row] >= NEAR_ZERO_PIVOT_GUARD.
+        //   Degenerate steps don't change x_B so any tied leaving row is primal-feasible.
+        //   This prevents near-zero eta entries (inv_pivot → huge) that corrupt FTRAN.
+        //   Using an absolute threshold preserves Bland's anti-cycling guarantee for all
+        //   non-near-zero pivots (a relative threshold fires too broadly and breaks Bland's).
+        let mut leaving = None;
         let mut min_ratio = f64::INFINITY;
+        let mut stable_leaving: Option<usize> = None;
+
         for i in 0..m {
             if d[i] > PIVOT_TOL {
                 let ratio = x_b[i] / d[i];
-                if ratio < min_ratio {
+                // Bland's rule (primary tie-breaking)
+                if ratio < min_ratio - PIVOT_TOL {
                     min_ratio = ratio;
+                    leaving = Some(i);
+                } else if (ratio - min_ratio).abs() < PIVOT_TOL {
+                    if let Some(prev) = leaving {
+                        if basis[i] < basis[prev] {
+                            leaving = Some(i);
+                        }
+                    }
+                }
+                // Track non-near-zero degenerate candidates for near-zero override.
+                // Use Bland's rule (smallest basis index) to maintain anti-cycling.
+                if ratio <= PIVOT_TOL && d[i] >= NEAR_ZERO_PIVOT_GUARD {
+                    match stable_leaving {
+                        None => stable_leaving = Some(i),
+                        Some(prev) if basis[i] < basis[prev] => stable_leaving = Some(i),
+                        _ => {}
+                    }
                 }
             }
         }
 
-        if !min_ratio.is_finite() {
-            return SimplexOutcome::Unbounded;
-        }
-
-        let harris_window = min_ratio + PIVOT_TOL;
-        let mut leaving: Option<usize> = None;
-        let mut best_pivot_abs = 0.0f64;
-        for i in 0..m {
-            if d[i] > PIVOT_TOL {
-                let ratio = x_b[i] / d[i];
-                if ratio <= harris_window {
-                    let d_abs = d[i].abs();
-                    if d_abs > best_pivot_abs + PIVOT_TOL {
-                        best_pivot_abs = d_abs;
-                        leaving = Some(i);
-                    } else if (d_abs - best_pivot_abs).abs() <= PIVOT_TOL {
-                        // tie: Bland's rule
-                        match leaving {
-                            None => leaving = Some(i),
-                            Some(prev) if basis[i] < basis[prev] => leaving = Some(i),
-                            _ => {}
-                        }
-                    }
-                }
+        // On a degenerate step: if Bland's selected a near-zero pivot (d < NEAR_ZERO_PIVOT_GUARD),
+        // switch to a non-near-zero alternative to prevent singular eta entries.
+        if let (Some(bland), Some(stable)) = (leaving, stable_leaving) {
+            if min_ratio <= PIVOT_TOL && d[bland] < NEAR_ZERO_PIVOT_GUARD {
+                leaving = Some(stable);
             }
         }
 
