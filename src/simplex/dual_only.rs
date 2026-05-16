@@ -177,10 +177,18 @@ fn augment_with_artificials(sf: &StandardForm) -> Extended {
         };
     }
 
-    // bounds: standard form は全変数 lb=0, slack/structural ub=+inf。
-    // 人工変数は FX [0, 0]: dual_iter_blp が UB=0 違反を検出して pivot 駆動。
+    // bounds: standard form は全変数 lb=0。
+    // - artificial: FX [0, 0]
+    // - structural/slack: [0, BIG_UB]  (Big-M 上限で BFRT を有効化)
+    //
+    // 理由: LB-only (ub=+inf) だと dual simplex pivot 後に leaving の c_bar が
+    // -theta < 0 になり、LB に押し込めない (dual feasibility 破綻)。
+    // 構造変数に finite ub を与えて UB 側へ flip 可能にする。
+    // Phase II optimal で UB に貼り付いた var は実質的な制約とならない (BIG_UB が
+    // 真の制約より十分大きいため)。
+    const BIG_UB: f64 = 1e15;
     let lb = vec![0.0_f64; n_ext];
-    let mut ub = vec![f64::INFINITY; n_ext];
+    let mut ub = vec![BIG_UB; n_ext];
     for i in 0..m {
         if let Some(art_col) = art_col_of_row[i] {
             ub[art_col] = 0.0;
@@ -422,8 +430,14 @@ fn dual_iter_blp(
         let mut min_ratio = f64::INFINITY;
         let mut pivot_element = 0.0_f64;
         // min-ratio + Bland 規則 tie-break (textbook standard)
+        // **c_bar >= 0 (at LB の dual 実行可能) のみ候補に**:
+        //   c_bar < 0 候補を選ぶと leaving の新 c_bar = -theta > 0 になり、leaving が
+        //   LB に行けても OK だが、entering の現 c_bar < 0 は既に dual 違反なので
+        //   そもそも候補にすべきでない。
+        const DUAL_FEAS_GUARD: f64 = -1e-9;
         for j in 0..n {
             if is_basic[j] { continue; }
+            if c_bar[j] < DUAL_FEAS_GUARD { continue; } // skip dual-infeasible candidates
             let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
             let alpha: f64 = (cs..ce).map(|k| rho[a.row_ind[k]] * a.values[k]).sum();
             let (valid, denom) = if leaving_direction > 0 {
@@ -473,9 +487,9 @@ fn dual_iter_blp(
         // standard form では lb=0、artificial の ub=0 のみ FX。
         let target = if leaving_direction > 0 { ext_lb[basis[p]] } else { ext_ub[basis[p]] };
         let step = (x_b[p] - target) / pivot_element;
-        if dbg_iter && iter_count < 5 {
-            eprintln!("[dual_iter] iter {} leaving p={} dir={} x_b[p]={:.3e} target={:.3e} pivot={:.3e} step={:.3e} entering q={}",
-                iter_count, p, leaving_direction, x_b[p], target, pivot_element, step, q);
+        if dbg_iter && iter_count >= 198 && iter_count <= 210 {
+            eprintln!("[dual_iter] iter {} leaving p={} (basis[p]={}) dir={} x_b[p]={:.6e} target={:.6e} pivot={:.6e} step={:.6e} entering q={} c_bar[q]={:.3e}",
+                iter_count, p, basis[p], leaving_direction, x_b[p], target, pivot_element, step, q, c_bar[q]);
         }
         for i in 0..m {
             x_b[i] -= alpha_dense[i] * step;
@@ -506,9 +520,19 @@ fn dual_iter_blp(
         gamma[p] = max_w.min(GAMMA_MAX);
 
         // 周期的リセット: 数値誤差累積で gamma が真値から大きく離れる前にリセット。
-        // 1000 iter ごとに 1.0 へ戻す (reference Devex)。
         if iter_count > 0 && iter_count % 1000 == 0 {
             for g in gamma.iter_mut() { *g = 1.0; }
+        }
+
+        // 周期的 LU refactor + x_B 再計算 (drift 防止)
+        // 100 iter ごとに LU を re-build し x_B/y/c_bar を b から再計算。
+        if iter_count > 0 && iter_count % 100 == 0 {
+            basis_mgr.force_refactor_timed(a, basis, deadline);
+            // x_B = B^{-1} b (非基底 = 0 仮定なので b そのまま)
+            // 注意: もし at_ub の非基底があれば b - sum(A_j * value) が必要だが、
+            // 本実装は全非基底 LB=0 想定。
+            // 実用: refactor のみ。x_B は累積更新で持つ (drift は LU 精度で軽減)。
+            // y/c_bar は次の loop 内で recompute される (毎 iter 全 recompute なので OK)。
         }
 
         // c_bar 再計算 (簡略: 全再計算)
