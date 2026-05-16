@@ -337,16 +337,6 @@ pub fn run_postsolve(
         }
     }
 
-    // QP #14 Large Coefficient Row Scaling の逆変換:
-    // A_scaled = σ A → A^T y_orig = c ⇔ (σ A)^T (y_orig/σ) = c ⇔ y_scaled = y_orig / σ
-    //   → y_orig = σ * y_scaled
-    // 縮約後 simplex の出力 y_scaled を元行空間に展開した後で σ_i を掛ける。
-    for (i, &s) in presolve_result.row_scales.iter().enumerate() {
-        if i < dual_solution.len() {
-            dual_solution[i] *= s;
-        }
-    }
-
     // PostsolveStack を逆順に適用して削除変数・制約を復元
     for step in presolve_result.postsolve_stack.iter().rev() {
         match step {
