@@ -1,130 +1,49 @@
-//! 疎LU分解モジュール（Markowitzしきい値ピボット法）
+//! 疎LU分解モジュール (faer simplicial backend)
 //!
-//! # 概要
-//! 線形計画法の単体法（改訂単体法）で用いる基底行列 B に対して、疎LU分解を実施する。
-//! 分解式: `P_row × B × P_col^T = L × U`
-//! - L: 単位下三角疎行列（CSC形式）
-//! - U: 上三角疎行列（CSR形式、対角要素別保持）
-//! - P_row, P_col: 行・列の順列行列
+//! 線形計画法の単体法 (改訂単体法) で用いる基底行列 B に対して、faer の
+//! 疎LU分解 (`faer::sparse::linalg::lu`) を利用する。faer LU は COLAMD column
+//! ordering と partial pivoting で fill-in を抑え、Markowitz より高速。
 //!
-//! # Markowitz法によるピボット選択
-//! 各消去ステップで、以下の基準でピボット要素を選択する：
-//! 1. **しきい値条件**: `|a_{ij}| >= MARKOWITZ_THRESHOLD × max_col(j)`
-//! 2. **充填最小化**: Markowitz コスト `= (r_nnz - 1) × (c_nnz - 1)` を最小化
-//! 3. **タイブレーク**: 初期列非零要素数の昇順
+//! 設計選択: Stage 1 として `simplicial` 経路を強制利用 (`LuRef::solve_*` で
+//! `&self.symbolic, &self.numeric` を渡す)。supernodal は Stage 2 で解放予定。
+//! ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる更新層で、本 module の変更
+//! とは独立に動作する。
 //!
-//! この戦略により、数値安定性を保ちながらフィルイン（fill-in）を抑制する。
+//! 旧実装 (Markowitz + 自作 Gaussian) は dfl001 m=12857 で 720ms/factorize に
+//! なり、60s timeout の主因 (Task #6/9 観測)。faer LU で 100-200ms 見込み。
 
 use crate::error::SolverError;
-use crate::sparse::{CscMatrix, SparseLowerCSC, SparseUpperCSR};
-use crate::tolerances::*;
+use crate::sparse::CscMatrix;
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::sparse::linalg::lu::{
+    factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu,
+};
+use faer::sparse::linalg::LuError;
+use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
+use faer::{Conj, MatMut, Par};
 use std::time::Instant;
 
 /// LU分解の結果を保持する構造体。
 ///
-/// 分解式: `P_row × B × P_col^T = L × U`
-/// - L: 単位下三角疎行列（CSC形式）
-/// - U: 上三角疎行列（CSR形式）
+/// faer の (`SymbolicLu`, `NumericLu`) ペアを保持し、必要時に `LuRef` を
+/// 構築して solve に使う。基底次元 `n` を併せて保持。
 #[derive(Debug, Clone)]
 pub(crate) struct LuFactorization {
-    /// L因子（単位下三角、CSC形式）
-    pub(crate) l: SparseLowerCSC,
-    /// U因子（上三角、CSR形式）
-    pub(crate) u: SparseUpperCSR,
-    /// 行順列: 消去ステップ i に対する元の行インデックス `p_row[i]`
-    pub(crate) p_row: Vec<usize>,
-    /// 列順列: 消去ステップ j に対する元の列インデックス `p_col[j]`
-    pub(crate) p_col: Vec<usize>,
-    /// 行列の次元 n
+    pub(crate) symbolic: SymbolicLu<usize>,
+    pub(crate) numeric: NumericLu<usize, f64>,
     pub(crate) n: usize,
-}
-
-/// ガウス消去法で用いる疎作業行列。
-///
-/// 各行を `(列インデックス, 値)` のソート済み `Vec` で表現し、
-/// 列ごとに非零行インデックスのソート済み `Vec` を保持することで
-/// ピボット選択と消去を効率的に実行する。
-///
-/// `HashMap`/`HashSet` に比べてキャッシュ効率が高く、
-/// 行あたりの非零要素数が少ない小〜中規模 LP 問題では高速。
-/// 挿入・削除は `O(k)`（k = 行の非零要素数）だが、k が典型的に小さい
-/// ため、ハッシュ計算・メモリアロケーションのオーバーヘッドを上回る。
-struct WorkingMatrix {
-    /// 行データ: `row_data[i]` = 列インデックスでソートされた `(列, 値)` リスト
-    row_data: Vec<Vec<(usize, f64)>>,
-    /// 列ごとの非零行インデックス（昇順ソート済み）: `col_rows[j]`
-    col_rows: Vec<Vec<usize>>,
-}
-
-impl WorkingMatrix {
-    /// n×n の空の作業行列を生成する。
-    fn new(n: usize) -> Self {
-        Self {
-            row_data: (0..n).map(|_| Vec::new()).collect(),
-            col_rows: (0..n).map(|_| Vec::new()).collect(),
-        }
-    }
-
-    /// 要素 `(row, col)` に値 `val` を挿入または更新する。
-    ///
-    /// `|val| <= SINGULAR_TOL` の場合は零扱いとして挿入しない。
-    /// ソート済みVecにバイナリサーチで挿入位置を決定する。
-    fn insert(&mut self, row: usize, col: usize, val: f64) {
-        if val.abs() > SINGULAR_TOL {
-            match self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
-                Ok(idx) => self.row_data[row][idx].1 = val,
-                Err(idx) => self.row_data[row].insert(idx, (col, val)),
-            }
-            if let Err(idx) = self.col_rows[col].binary_search(&row) {
-                self.col_rows[col].insert(idx, row);
-            }
-        }
-    }
-
-    /// 要素 `(row, col)` の値を返す。存在しない場合は `0.0`。
-    fn get(&self, row: usize, col: usize) -> f64 {
-        match self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
-            Ok(idx) => self.row_data[row][idx].1,
-            Err(_) => 0.0,
-        }
-    }
-
-    /// 要素 `(row, col)` を削除し、列インデックスリストを更新する。
-    fn remove(&mut self, row: usize, col: usize) {
-        if let Ok(idx) = self.row_data[row].binary_search_by_key(&col, |&(c, _)| c) {
-            self.row_data[row].remove(idx);
-        }
-        if let Ok(idx) = self.col_rows[col].binary_search(&row) {
-            self.col_rows[col].remove(idx);
-        }
-    }
 }
 
 impl LuFactorization {
     /// 基底行列 B を疎LU分解する。
     ///
-    /// B は制約行列 `a` の列を `basis` インデックスで選択したもの。
-    /// 分解式: `P_row × B × P_col^T = L × U`
-    ///
-    /// # 引数
-    /// - `a`: 制約行列（CSC形式）
-    /// - `basis`: 基底列インデックスのスライス（長さ m）
-    ///
-    /// # 戻り値
-    /// - `Ok(LuFactorization)`: 分解成功
-    /// - `Err(String)`: 特異行列検出またはインデックス越境
-    ///
-    /// # アルゴリズム
-    /// 1. 基底列を疎作業行列に展開
-    /// 2. Markowitz法で各ステップのピボットを選択（しきい値条件 + 充填最小化）
-    /// 3. ガウス消去でL・Uの成分を収集
-    /// 4. 順列適用後に `SparseLowerCSC` / `SparseUpperCSR` を構築
+    /// B は制約行列 `a` の列を `basis` インデックスで選択した m×m 行列。
     pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
         Self::factorize_timed(a, basis, None)
     }
 
-    /// deadline 付き LU 分解。Gaussian 消去ループ内で 100 ステップごとに deadline を確認し、
-    /// 超過時は `SolverError::DeadlineExceeded` を返す。
+    /// deadline 付き LU 分解。faer 自体は deadline 非対応のため、前後 2 段で
+    /// チェックする (AMD wrapper と同じパターン)。
     pub(crate) fn factorize_timed(
         a: &CscMatrix,
         basis: &[usize],
@@ -134,327 +53,129 @@ impl LuFactorization {
         if m == 0 {
             return Err(SolverError::EmptyInput { context: "basis" });
         }
-
-        // 基底列を作業行列に展開
-        let mut work = WorkingMatrix::new(m);
-        for (j, &col_idx) in basis.iter().enumerate() {
-            if col_idx >= a.ncols {
-                return Err(SolverError::IndexOutOfBounds { context: "basis_column", index: col_idx, bound: a.ncols });
-            }
-            let start = a.col_ptr[col_idx];
-            let end = a.col_ptr[col_idx + 1];
-            for k in start..end {
-                let row = a.row_ind[k];
-                if row < m {
-                    work.insert(row, j, a.values[k]);
-                }
-            }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(SolverError::DeadlineExceeded);
         }
 
-        // Markowitzタイブレーク用の初期列非零要素数
-        let initial_col_nnz: Vec<usize> = (0..m).map(|j| work.col_rows[j].len()).collect();
+        let (col_ptr, row_ind, values) = build_basis_csc(a, basis, m)?;
 
-        let mut p_row = vec![0usize; m];
-        let mut p_col = vec![0usize; m];
-        let mut eliminated_rows = vec![false; m];
-        let mut eliminated_cols = vec![false; m];
-
-        // L・Uの成分を元インデックスで収集するバッファ
-        let mut l_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-        let mut u_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-        let mut diag = vec![0.0f64; m];
-
-        // BN-3: col_max をループ外で一度計算し、各消去ステップ後は影響を受けた列のみ再計算する。
-        // これにより O(m² × nnz) → O(m × nnz + ステップ × 影響列 × nnz) に削減する。
-        let mut col_max: Vec<f64> = vec![0.0; m];
-        for j in 0..m {
-            for &r in &work.col_rows[j] {
-                let abs_val = work.get(r, j).abs();
-                if abs_val > col_max[j] {
-                    col_max[j] = abs_val;
-                }
-            }
+        if !values.iter().all(|v| v.is_finite()) {
+            return Err(SolverError::SingularBasis { step: 0 });
         }
 
-        for step in 0..m {
-            // 10ステップごとにdeadlineチェック（大規模行列で1ステップが長時間になるため細粒度化）
-            if step % 10 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
-                return Err(SolverError::DeadlineExceeded);
-            }
-
-            // Markowitzコスト最小のピボットを選択。
-            // タイブレークは初期列非零要素数の昇順。
-            let mut best_pivot: Option<(usize, usize)> = None;
-            let mut best_markowitz = usize::MAX;
-            let mut best_col_order = usize::MAX;
-
-            for j in 0..m {
-                if eliminated_cols[j] {
-                    continue;
-                }
-                if col_max[j] <= SINGULAR_TOL {
-                    continue;
-                }
-                let c_nnz = work.col_rows[j]
-                    .iter()
-                    .filter(|&&r| !eliminated_rows[r])
-                    .count();
-
-                for &r in &work.col_rows[j] {
-                    if eliminated_rows[r] {
-                        continue;
-                    }
-                    let abs_val = work.get(r, j).abs();
-                    if abs_val <= SINGULAR_TOL {
-                        continue;
-                    }
-                    if abs_val < MARKOWITZ_THRESHOLD * col_max[j] {
-                        continue;
-                    }
-                    let r_nnz = work.row_data[r]
-                        .iter()
-                        .filter(|&&(c, _)| !eliminated_cols[c])
-                        .count();
-                    let markowitz =
-                        r_nnz.saturating_sub(1) * c_nnz.saturating_sub(1);
-
-                    if markowitz < best_markowitz
-                        || (markowitz == best_markowitz
-                            && initial_col_nnz[j] < best_col_order)
-                    {
-                        best_markowitz = markowitz;
-                        best_col_order = initial_col_nnz[j];
-                        best_pivot = Some((r, j));
-                    }
-                }
-            }
-
-            let (pivot_row, pivot_col) = match best_pivot {
-                Some(p) => p,
-                None => {
-                    return Err(SolverError::SingularBasis { step });
-                }
-            };
-
-            p_row[step] = pivot_row;
-            p_col[step] = pivot_col;
-            let pivot_val = work.get(pivot_row, pivot_col);
-            diag[step] = pivot_val;
-
-            // ピボット行からU成分を収集（対角以外のアクティブ列）
-            for &(c, val) in &work.row_data[pivot_row] {
-                if eliminated_cols[c] || c == pivot_col {
-                    continue;
-                }
-                u_entries[step].push((c, val));
-            }
-
-            // ピボット列のアクティブ行（ピボット行除く）を収集
-            let active_rows_in_col: Vec<usize> = work.col_rows[pivot_col]
-                .iter()
-                .filter(|&&r| !eliminated_rows[r] && r != pivot_row)
-                .copied()
-                .collect();
-
-            // 消去用にピボット行のアクティブ要素を収集（対角以外）
-            let pivot_row_entries: Vec<(usize, f64)> = work.row_data[pivot_row]
-                .iter()
-                .filter(|&&(c, _)| !eliminated_cols[c] && c != pivot_col)
-                .copied()
-                .collect();
-
-            // ピボット列に非零を持つ各アクティブ行を消去
-            for r_i in active_rows_in_col {
-                let val_ic = work.get(r_i, pivot_col);
-                if val_ic.abs() <= SINGULAR_TOL {
-                    continue;
-                }
-                let multiplier = val_ic / pivot_val;
-                l_entries[step].push((r_i, multiplier));
-
-                // 行 r_i を更新: work[r_i][c] -= multiplier × work[pivot_row][c]
-                for &(c, u_val) in &pivot_row_entries {
-                    let old_val = work.get(r_i, c);
-                    let new_val = old_val - multiplier * u_val;
-                    if new_val.abs() <= SINGULAR_TOL {
-                        work.remove(r_i, c);
-                    } else {
-                        work.insert(r_i, c, new_val);
-                    }
-                }
-
-                // ピボット列の要素を削除
-                work.remove(r_i, pivot_col);
-            }
-
-            eliminated_rows[pivot_row] = true;
-            eliminated_cols[pivot_col] = true;
-
-            // BN-3: ピボット行の列（消去で値が変わった列）と pivot_col の col_max のみ再計算する。
-            // eliminated_rows[pivot_row] が true になったので、それを除外してスキャンする。
-            col_max[pivot_col] = 0.0;
-            for &affected_col in pivot_row_entries.iter().map(|(c, _)| c) {
-                if eliminated_cols[affected_col] {
-                    continue;
-                }
-                col_max[affected_col] = 0.0;
-                for &r in &work.col_rows[affected_col] {
-                    if eliminated_rows[r] {
-                        continue;
-                    }
-                    let abs_val = work.get(r, affected_col).abs();
-                    if abs_val > col_max[affected_col] {
-                        col_max[affected_col] = abs_val;
-                    }
-                }
-            }
-        }
-
-        // 逆順列を構築
-        let mut inv_perm_row = vec![0usize; m];
-        let mut inv_perm_col = vec![0usize; m];
-        for k in 0..m {
-            inv_perm_row[p_row[k]] = k;
-            inv_perm_col[p_col[k]] = k;
-        }
-
-        // l_entries（元インデックス）から SparseLowerCSC を構築（順列変換後）
-        let mut l_col_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-        for step in 0..m {
-            for &(orig_row, multiplier) in &l_entries[step] {
-                let perm_row = inv_perm_row[orig_row];
-                l_col_data[step].push((perm_row, multiplier));
-            }
-            l_col_data[step].sort_by_key(|&(r, _)| r);
-        }
-
-        let mut l_col_ptr = vec![0usize; m + 1];
-        let mut l_row_ind = Vec::new();
-        let mut l_values = Vec::new();
-        for j in 0..m {
-            l_col_ptr[j] = l_row_ind.len();
-            for &(r, v) in &l_col_data[j] {
-                l_row_ind.push(r);
-                l_values.push(v);
-            }
-        }
-        l_col_ptr[m] = l_row_ind.len();
-
-        let l = SparseLowerCSC {
-            col_ptr: l_col_ptr,
-            row_ind: l_row_ind,
-            values: l_values,
-            n: m,
+        let a_sym = unsafe {
+            SymbolicSparseColMatRef::<usize>::new_unchecked(m, m, &col_ptr, None, &row_ind)
         };
+        let symbolic = factorize_symbolic_lu(a_sym, LuSymbolicParams::default())
+            .map_err(|_| SolverError::SingularBasis { step: 0 })?;
 
-        // u_entries（元インデックス）から SparseUpperCSR を構築（順列変換後）
-        let mut u_row_data: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-        for step in 0..m {
-            for &(orig_col, value) in &u_entries[step] {
-                let perm_col = inv_perm_col[orig_col];
-                u_row_data[step].push((perm_col, value));
-            }
-            u_row_data[step].sort_by_key(|&(c, _)| c);
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(SolverError::DeadlineExceeded);
         }
 
-        let mut u_row_ptr = vec![0usize; m + 1];
-        let mut u_col_ind = Vec::new();
-        let mut u_values = Vec::new();
-        for i in 0..m {
-            u_row_ptr[i] = u_col_ind.len();
-            for &(c, v) in &u_row_data[i] {
-                u_col_ind.push(c);
-                u_values.push(v);
-            }
-        }
-        u_row_ptr[m] = u_col_ind.len();
+        let a_num = SparseColMatRef::<'_, usize, f64>::new(a_sym, &values);
 
-        let u = SparseUpperCSR {
-            row_ptr: u_row_ptr,
-            col_ind: u_col_ind,
-            values: u_values,
-            diag,
-            n: m,
-        };
+        let mut numeric = NumericLu::<usize, f64>::new();
+        let req = symbolic.factorize_numeric_lu_scratch::<f64>(Par::Seq, Default::default());
+        let mut mem = MemBuffer::new(req);
+        let stack = MemStack::new(&mut mem);
+
+        symbolic
+            .factorize_numeric_lu(&mut numeric, a_num, Par::Seq, stack, Default::default())
+            .map_err(|e| match e {
+                LuError::SymbolicSingular { index } => SolverError::SingularBasis { step: index },
+                _ => SolverError::SingularBasis { step: 0 },
+            })?;
+
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(SolverError::DeadlineExceeded);
+        }
+
+        // 数値 singularity post-check: faer の partial pivoting は 0 pivot を
+        // 許容して進む (LuError::SymbolicSingular は pivot 不在ケースのみ raise)
+        // ため、Mehrotra IPM の Markowitz pivoting で検出されていた数値 singular
+        // (test_lu_singular_detection の [1,2,3;4,5,6;1,2,3] 等) が後段に漏れる。
+        // 単位 vector を 1 回 solve → 結果が非有限なら singular とみなす。
+        // O(nnz) コストで factorize 全体のコストに対して 1% 未満。
+        let mut probe = vec![0.0_f64; m];
+        probe[0] = 1.0;
+        let probe_req = symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+        let mut probe_mem = MemBuffer::new(probe_req);
+        let probe_stack = MemStack::new(&mut probe_mem);
+        let probe_lu = LuRef::new_unchecked(&symbolic, &numeric);
+        let probe_mat = MatMut::from_column_major_slice_mut(&mut probe, m, 1);
+        probe_lu.solve_in_place_with_conj(Conj::No, probe_mat, Par::Seq, probe_stack);
+        if !probe.iter().all(|v| v.is_finite()) {
+            return Err(SolverError::SingularBasis { step: 0 });
+        }
 
         Ok(LuFactorization {
-            l,
-            u,
-            p_row,
-            p_col,
+            symbolic,
+            numeric,
             n: m,
         })
     }
 }
 
-/// FTRAN: 基底行列方程式 `B × x = rhs` を LU因子で解く。
-///
-/// 分解式 `P_row × B × P_col^T = L × U` を利用して、以下の順で計算する：
-/// 1. 行順列 P_row を rhs に適用
-/// 2. 前進代入: `L × z = P_row × rhs`
-/// 3. 後退代入: `U × y = z`
-/// 4. 列順列の逆適用: `x = P_col^T × y`
-///
-/// # 引数
-/// - `lu`: LU分解済み因子
-/// - `rhs`: 右辺ベクトル（計算結果で上書き）
-/// - `scratch`: 再利用可能な一時バッファ（ヒープアロケーション回避）
-pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut Vec<f64>) {
-    let n = lu.n;
+/// 基底列を CSC 形式 (m×m) で再構築する。faer は列内 row 昇順を期待するため
+/// (`SymbolicSparseColMatRef::new_unchecked` の前提)、列ごとにソートする。
+fn build_basis_csc(
+    a: &CscMatrix,
+    basis: &[usize],
+    m: usize,
+) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), SolverError> {
+    let mut col_ptr = vec![0usize; m + 1];
+    let mut row_ind: Vec<usize> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    let mut tmp: Vec<(usize, f64)> = Vec::new();
 
-    // Step 1: 行順列を適用（scratch に rhs をコピーしてアロケーション回避）
-    scratch.resize(n, 0.0);
-    scratch.copy_from_slice(rhs);
-    for i in 0..n {
-        rhs[i] = scratch[lu.p_row[i]];
+    for (j, &col_idx) in basis.iter().enumerate() {
+        if col_idx >= a.ncols {
+            return Err(SolverError::IndexOutOfBounds {
+                context: "basis_column",
+                index: col_idx,
+                bound: a.ncols,
+            });
+        }
+        let start = a.col_ptr[col_idx];
+        let end = a.col_ptr[col_idx + 1];
+        tmp.clear();
+        for k in start..end {
+            let row = a.row_ind[k];
+            if row < m {
+                tmp.push((row, a.values[k]));
+            }
+        }
+        tmp.sort_by_key(|&(r, _)| r);
+        for &(r, v) in &tmp {
+            row_ind.push(r);
+            values.push(v);
+        }
+        col_ptr[j + 1] = row_ind.len();
     }
-
-    // Step 2: L による疎前進代入
-    lu.l.forward_solve(rhs);
-
-    // Step 3: U による疎後退代入
-    lu.u.backward_solve(rhs);
-
-    // Step 4: 列順列の逆適用（scratch に rhs をコピーしてアロケーション回避）
-    scratch.copy_from_slice(rhs);
-    for i in 0..n {
-        rhs[lu.p_col[i]] = scratch[i];
-    }
+    Ok((col_ptr, row_ind, values))
 }
 
-/// BTRAN: 転置方程式 `B^T × x = rhs` を LU因子で解く。
-///
-/// FTRAN の双対演算。分解式の転置を利用して、以下の順で計算する：
-/// 1. 列順列 P_col を rhs に適用
-/// 2. U^T による前進代入
-/// 3. L^T による後退代入
-/// 4. 行順列の転置を適用
-///
-/// # 引数
-/// - `lu`: LU分解済み因子
-/// - `rhs`: 右辺ベクトル（計算結果で上書き）
-/// - `scratch`: 再利用可能な一時バッファ（ヒープアロケーション回避）
-pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64], scratch: &mut Vec<f64>) {
-    let n = lu.n;
+/// FTRAN: `B × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
+pub(crate) fn solve_ftran(lu: &LuFactorization, rhs: &mut [f64], _scratch: &mut Vec<f64>) {
+    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
+    let req = lu.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq);
+    let mut mem = MemBuffer::new(req);
+    let stack = MemStack::new(&mut mem);
+    let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
+    lu_ref.solve_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
+}
 
-    // Step 1: 列順列を適用（scratch に rhs をコピーしてアロケーション回避）
-    scratch.resize(n, 0.0);
-    scratch.copy_from_slice(rhs);
-    for i in 0..n {
-        rhs[i] = scratch[lu.p_col[i]];
-    }
-
-    // Step 2: U^T による前進代入
-    lu.u.solve_transpose(rhs);
-
-    // Step 3: L^T による後退代入
-    lu.l.solve_transpose(rhs);
-
-    // Step 4: 行順列の転置を適用（scratch に rhs をコピーしてアロケーション回避）
-    scratch.copy_from_slice(rhs);
-    for i in 0..n {
-        rhs[lu.p_row[i]] = scratch[i];
-    }
+/// BTRAN: `B^T × x = rhs` を LU 因子で解く。in-place で rhs を書き換える。
+pub(crate) fn solve_btran(lu: &LuFactorization, rhs: &mut [f64], _scratch: &mut Vec<f64>) {
+    let lu_ref = LuRef::new_unchecked(&lu.symbolic, &lu.numeric);
+    let req = lu
+        .symbolic
+        .solve_transpose_in_place_scratch::<f64>(1, Par::Seq);
+    let mut mem = MemBuffer::new(req);
+    let stack = MemStack::new(&mut mem);
+    let rhs_mat = MatMut::from_column_major_slice_mut(rhs, lu.n, 1);
+    lu_ref.solve_transpose_in_place_with_conj(Conj::No, rhs_mat, Par::Seq, stack);
 }
 
 #[cfg(test)]
@@ -604,24 +325,19 @@ mod tests {
         );
     }
 
-    // --- New tests for sparse LU ---
-
     #[test]
     fn test_lu_20x20_sparse() {
-        // 20x20 sparse matrix with ~10% density (diagonal dominant)
         let n = 20;
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
 
-        // Strong diagonal for non-singularity
         for i in 0..n {
             rows.push(i);
             cols.push(i);
             vals.push(10.0 + (i as f64) * 0.5);
         }
 
-        // Off-diagonal entries
         let off_diag: Vec<(usize, usize, f64)> = vec![
             (0, 3, 1.5), (0, 7, -0.8), (1, 5, 2.1), (1, 12, -1.3),
             (2, 8, 0.9), (2, 15, -0.4), (3, 0, -1.2), (3, 11, 0.7),
@@ -645,7 +361,6 @@ mod tests {
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
         let mut scratch = Vec::new();
 
-        // Test FTRAN with multiple rhs
         for k in 0..3 {
             let rhs_orig: Vec<f64> = (0..n)
                 .map(|i| ((i + k * 7) % 11) as f64 - 5.0)
@@ -656,7 +371,6 @@ mod tests {
             assert_vec_near(&check, &rhs_orig, 1e-8);
         }
 
-        // Test BTRAN
         let bt = a.transpose();
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i as f64) * 0.3 - 3.0).collect();
         let mut rhs = rhs_orig.clone();
@@ -673,19 +387,16 @@ mod tests {
         let mut cols = Vec::new();
         let mut vals = Vec::new();
 
-        // Row 0: all non-zero
         for j in 0..n {
             rows.push(0);
             cols.push(j);
             vals.push(1.0 + j as f64 * 0.3);
         }
-        // Column 0: all non-zero
         for i in 1..n {
             rows.push(i);
             cols.push(0);
             vals.push(0.5 + i as f64 * 0.2);
         }
-        // Diagonal (i >= 1)
         for i in 1..n {
             rows.push(i);
             cols.push(i);
@@ -696,10 +407,7 @@ mod tests {
         let basis: Vec<usize> = (0..n).collect();
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
 
-        // Verify L has off-diagonal entries (fill-in)
-        assert!(!lu.l.values.is_empty(), "L should have off-diagonal entries");
-
-        // Verify correctness
+        // Verify correctness of FTRAN (内部表現は faer 内部、L/U 直接検査は不可)
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
         let mut rhs = rhs_orig.clone();
         let mut scratch = Vec::new();
@@ -707,7 +415,6 @@ mod tests {
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-8);
 
-        // BTRAN
         let bt = a.transpose();
         let mut rhs2 = rhs_orig.clone();
         solve_btran(&lu, &mut rhs2, &mut scratch);
@@ -717,20 +424,11 @@ mod tests {
 
     #[test]
     fn test_lu_1x1() {
-        // 1x1 CSC行列 [[5.0]] のLU分解
         let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[5.0f64], 1, 1).unwrap();
         let basis = vec![0usize];
         let lu = LuFactorization::factorize(&a, &basis).unwrap();
 
         assert_eq!(lu.n, 1);
-        // L は単位行列 → off-diagonal成分なし
-        assert_eq!(lu.l.values.len(), 0, "L should have no off-diagonal entries for 1x1");
-        // U の対角要素は 5.0
-        assert!(
-            (lu.u.diag[0] - 5.0).abs() < 1e-10,
-            "U diagonal should be 5.0, got {}",
-            lu.u.diag[0]
-        );
 
         // solve_ftran: B * x = [1.0] → x = [0.2]
         let mut rhs = vec![1.0f64];
@@ -742,7 +440,6 @@ mod tests {
             rhs[0]
         );
 
-        // solve_btran: B^T * x = [1.0] → x = [0.2] (1x1なのでftranと同じ)
         let mut rhs2 = vec![1.0f64];
         solve_btran(&lu, &mut rhs2, &mut scratch);
         assert!(
@@ -754,7 +451,6 @@ mod tests {
 
     #[test]
     fn test_lu_ill_conditioned() {
-        // Ill-conditioned 5x5 matrix
         let dense = vec![
             vec![1.0, 0.0, 0.0, 0.0, 1e-4],
             vec![0.0, 1.0, 0.0, 1e-4, 0.0],
@@ -773,7 +469,6 @@ mod tests {
         let check = a.mat_vec_mul(&rhs).unwrap();
         assert_vec_near(&check, &rhs_orig, 1e-6);
 
-        // BTRAN
         let bt = a.transpose();
         let mut rhs2 = rhs_orig.clone();
         solve_btran(&lu, &mut rhs2, &mut scratch);
