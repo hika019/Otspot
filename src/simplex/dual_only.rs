@@ -1,550 +1,422 @@
 //! Pure Dual Simplex (single source of truth for LP).
 //!
-//! 設計方針:
-//! - 純粋 dual simplex のみ。Phase I / Phase II は cost perturbation で統一。
-//! - bounded variables (BLP) を素直に扱う (bound flipping)。
-//! - Eq 制約は人工変数 (Big-M cost) で吸収。
-//! - 既存 primal/dual/dual_advanced のパッチ蓄積を捨て、シンプルさを優先。
+//! 設計:
+//! - `build_standard_form` で LP を「min c·x s.t. A·x = b, x ≥ 0, b ≥ 0」へ整形
+//! - 人工変数 (Eq/Ge with b>0 など slack 不能行) を **明示列で追加**
+//! - 人工列に Big-M cost、cost 摂動で初期 dual 実行可能性を確保
+//! - `dual_simplex_core` (既存の DSE/Bland 実装) を Phase I で 1 回呼び出し
+//! - 摂動を解いて Phase II として再呼び出し
+//! - 人工変数残量 > tol で Infeasible 判定
 //!
-//! 入力: `LpProblem` (any Eq/Ge/Le mix, any bounds)
-//! 出力: `SolverResult` (Optimal/Infeasible/Unbounded/Timeout/NumericalError)
+//! Primal Simplex への一切のフォールバックなし。
 
-use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::sparse::{CscMatrix, SparseVec};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
+use crate::tolerances::PIVOT_TOL;
+use super::{StandardForm, SimplexOutcome, build_standard_form, extract_solution};
+use super::dual::dual_simplex_core;
 
-/// Big-M cost on artificial variables.
-/// 1e7 で Netlib LP の最大 |c| (≈ 1e4-1e5) を上回り、人工変数を必ず非基底に追い出す。
-/// 1e15 級は f64 round-off で対角 ill-conditioning を生むため避ける。
-const BIG_M: f64 = 1e7;
+/// 人工列に与える Big-M cost。
+/// 1e6 で Netlib の |c| (≈ 1e4-1e5) を支配しつつ、f64 round-off (~1e-15 相対) で
+/// 余裕。1e10 級は単純な加減算で精度が崩れるため避ける。
+const BIG_M: f64 = 1e6;
 
-/// 反復回数上限 (実用的 guard。本来は timeout で制御)
-const MAX_ITERATIONS: usize = 10_000_000;
+/// 人工変数残量の判定閾値。これを超えると infeasibility と判定。
+const ARTIFICIAL_FEAS_TOL: f64 = 1e-6;
 
-/// Dual simplex で LP を解く。
+/// LP を pure dual simplex で解く (Phase I / Phase II 統合)。
 pub fn solve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
-    let deadline = options.deadline.or_else(|| {
-        options
-            .timeout_secs
-            .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s))
-    });
+    let sf = build_standard_form(problem);
 
-    // Step 1: 拡張系を構築 (slack + artificial を明示列で持つ)
-    let ext = match build_extended(problem) {
-        Ok(e) => e,
-        Err(s) => return s,
-    };
+    // 拡張: standard form の上に「人工変数の明示列」を被せる
+    let ext = augment_with_artificials(&sf);
 
-    // Step 2: 初期 LU 因子分解
-    let mut basis = ext.initial_basis.clone();
-    let mut basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
-        Ok(bm) => bm,
-        Err(_) => return SolverResult::default_with(SolveStatus::NumericalError),
-    };
+    // Phase I: Big-M 込みコストで dual simplex
+    let phase1_result = run_dual_with_perturbation(&ext, options, /*phase=*/1);
 
-    // Step 3: x_B = B^{-1} (b - A_N x_N) を計算
-    //   非基底変数は LB/UB のどちらかに固定。
-    //   ax_n[i] = sum_{j non-basic} A[i,j] * value(j)
-    //   x_b = B^{-1} (b - ax_n)
-    let mut x_b = compute_xb(&ext, &basis, &mut basis_mgr);
-
-    // Step 4: 双対変数 y = (B^{-T}) c_B
-    let mut y = compute_dual(&ext, &basis, &mut basis_mgr);
-
-    // Step 5: 全非基底変数の reduced cost を計算 + dual feasibility 摂動
-    //   c_bar_j = c_j - y^T A_j
-    //   at LB の var: c_bar >= 0 必要
-    //   at UB の var: c_bar <= 0 必要
-    let (c_perturbed, perturb_count) = perturb_for_dual_feasibility(&ext, &y);
-
-    let _ = perturb_count; // TODO: Phase II で undo
-
-    // Step 6: dual simplex iteration loop
-    let mut iter = 0usize;
-    let cancel_flag = options.cancel_flag.clone();
-    loop {
-        if iter >= MAX_ITERATIONS {
-            return finalize(&ext, &basis, &x_b, &y, SolveStatus::Timeout, problem);
-        }
-        if let Some(dl) = deadline {
-            if std::time::Instant::now() >= dl {
-                return finalize(&ext, &basis, &x_b, &y, SolveStatus::Timeout, problem);
+    match phase1_result.outcome {
+        SimplexOutcome::Optimal(obj, _y) => {
+            // 人工変数残量チェック
+            let art_max = artificial_max(&ext, &phase1_result.basis, &phase1_result.x_b);
+            if art_max > ARTIFICIAL_FEAS_TOL {
+                return result_infeasible(&sf);
             }
-        }
-        if let Some(ref f) = cancel_flag {
-            if f.load(std::sync::atomic::Ordering::Relaxed) {
-                return finalize(&ext, &basis, &x_b, &y, SolveStatus::Timeout, problem);
+            // Phase II: 摂動なしで再実行 (Big-M も外す → 元の c のみ)
+            let phase2_result = run_dual_pure(&ext, options, phase1_result.basis, phase1_result.x_b);
+            match phase2_result.outcome {
+                SimplexOutcome::Optimal(_obj2, y2) => {
+                    result_optimal(&sf, problem, &phase2_result.basis, &phase2_result.x_b, &y2, &ext)
+                }
+                SimplexOutcome::Unbounded => result_infeasible(&sf), // dual unbounded = primal infeasible
+                SimplexOutcome::Timeout(_) => {
+                    result_timeout(&sf, problem, &phase2_result.basis, &phase2_result.x_b, &ext)
+                }
+                SimplexOutcome::SingularBasis => SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
             }
+            .also(|_| { let _ = obj; }) // silence unused
         }
-
-        // 6a. Pick leaving row (most infeasible)
-        let leaving = pick_leaving(&ext, &x_b, &basis);
-        let leaving_row = match leaving {
-            Some(lr) => lr,
-            None => {
-                // 全 x_B が境界内 → primal 実行可能 = 最適
-                return finalize(&ext, &basis, &x_b, &y, SolveStatus::Optimal, problem);
-            }
-        };
-
-        // 6b. rho = e_leaving^T B^{-1} (BTRAN)
-        let mut rho_dense = vec![0.0_f64; ext.m];
-        rho_dense[leaving_row] = 1.0;
-        basis_mgr.btran_dense(&mut rho_dense);
-
-        // 6c. 非基底列ごとに alpha_j = rho^T A_j 計算 + ratio test
-        let direction_up = x_b[leaving_row] < ext.lb_basic(leaving_row, &basis);
-        let entering = pick_entering(&ext, &basis, &c_perturbed, &rho_dense, direction_up);
-
-        let entering_col = match entering {
-            Some(j) => j,
-            None => {
-                // ratio test で候補なし → dual unbounded = primal infeasible
-                return finalize(&ext, &basis, &x_b, &y, SolveStatus::Infeasible, problem);
-            }
-        };
-
-        // 6d. Pivot: B^{-1} A_entering を計算 (FTRAN)
-        let (rows, vals) = ext.a.get_column(entering_col).expect("valid column");
-        let mut alpha_sv = SparseVec {
-            indices: rows.to_vec(),
-            values: vals.to_vec(),
-            len: ext.m,
-        };
-        basis_mgr.ftran(&mut alpha_sv);
-
-        // alpha_j[leaving_row] が pivot 要素
-        let pivot = alpha_sv.values.iter().zip(alpha_sv.indices.iter())
-            .find(|(_, &i)| i == leaving_row)
-            .map(|(&v, _)| v)
-            .unwrap_or(0.0);
-
-        if pivot.abs() < 1e-12 {
-            // 数値的に degenerate な pivot → refactor して retry
-            basis_mgr.force_refactor_timed(&ext.a, &basis, deadline);
-            x_b = compute_xb(&ext, &basis, &mut basis_mgr);
-            y = compute_dual(&ext, &basis, &mut basis_mgr);
-            iter += 1;
-            continue;
+        SimplexOutcome::Unbounded => result_infeasible(&sf),
+        SimplexOutcome::Timeout(_) => {
+            result_timeout(&sf, problem, &phase1_result.basis, &phase1_result.x_b, &ext)
         }
-
-        // 6e. Update x_b: x_b = x_b - alpha * step + ...
-        //   step = (x_b[leaving] - target_bound) / pivot
-        let target_bound = if direction_up {
-            ext.lb_basic(leaving_row, &basis)
-        } else {
-            ext.ub_basic(leaving_row, &basis)
-        };
-        let step = (x_b[leaving_row] - target_bound) / pivot;
-
-        let mut alpha_dense = vec![0.0_f64; ext.m];
-        alpha_sv.to_dense_into(&mut alpha_dense);
-        for i in 0..ext.m {
-            x_b[i] -= alpha_dense[i] * step;
-        }
-        x_b[leaving_row] = target_bound + step * 0.0; // = target_bound; entering 変数は別途
-        // entering 変数の新値:
-        let entering_new_val = ext.value_at_bound(entering_col, !ext.at_ub[entering_col]) + step;
-        x_b[leaving_row] = entering_new_val;
-
-        // 6f. Update basis
-        let leaving_col = basis[leaving_row];
-        basis[leaving_row] = entering_col;
-        // 旧 leaving_col は非基底へ。bound = target_bound のどちらか。
-        // direction_up なら leaving_col は LB (=lb of leaving_col) に固定された
-        // すなわち leaving 行の制約 var が lb に行く = at_ub=false
-        // (実装簡略: leaving 行の x_b は basis[leaving]=entering 後の値)
-        // TODO: at_ub[leaving_col] を正しく更新
-
-        let _ = leaving_col;
-
-        basis_mgr.update(entering_col, leaving_row, &alpha_sv);
-        basis_mgr.refactor_if_needed_timed(&ext.a, &basis, deadline);
-
-        // dual y update (簡略: 完全 recompute)
-        y = compute_dual(&ext, &basis, &mut basis_mgr);
-
-        iter += 1;
+        SimplexOutcome::SingularBasis => SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
     }
 }
 
 // =====================================================================
-// 拡張系の構築
+// 拡張系 = standard_form + 明示人工列
 // =====================================================================
 
-/// 拡張系 (slack/artificial 込み) 表現。
 struct Extended {
-    /// 制約行列 m × n_ext (CSC)
+    /// 拡張制約行列 (m × n_ext)
     a: CscMatrix,
-    /// RHS m
+    /// 拡張 RHS
     b: Vec<f64>,
-    /// コスト n_ext (artificials に BIG_M)
+    /// 拡張コスト (元 + 0 slack + BIG_M artificial)
     c: Vec<f64>,
-    /// 変数下限 n_ext
-    lb: Vec<f64>,
-    /// 変数上限 n_ext
-    ub: Vec<f64>,
-    /// 初期基底 (各行に対する列 index)
+    /// 初期基底 (m 行 ⇒ 列 index)
     initial_basis: Vec<usize>,
-    /// 各非基底変数の状態 (false=LB, true=UB)
-    at_ub: Vec<bool>,
-    /// 元 LP の変数数 (n_ext から逆引きするため)
-    n_orig: usize,
+    /// 元 LP の standard form 部分の列数 (= n_total)。これより大きい列は artificial
+    n_standard: usize,
+    /// 全列数
+    n_ext: usize,
     /// 行数
     m: usize,
 }
 
-impl Extended {
-    fn n_ext(&self) -> usize { self.lb.len() }
-    /// non-basic var の固定値 (at_ub に応じて LB/UB)
-    fn value_at_bound(&self, j: usize, at_ub_flag: bool) -> f64 {
-        if at_ub_flag { self.ub[j] } else { self.lb[j] }
-    }
-    /// 行 i に対応する basis 変数の LB
-    fn lb_basic(&self, i: usize, basis: &[usize]) -> f64 { self.lb[basis[i]] }
-    fn ub_basic(&self, i: usize, basis: &[usize]) -> f64 { self.ub[basis[i]] }
-}
+fn augment_with_artificials(sf: &StandardForm) -> Extended {
+    let m = sf_m(sf);
+    let n_standard = sf_n_total(sf);
 
-/// LpProblem を拡張系に変換する。
-fn build_extended(problem: &LpProblem) -> Result<Extended, SolverResult> {
-    let n_orig = problem.num_vars;
-    let m = problem.num_constraints;
-
-    // 拡張変数構成:
-    //   [0, n_orig)         : 元変数 (bound はそのまま)
-    //   [n_orig, n_orig+n_slack) : Le/Ge の slack (bound [0, ∞))
-    //   [..., n_ext)        : Eq の artificial (bound [0, ∞), cost BIG_M)
-    let mut slack_for_row: Vec<Option<usize>> = vec![None; m];
-    let mut artificial_for_row: Vec<Option<usize>> = vec![None; m];
-    let mut slack_coef = vec![0.0_f64; m]; // +1 (Le), -1 (Ge), 0 (Eq → no slack)
-
-    let mut n_slack = 0usize;
+    // sf.needs_artificial に基づいて artificial 列を追加
     let mut n_artificial = 0usize;
-    let mut col_offset = n_orig;
-
+    let mut art_col_of_row: Vec<Option<usize>> = vec![None; m];
     for i in 0..m {
-        match problem.constraint_types[i] {
-            ConstraintType::Le => {
-                slack_for_row[i] = Some(col_offset);
-                slack_coef[i] = 1.0;
-                col_offset += 1;
-                n_slack += 1;
-            }
-            ConstraintType::Ge => {
-                slack_for_row[i] = Some(col_offset);
-                slack_coef[i] = -1.0;
-                col_offset += 1;
-                n_slack += 1;
-            }
-            ConstraintType::Eq => {
-                // Eq は slack を持たず artificial で覆う
-            }
-        }
-    }
-
-    // artificial を後ろに置く
-    for i in 0..m {
-        if matches!(problem.constraint_types[i], ConstraintType::Eq) {
-            artificial_for_row[i] = Some(col_offset);
-            col_offset += 1;
+        if sf_needs_artificial(sf, i) {
+            art_col_of_row[i] = Some(n_standard + n_artificial);
             n_artificial += 1;
         }
     }
+    let n_ext = n_standard + n_artificial;
 
-    let n_ext = n_orig + n_slack + n_artificial;
-
-    // RHS の符号を整える (b_i < 0 のとき行を反転して b >= 0 にする)
-    let mut b = problem.b.clone();
-    let mut row_flip = vec![false; m];
-    for i in 0..m {
-        if b[i] < 0.0 {
-            row_flip[i] = true;
-            b[i] = -b[i];
-        }
-    }
-
-    // 拡張 A を triplet で構築
+    // 既存 sf.a (CSC) を triplet に展開 → artificial 列を append
     let mut trip_rows: Vec<usize> = Vec::new();
     let mut trip_cols: Vec<usize> = Vec::new();
     let mut trip_vals: Vec<f64> = Vec::new();
-    for j in 0..n_orig {
-        if let Ok((rs, vs)) = problem.a.get_column(j) {
-            for (k, &r) in rs.iter().enumerate() {
-                let v = if row_flip[r] { -vs[k] } else { vs[k] };
-                trip_rows.push(r);
-                trip_cols.push(j);
-                trip_vals.push(v);
-            }
+    let a_orig = sf_a(sf);
+    for col in 0..a_orig.ncols {
+        let cs = a_orig.col_ptr[col];
+        let ce = a_orig.col_ptr[col + 1];
+        for k in cs..ce {
+            trip_rows.push(a_orig.row_ind[k]);
+            trip_cols.push(col);
+            trip_vals.push(a_orig.values[k]);
         }
     }
     for i in 0..m {
-        if let Some(s) = slack_for_row[i] {
-            let coef = if row_flip[i] { -slack_coef[i] } else { slack_coef[i] };
+        if let Some(art_col) = art_col_of_row[i] {
             trip_rows.push(i);
-            trip_cols.push(s);
-            trip_vals.push(coef);
-        }
-        if let Some(a) = artificial_for_row[i] {
-            // artificial は常に +1
-            trip_rows.push(i);
-            trip_cols.push(a);
+            trip_cols.push(art_col);
             trip_vals.push(1.0);
         }
     }
     let a_ext = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext)
-        .map_err(|_| SolverResult::default_with(SolveStatus::NumericalError))?;
+        .expect("augment: triplet construction");
 
-    // bounds: 元変数 + slack [0,∞) + artificial [0,∞)
-    let mut lb = vec![0.0_f64; n_ext];
-    let mut ub = vec![f64::INFINITY; n_ext];
-    for j in 0..n_orig {
-        lb[j] = problem.bounds[j].0;
-        ub[j] = problem.bounds[j].1;
-    }
-
-    // cost: 元 c + 0 (slack) + BIG_M (artificial)
+    // コスト: 標準形部分は sf.c、artificial は BIG_M
     let mut c = vec![0.0_f64; n_ext];
-    c[..n_orig].copy_from_slice(&problem.c);
+    let c_sf = sf_c(sf);
+    c[..c_sf.len()].copy_from_slice(c_sf);
     for i in 0..m {
-        if let Some(a) = artificial_for_row[i] {
-            c[a] = BIG_M;
+        if let Some(art_col) = art_col_of_row[i] {
+            c[art_col] = BIG_M;
         }
     }
 
-    // 初期基底: 各行 i について
-    //   Le/Ge: slack 列 (+1 列係数, b_i >= 0 なので x_B = b_i 適切)
-    //     ※ Le で +1 係数 → x_B = b_i ≥ 0 OK
-    //     ※ Ge は -1 係数だが行反転で +1 にしたので x_B = b_i (元の |b_i|) ≥ 0 OK
-    //   Eq: artificial 列 (+1 係数), x_B = b_i ≥ 0
+    // 初期基底:
+    //   needs_artificial の行 → artificial 列
+    //   それ以外 → sf.initial_basis (slack)
     let mut initial_basis = vec![0_usize; m];
+    let sf_basis = sf_initial_basis(sf);
     for i in 0..m {
-        if let Some(s) = slack_for_row[i] {
-            // 行反転していると slack 係数も反転している。係数 +1 ならスラックを基底に。
-            // 反転後の係数は (row_flip ? -slack_coef[i] : slack_coef[i])。
-            // この値が +1 ならそのまま basis にしてよい (B = I 部分行列)。
-            // -1 のままだと B[i,i] = -1 で x_B = -b_i = 負 → bound 違反 → dual simplex で fix。
-            // 簡単のため slack を必ず基底に入れる (LuBasis が対応する)。
-            initial_basis[i] = s;
-        } else if let Some(a) = artificial_for_row[i] {
-            initial_basis[i] = a;
+        initial_basis[i] = if let Some(art_col) = art_col_of_row[i] {
+            art_col
         } else {
-            unreachable!("row {} has neither slack nor artificial", i);
-        }
-    }
-
-    // 初期 at_ub: 全非基底は LB (false)
-    let at_ub = vec![false; n_ext];
-
-    Ok(Extended { a: a_ext, b, c, lb, ub, initial_basis, at_ub, n_orig, m })
-}
-
-// =====================================================================
-// Helper: x_B, y, reduced cost
-// =====================================================================
-
-/// x_B = B^{-1} (b - A_N x_N) を計算
-fn compute_xb(ext: &Extended, basis: &[usize], basis_mgr: &mut LuBasis) -> Vec<f64> {
-    // b - A_N x_N: 非基底変数の固定値が contribution
-    let mut rhs = ext.b.clone();
-    let n_ext = ext.n_ext();
-    let mut is_basic = vec![false; n_ext];
-    for &b in basis { is_basic[b] = true; }
-    for j in 0..n_ext {
-        if is_basic[j] { continue; }
-        let val = ext.value_at_bound(j, ext.at_ub[j]);
-        if val == 0.0 { continue; }
-        if let Ok((rs, vs)) = ext.a.get_column(j) {
-            for (k, &r) in rs.iter().enumerate() {
-                rhs[r] -= vs[k] * val;
-            }
-        }
-    }
-    basis_mgr.ftran_dense(&mut rhs);
-    rhs
-}
-
-/// y = B^{-T} c_B
-fn compute_dual(ext: &Extended, basis: &[usize], basis_mgr: &mut LuBasis) -> Vec<f64> {
-    let mut y = vec![0.0_f64; ext.m];
-    for i in 0..ext.m {
-        y[i] = ext.c[basis[i]];
-    }
-    basis_mgr.btran_dense(&mut y);
-    y
-}
-
-/// dual 実行可能性のための cost 摂動: c_j <- c_j + max(0, -c_bar_j) for at-LB
-/// returns (perturbed c, count of perturbed columns)
-fn perturb_for_dual_feasibility(ext: &Extended, y: &[f64]) -> (Vec<f64>, usize) {
-    let mut c_p = ext.c.clone();
-    let mut count = 0usize;
-    let n_ext = ext.n_ext();
-    for j in 0..n_ext {
-        // c_bar_j = c_j - y^T A_j
-        let aty = if let Ok((rs, vs)) = ext.a.get_column(j) {
-            rs.iter().zip(vs.iter()).map(|(&r, &v)| v * y[r]).sum::<f64>()
-        } else { 0.0 };
-        let c_bar = c_p[j] - aty;
-        if !ext.at_ub[j] {
-            // at LB → c_bar >= 0 必要
-            if c_bar < 0.0 {
-                c_p[j] -= c_bar; // c_bar 0 になるようシフト
-                count += 1;
-            }
-        } else {
-            // at UB → c_bar <= 0 必要
-            if c_bar > 0.0 {
-                c_p[j] -= c_bar;
-                count += 1;
-            }
-        }
-    }
-    (c_p, count)
-}
-
-// =====================================================================
-// Iteration helpers
-// =====================================================================
-
-/// 最大 bound 違反を持つ basic var の行 index を返す
-fn pick_leaving(ext: &Extended, x_b: &[f64], basis: &[usize]) -> Option<usize> {
-    let mut worst_viol = 0.0_f64;
-    let mut worst_row: Option<usize> = None;
-    const FEAS_TOL: f64 = 1e-7;
-    for i in 0..ext.m {
-        let j = basis[i];
-        let lb_j = ext.lb[j];
-        let ub_j = ext.ub[j];
-        let lo_viol = if lb_j.is_finite() { (lb_j - x_b[i]).max(0.0) } else { 0.0 };
-        let hi_viol = if ub_j.is_finite() { (x_b[i] - ub_j).max(0.0) } else { 0.0 };
-        let v = lo_viol.max(hi_viol);
-        if v > worst_viol + FEAS_TOL && v > worst_viol {
-            worst_viol = v;
-            worst_row = Some(i);
-        }
-    }
-    worst_row
-}
-
-/// dual ratio test で entering 列を選ぶ
-fn pick_entering(
-    ext: &Extended,
-    basis: &[usize],
-    c_p: &[f64],
-    rho: &[f64],
-    direction_up: bool,
-) -> Option<usize> {
-    // alpha_j = rho^T A_j
-    // direction_up: leaving 変数を増やしたい (LB 違反) → step > 0 で増加
-    //   → entering 変数の方向と整合する alpha_j の符号を選ぶ
-    //     - at LB の entering: step > 0 で増加 → alpha_j > 0 が必要 (xb[leaving] 減少と整合は要見直し)
-    //     - at UB の entering: step > 0 で減少 → alpha_j < 0
-    //
-    // 簡略実装: |c_bar_j / alpha_j| を最小化、|alpha_j| > tol で候補
-    let n_ext = ext.n_ext();
-    let mut is_basic = vec![false; n_ext];
-    for &b in basis { is_basic[b] = true; }
-
-    let mut best: Option<(usize, f64)> = None;
-    const ALPHA_TOL: f64 = 1e-9;
-    for j in 0..n_ext {
-        if is_basic[j] { continue; }
-        if !ext.lb[j].is_finite() && !ext.ub[j].is_finite() { continue; }
-        let alpha = if let Ok((rs, vs)) = ext.a.get_column(j) {
-            rs.iter().zip(vs.iter()).map(|(&r, &v)| v * rho[r]).sum::<f64>()
-        } else { 0.0 };
-        let signed_alpha = if direction_up { alpha } else { -alpha };
-        // 候補条件: at LB → signed_alpha < 0 で c_bar 増加方向, at UB → > 0
-        let valid = if !ext.at_ub[j] { signed_alpha < -ALPHA_TOL } else { signed_alpha > ALPHA_TOL };
-        if !valid { continue; }
-
-        // reduced cost
-        let aty: f64 = if let Ok((rs, vs)) = ext.a.get_column(j) {
-            // y は呼出側で持ってないので簡略: c_p_j を使う (摂動済みなので c_bar >= 0)
-            rs.iter().zip(vs.iter()).map(|(&r, &v)| v * rho[r]).sum::<f64>()
-        } else { 0.0 };
-        let _ = aty;
-        let c_bar = c_p[j]; // 簡略: 摂動後の c_p を直接 reduced cost と看做す (要見直し)
-        let ratio = (c_bar / signed_alpha.abs()).abs();
-        match best {
-            None => best = Some((j, ratio)),
-            Some((_, bratio)) if ratio < bratio => best = Some((j, ratio)),
-            _ => {}
-        }
-    }
-    best.map(|(j, _)| j)
-}
-
-// =====================================================================
-// 結果マッピング
-// =====================================================================
-
-fn finalize(
-    ext: &Extended,
-    basis: &[usize],
-    x_b: &[f64],
-    _y: &[f64],
-    status: SolveStatus,
-    problem: &LpProblem,
-) -> SolverResult {
-    // 元変数の解を組み立てる
-    let mut solution = vec![0.0_f64; ext.n_orig];
-    let n_ext = ext.n_ext();
-    let mut is_basic = vec![false; n_ext];
-    let mut basic_row = vec![0_usize; n_ext];
-    for (i, &b) in basis.iter().enumerate() {
-        is_basic[b] = true;
-        basic_row[b] = i;
-    }
-    for j in 0..ext.n_orig {
-        solution[j] = if is_basic[j] {
-            x_b[basic_row[j]]
-        } else {
-            ext.value_at_bound(j, ext.at_ub[j])
+            sf_basis[i]
         };
     }
 
-    // 目的関数値
-    let obj: f64 = problem.c.iter().zip(solution.iter()).map(|(&c, &x)| c * x).sum();
+    Extended {
+        a: a_ext,
+        b: sf_b(sf).to_vec(),
+        c,
+        initial_basis,
+        n_standard,
+        n_ext,
+        m,
+    }
+}
 
-    // 人工変数残量 > eps なら infeasible (Big-M で押さえ込めてないケース)
-    let mut art_max = 0.0_f64;
-    for j in ext.n_orig..n_ext {
-        if ext.c[j] >= BIG_M * 0.5 {
-            // artificial 列
-            if is_basic[j] {
-                art_max = art_max.max(x_b[basic_row[j]].abs());
-            }
+// =====================================================================
+// dual simplex 呼び出しラッパ
+// =====================================================================
+
+struct PhaseResult {
+    outcome: SimplexOutcome,
+    basis: Vec<usize>,
+    x_b: Vec<f64>,
+}
+
+/// Phase I: cost に dual-feasibility 摂動を適用して dual simplex
+fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u8) -> PhaseResult {
+    let mut basis = ext.initial_basis.clone();
+    // 初期 x_B = b (basis は identity 構造のため B = I → x_B = b)
+    // (slack 列は +1、artificial 列は +1。row_negated 済みなので b ≥ 0)
+    let mut x_b = ext.b.clone();
+
+    // 初期 y = c_B
+    let y_init: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
+
+    // c_bar_j = c_j - y^T A_j を計算し、c_perturbed で dual 実行可能化
+    let mut c_perturbed = ext.c.clone();
+    let n_ext = ext.n_ext;
+    let mut is_basic = vec![false; n_ext];
+    for &b in &basis { is_basic[b] = true; }
+    for j in 0..n_ext {
+        if is_basic[j] { continue; }
+        // a_j^T y を計算
+        let aty: f64 = {
+            let cs = ext.a.col_ptr[j];
+            let ce = ext.a.col_ptr[j + 1];
+            (cs..ce).map(|k| ext.a.values[k] * y_init[ext.a.row_ind[k]]).sum()
+        };
+        let c_bar = c_perturbed[j] - aty;
+        if c_bar < 0.0 {
+            c_perturbed[j] -= c_bar; // c_bar 0 に
         }
     }
-    let final_status = if matches!(status, SolveStatus::Optimal) && art_max > 1e-6 {
-        SolveStatus::Infeasible
-    } else {
-        status
-    };
 
+    let outcome = dual_simplex_core(
+        &ext.a, &mut x_b, &c_perturbed, &mut basis, ext.m, ext.n_standard, options,
+    );
+    PhaseResult { outcome, basis, x_b }
+}
+
+/// Phase II: 摂動なしの cost で dual simplex を再実行
+fn run_dual_pure(
+    ext: &Extended,
+    options: &SolverOptions,
+    init_basis: Vec<usize>,
+    init_x_b: Vec<f64>,
+) -> PhaseResult {
+    let mut basis = init_basis;
+    let mut x_b = init_x_b;
+
+    // Phase II では Big-M を外し、人工変数の cost を 0 にする
+    let mut c2 = ext.c.clone();
+    for j in ext.n_standard..ext.n_ext {
+        c2[j] = 0.0;
+    }
+
+    let outcome = dual_simplex_core(
+        &ext.a, &mut x_b, &c2, &mut basis, ext.m, ext.n_standard, options,
+    );
+    PhaseResult { outcome, basis, x_b }
+}
+
+// =====================================================================
+// 後処理
+// =====================================================================
+
+fn artificial_max(ext: &Extended, basis: &[usize], x_b: &[f64]) -> f64 {
+    let mut max_v = 0.0_f64;
+    for (i, &b) in basis.iter().enumerate() {
+        if b >= ext.n_standard {
+            max_v = max_v.max(x_b[i].abs());
+        }
+    }
+    max_v
+}
+
+fn result_optimal(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    basis: &[usize],
+    x_b: &[f64],
+    _y: &[f64],
+    ext: &Extended,
+) -> SolverResult {
+    // 標準形 → 元変数空間に戻す
+    // 拡張部分 (artificial) は元空間に影響しないので、最初の n_standard 列のみで extract_solution を呼ぶ
+    // x_b は m 個、basis は m 個。basis[i] が n_standard 以上なら artificial が basis に残っている (≈0)
+    // ⇒ そのまま渡しても extract_solution 側は元変数のみ参照するので問題なし
+    let col_scale = vec![1.0_f64; ext.n_standard]; // Ruiz scaling なし
+    let solution = extract_solution(sf, basis, x_b, &col_scale);
+    let obj: f64 = problem.c.iter().zip(solution.iter()).map(|(&c, &x)| c * x).sum::<f64>()
+        + sf_obj_offset(sf);
     SolverResult {
-        status: final_status,
+        status: SolveStatus::Optimal,
         objective: obj,
         solution,
-        dual_solution: vec![],
-        reduced_costs: vec![],
-        slack: vec![],
-        warm_start_basis: None,
+        ..Default::default()
+    }
+}
+
+fn result_infeasible(_sf: &StandardForm) -> SolverResult {
+    SolverResult { status: SolveStatus::Infeasible, ..Default::default() }
+}
+
+fn result_timeout(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    basis: &[usize],
+    x_b: &[f64],
+    ext: &Extended,
+) -> SolverResult {
+    let col_scale = vec![1.0_f64; ext.n_standard];
+    let solution = extract_solution(sf, basis, x_b, &col_scale);
+    let obj: f64 = problem.c.iter().zip(solution.iter()).map(|(&c, &x)| c * x).sum::<f64>()
+        + sf_obj_offset(sf);
+    let _ = PIVOT_TOL;
+    SolverResult {
+        status: SolveStatus::Timeout,
+        objective: obj,
+        solution,
         ..Default::default()
     }
 }
 
 // =====================================================================
-// SolverResult 拡張
+// StandardForm の private フィールドアクセサ
+// (super:: 経由でしか触れないので関数経由で取得)
 // =====================================================================
 
-trait SolverResultExt {
-    fn default_with(status: SolveStatus) -> Self;
+fn sf_m(sf: &StandardForm) -> usize { sf_field_m(sf) }
+fn sf_n_total(sf: &StandardForm) -> usize { sf_field_n_total(sf) }
+fn sf_a(sf: &StandardForm) -> &CscMatrix { sf_field_a(sf) }
+fn sf_b(sf: &StandardForm) -> &[f64] { sf_field_b(sf) }
+fn sf_c(sf: &StandardForm) -> &[f64] { sf_field_c(sf) }
+fn sf_initial_basis(sf: &StandardForm) -> &[usize] { sf_field_initial_basis(sf) }
+fn sf_needs_artificial(sf: &StandardForm, i: usize) -> bool { sf_field_needs_artificial(sf, i) }
+fn sf_obj_offset(sf: &StandardForm) -> f64 { sf_field_obj_offset(sf) }
+
+// 以下は mod.rs 側で StandardForm に accessor を追加する必要がある。
+// 一時的に extern 風 declaration (super:: 経由)。
+use super::sf_field_m;
+use super::sf_field_n_total;
+use super::sf_field_a;
+use super::sf_field_b;
+use super::sf_field_c;
+use super::sf_field_initial_basis;
+use super::sf_field_needs_artificial;
+use super::sf_field_obj_offset;
+
+// =====================================================================
+// 補助 trait
+// =====================================================================
+
+trait AlsoExt {
+    fn also<F: FnOnce(&Self)>(self, f: F) -> Self where Self: Sized;
 }
-impl SolverResultExt for SolverResult {
-    fn default_with(status: SolveStatus) -> Self {
-        SolverResult { status, ..Default::default() }
+impl<T> AlsoExt for T {
+    fn also<F: FnOnce(&Self)>(self, f: F) -> Self where Self: Sized {
+        f(&self);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
+
+    fn make_lp(c: Vec<f64>, a_triplets: Vec<(usize, usize, f64)>, b: Vec<f64>,
+               cts: Vec<ConstraintType>, bounds: Vec<(f64, f64)>, m: usize, n: usize) -> LpProblem {
+        let rows: Vec<usize> = a_triplets.iter().map(|&(r,_,_)| r).collect();
+        let cols: Vec<usize> = a_triplets.iter().map(|&(_,c,_)| c).collect();
+        let vals: Vec<f64> = a_triplets.iter().map(|&(_,_,v)| v).collect();
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+        LpProblem {
+            c,
+            a,
+            b,
+            num_vars: n,
+            num_constraints: m,
+            constraint_types: cts,
+            bounds,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn dual_only_tiny_le() {
+        // min x1 + 2*x2 s.t. x1+x2 <= 3, x1,x2 >= 0
+        // 解: x1=0, x2=0, obj=0 (最小化なので原点で最小)
+        let lp = make_lp(
+            vec![1.0, 2.0],
+            vec![(0,0,1.0), (0,1,1.0)],
+            vec![3.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY); 2],
+            1, 2,
+        );
+        let opts = SolverOptions::default();
+        let r = solve(&lp, &opts);
+        assert_eq!(r.status, SolveStatus::Optimal, "tiny Le: status");
+        assert!((r.objective - 0.0).abs() < 1e-6, "tiny Le: obj={}", r.objective);
+    }
+
+    #[test]
+    fn dual_only_tiny_ge() {
+        // min x1 + 2*x2 s.t. x1+x2 >= 1, x1,x2 >= 0
+        // 解: x1=1, x2=0, obj=1
+        let lp = make_lp(
+            vec![1.0, 2.0],
+            vec![(0,0,1.0), (0,1,1.0)],
+            vec![1.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY); 2],
+            1, 2,
+        );
+        let opts = SolverOptions::default();
+        let r = solve(&lp, &opts);
+        assert_eq!(r.status, SolveStatus::Optimal, "tiny Ge: status");
+        assert!((r.objective - 1.0).abs() < 1e-6, "tiny Ge: obj={}", r.objective);
+    }
+
+    #[test]
+    fn dual_only_tiny_eq() {
+        // min x1 + 2*x2 s.t. x1+x2 = 2, x1,x2 >= 0
+        // 解: x1=2, x2=0, obj=2
+        let lp = make_lp(
+            vec![1.0, 2.0],
+            vec![(0,0,1.0), (0,1,1.0)],
+            vec![2.0],
+            vec![ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 2],
+            1, 2,
+        );
+        let opts = SolverOptions::default();
+        let r = solve(&lp, &opts);
+        assert_eq!(r.status, SolveStatus::Optimal, "tiny Eq: status");
+        assert!((r.objective - 2.0).abs() < 1e-6, "tiny Eq: obj={}", r.objective);
+    }
+
+    #[test]
+    fn dual_only_infeasible() {
+        // min x1 s.t. x1 = 1, x1 = 2 → infeasible
+        let lp = make_lp(
+            vec![1.0],
+            vec![(0,0,1.0), (1,0,1.0)],
+            vec![1.0, 2.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 1],
+            2, 1,
+        );
+        let opts = SolverOptions::default();
+        let r = solve(&lp, &opts);
+        assert_eq!(r.status, SolveStatus::Infeasible, "infeas detection");
     }
 }
