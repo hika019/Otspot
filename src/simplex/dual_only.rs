@@ -56,6 +56,9 @@ pub fn solve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
         SimplexOutcome::Optimal(obj, _y) => {
             // 人工変数残量チェック
             let art_max = artificial_max(&ext, &phase1_result.basis, &phase1_result.x_b);
+            if dbg {
+                eprintln!("[DUAL_ONLY] art_max={:.3e} threshold={:.3e}", art_max, ARTIFICIAL_FEAS_TOL);
+            }
             if art_max > ARTIFICIAL_FEAS_TOL {
                 return result_infeasible(&sf);
             }
@@ -319,6 +322,11 @@ fn dual_iter_blp(
         c_bar[j] = c[j] - aty;
     }
 
+    // Devex (approximate Dual Steepest Edge) 重み γ_i ≈ ||B^{-T} e_i||^2。
+    // 初期 basis ≒ I のため γ_i = 1 から開始。pivot 毎に Harris-Devex 更新で
+    // 真の DSE に近似的に追随、degenerate cycling を実用速度で回避。
+    let mut gamma = vec![1.0_f64; m];
+
     const FEAS_TOL: f64 = 1e-7;
     // pivot 候補の最小絶対値。これを下回ると eta 蓄積で数値破綻するため除外。
     const PIVOT_NEG_TOL: f64 = 1e-6;
@@ -329,12 +337,13 @@ fn dual_iter_blp(
     let mut iter_count = 0usize;
     for _iter in 0..max_iter {
         iter_count = _iter;
-        if dbg_iter && _iter % 1000 == 0 && _iter > 0 {
+        if dbg_iter && _iter % 200 == 0 && _iter > 0 {
             let xb_min = x_b.iter().cloned().fold(f64::INFINITY, f64::min);
             let xb_max = x_b.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let n_basic_art = basis.iter().filter(|&&b| ext_ub[b] == 0.0 && ext_lb[b] == 0.0).count();
-            eprintln!("[dual_iter] iter {} xb=[{:.3e},{:.3e}] n_art_basic={}",
-                _iter, xb_min, xb_max, n_basic_art);
+            let gmax = gamma.iter().cloned().fold(0.0_f64, f64::max);
+            eprintln!("[dual_iter] iter {} xb=[{:.3e},{:.3e}] n_art_basic={} gmax={:.2e}",
+                _iter, xb_min, xb_max, n_basic_art, gmax);
         }
         if let Some(dl) = deadline {
             if std::time::Instant::now() >= dl {
@@ -346,11 +355,12 @@ fn dual_iter_blp(
             }
         }
 
-        // 1. Leaving row: Bland 規則 (最小 basis index の infeasible 行を選ぶ)
-        // anti-cycling 保証のため Dantzig (most-infeasible) ではなく Bland を採用。
+        // 1. Leaving row: Dual Steepest Edge (Devex 近似)。
+        //    max_i violation_i^2 / γ_i を最大化する i を選ぶ。
+        //    最も「下降幅が大きい」 leaving を選ぶことで degenerate cycling を実用回避。
         let mut leaving_row: Option<usize> = None;
-        let mut leaving_direction = 0i8; // +1: 下違反(x_B<lb)、-1: 上違反(x_B>ub)
-        let mut best_basis_idx = usize::MAX;
+        let mut leaving_direction = 0i8;
+        let mut best_score = 0.0_f64;
         for i in 0..m {
             let j = basis[i];
             let lb_j = ext_lb[j];
@@ -358,8 +368,11 @@ fn dual_iter_blp(
             let lo_viol = if lb_j.is_finite() { (lb_j - x_b[i]).max(0.0) } else { 0.0 };
             let hi_viol = if ub_j.is_finite() { (x_b[i] - ub_j).max(0.0) } else { 0.0 };
             let (viol, dir) = if lo_viol >= hi_viol { (lo_viol, 1) } else { (hi_viol, -1) };
-            if viol > FEAS_TOL && j < best_basis_idx {
-                best_basis_idx = j;
+            if viol <= FEAS_TOL { continue; }
+            let g = gamma[i].max(1e-12);
+            let score = viol * viol / g;
+            if score > best_score {
+                best_score = score;
                 leaving_row = Some(i);
                 leaving_direction = dir;
             }
@@ -367,7 +380,29 @@ fn dual_iter_blp(
         let p = match leaving_row {
             None => {
                 if dbg_iter {
-                    eprintln!("[dual_iter] Optimal after {} iters", iter_count);
+                    let mut max_viol_art = 0.0_f64;
+                    let mut max_xb_art = 0.0_f64;
+                    let mut sample_row = 0_usize;
+                    let mut sample_xb = 0.0_f64;
+                    let mut sample_ub = 0.0_f64;
+                    let mut sample_gamma = 0.0_f64;
+                    for i in 0..m {
+                        if basis[i] >= 138 {
+                            if x_b[i].abs() > sample_xb.abs() {
+                                sample_row = i;
+                                sample_xb = x_b[i];
+                                sample_ub = ext_ub[basis[i]];
+                                sample_gamma = gamma[i];
+                            }
+                            max_xb_art = max_xb_art.max(x_b[i]);
+                            let v = (x_b[i] - ext_ub[basis[i]]).max(0.0);
+                            max_viol_art = max_viol_art.max(v);
+                        }
+                    }
+                    eprintln!("[dual_iter] Optimal {} iters, max_xb_art={:.3e} max_viol={:.3e}",
+                        iter_count, max_xb_art, max_viol_art);
+                    eprintln!("[dual_iter] worst sample: row={} x_b={:.3e} ub={:.3e} gamma={:.3e}",
+                        sample_row, sample_xb, sample_ub, sample_gamma);
                 }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Optimal(obj, y);
@@ -438,6 +473,10 @@ fn dual_iter_blp(
         // standard form では lb=0、artificial の ub=0 のみ FX。
         let target = if leaving_direction > 0 { ext_lb[basis[p]] } else { ext_ub[basis[p]] };
         let step = (x_b[p] - target) / pivot_element;
+        if dbg_iter && iter_count < 5 {
+            eprintln!("[dual_iter] iter {} leaving p={} dir={} x_b[p]={:.3e} target={:.3e} pivot={:.3e} step={:.3e} entering q={}",
+                iter_count, p, leaving_direction, x_b[p], target, pivot_element, step, q);
+        }
         for i in 0..m {
             x_b[i] -= alpha_dense[i] * step;
         }
@@ -448,6 +487,29 @@ fn dual_iter_blp(
         is_basic[q] = true;
         basis[p] = q;
         basis_mgr.update(q, p, &alpha_sv);
+
+        // Devex 重み更新 (Harris 1973) with overflow cap:
+        //   γ_p_new = max(γ_p_old / pivot^2, max_{i!=p} (α_iq/pivot)^2 * γ_p_old)
+        //   γ_i_new = max(γ_i_old, (α_iq/pivot)^2 * γ_p_old)  for i != p
+        // GAMMA_MAX で発散を防ぐ (発散すると score=0 で leaving 候補から外れるバグ)。
+        const GAMMA_MAX: f64 = 1e8;
+        let gp_old = gamma[p].min(GAMMA_MAX);
+        let inv_pivot_sq = 1.0 / (pivot_element * pivot_element);
+        let mut max_w = (gp_old * inv_pivot_sq).min(GAMMA_MAX);
+        for i in 0..m {
+            if i == p { continue; }
+            let r = alpha_dense[i] / pivot_element;
+            let new_w = (r * r * gp_old).max(gamma[i]).min(GAMMA_MAX);
+            gamma[i] = new_w;
+            if new_w > max_w { max_w = new_w; }
+        }
+        gamma[p] = max_w.min(GAMMA_MAX);
+
+        // 周期的リセット: 数値誤差累積で gamma が真値から大きく離れる前にリセット。
+        // 1000 iter ごとに 1.0 へ戻す (reference Devex)。
+        if iter_count > 0 && iter_count % 1000 == 0 {
+            for g in gamma.iter_mut() { *g = 1.0; }
+        }
 
         // c_bar 再計算 (簡略: 全再計算)
         for i in 0..m { y[i] = c[basis[i]]; }
