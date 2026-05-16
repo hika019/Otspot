@@ -266,6 +266,23 @@ fn test_scfxm1_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/scfxm1.QPS");
 }
 
+// QP 調査結果に基づく Tier 1 (Large Coeff Scaling / Implied Bounds Guards) 対象問題。
+// これらは現状で fail or TIMEOUT。実装後 GREEN になるべき問題。
+#[test]
+fn test_etamacro_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/etamacro.QPS");
+}
+
+#[test]
+fn test_bandm_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/bandm.QPS");
+}
+
+#[test]
+fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/beaconfd.QPS");
+}
+
 /// scorpion の y を presolve OFF / ON で比較し、cleanup LP の必要性を観察
 #[test]
 fn diag_scorpion_y_off_vs_on() {

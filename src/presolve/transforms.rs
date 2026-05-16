@@ -644,6 +644,13 @@ fn step5_bounds_tightening(
     st: &mut PresolveState,
     new_fixed: &mut usize,
 ) -> Result<(), PresolveStatus> {
+    // QP transforms から DENSE_ROW_THRESHOLD/IMPLIED_BOUND_SANITY を転用したが
+    // LP では 25fv47/stocfor2 が TIMEOUT 化 (必要な bound tightening を抜くことで
+    // simplex 収束悪化)。QP IPM と LP simplex で「presolve の効き」が異なる証拠。
+    // 動的化 (n 比率や bound magnitude 連動) で再挑戦予定 (TODO)。
+    let accept_implied_ub = |_implied: f64, _old_ub: f64| -> bool { true };
+    let accept_implied_lb = |_implied: f64, _old_lb: f64| -> bool { true };
+
     let m = st.b.len();
     for i in 0..m {
         if st.removed_rows[i] {
@@ -739,7 +746,7 @@ fn step5_bounds_tightening(
                         if implied_ub < old_lb - ZERO_TOL {
                             return Err(PresolveStatus::Infeasible);
                         }
-                        if implied_ub < new_ub - ZERO_TOL {
+                        if implied_ub < new_ub - ZERO_TOL && accept_implied_ub(implied_ub, old_ub) {
                             new_ub = implied_ub;
                         }
                     } else if a_ij < 0.0 && rest_lb_fin {
@@ -747,7 +754,7 @@ fn step5_bounds_tightening(
                         if implied_lb > old_ub + ZERO_TOL {
                             return Err(PresolveStatus::Infeasible);
                         }
-                        if implied_lb > new_lb + ZERO_TOL {
+                        if implied_lb > new_lb + ZERO_TOL && accept_implied_lb(implied_lb, old_lb) {
                             new_lb = implied_lb;
                         }
                     }
@@ -758,7 +765,7 @@ fn step5_bounds_tightening(
                         if implied_lb > old_ub + ZERO_TOL {
                             return Err(PresolveStatus::Infeasible);
                         }
-                        if implied_lb > new_lb + ZERO_TOL {
+                        if implied_lb > new_lb + ZERO_TOL && accept_implied_lb(implied_lb, old_lb) {
                             new_lb = implied_lb;
                         }
                     } else if a_ij < 0.0 && rest_ub_fin {
@@ -766,7 +773,7 @@ fn step5_bounds_tightening(
                         if implied_ub < old_lb - ZERO_TOL {
                             return Err(PresolveStatus::Infeasible);
                         }
-                        if implied_ub < new_ub - ZERO_TOL {
+                        if implied_ub < new_ub - ZERO_TOL && accept_implied_ub(implied_ub, old_ub) {
                             new_ub = implied_ub;
                         }
                     }
