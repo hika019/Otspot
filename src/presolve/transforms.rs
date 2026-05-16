@@ -89,6 +89,10 @@ pub struct PresolveResult {
     pub was_reduced: bool,
     /// 削除変数の目的関数への寄与量。縮約後 objective + obj_offset = 元 objective
     pub obj_offset: f64,
+    /// QP #14 Large Coefficient Row Scaling の σ_i (i=0..orig_num_constraints)。
+    /// presolve 入口で σ_i (≤ 1.0) を適用、postsolve で y_orig[i] = σ_i * y_scaled[i] 復元。
+    /// 該当行が無い (scaling 不要) 場合は全て 1.0。
+    pub row_scales: Vec<f64>,
 }
 
 /// Presolve段階で検出された問題のステータス
@@ -113,8 +117,54 @@ impl PresolveResult {
             row_map: (0..m).map(Some).collect(),
             was_reduced: false,
             obj_offset: 0.0,
+            row_scales: vec![1.0; m],
         }
     }
+}
+
+/// QP #14 から転用: max|A| > 1e6 の行に σ_i = max(1/sqrt(row_max), SIGMA_FLOOR) を適用。
+/// LU 因子分解前の条件数を抑制し、cre-b/d/dfl001 等の数値悪化を緩和する。
+///
+/// 戻り値: 各行の scaling factor σ_i (適用なしなら 1.0)。
+/// SIGMA_FLOOR=1e-3 はアルゴ物理量ベース (Wright IPM §11.5, eps_inner=√delta_min)。
+fn apply_large_coeff_row_scaling(st: &mut PresolveState) -> Vec<f64> {
+    let m = st.b.len();
+    // 行 max を計算
+    let mut row_max = vec![0.0f64; m];
+    let mut has_large = false;
+    for i in 0..m {
+        for &(_, v) in &st.row_entries[i] {
+            let av = v.abs();
+            if av > row_max[i] { row_max[i] = av; }
+            if av > 1.0e6 { has_large = true; }
+        }
+    }
+    if !has_large {
+        return vec![1.0; m];
+    }
+    // σ_i = 1/sqrt(row_max) (row_max > 1 のみ)、SIGMA_FLOOR で下限 cap
+    const SIGMA_FLOOR: f64 = 1.0e-3;
+    let scales: Vec<f64> = row_max.iter().map(|&mx| {
+        if mx > 1.0 { (1.0 / mx.sqrt()).max(SIGMA_FLOOR) } else { 1.0 }
+    }).collect();
+    // A の値と b に σ_i を適用 (state を直接書き換え)
+    for i in 0..m {
+        let s = scales[i];
+        if (s - 1.0).abs() < 1e-15 { continue; }
+        st.b[i] *= s;
+        for entry in st.row_entries[i].iter_mut() {
+            entry.1 *= s;
+        }
+        // col_entries の対応も更新
+        for col_entries in st.col_entries.iter_mut() {
+            for entry in col_entries.iter_mut() {
+                if entry.0 == i {
+                    entry.1 *= s;
+                }
+            }
+        }
+    }
+    scales
 }
 
 /// 内部の可変状態。Step 1〜8 が共通で参照する。
@@ -301,6 +351,11 @@ pub fn run_presolve(
     let m = problem.num_constraints;
     let mut st = PresolveState::from_problem(problem);
 
+    // QP #14 Large Coefficient Row Scaling (presolve 入口で 1 回適用)。
+    // max|A| > 1e6 の行で σ_i = max(1/sqrt(row_max), 1e-3) を A と b に乗算。
+    // postsolve で y_orig[i] = σ_i * y_scaled[i] 復元 (postsolve.rs:run_postsolve)。
+    let row_scales = apply_large_coeff_row_scaling(&mut st);
+
     // 収束 (reduction == 0) で break する設計 (line 364-366)。
     // 削除可能要素は有限なので無限ループにはならない。安全装置の上限は
     // deadline チェック (各 step 境界) に統一。
@@ -450,8 +505,9 @@ pub fn run_presolve(
         orig_num_constraints: m,
         col_map,
         row_map,
-        was_reduced,
+        was_reduced: was_reduced || row_scales.iter().any(|&s| (s - 1.0).abs() > 1e-15),
         obj_offset: st.obj_offset,
+        row_scales,
     })
 }
 
