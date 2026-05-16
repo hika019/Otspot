@@ -171,11 +171,23 @@ pub struct SolverOptions {
     pub ipm: IpmOptions,
 }
 
+/// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
+/// 小規模 (m<2000) は 20、大規模では m/100。固定値 50 は廃止。
+pub fn default_max_etas(m: usize) -> usize {
+    (m / 100).max(20)
+}
+
+/// Phase I の retry 上限 (暫定): revised_simplex_core が同じ basis を返し続ける
+/// 構造で無限ループに入るケース用の安全装置。本来は「同じ basis を繰り返したら
+/// abort」の progress 検出に置き換える (TODO)。
+pub const MAX_PHASE1_RETRIES: usize = 8;
+
 impl Default for SolverOptions {
     fn default() -> Self {
         Self {
             primal_tol: PIVOT_TOL, // 1e-8
-            max_etas: 50,
+            // max_etas: 0 = auto (default_max_etas(m) で m から計算、各 simplex 入口で適用)
+            max_etas: 0,
             clamp_tol: 1e-14,
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,

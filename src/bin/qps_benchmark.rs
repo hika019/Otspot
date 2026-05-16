@@ -197,6 +197,7 @@ fn compute_dfeas_orig(
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         let mut dfeas_abs = 0.0_f64;
         let mut dfeas_rel = 0.0_f64;
+        const BOUND_HIT_TOL: f64 = 1e-6;
         for j in 0..n {
             let (lb_j, ub_j) = prob.bounds[j];
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
@@ -206,7 +207,21 @@ fn compute_dfeas_orig(
                 continue; // EmptyCol は除外
             }
             let rc = reduced_costs[j];
-            let viol = f64::max(0.0, -rc);
+            // LP dual feasibility (bound 考慮):
+            //   x[j] at lb → rc ≥ 0、x[j] at ub → rc ≤ 0、interior → rc ≈ 0
+            // 旧実装 (viol = max(0, -rc)) は lb hit 前提のみで ub hit ケースを誤検出。
+            let x_j = solution[j];
+            let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_HIT_TOL;
+            let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_HIT_TOL;
+            // interior 変数 (どの bound にも hit しない) は LP 退化解で rc ≠ 0 が
+            // 自然に発生するため厳格判定しない。bound hit 変数のみ符号制約を要求。
+            let viol = if at_lb && !at_ub {
+                f64::max(0.0, -rc)
+            } else if at_ub && !at_lb {
+                f64::max(0.0, rc)
+            } else {
+                0.0 // interior or 両端 hit: 厳格判定なし
+            };
             dfeas_abs = dfeas_abs.max(viol);
             let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
             dfeas_rel = dfeas_rel.max(viol / scale_j);

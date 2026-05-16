@@ -236,9 +236,17 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 // After fresh-LU reconcile reveals primal infeasibility, we switch to
                 // DUAL SIMPLEX to restore primal feasibility (dual simplex starts from
                 // dual-feasible, fixes primal infeasibility). Then re-check.
-                const MAX_PHASE1_RETRIES: usize = 8;
+                // Phase I retry: 安全装置として上限を残す (MAX_PHASE1_RETRIES 撤廃すると
+                // revised_simplex_core が「同じ basis で Optimal を返し続ける」無限ループに
+                // 入るケースで bandm/beaconfd 等が TIMEOUT 化したため revert)。
+                // TODO: 「同じ basis を繰り返したら abort」の progress 検出を実装し、
+                //       MAX_PHASE1_RETRIES に依存しない収束判定に置換する。
+                use crate::options::MAX_PHASE1_RETRIES;
                 let mut phase1_feasible = false;
                 'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
+                    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        break 'retry;
+                    }
                     let mut y_dummy = vec![0.0f64; m];
                     let rec_obj = match reconcile_final_basis_state(
                         &a_ext, &b, &c_phase1, &basis, &mut x_b, &mut y_dummy,
@@ -665,6 +673,12 @@ fn pivot_out_degenerate_artificials(
     }
 
     for i in 0..m {
+        // deadline チェック: pds-20 等の大規模で artificial 多数の場合、
+        // m_artificial × n_total 回 FTRAN で 1000 秒予算を簡単に消費する。
+        // 各 i 反復先頭で deadline 検査し、超過なら未処理 artificial を残して return。
+        if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return;
+        }
         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
             continue;
         }
@@ -678,6 +692,10 @@ fn pivot_out_degenerate_artificials(
         for j in 0..sf.n_total {
             if is_basic[j] {
                 continue;
+            }
+            // 内側ループでも 1024 回ごとに deadline 検査 (pds-20 では n_total ≈ 33,798)。
+            if j & 0x3ff == 0 && options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return;
             }
             if let Ok((rows, vals)) = a_ext.get_column(j) {
                 let mut col_dense = vec![0.0_f64; m];

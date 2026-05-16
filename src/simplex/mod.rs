@@ -141,7 +141,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
 }
 
 /// Presolve なしでLPを直接解く内部関数
-fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 

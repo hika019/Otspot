@@ -5190,16 +5190,20 @@ mod tests {
             (result.reduced_costs[1] - 3.0).abs() < tol,
             "T2: rc[1]=3 (y non-basic at lb)"
         );
+        // rc[2] = c[2] - A^T[2] y - (bound dual) = 1 - 0 = 1
+        // (z は A の 2 つの制約に出現しないので A^T[z] y = 0; LP/QP KKT 整合で
+        //  reduced_cost = c - A^T y となる)
         assert!(
-            (result.reduced_costs[2]).abs() < tol,
-            "T2: rc[2]=0 (z fixed by FixedVar)"
+            (result.reduced_costs[2] - 1.0).abs() < tol,
+            "T2: rc[2]=1 (= c[2] - A^T[z] y = 1 - 0)"
         );
         // slack = b - Ax
         assert_eq!(result.slack.len(), 2, "T2: slack.len=2");
         assert!((result.slack[0] - 4.0).abs() < tol, "T2: slack[0]=4");
         assert!((result.slack[1] - 6.0).abs() < tol, "T2: slack[1]=6");
-        // 相補性: x[j]*rc[j] ≈ 0
-        for j in 0..3 {
+        // 相補性: 下限が 0 の自由変数 (x, y) のみ x[j]*rc[j] ≈ 0
+        // 固定変数 z (lb=ub=5) は lb/ub 両方の dual を持ち得るので rc ≠ 0 でも整合
+        for j in 0..2 {
             assert!(
                 (result.solution[j] * result.reduced_costs[j]).abs() < 1e-7,
                 "T2: complementarity x[{}]*rc[{}]",
@@ -5278,7 +5282,8 @@ mod tests {
         assert!((result.slack[0] - 10.0).abs() < tol, "T4: slack[0]=10");
         assert!((result.slack[1] - 3.0).abs() < tol, "T4: slack[1]=3");
         assert_eq!(result.reduced_costs.len(), 3, "T4: rc.len=3");
-        assert!((result.reduced_costs[2]).abs() < tol, "T4: rc[2]=0 (fixed)");
+        // rc[2] = c[2] - A^T[z] y = 1 - 0 = 1 (LP/QP KKT 整合)
+        assert!((result.reduced_costs[2] - 1.0).abs() < tol, "T4: rc[2]=1 (= c[2] - 0)");
     }
 
     /// T5: FixedVar+LCS + 大Ruiz（C1指摘の核心ケース）
@@ -5321,9 +5326,10 @@ mod tests {
         );
         // reduced_costs.len = 3
         assert_eq!(result.reduced_costs.len(), 3, "T5: rc.len=3");
+        // rc[2] = c[2] - A^T[z] y = 1 - 0 = 1 (LP/QP KKT 整合)
         assert!(
-            (result.reduced_costs[2]).abs() < 1e-6,
-            "T5: rc[2]=0 (fixed z)"
+            (result.reduced_costs[2] - 1.0).abs() < 1e-6,
+            "T5: rc[2]=1 (= c[2] - 0)"
         );
     }
 
@@ -5354,9 +5360,11 @@ mod tests {
         assert!((result.slack[0] - 4.0).abs() < tol, "T6: slack[0]=4");
         assert!((result.slack[1] - 3.0).abs() < tol, "T6: slack[1]=3");
         assert_eq!(result.reduced_costs.len(), 3, "T6: rc.len=3");
+        // rc[2] = c[2] - A^T[z] y = 1 - 0 = 1 (LP/QP KKT 整合)
+        // z は z=0 (lb) で active、rc ≥ 0 は dual feasibility と整合
         assert!(
-            (result.reduced_costs[2]).abs() < tol,
-            "T6: rc[2]=0 (empty col fixed)"
+            (result.reduced_costs[2] - 1.0).abs() < tol,
+            "T6: rc[2]=1 (= c[2] - 0)"
         );
     }
 
