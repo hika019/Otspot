@@ -30,15 +30,6 @@ pub(crate) fn solve_dual_advanced(
     options: &SolverOptions,
 ) -> SolverResult {
     let m = sf.m;
-
-    // 早期 fallback: warm_start なし & artificial > 0 (Ge/Eq 制約含む) は
-    // L65 の `num_artificial == 0` 分岐で必ず two_phase_dual_simplex に飛ぶため、
-    // ここで Ruiz scaling を走らせる意味がない。3 段 fallback (dual_adv → dual →
-    // primal) で同じ Ruiz scale が 3 回繰り返されるのを断つ。
-    if options.warm_start.is_none() && sf.num_artificial > 0 {
-        return super::dual::two_phase_dual_simplex(sf, problem, options);
-    }
-
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
