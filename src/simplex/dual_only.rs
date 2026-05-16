@@ -32,8 +32,25 @@ pub fn solve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     // 拡張: standard form の上に「人工変数の明示列」を被せる
     let ext = augment_with_artificials(&sf);
 
+    let dbg = std::env::var("DUAL_ONLY_TRACE").ok().as_deref() == Some("1");
+    if dbg {
+        eprintln!("[DUAL_ONLY] solve: m={} n_standard={} n_ext={} n_artificial={}",
+            ext.m, ext.n_standard, ext.n_ext, ext.n_ext - ext.n_standard);
+    }
+
     // Phase I: Big-M 込みコストで dual simplex
     let phase1_result = run_dual_with_perturbation(&ext, options, /*phase=*/1);
+
+    if dbg {
+        let st = match &phase1_result.outcome {
+            SimplexOutcome::Optimal(o, _) => format!("Optimal({})", o),
+            SimplexOutcome::Unbounded => "Unbounded".to_string(),
+            SimplexOutcome::Timeout(_) => "Timeout".to_string(),
+            SimplexOutcome::SingularBasis => "SingularBasis".to_string(),
+        };
+        let n_art_in_basis = phase1_result.basis.iter().filter(|&&b| b >= ext.n_standard).count();
+        eprintln!("[DUAL_ONLY] phase1 outcome={} n_art_in_basis={}", st, n_art_in_basis);
+    }
 
     match phase1_result.outcome {
         SimplexOutcome::Optimal(obj, _y) => {
@@ -75,6 +92,10 @@ struct Extended {
     b: Vec<f64>,
     /// 拡張コスト (元 + 0 slack + BIG_M artificial)
     c: Vec<f64>,
+    /// 変数下限 (全 0、standard form 慣例)
+    lb: Vec<f64>,
+    /// 変数上限 (slack/structural=+inf、artificial=0 FX)
+    ub: Vec<f64>,
     /// 初期基底 (m 行 ⇒ 列 index)
     initial_basis: Vec<usize>,
     /// 元 LP の standard form 部分の列数 (= n_total)。これより大きい列は artificial
@@ -153,10 +174,31 @@ fn augment_with_artificials(sf: &StandardForm) -> Extended {
         };
     }
 
+    // bounds: standard form は全変数 lb=0, slack/structural ub=+inf。
+    // 人工変数は FX [0, 0]: dual_iter_blp が UB=0 違反を検出して pivot 駆動。
+    let lb = vec![0.0_f64; n_ext];
+    let mut ub = vec![f64::INFINITY; n_ext];
+    for i in 0..m {
+        if let Some(art_col) = art_col_of_row[i] {
+            ub[art_col] = 0.0;
+        }
+    }
+
+    // b に lexicographic 摂動 (textbook anti-cycling)。
+    // b_perturbed[i] = b[i] + epsilon * (i+1) で degeneracy を解消。
+    // epsilon は 1e-10 程度で十分小さく、最適解への影響は無視可能。
+    let mut b_vec = sf_b(sf).to_vec();
+    let lex_eps = 1e-10_f64;
+    for (i, bi) in b_vec.iter_mut().enumerate() {
+        *bi += lex_eps * ((i + 1) as f64);
+    }
+
     Extended {
         a: a_ext,
-        b: sf_b(sf).to_vec(),
+        b: b_vec,
         c,
+        lb,
+        ub,
         initial_basis,
         n_standard,
         n_ext,
@@ -191,19 +233,24 @@ fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u
     let n_ext = ext.n_ext;
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
-    const DUAL_FEAS_MARGIN: f64 = 1e-3;
+    // graded 摂動: 列 j に DUAL_FEAS_BASE + j * DUAL_FEAS_STEP の摂動を最低保証。
+    // 列ごとに異なる shift で degeneracy を破壊し、Bland 規則の cycling を防ぐ。
+    // BASE は十分大きく取り Phase I 進捗速度を確保、STEP は tie-break 用の微少差。
+    const DUAL_FEAS_BASE: f64 = 1.0;
+    const DUAL_FEAS_STEP: f64 = 1e-7;
     for j in 0..n_ext {
         if is_basic[j] { continue; }
         let cs = ext.a.col_ptr[j];
         let ce = ext.a.col_ptr[j + 1];
         let aty: f64 = (cs..ce).map(|k| ext.a.values[k] * y[ext.a.row_ind[k]]).sum();
         let c_bar = c_perturbed[j] - aty;
-        if c_bar < DUAL_FEAS_MARGIN {
-            c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar;
+        let target = DUAL_FEAS_BASE + (j as f64) * DUAL_FEAS_STEP;
+        if c_bar < target {
+            c_perturbed[j] += target - c_bar;
         }
     }
 
-    let outcome = dual_iter(&ext.a, &c_perturbed, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
+    let outcome = dual_iter_blp(&ext.a, &c_perturbed, &ext.lb, &ext.ub, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
     PhaseResult { outcome, basis, x_b }
 }
 
@@ -228,7 +275,7 @@ fn run_dual_pure(
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
 
-    let outcome = dual_iter(&ext.a, &c2, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
+    let outcome = dual_iter_blp(&ext.a, &c2, &ext.lb, &ext.ub, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
     PhaseResult { outcome, basis, x_b }
 }
 
@@ -236,15 +283,21 @@ fn run_dual_pure(
 // Pure dual simplex iteration (textbook)
 // =====================================================================
 
-/// 教科書 dual simplex iteration:
-///   1. Leaving: x_B[p] < -tol で最も infeasible な行
+/// 教科書 dual simplex iteration (BLP 対応):
+///   1. Leaving: x_B[p] < lb_basic[p] (下違反) OR x_B[p] > ub_basic[p] (上違反)
 ///   2. BTRAN: rho = e_p^T B^{-1}
 ///   3. trow[j] = rho^T A_j (alpha_p,j)
-///   4. Ratio test: j non-basic with trow[j] < -tol を候補とし、min |c_bar[j] / trow[j]| を選ぶ
+///   4. Ratio test:
+///      - 下違反: alpha < -tol を候補、min c_bar / |alpha|
+///      - 上違反: alpha > +tol を候補、min c_bar / alpha
 ///   5. FTRAN, pivot, x_b 更新、basis 更新、c_bar 再計算
-fn dual_iter(
+///
+/// `ext_lb`/`ext_ub` を渡すと FX 人工変数 (lb=ub=0) の UB 違反検出が有効化される。
+fn dual_iter_blp(
     a: &CscMatrix,
     c: &[f64],
+    ext_lb: &[f64],
+    ext_ub: &[f64],
     basis: &mut Vec<usize>,
     x_b: &mut Vec<f64>,
     mut basis_mgr: LuBasis,
@@ -267,29 +320,55 @@ fn dual_iter(
     }
 
     const FEAS_TOL: f64 = 1e-7;
-    const PIVOT_NEG_TOL: f64 = 1e-9;
+    // pivot 候補の最小絶対値。これを下回ると eta 蓄積で数値破綻するため除外。
+    const PIVOT_NEG_TOL: f64 = 1e-6;
     let max_iter = 1_000_000usize;
     let deadline = options.deadline;
 
+    let dbg_iter = std::env::var("DUAL_ONLY_TRACE").ok().as_deref() == Some("1");
+    let mut iter_count = 0usize;
     for _iter in 0..max_iter {
+        iter_count = _iter;
+        if dbg_iter && _iter % 1000 == 0 && _iter > 0 {
+            let xb_min = x_b.iter().cloned().fold(f64::INFINITY, f64::min);
+            let xb_max = x_b.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let n_basic_art = basis.iter().filter(|&&b| ext_ub[b] == 0.0 && ext_lb[b] == 0.0).count();
+            eprintln!("[dual_iter] iter {} xb=[{:.3e},{:.3e}] n_art_basic={}",
+                _iter, xb_min, xb_max, n_basic_art);
+        }
         if let Some(dl) = deadline {
             if std::time::Instant::now() >= dl {
+                if dbg_iter {
+                    eprintln!("[dual_iter] Timeout after {} iters", iter_count);
+                }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Timeout(obj);
             }
         }
 
-        // 1. Leaving row (most negative x_B)
+        // 1. Leaving row: Bland 規則 (最小 basis index の infeasible 行を選ぶ)
+        // anti-cycling 保証のため Dantzig (most-infeasible) ではなく Bland を採用。
         let mut leaving_row: Option<usize> = None;
-        let mut worst = -FEAS_TOL;
+        let mut leaving_direction = 0i8; // +1: 下違反(x_B<lb)、-1: 上違反(x_B>ub)
+        let mut best_basis_idx = usize::MAX;
         for i in 0..m {
-            if x_b[i] < worst {
-                worst = x_b[i];
+            let j = basis[i];
+            let lb_j = ext_lb[j];
+            let ub_j = ext_ub[j];
+            let lo_viol = if lb_j.is_finite() { (lb_j - x_b[i]).max(0.0) } else { 0.0 };
+            let hi_viol = if ub_j.is_finite() { (x_b[i] - ub_j).max(0.0) } else { 0.0 };
+            let (viol, dir) = if lo_viol >= hi_viol { (lo_viol, 1) } else { (hi_viol, -1) };
+            if viol > FEAS_TOL && j < best_basis_idx {
+                best_basis_idx = j;
                 leaving_row = Some(i);
+                leaving_direction = dir;
             }
         }
         let p = match leaving_row {
             None => {
+                if dbg_iter {
+                    eprintln!("[dual_iter] Optimal after {} iters", iter_count);
+                }
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Optimal(obj, y);
             }
@@ -302,31 +381,43 @@ fn dual_iter(
         basis_mgr.btran_dense(&mut rho);
 
         // 3+4. Ratio test
+        // direction = +1 (LB違反): alpha < -tol を候補, ratio = c_bar / (-alpha)
+        // direction = -1 (UB違反): alpha > +tol を候補, ratio = c_bar / alpha
         let mut entering_col: Option<usize> = None;
         let mut min_ratio = f64::INFINITY;
         let mut pivot_element = 0.0_f64;
+        // min-ratio + Bland 規則 tie-break (textbook standard)
         for j in 0..n {
             if is_basic[j] { continue; }
             let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
             let alpha: f64 = (cs..ce).map(|k| rho[a.row_ind[k]] * a.values[k]).sum();
-            if alpha < -PIVOT_NEG_TOL {
-                let ratio = c_bar[j] / (-alpha);
-                if ratio < min_ratio - PIVOT_TOL {
-                    min_ratio = ratio;
-                    entering_col = Some(j);
-                    pivot_element = alpha;
-                } else if (ratio - min_ratio).abs() <= PIVOT_TOL {
-                    if let Some(prev) = entering_col {
-                        if j < prev {
-                            entering_col = Some(j);
-                            pivot_element = alpha;
-                        }
+            let (valid, denom) = if leaving_direction > 0 {
+                (alpha < -PIVOT_NEG_TOL, -alpha)
+            } else {
+                (alpha > PIVOT_NEG_TOL, alpha)
+            };
+            if !valid { continue; }
+            let ratio = c_bar[j] / denom;
+            if ratio < min_ratio - PIVOT_TOL {
+                min_ratio = ratio;
+                entering_col = Some(j);
+                pivot_element = alpha;
+            } else if (ratio - min_ratio).abs() <= PIVOT_TOL {
+                if let Some(prev) = entering_col {
+                    if j < prev {
+                        entering_col = Some(j);
+                        pivot_element = alpha;
                     }
                 }
             }
         }
         let q = match entering_col {
-            None => return SimplexOutcome::Unbounded, // 双対非有界 = 主実行不可
+            None => {
+                if dbg_iter {
+                    eprintln!("[dual_iter] Unbounded after {} iters, leaving p={} x_b[p]={:.3e}", iter_count, p, x_b[p]);
+                }
+                return SimplexOutcome::Unbounded;
+            },
             Some(q) => q,
         };
 
@@ -341,8 +432,12 @@ fn dual_iter(
         let mut alpha_dense = vec![0.0_f64; m];
         alpha_sv.to_dense_into(&mut alpha_dense);
 
-        // step = x_B[p] / pivot_element (両方負 → step > 0)
-        let step = x_b[p] / pivot_element;
+        // step: 入基変数 q の新基底値
+        //   target = lb_basic[p] (下違反) or ub_basic[p] (上違反)
+        //   step = (x_B[p] - target) / pivot_element
+        // standard form では lb=0、artificial の ub=0 のみ FX。
+        let target = if leaving_direction > 0 { ext_lb[basis[p]] } else { ext_ub[basis[p]] };
+        let step = (x_b[p] - target) / pivot_element;
         for i in 0..m {
             x_b[i] -= alpha_dense[i] * step;
         }
@@ -391,21 +486,59 @@ fn result_optimal(
     problem: &LpProblem,
     basis: &[usize],
     x_b: &[f64],
-    _y: &[f64],
+    y: &[f64],
     ext: &Extended,
 ) -> SolverResult {
-    // 標準形 → 元変数空間に戻す
-    // 拡張部分 (artificial) は元空間に影響しないので、最初の n_standard 列のみで extract_solution を呼ぶ
-    // x_b は m 個、basis は m 個。basis[i] が n_standard 以上なら artificial が basis に残っている (≈0)
-    // ⇒ そのまま渡しても extract_solution 側は元変数のみ参照するので問題なし
-    let col_scale = vec![1.0_f64; ext.n_standard]; // Ruiz scaling なし
+    let col_scale = vec![1.0_f64; ext.n_standard];
     let solution = extract_solution(sf, basis, x_b, &col_scale);
     let obj: f64 = problem.c.iter().zip(solution.iter()).map(|(&c, &x)| c * x).sum::<f64>()
         + sf_obj_offset(sf);
+
+    // 元 LP の dual 復元: A^T y_orig = c_orig - reduced_costs (元空間)
+    // ここでは拡張行列 ext.a の y を渡す。bench 側で行数 = problem.num_constraints
+    // を期待するため、必要数だけ取り出す。
+    let m_orig = problem.num_constraints;
+    let dual_solution: Vec<f64> = if y.len() >= m_orig {
+        y[..m_orig].to_vec()
+    } else { vec![] };
+
+    // reduced_costs: 元変数 (j < problem.num_vars) のみ。c - A^T y を元 A から再計算
+    let n_orig = problem.num_vars;
+    let mut reduced_costs = vec![0.0_f64; n_orig];
+    for j in 0..n_orig {
+        let cs = problem.a.col_ptr[j];
+        let ce = problem.a.col_ptr[j + 1];
+        let aty: f64 = (cs..ce)
+            .map(|k| {
+                let r = problem.a.row_ind[k];
+                if r < dual_solution.len() { dual_solution[r] * problem.a.values[k] } else { 0.0 }
+            }).sum();
+        reduced_costs[j] = problem.c[j] - aty;
+    }
+
+    // slack: b_i - A_i·x (制約 type 依存だが、bench は raw 値を期待することが多い)
+    let mut slack = vec![0.0_f64; m_orig];
+    for i in 0..m_orig {
+        slack[i] = problem.b[i];
+    }
+    for j in 0..n_orig {
+        let cs = problem.a.col_ptr[j];
+        let ce = problem.a.col_ptr[j + 1];
+        for k in cs..ce {
+            let r = problem.a.row_ind[k];
+            if r < m_orig {
+                slack[r] -= problem.a.values[k] * solution[j];
+            }
+        }
+    }
+
     SolverResult {
         status: SolveStatus::Optimal,
         objective: obj,
         solution,
+        dual_solution,
+        reduced_costs,
+        slack,
         ..Default::default()
     }
 }
