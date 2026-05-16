@@ -77,9 +77,15 @@ impl LuBasis {
     pub fn new_timed(a: &CscMatrix, basis: &[usize], max_etas: usize, deadline: Option<std::time::Instant>) -> Result<Self, SolverError> {
         let lu = lu::LuFactorization::factorize_timed(a, basis, deadline)?;
         let n = lu.n;
+        // max_etas == 0 を auto と解釈し m から動的計算 (CLAUDE.md 固定値排除)。
+        let effective_max_etas = if max_etas == 0 {
+            crate::options::default_max_etas(basis.len())
+        } else {
+            max_etas
+        };
         Ok(Self {
             lu,
-            eta_file: eta::EtaFile::new(max_etas),
+            eta_file: eta::EtaFile::new(effective_max_etas),
             basis_indices: basis.to_vec(),
             singular_basis: false,
             refactor_failed: false,

@@ -301,13 +301,10 @@ pub fn run_presolve(
     let m = problem.num_constraints;
     let mut st = PresolveState::from_problem(problem);
 
-    use crate::options::MAX_PRESOLVE_ITER;
-    let mut pass = 0usize;
+    // 収束 (reduction == 0) で break する設計 (line 364-366)。
+    // 削除可能要素は有限なので無限ループにはならない。安全装置の上限は
+    // deadline チェック (各 step 境界) に統一。
     loop {
-        if pass >= MAX_PRESOLVE_ITER {
-            eprintln!("presolve: MAX_PRESOLVE_ITER ({MAX_PRESOLVE_ITER}) reached without convergence");
-            break;
-        }
         let prev_removed = st.removed_cols.iter().filter(|&&r| r).count()
             + st.removed_rows.iter().filter(|&&r| r).count();
         let mut new_fixed_by_step5 = 0usize;
@@ -364,7 +361,6 @@ pub fn run_presolve(
         if reduction == 0 && new_fixed_by_step5 == 0 && new_subst_steps == 0 {
             break;
         }
-        pass += 1;
     }
 
     // ==========================================================

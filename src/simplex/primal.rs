@@ -236,11 +236,14 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 // After fresh-LU reconcile reveals primal infeasibility, we switch to
                 // DUAL SIMPLEX to restore primal feasibility (dual simplex starts from
                 // dual-feasible, fixes primal infeasibility). Then re-check.
+                // Phase I retry: 安全装置として上限を残す (MAX_PHASE1_RETRIES 撤廃すると
+                // revised_simplex_core が「同じ basis で Optimal を返し続ける」無限ループに
+                // 入るケースで bandm/beaconfd 等が TIMEOUT 化したため revert)。
+                // TODO: 「同じ basis を繰り返したら abort」の progress 検出を実装し、
+                //       MAX_PHASE1_RETRIES に依存しない収束判定に置換する。
                 use crate::options::MAX_PHASE1_RETRIES;
                 let mut phase1_feasible = false;
                 'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
-                    // retry ループ先頭で deadline 検査。連続退化や数値誤差で
-                    // retry が予算を食いつぶす case を回避する。
                     if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                         break 'retry;
                     }
