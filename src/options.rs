@@ -172,9 +172,13 @@ pub struct SolverOptions {
 }
 
 /// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
-/// 小規模 (m<2000) は 20、大規模では m/100。固定値 50 は廃止。
+/// 小規模 (m<1000) は 20、大規模では m/50。
+///
+/// 旧 m/100 は dfl001 級 (m=12857) で max_etas=128、refactor 1 回 720ms × 69 = 50s
+/// が timeout の主因 (Task #6/9 観測)。m/50 で refactor 頻度を半減、per-iter eta cost
+/// 増加とのトレードオフで dfl001 改善を狙う (eta cost は per-iter ~50us 程度の増)。
 pub fn default_max_etas(m: usize) -> usize {
-    (m / 100).max(20)
+    (m / 50).max(20)
 }
 
 /// Phase I の retry 上限 (暫定): revised_simplex_core が同じ basis を返し続ける
