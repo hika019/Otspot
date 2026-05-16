@@ -12,5 +12,7 @@ scripts/cmd843/__pycache__/
 /bench_results
 /results
 /tmp
+/logs
+Highs.log
 
 /.claude

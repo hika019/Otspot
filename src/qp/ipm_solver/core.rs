@@ -262,7 +262,6 @@ fn run_ipm_with(
         let mut n_fixed = 0;
         let mut n_singleton = 0;
         let mut n_empty = 0;
-        let mut n_redundant = 0;
         let mut n_largescale = 0;
         let mut row_scales_for_diag: Option<Vec<f64>> = None;
         for step in presolve_result.postsolve_stack.steps.iter() {
@@ -270,15 +269,14 @@ fn run_ipm_with(
                 QpPostsolveStep::FixedVar { .. } => n_fixed += 1,
                 QpPostsolveStep::SingletonRow { .. } => n_singleton += 1,
                 QpPostsolveStep::EmptyCol { .. } => n_empty += 1,
-                QpPostsolveStep::RedundantRowFix { .. } => n_redundant += 1,
                 QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
                     n_largescale += 1;
                     row_scales_for_diag = Some(row_scales.clone());
                 }
             }
         }
-        eprintln!("POST_STAGE [presolve transforms] FixedVar={} SingletonRow={} EmptyCol={} RedundantRowFix={} LargeCoeffRowScale={} reduced_vars={} orig_vars={}",
-            n_fixed, n_singleton, n_empty, n_redundant, n_largescale,
+        eprintln!("POST_STAGE [presolve transforms] FixedVar={} SingletonRow={} EmptyCol={} LargeCoeffRowScale={} reduced_vars={} orig_vars={}",
+            n_fixed, n_singleton, n_empty, n_largescale,
             reduced.num_vars, orig_problem.num_vars);
         // LargeCoeffRowScale の row_scales 統計と極端値を出力
         if let Some(scales) = &row_scales_for_diag {
@@ -657,8 +655,7 @@ fn run_ipm_with(
             //      bound_contrib を bound_duals から取得して KKT 完全式で解く
             for step in presolve_result.postsolve_stack.steps.iter().rev() {
                 let (row, col) = match step {
-                    QpPostsolveStep::SingletonRow { row, col, .. }
-                    | QpPostsolveStep::RedundantRowFix { row, col, .. } => (*row, *col),
+                    QpPostsolveStep::SingletonRow { row, col, .. } => (*row, *col),
                     _ => continue,
                 };
                 let bc = bound_contrib_at_var(&orig_problem.bounds, &final_sol.bound_duals, col);

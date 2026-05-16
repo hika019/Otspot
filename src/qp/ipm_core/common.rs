@@ -13,22 +13,6 @@ use super::kkt::{spmv_q, norm_inf};
 // Infeasibility / Unboundedness 検出
 // ---------------------------------------------------------------------------
 
-/// |x| が f64 で表現可能な範囲 (1/ε_machine ≈ 4.5e15) を超えた場合に LP/QP が
-/// 数値的に非有界と判定する。Unbounded の構造的シグナル。
-///
-/// 真因: 旧 `check_infeasible_or_unbounded` の cond_obj は dx が strict null-space of A
-/// に収まることを要求 (norm(A·dx)/norm(dx) < 1e-8) するが、IPM の実装が常に純 null-space
-/// を返すとは限らず、numerical divergence (例 QFORPLAN で obj=+8e38 へ発散) で検出を
-/// 漏らす。|x| が f64 の精度範囲を超えた時点で **数値的には** 解が無限大に行っており、
-/// LP の有限最適解が存在しないと判定して Unbounded を返す。
-///
-/// 閾値 1/ε_machine は f64 機械精度の物理上限 (これを超えると x の任意の値変動が
-/// 加減算で消失する f64-unrepresentable 領域) であり、問題集 tuning ではない。
-pub(crate) fn check_x_unrepresentable(x: &[f64]) -> bool {
-    let f64_repr_ceiling = 1.0 / f64::EPSILON;
-    x.iter().any(|v| v.is_finite() && v.abs() > f64_repr_ceiling)
-}
-
 /// Gondzio corrector 後のステップ方向 (Δx, Δy) から実行不能または非有界を検出する。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_infeasible_or_unbounded(

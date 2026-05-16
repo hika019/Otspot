@@ -11,10 +11,6 @@ use solver::problem::ConstraintType;
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{DefaultSolver, DefaultSettings, IPSolver, SolverStatus, SupportedConeT};
 
-fn convert_csc(m: &solver::sparse::CscMatrix) -> ClCsc<f64> {
-    ClCsc::new(m.nrows, m.ncols, m.col_ptr.clone(), m.row_ind.clone(), m.values.clone())
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {

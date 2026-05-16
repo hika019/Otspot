@@ -40,10 +40,6 @@ pub(crate) enum QpPostsolveStep {
     SingletonRow { row: usize, col: usize, val: f64 },
     /// 空列（Q列・A列ともゼロ）の復元。c[idx] の符号で活性 bound を決定済み。
     EmptyCol { idx: usize, val: f64 },
-    /// 活性度域による redundant constraint Eq 締め込み (#5)。
-    /// 行 `row` が activity range に支配されて Eq 化、変数 `col` を `val` に固定。
-    /// SingletonRow と同形だが、複数変数同時 fix を行うため別 variant で区別。
-    RedundantRowFix { row: usize, col: usize, val: f64 },
     /// 大係数スケーリングの行スケール（#14 逆変換用）。
     /// postsolve_qpでは双対変数の逆変換に使用。
     /// slackへの影響はmod.rs側のb-Ax再計算で回避（LP経路でslackが非空になるケースに対応）。
