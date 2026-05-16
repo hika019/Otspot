@@ -527,7 +527,7 @@ pub(crate) fn solve_ippmm_inner(
     let mut prof_predcorr_ns: u128 = 0;
     let mut prof_gondzio_ns: u128 = 0;
     let mut prof_update_ns: u128 = 0;
-    let mut prof_other_ns: u128 = 0;
+    let prof_other_ns: u128 = 0;
 
     for iter in 0..options.ipm.max_iter {
         let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };

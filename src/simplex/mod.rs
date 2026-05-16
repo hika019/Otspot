@@ -23,7 +23,9 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 use log::warn;
 
-pub(crate) use primal::{two_phase_simplex, extract_solution, revised_simplex_core, reconcile_final_basis_state};
+pub(crate) use primal::{two_phase_simplex, extract_solution, revised_simplex_core};
+#[cfg(test)]
+pub(crate) use primal::reconcile_final_basis_state;
 
 /// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
 ///

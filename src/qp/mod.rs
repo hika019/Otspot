@@ -87,6 +87,7 @@ impl QpSolver for IpPmmSolver {
 /// # 既知制限
 /// 対角チェックは対角負値（Q[i,i] < -1e-10）のみ検出する。
 /// 対角全正の不定行列はn≤1000ではCholeskyで検出、n>1000では未検出（既知制限）。
+#[cfg(test)]
 pub(crate) fn check_q_positive_semidefinite(q: &CscMatrix) -> bool {
     let n = q.nrows;
     if n == 0 {
@@ -6436,7 +6437,6 @@ mod tests {
     /// min x²+y²  s.t. x+y=1 (Eq) を presolve ON/OFF両方で解き、解一致を確認
     #[test]
     fn test_presolve_qp_eq_on_off_consistency() {
-        use crate::problem::ConstraintType;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();

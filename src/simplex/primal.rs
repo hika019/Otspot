@@ -803,7 +803,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
-    b: &[f64],
+    _b: &[f64],
     basis: &mut [usize],
     m: usize,
     n_cols: usize,

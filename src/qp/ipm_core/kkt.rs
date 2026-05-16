@@ -685,6 +685,7 @@ pub(crate) fn build_schur_system(
 ///
 /// augmented system のスパースパターンは IPM 反復間で完全固定。
 /// 初回構築後は values のみを更新することで `from_triplets` の O(nnz log nnz) を回避する。
+#[cfg(test)]
 pub(crate) struct KktCache {
     /// 初回 `build_augmented_system` で構築した CSC 行列（パターン固定）
     pub mat: CscMatrix,
@@ -702,6 +703,7 @@ pub(crate) struct KktCache {
 ///
 /// 上三角 CSC では列 i の対角要素（row = i）が列内最大行インデックスとなるため
 /// `col_ptr[i+1] - 1` の位置にある。
+#[cfg(test)]
 pub(crate) fn collect_part1_diag_indices(aug_mat: &CscMatrix, n: usize) -> Vec<usize> {
     (0..n).map(|i| aug_mat.col_ptr[i + 1] - 1).collect()
 }
@@ -709,6 +711,7 @@ pub(crate) fn collect_part1_diag_indices(aug_mat: &CscMatrix, n: usize) -> Vec<u
 /// augmented KKT 行列の Part 3（-(Σ + δ_d·I)）対角要素の values インデックスを収集する。
 ///
 /// 列 n+k の対角要素（row = n+k）は列内最大行インデックスなので `col_ptr[n+k+1] - 1`。
+#[cfg(test)]
 pub(crate) fn collect_part3_diag_indices(
     aug_mat: &CscMatrix,
     n: usize,
@@ -720,6 +723,7 @@ pub(crate) fn collect_part3_diag_indices(
 /// Q の対角要素値を収集する（delta_p 更新のベースライン）。
 ///
 /// Q に対角要素がない列は 0.0 とする。
+#[cfg(test)]
 pub(crate) fn collect_q_diag_base(q: &CscMatrix, n: usize) -> Vec<f64> {
     let mut base = vec![0.0f64; n];
     for (col, val) in base.iter_mut().enumerate().take(n) {
@@ -737,6 +741,7 @@ pub(crate) fn collect_q_diag_base(q: &CscMatrix, n: usize) -> Vec<f64> {
 ///
 /// `build_augmented_system` の代替として IPM ループ内で呼ぶ。
 /// スパースパターンは不変なので values のみ更新する。
+#[cfg(test)]
 pub(crate) fn update_augmented_values(
     cache: &mut KktCache,
     sigma_vec: &[f64],

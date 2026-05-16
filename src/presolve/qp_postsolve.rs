@@ -43,9 +43,6 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
             QpPostsolveStep::SingletonRow { col, val, .. } => {
                 solution[*col] = *val;
             }
-            QpPostsolveStep::RedundantRowFix { col, val, .. } => {
-                solution[*col] = *val;
-            }
             QpPostsolveStep::EmptyCol { idx, val } => {
                 solution[*idx] = *val;
             }
@@ -177,8 +174,7 @@ pub fn postsolve_qp_with_dual_recovery(
     for pass in 0..RECOVER_PASSES {
         for step in presolve_result.postsolve_stack.steps.iter().rev() {
             match step {
-                QpPostsolveStep::SingletonRow { row, col, .. }
-                | QpPostsolveStep::RedundantRowFix { row, col, .. } => {
+                QpPostsolveStep::SingletonRow { row, col, .. } => {
                     recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
                 }
                 // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が

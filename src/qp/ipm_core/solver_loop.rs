@@ -966,7 +966,7 @@ pub(crate) fn update_variables(
 mod tests {
     use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur};
     use crate::qp::ipm_core::kkt::{build_augmented_system, build_schur_system};
-    use crate::linalg::{ldl, amd::amd_with_deadline};
+    use crate::linalg::amd::amd_with_deadline;
     use crate::sparse::CscMatrix;
 
     /// DD 残差計算 (compute_residual_dd) が f64 残差より高精度なことを確認。

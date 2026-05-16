@@ -953,7 +953,7 @@ mod tests {
         //     [ 1 -1 ]   (quasidefinite: top SPD, bottom -SPD)
         // 上三角 CSC: (0,0)=2, (0,1)=1, (1,1)=-1
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let mut solver = DirectLdl::from_matrix(&k, None).expect("factorize");
+        let solver = DirectLdl::from_matrix(&k, None).expect("factorize");
         // K · u = [3, 0]^T → 解析解 u = K^{-1} [3, 0]^T
         // det(K) = 2*(-1) - 1*1 = -3
         // K^{-1} = (1/-3) * [-1 -1; -1 2] = [1/3 1/3; 1/3 -2/3]
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn kkt_solver_works_as_trait_object() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let mut solver: Box<dyn KktSolver> = Box::new(
+        let solver: Box<dyn KktSolver> = Box::new(
             DirectLdl::from_matrix(&k, None).expect("factorize"),
         );
         let mut sol = vec![0.0; 2];
@@ -1079,7 +1079,7 @@ mod tests {
     #[test]
     fn minres_kkt_2x2_indefinite() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let mut solver = PreconditionedMinres::new(k);
+        let solver = PreconditionedMinres::new(k);
         let mut sol = vec![0.0; 2];
         solver.solve(&[3.0, 0.0], &mut sol, None).expect("MINRES solve");
         assert!((sol[0] - 1.0).abs() < 1e-7);
@@ -1102,11 +1102,11 @@ mod tests {
         let b = vec![1.0, 2.0, -1.0, 0.5, -0.5];
 
         let mut x_ldl = vec![0.0; 5];
-        let mut ldl_solver = DirectLdl::from_matrix(&k, None).unwrap();
+        let ldl_solver = DirectLdl::from_matrix(&k, None).unwrap();
         ldl_solver.solve(&b, &mut x_ldl, None).unwrap();
 
         let mut x_minres = vec![0.0; 5];
-        let mut minres_solver = PreconditionedMinres::new(k);
+        let minres_solver = PreconditionedMinres::new(k);
         minres_solver.solve(&b, &mut x_minres, None).expect("MINRES solve");
 
         for i in 0..5 {
@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn minres_kkt_past_deadline() {
         let k = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, -1.0], 2, 2).unwrap();
-        let mut solver = PreconditionedMinres::new(k);
+        let solver = PreconditionedMinres::new(k);
         let mut sol = vec![0.0; 2];
         let past = Instant::now() - std::time::Duration::from_secs(1);
         let result = solver.solve(&[1.0, 1.0], &mut sol, Some(past));
@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn minres_kkt_works_as_trait_object() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let mut solver: Box<dyn KktSolver> = Box::new(PreconditionedMinres::new(k));
+        let solver: Box<dyn KktSolver> = Box::new(PreconditionedMinres::new(k));
         let mut sol = vec![0.0; 2];
         solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
         assert!((sol[0] - 1.0).abs() < 1e-7);

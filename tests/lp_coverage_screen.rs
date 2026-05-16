@@ -50,6 +50,7 @@ fn load_baseline() -> HashMap<String, f64> {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum Verdict {
     Optimal,
     ObjMismatch { got: f64, expected: f64, rel_err: f64 },
