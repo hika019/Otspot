@@ -114,17 +114,23 @@ fn augment_with_artificials(sf: &StandardForm) -> Extended {
             trip_vals.push(a_orig.values[k]);
         }
     }
+    // 人工列を **-e_i 係数**で追加する。
+    // これにより basis 行列 B が art 行で -1 を持ち、x_B = B^{-1} b = -b < 0 となる。
+    // dual_simplex_core は x_B < 0 を起点に反復するため、人工列が pivot 駆動される。
     for i in 0..m {
         if let Some(art_col) = art_col_of_row[i] {
             trip_rows.push(i);
             trip_cols.push(art_col);
-            trip_vals.push(1.0);
+            trip_vals.push(-1.0);
         }
     }
     let a_ext = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext)
         .expect("augment: triplet construction");
 
-    // コスト: 標準形部分は sf.c、artificial は BIG_M
+    // コスト: 標準形部分は sf.c、artificial は +BIG_M
+    // B^T y = c_B で art 行は B=-1 なので y_art = -BIG_M。
+    // 構造変数 c_bar_j = c_j - sum y_i A_ij = c_j + BIG_M * sum_{art rows} A_ij。
+    // sum >= 0 なら c_bar very positive (dual feasible)、sum < 0 なら摂動で吸収。
     let mut c = vec![0.0_f64; n_ext];
     let c_sf = sf_c(sf);
     c[..c_sf.len()].copy_from_slice(c_sf);
@@ -170,19 +176,34 @@ struct PhaseResult {
 
 /// Phase I: cost に dual-feasibility 摂動を適用して dual simplex
 fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u8) -> PhaseResult {
+    use crate::basis::{BasisManager, LuBasis};
     let mut basis = ext.initial_basis.clone();
-    // 初期 x_B = b (basis は identity 構造のため B = I → x_B = b)
-    // (slack 列は +1、artificial 列は +1。row_negated 済みなので b ≥ 0)
-    let mut x_b = ext.b.clone();
 
-    // 初期 y = c_B
-    let y_init: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
+    // 初期 x_B = B^{-1} b を計算 (basis 構造は identity / -identity 混在)
+    let mut basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return PhaseResult {
+            outcome: SimplexOutcome::SingularBasis,
+            basis,
+            x_b: ext.b.clone(),
+        },
+    };
+    let mut x_b = ext.b.clone();
+    basis_mgr.ftran_dense(&mut x_b);
+
+    // 初期 y = B^{-T} c_B
+    let mut y_init: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
+    basis_mgr.btran_dense(&mut y_init);
 
     // c_bar_j = c_j - y^T A_j を計算し、c_perturbed で dual 実行可能化
     let mut c_perturbed = ext.c.clone();
     let n_ext = ext.n_ext;
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
+    // DUAL_FEAS_MARGIN: 摂動でちょうど c_bar=0 にすると、後続 pivot で
+    // ratio=0 となり進歩しなくなる。小さい正の余裕を残すことで dual simplex の
+    // entering 候補を有効化する。
+    const DUAL_FEAS_MARGIN: f64 = 1e-3;
     for j in 0..n_ext {
         if is_basic[j] { continue; }
         // a_j^T y を計算
@@ -192,8 +213,8 @@ fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u
             (cs..ce).map(|k| ext.a.values[k] * y_init[ext.a.row_ind[k]]).sum()
         };
         let c_bar = c_perturbed[j] - aty;
-        if c_bar < 0.0 {
-            c_perturbed[j] -= c_bar; // c_bar 0 に
+        if c_bar < DUAL_FEAS_MARGIN {
+            c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar; // c_bar = MARGIN に
         }
     }
 
