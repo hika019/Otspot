@@ -31,10 +31,15 @@ pub(crate) enum PostsolveStep {
     /// Empty row removal の逆変換 (全係数ゼロ行)
     EmptyRow { orig_row: usize },
     /// Singleton row の逆変換 (Eq制約、変数1つで値確定)
+    /// Dual 復元: y_i = c_j / a_ij (bound 非 active 前提、active 時は z_j != 0 を別途扱う)
     SingletonRow {
         orig_row: usize,
         orig_col: usize,
         value: f64,
+        /// intermediate state での a_ij と c_j (snapshot)。
+        /// dual 復元時に y_i = c_j / a_ij で使用。
+        a_ij: f64,
+        c_j: f64,
     },
     /// Redundant constraint removal の逆変換 (常に満たされる制約)
     RedundantConstraint { orig_row: usize },
@@ -515,13 +520,16 @@ fn step2_singleton_row(st: &mut PresolveState) -> Result<(), PresolveStatus> {
                     st.b[row] -= val * value;
                 }
             }
-            st.obj_offset += st.c[j] * value;
+            let c_j_snapshot = st.c[j];
+            st.obj_offset += c_j_snapshot * value;
             st.removed_cols[j] = true;
             st.removed_rows[i] = true;
             st.postsolve_stack.push(PostsolveStep::SingletonRow {
                 orig_row: i,
                 orig_col: j,
                 value,
+                a_ij,
+                c_j: c_j_snapshot,
             });
         }
     }
@@ -898,12 +906,20 @@ fn eliminate_variable_via_eq_row(
         .copied()
         .collect();
 
-    // 列 j のエントリ (piv_row 以外) を取得
+    // 列 j のエントリ (piv_row 以外) を取得。
+    // active かつ piv_row 以外。Dual 復元 snapshot もこれを再利用する。
     let col_j_others: Vec<(usize, f64)> = st.col_entries[j]
         .iter()
         .filter(|&&(ii, v)| ii != piv_row && !st.removed_rows[ii] && v.abs() >= ZERO_TOL)
         .copied()
         .collect();
+
+    // Dual 復元 snapshot (分配前 / active i のみ)。
+    // 分配 (下のループ) で行 i の x_j 係数が 0 化されると col_entries[j] から消えるため、
+    // ここで先に確保する。LIFO postsolve 順では active な i は j より後で消える
+    // (= j より先に復元される) ため、y_i は j 復元時点で確定済み。
+    let col_orig_entries: Vec<(usize, f64)> = col_j_others.clone();
+    let c_orig = st.c[j];
 
     // 他の行 i に対して x_j を置換
     for (i, a_ij) in col_j_others {
@@ -917,14 +933,6 @@ fn eliminate_variable_via_eq_row(
         // x_j の係数を行 i から削除（0 にする）
         st.add_to_entry(i, j, -a_ij);
     }
-
-    // Dual 復元用に "分配前" の c[j] と col_entries[j] をスナップショット
-    let c_orig = st.c[j];
-    let col_orig_entries: Vec<(usize, f64)> = st.col_entries[j]
-        .iter()
-        .filter(|&&(_, v)| v.abs() >= ZERO_TOL)
-        .copied()
-        .collect();
 
     // 目的関数係数 c[j] の分配
     if c_orig.abs() >= ZERO_TOL {

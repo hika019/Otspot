@@ -152,3 +152,91 @@ fn diag_afiro_y_presolve_off_vs_on() {
         max_y_diff, argmax_i, r_off.dual_solution[argmax_i], r_on.dual_solution[argmax_i]
     );
 }
+
+/// presolve ON で解いた afiro が LP の dual feasibility (rc>=0) と
+/// KKT 残差 ≈ 0 の両方を満たすことを要求する TDD テスト。
+///
+/// 現状 (旧方式 rc): rc>=0 PASS、KKT FAIL (削除行 12 の y=0 が KKT 破る)
+/// 新方式 rc (revert 後): rc>=0 FAIL (-0.325)、KKT PASS (機械的に 0)
+/// 真の修正 = 各 transform で y を KKT 整合に復元 → 両方 PASS
+const KKT_TOL: f64 = 1e-6;
+const RC_NONNEG_TOL: f64 = 1e-6;
+
+/// LP dual feasibility (bound 考慮版):
+/// x[j] at lb → rc[j] >= 0
+/// x[j] at ub → rc[j] <= 0
+/// interior   → rc[j] ≈ 0
+/// free / fixed → 任意
+const BOUND_TOL: f64 = 1e-6;
+
+fn check_lp_dual_kkt(qp_path: &str) {
+    let path = Path::new(qp_path);
+    if !path.exists() {
+        eprintln!("[SKIP] {} not found", qp_path);
+        return;
+    }
+    let qp = parse_qps(path).expect("parse failed");
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = true;
+    opts.timeout_secs = Some(30.0);
+    let r = solve_qp_with(&qp, &opts);
+
+    let n = qp.c.len();
+    for j in 0..n.min(r.reduced_costs.len()).min(r.solution.len()) {
+        let x = r.solution[j];
+        let (lb, ub) = qp.bounds[j];
+        let rc = r.reduced_costs[j];
+        let at_lb = lb.is_finite() && (x - lb).abs() < BOUND_TOL;
+        let at_ub = ub.is_finite() && (x - ub).abs() < BOUND_TOL;
+        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
+        if fixed { continue; }
+        if at_lb && !at_ub {
+            assert!(rc >= -RC_NONNEG_TOL,
+                "[{}] x[{}]={} at lb={} なのに rc={} < -{}",
+                qp_path, j, x, lb, rc, RC_NONNEG_TOL);
+        } else if at_ub && !at_lb {
+            assert!(rc <= RC_NONNEG_TOL,
+                "[{}] x[{}]={} at ub={} なのに rc={} > {}",
+                qp_path, j, x, ub, rc, RC_NONNEG_TOL);
+        }
+        // interior は rc ≈ 0 を厳格に要求しない (退化解で簡単に壊れる)
+    }
+
+    let (_diff, kkt_max) = kkt_residual(&qp, &r.dual_solution, &r.reduced_costs);
+    assert!(
+        kkt_max < KKT_TOL,
+        "[{}] KKT 残差 |c - A^T y - rc|_∞ = {} >= {}",
+        qp_path, kkt_max, KKT_TOL
+    );
+}
+
+#[test]
+fn test_afiro_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/afiro.QPS");
+}
+
+#[test]
+fn test_blend_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/blend.QPS");
+}
+
+#[test]
+fn test_adlittle_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/adlittle.QPS");
+}
+
+#[test]
+fn test_agg_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/agg.QPS");
+}
+
+#[test]
+fn test_sc50a_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/sc50a.QPS");
+}
+
+#[test]
+fn test_kb2_presolve_on_dual_feasibility_and_kkt() {
+    check_lp_dual_kkt("data/lp_problems/kb2.QPS");
+}

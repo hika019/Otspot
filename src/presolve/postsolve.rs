@@ -3,8 +3,68 @@
 //! Presolveで縮約した問題の解を元問題の解空間に復元する。
 //! PostsolveStackを逆順（LIFO）に適用する。
 
-use crate::problem::{LpProblem, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolverResult};
 use super::transforms::{PostsolveStep, PresolveResult};
+
+/// CSC 形式の orig_problem.a から行 i のエントリ (j, A_ij) を列挙する。
+/// O(nnz_total) の走査だが、一度だけ呼ばれる小規模問題用 (大規模では別途キャッシュ化)。
+fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
+    let mut out = Vec::new();
+    for j in 0..orig_problem.num_vars {
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                if row == i {
+                    out.push((j, vals[k]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 削除行 i の y_i を LP dual feasibility (rc[j] >= 0 ∀j) を満たすよう KKT 整合に復元する。
+///
+/// y_i = 0 と仮定したときの rc_at_y0[j] = c[j] - Σ_k A_kj * y_k から、
+/// rc[j] = rc_at_y0[j] - A_ij * y_i >= 0 という不等式を全 j について連立し、
+/// y_i の許容範囲 [min_y_i, max_y_i] を求める。
+/// 制約タイプの符号慣例 (Le: y<=0, Ge: y>=0, Eq: free) を交差させ、
+/// 範囲内で 0 に最も近い値を採用する。
+fn recover_removed_row_dual(orig_problem: &LpProblem, i: usize, dual_solution: &[f64]) -> f64 {
+    let row_entries = collect_row_entries(orig_problem, i);
+    let mut min_y_i = f64::NEG_INFINITY;
+    let mut max_y_i = f64::INFINITY;
+    for &(j, a_ij) in &row_entries {
+        if a_ij.abs() < f64::EPSILON { continue; }
+        let mut rc_at_y0 = orig_problem.c[j];
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                rc_at_y0 -= vals[k] * dual_solution[row];
+            }
+        }
+        // dual_solution[i] は呼出時点 0 と仮定 (このパスでは未復元)
+        // rc[j] = rc_at_y0 - a_ij * y_i >= 0 ⇔ a_ij * y_i <= rc_at_y0
+        let bound = rc_at_y0 / a_ij;
+        if a_ij > 0.0 {
+            if bound < max_y_i { max_y_i = bound; }
+        } else {
+            if bound > min_y_i { min_y_i = bound; }
+        }
+    }
+    let (sign_lb, sign_ub) = match orig_problem.constraint_types[i] {
+        ConstraintType::Le => (f64::NEG_INFINITY, 0.0),
+        ConstraintType::Ge => (0.0, f64::INFINITY),
+        ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
+    };
+    let lb_y = sign_lb.max(min_y_i);
+    let ub_y = sign_ub.min(max_y_i);
+    if lb_y <= ub_y {
+        if lb_y <= 0.0 && ub_y >= 0.0 { 0.0 }
+        else if ub_y < 0.0 { ub_y }
+        else { lb_y }
+    } else {
+        0.0
+    }
+}
 
 /// 縮約後の解を元問題の解空間に復元する。
 ///
@@ -53,14 +113,16 @@ pub fn run_postsolve(
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {
-                dual_solution[*orig_row] = 0.0;
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
             }
-            PostsolveStep::SingletonRow { orig_col, orig_row, value } => {
+            PostsolveStep::SingletonRow { orig_col, orig_row, value, a_ij: _, c_j: _ } => {
                 solution[*orig_col] = *value;
-                dual_solution[*orig_row] = 0.0;
+                // y_i を KKT 整合に復元 (RedundantConstraint と同様)。
+                // bound active 時も含めて rc[j]>=0 を満たす y_i を選ぶ。
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
-                dual_solution[*orig_row] = 0.0;
+                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &dual_solution);
             }
             PostsolveStep::BoundsTightened { .. } => {
                 // Bounds tightening は解の値そのものに影響しない（情報保持のみ）
@@ -82,11 +144,12 @@ pub fn run_postsolve(
                 solution[*orig_col] = (rhs - sum_others) / pivot;
 
                 // --- Dual 復元: 消去された Eq 行 piv_row の y_piv ---
-                // 最適性 (reduced cost = 0 for free pivot var):
-                //   c_j_reduced = Σ_{i: A_ij ≠ 0} A_ij_reduced * y_i
-                //   y_piv * pivot = c_j_reduced - Σ_{i ≠ piv_row} A_ij_reduced * y_i_postsolved
-                // ここで A_ij_reduced は LIFO 適用時点 = 消去直前の col_entries[j]
-                // (= col_orig_entries に格納済み)。
+                // LinearSubstitution は free 変数 (R6/R15/R5) を Eq 行から消去する変換。
+                // free 変数の最適性条件 rc[j] = 0 から:
+                //   c_j_orig = Σ_i A_ij * y_i
+                //   → y_piv = (c_orig - Σ_{i ≠ piv_row} A_ij * y_i) / pivot
+                // col_orig_entries は分配前 (= 行 i の x_j 係数を 0 化する前) の
+                // active な (i, A_ij^intermediate) snapshot (piv_row 以外)。
                 if let Some(piv_row) = orig_row {
                     let mut sum_other_rows = 0.0f64;
                     for &(row_i, a_ij) in col_orig_entries {
@@ -111,10 +174,55 @@ pub fn run_postsolve(
         }
     }
 
+    // 削除行の y を Gauss-Seidel 風反復で KKT 整合に収束させる。
+    // (a) 一般削除行 (RedundantConstraint/EmptyRow/SingletonRow): recover_removed_row_dual
+    // (b) LinearSubstitution の pivot 行: 専用 KKT 式 (c_orig - Σ A_ij*y_i)/pivot
+    // 両者を交互に更新することで LIFO 順序依存 (削除行 i を別 step が後で復元) を解消。
+    let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for step in &presolve_result.postsolve_stack {
+        if let PostsolveStep::LinearSubstitution { orig_row: Some(r), .. } = step {
+            linsub_rows.insert(*r);
+        }
+    }
+    let max_iter = 50;
+    let conv_tol = 1e-12;
+    for _ in 0..max_iter {
+        let mut max_diff = 0.0f64;
+        // (a) 一般削除行
+        for i in 0..m {
+            if presolve_result.row_map[i].is_some() { continue; }
+            if linsub_rows.contains(&i) { continue; }
+            let new_y = recover_removed_row_dual(orig_problem, i, &dual_solution);
+            let diff = (dual_solution[i] - new_y).abs();
+            if diff > max_diff { max_diff = diff; }
+            dual_solution[i] = new_y;
+        }
+        // (b) LinearSubstitution の y_piv (free 変数 rc=0 から逆算)
+        for step in &presolve_result.postsolve_stack {
+            if let PostsolveStep::LinearSubstitution {
+                orig_row: Some(piv),
+                col_orig_entries,
+                c_orig,
+                pivot,
+                ..
+            } = step {
+                let mut sum = 0.0f64;
+                for &(row_i, a_ij) in col_orig_entries {
+                    if row_i == *piv { continue; }
+                    sum += a_ij * dual_solution[row_i];
+                }
+                let new_y = (c_orig - sum) / pivot;
+                let diff = (dual_solution[*piv] - new_y).abs();
+                if diff > max_diff { max_diff = diff; }
+                dual_solution[*piv] = new_y;
+            }
+        }
+        if max_diff < conv_tol { break; }
+    }
+
     // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
     //   reduced_cost[j] = c[j] - Σ_i A_ij * y_i
-    // これは presolve で消去された変数 (FixedVar / LinearSubstitution 等) でも
-    // 最適性に整合した値を与える。
+    // y が KKT 整合に復元されていれば rc も KKT 整合になる (e61f27b 設計)。
     let mut reduced_costs = orig_problem.c.clone();
     for (j, rc) in reduced_costs.iter_mut().enumerate().take(n) {
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
