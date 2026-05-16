@@ -13,6 +13,7 @@
 
 pub mod dual;
 pub mod dual_advanced;
+pub mod dual_only;
 pub mod pricing;
 pub(crate) mod primal;
 
