@@ -67,9 +67,8 @@ pub fn solve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
         SimplexOutcome::SingularBasis => return SolverResult { status: SolveStatus::NumericalError, ..Default::default() },
     };
 
-    // Phase II: 元 c で再反復。c_bar<0 guard で dual infeasible 候補は除外、
-    // primal feasibility を維持しつつ optimal を探索。
-    let phase2 = run_dual_pure(&ext, options, phase1_basis.basis, phase1_basis.x_b);
+    // Phase II: 元 c で再反復。
+    let phase2 = run_dual_pure(&ext, options, phase1_basis.basis, phase1_basis.x_b, phase1_basis.at_ub);
     if dbg {
         eprintln!("[DUAL_ONLY] phase2 outcome={:?}",
             match &phase2.outcome {
@@ -106,10 +105,12 @@ struct Extended {
     c: Vec<f64>,
     /// 変数下限 (全 0、standard form 慣例)
     lb: Vec<f64>,
-    /// 変数上限 (slack/structural=+inf、artificial=0 FX)
+    /// 変数上限 (slack/structural=BIG_UB、artificial=0 FX)
     ub: Vec<f64>,
     /// 初期基底 (m 行 ⇒ 列 index)
     initial_basis: Vec<usize>,
+    /// 初期 at_ub フラグ (n_ext 個、true=UB に固定)
+    initial_at_ub: Vec<bool>,
     /// 元 LP の standard form 部分の列数 (= n_total)。これより大きい列は artificial
     n_standard: usize,
     /// 全列数
@@ -213,6 +214,8 @@ fn augment_with_artificials(sf: &StandardForm) -> Extended {
         *bi += lex_eps * ((i + 1) as f64);
     }
 
+    let initial_at_ub = vec![false; n_ext];
+
     Extended {
         a: a_ext,
         b: b_vec,
@@ -220,6 +223,7 @@ fn augment_with_artificials(sf: &StandardForm) -> Extended {
         lb,
         ub,
         initial_basis,
+        initial_at_ub,
         n_standard,
         n_ext,
         m,
@@ -234,30 +238,30 @@ struct PhaseResult {
     outcome: SimplexOutcome,
     basis: Vec<usize>,
     x_b: Vec<f64>,
+    at_ub: Vec<bool>,
 }
 
 /// Phase I: cost に dual-feasibility 摂動を適用して dual simplex
 fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u8) -> PhaseResult {
     let mut basis = ext.initial_basis.clone();
-    let mut x_b = ext.b.clone();
-    let mut basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
+    let mut at_ub = ext.initial_at_ub.clone();
+    let mut x_b = compute_initial_xb(ext, &basis, &at_ub, options.max_etas);
+    let basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
         Ok(bm) => bm,
-        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b },
+        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b, at_ub },
     };
-    basis_mgr.ftran_dense(&mut x_b);
 
     let mut y: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
-    basis_mgr.btran_dense(&mut y);
+    let mut basis_mgr2 = match LuBasis::new(&ext.a, &basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b, at_ub },
+    };
+    basis_mgr2.btran_dense(&mut y);
 
     let mut c_perturbed = ext.c.clone();
     let n_ext = ext.n_ext;
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
-    // 最小限の dual-feasibility 摂動: c_bar が負の場合のみ +DUAL_FEAS_MARGIN まで持ち上げる。
-    // BASE 1.0 で大幅 shift すると元 c が歪み単一相 Big-M で最適解誤差大。
-    // 0 近傍に揃えると degenerate ratio が出るが、c_bar<0 guard でカバー。
-    // dual-feasibility 摂動: c_bar に大きめのマージンを与えて degenerate ratio を排除。
-    // 単一相 Big-M なので摂動は最後まで残るが、結果 obj は OK (摂動分は y に吸収)。
     const DUAL_FEAS_MARGIN: f64 = 1.0;
     for j in 0..n_ext {
         if is_basic[j] { continue; }
@@ -265,13 +269,39 @@ fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u
         let ce = ext.a.col_ptr[j + 1];
         let aty: f64 = (cs..ce).map(|k| ext.a.values[k] * y[ext.a.row_ind[k]]).sum();
         let c_bar = c_perturbed[j] - aty;
-        if c_bar < DUAL_FEAS_MARGIN {
+        if !at_ub[j] && c_bar < DUAL_FEAS_MARGIN {
             c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar;
+        } else if at_ub[j] && c_bar > -DUAL_FEAS_MARGIN {
+            c_perturbed[j] -= c_bar + DUAL_FEAS_MARGIN;
         }
     }
 
-    let outcome = dual_iter_blp(&ext.a, &c_perturbed, &ext.lb, &ext.ub, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
-    PhaseResult { outcome, basis, x_b }
+    let outcome = dual_iter_blp(&ext.a, &c_perturbed, &ext.lb, &ext.ub, &mut basis, &mut x_b, &mut at_ub, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
+    PhaseResult { outcome, basis, x_b, at_ub }
+}
+
+/// 初期 x_B = B^{-1}(b - sum_{j non-basic} A_j * v_j) を計算する。
+fn compute_initial_xb(ext: &Extended, basis: &[usize], at_ub: &[bool], max_etas: usize) -> Vec<f64> {
+    let mut rhs = ext.b.clone();
+    let n_ext = ext.n_ext;
+    let mut is_basic = vec![false; n_ext];
+    for &b in basis { is_basic[b] = true; }
+    for j in 0..n_ext {
+        if is_basic[j] { continue; }
+        let val = if at_ub[j] { ext.ub[j] } else { ext.lb[j] };
+        if val == 0.0 || !val.is_finite() { continue; }
+        let cs = ext.a.col_ptr[j];
+        let ce = ext.a.col_ptr[j + 1];
+        for k in cs..ce {
+            rhs[ext.a.row_ind[k]] -= ext.a.values[k] * val;
+        }
+    }
+    let mut basis_mgr = match LuBasis::new(&ext.a, basis, max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return ext.b.clone(),
+    };
+    basis_mgr.ftran_dense(&mut rhs);
+    rhs
 }
 
 /// Phase II: 摂動なしの cost で dual simplex を再実行
@@ -280,12 +310,14 @@ fn run_dual_pure(
     options: &SolverOptions,
     init_basis: Vec<usize>,
     init_x_b: Vec<f64>,
+    init_at_ub: Vec<bool>,
 ) -> PhaseResult {
     let mut basis = init_basis;
     let mut x_b = init_x_b;
+    let mut at_ub = init_at_ub;
     let basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
         Ok(bm) => bm,
-        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b },
+        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b, at_ub },
     };
 
     let mut c2 = ext.c.clone();
@@ -295,8 +327,8 @@ fn run_dual_pure(
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
 
-    let outcome = dual_iter_blp(&ext.a, &c2, &ext.lb, &ext.ub, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
-    PhaseResult { outcome, basis, x_b }
+    let outcome = dual_iter_blp(&ext.a, &c2, &ext.lb, &ext.ub, &mut basis, &mut x_b, &mut at_ub, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
+    PhaseResult { outcome, basis, x_b, at_ub }
 }
 
 // =====================================================================
@@ -320,6 +352,7 @@ fn dual_iter_blp(
     ext_ub: &[f64],
     basis: &mut Vec<usize>,
     x_b: &mut Vec<f64>,
+    at_ub: &mut Vec<bool>,
     mut basis_mgr: LuBasis,
     is_basic_init: &[bool],
     n: usize,
@@ -438,24 +471,40 @@ fn dual_iter_blp(
         let mut entering_col: Option<usize> = None;
         let mut min_ratio = f64::INFINITY;
         let mut pivot_element = 0.0_f64;
-        // min-ratio + Bland 規則 tie-break (textbook standard)
-        // **c_bar >= 0 (at LB の dual 実行可能) のみ候補に**:
-        //   c_bar < 0 候補を選ぶと leaving の新 c_bar = -theta > 0 になり、leaving が
-        //   LB に行けても OK だが、entering の現 c_bar < 0 は既に dual 違反なので
-        //   そもそも候補にすべきでない。
-        const DUAL_FEAS_GUARD: f64 = -1e-9;
+        // BLP ratio test: at_ub の状態に応じて dual feasibility と pivot 方向を変える。
+        //   非基底 j の dual 実行可能性:
+        //     at LB (at_ub=false): c_bar >= 0 必要
+        //     at UB (at_ub=true):  c_bar <= 0 必要
+        //   leaving direction +1 (x_B[p]↑ 必要):
+        //     LB 候補で alpha<0、または UB 候補で alpha>0
+        //     dual step δ = |c_bar_j| / |alpha_pj|
+        //   leaving direction -1 (x_B[p]↓ 必要):
+        //     LB 候補で alpha>0、または UB 候補で alpha<0
+        //
+        // c_bar が dual 違反の候補は除外 (絶対値で guard)。
+        const DUAL_FEAS_GUARD: f64 = 1e-9;
         for j in 0..n {
             if is_basic[j] { continue; }
-            if c_bar[j] < DUAL_FEAS_GUARD { continue; } // skip dual-infeasible candidates
+            // dual feasibility filter
+            if !at_ub[j] && c_bar[j] < -DUAL_FEAS_GUARD { continue; }
+            if at_ub[j]  && c_bar[j] > DUAL_FEAS_GUARD  { continue; }
+
             let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
             let alpha: f64 = (cs..ce).map(|k| rho[a.row_ind[k]] * a.values[k]).sum();
-            let (valid, denom) = if leaving_direction > 0 {
-                (alpha < -PIVOT_NEG_TOL, -alpha)
+
+            // direction filter
+            let (valid, abs_alpha) = if leaving_direction > 0 {
+                // x_B[p]↑: LB 候補 alpha<0 / UB 候補 alpha>0
+                let v = if !at_ub[j] { alpha < -PIVOT_NEG_TOL } else { alpha > PIVOT_NEG_TOL };
+                (v, alpha.abs())
             } else {
-                (alpha > PIVOT_NEG_TOL, alpha)
+                // x_B[p]↓: LB 候補 alpha>0 / UB 候補 alpha<0
+                let v = if !at_ub[j] { alpha > PIVOT_NEG_TOL } else { alpha < -PIVOT_NEG_TOL };
+                (v, alpha.abs())
             };
             if !valid { continue; }
-            let ratio = c_bar[j] / denom;
+            // dual step = |c_bar| / |alpha|. min 候補 = 最初に c_bar が 0 線を超える var。
+            let ratio = c_bar[j].abs() / abs_alpha;
             if ratio < min_ratio - PIVOT_TOL {
                 min_ratio = ratio;
                 entering_col = Some(j);
@@ -510,6 +559,13 @@ fn dual_iter_blp(
         is_basic[q] = true;
         basis[p] = q;
         basis_mgr.update(q, p, &alpha_sv);
+
+        // at_ub 更新: leaving は dir に応じて bound に行く。entering は basic に。
+        // dir=+1 (LB violation): leaving は LB に → at_ub[leaving]=false
+        // dir=-1 (UB violation): leaving は UB に → at_ub[leaving]=true
+        at_ub[leaving_col] = leaving_direction < 0;
+        // entering は basic になるので at_ub[q] は意味を失う (false に reset)
+        at_ub[q] = false;
 
         // Devex 重み更新 (Harris 1973) with overflow cap:
         //   γ_p_new = max(γ_p_old / pivot^2, max_{i!=p} (α_iq/pivot)^2 * γ_p_old)
