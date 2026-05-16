@@ -12,10 +12,10 @@
 
 use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
+use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
+use crate::basis::{BasisManager, LuBasis};
 use super::{StandardForm, SimplexOutcome, build_standard_form, extract_solution};
-use super::dual::dual_simplex_core;
 
 /// 人工列に与える Big-M cost。
 /// 1e6 で Netlib の |c| (≈ 1e4-1e5) を支配しつつ、f64 round-off (~1e-15 相対) で
@@ -176,51 +176,34 @@ struct PhaseResult {
 
 /// Phase I: cost に dual-feasibility 摂動を適用して dual simplex
 fn run_dual_with_perturbation(ext: &Extended, options: &SolverOptions, _phase: u8) -> PhaseResult {
-    use crate::basis::{BasisManager, LuBasis};
     let mut basis = ext.initial_basis.clone();
-
-    // 初期 x_B = B^{-1} b を計算 (basis 構造は identity / -identity 混在)
+    let mut x_b = ext.b.clone();
     let mut basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
         Ok(bm) => bm,
-        Err(_) => return PhaseResult {
-            outcome: SimplexOutcome::SingularBasis,
-            basis,
-            x_b: ext.b.clone(),
-        },
+        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b },
     };
-    let mut x_b = ext.b.clone();
     basis_mgr.ftran_dense(&mut x_b);
 
-    // 初期 y = B^{-T} c_B
-    let mut y_init: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
-    basis_mgr.btran_dense(&mut y_init);
+    let mut y: Vec<f64> = basis.iter().map(|&b| ext.c[b]).collect();
+    basis_mgr.btran_dense(&mut y);
 
-    // c_bar_j = c_j - y^T A_j を計算し、c_perturbed で dual 実行可能化
     let mut c_perturbed = ext.c.clone();
     let n_ext = ext.n_ext;
     let mut is_basic = vec![false; n_ext];
     for &b in &basis { is_basic[b] = true; }
-    // DUAL_FEAS_MARGIN: 摂動でちょうど c_bar=0 にすると、後続 pivot で
-    // ratio=0 となり進歩しなくなる。小さい正の余裕を残すことで dual simplex の
-    // entering 候補を有効化する。
     const DUAL_FEAS_MARGIN: f64 = 1e-3;
     for j in 0..n_ext {
         if is_basic[j] { continue; }
-        // a_j^T y を計算
-        let aty: f64 = {
-            let cs = ext.a.col_ptr[j];
-            let ce = ext.a.col_ptr[j + 1];
-            (cs..ce).map(|k| ext.a.values[k] * y_init[ext.a.row_ind[k]]).sum()
-        };
+        let cs = ext.a.col_ptr[j];
+        let ce = ext.a.col_ptr[j + 1];
+        let aty: f64 = (cs..ce).map(|k| ext.a.values[k] * y[ext.a.row_ind[k]]).sum();
         let c_bar = c_perturbed[j] - aty;
         if c_bar < DUAL_FEAS_MARGIN {
-            c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar; // c_bar = MARGIN に
+            c_perturbed[j] += DUAL_FEAS_MARGIN - c_bar;
         }
     }
 
-    let outcome = dual_simplex_core(
-        &ext.a, &mut x_b, &c_perturbed, &mut basis, ext.m, ext.n_standard, options,
-    );
+    let outcome = dual_iter(&ext.a, &c_perturbed, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
     PhaseResult { outcome, basis, x_b }
 }
 
@@ -233,17 +216,160 @@ fn run_dual_pure(
 ) -> PhaseResult {
     let mut basis = init_basis;
     let mut x_b = init_x_b;
+    let basis_mgr = match LuBasis::new(&ext.a, &basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return PhaseResult { outcome: SimplexOutcome::SingularBasis, basis, x_b },
+    };
 
-    // Phase II では Big-M を外し、人工変数の cost を 0 にする
     let mut c2 = ext.c.clone();
-    for j in ext.n_standard..ext.n_ext {
-        c2[j] = 0.0;
+    for j in ext.n_standard..ext.n_ext { c2[j] = 0.0; }
+
+    let n_ext = ext.n_ext;
+    let mut is_basic = vec![false; n_ext];
+    for &b in &basis { is_basic[b] = true; }
+
+    let outcome = dual_iter(&ext.a, &c2, &mut basis, &mut x_b, basis_mgr, &is_basic, ext.n_ext, ext.m, options);
+    PhaseResult { outcome, basis, x_b }
+}
+
+// =====================================================================
+// Pure dual simplex iteration (textbook)
+// =====================================================================
+
+/// 教科書 dual simplex iteration:
+///   1. Leaving: x_B[p] < -tol で最も infeasible な行
+///   2. BTRAN: rho = e_p^T B^{-1}
+///   3. trow[j] = rho^T A_j (alpha_p,j)
+///   4. Ratio test: j non-basic with trow[j] < -tol を候補とし、min |c_bar[j] / trow[j]| を選ぶ
+///   5. FTRAN, pivot, x_b 更新、basis 更新、c_bar 再計算
+fn dual_iter(
+    a: &CscMatrix,
+    c: &[f64],
+    basis: &mut Vec<usize>,
+    x_b: &mut Vec<f64>,
+    mut basis_mgr: LuBasis,
+    is_basic_init: &[bool],
+    n: usize,
+    m: usize,
+    options: &SolverOptions,
+) -> SimplexOutcome {
+    let mut is_basic = is_basic_init.to_vec();
+
+    // c_bar 初期計算
+    let mut y: Vec<f64> = basis.iter().map(|&b| c[b]).collect();
+    basis_mgr.btran_dense(&mut y);
+    let mut c_bar = vec![0.0_f64; n];
+    for j in 0..n {
+        if is_basic[j] { continue; }
+        let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
+        let aty: f64 = (cs..ce).map(|k| a.values[k] * y[a.row_ind[k]]).sum();
+        c_bar[j] = c[j] - aty;
     }
 
-    let outcome = dual_simplex_core(
-        &ext.a, &mut x_b, &c2, &mut basis, ext.m, ext.n_standard, options,
-    );
-    PhaseResult { outcome, basis, x_b }
+    const FEAS_TOL: f64 = 1e-7;
+    const PIVOT_NEG_TOL: f64 = 1e-9;
+    let max_iter = 1_000_000usize;
+    let deadline = options.deadline;
+
+    for _iter in 0..max_iter {
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Timeout(obj);
+            }
+        }
+
+        // 1. Leaving row (most negative x_B)
+        let mut leaving_row: Option<usize> = None;
+        let mut worst = -FEAS_TOL;
+        for i in 0..m {
+            if x_b[i] < worst {
+                worst = x_b[i];
+                leaving_row = Some(i);
+            }
+        }
+        let p = match leaving_row {
+            None => {
+                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                return SimplexOutcome::Optimal(obj, y);
+            }
+            Some(p) => p,
+        };
+
+        // 2. BTRAN: rho = e_p^T B^{-1}
+        let mut rho = vec![0.0_f64; m];
+        rho[p] = 1.0;
+        basis_mgr.btran_dense(&mut rho);
+
+        // 3+4. Ratio test
+        let mut entering_col: Option<usize> = None;
+        let mut min_ratio = f64::INFINITY;
+        let mut pivot_element = 0.0_f64;
+        for j in 0..n {
+            if is_basic[j] { continue; }
+            let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
+            let alpha: f64 = (cs..ce).map(|k| rho[a.row_ind[k]] * a.values[k]).sum();
+            if alpha < -PIVOT_NEG_TOL {
+                let ratio = c_bar[j] / (-alpha);
+                if ratio < min_ratio - PIVOT_TOL {
+                    min_ratio = ratio;
+                    entering_col = Some(j);
+                    pivot_element = alpha;
+                } else if (ratio - min_ratio).abs() <= PIVOT_TOL {
+                    if let Some(prev) = entering_col {
+                        if j < prev {
+                            entering_col = Some(j);
+                            pivot_element = alpha;
+                        }
+                    }
+                }
+            }
+        }
+        let q = match entering_col {
+            None => return SimplexOutcome::Unbounded, // 双対非有界 = 主実行不可
+            Some(q) => q,
+        };
+
+        // 5. FTRAN: alpha_col = B^{-1} A_q
+        let (q_rows, q_vals) = a.get_column(q).unwrap();
+        let mut alpha_sv = SparseVec {
+            indices: q_rows.to_vec(),
+            values: q_vals.to_vec(),
+            len: m,
+        };
+        basis_mgr.ftran(&mut alpha_sv);
+        let mut alpha_dense = vec![0.0_f64; m];
+        alpha_sv.to_dense_into(&mut alpha_dense);
+
+        // step = x_B[p] / pivot_element (両方負 → step > 0)
+        let step = x_b[p] / pivot_element;
+        for i in 0..m {
+            x_b[i] -= alpha_dense[i] * step;
+        }
+        x_b[p] = step; // 入基 q の新値
+
+        let leaving_col = basis[p];
+        is_basic[leaving_col] = false;
+        is_basic[q] = true;
+        basis[p] = q;
+        basis_mgr.update(q, p, &alpha_sv);
+
+        // c_bar 再計算 (簡略: 全再計算)
+        for i in 0..m { y[i] = c[basis[i]]; }
+        basis_mgr.btran_dense(&mut y);
+        for j in 0..n {
+            if is_basic[j] {
+                c_bar[j] = 0.0;
+                continue;
+            }
+            let cs = a.col_ptr[j]; let ce = a.col_ptr[j + 1];
+            let aty: f64 = (cs..ce).map(|k| a.values[k] * y[a.row_ind[k]]).sum();
+            c_bar[j] = c[j] - aty;
+        }
+    }
+
+    let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+    SimplexOutcome::Timeout(obj)
 }
 
 // =====================================================================
