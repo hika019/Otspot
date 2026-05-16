@@ -7,7 +7,7 @@ use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, LpProblem};
 use solver::qp::solve_qp_with;
-use solver::QpProblem;
+use solver::{solve_with, QpProblem};
 use std::path::Path;
 
 fn make_lp(qp: &QpProblem) -> LpProblem {
@@ -281,6 +281,26 @@ fn test_bandm_presolve_on_dual_feasibility_and_kkt() {
 #[test]
 fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/beaconfd.QPS");
+}
+
+/// TimingBreakdown が presolve ON で填まること、 各 phase Duration > 0 を要求。
+#[test]
+fn test_timing_breakdown_recorded_for_presolved_lp() {
+    let path = Path::new("data/lp_problems/afiro.QPS");
+    if !path.exists() { eprintln!("[SKIP]"); return; }
+    let qp = parse_qps(path).expect("parse");
+    let lp = make_lp(&qp);
+    let mut opts = SolverOptions::default();
+    opts.presolve = true;
+    opts.timeout_secs = Some(10.0);
+    let r = solve_with(&lp, &opts);
+    assert!(r.timing_breakdown.is_some(), "timing_breakdown must be Some when presolve reduced");
+    let tb = r.timing_breakdown.unwrap();
+    // presolve / solve は実時間で μs 単位、 0 は不自然
+    assert!(tb.presolve_us > 0, "presolve_us={}", tb.presolve_us);
+    assert!(tb.solve_us > 0, "solve_us={}", tb.solve_us);
+    // postsolve は cleanup LP で時間掛かる
+    assert!(tb.postsolve_us > 0, "postsolve_us={}", tb.postsolve_us);
 }
 
 /// scorpion の y を presolve OFF / ON で比較し、cleanup LP の必要性を観察

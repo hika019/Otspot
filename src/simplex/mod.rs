@@ -68,6 +68,8 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
         options
     };
 
+    let prof_t0 = std::time::Instant::now();
+
     // --- Presolve ---
     if options.presolve {
         match presolve::run_presolve(problem, options.deadline) {
@@ -106,7 +108,11 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     None
                 };
                 let eff_opts = opts_no_ws.as_ref().unwrap_or(options);
+                let t_presolve_done = std::time::Instant::now();
+                let presolve_us = t_presolve_done.duration_since(prof_t0).as_micros() as u64;
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
+                let t_solve_done = std::time::Instant::now();
+                let solve_us = t_solve_done.duration_since(t_presolve_done).as_micros() as u64;
                 // Presolve で縮約された問題を Simplex が解けない場合 (SingularBasis / check_eq_feasibility 失敗):
                 // - capri: presolve 後の縮約問題が Phase I で SingularBasis (初期基底が特異)
                 // - forplan: Phase II 後の解が Eq 制約を大きく違反 (人工変数の数値ドリフト)
@@ -114,7 +120,12 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 if raw.status == SolveStatus::NumericalError {
                     return solve_without_presolve(problem, options);
                 }
-                return presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
+                let mut res = presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
+                let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
+                res.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                    presolve_us, solve_us, postsolve_us,
+                });
+                return res;
             }
             Ok(_) => {
                 // 縮約不要: fallthrough して通常ルートで解く
