@@ -127,19 +127,66 @@ fn build_and_solve_cleanup_lp(
 
     if b_clean.is_empty() { return None; }
 
-    // y_i 変数 bound (constraint type 符号慣例)
-    let bounds_clean: Vec<(f64, f64)> = deleted_rows.iter().map(|&i| {
-        match orig_problem.constraint_types[i] {
-            ConstraintType::Le => (f64::NEG_INFINITY, 0.0),
-            ConstraintType::Ge => (0.0, f64::INFINITY),
-            ConstraintType::Eq => (f64::NEG_INFINITY, f64::INFINITY),
-        }
-    }).collect();
-    let c_clean = vec![0.0f64; k]; // feasibility のみ
-
+    // Phase I 風 slack 緩和で cleanup LP を常に feasible 化。
+    // 各制約に slack 変数を追加し、目的を min Σ s に変更:
+    //   Le: Σ a*y - s ≤ rc, s ≥ 0
+    //   Ge: Σ a*y + s ≥ rc, s ≥ 0
+    //   Eq: Σ a*y + s_pos - s_neg = rc, s_pos/s_neg ≥ 0
+    // 最適値 0 なら厳密に rc 符号制約を満たす y が存在、0 でなければ違反量。
     let m_clean = b_clean.len();
+    let mut slack_count = 0usize; // 追加 slack 変数の数 (Eq は 2、Le/Ge は 1)
+    let mut slack_cols_per_row: Vec<(usize, Option<usize>)> = Vec::with_capacity(m_clean); // (s_idx, optional s_neg_idx for Eq)
+    for ct in &ct_clean {
+        match ct {
+            ConstraintType::Eq => {
+                let pos = k + slack_count;
+                let neg = k + slack_count + 1;
+                slack_cols_per_row.push((pos, Some(neg)));
+                slack_count += 2;
+            }
+            _ => {
+                slack_cols_per_row.push((k + slack_count, None));
+                slack_count += 1;
+            }
+        }
+    }
+    // 各 slack 列を A に追加 (係数 ±1)
+    for (row_idx, (s_pos, s_neg_opt)) in slack_cols_per_row.iter().enumerate() {
+        let sign = match ct_clean[row_idx] {
+            ConstraintType::Le => -1.0,  // a*y - s <= rc
+            ConstraintType::Ge => 1.0,   // a*y + s >= rc
+            ConstraintType::Eq => 1.0,   // a*y + s_pos - s_neg = rc
+        };
+        tri_rows.push(row_idx);
+        tri_cols.push(*s_pos);
+        tri_vals.push(sign);
+        if let Some(s_neg) = s_neg_opt {
+            tri_rows.push(row_idx);
+            tri_cols.push(*s_neg);
+            tri_vals.push(-1.0);
+        }
+    }
+    let total_vars = k + slack_count;
+
+    // 変数 bound: y は constraint type 符号慣例、slack は [0, ∞)
+    let mut bounds_clean: Vec<(f64, f64)> = Vec::with_capacity(total_vars);
+    for &i in &deleted_rows {
+        match orig_problem.constraint_types[i] {
+            ConstraintType::Le => bounds_clean.push((f64::NEG_INFINITY, 0.0)),
+            ConstraintType::Ge => bounds_clean.push((0.0, f64::INFINITY)),
+            ConstraintType::Eq => bounds_clean.push((f64::NEG_INFINITY, f64::INFINITY)),
+        }
+    }
+    for _ in 0..slack_count {
+        bounds_clean.push((0.0, f64::INFINITY));
+    }
+
+    // 目的: min Σ slack (y の係数は 0)
+    let mut c_clean = vec![0.0f64; total_vars];
+    for j in k..total_vars { c_clean[j] = 1.0; }
+
     let a_clean = CscMatrix::from_triplets(
-        &tri_rows, &tri_cols, &tri_vals, m_clean, k
+        &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
     ).ok()?;
     let cleanup_lp = LpProblem::new_general(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
@@ -150,9 +197,10 @@ fn build_and_solve_cleanup_lp(
     opts.warm_start = None;
     opts.timeout_secs = Some(CLEANUP_LP_TIMEOUT_SECS);
     let r = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
-    let _ = m_clean;
-    if r.status == SolveStatus::Optimal && r.solution.len() == k {
-        Some(r.solution)
+    let _ = (slack_count, m_clean);
+    if r.status == SolveStatus::Optimal && r.solution.len() == total_vars {
+        // 先頭 k 個が y_i、残り slack
+        Some(r.solution[..k].to_vec())
     } else {
         None
     }
