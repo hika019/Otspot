@@ -1,15 +1,15 @@
-//! LP dispatch モジュール (dual-only)
+//! LP dispatch モジュール
 //!
-//! Q=0 退化ケース (LP 問題) を `simplex::dual_only::solve` に委譲する。
-//! IPM dispatch / Simplex フォールバックは削除済み。
+//! Q=0 退化ケース (LP 問題) を `simplex::solve_with` (= dual_advanced 経由) に委譲する。
+//! IPM dispatch / 旧 dual_only は撤廃済み。
 
 use crate::options::SolverOptions;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::simplex::dual_only;
+use crate::problem::{LpProblem, SolverResult};
+use crate::simplex;
 
 use super::QpProblem;
 
-/// Q=0 退化ケース (LP 問題) を dual simplex に委譲して QP 結果に変換する
+/// Q=0 退化ケース (LP 問題) を simplex (Harris BFRT + DSE 装備の dual_advanced) に委譲する。
 pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     // deadline 確定 (timeout_secs → deadline 変換)
     let opts_with_deadline;
@@ -42,13 +42,9 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         Err(_) => return SolverResult::infeasible(),
     };
 
-    let _ = ConstraintType::Eq; // imports kept stable
+    let mut result = simplex::solve_with(&lp, options);
 
-    // 単一エントリ: dual_only
-    let mut result = dual_only::solve(&lp, options);
-
-    // objective に obj_offset を加味 (LpProblem 側にも c·x + offset の慣例があるなら必要)
-    // dual_only は c·x のみ返す。problem 全体の obj_offset を追加。
+    // QP 全体の obj_offset を加味
     result.objective += problem.obj_offset;
     result
 }

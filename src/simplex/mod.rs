@@ -13,7 +13,6 @@
 
 pub mod dual;
 pub mod dual_advanced;
-pub mod dual_only;
 pub mod pricing;
 pub(crate) mod primal;
 
@@ -25,16 +24,6 @@ use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 use log::warn;
 
 pub(crate) use primal::{two_phase_simplex, extract_solution, revised_simplex_core, reconcile_final_basis_state};
-
-// dual_only モジュール用 StandardForm accessor
-pub(crate) fn sf_field_m(sf: &StandardForm) -> usize { sf.m }
-pub(crate) fn sf_field_n_total(sf: &StandardForm) -> usize { sf.n_total }
-pub(crate) fn sf_field_a(sf: &StandardForm) -> &CscMatrix { &sf.a }
-pub(crate) fn sf_field_b(sf: &StandardForm) -> &[f64] { &sf.b }
-pub(crate) fn sf_field_c(sf: &StandardForm) -> &[f64] { &sf.c }
-pub(crate) fn sf_field_initial_basis(sf: &StandardForm) -> &[usize] { &sf.initial_basis }
-pub(crate) fn sf_field_needs_artificial(sf: &StandardForm, i: usize) -> bool { sf.needs_artificial[i] }
-pub(crate) fn sf_field_obj_offset(sf: &StandardForm) -> f64 { sf.obj_offset }
 
 /// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
 ///
