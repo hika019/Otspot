@@ -155,7 +155,7 @@ mkdir -p "$TMPDIR_BASE"
 
 # 終了時クリーンアップ
 cleanup() {
-  rm -rf "$TMPDIR_BASE"
+  if [[ "${BENCH_KEEP_LOGS:-0}" != "1" ]]; then rm -rf "$TMPDIR_BASE"; else echo "[DEBUG] keeping $TMPDIR_BASE" >&2; fi
 }
 trap cleanup EXIT
 
