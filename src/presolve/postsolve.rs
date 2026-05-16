@@ -65,6 +65,39 @@ pub fn run_postsolve(
             PostsolveStep::BoundsTightened { .. } => {
                 // Bounds tightening は解の値そのものに影響しない（情報保持のみ）
             }
+            PostsolveStep::LinearSubstitution {
+                orig_col,
+                orig_row,
+                pivot,
+                rhs,
+                others,
+                col_orig_entries,
+                c_orig,
+            } => {
+                // --- Primal 復元: x_j = (rhs - Σ coeff_k * x_k) / pivot ---
+                let mut sum_others = 0.0f64;
+                for &(other_col, coeff) in others {
+                    sum_others += coeff * solution[other_col];
+                }
+                solution[*orig_col] = (rhs - sum_others) / pivot;
+
+                // --- Dual 復元: 消去された Eq 行 piv_row の y_piv ---
+                // 最適性 (reduced cost = 0 for free pivot var):
+                //   c_j_reduced = Σ_{i: A_ij ≠ 0} A_ij_reduced * y_i
+                //   y_piv * pivot = c_j_reduced - Σ_{i ≠ piv_row} A_ij_reduced * y_i_postsolved
+                // ここで A_ij_reduced は LIFO 適用時点 = 消去直前の col_entries[j]
+                // (= col_orig_entries に格納済み)。
+                if let Some(piv_row) = orig_row {
+                    let mut sum_other_rows = 0.0f64;
+                    for &(row_i, a_ij) in col_orig_entries {
+                        if row_i == *piv_row {
+                            continue;
+                        }
+                        sum_other_rows += a_ij * dual_solution[row_i];
+                    }
+                    dual_solution[*piv_row] = (c_orig - sum_other_rows) / pivot;
+                }
+            }
         }
     }
 
@@ -78,12 +111,15 @@ pub fn run_postsolve(
         }
     }
 
-    // 被縮小費用を元変数空間に展開（削除変数は 0）
-    let mut reduced_costs = vec![0.0f64; n];
-    for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
-        if let Some(jj) = maybe_jj {
-            if jj < result.reduced_costs.len() {
-                reduced_costs[j] = result.reduced_costs[jj];
+    // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
+    //   reduced_cost[j] = c[j] - Σ_i A_ij * y_i
+    // これは presolve で消去された変数 (FixedVar / LinearSubstitution 等) でも
+    // 最適性に整合した値を与える。
+    let mut reduced_costs = orig_problem.c.clone();
+    for (j, rc) in reduced_costs.iter_mut().enumerate().take(n) {
+        if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                *rc -= vals[k] * dual_solution[row];
             }
         }
     }
