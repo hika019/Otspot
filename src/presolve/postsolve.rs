@@ -28,15 +28,16 @@ fn build_and_solve_cleanup_lp(
     dual_solution_known: &[f64],
     deadline: Option<Instant>,
 ) -> Option<Vec<f64>> {
-    // Inherit the parent deadline. If the parent has no deadline (rare —
-    // primarily tests / unbounded interactive runs), we still must avoid running
-    // the cleanup LP unbounded because its size scales with the number of
-    // deleted rows (ken-18: m_clean ≈ 96k × n_clean ≈ 323k vs. the original
-    // 105k × 155k). We refuse to start the cleanup LP without a deadline — the
-    // Gauss-Seidel fallback in `run_postsolve` will recover the duals.
-    let parent_deadline = deadline?;
-    if Instant::now() >= parent_deadline {
-        return None;
+    // Inherit the parent deadline. If the parent has already lapsed, bail out
+    // immediately and let the Gauss-Seidel fallback handle dual recovery.
+    // When the parent has no deadline (Default options / interactive callers
+    // that opted into unbounded runtime), we let the cleanup LP run without a
+    // budget — the previous behaviour and required for the KKT-accuracy unit
+    // tests in tests/diag_afiro_y.rs.
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return None;
+        }
     }
     let n = orig_problem.num_vars;
     let m = orig_problem.num_constraints;
@@ -211,7 +212,9 @@ fn build_and_solve_cleanup_lp(
     // (ken-18) easily spent minutes in setup before the budget was enforced.
     // Wiring the parent deadline through directly makes every inner step
     // (parse, scale, factorize, simplex iterate) check the same clock.
-    opts.deadline = Some(parent_deadline);
+    // `deadline = None` is passed through unchanged — callers without a
+    // budget opted into unbounded runtime.
+    opts.deadline = deadline;
     let r = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
     if r.status == SolveStatus::Optimal && r.solution.len() == total_vars {
