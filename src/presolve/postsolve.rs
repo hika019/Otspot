@@ -206,6 +206,9 @@ fn build_and_solve_cleanup_lp(
     let a_clean = CscMatrix::from_triplets(
         &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
     ).ok()?;
+    // Phase 2 でも b_clean / ct_clean を参照するため clone を保持
+    let b_clean_keep = b_clean.clone();
+    let ct_clean_keep = ct_clean.clone();
     let cleanup_lp = LpProblem::new_general(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
     ).ok()?;
@@ -223,15 +226,158 @@ fn build_and_solve_cleanup_lp(
     // `deadline = None` is passed through unchanged — callers without a
     // budget opted into unbounded runtime.
     opts.deadline = deadline;
-    let r = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
+    let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
-    if r.status == SolveStatus::Optimal && r.solution.len() == total_vars {
-        // 先頭 k 個が y_i、残り slack
-        Some(r.solution[..k].to_vec())
+    if std::env::var("POSTSOLVE_DIAG").is_ok() {
+        eprintln!("[postsolve_diag] Phase1 status={:?} sol_len={} obj={:.3e}",
+            r1.status, r1.solution.len(), r1.objective);
+    }
+    if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
+        // Phase 1 失敗 → 上位の Gauss-Seidel フォールバックに任せる。
+        return None;
+    }
+    let y_phase1: Vec<f64> = r1.solution[..k].to_vec();
+    let slack_phase1: Vec<f64> = r1.solution[k..].to_vec();
+
+    // -------------------------------------------------------------------------
+    // Phase 2: タイ崩し (task #15)
+    //
+    // Phase 1 の cleanup LP は `min Σ slack` で feasibility 最大化のみ求める
+    // ため、複数の y が同じ optimal slack を達成する **dual 退化** ケース
+    // (perold col 229 / greenbea col 2741 等) で y は under-determined になる。
+    // simplex のタイ崩しは LP 標準形の pivoting 順序依存で、|y| が極端に大きい
+    // (perold で y=-30, greenbea で y=-3664) 別解を採用してしまい、後段で
+    // dfeas を悪化させていた。
+    //
+    // 対処: Phase 2 で `min Σ |y_i - y_ref[i]|` を解く。slack は Phase 1 の
+    // optimal 値で **固定** することで feasible 領域を維持し、その中で y を
+    // y_ref (= postsolve loop の局所 KKT 復元 = dual_solution_known) に最も
+    // 近づける。
+    //
+    // 構造的設計 (magic number 排除):
+    //   - ε による重み付け (1 phase) ではなく Phase 2 LP を別解として解く
+    //   - tie-break は別 LP の hard objective なので scale 依存なし
+    //   - 計算量: cleanup LP 1 回追加 (Phase 2)。Phase 1 と同サイズ程度
+    //
+    // 旧 3-way 比較 (y_loop / y_gs / y_cl の dfeas 最小選択) は不要になる
+    // (task #15 commit で撤廃予定)。
+    //
+    // 変数:  y_i (k 個、constraint type 符号 bound) + d_pos[i], d_neg[i]
+    //        (各 k 個、>= 0)。合計 3k 個。
+    // 制約:  (i) Phase 1 と同じ a*y 制約だが slack は Phase 1 値で吸収:
+    //          Le: Σ a*y <= rc + slack_phase1[r]    (slack 抜き、RHS 緩和)
+    //          Ge: Σ a*y >= rc - slack_phase1[r]
+    //          Eq: Σ a*y = rc + slack_pos* - slack_neg*
+    //       (ii) Tie-break Eq 行 (k 個): y_i - d_pos[i] + d_neg[i] = y_ref[i]
+    // 目的:  min Σ (d_pos[i] + d_neg[i]) (= |y_i - y_ref[i]| を最小化)
+    // タイ崩しの参照値 y_ref:
+    //   y_gs (Gauss-Seidel 後) は kept 行で simplex y を保持し、deleted 行は
+    //   local 復元値 (多くは 0)。これを y_ref にすると Phase 2 が deleted 行
+    //   を 0 寄せ、kept 行は変化なし (cleanup LP は deleted 行のみ最適化なので
+    //   無関係)。ゆえに y_ref = 0 と等価。明示的に 0 にする方が意図が明確。
+    let y_ref: Vec<f64> = vec![0.0; k];
+    let phase2_total_vars = 3 * k;
+    let phase2_total_cons = m_clean + k;
+    let mut p2_tri_rows: Vec<usize> = Vec::with_capacity(tri_rows.len() + 3 * k);
+    let mut p2_tri_cols: Vec<usize> = Vec::with_capacity(tri_rows.len() + 3 * k);
+    let mut p2_tri_vals: Vec<f64> = Vec::with_capacity(tri_rows.len() + 3 * k);
+    let mut p2_b: Vec<f64> = Vec::with_capacity(phase2_total_cons);
+    let mut p2_ct: Vec<ConstraintType> = Vec::with_capacity(phase2_total_cons);
+    // (i) Phase 1 の a*y 制約を slack 抜き形で複製、RHS は Phase 1 slack で緩和
+    for (orig_idx, (slack_pos, slack_neg_opt)) in slack_cols_per_row.iter().enumerate() {
+        // a*y のエントリは tri_rows/tri_cols/tri_vals から orig_idx 行を抽出
+        for (k_t, &row) in tri_rows.iter().enumerate() {
+            if row != orig_idx { continue; }
+            let col = tri_cols[k_t];
+            if col >= k { continue; } // slack 列はスキップ
+            p2_tri_rows.push(orig_idx);
+            p2_tri_cols.push(col);
+            p2_tri_vals.push(tri_vals[k_t]);
+        }
+        let s_p_val = slack_phase1[*slack_pos - k];
+        // Phase 1 形:
+        //   Le: a*y - s = rc 制約に変換可能 (slack 入り)、a*y = rc + s
+        //   Ge: a*y + s = rc, a*y = rc - s
+        //   Eq: a*y + s_pos - s_neg = rc, a*y = rc - s_pos + s_neg
+        // Phase 2 (slack 固定): a*y を Phase 1 optimal の取れる範囲に縛る
+        let rhs = match ct_clean_keep[orig_idx] {
+            ConstraintType::Le => b_clean_keep[orig_idx] + s_p_val, // a*y <= rc + s
+            ConstraintType::Ge => b_clean_keep[orig_idx] - s_p_val, // a*y >= rc - s
+            ConstraintType::Eq => {
+                let s_n_val = slack_phase1[slack_neg_opt.unwrap() - k];
+                b_clean_keep[orig_idx] - s_p_val + s_n_val          // a*y = rc - s_p + s_n
+            }
+        };
+        p2_b.push(rhs);
+        p2_ct.push(ct_clean_keep[orig_idx].clone());
+    }
+    // (ii) Tie-break Eq 制約: y_i - d_pos[i] + d_neg[i] = y_ref[i]
+    for i in 0..k {
+        let row_idx = m_clean + i;
+        p2_tri_rows.push(row_idx); p2_tri_cols.push(i);             p2_tri_vals.push(1.0);
+        p2_tri_rows.push(row_idx); p2_tri_cols.push(k + i);         p2_tri_vals.push(-1.0);
+        p2_tri_rows.push(row_idx); p2_tri_cols.push(2 * k + i);     p2_tri_vals.push(1.0);
+        p2_b.push(y_ref[i]);
+        p2_ct.push(ConstraintType::Eq);
+    }
+    // Phase 2 bounds: y は元 constraint type 符号、d_pos/d_neg は >= 0
+    let mut p2_bounds: Vec<(f64, f64)> = Vec::with_capacity(phase2_total_vars);
+    for &i in &deleted_rows {
+        match orig_problem.constraint_types[i] {
+            ConstraintType::Le => p2_bounds.push((f64::NEG_INFINITY, 0.0)),
+            ConstraintType::Ge => p2_bounds.push((0.0, f64::INFINITY)),
+            ConstraintType::Eq => p2_bounds.push((f64::NEG_INFINITY, f64::INFINITY)),
+        }
+    }
+    for _ in 0..(2 * k) { p2_bounds.push((0.0, f64::INFINITY)); }
+    // Phase 2 objective: min Σ (d_pos + d_neg)
+    let mut p2_c = vec![0.0f64; phase2_total_vars];
+    for j in k..(3 * k) { p2_c[j] = 1.0; }
+
+    if std::env::var("POSTSOLVE_DIAG").is_ok() {
+        eprintln!("[postsolve_diag] Phase2 m={} n={} nnz={} y_ref_max_abs={:.3e}",
+            phase2_total_cons, phase2_total_vars, p2_tri_rows.len(),
+            y_ref.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
+        // verify y_phase1 satisfies Phase 2 (i) constraints with rhs relaxation
+        for (orig_idx, _) in slack_cols_per_row.iter().enumerate() {
+            let mut a_y = 0.0;
+            for (kk, &row) in tri_rows.iter().enumerate() {
+                if row != orig_idx { continue; }
+                let col = tri_cols[kk];
+                if col < k { a_y += tri_vals[kk] * y_phase1[col]; }
+            }
+            let rhs = p2_b[orig_idx];
+            let viol = match p2_ct[orig_idx] {
+                ConstraintType::Le => (a_y - rhs).max(0.0),
+                ConstraintType::Ge => (rhs - a_y).max(0.0),
+                ConstraintType::Eq => (a_y - rhs).abs(),
+            };
+            if viol > 1e-6 {
+                eprintln!("[postsolve_diag]   row {} ct={:?} a*y={:.3e} rhs={:.3e} viol={:.3e}",
+                    orig_idx, p2_ct[orig_idx], a_y, rhs, viol);
+            }
+        }
+    }
+    let p2_a = match CscMatrix::from_triplets(
+        &p2_tri_rows, &p2_tri_cols, &p2_tri_vals, phase2_total_cons, phase2_total_vars
+    ) {
+        Ok(m) => m,
+        Err(_) => return Some(y_phase1), // Phase 2 build 失敗 → Phase 1 採用
+    };
+    let p2_lp = match LpProblem::new_general(p2_c, p2_a, p2_b, p2_ct, p2_bounds, None) {
+        Ok(l) => l,
+        Err(_) => return Some(y_phase1),
+    };
+    let r2 = crate::simplex::solve_without_presolve(&p2_lp, &opts);
+    if std::env::var("POSTSOLVE_DIAG").is_ok() {
+        eprintln!("[postsolve_diag] Phase 2 status={:?} sol_len={} obj={:.3e}",
+            r2.status, r2.solution.len(), r2.objective);
+    }
+    if r2.status == SolveStatus::Optimal && r2.solution.len() == phase2_total_vars {
+        Some(r2.solution[..k].to_vec())
     } else {
-        // 解けなかった: Gauss-Seidel フォールバックに任せる (run_postsolve 側で
-        // recover_removed_row_dual を全削除行に対し回す既存経路)。
-        None
+        // Phase 2 失敗 → Phase 1 採用 (3-way 比較に頼る)
+        Some(y_phase1)
     }
 }
 
@@ -575,6 +721,17 @@ pub fn run_postsolve(
         Some(y) => (dfeas_bound(y), true),
         None => (f64::INFINITY, false),
     };
+    if std::env::var("POSTSOLVE_DIAG").is_ok() {
+        eprintln!("[postsolve_diag] df_loop={:.3e} df_gs={:.3e} df_cl={:.3e} has_cl={}",
+            df_loop, df_gs, df_cl, has_cl);
+        for &i in &[1234usize, 1238, 1270, 1236, 1233] {
+            if i < m {
+                let yc = if let Some(y) = &y_cl { y[i] } else { f64::NAN };
+                eprintln!("[postsolve_diag]   y[{}]: loop={:10.3e} gs={:10.3e} cl={:10.3e}",
+                    i, y_loop[i], y_gs[i], yc);
+            }
+        }
+    }
     // 最小 df の y を採用。同点は loop < gs < cl の優先 (計算量の小さい順)。
     let _ = has_cl;
     if df_loop <= df_gs && df_loop <= df_cl {

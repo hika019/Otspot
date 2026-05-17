@@ -336,3 +336,139 @@ fn pds_10_postsolve_dual_feasibility() {
         Err(e) => panic!("{}", e),
     }
 }
+
+// ============================================================================
+// task #14: greenbea 深掘り診断
+// ============================================================================
+
+/// 診断: greenbea の最悪 dual 違反列を print。perold_diagnostic_dump_worst_violations
+/// と同型。assertion なし。
+#[test]
+fn greenbea_diagnostic_dump_worst_violations() {
+    let path = Path::new("data/lp_problems/greenbea.QPS");
+    if !path.exists() { eprintln!("[SKIP] greenbea.QPS"); return; }
+    let prob = parse_qps(path).expect("parse greenbea");
+    let mut opts = SolverOptions::default();
+    opts.presolve = true;
+    opts.timeout_secs = Some(60.0);
+    let r = solve_qp_with(&prob, &opts);
+
+    const BOUND_TOL: f64 = 1e-6;
+    let n = prob.c.len();
+    let m = prob.num_constraints;
+
+    let mut viols: Vec<(usize, f64, f64, f64, f64, &'static str, f64, f64, f64)> = Vec::new();
+    for j in 0..n {
+        let (lb, ub) = prob.bounds[j];
+        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
+        if fixed { continue; }
+        let x = r.solution[j];
+        let rc = r.reduced_costs[j];
+        let at_lb = lb.is_finite() && (x - lb).abs() < BOUND_TOL;
+        let at_ub = ub.is_finite() && (x - ub).abs() < BOUND_TOL;
+        let (viol, where_): (f64, &'static str) = if at_lb && !at_ub {
+            (f64::max(0.0, -rc), "at_lb")
+        } else if at_ub && !at_lb {
+            (f64::max(0.0, rc), "at_ub")
+        } else {
+            (0.0, "interior")
+        };
+        if viol > 1e-6 {
+            let scale = 1.0 + rc.abs() + prob.c[j].abs();
+            viols.push((j, x, lb, ub, rc, where_, prob.c[j], viol, viol/scale));
+        }
+    }
+    viols.sort_by(|a, b| b.8.partial_cmp(&a.8).unwrap());
+    eprintln!("greenbea: status={:?} obj={:.4e} m={} n={}", r.status, r.objective, m, n);
+    eprintln!("greenbea violations (top 20 of {}):", viols.len());
+    eprintln!("  j     x          lb         ub         rc         where    c[j]       viol      rel");
+    for v in viols.iter().take(20) {
+        eprintln!("  {:5} {:10.3e} {:10.3e} {:10.3e} {:10.3e} {:8} {:10.3e} {:10.3e} {:10.3e}",
+            v.0, v.1, v.2, v.3, v.4, v.5, v.6, v.7, v.8);
+    }
+    let mut y_nonzero = 0;
+    let mut y_max = 0.0_f64;
+    for i in 0..m {
+        if r.dual_solution[i].abs() > 1e-12 { y_nonzero += 1; }
+        y_max = y_max.max(r.dual_solution[i].abs());
+    }
+    eprintln!("greenbea: y_nonzero={} y_max={:.3e}", y_nonzero, y_max);
+}
+
+/// greenbea 深掘り: col 2741 (worst) の entries と y の出元を identify。
+#[test]
+fn greenbea_col2741_deep_diag() {
+    let path = Path::new("data/lp_problems/greenbea.QPS");
+    if !path.exists() { eprintln!("[SKIP]"); return; }
+    let prob = parse_qps(path).expect("parse greenbea");
+    let mut opts_on = SolverOptions::default();
+    opts_on.presolve = true;
+    opts_on.timeout_secs = Some(60.0);
+    let r_on = solve_qp_with(&prob, &opts_on);
+
+    let mut opts_off = SolverOptions::default();
+    opts_off.presolve = false;
+    opts_off.timeout_secs = Some(180.0);
+    let r_off = solve_qp_with(&prob, &opts_off);
+    eprintln!("greenbea presolve=off status={:?}", r_off.status);
+
+    for &j in &[2741usize, 2743, 2687, 2742, 2739] {
+        eprintln!("------ col {} : c[j]={:.3e} bounds={:?} ------",
+            j, prob.c[j], prob.bounds[j]);
+        eprintln!("  x_on  = {:.3e}  rc_on = {:.3e}", r_on.solution[j], r_on.reduced_costs[j]);
+        if matches!(r_off.status, SolveStatus::Optimal) {
+            eprintln!("  x_off = {:.3e}  rc_off= {:.3e}", r_off.solution[j], r_off.reduced_costs[j]);
+        }
+        if let Ok((rows, vals)) = prob.a.get_column(j) {
+            eprintln!("  col entries ({}):", rows.len());
+            let mut sum_on = 0.0;
+            let mut sum_off = 0.0;
+            for (k, &i) in rows.iter().enumerate() {
+                let a = vals[k];
+                let yi_on = r_on.dual_solution[i];
+                let yi_off = if matches!(r_off.status, SolveStatus::Optimal) { r_off.dual_solution[i] } else { f64::NAN };
+                sum_on += a * yi_on;
+                sum_off += a * yi_off;
+                eprintln!("    i={:5} A={:10.3e} y_on={:10.3e} y_off={:10.3e} A*y_on={:10.3e} A*y_off={:10.3e}",
+                    i, a, yi_on, yi_off, a*yi_on, a*yi_off);
+            }
+            eprintln!("  Σ A*y_on  = {:.3e} → rc_on  = c - Σ = {:.3e}", sum_on, prob.c[j] - sum_on);
+            if matches!(r_off.status, SolveStatus::Optimal) {
+                eprintln!("  Σ A*y_off = {:.3e} → rc_off = c - Σ = {:.3e}", sum_off, prob.c[j] - sum_off);
+            }
+        }
+    }
+}
+
+/// 診断: greenbea で row 1270 がどの col に何個 entry を持つか列挙
+#[test]
+fn greenbea_row1270_scan() {
+    let path = Path::new("data/lp_problems/greenbea.QPS");
+    if !path.exists() { eprintln!("[SKIP]"); return; }
+    let prob = parse_qps(path).expect("parse greenbea");
+    let n = prob.c.len();
+    let row = 1270usize;
+    let mut cols_in_row: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
+    let mut opts_off = SolverOptions::default();
+    opts_off.presolve = false;
+    opts_off.timeout_secs = Some(180.0);
+    let r_off = solve_qp_with(&prob, &opts_off);
+    for j in 0..n {
+        if let Ok((rows, vals)) = prob.a.get_column(j) {
+            for (k, &i) in rows.iter().enumerate() {
+                if i == row {
+                    let x_off = if matches!(r_off.status, SolveStatus::Optimal) { r_off.solution[j] } else { f64::NAN };
+                    cols_in_row.push((j, vals[k], prob.c[j], x_off, r_off.reduced_costs[j]));
+                }
+            }
+        }
+    }
+    eprintln!("row {} appears in {} cols. ct={:?} b={}", row, cols_in_row.len(),
+        prob.constraint_types[row], prob.b[row]);
+    eprintln!("y_off[{}] = {:.3e}", row, r_off.dual_solution[row]);
+    eprintln!("  j     A_ij      c_j      x_off     rc_off    ");
+    for (j, a, c, x, rc) in cols_in_row.iter().take(40) {
+        let (lb, ub) = prob.bounds[*j];
+        eprintln!("  {:5} {:9.3e} {:9.3e} {:9.3e} {:9.3e}  bounds=({:.2e},{:.2e})", j, a, c, x, rc, lb, ub);
+    }
+}
