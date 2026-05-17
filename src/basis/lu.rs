@@ -8,9 +8,6 @@
 //! `&self.symbolic, &self.numeric` を渡す)。supernodal は Stage 2 で解放予定。
 //! ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる更新層で、本 module の変更
 //! とは独立に動作する。
-//!
-//! 旧実装 (Markowitz + 自作 Gaussian) は dfl001 m=12857 で 720ms/factorize に
-//! なり、60s timeout の主因 (Task #6/9 観測)。faer LU で 100-200ms 見込み。
 
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;

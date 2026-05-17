@@ -582,17 +582,8 @@ mod tests {
         );
     }
 
-    /// **task #12 (BOUND_HIT_TOL 撤去)**: 相対 bound-hit 判定 + sign check が
-    /// 構造的に正しい dfeas violation を返すことを assert。
-    ///
-    /// 構造仕様 (詳細は `compute_dfeas_orig` LP 経路コメント参照):
-    /// 1. bound 活性 (相対 PIVOT_TOL で判定) のとき、その方向の rc 符号制約
-    /// 2. 内点 (両端非活性): postsolve / cleanup LP noise 許容で 0
-    /// 3. free (両端 inf): 厳格 rc=0 要求
-    ///
-    /// 旧 BOUND_HIT_TOL=1e-6 は **絶対** 閾値で、x スケールに依存して誤判定を
-    /// 起こしていた (x~1e6 で hit 判定が失敗、x~1e-3 で過剰活性化)。
-    /// 新実装は `PIVOT_TOL * (1 + |x| + |bound|)` で scale-invariant。
+    /// 相対 bound-hit 判定 (`PIVOT_TOL * (1 + |x| + |bound|)`) は x スケール非依存。
+    /// 絶対閾値だと x~1e6 で hit 失敗、x~1e-3 で過剰活性化を起こす。
     #[test]
     fn test_dfeas_bound_hit_relative_structural() {
         let make_prob = |bounds: Vec<(f64, f64)>, c: Vec<f64>, x_target: f64| -> QpProblem {
