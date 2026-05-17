@@ -1,5 +1,4 @@
-//! qap15: Timeout 返却時の iterations フィールドが 0 でないことを assert。
-//! observability bug regression sentinel (task #17)。
+//! Timeout 返却時に iterations が実 iter 数を返すことの regression sentinel。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
