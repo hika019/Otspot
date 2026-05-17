@@ -1,17 +1,6 @@
-//! TDD diagnostic test for task #26 (`cycle.QPS` NumericalError).
-//!
-//! `cycle.QPS` (netlib_lp canary) returns FAIL:NumericalError at HEAD (b756f34).
-//! Known optimum from `data/baseline_objectives/netlib_lp_canary.csv`:
-//!     -5.2263930248924400e+00
-//! Root cause located by prior task #12 magic-removal agent:
-//!     src/simplex/primal.rs:440  Phase II SingularBasis → numerical_error()
-//!
-//! Test expects:
-//!   - `result.status == Optimal`
-//!   - `(obj - known) / |known| < 1e-4`  (rel 1e-4, scale=|known|)
-//!
-//! Run with: `cargo nextest run --release --test diag_cycle_numerr`.
-//! No `#[ignore]`: HEAD wall is ~4.2 s (NumericalError) and fix target is <60 s.
+//! Regression guard: `cycle.QPS` (Netlib LP canary) must converge to its known
+//! optimum within `REL_TOL`. Known objective is taken from
+//! `data/baseline_objectives/netlib_lp_canary.csv`.
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -37,7 +26,6 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 fn diag_cycle_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/cycle.QPS");
     if !path.exists() {
-        // CLAUDE.md L14: SKIP-PASS is forbidden. Make missing data a hard fail.
         panic!(
             "data missing: {:?}. Symlink data/lp_problems/cycle.QPS into the worktree.",
             path

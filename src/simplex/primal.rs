@@ -942,30 +942,16 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     // Pre-allocate RC vector (reused each iteration) for pricing strategy
     let mut rc_vec = vec![0.0f64; n_price];
 
-    // task #26: structural-singularity defense
-    //
-    // **真因**: eta-update は単独で「mathematically singular な basis」を受け入れてしまう。
-    // 後続 FTRAN で eta 連鎖が爆発し、d_max=1e21 等で検知される時点では既に basis singular。
-    //
-    // **対処**: 通常 ratio test は absolute PIVOT_TOL=1e-8 で候補を選ぶが、singular 検出
-    // 後は **column-relative stability floor** (PIVOT_STABILITY_THRESHOLD * max_d) に切替え、
-    // 不安定 pivot を ratio test 段階で排除する。stable_mode はその基底で fresh LU が成功
-    // するまで継続する (eta-update の累積で再び singular 化する余地を抑制)。
-    //
-    // 通常モードでは strict-mode と同様に Phase I が cycle する (cycle.QPS で 700k+ iters 確認)。
-    // 通常→strict-mode 切替で degenerate progression と stability の両立を狙う。
-    //
-    // snapshot は最後の fresh-LU 時点の (basis, x_B) を保持し、singular_basis 検出時に
-    // strict-mode 移行と同時に revert する。これにより eta-corrupted な basis 状態から
-    // 既知 non-singular な状態へ戻し、strict ratio test で安全に進める。
+    // eta-update can silently accept a pivot that makes B numerically singular;
+    // the loss is only visible at the next fresh LU. On detection we revert to
+    // `basis_snapshot` (the last basis a fresh LU accepted) and switch the ratio
+    // test to a column-relative pivot floor to prevent re-introducing the same
+    // singularity. `blocked_at_basis` records entering columns that triggered a
+    // revert so pricing skips them until the next clean refactor.
     let mut blocked_at_basis: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut consecutive_blocks: usize = 0;
     let max_consecutive_blocks: usize = m;
     let mut stable_mode: bool = false;
-
-    // 初期 basis は LuBasis::new で成功確認済み → snapshot として有効。
-    // x_B はスナップショットせず、revert 時に fresh LU + ftran(b) で再計算する
-    // (snapshot 時点の drift を排除し、negative slack value 等の primal infeasibility を回避)。
     let mut basis_snapshot: Vec<usize> = basis.to_vec();
 
     for _iter in 0..max_iter {
@@ -1000,9 +986,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
             rc_vec[j] = c[j] - ya;
         }
-        // task #26: 直前の singular-basis-detection で blocklist された entering 候補は
-        // 現 basis 状態では選ばない (rc=0 にすれば pricing が見落とす)。successful pivot
-        // で blocklist は clear される (新 basis では再評価)。
+        // Masking RC of blocked columns prevents pricing from re-selecting an
+        // entering column known to produce a singular basis from `basis_snapshot`.
         for &j in &blocked_at_basis {
             if j < n_price {
                 rc_vec[j] = 0.0;
@@ -1045,8 +1030,6 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
                 if basis_mgr.refactor_failed {
                     if basis_mgr.singular_basis {
-                        // task #26: 現 basis が rank-deficient (d_corrupt 真因)。
-                        // スナップショットへ revert + entering_col を blocklist → 別 column を試す。
                         blocked_at_basis.insert(entering_col);
                         consecutive_blocks += 1;
                         if consecutive_blocks > max_consecutive_blocks {
@@ -1076,15 +1059,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
         let d = &d_dense;
 
-        // 5. Harris 2-pass ratio test
+        // Harris 2-pass ratio test. Pass 2 selects max |d[i]| within
+        // `min_ratio + PIVOT_TOL` and breaks ties by Bland's rule.
         //
-        // Pass 1: Bland's min_ratio を計算 (主実行可能性の限界)。
-        // Pass 2: ratio ≤ min_ratio + PIVOT_TOL の row 群から |d[i]| が最大の row を選ぶ。
-        //         tie で Bland's (smallest basis index) → anti-cycling 保証。
-        //
-        // task #26: stable_mode (singular 検出後) では d 候補に column-relative threshold
-        // を適用し、tiny-pivot を ratio test 段階で除外する。fallback として PIVOT_TOL
-        // までは緩めて unbounded 誤判定を回避する。
+        // When `stable_mode` is on, eligibility uses a column-relative pivot
+        // floor (~1% of |d|_∞) instead of the absolute PIVOT_TOL — necessary
+        // after a singular-basis revert, since the absolute floor admits pivots
+        // that recreate the same singularity. The fallback to PIVOT_TOL when
+        // no row clears the relative floor preserves unboundedness sensitivity.
         let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
         let stable_floor = if stable_mode {
             (PIVOT_STABILITY_THRESHOLD * max_d_abs).max(PIVOT_TOL)
@@ -1102,7 +1084,6 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // stable_mode で安定行 0 件: PIVOT_TOL へ relaxed fallback (unbounded 誤判定回避)
         let effective_floor = if min_ratio.is_finite() {
             stable_floor
         } else if stable_mode {
@@ -1175,10 +1156,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // 10. Update basis index and check pivot stability
         basis[leaving_row] = entering_col;
 
-        // ピボット安定性チェック: |d[leaving_row]| / max(d) が閾値未満の場合、
-        // eta の inv_pivot が大きくなりすぎて FTRAN/BTRAN が数値爆発する。
-        // その場合は eta を追加せず即時再因子分解でリセットする（eta 蓄積誤差を防ぐ）。
-        // task #26: max_d_abs は ratio test pass で計算済み (列ノルム), ここで再利用する。
+        // A relatively small pivot blows up the eta inverse-pivot factor and
+        // contaminates subsequent FTRAN/BTRAN; refactor instead of accumulating
+        // another eta. `max_d_abs` is already computed for the ratio test.
         let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
             && basis_mgr.eta_count() > 0;
 
@@ -1195,13 +1175,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         if basis_mgr.refactor_failed {
             if basis_mgr.singular_basis {
-                // task #26: 新 basis (またはこの iter までに累積で) singular。
-                // 直近の fresh-LU snapshot へ revert + entering_col を blocklist。
                 blocked_at_basis.insert(entering_col);
                 consecutive_blocks += 1;
 
                 if consecutive_blocks > max_consecutive_blocks {
-                    // 真に詰んだ (snapshot から stable pivot が m 回連続で見つからない)
+                    // No stable pivot from `basis_snapshot` after m attempts.
                     return SimplexOutcome::SingularBasis;
                 }
 
@@ -1219,9 +1197,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // task #26: 自然 refactor (eta_count=0) または force_refactor 成功時にのみ
-        // snapshot 更新 + blocklist clear。これは「fresh-LU で non-singular 確認済み basis」
-        // への verified-progress を示す。
+        // After a fresh LU has accepted the current basis, snapshot it and
+        // clear the per-snapshot blocklist; entries that recreated singularity
+        // earlier may now be safe.
         if basis_mgr.eta_count() == 0 {
             basis_snapshot.copy_from_slice(basis);
             if !blocked_at_basis.is_empty() {
@@ -1232,16 +1210,15 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    // max_iter=usize::MAX のためここには事実上到達しない
+    // Unreachable with max_iter = usize::MAX (timeout is the real guard).
     SimplexOutcome::Timeout(obj)
 }
 
-/// task #26: スナップショットへ revert する helper。
+/// Restore `basis_snapshot` and rebuild `x_b = B^{-1} b` from a fresh LU.
 ///
-/// snapshot は最後に fresh-LU が non-singular で成功した時点の basis 状態。
-/// snapshot 以降の pivot が singular 化を起こした場合に、これらを破棄して
-/// 既知 non-singular な basis に戻し、x_B = B^{-1} b を fresh LU から再計算する。
-/// 戻り値: snapshot LU 再構築成功で true、snapshot 自体が singular なら false。
+/// Returns `false` only if the snapshot itself factors as singular — which
+/// implies the basis became singular before any fresh LU could accept it.
+/// Caller treats `false` as fatal SingularBasis.
 fn revert_to_snapshot(
     a: &CscMatrix,
     basis: &mut [usize],
@@ -1259,7 +1236,8 @@ fn revert_to_snapshot(
     }
     match LuBasis::new(a, basis, options.max_etas) {
         Ok(mut mgr) => {
-            // x_B を fresh LU から再計算 (snapshot 取得時点の drift を排除)
+            // Recomputing x_B avoids the eta-induced drift that, if carried in
+            // a stale snapshot, can leave a slack at a negative (infeasible) value.
             x_b.copy_from_slice(b_rhs);
             mgr.ftran_dense(x_b);
             for v in x_b.iter_mut() {
