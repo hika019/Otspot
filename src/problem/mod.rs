@@ -116,6 +116,10 @@ pub struct SolverResult {
     /// 各 phase の所要時間 (LP simplex 経路のみ、None なら未計測)。
     /// 「どこに時間が掛かっているか」事実観測用 (CLAUDE.md「順調に収束に向けて探索」)。
     pub timing_breakdown: Option<TimingBreakdown>,
+    /// Postsolve が最終的に採用した y_orig の dfeas violation (bound-aware sup ノルム).
+    /// LP simplex + presolve 経路のみ Some。caller (solve_with) が値が `PIVOT_TOL` を
+    /// 超えるとき presolve=off で再解する fallback gate に使う (greenbea-class 問題対策)。
+    pub postsolve_dfeas: Option<f64>,
 }
 
 /// LP solver の各 phase 所要時間 (μs精度)。
@@ -148,6 +152,7 @@ impl Default for SolverResult {
             gap: None,
             duality_gap_rel: None,
             timing_breakdown: None,
+            postsolve_dfeas: None,
         }
     }
 }

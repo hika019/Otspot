@@ -125,6 +125,30 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
                 });
+                // When postsolve cannot bring dfeas within the cleanup-LP gate (every
+                // candidate — Loop / Gauss-Seidel / cleanup±perturbation / LSQ — failed),
+                // the presolve transforms removed structure the dual-recovery cannot
+                // reconstruct (greenbea-class: cleanup_pert Phase 1 returns Infeasible).
+                // The same LP solves cleanly without presolve, so re-attempt on the
+                // remaining deadline. Trigger reuses PIVOT_TOL — the same gate the
+                // cleanup LP already screens against — no new magic threshold.
+                if res.status == SolveStatus::Optimal
+                    && res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
+                {
+                    let deadline_ok = options.deadline
+                        .is_none_or(|d| std::time::Instant::now() < d);
+                    if deadline_ok {
+                        let mut opts_off = options.clone();
+                        opts_off.presolve = false;
+                        let alt = solve_without_presolve(problem, &opts_off);
+                        if alt.status == SolveStatus::Optimal
+                            && alt.postsolve_dfeas.is_none()
+                            && alt.objective.is_finite()
+                        {
+                            return alt;
+                        }
+                    }
+                }
                 return res;
             }
             Ok(_) => {
