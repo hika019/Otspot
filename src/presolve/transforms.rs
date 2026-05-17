@@ -288,7 +288,7 @@ fn activity_range_from(
 /// LPをPresolveして縮約問題を返す。
 ///
 /// 問題が明らかにInfeasible/Unboundedな場合はErrを返す。
-/// deadline を超過した場合は早期終了し `was_reduced: false` を返す（案B: 残余時間渡し）。
+/// deadline を超過した場合は早期終了し `was_reduced: false` を返す。
 pub fn run_presolve(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
