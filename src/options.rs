@@ -162,9 +162,8 @@ pub fn default_max_etas(m: usize) -> usize {
     (m / 50).max(20)
 }
 
-/// Phase I の retry 上限 (暫定): revised_simplex_core が同じ basis を返し続ける
-/// 構造で無限ループに入るケース用の安全装置。本来は「同じ basis を繰り返したら
-/// abort」の progress 検出に置き換える (TODO)。
+/// Phase I retry 上限: revised_simplex_core が同じ basis で無限ループに入る
+/// 退化問題用の安全装置。
 pub const MAX_PHASE1_RETRIES: usize = 8;
 
 impl Default for SolverOptions {

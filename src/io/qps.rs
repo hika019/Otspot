@@ -1150,17 +1150,11 @@ ENDATA
         assert_eq!(prob.bounds[0].1, 50.0, "x1 ub should be 50.0");
     }
 
-    /// 数値文字列の変数名 + FR/MI/PL/BV の組合せ (DPKLO1 ケース)
-    ///
-    /// MPS 仕様で BOUNDS 行の 3 トークン形式 `<TYPE> <BNAME> <CNAME>` は、
-    /// FR/MI/PL/BV など値を取らない bound では `<CNAME>` が変数名。
-    /// しかし変数名が "1","2"... の数値文字列である場合、
-    /// `parts[2].parse::<f64>()` は Ok を返してしまい、
-    /// 旧実装は誤って bound 名省略形式 `<TYPE> <CNAME> <VALUE>` と解釈し、
-    /// `parts[1]` (= bound 名) を col_name として登録してしまう。
-    ///
-    /// 影響: DPKLO1 (133変数, 全 FR, 変数名 "1"〜"133") では全変数の bounds が
-    /// デフォルト (0, +∞) のまま残り、IPM が KKT 不整合で発散して TIMEOUT 化する。
+    /// 数値変数名 + FR/MI/PL/BV: 3 トークン形式 `<TYPE> <BNAME> <CNAME>` で
+    /// `<CNAME>` が "1" 等のとき parse::<f64>() が Ok を返し、bound 名省略形式
+    /// `<TYPE> <CNAME> <VALUE>` と誤認しうる。`<CNAME>` が registered col_name
+    /// なら value 形式とみなさない必要がある (DPKLO1 で実発火、133 var 全 FR
+    /// が default bound のまま残り IPM 発散)。
     #[test]
     fn test_parse_bounds_fr_with_numeric_var_name() {
         let qps = "NAME  DPKLO1_LIKE\nROWS\n N  obj\nCOLUMNS\n    1  obj  1.0\n    2  obj  1.0\n    3  obj  1.0\nRHS\nBOUNDS\n FR  BNDS  1\n FR  BNDS  2\n FR  BNDS  3\nENDATA\n";

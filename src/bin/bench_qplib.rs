@@ -30,11 +30,8 @@ enum BenchError {
 }
 
 fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
-    // 旧実装は thread::spawn + recv_timeout で parse をタイムアウトさせていたが、
-    // タイムアウト時にスレッドが detach されたまま継続実行され「不必要なメモリ」を
-    // 累積する mandate 違反。parse_qplib 自体に cancellation API がないため、
-    // 同期呼び出しに変更し、hang 時は bench_parallel.sh の外部 gtimeout で
-    // プロセスごと殺される設計に統一する。
+    // parse_qplib に cancel API なし → 同期呼び出し、hang 時は
+    // bench_parallel.sh の外部 gtimeout でプロセスごと kill。
     match parse_qplib(path) {
         Ok(prob) => Ok(prob),
         Err(QplibError::UnsupportedType(msg)) => Err(BenchError::Unsupported(msg)),
