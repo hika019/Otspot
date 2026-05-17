@@ -80,10 +80,16 @@ BUILD_FEATURES="parallel"
 if [[ -n "$EXTRA_FEATURES" ]]; then
   BUILD_FEATURES="parallel,$EXTRA_FEATURES"
 fi
-if [[ ! -f "target/release/$bin" ]] || [[ -n "$EXTRA_FEATURES" ]]; then
-  echo "[solver_bench.sh] ビルドを開始... (--features $BUILD_FEATURES)"
-  cargo build --release --features "$BUILD_FEATURES" 2>&1
-fi
+# 必ず cargo build を実行する。cargo の依存追跡 (mtime + Cargo.lock + features) に
+# 任せれば不要な再コンパイルは走らない。
+#
+# 旧実装は `if [[ ! -f target/release/$bin ]]` で skip していたが、`git checkout`
+# 後でも binary が残存していれば旧ソースのままで実行され、bench log の
+# `solver_commit: <HEAD>` 表記と実バイナリのソースが乖離する重大バグだった
+# (2026-05-17 bisecter 報告)。stale-binary により historical bench log は
+# 該当日付までの結果が「現 worktree HEAD の挙動」を保証しない。
+echo "[solver_bench.sh] ビルドを開始... (--features $BUILD_FEATURES)"
+cargo build --release --features "$BUILD_FEATURES" 2>&1
 
 echo "[solver_bench.sh] ./target/release/$bin $data_dir ${BINARY_ARGS[*]}"
 

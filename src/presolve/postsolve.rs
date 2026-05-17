@@ -89,15 +89,23 @@ fn build_and_solve_cleanup_lp(
         }
         if col_terms.is_empty() { continue; }
 
-        // interior 列 (どちらの bound にも hit せず、fixed でもない) は LP dual の
-        // 自由度で rc != 0 が自然に発生する。Eq 強制は cleanup LP を過剰制約化して
-        // infeasible にするためスキップ。
+        // 元の comment は「interior 列は退化で rc!=0 になり得るためスキップ」
+        // としていたが、これは perold col 229 のように **削除行 84 にしか entry
+        // を持たない非 bound-active 列** で削除行の y を under-determined にする。
+        // LP 最適性 (complementary slackness):
+        //   x[j] interior (basis 変数): rc[j] = 0
+        //   x[j] at lb (non-basis):     rc[j] >= 0
+        //   x[j] at ub (non-basis):     rc[j] <= 0
+        // cleanup LP は Phase I slack で常に feasible 化されるので、interior 列を
+        // Eq として含めても infeasible にはならない。primal が真に最適なら slack
+        // も 0、退化していれば slack が違反量だけ非ゼロ。
         let ct = if at_lb && !at_ub {
             ConstraintType::Le
         } else if at_ub && !at_lb {
             ConstraintType::Ge
         } else {
-            continue;
+            // interior (両 bound infinite or 両端非 active): rc = 0
+            ConstraintType::Eq
         };
         let row_idx = b_clean.len();
         for &(var_idx, a) in &col_terms {
@@ -430,78 +438,154 @@ pub fn run_postsolve(
         }
     }
 
-    // Step 3: Cleanup LP で削除行の y を一括解決 (Plan 設計の核)。
-    // 失敗時は既存 Gauss-Seidel フォールバックを実行する。
-    let cleanup_solved = if let Some(y_clean) = build_and_solve_cleanup_lp(
-        orig_problem, presolve_result, &solution, &dual_solution, deadline,
-    ) {
+    // Step 3: 2 経路 (Gauss-Seidel と Cleanup LP) で削除行の y 復元を計算し、
+    // bound-aware dfeas (LP dual feasibility 違反 sup ノルム) が小さい方を採用する。
+    //
+    // 設計動機 (2026-05-17 task #10 真因対処):
+    //   perold (col 229, c[j]=0, SingletonRow 経由) は cleanup LP が
+    //   Phase I slack 最小化のタイ崩しで y=0 解 (KKT 整合) を捨て、
+    //   別解 (y!=0、dual infeasible) を採用していた。LP optimum で y が
+    //   一意でない (dual 退化) ケースでは、cleanup LP の解は dual feasible
+    //   とは限らないため、Gauss-Seidel 経路と比較して KKT 整合性で勝った方を
+    //   採用する。
+    //
+    // 旧実装は cleanup LP が解けたら無条件採用、失敗時のみ Gauss-Seidel に
+    // フォールバックしていた。これは "cleanup LP 解は y_prev より厳格に良い"
+    // 前提に立っていたが、perold で反例があった (dual 退化)。
+
+    // (A) Loop 経路: postsolve reverse loop の直後の y (一度きり)。
+    let y_loop = dual_solution.clone();
+
+    // (A') Gauss-Seidel 経路: y_loop を起点に recover_removed_row_dual を反復収束。
+    //     LinearSubstitution y_piv も同時に更新する。複数 deleted 行が結合した
+    //     ケース (agg / scorpion 等) で反復改善する。
+    //     大規模 LP (ken-18: 95k 削除行 × O(n) recover/row × 50 iter ≒ 10^11 ops) で
+    //     postsolve が parent deadline を完全に無視して数百秒走る事故が発生していたため、
+    //     outer loop 先頭と内側 1024 行ごとに deadline 確認し超過時は break する。
+    let y_gs = {
+        let mut y = y_loop.clone();
+        let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for step in &presolve_result.postsolve_stack {
+            if let PostsolveStep::LinearSubstitution { orig_row: Some(r), .. } = step {
+                linsub_rows.insert(*r);
+            }
+        }
+        let max_iter = 50;
+        let conv_tol = 1e-12;
+        'gs_outer: for _ in 0..max_iter {
+            if deadline.is_some_and(|d| Instant::now() >= d) { break 'gs_outer; }
+            let mut max_diff = 0.0f64;
+            for i in 0..m {
+                if presolve_result.row_map[i].is_some() { continue; }
+                if linsub_rows.contains(&i) { continue; }
+                if i & 0x3ff == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                    break 'gs_outer;
+                }
+                let new_y = recover_removed_row_dual(orig_problem, i, &solution, &y);
+                let diff = (y[i] - new_y).abs();
+                if diff > max_diff { max_diff = diff; }
+                y[i] = new_y;
+            }
+            for step in &presolve_result.postsolve_stack {
+                if let PostsolveStep::LinearSubstitution {
+                    orig_row: Some(piv),
+                    col_orig_entries,
+                    c_orig,
+                    pivot,
+                    ..
+                } = step {
+                    let mut sum = 0.0f64;
+                    for &(row_i, a_ij) in col_orig_entries {
+                        if row_i == *piv { continue; }
+                        sum += a_ij * y[row_i];
+                    }
+                    let new_y = (c_orig - sum) / pivot;
+                    let diff = (y[*piv] - new_y).abs();
+                    if diff > max_diff { max_diff = diff; }
+                    y[*piv] = new_y;
+                }
+            }
+            if max_diff < conv_tol { break 'gs_outer; }
+        }
+        y
+    };
+
+    // (B) Cleanup LP 経路: 削除行 y を Phase I 風 slack relaxation で一括解決。
+    //     y_gs を rc_known 計算に使う (反復収束済みの方が rc_known の精度高い)。
+    //     deadline を継承して ken-18 のような大規模問題で暴走しないようにする。
+    let y_cl: Option<Vec<f64>> = build_and_solve_cleanup_lp(
+        orig_problem, presolve_result, &solution, &y_gs, deadline,
+    ).map(|y_clean| {
         let deleted_rows: Vec<usize> = (0..m)
             .filter(|&i| presolve_result.row_map[i].is_none())
             .collect();
+        let mut y = y_gs.clone();
         for (var_idx, &i) in deleted_rows.iter().enumerate() {
-            dual_solution[i] = y_clean[var_idx];
+            y[i] = y_clean[var_idx];
         }
-        true
-    } else {
-        false
+        y
+    });
+
+    // (C) 採用判定: bound-aware dfeas が小さい方を選ぶ。
+    //     dfeas_bound(y) = max_j viol_j で j: bound-active かつ
+    //       - lb==ub の真の固定変数は除外
+    //       - bound-tightening で FixedVar 化された列は rc=0 と見なして除外
+    //         (後段の FixedVar rc=0 override と整合)
+    //     viol_j = max(0, -rc_j) if at_lb only, max(0, rc_j) if at_ub only,
+    //              0 otherwise。bench `compute_dfeas_orig` (c69959d 以降) と同型。
+    let mut bound_tightened_fixed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for step in &presolve_result.postsolve_stack {
+        if let PostsolveStep::FixedVariable { orig_col, .. } = step {
+            let (lb, ub) = orig_problem.bounds[*orig_col];
+            let truly_fixed = lb.is_finite() && ub.is_finite()
+                && (ub - lb).abs() < BOUND_ACTIVE_TOL;
+            if !truly_fixed {
+                bound_tightened_fixed.insert(*orig_col);
+            }
+        }
+    }
+    let dfeas_bound = |y: &[f64]| -> f64 {
+        let mut max_viol = 0.0f64;
+        for j in 0..n {
+            if bound_tightened_fixed.contains(&j) { continue; }
+            let (lb_j, ub_j) = orig_problem.bounds[j];
+            let fixed = lb_j.is_finite() && ub_j.is_finite()
+                && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+            if fixed { continue; }
+            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < BOUND_ACTIVE_TOL;
+            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < BOUND_ACTIVE_TOL;
+            let mut rc = orig_problem.c[j];
+            if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
+                for (k, &row) in rows.iter().enumerate() {
+                    rc -= vals[k] * y[row];
+                }
+            }
+            let viol = if at_lb && !at_ub { f64::max(0.0, -rc) }
+                else if at_ub && !at_lb { f64::max(0.0, rc) }
+                else { 0.0 };
+            if viol > max_viol { max_viol = viol; }
+        }
+        max_viol
     };
 
-    // Gauss-Seidel 風反復 (cleanup LP 失敗時のみフォールバック)。
-    // cleanup_solved=true なら cleanup LP の解を保持 (上書きしない)。
-    if !cleanup_solved {
-    let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for step in &presolve_result.postsolve_stack {
-        if let PostsolveStep::LinearSubstitution { orig_row: Some(r), .. } = step {
-            linsub_rows.insert(*r);
-        }
+    // (C) 3-way 比較: y_loop / y_gs / y_cl のうち bound-aware dfeas が最小の方を採用。
+    let df_loop = dfeas_bound(&y_loop);
+    let df_gs = dfeas_bound(&y_gs);
+    let (df_cl, has_cl) = match &y_cl {
+        Some(y) => (dfeas_bound(y), true),
+        None => (f64::INFINITY, false),
+    };
+    // 最小 df の y を採用。同点は loop < gs < cl の優先 (計算量の小さい順)。
+    let _ = has_cl;
+    if df_loop <= df_gs && df_loop <= df_cl {
+        dual_solution = y_loop;
+    } else if df_gs <= df_cl {
+        dual_solution = y_gs;
+    } else if let Some(y) = y_cl {
+        dual_solution = y;
+    } else {
+        dual_solution = y_gs;
     }
-    let max_iter = 50;
-    let conv_tol = 1e-12;
-    // 大規模 LP (ken-18: 95k 削除行 × O(n) recover/row × 50 iter ≒ 10^11 ops) で
-    // postsolve が parent deadline を完全に無視して数百秒走る事故が発生していた。
-    // outer loop 先頭で deadline 確認、超過時は現状の dual_solution を保持して
-    // 抜ける (cleanup_lp と同様、不完全な復元のまま KKT 違反になる可能性は許容 —
-    // bench 判定で DFEAS_FAIL 等として表面化させる方が、SIGKILL より良い)。
-    'gs_outer: for _ in 0..max_iter {
-        if deadline.is_some_and(|d| Instant::now() >= d) { break 'gs_outer; }
-        let mut max_diff = 0.0f64;
-        // (a) 一般削除行
-        for i in 0..m {
-            if presolve_result.row_map[i].is_some() { continue; }
-            if linsub_rows.contains(&i) { continue; }
-            // recover_removed_row_dual は O(n + Σ nnz_col) で重い。
-            // 1024 行ごとに deadline チェック (ken-18 / pds-20 級で必要)。
-            if i & 0x3ff == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
-                break 'gs_outer;
-            }
-            let new_y = recover_removed_row_dual(orig_problem, i, &solution, &dual_solution);
-            let diff = (dual_solution[i] - new_y).abs();
-            if diff > max_diff { max_diff = diff; }
-            dual_solution[i] = new_y;
-        }
-        // (b) LinearSubstitution の y_piv (free 変数 rc=0 から逆算)
-        for step in &presolve_result.postsolve_stack {
-            if let PostsolveStep::LinearSubstitution {
-                orig_row: Some(piv),
-                col_orig_entries,
-                c_orig,
-                pivot,
-                ..
-            } = step {
-                let mut sum = 0.0f64;
-                for &(row_i, a_ij) in col_orig_entries {
-                    if row_i == *piv { continue; }
-                    sum += a_ij * dual_solution[row_i];
-                }
-                let new_y = (c_orig - sum) / pivot;
-                let diff = (dual_solution[*piv] - new_y).abs();
-                if diff > max_diff { max_diff = diff; }
-                dual_solution[*piv] = new_y;
-            }
-        }
-        if max_diff < conv_tol { break 'gs_outer; }
-    }
-    } // !cleanup_solved
 
     // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
     //   reduced_cost[j] = c[j] - Σ_i A_ij * y_i
