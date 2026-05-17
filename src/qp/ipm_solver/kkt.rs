@@ -1,17 +1,11 @@
-//! 元空間 KKT 残差計算 (bench `compute_dfeas_orig` と同形)。
-//!
-//! 設計書「元問題基準で報告」原則に従い、scaled 空間ではなく必ず元 problem.q / a / c で計算する。
-//! **成分相対化** (max_j |r_j| / (1 + |Qx_j| + |c_j| + |A^T y_j| + |z_j|)) を採用。
-//! 全体相対化 (OSQP 公式) は ill-scaled 問題で 1 成分のみ大きく外れた残差を見逃すため、
-//! ユーザー指定 eps の保証として不十分。+1 オフセットにより微小成分での過剰判定も抑制する。
+//! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
 use crate::problem::ConstraintType;
 use super::outcome::ProblemView;
 
-/// FX (固定) 変数判定の許容差。lb と ub の差がこれ未満なら固定変数とみなす。
 const FX_TOL: f64 = 1e-12;
 
-/// 境界 dual から KKT stationarity の bound 寄与 (-y_lb + y_ub) を成分ごと計算する。
+/// bound dual から stationarity 寄与 (−y_lb + y_ub) を成分ごと計算する。
 fn compute_bound_contrib(
     bounds: &[(f64, f64)],
     bound_duals: &[f64],
@@ -37,21 +31,8 @@ fn compute_bound_contrib(
     contrib
 }
 
-/// 元空間 KKT stationarity 残差 (成分相対化, 最大値)。
-///
-/// `max_j |r_j| / (1 + |Qx_j| + |c_j| + |A^T y_j| + |z_j|)`。
-/// 全体相対化 (OSQP 公式) は ill-scaled 問題で 1 成分のみ大きく外れた残差を
-/// 巨大スケールで割って eps を満たすように見せてしまう欠陥があり、ユーザー指定
-/// 精度の保証として不十分なため成分相対化を採用する。+1 オフセットで微小成分の
-/// 過剰判定を抑制。
-///
-/// **DD (TwoFloat) 精度** で計算する: ill-conditioned 問題 (QPILOTNO: cond≈3e12) で
-/// f64 mat_vec のキャンセル誤差が真の残差を埋もれさせ、bench `compute_dfeas_orig` (DD)
-/// と乖離する。同じ DD 演算で揃えないと採否判定 / quality_score が noise を相手にして
-/// 誤った収束判定をする。
-///
-/// FX 変数 (lb≈ub) と EmptyCol 変数は postsolve 慣例で bound_dual=0 埋めされるため
-/// KKT 評価から除外する (`compute_dfeas_orig` の除外条件と一致)。
+/// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
+/// FX (lb≈ub) と EmptyCol は postsolve 慣例で除外。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     let n = prob.bounds.len();
@@ -59,7 +40,6 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
         return f64::INFINITY;
     }
     let zero_dd = TwoFloat::from(0.0);
-    // qx[i] = sum_k Q[i, k] * x[k]
     let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
     for col in 0..n {
         let xv = x[col];
@@ -70,7 +50,6 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
             qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(prob.q.values[k], xv);
         }
     }
-    // aty[col] = sum_row A[row, col] * y[row]
     let aty_dd: Vec<TwoFloat> = if prob.a.nrows > 0 && !y.is_empty() {
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
@@ -113,11 +92,7 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     max_rel
 }
 
-/// 元空間 primal 残差 (成分相対化, 最大値)。
-///
-/// `max_i violation_i / (1 + |Ax_i| + |b_i|)` (制約型ごと violation を取る)。
-/// A·x は DD で積算: f64 sum のキャンセル誤差で実 violation が見えなくなるのを防ぐ。
-/// 成分相対化により ill-scaled 行列で 1 行のみ違反が大きい場合も検出する。
+/// 成分相対化 primal 残差。A·x は cancellation 対策で DD 積算。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     if prob.a.nrows == 0 {
@@ -180,7 +155,6 @@ pub fn complementarity_residual_rel(
     use twofloat::TwoFloat;
     let zero_dd = TwoFloat::from(0.0);
 
-    // Ax DD (primal_residual_rel と同形)。
     let m = prob.a.nrows;
     let ax_dd: Vec<TwoFloat> = if m > 0 {
         let mut ax = vec![zero_dd; m];
@@ -195,7 +169,6 @@ pub fn complementarity_residual_rel(
         Vec::new()
     };
 
-    // 双対対スケール: max(|y·b|, |y·Ax|, |z·x|, |c·x|, |0.5 x·Qx|, 1)
     let yb: f64 = y.iter().zip(prob.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
     let yax: f64 = y
         .iter()
@@ -233,7 +206,6 @@ pub fn complementarity_residual_rel(
 
     let mut max_abs = 0.0_f64;
 
-    // inequality complementarity
     if m > 0 && !y.is_empty() {
         for (i, ct) in prob.constraint_types.iter().enumerate() {
             let slack_dd = match ct {
@@ -248,7 +220,6 @@ pub fn complementarity_residual_rel(
         }
     }
 
-    // bound complementarity (postsolve の z=0/slack=0 は自動的に 0 寄与)
     if !z.is_empty() {
         let mut idx = 0_usize;
         for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
@@ -274,10 +245,7 @@ pub fn complementarity_residual_rel(
     max_abs / scale
 }
 
-/// 元空間 bounds 違反 (成分相対化, 最大値)。
-///
-/// `max_j violation_j / (1 + |x_j| + |bound_j|)`。成分相対化により単一変数が
-/// 大きく境界を超えても見逃さない。
+/// 成分相対化 bounds 違反 max_j violation_j/(1+|x_j|+|bound_j|)。
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     let mut max_rel = 0.0_f64;
     for (&xi, &(lb, ub)) in x.iter().zip(bounds.iter()) {
@@ -315,12 +283,7 @@ mod tests {
         ProblemView { q, a, c, b, bounds, constraint_types: cts }
     }
 
-    /// f64 sum のキャンセルで residual が見えなくなる入力で、kkt_residual_rel が
-    /// DD 計算で真の値を返すことを確認する。
-    ///
-    /// 設計: A の col 0 に [1.0, 1e16, -1e16] を CSC 順で入れ、y=[1,1,1] で aty[0] を取る。
-    /// f64 left-to-right sum (CSC walk): 0 + 1.0 = 1.0 → 1.0 + 1e16 = 1e16 (1.0 が ULP に
-    /// 吸収) → 1e16 + (-1e16) = 0 (真値 1.0 が消える)。DD sum なら 1.0 が保たれる。
+    /// f64 で消える 1.0 residual を DD が拾うこと。
     #[test]
     fn kkt_residual_rel_uses_dd_to_avoid_f64_cancellation() {
         let a = CscMatrix::from_triplets(
@@ -337,20 +300,15 @@ mod tests {
         let y = vec![1.0_f64, 1.0, 1.0];
         let z: Vec<f64> = vec![];
 
-        // f64 mat_vec_mul は cancellation で 0 を返す (真値 1.0 を見失う)。
         let aty_f64 = a.transpose().mat_vec_mul(&y).unwrap();
-        assert_eq!(aty_f64[0], 0.0, "f64 path loses the 1.0 residual via cancellation");
+        assert_eq!(aty_f64[0], 0.0);
 
-        // DD 経路の kkt_residual_rel は 真値 1.0 / scale を返す。scale = 1 + |aty|_dd ≈ 2。
         let r = kkt_residual_rel(&view, &x, &y, &z);
-        assert!(r > 0.4 && r < 0.6, "DD reveals 1.0 residual / scale ≈ 0.5; got r={:.3e}", r);
+        assert!(r > 0.4 && r < 0.6, "got r={:.3e}", r);
     }
 
-    /// primal_residual_rel も DD 計算であることを同形のキャンセル入力で確認する。
     #[test]
     fn primal_residual_rel_uses_dd_to_avoid_f64_cancellation() {
-        // m=1, n=3。A = [[1.0, 1e16, -1e16]] (1 行)、x=[1,1,1]、b=[0]、Eq。
-        // CSC col 走査順 (col 0 → col 1 → col 2): 0 + 1.0 → 1.0 + 1e16 → 1e16 + (-1e16) = 0。
         let a = CscMatrix::from_triplets(
             &[0, 0, 0], &[0, 1, 2], &[1.0_f64, 1.0e16, -1.0e16], 1, 3,
         ).unwrap();
@@ -363,21 +321,18 @@ mod tests {
 
         let x = vec![1.0_f64, 1.0, 1.0];
 
-        // f64 mat_vec_mul は 0 を返す (真の violation 1.0 が見えない)。
         let ax_f64 = a.mat_vec_mul(&x).unwrap();
-        assert_eq!(ax_f64[0], 0.0, "f64 path loses the 1.0 violation via cancellation");
+        assert_eq!(ax_f64[0], 0.0);
 
-        // DD 経路の primal_residual_rel は 1.0 / scale を返す。scale = 1 + |Ax|_dd ≈ 2。
         let r = primal_residual_rel(&view, &x);
-        assert!(r > 0.4 && r < 0.6, "DD reveals 1.0 violation / scale ≈ 0.5; got r={:.3e}", r);
+        assert!(r > 0.4 && r < 0.6, "got r={:.3e}", r);
     }
 
-    /// FX (lb≈ub) と EmptyCol は KKT 評価から除外される慣例を確認。
+    /// FX と EmptyCol は KKT 評価から除外される。
     #[test]
     fn kkt_residual_rel_excludes_fx_and_empty_col() {
-        // 3 列: col 0 = FX (lb=ub=1.0)、col 1 = empty (A 列に登場しない)、col 2 = 普通。
         let q = CscMatrix::new(3, 3);
-        let c = vec![1e10_f64, 1e10, 0.0]; // FX/empty 列の c は意図的に大きく
+        let c = vec![1e10_f64, 1e10, 0.0];
         let a = CscMatrix::from_triplets(
             &[0], &[2], &[1.0], 1, 3,
         ).unwrap();
@@ -386,12 +341,10 @@ mod tests {
         let cts = vec![ConstraintType::Eq];
         let view = build_view(&q, &a, &c, &b, &bounds, &cts);
 
-        // x[0]=1 (固定)、x[1]=0、x[2]=0、y=[0]、z=[lb_for_col1, lb_for_col2, ub のうち有限分なし] → 0 埋め
         let x = vec![1.0, 0.0, 0.0];
         let y = vec![0.0];
-        let z = vec![0.0, 0.0]; // 両 lb 有限 var (col 1, 2) の lb dual
+        let z = vec![0.0, 0.0];
         let r = kkt_residual_rel(&view, &x, &y, &z);
-        // FX (col 0) は除外、empty col (col 1) も除外、col 2 のみ評価。c[2]=0、qx=0、aty=0、bnd=0 → r=0。
-        assert!(r.abs() < 1e-15, "FX/empty col 除外で残差 0、got r={:.3e}", r);
+        assert!(r.abs() < 1e-15, "got r={:.3e}", r);
     }
 }

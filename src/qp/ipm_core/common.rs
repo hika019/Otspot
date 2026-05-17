@@ -1,6 +1,4 @@
-//! IPM/IP-PMM 共通関数
-//!
-//! step.rs (IPM Mehrotra) と ippmm.rs (IP-PMM) で重複していた関数の共通化。
+//! IPM/IP-PMM 共通関数。
 
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;
@@ -9,11 +7,7 @@ use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 use super::kkt::{spmv_q, norm_inf};
 
-// ---------------------------------------------------------------------------
-// Infeasibility / Unboundedness 検出
-// ---------------------------------------------------------------------------
-
-/// Gondzio corrector 後のステップ方向 (Δx, Δy) から実行不能または非有界を検出する。
+/// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_infeasible_or_unbounded(
     dx: &[f64],
@@ -103,12 +97,6 @@ pub(crate) fn check_infeasible_or_unbounded(
     Some(SolveStatus::Unbounded)
 }
 
-// ---------------------------------------------------------------------------
-// fraction-to-boundary
-// ---------------------------------------------------------------------------
-
-/// 等式行をスキップする fraction-to-boundary
-///
 /// α = min(1, τ · min_i { -v_i / Δv_i  for Δv_i < 0, skip_mask[i] == false } )
 pub(crate) fn fraction_to_boundary_masked(v: &[f64], dv: &[f64], tau: f64, skip_mask: &[bool]) -> f64 {
     let mut alpha = 1.0_f64;
@@ -126,11 +114,7 @@ pub(crate) fn fraction_to_boundary_masked(v: &[f64], dv: &[f64], tau: f64, skip_
     alpha
 }
 
-// ---------------------------------------------------------------------------
-// 制約なし QP
-// ---------------------------------------------------------------------------
-
-/// 制約なし QP を解く: Qx = -c（Q が PD でない場合は δ_p I で正則化）
+/// 制約なし QP: Qx = -c（PD でなければ δ_p I で正則化）。
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx) -> SolverResult {
     let n = problem.num_vars;
@@ -206,10 +190,6 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
         Err(_) => numerical_error_result(n),
     }
 }
-
-// ---------------------------------------------------------------------------
-// ユーティリティ
-// ---------------------------------------------------------------------------
 
 pub(crate) fn timeout_result(n: usize) -> SolverResult {
     SolverResult {
