@@ -62,7 +62,7 @@ enum Verdict {
 /// 90 LP問題全体のスクリーニング。実行時間が長い (約5-6分) ため `#[ignore]` で隔離。
 /// 手動実行: `cargo test --release --test lp_coverage_screen -- --ignored --nocapture --test-threads=1`
 #[test]
-#[ignore]
+#[ignore = "heavy (~5-6 min: 90 LP screen、要 data/lp_problems/)、cargo test --release で個別実行"]
 fn lp_coverage_screen_all() {
     let dir = Path::new(PROBLEMS_DIR);
     if !dir.exists() {

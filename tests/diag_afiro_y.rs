@@ -286,7 +286,7 @@ fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
 /// 大規模 LP の timing_breakdown を出力 (ignored、 cargo nextest run -- --ignored で実行)。
 /// 「どこに時間が掛かっているか」事実観測用。
 #[test]
-#[ignore]
+#[ignore = "diag (heavy: 12 LP × 15s timeout、要 data/lp_problems/)、timing 観測のみ"]
 fn diag_large_lp_timing_breakdown() {
     let problems = [
         "data/lp_problems/cre-b.QPS",
