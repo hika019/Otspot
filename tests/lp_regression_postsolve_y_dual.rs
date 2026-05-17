@@ -184,7 +184,9 @@ netlib_postsolve_test!(stocfor1_postsolve, "data/lp_problems/stocfor1.QPS", 1e-6
 
 /// 診断: perold のどの列が dual feasibility 違反を起こしているかを print する。
 /// 修正開発時の手がかり用 (assertion はせず情報のみ出力)。
+/// 重 (perold solve 約 5s)、default 除外。`cargo test -- --ignored` で実行。
 #[test]
+#[ignore = "diag (5s)、default 除外"]
 fn perold_diagnostic_dump_worst_violations() {
     let path = Path::new("data/lp_problems/perold.QPS");
     if !path.exists() { eprintln!("[SKIP] perold.QPS"); return; }
@@ -240,6 +242,7 @@ fn perold_diagnostic_dump_worst_violations() {
 
 /// 深掘り診断: perold col 229 の rc 内訳 (どの row の y が誤って巨大か特定)。
 #[test]
+#[ignore = "diag、default 除外"]
 fn perold_col229_deep_diag() {
     let path = Path::new("data/lp_problems/perold.QPS");
     if !path.exists() { eprintln!("[SKIP]"); return; }
@@ -344,6 +347,7 @@ fn pds_10_postsolve_dual_feasibility() {
 /// 診断: greenbea の最悪 dual 違反列を print。perold_diagnostic_dump_worst_violations
 /// と同型。assertion なし。
 #[test]
+#[ignore = "diag (60s)、default 除外"]
 fn greenbea_diagnostic_dump_worst_violations() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
     if !path.exists() { eprintln!("[SKIP] greenbea.QPS"); return; }
@@ -397,6 +401,7 @@ fn greenbea_diagnostic_dump_worst_violations() {
 
 /// greenbea 深掘り: col 2741 (worst) の entries と y の出元を identify。
 #[test]
+#[ignore = "diag (60s)、default 除外"]
 fn greenbea_col2741_deep_diag() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
     if !path.exists() { eprintln!("[SKIP]"); return; }
@@ -442,6 +447,7 @@ fn greenbea_col2741_deep_diag() {
 
 /// 診断: greenbea で row 1270 がどの col に何個 entry を持つか列挙
 #[test]
+#[ignore = "diag (60s)、default 除外"]
 fn greenbea_row1270_scan() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
     if !path.exists() { eprintln!("[SKIP]"); return; }

@@ -228,10 +228,6 @@ fn build_and_solve_cleanup_lp(
     opts.deadline = deadline;
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
-    if std::env::var("POSTSOLVE_DIAG").is_ok() {
-        eprintln!("[postsolve_diag] Phase1 status={:?} sol_len={} obj={:.3e}",
-            r1.status, r1.solution.len(), r1.objective);
-    }
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
         // Phase 1 失敗 → 上位の Gauss-Seidel フォールバックに任せる。
         return None;
@@ -334,30 +330,6 @@ fn build_and_solve_cleanup_lp(
     let mut p2_c = vec![0.0f64; phase2_total_vars];
     for j in k..(3 * k) { p2_c[j] = 1.0; }
 
-    if std::env::var("POSTSOLVE_DIAG").is_ok() {
-        eprintln!("[postsolve_diag] Phase2 m={} n={} nnz={} y_ref_max_abs={:.3e}",
-            phase2_total_cons, phase2_total_vars, p2_tri_rows.len(),
-            y_ref.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
-        // verify y_phase1 satisfies Phase 2 (i) constraints with rhs relaxation
-        for (orig_idx, _) in slack_cols_per_row.iter().enumerate() {
-            let mut a_y = 0.0;
-            for (kk, &row) in tri_rows.iter().enumerate() {
-                if row != orig_idx { continue; }
-                let col = tri_cols[kk];
-                if col < k { a_y += tri_vals[kk] * y_phase1[col]; }
-            }
-            let rhs = p2_b[orig_idx];
-            let viol = match p2_ct[orig_idx] {
-                ConstraintType::Le => (a_y - rhs).max(0.0),
-                ConstraintType::Ge => (rhs - a_y).max(0.0),
-                ConstraintType::Eq => (a_y - rhs).abs(),
-            };
-            if viol > 1e-6 {
-                eprintln!("[postsolve_diag]   row {} ct={:?} a*y={:.3e} rhs={:.3e} viol={:.3e}",
-                    orig_idx, p2_ct[orig_idx], a_y, rhs, viol);
-            }
-        }
-    }
     let p2_a = match CscMatrix::from_triplets(
         &p2_tri_rows, &p2_tri_cols, &p2_tri_vals, phase2_total_cons, phase2_total_vars
     ) {
@@ -369,10 +341,6 @@ fn build_and_solve_cleanup_lp(
         Err(_) => return Some(y_phase1),
     };
     let r2 = crate::simplex::solve_without_presolve(&p2_lp, &opts);
-    if std::env::var("POSTSOLVE_DIAG").is_ok() {
-        eprintln!("[postsolve_diag] Phase 2 status={:?} sol_len={} obj={:.3e}",
-            r2.status, r2.solution.len(), r2.objective);
-    }
     if r2.status == SolveStatus::Optimal && r2.solution.len() == phase2_total_vars {
         Some(r2.solution[..k].to_vec())
     } else {
@@ -721,17 +689,6 @@ pub fn run_postsolve(
         Some(y) => (dfeas_bound(y), true),
         None => (f64::INFINITY, false),
     };
-    if std::env::var("POSTSOLVE_DIAG").is_ok() {
-        eprintln!("[postsolve_diag] df_loop={:.3e} df_gs={:.3e} df_cl={:.3e} has_cl={}",
-            df_loop, df_gs, df_cl, has_cl);
-        for &i in &[1234usize, 1238, 1270, 1236, 1233] {
-            if i < m {
-                let yc = if let Some(y) = &y_cl { y[i] } else { f64::NAN };
-                eprintln!("[postsolve_diag]   y[{}]: loop={:10.3e} gs={:10.3e} cl={:10.3e}",
-                    i, y_loop[i], y_gs[i], yc);
-            }
-        }
-    }
     // 最小 df の y を採用。同点は loop < gs < cl の優先 (計算量の小さい順)。
     let _ = has_cl;
     if df_loop <= df_gs && df_loop <= df_cl {
