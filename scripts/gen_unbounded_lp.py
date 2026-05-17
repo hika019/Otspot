@@ -521,7 +521,7 @@ def main():
 
     for gen_fn in PROBLEMS:
         prob = gen_fn()
-        out_path = out_dir / f"{prob.name}.mps"
+        out_path = out_dir / f"{prob.name}.QPS"
         write_mps2(prob, out_path)
         print(f"  {prob.name}: n={len(prob.var_names)} m={len(prob.rows)} -> {out_path.name}")
 
