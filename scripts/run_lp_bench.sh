@@ -6,11 +6,11 @@
 #
 # オプション:
 #   --suite <suite>    実行する問題セット (デフォルト: all)
-#                      all | standard | infeas | hard | extra
+#                      all | standard | infeas | hard | extra | canary
 #   --eps <eps>        許容誤差 (デフォルト: 1e-6)
 #                      "all" を指定すると 1e-4, 1e-6, 1e-8 の 3 パターンを順次実行
-#   --jobs <N>         並列数 (デフォルト: 8)
-#   --timeout <sec>    タイムアウト秒数 (デフォルト: 1000)
+#   --jobs <N>         並列数 (デフォルト: 8、canary は single-worker を推奨)
+#   --timeout <sec>    タイムアウト秒数 (デフォルト: 1000、canary は 60 を推奨)
 #
 # 機能:
 #   1. データが存在しなければ対応するダウンロードスクリプトを自動実行
@@ -20,11 +20,15 @@
 #   5. 完了後にサマリーを表示 (PASS/FAIL/TIMEOUT 件数)
 #
 # Suite 定義:
-#   standard : data/lp_problems/        (Netlib 標準 109 問)
-#   infeas   : data/lp_problems_infeas/ (Netlib 実行不可能 29 問)
-#   extra    : data/lp_problems_extra/  (Mittelmann Large LP 拡張 4 問)
-#   hard     : data/lp_problems_hard/   (数値困難 + 大規模 LP)
-#   all      : 上記 4 suite を順次実行 (CLAUDE.md 規約: 各 suite は逐次)
+#   standard : data/lp_problems/         (Netlib 標準 109 問)
+#   infeas   : data/lp_problems_infeas/  (Netlib 実行不可能 29 問)
+#   extra    : data/lp_problems_extra/   (Mittelmann Large LP 拡張 4 問)
+#   hard     : data/lp_problems_hard/    (数値困難 + 大規模 LP)
+#   canary   : data/lp_problems_canary/  (subset 27 問、PR loop 用 5 分以内)
+#                                        詳細: docs/canary_suite.md
+#                                        ※ canary は all に含まれない
+#   all      : standard / infeas / extra / hard を順次実行
+#              (CLAUDE.md 規約: 各 suite は逐次)
 #
 # SOLVER は concurrent を使用。
 # ベンチ実行は bench_parallel.sh 経由のみ (直接バイナリ呼び出し禁止)。
@@ -34,6 +38,7 @@
 #   bash scripts/run_lp_bench.sh --suite standard --eps all
 #   bash scripts/run_lp_bench.sh --suite hard --eps 1e-6 --jobs 4
 #   bash scripts/run_lp_bench.sh --suite all --timeout 600
+#   bash scripts/run_lp_bench.sh --suite canary --jobs 1 --timeout 60
 
 set -euo pipefail
 
@@ -66,9 +71,9 @@ done
 
 # Suite の妥当性チェック
 case "$SUITE" in
-    all|standard|infeas|hard|extra) ;;
+    all|standard|infeas|hard|extra|canary) ;;
     *)
-        echo "エラー: --suite は all|standard|infeas|hard|extra のいずれか" >&2
+        echo "エラー: --suite は all|standard|infeas|hard|extra|canary のいずれか" >&2
         exit 1 ;;
 esac
 
@@ -86,6 +91,7 @@ suite_data_dir() {
         infeas)   echo "$SOLVER_ROOT/data/lp_problems_infeas" ;;
         extra)    echo "$SOLVER_ROOT/data/lp_problems_extra" ;;
         hard)     echo "$SOLVER_ROOT/data/lp_problems_hard" ;;
+        canary)   echo "$SOLVER_ROOT/data/lp_problems_canary" ;;
     esac
 }
 
@@ -95,6 +101,10 @@ suite_download_script() {
         infeas)   echo "$SCRIPT_DIR/netlib_lp_infeas_download.sh" ;;
         extra)    echo "$SCRIPT_DIR/lp_extra_download.sh" ;;
         hard)     echo "$SCRIPT_DIR/lp_hard_download.sh" ;;
+        # canary は既存 standard/infeas データへの symlink を貼るだけなので
+        # emps バイナリ不要。lp_canary_setup.sh が内部で依存元の有無を確認し、
+        # 必要なら netlib_lp_download.sh / netlib_lp_infeas_download.sh を呼ぶ。
+        canary)   echo "$SCRIPT_DIR/lp_canary_setup.sh" ;;
     esac
 }
 
