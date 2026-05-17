@@ -9,7 +9,7 @@
 //! Active Set 法等は採用しない。post-processing は `refine_dual_lsq` (qp/mod.rs の
 //! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
 
-use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
+use super::kkt::{bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel};
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::QpPostsolveStep;
@@ -144,6 +144,7 @@ fn run_ipm_with(
             kkt_residual_rel: f64::INFINITY,
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
+            complementarity_residual_rel: f64::INFINITY,
             duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
@@ -1034,6 +1035,12 @@ fn run_ipm_with(
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
+    let comp = complementarity_residual_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    );
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
     // Invariant: reported objective is computed at the *returned* x, not at any
@@ -1068,6 +1075,7 @@ fn run_ipm_with(
         kkt_residual_rel: kkt_out,
         primal_residual_rel: pres,
         bound_violation: bv,
+        complementarity_residual_rel: comp,
         duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,

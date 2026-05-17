@@ -154,6 +154,126 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
     max_rel
 }
 
+/// 元空間 KKT complementarity 残差 (問題全体スケール正規化)。
+///
+/// stationarity / primal feas / bound feas に加えて KKT 4 条件目を gating する。
+/// 欠落していると LISWET9 / YAO のように feasible だが optimal でない点を
+/// Optimal と誤判定する (`y_i` が inactive 制約で大、`slack_i` が小、積が中程度)。
+///
+/// `complementarity = max(|y_i · slack_i|, |z_j · (x_j - bnd_j)|)`
+///
+/// 正規化分母は「IPM 双対対の自然スケール」: `|y^T b|`, `|y^T Ax|`, `|z^T x|`, `|c^T x|`,
+/// `|0.5 x^T Q x|`, `1` の最大。これは双対関数 `b^T y - lb^T z_lb + ub^T z_ub` と
+/// 主目的の典型的大きさで、IPM 反復で `y·s + z·(x-bnd)` がこの基準に対して 0 に
+/// 収束する。bench `compute_pfeas_normalized` 流の `1 + ||·||∞` 正規化と同型で、
+/// 巨大 dual と数値ゼロ slack の積 (= O(|y|² × machine_eps)) を問題全体スケールで
+/// 押し下げ、真の complementarity 違反 (gap が obj スケールに匹敵) のみ捕捉する。
+///
+/// 等式制約は y·0=0 (primal feas で担保) のためスキップ。FX (lb≈ub) は postsolve で
+/// z=0 埋めされ slack=0 にもなるため自動的に 0 寄与。
+pub fn complementarity_residual_rel(
+    prob: &ProblemView,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+) -> f64 {
+    use twofloat::TwoFloat;
+    let zero_dd = TwoFloat::from(0.0);
+
+    // Ax DD (primal_residual_rel と同形)。
+    let m = prob.a.nrows;
+    let ax_dd: Vec<TwoFloat> = if m > 0 {
+        let mut ax = vec![zero_dd; m];
+        for col in 0..prob.a.ncols {
+            let xv = x[col];
+            for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
+                ax[prob.a.row_ind[k]] = ax[prob.a.row_ind[k]] + TwoFloat::new_mul(prob.a.values[k], xv);
+            }
+        }
+        ax
+    } else {
+        Vec::new()
+    };
+
+    // 双対対スケール: max(|y·b|, |y·Ax|, |z·x|, |c·x|, |0.5 x·Qx|, 1)
+    let yb: f64 = y.iter().zip(prob.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
+    let yax: f64 = y
+        .iter()
+        .zip(ax_dd.iter())
+        .map(|(&yi, &ax_dd_i)| yi * f64::from(ax_dd_i))
+        .sum();
+    let zx: f64 = {
+        let mut s = 0.0_f64;
+        let mut idx = 0_usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < z.len() {
+                s += z[idx] * x[j];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < z.len() {
+                s += z[idx] * x[j];
+                idx += 1;
+            }
+        }
+        s
+    };
+    let cx: f64 = prob.c.iter().zip(x.iter()).map(|(&c, &xi)| c * xi).sum();
+    let xqx: f64 = {
+        let qx = prob.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
+        qx.iter().zip(x.iter()).map(|(&q, &xi)| q * xi).sum()
+    };
+    let scale = 1.0
+        + yb.abs()
+        + yax.abs()
+        + zx.abs()
+        + cx.abs()
+        + (0.5 * xqx).abs();
+
+    let mut max_abs = 0.0_f64;
+
+    // inequality complementarity
+    if m > 0 && !y.is_empty() {
+        for (i, ct) in prob.constraint_types.iter().enumerate() {
+            let slack_dd = match ct {
+                ConstraintType::Le => TwoFloat::from(prob.b[i]) - ax_dd[i],
+                ConstraintType::Ge => ax_dd[i] - TwoFloat::from(prob.b[i]),
+                ConstraintType::Eq => continue,
+            };
+            let prod = (f64::from(slack_dd) * y[i]).abs();
+            if prod > max_abs {
+                max_abs = prod;
+            }
+        }
+    }
+
+    // bound complementarity (postsolve の z=0/slack=0 は自動的に 0 寄与)
+    if !z.is_empty() {
+        let mut idx = 0_usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < z.len() {
+                let prod = (z[idx] * (x[j] - lb)).abs();
+                if prod > max_abs {
+                    max_abs = prod;
+                }
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < z.len() {
+                let prod = (z[idx] * (ub - x[j])).abs();
+                if prod > max_abs {
+                    max_abs = prod;
+                }
+                idx += 1;
+            }
+        }
+    }
+
+    max_abs / scale
+}
+
 /// 元空間 bounds 違反 (成分相対化, 最大値)。
 ///
 /// `max_j violation_j / (1 + |x_j| + |bound_j|)`。成分相対化により単一変数が
