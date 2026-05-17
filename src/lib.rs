@@ -55,6 +55,9 @@ pub mod qp;
 #[allow(dead_code)]
 pub(crate) mod linalg;
 
+#[cfg(test)]
+pub(crate) mod test_kkt;
+
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::SolveStatus;

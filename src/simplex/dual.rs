@@ -568,6 +568,7 @@ mod tests {
     use crate::problem::{LpProblem, SolveStatus};
     use crate::simplex::solve_with;
     use crate::sparse::CscMatrix;
+    use crate::test_kkt::{assert_kkt_optimal_with, dfeas_rel_bound, pfeas_abs, EPS_KKT};
     use crate::tolerances::PIVOT_TOL;
 
     fn make_lp(
@@ -583,11 +584,11 @@ mod tests {
         LpProblem::new(c, a, b).unwrap()
     }
 
-    /// Le制約のみの基本LP（c ≥ 0）: スラック基底が双対実行可能 → 即座に最適
+    /// Le制約のみ c ≥ 0: スラック基底で原点最適。Dual Simplex 経路で
+    /// pfeas / dfeas / obj が全て収束することを検証。
     #[test]
     fn test_dual_basic_nonneg_cost() {
-        // min x1 + 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3
-        // 最適解: x1=0, x2=0, obj=0 (c ≥ 0 なので原点が最適)
+        // min x1 + 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=x2=0, obj=0
         let lp = make_lp(
             vec![1.0, 2.0],
             &[0, 0, 1, 2],
@@ -601,20 +602,14 @@ mod tests {
             simplex_method: SimplexMethod::Dual,
             ..SolverOptions::default()
         };
-        let result = solve_with(&lp, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal);
-        assert!(
-            result.objective.abs() < PIVOT_TOL,
-            "Expected obj=0.0, got {}",
-            result.objective
-        );
+        assert_kkt_optimal_with(&lp, 0.0, "test_dual_basic_nonneg_cost", &opts);
     }
 
-    /// Primal SimplexとDual Simplexが同じ最適解を返すことを検証する
+    /// Primal と Dual が同一最適解 (obj + KKT 残差) に収束することを検証。
+    /// obj 一致だけでは片方が早期 NumericalError 緩和した場合を見逃す。
     #[test]
     fn test_dual_matches_primal() {
-        // min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3
-        // 最適解: x1=1, x2=3, obj=-7
+        // min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=1, x2=3, obj=-7
         let lp = make_lp(
             vec![-1.0, -2.0],
             &[0, 0, 1, 2],
@@ -634,11 +629,11 @@ mod tests {
             ..SolverOptions::default()
         };
 
+        assert_kkt_optimal_with(&lp, -7.0, "test_dual_matches_primal/primal", &primal_opts);
+        assert_kkt_optimal_with(&lp, -7.0, "test_dual_matches_primal/dual", &dual_opts);
+
         let result_p = solve_with(&lp, &primal_opts);
         let result_d = solve_with(&lp, &dual_opts);
-
-        assert_eq!(result_p.status, SolveStatus::Optimal);
-        assert_eq!(result_d.status, SolveStatus::Optimal);
         assert!(
             (result_p.objective - result_d.objective).abs() < 1e-6,
             "Primal obj={}, Dual obj={}",
@@ -647,11 +642,12 @@ mod tests {
         );
     }
 
-    /// warm-start: RHSのみ変更した場合に正しい最適解が得られることを検証する
+    /// warm-start: RHSのみ変更した場合に正しい最適解 (KKT 全本柱) が得られること。
+    /// 旧 test は obj 一致のみ assert していたため、warm-start 経路で dfeas が
+    /// 退化した bug を検出できなかった。
     #[test]
     fn test_dual_warm_start_rhs_change() {
-        // LP1: min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3
-        // 最適解: x1=1, x2=3, obj=-7
+        // LP1: min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=1, x2=3, obj=-7
         let lp1 = make_lp(
             vec![-1.0, -2.0],
             &[0, 0, 1, 2],
@@ -666,8 +662,7 @@ mod tests {
         assert_eq!(result1.status, SolveStatus::Optimal);
         assert!(result1.warm_start_basis.is_some());
 
-        // LP2: 同じ問題、RHSのみ変更 b=[5, 3, 3]
-        // 最適解: x1=2, x2=3, obj=-8
+        // LP2: 同構造で b=[5,3,3] → x1=2, x2=3, obj=-8
         let lp2 = make_lp(
             vec![-1.0, -2.0],
             &[0, 0, 1, 2],
@@ -678,32 +673,18 @@ mod tests {
             vec![5.0, 3.0, 3.0],
         );
 
-        // コールドスタートで解く（正解確認用）
-        let result2_cold = solve_with(&lp2, &SolverOptions::default());
-        assert_eq!(result2_cold.status, SolveStatus::Optimal);
-
-        // warm-startで解く（Dual Simplex）
         let opts_warm = SolverOptions {
             warm_start: result1.warm_start_basis.clone(),
             simplex_method: SimplexMethod::Dual,
             ..SolverOptions::default()
         };
-        let result2_warm = solve_with(&lp2, &opts_warm);
-
-        assert_eq!(result2_warm.status, SolveStatus::Optimal, "Warm start should be Optimal");
-        assert!(
-            (result2_warm.objective - result2_cold.objective).abs() < 1e-6,
-            "Warm start obj={}, Cold start obj={}",
-            result2_warm.objective,
-            result2_cold.objective
-        );
+        assert_kkt_optimal_with(&lp2, -8.0, "test_dual_warm_start_rhs_change", &opts_warm);
     }
 
-    /// SimplexMethod::Dualオプションが正しく動作することを検証
+    /// SimplexMethod::Dualオプションが正しく動作することを検証 (KKT 全本柱)
     #[test]
     fn test_dual_simplex_method_option() {
-        // min -x1 - x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3
-        // 最適解: x1=1, x2=3 or x1=3, x2=1, obj=-4
+        // min -x1 - x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → obj=-4
         let lp = make_lp(
             vec![-1.0, -1.0],
             &[0, 0, 1, 2],
@@ -717,20 +698,14 @@ mod tests {
             simplex_method: SimplexMethod::Dual,
             ..SolverOptions::default()
         };
-        let result = solve_with(&lp, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal);
-        assert!(
-            (result.objective - (-4.0)).abs() < PIVOT_TOL,
-            "Expected obj=-4.0, got {}",
-            result.objective
-        );
+        assert_kkt_optimal_with(&lp, -4.0, "test_dual_simplex_method_option", &opts);
     }
 
-    /// warm-start後の被縮小費用が全て非負（双対実行可能性の維持）
+    /// warm-start後 KKT 全本柱: rc≥0 のみでは bound-aware dfeas や pfeas の退化を
+    /// 見逃すため、bound-aware dfeas_rel_bound と pfeas_abs を直接 assert する。
     #[test]
     fn test_dual_warm_start_preserves_dual_feasibility() {
-        // LP1: min x1 + x2 s.t. x1+x2 ≤ 6, x1 ≤ 4, x2 ≤ 4
-        // 最適解: x1=0, x2=0, obj=0 (c ≥ 0 → 原点が最適)
+        // LP1: min x1 + x2 s.t. x1+x2 ≤ 6, x1 ≤ 4, x2 ≤ 4 → x1=x2=0, obj=0
         let lp1 = make_lp(
             vec![1.0, 1.0],
             &[0, 0, 1, 2],
@@ -745,7 +720,7 @@ mod tests {
         assert_eq!(result1.status, SolveStatus::Optimal);
         assert!(result1.warm_start_basis.is_some());
 
-        // LP2: RHSのみ変更 b=[5, 3, 3]（同じ問題構造）
+        // LP2: b=[5,3,3] (狭めた)。c≥0 なので最適は依然 x=0, obj=0
         let lp2 = make_lp(
             vec![1.0, 1.0],
             &[0, 0, 1, 2],
@@ -762,14 +737,16 @@ mod tests {
             ..SolverOptions::default()
         };
         let result2 = solve_with(&lp2, &opts_warm);
-
         assert_eq!(result2.status, SolveStatus::Optimal);
-        // 双対変数（被縮小費用）が全て非負（最小化問題で最適性条件）
+
+        let pf = pfeas_abs(&lp2.a, &lp2.b, &lp2.constraint_types, &result2.solution);
+        assert!(pf < EPS_KKT, "pfeas={:.3e} > {:.3e}", pf, EPS_KKT);
+
+        let df = dfeas_rel_bound(&lp2.c, &lp2.bounds, &result2.solution, &result2.reduced_costs);
+        assert!(df < EPS_KKT, "dfeas_rel_bound={:.3e} > {:.3e}", df, EPS_KKT);
+
         for &rc in &result2.reduced_costs {
-            assert!(
-                rc >= -PIVOT_TOL,
-                "Reduced cost {rc} should be ≥ 0 at optimality (dual feasibility)"
-            );
+            assert!(rc >= -PIVOT_TOL, "rc={} < -PIVOT_TOL", rc);
         }
     }
 
