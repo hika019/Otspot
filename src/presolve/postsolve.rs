@@ -48,6 +48,7 @@ fn build_and_solve_cleanup_lp(
     solution: &[f64],
     dual_solution_known: &[f64],
     deadline: Option<Instant>,
+    allow_kept_perturbation: bool,
 ) -> Option<Vec<f64>> {
     // Inherit the parent deadline. If the parent has already lapsed, bail out
     // immediately and let the Gauss-Seidel fallback handle dual recovery.
@@ -81,7 +82,8 @@ fn build_and_solve_cleanup_lp(
     // size guard (LSQ_DUAL_SIZE_LIMIT と統一、`compute_lsq_dual_y` 内の値と整合)。
     // n + m が閾値を超える ken-18 / dfl001 等は cleanup LP の col 数増で simplex
     // factorize が現実的でなくなるため、旧来の y_del-only 経路に fallback。
-    let use_kept_perturbation = n + m <= CLEANUP_LP_KEPT_PERT_SIZE_LIMIT;
+    let use_kept_perturbation =
+        allow_kept_perturbation && n + m <= CLEANUP_LP_KEPT_PERT_SIZE_LIMIT;
     // task #22: dy 変数を持たせる kept 行集合 `coupled_kept` を closure で決定。
     //
     // 観察 (greenbea diag):
@@ -806,14 +808,16 @@ pub fn run_postsolve(
         y
     };
 
-    // (B) Cleanup LP 経路: 削除行 y を Phase I 風 slack relaxation で一括解決。
-    //     y_gs を rc_known / y_kept 計算に使う (反復収束済みの方が精度高い)。
-    //     task #22 で **kept-y perturbation 変数 dy** を追加し、kept 行の y も
-    //     coupling 解消に必要なら同時に調整する (greenbea 真因対処)。
-    //     deadline を継承して ken-18 のような大規模問題で暴走しないようにする。
-    //     戻り値は full y vector (m 要素): caller 側 unpack 不要。
-    let y_cl: Option<Vec<f64>> = build_and_solve_cleanup_lp(
-        orig_problem, presolve_result, &solution, &y_gs, deadline,
+    // (B) Cleanup LP: 削除行 y を Phase I slack relaxation で一括解決。
+    //     y_cl_pert (task #22 kept-y perturbation 有効) と y_cl_nopert (旧来 y_del-only)
+    //     を両方計算し、候補集合に並列に並べる。task #28: 一方が他方より dfeas を
+    //     悪化させる問題 (etamacro: pert→4.3e-6, nopert→6.6e-9) を 5-way 比較で
+    //     最良側を選べるようにし、greenbea 等の coupling 救済も維持する。
+    let y_cl_pert: Option<Vec<f64>> = build_and_solve_cleanup_lp(
+        orig_problem, presolve_result, &solution, &y_gs, deadline, true,
+    );
+    let y_cl_nopert: Option<Vec<f64>> = build_and_solve_cleanup_lp(
+        orig_problem, presolve_result, &solution, &y_gs, deadline, false,
     );
 
     // (C) 採用判定: bound-aware dfeas が小さい方を選ぶ。
@@ -885,10 +889,13 @@ pub fn run_postsolve(
                 orig_problem.constraint_types.clone(),
             ).ok();
             qp.and_then(|qp| {
-                // 現状の最良 y (y_cl があれば y_cl、なければ y_gs) を seed として渡す。
-                // compute_lsq_dual_y は target = -(Qx + c + bound_contrib) から
-                // A^T y ≈ target を LDL(A·A^T) で解く。LP (Q=0) では target = -c。
-                let seed = y_cl.as_ref().cloned().unwrap_or_else(|| y_gs.clone());
+                // compute_lsq_dual_y は dual_solution を seed として読まない (A·A^T y = -A·target
+                // を LDL で直接解く)。seed には現状の最良候補を渡しておく。
+                let seed = y_cl_pert
+                    .as_ref()
+                    .or(y_cl_nopert.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| y_gs.clone());
                 let tmp_result = crate::problem::SolverResult {
                     solution: solution.clone(),
                     dual_solution: seed,
@@ -901,25 +908,27 @@ pub fn run_postsolve(
         }
     };
 
-    // (C) 4-way 比較: y_loop / y_gs / y_cl / y_lsq のうち bound-aware dfeas が最小を採用。
+    // (C) 5-way 比較: y_loop / y_gs / y_cl_pert / y_cl_nopert / y_lsq のうち
+    //     bound-aware dfeas が最小を採用。同点は loop < gs < cl_nopert < cl_pert < lsq
+    //     の優先 (計算量の小さい順、kept-y 摂動なしを優先 = task #28 etamacro)。
     let df_loop = dfeas_bound(&y_loop);
     let df_gs = dfeas_bound(&y_gs);
-    let (df_cl, _has_cl) = match &y_cl {
-        Some(y) => (dfeas_bound(y), true),
-        None => (f64::INFINITY, false),
-    };
-    let (df_lsq, _has_lsq) = match &y_lsq {
-        Some(y) => (dfeas_bound(y), true),
-        None => (f64::INFINITY, false),
-    };
-    // 最小 df の y を採用。同点は loop < gs < cl < lsq の優先 (計算量の小さい順)。
-    let min_df = df_loop.min(df_gs).min(df_cl).min(df_lsq);
+    let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let min_df = df_loop
+        .min(df_gs)
+        .min(df_cl_nopert)
+        .min(df_cl_pert)
+        .min(df_lsq);
     if df_loop == min_df {
         dual_solution = y_loop;
     } else if df_gs == min_df {
         dual_solution = y_gs;
-    } else if df_cl == min_df {
-        dual_solution = y_cl.expect("df_cl finite implies Some");
+    } else if df_cl_nopert == min_df {
+        dual_solution = y_cl_nopert.expect("df_cl_nopert finite implies Some");
+    } else if df_cl_pert == min_df {
+        dual_solution = y_cl_pert.expect("df_cl_pert finite implies Some");
     } else {
         dual_solution = y_lsq.expect("df_lsq finite implies Some");
     }
