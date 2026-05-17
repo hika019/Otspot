@@ -84,7 +84,11 @@ pub(crate) fn solve_dual_advanced(
                 sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
             );
             if bigm_result.status == SolveStatus::Timeout {
-                primal_result
+                // Phase Primal と Phase Big-M 両方 Timeout: 全体 iter 数 (sum) を
+                // observability として保持。primal_result を base にして iter のみ加算。
+                let mut r = primal_result;
+                r.iterations = r.iterations.saturating_add(bigm_result.iterations);
+                r
             } else {
                 bigm_result
             }
@@ -153,7 +157,7 @@ fn cold_start_advanced(
             };
         }
         SimplexOutcome::Timeout(_) => {
-            return super::timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale);
+            return super::timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale, total_iters);
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -214,6 +218,7 @@ fn cold_start_advanced(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+                iterations: total_iters,
                 ..Default::default()
             }
         }
@@ -287,6 +292,7 @@ fn outcome_to_result(
         }
         SimplexOutcome::Timeout(obj) => {
             let solution = extract_solution(sf, basis, x_b, col_scale);
+            // iterations は呼び出し側 (solve_dual_advanced) で total_iters を上書き
             SolverResult {
                 status: SolveStatus::Timeout,
                 objective: obj + sf.obj_offset,

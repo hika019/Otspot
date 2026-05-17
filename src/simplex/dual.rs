@@ -103,7 +103,7 @@ fn cold_start_dual(
             };
         }
         SimplexOutcome::Timeout(_) => {
-            return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale);
+            return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale, total_iters);
         }
         SimplexOutcome::SingularBasis => {
             if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {

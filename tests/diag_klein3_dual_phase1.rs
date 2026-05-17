@@ -37,6 +37,15 @@ use std::time::Instant;
 
 const TIMEOUT_SEC: f64 = 60.0;
 
+/// klein3 専用 Bland anti-cycling 上限。
+///
+/// basis-hash 観測で「concurrent path の `dual_simplex_core_advanced` が
+/// 280k iter で 4 distinct basis を周回」が事実。Bland's rule (smallest-idx
+/// leaving + min-ratio/smallest-idx entering) は有限終了保証を持ち、cycle 長
+/// m=88 オーダーなら数百〜数千 iter で抜けるのが物理的妥当。30s timeout に
+/// 余裕を持って 20s 上限とした。
+const KLEIN3_BLAND_BUDGET_SEC: f64 = 20.0;
+
 fn run_klein(path_str: &str) -> (SolveStatus, f64, usize) {
     run_klein_with_presolve(path_str, true)
 }
@@ -99,6 +108,39 @@ fn klein3_no_false_optimal_within_60s() {
         status
     );
     assert!(wall < TIMEOUT_SEC, "klein3 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
+}
+
+/// task #6 (anti-cycling): bland_mode 起動時に lex 摂動 (`x_b += B^{-1} delta`、
+/// `delta[i] = LEX_PERTURB_BASE * LEX_PERTURB_RATIO^i`) を注入することで
+/// degeneracy が解消され、Bland's rule が klein3 を有限ステップで Infeasible
+/// 判定することを確認する。
+#[test]
+fn klein3_infeasible_via_bland_anticycling() {
+    let path = Path::new("data/lp_problems_infeas/klein3.QPS");
+    assert!(path.exists(), "data missing: {}", path.display());
+    let problem = parse_qps(path).expect("parse_qps");
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(30.0);
+
+    let t0 = Instant::now();
+    let result = solver::qp::solve_qp_with(&problem, &opts);
+    let wall = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "[klein3-bland] status={:?} wall={:.3}s iters={}",
+        result.status, wall, result.iterations
+    );
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Infeasible,
+        "Bland anti-cycling で klein3 は Infeasible 判定されるべき"
+    );
+    assert!(
+        wall < KLEIN3_BLAND_BUDGET_SEC,
+        "klein3 wall {:.3}s — anti-cycling 効いていれば {:.1}s 未満で終わるはず",
+        wall,
+        KLEIN3_BLAND_BUDGET_SEC
+    );
 }
 
 /// klein3: presolve OFF で Big-M 直接実行の挙動を観測 (diagnostic)
