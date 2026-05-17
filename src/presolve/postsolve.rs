@@ -373,7 +373,6 @@ fn build_and_solve_cleanup_lp(
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
-        // Phase 1 失敗 → 上位の Gauss-Seidel フォールバックに任せる。
         return None;
     }
     let y_del_phase1: Vec<f64> = r1.solution[..k].to_vec();
@@ -987,7 +986,8 @@ pub fn run_postsolve(
         }
     }
 
-    // 目的関数値 = 縮約後 objective + presolve で除いた変数の寄与
+    let postsolve_dfeas_recomputed = dfeas_bound(&dual_solution);
+
     let objective = result.objective + presolve_result.obj_offset;
 
     SolverResult {
@@ -997,8 +997,9 @@ pub fn run_postsolve(
         dual_solution,
         reduced_costs,
         slack,
-        warm_start_basis: None, // presolve と warm-start の組み合わせは未対応
-        iterations: result.iterations, // task #19: 縮約後 solve の iter を引き継ぐ
+        warm_start_basis: None,
+        iterations: result.iterations,
+        postsolve_dfeas: Some(postsolve_dfeas_recomputed),
         ..Default::default()
     }
 }

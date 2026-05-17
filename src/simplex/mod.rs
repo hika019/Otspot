@@ -125,6 +125,44 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
                 });
+                // When postsolve cannot bring dfeas within the cleanup-LP gate (every
+                // candidate — Loop / Gauss-Seidel / cleanup±perturbation / LSQ — failed),
+                // the presolve transforms removed structure the dual-recovery cannot
+                // reconstruct (greenbea-class: cleanup_pert Phase 1 returns Infeasible).
+                // The same LP solves cleanly without presolve, so re-attempt on the
+                // remaining deadline. Trigger reuses PIVOT_TOL — the same gate the
+                // cleanup LP already screens against — no new magic threshold.
+                if res.status == SolveStatus::Optimal
+                    && res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
+                {
+                    let deadline_ok = options.deadline
+                        .is_none_or(|d| std::time::Instant::now() < d);
+                    if deadline_ok {
+                        let mut opts_off = options.clone();
+                        opts_off.presolve = false;
+                        // Skip dual_advanced's Ge/Eq cold-start half-deadline split
+                        // (klein3-cycling safety net): we already know the LP is
+                        // feasible (first attempt returned Optimal), so primal
+                        // direct uses the full remaining deadline. Without this,
+                        // greenbea-class LPs cannot finish the alt in 60 s canary
+                        // because half of ~40 s remaining is not enough.
+                        opts_off.simplex_method = crate::options::SimplexMethod::Primal;
+                        let t_alt_start = std::time::Instant::now();
+                        let mut alt = solve_without_presolve(problem, &opts_off);
+                        let alt_solve_us = t_alt_start.elapsed().as_micros() as u64;
+                        if alt.status == SolveStatus::Optimal
+                            && alt.postsolve_dfeas.is_none()
+                            && alt.objective.is_finite()
+                        {
+                            alt.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                                presolve_us: 0,
+                                solve_us: alt_solve_us,
+                                postsolve_us: 0,
+                            });
+                            return alt;
+                        }
+                    }
+                }
                 return res;
             }
             Ok(_) => {
