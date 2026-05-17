@@ -254,15 +254,15 @@ pub(crate) fn check_dfeas_status(
     }
 }
 
-/// 成分ごとの相対dfeasチェック
+/// 成分ごとの相対 KKT 残差 + complementarity チェック。
 ///
-/// pfeasの正規化パターン `violation / (1 + ||a_k|| + |b_k|)` に倣い、
-/// KKT双対残差を各成分のKKT項スケールで正規化する:
-/// ```text
-/// max_j |Qx_j + A^Ty_j + bound_contrib_j + c_j| / (1 + |Qx_j| + |A^Ty_j| + |bound_contrib_j| + |c_j|)
-/// ```
-/// グローバルノルムでは巨大項のキャンセレーション（BOYD1: Qx ≈ -A^Ty）を反映できないが、
-/// 成分ごとの正規化なら真の相対精度を測定できる。
+/// stationarity (`|Qx + A^Ty + bound_contrib + c|` 成分相対化) に加えて
+/// complementarity (`y_i · slack_i`, `z_j · (x_j - bnd_j)`) を成分相対化で評価し、
+/// 両方 eps 以下の場合のみ Optimal を返す。
+///
+/// stationarity だけ見るとLISWET9/YAOのように feasible だが optimal でない点が
+/// Optimal と判定される (inactive 制約の y が大、slack が小、積が中程度)。
+/// 同形の正規化は `ipm_solver::kkt::complementarity_residual_rel` と整合。
 pub(crate) fn check_dfeas_status_relative(
     problem: &QpProblem,
     x: &[f64],
@@ -318,11 +318,119 @@ pub(crate) fn check_dfeas_status_relative(
             + problem.c[j].abs();
         dfeas_relative = dfeas_relative.max(r / scale_j);
     }
-    if dfeas_relative < eps {
+    if dfeas_relative >= eps {
+        return SolveStatus::SuboptimalSolution;
+    }
+    // complementarity (4 つ目の KKT 条件)。stationarity だけ通っても
+    // y·slack や z·(x-bnd) が崩れた解は optimal でない。
+    let comp = complementarity_relative(problem, x, y, bound_duals);
+    if comp < eps {
         SolveStatus::Optimal
     } else {
         SolveStatus::SuboptimalSolution
     }
+}
+
+/// 元空間 complementarity 残差 (問題全体スケール正規化)。
+/// `ipm_solver::kkt::complementarity_residual_rel` と同形の双対対スケール正規化を使う。
+fn complementarity_relative(
+    problem: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    bound_duals: &[f64],
+) -> f64 {
+    use crate::problem::ConstraintType;
+    use twofloat::TwoFloat;
+    let zero_dd = TwoFloat::from(0.0);
+
+    let m = problem.a.nrows;
+    let ax_dd: Vec<TwoFloat> = if m > 0 {
+        let mut ax = vec![zero_dd; m];
+        for col in 0..problem.a.ncols {
+            let xv = x[col];
+            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
+                ax[problem.a.row_ind[k]] =
+                    ax[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+            }
+        }
+        ax
+    } else {
+        Vec::new()
+    };
+
+    let yb: f64 = y.iter().zip(problem.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
+    let yax: f64 = y
+        .iter()
+        .zip(ax_dd.iter())
+        .map(|(&yi, &ax_dd_i)| yi * f64::from(ax_dd_i))
+        .sum();
+    let zx: f64 = {
+        let mut s = 0.0_f64;
+        let mut idx = 0_usize;
+        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < bound_duals.len() {
+                s += bound_duals[idx] * x[j];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < bound_duals.len() {
+                s += bound_duals[idx] * x[j];
+                idx += 1;
+            }
+        }
+        s
+    };
+    let cx: f64 = problem.c.iter().zip(x.iter()).map(|(&c, &xi)| c * xi).sum();
+    let xqx: f64 = {
+        let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
+        qx.iter().zip(x.iter()).map(|(&q, &xi)| q * xi).sum()
+    };
+    let scale = 1.0
+        + yb.abs()
+        + yax.abs()
+        + zx.abs()
+        + cx.abs()
+        + (0.5 * xqx).abs();
+
+    let mut max_abs = 0.0_f64;
+
+    if m > 0 && !y.is_empty() {
+        for (i, ct) in problem.constraint_types.iter().enumerate() {
+            let slack_dd = match ct {
+                ConstraintType::Eq => continue,
+                ConstraintType::Le => TwoFloat::from(problem.b[i]) - ax_dd[i],
+                ConstraintType::Ge => ax_dd[i] - TwoFloat::from(problem.b[i]),
+            };
+            let prod = (f64::from(slack_dd) * y[i]).abs();
+            if prod > max_abs {
+                max_abs = prod;
+            }
+        }
+    }
+
+    if !bound_duals.is_empty() {
+        let mut idx = 0_usize;
+        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < bound_duals.len() {
+                let prod = (bound_duals[idx] * (x[j] - lb)).abs();
+                if prod > max_abs {
+                    max_abs = prod;
+                }
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < bound_duals.len() {
+                let prod = (bound_duals[idx] * (ub - x[j])).abs();
+                if prod > max_abs {
+                    max_abs = prod;
+                }
+                idx += 1;
+            }
+        }
+    }
+    max_abs / scale
 }
 
 // ---------------------------------------------------------------------------

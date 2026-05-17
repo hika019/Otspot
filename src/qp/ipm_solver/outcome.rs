@@ -30,6 +30,11 @@ pub struct IpmOutcome {
     pub primal_residual_rel: f64,
     /// 元空間 bounds 違反 (max_j max(lb-x, x-ub))
     pub bound_violation: f64,
+    /// 元空間 KKT complementarity 残差。inequality `y_i · slack_i` と
+    /// bound `z_j · (x_j - bnd_j)` を |dual|·(|Ax|+|b|) (resp. |dual|·(|x|+|bnd|))
+    /// で正規化した最大値。stationarity gate のみでは見逃される
+    /// 「feasible だが optimal でない点」を弾く。
+    pub complementarity_residual_rel: f64,
     /// 元空間 双対ギャップ相対値 |primal_obj - dual_obj| / max(|p|, |d|, 1)。
     /// rank-deficient Q (UBH1 等) で KKT 残差は小さいが obj が大きく外れる
     /// 偽 Optimal を検出するためのゲート。
@@ -58,6 +63,7 @@ impl IpmOutcome {
             kkt_residual_rel: f64::INFINITY,
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
+            complementarity_residual_rel: f64::INFINITY,
             duality_gap_rel: f64::INFINITY,
             numerical_failure: false,
             infeasibility_status: None,
@@ -100,6 +106,7 @@ impl IpmOutcome {
             && self.kkt_residual_rel <= eps
             && self.primal_residual_rel <= eps
             && self.bound_violation <= eps
+            && self.complementarity_residual_rel <= eps
             && self.duality_gap_rel < Self::PROMOTION_GAP_TOL
     }
 
@@ -122,6 +129,7 @@ impl IpmOutcome {
         self.kkt_residual_rel
             .max(self.primal_residual_rel)
             .max(self.bound_violation)
+            .max(self.complementarity_residual_rel)
     }
 }
 
