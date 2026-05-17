@@ -808,11 +808,8 @@ pub fn run_postsolve(
         y
     };
 
-    // (B) Cleanup LP: 削除行 y を Phase I slack relaxation で一括解決。
-    //     y_cl_pert (task #22 kept-y perturbation 有効) と y_cl_nopert (旧来 y_del-only)
-    //     を両方計算し、候補集合に並列に並べる。task #28: 一方が他方より dfeas を
-    //     悪化させる問題 (etamacro: pert→4.3e-6, nopert→6.6e-9) を 5-way 比較で
-    //     最良側を選べるようにし、greenbea 等の coupling 救済も維持する。
+    // kept-y 摂動の有無で y_cl を並列に計算: どちらが最良かは問題依存
+    // (摂動有効が必要なケースと摂動が dfeas を悪化させるケースが両方ある)。
     let y_cl_pert: Option<Vec<f64>> = build_and_solve_cleanup_lp(
         orig_problem, presolve_result, &solution, &y_gs, deadline, true,
     );
@@ -889,8 +886,6 @@ pub fn run_postsolve(
                 orig_problem.constraint_types.clone(),
             ).ok();
             qp.and_then(|qp| {
-                // compute_lsq_dual_y は dual_solution を seed として読まない (A·A^T y = -A·target
-                // を LDL で直接解く)。seed には現状の最良候補を渡しておく。
                 let seed = y_cl_pert
                     .as_ref()
                     .or(y_cl_nopert.as_ref())
@@ -908,9 +903,7 @@ pub fn run_postsolve(
         }
     };
 
-    // (C) 5-way 比較: y_loop / y_gs / y_cl_pert / y_cl_nopert / y_lsq のうち
-    //     bound-aware dfeas が最小を採用。同点は loop < gs < cl_nopert < cl_pert < lsq
-    //     の優先 (計算量の小さい順、kept-y 摂動なしを優先 = task #28 etamacro)。
+    // 候補 y を dfeas_bound 最小で採用 (同点は計算量の小さい順)。
     let df_loop = dfeas_bound(&y_loop);
     let df_gs = dfeas_bound(&y_gs);
     let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
