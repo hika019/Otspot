@@ -1036,11 +1036,34 @@ fn run_ipm_with(
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
+    // Invariant: reported objective is computed at the *returned* x, not at any
+    // intermediate iterate. Post-processing (refine_primal_lsq, KKT IR) mutates
+    // final_sol.solution; recomputing here makes the contract hold regardless of
+    // how many post-processing passes run.
+    let objective_recomputed = {
+        let qx = orig_problem
+            .q
+            .mat_vec_mul(&final_sol.solution)
+            .unwrap_or_else(|_| vec![0.0; orig_problem.num_vars]);
+        let xqx: f64 = qx
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&q, &x)| q * x)
+            .sum();
+        let cx: f64 = orig_problem
+            .c
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&c, &x)| c * x)
+            .sum();
+        0.5 * xqx + cx + orig_problem.obj_offset
+    };
+
     IpmOutcome {
         solution: final_sol.solution,
         dual_solution: final_sol.dual_solution,
         bound_duals: final_sol.bound_duals,
-        objective: final_sol.objective,
+        objective: objective_recomputed,
         iterations: result.iterations,
         kkt_residual_rel: kkt_out,
         primal_residual_rel: pres,
