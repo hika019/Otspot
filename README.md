@@ -279,6 +279,20 @@ docker run --rm -v "$PWD":/workspace -w /workspace solver-dev \
   cargo nextest run --release
 ```
 
+### Bare host 実行 (Docker を使わない場合)
+
+bench data 生成 script (`scripts/gen_*.py`) は以下の Python pkg を要求:
+
+```bash
+pip install numpy scipy cvxpy clarabel
+```
+
+`cvxpy` / `clarabel` は `osqp_bench` 系 (`osqp_bench`, `osqp_bench_*`, `qp_dense_a`)
+の生成器でのみ必要。LP suite (`lp_problems*`) は `curl` + `emps` のみで動く。
+
+`scripts/download_all_bench_data.sh` は QP モード突入時に numpy/scipy の
+有無を check し、不在なら Docker / pip の手順を案内して exit する。
+
 ### ベンチマークデータの取得
 
 `data/` 配下は `.gitignore` 対象なので、clone 後に bench data を自前生成する必要がある:
