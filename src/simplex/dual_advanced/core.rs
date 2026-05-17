@@ -134,7 +134,7 @@ pub(crate) fn dual_simplex_core_advanced(
         }
 
         // 3b: 離基変数選択（leaving.select_leaving()）
-        let leaving_row = match leaving.select_leaving(x_b, options.primal_tol) {
+        let leaving_row = match leaving.select_leaving(x_b, options.primal_tol, basis) {
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();

@@ -114,17 +114,22 @@ impl PricingStrategy for SteepestEdgePricing {
 }
 
 /// Dual Simplexの離基変数選択トレイト
+///
+/// `basis` 引数は現在の基底配列 (basis[i] = 行 i に basic な列のグローバル
+/// インデックス) を渡す。標準的な leaving 規則 (MostInfeasibleLeaving) は
+/// 無視するが、Big-M Phase I (`dual_advanced/phase1.rs`) では人工変数の
+/// basis 残存を判定するためにこれを参照する。
 pub(crate) trait DualLeavingStrategy {
-    /// 最も主実行不可な基底変数の行インデックスを返す
-    /// x_B[i] >= -primal_tol なら全て実行可能 → None（最適）
-    fn select_leaving(&self, x_b: &[f64], primal_tol: f64) -> Option<usize>;
+    /// 主実行不可 (x_B[i] < -primal_tol) or 追い出すべき変数の行インデックスを返す。
+    /// 候補なし → None（最適）
+    fn select_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
 }
 
 /// Most Infeasible Rule: 最も負のx_B[i]を選択
 pub(crate) struct MostInfeasibleLeaving;
 
 impl DualLeavingStrategy for MostInfeasibleLeaving {
-    fn select_leaving(&self, x_b: &[f64], primal_tol: f64) -> Option<usize> {
+    fn select_leaving(&self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
         let mut best_row = None;
         let mut max_violation = primal_tol;
 
