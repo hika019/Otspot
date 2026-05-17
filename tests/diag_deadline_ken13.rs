@@ -1,13 +1,11 @@
-//! task #27: ken-13 deadline 不遵守 fix の TDD diag + 大規模 LP regression guard.
+//! Large-LP deadline regression guard.
 //!
-//! 既知症状 (docs/known_bugs.md): ken-13.QPS (~30000 行) で solver の `timeout=1000s`
-//! が守られず、外側 gtimeout 1300s まで CPU 100% で暴走する。
+//! Solves ken-13 and related large Netlib LPs under a short `timeout_secs` and a
+//! `mpsc::recv_timeout` watchdog. A solver path that ignores `options.deadline`
+//! manifests as either watchdog expiry (hang) or wall ≫ watchdog.
 //!
-//! このテストは短縮版 (timeout=30s) で再現し、watchdog 内に solve が必ず戻ること
-//! を GREEN 条件とする。watchdog 超過は test failure。data 欠落時は panic
-//! (SKIP 禁止 — CLAUDE.md「検証空白は bug 不在を保証しない」)。
-//!
-//! 関連 fix commit: 5652027 (cleanup_lp deadline 継承) / 55e4cf7 (parent deadline 未設定時)。
+//! Data files are required; missing data panics rather than skips so absence is
+//! never silently mistaken for absence of the bug.
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -30,8 +28,11 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
     .unwrap()
 }
 
-/// 共通ヘルパ: 指定 LP を `timeout_secs` で解く。watchdog 内に終わらなければ panic、
-/// 終わった場合は (status, wall_secs) を返す。
+/// Solve `qps_path` with `timeout_secs`; fail if the solver thread does not
+/// return within `watchdog` or returns with wall > `watchdog`.
+///
+/// The 8 MiB stack matches `qp::SOLVE_STACK_SIZE` — faer supernodal recursion
+/// overflows the default 2 MiB on large bases.
 fn solve_with_watchdog(
     qps_path: &Path,
     timeout_secs: f64,
@@ -40,7 +41,7 @@ fn solve_with_watchdog(
 ) -> (SolveStatus, f64) {
     assert!(
         qps_path.exists(),
-        "task #27 diag 必須: {:?} が見つからない (SKIP 禁止)",
+        "data required (no SKIP): {:?}",
         qps_path
     );
     let qp = parse_qps(qps_path).expect("parse QPS");
@@ -54,7 +55,6 @@ fn solve_with_watchdog(
 
     let (tx, rx) = mpsc::channel();
     let lp_clone = lp.clone();
-    let label_owned = label.to_string();
     let handle = thread::Builder::new()
         .name(format!("{label}-solver"))
         .stack_size(8 * 1024 * 1024)
@@ -63,16 +63,15 @@ fn solve_with_watchdog(
             opts.timeout_secs = Some(timeout_secs);
             let t0 = Instant::now();
             let r = solve_with(&lp_clone, &opts);
-            let elapsed = t0.elapsed();
-            let _ = tx.send((r.status, r.objective, elapsed, label_owned));
+            let _ = tx.send((r.status, r.objective, t0.elapsed()));
         })
         .expect("spawn solver thread");
 
     match rx.recv_timeout(watchdog) {
-        Ok((status, obj, elapsed, _)) => {
+        Ok((status, obj, elapsed)) => {
             let secs = elapsed.as_secs_f64();
             eprintln!(
-                "[{label}] status={:?} obj={:.6e} wall={:.3}s (timeout_secs={timeout_secs}, watchdog={}s)",
+                "[{label}] status={:?} obj={:.6e} wall={:.3}s (timeout={timeout_secs}s, watchdog={}s)",
                 status,
                 obj,
                 secs,
@@ -81,31 +80,26 @@ fn solve_with_watchdog(
             let _ = handle.join();
             assert!(
                 secs <= watchdog.as_secs_f64(),
-                "task #27 [{label}]: wall={:.3}s が watchdog={}s を超過 (deadline 不遵守)",
+                "[{label}] wall={:.3}s exceeded watchdog={}s",
                 secs,
                 watchdog.as_secs_f64()
             );
             (status, secs)
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!(
-                "task #27 FAIL [{label}]: solve_with が watchdog {}s 内に return しない (timeout_secs={timeout_secs}). deadline check が抜けている経路あり",
-                watchdog.as_secs_f64(),
-            );
-        }
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "[{label}] solve_with did not return within watchdog {}s (timeout={timeout_secs}s) — deadline path missing",
+            watchdog.as_secs_f64(),
+        ),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("task #27 [{label}]: solver thread panicked before sending result");
+            panic!("[{label}] solver thread panicked before reply")
         }
     }
 }
 
-/// task #27 メイン: ken-13 (~30000 行) — bug 報告本体。
-///
-/// timeout_secs=30s, watchdog=60s。watchdog 超過 / 異常 status は test failure。
 #[test]
 fn diag_ken13_deadline_must_stop_within_watchdog() {
     let path = Path::new("data/lp_problems/ken-13.QPS");
-    let (status, _secs) = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-13");
+    let (status, _) = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-13");
     assert!(
         matches!(
             status,
@@ -114,31 +108,28 @@ fn diag_ken13_deadline_must_stop_within_watchdog() {
                 | SolveStatus::NumericalError
                 | SolveStatus::Infeasible
         ),
-        "task #27 ken-13: 予期せぬ status {:?} (停止はしたが状態不明)",
+        "ken-13: unexpected status {:?}",
         status
     );
 }
 
-/// cross-verify: ken-11 (~14000 行) — 元から deadline 正常停止していた問題、
-/// 回帰がないことを確認。
 #[test]
 fn diag_ken11_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/ken-11.QPS");
-    let (_status, _secs) = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-11");
+    let _ = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-11");
 }
 
-/// cross-verify: dfl001 (~6000 行) — 1e-4 bench で TIMEOUT 1287s (1000s 超過) 報告あり。
 #[test]
 fn diag_dfl001_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/dfl001.QPS");
-    let (_status, _secs) = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "dfl001");
+    let _ = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "dfl001");
 }
 
-/// cross-verify: pds-20 (~33000 行) — 1000s 級 PFEAS_FAIL 問題。
-/// heavy (timeout=60s, watchdog=100s) のため `#[ignore]` で nextest --run-ignored only 経由のみ。
+/// pds-20 needs ~60s solve budget; gate behind `#[ignore]` to keep default
+/// `cargo nextest run` under 3 minutes (see CLAUDE.md test budget).
 #[test]
-#[ignore = "diag heavy ~60s; task #27 cross-verify, run with --run-ignored only"]
+#[ignore = "heavy ~60s; run with --run-ignored only"]
 fn diag_pds20_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/pds-20.QPS");
-    let (_status, _secs) = solve_with_watchdog(path, 60.0, Duration::from_secs(100), "pds-20");
+    let _ = solve_with_watchdog(path, 60.0, Duration::from_secs(100), "pds-20");
 }
