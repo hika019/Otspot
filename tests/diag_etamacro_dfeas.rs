@@ -1,4 +1,4 @@
-//! Task #28: etamacro DFEAS_FAIL regression (8804da8 PASS → b756f34 df=4.3e-6 @ eps=1e-6).
+//! Regression: etamacro must reach Optimal with dfeas_rel ≤ eps at eps=1e-6.
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
