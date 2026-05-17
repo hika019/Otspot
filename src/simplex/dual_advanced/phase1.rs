@@ -46,6 +46,7 @@
 //! ```
 //! いずれも問題スケールから派生する算式 (固定マジック値ではない)。
 
+use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
@@ -53,6 +54,59 @@ use crate::tolerances::DROP_TOL;
 use super::super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
 use super::core::dual_simplex_core_advanced;
+
+/// Farkas certificate verification for primal infeasibility.
+///
+/// At a Big-M Phase I exit basis with artificials residual, construct the
+/// pure-Phase-I dual y = B^{-T} e_art (indicator of artificial basis rows) and
+/// test the Farkas alternative for the original LP {min c^T x | Ax = b, x ≥ 0}:
+///
+///   A^T y ≤ tol  for all original cols j  AND  b^T y > tol  →  infeasible.
+///
+/// This is the only sufficient proof of infeasibility we can give without
+/// completing Phase I. If the certificate fails, the caller must return Timeout
+/// rather than guessing Infeasible from artificial residual alone — that
+/// heuristic flipped the verdict on slow-but-feasible LPs (#37: pilot/dfl001/
+/// ken-13/ken-18).
+///
+/// Tolerance scales with ||b||_∞ to stay correct on Ruiz-scaled inputs.
+fn farkas_infeasibility_certified(
+    a_aug: &CscMatrix,
+    b: &[f64],
+    basis_aug: &[usize],
+    m: usize,
+    n_total: usize,
+    options: &SolverOptions,
+) -> bool {
+    let c_phase1: Vec<f64> = (0..m)
+        .map(|i| if basis_aug[i] >= n_total { 1.0 } else { 0.0 })
+        .collect();
+
+    let mut basis_mgr = match LuBasis::new(a_aug, basis_aug, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return false,
+    };
+    let mut y = c_phase1;
+    basis_mgr.btran_dense(&mut y);
+
+    let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let tol = options.dual_tol * (1.0_f64).max(b_norm);
+    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+    if by <= tol {
+        return false;
+    }
+    for j in 0..n_total {
+        let (rows, vals) = a_aug.get_column(j).unwrap();
+        let mut aty = 0.0_f64;
+        for (k, &row) in rows.iter().enumerate() {
+            aty += vals[k] * y[row];
+        }
+        if aty > tol {
+            return false;
+        }
+    }
+    true
+}
 
 /// SolverOptions のクローンを返し、deadline がある場合は残り時間の半分に縮める。
 ///
@@ -245,17 +299,20 @@ pub(crate) fn big_m_cold_start(
             return r;
         }
         SimplexOutcome::Timeout(_) => {
-            // Phase I が半分の deadline で終わらない & artificial 残存 → Infeasibility シグナル
-            // (klein3 等 highly degenerate infeasible LP のヒューリスティック判定)。
+            // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
+            // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
+            // ヒューリスティック (#37)。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
+            // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
             let any_artificial_left = (0..m).any(|i| {
                 basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
             });
-            if any_artificial_left {
+            if any_artificial_left
+                && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
+            {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
                 return r;
             }
-            // artificial 残存なし → Timeout として返却
             let mut r = super::super::timeout_result_with_incumbent(
                 sf, problem, &basis_aug, &x_b, col_scale,
             );
@@ -271,7 +328,9 @@ pub(crate) fn big_m_cold_start(
             // 単に Phase I で leaving 候補が枯渇 (= artificial 追い出し完了 or
             // 元から artificial 残存しないケース)。Phase II へ。
             //
-            // 念のため artificial 残存値をチェックして Infeasible 早期判定。
+            // Phase I が Optimal で停止 → Big-M LP の主双対最適。Big-M が十分大きい
+            // 構成上、artificial が basis に残って x_B > 0 ならば元 LP は infeasible
+            // (この経路は Phase I 完走を要求するため Timeout 経路と違って健全)。
             let any_artificial_left = (0..m).any(|i| {
                 basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
             });

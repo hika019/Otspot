@@ -79,14 +79,24 @@ fn klein2_infeasible_within_60s() {
     assert!(wall < TIMEOUT_SEC, "klein2 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
-/// klein3: task #11 ターゲット (Big-M Phase I 未実装で現状 Timeout)
+/// klein3: highly degenerate infeasible LP. task #11 introduced Big-M Phase I
+/// with a `Timeout + artificials residual → Infeasible` heuristic that
+/// happened to be right for klein3 but flipped slow-but-feasible LPs to
+/// false-Infeasible (#37: pilot/dfl001/ken-13/ken-18). #37 replaced the
+/// heuristic with a Farkas certificate (A^T y ≤ 0, b^T y > 0); on klein3 the
+/// Big-M basis after 600K iters does not satisfy A^T y ≤ 0 within 60s budget,
+/// so the certificate fails and the solver returns Timeout (honest answer).
+///
+/// Both verdicts are acceptable: Infeasible (presolve / Phase I converges in
+/// time) or Timeout (Phase I incomplete, no certificate). Optimal or Unbounded
+/// would be a real bug.
 #[test]
-fn klein3_infeasible_within_60s() {
+fn klein3_no_false_optimal_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein3.QPS");
-    assert_eq!(
-        status,
-        SolveStatus::Infeasible,
-        "klein3 must be Infeasible (task #11 Big-M Dual Phase I で解消)"
+    assert!(
+        matches!(status, SolveStatus::Infeasible | SolveStatus::Timeout),
+        "klein3 must be Infeasible (certified) or Timeout (honest); got {:?}",
+        status
     );
     assert!(wall < TIMEOUT_SEC, "klein3 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
