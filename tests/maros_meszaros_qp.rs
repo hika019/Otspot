@@ -1,35 +1,15 @@
-//! Maros-Meszaros QP ベンチマーク問題テスト
-//!
-//! 業界標準 QP ベンチマーク（Hock-Schittkowski / Maros-Meszaros）を
-//! Rust テストとして実装し、solver の QP 実装を検証する。
-//!
-//! 問題形式: min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub
-//! （「1/2 あり」OSQP/qpOASES 標準規約）
+//! Maros-Meszaros / Hock-Schittkowski QP ベンチマーク (形式: min 1/2 xᵀQx+cᵀx s.t. Ax≤b, lb≤x≤ub)。
 
 use solver::qp::{solve_qp, solve_qp_warm, QpProblem, QpWarmStart};
 use solver::sparse::CscMatrix;
 use solver::SolveStatus;
 
-// 解精度の許容値: default user_eps=1e-6 を基準に問題構造から導出する。
-//
-// 目的値: solver は relative gap = |pf-df| / (1 + |obj|) ≤ eps で収束判定する。
-//   → 目的値絶対誤差 ≤ eps × (1 + |obj|)。abs 比較ではなく relative 比較が正しい。
-//   assert_obj_close は relative eps=1e-6 で比較する。
-//
-// 解変数: 内点法の primal 精度は O(eps) ≈ 1e-6 (postsolve 後の丸め込みで数倍)
-//   EPS_SOL: 通常解変数の絶対許容値
-//
-// 退化境界 (λ*=0 かつ制約 active) の解変数: O(sqrt(eps)) ≈ 1e-3
-//   理由: 補完余裕 λ*s=mu で λ→0+ の場合、s≈sqrt(mu) で収束するため。
-//   例: CVXQP1_S (λ*=0, sum(x)=5 active) → xi 誤差≈sqrt(1e-6)/2 ≈ 5e-4
-
-// 解変数の絶対許容値 (postsolve 後の丸め ≈ 数×eps)
+// 通常解変数の絶対許容値 (postsolve 後の丸め ≈ 数×eps)
 const EPS_SOL: f64 = 1e-5;
-// 退化制約境界 (λ*=0) の解変数許容値
+// 退化制約境界 (λ*=0) は補完余裕 λs=μ より s≈√μ で収束するため O(√eps)
 const EPS_DEG: f64 = 5e-4;
 
-/// 目的値を相対誤差 eps=1e-6 で検証する。
-/// ソルバーの収束判定 relative gap ≤ 1e-6 に対応した正しい比較。
+/// 相対誤差 eps=1e-6 で目的値を検証 (solver の relative gap 収束判定と整合)。
 fn assert_obj_close(actual: f64, expected: f64, name: &str) {
     let rel = (actual - expected).abs() / (1.0 + expected.abs());
     assert!(
@@ -50,19 +30,7 @@ fn assert_close(a: f64, b: f64, eps: f64, name: &str) {
     );
 }
 
-/// HS21: Hock-Schittkowski Problem #21
-///
-/// 原問題:
-///   min f = 0.01*x1^2 + x2^2 - 10*x1 - x2
-///   s.t. 10*x1 - x2 >= 2
-///        2 <= x1 <= 10,  -10 <= x2 <= 10
-///
-/// QP 形式（1/2 あり規約）:
-///   Q = diag(0.02, 2.0),  c = [-10, -1]
-///   A = [[-10, 1]],  b = [-2]  （10x1-x2>=2 → -10x1+x2<=-2）
-///
-/// 解析解: x1* = 10（上界が活性）, x2* = 0.5（内点最小）
-/// QP 目的関数値: 1/2*(0.02*100 + 2*0.25) + (-100 - 0.5) = 1.25 - 100.5 = -99.25
+/// HS21: min 0.01x1²+x2²−10x1−x2  s.t. 10x1−x2≥2, x1∈[2,10], x2∈[-10,10]  →  opt=(10, 0.5), obj=-99.25
 #[test]
 fn test_hs21() {
     let n = 2;
@@ -83,21 +51,7 @@ fn test_hs21() {
     assert_obj_close(result.objective, -99.25, "HS21: QP objective = -99.25");
 }
 
-/// HS35: Hock-Schittkowski Problem #35
-///
-/// 原問題（Hock & Schittkowski 1981, Problem 35）:
-///   min f = 9 - 8x1 - 6x2 - 4x3 + 2x1^2 + 2x2^2 + x3^2 + 2x1x2 + 2x1x3
-///   s.t. x1 + x2 + 2*x3 <= 3
-///        xi >= 0  (i=1,2,3)
-///
-/// QP 形式（1/2 あり規約）, 定数 +9 を除いた形:
-///   Q = [[4,2,2],[2,4,0],[2,0,2]],  c = [-8,-6,-4]
-///   A = [[1,1,2]],  b = [3]
-///   bounds = [(0, INF); 3]
-///
-/// 解析解: x* = (4/3, 7/9, 4/9)
-///   原問題値 f* = 1/9 ≈ 0.1111
-///   QP 目的関数値（定数除く）: -80/9 ≈ -8.8889
+/// HS35: min 9−8x1−6x2−4x3+2x1²+2x2²+x3²+2x1x2+2x1x3  s.t. x1+x2+2x3≤3, x≥0  →  opt=(4/3, 7/9, 4/9), QP obj=-80/9 (定数9除く)
 #[test]
 fn test_hs35() {
     let n = 3;
@@ -127,23 +81,7 @@ fn test_hs35() {
     assert_obj_close(result.objective, -80.0 / 9.0, "HS35: QP objective = -80/9");
 }
 
-/// HS51: Hock-Schittkowski Problem #51
-///
-/// 原問題（5変数、3等式制約）:
-///   min f = (x1-x2)^2 + (x2+x3-2)^2 + (x4-1)^2 + (x5-1)^2
-///   s.t. x1 + 3*x2 = 4
-///        x3 + x4 - 2*x5 = 0
-///        x2 - x5 = 0
-///   (変数境界なし)
-///
-/// QP 形式（1/2 あり規約）, 定数 +6 を除いた形:
-///   Q = [[2,-2,0,0,0],[-2,4,2,0,0],[0,2,2,0,0],[0,0,0,2,0],[0,0,0,0,2]]
-///   c = [0,-4,-4,-2,-2]
-///   等式制約を2不等式ペアに変換（計6行）
-///
-/// 解析解: x* = (1,1,1,1,1)
-///   原問題値 f* = 0
-///   QP 目的関数値（定数除く）: -6
+/// HS51: min (x1-x2)²+(x2+x3-2)²+(x4-1)²+(x5-1)²  s.t. x1+3x2=4, x3+x4-2x5=0, x2-x5=0 (free)  →  opt=(1,1,1,1,1), QP obj=-6 (定数6除く)
 #[test]
 fn test_hs51() {
     let n = 5;
@@ -215,19 +153,7 @@ fn test_hs51() {
     assert_obj_close(result.objective, -6.0, "HS51: QP objective = -6");
 }
 
-/// CVXQP1_S: 10変数小型凸QP（Maros-Meszaros CVXQP1_S 相当の合成問題）
-///
-/// min 1/2 * sum_i(2*xi^2) - sum_i(xi)
-///   [QP 形式: Q = 2*I_{10},  c = [-1,...,-1]]
-/// s.t. x1 + x2 + ... + x10 <= 5
-///      xi >= 0  (bounds)
-///
-/// 解析:
-///   KKT 条件: 2xi - 1 + λ = 0 (全変数同一) → xi = (1-λ)/2
-///   制約が等号活性なら: 10*(1-λ)/2 = 5 → λ = 0 → xi* = 0.5
-///   (無制約最小点が制約境界上にある)
-///
-/// x* = [0.5; 10],  QP 目的関数値 = -2.5
+/// CVXQP1_S: min Σxi²−Σxi (Q=2I_10, c=-1)  s.t. Σxi≤5, xi≥0  →  opt=0.5·1, obj=-2.5 (λ*=0, 制約境界活性で退化)
 #[test]
 fn test_cvxqp1_s() {
     let n = 10;
@@ -260,26 +186,7 @@ fn test_cvxqp1_s() {
     assert_obj_close(result.objective, -2.5, "CVXQP1_S: QP objective = -2.5");
 }
 
-/// QPCSTAIR 類似: 6変数・階段構造 QP
-///
-/// 階段型（staircase）制約を持つ QP（QPCSTAIR に近い構造）:
-///   min 1/2*(2*x1^2+...+2*x6^2) - [3,2,3,2,3,2]^T x
-///   s.t. x1 + x2 <= 2
-///        x3 + x4 <= 2
-///        x5 + x6 <= 2
-///        xi >= 0  (bounds)
-///
-/// 各ペアは独立に解ける:
-///   KKT: 2xi - ci + λj = 0 (λj はペア j の双対乗数)
-///   ペア (2k-1, 2k) に対し:
-///     c = [-3, -2] → 2x1-3+λ=0, 2x2-2+λ=0 → x1=x2+0.5
-///     x1+x2=2 → x1=1.25, x2=0.75, λ=0.5 >= 0 ✓
-///
-/// x* = [1.25, 0.75, 1.25, 0.75, 1.25, 0.75]
-/// QP 目的関数値:
-///   = 1/2*2*(1.25^2+0.75^2)*3 + (-3*1.25-2*0.75)*3
-///   = (1.5625+0.5625)*3 + (-3.75-1.5)*3
-///   = 6.375 - 15.75 = -9.375
+/// QPCSTAIR-like: min Σxi²−[3,2,3,2,3,2]ᵀx  s.t. x_{2k-1}+x_{2k}≤2 (k=1..3), xi≥0  →  opt=(1.25,0.75)×3, obj=-9.375
 #[test]
 fn test_qpcstair_like() {
     let n = 6;

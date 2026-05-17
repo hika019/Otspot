@@ -53,9 +53,7 @@ fn check_sol_elem(x: f64, expected: f64, tol: f64, label: &str) {
 // LP テスト
 // ===========================================================================
 
-/// min x, s.t. x >= 1, 0 <= x <= 10
-/// 最適: x=1, obj=1
-/// (簡単な単変数LP、下界が有効)
+/// min x  s.t. x≥1, 0≤x≤10  →  opt x=1, obj=1
 #[test]
 fn lp_trivial_bound() {
     // A = [[-1]], b = [-1] (x >= 1 → -x <= -1)
@@ -72,9 +70,7 @@ fn lp_trivial_bound() {
     check_sol_elem(result.solution[0], 1.0, TOL_X, "lp_trivial_bound x");
 }
 
-/// min x + y, s.t. x + y >= 2, x,y >= 0
-/// 最適: x+y=2 が有効。頂点は (2,0) または (0,2)。obj=2
-/// (2変数Ge制約LP)
+/// min x+y  s.t. x+y≥2, x,y≥0  →  opt x+y=2, obj=2 (頂点 (2,0) or (0,2))
 #[test]
 fn lp_ge_constraint() {
     let q = CscMatrix::new(2, 2);
@@ -96,10 +92,7 @@ fn lp_ge_constraint() {
     );
 }
 
-/// min x + 2y, s.t. x + y = 3, x,y >= 0
-/// KKT: ∂L/∂x = 1+λ=0 → λ=-1, ∂L/∂y = 2+λ=0 → λ=-2 (矛盾)
-/// → 等式制約の端点で解: x=3,y=0 で obj=3 (c_x < c_y なので x を最大化)
-/// (等式制約LP)
+/// min x+2y  s.t. x+y=3, x,y≥0  →  opt (x,y)=(3,0), obj=3 (c_x<c_y で x 優先)
 #[test]
 fn lp_eq_constraint() {
     let q = CscMatrix::new(2, 2);
@@ -117,9 +110,7 @@ fn lp_eq_constraint() {
     check_sol_elem(result.solution[1], 0.0, TOL_X, "lp_eq_constraint y");
 }
 
-/// max x + y, s.t. x + y <= 4, 0<=x<=3, 0<=y<=3
-/// maximize は -minimize に変換。最適: obj=4 (頂点 (3,1) または (1,3))
-/// (最大化LP)
+/// max x+y  s.t. x+y≤4, 0≤x,y≤3  →  opt obj=4 (-minimize 変換, 頂点 (3,1) or (1,3))
 #[test]
 fn lp_maximize() {
     // minimize -(x+y), A=[[1,1]], b=[4], bounds=[(0,3),(0,3)]
@@ -142,13 +133,7 @@ fn lp_maximize() {
     );
 }
 
-/// min 2x + y, s.t. x + y >= 3, x + 2y >= 4, x,y >= 0
-/// 解析解: 頂点列挙
-///   (0, 3): 2*0+3=3, x+y=3 ✓, x+2y=6>=4 ✓ → obj=3
-///   (2, 1): 2*2+1=5, x+y=3 ✓, x+2y=4 ✓ → obj=5 (交点)
-///   (0, 4): obj=4, x+y=4>=3 ✓, x+2y=8>=4 ✓
-/// 最小は (0,3) で obj=3
-/// (複数Ge制約LP)
+/// min 2x+y  s.t. x+y≥3, x+2y≥4, x,y≥0  →  opt (0,3), obj=3 (頂点列挙最小)
 #[test]
 fn lp_two_constraints() {
     let q = CscMatrix::new(2, 2);
@@ -172,8 +157,7 @@ fn lp_two_constraints() {
     check_sol_elem(result.solution[1], 3.0, TOL_X, "lp_two_constraints y");
 }
 
-/// min x, s.t. x >= 3, x <= 1, 0 <= x <= 10
-/// 実行不可能 (x>=3 と x<=1 が矛盾)
+/// min x  s.t. x≥3 ∧ x≤1 (矛盾)  →  Infeasible
 #[test]
 fn lp_infeasible() {
     let q = CscMatrix::new(1, 1);
@@ -194,8 +178,7 @@ fn lp_infeasible() {
     );
 }
 
-/// min -x, s.t. x >= 0 (上限なし)
-/// 非有界 (目的関数 → -∞ として x → +∞)
+/// min -x  s.t. x≥0 (no upper)  →  Unbounded (x→+∞)
 #[test]
 fn lp_unbounded() {
     let q = CscMatrix::new(1, 1);
@@ -216,9 +199,7 @@ fn lp_unbounded() {
     );
 }
 
-/// min x, s.t. x + y = 1, x - y = 1, x,y free
-/// 連立方程式: x+y=1, x-y=1 → x=1, y=0。obj=1
-/// (等式制約のみ、変数が自由)
+/// min x  s.t. x+y=1, x-y=1, x,y free  →  opt (1,0), obj=1
 #[test]
 fn lp_degenerate() {
     let q = CscMatrix::new(2, 2);
@@ -245,10 +226,7 @@ fn lp_degenerate() {
 // QP テスト
 // ===========================================================================
 
-/// min (x-1)^2 + (y-2)^2 = min 1/2 * [[2,0],[0,2]] * [x,y]^T + [-2,-4]^T * [x,y] + 5
-/// 1/2規約: Q=[[2,0],[0,2]], c=[-2,-4], 定数項5 (obj_offsetなし → obj = -5)
-/// 上限なし: x,y in [-10,10]
-/// 最適: x=1, y=2, f = 1^2+2^2-2*1-4*2 = 1+4-2-8 = -5
+/// min (x-1)²+(y-2)² (1/2 規約: Q=2I, c=[-2,-4]), x,y∈[-10,10]  →  opt (1,2), obj=-5 (定数+5 除く)
 #[test]
 fn qp_unconstrained_quadratic() {
     // Q=[[2,0],[0,2]], c=[-2,-4]。1/2規約で f = 1/2*(2x^2+2y^2) - 2x - 4y = x^2+y^2-2x-4y
@@ -267,10 +245,7 @@ fn qp_unconstrained_quadratic() {
     check_sol_elem(result.solution[1], 2.0, TOL_X, "qp_unconstrained_quadratic y");
 }
 
-/// min 1/2*(2x^2+2y^2) = x^2+y^2, s.t. x+y=1, x,y>=0
-/// Q=[[2,0],[0,2]], c=[0,0], A=[[1,1]], b=[1], Eq, bounds=(0,inf)x2
-/// KKT: 2x+λ=0, 2y+λ=0 → x=y=-λ/2。x+y=1 → x=y=0.5, λ=-1
-/// obj = 1/2*(2*0.25+2*0.25) = 0.5
+/// min x²+y² (Q=2I)  s.t. x+y=1, x,y≥0  →  opt (0.5, 0.5), obj=0.5 (λ=-1)
 #[test]
 fn qp_eq_constrained() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -287,9 +262,7 @@ fn qp_eq_constrained() {
     check_sol_elem(result.solution[1], 0.5, TOL_X, "qp_eq_constrained y");
 }
 
-/// min 1/2*(2x^2+2y^2) = x^2+y^2, s.t. x+y>=2, x,y>=0
-/// Q=[[2,0],[0,2]], c=[0,0], A=[[1,1]], b=[2], Ge, bounds=(0,inf)x2
-/// KKT (active): 2x=λ, 2y=λ → x=y. x+y=2 → x=y=1. obj=1/2*(2+2)=2
+/// min x²+y² (Q=2I)  s.t. x+y≥2 (active), x,y≥0  →  opt (1,1), obj=2
 #[test]
 fn qp_ineq_constrained() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -306,11 +279,7 @@ fn qp_ineq_constrained() {
     check_sol_elem(result.solution[1], 1.0, TOL_X, "qp_ineq_constrained y");
 }
 
-/// min 1/2*(2x^2+2y^2) = x^2+y^2, s.t. 0<=x<=0.5, 0<=y<=0.5
-/// Q=[[2,0],[0,2]], c=[0,0], 制約なし (boundsのみ)
-/// f の最小値は原点 (0,0)。boundsが (0,0.5) なので x=0,y=0 が最適。
-/// obj = 0
-/// IPM barrier 法のため lb=0 に到達せず微小残差が残るので obj=0 に対し 5e-6 以内を期待。
+/// min x²+y² (Q=2I), 0≤x,y≤0.5 (bounds のみ)  →  opt (0,0), obj=0 (IPM barrier 残差 5e-6 許容)
 #[test]
 fn qp_bounds_only() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -349,10 +318,7 @@ fn qp_bounds_only() {
     );
 }
 
-/// min 1/2*(2x^2+2y^2) + x + y = x^2+y^2+x+y, s.t. x+y=2, x,y>=0
-/// Q=[[2,0],[0,2]], c=[1,1], A=[[1,1]], b=[2], Eq
-/// KKT: 2x+1+λ=0, 2y+1+λ=0 → x=y (同次)。x+y=2 → x=y=1, λ=-3
-/// obj = 1/2*(2*1+2*1) + 1 + 1 = 2 + 2 = 4
+/// min x²+y²+x+y (Q=2I, c=1)  s.t. x+y=2, x,y≥0  →  opt (1,1), obj=4 (λ=-3)
 #[test]
 fn qp_with_linear() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -369,8 +335,7 @@ fn qp_with_linear() {
     check_sol_elem(result.solution[1], 1.0, TOL_X, "qp_with_linear y");
 }
 
-/// min x^2 (1/2規約: Q=[[2]], c=[0]), s.t. x>=2, x<=1
-/// 実行不可能 (x>=2 と x<=1 が矛盾)
+/// min x² (Q=2)  s.t. x≥2 ∧ x≤1 (矛盾)  →  Infeasible
 #[test]
 fn qp_infeasible() {
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
@@ -394,15 +359,7 @@ fn qp_infeasible() {
 // 双対変数の KKT 検証
 // ===========================================================================
 
-/// lp_ge_constraint の双対解 KKT 検証
-///
-/// min c^T x, s.t. Ax >= b, x >= 0
-/// KKT (LP): c - A^T y - z = 0 (reduced cost = 0 at optimal)
-/// ここで y は Ge 制約の双対変数 (y >= 0)、z は下界 bound dual (z >= 0)
-///
-/// LP: min x+y, x+y>=2, x,y>=0
-/// 最適 x=2,y=0 または x=0,y=2 (双対: y_1 = constraint shadow price)
-/// KKT: c_i = A^T y + z の確認
+/// dual KKT 検証: lp_ge_constraint の y≥0 (shadow price) と c−Aᵀy=reduced_cost≥0 を確認。
 #[test]
 fn dual_lp_ge_constraint() {
     let q = CscMatrix::new(2, 2);
@@ -443,12 +400,7 @@ fn dual_lp_ge_constraint() {
     }
 }
 
-/// qp_eq_constrained の双対解 KKT 検証
-///
-/// min 1/2 x^T Q x + c^T x, s.t. Ax = b
-/// KKT: Q x + c + A^T λ = 0 (等式制約、bound duals なし)
-/// x=[0.5,0.5], Q=[[2,0],[0,2]], c=[0,0], A=[[1,1]], λ=-1
-/// チェック: Q*x + c + A^T*λ = [2*0.5, 2*0.5] + [0,0] + [λ,λ] = [1,1] + [-1,-1] = [0,0]
+/// dual KKT 検証: qp_eq_constrained で Qx+c+Aᵀλ≈0 (期待 x=(0.5,0.5), λ=-1)。
 #[test]
 fn dual_qp_eq_constrained() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -489,15 +441,7 @@ fn dual_qp_eq_constrained() {
     }
 }
 
-/// lp_two_constraints の双対解 KKT 検証
-///
-/// min 2x + y, s.t. x+y>=3, x+2y>=4, x,y>=0
-/// 最適解: x=0, y=3 (obj=3)
-/// 有効制約: x+y>=3 (active: 0+3=3), x+2y>=4 (inactive: 0+6=6)
-/// active 制約 1 の双対 y1: c_y = 1 = y1 * 1 (y2=0 as inactive)
-/// KKT: ∂L/∂y: c[1] - y[0] = 0 → y[0]=1
-///       ∂L/∂x: c[0] - y[0] - y[1] - z_lb[0] = 2 - 1 - 0 - z_lb[0] = 0 → z_lb[0]=1
-/// (x=0 なので lb bound dual z_lb[0] = 1 >= 0 ✓)
+/// dual KKT 検証: lp_two_constraints で active row 1 のみ y=1、x=0 で z_lb=1≥0 (主実行可能性も sanity check)。
 #[test]
 fn dual_lp_two_constraints() {
     let q = CscMatrix::new(2, 2);
@@ -541,8 +485,7 @@ fn dual_lp_two_constraints() {
 // Model API 経由テスト (QpProblem 直接構築と同じ結果になることを確認)
 // ===========================================================================
 
-/// lp_trivial_bound を Model API 経由で解く
-/// min x, s.t. x >= 1, 0 <= x <= 10
+/// Model API ↔ QpProblem 直接構築一致確認 (lp_trivial_bound)。
 #[test]
 fn model_api_lp_trivial_bound() {
     let mut model = Model::new("api_trivial");
@@ -576,8 +519,7 @@ fn model_api_lp_trivial_bound() {
     assert!((r_api[x] - 1.0).abs() < 1e-5, "model_api_trivial: x should be 1.0");
 }
 
-/// lp_two_constraints を Model API 経由で解く
-/// min 2x + y, s.t. x+y>=3, x+2y>=4, x,y>=0
+/// Model API ↔ QpProblem 直接構築一致確認 (lp_two_constraints)。
 #[test]
 fn model_api_lp_two_constraints() {
     let mut model = Model::new("api_two");
@@ -614,8 +556,7 @@ fn model_api_lp_two_constraints() {
     assert!((r_api[y] - 3.0).abs() < 1e-4, "model_api_two: y should be 3.0");
 }
 
-/// qp_eq_constrained を Model API 経由で解く
-/// min x^2+y^2, s.t. x+y=1, x,y>=0 (1/2規約: Q=[[2,0],[0,2]])
+/// Model API ↔ QpProblem 直接構築一致確認 (qp_eq_constrained)。
 #[test]
 fn model_api_qp_eq_constrained() {
     let mut model = Model::new("api_qp_eq");
