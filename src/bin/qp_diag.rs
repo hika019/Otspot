@@ -2,7 +2,7 @@
 //! `result.solution`, `result.dual_solution`, `result.bound_duals` から
 //! 元空間 KKT 残差を bench と同じ式で再計算し、内訳を表示する。
 //!
-//! 使い方: `qp_diag <path/to/problem.QPS> [solver=ipm|ippmm_new|concurrent]`
+//! 使い方: `qp_diag <path/to/problem.QPS>`
 //! 環境変数:
 //!   DIAG_NO_RUIZ=1     — Ruiz scaling 無効化
 //!   DIAG_NO_PRESOLVE=1 — presolve 無効化
@@ -13,7 +13,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
 use solver::io::qps::parse_qps;
-use solver::options::{QpSolverChoice, SolverOptions};
+use solver::options::SolverOptions;
 use solver::problem::ConstraintType;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -21,17 +21,10 @@ use solver::QpProblem;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <path/to/file.QPS> [solver]", args[0]);
+        eprintln!("Usage: {} <path/to/file.QPS>", args[0]);
         std::process::exit(2);
     }
     let path = PathBuf::from(&args[1]);
-    let solver_name = args.get(2).cloned().unwrap_or_else(|| "ippmm_new".to_string());
-    let solver_choice = match solver_name.as_str() {
-        "ipm" => QpSolverChoice::IpPmm,
-        "ippmm_new" => QpSolverChoice::IpPmm,
-        "concurrent" => QpSolverChoice::IpPmm,
-        _ => panic!("unknown solver: {}", solver_name),
-    };
 
     let prob_box = parse_qps(&path).expect("parse failed");
     let prob: &QpProblem = &prob_box;
@@ -40,7 +33,6 @@ fn main() {
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(30.0);
     opts.timeout_secs = Some(timeout);
-    opts.qp_solver = solver_choice;
     if std::env::var("DIAG_NO_RUIZ").ok().as_deref() == Some("1") {
         opts.use_ruiz_scaling = false;
         println!("[DIAG] Ruiz scaling DISABLED");

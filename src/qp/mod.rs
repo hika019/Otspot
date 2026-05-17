@@ -43,34 +43,8 @@ pub use diagnose::{
 pub(crate) use lp_dispatch::solve_as_lp_pub;
 pub use problem::{QpProblem, QpWarmStart};
 
-use crate::options::{QpSolverChoice, SolverOptions};
+use crate::options::SolverOptions;
 use crate::sparse::CscMatrix;
-
-/// QP ソルバーを統一的に扱うための trait
-///
-/// 現在 `IpPmmSolver` のみが `QpSolver` を実装している。
-pub trait QpSolver {
-    /// QP 問題を解く
-    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult;
-    /// ソルバー名を返す
-    fn name(&self) -> &'static str;
-}
-
-/// IP-PMM (Interior Point Proximal Method of Multipliers) QP ソルバー
-///
-/// `QpSolver` trait を実装する。内部で [`solve_qp_with`] を呼ぶ。
-pub struct IpPmmSolver;
-
-impl QpSolver for IpPmmSolver {
-    fn solve(&self, problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-        let mut forced_opts = options.clone();
-        forced_opts.qp_solver = QpSolverChoice::IpPmm;
-        solve_qp_with(problem, &forced_opts)
-    }
-    fn name(&self) -> &'static str {
-        "IP-PMM"
-    }
-}
 
 /// Q行列が正半定値かどうかを確認する。
 ///
@@ -261,9 +235,7 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     })
 }
 
-/// `solve_qp_with` 本体の dispatch。`QpSolverChoice` は `IpPmm` のみ。
-///
-/// Mehrotra IPM 単独 / Concurrent 並列実行は廃止 (IPPMM が IPM の上位互換)。
+/// `solve_qp_with` 本体の dispatch。
 ///
 /// Q=0 退化ケース (LP) は Simplex に委譲する。LP は Simplex の方が IPPMM より速く、
 /// `slack` / `reduced_costs` も自然に得られる。
@@ -271,9 +243,7 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     if problem.is_zero_q() {
         return solve_as_lp_pub(problem, options);
     }
-    match options.qp_solver {
-        QpSolverChoice::IpPmm => ipm_solver::solve_ipm(problem, options),
-    }
+    ipm_solver::solve_ipm(problem, options)
 }
 
 /// FX (固定) 変数判定の許容差。lb と ub の差がこれ未満なら固定変数とみなす。
@@ -3936,11 +3906,10 @@ pub fn solve_qp_warm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::QpSolverChoice;
     use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
-    // concurrent solver での許容誤差（IPM/IPM-Schur を並列実行）
+    // IPPMM dispatch test 用許容誤差
     const EPS: f64 = 1e-2;
 
     fn assert_close(a: f64, b: f64, eps: f64, name: &str) {
@@ -4324,10 +4293,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions {
-            qp_solver: QpSolverChoice::IpPmm,
-            ..Default::default()
-        };
+        let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "T18: 強制IPMはOptimal");
         assert!((result.solution[0] - 0.5).abs() < 1e-4, "T18: x[0] ≈ 0.5");
@@ -4335,7 +4301,7 @@ mod tests {
         assert!((result.objective - 0.5).abs() < 1e-4, "T18: obj ≈ 0.5");
     }
 
-    /// T20: Concurrent Solver（parallel feature）
+    /// T20: parallel feature 有効時の IPPMM dispatch smoke test
     #[cfg(feature = "parallel")]
     #[test]
     fn test_concurrent_solver_basic() {
@@ -4880,7 +4846,6 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions {
             presolve: false,
-            qp_solver: QpSolverChoice::IpPmm,
             ..SolverOptions::default()
         };
         let result = solve_qp_with(&problem, &opts);
@@ -4933,7 +4898,6 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true)); // 事前に true
         let opts = SolverOptions {
             cancel_flag: Some(Arc::clone(&cancel)),
-            qp_solver: QpSolverChoice::IpPmm,
             ..SolverOptions::default()
         };
         let result = solve_qp_with(&problem, &opts);
@@ -4956,12 +4920,10 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts_with = SolverOptions {
             presolve: true,
-            qp_solver: QpSolverChoice::IpPmm,
             ..SolverOptions::default()
         };
         let opts_without = SolverOptions {
             presolve: false,
-            qp_solver: QpSolverChoice::IpPmm,
             ..SolverOptions::default()
         };
         let result_with = solve_qp_with(&problem, &opts_with);
@@ -5040,10 +5002,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         for _ in 0..10 {
-            let opts = SolverOptions {
-                qp_solver: QpSolverChoice::IpPmm,
-                ..SolverOptions::default()
-            };
+            let opts = SolverOptions::default();
             let result = solve_qp_with(&problem, &opts);
             assert_eq!(
                 result.status,
@@ -5066,7 +5025,6 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let opts = SolverOptions {
-            qp_solver: QpSolverChoice::IpPmm,
             timeout_secs: Some(0.0), // 即座にタイムアウト
             ..SolverOptions::default()
         };
@@ -5095,7 +5053,6 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let cancel = Arc::new(AtomicBool::new(true)); // 事前 true
         let opts = SolverOptions {
-            qp_solver: QpSolverChoice::IpPmm,
             cancel_flag: Some(Arc::clone(&cancel)),
             ..SolverOptions::default()
         };
@@ -5558,10 +5515,7 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         // Concurrent (default)
-        let opts = SolverOptions {
-            qp_solver: QpSolverChoice::IpPmm,
-            ..SolverOptions::default()
-        };
+        let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
 
         // Simplex 経由なら Optimal で `reduced_costs` / `slack` が埋まる。

@@ -160,5 +160,5 @@ echo "注意: 正解値CSV は data/baseline_objectives/netlib_lp_extra.csv" >&2
 echo "  初回ベンチ後に optimal_obj を更新すること (現在は no_ref)" >&2
 echo "  ベンチ実行: SOLVER_DIR=. bash scripts/bench_parallel.sh \\" >&2
 echo "    --data-dir data/lp_problems_extra \\" >&2
-echo "    --solver concurrent --timeout 1000 --eps 1e-6 --jobs 4 \\" >&2
+echo "    --timeout 1000 --eps 1e-6 --jobs 4 \\" >&2
 echo "    --output /tmp/extra_bench.txt" >&2

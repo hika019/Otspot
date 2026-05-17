@@ -50,7 +50,7 @@ pub(crate) mod basis;
 pub mod model;
 pub mod tolerances;
 pub mod options;
-pub use options::{SolverOptions, QpSolverChoice, Tolerance};
+pub use options::{SolverOptions, Tolerance};
 pub mod qp;
 #[allow(dead_code)]
 pub(crate) mod linalg;
@@ -65,5 +65,4 @@ pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use simplex::{solve, solve_with};
 pub use presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
-pub use qp::{QpSolver, IpPmmSolver};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

@@ -7,7 +7,7 @@
 //! # 設計方針
 //! - step.rs / kkt.rs の関数を一切呼ばない（共有禁止）
 //! - IP-PMM のネイティブ実装: proximal 参照点 + adaptive rho/delta
-//! - 4 系統独立パスの 1 つとして Concurrent Solver から選択される
+//! - `dispatch_solve_qp` から QP の単一 backend として呼ばれる
 //!
 //! # 理論要点
 //! PMM subproblem:

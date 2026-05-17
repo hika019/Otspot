@@ -190,7 +190,6 @@ mod tests {
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(5.0);
-        opts.qp_solver = crate::options::QpSolverChoice::IpPmm;
         let r = solve_ipm(&problem, &opts);
         eprintln!("BD-T4 v2: status={:?} obj={:.5e} iters={}", r.status, r.objective, r.iterations);
         eprintln!("  x={:?}", r.solution);

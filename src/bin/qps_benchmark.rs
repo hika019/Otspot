@@ -1,6 +1,6 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
-//! Usage: qps_benchmark <data_dir> [--solver ipm|lp|ippmm_new|concurrent|dualadvanced] [--eps <value>]
+//! Usage: qps_benchmark <data_dir> [--eps <value>] [--dual-advanced]
 //! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with_options で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!
@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use solver::bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
 use solver::io::qps::{parse_qps, QpsError};
-use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
+use solver::options::{SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::tolerances::ZERO_TOL;
 use solver::qp::ipm_solver::solve_ipm;
@@ -742,15 +742,14 @@ fn main() {
     // bench_parallel.sh 経由でのみ実行可能（直接実行禁止）
     if std::env::var("_BENCH_PARALLEL_CALLER").as_deref() != Ok("1") {
         eprintln!("[qps_benchmark] エラー: 直接実行禁止。bench_parallel.sh 経由で実行せよ。");
-        eprintln!("[qps_benchmark] 使い方: bash scripts/bench_parallel.sh --data-dir DIR --solver SOLVER --timeout SEC --output FILE --jobs N");
+        eprintln!("[qps_benchmark] 使い方: bash scripts/bench_parallel.sh --data-dir DIR --timeout SEC --output FILE --jobs N");
         std::process::exit(1);
     }
 
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
+    // 引数パース: [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>] [--dual-advanced]
     let mut data_dir = "data/maros_meszaros".to_string();
-    let mut solver_choice = QpSolverChoice::IpPmm;
     let mut dual_advanced_mode = false;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
@@ -759,11 +758,11 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: qps_benchmark [data_dir] [--solver ipm|ippmm_new|concurrent|dualadvanced] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
-            println!("  --solver        Solver to use (default: concurrent/auto)");
-            println!("  --eps           Convergence tolerance (default: 1e-6)");
-            println!("  --timeout       Solver timeout in seconds (default: 10.0)");
-            println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
+            println!("Usage: qps_benchmark [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>] [--dual-advanced]");
+            println!("  --eps             Convergence tolerance (default: 1e-6)");
+            println!("  --timeout         Solver timeout in seconds (default: 10.0)");
+            println!("  --known-optimal   Path to known optimal values CSV (default: auto-detect)");
+            println!("  --dual-advanced   LP は DualAdvanced simplex を使う (QP は無視)");
             std::process::exit(0);
         } else if args[i] == "--known-optimal" {
             i += 1;
@@ -780,23 +779,8 @@ fn main() {
             if i < args.len() {
                 timeout_secs = args[i].parse().unwrap_or(10.0);
             }
-        } else if args[i] == "--solver" {
-            i += 1;
-            if i < args.len() {
-                match args[i].as_str() {
-                    "ipm" | "lp" => solver_choice = QpSolverChoice::IpPmm,
-                    "ippmm_new" => solver_choice = QpSolverChoice::IpPmm,
-                    "concurrent" => solver_choice = QpSolverChoice::IpPmm,
-                    "dualadvanced" => {
-                        dual_advanced_mode = true;
-                        solver_choice = QpSolverChoice::IpPmm; // QP問題のフォールバック
-                    }
-                    other => {
-                        eprintln!("Unknown solver: {}. Use ipm|lp|ippmm_new|concurrent|dualadvanced", other);
-                        std::process::exit(1);
-                    }
-                };
-            }
+        } else if args[i] == "--dual-advanced" {
+            dual_advanced_mode = true;
         } else if !args[i].starts_with("--") {
             data_dir = args[i].clone();
         }
@@ -874,19 +858,11 @@ fn main() {
     let mut n_nonconvex = 0usize;
     let mut n_suboptimal = 0usize;
 
-    let solver_label = if dual_advanced_mode {
-        "DualAdvanced"
-    } else {
-        match solver_choice {
-            QpSolverChoice::IpPmm => "Concurrent",
-            _ => "Unknown",
-        }
-    };
+    let solver_label = if dual_advanced_mode { "DualAdvanced (LP) + IPPMM (QP)" } else { "IPPMM" };
     println!("Solver: {}", solver_label);
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
-    opts.qp_solver = solver_choice;
     opts.ipm.eps = eps;
     if dual_advanced_mode {
         opts.simplex_method = SimplexMethod::DualAdvanced;
@@ -943,11 +919,7 @@ fn main() {
             name, result.status, elapsed_s
         );
 
-        let method_label = match result.solver_used {
-            Some(QpSolverChoice::IpPmm) => "ipm",
-            Some(_) => "other",
-            None => "-",
-        };
+        let method_label = "ipm";
         let resid_str = match result.final_residuals {
             Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
             None => String::new(),

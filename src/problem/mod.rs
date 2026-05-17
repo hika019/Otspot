@@ -4,7 +4,7 @@
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
 use crate::error::SolverError;
-use crate::options::{QpSolverChoice, WarmStartBasis};
+use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;
 use std::fmt;
 
@@ -99,8 +99,6 @@ pub struct SolverResult {
     pub bound_duals: Vec<f64>,
     /// 反復回数（WSR実績回数）
     pub iterations: usize,
-    /// 使用したソルバー方式（Concurrent時: 勝者; 直接指定時: 指定値; 不明時: None）
-    pub solver_used: Option<QpSolverChoice>,
     /// 最終反復の残差実値 (pfeas, dfeas, duality_gap)。Optimal/MaxIterations時のみ Some。
     pub final_residuals: Option<(f64, f64, f64)>,
     /// 主実行可能性残差 (||Ax - b||_inf)。final_residuals と同値。デバッグ可視性向上用。
@@ -145,7 +143,6 @@ impl Default for SolverResult {
             warm_start_basis: None,
             bound_duals: vec![],
             iterations: 0,
-            solver_used: None,
             final_residuals: None,
             pfeas: None,
             dfeas: None,
