@@ -485,8 +485,10 @@ pub fn run_qp_presolve_phase1(
     }
 
     // #3: singleton columns. Skip when Q column j is nonzero (would leave a residual quadratic term).
+    // O(n*m) inner scan — needs per-j deadline guard.
     'step3: for j in 0..n {
         if skip_step(3) { break 'step3; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break 'step3; }
         if removed_cols[j] {
             continue;
         }
@@ -648,8 +650,10 @@ pub fn run_qp_presolve_phase1(
 
     // #7: free-variable substitution via Eq rows. Restricted to Q-zero columns so we don't
     // have to update Q with a rank-1 term.
+    // O(n*m) inner scan — needs per-j deadline guard.
     'step7: for j in 0..n {
         if skip_step(7) { break 'step7; }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break 'step7; }
         if removed_cols[j] {
             continue;
         }
@@ -718,10 +722,11 @@ pub fn run_qp_presolve_phase1(
             row_signature.entry((first_col, sign)).or_default().push(i);
         }
 
-        for row_group in row_signature.values() {
+        'step8_groups: for row_group in row_signature.values() {
             if row_group.len() < 2 {
                 continue;
             }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break 'step8_groups; }
             'outer: for &i1 in row_group {
                 if removed_rows[i1] { continue; }
                 let entries1: Vec<(usize, f64)> = row_entries[i1]
@@ -789,12 +794,14 @@ pub fn run_qp_presolve_phase1(
 
     // #10: detect infeasibility from implied bounds. Bounds themselves are not mutated;
     // dense rows and pathological implied magnitudes are skipped to avoid KKT blowup.
-    {
+    // O(m*avg_row²) inner — needs per-i deadline guard.
+    'step10: {
         const DENSE_ROW_THRESHOLD: usize = 500;
         const IMPLIED_BOUND_SANITY: f64 = 1e8;
         let mut impl_bounds: Vec<(f64, f64)> = bounds.clone();
 
         for i in 0..m {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) { break 'step10; }
             if removed_rows[i] {
                 continue;
             }
