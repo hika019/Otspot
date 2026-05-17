@@ -827,6 +827,24 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
     solution
 }
 
+/// Primal Phase I cycling early-bail (task #37). klein3 observation: with
+/// Ge/Eq constraints, `cold_start_dual` (dual.rs) falls back to Primal
+/// `two_phase_simplex` whose Phase I cycles indefinitely (no Bland switch),
+/// burning the whole `solve_dual_advanced` half-deadline before Big-M can
+/// start. The bail returns `Timeout` with empty solution, which lets
+/// `solve_dual_advanced` invoke Big-M (`dual_simplex_core_advanced` does
+/// have a Bland switch + lex perturbation) with the remaining deadline.
+///
+/// `K = max(BAIL_TRIGGER_FACTOR * m, BAIL_TRIGGER_MIN)`. Tuned so klein3
+/// (m ≈ 88, iter rate ≈ 3300/s) bails in well under 1 s; slow-but-
+/// progressing LPs that decrease the objective at least every K pivots
+/// stay unaffected.
+const BAIL_TRIGGER_FACTOR: usize = 10;
+const BAIL_TRIGGER_MIN: usize = 5_000;
+/// `current + best * REL_EPS < best`: relative threshold above f64 noise
+/// (~1e-15) that filters degenerate step≈0 "non-progress" from real moves.
+const NO_PROGRESS_REL_EPS: f64 = 1e-12;
+
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
 #[allow(clippy::too_many_arguments)]
@@ -877,6 +895,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let max_consecutive_blocks: usize = m;
     let mut stable_mode: bool = false;
     let mut basis_snapshot: Vec<usize> = basis.to_vec();
+
+    // Phase I cycling early-bail state (task #37).
+    let bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
+    let mut best_obj: f64 = f64::INFINITY;
+    let mut iters_since_progress: usize = 0;
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
@@ -1106,6 +1129,22 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             if !blocked_at_basis.is_empty() {
                 blocked_at_basis.clear();
                 consecutive_blocks = 0;
+            }
+        }
+
+        // Cycling early-bail (task #37). Treat `c^T x_B` as the progress
+        // metric (Phase I = sum of artificials, Phase II = real cost). A
+        // sustained plateau means degenerate pivoting / cycling; the Primal
+        // core has no Bland switch, so hand off to Big-M Phase I.
+        let current_obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+        let progress_eps = best_obj.abs().max(1.0) * NO_PROGRESS_REL_EPS;
+        if current_obj + progress_eps < best_obj {
+            best_obj = current_obj;
+            iters_since_progress = 0;
+        } else {
+            iters_since_progress = iters_since_progress.saturating_add(1);
+            if iters_since_progress >= bail_trigger {
+                return SimplexOutcome::Timeout(current_obj);
             }
         }
     }

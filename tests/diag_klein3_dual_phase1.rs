@@ -150,3 +150,54 @@ fn diag_klein3_no_presolve() {
     eprintln!("[diag] klein3 no-presolve: status={:?} wall={:.3}s iters={}", status, wall, iters);
     // この test は assertion なし (観測のみ)
 }
+
+/// SPEED #1 (task #37): LP cold-start (Ge/Eq) で `solve_dual_advanced` は
+/// Primal (`two_phase_dual_simplex`) を deadline の半分で実行し、Timeout なら
+/// Big-M Phase I へ fall back する。klein3 は Primal Phase I が cycling 確実な
+/// degenerate infeasible LP で、Primal が **進歩なしで half-deadline を完全に
+/// 食いつぶし**、Big-M が残り半分で間に合わないと Timeout する症状を示す。
+///
+/// ## 観測事実 (speed-profiler #36)
+///
+/// - timeout=30s: wall ≈ 17.6s (Primal 15s 浪費 + Big-M 2.6s 成功)
+/// - timeout=60s: wall ≈ 32.3s (Primal 30s 浪費 + Big-M 2.3s 成功) ← 浪費が deadline に比例
+///
+/// 修正方針: Primal `revised_simplex_core` に **no-progress 早期 bail**
+/// (K iter 連続で `c^T x_B` 改善なし → Timeout 返却) を追加し、Primal が
+/// cycling を検出した時点で速やかに Big-M に時間を譲る。
+///
+/// ## 期待 (TDD GREEN)
+///
+/// timeout=60s 設定で wall < 25s (現状 RED ~32s)。
+/// 修正後実測 ≈ 13s (Primal 半 deadline 内 bail + Big-M 完走)、25s は安全
+/// マージン込み。bail 閾値を perold/dfl001 等 slow-but-progressing LP を
+/// 巻き込まない値に調整した上限。
+#[test]
+fn klein3_primal_early_bail_speedup() {
+    let path = Path::new("data/lp_problems_infeas/klein3.QPS");
+    assert!(path.exists(), "data missing: {}", path.display());
+    let problem = parse_qps(path).expect("parse_qps");
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(60.0);
+
+    let t0 = Instant::now();
+    let result = solver::qp::solve_qp_with(&problem, &opts);
+    let wall = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "[klein3-speedup] status={:?} wall={:.3}s iters={}",
+        result.status, wall, result.iterations
+    );
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Infeasible,
+        "klein3 は Big-M Phase I で Infeasible 判定されるべき"
+    );
+    const KLEIN3_PRIMAL_EARLY_BAIL_BUDGET_SEC: f64 = 25.0;
+    assert!(
+        wall < KLEIN3_PRIMAL_EARLY_BAIL_BUDGET_SEC,
+        "klein3 wall {:.3}s — Primal early-bail が効いていれば {:.1}s 未満で終わるはず (現状 ~32s で FAIL)",
+        wall,
+        KLEIN3_PRIMAL_EARLY_BAIL_BUDGET_SEC
+    );
+}
