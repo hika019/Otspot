@@ -7,9 +7,7 @@ use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::options::SolverOptions;
 use super::transforms::{PostsolveStep, PresolveResult};
-
-/// cleanup LP の timeout 上限 (削除行数〜数百のため小規模、5秒で十分)。
-const CLEANUP_LP_TIMEOUT_SECS: f64 = 5.0;
+use std::time::Instant;
 
 /// Cleanup LP を構築して解き、削除行の y_i を KKT 整合に決定する。
 ///
@@ -28,7 +26,19 @@ fn build_and_solve_cleanup_lp(
     presolve_result: &PresolveResult,
     solution: &[f64],
     dual_solution_known: &[f64],
+    deadline: Option<Instant>,
 ) -> Option<Vec<f64>> {
+    // Inherit the parent deadline. If the parent has already lapsed, bail out
+    // immediately and let the Gauss-Seidel fallback handle dual recovery.
+    // When the parent has no deadline (Default options / interactive callers
+    // that opted into unbounded runtime), we let the cleanup LP run without a
+    // budget — the previous behaviour and required for the KKT-accuracy unit
+    // tests in tests/diag_afiro_y.rs.
+    if let Some(d) = deadline {
+        if Instant::now() >= d {
+            return None;
+        }
+    }
     let n = orig_problem.num_vars;
     let m = orig_problem.num_constraints;
     let deleted_rows: Vec<usize> = (0..m)
@@ -203,13 +213,24 @@ fn build_and_solve_cleanup_lp(
     let mut opts = SolverOptions::default();
     opts.presolve = false;
     opts.warm_start = None;
-    opts.timeout_secs = Some(CLEANUP_LP_TIMEOUT_SECS);
+    // Inherit the parent deadline directly. The previous implementation set
+    // `timeout_secs = CLEANUP_LP_TIMEOUT_SECS` (5 s, magic number), but that
+    // value was only converted to `deadline` *inside* `simplex::solve_with`
+    // after Ruiz scaling / standard-form build, so a 96k × 322k cleanup LP
+    // (ken-18) easily spent minutes in setup before the budget was enforced.
+    // Wiring the parent deadline through directly makes every inner step
+    // (parse, scale, factorize, simplex iterate) check the same clock.
+    // `deadline = None` is passed through unchanged — callers without a
+    // budget opted into unbounded runtime.
+    opts.deadline = deadline;
     let r = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
     if r.status == SolveStatus::Optimal && r.solution.len() == total_vars {
         // 先頭 k 個が y_i、残り slack
         Some(r.solution[..k].to_vec())
     } else {
+        // 解けなかった: Gauss-Seidel フォールバックに任せる (run_postsolve 側で
+        // recover_removed_row_dual を全削除行に対し回す既存経路)。
         None
     }
 }
@@ -321,6 +342,7 @@ pub fn run_postsolve(
     result: &SolverResult,
     presolve_result: &PresolveResult,
     orig_problem: &LpProblem,
+    deadline: Option<Instant>,
 ) -> SolverResult {
     let n = presolve_result.orig_num_vars;
     let m = presolve_result.orig_num_constraints;
@@ -437,6 +459,9 @@ pub fn run_postsolve(
     // (A') Gauss-Seidel 経路: y_loop を起点に recover_removed_row_dual を反復収束。
     //     LinearSubstitution y_piv も同時に更新する。複数 deleted 行が結合した
     //     ケース (agg / scorpion 等) で反復改善する。
+    //     大規模 LP (ken-18: 95k 削除行 × O(n) recover/row × 50 iter ≒ 10^11 ops) で
+    //     postsolve が parent deadline を完全に無視して数百秒走る事故が発生していたため、
+    //     outer loop 先頭と内側 1024 行ごとに deadline 確認し超過時は break する。
     let y_gs = {
         let mut y = y_loop.clone();
         let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -447,11 +472,15 @@ pub fn run_postsolve(
         }
         let max_iter = 50;
         let conv_tol = 1e-12;
-        for _ in 0..max_iter {
+        'gs_outer: for _ in 0..max_iter {
+            if deadline.is_some_and(|d| Instant::now() >= d) { break 'gs_outer; }
             let mut max_diff = 0.0f64;
             for i in 0..m {
                 if presolve_result.row_map[i].is_some() { continue; }
                 if linsub_rows.contains(&i) { continue; }
+                if i & 0x3ff == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                    break 'gs_outer;
+                }
                 let new_y = recover_removed_row_dual(orig_problem, i, &solution, &y);
                 let diff = (y[i] - new_y).abs();
                 if diff > max_diff { max_diff = diff; }
@@ -476,15 +505,16 @@ pub fn run_postsolve(
                     y[*piv] = new_y;
                 }
             }
-            if max_diff < conv_tol { break; }
+            if max_diff < conv_tol { break 'gs_outer; }
         }
         y
     };
 
     // (B) Cleanup LP 経路: 削除行 y を Phase I 風 slack relaxation で一括解決。
     //     y_gs を rc_known 計算に使う (反復収束済みの方が rc_known の精度高い)。
+    //     deadline を継承して ken-18 のような大規模問題で暴走しないようにする。
     let y_cl: Option<Vec<f64>> = build_and_solve_cleanup_lp(
-        orig_problem, presolve_result, &solution, &y_gs,
+        orig_problem, presolve_result, &solution, &y_gs, deadline,
     ).map(|y_clean| {
         let deleted_rows: Vec<usize> = (0..m)
             .filter(|&i| presolve_result.row_map[i].is_none())
