@@ -323,7 +323,7 @@ pub(super) fn dual_simplex_core(
         }
 
         // Step 1: 離基変数選択 - 最も主実行不可な基底変数
-        let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol) {
+        let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
