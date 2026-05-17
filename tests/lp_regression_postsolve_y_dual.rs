@@ -281,3 +281,58 @@ fn perold_col229_deep_diag() {
 }
 
 // (presolve module は pub(crate) のため map 直接観測は src 内 diag 経由)
+
+// ============================================================================
+// 大規模 LP (team-lead task #6 list) の TDD test
+//
+// CLAUDE.md L13「複数パターンのデータを用意せよ」+ task #10 完了報告 fix の
+// 網羅検証。これらは Netlib LP の中でも大規模で、bench 当時 PASS/FAIL の
+// 混在があった問題群。本 commit 後の dfeas_rel を assert する。
+//
+// 注意: cre-b / pds-10 / dfl001 / ken-13 等は数十秒〜数分かかる。CLAUDE.md
+// L16 (test 1 つ 3 分以内) を遵守するため timeout を絞り、所要時間が超えそうな
+// ものは `#[ignore]` でデフォルト実行から外す (cargo test -- --ignored で
+// 明示実行)。
+// ============================================================================
+
+/// cre-b: 72k×9k の大規模 LP。historical bench で 35.7s PASS だったが、
+/// 本環境 (HEAD 66857c1) では 120s timeout でも未収束 (`status=Timeout`)。
+/// convergence 自体は task #10 fix の射程外なので `#[ignore]` で default から
+/// 外し、`cargo test -- --ignored cre_b_postsolve_dual_feasibility` で明示
+/// 実行する。修正後 GREEN を狙う target test。
+#[test]
+#[ignore = "重 LP (timeout 300s 必要); cargo test -- --ignored で明示実行"]
+fn cre_b_postsolve_dual_feasibility() {
+    let r = check_postsolve_dual_feasibility("data/lp_problems/cre-b.QPS", 1e-6, 300.0);
+    match r {
+        Ok(s) => eprintln!("PASS {}", s),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+/// greenbea: bisecter task #6 で perold と同類の dual 退化パターンと推定。
+/// 2026-05-17 task #10 commit 66857c1 時点で本 fix は GREEN 化できていない
+/// (`df_rel ≈ 0.97`)。task #14 (greenbea 個別調査) で対処予定。
+/// 修正後 GREEN を確認するための **fail-documenting test** として `#[ignore]`。
+#[test]
+#[ignore = "GREEN target: task #14 完了で外す。HEAD では df_rel≈0.97 で FAIL"]
+fn greenbea_postsolve_dual_feasibility() {
+    let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 60.0);
+    match r {
+        Ok(s) => eprintln!("PASS {}", s),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+/// pds-10: 105k×34k で convergence に時間がかかる (HEAD で 185s timeout)。
+/// 解そのものの dual feasibility を確認する設計。timeout=200s だが CI で
+/// 重いため `#[ignore]`。task #6 list の重要 problem 1 つ。
+#[test]
+#[ignore = "重 LP (≈ 200s); cargo test -- --ignored で明示実行"]
+fn pds_10_postsolve_dual_feasibility() {
+    let r = check_postsolve_dual_feasibility("data/lp_problems/pds-10.QPS", 1e-6, 200.0);
+    match r {
+        Ok(s) => eprintln!("PASS {}", s),
+        Err(e) => panic!("{}", e),
+    }
+}
