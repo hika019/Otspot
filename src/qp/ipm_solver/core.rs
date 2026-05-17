@@ -1,13 +1,5 @@
-//! IPM 数値カーネル + 後処理 (Ruiz unscale, postsolve, bound clip, 元空間 KKT) の一貫処理。
-//!
-//! 設計原則:
-//! - 入力は元 QpProblem と presolve 結果。reduced(scaled) は内部で扱う。
-//! - 出力 IpmOutcome は **元空間** の解と残差のみを持つ。
-//! - これにより `satisfies_eps(user_eps)` が常に元空間判定として機能する。
-//!
-//! 採用アルゴリズムは設計概要 (`docs/solver_overview_design.md`) に従い IPM/IPPMM のみ。
-//! Active Set 法等は採用しない。post-processing は `refine_dual_lsq` (qp/mod.rs の
-//! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
+//! IPM 数値カーネル + 後処理 (Ruiz unscale, postsolve, bound clip, 元空間 KKT)。
+//! IpmOutcome は元空間の解と残差のみ持ち、satisfies_eps(user_eps) は常に元空間判定。
 
 use super::kkt::{bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel};
 use super::outcome::{IpmOutcome, ProblemView};
@@ -20,7 +12,6 @@ use crate::presolve::{
 use crate::problem::SolveStatus;
 use crate::qp::problem::QpProblem;
 
-/// inner_solver の関数型 (現在は IP-PMM のみ)
 pub type InnerSolver = fn(&QpProblem, &SolverOptions) -> crate::problem::SolverResult;
 
 /// 1 回の IPPMM 呼出 + 後処理。元空間の解と残差を返す。
@@ -37,7 +28,6 @@ pub fn run_ipm(
     )
 }
 
-/// 内部 solver を引数に取る一般化 wrapper。
 fn run_ipm_with(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
@@ -46,20 +36,9 @@ fn run_ipm_with(
 ) -> IpmOutcome {
     let reduced = &presolve_result.reduced;
 
-    // presolve スケーリングを考慮した IPM eps の事前調整。
-    //
-    // presolve の LargeCoeffRowScale + Ruiz E (行) / Ruiz D・c (列) で問題が σ 倍に
-    // 縮められると、unscale 時に残差が 1/σ 倍に増幅される。
-    //   r_p_scaled[i] = e[i] × r_p_orig[i]              → ||r_p_orig|| ≤ ||r_p_scaled|| / e_min
-    //   r_d_scaled[j] = (c × d[j]) × r_d_orig[j]        → ||r_d_orig|| ≤ ||r_d_scaled|| / (c × d_min)
-    // primal 側 e_min と LargeCoeffRowScale の積、dual 側 c × d_min の小さい方を
-    // sigma_total として、IPM に渡す eps を `user_eps × sigma_total` に厳しくする。
-    //
-    // 限界: σ_total が極端に小さいと eps_scaled が cond×u 限界を下回り IPM が達成できない。
-    // その場合は IPM が SuboptimalSolution で正直に申告し、Optimal を偽装しない。
-
-    // 行ごとの primal scale の積 (LargeCoeffRowScale × Ruiz E の合成) の最小値で primal
-    // 増幅率を推定。dual 増幅率は Ruiz の (c × d_min)。両者の小さい方を採用。
+    // presolve スケーリング (LargeCoeffRowScale × Ruiz E / c·D) で問題が σ 倍に縮むと
+    // unscale 時に残差が 1/σ 倍に増幅される。primal 側 e_min × LargeCoeffRowScale と
+    // dual 側 c·d_min の小さい方を sigma_total とし、IPM eps を user_eps×σ に厳しくする。
     let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
@@ -92,9 +71,6 @@ fn run_ipm_with(
         }
     }
     let sigma_total = primal_row_scale_min.min(dual_col_scale_min);
-    // sigma_total < 1.0 (= 任意のスケール縮小あり) なら常に eps tighten を適用する。
-    // 旧実装は < 0.01 のみ tighten していたが、sigma=0.05 級の中程度スケーリングでも
-    // unscale で 20x 増幅されて元空間 eps を超える事象がある (中間 KKT が緩むのを防ぐ)。
     let opts_for_ipm: SolverOptions = if sigma_total < 1.0 && sigma_total > 0.0 {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
@@ -113,8 +89,7 @@ fn run_ipm_with(
     };
     let mut result = inner_solver(reduced, &opts_for_ipm);
 
-    // 確定的 Infeasible / Unbounded / NonConvex は IpmOutcome に保持して finalize_outcome に
-    // 伝える。ここで握りつぶすと外部 status は Timeout に丸められて status 隠蔽になる。
+    // 確定的 Infeasible/Unbounded/NonConvex は outcome に保持して Timeout 隠蔽を避ける。
     if matches!(
         result.status,
         SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
@@ -122,11 +97,9 @@ fn run_ipm_with(
         return IpmOutcome::infeasibility(result.status);
     }
 
-    // 不定 Q に対して慣性修正付き IPM が収束した場合、LocallyOptimal フラグを保持する。
-    // post-processing 後も IpmOutcome を通じて finalize_outcome に伝搬する。
+    // 不定 Q + 慣性修正 IPM 収束時は LocallyOptimal フラグを保持。
+    // 後処理は Optimal と同パスで行うため一旦 Optimal に昇格。
     let is_locally_optimal = result.status == SolveStatus::LocallyOptimal;
-    // 後続の post-processing は Optimal と同じパスで行えるので、内部ステータスを
-    // Optimal に昇格させて処理する (LocallyOptimal フラグは別途保持)。
     if is_locally_optimal {
         result.status = SolveStatus::Optimal;
     }
@@ -152,19 +125,9 @@ fn run_ipm_with(
         };
     }
 
-    // dual の post-process refinement (LSQ) は **元空間に戻してから** Stage B/C で行う。
-    //
-    // scaled 空間 (Ruiz 適用後) で refine_dual_lsq を回すと、ill-conditioned 問題で
-    // 「scaled 空間では LSQ-y が IPM-y より小さい残差を持つが、unscale 後の元空間では
-    //  LSQ-y のほうが残差が大きくなる」現象が起きる (QPILOTNO で実測)。原因は LSQ が
-    // L2 ノルムを最小化するため、スケール固有の residual 分布最適化に過度に当たる。
-    // IPM-y は元空間で正しい構造を持つので、scaled での "improvement" を捨てて、
-    // unscale 後に元空間で 1 度だけ LSQ refine + Stage B/C 反復で詰めるほうが安全。
-    //
-    // 大規模問題で AAT factorize が分単位かかる遅延も同時に回避する
-    // (Stage B/C で必要に応じて 1 回 factorize するだけで済む)。
+    // dual の LSQ refine は元空間に戻してから行う。scaled 空間で LSQ を回すと L2 ノルム
+    // 最小化が scaled 残差分布に過剰適合し、unscale 後に元空間残差が悪化することがある。
 
-    // [DIAG] POST_STAGE_TRACE: 後処理 chain で primal/kkt 残差がどこで膨らむか観測
     let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
     if post_trace {
         let view_red = ProblemView {
@@ -182,7 +145,6 @@ fn run_ipm_with(
             &result.dual_solution,
             &result.bound_duals,
         );
-        // 絶対 pres と normalize denominator を計算
         let ax_red = reduced
             .a
             .mat_vec_mul(&result.solution)
@@ -206,13 +168,8 @@ fn run_ipm_with(
             pres_red, pres_abs_red, denom_red, kkt_red, reduced.num_vars, reduced.num_constraints);
     }
 
-    // Ruiz unscale: presolve が scaling 適用済みの場合のみ。
     if let Some(scaler) = &presolve_result.ruiz_scaler {
         if post_trace {
-            // Ruiz scaler の値域を観測 (scale factor が大きいと unscale で残差が増幅)。
-            // RuizScaler 構造: c (objective scale), r (row scale), s (col scale) を保持。
-            // 本診断では scaler 全要素を直接読まずアクセサ経由が必要だが、簡易に
-            // unscale 前後の解ノルム比を出すことで実効的な scale 増幅率を測る。
             let x_pre_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let y_pre_inf = result
                 .dual_solution
@@ -236,7 +193,6 @@ fn run_ipm_with(
         }
     }
     if post_trace {
-        // unscale 後 (まだ reduced space)、postsolve 前
         let view_red = ProblemView {
             q: &reduced.q,
             a: &reduced.a,
@@ -259,7 +215,6 @@ fn run_ipm_with(
     }
 
     if post_trace {
-        // presolve transform 内訳を実測 (postsolve で primal が悪化する機序仮説の検証)。
         let mut n_fixed = 0;
         let mut n_singleton = 0;
         let mut n_empty = 0;
@@ -279,12 +234,10 @@ fn run_ipm_with(
         eprintln!("POST_STAGE [presolve transforms] FixedVar={} SingletonRow={} EmptyCol={} LargeCoeffRowScale={} reduced_vars={} orig_vars={}",
             n_fixed, n_singleton, n_empty, n_largescale,
             reduced.num_vars, orig_problem.num_vars);
-        // LargeCoeffRowScale の row_scales 統計と極端値を出力
         if let Some(scales) = &row_scales_for_diag {
             let n_scaled = scales.iter().filter(|&&s| (s - 1.0).abs() > 1e-12).count();
             let smin = scales.iter().fold(f64::INFINITY, |a, &v| a.min(v));
             let smax = scales.iter().fold(f64::NEG_INFINITY, |a, &v| a.max(v));
-            // 最も小さい (= 最も増幅される) 5 row を抽出
             let mut indexed: Vec<(usize, f64)> = scales
                 .iter()
                 .enumerate()
@@ -305,7 +258,6 @@ fn run_ipm_with(
     // postsolve: reduced 空間 → 元問題空間。eliminated 行 / 固定変数の dual 復元込み。
     let mut final_sol = postsolve_qp_with_dual_recovery(presolve_result, &result, orig_problem);
 
-    // bound_duals を元問題空間に remap
     if presolve_result.was_reduced {
         final_sol.bound_duals = crate::qp::remap_bound_duals_to_orig(
             presolve_result,
@@ -315,8 +267,6 @@ fn run_ipm_with(
     }
 
     if post_trace {
-        // 純粋 postsolve (dual recovery + remap) 直後の元空間残差。
-        // 以後の bounds clip / 後処理が postsolve 段階の精度をどう動かすかの基準値。
         let view = ProblemView {
             q: &orig_problem.q,
             a: &orig_problem.a,
@@ -354,7 +304,6 @@ fn run_ipm_with(
             &final_sol.dual_solution,
             &final_sol.bound_duals,
         );
-        // 絶対 pres と denom (orig 空間)
         use crate::problem::ConstraintType;
         let ax_orig = orig_problem
             .a
@@ -423,7 +372,6 @@ fn run_ipm_with(
             top10_share,
             top10.join(", ")
         );
-        // top-1 違反 row の内訳: A[top_row,:] の各項を計算、x が presolve fix か IPM か区別
         if !viol.is_empty() && viol[0].1 > 0.0 {
             let top_row = viol[0].0;
             let mut row_terms: Vec<(usize, f64, f64, bool)> = Vec::new();
@@ -434,7 +382,6 @@ fn run_ipm_with(
                     if orig_problem.a.row_ind[k] == top_row {
                         let a_val = orig_problem.a.values[k];
                         let x_val = final_sol.solution[col];
-                        // col_map で reduced 空間にあるか (= IPM が解いた変数) を判定
                         let is_reduced = presolve_result
                             .col_map
                             .get(col)
@@ -471,7 +418,6 @@ fn run_ipm_with(
             eprintln!("POST_STAGE [top-1 viol row {}] b={:.3e} A·x_sum={:.3e} viol={:.3e} (fixed_vars={} ipm_vars={}) top8: {}",
                 top_row, orig_problem.b[top_row], sum, sum - orig_problem.b[top_row],
                 n_fixed_in_row, n_ipm_in_row, top_str.join(", "));
-            // top-1 viol row が LargeCoeffRowScale 対象か確認 (row_map で reduced index 取得)
             let red_row = presolve_result.row_map.get(top_row).copied().flatten();
             let row_max_orig: f64 = {
                 let mut mx = 0.0_f64;
@@ -486,7 +432,6 @@ fn run_ipm_with(
                 }
                 mx
             };
-            // reduced.A の同一行で scaling 後の max を見る (presolve scaled A の影響)
             let red_row_max: Option<f64> = red_row.map(|rr| {
                 let mut mx = 0.0_f64;
                 for col in 0..reduced.num_vars {
@@ -550,11 +495,9 @@ fn run_ipm_with(
             clip_count_pre, total_bound_clip, pres, kkt);
     }
 
-    // 元空間 dual の一括復元: postsolve_qp_with_dual_recovery は SingletonRow /
-    // RedundantRowFix の y[row] を col_first の停留性のみで復元するが、その row が
-    // 関与する他の固定 col の停留性は z で別途吸収しないと壊れたままになる。
-    // ここで refine_dual_lsq を 1 度走らせ、x と現在の z を固定して y を LSQ-optimal に
-    // 更新する。AAT factorize が小〜中規模 (n+m ≤ LSQ_DUAL_SIZE_LIMIT) でだけ走る。
+    // 元空間 dual 一括復元: postsolve_qp_with_dual_recovery は col_first 停留性のみで
+    // y[row] を復元するため、関与 fixed col の停留性が z で吸収されない。ここで
+    // refine_dual_lsq を回し x/z 固定で y を LSQ-optimal に更新する。
     if presolve_result.was_reduced
         && !presolve_result.postsolve_stack.steps.is_empty()
         && final_sol.solution.len() == orig_problem.num_vars
@@ -614,17 +557,14 @@ fn run_ipm_with(
         }
     }
 
-    // Stage 0: postsolve y/z 交互反復 (bound_duals が orig レイアウト確定後)。
-    // 上の一括 LSQ で残った fixed-row dofs (SingletonRow/RedundantRowFix) を col_first
-    // の停留性で正確に締める。
+    // Stage 0: postsolve y/z 交互反復。一括 LSQ で残った fixed-row dofs を col_first
+    // 停留性で締める。
     if result.iterations > 0
         && presolve_result.was_reduced
         && !presolve_result.postsolve_stack.steps.is_empty()
         && final_sol.solution.len() == orig_problem.num_vars
         && final_sol.dual_solution.len() == orig_problem.num_constraints
     {
-        /// 連鎖依存解消用の最大反復回数。各 pass で z (refit) → y (recover_y_with_bound)
-        /// を交互更新する。改善が STAGE0_CONVERGE_RATIO 未満で停滞したら早期終了。
         const STAGE0_PROGRESS_EPS: f64 = 1e-12;
         let view0 = ProblemView {
             q: &orig_problem.q,
@@ -650,10 +590,8 @@ fn run_ipm_with(
                 final_sol = best_sol;
                 break;
             }
-            // (i) z (bound_duals) を current y に基づいて refit
             crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
-            // (ii) y[row] を SingletonRow / RedundantRowFix step で更新 (逆順=後退代入)
-            //      bound_contrib を bound_duals から取得して KKT 完全式で解く
+            // y[row] を逆順で SingletonRow/RedundantRowFix から復元 (後退代入)
             for step in presolve_result.postsolve_stack.steps.iter().rev() {
                 let (row, col) = match step {
                     QpPostsolveStep::SingletonRow { row, col, .. } => (*row, *col),
@@ -689,7 +627,6 @@ fn run_ipm_with(
         }
     }
 
-    // 元空間で KKT 残差を計算 (元空間判定ベース)
     let view = ProblemView {
         q: &orig_problem.q,
         a: &orig_problem.a,
@@ -699,21 +636,13 @@ fn run_ipm_with(
         constraint_types: &orig_problem.constraint_types,
     };
 
-    // 元空間 post-processing は 3 段階で行う:
-    //   1. primal projection: x を violating 制約方向に最小ノルム射影 (refine_primal_lsq)
-    //   2. dual / bound-dual refit: y と z を交互に LSQ で再最適化
-    //   3. saddle-point Krylov refinement: K [x; y] = -[r_d; r_p] を IR で解く
-    //
-    // primal projection は y との整合を崩しうるため、primal/KKT 双方の max で guard。
-    // dual/bound 個別 refit は kkt_residual_rel で個別 guard。
-    //
-    // IPM が一度も iterate しなかった場合 (cancel_flag 即停止 / timeout=0 等) は
-    // 後処理をスキップ: 冷状態 x=[0,..,0] から後処理が独自の analytic な解を作って
-    // しまい、外部 cancel/Timeout セマンティクスを破壊するのを防ぐ。
+    // 元空間 post-processing 3 段階: (1) primal projection, (2) y/z 交互 refit,
+    // (3) saddle-point Krylov IR。
+    // IPM が 1 度も iterate しなかった場合 (cancel/timeout=0) は冷状態 x=0 から
+    // 後処理が独自解を作り cancel/Timeout セマンティクスを破壊するため skip。
     let ipm_made_progress = result.iterations > 0;
 
-    // refine_primal_lsq / refine_kkt_iterative の AAT/K factorize が時間予算を
-    // 圧迫しないようサイズ上限を設ける。LDL 因子化が分単位かかる規模では skip。
+    // factorize 時間予算ガード。LDL 因子化が分単位かかる規模では skip。
     const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
     let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
     let allow_primal_projection = problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT;
@@ -732,10 +661,8 @@ fn run_ipm_with(
         );
     }
 
-    // 既に IPM で eps を満たしている場合、primal projection と dual/bound refit は無駄
-    // (改善余地なし)。大規模問題では LSQ が秒単位かかるため skip 必須。
-    // ただし Suboptimal/Timeout は global norm が小さくても component-wise dfr が
-    // 残っていることがあるため、Optimal 終了時だけ skip を許容する。
+    // 既に IPM で eps 達成済の Optimal は post-processing skip (大規模で LSQ が秒単位)。
+    // Suboptimal/Timeout は component-wise dfr が残るため skip しない。
     let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = if !final_sol.solution.is_empty()
         && orig_problem.num_constraints > 0
@@ -759,23 +686,18 @@ fn run_ipm_with(
         && !kkt_already_pass
     {
         // (1) primal projection: 違反制約に対して x を最小ノルム射影。
-        //     primal/KKT 合算の guard で悪化時 revert。near-rank-deficient AAT で
-        //     LSQ y refit が膨張する系統では primal のみ動かし dual は IPM 値を維持する。
+        //     pres 悪化時は revert。near-rank-deficient AAT で LSQ y refit が膨張する
+        //     系統では primal のみ動かし dual は IPM 値を維持。
         if allow_primal_projection {
             let pre_x = final_sol.solution.clone();
             let pre_pres = primal_residual_rel(&view, &final_sol.solution);
             crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
             let post_pres = primal_residual_rel(&view, &final_sol.solution);
             if post_pres > pre_pres {
-                // primal projection made things worse — revert x.
-                // This guards against degenerate AAT factorizations that push x away from feasibility.
                 final_sol.solution = pre_x;
             } else {
-                // Primal improved (or unchanged). Refit bound_duals to match the new x.
-                // refit_bound_duals_kkt may transiently increase kkt_residual because
-                // Q·δx (the perturbation from primal correction) affects the KKT stationarity.
-                // This is expected — the subsequent y/z refit loop and KKT IR stages will
-                // restore dual feasibility. We must NOT revert x here solely because kkt worsened.
+                // x 改善時は z を新 x に合わせて refit。Q·δx が KKT 停留性に効くため
+                // kkt は一時的に増えうるが、後段の y/z refit と KKT IR で回復する。
                 crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
             }
             if std::env::var("PRIMAL_LSQ_TRACE").ok().as_deref() == Some("1") {
@@ -792,16 +714,9 @@ fn run_ipm_with(
             }
         }
 
-        // (2) y / z 交互 refit — fixed point に達するまで反復。
-        //
-        // 各反復:
-        //   - refine_dual_lsq: bound_duals 固定で y を LSQ 最適化
-        //   - refit_bound_duals_kkt: y 固定で z (bound_duals) を KKT 停留性から再計算
-        // 双方向依存するため 1 回では届かず、ill-conditioned 系では数回反復で
-        // kkt_rel が桁単位で減ることがある。
-        //
-        // 収束判定: 改善率が REFIT_CONVERGE_RATIO 未満で停止。各 step は KKT-guard 付き
-        // で悪化時 revert するため安全に反復できる。
+        // (2) y/z 交互 refit。y (refine_dual_lsq) と z (refit_bound_duals_kkt) は
+        // 双方向依存。ill-conditioned 系では数回反復で kkt_rel が桁単位で減る。
+        // 各 step は KKT-guard 付きで悪化時 revert。
         const REFIT_PROGRESS_EPS: f64 = 1e-12;
         let mut current_kkt = kkt_residual_rel(
             &view,
@@ -850,14 +765,13 @@ fn run_ipm_with(
                 final_sol.bound_duals = pre_z;
             }
 
-            // 改善が止まれば早期 break (固定点)
             if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
                 break;
             }
         }
 
-        // 標準 LSQ refine が componentwise eps を満たさないなら IRLS で L∞ 風の y を試す。
-        // 改善した場合は z refit + 再度 IRLS のループを回し fixed point に達するまで反復。
+        // 標準 LSQ が componentwise eps を満たさない場合 IRLS で L∞ 風 y を試行。
+        // 改善時は z refit + 再 IRLS の固定点反復。
         let user_eps = opts.ipm_eps();
         const IRLS_INNER_MAX_ITERS: usize = 30;
         loop {
@@ -892,7 +806,6 @@ fn run_ipm_with(
             );
             if post_kkt_irls < current_kkt {
                 current_kkt = post_kkt_irls;
-                // y が変わった → z 再 refit で停留性を取り直し
                 let pre_z = final_sol.bound_duals.clone();
                 crate::qp::refit_bound_duals_kkt(orig_problem, &mut final_sol);
                 let post_kkt_z = kkt_residual_rel(
@@ -908,10 +821,9 @@ fn run_ipm_with(
                 }
             } else {
                 final_sol = pre_dual_step;
-                break; // IRLS が改善できなければ outer loop も終了
+                break;
             }
 
-            // outer pass の収束判定 (10% 以上改善あれば継続)
             if current_kkt + REFIT_PROGRESS_EPS >= prev_kkt {
                 break;
             }
@@ -928,19 +840,9 @@ fn run_ipm_with(
     };
 
     // (3) saddle-point Krylov refinement: K [dx; dy] = -[r_d; r_p] を古典的 IR で解く。
-    //
-    // IPM 内部の Newton step ごとの LDL 誤差が accumulate して pf が IPM 段階で
-    // 下げきれない問題で、IPM 収束後の (x, y, z) を初期推定として saddle-point K
-    // に対する IR を回す。残差を full-f64 (or DD env=REFINE_KKT_DD=1) で再計算し、
-    // cond の影響を受けず eps·‖A‖ レベルまで refine する。
-    //
-    // 実行条件: ipm_made_progress (cold-start を避ける) AND constraints あり。
-    // refine_kkt_iterative 内で size 制限・退行 guard・deadline を見る。
+    // IPM 内部 Newton step の LDL 誤差 accumulate 由来の primal/dual feasibility を
+    // refine する。残差は full-f64 (env REFINE_KKT_DD=1 で DD) で再計算。
     if !final_sol.solution.is_empty() && orig_problem.num_constraints > 0 && ipm_made_progress {
-        // per-iter 収束率は cond に依存する。LISWET 系 (cond~1e10, rate≈0.987/iter) では
-        // pf=1e-6 から 1e-8 に落とすには ~350 iter 必要。1 iter = LDL backward solve で
-        // LISWET (K nnz=50k) 約 2ms なので 400 iter ≈ 0.8s。各問題で deadline 監視済み。
-        // 早期 break 条件: score 改善なしで break するため、少 iter で収束した問題は影響なし。
         const KRYLOV_MAX_ITERS: usize = 400;
         let user_eps = opts.ipm_eps();
         let target_pf = user_eps;
@@ -978,9 +880,8 @@ fn run_ipm_with(
             );
         }
 
-        // (3b) Second primal projection: after KKT IR, if pres > eps, try one more
-        // refine_primal_lsq pass. Accept ONLY if both pres improves AND kkt stays <= user_eps.
-        // The strict kkt guard prevents the df regression seen when refit_bound_duals worsens kkt.
+        // (3b) KKT IR 後に pres > eps なら primal projection を 1 回追加。
+        // 採用条件: pres 改善 AND kkt <= user_eps を厳守 (df 退行防止)。
         if allow_primal_projection
             && !opts
                 .deadline
@@ -994,7 +895,6 @@ fn run_ipm_with(
                 &final_sol.bound_duals,
             );
             if pres_post_ir > user_eps && kkt_post_ir <= user_eps {
-                // Save full state before 2nd primal projection
                 let pre_sol2 = final_sol.clone();
                 crate::qp::refine_primal_lsq(orig_problem, &mut final_sol, opts.deadline);
                 let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
@@ -1006,7 +906,6 @@ fn run_ipm_with(
                         &final_sol.dual_solution,
                         &final_sol.bound_duals,
                     );
-                    // Accept only if kkt stays within user_eps (strict dual feasibility guard)
                     if kkt_after2 > user_eps {
                         final_sol = pre_sol2;
                     } else if post_trace {
@@ -1020,18 +919,14 @@ fn run_ipm_with(
         }
     }
 
-    // Recompute kkt after all post-processing stages (KKT IR may have improved it significantly).
-    // The `kkt` variable above was computed before the saddle-point IR and is now stale.
     let kkt_final = kkt_residual_rel(
         &view,
         &final_sol.solution,
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
-    // Use the better of: pre-IR kkt (captures y/z refit quality) vs post-IR kkt (captures full pipeline).
-    // Always take the post-IR kkt since it reflects the actual final state.
     let kkt_out = kkt_final;
-    let _ = kkt; // suppress warning; variable kept for readability of pre-IR value
+    let _ = kkt;
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -1043,10 +938,7 @@ fn run_ipm_with(
     );
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
-    // Invariant: reported objective is computed at the *returned* x, not at any
-    // intermediate iterate. Post-processing (refine_primal_lsq, KKT IR) mutates
-    // final_sol.solution; recomputing here makes the contract hold regardless of
-    // how many post-processing passes run.
+    // Invariant: 報告 objective は返却 x で計算。post-processing 後の整合性を保証。
     let objective_recomputed = {
         let qx = orig_problem
             .q
@@ -1083,17 +975,9 @@ fn run_ipm_with(
     }
 }
 
-/// 元空間 双対ギャップ相対値: |primal_obj - dual_obj| / max(|p|, |d|, 1)
-///
-/// QP の弱双対性: dual_obj = -1/2 x^T Q x - b^T y + lb^T z_lb - ub^T z_ub
-///   (KKT 停留性 Qx + c + A^T y - z_lb + z_ub = 0 を Lagrangian に代入して導出)
-/// 真の Optimal では gap → 0。rank-deficient Q で KKT 残差が小さくても gap が
-/// 大きい偽 Optimal (UBH1: gap=9.49 で obj 54% 誤差) を弾くゲート。
-///
-/// FX (lb=ub) 変数は postsolve で bound_duals が 0 埋めされる慣例 + KKT 評価から
-/// 除外される設計のため、result.bound_duals[j] には FX 変数の正しい dual が入って
-/// いない。ここでは FX 変数の bound 寄与を「lb_j * 停留性」で解析的に置き換え、
-/// 偽の gap 検出を防ぐ。
+/// 元空間 双対ギャップ相対値: |primal_obj − dual_obj| / max(|p|, |d|, 1)。
+/// QP 弱双対性 dual_obj = -1/2 x'Qx - b'y + lb'z_lb - ub'z_ub。rank-deficient Q の
+/// 偽 Optimal (KKT 小だが gap 大) を弾く。FX 変数の bound 寄与は lb·停留性で解析的に置換。
 fn compute_duality_gap_rel(
     problem: &crate::qp::QpProblem,
     result: &crate::problem::SolverResult,
@@ -1124,9 +1008,8 @@ fn compute_duality_gap_rel(
         by += bi * yi;
     }
 
-    // bnd_term = lb^T z_lb - ub^T z_ub
-    // FX (lb=ub=val) は z_lb_j, z_ub_j が postsolve で 0 埋め (refit でも更新されない)
-    // のため、解析的に val * net_z_at_j (= val * -(qx+c+aty)) で置換する。
+    // FX (lb=ub) は postsolve で z_lb,z_ub が 0 埋めされるため、
+    // val * (z_lb - z_ub) = val * (qx + c + aty) で解析的に置換。
     let mut bnd_term: f64 = 0.0;
     let mut lb_idx = 0_usize;
     let mut ub_idx = problem
@@ -1139,12 +1022,8 @@ fn compute_duality_gap_rel(
         let ub_finite = ub.is_finite();
         let is_fx = lb_finite && ub_finite && (lb - ub).abs() < crate::qp::FX_TOL;
         if is_fx {
-            // FX: lb_j * z_lb_j - ub_j * z_ub_j = val * (z_lb - z_ub)。
-            // bound_contrib[j] = -z_lb + z_ub = -(qx + c + aty) (停留性) なので
-            //   val * (z_lb - z_ub) = -val * bound_contrib = val * (qx + c + aty)
             let stat_no_bnd = qx[j] + problem.c[j] + aty[j];
             bnd_term += lb * stat_no_bnd;
-            // bound_duals layout 上 idx は進める (FX 用 slot は使わない)
             if lb_finite {
                 lb_idx += 1;
             }

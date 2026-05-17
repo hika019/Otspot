@@ -1,16 +1,11 @@
-//! QP問題のデータ構造定義
-//!
-//! 二次計画問題 min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub の
-//! 構造体と求解結果を定義する。
+//! QP問題のデータ構造定義。
 
 use crate::problem::{ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
-/// [`QpProblem::new`] が返す専用エラー型
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum QpProblemError {
-    /// 行列・ベクトルの次元が不一致
     DimensionMismatch(String),
 }
 
@@ -24,33 +19,22 @@ impl std::fmt::Display for QpProblemError {
 
 impl std::error::Error for QpProblemError {}
 
-/// 二次計画問題: min 1/2 x^T Q x + c^T x  s.t. Ax {<=,=} b, lb <= x <= ub
+/// min 1/2 x^T Q x + c^T x  s.t. Ax {<=,=,>=} b, lb <= x <= ub
 #[derive(Debug, Clone)]
 pub struct QpProblem {
-    /// 目的関数二次項: n×n PSD行列（全要素格納）
     pub q: CscMatrix,
-    /// 目的関数線形項: n次元ベクトル
     pub c: Vec<f64>,
-    /// 制約行列: m×n（CSC形式）
     pub a: CscMatrix,
-    /// 制約右辺: m次元ベクトル
     pub b: Vec<f64>,
-    /// 変数境界 (lb, ub): n個。lb = -INF/ub = +INF は無制限
     pub bounds: Vec<(f64, f64)>,
-    /// 変数数
     pub num_vars: usize,
-    /// 制約数
     pub num_constraints: usize,
-    /// 制約種別: m個。Le/Ge/Eq のいずれか
     pub constraint_types: Vec<ConstraintType>,
-    /// QPSファイルのN-row（目的関数行）に設定されたRHS定数項。
     /// 目的関数値 = 1/2 x^T Q x + c^T x + obj_offset
-    /// QPSファイルにN-row RHS値がない場合は 0.0（後方互換性維持）。
     pub obj_offset: f64,
 }
 
 impl QpProblem {
-    /// QP問題を生成する（次元チェック付き）
     pub fn new(
         q: CscMatrix,
         c: Vec<f64>,
@@ -84,8 +68,7 @@ impl QpProblem {
         Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, obj_offset: 0.0 })
     }
 
-    /// 全制約をLe（Ax <= b）として構築するヘルパー。
-    /// 既存テスト・手動QpProblem構築コード向け。
+    /// 全制約 Le として構築するヘルパー。
     pub fn new_all_le(
         q: CscMatrix,
         c: Vec<f64>,
@@ -97,13 +80,9 @@ impl QpProblem {
         Self::new(q, c, a, b, bounds, vec![ConstraintType::Le; m])
     }
 
-    /// IPM用: Eq→2Le展開、Ge→符号反転Le変換した新QpProblemを返す。
-    /// 全制約がLeの場合はcloneして返す。
-    /// 戻り値: (変換後QpProblem, 元行→展開後行のマッピング)
     #[deprecated(note = "IPMは等式ネイティブ化。build_extended_constraintsを使用")]
     #[allow(deprecated)]
     pub fn to_all_le(&self) -> (QpProblem, LeExpansionMap) {
-        // 全Leの場合はfastパス
         if self.constraint_types.iter().all(|ct| matches!(ct, ConstraintType::Le)) {
             return (self.clone(), LeExpansionMap::identity(self.num_constraints));
         }
@@ -111,7 +90,6 @@ impl QpProblem {
         let n = self.num_vars;
         let m = self.num_constraints;
 
-        // 行ごとの非ゼロ要素を収集（CSC→疑似CSR変換）
         let mut row_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
         for col in 0..n {
             for k in self.a.col_ptr[col]..self.a.col_ptr[col + 1] {
@@ -142,7 +120,6 @@ impl QpProblem {
                     new_row += 1;
                 }
                 ConstraintType::Eq => {
-                    // Ax <= b
                     for &(col, val) in &row_entries[i] {
                         trip_rows.push(new_row);
                         trip_cols.push(col);
@@ -152,7 +129,6 @@ impl QpProblem {
                     new_ct.push(ConstraintType::Le);
                     let row1 = new_row;
                     new_row += 1;
-                    // -Ax <= -b
                     for &(col, val) in &row_entries[i] {
                         trip_rows.push(new_row);
                         trip_cols.push(col);
@@ -165,7 +141,6 @@ impl QpProblem {
                     original_to_expanded.push(vec![row1, row2]);
                 }
                 ConstraintType::Ge => {
-                    // -Ax <= -b
                     for &(col, val) in &row_entries[i] {
                         trip_rows.push(new_row);
                         trip_cols.push(col);
@@ -231,9 +206,6 @@ impl QpProblem {
     }
 }
 
-/// Eq/Ge→Le展開のマッピング情報。
-/// IPM呼び出し後にdual_solutionを元行数に逆変換する際に使用。
-/// Le行: [new_row], Eq行: [new_row_le, new_row_neg_le], Ge行: [new_row_neg]
 #[deprecated(note = "to_all_le()廃止に伴い不要")]
 pub struct LeExpansionMap {
     pub original_to_expanded: Vec<Vec<usize>>,
@@ -241,7 +213,6 @@ pub struct LeExpansionMap {
 
 #[allow(deprecated)]
 impl LeExpansionMap {
-    /// 全制約がLeの場合の恒等マッピング（1:1対応）
     pub fn identity(m: usize) -> Self {
         Self {
             original_to_expanded: (0..m).map(|i| vec![i]).collect(),
@@ -249,17 +220,11 @@ impl LeExpansionMap {
     }
 }
 
-/// QP求解結果（`SolverResult` の型エイリアス）
-///
-/// # Deprecated
-///
-/// `SolverResult` に統合された。`crate::problem::SolverResult` を直接使用すること。
 #[deprecated(since = "0.1.0", note = "use SolverResult (LP/QP unified result type) instead")]
 #[allow(unused)]
 pub type QpResult = crate::problem::SolverResult;
 
 impl crate::problem::SolverResult {
-    /// Infeasible結果を生成（QP用）
     pub fn infeasible() -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::Infeasible,
@@ -273,7 +238,6 @@ impl crate::problem::SolverResult {
         }
     }
 
-    /// Unbounded結果を生成（QP用）
     pub fn unbounded() -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::Unbounded,
@@ -286,7 +250,6 @@ impl crate::problem::SolverResult {
         }
     }
 
-    /// MaxIterations結果を生成（QP用）。真のイテレーション上限到達時のみ使用すること。
     pub fn max_iterations(x: Vec<f64>, obj: f64, iters: usize) -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::MaxIterations,
@@ -299,7 +262,6 @@ impl crate::problem::SolverResult {
         }
     }
 
-    /// NumericalError結果を生成（KKT分解失敗・Q特異・Phase1数値困難時）
     pub fn numerical_error() -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::NumericalError,
@@ -314,16 +276,9 @@ impl crate::problem::SolverResult {
     }
 }
 
-/// Warm-start情報: SQP等で前反復の活性集合を次反復に引き継ぐ
-///
-/// 注意: 現在の実装では `solve_qp_warm` が `warm_start` を無視するため、
-/// いずれのフィールドも使用されない。公開 API 互換性のためフィールドは保持している。
+/// Warm-start. 公開 API 互換性のため保持しているが現状 solve_qp_warm では未使用。
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
-    /// 初期活性制約インデックス（QpResult.active_set から取得して渡す）
-    /// 現在未使用: `solve_qp_warm` が warm_start を無視するため参照されない
     pub initial_active_set: Vec<usize>,
-    /// 初期点 x_0
-    /// 現在未使用: `solve_qp_warm` が warm_start を無視するため参照されない
     pub initial_point: Option<Vec<f64>>,
 }

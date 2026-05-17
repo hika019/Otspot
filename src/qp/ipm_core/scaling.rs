@@ -1,29 +1,17 @@
-//! Ruiz スケーリングラッパー・アンスケール・後検証
-//!
-//! mod.rs の Ruiz スケーリング関連処理をこのモジュールに分離。
-//! - `solve_with_ruiz_scaling`: solve_qp_ipm / solve_qp_ippmm の共通スケーリングラッパー
-//! - `compute_amplification`: Ruiz スケーリング増幅率計算
-//! - `unscale_ipm_result`: スケール済み結果を元スケールへ逆変換
-//! - `post_verify_solution`: SuboptimalSolution の原空間再検証
-//! - `check_bfeas_status`: 境界制約実現可能性検証
-//! - `check_dfeas_status`: 双対実現可能性検証
+//! Ruiz スケーリングラッパー・アンスケール・後検証。
 
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// IPM target eps の f64 表現可能な絶対下限。`user_eps / amplification` がこの
-/// 値を下回ると target が完全に表現不能 (denormal/zero) になるため抑える。
+/// `user_eps / amplification` が denormal/zero になるのを抑える。
 pub(crate) const EPS_FLOOR: f64 = f64::EPSILON;
 
-/// Suboptimal → Optimal 昇格時の双対ギャップ閾値 (真の Optimal は通常 < 1%、
-/// 偽 Optimal は >> 10% で弾く)。
+/// Suboptimal → Optimal 昇格時の双対ギャップ閾値。
 pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
 
-/// OSQP 流 primal feasibility 計算 (全体相対化, bench/v2 と整合)。
-/// `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。A·x は DD で積算
-/// (cancellation で違反を見逃さないため)。
+/// OSQP 流 pfeas: `||v||_∞ / (1 + max(||Ax||_∞, ||b||_∞))`。A·x は cancellation 対策で DD 積算。
 fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     use crate::problem::ConstraintType;
     use twofloat::TwoFloat;
@@ -57,13 +45,7 @@ fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     max_v / (1.0 + max_ax.max(max_b))
 }
 
-// ---------------------------------------------------------------------------
-// 公開関数
-// ---------------------------------------------------------------------------
-
-/// Ruiz スケーリングラッパー（solve_qp_ipm / solve_qp_ippmm の共通処理）
-///
-/// inner_solver は `solve_ippmm_inner` を渡す。
+/// solve_qp_ipm / solve_qp_ippmm 共通の Ruiz スケーリングラッパー。
 pub(crate) fn solve_with_ruiz_scaling<F>(
     problem: &QpProblem,
     options: &SolverOptions,
@@ -89,7 +71,7 @@ where
             q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
         ) {
             scaled_problem.obj_offset = problem.obj_offset;
-            // scaled 空間 eps を amp 倍だけ tighten し、unscale 後に元空間 eps を保証。
+            // unscale 後に元空間 eps を保証するため scaled 空間 eps を amp 倍 tighten。
             let amplification = compute_amplification(&scaler);
             let mut adjusted_opts = options.clone();
             adjusted_opts.ipm.eps =
@@ -102,7 +84,6 @@ where
             );
             let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
 
-            // MaxIterations は外部 Timeout/Suboptimal に bridge する。
             if result.status == SolveStatus::MaxIterations {
                 if !result.solution.is_empty() {
                     return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
@@ -112,10 +93,8 @@ where
             }
             return result;
         }
-        // QpProblem::new 失敗 → 非スケールにフォールバック
     }
 
-    // 非 Ruiz パス: SuboptimalSolution を原空間で再検証
     post_verify_solution(
         inner_solver(problem, options, options.ipm_eps()),
         problem,
@@ -123,11 +102,8 @@ where
     )
 }
 
-/// SuboptimalSolution（ソルバー内部判定）を原問題空間で再検証し、
-/// pfeas・bfeas・dfeas が eps 基準を満たすなら Optimal に昇格する。
-///
-/// Ruiz scaling なしのフォールバックパスで使用。
-/// Ruiz ありパスは unscale_ipm_result の SuboptimalSolution ブランチが担当。
+/// SuboptimalSolution を原空間で再検証し pfeas/bfeas/dfeas が eps を満たせば Optimal に昇格。
+/// 非 Ruiz パス専用。
 pub(crate) fn post_verify_solution(
     result: SolverResult,
     problem: &QpProblem,
@@ -139,7 +115,6 @@ pub(crate) fn post_verify_solution(
     let x = &result.solution;
     let y = &result.dual_solution;
     let bound_duals = &result.bound_duals;
-    // 元空間 KKT 判定: bench/v2 と同形の OSQP 流 全体相対化 pfeas。
     let status = if problem.num_constraints > 0 {
         let pfeas_normalized = compute_pfeas_osqp(problem, x);
         if pfeas_normalized.is_finite() && pfeas_normalized < eps {
@@ -172,10 +147,7 @@ pub(crate) fn post_verify_solution(
     SolverResult { status, ..result }
 }
 
-/// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する
-///
-/// 閾値: eps（絶対値基準）。qps_benchmarkの検証基準と統一。
-/// lb/ub が ±∞ の成分はスキップする。
+/// lb <= x <= ub の違反量を検証し、超過していれば SuboptimalSolution に降格する。
 pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> SolveStatus {
     let bfeas: f64 = x
         .iter()
@@ -193,15 +165,7 @@ pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> 
     }
 }
 
-/// QPの双対実現可能性 (dfeas, inf-norm 絶対基準) を検証し、超過していれば SuboptimalSolution に降格する
-///
-/// 注意: 本関数は inf-norm の絶対値で判定する。ill-conditioned な問題で偽 Optimal を量産していた
-/// ため、現在は `check_dfeas_status_relative` (成分相対化版) を使うのが推奨。
-/// 本関数は単体テスト互換のために保持。
-///
-/// # 引数
-/// - `bound_duals`: アンスケール済み境界双対変数。
-/// - `threshold`: 呼び出し元計算の許容閾値。
+/// inf-norm 絶対基準の dfeas 検証。互換用 (主要パスは check_dfeas_status_relative)。
 #[allow(dead_code)]
 pub(crate) fn check_dfeas_status(
     problem: &QpProblem,
@@ -211,13 +175,10 @@ pub(crate) fn check_dfeas_status(
     threshold: f64,
 ) -> SolveStatus {
     let n = x.len();
-    // Q*x. mat_vec_mul は次元一致前提で失敗は API 契約違反。
-    // 失敗時は Optimal 昇格できる根拠がないため SuboptimalSolution を返す (status 隠蔽防止)。
     let qx = match problem.q.mat_vec_mul(x) {
         Ok(v) => v,
         Err(_) => return SolveStatus::SuboptimalSolution,
     };
-    // A^T*y（無制約QPではa.nrows==0なのでzeroベクトル）
     let aty: Vec<f64> = if problem.a.nrows > 0 && !y.is_empty() {
         match problem.a.transpose().mat_vec_mul(y) {
             Ok(v) => v,
@@ -226,7 +187,6 @@ pub(crate) fn check_dfeas_status(
     } else {
         vec![0.0; n]
     };
-    // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
     let mut bound_contrib = vec![0.0f64; n];
     if !bound_duals.is_empty() {
         let mut bd_idx = 0usize;
@@ -243,7 +203,6 @@ pub(crate) fn check_dfeas_status(
             }
         }
     }
-    // dfeas = ||Q*x + A^T*y + bound_contrib + c||_inf
     let dfeas = (0..n)
         .map(|i| (qx[i] + aty[i] + bound_contrib[i] + problem.c[i]).abs())
         .fold(0.0_f64, f64::max);
@@ -254,15 +213,8 @@ pub(crate) fn check_dfeas_status(
     }
 }
 
-/// 成分ごとの相対 KKT 残差 + complementarity チェック。
-///
-/// stationarity (`|Qx + A^Ty + bound_contrib + c|` 成分相対化) に加えて
-/// complementarity (`y_i · slack_i`, `z_j · (x_j - bnd_j)`) を成分相対化で評価し、
-/// 両方 eps 以下の場合のみ Optimal を返す。
-///
-/// stationarity だけ見るとLISWET9/YAOのように feasible だが optimal でない点が
-/// Optimal と判定される (inactive 制約の y が大、slack が小、積が中程度)。
-/// 同形の正規化は `ipm_solver::kkt::complementarity_residual_rel` と整合。
+/// 成分相対化された stationarity + complementarity チェック。
+/// stationarity だけ見ると inactive 制約の y 大 × slack 小で偽 Optimal が出るため両方判定。
 pub(crate) fn check_dfeas_status_relative(
     problem: &QpProblem,
     x: &[f64],
@@ -304,9 +256,7 @@ pub(crate) fn check_dfeas_status_relative(
             }
         }
     }
-    // 成分ごとの相対化（bench の dfeas_rel_componentwise と整合）。
-    // 全体最大値スケールでは 1 成分のみ大きく外れた残差をマスクするため、
-    // 各成分 j を独立に正規化し max を取る。
+    // 全体最大値スケールでは外れ残差を 1 成分でマスクするため、各成分 j を独立正規化して max。
     let mut dfeas_relative = 0.0_f64;
     for j in 0..n {
         let r_dd = qx_dd[j] + aty_dd[j] + TwoFloat::from(bound_contrib[j]) + TwoFloat::from(problem.c[j]);
@@ -321,8 +271,6 @@ pub(crate) fn check_dfeas_status_relative(
     if dfeas_relative >= eps {
         return SolveStatus::SuboptimalSolution;
     }
-    // complementarity (4 つ目の KKT 条件)。stationarity だけ通っても
-    // y·slack や z·(x-bnd) が崩れた解は optimal でない。
     let comp = complementarity_relative(problem, x, y, bound_duals);
     if comp < eps {
         SolveStatus::Optimal
@@ -332,7 +280,6 @@ pub(crate) fn check_dfeas_status_relative(
 }
 
 /// 元空間 complementarity 残差 (問題全体スケール正規化)。
-/// `ipm_solver::kkt::complementarity_residual_rel` と同形の双対対スケール正規化を使う。
 fn complementarity_relative(
     problem: &QpProblem,
     x: &[f64],
@@ -433,13 +380,7 @@ fn complementarity_relative(
     max_abs / scale
 }
 
-// ---------------------------------------------------------------------------
-// 非公開関数
-// ---------------------------------------------------------------------------
-
-/// Ruiz スケーリング後の unscale 残差増幅率。
-/// pfeas 増幅 = `1/min(e)`、dfeas 増幅 = `1/(c × min(d))` の最大値。
-/// `f64::MIN_POSITIVE` は div0 防護 (Ruiz の `scale_floor_for_eps` で通常下限が保証される)。
+/// unscale 残差増幅率 = max(1/min(e), 1/(c·min(d)))。MIN_POSITIVE で div0 防護。
 pub(crate) fn compute_amplification(scaler: &RuizScaler) -> f64 {
     let e_min = if scaler.e.is_empty() {
         1.0
@@ -454,10 +395,7 @@ pub(crate) fn compute_amplification(scaler: &RuizScaler) -> f64 {
     (1.0 / e_min).max(1.0 / (scaler.c * d_min))
 }
 
-/// スケール済み IPM 結果を元のスケールに逆変換する
-///
-/// Optimal ステータスの場合、元空間で pfeas・bfeas・dfeas を再計算し、
-/// それぞれの許容誤差を超えていれば SuboptimalSolution に降格する（偽Optimal防止）。
+/// スケール済み IPM 結果を元スケールに戻し、Optimal は元空間 KKT で再検証する。
 pub(crate) fn unscale_ipm_result(
     result: SolverResult,
     scaler: &RuizScaler,
@@ -469,9 +407,6 @@ pub(crate) fn unscale_ipm_result(
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
-            // [整合性] check_dfeas_status は L405 で unscaled x,y,bound_duals を受け取り
-            // 元空間で dfeas を計算する。よって threshold も元空間 (bench と同形)。
-            // 元空間 KKT 判定: OSQP 流 全体相対化 pfeas。
             let (status, orig_residuals) = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(ax) => {
@@ -499,9 +434,6 @@ pub(crate) fn unscale_ipm_result(
                         };
                         (status, orig_resid)
                     }
-                    // mat_vec_mul は次元一致前提で失敗は API 契約違反。
-                    // 失敗時に Optimal を維持すると pfeas 検証なしで Optimal を返す
-                    // false-positive になるため SuboptimalSolution に降格 (status 隠蔽防止)。
                     Err(_) => (SolveStatus::SuboptimalSolution, result.final_residuals),
                 }
             } else {
@@ -534,11 +466,9 @@ pub(crate) fn unscale_ipm_result(
             }
         }
         SolveStatus::SuboptimalSolution => {
-            // scaled 空間で SuboptimalSolution だった場合も unscale して原空間で再検証する。
             let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
-            // [整合性] 上記 Optimal branch と同形。元空間 dfeas tol = bench tol。
             let status = if problem.num_constraints > 0 {
                 match problem.a.mat_vec_mul(&x) {
                     Ok(_ax) => {
@@ -564,8 +494,7 @@ pub(crate) fn unscale_ipm_result(
                     bfeas_status
                 }
             };
-            // Suboptimal→Optimal 昇格ゲート: 双対ギャップ閾値外なら Optimal に上げない。
-            // UBH1 型の null-space 漂流で残差小・ギャップ大となった解を弾く最終防壁。
+            // null-space 漂流 (残差小・ギャップ大) の偽 Optimal を弾く最終防壁。
             let status = if status == SolveStatus::Optimal {
                 match result.duality_gap_rel {
                     Some(g) if g.abs() >= PROMOTION_GAP_TOL => SolveStatus::SuboptimalSolution,
@@ -592,31 +521,23 @@ mod tests {
     use super::*;
     use crate::linalg::ruiz::RuizScaler;
 
-    /// compute_amplification は primal 側 (1/e_min) と dual 側 (1/(c*d_min)) の
-    /// 大きい方を返す。dual 側を取りこぼすと QPILOTNO のような ill-conditioned 問題で
-    /// IPM 完了後の元空間 dfeas を eps 以下に保証できなくなる。
     #[test]
     fn compute_amplification_includes_dual_side() {
-        // primal amp = 1/e_min = 100、dual amp = 1/(c*d_min) = 10000 のケース。
-        // 期待: max(100, 10000) = 10000。
         let mut scaler = RuizScaler::new(2, 2);
-        scaler.e = vec![0.01, 1.0]; // e_min = 0.01 → primal amp = 100
-        scaler.d = vec![0.001, 1.0]; // d_min = 0.001
-        scaler.c = 0.1; // c * d_min = 1e-4 → dual amp = 1e4
+        scaler.e = vec![0.01, 1.0];
+        scaler.d = vec![0.001, 1.0];
+        scaler.c = 0.1;
         let amp = compute_amplification(&scaler);
-        assert!((amp - 10000.0).abs() < 1.0,
-            "dual amp 1/(c*d_min)=1e4 が支配するはず, got {:.3e}", amp);
+        assert!((amp - 10000.0).abs() < 1.0, "got {:.3e}", amp);
     }
 
-    /// primal 側が支配する場合の確認 (dual は十分小さい amp)。
     #[test]
     fn compute_amplification_primal_dominant() {
         let mut scaler = RuizScaler::new(2, 2);
-        scaler.e = vec![1e-5, 1.0];  // primal amp = 1e5
-        scaler.d = vec![0.5, 1.0];   // d_min = 0.5
-        scaler.c = 1.0;              // c * d_min = 0.5 → dual amp = 2
+        scaler.e = vec![1e-5, 1.0];
+        scaler.d = vec![0.5, 1.0];
+        scaler.c = 1.0;
         let amp = compute_amplification(&scaler);
-        assert!((amp - 1e5).abs() < 10.0,
-            "primal amp 1/e_min=1e5 が支配するはず, got {:.3e}", amp);
+        assert!((amp - 1e5).abs() < 10.0, "got {:.3e}", amp);
     }
 }

@@ -1,35 +1,13 @@
-//! IP-PMM 完全独立実装
+//! IP-PMM (Pougkakiotis & Gondzio 2021, DOI 10.1007/s10589-020-00240-9)
 //!
-//! Interior Point-Proximal Method of Multipliers (Gondzio 2021)
-//! 論文: "An Interior Point-Proximal Method of Multipliers for Convex Quadratic Programming"
-//! DOI: 10.1007/s10589-020-00240-9
+//! Augmented KKT (quasi-definite, upper-tri CSC):
+//!   K = [(Q + ρI),  Aᵀ ]
+//!       [A,        -D  ]   D = Σ + δI, Σ = diag(s/y)
 //!
-//! # 設計方針
-//! - step.rs / kkt.rs の関数を一切呼ばない（共有禁止）
-//! - IP-PMM のネイティブ実装: proximal 参照点 + adaptive rho/delta
-//! - `dispatch_solve_qp` から QP の単一 backend として呼ばれる
-//!
-//! # 理論要点
-//! PMM subproblem:
-//!   min (1/2)xᵀQx + cᵀx + (ρ/2)||x - x_ref||² + λᵀ(Ax - b)
-//!   + (1/2δ)||Ax - b||² + (δ/2)||y - y_ref||²  s.t. x >= 0
-//!
-//! augmented KKT（上三角 CSC、quasi-definite）:
-//!   K = [(Q + ρI),  Aᵀ   ]
-//!       [A,        -D    ]  where D = Σ + δI, Σ = diag(s/y)
-//!
-//! RHS（proximal 修正済み）:
-//!   r_d_pmm = r_d - ρ*(x - x_ref)   (dual  residual with proximal primal term)
-//!   r_p_pmm = r_p - δ*(y - y_ref)   (primal residual with dual augmented Lagrangian)
-//!
-//! PMM update rule (Algorithm PEU §5.1.4, Pougkakiotis & Gondzio 2021):
-//!   r = |μ_k - μ_{k+1}| / μ_k   (変数更新後の実μで計算)
-//!   primal_improved = (0.95 * prev_nr_p > nr_p)
-//!   dual_improved   = (0.95 * prev_nr_d > nr_d)
-//!   if primal_improved: y_ref = y; δ *= (1 - r)
-//!   else:               δ *= (1 - r/3)
-//!   if dual_improved:   x_ref = x; ρ *= (1 - r)
-//!   else:               ρ *= (1 - r/3)
+//! PMM update rule (Algorithm PEU §5.1.4):
+//!   r = |μ_k − μ_{k+1}| / μ_k (実 μ)
+//!   primal_improved = 0.95·prev_nr_p > nr_p  →  y_ref=y, δ *= (1−r),  else δ *= (1−r/3)
+//!   dual_improved   = 0.95·prev_nr_d > nr_d  →  x_ref=x, ρ *= (1−r),  else ρ *= (1−r/3)
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
@@ -51,101 +29,44 @@ use super::solver_loop::{
 };
 use super::kkt::collapse_extended_dual;
 
-// ---------------------------------------------------------------------------
-// PMM パラメータ定数（§35 PARAM マーカー）
-// ---------------------------------------------------------------------------
-
-/// PMM 初期 rho（primal proximal）
-/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) §5.1 論文値 8.0
-/// Ruizスケーリング後の単位スケール問題を前提とした値。
-/// N1修正後は減衰が正しく機能するため論文値8.0が適切。
+/// 論文 §5.1 推奨初期値。
 const RHO_INIT: f64 = 8.0;
-
-/// PMM 初期 delta（dual proximal）
-/// PARAM: 根拠=Pougkakiotis&Gondzio(2021) §5.1 論文値 8.0
-/// Ruizスケーリング後の単位スケール問題を前提とした値。
-/// N1修正後は減衰が正しく機能するため論文値8.0が適切。
 const DELTA_INIT: f64 = 8.0;
 
-/// PMM 改善判定閾値（5% 以上の残差減少で改善とみなす）
-/// PARAM: 根拠=Gondzio2021 MATLAB実装(0.95*prev > current) | 要検証=閾値の感度
+/// 5% 以上の残差減少を改善とみなす (Gondzio2021 MATLAB)。
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
-
-/// PMM 遅い減衰率（改善なし時に rho/delta をゆっくり減らす係数）
-/// PARAM: 根拠=MATLAB拡張版IP-PMM準拠（設計書§A_PMM参照）
 const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
 
-/// μ がゼロとみなされる閾値。f64 機械精度 (~2.2e-16) のすぐ上で「実質 0」と判定する境界。
-/// 等式問題で μ=0 の極限に到達したケースの mu_rate 切替に使われる。
+/// μ が実質 0 と判定する境界 (機械精度直上)。
 const MU_ZERO_THRESHOLD: f64 = 1e-15;
 
-/// LDL 因子化失敗時の正則化リトライ上限回数。経験値 (δ 探索空間 1e-4→1e0 は約 4 段階で到達)。
 const LDL_REG_RETRY_MAX: usize = 10;
-/// LDL 因子化失敗時の正則化倍率。各リトライで rho/delta を 10 倍する。
 const LDL_REG_GROWTH: f64 = 10.0;
-/// LDL 因子化リトライの正則化上限。条件数悪化を防ぐ経験的上限。
 const LDL_REG_CEILING: f64 = 1.0;
-/// LDL 因子化最終 fallback の delta 下限 (identity ordering 経路用)。
 const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
-/// alpha 停滞検出: line search が `alpha < alpha_stall_eps_for(eps)` のときに stall とみなす。
-/// tight eps では小さい alpha が正常収束局面なので eps スケールで閾値を緩める
-/// (eps=1e-6 → 1e-8、eps=1e-9 → 1e-11、eps=1e-3 → 1e-5)。
+/// tight eps で正常な小 alpha を stall 扱いしないため eps スケールで閾値を緩める。
 fn alpha_stall_eps_for(eps: f64) -> f64 {
     (eps * 1e-2).max(1e-14)
 }
-/// alpha 停滞回数の早期脱出閾値 (best-so-far で復帰)。
 const ALPHA_STALL_N: usize = 5;
-/// alpha=0 連続回数のデッドロック判定閾値 (rho/delta が reg_limit に張り付いた場合の無限ループ対策)。
 const ALPHA_DEADLOCK_N: usize = 20;
 
-/// best_score 停滞検出 (alpha > 0 でも残差が改善しない病理向け):
-/// 直近 RESIDUAL_STALL_WINDOW 回の iter で best_score が
-/// `RESIDUAL_STALL_REL_DEC` 以上の相対減少を見せなければ停滞とみなす。
-///
-/// QPLIB_8500 (n=250k): iter 22-682 (~905s) で alpha > 1e-8 を保ったまま residual 改善せず。
-/// alpha-stall (alpha < 1e-8) では捕捉できないため、別途 best_score の停滞窓で検出する。
-///
-/// パラメータ根拠 (アルゴ物理量、問題集 tuning ではない):
-/// - WINDOW = 50: IPPMM の典型収束速度 (1 iter あたり residual 0.5x 程度) を 7-8 桁
-///   分に余裕を取った観測窓。50 iter で 0.5^50 = 9e-16 まで改善するのが正常。
-/// - REL_DEC = 1e-3: 50 iter で 1e-3 (千分の一) すら改善しないなら数値飽和。
-///   1e-1 (10%) は窓内で正常な改善ともマッチするので過剰検出。1e-3 は安全側。
+/// alpha > 0 でも residual が改善しない病理 (n=250k 級) 用の停滞窓。
+/// 50 iter は典型収束速度 0.5^50 ≈ 9e-16 を踏まえた観測窓、REL_DEC=1e-3 は数値飽和判定。
 const RESIDUAL_STALL_WINDOW: usize = 50;
 const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 
-// best-so-far からの Optimal 救出基準は `is_quasi_optimal`:
-// (best_score < 10·eps かつ |rel_gap| < DUALITY_GAP_TOL) OR (best_pf < eps かつ best_df < eps)
-// 前者は score+gap 連動、後者は pf/df 個別 feasibility。両方 eps 由来で物理量根拠あり、
-// 問題集 tuning の閾値ではない。NaN_guard / alpha_stall / residual_stall 全経路で
-// この基準を共有する。
-
-// ---------------------------------------------------------------------------
-// PMM 状態構造体
-// ---------------------------------------------------------------------------
-
 struct PmmState {
-    /// primal 参照点 ζ (Gondzio 表記)
     x_ref: Vec<f64>,
-    /// dual 参照点 λ (Gondzio 表記)
     y_ref: Vec<f64>,
-    /// primal proximal パラメータ ρ
     rho: f64,
-    /// dual proximal パラメータ δ
     delta: f64,
-    /// 前反復の非正則化 primal 残差ノルム
     prev_nr_p: f64,
-    /// 前反復の非正則化 dual 残差ノルム
     prev_nr_d: f64,
 }
 
-// ---------------------------------------------------------------------------
-// 公開エントリポイント
-// ---------------------------------------------------------------------------
-
-/// IP-PMM 内部ソルバー（Ruiz スケーリング適用済み problem を受け取る）
-///
-/// augmented KKT + LDLT 直接法 + PMM 参照点更新
+/// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 pub(crate) fn solve_ippmm_inner(
     problem: &QpProblem,
     options: &SolverOptions,
@@ -158,28 +79,22 @@ pub(crate) fn solve_ippmm_inner(
         return timeout_result(n);
     }
 
-    // 制約なし特殊ケース
     if problem.num_constraints == 0
         && problem.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
     {
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
-    // 拡張制約行列を構築（6-tuple: is_eq_ext追加）
     let (a_ext, b_ext, m_ext, m_orig, _n_lb, is_eq_ext) = build_extended_constraints(problem);
 
     if m_ext == 0 {
         return solve_unconstrained(problem, &timeout_ctx);
     }
 
-    // 等式行数と不等式行数
     let eq_count = is_eq_ext.iter().filter(|&&v| v).count();
     let m_ineq = m_ext - eq_count;
 
-    // 初期点: 0 が bounds 内なら 0 を優先 (multiplier-method 標準)。0 が含まれなければ
-    // midpoint または単側 ε シフトに退避。
-    // 巨大 bounds (QPLIB_9002 |ub|=1e11) で midpoint=2.9e10 から始めると pf=2e10 (b=0)
-    // で line search が追いつかず wrong vertex に張り付くため、0 優先で初期 pf=0 を実現。
+    // 巨大 |ub|=1e11 で midpoint 起点だと pf が抜けないため、0 が bounds 内なら 0 を優先。
     let x0: Vec<f64> = problem
         .bounds
         .iter()
@@ -202,8 +117,7 @@ pub(crate) fn solve_ippmm_inner(
         })
         .collect();
 
-    // s0 = b_ext - A_ext * x0 でプライマル実行可能にする。
-    // 等式行: s=0（スラックなし）、不等式行: 下限 1.0 でクランプ
+    // s0 = b_ext − A_ext·x0。等式行は s=0、不等式行は s≥1 にクランプ。
     let mut ax0 = vec![0.0f64; m_ext];
     #[allow(clippy::needless_range_loop)]
     for col in 0..n {
@@ -227,16 +141,9 @@ pub(crate) fn solve_ippmm_inner(
     let mut s = s0.clone();
     let mut y = y0.clone();
 
-    // ── Mehrotra 1992 標準初期点 (等式 + 不等式制約両方への射影 + 均一化補正) ─────
-    //
-    // Mehrotra 1992 / Wright "Primal-Dual Interior-Point Methods" §5.1 準拠:
-    //   1. 全制約行 (等式 + 不等式) の残差を RHS にして Newton step で x̂ を取り
-    //      s_hat = b - A·x̂ を問題スケールに合わせる
-    //   2. δ_s, δ_y で正補正 (s, y ≥ 0 を保証)
-    //   3. δ_s_corr, δ_y_corr で s × y を均一化 (Σ 分散抑制)
-    // |b|≈1e11 級の問題で等式のみ射影だと s0 ≈ 1e11 に膨らみ K matrix 暴走するのを防ぐ。
+    // Mehrotra 1992 標準初期点 (Wright §5.1): 全制約射影 + δ_s/δ_y 正補正 + Σ 均一化補正。
+    // 等式のみの射影だと |b|≈1e11 級で s0 が膨張し K matrix が暴走する。
     {
-        // 全制約行の残差を RHS に
         let r_p: Vec<f64> = b_ext.iter().zip(ax0.iter())
             .map(|(&bi, &axi)| bi - axi)
             .collect();
@@ -286,7 +193,6 @@ pub(crate) fn solve_ippmm_inner(
             }
         }
 
-        // s_hat, y_hat を再計算 (射影後の x で)
         let mut ax_new = vec![0.0_f64; m_ext];
         for col in 0..n {
             for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
@@ -300,7 +206,6 @@ pub(crate) fn solve_ippmm_inner(
             .map(|i| if is_eq_ext[i] { 0.0 } else { 1.0 })
             .collect();
 
-        // Mehrotra 標準: δ_s = max(-1.5 * min(ŝ), 0) + 1 で s ≥ 1 を保証
         let s_min_ineq = s_hat.iter().zip(is_eq_ext.iter())
             .filter_map(|(&v, &eq)| if eq { None } else { Some(v) })
             .fold(f64::INFINITY, f64::min);
@@ -310,7 +215,6 @@ pub(crate) fn solve_ippmm_inner(
         let delta_s = (-1.5 * s_min_ineq).max(0.0) + 1.0;
         let delta_y = (-1.5 * y_min_ineq).max(0.0) + 1.0;
 
-        // shifted 値
         let s_pos: Vec<f64> = s_hat.iter().enumerate()
             .map(|(i, &v)| if is_eq_ext[i] { 0.0 } else { v + delta_s })
             .collect();
@@ -318,14 +222,12 @@ pub(crate) fn solve_ippmm_inner(
             .map(|(i, &v)| if is_eq_ext[i] { 0.0 } else { v + delta_y })
             .collect();
 
-        // 均一化補正: s × y を平均化
         let sy_sum: f64 = s_pos.iter().zip(y_pos.iter()).map(|(&si, &yi)| si * yi).sum();
         let s_sum_pos: f64 = s_pos.iter().sum();
         let y_sum_pos: f64 = y_pos.iter().sum();
         let delta_s_corr = if y_sum_pos > 1e-300 { sy_sum / (2.0 * y_sum_pos) } else { 0.0 };
         let delta_y_corr = if s_sum_pos > 1e-300 { sy_sum / (2.0 * s_sum_pos) } else { 0.0 };
 
-        // 最終 s0, y0 (= s_pos + δ_s_corr, y_pos + δ_y_corr)
         for i in 0..m_ext {
             s[i] = if is_eq_ext[i] { 0.0 } else { s_pos[i] + delta_s_corr };
             y[i] = if is_eq_ext[i] { 0.0 } else { y_pos[i] + delta_y_corr };
@@ -342,7 +244,6 @@ pub(crate) fn solve_ippmm_inner(
         }
     }
 
-    // PMM 状態初期化
     let mut pmm = PmmState {
         x_ref: x.clone(),
         y_ref: y.clone(),
@@ -353,18 +254,11 @@ pub(crate) fn solve_ippmm_inner(
     };
     let _ = x0; let _ = y0; let _ = s0;
 
-    // 慣性修正量: Q が indefinite の場合、Gershgorin 円定理から
-    // λ_min(Q) の下界を導出し、Q + δ_ic·I を PSD にする最小量を計算する。
-    // 凸 QP では 0 が返るため既存の収束挙動は変わらない。
-    // この値は q_is_indefinite フラグのみに使用する。rho_retry の下限には使わない
-    // (使うと PSD 問題でも過大正則化になり収束を阻害する)。
+    // Gershgorin 由来の Q + δ_ic·I PSD 化量。凸 QP では 0。indefinite 判定 (返却 status 用) のみに使う。
     let inertia_correction = super::kkt::compute_inertia_correction(&problem.q);
-    // Q が indefinite かどうかのフラグ (返却ステータスを LocallyOptimal にする判断に使う)
     let q_is_indefinite = inertia_correction > 0.0;
 
-    // PARAM: 根拠=MATLAB拡張版IP-PMM準拠 (env QP_REG_LIMIT で診断 override 可)。
-    // 【履歴】論文式(動的) を一時導入→DTOC3(‖A‖∞≈2.0)で reg_limit が
-    // 2500倍緩くなり退行。best-so-far + false-unbounded 格下げは維持したまま reg_limit は定数に戻す。
+    // QP_REG_LIMIT で override 可。
     let default_reg_qp = 5e-8;
     let default_reg_lp = 5e-10;
     let initial_reg_limit = std::env::var("QP_REG_LIMIT").ok()
@@ -376,21 +270,11 @@ pub(crate) fn solve_ippmm_inner(
                 default_reg_qp
             }
         });
-    // Adaptive reg_limit: rank-deficient Q + c≈0 の問題 (UBH1) で rho が floor に
-    // 張り付いて proximal 項が df 残差を支配し、IPM が真の Optimal に到達できない
-    // 病理を解消するため、特定パターンで floor を動的に下げる。
-    //
-    // トリガーパターン (UBH1 シグネチャ):
-    //   max(|c|) < 1e-6 (cost vector が ≈ 0、Q が支配的)
-    //   かつ rho == reg_limit (decay が止まっている)
-    //   かつ proximal 項が df の半分以上を占める
-    // c が非ゼロな問題 (LISWET 等) ではトリガーしない。
+    // rank-deficient Q + c≈0 で rho が floor に張り付き proximal 項が df を支配する病理を回避する適応 floor。
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < 1e-6;
     let mut reg_limit = initial_reg_limit;
-    /// 適応的 floor の最下限 (これ以上は数値不安定のリスク)
     const REG_LIMIT_MIN: f64 = 1e-14;
-    /// 適応 trigger: prox_d_inf > df * PROX_DOMINATE_RATIO のとき floor を下げる
     const PROX_DOMINATE_RATIO: f64 = 0.5;
     /// 一度の調整で reg_limit を割る倍率
     const REG_LIMIT_STEP: f64 = 1e-3;
@@ -398,34 +282,17 @@ pub(crate) fn solve_ippmm_inner(
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
     // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
     // 桁違いに離れている場合、reg_limit を下げて IPM が boundary を探索できる
-    // ようにする。
-    //
-    // 動機: OSQP_PORTFOLIO_100 (n=10100, m=20101, c≠0 で active boundary 構造)
-    // で δ=5e-8 floor が x を interior に張り付かせて obj=0.0297 (suboptimal,
-    // Clarabel: -2.63) で停滞。c が大きいので allow_adaptive_reg=false のまま
-    // この path を通せず、interior 解で false-positive Infeasible 検出される。
-    // pf 停滞検出により reg_limit を下げ、boundary に到達できる。
-    //
-    // LISWET など c≠0 でも pf が緩やかに減少する問題では PF_STUCK_RATIO=0.95
-    // を満たさず trigger しない (毎 iter 5%以上改善されている)。
-    /// pf 履歴を残す iter 数
+    // c≠0 でも floor で boundary に到達できず suboptimal で停滞するケース用。
+    // PF_STUCK_RATIO=0.95: 5 iter 連続で 5%未満の改善を停滞と判定。
     const PF_HISTORY_LEN: usize = 5;
-    /// pf が改善とみなされる ratio 上限。pf_now / pf_5_iter_ago > この値なら停滞。
-    /// 0.95 = 5% 未満の改善 (5 iter に渡る) を停滞と判定。LISWET は 0.96/iter で 5 iter で 0.81、
-    /// 0.95 を下回るので trigger しない。一方 PORTFOLIO_100 は ratio≈1.0 で確実に trigger。
     const PF_STUCK_RATIO: f64 = 0.95;
-    /// pf が target から離れていることを要求する係数 (target × この倍数)。
-    /// 1e2 = pf > 100·eps なら "まだ収束遠し" と判定。LISWET の pf=1.5e-6 (eps=1e-6) は
-    /// 1.5 < 100 で trigger しない。PORTFOLIO_100 の pf=3.4e-4 (eps=1e-6) は 340 > 100 で trigger。
+    /// pf > FAR·eps を「まだ収束遠し」と判定する係数。
     const PF_FAR_FROM_TARGET_RATIO: f64 = 1e2;
     let mut pf_history: Vec<f64> = Vec::with_capacity(PF_HISTORY_LEN);
 
-    // check_infeasible_or_unbounded の連続 fire 数。1 iter 単発 fire は noise の可能性が
-    // 高い (PMM regularization floor 付近の dy 方向揺らぎ等) ため、K iter 連続で
-    // 検出された場合のみ exit する。
+    // 1 iter 単発の infeasible fire は noise なので、K iter 連続で確定。
     let mut consecutive_infeas_triggers: usize = 0;
 
-    // 作業バッファ
     let mut ax = vec![0.0f64; m_ext];
     let mut aty = vec![0.0f64; n];
     let mut qx = vec![0.0f64; n];
@@ -435,46 +302,22 @@ pub(crate) fn solve_ippmm_inner(
     let mut dy = vec![0.0f64; m_ext];
     let mut ds = vec![0.0f64; m_ext];
 
-    // AMD permutation キャッシュ（スパースパターンは反復間で不変）
+    // 反復間で sparsity 不変な構造はキャッシュ。
     let mut amd_perm_cache: Option<Vec<usize>> = None;
-
-    // augmented KKT 構造キャッシュ。Q/A の sparsity が反復間で不変なので
-    // col_ptr/row_ind/static_values を 1 度だけ確定し、以降は σ/δ 更新だけ行う。
-    // use_schur 経路では使わない (Schur は別構造)。
     let aug_cache = super::kkt::build_augmented_cache(&problem.q, &a_ext);
-    // permuted 版キャッシュ。AMD perm 確定後 1 回だけ計算し、permute_sym_upper を回避する。
     let mut aug_permuted_cache: Option<super::kkt::PermutedAugmentedKkt> = None;
-    // SymbolicCholesky キャッシュ。最初の factorize 成功後に保持し、以降の反復で再利用する
-    // (build_symbolic_hl の ~5ms/call を削減)。pattern が変わる Schur/DD-LDL では None のまま。
     let mut symbolic_cholesky_cache:
         Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> = None;
 
-    // inexact Newton forcing term η を user 指定 eps から計算する。
-    // η = eps × 0.1 (IPM_OUTER_VS_INNER_RATIO)、下限 1e-13 (f64 limit)。
-    // user が eps=1e-9 を要求すれば η=1e-10 となり、Newton 方向品質も
-    // それに見合う精度になる。MINRES (iterative) 経路でのみ反映、LDL 経路では
-    // forward error = cond × ε_machine が支配的なので η は無関係。
     let inexact_eta = inexact_eta_for_eps(eps_orig);
 
-    // [Schur auto-dispatch] augmented LDL が memory budget 超過 (= MINRES fallback)
-    // になる場合は Schur (n×n SPD) に切替える。augmented MINRES path は
-    // ill-cond saddle KKT で direction error = η × ||r|| / σ_min(K) が
-    // 発散するため (QPLIB_9008 で実証)、Schur SPD に切替で安定化する。
-    //
-    // 検出方法: 任意の sigma で symbolic augmented を構築 → L_nnz が budget
-    // 超過なら Schur に切替。symbolic factorize は O(nnz) で O(L_nnz) より速く、
-    // 値はパターンに無関係なので probe 用 sigma=1 で十分。
-    //
-    // sparse pattern は反復不変なので 1 回だけ probe する。
-    //
-    // env QP_SCHUR=1 (明示) があればそちら優先。
-    // env QP_NO_AUTO_SCHUR=1 でこの auto-switch を無効化 (回帰調査用)。
+    // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
+    // augmented MINRES は ill-cond saddle で direction error が発散するため。
     let explicit_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
     let auto_schur_disabled = std::env::var("QP_NO_AUTO_SCHUR").ok().as_deref() == Some("1");
     let auto_schur = if explicit_schur || auto_schur_disabled {
-        false // 明示 Schur or auto 無効なら probe しない
+        false
     } else {
-        // probe 用に rho/delta は initial value、sigma は 1 を使う (パターン不変)
         let probe_sigma: Vec<f64> = vec![1.0; m_ext];
         let probe_rho = options.ipm.delta_min;
         let probe_aug = build_augmented_system(&problem.q, &a_ext, &probe_sigma, probe_rho, probe_rho);
@@ -491,34 +334,25 @@ pub(crate) fn solve_ippmm_inner(
         exceeds
     };
 
-    // 殿指示(C): MaxIterationsを発生させる経路自体を消す。
-    // None = 「まだ収束もタイムアウトも起きていない」を型で表現。
-    // ループ出口は「収束→Some(Optimal)」「timeout→Some(Timeout)」の2つだけ。
+    // 終了条件は Some(Optimal) / Some(Timeout) のみ。MaxIterations 経路は除去。
     let mut status: Option<SolveStatus> = None;
     let mut final_iter = options.ipm.max_iter;
     let mut final_residuals: Option<(f64, f64, f64)> = None;
 
-    // best-so-far: 残差スコア最良時の (x,y,s,iter,residuals) を保持。
-    // NaN guard 経路で崩壊解を返さないための保険。
+    // NaN guard で崩壊解を返さないための best-so-far スナップショット。
     let mut best_score = f64::INFINITY;
     let mut best_x = x.clone();
     let mut best_y = y.clone();
     let mut best_s = s.clone();
     let mut best_iter: usize = 0;
     let mut best_residuals: (f64, f64, f64) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    // best-so-far の rel_gap も保持。
-    // reject_false_*_bestsofar 経路で偽 Optimal 昇格を防ぐためのゲート用。
     let mut best_rel_gap: f64 = f64::INFINITY;
 
-    // alpha 停滞・deadlock 検出 (定数はモジュールレベルに集約)
     let mut alpha_stall_count: usize = 0;
 
-    // residual 停滞検出: best_score が窓内で改善しないかを追跡。
-    // best_score が更新された iter 番号と、その時の値を保持。
     let mut last_score_improvement_iter: usize = 0;
     let mut last_score_improvement_value: f64 = f64::INFINITY;
 
-    // env=IPM_PROF=1: per-iter cost breakdown を最後に1行で emit。
     let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
     let mut prof_iters: usize = 0;
     let mut prof_residual_ns: u128 = 0;
@@ -532,14 +366,12 @@ pub(crate) fn solve_ippmm_inner(
     for iter in 0..options.ipm.max_iter {
         let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };
         let mut prof_section_start = prof_iter_start;
-        // T3: 反復先頭タイムアウトチェック
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
         }
 
-        // ── 残差計算（非正則化）──────────────────────────────────
         spmv(&a_ext, &x, &mut ax);
         spmtv(&a_ext, &y, &mut aty);
         spmv_q(&problem.q, &x, &mut qx);
@@ -551,7 +383,7 @@ pub(crate) fn solve_ippmm_inner(
             r_p[i] = b_ext[i] - ax[i] - s[i];
         }
 
-        // μ = sᵀy / m_ineq（等式行除外）
+        // μ = sᵀy / m_ineq (等式行除外)
         let mu: f64 = if m_ineq > 0 {
             s.iter().zip(y.iter()).zip(is_eq_ext.iter())
                 .filter(|&(_, &eq)| !eq)
@@ -561,14 +393,11 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // 残差ノルム記録
         let nr_p = norm_inf(&r_p);
         let nr_d = norm_inf(&r_d);
         final_residuals = Some((nr_p, nr_d, mu));
 
-        // 双対ギャップを best-so-far 更新前に算出。
         // 符号規約: r_d = -(Qx + c + A^T y) → dual = -0.5 x^T Q x - Σ b_ext·y。
-        // best 更新時に gap も記録し、reject_false 経路の偽 Optimal 昇格を防ぐ。
         let qx_dot_x: f64 = qx.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
         let c_dot_x: f64 = problem.c.iter().zip(x.iter()).map(|(&a, &b)| a * b).sum();
         let p_obj_s = 0.5 * qx_dot_x + c_dot_x;
@@ -582,10 +411,7 @@ pub(crate) fn solve_ippmm_inner(
         let rel_gap = gap_abs / gap_denom;
         const DUALITY_GAP_TOL: f64 = 1e-3;
 
-        // best-so-far 更新（NaN guard 経路で崩壊解を返さないための保険）
-        // 各項を同じスケールで正規化 (mu は complementarity = sᵀy/m で dual variable と同スケール)。
-        // mu を無正規化で混ぜると ||c|| が大きい問題で best-so-far が「mu が小さい解」に
-        // バイアスされるため、mu / (1+norm_c) で正規化する。
+        // mu は dual と同スケール (sᵀy/m) なので ||c|| 大の問題でバイアスしないよう mu/(1+||c||) 正規化。
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let norm_b_bs = norm_inf(&b_ext).max(1.0);
         if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() {
@@ -626,9 +452,7 @@ pub(crate) fn solve_ippmm_inner(
                 iter, mu, nr_p, nr_d, pmm.rho, pmm.delta, prox_d_inf, prox_p_inf, diff_x_inf, reg_limit
             );
         }
-        // task #32 diag: per-iter active-set count instrumentation. Counts inequality
-        // rows where slack s_i or dual y_i hits boundary so wrong-basin lock-in is
-        // observable iter-by-iter.
+        // per-iter active-set count: wrong-basin lock-in を観測する診断 (IPPMM_ACTIVE_TRACE=1)。
         if std::env::var("IPPMM_ACTIVE_TRACE").ok().as_deref() == Some("1") {
             let s_inf = s.iter().zip(is_eq_ext.iter())
                 .filter_map(|(&v, &eq)| if eq { None } else { Some(v.abs()) })
@@ -654,21 +478,10 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
 
-        // ── 収束判定 ──────────────────────────────────────────────
-        //
-        // bench (`compute_pfeas_normalized` / `compute_dfeas_componentwise`) と同型の
-        // **per-row componentwise relative** で評価する:
+        // per-row componentwise relative (bench と同形):
         //   primal: max_i |r_p[i]| / (1 + |ax[i]| + |b_ext[i]|)
         //   dual:   max_j |r_d[j]| / (1 + |qx[j]| + |c[j]| + |aty[j]|)
-        //
-        // 旧実装は OSQP 全体正規化 `||r_p||_∞ / (1 + max(||ax||, ||b||))` (= pfeas_thr)
-        // を使い、`||b||` が大きい問題 (QPCBOEI2: ‖b_ext‖≈1e4) で threshold が
-        // user_eps の数千倍緩み、unscale 後の元空間 componentwise が user_eps に
-        // 届かない (bench で PFEAS_FAIL) 事例が出ていた。bench は per-row 判定なので
-        // IPM 終了条件も per-row に揃えれば、scaled→orig の (1+|ax_i|+|b_i|) 正規化
-        // 因子は ax_i, b_i が同じスケール (Ruiz は同 row を同係数で scale) なので
-        // 比例打ち消し → ほぼ scaling 不変。`nr_d_rel_orig` (旧 global OSQP, 名前と
-        // 内容が乖離) も廃して same-form per-row に統一する。
+        // OSQP 全体正規化は ||b|| 大の問題で threshold が緩み unscale 後の bench を通せない。
         let eps = options.ipm_eps();
         let nr_p_rel = {
             let mut m = 0.0_f64;
@@ -689,7 +502,6 @@ pub(crate) fn solve_ippmm_inner(
             m
         };
 
-        // [DIAG] Optimal_main 条件を全て出力 (env=IPPMM_OPT_DIAG=1)
         if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
             eprintln!(
                 "IPPMM_OPT iter={} pf_rel={:.3e}/eps={:.3e}{} df_rel={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
@@ -701,10 +513,7 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
 
-        // rel_gap / DUALITY_GAP_TOL は上のブロックで計算済（best-so-far 更新前）。
-        // UBH1 (||x||≈1459, c=0, Q rank-deficient) で r_stat=2e-6・mu=1e-30 なのに
-        // duality gap = 9.49 で obj 91% 誤差の事例を検出できなかった（Phase A 検証）。
-        // 3 族独立 solver (PIQP/Clarabel/OSQP) で UBH1 真値 1.116 を確認済。
+        // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps
             && nr_d_rel < eps
             && mu < eps
@@ -721,29 +530,12 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // 旧 Suboptimal_mu_floor / Optimal_orig_recheck path は削除した。理由:
-        //
-        // 1. Optimal_orig_recheck (旧 743 行) の orig 空間再計算は OSQP 全体正規化で
-        //    ill-scaled 問題で permissive すぎた (`pfeas_thr_orig = eps × (1+denom)`)。
-        //    新 per-row componentwise check (`nr_p_rel < eps`) は Ruiz 行スケーリングに
-        //    対してほぼ不変なので、orig 空間再計算は冗長。
-        //
-        // 2. Suboptimal_mu_floor の `nr_p < thr_p` (= max(eps×(1+norm_b), reg_limit×10))
-        //    も OSQP 全体正規化で同じ permissive 問題を抱えていた。「mu floor で停滞 +
-        //    componentwise が eps を満たす」 → 上の Optimal_main で Optimal を出す。
-        //    満たさず純粋に停滞しているケースは、後段の alpha_stall / residual_stall
-        //    検出 (eps スケール閾値) で SuboptimalSolution に降格される。同じ目的を
-        //    達成するゲートが二重に存在していたのを 1 つに統一した。
-
-        // ── PMM 改善判定（前反復の残差と比較）──────────────────────
-        // Algorithm PEU: primal/dual改善を独立に判定
+        // Algorithm PEU: primal/dual 改善を独立判定。
         let primal_improved = PMM_IMPROVE_THRESHOLD * pmm.prev_nr_p > nr_p;
         let dual_improved = PMM_IMPROVE_THRESHOLD * pmm.prev_nr_d > nr_d;
 
-        // ── PMM 修正済み残差を計算 ──────────────────────────────────
-        // r_d_pmm = r_d - ρ*(x - x_ref)
-        // r_p_pmm = r_p - δ*(y - y_ref)
-        // 注意: 行列には rho_matrix/delta_matrix を使うが、RHS proximal 補正は rho_prox/delta_prox
+        // r_d_pmm = r_d − ρ(x−x_ref), r_p_pmm = r_p − δ(y−y_ref)。
+        // 行列側 (rho_matrix/delta_matrix) と RHS 補正側 (rho_prox/delta_prox) を区別する。
         let rho_prox = pmm.rho;
         let delta_prox = pmm.delta;
 
@@ -756,11 +548,10 @@ pub(crate) fn solve_ippmm_inner(
             r_p_pmm[i] -= delta_prox * (y[i] - pmm.y_ref[i]);
         }
 
-        // Σ = diag(s_i / y_i)（等式行は0）
+        // Σ = diag(s_i / y_i) (等式行は0)
         let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
 
-        // [DIAG] Σ の dynamic range 実測 (env=IPPMM_SIGMA_DIAG=1 のときのみ)
         if std::env::var("IPPMM_SIGMA_DIAG").ok().as_deref() == Some("1") {
             let mut sigma_min = f64::INFINITY;
             let mut sigma_max_actual = 0.0_f64;
@@ -785,41 +576,28 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
 
-        // PMM駆動の正則化（mu-tracking廃止、gunshi指摘(2)）
-        // rho/deltaはPMMが管理する。mu依存フロアは使わない
+        // 正則化は PMM 駆動。mu 依存 floor は使わない。
         let rho_matrix = pmm.rho.max(options.ipm.delta_min);
         let delta_matrix = pmm.delta.max(options.ipm.delta_min);
 
-        // ── augmented KKT 構築 + 因子化 ────────────────────────────
-        // T2: 因子化前タイムアウトチェック
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
         }
 
-        // ── PROF: residual+sigma 区間 ──
         if let Some(t) = prof_section_start {
             prof_residual_ns += t.elapsed().as_nanos();
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        // 因子化失敗時に rho/delta を LDL_REG_GROWTH 倍ずつ増やして再試行する。
-        // 不定 Q の場合: rho_retry の初期値を inertia_correction で下限設定し、
-        // KKT (1,1) ブロック Q + ρI が初回から PSD となるよう保証する。
-        // PSD 問題では inertia_correction = 0 なので rho_matrix から始まり挙動は変わらない。
+        // 不定 Q 用に rho_retry を inertia_correction で下限し、Q+ρI を初回から PSD に。
+        // 必要最低 rho は -λ_min(Q) なので天井も同様に持ち上げる (例: λ_min≈-398 を許す)。
         let mut rho_retry = rho_matrix.max(inertia_correction);
-        // inertia_correction が LDL_REG_CEILING を超える場合は天井も引き上げる。
-        // 不定 Q の必要最低 rho は -λ_min(Q) ≥ inertia_correction であり、その上限が 1.0 では
-        // 高不定行列 (QPLIB_0018: λ_min≈-398) で因子化が絶対に成功しない。
         let ldl_reg_ceiling = LDL_REG_CEILING.max(inertia_correction);
         let mut delta_matrix_retry = delta_matrix;
         let mut fac_opt: Option<KktFactor> = None;
         let mut aug_mat_opt: Option<crate::sparse::CscMatrix> = None;
-        // [Schur path] env=QP_SCHUR=1 で Schur complement formulation を使う
-        // (n×n SPD、augmented n+m_ext の代替)。LISWET 系の precision floor 突破を狙う。
-        // auto_schur (loop 入り口で probe 済) が true なら augmented MINRES 回避目的で
-        // 自動的に Schur に切替。
         let use_schur = explicit_schur || auto_schur;
         let mut d_inv_opt: Option<Vec<f64>> = None;
         for _retry in 0..LDL_REG_RETRY_MAX {
@@ -845,7 +623,6 @@ pub(crate) fn solve_ippmm_inner(
             if let Some(t) = prof_t_build {
                 eprintln!("FACT_PROF section=build n={} nnz={} t={:.3}ms", mat_for_factor.nrows, mat_for_factor.values.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
-            // AMD は 1 回だけ計算してキャッシュ（スパースパターン不変のため）
             if amd_perm_cache.is_none() {
                 amd_perm_cache = Some(amd_with_deadline(
                     mat_for_factor.nrows,
@@ -855,8 +632,7 @@ pub(crate) fn solve_ippmm_inner(
                 ));
             }
             let perm = amd_perm_cache.as_ref().unwrap();
-            // augmented 経路では permuted cache を使って permute_sym_upper を skip する。
-            // Schur 経路 / DD LDL 経路 は通常経路を使う (pre-permuted 未対応)。
+            // Schur / DD-LDL は pre-permuted 未対応なので通常経路へ。
             let dd_ldl = std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1");
             let use_pre_permuted = !use_schur && !dd_ldl;
             if use_pre_permuted && aug_permuted_cache.is_none() {
@@ -884,7 +660,6 @@ pub(crate) fn solve_ippmm_inner(
                     Some(n),
                 )
             };
-            // factor 成功後に symbolic を pull して以降の反復で再利用する。
             if use_pre_permuted && symbolic_cholesky_cache.is_none() {
                 if let Ok(ref f) = factor_result {
                     symbolic_cholesky_cache = f.symbolic_arc();
@@ -896,23 +671,14 @@ pub(crate) fn solve_ippmm_inner(
                         eprintln!("FACT_PROF section=factorize n={} t={:.3}ms", mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
                     }
                     let prof_t_probe = if prof { Some(std::time::Instant::now()) } else { None };
-                    // 健全性プローブ: factorize は Ok でも cond(K) が大きいと LDL solve が
-                    // K·sol = rhs を満たさず Newton 方向が central path から逸脱する病理がある
-                    // (QPLIB_8515: dx_inf=3.35e10, alpha=5.72e-11、翌 iter で pf が 8e-6→1e3 発散)。
-                    //
-                    // 実残差 ||K·sol − rhs||_∞ / ||rhs||_∞ ≤ LDL_HEALTH_REL_TOL を直接判定する。
-                    // LDL_HEALTH_REL_TOL = 1e-3 は inexact Newton forcing term η=0.1 より厳しく、
-                    // 外側 IPM の Newton ステップ品質を保証する閾値 (Wright IPM §11.7、
-                    // Eisenstat-Walker)。問題集 tuning ではない。
-                    //
-                    // 反復法 (MINRES) backend では LDL 精度の概念が当てはまらない (相対 tol で
-                    // 自分で収束) ため、probe を skip する。
+                    // 健全性プローブ: factorize Ok でも cond(K) 大で LDL solve が Newton 方向
+                    // を central path から外す病理を ||K·sol − rhs||/||rhs|| で直接弾く。
+                    // iterative backend は LDL 精度概念が無いので skip。
                     if !f.is_iterative() {
                         let probe_dim = mat_for_factor.nrows;
                         let mut probe_rhs = vec![0.0_f64; probe_dim];
                         probe_rhs[..n].copy_from_slice(&r_d_pmm);
-                        // 予測子 RHS の下半分は r_p_mod_pred = r_p - r_c_pred/y で、不等式行
-                        // では r_c_pred = -s*y → r_p_mod_pred = r_p + s。等式行はそのまま r_p。
+                        // 予測子 RHS 下半分: 不等式行は r_p + s、等式行は r_p。
                         for (i, slot) in probe_rhs[n..].iter_mut().enumerate() {
                             *slot = if is_eq_ext[i] { r_p_pmm[i] } else { r_p_pmm[i] + s[i] };
                         }
@@ -921,7 +687,6 @@ pub(crate) fn solve_ippmm_inner(
                             let mut probe_sol = vec![0.0_f64; probe_dim];
                             f.solve(&probe_rhs, &mut probe_sol);
 
-                            // 実残差 K·sol − rhs を計算 (上三角 sym matvec)。
                             let mut kx = vec![0.0_f64; probe_dim];
                             for col in 0..mat_for_factor.ncols {
                                 let cs = mat_for_factor.col_ptr[col];
@@ -944,19 +709,8 @@ pub(crate) fn solve_ippmm_inner(
                             let sol_inf = probe_sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
                             let f64_precision_ceiling = 1.0 / f64::EPSILON;
                             let amplification = sol_inf / rhs_inf;
-                            // 健全性条件 (両方満たす必要):
-                            //   (A) 実残差 ||K·sol − rhs|| / ||rhs|| ≤ LDL_HEALTH_REL_TOL = 1e-3
-                            //       (LDL の大破綻検出 sanity threshold、eps 非連動)
-                            //   (B) sol 増幅率 sol_inf / rhs_inf ≤ 1/ε_machine = 4.5e15
-                            //       (cond(K) が f64 表現範囲内、物理量)
-                            // どちらか一方でも破れたら不健全 → delta bump で再因子化。
-                            // (A) は QPLIB_8515 iter 7 (residual 大) を捕捉、(B) は
-                            // QPLIB_9002 iter 36 (sol 桁外れ) を捕捉。
-                            //
-                            // LDL_HEALTH_REL_TOL を eps 連動にすべきか検討したが、LDL
-                            // forward error は cond(K) × ε_machine で eps と独立に
-                            // 決まるため、eps 連動は誤った scaling。1e-3 は「LDL が 10x
-                            // 以上ズレる病理」を捕捉する sanity threshold として固定。
+                            // (A) ||K·sol−rhs||/||rhs|| ≤ 1e-3 (LDL 大破綻 sanity, eps 独立)
+                            // (B) sol_inf / rhs_inf ≤ 1/ε_machine (cond(K) が f64 域内)
                             const LDL_HEALTH_REL_TOL: f64 = 1e-3;
                             let unhealthy = !rel_resid.is_finite()
                                 || rel_resid > LDL_HEALTH_REL_TOL
@@ -964,7 +718,7 @@ pub(crate) fn solve_ippmm_inner(
                                 || amplification > f64_precision_ceiling;
                             if unhealthy {
                                 if rho_retry >= ldl_reg_ceiling {
-                                    break; // 上限到達 → あきらめ (M-02 NumericalError 経路)
+                                    break;
                                 }
                                 rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                                 delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
@@ -986,18 +740,17 @@ pub(crate) fn solve_ippmm_inner(
                 }
                 Err(_) => {
                     if rho_retry >= ldl_reg_ceiling {
-                        break; // 上限到達 → あきらめ
+                        break;
                     }
                     rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                     delta_matrix_retry = (delta_matrix_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
-                    // AMD キャッシュは rho/delta 変化でもスパース構造不変なので再利用可
                 }
             }
         }
         if matches!(status, Some(SolveStatus::Timeout)) {
             break;
         }
-        // 第3防御: Identity fallback — 全リトライ失敗時に identity perm + 大きな delta で再試行
+        // 第3防御: identity perm + 大きな delta で再試行。
         if fac_opt.is_none() {
             amd_perm_cache = None;
             let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_matrix_retry);
@@ -1018,35 +771,27 @@ pub(crate) fn solve_ippmm_inner(
                     status = Some(SolveStatus::Timeout);
                     final_iter = iter;
                 }
-                Err(_) => {} // identity fallback も失敗 → fac_opt は None のまま → M-02
+                Err(_) => {}
             }
         }
         if matches!(status, Some(SolveStatus::Timeout)) {
             break;
         }
-        // M-02: fac_opt が None なら全リトライ失敗 → NumericalError
         let mut fac = match fac_opt {
             Some(f) => f,
             None => return numerical_error_result(n),
         };
-        // MINRES (iterative) 経路の tol を user 指定 eps から計算した η に上書きする。
-        // Direct/DirectDd では no-op。constructor 時に固定の η を使うのではなく、
-        // ここで都度設定するのは将来 dynamic forcing (cond 推定連動 等) を入れる
-        // 余地を残すため。
+        // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
         let aug_mat_for_ir = aug_mat_opt
             .as_ref()
             .expect("aug_mat_opt must be set when fac_opt is set");
 
-        // ── PROF: factorize 区間 ──
         if let Some(t) = prof_section_start {
             prof_factor_ns += t.elapsed().as_nanos();
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        // N1: mu_rate(predictor直後)は廃止。変数更新後のμからrを計算する（PMM更新部で実施）
-
-        // ── Predictor / Corrector / Gondzio (Schur or augmented dispatch) ──
         let (pred, alpha, r_c_corr) = if use_schur {
             let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
             let pred = predictor_step_schur(
@@ -1081,13 +826,11 @@ pub(crate) fn solve_ippmm_inner(
             (pred, alpha, r_c_corr)
         };
 
-        // ── PROF: predictor+corrector 区間 ──
         if let Some(t) = prof_section_start {
             prof_predcorr_ns += t.elapsed().as_nanos();
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        // ── Gondzio multiple centrality correctors ──────────────────
         let mut alpha = alpha;
         if alpha < 0.999 {
             alpha = if use_schur {
@@ -1111,16 +854,9 @@ pub(crate) fn solve_ippmm_inner(
             };
         }
 
-        let _ = pred; // 未使用警告抑止
+        let _ = pred;
 
-        // ── 変数更新 ──────────────────────────────────────────────
-        // NaN/Inf ガード: ステップにNaNが含まれる場合は現在のx,y,sで停止。
-        // sigma_max=1e17-1e19の問題で補正ステップの壊滅的キャンセルによりNaNが
-        // 発生した際に、直前の有効な解でSuboptimalSolutionを返す。
-        // unscale_ipm_result がpfeas/bfeas/dfeasを原空間で再検証してOptimalに昇格する。
-        // Catastrophic blow-up（finite だが極端値）も検出。
-        // UBH1 で reg_limit=5e-12 まで降下後、KKT system が semi-definite に近づき
-        // LDL solve が dx_inf=1e290+ を返す病理。これも NaN 同等扱いで best 復帰。
+        // NaN/Inf または finite-but-huge (>1e30) は LDL blow-up とみなし best-so-far で復帰。
         const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
         let direction_finite_but_huge = dx.iter().chain(dy.iter()).chain(ds.iter())
             .any(|v| v.is_finite() && v.abs() > DIRECTION_BLOWUP_THRESHOLD);
@@ -1129,16 +865,12 @@ pub(crate) fn solve_ippmm_inner(
             || ds.iter().any(|v| !v.is_finite())
             || direction_finite_but_huge
         {
-            // best-so-far 復帰: 崩壊した現在値ではなく最良残差時の解を返す
             if best_score.is_finite() {
                 x.copy_from_slice(&best_x);
                 y.copy_from_slice(&best_y);
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                // best-so-far が真に Optimal 級なら Optimal、そうでなければ SuboptimalSolution。
-                // best は valid な近似解として下流の bench 品質判定 (PFEAS_FAIL/DFEAS_FAIL/
-                // OBJ_MISMATCH/PASS) に委ねる。NumericalError 扱いは status 隠蔽になるため避ける。
                 let quality_threshold = 10.0 * eps_orig;
                 let combined_quasi = best_score < quality_threshold
                     && best_rel_gap.abs() < DUALITY_GAP_TOL;
@@ -1168,33 +900,14 @@ pub(crate) fn solve_ippmm_inner(
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                     eprintln!("IPPMM_EXIT iter={} path=NumericalError_NaN_guard_no_best", iter);
                 }
-                // best-so-far がない (即座に NaN) → 解なし。NumericalError 一択。
                 status = Some(SolveStatus::NumericalError);
             }
             break;
         }
 
-        // Infeasibility / Unboundedness 検出（IP-PMM パス）
-        //
-        // 検出器 (check_infeasible_or_unbounded) は Newton step (dx, dy) の **方向**
-        // から Farkas-like 証明書を判定する。これは正規の Farkas 証明書 (recession
-        // direction) ではなく Newton 方向を使う近似なので、以下の **false-positive** が
-        // 起きうる:
-        //   - PMM regularization δ floor (5e-8) で primal が pf ≈ δ·‖y‖ に張り付く
-        //     OSQP_PORTFOLIO_100 (n=10100, m=20101) で確認: pf=3.4e-4, df=6e-11, ‖y‖≈6e3,
-        //     δ·‖y‖ ≈ 3e-4 — IPM は frozen 状態で dy/dx は noise を含み、
-        //     ||A^T dy||≈0 と b·dy<0 を偶然満たして Infeasible 誤判定。
-        //
-        // **対処方針**: 検出器が反応しても、best-so-far が finite (= IPM が iterate を
-        // 1 度でも改善した) ならその解を信頼し、status は **下流の finalize_outcome** に
-        // 委ねる (best_score < 10·eps なら Optimal 昇格、それ以外は SuboptimalSolution
-        // → bench 側で PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH に正しく分類)。
-        // 検出器を完全に無効化はしない: best が無い (pf 未収束のまま 1 回も best 更新が
-        // 起きていない、best_score=INFINITY) 場合のみ Infeasible/Unbounded を信じる。
-        //
-        // 真の Infeasible 問題では IPM が常に大きな pf を返すため best_score は常に
-        // 大きい finite 値 → SuboptimalSolution → bench 側で PFEAS_FAIL に分類される
-        // (pf が enormous なので "Infeasible" と区別する精緻さは bench 出力で確認可能)。
+        // check_infeasible_or_unbounded は Newton 方向の Farkas-like 近似なので
+        // PMM floor 起因の false-positive がありうる。best-so-far がある間は信用せず、
+        // best が無い時のみ Infeasible/Unbounded を確定とみなす。
         if let Some(infeas_status) = check_infeasible_or_unbounded(
             &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
         ) {
@@ -1203,8 +916,6 @@ pub(crate) fn solve_ippmm_inner(
             if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                 eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={} consecutive_infeas={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite(), consecutive_infeas_triggers);
             }
-            // best が Optimal-quality なら 1 回目の trigger でも即 rescue (false-positive を
-            // 早期に切り上げる、IPPMM 真の収束済み)。
             if best_score.is_finite()
                 && best_score < quality_threshold
                 && best_rel_gap.abs() < DUALITY_GAP_TOL
@@ -1224,14 +935,7 @@ pub(crate) fn solve_ippmm_inner(
                 status = Some(SolveStatus::Optimal);
                 break;
             }
-            // 1 回の trigger では確信できないので、N 連続で fire するまで最大 K iter
-            // 待ってから demote/Infeasible 判定する。これにより:
-            //   - PMM regularization floor で primal が一時的に stuck し dy 方向がたまたま
-            //     Farkas-like を満たすケース (PORTFOLIO_100) で adaptive reg_limit が降りる
-            //     猶予を与える。
-            //   - 真の Infeasible (常に dy 方向が Farkas) は K iter 連続で fire し確実に exit。
-            // この window 中は status を立てずループ続行 (newton step / alpha 更新で進捗を
-            // 見守る)。
+            // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             const MIN_CONSECUTIVE_INFEAS: usize = 3;
             if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
@@ -1240,20 +944,8 @@ pub(crate) fn solve_ippmm_inner(
                         iter, consecutive_infeas_triggers, MIN_CONSECUTIVE_INFEAS
                     );
                 }
-                // continue でなくループ続行: 後段の newton step / alpha 更新を実施して
-                // 次 iter で再判定する。
             } else {
-                // K iter 連続 fire: best が Optimal-quality (< quality_threshold) なら
-                // false-positive の可能性があるため SuboptimalSolution に降格する。
-                // best_score >= quality_threshold の場合は本物の Infeasible/Unbounded と
-                // みなして検出器に従う。
-                //
-                // 根拠: 真に実行可能な問題で PMM 正則化 floor (5e-8) により primal が
-                //   pf ≈ δ·‖y‖ に張り付くケース (PORTFOLIO_100) では、IPM 内部の
-                //   Newton 方向が Farkas-like を偶然満たすことがある。この場合 best_score は
-                //   delta * ||y|| ≈ 小さい有限値 (< quality_threshold) になる。
-                // 真の Infeasible/Unbounded 問題では primal 残差が構造的に非ゼロのため
-                //   best_score は常に >> quality_threshold = 10 * eps_orig ≈ 1e-5。
+                // K 連続 fire: best が quality_threshold 未満なら false-positive 扱いで降格、それ以外は検出器に従う。
                 if best_score < quality_threshold {
                     x.copy_from_slice(&best_x);
                     y.copy_from_slice(&best_y);
@@ -1297,18 +989,8 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
 
-        // Trust-region 風 step magnitude cap:
-        // 各成分 (x, y, s) について alpha · |dv|_inf <= STEP_REL_CAP · max(|v|_inf, 1) を強制。
-        // これは fraction-to-boundary が捉えられない「方向自体の暴発」を抑える。
-        //
-        // 真因: 近 optimal iter で μ→0、Σ=s/y dynamic range 暴発、PMM rho が同時に縮小して
-        // K の正則化が弱まり、Newton 系から sol/rhs ≈ 1e7 級の huge dx が出る。
-        // fraction-to-boundary は s, y > 0 のみ保護、dx は無制約 → x が桁外れに飛ぶ。
-        // 結果、box-only QP で wrong vertex (中点) に張り付く病理あり。
-        //
-        // STEP_REL_CAP = 1e3 は central path 追跡の Newton ステップが 1反復で状態を 3 桁
-        // 以上変化させないという IPM 収束理論 (Wright 1997 §5.2) の経験則由来。問題集
-        // 依存ではなく、IPM iterate progression の物理上限。
+        // Trust-region cap: alpha·|dv|_inf ≤ STEP_REL_CAP·max(|v|_inf, 1)。
+        // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → 1e3 cap で 1 iter 3 桁以上の暴発を抑制 (Wright §5.2)。
         const STEP_REL_CAP: f64 = 1e3;
         let nx_safe = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ny_safe = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
@@ -1319,7 +1001,6 @@ pub(crate) fn solve_ippmm_inner(
         let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
         let alpha = alpha.min(alpha_tr);
 
-        // ── PROF: gondzio 区間 ──
         if let Some(t) = prof_section_start {
             prof_gondzio_ns += t.elapsed().as_nanos();
             prof_section_start = Some(std::time::Instant::now());
@@ -1327,24 +1008,15 @@ pub(crate) fn solve_ippmm_inner(
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
-        // null-space: alpha 停滞早期脱出。
-        // alpha=0 が続く＝line search が進まない＝数値飽和または null-space 漂流。
-        // best-so-far があればそれで Suboptimal 復帰、無ければ素で Suboptimal 脱出。
+        // alpha=0 持続 = line search 停止 = 数値飽和 / null-space 漂流。best-so-far で復帰。
         if alpha < alpha_stall_eps_for(eps_orig) {
             alpha_stall_count += 1;
         } else {
             alpha_stall_count = 0;
         }
-        // stall 成立条件を best_score < eps に絞る。
-        // UBH1 (best_score=4.8e-7) のように真に収束後に動けなくなったケースでのみ早期脱出。
-        // QPILOTNO (best_score=2.5e-6) のような残差マージナルな問題では alpha-stall を発火させず、
-        // 通常の timeout フローに任せる（DFEAS_FAIL として偽 Optimal を返すのを防ぐ）。
+        // 真収束後の停滞のみ早期脱出 (best_score < eps)、マージナル問題は timeout 側に委ねる。
         let alpha_stall_converged = best_score.is_finite() && best_score < eps;
-        // eps 非依存 deadlock gate。POST_VERIFY の eps 10x 厳格化で
-        // best_score < eps が成立しなくなり alpha_stall_converged が永久 false となる
-        // 病理（UBH1: 186 iter alpha=0 → さらに 24000+ iter alpha=0 継続）を断ち切る。
-        // 条件: alpha=0 が 2N 連続＋rho/delta が reg_limit 付近＋best_score 有限
-        // （rho/delta が floor = もうこれ以上 proximal を緩められない = 数値的に進めない）。
+        // best_score < eps が成立しない場合の deadlock gate (rho/delta 両方が floor 付近)。
         let alpha_stall_deadlock = alpha_stall_count >= ALPHA_DEADLOCK_N
             && best_score.is_finite()
             && pmm.rho <= reg_limit * 1.01
@@ -1370,14 +1042,7 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // residual 停滞検出: alpha > 0 で line search 自体は動いているが、
-        // best_score が窓内で改善しない病理 (QPLIB_8500 iter 21 で score=2.4e-5 確定後
-        // ~660 iter spin)。alpha-stall とは独立。
-        // 条件:
-        //   (a) best_score 有限 (一度は更新された)
-        //   (b) iter - last_score_improvement_iter >= WINDOW (窓越え)
-        //   (c) best_score >= eps (まだ収束していない、これが満たせば Optimal 経路で抜ける)
-        // 真に収束途中の解は (c) を満たさず、ここでは発火しない。
+        // alpha > 0 でも best_score が窓内で改善しない病理向け (alpha-stall と独立)。
         let residual_stall = best_score.is_finite()
             && iter >= last_score_improvement_iter + RESIDUAL_STALL_WINDOW
             && best_score >= eps;
@@ -1399,9 +1064,7 @@ pub(crate) fn solve_ippmm_inner(
             break;
         }
 
-        // ── PMM パラメータ更新 ──────────────────────────────────────
-        // Algorithm PEU Step 0: r = |μ_k - μ_{k+1}| / μ_k
-        // μ_new = 変数更新後の実際のμ（corrector + line search 後）
+        // Algorithm PEU Step 0: r = |μ_k − μ_{k+1}| / μ_k (corrector + line search 後の実 μ)。
         let mu_new: f64 = if m_ineq > 0 {
             s.iter().zip(y.iter()).zip(is_eq_ext.iter())
                 .filter(|&(_, &eq)| !eq)
@@ -1416,27 +1079,20 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // mu=0 等式問題では高速減衰 (mu_rate=0.9 → 乗数 0.1 → ~8 反復で reg_limit)
-        // PARAM: §35-B1, MATLAB 拡張版 IP-PMM_QP_Solver 準拠
+        // 等式 (mu=0) では mu_rate=0.9 で高速減衰、それ以外は r を [0.2, 0.9] で clamp。
         let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { 0.9 } else { r };
         let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
 
-        // pf 履歴を維持 (pf-stagnation 検出用、c≠0 問題でも適応的 reg_limit を可能に)
         pf_history.push(nr_p);
         if pf_history.len() > PF_HISTORY_LEN {
             pf_history.remove(0);
         }
 
-        // Adaptive reg_limit:
-        //   経路 A: c≈0 (UBH1 パターン) で proximal が dual residual を支配
-        //   経路 B: pf が PF_HISTORY_LEN iter にわたり停滞 + target から桁違いに遠い
-        // どちらの経路も「regularization floor が convergence をブロックしている」
-        // 状態を検出する。reg_limit を 1e-3 倍に下げて IPM の探索余地を広げる。
+        // Adaptive reg_limit: prox が df を支配 (c≈0) または pf が窓内停滞 + target から遠い場合、floor を下げる。
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01
             && reg_limit > REG_LIMIT_MIN
         {
             let mut should_lower = false;
-            // 経路 A: 既存 trigger (c≈0, prox dominates)
             if allow_adaptive_reg {
                 let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
                     .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
@@ -1445,7 +1101,6 @@ pub(crate) fn solve_ippmm_inner(
                     should_lower = true;
                 }
             }
-            // 経路 B: pf 停滞検出 (c の値に依存しない)
             if !should_lower
                 && pf_history.len() == PF_HISTORY_LEN
                 && pf_history[0] > 0.0
@@ -1458,20 +1113,16 @@ pub(crate) fn solve_ippmm_inner(
             }
             if should_lower {
                 reg_limit = (reg_limit * REG_LIMIT_STEP).max(REG_LIMIT_MIN);
-                // 履歴をリセット (新しい reg_limit の下で改めて停滞判定する)
                 pf_history.clear();
             }
         }
 
-        // Algorithm PEU Step 1&2: OR条件判定（MATLAB拡張版準拠）
-        // primalまたはdual改善があれば良ステップ。delta/rho両方を同期的に更新。
-        // 根拠: 設計書§A.5
+        // Algorithm PEU Step 1&2 (OR 判定): どちらか改善があれば δ,ρ 両方を mu_rate で更新。
         let either_improved = primal_improved || dual_improved;
-        // [実験] env=IPPMM_FORCE_REF_UPDATE=1 で毎 iter 強制更新 → proximal effect ≈0
         let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
         if either_improved || force_ref_update {
-            pmm.y_ref.copy_from_slice(&y);  // λ_{k+1} = y_{k+1}
-            pmm.x_ref.copy_from_slice(&x);  // ζ_{k+1} = x_{k+1}
+            pmm.y_ref.copy_from_slice(&y);
+            pmm.x_ref.copy_from_slice(&x);
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
             pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
         } else {
@@ -1479,20 +1130,14 @@ pub(crate) fn solve_ippmm_inner(
             pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
         }
 
-        // 残差記録（次反復の改善判定用）
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
 
-        // ── PROF: update + post-step (line search caps, alpha stall, residual stall, PMM update) ──
         if let Some(t) = prof_section_start {
             prof_update_ns += t.elapsed().as_nanos();
         }
         if let Some(t) = prof_iter_start {
-            let total = t.elapsed().as_nanos();
-            let accounted = prof_residual_ns + prof_factor_ns + prof_predcorr_ns + prof_gondzio_ns + prof_update_ns;
-            // accounted は累積、total は今回 iter のみ。other は概算。
-            let _ = accounted;
-            let _ = total;
+            let _ = t.elapsed().as_nanos();
         }
         prof_iters += 1;
     }
@@ -1513,16 +1158,9 @@ pub(crate) fn solve_ippmm_inner(
         );
     }
 
-    // 殿指示(C): None→Timeout変換。「MaxIterations→Timeout変換」ではなく「未決定→Timeout」。
-    // max_iter=usize::MAXで収束もtimeoutも起きなかった場合（理論上不可能）にTimeoutを返す。
     let status = status.unwrap_or(SolveStatus::Timeout);
 
-    // Timeout/MaxIterations の素の終了経路で best-so-far に復帰。
-    // Why: alpha_stall/reject_false/NaN_guard の 3 経路は best_x 復帰するが、
-    // 純粋な Timeout (timeout_ctx 検出) 経路はループ末尾の発散 x をそのまま返す。
-    // QPILOTNO のような残差マージナル問題で alpha-stall が発火しない場合、
-    // 最終 x が発散していても best_x (iter 199 相当) は pf=6.5e-6 で保持されている。
-    // best_score が有限かつ current より良ければ復帰させる（post-solve の IR/昇格機会を与える）。
+    // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
     if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations)
         && best_score.is_finite()
     {
@@ -1550,7 +1188,6 @@ pub(crate) fn solve_ippmm_inner(
         }
     }
 
-    // 目的関数値
     spmv_q(&problem.q, &x, &mut qx);
     let objective = 0.5
         * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
@@ -1559,9 +1196,7 @@ pub(crate) fn solve_ippmm_inner(
     let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..].to_vec();
 
-    // 不定 Q で IPM が Optimal に収束した場合、局所最適解（KKT 点）として報告する。
-    // 大域的最適性は慣性修正により失われるため、LocallyOptimal を返す。
-    // その他のステータス (Timeout, SuboptimalSolution, Infeasible 等) はそのまま。
+    // 不定 Q の Optimal は慣性修正により局所最適に降格。
     let final_status = if q_is_indefinite && status == SolveStatus::Optimal {
         SolveStatus::LocallyOptimal
     } else {
@@ -1580,9 +1215,7 @@ pub(crate) fn solve_ippmm_inner(
         pfeas: final_residuals.map(|(pf, _, _)| pf),
         dfeas: final_residuals.map(|(_, df, _)| df),
         gap: final_residuals.map(|(_, _, g)| g),
-        // null-space: best-so-far の相対双対ギャップ。
-        // unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
-        // INFINITY なら未計測扱いで None を返す（全 iter で best 更新ゼロは異常系）。
+        // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
         duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },
         ..Default::default()
     }

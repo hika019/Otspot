@@ -1,33 +1,5 @@
-//! IPM Solver - Mehrotra 予測子修正子内点法 (IP-PMM)
-//!
-//! 設計書 (`docs/solver_overview_design.md`) の原則:
-//!
-//! 1. **retry 1 層**: 時間内で eps 厳格化を直線的に進める。多層 retry を排除。
-//! 2. **status 変換 1 箇所**: 内部は `IpmOutcome` struct で残差・解を持ち、
-//!    API 境界 (`solve_ipm`) で `SolverResult` (外部 status) に変換する。
-//! 3. **元空間 KKT 直接判定**: scaled 空間判定で偽 Optimal を出さない。
-//! 4. **大規模対応**: supernode-aware LDL を `linalg::ldl` 経由で直接利用。
-//!
-//! # アーキテクチャ
-//!
-//! ```text
-//! solve_ipm(prob, opts) -> SolverResult
-//!     ├── presolve(prob, deadline) -> reduced
-//!     ├── deadline = compute_deadline(opts)
-//!     ├── for attempt in 0.. while now() < deadline:
-//!     │       eps_attempt = opts.eps / 10^attempt   # 直線的に厳格化
-//!     │       outcome = single_attempt(reduced, eps_attempt, deadline_attempt)
-//!     │       if outcome.kkt_satisfied(eps_orig): break  # 元空間判定
-//!     ├── postsolve(reduced_outcome) -> orig_solution
-//!     └── finalize(outcome) -> SolverResult  # 外部 status に変換
-//! ```
-//!
-//! # 各モジュール
-//!
-//! - `outcome`: 内部 `IpmOutcome` struct (status mutation の対象を 1 箇所に集約)
-//! - `attempt`: 1 回の Mehrotra IPM 呼出 (Ruiz scale + iterate + unscale + KKT verify)
-//! - `kkt`: 元空間 KKT 残差計算 (bench compute_dfeas_orig と同形)
-//! - `core`: Mehrotra predictor-corrector の純粋実装
+//! Mehrotra IPM (IP-PMM)。
+//! 1 層 retry で eps を直線厳格化、status 変換は API 境界の 1 箇所に集約、KKT は元空間判定。
 
 pub mod outcome;
 pub mod kkt;
@@ -44,7 +16,6 @@ mod tests {
     use crate::problem::SolveStatus;
     use std::path::Path;
 
-    /// HS21 で v1 と v2 を直接比較する診断テスト。
     #[test]
     fn test_ipm_hs21_cmp_full_solver() {
         let path = Path::new("data/maros_meszaros/HS21.QPS");
@@ -76,7 +47,6 @@ mod tests {
         eprintln!("v2 KKT_rel={:.3e}", v2_kkt);
     }
 
-    /// HS21 で v2 が PASS することを確認 (smoke test)。
     #[test]
     fn test_v2_hs21() {
         let path = Path::new("data/maros_meszaros/HS21.QPS");
@@ -84,12 +54,10 @@ mod tests {
         let prob = parse_qps(path).expect("parse HS21");
         let opts = SolverOptions::default();
         let r = solve_ipm(&prob, &opts);
-        assert_eq!(r.status, SolveStatus::Optimal, "HS21 v2 should be Optimal");
+        assert_eq!(r.status, SolveStatus::Optimal);
     }
 
-    /// QADLITTL (n=97, m=56) で残 DFEAS_FAIL の構造を診断する。
-    /// 現状: dfr=1.0e0 なのに obj は正解値と一致 → x は正しい、z が完全に外れている。
-    /// このテストで z, y, r_j の詳細を出力し、どの bound で大きな寄与が出てるか把握する。
+    /// QADLITTL の DFEAS_FAIL を z, y, r_j 単位で診断。
     #[test]
     fn test_ipm_qadlittl_diagnose() {
         let path = Path::new("data/maros_meszaros/QADLITTL.QPS");
@@ -143,15 +111,12 @@ mod tests {
         eprintln!("z_lb: max={:.3e}, nonzero count={}/{}", max_z_lb, nonzero_z_lb, n_lb);
     }
 
-    /// Catastrophic 9件 (Q-prefix LP 由来) と比較対象の Q 規模を出力する診断。
-    /// task: Q≒0 検出基準を相対値に変更すべきか確認する。
+    /// Q-prefix LP の Q 規模比較 (Q≒0 検出基準確認用)。
     #[test]
     fn test_q_magnitude_catastrophic() {
         let problems = [
-            // Catastrophic 9件
             "QADLITTL", "QBORE3D", "QCAPRI", "QETAMACR", "QFFFFF80",
             "QPCBOEI1", "QSEBA", "QSHELL", "QSCRS8",
-            // 比較: 通常 PASS する Q-prefix 問題
             "QSHARE2B", "QSC205", "QGROW7", "QPCSTAIR", "QSCAGR25", "QSHIP12L",
         ];
         eprintln!("{:12} {:>5} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10}",
@@ -176,7 +141,7 @@ mod tests {
         }
     }
 
-    /// BD-T4 (rank-deficient Q + EmptyCol) で v2 が何で詰まるか調査。
+    /// BD-T4 (rank-deficient Q + EmptyCol) の詰まり調査。
     #[test]
     fn test_ipm_bd_t4_diagnose() {
         use crate::sparse::CscMatrix;
@@ -205,7 +170,6 @@ mod tests {
         eprintln!("  kkt={:.3e} pres={:.3e} bv={:.3e}", kkt, pres, bv);
     }
 
-    /// 1000s で救える見込みのある問題を特定する。
     #[test]
     fn test_osqp_eval_catastrophic() {
         let problems = [
@@ -227,7 +191,6 @@ mod tests {
             let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
             let pres = super::kkt::primal_residual_rel(&view, &r.solution);
             let bv = super::kkt::bound_violation(&prob.bounds, &r.solution);
-            // 1000s で救える見込み: KKT < 1e-3 (1000s で更に IPM 進めば 1e-6 達成)
             let prospect_1000s = kkt < 1e-3 && pres < 1e-3 && bv < 1e-6;
             eprintln!("{:10} status={:?} kkt={:.3e} pres={:.3e} prospect_1000s={}",
                 name, r.status, kkt, pres, prospect_1000s);
@@ -237,11 +200,8 @@ mod tests {
     #[test]
     fn test_osqp_eval_marginal() {
         let problems = [
-            // Marginal 5件
             "PRIMALC5", "QSCAGR25", "QSCAGR7", "QSHIP12L", "QSHIP12S",
-            // Mid sample
             "QBANDM", "QSHARE1B",
-            // Catastrophic sample
             "QADLITTL", "QSCRS8",
         ];
         for name in problems {
@@ -265,8 +225,7 @@ mod tests {
         }
     }
 
-    /// Marginal 問題で x が bound からどの程度離れているか診断する。
-    /// snap_tol を決めるための事実確認。
+    /// Marginal 問題で x の bound 距離分布 (snap_tol 決定用)。
     #[test]
     fn test_marginal_x_bound_gap() {
         let problems = ["PRIMALC5", "QSCAGR25", "QSCAGR7", "QSHIP12L", "QSHIP12S"];
@@ -279,7 +238,6 @@ mod tests {
             opts.timeout_secs = Some(60.0);
             let r = solve_ipm(&prob, &opts);
             let n = prob.num_vars;
-            // 各変数の bound 距離を計算
             let mut gaps: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
             for j in 0..n {
                 let (lb, ub) = prob.bounds[j];
@@ -288,9 +246,7 @@ mod tests {
                 let min_dist = d_lb.min(d_ub);
                 gaps.push((j, r.solution[j], lb, ub, min_dist));
             }
-            // min_dist で sort
             gaps.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap());
-            // < 1e-3 の変数数を集計、ヒストグラム
             let buckets = [1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2, 1.0];
             let counts: Vec<usize> = buckets.iter().map(|&t| {
                 gaps.iter().filter(|(_, _, lb, ub, d)| (lb.is_finite() || ub.is_finite()) && *d < t).count()
@@ -298,7 +254,6 @@ mod tests {
             eprintln!("{:10} n={} status={:?}", name, n, r.status);
             eprintln!("  min_dist 分布: <1e-12:{} <1e-10:{} <1e-8:{} <1e-6:{} <1e-4:{} <1e-2:{} <1.0:{}",
                 counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]);
-            // 1e-6〜1e-3 範囲の変数を出力 (snap で動かしうる)
             let snap_candidates: Vec<_> = gaps.iter().filter(|(_, _, lb, ub, d)|
                 (lb.is_finite() || ub.is_finite()) && *d > 1e-12 && *d < 1e-3
             ).take(5).collect();
@@ -308,13 +263,12 @@ mod tests {
         }
     }
 
-    /// QPILOTNO row 14 と row 130 の関係 (A 行ペア確認 + presolve 経路追跡)。
+    /// QPILOTNO row 14 / 130 の A 行ペア一致確認。
     #[test]
     fn test_ipm_qpilotno_row_pair_check() {
         let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
         if !path.exists() { return; }
         let prob = parse_qps(path).expect("parse QPILOTNO");
-        // 行 14 と 130 の非ゼロ要素を抽出
         let extract_row = |row_target: usize| -> Vec<(usize, f64)> {
             let mut entries = Vec::new();
             for col in 0..prob.num_vars {
@@ -334,7 +288,6 @@ mod tests {
         for (c, v) in &r14 { eprintln!("  col[{}] = {:+.5e}", c, v); }
         eprintln!("Row 130: nnz={} b={}", r130.len(), prob.b[130]);
         for (c, v) in &r130 { eprintln!("  col[{}] = {:+.5e}", c, v); }
-        // pairwise 一致確認
         if r14.len() == r130.len() {
             let same_cols = r14.iter().zip(r130.iter()).all(|(a, b)| a.0 == b.0);
             if same_cols {
@@ -347,9 +300,7 @@ mod tests {
         }
     }
 
-    /// QFORPLAN の dual residual 集中 col を特定する診断。
-    /// componentwise pfeas 化以後、col 15 等で Aty != 0 が残る現象を観察。
-    /// NO_PRESOLVE=1 で presolve 無効化、QFORPLAN_LONG=1 で 60s 動作。
+    /// QFORPLAN の dual residual 集中 col 特定 (NO_PRESOLVE=1 / QFORPLAN_LONG=1)。
     #[test]
     fn test_ipm_qforplan_dual_residual_diagnose() {
         let path = Path::new("data/maros_meszaros/QFORPLAN.QPS");
@@ -362,7 +313,6 @@ mod tests {
         }
         let r = solve_ipm(&prob, &opts);
         eprintln!("QFORPLAN status={:?} obj={:.5e} presolve={}", r.status, r.objective, opts.presolve);
-        // dual residual 上位 10 col を出力
         use twofloat::TwoFloat;
         let n = prob.num_vars;
         let zero_dd = TwoFloat::from(0.0);
@@ -382,7 +332,6 @@ mod tests {
             }
         }
         let aty: Vec<f64> = aty_dd.iter().map(|&v| f64::from(v)).collect();
-        // bound contrib
         let n_lb = prob.bounds.iter().filter(|(lb,_)| lb.is_finite()).count();
         let mut bnd = vec![0.0_f64; n];
         let mut idx = 0;
@@ -409,15 +358,13 @@ mod tests {
         let _ = n_lb;
         for (j, res, qx_j, aty_j, bnd_j, c_j, rel, x_j) in entries.iter().take(8) {
             let (lb, ub) = prob.bounds[*j];
-            // 列 j に touching する row 集合のサイズ
             let nrows = prob.a.col_ptr[j+1] - prob.a.col_ptr[*j];
             eprintln!("  j={:5} rel={:.3e} r={:+.3e} qx={:+.3e} aty={:+.3e} bnd={:+.3e} c={:+.3e} x={:+.3e} lb={:+.2e} ub={:+.2e} nrows={}",
                 j, rel, res, qx_j, aty_j, bnd_j, c_j, x_j, lb, ub, nrows);
         }
     }
 
-    /// QPILOTNO の primal violation 集中行を特定する診断 (componentwise pfeas 化以後)。
-    /// 環境変数 NO_PRESOLVE=1 で presolve 無効化して bug 切り分け。
+    /// QPILOTNO primal violation 集中行特定 (NO_PRESOLVE=1 で切り分け)。
     #[test]
     fn test_ipm_qpilotno_primal_violation_diagnose() {
         let path = Path::new("data/maros_meszaros/QPILOTNO.QPS");
@@ -448,7 +395,7 @@ mod tests {
         }
     }
 
-    /// DPKLO1 で parser bug 修正と v2 が両立することを確認 (timeout/optimal ok)。
+    /// DPKLO1 が hang せず timeout/optimal で返ること。
     #[test]
     fn test_ipm_dpklo1() {
         let path = Path::new("data/maros_meszaros/DPKLO1.QPS");
@@ -461,7 +408,6 @@ mod tests {
         opts.timeout_secs = Some(5.0);
         let r = solve_ipm(&prob, &opts);
         eprintln!("DPKLO1 v2: status={:?} obj={} iters={}", r.status, r.objective, r.iterations);
-        // DPKLO1 が timeout/optimal いずれかで返ってくることを確認 (v2 が hang しない)
         assert!(matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout));
     }
 }
