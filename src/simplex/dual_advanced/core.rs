@@ -86,6 +86,7 @@ pub(crate) fn dual_simplex_core_advanced(
     n_price: usize,
     options: &SolverOptions,
     leaving: &dyn DualLeavingStrategy,
+    iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     // Step 1: LuBasis初期化
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
@@ -120,6 +121,7 @@ pub(crate) fn dual_simplex_core_advanced(
 
     // Step 3: 反復ループ
     loop {
+        *iter_count_out = iter_count_out.saturating_add(1);
         // 3a: タイムアウト/キャンセルチェック
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options

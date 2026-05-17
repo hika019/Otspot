@@ -45,14 +45,18 @@ pub(crate) fn solve_dual_advanced(
                     let mut x_b = x_b_sv.to_dense();
 
                     let leaving = MostInfeasibleLeaving;
+                    let mut total_iters: usize = 0;
                     let outcome = core::dual_simplex_core_advanced(
                         &a, &mut x_b, &c, &mut basis, m, sf.n_total, options, &leaving,
+                        &mut total_iters,
                     );
 
-                    return outcome_to_result(
+                    let mut result = outcome_to_result(
                         outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
                         true, // dual_unbounded → Infeasible
                     );
+                    result.iterations = total_iters;
+                    return result;
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
@@ -98,8 +102,10 @@ fn cold_start_advanced(
 
     // Phase 1: Harris dual simplexで主実行可能性を修復
     // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
+    let mut total_iters: usize = 0;
     let phase1_outcome = core::dual_simplex_core_advanced(
         a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options, &leaving,
+        &mut total_iters,
     );
 
     match phase1_outcome {
@@ -132,10 +138,12 @@ fn cold_start_advanced(
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
+        &mut total_iters,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界
-    match phase2_outcome {
+    // (result.iterations は match の後で set)
+    let mut result = match phase2_outcome {
         SimplexOutcome::Optimal(obj, y) => {
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
@@ -149,6 +157,7 @@ fn cold_start_advanced(
                 reduced_costs,
                 slack,
                 warm_start_basis: Some(ws),
+                iterations: total_iters,
                 ..Default::default()
             }
         }
@@ -176,7 +185,9 @@ fn cold_start_advanced(
             }
         }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
-    }
+    };
+    result.iterations = total_iters;
+    result
 }
 
 /// SimplexOutcome → SolverResult 変換
