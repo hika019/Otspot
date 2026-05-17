@@ -1,0 +1,35 @@
+# Netlib LP canary subset baseline (Task #18)
+# Source: union of netlib_lp.csv (Optimal) + netlib_lp_infeas.csv (INFEASIBLE)
+# 用途: scripts/run_lp_bench.sh --suite canary が参照する known-optimal 表。
+#       canary は standard / infeas を跨ぐ 28 問の代表セットなので、
+#       既存 baseline を 1 ファイルに集約する必要がある。
+# 構成基準: docs/canary_suite.md 参照。
+# 各 bug class の代表 1-2 問 + 軽量 sanity 群で 5 分以内に収まる。
+problem_name,optimal_obj,source
+adlittle,2.2549496316e+05,https://www.netlib.org/lp/data/readme
+afiro,-4.6475314286e+02,https://www.netlib.org/lp/data/readme
+agg,-3.5991767287e+07,https://www.netlib.org/lp/data/readme
+blend,-3.0812149846e+01,https://www.netlib.org/lp/data/readme
+boeing2,-3.1501872802e+02,https://www.netlib.org/lp/data/readme
+brandy,1.5185098965e+03,https://www.netlib.org/lp/data/readme
+capri,2.6900129138e+03,https://www.netlib.org/lp/data/readme
+cycle,-5.2263930249e+00,https://www.netlib.org/lp/data/readme
+d6cube,3.1549166667e+02,https://www.netlib.org/lp/data/readme
+etamacro,-7.5571521774e+02,https://www.netlib.org/lp/data/readme
+greenbea,-7.2462405908e+07,https://www.netlib.org/lp/data/readme
+kb2,-1.7499001299e+03,https://www.netlib.org/lp/data/readme
+pds-10,2.6727095e+10,https://www.netlib.org/lp/data/kennington/readme
+perold,-9.3807580773e+03,https://www.netlib.org/lp/data/readme
+recipe,-2.6661600000e+02,https://www.netlib.org/lp/data/readme
+sc105,-5.2202061212e+01,https://www.netlib.org/lp/data/readme
+sc205,-5.2202061212e+01,https://www.netlib.org/lp/data/readme
+sc50a,-6.4575077059e+01,https://www.netlib.org/lp/data/readme
+sc50b,-7.0000000000e+01,https://www.netlib.org/lp/data/readme
+scagr7,-2.3313892548e+06,https://www.netlib.org/lp/data/readme
+scfxm1,1.8416759028e+04,https://www.netlib.org/lp/data/readme
+share1b,-7.6589318579e+04,https://www.netlib.org/lp/data/readme
+share2b,-4.1573224074e+02,https://www.netlib.org/lp/data/readme
+stocfor1,-4.1131976219e+04,https://www.netlib.org/lp/data/readme
+wood1p,1.4429024116e+00,https://www.netlib.org/lp/data/readme
+klein1,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
+klein2,INFEASIBLE,https://www.netlib.org/lp/infeas/readme
