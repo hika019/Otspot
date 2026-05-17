@@ -877,21 +877,8 @@ mod tests {
         assert!(is_q_psd_by_cholesky(&q), "Empty matrix should be identified as PSD");
     }
 
-    /// is_q_psd_by_cholesky: QPLIB_1055 型パターン — 不定行列でも ZeroPivot が先に来るケース
-    ///
-    /// n=4, Q の非ゼロは行 0 のみ:
-    ///   Q = [[2,  1, -1,  0],
-    ///        [ 1,  0,  0,  0],
-    ///        [-1,  0,  0,  0],
-    ///        [ 0,  0,  0,  0]]
-    ///
-    /// 行 0 だけが非ゼロ。LDL^T:
-    ///   D[0] = 2 > 0
-    ///   D[1] = Q[1,1] - L[1,0]^2 * D[0] = 0 - (1/2)^2 * 2 = -0.5  < 0 (indefinite!)
-    ///   D[2] = Q[2,2] - L[2,0]^2 * D[0] = 0 - (1/2)^2 * 2 = -0.5  < 0
-    ///   D[3] = Q[3,3] = 0  → ZeroPivot
-    ///
-    /// 旧実装は ZeroPivot → true (誤判定)。修正後は D[1] < 0 を検出して false。
+    /// Indefinite Q where a ZeroPivot column appears *after* a negative D[i]; the
+    /// classifier must report non-PSD rather than mask the negative pivot.
     #[test]
     fn test_is_q_psd_zeropivot_masks_negative_d() {
         // 上三角形式: (row, col, val) with row <= col

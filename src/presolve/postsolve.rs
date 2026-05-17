@@ -1,7 +1,5 @@
-//! Postsolve（逆変換）モジュール
-//!
-//! Presolveで縮約した問題の解を元問題の解空間に復元する。
-//! PostsolveStackを逆順（LIFO）に適用する。
+//! Postsolve: lift a reduced LP's solution back to the original variable / constraint
+//! space by replaying `PostsolveStack` in LIFO order.
 
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
@@ -10,39 +8,13 @@ use crate::tolerances::PIVOT_TOL;
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
 
-/// Cleanup LP を構築して解き、削除行 (および kept 行) の y_i を KKT 整合に決定する。
+/// Build and solve a cleanup LP that recovers `y_i` for deleted rows (and optionally a
+/// perturbation on kept rows) so the full dual is KKT-consistent.
 ///
-/// ## task #22 (案 A) — kept-y perturbation 拡張
-///
-/// 旧実装は **削除行の y のみ** を変数化し、kept 行の y は `dual_solution_known`
-/// (= reduced LP optimum) で固定していた。これは perold / agg 等の単純な dual
-/// 退化には十分だが、**greenbea / cre-b 等で kept-deleted 間の strong coupling**
-/// (row 1270 et al.) がある場合に reduced LP の kept-y が original LP optimum と
-/// ずれており、削除行 y だけ最適化しても Phase 1 slack が 0 に落ちない (greenbea
-/// で df_rel_bound ≈ 0.97 残存)。
-///
-/// 真因対処として **kept 行の y にも perturbation 変数 `dy[i]`** を追加し、
-/// `y_kept[i] + dy[i]` の符号慣例を保ったまま Phase 1 で coupling 解消余地を
-/// 全 y に持たせる。Phase 2 は `(y_del, dy)` を共に 0 ベクトルへタイ崩しする
-/// (perturbation は必要最小限)。
-///
-/// ## 構造
-/// - 変数:
-///   - `y_del[k]` 削除行 dual (constraint type 符号慣例で bound)
-///   - `dy[m_kept]` kept 行 dual perturbation (符号 bound は `-y_kept[i]` でシフト)
-///   - `slack` Phase 1 feasibility 緩和 (Le/Ge 1 個、Eq は ±2 個)
-/// - 制約: 列 j (非 fixed) で:
-///   `Σ_{i kept} A_ij·dy[i] + Σ_{i del} A_ij·y_del[i] [<=/>=/=] rc_known[j]`
-///   ここで `rc_known[j] = c[j] - Σ_{i kept} A_ij·y_kept[i]`。
-/// - 目的: Phase 1 で `min Σ slack`、Phase 2 で slack 固定して
-///   `min Σ |y_del| + Σ |dy|` (タイ崩し参照点は 0)。
-///
-/// ## サイズガード
-/// `n + m > LSQ_DUAL_SIZE_LIMIT (50_000)` の問題では cleanup LP のサイズが
-/// 過大になるため、kept-y perturbation を無効化し旧来 (y_del-only) 経路に
-/// fallback。LSQ_DUAL_SIZE_LIMIT は `compute_lsq_dual_y` と統一。
-///
-/// 戻り値: 元問題と同サイズ (`m` 要素) の y ベクトル。`None` は構築失敗 or 解けず。
+/// Phase 1 minimises `Σ slack` for feasibility; Phase 2 fixes the Phase-1 slack and
+/// minimises `Σ|y_del| + Σ|dy|` to break ties. Kept-row perturbation is required when
+/// kept↔deleted coupling is strong; it is disabled above `CLEANUP_LP_KEPT_PERT_SIZE_LIMIT`.
+/// Returns an `m`-sized y vector, or `None` on construction/solve failure.
 fn build_and_solve_cleanup_lp(
     orig_problem: &LpProblem,
     presolve_result: &PresolveResult,
@@ -51,12 +23,8 @@ fn build_and_solve_cleanup_lp(
     deadline: Option<Instant>,
     allow_kept_perturbation: bool,
 ) -> Option<Vec<f64>> {
-    // Inherit the parent deadline. If the parent has already lapsed, bail out
-    // immediately and let the Gauss-Seidel fallback handle dual recovery.
-    // When the parent has no deadline (Default options / interactive callers
-    // that opted into unbounded runtime), we let the cleanup LP run without a
-    // budget — the previous behaviour and required for the KKT-accuracy unit
-    // tests in tests/diag_afiro_y.rs.
+    // Bail if the parent deadline has already lapsed; a `None` deadline means
+    // the caller opted into unbounded runtime (required by KKT-accuracy unit tests).
     if let Some(d) = deadline {
         if Instant::now() >= d {
             return None;
@@ -73,32 +41,14 @@ fn build_and_solve_cleanup_lp(
     let row_to_var: std::collections::HashMap<usize, usize> = deleted_rows
         .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
 
-    // task #22: kept 行のうち **deleted 行と coupling する** (= ある col j で deleted
-    // 行のエントリと共存する) ものだけを dy 変数化する。coupling しない kept 行は
-    //   - 該当 col の制約に登場しない (skip 対象)
-    //   - 登場しても constraint matrix から消える (dy[i] 非変数)
-    // ため dy[i] を持つ意味がない。これにより cleanup LP の col 数が m_kept→m_coupled
-    // に縮む (greenbea: 2200→数百)。
-    //
-    // size guard (LSQ_DUAL_SIZE_LIMIT と統一、`compute_lsq_dual_y` 内の値と整合)。
-    // n + m が閾値を超える ken-18 / dfl001 等は cleanup LP の col 数増で simplex
-    // factorize が現実的でなくなるため、旧来の y_del-only 経路に fallback。
     let use_kept_perturbation =
         allow_kept_perturbation && n + m <= CLEANUP_LP_KEPT_PERT_SIZE_LIMIT;
-    // task #22: dy 変数を持たせる kept 行集合 `coupled_kept` を closure で決定。
-    //
-    // 観察 (greenbea diag):
-    //   - 単純 1-pass (del 行と同 col 共存 kept) では Phase 1 slack ≈ 6e4 残存 →
-    //     違反 col (2741 等) が **del 行と直接共存しない** ため dy が touch しない。
-    //   - 真因対処として bipartite closure を取る:
-    //       * 初期 affected col = del 行を含む col
-    //       * BFS: affected col の kept 行を coupled に追加 → 新 coupled 行が含む
-    //         col を affected に追加 → 反復
-    //   - greenbea の coupling block は constraint matrix の連結成分 1 個に概ね
-    //     収まる (kept ≈ 2300)。サイズ guard (LSQ_DUAL_SIZE_LIMIT = 50_000) 内で
-    //     全 kept 行が dy 化されても LP は 8000×8000 程度で許容内。
+    // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
+    // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
+    // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
+    // indirectly-coupled violation columns and leaves Phase-1 slack non-zero.
     let coupled_kept: Vec<usize> = if use_kept_perturbation {
-        // 逆引き: row → cols (CSC は col-major、row 走査が遅いため一度作る)
+        // Inverted index row → cols (CSC is col-major; row traversal is otherwise slow).
         let mut row_to_cols: Vec<Vec<usize>> = vec![Vec::new(); m];
         for j in 0..n {
             if let Ok((rows, _)) = orig_problem.a.get_column(j) {
@@ -107,7 +57,6 @@ fn build_and_solve_cleanup_lp(
                 }
             }
         }
-        // 初期 affected col: del 行を含む col + LinearSubstitution の orig_col
         let mut col_affected: Vec<bool> = vec![false; n];
         let mut col_queue: Vec<usize> = Vec::new();
         for &del_row in &deleted_rows {
@@ -127,7 +76,6 @@ fn build_and_solve_cleanup_lp(
                 }
             }
         }
-        // BFS: affected col の kept 行 → coupled、それらの行が touch する col → affected
         let mut kept_in_set: Vec<bool> = vec![false; m];
         let mut coupled: Vec<usize> = Vec::new();
         let mut head = 0usize;
@@ -157,17 +105,12 @@ fn build_and_solve_cleanup_lp(
         coupled_kept.iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
     let m_kept = coupled_kept.len();
 
-    // 変数レイアウト:
-    //   [0..k]                       y_del
-    //   [k..k+m_kept_var]            dy        (use_kept_perturbation のときのみ)
-    //   [k+m_kept_var..]             slack     (Phase 1 で feasibility 緩和)
+    // Variable layout: [y_del | dy | slack].
     let m_kept_var = if use_kept_perturbation { m_kept } else { 0 };
     let dy_offset = k;
     let slack_offset = k + m_kept_var;
 
-    // rc_known[j] = c[j] - Σ_{i: kept} A_ij * y_kept[i]
-    //   * 削除行 y は cleanup LP が決定するので除外。
-    //   * kept-y は dy 変数で perturbation し直すので b 側に固定。
+    // rc_known[j] = c[j] - Σ_{i: kept} A_ij * y_kept[i]. Deleted-row y is what we solve for.
     let mut rc_known = orig_problem.c.clone();
     for j in 0..n {
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
@@ -179,14 +122,13 @@ fn build_and_solve_cleanup_lp(
         }
     }
 
-    // 制約構築
     let mut tri_rows: Vec<usize> = Vec::new();
     let mut tri_cols: Vec<usize> = Vec::new();
     let mut tri_vals: Vec<f64> = Vec::new();
     let mut b_clean: Vec<f64> = Vec::new();
     let mut ct_clean: Vec<ConstraintType> = Vec::new();
 
-    // (i) 未削除列 j の rc 符号制約
+    // (i) rc-sign constraints for non-fixed columns j.
     for j in 0..n {
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
@@ -195,9 +137,6 @@ fn build_and_solve_cleanup_lp(
         let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
         if fixed { continue; }
 
-        // 列 j を構成する (y_del, dy) のエントリを抽出
-        //   - 削除行エントリ → y_del 変数
-        //   - kept 行エントリ → dy 変数 (use_kept_perturbation 時のみ)
         let mut col_terms: Vec<(usize, f64)> = Vec::new();
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (kk, &row) in rows.iter().enumerate() {
@@ -212,22 +151,13 @@ fn build_and_solve_cleanup_lp(
         }
         if col_terms.is_empty() { continue; }
 
-        // 元の comment は「interior 列は退化で rc!=0 になり得るためスキップ」
-        // としていたが、これは perold col 229 のように **削除行 84 にしか entry
-        // を持たない非 bound-active 列** で削除行の y を under-determined にする。
-        // LP 最適性 (complementary slackness):
-        //   x[j] interior (basis 変数): rc[j] = 0
-        //   x[j] at lb (non-basis):     rc[j] >= 0
-        //   x[j] at ub (non-basis):     rc[j] <= 0
-        // cleanup LP は Phase I slack で常に feasible 化されるので、interior 列を
-        // Eq として含めても infeasible にはならない。primal が真に最適なら slack
-        // も 0、退化していれば slack が違反量だけ非ゼロ。
+        // Complementary slackness sign on rc[j]: at lb → rc ≥ 0, at ub → rc ≤ 0,
+        // interior → rc = 0. Phase-1 slack absorbs any infeasibility from degeneracy.
         let ct = if at_lb && !at_ub {
             ConstraintType::Le
         } else if at_ub && !at_lb {
             ConstraintType::Ge
         } else {
-            // interior (両 bound infinite or 両端非 active): rc = 0
             ConstraintType::Eq
         };
         let row_idx = b_clean.len();
@@ -240,13 +170,10 @@ fn build_and_solve_cleanup_lp(
         ct_clean.push(ct);
     }
 
-    // (ii) LinearSubstitution の y_piv (orig_col の rc = 0 = free 変数最適性)
+    // (ii) Free-variable stationarity rc[orig_col] = 0 for each LinearSubstitution.
     for step in &presolve_result.postsolve_stack {
         if let PostsolveStep::LinearSubstitution { orig_col, .. } = step {
             let j = *orig_col;
-            // rc[orig_col] = c[orig_col] - Σ_i A_{i,orig_col} * y_i = 0
-            //   ⇔ Σ_{i: deleted} A_{i,j} * y_i + Σ_{i: kept} A_{i,j} * dy[i]
-            //       = rc_known[j] (kept-y は rc_known 側に固定済み + dy で perturb)
             let mut col_terms: Vec<(usize, f64)> = Vec::new();
             if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
                 for (kk, &row) in rows.iter().enumerate() {
@@ -273,15 +200,11 @@ fn build_and_solve_cleanup_lp(
 
     if b_clean.is_empty() { return None; }
 
-    // Phase I 風 slack 緩和で cleanup LP を常に feasible 化。
-    // 各制約に slack 変数を追加し、目的を min Σ s に変更:
-    //   Le: Σ a*y - s ≤ rc, s ≥ 0
-    //   Ge: Σ a*y + s ≥ rc, s ≥ 0
-    //   Eq: Σ a*y + s_pos - s_neg = rc, s_pos/s_neg ≥ 0
-    // 最適値 0 なら厳密に rc 符号制約を満たす y が存在、0 でなければ違反量。
+    // Add Phase-1 slack to guarantee feasibility: Le/Ge use one slack, Eq uses ± pair.
+    // Objective `min Σ slack` returns 0 iff exact rc-sign satisfaction is possible.
     let m_clean = b_clean.len();
-    let mut slack_count = 0usize; // 追加 slack 変数の数 (Eq は 2、Le/Ge は 1)
-    let mut slack_cols_per_row: Vec<(usize, Option<usize>)> = Vec::with_capacity(m_clean); // (s_idx, optional s_neg_idx for Eq)
+    let mut slack_count = 0usize;
+    let mut slack_cols_per_row: Vec<(usize, Option<usize>)> = Vec::with_capacity(m_clean);
     for ct in &ct_clean {
         match ct {
             ConstraintType::Eq => {
@@ -296,12 +219,11 @@ fn build_and_solve_cleanup_lp(
             }
         }
     }
-    // 各 slack 列を A に追加 (係数 ±1)
     for (row_idx, (s_pos, s_neg_opt)) in slack_cols_per_row.iter().enumerate() {
         let sign = match ct_clean[row_idx] {
-            ConstraintType::Le => -1.0,  // a*y - s <= rc
-            ConstraintType::Ge => 1.0,   // a*y + s >= rc
-            ConstraintType::Eq => 1.0,   // a*y + s_pos - s_neg = rc
+            ConstraintType::Le => -1.0,
+            ConstraintType::Ge => 1.0,
+            ConstraintType::Eq => 1.0,
         };
         tri_rows.push(row_idx);
         tri_cols.push(*s_pos);
@@ -314,13 +236,8 @@ fn build_and_solve_cleanup_lp(
     }
     let total_vars = slack_offset + slack_count;
 
-    // 変数 bound:
-    //   y_del は constraint type 符号慣例
-    //   dy は (y_kept[i] + dy) が符号慣例を満たすよう -y_kept[i] でシフト:
-    //     Le: y_kept + dy <= 0   → dy <= -y_kept
-    //     Ge: y_kept + dy >= 0   → dy >= -y_kept
-    //     Eq: dy free
-    //   slack は [0, ∞)
+    // Variable bounds: y_del follows the row's sign convention; dy is shifted by -y_kept[i]
+    // so y_kept + dy still satisfies the sign convention; slack ∈ [0, ∞).
     let mut bounds_clean: Vec<(f64, f64)> = Vec::with_capacity(total_vars);
     for &i in &deleted_rows {
         match orig_problem.constraint_types[i] {
@@ -343,14 +260,12 @@ fn build_and_solve_cleanup_lp(
         bounds_clean.push((0.0, f64::INFINITY));
     }
 
-    // 目的: min Σ slack (y_del / dy の係数は 0)
     let mut c_clean = vec![0.0f64; total_vars];
     for j in slack_offset..total_vars { c_clean[j] = 1.0; }
 
     let a_clean = CscMatrix::from_triplets(
         &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
     ).ok()?;
-    // Phase 2 でも b_clean / ct_clean を参照するため clone を保持
     let b_clean_keep = b_clean.clone();
     let ct_clean_keep = ct_clean.clone();
     let cleanup_lp = LpProblem::new_general(
@@ -360,15 +275,9 @@ fn build_and_solve_cleanup_lp(
     let mut opts = SolverOptions::default();
     opts.presolve = false;
     opts.warm_start = None;
-    // Inherit the parent deadline directly. The previous implementation set
-    // `timeout_secs = CLEANUP_LP_TIMEOUT_SECS` (5 s, magic number), but that
-    // value was only converted to `deadline` *inside* `simplex::solve_with`
-    // after Ruiz scaling / standard-form build, so a 96k × 322k cleanup LP
-    // (ken-18) easily spent minutes in setup before the budget was enforced.
-    // Wiring the parent deadline through directly makes every inner step
-    // (parse, scale, factorize, simplex iterate) check the same clock.
-    // `deadline = None` is passed through unchanged — callers without a
-    // budget opted into unbounded runtime.
+    // Wire the parent deadline straight through so every inner stage (parse, scale,
+    // factorize, simplex iterate) checks the same clock; otherwise large cleanup
+    // LPs can spend minutes in setup before any per-call budget kicks in.
     opts.deadline = deadline;
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
@@ -382,8 +291,8 @@ fn build_and_solve_cleanup_lp(
         Vec::new()
     };
     let slack_phase1: Vec<f64> = r1.solution[slack_offset..].to_vec();
-    // assemble_full_y: 削除行は y_del、coupled kept 行は y_kept + dy で合成 (m 要素)。
-    // 非 coupled kept 行は dual_solution_known の値をそのまま使う。
+    // Combine: deleted rows use y_del, coupled kept rows use y_kept + dy,
+    // non-coupled kept rows keep their known dual.
     let assemble_full_y = |y_del: &[f64], dy: &[f64]| -> Vec<f64> {
         let mut y = dual_solution_known.to_vec();
         for (idx, &row) in deleted_rows.iter().enumerate() {
@@ -397,35 +306,9 @@ fn build_and_solve_cleanup_lp(
         y
     };
 
-    // -------------------------------------------------------------------------
-    // Phase 2: タイ崩し (task #15 + task #22)
-    //
-    // Phase 1 の cleanup LP は `min Σ slack` で feasibility 最大化のみ求める
-    // ため、複数の (y_del, dy) が同じ optimal slack を達成する **dual 退化**
-    // ケースで under-determined になる。simplex のタイ崩しは LP 標準形の
-    // pivoting 順序依存で、|y| が極端に大きい別解を採用してしまうリスクがある。
-    //
-    // 対処: Phase 2 で `min Σ |y_del[i]| + Σ |dy[j]|` を解く。slack は
-    // Phase 1 の optimal 値で **固定** することで feasible 領域を維持し、
-    // その中で perturbation 量を最小化する。
-    //
-    // 構造的設計 (magic number 排除):
-    //   - ε による重み付け (1 phase) ではなく Phase 2 LP を別解として解く
-    //   - tie-break は別 LP の hard objective なので scale 依存なし
-    //   - 計算量: cleanup LP 1 回追加 (Phase 2)。Phase 1 と同サイズ程度
-    //
-    // 変数: y_del[k] + dy[m_kept_var] + d_pos[k+m_kept_var] + d_neg[k+m_kept_var]
-    // 制約:  (i) Phase 1 と同じ a*y 制約だが slack は Phase 1 値で吸収:
-    //          Le: Σ a*y <= rc + slack_phase1[r]    (slack 抜き、RHS 緩和)
-    //          Ge: Σ a*y >= rc - slack_phase1[r]
-    //          Eq: Σ a*y = rc + slack_pos* - slack_neg*
-    //       (ii) Tie-break Eq 行: (y_del | dy)[i] - d_pos[i] + d_neg[i] = 0
-    // 目的:  min Σ (d_pos[i] + d_neg[i]) (= |y_del / dy| 最小化)
-    // タイ崩しの参照値 y_ref:
-    //   y_del は cleanup LP が決定するので 0 寄せ (KKT 整合な最小 |y|)。
-    //   dy は kept-y からの perturbation で 0 が「reduced LP 解と同じ」相当。
-    //   `dual_solution_known` (= y_gs) を直接 y_ref にしても良いが、構造的に
-    //   0 で揃える方が tie-break の意図が明確。
+    // Phase 2 tie-break: fix Phase-1 slack and minimise `Σ|y_del| + Σ|dy|` so
+    // dual degeneracy cannot pick an arbitrary large-|y| solution. Layout:
+    //   [y_del | dy | d_pos | d_neg], with Eq rows `(y_del|dy)[i] - d_pos[i] + d_neg[i] = 0`.
     let n_yvars = k + m_kept_var;
     let phase2_total_vars = 3 * n_yvars;
     let phase2_total_cons = m_clean + n_yvars;
@@ -434,19 +317,13 @@ fn build_and_solve_cleanup_lp(
     let mut p2_tri_vals: Vec<f64> = Vec::with_capacity(tri_rows.len() + 3 * n_yvars);
     let mut p2_b: Vec<f64> = Vec::with_capacity(phase2_total_cons);
     let mut p2_ct: Vec<ConstraintType> = Vec::with_capacity(phase2_total_cons);
-    // Phase 2 では (d_pos, d_neg) を y_del/dy の直後に並べる。
-    //   [0..k]                       y_del
-    //   [k..k+m_kept_var]            dy
-    //   [n_yvars..2*n_yvars]         d_pos
-    //   [2*n_yvars..3*n_yvars]       d_neg
-    let p2_slack_offset = slack_offset; // Phase 1 と同じ (slack 列 index)
-    // (i) Phase 1 の a*y 制約を slack 抜き形で複製、RHS は Phase 1 slack で緩和。
-    //     y_del / dy の列 index は Phase 1 と一致するので、tri_* をそのまま流用。
+    let p2_slack_offset = slack_offset;
+    // (i) Replicate Phase-1 a*y constraints without slack, with RHS relaxed by Phase-1 slack.
     for (orig_idx, (slack_pos, slack_neg_opt)) in slack_cols_per_row.iter().enumerate() {
         for (k_t, &row) in tri_rows.iter().enumerate() {
             if row != orig_idx { continue; }
             let col = tri_cols[k_t];
-            if col >= p2_slack_offset { continue; } // slack 列はスキップ
+            if col >= p2_slack_offset { continue; }
             p2_tri_rows.push(orig_idx);
             p2_tri_cols.push(col);
             p2_tri_vals.push(tri_vals[k_t]);
@@ -463,7 +340,7 @@ fn build_and_solve_cleanup_lp(
         p2_b.push(rhs);
         p2_ct.push(ct_clean_keep[orig_idx].clone());
     }
-    // (ii) Tie-break Eq 制約: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0
+    // (ii) Tie-break Eq rows: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0.
     for i in 0..n_yvars {
         let row_idx = m_clean + i;
         p2_tri_rows.push(row_idx); p2_tri_cols.push(i);                  p2_tri_vals.push(1.0);
@@ -472,10 +349,6 @@ fn build_and_solve_cleanup_lp(
         p2_b.push(0.0);
         p2_ct.push(ConstraintType::Eq);
     }
-    // Phase 2 bounds:
-    //   y_del: 元 constraint type 符号
-    //   dy: -y_kept[i] でシフト (Phase 1 と同じ)
-    //   d_pos, d_neg: >= 0
     let mut p2_bounds: Vec<(f64, f64)> = Vec::with_capacity(phase2_total_vars);
     for &i in &deleted_rows {
         match orig_problem.constraint_types[i] {
@@ -495,7 +368,6 @@ fn build_and_solve_cleanup_lp(
         }
     }
     for _ in 0..(2 * n_yvars) { p2_bounds.push((0.0, f64::INFINITY)); }
-    // Phase 2 objective: min Σ (d_pos + d_neg)
     let mut p2_c = vec![0.0f64; phase2_total_vars];
     for j in n_yvars..(3 * n_yvars) { p2_c[j] = 1.0; }
 
@@ -519,22 +391,15 @@ fn build_and_solve_cleanup_lp(
         };
         Some(assemble_full_y(&y_del_p2, &dy_p2))
     } else {
-        // Phase 2 失敗 → Phase 1 採用
         Some(assemble_full_y(&y_del_phase1, &dy_phase1))
     }
 }
 
-/// `build_and_solve_cleanup_lp` の kept-y perturbation 経路 (task #22) を有効化する
-/// 上限。`n + m <= LSQ_DUAL_SIZE_LIMIT` を超える問題では cleanup LP の col 数増
-/// (+m_kept) で simplex が現実的でなくなるため、旧来 (y_del-only) 経路に fallback。
-///
-/// 値は `src/qp/mod.rs::LSQ_DUAL_SIZE_LIMIT` と同一に揃えている (`compute_lsq_dual_y`
-/// と integration の整合)。両者を一箇所に集約する refactor は task #12 (magic number
-/// 排除) の領域なので本 task では同値を文書化するに留める。
+/// Size threshold above which kept-y perturbation is disabled (cleanup LP would
+/// otherwise grow unmanageably). Mirrors `LSQ_DUAL_SIZE_LIMIT` in `compute_lsq_dual_y`.
 const CLEANUP_LP_KEPT_PERT_SIZE_LIMIT: usize = 50_000;
 
-/// CSC 形式の orig_problem.a から行 i のエントリ (j, A_ij) を列挙する。
-/// O(nnz_total) の走査だが、一度だけ呼ばれる小規模問題用 (大規模では別途キャッシュ化)。
+/// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
     let mut out = Vec::new();
     for j in 0..orig_problem.num_vars {
@@ -549,20 +414,13 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
     out
 }
 
-/// bound active 判定の許容差 (x[j] が lb / ub にどれだけ近ければ active と見るか)。
+/// Distance below which `x[j]` is treated as active at its lb / ub.
 const BOUND_ACTIVE_TOL: f64 = 1e-6;
 
-/// 削除行 i の y_i を LP dual feasibility に整合的に復元する。
-///
-/// LP KKT (bound 考慮):
-///   x[j] at lb (lb finite, |x-lb|<TOL): rc[j] >= 0 が必要
-///   x[j] at ub (ub finite, |x-ub|<TOL): rc[j] <= 0 が必要
-///   x[j] interior: rc[j] ≈ 0 が必要
-///   x[j] fixed (lb==ub): rc[j] 任意
-///
-/// rc[j] = rc_at_y0[j] - A_ij * y_i (y_i 以外の y は確定済み) について、
-/// 各列の必要符号から y_i の許容範囲 [min_y_i, max_y_i] を導出し、
-/// 制約タイプ (Le: y<=0, Ge: y>=0, Eq: free) と交差して 0 に最も近い値を選ぶ。
+/// Recover `y_i` of a removed row to satisfy LP dual feasibility, given the rest of `y`.
+/// For each column the required rc sign yields a permissible range on `y_i`; the row's
+/// constraint type (Le: y≤0, Ge: y≥0, Eq: free) intersects that range and we pick the
+/// value closest to zero.
 fn recover_removed_row_dual(
     orig_problem: &LpProblem,
     i: usize,
@@ -580,17 +438,12 @@ fn recover_removed_row_dual(
                 rc_at_y0 -= vals[k] * dual_solution[row];
             }
         }
-        // bound active 判定 (x[j] が lb / ub のどちらに hit しているか)
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
         let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_ACTIVE_TOL;
         let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_ACTIVE_TOL;
         let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
-        if fixed { continue; } // 固定変数の rc は LP 上自由
-        // rc[j] = rc_at_y0 - a_ij * y_i に対する制約:
-        //   at_lb && !at_ub: rc >= 0 → a_ij * y_i <= rc_at_y0
-        //   at_ub && !at_lb: rc <= 0 → a_ij * y_i >= rc_at_y0
-        //   interior:        rc == 0 → a_ij * y_i == rc_at_y0
+        if fixed { continue; }
         let bound_val = rc_at_y0 / a_ij;
         if at_lb && !at_ub {
             if a_ij > 0.0 {
@@ -599,14 +452,12 @@ fn recover_removed_row_dual(
                 if bound_val > min_y_i { min_y_i = bound_val; }
             }
         } else if at_ub && !at_lb {
-            // 不等号が逆方向
             if a_ij > 0.0 {
                 if bound_val > min_y_i { min_y_i = bound_val; }
             } else {
                 if bound_val < max_y_i { max_y_i = bound_val; }
             }
         } else {
-            // interior or 両端 hit: rc == 0 (等号制約)
             if bound_val < max_y_i { max_y_i = bound_val; }
             if bound_val > min_y_i { min_y_i = bound_val; }
         }
@@ -627,15 +478,7 @@ fn recover_removed_row_dual(
     }
 }
 
-/// 縮約後の解を元問題の解空間に復元する。
-///
-/// # 引数
-/// * `result` - 縮約後問題の SolverResult
-/// * `presolve_result` - Presolve時に記録した変換情報
-/// * `orig_problem` - 元の（縮約前の）LP問題（slack再計算に使用）
-///
-/// # 戻り値
-/// 元問題の変数・制約数に合わせた SolverResult
+/// Lift the reduced-problem solution back into the original variable / constraint space.
 pub fn run_postsolve(
     result: &SolverResult,
     presolve_result: &PresolveResult,
@@ -645,11 +488,9 @@ pub fn run_postsolve(
     let n = presolve_result.orig_num_vars;
     let m = presolve_result.orig_num_constraints;
 
-    // 縮約後問題の解を元変数空間に展開
     let mut solution = vec![0.0f64; n];
     let mut dual_solution = vec![0.0f64; m];
 
-    // 縮約後のインデックスから元インデックスへ値をコピー
     for (j, &maybe_jj) in presolve_result.col_map.iter().enumerate() {
         if let Some(jj) = maybe_jj {
             if jj < result.solution.len() {
@@ -665,7 +506,6 @@ pub fn run_postsolve(
         }
     }
 
-    // PostsolveStack を逆順に適用して削除変数・制約を復元
     for step in presolve_result.postsolve_stack.iter().rev() {
         match step {
             PostsolveStep::FixedVariable { orig_col, value } => {
@@ -679,16 +519,12 @@ pub fn run_postsolve(
             }
             PostsolveStep::SingletonRow { orig_col, orig_row, value, a_ij: _, c_j: _ } => {
                 solution[*orig_col] = *value;
-                // y_i を KKT 整合に復元 (RedundantConstraint と同様)。
-                // bound active 時も含めて rc[j]>=0 を満たす y_i を選ぶ。
                 dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
                 dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
-            PostsolveStep::BoundsTightened { .. } => {
-                // Bounds tightening は解の値そのものに影響しない（情報保持のみ）
-            }
+            PostsolveStep::BoundsTightened { .. } => {}
             PostsolveStep::LinearSubstitution {
                 orig_col,
                 orig_row,
@@ -698,20 +534,16 @@ pub fn run_postsolve(
                 col_orig_entries,
                 c_orig,
             } => {
-                // --- Primal 復元: x_j = (rhs - Σ coeff_k * x_k) / pivot ---
+                // Primal: x_j = (rhs - Σ coeff_k · x_k) / pivot.
                 let mut sum_others = 0.0f64;
                 for &(other_col, coeff) in others {
                     sum_others += coeff * solution[other_col];
                 }
                 solution[*orig_col] = (rhs - sum_others) / pivot;
 
-                // --- Dual 復元: 消去された Eq 行 piv_row の y_piv ---
-                // LinearSubstitution は free 変数 (R6/R15/R5) を Eq 行から消去する変換。
-                // free 変数の最適性条件 rc[j] = 0 から:
-                //   c_j_orig = Σ_i A_ij * y_i
-                //   → y_piv = (c_orig - Σ_{i ≠ piv_row} A_ij * y_i) / pivot
-                // col_orig_entries は分配前 (= 行 i の x_j 係数を 0 化する前) の
-                // active な (i, A_ij^intermediate) snapshot (piv_row 以外)。
+                // Dual: a free-variable substitution eliminates one Eq row; its y is
+                // recovered from the free var's stationarity rc[orig_col] = 0,
+                // using the pre-distribution column snapshot `col_orig_entries`.
                 if let Some(piv_row) = orig_row {
                     let mut sum_other_rows = 0.0f64;
                     for &(row_i, a_ij) in col_orig_entries {
@@ -726,7 +558,7 @@ pub fn run_postsolve(
         }
     }
 
-    // slack を元問題 b - Ax で再計算
+    // Recompute slack on the original problem as `b - Ax`.
     let mut slack = orig_problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n) {
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
@@ -736,30 +568,14 @@ pub fn run_postsolve(
         }
     }
 
-    // Step 3: 2 経路 (Gauss-Seidel と Cleanup LP) で削除行の y 復元を計算し、
-    // bound-aware dfeas (LP dual feasibility 違反 sup ノルム) が小さい方を採用する。
-    //
-    // 設計動機 (2026-05-17 task #10 真因対処):
-    //   perold (col 229, c[j]=0, SingletonRow 経由) は cleanup LP が
-    //   Phase I slack 最小化のタイ崩しで y=0 解 (KKT 整合) を捨て、
-    //   別解 (y!=0、dual infeasible) を採用していた。LP optimum で y が
-    //   一意でない (dual 退化) ケースでは、cleanup LP の解は dual feasible
-    //   とは限らないため、Gauss-Seidel 経路と比較して KKT 整合性で勝った方を
-    //   採用する。
-    //
-    // 旧実装は cleanup LP が解けたら無条件採用、失敗時のみ Gauss-Seidel に
-    // フォールバックしていた。これは "cleanup LP 解は y_prev より厳格に良い"
-    // 前提に立っていたが、perold で反例があった (dual 退化)。
-
-    // (A) Loop 経路: postsolve reverse loop の直後の y (一度きり)。
+    // Compute several deleted-row y candidates and adopt whichever achieves the smallest
+    // bound-aware dual-feasibility violation. Cleanup-LP alone is not guaranteed to be
+    // dual-feasible under dual degeneracy, so it is compared against the Gauss-Seidel path.
     let y_loop = dual_solution.clone();
 
-    // (A') Gauss-Seidel 経路: y_loop を起点に recover_removed_row_dual を反復収束。
-    //     LinearSubstitution y_piv も同時に更新する。複数 deleted 行が結合した
-    //     ケース (agg / scorpion 等) で反復改善する。
-    //     大規模 LP (ken-18: 95k 削除行 × O(n) recover/row × 50 iter ≒ 10^11 ops) で
-    //     postsolve が parent deadline を完全に無視して数百秒走る事故が発生していたため、
-    //     outer loop 先頭と内側 1024 行ごとに deadline 確認し超過時は break する。
+    // Gauss-Seidel: iterate `recover_removed_row_dual` and the LinearSubstitution y_piv.
+    // The deadline is checked at the outer loop and every 1024 rows so very large
+    // postsolves cannot ignore the parent budget.
     let y_gs = {
         let mut y = y_loop.clone();
         let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -808,11 +624,8 @@ pub fn run_postsolve(
         y
     };
 
-    // Define dfeas_bound first so the cheap candidates (y_loop, y_gs) can be
-    // screened before paying for the cleanup-LP candidates. Profile on canary
-    // showed cleanup_pert costs 15–25 s each on wood1p/d6cube/greenbea while
-    // returning Inf in 4/6 cases, and cheap candidates already achieved
-    // machine-zero dfeas — running cleanup unconditionally wasted ~40 s.
+    // Build dfeas_bound first so the cheap candidates (y_loop, y_gs) can gate the
+    // far more expensive cleanup-LP candidates.
     let mut bound_tightened_fixed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for step in &presolve_result.postsolve_stack {
         if let PostsolveStep::FixedVariable { orig_col, .. } = step {
@@ -852,11 +665,8 @@ pub fn run_postsolve(
     let df_gs = dfeas_bound(&y_gs);
     let cheap_min = df_loop.min(df_gs);
 
-    // Cleanup-LP gating threshold: the strictest LP feasibility eps the bench
-    // exercises (`PIVOT_TOL = 1e-8`). When cheap recovery already achieves
-    // dfeas at or below this, neither cleanup variant can improve the bench
-    // verdict, and the kept-y perturbation variant in particular routinely
-    // takes 15–25 s and returns Inf on feasible problems.
+    // Gate at the strictest LP feasibility eps used by the bench (`PIVOT_TOL`);
+    // below this, cleanup LP cannot improve the verdict and only costs runtime.
     let gate = PIVOT_TOL;
 
     let (y_cl_nopert, y_cl_pert) = if cheap_min <= gate {
@@ -869,12 +679,8 @@ pub fn run_postsolve(
         let t_nopert = t0_nopert.elapsed();
         let df_nopert = y_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
         let so_far = cheap_min.min(df_nopert);
-        // The kept-y perturbation variant (task #22) was added for
-        // greenbea/cre-b kept↔deleted coupling. The perturbed LP is much
-        // larger and on the canary set it consistently returned Inf dfeas
-        // after 15–20 s. Budget it at a small multiple of the plain variant's
-        // wall time so the worst case is bounded by what cleanup_nopert
-        // already showed is reasonable for this problem's size.
+        // The kept-y perturbation variant is much larger and often returns Inf dfeas;
+        // budget it at a small multiple of the plain variant's wall time.
         let y_pert = if so_far <= gate {
             None
         } else {
@@ -891,23 +697,12 @@ pub fn run_postsolve(
         (y_nopert, y_pert)
     };
 
-    // (B') task #20 (greenbea coupling 解消): cleanup LP 後の y を `compute_lsq_dual_y`
-    //      経由で **全体 KKT 整合** に LSQ 射影する。
-    //
-    //      動機: cleanup LP は **deleted rows の y のみ** を最適化するが、kept rows の y は
-    //      reduced LP の最適 dual で固定するため、kept-deleted の coupling が strong な場合
-    //      (greenbea row 1270 et al.) に **infeasible** (Phase 1 slack ≈ 1e5) になる。
-    //      LSQ 射影は kept/deleted の境界を意識せず A^T y ≈ -c を解くので、coupling を
-    //      跨いで y 全体を調整できる。
-    //
-    //      実装: orig_problem (LpProblem) → 一時 QpProblem (Q=0) 変換、現在の y を持つ
-    //      SolverResult を渡して `compute_lsq_dual_y` を呼び、得られた y を 4 番目の候補
-    //      として df_bound 比較に組み込む。LSQ 射影は cheap candidate が gate を満たして
-    //      いる場合は不要 (cleanup LP と同じ理由)。
+    // LSQ projection (A^T y ≈ -c) as a fourth candidate. Cleanup LP only adjusts
+    // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
+    // full y vector when coupling is strong.
     let y_lsq: Option<Vec<f64>> = if cheap_min <= gate {
         None
     } else {
-        // size guard (compute_lsq_dual_y 内の 50_000 と整合)
         const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
         if n + m <= LSQ_DUAL_SIZE_LIMIT && m > 0 {
             let q_empty = CscMatrix::new(n, n);
@@ -937,7 +732,7 @@ pub fn run_postsolve(
         }
     };
 
-    // 候補 y を dfeas_bound 最小で採用 (同点は計算量の小さい順)。
+    // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper computation.
     let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
@@ -958,9 +753,8 @@ pub fn run_postsolve(
         dual_solution = y_lsq.expect("df_lsq finite implies Some");
     }
 
-    // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
-    //   reduced_cost[j] = c[j] - Σ_i A_ij * y_i
-    // y が KKT 整合に復元されていれば rc も KKT 整合になる (e61f27b 設計)。
+    // Recompute reduced costs on the original problem now that the dual is final:
+    //   reduced_cost[j] = c[j] - Σ_i A_ij · y_i.
     let mut reduced_costs = orig_problem.c.clone();
     for (j, rc) in reduced_costs.iter_mut().enumerate().take(n) {
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
@@ -969,12 +763,9 @@ pub fn run_postsolve(
             }
         }
     }
-    // Presolve で **bound tightening により固定化された** 変数の rc は bound dual
-    // (mu_lb - mu_ub) で吸収される自由度があり KKT 整合性を rc=0 とみなせる。旧実装は
-    // y のみで rc 再計算していたため、recipe j=76/107/138 等 (orig ub=20→presolve で
-    // ub=0 に tightening されて FixedVar 化) で rc≠0 が報告され bench dfeas が違反
-    // 検出していた。FixedVar として stack に push された col のみ rc=0 化する
-    // (orig bounds で lb==ub の真の固定変数は既存挙動を保持、test_postsolve_t2 等)。
+    // For variables fixed by bound tightening (not lb==ub originally), the rc can be
+    // absorbed into the bound dual (mu_lb − mu_ub); treat it as zero to keep dual
+    // feasibility consistent. True fixed variables (orig lb == ub) keep their rc.
     for step in &presolve_result.postsolve_stack {
         if let PostsolveStep::FixedVariable { orig_col, .. } = step {
             let (lb, ub) = orig_problem.bounds[*orig_col];

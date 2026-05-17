@@ -1,36 +1,14 @@
-//! KKT 線形系 `K · u = rhs` を解くための統一 trait。
-//!
-//! IPM / IPPMM の Newton step で繰り返し現れる「対称鞍点 K に対する線形解」を
-//! 抽象化する。直接法 (`DirectLdl`) と反復法 (`PreconditionedMinres`、別 commit)
-//! が同じインターフェイスを実装し、問題特性に応じた dispatcher が選択する。
-//!
-//! 設計方針:
-//! - **deadline は呼び出し側の責任**: solver 内部で deadline を検査し、超過時は
-//!   `KktError::DeadlineExceeded` を返す (上位で best-so-far フォールバック)。
-//! - **factorize と solve を分離**: 1 度因子化したら同じ K で複数 RHS を効率的に
-//!   解ける (predictor/corrector 用)。`refactor` で K の値が変わったときに再計算。
-//! - **失敗の種類を区別**: deadline 超過 / 数値特異 / メモリ予算超過 を区別して
-//!   返し、上位の dispatcher がフォールバック判断に使う。
-//!
-//! 直接法と反復法の dispatcher は別モジュールで実装する (本 trait は機構のみ)。
-//!
-//! 用途: 行列の疎構造とメモリ予算で direct/iterative を自動選択する基盤。
-//! QPLIB_9008 (n=1M) の OOM kill 回避と Maros 138 級の通常問題で direct を維持する両立。
+//! Common KKT-solver trait abstracting `K · u = rhs` for IPM/IPPMM Newton steps.
+//! Implementations expose `factorize` + `solve` (with deadline awareness) and report
+//! failures in distinct categories so the dispatcher can fall back from direct to
+//! iterative methods on memory pressure or singularity.
 
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 
-/// 1 つの線形解 (LDL の L 値配列) が消費してよい既定メモリ予算 (バイト)。
-///
-/// 4 GiB を既定とする (現代的なマシンの RAM 16〜64 GB の 1/4〜1/16 に相当、
-/// 同時に他プロセスが動いていてもクラッシュしない安全マージン)。
-///
-/// **これは「問題サイズの heuristic threshold」ではなくシステム resource policy**:
-/// n=10 でも n=10M でも同じ式 `L_nnz × 16B vs budget` で判定する。問題依存の
-/// マジックナンバー (例: `n+m ≥ 100k`) は使わない。
-///
-/// 環境変数 `KKT_MEMORY_BUDGET_BYTES` で上書き可。CI / 制約環境では小さく、
-/// hi-mem サーバでは大きく設定できる。
+/// Default per-factorisation memory budget (4 GiB). Overridable via
+/// `KKT_MEMORY_BUDGET_BYTES`. Applied uniformly via `L_nnz × BYTES_PER_L_ENTRY`
+/// rather than via problem-size heuristics.
 const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// LDL の L 値 1 entry あたりのバイト数。f64 = 8B + row index usize = 8B (上限見積り)。
@@ -49,23 +27,15 @@ pub fn max_l_nnz_from_budget() -> usize {
     memory_budget_bytes() / BYTES_PER_L_ENTRY
 }
 
-/// `KktSolver::solve` / `refactor` が返すエラー。
-///
-/// 上位の dispatcher は `WouldExceedMemory` / `SingularOrIndefinite` を見て
-/// 反復法へフォールバック判断する。`DeadlineExceeded` はフォールバックしても
-/// 残時間がない可能性が高いため、上位で Timeout として伝搬される想定。
+/// Failure modes from `KktSolver::solve` / `refactor`.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum KktError {
-    /// 因子化が deadline 内に完了しなかった。
     DeadlineExceeded,
-    /// 行列が特異または不定値で因子化に失敗した。
-    /// 規則化 (δ 増加) で救う場合あり、上位責任で retry。
+    /// Singular or indefinite K; the caller may retry after regularisation.
     SingularOrIndefinite,
-    /// 因子化が利用可能メモリ予算を超過すると判定された
-    /// (symbolic 段階の L_nnz 推定で検出)。反復法フォールバックの主トリガ。
+    /// Symbolic estimation predicts the factor would exceed the memory budget.
     WouldExceedMemory,
-    /// 反復法が最大反復数内に収束しなかった (反復法バックエンド固有)。
     DidNotConverge,
 }
 
@@ -82,16 +52,9 @@ impl std::fmt::Display for KktError {
 
 impl std::error::Error for KktError {}
 
-/// 対称鞍点 KKT 系 `K · u = rhs` を解くソルバの抽象化。
-///
-/// 実装は `factorize` (or `refactor`) で K を準備し、`solve` で 1 つ以上の
-/// 右辺について解を返す。
-///
-/// **&self vs &mut self 設計**:
-/// - `solve` は `&self`: predictor/corrector で同じ factorization に対し複数 RHS を
-///   解く際、IPM 側が `&fac` を持ち回って複数関数に渡せるようにするため。MINRES の
-///   reverberation 状態 (Lanczos vectors) は呼び出し毎にローカル確保。
-/// - `refactor` は `&mut self`: cached factorization を置き換えるため。
+/// Solver abstraction for the symmetric saddle-point KKT system `K · u = rhs`.
+/// `solve` is `&self` so predictor/corrector can share one factorisation; `refactor`
+/// is `&mut self` because it replaces the cached factorisation.
 pub trait KktSolver: Send {
     /// 1 つの右辺に対して `K · u = rhs` を解いて `sol` に書き込む。
     ///
@@ -119,42 +82,30 @@ pub trait KktSolver: Send {
     fn dim(&self) -> usize;
 }
 
-/// 既存の `factorize_quasidefinite_with_amd_budget` を `KktSolver` trait に
-/// 適合させる薄い wrapper。
-///
-/// `max_l_nnz` を `None` で構築すると budget チェック無しで現行と完全互換。
-/// `Some` で構築すると symbolic 段階で L_nnz が超過したとき
-/// `KktError::WouldExceedMemory` を返し、上位の dispatcher が反復法へ
-/// フォールバックする判断材料にする。
+/// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget`.
+/// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
+/// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
-    /// L_nnz 上限。`None` のとき budget チェックなし (現行互換)。
     max_l_nnz: Option<usize>,
 }
 
 impl DirectLdl {
-    /// 空の (まだ因子化されていない) `DirectLdl` を作る。`refactor` で使用可能になる。
-    /// budget チェックなし版。
     pub fn new(n: usize) -> Self {
         Self { factor: None, n, max_l_nnz: None }
     }
 
-    /// memory budget を持つ `DirectLdl` を作る。symbolic 段階で L_nnz が
-    /// 超過したら `refactor` が `WouldExceedMemory` を返す。
     pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
         Self { factor: None, n, max_l_nnz: Some(max_l_nnz) }
     }
 
-    /// 即座に行列 K を渡して因子化する (最初の Newton step 用ヘルパ)。
     pub fn from_matrix(k: &CscMatrix, deadline: Option<Instant>) -> Result<Self, KktError> {
         let mut s = Self::new(k.nrows);
         s.refactor(k, deadline)?;
         Ok(s)
     }
 
-    /// 因子化済みの L_nnz を返す (fill-in 計測用、診断のみ)。
-    /// 因子化前は 0。
     pub fn l_nnz(&self) -> usize {
         self.factor.as_ref().map_or(0, |f| f.nnz_l())
     }
@@ -167,8 +118,6 @@ impl KktSolver for DirectLdl {
         sol: &mut [f64],
         _deadline: Option<Instant>,
     ) -> Result<(), KktError> {
-        // 直接法は事前因子化済みなので solve は速い (ms 単位)。
-        // deadline チェックは省略 (1 solve が deadline を消費することは現実的に無い)。
         let factor = self.factor.as_ref().ok_or(KktError::SingularOrIndefinite)?;
         factor.solve(rhs, sol);
         Ok(())
@@ -209,104 +158,49 @@ impl KktSolver for DirectLdl {
     }
 }
 
-// ── Iterative backend: PreconditionedMinres ──────────────────────────────────────
-
-/// 対角前処理付き MINRES による反復解法。LDL の fill-in を回避する代替経路。
-///
-/// 前処理 M は問題に応じて 2 種類選択可能 (`PreconditionerKind`):
-/// - `Jacobi`: M[i,i] = |K[i,i]|。最も簡単、汎用、対称鞍点系では弱い。
-/// - `BlockDiag { n_top }`: 鞍点 K = [Q+R, A^T; A, -S] のブロック構造を活かし、
-///   下部の対角を S の Schur 補集合で近似 (`sum_r A[i,r]²/(Q+R)[r,r] + (Σ_y+δ_y)[i]`)。
-///   オフ対角の影響を反映するため Jacobi より大幅に効果的 (cond ~1e10 → ~1e5)。
-///
-/// メモリ: K の保持 (nnz × 16B) + 数本のワークベクトル (n × 8B × 数本) のみ。
-/// fill-in は無いため、QPLIB_9008 級 (n=1M) でも GB 級メモリは不要。
+/// Diagonally-preconditioned MINRES, used as an iterative alternative when an LDL
+/// factorisation would exceed the memory budget. `BlockDiag` exploits the saddle-point
+/// block structure and is typically much more effective than plain `Jacobi`.
 pub struct PreconditionedMinres {
-    /// K 行列の所有コピー (mat-vec 用)
     k: CscMatrix,
-    /// M^{-1} の対角値
     m_inv_diag: Vec<f64>,
-    /// 前処理の種類 (refactor 時に同じ kind で再構築するため保持)
     kind: PreconditionerKind,
-    /// 最大反復数 (収束しない場合のフォールバック)
     max_iter: usize,
-    /// 相対許容差
     tol: f64,
-    /// 反復改良 (IR) ラウンド数。`solve()` 後に `r = rhs - K·sol` を計算し、
-    /// `K·δ = r` を再度 MINRES で解いて `sol += δ` を `ir_steps` 回繰り返す。
-    /// inexact MINRES (`tol = η`) の実効精度を `η^(ir_steps + 1)` まで押し下げる。
-    ///
-    /// 物理量根拠: MINRES は `||K·d̃ − r|| ≤ η·||r||` (relative) で停止するが、
-    /// Newton 方向誤差は `||d̃ − d|| ≤ η·||r||/σ_min(K)` で σ_min が小さい
-    /// (saddle point KKT で典型的) と桁外れの方向誤差になる。IR 1 ラウンドで
-    /// 残差を η 倍するため、桁数を線形に追加で稼げる (Wilkinson 1965)。
-    ///
-    /// デフォルト 0 (IR なし、後方互換)。`*_inexact` constructor は 2 を設定。
+    /// Iterative-refinement rounds: each round reapplies MINRES to the residual,
+    /// driving the effective relative tolerance toward `tol^(ir_steps + 1)`. Default 0.
     ir_steps: usize,
 }
 
-/// 前処理対角の最小値 (これ未満は MIN_DIAG にクランプして M^{-1} を有限化)
+/// Clamp preconditioner diagonal entries below this to avoid blowing up M^{-1}.
 const MIN_DIAG: f64 = 1e-12;
 
-/// 前処理の種類。`BlockDiag { n_top }` は鞍点 K = [top n_top × n_top; bottom m × m]
-/// の構造を活かす。
 #[derive(Debug, Clone, Copy)]
 pub enum PreconditionerKind {
-    /// 単純な K の対角絶対値 (汎用、対称鞍点系では弱い)
     Jacobi,
-    /// ブロック対角 Jacobi: 下部対角を Schur 補集合の対角で近似
+    /// Block-diagonal preconditioner for a saddle-point K = [top × top; bottom × bottom].
     BlockDiag { n_top: usize },
 }
 
-/// IPM の Newton 系内側解で使う inexact Newton forcing term η を eps から計算する。
-///
-/// 設計: η = eps × IPM_OUTER_VS_INNER_RATIO で **user 指定 eps に連動**させる。
-/// 物理量根拠 (問題集 tuning ではなく user 指定 tolerance 連動):
-///
-/// - IPM が outer tolerance ε まで収束するには、Newton 方向が ε 未満の精度で
-///   求まる必要がある (Newton 方向誤差 = η·||r||/σ_min(K) が ε を上回ると、
-///   outer は η × cond_factor で頭打ち = ε に到達不可)。
-/// - したがって η ≤ ε が必要条件、安全側で η = ε × 0.1 とする。
-/// - eps=1e-6 → η=1e-7、eps=1e-9 → η=1e-10、eps=1e-3 → η=1e-4 と自動調整。
-///
-/// 旧 default 0.1 (eps 非連動 hardcode) は QPLIB_9008 (n=1M, MINRES on Schur)
-/// で saddle KKT の cond 増幅により df 発散していた:
-///   実測: η=0.1 → 発散、η=1e-4 → iter 12 で発散開始、η=1e-7 → 発散完全停止
-///
-/// 下限 `IPM_INEXACT_ETA_FLOOR` は f64 機械精度 (≈2.2e-16) ベースで設定。
-/// これ未満は MINRES の収束判定が機械精度に支配されて意味を持たない。
+/// Tie the inexact-Newton forcing term η to the user-specified eps so the
+/// inner-solve precision tracks the outer tolerance.
 pub(crate) const IPM_OUTER_VS_INNER_RATIO: f64 = 0.1;
-/// inner η の絶対下限 (f64 限界由来)。これ未満の MINRES tol は意味なし。
+/// Floor on η — below f64 working precision the MINRES tolerance is meaningless.
 pub(crate) const IPM_INEXACT_ETA_FLOOR: f64 = 1e-13;
 
-/// user 指定 eps から inexact Newton forcing term η を計算する。
 pub fn inexact_eta_for_eps(eps: f64) -> f64 {
     (eps * IPM_OUTER_VS_INNER_RATIO).max(IPM_INEXACT_ETA_FLOOR)
 }
 
-/// 旧互換 default (eps=1e-6 想定での η)。
-/// `inexact_eta_for_eps(1e-6)` と同値。eps を渡せない呼出元 (テスト等) 用。
+/// Backward-compatible default η (equivalent to `inexact_eta_for_eps(1e-6)`),
+/// used by callers (mostly tests) that don't have an eps in hand.
 pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 
-/// inexact MINRES に施す反復改良 (IR) のデフォルト回数。
-///
-/// IR 機能自体は単体テストで動作確認済 (η^(IR+1) まで relative residual を
-/// 押し下げる、`minres_ir_actually_reduces_residual` テスト参照)。
-///
-/// しかし saddle KKT で direction error = relative_residual × cond(K) で
-/// あり、IR で relative residual を η^(IR+1) まで詰めても cond の大きい系
-/// では direction quality は IPM 安定化に十分でない (実測: QPLIB_8500 強制
-/// MINRES で IR=2 でも iter 11-12 で pf 発散開始、IR=5 でも iter 11)。
-///
-/// 真の発散停止は cond 増幅の構造的回避 (`auto_schur` で saddle → SPD Schur
-/// 切替) で実現済 (`fix(qp/ipm): augmented LDL budget 超過時に Schur へ`)。
-/// その後の経路 (Schur SPD) では MINRES が CG 風に振る舞い IR は不要に近い。
-///
-/// よって default は 0 = IR 無効。`MINRES_IR=N` env で必要時に opt-in。
+/// Default IR rounds for inexact MINRES. 0 because the auto-Schur path
+/// makes the saddle-point conditioning manageable in practice.
 const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 
-/// 実行時 η override (発散実験用)。`MINRES_ETA` env が `(0, 1]` の f64 として
-/// 解釈できれば該当値、それ以外は `MINRES_INEXACT_NEWTON_ETA` を返す。
+/// Resolve η from the `MINRES_ETA` env (constrained to `(0, 1]`), else default.
 fn minres_eta_runtime() -> f64 {
     std::env::var("MINRES_ETA")
         .ok()
@@ -315,9 +209,7 @@ fn minres_eta_runtime() -> f64 {
         .unwrap_or(MINRES_INEXACT_NEWTON_ETA)
 }
 
-/// 実行時 IR ラウンド数 override (`MINRES_IR` env)。`0..=10` の usize として
-/// 解釈できれば該当値、それ以外は引数 `default` を返す (== `*_inexact` の
-/// デフォルト or 通常 constructor の 0)。
+/// Resolve IR rounds from the `MINRES_IR` env (constrained to `0..=10`), else default.
 fn minres_ir_runtime(default: usize) -> usize {
     std::env::var("MINRES_IR")
         .ok()
@@ -327,14 +219,11 @@ fn minres_ir_runtime(default: usize) -> usize {
 }
 
 impl PreconditionedMinres {
-    /// inexact tolerance を後から override する (Eisenstat-Walker forcing 用)。
-    /// IPPMM の outer iteration 残差縮小率に応じて η を tighten するために
-    /// 各 IPM iter で呼ばれる。
+    /// Tighten η between outer IPM iterations (Eisenstat-Walker forcing).
     pub fn set_inexact_tol(&mut self, tol: f64) {
         self.tol = tol;
     }
 
-    /// 単純 Jacobi 前処理付き MINRES を構築する (旧 `new` 互換)。
     pub fn new(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -342,12 +231,8 @@ impl PreconditionedMinres {
         Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
     }
 
-    /// 鞍点 K 用のブロック対角前処理付き MINRES を構築する。
-    ///
-    /// `n_top` は K の上部ブロック (Q+R) のサイズ。下部ブロックは
-    /// `S = A·diag(Q+R)⁻¹·A^T + Σ_y+δ_y` の対角を近似計算する。
-    ///
-    /// 計算量: O(nnz(K))。fill-in なし。
+    /// Block-diagonal preconditioner for a saddle-point K of dimension `n_top + m`.
+    /// Approximates the lower block with a Schur-complement diagonal in O(nnz(K)).
     pub fn with_block_diag(k: CscMatrix, n_top: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -355,9 +240,7 @@ impl PreconditionedMinres {
         Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
     }
 
-    /// IPM Newton 系用 (inexact Newton tol η = 0.1 + IR 2 ラウンド)。
-    /// 鞍点ブロック対角前処理。
-    /// `factorize_kkt_with_cached_perm` の MINRES フォールバックから使う想定。
+    /// Inexact-Newton variant of `with_block_diag`, with env-overridable η and IR rounds.
     pub fn with_block_diag_inexact(k: CscMatrix, n_top: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -372,8 +255,7 @@ impl PreconditionedMinres {
         }
     }
 
-    /// IPM Newton 系用 (inexact Newton tol η = 0.1 + IR 2 ラウンド)。
-    /// Jacobi 前処理 (n_top 不明時)。
+    /// Inexact-Newton variant of `new` (Jacobi preconditioner).
     pub fn new_inexact(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -388,7 +270,6 @@ impl PreconditionedMinres {
         }
     }
 
-    /// 反復回数上限と相対許容差をカスタム指定する (Jacobi 前処理)。
     pub fn with_params(k: CscMatrix, max_iter: usize, tol: f64) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -396,7 +277,6 @@ impl PreconditionedMinres {
     }
 }
 
-/// 前処理 M^{-1} の対角を計算する (kind に応じて Jacobi または BlockDiag)。
 fn compute_inv_diag(k: &CscMatrix, kind: PreconditionerKind) -> Vec<f64> {
     match kind {
         PreconditionerKind::Jacobi => compute_jacobi_inv_diag(k),
@@ -404,7 +284,6 @@ fn compute_inv_diag(k: &CscMatrix, kind: PreconditionerKind) -> Vec<f64> {
     }
 }
 
-/// K の対角絶対値から Jacobi 前処理 M^{-1} を構築する。
 fn compute_jacobi_inv_diag(k: &CscMatrix) -> Vec<f64> {
     let n = k.nrows;
     let mut diag_abs = vec![MIN_DIAG; n];
@@ -420,19 +299,15 @@ fn compute_jacobi_inv_diag(k: &CscMatrix) -> Vec<f64> {
     diag_abs.iter().map(|&d| 1.0 / d).collect()
 }
 
-/// 鞍点 K のブロック対角前処理:
-///   M_top[j]    = max(|K[j,j]|, MIN_DIAG)     for j < n_top
-///   M_bottom[i] = sum_r A[i,r]² / M_top[r] + |K[n_top+i, n_top+i]|
-///                                            for i = 0..(n - n_top)
-///
-/// K は対称上三角 CSC で格納されている前提。A^T entries は K の上三角の
-/// (row r, col n_top+i) with r < n_top に格納。
+/// Block-diagonal preconditioner for a saddle-point K stored as symmetric upper CSC:
+///   M_top[j]    = max(|K[j,j]|, MIN_DIAG)                       for j < n_top
+///   M_bottom[i] = Σ_r A[i,r]² / M_top[r] + |K[n_top+i, n_top+i]| for i < n - n_top
+/// where A^T entries appear at (row r, col n_top+i) with r < n_top.
 fn compute_block_diag_inv(k: &CscMatrix, n_top: usize) -> Vec<f64> {
     let n_total = k.nrows;
     debug_assert!(n_top <= n_total);
     let m_bot = n_total - n_top;
 
-    // 1. 上部ブロックの対角 |K[j,j]| (j < n_top)
     let mut top_diag = vec![MIN_DIAG; n_top];
     for j in 0..n_top {
         for k_idx in k.col_ptr[j]..k.col_ptr[j + 1] {
@@ -443,10 +318,6 @@ fn compute_block_diag_inv(k: &CscMatrix, n_top: usize) -> Vec<f64> {
         }
     }
 
-    // 2. 下部ブロックの Schur 補集合の対角:
-    //    S_diag[i] = sum_r A[i,r]² / top_diag[r] + |K[n_top+i, n_top+i]|
-    //    K の col n_top+i を走査し、row r < n_top の entry が A^T 値 (= A[i, r]).
-    //    row == col のとき K の下部ブロック対角 (= -(Σ_y+δ_y)).
     let mut bot_diag = vec![MIN_DIAG; m_bot];
     for i in 0..m_bot {
         let col = n_top + i;
@@ -455,18 +326,14 @@ fn compute_block_diag_inv(k: &CscMatrix, n_top: usize) -> Vec<f64> {
             let r = k.row_ind[k_idx];
             let val = k.values[k_idx];
             if r < n_top {
-                // A^T entry: K[r, col] = A[i, r]
                 accum += (val * val) / top_diag[r];
             } else if r == col {
-                // 下部ブロック対角 (負値)。絶対値で正の寄与に。
                 accum += val.abs();
             }
-            // else: r in [n_top, col), 下部 -S off-diagonal, ignore
         }
         bot_diag[i] = accum.max(MIN_DIAG);
     }
 
-    // 3. M^{-1} = [1/top_diag; 1/bot_diag] を結合
     let mut m_inv = Vec::with_capacity(n_total);
     m_inv.extend(top_diag.iter().map(|&d| 1.0 / d));
     m_inv.extend(bot_diag.iter().map(|&d| 1.0 / d));
@@ -480,7 +347,6 @@ impl KktSolver for PreconditionedMinres {
         sol: &mut [f64],
         deadline: Option<Instant>,
     ) -> Result<(), KktError> {
-        // 解の初期推定はゼロ (warm-start サポートは将来課題)
         for s in sol.iter_mut() { *s = 0.0; }
         let k = &self.k;
         let m_inv = &self.m_inv_diag;
@@ -507,12 +373,9 @@ impl KktSolver for PreconditionedMinres {
                 n, stats.iters, self.max_iter, self.tol, stats.residual_estimate, stats.converged, self.kind);
         }
 
-        // ── 反復改良 (IR): MINRES 解 sol に対し r = rhs - K·sol を計算し、
-        //    K·δ = r を再度 MINRES で解いて sol += δ。`ir_steps` 回繰り返す。
-        //    MINRES の `tol = η` (relative) のもとで、IR 1 ラウンドあたり
-        //    残差を η 倍するため、実効精度を η^(ir_steps + 1) まで詰められる。
-        //    deadline 超過時は IR を中断 (途中の sol は MINRES 単体より悪化しない: IR
-        //    は加算更新で、最初の MINRES 解は破棄しない)。
+        // Iterative refinement: each round reapplies MINRES to `r = rhs − K·sol` so the
+        // effective relative residual is driven toward `tol^(ir_steps + 1)`. Bailing on
+        // the deadline is safe — IR only adds to `sol`, never replaces the initial solve.
         if self.ir_steps > 0 {
             let mut residual = vec![0.0_f64; n];
             let mut delta = vec![0.0_f64; n];
@@ -531,10 +394,8 @@ impl KktSolver for PreconditionedMinres {
                     r_norm_sq += residual[i] * residual[i];
                 }
                 let r_norm = r_norm_sq.sqrt();
-                // 残差が機械精度近傍まで小さい場合のみ打ち切り (saddle point KKT は
-                // cond × relative_residual で direction error が増幅されるため、
-                // relative residual が tol² 程度では不十分。f64 の規範境界 1e-14
-                // を絶対下限とする)。
+                // Saddle-point conditioning amplifies the relative residual, so only
+                // bail at the f64 norm floor (1e-14), not at `tol²`.
                 let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
                 if rhs_norm > 0.0 && r_norm <= 1e-14 * rhs_norm {
                     if trace {
@@ -542,7 +403,6 @@ impl KktSolver for PreconditionedMinres {
                     }
                     break;
                 }
-                // δ を求めて sol に加算
                 for d in delta.iter_mut() { *d = 0.0; }
                 let ir_stats = do_minres(&mut delta, &residual);
                 for i in 0..n {
@@ -574,8 +434,6 @@ impl KktSolver for PreconditionedMinres {
         if k.nrows != self.dim() || k.ncols != self.dim() {
             return Err(KktError::SingularOrIndefinite);
         }
-        // K の値が変わったので前処理を更新。fill-in は無いのでこれだけで OK。
-        // 元の前処理 kind (Jacobi or BlockDiag) を維持して再構築する。
         self.m_inv_diag = compute_inv_diag(k, self.kind);
         self.k = k.clone();
         Ok(())
@@ -586,48 +444,30 @@ impl KktSolver for PreconditionedMinres {
     }
 }
 
-// ── KktFactor: 直接法 / 反復法を統一した最小 API でラップする「factor 互換」型 ─────
-
-/// 既存の `LdlFactorizationAmd` 互換の `solve(&self, rhs, sol)` API を持ちつつ、
-/// 内部で直接法 / 反復法を切り替えられる factor 型。
-///
-/// `LdlFactorizationAmd` を直接持ち回っている既存の IPM コード (predictor/corrector/
-/// gondzio/IR) を最小変更で MINRES 対応にする目的で追加。trait オブジェクトでは
-/// なく enum dispatch で書くことで、既存コードの `&LdlFactorizationAmd` を
-/// `&KktFactor` に置換するだけで済む。
+/// LDL-compatible factor type with enum-dispatched backends. `Direct` and `DirectDd`
+/// hold factorisations (f64 / TwoFloat); `Iterative` keeps K for MINRES.
 pub enum KktFactor {
-    /// 直接法 (LDL, f64) で因子化済み
     Direct(crate::linalg::ldl::LdlFactorizationAmd),
-    /// 直接法 (LDL, TwoFloat ≈ 106 bit) で因子化済み。
-    /// f64 の precision floor (cond × 2.2e-16) を超える ill-conditioned 系
-    /// (QPILOTNO cond 5e13 / QPLIB_10034 cond 1e7×amp 1170) 用。
+    /// TwoFloat (~106-bit) LDL used when f64's `cond × ε` exceeds the requested eps.
     DirectDd(crate::linalg::ldl_dd::LdlFactorizationDdAmd),
-    /// 反復法 (MINRES + Jacobi) で K の値を保持
     Iterative(PreconditionedMinres),
 }
 
 impl KktFactor {
-    /// MINRES iterative variant の tol を override する (Eisenstat-Walker forcing 用)。
-    /// Direct/DirectDd variant では何もしない (LDL は exact 求解で tol 概念なし)。
+    /// Override the MINRES tolerance (no-op for the direct backends).
     pub fn set_iterative_tol(&mut self, tol: f64) {
         if let KktFactor::Iterative(minres) = self {
             minres.set_inexact_tol(tol);
         }
     }
 
-
-    /// `K · sol = rhs` を解いて `sol` に書き込む。LDL 互換の infallible API。
-    ///
-    /// 反復法側のエラー (収束失敗等) は内部で握り潰し、best-effort 解を返す。
-    /// (既存 `LdlFactorizationAmd::solve` も数値破綻時は NaN を含む解を返すだけで
-    /// 破綻自体を return しない infallible API のため、整合)
+    /// Infallible `K · sol = rhs` solve (mirrors `LdlFactorizationAmd::solve`).
+    /// Iterative-backend errors are swallowed; the best-effort solution is left in `sol`.
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         self.solve_with_deadline(rhs, sol, None);
     }
 
-    /// deadline を伝搬する版 `solve`。反復法経路では deadline 超過で
-    /// 早期 break する (巨大問題で MINRES が無限ループに陥るのを防ぐ)。
-    /// 直接法経路では deadline は無視 (LDL solve は十分速い)。
+    /// `solve` with a deadline that the iterative backend honours.
     pub fn solve_with_deadline(
         &self,
         rhs: &[f64],
@@ -638,34 +478,23 @@ impl KktFactor {
             KktFactor::Direct(ldl) => ldl.solve(rhs, sol),
             KktFactor::DirectDd(ldl_dd) => ldl_dd.solve(rhs, sol),
             KktFactor::Iterative(minres) => {
-                // MINRES は Result を返すが、IPM 内部では最大努力 best-effort で十分。
-                // deadline で早期 break しても sol には反復途中の状態が入る。
                 let _ = minres.solve(rhs, sol, deadline);
             }
         }
     }
 
-    /// 直接法/反復法のどちらが使われているか診断する
     pub fn is_iterative(&self) -> bool {
         matches!(self, KktFactor::Iterative(_))
     }
 
-    /// DD precision LDL を使っているか診断する
     pub fn is_dd(&self) -> bool {
         matches!(self, KktFactor::DirectDd(_))
     }
 }
 
-/// 既存の `factorize_quasidefinite_with_cached_perm` 互換シグネチャで、内部的に
-/// budget 超過時に MINRES へフォールバックする factor を返す。
-///
-/// IPM の既存 LDL retry ループから 1:1 で差し替え可能なインターフェイス。
-/// (置換目安: `ldl::factorize_quasidefinite_with_cached_perm(K, perm, deadline)`
-///  → `factorize_kkt_with_cached_perm(K, perm, deadline, max_l_nnz_from_budget(), Some(n))`)
-///
-/// `n_top`: 鞍点 K = [Q+R, A^T; A, -S] の上部ブロックサイズ (= n)。`Some(n)` のとき
-/// MINRES フォールバック側のブロック対角前処理が有効化される (Jacobi より大幅に
-/// 効果的)。`None` のときは Jacobi 前処理 (旧互換)。
+/// LDL-compatible factorisation that falls back to MINRES when the LDL factor would
+/// exceed the memory budget. Pass `n_top = Some(n)` to enable the saddle-point
+/// block-diagonal MINRES preconditioner; `None` selects plain Jacobi.
 pub fn factorize_kkt_with_cached_perm(
     k: &CscMatrix,
     perm: &[usize],
@@ -673,18 +502,15 @@ pub fn factorize_kkt_with_cached_perm(
     max_l_nnz: usize,
     n_top: Option<usize>,
 ) -> Result<KktFactor, KktError> {
-    // env IPM_DD_LDL=1 が設定されているときは TwoFloat (≈106 bit) で因子化する。
-    // f64 LDL の forward error = cond × 2.2e-16 が eps を超える ill-cond 系
-    // (QPILOTNO cond 5e13 / QPLIB_10034 cond 1e7×amp 1170) 用。
-    // budget チェックは f64 経路と同等 (DD は係数行列構造が同じなので同じ AMD/etree)。
+    // IPM_DD_LDL=1 switches to TwoFloat (~106-bit) LDL for ill-conditioned systems
+    // where the f64 forward error (cond × ε) would exceed the requested eps.
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
         let trace = std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1");
-        // f64 で symbolic を済ませて budget 判定し、超過なら MINRES、超過しないなら DD numeric。
+        // Run the f64 symbolic factorisation to honour the same memory budget.
         match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
             k, perm, deadline, Some(max_l_nnz),
         ) {
             Ok(_) => {
-                // budget 内 → DD で再因子化
                 match crate::linalg::ldl_dd::factorize_quasidefinite_with_cached_perm_dd(
                     k, perm, deadline,
                 ) {
@@ -705,14 +531,12 @@ pub fn factorize_kkt_with_cached_perm(
                         return Err(KktError::SingularOrIndefinite);
                     }
                     Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
-                        // DD path は budget チェックなし。到達不可だが安全に MINRES へ。
+                        // Unreachable for the DD path (no budget check); fall through to MINRES.
                     }
                 }
             }
             Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
-                // budget 超過 → DD でも同じく超過する。MINRES へフォールバック。
-                // 注意: DD は LDL のみで、MINRES は f64 のまま。saddle / SPD の cond
-                // amplification は f64 MINRES では完全には抑え切れない (handover 参照)。
+                // f64-budget exceeded → DD would exceed it too; fall back to MINRES (f64).
             }
             Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => {
                 return Err(KktError::DeadlineExceeded);
@@ -721,7 +545,6 @@ pub fn factorize_kkt_with_cached_perm(
                 return Err(KktError::SingularOrIndefinite);
             }
         }
-        // budget 超過時のみここに来る → MINRES (f64)
         let minres = match n_top {
             Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
             _ => PreconditionedMinres::new_inexact(k.clone()),
@@ -734,10 +557,7 @@ pub fn factorize_kkt_with_cached_perm(
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
-            // budget 超過: MINRES にフォールバック (deadline は呼び出し側に伝搬しないが、
-            // MINRES は solve 時に deadline 引数で制御される)。
-            // IPM/IPPMM の Newton 系内側解として使うため inexact Newton tol η=0.1 を採用
-            // (Wright IPM §11.7 / Eisenstat-Walker)。1e-9 は外側 IPM 収束に過剰精度。
+            // Budget exceeded → MINRES with inexact-Newton tolerance.
             let minres = match n_top {
                 Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
                 _ => PreconditionedMinres::new_inexact(k.clone()),
@@ -751,11 +571,8 @@ pub fn factorize_kkt_with_cached_perm(
     }
 }
 
-/// `factorize_kkt_with_cached_perm` の pre-permuted 版。`pre_permuted_k` は AMD 置換を
-/// 既に適用した CSC で、内部で `permute_sym_upper` を skip する高速経路。
-///
-/// MINRES fallback は元 (unpermuted) 行列が必要なため、budget 超過時は
-/// `unpermuted_k` を使って MINRES を構築する。
+/// Pre-permuted fast path. MINRES fallback uses `unpermuted_k` since it operates on
+/// the original ordering.
 pub fn factorize_kkt_pre_permuted(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -769,8 +586,7 @@ pub fn factorize_kkt_pre_permuted(
     )
 }
 
-/// `factorize_kkt_pre_permuted` の symbolic キャッシュ版。`cached_symbolic` が `Some` の
-/// ときは `build_symbolic_hl` を skip する。
+/// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky.
 pub fn factorize_kkt_pre_permuted_cached(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -780,7 +596,7 @@ pub fn factorize_kkt_pre_permuted_cached(
     n_top: Option<usize>,
     cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
 ) -> Result<KktFactor, KktError> {
-    // DD LDL 経路は pre-permuted を直接サポートしないため、要求時は通常経路にフォールバック。
+    // The DD LDL path doesn't accept a pre-permuted matrix; fall back to the standard route.
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
         return factorize_kkt_with_cached_perm(unpermuted_k, perm, deadline, max_l_nnz, n_top);
     }
@@ -805,8 +621,7 @@ pub fn factorize_kkt_pre_permuted_cached(
 }
 
 impl KktFactor {
-    /// Direct (LDL) factor の SymbolicCholesky を Arc として返す (反復間キャッシュ用)。
-    /// Iterative / DirectDd の場合は None。
+    /// Shared SymbolicCholesky for the Direct backend (None for Iterative / DirectDd).
     pub fn symbolic_arc(&self) -> Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> {
         match self {
             KktFactor::Direct(f) => Some(f.symbolic_arc()),
@@ -815,46 +630,26 @@ impl KktFactor {
     }
 }
 
-// ── Auto dispatcher: try direct, fall back to iterative on memory budget ────────
-
-/// 最後に使用したバックエンド種別 (診断 / 検証用)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KktBackend {
-    /// 直接法 (LDL)
     Direct,
-    /// 反復法 (MINRES + Jacobi)
     Iterative,
 }
 
-/// 自動切替 dispatcher: 直接法 (LDL) を試し、メモリ予算超過時は反復法 (MINRES) に
-/// フォールバックする。
-///
-/// 判定:
-/// - `refactor` 内で DirectLdl を `max_l_nnz_from_budget()` 制限付きで試行
-/// - `WouldExceedMemory` を観測したら以降の `refactor` は反復法を使う
-///   (一度 budget を超えた問題は次 Newton step でも同じく超えるため、
-///    direct path を再度試みても無駄)
-/// - 数値特異 / deadline 切れは上位に伝搬 (反復法でも救えない)
-///
-/// fallback 後も deadline を共有する: direct で消費した時間は反復法の budget
-/// から自動的に減る (両方 deadline 引数で同じ Instant を見る)。
-///
-/// 「分岐は問題サイズの heuristic ではなく実測 L_nnz vs system memory の
-/// 比較」という設計のため、Maros 138 (小〜中問題) は direct 経路で性能維持、
-/// QPLIB_9008 (n=1M) は iterative 経路で OOM 回避という両立が自動で実現する。
+/// Try the direct LDL backend first; once it reports `WouldExceedMemory`, switch
+/// permanently to MINRES. Numerical / deadline failures still propagate up. The decision
+/// is driven by measured `L_nnz` vs the configured memory budget rather than any
+/// problem-size heuristic.
 pub struct AutoKktSolver {
     n: usize,
-    /// 直接法バックエンド。一度 WouldExceedMemory が出たら `None` にして以降スキップ
+    /// Cleared once `WouldExceedMemory` is observed so subsequent calls skip direct.
     direct: Option<DirectLdl>,
-    /// 反復法バックエンド。lazy init (direct が成功している間は不要)
+    /// Lazily constructed; only built once we need MINRES.
     iterative: Option<PreconditionedMinres>,
-    /// 最後に使ったバックエンド (`solve` でどちらを呼ぶか決める)
     last_used: Option<KktBackend>,
 }
 
 impl AutoKktSolver {
-    /// 既定の memory budget (`KKT_MEMORY_BUDGET_BYTES` env または 4 GiB) で
-    /// dispatcher を構築する。
     pub fn new(n: usize) -> Self {
         Self {
             n,
@@ -864,7 +659,6 @@ impl AutoKktSolver {
         }
     }
 
-    /// memory budget を明示指定するコンストラクタ (主にテスト用)。
     pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
         Self {
             n,
@@ -874,7 +668,6 @@ impl AutoKktSolver {
         }
     }
 
-    /// 最後に使われたバックエンド種別を返す (診断用)。
     pub fn last_backend(&self) -> Option<KktBackend> {
         self.last_used
     }
@@ -911,7 +704,6 @@ impl KktSolver for AutoKktSolver {
             return Err(KktError::SingularOrIndefinite);
         }
 
-        // Phase 1: direct を試す (まだ disable されていなければ)。
         if let Some(direct) = self.direct.as_mut() {
             match direct.refactor(k, deadline) {
                 Ok(()) => {
@@ -919,14 +711,13 @@ impl KktSolver for AutoKktSolver {
                     return Ok(());
                 }
                 Err(KktError::WouldExceedMemory) => {
-                    // 一度 budget 超えた問題は今後も超えるので direct を永久 disable。
+                    // Disable the direct backend permanently once budget is exceeded.
                     self.direct = None;
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        // Phase 2: iterative にフォールバック (deadline は共有なので残時間で動く)。
         if self.iterative.is_none() {
             self.iterative = Some(PreconditionedMinres::new(k.clone()));
         } else {

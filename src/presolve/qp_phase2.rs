@@ -1,10 +1,5 @@
-//! QP Presolve Phase 2 モジュール（#19-21）
-//!
-//! Phase 1（#1-18）の縮約後問題に対してさらに高度な前処理を適用する。
-//!
-//! - #19: equality_constraint_qr()     — 等式制約冗長行を QR/Gaussian 消去で除去
-//! - #20: near_zero_q_removal()        — Q 非対角の微小要素をゼロ化（疎性向上）
-//! - #21: constraint_precond_refactor()— 制約行の前処理（行正規化）presolve に集約
+//! QP presolve Phase 2: equality-constraint redundancy elimination, near-zero Q
+//! off-diagonal pruning, and row-norm constraint preconditioning.
 
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
@@ -12,18 +7,9 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
-// ---------------------------------------------------------------------------
-// #19: equality_constraint_qr — 等式制約の冗長行除去
-// ---------------------------------------------------------------------------
-
-/// 等式制約ペアを検出し、Gaussian 消去（部分ピボット）で線形独立な行を特定する。
-/// 冗長な等式制約ペアを削除して問題を縮小する。
-///
-/// 適用条件: m > n*2 （小問題はスキップ）
-/// PARAM: 適用閾値 m > n*2, 理由=QR分解コストが O(n²m) のため
-///
-/// 等式制約の検出: Le 制約 `A[i,*]x <= b[i]` と `A[j,*]x >= b[i]`
-/// （= `-A[j,*]x <= -b[i]`）が対になる行を等式制約ペアとして認識する。
+/// Detect Le-Le pairs that form an equality (A[j,*] = -A[i,*] and b[j] = -b[i]) and
+/// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
+/// `m > 2n` since the elimination cost is O(n²m).
 pub fn equality_constraint_qr(
     prob: &QpProblem,
     removed_rows: &mut [bool],
@@ -35,18 +21,13 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // (C) 計算量が過大な問題では #19 をスキップして HANG を防止
-    // QPLIB_8602 は m=105966, n≈1000 → 旧閾値 m>10000 でスキップ済み。
-    // 計算量ベース閾値 m*n > 1e8 に変更: m=10000,n=100 の問題では実行可能になる。
-    // PARAM: 閾値 1e8 = O(m_eq * n) の推定計算量ベース（Gaussian消去コスト）
+    // Skip when Gaussian-elimination cost (≈ m·n) is prohibitive.
     const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
     if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * 2 || n == 0 {
         return;
     }
 
-    // 行ごとの非ゼロエントリを収集 (列順に格納されるため列優先でイテレート)。
-    // ペア検出は Le 制約のみが対象 (`A[i]x <= b` と `-A[i]x <= -b` の組合せが等式)。
-    // Eq / Ge 制約を Le と誤ペア化すると冗長削除でない行を消して問題が壊れる。
+    // Restrict pair detection to Le rows; pairing Eq/Ge rows with Le would corrupt the problem.
     let mut row_entries: Vec<Vec<(usize, f64)>> = vec![vec![]; m];
     for j in 0..n {
         let start = prob.a.col_ptr[j];
@@ -61,11 +42,7 @@ pub fn equality_constraint_qr(
         }
     }
 
-    // (A) ハッシュベースのペア検出: O(m × nnz_per_row)
-    // ペア条件: A[j,*] = -A[i,*] かつ b[j] = -b[i]
-    //   → 同じ列パターン・同じ |b| の行をグループ化し、グループ内のみ比較
-
-    // 列パターンハッシュ (値を除いた列インデックスのハッシュ)
+    // Hash-bucket rows by (nnz, column-pattern, |b|) so pair candidates stay in small groups.
     let col_pattern_hash = |entries: &[(usize, f64)]| -> u64 {
         let mut h = DefaultHasher::new();
         for &(col, _) in entries {
@@ -74,28 +51,21 @@ pub fn equality_constraint_qr(
         h.finish()
     };
 
-    // グループキー: (nnz_count, col_pattern_hash, |b| 量子化)
     let mut groups: HashMap<(usize, u64, i64), Vec<usize>> = HashMap::new();
     for i in 0..m {
         if removed_rows[i] || row_entries[i].is_empty() {
             continue;
         }
         let ch = col_pattern_hash(&row_entries[i]);
-        // PARAM: 1e9 — |b| 量子化スケール（経験値）。b 値の 10^-9 精度での量子化により
-        // 同一制約の |b| 値が丸め誤差以内で一致する行をグループ化するためのハッシュキー。
-        // HiGHS は b 値をハッシュキーに使わず係数正規化ハッシュのみ使用。本実装独自。
-        // 注意: b > 9.22e9 のとき i64 飽和が発生する可能性。
-        // 実用的なQP問題では通常b≤1e6程度なので実害は稀だが、スケーリング後の内部値に注意。
-        // 飽和時は異なるb値の行が同一ハッシュに衝突するが、正確性への影響なし（QR消去で実値判定）。
-        // 承認=家老承認済み
+        // Quantise |b| at 1e-9 so rows agreeing within rounding hash together; collisions
+        // are harmless because the real comparison runs below.
         let bk = (prob.b[i].abs() * 1e9).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }
 
-    // グループ内でペアを検出 (グループは通常2〜数行と小さい)
     let mut eq_pos_rows: Vec<usize> = Vec::new();
     let mut paired = vec![false; m];
-    let mut pair_partner: Vec<usize> = vec![usize::MAX; m]; // i のペア相手 j
+    let mut pair_partner: Vec<usize> = vec![usize::MAX; m];
 
     for group in groups.values() {
         for &i in group {
@@ -110,7 +80,6 @@ pub fn equality_constraint_qr(
                 let entries_j = &row_entries[j];
                 let b_i = prob.b[i];
 
-                // A[j] = -A[i] かつ b[j] = -b[i] を厳密チェック
                 if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) {
                     continue;
                 }
@@ -133,7 +102,7 @@ pub fn equality_constraint_qr(
         return;
     }
 
-    // 等式制約行列 Aeq (m_eq x n) を密行列として構築
+    // Dense Aeq (m_eq × n) for partial-pivot Gaussian elimination.
     let mut aeq = vec![vec![0.0f64; n]; m_eq];
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
         for &(col, val) in &row_entries[orig_row] {
@@ -141,7 +110,6 @@ pub fn equality_constraint_qr(
         }
     }
 
-    // Gaussian 消去（部分ピボット）で線形独立行を特定
     let mut pivot_rows: Vec<bool> = vec![false; m_eq];
     let mut pivot_count = 0usize;
     let mut used_pivot_col = vec![false; n];
@@ -161,8 +129,6 @@ pub fn equality_constraint_qr(
             }
         }
 
-        // PARAM: 1e-10 — ピボット選択の最小値（実装的根拠）。EPS_Q と同値。
-        // 小さすぎるピボットは数値不安定を引き起こすためスキップ。承認=家老承認済み
         if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
             continue;
         }
@@ -177,8 +143,6 @@ pub fn equality_constraint_qr(
                 continue;
             }
             let factor = work[k][col] / pivot;
-            // PARAM: 1e-15 — ほぼゼロな因子のスキップ閾値（実装的根拠）。DROP_TOL と同値。
-            // 数値誤差以下の消去は不要。承認=家老承認済み
             if factor.abs() < 1e-15 {
                 continue;
             }
@@ -194,8 +158,7 @@ pub fn equality_constraint_qr(
         }
     }
 
-    // 非ピボット行（冗長な等式制約ペア）を除去
-    // pair_partner を使って O(m_eq) で完結（旧実装の O(m²) パートナー探索を廃止）
+    // Drop non-pivot rows (and their Le partners) — O(m_eq) via `pair_partner`.
     for (row_idx, &orig_row) in eq_pos_rows.iter().enumerate() {
         if !pivot_rows[row_idx] {
             removed_rows[orig_row] = true;
@@ -207,13 +170,7 @@ pub fn equality_constraint_qr(
     }
 }
 
-// ---------------------------------------------------------------------------
-// #20: near_zero_q_removal — Q 非対角微小要素のゼロ化
-// ---------------------------------------------------------------------------
-
-/// Q の非対角要素で |Q[i,j]| < eps_q のものをゼロ化する（疎性向上）。
-///
-/// PARAM: eps_q=1e-10, 理由=解の精度への影響は最小
+/// Drop Q off-diagonal entries with `|Q[i,j]| < EPS_Q` to improve sparsity.
 pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
     const EPS_Q: f64 = 1e-10;
 
@@ -227,7 +184,6 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
         for k in start..end {
             let row = q.row_ind[k];
             let val = q.values[k];
-            // 対角要素はゼロ化しない。非対角要素のみ eps_q でフィルタ。
             if row == j || val.abs() >= EPS_Q {
                 new_row_ind.push(row);
                 new_values.push(val);
@@ -245,17 +201,8 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
     }
 }
 
-// ---------------------------------------------------------------------------
-// #21: constraint_precond_refactor — 制約前処理の presolve への集約
-// ---------------------------------------------------------------------------
-
-/// 制約行を行ノルムで正規化する（制約前処理の presolve への集約）。
-///
-/// 各行 i: σ_i = max|A[i,*]|。σ_i > 1 なら A[i,*] と b[i] を σ_i で割る。
-///
-/// これにより KKT 行列の数値安定性が改善し、IPM の収束が向上する。
-///
-/// 戻り値: 行スケール係数（逆変換に使用。双対変数 y_i *= σ_i で元スケールに戻る）
+/// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SIGMA_FLOOR`).
+/// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
 pub fn constraint_precond(
     a: &mut CscMatrix,
     b: &mut [f64],
@@ -263,7 +210,6 @@ pub fn constraint_precond(
     let m = a.nrows;
     let n = a.ncols;
 
-    // 行ごとの max|A[i,*]|
     let mut row_max = vec![0.0f64; m];
     for col in 0..n {
         let start = a.col_ptr[col];
@@ -275,16 +221,8 @@ pub fn constraint_precond(
         }
     }
 
-    // σ_i = max(1/row_max[i], SIGMA_FLOOR) for rows with row_max > 1.0
-    //
-    // SIGMA_FLOOR = 1e-3: phase1 apply_large_coeff_rescaling と同じ floor。
-    // この floor は IPPMM が scaled 空間で達成できる pres_rel ~ cond×ε から逆算され、
-    // user_eps=1e-6 を unscale 後達成するには合成 amp ≤ 1e3 が必要 (= 1/SIGMA_FLOOR)。
-    //
-    // 真因 (QPILOTNO): floor なし版は row_max=5.85e6 行に対し σ=1.71e-7 を生成。
-    // phase1 LCS (σ=1e-3) と直列で合成 amp=5.85e6 → unscale で scaled pres 1.7e-7 が
-    // orig 1.0 まで増幅 → pfn=1.1e-5 で PFEAS_FAIL。phase1 と同じ floor を適用して
-    // 単一 stage あたり amp ≤ 1e3 に統一する (アルゴ物理量、問題集 tuning ではない)。
+    // SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
+    // amp (phase1·phase2·Ruiz) stays within the IPM's achievable scaled tolerance.
     const SIGMA_FLOOR: f64 = 1e-3;
     let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
         if mx > 1.0 + 1e-10 { (1.0 / mx).max(SIGMA_FLOOR) } else { 1.0 }
@@ -295,7 +233,6 @@ pub fn constraint_precond(
         return sigmas;
     }
 
-    // A の値をスケール: A[i,j] *= σ_i
     for col in 0..n {
         let start = a.col_ptr[col];
         let end = a.col_ptr[col + 1];
@@ -305,7 +242,6 @@ pub fn constraint_precond(
         }
     }
 
-    // b[i] *= σ_i
     for i in 0..m {
         b[i] *= sigmas[i];
     }
@@ -313,17 +249,8 @@ pub fn constraint_precond(
     sigmas
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2 エントリポイント
-// ---------------------------------------------------------------------------
-
-/// QP Presolve Phase 2（#19-21 の技法を適用）
-///
-/// Phase 1 の `QpPresolveResult` を受け取り、縮約後問題をさらに前処理して返す。
-///
-/// - #19: 等式制約の QR 分解による冗長行除去
-/// - #20: Q 非対角微小要素のゼロ化
-/// - #21: 制約行正規化（IPM の収束改善）
+/// Run Phase 2 of QP presolve on a Phase-1 result: redundant-equality removal,
+/// near-zero Q pruning, and row-norm preconditioning.
 pub fn run_qp_presolve_phase2(
     phase1_result: QpPresolveResult,
     opts: &SolverOptions,
@@ -336,35 +263,18 @@ pub fn run_qp_presolve_phase2(
         return phase1_result;
     }
 
-    // deadline 経過なら phase1 の結果をそのまま返す (Ruiz / 大係数 scale を skip)。
-    // 100 万変数級 QPLIB では Ruiz iteration が秒単位で deadline を圧迫する。
     if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return phase1_result;
     }
 
-    // ==================================================================
-    // #20: near_zero_q_removal() — Q 非対角要素のゼロ化
-    // ==================================================================
     let q_cleaned = near_zero_q_removal(&prob.q, n);
 
-    // ==================================================================
-    // #19: equality_constraint_qr() — 等式制約の冗長行除去
-    // 適用条件: m > n*2 の場合のみ実行
-    // ==================================================================
     let mut removed_rows_phase2 = vec![false; m];
-    {
-        // #19 は prob の情報を元に removed_rows_phase2 を更新する
-        // (q_cleaned は row 除去に影響しない)
-        equality_constraint_qr(prob, &mut removed_rows_phase2);
-    }
+    equality_constraint_qr(prob, &mut removed_rows_phase2);
 
-    // ==================================================================
-    // 縮約後問題の再構築（#19 で除去した行を反映）
-    // ==================================================================
     let any_removed = removed_rows_phase2.iter().any(|&b| b);
 
-    // phase1 reduced row → phase2 reduced row 対応 (削除された行は None)。
-    // 外側スコープに置く: a/b 再構築だけでなく postsolve_stack の row_map / row_scales 同期にも使う。
+    // Reuse the map outside this scope for row_scales / row_map syncing too.
     let new_row_map: Vec<Option<usize>> = {
         let mut map = vec![None; m];
         let mut idx = 0usize;
@@ -380,7 +290,6 @@ pub fn run_qp_presolve_phase2(
     let (a_new, b_new) = if any_removed {
         let m_new = new_row_map.iter().filter(|o| o.is_some()).count();
 
-        // 新 A 行列（CSC）
         let mut trip_rows: Vec<usize> = Vec::new();
         let mut trip_cols: Vec<usize> = Vec::new();
         let mut trip_vals: Vec<f64> = Vec::new();
@@ -413,14 +322,10 @@ pub fn run_qp_presolve_phase2(
         (prob.a.clone(), prob.b.clone())
     };
 
-    // ==================================================================
-    // #21: constraint_precond_refactor() — 制約行正規化
-    // ==================================================================
     let mut a_precond = a_new;
     let mut b_precond = b_new;
     let sigmas = constraint_precond(&mut a_precond, &mut b_precond);
 
-    // 縮約後問題を再構築（constraint_typesをremoved_rows_phase2でフィルタリング）
     let constraint_types_new: Vec<crate::problem::ConstraintType> = (0..m)
         .filter(|&i| !removed_rows_phase2[i])
         .map(|i| prob.constraint_types[i])
@@ -429,29 +334,19 @@ pub fn run_qp_presolve_phase2(
     let bounds_clone = prob.bounds.clone();
     let reduced_new = match QpProblem::new(q_cleaned, c_clone, a_precond, b_precond, bounds_clone, constraint_types_new) {
         Ok(p) => p,
-        Err(_) => return phase1_result, // 構築失敗 → Phase 1 結果をそのまま返す
+        Err(_) => return phase1_result,
     };
 
-    // constraint_precond の行スケーリングを postsolve_stack に記録（双対変数の逆変換に必要）
-    // Phase1の LargeCoeffRowScale に加え、Phase2の constraint_precond も
-    // postsolve_stack に積むことで、postsolve時に両方の行スケーリングが逆変換される。
     let mut result = QpPresolveResult {
         reduced: reduced_new,
         was_reduced: phase1_result.was_reduced || any_removed,
         ..phase1_result
     };
 
-    // Bug A 修正: phase2 で row 削除があった場合、result.row_map (元 row → reduced row)
-    // を new_row_map (phase1 reduced row → phase2 reduced row) で合成して更新する。
-    // 旧実装は phase1 の row_map のままで postsolve に渡しており、削除された行の dual を
-    // phase1 reduced index で引き当てて間違った位置に配置していた。
-    //
-    // Bug B 修正: phase1 で既に push された LargeCoeffRowScale の row_scales (size m_p1) を
-    // phase2 row 削除に同期して縮約する。同期しないと postsolve 逆変換で reduced_dual
-    // (size m_p2) と row_scales (size m_p1) のインデックス対応がずれて間違った scale が
-    // 適用される。
+    // When Phase 2 drops rows, compose the phase1 row_map with new_row_map, and
+    // contract any phase1 LargeCoeffRowScale entries to match the new row indexing —
+    // otherwise postsolve maps reduced duals through stale indices and applies wrong scales.
     if any_removed {
-        // Bug A: row_map 合成
         for entry in result.row_map.iter_mut() {
             if let Some(phase1_i) = *entry {
                 *entry = if phase1_i < new_row_map.len() {
@@ -461,7 +356,6 @@ pub fn run_qp_presolve_phase2(
                 };
             }
         }
-        // Bug B: 既存 LargeCoeffRowScale の row_scales を縮約
         for step in result.postsolve_stack.steps.iter_mut() {
             if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
                 if row_scales.len() == m {
@@ -481,10 +375,6 @@ pub fn run_qp_presolve_phase2(
     }
     result
 }
-
-// ---------------------------------------------------------------------------
-// テスト
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
