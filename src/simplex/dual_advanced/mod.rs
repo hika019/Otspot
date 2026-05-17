@@ -177,7 +177,7 @@ fn cold_start_advanced(
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
-        &mut total_iters,
+        &mut total_iters, false,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界

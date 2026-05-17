@@ -59,7 +59,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, &mut total_iters)
+        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, &mut total_iters, false)
         {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -225,6 +225,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             &mut pricing1,
             options,
             &mut total_iters,
+            true,
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
@@ -259,7 +260,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     match revised_simplex_core(
                         &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
                         m, n_ext, n_ext, &mut pricing_retry, options,
-                        &mut total_iters,
+                        &mut total_iters, true,
                     ) {
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
@@ -345,6 +346,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     &mut pricing2,
                     options,
                     &mut total_iters,
+                    false,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -542,6 +544,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         &mut pricing2,
                         options,
                         &mut total_iters,
+                        false,
                     ) {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -839,14 +842,46 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
 /// (m ≈ 88, iter rate ≈ 3300/s) bails in well under 1 s; slow-but-
 /// progressing LPs that decrease the objective at least every K pivots
 /// stay unaffected.
+///
+/// The bail fires only when **both** signatures are observed within the
+/// window: the Phase I objective `c^T x_B` does not improve for K
+/// consecutive iters, **and** the pivot step is essentially zero (degenerate)
+/// for K' consecutive iters. The AND condition is what distinguishes true
+/// cycling (klein3) from slow-but-progressing Phase I (forplan): forplan's
+/// Phase I pivots have step > 0 (real basis transitions reducing arts)
+/// even when individual obj decrements fall below `NO_PROGRESS_REL_EPS`,
+/// so the step counter resets and bail does not fire. klein3's degenerate
+/// cycling exhibits step ≈ 0 on every pivot (Charnes-perturbed values are
+/// the only nonzero contribution and they cancel), so both counters trip.
+///
+/// Bail is also gated on `enable_phase1_cycling_bail`. Callers pass `true`
+/// only for Primal Phase I (where Big-M is a meaningful fall-back); Phase II
+/// and all dual-driven Phase II calls pass `false` because at Phase II
+/// entry the primal incumbent is already feasible and an obj plateau there
+/// signals proximity to the optimum, not cycling.
 const BAIL_TRIGGER_FACTOR: usize = 10;
 const BAIL_TRIGGER_MIN: usize = 5_000;
+/// Step-plateau threshold K'. Set to K / `STEP_BAIL_RATIO` so a single
+/// non-degenerate pivot within any K'-iter window refutes cycling. Smaller
+/// than K because step ≈ 0 is a stronger per-iter signature than obj
+/// plateau (which can also come from f64 noise on real decrements), so
+/// fewer consecutive occurrences are required.
+const STEP_BAIL_RATIO: usize = 10;
 /// `current + best * REL_EPS < best`: relative threshold above f64 noise
 /// (~1e-15) that filters degenerate step≈0 "non-progress" from real moves.
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
+/// `step` magnitudes at or below this are treated as degenerate (step ≈ 0).
+/// Sized to cover the Charnes perturbation upper bound: `x_b[i]` after
+/// perturbation is at most `PIVOT_TOL * m`, and a pivot whose `d[leaving]`
+/// is O(1) yields `step <= PIVOT_TOL * m`. We pad by a factor for the
+/// general O(1/|d|) blow-up case.
+const STEP_DEGENERATE_FACTOR: f64 = 1.0;
 
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
+///
+/// `enable_phase1_cycling_bail` arms the obj+step plateau early-bail
+/// described above; pass `true` only from Primal Phase I.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
@@ -860,6 +895,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     pricing: &mut P,
     options: &SolverOptions,
     iter_count_out: &mut usize,
+    enable_phase1_cycling_bail: bool,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout is the real guard
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
@@ -897,9 +933,12 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut basis_snapshot: Vec<usize> = basis.to_vec();
 
     // Phase I cycling early-bail state (task #37).
-    let bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
+    let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
+    let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
+    let step_zero_threshold = PIVOT_TOL * STEP_DEGENERATE_FACTOR * (m as f64).max(1.0);
     let mut best_obj: f64 = f64::INFINITY;
-    let mut iters_since_progress: usize = 0;
+    let mut iters_since_obj_progress: usize = 0;
+    let mut iters_since_step_progress: usize = 0;
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
@@ -1132,20 +1171,30 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // Cycling early-bail (task #37). Treat `c^T x_B` as the progress
-        // metric (Phase I = sum of artificials, Phase II = real cost). A
-        // sustained plateau means degenerate pivoting / cycling; the Primal
-        // core has no Bland switch, so hand off to Big-M Phase I.
+        // Cycling early-bail (task #37). Trigger requires (a) `c^T x_B`
+        // plateau for `obj_bail_trigger` iters AND (b) step ≈ 0 for
+        // `step_bail_trigger` iters AND (c) Phase I caller. Either signal
+        // alone is insufficient: forplan-style Phase I (slow real progress)
+        // has step > 0 and resets (b); a Phase II near the optimum sees
+        // obj plateau but is gated off by (c).
         let current_obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
         let progress_eps = best_obj.abs().max(1.0) * NO_PROGRESS_REL_EPS;
         if current_obj + progress_eps < best_obj {
             best_obj = current_obj;
-            iters_since_progress = 0;
+            iters_since_obj_progress = 0;
         } else {
-            iters_since_progress = iters_since_progress.saturating_add(1);
-            if iters_since_progress >= bail_trigger {
-                return SimplexOutcome::Timeout(current_obj);
-            }
+            iters_since_obj_progress = iters_since_obj_progress.saturating_add(1);
+        }
+        if step.abs() > step_zero_threshold {
+            iters_since_step_progress = 0;
+        } else {
+            iters_since_step_progress = iters_since_step_progress.saturating_add(1);
+        }
+        if enable_phase1_cycling_bail
+            && iters_since_obj_progress >= obj_bail_trigger
+            && iters_since_step_progress >= step_bail_trigger
+        {
+            return SimplexOutcome::Timeout(current_obj);
         }
     }
 
