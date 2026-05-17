@@ -11,15 +11,11 @@
 //!
 //! ## このファイルのテスト方針
 //!
-//! - eq1-eq3 は Model API (`Model` + `constraint!`) で記述。
-//! - eq4 は `bound_duals` を直接 assert するため raw `QpProblem` を維持。
-//!   `ModelResult` は bound_duals を露出していない (task #26 拡張で解消予定)。
+//! - 全 4 test (eq1-4) を Model API で記述。
+//! - eq4 は `ModelResult.bound_duals` (model-api-extender) で active bound 検証。
 
 use solver::constraint;
 use solver::model::Model;
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_with, QpProblem};
 use solver::sparse::CscMatrix;
 
 // solver の収束判定 `ipm_eps` の default は 1e-6 (options.rs)。
@@ -30,12 +26,6 @@ const EPS_DUAL_ABS: f64 = 1e-4;
 
 /// mini test の単一 timeout (CLAUDE.md 「test 1 つ 3 分以内」、mini は 5s 以内)。
 const MINI_TIMEOUT_SECS: f64 = 5.0;
-
-fn solver_opts() -> SolverOptions {
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(MINI_TIMEOUT_SECS);
-    opts
-}
 
 fn assert_obj_close(actual: f64, expected: f64, label: &str) {
     let rel = (actual - expected).abs() / (1.0 + expected.abs());
@@ -169,27 +159,25 @@ fn eq3_rank_deficient_psd_q_equality() {
 ///   x1 = 0.5, x2 = 1.5。両方 (0,10) 内点なので bound 非 active OK。
 ///   obj = 0.5*(0.25+2.25) - 0.5 - 3 = 1.25 - 3.5 = -2.25。
 /// **狙い**: bound あり Eq で IPM が bound shift しないか (bound 非 active なら dual=0)。
-///
-/// **NOTE**: `bound_duals` を assert するため raw `QpProblem` を保持
-/// (Model API は ModelResult.bound_duals 未露出、task #26 拡張で解消予定)。
+///         `ModelResult.bound_duals` (model-api-extender) で検証。
 #[test]
 fn eq4_equality_with_inactive_bounds() {
     let n = 2;
+    let mut model = Model::new("eq4");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", 0.0, 10.0);
+    let x2 = model.add_var("x2", 0.0, 10.0);
+    model.add_constraint(constraint!((x1 + x2) == 2.0));
+    model.minimize(-1.0 * x1 - 2.0 * x2);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    let c = vec![-1.0, -2.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
-    let b = vec![2.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(0.0, 10.0), (0.0, 10.0)];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "eq4: status");
-    assert_x_close(r.solution[0], 0.5, "eq4: x1");
-    assert_x_close(r.solution[1], 1.5, "eq4: x2");
-    assert_obj_close(r.objective, -2.25, "eq4: obj");
+    let result = model.solve().expect("eq4: solve");
+    assert_x_close(result[x1], 0.5, "eq4: x1");
+    assert_x_close(result[x2], 1.5, "eq4: x2");
+    assert_obj_close(result.objective_value, -2.25, "eq4: obj");
     // bound_duals: 全 bound inactive → 全要素 ≈ 0 (CLAUDE.md L20「実装を正とするな」 — 期待値で assert)
-    for (k, &bd) in r.bound_duals.iter().enumerate() {
+    for (k, &bd) in result.bound_duals.iter().enumerate() {
         assert!(bd.abs() < EPS_DUAL_ABS, "eq4: bound_dual[{}]={} expected 0 (bound inactive)", k, bd);
     }
 }

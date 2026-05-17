@@ -16,27 +16,17 @@
 //!
 //! ## ファイル方針
 //!
-//! - mix1-3, mix6 は Model API で記述。
-//! - mix4, mix5 は `QpProblem.obj_offset` を直接設定する設計のため raw を維持
-//!   (Model API は obj_offset 設定 API 未提供、task #26 拡張で要検討)。
+//! - 全 6 test (mix1-6) を Model API で記述。
+//! - mix4/5 は `Model::set_obj_offset` (model-api-extender) を使用。
 
 use solver::constraint;
 use solver::model::Model;
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_with, QpProblem};
 use solver::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_ABS: f64 = 1e-5;
 const EPS_DUAL_ABS: f64 = 1e-4;
 const MINI_TIMEOUT_SECS: f64 = 5.0;
-
-fn solver_opts() -> SolverOptions {
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(MINI_TIMEOUT_SECS);
-    opts
-}
 
 fn assert_obj_close(actual: f64, expected: f64, label: &str) {
     let rel = (actual - expected).abs() / (1.0 + expected.abs());
@@ -188,27 +178,25 @@ fn mix3_eq_le_active_dual_recovery() {
 
 /// **構造**: scl4 と同じ問題 (min 1/2 (x1^2+x2^2) s.t. x1+x2=1) に obj_offset = 10.
 /// **解析解**: x1=x2=0.5, internal obj=0.25, reported obj = 0.25 + 10 = 10.25。
-/// **狙い**: QpProblem.obj_offset が SolverResult.objective に加算されているか。
-///
-/// **NOTE**: Model API は `obj_offset` 設定 API を提供しないため raw `QpProblem` を維持。
+/// **狙い**: `Model::set_obj_offset` が SolverResult.objective に加算されているか。
 #[test]
 fn mix4_obj_offset_addition() {
     let n = 2;
+    let mut model = Model::new("mix4");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2) == 1.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
-    let b = vec![1.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let mut prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
-    prob.obj_offset = 10.0;
+    model.set_quadratic_objective(q);
+    model.set_obj_offset(10.0);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix4: status");
-    assert_x_close(r.solution[0], 0.5, "mix4: x1");
-    assert_x_close(r.solution[1], 0.5, "mix4: x2");
+    let result = model.solve().expect("mix4: solve");
+    assert_x_close(result[x1], 0.5, "mix4: x1");
+    assert_x_close(result[x2], 0.5, "mix4: x2");
     // 期待: reported obj = internal(0.25) + offset(10) = 10.25
-    assert_obj_close(r.objective, 10.25, "mix4: obj with offset=10");
+    assert_obj_close(result.objective_value, 10.25, "mix4: obj with offset=10");
 }
 
 // =============================================================================
@@ -217,23 +205,21 @@ fn mix4_obj_offset_addition() {
 
 /// **狙い**: obj_offset が負数でも正しく加算 (符号の取扱い regression)。
 ///   同じ問題に offset = -100。
-///
-/// **NOTE**: Model API は `obj_offset` 設定 API を提供しないため raw `QpProblem` を維持。
 #[test]
 fn mix5_obj_offset_negative() {
     let n = 2;
+    let mut model = Model::new("mix5");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2) == 1.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
-    let b = vec![1.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let mut prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
-    prob.obj_offset = -100.0;
+    model.set_quadratic_objective(q);
+    model.set_obj_offset(-100.0);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix5: status");
-    assert_obj_close(r.objective, -99.75, "mix5: obj=internal(0.25)+offset(-100)");
+    let result = model.solve().expect("mix5: solve");
+    assert_obj_close(result.objective_value, -99.75, "mix5: obj=internal(0.25)+offset(-100)");
 }
 
 // =============================================================================

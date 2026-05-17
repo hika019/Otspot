@@ -178,9 +178,10 @@ fn ub2_psd_q_finite_bounds_yields_optimal() {
 /// **狙い**: PSD Q (但し semi-definite)、null space 方向に linear 項あり → unbounded.
 ///         一般凸 QP の unbounded 検出経路の regression。
 ///
-/// **NOTE**: status の細分 (Unbounded / MaxIterations / NumericalError いずれも許容)
-/// を assert するため raw `QpProblem` を保持。Model API は MaxIterations を `Timeout` /
-/// `Internal` に隠蔽するため fidelity が崩れる (task #26 拡張で要検討)。
+/// **NOTE (raw 維持理由)**: solver は本問題に `SuboptimalSolution` status + 非空 solution
+/// を返す。Model API は `SuboptimalSolution + !empty` を `Ok(ModelResult)` に折り畳むため、
+/// 「Optimal を name しない」契約 (= solver が convergence を主張しない) を Model API では
+/// 表現できない。raw 維持で `status != Optimal` を直接 pin する。
 #[test]
 fn ub3_q_null_space_with_linear_term_unbounded() {
     let n = 2;
