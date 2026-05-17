@@ -86,6 +86,10 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?hard"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_hard.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?extra"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_extra.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?canary"; then
+  # canary は standard / infeas 両方の問題を含むので、専用 baseline を使う
+  # (生成: lp_canary_setup.sh と一緒に手動メンテ。docs/canary_suite.md 参照)
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_canary.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 else

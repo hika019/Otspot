@@ -120,7 +120,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 if raw.status == SolveStatus::NumericalError {
                     return solve_without_presolve(problem, options);
                 }
-                let mut res = presolve::postsolve::run_postsolve(&raw, &presolve_result, problem);
+                let mut res = presolve::postsolve::run_postsolve(&raw, &presolve_result, problem, eff_opts.deadline);
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
@@ -1356,8 +1356,9 @@ mod tests {
         let mut pricing = DantzigPricing;
         let opts = SolverOptions::default();
         let b = vec![1.0, 0.0];
+        let mut iters = 0usize;
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts,
+            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts, &mut iters,
         );
         // 修正後: Timeout が期待される。現状: Optimal（偽）が返るのでこの assert は FAIL。
         assert!(
@@ -1423,8 +1424,9 @@ mod tests {
             ..SolverOptions::default()
         };
         let b = vec![4.0];
+        let mut iters = 0usize;
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts,
+            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts, &mut iters,
         );
         // MaxIterations廃止後 → Optimal、Timeout、または SingularBasis が返る
         assert!(
