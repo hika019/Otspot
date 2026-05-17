@@ -6,6 +6,7 @@
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::options::SolverOptions;
+use crate::tolerances::PIVOT_TOL;
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
 
@@ -808,22 +809,11 @@ pub fn run_postsolve(
         y
     };
 
-    // kept-y 摂動の有無で y_cl を並列に計算: どちらが最良かは問題依存
-    // (摂動有効が必要なケースと摂動が dfeas を悪化させるケースが両方ある)。
-    let y_cl_pert: Option<Vec<f64>> = build_and_solve_cleanup_lp(
-        orig_problem, presolve_result, &solution, &y_gs, deadline, true,
-    );
-    let y_cl_nopert: Option<Vec<f64>> = build_and_solve_cleanup_lp(
-        orig_problem, presolve_result, &solution, &y_gs, deadline, false,
-    );
-
-    // (C) 採用判定: bound-aware dfeas が小さい方を選ぶ。
-    //     dfeas_bound(y) = max_j viol_j で j: bound-active かつ
-    //       - lb==ub の真の固定変数は除外
-    //       - bound-tightening で FixedVar 化された列は rc=0 と見なして除外
-    //         (後段の FixedVar rc=0 override と整合)
-    //     viol_j = max(0, -rc_j) if at_lb only, max(0, rc_j) if at_ub only,
-    //              0 otherwise。bench `compute_dfeas_orig` (c69959d 以降) と同型。
+    // Define dfeas_bound first so the cheap candidates (y_loop, y_gs) can be
+    // screened before paying for the cleanup-LP candidates. Profile on canary
+    // showed cleanup_pert costs 15–25 s each on wood1p/d6cube/greenbea while
+    // returning Inf in 4/6 cases, and cheap candidates already achieved
+    // machine-zero dfeas — running cleanup unconditionally wasted ~40 s.
     let mut bound_tightened_fixed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for step in &presolve_result.postsolve_stack {
         if let PostsolveStep::FixedVariable { orig_col, .. } = step {
@@ -859,6 +849,49 @@ pub fn run_postsolve(
         max_viol
     };
 
+    let df_loop = dfeas_bound(&y_loop);
+    let df_gs = dfeas_bound(&y_gs);
+    let cheap_min = df_loop.min(df_gs);
+
+    // Cleanup-LP gating threshold: the strictest LP feasibility eps the bench
+    // exercises (`PIVOT_TOL = 1e-8`). When cheap recovery already achieves
+    // dfeas at or below this, neither cleanup variant can improve the bench
+    // verdict, and the kept-y perturbation variant in particular routinely
+    // takes 15–25 s and returns Inf on feasible problems.
+    let gate = PIVOT_TOL;
+
+    let (y_cl_nopert, y_cl_pert) = if cheap_min <= gate {
+        (None, None)
+    } else {
+        let t0_nopert = std::time::Instant::now();
+        let y_nopert = build_and_solve_cleanup_lp(
+            orig_problem, presolve_result, &solution, &y_gs, deadline, false,
+        );
+        let t_nopert = t0_nopert.elapsed();
+        let df_nopert = y_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+        let so_far = cheap_min.min(df_nopert);
+        // The kept-y perturbation variant (task #22) was added for
+        // greenbea/cre-b kept↔deleted coupling. The perturbed LP is much
+        // larger and on the canary set it consistently returned Inf dfeas
+        // after 15–20 s. Budget it at a small multiple of the plain variant's
+        // wall time so the worst case is bounded by what cleanup_nopert
+        // already showed is reasonable for this problem's size.
+        let y_pert = if so_far <= gate {
+            None
+        } else {
+            let now = std::time::Instant::now();
+            let pert_budget = t_nopert.saturating_mul(4);
+            let pert_deadline = match deadline {
+                Some(d) => Some(d.min(now + pert_budget)),
+                None => Some(now + pert_budget),
+            };
+            build_and_solve_cleanup_lp(
+                orig_problem, presolve_result, &solution, &y_gs, pert_deadline, true,
+            )
+        };
+        (y_nopert, y_pert)
+    };
+
     // (B') task #20 (greenbea coupling 解消): cleanup LP 後の y を `compute_lsq_dual_y`
     //      経由で **全体 KKT 整合** に LSQ 射影する。
     //
@@ -870,12 +903,14 @@ pub fn run_postsolve(
     //
     //      実装: orig_problem (LpProblem) → 一時 QpProblem (Q=0) 変換、現在の y を持つ
     //      SolverResult を渡して `compute_lsq_dual_y` を呼び、得られた y を 4 番目の候補
-    //      として df_bound 比較に組み込む。
-    let y_lsq: Option<Vec<f64>> = {
+    //      として df_bound 比較に組み込む。LSQ 射影は cheap candidate が gate を満たして
+    //      いる場合は不要 (cleanup LP と同じ理由)。
+    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate {
+        None
+    } else {
         // size guard (compute_lsq_dual_y 内の 50_000 と整合)
         const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
         if n + m <= LSQ_DUAL_SIZE_LIMIT && m > 0 {
-            // LpProblem を QpProblem (Q=0) に変換。共有 reference 不可なので clone。
             let q_empty = CscMatrix::new(n, n);
             let qp = crate::qp::QpProblem::new(
                 q_empty,
@@ -904,8 +939,6 @@ pub fn run_postsolve(
     };
 
     // 候補 y を dfeas_bound 最小で採用 (同点は計算量の小さい順)。
-    let df_loop = dfeas_bound(&y_loop);
-    let df_gs = dfeas_bound(&y_gs);
     let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));

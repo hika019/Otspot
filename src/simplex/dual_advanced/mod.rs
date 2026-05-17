@@ -70,26 +70,19 @@ pub(crate) fn solve_dual_advanced(
         return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
     }
 
-    // cold-start: Ge/Eq制約を含む問題:
-    //   1. まず既存 dual::two_phase_dual_simplex (= Primal fallback) を deadline の
-    //      半分で試す。多くの infeasible LP は Primal Phase I で短時間 Infeasible
-    //      検出できる (klein1, klein2 など)。
-    //   2. Primal が Timeout を返した場合 (klein3 のような degenerate cycling)、
-    //      残り半分の deadline で Big-M Phase I (phase1.rs, task #11) に fallback。
-    //      Big-M は cycling を検出して Infeasibility 推定する。
-    //   3. Primal が NumericalError / Infeasible / Optimal などを返したら
-    //      そのまま返却 (regression を避ける)。
-    //
-    // この順序により klein1/2 は従来通り高速、klein3 は Big-M で対処可能。
+    // Cold-start with Ge/Eq constraints: run Primal first with half the
+    // deadline; only fall back to Big-M Phase I if Primal had no feasible
+    // incumbent (Phase I cycled on infeasibility — klein3 case). When Primal
+    // returned with a non-empty solution the LP is feasible, so Big-M's
+    // "Timeout + artificials left → Infeasible" heuristic would wrongly flip
+    // the verdict (observed on d6cube, pds-10).
     let primal_options = clone_options_with_half_deadline(options);
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, &primal_options);
     match primal_result.status {
-        SolveStatus::Timeout => {
-            // klein3 級 cycling 疑い → Big-M Phase I で Infeasibility 推定。
+        SolveStatus::Timeout if primal_result.solution.is_empty() => {
             let bigm_result = phase1::big_m_cold_start(
                 sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
             );
-            // Big-M も Timeout なら Primal の結果を返す (incumbent 保持)
             if bigm_result.status == SolveStatus::Timeout {
                 primal_result
             } else {
