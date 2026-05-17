@@ -364,11 +364,16 @@ pub(crate) fn big_m_cold_start(
 mod tests {
     //! Big-M Phase I の全分岐 (feasible / infeasible / Ge / Eq / 混在) を
     //! 小規模合成 LP で網羅検証する。
+    //!
+    //! 旧 test は objective + status のみ assert していたため、Phase I が偽
+    //! Optimal を出した場合や dual recovery が崩れた場合に検出できなかった。
+    //! `assert_kkt_optimal` で primal/dual/objective を一括検証する。
 
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::solve_with;
     use crate::sparse::CscMatrix;
+    use crate::test_kkt::assert_kkt_optimal;
 
     #[test]
     fn big_m_phase1_feasible_eq() {
@@ -378,9 +383,7 @@ mod tests {
             vec![ConstraintType::Eq],
             vec![(0.0, f64::INFINITY); 2], None,
         ).unwrap();
-        let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.objective - 3.0).abs() < 1e-6, "obj should be 3.0, got {}", result.objective);
+        assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
     }
 
     #[test]
@@ -391,9 +394,7 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0, f64::INFINITY); 2], None,
         ).unwrap();
-        let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.objective - 5.0).abs() < 1e-6, "obj should be 5.0, got {}", result.objective);
+        assert_kkt_optimal(&lp, 5.0, "big_m_phase1_feasible_ge");
     }
 
     #[test]
@@ -424,8 +425,7 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Infeasible, "got {:?}", result.status);
     }
 
-    /// RANGE 風 (Le + Ge 同行) feasible: 3 ≤ x1+x2 ≤ 7, min x1+x2 → obj=3
-    /// io::mps::tests::test_range_solve_simple の構造的 sentinel。
+    /// 3 ≤ x1+x2 ≤ 7, min x1+x2 → obj=3
     #[test]
     fn big_m_phase1_le_ge_range_feasible() {
         let a = CscMatrix::from_triplets(
@@ -436,9 +436,7 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Ge],
             vec![(0.0, f64::INFINITY); 2], None,
         ).unwrap();
-        let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
-        assert!((result.objective - 3.0).abs() < 1e-6, "obj should be 3.0, got {}", result.objective);
+        assert_kkt_optimal(&lp, 3.0, "big_m_phase1_le_ge_range_feasible");
     }
 
     /// Ge b=0 (initial_basis に surplus が直接入る、artificial 不要)
@@ -450,8 +448,59 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0, f64::INFINITY); 2], None,
         ).unwrap();
-        let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Optimal);
-        assert!(result.objective.abs() < 1e-6, "obj should be 0, got {}", result.objective);
+        assert_kkt_optimal(&lp, 0.0, "big_m_phase1_ge_b_zero_bypasses_bigm");
+    }
+
+    /// Eq with b=0 (degenerate artificial). wood1p / etamacro が踏むパターン
+    /// の最小再現: Big-M Phase I が b=0 Eq 行で人工変数を正しく排除しないと
+    /// dfeas が劣化する。
+    #[test]
+    fn big_m_phase1_degenerate_eq_zero_rhs() {
+        // x1 + x2 = 0  (b=0 Eq → 人工変数縮退)
+        // x1 + x3 = 1  (b=1 Eq)
+        // min x3
+        // → x1=x2=0, x3=1, obj=1
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![0.0, 0.0, 1.0], a, vec![0.0, 1.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(0.0, f64::INFINITY); 3], None,
+        ).unwrap();
+        assert_kkt_optimal(&lp, 1.0, "big_m_phase1_degenerate_eq_zero_rhs");
+    }
+
+    /// 大係数 + Eq + Ge 混在: Big-M スケーリングが c/b の大きさに動的追従しないと
+    /// 双対実行可能性が崩れる。
+    #[test]
+    fn big_m_phase1_large_coeff_eq_ge_mix() {
+        // 1e6 * x1 + x2 = 2e6, x1 + x2 >= 1, min x1 + x2
+        // x1=1 で Eq 違反 (e6 + x2 = 2e6 → x2 = 1e6) → x2=1e6
+        // → x1=1, x2=1e6 を最適化: x1+x2=1e6+1。x1↑にすると x2↓ で合計減 → x1=2, x2=0
+        //   sum=2 だが Eq 確認: 2e6+0=2e6 ✓、Ge: 2>=1 ✓ → obj=2
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0e6, 1.0, 1.0, 1.0], 2, 2,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0], a, vec![2.0e6, 1.0],
+            vec![ConstraintType::Eq, ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY); 2], None,
+        ).unwrap();
+        assert_kkt_optimal(&lp, 2.0, "big_m_phase1_large_coeff_eq_ge_mix");
+    }
+
+    /// 自由変数 + Eq: split-variable + Phase I の組合せで feasibility が崩れないか。
+    #[test]
+    fn big_m_phase1_free_var_eq() {
+        // x1 + x2 = 2, x1 free, x2 in [0, INF), min x1+x2
+        // → x1=2-x2, obj = 2 (任意の feasible で)
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0], a, vec![2.0],
+            vec![ConstraintType::Eq],
+            vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)], None,
+        ).unwrap();
+        assert_kkt_optimal(&lp, 2.0, "big_m_phase1_free_var_eq");
     }
 }
