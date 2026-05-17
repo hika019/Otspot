@@ -313,10 +313,9 @@ pub(crate) fn big_m_cold_start(
                 r.iterations = total_iters;
                 return r;
             }
-            let mut r = super::super::timeout_result_with_incumbent(
-                sf, problem, &basis_aug, &x_b, col_scale,
+            let r = super::super::timeout_result_with_incumbent(
+                sf, problem, &basis_aug, &x_b, col_scale, total_iters,
             );
-            r.iterations = total_iters;
             return r;
         }
         SimplexOutcome::SingularBasis => {
@@ -413,7 +412,7 @@ pub(crate) fn big_m_cold_start(
             ..Default::default()
         },
         SimplexOutcome::Timeout(_) => {
-            super::super::timeout_result_with_incumbent(sf, problem, &basis_aug, &x_b, col_scale)
+            super::super::timeout_result_with_incumbent(sf, problem, &basis_aug, &x_b, col_scale, total_iters)
         }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }

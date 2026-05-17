@@ -267,6 +267,7 @@ pub(crate) fn timeout_result_with_incumbent(
     basis: &[usize],
     x_b: &[f64],
     col_scale: &[f64],
+    iter: usize,
 ) -> SolverResult {
     let solution = extract_solution(sf, basis, x_b, col_scale);
     let objective = problem
@@ -284,6 +285,7 @@ pub(crate) fn timeout_result_with_incumbent(
         reduced_costs: vec![],
         slack: vec![],
         warm_start_basis: None,
+        iterations: iter,
         ..Default::default()
     }
 }
@@ -599,9 +601,10 @@ mod tests {
         let x_b = sf.b.clone();
         let col_scale = vec![1.0; sf.n_total];
 
-        let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale);
+        let result = timeout_result_with_incumbent(&sf, &lp, &basis, &x_b, &col_scale, 42);
 
         assert_eq!(result.status, SolveStatus::Timeout);
+        assert_eq!(result.iterations, 42, "iter arg は SolverResult.iterations へ反映");
         assert_eq!(result.solution.len(), 2);
         let expected_obj = lp
             .c

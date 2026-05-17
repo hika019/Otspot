@@ -76,7 +76,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             options.max_etas,
                             options.deadline,
                         );
-                        return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, ..Default::default() };
+                        return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
                     }
                     Err(_) => return SolverResult::numerical_error(),
                 }
@@ -272,6 +272,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 reduced_costs: vec![],
                                 slack: vec![],
                                 warm_start_basis: None,
+                                iterations: total_iters,
                                 ..Default::default()
                             };
                         }
@@ -314,7 +315,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
                                 options.max_etas, options.deadline,
                             );
-                            return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
+                            return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
                         }
                         Err(_) => return SolverResult::numerical_error(),
                     }
@@ -360,7 +361,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                     options.max_etas,
                                     options.deadline,
                                 );
-                                return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
+                                return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
                             }
                             Err(_) => return SolverResult::numerical_error(),
                         }
@@ -475,6 +476,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 reduced_costs: vec![],
                                 slack: vec![],
                                 warm_start_basis: None,
+                                iterations: total_iters,
                                 ..Default::default()
                             };
                         }
@@ -493,6 +495,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs: vec![],
                             slack: vec![],
                             warm_start_basis: None,
+                            iterations: total_iters,
                             ..Default::default()
                         };
                     }
@@ -512,7 +515,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                     sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
                                     options.max_etas, options.deadline,
                                 );
-                                return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, ..Default::default() };
+                                return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
                             }
                             Err(_) => return SolverResult::numerical_error(),
                         }
@@ -555,7 +558,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                         options.max_etas,
                                         options.deadline,
                                     );
-                                    return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, ..Default::default() };
+                                    return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
                                 }
                                 Err(_) => return SolverResult::numerical_error(),
                             }
@@ -629,6 +632,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    iterations: total_iters,
                     ..Default::default()
                 }
             }
