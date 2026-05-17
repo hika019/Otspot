@@ -62,6 +62,8 @@ pub struct Model {
     use_ruiz_scaling: Option<bool>,
     /// 収束精度プリセット（None = デフォルト Medium = 1e-6）
     tolerance: Option<Tolerance>,
+    /// Presolve 有効/無効（None = SolverOptions::default() に従う = true）
+    presolve: Option<bool>,
 }
 
 impl Model {
@@ -77,6 +79,7 @@ impl Model {
             timeout_secs: None,
             use_ruiz_scaling: None,
             tolerance: None,
+            presolve: None,
         }
     }
 
@@ -94,6 +97,12 @@ impl Model {
     /// 精度プリセットを設定する。
     pub fn set_tolerance(&mut self, tol: Tolerance) -> &mut Self {
         self.tolerance = Some(tol);
+        self
+    }
+
+    /// Presolve の有効/無効を設定する（デフォルト: true）。
+    pub fn set_presolve(&mut self, flag: bool) -> &mut Self {
+        self.presolve = Some(flag);
         self
     }
 
@@ -220,7 +229,38 @@ impl Model {
         let problem = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
             .map_err(|e| ModelError::Internal(e.to_string()))?;
 
-        let solver_result = simplex::solve(&problem);
+        let mut lp_opts = crate::options::SolverOptions::default();
+        if let Some(t) = self.timeout_secs {
+            lp_opts.timeout_secs = Some(t);
+        }
+        if let Some(tol) = self.tolerance {
+            lp_opts.tolerance = Some(tol);
+        }
+        if let Some(flag) = self.presolve {
+            lp_opts.presolve = flag;
+        }
+        let solver_result = simplex::solve_with(&problem, &lp_opts);
+
+        // SolverResult の dual/rc/slack は extract_dual_info によって
+        // 元の制約空間 (Eq/Ge/Le) と変数空間 (bounds 込み) で復元済み。
+        let lp_extras = |sr: &crate::problem::SolverResult| {
+            let dual = if sr.dual_solution.is_empty() {
+                None
+            } else {
+                Some(sr.dual_solution.clone())
+            };
+            let rc = if sr.reduced_costs.is_empty() {
+                None
+            } else {
+                Some(sr.reduced_costs.clone())
+            };
+            let slack = if sr.slack.is_empty() {
+                None
+            } else {
+                Some(sr.slack.clone())
+            };
+            (dual, rc, slack)
+        };
 
         match solver_result.status {
             SolveStatus::Optimal => {
@@ -229,15 +269,13 @@ impl Model {
                 } else {
                     solver_result.objective
                 };
+                let (dual, rc, slack) = lp_extras(&solver_result);
                 Ok(ModelResult {
                     objective_value: obj,
                     solution: solver_result.solution,
-                    // dual_solution / reduced_costs / slack: not yet available in
-                    // the main-branch SolverResult. Will be populated once
-                    // SolverResult is extended in a future task.
-                    dual_solution: None,
-                    reduced_costs: None,
-                    slack: None,
+                    dual_solution: dual,
+                    reduced_costs: rc,
+                    slack,
                 })
             }
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
@@ -253,12 +291,13 @@ impl Model {
                     } else {
                         solver_result.objective
                     };
+                    let (dual, rc, slack) = lp_extras(&solver_result);
                     Ok(ModelResult {
                         objective_value: obj,
                         solution: solver_result.solution.clone(),
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
+                        dual_solution: dual,
+                        reduced_costs: rc,
+                        slack,
                     })
                 }
             }
@@ -271,12 +310,13 @@ impl Model {
                     } else {
                         solver_result.objective
                     };
+                    let (dual, rc, slack) = lp_extras(&solver_result);
                     Ok(ModelResult {
                         objective_value: obj,
                         solution: solver_result.solution,
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
+                        dual_solution: dual,
+                        reduced_costs: rc,
+                        slack,
                     })
                 }
             }
