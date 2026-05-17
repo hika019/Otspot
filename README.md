@@ -239,23 +239,27 @@ HTMLレポートは `target/criterion/` に生成される。
 ## テスト
 
 ```bash
-# Full test suite (unit + Netlib + proptest)
-cargo test
+# Full test suite (unit + Netlib + proptest) — bench data 必須
+cargo nextest run --release
 
-# Verbose output
-cargo test -- --nocapture
+# unit / bin test のみ (bench data 不要)
+cargo nextest run --release --profile lib-only
 
-# Netlib integration tests only
-cargo test netlib
-
-# Proptest fuzz tests only
-cargo test proptest
+# doc test
+cargo test --doc --release
 ```
+
+`tests/*.rs` の多くは `data/lp_problems_*/`, `data/qplib/` 等を `assert!(path.exists())` で
+要求し、data 欠落で **panic** する (CLAUDE.md 原則「SKIP せず panic」で検証空白を作らない)。
+data を整備していない環境では `--profile lib-only` で unit + bin test のみ走らせる。
+
+bench data 取得は [開発環境 (Docker)](#開発環境-docker) section 参照、もしくは
+`bash scripts/download_all_bench_data.sh`。
 
 テストスイートに含まれるもの:
 - 全モジュールの**ユニットテスト**
-- 実世界検証のための**23件のNetlibインスタンス**
-- ランダム化ファズテストのための**3種類のproptestスイート**
+- 実世界検証のための**Netlibインスタンス integration**
+- ランダム化ファズテストのための**proptest**
 - 基本的なAPIカバレッジのための**スモークテスト**
 
 ## 開発環境 (Docker)
