@@ -1,29 +1,8 @@
-//! task #16: 1000s 級 TIMEOUT/FAIL 問題群の真因分類診断
+//! 1000s 級 TIMEOUT/FAIL 問題群の真因分類診断。
 //!
-//! ## 目的
-//! abnormal-exit task #3/#4 + bisecter task #6/#10/#14/#15 完了後も残る
-//! 1000s 級 LP の **真因 class 分け** を事実観測する。
-//!
-//! ## class 定義 (CLAUDE.md L11「ダイレクトに効く」事実分類)
-//! - **Class A**: dual 退化 / postsolve y 復元不足 (perold col 229 type)
-//!   → cleanup LP の Phase 2 / y_ref 拡張で対処可能
-//! - **Class B**: cleanup LP 内の **multi-row coupling** (greenbea row 1270 type)
-//!   → cleanup LP の構造拡張 (kept rows 同時最適化) が必要
-//! - **Class C**: Phase I cycling / Big-M 不足 (klein3 type)
-//!   → task #11 領域
-//! - **Class D**: solver 性能不足 (iter 数足りない / convergence 遅い)
-//!   → cre-b PASS 996s / d6cube PFEAS_FAIL 60s 等
-//! - **Class E**: presolve エラー (cleanup LP timeout 等)
-//!   → ken-18 abnormal-exit 跡 (build_and_solve_cleanup_lp 暴走)
-//!
-//! ## 観測する事実
-//! 1. status (Optimal / Timeout / PFEAS_FAIL / DFEAS_FAIL / NumericalError)
-//! 2. iterations (solver が収束へ向け進んだか)
-//! 3. pf / df / dfr (どの残差が失敗の主因)
-//! 4. timing_breakdown (presolve / solve / postsolve のどこに時間)
-//! 5. 違反列の数 / 値分布 (dual 退化パターンの shape)
-//!
-//! 全 test `#[ignore]`、CPU 競合避けて `cargo test -- --ignored <name>` で個別実行。
+//! 各 problem の status / iterations / pf / df / timing / 違反列を観測し
+//! class (dual 退化 / cleanup coupling / cycling / 性能不足 / presolve エラー)
+//! を heuristic で推定する。全 test `#[ignore]`、個別実行用。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -111,40 +90,35 @@ fn classify(qp_path: &str, eps: f64, timeout_s: f64) -> bool {
         t_pre, t_sol, t_post);
     eprintln!("  pf_max={:.2e}  df_max={:.2e}  df_rel_max={:.2e}",
         max_pf, max_viol, max_viol_rel);
-    eprintln!("  violators: at_lb={} at_ub={}  zero_c_violators={} (perold/greenbea type pattern)",
+    eprintln!("  violators: at_lb={} at_ub={}  zero_c_violators={}",
         viol_at_lb, viol_at_ub, zero_c_violators);
 
-    // class 推定 (heuristics)
     let class: &str = match &r.status {
         SolveStatus::Optimal => {
             if max_viol_rel < eps {
                 "PASS"
             } else if zero_c_violators > 0 && (viol_at_lb + viol_at_ub) > 0 {
-                "Class A/B (dual 退化、perold/greenbea type)"
+                "Class A/B (dual 退化)"
             } else if max_viol_rel > 0.0 {
-                "Class A 変種 (dual 違反、非 zero_c パターン)"
+                "Class A 変種 (dual 違反)"
             } else {
                 "Optimal but check"
             }
         }
-        SolveStatus::Timeout => "Class D (solver 性能不足、convergence 不到達)",
-        SolveStatus::NumericalError => "Class C/E (Phase I 失敗 or presolve エラー、要 trace)",
+        SolveStatus::Timeout => "Class D (convergence 不到達)",
+        SolveStatus::NumericalError => "Class C/E (Phase I 失敗 or presolve エラー)",
         SolveStatus::Infeasible => "FAIL: Infeasible 誤判定",
         SolveStatus::Unbounded => "FAIL: Unbounded 誤判定",
-        SolveStatus::MaxIterations => "Class D (iter 上限到達、性能不足)",
+        SolveStatus::MaxIterations => "Class D (iter 上限到達)",
         SolveStatus::SuboptimalSolution => "Class D (収束 partial)",
         SolveStatus::LocallyOptimal => "Class D (LP では起きるべきでない)",
         SolveStatus::NonConvex(_) => "FAIL: LP に NonConvex 返却 (バグ)",
-        _ => "未知 status (#[non_exhaustive])",
+        _ => "未知 status",
     };
     eprintln!("  CLASS ESTIMATE: {}", class);
     eprintln!();
     matches!(r.status, SolveStatus::Optimal) && max_viol_rel < eps
 }
-
-// ============================================================================
-// 個別 classification test (全て #[ignore]、`cargo test -- --ignored` で実行)
-// ============================================================================
 
 #[test] #[ignore = "diag (~30s)"] fn classify_greenbea() {
     classify("data/lp_problems/greenbea.QPS", 1e-6, 60.0);
@@ -178,7 +152,6 @@ fn classify(qp_path: &str, eps: f64, timeout_s: f64) -> bool {
     classify("data/lp_problems/ken-18.QPS", 1e-6, 1000.0);
 }
 
-// hard suite の 1000s 級も対象に含める (109 にフォーカスしない方針)
 #[test] #[ignore = "diag (~120s)"] fn classify_rail582() {
     classify("data/lp_problems_hard/rail582.QPS", 1e-6, 300.0);
 }

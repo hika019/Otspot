@@ -1,11 +1,5 @@
-//! task #32 Phase 0 観測: LISWET9 wrong basin の active-set 事実化。
-//!
-//! Clarabel strict 解と本 solver 解を per-row で比較し、
-//! - 各行の slack r_i = b_i - a_i^T x の符号 / magnitude 分布
-//! - active set 一致率 (|r_i| < tol を active と定義)
-//! - LISWET-family 全 12 問で同パターン確認
-//!
-//! 目的: hypothesis (c) "wrong active set / wrong convergence basin" を事実支持 / 反証。
+//! LISWET wrong-basin 観測 diag: Clarabel strict 解と本 solver 解を per-row で
+//! 比較し、active set 一致率 / slack 分布を出力する (assertion なし)。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -224,14 +218,14 @@ fn diff_active_set(
 }
 
 #[test]
-#[ignore = "task #32 Phase 0: LISWET-family active-set diff observation"]
+#[ignore = "diag: LISWET-family active-set diff observation"]
 fn diag_liswet_family_active_set_diff() {
     let names = [
         "LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5", "LISWET6",
         "LISWET7", "LISWET8", "LISWET9", "LISWET10", "LISWET11", "LISWET12",
     ];
 
-    eprintln!("\n========= LISWET-family active set diff (task #32 Phase 0) =========");
+    eprintln!("\n========= LISWET-family active set diff =========");
     eprintln!("ACTIVE_TOL = {:.0e}", ACTIVE_TOL);
 
     for name in &names {
@@ -289,10 +283,9 @@ fn diag_liswet_family_active_set_diff() {
     }
 }
 
-/// 観測 2 相当: max_iter=1, 2, 5, 10, 49 で LISWET9 を解いて、iter ごとの x 進化を観測。
-/// IPM iter 0→1 の active-set 変化を「max_iter=1 結果と x0 (≒0) との diff」で近似。
+/// max_iter=1,2,5,10,49 で LISWET9 を解き、iter ごとの x 進化 / active-set 変化を観測。
 #[test]
-#[ignore = "task #32 Phase 0: LISWET9 early-iter active-set evolution"]
+#[ignore = "diag: LISWET9 early-iter active-set evolution"]
 fn diag_liswet9_early_iter_evolution() {
     let path = std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS");
     if !path.exists() {

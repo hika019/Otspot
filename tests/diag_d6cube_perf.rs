@@ -1,25 +1,8 @@
-//! d6cube perf/feasibility regression guard (task #35 / #36).
+//! d6cube perf/feasibility regression guard。
 //!
-//! d6cube is a feasible LP (415 Eq constraints, 6184 vars, all c_j = 1) whose
-//! Phase II is highly degenerate near the optimum. Three issues stacked here:
-//!
-//! - **#36 (false Infeasible)**: the dual_advanced router used to hand the
-//!   remaining deadline to Big-M Phase I after a primal Timeout. Big-M's
-//!   `Timeout + artificials left → Infeasible` heuristic is sound only for
-//!   problems where Phase I itself cycles (klein3 type); on feasible-but-slow
-//!   LPs like d6cube it wrongly flipped the verdict to Infeasible. Fix:
-//!   skip Big-M when primal Timeout came with a non-empty incumbent solution.
-//!
-//! - **#35a (postsolve overhead)**: postsolve was unconditionally running a
-//!   15 s cleanup LP that returned Inf dfeas while the cheap recovery
-//!   already had df=0. Fix: gate the cleanup LPs behind a dfeas sufficiency
-//!   check (see `diag_postsolve_cleanup_gate.rs`). Cuts d6cube wall by 15 s.
-//!
-//! - **#35b (slow Phase II convergence)**: Phase II asymptotically approaches
-//!   the optimum (507 → ~322 over 30K iters in 30s), but the rate decelerates
-//!   exponentially because the optimum sits on a highly degenerate face.
-//!   Reaching `eps=1e-6` within 60s requires an algorithmic improvement
-//!   (EXPAND / IPM crossover / dual finish-up) — outstanding.
+//! d6cube は feasible LP (415 Eq, 6184 vars, c_j=1) で Phase II が optimum
+//! 近傍で highly degenerate。Big-M Phase I の false Infeasible flip 防止 +
+//! Phase II が known optimum 近傍に到達することを guard する。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -63,13 +46,11 @@ fn d6cube_no_false_infeasible_and_makes_progress() {
         );
     }
 
-    // #36 guard: must not return Infeasible (the pre-fix bug). Timeout is the
-    // expected outcome until Phase II convergence is sped up (#35); Optimal is
-    // also acceptable if/when that lands.
+    // Guard: must not return Infeasible. Timeout/Optimal are acceptable.
     assert!(
         !matches!(r.status, SolveStatus::Infeasible),
-        "d6cube returned Infeasible — #36 regression: dual_advanced router \
-         is again running Big-M Phase I on a feasible-but-slow LP"
+        "d6cube returned Infeasible — dual_advanced router must not run Big-M \
+         Phase I on a feasible-but-slow LP"
     );
     // Solver must produce a non-empty incumbent.
     assert!(
@@ -86,13 +67,10 @@ fn d6cube_no_false_infeasible_and_makes_progress() {
     );
 }
 
-/// Aspirational TDD red for task #35: d6cube should reach Optimal at eps=1e-6
-/// within 60s. Currently FAIL — requires algorithmic Phase II improvement
-/// (EXPAND ratio test, IPM crossover, or equivalent). Marked `#[ignore]` so
-/// the regression guard above runs by default; this test stays red as a
-/// progress marker, run with `cargo test -- --ignored d6cube_optimal_within_60s`.
+/// Aspirational red test: d6cube should reach Optimal at eps=1e-6 within 60s.
+/// Currently FAIL (Phase II asymptotic deceleration on degenerate optimum).
 #[test]
-#[ignore = "task #35 outstanding: Phase II asymptotic deceleration on degenerate optimum"]
+#[ignore = "Phase II asymptotic deceleration on degenerate optimum"]
 fn d6cube_optimal_within_60s() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
@@ -105,7 +83,7 @@ fn d6cube_optimal_within_60s() {
     let rel_err = (r.objective - D6CUBE_KNOWN_OPT).abs()
         / (1.0_f64).max(D6CUBE_KNOWN_OPT.abs());
     eprintln!(
-        "d6cube[task#35]: status={:?} obj={:.6e} rel_err={:.2e} iters={}",
+        "d6cube: status={:?} obj={:.6e} rel_err={:.2e} iters={}",
         r.status, r.objective, rel_err, r.iterations
     );
 

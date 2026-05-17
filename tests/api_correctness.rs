@@ -310,8 +310,7 @@ fn qp_ineq_constrained() {
 /// Q=[[2,0],[0,2]], c=[0,0], 制約なし (boundsのみ)
 /// f の最小値は原点 (0,0)。boundsが (0,0.5) なので x=0,y=0 が最適。
 /// obj = 0
-/// 注: IPM はバリア法のため lb=0 に到達せず、微小残差が残る可能性がある。
-///     解析解 obj=0 に対し 5e-6 以内を期待する。
+/// IPM barrier 法のため lb=0 に到達せず微小残差が残るので obj=0 に対し 5e-6 以内を期待。
 #[test]
 fn qp_bounds_only() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();

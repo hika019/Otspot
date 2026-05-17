@@ -1,39 +1,5 @@
-//! Task #29 凸 QP テスト coverage 拡充 — Clarabel cross-check **assertion 強化**
-//!
-//! ## 背景
-//!
-//! 既存 `tests/clarabel_cross_check.rs::test_multi_problems_match_clarabel` は
-//! `#[ignore]` かつ assertion なし (print only)。CLAUDE.md L14「fail を範疇外で
-//! 分離するな」「SKIP は bug 不在を保証しない」に従い、小規模・既知 SUCCESS の
-//! Maros 問題に対して **個別 test + 厳密 assertion** を追加する。
-//!
-//! ## 住み分け
-//!
-//! qp-survey (fix/qp-bugs) が `tests/clarabel_cross_check.rs` を bug 修正
-//! 経路で触る可能性があるため、本 file は **新 file** として独立。
-//! 既存 file は一切 edit せず追加のみ。
-//!
-//! ## カバー問題 (小規模、< 5s/test、CLAUDE.md L16)
-//!
-//! - HS21 (n=2)         : box + linear ineq
-//! - HS35 (n=3)         : single ineq
-//! - HS35MOD (n=3)      : HS35 と同型、bound 違い
-//! - HS76 (n=4)         : 3 ineq
-//! - HS268 (n=5)        : 5 ineq
-//! - ZECEVIC2 (n=2)     : 2 ineq, simple
-//! - GENHS28 (n=10)     : 8 eq
-//! - TAME (n=2)         : 1 eq, 1 var fixed
-//! - S268 (n=5)         : HS268 系
-//! - AUG2D (n≈220)      : 等式系、中規模
-//! - QSC205, QADLITTL   : sparse QP
-//! - DUAL1, DUAL2       : 200~ var QP
-//!
-//! 各 test は:
-//!   1. parse_qps → QpProblem
-//!   2. Clarabel で参照解 (cost_primal)
-//!   3. solver で解 (objective)
-//!   4. internal obj (Qx,c の自前計算) で参照解と比較 (rel < 1e-4)
-//!   5. solver status = Optimal
+//! 小規模 Maros 凸 QP に対する Clarabel cross-check 個別 test + 厳密 assertion。
+//! 各 test は QpProblem を parse し、Clarabel 参照解と internal obj で比較 (rel < 1e-4)。
 
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{

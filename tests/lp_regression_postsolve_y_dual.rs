@@ -1,24 +1,5 @@
-//! 回帰テスト: e61f27b "presolve に R6/R15/R5 追加" が壊した postsolve dual 復元
-//!
-//! ## 真因 (bisect 2026-05-17 by bisecter agent)
-//!
-//! commit e61f27b で `src/presolve/postsolve.rs:111` の reduced_cost 計算を
-//!   旧: `vec![0.0; n]` + col_map で reduced 空間 rc を展開 (削除変数=0)
-//!   新: `c.clone()` から `c[j] - Σ A_ij * y_i` を全変数で再計算
-//! に変更したが、`y` は LinearSubstitution の y 復元のみ追加。RedundantCons /
-//! SingletonRow / 既存 transform 群の y 復元の網羅性は保証されていない。
-//!
-//! ## このテストの目的
-//! - postsolve 後の (x, y, rc) が LP KKT 条件 (bound feasibility + complementary
-//!   slackness + 残差) を満たすことを **複数問題で** 直接 assert する。
-//! - bench script (stale binary bug あり) に依存せず Rust API 直叩き。
-//! - HEAD で perold は FAIL (df_rel ≈ 1.0)、修正後は GREEN を期待。
-//!
-//! ## 設計方針
-//! - 109 問にチューニングするのではなく、`postsolve.rs` の各 PostsolveStep
-//!   (FixedVariable / EmptyColumn / EmptyRow / SingletonRow / RedundantConstraint /
-//!   BoundsTightened / LinearSubstitution) が触る経路を **小〜中規模問題で網羅** する。
-//! - 1 問あたり 60s 以下、テストファイル合計 3 分以下 (CLAUDE.md L16)。
+//! postsolve 後の (x, y, rc) が LP KKT を満たすことを複数問題で assert する
+//! regression guard。perold は postsolve dual 復元の代表 canary。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -26,12 +7,7 @@ use solver::problem::SolveStatus;
 use solver::qp::{solve_qp_with, QpProblem};
 use std::path::Path;
 
-/// bench `compute_dfeas_orig` と同型: LP/QP の dual feasibility 相対残差。
-///
-/// `viol_j = max(0, -rc_j)` (bound 考慮しない旧 formula、c69959d 以前)。
-/// c69959d 以降の at_lb/at_ub 緩和 judge は本質的に同等以下の検出力なので、
-/// 旧 formula で violation を取れば bench の DFEAS_FAIL と同等以上に厳しく
-/// 判定できる (regression 防壁用に厳しい側を採用)。
+/// LP/QP dual feasibility 相対残差 (`viol_j = max(0, -rc_j)`、bound 非考慮版)。
 fn dfeas_abs_rel(prob: &QpProblem, rc: &[f64]) -> (f64, f64) {
     let n = prob.c.len().min(rc.len());
     let mut dfeas_abs = 0.0_f64;
@@ -46,9 +22,9 @@ fn dfeas_abs_rel(prob: &QpProblem, rc: &[f64]) -> (f64, f64) {
     (dfeas_abs, dfeas_rel)
 }
 
-/// LP dual feasibility (bound 考慮版、c69959d 以降の judge と同等):
+/// LP dual feasibility (bound 考慮版): bound-hit 列のみ厳格判定。
 /// `viol = max(0, -rc)` if x at lb only; `max(0, rc)` if x at ub only;
-/// fixed (lb==ub) skip; interior 0。bound-hit 列のみ厳格判定。
+/// fixed (lb==ub) skip; interior 0。
 fn dfeas_rel_bound_aware(prob: &QpProblem, x: &[f64], rc: &[f64]) -> f64 {
     const BOUND_TOL: f64 = 1e-6;
     let n = prob.c.len().min(rc.len()).min(x.len());
@@ -106,10 +82,7 @@ fn check_postsolve_dual_feasibility(
     Ok(summary)
 }
 
-/// perold: e61f27b 退化の canary。HEAD で df_rel ≈ 1.0 で FAIL。修正後で PASS。
-///
-/// HEAD 4a1e305 (bisect 確定): df_abs=1.43e2 df_rel_bound=9.93e-1
-/// good ae81dea: df_abs=5.77e-11 df_rel_bound ≈ 5.77e-11
+/// perold: postsolve dual 復元退化の canary。
 #[test]
 fn perold_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility("data/lp_problems/perold.QPS", 1e-6, 180.0);
@@ -119,7 +92,7 @@ fn perold_postsolve_dual_feasibility() {
     }
 }
 
-/// 診断: greenbea を presolve=off で解いた dfeas を観測。task #22 開発用、default 除外。
+/// 診断: greenbea を presolve=off で解いた dfeas を観測。
 #[test]
 #[ignore = "diag (60s)"]
 fn greenbea_presolve_off_dfeas_check() {
@@ -161,7 +134,7 @@ fn perold_presolve_off_baseline() {
             df_rel
         );
     } else {
-        eprintln!("[NOTE] simplex 単体は perold で {:?} ({} bisect 対象外)", r.status, "presolve=off");
+        eprintln!("perold[presolve=off]: status={:?}", r.status);
     }
 }
 
@@ -298,26 +271,9 @@ fn perold_col229_deep_diag() {
     }
 }
 
-// (presolve module は pub(crate) のため map 直接観測は src 内 diag 経由)
+// 大規模 LP の dfeas_rel assertion (network/重 LP は #[ignore] で default 除外)。
 
-// ============================================================================
-// 大規模 LP (team-lead task #6 list) の TDD test
-//
-// CLAUDE.md L13「複数パターンのデータを用意せよ」+ task #10 完了報告 fix の
-// 網羅検証。これらは Netlib LP の中でも大規模で、bench 当時 PASS/FAIL の
-// 混在があった問題群。本 commit 後の dfeas_rel を assert する。
-//
-// 注意: cre-b / pds-10 / dfl001 / ken-13 等は数十秒〜数分かかる。CLAUDE.md
-// L16 (test 1 つ 3 分以内) を遵守するため timeout を絞り、所要時間が超えそうな
-// ものは `#[ignore]` でデフォルト実行から外す (cargo test -- --ignored で
-// 明示実行)。
-// ============================================================================
-
-/// cre-b: 72k×9k の大規模 LP。historical bench で 35.7s PASS だったが、
-/// 本環境 (HEAD 66857c1) では 120s timeout でも未収束 (`status=Timeout`)。
-/// convergence 自体は task #10 fix の射程外なので `#[ignore]` で default から
-/// 外し、`cargo test -- --ignored cre_b_postsolve_dual_feasibility` で明示
-/// 実行する。修正後 GREEN を狙う target test。
+/// cre-b: 72k×9k の大規模 LP。
 #[test]
 #[ignore = "重 LP (timeout 300s 必要); cargo test -- --ignored で明示実行"]
 fn cre_b_postsolve_dual_feasibility() {
@@ -328,17 +284,9 @@ fn cre_b_postsolve_dual_feasibility() {
     }
 }
 
-/// greenbea: bisecter task #6 で perold と同類の dual 退化パターンと推定。
-/// 2026-05-17 task #10 commit 66857c1 時点で本 fix は GREEN 化できていない
-/// (`df_rel ≈ 0.97`)。task #22 (案 A: cleanup LP に kept-y perturbation 追加) で
-/// 構造的修正 (`dy[m_kept]` 変数 + BFS coupling closure) を実装したが、cleanup LP
-/// が n=5405 / m=2392 規模で 60 秒テスト deadline 内に収束せず Timeout → None
-/// fallback → y_loop 採用 (df_rel ≈ 0.97 のまま)。**unlimited deadline では
-/// Chebyshev (min-max) で df_cl ≈ 30 / 38 まで改善** することを確認済 (commit
-/// 内 diag run)。GREEN 化には warm-start cleanup LP 或いは presolve=off 系
-/// fallback などさらなる施策が必要。`#[ignore]` で default 除外、target 維持。
+/// greenbea: perold と同類の dual 退化パターン。cleanup LP が 60s 内に未収束で GREEN 未達。
 #[test]
-#[ignore = "GREEN target 未達: task #22 で構造 fix 入ったが cleanup LP が 60s 内に未収束"]
+#[ignore = "GREEN target 未達: cleanup LP が 60s 内に未収束"]
 fn greenbea_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 60.0);
     match r {
@@ -347,9 +295,7 @@ fn greenbea_postsolve_dual_feasibility() {
     }
 }
 
-/// pds-10: 105k×34k で convergence に時間がかかる (HEAD で 185s timeout)。
-/// 解そのものの dual feasibility を確認する設計。timeout=200s だが CI で
-/// 重いため `#[ignore]`。task #6 list の重要 problem 1 つ。
+/// pds-10: 105k×34k の大規模 LP。convergence に時間がかかる。
 #[test]
 #[ignore = "重 LP (≈ 200s); cargo test -- --ignored で明示実行"]
 fn pds_10_postsolve_dual_feasibility() {
@@ -360,12 +306,7 @@ fn pds_10_postsolve_dual_feasibility() {
     }
 }
 
-// ============================================================================
-// task #14: greenbea 深掘り診断
-// ============================================================================
-
-/// 診断: greenbea の最悪 dual 違反列を print。perold_diagnostic_dump_worst_violations
-/// と同型。assertion なし。
+/// 診断: greenbea の最悪 dual 違反列を print。assertion なし。
 #[test]
 #[ignore = "diag (60s)、default 除外"]
 fn greenbea_diagnostic_dump_worst_violations() {

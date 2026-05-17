@@ -1,39 +1,6 @@
-//! Task #17 mini-corpus — **bug class 3**: `pivot_out_degenerate_artificials`
-//! の O(n_artificial × n_total) cost (Task #4 真因対処済)。
-//!
-//! ## 構造的特徴
-//!
-//! Phase I 終了時点で `n_artificial` 個の artificial 列が degenerate (`x_b ≈ 0`)
-//! のまま基底に残っており、それぞれを非基底列 (`n_total` 個) へ pivot-out する
-//! 必要がある。旧実装は各 artificial 行について全 `n_total` 列を FTRAN して
-//! pivot 候補を探索 (= O(n_artificial × n_total × FTRAN cost))。
-//!
-//! `osa-60` (n_total ≈ 243k, n_artificial = 11) で本 routine だけで 60s budget
-//! を使い切り、Phase 2 が走れず `obj=0` で Timeout していた。
-//!
-//! ## 本 fix (5652027 + abnormal-exit)
-//!
-//! BTRAN-based candidate scan:
-//!   1. `z = B^{-T} e_i` (1 BTRAN per artificial row, O(m))
-//!   2. `d[i, j] = z · A_{:,j}` (sparse dot per nonbasic, O(nnz(A_{:,j})))
-//!   3. argmax_j |d[i, j]|; only the chosen column gets a full FTRAN
-//! 計算量 O(m + nnz(A) + FTRAN_cost) per artificial。osa-60 で 30000× speedup
-//! 観測 (`tests/diag_ken18_osa60.rs` 経由)。
-//!
-//! ## このテストの設計
-//!
-//! 旧 routine の O(n_artificial × n_total) を実時間で再現するのは小規模 LP では
-//! 困難 (BLAS/cache が速いため worst-case が顕在化しない)。代わりに:
-//!   (i) `K` artificial × `N` 非基底列の合成 LP を build し、
-//!   (ii) 解時間が現実的な範囲 (≤ 1 sec) であることを bench gate にする
-//!       — 退行で minutes に戻ったら fail。
-//!
-//! ## test 構成
-//!
-//! - K=3 artificial-prone Eq 行 × N=50 非基底列の合成 LP (3 sec budget 内)。
-//! - K=5 × N=80 (重め、3 sec 内)。
-//! - 修正前のコードでは BTRAN 経路を持たないため、解時間が極端に大きくなる。
-//!   現 HEAD で <1s で解けることを確認。
+//! `pivot_out_degenerate_artificials` の BTRAN candidate scan 計算量 regression guard。
+//! K artificial × N 非基底列の合成 LP を build し、解時間が wall budget 内に
+//! 収まることで O(n_artificial × n_total) 退行を検知する。
 
 use std::time::Instant;
 
