@@ -13,7 +13,15 @@
 //! - to_all_le 経路は廃止 / native Eq 経路移行で dual 折りたたみが旧 codepath に
 //!   残っていると Ge 行に符号誤りが入る
 //! - obj_offset は postsolve で加算 (qp_postsolve.rs 想定)、加算漏れ→ obj 一致せず
+//!
+//! ## ファイル方針
+//!
+//! - mix1-3, mix6 は Model API で記述。
+//! - mix4, mix5 は `QpProblem.obj_offset` を直接設定する設計のため raw を維持
+//!   (Model API は obj_offset 設定 API 未提供、task #26 拡張で要検討)。
 
+use solver::constraint;
+use solver::model::Model;
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::{solve_qp_with, QpProblem};
@@ -56,22 +64,23 @@ fn assert_x_close(actual: f64, expected: f64, label: &str) {
 #[test]
 fn mix1_ge_constraint_dual_magnitude() {
     let n = 2;
+    let mut model = Model::new("mix1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2) >= 1.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
-    let b = vec![1.0];
-    let cts = vec![ConstraintType::Ge];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix1: status");
-    assert_x_close(r.solution[0], 0.5, "mix1: x1");
-    assert_x_close(r.solution[1], 0.5, "mix1: x2");
-    assert_obj_close(r.objective, 0.25, "mix1: obj");
-    assert_eq!(r.dual_solution.len(), 1, "mix1: dual length=1 (元 row 数)");
-    assert!((r.dual_solution[0].abs() - 0.5).abs() < EPS_DUAL_ABS,
-        "mix1: |y|=0.5, got {}", r.dual_solution[0]);
+    let result = model.solve().expect("mix1: solve");
+    assert_x_close(result[x1], 0.5, "mix1: x1");
+    assert_x_close(result[x2], 0.5, "mix1: x2");
+    assert_obj_close(result.objective_value, 0.25, "mix1: obj");
+    let dual = result.dual_solution.as_ref().expect("mix1: dual_solution");
+    assert_eq!(dual.len(), 1, "mix1: dual length=1 (元 row 数)");
+    assert!((dual[0].abs() - 0.5).abs() < EPS_DUAL_ABS,
+        "mix1: |y|=0.5, got {}", dual[0]);
 }
 
 // =============================================================================
@@ -93,38 +102,34 @@ fn mix1_ge_constraint_dual_magnitude() {
 #[test]
 fn mix2_eq_le_ge_mixed_inactive_inequalities() {
     let n = 3;
+    let mut model = Model::new("mix2");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
+    model.add_constraint(constraint!(x1 <= 2.0));
+    model.add_constraint(constraint!(x3 >= 0.5));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
-    let c = vec![0.0, 0.0, 0.0];
-    // 3 rows:
-    //   row0: x1+x2+x3 (Eq)
-    //   row1: x1 (Le)
-    //   row2: x3 (Ge)
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 0, 0, 2],
-        &[0, 0, 1, 2, 2],
-        &[1.0, 1.0, 1.0, 1.0, 1.0],
-        3, n,
-    ).unwrap();
-    let b = vec![3.0, 2.0, 0.5];
-    let cts = vec![ConstraintType::Eq, ConstraintType::Le, ConstraintType::Ge];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix2: status");
-    for i in 0..n {
-        assert_x_close(r.solution[i], 1.0, &format!("mix2: x{}=1", i+1));
+    let result = model.solve().expect("mix2: solve");
+    let xs = [x1, x2, x3];
+    for (i, &v) in xs.iter().enumerate() {
+        assert_x_close(result[v], 1.0, &format!("mix2: x{}=1", i + 1));
     }
-    assert_obj_close(r.objective, 1.5, "mix2: obj");
-    assert_eq!(r.dual_solution.len(), 3, "mix2: dual length = 元 row 数 3");
+    assert_obj_close(result.objective_value, 1.5, "mix2: obj");
+    let dual = result.dual_solution.as_ref().expect("mix2: dual_solution");
+    assert_eq!(dual.len(), 3, "mix2: dual length = 元 row 数 3");
     // Le (idx 1), Ge (idx 2) は inactive → ≈0
-    assert!(r.dual_solution[1].abs() < EPS_DUAL_ABS,
-        "mix2: y_le inactive ≈ 0, got {}", r.dual_solution[1]);
-    assert!(r.dual_solution[2].abs() < EPS_DUAL_ABS,
-        "mix2: y_ge inactive ≈ 0, got {}", r.dual_solution[2]);
+    assert!(dual[1].abs() < EPS_DUAL_ABS,
+        "mix2: y_le inactive ≈ 0, got {}", dual[1]);
+    assert!(dual[2].abs() < EPS_DUAL_ABS,
+        "mix2: y_ge inactive ≈ 0, got {}", dual[2]);
     // Eq dual の符号は規約依存だが大きさは |y_eq|=1
-    assert!((r.dual_solution[0].abs() - 1.0).abs() < EPS_DUAL_ABS,
-        "mix2: |y_eq|=1, got {}", r.dual_solution[0]);
+    assert!((dual[0].abs() - 1.0).abs() < EPS_DUAL_ABS,
+        "mix2: |y_eq|=1, got {}", dual[0]);
 }
 
 // =============================================================================
@@ -146,21 +151,19 @@ fn mix2_eq_le_ge_mixed_inactive_inequalities() {
 #[test]
 fn mix3_eq_le_active_dual_recovery() {
     let n = 3;
+    let mut model = Model::new("mix3");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
+    model.add_constraint(constraint!(x1 <= 2.0));
+    model.add_constraint(constraint!(x3 >= 0.5));
+    model.minimize(-10.0 * x1);
     let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
-    let c = vec![-10.0, 0.0, 0.0];
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 0, 0, 2],
-        &[0, 0, 1, 2, 2],
-        &[1.0, 1.0, 1.0, 1.0, 1.0],
-        3, n,
-    ).unwrap();
-    let b = vec![3.0, 2.0, 0.5];
-    let cts = vec![ConstraintType::Eq, ConstraintType::Le, ConstraintType::Ge];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix3: status");
+    let result = model.solve().expect("mix3: solve");
     // Ge 「弱 active」(境界ぎりぎり) のため active-set 切替の数値感度が高い。
     // 内点法の解変数精度 O(eps × cond) ≈ 5e-5。LP 退化境界 (EPS_DEG) 同等で許容。
     const EPS_X_WEAK_ACTIVE: f64 = 5e-5;
@@ -168,14 +171,15 @@ fn mix3_eq_le_active_dual_recovery() {
         let d = (a - e).abs();
         assert!(d < EPS_X_WEAK_ACTIVE, "[mix3:{}] x={:.6e} expected={:.6e} diff={:.3e}", name, a, e, d);
     };
-    chk(r.solution[0], 2.0, "x1=2 (Le active)");
-    chk(r.solution[1], 0.5, "x2=0.5");
-    chk(r.solution[2], 0.5, "x3=0.5 (Ge weakly active)");
-    assert_obj_close(r.objective, -17.75, "mix3: obj");
-    assert_eq!(r.dual_solution.len(), 3, "mix3: dual length=3");
+    chk(result[x1], 2.0, "x1=2 (Le active)");
+    chk(result[x2], 0.5, "x2=0.5");
+    chk(result[x3], 0.5, "x3=0.5 (Ge weakly active)");
+    assert_obj_close(result.objective_value, -17.75, "mix3: obj");
+    let dual = result.dual_solution.as_ref().expect("mix3: dual_solution");
+    assert_eq!(dual.len(), 3, "mix3: dual length=3");
     // |y_le|=8.5 (正値、Le の active dual)
-    assert!((r.dual_solution[1].abs() - 8.5).abs() < EPS_DUAL_ABS,
-        "mix3: |y_le|=8.5 expected, got {}", r.dual_solution[1]);
+    assert!((dual[1].abs() - 8.5).abs() < EPS_DUAL_ABS,
+        "mix3: |y_le|=8.5 expected, got {}", dual[1]);
 }
 
 // =============================================================================
@@ -185,6 +189,8 @@ fn mix3_eq_le_active_dual_recovery() {
 /// **構造**: scl4 と同じ問題 (min 1/2 (x1^2+x2^2) s.t. x1+x2=1) に obj_offset = 10.
 /// **解析解**: x1=x2=0.5, internal obj=0.25, reported obj = 0.25 + 10 = 10.25。
 /// **狙い**: QpProblem.obj_offset が SolverResult.objective に加算されているか。
+///
+/// **NOTE**: Model API は `obj_offset` 設定 API を提供しないため raw `QpProblem` を維持。
 #[test]
 fn mix4_obj_offset_addition() {
     let n = 2;
@@ -211,6 +217,8 @@ fn mix4_obj_offset_addition() {
 
 /// **狙い**: obj_offset が負数でも正しく加算 (符号の取扱い regression)。
 ///   同じ問題に offset = -100。
+///
+/// **NOTE**: Model API は `obj_offset` 設定 API を提供しないため raw `QpProblem` を維持。
 #[test]
 fn mix5_obj_offset_negative() {
     let n = 2;
@@ -242,25 +250,22 @@ fn mix5_obj_offset_negative() {
 #[test]
 fn mix6_redundant_le_row_dual_padded() {
     let n = 2;
+    let mut model = Model::new("mix6");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", 0.0, 50.0);
+    let x2 = model.add_var("x2", 0.0, 50.0);
+    model.add_constraint(constraint!((x1 + x2) == 1.0));
+    model.add_constraint(constraint!((x1 + x2) <= 100.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 0, 1],
-        &[0, 0, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        2, n,
-    ).unwrap();
-    let b = vec![1.0, 100.0];
-    let cts = vec![ConstraintType::Eq, ConstraintType::Le];
-    let bounds = vec![(0.0, 50.0), (0.0, 50.0)];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "mix6: status");
-    assert_x_close(r.solution[0], 0.5, "mix6: x1");
-    assert_x_close(r.solution[1], 0.5, "mix6: x2");
-    assert_obj_close(r.objective, 0.25, "mix6: obj");
-    assert_eq!(r.dual_solution.len(), 2, "mix6: dual length = 元 row 数 2 (presolve 除去後も元数で報告)");
-    assert!(r.dual_solution[1].abs() < EPS_DUAL_ABS,
-        "mix6: y_le redundant ≈ 0, got {}", r.dual_solution[1]);
+    let result = model.solve().expect("mix6: solve");
+    assert_x_close(result[x1], 0.5, "mix6: x1");
+    assert_x_close(result[x2], 0.5, "mix6: x2");
+    assert_obj_close(result.objective_value, 0.25, "mix6: obj");
+    let dual = result.dual_solution.as_ref().expect("mix6: dual_solution");
+    assert_eq!(dual.len(), 2, "mix6: dual length = 元 row 数 2 (presolve 除去後も元数で報告)");
+    assert!(dual[1].abs() < EPS_DUAL_ABS,
+        "mix6: y_le redundant ≈ 0, got {}", dual[1]);
 }

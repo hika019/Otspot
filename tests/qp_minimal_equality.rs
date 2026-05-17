@@ -11,11 +11,12 @@
 //!
 //! ## このファイルのテスト方針
 //!
-//! - 全 test は LP/QP リテラル (≤ 10 var) で構築。
-//! - 解析解 (KKT 直解) を assert: primal x, objective, dual y。
-//! - bound dual は本ファイルでは扱わない (Eq-only / 全自由変数で bound active なし)。
-//! - magic は使わず eps は問題 scale から導出 (`EPS_*` constant 定義)。
+//! - eq1-eq3 は Model API (`Model` + `constraint!`) で記述。
+//! - eq4 は `bound_duals` を直接 assert するため raw `QpProblem` を維持。
+//!   `ModelResult` は bound_duals を露出していない (task #26 拡張で解消予定)。
 
+use solver::constraint;
+use solver::model::Model;
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::{solve_qp_with, QpProblem};
@@ -63,23 +64,22 @@ fn assert_x_close(actual: f64, expected: f64, label: &str) {
 /// **狙い**: 最小の Eq-only QP で IPM が「Phase II 直行」収束することを確認。
 #[test]
 fn eq1_two_free_vars_single_equality() {
+    let mut model = Model::new("eq1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2) == 1.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
-    let b = vec![1.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "eq1: status");
-    assert_x_close(r.solution[0], 0.5, "eq1: x1");
-    assert_x_close(r.solution[1], 0.5, "eq1: x2");
-    assert_obj_close(r.objective, 0.25, "eq1: obj");
-    // dual y: |Qx - A^T y + c|=0 → 1*0.5 - y = 0 → y = 0.5
-    assert_eq!(r.dual_solution.len(), 1, "eq1: dual length");
-    let dy = (r.dual_solution[0].abs() - 0.5).abs();
-    assert!(dy < EPS_DUAL_ABS, "eq1: |y|=0.5, got {}", r.dual_solution[0]);
+    let result = model.solve().expect("eq1: solve");
+    assert_x_close(result[x1], 0.5, "eq1: x1");
+    assert_x_close(result[x2], 0.5, "eq1: x2");
+    assert_obj_close(result.objective_value, 0.25, "eq1: obj");
+    let dual = result.dual_solution.as_ref().expect("eq1: dual_solution");
+    assert_eq!(dual.len(), 1, "eq1: dual length");
+    assert!((dual[0].abs() - 0.5).abs() < EPS_DUAL_ABS, "eq1: |y|=0.5, got {}", dual[0]);
 }
 
 // =============================================================================
@@ -93,34 +93,32 @@ fn eq1_two_free_vars_single_equality() {
 #[test]
 fn eq2_hs51_cold_start_regression() {
     let n = 5;
+    let mut model = Model::new("eq2_hs51");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
+    let x4 = model.add_var("x4", f64::NEG_INFINITY, f64::INFINITY);
+    let x5 = model.add_var("x5", f64::NEG_INFINITY, f64::INFINITY);
+    // 等式 3 本: x1+3*x2=4, x3+x4-2*x5=0, x2-x5=0
+    model.add_constraint(constraint!((x1 + 3.0 * x2) == 4.0));
+    model.add_constraint(constraint!((x3 + x4 - 2.0 * x5) == 0.0));
+    model.add_constraint(constraint!((x2 - x5) == 0.0));
+    model.minimize(-4.0 * x2 - 4.0 * x3 - 2.0 * x4 - 2.0 * x5);
     let q = CscMatrix::from_triplets(
         &[0, 1, 0, 1, 2, 1, 2, 3, 4],
         &[0, 0, 1, 1, 1, 2, 2, 3, 4],
         &[2.0, -2.0, -2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0],
         n, n,
     ).unwrap();
-    let c = vec![0.0, -4.0, -4.0, -2.0, -2.0];
-    // 等式 3 本 (Le 展開せず Eq そのまま)
-    //   x1 + 3*x2 = 4
-    //   x3 + x4 - 2*x5 = 0
-    //   x2 - x5 = 0
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 2, 1, 1, 2, 1],
-        &[0, 1, 1, 2, 3, 4, 4],
-        &[1.0, 3.0, 1.0, 1.0, 1.0, -1.0, -2.0],
-        3, n,
-    ).unwrap();
-    let b = vec![4.0, 0.0, 0.0];
-    let cts = vec![ConstraintType::Eq; 3];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "eq2: cold-start should reach Optimal (HS51 真因確認)");
-    for i in 0..n {
-        assert_x_close(r.solution[i], 1.0, &format!("eq2: x{}=1", i+1));
+    let result = model.solve().expect("eq2: cold-start solve (HS51 真因確認)");
+    let xs = [x1, x2, x3, x4, x5];
+    for (i, &v) in xs.iter().enumerate() {
+        assert_x_close(result[v], 1.0, &format!("eq2: x{}=1", i + 1));
     }
-    assert_obj_close(r.objective, -6.0, "eq2: obj=-6");
+    assert_obj_close(result.objective_value, -6.0, "eq2: obj=-6");
 }
 
 // =============================================================================
@@ -137,6 +135,13 @@ fn eq2_hs51_cold_start_regression() {
 #[test]
 fn eq3_rank_deficient_psd_q_equality() {
     let n = 3;
+    let mut model = Model::new("eq3_rank1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
+    model.minimize(0.0);
     // Q = v v^T, v=[1,1,-1] → Q = [[1,1,-1],[1,1,-1],[-1,-1,1]]
     let q = CscMatrix::from_triplets(
         &[0, 1, 2, 0, 1, 2, 0, 1, 2],
@@ -144,23 +149,14 @@ fn eq3_rank_deficient_psd_q_equality() {
         &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0],
         n, n,
     ).unwrap();
-    let c = vec![0.0, 0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, n).unwrap();
-    let b = vec![3.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "eq3: rank-1 Q + Eq の Optimal 到達");
-    // obj=0 (u=0 達成)
-    assert_obj_close(r.objective, 0.0, "eq3: obj=0");
-    // x3=1.5 は一意。x1+x2=1.5 だけ確認 (x1,x2 個別は非一意)。
-    assert_x_close(r.solution[2], 1.5, "eq3: x3=1.5");
-    let sum12 = r.solution[0] + r.solution[1];
+    let result = model.solve().expect("eq3: rank-1 Q + Eq の Optimal 到達");
+    assert_obj_close(result.objective_value, 0.0, "eq3: obj=0");
+    assert_x_close(result[x3], 1.5, "eq3: x3=1.5");
+    let sum12 = result[x1] + result[x2];
     assert_x_close(sum12, 1.5, "eq3: x1+x2=1.5");
-    // 制約満足: sum(x)=3
-    let sum_all = r.solution.iter().sum::<f64>();
+    let sum_all = result[x1] + result[x2] + result[x3];
     assert_x_close(sum_all, 3.0, "eq3: sum=3");
 }
 
@@ -173,6 +169,9 @@ fn eq3_rank_deficient_psd_q_equality() {
 ///   x1 = 0.5, x2 = 1.5。両方 (0,10) 内点なので bound 非 active OK。
 ///   obj = 0.5*(0.25+2.25) - 0.5 - 3 = 1.25 - 3.5 = -2.25。
 /// **狙い**: bound あり Eq で IPM が bound shift しないか (bound 非 active なら dual=0)。
+///
+/// **NOTE**: `bound_duals` を assert するため raw `QpProblem` を保持
+/// (Model API は ModelResult.bound_duals 未露出、task #26 拡張で解消予定)。
 #[test]
 fn eq4_equality_with_inactive_bounds() {
     let n = 2;

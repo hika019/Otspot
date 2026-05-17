@@ -18,11 +18,15 @@
 //! - Phase I LP が「artificial 列」を残して Optimal 偽装する旧 bug
 //! - unbounded 判定が dual_solution 不在で MaxIterations に倒れる
 //!
-//! ## NOTE
+//! ## ファイル方針
 //!
-//! - solver の SolveStatus 種別: Optimal/Infeasible/Unbounded/MaxIterations/
-//!   Timeout/NumericalError/NonConvex (problem/mod.rs 確認済)。
+//! - inf1-3, ub1-2 は Model API (`Model` + `constraint!`) で記述。
+//! - ub3 は `SolveStatus` の細分 (Unbounded / MaxIterations / NumericalError いずれも許容)
+//!   を assert する設計のため raw `QpProblem` を維持。
+//!   Model API は MaxIterations を `Timeout` 等に隠蔽するため fidelity が崩れる。
 
+use solver::constraint;
+use solver::model::{Model, ModelError, SolveError};
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::{solve_qp_with, QpProblem};
@@ -44,17 +48,19 @@ fn solver_opts() -> SolverOptions {
 /// **狙い**: bound 矛盾を presolve / IPM 入口で Infeasible 即検出。
 #[test]
 fn inf1_bound_lb_gt_ub_infeasible() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    let c = vec![0.0];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(5.0, 3.0)]; // lb > ub
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    let mut model = Model::new("inf1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", 5.0, 3.0); // lb > ub
+    model.minimize(0.0 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Infeasible,
-        "inf1: lb>ub must yield Infeasible, got {:?} obj={}", r.status, r.objective);
+    let err = model.solve().expect_err("inf1: lb>ub must yield Infeasible");
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+        "inf1: expected Infeasible, got {:?}",
+        err
+    );
 }
 
 // =============================================================================
@@ -65,18 +71,20 @@ fn inf1_bound_lb_gt_ub_infeasible() {
 /// **狙い**: 等式制約 5 が bound [0,1] 範囲外 → Infeasible.
 #[test]
 fn inf2_eq_outside_bounds_infeasible() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    let c = vec![0.0];
-    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
-    let b = vec![5.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(0.0, 1.0)];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    let mut model = Model::new("inf2");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", 0.0, 1.0);
+    model.add_constraint(constraint!(x == 5.0));
+    model.minimize(0.0 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Infeasible,
-        "inf2: Eq=5 vs bound [0,1] must be Infeasible, got {:?}", r.status);
+    let err = model.solve().expect_err("inf2: Eq=5 vs bound [0,1] must be Infeasible");
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+        "inf2: expected Infeasible, got {:?}",
+        err
+    );
 }
 
 // =============================================================================
@@ -87,19 +95,21 @@ fn inf2_eq_outside_bounds_infeasible() {
 /// **狙い**: 2 つの不等式が空集合を作る → Infeasible.
 #[test]
 fn inf3_conflicting_inequalities_infeasible() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    let c = vec![0.0];
-    // row0: x >= 10 (Ge), row1: x <= 1 (Le)
-    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, n).unwrap();
-    let b = vec![10.0, 1.0];
-    let cts = vec![ConstraintType::Ge, ConstraintType::Le];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    let mut model = Model::new("inf3");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!(x >= 10.0));
+    model.add_constraint(constraint!(x <= 1.0));
+    model.minimize(0.0 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Infeasible,
-        "inf3: x>=10 ∧ x<=1 must be Infeasible, got {:?}", r.status);
+    let err = model.solve().expect_err("inf3: x>=10 ∧ x<=1 must be Infeasible");
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+        "inf3: expected Infeasible, got {:?}",
+        err
+    );
 }
 
 // =============================================================================
@@ -109,20 +119,25 @@ fn inf3_conflicting_inequalities_infeasible() {
 /// **構造**: min -x (LP)  s.t. x >= 0 (Ge), x free above.
 /// Q=0 ⇒ LP fallback (Simplex). c=-1, x >= 0, no upper bound → unbounded.
 /// **狙い**: Q=0 退化 LP の unbounded を Simplex 経路で正しく検出。
+///   Model API でも `set_quadratic_objective(empty_csc)` 経由で QP path に入り、
+///   QpProblem 内部の `is_zero_q()` で LP fallback がトリガーされる。
 #[test]
 fn ub1_q_zero_lp_fallback_unbounded() {
     let n = 1;
-    let q = CscMatrix::new(n, n); // Q=0
-    let c = vec![-1.0];
-    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
-    let b = vec![0.0];
-    let cts = vec![ConstraintType::Ge];
-    let bounds = vec![(0.0, f64::INFINITY)];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    let mut model = Model::new("ub1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", 0.0, f64::INFINITY);
+    model.add_constraint(constraint!(x >= 0.0));
+    model.minimize(-1.0 * x);
+    let q = CscMatrix::new(n, n); // Q=0 → QP→LP fallback inside solve_qp_with
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Unbounded,
-        "ub1: Q=0 LP min -x s.t. x>=0 must be Unbounded, got {:?}", r.status);
+    let err = model.solve().expect_err("ub1: Q=0 LP min -x s.t. x>=0 must be Unbounded");
+    assert!(
+        matches!(err, ModelError::SolveError(SolveError::Unbounded)),
+        "ub1: expected Unbounded, got {:?}",
+        err
+    );
 }
 
 // =============================================================================
@@ -134,20 +149,23 @@ fn ub1_q_zero_lp_fallback_unbounded() {
 /// **狙い**: Q PSD + finite bounds なら絶対に unbounded ではないことを確認 (regression)。
 #[test]
 fn ub2_psd_q_finite_bounds_yields_optimal() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    let c = vec![-1000.0];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(0.0, 100.0)];
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    let mut model = Model::new("ub2");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", 0.0, 100.0);
+    model.minimize(-1000.0 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal,
-        "ub2: PSD Q + finite bounds must be Optimal, got {:?}", r.status);
+    let result = model.solve().expect("ub2: PSD Q + finite bounds must be Optimal");
     let exp_obj = 0.5 * 100.0 * 100.0 - 1000.0 * 100.0;
-    let rel = (r.objective - exp_obj).abs() / (1.0 + exp_obj.abs());
-    assert!(rel < 1e-6, "ub2: obj={} expected={} rel={}", r.objective, exp_obj, rel);
+    let rel = (result.objective_value - exp_obj).abs() / (1.0 + exp_obj.abs());
+    assert!(
+        rel < 1e-6,
+        "ub2: obj={} expected={} rel={}",
+        result.objective_value,
+        exp_obj,
+        rel
+    );
 }
 
 // =============================================================================
@@ -159,6 +177,10 @@ fn ub2_psd_q_finite_bounds_yields_optimal() {
 ///   x1 を無限に大きくすれば obj → -∞.
 /// **狙い**: PSD Q (但し semi-definite)、null space 方向に linear 項あり → unbounded.
 ///         一般凸 QP の unbounded 検出経路の regression。
+///
+/// **NOTE**: status の細分 (Unbounded / MaxIterations / NumericalError いずれも許容)
+/// を assert するため raw `QpProblem` を保持。Model API は MaxIterations を `Timeout` /
+/// `Internal` に隠蔽するため fidelity が崩れる (task #26 拡張で要検討)。
 #[test]
 fn ub3_q_null_space_with_linear_term_unbounded() {
     let n = 2;
