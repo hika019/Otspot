@@ -9,7 +9,7 @@
 //! Active Set 法等は採用しない。post-processing は `refine_dual_lsq` (qp/mod.rs の
 //! 既存関数、A^T y = -(Qx + c + bound_contrib) の最小二乗解) のみ使用する。
 
-use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
+use super::kkt::{bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel};
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::QpPostsolveStep;
@@ -144,6 +144,7 @@ fn run_ipm_with(
             kkt_residual_rel: f64::INFINITY,
             primal_residual_rel: f64::INFINITY,
             bound_violation: f64::INFINITY,
+            complementarity_residual_rel: f64::INFINITY,
             duality_gap_rel: f64::INFINITY,
             numerical_failure: true,
             infeasibility_status: None,
@@ -1034,17 +1035,47 @@ fn run_ipm_with(
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
+    let comp = complementarity_residual_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    );
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
+
+    // Invariant: reported objective is computed at the *returned* x, not at any
+    // intermediate iterate. Post-processing (refine_primal_lsq, KKT IR) mutates
+    // final_sol.solution; recomputing here makes the contract hold regardless of
+    // how many post-processing passes run.
+    let objective_recomputed = {
+        let qx = orig_problem
+            .q
+            .mat_vec_mul(&final_sol.solution)
+            .unwrap_or_else(|_| vec![0.0; orig_problem.num_vars]);
+        let xqx: f64 = qx
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&q, &x)| q * x)
+            .sum();
+        let cx: f64 = orig_problem
+            .c
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&c, &x)| c * x)
+            .sum();
+        0.5 * xqx + cx + orig_problem.obj_offset
+    };
 
     IpmOutcome {
         solution: final_sol.solution,
         dual_solution: final_sol.dual_solution,
         bound_duals: final_sol.bound_duals,
-        objective: final_sol.objective,
+        objective: objective_recomputed,
         iterations: result.iterations,
         kkt_residual_rel: kkt_out,
         primal_residual_rel: pres,
         bound_violation: bv,
+        complementarity_residual_rel: comp,
         duality_gap_rel: dual_gap,
         numerical_failure: false,
         infeasibility_status: None,
