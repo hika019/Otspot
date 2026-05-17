@@ -122,15 +122,11 @@ fn ipm_repeated_solve_no_runaway_memory_growth() {
 }
 
 /// 密 A を持つ中規模 LASSO 風 QP で `build_aat_upper_csc` が memory budget guard で
-/// skip されることを検証する。LASSO_150_S3 (n=15300, m=15300, A 密) で旧実装は
-/// BTreeMap で 9 GB / LDL で 3.7 GB を allocate し peak RSS 11 GB に達していた
-/// (handover 2026-05-09)。本テストは小型化合成版で「memory_budget 内に収まる」かを
-/// peak RSS で gate する。
+/// skip されることを検証する。小型化合成版で peak RSS が leak 検出 floor 200 MB を
+/// 確実に下回ることを確認。
 ///
-/// 規模設定: n=300, m=400 で nnz(A) = 300*400 = 120k (col_density=400)。
-/// nnz(AAT_upper) 上限 ≈ min(m²/2, n × 400² / 2) = min(80k, 24M) = 80k。
-/// 80k × 80 byte ≈ 6 MB → memory_budget 4 GiB 以下で進むケース。
-/// 旧 bug でも RSS 増加は限定的だが、leak 検出 floor 200 MB を確実に下回ることを確認。
+/// 規模設定: n=300, m=400, A 密 (col_density=m)。nnz(AAT_upper) 上限 ≈ 80k、
+/// memory_budget 4 GiB 以下で進む。
 #[test]
 fn lasso_dense_aat_no_runaway_memory() {
     use solver::sparse::CscMatrix;

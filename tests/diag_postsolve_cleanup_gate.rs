@@ -1,18 +1,8 @@
-//! Postsolve cleanup-LP gate (task #35) — regression guard.
+//! Postsolve cleanup-LP gate regression guard。
 //!
-//! `run_postsolve` used to unconditionally solve TWO cleanup LPs (the kept-y
-//! perturbation variant from task #22 and the plain variant) for every
-//! reduced problem. Canary profiling showed:
-//!
-//!   - wood1p: cleanup_pert 25.5 s while df_loop already 8.9e-15
-//!   - d6cube: cleanup_pert 15.0 s while df_loop already 0
-//!   - greenbea: cleanup_pert 20.4 s returning Inf (perturbed LP infeasible)
-//!
-//! In all three cases the cleanup-LP output was discarded — the cheap loop /
-//! Gauss-Seidel candidate already had the minimum dfeas. The fix gates both
-//! cleanup variants behind a sufficiency check on `min(df_loop, df_gs)`, and
-//! caps the perturbation variant's deadline at 4× the plain variant's wall
-//! time. These tests pin the resulting wall-clock thresholds.
+//! `run_postsolve` の cleanup LP は `min(df_loop, df_gs)` の sufficiency check で
+//! gate され、perturbation variant の deadline は plain variant の 4× に制限される。
+//! 本 test は wall-clock threshold を pin する。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;

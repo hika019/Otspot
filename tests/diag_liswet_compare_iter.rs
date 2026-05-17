@@ -1,5 +1,4 @@
-//! task #32 Phase 0 観測 2: LISWET1 (converge OK) vs LISWET9 (wrong basin) 比較。
-//! IPPMM_ACTIVE_TRACE=1 を有効化し iter 単位の挙動を比較する。
+//! LISWET1 (converge OK) vs LISWET9 (wrong basin) の iter 単位 trace 比較 diag。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;

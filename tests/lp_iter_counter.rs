@@ -1,21 +1,5 @@
-//! task #19: SolverResult.iterations が LP simplex 経路で populated されることを保証する。
-//!
-//! ## 真因 (bisecter task #16 で発見)
-//! `pds-10` が `iters=0` のまま Optimal を返していた。LP simplex (primal.rs /
-//! dual_advanced/core.rs) の main loop で `iteration` カウンタが SolverResult に
-//! 伝播していなかった (Default::default() で 0 のまま)。
-//!
-//! ## 影響
-//! 過去の bench/diag で `iters=0` を「solver が動いてない」と誤解させた:
-//! - task #2 の fome12/ns1688926 解釈
-//! - bisecter task #16 で d6cube/dfl001 が「setup hang」と誤推定
-//!
-//! ## 修正方針
-//! `revised_simplex_core` / `dual_simplex_core_advanced` / `dual_simplex_core` に
-//! `iter_count_out: &mut usize` を out-param で追加。各 main loop で
-//! `*iter_count_out = iter_count_out.saturating_add(1)` を 1 行追加。
-//! 上位の `two_phase_simplex` / `solve_dual_advanced` / `two_phase_dual_simplex`
-//! で `total_iters` を累積し、最終的に `SolverResult.iterations` に格納。
+//! SolverResult.iterations が LP simplex 経路で populated されることを保証する
+//! observability regression guard。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -49,7 +33,7 @@ fn afiro_iterations_positive() {
     );
     assert!(
         r.iterations > 0,
-        "afiro iterations={} must be > 0 (LP simplex counter bug regression防壁)",
+        "afiro iterations={} must be > 0 (LP simplex counter regression guard)",
         r.iterations
     );
 }

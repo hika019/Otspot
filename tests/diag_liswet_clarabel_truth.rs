@@ -1,8 +1,5 @@
-//! task #33: LISWET-family 12 問の Clarabel 真値取得 (baseline 再記録用)。
-//!
-//! 旧 baseline は task #25 bug A (IpmOutcome.objective stale) 影響下の自ソルバ計測値で、
-//! LISWET1/7/8/9/10/11/12 が全て -5.03e3 に揃うなど明らかに不審。
-//! Clarabel (tol=1e-12, max_iter=100k) を独立 reference として真値を取得し commit に残す。
+//! LISWET-family 12 問の Clarabel 真値取得 diag (baseline 再記録用)。
+//! Clarabel (tol=1e-12, max_iter=100k) を独立 reference として objective を出力。
 
 use solver::io::qps::parse_qps;
 use solver::QpProblem;
@@ -134,9 +131,9 @@ fn compute_internal_obj(prob: &QpProblem, x: &[f64]) -> f64 {
 }
 
 /// Clarabel strict 解で LISWET-family 12 問の真値出力。
-/// 想定: convergence しなかったら test fail (diag だが convergence 失敗は問題)。
+/// Clarabel が convergence しなかったら fail。
 #[test]
-#[ignore = "diag (Clarabel strict tol=1e-12 / max_iter=100k で LISWET-family 12 問の真値取得; task #33)"]
+#[ignore = "diag: Clarabel strict tol=1e-12 / max_iter=100k で LISWET-family 12 問の真値取得"]
 fn diag_liswet_family_clarabel_truth() {
     let names = [
         "LISWET1", "LISWET2", "LISWET3", "LISWET4", "LISWET5", "LISWET6",

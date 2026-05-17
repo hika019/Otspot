@@ -252,7 +252,7 @@ fn deep_check(name: &str, path: &std::path::Path) -> bool {
 }
 
 #[test]
-#[ignore = "永久 FAIL: LISWET9 が Clarabel と rel err ~45% で乖離 (QP solver bug、task #25 で起票)"]
+#[ignore = "永久 FAIL: LISWET9 が Clarabel と rel err ~45% で乖離 (QP solver bug)"]
 fn test_liswet9_matches_clarabel() {
     let p = std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS");
     let ok = deep_check("LISWET9", &p);
@@ -261,7 +261,7 @@ fn test_liswet9_matches_clarabel() {
 
 /// LISWET9 / YAO で Clarabel を厳しく走らせて真の最適を確認
 #[test]
-#[ignore = "diag (~12s; Clarabel strict tol=1e-12 / max_iter=100k 出力のみ、assertion なし、task #25 調査用)"]
+#[ignore = "diag (~12s; Clarabel strict tol=1e-12 / max_iter=100k 出力のみ、assertion なし)"]
 fn test_liswet9_yao_strict_clarabel() {
     for name in &["LISWET9", "YAO"] {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
@@ -290,7 +290,7 @@ fn test_liswet9_yao_strict_clarabel() {
 
 /// 横展開: 様々な問題で internal obj が一致するか
 #[test]
-#[ignore = "diag (~44s; 35 Maros 問題で Clarabel cross-check、SUMMARY 出力のみ assertion なし、task #25 調査用)"]
+#[ignore = "diag (~44s; 35 Maros 問題で Clarabel cross-check、SUMMARY 出力のみ assertion なし)"]
 fn test_multi_problems_match_clarabel() {
     let problems = [
         "HS21", "HS35", "HS35MOD", "HS268", "HS76",

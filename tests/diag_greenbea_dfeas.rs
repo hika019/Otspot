@@ -1,7 +1,4 @@
 //! Regression: greenbea must reach Optimal with dfeas_rel ≤ eps at eps=1e-6.
-//!
-//! Tracks task #23. Current HEAD (4d18a29) reports DFEAS_FAIL: status=Optimal
-//! but dfeas absolute ≈ 38 (dfeas_rel ≈ 0.97), 6 orders of magnitude over eps.
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -125,7 +122,7 @@ fn diag_greenbea_dfeas_full_green() {
     );
     assert!(
         dfeas_rel <= eps,
-        "greenbea: dfeas_rel {:.3e} > eps {:.1e} (task #23 DFEAS_FAIL)",
+        "greenbea: dfeas_rel {:.3e} > eps {:.1e} (DFEAS_FAIL)",
         dfeas_rel, eps,
     );
 }
