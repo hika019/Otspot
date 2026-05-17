@@ -140,6 +140,13 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     if deadline_ok {
                         let mut opts_off = options.clone();
                         opts_off.presolve = false;
+                        // Skip dual_advanced's Ge/Eq cold-start half-deadline split
+                        // (klein3-cycling safety net): we already know the LP is
+                        // feasible (first attempt returned Optimal), so primal
+                        // direct uses the full remaining deadline. Without this,
+                        // greenbea-class LPs cannot finish the alt in 60 s canary
+                        // because half of ~40 s remaining is not enough.
+                        opts_off.simplex_method = crate::options::SimplexMethod::Primal;
                         let alt = solve_without_presolve(problem, &opts_off);
                         if alt.status == SolveStatus::Optimal
                             && alt.postsolve_dfeas.is_none()
