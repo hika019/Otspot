@@ -179,8 +179,7 @@ fn qp_diagonal_q_basic() {
     );
 }
 
-/// QP: off-diagonal Q の取り扱い
-/// min 1/2 (x^2 + xy + y^2) + (-x - y)  s.t. x + y <= 4, x,y in [0, inf)
+/// QP off-diagonal Q: min 1/2(x²+xy+y²)−x−y  s.t. x+y≤4, x,y≥0  (Model ↔ direct 一致確認)。
 #[test]
 fn qp_offdiagonal_q() {
     let mut model = Model::new("qp_off");
@@ -207,9 +206,7 @@ fn qp_offdiagonal_q() {
     assert_close(r_api[y], r_direct.solution[1], TOL_X, "y");
 }
 
-/// QP: 等式制約あり。退化方向 (Q rank-deficient) を含み、IPM 経路で解く
-/// min 1/2 x^2 + 0·y  s.t. x + y == 1, x,y in [0, 1]
-/// (y は obj に絡まないので「LP 退化」型のミニ版)
+/// QP rank-deficient (LP 退化型 mini): min 1/2 x²  s.t. x+y=1, x,y∈[0,1]  →  opt (0,1).
 #[test]
 fn qp_eq_with_redundant_var() {
     let mut model = Model::new("qp_eq_red");
@@ -245,13 +242,7 @@ fn qp_eq_with_redundant_var() {
     );
 }
 
-/// QP maximize: API 仕様により **Q は NSD で渡す必要がある** (内部で -Q にされて
-/// 解かれる)。`set_quadratic_objective` の docstring に記載済。本テストはこの規約が
-/// ちゃんと意図通りに動くことを確認する。
-///
-/// max -1/2 x^2 + x  s.t. x in [0, 5]
-/// → 最大値 x = 1, max obj = 0.5
-/// → user 入力: Q = [[-1]] (NSD)、c (= maximize 引数) = x、解は obj=0.5
+/// QP maximize 規約検証: Q は NSD で渡す必要あり (内部で -Q)。max -1/2 x²+x, x∈[0,5]  →  opt x=1, obj=0.5.
 #[test]
 fn qp_maximize_concave() {
     let mut model = Model::new("qp_max");
@@ -275,13 +266,7 @@ fn qp_maximize_concave() {
     );
 }
 
-/// **非凸 QP の maximize テスト**: maximize に PSD Q を渡すと内部で NSD になり
-/// solver が慣性修正付き IPM で KKT 点を探索し LocallyOptimal / Optimal を返す。
-///
-/// 問題: maximize 1/2 x^2  s.t. 0 <= x <= 5
-/// 等価: minimize -1/2 x^2  s.t. 0 <= x <= 5  (NSD Q = negative definite)
-/// 真の最大値は x=5 (境界), obj=17.5
-/// KKT 条件を満たす x=5 が LocallyOptimal として返る (また凸問題なら Optimal)。
+/// 非凸 maximize: max 1/2 x²+x, x∈[0,5] (PSD Q→内部 NSD).  慣性修正 IPM で境界 KKT 点 x=5, obj=17.5 を LocallyOptimal で返す。
 #[test]
 fn qp_maximize_with_psd_q_returns_error() {
     let mut model = Model::new("qp_max_psd");
@@ -307,9 +292,7 @@ fn qp_maximize_with_psd_q_returns_error() {
     );
 }
 
-/// 制約なし QP (m = 0): bounds のみで定義
-/// min 1/2 (x^2 + y^2) - x  s.t. x in [-2, 2], y in [-2, 2]
-/// 最適: x = 1, y = 0、obj = 0.5 - 1 = -0.5
+/// 制約なし QP (bounds のみ): min 1/2(x²+y²)−x, x,y∈[-2,2]  →  opt (1,0), obj=-0.5.
 #[test]
 fn qp_no_constraints_only_bounds() {
     let mut model = Model::new("qp_nocon");
@@ -362,16 +345,8 @@ fn lp_unbounded_returns_err() {
     );
 }
 
-/// Model API: dual_solution が QP 経路で取得できるか確認 (長さと magnitude)。
-/// min 1/2 x^2  s.t. x >= 1 (Ge)
-/// 最適 x = 1, |λ| = 1 (Ge 制約の Lagrange 乗数の絶対値)。
-///
-/// **符号規約の注意**: 我々の solve_qp_with は `collapse_extended_dual` で
-/// Ge constraint の dual を内部 (Le 形に変換した y_ext) から **符号反転して** 返す。
-/// 結果として「x >= 1 (Ge)」の dual 出力は **負の値 (-1)** になる。
-/// OSQP / Gurobi のような外部 solver と符号規約が異なるので、ユーザーは |dual|
-/// を見るか、本実装の規約 (Ge は負) を理解した上で使う必要あり。
-/// 本 test は現状の規約を固定する (将来変える際の signal とする)。
+/// QP dual 出力の符号規約 sentinel: min 1/2 x²  s.t. x≥1 (Ge)  →  x=1, dual=-1.
+/// collapse_extended_dual で Ge を Le に変換時に符号反転されるため、Ge dual は負値 (OSQP/Gurobi と逆規約)。
 #[test]
 fn qp_dual_solution_available() {
     let mut model = Model::new("qp_dual");
