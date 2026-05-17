@@ -119,6 +119,21 @@ fn perold_postsolve_dual_feasibility() {
     }
 }
 
+/// 診断: greenbea を presolve=off で解いた dfeas を観測。task #22 開発用、default 除外。
+#[test]
+#[ignore = "diag (60s)"]
+fn greenbea_presolve_off_dfeas_check() {
+    let path = Path::new("data/lp_problems/greenbea.QPS");
+    if !path.exists() { eprintln!("[SKIP]"); return; }
+    let prob = parse_qps(path).expect("parse");
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.timeout_secs = Some(300.0);
+    let r = solve_qp_with(&prob, &opts);
+    let df = dfeas_rel_bound_aware(&prob, &r.solution, &r.reduced_costs);
+    eprintln!("greenbea[presolve=off]: status={:?} obj={:.4e} df_rel_bound={:.3e}", r.status, r.objective, df);
+}
+
 /// perold の presolve=off は別経路 (postsolve なし)。bug の局在を切り分け:
 /// HEAD で PASS (df_rel ≈ 3.5e-13) なら、FAIL は postsolve 経路に 100% 局在。
 #[test]
@@ -315,10 +330,15 @@ fn cre_b_postsolve_dual_feasibility() {
 
 /// greenbea: bisecter task #6 で perold と同類の dual 退化パターンと推定。
 /// 2026-05-17 task #10 commit 66857c1 時点で本 fix は GREEN 化できていない
-/// (`df_rel ≈ 0.97`)。task #14 (greenbea 個別調査) で対処予定。
-/// 修正後 GREEN を確認するための **fail-documenting test** として `#[ignore]`。
+/// (`df_rel ≈ 0.97`)。task #22 (案 A: cleanup LP に kept-y perturbation 追加) で
+/// 構造的修正 (`dy[m_kept]` 変数 + BFS coupling closure) を実装したが、cleanup LP
+/// が n=5405 / m=2392 規模で 60 秒テスト deadline 内に収束せず Timeout → None
+/// fallback → y_loop 採用 (df_rel ≈ 0.97 のまま)。**unlimited deadline では
+/// Chebyshev (min-max) で df_cl ≈ 30 / 38 まで改善** することを確認済 (commit
+/// 内 diag run)。GREEN 化には warm-start cleanup LP 或いは presolve=off 系
+/// fallback などさらなる施策が必要。`#[ignore]` で default 除外、target 維持。
 #[test]
-#[ignore = "GREEN target: task #14 完了で外す。HEAD では df_rel≈0.97 で FAIL"]
+#[ignore = "GREEN target 未達: task #22 で構造 fix 入ったが cleanup LP が 60s 内に未収束"]
 fn greenbea_postsolve_dual_feasibility() {
     let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 60.0);
     match r {
