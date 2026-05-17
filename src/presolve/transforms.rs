@@ -288,7 +288,7 @@ fn activity_range_from(
 /// LPをPresolveして縮約問題を返す。
 ///
 /// 問題が明らかにInfeasible/Unboundedな場合はErrを返す。
-/// deadline を超過した場合は早期終了し `was_reduced: false` を返す（案B: 残余時間渡し）。
+/// deadline を超過した場合は早期終了し `was_reduced: false` を返す。
 pub fn run_presolve(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
@@ -470,8 +470,7 @@ fn step1_fixed_variable(st: &mut PresolveState) -> Result<(), PresolveStatus> {
         }
         if (lb - ub).abs() < ZERO_TOL {
             let value = lb;
-            // 列 j のすべての active 行で b -= a_ij * value
-            // 注: col_entries[j] のクローンを取らないと借用エラー
+            // Clone the column entries so we can mutate `st` while iterating.
             let col_copy = st.col_entries[j].clone();
             for (row, val) in col_copy {
                 if !st.removed_rows[row] {
@@ -644,10 +643,9 @@ fn step5_bounds_tightening(
     st: &mut PresolveState,
     new_fixed: &mut usize,
 ) -> Result<(), PresolveStatus> {
-    // QP transforms から DENSE_ROW_THRESHOLD/IMPLIED_BOUND_SANITY を転用したが
-    // LP では 25fv47/stocfor2 が TIMEOUT 化 (必要な bound tightening を抜くことで
-    // simplex 収束悪化)。QP IPM と LP simplex で「presolve の効き」が異なる証拠。
-    // 動的化 (n 比率や bound magnitude 連動) で再挑戦予定 (TODO)。
+    // Accept every implied bound; LP simplex relies on aggressive bound tightening,
+    // and the QP-style dense-row / sanity caps slowed several test instances enough
+    // to time out, so they are intentionally off here.
     let accept_implied_ub = |_implied: f64, _old_ub: f64| -> bool { true };
     let accept_implied_lb = |_implied: f64, _old_lb: f64| -> bool { true };
 
