@@ -62,6 +62,8 @@ pub struct Model {
     use_ruiz_scaling: Option<bool>,
     /// 収束精度プリセット（None = デフォルト Medium = 1e-6）
     tolerance: Option<Tolerance>,
+    /// 目的関数定数オフセット (QP: 1/2 x^T Q x + c^T x + offset, LP: c^T x + offset)
+    obj_offset: f64,
 }
 
 impl Model {
@@ -77,6 +79,7 @@ impl Model {
             timeout_secs: None,
             use_ruiz_scaling: None,
             tolerance: None,
+            obj_offset: 0.0,
         }
     }
 
@@ -151,6 +154,30 @@ impl Model {
         self
     }
 
+    /// 対角 Q 行列を `diag` ベクトルから構築して設定する ergonomic helper。
+    /// `diag.len()` は変数数と一致する必要がある。
+    pub fn set_diagonal_q(&mut self, diag: &[f64]) -> &mut Self {
+        let n = diag.len();
+        assert_eq!(
+            n,
+            self.variables.len(),
+            "set_diagonal_q: diag length {} != variable count {}",
+            n,
+            self.variables.len()
+        );
+        let idx: Vec<usize> = (0..n).collect();
+        let q = CscMatrix::from_triplets(&idx, &idx, diag, n, n)
+            .expect("diagonal CSC construction must succeed");
+        self.set_quadratic_objective(q)
+    }
+
+    /// 目的関数の定数オフセットを設定する。
+    /// `objective_value = (1/2 x^T Q x +) c^T x + offset` として最終結果に加算される。
+    pub fn set_obj_offset(&mut self, offset: f64) -> &mut Self {
+        self.obj_offset = offset;
+        self
+    }
+
     /// Solve the model and return the result.
     ///
     /// # Errors
@@ -222,69 +249,61 @@ impl Model {
 
         let solver_result = simplex::solve(&problem);
 
+        let signed_obj = |raw: f64| -> f64 {
+            let oriented = if self.sense == OptimizationSense::Maximize {
+                -raw
+            } else {
+                raw
+            };
+            oriented + self.obj_offset
+        };
+        let build_ok = |raw_obj: f64, sol: Vec<f64>, bd: Vec<f64>| ModelResult {
+            objective_value: signed_obj(raw_obj),
+            solution: sol,
+            // dual_solution / reduced_costs / slack: LP path では未配線。
+            // task #35 (Model API LP path 拡張) で対応予定。
+            dual_solution: None,
+            reduced_costs: None,
+            slack: None,
+            bound_duals: bd,
+        };
+
         match solver_result.status {
-            SolveStatus::Optimal => {
-                let obj = if self.sense == OptimizationSense::Maximize {
-                    -solver_result.objective
-                } else {
-                    solver_result.objective
-                };
-                Ok(ModelResult {
-                    objective_value: obj,
-                    solution: solver_result.solution,
-                    // dual_solution / reduced_costs / slack: not yet available in
-                    // the main-branch SolverResult. Will be populated once
-                    // SolverResult is extended in a future task.
-                    dual_solution: None,
-                    reduced_costs: None,
-                    slack: None,
-                })
-            }
+            SolveStatus::Optimal => Ok(build_ok(
+                solver_result.objective,
+                solver_result.solution,
+                solver_result.bound_duals,
+            )),
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
-                // DEAD PATH but handle gracefully: 概要設計に従い有効解の有無で分岐
                 if solver_result.solution.is_empty() {
-                    Err(ModelError::Timeout)
+                    Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
-                    // SuboptimalSolutionと同パターン: 有効解があればOptimal相当で返す
-                    let obj = if self.sense == OptimizationSense::Maximize {
-                        -solver_result.objective
-                    } else {
-                        solver_result.objective
-                    };
-                    Ok(ModelResult {
-                        objective_value: obj,
-                        solution: solver_result.solution.clone(),
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
-                    })
+                    Ok(build_ok(
+                        solver_result.objective,
+                        solver_result.solution,
+                        solver_result.bound_duals,
+                    ))
                 }
             }
             SolveStatus::SuboptimalSolution => {
                 if solver_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
-                    let obj = if self.sense == OptimizationSense::Maximize {
-                        -solver_result.objective
-                    } else {
-                        solver_result.objective
-                    };
-                    Ok(ModelResult {
-                        objective_value: obj,
-                        solution: solver_result.solution,
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
-                    })
+                    Ok(build_ok(
+                        solver_result.objective,
+                        solver_result.solution,
+                        solver_result.bound_duals,
+                    ))
                 }
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽: 内部事情をユーザーに見せない
+            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
             SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
-            // LocallyOptimal は LP path では発生しないが、exhaustive match のために処理する
-            SolveStatus::LocallyOptimal => Err(ModelError::Internal("Unexpected LocallyOptimal on LP path".to_string())),
+            SolveStatus::LocallyOptimal => Err(ModelError::Internal(
+                "Unexpected LocallyOptimal on LP path".to_string(),
+            )),
         }
     }
 
@@ -345,8 +364,10 @@ impl Model {
                 .map_err(|e| ModelError::Internal(e.to_string()))?
         };
 
-        let qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
+        let mut qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
             .map_err(|e| ModelError::Internal(e.to_string()))?;
+        // offset は signed_obj で post-solve 加算するため solver には渡さない。
+        qp_problem.obj_offset = 0.0;
 
         let mut opts = crate::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
@@ -360,102 +381,82 @@ impl Model {
         }
         let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
 
-        match qp_result.status {
-            SolveStatus::Optimal => {
-                let obj = if self.sense == OptimizationSense::Maximize {
-                    -qp_result.objective
-                } else {
-                    qp_result.objective
-                };
-
-                // solve_qp_with は Eq/Ge の dual を元制約空間に折り畳んで返す。
-                // （Le: そのまま, Ge: 符号反転済み, Eq: μ1-μ2 計算済み）
-                // 長さが num_model_constraints と一致する場合はそのまま使用。
-                let dual = if qp_result.dual_solution.len() == num_model_constraints {
-                    Some(qp_result.dual_solution.clone())
-                } else if !qp_result.dual_solution.is_empty() && num_model_constraints > 0 {
-                    // 長さ不一致: 先頭を切り取るフォールバック
-                    let take = num_model_constraints.min(qp_result.dual_solution.len());
-                    Some(qp_result.dual_solution[..take].to_vec())
-                } else {
-                    None
-                };
-
-                Ok(ModelResult {
-                    objective_value: obj,
-                    solution: qp_result.solution,
-                    dual_solution: dual,
-                    reduced_costs: None,
-                    slack: None,
-                })
+        // dual_solution: Le=そのまま / Ge=符号反転済み / Eq=μ1-μ2 折り畳み済み。
+        let fold_dual = |sol: &[f64]| -> Option<Vec<f64>> {
+            if sol.len() == num_model_constraints {
+                Some(sol.to_vec())
+            } else if !sol.is_empty() && num_model_constraints > 0 {
+                let take = num_model_constraints.min(sol.len());
+                Some(sol[..take].to_vec())
+            } else {
+                None
             }
+        };
+
+        let signed_obj = |raw: f64| -> f64 {
+            let oriented = if self.sense == OptimizationSense::Maximize {
+                -raw
+            } else {
+                raw
+            };
+            oriented + self.obj_offset
+        };
+        let build_ok =
+            |raw_obj: f64, sol: Vec<f64>, dual: Option<Vec<f64>>, bd: Vec<f64>| ModelResult {
+                objective_value: signed_obj(raw_obj),
+                solution: sol,
+                dual_solution: dual,
+                reduced_costs: None,
+                slack: None,
+                bound_duals: bd,
+            };
+
+        match qp_result.status {
+            SolveStatus::Optimal => Ok(build_ok(
+                qp_result.objective,
+                qp_result.solution.clone(),
+                fold_dual(&qp_result.dual_solution),
+                qp_result.bound_duals,
+            )),
             SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
             SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
-                // DEAD PATH but handle gracefully: 概要設計に従い有効解の有無で分岐
                 if qp_result.solution.is_empty() {
-                    Err(ModelError::Timeout)
+                    Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
-                    // SuboptimalSolutionと同パターン: 有効解があればOptimal相当で返す
-                    let obj = if self.sense == OptimizationSense::Maximize {
-                        -qp_result.objective
-                    } else {
-                        qp_result.objective
-                    };
-                    Ok(ModelResult {
-                        objective_value: obj,
-                        solution: qp_result.solution.clone(),
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
-                    })
+                    Ok(build_ok(
+                        qp_result.objective,
+                        qp_result.solution.clone(),
+                        fold_dual(&qp_result.dual_solution),
+                        qp_result.bound_duals,
+                    ))
                 }
             }
             SolveStatus::SuboptimalSolution => {
-                // apply_api_boundary_conversion が通常 Optimal/Timeout に変換済み。
-                // このアームは予備。解ありなら Optimal 相当、なしなら Timeout。
+                // apply_api_boundary_conversion が通常 Optimal/Timeout に変換済み。予備パス。
                 if qp_result.solution.is_empty() {
                     Err(ModelError::Timeout)
                 } else {
-                    let obj = if self.sense == OptimizationSense::Maximize {
-                        -qp_result.objective
-                    } else {
-                        qp_result.objective
-                    };
-                    Ok(ModelResult {
-                        objective_value: obj,
-                        solution: qp_result.solution,
-                        dual_solution: None,
-                        reduced_costs: None,
-                        slack: None,
-                    })
+                    Ok(build_ok(
+                        qp_result.objective,
+                        qp_result.solution.clone(),
+                        fold_dual(&qp_result.dual_solution),
+                        qp_result.bound_duals,
+                    ))
                 }
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => Err(ModelError::Timeout), // 情報隠蔽
+            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
             SolveStatus::NonConvex(msg) => {
                 Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
             }
             // LocallyOptimal: 不定 Q の KKT 点を解として返す（局所最適解）
-            SolveStatus::LocallyOptimal => {
-                let obj = if self.sense == OptimizationSense::Maximize {
-                    -qp_result.objective
-                } else {
-                    qp_result.objective
-                };
-                let dual = if qp_result.dual_solution.len() == num_model_constraints {
-                    Some(qp_result.dual_solution.clone())
-                } else {
-                    None
-                };
-                Ok(ModelResult {
-                    objective_value: obj,
-                    solution: qp_result.solution,
-                    dual_solution: dual,
-                    reduced_costs: None,
-                    slack: None,
-                })
-            }
+            SolveStatus::LocallyOptimal => Ok(build_ok(
+                qp_result.objective,
+                qp_result.solution.clone(),
+                fold_dual(&qp_result.dual_solution),
+                qp_result.bound_duals,
+            )),
         }
     }
 }
@@ -477,6 +478,10 @@ pub struct ModelResult {
     pub reduced_costs: Option<Vec<f64>>,
     /// Constraint slacks, if available.
     pub slack: Option<Vec<f64>>,
+    /// Variable bound dual values (QP path).
+    /// Layout: `[lb_dual for each var with finite lb, ub_dual for each var with finite ub]`
+    /// (see `SolverResult.bound_duals` §2.5). Empty when not provided by the solver.
+    pub bound_duals: Vec<f64>,
 }
 
 impl ModelResult {
@@ -521,6 +526,10 @@ pub enum SolveError {
     Infeasible,
     /// The problem is unbounded.
     Unbounded,
+    /// Solver reached the iteration cap before converging (no usable solution).
+    MaxIterations,
+    /// Solver aborted due to numerical breakdown (no usable solution).
+    NumericalError,
 }
 
 impl fmt::Display for SolveError {
@@ -528,6 +537,8 @@ impl fmt::Display for SolveError {
         match self {
             SolveError::Infeasible => write!(f, "Problem is infeasible"),
             SolveError::Unbounded => write!(f, "Problem is unbounded"),
+            SolveError::MaxIterations => write!(f, "Max iterations reached without optimal solution"),
+            SolveError::NumericalError => write!(f, "Numerical breakdown during solve"),
         }
     }
 }
