@@ -48,6 +48,19 @@ check_dir() {
   fi
 }
 
+check_python_qp_deps() {
+  if ! python3 -c "import numpy, scipy" 2>/dev/null; then
+    echo "[error] QP bench data 生成に必要な Python pkg (numpy / scipy) が host にない。" >&2
+    echo "         Docker で実行 (推奨):" >&2
+    echo "           docker run --rm -v \"\$PWD\":/workspace -w /workspace solver-dev \\" >&2
+    echo "             bash scripts/download_all_bench_data.sh${MODE:+ --$MODE}" >&2
+    echo "         または host へ install:" >&2
+    echo "           pip install numpy scipy cvxpy clarabel" >&2
+    echo "         (cvxpy / clarabel は osqp_bench 系 generator のみで必要)" >&2
+    exit 1
+  fi
+}
+
 run_or_skip() {
   local dir=$1
   local expect=$2
@@ -116,6 +129,8 @@ fi
 if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   echo ""
   echo "########## QP data ##########"
+
+  check_python_qp_deps
 
   # external repo 経由 (osqp_bench, mpc_qp)
   run_or_skip data/osqp_bench           62  "bash scripts/setup_extra_benches.sh && python3 scripts/gen_osqp_bench.py"
