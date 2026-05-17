@@ -682,23 +682,70 @@ pub fn run_postsolve(
         max_viol
     };
 
-    // (C) 3-way 比較: y_loop / y_gs / y_cl のうち bound-aware dfeas が最小の方を採用。
+    // (B') task #20 (greenbea coupling 解消): cleanup LP 後の y を `compute_lsq_dual_y`
+    //      経由で **全体 KKT 整合** に LSQ 射影する。
+    //
+    //      動機: cleanup LP は **deleted rows の y のみ** を最適化するが、kept rows の y は
+    //      reduced LP の最適 dual で固定するため、kept-deleted の coupling が strong な場合
+    //      (greenbea row 1270 et al.) に **infeasible** (Phase 1 slack ≈ 1e5) になる。
+    //      LSQ 射影は kept/deleted の境界を意識せず A^T y ≈ -c を解くので、coupling を
+    //      跨いで y 全体を調整できる。
+    //
+    //      実装: orig_problem (LpProblem) → 一時 QpProblem (Q=0) 変換、現在の y を持つ
+    //      SolverResult を渡して `compute_lsq_dual_y` を呼び、得られた y を 4 番目の候補
+    //      として df_bound 比較に組み込む。
+    let y_lsq: Option<Vec<f64>> = {
+        // size guard (compute_lsq_dual_y 内の 50_000 と整合)
+        const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
+        if n + m <= LSQ_DUAL_SIZE_LIMIT && m > 0 {
+            // LpProblem を QpProblem (Q=0) に変換。共有 reference 不可なので clone。
+            let q_empty = CscMatrix::new(n, n);
+            let qp = crate::qp::QpProblem::new(
+                q_empty,
+                orig_problem.c.clone(),
+                orig_problem.a.clone(),
+                orig_problem.b.clone(),
+                orig_problem.bounds.clone(),
+                orig_problem.constraint_types.clone(),
+            ).ok();
+            qp.and_then(|qp| {
+                // 現状の最良 y (y_cl があれば y_cl、なければ y_gs) を seed として渡す。
+                // compute_lsq_dual_y は target = -(Qx + c + bound_contrib) から
+                // A^T y ≈ target を LDL(A·A^T) で解く。LP (Q=0) では target = -c。
+                let seed = y_cl.as_ref().cloned().unwrap_or_else(|| y_gs.clone());
+                let tmp_result = crate::problem::SolverResult {
+                    solution: solution.clone(),
+                    dual_solution: seed,
+                    ..Default::default()
+                };
+                crate::qp::compute_lsq_dual_y(&qp, &tmp_result)
+            })
+        } else {
+            None
+        }
+    };
+
+    // (C) 4-way 比較: y_loop / y_gs / y_cl / y_lsq のうち bound-aware dfeas が最小を採用。
     let df_loop = dfeas_bound(&y_loop);
     let df_gs = dfeas_bound(&y_gs);
-    let (df_cl, has_cl) = match &y_cl {
+    let (df_cl, _has_cl) = match &y_cl {
         Some(y) => (dfeas_bound(y), true),
         None => (f64::INFINITY, false),
     };
-    // 最小 df の y を採用。同点は loop < gs < cl の優先 (計算量の小さい順)。
-    let _ = has_cl;
-    if df_loop <= df_gs && df_loop <= df_cl {
+    let (df_lsq, _has_lsq) = match &y_lsq {
+        Some(y) => (dfeas_bound(y), true),
+        None => (f64::INFINITY, false),
+    };
+    // 最小 df の y を採用。同点は loop < gs < cl < lsq の優先 (計算量の小さい順)。
+    let min_df = df_loop.min(df_gs).min(df_cl).min(df_lsq);
+    if df_loop == min_df {
         dual_solution = y_loop;
-    } else if df_gs <= df_cl {
+    } else if df_gs == min_df {
         dual_solution = y_gs;
-    } else if let Some(y) = y_cl {
-        dual_solution = y;
+    } else if df_cl == min_df {
+        dual_solution = y_cl.expect("df_cl finite implies Some");
     } else {
-        dual_solution = y_gs;
+        dual_solution = y_lsq.expect("df_lsq finite implies Some");
     }
 
     // 被縮小費用は dual_solution が確定した後に元問題で再計算する:
