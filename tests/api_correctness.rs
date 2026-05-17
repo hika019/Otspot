@@ -53,7 +53,6 @@ fn check_sol_elem(x: f64, expected: f64, tol: f64, label: &str) {
 // LP テスト
 // ===========================================================================
 
-/// min x  s.t. x≥1, 0≤x≤10  →  opt x=1, obj=1
 #[test]
 fn lp_trivial_bound() {
     // A = [[-1]], b = [-1] (x >= 1 → -x <= -1)
@@ -70,7 +69,7 @@ fn lp_trivial_bound() {
     check_sol_elem(result.solution[0], 1.0, TOL_X, "lp_trivial_bound x");
 }
 
-/// min x+y  s.t. x+y≥2, x,y≥0  →  opt x+y=2, obj=2 (頂点 (2,0) or (0,2))
+/// 退化頂点: (2,0) or (0,2) 両方 obj=2 (assert は x+y=2 のみチェック)。
 #[test]
 fn lp_ge_constraint() {
     let q = CscMatrix::new(2, 2);
@@ -92,7 +91,7 @@ fn lp_ge_constraint() {
     );
 }
 
-/// min x+2y  s.t. x+y=3, x,y≥0  →  opt (x,y)=(3,0), obj=3 (c_x<c_y で x 優先)
+/// c_x=1<c_y=2 で x 優先 → opt (3,0), obj=3 (端点解)。
 #[test]
 fn lp_eq_constraint() {
     let q = CscMatrix::new(2, 2);
@@ -110,7 +109,7 @@ fn lp_eq_constraint() {
     check_sol_elem(result.solution[1], 0.0, TOL_X, "lp_eq_constraint y");
 }
 
-/// max x+y  s.t. x+y≤4, 0≤x,y≤3  →  opt obj=4 (-minimize 変換, 頂点 (3,1) or (1,3))
+/// maximize は c 符号反転で min 化 (c=[-1,-1]); 真の max x+y=4, 内部 obj=-4。
 #[test]
 fn lp_maximize() {
     // minimize -(x+y), A=[[1,1]], b=[4], bounds=[(0,3),(0,3)]
@@ -133,7 +132,7 @@ fn lp_maximize() {
     );
 }
 
-/// min 2x+y  s.t. x+y≥3, x+2y≥4, x,y≥0  →  opt (0,3), obj=3 (頂点列挙最小)
+/// 頂点列挙の最小: opt (0,3), obj=3 (他頂点 (2,1) obj=5, (0,4) obj=4)。
 #[test]
 fn lp_two_constraints() {
     let q = CscMatrix::new(2, 2);
@@ -157,7 +156,7 @@ fn lp_two_constraints() {
     check_sol_elem(result.solution[1], 3.0, TOL_X, "lp_two_constraints y");
 }
 
-/// min x  s.t. x≥3 ∧ x≤1 (矛盾)  →  Infeasible
+/// intentionally infeasible: x≥3 ∧ x≤1。
 #[test]
 fn lp_infeasible() {
     let q = CscMatrix::new(1, 1);
@@ -178,7 +177,7 @@ fn lp_infeasible() {
     );
 }
 
-/// min -x  s.t. x≥0 (no upper)  →  Unbounded (x→+∞)
+/// intentionally unbounded: c=-1 + x≥0 で x→+∞。
 #[test]
 fn lp_unbounded() {
     let q = CscMatrix::new(1, 1);
@@ -199,7 +198,7 @@ fn lp_unbounded() {
     );
 }
 
-/// min x  s.t. x+y=1, x-y=1, x,y free  →  opt (1,0), obj=1
+/// 等式 2 本連立 (x+y=1, x-y=1) で unique 解 (1,0), obj=1。
 #[test]
 fn lp_degenerate() {
     let q = CscMatrix::new(2, 2);
@@ -226,7 +225,7 @@ fn lp_degenerate() {
 // QP テスト
 // ===========================================================================
 
-/// min (x-1)²+(y-2)² (1/2 規約: Q=2I, c=[-2,-4]), x,y∈[-10,10]  →  opt (1,2), obj=-5 (定数+5 除く)
+/// min (x-1)²+(y-2)² の bound 内 unconstrained 最小; opt (1,2), obj=-5 (定数+5 除く)。
 #[test]
 fn qp_unconstrained_quadratic() {
     // Q=[[2,0],[0,2]], c=[-2,-4]。1/2規約で f = 1/2*(2x^2+2y^2) - 2x - 4y = x^2+y^2-2x-4y
@@ -245,7 +244,7 @@ fn qp_unconstrained_quadratic() {
     check_sol_elem(result.solution[1], 2.0, TOL_X, "qp_unconstrained_quadratic y");
 }
 
-/// min x²+y² (Q=2I)  s.t. x+y=1, x,y≥0  →  opt (0.5, 0.5), obj=0.5 (λ=-1)
+/// KKT: 対称な 2x+λ=0 から x=y=0.5, λ=-1, obj=0.5。
 #[test]
 fn qp_eq_constrained() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -262,7 +261,7 @@ fn qp_eq_constrained() {
     check_sol_elem(result.solution[1], 0.5, TOL_X, "qp_eq_constrained y");
 }
 
-/// min x²+y² (Q=2I)  s.t. x+y≥2 (active), x,y≥0  →  opt (1,1), obj=2
+/// active Ge 制約; opt (1,1), obj=2。
 #[test]
 fn qp_ineq_constrained() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -279,7 +278,7 @@ fn qp_ineq_constrained() {
     check_sol_elem(result.solution[1], 1.0, TOL_X, "qp_ineq_constrained y");
 }
 
-/// min x²+y² (Q=2I), 0≤x,y≤0.5 (bounds のみ)  →  opt (0,0), obj=0 (IPM barrier 残差 5e-6 許容)
+/// bounds のみ; opt 原点だが IPM barrier は lb=0 に完全到達せず obj≈0 (許容 5e-6)。
 #[test]
 fn qp_bounds_only() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -318,7 +317,7 @@ fn qp_bounds_only() {
     );
 }
 
-/// min x²+y²+x+y (Q=2I, c=1)  s.t. x+y=2, x,y≥0  →  opt (1,1), obj=4 (λ=-3)
+/// linear c=[1,1] と等式制約の組合せ; opt (1,1), obj=4 (λ=-3)。
 #[test]
 fn qp_with_linear() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -335,7 +334,7 @@ fn qp_with_linear() {
     check_sol_elem(result.solution[1], 1.0, TOL_X, "qp_with_linear y");
 }
 
-/// min x² (Q=2)  s.t. x≥2 ∧ x≤1 (矛盾)  →  Infeasible
+/// intentionally infeasible: x≥2 ∧ x≤1。
 #[test]
 fn qp_infeasible() {
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
