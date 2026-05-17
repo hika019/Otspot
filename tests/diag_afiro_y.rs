@@ -283,6 +283,48 @@ fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/beaconfd.QPS");
 }
 
+/// 大規模 LP の timing_breakdown を出力 (ignored、 cargo nextest run -- --ignored で実行)。
+/// 「どこに時間が掛かっているか」事実観測用。
+#[test]
+#[ignore]
+fn diag_large_lp_timing_breakdown() {
+    let problems = [
+        "data/lp_problems/cre-b.QPS",
+        "data/lp_problems/cre-d.QPS",
+        "data/lp_problems/dfl001.QPS",
+        "data/lp_problems/ken-11.QPS",
+        "data/lp_problems/d2q06c.QPS",
+        "data/lp_problems/d6cube.QPS",
+        "data/lp_problems/greenbea.QPS",
+        "data/lp_problems/pilot.QPS",
+        "data/lp_problems/maros-r7.QPS",
+        "data/lp_problems/pilot87.QPS",
+        "data/lp_problems/perold.QPS",
+        "data/lp_problems/pds-20.QPS",
+    ];
+    println!("{:<24} {:>10} {:>10} {:>10} {:>10} {:>12}",
+        "problem", "presolve", "solve", "postsolve", "total_ms", "status");
+    for p in &problems {
+        let path = Path::new(p);
+        if !path.exists() { continue; }
+        let qp = parse_qps(path).expect("parse");
+        let lp = make_lp(&qp);
+        let mut opts = SolverOptions::default();
+        opts.presolve = true;
+        opts.timeout_secs = Some(15.0);
+        let r = solve_with(&lp, &opts);
+        let name = path.file_stem().unwrap().to_string_lossy();
+        if let Some(tb) = r.timing_breakdown {
+            let total_ms = (tb.presolve_us + tb.solve_us + tb.postsolve_us) as f64 / 1000.0;
+            println!("{:<24} {:>10} {:>10} {:>10} {:>10.1} {:>12?}",
+                name, tb.presolve_us, tb.solve_us, tb.postsolve_us, total_ms, r.status);
+        } else {
+            println!("{:<24} {:>10} {:>10} {:>10} {:>10} {:>12?}",
+                name, "-", "-", "-", "-", r.status);
+        }
+    }
+}
+
 /// TimingBreakdown が presolve ON で填まること、 各 phase Duration > 0 を要求。
 #[test]
 fn test_timing_breakdown_recorded_for_presolved_lp() {
