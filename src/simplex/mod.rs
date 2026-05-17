@@ -147,11 +147,18 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                         // greenbea-class LPs cannot finish the alt in 60 s canary
                         // because half of ~40 s remaining is not enough.
                         opts_off.simplex_method = crate::options::SimplexMethod::Primal;
-                        let alt = solve_without_presolve(problem, &opts_off);
+                        let t_alt_start = std::time::Instant::now();
+                        let mut alt = solve_without_presolve(problem, &opts_off);
+                        let alt_solve_us = t_alt_start.elapsed().as_micros() as u64;
                         if alt.status == SolveStatus::Optimal
                             && alt.postsolve_dfeas.is_none()
                             && alt.objective.is_finite()
                         {
+                            alt.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                                presolve_us: 0,
+                                solve_us: alt_solve_us,
+                                postsolve_us: 0,
+                            });
                             return alt;
                         }
                     }
