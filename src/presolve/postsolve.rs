@@ -747,7 +747,7 @@ pub fn run_postsolve(
                     dual_solution: seed,
                     ..Default::default()
                 };
-                crate::qp::compute_lsq_dual_y(&qp, &tmp_result)
+                crate::qp::compute_lsq_dual_y(&qp, &tmp_result, deadline)
             })
         } else {
             None

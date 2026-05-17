@@ -248,7 +248,7 @@ pub(crate) fn refine_dual_lsq(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
-    let Some(y_new) = compute_lsq_dual_y(problem, result) else {
+    let Some(y_new) = compute_lsq_dual_y(problem, result, deadline) else {
         return;
     };
     let n = problem.num_vars;
@@ -1352,6 +1352,7 @@ pub(crate) fn refine_dual_worst_active_block(
 pub(crate) fn compute_lsq_dual_y(
     problem: &QpProblem,
     result: &crate::problem::SolverResult,
+    deadline: Option<std::time::Instant>,
 ) -> Option<Vec<f64>> {
     use twofloat::TwoFloat;
     let n = problem.num_vars;
@@ -1360,6 +1361,9 @@ pub(crate) fn compute_lsq_dual_y(
         return None;
     }
     if n + m > LSQ_DUAL_SIZE_LIMIT {
+        return None;
+    }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
     let x = &result.solution;
@@ -1444,7 +1448,13 @@ pub(crate) fn compute_lsq_dual_y(
     }
 
     let solve_lsq_ir = |a_sub: &CscMatrix, m_sub: usize, v_dd: &[TwoFloat]| -> Option<Vec<f64>> {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let aat_sub = build_aat_upper_csc(a_sub, n, m_sub)?;
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let factor = crate::linalg::ldl::factorize(&aat_sub).ok()?;
         let build_rhs_sub = |v_dd: &[TwoFloat]| -> Vec<f64> {
             let mut acc: Vec<TwoFloat> = vec![zero_dd; m_sub];
@@ -1472,6 +1482,9 @@ pub(crate) fn compute_lsq_dual_y(
         const IR_PROGRESS_EPS: f64 = 1e-18;
         let mut prev_r_inf = f64::INFINITY;
         loop {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
             let mut atysub_dd: Vec<TwoFloat> = vec![zero_dd; n];
             for col in 0..n {
                 let cs = a_sub.col_ptr[col];
@@ -5975,7 +5988,7 @@ mod tests {
             bound_duals: vec![],
             ..SolverResult::default()
         };
-        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+        let y = compute_lsq_dual_y(&problem, &result, None).expect("LSQ should succeed");
         assert!((y[0] - (-3.0)).abs() < 1e-12, "got {}", y[0]);
     }
 
@@ -6003,7 +6016,7 @@ mod tests {
             bound_duals: vec![],
             ..SolverResult::default()
         };
-        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+        let y = compute_lsq_dual_y(&problem, &result, None).expect("LSQ should succeed");
 
         use twofloat::TwoFloat;
         let target = [1.0_f64, 1.0];
@@ -6036,7 +6049,7 @@ mod tests {
             ..SolverResult::default()
         };
 
-        let y = compute_lsq_dual_y(&problem, &result).expect("LSQ should succeed");
+        let y = compute_lsq_dual_y(&problem, &result, None).expect("LSQ should succeed");
 
         assert_eq!(y.len(), 2);
         assert!(y[0].abs() < 1e-10, "got {}", y[0]);
