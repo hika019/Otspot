@@ -104,5 +104,5 @@ echo "注意: 正解値CSV は data/baseline_objectives/netlib_lp_infeas.csv" >&
 echo "  全問題の expected status = INFEASIBLE" >&2
 echo "  ベンチ実行: SOLVER_DIR=. bash scripts/bench_parallel.sh \\" >&2
 echo "    --data-dir data/lp_problems_infeas \\" >&2
-echo "    --solver concurrent --timeout 300 --eps 1e-6 --jobs 8 \\" >&2
+echo "    --timeout 300 --eps 1e-6 --jobs 8 \\" >&2
 echo "    --output /tmp/infeas_bench.txt" >&2

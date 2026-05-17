@@ -8,7 +8,6 @@
 #   SOLVER_DIR=/path/to/solver \
 #   bash scripts/bench_parallel.sh \
 #     --data-dir <dir> \
-#     --solver <solver> \
 #     --timeout <sec> \
 #     --output <file> \
 #     [--eps <eps>]      (default: 1e-6)
@@ -29,7 +28,6 @@ EPS="1e-6"
 JOBS=""
 FEATURES=""
 DATA_DIR=""
-SOLVER=""
 TIMEOUT=""
 OUTPUT=""
 
@@ -37,23 +35,21 @@ OUTPUT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --data-dir)  DATA_DIR="$2";  shift 2 ;;
-    --solver)    SOLVER="$2";    shift 2 ;;
     --timeout)   TIMEOUT="$2";   shift 2 ;;
     --eps)       EPS="$2";       shift 2 ;;
     --jobs)      JOBS="$2";      shift 2 ;;
     --output)    OUTPUT="$2";    shift 2 ;;
     --features)  FEATURES="$2";  shift 2 ;;
     *) echo "エラー: 不明な引数 '$1'" >&2
-       echo "使い方: $0 --data-dir DIR --solver SOLVER --timeout SEC --output FILE [--eps EPS] [--jobs N] [--features FEAT]" >&2
+       echo "使い方: $0 --data-dir DIR --timeout SEC --output FILE [--eps EPS] [--jobs N] [--features FEAT]" >&2
        exit 1 ;;
   esac
 done
 
-# 必須引数チェック（--solver含む全て必須。暗黙のデフォルトモード禁止）
-if [[ -z "$DATA_DIR" || -z "$SOLVER" || -z "$TIMEOUT" || -z "$OUTPUT" || -z "$JOBS" ]]; then
-  echo "エラー: --data-dir, --solver, --timeout, --output, --jobs は全て必須" >&2
-  echo "使い方: $0 --data-dir DIR --solver SOLVER --timeout SEC --output FILE --jobs N [--eps EPS] [--features FEAT]" >&2
-  echo "  --solver: concurrent|ipm|ippmm_new（暗黙のデフォルト禁止）" >&2
+# 必須引数チェック（暗黙のデフォルトモード禁止）
+if [[ -z "$DATA_DIR" || -z "$TIMEOUT" || -z "$OUTPUT" || -z "$JOBS" ]]; then
+  echo "エラー: --data-dir, --timeout, --output, --jobs は全て必須" >&2
+  echo "使い方: $0 --data-dir DIR --timeout SEC --output FILE --jobs N [--eps EPS] [--features FEAT]" >&2
   echo "  --jobs: 並列数を明示せよ（暗黙のデフォルト禁止）" >&2
   exit 1
 fi
@@ -138,7 +134,7 @@ echo "[bench_parallel.sh] script_commit: $SCRIPT_VERSION (solver)"
 echo "[bench_parallel.sh] solver_commit: $SOLVER_COMMIT (branch: $SOLVER_BRANCH)"
 echo "[bench_parallel.sh] solver_dir: ${SOLVER_DIR:-$(pwd)}"
 echo "[bench_parallel.sh] timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-echo "[bench_parallel.sh] 対象: $TOTAL_FILES 件 (bin=$BIN, solver=${SOLVER:-default}, timeout=${TIMEOUT}s, eps=$EPS, jobs=$JOBS)"
+echo "[bench_parallel.sh] 対象: $TOTAL_FILES 件 (bin=$BIN, timeout=${TIMEOUT}s, eps=$EPS, jobs=$JOBS)"
 
 # ワークプールのグループサイズ (1問/グループ)。
 # 重い問題を含むグループが timeout に到達すると、そのワーカーが長時間塞がれ
@@ -198,11 +194,6 @@ FAILED_GROUPS_FILE="$TMPDIR_BASE/failed_groups.txt"
 : > "$FAILED_GROUPS_FILE"
 
 set +e  # 子プロセスの終了コードを個別に確認するため
-SOLVER_ARGS=()
-if [[ -n "$SOLVER" ]]; then
-  SOLVER_ARGS=(--solver "$SOLVER")
-fi
-
 KNOWN_OPTIMAL_ARG=()
 if [[ -n "$KNOWN_OPTIMAL" ]]; then
   KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
@@ -238,7 +229,6 @@ worker_func() {
     _BENCH_PARALLEL_CALLER=1 \
     SOLVER_DIR="${SOLVER_DIR:-$(pwd)}" \
     bash "$SCRIPT_DIR/solver_bench.sh" "$BIN" "$group_dir" \
-      "${SOLVER_ARGS[@]}" \
       --eps "$EPS" \
       --timeout "$TIMEOUT" \
       "${KNOWN_OPTIMAL_ARG[@]}" \
@@ -345,7 +335,6 @@ done
 {
   echo "=== bench_parallel.sh 集計結果 ==="
   echo "data-dir : $DATA_DIR"
-  echo "solver   : $SOLVER"
   echo "timeout  : ${TIMEOUT}s"
   echo "eps      : $EPS"
   echo "jobs     : $JOBS"

@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_ruiz_scaling_correctness() {
         use crate::qp::QpProblem;
-        use crate::options::{SolverOptions, QpSolverChoice};
+        use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
 
         // Q = diag(1, 100, 1, 100, 1) — 条件数が大きい
@@ -376,11 +376,11 @@ mod tests {
         let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
         // スケーリングなし
-        let opts_no_scale = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::IpPmm, ..Default::default() };
+        let opts_no_scale = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
         let r_no_scale = crate::qp::solve_qp_with(&problem, &opts_no_scale);
 
         // スケーリングあり
-        let opts_scale = SolverOptions { use_ruiz_scaling: true, qp_solver: QpSolverChoice::IpPmm, ..Default::default() };
+        let opts_scale = SolverOptions { use_ruiz_scaling: true, ..Default::default() };
         let r_scale = crate::qp::solve_qp_with(&problem, &opts_scale);
 
         // 両方 Optimal (偽Optimal検出時はSuboptimalSolutionも許容)
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_ruiz_disabled() {
         use crate::qp::QpProblem;
-        use crate::options::{SolverOptions, QpSolverChoice};
+        use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
 
         // 簡単な QP: min x^2 + y^2  s.t. x+y >= 1
@@ -430,7 +430,7 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { use_ruiz_scaling: false, qp_solver: QpSolverChoice::IpPmm, ..Default::default() };
+        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
 
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal, "disabled: {:?}", result.status);

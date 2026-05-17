@@ -30,7 +30,6 @@
 #   all      : standard / infeas / extra / hard を順次実行
 #              (CLAUDE.md 規約: 各 suite は逐次)
 #
-# SOLVER は concurrent を使用。
 # ベンチ実行は bench_parallel.sh 経由のみ (直接バイナリ呼び出し禁止)。
 #
 # 例:
@@ -50,7 +49,6 @@ SUITE="all"
 EPS="1e-6"
 JOBS="8"
 TIMEOUT="1000"
-SOLVER="concurrent"
 
 # 引数パース
 while [[ $# -gt 0 ]]; do
@@ -170,7 +168,6 @@ run_one() {
     SOLVER_DIR="$SOLVER_ROOT" \
     bash "$SCRIPT_DIR/bench_parallel.sh" \
         --data-dir "$data_dir" \
-        --solver "$SOLVER" \
         --timeout "$TIMEOUT" \
         --eps "$eps" \
         --jobs "$JOBS" \

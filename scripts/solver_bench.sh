@@ -18,7 +18,7 @@ set -euo pipefail
 # bench_parallel.sh 経由でのみ実行可能（直接実行禁止）
 if [[ "${_BENCH_PARALLEL_CALLER:-}" != "1" ]]; then
   echo "[solver_bench.sh] エラー: 直接実行禁止。bench_parallel.sh 経由で実行せよ。" >&2
-  echo "[solver_bench.sh] 使い方: bash scripts/bench_parallel.sh --data-dir DIR --solver SOLVER --timeout SEC --output FILE --jobs N" >&2
+  echo "[solver_bench.sh] 使い方: bash scripts/bench_parallel.sh --data-dir DIR --timeout SEC --output FILE --jobs N" >&2
   exit 1
 fi
 
@@ -40,33 +40,13 @@ echo "[solver_bench.sh] solver_commit: $(git rev-parse --short HEAD 2>/dev/null 
 echo "[solver_bench.sh] solver_branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
 echo "[solver_bench.sh] timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-# --solver フラグ必須チェック（暗黙のデフォルトモード禁止）
-has_solver=false
-for arg in "$@"; do
-  if [[ "$arg" == "--solver" ]]; then
-    has_solver=true
-    break
-  fi
-done
-if [[ "$has_solver" == false ]]; then
-  echo "[solver_bench.sh] エラー: --solver フラグが指定されていない。" >&2
-  echo "[solver_bench.sh] 暗黙のデフォルトモード禁止。--solver concurrent|ipm|ippmm_new を明示せよ。" >&2
-  exit 1
-fi
-
-# --features と --solver を $@ から分離（cargo build 用）
+# --features を $@ から分離（cargo build 用）
 EXTRA_FEATURES=""
-SOLVER_ARG=""
 BINARY_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --features)
       EXTRA_FEATURES="$2"
-      shift 2
-      ;;
-    --solver)
-      SOLVER_ARG="$2"
-      BINARY_ARGS+=("$1" "$2")
       shift 2
       ;;
     *)

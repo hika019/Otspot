@@ -25,7 +25,7 @@ pub use crate::constraint;
 
 use variable::VariableDefinition;
 
-use crate::options::{QpSolverChoice, Tolerance};
+use crate::options::Tolerance;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::simplex;
 use crate::sparse::CscMatrix;
@@ -58,8 +58,6 @@ pub struct Model {
     quadratic_objective: Option<CscMatrix>,
     /// Timeout for QP solve in seconds (None = unlimited).
     timeout_secs: Option<f64>,
-    /// QP solver choice (None = use default Concurrent).
-    qp_solver_choice: Option<QpSolverChoice>,
     /// Ruiz スケーリング有効/無効（None = default true）
     use_ruiz_scaling: Option<bool>,
     /// 収束精度プリセット（None = デフォルト Medium = 1e-6）
@@ -77,7 +75,6 @@ impl Model {
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
             timeout_secs: None,
-            qp_solver_choice: None,
             use_ruiz_scaling: None,
             tolerance: None,
         }
@@ -86,11 +83,6 @@ impl Model {
     /// Set a timeout for QP solve operations.
     pub fn set_timeout(&mut self, secs: f64) {
         self.timeout_secs = Some(secs);
-    }
-
-    /// Set the QP solver to use.
-    pub fn set_qp_solver_choice(&mut self, choice: QpSolverChoice) {
-        self.qp_solver_choice = Some(choice);
     }
 
     /// Ruiz equilibration スケーリングの有効/無効を設定する（デフォルト: true）
@@ -359,9 +351,6 @@ impl Model {
         let mut opts = crate::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
             opts.timeout_secs = Some(t);
-        }
-        if let Some(choice) = self.qp_solver_choice {
-            opts.qp_solver = choice;
         }
         if let Some(flag) = self.use_ruiz_scaling {
             opts.use_ruiz_scaling = flag;

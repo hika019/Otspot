@@ -1,6 +1,6 @@
 //! QPLIBベンチマーク
 //!
-//! Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
+//! Usage: bench_qplib [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
 //! 指定ディレクトリ内の全 *.qplib ファイルを parse_qplib → solve_qp_with_options で実行し、
 //! 結果テーブルを stdout に出力する。
 //!
@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
 use solver::io::qplib::{parse_qplib, QplibError};
-use solver::options::{QpSolverChoice, SolverOptions};
+use solver::options::SolverOptions;
 use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
@@ -45,23 +45,21 @@ fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, Benc
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 引数パース: [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
+    // 引数パース: [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
     let mut data_dir = "data/qplib".to_string();
-    let mut solver_choice = QpSolverChoice::IpPmm;
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
 
     // known flagリスト（値を持つフラグ）
     const KNOWN_FLAGS_WITH_VALUE: &[&str] = &[
-        "--solver", "--eps", "--timeout", "--known-optimal",
+        "--eps", "--timeout", "--known-optimal",
     ];
 
     let mut i = 1usize;
     while i < args.len() {
         if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: bench_qplib [data_dir] [--solver ipm|ippmm_new|concurrent] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
-            println!("  --solver        Solver to use (default: concurrent/auto)");
+            println!("Usage: bench_qplib [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]");
             println!("  --eps           Convergence tolerance (default: 1e-6)");
             println!("  --timeout       Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
@@ -71,17 +69,6 @@ fn main() {
             i += 1;
             if i < args.len() {
                 match args[i - 1].as_str() {
-                    "--solver" => {
-                        solver_choice = match args[i].as_str() {
-                            "ipm" => QpSolverChoice::IpPmm,
-                            "concurrent" => QpSolverChoice::IpPmm,
-                            "ippmm_new" => QpSolverChoice::IpPmm,
-                            other => {
-                                eprintln!("Unknown solver: {}. Use ipm|concurrent|ippmm_new", other);
-                                std::process::exit(1);
-                            }
-                        };
-                    }
                     "--eps" => { eps = args[i].parse().unwrap_or(1e-6); }
                     "--timeout" => { timeout_secs = args[i].parse().unwrap_or(10.0); }
                     "--known-optimal" => { baseline_override = Some(args[i].clone()); }
@@ -142,11 +129,7 @@ fn main() {
     println!("QPLIB Benchmark ({} files)", qplib_files.len());
     println!();
 
-    let solver_label = match solver_choice {
-        QpSolverChoice::IpPmm => "Concurrent",
-        _ => "Unknown",
-    };
-    println!("Solver: {}", solver_label);
+    println!("Solver: IPPMM");
 
     println!(
         "{:<24} {:>6} {:>6} {:>15} {:>10} Note",
@@ -175,7 +158,6 @@ fn main() {
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
-    opts.qp_solver = solver_choice;
     opts.ipm.eps = eps;
 
     for path in &qplib_files {
@@ -240,11 +222,7 @@ fn main() {
         let elapsed_s = start.elapsed().as_secs_f64();
         println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
 
-        let method_label = match result.solver_used {
-            Some(QpSolverChoice::IpPmm) => "ipm",
-            Some(_) => "other",
-            None => "-",
-        };
+        let method_label = "ipm";
         let resid_str = match result.final_residuals {
             Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
             None => String::new(),

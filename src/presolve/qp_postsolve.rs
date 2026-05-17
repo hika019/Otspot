@@ -103,7 +103,6 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         bound_duals: reduced_sol.bound_duals.clone(),
 
         iterations: reduced_sol.iterations,
-        solver_used: reduced_sol.solver_used,
         final_residuals: reduced_sol.final_residuals,
         pfeas: reduced_sol.pfeas,
         dfeas: reduced_sol.dfeas,

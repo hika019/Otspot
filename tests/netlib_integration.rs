@@ -572,10 +572,9 @@ fn test_boyd1_no_memory_explosion() {
 }
 
 
-/// Stack-overflow regression: `qp_solver: Ipm` 直接指定でも BOYD1 級で stack 保護されるか
+/// Stack-overflow regression: BOYD1 級でも IPPMM 経路で stack 保護されるか
 #[test]
 fn test_boyd1_direct_ipm_no_stack_overflow() {
-    use solver::options::QpSolverChoice;
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
     if !path.exists() {
         eprintln!("BOYD1.QPS not found, skipping");
@@ -583,10 +582,9 @@ fn test_boyd1_direct_ipm_no_stack_overflow() {
     }
     let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
     let mut opts = SolverOptions::default();
-    opts.qp_solver = QpSolverChoice::IpPmm;
     opts.timeout_secs = Some(30.0);
     let result = solve_qp_with(&problem, &opts);
-    println!("BOYD1 direct Ipm: status={:?}", result.status);
+    println!("BOYD1 direct IPPMM: status={:?}", result.status);
     // status は Optimal/Suboptimal/Timeout どれでも良い。stack overflow しないことだけ検証。
     assert!(!result.solution.is_empty() || matches!(result.status, SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution));
 }

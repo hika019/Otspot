@@ -69,7 +69,6 @@ echo "[bench_mini] output: $OUTPUT"
 
 SOLVER_DIR="$ROOT" bash "$SCRIPT_DIR/bench_parallel.sh" \
   --data-dir "$TMPDIR" \
-  --solver concurrent \
   --timeout "$TIMEOUT" \
   --eps "$EPS" \
   --jobs "$JOBS" \

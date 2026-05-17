@@ -5,7 +5,6 @@
 //! Usage:
 //!   cargo run --release --features parallel --bin verify_solutions
 //!   cargo run --release --features parallel --bin verify_solutions -- --qplib
-//!   cargo run --release --features parallel --bin verify_solutions -- --solver ipm
 //!
 //! KKT条件（min 1/2 x^T Q x + c^T x  s.t. Ax <= b, lb <= x <= ub）:
 //!   primal_feas : max(0, max_i(A*x - b)_i)        (Ax <= b 違反)
@@ -24,7 +23,7 @@ use std::time::Instant;
 
 use solver::io::qps::parse_qps;
 use solver::io::qplib::{parse_qplib, QplibError};
-use solver::options::{QpSolverChoice, SolverOptions};
+use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -152,26 +151,11 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut use_qplib = false;
-    let mut solver_choice = QpSolverChoice::IpPmm;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--qplib" => use_qplib = true,
-            "--solver" => {
-                i += 1;
-                if i < args.len() {
-                    solver_choice = match args[i].as_str() {
-                        "ipm" => QpSolverChoice::IpPmm,
-                        "ippmm_new" => QpSolverChoice::IpPmm,
-                        "concurrent" => QpSolverChoice::IpPmm,
-                        other => {
-                            eprintln!("Unknown solver: {}", other);
-                            std::process::exit(1);
-                        }
-                    };
-                }
-            }
             _ => {}
         }
         i += 1;
@@ -198,13 +182,8 @@ fn main() {
         .collect();
     files.sort();
 
-    let solver_label = match solver_choice {
-        QpSolverChoice::IpPmm => "Concurrent",
-        _ => "Unknown",
-    };
-
     let dataset = if use_qplib { "QPLIB" } else { "Maros-Meszaros" };
-    println!("=== KKT Solution Verification: {} ({} files, solver={}) ===", dataset, files.len(), solver_label);
+    println!("=== KKT Solution Verification: {} ({} files, solver=IPPMM) ===", dataset, files.len());
     println!("EPS = {:.0e}", EPS);
     println!();
     println!(
@@ -215,7 +194,6 @@ fn main() {
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(10.0);
-    opts.qp_solver = solver_choice;
 
     let mut n_pass = 0usize;
     let mut n_fail = 0usize;
