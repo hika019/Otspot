@@ -55,7 +55,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 /// converges to 4.044e6. So the test FAILS at HEAD with 60 s budget and
 /// would PASS once `pivot_out_degenerate_artificials` is sped up.
 #[test]
-#[ignore]
+#[ignore = "diag (heavy ~60s; regression target task #4、要 data/lp_problems/osa-60.QPS)"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     if !path.exists() {
@@ -150,7 +150,7 @@ fn diag_osa60_must_reach_known_objective() {
 /// At HEAD this FAILS: empirically wall ≈ 365 s for a 120 s internal
 /// budget. Scaled to 30 s internal it lands well past the 60 s slack ceiling.
 #[test]
-#[ignore]
+#[ignore = "diag (heavy ~60s; regression target task #3、要 data/lp_problems/ken-18.QPS)"]
 fn diag_ken18_must_respect_internal_deadline() {
     let path = Path::new("data/lp_problems/ken-18.QPS");
     if !path.exists() {

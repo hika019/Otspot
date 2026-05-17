@@ -1653,60 +1653,6 @@ mod tests {
     // -----------------------------------------------------------
     // R5: Free singleton column
     // -----------------------------------------------------------
-    /// 一時計測: tests/netlib/*.mps の縮小効果。commit 前に削除する。
-    #[test]
-    #[ignore]
-    fn measure_presolve_sizes_netlib() {
-        use std::path::Path;
-        let dir = Path::new("tests/netlib");
-        let mut entries: Vec<_> = std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("mps"))
-            .collect();
-        entries.sort_by_key(|e| e.path());
-        eprintln!(
-            "{:<24} {:>6} {:>6} {:>8} -> {:>6} {:>6} {:>8}  (Δn / Δm / Δnnz)",
-            "problem", "n", "m", "nnz", "n'", "m'", "nnz'"
-        );
-        let mut tot_dn = 0i64;
-        let mut tot_dm = 0i64;
-        let mut tot_dnnz = 0i64;
-        for e in entries {
-            let path = e.path();
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-            let lp = match crate::io::mps::parse_mps_file(&path) {
-                Ok(p) => p,
-                Err(err) => {
-                    eprintln!("{}: parse error: {:?}", stem, err);
-                    continue;
-                }
-            };
-            let n0 = lp.num_vars;
-            let m0 = lp.num_constraints;
-            let nnz0 = lp.a.nnz();
-            match run_presolve(&lp, None) {
-                Ok(res) => {
-                    let n1 = res.reduced_problem.num_vars;
-                    let m1 = res.reduced_problem.num_constraints;
-                    let nnz1 = res.reduced_problem.a.nnz();
-                    eprintln!(
-                        "{:<24} {:>6} {:>6} {:>8} -> {:>6} {:>6} {:>8}  ({:>5} / {:>5} / {:>6})",
-                        stem, n0, m0, nnz0, n1, m1, nnz1,
-                        n0 as i64 - n1 as i64,
-                        m0 as i64 - m1 as i64,
-                        nnz0 as i64 - nnz1 as i64
-                    );
-                    tot_dn += n0 as i64 - n1 as i64;
-                    tot_dm += m0 as i64 - m1 as i64;
-                    tot_dnnz += nnz0 as i64 - nnz1 as i64;
-                }
-                Err(s) => eprintln!("{:<24} ERR: {:?}", stem, s),
-            }
-        }
-        eprintln!("TOTAL  Δn={} Δm={} Δnnz={}", tot_dn, tot_dm, tot_dnnz);
-    }
-
     #[test]
     fn presolve_doubleton_dual_recovery_eq_le() {
         // Eq doubleton (x1+x2=6) + Le (x2<=5)。pivot=x1 で x1 を消去後、
