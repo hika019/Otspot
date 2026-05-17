@@ -179,7 +179,7 @@ fn qp_diagonal_q_basic() {
     );
 }
 
-/// QP off-diagonal Q: min 1/2(x²+xy+y²)−x−y  s.t. x+y≤4, x,y≥0  (Model ↔ direct 一致確認)。
+/// 上下三角両格納の off-diag Q (QPS 慣例); Model ↔ direct 一致確認。
 #[test]
 fn qp_offdiagonal_q() {
     let mut model = Model::new("qp_off");
@@ -206,7 +206,7 @@ fn qp_offdiagonal_q() {
     assert_close(r_api[y], r_direct.solution[1], TOL_X, "y");
 }
 
-/// QP rank-deficient (LP 退化型 mini): min 1/2 x²  s.t. x+y=1, x,y∈[0,1]  →  opt (0,1).
+/// Q rank-deficient (y は obj に絡まない LP 退化型 mini); IPM 経路で opt (0,1)。
 #[test]
 fn qp_eq_with_redundant_var() {
     let mut model = Model::new("qp_eq_red");
@@ -242,7 +242,7 @@ fn qp_eq_with_redundant_var() {
     );
 }
 
-/// QP maximize 規約検証: Q は NSD で渡す必要あり (内部で -Q)。max -1/2 x²+x, x∈[0,5]  →  opt x=1, obj=0.5.
+/// QP maximize 規約: Q は NSD で渡す (内部で -Q 反転)。concave max → opt x=1, obj=0.5。
 #[test]
 fn qp_maximize_concave() {
     let mut model = Model::new("qp_max");
@@ -266,7 +266,7 @@ fn qp_maximize_concave() {
     );
 }
 
-/// 非凸 maximize: max 1/2 x²+x, x∈[0,5] (PSD Q→内部 NSD).  慣性修正 IPM で境界 KKT 点 x=5, obj=17.5 を LocallyOptimal で返す。
+/// 非凸 maximize (PSD Q を maximize → 内部 NSD); 慣性修正 IPM で境界 KKT 点 x=5, obj=17.5 を LocallyOptimal 返却。
 #[test]
 fn qp_maximize_with_psd_q_returns_error() {
     let mut model = Model::new("qp_max_psd");
@@ -292,7 +292,7 @@ fn qp_maximize_with_psd_q_returns_error() {
     );
 }
 
-/// 制約なし QP (bounds のみ): min 1/2(x²+y²)−x, x,y∈[-2,2]  →  opt (1,0), obj=-0.5.
+/// 制約なし (m=0, bounds のみ); opt (1,0), obj=-0.5。
 #[test]
 fn qp_no_constraints_only_bounds() {
     let mut model = Model::new("qp_nocon");
@@ -345,8 +345,7 @@ fn lp_unbounded_returns_err() {
     );
 }
 
-/// QP dual 出力の符号規約 sentinel: min 1/2 x²  s.t. x≥1 (Ge)  →  x=1, dual=-1.
-/// collapse_extended_dual で Ge を Le に変換時に符号反転されるため、Ge dual は負値 (OSQP/Gurobi と逆規約)。
+/// QP dual 符号規約 sentinel: collapse_extended_dual の Ge→Le 変換で符号反転、Ge dual は負値 (OSQP/Gurobi と逆規約)。
 #[test]
 fn qp_dual_solution_available() {
     let mut model = Model::new("qp_dual");
