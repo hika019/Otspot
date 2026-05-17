@@ -1,0 +1,10 @@
+target/
+bench_results/
+tmp/
+data/
+.git/
+.claude/
+.idea/
+.vscode/
+*.log
+.DS_Store

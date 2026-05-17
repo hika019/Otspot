@@ -1,0 +1,76 @@
+# Dev environment for solver (LP / QP)、ホスト rustc 1.93.1 に整合
+#
+# Build:
+#   docker build -f Dockerfile.dev -t solver-dev .
+#
+# Run interactive:
+#   docker run -it --rm -v "$PWD":/workspace -w /workspace solver-dev bash
+#
+# One-shot test:
+#   docker run --rm -v "$PWD":/workspace -w /workspace solver-dev \
+#     bash -c 'cargo nextest run --release'
+#
+# One-shot bench data setup + canary bench:
+#   docker run --rm -v "$PWD":/workspace -w /workspace solver-dev \
+#     bash -c 'bash scripts/download_all_bench_data.sh --lp && \
+#              bash scripts/run_lp_bench.sh --suite canary --jobs 1 --timeout 60 --eps 1e-6'
+
+FROM rust:1.93.1-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps
+#   build-essential: gcc/cc for emps + native Rust deps (mimalloc 等)
+#   pkg-config / libssl-dev: 一部 crate が link する
+#   git curl: bench data 取得スクリプト + cargo dep fetch
+#   python3 + venv: bench data 生成スクリプト
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      pkg-config \
+      libssl-dev \
+      git \
+      curl \
+      ca-certificates \
+      python3 \
+      python3-pip \
+      python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps for bench data generation (scripts/gen_*.py)
+#   scipy / numpy: 行列生成 (gen_* 全般)
+#   cvxpy: osqp benchmark 系の問題生成
+#   clarabel: cross-check baseline 取得 (任意だが推奨)
+#   --break-system-packages: Debian 12 PEP 668 回避 (container 内なので問題なし)
+RUN pip3 install --no-cache-dir --break-system-packages \
+      'numpy>=1.24' \
+      'scipy>=1.10' \
+      'cvxpy>=1.4' \
+      'clarabel>=0.6'
+
+# nextest (推奨 test runner、scripts/solver_test.sh が使用)
+# 公式推奨は pre-built binary (curl install)、cargo install より高速かつ確実
+# https://nexte.st/docs/installation/pre-built-binaries/
+# CARGO_HOME を後で /cargo に変更する前なので、binary は ~/.cargo/bin (= /usr/local/cargo/bin) に入る
+RUN arch=$(dpkg --print-architecture) && \
+    case "$arch" in \
+      amd64) url="https://get.nexte.st/latest/linux" ;; \
+      arm64) url="https://get.nexte.st/latest/linux-arm" ;; \
+      *) echo "unsupported arch: $arch" && exit 1 ;; \
+    esac && \
+    curl -LsSf "$url" | tar zxf - -C "${CARGO_HOME:-/usr/local/cargo}/bin"
+
+# emps コンパイル (Netlib LP データ取得時に必要、scripts/lp_canary_setup.sh 等)
+RUN curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c \
+    && cc -O2 -o /usr/local/bin/emps /tmp/emps.c \
+    && rm /tmp/emps.c
+
+# 作業 dir は外部 mount を想定 (source は -v $PWD:/workspace でマウント)
+WORKDIR /workspace
+
+# cargo build/cache の persist 用 (任意で volume 化)
+ENV CARGO_HOME=/cargo
+ENV CARGO_TARGET_DIR=/workspace/target
+RUN mkdir -p /cargo
+
+# default は bash 起動 (interactive 用)
+CMD ["bash"]
