@@ -18,6 +18,7 @@ use solver::bench_utils::{detect_csv_path, load_baseline_objectives, load_expect
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{QpSolverChoice, SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
+use solver::tolerances::ZERO_TOL;
 use solver::qp::ipm_solver::solve_ipm;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
@@ -188,39 +189,71 @@ fn compute_dfeas_orig(
     } else {
         vec![0.0; n]
     };
-    // LP/Simplex 経路: Simplex の双対変数は IPM の KKT 符号慣例と異なる (shadow prices ≥ 0)。
-    // Stationarity 式 (c + A^T y + bound_contrib = 0) を Simplex 双対に適用すると
-    // residual = 2 * A^T y + mu_ub ≠ 0 となり誤検出が発生する。
-    // LP 双対実行可能性の正しい判定: rc_extracted[j] ≥ 0 (∀j)。
-    // Simplex が Optimal を返すとき rc ≥ 0 は算法的に保証されるが、
-    // 数値誤差で一部が负になる場合は非最適解を返している可能性がある。
+    // LP/Simplex 経路: complementarity-aware dual feasibility check
+    //
+    // ## LP KKT 概観
+    //
+    // primal: min c^T x s.t. Ax = b, lb <= x <= ub
+    // dual:   y (Ax=b), z_lb >= 0 (x>=lb), z_ub >= 0 (x<=ub)
+    // stationarity:  A^T y + z_lb − z_ub = c  ⇒  rc := c − A^T y = z_lb − z_ub
+    // complementarity:  (x − lb) z_lb = 0,  (ub − x) z_ub = 0
+    //
+    // Simplex 最適性: 非基底変数のみが bound に活性化、基底変数は内点で rc=0 (構造的)。
+    //
+    // ## なぜ「bound hit 判定 + sign check」か (純粋な bound-finiteness 判定では不十分)
+    //
+    // 純粋な bound-finiteness 判定 (lb 有限 ⇒ rc>=0 必須) は、基底変数 (内点、rc=0
+    // が原理的) に postsolve / cleanup LP 由来の noise (|rc| ~ 1e-2 級) が乗ったとき
+    // 大量の false positive を生む (agg/boeing2/brandy 等で観測)。
+    //
+    // 構造的に正しい複合判定: 「変数が bound に活性化しているか」を **相対許容**
+    // で見て、活性のみ rc 符号を要求する。これにより:
+    //   1. bound 活性変数: KKT 通り厳格判定
+    //   2. 内点変数 (基底): rc=0 が構造的、ただし extract noise 許容
+    //
+    // ## 旧 magic BOUND_HIT_TOL=1e-6 を撤去した理由
+    //
+    // 1e-6 絶対閾値は問題スケール非依存 (x ~ 1e6 で hit 判定が失敗、x ~ 1e-3 で
+    // 過剰活性化)。Wilkinson 経験則由来の `feas_rel_tol()` (= sqrt(PIVOT_TOL))
+    // を相対 `(1 + |x| + |bound|)` でスケールすれば、磁石的 magic を廃しつつ
+    // 同じ defense-in-depth を達成できる。
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
+        use solver::tolerances::feas_rel_tol;
+        let rel_tol = feas_rel_tol(); // sqrt(PIVOT_TOL) = 1e-4 (構造的派生)
         let mut dfeas_abs = 0.0_f64;
         let mut dfeas_rel = 0.0_f64;
-        const BOUND_HIT_TOL: f64 = 1e-6;
         for j in 0..n {
             let (lb_j, ub_j) = prob.bounds[j];
-            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
-                continue; // FX 変数は除外
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
+                continue; // FX 変数は presolve で除去済み
             }
             if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
-                continue; // EmptyCol は除外
+                continue; // EmptyCol は presolve で除去済み
             }
             let rc = reduced_costs[j];
-            // LP dual feasibility (bound 考慮):
-            //   x[j] at lb → rc ≥ 0、x[j] at ub → rc ≤ 0、interior → rc ≈ 0
-            // 旧実装 (viol = max(0, -rc)) は lb hit 前提のみで ub hit ケースを誤検出。
             let x_j = solution[j];
-            let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_HIT_TOL;
-            let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_HIT_TOL;
-            // interior 変数 (どの bound にも hit しない) は LP 退化解で rc ≠ 0 が
-            // 自然に発生するため厳格判定しない。bound hit 変数のみ符号制約を要求。
+            // 相対 bound-hit 判定: `|x - bound| <= rel_tol * (1 + |x| + |bound|)`
+            // (FEAS_REL_TOL = sqrt(PIVOT_TOL) ≈ 1e-4, scale 依存性 0)。
+            let at_lb = lb_j.is_finite()
+                && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
+            let at_ub = ub_j.is_finite()
+                && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+            // sign 制約: 活性 bound のみ要求 (内点は基底変数として rc≈0 が構造的)。
             let viol = if at_lb && !at_ub {
-                f64::max(0.0, -rc)
+                f64::max(0.0, -rc) // x = lb: z_lb = rc >= 0
             } else if at_ub && !at_lb {
-                f64::max(0.0, rc)
+                f64::max(0.0,  rc) // x = ub: z_ub = -rc >= 0
+            } else if !at_lb && !at_ub {
+                // 内点 + 両端非活性: 基底変数として rc=0 が構造的。noise は許容。
+                // free 変数 (両端 inf) の場合のみ厳格 (z_lb=z_ub=0 強制) → |rc|
+                // をフル違反扱い。それ以外は 0 (postsolve noise 排除)。
+                if !lb_j.is_finite() && !ub_j.is_finite() {
+                    rc.abs()
+                } else {
+                    0.0
+                }
             } else {
-                0.0 // interior or 両端 hit: 厳格判定なし
+                0.0 // 両端 hit (FX相当、稀): 厳格判定なし
             };
             dfeas_abs = dfeas_abs.max(viol);
             let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
@@ -551,6 +584,75 @@ mod tests {
             "Ge充足: expected pfeas=0.0, got {}",
             pfeas_ok
         );
+    }
+
+    /// **task #12 (BOUND_HIT_TOL 撤去)**: 相対 bound-hit 判定 + sign check が
+    /// 構造的に正しい dfeas violation を返すことを assert。
+    ///
+    /// 構造仕様 (詳細は `compute_dfeas_orig` LP 経路コメント参照):
+    /// 1. bound 活性 (相対 `feas_rel_tol` で判定) のとき、その方向の rc 符号制約
+    /// 2. 内点 (両端非活性): postsolve / cleanup LP noise 許容で 0
+    /// 3. free (両端 inf): 厳格 rc=0 要求
+    ///
+    /// 旧 BOUND_HIT_TOL=1e-6 は **絶対** 閾値で、x スケールに依存して誤判定を
+    /// 起こしていた。新実装は scale-invariant。
+    #[test]
+    fn test_dfeas_bound_hit_relative_structural() {
+        let make_prob = |bounds: Vec<(f64, f64)>, c: Vec<f64>, x_target: f64| -> QpProblem {
+            let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+            let mut p = QpProblem::new(
+                CscMatrix::new(1, 1),
+                c,
+                a,
+                vec![x_target],
+                bounds,
+                vec![ConstraintType::Eq],
+            ).unwrap();
+            p.obj_offset = 0.0;
+            p
+        };
+
+        // Case A: lb=0, ub=inf, x=0 (at lb), rc=+1 → 合法 (z_lb=1≥0)
+        let p = make_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 0.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[0.0], &[], &[], &[1.0]);
+        assert!(abs < 1e-15, "at lb, rc=+1 (合法): dfeas={}", abs);
+
+        // Case B: lb=0, ub=inf, x=0 (at lb), rc=-1 → 違反 (z_lb=-1<0)
+        let (abs, _) = compute_dfeas_orig(&p, &[0.0], &[], &[], &[-1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "at lb, rc=-1 (違反): dfeas={}", abs);
+
+        // Case C: lb=0, ub=inf, x=100 (interior, x ≫ lb*rel_tol), rc=-1 →
+        //   内点 = 基底変数仮定で noise 許容、dfeas=0
+        let p = make_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 100.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[100.0], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "interior, rc=-1 (基底 noise 許容): dfeas={}", abs);
+
+        // Case D: lb=0, ub=10, x=10 (at ub), rc=+1 → 違反 (z_ub=-1<0)
+        let p = make_prob(vec![(0.0, 10.0)], vec![1.0], 10.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "at ub, rc=+1 (違反): dfeas={}", abs);
+
+        // Case E: lb=0, ub=10, x=10 (at ub), rc=-1 → 合法 (z_ub=1≥0)
+        let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "at ub, rc=-1 (合法): dfeas={}", abs);
+
+        // Case F: free (lb=-inf, ub=+inf), x=5, rc=0.5 → 違反 (z_lb=z_ub=0 強制で rc=0)
+        let p = make_prob(vec![(f64::NEG_INFINITY, f64::INFINITY)], vec![1.0], 5.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[5.0], &[], &[], &[0.5]);
+        assert!((abs - 0.5).abs() < 1e-15, "free rc=0.5 (違反): dfeas={}", abs);
+
+        // Case G: lb=0, x=1e6 (内点, 大スケール) — 旧 BOUND_HIT_TOL=1e-6 では
+        //   |x-lb|=1e6 >> 1e-6 で「内点」と判定するが、新コードも相対判定で「内点」
+        //   と判定 (1e6 > rel_tol * (1+1e6) ≈ 100)。内点 rc<0 は許容。
+        let p = make_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 1e6);
+        let (abs, _) = compute_dfeas_orig(&p, &[1e6], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "large-scale interior, rc=-1 (内点 noise 許容): dfeas={}", abs);
+
+        // Case H: lb=0, x=1e-9 (tiny x, 旧 BOUND_HIT_TOL=1e-6 では「at lb」だが、
+        //   |x-lb|=1e-9 < rel_tol * (1+1e-9) ≈ 1e-4 で新コードも「at lb」判定。
+        //   rc<0 → 違反として正しく検出)。
+        let (abs, _) = compute_dfeas_orig(&p, &[1e-9], &[], &[], &[-1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "tiny x (at lb relatively), rc=-1: dfeas={}", abs);
     }
 
     #[test]

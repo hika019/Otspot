@@ -632,13 +632,25 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
     }
 }
 
-/// Eq 制約の feasibility を確認する（案D: defense-in-depth）
+/// 制約 feasibility を確認する（defense-in-depth）。
 ///
-/// `solution` は problem の変数空間の解ベクトル。
-/// Eq 制約の violation が `FEASIBILITY_TOL` を超える場合 false を返す。
-/// bore3d の 100 単位違反のような明らかな誤 Optimal を検出し NumericalError として返すために使う。
+/// `solution` は problem の変数空間の解ベクトル。各制約 i について
+/// `violation = |Ax_i − b_i|` (Eq) / `max(0, Ax_i − b_i)` (Le) /
+/// `max(0, b_i − Ax_i)` (Ge) を求め、**relative** に比較する:
+///
+///   violation > `feas_rel_tol()` * (1 + |b_i| + |Ax_i|)  →  false
+///
+/// **旧実装** (`FEASIBILITY_TOL = 1e-4` の絶対閾値) は scale 依存:
+///   - bore3d (|b|≈O(1)) の 100-単位違反 → relative 100 で問題なく検出
+///   - cycle/d6cube (|b|≫1) の **真の Optimal** にも relative 1e-7 程度の
+///     `|Ax-b|` 揺らぎがあり、絶対 1e-4 で誤 reject (NumericalError 化)
+///
+/// relative 化により scale 非依存となり、bore3d 級異常は引き続き検出し、
+/// cycle/d6cube の false NumericalError は解消する。
+/// `feas_rel_tol() = sqrt(PIVOT_TOL)` は magic ではなく Wilkinson 経験則から
+/// 構造的に導出（`tolerances.rs` 参照）。
 fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
-    const FEASIBILITY_TOL: f64 = 1e-4;
+    let tol = feas_rel_tol();
     let mut ax = vec![0.0f64; problem.num_constraints];
     for (j, &sj) in solution.iter().enumerate() {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -647,17 +659,33 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
             }
         }
     }
-    for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
+    let mut max_abs_viol = 0.0_f64;
+    let mut max_rel_viol = 0.0_f64;
+    let mut worst_row = (0usize, 0.0_f64, 0.0_f64, 0.0_f64); // row, ax, b, viol
+    let mut violated = false;
+    for (i, ((ax_i, ct), bi)) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()).enumerate() {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
             ConstraintType::Le => (ax_i - bi).max(0.0),
             ConstraintType::Ge => (bi - ax_i).max(0.0),
         };
-        if violation > FEASIBILITY_TOL {
-            return false;
+        let scale = 1.0 + bi.abs() + ax_i.abs();
+        let rel = violation / scale;
+        if violation > max_abs_viol {
+            max_abs_viol = violation;
+            worst_row = (i, *ax_i, *bi, violation);
+        }
+        if rel > max_rel_viol { max_rel_viol = rel; }
+        if rel > tol {
+            violated = true;
         }
     }
-    true
+    if std::env::var("DUMP_CHECK_EQ").ok().as_deref() == Some("1") {
+        eprintln!("[check_eq] name={:?} m={} max_abs_viol={:.3e} max_rel_viol={:.3e} tol={:.3e} worst_row=(i={}, ax={:.6e}, b={:.6e}, viol={:.3e}) PASS={}",
+            problem.name, problem.num_constraints, max_abs_viol, max_rel_viol, tol,
+            worst_row.0, worst_row.1, worst_row.2, worst_row.3, !violated);
+    }
+    !violated
 }
 
 fn pivot_out_degenerate_artificials(

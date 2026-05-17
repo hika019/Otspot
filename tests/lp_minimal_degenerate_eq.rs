@@ -138,6 +138,65 @@ fn bug5d_single_eq_constraint_clean() {
     assert_optimal_with_value(&lp, 3.0, "bug5d_single_eq_clean");
 }
 
+/// **task #12 (FEASIBILITY_TOL 相対化)**: 大きい b スケール (例 b=1e6) の
+/// Eq 制約で、退化系の数値ノイズ (絶対 1e-5 程度) が **誤って** NumericalError
+/// 化されないことを assert する。
+///
+/// 旧実装は `FEASIBILITY_TOL = 1e-4` 絶対閾値。|b|=1e6 で legitimate な LU 残差
+/// 1e-5 (相対 1e-11) でも NumericalError と判定。
+///
+/// 新実装は `feas_rel_tol() * (1 + |b| + |Ax|)` 相対閾値。
+/// → |b|=1e6 で許容絶対 ≈ 1e-4 * 1e6 = 1e2 まで通る (cycle / d6cube 退化系の
+///   数値ノイズが false NumericalError 化されない)。
+#[test]
+fn bug5e_large_b_scale_degenerate() {
+    // 5 退化 Eq (x_i = 0) + 1 active Eq (x_5 = 1e6)
+    let n = 6;
+    let m = 6;
+    let mut tri_rows = Vec::new();
+    let mut tri_cols = Vec::new();
+    let mut tri_vals = Vec::new();
+    for i in 0..5 {
+        tri_rows.push(i);
+        tri_cols.push(i);
+        tri_vals.push(1.0);
+    }
+    tri_rows.push(5);
+    tri_cols.push(5);
+    tri_vals.push(1.0);
+    let a = CscMatrix::from_triplets(&tri_rows, &tri_cols, &tri_vals, m, n).unwrap();
+
+    let mut b = vec![0.0; m];
+    b[5] = 1e6;
+    let cts = vec![ConstraintType::Eq; m];
+
+    let mut c = vec![0.0; n];
+    c[5] = 1.0;
+    let bounds = vec![(0.0, f64::INFINITY); n];
+
+    let lp = LpProblem::new_general(
+        c, a, b, cts, bounds, Some("bug5e_large_b_scale".into())
+    ).unwrap();
+    assert_optimal_with_value(&lp, 1e6, "bug5e_large_b_scale_degenerate");
+}
+
+/// **task #12 (FEASIBILITY_TOL 相対化)**: 大スケール解 (e.g. |x|≈1e6) で
+/// `|Ax|` も大きいときに、絶対 1e-4 で見逃したい数値ノイズが通ること。
+///
+/// 例: x が 1e6 オーダー、Ax と b が 1e6 で一致 — LU 残差 1e-3 級は
+/// 相対 1e-9 で通る (旧 1e-4 abs だと false NumericalError)。
+#[test]
+fn bug5f_large_solution_scale() {
+    // min -x s.t. x = 1e6, x >= 0
+    let c = vec![-1.0];
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let b = vec![1e6];
+    let cts = vec![ConstraintType::Eq];
+    let bounds = vec![(0.0, f64::INFINITY)];
+    let lp = LpProblem::new_general(c, a, b, cts, bounds, Some("bug5f_large_x".into())).unwrap();
+    assert_optimal_with_value(&lp, -1e6, "bug5f_large_solution_scale");
+}
+
 // =============================================================================
 // Bug class 6 (optional): ge/eq cold start infeasible (klein* proxy)
 // =============================================================================

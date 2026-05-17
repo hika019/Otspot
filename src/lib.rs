@@ -48,7 +48,7 @@ pub(crate) mod simplex;
 pub mod io;
 pub(crate) mod basis;
 pub mod model;
-pub(crate) mod tolerances;
+pub mod tolerances;
 pub mod options;
 pub use options::{SolverOptions, QpSolverChoice, Tolerance};
 pub mod qp;
