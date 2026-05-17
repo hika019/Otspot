@@ -13,10 +13,92 @@ use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
-use super::ratio_test::{RatioTestStrategy, HarrisRatioTest};
+use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
+
+/// No-progress 判定で Bland's rule に切り替える反復数:
+///   `K = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
+/// m 個の basis 変数を全置換するのに最低 m iter 必要、3 倍は実用的安全マージン
+/// (典型的 cycle 長は m 以下)。下限 100 は m が小さい問題の degenerate
+/// な揺り戻しを許容する床。
+const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
+const NO_PROGRESS_MIN: usize = 100;
+
+/// 進歩判定の相対閾値: `best - current > best * REL_EPS` のとき改善とみなす。
+/// 1e-12 は f64 の数値ノイズ (~1e-15) より十分大きく、有意な改善のみ拾う。
+const NO_PROGRESS_REL_EPS: f64 = 1e-12;
+
+/// Bland's rule の leaving 選択: `x_b[i] < -primal_tol` を満たす行のうち、
+/// **basis 変数インデックス `basis[i]` が最小**のものを返す。
+/// 教科書的 Bland's anti-cycling rule (lexicographic ordering on variable
+/// index) は MostInfeasible の magnitude 依存を断ち、有限ステップで cycling
+/// から脱出する。row idx ではなく basis[i] でソートする点が肝 (degenerate
+/// pivot で row が並べ替わっても変数 idx は一貫)。
+fn bland_leaving(x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+    let mut best_row: Option<usize> = None;
+    let mut best_var = usize::MAX;
+    for (i, &v) in x_b.iter().enumerate() {
+        if v < -primal_tol && basis[i] < best_var {
+            best_var = basis[i];
+            best_row = Some(i);
+        }
+    }
+    best_row
+}
+
+/// primal infeasibility 指標: 負の項の和 (= 1-norm of negative part of x_b)。
+/// dual simplex で driving toward primal feasibility の進歩を測る。
+fn sum_neg(x_b: &[f64]) -> f64 {
+    x_b.iter().map(|&v| (-v).max(0.0)).sum()
+}
+
+/// Lex 摂動: bland_mode 起動時に reduced_costs (non-basic) と x_b
+/// (basis values) の両方に `eps * (1 + i/n) * scale` を加算し degeneracy を
+/// 解消、Bland's rule の有限終了を保証する。
+///
+/// **reduced_costs 摂動が cycle 解消の本体**: klein3 観測の 2-cycle は entering
+/// ratio test の tie (j=43 / j=63 が ほぼ同じ ratio を持ち is_basic 切替で交互
+/// 選択) が原因。reduced_costs を positive 値で線形に摂動 → ratio test の tie
+/// 解消 → 一意 entering。**c (objective) を直接摂動すると dual feasibility を
+/// 破る** (推奨されない経路) ので reduced_costs 経路を選択。
+/// **x_b 摂動は補助**: leaving の degeneracy 解消用。
+///
+/// 摂動は positive 加算なので `r_j > 0` を保ち dual feasibility 維持。
+/// 注意: refactor 後 (`needs_refactor()` で reduced_costs 再計算) は摂動が
+/// 失われるため、Bland mode 中も逐次再注入が必要 (実装側で対応)。
+///
+/// `LEX_PERTURB_REL = 1e-4` は reduced_costs / x_b スケールに対する相対摂動。
+/// 1e-6 では cycle 行の reduced_cost diff (~1e-3 オーダー) を上回れず tie 残存。
+/// 1e-3 では Phase 1 の Infeasible 判定境界に影響しうるため間を取った。
+const LEX_PERTURB_REL: f64 = 1e-4;
+
+/// reduced_costs (non-basic only) と x_b に lex 摂動を加える。
+fn apply_lex_perturbation(
+    reduced_costs: &mut [f64],
+    is_basic: &[bool],
+    x_b: &mut [f64],
+    m: usize,
+) {
+    let scale_r = reduced_costs
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let scale_x = x_b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+    let base_r = LEX_PERTURB_REL * scale_r;
+    let base_x = LEX_PERTURB_REL * scale_x;
+    let n_price = reduced_costs.len();
+    for (j, slot) in reduced_costs.iter_mut().enumerate() {
+        if !is_basic[j] {
+            *slot += base_r * (1.0 + (j as f64) / (n_price as f64));
+        }
+    }
+    for (i, slot) in x_b.iter_mut().enumerate() {
+        *slot += base_x * (1.0 + (i as f64) / (m as f64));
+    }
+}
 
 /// 被縮小費用を計算する: r_j = c_j - y^T a_j（y = B^{-T} c_B）
 fn compute_reduced_costs(
@@ -119,6 +201,13 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut trow = vec![0.0f64; n_price];
     let mut alpha_dense = vec![0.0f64; m];
 
+    // Anti-cycling state: primal infeasibility が K iter 改善なし → Bland fallback。
+    // 一度 bland_mode に入ったら戻さない (再 cycle 防止)。
+    let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let mut best_infeas = sum_neg(x_b);
+    let mut iters_since_progress: usize = 0;
+    let mut bland_mode = false;
+
     // Step 3: 反復ループ
     loop {
         *iter_count_out = iter_count_out.saturating_add(1);
@@ -133,8 +222,15 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::Timeout(obj);
         }
 
-        // 3b: 離基変数選択（leaving.select_leaving()）
-        let leaving_row = match leaving.select_leaving(x_b, options.primal_tol, basis) {
+        // 3b: 離基変数選択
+        // bland_mode では smallest-idx leaving に切り替え。通常時は引数の
+        // leaving strategy を使用 (MostInfeasibleLeaving / ArtificialPriorityLeaving)。
+        let leaving_pick = if bland_mode {
+            bland_leaving(x_b, options.primal_tol, basis)
+        } else {
+            leaving.select_leaving(x_b, options.primal_tol, basis)
+        };
+        let leaving_row = match leaving_pick {
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
@@ -165,13 +261,14 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
-        // 3e: Harris ratio test → entering_col, theta
-        let (entering_col, theta) = match ratio_tester.select_entering(
-            &trow,
-            &reduced_costs,
-            &is_basic,
-            n_price,
-        ) {
+        // 3e: ratio test → entering_col, theta
+        // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
+        let ratio_pick = if bland_mode {
+            bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
+        } else {
+            ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
+        };
+        let (entering_col, theta) = match ratio_pick {
             None => {
                 // 候補なし: 双対非有界 = 主実行不可
                 return SimplexOutcome::Unbounded;
@@ -200,6 +297,9 @@ pub(crate) fn dual_simplex_core_advanced(
             }
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            if bland_mode {
+                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+            }
             continue;
         }
 
@@ -255,6 +355,25 @@ pub(crate) fn dual_simplex_core_advanced(
             // refactor後は被縮小費用の数値誤差をリセット
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+            if bland_mode {
+                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+            }
+        }
+
+        // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
+        if !bland_mode {
+            let current = sum_neg(x_b);
+            let threshold = best_infeas * (1.0 - NO_PROGRESS_REL_EPS);
+            if current < threshold {
+                best_infeas = current;
+                iters_since_progress = 0;
+            } else {
+                iters_since_progress = iters_since_progress.saturating_add(1);
+                if iters_since_progress >= k_trigger {
+                    bland_mode = true;
+                    apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+                }
+            }
         }
     }
 }

@@ -129,6 +129,36 @@ impl RatioTestStrategy for HarrisRatioTest {
     }
 }
 
+/// Pure Bland ratio test: minimum ratio, smallest-index tiebreak.
+///
+/// Anti-cycling 用フォールバック (cf. `core.rs::dual_simplex_core_advanced`)。
+/// `HarrisRatioTest` の数値安定性優先 (|trow|最大) を捨て、決定的な
+/// インデックス順で候補を選ぶ。strict `<` で min を更新するため、
+/// 同じ min ratio に到達した最初の j (= smallest idx) が選ばれる。
+pub(crate) fn bland_ratio_test(
+    trow: &[f64],
+    reduced_costs: &[f64],
+    is_basic: &[bool],
+    n_price: usize,
+    pivot_tol: f64,
+) -> Option<(usize, f64)> {
+    let mut best_ratio = f64::INFINITY;
+    let mut best_j: Option<usize> = None;
+    for j in 0..n_price {
+        if is_basic[j] {
+            continue;
+        }
+        if trow[j] > pivot_tol {
+            let ratio = reduced_costs[j] / trow[j];
+            if ratio < best_ratio {
+                best_ratio = ratio;
+                best_j = Some(j);
+            }
+        }
+    }
+    best_j.map(|j| (j, best_ratio))
+}
+
 /// Standard ratio test（フォールバック）
 ///
 /// 既存 `dual.rs` の `dual_ratio_test` 相当。Bland則付き。
@@ -303,6 +333,62 @@ mod tests {
         assert!(result.is_some());
         let (col, _) = result.unwrap();
         assert_eq!(col, 1, "j=0 is basic, only j=1 should be selected");
+    }
+
+    // ======================================================
+    // bland_ratio_test tests
+    // ======================================================
+
+    /// Bland: 最小 ratio が選ばれる
+    #[test]
+    fn bland_selects_min_ratio() {
+        // trow = [1.0, 2.0, 3.0], r = [0.3, 0.2, 0.9]
+        // ratio = [0.3, 0.1, 0.3] → min is j=1
+        let trow = vec![1.0, 2.0, 3.0];
+        let r = vec![0.3, 0.2, 0.9];
+        let is_basic = no_basic(3);
+        let result = bland_ratio_test(&trow, &r, &is_basic, 3, PIVOT_TOL);
+        assert!(result.is_some());
+        let (col, theta) = result.unwrap();
+        assert_eq!(col, 1);
+        assert!((theta - 0.1).abs() < 1e-9);
+    }
+
+    /// Bland: 同率 → smallest index
+    #[test]
+    fn bland_smallest_index_on_tie() {
+        // ratio が完全に同じ場合、最小 idx (j=0) が選ばれる
+        let trow = vec![1.0, 1.0, 1.0];
+        let r = vec![0.5, 0.5, 0.5];
+        let is_basic = no_basic(3);
+        let result = bland_ratio_test(&trow, &r, &is_basic, 3, PIVOT_TOL);
+        assert!(result.is_some());
+        let (col, _) = result.unwrap();
+        assert_eq!(col, 0);
+    }
+
+    /// Bland: 候補なし → None
+    #[test]
+    fn bland_no_eligible_returns_none() {
+        let trow = vec![-1.0, 0.0, -2.0];
+        let r = vec![0.1, 0.2, 0.3];
+        let is_basic = no_basic(3);
+        let result = bland_ratio_test(&trow, &r, &is_basic, 3, PIVOT_TOL);
+        assert!(result.is_none());
+    }
+
+    /// Bland: basic 変数はスキップ
+    #[test]
+    fn bland_skips_basic_variables() {
+        // j=0 が basic だが ratio 最小。j=1 が次点で選ばれる
+        let trow = vec![10.0, 1.0];
+        let r = vec![0.1, 0.5];
+        let is_basic = vec![true, false];
+        let result = bland_ratio_test(&trow, &r, &is_basic, 2, PIVOT_TOL);
+        assert!(result.is_some());
+        let (col, theta) = result.unwrap();
+        assert_eq!(col, 1);
+        assert!((theta - 0.5).abs() < 1e-9);
     }
 
     // ======================================================
