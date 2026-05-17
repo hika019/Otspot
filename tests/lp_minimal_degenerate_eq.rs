@@ -1,27 +1,28 @@
 //! Task #17 mini-corpus — **bug class 5**: `check_eq_feasibility` 過剰発火
 //! (Task #6 / cycle / d6cube 退化 NumericalError 経路)。
 //!
-//! ## 構造的特徴
+//! ## 構造的特徴 (task #12 で構造化済み)
 //!
-//! `src/simplex/primal.rs` の `check_eq_feasibility` は Eq 制約の `|Ax - b|` を
-//! `FEASIBILITY_TOL = 1e-4` (magic) で見て、超過時は最適化結果ごと
-//! `SolveStatus::NumericalError` を返す **防衛的 fallback**。
-//!
-//! 退化 Eq 制約 (退化頂点 + 数値誤差で `|Ax - b|` が 1e-5 オーダーまで揺らぐ
-//! 問題、e.g. `cycle`, `d6cube`) では真の最適解にも関わらず本 check で弾かれ
-//! `DFEAS_FAIL` / `NumericalError` を返す。
+//! `src/simplex/primal.rs` の `check_eq_feasibility` は Eq/Le/Ge 制約の violation
+//! を **相対** 比較する: `violation > feas_rel_tol() * (1 + |b| + |Ax|)` →
+//! `SolveStatus::NumericalError`。`feas_rel_tol() = sqrt(PIVOT_TOL) = 1e-4` は
+//! Wilkinson 経験則由来の構造的派生 (magic ではない)。
 //!
 //! ## このテストの設計
 //!
 //! 退化 Eq 制約を持つ小規模 LP を組み、Optimal を期待する。
-//! - 退化頂点で `Ax - b` が常に 0 になる場合: 普通に PASS する (退化があっても数値良性)。
+//! - 退化頂点で `Ax - b` が常に 0 になる場合: 普通に PASS する。
 //! - 数値スケール差 (1e3, 1e-3 mix) で `|Ax - b|` が 1e-5 オーダー揺らぐ場合:
-//!   旧 check_eq_feasibility は誤って NumericalError 返却 → 本テストで FAIL → 真因対処の TDD target。
+//!   旧 absolute 1e-4 では誤って NumericalError 化していたが、相対化で PASS。
+//! - **bug5e / bug5f** (task #12): 大スケール (|b|=1e6 / |x|=1e6) で相対化の
+//!   scale 非依存性を assert する regression detector。
 //!
-//! 現 HEAD でこの mini が PASS することは、small problem では check_eq_feasibility
-//! が誤発火しないことを示す (退化発生条件は規模・条件数依存)。
-//! cycle / d6cube の真因対処 (`FEASIBILITY_TOL` の relative 化 / 動的化) が
-//! 入った際に本 mini が引き続き PASS することを保証する regression detector。
+//! ## cycle/d6cube に対する効果 (task #12 観測)
+//!
+//! `check_eq_feasibility` の相対化だけでは cycle は救えない。cycle の
+//! NumericalError は実は `primal.rs:440` (Phase II SingularBasis) が真因で
+//! あり、`check_eq_feasibility` は呼ばれていない (DUMP_NE_TRACE で確認)。
+//! cycle/d6cube の構造的対処は task #21 (LP convergence) 領域。
 
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, LpProblem, SolveStatus};
