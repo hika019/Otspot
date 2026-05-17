@@ -1,7 +1,7 @@
 //! d6cube perf/feasibility regression guard (task #35 / #36).
 //!
 //! d6cube is a feasible LP (415 Eq constraints, 6184 vars, all c_j = 1) whose
-//! Phase II is highly degenerate near the optimum. Two distinct bugs interact:
+//! Phase II is highly degenerate near the optimum. Three issues stacked here:
 //!
 //! - **#36 (false Infeasible)**: the dual_advanced router used to hand the
 //!   remaining deadline to Big-M Phase I after a primal Timeout. Big-M's
@@ -10,14 +10,16 @@
 //!   LPs like d6cube it wrongly flipped the verdict to Infeasible. Fix:
 //!   skip Big-M when primal Timeout came with a non-empty incumbent solution.
 //!
-//! - **#35 (slow Phase II convergence)**: Phase II asymptotically approaches
-//!   the optimum (507 → ~322 over 30K iters in 30s), but the rate decelerates
-//!   exponentially because the optimum sits on a highly degenerate face of the
-//!   d6cube polytope. Reaching `eps=1e-6` within 60s requires an algorithmic
-//!   improvement (EXPAND / IPM crossover / dual finish-up) that is out of
-//!   scope here.
+//! - **#35a (postsolve overhead)**: postsolve was unconditionally running a
+//!   15 s cleanup LP that returned Inf dfeas while the cheap recovery
+//!   already had df=0. Fix: gate the cleanup LPs behind a dfeas sufficiency
+//!   check (see `diag_postsolve_cleanup_gate.rs`). Cuts d6cube wall by 15 s.
 //!
-//! This test enforces the structural #36 fix and tracks #35 progress.
+//! - **#35b (slow Phase II convergence)**: Phase II asymptotically approaches
+//!   the optimum (507 → ~322 over 30K iters in 30s), but the rate decelerates
+//!   exponentially because the optimum sits on a highly degenerate face.
+//!   Reaching `eps=1e-6` within 60s requires an algorithmic improvement
+//!   (EXPAND / IPM crossover / dual finish-up) — outstanding.
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
