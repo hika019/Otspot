@@ -50,13 +50,21 @@ check_dir() {
 
 run_or_skip() {
   local dir=$1
-  local cmd=$2
-  if [[ -d "$dir" && $(ls "$dir" 2>/dev/null | wc -l) -gt 0 ]]; then
-    echo "[skip] $dir already populated"
-  else
-    echo "[run] $cmd"
-    eval "$cmd"
+  local expect=$2
+  local cmd=$3
+  local n=0
+  if [[ -d "$dir" ]]; then
+    n=$(ls "$dir" 2>/dev/null | wc -l | tr -d ' ')
   fi
+  if [[ "$n" -ge "$expect" ]]; then
+    echo "[skip] $dir already populated ($n/$expect)"
+    return 0
+  fi
+  if [[ "$n" -gt 0 ]]; then
+    echo "[partial] $dir ($n/$expect) — re-running to fill missing files"
+  fi
+  echo "[run] $cmd"
+  eval "$cmd"
 }
 
 ##############################################################################
@@ -94,12 +102,12 @@ if [[ "$MODE" == "all" || "$MODE" == "lp" ]]; then
   echo ""
   echo "########## LP data ##########"
 
-  run_or_skip data/lp_problems         "bash scripts/netlib_lp_download.sh"
-  run_or_skip data/lp_problems_infeas  "bash scripts/netlib_lp_infeas_download.sh"
-  run_or_skip data/lp_problems_extra   "bash scripts/lp_extra_download.sh"
-  run_or_skip data/lp_problems_hard    "bash scripts/lp_hard_download.sh"
-  run_or_skip data/lp_problems_canary  "bash scripts/lp_canary_setup.sh data/lp_problems_canary"
-  run_or_skip data/lp_problems_unbounded "python3 scripts/gen_unbounded_lp.py"
+  run_or_skip data/lp_problems           109 "bash scripts/netlib_lp_download.sh"
+  run_or_skip data/lp_problems_infeas    29  "bash scripts/netlib_lp_infeas_download.sh"
+  run_or_skip data/lp_problems_extra     4   "bash scripts/lp_extra_download.sh"
+  run_or_skip data/lp_problems_hard      53  "bash scripts/lp_hard_download.sh"
+  run_or_skip data/lp_problems_canary    27  "bash scripts/lp_canary_setup.sh data/lp_problems_canary"
+  run_or_skip data/lp_problems_unbounded 12  "python3 scripts/gen_unbounded_lp.py"
 fi
 
 ##############################################################################
@@ -110,17 +118,17 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   echo "########## QP data ##########"
 
   # external repo 経由 (osqp_bench, mpc_qp)
-  run_or_skip data/osqp_bench   "bash scripts/setup_extra_benches.sh && python3 scripts/gen_osqp_bench.py"
-  run_or_skip data/mpc_qp       "python3 scripts/gen_mpc_qp.py"
+  run_or_skip data/osqp_bench           62  "bash scripts/setup_extra_benches.sh && python3 scripts/gen_osqp_bench.py"
+  run_or_skip data/mpc_qp               64  "python3 scripts/gen_mpc_qp.py"
 
   # gen 系
-  run_or_skip data/osqp_bench_extra     "python3 scripts/gen_osqp_bench_extra.py"
-  run_or_skip data/osqp_bench_illscaled "python3 scripts/gen_osqp_bench_illscaled.py"
-  run_or_skip data/osqp_bench_xl        "python3 scripts/gen_osqp_bench_xl.py"
-  run_or_skip data/qp_dense_a           "python3 scripts/gen_dense_a_qp.py"
-  run_or_skip data/qp_infeasible        "python3 scripts/gen_infeasible_qp.py"
-  run_or_skip data/qp_unbounded         "python3 scripts/gen_unbounded_qp.py"
-  run_or_skip data/qplib_nonconvex      "python3 scripts/gen_nonconvex_qp.py"
+  run_or_skip data/osqp_bench_extra     238 "python3 scripts/gen_osqp_bench_extra.py"
+  run_or_skip data/osqp_bench_illscaled 126 "python3 scripts/gen_osqp_bench_illscaled.py"
+  run_or_skip data/osqp_bench_xl        2   "python3 scripts/gen_osqp_bench_xl.py"
+  run_or_skip data/qp_dense_a           8   "python3 scripts/gen_dense_a_qp.py"
+  run_or_skip data/qp_infeasible        12  "python3 scripts/gen_infeasible_qp.py"
+  run_or_skip data/qp_unbounded         9   "python3 scripts/gen_unbounded_qp.py"
+  run_or_skip data/qplib_nonconvex      45  "python3 scripts/gen_nonconvex_qp.py"
 
   # Manual setup required (no download script yet)
   if [[ ! -d data/maros_meszaros || $(ls data/maros_meszaros 2>/dev/null | wc -l) -eq 0 ]]; then
