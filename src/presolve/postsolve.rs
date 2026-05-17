@@ -481,6 +481,22 @@ pub fn run_postsolve(
             }
         }
     }
+    // Presolve で **bound tightening により固定化された** 変数の rc は bound dual
+    // (mu_lb - mu_ub) で吸収される自由度があり KKT 整合性を rc=0 とみなせる。旧実装は
+    // y のみで rc 再計算していたため、recipe j=76/107/138 等 (orig ub=20→presolve で
+    // ub=0 に tightening されて FixedVar 化) で rc≠0 が報告され bench dfeas が違反
+    // 検出していた。FixedVar として stack に push された col のみ rc=0 化する
+    // (orig bounds で lb==ub の真の固定変数は既存挙動を保持、test_postsolve_t2 等)。
+    for step in &presolve_result.postsolve_stack {
+        if let PostsolveStep::FixedVariable { orig_col, .. } = step {
+            let (lb, ub) = orig_problem.bounds[*orig_col];
+            let truly_fixed = lb.is_finite() && ub.is_finite()
+                && (ub - lb).abs() < BOUND_ACTIVE_TOL;
+            if !truly_fixed && *orig_col < n {
+                reduced_costs[*orig_col] = 0.0;
+            }
+        }
+    }
 
     // 目的関数値 = 縮約後 objective + presolve で除いた変数の寄与
     let objective = result.objective + presolve_result.obj_offset;

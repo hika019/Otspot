@@ -113,6 +113,20 @@ pub struct SolverResult {
     /// IPPMM 内部の best-so-far に紐づく値。unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
     /// None = 未計測（LP simplex 等 gap を持たない経路）。
     pub duality_gap_rel: Option<f64>,
+    /// 各 phase の所要時間 (LP simplex 経路のみ、None なら未計測)。
+    /// 「どこに時間が掛かっているか」事実観測用 (CLAUDE.md「順調に収束に向けて探索」)。
+    pub timing_breakdown: Option<TimingBreakdown>,
+}
+
+/// LP solver の各 phase 所要時間 (μs精度)。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TimingBreakdown {
+    /// Presolve 全体 (run_presolve)
+    pub presolve_us: u64,
+    /// 縮約後 simplex 本体 (solve_without_presolve)
+    pub solve_us: u64,
+    /// Postsolve (run_postsolve、 cleanup LP 含む)
+    pub postsolve_us: u64,
 }
 
 impl Default for SolverResult {
@@ -133,6 +147,7 @@ impl Default for SolverResult {
             dfeas: None,
             gap: None,
             duality_gap_rel: None,
+            timing_breakdown: None,
         }
     }
 }

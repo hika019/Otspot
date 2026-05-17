@@ -112,6 +112,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         reduced_costs,
         slack: reduced_sol.slack.clone(),
         warm_start_basis: reduced_sol.warm_start_basis.clone(),
+        timing_breakdown: reduced_sol.timing_breakdown,
     }
 }
 
