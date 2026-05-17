@@ -626,6 +626,33 @@ pub(crate) fn solve_ippmm_inner(
                 iter, mu, nr_p, nr_d, pmm.rho, pmm.delta, prox_d_inf, prox_p_inf, diff_x_inf, reg_limit
             );
         }
+        // task #32 diag: per-iter active-set count instrumentation. Counts inequality
+        // rows where slack s_i or dual y_i hits boundary so wrong-basin lock-in is
+        // observable iter-by-iter.
+        if std::env::var("IPPMM_ACTIVE_TRACE").ok().as_deref() == Some("1") {
+            let s_inf = s.iter().zip(is_eq_ext.iter())
+                .filter_map(|(&v, &eq)| if eq { None } else { Some(v.abs()) })
+                .fold(0.0_f64, f64::max).max(1e-300);
+            let y_inf = y.iter().zip(is_eq_ext.iter())
+                .filter_map(|(&v, &eq)| if eq { None } else { Some(v.abs()) })
+                .fold(0.0_f64, f64::max).max(1e-300);
+            let s_small_abs = s.iter().zip(is_eq_ext.iter())
+                .filter(|(_, &eq)| !eq)
+                .filter(|(&v, _)| v < 1e-6).count();
+            let s_small_rel = s.iter().zip(is_eq_ext.iter())
+                .filter(|(_, &eq)| !eq)
+                .filter(|(&v, _)| v < 1e-6 * s_inf).count();
+            let y_large_abs = y.iter().zip(is_eq_ext.iter())
+                .filter(|(_, &eq)| !eq)
+                .filter(|(&v, _)| v > 1e-6).count();
+            let y_large_rel = y.iter().zip(is_eq_ext.iter())
+                .filter(|(_, &eq)| !eq)
+                .filter(|(&v, _)| v > 1e-6 * y_inf).count();
+            eprintln!(
+                "IPPMM_ACTIVE iter={:4} m_ineq={} s_inf={:.3e} y_inf={:.3e} s<1e-6={} s<1e-6*smax={} y>1e-6={} y>1e-6*ymax={}",
+                iter, m_ineq, s_inf, y_inf, s_small_abs, s_small_rel, y_large_abs, y_large_rel
+            );
+        }
 
         // ── 収束判定 ──────────────────────────────────────────────
         //
