@@ -48,14 +48,18 @@ pub(crate) fn two_phase_dual_simplex(
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
 
+                    let mut total_iters: usize = 0;
                     let outcome = dual_simplex_core(
                         &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                        &mut total_iters,
                     );
 
                     // Dual SimplexではUnbounded=双対非有界=主実行不可
-                    return warm_outcome_to_result(
+                    let mut result = warm_outcome_to_result(
                         outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
                     );
+                    result.iterations = total_iters;
+                    return result;
                 }
                 Err(_) => {
                     // 基底が特異 → コールドスタートにフォールバック
@@ -101,8 +105,10 @@ fn cold_start_dual(
 
     // Dual Phase I: 主実行可能性を修復
     // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
+    let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core(
         a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options,
+        &mut total_iters,
     );
 
     match phase1_outcome {
@@ -123,6 +129,9 @@ fn cold_start_dual(
             return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale);
         }
         SimplexOutcome::SingularBasis => {
+            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[NE-TRACE] dual.rs:131 Dual Phase-I SingularBasis");
+            }
             return SolverResult::numerical_error();
         }
         SimplexOutcome::Optimal(_, _) => {
@@ -134,12 +143,15 @@ fn cold_start_dual(
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
+        &mut total_iters,
     );
 
     // Phase IIはPrimalなのでUnbounded=主非有界
-    primal_outcome_to_result(
+    let mut result = primal_outcome_to_result(
         phase2_outcome, sf, problem, &basis, &x_b, col_scale, row_scale,
-    )
+    );
+    result.iterations = total_iters;
+    result
 }
 
 /// Dual Simplex用のSimplexOutcome→SolverResult変換
@@ -194,7 +206,12 @@ fn warm_outcome_to_result(
             ..Default::default()
             }
         }
-        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+        SimplexOutcome::SingularBasis => {
+            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[NE-TRACE] dual.rs:206 warm_outcome_to_result SingularBasis");
+            }
+            SolverResult::numerical_error()
+        }
     }
 }
 
@@ -249,7 +266,12 @@ fn primal_outcome_to_result(
             ..Default::default()
             }
         }
-        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+        SimplexOutcome::SingularBasis => {
+            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[NE-TRACE] dual.rs:261 primal_outcome_to_result SingularBasis");
+            }
+            SolverResult::numerical_error()
+        }
     }
 }
 
@@ -272,6 +294,7 @@ pub(super) fn dual_simplex_core(
     m: usize,
     n_price: usize,
     options: &SolverOptions,
+    iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
 
@@ -303,6 +326,7 @@ pub(super) fn dual_simplex_core(
     let mut alpha_dense = vec![0.0f64; m];
 
     for _iter in 0..max_iter {
+        *iter_count_out = iter_count_out.saturating_add(1);
         // タイムアウト・キャンセルチェック
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
@@ -312,7 +336,7 @@ pub(super) fn dual_simplex_core(
         }
 
         // Step 1: 離基変数選択 - 最も主実行不可な基底変数
-        let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol) {
+        let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
@@ -789,8 +813,9 @@ mod tests {
         let mut x_b = vec![1.0, 0.0];
         let mut basis = vec![0usize, 0]; // 同一列 → 特異基底
         let opts = SolverOptions::default();
+        let mut iters = 0usize;
         let outcome = dual_simplex_core(
-            &a, &mut x_b, &c, &mut basis, 2, 2, &opts,
+            &a, &mut x_b, &c, &mut basis, 2, 2, &opts, &mut iters,
         );
         assert!(
             !matches!(outcome, SimplexOutcome::Optimal(..)),

@@ -45,14 +45,18 @@ pub(crate) fn solve_dual_advanced(
                     let mut x_b = x_b_sv.to_dense();
 
                     let leaving = MostInfeasibleLeaving;
+                    let mut total_iters: usize = 0;
                     let outcome = core::dual_simplex_core_advanced(
                         &a, &mut x_b, &c, &mut basis, m, sf.n_total, options, &leaving,
+                        &mut total_iters,
                     );
 
-                    return outcome_to_result(
+                    let mut result = outcome_to_result(
                         outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
                         true, // dual_unbounded → Infeasible
                     );
+                    result.iterations = total_iters;
+                    return result;
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
@@ -66,8 +70,38 @@ pub(crate) fn solve_dual_advanced(
         return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
     }
 
-    // cold-start: Ge/Eq制約を含む問題は dual::two_phase_dual_simplex にフォールバック
-    super::dual::two_phase_dual_simplex(sf, problem, options)
+    // Cold-start with Ge/Eq constraints: run Primal first with half the
+    // deadline; only fall back to Big-M Phase I if Primal had no feasible
+    // incumbent (Phase I cycled on infeasibility — klein3 case). When Primal
+    // returned with a non-empty solution the LP is feasible, so Big-M's
+    // "Timeout + artificials left → Infeasible" heuristic would wrongly flip
+    // the verdict (observed on d6cube, pds-10).
+    let primal_options = clone_options_with_half_deadline(options);
+    let primal_result = super::dual::two_phase_dual_simplex(sf, problem, &primal_options);
+    match primal_result.status {
+        SolveStatus::Timeout if primal_result.solution.is_empty() => {
+            let bigm_result = phase1::big_m_cold_start(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
+            );
+            if bigm_result.status == SolveStatus::Timeout {
+                primal_result
+            } else {
+                bigm_result
+            }
+        }
+        _ => primal_result,
+    }
+}
+
+/// SolverOptions のクローンを返し、deadline がある場合は残り時間の半分に縮める。
+fn clone_options_with_half_deadline(options: &SolverOptions) -> SolverOptions {
+    let mut o = options.clone();
+    if let Some(d) = options.deadline {
+        let now = std::time::Instant::now();
+        let remaining = d.saturating_duration_since(now);
+        o.deadline = Some(now + remaining / 2);
+    }
+    o
 }
 
 /// Le-only cold startでHarris Dual Simplexを使用する
@@ -98,8 +132,10 @@ fn cold_start_advanced(
 
     // Phase 1: Harris dual simplexで主実行可能性を修復
     // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
+    let mut total_iters: usize = 0;
     let phase1_outcome = core::dual_simplex_core_advanced(
         a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options, &leaving,
+        &mut total_iters,
     );
 
     match phase1_outcome {
@@ -132,10 +168,12 @@ fn cold_start_advanced(
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
+        &mut total_iters,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界
-    match phase2_outcome {
+    // (result.iterations は match の後で set)
+    let mut result = match phase2_outcome {
         SimplexOutcome::Optimal(obj, y) => {
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
@@ -149,6 +187,7 @@ fn cold_start_advanced(
                 reduced_costs,
                 slack,
                 warm_start_basis: Some(ws),
+                iterations: total_iters,
                 ..Default::default()
             }
         }
@@ -163,6 +202,9 @@ fn cold_start_advanced(
             ..Default::default()
         },
         SimplexOutcome::Timeout(obj) => {
+            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[NE-TRACE] dual_advanced cold_start Phase-2 Timeout (total_iters={}, obj={:.6e})", total_iters, obj);
+            }
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             SolverResult {
                 status: SolveStatus::Timeout,
@@ -175,8 +217,15 @@ fn cold_start_advanced(
                 ..Default::default()
             }
         }
-        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
-    }
+        SimplexOutcome::SingularBasis => {
+            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[NE-TRACE] dual_advanced cold_start Phase-2 SingularBasis (total_iters={})", total_iters);
+            }
+            SolverResult::numerical_error()
+        }
+    };
+    result.iterations = total_iters;
+    result
 }
 
 /// SimplexOutcome → SolverResult 変換

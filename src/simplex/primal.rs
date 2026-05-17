@@ -44,6 +44,9 @@ fn extract_timeout_solution_reconciled(
 /// Ruiz equilibration スケーリングを適用してから解く。
 pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = sf.m;
+    // task #19: simplex 反復回数を SolverResult.iterations に伝播するため、
+    // すべての core 呼び出しで out-param 経由で累積する。
+    let mut total_iters: usize = 0;
 
     // Apply Ruiz equilibration scaling to the standard form
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
@@ -68,7 +71,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
+        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, &mut total_iters)
         {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -114,6 +117,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs,
                     slack,
                     warm_start_basis: Some(ws),
+                    iterations: total_iters,
             ..Default::default()
                 }
             }
@@ -125,6 +129,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+                iterations: total_iters,
             ..Default::default()
             },
             SimplexOutcome::Timeout(obj) => {
@@ -147,10 +152,16 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    iterations: total_iters,
             ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+            SimplexOutcome::SingularBasis => {
+                if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!("[NE-TRACE] primal.rs:159 Direct-Phase-II SingularBasis (no Phase I)");
+                }
+                SolverResult::numerical_error()
+            }
         }
     } else {
         // Phase I + Phase II (Ruiz-scaled system)
@@ -225,6 +236,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             n_ext,
             &mut pricing1,
             options,
+            &mut total_iters,
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
@@ -268,6 +280,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     match revised_simplex_core(
                         &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
                         m, n_ext, n_ext, &mut pricing_retry, options,
+                        &mut total_iters,
                     ) {
                         SimplexOutcome::Optimal(_, _) => {} // check reconcile next iteration
                         SimplexOutcome::Unbounded => break 'retry,
@@ -283,7 +296,12 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 ..Default::default()
                             };
                         }
-                        SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
+                        SimplexOutcome::SingularBasis => {
+                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                                eprintln!("[NE-TRACE] primal.rs:294 Phase-I retry SingularBasis (attempt={}, total_iters={})", attempt, total_iters);
+                            }
+                            return SolverResult::numerical_error();
+                        }
                     }
                 }
 
@@ -346,6 +364,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     sf.n_total,
                     &mut pricing2,
                     options,
+                    &mut total_iters,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -368,6 +387,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         if !check_eq_feasibility(problem, &solution) {
+                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                                eprintln!("[NE-TRACE] primal.rs Phase-II Optimal-but-Eq-violated NumericalError (total_iters={})", total_iters);
+                            }
                             return SolverResult {
                                 status: SolveStatus::NumericalError,
                                 objective: obj2 + sf.obj_offset,
@@ -390,6 +412,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs,
                             slack,
                             warm_start_basis: Some(ws),
+                            iterations: total_iters,
                             ..Default::default()
                         }
                     }
@@ -401,6 +424,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+                        iterations: total_iters,
                         ..Default::default()
                     },
                     SimplexOutcome::Timeout(obj2) => {
@@ -423,10 +447,16 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs: vec![],
                             slack: vec![],
                             warm_start_basis: None,
+                            iterations: total_iters,
                             ..Default::default()
                         }
                     }
-                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+                    SimplexOutcome::SingularBasis => {
+                        if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                            eprintln!("[NE-TRACE] primal.rs:440 Phase-II SingularBasis (total_iters={})", total_iters);
+                        }
+                        SolverResult::numerical_error()
+                    }
                 }
             }
             SimplexOutcome::Unbounded => { SolverResult {
@@ -531,6 +561,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         sf.n_total,
                         &mut pricing2,
                         options,
+                        &mut total_iters,
                     ) {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -570,6 +601,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             };
                         }
                         SimplexOutcome::Timeout(obj2) => {
+                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                                eprintln!("[NE-TRACE] primal.rs Phase-II-after-Phase-I-Timeout Timeout (total_iters={}, obj2={:.6e})", total_iters, obj2);
+                            }
                             let solution = extract_timeout_solution_reconciled(
                                 sf,
                                 &a_ext,
@@ -585,6 +619,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 status: SolveStatus::Timeout,
                                 objective: obj2 + sf.obj_offset,
                                 solution,
+                                iterations: total_iters,
                                 ..Default::default()
                             };
                         }
@@ -600,7 +635,12 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                 ..Default::default()
                             };
                         }
-                        SimplexOutcome::SingularBasis => return SolverResult::numerical_error(),
+                        SimplexOutcome::SingularBasis => {
+                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                                eprintln!("[NE-TRACE] primal.rs:615 Phase-II-after-Phase-I-Timeout SingularBasis (total_iters={})", total_iters);
+                            }
+                            return SolverResult::numerical_error();
+                        }
                     }
                 }
                 // obj1 > PIVOT_TOL: Phase1 が実行可能基底を発見できないまま時間切れ。
@@ -615,18 +655,35 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+            SimplexOutcome::SingularBasis => {
+                if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
+                    eprintln!("[NE-TRACE] primal.rs:630 Phase-I SingularBasis (total_iters={})", total_iters);
+                }
+                SolverResult::numerical_error()
+            }
         }
     }
 }
 
-/// Eq 制約の feasibility を確認する（案D: defense-in-depth）
+/// 制約 feasibility を確認する（defense-in-depth）。
 ///
-/// `solution` は problem の変数空間の解ベクトル。
-/// Eq 制約の violation が `FEASIBILITY_TOL` を超える場合 false を返す。
-/// bore3d の 100 単位違反のような明らかな誤 Optimal を検出し NumericalError として返すために使う。
+/// `solution` は problem の変数空間の解ベクトル。各制約 i について
+/// `violation = |Ax_i − b_i|` (Eq) / `max(0, Ax_i − b_i)` (Le) /
+/// `max(0, b_i − Ax_i)` (Ge) を求め、**relative** に比較する:
+///
+///   violation > `feas_rel_tol()` * (1 + |b_i| + |Ax_i|)  →  false
+///
+/// **旧実装** (`FEASIBILITY_TOL = 1e-4` の絶対閾値) は scale 依存:
+///   - bore3d (|b|≈O(1)) の 100-単位違反 → relative 100 で問題なく検出
+///   - cycle/d6cube (|b|≫1) の **真の Optimal** にも relative 1e-7 程度の
+///     `|Ax-b|` 揺らぎがあり、絶対 1e-4 で誤 reject (NumericalError 化)
+///
+/// relative 化により scale 非依存となり、bore3d 級異常は引き続き検出し、
+/// cycle/d6cube の false NumericalError は解消する。
+/// `feas_rel_tol() = sqrt(PIVOT_TOL)` は magic ではなく Wilkinson 経験則から
+/// 構造的に導出（`tolerances.rs` 参照）。
 fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
-    const FEASIBILITY_TOL: f64 = 1e-4;
+    let tol = feas_rel_tol();
     let mut ax = vec![0.0f64; problem.num_constraints];
     for (j, &sj) in solution.iter().enumerate() {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -635,17 +692,33 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
             }
         }
     }
-    for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
+    let mut max_abs_viol = 0.0_f64;
+    let mut max_rel_viol = 0.0_f64;
+    let mut worst_row = (0usize, 0.0_f64, 0.0_f64, 0.0_f64); // row, ax, b, viol
+    let mut violated = false;
+    for (i, ((ax_i, ct), bi)) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()).enumerate() {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
             ConstraintType::Le => (ax_i - bi).max(0.0),
             ConstraintType::Ge => (bi - ax_i).max(0.0),
         };
-        if violation > FEASIBILITY_TOL {
-            return false;
+        let scale = 1.0 + bi.abs() + ax_i.abs();
+        let rel = violation / scale;
+        if violation > max_abs_viol {
+            max_abs_viol = violation;
+            worst_row = (i, *ax_i, *bi, violation);
+        }
+        if rel > max_rel_viol { max_rel_viol = rel; }
+        if rel > tol {
+            violated = true;
         }
     }
-    true
+    if std::env::var("DUMP_CHECK_EQ").ok().as_deref() == Some("1") {
+        eprintln!("[check_eq] name={:?} m={} max_abs_viol={:.3e} max_rel_viol={:.3e} tol={:.3e} worst_row=(i={}, ax={:.6e}, b={:.6e}, viol={:.3e}) PASS={}",
+            problem.name, problem.num_constraints, max_abs_viol, max_rel_viol, tol,
+            worst_row.0, worst_row.1, worst_row.2, worst_row.3, !violated);
+    }
+    !violated
 }
 
 fn pivot_out_degenerate_artificials(
@@ -658,10 +731,9 @@ fn pivot_out_degenerate_artificials(
     let m = basis.len();
     let basis_before = basis.to_vec();
 
-    // Build LuBasis from the Phase I final basis to enable FTRAN-based pivot selection.
-    // Using FTRAN (d = B^{-1} a_j) for pivot element selection instead of the raw matrix
-    // entry A[i,j] prevents ill-conditioned bases: raw entries ignore basis transformation,
-    // while |d[i]| directly measures the numerical stability of the entering pivot.
+    // Build LuBasis from the Phase I final basis to enable pivot selection.
+    // |d[i]| = |(B^{-1} a_j)[i]| measures the numerical stability of a candidate
+    // entering pivot; raw A[i,j] would ignore basis transformation.
     let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(mgr) => mgr,
         Err(_) => return, // singular basis: leave artificials as-is
@@ -672,10 +744,21 @@ fn pivot_out_degenerate_artificials(
         is_basic[col] = true;
     }
 
+    // BTRAN-based candidate scan (replaces the prior O(n_artificial × n_total)
+    // FTRAN-per-column loop):
+    //   For each degenerate artificial row i:
+    //     1. z = B^{-T} e_i   (one BTRAN — gives the i-th row of B^{-1})
+    //     2. d[i, j] = z · A_{:,j} for every non-basic j (sparse dot, O(nnz(A_j)))
+    //     3. choose argmax_j |d[i, j]| > PIVOT_TOL, FTRAN that one column to
+    //        obtain the d-vector required by basis_mgr.update.
+    // Per artificial cost: 1 BTRAN + sum_j nnz(A_{:,j}) + 1 FTRAN
+    //                    ≈ O(m + nnz(A)) instead of O(n_total × FTRAN).
+    // osa-60 (n_total ≈ 243k, n_artificial = 11): ~30k× speedup vs. the prior
+    // formulation (verified via tests/diag_ken18_osa60.rs).
+    let mut z_dense = vec![0.0_f64; m];
     for i in 0..m {
-        // deadline チェック: pds-20 等の大規模で artificial 多数の場合、
-        // m_artificial × n_total 回 FTRAN で 1000 秒予算を簡単に消費する。
-        // 各 i 反復先頭で deadline 検査し、超過なら未処理 artificial を残して return。
+        // Coarse deadline guard: with O(m + nnz(A)) per artificial the function
+        // is fast enough that this should rarely fire — kept as a safety net.
         if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return;
         }
@@ -683,44 +766,49 @@ fn pivot_out_degenerate_artificials(
             continue;
         }
 
-        // Find non-basic original column j maximising |d[i]| = |(B^{-1} a_j)[i]|.
-        // This is the true pivot element after the current basis transformation.
-        let mut best_j = None;
-        let mut best_abs = PIVOT_TOL;
-        let mut best_d_sv = SparseVec::new(m);
+        // Step 1: z = B^{-T} e_i
+        z_dense.iter_mut().for_each(|v| *v = 0.0);
+        z_dense[i] = 1.0;
+        basis_mgr.btran_dense(&mut z_dense);
 
+        // Step 2: scan all non-basic original columns; track argmax |d|.
+        let mut best_j: Option<usize> = None;
+        let mut best_abs = PIVOT_TOL;
         for j in 0..sf.n_total {
             if is_basic[j] {
                 continue;
             }
-            // 内側ループでも 1024 回ごとに deadline 検査 (pds-20 では n_total ≈ 33,798)。
-            if j & 0x3ff == 0 && options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return;
-            }
             if let Ok((rows, vals)) = a_ext.get_column(j) {
-                let mut col_dense = vec![0.0_f64; m];
+                let mut d_ij = 0.0_f64;
                 for (k, &row) in rows.iter().enumerate() {
                     if row < m {
-                        col_dense[row] = vals[k];
+                        d_ij += z_dense[row] * vals[k];
                     }
                 }
-                let mut d_sv = SparseVec::from_dense(&col_dense);
-                basis_mgr.ftran(&mut d_sv);
-                let d_i = d_sv.get(i).abs();
-                if d_i > best_abs {
-                    best_abs = d_i;
+                let abs_d = d_ij.abs();
+                if abs_d > best_abs {
+                    best_abs = abs_d;
                     best_j = Some(j);
-                    best_d_sv = d_sv;
                 }
             }
         }
 
         if let Some(j) = best_j {
+            // Step 3: one FTRAN on the chosen column to feed basis_mgr.update.
+            let (col_rows, col_vals) = match a_ext.get_column(j) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut d_sv = SparseVec {
+                indices: col_rows.to_vec(),
+                values: col_vals.to_vec(),
+                len: m,
+            };
+            basis_mgr.ftran(&mut d_sv);
             is_basic[basis[i]] = false;
             is_basic[j] = true;
             basis[i] = j;
-            // Rank-1 LU update: subsequent FTRANs use the updated (post-pivot) basis.
-            basis_mgr.update(j, i, &best_d_sv);
+            basis_mgr.update(j, i, &d_sv);
             basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
         }
     }
@@ -821,13 +909,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     a: &CscMatrix,
     x_b: &mut [f64],
     c: &[f64],
-    _b: &[f64],
+    b_rhs: &[f64],
     basis: &mut [usize],
     m: usize,
     n_cols: usize,
     n_price: usize,
     pricing: &mut P,
     options: &SolverOptions,
+    iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
@@ -853,7 +942,20 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     // Pre-allocate RC vector (reused each iteration) for pricing strategy
     let mut rc_vec = vec![0.0f64; n_price];
 
+    // eta-update can silently accept a pivot that makes B numerically singular;
+    // the loss is only visible at the next fresh LU. On detection we revert to
+    // `basis_snapshot` (the last basis a fresh LU accepted) and switch the ratio
+    // test to a column-relative pivot floor to prevent re-introducing the same
+    // singularity. `blocked_at_basis` records entering columns that triggered a
+    // revert so pricing skips them until the next clean refactor.
+    let mut blocked_at_basis: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut consecutive_blocks: usize = 0;
+    let max_consecutive_blocks: usize = m;
+    let mut stable_mode: bool = false;
+    let mut basis_snapshot: Vec<usize> = basis.to_vec();
+
     for _iter in 0..max_iter {
+        *iter_count_out = iter_count_out.saturating_add(1);
         // タイムアウト・キャンセルチェック
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
@@ -883,6 +985,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 ya += y[row] * vals[k];
             }
             rc_vec[j] = c[j] - ya;
+        }
+        // Masking RC of blocked columns prevents pricing from re-selecting an
+        // entering column known to produce a singular basis from `basis_snapshot`.
+        for &j in &blocked_at_basis {
+            if j < n_price {
+                rc_vec[j] = 0.0;
+            }
         }
 
         // 3. Select entering variable via pricing strategy
@@ -921,7 +1030,19 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
                 if basis_mgr.refactor_failed {
                     if basis_mgr.singular_basis {
-                        return SimplexOutcome::SingularBasis;
+                        blocked_at_basis.insert(entering_col);
+                        consecutive_blocks += 1;
+                        if consecutive_blocks > max_consecutive_blocks {
+                            return SimplexOutcome::SingularBasis;
+                        }
+                        stable_mode = true;
+                        if !revert_to_snapshot(
+                            a, basis, x_b, b_rhs, &basis_snapshot,
+                            &mut is_basic, &mut basis_mgr, options,
+                        ) {
+                            return SimplexOutcome::SingularBasis;
+                        }
+                        continue;
                     } else {
                         let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                         return SimplexOutcome::Timeout(obj);
@@ -932,29 +1053,50 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 d_sv = SparseVec { indices: cr2.to_vec(), values: cv2.to_vec(), len: m };
                 basis_mgr.ftran(&mut d_sv);
                 d_sv.to_dense_into(&mut d_dense);
+                // force_refactor が成功 → snapshot 更新
+                basis_snapshot.copy_from_slice(basis);
             }
         }
         let d = &d_dense;
 
-        // 5. Harris 2-pass ratio test
+        // Harris 2-pass ratio test. Pass 2 selects max |d[i]| within
+        // `min_ratio + PIVOT_TOL` and breaks ties by Bland's rule.
         //
-        // Pass 1: Bland's min_ratio を計算 (主実行可能性の限界)。
-        // Pass 2: ratio ≤ min_ratio + PIVOT_TOL の row 群から |d[i]| が最大の row を選ぶ。
-        //         tie で Bland's (smallest basis index) → anti-cycling 保証。
-        //
-        // 旧実装は Bland's rule のみで、不安定な小 pivot を選んでも事後 (L1020-) に
-        // force_refactor (LU 再因子分解, m=12k で 700ms) で救済していた。観測では
-        // per-iter cost の 96-99% が refactor だった。Harris は ratio test 段階で
-        // stable pivot を優先することで refactor 頻度を下げる algorithmic alternative。
+        // When `stable_mode` is on, eligibility uses a column-relative pivot
+        // floor (~1% of |d|_∞) instead of the absolute PIVOT_TOL — necessary
+        // after a singular-basis revert, since the absolute floor admits pivots
+        // that recreate the same singularity. The fallback to PIVOT_TOL when
+        // no row clears the relative floor preserves unboundedness sensitivity.
+        let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        let stable_floor = if stable_mode {
+            (PIVOT_STABILITY_THRESHOLD * max_d_abs).max(PIVOT_TOL)
+        } else {
+            PIVOT_TOL
+        };
+
         let mut min_ratio = f64::INFINITY;
         for i in 0..m {
-            if d[i] > PIVOT_TOL {
+            if d[i] > stable_floor {
                 let ratio = x_b[i] / d[i];
                 if ratio < min_ratio {
                     min_ratio = ratio;
                 }
             }
         }
+
+        let effective_floor = if min_ratio.is_finite() {
+            stable_floor
+        } else if stable_mode {
+            for i in 0..m {
+                if d[i] > PIVOT_TOL {
+                    let ratio = x_b[i] / d[i];
+                    if ratio < min_ratio { min_ratio = ratio; }
+                }
+            }
+            PIVOT_TOL
+        } else {
+            PIVOT_TOL
+        };
 
         if !min_ratio.is_finite() {
             return SimplexOutcome::Unbounded;
@@ -964,7 +1106,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         let mut leaving: Option<usize> = None;
         let mut best_pivot_abs = 0.0f64;
         for i in 0..m {
-            if d[i] > PIVOT_TOL {
+            if d[i] > effective_floor {
                 let ratio = x_b[i] / d[i];
                 if ratio <= harris_window {
                     let d_abs = d[i].abs();
@@ -1014,10 +1156,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // 10. Update basis index and check pivot stability
         basis[leaving_row] = entering_col;
 
-        // ピボット安定性チェック: |d[leaving_row]| / max(d) が閾値未満の場合、
-        // eta の inv_pivot が大きくなりすぎて FTRAN/BTRAN が数値爆発する。
-        // その場合は eta を追加せず即時再因子分解でリセットする（eta 蓄積誤差を防ぐ）。
-        let max_d_abs = d.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        // A relatively small pivot blows up the eta inverse-pivot factor and
+        // contaminates subsequent FTRAN/BTRAN; refactor instead of accumulating
+        // another eta. `max_d_abs` is already computed for the ratio test.
         let pivot_unstable = d[leaving_row].abs() < PIVOT_STABILITY_THRESHOLD * max_d_abs
             && basis_mgr.eta_count() > 0;
 
@@ -1034,15 +1175,77 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         if basis_mgr.refactor_failed {
             if basis_mgr.singular_basis {
-                return SimplexOutcome::SingularBasis;
+                blocked_at_basis.insert(entering_col);
+                consecutive_blocks += 1;
+
+                if consecutive_blocks > max_consecutive_blocks {
+                    // No stable pivot from `basis_snapshot` after m attempts.
+                    return SimplexOutcome::SingularBasis;
+                }
+
+                stable_mode = true;
+                if !revert_to_snapshot(
+                    a, basis, x_b, b_rhs, &basis_snapshot,
+                    &mut is_basic, &mut basis_mgr, options,
+                ) {
+                    return SimplexOutcome::SingularBasis;
+                }
+                continue;
             } else {
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Timeout(obj);
             }
         }
+
+        // After a fresh LU has accepted the current basis, snapshot it and
+        // clear the per-snapshot blocklist; entries that recreated singularity
+        // earlier may now be safe.
+        if basis_mgr.eta_count() == 0 {
+            basis_snapshot.copy_from_slice(basis);
+            if !blocked_at_basis.is_empty() {
+                blocked_at_basis.clear();
+                consecutive_blocks = 0;
+            }
+        }
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    // max_iter=usize::MAX のためここには事実上到達しない
+    // Unreachable with max_iter = usize::MAX (timeout is the real guard).
     SimplexOutcome::Timeout(obj)
+}
+
+/// Restore `basis_snapshot` and rebuild `x_b = B^{-1} b` from a fresh LU.
+///
+/// Returns `false` only if the snapshot itself factors as singular — which
+/// implies the basis became singular before any fresh LU could accept it.
+/// Caller treats `false` as fatal SingularBasis.
+fn revert_to_snapshot(
+    a: &CscMatrix,
+    basis: &mut [usize],
+    x_b: &mut [f64],
+    b_rhs: &[f64],
+    basis_snapshot: &[usize],
+    is_basic: &mut [bool],
+    basis_mgr: &mut LuBasis,
+    options: &SolverOptions,
+) -> bool {
+    basis.copy_from_slice(basis_snapshot);
+    for v in is_basic.iter_mut() { *v = false; }
+    for &col in basis.iter() {
+        is_basic[col] = true;
+    }
+    match LuBasis::new(a, basis, options.max_etas) {
+        Ok(mut mgr) => {
+            // Recomputing x_B avoids the eta-induced drift that, if carried in
+            // a stale snapshot, can leave a slack at a negative (infeasible) value.
+            x_b.copy_from_slice(b_rhs);
+            mgr.ftran_dense(x_b);
+            for v in x_b.iter_mut() {
+                if v.abs() < options.clamp_tol { *v = 0.0; }
+            }
+            *basis_mgr = mgr;
+            true
+        }
+        Err(_) => false,
+    }
 }

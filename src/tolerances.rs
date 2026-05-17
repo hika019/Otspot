@@ -19,3 +19,19 @@ pub const DROP_TOL: f64 = 1e-15;
 /// 値: 最大列エントリの 1% 未満のピボットを「不安定」と判定。
 pub const PIVOT_STABILITY_THRESHOLD: f64 = 0.01;
 
+/// 数値的「同等」(near-zero) 判定の relative tolerance。
+///
+/// `PIVOT_TOL.sqrt()` (= 1e-4 when PIVOT_TOL=1e-8)。
+/// Wilkinson の経験則「LU 累積丸め誤差 ~ sqrt(機械精度)」に対応した派生値で、
+/// magic ではなく PIVOT_TOL から構造的に導出される。
+///
+/// 用途: 解返却前の defense-in-depth check
+///   - `|Ax - b| <= FEAS_REL_TOL * (1 + |b| + |Ax|)` (Eq 制約 feasibility)
+///   - `|x - bound| <= FEAS_REL_TOL * (1 + |x| + |bound|)` (bound hit 判定)
+///
+/// 内部最適性判定 (PIVOT_TOL=1e-8) よりは緩いが、解返却前の false-positive
+/// 検出としては十分厳しい。
+pub fn feas_rel_tol() -> f64 {
+    PIVOT_TOL.sqrt()
+}
+
