@@ -93,7 +93,7 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/lp_problems_unbounded 12
 
   echo "=== QP ==="
-  check_dir data/maros_meszaros 139
+  check_dir data/maros_meszaros 138
   check_dir data/mpc_qp 64
   check_dir data/osqp_bench 62
   check_dir data/osqp_bench_extra 238
@@ -104,7 +104,7 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/qp_unbounded 9
   check_dir data/qplib 41
   check_dir data/qplib_nonconvex 45
-  check_dir data/qplib_unsupported 11
+  check_dir data/qplib_unsupported 6
   exit 0
 fi
 
@@ -145,38 +145,10 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   run_or_skip data/qp_unbounded         9   "python3 scripts/gen_unbounded_qp.py"
   run_or_skip data/qplib_nonconvex      45  "python3 scripts/gen_nonconvex_qp.py"
 
-  # Manual setup required (no download script yet)
-  if [[ ! -d data/maros_meszaros || $(ls data/maros_meszaros 2>/dev/null | wc -l) -eq 0 ]]; then
-    cat <<'EOF'
-
-[manual] data/maros_meszaros/ (139 .QPS files) — download script 未整備
-  source: https://github.com/YimingYAN/QP-Test-Problems (MAT_Files/)
-  対応:
-    1. .mat ファイルを cache: scripts/run_maros_all.py 内の download_mat() を参考
-    2. .mat -> .QPS 変換が別途必要 (scipy.io + qp_to_qps.py の組合せ)
-  TODO: 自動 download スクリプト化
-EOF
-  fi
-
-  if [[ ! -d data/qplib || $(ls data/qplib 2>/dev/null | wc -l) -eq 0 ]]; then
-    cat <<'EOF'
-
-[manual] data/qplib/ (41 .qplib files) — download script 未整備
-  source: https://qplib.zib.de/ (個別問題 instance)
-  対応:
-    各 QPLIB_XXXX.qplib を https://qplib.zib.de/data/QPLIB_XXXX.qplib から取得
-  TODO: convex subset の自動 download スクリプト化
-EOF
-  fi
-
-  if [[ ! -d data/qplib_unsupported || $(ls data/qplib_unsupported 2>/dev/null | wc -l) -eq 0 ]]; then
-    cat <<'EOF'
-
-[manual] data/qplib_unsupported/ (11 .qplib files) — download script 未整備
-  source: 同 QPLIB.zib.de (現 solver で未対応の構造を持つ instance 群)
-  TODO: 自動 download スクリプト化
-EOF
-  fi
+  # Maros-Meszaros / QPLIB: 専用 download script
+  run_or_skip data/maros_meszaros     138 "bash scripts/maros_meszaros_download.sh"
+  run_or_skip data/qplib              41  "bash scripts/qplib_download.sh"
+  run_or_skip data/qplib_unsupported  6   "bash scripts/qplib_unsupported_download.sh"
 fi
 
 echo ""
