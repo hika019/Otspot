@@ -697,10 +697,32 @@ pub fn run_postsolve(
         (y_nopert, y_pert)
     };
 
+    // Compute cleanup dfeas before the LSQ gate so we can decide whether the
+    // LSQ pass is worth the (often dominant, see #38) runtime.
+    let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_cl_min = df_cl_nopert.min(df_cl_pert);
+
+    // When both cleanup variants failed to improve the cheap candidates beyond
+    // numerical drift, LSQ shares the same data path (A, c, x*) and is expected
+    // to stagnate as well; running it only burns budget (dfl001: 98% of ~3s
+    // postsolve). The 0.1% relative-improvement floor lets genuine cleanup
+    // progress (≥0.1% of cheap_min) still trigger LSQ.
+    const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
+    let cleanup_stagnant = df_cl_min.is_finite()
+        && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
+
     // LSQ projection (A^T y ≈ -c) as a fourth candidate. Cleanup LP only adjusts
     // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
     // full y vector when coupling is strong.
-    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate {
+    let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || cleanup_stagnant {
+        #[cfg(debug_assertions)]
+        if cleanup_stagnant {
+            eprintln!(
+                "[postsolve] LSQ skip: improvement-stagnant (cheap_min={:.3e} df_cl_min={:.3e})",
+                cheap_min, df_cl_min
+            );
+        }
         None
     } else {
         const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
@@ -733,8 +755,6 @@ pub fn run_postsolve(
     };
 
     // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper computation.
-    let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
-    let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_lsq = y_lsq.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let min_df = df_loop
         .min(df_gs)
