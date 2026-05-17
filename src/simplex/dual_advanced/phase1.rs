@@ -358,7 +358,7 @@ pub(crate) fn big_m_cold_start(
     let mut pricing = SteepestEdgePricing::new(n_aug);
     let phase2_outcome = super::super::revised_simplex_core(
         &a_aug, &mut x_b, &c_aug_p2, b, &mut basis_aug,
-        m, n_aug, n_aug, &mut pricing, options, &mut total_iters,
+        m, n_aug, n_aug, &mut pricing, options, &mut total_iters, false,
     );
 
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===

@@ -76,6 +76,11 @@ pub(crate) fn solve_dual_advanced(
     // returned with a non-empty solution the LP is feasible, so Big-M's
     // "Timeout + artificials left → Infeasible" heuristic would wrongly flip
     // the verdict (observed on d6cube, pds-10).
+    //
+    // `revised_simplex_core` has a no-progress early-bail (task #37) so a
+    // Primal Phase I cycle returns Timeout in O(K) pivots and Big-M gets
+    // the remaining half quickly. The split is kept as defence-in-depth for
+    // problems whose Primal makes slow but real progress (pilot/dfl001).
     let primal_options = clone_options_with_half_deadline(options);
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, &primal_options);
     match primal_result.status {
@@ -172,7 +177,7 @@ fn cold_start_advanced(
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
-        &mut total_iters,
+        &mut total_iters, false,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界

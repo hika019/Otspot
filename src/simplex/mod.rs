@@ -1247,7 +1247,7 @@ mod tests {
         let b = vec![1.0, 0.0];
         let mut iters = 0usize;
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts, &mut iters,
+            &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts, &mut iters, false,
         );
         assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
     }
@@ -1295,7 +1295,7 @@ mod tests {
         let b = vec![4.0];
         let mut iters = 0usize;
         let outcome = revised_simplex_core(
-            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts, &mut iters,
+            &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts, &mut iters, false,
         );
         assert!(matches!(
             outcome,
