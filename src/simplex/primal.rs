@@ -44,6 +44,9 @@ fn extract_timeout_solution_reconciled(
 /// Ruiz equilibration スケーリングを適用してから解く。
 pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = sf.m;
+    // task #19: simplex 反復回数を SolverResult.iterations に伝播するため、
+    // すべての core 呼び出しで out-param 経由で累積する。
+    let mut total_iters: usize = 0;
 
     // Apply Ruiz equilibration scaling to the standard form
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
@@ -68,7 +71,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options)
+        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, &mut total_iters)
         {
             SimplexOutcome::Optimal(obj, mut y) => {
                 match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -114,6 +117,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs,
                     slack,
                     warm_start_basis: Some(ws),
+                    iterations: total_iters,
             ..Default::default()
                 }
             }
@@ -125,6 +129,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+                iterations: total_iters,
             ..Default::default()
             },
             SimplexOutcome::Timeout(obj) => {
@@ -147,6 +152,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
+                    iterations: total_iters,
             ..Default::default()
                 }
             }
@@ -225,6 +231,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             n_ext,
             &mut pricing1,
             options,
+            &mut total_iters,
         );
         match phase1_outcome {
             SimplexOutcome::Optimal(_obj, _) => {
@@ -268,6 +275,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     match revised_simplex_core(
                         &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
                         m, n_ext, n_ext, &mut pricing_retry, options,
+                        &mut total_iters,
                     ) {
                         SimplexOutcome::Optimal(_, _) => {} // check reconcile next iteration
                         SimplexOutcome::Unbounded => break 'retry,
@@ -346,6 +354,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     sf.n_total,
                     &mut pricing2,
                     options,
+                    &mut total_iters,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
                         match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -390,6 +399,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             reduced_costs,
                             slack,
                             warm_start_basis: Some(ws),
+                            iterations: total_iters,
                             ..Default::default()
                         }
                     }
@@ -401,6 +411,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+                        iterations: total_iters,
                         ..Default::default()
                     },
                     SimplexOutcome::Timeout(obj2) => {
@@ -531,6 +542,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         sf.n_total,
                         &mut pricing2,
                         options,
+                        &mut total_iters,
                     ) {
                         SimplexOutcome::Optimal(obj2, mut y) => {
                             match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
@@ -843,6 +855,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     n_price: usize,
     pricing: &mut P,
     options: &SolverOptions,
+    iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
@@ -869,6 +882,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut rc_vec = vec![0.0f64; n_price];
 
     for _iter in 0..max_iter {
+        *iter_count_out = iter_count_out.saturating_add(1);
         // タイムアウト・キャンセルチェック
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));

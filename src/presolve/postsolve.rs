@@ -787,6 +787,7 @@ pub fn run_postsolve(
         reduced_costs,
         slack,
         warm_start_basis: None, // presolve と warm-start の組み合わせは未対応
+        iterations: result.iterations, // task #19: 縮約後 solve の iter を引き継ぐ
         ..Default::default()
     }
 }
