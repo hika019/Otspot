@@ -1705,4 +1705,169 @@ mod tests {
         assert!(result.col_map[2].is_none(), "z should be eliminated");
         assert!(result.row_map[1].is_none(), "Eq row should be eliminated");
     }
+
+    // -----------------------------------------------------------
+    // Round-trip KKT tests: presolve→solve→postsolve cycle が原問題で
+    // primal/dual/objective を全て満たすことを assert する。
+    //
+    // 既存 test 群は run_presolve の構造的副作用 (num_vars, postsolve_stack,
+    // col_map) のみ検証していたため、postsolve の dual recovery が崩れても
+    // 検出できなかった (perold 等で実際に bug を漏らした)。
+    // -----------------------------------------------------------
+    mod roundtrip_kkt {
+        use super::*;
+        use crate::test_kkt::assert_kkt_optimal;
+
+        /// Doubleton Eq の round-trip: x+y=4, x∈[0,3], y∈[0,3], min x+y → obj=4
+        #[test]
+        fn roundtrip_doubleton_eq_simple() {
+            let lp = make_lp_general(
+                vec![1.0, 1.0],
+                &[0, 0], &[0, 1], &[1.0, 1.0],
+                1, 2,
+                vec![4.0],
+                vec![ConstraintType::Eq],
+                vec![(0.0, 3.0), (0.0, 3.0)],
+            );
+            assert_kkt_optimal(&lp, 4.0, "roundtrip_doubleton_eq_simple");
+        }
+
+        /// Doubleton Eq + 異なる係数: 2x+3y=12, x∈[0,4], y∈[0,4], min x+2y
+        /// 代入: x = 6 - 1.5y, feasible: 4/3 ≤ y ≤ 4
+        /// obj = (6-1.5y) + 2y = 6 + 0.5y → min y=4/3, x=4, obj = 6+2/3 = 20/3
+        #[test]
+        fn roundtrip_doubleton_eq_nonunit_coeffs() {
+            let lp = make_lp_general(
+                vec![1.0, 2.0],
+                &[0, 0], &[0, 1], &[2.0, 3.0],
+                1, 2,
+                vec![12.0],
+                vec![ConstraintType::Eq],
+                vec![(0.0, 4.0), (0.0, 4.0)],
+            );
+            assert_kkt_optimal(&lp, 20.0 / 3.0, "roundtrip_doubleton_eq_nonunit_coeffs");
+        }
+
+        /// Free var substitution: z free + Eq row で z を消去後 KKT 整合
+        /// min x+y+z, x+y+z=5, x+y<=10, x,y∈[0,10], z free → z=5-x-y, obj=5
+        #[test]
+        fn roundtrip_free_var_subst() {
+            let lp = make_lp_general(
+                vec![1.0, 1.0, 1.0],
+                &[0, 0, 0, 1, 1],
+                &[0, 1, 2, 0, 1],
+                &[1.0, 1.0, 1.0, 1.0, 1.0],
+                2, 3,
+                vec![5.0, 10.0],
+                vec![ConstraintType::Eq, ConstraintType::Le],
+                vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
+            );
+            assert_kkt_optimal(&lp, 5.0, "roundtrip_free_var_subst");
+        }
+
+        /// Free singleton col: z は singleton 列 + free。Eq 1 + Ge 1 の混在で
+        /// postsolve が free col + Ge dual の符号慣例を正しく復元するか。
+        /// min x+y+z, x+y>=3, x+z=7, x,y∈[0,10], z free → x=3, y=0, z=4 obj=7
+        #[test]
+        fn roundtrip_free_singleton_col() {
+            let lp = make_lp_general(
+                vec![1.0, 1.0, 1.0],
+                &[0, 0, 1, 1],
+                &[0, 1, 0, 2],
+                &[1.0, 1.0, 1.0, 1.0],
+                2, 3,
+                vec![3.0, 7.0],
+                vec![ConstraintType::Ge, ConstraintType::Eq],
+                vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
+            );
+            // x+y>=3, x+z=7. min x+y+z = x+y + (7-x) = y+7 → minimize y → y=0
+            // y=0: x>=3, z=7-x. min x+0+7-x = 7. 任意 x ∈ [3,7] feasible. obj=7
+            assert_kkt_optimal(&lp, 7.0, "roundtrip_free_singleton_col");
+        }
+
+        /// Singleton row + bounds tightening: x0 = 5 fix で SingletonRow 経由
+        /// y_0 を bound-aware に復元する経路 (perold class proxy)。
+        /// min x0+x1+x2, x0=5 (Eq singleton), x1+x2=4 (Eq), x1∈[0,3], x2∈[0,3]
+        /// → x0=5, x1+x2=4 minimize → 任意組合せ、obj = 5+4=9
+        #[test]
+        fn roundtrip_singleton_row_eq_with_doubleton() {
+            let lp = make_lp_general(
+                vec![1.0, 1.0, 1.0],
+                &[0, 1, 1],
+                &[0, 1, 2],
+                &[1.0, 1.0, 1.0],
+                2, 3,
+                vec![5.0, 4.0],
+                vec![ConstraintType::Eq, ConstraintType::Eq],
+                vec![(0.0, 10.0), (0.0, 3.0), (0.0, 3.0)],
+            );
+            assert_kkt_optimal(&lp, 9.0, "roundtrip_singleton_row_eq_with_doubleton");
+        }
+
+        /// Redundant Le row + active Eq: Redundant が削除されても残りの Eq
+        /// で KKT が成立し、削除行の y_i は bound-aware default (= 0) で
+        /// 矛盾ないことを round-trip で検証。
+        #[test]
+        fn roundtrip_redundant_le_with_active_eq() {
+            // x1+x2 <= 100 (Le, redundant: x1∈[0,3], x2∈[0,3])
+            // x1+x2 = 4 (Eq, active)
+            // min 2x1+x2, x1∈[0,3], x2∈[0,3]
+            // → x1=1, x2=3 (cost x1 を最小化、x2 が cheaper): obj = 2+3 = 5
+            //   x1=3, x2=1: obj = 6+1=7
+            //   x1=0, x2=4: infeasible (x2>3)
+            //   x1=1, x2=3: obj=5 (★)
+            let lp = make_lp_general(
+                vec![2.0, 1.0],
+                &[0, 0, 1, 1],
+                &[0, 1, 0, 1],
+                &[1.0, 1.0, 1.0, 1.0],
+                2, 2,
+                vec![100.0, 4.0],
+                vec![ConstraintType::Le, ConstraintType::Eq],
+                vec![(0.0, 3.0), (0.0, 3.0)],
+            );
+            assert_kkt_optimal(&lp, 5.0, "roundtrip_redundant_le_with_active_eq");
+        }
+
+        /// 全 transform 混在: doubleton + free var + singleton + redundant
+        /// (presolve→postsolve の全体パスの cross 検証)
+        #[test]
+        fn roundtrip_mixed_transforms() {
+            // min x1 + x2 + x3 + x4
+            // x1 + x2     = 3    (Eq doubleton, x1∈[0,2], x2∈[0,2] active)
+            // x3 + x4     = 2    (Eq doubleton, x3 free, x4∈[0,5])
+            // x1 + x3    <= 100  (Le redundant)
+            // → x1+x2=3 (x1=1,x2=2 や x1=2,x2=1)、x3+x4=2 (任意)、obj = 3+2 = 5
+            let lp = make_lp_general(
+                vec![1.0, 1.0, 1.0, 1.0],
+                &[0, 0, 1, 1, 2, 2],
+                &[0, 1, 2, 3, 0, 2],
+                &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                3, 4,
+                vec![3.0, 2.0, 100.0],
+                vec![ConstraintType::Eq, ConstraintType::Eq, ConstraintType::Le],
+                vec![
+                    (0.0, 2.0), (0.0, 2.0),
+                    (f64::NEG_INFINITY, f64::INFINITY), (0.0, 5.0),
+                ],
+            );
+            assert_kkt_optimal(&lp, 5.0, "roundtrip_mixed_transforms");
+        }
+
+        /// Le → Ge round-trip: Ge は postsolve で符号反転、dual 符号慣例を
+        /// 正しく復元できないと dfeas_rel_bound が劣化。
+        #[test]
+        fn roundtrip_ge_constraint_dual_sign() {
+            // min x+y, x+y >= 3, x∈[0,5], y∈[0,5] → x+y=3 (任意)、obj=3
+            let lp = make_lp_general(
+                vec![1.0, 1.0],
+                &[0, 0], &[0, 1], &[1.0, 1.0],
+                1, 2,
+                vec![3.0],
+                vec![ConstraintType::Ge],
+                vec![(0.0, 5.0), (0.0, 5.0)],
+            );
+            assert_kkt_optimal(&lp, 3.0, "roundtrip_ge_constraint_dual_sign");
+        }
+    }
 }
