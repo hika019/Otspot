@@ -298,7 +298,7 @@ fn compute_dfeas_orig(
         // bound_dual=0 が埋められる慣例。stationarity 評価から除外して v2 経路
         // (`kkt_residual_rel`) と整合させる。
         let (lb_i, ub_i) = prob.bounds[i];
-        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
             continue;
         }
         if prob.a.col_ptr.len() > i + 1
@@ -412,7 +412,7 @@ fn compute_dfeas_componentwise(
         let mut max_rel = 0.0_f64;
         for j in 0..n {
             let (lb_j, ub_j) = prob.bounds[j];
-            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12 {
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
             }
             if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
@@ -435,7 +435,7 @@ fn compute_dfeas_componentwise(
     let mut max_rel = 0.0_f64;
     for i in 0..n {
         let (lb_i, ub_i) = prob.bounds[i];
-        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < 1e-12 {
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
             continue;
         }
         if prob.a.col_ptr.len() > i + 1
