@@ -112,7 +112,8 @@ ub = np.where(ub >=  INF_THR,  np.inf, ub)
 #   triangle のみなら Q+Q.T-diag(Q) で full sym 化
 Q = spa.csc_matrix(Q)
 diff = Q - Q.T
-if abs(diff).max() if diff.nnz > 0 else 0.0 > 1e-10:
+max_diff = abs(diff).max() if diff.nnz > 0 else 0.0
+if max_diff > 1e-10:
     Q = Q + Q.T - spa.diags(Q.diagonal())
 
 write_qps(
