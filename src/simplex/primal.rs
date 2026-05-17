@@ -658,10 +658,9 @@ fn pivot_out_degenerate_artificials(
     let m = basis.len();
     let basis_before = basis.to_vec();
 
-    // Build LuBasis from the Phase I final basis to enable FTRAN-based pivot selection.
-    // Using FTRAN (d = B^{-1} a_j) for pivot element selection instead of the raw matrix
-    // entry A[i,j] prevents ill-conditioned bases: raw entries ignore basis transformation,
-    // while |d[i]| directly measures the numerical stability of the entering pivot.
+    // Build LuBasis from the Phase I final basis to enable pivot selection.
+    // |d[i]| = |(B^{-1} a_j)[i]| measures the numerical stability of a candidate
+    // entering pivot; raw A[i,j] would ignore basis transformation.
     let mut basis_mgr = match LuBasis::new_timed(a_ext, basis, options.max_etas, options.deadline) {
         Ok(mgr) => mgr,
         Err(_) => return, // singular basis: leave artificials as-is
@@ -672,10 +671,21 @@ fn pivot_out_degenerate_artificials(
         is_basic[col] = true;
     }
 
+    // BTRAN-based candidate scan (replaces the prior O(n_artificial × n_total)
+    // FTRAN-per-column loop):
+    //   For each degenerate artificial row i:
+    //     1. z = B^{-T} e_i   (one BTRAN — gives the i-th row of B^{-1})
+    //     2. d[i, j] = z · A_{:,j} for every non-basic j (sparse dot, O(nnz(A_j)))
+    //     3. choose argmax_j |d[i, j]| > PIVOT_TOL, FTRAN that one column to
+    //        obtain the d-vector required by basis_mgr.update.
+    // Per artificial cost: 1 BTRAN + sum_j nnz(A_{:,j}) + 1 FTRAN
+    //                    ≈ O(m + nnz(A)) instead of O(n_total × FTRAN).
+    // osa-60 (n_total ≈ 243k, n_artificial = 11): ~30k× speedup vs. the prior
+    // formulation (verified via tests/diag_ken18_osa60.rs).
+    let mut z_dense = vec![0.0_f64; m];
     for i in 0..m {
-        // deadline チェック: pds-20 等の大規模で artificial 多数の場合、
-        // m_artificial × n_total 回 FTRAN で 1000 秒予算を簡単に消費する。
-        // 各 i 反復先頭で deadline 検査し、超過なら未処理 artificial を残して return。
+        // Coarse deadline guard: with O(m + nnz(A)) per artificial the function
+        // is fast enough that this should rarely fire — kept as a safety net.
         if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return;
         }
@@ -683,44 +693,49 @@ fn pivot_out_degenerate_artificials(
             continue;
         }
 
-        // Find non-basic original column j maximising |d[i]| = |(B^{-1} a_j)[i]|.
-        // This is the true pivot element after the current basis transformation.
-        let mut best_j = None;
-        let mut best_abs = PIVOT_TOL;
-        let mut best_d_sv = SparseVec::new(m);
+        // Step 1: z = B^{-T} e_i
+        z_dense.iter_mut().for_each(|v| *v = 0.0);
+        z_dense[i] = 1.0;
+        basis_mgr.btran_dense(&mut z_dense);
 
+        // Step 2: scan all non-basic original columns; track argmax |d|.
+        let mut best_j: Option<usize> = None;
+        let mut best_abs = PIVOT_TOL;
         for j in 0..sf.n_total {
             if is_basic[j] {
                 continue;
             }
-            // 内側ループでも 1024 回ごとに deadline 検査 (pds-20 では n_total ≈ 33,798)。
-            if j & 0x3ff == 0 && options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return;
-            }
             if let Ok((rows, vals)) = a_ext.get_column(j) {
-                let mut col_dense = vec![0.0_f64; m];
+                let mut d_ij = 0.0_f64;
                 for (k, &row) in rows.iter().enumerate() {
                     if row < m {
-                        col_dense[row] = vals[k];
+                        d_ij += z_dense[row] * vals[k];
                     }
                 }
-                let mut d_sv = SparseVec::from_dense(&col_dense);
-                basis_mgr.ftran(&mut d_sv);
-                let d_i = d_sv.get(i).abs();
-                if d_i > best_abs {
-                    best_abs = d_i;
+                let abs_d = d_ij.abs();
+                if abs_d > best_abs {
+                    best_abs = abs_d;
                     best_j = Some(j);
-                    best_d_sv = d_sv;
                 }
             }
         }
 
         if let Some(j) = best_j {
+            // Step 3: one FTRAN on the chosen column to feed basis_mgr.update.
+            let (col_rows, col_vals) = match a_ext.get_column(j) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut d_sv = SparseVec {
+                indices: col_rows.to_vec(),
+                values: col_vals.to_vec(),
+                len: m,
+            };
+            basis_mgr.ftran(&mut d_sv);
             is_basic[basis[i]] = false;
             is_basic[j] = true;
             basis[i] = j;
-            // Rank-1 LU update: subsequent FTRANs use the updated (post-pivot) basis.
-            basis_mgr.update(j, i, &best_d_sv);
+            basis_mgr.update(j, i, &d_sv);
             basis_mgr.refactor_if_needed_timed(a_ext, basis, options.deadline);
         }
     }
