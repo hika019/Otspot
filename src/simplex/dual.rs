@@ -1,18 +1,6 @@
-//! Dual Simplex法の実装
-//!
-//! warm-start基盤を主目的とした双対単体法。
-//! Primal Simplex（mod.rs）と基底管理（basis/）を共有する。
-//!
-//! # アルゴリズム概要
-//!
-//! Dual SimplexはPrimal Simplexと「何を維持し、何を修復するか」が逆転する:
-//! - **維持**: 双対実行可能性（r_j ≥ 0）
-//! - **修復**: 主実行可能性（x_B ≥ 0）
-//!
-//! # 主要ユースケース
-//!
-//! SQP等で制約RHSのみが変化する場合、前の最適基底を用いてwarm-startすることで
-//! O(少数反復)で新しい最適解に到達できる。
+//! Dual Simplex. Maintains dual feasibility (r_j ≥ 0) and restores primal
+//! feasibility (x_B ≥ 0). Primary use: warm-start re-optimization after RHS
+//! changes (e.g. SQP).
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
@@ -24,10 +12,9 @@ use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, t
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use std::sync::atomic::Ordering;
 
-/// Dual Simplex法の2相実装エントリポイント
-///
-/// - **warm-start**: 提供された基底を使用してx_Bを再計算し、Dual Simplexで修復
-/// - **コールドスタート**: コスト摂動でDual実行可能性を確保後、Primal Phase IIで最適化
+/// Two-phase dual simplex entry point. Warm-start path recomputes x_B from the
+/// supplied basis; cold-start uses cost perturbation to gain dual feasibility,
+/// then runs primal Phase II.
 pub(crate) fn two_phase_dual_simplex(
     sf: &StandardForm,
     problem: &LpProblem,
@@ -37,13 +24,12 @@ pub(crate) fn two_phase_dual_simplex(
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
-        // Warm start: 提供された基底でx_Bを新しいRHSから再計算
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
             let mut basis = warm.basis.clone();
 
             match LuBasis::new(&a, &basis, options.max_etas) {
                 Ok(mut basis_mgr) => {
-                    // x_B = B^{-1} b_new (FTRANで計算)
+                    // x_B = B^{-1} b_new
                     let mut x_b_sv = SparseVec::from_dense(&b);
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
@@ -54,28 +40,23 @@ pub(crate) fn two_phase_dual_simplex(
                         &mut total_iters,
                     );
 
-                    // Dual SimplexではUnbounded=双対非有界=主実行不可
                     let mut result = warm_outcome_to_result(
                         outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
                     );
                     result.iterations = total_iters;
                     return result;
                 }
-                Err(_) => {
-                    // 基底が特異 → コールドスタートにフォールバック
-                }
+                // Singular basis: fall through to cold start.
+                Err(_) => {}
             }
         }
     }
 
-    // コールドスタート
     cold_start_dual(sf, problem, options, &a, &b, &c, &row_scale, &col_scale)
 }
 
-/// コールドスタートでのDual Simplex
-///
-/// コスト摂動でDual実行可能性を確保し、Dual Phase I（主実行可能性の修復）後に
-/// Primal Phase II（目的関数の最適化）を実行する。
+/// Cost-perturbation cold start: Dual Phase I restores primal feasibility,
+/// then Primal Phase II optimizes the original objective.
 #[allow(clippy::too_many_arguments)]
 fn cold_start_dual(
     sf: &StandardForm,
@@ -89,22 +70,18 @@ fn cold_start_dual(
 ) -> SolverResult {
     let m = sf.m;
 
-    // 人工変数が必要な問題はPrimal Simplexにフォールバック
-    // (Ge/Eq制約でスラック基底が特異になるため)
+    // Ge/Eq → slack basis is singular; fall back to primal simplex.
     if sf.num_artificial > 0 {
         return super::two_phase_simplex(sf, problem, options);
     }
 
-    // Le-only問題: スラック基底 B=I, x_B = b ≥ 0 (標準形変換後)
+    // Le-only: B=I, x_B = b ≥ 0 after standard-form transform.
     let mut basis = sf.initial_basis.clone();
     let mut x_b = b.to_vec();
 
-    // コスト摂動: c̃_j = max(c_j, 0) → r̃_j = c̃_j ≥ 0 (双対実行可能)
-    // スラック基底でy=0なのでr̃_j = c̃_j
+    // Perturb costs to c̃_j = max(c_j, 0) so r̃_j = c̃_j ≥ 0 (slack basis ⇒ y=0).
     let c_perturbed: Vec<f64> = c.iter().map(|&v| v.max(0.0)).collect();
 
-    // Dual Phase I: 主実行可能性を修復
-    // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core(
         a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options,
@@ -113,7 +90,7 @@ fn cold_start_dual(
 
     match phase1_outcome {
         SimplexOutcome::Unbounded => {
-            // 双対非有界 = 主実行不可
+            // Dual-unbounded ⇒ primal-infeasible.
             return SolverResult {
                 status: SolveStatus::Infeasible,
                 objective: 0.0,
@@ -134,19 +111,15 @@ fn cold_start_dual(
             }
             return SolverResult::numerical_error();
         }
-        SimplexOutcome::Optimal(_, _) => {
-            // Phase I完了: x_B ≥ 0 (主実行可能)
-        }
+        SimplexOutcome::Optimal(_, _) => {}
     }
 
-    // Primal Phase II: 元のコストで最適化（主実行可能点から）
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
         a, &mut x_b, c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
         &mut total_iters,
     );
 
-    // Phase IIはPrimalなのでUnbounded=主非有界
     let mut result = primal_outcome_to_result(
         phase2_outcome, sf, problem, &basis, &x_b, col_scale, row_scale,
     );
@@ -154,8 +127,7 @@ fn cold_start_dual(
     result
 }
 
-/// Dual Simplex用のSimplexOutcome→SolverResult変換
-/// (Unbounded = 双対非有界 = 主実行不可)
+/// Convert dual-simplex outcome to `SolverResult` (Unbounded ⇒ Infeasible).
 fn warm_outcome_to_result(
     outcome: SimplexOutcome,
     sf: &StandardForm,
@@ -183,7 +155,6 @@ fn warm_outcome_to_result(
             }
         }
         SimplexOutcome::Unbounded => SolverResult {
-            // 双対非有界 = 主実行不可
             status: SolveStatus::Infeasible,
             objective: 0.0,
             solution: vec![],
@@ -215,8 +186,7 @@ fn warm_outcome_to_result(
     }
 }
 
-/// Primal Simplex用のSimplexOutcome→SolverResult変換
-/// (Unbounded = 主非有界)
+/// Convert primal-simplex outcome to `SolverResult`.
 fn primal_outcome_to_result(
     outcome: SimplexOutcome,
     sf: &StandardForm,
@@ -275,17 +245,8 @@ fn primal_outcome_to_result(
     }
 }
 
-/// Dual Simplexコアアルゴリズム
-///
-/// 双対実行可能性（r_j ≥ 0）を維持しながら、主実行可能性（x_B ≥ 0）を反復的に修復する。
-///
-/// # 前提条件
-/// - 呼び出し前に双対実行可能性が確保されていること（warm-startまたはコスト摂動）
-///
-/// # 戻り値
-/// - `Optimal`: 主実行可能性達成（最適）
-/// - `Unbounded`: 双対比率テストで候補なし（双対非有界 = 主実行不可）
-/// - `Timeout`: refactor_failed（数値障害）またはmax_iter到達（事実上不到達）
+/// Dual simplex core. Caller must establish dual feasibility (warm-start or
+/// cost perturbation) before invocation.
 pub(super) fn dual_simplex_core(
     a: &CscMatrix,
     x_b: &mut [f64],
@@ -296,7 +257,7 @@ pub(super) fn dual_simplex_core(
     options: &SolverOptions,
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
-    let max_iter = usize::MAX; // timeout が実質的なガード（max_iterations廃止）
+    let max_iter = usize::MAX; // timeout is the real guard
 
     let mut basis_mgr = match LuBasis::new(a, basis, options.max_etas) {
         Ok(bm) => bm,
@@ -309,7 +270,6 @@ pub(super) fn dual_simplex_core(
         }
     };
 
-    // 基底追跡用フラグ
     let mut is_basic = vec![false; n_price];
     for &b in basis.iter() {
         if b < n_price {
@@ -317,7 +277,7 @@ pub(super) fn dual_simplex_core(
         }
     }
 
-    // 初期被縮小費用: r_j = c_j - y^T a_j (y = B^{-T} c_B)
+    // r_j = c_j - y^T a_j, y = B^{-T} c_B
     let mut reduced_costs = compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
 
     let leaving_strategy = MostInfeasibleLeaving;
@@ -327,7 +287,6 @@ pub(super) fn dual_simplex_core(
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
-        // タイムアウト・キャンセルチェック
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
@@ -335,10 +294,8 @@ pub(super) fn dual_simplex_core(
             return SimplexOutcome::Timeout(obj);
         }
 
-        // Step 1: 離基変数選択 - 最も主実行不可な基底変数
         let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {
             None => {
-                // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
                 return SimplexOutcome::Optimal(obj, y);
@@ -346,14 +303,14 @@ pub(super) fn dual_simplex_core(
             Some(p) => p,
         };
 
-        // Step 2: BTRAN: ρ = B^{-T} e_p
+        // BTRAN: ρ = B^{-T} e_p
         let mut e_p = vec![0.0f64; m];
         e_p[leaving_row] = 1.0;
         let mut rho_sv = SparseVec::from_dense(&e_p);
         basis_mgr.btran(&mut rho_sv);
         rho_sv.to_dense_into(&mut rho_dense);
 
-        // Step 3: PRICE: trow[j] = ρ^T a_j (非基底列のみ)
+        // PRICE: trow[j] = ρ^T a_j  (non-basic columns)
         for j in 0..n_price {
             if is_basic[j] {
                 trow[j] = 0.0;
@@ -367,18 +324,14 @@ pub(super) fn dual_simplex_core(
             trow[j] = dot;
         }
 
-        // Step 4: 双対比率テスト: 入基変数選択
         let (entering_col, theta) = match dual_ratio_test(
             &trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL,
         ) {
-            None => {
-                // 候補なし: 双対非有界 = 主実行不可
-                return SimplexOutcome::Unbounded;
-            }
+            None => return SimplexOutcome::Unbounded,
             Some(result) => result,
         };
 
-        // Step 5: FTRAN: α = B^{-1} a_q (入基変数のピボット列)
+        // FTRAN: α = B^{-1} a_q
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
         let mut alpha_sv = SparseVec {
             indices: col_rows.to_vec(),
@@ -388,10 +341,9 @@ pub(super) fn dual_simplex_core(
         basis_mgr.ftran(&mut alpha_sv);
         alpha_sv.to_dense_into(&mut alpha_dense);
 
-        // Step 6: ピボット要素の数値安定性チェック
         let pivot_element = alpha_dense[leaving_row];
         if pivot_element.abs() < PIVOT_TOL {
-            // 数値的に不安定 → refactorして被縮小費用を再計算
+            // Unstable pivot: refactor and recompute reduced costs.
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
                 if basis_mgr.singular_basis {
@@ -405,47 +357,38 @@ pub(super) fn dual_simplex_core(
             continue;
         }
 
-        // Step 7: x_Bの更新
-        // step = x_B[p] / α[p] (負の値)
+        // x_B update; step = x_B[p] / α[p] (negative).
         let step = x_b[leaving_row] / pivot_element;
         for i in 0..m {
             x_b[i] -= alpha_dense[i] * step;
         }
         x_b[leaving_row] = step;
 
-        // 微小値クランプ（数値ドリフト防止）
         for val in x_b.iter_mut() {
             if val.abs() < options.clamp_tol {
                 *val = 0.0;
             }
         }
 
-        // Step 8: 被縮小費用の更新
-        // r_j_new = r_j - θ * trow[j] for all non-basic j
+        // r_j_new = r_j - θ * trow[j] for non-basic j; r_{leaving_col} = -θ.
         let leaving_col = basis[leaving_row];
         for j in 0..n_price {
             if !is_basic[j] {
                 reduced_costs[j] -= theta * trow[j];
-                // 入基変数qのr_q_new = r_q - θ * trow[q] = 0 (数学的に保証)
             }
         }
-        // 離基変数の被縮小費用: r_{leaving_col} = -θ
-        // (trow[leaving_col] = 1 は数学的に保証される)
         if leaving_col < n_price {
             reduced_costs[leaving_col] = -theta;
         }
 
-        // Step 9: 基底追跡の更新
         if leaving_col < n_price {
             is_basic[leaving_col] = false;
         }
         is_basic[entering_col] = true;
 
-        // Step 10: 基底マネージャの更新（eta追加）
         basis_mgr.update(entering_col, leaving_row, &alpha_sv);
         basis[leaving_row] = entering_col;
 
-        // Step 11: 必要に応じてrefactor + 被縮小費用リセット
         if basis_mgr_needs_refactor_approx(_iter) {
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
@@ -455,30 +398,23 @@ pub(super) fn dual_simplex_core(
                 let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
                 return SimplexOutcome::Timeout(obj);
             }
-            // refactor後に被縮小費用を再計算（数値誤差リセット）
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
         }
     }
 
     let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
-    // max_iter=usize::MAX のためここには事実上到達しない
     SimplexOutcome::Timeout(obj)
 }
 
-/// refactor_if_neededの呼び出し頻度を制御するヘルパー
-///
-/// LuBasisのneeds_refactorは内部でチェックするが、
-/// compute_reduced_costsは追加コストがあるため毎反復は呼ばない。
+/// Throttle reduced-cost recomputation (every 50 iters) — separate from the
+/// LuBasis-internal refactor check since recomputation has extra cost.
 #[inline]
 fn basis_mgr_needs_refactor_approx(iter: usize) -> bool {
-    // 50反復ごと、またはeta閾値到達時
     iter % 50 == 49
 }
 
-/// 初期被縮小費用を計算する
-///
-/// r_j = c_j - y^T a_j (y = B^{-T} c_B)
+/// r_j = c_j - y^T a_j, y = B^{-T} c_B
 fn compute_reduced_costs(
     a: &CscMatrix,
     c: &[f64],
@@ -488,11 +424,10 @@ fn compute_reduced_costs(
     m: usize,
     basis: &[usize],
 ) -> Vec<f64> {
-    // y = B^{-T} c_B (c_b は常に dense なので btran_dense で sparse 変換を省略)
+    // y = B^{-T} c_B; c_B is dense so skip sparse conversion.
     let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
     basis_mgr.btran_dense(&mut y);
 
-    // r_j = c_j - y^T a_j
     let mut reduced_costs = vec![0.0f64; n_price];
     for j in 0..n_price {
         if is_basic[j] {
@@ -508,27 +443,19 @@ fn compute_reduced_costs(
     reduced_costs
 }
 
-/// 双対変数を計算する: y = B^{-T} c_B
+/// y = B^{-T} c_B
 fn compute_dual_vars(
     c: &[f64],
     basis_mgr: &mut LuBasis,
     basis: &[usize],
     m: usize,
 ) -> Vec<f64> {
-    // c_b は常に dense なので btran_dense で sparse 変換を省略
     let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
     basis_mgr.btran_dense(&mut y);
     y
 }
 
-/// 双対比率テスト: 入基変数を選択する
-///
-/// x_B[p] < 0（下限違反）の場合: trow[j] > pivot_tol の列が候補
-/// θ = min_{j: trow[j] > ε} { r_j / trow[j] }
-///
-/// # 戻り値
-/// - `Some((entering_col, theta))`: 入基変数のインデックスと双対ステップサイズ
-/// - `None`: 候補なし（双対非有界 = 主実行不可）
+/// θ = min_{j: trow[j] > ε} r_j / trow[j].  None ⇒ dual unbounded.
 fn dual_ratio_test(
     trow: &[f64],
     reduced_costs: &[f64],
@@ -542,14 +469,13 @@ fn dual_ratio_test(
     for j in 0..n_price {
         if is_basic[j] { continue; }
 
-        // x_B[p] < 0 → trow[j] > 0 の列が候補
         if trow[j] > pivot_tol {
             let ratio = reduced_costs[j] / trow[j];
             if ratio < min_ratio - pivot_tol {
                 min_ratio = ratio;
                 entering = Some(j);
             } else if (ratio - min_ratio).abs() <= pivot_tol {
-                // Bland's rule: 同率なら列インデックスが小さい方
+                // Bland's rule for ties.
                 if let Some(prev_j) = entering {
                     if j < prev_j {
                         entering = Some(j);
@@ -584,8 +510,6 @@ mod tests {
         LpProblem::new(c, a, b).unwrap()
     }
 
-    /// Le制約のみ c ≥ 0: スラック基底で原点最適。Dual Simplex 経路で
-    /// pfeas / dfeas / obj が全て収束することを検証。
     #[test]
     fn test_dual_basic_nonneg_cost() {
         // min x1 + 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=x2=0, obj=0
@@ -605,8 +529,7 @@ mod tests {
         assert_kkt_optimal_with(&lp, 0.0, "test_dual_basic_nonneg_cost", &opts);
     }
 
-    /// Primal と Dual が同一最適解 (obj + KKT 残差) に収束することを検証。
-    /// obj 一致だけでは片方が早期 NumericalError 緩和した場合を見逃す。
+    /// Primal/Dual converge to the same KKT optimum (objective + residuals).
     #[test]
     fn test_dual_matches_primal() {
         // min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=1, x2=3, obj=-7
@@ -642,9 +565,8 @@ mod tests {
         );
     }
 
-    /// warm-start: RHSのみ変更した場合に正しい最適解 (KKT 全本柱) が得られること。
-    /// 旧 test は obj 一致のみ assert していたため、warm-start 経路で dfeas が
-    /// 退化した bug を検出できなかった。
+    /// Warm-start with RHS-only change must satisfy full KKT (obj match alone
+    /// would miss dfeas degradation on the warm-start path).
     #[test]
     fn test_dual_warm_start_rhs_change() {
         // LP1: min -x1 - 2*x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → x1=1, x2=3, obj=-7
@@ -681,7 +603,6 @@ mod tests {
         assert_kkt_optimal_with(&lp2, -8.0, "test_dual_warm_start_rhs_change", &opts_warm);
     }
 
-    /// SimplexMethod::Dualオプションが正しく動作することを検証 (KKT 全本柱)
     #[test]
     fn test_dual_simplex_method_option() {
         // min -x1 - x2 s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3 → obj=-4
@@ -701,8 +622,8 @@ mod tests {
         assert_kkt_optimal_with(&lp, -4.0, "test_dual_simplex_method_option", &opts);
     }
 
-    /// warm-start後 KKT 全本柱: rc≥0 のみでは bound-aware dfeas や pfeas の退化を
-    /// 見逃すため、bound-aware dfeas_rel_bound と pfeas_abs を直接 assert する。
+    /// Warm-start asserts bound-aware dfeas_rel_bound and pfeas_abs directly;
+    /// `rc ≥ 0` alone would miss pfeas / bound-aware dfeas degradation.
     #[test]
     fn test_dual_warm_start_preserves_dual_feasibility() {
         // LP1: min x1 + x2 s.t. x1+x2 ≤ 6, x1 ≤ 4, x2 ≤ 4 → x1=x2=0, obj=0
@@ -752,7 +673,6 @@ mod tests {
 
     #[test]
     fn test_dual_simplex_timeout() {
-        // コールドスタートLP、deadlineを過去に設定してTimeout確認
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();
@@ -775,33 +695,23 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Timeout);
     }
 
-    /// BUG-SX-002 (dual): LuBasis::new Err → 偽Optimal廃止
-    /// dual_simplex_core で特異初期基底を渡し、Optimal 以外が返ることを確認。
-    /// SingularBasis が発生した場合は SingularBasis を返す（Timeout ではなく）。
+    /// Singular initial basis must not yield a spurious Optimal.
     #[test]
-    fn test_sx002_dual_lu_basis_err_should_return_timeout() {
+    fn test_dual_singular_basis_not_optimal() {
         use crate::simplex::dual::dual_simplex_core;
         use crate::simplex::SimplexOutcome;
 
-        // 2×2 行列: 列0 = [1; 0]
-        // basis = [0, 0] → B = [[1, 1]; [0, 0]] → rank 1 → 特異 → LuBasis::new Err
+        // Duplicate basis column → B singular → LuBasis::new fails.
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let mut x_b = vec![1.0, 0.0];
-        let mut basis = vec![0usize, 0]; // 同一列 → 特異基底
+        let mut basis = vec![0usize, 0];
         let opts = SolverOptions::default();
         let mut iters = 0usize;
         let outcome = dual_simplex_core(
             &a, &mut x_b, &c, &mut basis, 2, 2, &opts, &mut iters,
         );
-        assert!(
-            !matches!(outcome, SimplexOutcome::Optimal(..)),
-            "BUG-SX-002 (dual): LuBasis::new Err 時は Optimal を返してはならない"
-        );
-        // 特異基底は SingularBasis または Timeout を返す（Optimal は不可）
-        assert!(
-            matches!(outcome, SimplexOutcome::Timeout(..) | SimplexOutcome::SingularBasis),
-            "BUG-SX-002 (dual): LuBasis::new Err 時は Timeout または SingularBasis を返すべき"
-        );
+        assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
+        assert!(matches!(outcome, SimplexOutcome::Timeout(..) | SimplexOutcome::SingularBasis));
     }
 }

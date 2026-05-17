@@ -43,9 +43,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {
-        // No weights to maintain for Dantzig pricing
-    }
+    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {}
 }
 
 /// Approximate Steepest-Edge pricing.
@@ -77,7 +75,6 @@ impl PricingStrategy for SteepestEdgePricing {
         for (j, &rc) in reduced_costs.iter().enumerate().take(limit) {
             if rc < -EPS {
                 let gamma = self.weights.get(j).copied().unwrap_or(1.0).max(1e-10);
-                // Score: how much improvement per unit step in the steepest-edge sense
                 let score = -rc / gamma.sqrt();
                 if score > best_score {
                     best_score = score;
@@ -99,29 +96,25 @@ impl PricingStrategy for SteepestEdgePricing {
             .unwrap_or(1.0)
             .max(1e-10);
 
-        // Estimate weight for the newly non-basic variable (old leaving variable)
         if leaving < self.weights.len() {
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
             let new_weight = eta_norm_sq / gamma_entering;
             self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
 
-        // Reset the entering variable's weight (it is now basic; reset for next time it leaves)
         if entering < self.weights.len() {
             self.weights[entering] = 1.0;
         }
     }
 }
 
-/// Dual Simplexの離基変数選択トレイト
+/// Dual Simplex leaving-variable selection.
 ///
-/// `basis` 引数は現在の基底配列 (basis[i] = 行 i に basic な列のグローバル
-/// インデックス) を渡す。標準的な leaving 規則 (MostInfeasibleLeaving) は
-/// 無視するが、Big-M Phase I (`dual_advanced/phase1.rs`) では人工変数の
-/// basis 残存を判定するためにこれを参照する。
+/// `basis` is the current basic-column index per row. Standard `MostInfeasibleLeaving`
+/// ignores it; Big-M Phase I (`dual_advanced/phase1.rs`) uses it to detect artificials
+/// still in the basis.
 pub(crate) trait DualLeavingStrategy {
-    /// 主実行不可 (x_B[i] < -primal_tol) or 追い出すべき変数の行インデックスを返す。
-    /// 候補なし → None（最適）
+    /// Row index of a basic variable to leave (None = primal feasible).
     fn select_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
 }
 

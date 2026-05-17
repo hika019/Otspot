@@ -1,15 +1,4 @@
-//! 線形計画法（LP）のための主シンプレックス法モジュール
-//!
-//! Phase I + Phase II の改訂シンプレックス法（Revised Simplex Method）を実装する。
-//! LU分解を用いた基底行列の効率的な操作により、数値的安定性と計算速度を両立する。
-//!
-//! # アルゴリズム概要
-//!
-//! 1. **Phase I**: 人工変数を導入し、初期実行可能基底解を探索する
-//! 2. **Phase II**: 実行可能解から最適解に向けて目的関数を改善する
-//!
-//! 改訂シンプレックス法では完全な単体表ではなく基底行列のLU分解を保持するため、
-//! 大規模疎行列に対して高い計算効率を発揮する。
+//! Two-phase revised simplex with LU-based basis updates.
 
 pub mod dual;
 pub mod dual_advanced;
@@ -27,36 +16,15 @@ pub(crate) use primal::{two_phase_simplex, extract_solution, revised_simplex_cor
 #[cfg(test)]
 pub(crate) use primal::reconcile_final_basis_state;
 
-/// LU分解を用いた改訂シンプレックス法でLPを解く（後方互換 API）
-///
-/// デフォルトの [`SolverOptions`] を使用して [`solve_with`] を呼び出す。
-///
-/// # 引数
-///
-/// * `problem` - 解くべき線形計画問題
-///
-/// # 戻り値
-///
-/// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
+/// Solve an LP with default options.
 pub fn solve(problem: &LpProblem) -> SolverResult {
     solve_with(problem, &SolverOptions::default())
 }
 
-/// カスタム設定でLPを解く
-///
-/// 与えられた線形計画問題を標準形に変換し、2相シンプレックス法で最適解を求める。
-/// `options.presolve` が true の場合、求解前にPresolveを適用して問題を縮約する。
-///
-/// # 引数
-///
-/// * `problem` - 解くべき線形計画問題
-/// * `options` - ソルバー動作設定（許容誤差・反復上限・eta 保持数など）
-///
-/// # 戻り値
-///
-/// [`SolverResult`] — 求解ステータス（最適・非有界・実行不可）と目的関数値・解ベクトル
+/// Solve an LP with the supplied options. When `options.presolve` is set,
+/// presolve runs before the simplex.
 pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
-    // timeout_secs → deadline 変換（qp_solve_impl と同様）
+    // timeout_secs → deadline (mirrors qp_solve_impl).
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
         opts_with_deadline = options.clone();
@@ -70,7 +38,6 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
 
     let prof_t0 = std::time::Instant::now();
 
-    // --- Presolve ---
     if options.presolve {
         match presolve::run_presolve(problem, options.deadline) {
             Err(presolve::PresolveStatus::Infeasible) => {
@@ -98,7 +65,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 };
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
-                // warm_start と presolve の組み合わせは未対応（presolve が変数インデックスを変える）
+                // Presolve renumbers variables, so a supplied warm_start is invalidated.
                 let opts_no_ws = if options.warm_start.is_some() {
                     let mut o = options.clone();
                     o.warm_start = None;
@@ -113,10 +80,9 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 let raw = solve_without_presolve(&presolve_result.reduced_problem, eff_opts);
                 let t_solve_done = std::time::Instant::now();
                 let solve_us = t_solve_done.duration_since(t_presolve_done).as_micros() as u64;
-                // Presolve で縮約された問題を Simplex が解けない場合 (SingularBasis / check_eq_feasibility 失敗):
-                // - capri: presolve 後の縮約問題が Phase I で SingularBasis (初期基底が特異)
-                // - forplan: Phase II 後の解が Eq 制約を大きく違反 (人工変数の数値ドリフト)
-                // いずれも元問題 (presolve なし) は Simplex で正しく解けるため、fallback する。
+                // The reduced LP can be unsolvable while the original is fine
+                // (SingularBasis on the reduced initial basis, Eq drift in Phase II).
+                // Fall back to solving the original LP without presolve.
                 if raw.status == SolveStatus::NumericalError {
                     return solve_without_presolve(problem, options);
                 }
@@ -125,13 +91,9 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
                 });
-                // When postsolve cannot bring dfeas within the cleanup-LP gate (every
-                // candidate — Loop / Gauss-Seidel / cleanup±perturbation / LSQ — failed),
-                // the presolve transforms removed structure the dual-recovery cannot
-                // reconstruct (greenbea-class: cleanup_pert Phase 1 returns Infeasible).
-                // The same LP solves cleanly without presolve, so re-attempt on the
-                // remaining deadline. Trigger reuses PIVOT_TOL — the same gate the
-                // cleanup LP already screens against — no new magic threshold.
+                // Postsolve dfeas above PIVOT_TOL means dual-recovery cannot
+                // reconstruct the structure presolve removed. The original LP
+                // solves cleanly, so re-attempt on the remaining deadline.
                 if res.status == SolveStatus::Optimal
                     && res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
                 {
@@ -140,12 +102,8 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     if deadline_ok {
                         let mut opts_off = options.clone();
                         opts_off.presolve = false;
-                        // Skip dual_advanced's Ge/Eq cold-start half-deadline split
-                        // (klein3-cycling safety net): we already know the LP is
-                        // feasible (first attempt returned Optimal), so primal
-                        // direct uses the full remaining deadline. Without this,
-                        // greenbea-class LPs cannot finish the alt in 60 s canary
-                        // because half of ~40 s remaining is not enough.
+                        // Force primal: the first attempt already proved feasibility,
+                        // so skip dual_advanced's half-deadline cold-start split.
                         opts_off.simplex_method = crate::options::SimplexMethod::Primal;
                         let t_alt_start = std::time::Instant::now();
                         let mut alt = solve_without_presolve(problem, &opts_off);
@@ -165,14 +123,12 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 }
                 return res;
             }
-            Ok(_) => {
-                // 縮約不要: fallthrough して通常ルートで解く
-            }
+            Ok(_) => {}
         }
     }
 
-    // presolve が deadline 超過で早期終了した場合（was_reduced=false）も
-    // deadline を超過していれば Timeout を返す（build_standard_form 前にチェック）
+    // Catch deadline overrun before build_standard_form (presolve may have
+    // returned early without reducing).
     if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return SolverResult {
             status: SolveStatus::Timeout,
@@ -189,12 +145,11 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
     solve_without_presolve(problem, options)
 }
 
-/// Presolve なしでLPを直接解く内部関数
+/// Solve without presolve.
 pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let m = problem.num_constraints;
     let n = problem.num_vars;
 
-    // Edge case: no variables
     if n == 0 {
         for i in 0..m {
             if problem.b[i] < -options.primal_tol {
@@ -222,13 +177,12 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
         };
     }
 
-    // Edge case: no constraints
     if m == 0 {
         let mut x = vec![0.0; n];
         let mut obj = 0.0;
         for (j, x_j) in x.iter_mut().enumerate() {
             if problem.c[j] < -options.primal_tol {
-                // BUG-simplex-001修正: ubが有限なら最大値(ub)に設定、無限ならUnbounded
+                // Finite upper bound caps the maximizer; infinite ⇒ Unbounded.
                 let ub = problem.bounds[j].1;
                 if ub.is_infinite() {
                     return SolverResult {
@@ -263,77 +217,47 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
     match options.simplex_method {
         SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
         SimplexMethod::Dual => dual::two_phase_dual_simplex(&sf, problem, options),
-        SimplexMethod::DualAdvanced => {
-            // 産業品質Dual Simplex（dual_advanced/を使用）
-            dual_advanced::solve_dual_advanced(&sf, problem, options)
-        }
-        SimplexMethod::Auto => {
-            // Auto: DualAdvanced（Harris ratio test + LuBasis::needs_refactor）を使用する。
-            // Le-only cold start は Harris dual simplex で高速化。
-            // Ge/Eq制約含む問題は DualAdvanced 内で two_phase_dual_simplex にフォールバック。
+        SimplexMethod::DualAdvanced | SimplexMethod::Auto => {
+            // Auto uses dual_advanced; it falls back to two_phase_dual_simplex
+            // internally for problems with Ge/Eq constraints.
             dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
     }
 }
 
-// --- Data structures ---
-
-/// 元の変数の変換情報を保持する構造体
-///
-/// 各元変数がどのように標準形の変数群に対応しているかを記録する。
-/// 下限・上限制約によって変数分割や符号反転が生じた際に使用する。
+/// Mapping from one original variable to its standard-form representation.
+/// Typically 1 new var (shifted bound) or 2 (free-variable split into ±).
 pub(crate) struct OrigVarInfo {
-    /// 変数変換のオフセット（下限 lb または上限 ub の値）
     offset: f64,
-    /// 新変数インデックスと係数のペアのリスト
-    ///
-    /// 通常は1要素（下限付き変数）または2要素（無制限変数を正部・負部に分割）
     new_vars: Vec<(usize, f64)>,
 }
 
-/// 線形計画問題の標準形表現
-///
-/// 元のLPを改訂シンプレックス法に適した形式に変換した結果を保持する。
-/// スラック変数の追加、変数変換（下限シフト・符号反転・分割）、
-/// 人工変数の要否判定を含む完全な変換済みデータを格納する。
+/// Standard-form LP: A, b, c after slack addition, variable shifts/splits,
+/// and per-row sign normalization.
 pub(crate) struct StandardForm {
-    /// 制約行列（疎CSC形式）
     a: CscMatrix,
-    /// 制約右辺ベクトル（変換済み）
     b: Vec<f64>,
-    /// 目的関数係数ベクトル（Phase II用）
     c: Vec<f64>,
-    /// 制約数（上限制約行も含む）
     m: usize,
-    /// 元変数を変換した新変数の数
     n_shifted: usize,
-    /// 全変数数（新変数 + スラック変数）
     n_total: usize,
-    /// 初期基底変数のインデックスリスト（行ごと）
     initial_basis: Vec<usize>,
-    /// 各制約行が人工変数を必要とするかのフラグ
     needs_artificial: Vec<bool>,
-    /// 人工変数の総数
     num_artificial: usize,
-    /// 変数変換による目的関数のオフセット
     obj_offset: f64,
-    /// 元の変数数
     n_orig: usize,
-    /// 元変数ごとの変換情報
     orig_var_info: Vec<OrigVarInfo>,
-    /// 各制約行が符号反転されているか（双対変数の符号調整に使用）
+    /// Per-row sign-flip flag; needed when recovering original-problem duals.
     row_negated: Vec<bool>,
 }
 
-/// シンプレックス法コア関数の実行結果
 pub(crate) enum SimplexOutcome {
-    /// 最適解が得られた。値は最適目的関数値と最適時点の双対変数ベクトル
+    /// Optimal objective and dual vector.
     Optimal(f64, Vec<f64>),
-    /// 問題が非有界（unbounded）であった
     Unbounded,
-    /// タイムアウト（timeout_secs を超過した）。値は打ち切り時点の目的関数値
+    /// Objective at termination.
     Timeout(f64),
-    /// 基底行列が特異（サイクリック基底など）。IPM フォールバック用
+    /// Triggers IPM fallback at the caller.
     SingularBasis,
 }
 
@@ -364,24 +288,12 @@ pub(crate) fn timeout_result_with_incumbent(
     }
 }
 
-// --- Standard form construction ---
-
-/// LPを改訂シンプレックス法用の標準形に変換する
-///
-/// 以下の7ステップで変換を行う:
-///
-/// 1. 変数変換（下限シフト・上限反転・無制限変数の正負分割）
-/// 2. 上限制約の追加
-/// 3. 調整済み右辺ベクトルの計算
-/// 4. 制約タイプの整理
-/// 5. 行の符号調整とスラック変数の設定
-/// 6. 初期基底と人工変数の決定
-/// 7. CSC疎行列の構築
+/// Convert an LP into standard form: variable shifts/splits, upper-bound rows,
+/// row sign normalization, slacks, initial basis with artificials.
 pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let n_orig = problem.num_vars;
     let m_orig = problem.num_constraints;
 
-    // 1. Variable transformations
     let mut orig_var_info: Vec<OrigVarInfo> = Vec::with_capacity(n_orig);
     let mut n_shifted = 0usize;
     let mut obj_offset = 0.0f64;
@@ -421,7 +333,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         }
     }
 
-    // 2. Upper bound constraints
+    // Upper bound rows.
     let mut ub_constraints: Vec<(usize, f64)> = Vec::new();
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
         let (lb, ub) = problem.bounds[j];
@@ -434,7 +346,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     let n_ub = ub_constraints.len();
     let m_ext = m_orig + n_ub;
 
-    // 3. Compute adjusted b
+    // b adjusted for variable shifts.
     let mut b = problem.b.clone();
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
         let offset = info.offset;
@@ -450,13 +362,12 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         b.push(ub_val);
     }
 
-    // 4. Constraint types
     let mut ctypes: Vec<ConstraintType> = problem.constraint_types.clone();
     for _ in 0..n_ub {
         ctypes.push(ConstraintType::Le);
     }
 
-    // 5. Row negation and slack setup
+    // Row sign normalization + slack column setup.
     let mut row_negated = vec![false; m_ext];
     let mut slack_col_idx: Vec<Option<usize>> = Vec::with_capacity(m_ext);
     let mut n_slack = 0usize;
@@ -470,9 +381,8 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
                     b[i] = -b[i];
                     slack_coeff[i] = -1.0;
                 } else {
-                    // b[i] が [-PIVOT_TOL, 0) の範囲にある場合: 変数下限シフト
-                    // (presolve 起因の丸め誤差など) による浮動小数点ノイズ。
-                    // slack の初期値が微小負になるのを防ぐため 0 にクランプ。
+                    // Clamp b ∈ [-PIVOT_TOL, 0) noise to 0 so the slack
+                    // doesn't start at a tiny negative value.
                     if b[i] < 0.0 { b[i] = 0.0; }
                     slack_coeff[i] = 1.0;
                 }
@@ -502,7 +412,7 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
     let n_total = n_shifted + n_slack;
 
-    // 6. Initial basis and artificial detection
+    // Initial basis: pick slack where possible; flag artificials otherwise.
     let mut initial_basis = vec![0usize; m_ext];
     let mut needs_artificial = vec![false; m_ext];
     let mut num_artificial = 0usize;
@@ -515,10 +425,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
                     // Le: slack >= 0 → no artificial needed
                     initial_basis[i] = col;
                 } else if b[i].abs() <= PIVOT_TOL {
-                    // Ge(b≈0): surplus at 0 is primal-feasible → no artificial needed.
-                    // Using an artificial here causes it to remain in the Phase II basis
-                    // (Phase I terminates immediately since obj=0), which allows the solver
-                    // to drift and violate this constraint. Use surplus directly.
+                    // Ge with b≈0: surplus at 0 is feasible, so skip the artificial
+                    // (which would otherwise sit in the Phase II basis and let the
+                    // constraint drift, since Phase I terminates with obj=0).
                     initial_basis[i] = col;
                 } else {
                     needs_artificial[i] = true;
@@ -533,12 +442,10 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         }
     }
 
-    // 7. Build CscMatrix from triplets
     let mut trip_rows = Vec::new();
     let mut trip_cols = Vec::new();
     let mut trip_vals = Vec::new();
 
-    // Original variable columns (transformed)
     for (j, info) in orig_var_info.iter().enumerate().take(n_orig) {
         if let Ok((a_rows, a_vals)) = problem.a.get_column(j) {
             for (k, &row) in a_rows.iter().enumerate() {
@@ -556,7 +463,6 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         }
     }
 
-    // Upper bound constraint rows
     for (ub_idx, &(new_var_idx, _)) in ub_constraints.iter().enumerate() {
         let row = m_orig + ub_idx;
         trip_rows.push(row);
@@ -564,7 +470,6 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
         trip_vals.push(1.0);
     }
 
-    // Slack/surplus columns
     for i in 0..m_ext {
         if let Some(s_idx) = slack_col_idx[i] {
             let col = n_shifted + s_idx;
@@ -576,7 +481,6 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
 
     let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_ext, n_total).unwrap();
 
-    // Cost vector for Phase II
     let mut c_ext = vec![0.0; n_total];
     c_ext[..n_shifted].copy_from_slice(&new_c[..n_shifted]);
 
@@ -597,19 +501,8 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
     }
 }
 
-// --- Two-phase simplex ---
-
-/// 双対変数・被縮小費用・スラックを元問題の情報から計算する
-///
-/// # 引数
-/// * `sf` - 標準形（行符号反転情報を含む）
-/// * `problem` - 元のLP問題（制約行列・右辺ベクトル・目的係数）
-/// * `y_std` - 標準形の双対変数ベクトル（長さ: sf.m）
-/// * `solution` - 元問題の解ベクトル（長さ: problem.num_vars）
-/// * `row_scale` - Ruizスケーリングの行スケール因子（スケーリングなしの場合は空スライス）
-///
-/// # 戻り値
-/// `(dual_solution, reduced_costs, slack)` のタプル
+/// Recover original-problem duals, reduced costs and slack from the
+/// standard-form dual `y_std` and primal `solution`.
 pub(crate) fn extract_dual_info(
     sf: &StandardForm,
     problem: &LpProblem,
@@ -620,7 +513,7 @@ pub(crate) fn extract_dual_info(
     let m_orig = problem.num_constraints;
     let n_orig = problem.num_vars;
 
-    // 双対変数: y_std を行符号反転 + Ruiz行スケールで調整して元制約に対応
+    // Undo row sign flip and Ruiz row scaling on y_std.
     let mut dual_solution = vec![0.0; m_orig];
     for i in 0..m_orig {
         let sign = if sf.row_negated[i] { -1.0 } else { 1.0 };
@@ -628,7 +521,6 @@ pub(crate) fn extract_dual_info(
         dual_solution[i] = sign * rs * y_std[i];
     }
 
-    // スラック: b - Ax（元問題の解から直接計算）
     let mut slack = problem.b.clone();
     for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -638,7 +530,6 @@ pub(crate) fn extract_dual_info(
         }
     }
 
-    // 被縮小費用: c_j - lambda^T A_j（元問題の変数に対して）
     let mut reduced_costs = problem.c.clone();
     for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -650,10 +541,8 @@ pub(crate) fn extract_dual_info(
         }
     }
 
-    // ★追加: 上限制約dual (mu_j) の減算
-    // build_standard_form と同じ順序で有限上下限変数を列挙し、
-    // 対応する y_std[m_orig + k] を reduced_costs から減算する。
-    // j は reduced_costs と problem.bounds の両方に使うため range loop が必要。
+    // Subtract the upper-bound dual mu_j. Iterate finite-bounded vars in the
+    // same order as build_standard_form so y_std[m_orig + k] aligns.
     let mut ub_idx = 0usize;
     #[allow(clippy::needless_range_loop)]
     for j in 0..n_orig {
@@ -902,13 +791,7 @@ mod tests {
         );
     }
 
-    /// Ge制約防御テスト
-    ///
-    /// 問題: min -x - y
-    ///   s.t. x + y >= 1 (ConstraintType::Ge)
-    ///        0 <= x <= 10
-    ///        0 <= y <= 10
-    /// 最適解: x=10, y=10, obj=-20
+    /// min -x - y s.t. x+y ≥ 1, 0 ≤ x,y ≤ 10 ⇒ x=y=10, obj=-20.
     #[test]
     fn test_simplex_ge_defensive() {
         use crate::problem::ConstraintType;
@@ -957,18 +840,9 @@ mod tests {
         );
     }
 
-    /// 基本LP（Le制約のみ）の双対解・スラック・被縮小費用を検証する
-    ///
-    /// 問題: min -x1 - 2*x2
-    ///   s.t. x1 + x2 <= 4
-    ///        x1 <= 3
-    ///        x2 <= 3
-    ///        x1, x2 >= 0
-    ///
-    /// 最適解: x1=1, x2=3, obj=-7
-    /// 双対変数: y=[-1, 0, -1] (Le制約のshadow price、最小化LPでは<=0)
-    /// スラック: s=[0, 2, 0]
-    /// 被縮小費用: rc=[0, 0] (基底変数なのでゼロ)
+    /// Le-only LP: verify dual / slack / reduced costs.
+    /// min -x1-2x2 s.t. x1+x2≤4, x1≤3, x2≤3, x≥0
+    ///  ⇒ x=(1,3), y=(-1,0,-1), slack=(0,2,0), rc=(0,0).
     #[test]
     fn test_dual_solution_basic_le_constraints() {
         let lp = make_lp(
@@ -1111,17 +985,9 @@ mod tests {
         assert!((x2 - 1.0).abs() < PIVOT_TOL, "Expected x2=1.0, got {}", x2);
     }
 
-    /// 等式制約付きLPの双対解・スラック・被縮小費用を検証する
-    ///
-    /// 問題: min x1 + 2*x2
-    ///   s.t. x1 + x2 = 6  (Eq)
-    ///        x2 <= 5       (Le)
-    ///        x1, x2 >= 0
-    ///
-    /// 最適解: x1=6, x2=0, obj=6
-    /// 双対変数: y=[1, 0] (Eq制約shadow price=1、x2<=5は非binding)
-    /// スラック: s=[0, 5] (等式制約は0、x2<=5は5余裕)
-    /// 被縮小費用: rc=[0, 1] (x1は基底でrc=0、x2は非基底でrc=1)
+    /// Eq + Le mix: verify dual / slack / reduced costs.
+    /// min x1+2x2 s.t. x1+x2=6, x2≤5, x≥0
+    ///  ⇒ x=(6,0), y=(1,0), slack=(0,5), rc=(0,1).
     #[test]
     fn test_dual_solution_equality_constraint() {
         use crate::problem::ConstraintType;
@@ -1266,10 +1132,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bug_simplex_001_finite_ub() {
-        // BUG-simplex-001修正確認: m=0, maximize x with lb=0, ub=3
-        // 修正前: Unbounded誤判定
-        // 修正後: x=3, obj=3 (maximize) または obj=-3 (minimize として内部処理)
+    fn test_finite_ub_zero_constraints() {
+        // m=0 with maximize x, lb=0, ub=3 ⇒ x=3.
         let a = CscMatrix::new(0, 1);
         let lp = LpProblem::new_general(
             vec![-1.0], // minimize -x (= maximize x)
@@ -1296,7 +1160,6 @@ mod tests {
 
     #[test]
     fn test_primal_simplex_timeout() {
-        // n=200, m=100 の密なLP、deadlineを過去に設定してTimeout確認
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();
@@ -1320,8 +1183,6 @@ mod tests {
 
     #[test]
     fn test_lp_timeout() {
-        // timeout_secs=0.0 (即時期限切れ) でLP実行 → SolveStatus::Timeout を確認
-        // HIGH-1: LP timeout 公開APIの動作検証
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();
@@ -1346,8 +1207,6 @@ mod tests {
 
     #[test]
     fn test_lp_cancel() {
-        // cancel_flag を true にセットしてLP実行 → SolveStatus::Timeout を確認
-        // HIGH-1: LP cancel_flag 動作検証
         use std::sync::Arc;
         let n = 200usize;
         let m = 100usize;
@@ -1372,25 +1231,14 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Timeout);
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // バグ再現・regression テスト
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// BUG-SX-002: LuBasis::new Err → 偽 Optimal（CRITICAL）
-    /// 特異初期基底（同一列インデックスを2回指定）で revised_simplex_core を呼ぶと
-    /// LuBasis::new が Err → 現状 SimplexOutcome::Optimal（偽）が返る。
-    /// 修正後は Timeout が返るべき。
+    /// Singular initial basis (duplicate column) must not yield Optimal.
     #[test]
-    fn test_sx002_lu_basis_err_should_return_timeout_not_optimal() {
-        // SPEC: BUG-SX-002
+    fn test_singular_initial_basis_not_optimal() {
         use crate::simplex::pricing::DantzigPricing;
-        // 2×2 行列: 列0 = [1; 0]、列1 = [0; 0]（全零列）
-        // basis = [0, 0] → B = [[1, 1]; [0, 0]] → rank 1 → 特異
-        // → LuBasis::new が Err を返す
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let mut x_b = vec![1.0, 0.0];
-        let mut basis = vec![0usize, 0]; // 同一列 → 特異基底
+        let mut basis = vec![0usize, 0];
         let mut pricing = DantzigPricing;
         let opts = SolverOptions::default();
         let b = vec![1.0, 0.0];
@@ -1398,21 +1246,12 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &b, &mut basis, 2, 2, 2, &mut pricing, &opts, &mut iters,
         );
-        // 修正後: Timeout が期待される。現状: Optimal（偽）が返るのでこの assert は FAIL。
-        assert!(
-            !matches!(outcome, SimplexOutcome::Optimal(..)),
-            "BUG-SX-002: LuBasis::new Err 時は Optimal を返してはならない（修正後は Timeout）"
-        );
+        assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
     }
 
-    /// BUG-SX-001: Simplex MaxIterations 生成（HIGH）
-    /// Simplex 外部 API（solve_with）から SolveStatus::MaxIterations が返ってはならない。
-    /// SimplexOutcome::MaxIterations廃止後: SimplexOutcome自体にMaxIterationsバリアントが存在しない。
-    /// refactor_failed = true かつ deadline 未設定の経路はTimeout（simplex/mod.rs, dual.rs）。
+    /// `solve_with` must never surface SolveStatus::MaxIterations.
     #[test]
-    fn test_sx001_solve_does_not_return_max_iterations() {
-        // SPEC: BUG-SX-001 — regression test（修正後PASS）
-        // SimplexOutcome::MaxIterations廃止により、SolveStatus::MaxIterationsへの経路が閉じた。
+    fn test_solve_does_not_return_max_iterations() {
         for method in [SimplexMethod::Primal, SimplexMethod::Dual] {
             let lp = make_lp(
                 vec![-1.0, -1.0],
@@ -1429,33 +1268,22 @@ mod tests {
                 ..SolverOptions::default()
             };
             let result = solve_with(&lp, &opts);
-            assert_ne!(
-                result.status,
-                SolveStatus::MaxIterations,
-                "BUG-SX-001: solve_with は SolveStatus::MaxIterations を返してはならない (method={:?})",
-                method
-            );
+            assert_ne!(result.status, SolveStatus::MaxIterations, "method={:?}", method);
         }
     }
 
-    /// BUG-SX-003: refactor_failed + deadline 未設定 → Timeout（MEDIUM）
-    /// SimplexOutcome::MaxIterations廃止後: refactor_failed経路はTimeout。
+    /// refactor_failed with no deadline must yield Optimal/Timeout/SingularBasis.
     #[test]
-    fn test_sx003_refactor_failed_no_deadline_returns_timeout() {
-        // SPEC: BUG-SX-003 — regression test（修正後PASS）
-        // SimplexOutcome::MaxIterations廃止により、refactor_failed時はTimeoutが返る。
+    fn test_refactor_failed_no_deadline_returns_timeout() {
         use crate::simplex::pricing::DantzigPricing;
-        // m=1, n=3 (cols: x1, x2, slack)
-        // A = [[1, 1, 1]] → min -x1-x2 s.t. x1+x2+s=4
-        // 初期基底 = [2] (スラック), x_b=[4]
         let a = CscMatrix::from_triplets(
             &[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 1.0], 1, 3,
         ).unwrap();
         let c = vec![-1.0, -1.0, 0.0];
         let mut x_b = vec![4.0];
-        let mut basis = vec![2usize]; // スラック → 非特異
+        let mut basis = vec![2usize];
         let mut pricing = DantzigPricing;
-        // deadline=None + max_etas=1 で早期 refactor を発動
+        // max_etas=1 forces an early refactor.
         let opts = SolverOptions {
             deadline: None,
             max_etas: 1,
@@ -1466,29 +1294,15 @@ mod tests {
         let outcome = revised_simplex_core(
             &a, &mut x_b, &c, &b, &mut basis, 1, 3, 3, &mut pricing, &opts, &mut iters,
         );
-        // MaxIterations廃止後 → Optimal、Timeout、または SingularBasis が返る
-        assert!(
-            matches!(outcome, SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_) | SimplexOutcome::SingularBasis),
-            "BUG-SX-003: refactor_failed 時は Optimal/Timeout/SingularBasis を返すべき（got: {:?}）",
-            match &outcome {
-                SimplexOutcome::Optimal(..) => "Optimal",
-                SimplexOutcome::Unbounded => "Unbounded",
-                SimplexOutcome::Timeout(_) => "Timeout",
-                SimplexOutcome::SingularBasis => "SingularBasis",
-            }
-        );
+        assert!(matches!(
+            outcome,
+            SimplexOutcome::Optimal(..) | SimplexOutcome::Timeout(_) | SimplexOutcome::SingularBasis
+        ));
     }
 
-    /// BUG-PRE-001: Simplex presolve が deadline を参照しない（LOW）
-    /// simplex/mod.rs L69: presolve が deadline なしで実行される。
-    /// timeout_secs=0 でも presolve は全実行されるバグ。
+    /// timeout_secs=0 must propagate to Timeout (small LP path).
     #[test]
-    fn test_pre001_presolve_does_not_respect_deadline() {
-        // SPEC: BUG-PRE-001 — regression test
-        // 小問題ではinner solverがTimeoutを返すためPASSする。
-        // 大規模問題ではpresolveが予算を超過するバグが残存。
-        // TODO(green phase): 大規模問題でpresolveが予算超過するケースのテストを追加し、
-        //   presolve→deadline伝搬の修正を検証すること。
+    fn test_presolve_respects_deadline_small() {
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();
@@ -1503,27 +1317,17 @@ mod tests {
         }
         let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
         let opts = SolverOptions {
-            timeout_secs: Some(0.0), // 即座にタイムアウト
+            timeout_secs: Some(0.0),
             presolve: true,
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
-        // 修正後: presolve が deadline を参照して Timeout を返す
-        // 現状: inner solver が Timeout を返すため結果として Timeout になる可能性あり
-        assert_eq!(
-            result.status,
-            SolveStatus::Timeout,
-            "BUG-PRE-001: timeout_secs=0 は Timeout を返すべき"
-        );
+        assert_eq!(result.status, SolveStatus::Timeout);
     }
 
-    /// BUG-PRE-001 大規模問題: presolve が deadline を超過しないことを確認
-    /// deadline=過去のInstant（即座にTimeout）で n=2000, m=1000 の問題を実行し、
-    /// presolve の deadline チェックで early return されることを検証する。
+    /// At n=2000/m=1000, presolve must early-return on past deadline (no budget overrun).
     #[test]
-    fn test_pre001_large_scale_presolve_respects_deadline() {
-        // SPEC: BUG-PRE-001 — green phase test（設計書 §6 Step E）
-        // presolveにdeadline=過去のInstantを渡し、Step 1前のチェックで即early returnされることを確認
+    fn test_large_scale_presolve_respects_deadline() {
         let n = 2000usize;
         let m = 1000usize;
         let mut rows = Vec::new();
@@ -1539,36 +1343,19 @@ mod tests {
         let lp = make_lp(vec![-1.0; n], &rows, &cols, &vals, m, n, vec![1.0; m]);
         let start = std::time::Instant::now();
         let opts = SolverOptions {
-            timeout_secs: Some(0.0), // 即座にタイムアウト → presolve deadline チェックで early return
+            timeout_secs: Some(0.0),
             presolve: true,
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
         let elapsed = start.elapsed();
-        assert_eq!(
-            result.status,
-            SolveStatus::Timeout,
-            "BUG-PRE-001 大規模: timeout_secs=0 は Timeout を返すべき"
-        );
-        // presolve の早期終了により、大規模問題でも短時間（< 0.5s）で完了するはず
-        assert!(
-            elapsed.as_secs_f64() < 0.5,
-            "BUG-PRE-001 大規模: presolve が deadline を超過した (elapsed={:.3}s)",
-            elapsed.as_secs_f64()
-        );
+        assert_eq!(result.status, SolveStatus::Timeout);
+        assert!(elapsed.as_secs_f64() < 0.5, "elapsed={:.3}s", elapsed.as_secs_f64());
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // TDD赤フェーズ: テスト不足 (△) 項目
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /// A2-T01: timeout_secs 設定時の停止保証（K=2.0 以内）
-    /// Given: timeout_secs=T, When: solve_with, Then: elapsed ≤ T×2.0
+    /// Wall-clock must stay within K · timeout_secs.
     #[test]
-    fn test_a2t01_timeout_elapsed_within_budget() {
-        // SPEC: A2-T01
-        // 大きな LP 問題を timeout_secs=0.01 で実行し、elapsed < 0.02s を確認
-        // deadline を過去に設定することで確実に Timeout を引き起こす
+    fn test_timeout_elapsed_within_budget() {
         let n = 200usize;
         let m = 100usize;
         let mut rows = Vec::new();
@@ -1591,24 +1378,13 @@ mod tests {
         let start = std::time::Instant::now();
         let result = solve_with(&lp, &opts);
         let elapsed = start.elapsed().as_secs_f64();
-        // Timeout または Optimal（タイムアウト内に解けた場合）
-        assert!(
-            result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
-            "A2-T01: Timeout または Optimal が返ること。got: {:?}", result.status
-        );
-        // elapsed は K×T 以内（K=3.0 でも超過した場合はバグ）
-        assert!(
-            elapsed < timeout_secs * 3.0 + 0.5, // 十分な余裕（CI環境考慮）
-            "A2-T01: elapsed({:.3}s) > timeout×3({:.3}s). deadline バグが残存している可能性",
-            elapsed, timeout_secs * 3.0
-        );
+        assert!(matches!(result.status, SolveStatus::Timeout | SolveStatus::Optimal));
+        assert!(elapsed < timeout_secs * 3.0 + 0.5, "elapsed={:.3}s", elapsed);
     }
 
-    /// A2-T03: timeout_secs=None でも有限ステップで収束（無期限実行保証）
-    /// 小問題を deadline なしで解き、Optimal が返ることを確認
+    /// timeout_secs=None must still converge on a tractable LP.
     #[test]
-    fn test_a2t03_no_deadline_converges_finite() {
-        // SPEC: A2-T03
+    fn test_no_deadline_converges_finite() {
         let lp = make_lp(
             vec![-1.0, -1.0],
             &[0, 0, 1, 2],
@@ -1619,28 +1395,17 @@ mod tests {
             vec![4.0, 3.0, 3.0],
         );
         let opts = SolverOptions {
-            timeout_secs: None, // 無期限
+            timeout_secs: None,
             presolve: false,
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "A2-T03: タイムアウトなしで収束すること");
+        assert_eq!(result.status, SolveStatus::Optimal);
     }
 
-    /// extract_dual_info が上限制約dual(mu_j)を正しく減算することを検証する
-    ///
-    /// 問題:
-    ///   min -2*x1 - x2
-    ///   s.t. x1 + x2 <= 4
-    ///        0 <= x1 <= 2,  0 <= x2 <= 3
-    ///
-    /// 最適解: x1=2 (bounds上限活性), x2=2 (制約活性, 上限非活性)
-    ///
-    /// KKT条件:
-    ///   rc[0] = c_0 - lambda_1*1 - mu_0 = 0  (x1 at upper bound)
-    ///   rc[1] = c_1 - lambda_1*1       = 0  (x2 strictly between bounds)
-    ///
-    /// mu_j欠落の場合: rc[0] = -2 - lambda_1 != 0 (補正漏れが相補性誤差を生む)
+    /// extract_dual_info must subtract the upper-bound dual mu_j from rc.
+    /// min -2x1-x2 s.t. x1+x2≤4, 0≤x1≤2, 0≤x2≤3  ⇒  x=(2,2).
+    /// Missing mu_j would give rc[0] = -2-lambda ≠ 0 (complementarity error).
     #[test]
     fn test_extract_dual_info_ub_dual() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -1677,25 +1442,10 @@ mod tests {
         assert!(upper_comp.abs() < 1e-8, "upper complementarity={} should be ≈ 0", upper_comp);
     }
 
-    /// BUG-NE-001: maros NumericalError 再現防止テスト
-    ///
-    /// Phase I で Eq制約の縮退人工変数が残り、Phase II で check_eq_feasibility が通ること。
-    /// 問題構造: 2行 b=0 の Eq制約 + 1行 b=1 の Eq制約 + Le制約
-    ///
-    /// 案C有効化(if true)でNumericalErrorが解消されることを確認する。
-    /// 修正前(if false)ではNumericalErrorが発生していた。
-    ///
-    /// 問題:
-    ///   min -x4
-    ///   x1 + x2 = 0  (Eq, b=0) → degenerate artificial in Phase I
-    ///   x1 + x3 = 0  (Eq, b=0) → degenerate artificial in Phase I
-    ///   x2 + x4 = 1  (Eq, b=1) → normal artificial
-    ///   x1 + x4 <= 2 (Le)
-    ///   x >= 0
-    ///
-    /// 最適解: x=[0,0,0,1], obj=-1
+    /// Degenerate Eq(b=0) artificials must not yield NumericalError.
+    /// min -x4 s.t. x1+x2=0, x1+x3=0, x2+x4=1, x1+x4≤2, x≥0  ⇒ x=(0,0,0,1).
     #[test]
-    fn test_bug_ne001_maros_degenerate_eq_zero_rhs() {
+    fn test_degenerate_eq_zero_rhs_artificials() {
         use crate::problem::ConstraintType;
         let a = CscMatrix::from_triplets(
             &[0, 1, 3, 0, 2, 1, 2, 3],
@@ -1724,41 +1474,15 @@ mod tests {
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
-        assert_ne!(
-            result.status,
-            SolveStatus::NumericalError,
-            "BUG-NE-001: 縮退Eq制約(b=0)でNumericalErrorが発生してはならない"
-        );
-        assert_eq!(
-            result.status,
-            SolveStatus::Optimal,
-            "BUG-NE-001: Optimal を返すべき、got {:?}",
-            result.status
-        );
-        assert!(
-            (result.objective - (-1.0)).abs() < 1e-6,
-            "BUG-NE-001: obj=-1.0 を期待、got {}",
-            result.objective
-        );
+        assert_ne!(result.status, SolveStatus::NumericalError);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.objective - (-1.0)).abs() < 1e-6);
     }
 
-    /// BUG-NE-002: wood1p NumericalError 再現防止テスト
-    ///
-    /// 243Eq+1G制約のうち242本がb=0という wood1p の縮退構造を小規模で再現する。
-    /// 問題構造: 3行 b=0 の Eq制約 + 1行 b=1 の Eq制約 + Le制約
-    ///
-    /// 問題:
-    ///   min -x5
-    ///   x1 + x2 = 0  (Eq, b=0)
-    ///   x2 + x3 = 0  (Eq, b=0)
-    ///   x3 + x4 = 0  (Eq, b=0)
-    ///   x1 + x5 = 1  (Eq, b=1)
-    ///   x1+x2+x3+x4+x5 <= 2 (Le)
-    ///   x >= 0
-    ///
-    /// 最適解: x=[0,0,0,0,1], obj=-1
+    /// Many b=0 Eq constraints (wood1p-style) must not yield NumericalError.
+    /// min -x5 s.t. x1+x2=0, x2+x3=0, x3+x4=0, x1+x5=1, sum≤2, x≥0  ⇒ x5=1.
     #[test]
-    fn test_bug_ne002_wood1p_multiple_zero_rhs_eq() {
+    fn test_multiple_zero_rhs_eq_artificials() {
         use crate::problem::ConstraintType;
         let a = CscMatrix::from_triplets(
             &[0, 3, 4, 0, 1, 4, 1, 2, 4, 2, 4, 3, 4],
@@ -1788,33 +1512,15 @@ mod tests {
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
-        assert_ne!(
-            result.status,
-            SolveStatus::NumericalError,
-            "BUG-NE-002: 多数b=0 Eq制約でNumericalErrorが発生してはならない"
-        );
-        assert_eq!(
-            result.status,
-            SolveStatus::Optimal,
-            "BUG-NE-002: Optimal を返すべき、got {:?}",
-            result.status
-        );
-        assert!(
-            (result.objective - (-1.0)).abs() < 1e-6,
-            "BUG-NE-002: obj=-1.0 を期待、got {}",
-            result.objective
-        );
+        assert_ne!(result.status, SolveStatus::NumericalError);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!((result.objective - (-1.0)).abs() < 1e-6);
     }
 
-    /// BUG-NE-001/002 案C有効化後: hs51 regression test（基底特異化リスク確認）
-    ///
-    /// 自由変数 + Le制約の feasibility LP で 案C が基底特異化を引き起こさないことを確認。
-    /// best_j != None フォールバックにより hs51 パターンが安全に処理されること。
-    ///
-    /// hs51: 5変数(全自由), 6Le制約, 実行可能解 x=[1,1,1,1,1] が存在する。
-    /// 案C有効化後も Optimal が返ること（基底特異化しないこと）を検証する。
+    /// hs51 (free vars + Le): degenerate-artificial pivot must not singularize
+    /// the basis (best_j=None fallback keeps it safe).
     #[test]
-    fn test_bug_ne_case_c_hs51_regression() {
+    fn test_hs51_free_var_no_singular_basis() {
         let a = CscMatrix::from_triplets(
             &[0, 1, 0, 1, 4, 5, 2, 3, 2, 3, 2, 3, 4, 5],
             &[0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4],
@@ -1839,24 +1545,13 @@ mod tests {
             ..SolverOptions::default()
         };
         let result = solve_with(&lp, &opts);
-        assert_ne!(
-            result.status,
-            SolveStatus::NumericalError,
-            "hs51 regression: 案C有効化後もNumericalErrorを返してはならない（基底特異化の兆候）"
-        );
-        assert_eq!(
-            result.status,
-            SolveStatus::Optimal,
-            "hs51 regression: 実行可能解が存在するのでOptimalを返すべき、got {:?}",
-            result.status
-        );
+        assert_ne!(result.status, SolveStatus::NumericalError);
+        assert_eq!(result.status, SolveStatus::Optimal);
     }
 }
 
-/// DualAdvanced warm-start integration tests
-///
-/// warm-start経路（dual_simplex_core_advanced）が実際に呼ばれることを確認する。
-/// SimplexMethod::DualAdvanced + warm_start で LP を解き、Optimal + cold-start一致を検証。
+/// DualAdvanced warm-start: ensures `dual_simplex_core_advanced` is reached
+/// and matches the cold-start optimum.
 #[cfg(test)]
 mod tests_dual_advanced {
     use super::*;
@@ -1875,15 +1570,7 @@ mod tests_dual_advanced {
         LpProblem::new(c, a, b).unwrap()
     }
 
-    /// DualAdvanced warm-start テスト1: RHS変更後の再最適化
-    ///
-    /// LP1 を解いて warm_start_basis を取得し、RHS のみ変更した LP2 を
-    /// SimplexMethod::DualAdvanced + warm_start で再最適化する。
-    /// warm-start 経路（dual_simplex_core_advanced）が正しく動作し、
-    /// cold-start と同じ最適値を返すことを確認。
-    ///
-    /// LP1: min -x1 - 2*x2  s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3  → obj = -7
-    /// LP2: 同じ構造、b = [5, 3, 3]                             → obj = -8
+    /// LP1 (obj=-7) → reuse basis on LP2 with RHS=[5,3,3] (obj=-8).
     #[test]
     fn test_dual_advanced_warm_start_rhs_change() {
         let lp1 = make_lp(
@@ -1940,14 +1627,7 @@ mod tests_dual_advanced {
         );
     }
 
-    /// DualAdvanced warm-start テスト2: 別LP（b=[6,4,4]）での再最適化
-    ///
-    /// LP1 を解いて warm_start_basis を取得し、RHS を拡大した LP2 を
-    /// SimplexMethod::DualAdvanced + warm_start で再最適化する。
-    /// cold-start と同じ最適値を返すことを確認。
-    ///
-    /// LP1: min -x1 - x2  s.t. x1+x2 ≤ 4, x1 ≤ 3, x2 ≤ 3  → obj = -4
-    /// LP2: 同じ構造、b = [6, 4, 4]                          → obj = -8
+    /// LP1 (obj=-4) → reuse basis on LP2 with RHS=[6,4,4] (obj=-8).
     #[test]
     fn test_dual_advanced_warm_start_larger_rhs() {
         let lp1 = make_lp(
