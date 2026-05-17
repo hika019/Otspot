@@ -258,6 +258,62 @@ cargo test proptest
 - ランダム化ファズテストのための**3種類のproptestスイート**
 - 基本的なAPIカバレッジのための**スモークテスト**
 
+## 開発環境 (Docker)
+
+`Dockerfile.dev` は他環境で test / bench を再現するための開発用 container 定義 (Rust 1.83
++ python3 (numpy/scipy/cvxpy/clarabel) + cargo-nextest + Netlib emps decoder pre-compile)。
+
+```bash
+# 1. Build (初回 ~5-10 分)
+docker build -f Dockerfile.dev -t solver-dev .
+
+# 2. Interactive 開発 (source を host と共有、保存即反映)
+docker run -it --rm -v "$PWD":/workspace -w /workspace solver-dev bash
+
+# 3. One-shot test
+docker run --rm -v "$PWD":/workspace -w /workspace solver-dev \
+  cargo nextest run --release
+```
+
+### ベンチマークデータの取得
+
+`data/` 配下は `.gitignore` 対象なので、clone 後に bench data を自前生成する必要がある:
+
+```bash
+# 全部 (LP 234 + QP 出来る範囲 = ~570 問、~10-20 分)
+bash scripts/download_all_bench_data.sh
+
+# LP のみ (Netlib 取得 + 合成、決定論的)
+bash scripts/download_all_bench_data.sh --lp
+
+# 取得状況確認
+bash scripts/download_all_bench_data.sh --check
+```
+
+| dir | 件数 | source | 自動化 |
+|---|---|---|---|
+| lp_problems | 109 | Netlib | ✓ |
+| lp_problems_infeas | 29 | Netlib | ✓ |
+| lp_problems_extra | 4 | Mittelmann | ✓ |
+| lp_problems_hard | 53 | various | ✓ |
+| lp_problems_canary | 27 | symlink | ✓ |
+| lp_problems_unbounded | 12 | 合成 (固定 seed) | ✓ |
+| osqp_bench | 62 | external + gen | ✓ |
+| osqp_bench_extra | 238 | 合成 (固定 seed) | ✓ |
+| osqp_bench_illscaled | 126 | 合成 (固定 seed) | ✓ |
+| osqp_bench_xl | 2 | 合成 (固定 seed) | ✓ |
+| mpc_qp | 64 | external | ✓ |
+| qp_dense_a | 8 | 合成 (固定 seed) | ✓ |
+| qp_infeasible | 12 | 合成 (固定 seed) | ✓ |
+| qp_unbounded | 9 | 合成 (固定 seed) | ✓ |
+| qplib_nonconvex | 45 | 合成 (固定 seed) | ✓ |
+| **maros_meszaros** | 139 | YimingYAN/QP-Test-Problems | **手動** |
+| **qplib** | 41 | QPLIB.zib.de | **手動** |
+| **qplib_unsupported** | 11 | QPLIB.zib.de | **手動** |
+
+合成系は固定 seed なので任意環境で同一出力を再現可。Maros / QPLIB (計 191 問) は
+download script 未整備、手動配置が必要 (URL ヒントは `download_all_bench_data.sh` 内に記載)。
+
 ## プロジェクト構造
 
 ```
