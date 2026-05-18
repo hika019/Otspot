@@ -46,10 +46,7 @@ fn max_violation_lp(x: &[f64], prob: &LpProblem) -> f64 {
 #[test]
 fn diag_capri_presolve_vs_no_presolve() {
     let mps_path = Path::new("tests/netlib/capri.mps");
-    if !mps_path.exists() {
-        eprintln!("[SKIP] capri.mps not found");
-        return;
-    }
+    assert!(mps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", mps_path.display());
     let prob = parse_mps_file(mps_path).expect("parse capri.mps failed");
     println!("capri: n={}, m={}", prob.num_vars, prob.num_constraints);
 
@@ -111,10 +108,7 @@ fn diag_capri_presolve_vs_no_presolve() {
 #[test]
 fn diag_forplan_presolve_vs_no_presolve() {
     let qps_path = Path::new("data/lp_problems/forplan.QPS");
-    if !qps_path.exists() {
-        eprintln!("[SKIP] forplan.QPS not found");
-        return;
-    }
+    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob_raw = parse_qps(qps_path).expect("parse forplan.QPS failed");
 
     // QpProblem から LpProblem を構築
@@ -184,10 +178,7 @@ fn diag_forplan_presolve_vs_no_presolve() {
 #[test]
 fn diag_scsd8_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/scsd8.QPS");
-    if !qps_path.exists() {
-        eprintln!("[SKIP] scsd8.QPS not found");
-        return;
-    }
+    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = parse_qps(qps_path).expect("parse scsd8.QPS failed");
     println!("scsd8: n={}, m={}", prob.a.ncols, prob.b.len());
 
@@ -248,10 +239,7 @@ fn diag_scsd8_simplex_behavior() {
 #[test]
 fn diag_wood1p_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/wood1p.QPS");
-    if !qps_path.exists() {
-        eprintln!("[SKIP] wood1p.QPS not found");
-        return;
-    }
+    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = parse_qps(qps_path).expect("parse wood1p.QPS failed");
     println!("wood1p: n={}, m={}", prob.a.ncols, prob.b.len());
 
@@ -305,10 +293,7 @@ fn diag_wood1p_simplex_behavior() {
 #[test]
 fn diag_boeing1_current_state() {
     let mps_path = Path::new("tests/netlib/boeing1.mps");
-    if !mps_path.exists() {
-        eprintln!("[SKIP] boeing1.mps not found");
-        return;
-    }
+    assert!(mps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", mps_path.display());
     let prob = parse_mps_file(mps_path).expect("parse boeing1.mps failed");
     println!("boeing1: n={}, m={}", prob.num_vars, prob.num_constraints);
 
@@ -352,10 +337,7 @@ fn diag_bland_rule_coverage() {
     // デフォルト: Simplex が SingularBasis で失敗 → solve_as_lp が IPM fallback
     // Primal only: SingularBasis を返すはず
     let qps_path = Path::new("data/lp_problems/scsd8.QPS");
-    if !qps_path.exists() {
-        eprintln!("[SKIP] scsd8.QPS not found");
-        return;
-    }
+    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = parse_qps(qps_path).expect("parse scsd8.QPS failed");
 
     // Simplex のみ (IPM fallback を起こさないよう presolve=false, simplex only)
@@ -385,7 +367,7 @@ fn diag_bland_rule_coverage() {
 #[test]
 fn diag_modszk1_primal_baseline() {
     let qps_path = std::path::Path::new("data/lp_problems/modszk1.QPS");
-    if !qps_path.exists() { return; }
+    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = solver::io::qps::parse_qps(qps_path).expect("parse modszk1 failed");
     let known_obj = 3.21049143e2_f64;
     let mut opts = SolverOptions::default();

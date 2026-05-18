@@ -59,10 +59,7 @@ fn maros_path(name: &str) -> std::path::PathBuf {
 #[test]
 fn qpcboei2_pfeas_componentwise_at_loose_eps_1e4() {
     let path = maros_path("QPCBOEI2.QPS");
-    if !path.exists() {
-        eprintln!("SKIP: {} not present", path.display());
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-4);
     let pfn = pfeas_normalized(&prob, &result.solution);
@@ -81,10 +78,7 @@ fn qpcboei2_pfeas_componentwise_at_loose_eps_1e4() {
 #[test]
 fn qpcboei2_pfeas_componentwise_at_default_eps_1e6() {
     let path = maros_path("QPCBOEI2.QPS");
-    if !path.exists() {
-        eprintln!("SKIP: {} not present", path.display());
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-6);
     let pfn = pfeas_normalized(&prob, &result.solution);
@@ -105,10 +99,7 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
     // 1e-8 は f64 限界に近いため Optimal/Suboptimal どちらでも許容するが、
     // pfn 自体が user_eps を満たすことは bench で要求する PASS の条件。
     let path = maros_path("QPCBOEI2.QPS");
-    if !path.exists() {
-        eprintln!("SKIP: {} not present", path.display());
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-8);
     let pfn = pfeas_normalized(&prob, &result.solution);
@@ -127,10 +118,7 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
 #[test]
 fn qpcboei2_pfeas_monotonicity_across_eps() {
     let path = maros_path("QPCBOEI2.QPS");
-    if !path.exists() {
-        eprintln!("SKIP: {} not present", path.display());
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let mut prev_pfn = f64::INFINITY;
     for &user_eps in &[1e-4_f64, 1e-6, 1e-8] {

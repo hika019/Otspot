@@ -65,10 +65,7 @@ enum Verdict {
 #[ignore = "heavy (~5-6 min: 90 LP screen、要 data/lp_problems/)、cargo test --release で個別実行"]
 fn lp_coverage_screen_all() {
     let dir = Path::new(PROBLEMS_DIR);
-    if !dir.exists() {
-        eprintln!("SKIP: {} not found", PROBLEMS_DIR);
-        return;
-    }
+    assert!(dir.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", PROBLEMS_DIR);
     let baseline = load_baseline();
 
     let mut entries: Vec<_> = fs::read_dir(dir)

@@ -58,9 +58,7 @@ fn check_postsolve_dual_feasibility(
     timeout_s: f64,
 ) -> Result<String, String> {
     let path = Path::new(qp_path);
-    if !path.exists() {
-        return Ok(format!("[SKIP] {} not found", qp_path));
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qp_path);
     let prob = parse_qps(path).map_err(|e| format!("parse failed: {:?}", e))?;
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -97,7 +95,7 @@ fn perold_postsolve_dual_feasibility() {
 #[ignore = "diag (60s)"]
 fn greenbea_presolve_off_dfeas_check() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse");
     let mut opts = SolverOptions::default();
     opts.presolve = false;
@@ -112,26 +110,25 @@ fn greenbea_presolve_off_dfeas_check() {
 #[test]
 fn perold_presolve_off_baseline() {
     let path = Path::new("data/lp_problems/perold.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] perold.QPS");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse perold");
     let mut opts = SolverOptions::default();
     opts.presolve = false;
     opts.timeout_secs = Some(180.0);
     let r = solve_qp_with(&prob, &opts);
-    let (df_abs, df_rel) = dfeas_abs_rel(&prob, &r.reduced_costs);
+    // rc = c − A^T y 規約 (extract_dual_info)。at_ub 変数は rc = −μ_ub ≤ 0 を取り得るため、
+    // strict `max(0, −rc)` 形式 (`dfeas_abs_rel`) は at_ub を誤検出する。bound-aware を主判定に。
+    let df_rel_bound = dfeas_rel_bound_aware(&prob, &r.solution, &r.reduced_costs);
     eprintln!(
-        "perold[presolve=off]: status={:?} obj={:.4e} df_abs={:.2e} df_rel={:.2e}",
-        r.status, r.objective, df_abs, df_rel
+        "perold[presolve=off]: status={:?} obj={:.4e} df_rel_bound={:.2e}",
+        r.status, r.objective, df_rel_bound
     );
     // SKIP allowed for status: 別経路で NumericalError でも本テストの目的ではない。
     if matches!(r.status, SolveStatus::Optimal) {
         assert!(
-            df_rel < 1e-6,
-            "perold[presolve=off]: df_rel={:.3e} → simplex 単体に別バグの疑い",
-            df_rel
+            df_rel_bound < 1e-6,
+            "perold[presolve=off]: df_rel_bound={:.3e} → simplex 単体に別バグの疑い",
+            df_rel_bound
         );
     } else {
         eprintln!("perold[presolve=off]: status={:?}", r.status);
@@ -177,7 +174,7 @@ netlib_postsolve_test!(stocfor1_postsolve, "data/lp_problems/stocfor1.QPS", 1e-6
 #[ignore = "diag (5s)、default 除外"]
 fn perold_diagnostic_dump_worst_violations() {
     let path = Path::new("data/lp_problems/perold.QPS");
-    if !path.exists() { eprintln!("[SKIP] perold.QPS"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse perold");
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -233,7 +230,7 @@ fn perold_diagnostic_dump_worst_violations() {
 #[ignore = "diag、default 除外"]
 fn perold_col229_deep_diag() {
     let path = Path::new("data/lp_problems/perold.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse perold");
     let mut opts_on = SolverOptions::default();
     opts_on.presolve = true;
@@ -311,7 +308,7 @@ fn pds_10_postsolve_dual_feasibility() {
 #[ignore = "diag (60s)、default 除外"]
 fn greenbea_diagnostic_dump_worst_violations() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
-    if !path.exists() { eprintln!("[SKIP] greenbea.QPS"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse greenbea");
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -365,7 +362,7 @@ fn greenbea_diagnostic_dump_worst_violations() {
 #[ignore = "diag (60s)、default 除外"]
 fn greenbea_col2741_deep_diag() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse greenbea");
     let mut opts_on = SolverOptions::default();
     opts_on.presolve = true;
@@ -411,7 +408,7 @@ fn greenbea_col2741_deep_diag() {
 #[ignore = "diag (60s)、default 除外"]
 fn greenbea_row1270_scan() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse greenbea");
     let n = prob.c.len();
     let row = 1270usize;

@@ -12,10 +12,7 @@ use std::path::Path;
 #[test]
 fn afiro_iterations_positive() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] afiro.QPS not found");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse afiro");
     let mut opts = SolverOptions::default();
     opts.presolve = false; // postsolve 経由を避け、純粋に simplex 経路のみ計測
@@ -42,10 +39,7 @@ fn afiro_iterations_positive() {
 #[test]
 fn afiro_iterations_positive_with_presolve() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] afiro.QPS not found");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse afiro");
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -72,10 +66,7 @@ fn afiro_iterations_positive_with_presolve() {
 #[test]
 fn perold_iterations_positive() {
     let path = Path::new("data/lp_problems/perold.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] perold.QPS not found");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let prob = parse_qps(path).expect("parse perold");
     let mut opts = SolverOptions::default();
     opts.presolve = true;

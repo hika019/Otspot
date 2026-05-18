@@ -6,7 +6,7 @@ use solver::qp::solve_qp_with;
 
 fn solve_with_trace(name: &str) {
     let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-    if !path.exists() { eprintln!("[{}] missing", name); return; }
+    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
     let prob = parse_qps(&path).expect("parse");
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
