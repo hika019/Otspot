@@ -134,7 +134,7 @@ fn all_bounds_finite(node_bounds: &[(f64, f64)]) -> bool {
 ///
 /// convex relaxation は cold solve で実行 (= warm 継承なし、`opts.warm_start_qp = None`)。
 /// 元 non-convex の warm は凸化後の最適解と一致せず再固着 risk があるため。
-pub(crate) fn alpha_bb_lower_bound(
+pub fn alpha_bb_lower_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
     alpha: f64,

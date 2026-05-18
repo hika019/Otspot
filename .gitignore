@@ -16,3 +16,4 @@ scripts/cmd843/__pycache__/
 Highs.log
 
 /.claude
+/bench_results

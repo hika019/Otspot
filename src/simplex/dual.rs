@@ -9,6 +9,7 @@ use crate::presolve::RuizScaler;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
+use super::dual_common::{compute_dual_vars, compute_reduced_costs};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use std::sync::atomic::Ordering;
 
@@ -412,47 +413,6 @@ pub(super) fn dual_simplex_core(
 #[inline]
 fn basis_mgr_needs_refactor_approx(iter: usize) -> bool {
     iter % 50 == 49
-}
-
-/// r_j = c_j - y^T a_j, y = B^{-T} c_B
-fn compute_reduced_costs(
-    a: &CscMatrix,
-    c: &[f64],
-    basis_mgr: &mut LuBasis,
-    is_basic: &[bool],
-    n_price: usize,
-    m: usize,
-    basis: &[usize],
-) -> Vec<f64> {
-    // y = B^{-T} c_B; c_B is dense so skip sparse conversion.
-    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    basis_mgr.btran_dense(&mut y);
-
-    let mut reduced_costs = vec![0.0f64; n_price];
-    for j in 0..n_price {
-        if is_basic[j] {
-            continue;
-        }
-        let (rows, vals) = a.get_column(j).unwrap();
-        let mut ya = 0.0;
-        for (k, &row) in rows.iter().enumerate() {
-            ya += y[row] * vals[k];
-        }
-        reduced_costs[j] = c[j] - ya;
-    }
-    reduced_costs
-}
-
-/// y = B^{-T} c_B
-fn compute_dual_vars(
-    c: &[f64],
-    basis_mgr: &mut LuBasis,
-    basis: &[usize],
-    m: usize,
-) -> Vec<f64> {
-    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    basis_mgr.btran_dense(&mut y);
-    y
 }
 
 /// θ = min_{j: trow[j] > ε} r_j / trow[j].  None ⇒ dual unbounded.
