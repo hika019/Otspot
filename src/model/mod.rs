@@ -27,7 +27,6 @@ use variable::VariableDefinition;
 
 use crate::options::Tolerance;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-use crate::simplex;
 use crate::sparse::CscMatrix;
 use std::fmt;
 use std::ops::Index;
@@ -279,7 +278,7 @@ impl Model {
         if let Some(n) = self.threads {
             lp_opts.threads = n;
         }
-        let solver_result = simplex::solve_with(&problem, &lp_opts);
+        let solver_result = crate::lp::solve_lp_with(&problem, &lp_opts);
 
         // SolverResult の dual/rc/slack は extract_dual_info によって
         // 元の制約空間 (Eq/Ge/Le) と変数空間 (bounds 込み) で復元済み。

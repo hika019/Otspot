@@ -55,6 +55,7 @@ pub use options::{
     WarmStartBasis,
 };
 pub mod qp;
+pub mod lp;
 // linalg は ldl / kkt_solver 等にクロスモジュールテストからのみ参照される
 // public helper を含むため、項目単位の dead_code 警告を抑制する。
 #[allow(dead_code)]
@@ -68,6 +69,7 @@ pub use sparse::CscMatrix;
 pub use problem::SolveStatus;
 pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
+pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 pub use presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
