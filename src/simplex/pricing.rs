@@ -115,17 +115,18 @@ impl PricingStrategy for SteepestEdgePricing {
 ///
 /// `basis` is the current basic-column index per row. Standard `MostInfeasibleLeaving`
 /// ignores it; Big-M Phase I (`dual_advanced/phase1.rs`) uses it to detect artificials
-/// still in the basis.
+/// still in the basis. Stateful strategies (DSE) use `&mut self` + hooks to maintain
+/// per-iter weights; stateless strategies leave the hooks as no-ops.
 pub(crate) trait DualLeavingStrategy {
     /// Row index of a basic variable to leave (None = primal feasible).
-    fn select_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
+    fn select_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
 
     /// Anti-cycling fallback used when `dual_simplex_core_advanced` enters
     /// bland_mode. Default = pure Bland (smallest `basis[i]` index among rows
     /// with `x_B[i] < -primal_tol`). Strategies with auxiliary objectives
     /// (e.g. artificial removal in Big-M Phase I) must override so bland_mode
     /// does not mask their secondary priority (task #43).
-    fn bland_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
         let mut best_row: Option<usize> = None;
         let mut best_var = usize::MAX;
         for (i, &v) in x_b.iter().enumerate() {
@@ -144,16 +145,45 @@ pub(crate) trait DualLeavingStrategy {
     /// to zero must include those in the metric; otherwise Big-M Phase I
     /// entry condition `x_B = b ≥ 0` makes `best = 0` and threshold = 0 →
     /// every iter judged no-progress → bland_mode 誤起動 (task #43).
-    fn progress_metric(&self, x_b: &[f64], _basis: &[usize]) -> f64 {
+    fn progress_metric(&mut self, x_b: &[f64], _basis: &[usize]) -> f64 {
         x_b.iter().map(|&v| (-v).max(0.0)).sum()
     }
+
+    /// Whether the strategy needs σ = B^{-1} ρ_p passed to `after_pivot`.
+    /// Stateless strategies return false → core skips the extra FTRAN.
+    /// DSE returns true.
+    fn needs_sigma(&self) -> bool {
+        false
+    }
+
+    /// Post-pivot hook. Stateful weight updates (DSE) wire this; stateless
+    /// strategies leave the default no-op. `sigma` is only valid when
+    /// `needs_sigma()` returned true.
+    fn after_pivot(
+        &mut self,
+        _leaving_row: usize,
+        _alpha: &[f64],
+        _sigma: &[f64],
+        _pivot: f64,
+    ) {
+    }
+
+    /// Called after the basis is refactored. Stateful weights that may drift
+    /// (DSE) reset here to identity; stateless strategies leave the no-op.
+    fn after_refactor(&mut self, _m: usize) {}
+
+    /// Initialise γ_i = ||(B^{-1})_{i,:}||² for arbitrary starting basis.
+    /// `gamma_truth[i]` is supplied by the core loop after m BTRANs. DSE
+    /// overrides; stateless strategies ignore. The default no-op means the
+    /// core loop may skip the (O(m²)) BTRAN sweep for stateless callers.
+    fn set_initial_gamma(&mut self, _gamma_truth: &[f64]) {}
 }
 
 /// Most Infeasible Rule: 最も負のx_B[i]を選択
 pub(crate) struct MostInfeasibleLeaving;
 
 impl DualLeavingStrategy for MostInfeasibleLeaving {
-    fn select_leaving(&self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
+    fn select_leaving(&mut self, x_b: &[f64], primal_tol: f64, _basis: &[usize]) -> Option<usize> {
         let mut best_row = None;
         let mut max_violation = primal_tol;
 
