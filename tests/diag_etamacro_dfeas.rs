@@ -76,13 +76,10 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
 
 #[test]
 fn diag_etamacro_dfeas_regression() {
-    let path = match locate_etamacro() {
-        Some(p) => p,
-        None => {
-            eprintln!("[SKIP] etamacro.QPS not found in canary/standard dirs");
-            return;
-        }
-    };
+    let path = locate_etamacro().expect(
+        "etamacro.QPS not found in canary/standard dirs — bench data 未配置。\
+         scripts/download_all_bench_data.sh を実行",
+    );
     let qp = parse_qps(path).expect("parse etamacro");
     let lp = make_lp(&qp);
 
