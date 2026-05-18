@@ -8,6 +8,11 @@ use solver::qp::{solve_qp_with, QpProblem, QpWarmStart};
 use solver::sparse::CscMatrix;
 use solver::{SolveStatus, SolverOptions};
 
+/// warm の最低有効効果 10% (= cold の 0.9 倍以下 iter)。これより緩いと no-op
+/// fallback が検出できず sentinel として機能しない。
+const WARM_ITER_REDUCTION_MARGIN: f64 = 0.1;
+const WARM_ITER_RATIO_UPPER: f64 = 1.0 - WARM_ITER_REDUCTION_MARGIN;
+
 /// 決定論的 diagonal PSD Q + random sparse 不等式 + box bound の合成 QP。
 /// diag Q は確実に PSD、IPM が安定に Optimal を返す。
 fn build_medium_convex_qp(n: usize, m: usize, density: f64) -> QpProblem {
@@ -247,10 +252,8 @@ fn warm_start_propagates_through_q_diag_scaling() {
     // bounds に強制 clamp され (例: orig [-2,2]、q=1e-4 列の scaled bound [-0.02, 0.02]
     // で warm.x=0.5 → 0.02 に押し込み) IPM 入力が壊れ、interior 復帰のため cold init 以上の
     // iter を要する → iter_ratio ≈ 1.0 以上で本 assert が FAIL する。
-    // 0.9 は WARM_ITER_REDUCTION_MARGIN=0.1 (warm の最低有効効果 10%)。これより緩いと
-    // no-op fallback が検出できず sentinel として機能しない。
-    const WARM_ITER_REDUCTION_MARGIN: f64 = 0.1;
-    const WARM_ITER_RATIO_UPPER: f64 = 1.0 - WARM_ITER_REDUCTION_MARGIN;
+    // 0.9 = 1 - WARM_ITER_REDUCTION_MARGIN (module top で共有定義)。
+    // 実測 (n=600 diag Q q_range=1e8): cold=16 warm=5 ratio=0.312、no-op 倒すと ratio≈1.94 で FAIL。
     assert!(
         iter_ratio < WARM_ITER_RATIO_UPPER,
         "Q-diag warm not reducing iter as expected: ratio={:.3} ≥ {:.3} (warm={} cold={})",
@@ -325,9 +328,13 @@ fn warm_start_propagates_through_presolve_reduction() {
         warm.iterations, cold.iterations
     );
 
+    // Ruiz scaler 適用 (B-2 fix) が機能していれば warm path は cold より大幅短縮。
+    // translate 内 Ruiz block を no-op に倒すと warm.x が orig 空間のまま scaled reduced
+    // 問題に入り iter 削減効果消失 → iter_ratio ≈ 1.0 以上で本 assert が FAIL する。
+    // 実測 (n=4 + FixedVar): cold=8 warm=2 ratio=0.250。
     assert!(
-        iter_ratio < 5.0,
-        "presolve warm iter blowup: warm={} cold={} ratio={:.2}",
-        warm.iterations, cold.iterations, iter_ratio
+        iter_ratio < WARM_ITER_RATIO_UPPER,
+        "presolve warm not reducing iter as expected: ratio={:.3} ≥ {:.3} (warm={} cold={})",
+        iter_ratio, WARM_ITER_RATIO_UPPER, warm.iterations, cold.iterations
     );
 }
