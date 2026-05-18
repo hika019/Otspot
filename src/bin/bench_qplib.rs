@@ -226,14 +226,8 @@ fn main() {
         };
 
         // SuboptimalSolution / LocallyOptimal で有効解 + 有限 obj を持つ result を Optimal に
-        // 格上げし baseline obj 照合に流す。qps_benchmark.rs と整合させた挙動。
-        // Timeout は意図的に対象外 (task #46/#52): 半 deadline incumbent を silent 格上げすると
-        // PFEAS_FAIL / OBJ_MISMATCH に化けて真因 (deadline 切れ) が観測者に隠れる。
-        // 動機: bench_qplib は旧来 SuboptimalSolution を一律 SUBOPTIMAL として表示し obj
-        //   照合スキップ → 「解は合っているが SUBOPTIMAL」を抱え込んでいた
-        //   (QPLIB_10034: obj=-6.601e-2 vs baseline=-6.601e-2 で誤差 0.008% でも SUBOPTIMAL)。
-        // LocallyOptimal: 不定 Q の KKT 点。凸ベンチでは原問題 Q が実は PSD なので Optimal
-        //   と同等に扱って品質確認する。
+        // 格上げし baseline obj 照合に流す。Timeout / MaxIterations / NumericalError /
+        // NonConvex は格上げ対象外 (収束未達 status を honest に報告する)。
         let result = solver::bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,

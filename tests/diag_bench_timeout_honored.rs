@@ -1,12 +1,7 @@
-//! bench harness の Timeout→Optimal silent wrap 撤廃 regression sentinel (task #52).
+//! bench harness の Timeout→Optimal silent wrap 撤廃 regression sentinel。
 //!
-//! 真因 (task #46 eps-stuck-investigator 観測):
-//!   qps_benchmark / bench_qplib が `Timeout + 解あり` を SolveStatus::Optimal に
-//!   silent 格上げ → Primal 半 deadline の低品質 incumbent が品質判定経路 (pfeas/dfeas)
-//!   へ流れ込み PFEAS_FAIL として表示 → 真因 (Timeout) が観測者に隠れる。
-//!
-//! 期待挙動: Timeout は格上げ対象外、Timeout のまま bench に報告する。
-//! SuboptimalSolution / LocallyOptimal は据置 (本来 KKT 近傍の正規 status)。
+//! 期待挙動: 収束未達 status (Timeout / MaxIterations / NumericalError / NonConvex) は
+//! 格上げ対象外。SuboptimalSolution / LocallyOptimal のみ Optimal 化 (KKT 近傍正規 status)。
 
 use solver::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
 use solver::problem::{SolveStatus, SolverResult};
@@ -15,7 +10,7 @@ fn make(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult
     SolverResult { status, solution, objective, ..Default::default() }
 }
 
-/// regression sentinel: Timeout + 有効解 でも Optimal 格上げしない (task #52 真因対処)。
+/// regression sentinel: Timeout + 有効解 でも Optimal 格上げしない。
 #[test]
 fn timeout_with_solution_stays_timeout_qps_benchmark() {
     let r_in = make(SolveStatus::Timeout, vec![0.1, 0.2, 0.3], 1.0);
@@ -102,10 +97,22 @@ fn unbounded_unchanged() {
 }
 
 #[test]
-fn max_iterations_not_promoted() {
-    // MaxIterations 系の status (もし存在しても) は格上げ対象外であることを念のため確認。
-    // Timeout と同様、収束未達 status は honest に報告すべき。
+fn numerical_error_not_promoted() {
     let r_in = make(SolveStatus::NumericalError, vec![1.0; 3], 1.0);
     let r_out = apply_bench_status_promotion(r_in, 3, BenchPromotionPolicy::QpsBenchmark);
     assert_eq!(r_out.status, SolveStatus::NumericalError);
+}
+
+#[test]
+fn max_iterations_not_promoted() {
+    let r_in = make(SolveStatus::MaxIterations, vec![1.0; 3], 1.0);
+    let r_out = apply_bench_status_promotion(r_in, 3, BenchPromotionPolicy::QpsBenchmark);
+    assert_eq!(r_out.status, SolveStatus::MaxIterations);
+}
+
+#[test]
+fn nonconvex_not_promoted() {
+    let r_in = make(SolveStatus::NonConvex("indefinite Q".into()), vec![1.0; 3], 1.0);
+    let r_out = apply_bench_status_promotion(r_in, 3, BenchPromotionPolicy::BenchQplib);
+    assert!(matches!(r_out.status, SolveStatus::NonConvex(_)));
 }

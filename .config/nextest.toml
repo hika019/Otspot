@@ -1,19 +1,11 @@
 [profile.default]
-# 各テストを独立プロセスで並列実行
-# NOTE: doctestはnextest非対応。cargo test --doc で別途実行すること
+# doctest は nextest 非対応 → `cargo test --doc` で別途実行。
 test-threads = "num-cpus"
-# terminate-after = 3 → 180s 上限 (3 min CLAUDE.md cap)。
-# task #48 で simplex half-deadline 撤廃後、120s budget の integration test が
-# user budget を最後まで honor するため 120s 上限 (= 元 terminate-after=2) と衝突する。
+# slow-timeout.period 60s, terminate-after 3 → 180s で kill (CLAUDE.md 3min cap)。
 slow-timeout = { period = "60s", terminate-after = 3 }
-test-timeout = "180s"
 
-# bench data 不在環境で unit test だけ走らせる用。
-# integration test (tests/*.rs) の多くが data/lp_problems_*/, data/qplib/ 等を
-# `assert!(path.exists())` で要求し data 欠落で panic する (CLAUDE.md 原則「SKIP せず panic」)。
-# data 整備前は `cargo nextest run --profile lib-only` で lib のみ実行可。
+# bench data 不在環境で lib/bin のみ走らせる用。integration は data を assert で要求。
 [profile.lib-only]
 default-filter = "kind(lib) + kind(bin)"
 test-threads = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 2 }
-test-timeout = "120s"
