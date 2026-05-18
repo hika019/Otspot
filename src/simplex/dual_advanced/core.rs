@@ -30,29 +30,8 @@ const NO_PROGRESS_MIN: usize = 100;
 /// 1e-12 は f64 の数値ノイズ (~1e-15) より十分大きく、有意な改善のみ拾う。
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 
-/// Bland's rule の leaving 選択: `x_b[i] < -primal_tol` を満たす行のうち、
-/// **basis 変数インデックス `basis[i]` が最小**のものを返す。
-/// 教科書的 Bland's anti-cycling rule (lexicographic ordering on variable
-/// index) は MostInfeasible の magnitude 依存を断ち、有限ステップで cycling
-/// から脱出する。row idx ではなく basis[i] でソートする点が肝 (degenerate
-/// pivot で row が並べ替わっても変数 idx は一貫)。
-fn bland_leaving(x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
-    let mut best_row: Option<usize> = None;
-    let mut best_var = usize::MAX;
-    for (i, &v) in x_b.iter().enumerate() {
-        if v < -primal_tol && basis[i] < best_var {
-            best_var = basis[i];
-            best_row = Some(i);
-        }
-    }
-    best_row
-}
-
-/// primal infeasibility 指標: 負の項の和 (= 1-norm of negative part of x_b)。
-/// dual simplex で driving toward primal feasibility の進歩を測る。
-fn sum_neg(x_b: &[f64]) -> f64 {
-    x_b.iter().map(|&v| (-v).max(0.0)).sum()
-}
+// Bland's rule leaving と progress metric は `DualLeavingStrategy::bland_leaving`
+// と `::progress_metric` (default + strategy override) に委譲した (task #43)。
 
 /// Lex 摂動: bland_mode 起動時に reduced_costs (non-basic) と x_b
 /// (basis values) の両方に `eps * (1 + i/n) * scale` を加算し degeneracy を
@@ -201,10 +180,13 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut trow = vec![0.0f64; n_price];
     let mut alpha_dense = vec![0.0f64; m];
 
-    // Anti-cycling state: primal infeasibility が K iter 改善なし → Bland fallback。
-    // 一度 bland_mode に入ったら戻さない (再 cycle 防止)。
+    // Anti-cycling state: progress_metric が K iter 改善なし → Bland fallback。
+    // 一度 bland_mode に入ったら戻さない (再 cycle 防止)。progress_metric は
+    // leaving strategy が提供し、auxiliary objective (Big-M Phase I の人工変数
+    // 残存 etc.) も含む。global `sum_neg` だと初期 `x_B ≥ 0` の Big-M Phase I で
+    // `best = 0` → threshold = 0 → 必ず no-progress と判定されて誤発火する (#43)。
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
-    let mut best_infeas = sum_neg(x_b);
+    let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
 
@@ -223,10 +205,10 @@ pub(crate) fn dual_simplex_core_advanced(
         }
 
         // 3b: 離基変数選択
-        // bland_mode では smallest-idx leaving に切り替え。通常時は引数の
-        // leaving strategy を使用 (MostInfeasibleLeaving / ArtificialPriorityLeaving)。
+        // bland_mode では leaving.bland_leaving (strategy-aware Bland) に切り替え。
+        // 通常時は leaving.select_leaving を使用。
         let leaving_pick = if bland_mode {
-            bland_leaving(x_b, options.primal_tol, basis)
+            leaving.bland_leaving(x_b, options.primal_tol, basis)
         } else {
             leaving.select_leaving(x_b, options.primal_tol, basis)
         };
@@ -362,7 +344,7 @@ pub(crate) fn dual_simplex_core_advanced(
 
         // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
         if !bland_mode {
-            let current = sum_neg(x_b);
+            let current = leaving.progress_metric(x_b, basis);
             let threshold = best_infeas * (1.0 - NO_PROGRESS_REL_EPS);
             if current < threshold {
                 best_infeas = current;

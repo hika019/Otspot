@@ -160,6 +160,43 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
         }
         best_art
     }
+
+    /// Bland fallback must honor Priority 2; default Bland would return None
+    /// whenever `x_B ≥ 0` (initial Big-M Phase I state with `b ≥ 0`), masking
+    /// artificial-removal and causing `dual_simplex_core_advanced` to declare
+    /// false Optimal with artificials in basis (task #43).
+    fn bland_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+        let mut best_row: Option<usize> = None;
+        let mut best_var = usize::MAX;
+        for (i, &v) in x_b.iter().enumerate() {
+            if v < -primal_tol && basis[i] < best_var {
+                best_var = basis[i];
+                best_row = Some(i);
+            }
+        }
+        if best_row.is_some() {
+            return best_row;
+        }
+        for (i, &v) in x_b.iter().enumerate() {
+            if basis[i] >= self.n_total && v > primal_tol && basis[i] < best_var {
+                best_var = basis[i];
+                best_row = Some(i);
+            }
+        }
+        best_row
+    }
+
+    /// 進歩指標 = x_B 負部分 + basis 内人工変数の正値合計。後者を含めないと
+    /// Big-M Phase I で `best_infeas = 0` 固定 → threshold = 0 → 任意の
+    /// `sum_neg ≥ 0` で改善判定 false → 全反復 no-progress → bland_mode 誤起動。
+    fn progress_metric(&self, x_b: &[f64], basis: &[usize]) -> f64 {
+        let neg_sum: f64 = x_b.iter().map(|&v| (-v).max(0.0)).sum();
+        let art_sum: f64 = (0..x_b.len())
+            .filter(|&i| basis[i] >= self.n_total)
+            .map(|i| x_b[i].max(0.0))
+            .sum();
+        neg_sum + art_sum
+    }
 }
 
 /// Big-M ペナルティ算出時の coefficient 倍率 (設計書 §6.4 推奨)。
@@ -322,18 +359,15 @@ pub(crate) fn big_m_cold_start(
             return SolverResult::numerical_error();
         }
         SimplexOutcome::Optimal(_, _) => {
-            // Phase I optimum。 Priority 2 (artificial leaving) で ratio test が
-            // 候補なしを返したら SimplexOutcome::Unbounded となるが、Optimal の場合は
-            // 単に Phase I で leaving 候補が枯渇 (= artificial 追い出し完了 or
-            // 元から artificial 残存しないケース)。Phase II へ。
-            //
-            // Phase I が Optimal で停止 → Big-M LP の主双対最適。Big-M が十分大きい
-            // 構成上、artificial が basis に残って x_B > 0 ならば元 LP は infeasible
-            // (この経路は Phase I 完走を要求するため Timeout 経路と違って健全)。
-            let any_artificial_left = (0..m).any(|i| {
-                basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
-            });
-            if any_artificial_left {
+            // Phase I が Optimal で停止し人工変数が basis に残るケース (値が
+            // 0 でも degenerate basic として残存しうる): Farkas 証明書で検証。
+            // 値での filter (|x_B| > tol) は不適切 — 数値ドリフトで artificial
+            // が 0 にクランプされても、基底構造 e_art は Farkas 条件を満たし
+            // うる (klein3 の長期 pivot で観測 / task #43)。
+            let any_artificial_in_basis = (0..m).any(|i| basis_aug[i] >= n_total);
+            if any_artificial_in_basis
+                && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
+            {
                 let mut r = SolverResult::infeasible();
                 r.iterations = total_iters;
                 return r;
@@ -546,6 +580,67 @@ mod tests {
             vec![(0.0, f64::INFINITY); 2], None,
         ).unwrap();
         assert_kkt_optimal(&lp, 2.0, "big_m_phase1_large_coeff_eq_ge_mix");
+    }
+
+    /// task #43 regression: ArtificialPriorityLeaving::bland_leaving must
+    /// honor Priority 2 (artificial in basis, x_B > tol). Default Bland
+    /// (Priority 1 only) would mask the artificial-removal objective and
+    /// return None once `x_B ≥ 0`, causing `dual_simplex_core_advanced` to
+    /// declare false Optimal with artificials still in basis.
+    #[test]
+    fn artificial_priority_bland_picks_artificial_when_xb_nonneg() {
+        use super::ArtificialPriorityLeaving;
+        use crate::simplex::pricing::DualLeavingStrategy;
+        let n_total = 3usize;
+        let strat = ArtificialPriorityLeaving { n_total };
+        let basis = vec![1usize, n_total]; // row 0: orig var, row 1: artificial
+        let x_b = vec![0.5_f64, 2.0_f64];
+        let pick = strat.bland_leaving(&x_b, 1e-9, &basis);
+        assert_eq!(pick, Some(1), "bland_leaving must select artificial row when x_B >= 0");
+
+        // No artificials → None
+        let basis2 = vec![0usize, 1usize];
+        let pick2 = strat.bland_leaving(&x_b, 1e-9, &basis2);
+        assert_eq!(pick2, None);
+    }
+
+    /// task #43 regression: progress_metric must count artificial-removal
+    /// progress; otherwise `best_infeas = 0` for any Big-M Phase I starting
+    /// from `x_B = b ≥ 0`, threshold = 0, and bland_mode triggers after
+    /// k_trigger iterations regardless of genuine progress.
+    #[test]
+    fn artificial_priority_progress_metric_includes_artificial_sum() {
+        use super::ArtificialPriorityLeaving;
+        use crate::simplex::pricing::DualLeavingStrategy;
+        let n_total = 2usize;
+        let strat = ArtificialPriorityLeaving { n_total };
+        let basis = vec![0usize, n_total]; // row 1: artificial
+        let x_b = vec![3.0_f64, 5.0_f64];
+        // sum_neg = 0, art_sum = 5.0
+        assert!((strat.progress_metric(&x_b, &basis) - 5.0).abs() < 1e-12);
+
+        // After driving artificial out
+        let basis2 = vec![0usize, 1usize];
+        assert!(strat.progress_metric(&x_b, &basis2) < 1e-12);
+    }
+
+    /// task #43 regression: Big-M Phase I で bland_mode が誤起動しても false
+    /// Infeasible を返してはいけない。小規模 Eq-only feasible LP で
+    /// `assert_kkt_optimal` が Infeasible 戻り値で panic することを利用。
+    #[test]
+    fn big_m_phase1_no_false_infeasible_when_blandmode_triggers() {
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[5.0, 3.0, 2.0, 2.0, 7.0, 1.0, 1.0, 1.0, 1.0],
+            3, 3,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0, 1.0], a, vec![10.0, 5.0, 3.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, f64::INFINITY); 3], None,
+        ).unwrap();
+        assert_kkt_optimal(&lp, 3.0, "big_m_phase1_no_false_infeasible_when_blandmode_triggers");
     }
 
     /// 自由変数 + Eq: split-variable + Phase I の組合せで feasibility が崩れないか。
