@@ -35,6 +35,7 @@ use solver::bench_utils::compute_qp_kkt_max;
 use solver::io::qplib::parse_qplib;
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
+use solver::qp::kkt_resid::{self, f64_impl};
 use solver::qp::{solve_qp_with, QpProblem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -92,30 +93,9 @@ impl KktResidual {
 ///   lb_du, ub_du ≥ 0, comp: lb_duⱼ·(x−lb)ⱼ = 0, ub_duⱼ·(ub−x)ⱼ = 0
 fn compute_kkt(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> KktResidual {
     let n = prob.num_vars;
-
-    let qx = prob.q.mat_vec_mul(x).expect("Qx");
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !y.is_empty() {
-        prob.a.transpose().mat_vec_mul(y).expect("AT y")
-    } else {
-        vec![0.0; n]
-    };
-
-    let mut bound_contrib = vec![0.0_f64; n];
-    if !bd.is_empty() {
-        let mut idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bd.len() {
-                bound_contrib[j] -= bd[idx];
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bd.len() {
-                bound_contrib[j] += bd[idx];
-                idx += 1;
-            }
-        }
-    }
+    let qx = f64_impl::qx(&prob.q, x);
+    let aty = f64_impl::aty(&prob.a, y, n);
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bd);
 
     let mut stat = 0.0_f64;
     for j in 0..n {
@@ -124,22 +104,12 @@ fn compute_kkt(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> KktResidua
         stat = stat.max(r.abs() / scale);
     }
 
-    let ax = if prob.a.nrows > 0 {
-        prob.a.mat_vec_mul(x).expect("Ax")
-    } else {
-        Vec::new()
-    };
-
+    let ax = f64_impl::ax(&prob.a, x);
+    let viols = f64_impl::constraint_violations(&ax, &prob.b, &prob.constraint_types);
     let mut prim = 0.0_f64;
-    for (i, ct) in prob.constraint_types.iter().enumerate() {
-        let violation = match ct {
-            ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-            ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
-            ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-            _ => continue,
-        };
+    for (i, &v) in viols.iter().enumerate() {
         let scale = 1.0 + ax[i].abs() + prob.b[i].abs();
-        prim = prim.max(violation / scale);
+        prim = prim.max(v / scale);
     }
     for (j, &(lb, ub)) in prob.bounds.iter().enumerate() {
         if lb.is_finite() {
@@ -152,41 +122,31 @@ fn compute_kkt(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> KktResidua
         }
     }
 
+    let comp_i_raw = f64_impl::comp_ineq_products(&ax, &prob.b, &prob.constraint_types, y);
     let mut comp_ineq = 0.0_f64;
-    if !ax.is_empty() && !y.is_empty() {
-        for (i, ct) in prob.constraint_types.iter().enumerate() {
-            let slack = match ct {
-                ConstraintType::Eq => continue,
-                ConstraintType::Le => prob.b[i] - ax[i],
-                ConstraintType::Ge => ax[i] - prob.b[i],
-                _ => continue,
-            };
-            let prod = (y[i] * slack).abs();
-            let scale = 1.0 + y[i].abs() * (ax[i].abs() + prob.b[i].abs());
-            comp_ineq = comp_ineq.max(prod / scale);
+    for (i, &prod) in comp_i_raw.iter().enumerate() {
+        if prod == 0.0 {
+            continue;
         }
+        let scale = 1.0 + y[i].abs() * (ax[i].abs() + prob.b[i].abs());
+        comp_ineq = comp_ineq.max(prod / scale);
     }
 
+    let comp_b_raw = kkt_resid::comp_bound_products(&prob.bounds, x, bd);
     let mut comp_bound = 0.0_f64;
-    if !bd.is_empty() {
-        let mut idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bd.len() {
-                let slack = x[j] - lb;
-                let prod = (bd[idx] * slack).abs();
-                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + lb.abs());
-                comp_bound = comp_bound.max(prod / scale);
-                idx += 1;
-            }
+    let mut idx = 0_usize;
+    for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+        if lb.is_finite() && idx < bd.len() {
+            let scale = 1.0 + bd[idx].abs() * (x[j].abs() + lb.abs());
+            comp_bound = comp_bound.max(comp_b_raw[idx] / scale);
+            idx += 1;
         }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bd.len() {
-                let slack = ub - x[j];
-                let prod = (bd[idx] * slack).abs();
-                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + ub.abs());
-                comp_bound = comp_bound.max(prod / scale);
-                idx += 1;
-            }
+    }
+    for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+        if ub.is_finite() && idx < bd.len() {
+            let scale = 1.0 + bd[idx].abs() * (x[j].abs() + ub.abs());
+            comp_bound = comp_bound.max(comp_b_raw[idx] / scale);
+            idx += 1;
         }
     }
 
