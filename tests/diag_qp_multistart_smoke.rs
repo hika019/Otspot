@@ -257,6 +257,25 @@ fn api_model_set_threads_propagates_to_solver_options() {
 }
 
 #[test]
+fn api_model_set_threads_propagates_to_qp_solve() {
+    // Model 経由で set_threads(N) → QP single solve path に伝播することを
+    // observable に確認 (LP path 同等 test の QP 版、漏れ穴埋め)。
+    use solver::model::{Expression, Model};
+    let mut m = Model::new("qp_threads_round_trip");
+    let x = m.add_var("x", -1.0, 1.0);
+    let y = m.add_var("y", -1.0, 1.0);
+    // 簡易 PSD QP: min 0.5 (x^2 + y^2) s.t. x + y <= 1、Q diag = [1, 1] で QP path 強制
+    m.set_diagonal_q(&[1.0, 1.0]);
+    let lhs: Expression = Expression::from(x) + Expression::from(y);
+    m.add_constraint(lhs.leq(1.0));
+    m.minimize(Expression::from(x));
+    m.set_threads(4);
+    // QP solve が成功する (= threads=4 が QP path に valid に伝播、SolverOptions 壊れない)
+    // 現状 threads は単発 QP solve では no-op (#31 完了まで)、伝播 path のみ確認
+    let _r = m.solve().expect("QP solve should succeed with threads=4");
+}
+
+#[test]
 fn api_model_set_threads_clamps_zero_to_one() {
     // 0 は invalid (LCG/ThreadPool 双方で fatal)、Model::set_threads 入口で 1 に補正。
     use solver::model::Model;

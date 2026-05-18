@@ -270,13 +270,16 @@ pub struct SolverOptions {
     /// **user 指定** 全 solver 共通の thread 上限 (LP / QP / 非凸 multistart 全て)。
     ///
     /// default = 1 (シリアル、既存挙動完全保護、bench worker と多重化しない)。
-    /// multistart 時の並列度 = `min(n_starts, threads)` を内部で自動分配。
-    /// 各 inner solve は `threads = 1` 強制 (二重並列化抑止)。
-    /// 単発 solve (multistart なし) の faer 内部並列化への配線は future work
-    /// (本 field のみで multistart 並列を制御)。
+    ///
+    /// **現状の実効範囲 (2026-05-18 時点)**:
+    /// - multistart 時の並列度 = `min(n_starts, threads)` を内部で自動分配 = **実効並列**
+    /// - 各 inner solve は `threads = 1` 強制 (二重並列化抑止)
+    /// - **単発 LP/QP solve では現状 no-op** (faer 内部は `Par::Seq` hardcode、
+    ///   per-call parallelism 配線は future work、task #31)
+    /// - 単発 solve threads option 指定しても **値は受理されるが効果ゼロ**
     ///
     /// CLAUDE.md cpu800% 上限考慮、`bench_parallel.sh --jobs N × threads=1`
-    /// と `--jobs 1 × threads=N` のいずれも合計 N CPU で動かせる設計。
+    /// と (#31 完了後) `--jobs 1 × threads=N` のいずれも合計 N CPU で動かせる設計。
     pub threads: usize,
 }
 
