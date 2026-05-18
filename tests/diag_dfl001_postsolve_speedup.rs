@@ -16,8 +16,11 @@ fn dfl001_postsolve_skips_lsq_when_cleanup_stagnant() {
     let path = Path::new("data/lp_problems/dfl001.QPS");
     assert!(path.exists(), "data missing: dfl001.QPS — lp_download script で取得");
     let problem = parse_qps(path).expect("parse");
+    // budget は dfl001 の実測 wall (task #42 reviewer 報告 ~90s) + ~−30s 安全マージン。
+    // 主検査対象は wall ではなく postsolve_us なので、timeout で primal が打ち切られても
+    // postsolve は走り (LSQ skip gate を含む) assert は成立する。
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(120.0);
+    opts.timeout_secs = Some(60.0);
     let t0 = Instant::now();
     let result = solve_qp_with(&problem, &opts);
     let wall = t0.elapsed().as_secs_f64();
