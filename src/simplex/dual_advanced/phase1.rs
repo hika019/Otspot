@@ -122,7 +122,7 @@ struct ArtificialPriorityLeaving {
 }
 
 impl DualLeavingStrategy for ArtificialPriorityLeaving {
-    fn select_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+    fn select_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
         // Priority 1: 標準的 most-infeasible
         let mut best_row: Option<usize> = None;
         let mut max_violation = primal_tol;
@@ -151,7 +151,7 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
     /// whenever `x_B ≥ 0` (initial Big-M Phase I state with `b ≥ 0`), masking
     /// artificial-removal and causing `dual_simplex_core_advanced` to declare
     /// false Optimal with artificials in basis (task #43).
-    fn bland_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+    fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
         let mut best_row: Option<usize> = None;
         let mut best_var = usize::MAX;
         for (i, &v) in x_b.iter().enumerate() {
@@ -175,7 +175,7 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
     /// 進歩指標 = x_B 負部分 + basis 内人工変数の正値合計。後者を含めないと
     /// Big-M Phase I で `best_infeas = 0` 固定 → threshold = 0 → 任意の
     /// `sum_neg ≥ 0` で改善判定 false → 全反復 no-progress → bland_mode 誤起動。
-    fn progress_metric(&self, x_b: &[f64], basis: &[usize]) -> f64 {
+    fn progress_metric(&mut self, x_b: &[f64], basis: &[usize]) -> f64 {
         let neg_sum: f64 = x_b.iter().map(|&v| (-v).max(0.0)).sum();
         let art_sum: f64 = (0..x_b.len())
             .filter(|&i| basis[i] >= self.n_total)
@@ -307,10 +307,10 @@ pub(crate) fn big_m_cold_start(
     // - Phase I が Timeout: Phase II は遅延の起点になっても意味がないので
     //   そのまま Timeout 返却 (Farkas 検証 fail 時)。元の「half-deadline 到達 →
     //   Infeasibility 推定」は #37 で Farkas 証明書に置き換え済。
-    let leaving = ArtificialPriorityLeaving { n_total };
+    let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
-        &a_aug, &mut x_b, &c_aug_p1, &mut basis_aug, m, n_aug, options, &leaving,
+        &a_aug, &mut x_b, &c_aug_p1, &mut basis_aug, m, n_aug, options, &mut leaving,
         &mut total_iters,
     );
 
@@ -578,7 +578,7 @@ mod tests {
         use super::ArtificialPriorityLeaving;
         use crate::simplex::pricing::DualLeavingStrategy;
         let n_total = 3usize;
-        let strat = ArtificialPriorityLeaving { n_total };
+        let mut strat = ArtificialPriorityLeaving { n_total };
         let basis = vec![1usize, n_total]; // row 0: orig var, row 1: artificial
         let x_b = vec![0.5_f64, 2.0_f64];
         let pick = strat.bland_leaving(&x_b, 1e-9, &basis);
@@ -599,7 +599,7 @@ mod tests {
         use super::ArtificialPriorityLeaving;
         use crate::simplex::pricing::DualLeavingStrategy;
         let n_total = 2usize;
-        let strat = ArtificialPriorityLeaving { n_total };
+        let mut strat = ArtificialPriorityLeaving { n_total };
         let basis = vec![0usize, n_total]; // row 1: artificial
         let x_b = vec![3.0_f64, 5.0_f64];
         // sum_neg = 0, art_sum = 5.0

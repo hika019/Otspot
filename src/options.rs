@@ -15,6 +15,24 @@ use std::sync::{
 };
 use std::time::Instant;
 
+/// Dual simplex の leaving (基底脱出) 戦略。
+///
+/// `MostInfeasible`: 最も負の x_B[i] を選ぶ素朴規則 (Dantzig 流)。安定だが
+/// 大規模問題で iter が膨らみがち。
+///
+/// `SteepestEdge`: Forrest-Goldfarb 1992 の Dual Steepest Edge。各行に重み
+/// γ_i = ||(B^{-1})_{i,:}||² を保持し score = x_B[i]² / γ_i を最大化する。
+/// HiGHS/CPLEX で 3-10x の標準的高速化、ただし 1 iter あたり追加 FTRAN 1 回。
+///
+/// default は `MostInfeasible` を維持 (A/B 比較容易化 + 既存挙動保護)。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DualPricing {
+    #[default]
+    MostInfeasible,
+    SteepestEdge,
+}
+
 /// シンプレックス法の選択
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -290,6 +308,9 @@ pub struct SolverOptions {
     pub simplex_method: SimplexMethod,
     /// 双対実行可能性の閾値（デフォルト: PIVOT_TOL = 1e-8）
     pub dual_tol: f64,
+    /// Dual simplex leaving 戦略 (default `MostInfeasible`)。
+    /// `SteepestEdge` 切替で `dual_advanced` 配下のみ DSE 駆動。
+    pub dual_pricing: DualPricing,
     /// warm-start基底情報（Noneの場合はコールドスタート）
     pub warm_start: Option<WarmStartBasis>,
     /// QP IP-PMM の interior point warm start (B&B node 間引継ぎ用)
@@ -373,6 +394,7 @@ impl Default for SolverOptions {
             clamp_tol: 1e-14,
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
+            dual_pricing: DualPricing::default(),
             warm_start: None,
             warm_start_qp: None,
             warm_start_lp: None,

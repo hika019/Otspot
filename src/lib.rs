@@ -51,8 +51,8 @@ pub mod model;
 pub mod tolerances;
 pub mod options;
 pub use options::{
-    BranchingStrategy, GlobalOptimizationConfig, LpWarmStart, SolverOptions, Tolerance,
-    WarmStartBasis,
+    BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, SolverOptions,
+    Tolerance, WarmStartBasis,
 };
 pub mod qp;
 pub mod lp;
