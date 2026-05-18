@@ -6,3 +6,6 @@ pub mod minres;
 pub mod parallelism;
 pub mod ruiz;
 pub(crate) mod timeout;
+
+#[cfg(test)]
+mod par_sentinel;
