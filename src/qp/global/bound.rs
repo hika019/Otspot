@@ -11,9 +11,12 @@
 //! の objective = incumbent 候補。warm start (#12) で parent 解継承で iter 削減。
 //!
 //! ## Q storage 規約
-//! `QpProblem::q` は **upper triangle storage** (row <= col のみ)。off-diagonal は
-//! 1 entry で symmetric pair (q_ij = q_ji) を表現。下三角に値があれば無視
-//! (= QPS loader / check_q_positive_semidefinite と同規約)。
+//! `QpProblem::q` は **full symmetric storage** (CSC で両半 (i,j) と (j,i) の両 entry)。
+//! objective は solver 内部で `Q.mat_vec_mul(x)` を使って `0.5 x' Q x` を計算する
+//! ため、Q は格納どおりに literal 解釈される。テスト fixture も両半 store が標準
+//! (src/qp/tests.rs::test_qp_least_squares, tests/diag_qp_multistart_smoke.rs)。
+//!
+//! 区間 bound 計算は全 entry を走査し 0.5*v_ij の寄与を累積する。
 
 use crate::options::{QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
@@ -75,20 +78,18 @@ pub(crate) fn interval_quadratic_bounds(
         hi += p.max(q);
     }
 
-    // 二次項 1/2 x' Q x
-    // upper triangle storage 規約: row <= col のみ参照、対角は 1/2 q_ii x_i²、
-    // 非対角 (row < col) は q_ij x_i x_j (factor 2 from symmetry × 1/2 = 1)。
+    // 二次項 0.5 x' Q x。Q は full symmetric storage 規約 (両半 entry あり)。
+    // 各 entry の寄与 = 0.5 * v_ij * x_i * x_j (対角は x_i² の interval を直接、
+    // 非対角は product interval)。lower-tri 半分も同様に加算され、両半合計で
+    // 正しい 0.5 x'Qx 値域になる。
     for col in 0..n {
         let (a_c, b_c) = bounds[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
             let row = problem.q.row_ind[k];
-            if row > col {
-                continue; // lower triangle entry は規約上無視
-            }
             let v = problem.q.values[k];
+            let coeff = 0.5 * v;
             if row == col {
                 let (x2_min, x2_max) = square_interval(a_c, b_c);
-                let coeff = 0.5 * v;
                 let t1 = coeff * x2_min;
                 let t2 = coeff * x2_max;
                 lo += t1.min(t2);
@@ -96,8 +97,8 @@ pub(crate) fn interval_quadratic_bounds(
             } else {
                 let (a_r, b_r) = bounds[row];
                 let (p_min, p_max) = product_interval(a_r, b_r, a_c, b_c);
-                let t1 = v * p_min;
-                let t2 = v * p_max;
+                let t1 = coeff * p_min;
+                let t2 = coeff * p_max;
                 lo += t1.min(t2);
                 hi += t1.max(t2);
             }
@@ -106,12 +107,42 @@ pub(crate) fn interval_quadratic_bounds(
     (lo, hi)
 }
 
+/// warm.x が新 box の境界に張り付いていると判定する相対 margin。
+/// IPM tolerance より大きい、box width に対する相対比。
+const WARM_BOUNDARY_REL_MARGIN: f64 = 1e-3;
+
+/// parent warm を新 box で活用可能か判定。
+/// warm.x のいずれかが新 box 境界に張り付くと IPM が saddle / stalled KKT に固着する
+/// (concave-symmetric QP の典型病理) ため、その場合は warm を捨てて cold restart に倒す。
+fn warm_is_safe_for_box(warm: &QpWarmStart, bounds: &[(f64, f64)]) -> bool {
+    if warm.x.len() != bounds.len() {
+        return false;
+    }
+    for (xi, &(lb, ub)) in warm.x.iter().zip(bounds.iter()) {
+        if !lb.is_finite() || !ub.is_finite() {
+            continue;
+        }
+        let width = ub - lb;
+        if width <= 0.0 {
+            return false;
+        }
+        let margin = WARM_BOUNDARY_REL_MARGIN * width;
+        if *xi < lb + margin || *xi > ub - margin {
+            return false;
+        }
+    }
+    true
+}
+
 /// IPM local solve on the box subproblem → upper bound (incumbent candidate)。
 ///
 /// `parent_warm` が Some なら interior point warm start で起動 (#12 利用)。
 /// `node_bounds` で problem.bounds を差し替えた clone を solve。
 /// silent SKIP しない: solver の status をそのまま返す。
 /// `multistart` / `global_optimization` は **強制 None** (= 再入防止 + 子 solve は単発 local)。
+///
+/// warm.x が新 box 境界に張り付くケースでは warm を **捨てて cold** で起動
+/// (= concave-symmetric saddle に再固着するのを避ける、Phase 3 退化対応)。
 pub(crate) fn solve_local_upper_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
@@ -121,7 +152,13 @@ pub(crate) fn solve_local_upper_bound(
     let mut sub = problem.clone();
     sub.bounds = node_bounds.to_vec();
     let mut opts = base_opts.clone();
-    opts.warm_start_qp = parent_warm.cloned();
+    opts.warm_start_qp = parent_warm.and_then(|w| {
+        if warm_is_safe_for_box(w, node_bounds) {
+            Some(w.clone())
+        } else {
+            None
+        }
+    });
     opts.multistart = None;
     opts.global_optimization = None;
     crate::qp::solve_qp_with(&sub, &opts)
@@ -214,9 +251,9 @@ mod tests {
 
     #[test]
     fn bilinear_off_diagonal_handled() {
-        // f = 0.5 * x'Q x with Q = [[0,1],[1,0]] (upper tri = [[0,1],[_,0]])
-        // = x*y (since 0.5*(2*x*y) = x*y via symmetry). On [-1,1]^2 → range [-1, 1]
-        let q = CscMatrix::from_triplets(&[0], &[1], &[1.0], 2, 2).unwrap();
+        // Q full-symmetric (両半 entry): Q = [[0,1],[1,0]] → 0.5 x'Qx = x*y
+        // On [-1,1]^2 → range [-1, 1].
+        let q = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
         let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2])
             .unwrap();
@@ -231,6 +268,38 @@ mod tests {
         let (lo, hi) = interval_quadratic_bounds(&p, &p.bounds);
         assert!(lo.is_infinite() && lo < 0.0);
         assert!(hi.is_infinite() && hi > 0.0);
+    }
+
+    #[test]
+    fn warm_safe_when_x_well_inside_box() {
+        let warm = QpWarmStart {
+            x: vec![0.5, -0.3],
+            y: vec![],
+            mu: 1e-6,
+        };
+        assert!(warm_is_safe_for_box(&warm, &[(0.0, 1.0), (-1.0, 1.0)]));
+    }
+
+    #[test]
+    fn warm_unsafe_when_x_on_boundary() {
+        // x[0] = 0.0001 is within 0.1% of lb=0.0 (width=1.0, margin=1e-3) → unsafe
+        let warm = QpWarmStart {
+            x: vec![0.0001, 0.0],
+            y: vec![],
+            mu: 1e-6,
+        };
+        assert!(!warm_is_safe_for_box(&warm, &[(0.0, 1.0), (-1.0, 1.0)]));
+    }
+
+    #[test]
+    fn warm_unsafe_when_x_outside_box_post_branching() {
+        // parent solved at (1.0, 0), child box now [-1, 0] for var 0 → x[0]=1.0 outside
+        let warm = QpWarmStart {
+            x: vec![1.0, 0.0],
+            y: vec![],
+            mu: 1e-6,
+        };
+        assert!(!warm_is_safe_for_box(&warm, &[(-1.0, 0.0), (-1.0, 1.0)]));
     }
 
     #[test]
