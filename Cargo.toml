@@ -12,13 +12,16 @@ categories = ["science", "algorithms", "mathematics"]
 
 [features]
 default = []
-parallel = ["dep:rayon"]
+# `parallel` 機能フラグは後方互換のため残置 (no-op)。rayon は必須依存に昇格
+# (#5 Phase 2 multi-start で常時 ThreadPool が必要)。
+# 既存 `#[cfg(feature="parallel")]` 配下の heavy parallel テストは opt-in 維持。
+parallel = []
 
 [dependencies]
 faer = "0.24.0"
 log = "0.4"
 mimalloc = { version = "0.1", default-features = false }
-rayon = { version = "1", optional = true }
+rayon = "1"
 twofloat = "0.8"
 
 [dev-dependencies]

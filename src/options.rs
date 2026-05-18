@@ -99,40 +99,49 @@ pub enum StartStrategy {
     LatinHypercube,
 }
 
-/// Multi-start local search (#5 Phase 2) 設定。
+/// Multi-start local search (#5 Phase 2) **user-facing** config。
 ///
 /// `n_starts` 個の初期点で IPM を解き、最良の objective を採用する。
 /// 非凸 QP の脱出率向上 + Phase 3 spatial B&B の上界 (incumbent) 供給。
+///
+/// **user 指定 (pub field、explicit input)**:
+/// - `n_starts`: 探索並列度 (大域最適 hit 確率に直結)
+/// - `seed`: 再現性 (同 seed = 同 random init = 同 best)
+/// - `strategy`: 探索戦略 (RandomBox / LatinHypercube)
+///
+/// **内部勝手に決める (user に見せない)**:
+/// - 乱数 algorithm (LCG 1664525/1013904223)
+/// - 無限境界のサンプリング半径 (`MULTISTART_UNBOUNDED_RANGE = 10.0`)
+/// - thread 並列度 (`SolverOptions::threads` から `min(n_starts, threads)` 自動分配)
+/// - 各 inner solve の `threads = 1` 強制 (faer 多重並列化を抑止)
 ///
 /// 規約:
 /// - `n_starts == 1` は cold solve 1 回のみ (= 既存挙動)
 /// - `n_starts >= 2` で start #0 = cold、#1..#n_starts = random initial (warm_start_qp.x 注入)
 /// - 全 start で deadline を共有 (timeout_secs / deadline は最初に固定)
-/// - `seed` 同一なら結果は決定論的
 #[derive(Debug, Clone)]
 pub struct MultiStartConfig {
-    /// 初期点数 (cold #0 + random #1..#n_starts)。1 で multistart 無効化。
+    /// 初期点数 (cold #0 + random #1..#n_starts)。1 で multistart 無効化、
+    /// 2 以上で並列 escape 探索。default=1 (= 既存挙動)。
     pub n_starts: usize,
-    /// LCG seed。0 は内部で 1 に補正 (LCG state=0 は固着するため)。
+    /// 乱数 seed。default=`DEFAULT_MULTISTART_SEED` (= 0xC0FFEE_DEADBEEF) で
+    /// deterministic test 環境を保護。bench で variance 取るときは user が変える。
+    /// `0` は内部で 1 に補正 (LCG state=0 固着回避)。
     pub seed: u64,
-    /// サンプリング戦略。
+    /// サンプリング戦略。default=`RandomBox` (= 各次元独立一様)。
     pub strategy: StartStrategy,
-    /// 無限境界変数のサンプリング半径 |x| <= range。IPPMM cold-init は unbounded で
-    /// 0 を採用するため、random restart も origin 近傍 (±10) を出発点とする。
-    pub unbounded_range: f64,
 }
 
-/// Multi-start `unbounded_range` 既定値。IPPMM `solve_ippmm_inner` の cold-init 規約
-/// (zero in bounds → 0 / lb_fin → lb+1 / ub_fin → ub-1) と整合する origin 近傍半径。
-pub const DEFAULT_MULTISTART_UNBOUNDED_RANGE: f64 = 10.0;
+/// `MultiStartConfig::seed` の default。固定値で deterministic test を保護。
+/// magic 根拠: 任意の非零値で良い。0xC0FFEE_DEADBEEF は識別性のためのフォーク値。
+pub const DEFAULT_MULTISTART_SEED: u64 = 0x_00C0_FFEE_DEAD_BEEF;
 
 impl Default for MultiStartConfig {
     fn default() -> Self {
         Self {
             n_starts: 1,
-            seed: 1,
+            seed: DEFAULT_MULTISTART_SEED,
             strategy: StartStrategy::RandomBox,
-            unbounded_range: DEFAULT_MULTISTART_UNBOUNDED_RANGE,
         }
     }
 }
@@ -257,6 +266,18 @@ pub struct SolverOptions {
     /// `Some(_)` かつ `n_starts >= 2` の場合 `solve_qp_with` は内部で
     /// `solve_qp_multistart` に委譲する (再入防止のため委譲時は None に剥がす)。
     pub multistart: Option<MultiStartConfig>,
+
+    /// **user 指定** 全 solver 共通の thread 上限 (LP / QP / 非凸 multistart 全て)。
+    ///
+    /// default = 1 (シリアル、既存挙動完全保護、bench worker と多重化しない)。
+    /// multistart 時の並列度 = `min(n_starts, threads)` を内部で自動分配。
+    /// 各 inner solve は `threads = 1` 強制 (二重並列化抑止)。
+    /// 単発 solve (multistart なし) の faer 内部並列化への配線は future work
+    /// (本 field のみで multistart 並列を制御)。
+    ///
+    /// CLAUDE.md cpu800% 上限考慮、`bench_parallel.sh --jobs N × threads=1`
+    /// と `--jobs 1 × threads=N` のいずれも合計 N CPU で動かせる設計。
+    pub threads: usize,
 }
 
 /// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
@@ -294,6 +315,7 @@ impl Default for SolverOptions {
             tolerance: None,
             ipm: IpmOptions::default(),
             multistart: None,
+            threads: 1,
         }
     }
 }
