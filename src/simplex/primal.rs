@@ -717,7 +717,9 @@ fn try_apply_crash(
         return None;
     }
 
-    // partial revert loop: 負 x_b を持つ crashed 行を artif に戻す。
+    // partial revert loop: 負 x_b の crashed 行を artif に戻す。
+    // 復元不能な行 (= 元 cold basis に artif 候補が無い ub/slack 行) で負成分が
+    // 出た場合は crash 全体を放棄 (Phase I/II が x_B >= 0 不変式を回復できないため)。
     let mut x_b = vec![0.0_f64; m];
     let mut crashed_count = num_art_in - num_art_out;
     for round in 0..=CRASH_REVERT_MAX_ROUNDS {
@@ -734,12 +736,23 @@ fn try_apply_crash(
         basis_mgr.ftran(&mut x_b_sv);
         x_b = x_b_sv.to_dense();
 
-        // 被覆された (= 構造列が basis に入った) 行で x_b < 0 の行を artif に戻す。
         let mut reverts = 0usize;
         for i in 0..m {
-            if basis[i] < n_total && cold_basis[i] >= n_total && x_b[i] < -PIVOT_TOL {
+            if x_b[i] >= -PIVOT_TOL {
+                continue;
+            }
+            // 負成分行: 元 cold で artif があれば revert、無ければ crash 放棄。
+            if cold_basis[i] >= n_total {
                 basis[i] = cold_basis[i];
                 reverts += 1;
+            } else {
+                if trace {
+                    eprintln!(
+                        "LP_CRASH: x_b[{}]={:.3e} < 0 in non-revertable row (cold basis col {} < n_total={}), abandoning crash",
+                        i, x_b[i], cold_basis[i], n_total
+                    );
+                }
+                return None;
             }
         }
         if reverts == 0 {
