@@ -3,6 +3,7 @@
 //! qps_benchmark / bench_qplib 両バイナリで共有するCSV読み込み・正解値照合ロジック。
 
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+use crate::qp::kkt_resid::{self, f64_impl};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;
@@ -76,36 +77,15 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
     if x.len() != n {
         return f64::INFINITY;
     }
-
-    let qx = match prob.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !y.is_empty() {
-        match prob.a.transpose().mat_vec_mul(y) {
-            Ok(v) => v,
-            Err(_) => return f64::INFINITY,
-        }
-    } else {
-        vec![0.0; n]
-    };
-
-    let mut bound_contrib = vec![0.0_f64; n];
-    if !bd.is_empty() {
-        let mut idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bd.len() {
-                bound_contrib[j] -= bd[idx];
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bd.len() {
-                bound_contrib[j] += bd[idx];
-                idx += 1;
-            }
-        }
+    // 原実装は y.len() != a.nrows で mat_vec_mul err → INFINITY を返したので
+    // shape mismatch を保つ。
+    if prob.a.nrows > 0 && !y.is_empty() && y.len() != prob.a.nrows {
+        return f64::INFINITY;
     }
+
+    let qx = f64_impl::qx(&prob.q, x);
+    let aty = f64_impl::aty(&prob.a, y, n);
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bd);
 
     let mut max_resid = 0.0_f64;
     for j in 0..n {
@@ -122,48 +102,29 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
         x,
     ));
 
-    let ax = if prob.a.nrows > 0 {
-        match prob.a.mat_vec_mul(x) {
-            Ok(v) => v,
-            Err(_) => return f64::INFINITY,
+    let ax = f64_impl::ax(&prob.a, x);
+    let comp_i = f64_impl::comp_ineq_products(&ax, &prob.b, &prob.constraint_types, y);
+    for (i, &prod) in comp_i.iter().enumerate() {
+        if prod == 0.0 {
+            continue;
         }
-    } else {
-        Vec::new()
-    };
-
-    if !ax.is_empty() && !y.is_empty() {
-        #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
-        for (i, ct) in prob.constraint_types.iter().enumerate() {
-            let slack = match ct {
-                ConstraintType::Eq => continue,
-                ConstraintType::Le => prob.b[i] - ax[i],
-                ConstraintType::Ge => ax[i] - prob.b[i],
-                _ => continue,
-            };
-            let prod = (y[i] * slack).abs();
-            let scale = 1.0 + y[i].abs() * (ax[i].abs() + prob.b[i].abs());
-            max_resid = max_resid.max(prod / scale);
+        let scale = 1.0 + y[i].abs() * (ax[i].abs() + prob.b[i].abs());
+        max_resid = max_resid.max(prod / scale);
+    }
+    let comp_b = kkt_resid::comp_bound_products(&prob.bounds, x, bd);
+    let mut idx = 0_usize;
+    for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+        if lb.is_finite() && idx < bd.len() {
+            let scale = 1.0 + bd[idx].abs() * (x[j].abs() + lb.abs());
+            max_resid = max_resid.max(comp_b[idx] / scale);
+            idx += 1;
         }
     }
-    if !bd.is_empty() {
-        let mut idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bd.len() {
-                let slack = x[j] - lb;
-                let prod = (bd[idx] * slack).abs();
-                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + lb.abs());
-                max_resid = max_resid.max(prod / scale);
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bd.len() {
-                let slack = ub - x[j];
-                let prod = (bd[idx] * slack).abs();
-                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + ub.abs());
-                max_resid = max_resid.max(prod / scale);
-                idx += 1;
-            }
+    for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+        if ub.is_finite() && idx < bd.len() {
+            let scale = 1.0 + bd[idx].abs() * (x[j].abs() + ub.abs());
+            max_resid = max_resid.max(comp_b[idx] / scale);
+            idx += 1;
         }
     }
     max_resid

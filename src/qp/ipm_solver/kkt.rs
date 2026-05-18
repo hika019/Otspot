@@ -1,34 +1,8 @@
 //! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
-use crate::problem::ConstraintType;
+use crate::qp::kkt_resid::{self, dd_impl};
 use crate::tolerances::FX_TOL;
 use super::outcome::ProblemView;
-
-/// bound dual から stationarity 寄与 (−y_lb + y_ub) を成分ごと計算する。
-fn compute_bound_contrib(
-    bounds: &[(f64, f64)],
-    bound_duals: &[f64],
-    n: usize,
-) -> Vec<f64> {
-    let mut contrib = vec![0.0_f64; n];
-    if bound_duals.is_empty() {
-        return contrib;
-    }
-    let mut idx = 0usize;
-    for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bound_duals.len() {
-            contrib[j] -= bound_duals[idx];
-            idx += 1;
-        }
-    }
-    for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bound_duals.len() {
-            contrib[j] += bound_duals[idx];
-            idx += 1;
-        }
-    }
-    contrib
-}
 
 /// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
 /// FX (lb≈ub) と EmptyCol は postsolve 慣例で除外。
@@ -38,32 +12,9 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     if x.len() != n {
         return f64::INFINITY;
     }
-    let zero_dd = TwoFloat::from(0.0);
-    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    for col in 0..n {
-        let xv = x[col];
-        let cs = prob.q.col_ptr[col];
-        let ce = prob.q.col_ptr[col + 1];
-        for k in cs..ce {
-            let row = prob.q.row_ind[k];
-            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(prob.q.values[k], xv);
-        }
-    }
-    let aty_dd: Vec<TwoFloat> = if prob.a.nrows > 0 && !y.is_empty() {
-        let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
-        for col in 0..n {
-            let cs = prob.a.col_ptr[col];
-            let ce = prob.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = prob.a.row_ind[k];
-                acc[col] = acc[col] + TwoFloat::new_mul(prob.a.values[k], y[row]);
-            }
-        }
-        acc
-    } else {
-        vec![zero_dd; n]
-    };
-    let bound_contrib = compute_bound_contrib(prob.bounds, z, n);
+    let qx_dd = dd_impl::qx(prob.q, x);
+    let aty_dd = dd_impl::aty(prob.a, y, n);
+    let bound_contrib = kkt_resid::bound_contrib(prob.bounds, z);
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
@@ -93,33 +44,15 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
 
 /// 成分相対化 primal 残差。A·x は cancellation 対策で DD 積算。
 pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
-    use twofloat::TwoFloat;
     if prob.a.nrows == 0 {
         return 0.0;
     }
-    let m = prob.a.nrows;
-    let zero_dd = TwoFloat::from(0.0);
-    let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
-    for col in 0..prob.a.ncols {
-        let xv = x[col];
-        for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-            ax_dd[prob.a.row_ind[k]] = ax_dd[prob.a.row_ind[k]] + TwoFloat::new_mul(prob.a.values[k], xv);
-        }
-    }
+    let ax_dd = dd_impl::ax(prob.a, x);
+    let viols = dd_impl::constraint_violations(&ax_dd, prob.b, prob.constraint_types);
     let mut max_rel = 0.0_f64;
-    for ((ax_i_dd, &b_i), ct) in ax_dd.iter()
-        .zip(prob.b.iter())
-        .zip(prob.constraint_types.iter())
-    {
-        let raw_dd = *ax_i_dd - TwoFloat::from(b_i);
-        let raw = f64::from(raw_dd);
-        let v = match ct {
-            ConstraintType::Eq => raw.abs(),
-            ConstraintType::Ge => (-raw).max(0.0),
-            _ => raw.max(0.0),
-        };
-        let ax_i_abs = f64::from(*ax_i_dd).abs();
-        let scale_i = 1.0 + ax_i_abs + b_i.abs();
+    for (i, &v) in viols.iter().enumerate() {
+        let ax_i_abs = f64::from(ax_dd[i]).abs();
+        let scale_i = 1.0 + ax_i_abs + prob.b[i].abs();
         let rel_i = v / scale_i;
         if rel_i > max_rel {
             max_rel = rel_i;
@@ -151,22 +84,7 @@ pub fn complementarity_residual_rel(
     y: &[f64],
     z: &[f64],
 ) -> f64 {
-    use twofloat::TwoFloat;
-    let zero_dd = TwoFloat::from(0.0);
-
-    let m = prob.a.nrows;
-    let ax_dd: Vec<TwoFloat> = if m > 0 {
-        let mut ax = vec![zero_dd; m];
-        for col in 0..prob.a.ncols {
-            let xv = x[col];
-            for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-                ax[prob.a.row_ind[k]] = ax[prob.a.row_ind[k]] + TwoFloat::new_mul(prob.a.values[k], xv);
-            }
-        }
-        ax
-    } else {
-        Vec::new()
-    };
+    let ax_dd = dd_impl::ax(prob.a, x);
 
     let yb: f64 = y.iter().zip(prob.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
     let yax: f64 = y
@@ -203,43 +121,9 @@ pub fn complementarity_residual_rel(
         + cx.abs()
         + (0.5 * xqx).abs();
 
-    let mut max_abs = 0.0_f64;
-
-    if m > 0 && !y.is_empty() {
-        for (i, ct) in prob.constraint_types.iter().enumerate() {
-            let slack_dd = match ct {
-                ConstraintType::Le => TwoFloat::from(prob.b[i]) - ax_dd[i],
-                ConstraintType::Ge => ax_dd[i] - TwoFloat::from(prob.b[i]),
-                ConstraintType::Eq => continue,
-            };
-            let prod = (f64::from(slack_dd) * y[i]).abs();
-            if prod > max_abs {
-                max_abs = prod;
-            }
-        }
-    }
-
-    if !z.is_empty() {
-        let mut idx = 0_usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < z.len() {
-                let prod = (z[idx] * (x[j] - lb)).abs();
-                if prod > max_abs {
-                    max_abs = prod;
-                }
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < z.len() {
-                let prod = (z[idx] * (ub - x[j])).abs();
-                if prod > max_abs {
-                    max_abs = prod;
-                }
-                idx += 1;
-            }
-        }
-    }
+    let comp_i = dd_impl::comp_ineq_products(&ax_dd, prob.b, prob.constraint_types, y);
+    let comp_b = kkt_resid::comp_bound_products(prob.bounds, x, z);
+    let max_abs = comp_i.iter().chain(comp_b.iter()).fold(0.0_f64, |a, &b| a.max(b));
 
     max_abs / scale
 }

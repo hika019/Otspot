@@ -5,6 +5,7 @@ pub mod diagnose;
 pub mod global;
 pub(crate) mod ipm_core;
 pub mod ipm_solver;
+pub mod kkt_resid;
 pub(crate) mod linalg;
 mod lp_dispatch;
 pub mod multistart;
