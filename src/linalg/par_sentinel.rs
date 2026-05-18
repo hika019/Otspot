@@ -194,8 +194,8 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-/// dense PSD (n=2000) で supernodal Cholesky を発火させ、wall 短縮を assert。
-/// n=2000 dense → factor ~150ms 級 (Apple M-series 単一スレッド)、
+/// dense PSD (n=`SPEEDUP_TEST_N`=1500) で supernodal Cholesky を発火させ、wall 短縮を assert。
+/// n=1500 dense → factor ~150ms 級 (Apple M-series 単一スレッド)、
 /// rayon spawn overhead を十分に上回り par scaling が観測可能。
 /// CLAUDE.md「テスト 1 つ 3 分以内」cap 内 (実測 ~5-10s)。
 #[test]

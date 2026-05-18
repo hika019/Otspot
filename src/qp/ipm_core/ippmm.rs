@@ -447,8 +447,8 @@ pub(crate) fn solve_ippmm_inner(
         let probe_perm = amd_with_deadline(
             probe_aug.nrows, &probe_aug.col_ptr, &probe_aug.row_ind, timeout_ctx.deadline,
         );
-        let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
-            &probe_aug, &probe_perm, timeout_ctx.deadline, Some(max_l_nnz_from_budget()),
+        let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+            &probe_aug, &probe_perm, timeout_ctx.deadline, Some(max_l_nnz_from_budget()), par,
         );
         let exceeds = matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }));
         if exceeds && std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {

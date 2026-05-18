@@ -1,7 +1,7 @@
 //! SolverOptions::threads を faer `Par` に橋渡しするヘルパ。
 //!
 //! threads=1 → `Par::Seq` (= 既存挙動完全互換)、
-//! threads>=2 → `Par::Rayon(threads)` (= faer 内部 supernodal Cholesky / LDL を
+//! threads>=2 → `Par::Rayon(NonZero(threads))` (= faer 内部 supernodal Cholesky / LDL を
 //! グローバル rayon thread-pool で並列化)。
 //!
 //! 単発 LP/QP solve の per-call parallelism 配線点 (#31)。
