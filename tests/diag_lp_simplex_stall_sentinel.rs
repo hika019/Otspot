@@ -151,7 +151,13 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
     let ctypes = vec![ConstraintType::Eq; m];
 
     let q = CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap();
-    let qp = QpProblem::new(q, c, a, b, bounds, ctypes).expect("QpProblem ctor");
+    let qp = QpProblem::new(q, c.clone(), a, b, bounds, ctypes).expect("QpProblem ctor");
+
+    // Objective lower bound: with x ∈ [0, 1]^n, optimum is bounded below by
+    // sum_j min(c_j · 0, c_j · 1) = sum of negative c_j.
+    let obj_lb_bound_only: f64 = c.iter().map(|&v| v.min(0.0)).sum();
+    // Feasible incumbent at x_star ∈ [0, 1] gives an upper bound.
+    let obj_at_xstar: f64 = c.iter().zip(x_star.iter()).map(|(&cj, &xj)| cj * xj).sum();
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(SYNTH_BUDGET_SECS);
@@ -160,6 +166,11 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
     if dispatch_disabled() {
         // No-op: simplex alone must NOT reach Optimal/LocallyOptimal on this
         // size within the budget (proves the dispatch route is required).
+        eprintln!(
+            "[synthetic LP_DISPATCH_NOOP=1] status={:?} iters={} obj={:.3e} \
+             (budget={}s, m=2500, n=3500)",
+            r.status, r.iterations, r.objective, SYNTH_BUDGET_SECS
+        );
         assert!(
             !matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
             "LP_DISPATCH_NOOP=1: simplex unexpectedly converged \
@@ -168,10 +179,39 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
         );
         return;
     }
+    eprintln!(
+        "[synthetic dispatch enabled] status={:?} iters={} obj={:.6e} \
+         (budget={}s, m=2500, n=3500)",
+        r.status, r.iterations, r.objective, SYNTH_BUDGET_SECS
+    );
 
     assert!(
         matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
         "synthetic large LP must converge: status={:?} iters={} obj={:.3e}",
         r.status, r.iterations, r.objective
+    );
+
+    // Objective validity (reviewer M2):
+    //  - r.objective <= obj_at_xstar (LP is a minimisation; the dispatched
+    //    solution must beat the feasible incumbent we constructed).
+    //  - r.objective >= obj_lb_bound_only (with x ∈ [0,1]^n, no objective
+    //    can be lower than summing all negative c_j with x_j = 1).
+    // Tolerance covers IPM final residual / postsolve drift.
+    const OBJ_TOL: f64 = 1e-6;
+    let scale = obj_at_xstar.abs().max(obj_lb_bound_only.abs()).max(1.0);
+    assert!(
+        r.objective.is_finite(),
+        "synthetic objective not finite: {}",
+        r.objective
+    );
+    assert!(
+        r.objective <= obj_at_xstar + OBJ_TOL * scale,
+        "synthetic objective {:.6e} worse than feasible incumbent obj_at_xstar={:.6e}",
+        r.objective, obj_at_xstar
+    );
+    assert!(
+        r.objective >= obj_lb_bound_only - OBJ_TOL * scale,
+        "synthetic objective {:.6e} below sum-of-negative-cj LB {:.6e} (dual infeasible?)",
+        r.objective, obj_lb_bound_only
     );
 }
