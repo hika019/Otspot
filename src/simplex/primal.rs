@@ -190,14 +190,30 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         let mut c_phase1 = vec![0.0; n_ext];
         c_phase1[sf.n_total..].fill(1.0);
 
-        // Correct x_b for diagonal entries of initial basis columns.
-        // Art cols have entry 1.0 → no change. Scaled slack cols → divide by diagonal.
-        for i in 0..m {
-            if let Ok((rows, vals)) = a_ext.get_column(basis[i]) {
-                for (k, &row) in rows.iter().enumerate() {
-                    if row == i && vals[k].abs() > 1e-14 {
-                        x_b[i] /= vals[k];
-                        break;
+        // #15 crash basis: artificial を構造列で被覆して Phase I の駆出対象を縮減。
+        // 適用条件: warm_start なし & options.use_lp_crash_basis & crash 結果が non-singular。
+        // 計算した x_b に負成分があった行はロールバック (Phase I で駆出できないため)。
+        let crashed = if options.warm_start.is_none()
+            && options.use_lp_crash_basis
+            && sf.num_artificial > 0
+        {
+            try_apply_crash(&a_ext, m, sf.n_shifted, sf.n_total, &b, options.max_etas, &basis)
+        } else {
+            None
+        };
+        if let Some((crash_basis, crash_x_b)) = crashed {
+            basis = crash_basis;
+            x_b = crash_x_b;
+        } else {
+            // Correct x_b for diagonal entries of initial basis columns.
+            // Art cols have entry 1.0 → no change. Scaled slack cols → divide by diagonal.
+            for i in 0..m {
+                if let Ok((rows, vals)) = a_ext.get_column(basis[i]) {
+                    for (k, &row) in rows.iter().enumerate() {
+                        if row == i && vals[k].abs() > 1e-14 {
+                            x_b[i] /= vals[k];
+                            break;
+                        }
                     }
                 }
             }
@@ -647,6 +663,116 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             }
         }
     }
+}
+
+/// #15 crash 後 partial revert の最大ラウンド数。
+/// 1 ラウンドで負 x_b 行を artificial に戻し再 FTRAN、収束しなければ次ラウンド。
+/// 3 ラウンドは観測 (中規模 ill LP) で十分な経験値。
+const CRASH_REVERT_MAX_ROUNDS: usize = 3;
+
+/// #15 crash basis: 構造列で artificial 行を被覆し Phase I の駆出対象を縮減する。
+///
+/// 戻り値 `Some((crash_basis, x_b))` の意味:
+/// - `crash_basis[i]`: 行 i を被覆する列 index (構造列 or artificial col)
+/// - `x_b`: B^{-1}*b (LU FTRAN で厳密計算)
+///
+/// 不採用条件 (None 帰着) で観測可能化のため LP_CRASH_TRACE で eprintln:
+/// 1. crash 結果が `cold_basis` と同一 (構造列で 1 行も被覆できなかった)
+/// 2. LU 分解失敗 (crashed basis singular)
+/// 3. partial revert 後も crash 構造列が 0 個 (実質 cold と同じ)
+///
+/// partial revert: 被覆された行で x_b < -PIVOT_TOL の行は basis[i] を artif に戻し
+/// 再因子化。Phase I で駆出できない負 x_b を持つ crashed 行を残さない。
+fn try_apply_crash(
+    a_ext: &CscMatrix,
+    m: usize,
+    n_shifted: usize,
+    n_total: usize,
+    b_scaled: &[f64],
+    max_etas: usize,
+    cold_basis: &[usize],
+) -> Option<(Vec<usize>, Vec<f64>)> {
+    use crate::basis::{BasisManager, LuBasis};
+    use crate::sparse::SparseVec;
+    use super::crash;
+    use crate::tolerances::PIVOT_TOL;
+
+    // 入力 needs_artificial を `cold_basis[i] >= n_total` から再構築。
+    let needs_artificial: Vec<bool> = cold_basis.iter().map(|&c| c >= n_total).collect();
+    let trace = std::env::var("LP_CRASH_TRACE").ok().as_deref() == Some("1");
+
+    let num_art_in = needs_artificial.iter().filter(|&&v| v).count();
+    if num_art_in == 0 {
+        return None;
+    }
+
+    let (mut basis, _, num_art_out) = crash::compute_crash_basis(
+        a_ext, b_scaled, m, n_shifted, cold_basis, &needs_artificial,
+    );
+
+    if num_art_out == num_art_in {
+        if trace {
+            eprintln!("LP_CRASH: 0 reduction (m={}, num_art={}), skipping", m, num_art_in);
+        }
+        return None;
+    }
+
+    // partial revert loop: 負 x_b を持つ crashed 行を artif に戻す。
+    let mut x_b = vec![0.0_f64; m];
+    let mut crashed_count = num_art_in - num_art_out;
+    for round in 0..=CRASH_REVERT_MAX_ROUNDS {
+        let mut basis_mgr = match LuBasis::new(a_ext, &basis, max_etas) {
+            Ok(b) => b,
+            Err(_) => {
+                if trace {
+                    eprintln!("LP_CRASH: singular basis at round {}, reverting", round);
+                }
+                return None;
+            }
+        };
+        let mut x_b_sv = SparseVec::from_dense(b_scaled);
+        basis_mgr.ftran(&mut x_b_sv);
+        x_b = x_b_sv.to_dense();
+
+        // 被覆された (= 構造列が basis に入った) 行で x_b < 0 の行を artif に戻す。
+        let mut reverts = 0usize;
+        for i in 0..m {
+            if basis[i] < n_total && cold_basis[i] >= n_total && x_b[i] < -PIVOT_TOL {
+                basis[i] = cold_basis[i];
+                reverts += 1;
+            }
+        }
+        if reverts == 0 {
+            break;
+        }
+        crashed_count = crashed_count.saturating_sub(reverts);
+        if crashed_count == 0 {
+            if trace {
+                eprintln!("LP_CRASH: all crashed rows reverted, falling back to cold");
+            }
+            return None;
+        }
+        if round == CRASH_REVERT_MAX_ROUNDS && reverts > 0 {
+            if trace {
+                eprintln!(
+                    "LP_CRASH: revert did not converge in {} rounds, falling back",
+                    CRASH_REVERT_MAX_ROUNDS + 1
+                );
+            }
+            return None;
+        }
+    }
+
+    if trace {
+        let final_num_art: usize = basis.iter().filter(|&&c| c >= n_total).count();
+        eprintln!(
+            "LP_CRASH: m={} n_shifted={} num_artificial {}→{} (reduction {}, crashed_cols {})",
+            m, n_shifted, num_art_in, final_num_art,
+            num_art_in.saturating_sub(final_num_art), crashed_count
+        );
+    }
+
+    Some((basis, x_b))
 }
 
 /// Defense-in-depth feasibility check.  Per constraint, compare violation to
