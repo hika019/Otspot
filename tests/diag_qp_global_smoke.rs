@@ -56,6 +56,7 @@ fn cfg(gap_tol: f64) -> GlobalOptimizationConfig {
         max_depth: 20,
         max_nodes: 10_000,
         branching: BranchingStrategy::MaxViolation,
+        ..GlobalOptimizationConfig::default()
     }
 }
 
@@ -331,6 +332,7 @@ fn unbounded_variable_returns_locally_optimal_not_optimal() {
         max_depth: 20,
         max_nodes: 1_000,
         branching: BranchingStrategy::MaxViolation,
+        ..GlobalOptimizationConfig::default()
     };
     let r = solve_qp_global(&p, &opts(5.0), &cfg);
     assert!(
@@ -371,6 +373,7 @@ fn pruning_keeps_node_count_well_below_cap() {
         max_depth: 20,
         max_nodes: 2_000,
         branching: BranchingStrategy::MaxViolation,
+        ..GlobalOptimizationConfig::default()
     };
     let (r, stats) = solve_qp_global_with_stats(&p, &opts(60.0), &cfg);
     eprintln!(
