@@ -5,6 +5,7 @@ pub mod postsolve;
 pub mod qp_transforms;
 pub mod qp_postsolve;
 pub mod qp_phase2;
+pub(crate) mod activity;
 
 pub use scaling::RuizScaler;
 pub use transforms::{run_presolve, run_presolve_with_flags, PresolveFlags, PresolveStatus};

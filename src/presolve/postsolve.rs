@@ -428,7 +428,8 @@ enum BoundAbsorb { AtLb, AtUb }
 /// Recover `y_i` of a removed row to satisfy LP dual feasibility, given the rest of `y`.
 /// For each column the required rc sign yields a permissible range on `y_i`; the row's
 /// constraint type (Le: y≤0, Ge: y≥0, Eq: free) intersects that range and we pick the
-/// value closest to zero.
+/// value closest to zero. Rows whose primal is strictly non-binding short-circuit to
+/// `y_i = 0` because the rc-sign-only walk otherwise admits slackness-violating duals.
 fn recover_removed_row_dual(
     orig_problem: &LpProblem,
     i: usize,
@@ -436,6 +437,19 @@ fn recover_removed_row_dual(
     dual_solution: &[f64],
 ) -> f64 {
     let row_entries = collect_row_entries(orig_problem, i);
+
+    let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
+    let b_i = orig_problem.b[i];
+    let nonbinding_slack = match orig_problem.constraint_types[i] {
+        ConstraintType::Le => b_i - ax_i,
+        ConstraintType::Ge => ax_i - b_i,
+        ConstraintType::Eq => 0.0,
+    };
+    let slack_scale = 1.0 + b_i.abs() + ax_i.abs();
+    if nonbinding_slack > BOUND_ACTIVE_TOL * slack_scale {
+        return 0.0;
+    }
+
     let mut min_y_i = f64::NEG_INFINITY;
     let mut max_y_i = f64::INFINITY;
     for &(j, a_ij) in &row_entries {

@@ -266,45 +266,6 @@ impl PresolveState {
     }
 }
 
-/// 行の活動範囲 [row_lb, row_ub] を計算する。
-fn activity_range_from(
-    entries: &[(usize, f64)],
-    bounds: &[(f64, f64)],
-) -> (f64, f64, bool, bool) {
-    let mut row_lb = 0.0f64;
-    let mut row_ub = 0.0f64;
-    let mut lb_finite = true;
-    let mut ub_finite = true;
-
-    for &(j, a_ij) in entries {
-        let (lb_j, ub_j) = bounds[j];
-        if a_ij > 0.0 {
-            if lb_j == f64::NEG_INFINITY {
-                lb_finite = false;
-            } else if lb_finite {
-                row_lb += a_ij * lb_j;
-            }
-            if ub_j == f64::INFINITY {
-                ub_finite = false;
-            } else if ub_finite {
-                row_ub += a_ij * ub_j;
-            }
-        } else if a_ij < 0.0 {
-            if ub_j == f64::INFINITY {
-                lb_finite = false;
-            } else if lb_finite {
-                row_lb += a_ij * ub_j;
-            }
-            if lb_j == f64::NEG_INFINITY {
-                ub_finite = false;
-            } else if ub_finite {
-                row_ub += a_ij * lb_j;
-            }
-        }
-    }
-    (row_lb, row_ub, lb_finite, ub_finite)
-}
-
 /// LPをPresolveして縮約問題を返す。
 ///
 /// 問題が明らかにInfeasible/Unboundedな場合はErrを返す。
@@ -667,7 +628,7 @@ fn step4_redundant_constraint(st: &mut PresolveState) -> Result<(), PresolveStat
         }
         let active_entries = st.active_row_entries(i);
         let (row_lb, row_ub, lb_fin, ub_fin) =
-            activity_range_from(&active_entries, &st.bounds);
+            crate::presolve::activity::activity_range(&active_entries, &st.bounds, None);
 
         let redundant = match st.constraint_types[i] {
             ConstraintType::Le => ub_fin && row_ub <= st.b[i] + ZERO_TOL,
