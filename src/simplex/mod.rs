@@ -1392,9 +1392,8 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Optimal);
     }
 
-    /// extract_dual_info must subtract the upper-bound dual mu_j from rc.
-    /// min -2x1-x2 s.t. x1+x2≤4, 0≤x1≤2, 0≤x2≤3  ⇒  x=(2,2).
-    /// Missing mu_j would give rc[0] = -2-lambda ≠ 0 (complementarity error).
+    /// Optimality at upper bound (min): for x=(2,2) of min -2x1-x2 s.t. x1+x2≤4, 0≤x1≤2, 0≤x2≤3,
+    /// x[1] basic ⇒ lambda=-1, then rc[0]=c[0]-lambda*a[0,0]=-2+1=-1≤0 under rc=c−A^T y.
     #[test]
     fn test_extract_dual_info_ub_dual() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -1418,9 +1417,8 @@ mod tests {
 
         let rc = &result.reduced_costs;
 
-        // x[0] is at upper bound (x[0] = ub = 2) → rc[0] ≤ 0
-        // If mu_j subtraction is missing, rc[0] = c[0] - lambda*a[0,0] = -1 - (-2) = 1 > 0
-        assert!(rc[0] <= 1e-6, "rc[0]={} should be <= 0 (x[0] at upper bound; mu_j subtraction required)", rc[0]);
+        // x[0] at upper bound ⇒ optimality requires rc[0] ≤ 0 under rc = c − A^T y.
+        assert!(rc[0] <= 1e-6, "rc[0]={} should be <= 0 (x[0] at upper bound)", rc[0]);
 
         // x[1] is strictly between bounds (0 < x[1]=2 < 3) → x[1] is basic → rc[1] ≈ 0
         assert!(rc[1].abs() < 1e-6, "rc[1]={} should be ≈ 0 (x[1] is basic)", rc[1]);
