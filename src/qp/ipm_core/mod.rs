@@ -24,6 +24,14 @@ pub(crate) const GAMMA_L: f64 = 0.1;
 pub(crate) const GAMMA_U: f64 = 10.0;
 pub(crate) const ALPHA_IMPROVE_THRESHOLD: f64 = 1e-3;
 
+/// IPM 内部 eps の machine-noise floor。`eps_orig × σ_total` (core.rs) と
+/// `user_eps / amp` (scaling.rs) の両 σ-tightening が `nr_d_rel` 達成可能域
+/// (≈ √n × machine_eps、典型 n≈10^4 で √n≈100) を割らないよう下限を共通化。
+/// 元空間は post-processing が user_eps で再 gate するため誤判定にはならない。
+/// 100 = √n の典型値 + scaled-eps が 2.22e-14 → user_eps=1e-6 × σ_total ≥ 2.22e-8
+/// で初めて発動 (well-scaled では no-op)。
+pub(crate) const IPM_EPS_NOISE_FLOOR: f64 = 100.0 * f64::EPSILON;
+
 /// Ruiz scaling 付き IP-PMM。
 pub fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     scaling::solve_with_ruiz_scaling(problem, options, ippmm::solve_ippmm_inner)

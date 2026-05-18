@@ -43,6 +43,27 @@ pub struct WarmStartBasis {
     pub x_b: Vec<f64>,
 }
 
+/// QP IP-PMM の内部 interior point 引継ぎ情報。
+///
+/// 前ノードの最適 (x, y, μ) を次ノードの central path 出発点として使う。
+/// LP の [`WarmStartBasis`] は basis index、QP は central path 上の点で
+/// 共存しないため別 struct で持つ。
+///
+/// 規約:
+/// - `x` 長さ = n (primal)
+/// - `y` 長さ = m (元制約 dual、ユーザー符号規約。Ge は内部で反転される)
+/// - `mu` = sᵀy/m_ineq に相当する barrier parameter。
+///   再帰的 B&B では parent の final μ をそのまま渡す想定。
+///
+/// 入口で interior 補正される (μ floor / x bound margin / y positivity)
+/// ため境界値や 0 を渡しても安全に IPM が起動する。
+#[derive(Debug, Clone)]
+pub struct QpWarmStart {
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub mu: f64,
+}
+
 /// QP ソルバーの収束精度を抽象化する列挙型
 ///
 /// 各ソルバーは `Tolerance` を内部の収束基準に変換して使用する。
@@ -127,6 +148,8 @@ pub struct SolverOptions {
     pub dual_tol: f64,
     /// warm-start基底情報（Noneの場合はコールドスタート）
     pub warm_start: Option<WarmStartBasis>,
+    /// QP IP-PMM の interior point warm start (B&B node 間引継ぎ用)
+    pub warm_start_qp: Option<QpWarmStart>,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
     /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
@@ -176,6 +199,7 @@ impl Default for SolverOptions {
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
             warm_start: None,
+            warm_start_qp: None,
             presolve: true,
             timeout_secs: None,
             cancel_flag: None,

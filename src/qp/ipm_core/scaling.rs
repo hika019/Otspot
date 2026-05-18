@@ -5,8 +5,11 @@ use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 
-/// `user_eps / amplification` が denormal/zero になるのを抑える。
-pub(crate) const EPS_FLOOR: f64 = f64::EPSILON;
+/// `user_eps / amplification` の machine-noise floor。
+/// `IPM_EPS_NOISE_FLOOR` (ipm_core/mod.rs) と整合: core.rs の σ-tightening と
+/// scaling.rs の amp-tightening は両方とも IPM convergence eps の下押しで、
+/// amp > 100 が起きると 1×EPS 旧 floor が core 側 floor を defeat してしまう。
+pub(crate) const EPS_FLOOR: f64 = super::IPM_EPS_NOISE_FLOOR;
 
 /// Suboptimal → Optimal 昇格時の双対ギャップ閾値。
 pub(crate) const PROMOTION_GAP_TOL: f64 = 1e-1;
@@ -76,6 +79,19 @@ where
             let mut adjusted_opts = options.clone();
             adjusted_opts.ipm.eps =
                 (options.ipm_eps() / amplification).max(EPS_FLOOR);
+            // warm start: user 空間 (x, y) を scaled 空間に変換 (Ruiz: x = D·x_s, y = E·y_s/c)
+            if let Some(ws) = adjusted_opts.warm_start_qp.as_mut() {
+                if ws.x.len() == n && ws.y.len() == m {
+                    for j in 0..n { ws.x[j] /= scaler.d[j]; }
+                    for i in 0..m { ws.y[i] = scaler.c * ws.y[i] / scaler.e[i]; }
+                } else {
+                    eprintln!(
+                        "[warm_start_qp dropped] ruiz dim mismatch: ws.x={}/{} ws.y={}/{}",
+                        ws.x.len(), n, ws.y.len(), m
+                    );
+                    adjusted_opts.warm_start_qp = None;
+                }
+            }
 
             let scaled_result = inner_solver(
                 &scaled_problem,
