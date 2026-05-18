@@ -9,3 +9,11 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 default-filter = "kind(lib) + kind(bin)"
 test-threads = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 2 }
+
+# CPU 時間 sensitive な faer per-call parallelism sentinel (#31) は
+# CPU を独占しないと par scaling が安定しない (他 test と並走で wall noise)。
+# threads-required = "num-cpus" で各 sentinel test が全 CPU を要求 →
+# 他 test と排他、par_sentinel test 同士も serialize される。
+[[profile.default.overrides]]
+filter = "test(linalg::par_sentinel::)"
+threads-required = "num-cpus"
