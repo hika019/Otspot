@@ -1,4 +1,4 @@
-//! task#13: ill-scaled QP で `IPM_EPS_NOISE_FLOOR` が IPM 空転を断つ regression sentinel。
+//! ill-scaled QP で `IPM_EPS_NOISE_FLOOR` が IPM 空転を断つ regression sentinel。
 //!
 //! 仕様 (`src/qp/ipm_core/mod.rs::IPM_EPS_NOISE_FLOOR`):
 //!   floor = 100 × machine_eps ≈ 2.22e-14
