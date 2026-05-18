@@ -504,6 +504,12 @@ pub struct ModelResult {
     /// Dual solution (shadow prices), if available.
     pub dual_solution: Option<Vec<f64>>,
     /// Reduced costs, if available.
+    ///
+    /// 通常は `c − A^T y`。例外: presolve の bound-tightened-fixed 列が *元の* 上下限に
+    /// 着地した場合、`reduced_costs[j]` には bound dual (μ_lb / μ_ub) が暗黙吸収され、
+    /// raw `c − A^T y` ではなく at-lb で `max(·, 0)` / at-ub で `min(·, 0)` の clamp 値
+    /// となる (presolve/postsolve.rs::BoundAbsorb)。LP path で `bound_duals` は default
+    /// 空のため μ を分離取得することはできない (QP path のみ populate)。
     pub reduced_costs: Option<Vec<f64>>,
     /// Constraint slacks, if available.
     pub slack: Option<Vec<f64>>,
