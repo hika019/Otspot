@@ -3,11 +3,12 @@
 //! 設計書 §3.3 `dual_simplex_core_advanced()` に準拠。
 //! DualLeavingStrategy / RatioTestStrategy を差し替え可能な形で実装する。
 //!
-//! Phase 2 実装範囲:
-//! - MostInfeasibleLeaving によるleaving選択
+//! 実装範囲:
+//! - DualLeavingStrategy 経由のleaving選択 (MostInfeasibleLeaving / DualSteepestEdgeLeaving)
 //! - HarrisRatioTest による ratio test
-//! - LuBasis::needs_refactor() ベースの refactor判定（50反復固定廃止）
-//! - DSE重み更新（3j）: Phase 3でno-opからDSEに差替予定
+//! - LuBasis::needs_refactor() ベースの refactor判定
+//! - DSE 重み更新 (3j): `leaving.needs_sigma()` が true のとき σ = B^{-1} ρ_p
+//!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
@@ -133,7 +134,7 @@ fn compute_dual_vars(
 /// - `m`: 制約数
 /// - `n_price`: price対象の列数
 /// - `options`: ソルバーオプション
-/// - `leaving`: 離基変数選択戦略（DualLeavingStrategy実装: MostInfeasibleLeaving or DualSteepestEdge）
+/// - `leaving`: 離基変数選択戦略（DualLeavingStrategy実装。`&mut` でDSE等の状態更新を許容）
 ///
 /// # 戻り値
 /// SimplexOutcome (Optimal/Unbounded/Timeout)
@@ -146,7 +147,7 @@ pub(crate) fn dual_simplex_core_advanced(
     m: usize,
     n_price: usize,
     options: &SolverOptions,
-    leaving: &dyn DualLeavingStrategy,
+    leaving: &mut dyn DualLeavingStrategy,
     iter_count_out: &mut usize,
 ) -> SimplexOutcome {
     // Step 1: LuBasis初期化
@@ -179,6 +180,35 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut rho_dense = vec![0.0f64; m];
     let mut trow = vec![0.0f64; n_price];
     let mut alpha_dense = vec![0.0f64; m];
+    // σ = B^{-1} ρ_p, allocated only when the strategy needs it (DSE).
+    // Stateless strategies skip the extra FTRAN entirely; sigma_dense
+    // stays empty and `after_pivot` ignores its argument.
+    let needs_sigma = leaving.needs_sigma();
+    let mut sigma_dense = if needs_sigma {
+        vec![0.0f64; m]
+    } else {
+        Vec::new()
+    };
+
+    // DSE init: γ_i = ||(B^{-1})_{i,:}||² via m BTRANs. Required for warm-start
+    // bases (B ≠ I) — γ = 1 is only correct at the identity basis, and the σ
+    // cross-term in update_after_pivot would otherwise dominate and clamp γ
+    // to FLOOR within a few pivots (verified on textbook degenerate LP).
+    // Cost: O(m²). Acceptable: one-shot per warm-start solve.
+    if needs_sigma {
+        let mut gamma_truth = vec![0.0f64; m];
+        let mut e_i = vec![0.0f64; m];
+        let mut rho_i = vec![0.0f64; m];
+        for i in 0..m {
+            e_i.iter_mut().for_each(|v| *v = 0.0);
+            e_i[i] = 1.0;
+            let mut sv = SparseVec::from_dense(&e_i);
+            basis_mgr.btran(&mut sv);
+            sv.to_dense_into(&mut rho_i);
+            gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
+        }
+        leaving.set_initial_gamma(&gamma_truth);
+    }
 
     // Anti-cycling state: progress_metric が K iter 改善なし → Bland fallback。
     // 一度 bland_mode に入ったら戻さない (再 cycle 防止)。progress_metric は
@@ -282,7 +312,16 @@ pub(crate) fn dual_simplex_core_advanced(
             if bland_mode {
                 apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
             }
+            leaving.after_refactor(m);
             continue;
+        }
+
+        // 3f': DSE-only — σ = B^{-1} ρ_p (extra FTRAN for the γ rank-1 update).
+        // Computed *before* the basis update so it refers to the old B^{-1}.
+        if needs_sigma {
+            let mut sigma_sv = SparseVec::from_dense(&rho_dense);
+            basis_mgr.ftran(&mut sigma_sv);
+            sigma_sv.to_dense_into(&mut sigma_dense);
         }
 
         // 3h: x_B更新 + 微小値クランプ
@@ -310,8 +349,9 @@ pub(crate) fn dual_simplex_core_advanced(
             reduced_costs[leaving_col] = -theta;
         }
 
-        // 3j: DSE重み更新（Phase 2ではno-op）
-        // TODO Phase 3: DualSteepestEdge::update_weights() をここで呼び出す
+        // 3j: DSE 重み更新 (stateless strategies は no-op)。
+        // σ は needs_sigma 経路でのみ valid、stateless 側は &[] が渡る。
+        leaving.after_pivot(leaving_row, &alpha_dense, &sigma_dense, pivot_element);
 
         // 基底追跡更新
         if leaving_col < n_price {
@@ -339,6 +379,23 @@ pub(crate) fn dual_simplex_core_advanced(
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             if bland_mode {
                 apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+            }
+            // Stateful weight 戦略 (DSE) は drift をここでリセット +
+            // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
+            leaving.after_refactor(m);
+            if needs_sigma {
+                let mut gamma_truth = vec![0.0f64; m];
+                let mut e_i = vec![0.0f64; m];
+                let mut rho_i = vec![0.0f64; m];
+                for i in 0..m {
+                    e_i.iter_mut().for_each(|v| *v = 0.0);
+                    e_i[i] = 1.0;
+                    let mut sv = SparseVec::from_dense(&e_i);
+                    basis_mgr.btran(&mut sv);
+                    sv.to_dense_into(&mut rho_i);
+                    gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
+                }
+                leaving.set_initial_gamma(&gamma_truth);
             }
         }
 
