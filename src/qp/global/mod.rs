@@ -104,11 +104,22 @@ pub fn solve_qp_global_with_stats(
 
     let mut tree = BBTree::new();
 
-    // root 分枝。x* が box midpoint 同一なら分枝不能 = ε-converged 扱い。
+    // root 分枝。分枝不能 (= 全変数 infinite bound or width <= MIN_BRANCH_BOX_WIDTH)
+    // のとき: 下界が incumbent と gap_tol 以内なら proof 済み、
+    // そうでなければ証明不能 → LocallyOptimal (= 大域証明できない)。
     let root_node = BBNode::root(root_bounds, root_lb);
     let root_x = state.incumbent_sol.clone();
     match select_branching_variable(&root_node, &root_x) {
-        None => return (state.finalize_proven(root_lb), stats),
+        None => {
+            return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+                (state.finalize_proven(root_lb), stats)
+            } else {
+                (
+                    state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg),
+                    stats,
+                )
+            };
+        }
         Some(j) => {
             let warm = state.build_warm();
             let (l, r) = split_node(&root_node, j, root_x[j], warm);

@@ -311,6 +311,36 @@ fn max_nodes_zero_returns_root_only_incumbent() {
 }
 
 #[test]
+fn unbounded_variable_returns_locally_optimal_not_optimal() {
+    // 半無限境界 (x in [0, inf)) では box-cutting BB は分枝対象を持たない。
+    // root local IPM が見つけた point は feasible ですが大域証明はできない →
+    // 必ず LocallyOptimal (= 当該方向の Phase 4 α-BB 必要 sign)。
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let p = QpProblem::new(
+        q,
+        vec![1.0, 1.0],
+        a,
+        vec![1.0],
+        vec![(0.0, f64::INFINITY); 2],
+        vec![solver::problem::ConstraintType::Eq],
+    )
+    .unwrap();
+    let cfg = GlobalOptimizationConfig {
+        gap_tol: 1e-3,
+        max_depth: 20,
+        max_nodes: 1_000,
+        branching: BranchingStrategy::MaxViolation,
+    };
+    let r = solve_qp_global(&p, &opts(5.0), &cfg);
+    assert!(
+        matches!(r.status, SolveStatus::LocallyOptimal),
+        "expected LocallyOptimal under semi-infinite bounds, got {:?}",
+        r.status
+    );
+}
+
+#[test]
 fn pure_convex_qp_solves_at_root_with_optimal_status() {
     // Convex (PSD Q + c) は root local solve が global を与え、interval lb が
     // 緩くても proof 可能。Optimal が返ることを sentinel として保護。
