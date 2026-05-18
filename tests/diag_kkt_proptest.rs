@@ -2,8 +2,11 @@
 //!
 //! ランダム生成 LP / 凸 QP / 非凸 QP の Optimal/LocallyOptimal 出力に対し、
 //! KKT 4 成分 (primal feas / stationarity / complementarity ineq / comp bound)
-//! の成分相対化 max が `EPS_KKT` 未満であることを検証する。固定 fixture
-//! 中心の既存 unit test を補完し、未踏 shape を系統的に cover する。
+//! の成分相対化 max が threshold 未満であることを検証する。凸 (LP / convex QP)
+//! は `EPS_KKT` (1e-4) 厳格、非凸 QP は status 別に `EPS_KKT_NONCONVEX_LOCAL`
+//! (LocallyOptimal, leaf IPM 由来) と `EPS_KKT_NONCONVEX_GLOBAL` (Optimal, BB
+//! gap-closed 主張に伴う bd 復元 drift 既知) で必ず assert (WARN-only は teeth
+//! を失う)。固定 fixture 中心の既存 unit test を補完し、未踏 shape を系統的に cover する。
 //!
 //! ## sentinel 検出力 (no-op proof)
 //!
@@ -39,6 +42,15 @@ use solver::solve_lp_with;
 use solver::sparse::CscMatrix;
 
 const EPS_KKT: f64 = 1e-4;
+/// 非凸 QP LocallyOptimal 状態の閾値。leaf local IPM の unscale 復元 drift で
+/// stationarity が O(1e-4) drift する分を吸収。WARN-only に逃げないため必ず assert。
+const EPS_KKT_NONCONVEX_LOCAL: f64 = 1e-3;
+/// 非凸 QP Optimal-claim 状態の閾値。`solve_qp_global` は BB tree 完走 (ε-gap
+/// closed) で Optimal を主張するが、leaf の bound dual 復元が non-PSD Q で O(1)
+/// drift する既知挙動を持つ (KKT 残差 ≈ 1 のケースを実測)。WARN-only に逃げず
+/// 緩い threshold で必ず assert することで、これ以上悪化する regression を catch
+/// する。本来は global 解の bd 復元 fix が真因対処 (新規 follow-up task)。
+const EPS_KKT_NONCONVEX_GLOBAL: f64 = 1.5;
 /// LP complementarity は random / ill-conditioned shape で 〜10% drift する
 /// (近接 active 制約 slack ~ 1e-3 級 + y ~ O(1) で y·slack 〜 1e-3 が出る)。
 /// LP solver convergence drift であり KKT helper bug ではないため、
@@ -473,13 +485,15 @@ fn assert_kkt_when_optimal_lp(
 fn assert_kkt_when_optimal_qp(
     qp: &QpProblem,
     res: &SolverResult,
-    require_stationarity: bool,
+    threshold_local: f64,
+    threshold_global: f64,
     label: &str,
 ) -> Result<(), TestCaseError> {
-    let claims_kkt = matches!(res.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
-    if !claims_kkt {
-        return Ok(());
-    }
+    let threshold = match res.status {
+        SolveStatus::LocallyOptimal => threshold_local,
+        SolveStatus::Optimal => threshold_global,
+        _ => return Ok(()),
+    };
     if res.solution.len() != qp.num_vars {
         return Err(TestCaseError::fail(format!(
             "{}: {} 主張なのに solution shape 不一致 (got {} expected {})",
@@ -487,21 +501,11 @@ fn assert_kkt_when_optimal_qp(
         )));
     }
     let kkt = compute_qp_kkt_max(qp, &res.solution, &res.dual_solution, &res.bound_duals);
-    if require_stationarity {
-        prop_assert!(
-            kkt.is_finite() && kkt < EPS_KKT,
-            "{}: status={:?} KKT max={:.3e} >= {:.0e}",
-            label, res.status, kkt, EPS_KKT,
-        );
-    } else {
-        // 非凸 Optimal-claim 経路 (Q non-PSD の unscale 復元不整合は既知) は WARN log。
-        if !(kkt.is_finite() && kkt < EPS_KKT) {
-            eprintln!(
-                "[kkt-proptest WARN] {}: status={:?} KKT max={:.3e} >= {:.0e}",
-                label, res.status, kkt, EPS_KKT,
-            );
-        }
-    }
+    prop_assert!(
+        kkt.is_finite() && kkt < threshold,
+        "{}: status={:?} KKT max={:.3e} >= {:.0e}",
+        label, res.status, kkt, threshold,
+    );
     Ok(())
 }
 
@@ -525,21 +529,26 @@ proptest! {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(QP_TIMEOUT_SECS);
         let res = solve_qp_with(&qp, &opts);
-        assert_kkt_when_optimal_qp(&qp, &res, true, "prop_convex_qp_kkt_invariants")?;
+        assert_kkt_when_optimal_qp(&qp, &res, EPS_KKT, EPS_KKT, "prop_convex_qp_kkt_invariants")?;
     }
 
     /// 非凸 QP。bounds box [-mag, +mag]、`solve_qp_global` target。
-    /// LocallyOptimal/Optimal 両方を assert (LocallyOptimal は local KKT 規約成立)。
+    /// LocallyOptimal/Optimal 両方で stationarity を強制する。nonconvex 第一階条件
+    /// (∇f − Aᵀy − z = 0) は status に依らず KKT 必須。WARN-only は sentinel teeth
+    /// を失わせるため不可。
     #[test]
     fn prop_nonconvex_qp_kkt_invariants(qp in nonconvex_qp_strategy_inner(3)) {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(GLOBAL_TIMEOUT_SECS);
         let cfg = GlobalOptimizationConfig::default();
         let res = solve_qp_global(&qp, &opts, &cfg);
-        // 非凸 Optimal-claim は非PSD unscale 復元不整合 (既存 pre-existing) のため
-        // strict 強制を切る。LocallyOptimal は local KKT で require_stationarity=true 相当
-        // だが proptest 安定のため緩く WARN-only。検出力は sentinel test で担保。
-        assert_kkt_when_optimal_qp(&qp, &res, false, "prop_nonconvex_qp_kkt_invariants")?;
+        assert_kkt_when_optimal_qp(
+            &qp,
+            &res,
+            EPS_KKT_NONCONVEX_LOCAL,
+            EPS_KKT_NONCONVEX_GLOBAL,
+            "prop_nonconvex_qp_kkt_invariants",
+        )?;
     }
 }
 
@@ -579,7 +588,7 @@ proptest! {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(QP_TIMEOUT_SECS);
         let res = solve_qp_with(&qp, &opts);
-        assert_kkt_when_optimal_qp(&qp, &res, true, "prop_convex_qp_kkt_invariants_medium")?;
+        assert_kkt_when_optimal_qp(&qp, &res, EPS_KKT, EPS_KKT, "prop_convex_qp_kkt_invariants_medium")?;
     }
 }
 
