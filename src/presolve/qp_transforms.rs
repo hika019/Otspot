@@ -4,6 +4,7 @@
 
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
+use crate::presolve::activity::activity_range;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
@@ -105,49 +106,6 @@ fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
         }
     }
     0.0
-}
-
-/// Activity range for a row's active entries (same logic as the LP variant).
-fn activity_range(
-    entries: &[(usize, f64)],
-    bounds: &[(f64, f64)],
-    exclude_col: Option<usize>,
-) -> (f64, f64, bool, bool) {
-    let mut row_lb = 0.0f64;
-    let mut row_ub = 0.0f64;
-    let mut lb_finite = true;
-    let mut ub_finite = true;
-
-    for &(j, a_ij) in entries {
-        if Some(j) == exclude_col {
-            continue;
-        }
-        let (lb_j, ub_j) = bounds[j];
-        if a_ij > 0.0 {
-            if lb_j == f64::NEG_INFINITY {
-                lb_finite = false;
-            } else if lb_finite {
-                row_lb += a_ij * lb_j;
-            }
-            if ub_j == f64::INFINITY {
-                ub_finite = false;
-            } else if ub_finite {
-                row_ub += a_ij * ub_j;
-            }
-        } else if a_ij < 0.0 {
-            if ub_j == f64::INFINITY {
-                lb_finite = false;
-            } else if lb_finite {
-                row_lb += a_ij * ub_j;
-            }
-            if lb_j == f64::NEG_INFINITY {
-                ub_finite = false;
-            } else if ub_finite {
-                row_ub += a_ij * lb_j;
-            }
-        }
-    }
-    (row_lb, row_ub, lb_finite, ub_finite)
 }
 
 /// Kahan-compensated `*sum += delta` to keep presolve-induced rounding noise
