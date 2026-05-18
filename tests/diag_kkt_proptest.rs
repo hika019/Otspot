@@ -680,30 +680,64 @@ fn sentinel_qp_perturbed_solution_fails_kkt() {
     );
 }
 
-/// 規約整合 sanity: bound_duals 配置 `[lb; ub]` の入替えで KKT が増えることを
-/// assert する。実装が「bd を無視する」no-op だと両者一致して FAIL する。
+/// 解析的に bd を確定できる active-bound QP を作り、`[lb; ub]` 配置を入替えた
+/// 場合に KKT max が `SENTINEL_MIN_KKT` 以上跳ね上がることを assert する。
+///
+/// 構成:
+///   min ½ ‖x‖² + cᵀ x s.t. 0 ≤ x ≤ 5, c = (1,1,1).
+///   unconstrained min x* = -c = (-1,-1,-1) → lb 活性 → x* = (0,0,0).
+///   stationarity: Qx + c − lb_du + ub_du = 0 + 1 − lb_du + 0 = 0 → lb_du = 1.
+///   よって true bd = [1,1,1, 0,0,0] (layout `[lb; ub]`)。
+///
+/// swap bd = [0,0,0, 1,1,1] にすると stationarity が 1 + 1 = 2、bound comp も
+/// ub_du · (ub−x) = 1·5 で活性化し、KKT max が大きく跳ねる。
+/// no-op (bd 引数を無視) 実装ではこの差が消えるので必ず FAIL する。
 #[test]
 fn sentinel_qp_swapped_bound_duals_changes_kkt() {
-    let qp = analytic_qp_for_sentinel();
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(QP_TIMEOUT_SECS);
-    let res = solve_qp_with(&qp, &opts);
-    let base = compute_qp_kkt_max(&qp, &res.solution, &res.dual_solution, &res.bound_duals);
-
-    // bound 全て非活性 (内点解) なら bd 全て ≈ 0 で swap でも変化しない。
-    // c = (0.3, -0.7, 0.5), bounds [-2,2] → x* ≈ -c (interior) で実際 bd ≈ 0。
-    // よってここでは bd の長さが 2n になることだけ確認し、no-op detection は
-    // sentinel_qp_perturbed_solution_fails_kkt に委譲。
-    let expected_bd_len = qp.num_vars * 2;
-    assert_eq!(
-        res.bound_duals.len(),
-        expected_bd_len,
-        "bound_duals layout 不一致: got {}, expected {}",
-        res.bound_duals.len(), expected_bd_len,
+    let n = 3;
+    let q = build_psd_q(
+        &{
+            let mut l = vec![0.0; n * n];
+            for i in 0..n {
+                l[i * n + i] = 1.0;
+            }
+            l
+        },
+        n,
     );
+    let c = vec![1.0; n];
+    let a = zero_csc(0, n);
+    let bounds = vec![(0.0, 5.0); n];
+    let qp = QpProblem::new(q, c, a, vec![], bounds, vec![]).expect("active-bound QP");
+
+    let x_star = vec![0.0; n];
+    let y_star: Vec<f64> = Vec::new();
+    let mut bd_true = vec![0.0; 2 * n];
+    for i in 0..n {
+        bd_true[i] = 1.0;
+    }
+    let mut bd_swapped = vec![0.0; 2 * n];
+    for i in 0..n {
+        bd_swapped[n + i] = 1.0;
+    }
+
+    let base = compute_qp_kkt_max(&qp, &x_star, &y_star, &bd_true);
+    let swapped = compute_qp_kkt_max(&qp, &x_star, &y_star, &bd_swapped);
+    eprintln!("[sentinel_swap] base={:.3e} swapped={:.3e}", base, swapped);
+
     assert!(
         base.is_finite() && base < EPS_KKT,
-        "analytic QP KKT={:.3e} not below {:.0e}",
+        "true bd に対する KKT={:.3e} not below {:.0e} — helper bug or 規約 mismatch",
         base, EPS_KKT,
+    );
+    assert!(
+        swapped >= SENTINEL_MIN_KKT,
+        "swap した bd で KKT={:.3e} < {:.0e} — bd 引数 no-op の疑い",
+        swapped, SENTINEL_MIN_KKT,
+    );
+    assert!(
+        swapped > base * 100.0 || swapped >= SENTINEL_MIN_KKT,
+        "swap 前後で KKT が変化していない (base={:.3e}, swapped={:.3e})",
+        base, swapped,
     );
 }
