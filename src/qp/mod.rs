@@ -17,6 +17,12 @@ pub use diagnose::{
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 pub use multistart::solve_qp_multistart;
 pub(crate) use lp_dispatch::solve_as_lp_pub;
+/// Public accessor for the LP→IPM size gate (used by qps_benchmark for label
+/// reporting). Returns `true` when an LP of size `(n, m)` will be routed via
+/// IPM-first in `solve_as_lp_pub`.
+pub fn lp_dispatch_prefers_ipm(n: usize, m: usize) -> bool {
+    lp_dispatch::prefer_ipm_for_size(n, m)
+}
 pub(crate) use postsolve::bound_dual::{
     project_duals_from_singleton_columns, remap_bound_duals_to_orig, zero_inactive_inequality_duals,
 };

@@ -895,7 +895,7 @@ fn main() {
         let n = prob.num_vars;
         let m = prob.num_constraints;
         let nnz_before = prob.q.nnz() + prob.a.nnz();
-        let _is_qp = prob.q.nnz() > 0;
+        let is_qp = prob.q.nnz() > 0;
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
@@ -910,7 +910,16 @@ fn main() {
             name, result.status, elapsed_s
         );
 
-        let method_label = "ipm";
+        // QP は IPPMM 1 本。LP (Q=0) は size により simplex / IPM が分岐するため
+        // 実 dispatch を反映: 大規模 LP は IPM 経路、それ以外は simplex (cf.
+        // src/qp/lp_dispatch.rs)。誤誘導 (元 "ipm" hardcode) を是正 (#33)。
+        let method_label = if is_qp {
+            "ipm"
+        } else if solver::qp::lp_dispatch_prefers_ipm(n, m) {
+            "lp-ipm"
+        } else {
+            "lp-simplex"
+        };
         let resid_str = match result.final_residuals {
             Some((pf, df, gap)) => format!("pf={:.1e} df={:.1e} gap={:.1e}", pf, df, gap),
             None => String::new(),
