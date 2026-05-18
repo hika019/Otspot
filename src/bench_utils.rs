@@ -4,8 +4,65 @@
 
 use crate::problem::{ConstraintType, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
+use crate::sparse::CscMatrix;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// 制約 `Ax {op} b` と bounds `lb ≤ x ≤ ub` を成分相対化して `max` 違反を返す。
+///
+/// LP / QP の primal feasibility 残差は共通形 (Le/Ge/Eq + finite bounds) なので
+/// helper として抽出。`ax = a · x` を渡せない場合は INFINITY (shape 不一致)。
+///
+/// 規約:
+///   - Le:  max(0, ax−b) / (1 + |ax| + |b|)
+///   - Ge:  max(0, b−ax) / (1 + |ax| + |b|)
+///   - Eq:  |ax−b|       / (1 + |ax| + |b|)
+///   - lb finite: max(0, lb−xⱼ) / (1 + |xⱼ| + |lb|)
+///   - ub finite: max(0, xⱼ−ub) / (1 + |xⱼ| + |ub|)
+pub fn primal_feas_max(
+    a: &CscMatrix,
+    b: &[f64],
+    ct: &[ConstraintType],
+    bounds: &[(f64, f64)],
+    x: &[f64],
+) -> f64 {
+    let n = bounds.len();
+    if x.len() != n {
+        return f64::INFINITY;
+    }
+    let ax = if a.nrows > 0 {
+        match a.mat_vec_mul(x) {
+            Ok(v) => v,
+            Err(_) => return f64::INFINITY,
+        }
+    } else {
+        Vec::new()
+    };
+    let mut max_v = 0.0_f64;
+    #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
+    for (i, cti) in ct.iter().enumerate() {
+        if i >= ax.len() || i >= b.len() {
+            continue;
+        }
+        let viol = match cti {
+            ConstraintType::Le => (ax[i] - b[i]).max(0.0),
+            ConstraintType::Ge => (b[i] - ax[i]).max(0.0),
+            ConstraintType::Eq => (ax[i] - b[i]).abs(),
+            _ => continue,
+        };
+        let scale = 1.0 + ax[i].abs() + b[i].abs();
+        max_v = max_v.max(viol / scale);
+    }
+    for (j, &(lb, ub)) in bounds.iter().enumerate() {
+        if lb.is_finite() {
+            max_v = max_v.max((lb - x[j]).max(0.0) / (1.0 + x[j].abs() + lb.abs()));
+        }
+        if ub.is_finite() {
+            max_v = max_v.max((x[j] - ub).max(0.0) / (1.0 + x[j].abs() + ub.abs()));
+        }
+    }
+    max_v
+}
 
 /// QP 元空間 KKT 残差 (stationarity / primal_inf / comp_ineq / comp_bound) の
 /// 成分相対化 max。`diag_nonconvex_kkt.rs` の compute_kkt と同一規約:
@@ -57,6 +114,14 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
         max_resid = max_resid.max(r.abs() / scale);
     }
 
+    max_resid = max_resid.max(primal_feas_max(
+        &prob.a,
+        &prob.b,
+        &prob.constraint_types,
+        &prob.bounds,
+        x,
+    ));
+
     let ax = if prob.a.nrows > 0 {
         match prob.a.mat_vec_mul(x) {
             Ok(v) => v,
@@ -65,27 +130,6 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
     } else {
         Vec::new()
     };
-    #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive]; wildcard guards future variants.
-    for (i, ct) in prob.constraint_types.iter().enumerate() {
-        let violation = match ct {
-            ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-            ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
-            ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-            _ => continue,
-        };
-        let scale = 1.0 + ax[i].abs() + prob.b[i].abs();
-        max_resid = max_resid.max(violation / scale);
-    }
-    for (j, &(lb, ub)) in prob.bounds.iter().enumerate() {
-        if lb.is_finite() {
-            let v = (lb - x[j]).max(0.0);
-            max_resid = max_resid.max(v / (1.0 + x[j].abs() + lb.abs()));
-        }
-        if ub.is_finite() {
-            let v = (x[j] - ub).max(0.0);
-            max_resid = max_resid.max(v / (1.0 + x[j].abs() + ub.abs()));
-        }
-    }
 
     if !ax.is_empty() && !y.is_empty() {
         #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
