@@ -264,3 +264,101 @@ pub(crate) fn refine_dual_lsq_irls(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::{SolveStatus, SolverResult};
+    use crate::sparse::CscMatrix;
+
+    /// 複数 well-conditioned 問題で y=0 から LSQ refine が真の解に到達するか。
+    /// no-op 化検証: refine_dual_lsq 末尾の `if max_rel_new < max_rel_old { ... }` を
+    /// 削除 (= y_new を採用しない) すると全 case で初期 y=0 のまま留まり FAIL することを手動で確認済。
+    #[test]
+    fn refine_dual_lsq_improves_on_multi_pattern_well_conditioned() {
+        struct Case {
+            name: &'static str,
+            a_triplets: (Vec<usize>, Vec<usize>, Vec<f64>, usize, usize),
+            c: Vec<f64>,
+            x: Vec<f64>,
+            expected_y: Vec<f64>,
+        }
+        let cases = vec![
+            Case {
+                name: "1x1: a=2, c=6 → y=-3",
+                a_triplets: (vec![0], vec![0], vec![2.0], 1, 1),
+                c: vec![6.0],
+                x: vec![0.0],
+                expected_y: vec![-3.0],
+            },
+            Case {
+                name: "1x1: a=4, c=-8 → y=2",
+                a_triplets: (vec![0], vec![0], vec![4.0], 1, 1),
+                c: vec![-8.0],
+                x: vec![0.0],
+                expected_y: vec![2.0],
+            },
+            Case {
+                name: "diag 2x2: a=[3,5], c=[-9,-15] → y=[3,3]",
+                a_triplets: (vec![0, 1], vec![0, 1], vec![3.0, 5.0], 2, 2),
+                c: vec![-9.0, -15.0],
+                x: vec![0.0, 0.0],
+                expected_y: vec![3.0, 3.0],
+            },
+        ];
+
+        for case in &cases {
+            let (rows, cols, vals, nrows, ncols) = &case.a_triplets;
+            let a = CscMatrix::from_triplets(rows, cols, vals, *nrows, *ncols).unwrap();
+            let q = CscMatrix::new(*ncols, *ncols);
+            let b = vec![0.0_f64; *nrows];
+            let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); *ncols];
+            let problem = QpProblem::new_all_le(q, case.c.clone(), a, b, bounds).unwrap();
+            let mut result = SolverResult {
+                status: SolveStatus::Optimal,
+                solution: case.x.clone(),
+                dual_solution: vec![0.0_f64; *nrows],
+                bound_duals: vec![],
+                ..SolverResult::default()
+            };
+            refine_dual_lsq(&problem, &mut result, None);
+            for (i, &expected) in case.expected_y.iter().enumerate() {
+                assert!(
+                    (result.dual_solution[i] - expected).abs() < 1e-9,
+                    "{}: y[{}] expected {}, got {}",
+                    case.name,
+                    i,
+                    expected,
+                    result.dual_solution[i]
+                );
+            }
+        }
+    }
+
+    /// refine_dual_lsq の DD guard が「LSQ y が改善しない」ケースで現状 y を保持する。
+    /// 既に最適 y を与えてもう一度 refine をかけた場合に y が変わらないこと。
+    #[test]
+    fn refine_dual_lsq_keeps_y_when_already_optimal() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let q = CscMatrix::new(1, 1);
+        let c = vec![6.0_f64];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let optimal_y = -3.0_f64;
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0],
+            dual_solution: vec![optimal_y],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        refine_dual_lsq(&problem, &mut result, None);
+        assert!(
+            (result.dual_solution[0] - optimal_y).abs() < 1e-12,
+            "expected y={} preserved, got {}",
+            optimal_y,
+            result.dual_solution[0]
+        );
+    }
+}
