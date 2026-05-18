@@ -158,23 +158,26 @@ pub const DEFAULT_GLOBAL_GAP_TOL: f64 = 1e-3;
 pub const DEFAULT_GLOBAL_MAX_DEPTH: usize = 20;
 pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 
-/// Phase 3 spatial Branch-and-Bound 設定 (#6 非凸 QP 大域最適化)。
+/// Spatial Branch-and-Bound 設定 (#6 / #7 非凸 QP 大域最適化)。
 ///
 /// **user 指定** ε-optimal global solve のパラメータ。`SolverOptions::global_optimization`
-/// に注入し、`solve_qp_global` から参照される。Phase 3 段階では `solve_qp_with` の
-/// dispatch 対象では**ない** (= 明示呼び出し)。誤って global path に倒すと既存 QP
-/// user の wall が桁違いに増えるリスクを抑える。
+/// に注入し、`solve_qp_global` から参照される。`solve_qp_with` の dispatch 対象には**ならない**
+/// (= 明示呼び出し)。誤って global path に倒すと既存 QP user の wall が桁違いに増える
+/// リスクを抑える。
 ///
 /// 規約:
 /// - `gap_tol > 0`: 相対 gap (= |UB - LB| / max(1, |UB|))
 /// - `max_depth >= 1`: 0 は root 1 回のみ
 /// - `max_nodes >= 1`: 0 は root も解かない
+/// - `use_alpha_bb`: true で Phase 4 α-BB underestimator を下界に使う (default)。
+///   false にすると Phase 3 の interval-arithmetic bound に戻す (退化/比較用)。
 #[derive(Debug, Clone)]
 pub struct GlobalOptimizationConfig {
     pub gap_tol: f64,
     pub max_depth: usize,
     pub max_nodes: usize,
     pub branching: BranchingStrategy,
+    pub use_alpha_bb: bool,
 }
 
 impl Default for GlobalOptimizationConfig {
@@ -184,6 +187,7 @@ impl Default for GlobalOptimizationConfig {
             max_depth: DEFAULT_GLOBAL_MAX_DEPTH,
             max_nodes: DEFAULT_GLOBAL_MAX_NODES,
             branching: BranchingStrategy::MaxViolation,
+            use_alpha_bb: true,
         }
     }
 }
