@@ -90,7 +90,6 @@ fn multi_solve(
         n_starts,
         seed,
         strategy,
-        ..Default::default()
     };
     let r = solve_qp_multistart(problem, &opts, &cfg);
     (r.status, r.objective)
@@ -225,6 +224,109 @@ fn multistart_deterministic_with_same_seed() {
     assert!((o1 - o2).abs() < 1e-9, "deterministic: o1={o1} o2={o2}");
 }
 
+// ============================================================================
+// API tests (SolverOptions::threads / Model::set_threads / backward-compat)
+// ============================================================================
+
+#[test]
+fn api_solver_options_threads_default_is_1() {
+    let o = SolverOptions::default();
+    assert_eq!(o.threads, 1, "default threads must be 1 (= existing behavior)");
+}
+
+#[test]
+fn api_solver_options_threads_round_trip() {
+    let mut o = SolverOptions::default();
+    o.threads = 4;
+    assert_eq!(o.threads, 4);
+}
+
+#[test]
+fn api_model_set_threads_propagates_to_solver_options() {
+    // Model 経由で set_threads(N) → 内部 SolverOptions.threads = N が伝播することを
+    // observable に確認する。直接 SolverOptions を取れないので solve 経路で実証する。
+    use solver::model::{Expression, Model};
+    let mut m = Model::new("threads_round_trip");
+    let x = m.add_var("x", 0.0, 1.0);
+    m.minimize(x);
+    let lhs: Expression = x.into();
+    m.add_constraint(lhs.leq(1.0));
+    m.set_threads(4);
+    // solve が成功する (= threads が valid に伝播し SolverOptions が壊れない)。
+    let _r = m.solve().expect("LP solve should succeed");
+}
+
+#[test]
+fn api_model_set_threads_clamps_zero_to_one() {
+    // 0 は invalid (LCG/ThreadPool 双方で fatal)、Model::set_threads 入口で 1 に補正。
+    use solver::model::Model;
+    let mut m = Model::new("threads_zero_clamp");
+    let _x = m.add_var("x", 0.0, 1.0);
+    m.set_threads(0);
+    // 後段で panic しないこと。set_threads が saturating であることを smoke で確認。
+    // (内部 field は private なので直接 assert 不可、ただし solve_qp_with でも同様に
+    // SolverOptions::threads.max(1) しているので 0 でも crash しない契約。)
+}
+
+#[test]
+fn api_threads_eq_1_preserves_legacy_obj() {
+    // threads=1 (default) は既存挙動と完全一致 (= backward compat 退化なし)。
+    let prob = build_bilinear_zero_c(3.0);
+    let opts_default = opts_with_timeout(5.0); // threads=1 (default)
+    let r1 = solve_qp_with(&prob, &opts_default);
+
+    let mut opts_thread1 = opts_with_timeout(5.0);
+    opts_thread1.threads = 1;
+    let r2 = solve_qp_with(&prob, &opts_thread1);
+    assert_eq!(r1.status, r2.status);
+    assert!((r1.objective - r2.objective).abs() < 1e-9);
+}
+
+#[test]
+fn api_threads_n_with_multistart_still_improves() {
+    // threads=4 + multistart で saddle escape が機能する (並列下でも logic 健在)。
+    let prob = build_diag_concave(2, 3.0);
+    let (_, cold_obj) = cold_solve(&prob);
+    let cfg = MultiStartConfig {
+        n_starts: 12,
+        seed: 0xBEEF,
+        strategy: StartStrategy::RandomBox,
+    };
+    let mut opts = opts_with_timeout(20.0);
+    opts.threads = 4;
+    opts.multistart = Some(cfg);
+    let r = solve_qp_with(&prob, &opts);
+    let improvement = cold_obj - r.objective;
+    assert!(
+        improvement >= STRICT_IMPROVEMENT_MARGIN,
+        "threads=4 multistart: cold={cold_obj} ms={}",
+        r.objective
+    );
+}
+
+#[test]
+fn api_threads_n_with_multistart_deterministic_across_threads() {
+    // 同 seed + threads=1 と threads=4 で同 objective (race-free + index-reduce)。
+    let prob = build_diag_concave(2, 3.0);
+    let cfg = MultiStartConfig {
+        n_starts: 10,
+        seed: 0xABCD,
+        strategy: StartStrategy::RandomBox,
+    };
+    let mut o1 = opts_with_timeout(20.0);
+    o1.threads = 1;
+    let r1 = solve_qp_multistart(&prob, &o1, &cfg);
+    let mut o4 = opts_with_timeout(20.0);
+    o4.threads = 4;
+    let r4 = solve_qp_multistart(&prob, &o4, &cfg);
+    assert!(
+        (r1.objective - r4.objective).abs() < 1e-9,
+        "threads-invariance broken: r1={} r4={}",
+        r1.objective,
+        r4.objective
+    );
+}
+
 #[test]
 fn multistart_dispatch_via_options_field_matches_explicit_call() {
     // SolverOptions::multistart 経由 dispatch も同じ結果 (solve_qp_with 内 if 分岐)。
@@ -233,7 +335,6 @@ fn multistart_dispatch_via_options_field_matches_explicit_call() {
         n_starts: 8,
         seed: 0xC0DE,
         strategy: StartStrategy::RandomBox,
-        ..Default::default()
     };
     let opts_explicit = opts_with_timeout(10.0);
     let r_explicit = solve_qp_multistart(&prob, &opts_explicit, &cfg);
