@@ -1,11 +1,12 @@
 //! Two-phase revised simplex with LU-based basis updates.
 
+pub(crate) mod crash;
 pub mod dual;
 pub mod dual_advanced;
 pub mod pricing;
 pub(crate) mod primal;
 
-use crate::options::{SimplexMethod, SolverOptions};
+use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
@@ -211,6 +212,26 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
     }
 
     let sf = build_standard_form(problem);
+
+    // #15: warm_start_lp.basis を warm_start にコピー (LP 専用 path で
+    // IPM crossover 等の拡張 slot を吸収) → 既存 simplex の warm path に乗る。
+    let warm_lp_opts;
+    let options = if let Some(ws_lp) = options.warm_start_lp.as_ref() {
+        if options.warm_start.is_none() {
+            warm_lp_opts = SolverOptions {
+                warm_start: Some(WarmStartBasis {
+                    basis: ws_lp.basis.clone(),
+                    x_b: Vec::new(),
+                }),
+                ..options.clone()
+            };
+            &warm_lp_opts
+        } else {
+            options
+        }
+    } else {
+        options
+    };
 
     match options.simplex_method {
         SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
