@@ -16,9 +16,9 @@
 //!   status で、元空間 Q の停留性が成立する規約)。
 //!   Optimal は WARN log のみ (assert なし)。non-PSD Q で solver が Optimal を
 //!   主張する経路は scaled-space KKT check が claim 主体で unscale 後の
-//!   bound_dual 復元が壊れる pre-existing 不具合 (タスク #18 "dual residual
-//!   ratio=1.0 系" と同根の疑い) を含むため、Phase 1A 範疇では WARN に留め fail
-//!   させない。
+//!   bound_dual 復元が壊れる pre-existing 不具合を含むため、Phase 1A 範疇では
+//!   WARN に留め fail させない (follow-up で Optimal-claim 解の stat assert
+//!   化が予定)。
 //!
 //! status=SuboptimalSolution / Timeout / その他は honest non-convergence 申告で
 //! assert 除外 (log のみ)。
