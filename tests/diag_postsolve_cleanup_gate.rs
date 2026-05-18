@@ -3,6 +3,11 @@
 //! `run_postsolve` の cleanup LP は `min(df_loop, df_gs)` の sufficiency check で
 //! gate され、perturbation variant の deadline は plain variant の 4× に制限される。
 //! 本 test は wall-clock threshold を pin する。
+//!
+//! Gate は **simplex postsolve** 経路の挙動を pin するもの。`#33` の LP→IPM
+//! dispatch 導入後、サイズ閾値を超える LP は IPM 経路で解かれ simplex postsolve
+//! 自体が走らない (`timing_breakdown` が `None`)。その場合 cleanup-LP 退化は
+//! 原理的に発生しえないので NaN を「regression 検出不能」として PASS 扱いする。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
@@ -26,6 +31,13 @@ fn solve(path: &str, timeout_s: f64) -> (SolveStatus, f64, f64) {
     (r.status, wall, postsolve_s)
 }
 
+/// Returns true if `postsolve_s` is NaN, indicating the LP took the IPM
+/// dispatch path (no simplex postsolve ran). Cleanup-LP gate cannot
+/// regress in that case.
+fn ipm_dispatched(postsolve_s: f64) -> bool {
+    postsolve_s.is_nan()
+}
+
 /// wood1p was solving in ~9 s but spending another ~25 s in a cleanup LP
 /// that always returned Inf. Postsolve must stay under 2 s.
 #[test]
@@ -44,6 +56,10 @@ fn wood1p_postsolve_under_2s() {
 #[test]
 fn d6cube_postsolve_under_1s() {
     let (_status, _wall, postsolve_s) = solve("data/lp_problems/d6cube.QPS", 60.0);
+    if ipm_dispatched(postsolve_s) {
+        // IPM 経路で解かれた → simplex cleanup-LP は走らない (#33)。
+        return;
+    }
     assert!(
         postsolve_s < 1.0,
         "d6cube postsolve {:.2}s exceeded 1s — cleanup-LP gate likely regressed",
@@ -56,6 +72,9 @@ fn d6cube_postsolve_under_1s() {
 #[test]
 fn greenbea_postsolve_under_5s() {
     let (_status, _wall, postsolve_s) = solve("data/lp_problems/greenbea.QPS", 60.0);
+    if ipm_dispatched(postsolve_s) {
+        return;
+    }
     assert!(
         postsolve_s < 5.0,
         "greenbea postsolve {:.2}s exceeded 5s — cleanup_pert deadline cap likely regressed",
