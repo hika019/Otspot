@@ -203,12 +203,13 @@ fn build_random_starts(config: &MultiStartConfig, bounds: &[(f64, f64)]) -> Vec<
     }
 }
 
-/// thread sentinel 用 hook (peak parallelism 計測)。`pub(crate)` で外部非公開。
-/// production code は `solve_qp_multistart_with_hooks(.., None)` を経由するため
-/// 実行時 overhead はゼロ。
+/// thread sentinel 用 hook (peak parallelism / deadline shortcut 計測)。
+/// `pub(crate)` で外部非公開。production は `..(.., None)` 経由で overhead ゼロ。
 pub(crate) struct MultiStartHooks {
     pub on_solve_enter: Arc<dyn Fn() + Send + Sync>,
     pub on_solve_exit: Arc<dyn Fn() + Send + Sync>,
+    /// true → worker 入口の deadline shortcut を bypass (no-op 退化挙動の sentinel 用)。
+    pub disable_deadline_shortcut: bool,
 }
 
 /// Multi-start QP solver。`config.n_starts == 1` は cold solve 1 回 (= 既存挙動)。
@@ -262,7 +263,17 @@ pub(crate) fn solve_qp_multistart_with_hooks(
         }))
         .collect();
 
+    // worker 入口で deadline 短絡: rayon は queued task を mid-flight cancel できないため
+    // 並列 path では worker 内で確認、超過済なら solve せず Timeout stub を返す。
+    let shortcut_enabled = hooks.map_or(true, |h| !h.disable_deadline_shortcut);
     let worker = |warm: Option<QpWarmStart>| -> SolverResult {
+        if shortcut_enabled && shared_opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            return SolverResult {
+                status: SolveStatus::Timeout,
+                objective: f64::INFINITY,
+                ..SolverResult::default()
+            };
+        }
         if let Some(h) = hooks {
             (h.on_solve_enter)();
         }
@@ -273,11 +284,14 @@ pub(crate) fn solve_qp_multistart_with_hooks(
         r
     };
 
-    // 並列度 1 はオーバーヘッド回避のため直接 sequential。
+    // 並列度 1 はオーバーヘッド回避のため直接 sequential。take_while で iteration を打切り、
+    // stub Vec を作らずに済ませる (parallel branch では rayon の collect が全件 evaluate する)。
     let results: Vec<SolverResult> = if parallel <= 1 {
         warms
             .into_iter()
-            .take_while(|_| !shared_opts.deadline.is_some_and(|d| Instant::now() >= d))
+            .take_while(|_| {
+                !shortcut_enabled || !shared_opts.deadline.is_some_and(|d| Instant::now() >= d)
+            })
             .map(worker)
             .collect()
     } else {
@@ -471,6 +485,7 @@ mod tests {
                 on_solve_exit: Arc::new(move || {
                     a_exit.fetch_sub(1, Ordering::SeqCst);
                 }),
+                disable_deadline_shortcut: false,
             };
             let cfg = MultiStartConfig {
                 n_starts,
@@ -517,6 +532,7 @@ mod tests {
             on_solve_exit: Arc::new(move || {
                 a_exit.fetch_sub(1, Ordering::SeqCst);
             }),
+            disable_deadline_shortcut: false,
         };
         let cfg = MultiStartConfig {
             n_starts: 6,
@@ -528,5 +544,130 @@ mod tests {
         opts.threads = 1;
         let _ = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
         assert_eq!(peak.load(Ordering::SeqCst), 1, "threads=1 must be serial");
+    }
+
+    /// deadline shortcut sentinel + no-op proof。
+    ///
+    /// 各 worker の on_solve_enter で 80ms sleep する hook を仕込み、
+    /// shortcut ON / OFF (disable=true) の wall-clock 比を測る。
+    ///
+    /// 期待 (threads=2, n_starts=8, deadline=10ms, per-solve sleep=80ms):
+    ///   - ON  : deadline 前に動いた最初の 2 worker のみ 80ms 消費、残り 6 は stub return
+    ///           wall-clock ≈ 80ms + dispatch overhead
+    ///   - OFF : 8 worker 全てが sleep を貫通、batch サイズ 2 で 4 batch × 80ms = 320ms
+    ///           wall-clock ≈ 320ms
+    /// no-op (OFF) で wall-clock が ON の 2x 超になれば shortcut の効果が事実化される。
+    #[test]
+    fn deadline_shortcut_skips_post_deadline_workers() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let c = vec![0.0_f64; 2];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let bounds = vec![(-3.0, 3.0); 2];
+        let prob = QpProblem::new(q, c, a, vec![], bounds, vec![]).unwrap();
+
+        let cfg = MultiStartConfig {
+            n_starts: 8,
+            seed: 1,
+            strategy: StartStrategy::RandomBox,
+        };
+        let mut opts = SolverOptions::default();
+        // deadline は最初の batch (= threads=2 個) の sleep が終わる前に必ず超過。
+        opts.deadline = Some(Instant::now() + Duration::from_millis(10));
+        opts.threads = 2;
+
+        let make_hooks = |disable: bool| -> (MultiStartHooks, Arc<AtomicUsize>) {
+            let entered = Arc::new(AtomicUsize::new(0));
+            let entered_clone = entered.clone();
+            (
+                MultiStartHooks {
+                    on_solve_enter: Arc::new(move || {
+                        entered_clone.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(80));
+                    }),
+                    on_solve_exit: Arc::new(|| {}),
+                    disable_deadline_shortcut: disable,
+                },
+                entered,
+            )
+        };
+
+        // ON: shortcut 有効 → deadline 前に走った worker 数 < n_starts (= skip 確実)
+        let (h_on, entered_on) = make_hooks(false);
+        let t0_on = Instant::now();
+        let _ = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&h_on));
+        let dur_on = t0_on.elapsed();
+        let n_entered_on = entered_on.load(Ordering::SeqCst);
+
+        // OFF: shortcut 無効 → 全 worker が sleep 貫通
+        let mut opts_off = opts.clone();
+        opts_off.deadline = Some(Instant::now() + Duration::from_millis(10));
+        let (h_off, entered_off) = make_hooks(true);
+        let t0_off = Instant::now();
+        let _ = solve_qp_multistart_with_hooks(&prob, &opts_off, &cfg, Some(&h_off));
+        let dur_off = t0_off.elapsed();
+        let n_entered_off = entered_off.load(Ordering::SeqCst);
+
+        // ON: 全 n_starts のうち少なくとも 4 個は shortcut で skip (= hook 未到達)
+        assert!(
+            n_entered_on <= 4,
+            "shortcut ON: at most 4/{n_starts} workers should enter (deadline=10ms, sleep=80ms), got {n}",
+            n_starts = cfg.n_starts,
+            n = n_entered_on
+        );
+        // OFF: 全 n_starts が hook を通過 (shortcut bypass の事実化)
+        assert_eq!(
+            n_entered_off, cfg.n_starts,
+            "shortcut OFF: all {n_starts} workers must enter, got {n}",
+            n_starts = cfg.n_starts,
+            n = n_entered_off
+        );
+        // wall-clock: OFF は ON の 2x 以上 (= shortcut の wall-clock 削減効果)
+        assert!(
+            dur_off.as_millis() >= dur_on.as_millis() * 2,
+            "shortcut effect not observable: ON={:?} OFF={:?}",
+            dur_on,
+            dur_off
+        );
+    }
+
+    /// shortcut が有効でも deadline 前に終わる場合は全 worker が正常完了することを確認。
+    /// regression防止: shortcut が誤って早期終了して結果を破壊しないこと。
+    #[test]
+    fn deadline_shortcut_inactive_when_deadline_not_passed() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let c = vec![0.0_f64; 2];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let bounds = vec![(-3.0, 3.0); 2];
+        let prob = QpProblem::new(q, c, a, vec![], bounds, vec![]).unwrap();
+
+        let entered = Arc::new(AtomicUsize::new(0));
+        let entered_c = entered.clone();
+        let hooks = MultiStartHooks {
+            on_solve_enter: Arc::new(move || {
+                entered_c.fetch_add(1, Ordering::SeqCst);
+            }),
+            on_solve_exit: Arc::new(|| {}),
+            disable_deadline_shortcut: false,
+        };
+        let cfg = MultiStartConfig {
+            n_starts: 6,
+            seed: 1,
+            strategy: StartStrategy::RandomBox,
+        };
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(20.0); // 余裕 deadline
+        opts.threads = 2;
+        let r = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            6,
+            "all 6 starts must run when deadline is not breached"
+        );
+        // 通常完了で objective は有限 (Timeout stub の +inf ではない)
+        assert!(
+            r.objective.is_finite(),
+            "objective should be finite, got {}",
+            r.objective
+        );
     }
 }
