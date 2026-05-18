@@ -19,7 +19,10 @@ use std::path::Path;
 use std::time::Instant;
 
 /// postsolve cleanup LP / Gauss-Seidel 等、LSQ 外の post-processing 残量を吸収する余裕。
-const SLACK_SEC: f64 = 2.0;
+/// task #48 で simplex half-deadline 撤廃後、solver が user budget を full 使い切り
+/// parallel test 実行時の CPU 競合で wall がやや膨らむため 4.0s に拡張。
+/// LSQ 漏れ (= wall ≈ 2×budget) との分離は依然可能。
+const SLACK_SEC: f64 = 4.0;
 
 fn make_lp(qp: &QpProblem) -> LpProblem {
     LpProblem::new_general(
