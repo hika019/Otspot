@@ -18,6 +18,7 @@ use solver::bench_utils::{detect_csv_path, load_baseline_objectives, load_expect
 use solver::io::qps::{parse_qps, QpsError};
 use solver::options::{SimplexMethod, SolverOptions};
 use solver::problem::{ConstraintType, SolveStatus};
+use solver::qp::kkt_resid::{self, dd_impl};
 use solver::tolerances::ZERO_TOL;
 use solver::qp::ipm_solver::solve_ipm;
 use solver::qp::solve_qp_with;
@@ -156,39 +157,9 @@ fn compute_dfeas_orig(
     let n = solution.len();
     // ill-scaled 問題 (Maros QPILOTNO: ‖A‖=5.85e6, cond=3e12) で
     // f64 cancellation noise が真の残差を埋もれさせるため、Q*x と A^T*y は
-    // double-double 精度で計算する。bench の判定 (PASS/DFEAS_FAIL) に直結するため
-    // 真の精度を見せる必要がある。
-    //
-    // Q 格納慣例: spmv_q (src/qp/ipm/kkt.rs) と同じく **全要素格納の対称行列**
-    // (上下三角両方 stored)。symmetric duplication しないように直接 col×row 走査。
-    let zero_dd = TwoFloat::from(0.0);
-    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    for col in 0..n {
-        let xv = solution[col];
-        let cs = prob.q.col_ptr[col];
-        let ce = prob.q.col_ptr[col + 1];
-        for k in cs..ce {
-            let row = prob.q.row_ind[k];
-            let v = prob.q.values[k];
-            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
-        }
-    }
-    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
-        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-        for col in 0..n {
-            let cs = prob.a.col_ptr[col];
-            let ce = prob.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = prob.a.row_ind[k];
-                let v = prob.a.values[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, dual_solution[row]);
-            }
-        }
-        aty_dd.iter().map(|&v| f64::from(v)).collect()
-    } else {
-        vec![0.0; n]
-    };
+    // double-double 精度で計算する。
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
     // LP/Simplex 経路: complementarity-aware dual feasibility check
     //
     // ## LP KKT 概観
@@ -259,24 +230,10 @@ fn compute_dfeas_orig(
     }
 
     // bound_contrib[j] = -y_lb[j] (lb有限) + y_ub[j] (ub有限)
-    // - QP/IPM 経路: bound_duals が [y_lb 群; y_ub 群] レイアウトで渡る
-    let mut bound_contrib = vec![0.0_f64; n];
-    if !bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] -= bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] += bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
-        // LP 経路: reduced_cost を負号で取り込む (c + A^T*y - rc = 0)
+    // QP/IPM 経路: bound_duals が [y_lb 群; y_ub 群] レイアウト。
+    // LP 経路: reduced_cost を負号で取り込む (c + A^T*y - rc = 0)。
+    let mut bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         for j in 0..n {
             bound_contrib[j] = -reduced_costs[j];
         }
@@ -362,50 +319,10 @@ fn compute_dfeas_componentwise(
         return f64::NAN;
     }
     let n = solution.len();
-    let zero_dd = TwoFloat::from(0.0);
-    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    for col in 0..n {
-        let xv = solution[col];
-        let cs = prob.q.col_ptr[col];
-        let ce = prob.q.col_ptr[col + 1];
-        for k in cs..ce {
-            let row = prob.q.row_ind[k];
-            let v = prob.q.values[k];
-            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
-        }
-    }
-    let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !dual_solution.is_empty() {
-        let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-        for col in 0..n {
-            let cs = prob.a.col_ptr[col];
-            let ce = prob.a.col_ptr[col + 1];
-            for k in cs..ce {
-                let row = prob.a.row_ind[k];
-                let v = prob.a.values[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, dual_solution[row]);
-            }
-        }
-        aty_dd.iter().map(|&v| f64::from(v)).collect()
-    } else {
-        vec![0.0; n]
-    };
-    let mut bound_contrib = vec![0.0_f64; n];
-    if !bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] -= bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] += bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    } else if !reduced_costs.is_empty() && reduced_costs.len() == n {
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         // LP 経路: UB 非基底変数 (rc ≤ 0 が最適性条件) を考慮して dual infeasibility を計算。
         // UB 非基底 (x_j ≈ ub_j): rc_j > 0 が違反。
         // LB 非基底 / 自由 (x_j < ub_j): rc_j < 0 が違反。
