@@ -142,6 +142,9 @@ fn run_ipm_with(
     // presolve スケーリング (LargeCoeffRowScale × Ruiz E / c·D) で問題が σ 倍に縮むと
     // unscale 時に残差が 1/σ 倍に増幅される。primal 側 e_min × LargeCoeffRowScale と
     // dual 側 c·d_min の小さい方を sigma_total とし、IPM eps を user_eps×σ に厳しくする。
+    // noise floor は `ipm_core::IPM_EPS_NOISE_FLOOR` で集約 (scaling.rs::EPS_FLOOR と
+    // 共通)。amp 経由の二段 tightening を defeat されない設計。
+    use crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR;
     let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
@@ -177,7 +180,7 @@ fn run_ipm_with(
     let mut opts_for_ipm: SolverOptions = if sigma_total < 1.0 && sigma_total > 0.0 {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
-        let eps_scaled = (eps_orig * sigma_total).max(f64::MIN_POSITIVE);
+        let eps_scaled = (eps_orig * sigma_total).max(IPM_EPS_NOISE_FLOOR);
         tightened.tolerance = None;
         tightened.ipm.eps = eps_scaled;
         if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
