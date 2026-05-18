@@ -63,11 +63,33 @@ fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
 /// Q が対角なら s_j=1/√Q_jj の column scaling で Q'_jj=1 に均等化し、解後 x_orig=D·x_scaled で復元。
 pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
-        let mut result = solve_ipm_with_runner(&scaled_problem, options, run_ipm);
+        let scaled_options = scale_warm_start_for_q_diag(options, &col_scales);
+        let mut result = solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm);
         unscale_q_diagonal(&mut result, &col_scales, problem);
         return result;
     }
     solve_ipm_with_runner(problem, options, run_ipm)
+}
+
+/// warm_start_qp.x を Q-diag column scaling (x_orig = D·x_scaled) の inverse で scaled 空間に翻訳。
+/// y / mu は scaling 不変。長さ不一致は B-2 で扱うため drop + 警告。
+fn scale_warm_start_for_q_diag(options: &SolverOptions, col_scales: &[f64]) -> SolverOptions {
+    let mut scaled = options.clone();
+    if let Some(ws) = scaled.warm_start_qp.as_mut() {
+        if ws.x.len() == col_scales.len() {
+            for j in 0..col_scales.len() {
+                ws.x[j] /= col_scales[j];
+            }
+        } else {
+            eprintln!(
+                "[warm_start_qp dropped] q_diag_scaling dim mismatch: ws.x.len={} col_scales.len={}",
+                ws.x.len(),
+                col_scales.len()
+            );
+            scaled.warm_start_qp = None;
+        }
+    }
+    scaled
 }
 
 fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> {

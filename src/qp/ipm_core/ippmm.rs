@@ -97,6 +97,10 @@ fn apply_qp_warm_start(
     use crate::problem::ConstraintType;
     let n = problem.num_vars;
     if ws.x.len() != n || ws.y.len() != m_orig {
+        eprintln!(
+            "[warm_start_qp dropped] ippmm dim mismatch: ws.x={}/{} ws.y={}/{}",
+            ws.x.len(), n, ws.y.len(), m_orig
+        );
         return None;
     }
     let mu = ws.mu.max(WARM_MU_MIN);
