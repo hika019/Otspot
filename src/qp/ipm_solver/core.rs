@@ -39,11 +39,9 @@ fn run_ipm_with(
     // presolve スケーリング (LargeCoeffRowScale × Ruiz E / c·D) で問題が σ 倍に縮むと
     // unscale 時に残差が 1/σ 倍に増幅される。primal 側 e_min × LargeCoeffRowScale と
     // dual 側 c·d_min の小さい方を sigma_total とし、IPM eps を user_eps×σ に厳しくする。
-    // task#13: scaled eps の noise floor。σ ≪ 1 の ill-scaled で eps_scaled が
-    // O(√n)·machine_eps 直下に潜ると IPM 内 `nr_d_rel` が達成不能で 20-30 iter
-    // 空転する。100×machine_eps を下限とし、orig-space は post-processing が
-    // user_eps 基準で再 gate する。
-    const IPM_EPS_NOISE_FLOOR: f64 = 100.0 * f64::EPSILON;
+    // noise floor は `ipm_core::IPM_EPS_NOISE_FLOOR` で集約 (scaling.rs::EPS_FLOOR と
+    // 共通)。amp 経由の二段 tightening を defeat されない設計。
+    use crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR;
     let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
