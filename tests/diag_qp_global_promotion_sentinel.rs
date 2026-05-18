@@ -33,6 +33,12 @@ const MIN_TOTAL_REDUCTION_RATIO: f64 = 5.0;
 /// 個別 fixture での最小削減倍率。観測最小 13.7× に対し margin 4×、3× を要求。
 const MIN_PER_FIXTURE_REDUCTION_RATIO: f64 = 3.0;
 
+/// LocallyOptimal → Optimal promotion を観測すべき fixture 数の下限。
+/// Phase 4 の存在意義は「Phase 3 で未証明だった大域最適性を proof 化する」点にあり、
+/// 1 fixture でしか効いていなければ「偶然の 1 サンプル」と区別できない。複数 fixture で
+/// 効果が観測できることを require して sentinel に teeth を与える。
+const MIN_PROMOTION_COUNT: usize = 2;
+
 /// BB 探索上限 (3 分内で完結する範囲)。
 const TEST_MAX_DEPTH: usize = 25;
 const TEST_MAX_NODES: usize = 5_000;
@@ -157,6 +163,105 @@ fn concave_5d_sumcap() -> QpProblem {
     .unwrap()
 }
 
+/// 6D concave sum-cap。次元を 1 上げ Σx≤2.0 にして node 増、Phase 3 で打ち切られ
+/// LocallyOptimal → Phase 4 α-BB で Optimal に格上げされる想定。
+fn concave_6d_sumcap() -> QpProblem {
+    let n = 6;
+    let q = CscMatrix::from_triplets(
+        &(0..n).collect::<Vec<_>>(),
+        &(0..n).collect::<Vec<_>>(),
+        &vec![-2.0; n],
+        n,
+        n,
+    )
+    .unwrap();
+    let a = CscMatrix::from_triplets(
+        &vec![0_usize; n],
+        &(0..n).collect::<Vec<_>>(),
+        &vec![1.0_f64; n],
+        1,
+        n,
+    )
+    .unwrap();
+    QpProblem::new(
+        q,
+        vec![0.0; n],
+        a,
+        vec![2.0],
+        vec![(0.0, 1.0); n],
+        vec![ConstraintType::Le],
+    )
+    .unwrap()
+}
+
+/// 4D 混合: diag=[-2,-2,-1,-1] + sum-cap。eigenvalue が複数値で interval bound と
+/// α-BB bound の差が顕著、Phase 3 LocallyOptimal を促す。
+fn mixed_concave_4d() -> QpProblem {
+    let n = 4;
+    let q = CscMatrix::from_triplets(
+        &(0..n).collect::<Vec<_>>(),
+        &(0..n).collect::<Vec<_>>(),
+        &[-2.0, -2.0, -1.0, -1.0],
+        n,
+        n,
+    )
+    .unwrap();
+    let a = CscMatrix::from_triplets(
+        &vec![0_usize; n],
+        &(0..n).collect::<Vec<_>>(),
+        &vec![1.0_f64; n],
+        1,
+        n,
+    )
+    .unwrap();
+    QpProblem::new(
+        q,
+        vec![0.0; n],
+        a,
+        vec![1.5],
+        vec![(0.0, 1.0); n],
+        vec![ConstraintType::Le],
+    )
+    .unwrap()
+}
+
+/// 5D bilinear: Q 全 off-diag = 1.0 (diag=0)。eigenvalue は (n-1,1) 重複度=(1,n-1) で
+/// 強非凸 (Q = J - I の eigvals: 4, -1×4)。Σx ≤ 1 で対称破壊。
+fn bilinear_5d_box() -> QpProblem {
+    let n = 5;
+    // dense off-diag: rows[i,j] for all i!=j, value 1.0
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    for c in 0..n {
+        for r in 0..n {
+            if r != c {
+                rows.push(r);
+                cols.push(c);
+                vals.push(1.0);
+            }
+        }
+    }
+    let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let a = CscMatrix::from_triplets(
+        &vec![0_usize; n],
+        &(0..n).collect::<Vec<_>>(),
+        &vec![1.0_f64; n],
+        1,
+        n,
+    )
+    .unwrap();
+    QpProblem::new(
+        q,
+        vec![-0.5; n],
+        a,
+        vec![1.0],
+        vec![(0.0, 1.0); n],
+        vec![ConstraintType::Le],
+    )
+    .unwrap()
+}
+
 struct Case {
     label: &'static str,
     problem: QpProblem,
@@ -169,6 +274,9 @@ fn cases() -> Vec<Case> {
         Case { label: "bilinear_eq_2d", problem: bilinear_eq_2d() },
         Case { label: "mixed_eq_2d", problem: mixed_eq_2d() },
         Case { label: "concave_5d_sumcap", problem: concave_5d_sumcap() },
+        Case { label: "concave_6d_sumcap", problem: concave_6d_sumcap() },
+        Case { label: "mixed_concave_4d", problem: mixed_concave_4d() },
+        Case { label: "bilinear_5d_box", problem: bilinear_5d_box() },
     ]
 }
 
@@ -299,12 +407,17 @@ fn alpha_bb_pruning_count_remains_positive_across_fixtures() {
     );
 }
 
-/// promotion による status 向上 (LocallyOptimal → Optimal) が観測できる fixture が
-/// **1 件以上** あること。これがゼロだと α-BB が「node を減らしてはいるが proof を
-/// 一切 enable していない」ことになり Phase 4 価値が消える。
+/// promotion による status 向上 (LocallyOptimal → Optimal) が **複数 fixture** で
+/// 観測できること (`MIN_PROMOTION_COUNT` 以上)。
+///
+/// 1 件だけ通る threshold だと「偶発的に 1 fixture が promote した」case と
+/// 「α-BB が広く効いている」case を区別できず、smoke 側の同種 sentinel と機能重複する。
+/// 本ファイルは強化版として複数件を要求し、新規 fixture (concave_6d_sumcap /
+/// bilinear_5d_box) と既存 concave_5d_sumcap の合算で MIN_PROMOTION_COUNT を確保する。
 #[test]
-fn alpha_bb_promotes_locally_optimal_to_optimal_at_least_once() {
+fn alpha_bb_promotes_locally_optimal_to_optimal_on_multiple_fixtures() {
     let mut promotions = 0;
+    let mut promoted_labels = Vec::new();
     for c in cases() {
         let (r3, _) = solve_qp_global_with_stats(&c.problem, &opts(), &cfg(false));
         let (r4, _) = solve_qp_global_with_stats(&c.problem, &opts(), &cfg(true));
@@ -316,12 +429,12 @@ fn alpha_bb_promotes_locally_optimal_to_optimal_at_least_once() {
         );
         if was_locally && now_optimal {
             promotions += 1;
+            promoted_labels.push(c.label);
         }
     }
     assert!(
-        promotions >= 1,
-        "no LocallyOptimal → Optimal promotion observed across {} fixtures — \
-         Phase 4 α-BB pathway delivers zero proof uplift",
-        cases().len()
+        promotions >= MIN_PROMOTION_COUNT,
+        "α-BB promote {promotions} fixtures (need >= {MIN_PROMOTION_COUNT}). \
+         Phase 4 が広域に proof uplift を生んでいない可能性 — promoted = {promoted_labels:?}",
     );
 }
