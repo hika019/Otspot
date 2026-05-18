@@ -42,11 +42,32 @@ use tree::BBTree;
 /// 各 node の local solve は `solve_qp_with` 経由 = inertia 補正付き IPM (#3 Phase 1A)
 /// + (#12) warm start で parent 解継承。下界は `interval_quadratic_bounds`
 /// = box 上 interval arithmetic (Phase 4 で α-BB 置換予定)。
+/// BB 探索の統計 (テスト sentinel 用、production API には含めない)。
+/// `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
+/// `max_depth_seen`: 探索 tree 内で到達した最大 depth。
+/// `pruned`: 子展開前に枝刈で discard した node 数。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GlobalStats {
+    pub nodes_processed: usize,
+    pub max_depth_seen: usize,
+    pub pruned: usize,
+}
+
 pub fn solve_qp_global(
     problem: &QpProblem,
     options: &SolverOptions,
     cfg: &GlobalOptimizationConfig,
 ) -> SolverResult {
+    solve_qp_global_with_stats(problem, options, cfg).0
+}
+
+/// テスト sentinel 用: result とともに探索統計を返す。
+/// public で sentinel test (pruning no-op 検出) からのみ参照される。
+pub fn solve_qp_global_with_stats(
+    problem: &QpProblem,
+    options: &SolverOptions,
+    cfg: &GlobalOptimizationConfig,
+) -> (SolverResult, GlobalStats) {
     // deadline 計算: options.deadline 優先、無ければ timeout_secs から固定。
     let deadline = options.deadline.or_else(|| {
         options
@@ -61,31 +82,33 @@ pub fn solve_qp_global(
 
     let root_bounds = problem.bounds.clone();
 
+    let mut stats = GlobalStats::default();
+
     // 1. root local solve (= 初期 incumbent 候補)
     let root_solve = solve_local_upper_bound(problem, &root_bounds, &shared_opts, None);
     if !is_feasible_result(&root_solve.status) {
         // root が解けない (Infeasible / NumericalError / Unbounded / NonConvex / Timeout)
         // → そのまま伝播。
-        return root_solve;
+        return (root_solve, stats);
     }
 
     let (root_lb, _) = interval_quadratic_bounds(problem, &root_bounds);
 
     let mut state = SearchState::new(root_solve, root_lb);
+    stats.nodes_processed = 1;
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return state.finalize_proven(root_lb);
+        return (state.finalize_proven(root_lb), stats);
     }
 
     let mut tree = BBTree::new();
-    let mut max_depth_seen: usize = 0;
 
     // root 分枝。x* が box midpoint 同一なら分枝不能 = ε-converged 扱い。
     let root_node = BBNode::root(root_bounds, root_lb);
     let root_x = state.incumbent_sol.clone();
     match select_branching_variable(&root_node, &root_x) {
-        None => return state.finalize_proven(root_lb),
+        None => return (state.finalize_proven(root_lb), stats),
         Some(j) => {
             let warm = state.build_warm();
             let (l, r) = split_node(&root_node, j, root_x[j], warm);
@@ -94,19 +117,19 @@ pub fn solve_qp_global(
         }
     }
 
-    let mut nodes_processed: usize = 1; // root 自体
     let mut max_depth_breached = false;
 
     while let Some(node) = tree.pop() {
         if deadline_hit(&deadline) {
             break;
         }
-        if nodes_processed >= cfg.max_nodes {
+        if stats.nodes_processed >= cfg.max_nodes {
             break;
         }
 
         // 親から継承 lb で再 prune (incumbent が更新されている可能性)
         if should_prune(node.lower_bound, Some(state.incumbent_obj), cfg.gap_tol) {
+            stats.pruned += 1;
             continue;
         }
 
@@ -114,12 +137,13 @@ pub fn solve_qp_global(
         let (local_lb, _) = interval_quadratic_bounds(problem, &node.var_bounds);
         let node_lb = local_lb.max(node.lower_bound);
         if should_prune(node_lb, Some(state.incumbent_obj), cfg.gap_tol) {
+            stats.pruned += 1;
             continue;
         }
 
-        nodes_processed += 1;
-        if node.depth > max_depth_seen {
-            max_depth_seen = node.depth;
+        stats.nodes_processed += 1;
+        if node.depth > stats.max_depth_seen {
+            stats.max_depth_seen = node.depth;
         }
 
         let res = solve_local_upper_bound(
@@ -161,9 +185,9 @@ pub fn solve_qp_global(
     let halted_early = !tree.is_empty()
         || max_depth_breached
         || deadline_hit(&deadline)
-        || nodes_processed >= cfg.max_nodes;
+        || stats.nodes_processed >= cfg.max_nodes;
 
-    if halted_early {
+    let result = if halted_early {
         // 未探索領域の下界 (queue に残った node の最小 lb)
         let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY);
         let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
@@ -172,13 +196,19 @@ pub fn solve_qp_global(
             let lb_for_proof = remaining_lb.min(inc_obj);
             state.finalize_proven(lb_for_proof)
         } else {
-            state.finalize_unproven(remaining_lb, nodes_processed, max_depth_seen, cfg)
+            state.finalize_unproven(
+                remaining_lb,
+                stats.nodes_processed,
+                stats.max_depth_seen,
+                cfg,
+            )
         }
     } else {
         // queue 空 = 全探索完了 → incumbent_obj が global
         let inc_obj = state.incumbent_obj;
         state.finalize_proven(inc_obj)
-    }
+    };
+    (result, stats)
 }
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {

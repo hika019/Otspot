@@ -14,7 +14,7 @@ pub use crate::problem::SolverResult;
 pub use diagnose::{
     diagnose, DiagnosticCode, DiagnosticReport, DiagnosticWarning, ProblemInfo, Severity,
 };
-pub use global::solve_qp_global;
+pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 pub use multistart::solve_qp_multistart;
 pub(crate) use lp_dispatch::solve_as_lp_pub;
 pub(crate) use postsolve::bound_dual::{

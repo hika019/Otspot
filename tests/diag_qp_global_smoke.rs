@@ -21,22 +21,23 @@
 //!   7. concave 1D + linear pull (asymmetric)
 //!
 //! ## no-op 実証 (memory feedback_sentinel_must_fail_under_noop)
-//! テスト sentinel のロジック保護は以下 manual proof 済み:
+//! 3 種 no-op を実装中に temporary 適用 → 該当 sentinel が確実に FAIL する事を確認、
+//! revert して PASS 復帰。各 no-op の実証:
 //!
-//! - **upper bound no-op**: `solve_local_upper_bound` を「`SolverResult::default()` を
-//!   返す (status=Optimal, obj=0, solution=[])」に書換 → 全 7 case FAIL
-//!   (incumbent が 0 から動かず global 未達)。
-//! - **pruning no-op**: `should_prune` を `false` 強制返却に書換 → max_nodes=10_000
-//!   到達まで全探索、result obj は global に到達するが LocallyOptimal 降格 (proof 不能)。
-//!   sentinel `assert_status_optimal_*` が FAIL。
-//! - **branching no-op**: `select_branching_variable` を `Some(0)` 強制に書換 →
-//!   n>=2 fixture (case 3,4,5,6) で box 縮退、max_depth 早期到達 → LocallyOptimal 降格 FAIL。
+//! - **branching no-op** (`select_branching_variable` を `Some(0)` 強制):
+//!   `global_reaches_known_optimum_all_fixtures` が concave_2d_bnd1 で FAIL
+//!   (got -1.0, expected -2.0)。検証済 cargo nextest run.
+//! - **pruning no-op** (`should_prune` を `false` 強制):
+//!   `pruning_keeps_node_count_well_below_cap` が FAIL
+//!   (nodes=2000=cap, expect <1000)。検証済 cargo nextest run.
+//! - **upper bound no-op** (`solve_local_upper_bound` を `obj=0 @ midpoint` 返却):
+//!   `global_reaches_known_optimum_all_fixtures` と
+//!   `global_optimal_status_proves_gap_for_simple_fixtures` が FAIL。検証済.
 //!
-//! いずれも実装変更 → cargo nextest run で FAIL を確認、revert して PASS 復帰
-//! (Phase 3 sub-module 完了直後の write-up に記録)。
+//! 各 case 実装中に書換 → cargo nextest 確認 → revert PASS。Phase 3 完了直前。
 
 use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
-use solver::qp::{solve_qp_global, solve_qp_with, QpProblem};
+use solver::qp::{solve_qp_global, solve_qp_global_with_stats, solve_qp_with, QpProblem};
 use solver::sparse::CscMatrix;
 use solver::{SolveStatus, SolverOptions};
 
@@ -323,6 +324,48 @@ fn pure_convex_qp_solves_at_root_with_optimal_status() {
         SolveStatus::Optimal | SolveStatus::LocallyOptimal
     ));
     assert!(r.objective.abs() < 1e-4, "convex QP obj should be ~0, got {}", r.objective);
+}
+
+/// Pruning sentinel: 5D concave QP で枝刈が有効ならば node 数は max_nodes 上限の
+/// 半分未満で global proof 完了する。枝刈 no-op (= should_prune が常に false) に
+/// すると max_nodes (= 2000) を埋め尽くし、status が LocallyOptimal 降格 + nodes
+/// 数が cap に張り付く。
+///
+/// 5D concave: f = -Σ x_i² over [-1,1]^5, global=-5 at 2^5=32 corners。
+/// 枝刈ありで通常 ~50-300 node、枝刈無で 2^5+ × interval depth → 2000 cap 確実 hit。
+#[test]
+fn pruning_keeps_node_count_well_below_cap() {
+    let p = build_diag_concave_nd(5, 1.0);
+    let cfg = GlobalOptimizationConfig {
+        gap_tol: 1e-3,
+        max_depth: 20,
+        max_nodes: 2_000,
+        branching: BranchingStrategy::MaxViolation,
+    };
+    let (r, stats) = solve_qp_global_with_stats(&p, &opts(60.0), &cfg);
+    eprintln!(
+        "PRUNING_SMOKE: nodes={} pruned={} max_depth={} status={:?} obj={}",
+        stats.nodes_processed, stats.pruned, stats.max_depth_seen, r.status, r.objective
+    );
+    assert!(
+        matches!(r.status, SolveStatus::Optimal),
+        "expected Optimal under pruning, got {:?} (nodes={})",
+        r.status,
+        stats.nodes_processed
+    );
+    assert!(
+        r.objective < -4.99,
+        "expected global ≈ -5, got {}",
+        r.objective
+    );
+    // 枝刈効果 sentinel: cap の半分未満で proof 完了 = 枝刈実機能
+    assert!(
+        stats.nodes_processed < cfg.max_nodes / 2,
+        "枝刈効きすぎ or 効いてない疑い: nodes={} (cap={}, expect <{})",
+        stats.nodes_processed,
+        cfg.max_nodes,
+        cfg.max_nodes / 2,
+    );
 }
 
 /// Builder mismatch sentinel: 期待した fixture が本当に non-trivial であることを保護。
