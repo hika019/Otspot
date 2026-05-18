@@ -18,6 +18,7 @@
 
 pub(crate) mod bound;
 pub mod bound_alpha_bb;
+pub mod bound_mccormick;
 pub(crate) mod branch;
 pub(crate) mod node;
 pub(crate) mod pruning;
@@ -30,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
 use bound_alpha_bb::{alpha_bb_lower_bound, gershgorin_alpha};
+use bound_mccormick::mccormick_lower_bound;
 use branch::{select_branching_variable, split_node};
 use node::BBNode;
 use pruning::{should_prune, within_gap};
@@ -108,6 +110,7 @@ pub fn solve_qp_global_with_stats(
         &shared_opts,
         deadline,
         cfg.use_alpha_bb,
+        cfg.use_mccormick,
     );
 
     let mut state = SearchState::new(root_solve);
@@ -160,7 +163,7 @@ pub fn solve_qp_global_with_stats(
             continue;
         }
 
-        // 自前で再計算した lb (Phase 4: α-BB + interval の max) で tight 化、再 prune
+        // 自前で再計算した lb (Phase 4/5: interval + α-BB + McCormick の max) で tight 化、再 prune
         let local_lb = compute_node_lower_bound(
             problem,
             &node.var_bounds,
@@ -168,6 +171,7 @@ pub fn solve_qp_global_with_stats(
             &shared_opts,
             deadline,
             cfg.use_alpha_bb,
+            cfg.use_mccormick,
         );
         let node_lb = local_lb.max(node.lower_bound);
         if should_prune(node_lb, Some(state.incumbent_obj), cfg.gap_tol) {
@@ -250,9 +254,9 @@ fn deadline_hit(deadline: &Option<Instant>) -> bool {
 }
 
 /// 当該 box に対する lower bound。
-/// 戦略: Phase 3 interval lb (cheap) + Phase 4 α-BB lb (1 凸 IPM solve) の **max**。
-/// 両者とも valid lower bound = max を取ることで一方が tight な方を採用 (= ロスなし)。
-/// `use_alpha_bb=false` または α=0 (Q PSD) では α-BB を skip し interval のみ。
+/// 戦略: interval lb (cheap) + α-BB lb (1 凸 IPM solve) + McCormick lb (1 LP solve) の **max**。
+/// 3 経路はいずれも valid lower bound のため `max` を取ることで一方が tight な方を採用
+/// (= ロスなし)。各経路は `use_*` flag で個別に skip 可能。
 fn compute_node_lower_bound(
     problem: &QpProblem,
     bounds: &[(f64, f64)],
@@ -260,15 +264,21 @@ fn compute_node_lower_bound(
     base_opts: &SolverOptions,
     deadline: Option<Instant>,
     use_alpha_bb: bool,
+    use_mccormick: bool,
 ) -> f64 {
     let (interval_lb, _) = interval_quadratic_bounds(problem, bounds);
-    if !use_alpha_bb {
-        return interval_lb;
+    let mut lb = interval_lb;
+    if use_alpha_bb {
+        if let Some(ab_lb) = alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline) {
+            lb = lb.max(ab_lb);
+        }
     }
-    match alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline) {
-        Some(ab_lb) => ab_lb.max(interval_lb),
-        None => interval_lb,
+    if use_mccormick {
+        if let Some(mc_lb) = mccormick_lower_bound(problem, bounds, base_opts, deadline) {
+            lb = lb.max(mc_lb);
+        }
     }
+    lb
 }
 
 fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
