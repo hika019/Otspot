@@ -1,0 +1,10 @@
+# QPLIB official pure-continuous non-convex QP instances (CC-BY 4.0, qplib.zib.de).
+# 出典: QPLIB instance pages (https://qplib.zib.de/QPLIB_<id>.html), solobjvalue 列 (best known primal).
+# Selection: probtype=QCL (Quadratic obj, Continuous vars, Linear constraints),
+#            CONVEX=false, OBJCURVATURE=indefinite. QCQP / binary-QP は除外.
+# Purpose: Phase 1B 非凸 QP 大域最適化評価の reference (合成データと分離).
+problem_name,optimal_obj,source,license
+QPLIB_0018,-6.38601498,qplib_zib_de_solobjvalue,CC-BY-4.0
+QPLIB_0343,-6.38601498,qplib_zib_de_solobjvalue,CC-BY-4.0
+QPLIB_2712,0.01286883,qplib_zib_de_solobjvalue,CC-BY-4.0
+QPLIB_2761,0.00104853,qplib_zib_de_solobjvalue,CC-BY-4.0
