@@ -8,31 +8,23 @@
 //! する。
 //!
 //! ## 複数 data pattern (memory feedback_test_multi_data_pattern)
-//! 5 fixture × 「Phase 3 OFF → LocallyOptimal、Phase 4 ON → Optimal proof」の table-driven:
+//! 5 fixture を共通 table 化し obj-correctness / 総 node 数の退化を見張る:
 //!   1. concave 2D bnd1 (= 制約あり concave、Phase 3 不能 / Phase 4 可能の最小例)
 //!   2. concave 3D bnd1 (= dimension up でも維持)
 //!   3. bilinear symmetric 2D (= zero-diag indefinite、Gershgorin LLT 短絡回避の sentinel)
 //!   4. mixed concave+convex (= 一部負固有値だけ補正で十分)
-//!   5. NEARPSD diag (small negative eigenvalue, α 小で済む)
+//!   5. 5D concave sumcap (BB 探索 stress)
 //!
 //! ## no-op 実証 (memory feedback_sentinel_must_fail_under_noop)
-//! 3 種 no-op を実装中に temporary 適用 → 該当 sentinel 確実 FAIL を確認、revert で PASS。
-//!
-//! - **α=0 強制** (`gershgorin_alpha` を `_ -> 0.0` 化):
-//!   `alpha_bb_lifts_phase3_locally_optimal_to_optimal` の bilinear_symmetric_2d
-//!   case で FAIL (Optimal proof 失敗、LocallyOptimal 復帰)。Phase 3 OFF 経路と
-//!   完全一致してしまうため。検証手順は本ファイル末尾 docstring 参照。
-//! - **add_scalar_to_diagonal を恒等化** (`(q, _) -> q.clone()`):
-//!   α 計算は走るが凸化されないため underestimator が non-convex、IPM が local min を
-//!   返し下界として無効化 → やはり Optimal proof 失敗。
-//! - **alpha_bb_lower_bound が常に None を返す**:
-//!   compute_node_lower_bound が interval にフォールバック = Phase 3 と等価。
-//!   `alpha_bb_strictly_reduces_node_count` で node 数が Phase 3 と同等になり FAIL。
+//! promotion 観察は `diag_qp_global_promotion_sentinel` の
+//! `alpha_bb_promotes_locally_optimal_to_optimal_on_multiple_fixtures` (>=2 件) に
+//! 集約済み (本 smoke から重複 test を削除済み)。本 file には node 数 / status の
+//! 退化検知のみ残し、α=0 / 凸化恒等 等の no-op proof は invariants / promotion 側で
+//! 担保する。
 //!
 //! ## 効果実測
-//! `alpha_bb_strictly_reduces_node_count`: Phase 4 node 数 ≤ Phase 3 node 数 (= 緩い)。
-//! `alpha_bb_lifts_phase3_locally_optimal_to_optimal`: Phase 3 で LocallyOptimal だった
-//! fixture が Phase 4 で Optimal に進化する fixture が **1 件以上**。
+//! `alpha_bb_does_not_increase_total_node_count`: Phase 4 合計 node 数 ≤ Phase 3
+//! 合計 node 数 (= α-BB lb が interval より緩くないことを総量で sentinel 化)。
 
 use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
 use solver::qp::{solve_qp_global_with_stats, QpProblem};
@@ -238,42 +230,6 @@ fn alpha_bb_reaches_global_objective_on_all_fixtures() {
             fx.global_obj,
         );
     }
-}
-
-/// Phase 4 ON で **Optimal proof** に進化する fixture が **1 件以上** ある
-/// (= α-BB が Phase 3 LocallyOptimal を実際に格上げしている)。
-///
-/// no-op 実証 fallback (α=0 / 凸化恒等 / alpha_bb_lower_bound→None) で本 sentinel が
-/// FAIL することを実装中に確認済み = sentinel が真に α-BB pathway を保護している。
-#[test]
-fn alpha_bb_lifts_phase3_locally_optimal_to_optimal() {
-    let mut promotions = 0;
-    for fx in fixtures() {
-        let (r3, _) = solve_qp_global_with_stats(&fx.problem, &opts(30.0), &cfg(false));
-        let (r4, _) = solve_qp_global_with_stats(&fx.problem, &opts(30.0), &cfg(true));
-        let was_locally = matches!(r3.status, SolveStatus::LocallyOptimal);
-        let now_optimal = matches!(r4.status, SolveStatus::Optimal);
-        eprintln!(
-            "PROMOTION [{}]: phase3={:?} phase4={:?} obj3={:.4} obj4={:.4}",
-            fx.label, r3.status, r4.status, r3.objective, r4.objective
-        );
-        if was_locally && now_optimal {
-            promotions += 1;
-        }
-        // どちらの phase でも obj は正しく取れていること (regression sentinel)
-        assert!(
-            rel_err(r4.objective, fx.global_obj) <= GLOBAL_OBJ_TOL,
-            "{}: phase4 obj wrong {} vs {}",
-            fx.label,
-            r4.objective,
-            fx.global_obj,
-        );
-    }
-    assert!(
-        promotions >= 1,
-        "no fixture showed Phase 3 LocallyOptimal → Phase 4 Optimal promotion. \
-         α-BB pathway may not be contributing — re-check gershgorin_alpha / convexification."
-    );
 }
 
 /// Phase 4 ON で全 fixture が **(node 数, status)** いずれかで Phase 3 より同等以上に

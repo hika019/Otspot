@@ -261,30 +261,38 @@ fn gershgorin_alpha_sign_matches_convexity() {
 
 /// 全 fixture × 多 seed sample で `L(x) ≤ f(x)` (= 有効 lower bound condition)。
 /// box 内部からの一様 sample で **statistical** に網羅。corner も別途 explicit に check。
+///
+/// **chain 完結**: local α だけでなく src `gershgorin_alpha` でも同じ assertion を回す。
+/// src α が誤値 (例: 0.5× 過小評価) を返した場合は src α 経由の L(x) が一部 sample で
+/// f(x) を超え、本 test 自身が FAIL する。これにより src α regression が sample test
+/// レベルで直接検出される (= invariants の chain が src 側で切れない)。
 #[test]
 fn underestimator_dominates_objective_on_uniform_samples() {
     const N_SAMPLES_PER_SEED: usize = 30;
     const SEEDS: [u64; 3] = [1, 7, 42];
     for fx in fixtures() {
-        let alpha = gershgorin_alpha_local(&fx.problem.q);
-        for seed in SEEDS {
-            let mut rng = Lcg::new(seed);
-            for _ in 0..N_SAMPLES_PER_SEED {
-                let x: Vec<f64> = fx
-                    .problem
-                    .bounds
-                    .iter()
-                    .map(|&(l, u)| rng.sample_in(l, u))
-                    .collect();
-                let f = eval_f(&fx.problem, &x);
-                let l = eval_l(&fx.problem, &x, alpha);
-                let slack = f - l;
-                assert!(
-                    slack >= -EQUAL_TOL,
-                    "{} seed={seed}: L({x:?})={l:.6e} exceeded f={f:.6e} by {:.3e} (α={alpha})",
-                    fx.label,
-                    -slack,
-                );
+        let alpha_local = gershgorin_alpha_local(&fx.problem.q);
+        let alpha_src = gershgorin_alpha_src(&fx.problem.q);
+        for (alpha_label, alpha) in [("local", alpha_local), ("src", alpha_src)] {
+            for seed in SEEDS {
+                let mut rng = Lcg::new(seed);
+                for _ in 0..N_SAMPLES_PER_SEED {
+                    let x: Vec<f64> = fx
+                        .problem
+                        .bounds
+                        .iter()
+                        .map(|&(l, u)| rng.sample_in(l, u))
+                        .collect();
+                    let f = eval_f(&fx.problem, &x);
+                    let l = eval_l(&fx.problem, &x, alpha);
+                    let slack = f - l;
+                    assert!(
+                        slack >= -EQUAL_TOL,
+                        "{} α[{alpha_label}] seed={seed}: L({x:?})={l:.6e} exceeded f={f:.6e} by {:.3e} (α={alpha})",
+                        fx.label,
+                        -slack,
+                    );
+                }
             }
         }
     }
