@@ -154,9 +154,4 @@ impl crate::problem::SolverResult {
     }
 }
 
-/// Warm-start. 公開 API 互換性のため保持しているが現状 solve_qp_warm では未使用。
-#[derive(Debug, Clone)]
-pub struct QpWarmStart {
-    pub initial_active_set: Vec<usize>,
-    pub initial_point: Option<Vec<f64>>,
-}
+pub use crate::options::QpWarmStart;
