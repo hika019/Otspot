@@ -5,44 +5,50 @@
 //! 本 test は wall-clock threshold を pin する。
 //!
 //! Gate は **simplex postsolve** 経路の挙動を pin するもの。`#33` の LP→IPM
-//! dispatch 導入後、サイズ閾値を超える LP は IPM 経路で解かれ simplex postsolve
-//! 自体が走らない (`timing_breakdown` が `None`)。その場合 cleanup-LP 退化は
-//! 原理的に発生しえないので NaN を「regression 検出不能」として PASS 扱いする。
+//! dispatch (`src/qp/lp_dispatch.rs`) 導入後、サイズ閾値を超える LP は IPM 経路で
+//! 解かれ simplex postsolve 自体が走らない。その判定は public accessor
+//! `solver::qp::lp_dispatch_prefers_ipm(n, m)` を直接呼ぶ (`timing_breakdown`
+//! の NaN proxy は presolve OFF の simplex 経路でも NaN になるため brittle、
+//! reviewer C2 指摘で書き換え)。
 
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
 use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use solver::qp::{lp_dispatch_prefers_ipm, solve_qp_with, QpProblem};
 use std::path::Path;
 
-fn solve(path: &str, timeout_s: f64) -> (SolveStatus, f64, f64) {
+fn load(path: &str) -> QpProblem {
     let p = Path::new(path);
     assert!(p.exists(), "data missing: {}", path);
-    let prob = parse_qps(p).expect("parse");
+    parse_qps(p).expect("parse")
+}
+
+fn solve(prob: &QpProblem, timeout_s: f64) -> (SolveStatus, f64, f64) {
     let mut opts = SolverOptions::default();
     opts.presolve = true;
     opts.timeout_secs = Some(timeout_s);
     let t0 = std::time::Instant::now();
-    let r = solve_qp_with(&prob, &opts);
+    let r = solve_qp_with(prob, &opts);
     let wall = t0.elapsed().as_secs_f64();
     let postsolve_s = r.timing_breakdown.map(|t| t.postsolve_us as f64 / 1e6).unwrap_or(f64::NAN);
-    eprintln!("{}: status={:?} wall={:.2}s postsolve={:.2}s",
-        path, r.status, wall, postsolve_s);
+    eprintln!(
+        "n={} m={}: status={:?} wall={:.2}s postsolve={:.2}s",
+        prob.num_vars, prob.num_constraints, r.status, wall, postsolve_s
+    );
     (r.status, wall, postsolve_s)
-}
-
-/// Returns true if `postsolve_s` is NaN, indicating the LP took the IPM
-/// dispatch path (no simplex postsolve ran). Cleanup-LP gate cannot
-/// regress in that case.
-fn ipm_dispatched(postsolve_s: f64) -> bool {
-    postsolve_s.is_nan()
 }
 
 /// wood1p was solving in ~9 s but spending another ~25 s in a cleanup LP
 /// that always returned Inf. Postsolve must stay under 2 s.
 #[test]
 fn wood1p_postsolve_under_2s() {
-    let (status, _wall, postsolve_s) = solve("data/lp_problems/wood1p.QPS", 60.0);
+    let prob = load("data/lp_problems/wood1p.QPS");
+    // wood1p: n=2594, m=244 → simplex 経路 (n<3000, m<2000)。gate 適用対象。
+    assert!(
+        !lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints),
+        "wood1p must remain on simplex path for this gate to apply"
+    );
+    let (status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(matches!(status, SolveStatus::Optimal), "wood1p must reach Optimal");
     assert!(
         postsolve_s < 2.0,
@@ -55,11 +61,12 @@ fn wood1p_postsolve_under_2s() {
 /// The cheap recovery already gives machine-zero dfeas.
 #[test]
 fn d6cube_postsolve_under_1s() {
-    let (_status, _wall, postsolve_s) = solve("data/lp_problems/d6cube.QPS", 60.0);
-    if ipm_dispatched(postsolve_s) {
-        // IPM 経路で解かれた → simplex cleanup-LP は走らない (#33)。
+    let prob = load("data/lp_problems/d6cube.QPS");
+    if lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints) {
+        // IPM 経路で解かれる → simplex cleanup-LP は走らない (#33)。
         return;
     }
+    let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(
         postsolve_s < 1.0,
         "d6cube postsolve {:.2}s exceeded 1s — cleanup-LP gate likely regressed",
@@ -71,10 +78,11 @@ fn d6cube_postsolve_under_1s() {
 /// deadline bounds postsolve well under what it used to consume.
 #[test]
 fn greenbea_postsolve_under_5s() {
-    let (_status, _wall, postsolve_s) = solve("data/lp_problems/greenbea.QPS", 60.0);
-    if ipm_dispatched(postsolve_s) {
+    let prob = load("data/lp_problems/greenbea.QPS");
+    if lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints) {
         return;
     }
+    let (_status, _wall, postsolve_s) = solve(&prob, 60.0);
     assert!(
         postsolve_s < 5.0,
         "greenbea postsolve {:.2}s exceeded 5s — cleanup_pert deadline cap likely regressed",
