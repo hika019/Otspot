@@ -136,8 +136,9 @@ fn test_hs51() {
     // Phase I LP は全自由変数（-INF/INF）で未界を誤検知する場合がある。
     // 既知の実行可能点 x*=[1,...,1] を warm-start として Phase I をバイパスする。
     let ws = QpWarmStart {
-        initial_active_set: vec![],
-        initial_point: Some(vec![1.0; n]),
+        x: vec![1.0; n],
+        y: vec![0.0; 6],
+        mu: 1.0,
     };
     let result = solve_qp_warm(&problem, &ws, &Default::default());
     assert_eq!(result.status, SolveStatus::Optimal, "HS51: status should be Optimal");

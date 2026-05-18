@@ -3480,15 +3480,18 @@ pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> So
     solve_qp_with(problem, options)
 }
 
-/// Warm-start 付きで QP を解く (qpOASES `hotstart` 相当)。
+/// Warm-start 付きで QP を解く (B&B node 間引継ぎなど)。
 ///
-/// IPM は warm_start 未対応 (initial_point/active_set 共に無視)。solve_qp_with に委譲。
+/// `warm_start` を `options.warm_start_qp` に注入して `solve_qp_with` へ委譲する。
+/// 既に options 側で warm を組み立てているなら `solve_qp_with` を直接呼べばよい。
 pub fn solve_qp_warm(
     problem: &QpProblem,
-    _warm_start: &QpWarmStart,
+    warm_start: &QpWarmStart,
     options: &SolverOptions,
 ) -> SolverResult {
-    solve_qp_with(problem, options)
+    let mut opts = options.clone();
+    opts.warm_start_qp = Some(warm_start.clone());
+    solve_qp_with(problem, &opts)
 }
 
 #[cfg(test)]
@@ -3614,8 +3617,9 @@ mod tests {
         assert_eq!(result1.status, SolveStatus::Optimal);
 
         let ws = crate::qp::QpWarmStart {
-            initial_active_set: vec![],
-            initial_point: Some(result1.solution.clone()),
+            x: result1.solution.clone(),
+            y: result1.dual_solution.clone(),
+            mu: result1.gap.unwrap_or(1e-6),
         };
         let result2 = solve_qp_warm(&problem2, &ws, &SolverOptions::default());
 
