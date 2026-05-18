@@ -119,6 +119,34 @@ impl PricingStrategy for SteepestEdgePricing {
 pub(crate) trait DualLeavingStrategy {
     /// Row index of a basic variable to leave (None = primal feasible).
     fn select_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize>;
+
+    /// Anti-cycling fallback used when `dual_simplex_core_advanced` enters
+    /// bland_mode. Default = pure Bland (smallest `basis[i]` index among rows
+    /// with `x_B[i] < -primal_tol`). Strategies with auxiliary objectives
+    /// (e.g. artificial removal in Big-M Phase I) must override so bland_mode
+    /// does not mask their secondary priority (task #43).
+    fn bland_leaving(&self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
+        let mut best_row: Option<usize> = None;
+        let mut best_var = usize::MAX;
+        for (i, &v) in x_b.iter().enumerate() {
+            if v < -primal_tol && basis[i] < best_var {
+                best_var = basis[i];
+                best_row = Some(i);
+            }
+        }
+        best_row
+    }
+
+    /// Progress metric (smaller = closer to goal). bland_mode triggers when
+    /// this fails to improve for `k_trigger` consecutive iterations. Default
+    /// = sum of negative parts of x_B (standard "primal infeasibility").
+    /// Strategies that drive auxiliary quantities (e.g. artificial values)
+    /// to zero must include those in the metric; otherwise Big-M Phase I
+    /// entry condition `x_B = b ≥ 0` makes `best = 0` and threshold = 0 →
+    /// every iter judged no-progress → bland_mode 誤起動 (task #43).
+    fn progress_metric(&self, x_b: &[f64], _basis: &[usize]) -> f64 {
+        x_b.iter().map(|&v| (-v).max(0.0)).sum()
+    }
 }
 
 /// Most Infeasible Rule: 最も負のx_B[i]を選択
