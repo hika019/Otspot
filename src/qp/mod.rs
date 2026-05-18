@@ -135,11 +135,8 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     })
 }
 
-/// QP entry call カウンタ (#36 sentinel)。LP/QP entry が想定経路に乗っているか
-/// 機械検証するため exposed。
-///
-/// `ipm_calls` は Q≠0 で IPM が走った回数のみカウントし、Q=0 → LP forward は
-/// 含まない (forward は `crate::lp::telemetry::lp_forwarded_from_qp_calls` 側)。
+/// QP entry telemetry. `qp_ipm_calls` counts only Q≠0 IPM dispatches;
+/// the Q=0 LP forward is counted by `crate::lp::telemetry`.
 pub mod telemetry {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -154,11 +151,8 @@ pub mod telemetry {
     }
 }
 
-/// Q=0 (LP) は LP entry に転送、Q≠0 は IPPMM。
-///
-/// **設計方針 (#36)**: 本来 user は LP を解く際 `crate::lp::solve_lp_with` を
-/// 直接呼ぶべき。Q=0 forward は後方互換のために残しているが、bench label
-/// 誤誘導や経路 confusion の原因になるため将来 deprecation 予定。
+/// Q=0 forwards to the LP entry (kept for backward compat — callers
+/// should prefer `crate::lp::solve_lp_with` directly); Q≠0 goes to IPPMM.
 fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if problem.is_zero_q() {
         return solve_as_lp_pub(problem, options);

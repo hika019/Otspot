@@ -278,8 +278,6 @@ impl Model {
         if let Some(n) = self.threads {
             lp_opts.threads = n;
         }
-        // LP entry を明示 (#36): 旧実装は simplex::solve_with を直接呼んでいたが、
-        // LP/QP entry 分離の趣旨に従い crate::lp::solve_lp_with 経由とする。
         let solver_result = crate::lp::solve_lp_with(&problem, &lp_opts);
 
         // SolverResult の dual/rc/slack は extract_dual_info によって

@@ -1,9 +1,6 @@
-//! Q=0 退化ケースを LP entry に転送する (#36)。
-//!
-//! 旧実装は `simplex::solve_with` を直接呼んでいたが、`crate::lp` を
-//! 経由することで LP-specific 経路を全て LP module に集約し、
-//! telemetry counter (`lp::telemetry::lp_forwarded_from_qp_calls`) で
-//! QP→LP forward を識別できるようにする。
+//! Forward the Q=0 degenerate case to the LP entry so that all
+//! LP-specific paths live in `crate::lp`. Telemetry counts this
+//! forward separately from a direct LP entry call.
 
 use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolverResult};

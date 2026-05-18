@@ -1,26 +1,13 @@
-//! #36 sentinel: LP/QP 入口分離が想定どおり経路に乗っているか機械検証する。
+//! LP/QP entry split sentinel.
 //!
-//! ## 何を保証するか
-//! - `Model::solve` の LP path は `crate::lp::solve_lp_with` を経由する
-//!   (`lp::telemetry::lp_direct_calls` が増える / `qp::telemetry::qp_ipm_calls`
-//!    は増えない)。
-//! - `Model::solve` の QP path は `crate::qp::solve_qp_with` → IPM を経由する
-//!   (`qp::telemetry::qp_ipm_calls` が増える / LP counter は増えない)。
-//! - `solve_qp_with(Q=0)` の forward は `lp_forwarded_from_qp_calls` 側で
-//!   識別可能 (direct と混同しない)。
-//! - `solve_lp_with(LpProblem)` 直接呼び出しが正解を返す (Q=0 forward と同値)。
-//!
-//! ## no-op proof (sentinel が無意味でない証明)
-//! - `sentinel_proves_lp_path_regression_detectable`: LP fixture を意図的に
-//!   `solve_qp_with` (QP entry) 経由で解き、`lp_direct_calls` が **0 のまま**
-//!   かつ `lp_forwarded_from_qp_calls` が増えることを assert する。
-//!   = Model::solve LP path が誤って solve_qp_with に regression したら
-//!     `lp_direct_calls > 0` の主 assertion が FAIL する。
-//!
-//! ## 複数 data pattern (CLAUDE.md「複数パターンのデータを用意せよ」遵守)
-//! - LP: trivial bound / standard ≤ / ≥ / = / 退化 (degenerate) / 大規模合成 (n=200)
-//! - QP: PSD diagonal small / PSD off-diagonal / box-constrained / equality+inequality
-//!       / 大規模 PSD diagonal (n=50)
+//! Verifies that `Model::solve` routes LP through `crate::lp::solve_lp_with`
+//! and QP through `crate::qp::solve_qp_with` → IPM, that `solve_qp_with(Q=0)`
+//! forwards to the LP module on a distinguishable counter, and that
+//! `solve_lp_with(LpProblem)` matches the forwarded result. The
+//! `sentinel_proves_lp_path_regression_detectable` case is a no-op proof:
+//! it routes an LP through QP entry to show the counters discriminate
+//! direct vs forwarded paths, so a regression of `Model::solve` LP path
+//! onto `solve_qp_with` would fail the `lp_direct_calls >= 1` assertion.
 
 use std::sync::Mutex;
 
@@ -31,26 +18,19 @@ use solver::problem::{ConstraintType, LpProblem};
 use solver::qp::QpProblem;
 use solver::sparse::CscMatrix;
 
-/// LP fixture 用の固定オプション。
-///
-/// `SimplexMethod::Primal` を明示する: 既定 `Auto` / `Dual` / `DualAdvanced`
-/// 経路は本 task と独立に textbook LP (例: min -3x-5y …) で頂点 x=2.0
-/// ではなく x≈1.99977 を返す precision 退化が main HEAD 90be7cd 時点で
-/// 観測されており (#33 領域、本 task scope 外)、entry 分離 sentinel の
-/// 主旨である「経路が正しいか」と独立な numerical noise を assert に
-/// 混入させない目的で Primal pin する。
+/// Pin `SimplexMethod::Primal`: dual paths regress textbook fixtures to
+/// x≈1.99977 instead of vertex 2.0 on current main (task #33), which is
+/// orthogonal noise to the routing assertions here.
 fn lp_opts_strict() -> SolverOptions {
     let mut o = SolverOptions::default();
     o.simplex_method = SimplexMethod::Primal;
     o
 }
 
-/// telemetry counter は process-global static。test 並列実行時の race を避ける
-/// ため本 file の全 test を serialize する。
+/// Telemetry counters are process-global; serialise tests in this file.
 static SENTINEL_LOCK: Mutex<()> = Mutex::new(());
 
-/// LP fixture (Primal simplex pin) は頂点解で exact、QP fixture は IPM eps=1e-6
-/// で 1e-5 相対精度。両者を呑む共通 tolerance に統一する。
+/// Loose enough for IPM eps=1e-6 QP solutions; LP fixtures hit vertices exactly.
 const TOL_OBJ: f64 = 1e-4;
 const TOL_SOL: f64 = 1e-4;
 
@@ -150,11 +130,8 @@ fn qp_fixtures() -> Vec<(QpProblem, f64, &'static str)> {
     ]
 }
 
-/// 対称 Q を CSC 表現する。`upper_triples` には対角と上三角 (i<=j) のみ
-/// 与え、内部で下三角 (j>i) を mirror して挿入する。
-///
-/// solver の x^T Q x 評価は CSC に格納された entry をそのまま使うため、対称
-/// 部分は両方明示しないと obj が非対称化される (probe で実証済)。
+/// Build a symmetric Q from upper-triangle triples. The solver evaluates
+/// x^T Q x from raw CSC entries, so both halves must be present.
 fn symmetric_q_csc(n: usize, upper_triples: &[(usize, usize, f64)]) -> CscMatrix {
     let mut rows: Vec<usize> = Vec::new();
     let mut cols: Vec<usize> = Vec::new();
@@ -397,8 +374,7 @@ fn model_api_qp_path_uses_solve_qp_with() {
     );
 }
 
-/// QP entry に Q=0 を渡した場合 (legacy 後方互換経路): solve_lp_with 直接呼び
-/// 出しと同じ最適解、ただし telemetry は forward 側に乗る。
+/// Q=0 through QP entry: same optimum as direct LP entry, but counted as forward.
 #[test]
 fn qp_entry_with_zero_q_forwards_to_lp_module() {
     let _guard = SENTINEL_LOCK.lock().unwrap();
@@ -451,13 +427,9 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     );
 }
 
-/// no-op proof: LP fixture を意図的に solve_qp_with (QP entry) 経由で解いて、
-/// sentinel counter が direct と forward を識別できることを示す。
-///
-/// この test が PASS することで、もし Model::solve LP path が誤って
-/// solve_qp_with に regression したとしても
-/// `model_api_lp_path_uses_solve_lp_with` の assertion (`lp_direct_calls >= 1`)
-/// が FAIL することが保証される (= sentinel が能動的に regression を検出する)。
+/// No-op proof that the counters discriminate direct vs forwarded paths
+/// — a regression of any LP path onto `solve_qp_with` would flip
+/// `lp_direct_calls` to 0 / `lp_forwarded_from_qp_calls` to ≥1.
 #[test]
 fn sentinel_proves_lp_path_regression_detectable() {
     let _guard = SENTINEL_LOCK.lock().unwrap();
@@ -490,8 +462,8 @@ fn sentinel_proves_lp_path_regression_detectable() {
     }
 }
 
-/// 直接 LP entry と QP→LP forward 経路が同一 objective を返すクロスチェック
-/// (複数 data pattern)。
+/// Direct LP entry and QP→LP forward must agree on objective + solution
+/// for every fixture (cross-check across multiple data patterns).
 #[test]
 fn cross_check_lp_direct_vs_qp_forward_objective() {
     let _guard = SENTINEL_LOCK.lock().unwrap();
