@@ -41,9 +41,9 @@ use tree::BBTree;
 /// 出力: 大域 ε-optimal incumbent (`SolveStatus::Optimal`) or 打ち切り incumbent
 /// (`LocallyOptimal` / `Timeout` / 入口失敗の伝播)。
 ///
-/// 各 node の local solve は `solve_qp_with` 経由 = inertia 補正付き IPM (#3 Phase 1A)
-/// + (#12) warm start で parent 解継承。下界は `interval_quadratic_bounds`
-/// = box 上 interval arithmetic (Phase 4 で α-BB 置換予定)。
+/// 各 node の local solve は `solve_qp_with` 経由 = inertia 補正付き IPM
+/// + warm start で parent 解継承。下界 default は α-BB (`bound_alpha_bb`、Phase 4)、
+/// `use_alpha_bb=false` で interval_quadratic_bounds (Phase 3 fallback) に切替可。
 /// BB 探索の統計 (テスト sentinel 用、production API には含めない)。
 /// `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
 /// `max_depth_seen`: 探索 tree 内で到達した最大 depth。

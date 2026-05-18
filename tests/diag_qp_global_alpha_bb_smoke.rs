@@ -48,11 +48,15 @@ fn opts(timeout_secs: f64) -> SolverOptions {
     o
 }
 
+/// sentinel test 用 BB 探索上限 (lib test 3 分 cap 内で promotion 観察可能な範囲)。
+const TEST_MAX_DEPTH: usize = 25;
+const TEST_MAX_NODES: usize = 5_000;
+
 fn cfg(use_alpha_bb: bool) -> GlobalOptimizationConfig {
     GlobalOptimizationConfig {
         gap_tol: GLOBAL_OBJ_TOL,
-        max_depth: 25,
-        max_nodes: 5_000,
+        max_depth: TEST_MAX_DEPTH,
+        max_nodes: TEST_MAX_NODES,
         branching: BranchingStrategy::MaxViolation,
         use_alpha_bb,
     }

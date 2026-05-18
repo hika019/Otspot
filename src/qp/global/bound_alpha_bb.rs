@@ -14,10 +14,11 @@
 //! その obj 値 = 元 non-convex f の box 上 lower bound。
 //!
 //! ## α 計算
-//! `compute_inertia_correction(Q)` は Gershgorin で δ s.t. `Q + δ·I` が PSD を返すので、
-//! `α = δ / 2` で `Q + 2α·I` が PSD = α-BB の要求を満たす。
-//! `compute_inertia_correction` は full-symmetric / 上三角 どちらの CSC 格納でも
-//! `row < col` で off-diagonal を 1 度だけカウントするため共用可。
+//! raw Gershgorin で δ s.t. `Q + δ·I` PSD を計算 (`gershgorin_alpha`)、`α = δ / 2`
+//! で `Q + 2α·I` PSD = α-BB の要求を満たす。
+//! 既存 `compute_inertia_correction` は **流用不可** (ldl.rs:449-455 LLT 短絡で
+//! zero-diag indefinite [[0,1],[1,0]] を PSD 誤判定 = #37 audit task)。
+//! Phase 4 は raw Gershgorin 独立実装で side-step。
 //!
 //! ## semi-infinite box
 //! `(x_i − l_i)(x_i − u_i)` 項は有限境界を要求する。l_i や u_i が ±∞ の変数があれば
@@ -138,9 +139,8 @@ fn all_bounds_finite(node_bounds: &[(f64, f64)]) -> bool {
 /// `solve_local_upper_bound` の obj が同時に lb になる) / convex solve が infeasible 等で
 /// lb を得られない。caller は interval lb (or `-∞`) へ fall back する。
 ///
-/// `parent_warm` は convex relaxation 側にも継承する (元と同じ x スケール; ただし
-/// safe 判定は caller 側 `bound::warm_is_safe_for_box` で済んでいる前提なし、ここで
-/// 改めて bound 境界張り付き判定を行わず IPM 側の robustness に委ねる)。
+/// convex relaxation は cold solve で実行 (= warm 継承なし、`opts.warm_start_qp = None`)。
+/// 元 non-convex の warm は凸化後の最適解と一致せず再固着 risk があるため。
 pub(crate) fn alpha_bb_lower_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
