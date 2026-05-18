@@ -6,12 +6,14 @@ pub(crate) mod ipm_core;
 pub mod ipm_solver;
 pub(crate) mod linalg;
 mod lp_dispatch;
+pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
 pub use crate::problem::SolverResult;
 pub use diagnose::{
     diagnose, DiagnosticCode, DiagnosticReport, DiagnosticWarning, ProblemInfo, Severity,
 };
+pub use multistart::solve_qp_multistart;
 pub(crate) use lp_dispatch::solve_as_lp_pub;
 pub(crate) use postsolve::bound_dual::{
     project_duals_from_singleton_columns, remap_bound_duals_to_orig, zero_inactive_inequality_duals,
@@ -112,7 +114,16 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 pub(crate) const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// QP をカスタム設定で解く (8 MB scoped thread で stack overflow を防ぐ)。
+///
+/// `options.multistart.is_some() && n_starts >= 2` のとき multi-start (#5) に委譲する。
+/// multistart 内部の各 solve は同じ entry に戻るが options.multistart を None に剥がして
+/// 再入を断ち切る。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if let Some(cfg) = options.multistart.as_ref() {
+        if cfg.n_starts >= 2 {
+            return multistart::solve_qp_multistart(problem, options, cfg);
+        }
+    }
     std::thread::scope(|s| {
         let handle = std::thread::Builder::new()
             .stack_size(SOLVE_STACK_SIZE)
