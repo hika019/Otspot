@@ -17,6 +17,7 @@
 //! - root と同じ status: root が Infeasible / NumericalError / Unbounded だった場合
 
 pub(crate) mod bound;
+pub(crate) mod bound_alpha_bb;
 pub(crate) mod branch;
 pub(crate) mod node;
 pub(crate) mod pruning;
@@ -28,6 +29,7 @@ use crate::qp::problem::QpProblem;
 use std::time::{Duration, Instant};
 
 use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
+use bound_alpha_bb::{alpha_bb_lower_bound, gershgorin_alpha};
 use branch::{select_branching_variable, split_node};
 use node::BBNode;
 use pruning::{should_prune, within_gap};
@@ -92,7 +94,21 @@ pub fn solve_qp_global_with_stats(
         return (root_solve, stats);
     }
 
-    let (root_lb, _) = interval_quadratic_bounds(problem, &root_bounds);
+    // Phase 4 α-BB: 全 node で共通の α (Q only). use_alpha_bb=false なら 0 で実質無効化。
+    let alpha = if cfg.use_alpha_bb {
+        gershgorin_alpha(&problem.q)
+    } else {
+        0.0
+    };
+
+    let root_lb = compute_node_lower_bound(
+        problem,
+        &root_bounds,
+        alpha,
+        &shared_opts,
+        deadline,
+        cfg.use_alpha_bb,
+    );
 
     let mut state = SearchState::new(root_solve);
     stats.nodes_processed = 1;
@@ -144,8 +160,15 @@ pub fn solve_qp_global_with_stats(
             continue;
         }
 
-        // 自前で再計算した interval lb で tight 化、再 prune
-        let (local_lb, _) = interval_quadratic_bounds(problem, &node.var_bounds);
+        // 自前で再計算した lb (Phase 4: α-BB + interval の max) で tight 化、再 prune
+        let local_lb = compute_node_lower_bound(
+            problem,
+            &node.var_bounds,
+            alpha,
+            &shared_opts,
+            deadline,
+            cfg.use_alpha_bb,
+        );
         let node_lb = local_lb.max(node.lower_bound);
         if should_prune(node_lb, Some(state.incumbent_obj), cfg.gap_tol) {
             stats.pruned += 1;
@@ -224,6 +247,28 @@ pub fn solve_qp_global_with_stats(
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {
     deadline.map_or(false, |d| Instant::now() >= d)
+}
+
+/// 当該 box に対する lower bound。
+/// 戦略: Phase 3 interval lb (cheap) + Phase 4 α-BB lb (1 凸 IPM solve) の **max**。
+/// 両者とも valid lower bound = max を取ることで一方が tight な方を採用 (= ロスなし)。
+/// `use_alpha_bb=false` または α=0 (Q PSD) では α-BB を skip し interval のみ。
+fn compute_node_lower_bound(
+    problem: &QpProblem,
+    bounds: &[(f64, f64)],
+    alpha: f64,
+    base_opts: &SolverOptions,
+    deadline: Option<Instant>,
+    use_alpha_bb: bool,
+) -> f64 {
+    let (interval_lb, _) = interval_quadratic_bounds(problem, bounds);
+    if !use_alpha_bb {
+        return interval_lb;
+    }
+    match alpha_bb_lower_bound(problem, bounds, alpha, base_opts, deadline) {
+        Some(ab_lb) => ab_lb.max(interval_lb),
+        None => interval_lb,
+    }
 }
 
 fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
