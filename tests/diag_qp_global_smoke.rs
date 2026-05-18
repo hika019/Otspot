@@ -298,7 +298,7 @@ fn deadline_honored_returns_incumbent_not_panics() {
 }
 
 #[test]
-fn max_nodes_zero_returns_root_only_incumbent() {
+fn max_nodes_one_returns_root_only_incumbent() {
     // max_nodes=1 = root local solve のみ → LocallyOptimal (proof 不能なら) or Optimal
     let fx = build_diag_concave_nd(2, 1.0);
     let mut c = cfg(1e-6);
@@ -395,6 +395,12 @@ fn pruning_keeps_node_count_well_below_cap() {
         stats.nodes_processed,
         cfg.max_nodes,
         cfg.max_nodes / 2,
+    );
+    // pruning が実際に発火していること直接 assert (no-op 検出強化、reviewer 観点)
+    assert!(
+        stats.pruned > 0,
+        "枝刈 fire 0 件 = pruning logic 機能停止疑い: nodes={} pruned={}",
+        stats.nodes_processed, stats.pruned,
     );
 }
 

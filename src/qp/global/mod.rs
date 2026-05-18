@@ -94,7 +94,7 @@ pub fn solve_qp_global_with_stats(
 
     let (root_lb, _) = interval_quadratic_bounds(problem, &root_bounds);
 
-    let mut state = SearchState::new(root_solve, root_lb);
+    let mut state = SearchState::new(root_solve);
     stats.nodes_processed = 1;
 
     // root が ε-optimal なら即終了 (queue 不要)。
@@ -245,7 +245,7 @@ struct SearchState {
 }
 
 impl SearchState {
-    fn new(root: SolverResult, _root_lb: f64) -> Self {
+    fn new(root: SolverResult) -> Self {
         let obj = root.objective;
         let sol = root.solution.clone();
         Self {
