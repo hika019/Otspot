@@ -916,24 +916,17 @@ fn main() {
             None => String::new(),
         };
 
-        // Timeout / SuboptimalSolution / LocallyOptimal だが有効解を保持している場合、
-        // Optimal フローに乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
-        // PASS 判定が出れば bench 上 PASS としてカウントし、品質判定で fail した場合は
-        // PFEAS_FAIL/DFEAS_FAIL/OBJ_MISMATCH 等の正確な分類になる。
-        //
+        // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
+        // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
+        // Timeout は意図的に対象外: 半 deadline incumbent を silent に Optimal 化すると
+        // PFEAS_FAIL に化けて真因 (deadline 切れ) が隠れる (task #46/#52)。
         // LocallyOptimal: 不定 Q の KKT 点。凸ベンチでは原問題 Q が実は PSD なので
-        // Optimal と同等に扱って品質確認する。不定ベンチ (qplib_unsupported) は
-        // benchmark 側に ref がないため PASS[no_ref] として扱われる。
-        let result = if matches!(
-            result.status,
-            SolveStatus::Timeout | SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
-        ) && !result.solution.is_empty()
-            && result.solution.len() == prob.num_vars
-        {
-            solver::problem::SolverResult { status: SolveStatus::Optimal, ..result }
-        } else {
-            result
-        };
+        // Optimal と同等に扱って品質確認する。
+        let result = solver::bench_utils::apply_bench_status_promotion(
+            result,
+            prob.num_vars,
+            solver::bench_utils::BenchPromotionPolicy::QpsBenchmark,
+        );
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {

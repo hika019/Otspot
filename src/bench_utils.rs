@@ -2,8 +2,46 @@
 //!
 //! qps_benchmark / bench_qplib 両バイナリで共有するCSV読み込み・正解値照合ロジック。
 
+use crate::problem::{SolveStatus, SolverResult};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// bench harness 種別ごとの promotion policy.
+///
+/// qps_benchmark は obj 有限性チェックなし、bench_qplib は obj 有限性も要求する
+/// (qplib は baseline obj 照合経路に流すため obj が non-finite だと意味がない)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchPromotionPolicy {
+    QpsBenchmark,
+    BenchQplib,
+}
+
+/// SuboptimalSolution / LocallyOptimal で有効な全長解を持つ result を Optimal に格上げする.
+///
+/// Timeout は意図的に格上げ対象外: Primal 半 deadline incumbent を silent に Optimal 化すると
+/// 後段の品質判定 (pfeas/dfeas/obj) に流れて PFEAS_FAIL 表示となり、真因 (deadline 切れ)
+/// が観測者に隠れる (task #46 観測 / task #52 真因対処)。Timeout は honest に Timeout 報告。
+pub fn apply_bench_status_promotion(
+    result: SolverResult,
+    num_vars: usize,
+    policy: BenchPromotionPolicy,
+) -> SolverResult {
+    let eligible_status = matches!(
+        result.status,
+        SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
+    );
+    let has_full_solution =
+        !result.solution.is_empty() && result.solution.len() == num_vars;
+    let obj_ok = match policy {
+        BenchPromotionPolicy::QpsBenchmark => true,
+        BenchPromotionPolicy::BenchQplib => result.objective.is_finite(),
+    };
+    if eligible_status && has_full_solution && obj_ok {
+        SolverResult { status: SolveStatus::Optimal, ..result }
+    } else {
+        result
+    }
+}
 
 /// 正解値照合結果
 pub enum ObjCheckResult {
