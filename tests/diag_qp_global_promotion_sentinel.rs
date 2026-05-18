@@ -225,6 +225,40 @@ fn mixed_concave_4d() -> QpProblem {
     .unwrap()
 }
 
+/// 7D concave sum-cap (Σ x ≤ 2.5)。次元 7 で Phase 3 interval lb (= 制約無視, corner
+/// 全 1 で −7) に対し global は 2 vars=1 + 1 var=0.5 = −2.25。Phase 3 BB は探索上限
+/// (`TEST_MAX_NODES`) を使い切り LocallyOptimal、Phase 4 α-BB は制約付き凸化 lb で
+/// Optimal proof に格上げする想定。promotion 件数 4 で MIN_PROMOTION_COUNT=2 に対し
+/// margin 2 を確保する。
+fn concave_7d_sumcap() -> QpProblem {
+    let n = 7;
+    let q = CscMatrix::from_triplets(
+        &(0..n).collect::<Vec<_>>(),
+        &(0..n).collect::<Vec<_>>(),
+        &vec![-2.0; n],
+        n,
+        n,
+    )
+    .unwrap();
+    let a = CscMatrix::from_triplets(
+        &vec![0_usize; n],
+        &(0..n).collect::<Vec<_>>(),
+        &vec![1.0_f64; n],
+        1,
+        n,
+    )
+    .unwrap();
+    QpProblem::new(
+        q,
+        vec![0.0; n],
+        a,
+        vec![2.5],
+        vec![(0.0, 1.0); n],
+        vec![ConstraintType::Le],
+    )
+    .unwrap()
+}
+
 /// 5D bilinear: Q 全 off-diag = 1.0 (diag=0)。eigenvalue は (n-1,1) 重複度=(1,n-1) で
 /// 強非凸 (Q = J - I の eigvals: 4, -1×4)。Σx ≤ 1 で対称破壊。
 fn bilinear_5d_box() -> QpProblem {
@@ -277,6 +311,7 @@ fn cases() -> Vec<Case> {
         Case { label: "concave_6d_sumcap", problem: concave_6d_sumcap() },
         Case { label: "mixed_concave_4d", problem: mixed_concave_4d() },
         Case { label: "bilinear_5d_box", problem: bilinear_5d_box() },
+        Case { label: "concave_7d_sumcap", problem: concave_7d_sumcap() },
     ]
 }
 
@@ -412,8 +447,8 @@ fn alpha_bb_pruning_count_remains_positive_across_fixtures() {
 ///
 /// 1 件だけ通る threshold だと「偶発的に 1 fixture が promote した」case と
 /// 「α-BB が広く効いている」case を区別できず、smoke 側の同種 sentinel と機能重複する。
-/// 本ファイルは強化版として複数件を要求し、新規 fixture (concave_6d_sumcap /
-/// bilinear_5d_box) と既存 concave_5d_sumcap の合算で MIN_PROMOTION_COUNT を確保する。
+/// 本ファイルは強化版として複数件を要求し、concave_5d/6d/7d_sumcap + bilinear_5d_box
+/// の合算 (期待 4 件) で MIN_PROMOTION_COUNT に対し margin 2 を確保する。
 #[test]
 fn alpha_bb_promotes_locally_optimal_to_optimal_on_multiple_fixtures() {
     let mut promotions = 0;
