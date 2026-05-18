@@ -47,14 +47,22 @@ pub enum LdlError {
     },
 }
 
+/// per-call parallelism の default (= 既存挙動)。
+/// 公開 API の互換版 (par 引数なし) はこれを暗黙に使用する。
+const DEFAULT_PAR: faer::Par = faer::Par::Seq;
+
 // ── LdlFactorization (positive definite, no AMD) ──────────────────────────────
 
 /// faer high-level LDL^T factorization for positive definite matrices (no AMD).
 /// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
+///
+/// `par` は factorize 時に指定された per-call parallelism。solve 時に再利用される
+/// (factor と solve で同じ par を使う方が rayon thread-pool 局所性が良い)。
 pub struct LdlFactorization {
     symbolic: Arc<SymbolicCholesky<usize>>,
     l_values: Vec<f64>,
     n: usize,
+    par: faer::Par,
 }
 
 impl LdlFactorization {
@@ -62,7 +70,7 @@ impl LdlFactorization {
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         sol.copy_from_slice(rhs);
         let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
+            self.symbolic.solve_in_place_scratch::<f64>(1, self.par),
         );
         let stack = MemStack::new(&mut mem);
         let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
@@ -71,7 +79,7 @@ impl LdlFactorization {
         ldlt.solve_in_place_with_conj(
             faer::Conj::No,
             sol_mat.rb_mut(),
-            faer::Par::Seq,
+            self.par,
             stack,
         );
     }
@@ -91,6 +99,8 @@ pub struct LdlFactorizationAmd {
     /// AMD permutation: perm[k] = original index of reordered index k
     perm: Vec<usize>,
     n: usize,
+    /// factorize 時に指定された per-call parallelism。solve 時に再利用する。
+    par: faer::Par,
 }
 
 /// SymbolicCholesky の外部キャッシュ。IPM 反復で sparsity pattern が不変なとき、
@@ -119,7 +129,7 @@ impl LdlFactorizationAmd {
         let mut x_p = b_p;
 
         let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
+            self.symbolic.solve_in_place_scratch::<f64>(1, self.par),
         );
         let stack = MemStack::new(&mut mem);
         let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
@@ -128,7 +138,7 @@ impl LdlFactorizationAmd {
         ldlt.solve_in_place_with_conj(
             faer::Conj::No,
             sol_mat.rb_mut(),
-            faer::Par::Seq,
+            self.par,
             stack,
         );
 
@@ -215,8 +225,9 @@ fn do_numeric_factorize(
     signs: Option<&[i8]>,
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
+    par: faer::Par,
 ) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
-    do_numeric_factorize_with_cache(mat, signs, deadline, max_l_nnz, None)
+    do_numeric_factorize_with_cache(mat, signs, deadline, max_l_nnz, None, par)
 }
 
 /// `do_numeric_factorize` の symbolic キャッシュ対応版。`cached_symbolic` が `Some` の
@@ -228,6 +239,7 @@ fn do_numeric_factorize_with_cache(
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
     cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+    par: faer::Par,
 ) -> Result<(Arc<SymbolicCholesky<usize>>, Vec<f64>), LdlError> {
     // env=LDL_PROF=1: symbolic/numeric の所要時間を stderr に書き出す。
     let prof = std::env::var("LDL_PROF").ok().as_deref() == Some("1");
@@ -265,8 +277,8 @@ fn do_numeric_factorize_with_cache(
 
     let mut l_values = vec![0.0f64; l_nnz];
     let mut mem = MemBuffer::new(StackReq::any_of(&[
-        symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default()),
-        symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq),
+        symbolic.factorize_numeric_ldlt_scratch::<f64>(par, Default::default()),
+        symbolic.solve_in_place_scratch::<f64>(1, par),
     ]));
     let stack = MemStack::new(&mut mem);
 
@@ -277,7 +289,7 @@ fn do_numeric_factorize_with_cache(
             a_upper.rb(),
             faer::Side::Upper,
             regularization,
-            faer::Par::Seq,
+            par,
             stack,
             Default::default(),
         )
@@ -501,14 +513,23 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
     }
 }
 
-/// 正定値疎行列の LDL^T 分解を実行する。
+/// 正定値疎行列の LDL^T 分解を実行する (per-call parallelism = `Par::Seq`、既存互換)。
 pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
-    let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None, None, None)?;
-    Ok(LdlFactorization { symbolic, l_values, n })
+    factorize_with_par(mat, DEFAULT_PAR)
 }
 
-/// deadline 付き正定値疎行列の LDL^T 分解。
+/// `factorize` の per-call parallelism 指定版 (#31)。
+/// `par == Par::Seq` で既存挙動と完全互換。
+pub fn factorize_with_par(
+    mat: &CscMatrix,
+    par: faer::Par,
+) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, None, None, par)?;
+    Ok(LdlFactorization { symbolic, l_values, n, par })
+}
+
+/// deadline 付き正定値疎行列の LDL^T 分解 (per-call parallelism = `Par::Seq`、既存互換)。
 ///
 /// deadline は factorize 前と symbolic 完了後（numeric 開始前）の 2 箇所でチェック。
 /// faer の numeric 因子化自体は mid-factorization キャンセル不可のため、
@@ -517,17 +538,26 @@ pub fn factorize_with_deadline(
     mat: &CscMatrix,
     deadline: Option<Instant>,
 ) -> Result<LdlFactorization, LdlError> {
+    factorize_with_deadline_par(mat, deadline, DEFAULT_PAR)
+}
+
+/// `factorize_with_deadline` の per-call parallelism 指定版 (#31)。
+pub fn factorize_with_deadline_par(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+    par: faer::Par,
+) -> Result<LdlFactorization, LdlError> {
     if let Some(d) = deadline {
         if Instant::now() >= d {
             return Err(LdlError::DeadlineExceeded);
         }
     }
     let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline, None)?;
-    Ok(LdlFactorization { symbolic, l_values, n })
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline, None, par)?;
+    Ok(LdlFactorization { symbolic, l_values, n, par })
 }
 
-/// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解。
+/// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解 (既存互換)。
 ///
 /// `mat`: 元の（未置換の）augmented KKT 行列（上三角 CSC）
 /// `perm`: 事前計算済み AMD 置換ベクトル（perm[k] = 元インデックス）
@@ -537,6 +567,16 @@ pub fn factorize_quasidefinite_with_cached_perm(
     perm: &[usize],
     deadline: Option<Instant>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_with_cached_perm_par(mat, perm, deadline, DEFAULT_PAR)
+}
+
+/// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版 (#31)。
+pub fn factorize_quasidefinite_with_cached_perm_par(
+    mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    par: faer::Par,
+) -> Result<LdlFactorizationAmd, LdlError> {
     if let Some(d) = deadline {
         if Instant::now() >= d {
             return Err(LdlError::DeadlineExceeded);
@@ -553,20 +593,21 @@ pub fn factorize_quasidefinite_with_cached_perm(
         ncols: n,
     };
     let signs = extract_diagonal_signs(&perm_mat);
-    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline, None)?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+    let (symbolic, l_values) =
+        do_numeric_factorize(&perm_mat, Some(&signs), deadline, None, par)?;
+    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
 }
 
-/// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算）。
+/// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算、既存互換）。
 pub fn factorize_quasidefinite_with_amd(
     mat: &CscMatrix,
     deadline: Option<Instant>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_with_amd_budget(mat, deadline, None)
+    factorize_quasidefinite_with_amd_budget_par(mat, deadline, None, DEFAULT_PAR)
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解、L_nnz が `max_l_nnz` を超えたら
-/// numeric を試みず `WouldExceedBudget` で早期 return する budget 版。
+/// numeric を試みず `WouldExceedBudget` で早期 return する budget 版 (既存互換)。
 ///
 /// `max_l_nnz` が `None` のときは `factorize_quasidefinite_with_amd` と等価。
 /// 反復法フォールバック用 dispatcher (`KktSolver` 経路) から呼ばれる想定。
@@ -575,6 +616,16 @@ pub fn factorize_quasidefinite_with_amd_budget(
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_with_amd_budget_par(mat, deadline, max_l_nnz, DEFAULT_PAR)
+}
+
+/// `factorize_quasidefinite_with_amd_budget` の per-call parallelism 指定版 (#31)。
+pub fn factorize_quasidefinite_with_amd_budget_par(
+    mat: &CscMatrix,
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    par: faer::Par,
+) -> Result<LdlFactorizationAmd, LdlError> {
     let n = mat.nrows;
     let perm = amd_with_deadline(n, &mat.col_ptr, &mat.row_ind, deadline);
     if let Some(d) = deadline {
@@ -582,15 +633,27 @@ pub fn factorize_quasidefinite_with_amd_budget(
             return Err(LdlError::DeadlineExceeded);
         }
     }
-    factorize_quasidefinite_with_cached_perm_budget(mat, &perm, deadline, max_l_nnz)
+    let _ = n;
+    factorize_quasidefinite_with_cached_perm_budget_par(mat, &perm, deadline, max_l_nnz, par)
 }
 
-/// AMD キャッシュ済み置換 + budget 版。詳細は `factorize_quasidefinite_with_amd_budget`。
+/// AMD キャッシュ済み置換 + budget 版 (既存互換)。詳細は `factorize_quasidefinite_with_amd_budget`。
 pub fn factorize_quasidefinite_with_cached_perm_budget(
     mat: &CscMatrix,
     perm: &[usize],
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
+) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_with_cached_perm_budget_par(mat, perm, deadline, max_l_nnz, DEFAULT_PAR)
+}
+
+/// `factorize_quasidefinite_with_cached_perm_budget` の per-call parallelism 指定版 (#31)。
+pub fn factorize_quasidefinite_with_cached_perm_budget_par(
+    mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    par: faer::Par,
 ) -> Result<LdlFactorizationAmd, LdlError> {
     if let Some(d) = deadline {
         if Instant::now() >= d {
@@ -608,11 +671,12 @@ pub fn factorize_quasidefinite_with_cached_perm_budget(
         ncols: n,
     };
     let signs = extract_diagonal_signs(&perm_mat);
-    let (symbolic, l_values) = do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz)?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+    let (symbolic, l_values) =
+        do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
+    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
 }
 
-/// 既に AMD 置換適用済みの行列を受け取り、`permute_sym_upper` を skip する版。
+/// 既に AMD 置換適用済みの行列を受け取り、`permute_sym_upper` を skip する版 (既存互換)。
 /// IPM 反復で `PermutedAugmentedKkt::materialize` から得た matrix を直接渡せる。
 ///
 /// `perm` は solve 時の置換に使う (factorize 自体は pre_permuted_mat だけで完結)。
@@ -622,12 +686,12 @@ pub fn factorize_quasidefinite_pre_permuted(
     deadline: Option<Instant>,
     max_l_nnz: Option<usize>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_pre_permuted_cached(
-        pre_permuted_mat, perm, deadline, max_l_nnz, None,
+    factorize_quasidefinite_pre_permuted_cached_par(
+        pre_permuted_mat, perm, deadline, max_l_nnz, None, DEFAULT_PAR,
     )
 }
 
-/// `factorize_quasidefinite_pre_permuted` の symbolic キャッシュ版。
+/// `factorize_quasidefinite_pre_permuted` の symbolic キャッシュ版 (既存互換)。
 /// `cached_symbolic` が `Some` のときは `build_symbolic_hl` を skip する。
 /// 戻り値の `LdlFactorizationAmd` は内部で `Arc<SymbolicCholesky>` を保持しており、
 /// caller は `factor.symbolic_arc()` で取得して次回呼び出しに使い回せる。
@@ -638,6 +702,20 @@ pub fn factorize_quasidefinite_pre_permuted_cached(
     max_l_nnz: Option<usize>,
     cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
 ) -> Result<LdlFactorizationAmd, LdlError> {
+    factorize_quasidefinite_pre_permuted_cached_par(
+        pre_permuted_mat, perm, deadline, max_l_nnz, cached_symbolic, DEFAULT_PAR,
+    )
+}
+
+/// `factorize_quasidefinite_pre_permuted_cached` の per-call parallelism 指定版 (#31)。
+pub fn factorize_quasidefinite_pre_permuted_cached_par(
+    pre_permuted_mat: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: Option<usize>,
+    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
+    par: faer::Par,
+) -> Result<LdlFactorizationAmd, LdlError> {
     if let Some(d) = deadline {
         if Instant::now() >= d {
             return Err(LdlError::DeadlineExceeded);
@@ -646,9 +724,9 @@ pub fn factorize_quasidefinite_pre_permuted_cached(
     let n = pre_permuted_mat.nrows;
     let signs = extract_diagonal_signs(pre_permuted_mat);
     let (symbolic, l_values) = do_numeric_factorize_with_cache(
-        pre_permuted_mat, Some(&signs), deadline, max_l_nnz, cached_symbolic,
+        pre_permuted_mat, Some(&signs), deadline, max_l_nnz, cached_symbolic, par,
     )?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n })
+    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
 }
 
 impl LdlFactorizationAmd {

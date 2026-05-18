@@ -136,6 +136,62 @@ pub struct MultiStartConfig {
 /// magic 根拠: 任意の非零値で良い。0xC0FFEE_DEADBEEF は識別性のためのフォーク値。
 pub const DEFAULT_MULTISTART_SEED: u64 = 0x_00C0_FFEE_DEAD_BEEF;
 
+/// 分枝戦略 (#6 Phase 3 spatial B&B)。
+///
+/// `MaxViolation`: 現 box midpoint から x* が最も離れた連続変数を選び、x*[j] で
+/// 2 子に分割する。Phase 3 唯一の戦略。Phase 4 以降に strong branching 追加予定。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchingStrategy {
+    MaxViolation,
+}
+
+/// `GlobalOptimizationConfig` defaults。
+///
+/// - `DEFAULT_GLOBAL_GAP_TOL = 1e-3`: 相対 ε-optimal gap。Phase 3 (interval lower
+///   bound) は緩い下界しか出ないため 1e-6 級まで詰めると node 爆発。Phase 4 (α-BB)
+///   で 1e-6 へ tighten 想定。
+/// - `DEFAULT_GLOBAL_MAX_DEPTH = 20`: tree depth 上限。2^20 ≈ 100 万 node 安全装置。
+/// - `DEFAULT_GLOBAL_MAX_NODES = 10_000`: 探索 node 上限。Phase 3 は 1 node ≈ 1 IPM
+///   solve なので n=50 で 10k node ≈ wall 数十秒の budget。
+pub const DEFAULT_GLOBAL_GAP_TOL: f64 = 1e-3;
+pub const DEFAULT_GLOBAL_MAX_DEPTH: usize = 20;
+pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
+
+/// Spatial Branch-and-Bound 設定 (#6 / #7 非凸 QP 大域最適化)。
+///
+/// **user 指定** ε-optimal global solve のパラメータ。`SolverOptions::global_optimization`
+/// に注入し、`solve_qp_global` から参照される。`solve_qp_with` の dispatch 対象には**ならない**
+/// (= 明示呼び出し)。誤って global path に倒すと既存 QP user の wall が桁違いに増える
+/// リスクを抑える。
+///
+/// 規約:
+/// - `gap_tol > 0`: 相対 gap (= |UB - LB| / max(1, |UB|))
+/// - `max_depth >= 1`: 0 は root 1 回のみ
+/// - `max_nodes >= 1`: 0 は root も解かない
+/// - `use_alpha_bb`: true で Phase 4 α-BB underestimator を下界に使う (default)。
+///   false にすると Phase 3 の interval-arithmetic bound に戻す (退化/比較用)。
+#[derive(Debug, Clone)]
+pub struct GlobalOptimizationConfig {
+    pub gap_tol: f64,
+    pub max_depth: usize,
+    pub max_nodes: usize,
+    pub branching: BranchingStrategy,
+    pub use_alpha_bb: bool,
+}
+
+impl Default for GlobalOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            gap_tol: DEFAULT_GLOBAL_GAP_TOL,
+            max_depth: DEFAULT_GLOBAL_MAX_DEPTH,
+            max_nodes: DEFAULT_GLOBAL_MAX_NODES,
+            branching: BranchingStrategy::MaxViolation,
+            use_alpha_bb: true,
+        }
+    }
+}
+
 impl Default for MultiStartConfig {
     fn default() -> Self {
         Self {
@@ -267,6 +323,11 @@ pub struct SolverOptions {
     /// `solve_qp_multistart` に委譲する (再入防止のため委譲時は None に剥がす)。
     pub multistart: Option<MultiStartConfig>,
 
+    /// Phase 3 spatial Branch-and-Bound (#6 非凸 QP 大域最適化) の設定。
+    /// `None` (default) は無効。`Some(_)` のとき `solve_qp_global` から参照される。
+    /// **`solve_qp_with` は dispatch しない**: 明示呼び出し限定 (誤って既存 user の wall を桁違いに伸ばさないため)。
+    pub global_optimization: Option<GlobalOptimizationConfig>,
+
     /// **user 指定** 全 solver 共通の thread 上限 (LP / QP / 非凸 multistart 全て)。
     ///
     /// default = 1 (シリアル、既存挙動完全保護、bench worker と多重化しない)。
@@ -318,6 +379,7 @@ impl Default for SolverOptions {
             tolerance: None,
             ipm: IpmOptions::default(),
             multistart: None,
+            global_optimization: None,
             threads: 1,
         }
     }

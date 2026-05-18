@@ -85,19 +85,28 @@ pub trait KktSolver: Send {
 /// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget`.
 /// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
 /// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
+///
+/// `par` は per-call parallelism (#31)。default は `Par::Seq` (= 既存挙動)。
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
     max_l_nnz: Option<usize>,
+    par: faer::Par,
 }
 
 impl DirectLdl {
     pub fn new(n: usize) -> Self {
-        Self { factor: None, n, max_l_nnz: None }
+        Self { factor: None, n, max_l_nnz: None, par: faer::Par::Seq }
     }
 
     pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
-        Self { factor: None, n, max_l_nnz: Some(max_l_nnz) }
+        Self { factor: None, n, max_l_nnz: Some(max_l_nnz), par: faer::Par::Seq }
+    }
+
+    /// per-call parallelism を指定する (#31)。
+    pub fn with_par(mut self, par: faer::Par) -> Self {
+        self.par = par;
+        self
     }
 
     pub fn from_matrix(k: &CscMatrix, deadline: Option<Instant>) -> Result<Self, KktError> {
@@ -131,8 +140,8 @@ impl KktSolver for DirectLdl {
         if k.nrows != self.n || k.ncols != self.n {
             return Err(KktError::SingularOrIndefinite);
         }
-        match crate::linalg::ldl::factorize_quasidefinite_with_amd_budget(
-            k, deadline, self.max_l_nnz,
+        match crate::linalg::ldl::factorize_quasidefinite_with_amd_budget_par(
+            k, deadline, self.max_l_nnz, self.par,
         ) {
             Ok(f) => {
                 self.factor = Some(f);
@@ -494,7 +503,8 @@ impl KktFactor {
 
 /// LDL-compatible factorisation that falls back to MINRES when the LDL factor would
 /// exceed the memory budget. Pass `n_top = Some(n)` to enable the saddle-point
-/// block-diagonal MINRES preconditioner; `None` selects plain Jacobi.
+/// block-diagonal MINRES preconditioner; `None` selects plain Jacobi (既存互換、
+/// per-call parallelism = `Par::Seq`)。
 pub fn factorize_kkt_with_cached_perm(
     k: &CscMatrix,
     perm: &[usize],
@@ -502,13 +512,26 @@ pub fn factorize_kkt_with_cached_perm(
     max_l_nnz: usize,
     n_top: Option<usize>,
 ) -> Result<KktFactor, KktError> {
+    factorize_kkt_with_cached_perm_par(k, perm, deadline, max_l_nnz, n_top, faer::Par::Seq)
+}
+
+/// `factorize_kkt_with_cached_perm` の per-call parallelism 指定版 (#31)。
+pub fn factorize_kkt_with_cached_perm_par(
+    k: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: usize,
+    n_top: Option<usize>,
+    par: faer::Par,
+) -> Result<KktFactor, KktError> {
     // IPM_DD_LDL=1 switches to TwoFloat (~106-bit) LDL for ill-conditioned systems
     // where the f64 forward error (cond × ε) would exceed the requested eps.
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
         let trace = std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1");
         // Run the f64 symbolic factorisation to honour the same memory budget.
-        match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
-            k, perm, deadline, Some(max_l_nnz),
+        // DD LDL は内部で TwoFloat (scalar) を使うため、par は f64 側 sentinel のみに伝播。
+        match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+            k, perm, deadline, Some(max_l_nnz), par,
         ) {
             Ok(_) => {
                 match crate::linalg::ldl_dd::factorize_quasidefinite_with_cached_perm_dd(
@@ -552,8 +575,8 @@ pub fn factorize_kkt_with_cached_perm(
         return Ok(KktFactor::Iterative(minres));
     }
 
-    match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget(
-        k, perm, deadline, Some(max_l_nnz),
+    match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+        k, perm, deadline, Some(max_l_nnz), par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
@@ -572,7 +595,7 @@ pub fn factorize_kkt_with_cached_perm(
 }
 
 /// Pre-permuted fast path. MINRES fallback uses `unpermuted_k` since it operates on
-/// the original ordering.
+/// the original ordering (既存互換、per-call parallelism = `Par::Seq`)。
 pub fn factorize_kkt_pre_permuted(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -581,12 +604,13 @@ pub fn factorize_kkt_pre_permuted(
     max_l_nnz: usize,
     n_top: Option<usize>,
 ) -> Result<KktFactor, KktError> {
-    factorize_kkt_pre_permuted_cached(
-        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, None,
+    factorize_kkt_pre_permuted_cached_par(
+        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, None, faer::Par::Seq,
     )
 }
 
-/// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky.
+/// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky
+/// (既存互換、per-call parallelism = `Par::Seq`)。
 pub fn factorize_kkt_pre_permuted_cached(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -596,12 +620,31 @@ pub fn factorize_kkt_pre_permuted_cached(
     n_top: Option<usize>,
     cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
 ) -> Result<KktFactor, KktError> {
+    factorize_kkt_pre_permuted_cached_par(
+        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, cached_symbolic,
+        faer::Par::Seq,
+    )
+}
+
+/// `factorize_kkt_pre_permuted_cached` の per-call parallelism 指定版 (#31)。
+pub fn factorize_kkt_pre_permuted_cached_par(
+    pre_permuted_k: &CscMatrix,
+    unpermuted_k: &CscMatrix,
+    perm: &[usize],
+    deadline: Option<Instant>,
+    max_l_nnz: usize,
+    n_top: Option<usize>,
+    cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
+    par: faer::Par,
+) -> Result<KktFactor, KktError> {
     // The DD LDL path doesn't accept a pre-permuted matrix; fall back to the standard route.
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
-        return factorize_kkt_with_cached_perm(unpermuted_k, perm, deadline, max_l_nnz, n_top);
+        return factorize_kkt_with_cached_perm_par(
+            unpermuted_k, perm, deadline, max_l_nnz, n_top, par,
+        );
     }
-    match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached(
-        pre_permuted_k, perm, deadline, Some(max_l_nnz), cached_symbolic,
+    match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached_par(
+        pre_permuted_k, perm, deadline, Some(max_l_nnz), cached_symbolic, par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
