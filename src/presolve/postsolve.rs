@@ -417,6 +417,14 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
 /// Distance below which `x[j]` is treated as active at its lb / ub.
 const BOUND_ACTIVE_TOL: f64 = 1e-6;
 
+/// Marker for bound-tightened-fixed columns that landed on one of their *original*
+/// bounds.  At such a column the bound-multiplier pair (μ_lb, μ_ub) is degenerate;
+/// `extract_dual_info` produced `rc = c − A^T y`, but the residual's wrong-sign part
+/// has to be reported as the now-implicit `μ_ub` (resp. `μ_lb`) so the externally
+/// visible rc stays dual-feasible at the active bound.
+#[derive(Clone, Copy)]
+enum BoundAbsorb { AtLb, AtUb }
+
 /// Recover `y_i` of a removed row to satisfy LP dual feasibility, given the rest of `y`.
 /// For each column the required rc sign yields a permissible range on `y_i`; the row's
 /// constraint type (Le: y≤0, Ge: y≥0, Eq: free) intersects that range and we pick the
@@ -624,8 +632,44 @@ pub fn run_postsolve(
         y
     };
 
+    // For columns fixed by bound tightening (orig lb<ub, presolve shrunk to lb=ub) that
+    // ended up at an original bound, the bound dual is degenerate: μ_lb − μ_ub can split
+    // any residual `c − A^T y` between non-negative halves as long as one half is zero.
+    // We absorb the wrong-sign part into the now-implicit μ_ub (at orig lb) or μ_lb
+    // (at orig ub) so the reported `rc` stays dual-feasible, and let the dfeas-driven
+    // y-candidate selection ignore the absorbable mismatch.  Columns pushed strictly
+    // INTO the interior by tightening (e.g. orig (0,100) → fixed at 50) get NO override:
+    // both bound multipliers are zero there, so rc = c − A^T y must hold (KKT identity),
+    // which is what #56 fixed for bandm/beaconfd/brandy/agg/scorpion/scfxm1/recipe.
+    let bound_dual_absorbs: Vec<Option<BoundAbsorb>> = {
+        let mut out: Vec<Option<BoundAbsorb>> = vec![None; n];
+        for step in &presolve_result.postsolve_stack {
+            if let PostsolveStep::FixedVariable { orig_col, .. } = step {
+                let j = *orig_col;
+                if j >= n { continue; }
+                let (orig_lb, orig_ub) = orig_problem.bounds[j];
+                let truly_fixed = orig_lb.is_finite() && orig_ub.is_finite()
+                    && (orig_ub - orig_lb).abs() < BOUND_ACTIVE_TOL;
+                if truly_fixed { continue; }
+                let x = solution[j];
+                let at_orig_lb = orig_lb.is_finite()
+                    && (x - orig_lb).abs() < BOUND_ACTIVE_TOL;
+                let at_orig_ub = orig_ub.is_finite()
+                    && (x - orig_ub).abs() < BOUND_ACTIVE_TOL;
+                if at_orig_lb && !at_orig_ub {
+                    out[j] = Some(BoundAbsorb::AtLb);
+                } else if at_orig_ub && !at_orig_lb {
+                    out[j] = Some(BoundAbsorb::AtUb);
+                }
+            }
+        }
+        out
+    };
+
     // Build dfeas_bound first so the cheap candidates (y_loop, y_gs) can gate the
-    // far more expensive cleanup-LP candidates.
+    // far more expensive cleanup-LP candidates.  Stay clamp-unaware on purpose: the
+    // raw `c − A^T y` violation must surface so the caller's presolve-off fallback
+    // (src/simplex/mod.rs:96-121) can re-solve when cleanup LP couldn't recover.
     let dfeas_bound = |y: &[f64]| -> f64 {
         let mut max_viol = 0.0f64;
         for j in 0..n {
@@ -769,6 +813,16 @@ pub fn run_postsolve(
             for (k, &row) in rows.iter().enumerate() {
                 *rc -= vals[k] * dual_solution[row];
             }
+        }
+    }
+    // Apply the bound-dual-absorption clamp at the column granularity decided above;
+    // see `BoundAbsorb` for the math.  Columns with no absorption marker (interior
+    // tightened-fixed, all non-tightened cols) keep rc = c − A^T y untouched.
+    for j in 0..n {
+        match bound_dual_absorbs[j] {
+            Some(BoundAbsorb::AtLb) => reduced_costs[j] = reduced_costs[j].max(0.0),
+            Some(BoundAbsorb::AtUb) => reduced_costs[j] = reduced_costs[j].min(0.0),
+            None => {}
         }
     }
 
