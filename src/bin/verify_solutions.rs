@@ -24,7 +24,8 @@ use std::time::Instant;
 use solver::io::qps::parse_qps;
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
+use solver::problem::SolveStatus;
+use solver::qp::kkt_resid::f64_impl;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
 
@@ -39,27 +40,28 @@ struct KktResiduals {
     min_dual_y: f64,   // min y_i (should be >= 0 for <= constraints)
 }
 
-/// KKT残差を独立計算する
+/// KKT残差を独立計算する。
+///
+/// 規約 (`bench_utils::compute_qp_kkt_max` と意図的に異なる):
+///   - abs scale (rel 正規化なし)
+///   - stat = ‖Qx + c − A^T y‖_∞ (Ge 規約、bound_dual 不参照)
+///   - comp = |y_i (Ax−b)_i| (slack form 区別なし)
+///
+/// この差異は本ファイルが「独立検証バイナリ」として bench_utils と異なる規約で
+/// crosscheck する役割。helper による DRY は heavy mat-vec のみ (qx / aty / ax)。
 fn compute_kkt_residuals(prob: &QpProblem, x: &[f64], y: &[f64]) -> KktResiduals {
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // 1. Ax を計算
-    let ax = prob.a.mat_vec_mul(x).unwrap_or_else(|_| vec![f64::NAN; m]);
+    let ax = f64_impl::ax(&prob.a, x);
+    let qx = f64_impl::qx(&prob.q, x);
+    let aty = f64_impl::aty(&prob.a, y, n);
 
-    // primal_feas: Ge対応 (Ax >= b は (b - Ax).max(0), Eq は |Ax - b|, Le は (Ax - b).max(0))
-    let primal_feas = ax
-        .iter()
-        .zip(prob.b.iter())
-        .zip(prob.constraint_types.iter())
-        .map(|((&axi, &bi), ct)| match ct {
-            ConstraintType::Eq => (axi - bi).abs(),
-            ConstraintType::Ge => (bi - axi).max(0.0),
-            _ => (axi - bi).max(0.0),
-        })
-        .fold(0.0_f64, f64::max);
+    let primal_feas =
+        f64_impl::constraint_violations(&ax, &prob.b, &prob.constraint_types)
+            .into_iter()
+            .fold(0.0_f64, f64::max);
 
-    // bound_feas: max violation of lb <= x <= ub
     let bound_feas = x
         .iter()
         .zip(prob.bounds.iter())
@@ -70,17 +72,7 @@ fn compute_kkt_residuals(prob: &QpProblem, x: &[f64], y: &[f64]) -> KktResiduals
         })
         .fold(0.0_f64, f64::max);
 
-    // Q*x を計算
-    let qx = prob.q.mat_vec_mul(x).unwrap_or_else(|_| vec![f64::NAN; n]);
-
-    // A^T * y を計算（y が空の場合は 0 ベクトル）
-    let aty = if y.is_empty() {
-        vec![0.0_f64; n]
-    } else {
-        prob.a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![f64::NAN; n])
-    };
-
-    // stat_resid: ||Qx + c - A^T y||_inf  (縮小勾配ノルム)
+    // stat_resid: ||Qx + c - A^T y||_inf (Ge 規約 / Ax≥b 対応の縮小勾配ノルム)
     let stat_resid = qx
         .iter()
         .zip(prob.c.iter())
@@ -88,7 +80,7 @@ fn compute_kkt_residuals(prob: &QpProblem, x: &[f64], y: &[f64]) -> KktResiduals
         .map(|((&qxi, &ci), &atyi)| (qxi + ci - atyi).abs())
         .fold(0.0_f64, f64::max);
 
-    // comp_slack: max_i |y_i * (A_i*x - b_i)|
+    // comp_slack: max_i |y_i * (A_i x - b_i)| (slack form 区別なしの素朴版)
     let comp_slack = if y.is_empty() || ax.len() != m {
         0.0
     } else {
@@ -99,7 +91,6 @@ fn compute_kkt_residuals(prob: &QpProblem, x: &[f64], y: &[f64]) -> KktResiduals
             .fold(0.0_f64, f64::max)
     };
 
-    // dual_feas: min(y) — should be >= 0 for <= constraints
     let min_dual_y = if y.is_empty() {
         0.0
     } else {
