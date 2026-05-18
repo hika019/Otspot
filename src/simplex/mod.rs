@@ -10,7 +10,6 @@ use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
-use log::warn;
 
 pub(crate) use primal::{two_phase_simplex, extract_solution, revised_simplex_core};
 #[cfg(test)]
@@ -531,6 +530,14 @@ pub(crate) fn extract_dual_info(
         }
     }
 
+    // rc[j] = c[j] − Σ_i A_ij · y_i (Lagrangian stationarity residual on the
+    // original constraints). Bound multipliers μ_lb/μ_ub are kept separate; rc
+    // doubles as the bound dual via complementary slackness:
+    //   at orig lb → rc =  μ_lb ≥ 0,
+    //   at orig ub → rc = -μ_ub ≤ 0,
+    //   interior   → rc = 0,
+    //   truly fixed (lb==ub) → rc = μ_lb − μ_ub (free sign).
+    // The KKT test `c − A^T y − rc = 0` (diag_afiro_y) requires this convention.
     let mut reduced_costs = problem.c.clone();
     for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
         if let Ok((rows, vals)) = problem.a.get_column(j) {
@@ -539,26 +546,6 @@ pub(crate) fn extract_dual_info(
                     *rc_j -= dual_solution[row] * vals[k];
                 }
             }
-        }
-    }
-
-    // Subtract the upper-bound dual mu_j. Iterate finite-bounded vars in the
-    // same order as build_standard_form so y_std[m_orig + k] aligns.
-    let mut ub_idx = 0usize;
-    #[allow(clippy::needless_range_loop)]
-    for j in 0..n_orig {
-        let (lb, ub) = problem.bounds[j];
-        if lb.is_finite() && ub.is_finite() {
-            let row = m_orig + ub_idx;
-            if row < y_std.len() {
-                let sign = if sf.row_negated[row] { -1.0 } else { 1.0 };
-                let rs = row_scale.get(row).copied().unwrap_or(1.0);
-                let mu_j = sign * rs * y_std[row];
-                reduced_costs[j] -= mu_j;
-            } else {
-                warn!("extract_dual_info: y_std too short for ub constraint row {}, expected >= {}", row, row + 1);
-            }
-            ub_idx += 1;
         }
     }
 

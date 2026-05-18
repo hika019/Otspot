@@ -626,21 +626,9 @@ pub fn run_postsolve(
 
     // Build dfeas_bound first so the cheap candidates (y_loop, y_gs) can gate the
     // far more expensive cleanup-LP candidates.
-    let mut bound_tightened_fixed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for step in &presolve_result.postsolve_stack {
-        if let PostsolveStep::FixedVariable { orig_col, .. } = step {
-            let (lb, ub) = orig_problem.bounds[*orig_col];
-            let truly_fixed = lb.is_finite() && ub.is_finite()
-                && (ub - lb).abs() < BOUND_ACTIVE_TOL;
-            if !truly_fixed {
-                bound_tightened_fixed.insert(*orig_col);
-            }
-        }
-    }
     let dfeas_bound = |y: &[f64]| -> f64 {
         let mut max_viol = 0.0f64;
         for j in 0..n {
-            if bound_tightened_fixed.contains(&j) { continue; }
             let (lb_j, ub_j) = orig_problem.bounds[j];
             let fixed = lb_j.is_finite() && ub_j.is_finite()
                 && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
@@ -780,19 +768,6 @@ pub fn run_postsolve(
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
                 *rc -= vals[k] * dual_solution[row];
-            }
-        }
-    }
-    // For variables fixed by bound tightening (not lb==ub originally), the rc can be
-    // absorbed into the bound dual (mu_lb − mu_ub); treat it as zero to keep dual
-    // feasibility consistent. True fixed variables (orig lb == ub) keep their rc.
-    for step in &presolve_result.postsolve_stack {
-        if let PostsolveStep::FixedVariable { orig_col, .. } = step {
-            let (lb, ub) = orig_problem.bounds[*orig_col];
-            let truly_fixed = lb.is_finite() && ub.is_finite()
-                && (ub - lb).abs() < BOUND_ACTIVE_TOL;
-            if !truly_fixed && *orig_col < n {
-                reduced_costs[*orig_col] = 0.0;
             }
         }
     }
