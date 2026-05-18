@@ -39,6 +39,11 @@ fn run_ipm_with(
     // presolve スケーリング (LargeCoeffRowScale × Ruiz E / c·D) で問題が σ 倍に縮むと
     // unscale 時に残差が 1/σ 倍に増幅される。primal 側 e_min × LargeCoeffRowScale と
     // dual 側 c·d_min の小さい方を sigma_total とし、IPM eps を user_eps×σ に厳しくする。
+    // task#13: scaled eps の noise floor。σ ≪ 1 の ill-scaled で eps_scaled が
+    // O(√n)·machine_eps 直下に潜ると IPM 内 `nr_d_rel` が達成不能で 20-30 iter
+    // 空転する。100×machine_eps を下限とし、orig-space は post-processing が
+    // user_eps 基準で再 gate する。
+    const IPM_EPS_NOISE_FLOOR: f64 = 100.0 * f64::EPSILON;
     let mut primal_row_scale_min = 1.0_f64;
     for step in presolve_result.postsolve_stack.steps.iter() {
         if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
@@ -74,7 +79,7 @@ fn run_ipm_with(
     let opts_for_ipm: SolverOptions = if sigma_total < 1.0 && sigma_total > 0.0 {
         let mut tightened = opts.clone();
         let eps_orig = opts.ipm_eps();
-        let eps_scaled = (eps_orig * sigma_total).max(f64::MIN_POSITIVE);
+        let eps_scaled = (eps_orig * sigma_total).max(IPM_EPS_NOISE_FLOOR);
         tightened.tolerance = None;
         tightened.ipm.eps = eps_scaled;
         if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
