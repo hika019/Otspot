@@ -1,5 +1,10 @@
 #!/bin/bash
-# QPLIB convex subset (41 instances) downloader.
+# QPLIB instance subset (41 instances、convex + non-convex 混在) downloader.
+#
+# 注: 旧 doc は「convex subset」と表記していたが、QPLIB 公式メタ確認で
+# 0018/0343/2546/2712/2761/2981/3080/3297 等が CONVEX=false (binary QP / QCQP
+# 含む)。pure-continuous nonconvex は data/qplib_nonconvex_official/ (4 件、
+# CC-BY 4.0) に分離、本 script は既存 data/qplib/ 41 件 (= IDs 抽出元) を維持。
 #
 # Source: https://qplib.zib.de/qplib/QPLIB_XXXX.qplib
 # ID list は data/qplib/ の既存 file 名から抽出 (fact-based, 推測なし)。
