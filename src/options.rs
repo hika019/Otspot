@@ -85,6 +85,58 @@ pub struct LpWarmStart {
     pub y_orig: Option<Vec<f64>>,
 }
 
+/// Multi-start サンプリング戦略 (#5 Phase 2)。
+///
+/// IPM は inertia 補正下で「最寄り KKT 点」へ収束するため、非凸 QP では
+/// 出発点を変えると到達する local optimum が変わる。出発点生成方法の選択。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartStrategy {
+    /// 各変数を box bounds 内で独立一様サンプリング (LCG)。
+    RandomBox,
+    /// Latin Hypercube Sampling: 各次元を `n_starts` strata に分割し列ごと permutation。
+    /// box 全域被覆性が pure random より高い。
+    LatinHypercube,
+}
+
+/// Multi-start local search (#5 Phase 2) 設定。
+///
+/// `n_starts` 個の初期点で IPM を解き、最良の objective を採用する。
+/// 非凸 QP の脱出率向上 + Phase 3 spatial B&B の上界 (incumbent) 供給。
+///
+/// 規約:
+/// - `n_starts == 1` は cold solve 1 回のみ (= 既存挙動)
+/// - `n_starts >= 2` で start #0 = cold、#1..#n_starts = random initial (warm_start_qp.x 注入)
+/// - 全 start で deadline を共有 (timeout_secs / deadline は最初に固定)
+/// - `seed` 同一なら結果は決定論的
+#[derive(Debug, Clone)]
+pub struct MultiStartConfig {
+    /// 初期点数 (cold #0 + random #1..#n_starts)。1 で multistart 無効化。
+    pub n_starts: usize,
+    /// LCG seed。0 は内部で 1 に補正 (LCG state=0 は固着するため)。
+    pub seed: u64,
+    /// サンプリング戦略。
+    pub strategy: StartStrategy,
+    /// 無限境界変数のサンプリング半径 |x| <= range。IPPMM cold-init は unbounded で
+    /// 0 を採用するため、random restart も origin 近傍 (±10) を出発点とする。
+    pub unbounded_range: f64,
+}
+
+/// Multi-start `unbounded_range` 既定値。IPPMM `solve_ippmm_inner` の cold-init 規約
+/// (zero in bounds → 0 / lb_fin → lb+1 / ub_fin → ub-1) と整合する origin 近傍半径。
+pub const DEFAULT_MULTISTART_UNBOUNDED_RANGE: f64 = 10.0;
+
+impl Default for MultiStartConfig {
+    fn default() -> Self {
+        Self {
+            n_starts: 1,
+            seed: 1,
+            strategy: StartStrategy::RandomBox,
+            unbounded_range: DEFAULT_MULTISTART_UNBOUNDED_RANGE,
+        }
+    }
+}
+
 /// QP ソルバーの収束精度を抽象化する列挙型
 ///
 /// 各ソルバーは `Tolerance` を内部の収束基準に変換して使用する。
@@ -200,6 +252,11 @@ pub struct SolverOptions {
     // --- ソルバー固有オプション ---
     /// IPM 固有オプション
     pub ipm: IpmOptions,
+
+    /// Multi-start local search (#5 Phase 2)。`None` (default) は無効 = 既存挙動。
+    /// `Some(_)` かつ `n_starts >= 2` の場合 `solve_qp_with` は内部で
+    /// `solve_qp_multistart` に委譲する (再入防止のため委譲時は None に剥がす)。
+    pub multistart: Option<MultiStartConfig>,
 }
 
 /// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
@@ -236,6 +293,7 @@ impl Default for SolverOptions {
             use_ruiz_scaling: true,
             tolerance: None,
             ipm: IpmOptions::default(),
+            multistart: None,
         }
     }
 }
