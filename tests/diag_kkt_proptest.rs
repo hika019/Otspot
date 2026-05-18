@@ -31,7 +31,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
-use solver::bench_utils::compute_qp_kkt_max;
+use solver::bench_utils::{compute_qp_kkt_max, primal_feas_max};
 use solver::options::{GlobalOptimizationConfig, SolverOptions};
 use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use solver::qp::{solve_qp_global, solve_qp_with, QpProblem};
@@ -97,24 +97,9 @@ fn lp_kkt_resid(prob: &LpProblem, res: &SolverResult) -> LpKktResid {
         Err(_) => return LpKktResid::invalid(),
     };
 
-    let mut prim = 0.0_f64;
-    for (i, ct) in prob.constraint_types.iter().enumerate() {
-        let viol = match ct {
-            ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-            ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
-            ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-            _ => continue,
-        };
-        let scale = 1.0 + ax[i].abs() + prob.b[i].abs();
-        prim = prim.max(viol / scale);
-    }
-    for (j, &(lb, ub)) in prob.bounds.iter().enumerate() {
-        if lb.is_finite() {
-            prim = prim.max((lb - x[j]).max(0.0) / (1.0 + x[j].abs() + lb.abs()));
-        }
-        if ub.is_finite() {
-            prim = prim.max((x[j] - ub).max(0.0) / (1.0 + x[j].abs() + ub.abs()));
-        }
+    let prim = primal_feas_max(&prob.a, &prob.b, &prob.constraint_types, &prob.bounds, x);
+    if !prim.is_finite() {
+        return LpKktResid::invalid();
     }
 
     let mut stat = 0.0_f64;
