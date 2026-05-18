@@ -16,6 +16,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
+use super::super::dual_common::{compute_dual_vars, compute_reduced_costs};
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
 
@@ -78,48 +79,6 @@ fn apply_lex_perturbation(
     for (i, slot) in x_b.iter_mut().enumerate() {
         *slot += base_x * (1.0 + (i as f64) / (m as f64));
     }
-}
-
-/// 被縮小費用を計算する: r_j = c_j - y^T a_j（y = B^{-T} c_B）
-fn compute_reduced_costs(
-    a: &CscMatrix,
-    c: &[f64],
-    basis_mgr: &mut LuBasis,
-    is_basic: &[bool],
-    n_price: usize,
-    m: usize,
-    basis: &[usize],
-) -> Vec<f64> {
-    // y = B^{-T} c_B (c_b は常に dense なので btran_dense で sparse 変換を省略)
-    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    basis_mgr.btran_dense(&mut y);
-
-    let mut reduced_costs = vec![0.0f64; n_price];
-    for j in 0..n_price {
-        if is_basic[j] {
-            continue;
-        }
-        let (rows, vals) = a.get_column(j).unwrap();
-        let mut ya = 0.0;
-        for (k, &row) in rows.iter().enumerate() {
-            ya += y[row] * vals[k];
-        }
-        reduced_costs[j] = c[j] - ya;
-    }
-    reduced_costs
-}
-
-/// 双対変数を計算する: y = B^{-T} c_B
-fn compute_dual_vars(
-    c: &[f64],
-    basis_mgr: &mut LuBasis,
-    basis: &[usize],
-    m: usize,
-) -> Vec<f64> {
-    // c_b は常に dense なので btran_dense で sparse 変換を省略
-    let mut y: Vec<f64> = (0..m).map(|i| c[basis[i]]).collect();
-    basis_mgr.btran_dense(&mut y);
-    y
 }
 
 /// Dual Simplexコアループ（強化版）
