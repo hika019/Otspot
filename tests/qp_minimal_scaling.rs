@@ -13,9 +13,18 @@
 //!   落ちて誤解 (例: 1e-10 のみの Q で LP fallback すると unbounded 判定)。
 //! - Mehrotra IPM の正則化 ε が absolute (1e-8) だと 1e-12 Q を救えない、
 //!   逆に 1e10 Q を「regularize しすぎ」で精度落ちる可能性。
+//!
+//! ## ファイル方針
+//!
+//! - scl1-5 は Model API で記述。
+//! - scl6 は upper-only Q (非対称) を直接 IPM に渡して入力契約違反を pin する
+//!   設計のため raw `QpProblem` を維持 (Model API 経由では非対称 Q の構築意図が
+//!   表現困難)。
 
+use solver::constraint;
+use solver::model::Model;
 use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
+use solver::problem::SolveStatus;
 use solver::qp::{solve_qp_with, QpProblem};
 use solver::sparse::CscMatrix;
 
@@ -58,20 +67,21 @@ fn scl1_diagonal_high_condition_number() {
     let n = 3;
     let eps_q = 1e-6_f64;
     let m_q = 1e6_f64;
+    let mut model = Model::new("scl1");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
+    model.minimize(-1.0 * x1 - 1.0 * x2 - 1.0 * x3);
     let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[eps_q, 1.0, m_q], n, n).unwrap();
-    let c = vec![-1.0, -1.0, -1.0];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "scl1: status (cond≈1e12)");
-    assert_x_rel_close(r.solution[0], 1.0 / eps_q, "scl1: x1=1/eps");
-    assert_x_rel_close(r.solution[1], 1.0, "scl1: x2=1");
-    assert_x_rel_close(r.solution[2], 1.0 / m_q, "scl1: x3=1/M");
+    let result = model.solve().expect("scl1: solve (cond≈1e12)");
+    assert_x_rel_close(result[x1], 1.0 / eps_q, "scl1: x1=1/eps");
+    assert_x_rel_close(result[x2], 1.0, "scl1: x2=1");
+    assert_x_rel_close(result[x3], 1.0 / m_q, "scl1: x3=1/M");
     let expected_obj = -0.5 * (1.0 / eps_q + 1.0 + 1.0 / m_q);
-    assert_obj_close(r.objective, expected_obj, "scl1: obj");
+    assert_obj_close(result.objective_value, expected_obj, "scl1: obj");
 }
 
 // =============================================================================
@@ -84,18 +94,16 @@ fn scl1_diagonal_high_condition_number() {
 ///         x_0=0 から x=-1e8 まで降下できるか。max_iter で詰まらないか。
 #[test]
 fn scl2_large_linear_term_c() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    let c = vec![1e8_f64];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    let mut model = Model::new("scl2");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+    model.minimize(1e8_f64 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "scl2: status");
-    assert_x_rel_close(r.solution[0], -1e8, "scl2: x=-1e8");
-    assert_obj_close(r.objective, -0.5e16, "scl2: obj");
+    let result = model.solve().expect("scl2: solve");
+    assert_x_rel_close(result[x], -1e8, "scl2: x=-1e8");
+    assert_obj_close(result.objective_value, -0.5e16, "scl2: obj");
 }
 
 // =============================================================================
@@ -109,24 +117,22 @@ fn scl2_large_linear_term_c() {
 /// **狙い**: Q 非ゼロだが小さい場合に LP fallback されない、かつ KKT で正しい x。
 #[test]
 fn scl3_nearly_zero_q_above_threshold() {
-    let n = 1;
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1e-10_f64], n, n).unwrap();
-    let c = vec![-1.0];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(0.0, 1e15)];
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    let mut model = Model::new("scl3");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x = model.add_var("x", 0.0, 1e15);
+    model.minimize(-1.0 * x);
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1e-10_f64], 1, 1).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "scl3: status (Q small but ≠ 0)");
-    // x=1e10 を許容 rel < 1e-4
-    let rel = (r.solution[0] - 1e10).abs() / 1e10;
-    assert!(rel < 1e-3, "scl3: x≈1e10, got {} (rel={:.3e})", r.solution[0], rel);
+    let result = model.solve().expect("scl3: solve (Q small but ≠ 0)");
+    // x=1e10 を許容 rel < 1e-3
+    let rel = (result[x] - 1e10).abs() / 1e10;
+    assert!(rel < 1e-3, "scl3: x≈1e10, got {} (rel={:.3e})", result[x], rel);
     // obj 計算誤差は |x|^2 * Q オーダーで桁落ち。EPS_OBJ_REL より緩めて 1e-4。
     let exp_obj = -0.5e10;
-    let obj_rel = (r.objective - exp_obj).abs() / exp_obj.abs();
+    let obj_rel = (result.objective_value - exp_obj).abs() / exp_obj.abs();
     assert!(obj_rel < 1e-4, "scl3: obj={:.6e} expected={:.6e} (rel={:.3e})",
-        r.objective, exp_obj, obj_rel);
+        result.objective_value, exp_obj, obj_rel);
 }
 
 // =============================================================================
@@ -141,19 +147,19 @@ fn scl3_nearly_zero_q_above_threshold() {
 fn scl4_large_q_with_equality() {
     let n = 2;
     let big = 1e8_f64;
+    let mut model = Model::new("scl4");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.add_constraint(constraint!((x1 + x2) == 1.0));
+    model.minimize(0.0);
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[big, big], n, n).unwrap();
-    let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
-    let b = vec![1.0];
-    let cts = vec![ConstraintType::Eq];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "scl4: status (Q=1e8)");
-    assert_x_rel_close(r.solution[0], 0.5, "scl4: x1");
-    assert_x_rel_close(r.solution[1], 0.5, "scl4: x2");
-    assert_obj_close(r.objective, 2.5e7, "scl4: obj=2.5e7");
+    let result = model.solve().expect("scl4: solve (Q=1e8)");
+    assert_x_rel_close(result[x1], 0.5, "scl4: x1");
+    assert_x_rel_close(result[x2], 0.5, "scl4: x2");
+    assert_obj_close(result.objective_value, 2.5e7, "scl4: obj=2.5e7");
 }
 
 // =============================================================================
@@ -170,6 +176,11 @@ fn scl4_large_q_with_equality() {
 #[test]
 fn scl5_q_offdiagonal_full_storage() {
     let n = 2;
+    let mut model = Model::new("scl5");
+    model.set_timeout(MINI_TIMEOUT_SECS);
+    let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
+    let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
+    model.minimize(-3.0 * x1 - 3.0 * x2);
     // Q = [[2,1],[1,2]] 全要素 (col-major)
     let q = CscMatrix::from_triplets(
         &[0, 1, 0, 1],
@@ -177,17 +188,12 @@ fn scl5_q_offdiagonal_full_storage() {
         &[2.0, 1.0, 1.0, 2.0],
         n, n,
     ).unwrap();
-    let c = vec![-3.0, -3.0];
-    let a = CscMatrix::new(0, n);
-    let b = vec![];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    model.set_quadratic_objective(q);
 
-    let r = solve_qp_with(&prob, &solver_opts());
-    assert_eq!(r.status, SolveStatus::Optimal, "scl5: status");
-    assert_x_rel_close(r.solution[0], 1.0, "scl5: x1=1");
-    assert_x_rel_close(r.solution[1], 1.0, "scl5: x2=1");
-    assert_obj_close(r.objective, -3.0, "scl5: obj=-3");
+    let result = model.solve().expect("scl5: solve");
+    assert_x_rel_close(result[x1], 1.0, "scl5: x1=1");
+    assert_x_rel_close(result[x2], 1.0, "scl5: x2=1");
+    assert_obj_close(result.objective_value, -3.0, "scl5: obj=-3");
 }
 
 // =============================================================================
@@ -205,6 +211,8 @@ fn scl5_q_offdiagonal_full_storage() {
 ///   場合は test を Optimal assertion に切り替えるべき退化検出 anchor。
 ///
 /// **構造**: scl5 と同じ問題を upper-only で構築 → 誤った最適化に陥る。
+///
+/// **NOTE**: 非対称 Q を IPM に直接渡す入力契約 test の性質上、raw `QpProblem` を維持。
 #[test]
 fn scl6_q_upper_only_violates_input_contract() {
     let n = 2;

@@ -431,9 +431,13 @@ pub(crate) fn gondzio_correctors_schur(
     dx: &mut [f64],
     dy: &mut [f64],
     ds: &mut [f64],
+    deadline: Option<std::time::Instant>,
 ) -> f64 {
     let mut alpha_prev = alpha_init;
     for _k in 0..max_correctors {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let alpha_target = (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
         let mu_target: f64 = if m_ineq > 0 {
             s.iter()
@@ -697,6 +701,9 @@ pub(crate) fn gondzio_correctors(
 
     let mut alpha_prev = alpha_init;
     for _k in 0..max_correctors {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let alpha_target = (alpha_prev + BETA_GONDZIO * (1.0 - alpha_prev)).min(1.0);
         let mu_target: f64 = if m_ineq > 0 {
             s.iter()

@@ -1683,6 +1683,9 @@ pub(crate) fn refine_primal_lsq(
     const IR_PROGRESS_EPS: f64 = 1e-18;
     let mut prev_r_inf = f64::INFINITY;
     loop {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
         let mut atl_dd: Vec<TwoFloat> = vec![zero_dd; n];
         for j in 0..n {
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {

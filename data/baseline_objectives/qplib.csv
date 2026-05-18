@@ -19,4 +19,14 @@ QPLIB_8845,1.345312e7,bench_722g_ippmm_1000s
 QPLIB_8906,3.014980e6,bench_722g_ippmm_1000s
 QPLIB_8938,-3.577945e1,bench_722g_ippmm_1000s
 QPLIB_8991,-1.200696e0,bench_722g_ippmm_1000s
-QPLIB_9002,5.698097e9,bench_722g_ippmm_1000s
+# QPLIB_9002: QPLIB official solu = "=unkn=" (no published optimum). Clarabel
+# (tol=1e-8) terminates NumericalError at obj=3.69e13. 自 solver は
+# SuboptimalSolution / obj ~2e10 で residual_stall。past 5.698e9 (bench_722g) は
+# 単発で再現不能。ref 削除 (task #31). regression sentinel = diag_qplib_9002_obj.
+QPLIB_9002,no_ref,task31_intractable_diag_q_2026-05-18
+NONCONVEX_DIAG_N10,UNBOUNDED,qp_bug_hunter_20260518
+NONCONVEX_DIAG_N50,UNBOUNDED,qp_bug_hunter_20260518
+NONCONVEX_DIAG_N100,UNBOUNDED,qp_bug_hunter_20260518
+NONCONVEX_DIAG_N200,UNBOUNDED,qp_bug_hunter_20260518
+NONCONVEX_DIAG_N300,UNBOUNDED,qp_bug_hunter_20260518
+NONCONVEX_DIAG_N500,UNBOUNDED,qp_bug_hunter_20260518

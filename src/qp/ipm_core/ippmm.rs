@@ -841,6 +841,7 @@ pub(crate) fn solve_ippmm_inner(
                     &r_c_corr, &sigma_vec, &fac, aug_mat_for_ir, d_inv, &a_ext, n, m_ext,
                     options.ipm.max_correctors, alpha,
                     &mut dx, &mut dy, &mut ds,
+                    timeout_ctx.deadline,
                 )
             } else {
                 gondzio_correctors(
