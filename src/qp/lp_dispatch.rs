@@ -1,8 +1,12 @@
-//! Q=0 退化ケースを simplex に委譲する。
+//! Q=0 退化ケースを LP entry に転送する (#36)。
+//!
+//! 旧実装は `simplex::solve_with` を直接呼んでいたが、`crate::lp` を
+//! 経由することで LP-specific 経路を全て LP module に集約し、
+//! telemetry counter (`lp::telemetry::lp_forwarded_from_qp_calls`) で
+//! QP→LP forward を識別できるようにする。
 
 use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolverResult};
-use crate::simplex;
 
 use super::QpProblem;
 
@@ -36,7 +40,7 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         Err(_) => return SolverResult::infeasible(),
     };
 
-    let mut result = simplex::solve_with(&lp, options);
+    let mut result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     result.objective += problem.obj_offset;
     result
 }
