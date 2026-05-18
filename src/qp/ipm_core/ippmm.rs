@@ -11,9 +11,10 @@
 
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_pre_permuted_cached, factorize_kkt_with_cached_perm, inexact_eta_for_eps,
-    max_l_nnz_from_budget, KktError, KktFactor,
+    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par,
+    inexact_eta_for_eps, max_l_nnz_from_budget, KktError, KktFactor,
 };
+use crate::linalg::parallelism::solver_par_from_threads;
 
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -173,6 +174,7 @@ pub(crate) fn solve_ippmm_inner(
 ) -> SolverResult {
     let n = problem.num_vars;
     let timeout_ctx = TimeoutCtx::from_options(options);
+    let par = solver_par_from_threads(options.threads);
 
     if timeout_ctx.should_stop() {
         return timeout_result(n);
@@ -266,8 +268,8 @@ pub(crate) fn solve_ippmm_inner(
             let perm_init = amd_with_deadline(
                 k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
             );
-            if let Ok(fac_init) = factorize_kkt_with_cached_perm(
-                &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n),
+            if let Ok(fac_init) = factorize_kkt_with_cached_perm_par(
+                &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n), par,
             ) {
                 let mut rhs_init = vec![0.0_f64; n + m_ext];
                 for i in 0..m_ext { rhs_init[n + i] = r_p[i]; }
@@ -763,7 +765,7 @@ pub(crate) fn solve_ippmm_inner(
             let factor_result = if use_pre_permuted {
                 let permuted_cache = aug_permuted_cache.as_ref().unwrap();
                 let pre_permuted = permuted_cache.materialize(&sigma_vec, rho_retry, delta_matrix_retry);
-                factorize_kkt_pre_permuted_cached(
+                factorize_kkt_pre_permuted_cached_par(
                     &pre_permuted,
                     &mat_for_factor,
                     perm,
@@ -771,14 +773,16 @@ pub(crate) fn solve_ippmm_inner(
                     max_l_nnz_from_budget(),
                     Some(n),
                     symbolic_cholesky_cache.clone(),
+                    par,
                 )
             } else {
-                factorize_kkt_with_cached_perm(
+                factorize_kkt_with_cached_perm_par(
                     &mat_for_factor,
                     perm,
                     timeout_ctx.deadline,
                     max_l_nnz_from_budget(),
                     Some(n),
+                    par,
                 )
             };
             if use_pre_permuted && symbolic_cholesky_cache.is_none() {
@@ -877,12 +881,13 @@ pub(crate) fn solve_ippmm_inner(
             let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_matrix_retry);
             let aug_mat_fb = aug_cache.materialize(&sigma_vec, rho_retry, delta_fallback);
             let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
-            match factorize_kkt_with_cached_perm(
+            match factorize_kkt_with_cached_perm_par(
                 &aug_mat_fb,
                 &identity_perm,
                 timeout_ctx.deadline,
                 max_l_nnz_from_budget(),
                 Some(n),
+                par,
             ) {
                 Ok(f) => {
                     fac_opt = Some(f);
