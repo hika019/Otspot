@@ -175,14 +175,19 @@ fn csc_upper_to_faer_upper(mat: &CscMatrix) -> SparseColMat<usize, f64> {
 
 /// 対角要素の符号ベクトルを抽出する（LdltRegularization sign-aware 用）。
 ///
-/// 対角が負なら -1、それ以外は +1。
-fn extract_diagonal_signs(mat: &CscMatrix) -> Vec<i8> {
-    let n = mat.nrows;
+/// 対角が負なら -1、それ以外は +1。CSC 上三角を slice で受けるため、
+/// CscMatrix 経由でも permute 後の生 slice 経由でも (ldl_dd) 共通利用できる。
+pub(crate) fn extract_diagonal_signs(
+    n: usize,
+    col_ptr: &[usize],
+    row_ind: &[usize],
+    values: &[f64],
+) -> Vec<i8> {
     let mut signs = vec![1i8; n];
     for (j, sign) in signs.iter_mut().enumerate() {
-        for k in mat.col_ptr[j]..mat.col_ptr[j + 1] {
-            if mat.row_ind[k] == j {
-                if mat.values[k] < 0.0 {
+        for k in col_ptr[j]..col_ptr[j + 1] {
+            if row_ind[k] == j {
+                if values[k] < 0.0 {
                     *sign = -1;
                 }
                 break;
@@ -569,7 +574,7 @@ pub fn factorize_quasidefinite_with_cached_perm_par(
         nrows: n,
         ncols: n,
     };
-    let signs = extract_diagonal_signs(&perm_mat);
+    let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
         do_numeric_factorize(&perm_mat, Some(&signs), deadline, None, par)?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
@@ -647,7 +652,7 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
         nrows: n,
         ncols: n,
     };
-    let signs = extract_diagonal_signs(&perm_mat);
+    let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
         do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
@@ -699,7 +704,12 @@ pub fn factorize_quasidefinite_pre_permuted_cached_par(
         }
     }
     let n = pre_permuted_mat.nrows;
-    let signs = extract_diagonal_signs(pre_permuted_mat);
+    let signs = extract_diagonal_signs(
+        n,
+        &pre_permuted_mat.col_ptr,
+        &pre_permuted_mat.row_ind,
+        &pre_permuted_mat.values,
+    );
     let (symbolic, l_values) = do_numeric_factorize_with_cache(
         pre_permuted_mat, Some(&signs), deadline, max_l_nnz, cached_symbolic, par,
     )?;
