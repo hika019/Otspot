@@ -33,6 +33,17 @@ use super::kkt::collapse_extended_dual;
 const RHO_INIT: f64 = 8.0;
 const DELTA_INIT: f64 = 8.0;
 
+/// warm start safe guard.
+/// μ floor: x·y=0 / s=0 を渡された場合に central path から外れないため。
+const WARM_MU_MIN: f64 = 1e-8;
+/// 両端有限 box では range × WARM_BOUND_REL_MARGIN を interior 余白にとる
+/// (cold init の 1% 余白より tighter、warm 値を最大限尊重する)。
+const WARM_BOUND_REL_MARGIN: f64 = 1e-6;
+/// 半側有限 bound では cold init と同等の絶対 1.0 余白。
+const WARM_BOUND_ABS_MARGIN: f64 = 1.0;
+/// 不等式行 s, y の boundary 上で σ=s/y が発散するため両側を floor。
+const WARM_SY_MIN: f64 = 1e-8;
+
 /// 5% 以上の残差減少を改善とみなす (Gondzio2021 MATLAB)。
 const PMM_IMPROVE_THRESHOLD: f64 = 0.95;
 const PMM_SLOW_RATE: f64 = 2.0 / 3.0;
@@ -64,6 +75,90 @@ struct PmmState {
     delta: f64,
     prev_nr_p: f64,
     prev_nr_d: f64,
+}
+
+/// warm start から (x, y, s) を初期化し、有効なら μ を返す (none で cold start)。
+///
+/// 規約:
+/// - `ws.x` 長さ n、`ws.y` 長さ m_orig (user 符号、Ge は内部で反転)、`ws.mu` スカラー
+/// - bound row dual / slack は 1.0 で cold 初期化 (B&B でも bound multiplier は不安定)
+fn apply_qp_warm_start(
+    ws: &crate::options::QpWarmStart,
+    problem: &crate::qp::problem::QpProblem,
+    a_ext: &crate::sparse::CscMatrix,
+    b_ext: &[f64],
+    is_eq_ext: &[bool],
+    m_orig: usize,
+    m_ext: usize,
+    x: &mut [f64],
+    y: &mut [f64],
+    s: &mut [f64],
+) -> Option<f64> {
+    use crate::problem::ConstraintType;
+    let n = problem.num_vars;
+    if ws.x.len() != n || ws.y.len() != m_orig {
+        return None;
+    }
+    let mu = ws.mu.max(WARM_MU_MIN);
+
+    for j in 0..n {
+        let xj = ws.x[j];
+        let (lb, ub) = problem.bounds[j];
+        x[j] = match (lb.is_finite(), ub.is_finite()) {
+            (true, true) => {
+                let range = ub - lb;
+                let margin = (range * WARM_BOUND_REL_MARGIN).min(WARM_BOUND_ABS_MARGIN);
+                if range > 2.0 * margin {
+                    xj.clamp(lb + margin, ub - margin)
+                } else {
+                    0.5 * (lb + ub)
+                }
+            }
+            (true, false) => xj.max(lb + WARM_BOUND_ABS_MARGIN),
+            (false, true) => xj.min(ub - WARM_BOUND_ABS_MARGIN),
+            (false, false) => xj,
+        };
+    }
+
+    // 元制約 dual を内部符号 (Ge は -1 倍) に展開。
+    for i in 0..m_orig {
+        let yi = match problem.constraint_types[i] {
+            ConstraintType::Ge => -ws.y[i],
+            _ => ws.y[i],
+        };
+        y[i] = if is_eq_ext[i] { yi } else { yi.max(WARM_SY_MIN) };
+    }
+
+    // 自然な slack s = b_ext − A_ext·x (ineq は WARM_SY_MIN で boundary 退避)。
+    let mut ax = vec![0.0_f64; m_ext];
+    for col in 0..n {
+        for k in a_ext.col_ptr[col]..a_ext.col_ptr[col + 1] {
+            ax[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
+        }
+    }
+    for i in 0..m_ext {
+        if is_eq_ext[i] {
+            s[i] = 0.0;
+        } else {
+            s[i] = (b_ext[i] - ax[i]).max(WARM_SY_MIN);
+        }
+    }
+    // bound 行 dual は中心パス s·y=μ から逆算 (x interior → y≈0、x active → y≈μ/ε 大)。
+    // ユーザーが bound_duals を渡さない設計のため central path 関係で推定する。
+    for i in m_orig..m_ext {
+        y[i] = (mu / s[i]).max(WARM_SY_MIN);
+    }
+
+    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
+        let x_inf = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let y_inf = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        let s_inf = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        eprintln!(
+            "IPPMM_INIT_WARM: μ={:.3e} |x|_inf={:.3e} |y|_inf={:.3e} |s|_inf={:.3e}",
+            mu, x_inf, y_inf, s_inf
+        );
+    }
+    Some(mu)
 }
 
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
@@ -141,6 +236,18 @@ pub(crate) fn solve_ippmm_inner(
     let mut s = s0.clone();
     let mut y = y0.clone();
 
+    // warm start が渡されていれば Mehrotra init を skip し、interior 補正のみ適用する。
+    // 補正は (i) bound 余白 (ii) μ floor (iii) s,y boundary floor の三段。
+    let warm_mu = if let Some(ws) = options.warm_start_qp.as_ref() {
+        apply_qp_warm_start(
+            ws, problem, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext,
+            &mut x, &mut y, &mut s,
+        )
+    } else {
+        None
+    };
+
+    if warm_mu.is_none() {
     // Mehrotra 1992 標準初期点 (Wright §5.1): 全制約射影 + δ_s/δ_y 正補正 + Σ 均一化補正。
     // 等式のみの射影だと |b|≈1e11 級で s0 が膨張し K matrix が暴走する。
     {
@@ -243,12 +350,22 @@ pub(crate) fn solve_ippmm_inner(
             );
         }
     }
+    } // end cold start init
+
+    let (rho_init, delta_init) = match warm_mu {
+        // warm start: μ 規模に揃えた rho/delta で出発し proximal pull を最小化。
+        Some(mu) => {
+            let v = mu.max(options.ipm.delta_min);
+            (v, v)
+        }
+        None => (RHO_INIT, DELTA_INIT),
+    };
 
     let mut pmm = PmmState {
         x_ref: x.clone(),
         y_ref: y.clone(),
-        rho: RHO_INIT,
-        delta: DELTA_INIT,
+        rho: rho_init,
+        delta: delta_init,
         prev_nr_p: f64::INFINITY,
         prev_nr_d: f64::INFINITY,
     };
