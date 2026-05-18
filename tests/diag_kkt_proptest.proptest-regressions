@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6481e621e8239a991700b2e9af9deacc36a6097af7a5019a3d9a351dd9f32980 # shrinks to lp = LpProblem { c: [0.0, 1.6425494178529596], a: CscMatrix { col_ptr: [0, 0, 1], row_ind: [0], values: [-1.4181958711737435], nrows: 1, ncols: 2 }, b: [0.0], num_vars: 2, num_constraints: 1, constraint_types: [Eq], bounds: [(0.0, 1.5), (-inf, inf)], name: None }
+cc 5f9e728c9816b7a46d150e854ea50d67b94c0e24e74fd37651d37a262fc251d8 # shrinks to lp = LpProblem { c: [0.0, -803.3458161579554], a: CscMatrix { col_ptr: [0, 0, 1], row_ind: [0], values: [334.0485457230745], nrows: 1, ncols: 2 }, b: [0.1], num_vars: 2, num_constraints: 1, constraint_types: [Le], bounds: [(0.0, 1.5), (0.0, 1.5)], name: None }
+cc d7ae71011ed7e93cb179902d4ddff76fd1ab83e27d1097dd4adad0a88fe6b251 # shrinks to lp = LpProblem { c: [0.0, 590.9318537086355], a: CscMatrix { col_ptr: [0, 1, 2], row_ind: [0, 0], values: [-404.53277639691873, 48.67218016154472], nrows: 1, ncols: 2 }, b: [0.0], num_vars: 2, num_constraints: 1, constraint_types: [Eq], bounds: [(0.0, 1.5), (-1.5, 1.5)], name: None }
+cc f95be4c515b599f86684a4f55a758324b12372d6f48cedd2699c32d0089262ff # shrinks to lp = LpProblem { c: [0.0, -800.3292201645222], a: CscMatrix { col_ptr: [0, 1, 2], row_ind: [0, 0], values: [-82.43740322950417, -973.9684889867076], nrows: 1, ncols: 2 }, b: [-0.1], num_vars: 2, num_constraints: 1, constraint_types: [Ge], bounds: [(-1.5, 1.5), (0.0, 1.5)], name: None }
+cc a938d224847df66844dce6c5e95fe2f308b4ce3a8b2753fe07ae3f148b163ddd # shrinks to lp = LpProblem { c: [0.0, 3.2567336474320614], a: CscMatrix { col_ptr: [0, 0, 2], row_ind: [0, 1], values: [4.494611664553469, -1.9339029301709725], nrows: 2, ncols: 2 }, b: [-0.1, 0.1], num_vars: 2, num_constraints: 2, constraint_types: [Ge, Le], bounds: [(0.0, 1.5), (-inf, inf)], name: None }
