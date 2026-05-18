@@ -6,18 +6,27 @@
 //! 設計書 §3.2 に準拠。
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::options::{SolverOptions, WarmStartBasis};
+use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::presolve::RuizScaler;
 use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
-use super::pricing::MostInfeasibleLeaving;
+use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 
 mod core;
 mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
 mod bound_flip;
+
+/// `options.dual_pricing` から DualLeavingStrategy を組み立てる。
+/// DSE 経路は m 個の重みを new() で初期化する (γ_i = 1, 識別基底想定)。
+fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingStrategy> {
+    match pricing {
+        DualPricing::MostInfeasible => Box::new(MostInfeasibleLeaving),
+        DualPricing::SteepestEdge => Box::new(steepest_edge::DualSteepestEdgeLeaving::new(m)),
+    }
+}
 
 /// Dual Simplex強化版エントリポイント
 ///
@@ -44,10 +53,11 @@ pub(crate) fn solve_dual_advanced(
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
 
-                    let leaving = MostInfeasibleLeaving;
+                    let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                     let mut total_iters: usize = 0;
                     let outcome = core::dual_simplex_core_advanced(
-                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options, &leaving,
+                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                        leaving.as_mut(),
                         &mut total_iters,
                     );
 
@@ -129,13 +139,14 @@ fn cold_start_advanced(
     // コスト摂動: c̃_j = max(c_j, 0) → スラック基底（y=0）で r̃_j = c̃_j ≥ 0 → 双対実行可能
     let c_perturbed: Vec<f64> = c.iter().map(|&v| v.max(0.0)).collect();
 
-    let leaving = MostInfeasibleLeaving;
+    let mut leaving = make_leaving_strategy(options.dual_pricing, m);
 
     // Phase 1: Harris dual simplexで主実行可能性を修復
     // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
     let mut total_iters: usize = 0;
     let phase1_outcome = core::dual_simplex_core_advanced(
-        a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options, &leaving,
+        a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options,
+        leaving.as_mut(),
         &mut total_iters,
     );
 
