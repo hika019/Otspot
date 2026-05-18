@@ -15,10 +15,8 @@
 //!
 //! ## α 計算
 //! raw Gershgorin で δ s.t. `Q + δ·I` PSD を計算 (`gershgorin_alpha`)、`α = δ / 2`
-//! で `Q + 2α·I` PSD = α-BB の要求を満たす。
-//! 既存 `compute_inertia_correction` は **流用不可** (ldl.rs:449-455 LLT 短絡で
-//! zero-diag indefinite [[0,1],[1,0]] を PSD 誤判定 = #37 audit task)。
-//! Phase 4 は raw Gershgorin 独立実装で side-step。
+//! で `Q + 2α·I` PSD = α-BB の要求を満たす。LDL^T 経路は α-BB に不要なオーバヘッドで、
+//! 凸化 lb の保守性を素直に表せる raw Gershgorin を独立実装する。
 //!
 //! ## semi-infinite box
 //! `(x_i − l_i)(x_i − u_i)` 項は有限境界を要求する。l_i や u_i が ±∞ の変数があれば
@@ -38,11 +36,6 @@ use super::bound::is_feasible_result;
 /// Hessian `Q + 2α·I` が PSD となる最小 α を返す。
 ///
 /// `α = max(0, max_j(R_j − Q[j,j]) / 2)`。
-///
-/// `ipm_core::kkt::compute_inertia_correction` は LLT 短絡で「ゼロ対角の不定行列」を
-/// PSD と誤判定する仕様 (faer ZeroPivot 経路、ldl.rs:401 コメント) のため、α-BB の
-/// 凸化保証には流用できない。例: bilinear `Q=[[0,1],[1,0]]` は λ=±1 indefinite だが
-/// `compute_inertia_correction` は 0 を返す。下界保証には raw Gershgorin 必須。
 ///
 /// CSC は full-symmetric / 上三角どちらでも `row < col` だけで off-diag を 1 度
 /// カウントすれば対称行列の row sum と一致する (片半 entry は無視、両半 entry は

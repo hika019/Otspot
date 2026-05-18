@@ -649,6 +649,59 @@ mod tests {
         assert_eq!(compute_inertia_correction(&q), 0.0);
     }
 
+    /// task#37 sentinel: zero-diag indefinite Q を Gershgorin lb で正しく
+    /// indefinite 判定し、δ_ic > 0 を返すこと。複数 data pattern。
+    /// no-op proof: `is_q_psd_by_cholesky` の shift を 0 に戻すと FAIL。
+    #[test]
+    fn sentinel_inertia_zero_diag_indefinite_multi_pattern() {
+        // (label, n, entries, expected_min_delta)
+        let cases: &[(&str, usize, &[(usize, usize, f64)], f64)] = &[
+            // bilinear pure: Q=[[0,1],[1,0]], λ=±1, Gershgorin row sum=1 → δ ≥ 1
+            ("pure_bilinear_2x2", 2, &[(0, 1, 1.0)], 1.0),
+            // mixed zero + negative diag: Q=[[0,1],[1,-1]], indefinite
+            // diag=(0,-1), row sums = (1,1) → Gershgorin = (-1,-2) → δ ≥ 2
+            ("zero_plus_negative_diag", 2, &[(0, 1, 1.0), (1, 1, -1.0)], 2.0),
+            // 3x3 zero-diag bilinear: Q=[[0,1,0],[1,0,1],[0,1,0]]
+            // row sums = (1,2,1), diag=(0,0,0) → max(R-Q)=2 → δ ≥ 2
+            ("zero_diag_3x3_chain", 3, &[(0, 1, 1.0), (1, 2, 1.0)], 2.0),
+            // 4x4 partial zero-diag: Q[0,0]=2, Q[0,3]=3, rest zero
+            // row sums = (3,0,0,3), diag=(2,0,0,0) → Gershgorin = (-1,0,0,-3) → δ ≥ 3
+            ("zero_diag_4x4_extreme_offdiag", 4, &[(0, 0, 2.0), (0, 3, 3.0)], 3.0),
+        ];
+        for &(label, n, entries, expected_min) in cases {
+            let q = upper_tri_csc(n, entries);
+            let delta = compute_inertia_correction(&q);
+            assert!(
+                delta >= expected_min - 1e-12,
+                "[{label}] expected δ_ic ≥ {expected_min}, got {delta} (indefinite Q misclassified as PSD)"
+            );
+        }
+    }
+
+    /// task#37 sentinel: 真の PSD/PD は (perturbation 後も) δ_ic=0 を維持。
+    /// shift が大きすぎて全 PSD に過剰補正を出さないことを確認。
+    #[test]
+    fn sentinel_inertia_psd_no_over_correction() {
+        // (label, n, entries)
+        let psd_cases: &[(&str, usize, &[(usize, usize, f64)])] = &[
+            ("pd_2x2_diag", 2, &[(0, 0, 1.0), (1, 1, 1.0)]),
+            ("pd_2x2_offdiag", 2, &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0)]),
+            ("psd_singular_rank1", 2, &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)]),
+            ("psd_with_zero_eig_3x3", 3, &[(0, 0, 1.0), (1, 1, 1.0)]),
+            ("pd_large_offdiag_gershgorin_false_alarm", 2,
+             &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]),
+        ];
+        for &(label, n, entries) in psd_cases {
+            let q = upper_tri_csc(n, entries);
+            let delta = compute_inertia_correction(&q);
+            assert_eq!(
+                delta, 0.0,
+                "[{label}] PSD matrix must not get correction, got δ_ic={delta}"
+            );
+        }
+    }
+
+
     #[test]
     fn test_collect_part1_diag_indices() {
         let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 0.5), (1, 1, 3.0)]);

@@ -337,37 +337,42 @@ fn q_to_upper_triangular(q: &CscMatrix) -> CscMatrix {
     }
 }
 
+/// 上三角 CSC の各対角に `shift` を加算する (零対角は新規 entry を生成)。
+/// `from_triplets` の重複 sum 仕様を利用。
+fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
+    let n = q_upper.nrows;
+    let mut rows: Vec<usize> = Vec::with_capacity(q_upper.values.len() + n);
+    let mut cols: Vec<usize> = Vec::with_capacity(q_upper.values.len() + n);
+    let mut vals: Vec<f64> = Vec::with_capacity(q_upper.values.len() + n);
+    for col in 0..n {
+        for k in q_upper.col_ptr[col]..q_upper.col_ptr[col + 1] {
+            rows.push(q_upper.row_ind[k]);
+            cols.push(col);
+            vals.push(q_upper.values[k]);
+        }
+        rows.push(col);
+        cols.push(col);
+        vals.push(shift);
+    }
+    CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Q 行列が PSD (半正定値) かどうかを LDL^T 慣性判定で判定する。
 ///
 /// ## アルゴリズム
 ///
-/// faer の `factorize_simplicial_numeric_ldlt`（正則化なし）で因子化を試みる:
+/// 1. 必要条件チェック: 全対角 ≥ 0 でなければ即 false。
+/// 2. Q の対角を `shift = max(10·n·|Q|_max·ε, 10·ε)` で持ち上げ、`Q + shift·I` を LDL^T:
+///    - 完了 → D[j] < -fp_threshold が一つでもあれば indefinite。
+///    - ZeroPivot → 縮約 Schur complement が連続して degenerate な病的ケース。
+///      conservative に false (= 呼出側 Gershgorin 経路で補正) を返す。
 ///
-/// - **成功** → D 対角を走査:
-///   - D[j] < 0 の要素があれば **不定 (indefinite)** → `false` を返す
-///   - D[j] >= 0 のみ → **PSD または PD** → `true` を返す
-/// - **失敗** (ZeroPivot) → D[j] = 0 の列が存在 = **零固有値** (PSD) → `true` を返す
-///
-/// ### 根拠
-///
-/// faer の LDL^T 因子化（LltError の内部実装）:
-/// - 負の D[j] は zero pivot と同じ `NonPositivePivot` エラーに **なりません**。
-///   FactorizationKind::Ldlt では `d == 0 || !d.is_finite()` のみがエラー。
-/// - よって D[j] < 0 の不定行列では LDL^T は **正常に完了** し、l_values に負の D が格納される。
-/// - D[j] = 0 のPSD行列では ZeroPivot エラーで終了する。
-///
-/// これにより、LLT（ゼロまたは負で失敗）では区別できない PSD と indefinite を
-/// 正確に識別できる。
-///
-/// ### 制限
-///
-/// - Simplicial 因子化のみ対応。SuperNode 因子化は l_values の D 位置が異なり
-///   読み取りが複雑なため、`true`（PSD と仮定）を返す。大規模問題では
-///   対角チェック（必要条件）で reachable な不定性は除去済み。
-/// - Q がゼロ行列 (LP) の場合は即 `true`。
-/// - Q の全対角が非負かどうかを先にチェック（必要条件）。
+/// shift は PSD-singular 行列の zero pivot を回避しつつ、indefinite の λ_min を
+/// 検出可能に保つ大きさ (FP noise の 10 倍程度) に設定。
+/// `Q=[[0,1],[1,0]]` のような零対角 indefinite を従来は ZeroPivot 経路で PSD 誤判定
+/// していた (task#37) のを根治する。
 pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
     let n = q.nrows;
     if n == 0 {
@@ -395,27 +400,21 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
         return false;
     }
 
-    // LDL^T 慣性判定:
-    // faer の factorize_simplicial_numeric_ldlt (FactorizationKind::Ldlt) は:
-    //   - d == 0 の場合のみ ZeroPivot エラー → PSD (零固有値) → true を返す
-    //   - d < 0 の場合は正常に l_values[k_start] = d として格納 → indefinite
-    //   - d > 0 の場合も正常に格納 → PD
-    // 成功後に l_values の対角位置 (col_ptr[j]) を走査して D[j] < 0 を検出する。
-    //
-    // Q は full-symmetric (上三角 + 下三角) またはすでに上三角のみで格納される場合がある。
-    // faer は上三角 CSC を期待するため、row > col のエントリを除いた上三角 CSC を構築してから渡す。
+    // Q を上三角化、対角を shift だけ持ち上げて factorize。
+    // shift により PSD-singular 行列の ZeroPivot を回避しつつ、indefinite Q の
+    // 真の負固有値は shift より十分大きいので D[j] < -fp_threshold で検出できる。
     let q_upper = q_to_upper_triangular(q);
-    let a_upper = csc_upper_to_faer_upper(&q_upper);
+    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
+    // shift_factor=10: D[j] ≈ −μ + shift。検出可能下限は μ ≳ shift = 10·fp_threshold。
+    // |Q|_max=0 (Q=0 は既に上で early-return) ガードに 10·eps の最小値も設ける。
+    let shift = (10.0 * fp_threshold).max(10.0 * f64::EPSILON);
+    let q_shifted = upper_tri_with_diag_shift(&q_upper, shift);
+    let a_upper = csc_upper_to_faer_upper(&q_shifted);
     let symbolic = match build_symbolic_hl(&a_upper) {
         Ok(s) => s,
         Err(_) => return false,
     };
-
-    // FP スレッショルド: PSD 行列でも浮動小数点誤差で D[j] が僅かに負になる場合がある。
-    // n×n 行列でエントリ最大値 q_abs_max の場合、LDL^T の蓄積誤差は
-    // O(n * q_abs_max * eps_machine) 程度。これ以上に負なら真の固有値の符号と判断する。
-    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
 
     // 正則化なし (delta=0, epsilon=0) で LDL^T を試みる
     let reg: LdltRegularization<f64> = LdltRegularization::default();
@@ -439,25 +438,11 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
                 stack,
             );
 
-            // `up_to_col`: この列番号未満の列のみを検査する (ZeroPivot 前の計算済み範囲)。
+            // simplicial の D[j] は col_ptr[j] 位置に格納される。
             let col_ptr = simp_sym.col_ptr();
-            let has_negative_d = |up_to_col: usize| -> bool {
-                (0..up_to_col).any(|j| l_values[col_ptr[j]] < -fp_threshold)
-            };
-
             match result {
-                Err(LdltError::ZeroPivot { index }) => {
-                    // ZeroPivot: 列 index で D[index] = 0 (零固有値)。
-                    // ただし、index より前の列で D[j] < 0 が計算済みなら不定行列。
-                    // 例: 非ゼロ行が 1 行のみの Q (QPLIB_1055 型) では列 0 が D[0] > 0、
-                    // 列 1..k が D[j] < 0、列 k+1..n が D[j] = 0 (ZeroPivot) となる。
-                    // この場合、ZeroPivot で Err が来ても D[1..k] の負値を見落としてはならない。
-                    !has_negative_d(index) // false は不定行列、true は PSD
-                }
-                Ok(_) => {
-                    // 成功: 全列が完走。D 対角を全走査する。
-                    !has_negative_d(n)
-                }
+                Err(LdltError::ZeroPivot { .. }) => false,
+                Ok(_) => !(0..n).any(|j| l_values[col_ptr[j]] < -fp_threshold),
             }
         }
         SymbolicCholeskyRaw::Supernodal(sn_sym) => {
@@ -482,30 +467,22 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
                 Default::default(),
             );
 
-            // 因子化が失敗した場合 (ZeroPivot): 計算済みの l_values を走査する。
-            let check_up_to = match &result {
-                Ok(_) => n,
-                Err(LdltError::ZeroPivot { index }) => *index,
-            };
+            // ZeroPivot は shift 後の連続 degenerate ケース、conservative に false。
+            if matches!(result, Err(LdltError::ZeroPivot { .. })) {
+                return false;
+            }
 
-            // スーパーノードを走査して D 対角を検出する。
-            // SupernodeRef の val() は (s_nrows × s_ncols) 行列でカラムメジャー。
-            // val()[(j, j)] = D[s_start + j]。
             let ldlt_ref = supernodal::SupernodalLdltRef::<usize, f64>::new(sn_sym, &l_values);
             let n_sn = sn_sym.n_supernodes();
-            let sn_begin = sn_sym.supernode_begin(); // len = n_sn
-            let sn_end = sn_sym.supernode_end();     // len = n_sn
+            let sn_begin = sn_sym.supernode_begin();
+            let sn_end = sn_sym.supernode_end();
             let has_negative_d = (0..n_sn).any(|s| {
                 let s_start = sn_begin[s];
-                if s_start >= check_up_to {
-                    return false;
-                }
                 let s_end = sn_end[s];
                 let s_ncols = s_end - s_start;
-                let col_limit = s_ncols.min(check_up_to - s_start);
                 let node = ldlt_ref.supernode(s);
-                let ls = node.val(); // (s_nrows × s_ncols) MatRef
-                (0..col_limit).any(|j| ls[(j, j)] < -fp_threshold)
+                let ls = node.val();
+                (0..s_ncols).any(|j| ls[(j, j)] < -fp_threshold)
             });
 
             !has_negative_d
