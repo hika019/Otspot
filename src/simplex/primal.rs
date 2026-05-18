@@ -947,6 +947,12 @@ pub(crate) fn reconcile_final_basis_state(
 
 /// Map the standard-form basic solution back to original variables, inverting
 /// shifts/sign-flips/splits.  `col_scale` is the Ruiz column scale (or empty).
+///
+/// The recomposition `offset + Σ coeff * x_new[idx]` is accumulated in
+/// double-double (TwoFloat) precision because free variables are split as
+/// `x = x+ − x-`; when the simplex leaves both components large (e.g. on the
+/// order of 1e16) f64 subtraction loses the unit-scale residual entirely.
+/// The contract is locked by `tests::test_extract_solution_uses_dd_for_split_variable_cancellation`.
 pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
     use twofloat::TwoFloat;
     let mut x_new = vec![0.0; sf.n_shifted];

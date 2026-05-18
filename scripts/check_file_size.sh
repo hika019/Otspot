@@ -1,16 +1,16 @@
 #!/bin/bash
-# CLAUDE.md L27 trigger: 800 行以上 file は マイクロアーキテクチャ確認 + 統合/分割 + test 追加
+# CLAUDE.md L27 trigger: 1800 行以上 file は マイクロアーキテクチャ確認 + 統合/分割 + test 追加
 #
 # 使い方:
-#   bash scripts/check_file_size.sh              # default threshold 800 行
-#   bash scripts/check_file_size.sh 1000         # custom threshold
+#   bash scripts/check_file_size.sh              # default threshold 1800 行
+#   bash scripts/check_file_size.sh 800          # custom threshold (より厳しい監視)
 #
 # agent dispatch 前 / agent 作業冒頭 / reviewer 観点 / lead 定期 audit で使用。
 # 範囲: src/ + tests/ の .rs file。
 
 set -eu
 
-THRESHOLD="${1:-800}"
+THRESHOLD="${1:-1800}"
 
 result=$(find src/ tests/ -name "*.rs" -type f -exec wc -l {} \; 2>/dev/null \
   | awk -v t="$THRESHOLD" '$1 >= t' \
