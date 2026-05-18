@@ -2,9 +2,136 @@
 //!
 //! qps_benchmark / bench_qplib 両バイナリで共有するCSV読み込み・正解値照合ロジック。
 
-use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, SolveStatus, SolverResult};
+use crate::qp::QpProblem;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// QP 元空間 KKT 残差 (stationarity / primal_inf / comp_ineq / comp_bound) の
+/// 成分相対化 max。`diag_nonconvex_kkt.rs` の compute_kkt と同一規約:
+///   ∇_x L = Qx + c + Aᵀy − lb_du + ub_du
+///   primal: max(0, ax−b) for Le, max(0, b−ax) for Ge, |ax−b| for Eq + bounds
+///   comp_ineq: |yᵢ·slackᵢ| / (1 + |yᵢ|·(|axᵢ|+|bᵢ|))
+///   comp_bound: |duⱼ·(x−bnd)| / (1 + |duⱼ|·(|xⱼ|+|bnd|))
+/// 解形状不一致 (x.len() != n) なら INFINITY を返す。
+pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> f64 {
+    let n = prob.num_vars;
+    if x.len() != n {
+        return f64::INFINITY;
+    }
+
+    let qx = match prob.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let aty: Vec<f64> = if prob.a.nrows > 0 && !y.is_empty() {
+        match prob.a.transpose().mat_vec_mul(y) {
+            Ok(v) => v,
+            Err(_) => return f64::INFINITY,
+        }
+    } else {
+        vec![0.0; n]
+    };
+
+    let mut bound_contrib = vec![0.0_f64; n];
+    if !bd.is_empty() {
+        let mut idx = 0usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < bd.len() {
+                bound_contrib[j] -= bd[idx];
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < bd.len() {
+                bound_contrib[j] += bd[idx];
+                idx += 1;
+            }
+        }
+    }
+
+    let mut max_resid = 0.0_f64;
+    for j in 0..n {
+        let r = qx[j] + aty[j] + bound_contrib[j] + prob.c[j];
+        let scale = 1.0 + qx[j].abs() + aty[j].abs() + bound_contrib[j].abs() + prob.c[j].abs();
+        max_resid = max_resid.max(r.abs() / scale);
+    }
+
+    let ax = if prob.a.nrows > 0 {
+        match prob.a.mat_vec_mul(x) {
+            Ok(v) => v,
+            Err(_) => return f64::INFINITY,
+        }
+    } else {
+        Vec::new()
+    };
+    #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive]; wildcard guards future variants.
+    for (i, ct) in prob.constraint_types.iter().enumerate() {
+        let violation = match ct {
+            ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
+            ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
+            ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
+            _ => continue,
+        };
+        let scale = 1.0 + ax[i].abs() + prob.b[i].abs();
+        max_resid = max_resid.max(violation / scale);
+    }
+    for (j, &(lb, ub)) in prob.bounds.iter().enumerate() {
+        if lb.is_finite() {
+            let v = (lb - x[j]).max(0.0);
+            max_resid = max_resid.max(v / (1.0 + x[j].abs() + lb.abs()));
+        }
+        if ub.is_finite() {
+            let v = (x[j] - ub).max(0.0);
+            max_resid = max_resid.max(v / (1.0 + x[j].abs() + ub.abs()));
+        }
+    }
+
+    if !ax.is_empty() && !y.is_empty() {
+        #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
+        for (i, ct) in prob.constraint_types.iter().enumerate() {
+            let slack = match ct {
+                ConstraintType::Eq => continue,
+                ConstraintType::Le => prob.b[i] - ax[i],
+                ConstraintType::Ge => ax[i] - prob.b[i],
+                _ => continue,
+            };
+            let prod = (y[i] * slack).abs();
+            let scale = 1.0 + y[i].abs() * (ax[i].abs() + prob.b[i].abs());
+            max_resid = max_resid.max(prod / scale);
+        }
+    }
+    if !bd.is_empty() {
+        let mut idx = 0usize;
+        for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+            if lb.is_finite() && idx < bd.len() {
+                let slack = x[j] - lb;
+                let prod = (bd[idx] * slack).abs();
+                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + lb.abs());
+                max_resid = max_resid.max(prod / scale);
+                idx += 1;
+            }
+        }
+        for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+            if ub.is_finite() && idx < bd.len() {
+                let slack = ub - x[j];
+                let prod = (bd[idx] * slack).abs();
+                let scale = 1.0 + bd[idx].abs() * (x[j].abs() + ub.abs());
+                max_resid = max_resid.max(prod / scale);
+                idx += 1;
+            }
+        }
+    }
+    max_resid
+}
+
+/// `|obj − global_ref| / (1 + |global_ref|)`。両者の finite を要求。
+pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
+    if !obj.is_finite() || !global_ref.is_finite() {
+        return None;
+    }
+    Some((obj - global_ref).abs() / (1.0 + global_ref.abs()))
+}
 
 /// bench harness 種別ごとの promotion policy.
 ///
@@ -114,6 +241,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         "qp_unbounded.csv"
     } else if data_lower.contains("qp_infeasible") || data_lower.contains("qp-infeasible") {
         "qp_infeasible.csv"
+    } else if data_lower.contains("qplib_nonconvex_official")
+        || data_lower.contains("qplib-nonconvex-official")
+    {
+        "qplib_nonconvex_official.csv"
     } else if data_lower.contains("qplib") {
         "qplib.csv"
     } else if data_lower.contains("osqp_bench") || data_lower.contains("osqp-bench") {
