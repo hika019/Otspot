@@ -32,13 +32,6 @@ pub(crate) struct LuFactorization {
 }
 
 impl LuFactorization {
-    /// 基底行列 B を疎LU分解する。
-    ///
-    /// B は制約行列 `a` の列を `basis` インデックスで選択した m×m 行列。
-    pub(crate) fn factorize(a: &CscMatrix, basis: &[usize]) -> Result<Self, SolverError> {
-        Self::factorize_timed(a, basis, None)
-    }
-
     /// deadline 付き LU 分解。faer 自体は deadline 非対応のため、前後 2 段で
     /// チェックする (AMD wrapper と同じパターン)。
     pub(crate) fn factorize_timed(
@@ -184,7 +177,7 @@ mod tests {
     fn test_lu_identity() {
         let a = CscMatrix::identity(3);
         let basis = vec![0, 1, 2];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
         let mut scratch = Vec::new();
 
         for i in 0..3 {
@@ -205,7 +198,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
         let mut scratch = Vec::new();
 
         let rhs_orig = vec![3.0, 5.0, 3.0];
@@ -226,7 +219,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 4, 4);
         let basis = vec![0, 1, 2, 3];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
         let mut scratch = Vec::new();
 
         let rhs_orig = vec![5.0, 5.0, 6.0, 7.0];
@@ -246,7 +239,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
         let rhs_orig = vec![3.0, 5.0, 3.0];
         let mut rhs = rhs_orig.clone();
@@ -267,7 +260,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let result = LuFactorization::factorize(&a, &basis);
+        let result = LuFactorization::factorize_timed(&a, &basis, None);
         assert!(result.is_err(), "Should detect singular matrix");
     }
 
@@ -280,7 +273,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
         let rhs_orig = vec![1.001, 2.0, 2.0];
         let mut rhs = rhs_orig.clone();
@@ -300,7 +293,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 3, 3);
         let basis = vec![0, 1, 2];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
         let b = vec![1.0, 2.0, 3.0];
         let c = vec![4.0, 5.0, 6.0];
@@ -355,7 +348,7 @@ mod tests {
 
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let basis: Vec<usize> = (0..n).collect();
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
         let mut scratch = Vec::new();
 
         for k in 0..3 {
@@ -402,7 +395,7 @@ mod tests {
 
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let basis: Vec<usize> = (0..n).collect();
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
         // Verify correctness of FTRAN (内部表現は faer 内部、L/U 直接検査は不可)
         let rhs_orig: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
@@ -423,7 +416,7 @@ mod tests {
     fn test_lu_1x1() {
         let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[5.0f64], 1, 1).unwrap();
         let basis = vec![0usize];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
 
         assert_eq!(lu.n, 1);
 
@@ -457,7 +450,7 @@ mod tests {
         ];
         let a = dense_to_csc(&dense, 5, 5);
         let basis = vec![0, 1, 2, 3, 4];
-        let lu = LuFactorization::factorize(&a, &basis).unwrap();
+        let lu = LuFactorization::factorize_timed(&a, &basis, None).unwrap();
         let mut scratch = Vec::new();
 
         let rhs_orig = vec![1.0001, 1.0001, 0.0001, 1.0001, 1.0001];

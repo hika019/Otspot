@@ -8,22 +8,6 @@ use crate::sparse::CscMatrix;
 use super::lu::LuFactorization;
 use std::time::Instant;
 
-/// 基底行列をゼロから再因子分解する
-///
-/// LU 分解の薄いラッパー。eta ファイルをリセットして
-/// 数値安定性を回復させるために呼び出される。
-///
-/// # 引数
-/// - `a`: 全制約行列（CSC 形式）
-/// - `basis`: 現在の基底変数インデックス列
-///
-/// # エラー
-/// LU 分解が失敗した場合（特異行列等）は `Err` を返す
-#[allow(dead_code)]
-pub(crate) fn refactor(a: &CscMatrix, basis: &[usize]) -> Result<LuFactorization, SolverError> {
-    LuFactorization::factorize(a, basis)
-}
-
 /// deadline 付き基底行列再因子分解
 ///
 /// # timeout audit fix
