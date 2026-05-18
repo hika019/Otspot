@@ -71,5 +71,8 @@ pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
-pub use presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
+pub use presolve::{
+    run_presolve_with_flags, run_qp_presolve_phase1, run_qp_presolve_phase2,
+    PresolveFlags, PresolveStatus,
+};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};

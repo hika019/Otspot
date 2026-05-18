@@ -99,6 +99,36 @@ pub enum PresolveStatus {
     Unbounded,
 }
 
+/// Per-transform on/off toggles. Default: all on. Sentinel tests flip individual
+/// flags off to assert that disabling each path leaves a measurable artifact
+/// (reduction count or runtime), proving the transform is not a no-op.
+#[derive(Debug, Clone, Copy)]
+pub struct PresolveFlags {
+    pub enable_parallel_row: bool,
+    pub enable_dup_dom_col: bool,
+    pub enable_dual_fixing: bool,
+}
+
+impl Default for PresolveFlags {
+    fn default() -> Self {
+        Self {
+            enable_parallel_row: true,
+            enable_dup_dom_col: true,
+            enable_dual_fixing: true,
+        }
+    }
+}
+
+impl PresolveFlags {
+    pub fn all_off() -> Self {
+        Self {
+            enable_parallel_row: false,
+            enable_dup_dom_col: false,
+            enable_dual_fixing: false,
+        }
+    }
+}
+
 impl PresolveResult {
     /// 縮約なし（presolve: false またはフォールバック用）
     pub fn no_reduction(problem: &LpProblem) -> Self {
@@ -117,32 +147,22 @@ impl PresolveResult {
     }
 }
 
-/// 内部の可変状態。Step 1〜8 が共通で参照する。
+/// 内部の可変状態。Step 1〜11 が共通で参照する。
 ///
 /// row_entries[i] と col_entries[j] は同じ情報の dual representation。
 /// 整合性を保つため、書き換えは必ず両方を更新する。
-struct PresolveState {
-    // 行 i の非ゼロエントリ (col, val)
-    row_entries: Vec<Vec<(usize, f64)>>,
-    // 列 j の非ゼロエントリ (row, val)
-    col_entries: Vec<Vec<(usize, f64)>>,
-    // 右辺ベクトル (presolve 中で書き換わる)
-    b: Vec<f64>,
-    // 変数 bounds (presolve 中で書き換わる)
-    bounds: Vec<(f64, f64)>,
-    // 元の bounds (LP モデル上の "宣言された free" 判定用; bounds tightening の影響を受けない)
-    orig_bounds: Vec<(f64, f64)>,
-    // 制約種別 (presolve 中は不変だが参照用に持つ)
-    constraint_types: Vec<ConstraintType>,
-    // 目的係数 (R6/R15/R5 で他変数に分配されるため可変)
-    c: Vec<f64>,
-    // 削除フラグ
-    removed_cols: Vec<bool>,
-    removed_rows: Vec<bool>,
-    // postsolve スタック
-    postsolve_stack: Vec<PostsolveStep>,
-    // 目的関数オフセット
-    obj_offset: f64,
+pub(super) struct PresolveState {
+    pub(super) row_entries: Vec<Vec<(usize, f64)>>,
+    pub(super) col_entries: Vec<Vec<(usize, f64)>>,
+    pub(super) b: Vec<f64>,
+    pub(super) bounds: Vec<(f64, f64)>,
+    pub(super) orig_bounds: Vec<(f64, f64)>,
+    pub(super) constraint_types: Vec<ConstraintType>,
+    pub(super) c: Vec<f64>,
+    pub(super) removed_cols: Vec<bool>,
+    pub(super) removed_rows: Vec<bool>,
+    pub(super) postsolve_stack: Vec<PostsolveStep>,
+    pub(super) obj_offset: f64,
 }
 
 impl PresolveState {
@@ -181,7 +201,7 @@ impl PresolveState {
     }
 
     /// active な row エントリ (削除済み列を除く) を返す
-    fn active_row_entries(&self, i: usize) -> Vec<(usize, f64)> {
+    pub(super) fn active_row_entries(&self, i: usize) -> Vec<(usize, f64)> {
         self.row_entries[i]
             .iter()
             .filter(|&&(j, v)| !self.removed_cols[j] && v.abs() >= ZERO_TOL)
@@ -190,7 +210,7 @@ impl PresolveState {
     }
 
     /// active な col エントリ (削除済み行を除く) を返す
-    fn active_col_entries(&self, j: usize) -> Vec<(usize, f64)> {
+    pub(super) fn active_col_entries(&self, j: usize) -> Vec<(usize, f64)> {
         self.col_entries[j]
             .iter()
             .filter(|&&(i, v)| !self.removed_rows[i] && v.abs() >= ZERO_TOL)
@@ -293,6 +313,17 @@ pub fn run_presolve(
     problem: &LpProblem,
     deadline: Option<std::time::Instant>,
 ) -> Result<PresolveResult, PresolveStatus> {
+    run_presolve_with_flags(problem, deadline, PresolveFlags::default())
+}
+
+/// Variant of `run_presolve` with per-transform flags. Production callers use
+/// the default-flag wrapper above; sentinel / bench-gating callers vary flags
+/// to isolate each transform's contribution.
+pub fn run_presolve_with_flags(
+    problem: &LpProblem,
+    deadline: Option<std::time::Instant>,
+    flags: PresolveFlags,
+) -> Result<PresolveResult, PresolveStatus> {
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return Ok(PresolveResult::no_reduction(problem));
     }
@@ -354,6 +385,25 @@ pub fn run_presolve(
             return Ok(PresolveResult::no_reduction(problem));
         }
         step8_free_singleton_col(&mut st, &mut new_subst_steps)?;
+
+        if flags.enable_parallel_row {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(PresolveResult::no_reduction(problem));
+            }
+            super::transforms_dup::step9_parallel_row(&mut st)?;
+        }
+        if flags.enable_dup_dom_col {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(PresolveResult::no_reduction(problem));
+            }
+            super::transforms_dup::step10_dup_dom_col(&mut st, &mut new_fixed_by_step5)?;
+        }
+        if flags.enable_dual_fixing {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Ok(PresolveResult::no_reduction(problem));
+            }
+            super::transforms_dup::step11_dual_fixing(&mut st, &mut new_fixed_by_step5)?;
+        }
 
         let curr_removed = st.removed_cols.iter().filter(|&&r| r).count()
             + st.removed_rows.iter().filter(|&&r| r).count();
@@ -1404,8 +1454,10 @@ mod tests {
         assert_eq!(result.reduced_problem.num_constraints, 0, "all 3 constraints should be redundant");
         assert_eq!(result.reduced_problem.num_vars, 0, "vars removed as empty cols after constraints gone");
 
+        // Use negative cost so dual fixing (Step 11) cannot collapse the LP:
+        // c < 0 with Le a > 0 disqualifies neg-pressure, c < 0 fails pos-pressure cost gate.
         let lp2 = make_lp_general(
-            vec![1.0, 1.0],
+            vec![-1.0, -1.0],
             &[0, 0],
             &[0, 1],
             &[1.0, 1.0],
@@ -1424,8 +1476,10 @@ mod tests {
     // -----------------------------------------------------------
     #[test]
     fn test_bounds_tightening() {
+        // Use negative cost: Step 11 dual fixing (which collapses x→0 when c≥0
+        // and all Le coefs ≥0) does not apply here, so we observe pure Step 5.
         let lp = make_lp_general(
-            vec![1.0, 1.0],
+            vec![-1.0, -1.0],
             &[0, 0],
             &[0, 1],
             &[1.0, 1.0],
