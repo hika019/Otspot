@@ -17,7 +17,8 @@
 //! `feedback_sentinel_must_fail_under_noop` 準拠。
 
 use solver::problem::ConstraintType;
-use solver::qp::{QpProblem};
+use solver::qp::global::bound_alpha_bb::gershgorin_alpha as gershgorin_alpha_src;
+use solver::qp::QpProblem;
 use solver::sparse::CscMatrix;
 
 /// L(x) と f(x) の同値判定許容 (mat_vec_mul + ULP).
@@ -79,9 +80,12 @@ fn eval_f(p: &QpProblem, x: &[f64]) -> f64 {
     0.5 * xqx + cx + p.obj_offset
 }
 
-/// α-BB underestimator L(x) を **formula 直接** で評価。
-/// L(x) = 0.5 x'(Q + 2α I) x + (c − α(l+u))' x + obj_offset + α Σ l_i u_i.
-/// `(Q + 2α I)x = Qx + 2α x` を分解利用、src 側 `build_convex_relaxation` には依存しない。
+/// α-BB underestimator L(x) を formula 直接で評価。
+/// Source of truth: Maranas & Floudas (1995) "Finding all solutions of nonlinearly
+/// constrained systems of equations" eq. (12)、
+/// L(x) = f(x) + α Σ (x_i − l_i)(x_i − u_i) = 0.5 x'(Q + 2α I) x + (c − α(l+u))' x
+///        + obj_offset + α Σ l_i u_i。
+/// src 側 `build_convex_relaxation` を呼ばずに同 formula を独立実装して交差検証する。
 fn eval_l(p: &QpProblem, x: &[f64], alpha: f64) -> f64 {
     let qx = p.q.mat_vec_mul(x).unwrap();
     let xqx: f64 = x.iter().zip(qx.iter()).map(|(a, b)| a * b).sum();
@@ -214,6 +218,25 @@ fn fixtures() -> Vec<Fixture> {
 }
 
 // ---------------- tests ----------------
+
+/// src `bound_alpha_bb::gershgorin_alpha` と本ファイル独立実装 `gershgorin_alpha_local`
+/// が **全 fixture で bit-level に近い精度で一致** すること。
+/// `gershgorin_alpha_local` 単体だと src 側が壊れても sentinel が気付けない
+/// (Medium 4: 「invariants は src 非接続で tautology 化しうる」reviewer 指摘)。
+/// 本テストで両者を直接照会し、src 側 regression を検出可能にする。
+#[test]
+fn gershgorin_alpha_src_matches_local_implementation() {
+    for fx in fixtures() {
+        let alpha_src = gershgorin_alpha_src(&fx.problem.q);
+        let alpha_local = gershgorin_alpha_local(&fx.problem.q);
+        assert!(
+            (alpha_src - alpha_local).abs() < EQUAL_TOL,
+            "{}: src α={alpha_src} vs local α={alpha_local} diverge by {:.3e}",
+            fx.label,
+            (alpha_src - alpha_local).abs(),
+        );
+    }
+}
 
 /// Gershgorin α が convex / non-convex で正しく分岐すること。
 #[test]
