@@ -64,6 +64,27 @@ pub struct QpWarmStart {
     pub mu: f64,
 }
 
+/// LP 用拡張 warm start (#15 速度改善 F1)。
+///
+/// 既存 [`WarmStartBasis`] は (basis index, x_B) のみ。LP の Simplex/Dual 入口で
+/// 外部 solver 由来の (x, y, basis) を受け取って simplex に着地させるための
+/// 上位構造体。
+///
+/// 規約:
+/// - `basis` 長さ = m_ext (standard form 行数)、各値 < n_total (standard form 列数)。
+///   一致しない場合は silent SKIP せず eprintln + drop。
+/// - `x_orig` 長さ = problem.num_vars (元変数空間)
+/// - `y_orig` 長さ = problem.num_constraints (元制約空間、ユーザー符号)
+///
+/// `basis` のみ与えれば既存 dual simplex warm start と同等。`x_orig`/`y_orig` は
+/// 将来 IPM crossover や presolve 整合に使う slot。
+#[derive(Debug, Clone)]
+pub struct LpWarmStart {
+    pub basis: Vec<usize>,
+    pub x_orig: Option<Vec<f64>>,
+    pub y_orig: Option<Vec<f64>>,
+}
+
 /// QP ソルバーの収束精度を抽象化する列挙型
 ///
 /// 各ソルバーは `Tolerance` を内部の収束基準に変換して使用する。
@@ -150,6 +171,12 @@ pub struct SolverOptions {
     pub warm_start: Option<WarmStartBasis>,
     /// QP IP-PMM の interior point warm start (B&B node 間引継ぎ用)
     pub warm_start_qp: Option<QpWarmStart>,
+    /// LP 拡張 warm start (#15)。`warm_start` より優先される。
+    /// `basis` のみ与えれば既存挙動と同等で、`x_orig`/`y_orig` は将来 IPM crossover 用。
+    pub warm_start_lp: Option<LpWarmStart>,
+    /// LP cold start 時 simplex crash basis を適用する (#15)。
+    /// warm_start / warm_start_lp が Some なら無視される。
+    pub use_lp_crash_basis: bool,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
     /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
@@ -200,6 +227,8 @@ impl Default for SolverOptions {
             dual_tol: PIVOT_TOL,
             warm_start: None,
             warm_start_qp: None,
+            warm_start_lp: None,
+            use_lp_crash_basis: true,
             presolve: true,
             timeout_secs: None,
             cancel_flag: None,
