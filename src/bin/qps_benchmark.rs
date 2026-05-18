@@ -457,37 +457,6 @@ fn compute_dfeas_componentwise(
     max_rel
 }
 
-/// pfeas を成分相対化で評価する: max_i [violation_i / (1 + |a_i·x| + |b_i|)]。
-/// OSQP 公式 dfeas_normalized (全体相対化) より厳しく、巨大行 1 つで他がゼロでも
-/// 精度を保証する。
-fn compute_pfeas_componentwise(prob: &QpProblem, solution: &[f64]) -> f64 {
-    if solution.is_empty() || solution.len() != prob.num_vars {
-        return f64::NAN;
-    }
-    if prob.num_constraints == 0 {
-        return 0.0;
-    }
-    match prob.a.mat_vec_mul(solution) {
-        Ok(ax) => {
-            let mut max_rel = 0.0_f64;
-            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
-                let violation = match prob.constraint_types.get(i) {
-                    Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
-                    Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
-                    _ => (ax_i - b_i).max(0.0),
-                };
-                let scale_i = 1.0 + ax_i.abs() + b_i.abs();
-                let rel_i = violation / scale_i;
-                if rel_i > max_rel {
-                    max_rel = rel_i;
-                }
-            }
-            max_rel
-        }
-        Err(_) => f64::NAN,
-    }
-}
-
 fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
     // parse_qps 自体に cancellation API がないため同期呼び出し。hang 時は
     // bench_parallel.sh の外部 gtimeout でプロセスごと殺される設計。
@@ -1037,7 +1006,7 @@ fn main() {
                                     // 判定値 (pfn 全体相対化, dfr 全体相対化) と
                                     // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
                                     // 同じ eps で見て componentwise も満たすか可視化する。
-                                    let pfc = compute_pfeas_componentwise(&prob, &result.solution);
+                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
                                     let dfc = compute_dfeas_componentwise(
                                         &prob,
                                         &result.solution,
@@ -1073,7 +1042,7 @@ fn main() {
                                 }
                                 ObjCheckResult::NoRef => {
                                     n_pass_noref += 1;
-                                    let pfc = compute_pfeas_componentwise(&prob, &result.solution);
+                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
                                     let dfc = compute_dfeas_componentwise(
                                         &prob,
                                         &result.solution,

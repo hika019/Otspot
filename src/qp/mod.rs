@@ -167,8 +167,7 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
     ipm_solver::solve_ipm(problem, options)
 }
 
-/// FX (固定) 変数判定: |lb − ub| < FX_TOL。
-pub(crate) const FX_TOL: f64 = 1e-12;
+pub(crate) use crate::tolerances::FX_TOL;
 
 #[deprecated(since = "0.1.0", note = "use `solve_qp_with` instead")]
 pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> SolverResult {

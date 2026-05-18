@@ -245,27 +245,6 @@ fn ldl_numeric_dd(
     Ok((l_row_ind, l_values, d))
 }
 
-/// 対角符号ベクトルを上三角 CSC から抽出する。負なら -1、それ以外 +1。
-fn extract_diagonal_signs(
-    n: usize,
-    col_ptr: &[usize],
-    row_ind: &[usize],
-    values: &[f64],
-) -> Vec<i8> {
-    let mut signs = vec![1i8; n];
-    for j in 0..n {
-        for k in col_ptr[j]..col_ptr[j + 1] {
-            if row_ind[k] == j {
-                if values[k] < 0.0 {
-                    signs[j] = -1;
-                }
-                break;
-            }
-        }
-    }
-    signs
-}
-
 /// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解 (DD 精度)。
 ///
 /// `mat`: 元の (未置換の) augmented KKT 行列、上三角 CSC
@@ -293,7 +272,7 @@ pub fn factorize_quasidefinite_with_cached_perm_dd(
         }
     }
 
-    let signs = extract_diagonal_signs(n, &col_ptr, &row_ind, &values);
+    let signs = crate::linalg::ldl::extract_diagonal_signs(n, &col_ptr, &row_ind, &values);
     let (l_row_ind, l_values, d_vec) =
         ldl_numeric_dd(n, &col_ptr, &row_ind, &values, &parent, &l_col_ptr, Some(&signs))?;
 

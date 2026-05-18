@@ -19,6 +19,11 @@ pub const DROP_TOL: f64 = 1e-15;
 /// 値: 最大列エントリの 1% 未満のピボットを「不安定」と判定。
 pub const PIVOT_STABILITY_THRESHOLD: f64 = 0.01;
 
+/// FX (固定) 変数判定: `|lb − ub| < FX_TOL` なら lb=ub の fixed 変数とみなす。
+///
+/// QP postsolve / refine / IPM stationarity 寄与の bound 評価で共用される。
+pub const FX_TOL: f64 = 1e-12;
+
 /// 数値的「同等」(near-zero) 判定の relative tolerance。
 ///
 /// `PIVOT_TOL.sqrt()` (= 1e-4 when PIVOT_TOL=1e-8)。

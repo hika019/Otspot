@@ -360,11 +360,11 @@ pub(crate) fn refine_kkt_iterative(
 
     // FX (lb≈ub) と EmptyCol は bound_dual=0 慣例で stationarity 評価から除外。
     // 含めると orig 空間で huge cancellation noise が出て IR が壊れる。
-    const FX_TOL_REFINE: f64 = 1e-12;
+    use crate::tolerances::FX_TOL;
     let exclude_var: Vec<bool> = (0..n)
         .map(|j| {
             let (lb, ub) = problem.bounds[j];
-            if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL_REFINE {
+            if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
                 return true;
             }
             if problem.a.col_ptr.len() > j + 1

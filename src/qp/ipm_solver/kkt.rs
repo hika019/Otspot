@@ -1,9 +1,8 @@
 //! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
 use crate::problem::ConstraintType;
+use crate::tolerances::FX_TOL;
 use super::outcome::ProblemView;
-
-const FX_TOL: f64 = 1e-12;
 
 /// bound dual から stationarity 寄与 (−y_lb + y_ub) を成分ごと計算する。
 fn compute_bound_contrib(
