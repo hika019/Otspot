@@ -917,11 +917,8 @@ fn main() {
         };
 
         // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
-        // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。
-        // Timeout は意図的に対象外: 半 deadline incumbent を silent に Optimal 化すると
-        // PFEAS_FAIL に化けて真因 (deadline 切れ) が隠れる (task #46/#52)。
-        // LocallyOptimal: 不定 Q の KKT 点。凸ベンチでは原問題 Q が実は PSD なので
-        // Optimal と同等に扱って品質確認する。
+        // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。収束未達 status
+        // (Timeout / MaxIterations / NumericalError / NonConvex) は honest 報告。
         let result = solver::bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,

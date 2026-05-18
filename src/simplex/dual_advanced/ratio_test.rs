@@ -1,12 +1,5 @@
-//! Dual simplex ratio test戦略
-//!
-//! 設計書 §3.4 `dual_advanced/ratio_test.rs` に準拠。
-//! HarrisRatioTest（2パス法）と StandardRatioTest（Bland則付き）を提供する。
+//! Dual simplex ratio test 戦略 (HarrisRatioTest 2 パス法)。
 
-/// Ratio testの戦略トレイト
-///
-/// 双対シンプレックス法における入基変数の選択を抽象化する。
-/// Phase 2 (core.rs) で使用予定。
 pub(crate) trait RatioTestStrategy {
     /// 双対比率テスト: 入基変数を選択する
     ///
