@@ -213,7 +213,9 @@ pub(crate) struct MultiStartHooks {
 
 /// Multi-start QP solver。`config.n_starts == 1` は cold solve 1 回 (= 既存挙動)。
 ///
-/// `options.warm_start_qp` は無視される (multistart が cold/random を全て生成するため)。
+/// **注意**: `options.warm_start_qp` は **silent drop** (= multistart が cold/random を全て生成するため
+/// caller 指定 warm は使われない)。user warm + multistart 併用したい場合は caller 側で
+/// 単発 `solve_qp_with` 経由 + multistart を別途分離する設計に。
 /// `options.timeout_secs` / `options.deadline` は全 start で共有 (deadline は入口で固定)。
 /// `options.threads` で並列度 = `min(n_starts, threads)` を自動分配。
 pub fn solve_qp_multistart(
@@ -431,7 +433,7 @@ mod tests {
             (2_usize, 10_usize, 2_usize, 2_usize),
             (4, 10, 2, 4),
             (8, 16, 2, 8),
-            (4, 2, 1, 2), // n_starts < threads → peak <= n_starts
+            (4, 2, 2, 2), // n_starts < threads → parallel=min(4,2)=2、両 start が並列稼働で peak=2 必須
         ];
 
         // 軽量 toy QP: small bilinear。多回 solve でも < 1s。
