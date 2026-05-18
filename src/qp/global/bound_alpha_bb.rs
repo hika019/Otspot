@@ -47,7 +47,7 @@ use super::bound::is_feasible_result;
 /// CSC は full-symmetric / 上三角どちらでも `row < col` だけで off-diag を 1 度
 /// カウントすれば対称行列の row sum と一致する (片半 entry は無視、両半 entry は
 /// (row<col) の片方のみ反映)。
-pub(crate) fn gershgorin_alpha(q: &CscMatrix) -> f64 {
+pub fn gershgorin_alpha(q: &CscMatrix) -> f64 {
     let n = q.nrows;
     if n == 0 {
         return 0.0;
