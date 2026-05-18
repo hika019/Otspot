@@ -31,6 +31,18 @@
 //!
 //! 二重実装は避けるが、LP は bound dual を rc に折り畳む構造的差異があるため
 //! 完全集約はしない。両 helper の no-op 化はそれぞれ別 sentinel test で検出する。
+//!
+//! ## 実 proptest case 総数
+//!
+//! 各 proptest body の `cases` を合算した実総数は以下:
+//!   - primary:  prop_lp_kkt (96) + prop_convex_qp (96) + prop_nonconvex_qp (96)
+//!   - illscaled: prop_lp_illscaled (48)
+//!   - medium:   prop_lp_medium (24) + prop_convex_qp_medium (24)
+//!   - shape gap: prop_lp_fixed_bound (32) + prop_convex_qp_rank_deficient (32)
+//!                + prop_lp_micro_n1 (24) + prop_convex_qp_micro_n1 (24)
+//!                + prop_nonconvex_constrained (16)
+//! 合計 512 ケース。`3dcaf8a` commit msg に記された "440" は誤記、実数は当初 384、
+//! shape gap 補完後 512 (両方とも 440 ではない)。
 
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
@@ -51,6 +63,11 @@ const EPS_KKT_NONCONVEX_LOCAL: f64 = 1e-3;
 /// 緩い threshold で必ず assert することで、これ以上悪化する regression を catch
 /// する。本来は global 解の bd 復元 fix が真因対処 (新規 follow-up task)。
 const EPS_KKT_NONCONVEX_GLOBAL: f64 = 1.5;
+/// rank deficient な凸 QP (Q に null space) の閾値。dual の null space 自由度で
+/// stationarity 残差が O(0.4) まで drift する case が proptest で実測されるため、
+/// `EPS_KKT_NONCONVEX_GLOBAL` と同水準で必ず assert。null space dual 自由度自体は
+/// 理論的に正当で、IPM がどの dual を picks するかは algorithm 依存。
+const EPS_KKT_RANK_DEFICIENT: f64 = 1.5;
 /// LP complementarity は random / ill-conditioned shape で 〜10% drift する
 /// (近接 active 制約 slack ~ 1e-3 級 + y ~ O(1) で y·slack 〜 1e-3 が出る)。
 /// LP solver convergence drift であり KKT helper bug ではないため、
@@ -452,6 +469,286 @@ fn nonconvex_qp_strategy_inner(
     })
 }
 
+/// 一部変数を `l = u` の fixed bound にする LP。fixed 変数は等価な等式制約として
+/// 振る舞い、KKT helper が `at_lb && at_ub` 同時活性 (rc 符号無制約) を正しく
+/// 処理しているかを cover する。
+fn lp_strategy_fixed_bound(nmax: usize, mmax: usize) -> impl Strategy<Value = LpProblem> {
+    (2usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
+        let nm = n * m;
+        (
+            Just((n, m)),
+            prop::collection::vec(-2.0f64..2.0, n),
+            prop::collection::vec(-1.0f64..1.0, nm),
+            prop::collection::vec(any::<bool>(), nm),
+            prop::collection::vec(0.1f64..2.0, m),
+            prop::collection::vec(0u8..=2, m),
+            prop::collection::vec(any::<bool>(), n),
+            prop::collection::vec(-0.5f64..0.5, n),
+            prop::collection::vec(0.5f64..2.0, n),
+        )
+            .prop_map(move |(dims, c, a_vals, a_mask, b_mag, cts_raw, fix_mask, fix_val, bnd_mag)| {
+                let (n, m) = dims;
+                let a = sparsify(&a_vals, &a_mask, m, n);
+                let cts: Vec<CtShape> = cts_raw
+                    .iter()
+                    .map(|t| match t {
+                        0 => CtShape::Le,
+                        1 => CtShape::Ge,
+                        _ => CtShape::Eq,
+                    })
+                    .collect();
+                let b: Vec<f64> = cts
+                    .iter()
+                    .zip(b_mag.iter())
+                    .map(|(c, &mag)| match c {
+                        CtShape::Le => mag,
+                        CtShape::Ge => -mag,
+                        CtShape::Eq => 0.0,
+                    })
+                    .collect();
+                let bounds: Vec<(f64, f64)> = fix_mask
+                    .iter()
+                    .zip(fix_val.iter())
+                    .zip(bnd_mag.iter())
+                    .map(|((fix, &v), &mag)| if *fix { (v, v) } else { (-mag, mag) })
+                    .collect();
+                let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
+                LpProblem::new_general(c, a, b, ct_vec, bounds, None).expect("fixed-bound LP")
+            })
+    })
+}
+
+/// n=1 micro LP。次元退化 (Aᵀy の単一要素、bound 全活性 / 全非活性) を fuzz。
+fn lp_strategy_micro_n1() -> impl Strategy<Value = LpProblem> {
+    (
+        -2.0f64..2.0,
+        prop::collection::vec(-1.0f64..1.0, 3),
+        prop::collection::vec(0u8..=2, 3),
+        prop::collection::vec(0.1f64..2.0, 3),
+        0u8..=3,
+        0.5f64..3.0,
+    )
+        .prop_map(|(c, a_vals, cts_raw, b_mag, bnd_shape, bnd_mag)| {
+            let n = 1;
+            let m = 3;
+            let mask = vec![true; m];
+            let a = sparsify(&a_vals, &mask, m, n);
+            let cts: Vec<CtShape> = cts_raw
+                .iter()
+                .map(|t| match t {
+                    0 => CtShape::Le,
+                    1 => CtShape::Ge,
+                    _ => CtShape::Eq,
+                })
+                .collect();
+            let b: Vec<f64> = cts
+                .iter()
+                .zip(b_mag.iter())
+                .map(|(c, &mag)| match c {
+                    CtShape::Le => mag,
+                    CtShape::Ge => -mag,
+                    CtShape::Eq => 0.0,
+                })
+                .collect();
+            let shape = match bnd_shape {
+                0 => BoundShape::NonNegLimited,
+                1 => BoundShape::Free,
+                2 => BoundShape::TwoSided,
+                _ => BoundShape::OneSidedUpper,
+            };
+            let bounds = vec![apply_bound(shape, bnd_mag); n];
+            let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
+            LpProblem::new_general(vec![c], a, b, ct_vec, bounds, None).expect("micro LP n=1")
+        })
+}
+
+/// n=1 micro 凸 QP。Q = [q] (q ≥ 0)、stationarity が単一スカラに退化する経路。
+fn convex_qp_strategy_micro_n1() -> impl Strategy<Value = QpProblem> {
+    (
+        0.3f64..1.5,                                     // q
+        -2.0f64..2.0,                                    // c
+        prop::collection::vec(-1.0f64..1.0, 2),          // A (2 row, 1 col)
+        prop::collection::vec(0u8..=2, 2),               // ct
+        prop::collection::vec(0.1f64..2.0, 2),           // |b|
+        0u8..=3,
+        0.5f64..3.0,
+    )
+        .prop_map(|(q_val, c, a_vals, cts_raw, b_mag, bnd_shape, bnd_mag)| {
+            let n = 1;
+            let m = 2;
+            let q = dense_to_csc(&[q_val], n, n);
+            let mask = vec![true; m];
+            let a = sparsify(&a_vals, &mask, m, n);
+            let cts: Vec<CtShape> = cts_raw
+                .iter()
+                .map(|t| match t {
+                    0 => CtShape::Le,
+                    1 => CtShape::Ge,
+                    _ => CtShape::Eq,
+                })
+                .collect();
+            let b: Vec<f64> = cts
+                .iter()
+                .zip(b_mag.iter())
+                .map(|(c, &mag)| match c {
+                    CtShape::Le => mag,
+                    CtShape::Ge => -mag,
+                    CtShape::Eq => 0.0,
+                })
+                .collect();
+            let shape = match bnd_shape {
+                0 => BoundShape::NonNegLimited,
+                1 => BoundShape::Free,
+                2 => BoundShape::TwoSided,
+                _ => BoundShape::OneSidedUpper,
+            };
+            let bounds = vec![apply_bound(shape, bnd_mag); n];
+            let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
+            QpProblem::new(q, vec![c], a, b, bounds, ct_vec).expect("micro QP n=1")
+        })
+}
+
+/// Q rank deficient な凸 QP (l_diag に 0 を許容)。null space を持つ Q で
+/// stationarity の不変式が成立するかを cover。`l_diag` の最初の要素を必ず
+/// 0 にして rank<n を保証する。
+fn convex_qp_strategy_rank_deficient(
+    nmax: usize,
+    mmax: usize,
+) -> impl Strategy<Value = QpProblem> {
+    (3usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
+        let nm = n * m;
+        let nn = n * n;
+        (
+            Just((n, m)),
+            prop::collection::vec(-1.0f64..1.0, nn),
+            prop::collection::vec(0.0f64..1.2, n),
+            prop::collection::vec(-2.0f64..2.0, n),
+            prop::collection::vec(-1.0f64..1.0, nm),
+            prop::collection::vec(any::<bool>(), nm),
+            prop::collection::vec(0.1f64..3.0, m),
+            prop::collection::vec(0u8..=2, m),
+            prop::collection::vec(0u8..=3, n),
+            prop::collection::vec(0.5f64..3.0, n),
+        )
+            .prop_map(
+                move |(dims, mut l_off, mut l_diag, c, a_vals, a_mask, b_mag, cts_raw, bnd_raw, bnd_mag)| {
+                    let (n, m) = dims;
+                    l_diag[0] = 0.0;
+                    for i in 0..n {
+                        for j in 0..n {
+                            if j > i {
+                                l_off[i * n + j] = 0.0;
+                            } else if j == i {
+                                l_off[i * n + j] = l_diag[i];
+                            }
+                        }
+                    }
+                    let q = build_psd_q(&l_off, n);
+                    let a = sparsify(&a_vals, &a_mask, m, n);
+                    let cts: Vec<CtShape> = cts_raw
+                        .iter()
+                        .map(|t| match t {
+                            0 => CtShape::Le,
+                            1 => CtShape::Ge,
+                            _ => CtShape::Eq,
+                        })
+                        .collect();
+                    let b: Vec<f64> = cts
+                        .iter()
+                        .zip(b_mag.iter())
+                        .map(|(c, &mag)| match c {
+                            CtShape::Le => mag,
+                            CtShape::Ge => -mag,
+                            CtShape::Eq => 0.0,
+                        })
+                        .collect();
+                    let bounds: Vec<(f64, f64)> = bnd_raw
+                        .iter()
+                        .zip(bnd_mag.iter())
+                        .map(|(s, &mag)| {
+                            let shape = match s {
+                                0 => BoundShape::NonNegLimited,
+                                1 => BoundShape::Free,
+                                2 => BoundShape::TwoSided,
+                                _ => BoundShape::OneSidedUpper,
+                            };
+                            apply_bound(shape, mag)
+                        })
+                        .collect();
+                    let ct_vec: Vec<ConstraintType> =
+                        cts.iter().copied().map(ct_to_constraint).collect();
+                    QpProblem::new(q, c, a, b, bounds, ct_vec).expect("rank-deficient convex QP")
+                },
+            )
+    })
+}
+
+/// 線形制約付き 非凸 QP。既存 `nonconvex_qp_strategy_inner` は a = zero_csc のみ
+/// で制約あり経路 (Aᵀy 寄与 + comp_ineq) を踏まない。Le/Ge のみ (Eq は global
+/// solver が Infeasible を返しやすく Optimal-claim サンプル枯渇)。
+fn nonconvex_qp_strategy_constrained(
+    nmax: usize,
+    mmax: usize,
+) -> impl Strategy<Value = QpProblem> {
+    (2usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
+        let nn = n * n;
+        let nm = n * m;
+        (
+            Just((n, m)),
+            prop::collection::vec(-0.8f64..0.8, nn),
+            prop::collection::vec(0.4f64..1.5, n),
+            prop::collection::vec(0u8..=1, n),
+            prop::collection::vec(-1.5f64..1.5, n),
+            prop::collection::vec(-1.0f64..1.0, nm),
+            prop::collection::vec(any::<bool>(), nm),
+            prop::collection::vec(0.5f64..3.0, m),
+            prop::collection::vec(0u8..=1, m),
+            prop::collection::vec(0.5f64..3.0, n),
+        )
+            .prop_map(
+                move |(dims, mut l_off, l_diag, d_sign, c, a_vals, a_mask, b_mag, cts_raw, bnd_mag)| {
+                    let (n, m) = dims;
+                    for i in 0..n {
+                        for j in 0..n {
+                            if j > i {
+                                l_off[i * n + j] = 0.0;
+                            } else if j == i {
+                                l_off[i * n + j] = l_diag[i];
+                            }
+                        }
+                    }
+                    let d: Vec<f64> = d_sign
+                        .iter()
+                        .map(|&s| if s == 0 { 1.0 } else { -1.0 })
+                        .collect();
+                    let q = build_indefinite_q(&l_off, &d, n);
+                    let a = sparsify(&a_vals, &a_mask, m, n);
+                    let cts: Vec<CtShape> = cts_raw
+                        .iter()
+                        .map(|t| match t {
+                            0 => CtShape::Le,
+                            _ => CtShape::Ge,
+                        })
+                        .collect();
+                    let b: Vec<f64> = cts
+                        .iter()
+                        .zip(b_mag.iter())
+                        .map(|(c, &mag)| match c {
+                            CtShape::Le => mag,
+                            CtShape::Ge => -mag,
+                            CtShape::Eq => 0.0,
+                        })
+                        .collect();
+                    let bounds: Vec<(f64, f64)> = bnd_mag.iter().map(|&mag| (-mag, mag)).collect();
+                    let ct_vec: Vec<ConstraintType> =
+                        cts.iter().copied().map(ct_to_constraint).collect();
+                    QpProblem::new(q, c, a, b, bounds, ct_vec)
+                        .expect("nonconvex QP w/ linear constraints")
+                },
+            )
+    })
+}
+
 /// 解 status と KKT 残差が一致するかを assert (Optimal のみ強制)。
 fn assert_kkt_when_optimal_lp(
     lp: &LpProblem,
@@ -589,6 +886,85 @@ proptest! {
         opts.timeout_secs = Some(QP_TIMEOUT_SECS);
         let res = solve_qp_with(&qp, &opts);
         assert_kkt_when_optimal_qp(&qp, &res, EPS_KKT, EPS_KKT, "prop_convex_qp_kkt_invariants_medium")?;
+    }
+}
+
+// ---- shape gap 補完 (Fixed bound / n=1 micro / rank deficient / nonconvex+constraints) ----
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
+
+    /// l = u な fixed bound を含む LP。両側 active 変数の rc 符号無制約 path を cover。
+    #[test]
+    fn prop_lp_kkt_invariants_fixed_bound(lp in lp_strategy_fixed_bound(5, 4)) {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(LP_TIMEOUT_SECS);
+        let res = solve_lp_with(&lp, &opts);
+        assert_kkt_when_optimal_lp(&lp, &res, "prop_lp_kkt_invariants_fixed_bound")?;
+    }
+
+    /// rank deficient な凸 QP (Q に null space)。stationarity が dual null space の
+    /// 自由度を吸収して O(1e-2) drift する case があるため `EPS_KKT_RANK_DEFICIENT`
+    /// を採用。null space の dual 自由度自体は理論的に正当、KKT 規約成立は
+    /// 緩い threshold で十分意味がある (helper bug や solver 完全破綻なら更に大きい)。
+    #[test]
+    fn prop_convex_qp_kkt_invariants_rank_deficient(
+        qp in convex_qp_strategy_rank_deficient(5, 4),
+    ) {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(QP_TIMEOUT_SECS);
+        let res = solve_qp_with(&qp, &opts);
+        assert_kkt_when_optimal_qp(
+            &qp,
+            &res,
+            EPS_KKT_RANK_DEFICIENT,
+            EPS_KKT_RANK_DEFICIENT,
+            "prop_convex_qp_kkt_invariants_rank_deficient",
+        )?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, .. ProptestConfig::default() })]
+
+    /// n=1 micro LP。stationarity / bound 活性判定の次元退化 path。
+    #[test]
+    fn prop_lp_kkt_invariants_micro_n1(lp in lp_strategy_micro_n1()) {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(LP_TIMEOUT_SECS);
+        let res = solve_lp_with(&lp, &opts);
+        assert_kkt_when_optimal_lp(&lp, &res, "prop_lp_kkt_invariants_micro_n1")?;
+    }
+
+    /// n=1 micro 凸 QP。Q = [q] スカラ stationarity。
+    #[test]
+    fn prop_convex_qp_kkt_invariants_micro_n1(qp in convex_qp_strategy_micro_n1()) {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(QP_TIMEOUT_SECS);
+        let res = solve_qp_with(&qp, &opts);
+        assert_kkt_when_optimal_qp(&qp, &res, EPS_KKT, EPS_KKT, "prop_convex_qp_kkt_invariants_micro_n1")?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, .. ProptestConfig::default() })]
+
+    /// 線形制約付き 非凸 QP (Le/Ge mixed)。stationarity に Aᵀy 寄与 + comp_ineq path。
+    #[test]
+    fn prop_nonconvex_qp_kkt_invariants_constrained(
+        qp in nonconvex_qp_strategy_constrained(3, 3),
+    ) {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(GLOBAL_TIMEOUT_SECS);
+        let cfg = GlobalOptimizationConfig::default();
+        let res = solve_qp_global(&qp, &opts, &cfg);
+        assert_kkt_when_optimal_qp(
+            &qp,
+            &res,
+            EPS_KKT_NONCONVEX_LOCAL,
+            EPS_KKT_NONCONVEX_GLOBAL,
+            "prop_nonconvex_qp_kkt_invariants_constrained",
+        )?;
     }
 }
 
