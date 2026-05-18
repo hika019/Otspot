@@ -8,10 +8,12 @@
 //! `solve_qp_with` が `timeout_secs` を honor することを検証する。
 //! 実データでの再現は別タスク (要 `data/` 配置) で取り扱う。
 
+use solver::io::qplib::parse_qplib;
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::{solve_qp_with, QpProblem};
 use solver::sparse::CscMatrix;
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +30,7 @@ const SLACK_FOR_POSTPROCESS_SEC: f64 = 5.0;
 fn solve_with_watchdog(
     problem: QpProblem,
     timeout_secs: f64,
+    slack_sec: f64,
     watchdog: Duration,
     label: &str,
 ) -> (SolveStatus, f64) {
@@ -48,14 +51,14 @@ fn solve_with_watchdog(
         Ok((status, obj, elapsed)) => {
             let secs = elapsed.as_secs_f64();
             eprintln!(
-                "[{label}] status={:?} obj={:.6e} wall={:.3}s (timeout={timeout_secs}s, watchdog={}s)",
+                "[{label}] status={:?} obj={:.6e} wall={:.3}s (timeout={timeout_secs}s, slack={slack_sec}s, watchdog={}s)",
                 status, obj, secs, watchdog.as_secs_f64(),
             );
             let _ = handle.join();
             assert!(
-                secs <= timeout_secs + SLACK_FOR_POSTPROCESS_SEC,
+                secs <= timeout_secs + slack_sec,
                 "[{label}] wall={:.3}s > budget {}s + slack {}s — deadline path leaks",
-                secs, timeout_secs, SLACK_FOR_POSTPROCESS_SEC
+                secs, timeout_secs, slack_sec
             );
             (status, secs)
         }
@@ -185,7 +188,13 @@ fn qp_synthetic_lasso_small_honors_deadline() {
     let problem = make_synthetic_lasso(30, 30, 0.1, 0xC0FFEE);
     let budget = 5.0_f64;
     let watchdog = Duration::from_secs_f64(budget + SLACK_FOR_POSTPROCESS_SEC);
-    let (status, _wall) = solve_with_watchdog(problem, budget, watchdog, "synth_lasso_small");
+    let (status, _wall) = solve_with_watchdog(
+        problem,
+        budget,
+        SLACK_FOR_POSTPROCESS_SEC,
+        watchdog,
+        "synth_lasso_small",
+    );
     assert!(
         matches!(
             status,
@@ -210,7 +219,13 @@ fn qp_synthetic_lasso_mid_honors_deadline() {
     let problem = make_synthetic_lasso(150, 120, 0.05, 0xBADCAFE);
     let budget = 1.0_f64;
     let watchdog = Duration::from_secs_f64(budget + SLACK_FOR_POSTPROCESS_SEC);
-    let (status, _wall) = solve_with_watchdog(problem, budget, watchdog, "synth_lasso_mid");
+    let (status, _wall) = solve_with_watchdog(
+        problem,
+        budget,
+        SLACK_FOR_POSTPROCESS_SEC,
+        watchdog,
+        "synth_lasso_mid",
+    );
     assert!(
         matches!(
             status,
@@ -223,5 +238,55 @@ fn qp_synthetic_lasso_mid_honors_deadline() {
         ),
         "[synth_lasso_mid] unexpected status {:?}",
         status
+    );
+}
+
+/// IS_LASSO_300 (osqp_bench_illscaled, 実 data) E2E sentinel — 元 bug の直接再現:
+/// timeout=1000s 指定で wall=1025.6s と 25s 超過した IPPMM/presolve deadline 漏れ。
+/// budget=10s + slack=2s。合成 LASSO は presolve scaling や A^T A pattern が
+/// 異なるため、実 data でしか踏まない deadline-leak 経路を保護できない。
+///
+/// data 配置必須のため `#[ignore]`。`cargo nextest --release -- --include-ignored`
+/// (もしくは `cargo test --release -- --ignored`) でのみ実行。data 未配置の
+/// 状態では panic で fail させ、SKIP による検証空白を作らない (CLAUDE.md 方針)。
+const IS_LASSO_300_TIMEOUT_SEC: f64 = 10.0;
+const IS_LASSO_300_SLACK_SEC: f64 = 2.0;
+const IS_LASSO_300_WATCHDOG_SEC: f64 = 30.0;
+const IS_LASSO_300_PATH: &str = "data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib";
+
+#[test]
+#[ignore = "requires data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib"]
+fn qp_is_lasso_300_real_data_honors_deadline() {
+    let path = Path::new(IS_LASSO_300_PATH);
+    assert!(
+        path.exists(),
+        "data missing: {IS_LASSO_300_PATH} — place file or remove --include-ignored"
+    );
+    let problem = parse_qplib(path).expect("parse IS_LASSO_300");
+    let watchdog = Duration::from_secs_f64(IS_LASSO_300_WATCHDOG_SEC);
+    let (status, wall) = solve_with_watchdog(
+        problem,
+        IS_LASSO_300_TIMEOUT_SEC,
+        IS_LASSO_300_SLACK_SEC,
+        watchdog,
+        "is_lasso_300_real",
+    );
+    assert!(
+        matches!(
+            status,
+            SolveStatus::Optimal
+                | SolveStatus::Timeout
+                | SolveStatus::SuboptimalSolution
+                | SolveStatus::NumericalError
+                | SolveStatus::Infeasible
+                | SolveStatus::LocallyOptimal
+        ),
+        "[is_lasso_300_real] unexpected status {:?}",
+        status
+    );
+    // solve_with_watchdog 内で wall <= timeout+slack を assert 済み。
+    // ここで wall を再公開し、回帰時の log を明示化する。
+    eprintln!(
+        "[is_lasso_300_real] sentinel pass: wall={wall:.3}s <= timeout={IS_LASSO_300_TIMEOUT_SEC}s + slack={IS_LASSO_300_SLACK_SEC}s"
     );
 }
