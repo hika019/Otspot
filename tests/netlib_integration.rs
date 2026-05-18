@@ -539,10 +539,7 @@ fn test_solve_bore3d_dual() {
 #[test]
 fn test_boyd1_no_memory_explosion() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
-    if !path.exists() {
-        eprintln!("BOYD1.QPS not found, skipping");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
     assert_eq!(problem.num_vars, 93261, "BOYD1: expected 93261 vars");
     assert_eq!(problem.num_constraints, 18, "BOYD1: expected 18 constraints");
@@ -576,10 +573,7 @@ fn test_boyd1_no_memory_explosion() {
 #[test]
 fn test_boyd1_direct_ipm_no_stack_overflow() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
-    if !path.exists() {
-        eprintln!("BOYD1.QPS not found, skipping");
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
     let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);

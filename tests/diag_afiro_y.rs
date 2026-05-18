@@ -73,10 +73,7 @@ fn kkt_residual(qp: &QpProblem, y: &[f64], rc: &[f64]) -> (Vec<f64>, f64) {
 #[test]
 fn diag_afiro_y_presolve_off_vs_on() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] afiro.QPS not found at {}", path.display());
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let qp = parse_qps(path).expect("parse afiro");
     let lp = make_lp(&qp);
     let n = lp.num_vars;
@@ -171,10 +168,7 @@ const BOUND_TOL: f64 = 1e-6;
 
 fn check_lp_dual_kkt(qp_path: &str) {
     let path = Path::new(qp_path);
-    if !path.exists() {
-        eprintln!("[SKIP] {} not found", qp_path);
-        return;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qp_path);
     let qp = parse_qps(path).expect("parse failed");
 
     let mut opts = SolverOptions::default();
@@ -306,7 +300,7 @@ fn diag_large_lp_timing_breakdown() {
         "problem", "presolve", "solve", "postsolve", "total_ms", "status");
     for p in &problems {
         let path = Path::new(p);
-        if !path.exists() { continue; }
+        assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", p);
         let qp = parse_qps(path).expect("parse");
         let lp = make_lp(&qp);
         let mut opts = SolverOptions::default();
@@ -329,7 +323,7 @@ fn diag_large_lp_timing_breakdown() {
 #[test]
 fn test_timing_breakdown_recorded_for_presolved_lp() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let qp = parse_qps(path).expect("parse");
     let lp = make_lp(&qp);
     let mut opts = SolverOptions::default();
@@ -349,7 +343,7 @@ fn test_timing_breakdown_recorded_for_presolved_lp() {
 #[test]
 fn diag_scorpion_y_off_vs_on() {
     let path = Path::new("data/lp_problems/scorpion.QPS");
-    if !path.exists() { eprintln!("[SKIP]"); return; }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
     let qp = parse_qps(path).expect("parse");
     let lp = make_lp(&qp);
     let n = lp.num_vars;

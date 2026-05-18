@@ -178,7 +178,7 @@ fn test_simple_2var_qp_matches_clarabel() {
 /// 我々の x が Clarabel 用 b で feasible (Ax compared to b 我々の constraint_types)
 /// Clarabel の x が同じく feasible
 fn deep_check(name: &str, path: &std::path::Path) -> bool {
-    if !path.exists() { eprintln!("{} not present, skip", name); return true; }
+    assert!(path.exists(), "{:?} ({}) not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path, name);
     let prob = parse_qps(path).expect("parse failed");
 
     println!("\n=== {} ===", name);
@@ -265,7 +265,7 @@ fn test_liswet9_matches_clarabel() {
 fn test_liswet9_yao_strict_clarabel() {
     for name in &["LISWET9", "YAO"] {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        if !path.exists() { continue; }
+        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
         let prob = parse_qps(&path).expect("parse");
         println!("\n=== {} (strict Clarabel) ===", name);
         let cl = solve_clarabel_strict(&prob);
@@ -308,10 +308,7 @@ fn test_multi_problems_match_clarabel() {
     let mut results = Vec::new();
     for name in &problems {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        if !path.exists() {
-            results.push((name.to_string(), "MISSING".to_string()));
-            continue;
-        }
+        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
         let ok = std::panic::catch_unwind(|| deep_check(name, &path)).unwrap_or(false);
         results.push((name.to_string(), if ok { "MATCH".to_string() } else { "MISMATCH".to_string() }));
     }

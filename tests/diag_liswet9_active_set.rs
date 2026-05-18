@@ -230,10 +230,7 @@ fn diag_liswet_family_active_set_diff() {
 
     for name in &names {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        if !path.exists() {
-            eprintln!("[{}] DATA MISSING", name);
-            continue;
-        }
+        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
         let prob = parse_qps(&path).expect("parse");
 
         // Clarabel strict
@@ -288,9 +285,7 @@ fn diag_liswet_family_active_set_diff() {
 #[ignore = "diag: LISWET9 early-iter active-set evolution"]
 fn diag_liswet9_early_iter_evolution() {
     let path = std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS");
-    if !path.exists() {
-        eprintln!("LISWET9 missing"); return;
-    }
+    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
     let prob = parse_qps(&path).expect("parse");
     let (x_ref, _y_ref, _cl_status, _cl_obj) = solve_clarabel_strict(&prob).expect("clarabel");
     let slack_ref = compute_row_slacks(&prob, &x_ref);
