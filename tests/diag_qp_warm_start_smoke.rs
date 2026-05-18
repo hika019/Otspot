@@ -104,9 +104,16 @@ fn warm_start_30pct_speedup_smoke() {
 }
 
 /// 退化 warm (x が境界上、μ=0、y=0) でも interior 補正で IPM が起動して Optimal。
+/// silent SKIP 検出: warm 適用時の iter count が cold と完全一致するなら
+/// apply_qp_warm_start が None を返して cold init path に倒れたことを意味する。
 #[test]
 fn warm_start_degenerate_inputs_handled() {
     let problem = build_medium_convex_qp(40, 20, 0.3);
+    let mut cold_opts = SolverOptions::default();
+    cold_opts.timeout_secs = Some(30.0);
+    let cold = solve_qp_with(&problem, &cold_opts);
+    assert_eq!(cold.status, SolveStatus::Optimal);
+
     let ws = QpWarmStart {
         x: vec![-2.0; 40],
         y: vec![0.0; 20],
@@ -118,4 +125,200 @@ fn warm_start_degenerate_inputs_handled() {
     let r = solve_qp_with(&problem, &opts);
     assert_eq!(r.status, SolveStatus::Optimal,
         "degenerate warm must still converge; got {:?}", r.status);
+
+    // 退化 warm の iter は cold より大きくなりやすいが、その差が観測できることが
+    // 「warm が adapter を通過した」証拠。iter_ratio == 1.0 なら apply_qp_warm_start
+    // が silently None で cold init を辿ったことを意味する。
+    assert!(
+        r.iterations != cold.iterations,
+        "degenerate warm appears silently dropped (iter ratio = 1.0): warm={} cold={}",
+        r.iterations, cold.iterations
+    );
+
+    // IPM 暴発の上限 (cold の 4 倍以内)。退化点から interior 復帰 + 収束のオーバーヘッド
+    // 込みで合理的な上限。
+    let iter_ratio = r.iterations as f64 / cold.iterations.max(1) as f64;
+    assert!(
+        iter_ratio < 4.0,
+        "degenerate warm iter blowup: warm={} cold={} ratio={:.2}",
+        r.iterations, cold.iterations, iter_ratio
+    );
+}
+
+/// Q-diag scaling 経路 (q_pos_max/q_pos_min ≥ 1e6) で warm が正しく col_scales 変換
+/// される B-1 sentinel。
+///
+/// 検出原理:
+///   fix 前: warm.x は user 空間のまま scaled bounds に強制 clamp (例: orig [-2,2]、
+///           q=1e-4 列の scaled bound は [-0.02, 0.02] で warm.x=0.5 → 0.02 に押し込み)。
+///           IPM 入力が物理的に異常 → 後段 LSQ refit で最終解は救えても obj が drift する
+///           か、収束に余分な iter を要する。
+///   fix 後: warm.x が col_scales で scaled 空間に正しく配置され、cold init と区別可能。
+///
+/// 主検証は obj 整合性 + warm が cold init に倒れていない (iter ≠ cold)。iter 短縮は
+/// PMM rho_init の経路依存で variance が大きいため強要しない。
+#[test]
+fn warm_start_propagates_through_q_diag_scaling() {
+    use solver::sparse::CscMatrix;
+    use solver::problem::ConstraintType;
+
+    let n = 120_usize;
+    let m = 40_usize;
+    let mut seed: u64 = 0x_A5A5_1234_BEEF_0001;
+    let next = |s: &mut u64| -> f64 {
+        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*s >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
+    };
+
+    // diag Q with 8-decade dynamic range → q_pos_max/q_pos_min ≥ 1e6 trigger Q-diag scaling.
+    let q_diag: Vec<f64> = (0..n).map(|j| {
+        let exp = -4.0 + 8.0 * (j as f64 / (n - 1) as f64);
+        10.0_f64.powf(exp)
+    }).collect();
+    let q = CscMatrix::from_triplets(
+        &(0..n).collect::<Vec<_>>(),
+        &(0..n).collect::<Vec<_>>(),
+        &q_diag, n, n,
+    ).unwrap();
+
+    let c: Vec<f64> = (0..n).map(|_| next(&mut seed)).collect();
+
+    let mut a_rows = Vec::new();
+    let mut a_cols = Vec::new();
+    let mut a_vals = Vec::new();
+    for j in 0..n {
+        for i in 0..m {
+            if (next(&mut seed) + 1.0) * 0.5 < 0.15 {
+                a_rows.push(i);
+                a_cols.push(j);
+                a_vals.push(next(&mut seed));
+            }
+        }
+    }
+    let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
+    let b: Vec<f64> = (0..m).map(|_| 0.5 + (next(&mut seed) + 1.0) * 0.5).collect();
+    let bounds = vec![(-2.0_f64, 2.0_f64); n];
+    let problem = QpProblem::new(
+        q, c, a, b, bounds, vec![ConstraintType::Le; m],
+    ).unwrap();
+
+    let q_range = q_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        / q_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(q_range >= 1e6, "Q-diag scaling trigger requires range≥1e6, got {:.2e}", q_range);
+
+    let mut cold_opts = SolverOptions::default();
+    cold_opts.timeout_secs = Some(60.0);
+    let cold = solve_qp_with(&problem, &cold_opts);
+    assert_eq!(cold.status, SolveStatus::Optimal, "cold must Optimal");
+
+    let ws = QpWarmStart {
+        x: cold.solution.clone(),
+        y: cold.dual_solution.clone(),
+        mu: cold.gap.unwrap_or(1e-6).max(1e-10),
+    };
+    let mut warm_opts = SolverOptions::default();
+    warm_opts.timeout_secs = Some(60.0);
+    warm_opts.warm_start_qp = Some(ws);
+    let warm = solve_qp_with(&problem, &warm_opts);
+    assert_eq!(warm.status, SolveStatus::Optimal, "warm must Optimal");
+
+    let iter_ratio = warm.iterations as f64 / cold.iterations.max(1) as f64;
+    eprintln!(
+        "WARM_Q_DIAG_SENTINEL: cold_iters={} warm_iters={} ratio={:.3} q_range={:.2e}",
+        cold.iterations, warm.iterations, iter_ratio, q_range
+    );
+
+    // 主検証: obj が cold と一致 (B-1 transform 数式正当性)。
+    let obj_diff = (warm.objective - cold.objective).abs() / (1.0 + cold.objective.abs());
+    assert!(obj_diff < 1e-4, "Q-diag warm obj drift: {:.3e}", obj_diff);
+
+    // silent SKIP 検出: warm 適用時の iter は cold と異なる経路を辿る → iter 一致なら
+    // 実は warm が dropped されていた疑い。
+    assert!(
+        warm.iterations != cold.iterations,
+        "Q-diag warm appears silently dropped: warm={} cold={}",
+        warm.iterations, cold.iterations
+    );
+
+    // IPM 暴発の上限 (cold の 5 倍以内)。Q-diag scaling 下の PMM が rho_init mismatch
+    // で多数 iter する pathology 込みでも、cold init と桁違いの劣化はバグ。
+    assert!(
+        iter_ratio < 5.0,
+        "Q-diag warm iter blowup: warm={} cold={} ratio={:.2}",
+        warm.iterations, cold.iterations, iter_ratio
+    );
+}
+
+/// presolve 経路 (fixed var lb=ub) で warm が reduced 空間に col_map_inv で翻訳される
+/// B-2 sentinel。
+///
+/// 検出原理: silent SKIP (dim mismatch で apply_qp_warm_start が None 帰着) なら
+/// warm path は cold init と区別不能。translation 経由なら iter 数が cold と異なる。
+/// 主検証は obj 整合性 + iter ≠ cold (silent drop 検出) + Optimal status。
+#[test]
+fn warm_start_propagates_through_presolve_reduction() {
+    use solver::sparse::CscMatrix;
+    use solver::problem::ConstraintType;
+
+    // 小問題で FixedVar 確実 + 数値安定: n=4, 1 FixedVar → reduced n=3。
+    let q = CscMatrix::from_triplets(
+        &[0, 1, 2, 3], &[0, 1, 2, 3], &[2.0, 2.0, 2.0, 2.0], 4, 4,
+    ).unwrap();
+    let c = vec![-1.0, -2.0, -3.0, 1.0];
+    let a = CscMatrix::from_triplets(
+        &[0, 0, 0, 0], &[0, 1, 2, 3], &[1.0, 1.0, 1.0, 1.0], 1, 4,
+    ).unwrap();
+    let b = vec![3.0];
+    // 末尾 var を lb=ub=0.5 で固定 → presolve FixedVar reduction。
+    let bounds = vec![
+        (0.0_f64, 5.0_f64),
+        (0.0_f64, 5.0_f64),
+        (0.0_f64, 5.0_f64),
+        (0.5_f64, 0.5_f64),
+    ];
+    let problem = QpProblem::new(
+        q, c, a, b, bounds, vec![ConstraintType::Le],
+    ).unwrap();
+
+    let mut cold_opts = SolverOptions::default();
+    cold_opts.timeout_secs = Some(10.0);
+    let cold = solve_qp_with(&problem, &cold_opts);
+    assert_eq!(cold.status, SolveStatus::Optimal, "cold must Optimal; got {:?}", cold.status);
+    assert!((cold.solution[3] - 0.5).abs() < 1e-6, "fixed var must be 0.5");
+
+    let ws = QpWarmStart {
+        x: cold.solution.clone(),
+        y: cold.dual_solution.clone(),
+        mu: cold.gap.unwrap_or(1e-6).max(1e-10),
+    };
+    let mut warm_opts = SolverOptions::default();
+    warm_opts.timeout_secs = Some(10.0);
+    warm_opts.warm_start_qp = Some(ws);
+    let warm = solve_qp_with(&problem, &warm_opts);
+    assert_eq!(warm.status, SolveStatus::Optimal, "warm must Optimal");
+
+    let iter_ratio = warm.iterations as f64 / cold.iterations.max(1) as f64;
+    eprintln!(
+        "WARM_PRESOLVE_SENTINEL: cold_iters={} warm_iters={} ratio={:.3}",
+        cold.iterations, warm.iterations, iter_ratio
+    );
+
+    // 主検証: obj が cold と一致 (B-2 translate 数式正当性 + fixed var 整合)。
+    let obj_diff = (warm.objective - cold.objective).abs() / (1.0 + cold.objective.abs());
+    assert!(obj_diff < 1e-4, "presolve warm obj drift: {:.3e}", obj_diff);
+
+    // silent SKIP 検出: fix 前は ws.x.len=4 ≠ n_reduced=3 で apply_qp_warm_start が None
+    // → warm path == cold path → iter 一致。fix 後は translate で reduced 空間に翻訳され
+    // warm が起動 → cold と iter が異なる。
+    assert!(
+        warm.iterations != cold.iterations,
+        "presolve warm appears silently dropped: warm={} cold={}",
+        warm.iterations, cold.iterations
+    );
+
+    assert!(
+        iter_ratio < 5.0,
+        "presolve warm iter blowup: warm={} cold={} ratio={:.2}",
+        warm.iterations, cold.iterations, iter_ratio
+    );
 }
