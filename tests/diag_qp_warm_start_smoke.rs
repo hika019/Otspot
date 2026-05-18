@@ -155,8 +155,10 @@ fn warm_start_degenerate_inputs_handled() {
 ///           か、収束に余分な iter を要する。
 ///   fix 後: warm.x が col_scales で scaled 空間に正しく配置され、cold init と区別可能。
 ///
-/// 主検証は obj 整合性 + warm が cold init に倒れていない (iter ≠ cold)。iter 短縮は
-/// PMM rho_init の経路依存で variance が大きいため強要しない。
+/// 主検証は (a) obj 整合性、(b) iter ≠ cold (silent SKIP 排除)、(c) iter 上限 ratio。
+/// (c) は scale_warm_start_for_q_diag を no-op に倒すと warm がほぼ cold init 同等の
+/// iter になる (ratio ≈ 1.0) ことを利用した検出。warm が機能していれば cold の (1 - margin)
+/// 倍以下に収まることを assert する。
 #[test]
 fn warm_start_propagates_through_q_diag_scaling() {
     use solver::sparse::CscMatrix;
@@ -240,12 +242,19 @@ fn warm_start_propagates_through_q_diag_scaling() {
         warm.iterations, cold.iterations
     );
 
-    // IPM 暴発の上限 (cold の 5 倍以内)。Q-diag scaling 下の PMM が rho_init mismatch
-    // で多数 iter する pathology 込みでも、cold init と桁違いの劣化はバグ。
+    // warm が機能していれば cold の (1 - WARM_ITER_REDUCTION_MARGIN) 倍以下に収まる。
+    // scale_warm_start_for_q_diag を no-op に倒すと warm.x が user 空間のまま scaled
+    // bounds に強制 clamp され (例: orig [-2,2]、q=1e-4 列の scaled bound [-0.02, 0.02]
+    // で warm.x=0.5 → 0.02 に押し込み) IPM 入力が壊れ、interior 復帰のため cold init 以上の
+    // iter を要する → iter_ratio ≈ 1.0 以上で本 assert が FAIL する。
+    // 0.9 は WARM_ITER_REDUCTION_MARGIN=0.1 (warm の最低有効効果 10%)。これより緩いと
+    // no-op fallback が検出できず sentinel として機能しない。
+    const WARM_ITER_REDUCTION_MARGIN: f64 = 0.1;
+    const WARM_ITER_RATIO_UPPER: f64 = 1.0 - WARM_ITER_REDUCTION_MARGIN;
     assert!(
-        iter_ratio < 5.0,
-        "Q-diag warm iter blowup: warm={} cold={} ratio={:.2}",
-        warm.iterations, cold.iterations, iter_ratio
+        iter_ratio < WARM_ITER_RATIO_UPPER,
+        "Q-diag warm not reducing iter as expected: ratio={:.3} ≥ {:.3} (warm={} cold={})",
+        iter_ratio, WARM_ITER_RATIO_UPPER, warm.iterations, cold.iterations
     );
 }
 
