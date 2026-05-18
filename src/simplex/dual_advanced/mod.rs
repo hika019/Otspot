@@ -70,19 +70,22 @@ pub(crate) fn solve_dual_advanced(
         return cold_start_advanced(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
     }
 
-    // Cold-start with Ge/Eq constraints: run Primal first with half the
-    // deadline; only fall back to Big-M Phase I if Primal had no feasible
-    // incumbent (Phase I cycled on infeasibility — klein3 case). When Primal
-    // returned with a non-empty solution the LP is feasible, so Big-M's
-    // "Timeout + artificials left → Infeasible" heuristic would wrongly flip
-    // the verdict (observed on d6cube, pds-10).
+    // Cold-start with Ge/Eq constraints: run Primal first with the *full*
+    // user budget; only fall back to Big-M Phase I if Primal had no
+    // feasible incumbent (Phase I cycled on infeasibility — klein3 case).
+    // When Primal returned with a non-empty solution the LP is feasible,
+    // so Big-M's "Timeout + artificials left → Infeasible" heuristic would
+    // wrongly flip the verdict (observed on d6cube, pds-10).
     //
     // `revised_simplex_core` has a no-progress early-bail (task #37) so a
-    // Primal Phase I cycle returns Timeout in O(K) pivots and Big-M gets
-    // the remaining half quickly. The split is kept as defence-in-depth for
-    // problems whose Primal makes slow but real progress (pilot/dfl001).
-    let primal_options = clone_options_with_half_deadline(options);
-    let primal_result = super::dual::two_phase_dual_simplex(sf, problem, &primal_options);
+    // Primal Phase I cycle returns Timeout in O(K) pivots, leaving the
+    // remaining budget to Big-M. A defensive half-deadline split lived here
+    // until task #48; it stacked with `phase1::big_m_cold_start`'s own inner
+    // split, producing wall ≈ 0.75 × user_budget for slow-but-progressing
+    // LPs (neos / rail2586 / rail4284). Removed — slow Primal now honors
+    // the full budget and returns its incumbent, cycling Primal still bails
+    // quickly via #37.
+    let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
         SolveStatus::Timeout if primal_result.solution.is_empty() => {
             let bigm_result = phase1::big_m_cold_start(
@@ -100,17 +103,6 @@ pub(crate) fn solve_dual_advanced(
         }
         _ => primal_result,
     }
-}
-
-/// SolverOptions のクローンを返し、deadline がある場合は残り時間の半分に縮める。
-fn clone_options_with_half_deadline(options: &SolverOptions) -> SolverOptions {
-    let mut o = options.clone();
-    if let Some(d) = options.deadline {
-        let now = std::time::Instant::now();
-        let remaining = d.saturating_duration_since(now);
-        o.deadline = Some(now + remaining / 2);
-    }
-    o
 }
 
 /// Le-only cold startでHarris Dual Simplexを使用する

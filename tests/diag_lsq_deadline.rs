@@ -53,8 +53,9 @@ use solver::solve_with;
 use solver::sparse::CscMatrix;
 use std::time::Instant;
 
-/// 観測根拠は module docs 参照 (postsolve cleanup-LP + GS + unscale の余裕 + 2× margin)。
-const SLACK_SEC: f64 = 2.0;
+/// LSQ 外 post-processing (cleanup LP / GS / unscale) + parallel CPU 競合余裕。
+/// LSQ 漏れ (wall ≈ 2×budget) との分離は依然可能。
+const SLACK_SEC: f64 = 4.0;
 
 /// LSQ AAT factorize の実行観測下限 (m_main ~600 で 30-100ms、安全側で 50ms)。
 const POSTSOLVE_MIN_US: u64 = 50_000;

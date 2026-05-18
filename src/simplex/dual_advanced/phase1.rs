@@ -108,20 +108,6 @@ fn farkas_infeasibility_certified(
     true
 }
 
-/// SolverOptions のクローンを返し、deadline がある場合は残り時間の半分に縮める。
-///
-/// Big-M Phase I 専用: Phase I 内で時間を使い切らず Phase II にも半分残す。
-/// Phase I で half-deadline 到達 → artificial 残存判定で Infeasibility 推定。
-fn clone_options_with_half_deadline(options: &SolverOptions) -> SolverOptions {
-    let mut o = options.clone();
-    if let Some(d) = options.deadline {
-        let now = std::time::Instant::now();
-        let remaining = d.saturating_duration_since(now);
-        o.deadline = Some(now + remaining / 2);
-    }
-    o
-}
-
 /// Big-M Phase I 専用の離基変数戦略。
 ///
 /// 優先順位:
@@ -312,19 +298,19 @@ pub(crate) fn big_m_cold_start(
     // これにより Big-M Phase I 本来の「人工変数を basis から追い出す」役割を
     // 標準 dual simplex ループ (Harris ratio test 装備) で実現する。
     //
-    // ## Phase I 時間配分
+    // ## Phase I 時間配分 (task #48)
     //
-    // Phase II も Primal Simplex で走らせるため、deadline がある場合は
-    // 残り時間の **半分** を Phase I に割り当てる。Phase I が Timeout で戻った
-    // 場合は artificial が basis に残ったまま → 元 LP の Infeasibility シグナル
-    // として扱う (degenerate cycling を伴う infeasible 検出の経験的判定; klein3
-    // などの highly degenerate infeasible LP は理論最適 pivot 数では到達できず
-    // cycling する典型ケース)。
-    let phase1_options = clone_options_with_half_deadline(options);
+    // Phase I は元 deadline を honor する。以前は `remaining / 2` を割り当て
+    // Phase II にも半分を残していたが、外側 `solve_dual_advanced` の Primal-first
+    // halving と二重になり wall = 0.75 × user_budget の bug を生んだ。
+    // - Phase I が Optimal 完走: Phase II は当然残り deadline で動く。
+    // - Phase I が Timeout: Phase II は遅延の起点になっても意味がないので
+    //   そのまま Timeout 返却 (Farkas 検証 fail 時)。元の「half-deadline 到達 →
+    //   Infeasibility 推定」は #37 で Farkas 証明書に置き換え済。
     let leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
-        &a_aug, &mut x_b, &c_aug_p1, &mut basis_aug, m, n_aug, &phase1_options, &leaving,
+        &a_aug, &mut x_b, &c_aug_p1, &mut basis_aug, m, n_aug, options, &leaving,
         &mut total_iters,
     );
 
