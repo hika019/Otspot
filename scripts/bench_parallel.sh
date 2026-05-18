@@ -149,9 +149,11 @@ if [[ $JOBS -gt $TOTAL_GROUPS ]]; then
   echo "[bench_parallel.sh] jobs を $JOBS に調整（グループ数未満）"
 fi
 
-# 一時ディレクトリ作成
-TMPDIR_BASE="/tmp/bench_parallel_$$"
-mkdir -p "$TMPDIR_BASE"
+# 一時ディレクトリ作成。
+# mktemp -d で衝突回避（旧実装は $$ 利用で PID 再利用 / 外部 cleanup と競合する余地があった）。
+TMPDIR_BASE=$(mktemp -d "/tmp/bench_parallel.XXXXXX") || {
+  echo "エラー: mktemp -d 失敗" >&2; exit 1
+}
 
 # 終了時クリーンアップ
 cleanup() {
@@ -180,10 +182,12 @@ if [[ -n "$FEATURES" ]]; then
   FEATURES_EXTRA="--features $FEATURES"
 fi
 
-# 外部タイムアウト (1ワーカーが最大GROUP_SIZE問担当)
-EXTERNAL_TIMEOUT=$(( TIMEOUT * GROUP_SIZE + 300 ))
+# 外部タイムアウト (1ワーカーが最大GROUP_SIZE問担当)。
+# BENCH_EXT_TIMEOUT_BUFFER で余裕秒を上書き可（ビルド遅延・post-process 用）。
+EXTERNAL_TIMEOUT_BUFFER=${BENCH_EXT_TIMEOUT_BUFFER:-300}
+EXTERNAL_TIMEOUT=$(( TIMEOUT * GROUP_SIZE + EXTERNAL_TIMEOUT_BUFFER ))
 export EXTERNAL_TIMEOUT
-echo "[bench_parallel.sh] EXTERNAL_TIMEOUT: ${EXTERNAL_TIMEOUT}s (${GROUP_SIZE}問 × ${TIMEOUT}s + 300s余裕)"
+echo "[bench_parallel.sh] EXTERNAL_TIMEOUT: ${EXTERNAL_TIMEOUT}s (${GROUP_SIZE}問 × ${TIMEOUT}s + ${EXTERNAL_TIMEOUT_BUFFER}s余裕)"
 
 # ワーカープール設定
 COUNTER_FILE="$TMPDIR_BASE/counter"
@@ -199,10 +203,21 @@ if [[ -n "$KNOWN_OPTIMAL" ]]; then
   KNOWN_OPTIMAL_ARG=(--known-optimal "$KNOWN_OPTIMAL")
 fi
 
+# gtimeout が EXTERNAL_TIMEOUT を強制した時の終了コード（GNU timeout 仕様）
+GTIMEOUT_EXIT_CODE=124
+
 # ワーカー関数：キューからグループを取得して処理
 worker_func() {
   local worker_id="$1"
   while true; do
+    # TMPDIR_BASE が外的要因で消滅すると flock/cat/echo が連続失敗し
+    # group_num が空文字となる。bash 数値比較は empty を 0 扱いし
+    # group_000 を無限再試行してしまうため fail-fast。
+    if [[ ! -d "$TMPDIR_BASE" ]]; then
+      echo "[bench_parallel.sh] ワーカー $worker_id: TMPDIR_BASE '$TMPDIR_BASE' 消失、ワーカー停止" >&2
+      return 2
+    fi
+
     # アトミックに次のグループ番号を取得
     local group_num
     group_num=$(
@@ -213,6 +228,12 @@ worker_func() {
         echo "$n"
       ) 9>"$COUNTER_LOCK"
     )
+
+    # counter が空 / 非正整数 = state 破損。厳格 validate して spin 回避。
+    if ! [[ "$group_num" =~ ^[0-9]+$ ]] || [[ $group_num -lt 1 ]]; then
+      echo "[bench_parallel.sh] ワーカー $worker_id: 不正 group_num='$group_num' (state破損)、ワーカー停止" >&2
+      return 2
+    fi
 
     if [[ $group_num -gt $TOTAL_GROUPS ]]; then
       break
@@ -234,11 +255,25 @@ worker_func() {
       "${KNOWN_OPTIMAL_ARG[@]}" \
       ${FEATURES_EXTRA} > "$log" 2>&1 || exit_code=$?
 
-    if [[ $exit_code -ne 0 ]]; then
+    if [[ $exit_code -eq 0 ]]; then
+      echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 完了"
+    elif [[ $exit_code -eq $GTIMEOUT_EXIT_CODE ]]; then
+      # gtimeout 強制終了 = solver 内部 timeout が機能していない。
+      # 集計から脱落させない（問題数 invisible になるバグ）よう、
+      # log に TIMEOUT エントリを 1 件追記し、aggregator が拾える形式にする。
+      local prob_file prob_name="?"
+      for prob_file in "$group_dir"/*; do
+        [[ -e "$prob_file" ]] && prob_name=$(basename "$prob_file") && break
+      done
+      {
+        echo "  $prob_name  TIMEOUT (external_timeout=${EXTERNAL_TIMEOUT}s, solver internal timeout 未機能)"
+        echo "    TIMEOUT: 1"
+        echo "    TOTAL:   1"
+      } >> "$log"
+      echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 外部timeout発火 ($prob_name, ${EXTERNAL_TIMEOUT}s)" >&2
+    else
       echo "$group_name" >> "$FAILED_GROUPS_FILE"
       echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 異常終了 (exit=$exit_code)" >&2
-    else
-      echo "[bench_parallel.sh] ワーカー $worker_id: $group_name 完了"
     fi
   done
 }
