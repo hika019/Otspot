@@ -644,3 +644,168 @@ fn random_lp_consistency_across_seeds() {
         );
     }
 }
+
+// ----------------------------------------------------------
+// Row/col reduction-rate fact assertions across synthetic
+// patterns that mirror the netlib distribution (mixed Le/Eq,
+// proportional sub-blocks, dominated-cost columns). Each case
+// records the (m_before, n_before) → (m_after, n_after) ratios
+// so reviewers can verify the extension's measurable effect
+// without re-running the LP standard bench.
+// ----------------------------------------------------------
+
+fn reduction_pct(before: usize, after: usize) -> f64 {
+    if before == 0 { return 0.0; }
+    100.0 * (before - after) as f64 / before as f64
+}
+
+#[test]
+fn reduction_rate_fact_synthetic_battery() {
+    struct Case {
+        label: &'static str,
+        lp_fn: fn() -> LpProblem,
+        min_row_reduction_pct: f64,
+        min_col_reduction_pct: f64,
+    }
+
+    fn lp_pure_parallel_le() -> LpProblem {
+        // 5 vars, 4 Le rows where rows 1..3 are 2×/3×/0.5× of row 0.
+        // Step 9 must drop 3 rows ⇒ ≥75% row reduction.
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        let alphas = [1.0, 2.0, 3.0, 0.5];
+        for (i, &a) in alphas.iter().enumerate() {
+            for j in 0..5 {
+                rows.push(i);
+                cols.push(j);
+                vals.push(a);
+            }
+        }
+        let b = vec![20.0, 50.0, 80.0, 12.0];
+        build_lp(
+            vec![-1.0; 5],
+            &rows, &cols, &vals,
+            4, 5,
+            b,
+            vec![ConstraintType::Le; 4],
+            vec![(0.0, 100.0); 5],
+        )
+    }
+
+    fn lp_dominated_col_battery() -> LpProblem {
+        // 3 cheap cols (ub=∞) + 3 dearer dominated cols (per-A-unit cost worse).
+        // Each pair shares the same A column pattern with α=1.
+        // Step 10 must fix 3 cols ⇒ ≥50% col reduction.
+        let m = 4usize;
+        let n = 6usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..m {
+            for k in 0..3 {
+                let v = 1.0 + (i + k) as f64 * 0.3;
+                rows.push(i); cols.push(k);     vals.push(v); // cheap col k
+                rows.push(i); cols.push(k + 3); vals.push(v); // dominated col k+3
+            }
+        }
+        let mut bounds = vec![(0.0, f64::INFINITY); 3];
+        bounds.extend(vec![(0.0, 10.0); 3]);
+        let mut c = vec![1.0; 3];
+        c.extend(vec![5.0; 3]);
+        build_lp(
+            c,
+            &rows, &cols, &vals,
+            m, n,
+            vec![50.0; m],
+            vec![ConstraintType::Le; m],
+            bounds,
+        )
+    }
+
+    fn lp_dual_fix_battery() -> LpProblem {
+        // 5 vars, all Le rows with a≥0, c>0, finite lb ⇒ Step 11 fixes 100% cols.
+        let m = 3usize;
+        let n = 5usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i); cols.push(j); vals.push(0.5 + (i + j) as f64 * 0.1);
+            }
+        }
+        build_lp(
+            vec![1.0; n],
+            &rows, &cols, &vals,
+            m, n,
+            vec![100.0; m],
+            vec![ConstraintType::Le; m],
+            vec![(0.0, f64::INFINITY); n],
+        )
+    }
+
+    let cases = [
+        Case {
+            label: "parallel_le",
+            lp_fn: lp_pure_parallel_le,
+            min_row_reduction_pct: 75.0,
+            min_col_reduction_pct: 0.0,
+        },
+        Case {
+            label: "dominated_col",
+            lp_fn: lp_dominated_col_battery,
+            min_row_reduction_pct: 0.0,
+            min_col_reduction_pct: 50.0,
+        },
+        Case {
+            label: "dual_fix_all",
+            lp_fn: lp_dual_fix_battery,
+            min_row_reduction_pct: 0.0,
+            min_col_reduction_pct: 100.0,
+        },
+    ];
+
+    for case in &cases {
+        let lp = (case.lp_fn)();
+        let m_before = lp.num_constraints;
+        let n_before = lp.num_vars;
+        let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let m_after = on.reduced_problem.num_constraints;
+        let n_after = on.reduced_problem.num_vars;
+        let row_pct = reduction_pct(m_before, m_after);
+        let col_pct = reduction_pct(n_before, n_after);
+        // emit fact for review log even on success
+        eprintln!(
+            "[{}] m: {} → {} ({:.0}% reduction); n: {} → {} ({:.0}% reduction)",
+            case.label, m_before, m_after, row_pct, n_before, n_after, col_pct
+        );
+        assert!(
+            row_pct >= case.min_row_reduction_pct,
+            "[{}] row reduction {:.1}% below required {:.1}%",
+            case.label, row_pct, case.min_row_reduction_pct
+        );
+        assert!(
+            col_pct >= case.min_col_reduction_pct,
+            "[{}] col reduction {:.1}% below required {:.1}%",
+            case.label, col_pct, case.min_col_reduction_pct
+        );
+
+        // Repeat with all new flags off so the delta is attributable.
+        let off = run_presolve_with_flags(&lp, None, PresolveFlags::all_off()).unwrap();
+        let m_after_off = off.reduced_problem.num_constraints;
+        let n_after_off = off.reduced_problem.num_vars;
+        let row_pct_off = reduction_pct(m_before, m_after_off);
+        let col_pct_off = reduction_pct(n_before, n_after_off);
+        eprintln!(
+            "[{}] off m: {} → {} ({:.0}%); n: {} → {} ({:.0}%) [baseline]",
+            case.label, m_before, m_after_off, row_pct_off, n_before, n_after_off, col_pct_off
+        );
+        // The new transforms must strictly improve reduction on at least one axis.
+        assert!(
+            row_pct > row_pct_off || col_pct > col_pct_off,
+            "[{}] new transforms produced no extra reduction (on row={:.1}% col={:.1}% vs off row={:.1}% col={:.1}%)",
+            case.label, row_pct, col_pct, row_pct_off, col_pct_off
+        );
+    }
+}
