@@ -104,6 +104,7 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/qp_unbounded 9
   check_dir data/qplib 41
   check_dir data/qplib_nonconvex 45
+  check_dir data/qplib_nonconvex_official 4
   check_dir data/qplib_unsupported 6
   exit 0
 fi
@@ -146,9 +147,10 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   run_or_skip data/qplib_nonconvex      45  "python3 scripts/gen_nonconvex_qp.py"
 
   # Maros-Meszaros / QPLIB: 専用 download script
-  run_or_skip data/maros_meszaros     138 "bash scripts/maros_meszaros_download.sh"
-  run_or_skip data/qplib              41  "bash scripts/qplib_download.sh"
-  run_or_skip data/qplib_unsupported  6   "bash scripts/qplib_unsupported_download.sh"
+  run_or_skip data/maros_meszaros            138 "bash scripts/maros_meszaros_download.sh"
+  run_or_skip data/qplib                     41  "bash scripts/qplib_download.sh"
+  run_or_skip data/qplib_nonconvex_official  4   "bash scripts/qplib_nonconvex_download.sh"
+  run_or_skip data/qplib_unsupported         6   "bash scripts/qplib_unsupported_download.sh"
 fi
 
 echo ""
