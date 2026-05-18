@@ -16,13 +16,19 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use solver::bench_utils::{check_baseline_objective, detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
+use solver::bench_utils::{
+    check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
+    load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult,
+};
 use solver::io::qplib::{parse_qplib, QplibError};
 use solver::options::SolverOptions;
 use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
 use solver::QpProblem;
+
+/// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
+const KKT_FAIL_EPS: f64 = 1e-4;
 
 enum BenchError {
     Parse(QplibError),
@@ -146,6 +152,9 @@ fn main() {
     let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
     let mut n_nonconvex = 0usize;
+    // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。
+    // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
+    let mut n_kkt_fail = 0usize;
 
     // QPLIBベンチでは実行可能性判定なし → 常に0
     let n_dfeas_fail: usize = 0;
@@ -234,44 +243,94 @@ fn main() {
             solver::bench_utils::BenchPromotionPolicy::BenchQplib,
         );
 
+        // Optimal/LocallyOptimal/Suboptimal で有効解を持つ result に KKT 残差を計測。
+        // 1 つでも違反したら PASS を KKT_FAIL に降格する (obj 一致でも KKT が崩れていれば
+        // false-positive Optimal)。元空間 gap は baseline_objectives の最適値が
+        // 数値であれば算出 (Infeasible/Unbounded sentinel 文字列は除外済)。
+        let kkt_max = if matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+        ) && result.solution.len() == prob.num_vars
+        {
+            Some(compute_qp_kkt_max(
+                &prob,
+                &result.solution,
+                &result.dual_solution,
+                &result.bound_duals,
+            ))
+        } else {
+            None
+        };
+        let gap_to_global = baseline_objectives
+            .get(&name)
+            .and_then(|&gr| compute_gap_to_global(result.objective, gr));
+
+        let kkt_str = match kkt_max {
+            Some(v) => format!("kkt_max={:.2e}", v),
+            None => "kkt_max=—".to_string(),
+        };
+        let gap_str = match gap_to_global {
+            Some(v) => format!("gap_to_global={:.3e}", v),
+            None => "gap_to_global=—".to_string(),
+        };
+
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {
-                    match check_baseline_objective(
-                        &name,
-                        result.objective,
-                        &baseline_objectives,
-                        eps_obj,
-                    ) {
-                        ObjCheckResult::Ok { rel_err } => {
-                            n_pass += 1;
-                            (
-                                "PASS".to_string(),
-                                format!(
-                                    "[{}] obj={:.6e} obj_err={:.3}%",
-                                    method_label, result.objective, rel_err * 100.0
-                                ),
-                            )
-                        }
-                        ObjCheckResult::Mismatch { rel_err } => {
-                            n_obj_mismatch += 1;
-                            (
-                                "OBJ_MISMATCH".to_string(),
-                                format!(
-                                    "[{}] obj={:.6e} known={:.6e} err={:.1}%",
-                                    method_label,
-                                    result.objective,
-                                    baseline_objectives.get(&name).unwrap(),
-                                    rel_err * 100.0
-                                ),
-                            )
-                        }
-                        ObjCheckResult::NoRef => {
-                            n_pass_noref += 1;
-                            (
-                                "PASS[no_ref]".to_string(),
-                                format!("[{}] obj={:.6e}", method_label, result.objective),
-                            )
+                    // KKT_FAIL: status=Optimal だが元空間で KKT 違反 → PASS 判定の優先打ち消し。
+                    let kkt_violation =
+                        kkt_max.map(|v| !v.is_finite() || v >= KKT_FAIL_EPS).unwrap_or(false);
+                    if kkt_violation {
+                        n_kkt_fail += 1;
+                        (
+                            "KKT_FAIL".to_string(),
+                            format!(
+                                "[{}] obj={:.6e} {} {}",
+                                method_label, result.objective, kkt_str, gap_str
+                            ),
+                        )
+                    } else {
+                        match check_baseline_objective(
+                            &name,
+                            result.objective,
+                            &baseline_objectives,
+                            eps_obj,
+                        ) {
+                            ObjCheckResult::Ok { rel_err } => {
+                                n_pass += 1;
+                                (
+                                    "PASS".to_string(),
+                                    format!(
+                                        "[{}] obj={:.6e} obj_err={:.3}% {} {}",
+                                        method_label, result.objective, rel_err * 100.0,
+                                        kkt_str, gap_str,
+                                    ),
+                                )
+                            }
+                            ObjCheckResult::Mismatch { rel_err } => {
+                                n_obj_mismatch += 1;
+                                (
+                                    "OBJ_MISMATCH".to_string(),
+                                    format!(
+                                        "[{}] obj={:.6e} known={:.6e} err={:.1}% {} {}",
+                                        method_label,
+                                        result.objective,
+                                        baseline_objectives.get(&name).unwrap(),
+                                        rel_err * 100.0,
+                                        kkt_str, gap_str,
+                                    ),
+                                )
+                            }
+                            ObjCheckResult::NoRef => {
+                                n_pass_noref += 1;
+                                (
+                                    "PASS[no_ref]".to_string(),
+                                    format!(
+                                        "[{}] obj={:.6e} {} {}",
+                                        method_label, result.objective, kkt_str, gap_str
+                                    ),
+                                )
+                            }
                         }
                     }
                 } else {
@@ -321,7 +380,8 @@ fn main() {
                     format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
                 };
                 ("SUBOPTIMAL".to_string(),
-                    format!("[{}] iters={} {} {}", method_label, result.iterations, extra, resid_str))
+                    format!("[{}] iters={} {} {} {} {}",
+                        method_label, result.iterations, extra, resid_str, kkt_str, gap_str))
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;
@@ -371,6 +431,7 @@ fn main() {
     println!("  DFEAS_FAIL:        {}", n_dfeas_fail);
     println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
+    println!("  KKT_FAIL:          {}", n_kkt_fail);
     println!("  NONCONVEX:         {}", n_nonconvex);
     println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  MAXITER:           {}", n_max_iter);
@@ -379,7 +440,7 @@ fn main() {
     println!(
         "  TOTAL:             {}",
         n_pass + n_pass_noref + n_pass_infeasible + n_pass_unbounded
-            + n_timeout + n_fail + n_obj_mismatch
+            + n_timeout + n_fail + n_obj_mismatch + n_kkt_fail
             + n_nonconvex + n_suboptimal + n_max_iter + n_error + n_skip
     );
 }
