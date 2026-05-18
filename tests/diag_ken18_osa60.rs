@@ -58,10 +58,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 #[ignore = "diag (heavy ~60s; 要 data/lp_problems/osa-60.QPS)"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] osa-60.QPS not found at {:?}", path);
-        return;
-    }
+    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);
     let qp = parse_qps(path).expect("parse osa-60");
     let lp = make_lp(&qp);
 
@@ -153,10 +150,7 @@ fn diag_osa60_must_reach_known_objective() {
 #[ignore = "diag (heavy ~60s; 要 data/lp_problems/ken-18.QPS)"]
 fn diag_ken18_must_respect_internal_deadline() {
     let path = Path::new("data/lp_problems/ken-18.QPS");
-    if !path.exists() {
-        eprintln!("[SKIP] ken-18.QPS not found at {:?}", path);
-        return;
-    }
+    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);
     let qp = parse_qps(path).expect("parse ken-18");
     let lp = make_lp(&qp);
 

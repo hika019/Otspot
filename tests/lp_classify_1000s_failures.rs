@@ -15,10 +15,7 @@ const BOUND_TOL: f64 = 1e-6;
 /// 1 問の classification 診断結果を print する。
 fn classify(qp_path: &str, eps: f64, timeout_s: f64) -> bool {
     let path = Path::new(qp_path);
-    if !path.exists() {
-        eprintln!("[SKIP] {} not found", qp_path);
-        return false;
-    }
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qp_path);
     let prob = parse_qps(path).expect("parse");
     let mut opts = SolverOptions::default();
     opts.presolve = true;

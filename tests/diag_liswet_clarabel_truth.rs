@@ -145,11 +145,7 @@ fn diag_liswet_family_clarabel_truth() {
 
     for name in &names {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        if !path.exists() {
-            eprintln!("[{}] DATA MISSING: {:?}", name, path);
-            failed.push(format!("{} (missing data)", name));
-            continue;
-        }
+        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
         let prob = parse_qps(&path).expect("parse failed");
         let (p, q, a, b, cones) = build_clarabel(&prob);
 
