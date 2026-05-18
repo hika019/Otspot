@@ -171,6 +171,10 @@ pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 /// - `max_nodes >= 1`: 0 は root も解かない
 /// - `use_alpha_bb`: true で Phase 4 α-BB underestimator を下界に使う (default)。
 ///   false にすると Phase 3 の interval-arithmetic bound に戻す (退化/比較用)。
+/// - `use_mccormick`: true で Phase 5 McCormick envelope lifted LP relaxation を下界に
+///   追加する (default false: bilinear-rich 問題で α-BB より tight な lb を与えるが、
+///   node あたり 1 LP solve overhead が乗るため opt-in)。caller は α-BB / interval と
+///   `max` を取って統合する。
 #[derive(Debug, Clone)]
 pub struct GlobalOptimizationConfig {
     pub gap_tol: f64,
@@ -178,6 +182,7 @@ pub struct GlobalOptimizationConfig {
     pub max_nodes: usize,
     pub branching: BranchingStrategy,
     pub use_alpha_bb: bool,
+    pub use_mccormick: bool,
 }
 
 impl Default for GlobalOptimizationConfig {
@@ -188,6 +193,7 @@ impl Default for GlobalOptimizationConfig {
             max_nodes: DEFAULT_GLOBAL_MAX_NODES,
             branching: BranchingStrategy::MaxViolation,
             use_alpha_bb: true,
+            use_mccormick: false,
         }
     }
 }

@@ -59,6 +59,7 @@ fn cfg(use_alpha_bb: bool) -> GlobalOptimizationConfig {
         max_nodes: TEST_MAX_NODES,
         branching: BranchingStrategy::MaxViolation,
         use_alpha_bb,
+        use_mccormick: false,
     }
 }
 
