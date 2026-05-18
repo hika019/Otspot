@@ -7,7 +7,6 @@
 ///
 /// 双対シンプレックス法における入基変数の選択を抽象化する。
 /// Phase 2 (core.rs) で使用予定。
-#[allow(dead_code)]
 pub(crate) trait RatioTestStrategy {
     /// 双対比率テスト: 入基変数を選択する
     ///
@@ -43,14 +42,12 @@ pub(crate) trait RatioTestStrategy {
 /// # パラメータ
 /// - `harris_tol`: α_H（典型値: 1e-7〜1e-5。dual_tol相当）
 /// - `pivot_tol`: ピボット候補の最小閾値
-#[allow(dead_code)]
 pub(crate) struct HarrisRatioTest {
     pub harris_tol: f64,
     pub pivot_tol: f64,
 }
 
 impl HarrisRatioTest {
-    #[allow(dead_code)]
     pub fn new(harris_tol: f64, pivot_tol: f64) -> Self {
         Self { harris_tol, pivot_tol }
     }
@@ -157,58 +154,6 @@ pub(crate) fn bland_ratio_test(
         }
     }
     best_j.map(|j| (j, best_ratio))
-}
-
-/// Standard ratio test（フォールバック）
-///
-/// 既存 `dual.rs` の `dual_ratio_test` 相当。Bland則付き。
-///
-/// θ = min_{j: trow[j] > pivot_tol} { r_j / trow[j] }
-/// 同率の場合はインデックスが最小の列を選択（Bland則）。
-#[allow(dead_code)]
-pub(crate) struct StandardRatioTest {
-    pub pivot_tol: f64,
-}
-
-impl StandardRatioTest {
-    #[allow(dead_code)]
-    pub fn new(pivot_tol: f64) -> Self {
-        Self { pivot_tol }
-    }
-}
-
-impl RatioTestStrategy for StandardRatioTest {
-    fn select_entering(
-        &self,
-        trow: &[f64],
-        reduced_costs: &[f64],
-        is_basic: &[bool],
-        n_price: usize,
-    ) -> Option<(usize, f64)> {
-        let pivot_tol = self.pivot_tol;
-        let mut min_ratio = f64::INFINITY;
-        let mut entering: Option<usize> = None;
-
-        for j in 0..n_price {
-            if is_basic[j] { continue; }
-            if trow[j] > pivot_tol {
-                let ratio = reduced_costs[j] / trow[j];
-                if ratio < min_ratio - pivot_tol {
-                    min_ratio = ratio;
-                    entering = Some(j);
-                } else if (ratio - min_ratio).abs() <= pivot_tol {
-                    // Bland's rule: 同率なら列インデックスが小さい方
-                    if let Some(prev_j) = entering {
-                        if j < prev_j {
-                            entering = Some(j);
-                        }
-                    }
-                }
-            }
-        }
-
-        entering.map(|j| (j, min_ratio))
-    }
 }
 
 #[cfg(test)]
@@ -391,62 +336,4 @@ mod tests {
         assert!((theta - 0.5).abs() < 1e-9);
     }
 
-    // ======================================================
-    // StandardRatioTest tests
-    // ======================================================
-
-    /// Standard: 最小ratioの列が選ばれる
-    #[test]
-    fn standard_selects_min_ratio() {
-        // trow = [1.0, 2.0, 3.0], r = [0.3, 0.2, 0.9]
-        // ratio = [0.3, 0.1, 0.3] → min is j=1
-        let trow = vec![1.0, 2.0, 3.0];
-        let r = vec![0.3, 0.2, 0.9];
-        let is_basic = no_basic(3);
-        let std_test = StandardRatioTest::new(PIVOT_TOL);
-        let result = std_test.select_entering(&trow, &r, &is_basic, 3);
-        assert!(result.is_some());
-        let (col, theta) = result.unwrap();
-        assert_eq!(col, 1, "j=1 has min ratio 0.1");
-        assert!((theta - 0.1).abs() < 1e-9);
-    }
-
-    /// Standard Bland則: 同率の場合、最小インデックスを選択
-    #[test]
-    fn standard_bland_rule_on_tie() {
-        // trow = [1.0, 1.0, 1.0], r = [0.5, 0.5, 0.5]
-        // ratio = [0.5, 0.5, 0.5] → Bland則でj=0
-        let trow = vec![1.0, 1.0, 1.0];
-        let r = vec![0.5, 0.5, 0.5];
-        let is_basic = no_basic(3);
-        let std_test = StandardRatioTest::new(PIVOT_TOL);
-        let result = std_test.select_entering(&trow, &r, &is_basic, 3);
-        assert!(result.is_some());
-        let (col, _) = result.unwrap();
-        assert_eq!(col, 0, "Bland's rule: tie → smallest index j=0");
-    }
-
-    /// Standard: 候補なし → None
-    #[test]
-    fn standard_no_eligible_returns_none() {
-        let trow = vec![0.0, -1.0];
-        let r = vec![0.1, 0.2];
-        let is_basic = no_basic(2);
-        let std_test = StandardRatioTest::new(PIVOT_TOL);
-        let result = std_test.select_entering(&trow, &r, &is_basic, 2);
-        assert!(result.is_none());
-    }
-
-    /// Standard: is_basic フラグを尊重する
-    #[test]
-    fn standard_skips_basic_variables() {
-        let trow = vec![5.0, 1.0];
-        let r = vec![0.1, 0.5];
-        let is_basic = vec![true, false];
-        let std_test = StandardRatioTest::new(PIVOT_TOL);
-        let result = std_test.select_entering(&trow, &r, &is_basic, 2);
-        assert!(result.is_some());
-        let (col, _) = result.unwrap();
-        assert_eq!(col, 1, "j=0 is basic, only j=1 eligible");
-    }
 }

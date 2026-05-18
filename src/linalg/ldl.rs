@@ -558,7 +558,6 @@ pub fn factorize_quasidefinite_with_cached_perm(
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算）。
-#[allow(dead_code)]
 pub fn factorize_quasidefinite_with_amd(
     mat: &CscMatrix,
     deadline: Option<Instant>,

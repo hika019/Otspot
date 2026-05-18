@@ -165,7 +165,8 @@ pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> 
     }
 }
 
-/// inf-norm 絶対基準の dfeas 検証。互換用 (主要パスは check_dfeas_status_relative)。
+/// inf-norm 絶対基準の dfeas 検証。production は `check_dfeas_status_relative` を使うが、
+/// 絶対基準の semantics を sentinel する test (qp/mod.rs) から呼ばれる。
 #[allow(dead_code)]
 pub(crate) fn check_dfeas_status(
     problem: &QpProblem,

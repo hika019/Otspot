@@ -35,10 +35,6 @@ pub(crate) trait BasisManager: Send {
 
     /// ピボット後の基底更新: `entering_col` が `leaving_row` を置き換える
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec);
-
-    /// 数値安定性を検査し、必要であれば基底行列を再因子分解する
-    #[allow(dead_code)]
-    fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]);
 }
 
 /// eta ファイル更新付きの LU 分解ベース基底管理構造体
@@ -183,22 +179,6 @@ impl BasisManager for LuBasis {
         self.eta_file.etas.push(eta);
         self.basis_indices[leaving_row] = entering_col;
     }
-
-    fn refactor_if_needed(&mut self, a: &CscMatrix, basis: &[usize]) {
-        if self.eta_file.needs_refactor() {
-            match refactor::refactor(a, basis) {
-                Ok(new_lu) => {
-                    self.lu = new_lu;
-                    self.eta_file.etas.clear();
-                    self.basis_indices = basis.to_vec();
-                }
-                Err(_) => {
-                    // 特異基底: panicせずフラグを立てる。呼び出し元がsolverを安全に打ち切る
-                    self.refactor_failed = true;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -307,7 +287,7 @@ mod tests {
         );
 
         // refactor後: etaクリア、ftran/btran正常動作
-        lb.refactor_if_needed(&a, &basis);
+        lb.refactor_if_needed_timed(&a, &basis, None);
         assert!(
             !lb.eta_file.needs_refactor(),
             "After refactor, should not need refactor"
@@ -351,7 +331,7 @@ mod tests {
         assert!(lb.eta_file.needs_refactor());
 
         // Refactor should reset etas
-        lb.refactor_if_needed(&a, &basis);
+        lb.refactor_if_needed_timed(&a, &basis, None);
         assert!(!lb.eta_file.needs_refactor());
         assert_eq!(lb.eta_file.etas.len(), 0);
 

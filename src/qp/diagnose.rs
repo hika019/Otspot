@@ -6,8 +6,6 @@ const DIAG_TOL: f64 = 1e-10;
 const BOUND_TOL: f64 = 1e-10;
 /// IPM KKT 行列条件数の経験的許容上限。
 const SCALE_WARN_THRESHOLD: f64 = 1e8;
-#[allow(dead_code)]
-const ZERO_ROW_TOL: f64 = 1e-12;
 const ZERO_B_TOL: f64 = 1e-12;
 
 #[non_exhaustive]

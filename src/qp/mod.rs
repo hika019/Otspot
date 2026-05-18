@@ -95,46 +95,6 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
     solve_qp_with(problem, &SolverOptions::default())
 }
 
-#[deprecated(note = "to_all_le()廃止に伴いcollapse_extended_dualを使用")]
-#[allow(dead_code, deprecated)]
-pub(crate) fn collapse_le_expansion_dual(
-    dual_expanded: &[f64],
-    le_map: &crate::qp::problem::LeExpansionMap,
-    orig_types: &[crate::problem::ConstraintType],
-) -> Vec<f64> {
-    use crate::problem::ConstraintType;
-    let m_orig = orig_types.len();
-    let total_expanded: usize = le_map
-        .original_to_expanded
-        .iter()
-        .map(|rows| rows.len())
-        .sum();
-    if dual_expanded.len() < total_expanded {
-        return dual_expanded.to_vec();
-    }
-    let mut collapsed = vec![0.0f64; m_orig];
-    for (i, (ct, rows)) in orig_types
-        .iter()
-        .zip(le_map.original_to_expanded.iter())
-        .enumerate()
-    {
-        collapsed[i] = match ct {
-            ConstraintType::Le => dual_expanded[rows[0]],
-            ConstraintType::Ge => -dual_expanded[rows[0]],
-            ConstraintType::Eq => {
-                let mu1 = dual_expanded[rows[0]];
-                let mu2 = if rows.len() > 1 {
-                    dual_expanded[rows[1]]
-                } else {
-                    0.0
-                };
-                mu1 - mu2
-            }
-        };
-    }
-    collapsed
-}
-
 /// faer supernodal Cholesky の deepest stack 要求 + マージン。Rust thread デフォルト 2 MB では
 /// BOYD1 級 (n=93261) で overflow するため、入口で必ずこのサイズの scoped thread に載せる。
 pub(crate) const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
@@ -5035,7 +4995,6 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn test_concurrent_eq_constraint() {
-        use crate::problem::ConstraintType;
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();

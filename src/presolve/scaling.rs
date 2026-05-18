@@ -5,14 +5,10 @@
 
 use crate::sparse::CscMatrix;
 
-/// Ruiz equilibration scaler
+/// Ruiz equilibration namespace.
 ///
-/// Stores cumulative row and column scale factors from the iterative scaling.
-#[allow(dead_code)]
-pub struct RuizScaler {
-    pub row_scale: Vec<f64>,
-    pub col_scale: Vec<f64>,
-}
+/// 静的 `scale()` のみを提供する。インスタンス化される設計ではない。
+pub struct RuizScaler;
 
 impl RuizScaler {
     /// Apply Ruiz equilibration to a matrix, RHS vector, and cost vector.
@@ -115,29 +111,6 @@ impl RuizScaler {
         (a, cur_b, cur_c, cumul_row, cumul_col)
     }
 
-    /// Unscale a primal solution vector.
-    ///
-    /// If the scaled problem solution is `x̃`, the original solution is:
-    ///   `x_j = col_scale[j] * x̃_j`
-    #[allow(dead_code)]
-    pub fn unscale_solution(x: &[f64], col_scale: &[f64]) -> Vec<f64> {
-        x.iter()
-            .zip(col_scale.iter())
-            .map(|(&v, &s)| v * s)
-            .collect()
-    }
-
-    /// Unscale a dual solution vector.
-    ///
-    /// If the scaled problem dual is `ỹ`, the original dual is:
-    ///   `y_i = row_scale[i] * ỹ_i`
-    #[allow(dead_code)]
-    pub fn unscale_dual(y: &[f64], row_scale: &[f64]) -> Vec<f64> {
-        y.iter()
-            .zip(row_scale.iter())
-            .map(|(&v, &s)| v * s)
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -206,22 +179,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_unscale_solution() {
-        let x_scaled = vec![2.0, 3.0, 0.5];
-        let col_scale = vec![0.5, 2.0, 4.0];
-        let x_orig = RuizScaler::unscale_solution(&x_scaled, &col_scale);
-        assert!((x_orig[0] - 1.0).abs() < 1e-10);
-        assert!((x_orig[1] - 6.0).abs() < 1e-10);
-        assert!((x_orig[2] - 2.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_unscale_dual() {
-        let y_scaled = vec![1.0, 4.0];
-        let row_scale = vec![2.0, 0.5];
-        let y_orig = RuizScaler::unscale_dual(&y_scaled, &row_scale);
-        assert!((y_orig[0] - 2.0).abs() < 1e-10);
-        assert!((y_orig[1] - 2.0).abs() < 1e-10);
-    }
 }

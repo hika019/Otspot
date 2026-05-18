@@ -26,6 +26,9 @@ pub(crate) trait PricingStrategy {
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
+///
+/// 参照実装。production は `SteepestEdgePricing` のみを使用するが、
+/// pricing 戦略間の比較テストや refactor 系のテスト fixture として保持する。
 #[allow(dead_code)]
 pub(crate) struct DantzigPricing;
 
