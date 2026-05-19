@@ -693,10 +693,10 @@ pub(crate) fn phase2_primal_bounded(
     loop {
         *iters = iters.saturating_add(1);
         if *iters > PHASE2_PRIMAL_ITER_CAP {
-            return (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state);
+            return (SimplexOutcome::Timeout(bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs)), state);
         }
         if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state);
+            return (SimplexOutcome::Timeout(bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs)), state);
         }
 
         compute_reduced_costs_into(a, c, &mut basis_mgr, &state.is_basic, n_total,
@@ -780,7 +780,7 @@ pub(crate) fn phase2_primal_bounded(
                 return if basis_mgr.singular_basis {
                     (SimplexOutcome::SingularBasis, state)
                 } else {
-                    (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state)
+                    (SimplexOutcome::Timeout(bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs)), state)
                 };
             }
             continue;
@@ -826,7 +826,7 @@ pub(crate) fn phase2_primal_bounded(
                 return if basis_mgr.singular_basis {
                     (SimplexOutcome::SingularBasis, state)
                 } else {
-                    (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state)
+                    (SimplexOutcome::Timeout(bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs)), state)
                 };
             }
         }

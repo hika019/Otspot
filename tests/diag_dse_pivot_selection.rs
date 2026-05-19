@@ -163,7 +163,7 @@ fn warm_iter(lp: &LpProblem, basis: Vec<usize>, pricing: DualPricing) -> (usize,
     opts.presolve = false;
     opts.timeout_secs = Some(PER_LP_TIMEOUT_SECS);
     opts.dual_pricing = pricing;
-    opts.warm_start = Some(WarmStartBasis { basis, x_b: Vec::new() });
+    opts.warm_start = Some(WarmStartBasis { basis, x_b: Vec::new(), at_upper: vec![] });
     let r = solve_lp_with(lp, &opts);
     (r.iterations, r.status)
 }

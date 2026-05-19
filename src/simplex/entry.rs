@@ -271,6 +271,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
                 warm_start: Some(WarmStartBasis {
                     basis: ws_lp.basis.clone(),
                     x_b: Vec::new(),
+                    at_upper: vec![],
                 }),
                 ..options.clone()
             };

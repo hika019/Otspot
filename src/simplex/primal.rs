@@ -97,7 +97,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
                 let (dual_solution, reduced_costs, slack) =
                     extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone(), at_upper: vec![] };
                 SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj + sf.obj_offset,
@@ -402,7 +402,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                         let (dual_solution, reduced_costs, slack) =
                             extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                        let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                        let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone(), at_upper: vec![] };
                         SolverResult {
                             status: SolveStatus::Optimal,
                             objective: obj2 + sf.obj_offset,
@@ -588,7 +588,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             }
                             let (dual_solution, reduced_costs, slack) =
                                 extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                            let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                            let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone(), at_upper: vec![] };
                             return SolverResult {
                                 status: SolveStatus::Optimal,
                                 objective: obj2 + sf.obj_offset,

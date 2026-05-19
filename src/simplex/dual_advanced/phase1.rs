@@ -642,7 +642,7 @@ pub(crate) fn big_m_cold_start(
 
             // warm-start: artificial が basis に残るケースは除外
             let ws = if basis_aug.iter().all(|&idx| idx < n_total) {
-                Some(WarmStartBasis { basis: basis_aug.clone(), x_b: x_b.clone() })
+                Some(WarmStartBasis { basis: basis_aug.clone(), x_b: x_b.clone(), at_upper: vec![] })
             } else {
                 None
             };
