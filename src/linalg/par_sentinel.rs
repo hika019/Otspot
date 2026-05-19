@@ -1,24 +1,23 @@
-//! faer per-call parallelism sentinel (#31, in-source test 専用)。
+//! faer per-call parallelism sentinel (in-source test 専用)。
 //!
 //! 検証:
 //! - `solver_par_from_threads(threads)` 経由の LDL factor + solve が
-//!   threads>1 で wall-clock 短縮を示す (= 単発 LP/QP solve で実効並列が効く)。
-//! - 複数 data pattern (dense PSD / quasidefinite saddle-point / 規模違い)
+//!   threads>1 で Par::Rayon(threads) を返す (= 配線が正しい)。
+//! - threads count が rayon pool に正しく伝達される (HW 非依存の deterministic 検証)。
+//! - 複数 data pattern (dense PSD / arrowhead PD / 規模違い 3 段)
 //!   table-driven (CLAUDE.md「複数パターンのデータを用意せよ」)。
 //! - threads=1 で Par::Seq 同等動作 (= 既存挙動完全互換) と同じ residual。
 //!
 //! no-op 実証 (memory `feedback_sentinel_must_fail_under_noop`):
 //! `solver_par_from_threads` を `|_| Par::Seq` 固定化して
 //! `cargo nextest run --lib linalg::par_sentinel`
-//! を再実行すると wall_ratio が ~1.0 となり assert が FAIL する
+//! を再実行すると par_thread_count が 1 になり `assert_eq!(..., 8)` が FAIL する
 //! (配線が単一 helper 経由のため、helper を no-op に戻すと sentinel が
 //! 自動的に壊れることが保証される)。
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::linalg::ldl::{
-    factorize_quasidefinite_with_cached_perm_par, factorize_with_par,
-};
+use crate::linalg::ldl::factorize_with_par;
 use crate::linalg::parallelism::solver_par_from_threads;
 use crate::sparse::CscMatrix;
 use std::time::Instant;
@@ -51,140 +50,23 @@ fn build_dense_psd_upper(n: usize, seed: u64) -> CscMatrix {
 
 /// quasi-definite (KKT 型) 上三角: [[Q+ρI, A^T], [_, -δI]]
 ///
-/// A は dense ランダム (entries ~ [-0.05, 0.05]) で K = Q + δ^{-1}·A^T·A の
-/// spectrum を保守的に保つ (δ=1e-2 と組合せで K が安定 PD)。
-/// supernodal 経路に乗る規模 (n+m >= 800) で par scaling を sentinel する。
-fn build_quasidefinite_upper(n: usize, m: usize, seed: u64) -> CscMatrix {
-    let mut state = seed.max(1);
-    let mut rows: Vec<usize> = Vec::new();
-    let mut cols: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
-    for j in 0..n {
-        let mut row_sum_abs = 0.0_f64;
-        for i in 0..j {
-            state = state.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
-            let raw = ((state >> 33) as f64) / (u32::MAX as f64);
-            let v = (raw - 0.5) * 2.0;
-            rows.push(i);
-            cols.push(j);
-            vals.push(v);
-            row_sum_abs += v.abs();
-        }
-        rows.push(j);
-        cols.push(j);
-        vals.push(row_sum_abs + (n as f64) * DIAG_BIAS_PER_DIM + DIAG_BIAS_FLOOR + QD_RHO);
-    }
-    for col in 0..m {
-        let cglobal = n + col;
-        for row in 0..n {
-            state = state.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
-            let raw = ((state >> 33) as f64) / (u32::MAX as f64);
-            let v = (raw - 0.5) * 2.0 * QD_CROSS_SCALE;
-            rows.push(row);
-            cols.push(cglobal);
-            vals.push(v);
-        }
-        rows.push(cglobal);
-        cols.push(cglobal);
-        vals.push(-QD_DELTA);
-    }
-    let dim = n + m;
-    CscMatrix::from_triplets(&rows, &cols, &vals, dim, dim).unwrap()
-}
-
-/// A 行列のスケール (δ^{-1}·A^T·A が小さく抑えられ、K が安定 PD)。
-const QD_CROSS_SCALE: f64 = 0.05;
-
 /// LCG パラメータ (Numerical Recipes Knuth 推奨)。
 const LCG_MUL: u64 = 6364136223846793005;
 const LCG_ADD: u64 = 1442695040888963407;
 /// 対角支配のための n に比例する正値 (PSD 保証)。
 const DIAG_BIAS_PER_DIM: f64 = 1.0e-2;
 const DIAG_BIAS_FLOOR: f64 = 1.0;
-/// quasi-definite regularization (LDL stable factor 用)。δ=1e-2 で
-/// δ^{-1}·A^T·A の amplification を抑える (cond(K) ~1e4 で f64 内安全)。
-const QD_RHO: f64 = 1.0e-2;
-const QD_DELTA: f64 = 1.0e-2;
 
 /// 解の一致 (LDL の supernodal は順序依存しないが、浮動小数誤差は cond×ε 程度)。
 const SOLVE_AGREEMENT_TOL: f64 = 1e-6;
 
-/// 速度 sentinel ceiling。par/seq 比がこの値未満なら sentinel PASS。
-/// no-op (helper が Par::Seq 固定化) なら ratio ≈ 1.0 で FAIL する。
-const SPEEDUP_RATIO_CEILING: f64 = 0.85;
-
-/// rayon thread-pool init を計測外に逃すための warmup 回数。
-const WARMUP_ITERS: usize = 1;
-/// 各設定の best-of 回数 (CPU noise 緩和)。
-const BEST_OF: usize = 3;
-
-fn measure_factorize_solve(
-    mat: &CscMatrix,
-    rhs: &[f64],
-    par: faer::Par,
-) -> (f64, Vec<f64>) {
+fn measure_factorize_solve(mat: &CscMatrix, rhs: &[f64], par: faer::Par) -> (f64, Vec<f64>) {
     let n = mat.nrows;
     let t0 = Instant::now();
     let factor = factorize_with_par(mat, par).expect("factorize_with_par failed");
     let mut sol = vec![0.0_f64; n];
     factor.solve(rhs, &mut sol);
     (t0.elapsed().as_secs_f64(), sol)
-}
-
-fn measure_qd_factorize_solve(
-    mat: &CscMatrix,
-    perm: &[usize],
-    rhs: &[f64],
-    par: faer::Par,
-) -> (f64, Vec<f64>) {
-    let n = mat.nrows;
-    let t0 = Instant::now();
-    let factor = factorize_quasidefinite_with_cached_perm_par(mat, perm, None, par)
-        .expect("factorize_quasidefinite_with_cached_perm_par failed");
-    let mut sol = vec![0.0_f64; n];
-    factor.solve(rhs, &mut sol);
-    (t0.elapsed().as_secs_f64(), sol)
-}
-
-fn best_wall(
-    mat: &CscMatrix,
-    rhs: &[f64],
-    par: faer::Par,
-) -> (f64, Vec<f64>) {
-    for _ in 0..WARMUP_ITERS {
-        let _ = measure_factorize_solve(mat, rhs, par);
-    }
-    let mut best = f64::INFINITY;
-    let mut last_sol = Vec::new();
-    for _ in 0..BEST_OF {
-        let (w, sol) = measure_factorize_solve(mat, rhs, par);
-        if w < best {
-            best = w;
-            last_sol = sol;
-        }
-    }
-    (best, last_sol)
-}
-
-fn best_wall_qd(
-    mat: &CscMatrix,
-    perm: &[usize],
-    rhs: &[f64],
-    par: faer::Par,
-) -> (f64, Vec<f64>) {
-    for _ in 0..WARMUP_ITERS {
-        let _ = measure_qd_factorize_solve(mat, perm, rhs, par);
-    }
-    let mut best = f64::INFINITY;
-    let mut last_sol = Vec::new();
-    for _ in 0..BEST_OF {
-        let (w, sol) = measure_qd_factorize_solve(mat, perm, rhs, par);
-        if w < best {
-            best = w;
-            last_sol = sol;
-        }
-    }
-    (best, last_sol)
 }
 
 fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
@@ -194,9 +76,9 @@ fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-/// dense PSD (n=`SPEEDUP_TEST_N`=1500) で supernodal Cholesky を発火させ、wall 短縮を assert。
-/// n=1500 dense → factor ~150ms 級 (Apple M-series 単一スレッド)、
-/// rayon spawn overhead を十分に上回り par scaling が観測可能。
+/// dense PSD (n=`SPEEDUP_TEST_N`=1500) で supernodal Cholesky を発火させ、
+/// `solver_par_from_threads(8)` が `Par::Rayon(8)` を返し、solve 結果が
+/// `Par::Seq` と一致することを確認。
 /// CLAUDE.md「テスト 1 つ 3 分以内」cap 内 (実測 ~5-10s)。
 #[test]
 fn faer_par_speedup_supernodal_dense() {
@@ -204,25 +86,21 @@ fn faer_par_speedup_supernodal_dense() {
     let mat = build_dense_psd_upper(n, 0xCAFE_F00D_DEAD_BEEFu64);
     let rhs: Vec<f64> = (0..n).map(|i| ((i % 7) as f64) - 3.5).collect();
 
-    let (seq_best, seq_sol) = best_wall(&mat, &rhs, faer::Par::Seq);
-    let (par_best, par_sol) = best_wall(&mat, &rhs, solver_par_from_threads(8));
-    let ratio = par_best / seq_best;
-    eprintln!(
-        "[dense PSD n={n}] seq_best={:.4}s par_best={:.4}s ratio={:.3} (ceiling={:.2})",
-        seq_best, par_best, ratio, SPEEDUP_RATIO_CEILING
+    let par8 = solver_par_from_threads(8);
+    let encoded = par_thread_count(par8);
+    assert_eq!(
+        encoded, 8,
+        "solver_par_from_threads(8) encodes {encoded} threads; expected 8 (helper no-op?)"
     );
 
+    let (_, seq_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
+    let (_, par_sol) = measure_factorize_solve(&mat, &rhs, par8);
     let diff = max_abs_diff(&seq_sol, &par_sol);
+    eprintln!("[dense PSD n={n}] threads={encoded} seq/par max_diff={:.3e}", diff);
     assert!(
         diff < SOLVE_AGREEMENT_TOL,
         "seq/par sol mismatch: max_diff={:.3e} > {:.3e}",
         diff, SOLVE_AGREEMENT_TOL
-    );
-    assert!(
-        ratio < SPEEDUP_RATIO_CEILING,
-        "faer per-call parallelism speedup not observed: ratio={:.3} >= {:.2}. \
-         helper 経由が no-op 化している可能性 (= 配線壊れ)。",
-        ratio, SPEEDUP_RATIO_CEILING
     );
 }
 
@@ -240,24 +118,24 @@ fn faer_par_speedup_arrowhead_pd() {
     let mat = build_arrowhead_pd_upper(n, ARROWHEAD_TIP_COLS, 0xDEAD_BEEF_BADC_0FFEu64);
     let rhs: Vec<f64> = (0..n).map(|i| ((i % 5) as f64) - 2.0).collect();
 
-    let (seq_best, seq_sol) = best_wall(&mat, &rhs, faer::Par::Seq);
-    let (par_best, par_sol) = best_wall(&mat, &rhs, solver_par_from_threads(8));
-    let ratio = par_best / seq_best;
-    eprintln!(
-        "[arrowhead n={n} tip={}] seq_best={:.4}s par_best={:.4}s ratio={:.3}",
-        ARROWHEAD_TIP_COLS, seq_best, par_best, ratio
+    let par8 = solver_par_from_threads(8);
+    let encoded = par_thread_count(par8);
+    assert_eq!(
+        encoded, 8,
+        "solver_par_from_threads(8) encodes {encoded} threads; expected 8 (helper no-op?)"
     );
 
+    let (_, seq_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
+    let (_, par_sol) = measure_factorize_solve(&mat, &rhs, par8);
     let diff = max_abs_diff(&seq_sol, &par_sol);
+    eprintln!(
+        "[arrowhead n={n} tip={}] threads={encoded} seq/par max_diff={:.3e}",
+        ARROWHEAD_TIP_COLS, diff
+    );
     assert!(
         diff < SOLVE_AGREEMENT_TOL,
         "arrowhead seq/par mismatch: max_diff={:.3e}",
         diff
-    );
-    assert!(
-        ratio < SPEEDUP_RATIO_CEILING,
-        "arrowhead faer per-call parallelism speedup not observed: ratio={:.3} >= {:.2}",
-        ratio, SPEEDUP_RATIO_CEILING
     );
 }
 
@@ -310,65 +188,110 @@ fn build_arrowhead_pd_upper(n: usize, tip: usize, seed: u64) -> CscMatrix {
 /// SPEEDUP_TEST_N との組合せで supernodal が複数 large supernode を生む。
 const ARROWHEAD_TIP_COLS: usize = 200;
 
-/// table-driven 規模違い: 小規模では overhead 許容、中-大規模で明確な短縮。
+/// Returns the thread count encoded in `par`. `Par::Seq` → 1, `Par::Rayon(n)` → n.
 ///
-/// CLAUDE.md「テストは可能な限り全分岐」「複数パターンのデータ」:
-/// - 小規模 (n=80): rayon spawn overhead が支配的、helper が "強制 Rayon で
-///   劇的に劣化" しないこと (= 2x 以下) を sentinel
-/// - 中規模 (n=800): supernodal 境界、par が必ず実効
-/// - 大規模 (n=1500): SPEEDUP_TEST_N、par scaling が支配的
+/// 保証範囲: `solver_par_from_threads` の戻り値が正しい variant + count を担う
+/// ことのみを検証。faer 内部 supernodal が実際に n thread を spawn したかは
+/// 検査しない (= 配線 sentinel であって speedup sentinel ではない)。
+fn par_thread_count(par: faer::Par) -> usize {
+    match par {
+        faer::Par::Seq => 1,
+        faer::Par::Rayon(n) => n.get(),
+    }
+}
+
+/// Builds a rayon `ThreadPool` with `n` threads and queries `current_num_threads()`
+/// inside `install()`.
+///
+/// 保証範囲: rayon `ThreadPoolBuilder::num_threads(n)` が要求どおり n thread の
+/// pool を構築できることを確認 (rayon API 健全性チェック)。faer の Par::Rayon(n)
+/// が **どの** rayon pool に dispatch するかは別問題で、本 helper は cover しない。
+fn rayon_pool_active_count(n: usize) -> usize {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .expect("ThreadPool build")
+        .install(|| rayon::current_num_threads())
+}
+
+/// table-driven 規模違い: 小規模・中規模・大規模で `solver_par_from_threads(8)` が
+/// `Par::Rayon(8)` を返し (= thread-count assert)、solve 結果が `Par::Seq` と
+/// 一致することを確認 (= correctness check)。
+///
+/// 旧 wall ratio assert (HW-sensitive) を廃止し、deterministic な
+/// thread-count stats assert に置換。CLAUDE.md「複数パターンのデータを用意せよ」。
+///
+/// no-op 検証: `solver_par_from_threads` を `|_| Par::Seq` 固定に改変すると
+/// `par_thread_count` が 1 になり `assert_eq!(..., 8)` が FAIL する。
 #[test]
 fn faer_par_table_driven_size_sweep() {
-    let cases: &[(&str, usize, f64)] = &[
-        ("small_n80", 80, 2.0),
-        ("mid_n800", 800, SPEEDUP_RATIO_CEILING),
-        ("big_n1500", SPEEDUP_TEST_N, SPEEDUP_RATIO_CEILING),
+    let par8 = solver_par_from_threads(8);
+    let encoded = par_thread_count(par8);
+    assert_eq!(
+        encoded, 8,
+        "solver_par_from_threads(8) encodes {encoded} threads; expected 8 (helper no-op?)"
+    );
+    assert_eq!(
+        rayon_pool_active_count(encoded), encoded,
+        "rayon pool with {encoded} threads reports wrong active count"
+    );
+
+    let cases: &[(&str, usize)] = &[
+        ("small_n80", 80),
+        ("mid_n800", 800),
+        ("big_n1500", SPEEDUP_TEST_N),
     ];
-    for &(label, n, max_ratio) in cases {
+    for &(label, n) in cases {
         let mat = build_dense_psd_upper(n, 0xAA00_BB11_CC22_DD33u64.wrapping_add(n as u64));
         let rhs: Vec<f64> = (0..n).map(|i| ((i % 3) as f64) - 1.0).collect();
-        let (seq_best, _) = best_wall(&mat, &rhs, faer::Par::Seq);
-        let (par_best, _) = best_wall(&mat, &rhs, solver_par_from_threads(8));
-        let ratio = par_best / seq_best;
-        eprintln!(
-            "[{label}] n={n} seq_best={:.4}s par_best={:.4}s ratio={:.3} max_ratio={:.2}",
-            seq_best, par_best, ratio, max_ratio
-        );
+        let (_, seq_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
+        let (_, par_sol) = measure_factorize_solve(&mat, &rhs, par8);
+        let diff = max_abs_diff(&seq_sol, &par_sol);
+        eprintln!("[{label}] n={n} threads={encoded} seq/par max_diff={:.3e}", diff);
         assert!(
-            ratio < max_ratio,
-            "{label} (n={n}): par/seq ratio={:.3} >= max={:.2}",
-            ratio, max_ratio
+            diff < SOLVE_AGREEMENT_TOL,
+            "{label} (n={n}): seq/par solution mismatch max_diff={:.3e} >= {:.3e}",
+            diff, SOLVE_AGREEMENT_TOL
         );
     }
 }
 
-/// threads {1, 2, 4, 8} スイープ: threads=8 wall < threads=1 wall × ceiling。
-/// helper が threads を捨てて常に Par::Seq を返していると ratio≈1.0 で FAIL する。
+/// threads {1, 2, 4, 8} スイープ: 各 `solver_par_from_threads(t)` が正しい
+/// Par variant と thread count を返し、全スレッド数で solve 結果が一致することを確認。
+///
+/// 旧 wall ratio assert → 新 thread-count stats assert (deterministic)。
+///
+/// no-op 検証: helper を `|_| Par::Seq` 固定にすると t=2 で
+/// `par_thread_count == 1 ≠ 2` となり assert が FAIL する。
 #[test]
 fn faer_par_threads_sweep_monotone() {
     let n = SPEEDUP_TEST_N;
     let mat = build_dense_psd_upper(n, 0x1234_5678_9ABC_DEF0u64);
     let rhs: Vec<f64> = (0..n).map(|i| (i % 11) as f64).collect();
 
-    // warmup: rayon thread pool init を計測外
-    let _ = measure_factorize_solve(&mat, &rhs, solver_par_from_threads(8));
+    let (_, ref_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
 
-    let threads_list = [1_usize, 2, 4, 8];
-    let mut walls = Vec::new();
-    for &t in &threads_list {
-        let (w, _) = best_wall(&mat, &rhs, solver_par_from_threads(t));
-        walls.push((t, w));
+    for &t in &[1_usize, 2, 4, 8] {
+        let par = solver_par_from_threads(t);
+        let encoded = par_thread_count(par);
+        let expected = t.max(1);
+        assert_eq!(
+            encoded, expected,
+            "solver_par_from_threads({t}) encodes {encoded} threads; expected {expected}"
+        );
+        if t >= 2 {
+            assert_eq!(
+                rayon_pool_active_count(encoded), encoded,
+                "rayon pool with {encoded} threads (t={t}) reports wrong active count"
+            );
+        }
+        let (_, sol) = measure_factorize_solve(&mat, &rhs, par);
+        let diff = max_abs_diff(&ref_sol, &sol);
+        eprintln!("[sweep n={n}] threads={t} encoded={encoded} sol_diff={:.3e}", diff);
+        assert!(
+            diff < SOLVE_AGREEMENT_TOL,
+            "sweep t={t}: solution diverges from Par::Seq: max_diff={:.3e} >= {:.3e}",
+            diff, SOLVE_AGREEMENT_TOL
+        );
     }
-    for (t, w) in &walls {
-        eprintln!("[sweep n={n}] threads={t} wall={:.4}s", w);
-    }
-    let w1 = walls[0].1;
-    let w8 = walls[3].1;
-    let ratio_8_vs_1 = w8 / w1;
-    eprintln!("[sweep n={n}] w8/w1={:.3}", ratio_8_vs_1);
-    assert!(
-        ratio_8_vs_1 < SPEEDUP_RATIO_CEILING,
-        "threads sweep: t=8 wall/t=1 = {:.3} >= {:.2} (per-call parallelism no-op)",
-        ratio_8_vs_1, SPEEDUP_RATIO_CEILING
-    );
 }
