@@ -55,6 +55,24 @@ const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 /// 1e-3 では Phase 1 の Infeasible 判定境界に影響しうるため間を取った。
 const LEX_PERTURB_REL: f64 = 1e-4;
 
+/// γ_i = ||(B^{-1})_{i,:}||² 真値再計算 (m BTRAN). DSE warm-start init と
+/// refactor 後の drift wipe で同一手順を踏むため、2 caller 重複を helper 化。
+/// O(m²) cost (m BTRAN). Caller は `leaving.set_initial_gamma(...)` に渡す。
+fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
+    let mut gamma_truth = vec![0.0f64; m];
+    let mut e_i = vec![0.0f64; m];
+    let mut rho_i = vec![0.0f64; m];
+    for i in 0..m {
+        e_i.iter_mut().for_each(|v| *v = 0.0);
+        e_i[i] = 1.0;
+        let mut sv = SparseVec::from_dense(&e_i);
+        basis_mgr.btran(&mut sv);
+        sv.to_dense_into(&mut rho_i);
+        gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
+    }
+    gamma_truth
+}
+
 /// reduced_costs (non-basic only) と x_b に lex 摂動を加える。
 fn apply_lex_perturbation(
     reduced_costs: &mut [f64],
@@ -155,17 +173,7 @@ pub(crate) fn dual_simplex_core_advanced(
     // to FLOOR within a few pivots (verified on textbook degenerate LP).
     // Cost: O(m²). Acceptable: one-shot per warm-start solve.
     if needs_sigma {
-        let mut gamma_truth = vec![0.0f64; m];
-        let mut e_i = vec![0.0f64; m];
-        let mut rho_i = vec![0.0f64; m];
-        for i in 0..m {
-            e_i.iter_mut().for_each(|v| *v = 0.0);
-            e_i[i] = 1.0;
-            let mut sv = SparseVec::from_dense(&e_i);
-            basis_mgr.btran(&mut sv);
-            sv.to_dense_into(&mut rho_i);
-            gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
-        }
+        let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
         leaving.set_initial_gamma(&gamma_truth);
     }
 
@@ -343,17 +351,7 @@ pub(crate) fn dual_simplex_core_advanced(
             // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
             leaving.after_refactor(m);
             if needs_sigma {
-                let mut gamma_truth = vec![0.0f64; m];
-                let mut e_i = vec![0.0f64; m];
-                let mut rho_i = vec![0.0f64; m];
-                for i in 0..m {
-                    e_i.iter_mut().for_each(|v| *v = 0.0);
-                    e_i[i] = 1.0;
-                    let mut sv = SparseVec::from_dense(&e_i);
-                    basis_mgr.btran(&mut sv);
-                    sv.to_dense_into(&mut rho_i);
-                    gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
-                }
+                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
                 leaving.set_initial_gamma(&gamma_truth);
             }
         }
