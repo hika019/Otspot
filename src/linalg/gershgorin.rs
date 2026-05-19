@@ -14,11 +14,14 @@
 //! を共有するため本 helper に集約する。
 //!
 //! ## CSC 規約
-//! 入力 `Q` は full-symmetric / 上三角 / 下三角いずれも許容。layout は entry の
-//! `(row, col)` 並びから自動判定し、片側 triangular でも対称化された `R_j` を算出する
-//! (実装下半を参照)。対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
+//! 入力 `Q` は full-symmetric / 上三角 / 下三角 / 非対称 mixed (片側 entry に対称
+//! pair が欠ける) のいずれも許容。各 off-diag entry は `(min(r,c), max(r,c))`
+//! canonical pair に集約 (dedup) され、片側だけ存在しても両側存在しても
+//! 同一の `R_j` を得る。両側 entry で値が異なる場合は `max(|v|)` を採用 (PSD 側に保守的)。
+//! 対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
 
 use crate::sparse::CscMatrix;
+use std::collections::HashMap;
 
 /// `Q` の Gershgorin λ_min 下界から、PSD 化に必要な非負シフト
 /// `max(0, max_j(R_j − Q[j,j])) = max(0, −λ_min_lower(Q))` を返す。
@@ -32,14 +35,12 @@ pub(crate) fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
         return 0.0;
     }
     let mut diag = vec![0.0_f64; n];
-    let mut row_offdiag_sum = vec![0.0_f64; n];
-    // 全 off-diag entry を 1 度だけ走査し、|v| を (row, col) 双方の R に加算する。
-    // 旧実装は `row < col` のみを反映していたため lower-triangular 入力で off-diag を
-    // 取り零し λ_min 下界を誤算出する silent failure があった。両側を見ることで
-    // 上三角 / 下三角 layout は正しく対称化される。full-symmetric (両側 entry 持ち) は
-    // 各 pair を 2 度反映するので最後に 1/2 補正する。
-    let mut has_upper = false;
-    let mut has_lower = false;
+    // 各 off-diag entry を (min(r,c), max(r,c)) canonical pair に集約。
+    // upper/lower/full/mixed-asymmetric いずれの layout でも unordered pair
+    // ごとに 1 度だけ R に反映。旧 `has_upper && has_lower → 1/2` heuristic は
+    // 非対称 mixed (例: (0,1) upper と (2,1) lower で対称 pair なし) を full と
+    // 誤認し誤値を返したため、canonical dedup に置換。
+    let mut canonical: HashMap<(usize, usize), f64> = HashMap::new();
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
@@ -47,21 +48,19 @@ pub(crate) fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
             if row == col {
                 diag[col] = val;
             } else {
-                if row < col {
-                    has_upper = true;
-                } else {
-                    has_lower = true;
-                }
+                let key = if row < col { (row, col) } else { (col, row) };
                 let abs_val = val.abs();
-                row_offdiag_sum[row] += abs_val;
-                row_offdiag_sum[col] += abs_val;
+                let entry = canonical.entry(key).or_insert(0.0);
+                if abs_val > *entry {
+                    *entry = abs_val;
+                }
             }
         }
     }
-    if has_upper && has_lower {
-        for r in row_offdiag_sum.iter_mut() {
-            *r *= 0.5;
-        }
+    let mut row_offdiag_sum = vec![0.0_f64; n];
+    for (&(i, j), &abs_val) in canonical.iter() {
+        row_offdiag_sum[i] += abs_val;
+        row_offdiag_sum[j] += abs_val;
     }
     let mut shift = 0.0_f64;
     for j in 0..n {
@@ -211,6 +210,66 @@ mod tests {
         assert!((s_full - 2.0).abs() < 1e-12, "full shift = {s_full}");
     }
 
+    /// 非対称 mixed layout: (0,1) upper と (2,1) lower で対称 pair なし。
+    /// 抽象 Q = [[0,1,0],[1,0,1],[0,1,0]] (symmetric 化想定) → diag=(0,0,0),
+    /// R=(1,2,1), Gershgorin lower=(-1,-2,-1), shift=2。
+    /// 旧 `has_upper && has_lower → 1/2` heuristic は full と誤認し shift=1 (誤値) を返した。
+    #[test]
+    fn mixed_asymmetric_no_pair_canonicalizes() {
+        let q = CscMatrix::from_triplets(
+            &[0, 2],
+            &[1, 1],
+            &[1.0, 1.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let s = psd_shift_from_gershgorin(&q);
+        assert!((s - 2.0).abs() < 1e-12, "mixed-asymm shift = {s} (期待 2.0)");
+    }
+
+    /// 非対称 mixed の正規化が full-symmetric 入力と一致することを示す。
+    /// 上記 mixed 入力に欠けている対称 pair (1,0) と (1,2) を足した full 入力で
+    /// 同一 shift を返すこと = canonical 化が完全。
+    #[test]
+    fn mixed_asymmetric_matches_full_symmetric() {
+        let q_mixed = CscMatrix::from_triplets(
+            &[0, 2],
+            &[1, 1],
+            &[1.0, 1.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let q_full = CscMatrix::from_triplets(
+            &[0, 1, 2, 1],
+            &[1, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let s_mixed = psd_shift_from_gershgorin(&q_mixed);
+        let s_full = psd_shift_from_gershgorin(&q_full);
+        assert!((s_mixed - s_full).abs() < 1e-12, "mixed={s_mixed} vs full={s_full}");
+    }
+
+    /// 両側 entry で値不一致時は max(|v|) を採用 (PSD 側に保守的) すること。
+    /// (0,1)=1.0 と (1,0)=3.0 → canonical (0,1) で max=3.0 → R=(3,3), shift=3。
+    #[test]
+    fn asymmetric_value_pair_takes_max_abs() {
+        let q = CscMatrix::from_triplets(
+            &[0, 1],
+            &[1, 0],
+            &[1.0, 3.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let s = psd_shift_from_gershgorin(&q);
+        assert!((s - 3.0).abs() < 1e-12, "max-abs shift = {s} (期待 3.0)");
+    }
+
     /// no-op proof: lower-triangular 対称化 fix を撤回 (= 旧 `row < col` only) すると
     /// `lower_triangular_only_zero_diag_bilinear_matches_upper` 等がどう FAIL するかを
     /// 単一 inline で機械検証する。`feedback_sentinel_must_fail_under_noop` 準拠:
@@ -255,6 +314,59 @@ mod tests {
         assert!(
             (legacy - fixed).abs() > 0.5,
             "fix の有無で挙動が乖離 (legacy={legacy}, fixed={fixed}) = sentinel が active"
+        );
+    }
+
+    /// no-op proof: canonical dedup fix を撤回 (= 旧 `has_upper && has_lower → 1/2`)
+    /// すると `mixed_asymmetric_no_pair_canonicalizes` が確実に FAIL することを inline で
+    /// 機械検証する。`feedback_sentinel_must_fail_under_noop` 準拠。
+    #[test]
+    fn no_op_proof_mixed_asymmetric_canonicalize_required() {
+        // 旧 impl 相当 (#66 fix 後の has_upper && has_lower → 1/2 補正) を inline 再現。
+        fn legacy_has_upper_lower_half(q: &CscMatrix) -> f64 {
+            let n = q.nrows;
+            if n == 0 { return 0.0; }
+            let mut diag = vec![0.0_f64; n];
+            let mut row_sum = vec![0.0_f64; n];
+            let mut has_upper = false;
+            let mut has_lower = false;
+            for col in 0..n {
+                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+                    let row = q.row_ind[k];
+                    let val = q.values[k];
+                    if row == col {
+                        diag[col] = val;
+                    } else {
+                        if row < col { has_upper = true; } else { has_lower = true; }
+                        let abs = val.abs();
+                        row_sum[row] += abs;
+                        row_sum[col] += abs;
+                    }
+                }
+            }
+            if has_upper && has_lower {
+                for r in row_sum.iter_mut() { *r *= 0.5; }
+            }
+            let mut shift = 0.0_f64;
+            for j in 0..n {
+                let lower = diag[j] - row_sum[j];
+                if lower < 0.0 { shift = shift.max(-lower); }
+            }
+            shift
+        }
+        // 非対称 mixed: (0,1)=1 upper + (2,1)=1 lower, 対称 pair なし。
+        // 抽象 Q = [[0,1,0],[1,0,1],[0,1,0]] → 真 shift=2。
+        let q = CscMatrix::from_triplets(
+            &[0, 2], &[1, 1], &[1.0, 1.0], 3, 3,
+        ).unwrap();
+        let legacy = legacy_has_upper_lower_half(&q);
+        // 旧 impl: has_upper && has_lower=true → 誤って 1/2 補正、shift=1 (誤値)
+        assert!((legacy - 1.0).abs() < 1e-12, "旧 impl は mixed-asymm を full と誤認、shift={legacy}");
+        let fixed = psd_shift_from_gershgorin(&q);
+        assert!((fixed - 2.0).abs() < 1e-12, "新 impl: canonical dedup で shift={fixed}");
+        assert!(
+            (legacy - fixed).abs() > 0.5,
+            "fix の有無で乖離 (legacy={legacy}, fixed={fixed}) = sentinel が active"
         );
     }
 }
