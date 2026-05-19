@@ -18,6 +18,7 @@
 - エージェントはgit worktreeを使用
 - 作業が完了したブランチは削除 or 放置
 - 1 branch = 1-2 commit 理想. 3+ で merge 前 squash 検討 (logical unit 集約). main 上の commit 履歴改変禁止 (rebase/squash/amend は branch 内のみ).
+- mainへマージする前にtestを実行.
 
 # 方針/実装
 - ユーザーの意見に安易に迎合するな
