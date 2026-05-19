@@ -19,8 +19,9 @@ pub(crate) use primal::reconcile_final_basis_state;
 pub(crate) use standard_form::{
     extract_dual_info, timeout_result_with_incumbent, SimplexOutcome, StandardForm,
 };
+pub(crate) use standard_form::build_standard_form;
 #[cfg(test)]
-pub(crate) use standard_form::{build_standard_form, OrigVarInfo};
+pub(crate) use standard_form::OrigVarInfo;
 
 #[cfg(test)]
 mod tests;
