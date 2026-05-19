@@ -37,7 +37,7 @@ use super::bound::is_feasible_result;
 ///
 /// `α = max(0, max_j(R_j − Q[j,j])) / 2 = psd_shift_from_gershgorin(Q) / 2`。
 /// 共通 helper は `linalg::gershgorin` を参照。
-pub fn gershgorin_alpha(q: &CscMatrix) -> f64 {
+pub(crate) fn gershgorin_alpha(q: &CscMatrix) -> f64 {
     0.5 * psd_shift_from_gershgorin(q)
 }
 
@@ -105,7 +105,7 @@ fn all_bounds_finite(node_bounds: &[(f64, f64)]) -> bool {
 ///
 /// convex relaxation は cold solve で実行 (= warm 継承なし、`opts.warm_start_qp = None`)。
 /// 元 non-convex の warm は凸化後の最適解と一致せず再固着 risk があるため。
-pub fn alpha_bb_lower_bound(
+pub(crate) fn alpha_bb_lower_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
     alpha: f64,
