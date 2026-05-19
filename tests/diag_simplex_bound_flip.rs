@@ -1,4 +1,4 @@
-//! BFRT (Bound-Flipping Ratio Test) sentinel suite (task #41).
+//! BFRT (Bound-Flipping Ratio Test) sentinel suite.
 //!
 //! Validates the BFRT primitive via:
 //! 1. **Multi-pattern ratio test scenarios** — bounded vs unbounded mixes,
@@ -16,7 +16,7 @@
 //! Production wiring of BFRT into `dual_advanced/core.rs` requires an
 //! alternate `StandardForm` that does **not** expand bounded variables to
 //! upper-bound rows (otherwise BFRT sees only x ≥ 0 columns with no flip
-//! handles). That refactor is task #41-A (follow-up). The mini simplex below
+//! handles). That refactor is a follow-up task. The mini simplex below
 //! lets us prove the primitive's pivot-reduction effect on representative
 //! bound-rich data **today**, while production integration matures.
 

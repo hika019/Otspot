@@ -311,7 +311,7 @@ pub struct SolverOptions {
     /// Dual simplex leaving 戦略 (default `MostInfeasible`)。
     /// `SteepestEdge` 切替で `dual_advanced` 配下のみ DSE 駆動。
     pub dual_pricing: DualPricing,
-    /// Bound-Flipping Ratio Test (Maros 2003, #41) を有効化する。
+    /// Bound-Flipping Ratio Test (Maros 2003 §7.6) を有効化する。
     /// default false: 既存 Harris ratio test。
     /// true: dual_advanced 配下で BFRT を走らせる。Phase 2 ratio test の
     /// `bound_flip::bfrt_select_entering` に委譲され、対象 LP に finite upper

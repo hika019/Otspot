@@ -72,7 +72,7 @@ pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, 
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 
-/// Re-export of the BFRT (Bound-Flipping Ratio Test) primitive (#41).
+/// Re-export of the BFRT (Bound-Flipping Ratio Test) primitive.
 /// Public so integration sentinels in `tests/diag_simplex_bound_flip.rs`
 /// can exercise the ratio-test step-size effect without forcing private
 /// module exposure for the whole `simplex` tree.
