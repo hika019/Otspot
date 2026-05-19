@@ -43,47 +43,52 @@ pub(super) enum FactorizeOutcome {
     Failure,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// factorize_kkt_with_retry の入力一式 (1 iteration 分)。
+/// caches は mut 参照で別経路、本 ctx は immutable view のみ束ねる。
+pub(super) struct FactorizeContext<'a> {
+    pub problem: &'a QpProblem,
+    pub a_ext: &'a CscMatrix,
+    pub aug_cache: &'a AugmentedKktCache,
+    pub sigma_vec: &'a [f64],
+    pub is_eq_ext: &'a [bool],
+    pub s: &'a [f64],
+    pub r_d_pmm: &'a [f64],
+    pub r_p_pmm: &'a [f64],
+    pub rho_matrix: f64,
+    pub delta_matrix: f64,
+    pub inertia_correction: f64,
+    pub use_schur: bool,
+    pub timeout_ctx: &'a TimeoutCtx,
+    pub par: Par,
+    pub n: usize,
+    pub prof: bool,
+}
+
 pub(super) fn factorize_kkt_with_retry(
-    problem: &QpProblem,
-    a_ext: &CscMatrix,
-    aug_cache: &AugmentedKktCache,
+    ctx: &FactorizeContext<'_>,
     caches: &mut FactorizeCaches,
-    sigma_vec: &[f64],
-    is_eq_ext: &[bool],
-    s: &[f64],
-    r_d_pmm: &[f64],
-    r_p_pmm: &[f64],
-    rho_matrix: f64,
-    delta_matrix: f64,
-    inertia_correction: f64,
-    use_schur: bool,
-    timeout_ctx: &TimeoutCtx,
-    par: Par,
-    n: usize,
-    prof: bool,
 ) -> FactorizeOutcome {
     // 不定 Q 用に rho_retry を inertia_correction で下限し、Q+ρI を初回から PSD に。
-    let mut rho_retry = rho_matrix.max(inertia_correction);
-    let ldl_reg_ceiling = LDL_REG_CEILING.max(inertia_correction);
-    let mut delta_retry = delta_matrix;
+    let mut rho_retry = ctx.rho_matrix.max(ctx.inertia_correction);
+    let ldl_reg_ceiling = LDL_REG_CEILING.max(ctx.inertia_correction);
+    let mut delta_retry = ctx.delta_matrix;
     let mut fac_opt: Option<KktFactor> = None;
     let mut aug_mat_opt: Option<CscMatrix> = None;
     let mut d_inv_opt: Option<Vec<f64>> = None;
 
     for _retry in 0..LDL_REG_RETRY_MAX {
-        if timeout_ctx.should_stop() {
+        if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
         }
-        let prof_t_build = if prof { Some(std::time::Instant::now()) } else { None };
-        let mat_for_factor = if use_schur {
+        let prof_t_build = if ctx.prof { Some(std::time::Instant::now()) } else { None };
+        let mat_for_factor = if ctx.use_schur {
             let (s_mat, d_inv) = build_schur_system(
-                &problem.q, a_ext, sigma_vec, rho_retry, delta_retry,
+                &ctx.problem.q, ctx.a_ext, ctx.sigma_vec, rho_retry, delta_retry,
             );
             d_inv_opt = Some(d_inv);
             s_mat
         } else {
-            aug_cache.materialize(sigma_vec, rho_retry, delta_retry)
+            ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry)
         };
         if let Some(t) = prof_t_build {
             eprintln!("FACT_PROF section=build n={} nnz={} t={:.3}ms",
@@ -95,38 +100,38 @@ pub(super) fn factorize_kkt_with_retry(
                 mat_for_factor.nrows,
                 &mat_for_factor.col_ptr,
                 &mat_for_factor.row_ind,
-                timeout_ctx.deadline,
+                ctx.timeout_ctx.deadline,
             ));
         }
         let perm = caches.amd_perm.as_ref().unwrap();
         // Schur / DD-LDL は pre-permuted 未対応なので通常経路へ。
         let dd_ldl = std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1");
-        let use_pre_permuted = !use_schur && !dd_ldl;
+        let use_pre_permuted = !ctx.use_schur && !dd_ldl;
         if use_pre_permuted && caches.aug_permuted.is_none() {
-            caches.aug_permuted = Some(aug_cache.permute(perm));
+            caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
         }
-        let prof_t_factor = if prof { Some(std::time::Instant::now()) } else { None };
+        let prof_t_factor = if ctx.prof { Some(std::time::Instant::now()) } else { None };
         let factor_result = if use_pre_permuted {
             let permuted_cache = caches.aug_permuted.as_ref().unwrap();
-            let pre_permuted = permuted_cache.materialize(sigma_vec, rho_retry, delta_retry);
+            let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
             factorize_kkt_pre_permuted_cached_par(
                 &pre_permuted,
                 &mat_for_factor,
                 perm,
-                timeout_ctx.deadline,
+                ctx.timeout_ctx.deadline,
                 max_l_nnz_from_budget(),
-                Some(n),
+                Some(ctx.n),
                 caches.symbolic_cholesky.clone(),
-                par,
+                ctx.par,
             )
         } else {
             factorize_kkt_with_cached_perm_par(
                 &mat_for_factor,
                 perm,
-                timeout_ctx.deadline,
+                ctx.timeout_ctx.deadline,
                 max_l_nnz_from_budget(),
-                Some(n),
-                par,
+                Some(ctx.n),
+                ctx.par,
             )
         };
         if use_pre_permuted && caches.symbolic_cholesky.is_none() {
@@ -140,13 +145,13 @@ pub(super) fn factorize_kkt_with_retry(
                     eprintln!("FACT_PROF section=factorize n={} t={:.3}ms",
                         mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
                 }
-                let prof_t_probe = if prof { Some(std::time::Instant::now()) } else { None };
+                let prof_t_probe = if ctx.prof { Some(std::time::Instant::now()) } else { None };
                 // 健全性プローブ: factorize Ok でも cond(K) 大で LDL solve が Newton 方向
                 // を central path から外す病理を ||K·sol − rhs||/||rhs|| で直接弾く。
                 // iterative backend は LDL 精度概念が無いので skip。
                 if !f.is_iterative()
                     && !probe_ldl_health(
-                        &f, &mat_for_factor, r_d_pmm, r_p_pmm, s, is_eq_ext, n,
+                        &f, &mat_for_factor, ctx.r_d_pmm, ctx.r_p_pmm, ctx.s, ctx.is_eq_ext, ctx.n,
                     )
                 {
                     if rho_retry >= ldl_reg_ceiling {
@@ -181,15 +186,15 @@ pub(super) fn factorize_kkt_with_retry(
     if fac_opt.is_none() {
         caches.amd_perm = None;
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
-        let aug_mat_fb = aug_cache.materialize(sigma_vec, rho_retry, delta_fallback);
+        let aug_mat_fb = ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_fallback);
         let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
         match factorize_kkt_with_cached_perm_par(
             &aug_mat_fb,
             &identity_perm,
-            timeout_ctx.deadline,
+            ctx.timeout_ctx.deadline,
             max_l_nnz_from_budget(),
-            Some(n),
-            par,
+            Some(ctx.n),
+            ctx.par,
         ) {
             Ok(f) => {
                 fac_opt = Some(f);

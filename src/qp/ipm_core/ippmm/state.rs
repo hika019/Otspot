@@ -31,6 +31,29 @@ pub(super) const LDL_REG_GROWTH: f64 = 10.0;
 pub(super) const LDL_REG_CEILING: f64 = 1.0;
 pub(super) const LDL_FALLBACK_DELTA_MIN: f64 = 1e-2;
 
+/// 残差小・gap 大の偽 Optimal を弾く duality gap 上限。
+pub(super) const DUALITY_GAP_TOL: f64 = 1e-3;
+
+/// reg_limit 下限と一段引下げ倍率。
+pub(super) const REG_LIMIT_MIN: f64 = 1e-14;
+pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
+/// prox 項が dual residual を支配と判定する比率。
+pub(super) const PROX_DOMINATE_RATIO: f64 = 0.5;
+
+/// pf-stagnation 検出窓 + 停滞判定比率 + 「収束遠し」係数。
+pub(super) const PF_HISTORY_LEN: usize = 5;
+pub(super) const PF_STUCK_RATIO: f64 = 0.95;
+pub(super) const PF_FAR_FROM_TARGET_RATIO: f64 = 1e2;
+
+/// finite-but-huge 方向 (LDL blow-up) を弾く閾値。
+pub(super) const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
+
+/// false-positive 緩衝のための連続 infeasible 検出回数。
+pub(super) const MIN_CONSECUTIVE_INFEAS: usize = 3;
+
+/// fraction-to-boundary を補う trust-region cap (alpha·|dv|_inf ≤ cap·max(|v|_inf,1))。
+pub(super) const STEP_REL_CAP: f64 = 1e3;
+
 /// tight eps で正常な小 alpha を stall 扱いしないため eps スケールで閾値を緩める。
 pub(super) fn alpha_stall_eps_for(eps: f64) -> f64 {
     (eps * 1e-2).max(1e-14)
