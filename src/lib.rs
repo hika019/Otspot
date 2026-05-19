@@ -66,7 +66,7 @@ pub(crate) mod test_kkt;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
-pub use problem::SolveStatus;
+pub use problem::{SolveRoute, SolveStats, SolveStatus};
 pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use lp::solve_lp_with;

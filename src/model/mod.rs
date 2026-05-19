@@ -318,6 +318,7 @@ impl Model {
                 reduced_costs: rc,
                 slack,
                 bound_duals: sr.bound_duals,
+                stats: sr.stats,
             }
         };
 
@@ -426,6 +427,7 @@ impl Model {
             opts.threads = n;
         }
         let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
+        let qp_stats = qp_result.stats.clone();
 
         // dual_solution: Le=そのまま / Ge=符号反転済み / Eq=μ1-μ2 折り畳み済み。
         let fold_dual = |sol: &[f64]| -> Option<Vec<f64>> {
@@ -455,6 +457,7 @@ impl Model {
                 reduced_costs: None,
                 slack: None,
                 bound_duals: bd,
+                stats: qp_stats.clone(),
             };
 
         match qp_result.status {
@@ -539,6 +542,8 @@ pub struct ModelResult {
     /// Layout: `[lb_dual for each var with finite lb, ub_dual for each var with finite ub]`
     /// (see `SolverResult.bound_duals` §2.5). Empty when not provided by the solver.
     pub bound_duals: Vec<f64>,
+    /// Per-solve routing and warm-start statistics (race-free, per-result).
+    pub stats: crate::problem::SolveStats,
 }
 
 impl ModelResult {
