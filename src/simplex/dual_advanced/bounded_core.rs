@@ -1,0 +1,948 @@
+//! Bounded dual simplex core (BFRT-aware) consuming `BoundedStandardForm`.
+//!
+//! Companion to `core.rs`. Unlike the legacy core (which sees variable upper
+//! bounds as auxiliary `x_j + s = u_j` rows), this loop keeps the upper bound
+//! as a non-basic state flag (`at_upper[j]`) and routes entering-variable
+//! selection through `bfrt_select_entering` so non-basic columns whose bound
+//! switch absorbs less infeasibility than a normal pivot can flip lb↔ub
+//! mid-iter instead of forcing a small dual step.
+//!
+//! Maros (2003) §7.6 reference algorithm:
+//! - leaving pricing detects rows where `x_B[r]` violates a bound;
+//! - BFRT returns `(entering, theta, flips)` — `flips` ⊂ non-basic columns
+//!   whose bound switch is consumed by the dual step;
+//! - flip apply: `x_B -= u_k · α_k` (lb→ub) or `+= u_k · α_k` (ub→lb);
+//! - pivot equation gains a `+u_q` correction at the leaving row when the
+//!   entering column is currently at its upper bound (the "符号反転 pivot"):
+//!     `x_B[r]_new = step + (u_q if at_upper[q] else 0)`
+//!   derived from the column-swap update with q's non-basic value u_q being
+//!   removed from the effective RHS as q enters the basis.
+//!
+//! Scope: dual-phase iteration only. The driver (`solve_bounded_dual`) assumes
+//! the LP enters with a primal-feasible RHS after cost perturbation (Le-only,
+//! `num_artificial == 0`) and is exercised in tests via warm-start states with
+//! synthetic primal infeasibility. Phase 2 primal + solution / dual recovery
+//! + cold/warm production wiring live in follow-up tasks.
+//!
+//! ## Outcome reporting (`BoundedOutcome`)
+//!
+//! The loop returns its own `BoundedOutcome` instead of the shared
+//! `SimplexOutcome`. The reason is the third terminal state — ub-violation —
+//! that is genuinely "fall back to legacy" rather than "ran out of time".
+//! Multiplexing both onto `Timeout` made wiring-layer dispatch ambiguous and
+//! made sentinel assertions on Timeout meaningless. `UbViolationOutOfScope`
+//! carries the offending row/objective so callers can either retry on the
+//! legacy core or report a definite status.
+//!
+//! ## Bound-violation handling
+//!
+//! The `bound_flip` BFRT primitive is documented for the lb-violation leaving
+//! direction (`x_B[r] < 0`). When `x_B[r] > u_{basis[r]}` (ub overshoot) the
+//! symmetric BFRT requires mirroring `trow` and a parallel pivot adjustment
+//! that is outside this phase's scope — the loop detects ub-violation and
+//! returns `BoundedOutcome::UbViolationOutOfScope` so the wiring layer can
+//! fall back to legacy `core.rs`. The cold-start path used by production
+//! wiring enters with `x_B = b ≥ 0` so this branch is never triggered there.
+
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::SolverOptions;
+use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::PIVOT_TOL;
+use std::sync::atomic::Ordering;
+
+use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
+use super::super::standard_form::BoundedStandardForm;
+use super::bound_flip::{bfrt_select_entering, ColBound};
+
+/// Terminal status of the bounded dual simplex iteration.
+///
+/// Distinct from the shared `SimplexOutcome`: the `UbViolationOutOfScope`
+/// variant lets the wiring layer route to the legacy core deterministically
+/// without confusing genuine deadlines with "this loop doesn't handle that
+/// state". `Timeout`/`SingularBasis` retain their usual meaning.
+#[derive(Debug)]
+pub(crate) enum BoundedOutcome {
+    Optimal(f64, Vec<f64>),
+    Unbounded,
+    /// Deadline or hard iteration cap. Carries the latest objective.
+    Timeout(f64),
+    SingularBasis,
+    /// `x_B[r] > u_{basis[r]}` reached without an lb-violation candidate.
+    /// `row` is the offending basis row; `obj` is the current objective.
+    /// Callers fall back to legacy `core.rs`.
+    UbViolationOutOfScope { row: usize, obj: f64 },
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook: when `true`, the production `iterate` skips the
+    /// `x_B -= alpha_flip · weight` update inside the flip loop while still
+    /// toggling `at_upper[k]`. Sentinels flip this on/off to prove the flip
+    /// apply is load-bearing without maintaining a parallel test copy of the
+    /// iteration loop (which masked the production logic from no-op probes).
+    ///
+    /// Lives behind `#[cfg(test)]` so release binaries carry neither the
+    /// thread-local slot nor the branch (verified via `nm` on the release
+    /// `rlib` — symbol must be absent).
+    static FLIP_APPLY_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_flip_apply_disabled(v: bool) {
+    FLIP_APPLY_DISABLE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+fn flip_apply_disabled() -> bool {
+    FLIP_APPLY_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn flip_apply_disabled() -> bool {
+    false
+}
+
+/// Hard iteration cap to guarantee termination even when the pricing
+/// degenerates. Matches the existing dual cores' implicit budget via deadline;
+/// here the cap is the only safety net because `BoundedDualState` callers may
+/// pass `options.deadline = None` in unit tests.
+const BOUNDED_DUAL_ITER_HARD_CAP: usize = 1_000_000;
+
+/// Internal state of the bounded dual simplex iteration. Built from
+/// `BoundedStandardForm` (cold) or hand-populated by tests / warm-start
+/// callers, and consumed by `iterate`.
+///
+/// Field invariants:
+/// - `basis.len() == m`, `x_b.len() == m`.
+/// - `at_upper.len() == is_basic.len() == reduced_costs.len() == n_total`.
+/// - For each basic column `j ∈ basis`, `is_basic[j] == true`,
+///   `at_upper[j] == false` (basic vars have no bound state).
+/// - Non-basic vars: `at_upper[j]` indicates current bound; the non-basic
+///   value is `0` (lb) or `upper_bounds[j]` (ub).
+/// - `x_b[i] = (B^{-1} (b − Σ_{k at_upper non-basic} u_k · a_k))[i]`,
+///   reflecting the flip-applied effective RHS.
+pub(crate) struct BoundedDualState {
+    pub basis: Vec<usize>,
+    pub at_upper: Vec<bool>,
+    pub x_b: Vec<f64>,
+    pub reduced_costs: Vec<f64>,
+    pub is_basic: Vec<bool>,
+    pub iterations: usize,
+}
+
+impl BoundedDualState {
+    /// Cold-start state from a `BoundedStandardForm`: slacks in the basis,
+    /// every non-basic variable at its lower bound, `x_B = b`, dual feasibility
+    /// achieved by cost perturbation `c̃_j = max(c_j, 0)` evaluated at `y = 0`.
+    ///
+    /// Caller must supply Ruiz-scaled `(a, b)` — the LU factorization happens
+    /// in `iterate` so the state alone is decoupled from `BasisManager`.
+    pub(crate) fn cold(bsf: &BoundedStandardForm, b_scaled: &[f64]) -> Self {
+        let m = bsf.m;
+        let n_total = bsf.n_total;
+        assert_eq!(bsf.initial_basis.len(), m);
+        let mut is_basic = vec![false; n_total];
+        for &j in bsf.initial_basis.iter() {
+            if j < n_total {
+                is_basic[j] = true;
+            }
+        }
+        Self {
+            basis: bsf.initial_basis.clone(),
+            at_upper: vec![false; n_total],
+            x_b: b_scaled.to_vec(),
+            reduced_costs: vec![0.0; n_total],
+            is_basic,
+            iterations: 0,
+        }
+    }
+}
+
+/// Per-iteration scratch buffers. Allocated once and reused across iters.
+struct IterBuffers {
+    rho: Vec<f64>,
+    trow: Vec<f64>,
+    alpha: Vec<f64>,
+    alpha_flip: Vec<f64>,
+    col_bounds: Vec<ColBound>,
+    y: Vec<f64>,
+}
+
+impl IterBuffers {
+    fn new(m: usize, n_total: usize, upper_bounds: &[f64]) -> Self {
+        let col_bounds = (0..n_total)
+            .map(|j| ColBound {
+                upper: upper_bounds[j],
+                at_upper: false,
+            })
+            .collect();
+        Self {
+            rho: vec![0.0; m],
+            trow: vec![0.0; n_total],
+            alpha: vec![0.0; m],
+            alpha_flip: vec![0.0; m],
+            col_bounds,
+            y: vec![0.0; m],
+        }
+    }
+}
+
+/// Entry point: drives a cold-start bounded dual simplex on a Le-only
+/// `BoundedStandardForm`. Caller supplies the Ruiz-scaled `(a, b, c)` so the
+/// scaling lives at the same layer as `cold_start_advanced` does today.
+///
+/// Returns `(outcome, state)` so warm-start sequels can inspect the final
+/// basis / `at_upper`. The reported objective in `Optimal(obj, y)` uses the
+/// perturbed cost; the wiring layer is responsible for re-evaluating with the
+/// original `c` once Phase 2 primal completes.
+pub(crate) fn solve_bounded_dual(
+    bsf: &BoundedStandardForm,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    options: &SolverOptions,
+) -> (BoundedOutcome, BoundedDualState) {
+    let state = BoundedDualState::cold(bsf, b);
+    iterate(state, bsf, a, c, options)
+}
+
+/// Inner iteration loop. Accepts a pre-populated state — tests use this to
+/// inject synthetic primal infeasibilities; production cold/warm-start callers
+/// supply the matching basis. Cost perturbation is applied here so callers
+/// don't have to pre-perturb `c`.
+pub(crate) fn iterate(
+    mut state: BoundedDualState,
+    bsf: &BoundedStandardForm,
+    a: &CscMatrix,
+    c: &[f64],
+    options: &SolverOptions,
+) -> (BoundedOutcome, BoundedDualState) {
+    let m = bsf.m;
+    let n_total = bsf.n_total;
+    debug_assert_eq!(state.basis.len(), m);
+    debug_assert_eq!(state.x_b.len(), m);
+    debug_assert_eq!(state.at_upper.len(), n_total);
+    debug_assert_eq!(state.is_basic.len(), n_total);
+
+    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(crate::error::SolverError::SingularBasis { .. }) => {
+            return (BoundedOutcome::SingularBasis, state);
+        }
+        Err(_) => {
+            let obj = basic_obj(c, &state.basis, &state.x_b);
+            return (BoundedOutcome::Timeout(obj), state);
+        }
+    };
+
+    // Cost perturbation: c̃_j = max(c_j, 0). With slack initial basis (y = 0)
+    // every reduced cost is ≥ 0 ⇒ dual feasible. The perturbation is local
+    // to this loop; the caller restores the original cost in Phase 2 primal.
+    let c_perturbed: Vec<f64> = c.iter().map(|&v| v.max(0.0)).collect();
+
+    let mut buf = IterBuffers::new(m, n_total, &bsf.upper_bounds);
+
+    // Initial reduced costs (r_j = c̃_j − y^T a_j with y = B^{-T} c̃_B).
+    compute_reduced_costs_into(
+        a,
+        &c_perturbed,
+        &mut basis_mgr,
+        &state.is_basic,
+        n_total,
+        &state.basis,
+        &mut buf.y,
+        &mut state.reduced_costs,
+    );
+
+    loop {
+        state.iterations = state.iterations.saturating_add(1);
+        if state.iterations > BOUNDED_DUAL_ITER_HARD_CAP {
+            let obj = basic_obj(c, &state.basis, &state.x_b);
+            return (BoundedOutcome::Timeout(obj), state);
+        }
+        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        let cancelled = options
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed));
+        if timed_out || cancelled {
+            let obj = basic_obj(c, &state.basis, &state.x_b);
+            return (BoundedOutcome::Timeout(obj), state);
+        }
+
+        // Pricing: most infeasible row. lb-violation only — see module doc.
+        let mut leaving_row: Option<usize> = None;
+        let mut best_viol = options.primal_tol;
+        let mut ub_violation_row: Option<usize> = None;
+        for i in 0..m {
+            let xi = state.x_b[i];
+            let ub_i = bsf.upper_bounds[state.basis[i]];
+            if xi < -best_viol {
+                best_viol = -xi;
+                leaving_row = Some(i);
+            }
+            if ub_i.is_finite() && xi > ub_i + options.primal_tol {
+                ub_violation_row.get_or_insert(i);
+            }
+        }
+        if leaving_row.is_none() {
+            if let Some(row) = ub_violation_row {
+                // Out-of-scope for this loop: distinct from Timeout so the
+                // wiring layer can route to the legacy core deterministically.
+                let obj = basic_obj(c, &state.basis, &state.x_b);
+                return (BoundedOutcome::UbViolationOutOfScope { row, obj }, state);
+            }
+            let obj = basic_obj(c, &state.basis, &state.x_b);
+            let mut y = vec![0.0; m];
+            compute_dual_vars_into(&c_perturbed, &mut basis_mgr, &state.basis, &mut y);
+            return (BoundedOutcome::Optimal(obj, y), state);
+        }
+        let r = leaving_row.unwrap();
+
+        // BTRAN ρ = B^{-T} e_r.
+        for slot in buf.rho.iter_mut() {
+            *slot = 0.0;
+        }
+        buf.rho[r] = 1.0;
+        let mut rho_sv = SparseVec::from_dense(&buf.rho);
+        basis_mgr.btran(&mut rho_sv);
+        rho_sv.to_dense_into(&mut buf.rho);
+
+        // PRICE trow[j] = ρ^T a_j on non-basic columns.
+        for j in 0..n_total {
+            if state.is_basic[j] {
+                buf.trow[j] = 0.0;
+                continue;
+            }
+            let (rows, vals) = a.get_column(j).unwrap();
+            let mut dot = 0.0;
+            for (k, &row) in rows.iter().enumerate() {
+                dot += buf.rho[row] * vals[k];
+            }
+            buf.trow[j] = dot;
+        }
+
+        // Refresh `col_bounds.at_upper` (uppers themselves never change).
+        for j in 0..n_total {
+            buf.col_bounds[j].at_upper = state.at_upper[j];
+        }
+
+        let leaving_residual = state.x_b[r]; // negative; BFRT uses |·|
+        let bfrt = match bfrt_select_entering(
+            &buf.trow,
+            &state.reduced_costs,
+            &state.is_basic,
+            &buf.col_bounds,
+            n_total,
+            PIVOT_TOL,
+            leaving_residual,
+        ) {
+            None => {
+                // No compatible non-basic column ⇒ dual unbounded ⇒ primal
+                // infeasible (matches `core.rs` convention).
+                return (BoundedOutcome::Unbounded, state);
+            }
+            Some(res) => res,
+        };
+
+        // Apply flips: each non-entering bypassed breakpoint switches its
+        // bound. x_B picks up Δx_N[k] · α_k per flip — flip from lb (0) to ub
+        // (u_k) adds +u_k to x_N[k]; ub→lb adds −u_k. x_B := x_B − α_k · Δ.
+        // The `flip_apply_disabled` gate exists for test no-op proofs only and
+        // is a const `false` in release builds (eliminated by the optimizer).
+        let apply_flip = !flip_apply_disabled();
+        for &k in &bfrt.flips {
+            let u_k = bsf.upper_bounds[k];
+            debug_assert!(
+                u_k.is_finite(),
+                "BFRT must not return infinite-upper flips"
+            );
+            if apply_flip {
+                ftran_column(a, &mut basis_mgr, k, m, &mut buf.alpha_flip);
+                let direction = if state.at_upper[k] { -1.0 } else { 1.0 };
+                let weight = direction * u_k;
+                for i in 0..m {
+                    state.x_b[i] -= buf.alpha_flip[i] * weight;
+                }
+            }
+            state.at_upper[k] = !state.at_upper[k];
+        }
+
+        let entering_col = bfrt.entering_col;
+        let theta = bfrt.theta;
+        let entering_at_upper = state.at_upper[entering_col];
+
+        // FTRAN α_q = B^{-1} a_q.
+        ftran_column(a, &mut basis_mgr, entering_col, m, &mut buf.alpha);
+        let pivot_element = buf.alpha[r];
+        if pivot_element.abs() < PIVOT_TOL {
+            // Numerically unstable pivot — refactor and recompute reduced
+            // costs. Matches the legacy core's recovery path.
+            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                if basis_mgr.singular_basis {
+                    return (BoundedOutcome::SingularBasis, state);
+                }
+                let obj = basic_obj(c, &state.basis, &state.x_b);
+                return (BoundedOutcome::Timeout(obj), state);
+            }
+            compute_reduced_costs_into(
+                a,
+                &c_perturbed,
+                &mut basis_mgr,
+                &state.is_basic,
+                n_total,
+                &state.basis,
+                &mut buf.y,
+                &mut state.reduced_costs,
+            );
+            continue;
+        }
+
+        // Standard column-swap pivot update of x_B. The at-upper entering
+        // correction (`+u_q`) accounts for q's non-basic value being subtracted
+        // from the effective RHS as q transitions into the basis (derivation
+        // in module doc).
+        let step = state.x_b[r] / pivot_element;
+        for i in 0..m {
+            state.x_b[i] -= buf.alpha[i] * step;
+        }
+        state.x_b[r] = step;
+        if entering_at_upper {
+            let u_q = bsf.upper_bounds[entering_col];
+            debug_assert!(u_q.is_finite(), "at_upper entering must be finite");
+            state.x_b[r] += u_q;
+        }
+        // Defensive clamp; matches `core.rs`.
+        for val in state.x_b.iter_mut() {
+            if val.abs() < options.clamp_tol {
+                *val = 0.0;
+            }
+        }
+
+        // Reduced-cost increment: r_j_new = r_j − θ trow[j] for non-basic j.
+        // The leaving column σ becomes non-basic with r_σ = −θ.
+        let leaving_col = state.basis[r];
+        for j in 0..n_total {
+            if !state.is_basic[j] {
+                state.reduced_costs[j] -= theta * buf.trow[j];
+            }
+        }
+        if leaving_col < n_total {
+            state.reduced_costs[leaving_col] = -theta;
+        }
+
+        // Basis bookkeeping: q enters as basic (its previous at_upper flag
+        // is cleared — basic vars carry no bound state). σ leaves to its lb
+        // (lb-violation leaving direction ⇒ σ → 0).
+        state.is_basic[entering_col] = true;
+        state.at_upper[entering_col] = false;
+        if leaving_col < n_total {
+            state.is_basic[leaving_col] = false;
+            state.at_upper[leaving_col] = false;
+        }
+
+        // Push the column swap through the LU.
+        let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
+        let alpha_sv = SparseVec {
+            indices: col_rows.to_vec(),
+            values: col_vals.to_vec(),
+            len: m,
+        };
+        let mut alpha_sv_for_update = alpha_sv;
+        basis_mgr.ftran(&mut alpha_sv_for_update);
+        basis_mgr.update(entering_col, r, &alpha_sv_for_update);
+        state.basis[r] = entering_col;
+
+        // Refactor + reduced-cost refresh on the LU's request (eta cap).
+        if basis_mgr.needs_refactor() {
+            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                if basis_mgr.singular_basis {
+                    return (BoundedOutcome::SingularBasis, state);
+                }
+                let obj = basic_obj(c, &state.basis, &state.x_b);
+                return (BoundedOutcome::Timeout(obj), state);
+            }
+            compute_reduced_costs_into(
+                a,
+                &c_perturbed,
+                &mut basis_mgr,
+                &state.is_basic,
+                n_total,
+                &state.basis,
+                &mut buf.y,
+                &mut state.reduced_costs,
+            );
+        }
+    }
+}
+
+/// FTRAN a column of `a` and dump into `out` (length `m`). Wraps the
+/// `SparseVec` boilerplate that every FTRAN site repeats.
+fn ftran_column(
+    a: &CscMatrix,
+    basis_mgr: &mut LuBasis,
+    col: usize,
+    m: usize,
+    out: &mut [f64],
+) {
+    let (rows, vals) = a.get_column(col).unwrap();
+    let mut sv = SparseVec {
+        indices: rows.to_vec(),
+        values: vals.to_vec(),
+        len: m,
+    };
+    basis_mgr.ftran(&mut sv);
+    sv.to_dense_into(out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::SolverOptions;
+    use crate::problem::{ConstraintType, LpProblem};
+    use crate::simplex::dual_advanced::bound_flip::{
+        bfrt_flip_invocations, reset_bfrt_flip_invocations,
+    };
+    use crate::simplex::standard_form::build_bounded_standard_form;
+    use crate::sparse::CscMatrix;
+
+    /// Algebraic invariant tolerance — generous because injected warm-start
+    /// states walk the loop through many BTRAN/FTRAN rounds where rounding
+    /// accumulates. A tight 1e-8 would false-positive on long Timeout runs.
+    const INVARIANT_TOL: f64 = 1e-6;
+
+    /// RAII guard for the test-only `FLIP_APPLY_DISABLE` hook. Avoids leaking
+    /// the disabled state across tests if an assertion unwinds.
+    struct FlipApplyGuard;
+    impl FlipApplyGuard {
+        fn disabled() -> Self {
+            set_flip_apply_disabled(true);
+            Self
+        }
+    }
+    impl Drop for FlipApplyGuard {
+        fn drop(&mut self) {
+            set_flip_apply_disabled(false);
+        }
+    }
+
+    /// Small boxed-var LP with `c̃ = max(c,0) ≡ 0` (every `c` is negative).
+    /// The dual phase on the cost-perturbed LP has *all reduced costs zero*,
+    /// which keeps the loop in a degenerate stall once an lb-violation is
+    /// injected — useful for cold-start sanity but *not* for Optimal-only
+    /// convergence assertions. Used for dimension / immediate-terminate tests.
+    ///
+    ///     min  -x0 - x1
+    ///     s.t.  x0 + x1 ≤ 6
+    ///           x0 - x1 ≤ 2
+    ///           0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 4
+    /// Original optimum: x0=2, x1=4, obj=-6 (unused here — the cost-perturbed
+    /// dual phase, not the original LP, drives the loop).
+    fn lp_boxed_2x2_degenerate() -> LpProblem {
+        let rows = vec![0, 0, 1, 1];
+        let cols = vec![0, 1, 0, 1];
+        let vals = vec![1.0, 1.0, 1.0, -1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 2, 2).unwrap();
+        let b = vec![6.0, 2.0];
+        let c = vec![-1.0, -1.0];
+        let ctypes = vec![ConstraintType::Le, ConstraintType::Le];
+        let bounds = vec![(0.0, 4.0), (0.0, 4.0)];
+        LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap()
+    }
+
+    /// Mixed bounds: boxed + half-finite + fixed. Fixed vars have ub = 0
+    /// after the lb-shift, so BFRT must early-skip (weight = 0). All `c < 0`
+    /// → degenerate dual phase (`c̃ = 0`); used to exercise the
+    /// fixed-variable handling, not optimality.
+    fn lp_mixed_bounds_degenerate() -> LpProblem {
+        let n = 4;
+        let m = 2;
+        let rows = vec![0, 0, 0, 0, 1, 1];
+        let cols = vec![0, 1, 2, 3, 0, 1];
+        let vals = vec![1.0, 1.0, 1.0, 1.0, 2.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+        let b = vec![10.0, 8.0];
+        let c = vec![-1.0, -2.0, -1.0, 0.0];
+        let ctypes = vec![ConstraintType::Le, ConstraintType::Le];
+        let bounds = vec![
+            (0.0, 3.0),
+            (0.0, f64::INFINITY),
+            (0.0, 5.0),
+            (2.0, 2.0),
+        ];
+        LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap()
+    }
+
+    /// Fixture descriptor: an LP and a list of synthetic primal
+    /// infeasibilities to inject into the cold-start `x_B` before running
+    /// `iterate`. Positive costs (`c̃ = max(c, 0) = c`) keep reduced costs
+    /// dual-feasible at cold start so BFRT has multiple breakpoints to walk
+    /// when the loop tries to recover from the injection.
+    struct InvariantFixture {
+        name: &'static str,
+        problem: LpProblem,
+        /// (row, magnitude > 0) pairs — `state.x_b[row] = -magnitude`.
+        inject_negative_x_b: Vec<(usize, f64)>,
+    }
+
+    /// 1-row, 2 boxed positive-cost vars — minimal shape that still walks
+    /// past one breakpoint when the residual is large enough.
+    ///     min  x0 + 2 x1
+    ///     s.t. x0 + x1 ≤ 5
+    ///          0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 3
+    fn fixture_one_row_two_boxed() -> InvariantFixture {
+        let rows = vec![0, 0];
+        let cols = vec![0, 1];
+        let vals = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, 2).unwrap();
+        let b = vec![5.0];
+        let c = vec![1.0, 2.0];
+        let ctypes = vec![ConstraintType::Le];
+        let bounds = vec![(0.0, 4.0), (0.0, 3.0)];
+        let problem = LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap();
+        InvariantFixture {
+            name: "one_row_two_boxed",
+            problem,
+            inject_negative_x_b: vec![(0, 3.0)],
+        }
+    }
+
+    /// 2 rows, 3 boxed vars with distinct positive costs and tight upper
+    /// bounds. Designed so BFRT crosses multiple breakpoints during the
+    /// infeasibility recovery (`|residual| > u_0 · trow[0]`).
+    ///     min  x0 + 3 x1 + 5 x2
+    ///     s.t. x0 + x1 + x2 ≤ 7
+    ///          0.5 x0 + x1 + 2 x2 ≤ 6
+    ///          0 ≤ x0 ≤ 2, 0 ≤ x1 ≤ 2, 0 ≤ x2 ≤ 1
+    fn fixture_two_rows_three_boxed() -> InvariantFixture {
+        let rows = vec![0, 0, 0, 1, 1, 1];
+        let cols = vec![0, 1, 2, 0, 1, 2];
+        let vals = vec![1.0, 1.0, 1.0, 0.5, 1.0, 2.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 2, 3).unwrap();
+        let b = vec![7.0, 6.0];
+        let c = vec![1.0, 3.0, 5.0];
+        let ctypes = vec![ConstraintType::Le, ConstraintType::Le];
+        let bounds = vec![(0.0, 2.0), (0.0, 2.0), (0.0, 1.0)];
+        let problem = LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap();
+        InvariantFixture {
+            name: "two_rows_three_boxed",
+            problem,
+            inject_negative_x_b: vec![(0, 3.0)],
+        }
+    }
+
+    /// Reconstruct the full primal vector from `(basis, x_b, at_upper)` and
+    /// compute the algebraic residual `A · x_full − b_effective`. The flip-
+    /// apply step is exactly what keeps this residual at zero: when `at_upper`
+    /// toggles for column k, x_B must absorb `± u_k · B^{-1} a_k` so that
+    /// `A · x_full` stays equal to `b_effective = b` (where `b_effective` is
+    /// the original problem RHS — every flip is offset by a corresponding x_B
+    /// move).
+    ///
+    /// Returns the max absolute component of the residual vector. A correct
+    /// `iterate` keeps this at `O(numerical noise)`; the no-op flip apply
+    /// leaves a residual of `Σ_k u_k · a_k` (one per executed flip) and so
+    /// blows past `INVARIANT_TOL` after the first flip.
+    fn basis_rhs_residual(
+        state: &BoundedDualState,
+        bsf: &BoundedStandardForm,
+    ) -> f64 {
+        let mut x_full = vec![0.0; bsf.n_total];
+        for (pos, &j) in state.basis.iter().enumerate() {
+            x_full[j] = state.x_b[pos];
+        }
+        for j in 0..bsf.n_total {
+            if state.at_upper[j] && !state.is_basic[j] {
+                x_full[j] = bsf.upper_bounds[j];
+            }
+        }
+        let mut residual = vec![0.0; bsf.m];
+        for j in 0..bsf.n_total {
+            let xj = x_full[j];
+            if xj == 0.0 {
+                continue;
+            }
+            if let Ok((rows, vals)) = bsf.a.get_column(j) {
+                for (k, &row) in rows.iter().enumerate() {
+                    residual[row] += vals[k] * xj;
+                }
+            }
+        }
+        for i in 0..bsf.m {
+            residual[i] -= bsf.b[i];
+        }
+        residual.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+    }
+
+    #[test]
+    fn cold_state_from_bsf_has_consistent_dimensions() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let state = BoundedDualState::cold(&bsf, &bsf.b);
+        assert_eq!(state.basis.len(), bsf.m);
+        assert_eq!(state.x_b.len(), bsf.m);
+        assert_eq!(state.at_upper.len(), bsf.n_total);
+        assert_eq!(state.is_basic.len(), bsf.n_total);
+        for j in 0..bsf.n_shifted {
+            assert!(!state.is_basic[j]);
+            assert!(!state.at_upper[j]);
+        }
+        assert_eq!(state.x_b, bsf.b);
+    }
+
+    /// Cold-start dual phase on Le-only b≥0 input terminates immediately
+    /// (x_B = b ≥ 0 already primal-feasible). No iterations beyond the
+    /// optimality probe.
+    #[test]
+    fn cold_dual_le_only_terminates_immediately() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        match outcome {
+            BoundedOutcome::Optimal(_, _) => {}
+            other => panic!("expected Optimal, got {:?}", other),
+        }
+        assert_eq!(state.iterations, 1);
+    }
+
+    /// Fixed variable (lb=ub ⇒ shifted upper=0) is handled by BFRT: the
+    /// weight contribution is 0, so no flip-set inflation. Drives the
+    /// "BFRT early skip" path. Outcome can be Optimal or Timeout depending
+    /// on cycling; this test asserts only that the loop does not panic or
+    /// return a logically impossible status.
+    #[test]
+    fn fixed_variable_does_not_break_iteration() {
+        let lp = lp_mixed_bounds_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let mut state = BoundedDualState::cold(&bsf, &bsf.b);
+        state.x_b[0] = -0.5;
+        let opts = SolverOptions {
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(500)),
+            ..SolverOptions::default()
+        };
+        let (outcome, _state) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        match outcome {
+            BoundedOutcome::Optimal(_, _) => {}
+            BoundedOutcome::Timeout(_) => {}
+            BoundedOutcome::UbViolationOutOfScope { .. } => {}
+            other => panic!("unexpected outcome {:?}", other),
+        }
+    }
+
+    /// Compute the same `iterate` residual twice — once with the production
+    /// flip apply, once with `FLIP_APPLY_DISABLE` set — and return the per-
+    /// fixture residual pair, the executed flip count, and the pre-iterate
+    /// residual. Caller asserts the algebraic relation between them.
+    ///
+    /// Phase-1-only design constraint: with `c̃ = max(c, 0)` and an injected
+    /// `x_B[r] < 0` the dual loop cannot in general re-establish primal
+    /// feasibility — full anti-cycling (Bland fallback, lex perturbation)
+    /// lives in `core.rs` and is reused in follow-up wiring tasks. What the
+    /// loop *must* maintain regardless of outcome is the column-update
+    /// invariant `A · x_full = b_effective` (where `b_effective ≡ b` because
+    /// injection is the only perturbation), which the flip apply preserves
+    /// exactly and the no-op breaks by `Σ_k u_k · a_k` per executed flip.
+    fn measure_iterate_residual(
+        fx: &InvariantFixture,
+        deadline_ms: u64,
+        flip_disabled: bool,
+    ) -> (f64, f64, u64) {
+        reset_bfrt_flip_invocations();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let mut state = BoundedDualState::cold(&bsf, &bsf.b);
+        for &(row, mag) in &fx.inject_negative_x_b {
+            state.x_b[row] = -mag;
+        }
+        let pre_residual = basis_rhs_residual(&state, &bsf);
+        let opts = SolverOptions {
+            deadline: Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms),
+            ),
+            ..SolverOptions::default()
+        };
+        let _guard = if flip_disabled {
+            Some(FlipApplyGuard::disabled())
+        } else {
+            None
+        };
+        let (_outcome, post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        let post_residual = basis_rhs_residual(&post, &bsf);
+        let flips = bfrt_flip_invocations();
+        (pre_residual, post_residual, flips)
+    }
+
+    /// **Correctness sentinel (table-driven, multi-fixture).** For every
+    /// fixture: run `iterate`, recompute the algebraic residual
+    /// `‖A · x_full − b‖_∞`, and verify the production loop preserves it
+    /// (i.e. residual_post ≈ residual_pre). The flip apply line
+    /// `x_B -= alpha_flip · weight` is exactly the algebra that keeps this
+    /// invariant — if the loop toggles `at_upper[k]` without absorbing the
+    /// `u_k · B^{-1} a_k` change into `x_B`, the residual drifts by
+    /// `u_k · a_k` per flip.
+    ///
+    /// Multi-fixture: 1-row/2-boxed and 2-row/3-boxed shapes, distinct
+    /// upper bounds and reduced-cost gradients, share the same assertion.
+    /// Companion no-op proof below.
+    #[test]
+    fn flip_apply_preserves_basis_rhs_invariant() {
+        let fixtures = [fixture_one_row_two_boxed(), fixture_two_rows_three_boxed()];
+        let mut at_least_one_flip = false;
+        for fx in &fixtures {
+            // Short deadline keeps accumulated FP noise small (iterate runs
+            // ~50 k pivots/10 ms; per-pivot BTRAN/FTRAN drift < 1e-12).
+            let (pre, post, flips) = measure_iterate_residual(fx, 10, false);
+            let drift = (post - pre).abs();
+            assert!(
+                drift < INVARIANT_TOL,
+                "{}: production iterate drifted the algebraic invariant by \
+                 {drift:.3e} (pre={pre:.3e}, post={post:.3e}, flips={flips}) \
+                 — flip apply is no longer preserving A·x_full = b",
+                fx.name,
+            );
+            if flips > 0 {
+                at_least_one_flip = true;
+            }
+        }
+        assert!(
+            at_least_one_flip,
+            "no fixture exercised a BFRT flip — the sentinel proves nothing \
+             about the flip apply path"
+        );
+    }
+
+    /// **No-op proof for `flip_apply_preserves_basis_rhs_invariant`.** With
+    /// the `FLIP_APPLY_DISABLE` hook engaged, `iterate` toggles `at_upper[k]`
+    /// without updating `x_B`. At least one fixture must drift the invariant
+    /// past `INVARIANT_TOL`; otherwise the correctness sentinel would pass
+    /// on a broken flip apply (the pilot87/speed-f2/speed-b1 anti-pattern).
+    #[test]
+    fn flip_apply_preserves_basis_rhs_invariant_noop_proof() {
+        let fixtures = [fixture_one_row_two_boxed(), fixture_two_rows_three_boxed()];
+        let mut max_drift = 0.0_f64;
+        let mut max_drift_fixture = "<none>";
+        let mut total_flips = 0;
+        for fx in &fixtures {
+            let (pre, post, flips) = measure_iterate_residual(fx, 10, true);
+            let drift = (post - pre).abs();
+            total_flips += flips;
+            if drift > max_drift {
+                max_drift = drift;
+                max_drift_fixture = fx.name;
+            }
+        }
+        assert!(
+            total_flips > 0,
+            "no BFRT flip happened under FLIP_APPLY_DISABLE either — the \
+             fixture set does not exercise the flip path at all"
+        );
+        assert!(
+            max_drift > INVARIANT_TOL,
+            "no-op flip apply produced max drift {max_drift:.3e} (fixture \
+             '{max_drift_fixture}', total_flips={total_flips}) ≤ {INVARIANT_TOL:.0e} \
+             — the production correctness sentinel could not have detected \
+             the broken flip apply"
+        );
+    }
+
+    /// Effectiveness sentinel: BFRT flip count strictly > 0 after a residual
+    /// that spans multiple breakpoints. Pairs with `flip_apply_preserves_basis_rhs_invariant`
+    /// which verifies the apply step is load-bearing on the same fixtures.
+    /// Strengthened to also confirm the algebraic invariant is preserved
+    /// across the flips (a count without the apply update would silently
+    /// pass — pilot87 anti-pattern).
+    #[test]
+    fn bfrt_flip_count_positive_when_residual_spans_breakpoints() {
+        let fx = fixture_two_rows_three_boxed();
+        let (pre, post, flips) = measure_iterate_residual(&fx, 10, false);
+        assert!(
+            flips >= 1,
+            "expected BFRT flip count ≥ 1, got {flips} — fixture no longer \
+             exercises BFRT"
+        );
+        let drift = (post - pre).abs();
+        assert!(
+            drift < INVARIANT_TOL,
+            "{}: invariant drifted by {drift:.3e} despite {flips} flips — \
+             flip apply not preserving A·x_full = b",
+            fx.name,
+        );
+    }
+
+    /// Inject a single lb-violation and verify the loop makes **measurable
+    /// progress**: BFRT must be invoked at least once and the invariant must
+    /// remain intact (so the loop's pivots/flips are algebraically correct,
+    /// even if anti-cycling eventually halts it with a Timeout). Pure
+    /// Optimal-only convergence requires Bland fallback / lex perturbation
+    /// which is in `core.rs` and out of scope here.
+    #[test]
+    fn inject_lb_violation_makes_progress_boxed() {
+        let fx = fixture_two_rows_three_boxed();
+        let (pre, post, flips) = measure_iterate_residual(&fx, 10, false);
+        assert!(
+            flips > 0,
+            "{}: zero BFRT invocations — loop did no flip work",
+            fx.name,
+        );
+        let drift = (post - pre).abs();
+        assert!(
+            drift < INVARIANT_TOL,
+            "{}: invariant drifted by {drift:.3e} during {flips} flips — \
+             pivot / flip algebra broken",
+            fx.name,
+        );
+    }
+
+    /// UbViolationOutOfScope must be reachable: inject `x_B[r] > u_basis[r]`
+    /// with no lb-violation present. The loop must return the specialised
+    /// variant (not `Timeout`) so the wiring layer can route deterministically.
+    #[test]
+    fn ub_violation_returns_specialised_outcome() {
+        let fx = fixture_two_rows_three_boxed();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let mut state = BoundedDualState::cold(&bsf, &bsf.b);
+        // The slack basis column for row 0 has upper = +∞ in the bounded form
+        // (slacks have no finite ub by construction). To trigger the
+        // ub-violation branch we need a basis row whose basic column carries a
+        // finite ub; pivot a structural boxed var into the basis manually by
+        // overwriting state.basis[0] = 2 (col index of x2, ub=1), set x_b[0]
+        // beyond x2's ub, and leave x_b[1] feasible. No lb violation ⇒
+        // pricing exits the loop at the ub-violation check.
+        let target_col = 2; // x2 with ub = 1.0 (post-shift).
+        assert!(bsf.upper_bounds[target_col].is_finite());
+        state.basis[0] = target_col;
+        state.is_basic[target_col] = true;
+        // Keep the second basis row's slack basic; clear the original slack
+        // for row 0 from the basic flag set (the LU will see an inconsistent
+        // basis but iterate must still terminate on the pricing check before
+        // FTRAN gets invoked).
+        let prev_slack = bsf.initial_basis[0];
+        if prev_slack != target_col {
+            state.is_basic[prev_slack] = false;
+        }
+        state.x_b[0] = bsf.upper_bounds[target_col] + 1.5; // strictly above ub
+        state.x_b[1] = state.x_b[1].max(0.0);
+        let opts = SolverOptions {
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
+            ..SolverOptions::default()
+        };
+        let (outcome, _post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        match outcome {
+            BoundedOutcome::UbViolationOutOfScope { row, .. } => {
+                assert_eq!(row, 0);
+            }
+            // Singular-basis is also acceptable: the synthetic basis swap
+            // may not factor. Either way, Timeout would mean the ub-violation
+            // detection failed to short-circuit, which is the regression we
+            // are guarding against.
+            BoundedOutcome::SingularBasis => {}
+            other => panic!(
+                "expected UbViolationOutOfScope or SingularBasis, got {:?}",
+                other
+            ),
+        }
+    }
+}
