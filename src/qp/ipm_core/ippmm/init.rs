@@ -1,5 +1,6 @@
 //! 初期点 (x, s, y) の構築: warm start 経路 + Mehrotra cold-start 射影。
 
+use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, max_l_nnz_from_budget};
@@ -143,15 +144,15 @@ fn mehrotra_cold_init(
                     x[j] = match (lb.is_finite(), ub.is_finite()) {
                         (true, true) => {
                             let range = ub - lb;
-                            let raw_margin = (range * 0.01).min(1.0);
-                            if raw_margin > 0.0 && range > 2.0 * raw_margin {
-                                x_new.clamp(lb + raw_margin, ub - raw_margin)
+                            let margin = range * WARM_BOUND_REL_MARGIN;
+                            if range > 2.0 * margin {
+                                x_new.clamp(lb + margin, ub - margin)
                             } else {
                                 0.5 * (lb + ub)
                             }
                         }
-                        (true, false) => x_new.max(lb + 1.0),
-                        (false, true) => x_new.min(ub - 1.0),
+                        (true, false) => x_new.max(lb + warm_bound_margin(lb)),
+                        (false, true) => x_new.min(ub - warm_bound_margin(ub)),
                         (false, false) => x_new,
                     };
                 }
