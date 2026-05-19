@@ -44,6 +44,7 @@ pub(crate) struct StandardForm {
     pub(crate) row_negated: Vec<bool>,
 }
 
+#[derive(Debug)]
 pub(crate) enum SimplexOutcome {
     /// Optimal objective and dual vector.
     Optimal(f64, Vec<f64>),
