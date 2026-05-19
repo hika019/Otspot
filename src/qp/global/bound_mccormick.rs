@@ -40,7 +40,7 @@ use crate::problem::{ConstraintType, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 
-use super::bound::is_feasible_result;
+use super::bound::{all_bounds_finite, is_feasible_result};
 
 /// 値がゼロかどうかの数値的判定許容。`QpProblem::is_zero_q` と一致させる。
 const Q_ZERO_TOL: f64 = 1e-12;
@@ -51,23 +51,29 @@ const MCCORMICK_INEQ_PER_OFF_DIAG: usize = 4;
 /// 対角 (x²) 項に対する McCormick 不等式数 (端点接線 LB×2 + secant UB×1)。
 const MCCORMICK_INEQ_PER_DIAG: usize = 3;
 
-/// box bounds が McCormick 構築に必要な有限性を満たすか。
-pub(super) fn all_bounds_finite(bounds: &[(f64, f64)]) -> bool {
-    bounds
-        .iter()
-        .all(|&(l, u)| l.is_finite() && u.is_finite() && u >= l)
-}
-
 /// McCormick lower bound on the given box.
 ///
 /// `Some(lb)`: lifted LP が feasible、`lb` は元問題の有効 lower bound。
 /// `None`: semi-infinite box / Q が実質ゼロ (= McCormick 寄与なし) / LP infeasible
 /// / unbounded で lb を得られない場合。caller は他の lb 経路に倒す。
-pub fn mccormick_lower_bound(
+pub(crate) fn mccormick_lower_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
     base_opts: &SolverOptions,
     deadline: Option<Instant>,
+) -> Option<f64> {
+    solve_lifted_lp(problem, node_bounds, base_opts, deadline, /* include_envelope = */ true)
+}
+
+/// 共通 driver: lifted LP を構築 (`include_envelope=false` で McCormick 不等式を省略) し
+/// `solve_qp_with` 経由で min を返す。`false` 経路は in-source unit test の no-op teeth
+/// proof 専用 (envelope 不等式を機械的に剥がす単一切替点を 1 つに集約)。
+fn solve_lifted_lp(
+    problem: &QpProblem,
+    node_bounds: &[(f64, f64)],
+    base_opts: &SolverOptions,
+    deadline: Option<Instant>,
+    include_envelope: bool,
 ) -> Option<f64> {
     if !all_bounds_finite(node_bounds) {
         return None;
@@ -76,11 +82,15 @@ pub fn mccormick_lower_bound(
     if pairs.is_empty() {
         return None;
     }
-    let lifted = build_mccormick_lp(problem, node_bounds, &pairs)?;
+    let lifted = build_mccormick_lp(problem, node_bounds, &pairs, include_envelope)?;
     let mut opts = base_opts.clone();
     opts.multistart = None;
     opts.global_optimization = None;
+    // sub-solve hygiene: 元問題向け warm hint は lifted 空間で dim も active set も
+    // 異なるため、3 種すべて消去する (warm_start_qp 単独消去では不十分)。
+    opts.warm_start = None;
     opts.warm_start_qp = None;
+    opts.warm_start_lp = None;
     opts.deadline = deadline;
     let res: SolverResult = crate::qp::solve_qp_with(&lifted, &opts);
     if !is_feasible_result(&res.status) {
@@ -199,10 +209,15 @@ fn push_row_4(
 
 /// lifted LP 構築。変数順: `[x_0, …, x_{n-1}, w_0, …, w_{p-1}]`。
 /// Q = 0 (実質 LP) で組み立て、`solve_qp_with` 内の `is_zero_q` 判定で LP 経路に流れる。
+///
+/// `include_envelope=false` の場合は McCormick 不等式行を省略し box+linear だけ残す。
+/// これは "no-op proof teeth" 用の差分 = envelope を剥がすと lb は w 変数 box の min
+/// に退化し strict に緩む、を機械的に観測するための専用経路。production では常に true。
 fn build_mccormick_lp(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
     pairs: &[BilinearTerm],
+    include_envelope: bool,
 ) -> Option<QpProblem> {
     let n = problem.num_vars;
     let p = pairs.len();
@@ -222,17 +237,21 @@ fn build_mccormick_lp(
         bounds.push(w_interval(node_bounds, term.i, term.j));
     }
 
-    // 既存 A の re-emit + McCormick 行追加
-    let extra_rows: usize = pairs
-        .iter()
-        .map(|t| {
-            if t.i == t.j {
-                MCCORMICK_INEQ_PER_DIAG
-            } else {
-                MCCORMICK_INEQ_PER_OFF_DIAG
-            }
-        })
-        .sum();
+    // 既存 A の re-emit + McCormick 行追加 (envelope OFF なら 0 行)
+    let extra_rows: usize = if include_envelope {
+        pairs
+            .iter()
+            .map(|t| {
+                if t.i == t.j {
+                    MCCORMICK_INEQ_PER_DIAG
+                } else {
+                    MCCORMICK_INEQ_PER_OFF_DIAG
+                }
+            })
+            .sum()
+    } else {
+        0
+    };
     let total_rows = problem.num_constraints + extra_rows;
 
     let nnz_estimate = problem.a.values.len() + extra_rows * 3;
@@ -253,6 +272,13 @@ fn build_mccormick_lp(
     types.extend_from_slice(&problem.constraint_types);
 
     let mut row = problem.num_constraints;
+    if !include_envelope {
+        debug_assert_eq!(row, total_rows);
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, total_rows, total_vars).ok()?;
+        let mut lifted = QpProblem::new(q, c, a, b, bounds, types).ok()?;
+        lifted.obj_offset = problem.obj_offset;
+        return Some(lifted);
+    }
     for (k, term) in pairs.iter().enumerate() {
         let (li, ui) = node_bounds[term.i];
         let (lj, uj) = node_bounds[term.j];
@@ -471,6 +497,132 @@ mod tests {
         assert!(
             lb_narrow >= lb_wide - 1e-6,
             "narrow lb {lb_narrow} should not be worse than wide {lb_wide}"
+        );
+    }
+
+    /// no-op teeth: McCormick 不等式を機械的に剥がす (`include_envelope=false`) と lb は
+    /// w 変数 box bound しか効かなくなり厳格に緩む。同 fixture で full vs no-op を比較し
+    /// strict 差を観測することで、後段 BB driver sentinel
+    /// (`mccormick_reduces_or_matches_bb_node_count_on_bilinear_rich_set`) の teeth を
+    /// 数学的に裏付ける (= envelope を消すと当該 sentinel は確実に FAIL する)。
+    #[test]
+    fn mccormick_lb_strictly_better_than_envelope_removed() {
+        // f(x) = -x² + x on [0,1]. global = 0 at x=0 or x=1 (両端で f=0)。
+        // 解析:
+        //   envelope OFF: w_box=[0,1], c_w=-1, c_x=1 → min -w+x = -1+0 = -1 (緩い)
+        //   envelope ON : tangent + secant が xy=x² の hull を作り、w=0 を強制 → lb=0 (tight)
+        // → 厳格な差 1.0 を観測 (envelope なしでは絶対に達成できない)
+        let q = diag_q(&[-2.0]);
+        let p = build_problem(q, vec![1.0], vec![(0.0, 1.0)]);
+        let opts = SolverOptions::default();
+        let lb_full = solve_lifted_lp(&p, &p.bounds, &opts, None, true).expect("full");
+        let lb_noop = solve_lifted_lp(&p, &p.bounds, &opts, None, false).expect("noop");
+        assert!(lb_noop.is_finite(), "noop must remain finite, got {lb_noop}");
+        assert!(
+            lb_full > lb_noop + 0.5,
+            "McCormick envelope must add real tightness: full={lb_full}, noop={lb_noop}"
+        );
+        // sanity: 両者とも global f*=0 を underestimate
+        assert!(lb_full <= 0.0 + 1e-4, "full lb {lb_full} must underestimate 0");
+        assert!(lb_noop <= 0.0 + 1e-4, "noop lb {lb_noop} must underestimate 0");
+    }
+
+    /// Ge constraint type: x+y ≥ 1, min -x²-y² on [0,1]². global = -1 at (1,0)/(0,1)/(1,1)。
+    /// 既存 Eq テストでカバーされない Ge 経路の build_mccormick_lp 行 emit 整合性を確認。
+    #[test]
+    fn mccormick_lb_with_linear_ge_constraint() {
+        let q = diag_q(&[-2.0, -2.0]);
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let p = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![1.0],
+            vec![(0.0, 1.0); 2],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        let opts = SolverOptions::default();
+        let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("Ge McCormick");
+        assert!(
+            lb.is_finite() && lb <= -2.0 + 1e-4,
+            "Ge lb {lb} must underestimate global ≥ -2"
+        );
+    }
+
+    /// coef=0 path: box の片端が原点に張り付くと McCormick 行係数が 0 になる
+    /// (例: li=0 のとき diag LB tangent at l は w − 2·0·x ≥ 0 = `w ≥ 0`、x 列係数なし)。
+    /// push_row_3/4 の `coef_x != 0.0` skip が正しく分岐し triplet が壊れないこと、
+    /// 結果 lb が一貫していることを確認する。
+    #[test]
+    fn mccormick_lb_with_zero_coef_box_edges() {
+        // f = -x² on [0, 2]: global = -4 at x=2. li=0 で diag LB tangent at l は
+        // x 列係数ゼロ (= entry skip)、x² の McCormick envelope は w≥0, w≥4x-4, w≤2x。
+        let q = diag_q(&[-2.0]);
+        let p = build_problem(q, vec![0.0], vec![(0.0, 2.0)]);
+        let opts = SolverOptions::default();
+        let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("zero-coef path");
+        // LP IPM tol ~1e-3 を加味、tight 上限 -4 + 1e-3
+        assert!(
+            lb.is_finite() && (lb - (-4.0)).abs() < 1e-3,
+            "zero-coef edge lb {lb} must reach tight global -4 (±1e-3)"
+        );
+    }
+
+    /// Q_ZERO_TOL 境界: 全 entry が threshold 未満なら pairs 空 → None。
+    /// 一方 threshold 直上の entry は採用される (= 境界の側性が明確)。
+    #[test]
+    fn mccormick_lb_q_zero_tol_boundary() {
+        // 1) 全 entry < Q_ZERO_TOL: pairs 空 → None
+        let half = Q_ZERO_TOL * 0.5;
+        let q_below = CscMatrix::from_triplets(&[0], &[0], &[half], 1, 1).unwrap();
+        let p_below = build_problem(q_below, vec![0.0], vec![(-1.0, 1.0)]);
+        let opts = SolverOptions::default();
+        assert!(
+            mccormick_lower_bound(&p_below, &p_below.bounds, &opts, None).is_none(),
+            "Q values below Q_ZERO_TOL must produce empty pairs → None"
+        );
+        // 2) threshold の 10 倍 (= 明確に live) なら pairs 非空 → Some
+        let live = Q_ZERO_TOL * 10.0;
+        let q_above = CscMatrix::from_triplets(&[0], &[0], &[live], 1, 1).unwrap();
+        let p_above = build_problem(q_above, vec![0.0], vec![(-1.0, 1.0)]);
+        let lb = mccormick_lower_bound(&p_above, &p_above.bounds, &opts, None)
+            .expect("above-threshold Q must yield lb");
+        assert!(lb.is_finite(), "above-threshold lb must be finite, got {lb}");
+    }
+
+    /// 大規模 fixture (n=8): dense bilinear + box bound で BB 経路に乗らず純 lb 評価。
+    /// 多数 pair (n=8 → 28 off-diag + 8 diag = 36 pairs × 3-4 ineq = 100+ 行) の
+    /// 行構築・LP solve が壊れないこと、underestimator 性質を維持することを確認。
+    #[test]
+    fn mccormick_lb_holds_on_n8_dense_bilinear() {
+        const N: usize = 8;
+        // Q: full-symmetric, off-diag = 1, diag = -1 (light nonconvex)
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for c in 0..N {
+            for r in 0..N {
+                rows.push(r);
+                cols.push(c);
+                vals.push(if r == c { -1.0 } else { 1.0 });
+            }
+        }
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, N, N).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, N).unwrap();
+        let p = QpProblem::new(q, vec![0.0; N], a, vec![], vec![(-1.0, 1.0); N], vec![])
+            .unwrap();
+        let opts = SolverOptions::default();
+        let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None)
+            .expect("n=8 dense bilinear must solve");
+        assert!(lb.is_finite(), "n=8 lb must be finite, got {lb}");
+        // x=1 ベクトル等の corner 評価で valid underestimator を確認
+        let qx = p.q.mat_vec_mul(&vec![1.0; N]).unwrap();
+        let xqx: f64 = vec![1.0; N].iter().zip(qx.iter()).map(|(a, b)| a * b).sum();
+        let f_corner = 0.5 * xqx;
+        assert!(
+            lb <= f_corner + 1e-5,
+            "n=8 lb {lb} must underestimate corner f={f_corner}"
         );
     }
 }

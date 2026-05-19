@@ -31,7 +31,7 @@ use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 
-use super::bound::is_feasible_result;
+use super::bound::{all_bounds_finite, is_feasible_result};
 
 /// α-BB underestimator `Q + 2α·I` が PSD となる最小 α を Gershgorin で取得。
 ///
@@ -89,13 +89,6 @@ fn build_convex_relaxation(
     sub
 }
 
-/// box bounds が全変数で有限か。α-BB underestimator は有限 box が前提。
-fn all_bounds_finite(node_bounds: &[(f64, f64)]) -> bool {
-    node_bounds
-        .iter()
-        .all(|&(l, u)| l.is_finite() && u.is_finite() && u >= l)
-}
-
 /// α-BB lower bound on the given box。
 ///
 /// 戻り値 `Some(lb)`: convex relaxation が feasible 解を返した = lb は元問題下界として有効。
@@ -122,7 +115,10 @@ pub(crate) fn alpha_bb_lower_bound(
     let mut opts = base_opts.clone();
     opts.multistart = None;
     opts.global_optimization = None;
+    // sub-solve hygiene: caller の warm hint は凸化後の解空間で意味が変わるため全消去
+    opts.warm_start = None;
     opts.warm_start_qp = None;
+    opts.warm_start_lp = None;
     opts.deadline = deadline;
     let res: SolverResult = crate::qp::solve_qp_with(&sub, &opts);
     if !is_feasible_result(&res.status) {
