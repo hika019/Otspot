@@ -214,6 +214,118 @@ else
 fi
 
 # ---------------------------------------------------------------
+echo "=== Test 4: per-category aggregation (KKT_FAIL counter + CATEGORY_SUM 整合性) ==="
+# 目的: bench_qplib.rs に新 STATUS が追加された際、bench_parallel.sh の
+# Summary printer / CATEGORY_SUM 整合性 check に集計漏れが起きないことを検知する。
+# 過去 #114 で KKT_FAIL が aggregator に未配線で fence post bench 集計から漏れた。
+#
+# 合成 fixture (per-file synthetic Summary; 1 file = 1 group, jobs=3 で 3 group):
+#   p1.qps → PASS=3, TOTAL=3
+#   p2.qps → KKT_FAIL=4, TOTAL=4
+#   p3.qps → KKT_FAIL=3, TOTAL=3
+# 期待: TOTAL_PASS=3, TOTAL_KKT_FAIL=7, TOTAL=10, カテゴリ合算==TOTAL (警告 0 件)。
+FIXTURE_PASS=3
+FIXTURE_KKT_FAIL_G2=4
+FIXTURE_KKT_FAIL_G3=3
+FIXTURE_KKT_FAIL_TOTAL=$(( FIXTURE_KKT_FAIL_G2 + FIXTURE_KKT_FAIL_G3 ))
+FIXTURE_TOTAL=$(( FIXTURE_PASS + FIXTURE_KKT_FAIL_TOTAL ))
+
+unset BENCH_TEST_MODE
+# 既存 fake (BENCH_TEST_MODE 切替) を per-file 集計を吐くものに置き換え。
+# Test 4 は本 script 末尾のため後続 test への副作用なし。
+cat > "$FAKE_SOLVER_ROOT/scripts/solver_bench.sh" <<SOL
+#!/bin/bash
+# Test 4 専用 stub: group_dir 内のファイル名で per-group Summary を切替。
+set -u
+prob=\$(basename "\$(find "\$2" -type l -o -type f | head -1)")
+case "\$prob" in
+  p1.qps)
+    echo "  \$prob  PASS"
+    echo "    PASS:    ${FIXTURE_PASS}"
+    echo "    TOTAL:   ${FIXTURE_PASS}"
+    ;;
+  p2.qps)
+    echo "  \$prob  KKT_FAIL"
+    echo "    KKT_FAIL: ${FIXTURE_KKT_FAIL_G2}"
+    echo "    TOTAL:    ${FIXTURE_KKT_FAIL_G2}"
+    ;;
+  p3.qps)
+    echo "  \$prob  KKT_FAIL"
+    echo "    KKT_FAIL: ${FIXTURE_KKT_FAIL_G3}"
+    echo "    TOTAL:    ${FIXTURE_KKT_FAIL_G3}"
+    ;;
+  *)
+    echo "  \$prob  ERROR"
+    echo "    ERROR: 1"
+    echo "    TOTAL: 1"
+    ;;
+esac
+SOL
+chmod +x "$FAKE_SOLVER_ROOT/scripts/solver_bench.sh"
+
+OUT="$TMP_ROOT/t4.out"
+LOG="$TMP_ROOT/t4.log"
+SOLVER_DIR="$FAKE_SOLVER_ROOT" \
+bash "$FAKE_BENCH" \
+  --data-dir "$DATA_DIR" \
+  --timeout 1 \
+  --eps 1e-6 \
+  --jobs 3 \
+  --output "$OUT" >"$LOG" 2>&1 || true
+
+KKT_FAIL_LINE=$(grep -E "^\s+KKT_FAIL:" "$OUT" | head -1 | awk '{print $2}')
+PASS_LINE=$(grep -E "^\s+PASS:" "$OUT" | head -1 | awk '{print $2}')
+TOTAL_LINE=$(grep -E "^\s+TOTAL:" "$OUT" | head -1 | awk '{print $2}')
+assert_eq "$PASS_LINE" "$FIXTURE_PASS" "TOTAL_PASS 集計 (=${FIXTURE_PASS})"
+assert_eq "$KKT_FAIL_LINE" "$FIXTURE_KKT_FAIL_TOTAL" "TOTAL_KKT_FAIL 集計 (=${FIXTURE_KKT_FAIL_TOTAL})"
+assert_eq "$TOTAL_LINE" "$FIXTURE_TOTAL" "TOTAL 集計 (=${FIXTURE_TOTAL})"
+if grep -q "警告: カテゴリ合算" "$LOG"; then
+  echo "  FAIL: 正常 fixture でカテゴリ合算 mismatch 警告が出力された" >&2
+  echo "  --- LOG ($LOG) ---" >&2
+  grep "警告:" "$LOG" >&2 || true
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: カテゴリ合算 == TOTAL (警告 0 件)"
+  PASS=$((PASS + 1))
+fi
+
+# toggle proof (no-op 書換実証, ref: feedback_sentinel_must_fail_under_noop):
+# bench_parallel.sh の TOTAL_KKT_FAIL 集計行 (line 363: `${kkt_fail:-0}` 加算) を
+# sed で除去した複製を同じ FAKE_SOLVER_ROOT/scripts 内に配置して実行する。
+# (TOGGLE_BENCH が SCRIPT_DIR から solver_bench.sh を探すため同居必須。)
+# pattern `kkt_fail:-0` は line 363 のみで unique。
+# CATEGORY_SUM が KKT_FAIL=7 分だけ目減りして mismatch 警告が出ることを確認する。
+# 警告 line 形式 (bench_parallel.sh:492): "警告: カテゴリ合算(N) ≠ TOTAL(M)"
+TOGGLE_BENCH="$FAKE_SOLVER_ROOT/scripts/bench_parallel_no_kkt.sh"
+sed '/kkt_fail:-0/d' "$FAKE_BENCH" > "$TOGGLE_BENCH"
+# sed が aggregation 行を正しく削除したか前提検証 (見つからない/複数 hit を防ぐ)
+TOGGLE_REMOVED=$(( $(grep -c "kkt_fail:-0" "$FAKE_BENCH") - $(grep -c "kkt_fail:-0" "$TOGGLE_BENCH") ))
+assert_eq "$TOGGLE_REMOVED" "1" "toggle sed: TOTAL_KKT_FAIL 集計行を 1 行削除"
+chmod +x "$TOGGLE_BENCH"
+TOGGLE_OUT="$TMP_ROOT/t4_toggle.out"
+TOGGLE_LOG="$TMP_ROOT/t4_toggle.log"
+SOLVER_DIR="$FAKE_SOLVER_ROOT" \
+bash "$TOGGLE_BENCH" \
+  --data-dir "$DATA_DIR" \
+  --timeout 1 \
+  --eps 1e-6 \
+  --jobs 3 \
+  --output "$TOGGLE_OUT" >"$TOGGLE_LOG" 2>&1 || true
+EXPECT_TOGGLE_WARN="警告: カテゴリ合算(${FIXTURE_PASS}) ≠ TOTAL(${FIXTURE_TOTAL})"
+if grep -qF "$EXPECT_TOGGLE_WARN" "$TOGGLE_LOG"; then
+  echo "  PASS: toggle で sentinel 発火 (CATEGORY_SUM=${FIXTURE_PASS} ≠ TOTAL=${FIXTURE_TOTAL})"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: toggle で sentinel 未発火 (KKT_FAIL 集計欠落を検知できず)" >&2
+  echo "  --- expected ---" >&2
+  echo "  $EXPECT_TOGGLE_WARN" >&2
+  echo "  --- TOGGLE_LOG ($TOGGLE_LOG) ---" >&2
+  grep "警告:" "$TOGGLE_LOG" >&2 || echo "  (no 警告 line found)" >&2
+  echo "  ----------------" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------
 echo ""
 echo "=== Result: PASS=$PASS FAIL=$FAIL ==="
 [[ $FAIL -eq 0 ]] || exit 1
