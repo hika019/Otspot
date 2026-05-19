@@ -17,7 +17,7 @@ mod core;
 mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
-mod bound_flip;
+pub mod bound_flip;
 
 /// `options.dual_pricing` から DualLeavingStrategy を組み立てる。
 /// DSE 経路は m 個の重みを new() で初期化する (γ_i = 1, 識別基底想定)。
