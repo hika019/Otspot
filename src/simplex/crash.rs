@@ -430,32 +430,10 @@ mod tests {
         for &c in &basis { assert!(seen.insert(c), "duplicate column in basis: {:?}", basis); }
     }
 
-    /// 退化検証 sentinel: 静的 sort 版に書き戻したら必ず FAIL する構造。
+    /// LTSF basis 不変式: 列は一意かつ range 内、5×6 疎構造で ≥ 4 行被覆。
     ///
-    /// 構造:
-    ///   col0: row {0,1}, col1: row {0,1,2}, col2: row {0}
-    ///   3 行、3 列。col2 (singleton row0) → col0 (row1 残のみ singleton 化)
-    ///   → col1 (row2 残). 動的 LTSF なら全行被覆。
-    ///
-    ///   静的 nnz-sort 版だと col_priority = [(1,col2),(2,col0),(3,col1)]
-    ///   の順に処理。col2 → row0 取得 (row1,row2 残)。col0 (row0,row1) →
-    ///   pivot row として最大 |val| を選ぶが row0 は既に covered なので row1
-    ///   を取る (これは OK)。col1 (row0,row1,row2) → row2 を取る (これも OK)。
-    ///   なので静的でもこのケースは通る…。
-    ///
-    ///   ⇒ より厳しい構造を別に作る: col0 と col1 が同じ行集合 {0,1} で、
-    ///   col2 は row 2 singleton。静的 nnz-sort は col2 (1), col0 (2), col1
-    ///   (2) の順で、col0 と col1 が row 0,1 を取り合うとき max|val| pivot で
-    ///   両方とも row 0 を選ぼうとして row 1 が cover されないリスクあり。
-    ///
-    ///   値設計: col0[0]=10, col0[1]=1, col1[0]=10, col1[1]=1, col2[2]=5.
-    ///   静的: col2 → row2. col0 → max|val|=row0=10. col1 → max|val|=row0 既
-    ///   covered → row1=1. 結果 OK. ハマらない…
-    ///
-    ///   結局この設計では静的でも通るので、実用上の big bench で証明する。
-    ///   ここでは「初期 nnz-sort では順序逆転して singleton chase が必要」
-    ///   ケース (singleton_chase test + dynamic_repriority test) を sentinel
-    ///   として残し、cover 判定の不変式とする。
+    /// dynamic re-priority と singleton chase の cover 結果を確認する一般 sentinel。
+    /// sign 制約で 1 行残るのは許容するため num_art ≤ 1 を要求。
     #[test]
     fn ltsf_basis_columns_unique_and_in_range() {
         // 雑多な疎構造で basis 一意性と範囲を検証
