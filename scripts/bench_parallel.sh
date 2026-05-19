@@ -361,9 +361,17 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_NONCONVEX=$(( TOTAL_NONCONVEX + ${nonconvex:-0} ))
   TOTAL_SUBOPTIMAL=$(( TOTAL_SUBOPTIMAL + ${suboptimal:-0} ))
 
-  # 問題別詳細行（PARSE_/SOLVE_/=>行を除く、STATUS含む行）
-  grep -E "\s+(PASS((\[no_ref\])|(:Infeasible)|(:Unbounded))?|TIMEOUT|(DFEAS_FAIL|PFEAS_FAIL|FAIL)(:[A-Za-z]+)?|OBJ_MISMATCH|NONCONVEX|SUBOPTIMAL|MAXITER|ERROR)" "$LOG" \
-    | grep -v -E "^(PARSE_|SOLVE_)" >> "$PROBLEM_DETAIL_FILE" 2>/dev/null || true
+  # 問題別詳細行抽出:
+  # - bench binary 出力: `NAME ROWS COLS STATUS TIME ...` (NAME が非空白先頭)
+  # - 外部 timeout fallback (worker_func 内 fallback 行): `  NAME  TIMEOUT (...)` (NF=2+)
+  # - 除外: PARSE_/SOLVE_ progress lines、Summary block (`^\s+STATUS:\s+NUMBER\s*$`)
+  awk '
+    /^(PARSE_|SOLVE_)/ { next }
+    # Summary block lines: 2 field, field1 ends with ":", field2 is integer
+    NF == 2 && $1 ~ /:$/ && $2 ~ /^-?[0-9]+$/ { next }
+    # Detail rows: contain a known STATUS token
+    /(^|[[:space:]])(PASS(\[no_ref\])?(:Infeasible|:Unbounded)?|TIMEOUT|MAXITER|ERROR|SKIP|PARSE_ERR|NONCONVEX|SUBOPTIMAL|KKT_FAIL|OBJ_MISMATCH|PFEAS_FAIL|DFEAS_FAIL|FAIL(:[A-Za-z]+)?)([[:space:]]|$)/ { print }
+  ' "$LOG" >> "$PROBLEM_DETAIL_FILE"
 done
 
 # 結果を出力ファイルとstdoutに書き込み
@@ -398,6 +406,74 @@ done
   echo "=== 問題別詳細 ==="
   if [[ -s "$PROBLEM_DETAIL_FILE" ]]; then
     sort "$PROBLEM_DETAIL_FILE"
+  else
+    echo "  (詳細なし)"
+  fi
+  echo ""
+  echo "=== カテゴリ別 問題名一覧 ==="
+  if [[ -s "$PROBLEM_DETAIL_FILE" ]]; then
+    # 各 detail 行から (STATUS, NAME, NOTE) を抽出してカテゴリ毎に列挙。
+    # bench binary 行: $1=NAME $2=ROWS $3=COLS $4=STATUS $5=TIME $6..=NOTE
+    # 外部 timeout fallback 行: $1=NAME $2=TIMEOUT $3..=NOTE
+    # STATUS 判定は keyword set で行う (token を fuzzy 一致させると "solver" 等を
+    # 誤って status と認識する事故が起きるため)。
+    # NOTE は PASS 系では冗長 (ipm metrics は 詳細 block 側で見れば良い) なので省略。
+    awk '
+      function is_status(s) {
+        return s == "PASS" || s == "PASS[no_ref]" \
+            || s == "PASS:Infeasible" || s == "PASS:Unbounded" \
+            || s == "TIMEOUT" || s == "MAXITER" || s == "ERROR" || s == "SKIP" \
+            || s == "PARSE_ERR" || s == "NONCONVEX" || s == "SUBOPTIMAL" \
+            || s == "KKT_FAIL" || s == "OBJ_MISMATCH" \
+            || s == "PFEAS_FAIL" || s == "DFEAS_FAIL" \
+            || s ~ /^FAIL(:[A-Za-z]+)?$/
+      }
+      function is_pass(s) {
+        return s ~ /^PASS(\[no_ref\]|:Infeasible|:Unbounded)?$/
+      }
+      {
+        name = $1
+        status = ""
+        note_start = 0
+        if (NF >= 4 && is_status($4)) {
+          status = $4
+          note_start = 6
+        } else if (NF >= 2 && is_status($2)) {
+          status = $2
+          note_start = 3
+        } else {
+          next
+        }
+        note = ""
+        if (!is_pass(status) && note_start > 0 && NF >= note_start) {
+          note = $note_start
+          for (j = note_start + 1; j <= NF; j++) note = note " " $j
+        }
+        print status "\t" name "\t" note
+      }
+    ' "$PROBLEM_DETAIL_FILE" \
+    | sort -t $'\t' -k1,1 -k2,2 \
+    | awk -F'\t' '
+      # sort 済 stream → 連続する同 status を group としてまとめる
+      # (BSD awk の asorti 非依存)
+      BEGIN { prev = ""; cnt = 0; list = "" }
+      function flush() {
+        if (prev != "") printf "  %s (%d):\n%s", prev, cnt, list
+      }
+      {
+        if ($1 != prev) {
+          flush()
+          prev = $1; cnt = 0; list = ""
+        }
+        cnt++
+        if ($3 != "") {
+          list = list "    " $2 "  " $3 "\n"
+        } else {
+          list = list "    " $2 "\n"
+        }
+      }
+      END { flush() }
+    '
   else
     echo "  (詳細なし)"
   fi
