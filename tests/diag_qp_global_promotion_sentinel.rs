@@ -457,8 +457,16 @@ fn alpha_bb_promotes_locally_optimal_to_optimal_on_multiple_fixtures() {
     for c in cases() {
         let (r3, _) = solve_qp_global_with_stats(&c.problem, &opts(), &cfg(false));
         let (r4, _) = solve_qp_global_with_stats(&c.problem, &opts(), &cfg(true));
-        let was_locally = matches!(r3.status, SolveStatus::LocallyOptimal);
-        let now_optimal = matches!(r4.status, SolveStatus::Optimal);
+        // Phase 6 で indefinite Q は LocallyOptimal→NonconvexLocal, Optimal→NonconvexGlobal に
+        // 分岐。fixture は indefinite (concave_*d, bilinear) のため Nonconvex* 系で promotion。
+        let was_locally = matches!(
+            r3.status,
+            SolveStatus::LocallyOptimal | SolveStatus::NonconvexLocal
+        );
+        let now_optimal = matches!(
+            r4.status,
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+        );
         eprintln!(
             "PROMO [{}]: p3={:?} p4={:?}",
             c.label, r3.status, r4.status

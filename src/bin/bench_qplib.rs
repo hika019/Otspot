@@ -35,6 +35,61 @@ enum BenchError {
     Unsupported(String),
 }
 
+/// QPLIB UnsupportedType の category (parse error message 由来).
+///
+/// 推論ではなく `src/io/qplib.rs::parse_qplib_str` の error message prefix を
+/// 引用判定: ":Variable type" → integer, ":Constraint type" → qcqp, それ以外 → other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsupportedCategory {
+    /// 変数型が C(continuous) 以外 (B/I/G/S/M)
+    Integer,
+    /// 制約型が L/B/N 以外 (主に Q = quadratic constraint)
+    Qcqp,
+    /// 上記外
+    Other,
+}
+
+fn classify_unsupported(msg: &str) -> UnsupportedCategory {
+    if msg.starts_with("Variable type") {
+        UnsupportedCategory::Integer
+    } else if msg.starts_with("Constraint type") {
+        UnsupportedCategory::Qcqp
+    } else {
+        UnsupportedCategory::Other
+    }
+}
+
+#[cfg(test)]
+mod unsupported_classify_tests {
+    use super::{classify_unsupported, UnsupportedCategory};
+
+    #[test]
+    fn variable_type_message_is_integer_category() {
+        // src/io/qplib.rs:115 fmt
+        let m = "Variable type 'I' not supported (only C=continuous supported). Type=QIL";
+        assert_eq!(classify_unsupported(m), UnsupportedCategory::Integer);
+    }
+
+    #[test]
+    fn constraint_type_message_is_qcqp_category() {
+        // src/io/qplib.rs:125 fmt
+        let m = "Constraint type 'Q' not supported (only L/B/N supported). Type=QCQ";
+        assert_eq!(classify_unsupported(m), UnsupportedCategory::Qcqp);
+    }
+
+    #[test]
+    fn binary_var_message_is_integer_category() {
+        let m = "Variable type 'B' not supported (only C=continuous supported). Type=QBL";
+        assert_eq!(classify_unsupported(m), UnsupportedCategory::Integer);
+    }
+
+    #[test]
+    fn unknown_message_is_other() {
+        let m = "Some other unsupported feature";
+        assert_eq!(classify_unsupported(m), UnsupportedCategory::Other);
+    }
+}
+
 fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
     // parse_qplib に cancel API なし → 同期呼び出し、hang 時は
     // bench_parallel.sh の外部 gtimeout でプロセスごと kill。
@@ -151,7 +206,20 @@ fn main() {
     let mut n_max_iter = 0usize;
     let mut n_suboptimal = 0usize;
     let mut n_skip = 0usize;
+    // SKIP 内訳 (CLAUDE.md L46: 推論排除、parse 由来 message を category 化).
+    // - integer: var_char != 'C' (B=binary, I=integer, G=general-int, S=semi-cont, M=mixed)
+    // - qcqp:    con_char != L/B/N (Q=quadratic constraint)
+    // - other:   上記外の Unsupported message (現状 parser 経路では発生しないが保険)
+    let mut n_skip_integer = 0usize;
+    let mut n_skip_qcqp = 0usize;
+    let mut n_skip_other = 0usize;
     let mut n_nonconvex = 0usize;
+    // solve_qp_global 経由の status 区別.
+    // NonconvexLocal / NonconvexGlobal は現状の bench (solve_qp_with single-shot) では
+    // 出ない (BB driver は別 entry) が、将来 bench が global path に切り替わった際の
+    // print 経路を準備。LocallyOptimal は単発 IPM inertia 補正で発生する。
+    let mut n_nonconvex_local = 0usize;
+    let mut n_nonconvex_global = 0usize;
     // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。
     // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
     let mut n_kkt_fail = 0usize;
@@ -179,10 +247,23 @@ fn main() {
         let prob = match parse_with_timeout(path, 30) {
             Ok(p) => p,
             Err(BenchError::Unsupported(msg)) => {
+                // parse_qplib::UnsupportedType message に基づき category 分類
+                // (src/io/qplib.rs:115 "Variable type '..." / :125 "Constraint type '...")
+                let category = classify_unsupported(&msg);
+                let status_label = match category {
+                    UnsupportedCategory::Integer => "SKIP:integer",
+                    UnsupportedCategory::Qcqp => "SKIP:qcqp",
+                    UnsupportedCategory::Other => "SKIP:other",
+                };
+                match category {
+                    UnsupportedCategory::Integer => n_skip_integer += 1,
+                    UnsupportedCategory::Qcqp => n_skip_qcqp += 1,
+                    UnsupportedCategory::Other => n_skip_other += 1,
+                }
                 let note = msg.chars().take(40).collect::<String>();
                 println!(
                     "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
-                    name, "-", "-", "SKIP", 0.0, note
+                    name, "-", "-", status_label, 0.0, note
                 );
                 n_skip += 1;
                 continue;
@@ -243,13 +324,17 @@ fn main() {
             solver::bench_utils::BenchPromotionPolicy::BenchQplib,
         );
 
-        // Optimal/LocallyOptimal/Suboptimal で有効解を持つ result に KKT 残差を計測。
+        // Optimal/LocallyOptimal/Nonconvex*/Suboptimal で有効解を持つ result に KKT 残差を計測。
         // 1 つでも違反したら PASS を KKT_FAIL に降格する (obj 一致でも KKT が崩れていれば
         // false-positive Optimal)。元空間 gap は baseline_objectives の最適値が
         // 数値であれば算出 (Infeasible/Unbounded sentinel 文字列は除外済)。
         let kkt_max = if matches!(
             result.status,
-            SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+            SolveStatus::Optimal
+                | SolveStatus::LocallyOptimal
+                | SolveStatus::NonconvexLocal
+                | SolveStatus::NonconvexGlobal
+                | SolveStatus::SuboptimalSolution
         ) && result.solution.len() == prob.num_vars
         {
             Some(compute_qp_kkt_max(
@@ -395,6 +480,23 @@ fn main() {
                 n_nonconvex += 1;
                 ("NONCONVEX".to_string(), format!("[{}] Q not PSD", method_label))
             }
+            // BB driver から global path 経由で来た場合の caller 視点表示。
+            // 単発 IPM 経路 (apply_bench_status_promotion 後) では現状出ない (Optimal 化 or
+            // LocallyOptimal で別 arm を通る)。global path 統合時にここに乗る。
+            SolveStatus::NonconvexLocal => {
+                n_nonconvex_local += 1;
+                (
+                    "NONCONVEX_LOCAL".to_string(),
+                    format!("[{}] obj={:.6e} {} {}", method_label, result.objective, kkt_str, gap_str),
+                )
+            }
+            SolveStatus::NonconvexGlobal => {
+                n_nonconvex_global += 1;
+                (
+                    "NONCONVEX_GLOBAL".to_string(),
+                    format!("[{}] obj={:.6e} {} {}", method_label, result.objective, kkt_str, gap_str),
+                )
+            }
             _ => {
                 n_fail += 1;
                 ("FAIL:Unknown".to_string(), format!("[{}]", method_label))
@@ -433,14 +535,21 @@ fn main() {
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
     println!("  KKT_FAIL:          {}", n_kkt_fail);
     println!("  NONCONVEX:         {}", n_nonconvex);
+    println!("  NONCONVEX_LOCAL:   {}", n_nonconvex_local);
+    println!("  NONCONVEX_GLOBAL:  {}", n_nonconvex_global);
     println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  MAXITER:           {}", n_max_iter);
     println!("  ERROR:             {}", n_error);
     println!("  SKIP:              {}", n_skip);
+    // SKIP 内訳を fact 出力 (parse error message 由来、推論排除).
+    println!("    SKIP:integer:    {}", n_skip_integer);
+    println!("    SKIP:qcqp:       {}", n_skip_qcqp);
+    println!("    SKIP:other:      {}", n_skip_other);
     println!(
         "  TOTAL:             {}",
         n_pass + n_pass_noref + n_pass_infeasible + n_pass_unbounded
             + n_timeout + n_fail + n_obj_mismatch + n_kkt_fail
-            + n_nonconvex + n_suboptimal + n_max_iter + n_error + n_skip
+            + n_nonconvex + n_nonconvex_local + n_nonconvex_global
+            + n_suboptimal + n_max_iter + n_error + n_skip
     );
 }

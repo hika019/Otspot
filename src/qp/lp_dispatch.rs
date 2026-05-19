@@ -119,8 +119,11 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
                 }
                 // 残時間で simplex 再試行。
             }
-            SolveStatus::NonConvex(_) => {
-                // Q=0 では発生しない設計。安全策で simplex に倒す。
+            SolveStatus::NonConvex(_)
+            | SolveStatus::NonconvexLocal
+            | SolveStatus::NonconvexGlobal => {
+                // LP dispatch は Q=0 前提 → 非凸 status は本経路には出ないが、
+                // non-exhaustive match を防ぎ safety net として simplex に倒す。
             }
         }
     }

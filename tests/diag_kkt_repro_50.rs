@@ -134,8 +134,12 @@ fn repro_nonconvex_constrained_shape_sweep() {
                             let qp = build_qp(d, l, c, a, b, &cts, bnd);
                             let res = solve_qp_global(&qp, &opts, &cfg);
                             let threshold = match res.status {
-                                SolveStatus::LocallyOptimal => KKT_THRESHOLD_LOCAL,
-                                SolveStatus::Optimal => KKT_THRESHOLD_GLOBAL,
+                                SolveStatus::LocallyOptimal | SolveStatus::NonconvexLocal => {
+                                    KKT_THRESHOLD_LOCAL
+                                }
+                                SolveStatus::Optimal | SolveStatus::NonconvexGlobal => {
+                                    KKT_THRESHOLD_GLOBAL
+                                }
                                 _ => continue,
                             };
                             let kkt = compute_qp_kkt_max(

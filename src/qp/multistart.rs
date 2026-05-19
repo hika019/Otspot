@@ -135,7 +135,10 @@ fn status_rank(s: &SolveStatus) -> u8 {
     use SolveStatus::*;
     match s {
         Optimal => 0,
+        // Nonconvex global は Optimal と同等の証明済み枠 (caller が区別したいだけで quality は同列)
+        NonconvexGlobal => 0,
         LocallyOptimal => 1,
+        NonconvexLocal => 1,
         SuboptimalSolution => 2,
         MaxIterations => 3,
         Timeout => 4,

@@ -218,7 +218,13 @@ fn alpha_bb_reaches_global_objective_on_all_fixtures() {
             fx.label, r.objective, fx.global_obj, err, r.status, stats.nodes_processed
         );
         assert!(
-            matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+            matches!(
+                r.status,
+                SolveStatus::Optimal
+                    | SolveStatus::LocallyOptimal
+                    | SolveStatus::NonconvexGlobal
+                    | SolveStatus::NonconvexLocal
+            ),
             "{}: unexpected status {:?}",
             fx.label,
             r.status
@@ -288,8 +294,8 @@ fn use_alpha_bb_false_preserves_phase3_semantics() {
         "phase4 obj wrong: {}",
         r4.objective
     );
-    let phase3_proven = matches!(r3.status, SolveStatus::Optimal);
-    let phase4_proven = matches!(r4.status, SolveStatus::Optimal);
+    let phase3_proven = matches!(r3.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
+    let phase4_proven = matches!(r4.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
     // Phase 4 が Phase 3 で proven なものを退化させていない (Optimal → LocallyOptimal 不可)
     if phase3_proven {
         assert!(
@@ -317,9 +323,11 @@ fn alpha_bb_falls_back_safely_on_semi_infinite_box() {
     )
     .unwrap();
     let (r, _) = solve_qp_global_with_stats(&p, &opts(5.0), &cfg(true));
+    // Q indefinite (-2 diag) + semi-infinite + α-BB fallback → NonconvexLocal
+    // (Phase 6 で indefinite Q を LocallyOptimal から分離)
     assert!(
-        matches!(r.status, SolveStatus::LocallyOptimal),
-        "semi-infinite box should yield LocallyOptimal under α-BB fallback, got {:?}",
+        matches!(r.status, SolveStatus::NonconvexLocal),
+        "semi-infinite box should yield NonconvexLocal under α-BB fallback, got {:?}",
         r.status
     );
 }
