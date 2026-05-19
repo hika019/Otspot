@@ -13,6 +13,7 @@ use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 
+mod bounded_core;
 mod core;
 mod phase1;
 pub mod ratio_test;
