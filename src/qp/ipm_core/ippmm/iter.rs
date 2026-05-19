@@ -5,8 +5,11 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, PmmState, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT, MU_ZERO_THRESHOLD,
-    PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT,
+    alpha_stall_eps_for, PmmState, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
+    DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD,
+    PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN, PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD,
+    PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
+    RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
 use super::trace::{emit_active_trace, emit_iter_trace, emit_sigma_diag};
 use crate::linalg::kkt_solver::inexact_eta_for_eps;
@@ -99,19 +102,10 @@ pub(crate) fn solve_ippmm_inner(
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < 1e-6;
     let mut reg_limit = initial_reg_limit;
-    const REG_LIMIT_MIN: f64 = 1e-14;
-    const PROX_DOMINATE_RATIO: f64 = 0.5;
-    /// 一度の調整で reg_limit を割る倍率
-    const REG_LIMIT_STEP: f64 = 1e-3;
 
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
     // pf が最近の N 反復で実質改善せず (ratio > THRESHOLD) かつ pf が target から
     // 桁違いに離れている場合、reg_limit を下げて IPM が boundary を探索できる。
-    // PF_STUCK_RATIO=0.95: 5 iter 連続で 5%未満の改善を停滞と判定。
-    const PF_HISTORY_LEN: usize = 5;
-    const PF_STUCK_RATIO: f64 = 0.95;
-    /// pf > FAR·eps を「まだ収束遠し」と判定する係数。
-    const PF_FAR_FROM_TARGET_RATIO: f64 = 1e2;
     let mut pf_history: Vec<f64> = Vec::with_capacity(PF_HISTORY_LEN);
 
     // 1 iter 単発の infeasible fire は noise なので、K iter 連続で確定。
@@ -212,7 +206,6 @@ pub(crate) fn solve_ippmm_inner(
         let gap_abs = p_obj_s - d_obj_s;
         let gap_denom = p_obj_s.abs().max(d_obj_s.abs()).max(1.0);
         let rel_gap = gap_abs / gap_denom;
-        const DUALITY_GAP_TOL: f64 = 1e-3;
 
         // mu は dual と同スケール (sᵀy/m) なので ||c|| 大の問題でバイアスしないよう mu/(1+||c||) 正規化。
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
@@ -413,8 +406,7 @@ pub(crate) fn solve_ippmm_inner(
 
         let _ = pred;
 
-        // NaN/Inf または finite-but-huge (>1e30) は LDL blow-up とみなし best-so-far で復帰。
-        const DIRECTION_BLOWUP_THRESHOLD: f64 = 1e30;
+        // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
         let direction_finite_but_huge = dx.iter().chain(dy.iter()).chain(ds.iter())
             .any(|v| v.is_finite() && v.abs() > DIRECTION_BLOWUP_THRESHOLD);
         if dx.iter().any(|v| !v.is_finite())
@@ -493,7 +485,6 @@ pub(crate) fn solve_ippmm_inner(
                 break;
             }
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
-            const MIN_CONSECUTIVE_INFEAS: usize = 3;
             if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
                 if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
                     eprintln!(
@@ -544,8 +535,7 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         // Trust-region cap: alpha·|dv|_inf ≤ STEP_REL_CAP·max(|v|_inf, 1)。
-        // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → 1e3 cap で 1 iter 3 桁以上の暴発を抑制。
-        const STEP_REL_CAP: f64 = 1e3;
+        // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → cap で 1 iter 3 桁以上の暴発を抑制。
         let nx_safe = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ny_safe = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ns_safe = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
