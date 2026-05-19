@@ -332,8 +332,8 @@ pub struct SolverOptions {
     /// 無効化される。`true` のとき `run_postsolve` 出口で元 LP の standard form
     /// を再構築し、LTSF crash + solution-driven refinement で `warm_start_basis`
     /// を合成する。default `false` は build_standard_form (O(nnz)) + crash +
-    /// refinement のコストを払わない (large LP で wall 数十%増を観測)。
-    /// 次回 solve で同 LP を warm-start したい呼び出し側のみ opt-in。
+    /// refinement のコストを払わない。次回 solve で同 LP を warm-start
+    /// したい呼び出し側のみ opt-in。
     ///
     /// presolve が走らない場合 (`presolve = false` or `was_reduced = false`)
     /// は native simplex 出口で basis を直接 clone するため、本フラグに依らず
