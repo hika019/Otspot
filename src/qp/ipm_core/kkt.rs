@@ -297,46 +297,16 @@ impl PermutedAugmentedKkt {
 }
 
 /// 不定 Q に対する慣性修正量 δ_ic (Q が上三角 CSC 前提)。
-/// まず LLT で PSD 判定 (Gershgorin の保守誤判定を回避)、indefinite なら Gershgorin 円定理で
-/// λ_min(Q) ≥ min_j(Q[j,j] − R_j) を下界として δ_ic = max(0, max_j(R_j − Q[j,j]))。
+/// まず LLT で PSD 判定 (Gershgorin の保守誤判定を回避)、indefinite なら共通 helper
+/// `linalg::gershgorin::psd_shift_from_gershgorin` で δ_ic = max(0, max_j(R_j − Q[j,j])) を返す。
 pub(crate) fn compute_inertia_correction(q: &CscMatrix) -> f64 {
-    let n = q.nrows;
-    if n == 0 {
+    if q.nrows == 0 || q.values.iter().all(|&v| v == 0.0) {
         return 0.0;
     }
-    if q.values.iter().all(|&v| v == 0.0) {
-        return 0.0;
-    }
-
     if crate::linalg::ldl::is_q_psd_by_cholesky(q) {
         return 0.0;
     }
-
-    let mut diag = vec![0.0_f64; n];
-    let mut row_offdiag_sum = vec![0.0_f64; n];
-
-    for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            let val = q.values[k];
-            if row == col {
-                diag[col] = val;
-            } else if row < col {
-                let abs_val = val.abs();
-                row_offdiag_sum[row] += abs_val;
-                row_offdiag_sum[col] += abs_val;
-            }
-        }
-    }
-
-    let mut delta_ic = 0.0_f64;
-    for j in 0..n {
-        let gershgorin_lower = diag[j] - row_offdiag_sum[j];
-        if gershgorin_lower < 0.0 {
-            delta_ic = delta_ic.max(-gershgorin_lower);
-        }
-    }
-    delta_ic
+    crate::linalg::gershgorin::psd_shift_from_gershgorin(q)
 }
 
 /// `AugmentedKktCache` を構築。Q は上三角全要素格納前提。

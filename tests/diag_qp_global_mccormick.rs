@@ -12,7 +12,6 @@
 
 use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
 use solver::problem::ConstraintType;
-use solver::qp::global::bound_alpha_bb::gershgorin_alpha;
 use solver::qp::global::bound_mccormick::mccormick_lower_bound;
 use solver::qp::{solve_qp_global_with_stats, QpProblem};
 use solver::sparse::CscMatrix;
@@ -27,10 +26,6 @@ const TEST_GAP_TOL: f64 = 1e-3;
 /// underestimator inequality `L(x) ≤ f(x)` のテスト許容。
 /// LP IPM の収束精度 (~1e-6) と f 評価の浮動小数誤差を加味。
 const UNDERESTIMATE_TOL: f64 = 1e-5;
-
-/// McCormick が α-BB に勝つ最低 margin (bilinear-rich fixture)。
-/// 観測 0.125 (asymmetric bilinear) を踏まえ margin 0.05 を要求。
-const MIN_MC_OVER_ALPHA_MARGIN: f64 = 0.05;
 
 fn opts() -> SolverOptions {
     let mut o = SolverOptions::default();
@@ -254,24 +249,11 @@ fn mccormick_lb_dominated_by_objective_on_uniform_samples() {
     }
 }
 
-/// McCormick lb が **strict** に α-BB lb より tight な fixture (`asym_bilinear_2d`) を
-/// 確認。MIN_MC_OVER_ALPHA_MARGIN の margin で sentinel に teeth (no-op = -∞ なら FAIL).
-#[test]
-fn mccormick_strictly_tighter_than_alpha_bb_on_asymmetric_fixture() {
-    use solver::qp::global::bound_alpha_bb::alpha_bb_lower_bound;
-    let p = asym_bilinear_2d();
-    let opts = SolverOptions::default();
-    let alpha = gershgorin_alpha(&p.q);
-    let lb_alpha = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None).expect("α-BB");
-    let lb_mc = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("McCormick");
-    eprintln!("asym_bilinear_2d: lb_alpha={lb_alpha:.6} lb_mc={lb_mc:.6}");
-    assert!(
-        lb_mc > lb_alpha + MIN_MC_OVER_ALPHA_MARGIN,
-        "McCormick must beat α-BB by ≥ {MIN_MC_OVER_ALPHA_MARGIN}: \
-         lb_mc={lb_mc:.6}, lb_alpha={lb_alpha:.6}, diff={:.6}",
-        lb_mc - lb_alpha,
-    );
-}
+// McCormick vs α-BB の strict tightness 比較は `bound_alpha_bb` が pub(crate) のため
+// integration test では再現不可。同 fixture (`[[0,1],[1,0]]·(-1)`, box (-2,1)×(-1,2)) の
+// 比較は `src/qp/global/bound_mccormick.rs::tests::mccormick_lb_tighter_than_alpha_bb_on_asymmetric_bilinear`
+// で in-src unit test として保持。BB driver 経由の総 node 削減 sentinel は本ファイル
+// 後段 `mccormick_reduces_or_matches_bb_node_count_on_bilinear_rich_set` で確保する。
 
 /// 多 seed の random non-convex で n=3..=5、McCormick lb が常に valid underestimator
 /// であること (= ランダム fixture でも壊れない、CLAUDE.md "複数 data pattern")。
