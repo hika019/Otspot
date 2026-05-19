@@ -1,4 +1,4 @@
-//! task #11: Big-M Dual Phase I — TDD red / green test
+//! Big-M Dual Phase I — TDD red / green test
 //!
 //! ## 目的
 //!
@@ -6,14 +6,14 @@
 //! `dual_advanced/mod.rs` が `dual::two_phase_dual_simplex` →
 //! `cold_start_dual` (num_artificial>0 で primal fallback) に落ち、
 //! Primal Phase I cycling で `iters=0 TIMEOUT` する事象を
-//! Big-M Dual Phase I で解消する task #11 の TDD ガード。
+//! Big-M Dual Phase I で解消する TDD ガード。
 //!
 //! ## 対象 (Netlib infeasible LP set; klein 3 問)
 //!
 //! - `klein1.QPS`  小型 infeasible
 //! - `klein2.QPS`  中型 infeasible
-//! - `klein3.QPS`  大型 infeasible (88 × 994、現状 Phase I cycling →
-//!                  60s timeout 内で Infeasible 検出に失敗 = task #11 が解消する症状)
+//! - `klein3.QPS`  大型 infeasible (88 × 994、Phase I cycling で
+//!                  60s timeout 内に Infeasible 検出に失敗していた症状)
 //!
 //! ## 期待挙動 (TDD GREEN 基準)
 //!
@@ -79,13 +79,13 @@ fn klein2_infeasible_within_60s() {
     assert!(wall < TIMEOUT_SEC, "klein2 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
-/// klein3: highly degenerate infeasible LP. task #11 introduced Big-M Phase I
-/// with a `Timeout + artificials residual → Infeasible` heuristic that
-/// happened to be right for klein3 but flipped slow-but-feasible LPs to
-/// false-Infeasible (#37: pilot/dfl001/ken-13/ken-18). #37 replaced the
-/// heuristic with a Farkas certificate (A^T y ≤ 0, b^T y > 0); on klein3 the
-/// Big-M basis after 600K iters does not satisfy A^T y ≤ 0 within 60s budget,
-/// so the certificate fails and the solver returns Timeout (honest answer).
+/// klein3: highly degenerate infeasible LP. Big-M Phase I previously used a
+/// `Timeout + artificials residual → Infeasible` heuristic that was right for
+/// klein3 but flipped slow-but-feasible LPs (pilot/dfl001/ken-13/ken-18) to
+/// false-Infeasible. The heuristic was replaced by a Farkas certificate
+/// (A^T y ≤ 0, b^T y > 0); on klein3 the Big-M basis after 600K iters does
+/// not satisfy A^T y ≤ 0 within 60s budget, so the certificate fails and
+/// the solver returns Timeout (honest answer).
 ///
 /// Both verdicts are acceptable: Infeasible (presolve / Phase I converges in
 /// time) or Timeout (Phase I incomplete, no certificate). Optimal or Unbounded
@@ -101,11 +101,11 @@ fn klein3_no_false_optimal_within_60s() {
     assert!(wall < TIMEOUT_SEC, "klein3 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
-/// task #6 (anti-cycling): bland_mode 起動時に lex 摂動を注入することで
+/// Anti-cycling: bland_mode 起動時に lex 摂動を注入することで
 /// degeneracy が解消され、Bland's rule が klein3 を有限ステップで処理することを
 /// 確認する。
 ///
-/// task #43 更新: 以前は strict `status == Infeasible` を要求していたが、
+/// 以前は strict `status == Infeasible` を要求していたが、
 /// それは Big-M Phase I の「Optimal + artificials residual → Infeasible」
 /// heuristic に依存していた verdict (heuristic 自体が pilot 等で false-
 /// Infeasible を生み撤去)。新仕様では Phase I が Optimal に到達 + Farkas
@@ -151,13 +151,13 @@ fn diag_klein3_no_presolve() {
     // この test は assertion なし (観測のみ)
 }
 
-/// SPEED #1 (task #37): LP cold-start (Ge/Eq) で `solve_dual_advanced` は
+/// LP cold-start (Ge/Eq) で `solve_dual_advanced` は
 /// Primal (`two_phase_dual_simplex`) を deadline の半分で実行し、Timeout なら
 /// Big-M Phase I へ fall back する。klein3 は Primal Phase I が cycling 確実な
 /// degenerate infeasible LP で、Primal の早期 bail が効かないと Big-M に時間が
 /// 残らない症状を持つ。
 ///
-/// task #43 更新: status assertion は Infeasible / Timeout の両方を許可
+/// Status assertion は Infeasible / Timeout の両方を許可
 /// (詳細は `klein3_infeasible_via_bland_anticycling` 参照)。本 test は
 /// Primal early-bail の effectiveness sentinel — 60s deadline で wall ≪ 60s
 /// (Primal が cycling を検出して Big-M に時間を譲っている) を確認する。

@@ -1,4 +1,4 @@
-//! task#37 sentinel: zero-diagonal indefinite Q を `compute_inertia_correction`
+//! Sentinel: zero-diagonal indefinite Q を `compute_inertia_correction`
 //! が PSD と誤判定し、IPM が `q_is_indefinite=false` で `Optimal` を返す
 //! 退化を防ぐ end-to-end test。
 //!

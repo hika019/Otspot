@@ -1,6 +1,6 @@
-//! QPLIB_9002 (DCL, ill-conditioned diagonal Q) regression sentinel (task #31).
+//! QPLIB_9002 (DCL, ill-conditioned diagonal Q) regression sentinel.
 //!
-//! 経緯: bench_722g_ippmm_1000s が obj=5.698e9 を baseline 化していたが、当 task で
+//! 経緯: bench_722g_ippmm_1000s が obj=5.698e9 を baseline 化していたが、
 //! 以下を事実確認:
 //!   - QPLIB 公式 solu = "=unkn=" (published optimum なし)
 //!   - Clarabel (tol=1e-8) は NumericalError, obj=3.69e13 (より悪い)

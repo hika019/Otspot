@@ -1,11 +1,11 @@
 //! LSQ dual refine が user deadline を honor するかの regression sentinel
 //! (data 不在環境でも実行可能な合成 LP 版)。
 //!
-//! task #40 fail-safe: cleanup stagnant 時の LSQ skip (#39) は algorithmic gate。
+//! Fail-safe: cleanup stagnant 時の LSQ skip は algorithmic gate。
 //! 「cheap_min > PIVOT_TOL かつ cleanup が改善した」case のみ LSQ が走るため、
 //! LSQ 自体が `Option<Instant>` deadline を尊重して budget 内に終了する必要がある。
 //!
-//! ## 合成 LP 設計 (task #42 v2、reviewer fact-finding 後)
+//! ## 合成 LP 設計 (v2、reviewer fact-finding 後)
 //!
 //! v1 (commit 8a20524) の合成 LP は presolve が was_reduced=false で短絡し
 //! postsolve_us=0 即終了 → LSQ entry 未到達 = vacuous sentinel だった。
@@ -29,11 +29,11 @@
 //! 2. **postsolve_us >= POSTSOLVE_MIN_US**: LSQ entry が到達した観測検証
 //!    (vacuous fail-safe — v1 で見落とした穴を構造的に塞ぐ)
 //!
-//! ## SLACK_SEC = 2.0 の根拠 (task #42)
+//! ## SLACK_SEC = 2.0 の根拠
 //!
-//! 観測 (task #38 dfl001-probe):
+//! 観測 (dfl001-probe):
 //!   `compute_lsq_dual_y` 単発で wall 2.9–4.5s (postsolve 11s の 98%)。
-//! 観測 (task #39 dfl001 LSQ skip 後):
+//! 観測 (dfl001 LSQ skip 後):
 //!   postsolve は cleanup-LP + Gauss-Seidel + unscale 合計 ~0.3–0.8s。
 //! 本テストは LSQ deadline-guard を踏んだ後の cleanup/GS 残量を吸収する
 //! ための余裕として 2.0s を採用 (上記 0.3–0.8s + 2× 安全マージン)。

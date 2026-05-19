@@ -18,7 +18,7 @@ fn timeout_with_solution_stays_timeout_qps_benchmark() {
     assert_eq!(
         r_out.status,
         SolveStatus::Timeout,
-        "Timeout は Optimal に silent 格上げしてはいけない (task #46/#52)"
+        "Timeout は Optimal に silent 格上げしてはいけない"
     );
 }
 

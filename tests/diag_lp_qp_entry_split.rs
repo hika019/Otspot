@@ -19,7 +19,7 @@ use solver::qp::QpProblem;
 use solver::sparse::CscMatrix;
 
 /// Pin `SimplexMethod::Primal`: dual paths regress textbook fixtures to
-/// x≈1.99977 instead of vertex 2.0 on current main (task #33), which is
+/// x≈1.99977 instead of vertex 2.0 on current main, which is
 /// orthogonal noise to the routing assertions here.
 fn lp_opts_strict() -> SolverOptions {
     let mut o = SolverOptions::default();

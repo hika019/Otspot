@@ -1,4 +1,4 @@
-//! Simplex crash basis (#15) sentinel: 構造列で artificial を被覆して Phase I の
+//! Simplex crash basis sentinel: 構造列で artificial を被覆して Phase I の
 //! 反復数を削減することを検証する。
 //!
 //! 検出原理:

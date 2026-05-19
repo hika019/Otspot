@@ -1,4 +1,4 @@
-//! Model API 拡張 (task #26) 単体テスト:
+//! Model API 拡張 単体テスト:
 //! - `ModelResult.bound_duals` 露出
 //! - `Model::set_obj_offset(f64)`
 //! - `ModelError::SolveError::{MaxIterations, NumericalError}` 露出
