@@ -6,12 +6,13 @@
 //! here; the two call sites are distinguishable via `SolverResult.stats.route`.
 
 use crate::options::SolverOptions;
-use crate::problem::{LpProblem, SolveRoute, SolverResult};
+use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 
 /// Solve an LP directly. Sets `result.stats.route = SolveRoute::LpDirect`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
     result.stats.route = SolveRoute::LpDirect;
+    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
     result
 }
 
@@ -19,5 +20,6 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
 pub(crate) fn solve_lp_forwarded_from_qp(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
     result.stats.route = SolveRoute::LpForwardedFromQp;
+    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
     result
 }

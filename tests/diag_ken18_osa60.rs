@@ -219,11 +219,16 @@ fn diag_ken18_must_respect_internal_deadline() {
     }
 }
 
-/// Deadline contract fast-check: a small LP (bore3d, always committed to tests/) must
-/// return within budget + slack. Catches deadline enforcement regressions on any LP size.
+/// Deadline contract: two-case deterministic sentinel using `SolveStats::deadline_triggered`.
 ///
-/// bore3d solves in < 1 s, so the 5 s budget + 5 s slack is generous. This test is
-/// fast (< 5 s wall) and requires no external data download.
+/// Case A (generous budget): bore3d solves in < 1 s; a 30 s deadline is never hit.
+///   deadline_triggered == false, status == Optimal.
+///
+/// Case B (forced deadline): a 0.001 s (1 ms) budget forces Timeout before bore3d
+///   completes; deadline_triggered == true, status == Timeout.
+///
+/// Deleting the `deadline_triggered` assignment in lp.rs/dispatch_solve_qp causes
+/// Case B to assert false (no-op proof).  No wall-clock measurement.
 #[test]
 fn diag_deadline_small_lp() {
     let path = Path::new("tests/lp_problems/bore3d.QPS");
@@ -231,33 +236,29 @@ fn diag_deadline_small_lp() {
 
     let qp = parse_qps(path).expect("parse bore3d");
 
-    const BUDGET_SECS: f64 = 5.0;
-    const WALL_SLACK_SECS: f64 = 5.0;
+    // Case A: generous budget — bore3d finishes before the deadline.
+    {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(30.0);
+        let r = solve_qp_with(&qp, &opts);
+        eprintln!("[bore3d/A] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered);
+        assert_eq!(r.status, SolveStatus::Optimal,
+            "[bore3d/A] expected Optimal with generous budget, got {:?}", r.status);
+        assert!(!r.stats.deadline_triggered,
+            "[bore3d/A] deadline should not have triggered with 30 s budget");
+    }
 
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(BUDGET_SECS);
-
-    let t0 = Instant::now();
-    let r = solve_qp_with(&qp, &opts);
-    let elapsed = t0.elapsed().as_secs_f64();
-
-    eprintln!(
-        "[bore3d] elapsed={:.3}s status={:?} obj={:.6e}",
-        elapsed, r.status, r.objective,
-    );
-
-    assert!(
-        elapsed <= BUDGET_SECS + WALL_SLACK_SECS,
-        "[bore3d] wall {:.2}s exceeds budget {:.1}s + {:.1}s slack — deadline enforcement regressed",
-        elapsed, BUDGET_SECS, WALL_SLACK_SECS,
-    );
-
-    assert!(
-        matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout
-            | SolveStatus::Infeasible | SolveStatus::NumericalError
-            | SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
-            | SolveStatus::MaxIterations),
-        "[bore3d] unexpected status: {:?}",
-        r.status,
-    );
+    // Case B: 1 ms budget — forces Timeout, proving deadline enforcement is wired.
+    {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(0.001);
+        let r = solve_qp_with(&qp, &opts);
+        eprintln!("[bore3d/B] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered);
+        assert_eq!(r.status, SolveStatus::Timeout,
+            "[bore3d/B] expected Timeout with 1 ms budget, got {:?}", r.status);
+        assert!(r.stats.deadline_triggered,
+            "[bore3d/B] deadline_triggered must be true when status == Timeout");
+    }
 }

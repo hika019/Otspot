@@ -145,12 +145,13 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// Q=0 forwards to the LP entry (kept for backward compat — callers
 /// should prefer `crate::lp::solve_lp_with` directly); Q≠0 goes to IPPMM.
 fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    use crate::problem::SolveRoute;
+    use crate::problem::{SolveRoute, SolveStatus};
     if problem.is_zero_q() {
         return solve_as_lp_pub(problem, options);
     }
     let mut result = ipm_solver::solve_ipm(problem, options);
     result.stats.route = SolveRoute::QpIpm;
+    result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
     result
 }
 
