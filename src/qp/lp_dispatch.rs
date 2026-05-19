@@ -21,7 +21,7 @@
 use std::time::Instant;
 
 use crate::options::SolverOptions;
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 
 use super::{ipm_solver, QpProblem};
 
@@ -29,32 +29,6 @@ use super::{ipm_solver, QpProblem};
 const LP_IPM_FIRST_N: usize = 3_000;
 /// IPM を先に走らせる制約数閾値。LU 再因子分解 O(m·nnz(L)) を回避する。
 const LP_IPM_FIRST_M: usize = 2_000;
-
-/// crash→IPM warm wiring の telemetry。
-///
-/// `crash_attempted`: try_build_ipm_warm_from_crash が呼ばれた回数 (gate を通過した)。
-/// `crash_wired`: x_warm を生成して `warm_start_qp` に注入できた回数。
-/// no-op proof: `LP_CRASH_IPM_DISABLE=1` で `crash_attempted` のみ増えて
-/// `crash_wired` が 0 のままになることを sentinel で観測する。
-pub mod telemetry {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub(super) static CRASH_IPM_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
-    pub(super) static CRASH_IPM_WIRED: AtomicU64 = AtomicU64::new(0);
-
-    pub fn crash_ipm_attempted() -> u64 {
-        CRASH_IPM_ATTEMPTED.load(Ordering::Relaxed)
-    }
-
-    pub fn crash_ipm_wired() -> u64 {
-        CRASH_IPM_WIRED.load(Ordering::Relaxed)
-    }
-
-    pub fn reset() {
-        CRASH_IPM_ATTEMPTED.store(0, Ordering::Relaxed);
-        CRASH_IPM_WIRED.store(0, Ordering::Relaxed);
-    }
-}
 
 pub(crate) fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
     n > LP_IPM_FIRST_N || m > LP_IPM_FIRST_M
@@ -95,15 +69,22 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     // Unbounded は IPM 側 Q=0 数値リスクがあるため simplex で再確認。
     // LP_DISPATCH_NOOP=1 は sentinel 用 (no-op proof) で IPM 経路を無効化する。
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
+    let mut crash_attempted = false;
+    let mut crash_wired = false;
     if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
         let mut ipm_opts = ipm_opts_for_lp(options);
         // crash→IPM warm wiring: user 提供 warm_start_qp が無いときのみ生成。
         if ipm_opts.warm_start_qp.is_none() && options.use_lp_crash_basis {
+            crash_attempted = true;
             if let Some(ws) = try_build_ipm_warm_from_crash(&lp) {
                 ipm_opts.warm_start_qp = Some(ws);
+                crash_wired = true;
             }
         }
-        let ipm_result = ipm_solver::solve_ipm(problem, &ipm_opts);
+        let mut ipm_result = ipm_solver::solve_ipm(problem, &ipm_opts);
+        ipm_result.stats.crash_ipm_attempted = crash_attempted;
+        ipm_result.stats.crash_ipm_wired = crash_wired;
+        ipm_result.stats.route = SolveRoute::LpForwardedFromQp;
         // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
@@ -126,8 +107,11 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     }
 
     // simplex (LpProblem) は obj_offset を含まないため明示的に加算。
+    // crash stats を引き継ぐ (IPM fallback 経路でも attempted/wired を保持)。
     let mut result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     result.objective += problem.obj_offset;
+    result.stats.crash_ipm_attempted = crash_attempted;
+    result.stats.crash_ipm_wired = crash_wired;
     result
 }
 
@@ -153,8 +137,6 @@ fn try_build_ipm_warm_from_crash(lp: &LpProblem) -> Option<crate::options::QpWar
     use crate::basis::{BasisManager, LuBasis};
     use crate::simplex::crash_basis_for_ipm_warm;
 
-    telemetry::CRASH_IPM_ATTEMPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
     // env で no-op proof 化 (sentinel 用)。
     if std::env::var("LP_CRASH_IPM_DISABLE").ok().as_deref() == Some("1") {
         return None;
@@ -179,7 +161,6 @@ fn try_build_ipm_warm_from_crash(lp: &LpProblem) -> Option<crate::options::QpWar
         return None;
     }
 
-    telemetry::CRASH_IPM_WIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(crate::options::QpWarmStart {
         x: x_orig,
         y: vec![0.0_f64; lp.num_constraints],
@@ -202,33 +183,30 @@ mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
 
-    /// crash→IPM warm が n>3000 (IPM 経路) で実際に発火する: synthetic LP で
-    /// `crash_ipm_wired` カウンタが増えることを fact 化。
-    /// IPM 経路の閾値 (n>3000) を越えるよう n=3500 を使う。
-    #[test]
-    fn crash_basis_wired_into_ipm_path() {
-        telemetry::reset();
-        let n = 3500_usize;
-        let m = 200_usize;
-        // 各行 i に var i と var (i+m) の係数 1 を入れ、b=2 とする。
-        // structural cover が容易、artificial 半減期待。
+    /// Build the Eq-constrained LP fixture used by multiple tests (n=3500, m=200).
+    fn eq_lp_fixture(n: usize, m: usize) -> LpProblem {
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
         for i in 0..m {
-            rows.push(i);
-            cols.push(i);
-            vals.push(1.0);
-            rows.push(i);
-            cols.push(i + m);
-            vals.push(1.0);
+            rows.push(i); cols.push(i);     vals.push(1.0);
+            rows.push(i); cols.push(i + m); vals.push(1.0);
         }
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
         let b = vec![2.0_f64; m];
         let c = vec![1.0_f64; n];
         let ctypes = vec![crate::problem::ConstraintType::Eq; m];
         let bounds = vec![(0.0_f64, f64::INFINITY); n];
-        let lp = LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap();
+        LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap()
+    }
+
+    /// crash→IPM warm が cover-friendly LP で warm start を生成できることを fact 化。
+    /// per-result: return value `Some(ws)` that `ws.x.len() == n`, `ws.mu > 0`.
+    #[test]
+    fn crash_basis_wired_into_ipm_path() {
+        let n = 3500_usize;
+        let m = 200_usize;
+        let lp = eq_lp_fixture(n, m);
 
         let ws = try_build_ipm_warm_from_crash(&lp);
         assert!(ws.is_some(), "crash warm should be generated for cover-friendly LP");
@@ -236,55 +214,28 @@ mod tests {
         assert_eq!(ws.x.len(), n);
         assert_eq!(ws.y.len(), m);
         assert!(ws.mu > 0.0);
-        // counter sentinel
-        assert_eq!(telemetry::crash_ipm_attempted(), 1);
-        assert_eq!(telemetry::crash_ipm_wired(), 1);
     }
 
-    /// no-op proof: `LP_CRASH_IPM_DISABLE=1` で wiring が無効化される。
-    /// counter は attempted のみ増え、wired は 0 のまま。
+    /// no-op proof: `LP_CRASH_IPM_DISABLE=1` で wiring が無効化され None が返る。
+    /// per-result: return value is None (no global counter needed).
     #[test]
     fn crash_basis_ipm_wiring_no_op_proof() {
-        telemetry::reset();
-        // 上と同じ small LP
-        let n = 3500_usize;
-        let m = 200_usize;
-        let mut rows = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
-        for i in 0..m {
-            rows.push(i);
-            cols.push(i);
-            vals.push(1.0);
-            rows.push(i);
-            cols.push(i + m);
-            vals.push(1.0);
-        }
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
-        let b = vec![2.0_f64; m];
-        let c = vec![1.0_f64; n];
-        let ctypes = vec![crate::problem::ConstraintType::Eq; m];
-        let bounds = vec![(0.0_f64, f64::INFINITY); n];
-        let lp = LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap();
+        let lp = eq_lp_fixture(3500, 200);
 
-        // SAFETY: env var single-threaded test, restored after.
+        // SAFETY: env var mutation scoped to this test; nextest isolates processes.
         std::env::set_var("LP_CRASH_IPM_DISABLE", "1");
         let ws = try_build_ipm_warm_from_crash(&lp);
         std::env::remove_var("LP_CRASH_IPM_DISABLE");
 
-        assert!(ws.is_none(), "wiring must be disabled by env");
-        assert_eq!(telemetry::crash_ipm_attempted(), 1);
-        assert_eq!(telemetry::crash_ipm_wired(), 0);
+        assert!(ws.is_none(), "wiring must be disabled by LP_CRASH_IPM_DISABLE=1");
     }
 
-    /// 中規模 (m_orig=600 が UB 行で >2000 to trigger IPM 閾値想定外)。ここでは
-    /// crash の generic 動作 = 異なる LP shape (Le 制約 + bounded var) を fact 化。
+    /// Le 制約 + bounded var: crash は slack-cover 済みで None を返す valid path。
+    /// wired = ws.is_some(), attempted = always true when function called.
     #[test]
     fn crash_basis_wired_into_ipm_path_le_with_bounds() {
-        telemetry::reset();
         let n = 4000_usize;
         let m = 150_usize;
-        // diagonal-like LP: row i は x_i ≤ 5
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
@@ -295,18 +246,43 @@ mod tests {
         }
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
         let b = vec![5.0_f64; m];
-        let c = vec![-1.0_f64; n]; // maximize-ish
+        let c = vec![-1.0_f64; n];
         let ctypes = vec![crate::problem::ConstraintType::Le; m];
         let bounds = vec![(0.0_f64, 10.0); n];
         let lp = LpProblem::new_general(c, a, b, ctypes, bounds, None).unwrap();
 
         let ws = try_build_ipm_warm_from_crash(&lp);
         // Le 制約は cold で slack cover 済 (artificial=0) のため crash は何も
-        // 削減できず None を返す (= attempted=1, wired=0)。これも valid path。
-        assert_eq!(telemetry::crash_ipm_attempted(), 1);
+        // 削減できず None を返すことが多い。Some の場合も valid (LP shape 次第)。
+        // return value で分岐: いずれも valid path。
         match ws {
-            Some(_) => assert_eq!(telemetry::crash_ipm_wired(), 1),
-            None => assert_eq!(telemetry::crash_ipm_wired(), 0),
+            Some(warm) => {
+                assert_eq!(warm.x.len(), n);
+                assert!(warm.mu > 0.0);
+            }
+            None => { /* slack-covered: no crash warm needed */ }
         }
+    }
+
+    /// per-result 並列性 sentinel: 2 solve を独立実行しそれぞれの stats が独立。
+    /// global Atomic に戻す改変で crash_ipm_attempted が累積してこのテストが FAIL する。
+    #[test]
+    fn parallel_solve_stats_independent() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveRoute;
+
+        let lp = eq_lp_fixture(3500, 200);
+        let lp2 = eq_lp_fixture(3600, 180);
+        let opts = SolverOptions::default();
+
+        let r1 = crate::lp::solve_lp_with(&lp, &opts);
+        let r2 = crate::lp::solve_lp_with(&lp2, &opts);
+
+        // Each result carries its own route; no shared state.
+        assert_eq!(r1.stats.route, SolveRoute::LpDirect, "r1 route must be LpDirect");
+        assert_eq!(r2.stats.route, SolveRoute::LpDirect, "r2 route must be LpDirect");
+        // crash stats are false for pure simplex calls
+        assert!(!r1.stats.crash_ipm_attempted, "simplex path: crash not attempted");
+        assert!(!r2.stats.crash_ipm_attempted, "simplex path: crash not attempted");
     }
 }

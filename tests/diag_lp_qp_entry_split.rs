@@ -2,19 +2,20 @@
 //!
 //! Verifies that `Model::solve` routes LP through `crate::lp::solve_lp_with`
 //! and QP through `crate::qp::solve_qp_with` → IPM, that `solve_qp_with(Q=0)`
-//! forwards to the LP module on a distinguishable counter, and that
+//! forwards to the LP module on a distinguishable route, and that
 //! `solve_lp_with(LpProblem)` matches the forwarded result. The
 //! `sentinel_proves_lp_path_regression_detectable` case is a no-op proof:
-//! it routes an LP through QP entry to show the counters discriminate
-//! direct vs forwarded paths, so a regression of `Model::solve` LP path
-//! onto `solve_qp_with` would fail the `lp_direct_calls >= 1` assertion.
-
-use std::sync::Mutex;
+//! it routes an LP through QP entry to show the routes discriminate direct
+//! vs forwarded paths, so a regression of `Model::solve` LP path onto
+//! `solve_qp_with` would fail the `LpDirect` assertion.
+//!
+//! Per-result stats (SolverResult.stats / ModelResult.stats) replace
+//! process-global AtomicU64 counters — no SENTINEL_LOCK or reset needed.
 
 use solver::constraint;
 use solver::model::Model;
 use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem};
+use solver::problem::{ConstraintType, LpProblem, SolveRoute};
 use solver::qp::QpProblem;
 use solver::sparse::CscMatrix;
 
@@ -27,17 +28,9 @@ fn lp_opts_strict() -> SolverOptions {
     o
 }
 
-/// Telemetry counters are process-global; serialise tests in this file.
-static SENTINEL_LOCK: Mutex<()> = Mutex::new(());
-
 /// Loose enough for IPM eps=1e-6 QP solutions; LP fixtures hit vertices exactly.
 const TOL_OBJ: f64 = 1e-4;
 const TOL_SOL: f64 = 1e-4;
-
-fn reset_counters() {
-    solver::lp::telemetry::reset();
-    solver::qp::telemetry::reset();
-}
 
 // ===========================================================================
 // LP fixtures (5 pattern)
@@ -130,8 +123,6 @@ fn qp_fixtures() -> Vec<(QpProblem, f64, &'static str)> {
     ]
 }
 
-/// Build a symmetric Q from upper-triangle triples. The solver evaluates
-/// x^T Q x from raw CSC entries, so both halves must be present.
 fn symmetric_q_csc(n: usize, upper_triples: &[(usize, usize, f64)]) -> CscMatrix {
     let mut rows: Vec<usize> = Vec::new();
     let mut cols: Vec<usize> = Vec::new();
@@ -152,7 +143,6 @@ fn symmetric_q_csc(n: usize, upper_triples: &[(usize, usize, f64)]) -> CscMatrix
 
 fn qp_fix_diag_psd_box() -> (QpProblem, f64, &'static str) {
     // min 1/2 (x²+y²) s.t. x+y >= 1, x,y >= 0
-    // Lagrangian → x=y=0.5, obj = 1/2 (0.25+0.25) = 0.25
     let q = symmetric_q_csc(2, &[(0, 0, 1.0), (1, 1, 1.0)]);
     let c = vec![0.0, 0.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
@@ -164,10 +154,6 @@ fn qp_fix_diag_psd_box() -> (QpProblem, f64, &'static str) {
 }
 
 fn qp_fix_offdiag_psd() -> (QpProblem, f64, &'static str) {
-    // min 1/2 (2x² + 2y² + 2xy) + (-x - y)
-    // Q = [[2,1],[1,2]] (upper: (0,0)=2, (0,1)=1, (1,1)=2)
-    // Unconstrained gradient: (2x+y-1, x+2y-1) = 0 → x=y=1/3
-    // obj = 1/2 (2/9 + 2/9 + 2/9) + (-2/3) = 3/9 - 6/9 = -3/9 = -1/3
     let q = symmetric_q_csc(2, &[(0, 0, 2.0), (0, 1, 1.0), (1, 1, 2.0)]);
     let c = vec![-1.0, -1.0];
     let a = CscMatrix::new(0, 2);
@@ -179,8 +165,6 @@ fn qp_fix_offdiag_psd() -> (QpProblem, f64, &'static str) {
 }
 
 fn qp_fix_pure_box() -> (QpProblem, f64, &'static str) {
-    // min 1/2 x² - 3x   s.t. 0 <= x <= 2  (no row constraints)
-    // Unconstrained min at x=3; box clamps to x=2 → obj = 0.5*4 - 6 = -4
     let q = symmetric_q_csc(1, &[(0, 0, 1.0)]);
     let c = vec![-3.0];
     let a = CscMatrix::new(0, 1);
@@ -192,11 +176,6 @@ fn qp_fix_pure_box() -> (QpProblem, f64, &'static str) {
 }
 
 fn qp_fix_eq_inequality_mix() -> (QpProblem, f64, &'static str) {
-    // min 1/2 (x² + y² + z²)
-    // s.t. x + y + z = 3 (Eq)
-    //      x >= 0.5 (Ge)
-    //      x,y,z free
-    // Lagrangian: KKT → unique x=y=z=1, obj = 1.5
     let q = symmetric_q_csc(3, &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)]);
     let c = vec![0.0, 0.0, 0.0];
     let rows = vec![0, 0, 0, 1];
@@ -211,9 +190,6 @@ fn qp_fix_eq_inequality_mix() -> (QpProblem, f64, &'static str) {
 }
 
 fn qp_fix_large_diag_psd(n: usize) -> (QpProblem, f64, &'static str) {
-    // min 1/2 sum_i x_i²  + sum_i (-1) * x_i  s.t. sum x_i <= n, x_i >= 0
-    // Unconstrained min at x_i = 1; sum=n satisfies <=n (active).
-    // obj = 1/2 * n * 1 + (-1) * n = n/2 - n = -n/2
     let mut q_rows = Vec::with_capacity(n);
     let mut q_cols = Vec::with_capacity(n);
     let mut q_vals = Vec::with_capacity(n);
@@ -236,7 +212,7 @@ fn qp_fix_large_diag_psd(n: usize) -> (QpProblem, f64, &'static str) {
 }
 
 // ===========================================================================
-// Test cases
+// Helpers
 // ===========================================================================
 
 fn assert_obj(actual: f64, expected: f64, label: &str) {
@@ -249,12 +225,14 @@ fn assert_obj(actual: f64, expected: f64, label: &str) {
     );
 }
 
+// ===========================================================================
+// Test cases (no SENTINEL_LOCK — per-result stats are race-free)
+// ===========================================================================
+
 #[test]
 fn lp_direct_entry_solves_all_fixtures() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
     let opts = lp_opts_strict();
     for (lp, expected, label) in lp_fixtures() {
-        reset_counters();
         let r = solver::lp::solve_lp_with(&lp, &opts);
         assert_eq!(
             r.status,
@@ -265,18 +243,18 @@ fn lp_direct_entry_solves_all_fixtures() {
         );
         assert_obj(r.objective, expected, label);
         assert_eq!(
-            solver::lp::telemetry::lp_direct_calls(),
-            1,
-            "{}: lp_direct_calls must be 1", label
+            r.stats.route,
+            SolveRoute::LpDirect,
+            "{}: route must be LpDirect", label
         );
-        assert_eq!(
-            solver::lp::telemetry::lp_forwarded_from_qp_calls(),
-            0,
+        assert_ne!(
+            r.stats.route,
+            SolveRoute::LpForwardedFromQp,
             "{}: forward path must not fire on direct entry", label
         );
-        assert_eq!(
-            solver::qp::telemetry::qp_ipm_calls(),
-            0,
+        assert_ne!(
+            r.stats.route,
+            SolveRoute::QpIpm,
             "{}: QP IPM must not fire for LP entry", label
         );
     }
@@ -284,10 +262,8 @@ fn lp_direct_entry_solves_all_fixtures() {
 
 #[test]
 fn qp_direct_entry_solves_all_fixtures() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
     let opts = SolverOptions::default();
     for (qp, expected, label) in qp_fixtures() {
-        reset_counters();
         let r = solver::solve_qp_with(&qp, &opts);
         assert_eq!(
             r.status,
@@ -298,27 +274,25 @@ fn qp_direct_entry_solves_all_fixtures() {
         );
         assert_obj(r.objective, expected, label);
         assert_eq!(
-            solver::qp::telemetry::qp_ipm_calls(),
-            1,
-            "{}: qp_ipm_calls must be 1 (Q!=0 → IPM)", label
+            r.stats.route,
+            SolveRoute::QpIpm,
+            "{}: route must be QpIpm (Q!=0 → IPM)", label
         );
-        assert_eq!(
-            solver::lp::telemetry::lp_direct_calls(),
-            0,
+        assert_ne!(
+            r.stats.route,
+            SolveRoute::LpDirect,
             "{}: LP direct counter must stay 0 on QP entry", label
         );
-        assert_eq!(
-            solver::lp::telemetry::lp_forwarded_from_qp_calls(),
-            0,
-            "{}: LP forward counter must stay 0 (Q!=0)", label
+        assert_ne!(
+            r.stats.route,
+            SolveRoute::LpForwardedFromQp,
+            "{}: LP forward route must not fire (Q!=0)", label
         );
     }
 }
 
 #[test]
 fn model_api_lp_path_uses_solve_lp_with() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
-    reset_counters();
     // min x s.t. x >= 1, 0 <= x <= 10  → obj=1
     let mut m = Model::new("lp_via_model");
     let x = m.add_var("x", 0.0, 10.0);
@@ -327,28 +301,27 @@ fn model_api_lp_path_uses_solve_lp_with() {
     let r = m.solve().expect("model lp");
     assert_obj(r.objective_value, 1.0, "model_lp_path");
 
-    assert!(
-        solver::lp::telemetry::lp_direct_calls() >= 1,
-        "Model::solve LP path must increment lp_direct_calls (got {})",
-        solver::lp::telemetry::lp_direct_calls()
-    );
     assert_eq!(
-        solver::qp::telemetry::qp_ipm_calls(),
-        0,
-        "Model::solve LP path must NOT increment qp_ipm_calls"
+        r.stats.route,
+        SolveRoute::LpDirect,
+        "Model::solve LP path must use LpDirect route (got {:?})",
+        r.stats.route
     );
-    assert_eq!(
-        solver::lp::telemetry::lp_forwarded_from_qp_calls(),
-        0,
+    assert_ne!(
+        r.stats.route,
+        SolveRoute::QpIpm,
+        "Model::solve LP path must NOT use QpIpm route"
+    );
+    assert_ne!(
+        r.stats.route,
+        SolveRoute::LpForwardedFromQp,
         "Model::solve LP path must NOT route via QP→LP forward"
     );
 }
 
 #[test]
 fn model_api_qp_path_uses_solve_qp_with() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
-    reset_counters();
-    // min 1/2 x²  s.t. x >= 1 → obj=0.5  (Q via set_diagonal_q, c via minimize)
+    // min 1/2 x²  s.t. x >= 1 → obj=0.5
     let mut m = Model::new("qp_via_model");
     let x = m.add_var("x", 0.0, 10.0);
     m.add_constraint(constraint!(x >= 1.0));
@@ -358,35 +331,32 @@ fn model_api_qp_path_uses_solve_qp_with() {
     assert_obj(r.objective_value, 0.5, "model_qp_path");
 
     assert_eq!(
-        solver::qp::telemetry::qp_ipm_calls(),
-        1,
-        "Model::solve QP path must increment qp_ipm_calls"
+        r.stats.route,
+        SolveRoute::QpIpm,
+        "Model::solve QP path must use QpIpm route"
     );
-    assert_eq!(
-        solver::lp::telemetry::lp_direct_calls(),
-        0,
-        "Model::solve QP path must NOT use solve_lp_with"
+    assert_ne!(
+        r.stats.route,
+        SolveRoute::LpDirect,
+        "Model::solve QP path must NOT use LpDirect route"
     );
-    assert_eq!(
-        solver::lp::telemetry::lp_forwarded_from_qp_calls(),
-        0,
+    assert_ne!(
+        r.stats.route,
+        SolveRoute::LpForwardedFromQp,
         "Q!=0 must NOT route via QP→LP forward"
     );
 }
 
-/// Q=0 through QP entry: same optimum as direct LP entry, but counted as forward.
+/// Q=0 through QP entry: same optimum as direct LP entry, but route = LpForwardedFromQp.
 #[test]
 fn qp_entry_with_zero_q_forwards_to_lp_module() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
     let opts = lp_opts_strict();
     let (lp, expected, label) = lp_fix_le_two_var();
 
     // Direct LP entry
-    reset_counters();
     let r_direct = solver::lp::solve_lp_with(&lp, &opts);
     assert_obj(r_direct.objective, expected, "direct_lp");
-    assert_eq!(solver::lp::telemetry::lp_direct_calls(), 1);
-    assert_eq!(solver::lp::telemetry::lp_forwarded_from_qp_calls(), 0);
+    assert_eq!(r_direct.stats.route, SolveRoute::LpDirect);
 
     // Wrap as Q=0 QpProblem and call QP entry
     let n = lp.num_vars;
@@ -401,38 +371,36 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     )
     .unwrap();
 
-    reset_counters();
     let r_qp = solver::solve_qp_with(&qp, &opts);
     assert_obj(r_qp.objective, expected, "qp_zero_q_forward");
     assert_eq!(
-        solver::lp::telemetry::lp_direct_calls(),
-        0,
-        "{}: solve_qp_with(Q=0) must NOT increment direct counter", label
+        r_qp.stats.route,
+        SolveRoute::LpForwardedFromQp,
+        "{}: solve_qp_with(Q=0) must use LpForwardedFromQp route", label
     );
-    assert_eq!(
-        solver::lp::telemetry::lp_forwarded_from_qp_calls(),
-        1,
-        "{}: solve_qp_with(Q=0) must forward to lp module exactly once", label
+    assert_ne!(
+        r_qp.stats.route,
+        SolveRoute::LpDirect,
+        "{}: solve_qp_with(Q=0) must NOT use LpDirect route", label
     );
-    assert_eq!(
-        solver::qp::telemetry::qp_ipm_calls(),
-        0,
-        "{}: Q=0 must NOT trigger IPM", label
+    assert_ne!(
+        r_qp.stats.route,
+        SolveRoute::QpIpm,
+        "{}: Q=0 must NOT trigger IPM route", label
     );
 
-    // Objective equivalence (sanity)
+    // Objective equivalence
     assert!(
         (r_direct.objective - r_qp.objective).abs() < TOL_OBJ * (1.0 + expected.abs()),
         "{}: direct LP obj {:.9e} vs QP-forward obj {:.9e}", label, r_direct.objective, r_qp.objective
     );
 }
 
-/// No-op proof that the counters discriminate direct vs forwarded paths
-/// — a regression of any LP path onto `solve_qp_with` would flip
-/// `lp_direct_calls` to 0 / `lp_forwarded_from_qp_calls` to ≥1.
+/// No-op proof: routes discriminate direct vs forwarded paths.
+/// A regression of any LP path onto `solve_qp_with` would change route to
+/// LpForwardedFromQp and fail the LpDirect assertion.
 #[test]
 fn sentinel_proves_lp_path_regression_detectable() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
     let opts = lp_opts_strict();
     for (lp, _expected, label) in lp_fixtures() {
         let n = lp.num_vars;
@@ -446,27 +414,25 @@ fn sentinel_proves_lp_path_regression_detectable() {
             lp.constraint_types.clone(),
         )
         .unwrap();
-        reset_counters();
-        let _ = solver::solve_qp_with(&qp, &opts);
-        assert_eq!(
-            solver::lp::telemetry::lp_direct_calls(),
-            0,
-            "{}: regression simulation (solve_qp_with on LP) must NOT increment lp_direct_calls",
+        let r = solver::solve_qp_with(&qp, &opts);
+        assert_ne!(
+            r.stats.route,
+            SolveRoute::LpDirect,
+            "{}: regression simulation (solve_qp_with on LP) must NOT use LpDirect route",
             label
         );
-        assert!(
-            solver::lp::telemetry::lp_forwarded_from_qp_calls() >= 1,
-            "{}: regression simulation must increment lp_forwarded_from_qp_calls (sentinel discriminator)",
+        assert_eq!(
+            r.stats.route,
+            SolveRoute::LpForwardedFromQp,
+            "{}: regression simulation must use LpForwardedFromQp route (sentinel discriminator)",
             label
         );
     }
 }
 
-/// Direct LP entry and QP→LP forward must agree on objective + solution
-/// for every fixture (cross-check across multiple data patterns).
+/// Direct LP entry and QP→LP forward must agree on objective + solution.
 #[test]
 fn cross_check_lp_direct_vs_qp_forward_objective() {
-    let _guard = SENTINEL_LOCK.lock().unwrap();
     let opts = lp_opts_strict();
     for (lp, expected, label) in lp_fixtures() {
         let r_direct = solver::lp::solve_lp_with(&lp, &opts);
@@ -500,4 +466,46 @@ fn cross_check_lp_direct_vs_qp_forward_objective() {
             }
         }
     }
+}
+
+/// Parallel solves have independent stats — no global state leaks across results.
+/// This is the primary regression test for the per-result migration.
+#[test]
+fn parallel_solve_stats_are_independent() {
+    use std::thread;
+
+    let opts_lp = lp_opts_strict();
+    let (lp, _, _) = lp_fix_le_two_var();
+    let (qp, _, _) = qp_fix_diag_psd_box();
+
+    // Spawn LP and QP solves "simultaneously" via threads.
+    let lp_clone = lp.clone();
+    let opts_clone = opts_lp.clone();
+    let lp_handle = thread::spawn(move || {
+        solver::lp::solve_lp_with(&lp_clone, &opts_clone)
+    });
+
+    let qp_opts = SolverOptions::default();
+    let qp_handle = thread::spawn(move || {
+        solver::solve_qp_with(&qp, &qp_opts)
+    });
+
+    let r_lp = lp_handle.join().unwrap();
+    let r_qp = qp_handle.join().unwrap();
+
+    // Each result carries its own route — no contamination.
+    assert_eq!(r_lp.stats.route, SolveRoute::LpDirect, "LP result route");
+    assert_eq!(r_qp.stats.route, SolveRoute::QpIpm, "QP result route");
+
+    // A third sequential solve must also see correct independent stats.
+    let r_fwd = {
+        let (lp2, _, _) = lp_fix_trivial_bound();
+        let n = lp2.num_vars;
+        let q_zero = CscMatrix::new(n, n);
+        let qp2 = QpProblem::new(
+            q_zero, lp2.c, lp2.a, lp2.b, lp2.bounds, lp2.constraint_types,
+        ).unwrap();
+        solver::solve_qp_with(&qp2, &opts_lp)
+    };
+    assert_eq!(r_fwd.stats.route, SolveRoute::LpForwardedFromQp, "forwarded result route");
 }

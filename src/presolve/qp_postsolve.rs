@@ -113,6 +113,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         warm_start_basis: reduced_sol.warm_start_basis.clone(),
         timing_breakdown: reduced_sol.timing_breakdown,
         postsolve_dfeas: None,
+        stats: reduced_sol.stats.clone(),
     }
 }
 

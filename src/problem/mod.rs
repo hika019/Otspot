@@ -20,6 +20,35 @@ pub enum ConstraintType {
     Eq,
 }
 
+/// Route taken by a solve call (populated per-result, race-free).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SolveRoute {
+    /// Route not yet set (default for uninitialized results).
+    #[default]
+    Unknown,
+    /// Called directly via `crate::lp::solve_lp_with`.
+    LpDirect,
+    /// LP forwarded from `solve_qp_with(Q=0)`.
+    LpForwardedFromQp,
+    /// QP solved via IPM (Q≠0).
+    QpIpm,
+}
+
+/// Per-solve routing and warm-start statistics (race-free, per-result).
+///
+/// Replaces process-global `AtomicU64` counters so parallel tests observe
+/// independent stats without reset/race issues.
+#[derive(Debug, Clone, Default)]
+pub struct SolveStats {
+    /// Route taken for this solve.
+    pub route: SolveRoute,
+    /// Whether crash→IPM warm-start wiring was attempted (large LP IPM path).
+    pub crash_ipm_attempted: bool,
+    /// Whether crash→IPM warm-start was successfully built.
+    pub crash_ipm_wired: bool,
+}
+
 /// ソルバーの求解結果ステータス
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +147,8 @@ pub struct SolverResult {
     /// LP simplex + presolve 経路のみ Some。caller (solve_with) が値が `PIVOT_TOL` を
     /// 超えるとき presolve=off で再解する fallback gate に使う (greenbea-class 問題対策)。
     pub postsolve_dfeas: Option<f64>,
+    /// Per-solve routing and warm-start statistics (race-free).
+    pub stats: SolveStats,
 }
 
 /// LP solver の各 phase 所要時間 (μs精度)。
@@ -150,6 +181,7 @@ impl Default for SolverResult {
             duality_gap_rel: None,
             timing_breakdown: None,
             postsolve_dfeas: None,
+            stats: SolveStats::default(),
         }
     }
 }
