@@ -164,6 +164,15 @@ pub(crate) fn solve_local_upper_bound(
     crate::qp::solve_qp_with(&sub, &opts)
 }
 
+/// box bounds が全変数で有限かつ `l ≤ u` か。
+/// α-BB / McCormick underestimator は有限 box が前提 (semi-infinite では `(x-l)(x-u)`
+/// や `w_{ij}` bound が定義できない)。caller は false なら interval / `-∞` に fall back する。
+pub(crate) fn all_bounds_finite(bounds: &[(f64, f64)]) -> bool {
+    bounds
+        .iter()
+        .all(|&(l, u)| l.is_finite() && u.is_finite() && u >= l)
+}
+
 /// 解 status が incumbent 候補として採用可能か。
 /// Optimal / LocallyOptimal / SuboptimalSolution / MaxIterations は feasible point を持つ。
 /// Infeasible / Unbounded / NumericalError / Timeout / NonConvex は incumbent 候補外。

@@ -18,7 +18,7 @@
 
 pub(crate) mod bound;
 pub(crate) mod bound_alpha_bb;
-pub mod bound_mccormick;
+pub(crate) mod bound_mccormick;
 pub(crate) mod branch;
 pub(crate) mod node;
 pub(crate) mod pruning;
