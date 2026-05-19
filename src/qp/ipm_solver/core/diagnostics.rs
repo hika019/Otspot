@@ -12,21 +12,22 @@ pub(super) fn trace_enabled() -> bool {
     std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1")
 }
 
-/// IPM 内部終了直後 (まだ scaled + reduced 空間)。
-pub(super) fn log_ipm_exit_reduced(reduced: &QpProblem, result: &SolverResult) {
-    let view = build_view(reduced);
-    let pres = primal_residual_rel(&view, &result.solution);
-    let kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
-    let ax = reduced
-        .a
-        .mat_vec_mul(&result.solution)
-        .unwrap_or_else(|_| vec![0.0; reduced.num_constraints]);
+/// pres_rel + kkt_rel をまとめて計算。POST_STAGE の頻出 3-line pattern。
+fn pres_kkt_rel(p: &QpProblem, sol: &SolverResult) -> (f64, f64) {
+    let view = build_view(p);
+    let pres = primal_residual_rel(&view, &sol.solution);
+    let kkt = kkt_residual_rel(&view, &sol.solution, &sol.dual_solution, &sol.bound_duals);
+    (pres, kkt)
+}
+
+/// constraint_types ごとの絶対 violation + denom (1 + max(|ax|,|b|))。
+fn pres_abs_with_denom(p: &QpProblem, ax: &[f64]) -> (f64, f64) {
+    use crate::problem::ConstraintType as CT;
     let mut pres_abs = 0.0_f64;
     let mut max_ax = 0.0_f64;
     let mut max_b = 0.0_f64;
-    use crate::problem::ConstraintType as CT;
-    for (i, (&ax_i, &b_i)) in ax.iter().zip(reduced.b.iter()).enumerate() {
-        let v = match reduced.constraint_types[i] {
+    for (i, (&ax_i, &b_i)) in ax.iter().zip(p.b.iter()).enumerate() {
+        let v = match p.constraint_types[i] {
             CT::Eq => (ax_i - b_i).abs(),
             CT::Ge => (b_i - ax_i).max(0.0),
             _ => (ax_i - b_i).max(0.0),
@@ -35,7 +36,17 @@ pub(super) fn log_ipm_exit_reduced(reduced: &QpProblem, result: &SolverResult) {
         max_ax = max_ax.max(ax_i.abs());
         max_b = max_b.max(b_i.abs());
     }
-    let denom = 1.0 + max_ax.max(max_b);
+    (pres_abs, 1.0 + max_ax.max(max_b))
+}
+
+/// IPM 内部終了直後 (まだ scaled + reduced 空間)。
+pub(super) fn log_ipm_exit_reduced(reduced: &QpProblem, result: &SolverResult) {
+    let (pres, kkt) = pres_kkt_rel(reduced, result);
+    let ax = reduced
+        .a
+        .mat_vec_mul(&result.solution)
+        .unwrap_or_else(|_| vec![0.0; reduced.num_constraints]);
+    let (pres_abs, denom) = pres_abs_with_denom(reduced, &ax);
     eprintln!("POST_STAGE [IPM exit (scaled+reduced)] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
         pres, pres_abs, denom, kkt, reduced.num_vars, reduced.num_constraints);
 }
@@ -60,9 +71,7 @@ pub(super) fn log_ruiz_scale_ratio(
 
 /// Unscaled (まだ reduced 空間)。
 pub(super) fn log_unscaled_reduced(reduced: &QpProblem, result: &SolverResult) {
-    let view = build_view(reduced);
-    let pres = primal_residual_rel(&view, &result.solution);
-    let kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let (pres, kkt) = pres_kkt_rel(reduced, result);
     eprintln!(
         "POST_STAGE [unscaled (still reduced)] pres_rel={:.3e} kkt_rel={:.3e}",
         pres, kkt
@@ -115,14 +124,7 @@ pub(super) fn log_presolve_transforms(
 }
 
 pub(super) fn log_postsolve_remap_bd(orig_problem: &QpProblem, final_sol: &SolverResult) {
-    let view = build_view(orig_problem);
-    let pres = primal_residual_rel(&view, &final_sol.solution);
-    let kkt = kkt_residual_rel(
-        &view,
-        &final_sol.solution,
-        &final_sol.dual_solution,
-        &final_sol.bound_duals,
-    );
+    let (pres, kkt) = pres_kkt_rel(orig_problem, final_sol);
     eprintln!(
         "POST_STAGE [postsolve+remap_bd (orig space)] pres_rel={:.3e} kkt_rel={:.3e}",
         pres, kkt
@@ -137,32 +139,12 @@ pub(super) fn log_violation_distribution(
     final_sol: &SolverResult,
 ) {
     use crate::problem::ConstraintType;
-    let view = build_view(orig_problem);
-    let pres = primal_residual_rel(&view, &final_sol.solution);
-    let kkt = kkt_residual_rel(
-        &view,
-        &final_sol.solution,
-        &final_sol.dual_solution,
-        &final_sol.bound_duals,
-    );
+    let (pres, kkt) = pres_kkt_rel(orig_problem, final_sol);
     let ax = orig_problem
         .a
         .mat_vec_mul(&final_sol.solution)
         .unwrap_or_else(|_| vec![0.0; orig_problem.num_constraints]);
-    let mut pres_abs = 0.0_f64;
-    let mut max_ax = 0.0_f64;
-    let mut max_b = 0.0_f64;
-    for (i, (&ax_i, &b_i)) in ax.iter().zip(orig_problem.b.iter()).enumerate() {
-        let v = match orig_problem.constraint_types[i] {
-            ConstraintType::Eq => (ax_i - b_i).abs(),
-            ConstraintType::Ge => (b_i - ax_i).max(0.0),
-            _ => (ax_i - b_i).max(0.0),
-        };
-        pres_abs = pres_abs.max(v);
-        max_ax = max_ax.max(ax_i.abs());
-        max_b = max_b.max(b_i.abs());
-    }
-    let denom = 1.0 + max_ax.max(max_b);
+    let (pres_abs, denom) = pres_abs_with_denom(orig_problem, &ax);
     eprintln!("POST_STAGE [postsolve+remap (orig space, pre bounds-clip)] pres_rel={:.3e} pres_abs={:.3e} denom={:.3e} kkt_rel={:.3e} n={} m={}",
         pres, pres_abs, denom, kkt, orig_problem.num_vars, orig_problem.num_constraints);
 
@@ -279,27 +261,13 @@ pub(super) fn log_bounds_clip(
     clip_count_pre: usize,
     total_bound_clip: f64,
 ) {
-    let view = build_view(orig_problem);
-    let pres = primal_residual_rel(&view, &final_sol.solution);
-    let kkt = kkt_residual_rel(
-        &view,
-        &final_sol.solution,
-        &final_sol.dual_solution,
-        &final_sol.bound_duals,
-    );
+    let (pres, kkt) = pres_kkt_rel(orig_problem, final_sol);
     eprintln!("POST_STAGE [bounds clip applied] count={} max_amt={:.3e} pres_rel={:.3e} kkt_rel={:.3e}",
         clip_count_pre, total_bound_clip, pres, kkt);
 }
 
 pub(super) fn log_pre_post_processing(orig_problem: &QpProblem, final_sol: &SolverResult) {
-    let view = build_view(orig_problem);
-    let pres0 = primal_residual_rel(&view, &final_sol.solution);
-    let kkt0 = kkt_residual_rel(
-        &view,
-        &final_sol.solution,
-        &final_sol.dual_solution,
-        &final_sol.bound_duals,
-    );
+    let (pres0, kkt0) = pres_kkt_rel(orig_problem, final_sol);
     eprintln!(
         "POST_STAGE [pre post-processing] pres_rel={:.3e} kkt_rel={:.3e}",
         pres0, kkt0
