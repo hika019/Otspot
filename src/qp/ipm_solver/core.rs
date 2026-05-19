@@ -154,12 +154,22 @@ fn run_ipm_with(
         diagnostics::log_bounds_clip(orig_problem, &final_sol, clip_count_pre, total_bound_clip);
     }
 
+    // presolve metadata から削除 col mask を導出 (#92 真因 fix)。orig 空間での
+    // kkt_residual_rel / refine 呼出は本 mask を経由してのみ EmptyCol を skip する。
+    let eliminated_cols: Vec<bool> = presolve_result
+        .col_map
+        .iter()
+        .map(|c| c.is_none())
+        .collect();
+
     // 元空間 dual 一括復元 + Stage 0 (SingletonRow 後退代入)。両方とも IPM が iterate
     // した場合のみ実施 (cancel/timeout=0 で冷状態 x=0 から後処理が独自解を作らない)。
     if presolve_result.was_reduced && !presolve_result.postsolve_stack.steps.is_empty() {
-        refine_postsolve_dual_lsq(orig_problem, &mut final_sol, opts);
+        refine_postsolve_dual_lsq(orig_problem, &mut final_sol, &eliminated_cols, opts);
         if result.iterations > 0 {
-            refine_postsolve_recovery(orig_problem, presolve_result, &mut final_sol, opts);
+            refine_postsolve_recovery(
+                orig_problem, presolve_result, &eliminated_cols, &mut final_sol, opts,
+            );
         }
     }
 
@@ -176,14 +186,14 @@ fn run_ipm_with(
 
     let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = kkt_already_passes(
-        orig_problem, &final_sol, result.status == SolveStatus::Optimal, user_eps_for_skip,
+        orig_problem, &final_sol, &eliminated_cols, result.status == SolveStatus::Optimal, user_eps_for_skip,
     );
     let kkt = if !final_sol.solution.is_empty()
         && orig_problem.num_constraints > 0
         && ipm_made_progress
         && !kkt_already_pass
     {
-        refine_post_processing(orig_problem, &mut final_sol, opts, allow_primal)
+        refine_post_processing(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal)
     } else {
         let view = ProblemView {
             q: &orig_problem.q,
@@ -192,6 +202,7 @@ fn run_ipm_with(
             b: &orig_problem.b,
             bounds: &orig_problem.bounds,
             constraint_types: &orig_problem.constraint_types,
+            eliminated_cols: &eliminated_cols,
         };
         kkt_residual_rel(
             &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,
@@ -199,7 +210,7 @@ fn run_ipm_with(
     };
 
     if ipm_made_progress {
-        refine_krylov_and_projection(orig_problem, &mut final_sol, opts, allow_primal);
+        refine_krylov_and_projection(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
     }
 
     let view = ProblemView {
@@ -209,6 +220,7 @@ fn run_ipm_with(
         b: &orig_problem.b,
         bounds: &orig_problem.bounds,
         constraint_types: &orig_problem.constraint_types,
+        eliminated_cols: &eliminated_cols,
     };
     let kkt_final = kkt_residual_rel(
         &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,

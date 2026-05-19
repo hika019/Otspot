@@ -21,6 +21,7 @@ const STAGE0_PROGRESS_EPS: f64 = 1e-12;
 pub(super) fn refine_postsolve_dual_lsq(
     orig_problem: &QpProblem,
     final_sol: &mut SolverResult,
+    eliminated_cols: &[bool],
     opts: &SolverOptions,
 ) {
     if !(final_sol.solution.len() == orig_problem.num_vars
@@ -35,6 +36,7 @@ pub(super) fn refine_postsolve_dual_lsq(
         b: &orig_problem.b,
         bounds: &orig_problem.bounds,
         constraint_types: &orig_problem.constraint_types,
+        eliminated_cols,
     };
     let mut prev = kkt_residual_rel(
         &view0,
@@ -51,11 +53,11 @@ pub(super) fn refine_postsolve_dual_lsq(
             return;
         }
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
-        crate::qp::refine_dual_lsq(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
         let cur = kkt_residual_rel(
             &view0,
@@ -84,6 +86,7 @@ pub(super) fn refine_postsolve_dual_lsq(
 pub(super) fn refine_postsolve_recovery(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
+    eliminated_cols: &[bool],
     final_sol: &mut SolverResult,
     opts: &SolverOptions,
 ) {
@@ -99,6 +102,7 @@ pub(super) fn refine_postsolve_recovery(
         b: &orig_problem.b,
         bounds: &orig_problem.bounds,
         constraint_types: &orig_problem.constraint_types,
+        eliminated_cols,
     };
     let mut prev_kkt = kkt_residual_rel(
         &view0,
@@ -126,8 +130,8 @@ pub(super) fn refine_postsolve_recovery(
         }
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
         let cur_kkt = kkt_residual_rel(
             &view0,

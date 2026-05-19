@@ -12,6 +12,7 @@ use crate::qp::FX_TOL;
 pub(crate) fn refine_dual_lsq(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    eliminated_cols: &[bool],
     deadline: Option<std::time::Instant>,
 ) {
     use twofloat::TwoFloat;
@@ -22,6 +23,7 @@ pub(crate) fn refine_dual_lsq(
         return;
     };
     let n = problem.num_vars;
+    let use_elim_mask = eliminated_cols.len() == n;
     // ill-conditioned (cond~1e12) では f64 mat_vec の cancellation noise が真残差を
     // 上回り IPM の正しい y が LSQ y に置換される。DD で比較する。
     let zero_dd = TwoFloat::from(0.0);
@@ -59,7 +61,7 @@ pub(crate) fn refine_dual_lsq(
         if lbj.is_finite() && ubj.is_finite() && (lbj - ubj).abs() < FX_TOL {
             continue;
         }
-        if problem.a.col_ptr.len() > j + 1 && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 {
+        if use_elim_mask && eliminated_cols[j] {
             continue;
         }
         let r_old_dd = qx_dd[j]
@@ -92,6 +94,7 @@ pub(crate) fn refine_dual_lsq(
 pub(crate) fn refine_dual_lsq_irls(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    eliminated_cols: &[bool],
     eps_target: f64,
     max_iters: usize,
     deadline: Option<std::time::Instant>,
@@ -128,13 +131,14 @@ pub(crate) fn refine_dual_lsq_irls(
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
 
+    let use_elim_mask = eliminated_cols.len() == n;
     let exclude: Vec<bool> = (0..n)
         .map(|j| {
             let (lb, ub) = problem.bounds[j];
             if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
                 return true;
             }
-            problem.a.col_ptr.len() > j + 1 && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
+            use_elim_mask && eliminated_cols[j]
         })
         .collect();
 
@@ -321,7 +325,7 @@ mod tests {
                 bound_duals: vec![],
                 ..SolverResult::default()
             };
-            refine_dual_lsq(&problem, &mut result, None);
+            refine_dual_lsq(&problem, &mut result, &[], None);
             for (i, &expected) in case.expected_y.iter().enumerate() {
                 assert!(
                     (result.dual_solution[i] - expected).abs() < 1e-9,
@@ -333,6 +337,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #92 F2: empty A col + 未消去 var を含む問題で DD guard 評価が新旧で割れる。
+    ///
+    /// Fixture:
+    /// - n=2, m=1。A: row 0 = [0, 1] (col 0 が空、col 1 非空)。
+    /// - Q=0、c=(100, 0)、bounds [-10,10]^2、x=(0, 0.5)、初期 y=-3 (suboptimal)。
+    /// - LSQ y_new = 0 (row 1 のみで y を決定、row 0 は A 空で y 無関係)。
+    ///
+    /// 評価値:
+    /// - r[0]=Qx+c+A^Ty+bc=0+100+0+0=100 (y 独立)、scale[0]=1+0+100+0+0=101 → rel=0.99
+    /// - r[1]_old=-3, scale[1]_old=4 → rel=0.75 ; r[1]_new=0, rel=0
+    ///
+    /// 期待挙動 (mask `[false,false]`、新 logic):
+    /// - max_rel_old=max(0.99, 0.75)=0.99、max_rel_new=max(0.99, 0)=0.99
+    /// - guard 不通過 → y_new 不採用 → y=-3 を保持
+    ///
+    /// 旧 A-only logic (col 0 skip) では row 0 を除外して max_rel_old=0.75 / max_rel_new=0
+    /// → strict 改善判定で y_new 採用 → y=0 になり assert に FAIL する。
+    /// no-op 化検証: skip 条件を `A.col_ptr[j+1]-col_ptr[j]==0` に手動 revert すると
+    /// assert "should keep y=-3" が FAIL することを実機確認済。
+    #[test]
+    fn refine_dual_lsq_does_not_skip_empty_a_col_when_not_eliminated() {
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();
+        let q = CscMatrix::new(2, 2);
+        let c = vec![100.0_f64, 0.0_f64];
+        let b = vec![0.5_f64];
+        let bounds = vec![(-10.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
+        let problem = QpProblem::new(
+            q,
+            c,
+            a,
+            b,
+            bounds,
+            vec![crate::problem::ConstraintType::Eq],
+        )
+        .unwrap();
+        let mut result_with_mask = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0_f64, 0.5_f64],
+            dual_solution: vec![-3.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        let mut result_no_mask = result_with_mask.clone();
+
+        refine_dual_lsq(&problem, &mut result_with_mask, &[false, false], None);
+        refine_dual_lsq(&problem, &mut result_no_mask, &[], None);
+
+        assert!(
+            (result_with_mask.dual_solution[0] - (-3.0)).abs() < 1e-6,
+            "new mask logic should keep y=-3 (row 0 dominates DD guard), got {}",
+            result_with_mask.dual_solution[0]
+        );
+        assert!(
+            (result_no_mask.dual_solution[0] - (-3.0)).abs() < 1e-6,
+            "empty mask should also keep y=-3, got {}",
+            result_no_mask.dual_solution[0]
+        );
+    }
+
+    /// #92 F2 補完: eliminated=true を渡すと skip が復活し、y_new が採用される。
+    /// 上の sentinel と同 fixture で mask だけ変えて挙動が割れることを確認する。
+    #[test]
+    fn refine_dual_lsq_skips_when_marked_eliminated() {
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();
+        let q = CscMatrix::new(2, 2);
+        let c = vec![100.0_f64, 0.0_f64];
+        let b = vec![0.5_f64];
+        let bounds = vec![(-10.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
+        let problem = QpProblem::new(
+            q,
+            c,
+            a,
+            b,
+            bounds,
+            vec![crate::problem::ConstraintType::Eq],
+        )
+        .unwrap();
+        let mut result = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![0.0_f64, 0.5_f64],
+            dual_solution: vec![-3.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        // eliminated=true で col 0 を residual 評価から除外 → 旧 A-only 同等。
+        refine_dual_lsq(&problem, &mut result, &[true, false], None);
+        // col 0 skip により y_new=0 が strict 改善と判定され採用される。
+        assert!(
+            result.dual_solution[0].abs() < 1e-6,
+            "elim=true should let y update to 0, got {}",
+            result.dual_solution[0]
+        );
     }
 
     /// refine_dual_lsq の DD guard が「LSQ y が改善しない」ケースで現状 y を保持する。
@@ -353,7 +451,7 @@ mod tests {
             bound_duals: vec![],
             ..SolverResult::default()
         };
-        refine_dual_lsq(&problem, &mut result, None);
+        refine_dual_lsq(&problem, &mut result, &[], None);
         assert!(
             (result.dual_solution[0] - optimal_y).abs() < 1e-12,
             "expected y={} preserved, got {}",

@@ -15,6 +15,7 @@ pub(crate) fn run_dual_recovery_postprocess(
     deadline: Option<std::time::Instant>,
     trace: bool,
 ) -> f64 {
+    let eliminated_cols = view.eliminated_cols;
     let pre_cleanup = result.clone();
     let kkt_before_cleanup = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         view,
@@ -48,7 +49,7 @@ pub(crate) fn run_dual_recovery_postprocess(
             kkt_after_singleton
         );
     }
-    refine_dual_projected_gradient(problem, result, deadline);
+    refine_dual_projected_gradient(problem, result, eliminated_cols, deadline);
     if trace {
         let kkt_after_pg = crate::qp::ipm_solver::kkt::kkt_residual_rel(
             view,
@@ -61,7 +62,7 @@ pub(crate) fn run_dual_recovery_postprocess(
             kkt_after_pg
         );
     }
-    refine_dual_worst_active_block(problem, result, deadline);
+    refine_dual_worst_active_block(problem, result, eliminated_cols, deadline);
     if trace {
         let kkt_after_block = crate::qp::ipm_solver::kkt::kkt_residual_rel(
             view,

@@ -57,12 +57,11 @@ const EPS_KKT: f64 = 1e-4;
 /// 非凸 QP LocallyOptimal 状態の閾値。leaf local IPM の unscale 復元 drift で
 /// stationarity が O(1e-4) drift する分を吸収。WARN-only に逃げないため必ず assert。
 const EPS_KKT_NONCONVEX_LOCAL: f64 = 1e-3;
-/// 非凸 QP Optimal-claim 状態の閾値。`solve_qp_global` は BB tree 完走 (ε-gap
-/// closed) で Optimal を主張するが、leaf の bound dual 復元が non-PSD Q で O(1)
-/// drift する既知挙動を持つ (KKT 残差 ≈ 1 のケースを実測)。WARN-only に逃げず
-/// 緩い threshold で必ず assert することで、これ以上悪化する regression を catch
-/// する。本来は global 解の bd 復元 fix が真因対処 (新規 follow-up task)。
-const EPS_KKT_NONCONVEX_GLOBAL: f64 = 1.5;
+/// 非凸 QP Optimal-claim 状態の閾値。元 1.5 は EmptyCol skip 由来の bd 復元 drift
+/// を許容するための緩い値で、#92 (linear-only var skip 厳格化) 後は本来 1e-3 級まで
+/// 締まるはずだが、その他の non-PSD Q dual 復元 drift も残るため 1.0 まで段階的に
+/// 下げる。proptest 1000 case で max KKT ≈ 0.68 を実測 (1e-3 まで締めるのは別 task)。
+const EPS_KKT_NONCONVEX_GLOBAL: f64 = 1.0;
 /// rank deficient な凸 QP (Q に null space) の閾値。dual の null space 自由度で
 /// stationarity 残差が O(0.4) まで drift する case が proptest で実測されるため、
 /// `EPS_KKT_NONCONVEX_GLOBAL` と同水準で必ず assert。null space dual 自由度自体は

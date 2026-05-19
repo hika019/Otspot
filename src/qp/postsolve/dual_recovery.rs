@@ -383,12 +383,16 @@ pub(crate) fn select_dual_recovery_local_bounds(
     (local_bounds, bound_pos_of_var)
 }
 
-/// bound 制約のない自由列 (どの bound にも close でない、かつ A 列に非零あり) を抽出。
+/// bound 制約のない自由列を抽出 (どの bound にも close でない、presolve 未消去)。
+/// 旧来は「A 列空 == skip」だったが kkt.rs / iterative.rs / worst_active.rs と規約を揃え、
+/// `eliminated_cols` mask に統一する (linear-only var の誤 skip 防止)。
 pub(crate) fn collect_dual_recovery_free_columns(
     problem: &QpProblem,
     result: &crate::problem::SolverResult,
+    eliminated_cols: &[bool],
 ) -> Vec<usize> {
     let n = problem.num_vars;
+    let use_elim_mask = eliminated_cols.len() == n;
     let mut free_idx: Vec<usize> = Vec::with_capacity(n);
     for j in 0..n {
         let xj = result.solution[j];
@@ -400,10 +404,123 @@ pub(crate) fn collect_dual_recovery_free_columns(
         if ub.is_finite() && (ub - xj).abs() < tol {
             continue;
         }
-        if problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0 {
+        if use_elim_mask && eliminated_cols[j] {
             continue;
         }
         free_idx.push(j);
     }
     free_idx
+}
+
+#[cfg(test)]
+mod free_columns_tests {
+    //! #92 F2: collect_dual_recovery_free_columns の skip 規約を
+    //! 旧 A-only から `eliminated_cols` mask に揃えた sentinel。
+    //! 旧 logic で A 空列が常に skip された結果、linear-only var が dual-only IR の
+    //! free_idx 抽出から漏れ refine 経路で stationarity が改善されなかった。
+    use super::collect_dual_recovery_free_columns;
+    use crate::problem::{ConstraintType, SolverResult};
+    use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    fn make_problem_with_aempty_col0() -> (QpProblem, SolverResult) {
+        // n=2, m=1
+        // A: row 0 = [0, 1] → col 0 空, col 1 非空
+        // Q: diag=(0, 0) (irrelevant for free-idx filter)
+        // bounds: [-10,10]² (interior 解)
+        // x = (0.0, 0.5): どちらも bound 近傍ではない
+        let q = CscMatrix::new(2, 2);
+        let c = vec![1.0_f64, 0.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();
+        let b = vec![0.5_f64];
+        let bounds = vec![(-10.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+        let result = SolverResult {
+            status: crate::problem::SolveStatus::Optimal,
+            solution: vec![0.0_f64, 0.5_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        (problem, result)
+    }
+
+    /// Pattern: A col 0 空 + 未消去 (eliminated_cols=[false, false])
+    /// 期待: col 0 を free_idx に含む (新 logic)。旧 A-only logic では含まれず FAIL。
+    #[test]
+    fn empty_a_col_not_eliminated_is_in_free_idx() {
+        let (problem, result) = make_problem_with_aempty_col0();
+        let elim = vec![false, false];
+        let free_idx = collect_dual_recovery_free_columns(&problem, &result, &elim);
+        assert!(
+            free_idx.contains(&0),
+            "col 0 should be in free_idx (not eliminated), got {:?}",
+            free_idx
+        );
+        assert!(
+            free_idx.contains(&1),
+            "col 1 should be in free_idx, got {:?}",
+            free_idx
+        );
+    }
+
+    /// Pattern: A col 0 空 + 消去 (eliminated_cols=[true, false])
+    /// 期待: col 0 を free_idx に含まない (mask 消去)。
+    #[test]
+    fn empty_a_col_eliminated_is_skipped_from_free_idx() {
+        let (problem, result) = make_problem_with_aempty_col0();
+        let elim = vec![true, false];
+        let free_idx = collect_dual_recovery_free_columns(&problem, &result, &elim);
+        assert!(
+            !free_idx.contains(&0),
+            "col 0 should be skipped (eliminated), got {:?}",
+            free_idx
+        );
+        assert!(
+            free_idx.contains(&1),
+            "col 1 should still be in free_idx, got {:?}",
+            free_idx
+        );
+    }
+
+    /// Mask 不在 (`&[]`) → use_elim_mask=false → 消去判定無し、純粋に bound 近傍のみで判定。
+    #[test]
+    fn empty_mask_disables_elimination_check() {
+        let (problem, result) = make_problem_with_aempty_col0();
+        let free_idx = collect_dual_recovery_free_columns(&problem, &result, &[]);
+        assert!(
+            free_idx.contains(&0),
+            "col 0 should be in free_idx when mask absent, got {:?}",
+            free_idx
+        );
+    }
+
+    /// Pattern: x が bound 近傍 → eliminated_cols とは独立に skip される (退化テスト)。
+    #[test]
+    fn at_bound_var_skipped_regardless_of_mask() {
+        let q = CscMatrix::new(2, 2);
+        let c = vec![1.0_f64, 0.0_f64];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.5_f64];
+        // x[0]=0 (lb=0 に張り付き), x[1]=1.5
+        let bounds = vec![(0.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
+        let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
+        let result = SolverResult {
+            status: crate::problem::SolveStatus::Optimal,
+            solution: vec![0.0_f64, 1.5_f64],
+            dual_solution: vec![0.0_f64],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        // 全 mask パターンで bound 近傍判定が優先される。
+        for elim in &[vec![false, false], vec![false, true], vec![]] {
+            let free_idx = collect_dual_recovery_free_columns(&problem, &result, elim);
+            assert!(
+                !free_idx.contains(&0),
+                "col 0 at lb should be skipped, mask={:?}, got {:?}",
+                elim,
+                free_idx
+            );
+        }
+    }
 }

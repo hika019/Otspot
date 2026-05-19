@@ -19,6 +19,7 @@ fn test_dual_recovery_postprocess_can_improve_without_dual_ir() {
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
     };
     let mut result = SolverResult {
         status: SolveStatus::Optimal,
@@ -67,7 +68,7 @@ fn test_dual_only_ir_uses_active_rows_and_keeps_inactive_le_zero() {
         ..SolverResult::default()
     };
 
-    let accepted = try_dual_only_ir(&problem, &mut result, 1e-8, None);
+    let accepted = try_dual_only_ir(&problem, &mut result, &[], 1e-8, None);
 
     assert!(accepted > 0);
     assert!((result.dual_solution[0] - 1.0).abs() < 1e-9);
@@ -90,6 +91,7 @@ fn test_dual_only_ir_couples_row_and_bound_duals() {
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
     };
     let mut result = SolverResult {
         status: SolveStatus::Optimal,
@@ -105,7 +107,7 @@ fn test_dual_only_ir_couples_row_and_bound_duals() {
         &result.dual_solution,
         &result.bound_duals,
     );
-    let accepted = try_dual_only_ir(&problem, &mut result, 1e-8, None);
+    let accepted = try_dual_only_ir(&problem, &mut result, &[], 1e-8, None);
     let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,
         &result.solution,
@@ -156,7 +158,7 @@ fn test_dual_only_ir_weighted_gram_prioritizes_worst_component() {
     };
 
     let target_pf = 5e-7;
-    let accepted = try_dual_only_ir(&problem, &mut result, target_pf, None);
+    let accepted = try_dual_only_ir(&problem, &mut result, &[], target_pf, None);
 
     assert!(accepted > 0);
 
@@ -167,6 +169,7 @@ fn test_dual_only_ir_weighted_gram_prioritizes_worst_component() {
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
     };
     let df_rel = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,
@@ -321,6 +324,6 @@ fn refine_dual_lsq_keeps_y_when_lsq_does_not_strictly_improve() {
         bound_duals: vec![],
         ..SolverResult::default()
     };
-    refine_dual_lsq(&problem, &mut result, None);
+    refine_dual_lsq(&problem, &mut result, &[], None);
     assert!(result.dual_solution[0].abs() < 1e-12, "got {}", result.dual_solution[0]);
 }

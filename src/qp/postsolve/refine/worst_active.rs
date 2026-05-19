@@ -14,6 +14,7 @@ use crate::sparse::CscMatrix;
 pub(crate) fn refine_dual_worst_active_block(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    eliminated_cols: &[bool],
     deadline: Option<std::time::Instant>,
 ) {
     let trace = std::env::var("REFINE_DUAL_BLOCK_TRACE").ok().as_deref() == Some("1");
@@ -42,13 +43,14 @@ pub(crate) fn refine_dual_worst_active_block(
     };
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
 
+    let use_elim_mask = eliminated_cols.len() == n;
     let mut worst_j = None;
     let mut worst_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = problem.bounds[j];
         let is_fx = lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL;
-        let is_empty_col = problem.a.col_ptr[j + 1] == problem.a.col_ptr[j];
-        if is_fx || is_empty_col {
+        let is_eliminated = use_elim_mask && eliminated_cols[j];
+        if is_fx || is_eliminated {
             continue;
         }
         let r = qx[j] + problem.c[j] + aty[j] + bound_contrib[j];
@@ -291,6 +293,7 @@ pub(crate) fn refine_dual_worst_active_block(
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols,
     };
     let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,

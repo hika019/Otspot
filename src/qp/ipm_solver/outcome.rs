@@ -92,6 +92,11 @@ impl IpmOutcome {
 }
 
 /// KKT 計算に必要な要素だけを参照する軽量 view。
+///
+/// `eliminated_cols[j] == true` の col は presolve が物理削除した EmptyCol で、
+/// postsolve が `x[j]=val` を埋め戻したあとの original space stationarity 評価から除外する
+/// (bd=0 慣例で r=0 になる前提)。reduced space (IPM 内部) では `&[]` を渡す:
+/// 削除済み col は構造的に存在しないため。長さ != bounds.len() の slice は無視する。
 pub struct ProblemView<'a> {
     pub q: &'a CscMatrix,
     pub a: &'a CscMatrix,
@@ -99,4 +104,20 @@ pub struct ProblemView<'a> {
     pub b: &'a [f64],
     pub bounds: &'a [(f64, f64)],
     pub constraint_types: &'a [crate::problem::ConstraintType],
+    pub eliminated_cols: &'a [bool],
+}
+
+impl<'a> ProblemView<'a> {
+    /// presolve 情報なしで構築する (IPM internal / tests)。eliminated_cols = `&[]`。
+    pub fn from_problem(problem: &'a crate::qp::problem::QpProblem) -> Self {
+        Self {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols: &[],
+        }
+    }
 }
