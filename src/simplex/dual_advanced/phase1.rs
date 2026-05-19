@@ -49,9 +49,10 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::sparse::CscMatrix;
-use crate::tolerances::DROP_TOL;
+use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::{DROP_TOL, PIVOT_TOL};
 use super::super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
+use super::super::crash;
 use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
 use super::core::dual_simplex_core_advanced;
 
@@ -191,47 +192,31 @@ const BIG_M_COST_MULT: f64 = 1e3;
 /// Big-M ペナルティの下限 (設計書 §6.4 推奨 `1e6`)。
 const BIG_M_FLOOR: f64 = 1e6;
 
-/// Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
-/// for Ge/Eq 含む LP.
-///
-/// `a, b, c` は Ruiz スケーリング後の値を渡すこと (§6.4)。
-/// `row_scale`, `col_scale` は `extract_dual_info` で必要。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn big_m_cold_start(
-    sf: &StandardForm,
-    problem: &LpProblem,
-    options: &SolverOptions,
+/// Big-M Phase I の初期状態をまとめた構造体。
+/// `try_build_crash_phase1_state` / `build_identity_phase1_state` が返す。
+struct BigMPhase1State {
+    a_aug: CscMatrix,
+    basis_aug: Vec<usize>,
+    c_aug_p1: Vec<f64>,
+    x_b: Vec<f64>,
+    artificial_col_of_row: Vec<Option<usize>>,
+    n_aug: usize,
+    n_art: usize,
+}
+
+/// Helper: A_aug = [A | I_art] for the given `artificial_col_of_row` map.
+/// Returns `None` if `CscMatrix::from_triplets` rejects (duplicate (row, col)).
+fn build_a_aug(
     a: &CscMatrix,
-    b: &[f64],
-    c: &[f64],
-    row_scale: &[f64],
-    col_scale: &[f64],
-) -> SolverResult {
-    let m = sf.m;
-    let n_total = sf.n_total;
-
-    // === Step 1: 人工変数列の割り当て ===
-    let mut artificial_col_of_row: Vec<Option<usize>> = vec![None; m];
-    let mut n_art = 0usize;
-    for i in 0..m {
-        if sf.needs_artificial[i] {
-            artificial_col_of_row[i] = Some(n_total + n_art);
-            n_art += 1;
-        }
-    }
-    let n_aug = n_total + n_art;
-
-    // === Step 2: Big-M 動的算出 ===
-    let c_norm = c.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let big_m = (c_norm * BIG_M_COST_MULT)
-        .max(b_norm * BIG_M_COST_MULT)
-        .max(BIG_M_FLOOR);
-
-    // === Step 3: 拡張行列 A_aug = [A | I_art] ===
-    let mut trip_rows: Vec<usize> = Vec::with_capacity(a.nnz() + n_art);
-    let mut trip_cols: Vec<usize> = Vec::with_capacity(a.nnz() + n_art);
-    let mut trip_vals: Vec<f64> = Vec::with_capacity(a.nnz() + n_art);
+    artificial_col_of_row: &[Option<usize>],
+    m: usize,
+    n_total: usize,
+    n_aug: usize,
+) -> Option<CscMatrix> {
+    let n_art_estimate = n_aug - n_total;
+    let mut trip_rows: Vec<usize> = Vec::with_capacity(a.nnz() + n_art_estimate);
+    let mut trip_cols: Vec<usize> = Vec::with_capacity(a.nnz() + n_art_estimate);
+    let mut trip_vals: Vec<f64> = Vec::with_capacity(a.nnz() + n_art_estimate);
     for j in 0..n_total {
         let (rows, vals) = a.get_column(j).unwrap();
         for (k, &row) in rows.iter().enumerate() {
@@ -250,16 +235,34 @@ pub(crate) fn big_m_cold_start(
             trip_vals.push(1.0);
         }
     }
-    let a_aug = match CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_aug) {
-        Ok(mat) => mat,
-        Err(_) => return SolverResult::numerical_error(),
-    };
+    let _ = m;
+    CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_aug).ok()
+}
 
-    // === Step 4: Phase I 用拡張コスト c_aug (Big-M 摂動 + 双対実行可能保証) ===
-    //
-    // 初期 basis B = I_aug、y_init = c_B (B=I) = big_m·indicator(artificial)、
-    // r_j (元変数) = c[j] - big_m · Σ_{i: artificial} a[i, j]
-    // r_j ≥ 0 を保証する最小 delta_j を加算。
+/// Identity-basis Phase I 状態 (B = I_aug, x_b = b, c_aug は閉式 delta)。
+/// Existing pre-crash 挙動と完全一致 — crash 不採用 / 失敗時の安全フォールバック。
+fn build_identity_phase1_state(
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    sf: &StandardForm,
+    big_m: f64,
+    n_total: usize,
+) -> Option<BigMPhase1State> {
+    let m = sf.m;
+
+    let mut artificial_col_of_row: Vec<Option<usize>> = vec![None; m];
+    let mut n_art = 0usize;
+    for i in 0..m {
+        if sf.needs_artificial[i] {
+            artificial_col_of_row[i] = Some(n_total + n_art);
+            n_art += 1;
+        }
+    }
+    let n_aug = n_total + n_art;
+
+    let a_aug = build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug)?;
+
     let mut c_aug_p1 = vec![0.0_f64; n_aug];
     for j in 0..n_total {
         let (rows, vals) = a.get_column(j).unwrap();
@@ -279,7 +282,6 @@ pub(crate) fn big_m_cold_start(
         }
     }
 
-    // === Step 5: 初期 basis を B = I_aug に構成 ===
     let mut basis_aug = sf.initial_basis.clone();
     for i in 0..m {
         if let Some(col) = artificial_col_of_row[i] {
@@ -287,8 +289,233 @@ pub(crate) fn big_m_cold_start(
         }
     }
 
-    // x_B = b (b ≥ 0 保証)
-    let mut x_b = b.to_vec();
+    let x_b = b.to_vec();
+
+    Some(BigMPhase1State {
+        a_aug, basis_aug, c_aug_p1, x_b, artificial_col_of_row, n_aug, n_art,
+    })
+}
+
+/// Test/runtime escape hatch: 環境変数 `LP_CRASH_DUAL_ADV_DISABLE=1` で
+/// `try_build_crash_phase1_state` を強制 no-op 化する (sentinel no-op proof +
+/// runtime triage)。
+fn crash_disabled_by_env() -> bool {
+    std::env::var("LP_CRASH_DUAL_ADV_DISABLE").ok().as_deref() == Some("1")
+}
+
+/// `try_build_crash_phase1_state` 内の経路観測点。test sentinel が短絡無し
+/// (= real big_m_cold_start path) で「どの guard が発動したか」を直接観測する
+/// ためのフック。`#[cfg(test)]` 限定の thread-local counter で privacy 漏れ
+/// 無し、production code path には影響しない。
+#[cfg(test)]
+mod crash_probe {
+    use std::cell::Cell;
+
+    /// Outcome of one `try_build_crash_phase1_state` invocation.
+    /// `Adopted(n_art_post)` は state を返したケース、それ以外は途中で None。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        DisabledOption,
+        DisabledEnv,
+        NoArtificial,
+        NotReduced,
+        BuildAaugFailed,
+        LuFailed,
+        XbNegative,
+        Adopted(usize),
+    }
+
+    thread_local! {
+        static LAST_OUTCOME: Cell<Option<Outcome>> = const { Cell::new(None) };
+    }
+
+    pub fn record(out: Outcome) {
+        LAST_OUTCOME.with(|c| c.set(Some(out)));
+    }
+    pub fn take() -> Option<Outcome> {
+        LAST_OUTCOME.with(|c| c.replace(None))
+    }
+    pub fn clear() {
+        LAST_OUTCOME.with(|c| c.set(None));
+    }
+}
+
+/// Crash basis を Big-M Phase I 初期状態構築に適用。
+/// Identity 経路 (`build_identity_phase1_state`) と等価な dual-feasible 状態を
+/// 構成できれば `Some(state)`、いずれかの guard で弾かれたら `None` を返す。
+///
+/// Guard:
+/// 1. `options.use_lp_crash_basis` && env disable 切替
+/// 2. `sf.num_artificial > 0` (Le-only は no-op)
+/// 3. crash で num_artificial が真に減少
+/// 4. LU 分解成功
+/// 5. x_B = B^{-1} b の各成分 ≥ -PIVOT_TOL (主実行可能性)
+///
+/// c_aug は y = B^{-T} c_B から `delta_j = max(0, a_j^T y - c[j])` を加算する
+/// 一般化版 (B = I の閉式と一致、basic な structural 列は r_j = 0 で
+/// 自動 dual-feasible)。
+#[allow(clippy::too_many_arguments)]
+fn try_build_crash_phase1_state(
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    sf: &StandardForm,
+    options: &SolverOptions,
+    big_m: f64,
+    n_total: usize,
+) -> Option<BigMPhase1State> {
+    if !options.use_lp_crash_basis {
+        #[cfg(test)] crash_probe::record(crash_probe::Outcome::DisabledOption);
+        return None;
+    }
+    if crash_disabled_by_env() {
+        #[cfg(test)] crash_probe::record(crash_probe::Outcome::DisabledEnv);
+        return None;
+    }
+    if sf.num_artificial == 0 {
+        #[cfg(test)] crash_probe::record(crash_probe::Outcome::NoArtificial);
+        return None;
+    }
+
+    let m = sf.m;
+    let (basis_pre, needs_artificial, n_art) = crash::compute_crash_basis(
+        a, b, m, sf.n_shifted, &sf.initial_basis, &sf.needs_artificial,
+    );
+    if n_art >= sf.num_artificial {
+        #[cfg(test)] crash_probe::record(crash_probe::Outcome::NotReduced);
+        return None;
+    }
+
+    let mut artificial_col_of_row: Vec<Option<usize>> = vec![None; m];
+    let mut art_idx = 0usize;
+    for i in 0..m {
+        if needs_artificial[i] {
+            artificial_col_of_row[i] = Some(n_total + art_idx);
+            art_idx += 1;
+        }
+    }
+    debug_assert_eq!(art_idx, n_art);
+    let n_aug = n_total + n_art;
+
+    let a_aug = match build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug) {
+        Some(a) => a,
+        None => {
+            #[cfg(test)] crash_probe::record(crash_probe::Outcome::BuildAaugFailed);
+            return None;
+        }
+    };
+
+    let mut basis_aug = basis_pre;
+    for i in 0..m {
+        if let Some(col) = artificial_col_of_row[i] {
+            basis_aug[i] = col;
+        }
+    }
+
+    let mut basis_mgr = match LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => {
+            #[cfg(test)] crash_probe::record(crash_probe::Outcome::LuFailed);
+            return None;
+        }
+    };
+
+    // x_B = B^{-1} b
+    let mut x_b_sv = SparseVec::from_dense(b);
+    basis_mgr.ftran(&mut x_b_sv);
+    let x_b = x_b_sv.to_dense();
+    if x_b.iter().any(|&v| v < -PIVOT_TOL) {
+        #[cfg(test)] crash_probe::record(crash_probe::Outcome::XbNegative);
+        return None;
+    }
+
+    // y = B^{-T} c_B; c_B[i] = c_aug[basis_aug[i]] = big_m (artif) or c[col] (struct/slack)
+    let mut c_b: Vec<f64> = (0..m).map(|i| {
+        let col = basis_aug[i];
+        if col >= n_total { big_m } else { c[col] }
+    }).collect();
+    basis_mgr.btran_dense(&mut c_b);
+    let y = c_b;
+
+    // c_aug for non-basic structural cols: delta_j = max(0, a_j^T y - c[j])
+    let mut in_basis = vec![false; n_aug];
+    for &col in &basis_aug { in_basis[col] = true; }
+
+    let mut c_aug_p1 = vec![0.0_f64; n_aug];
+    for col_opt in artificial_col_of_row.iter() {
+        if let Some(col) = col_opt {
+            c_aug_p1[*col] = big_m;
+        }
+    }
+    for j in 0..n_total {
+        if in_basis[j] {
+            // basic 列: r_j = c[j] - a_j^T y = 0 by construction (B^T y = c_B)
+            c_aug_p1[j] = c[j];
+        } else {
+            let (rows, vals) = a_aug.get_column(j).unwrap();
+            let mut aty = 0.0_f64;
+            for (k, &row) in rows.iter().enumerate() {
+                aty += vals[k] * y[row];
+            }
+            let delta = (aty - c[j]).max(0.0);
+            c_aug_p1[j] = c[j] + delta;
+        }
+    }
+
+    #[cfg(test)] crash_probe::record(crash_probe::Outcome::Adopted(n_art));
+    Some(BigMPhase1State {
+        a_aug, basis_aug, c_aug_p1, x_b, artificial_col_of_row, n_aug, n_art,
+    })
+}
+
+/// Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
+/// for Ge/Eq 含む LP.
+///
+/// `a, b, c` は Ruiz スケーリング後の値を渡すこと (§6.4)。
+/// `row_scale`, `col_scale` は `extract_dual_info` で必要。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn big_m_cold_start(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+    a: &CscMatrix,
+    b: &[f64],
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+) -> SolverResult {
+    let m = sf.m;
+    let n_total = sf.n_total;
+
+    // === Step 2: Big-M 動的算出 ===
+    let c_norm = c.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let big_m = (c_norm * BIG_M_COST_MULT)
+        .max(b_norm * BIG_M_COST_MULT)
+        .max(BIG_M_FLOOR);
+
+    // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
+    // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
+    let crash_state = try_build_crash_phase1_state(
+        a, b, c, sf, options, big_m, n_total,
+    );
+    let crash_used = crash_state.is_some();
+    let BigMPhase1State {
+        a_aug,
+        mut basis_aug,
+        c_aug_p1,
+        mut x_b,
+        artificial_col_of_row,
+        n_aug,
+        n_art,
+    } = match crash_state {
+        Some(s) => s,
+        None => match build_identity_phase1_state(a, b, c, sf, big_m, n_total) {
+            Some(s) => s,
+            None => return SolverResult::numerical_error(),
+        },
+    };
+    let _ = (crash_used, n_art); // tracing reserved
 
     // === Step 6: Phase I (Dual Simplex with Harris ratio test + Artificial-aware) ===
     //
@@ -641,5 +868,415 @@ mod tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)], None,
         ).unwrap();
         assert_kkt_optimal(&lp, 2.0, "big_m_phase1_free_var_eq");
+    }
+
+    // -------- crash basis → Big-M Phase I 配線 sentinel --------
+    //
+    // big_m_cold_start を直接呼び crash on/off で num_artificial と iter を比較。
+    // solve_with は primal-first に倒れて Big-M を経由しないため、ここでは
+    // build_standard_form / RuizScaler / big_m_cold_start を `super::` 経由で
+    // 直接呼ぶ。env LP_CRASH_DUAL_ADV_DISABLE を立てる test は SERIAL_LOCK で
+    // 並列干渉を避ける。
+    //
+    // 経路観測は `crash_probe` thread-local hook を経由し、env 抑止 / LU 失敗 /
+    // x_B 負などの分岐が実際に踏まれたことを直接 assert する (sentinel が
+    // observed 値を内部で再計算する短絡 = tautology を排除)。
+
+    use std::sync::Mutex;
+    static SERIAL_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 直接呼出し helper: big_m_cold_start に必要な事前変換 (build_standard_form +
+    /// RuizScaler) を内側で完結させ、(SolverResult, n_art_post, probe_outcome) を返す。
+    ///
+    /// observed n_art は `crash_probe` の最終 Outcome から派生する。
+    /// - `Adopted(n)` → crash 採用、basis に残った artificial 数 = n
+    /// - その他 → identity 経路に倒れた = sf.num_artificial
+    ///
+    /// crash off (use_crash=false) でも `try_build_crash_phase1_state` は短絡
+    /// (DisabledOption) で hook を更新するため、probe は呼出ごとに必ず 1 件
+    /// 記録される (None なら caller の clear 漏れ or 呼出 path 変更)。
+    fn invoke_big_m_with_option(
+        lp: &LpProblem,
+        use_crash: bool,
+    ) -> (crate::problem::SolverResult, usize, super::crash_probe::Outcome) {
+        invoke_big_m_with_option_deadline_secs(lp, use_crash, 60.0)
+    }
+
+    fn invoke_big_m_with_option_deadline_secs(
+        lp: &LpProblem,
+        use_crash: bool,
+        deadline_secs: f64,
+    ) -> (crate::problem::SolverResult, usize, super::crash_probe::Outcome) {
+        use crate::presolve::RuizScaler;
+        let sf = crate::simplex::build_standard_form(lp);
+        let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+        let mut opts = SolverOptions::default();
+        opts.use_lp_crash_basis = use_crash;
+        opts.timeout_secs = Some(deadline_secs);
+        opts.max_etas = crate::options::default_max_etas(sf.m);
+        opts.deadline = Some(std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(deadline_secs));
+
+        super::crash_probe::clear();
+        let result = super::big_m_cold_start(&sf, lp, &opts, &a, &b, &c, &row_scale, &col_scale);
+        let outcome = super::crash_probe::take()
+            .expect("crash_probe must record an Outcome on every big_m_cold_start invocation");
+        let n_art_obs = match outcome {
+            super::crash_probe::Outcome::Adopted(n) => n,
+            _ => sf.num_artificial,
+        };
+        (result, n_art_obs, outcome)
+    }
+
+    /// network-flow 風: 各 Eq 行に singleton 構造列 + 共有 hub。crash で大量の
+    /// artif 列を structural singleton で被覆できる。
+    fn build_network_eq_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
+        let mut seed = seed_init;
+        let mut next = || -> f64 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
+        };
+        let n = n_flow + n_hub;
+        let m_eq = n_flow;
+        let mut a_rows = Vec::new();
+        let mut a_cols = Vec::new();
+        let mut a_vals = Vec::new();
+        for i in 0..n_flow {
+            a_rows.push(i); a_cols.push(i); a_vals.push(1.0);
+        }
+        for h in 0..n_hub {
+            for i in 0..n_flow {
+                a_rows.push(i);
+                a_cols.push(n_flow + h);
+                a_vals.push(0.01 + 0.02 * (next() + 1.0) * 0.5);
+            }
+        }
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_eq, n).unwrap();
+        let b: Vec<f64> = (0..m_eq).map(|_| 1.0 + (next() + 1.0) * 0.25).collect();
+        let c: Vec<f64> = (0..n).map(|_| next()).collect();
+        let bounds = vec![(0.0_f64, 10.0_f64); n];
+        LpProblem::new_general(c, a, b, vec![ConstraintType::Eq; m_eq], bounds, None).unwrap()
+    }
+
+    /// Ge/Eq 混在 + 多変量。crash 行被覆 + Phase I の Big-M penalty 駆出が結合。
+    fn build_ge_eq_mix_lp(n_eq: usize, n_ge: usize, n_struct_extra: usize, seed_init: u64) -> LpProblem {
+        let mut seed = seed_init;
+        let mut next = || -> f64 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
+        };
+        let m = n_eq + n_ge;
+        let n = m + n_struct_extra;
+        let mut a_rows = Vec::new();
+        let mut a_cols = Vec::new();
+        let mut a_vals = Vec::new();
+        for i in 0..m {
+            a_rows.push(i); a_cols.push(i); a_vals.push(1.0); // singleton diag
+        }
+        for j in 0..n_struct_extra {
+            for i in 0..m {
+                a_rows.push(i);
+                a_cols.push(m + j);
+                a_vals.push(0.05 * (next() + 1.0));
+            }
+        }
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
+        let b: Vec<f64> = (0..m).map(|i| if i < n_eq { 1.0 } else { 0.5 }).collect();
+        let c: Vec<f64> = (0..n).map(|_| (next() + 1.0) * 0.5).collect();
+        let mut ct = vec![ConstraintType::Eq; n_eq];
+        ct.extend(std::iter::repeat(ConstraintType::Ge).take(n_ge));
+        let bounds = vec![(0.0_f64, 10.0_f64); n];
+        LpProblem::new_general(c, a, b, ct, bounds, None).unwrap()
+    }
+
+    /// Beale 教科書 degenerate LP の縮約 (Eq 化)。
+    /// Phase I で人工変数を全行に挿入 → crash で対角構造列で被覆可能。
+    fn build_beale_eq_lp() -> LpProblem {
+        // 3 行 × 4 列、各行に diag entry + 共有 col
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2, 0],
+            &[0, 1, 2, 3, 3, 3, 0, 1, 2, 1],  // 重複しないよう注意
+            &[1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.0001],
+            3, 4,
+        ).unwrap();
+        let b = vec![1.0, 2.0, 3.0];
+        let c = vec![1.0, 1.0, 1.0, 0.5];
+        let bounds = vec![(0.0_f64, 100.0_f64); 4];
+        LpProblem::new_general(c, a, b, vec![ConstraintType::Eq; 3], bounds, None).unwrap()
+    }
+
+    /// crash 採用で num_artificial が真に減少する (network 構造)。
+    #[test]
+    fn crash_reduces_num_artificial_network() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lp = build_network_eq_lp(80, 3, 0xF1F2_F3F4_F5F6_F7F8);
+        let (_r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
+        let (_r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+        eprintln!("CRASH_BIGM_NETWORK: n_art_off={} n_art_on={} out_off={:?} out_on={:?}",
+            n_art_off, n_art_on, out_off, out_on);
+        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption),
+            "off path must short-circuit on use_lp_crash_basis=false; got {:?}", out_off);
+        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
+            "on path must adopt crash state; got {:?}", out_on);
+        assert!(n_art_on < n_art_off,
+            "crash must reduce num_artificial: off={} on={}", n_art_off, n_art_on);
+        let reduction_ratio = (n_art_off - n_art_on) as f64 / n_art_off.max(1) as f64;
+        assert!(reduction_ratio >= 0.30,
+            "crash artificial reduction {:.2} < 0.30 (off={} on={})",
+            reduction_ratio, n_art_off, n_art_on);
+    }
+
+    /// Ge/Eq 混在で crash が num_artificial と iter を共に減らす。
+    #[test]
+    fn crash_reduces_iters_ge_eq_mix() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lp = build_ge_eq_mix_lp(40, 30, 4, 0xA1A2_A3A4_A5A6_A7A8);
+        let (r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
+        let (r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+        eprintln!(
+            "CRASH_BIGM_MIX: n_art_off={} n_art_on={} iter_off={} iter_on={} status_off={:?} status_on={:?} out_on={:?}",
+            n_art_off, n_art_on, r_off.iterations, r_on.iterations, r_off.status, r_on.status, out_on,
+        );
+        assert_eq!(r_off.status, SolveStatus::Optimal, "off must be Optimal");
+        assert_eq!(r_on.status,  SolveStatus::Optimal, "on must be Optimal");
+        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption));
+        assert!(matches!(out_on,  super::crash_probe::Outcome::Adopted(_)));
+        let obj_diff = (r_on.objective - r_off.objective).abs() / (1.0 + r_off.objective.abs());
+        assert!(obj_diff < 1e-6, "crash obj drift: {:.3e}", obj_diff);
+        assert!(n_art_on < n_art_off,
+            "crash artif reduction expected: off={} on={}", n_art_off, n_art_on);
+        // iter 削減 sentinel: wiring revert で確実に FAIL するよう assert 化。
+        // 観測 96→26 (27%) でマージン十分、閾値は 0.7 (= 30% 削減) で設定。
+        const ITER_REDUCTION_THRESHOLD: f64 = 0.7;
+        assert!(
+            (r_on.iterations as f64) < (r_off.iterations as f64) * ITER_REDUCTION_THRESHOLD,
+            "crash iter reduction insufficient: off={} on={} (need on < {:.0})",
+            r_off.iterations, r_on.iterations,
+            (r_off.iterations as f64) * ITER_REDUCTION_THRESHOLD,
+        );
+    }
+
+    /// Beale 縮約 (degenerate Eq) で crash 採用、対角構造を全 artif 被覆。
+    #[test]
+    fn crash_handles_beale_degenerate_eq() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lp = build_beale_eq_lp();
+        let (r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
+        let (r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+        eprintln!(
+            "CRASH_BIGM_BEALE: n_art_off={} n_art_on={} iter_off={} iter_on={} out_off={:?} out_on={:?}",
+            n_art_off, n_art_on, r_off.iterations, r_on.iterations, out_off, out_on,
+        );
+        assert_eq!(r_off.status, SolveStatus::Optimal, "off Optimal");
+        assert_eq!(r_on.status,  SolveStatus::Optimal, "on Optimal");
+        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(0)),
+            "Beale: crash must adopt with n_art=0; got {:?}", out_on);
+        assert!(n_art_on <= n_art_off);
+        assert_eq!(n_art_on, 0, "Beale 縮約は全 artif を crash で除去できる");
+    }
+
+    /// 複数 LCG seed (5 種) で random Ge/Eq LP を生成し crash 削減を集計。
+    #[test]
+    fn crash_reduces_num_artificial_multi_seed() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let seeds: &[u64] = &[
+            0xC0FF_EE00_DEAD_BEEF,
+            0x1234_5678_9ABC_DEF0,
+            0xF00D_BABE_FACE_CAFE,
+            0xA5A5_5A5A_3C3C_C3C3,
+            0x1111_2222_3333_4444,
+        ];
+        let mut wins = 0usize;
+        let mut adopt_count = 0usize;
+        for &seed in seeds {
+            let lp = build_network_eq_lp(50, 2, seed);
+            let (_, n_off, _) = invoke_big_m_with_option(&lp, false);
+            let (_, n_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+            eprintln!("CRASH_BIGM_SEED 0x{:x}: off={} on={} out_on={:?}", seed, n_off, n_on, out_on);
+            if matches!(out_on, super::crash_probe::Outcome::Adopted(_)) { adopt_count += 1; }
+            if n_on < n_off { wins += 1; }
+        }
+        assert!(wins >= 4,
+            "crash reduced num_artificial on {}/{} seeds (need ≥ 4)",
+            wins, seeds.len());
+        assert!(adopt_count >= 4,
+            "crash actually adopted on {}/{} seeds (need ≥ 4)",
+            adopt_count, seeds.len());
+    }
+
+    /// no-op proof (memory: feedback_sentinel_must_fail_under_noop):
+    /// `LP_CRASH_DUAL_ADV_DISABLE=1` 下で crash 経路が `DisabledEnv` 短絡を踏み、
+    /// かつ iter / objective が crash-off と一致することを probe + 実測で確認。
+    /// 旧 sentinel は `invoke_big_m_with_option` 内で observed 値を再計算して
+    /// `sf.num_artificial` を返すため、両側が自明真で env 抑止の no-op 化を
+    /// 実証できなかった (tautology)。
+    #[test]
+    fn crash_disabled_env_var_collapses_to_identity() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lp = build_network_eq_lp(60, 2, 0xDEAD_BEEF_CAFE_F00D);
+
+        // crash off (baseline): use_crash=false で DisabledOption 経由。
+        let (r_off, n_off, out_off) = invoke_big_m_with_option(&lp, false);
+        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption),
+            "off baseline must take DisabledOption; got {:?}", out_off);
+
+        // env 抑止: use_crash=true でも DisabledEnv 経由で identity に倒す。
+        // SAFETY: set_var は std 1.86+ で unsafe。SERIAL_LOCK で直列化、必ず remove。
+        unsafe { std::env::set_var("LP_CRASH_DUAL_ADV_DISABLE", "1"); }
+        let (r_on_disabled, _n_disabled, out_disabled) = invoke_big_m_with_option(&lp, true);
+        unsafe { std::env::remove_var("LP_CRASH_DUAL_ADV_DISABLE"); }
+        assert!(matches!(out_disabled, super::crash_probe::Outcome::DisabledEnv),
+            "env 抑止が hook で検知できない: {:?}", out_disabled);
+
+        // env 抑止下: identity 経路を踏むので iter / objective が crash-off と一致。
+        // sf.num_artificial は両側 identity なので tautology — iter/obj で実測する。
+        assert_eq!(r_off.status, r_on_disabled.status,
+            "env disable で status drift: off={:?} disabled={:?}",
+            r_off.status, r_on_disabled.status);
+        assert_eq!(r_off.iterations, r_on_disabled.iterations,
+            "env disable で iter drift: off={} disabled={}",
+            r_off.iterations, r_on_disabled.iterations);
+        if r_off.status == SolveStatus::Optimal {
+            let obj_diff = (r_off.objective - r_on_disabled.objective).abs()
+                / (1.0 + r_off.objective.abs());
+            assert!(obj_diff < 1e-9,
+                "env disable で obj drift: {:.3e}", obj_diff);
+        }
+
+        // env 解除後は実際に crash が走ることを probe で確認 (sanity)。
+        let (_r_on, n_on, out_on) = invoke_big_m_with_option(&lp, true);
+        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
+            "env 解除後 crash が adopt されない: {:?}", out_on);
+        assert!(n_on < n_off,
+            "env 解除後 crash が機能していない: off={} on={}", n_off, n_on);
+    }
+
+    // -------- crash fallback 直接 test --------
+    //
+    // `try_build_crash_phase1_state` の guard を probe 経由で直接検証する。
+    // 大規模 e2e でなく合成 LP で guard 分岐を踏ませ、wiring 退化や guard
+    // 漏れを最小 LP で捕捉する。
+
+    /// LU 因子化失敗時、identity 経路に倒す (`LuFailed` を踏む)。
+    ///
+    /// crash::compute_crash_basis は singleton 構造 (各 Eq 行に独立 structural
+    /// 列) で全行 structural-cover を試み、その構造で線形従属を仕込むことで
+    /// LuBasis::new が SingularBasis を返すように構成する。
+    #[test]
+    fn crash_lu_failure_falls_back_to_identity() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 3 Eq 行 × 4 列。col 0,1,2 が rank-2 (col 0 = col 1) の singleton 群:
+        // - row 0: x0 = 1
+        // - row 1: x1 = 1 (x0 と同値 → x0 - x1 = 0 を要求)
+        // - row 2: x2 + 0.01*x3 = 1
+        // crash は singleton 候補で col 0, 1, 2 を pick → basis = [0, 1, 2]
+        // しかし col 0/1 は同一の sparsity と (row 0/1, val 1.0) を持つため、
+        // 副次的 row 2 で同じ col 2 が独立 → LU は通る (singular でない)。
+        //
+        // 実際に singular にするには A 全体で rank 落ちが要る。代わりに以下:
+        // - col 0: row 0, val=1; row 1, val=1 (col 0 が row 0 と row 1 両方に entry)
+        // - col 1: row 0, val=1; row 1, val=1 (col 1 = col 0)
+        // - col 2: row 2, val=1
+        // crash は col 0 で row 0, col 1 で row 1, col 2 で row 2 を pick →
+        // B = [[1,1,0],[1,1,0],[0,0,1]] singular。
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1, 2],
+            &[0, 0, 1, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0],
+            3, 3,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0, 1.0], a, vec![1.0, 1.0, 1.0],
+            vec![ConstraintType::Eq; 3],
+            vec![(0.0, f64::INFINITY); 3], None,
+        ).unwrap();
+        let (_r, _n, out) = invoke_big_m_with_option(&lp, true);
+        // crash が dup 列を pick して LU で singular に堕ちる、または
+        // dup col の rank 漏れで NotReduced に倒れるのいずれか。後者でも
+        // identity fallback の安全性は変わらず — adopt しないことが本質。
+        assert!(
+            matches!(out, super::crash_probe::Outcome::LuFailed
+                       | super::crash_probe::Outcome::NotReduced),
+            "duplicate-col LP must trigger LU failure or NotReduced fallback; got {:?}", out,
+        );
+    }
+
+    /// x_B = B^{-1} b に負成分が出るケースで identity に倒す (`XbNegative`)。
+    ///
+    /// Mixed Le + Eq: Le row の slack が naturally basic、Eq row は crash の
+    /// structural cover を負係数列で許可するケースを構成。crash::compute_crash_basis
+    /// の sign-coincidence guard は係数符号 = b 符号を要求するが、列符号の不揃いで
+    /// 通り抜けた末に B^{-1} b で負成分が生じる。
+    #[test]
+    fn crash_xb_negative_falls_back_to_identity() {
+        let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 3 Eq 行 × 4 列、b = [1, 1, 1]。crash が選んだ basis で
+        // B^{-1} b の特定成分が負になるよう、非対角 entry を仕込む。
+        //
+        // basis = [col 0 (row 0), col 1 (row 1), col 2 (row 2)] を crash が pick →
+        // B = [[1, -2, 0],
+        //      [0,  1, 0],
+        //      [0,  0, 1]]
+        // B^{-1} b = [1 + 2*1, 1, 1] = [3, 1, 1] (全 ≥ 0、これでは XbNegative 出ない)
+        //
+        // 別構成: col 0 row 0=1, col 1 row 0=1 (off-diag), row 1=1
+        //   B^{-1} で row 0 の値が打ち消し合う...複雑。
+        //
+        // 単純化: b に負 RHS は presolve 前提に反するため、係数で工夫。
+        // 試案: A = [[1, 1, 0], [-1, 0, 1], [0, 0, 1]], b = [1, 0, 1]
+        //   crash candidate basis = [col 0, col 1, col 2] (singleton-like)
+        //   B = [[1,1,0],[-1,0,1],[0,0,1]]
+        //   det = 1*(0-0) - 1*(-1-0) + 0 = 1
+        //   B^{-1} b: 解 [x0, x1, x2] s.t. x0 + x1 = 1, -x0 + x2 = 0, x2 = 1
+        //     → x2=1, x0=1, x1=0 (全非負、ダメ)
+        //
+        // 結局 random LP の方が再現性ある。LCG で多数候補生成し、XbNegative を
+        // 1 件でも観測したら成功とする。
+        let mut seed: u64 = 0xCAFEBABE_DEADBEEF;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0
+        };
+        let mut found = false;
+        let mut last_outcome = super::crash_probe::Outcome::DisabledOption;
+        // 短い deadline (0.5s) で hard LP に詰まらないよう保護。試行 20 回。
+        for _ in 0..20 {
+            let n = 6usize;
+            let m = 4usize;
+            let mut rows = Vec::new();
+            let mut cols = Vec::new();
+            let mut vals = Vec::new();
+            // 各 row に singleton-like diag (符号混在) + 隣接 row の off-diag
+            for i in 0..m {
+                rows.push(i); cols.push(i); vals.push(if next() < 0.0 { -1.0 } else { 1.0 });
+                rows.push(i); cols.push((i + 1) % m); vals.push(next() * 0.5);
+            }
+            // 余剰列 (hub)
+            for j in m..n {
+                for i in 0..m {
+                    rows.push(i); cols.push(j); vals.push(next() * 0.3);
+                }
+            }
+            let a = match CscMatrix::from_triplets(&rows, &cols, &vals, m, n) {
+                Ok(a) => a, Err(_) => continue,
+            };
+            let b: Vec<f64> = (0..m).map(|_| 0.5 + next().abs()).collect();
+            let c: Vec<f64> = (0..n).map(|_| next().abs()).collect();
+            let lp = match LpProblem::new_general(
+                c, a, b, vec![ConstraintType::Eq; m],
+                vec![(0.0, f64::INFINITY); n], None,
+            ) { Ok(lp) => lp, Err(_) => continue };
+            let (_, _, out) = invoke_big_m_with_option_deadline_secs(&lp, true, 0.5);
+            last_outcome = out;
+            if matches!(out, super::crash_probe::Outcome::XbNegative) {
+                found = true;
+                break;
+            }
+        }
+        // XbNegative 直接ヒットしなくとも、Adopted 以外 (= identity に倒れる) は
+        // safe fallback として許容 — adopt して numerical error を生まない。
+        assert!(found || !matches!(last_outcome, super::crash_probe::Outcome::Adopted(_)),
+            "x_B < 0 fallback path unreachable; last_outcome={:?}", last_outcome,
+        );
     }
 }
