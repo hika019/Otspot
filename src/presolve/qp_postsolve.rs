@@ -222,11 +222,12 @@ fn simple_kkt_inf(
             }
         }
     }
+    // FX のみ skip。"A col 空" だけの heuristic は非凸 QP linear-only var を
+    // 誤発火させる (#92) ので排除。本関数は trace 用なので EmptyCol metadata 不要。
     let mut max_r = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = bounds[j];
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < 1e-12 { continue; }
-        if a.col_ptr.len() > j + 1 && a.col_ptr[j + 1] - a.col_ptr[j] == 0 { continue; }
         let r = qx_dd[j] + TwoFloat::from(c[j]) + aty_dd[j];
         max_r = max_r.max(f64::from(r).abs());
     }

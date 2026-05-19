@@ -5,7 +5,9 @@ use crate::tolerances::FX_TOL;
 use super::outcome::ProblemView;
 
 /// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
-/// FX (lb≈ub) と EmptyCol は postsolve 慣例で除外。
+/// FX (lb≈ub) と `eliminated_cols[j]==true` の col は postsolve 慣例で除外。
+/// 旧来の "A 列空のみ" heuristic は非凸 QP linear-only var (A 空 / Q 非空 / c≠0) を
+/// 誤って skip する真因だったため廃止。EmptyCol 判定は presolve metadata 経由のみ。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     let n = prob.bounds.len();
@@ -15,15 +17,14 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     let qx_dd = dd_impl::qx(prob.q, x);
     let aty_dd = dd_impl::aty(prob.a, y, n);
     let bound_contrib = kkt_resid::bound_contrib(prob.bounds, z);
+    let use_elim_mask = prob.eliminated_cols.len() == n;
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
             continue;
         }
-        if prob.a.col_ptr.len() > j + 1
-            && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0
-        {
+        if use_elim_mask && prob.eliminated_cols[j] {
             continue;
         }
         let r_dd = qx_dd[j]
@@ -163,7 +164,14 @@ mod tests {
         q: &'a CscMatrix, a: &'a CscMatrix, c: &'a [f64], b: &'a [f64],
         bounds: &'a [(f64, f64)], cts: &'a [ConstraintType],
     ) -> ProblemView<'a> {
-        ProblemView { q, a, c, b, bounds, constraint_types: cts }
+        ProblemView { q, a, c, b, bounds, constraint_types: cts, eliminated_cols: &[] }
+    }
+
+    fn build_view_with_mask<'a>(
+        q: &'a CscMatrix, a: &'a CscMatrix, c: &'a [f64], b: &'a [f64],
+        bounds: &'a [(f64, f64)], cts: &'a [ConstraintType], mask: &'a [bool],
+    ) -> ProblemView<'a> {
+        ProblemView { q, a, c, b, bounds, constraint_types: cts, eliminated_cols: mask }
     }
 
     /// f64 で消える 1.0 residual を DD が拾うこと。
@@ -211,7 +219,7 @@ mod tests {
         assert!(r > 0.4 && r < 0.6, "got r={:.3e}", r);
     }
 
-    /// FX と EmptyCol は KKT 評価から除外される。
+    /// FX 列は KKT 評価から自動除外、EmptyCol は明示 mask 経由で除外される。
     #[test]
     fn kkt_residual_rel_excludes_fx_and_empty_col() {
         let q = CscMatrix::new(3, 3);
@@ -222,12 +230,37 @@ mod tests {
         let b = vec![0.0];
         let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
         let cts = vec![ConstraintType::Eq];
-        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+        // 列 1 が presolve で削除された EmptyCol である情景を再現。
+        let mask = vec![false, true, false];
+        let view = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
 
         let x = vec![1.0, 0.0, 0.0];
         let y = vec![0.0];
         let z = vec![0.0, 0.0];
         let r = kkt_residual_rel(&view, &x, &y, &z);
         assert!(r.abs() < 1e-15, "got r={:.3e}", r);
+    }
+
+    /// mask 未供給 (= IPM 経路) の場合: A 空 / Q 非空 の linear-only var は skip されず
+    /// stationarity に出る。これが #55 真因 (旧 A-only heuristic はこの r を隠していた)。
+    #[test]
+    fn kkt_residual_rel_no_mask_exposes_linear_only_var() {
+        // n=1, A 空, Q diag=(-2), c=1, bounds=(-2, 2)
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let c = vec![1.0_f64];
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(-2.0_f64, 2.0_f64)];
+        let cts: Vec<ConstraintType> = vec![];
+        let view = build_view(&q, &a, &c, &b, &bounds, &cts);
+
+        // x=-2 (lb 当て), bd=[0,0] (誤って 0 埋め)
+        // raw r = Qx+c+bc = -2*(-2)+1+0-0 = 5、scale = 1 + |Qx| + |c| + |aty| + |bc| = 6
+        // rel = 5/6 ≈ 0.833。旧 buggy heuristic では skip され rel=0 と評価されていた。
+        let x = vec![-2.0_f64];
+        let y: Vec<f64> = vec![];
+        let z = vec![0.0_f64, 0.0]; // [z_lb, z_ub] 両方 0
+        let r = kkt_residual_rel(&view, &x, &y, &z);
+        assert!(r > 0.5, "linear-only var の stationarity が露出するべき (got rel={:.3e})", r);
     }
 }

@@ -8,6 +8,7 @@ use crate::qp::problem::QpProblem;
 pub(crate) fn refine_kkt_iterative(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    eliminated_cols: &[bool],
     max_iters: usize,
     target_pf: f64,
     deadline: Option<std::time::Instant>,
@@ -44,6 +45,7 @@ pub(crate) fn refine_kkt_iterative(
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols,
     };
     let mut prev_kkt = kkt_residual_rel(
         &view,
@@ -57,7 +59,7 @@ pub(crate) fn refine_kkt_iterative(
     let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
         let mut outer_made_progress = false;
-        let n_dual = try_dual_only_ir(problem, result, target_pf, deadline);
+        let n_dual = try_dual_only_ir(problem, result, eliminated_cols, target_pf, deadline);
         if n_dual > 0 {
             n_dual_total += n_dual;
             outer_made_progress = true;
@@ -358,18 +360,18 @@ pub(crate) fn refine_kkt_iterative(
         );
     }
 
-    // FX (lb≈ub) と EmptyCol は bound_dual=0 慣例で stationarity 評価から除外。
-    // 含めると orig 空間で huge cancellation noise が出て IR が壊れる。
+    // FX (lb≈ub) と eliminated_cols (presolve metadata) を stationarity 評価から除外。
+    // 旧来は "A col 空" heuristic で判定していたが、非凸 QP の linear-only var
+    // (A 空 / Q 非空 / c≠0) を誤 skip して #55 真因となったため presolve 明示 flag のみに変更。
     use crate::tolerances::FX_TOL;
+    let use_elim_mask = eliminated_cols.len() == n;
     let exclude_var: Vec<bool> = (0..n)
         .map(|j| {
             let (lb, ub) = problem.bounds[j];
             if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < FX_TOL {
                 return true;
             }
-            if problem.a.col_ptr.len() > j + 1
-                && problem.a.col_ptr[j + 1] - problem.a.col_ptr[j] == 0
-            {
+            if use_elim_mask && eliminated_cols[j] {
                 return true;
             }
             false
