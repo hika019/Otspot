@@ -313,6 +313,7 @@ TOTAL_PASS_NO_REF=0
 TOTAL_PASS_INFEASIBLE=0
 TOTAL_PASS_UNBOUNDED=0
 TOTAL_OBJ_MISMATCH=0
+TOTAL_KKT_FAIL=0
 TOTAL_NONCONVEX=0
 TOTAL_SUBOPTIMAL=0
 
@@ -342,6 +343,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   pass_infeasible=$(grep -E "^\s+PASS:Infeasible:" "$LOG" | awk '{print $2}' | head -1)
   pass_unbounded=$(grep -E "^\s+PASS:Unbounded:" "$LOG" | awk '{print $2}' | head -1)
   obj_mismatch=$(grep -E "^\s+OBJ_MISMATCH:" "$LOG" | awk '{print $2}' | head -1)
+  kkt_fail=$(grep -E "^\s+KKT_FAIL:" "$LOG" | awk '{print $2}' | head -1)
   nonconvex=$(grep -E "^\s+NONCONVEX:" "$LOG" | awk '{print $2}' | head -1)
   suboptimal=$(grep -E "^\s+SUBOPTIMAL:" "$LOG" | awk '{print $2}' | head -1)
 
@@ -358,6 +360,7 @@ for g in $(seq 1 "$TOTAL_GROUPS"); do
   TOTAL_PASS_INFEASIBLE=$(( TOTAL_PASS_INFEASIBLE + ${pass_infeasible:-0} ))
   TOTAL_PASS_UNBOUNDED=$(( TOTAL_PASS_UNBOUNDED + ${pass_unbounded:-0} ))
   TOTAL_OBJ_MISMATCH=$(( TOTAL_OBJ_MISMATCH + ${obj_mismatch:-0} ))
+  TOTAL_KKT_FAIL=$(( TOTAL_KKT_FAIL + ${kkt_fail:-0} ))
   TOTAL_NONCONVEX=$(( TOTAL_NONCONVEX + ${nonconvex:-0} ))
   TOTAL_SUBOPTIMAL=$(( TOTAL_SUBOPTIMAL + ${suboptimal:-0} ))
 
@@ -396,6 +399,7 @@ done
   printf "  DFEAS_FAIL:        %d\n" "$TOTAL_DFEAS_FAIL"
   printf "  PFEAS_FAIL:        %d\n" "$TOTAL_PFEAS_FAIL"
   printf "  OBJ_MISMATCH:      %d\n" "$TOTAL_OBJ_MISMATCH"
+  printf "  KKT_FAIL:          %d\n" "$TOTAL_KKT_FAIL"
   printf "  NONCONVEX:         %d\n" "$TOTAL_NONCONVEX"
   printf "  SUBOPTIMAL:        %d\n" "$TOTAL_SUBOPTIMAL"
   printf "  MAXITER:           %d\n" "$TOTAL_MAXITER"
@@ -482,7 +486,7 @@ done
 # TOTAL整合性チェック
 CATEGORY_SUM=$(( TOTAL_PASS + TOTAL_PASS_NO_REF + TOTAL_PASS_INFEASIBLE + TOTAL_PASS_UNBOUNDED + \
   TOTAL_TIMEOUT + TOTAL_FAIL + \
-  TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_NONCONVEX + \
+  TOTAL_DFEAS_FAIL + TOTAL_PFEAS_FAIL + TOTAL_OBJ_MISMATCH + TOTAL_KKT_FAIL + TOTAL_NONCONVEX + \
   TOTAL_SUBOPTIMAL + TOTAL_MAXITER + TOTAL_ERROR + TOTAL_SKIP ))
 if [[ "$CATEGORY_SUM" != "$TOTAL_PROBLEMS" ]]; then
   echo "警告: カテゴリ合算($CATEGORY_SUM) ≠ TOTAL($TOTAL_PROBLEMS)" >&2
