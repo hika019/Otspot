@@ -20,6 +20,11 @@ impl std::fmt::Display for QpProblemError {
 impl std::error::Error for QpProblemError {}
 
 /// min 1/2 x^T Q x + c^T x  s.t. Ax {<=,=,>=} b, lb <= x <= ub
+///
+/// When `quadratic_constraints` is non-empty the problem is a QCQP.
+/// Entry `k` holds the symmetric `n×n` matrix `Q_k` for the quadratic part
+/// of constraint `k`: `1/2 x^T Q_k x + a_k^T x {<=,=,>=} b_k`.
+/// An empty `CscMatrix` at index `k` means constraint `k` has no quadratic part.
 #[derive(Debug, Clone)]
 pub struct QpProblem {
     pub q: CscMatrix,
@@ -30,6 +35,11 @@ pub struct QpProblem {
     pub num_vars: usize,
     pub num_constraints: usize,
     pub constraint_types: Vec<ConstraintType>,
+    /// Per-constraint quadratic matrices for QCQP.
+    ///
+    /// Length is either 0 (pure QP/LP, no quadratic constraints) or
+    /// `num_constraints` (QCQP). Entry `k` is the symmetric `Q_k` matrix.
+    pub quadratic_constraints: Vec<CscMatrix>,
     /// 目的関数値 = 1/2 x^T Q x + c^T x + obj_offset
     pub obj_offset: f64,
 }
@@ -65,7 +75,7 @@ impl QpProblem {
                 format!("constraint_types length must be {}, got {}", m, constraint_types.len())
             ));
         }
-        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, obj_offset: 0.0 })
+        Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, quadratic_constraints: vec![], obj_offset: 0.0 })
     }
 
     /// 全制約 Le として構築するヘルパー。
