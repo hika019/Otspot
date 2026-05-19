@@ -11,7 +11,12 @@ use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::presolve::RuizScaler;
 use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
+use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
+use bounded_core::{
+    BoundedDualState, BoundedOutcome, extract_solution_bounded, extract_dual_info_bounded,
+    solve_bounded_dual, phase2_primal_bounded, iterate as bounded_iterate,
+};
 
 mod bounded_core;
 mod core;
@@ -39,6 +44,20 @@ pub(crate) fn solve_dual_advanced(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> SolverResult {
+    // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
+    // Gate: Le-only (num_artificial == 0) and dispatch not disabled by test hook.
+    if !bounded_dispatch_disabled()
+        && problem.bounds.iter().any(|&(_, ub)| ub.is_finite())
+    {
+        let bsf = build_bounded_standard_form(problem);
+        if bsf.num_artificial == 0 {
+            if let Some(result) = try_bounded(&bsf, problem, options) {
+                return result;
+            }
+            // UbViolationOutOfScope → fall through to legacy path
+        }
+    }
+
     let m = sf.m;
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
 
@@ -113,6 +132,207 @@ pub(crate) fn solve_dual_advanced(
             }
         }
         _ => primal_result,
+    }
+}
+
+// ── Bounded (BFRT) path ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+thread_local! {
+    static BOUNDED_DISPATCH_DISABLE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_bounded_dispatch_disabled(v: bool) {
+    BOUNDED_DISPATCH_DISABLE.with(|c| c.set(v));
+}
+
+fn bounded_dispatch_disabled() -> bool {
+    #[cfg(test)]
+    {
+        BOUNDED_DISPATCH_DISABLE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Try to solve a Le-only bounded LP via the BFRT-aware dual+primal path.
+///
+/// Returns `Some(result)` on success or definite failure (Infeasible / Timeout /
+/// NumericalError). Returns `None` when `BoundedOutcome::UbViolationOutOfScope`
+/// is reached, signalling the caller to fall back to the legacy path.
+fn try_bounded(
+    bsf: &BoundedStandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> Option<SolverResult> {
+    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&bsf.a, &bsf.b, &bsf.c);
+    let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
+    // total_iters is always assigned before read (warm branch overwrites before
+    // passing &mut to finish_bounded; cold path overwrites before return).
+    let mut total_iters: usize;
+
+    // Warm start: reuse a previously-saved bounded-path basis when the index
+    // space matches (basis.len() == bsf.m, all indices < bsf.n_total). Warm
+    // starts from the legacy path have basis.len() == sf.m > bsf.m when UBs
+    // are present, so they fall through to cold start automatically.
+    if let Some(warm) = &options.warm_start {
+        if warm.basis.len() == bsf.m
+            && warm.basis.iter().all(|&idx| idx < bsf.n_total)
+        {
+            if let Ok(mut basis_mgr) = LuBasis::new(&a, &warm.basis, options.max_etas) {
+                let mut x_b_sv = SparseVec::from_dense(&b);
+                basis_mgr.ftran(&mut x_b_sv);
+                let x_b = x_b_sv.to_dense();
+                let mut is_basic = vec![false; bsf.n_total];
+                for &j in &warm.basis {
+                    is_basic[j] = true;
+                }
+                let state = BoundedDualState {
+                    basis: warm.basis.clone(),
+                    at_upper: vec![false; bsf.n_total],
+                    x_b,
+                    reduced_costs: vec![0.0; bsf.n_total],
+                    is_basic,
+                    iterations: 0,
+                };
+                let (dual_out, dual_state) =
+                    bounded_iterate(state, bsf, &a, &c, options, &ubs);
+                total_iters = dual_state.iterations;
+                let result = finish_bounded(
+                    dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
+                    problem, options, &mut total_iters,
+                );
+                if result.is_some() {
+                    return result;
+                }
+                // UbViolationOutOfScope from warm start → cold start
+            }
+            // Singular warm basis → cold start
+        }
+    }
+
+    // Cold start.
+    let (dual_out, dual_state) =
+        solve_bounded_dual(bsf, &a, &b, &c, options, &ubs);
+    total_iters = dual_state.iterations;
+    finish_bounded(
+        dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
+        problem, options, &mut total_iters,
+    )
+}
+
+/// Convert a `BoundedOutcome` from the dual phase into a `SolverResult`,
+/// running Phase 2 primal on `Optimal`. Returns `None` for
+/// `UbViolationOutOfScope` so the caller can fall back to the legacy path.
+#[allow(clippy::too_many_arguments)]
+fn finish_bounded(
+    dual_out: BoundedOutcome,
+    dual_state: BoundedDualState,
+    bsf: &BoundedStandardForm,
+    a: &crate::sparse::CscMatrix,
+    c: &[f64],
+    row_scale: &[f64],
+    col_scale: &[f64],
+    ubs: &[f64],
+    problem: &LpProblem,
+    options: &SolverOptions,
+    total_iters: &mut usize,
+) -> Option<SolverResult> {
+    match dual_out {
+        BoundedOutcome::UbViolationOutOfScope { .. } => None,
+        BoundedOutcome::Unbounded => Some(SolverResult {
+            status: SolveStatus::Infeasible,
+            objective: 0.0,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        }),
+        BoundedOutcome::Timeout(obj) => {
+            let solution = extract_solution_bounded(bsf, &dual_state, col_scale);
+            Some(SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + bsf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                iterations: *total_iters,
+                ..Default::default()
+            })
+        }
+        BoundedOutcome::SingularBasis => Some(SolverResult::numerical_error()),
+        BoundedOutcome::Optimal(_, _) => {
+            let (p2_out, p2_state) = phase2_primal_bounded(
+                bsf, dual_state, a, c, options, total_iters, ubs,
+            );
+            Some(finish_bounded_phase2(p2_out, p2_state, bsf, col_scale, row_scale, problem, *total_iters))
+        }
+    }
+}
+
+fn finish_bounded_phase2(
+    out: SimplexOutcome,
+    state: BoundedDualState,
+    bsf: &BoundedStandardForm,
+    col_scale: &[f64],
+    row_scale: &[f64],
+    problem: &LpProblem,
+    total_iters: usize,
+) -> SolverResult {
+    match out {
+        SimplexOutcome::Optimal(obj, y) => {
+            let solution = extract_solution_bounded(bsf, &state, col_scale);
+            let (dual_solution, reduced_costs, slack) =
+                extract_dual_info_bounded(bsf, problem, &y, &solution, row_scale);
+            let ws = WarmStartBasis {
+                basis: state.basis,
+                x_b: state.x_b,
+            };
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: obj + bsf.obj_offset,
+                solution,
+                dual_solution,
+                reduced_costs,
+                slack,
+                warm_start_basis: Some(ws),
+                iterations: total_iters,
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::Unbounded => SolverResult {
+            status: SolveStatus::Unbounded,
+            objective: f64::NEG_INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            reduced_costs: vec![],
+            slack: vec![],
+            warm_start_basis: None,
+            ..Default::default()
+        },
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution_bounded(bsf, &state, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + bsf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                iterations: total_iters,
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }
 
@@ -314,5 +534,142 @@ fn outcome_to_result(
             }
         }
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+    }
+}
+
+// ── Wiring sentinels ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+    use crate::options::SolverOptions;
+    use crate::simplex::dual_advanced::bound_flip::{
+        bfrt_flip_invocations, reset_bfrt_flip_invocations,
+    };
+    use crate::simplex::standard_form::build_standard_form;
+
+    /// min -x0 - x1, x0+x1 ≤ 6, x0-x1 ≤ 2, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 4
+    /// Known optimal: x0=4, x1=2, obj=-6.
+    fn lp_2x2_boxed() -> LpProblem {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
+        ).unwrap();
+        LpProblem::new_general(
+            vec![-1.0, -1.0], a, vec![6.0, 2.0],
+            vec![ConstraintType::Le, ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        ).unwrap()
+    }
+
+    /// min -x0 - 3*x1, x0+x1 ≤ 5, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 2.
+    /// Pricing scores: x1=3 > x0=1, so x1 enters first. The ratio test gives
+    /// min_step=5 but ub_x1=2 < 5, triggering a Phase 2 primal BFRT flip.
+    /// After the flip, x0 enters the basis at value 3.
+    /// Optimal: x0=3 (basic), x1=2 (non-basic at ub), obj=-3-6=-9.
+    fn lp_flip_trigger() -> LpProblem {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![-1.0, -3.0], a, vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 2.0)],
+            None,
+        ).unwrap()
+    }
+
+    fn lp_no_ub() -> LpProblem {
+        use crate::sparse::CscMatrix;
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        LpProblem::new_general(
+            vec![1.0, 2.0], a, vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        ).unwrap()
+    }
+
+    /// **Flip > 0 sentinel**: solving a boxed LP via `solve_dual_advanced`
+    /// must exercise at least one Phase 2 primal BFRT flip (entering variable
+    /// hits its upper bound before any basis row leaves).
+    ///
+    /// No-op proof: `bfrt_wiring_flip_count_positive_noop_proof` verifies that
+    /// disabling the bounded dispatch makes flip count = 0.
+    #[test]
+    fn bfrt_wiring_flip_count_positive() {
+        let lp = lp_flip_trigger();
+        let sf = build_standard_form(&lp);
+        reset_bfrt_flip_invocations();
+        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let flips = bfrt_flip_invocations();
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "expected Optimal, got {:?}", result.status);
+        assert!((result.objective - (-9.0)).abs() < 1e-5,
+            "expected obj=-9, got {:.6e}", result.objective);
+        assert!(flips > 0,
+            "bfrt_wiring_flip_count_positive: flip count = 0, bounded path not exercised");
+    }
+
+    /// **No-op proof**: disabling bounded dispatch causes flip count = 0.
+    /// This sentinel must FAIL whenever the bounded path is bypassed.
+    #[test]
+    fn bfrt_wiring_flip_count_positive_noop_proof() {
+        let lp = lp_flip_trigger();
+        let sf = build_standard_form(&lp);
+        set_bounded_dispatch_disabled(true);
+        reset_bfrt_flip_invocations();
+        let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let flips_disabled = bfrt_flip_invocations();
+        set_bounded_dispatch_disabled(false);
+        assert_eq!(flips_disabled, 0,
+            "noop proof: expected 0 flips with bounded dispatch disabled, got {flips_disabled}");
+        assert_eq!(result.status, SolveStatus::Optimal);
+    }
+
+    /// **Multi-pattern coverage**: three LP shapes all reach Optimal.
+    #[test]
+    fn bfrt_wiring_multi_pattern_correct() {
+        // Pattern 1: 2x2 boxed
+        {
+            let lp = lp_2x2_boxed();
+            let sf = build_standard_form(&lp);
+            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            assert_eq!(r.status, SolveStatus::Optimal, "pattern 1 status");
+            assert!((r.objective - (-6.0)).abs() < 1e-5, "pattern 1 obj={}", r.objective);
+        }
+        // Pattern 2: flip-trigger LP, non-basic-at-ub optimal contribution
+        {
+            let lp = lp_flip_trigger();
+            let sf = build_standard_form(&lp);
+            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            assert_eq!(r.status, SolveStatus::Optimal, "pattern 2 status");
+            assert!((r.objective - (-9.0)).abs() < 1e-5, "pattern 2 obj={}", r.objective);
+        }
+        // Pattern 3: no UBs → legacy path
+        {
+            let lp = lp_no_ub();
+            let sf = build_standard_form(&lp);
+            let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            assert_eq!(r.status, SolveStatus::Optimal, "pattern 3 status");
+        }
+    }
+
+    /// Warm start from a bounded-path solve is accepted and reused.
+    #[test]
+    fn bfrt_wiring_warm_start_reuse() {
+        let lp = lp_2x2_boxed();
+        let sf = build_standard_form(&lp);
+        let r1 = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        assert_eq!(r1.status, SolveStatus::Optimal);
+        let ws = r1.warm_start_basis.expect("bounded path must return warm_start_basis");
+        let r2 = solve_dual_advanced(
+            &sf, &lp,
+            &SolverOptions { warm_start: Some(ws), ..SolverOptions::default() },
+        );
+        assert_eq!(r2.status, SolveStatus::Optimal, "warm restart: {:?}", r2.status);
+        assert!((r2.objective - r1.objective).abs() < 1e-5,
+            "warm restart obj drift: {} vs {}", r2.objective, r1.objective);
     }
 }
