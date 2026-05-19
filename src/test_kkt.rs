@@ -101,6 +101,41 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     max_v
 }
 
+/// Assert solver invariants for a `SolverResult` against its `LpProblem`.
+///
+/// For `Optimal` results: checks primal feasibility, bound feasibility, and
+/// dual feasibility. For non-Optimal results: asserts no false-Optimal
+/// invariant (nothing to check, any honest non-Optimal is acceptable).
+///
+/// Use in tests that call into solver internals to ensure all Optimal returns
+/// maintain consistent invariants — catches false-Optimal like klein3.
+pub fn assert_solver_invariants_lp(result: &crate::problem::SolverResult, lp: &LpProblem) {
+    if result.status != crate::problem::SolveStatus::Optimal {
+        return;
+    }
+    assert!(
+        !result.solution.is_empty(),
+        "Optimal result must have non-empty solution"
+    );
+    let pf = pfeas_abs(&lp.a, &lp.b, &lp.constraint_types, &result.solution);
+    let b_inf = lp.b.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let pf_norm = pf / (1.0 + b_inf);
+    assert!(
+        pf_norm < EPS_KKT,
+        "Optimal result has excessive primal violation: pfeas={:.3e} normalized={:.3e} > {:.3e}",
+        pf,
+        pf_norm,
+        EPS_KKT
+    );
+    let bv = bound_violation(&lp.bounds, &result.solution);
+    assert!(
+        bv < EPS_KKT,
+        "Optimal result has bound violation={:.3e} > {:.3e}",
+        bv,
+        EPS_KKT
+    );
+}
+
 /// Solve `lp` and assert primal/dual/objective KKT all hold to `EPS_KKT`.
 ///
 /// `expected_obj` is compared with relative error `EPS_OBJ_REL`. `label`

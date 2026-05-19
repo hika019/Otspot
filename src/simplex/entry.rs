@@ -2,13 +2,61 @@
 
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::tolerances::PIVOT_TOL;
 
 use super::dual;
 use super::dual_advanced;
 use super::primal::two_phase_simplex;
 use super::standard_form::build_standard_form;
+
+/// Normalized primal violation threshold for the production sentinel.
+/// Solutions with normalized violation > this are corrupt (e.g. |Ax-b| = 1e11).
+/// Well-solved LPs typically have normalized violation < 1e-8.
+const LP_PRIMAL_SENTINEL_TOL: f64 = 1e-3;
+
+/// Normalized primal violation: max constraint violation / (1 + ||b||∞).
+fn lp_primal_violation_normalized(problem: &LpProblem, x: &[f64]) -> f64 {
+    let m = problem.b.len();
+    if m == 0 || x.is_empty() {
+        return 0.0;
+    }
+    let mut ax = vec![0.0_f64; m];
+    for j in 0..x.len().min(problem.a.ncols) {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                if row < m {
+                    ax[row] += vals[k] * x[j];
+                }
+            }
+        }
+    }
+    let b_inf = problem.b.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let viol: f64 = (0..m)
+        .map(|i| match problem.constraint_types[i] {
+            ConstraintType::Eq => (ax[i] - problem.b[i]).abs(),
+            ConstraintType::Le => (ax[i] - problem.b[i]).max(0.0),
+            ConstraintType::Ge => (problem.b[i] - ax[i]).max(0.0),
+        })
+        .fold(0.0_f64, f64::max);
+    viol / (1.0 + b_inf)
+}
+
+/// Downgrade a false-Optimal to NumericalError when primal violation is excessive.
+///
+/// Catches cases like klein3 where the simplex solver returns Optimal with
+/// |Ax-b| = 2.9e11 due to numerical corruption in Big-M Phase I/II cycling.
+pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> SolverResult {
+    if result.status != SolveStatus::Optimal || result.solution.is_empty() {
+        return result;
+    }
+    let viol = lp_primal_violation_normalized(problem, &result.solution);
+    if viol > LP_PRIMAL_SENTINEL_TOL {
+        SolverResult::numerical_error()
+    } else {
+        result
+    }
+}
 
 /// Solve an LP with default options.
 pub fn solve(problem: &LpProblem) -> SolverResult {
@@ -87,6 +135,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     eff_opts.deadline,
                     options.recover_warm_start_basis,
                 );
+                res = guard_lp_optimal(res, problem);
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
@@ -233,7 +282,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
         options
     };
 
-    match options.simplex_method {
+    let result = match options.simplex_method {
         SimplexMethod::Primal => two_phase_simplex(&sf, problem, options),
         SimplexMethod::Dual => dual::two_phase_dual_simplex(&sf, problem, options),
         SimplexMethod::DualAdvanced | SimplexMethod::Auto => {
@@ -241,5 +290,6 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
             // internally for problems with Ge/Eq constraints.
             dual_advanced::solve_dual_advanced(&sf, problem, options)
         }
-    }
+    };
+    guard_lp_optimal(result, problem)
 }

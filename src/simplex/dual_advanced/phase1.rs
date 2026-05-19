@@ -572,18 +572,34 @@ pub(crate) fn big_m_cold_start(
             return SolverResult::numerical_error();
         }
         SimplexOutcome::Optimal(_, _) => {
-            // Phase I が Optimal で停止し人工変数が basis に残るケース (値が
-            // 0 でも degenerate basic として残存しうる): Farkas 証明書で検証。
-            // 値での filter (|x_B| > tol) は不適切 — 数値ドリフトで artificial
-            // が 0 にクランプされても、基底構造 e_art は Farkas 条件を満たし
-            // うる (klein3 の長期 pivot で観測)。
+            // Recompute x_B = B^{-1} b to flush numerical drift accumulated
+            // during Phase I cycling (Maros §6 numerical hygiene). After Bland
+            // cycling, x_B values can be near-zero due to cancellation even
+            // when the true value is large; a fresh factorization reveals the
+            // true state of the basis (catches klein3-class infeasibility).
+            if let Ok(mut bm) = LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
+                let mut rhs = SparseVec::from_dense(b);
+                bm.ftran(&mut rhs);
+                let fresh = rhs.to_dense();
+                x_b.copy_from_slice(&fresh);
+            }
+
+            // Check for artificials in basis with non-zero value after recompute.
+            // These indicate true infeasibility (the artificial could not be
+            // driven to zero). Also run Farkas for zero-value degenerate
+            // artificials that may still certify infeasibility.
             let any_artificial_in_basis = (0..m).any(|i| basis_aug[i] >= n_total);
-            if any_artificial_in_basis
-                && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
-            {
-                let mut r = SolverResult::infeasible();
-                r.iterations = total_iters;
-                return r;
+            if any_artificial_in_basis {
+                let any_nonzero = (0..m).any(|i| {
+                    basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
+                });
+                if any_nonzero
+                    || farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
+                {
+                    let mut r = SolverResult::infeasible();
+                    r.iterations = total_iters;
+                    return r;
+                }
             }
         }
     }

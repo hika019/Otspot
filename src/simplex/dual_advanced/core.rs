@@ -28,6 +28,11 @@ use std::sync::atomic::Ordering;
 const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
 const NO_PROGRESS_MIN: usize = 100;
 
+/// Bland mode hard iteration cap factor: after `BLAND_ITER_CAP_FACTOR * n_price`
+/// iterations in Bland mode, bail with Timeout so the caller can run a Farkas
+/// infeasibility check rather than cycling indefinitely (e.g. klein3 class).
+const BLAND_ITER_CAP_FACTOR: usize = 10;
+
 /// 進歩判定の相対閾値: `best - current > best * REL_EPS` のとき改善とみなす。
 /// 1e-12 は f64 の数値ノイズ (~1e-15) より十分大きく、有意な改善のみ拾う。
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
@@ -186,6 +191,7 @@ pub(crate) fn dual_simplex_core_advanced(
     let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;
     let mut bland_mode = false;
+    let mut bland_start_iter: usize = 0;
 
     // Step 3: 反復ループ
     loop {
@@ -197,6 +203,16 @@ pub(crate) fn dual_simplex_core_advanced(
             .as_ref()
             .is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
+            let obj: f64 = basic_obj(c, basis, x_b);
+            return SimplexOutcome::Timeout(obj);
+        }
+
+        // Bland mode hard cap: if we have iterated > BLAND_ITER_CAP_FACTOR * n_price
+        // iterations in Bland mode, bail so the caller can run Farkas infeasibility
+        // check (catches klein3-class cycling that produces corrupt basis state).
+        if bland_mode
+            && *iter_count_out - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_price
+        {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
@@ -367,6 +383,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 iters_since_progress = iters_since_progress.saturating_add(1);
                 if iters_since_progress >= k_trigger {
                     bland_mode = true;
+                    bland_start_iter = *iter_count_out;
                     apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
                 }
             }
