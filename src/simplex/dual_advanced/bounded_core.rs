@@ -631,13 +631,23 @@ const PHASE2_PRIMAL_ITER_CAP: usize = 1_000_000;
 /// Objective including non-basic at-upper-bound contributions.
 ///
 /// `basic_obj` only sums over basic variables. For the bounded simplex, the
-/// full objective is c_B^T x_B + Σ_{j non-basic at ub} c_j · u_j.
-fn bounded_obj(c: &[f64], basis: &[usize], x_b: &[f64], at_upper: &[bool], ubs: &[f64]) -> f64 {
+/// full objective is c_B^T x_B + Σ_{j non-basic at ub} c_j · u_j. The basic
+/// filter is defensive: the invariant `at_upper[j] ⇒ !is_basic[j]` is
+/// maintained by `iterate` / `phase2_primal_bounded`, but skipping basic vars
+/// keeps `bounded_obj` correct even if a future caller violates that.
+fn bounded_obj(
+    c: &[f64],
+    basis: &[usize],
+    x_b: &[f64],
+    at_upper: &[bool],
+    is_basic: &[bool],
+    ubs: &[f64],
+) -> f64 {
     let basic: f64 = basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum();
     let at_ub: f64 = at_upper
         .iter()
         .enumerate()
-        .filter(|&(_, &flag)| flag)
+        .filter(|&(j, &flag)| flag && !is_basic.get(j).copied().unwrap_or(false))
         .map(|(j, _)| c.get(j).copied().unwrap_or(0.0) * ubs.get(j).copied().unwrap_or(0.0))
         .sum();
     basic + at_ub
@@ -710,7 +720,9 @@ pub(crate) fn phase2_primal_bounded(
 
         let q = match entering {
             None => {
-                let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, ubs);
+                let obj = bounded_obj(
+                    c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs,
+                );
                 return (SimplexOutcome::Optimal(obj, y), state);
             }
             Some(q) => q,

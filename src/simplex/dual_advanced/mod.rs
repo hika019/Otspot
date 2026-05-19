@@ -171,7 +171,9 @@ fn try_bounded(
 ) -> Option<SolverResult> {
     let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&bsf.a, &bsf.b, &bsf.c);
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
-    let mut total_iters: usize = 0;
+    // total_iters is always assigned before read (warm branch overwrites before
+    // passing &mut to finish_bounded; cold path overwrites before return).
+    let mut total_iters: usize;
 
     // Warm start: reuse a previously-saved bounded-path basis when the index
     // space matches (basis.len() == bsf.m, all indices < bsf.n_total). Warm
