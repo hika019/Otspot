@@ -39,7 +39,7 @@ mod tests {
         eprintln!("  z={:?}", v2.bound_duals);
         let view = super::outcome::ProblemView {
             q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            bounds: &prob.bounds, constraint_types: &prob.constraint_types, eliminated_cols: &[],
         };
         let v1_kkt = super::kkt::kkt_residual_rel(&view, &v1.solution, &v1.dual_solution, &v1.bound_duals);
         let v2_kkt = super::kkt::kkt_residual_rel(&view, &v2.solution, &v2.dual_solution, &v2.bound_duals);
@@ -163,6 +163,7 @@ mod tests {
         let view = super::outcome::ProblemView {
             q: &problem.q, a: &problem.a, c: &problem.c, b: &problem.b,
             bounds: &problem.bounds, constraint_types: &problem.constraint_types,
+            eliminated_cols: &[],
         };
         let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
         let pres = super::kkt::primal_residual_rel(&view, &r.solution);
@@ -186,7 +187,7 @@ mod tests {
             let r = solve_ipm(&prob, &opts);
             let view = super::outcome::ProblemView {
                 q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-                bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+                bounds: &prob.bounds, constraint_types: &prob.constraint_types, eliminated_cols: &[],
             };
             let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
             let pres = super::kkt::primal_residual_rel(&view, &r.solution);
@@ -214,7 +215,7 @@ mod tests {
             let r = solve_ipm(&prob, &opts);
             let view = super::outcome::ProblemView {
                 q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-                bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+                bounds: &prob.bounds, constraint_types: &prob.constraint_types, eliminated_cols: &[],
             };
             let kkt = super::kkt::kkt_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
             let pres = super::kkt::primal_residual_rel(&view, &r.solution);

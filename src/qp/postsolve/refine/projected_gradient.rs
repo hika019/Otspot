@@ -7,6 +7,7 @@ use crate::qp::FX_TOL;
 pub(crate) fn refine_dual_projected_gradient(
     problem: &QpProblem,
     result: &mut crate::problem::SolverResult,
+    eliminated_cols: &[bool],
     deadline: Option<std::time::Instant>,
 ) {
     use twofloat::TwoFloat;
@@ -228,6 +229,7 @@ pub(crate) fn refine_dual_projected_gradient(
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols,
     };
     let pre = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,

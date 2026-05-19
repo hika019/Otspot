@@ -23,6 +23,7 @@ pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
 pub(super) fn kkt_already_passes(
     orig_problem: &QpProblem,
     final_sol: &SolverResult,
+    eliminated_cols: &[bool],
     ipm_status_optimal: bool,
     user_eps: f64,
 ) -> bool {
@@ -32,7 +33,7 @@ pub(super) fn kkt_already_passes(
     {
         return false;
     }
-    let view = build_view(orig_problem);
+    let view = build_view(orig_problem, eliminated_cols);
     let kkt0 = kkt_residual_rel(
         &view,
         &final_sol.solution,
@@ -48,10 +49,11 @@ pub(super) fn kkt_already_passes(
 pub(super) fn refine_post_processing(
     orig_problem: &QpProblem,
     final_sol: &mut SolverResult,
+    eliminated_cols: &[bool],
     opts: &SolverOptions,
     allow_primal: bool,
 ) -> f64 {
-    let view = build_view(orig_problem);
+    let view = build_view(orig_problem, eliminated_cols);
 
     // (1) primal projection: 違反制約に対して x を最小ノルム射影。
     if allow_primal {
@@ -96,8 +98,8 @@ pub(super) fn refine_post_processing(
         crate::qp::refine_dual_lsq(orig_problem, final_sol, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -150,8 +152,8 @@ pub(super) fn refine_post_processing(
         );
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
         let post_kkt_irls = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -191,13 +193,14 @@ pub(super) fn refine_post_processing(
 pub(super) fn refine_krylov_and_projection(
     orig_problem: &QpProblem,
     final_sol: &mut SolverResult,
+    eliminated_cols: &[bool],
     opts: &SolverOptions,
     allow_primal: bool,
 ) {
     if final_sol.solution.is_empty() || orig_problem.num_constraints == 0 {
         return;
     }
-    let view = build_view(orig_problem);
+    let view = build_view(orig_problem, eliminated_cols);
     let user_eps = opts.ipm_eps();
     let target_pf = user_eps;
     let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
@@ -217,6 +220,7 @@ pub(super) fn refine_krylov_and_projection(
     let refined = crate::qp::refine_kkt_iterative(
         orig_problem,
         final_sol,
+        eliminated_cols,
         KRYLOV_MAX_ITERS,
         target_pf,
         opts.deadline,
@@ -274,7 +278,7 @@ pub(super) fn refine_krylov_and_projection(
     }
 }
 
-fn build_view(orig_problem: &QpProblem) -> ProblemView<'_> {
+fn build_view<'a>(orig_problem: &'a QpProblem, eliminated_cols: &'a [bool]) -> ProblemView<'a> {
     ProblemView {
         q: &orig_problem.q,
         a: &orig_problem.a,
@@ -282,5 +286,6 @@ fn build_view(orig_problem: &QpProblem) -> ProblemView<'_> {
         b: &orig_problem.b,
         bounds: &orig_problem.bounds,
         constraint_types: &orig_problem.constraint_types,
+        eliminated_cols,
     }
 }

@@ -275,12 +275,5 @@ pub(super) fn log_pre_post_processing(orig_problem: &QpProblem, final_sol: &Solv
 }
 
 fn build_view(p: &QpProblem) -> ProblemView<'_> {
-    ProblemView {
-        q: &p.q,
-        a: &p.a,
-        c: &p.c,
-        b: &p.b,
-        bounds: &p.bounds,
-        constraint_types: &p.constraint_types,
-    }
+    ProblemView::from_problem(p)
 }
