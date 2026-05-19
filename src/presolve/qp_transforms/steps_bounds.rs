@@ -1,10 +1,81 @@
-//! QP presolve steps 10 + 11: implied-bound tightening and dual fixing.
+//! QP presolve steps 9–11: singleton-ineq→bound, implied-bound tightening, dual fixing.
 
 use super::helpers::skip_step;
 use super::state::{QpPostsolveStep, QpPresolveResult, Workspace};
 use crate::presolve::activity::activity_range;
+use crate::problem::ConstraintType;
 use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
+
+/// Step 9: singleton Le/Ge rows with a single active variable are absorbed into
+/// that variable's bounds, shrinking the constraint matrix by one row per match.
+///
+/// For `a·x ≤ b` (Le):
+///   `a > 0` → tighten upper bound: `ub = min(ub, b/a)`
+///   `a < 0` → tighten lower bound: `lb = max(lb, b/a)`
+/// For `a·x ≥ b` (Ge): opposite directions.
+///
+/// Infeasibility is detected when the resulting `lb > ub + ZERO_TOL`.
+/// The removed row is recorded in the postsolve stack for dual recovery.
+pub(super) fn step9_singleton_ineq_to_bound(
+    prob: &QpProblem,
+    ws: &mut Workspace,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), QpPresolveResult> {
+    if skip_step(9) {
+        return Ok(());
+    }
+    let m = prob.num_constraints;
+    for i in 0..m {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(());
+        }
+        if ws.removed_rows[i] {
+            continue;
+        }
+        let ct = prob.constraint_types[i];
+        if ct == ConstraintType::Eq {
+            continue;
+        }
+        let active: Vec<(usize, f64)> = ws.row_entries[i]
+            .iter()
+            .filter(|&&(j, v)| !ws.removed_cols[j] && v.abs() > ZERO_TOL)
+            .copied()
+            .collect();
+        if active.len() != 1 {
+            continue;
+        }
+        let (j, a_ij) = active[0];
+        let rhs = ws.b[i] / a_ij;
+        let (lb, ub) = ws.bounds[j];
+
+        let (new_lb, new_ub) = match ct {
+            ConstraintType::Le => {
+                if a_ij > 0.0 {
+                    (lb, ub.min(rhs))
+                } else {
+                    (lb.max(rhs), ub)
+                }
+            }
+            ConstraintType::Ge => {
+                if a_ij > 0.0 {
+                    (lb.max(rhs), ub)
+                } else {
+                    (lb, ub.min(rhs))
+                }
+            }
+            ConstraintType::Eq => unreachable!(),
+        };
+
+        if new_lb > new_ub + ZERO_TOL {
+            return Err(QpPresolveResult::infeasible(prob));
+        }
+        ws.bounds[j] = (new_lb, new_ub);
+        ws.removed_rows[i] = true;
+        ws.postsolve_stack.push(QpPostsolveStep::SingletonIneqToBound { row: i, col: j, a_ij, ct });
+    }
+    Ok(())
+}
 
 /// Step 10: detect infeasibility from implied bounds. Bounds themselves are not
 /// mutated; dense rows and pathological implied magnitudes are skipped to avoid

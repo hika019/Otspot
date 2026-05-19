@@ -92,6 +92,7 @@ pub(super) fn log_presolve_transforms(
         match step {
             QpPostsolveStep::FixedVar { .. } => n_fixed += 1,
             QpPostsolveStep::SingletonRow { .. } => n_singleton += 1,
+            QpPostsolveStep::SingletonIneqToBound { .. } => n_singleton += 1,
             QpPostsolveStep::EmptyCol { .. } => n_empty += 1,
             QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
                 n_largescale += 1;

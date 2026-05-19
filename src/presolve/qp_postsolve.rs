@@ -43,6 +43,10 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
             QpPostsolveStep::SingletonRow { col, val, .. } => {
                 solution[*col] = *val;
             }
+            QpPostsolveStep::SingletonIneqToBound { .. } => {
+                // Primal: x[col] is found by solving the reduced problem with tightened bounds.
+                // Dual: y[row] is recovered in postsolve_qp_with_dual_recovery.
+            }
             QpPostsolveStep::EmptyCol { idx, val } => {
                 solution[*idx] = *val;
             }
@@ -178,6 +182,16 @@ pub fn postsolve_qp_with_dual_recovery(
             match step {
                 QpPostsolveStep::SingletonRow { row, col, .. } => {
                     recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+                }
+                QpPostsolveStep::SingletonIneqToBound { row, col, ct, .. } => {
+                    recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+                    // Clamp to the feasible dual sign per complementary slackness.
+                    let y = sol.dual_solution[*row];
+                    sol.dual_solution[*row] = match ct {
+                        crate::problem::ConstraintType::Le => y.max(0.0),
+                        crate::problem::ConstraintType::Ge => y.min(0.0),
+                        _ => y,
+                    };
                 }
                 // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が
                 // 一括で行う (bound_duals レイアウトが core.rs::remap で確定するため、
