@@ -1,4 +1,4 @@
-//! IP-PMM warm start (#12) sentinel: cold solve の (x*, y*, μ*) を warm として
+//! IP-PMM warm start sentinel: cold solve の (x*, y*, μ*) を warm として
 //! 再求解 → iter / wall ともに有意な短縮を要求。
 //!
 //! - iter 比 < 0.7: 決定論的、Phase 3 B&B の主要 ROI 検証

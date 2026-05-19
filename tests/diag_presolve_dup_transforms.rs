@@ -1,4 +1,4 @@
-//! Sentinel battery for task #42 presolve extensions (parallel row /
+//! Sentinel battery for presolve extensions (parallel row /
 //! duplicate-dominated col / dual fixing).
 //!
 //! Each transform gets:

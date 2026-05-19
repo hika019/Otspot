@@ -1,4 +1,4 @@
-//! Big-M Phase I cold-start (task #11, Phase 4 of dual_simplex_design.md §3.6 / §4)
+//! Big-M Phase I cold-start (Phase 4 of dual_simplex_design.md §3.6 / §4)
 //!
 //! ## 解決する問題
 //!
@@ -6,7 +6,7 @@
 //! `super::super::dual::two_phase_dual_simplex::cold_start_dual` は
 //! `sf.num_artificial > 0` 時 Primal Phase I (人工変数 sum 最小化) に
 //! フォールバックする。klein3 等 degenerate infeasible LP では cycling して
-//! `iters=0 TIMEOUT` する (task #11)。
+//! `iters=0 TIMEOUT` する。
 //!
 //! ## アルゴリズム (Dual Phase I + Primal Phase II + Big-M)
 //!
@@ -151,7 +151,7 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
     /// Bland fallback must honor Priority 2; default Bland would return None
     /// whenever `x_B ≥ 0` (initial Big-M Phase I state with `b ≥ 0`), masking
     /// artificial-removal and causing `dual_simplex_core_advanced` to declare
-    /// false Optimal with artificials in basis (task #43).
+    /// false Optimal with artificials in basis.
     fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
         let mut best_row: Option<usize> = None;
         let mut best_var = usize::MAX;
@@ -525,7 +525,7 @@ pub(crate) fn big_m_cold_start(
     // これにより Big-M Phase I 本来の「人工変数を basis から追い出す」役割を
     // 標準 dual simplex ループ (Harris ratio test 装備) で実現する。
     //
-    // ## Phase I 時間配分 (task #48)
+    // ## Phase I 時間配分
     //
     // Phase I は元 deadline を honor する。以前は `remaining / 2` を割り当て
     // Phase II にも半分を残していたが、外側 `solve_dual_advanced` の Primal-first
@@ -533,7 +533,7 @@ pub(crate) fn big_m_cold_start(
     // - Phase I が Optimal 完走: Phase II は当然残り deadline で動く。
     // - Phase I が Timeout: Phase II は遅延の起点になっても意味がないので
     //   そのまま Timeout 返却 (Farkas 検証 fail 時)。元の「half-deadline 到達 →
-    //   Infeasibility 推定」は #37 で Farkas 証明書に置き換え済。
+    //   Infeasibility 推定」は Farkas 証明書に置き換え済。
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
@@ -551,7 +551,7 @@ pub(crate) fn big_m_cold_start(
         SimplexOutcome::Timeout(_) => {
             // 旧実装は artificial 残存だけで Infeasible を立てていたが、これは
             // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
-            // ヒューリスティック (#37)。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
+            // ヒューリスティック。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
             // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
             let any_artificial_left = (0..m).any(|i| {
                 basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
@@ -576,7 +576,7 @@ pub(crate) fn big_m_cold_start(
             // 0 でも degenerate basic として残存しうる): Farkas 証明書で検証。
             // 値での filter (|x_B| > tol) は不適切 — 数値ドリフトで artificial
             // が 0 にクランプされても、基底構造 e_art は Farkas 条件を満たし
-            // うる (klein3 の長期 pivot で観測 / task #43)。
+            // うる (klein3 の長期 pivot で観測)。
             let any_artificial_in_basis = (0..m).any(|i| basis_aug[i] >= n_total);
             if any_artificial_in_basis
                 && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
@@ -795,7 +795,7 @@ mod tests {
         assert_kkt_optimal(&lp, 2.0, "big_m_phase1_large_coeff_eq_ge_mix");
     }
 
-    /// task #43 regression: ArtificialPriorityLeaving::bland_leaving must
+    /// Regression: ArtificialPriorityLeaving::bland_leaving must
     /// honor Priority 2 (artificial in basis, x_B > tol). Default Bland
     /// (Priority 1 only) would mask the artificial-removal objective and
     /// return None once `x_B ≥ 0`, causing `dual_simplex_core_advanced` to
@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(pick2, None);
     }
 
-    /// task #43 regression: progress_metric must count artificial-removal
+    /// Regression: progress_metric must count artificial-removal
     /// progress; otherwise `best_infeas = 0` for any Big-M Phase I starting
     /// from `x_B = b ≥ 0`, threshold = 0, and bland_mode triggers after
     /// k_trigger iterations regardless of genuine progress.
@@ -837,7 +837,7 @@ mod tests {
         assert!(strat.progress_metric(&x_b, &basis2) < 1e-12);
     }
 
-    /// task #43 regression: Big-M Phase I で bland_mode が誤起動しても false
+    /// Regression: Big-M Phase I で bland_mode が誤起動しても false
     /// Infeasible を返してはいけない。小規模 Eq-only feasible LP で
     /// `assert_kkt_optimal` が Infeasible 戻り値で panic することを利用。
     #[test]

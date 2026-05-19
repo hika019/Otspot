@@ -798,7 +798,7 @@ fn main() {
 
         // QP は IPPMM 1 本。LP (Q=0) は size により simplex / IPM が分岐するため
         // 実 dispatch を反映: 大規模 LP は IPM 経路、それ以外は simplex (cf.
-        // src/qp/lp_dispatch.rs)。誤誘導 (元 "ipm" hardcode) を是正 (#33)。
+        // src/qp/lp_dispatch.rs)。誤誘導 (元 "ipm" hardcode) を是正。
         let method_label = if is_qp {
             "ipm"
         } else if solver::qp::lp_dispatch_prefers_ipm(n, m) {

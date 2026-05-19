@@ -63,7 +63,7 @@ fn wood1p_postsolve_under_2s() {
 fn d6cube_postsolve_under_1s() {
     let prob = load("data/lp_problems/d6cube.QPS");
     if lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints) {
-        // IPM 経路で解かれる → simplex cleanup-LP は走らない (#33)。
+        // IPM 経路で解かれる → simplex cleanup-LP は走らない。
         return;
     }
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

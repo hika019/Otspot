@@ -125,7 +125,7 @@ pub(crate) trait DualLeavingStrategy {
     /// bland_mode. Default = pure Bland (smallest `basis[i]` index among rows
     /// with `x_B[i] < -primal_tol`). Strategies with auxiliary objectives
     /// (e.g. artificial removal in Big-M Phase I) must override so bland_mode
-    /// does not mask their secondary priority (task #43).
+    /// does not mask their secondary priority.
     fn bland_leaving(&mut self, x_b: &[f64], primal_tol: f64, basis: &[usize]) -> Option<usize> {
         let mut best_row: Option<usize> = None;
         let mut best_var = usize::MAX;
@@ -144,7 +144,7 @@ pub(crate) trait DualLeavingStrategy {
     /// Strategies that drive auxiliary quantities (e.g. artificial values)
     /// to zero must include those in the metric; otherwise Big-M Phase I
     /// entry condition `x_B = b ≥ 0` makes `best = 0` and threshold = 0 →
-    /// every iter judged no-progress → bland_mode 誤起動 (task #43).
+    /// every iter judged no-progress → bland_mode 誤起動.
     fn progress_metric(&mut self, x_b: &[f64], _basis: &[usize]) -> f64 {
         x_b.iter().map(|&v| (-v).max(0.0)).sum()
     }

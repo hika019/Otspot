@@ -310,8 +310,8 @@ fn solve_ipm_with_runner(
         opts.timeout_secs = None;
         opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
         opts.use_ruiz_scaling = use_ruiz;
-        // IPM_EPS_NOISE_FLOOR (100×ε) で統一 (#22 follow-up、attempt level でも machine
-        // noise 直近 eps を回避、reviewer 観点で 3 種共存 → 2 種集約)。
+        // IPM_EPS_NOISE_FLOOR (100×ε) で統一 (attempt level でも machine noise 直近 eps
+        // を回避、reviewer 観点で 3 種共存 → 2 種集約)。
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
         let outcome = runner(problem, &presolve_result, &opts);

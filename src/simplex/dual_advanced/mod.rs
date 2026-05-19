@@ -87,14 +87,14 @@ pub(crate) fn solve_dual_advanced(
     // so Big-M's "Timeout + artificials left → Infeasible" heuristic would
     // wrongly flip the verdict (observed on d6cube, pds-10).
     //
-    // `revised_simplex_core` has a no-progress early-bail (task #37) so a
+    // `revised_simplex_core` has a no-progress early-bail so a
     // Primal Phase I cycle returns Timeout in O(K) pivots, leaving the
-    // remaining budget to Big-M. A defensive half-deadline split lived here
-    // until task #48; it stacked with `phase1::big_m_cold_start`'s own inner
-    // split, producing wall ≈ 0.75 × user_budget for slow-but-progressing
-    // LPs (neos / rail2586 / rail4284). Removed — slow Primal now honors
+    // remaining budget to Big-M. A defensive half-deadline split previously
+    // stacked with `phase1::big_m_cold_start`'s own inner split, producing
+    // wall ≈ 0.75 × user_budget for slow-but-progressing LPs
+    // (neos / rail2586 / rail4284). Removed — slow Primal now honors
     // the full budget and returns its incumbent, cycling Primal still bails
-    // quickly via #37.
+    // quickly via the early-bail.
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
         SolveStatus::Timeout if primal_result.solution.is_empty() => {

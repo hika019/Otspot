@@ -1,4 +1,4 @@
-//! LP postsolve constraint complementarity sentinels (#45).
+//! LP postsolve constraint complementarity sentinels.
 //!
 //! Each test below is a regression seed from `diag_kkt_proptest` whose presolve
 //! path produced a `y_i` violating `y_i · slack_i = 0` for a non-binding row.

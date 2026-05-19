@@ -387,7 +387,7 @@ fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
 /// shift は PSD-singular 行列の zero pivot を回避しつつ、indefinite の λ_min を
 /// 検出可能に保つ大きさ (FP noise の 10 倍程度) に設定。
 /// `Q=[[0,1],[1,0]]` のような零対角 indefinite を従来は ZeroPivot 経路で PSD 誤判定
-/// していた (task#37) のを根治する。
+/// していたバグの根治。
 pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
     is_q_psd_by_cholesky_probe(q, SHIFT_FACTOR, true)
 }
@@ -395,9 +395,9 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
 /// `is_q_psd_by_cholesky` の挙動を構成する 2 つの fix を個別 toggle 可能にした probe 版。
 ///
 /// - `shift_factor`: 対角に乗せる shift の倍率。production = `SHIFT_FACTOR`(=10)。
-///   0 を渡すと shift を完全に無効化 (= #37 修正前の挙動を再現)。
+///   0 を渡すと shift を完全に無効化 (= 旧経路再現用)。
 /// - `zeropivot_conservative`: ZeroPivot 時の判定。production = true (`false`=indefinite と
-///   みなす)。false を渡すと #37 修正前の「ZeroPivot=PSD」(=true) 挙動を再現。
+///   みなす)。false を渡すと旧経路の「ZeroPivot=PSD」(=true) 挙動を再現。
 ///
 /// `(SHIFT_FACTOR, true)` の組合せが production。それ以外の組合せは個別 no-op 実証
 /// (`feedback_sentinel_must_fail_under_noop`) で各修正の必要性を機械検証するためにある。
@@ -474,7 +474,7 @@ pub(crate) fn is_q_psd_by_cholesky_probe(
             let col_ptr = simp_sym.col_ptr();
             match result {
                 // ZeroPivot: production は conservative に false (= indefinite 扱い)。
-                // probe で `zeropivot_conservative=false` (#37 修正前) を流すと true を返す。
+                // probe で `zeropivot_conservative=false` (旧経路) を流すと true を返す。
                 Err(LdltError::ZeroPivot { .. }) => !zeropivot_conservative,
                 Ok(_) => !(0..n).any(|j| l_values[col_ptr[j]] < -fp_threshold),
             }
@@ -530,7 +530,7 @@ pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
     factorize_with_par(mat, DEFAULT_PAR)
 }
 
-/// `factorize` の per-call parallelism 指定版 (#31)。
+/// `factorize` の per-call parallelism 指定版。
 /// `par == Par::Seq` で既存挙動と完全互換。
 pub fn factorize_with_par(
     mat: &CscMatrix,
@@ -553,7 +553,7 @@ pub fn factorize_with_deadline(
     factorize_with_deadline_par(mat, deadline, DEFAULT_PAR)
 }
 
-/// `factorize_with_deadline` の per-call parallelism 指定版 (#31)。
+/// `factorize_with_deadline` の per-call parallelism 指定版。
 pub fn factorize_with_deadline_par(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -582,7 +582,7 @@ pub fn factorize_quasidefinite_with_cached_perm(
     factorize_quasidefinite_with_cached_perm_par(mat, perm, deadline, DEFAULT_PAR)
 }
 
-/// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版 (#31)。
+/// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版。
 pub fn factorize_quasidefinite_with_cached_perm_par(
     mat: &CscMatrix,
     perm: &[usize],
@@ -631,7 +631,7 @@ pub fn factorize_quasidefinite_with_amd_budget(
     factorize_quasidefinite_with_amd_budget_par(mat, deadline, max_l_nnz, DEFAULT_PAR)
 }
 
-/// `factorize_quasidefinite_with_amd_budget` の per-call parallelism 指定版 (#31)。
+/// `factorize_quasidefinite_with_amd_budget` の per-call parallelism 指定版。
 pub fn factorize_quasidefinite_with_amd_budget_par(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -659,7 +659,7 @@ pub fn factorize_quasidefinite_with_cached_perm_budget(
     factorize_quasidefinite_with_cached_perm_budget_par(mat, perm, deadline, max_l_nnz, DEFAULT_PAR)
 }
 
-/// `factorize_quasidefinite_with_cached_perm_budget` の per-call parallelism 指定版 (#31)。
+/// `factorize_quasidefinite_with_cached_perm_budget` の per-call parallelism 指定版。
 pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     mat: &CscMatrix,
     perm: &[usize],
@@ -719,7 +719,7 @@ pub fn factorize_quasidefinite_pre_permuted_cached(
     )
 }
 
-/// `factorize_quasidefinite_pre_permuted_cached` の per-call parallelism 指定版 (#31)。
+/// `factorize_quasidefinite_pre_permuted_cached` の per-call parallelism 指定版。
 pub fn factorize_quasidefinite_pre_permuted_cached_par(
     pre_permuted_mat: &CscMatrix,
     perm: &[usize],
@@ -1004,7 +1004,7 @@ mod tests {
             "PSD matrix with zero eigenvalue (ZeroPivot) must return true");
     }
 
-    // ---- #37 個別 no-op proof (task#48 P3-3) ----
+    // ---- 個別 no-op proof ----
     //
     // `is_q_psd_by_cholesky_probe(q, shift_factor, zeropivot_conservative)` で
     // shift と ZeroPivot 経路書換を個別 toggle し、各 fix が必要な case を機械実証する。
@@ -1035,30 +1035,30 @@ mod tests {
         );
     }
 
-    /// **ZeroPivot no-op proof**: zero-diag bilinear `Q=[[0,1],[1,0]]` (=#37 trigger) は
+    /// **ZeroPivot no-op proof**: zero-diag bilinear `Q=[[0,1],[1,0]]` (旧 bug の trigger) は
     /// **shift 無しで初列が ZeroPivot** になる。旧経路 (`return true on ZeroPivot`) は
     /// この indefinite Q を PSD と誤判定する一方、新経路は false (conservative) を返す。
     /// shift を切った probe で旧経路 vs 新経路を直接比較し、ZeroPivot path 書換の必要性を実証。
     #[test]
     fn no_op_proof_zeropivot_conservative_required_when_shift_absent() {
         let q = upper_tri_csc(2, &[(0, 1, 1.0)]);
-        // shift_factor=0, zeropivot_conservative=false (旧経路) → #37 bug 再現 = true (誤分類)
+        // shift_factor=0, zeropivot_conservative=false (旧経路) → 旧 bug 再現 = true (誤分類)
         let old_path = is_q_psd_by_cholesky_probe(&q, 0.0, false);
         assert!(
             old_path,
             "ZeroPivot no-op proof: 旧経路 (shift=0, ZeroPivot=true) は indefinite Q を \
-             PSD と誤分類する (= #37 オリジナルバグの再現)"
+             PSD と誤分類する (= 旧 bug の再現)"
         );
         // shift=0, zeropivot_conservative=true (新経路のみ単独) → 修正される
         let new_path_alone = is_q_psd_by_cholesky_probe(&q, 0.0, true);
         assert!(
             !new_path_alone,
-            "ZeroPivot conservative 単独で #37 bug を修正できること"
+            "ZeroPivot conservative 単独で旧 bug を修正できること"
         );
     }
 
     /// **shift と ZeroPivot 経路は belt-and-suspenders**: production (shift+conservative)
-    /// は #37 trigger を確実に弾く。shift 単独でも (= D[1]<<0 経由) indefinite 検出
+    /// は旧 bug の trigger を確実に弾く。shift 単独でも (= D[1]<<0 経由) indefinite 検出
     /// 可能で、両 fix の独立寄与を network 状に検証する。
     #[test]
     fn no_op_proof_shift_alone_also_catches_zero_diag_bilinear() {

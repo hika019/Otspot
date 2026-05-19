@@ -1,4 +1,4 @@
-//! task #35: Model API LP path 拡張テスト
+//! Model API LP path 拡張テスト
 //!
 //! - LP path で dual_solution / reduced_costs が populate されること
 //! - set_presolve(false) で presolve OFF にしても正答に到達すること
@@ -26,7 +26,7 @@ fn model_api_lp_returns_dual_solution() {
     let dual = result
         .dual_solution
         .as_ref()
-        .expect("LP dual_solution must be Some after task #35");
+        .expect("LP dual_solution must be Some");
     assert_eq!(dual.len(), 1, "1 制約 → dual length 1");
     // active Ge 制約に対する shadow price は非ゼロ (sign convention は実観測)。
     assert!(
@@ -48,7 +48,7 @@ fn model_api_lp_returns_reduced_costs() {
     let rc = result
         .reduced_costs
         .as_ref()
-        .expect("LP reduced_costs must be Some after task #35");
+        .expect("LP reduced_costs must be Some");
     assert_eq!(rc.len(), 1, "rc length must equal num_vars");
 }
 

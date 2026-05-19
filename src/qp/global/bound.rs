@@ -8,7 +8,7 @@
 //!
 //! ## 上界 (upper bound)
 //! IPM (非凸 inertia 補正付き) で local solve、解 obj = 当該 box 内 feasible point
-//! の objective = incumbent 候補。warm start (#12) で parent 解継承で iter 削減。
+//! の objective = incumbent 候補。warm start で parent 解継承で iter 削減。
 //!
 //! ## Q storage 規約
 //! `QpProblem::q` は **full symmetric storage** (CSC で両半 (i,j) と (j,i) の両 entry)。

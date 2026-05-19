@@ -63,7 +63,7 @@ pub struct Model {
     tolerance: Option<Tolerance>,
     /// Presolve 有効/無効（None = SolverOptions::default() に従う = true）
     presolve: Option<bool>,
-    /// 並列 thread 上限 (#5)。None = SolverOptions::default() = 1 (serial)。
+    /// 並列 thread 上限。None = SolverOptions::default() = 1 (serial)。
     threads: Option<usize>,
     /// 目的関数定数オフセット (QP: 1/2 x^T Q x + c^T x + offset, LP: c^T x + offset)
     obj_offset: f64,
@@ -93,7 +93,7 @@ impl Model {
         self.timeout_secs = Some(secs);
     }
 
-    /// 並列 thread 上限を設定する (#5)。0 は 1 に補正、default は SolverOptions の 1。
+    /// 並列 thread 上限を設定する。0 は 1 に補正、default は SolverOptions の 1。
     /// LP / QP / 非凸 multistart すべてに影響する共通設定。
     pub fn set_threads(&mut self, n: usize) -> &mut Self {
         self.threads = Some(n.max(1));

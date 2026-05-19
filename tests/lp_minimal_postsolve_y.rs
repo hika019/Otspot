@@ -24,7 +24,7 @@
 //! - 旧 commit (e61f27b 直後) では複数が FAIL。bisect で fix の真因が確定。
 //! - 各 test は LP を Model API (`Model::add_var` + `add_constraint`) で組み、
 //!   presolve=true (本 fix 経路) で primal feasibility / dual feasibility /
-//!   目的関数値の三本柱を assert。LP path で task #35 拡張済の
+//!   目的関数値の三本柱を assert。LP path で拡張済の
 //!   `ModelResult.dual_solution` / `reduced_costs` 経由で KKT 検証する。
 
 use solver::model::{Expression, Model, Variable, constraint};
@@ -122,7 +122,7 @@ struct LpData<'a> {
 ///
 /// Model API 経由でも元 LP と同じ A (sparse 構造)、c、bounds、cts、b を持つ
 /// problem instance が構築される。Phase I + presolve 経路を bypass せず、
-/// task #17 で導入した 3-way y_loop/y_gs/y_cl 比較を踏襲する。
+/// 3-way y_loop/y_gs/y_cl 比較を踏襲する。
 fn build_model(data: &LpData<'_>) -> (Model, Vec<Variable>) {
     let mut model = Model::new(data.name);
     let vars: Vec<Variable> = data
@@ -161,7 +161,7 @@ fn build_model(data: &LpData<'_>) -> (Model, Vec<Variable>) {
 
 /// LP を Model API で solve し KKT 整合性を一括 assert する。
 ///
-/// presolve は task #35 で露出された `Model::set_presolve(true)` 経由で
+/// presolve は `Model::set_presolve(true)` 経由で
 /// 明示的に有効化。dual_solution / reduced_costs は LP path で
 /// populate されるため `.as_ref().expect(..)` で取得して dfeas 検証に使う。
 fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
@@ -201,7 +201,7 @@ fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
         data.name, pf, EPS_KKT, &x
     );
 
-    // (ii) dual feasibility (bound-aware) — task #17 3-way fix の本丸検証
+    // (ii) dual feasibility (bound-aware) — 3-way fix の本丸検証
     let df = dfeas_rel_bound(data.c, data.bounds, &x, rc);
     assert!(
         df < EPS_KKT,

@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(compute_inertia_correction(&q), 0.0);
     }
 
-    /// task#37 sentinel: zero-diag indefinite Q を Gershgorin lb で正しく
+    /// zero-diag indefinite Q を Gershgorin lb で正しく
     /// indefinite 判定し、δ_ic > 0 を返すこと。複数 data pattern。
     /// no-op proof: `is_q_psd_by_cholesky` の shift を 0 に戻すと FAIL。
     #[test]
@@ -648,7 +648,7 @@ mod tests {
         }
     }
 
-    /// task#37 sentinel: 真の PSD/PD は (perturbation 後も) δ_ic=0 を維持。
+    /// 真の PSD/PD は perturbation 後も δ_ic=0 を維持。
     /// shift が大きすぎて全 PSD に過剰補正を出さないことを確認。
     #[test]
     fn sentinel_inertia_psd_no_over_correction() {

@@ -1,4 +1,4 @@
-//! task #48: user-specified timeout が halving されてしまうバグ regression sentinel。
+//! user-specified timeout が halving されてしまうバグ regression sentinel。
 //!
 //! ## 観測事実 (bench_results/all_af7b1db/eps_1e-6 run.log L174/190/191)
 //!
@@ -20,7 +20,7 @@
 //!    残り (= budget/2) の半分を Phase I に割り当て。
 //!    → 0.5 + 0.5×0.5 = 0.75 で終了。
 //!
-//! task #11 / #37 の anti-cycling fix は Primal 早期 bail を追加したが
+//! 既存の anti-cycling fix は Primal 早期 bail を追加したが
 //! halving 自体は残した。slow-but-progress LP (rail*/neos) では Primal が早期
 //! bail せず half budget を使い切るため、本症状が顕在化する。
 //!

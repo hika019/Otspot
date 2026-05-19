@@ -1,4 +1,4 @@
-//! Hand-built deterministic KKT shape sentinel for task #50 reviewer follow-up.
+//! Hand-built deterministic KKT shape sentinel.
 //!
 //! The reviewer reported a transient FAIL of
 //! `prop_nonconvex_qp_kkt_invariants_constrained` shaped as
