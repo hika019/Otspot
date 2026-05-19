@@ -1,18 +1,18 @@
 //! McCormick envelope lb 不変式 + α-BB 比較 sentinel (Phase 5)。
 //!
-//! ## 目的
-//! 1. McCormick lb が box 上で常に `f(x)` 以下 (= 有効 lower bound) であること
-//! 2. bilinear-rich problem では α-BB lb より strict に tight (= node 削減効果あり)
-//! 3. diag-only convex / concave では α-BB と同等 (= 退化 risk なし)
-//! 4. no-op (McCormick OFF) では BB node 数が α-BB only と一致 (= sentinel に teeth)
+//! ## 目的 (BB driver 経由のみ)
+//! 1. bilinear-rich problem では α-BB lb より strict に tight (= node 削減効果あり)
+//! 2. diag-only convex / concave では α-BB と同等 (= 退化 risk なし)
+//! 3. no-op (McCormick OFF) では BB node 数が α-BB only と一致 (= sentinel に teeth)
 //!
 //! ## complementary 性
-//! `bound_mccormick.rs` 内 unit test は LP relaxation 単体 (1 box) の正しさを保証する。
-//! 本 sentinel は **BB driver 経由** で end-to-end の効果を測定する (= integration)。
+//! `bound_mccormick::mccormick_lower_bound` は `pub(crate)` (P3-4 test-api-audit)。
+//! lb 関数単体の不変式 / underestimator 性質 / Ge/coef=0/Q_ZERO 境界 / n=8 大規模 /
+//! envelope OFF no-op teeth の機械実証は in-source `bound_mccormick::tests` に置く。
+//! 本 file は **BB driver 経由** で end-to-end の node 削減効果を測定する (= integration)。
 
 use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
 use solver::problem::ConstraintType;
-use solver::qp::global::bound_mccormick::mccormick_lower_bound;
 use solver::qp::{solve_qp_global_with_stats, QpProblem};
 use solver::sparse::CscMatrix;
 use solver::{SolveStatus, SolverOptions};
@@ -22,10 +22,6 @@ const TEST_MAX_DEPTH: usize = 20;
 const TEST_MAX_NODES: usize = 3_000;
 const TEST_TIMEOUT_SECS: f64 = 30.0;
 const TEST_GAP_TOL: f64 = 1e-3;
-
-/// underestimator inequality `L(x) ≤ f(x)` のテスト許容。
-/// LP IPM の収束精度 (~1e-6) と f 評価の浮動小数誤差を加味。
-const UNDERESTIMATE_TOL: f64 = 1e-5;
 
 fn opts() -> SolverOptions {
     let mut o = SolverOptions::default();
@@ -44,46 +40,7 @@ fn cfg(use_alpha_bb: bool, use_mccormick: bool) -> GlobalOptimizationConfig {
     }
 }
 
-/// LCG: seed-deterministic、std のみで完結。`diag_qp_global_alpha_bb_invariants` と同方式。
-struct Lcg(u64);
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(
-            seed.wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407),
-        )
-    }
-    fn next_f64(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-    }
-    fn sample_in(&mut self, l: f64, u: f64) -> f64 {
-        l + self.next_f64() * (u - l)
-    }
-    fn sample_signed(&mut self, mag: f64) -> f64 {
-        (self.next_f64() * 2.0 - 1.0) * mag
-    }
-}
-
-/// f(x) = 0.5 x'Q x + c'x + obj_offset (独立評価)。
-fn eval_f(p: &QpProblem, x: &[f64]) -> f64 {
-    let qx = p.q.mat_vec_mul(x).unwrap();
-    let xqx: f64 = x.iter().zip(qx.iter()).map(|(a, b)| a * b).sum();
-    let cx: f64 = x.iter().zip(p.c.iter()).map(|(a, b)| a * b).sum();
-    0.5 * xqx + cx + p.obj_offset
-}
-
-// ---------------- fixtures ----------------
-
-/// 純 bilinear (diag 0): Q = [[0,1],[1,0]], c=0, box [-1,1]² 。global = -1。
-fn pure_bilinear_2d() -> QpProblem {
-    let q = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], 2, 2).unwrap();
-    let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-    QpProblem::new(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2], vec![]).unwrap()
-}
+// ---------------- fixtures (BB driver 経由で利用) ----------------
 
 /// 非対称 box bilinear: f = -xy on [-2,1] × [-1,2]、global = -2。
 /// McCormick が α-BB に確実に勝つ典型 fixture。
@@ -93,13 +50,6 @@ fn asym_bilinear_2d() -> QpProblem {
     QpProblem::new(q, vec![0.0, 0.0], a, vec![], vec![(-2.0, 1.0), (-1.0, 2.0)], vec![]).unwrap()
 }
 
-/// 混合 (diag + bilinear): f = -x² + xy on [0, 2]² 。
-fn mixed_2d() -> QpProblem {
-    let q = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 0], &[-2.0, 1.0, 1.0], 2, 2).unwrap();
-    let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-    QpProblem::new(q, vec![0.0, 0.0], a, vec![], vec![(0.0, 2.0); 2], vec![]).unwrap()
-}
-
 /// diag only (純 concave): f = -x² -y² on [-1, 1]² 。McCormick と α-BB が同等の想定 fixture。
 fn diag_concave_2d() -> QpProblem {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
@@ -107,9 +57,8 @@ fn diag_concave_2d() -> QpProblem {
     QpProblem::new(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2], vec![]).unwrap()
 }
 
-/// 3D 全 off-diag bilinear (diag=0): Q off-diag=1, c=0, box [-1,1]³ 。
-fn bilinear_dense_3d() -> QpProblem {
-    let n = 3;
+/// n 次元 全 off-diag bilinear (diag=0): Q off-diag=1, c=0, box [-1,1]^n 。
+fn bilinear_dense_nd(n: usize) -> QpProblem {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();
@@ -127,22 +76,14 @@ fn bilinear_dense_3d() -> QpProblem {
     QpProblem::new(q, vec![0.0; n], a, vec![], vec![(-1.0, 1.0); n], vec![]).unwrap()
 }
 
+fn bilinear_dense_3d() -> QpProblem {
+    bilinear_dense_nd(3)
+}
+
 /// 4D bilinear + sum-cap 制約。
 fn bilinear_sumcap_4d() -> QpProblem {
     let n = 4;
-    let mut rows = Vec::new();
-    let mut cols = Vec::new();
-    let mut vals = Vec::new();
-    for c in 0..n {
-        for r in 0..n {
-            if r != c {
-                rows.push(r);
-                cols.push(c);
-                vals.push(1.0);
-            }
-        }
-    }
-    let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let p = bilinear_dense_nd(n);
     let a = CscMatrix::from_triplets(
         &vec![0_usize; n],
         &(0..n).collect::<Vec<_>>(),
@@ -152,7 +93,7 @@ fn bilinear_sumcap_4d() -> QpProblem {
     )
     .unwrap();
     QpProblem::new(
-        q,
+        p.q.clone(),
         vec![0.0; n],
         a,
         vec![1.0],
@@ -162,131 +103,8 @@ fn bilinear_sumcap_4d() -> QpProblem {
     .unwrap()
 }
 
-/// Random non-convex generator (LCG seed)。n=3..=5、Q off-diag ±1 一様。
-fn random_nonconvex(seed: u64, n: usize) -> QpProblem {
-    let mut rng = Lcg::new(seed);
-    let mut rows = Vec::new();
-    let mut cols = Vec::new();
-    let mut vals = Vec::new();
-    for c in 0..n {
-        for r in 0..=c {
-            let v = rng.sample_signed(1.0);
-            if v.abs() > 1e-3 {
-                if r == c {
-                    rows.push(r);
-                    cols.push(c);
-                    vals.push(v);
-                } else {
-                    // full-symmetric: 両半 entry
-                    rows.push(r);
-                    cols.push(c);
-                    vals.push(v);
-                    rows.push(c);
-                    cols.push(r);
-                    vals.push(v);
-                }
-            }
-        }
-    }
-    let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
-    let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
-    let c_lin: Vec<f64> = (0..n).map(|_| rng.sample_signed(0.5)).collect();
-    QpProblem::new(q, c_lin, a, vec![], vec![(-1.0, 1.0); n], vec![]).unwrap()
-}
-
-struct Fixture {
-    label: &'static str,
-    problem: QpProblem,
-}
-
-fn fixtures() -> Vec<Fixture> {
-    vec![
-        Fixture { label: "pure_bilinear_2d", problem: pure_bilinear_2d() },
-        Fixture { label: "asym_bilinear_2d", problem: asym_bilinear_2d() },
-        Fixture { label: "mixed_2d", problem: mixed_2d() },
-        Fixture { label: "diag_concave_2d", problem: diag_concave_2d() },
-        Fixture { label: "bilinear_dense_3d", problem: bilinear_dense_3d() },
-        Fixture { label: "bilinear_sumcap_4d", problem: bilinear_sumcap_4d() },
-    ]
-}
-
-// ---------------- unit-level invariants ----------------
-
-/// 全 fixture × box 内一様 sample で `lb_McCormick ≤ f(x)` (= valid underestimator)。
-/// no-op (lb = -∞ 固定) でも本 assertion は trivially PASS = teeth なし。teeth は
-/// 後段 `node_reduction_*` および `tighter_than_alpha_bb_on_asymmetric_fixture` で確保。
-#[test]
-fn mccormick_lb_dominated_by_objective_on_uniform_samples() {
-    const N_SAMPLES_PER_SEED: usize = 12;
-    const SEEDS: [u64; 3] = [11, 23, 47];
-    let opts = SolverOptions::default();
-    for fx in fixtures() {
-        let lb = mccormick_lower_bound(&fx.problem, &fx.problem.bounds, &opts, None)
-            .expect("McCormick must yield finite lb on bounded fixtures");
-        assert!(
-            lb.is_finite(),
-            "{}: McCormick lb must be finite, got {lb}",
-            fx.label
-        );
-        for seed in SEEDS {
-            let mut rng = Lcg::new(seed);
-            for _ in 0..N_SAMPLES_PER_SEED {
-                let x: Vec<f64> = fx
-                    .problem
-                    .bounds
-                    .iter()
-                    .map(|&(l, u)| rng.sample_in(l, u))
-                    .collect();
-                let f = eval_f(&fx.problem, &x);
-                assert!(
-                    lb <= f + UNDERESTIMATE_TOL,
-                    "{} seed={seed}: lb={lb} exceeds f({x:?})={f} (Δ={:.3e})",
-                    fx.label,
-                    lb - f,
-                );
-            }
-        }
-    }
-}
-
-// McCormick vs α-BB の strict tightness 比較は `bound_alpha_bb` が pub(crate) のため
-// integration test では再現不可。同 fixture (`[[0,1],[1,0]]·(-1)`, box (-2,1)×(-1,2)) の
-// 比較は `src/qp/global/bound_mccormick.rs::tests::mccormick_lb_tighter_than_alpha_bb_on_asymmetric_bilinear`
-// で in-src unit test として保持。BB driver 経由の総 node 削減 sentinel は本ファイル
-// 後段 `mccormick_reduces_or_matches_bb_node_count_on_bilinear_rich_set` で確保する。
-
-/// 多 seed の random non-convex で n=3..=5、McCormick lb が常に valid underestimator
-/// であること (= ランダム fixture でも壊れない、CLAUDE.md "複数 data pattern")。
-#[test]
-fn mccormick_lb_underestimates_on_random_nonconvex_fixtures() {
-    const SEEDS: [u64; 5] = [101, 211, 313, 419, 521];
-    const SIZES: [usize; 3] = [3, 4, 5];
-    const N_SAMPLES: usize = 8;
-    let opts = SolverOptions::default();
-    for &seed in &SEEDS {
-        for &n in &SIZES {
-            let p = random_nonconvex(seed, n);
-            let lb: f64 = match mccormick_lower_bound(&p, &p.bounds, &opts, None) {
-                Some(l) => l,
-                None => continue, // Q が偶発的に全ゼロ等は skip
-            };
-            assert!(lb.is_finite(), "seed={seed} n={n}: lb non-finite ({lb})");
-            let mut rng = Lcg::new(seed.wrapping_add(n as u64));
-            for _ in 0..N_SAMPLES {
-                let x: Vec<f64> = p
-                    .bounds
-                    .iter()
-                    .map(|&(l, u)| rng.sample_in(l, u))
-                    .collect();
-                let f = eval_f(&p, &x);
-                assert!(
-                    lb <= f + UNDERESTIMATE_TOL,
-                    "seed={seed} n={n}: lb={lb} > f({x:?})={f}"
-                );
-            }
-        }
-    }
-}
+// unit-level invariants (lb 単体の underestimator 性質 / 境界 / 大規模) は
+// `bound_mccormick.rs::tests` に集約。本 file は BB driver 経由の sentinel に専念。
 
 // ---------------- BB driver integration ----------------
 
