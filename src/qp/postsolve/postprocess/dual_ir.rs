@@ -47,7 +47,7 @@ pub(crate) fn try_dual_only_ir(
         .unwrap_or(1e-12);
 
     // 1. free 変数の特定 (active = bound 近傍 or A col 空)
-    let free_eval_idx = collect_dual_recovery_free_columns(problem, result);
+    let free_eval_idx = collect_dual_recovery_free_columns(problem, result, eliminated_cols);
     let n_free_eval = free_eval_idx.len();
     if n_free_eval == 0 {
         if trace {
