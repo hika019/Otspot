@@ -146,6 +146,7 @@ fn test_basic_3var() {
     );
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     let x = &result.solution;
     assert!(x[0] >= -PIVOT_TOL);
     assert!(x[1] >= -PIVOT_TOL);
@@ -205,6 +206,7 @@ fn test_zero_constraints_optimal() {
     let lp = LpProblem::new(vec![1.0], a, vec![]).unwrap();
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!((result.objective).abs() < PIVOT_TOL);
 }
 
@@ -297,6 +299,7 @@ fn test_dual_solution_basic_le_constraints() {
     opts.timeout_secs = Some(10.0);
     let result = solve_with(&lp, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.objective - (-7.0)).abs() < PIVOT_TOL,
         "Expected obj=-7.0, got {}",
@@ -375,6 +378,9 @@ fn test_large_coefficient_lp() {
     );
     assert!(!result.objective.is_nan(), "Objective should not be NaN");
     assert!(result.objective.is_finite(), "Objective should be finite for bounded LP");
+    if result.status == SolveStatus::Optimal {
+        assert_solver_invariants_lp(&result, &lp);
+    }
 
     // 全係数 0.0 の目的関数 → Optimal, objective=0.0
     // min 0*x1 + 0*x2, s.t. x1 + x2 <= 2, x1 <= 1, x2 <= 1
@@ -389,6 +395,7 @@ fn test_large_coefficient_lp() {
     );
     let result_zero = solve(&lp_zero);
     assert_eq!(result_zero.status, SolveStatus::Optimal, "Expected Optimal for zero-objective LP");
+    assert_solver_invariants_lp(&result_zero, &lp_zero);
     assert!(
         result_zero.objective.abs() < PIVOT_TOL,
         "Expected objective=0.0, got {}",
@@ -523,6 +530,7 @@ fn test_free_variables_phase_i() {
         "Expected Optimal for free-variable LP with Eq constraint, got {:?}",
         result.status
     );
+    assert_solver_invariants_lp(&result, &lp);
     // 解の制約充足チェック: x1 + x2 = 2
     assert!(
         (result.solution[0] + result.solution[1] - 2.0).abs() < 1e-6,
@@ -563,6 +571,7 @@ fn test_hs51_feasibility_lp() {
         "HS51 feasibility LP: Expected Optimal, got {:?}",
         result.status
     );
+    assert_solver_invariants_lp(&result, &lp);
     // 解が制約を満たすか検証 (x1+3x2=4 かつ x3+x4-2x5=0 かつ x2-x5=0)
     let x = &result.solution;
     assert!(
@@ -587,6 +596,7 @@ fn test_finite_ub_zero_constraints() {
     .unwrap();
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.solution[0] - 3.0).abs() < PIVOT_TOL,
         "Expected x=3, got {}",
@@ -842,6 +852,7 @@ fn test_no_deadline_converges_finite() {
     };
     let result = solve_with(&lp, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
 }
 
 /// Optimality at upper bound (min): for x=(2,2) of min -2x1-x2 s.t. x1+x2≤4, 0≤x1≤2, 0≤x2≤3,
@@ -862,6 +873,7 @@ fn test_extract_dual_info_ub_dual() {
     let result = solve_with(&problem, &opts);
 
     assert_eq!(result.status, SolveStatus::Optimal, "status should be Optimal");
+    assert_solver_invariants_lp(&result, &problem);
 
     let x = &result.solution;
     assert!((x[0] - 2.0).abs() < 1e-6, "x[0]={} should be at upper bound 2.0", x[0]);
@@ -954,6 +966,7 @@ fn test_multiple_zero_rhs_eq_artificials() {
     let result = solve_with(&lp, &opts);
     assert_ne!(result.status, SolveStatus::NumericalError);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!((result.objective - (-1.0)).abs() < 1e-6);
 }
 
@@ -987,4 +1000,5 @@ fn test_hs51_free_var_no_singular_basis() {
     let result = solve_with(&lp, &opts);
     assert_ne!(result.status, SolveStatus::NumericalError);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
 }

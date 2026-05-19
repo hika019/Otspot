@@ -1,5 +1,10 @@
 //! solve_ipm: 単一 retry 層 + API 境界 1 箇所での status 変換 + 元空間 KKT 直接判定。
 
+use std::cell::Cell;
+use std::time::Instant;
+
+use crate::ScopedDisable;
+
 use crate::options::SolverOptions;
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
@@ -9,8 +14,74 @@ use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use super::core::run_ipm;
 use crate::presolve::QpPresolveResult;
-use super::outcome::IpmOutcome;
-use std::time::Instant;
+use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
+use super::outcome::{IpmOutcome, ProblemView};
+
+/// Residual threshold above which an Optimal/LocallyOptimal QP result is
+/// considered catastrophically corrupt and demoted to NumericalError.
+///
+/// Set three orders of magnitude above typical convergence (1e-6) so that
+/// only catastrophic failures (e.g. undetected postsolve corruption) trigger
+/// this guard. Normal near-miss suboptimal results are handled by satisfies_eps.
+const QP_GUARD_CATASTROPHIC_TOL: f64 = 1e-1;
+
+thread_local! {
+    static QP_GUARD_DISABLED: Cell<bool> = Cell::new(false);
+}
+
+/// Runs `f` with `guard_qp_optimal` bypassed.
+///
+/// Use in tests as a no-op scope guard: pass corrupt data through the guard
+/// while disabled and assert it is NOT demoted. The load-bearing evidence lives
+/// in the paired test that does NOT disable.
+///
+/// Thread-safe: affects only the current thread.
+/// Panic-safe: the guard is re-enabled even if `f` panics.
+pub(crate) fn with_qp_guard_disabled<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = ScopedDisable::new(
+        || QP_GUARD_DISABLED.with(|c| c.set(true)),
+        || QP_GUARD_DISABLED.with(|c| c.set(false)),
+    );
+    f()
+}
+
+/// Downgrade false-Optimal/LocallyOptimal QP results with catastrophic residuals
+/// to NumericalError. Defense-in-depth applied at the solve_ipm API boundary.
+///
+/// Recomputes KKT stationarity, primal feasibility, and bound violation from
+/// the solution independently of the stored IpmOutcome residuals, so it catches
+/// corruption that occurs after satisfies_eps has been evaluated.
+pub(crate) fn guard_qp_optimal(result: SolverResult, problem: &QpProblem) -> SolverResult {
+    if QP_GUARD_DISABLED.with(|c| c.get()) {
+        return result;
+    }
+    if !matches!(result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+        return result;
+    }
+    if result.solution.is_empty() {
+        return result;
+    }
+    let view = ProblemView::from_problem(problem);
+    let kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let pf = primal_residual_rel(&view, &result.solution);
+    let bv = bound_violation(&problem.bounds, &result.solution);
+    if kkt > QP_GUARD_CATASTROPHIC_TOL
+        || pf > QP_GUARD_CATASTROPHIC_TOL
+        || bv > QP_GUARD_CATASTROPHIC_TOL
+    {
+        SolverResult {
+            status: SolveStatus::NumericalError,
+            objective: f64::INFINITY,
+            iterations: result.iterations,
+            ..Default::default()
+        }
+    } else {
+        result
+    }
+}
 
 /// 1 attempt の IPM 反復上限。500 は Maros/QPLIB 全 PASS が収まる empirical sweet spot。
 const MAX_ITER_PER_ATTEMPT: usize = 500;
@@ -66,9 +137,10 @@ pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
         let scaled_options = scale_warm_start_for_q_diag(options, &col_scales);
         let mut result = solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm);
         unscale_q_diagonal(&mut result, &col_scales, problem);
-        return result;
+        return guard_qp_optimal(result, problem);
     }
-    solve_ipm_with_runner(problem, options, run_ipm)
+    let result = solve_ipm_with_runner(problem, options, run_ipm);
+    guard_qp_optimal(result, problem)
 }
 
 /// warm_start_qp.x を Q-diag column scaling (x_orig = D·x_scaled) の inverse で scaled 空間に翻訳。
@@ -484,12 +556,116 @@ mod tests {
         let opts = SolverOptions::default();
         let result = solve_ipm(&prob, &opts);
         assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+        // Full KKT + primal + bound invariant check (P1-C: assert_solver_invariants_qp coverage).
+        crate::test_kkt::assert_solver_invariants_qp(&result, &prob);
         let ax = prob.a.mat_vec_mul(&result.solution).unwrap();
         assert!((ax[0] - 1.0).abs() < 1e-6);
         for j in 0..2 {
             let (lb, ub) = prob.bounds[j];
             assert!(result.solution[j] >= lb - 1e-9);
             assert!(result.solution[j] <= ub + 1e-9);
+        }
+    }
+
+    fn make_simple_eq_qp() -> QpProblem {
+        // min x  s.t.  x = 1.0,  x >= 0
+        // optimal: x=1, obj=1
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        QpProblem::new(
+            q,
+            vec![1.0],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![crate::problem::ConstraintType::Eq],
+        )
+        .unwrap()
+    }
+
+    /// guard_qp_optimal demotes corrupt Optimal (x=1e12 violates x=1) to NumericalError.
+    #[test]
+    fn guard_qp_optimal_catches_catastrophic_result() {
+        let prob = make_simple_eq_qp();
+        let corrupt = SolverResult {
+            status: crate::problem::SolveStatus::Optimal,
+            objective: 1e12,
+            solution: vec![1e12],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..Default::default()
+        };
+        let guarded = guard_qp_optimal(corrupt, &prob);
+        assert_eq!(
+            guarded.status,
+            crate::problem::SolveStatus::NumericalError,
+            "guard must demote catastrophic QP result: primal violation 1e12-1 >> 1e-1"
+        );
+    }
+
+    /// No-op proof: with_qp_guard_disabled bypasses guard; corrupt result passes through.
+    ///
+    /// Load-bearing evidence: guard_qp_optimal_catches_catastrophic_result proves the
+    /// guard demotes the same corrupt data WITHOUT disabling. Together these tests form
+    /// the no-op proof: removing the guard body breaks the first test.
+    #[test]
+    fn guard_qp_optimal_no_op_proof() {
+        let prob = make_simple_eq_qp();
+        let corrupt = SolverResult {
+            status: crate::problem::SolveStatus::Optimal,
+            objective: 1e12,
+            solution: vec![1e12],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..Default::default()
+        };
+        let unguarded = with_qp_guard_disabled(|| guard_qp_optimal(corrupt, &prob));
+        assert_eq!(
+            unguarded.status,
+            crate::problem::SolveStatus::Optimal,
+            "with_qp_guard_disabled must pass corrupt result through as Optimal"
+        );
+    }
+
+    /// guard_qp_optimal passes through valid Optimal results unchanged.
+    ///
+    /// Uses a 2-variable convex QP that IPM solves without reducing to 0 variables.
+    #[test]
+    fn guard_qp_optimal_passthrough_valid() {
+        // min x1^2 + x2^2 s.t. x1 + x2 = 1, x1,x2 in [0,100]
+        // Optimal: x1=x2=0.5, obj=0.25. Strictly convex → IPM solves cleanly.
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let prob = QpProblem::new(
+            q, vec![0.0, 0.0], a, vec![1.0],
+            vec![(0.0, 100.0), (0.0, 100.0)],
+            vec![crate::problem::ConstraintType::Eq],
+        ).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_ipm(&prob, &opts);
+        assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
+        // Re-run guard on the already-valid result — must remain Optimal.
+        let re_guarded = guard_qp_optimal(result.clone(), &prob);
+        assert_eq!(
+            re_guarded.status,
+            crate::problem::SolveStatus::Optimal,
+            "guard must not demote a valid Optimal QP result"
+        );
+    }
+
+    /// guard_qp_optimal passes through non-Optimal statuses unchanged.
+    #[test]
+    fn guard_qp_optimal_passthrough_non_optimal() {
+        let prob = make_simple_eq_qp();
+        for status in [
+            crate::problem::SolveStatus::Infeasible,
+            crate::problem::SolveStatus::Timeout,
+            crate::problem::SolveStatus::NumericalError,
+            crate::problem::SolveStatus::SuboptimalSolution,
+        ] {
+            let r = SolverResult { status: status.clone(), ..Default::default() };
+            let out = guard_qp_optimal(r, &prob);
+            assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
     }
 

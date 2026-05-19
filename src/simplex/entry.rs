@@ -1,14 +1,41 @@
 //! Simplex public entry + presolve/postsolve orchestration + method dispatch.
 
+use std::cell::Cell;
+
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::tolerances::PIVOT_TOL;
+use crate::ScopedDisable;
 
 use super::dual;
 use super::dual_advanced;
 use super::primal::two_phase_simplex;
 use super::standard_form::build_standard_form;
+
+thread_local! {
+    static LP_GUARD_DISABLED: Cell<bool> = Cell::new(false);
+}
+
+/// Runs `f` with `guard_lp_optimal` bypassed.
+///
+/// Use in tests as a no-op scope guard: pass corrupt data through the guard
+/// while disabled and assert it is NOT demoted. The load-bearing evidence lives
+/// in the paired test that does NOT disable — removing the guard body would
+/// cause that test to FAIL.
+///
+/// Thread-safe: affects only the current thread.
+/// Panic-safe: the guard is re-enabled even if `f` panics.
+pub(crate) fn with_lp_guard_disabled<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = ScopedDisable::new(
+        || LP_GUARD_DISABLED.with(|c| c.set(true)),
+        || LP_GUARD_DISABLED.with(|c| c.set(false)),
+    );
+    f()
+}
 
 /// Normalized primal violation threshold for the production sentinel.
 /// Solutions with normalized violation > this are corrupt (e.g. |Ax-b| = 1e11).
@@ -44,9 +71,16 @@ fn lp_primal_violation_normalized(problem: &LpProblem, x: &[f64]) -> f64 {
 
 /// Downgrade a false-Optimal to NumericalError when primal violation is excessive.
 ///
-/// Catches cases like klein3 where the simplex solver returns Optimal with
-/// |Ax-b| = 2.9e11 due to numerical corruption in Big-M Phase I/II cycling.
+/// Defense-in-depth for LP solvers that may return Optimal with large |Ax-b|
+/// due to numerical corruption. Upstream solvers may have their own prevention
+/// (e.g. iter caps, x_B recompute) that catches the same corruption earlier;
+/// this guard provides a final boundary check independent of those measures.
+///
+/// Use `with_lp_guard_disabled` in tests as a thread-safe no-op scope guard.
 pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> SolverResult {
+    if LP_GUARD_DISABLED.with(|c| c.get()) {
+        return result;
+    }
     if result.status != SolveStatus::Optimal || result.solution.is_empty() {
         return result;
     }
@@ -292,4 +326,82 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
         }
     };
     guard_lp_optimal(result, problem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
+
+    fn make_trivial_lp() -> LpProblem {
+        // minimize x  s.t.  x <= 5,  x >= 0
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// guard_lp_optimal catches a corrupt Optimal (x = 1e12 >> b = 5).
+    #[test]
+    fn guard_lp_optimal_catches_corrupt_result() {
+        let lp = make_trivial_lp();
+        let corrupt = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 1e12,
+            solution: vec![1e12],
+            dual_solution: vec![0.0],
+            reduced_costs: vec![0.0],
+            slack: vec![0.0],
+            ..Default::default()
+        };
+        let guarded = guard_lp_optimal(corrupt, &lp);
+        assert_eq!(
+            guarded.status,
+            SolveStatus::NumericalError,
+            "guard must demote false-Optimal with |Ax-b| >> 1e-3 to NumericalError"
+        );
+    }
+
+    /// No-op proof: `with_lp_guard_disabled` bypasses guard; corrupt result passes through.
+    ///
+    /// Load-bearing evidence: `guard_lp_optimal_catches_corrupt_result` (above) proves the
+    /// guard demotes the same corrupt data WITHOUT disabling. Together these two tests form
+    /// a complete no-op proof — removing the guard body would break the first test.
+    #[test]
+    fn guard_lp_optimal_no_op_proof() {
+        let lp = make_trivial_lp();
+        let corrupt = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 1e12,
+            solution: vec![1e12],
+            dual_solution: vec![0.0],
+            reduced_costs: vec![0.0],
+            slack: vec![0.0],
+            ..Default::default()
+        };
+        let unguarded = with_lp_guard_disabled(|| guard_lp_optimal(corrupt, &lp));
+        assert_eq!(
+            unguarded.status,
+            SolveStatus::Optimal,
+            "with_lp_guard_disabled must pass corrupt result through as Optimal"
+        );
+    }
+
+    /// guard_lp_optimal is a no-op for non-Optimal statuses.
+    #[test]
+    fn guard_lp_optimal_passthrough_non_optimal() {
+        let lp = make_trivial_lp();
+        for status in [SolveStatus::Infeasible, SolveStatus::Timeout, SolveStatus::NumericalError] {
+            let r = SolverResult { status: status.clone(), ..Default::default() };
+            let out = guard_lp_optimal(r, &lp);
+            assert_eq!(out.status, status, "guard must pass through {status:?}");
+        }
+    }
 }
