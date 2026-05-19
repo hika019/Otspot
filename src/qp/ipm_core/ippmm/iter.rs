@@ -12,7 +12,13 @@ use super::state::{
     PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
     RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
-use super::trace::{emit_active_trace, emit_iter_trace, emit_sigma_diag};
+use super::trace::{
+    emit_active_trace, emit_debug_infeas_continue, emit_debug_infeas_meta,
+    emit_exit_alpha_stall, emit_exit_check_infeas, emit_exit_demote_to_suboptimal,
+    emit_exit_nan_guard, emit_exit_nan_guard_no_best, emit_exit_optimal_main,
+    emit_exit_reject_false_infeas, emit_exit_residual_stall, emit_exit_timeout_bestsofar,
+    emit_iter_trace, emit_prof_summary, emit_sigma_diag, emit_step_diag,
+};
 use crate::linalg::kkt_solver::inexact_eta_for_eps;
 use crate::linalg::parallelism::solver_par_from_threads;
 use crate::linalg::timeout::TimeoutCtx;
@@ -270,12 +276,7 @@ pub(crate) fn solve_ippmm_inner(
 
         // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "IPPMM_EXIT iter={} path=Optimal_main pf_rel={:.3e} df_rel={:.3e} rel_gap={:.3e}",
-                    iter, nr_p_rel, nr_d_rel, rel_gap
-                );
-            }
+            emit_exit_optimal_main(iter, nr_p_rel, nr_d_rel, rel_gap);
             status = Some(SolveStatus::Optimal);
             final_iter = iter;
             break;
@@ -445,24 +446,11 @@ pub(crate) fn solve_ippmm_inner(
                 } else {
                     SolveStatus::SuboptimalSolution
                 };
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    let path_label = if is_quasi_optimal {
-                        "Optimal_NaN_guard_bestsofar"
-                    } else {
-                        "SuboptimalSolution_NaN_guard_diverged_bestsofar"
-                    };
-                    eprintln!(
-                        "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                        iter, path_label, best_iter, best_score, best_rel_gap,
-                        best_residuals.0, best_residuals.1, best_residuals.2
-                    );
-                }
+                emit_exit_nan_guard(iter, is_quasi_optimal, best_iter, best_score, best_rel_gap, best_residuals);
                 status = Some(exit_status);
             } else {
                 final_iter = iter;
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("IPPMM_EXIT iter={} path=NumericalError_NaN_guard_no_best", iter);
-                }
+                emit_exit_nan_guard_no_best(iter);
                 status = Some(SolveStatus::NumericalError);
             }
             break;
@@ -476,9 +464,8 @@ pub(crate) fn solve_ippmm_inner(
         ) {
             consecutive_infeas_triggers += 1;
             let quality_threshold = 10.0 * eps_orig;
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={} consecutive_infeas={}", iter, best_score, quality_threshold, eps_orig, eps, best_score.is_finite(), consecutive_infeas_triggers);
-            }
+            emit_debug_infeas_meta(iter, best_score, quality_threshold, eps_orig, eps,
+                best_score.is_finite(), consecutive_infeas_triggers);
             if best_score.is_finite()
                 && best_score < quality_threshold
                 && best_rel_gap.abs() < DUALITY_GAP_TOL
@@ -488,24 +475,13 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "IPPMM_EXIT iter={} path=reject_false_{:?}_bestsofar best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                        iter, infeas_status, best_iter, best_score, best_rel_gap,
-                        best_residuals.0, best_residuals.1, best_residuals.2
-                    );
-                }
+                emit_exit_reject_false_infeas(iter, &infeas_status, best_iter, best_score, best_rel_gap, best_residuals);
                 status = Some(SolveStatus::Optimal);
                 break;
             }
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "IPPMM_DEBUG iter={} infeas trigger #{} (< {}), continue iterating",
-                        iter, consecutive_infeas_triggers, MIN_CONSECUTIVE_INFEAS
-                    );
-                }
+                emit_debug_infeas_continue(iter, consecutive_infeas_triggers, MIN_CONSECUTIVE_INFEAS);
             } else {
                 if best_score < quality_threshold {
                     x.copy_from_slice(&best_x);
@@ -513,20 +489,11 @@ pub(crate) fn solve_ippmm_inner(
                     s.copy_from_slice(&best_s);
                     final_iter = best_iter;
                     final_residuals = Some(best_residuals);
-                    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                        eprintln!(
-                            "IPPMM_EXIT iter={} path=demote_{:?}_to_suboptimal_bestsofar best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e}) consecutive={}",
-                            iter, infeas_status, best_iter, best_score,
-                            best_residuals.0, best_residuals.1, best_residuals.2,
-                            consecutive_infeas_triggers
-                        );
-                    }
+                    emit_exit_demote_to_suboptimal(iter, &infeas_status, best_iter, best_score, best_residuals, consecutive_infeas_triggers);
                     status = Some(SolveStatus::SuboptimalSolution);
                     break;
                 }
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("IPPMM_EXIT iter={} path=check_infeas status={:?} best_score={:.3e} consecutive={}", iter, infeas_status, best_score, consecutive_infeas_triggers);
-                }
+                emit_exit_check_infeas(iter, &infeas_status, best_score, consecutive_infeas_triggers);
                 status = Some(infeas_status);
                 final_iter = iter;
                 break;
@@ -539,14 +506,7 @@ pub(crate) fn solve_ippmm_inner(
         let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         let nds = ds.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-            let nrdpmm = r_d_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            let nrppmm = r_p_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            eprintln!(
-                "IPPMM_STEP iter={:4} alpha={:.6e} dx_inf={:.3e} dy_inf={:.3e} ds_inf={:.3e} rdpmm_inf={:.3e} rppmm_inf={:.3e}",
-                iter, alpha, ndx, ndy, nds, nrdpmm, nrppmm
-            );
-        }
+        emit_step_diag(iter, alpha, ndx, ndy, nds, &r_d_pmm, &r_p_pmm);
 
         // Trust-region cap: alpha·|dv|_inf ≤ STEP_REL_CAP·max(|v|_inf, 1)。
         // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → cap で 1 iter 3 桁以上の暴発を抑制。
@@ -586,15 +546,8 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                let exit_reason = if alpha_stall_converged { "conv" } else { "deadlock" };
-                eprintln!(
-                    "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar reason={} stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} rho={:.3e} reg_limit={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                    iter, exit_reason, alpha_stall_count, best_iter, best_score, best_rel_gap,
-                    pmm.rho, reg_limit,
-                    best_residuals.0, best_residuals.1, best_residuals.2
-                );
-            }
+            emit_exit_alpha_stall(iter, alpha_stall_converged, alpha_stall_count,
+                best_iter, best_score, best_rel_gap, pmm.rho, reg_limit, best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
         }
@@ -609,14 +562,8 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "IPPMM_EXIT iter={} path=Suboptimal_residual_stall_bestsofar window={} last_improve_iter={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                    iter, RESIDUAL_STALL_WINDOW, last_score_improvement_iter,
-                    best_iter, best_score, best_rel_gap,
-                    best_residuals.0, best_residuals.1, best_residuals.2
-                );
-            }
+            emit_exit_residual_stall(iter, RESIDUAL_STALL_WINDOW, last_score_improvement_iter,
+                best_iter, best_score, best_rel_gap, best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
         }
@@ -698,18 +645,9 @@ pub(crate) fn solve_ippmm_inner(
     }
 
     if prof {
-        let total_ns = prof_residual_ns + prof_factor_ns + prof_predcorr_ns + prof_gondzio_ns + prof_update_ns + prof_other_ns;
-        let total_ms = total_ns as f64 / 1_000_000.0;
-        let frac = |v: u128| -> f64 { 100.0 * v as f64 / total_ns.max(1) as f64 };
-        eprintln!(
-            "IPM_PROF iters={} total={:.1}ms residual={:.1}ms({:.1}%) factor={:.1}ms({:.1}%) predcorr={:.1}ms({:.1}%) gondzio={:.1}ms({:.1}%) update={:.1}ms({:.1}%)",
-            prof_iters,
-            total_ms,
-            prof_residual_ns as f64 / 1e6, frac(prof_residual_ns),
-            prof_factor_ns as f64 / 1e6, frac(prof_factor_ns),
-            prof_predcorr_ns as f64 / 1e6, frac(prof_predcorr_ns),
-            prof_gondzio_ns as f64 / 1e6, frac(prof_gondzio_ns),
-            prof_update_ns as f64 / 1e6, frac(prof_update_ns),
+        emit_prof_summary(
+            prof_iters, prof_residual_ns, prof_factor_ns, prof_predcorr_ns,
+            prof_gondzio_ns, prof_update_ns, prof_other_ns,
         );
     }
 
@@ -733,13 +671,7 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                eprintln!(
-                    "IPPMM_EXIT path=Timeout_bestsofar_fallback best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
-                    best_iter, best_score, best_rel_gap,
-                    best_residuals.0, best_residuals.1, best_residuals.2
-                );
-            }
+            emit_exit_timeout_bestsofar(best_iter, best_score, best_rel_gap, best_residuals);
         }
     }
 

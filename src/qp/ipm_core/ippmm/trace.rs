@@ -1,6 +1,159 @@
 //! Env-gated 診断トレース (IPPMM_TRACE / IPPMM_ACTIVE_TRACE / IPPMM_SIGMA_DIAG)。
 
 use super::state::PmmState;
+use crate::problem::SolveStatus;
+
+fn trace_enabled() -> bool {
+    std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1")
+}
+
+pub(super) fn emit_exit_optimal_main(iter: usize, nr_p_rel: f64, nr_d_rel: f64, rel_gap: f64) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_EXIT iter={} path=Optimal_main pf_rel={:.3e} df_rel={:.3e} rel_gap={:.3e}",
+        iter, nr_p_rel, nr_d_rel, rel_gap
+    );
+}
+
+pub(super) fn emit_exit_nan_guard(
+    iter: usize, is_quasi_optimal: bool, best_iter: usize,
+    best_score: f64, best_rel_gap: f64, best_residuals: (f64, f64, f64),
+) {
+    if !trace_enabled() { return; }
+    let path_label = if is_quasi_optimal {
+        "Optimal_NaN_guard_bestsofar"
+    } else {
+        "SuboptimalSolution_NaN_guard_diverged_bestsofar"
+    };
+    eprintln!(
+        "IPPMM_EXIT iter={} path={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+        iter, path_label, best_iter, best_score, best_rel_gap,
+        best_residuals.0, best_residuals.1, best_residuals.2
+    );
+}
+
+pub(super) fn emit_exit_nan_guard_no_best(iter: usize) {
+    if !trace_enabled() { return; }
+    eprintln!("IPPMM_EXIT iter={} path=NumericalError_NaN_guard_no_best", iter);
+}
+
+pub(super) fn emit_debug_infeas_meta(
+    iter: usize, best_score: f64, quality_threshold: f64,
+    eps_orig: f64, eps: f64, best_finite: bool, consecutive_infeas: usize,
+) {
+    if !trace_enabled() { return; }
+    eprintln!("IPPMM_DEBUG iter={} best_score={:e} quality_threshold={:e} eps_orig={:e} eps={:e} best_finite={} consecutive_infeas={}",
+        iter, best_score, quality_threshold, eps_orig, eps, best_finite, consecutive_infeas);
+}
+
+pub(super) fn emit_exit_reject_false_infeas(
+    iter: usize, infeas_status: &SolveStatus, best_iter: usize,
+    best_score: f64, best_rel_gap: f64, best_residuals: (f64, f64, f64),
+) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_EXIT iter={} path=reject_false_{:?}_bestsofar best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+        iter, infeas_status, best_iter, best_score, best_rel_gap,
+        best_residuals.0, best_residuals.1, best_residuals.2
+    );
+}
+
+pub(super) fn emit_debug_infeas_continue(iter: usize, consecutive: usize, min_consecutive: usize) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_DEBUG iter={} infeas trigger #{} (< {}), continue iterating",
+        iter, consecutive, min_consecutive
+    );
+}
+
+pub(super) fn emit_exit_demote_to_suboptimal(
+    iter: usize, infeas_status: &SolveStatus, best_iter: usize,
+    best_score: f64, best_residuals: (f64, f64, f64), consecutive: usize,
+) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_EXIT iter={} path=demote_{:?}_to_suboptimal_bestsofar best_iter={} best_score={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e}) consecutive={}",
+        iter, infeas_status, best_iter, best_score,
+        best_residuals.0, best_residuals.1, best_residuals.2, consecutive
+    );
+}
+
+pub(super) fn emit_exit_check_infeas(
+    iter: usize, infeas_status: &SolveStatus, best_score: f64, consecutive: usize,
+) {
+    if !trace_enabled() { return; }
+    eprintln!("IPPMM_EXIT iter={} path=check_infeas status={:?} best_score={:.3e} consecutive={}",
+        iter, infeas_status, best_score, consecutive);
+}
+
+pub(super) fn emit_step_diag(
+    iter: usize, alpha: f64, ndx: f64, ndy: f64, nds: f64,
+    r_d_pmm: &[f64], r_p_pmm: &[f64],
+) {
+    if !trace_enabled() { return; }
+    let nrdpmm = r_d_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let nrppmm = r_p_pmm.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    eprintln!(
+        "IPPMM_STEP iter={:4} alpha={:.6e} dx_inf={:.3e} dy_inf={:.3e} ds_inf={:.3e} rdpmm_inf={:.3e} rppmm_inf={:.3e}",
+        iter, alpha, ndx, ndy, nds, nrdpmm, nrppmm
+    );
+}
+
+pub(super) fn emit_exit_alpha_stall(
+    iter: usize, alpha_stall_converged: bool, alpha_stall_count: usize, best_iter: usize,
+    best_score: f64, best_rel_gap: f64, rho: f64, reg_limit: f64,
+    best_residuals: (f64, f64, f64),
+) {
+    if !trace_enabled() { return; }
+    let exit_reason = if alpha_stall_converged { "conv" } else { "deadlock" };
+    eprintln!(
+        "IPPMM_EXIT iter={} path=Suboptimal_alpha_stall_bestsofar reason={} stall_count={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} rho={:.3e} reg_limit={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+        iter, exit_reason, alpha_stall_count, best_iter, best_score, best_rel_gap,
+        rho, reg_limit,
+        best_residuals.0, best_residuals.1, best_residuals.2
+    );
+}
+
+pub(super) fn emit_exit_residual_stall(
+    iter: usize, window: usize, last_improve_iter: usize, best_iter: usize,
+    best_score: f64, best_rel_gap: f64, best_residuals: (f64, f64, f64),
+) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_EXIT iter={} path=Suboptimal_residual_stall_bestsofar window={} last_improve_iter={} best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+        iter, window, last_improve_iter, best_iter, best_score, best_rel_gap,
+        best_residuals.0, best_residuals.1, best_residuals.2
+    );
+}
+
+pub(super) fn emit_exit_timeout_bestsofar(
+    best_iter: usize, best_score: f64, best_rel_gap: f64, best_residuals: (f64, f64, f64),
+) {
+    if !trace_enabled() { return; }
+    eprintln!(
+        "IPPMM_EXIT path=Timeout_bestsofar_fallback best_iter={} best_score={:.3e} best_rel_gap={:.3e} best=(pf={:.3e},df={:.3e},mu={:.3e})",
+        best_iter, best_score, best_rel_gap,
+        best_residuals.0, best_residuals.1, best_residuals.2
+    );
+}
+
+pub(super) fn emit_prof_summary(
+    prof_iters: usize, residual_ns: u128, factor_ns: u128, predcorr_ns: u128,
+    gondzio_ns: u128, update_ns: u128, other_ns: u128,
+) {
+    let total_ns = residual_ns + factor_ns + predcorr_ns + gondzio_ns + update_ns + other_ns;
+    let total_ms = total_ns as f64 / 1_000_000.0;
+    let frac = |v: u128| -> f64 { 100.0 * v as f64 / total_ns.max(1) as f64 };
+    eprintln!(
+        "IPM_PROF iters={} total={:.1}ms residual={:.1}ms({:.1}%) factor={:.1}ms({:.1}%) predcorr={:.1}ms({:.1}%) gondzio={:.1}ms({:.1}%) update={:.1}ms({:.1}%)",
+        prof_iters, total_ms,
+        residual_ns as f64 / 1e6, frac(residual_ns),
+        factor_ns as f64 / 1e6, frac(factor_ns),
+        predcorr_ns as f64 / 1e6, frac(predcorr_ns),
+        gondzio_ns as f64 / 1e6, frac(gondzio_ns),
+        update_ns as f64 / 1e6, frac(update_ns),
+    );
+}
 
 pub(super) fn emit_iter_trace(
     iter: usize, mu: f64, nr_p: f64, nr_d: f64,
