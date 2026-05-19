@@ -108,7 +108,8 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
-                // known_optimal_obj が設定されており obj が一致する場合も同様に即返却。
+                // 確定 status は simplex 再試行不要、即返却。
+                // known_optimal_obj 経由の early-exit は SuboptimalSolution arm (下) で実施。
                 return ipm_result;
             }
             SolveStatus::Unbounded
