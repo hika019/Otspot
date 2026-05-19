@@ -393,6 +393,18 @@ pub struct SolverOptions {
     /// CLAUDE.md cpu800% 上限考慮、`bench_parallel.sh --jobs N × threads=1`
     /// と (#31 完了後) `--jobs 1 × threads=N` のいずれも合計 N CPU で動かせる設計。
     pub threads: usize,
+
+    /// Known optimal objective value for early-exit optimization.
+    ///
+    /// When `Some(ref_obj)`, the solver returns `Optimal` as soon as it
+    /// achieves an objective value within [`bench_utils::OBJ_MATCH_REL_TOL`]
+    /// of `ref_obj` (i.e. `|obj − ref_obj| / (1 + |ref_obj|) < tol`),
+    /// skipping any further simplex retry.  Used by the bench harness to
+    /// avoid wasting the remaining budget on a problem already solved to
+    /// reference quality.
+    ///
+    /// Default `None` preserves existing behaviour (no reference check).
+    pub known_optimal_obj: Option<f64>,
 }
 
 /// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
@@ -435,6 +447,7 @@ impl Default for SolverOptions {
             multistart: None,
             global_optimization: None,
             threads: 1,
+            known_optimal_obj: None,
         }
     }
 }

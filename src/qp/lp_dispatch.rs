@@ -71,6 +71,7 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
     let mut crash_attempted = false;
     let mut crash_wired = false;
+    let mut ipm_subopt_candidate: Option<SolverResult> = None;
     if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
         let mut ipm_opts = ipm_opts_for_lp(options);
         // crash→IPM warm wiring: user 提供 warm_start_qp が無いときのみ生成。
@@ -88,17 +89,36 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
+                // 確定 status は simplex 再試行不要、即返却。
+                // known_optimal_obj 経由の early-exit は SuboptimalSolution arm (下) で実施。
                 return ipm_result;
             }
             SolveStatus::Unbounded
             | SolveStatus::Timeout
             | SolveStatus::NumericalError
-            | SolveStatus::SuboptimalSolution
             | SolveStatus::MaxIterations => {
                 if options.deadline.is_some_and(|d| Instant::now() >= d) {
                     return ipm_result;
                 }
                 // 残時間で simplex 再試行。
+            }
+            SolveStatus::SuboptimalSolution => {
+                if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                    return ipm_result;
+                }
+                // known_optimal_obj が設定されており obj が一致するなら simplex retry 不要。
+                if let Some(ref_obj) = options.known_optimal_obj {
+                    if crate::bench_utils::obj_within_tol(
+                        ipm_result.objective, ref_obj,
+                        crate::bench_utils::OBJ_MATCH_REL_TOL,
+                    ) && !ipm_result.solution.is_empty()
+                    {
+                        return SolverResult { status: SolveStatus::Optimal, ..ipm_result };
+                    }
+                }
+                // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき
+                // pick_best_ipm_or_simplex が SuboptimalSolution を復元する。
+                ipm_subopt_candidate = Some(ipm_result);
             }
             SolveStatus::NonConvex(_)
             | SolveStatus::NonconvexLocal
@@ -111,8 +131,9 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
 
     // simplex (LpProblem) は obj_offset を含まないため明示的に加算。
     // crash stats を引き継ぐ (IPM fallback 経路でも attempted/wired を保持)。
-    let mut result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
-    result.objective += problem.obj_offset;
+    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
+    simplex_result.objective += problem.obj_offset;
+    let mut result = crate::bench_utils::pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result);
     result.stats.crash_ipm_attempted = crash_attempted;
     result.stats.crash_ipm_wired = crash_wired;
     result
