@@ -1,7 +1,7 @@
 //! Warm-start を受け取って interior 補正のみ適用する初期化経路。
 
 use super::state::{
-    WARM_BOUND_ABS_MARGIN, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN,
+    warm_bound_margin, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN,
 };
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
@@ -40,15 +40,17 @@ pub(super) fn apply_qp_warm_start(
         x[j] = match (lb.is_finite(), ub.is_finite()) {
             (true, true) => {
                 let range = ub - lb;
-                let margin = (range * WARM_BOUND_REL_MARGIN).min(WARM_BOUND_ABS_MARGIN);
+                // range × REL は box 幅相対 strict-interior。range が極小 (collapsing box)
+                // のときだけ midpoint 退避させ、それ以外は scale 追従させる。
+                let margin = range * WARM_BOUND_REL_MARGIN;
                 if range > 2.0 * margin {
                     xj.clamp(lb + margin, ub - margin)
                 } else {
                     0.5 * (lb + ub)
                 }
             }
-            (true, false) => xj.max(lb + WARM_BOUND_ABS_MARGIN),
-            (false, true) => xj.min(ub - WARM_BOUND_ABS_MARGIN),
+            (true, false) => xj.max(lb + warm_bound_margin(lb)),
+            (false, true) => xj.min(ub - warm_bound_margin(ub)),
             (false, false) => xj,
         };
     }
