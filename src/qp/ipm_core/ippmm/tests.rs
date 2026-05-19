@@ -1,8 +1,11 @@
 //! IP-PMM 単体テスト。
 
 use super::iter::solve_ippmm_inner;
-use crate::options::SolverOptions;
+use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
+use super::warm_start::apply_qp_warm_start;
+use crate::options::{QpWarmStart, SolverOptions};
 use crate::problem::{ConstraintType, SolveStatus};
+use crate::qp::ipm_core::kkt::build_extended_constraints;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
 
@@ -256,4 +259,159 @@ fn test_ippmm_multiple_equality_constraints() {
     close(result.solution[0], 1.0 / 3.0, "multi-eq: x[0]");
     close(result.solution[1], 2.0 / 3.0, "multi-eq: x[1]");
     close(result.solution[2], 1.0 / 3.0, "multi-eq: x[2]");
+}
+
+/// warm_bound_margin が bound scale に追従することの直接 sentinel。
+/// 旧 `WARM_BOUND_ABS_MARGIN = 1.0` 固定では小 bound 過大 / 大 bound 過小の両極。
+/// no-op 書換 (REL=1e-6 は据置きで margin=1.0 fixed) では各 assertion が FAIL することを表で確認。
+#[test]
+fn test_warm_bound_margin_scale_tracking() {
+    // (|bound|, expected = REL × max(|b|,1)) — multi-pattern data
+    // 旧 fixed=1.0 の場合 expected との不一致を検出。
+    let cases = [
+        (0.0_f64, WARM_BOUND_REL_MARGIN),
+        (0.25_f64, WARM_BOUND_REL_MARGIN),
+        (-0.5_f64, WARM_BOUND_REL_MARGIN),
+        (1.0_f64, WARM_BOUND_REL_MARGIN),
+        (-1.0_f64, WARM_BOUND_REL_MARGIN),
+        (10.0_f64, WARM_BOUND_REL_MARGIN * 10.0),
+        (1e3_f64, WARM_BOUND_REL_MARGIN * 1e3),
+        (-1e6_f64, WARM_BOUND_REL_MARGIN * 1e6),
+        (1e8_f64, WARM_BOUND_REL_MARGIN * 1e8),
+        (1e11_f64, WARM_BOUND_REL_MARGIN * 1e11),
+    ];
+    for (b, expected) in cases {
+        let got = warm_bound_margin(b);
+        let denom = expected.abs().max(WARM_BOUND_REL_MARGIN);
+        assert!(
+            ((got - expected) / denom).abs() < 1e-12,
+            "warm_bound_margin({}) = {:.6e}, expected {:.6e} (旧 ABS=1.0 fixed retention 疑い)",
+            b, got, expected,
+        );
+    }
+    // |b|=1 で margin が old=1.0 から大きく縮小していることを明示。
+    assert!(
+        warm_bound_margin(1.0) < 1e-3,
+        "|b|=1 で margin={:.3e} は old absolute 1.0 を残している",
+        warm_bound_margin(1.0),
+    );
+    // |b|=1e8 で margin が old=1.0 から拡大していることを明示。
+    assert!(
+        warm_bound_margin(1e8) > 10.0,
+        "|b|=1e8 で margin={:.3e} は old absolute 1.0 を残している",
+        warm_bound_margin(1e8),
+    );
+}
+
+/// apply_qp_warm_start: bound scale 別の strict-interior 補正 sentinel。
+/// 旧 ABS=1.0 固定では small-bound で warm 値が過剰に押し込まれ、large-bound で
+/// 不十分に押し込まれた。新 helper でいずれも適切な相対位置に収まることを確認。
+///
+/// no-op 書換 (margin を旧 1.0 fixed に戻す) では:
+/// - small-bound case: x[0] が 0.5 → 1.0 に押し上げられ assertion FAIL
+/// - large-bound case: x[0] が 1e8+50 → そのまま (1.0 < 50) で push 不足 assertion FAIL
+#[test]
+fn test_warm_start_half_finite_bound_scale_tracking() {
+    // (lb, xj_warm, expected_x_after_correction, name)
+    // multi-pattern: 各 |lb| scale × xj 位置パターンを cover。
+    let cases: [(f64, f64, f64, &str); 5] = [
+        // |lb|=1: 旧 margin=1.0 では 0.5 → 1.0 に過剰押込み。新 margin≈1e-6 で warm 尊重。
+        (1.0,    1.5, 1.5,                          "|lb|=1 well-interior"),
+        // |lb|=0: 旧 margin=1.0 では 0.1 → 1.0。新 margin=REL で 0.1 尊重。
+        (0.0,    0.1, 0.1,                          "|lb|=0 small warm"),
+        // |lb|=10: 旧 margin=1.0 では 10.1 → 11.0。新 margin=REL*10=1e-5 で 10.1 尊重。
+        (10.0,   10.1, 10.1,                        "|lb|=10 close warm"),
+        // |lb|=1e8: 旧 margin=1.0 では 1e8+0.5 → 1e8+1.0、足りない。新 margin=100 で push 必要。
+        (1e8,    1e8 + 50.0, 1e8 + 100.0,           "|lb|=1e8 needs scaled push"),
+        // |lb|=1e6: 旧 margin=1.0, 新 margin=1.0 (たまたま一致) なので push 量同じ。境界 case。
+        // ただし xj=0.999e6 (lb 未満) は旧 margin=1.0 → 1e6+1、新も同。
+        (1e6,    0.999e6, 1e6 + 1.0,                "|lb|=1e6 below bound floors at lb+margin"),
+    ];
+    for (lb, xj, expected, name) in cases {
+        let problem = build_single_var_lb_problem(lb);
+        let x_out = apply_warm_and_extract_x(&problem, xj);
+        assert!(
+            (x_out - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "{}: x={:.6e}, expected {:.6e} (lb={:.1e}, xj_warm={:.6e})",
+            name, x_out, expected, lb, xj,
+        );
+    }
+}
+
+/// apply_qp_warm_start: 両端 finite box の range-scale margin sentinel。
+/// 旧 `.min(WARM_BOUND_ABS_MARGIN=1.0)` cap では巨大 range で margin=1.0 に貼り付き
+/// strict-interior が相対 1e-10 以下に縮退。新コードでは range×REL で常に相対 1e-6 を確保。
+#[test]
+fn test_warm_start_both_finite_bound_scale_tracking() {
+    // (lb, ub, xj_warm, name, assertion-spec)
+    // 巨大 range: lb=-1e10, ub=1e10, range=2e10。旧 margin=1.0、新 margin=2e4。
+    // xj=ub-1.0 (旧では unchanged) は新では ub-2e4 に押し戻されるべき。
+    {
+        let problem = build_single_var_box_problem(-1e10, 1e10);
+        let x_out = apply_warm_and_extract_x(&problem, 1e10 - 1.0);
+        let new_margin_lower_bound = 1e3; // new margin=2e4、 旧 1.0 とは 4 桁差。
+        assert!(
+            x_out <= 1e10 - new_margin_lower_bound,
+            "large-range box: x={:.6e} は ub-1.0 に貼り付き (旧 ABS=1.0 cap retention 疑い)",
+            x_out,
+        );
+    }
+    // 中間 range: [0, 1e6], range=1e6。旧 margin=min(1.0, 1.0)=1.0、新 margin=1.0。境界一致。
+    {
+        let problem = build_single_var_box_problem(0.0, 1e6);
+        // 内部 well-interior: warm が範囲内なら維持。
+        let x_out = apply_warm_and_extract_x(&problem, 5e5);
+        assert!((x_out - 5e5).abs() < 1e-6, "mid-range box well-interior 維持");
+    }
+    // 小 range: [0, 1], range=1。旧 margin=min(1e-6, 1.0)=1e-6、新 margin=1e-6。一致。
+    {
+        let problem = build_single_var_box_problem(0.0, 1.0);
+        let x_out = apply_warm_and_extract_x(&problem, 0.5);
+        assert!((x_out - 0.5).abs() < 1e-9, "small box well-interior 維持");
+    }
+    // Collapsing box: range が 2×margin 未満 → midpoint 退避。
+    // [0, 1e-10]: range=1e-10, margin=1e-16、range > 2×margin なので clamp 経路に入る。
+    // [-1e-12, 1e-12]: range=2e-12, margin=2e-18、これも clamp。
+    // 退避経路に入る極端: range = 0 (lb=ub) のとき range > 2*0=0 が false → midpoint。
+    {
+        let problem = build_single_var_box_problem(3.0, 3.0);
+        let x_out = apply_warm_and_extract_x(&problem, 100.0);
+        assert!((x_out - 3.0).abs() < 1e-12, "collapsed box (lb=ub): midpoint=lb=ub");
+    }
+}
+
+fn build_single_var_lb_problem(lb: f64) -> QpProblem {
+    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let a = CscMatrix::new(0, 1);
+    let b: Vec<f64> = vec![];
+    let bounds = vec![(lb, f64::INFINITY)];
+    QpProblem::new(q, c, a, b, bounds, vec![]).unwrap()
+}
+
+fn build_single_var_box_problem(lb: f64, ub: f64) -> QpProblem {
+    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let a = CscMatrix::new(0, 1);
+    let b: Vec<f64> = vec![];
+    let bounds = vec![(lb, ub)];
+    QpProblem::new(q, c, a, b, bounds, vec![]).unwrap()
+}
+
+fn apply_warm_and_extract_x(problem: &QpProblem, xj_warm: f64) -> f64 {
+    let (a_ext, b_ext, m_ext, m_orig, _, is_eq_ext) = build_extended_constraints(problem);
+    let ws = QpWarmStart {
+        x: vec![xj_warm],
+        y: vec![0.0_f64; m_orig],
+        mu: 1e-3,
+    };
+    let mut x = vec![0.0_f64; 1];
+    let mut y = vec![0.0_f64; m_ext];
+    let mut s = vec![0.0_f64; m_ext];
+    let mu = apply_qp_warm_start(
+        &ws, problem, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext,
+        &mut x, &mut y, &mut s,
+    );
+    assert!(mu.is_some(), "apply_qp_warm_start dropped (dim mismatch?)");
+    x[0]
 }

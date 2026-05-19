@@ -10,8 +10,12 @@ pub(super) const WARM_MU_MIN: f64 = 1e-8;
 /// 両端有限 box では range × WARM_BOUND_REL_MARGIN を interior 余白にとる
 /// (cold init の 1% 余白より tighter、warm 値を最大限尊重する)。
 pub(super) const WARM_BOUND_REL_MARGIN: f64 = 1e-6;
-/// 半側有限 bound では cold init と同等の絶対 1.0 余白。
-pub(super) const WARM_BOUND_ABS_MARGIN: f64 = 1.0;
+/// 半側有限 / 単側 bound の strict-interior 余白。
+/// 絶対固定だと |b|≫1 で相対 0、|b|≪1 で warm を過剰に押し込む両極が出るため
+/// `max(|b|, 1.0)` で scale 追従させる (floor=1 で原点付近の margin=0 退化を回避)。
+pub(super) fn warm_bound_margin(bound: f64) -> f64 {
+    WARM_BOUND_REL_MARGIN * bound.abs().max(1.0)
+}
 /// 不等式行 s, y の boundary 上で σ=s/y が発散するため両側を floor。
 pub(super) const WARM_SY_MIN: f64 = 1e-8;
 
