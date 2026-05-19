@@ -252,7 +252,7 @@ fn deep_check(name: &str, path: &std::path::Path) -> bool {
 }
 
 #[test]
-#[ignore = "永久 FAIL: LISWET9 が Clarabel と rel err ~45% で乖離 (QP solver bug)"]
+#[ignore = "永久 FAIL (qp-bug-tracker): LISWET9 が Clarabel と rel err ~45% で乖離 (QP solver bug)"]
 fn test_liswet9_matches_clarabel() {
     let p = std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS");
     let ok = deep_check("LISWET9", &p);

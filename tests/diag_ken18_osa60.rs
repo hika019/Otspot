@@ -20,6 +20,7 @@
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
 use solver::problem::{LpProblem, SolveStatus};
+use solver::qp::solve_qp_with;
 use solver::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
@@ -215,5 +216,49 @@ fn diag_ken18_must_respect_internal_deadline() {
         // SolveStatus is `#[non_exhaustive]`; new variants must trip this test.
         #[allow(unreachable_patterns)]
         _ => panic!("[ken-18] unexpected SolveStatus variant: {:?}", r.status),
+    }
+}
+
+/// Deadline contract: two-case deterministic sentinel using `SolveStats::deadline_triggered`.
+///
+/// Case A (generous budget): bore3d solves in < 1 s; a 30 s deadline is never hit.
+///   deadline_triggered == false, status == Optimal.
+///
+/// Case B (forced deadline): a 0.001 s (1 ms) budget forces Timeout before bore3d
+///   completes; deadline_triggered == true, status == Timeout.
+///
+/// Deleting the `deadline_triggered` assignment in lp.rs/dispatch_solve_qp causes
+/// Case B to assert false (no-op proof).  No wall-clock measurement.
+#[test]
+fn diag_deadline_small_lp() {
+    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    assert!(path.exists(), "tests/lp_problems/bore3d.QPS missing from repo");
+
+    let qp = parse_qps(path).expect("parse bore3d");
+
+    // Case A: generous budget — bore3d finishes before the deadline.
+    {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(30.0);
+        let r = solve_qp_with(&qp, &opts);
+        eprintln!("[bore3d/A] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered);
+        assert_eq!(r.status, SolveStatus::Optimal,
+            "[bore3d/A] expected Optimal with generous budget, got {:?}", r.status);
+        assert!(!r.stats.deadline_triggered,
+            "[bore3d/A] deadline should not have triggered with 30 s budget");
+    }
+
+    // Case B: 1 ms budget — forces Timeout, proving deadline enforcement is wired.
+    {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(0.001);
+        let r = solve_qp_with(&qp, &opts);
+        eprintln!("[bore3d/B] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered);
+        assert_eq!(r.status, SolveStatus::Timeout,
+            "[bore3d/B] expected Timeout with 1 ms budget, got {:?}", r.status);
+        assert!(r.stats.deadline_triggered,
+            "[bore3d/B] deadline_triggered must be true when status == Timeout");
     }
 }
