@@ -4,7 +4,7 @@
 //! threads>=2 → `Par::Rayon(NonZero(threads))` (= faer 内部 supernodal Cholesky / LDL を
 //! グローバル rayon thread-pool で並列化)。
 //!
-//! 単発 LP/QP solve の per-call parallelism 配線点 (#31)。
+//! 単発 LP/QP solve の per-call parallelism 配線点。
 //! multistart 並列とは独立 (multistart 中は各 inner solve に threads=1 が渡る)。
 
 use faer::Par;

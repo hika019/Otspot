@@ -124,7 +124,7 @@ pub(crate) const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// QP をカスタム設定で解く (8 MB scoped thread で stack overflow を防ぐ)。
 ///
-/// `options.multistart.is_some() && n_starts >= 2` のとき multi-start (#5) に委譲する。
+/// `options.multistart.is_some() && n_starts >= 2` のとき multi-start に委譲する。
 /// multistart 内部の各 solve は同じ entry に戻るが options.multistart を None に剥がして
 /// 再入を断ち切る。
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {

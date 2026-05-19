@@ -323,7 +323,7 @@ pub struct SolverOptions {
     pub warm_start: Option<WarmStartBasis>,
     /// QP IP-PMM の interior point warm start (B&B node 間引継ぎ用)
     pub warm_start_qp: Option<QpWarmStart>,
-    /// LP 拡張 warm start (#15)。`warm_start` より優先される。
+    /// LP 拡張 warm start。`warm_start` より優先される。
     /// `basis` のみ与えれば既存挙動と同等で、`x_orig`/`y_orig` は将来 IPM crossover 用。
     pub warm_start_lp: Option<LpWarmStart>,
     /// LP cold start 時 simplex crash basis を適用する。

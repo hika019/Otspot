@@ -86,7 +86,7 @@ pub trait KktSolver: Send {
 /// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
 /// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
 ///
-/// `par` は per-call parallelism (#31)。default は `Par::Seq` (= 既存挙動)。
+/// `par` は per-call parallelism。default は `Par::Seq` (= 既存挙動)。
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
@@ -103,7 +103,7 @@ impl DirectLdl {
         Self { factor: None, n, max_l_nnz: Some(max_l_nnz), par: faer::Par::Seq }
     }
 
-    /// per-call parallelism を指定する (#31)。
+    /// per-call parallelism を指定する。
     pub fn with_par(mut self, par: faer::Par) -> Self {
         self.par = par;
         self
@@ -515,7 +515,7 @@ pub fn factorize_kkt_with_cached_perm(
     factorize_kkt_with_cached_perm_par(k, perm, deadline, max_l_nnz, n_top, faer::Par::Seq)
 }
 
-/// `factorize_kkt_with_cached_perm` の per-call parallelism 指定版 (#31)。
+/// `factorize_kkt_with_cached_perm` の per-call parallelism 指定版。
 pub fn factorize_kkt_with_cached_perm_par(
     k: &CscMatrix,
     perm: &[usize],
@@ -626,7 +626,7 @@ pub fn factorize_kkt_pre_permuted_cached(
     )
 }
 
-/// `factorize_kkt_pre_permuted_cached` の per-call parallelism 指定版 (#31)。
+/// `factorize_kkt_pre_permuted_cached` の per-call parallelism 指定版。
 pub fn factorize_kkt_pre_permuted_cached_par(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,

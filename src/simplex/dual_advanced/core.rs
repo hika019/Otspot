@@ -33,7 +33,7 @@ const NO_PROGRESS_MIN: usize = 100;
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 
 // Bland's rule leaving と progress metric は `DualLeavingStrategy::bland_leaving`
-// と `::progress_metric` (default + strategy override) に委譲した (task #43)。
+// と `::progress_metric` (default + strategy override) に委譲した。
 
 /// Lex 摂動: bland_mode 起動時に reduced_costs (non-basic) と x_b
 /// (basis values) の両方に `eps * (1 + i/n) * scale` を加算し degeneracy を
@@ -181,7 +181,7 @@ pub(crate) fn dual_simplex_core_advanced(
     // 一度 bland_mode に入ったら戻さない (再 cycle 防止)。progress_metric は
     // leaving strategy が提供し、auxiliary objective (Big-M Phase I の人工変数
     // 残存 etc.) も含む。global `sum_neg` だと初期 `x_B ≥ 0` の Big-M Phase I で
-    // `best = 0` → threshold = 0 → 必ず no-progress と判定されて誤発火する (#43)。
+    // `best = 0` → threshold = 0 → 必ず no-progress と判定されて誤発火する。
     let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
     let mut best_infeas = leaving.progress_metric(x_b, basis);
     let mut iters_since_progress: usize = 0;

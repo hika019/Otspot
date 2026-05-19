@@ -152,7 +152,7 @@ pub enum BenchPromotionPolicy {
 ///
 /// Timeout は意図的に格上げ対象外: Primal 半 deadline incumbent を silent に Optimal 化すると
 /// 後段の品質判定 (pfeas/dfeas/obj) に流れて PFEAS_FAIL 表示となり、真因 (deadline 切れ)
-/// が観測者に隠れる (task #46 観測 / task #52 真因対処)。Timeout は honest に Timeout 報告。
+/// が観測者に隠れる。Timeout は honest に Timeout 報告。
 pub fn apply_bench_status_promotion(
     result: SolverResult,
     num_vars: usize,

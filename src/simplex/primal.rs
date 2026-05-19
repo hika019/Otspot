@@ -975,7 +975,7 @@ pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], 
     solution
 }
 
-/// Primal Phase I cycling early-bail (task #37). klein3 observation: with
+/// Primal Phase I cycling early-bail. klein3 observation: with
 /// Ge/Eq constraints, `cold_start_dual` (dual.rs) falls back to Primal
 /// `two_phase_simplex` whose Phase I cycles indefinitely (no Bland switch),
 /// burning the whole `solve_dual_advanced` half-deadline before Big-M can
@@ -1077,7 +1077,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let mut stable_mode: bool = false;
     let mut basis_snapshot: Vec<usize> = basis.to_vec();
 
-    // Phase I cycling early-bail state (task #37).
+    // Phase I cycling early-bail state.
     let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
     let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
     let step_zero_threshold = PIVOT_TOL * STEP_DEGENERATE_FACTOR * (m as f64).max(1.0);
@@ -1316,7 +1316,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             }
         }
 
-        // Cycling early-bail (task #37). Trigger requires (a) `c^T x_B`
+        // Cycling early-bail. Trigger requires (a) `c^T x_B`
         // plateau for `obj_bail_trigger` iters AND (b) step ≈ 0 for
         // `step_bail_trigger` iters AND (c) Phase I caller. Either signal
         // alone is insufficient: forplan-style Phase I (slow real progress)
