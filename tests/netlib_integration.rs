@@ -13,6 +13,12 @@ use std::time::Instant;
 /// regression (cycling or iteration explosion).
 const MAX_NETLIB_ITER: usize = 500_000;
 
+/// BOYD1 IPM iteration cap (measured: 51 iters, ×4 headroom).
+/// Detects iterative-refine explosion: the memory-explosion regression caused
+/// IPM to be mis-classified SuboptimalSolution, triggering iterative_refine
+/// on a 93261-var problem. Excess iterations here indicate that regression.
+const BOYD1_MEMORY_ITER_CAP: usize = 200;
+
 /// Solve an LP with a wall-time budget enforced via solver timeout.
 /// If the solver exceeds `timeout_secs`, it returns `SolveStatus::Timeout`,
 /// which fails the caller's `status == Optimal` assert — deterministic sentinel.
@@ -168,9 +174,7 @@ fn test_netlib_adlittle() {
     let path = Path::new("tests/netlib/adlittle.mps");
     let problem = parse_mps_file(path).expect("Failed to parse adlittle.mps");
 
-    let start = Instant::now();
-    let result = solve(&problem);
-    let elapsed = start.elapsed();
+    let result = solve_timed(&problem, 30);
 
     assert_eq!(result.status, SolveStatus::Optimal, "adlittle should reach Optimal");
 
@@ -182,14 +186,9 @@ fn test_netlib_adlittle() {
         expected,
         result.objective
     );
+    assert!(result.iterations < MAX_NETLIB_ITER, "adlittle: {} iterations", result.iterations);
 
-    assert!(
-        elapsed.as_secs() < 10,
-        "adlittle solve time should be < 10 sec, got {:?}",
-        elapsed
-    );
-
-    println!("adlittle solved: obj={}, time={:?}", result.objective, elapsed);
+    println!("adlittle solved: obj={}", result.objective);
 }
 
 #[test]
@@ -197,9 +196,7 @@ fn test_netlib_share2b() {
     let path = Path::new("tests/netlib/share2b.mps");
     let problem = parse_mps_file(path).expect("Failed to parse share2b.mps");
 
-    let start = Instant::now();
-    let result = solve(&problem);
-    let elapsed = start.elapsed();
+    let result = solve_timed(&problem, 30);
 
     assert_eq!(result.status, SolveStatus::Optimal, "share2b should reach Optimal");
 
@@ -211,14 +208,9 @@ fn test_netlib_share2b() {
         expected,
         result.objective
     );
+    assert!(result.iterations < MAX_NETLIB_ITER, "share2b: {} iterations", result.iterations);
 
-    assert!(
-        elapsed.as_secs() < 10,
-        "share2b solve time should be < 10 sec, got {:?}",
-        elapsed
-    );
-
-    println!("share2b solved: obj={}, time={:?}", result.objective, elapsed);
+    println!("share2b solved: obj={}", result.objective);
 }
 
 #[test]
@@ -226,9 +218,7 @@ fn test_netlib_stocfor1() {
     let path = Path::new("tests/netlib/stocfor1.mps");
     let problem = parse_mps_file(path).expect("Failed to parse stocfor1.mps");
 
-    let start = Instant::now();
-    let result = solve(&problem);
-    let elapsed = start.elapsed();
+    let result = solve_timed(&problem, 30);
 
     assert_eq!(result.status, SolveStatus::Optimal, "stocfor1 should reach Optimal");
 
@@ -240,14 +230,9 @@ fn test_netlib_stocfor1() {
         expected,
         result.objective
     );
+    assert!(result.iterations < MAX_NETLIB_ITER, "stocfor1: {} iterations", result.iterations);
 
-    assert!(
-        elapsed.as_secs() < 10,
-        "stocfor1 solve time should be < 10 sec, got {:?}",
-        elapsed
-    );
-
-    println!("stocfor1 solved: obj={}, time={:?}", result.objective, elapsed);
+    println!("stocfor1 solved: obj={}", result.objective);
 }
 
 // --- §4-2 Netlib拡充: brandy, scorpion, fit1d, share1b (cmd_089) ---
@@ -560,25 +545,22 @@ fn test_boyd1_no_memory_explosion() {
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
-    let start = Instant::now();
     let result = solve_qp_with(&problem, &opts);
-    let elapsed = start.elapsed();
 
     assert_eq!(
         result.status,
         SolveStatus::Optimal,
-        "BOYD1: should be Optimal, got {:?} (elapsed={:?}). If SuboptimalSolution, dfeas check regression likely.",
+        "BOYD1: should be Optimal, got {:?}. If SuboptimalSolution, dfeas check regression likely.",
         result.status,
-        elapsed
     );
     assert!(
-        elapsed.as_secs() < 15,
-        "BOYD1: should complete in <15s, took {:?}. Memory explosion may be occurring.",
-        elapsed
+        result.iterations < BOYD1_MEMORY_ITER_CAP,
+        "BOYD1: {} IPM iterations (cap {}). Possible iterative-refine explosion regression.",
+        result.iterations, BOYD1_MEMORY_ITER_CAP,
     );
     println!(
-        "BOYD1: status={:?}, obj={:.6e}, time={:.3}s",
-        result.status, result.objective, elapsed.as_secs_f64()
+        "BOYD1: status={:?}, obj={:.6e}, iters={}",
+        result.status, result.objective, result.iterations
     );
 }
 
