@@ -23,6 +23,8 @@ mod substitution;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_per_step;
 
 pub use driver::{run_presolve, run_presolve_with_flags};
 pub use state::{PresolveFlags, PresolveResult, PresolveStatus};
