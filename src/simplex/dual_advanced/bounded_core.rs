@@ -238,7 +238,7 @@ pub(crate) fn iterate(
             return (BoundedOutcome::SingularBasis, state);
         }
         Err(_) => {
-            let obj = basic_obj(c, &state.basis, &state.x_b);
+            let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
             return (BoundedOutcome::Timeout(obj), state);
         }
     };
@@ -265,7 +265,7 @@ pub(crate) fn iterate(
     loop {
         state.iterations = state.iterations.saturating_add(1);
         if state.iterations > BOUNDED_DUAL_ITER_HARD_CAP {
-            let obj = basic_obj(c, &state.basis, &state.x_b);
+            let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
             return (BoundedOutcome::Timeout(obj), state);
         }
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
@@ -274,7 +274,7 @@ pub(crate) fn iterate(
             .as_ref()
             .is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
-            let obj = basic_obj(c, &state.basis, &state.x_b);
+            let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
             return (BoundedOutcome::Timeout(obj), state);
         }
 
@@ -391,7 +391,7 @@ pub(crate) fn iterate(
                 if basis_mgr.singular_basis {
                     return (BoundedOutcome::SingularBasis, state);
                 }
-                let obj = basic_obj(c, &state.basis, &state.x_b);
+                let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                 return (BoundedOutcome::Timeout(obj), state);
             }
             compute_reduced_costs_into(
@@ -469,7 +469,7 @@ pub(crate) fn iterate(
                 if basis_mgr.singular_basis {
                     return (BoundedOutcome::SingularBasis, state);
                 }
-                let obj = basic_obj(c, &state.basis, &state.x_b);
+                let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                 return (BoundedOutcome::Timeout(obj), state);
             }
             compute_reduced_costs_into(
@@ -1612,5 +1612,113 @@ mod tests {
         );
         // c = [1,2] ≥ 0 so c̃ = c; dual already optimal for original costs.
         assert_eq!(iters, 1, "should terminate after one pricing pass (no improvement)");
+    }
+
+    // ── bounded_obj Timeout sentinel ─────────────────────────────────────────
+
+    /// Sentinel: `iterate` Phase 1 dual Timeout returns the bounded objective,
+    /// including non-basic at-upper-bound contributions.
+    ///
+    /// Table-driven over two fixtures. Each pre-sets one structural variable at
+    /// its upper bound via `state_with_flips`, then triggers a deadline Timeout
+    /// on the first iteration (already-expired deadline). The test asserts
+    /// `returned_obj ≈ bounded_obj` within 1e-10.
+    ///
+    /// No-op proof is embedded: `|bounded_obj − basic_obj| ≥ MIN_CONTRIBUTION`
+    /// guarantees the test fails if the Timeout path were reverted to
+    /// `basic_obj` (diff > MIN_CONTRIBUTION >> 1e-10).
+    #[test]
+    fn phase1_dual_timeout_obj_matches_bounded_obj() {
+        const EPS: f64 = 1e-10;
+        const MIN_CONTRIBUTION: f64 = 0.5;
+
+        let p1_problem = fixture_one_row_two_boxed().problem;
+        let p2_problem = fixture_two_rows_three_boxed().problem;
+        let bsfs = [
+            ("one_row_two_boxed_x1_at_upper",    build_bounded_standard_form(&p1_problem), 1usize),
+            ("two_rows_three_boxed_x0_at_upper",  build_bounded_standard_form(&p2_problem), 0usize),
+        ];
+
+        for (name, bsf, flip_col) in &bsfs {
+            let state = state_with_flips(bsf, &[*flip_col]);
+
+            let exp_bounded = bounded_obj(
+                &bsf.c, &state.basis, &state.x_b,
+                &state.at_upper, &state.is_basic, &bsf.upper_bounds,
+            );
+            let exp_basic = basic_obj(&bsf.c, &state.basis, &state.x_b);
+
+            assert!(
+                (exp_bounded - exp_basic).abs() >= MIN_CONTRIBUTION,
+                "{name}: fixture degenerate — bounded_obj={exp_bounded:.6e} \
+                 basic_obj={exp_basic:.6e} differ by {:.3e} < {MIN_CONTRIBUTION:.1e}",
+                (exp_bounded - exp_basic).abs()
+            );
+
+            let deadline = std::time::Instant::now()
+                - std::time::Duration::from_millis(1);
+            let opts = SolverOptions { deadline: Some(deadline), ..SolverOptions::default() };
+            let (outcome, _) = iterate(state, bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
+            match outcome {
+                BoundedOutcome::Timeout(obj) => {
+                    assert!(
+                        (obj - exp_bounded).abs() < EPS,
+                        "{name}: Phase 1 dual Timeout obj={obj:.6e} differs from \
+                         bounded_obj={exp_bounded:.6e} by {:.3e}; \
+                         basic_obj={exp_basic:.6e} — at_upper contributions missing",
+                        (obj - exp_bounded).abs()
+                    );
+                }
+                other => panic!("{name}: expected Timeout (expired deadline), got {other:?}"),
+            }
+        }
+    }
+
+    /// Sentinel: `phase2_primal_bounded` Timeout returns the bounded objective,
+    /// including non-basic at-upper-bound contributions.
+    ///
+    /// Pre-sets x0 at ub=1 in a primal-feasible state and forces a deadline
+    /// Timeout on the first iteration. Asserts returned obj ≈ bounded_obj.
+    /// No-op proof embedded: diff from basic_obj ≥ MIN_CONTRIBUTION.
+    #[test]
+    fn phase2_primal_timeout_obj_matches_bounded_obj() {
+        const EPS: f64 = 1e-10;
+        const MIN_CONTRIBUTION: f64 = 0.5;
+
+        let problem = fixture_boxed_ub1().problem;
+        let bsf = build_bounded_standard_form(&problem);
+        let state = state_with_flips(&bsf, &[0]); // x0 at ub=1
+
+        let exp_bounded = bounded_obj(
+            &bsf.c, &state.basis, &state.x_b,
+            &state.at_upper, &state.is_basic, &bsf.upper_bounds,
+        );
+        let exp_basic = basic_obj(&bsf.c, &state.basis, &state.x_b);
+
+        assert!(
+            (exp_bounded - exp_basic).abs() >= MIN_CONTRIBUTION,
+            "fixture degenerate — bounded_obj={exp_bounded:.6e} \
+             basic_obj={exp_basic:.6e} differ by {:.3e} < {MIN_CONTRIBUTION:.1e}",
+            (exp_bounded - exp_basic).abs()
+        );
+
+        let deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        let opts = SolverOptions { deadline: Some(deadline), ..SolverOptions::default() };
+        let mut iters = 0usize;
+        let (outcome, _) = phase2_primal_bounded(
+            &bsf, state, &bsf.a, &bsf.c, &opts, &mut iters, &bsf.upper_bounds,
+        );
+        match outcome {
+            SimplexOutcome::Timeout(obj) => {
+                assert!(
+                    (obj - exp_bounded).abs() < EPS,
+                    "Phase 2 primal Timeout obj={obj:.6e} differs from \
+                     bounded_obj={exp_bounded:.6e} by {:.3e}; \
+                     basic_obj={exp_basic:.6e} — at_upper contributions missing",
+                    (obj - exp_bounded).abs()
+                );
+            }
+            other => panic!("expected Timeout (expired deadline), got {other:?}"),
+        }
     }
 }

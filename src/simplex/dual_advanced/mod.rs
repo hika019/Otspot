@@ -191,14 +191,9 @@ fn try_bounded(
                 for &j in &warm.basis {
                     is_basic[j] = true;
                 }
-                let at_upper = if warm.at_upper.len() == bsf.n_total {
-                    warm.at_upper.clone()
-                } else {
-                    vec![false; bsf.n_total]
-                };
                 let state = BoundedDualState {
                     basis: warm.basis.clone(),
-                    at_upper,
+                    at_upper: vec![false; bsf.n_total],
                     x_b,
                     reduced_costs: vec![0.0; bsf.n_total],
                     is_basic,
@@ -300,7 +295,6 @@ fn finish_bounded_phase2(
             let ws = WarmStartBasis {
                 basis: state.basis,
                 x_b: state.x_b,
-                at_upper: state.at_upper,
             };
             SolverResult {
                 status: SolveStatus::Optimal,
@@ -417,7 +411,7 @@ fn cold_start_advanced(
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec(), at_upper: vec![] };
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,
@@ -487,7 +481,7 @@ fn outcome_to_result(
             let solution = extract_solution(sf, basis, x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec(), at_upper: vec![] };
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,

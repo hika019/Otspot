@@ -685,7 +685,7 @@ fn recover_warm_start_basis(
     // Informational x_b at the new basis (dual-simplex warm path recomputes
     // x_B = B^{-1} b_new, so this is purely a hint).
     let x_b: Vec<f64> = basis.iter().map(|&j| x_std.get(j).copied().unwrap_or(0.0)).collect();
-    Some(WarmStartBasis { basis, x_b, at_upper: vec![] })
+    Some(WarmStartBasis { basis, x_b })
 }
 
 /// Lift the reduced-problem solution back into the original variable / constraint space.

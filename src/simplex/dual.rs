@@ -143,7 +143,7 @@ fn warm_outcome_to_result(
             let solution = extract_solution(sf, basis, x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec(), at_upper: vec![] };
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,
@@ -202,7 +202,7 @@ fn primal_outcome_to_result(
             let solution = extract_solution(sf, basis, x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec(), at_upper: vec![] };
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,

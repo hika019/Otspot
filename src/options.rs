@@ -59,9 +59,6 @@ pub struct WarmStartBasis {
     /// 基底変数の値 x_B（長さ = m）
     /// warm-start時、新しいRHSで再計算されるため、古い値でもよい
     pub x_b: Vec<f64>,
-    /// 非基底変数の上界状態（長さ = n_total）。
-    /// bounded path でのみ設定される。legacy path では空ベクトル。
-    pub at_upper: Vec<bool>,
 }
 
 /// QP IP-PMM の内部 interior point 引継ぎ情報。
