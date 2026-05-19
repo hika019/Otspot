@@ -18,6 +18,8 @@ mod steps_redundancy;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_per_step;
 
 pub use driver::run_qp_presolve_phase1;
 pub use state::{QpPresolveResult, QpPresolveStatus};
