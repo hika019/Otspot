@@ -92,6 +92,7 @@ fn test_dual_advanced_warm_start_larger_rhs() {
 
     let result1 = solve_with(&lp1, &SolverOptions::default());
     assert_eq!(result1.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result1, &lp1);
     assert!(
         result1.warm_start_basis.is_some(),
         "LP1 は warm_start_basis を返すべき"
@@ -111,6 +112,7 @@ fn test_dual_advanced_warm_start_larger_rhs() {
     // cold-start で正解を確認
     let result2_cold = solve_with(&lp2, &SolverOptions::default());
     assert_eq!(result2_cold.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result2_cold, &lp2);
 
     // DualAdvanced warm-start で解く
     let opts_warm = SolverOptions {
