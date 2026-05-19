@@ -17,7 +17,7 @@
 //! - root と同じ status: root が Infeasible / NumericalError / Unbounded だった場合
 
 pub(crate) mod bound;
-pub mod bound_alpha_bb;
+pub(crate) mod bound_alpha_bb;
 pub mod bound_mccormick;
 pub(crate) mod branch;
 pub(crate) mod node;

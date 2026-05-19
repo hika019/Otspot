@@ -25,6 +25,7 @@
 
 use std::time::Instant;
 
+use crate::linalg::gershgorin::psd_shift_from_gershgorin;
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
 use crate::qp::problem::QpProblem;
@@ -32,42 +33,12 @@ use crate::sparse::CscMatrix;
 
 use super::bound::is_feasible_result;
 
-/// Gershgorin で `λ_min(Q) ≥ min_j(Q[j,j] − R_j)` を得て、α-BB underestimator の
-/// Hessian `Q + 2α·I` が PSD となる最小 α を返す。
+/// α-BB underestimator `Q + 2α·I` が PSD となる最小 α を Gershgorin で取得。
 ///
-/// `α = max(0, max_j(R_j − Q[j,j]) / 2)`。
-///
-/// CSC は full-symmetric / 上三角どちらでも `row < col` だけで off-diag を 1 度
-/// カウントすれば対称行列の row sum と一致する (片半 entry は無視、両半 entry は
-/// (row<col) の片方のみ反映)。
-pub fn gershgorin_alpha(q: &CscMatrix) -> f64 {
-    let n = q.nrows;
-    if n == 0 {
-        return 0.0;
-    }
-    let mut diag = vec![0.0_f64; n];
-    let mut off_row_sum = vec![0.0_f64; n];
-    for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            let val = q.values[k];
-            if row == col {
-                diag[col] = val;
-            } else if row < col {
-                let abs_val = val.abs();
-                off_row_sum[row] += abs_val;
-                off_row_sum[col] += abs_val;
-            }
-        }
-    }
-    let mut delta = 0.0_f64;
-    for j in 0..n {
-        let lower = diag[j] - off_row_sum[j];
-        if lower < 0.0 {
-            delta = delta.max(-lower);
-        }
-    }
-    0.5 * delta
+/// `α = max(0, max_j(R_j − Q[j,j])) / 2 = psd_shift_from_gershgorin(Q) / 2`。
+/// 共通 helper は `linalg::gershgorin` を参照。
+pub(crate) fn gershgorin_alpha(q: &CscMatrix) -> f64 {
+    0.5 * psd_shift_from_gershgorin(q)
 }
 
 /// `Q` の対角に `value` を加えた新しい CSC を返す。
@@ -134,7 +105,7 @@ fn all_bounds_finite(node_bounds: &[(f64, f64)]) -> bool {
 ///
 /// convex relaxation は cold solve で実行 (= warm 継承なし、`opts.warm_start_qp = None`)。
 /// 元 non-convex の warm は凸化後の最適解と一致せず再固着 risk があるため。
-pub fn alpha_bb_lower_bound(
+pub(crate) fn alpha_bb_lower_bound(
     problem: &QpProblem,
     node_bounds: &[(f64, f64)],
     alpha: f64,

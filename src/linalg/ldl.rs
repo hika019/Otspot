@@ -47,6 +47,16 @@ pub enum LdlError {
     },
 }
 
+/// `is_q_psd_by_cholesky` で対角に乗せる shift の倍率。
+///
+/// shift = `SHIFT_FACTOR · fp_threshold` (fp_threshold = `|Q|_max · n · ε`).
+/// PSD-singular 行列の zero pivot を回避するには shift > FP noise が必要で、
+/// 一方で indefinite Q の真の負固有値 |λ_min| が shift より十分大きければ
+/// `D[j] < -fp_threshold` で検出できる。倍率を保守的に 10 とし、
+/// 縮約 Schur complement の累積誤差で zero pivot が再発しても D[j] ≈ -μ + shift
+/// が依然 `< -fp_threshold` となる margin を確保する。
+const SHIFT_FACTOR: f64 = 10.0;
+
 /// per-call parallelism の default (= 既存挙動)。
 /// 公開 API の互換版 (par 引数なし) はこれを暗黙に使用する。
 const DEFAULT_PAR: faer::Par = faer::Par::Seq;
@@ -379,6 +389,23 @@ fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
 /// `Q=[[0,1],[1,0]]` のような零対角 indefinite を従来は ZeroPivot 経路で PSD 誤判定
 /// していた (task#37) のを根治する。
 pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
+    is_q_psd_by_cholesky_probe(q, SHIFT_FACTOR, true)
+}
+
+/// `is_q_psd_by_cholesky` の挙動を構成する 2 つの fix を個別 toggle 可能にした probe 版。
+///
+/// - `shift_factor`: 対角に乗せる shift の倍率。production = `SHIFT_FACTOR`(=10)。
+///   0 を渡すと shift を完全に無効化 (= #37 修正前の挙動を再現)。
+/// - `zeropivot_conservative`: ZeroPivot 時の判定。production = true (`false`=indefinite と
+///   みなす)。false を渡すと #37 修正前の「ZeroPivot=PSD」(=true) 挙動を再現。
+///
+/// `(SHIFT_FACTOR, true)` の組合せが production。それ以外の組合せは個別 no-op 実証
+/// (`feedback_sentinel_must_fail_under_noop`) で各修正の必要性を機械検証するためにある。
+pub(crate) fn is_q_psd_by_cholesky_probe(
+    q: &CscMatrix,
+    shift_factor: f64,
+    zeropivot_conservative: bool,
+) -> bool {
     let n = q.nrows;
     if n == 0 {
         return true;
@@ -411,9 +438,9 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
     let q_upper = q_to_upper_triangular(q);
     let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let fp_threshold = q_abs_max * (n as f64) * f64::EPSILON;
-    // shift_factor=10: D[j] ≈ −μ + shift。検出可能下限は μ ≳ shift = 10·fp_threshold。
-    // |Q|_max=0 (Q=0 は既に上で early-return) ガードに 10·eps の最小値も設ける。
-    let shift = (10.0 * fp_threshold).max(10.0 * f64::EPSILON);
+    // shift_factor=10 (production): D[j] ≈ −μ + shift。検出可能下限は μ ≳ shift。
+    // |Q|_max=0 (Q=0 は既に上で early-return) ガードに shift_factor·eps の最小値も設ける。
+    let shift = (shift_factor * fp_threshold).max(shift_factor * f64::EPSILON);
     let q_shifted = upper_tri_with_diag_shift(&q_upper, shift);
     let a_upper = csc_upper_to_faer_upper(&q_shifted);
     let symbolic = match build_symbolic_hl(&a_upper) {
@@ -446,7 +473,9 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
             // simplicial の D[j] は col_ptr[j] 位置に格納される。
             let col_ptr = simp_sym.col_ptr();
             match result {
-                Err(LdltError::ZeroPivot { .. }) => false,
+                // ZeroPivot: production は conservative に false (= indefinite 扱い)。
+                // probe で `zeropivot_conservative=false` (#37 修正前) を流すと true を返す。
+                Err(LdltError::ZeroPivot { .. }) => !zeropivot_conservative,
                 Ok(_) => !(0..n).any(|j| l_values[col_ptr[j]] < -fp_threshold),
             }
         }
@@ -472,9 +501,10 @@ pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
                 Default::default(),
             );
 
-            // ZeroPivot は shift 後の連続 degenerate ケース、conservative に false。
+            // ZeroPivot: production は conservative に false (= indefinite 扱い)。
+            // probe で `zeropivot_conservative=false` (#37 修正前) を流すと true を返す。
             if matches!(result, Err(LdltError::ZeroPivot { .. })) {
-                return false;
+                return !zeropivot_conservative;
             }
 
             let ldlt_ref = supernodal::SupernodalLdltRef::<usize, f64>::new(sn_sym, &l_values);
@@ -972,6 +1002,77 @@ mod tests {
         ]);
         assert!(is_q_psd_by_cholesky(&q),
             "PSD matrix with zero eigenvalue (ZeroPivot) must return true");
+    }
+
+    // ---- #37 個別 no-op proof (task#48 P3-3) ----
+    //
+    // `is_q_psd_by_cholesky_probe(q, shift_factor, zeropivot_conservative)` で
+    // shift と ZeroPivot 経路書換を個別 toggle し、各 fix が必要な case を機械実証する。
+    // `feedback_sentinel_must_fail_under_noop` 準拠: 各 assert が片方の fix 撤回で
+    // 即 FAIL することを示し、両者を coupled に検証していた既存 sentinel に
+    // 個別寄与の証拠を補完する。
+
+    /// **shift no-op proof**: shift=0 に戻すと rank-1 PSD `Q=[[1,1],[1,1]]` が
+    /// ZeroPivot 経由で indefinite と誤判定される (D[1]=0 が ZeroPivot に化け、
+    /// 新 conservative 経路で false を返す)。shift があれば D[1]≈2·shift > 0 となり
+    /// PSD を正しく検出。`test_is_q_psd_singular_psd` が production で PASS する
+    /// 真の理由が shift にあることを切り分ける。
+    #[test]
+    fn no_op_proof_shift_required_for_rank1_psd() {
+        let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)]);
+        // shift_factor=0 (revert), zeropivot_conservative=true (新経路維持)
+        let without_shift = is_q_psd_by_cholesky_probe(&q, 0.0, true);
+        assert!(
+            !without_shift,
+            "shift no-op proof: rank-1 PSD は shift 無しだと ZeroPivot で false 化される \
+             (= shift がなければ production が誤分類)"
+        );
+        // shift を戻すと production と同じく true を返す
+        let with_shift = is_q_psd_by_cholesky_probe(&q, SHIFT_FACTOR, true);
+        assert!(
+            with_shift,
+            "guard: shift 適用時は rank-1 PSD が正しく PSD と分類されること"
+        );
+    }
+
+    /// **ZeroPivot no-op proof**: zero-diag bilinear `Q=[[0,1],[1,0]]` (=#37 trigger) は
+    /// **shift 無しで初列が ZeroPivot** になる。旧経路 (`return true on ZeroPivot`) は
+    /// この indefinite Q を PSD と誤判定する一方、新経路は false (conservative) を返す。
+    /// shift を切った probe で旧経路 vs 新経路を直接比較し、ZeroPivot path 書換の必要性を実証。
+    #[test]
+    fn no_op_proof_zeropivot_conservative_required_when_shift_absent() {
+        let q = upper_tri_csc(2, &[(0, 1, 1.0)]);
+        // shift_factor=0, zeropivot_conservative=false (旧経路) → #37 bug 再現 = true (誤分類)
+        let old_path = is_q_psd_by_cholesky_probe(&q, 0.0, false);
+        assert!(
+            old_path,
+            "ZeroPivot no-op proof: 旧経路 (shift=0, ZeroPivot=true) は indefinite Q を \
+             PSD と誤分類する (= #37 オリジナルバグの再現)"
+        );
+        // shift=0, zeropivot_conservative=true (新経路のみ単独) → 修正される
+        let new_path_alone = is_q_psd_by_cholesky_probe(&q, 0.0, true);
+        assert!(
+            !new_path_alone,
+            "ZeroPivot conservative 単独で #37 bug を修正できること"
+        );
+    }
+
+    /// **shift と ZeroPivot 経路は belt-and-suspenders**: production (shift+conservative)
+    /// は #37 trigger を確実に弾く。shift 単独でも (= D[1]<<0 経由) indefinite 検出
+    /// 可能で、両 fix の独立寄与を network 状に検証する。
+    #[test]
+    fn no_op_proof_shift_alone_also_catches_zero_diag_bilinear() {
+        let q = upper_tri_csc(2, &[(0, 1, 1.0)]);
+        // shift あり、ZeroPivot 旧経路 → shift がもたらす D[1]<<−fp で indefinite 検出
+        let shift_alone = is_q_psd_by_cholesky_probe(&q, SHIFT_FACTOR, false);
+        assert!(
+            !shift_alone,
+            "shift 単独でも Q=[[0,1],[1,0]] は indefinite と検出される \
+             (= shift 経路が D[1] negative を露出させる)"
+        );
+        // production: 両 fix
+        let production = is_q_psd_by_cholesky_probe(&q, SHIFT_FACTOR, true);
+        assert!(!production, "production 経路は indefinite を弾く");
     }
 
     #[test]
