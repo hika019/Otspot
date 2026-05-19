@@ -221,3 +221,98 @@ fn ill_scaled_iter_budget_seed_0x9abc() {
         ITER_BUDGET
     );
 }
+
+// ---------------------------------------------------------------------------
+// scaling.rs:: EPS_FLOOR 経路を **単独で** sentinel する追加 test 群。
+//
+// 既存 2 test は `IPM_EPS_NOISE_FLOOR` (ipm_core/mod.rs) を 0 化した場合に FAIL する
+// が、`scaling.rs::EPS_FLOOR` のみを 0 化した場合は `ipm_solver/core::eps_tighten`
+// が `presolve_result` 経由で IPM eps を `IPM_EPS_NOISE_FLOOR` に floor し直す
+// ため依然 PASS。scaling.rs 経路の回帰を isolate するには `presolve=false` で
+// eps_tighten を no-op 化し、`scaling.rs::EPS_FLOOR` を唯一の guard にする必要がある。
+//
+// 実証 (本 file commit 時): scaling.rs:12 を `EPS_FLOOR = 0.0` に書換 →
+// `no_presolve_*` 群が FAIL (iter budget 超 + Optimal 不達)。restore で PASS。
+// ---------------------------------------------------------------------------
+
+/// presolve=false で scaling.rs::EPS_FLOOR を唯一の floor とする solver 呼出。
+/// `ipm_solver/core::eps_tighten` は `presolve_result.ruiz_scaler` を見て floor を
+/// 印加するため presolve=false なら sigma_total=1.0 = no-op となり、`scaling.rs::EPS_FLOOR`
+/// が唯一の noise floor guard となる。
+fn solve_no_presolve(problem: &QpProblem) -> SolverResult {
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.timeout_secs = Some(20.0);
+    solve_qp_with(problem, &opts)
+}
+
+/// scaling.rs path 用 IPM iter budget。floor active 実測 (seed 0xc3/0xd4/0xe5) は
+/// 17-23 iter、floor=0 化で 60-100 iter まで膨張するため `40` で十分に検出可能。
+const ITER_BUDGET_NO_PRESOLVE: usize = 40;
+
+/// LASSO no-presolve seed=0xc3: scaling.rs floor 単独の sentinel (eps_tighten 介在無し)。
+/// floor active で 17 iter / floor=0 で 82 iter (4.8x)。
+#[test]
+fn no_presolve_lasso_seed_0xc3() {
+    let problem = lasso_ill_scaled(120, 100, 0.1, 14.0, 0xc3);
+    let r = solve_no_presolve(&problem);
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
+        "unexpected status {:?}",
+        r.status
+    );
+    assert!(
+        r.iterations <= ITER_BUDGET_NO_PRESOLVE,
+        "LASSO no-presolve seed=0xc3: iter {} > budget {} — scaling.rs::EPS_FLOOR が機能していない疑い",
+        r.iterations,
+        ITER_BUDGET_NO_PRESOLVE
+    );
+    assert_orig_primal_residual_ok(&problem, &r.solution);
+}
+
+/// 別 seed=0xd4: seed bias 排除。
+#[test]
+fn no_presolve_lasso_seed_0xd4() {
+    let problem = lasso_ill_scaled(120, 100, 0.1, 14.0, 0xd4);
+    let r = solve_no_presolve(&problem);
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
+        "unexpected status {:?}",
+        r.status
+    );
+    assert!(
+        r.iterations <= ITER_BUDGET_NO_PRESOLVE,
+        "LASSO no-presolve seed=0xd4: iter {} > budget {} — scaling.rs::EPS_FLOOR が機能していない疑い",
+        r.iterations,
+        ITER_BUDGET_NO_PRESOLVE
+    );
+    assert_orig_primal_residual_ok(&problem, &r.solution);
+}
+
+/// 別 seed=0xe5 + 異なる λ (0.5): regularization 強度違いでも同 budget を満たすこと。
+#[test]
+fn no_presolve_lasso_seed_0xe5_lambda_0_5() {
+    let problem = lasso_ill_scaled(120, 100, 0.5, 14.0, 0xe5);
+    let r = solve_no_presolve(&problem);
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+        ),
+        "unexpected status {:?}",
+        r.status
+    );
+    assert!(
+        r.iterations <= ITER_BUDGET_NO_PRESOLVE,
+        "LASSO no-presolve seed=0xe5 λ=0.5: iter {} > budget {} — scaling.rs::EPS_FLOOR が機能していない疑い",
+        r.iterations,
+        ITER_BUDGET_NO_PRESOLVE
+    );
+    assert_orig_primal_residual_ok(&problem, &r.solution);
+}
