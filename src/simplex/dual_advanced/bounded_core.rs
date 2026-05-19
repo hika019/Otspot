@@ -46,12 +46,13 @@
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::SolverOptions;
+use crate::problem::LpProblem;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
 use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
-use super::super::standard_form::BoundedStandardForm;
+use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::bound_flip::{bfrt_select_entering, ColBound};
 
 /// Terminal status of the bounded dual simplex iteration.
@@ -496,6 +497,303 @@ fn ftran_column(
     };
     basis_mgr.ftran(&mut sv);
     sv.to_dense_into(out);
+}
+
+// ── test-only hook: disable the at_upper correction in extract_solution_bounded ──
+
+#[cfg(test)]
+thread_local! {
+    /// When true, `extract_solution_bounded` skips the non-basic-at-upper
+    /// contribution. Used by the no-op proof sentinel to confirm the correction
+    /// is load-bearing. Release builds see a const-false inlined by the optimizer.
+    static AT_UPPER_APPLY_DISABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_at_upper_apply_disabled(v: bool) {
+    AT_UPPER_APPLY_DISABLE.with(|c| c.set(v));
+}
+
+#[cfg(test)]
+fn at_upper_apply_disabled() -> bool {
+    AT_UPPER_APPLY_DISABLE.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn at_upper_apply_disabled() -> bool {
+    false
+}
+
+// ── bounded solution / dual recovery ──────────────────────────────────────────
+
+/// Recover the full primal vector from a bounded dual terminal state.
+///
+/// Unlike `extract_solution` (which sets every non-basic value to 0), this
+/// function accounts for variables that are non-basic **at their upper bound**:
+/// - basic j = basis[i]: `x_new[j] = x_b[i] * col_scale[j]`
+/// - non-basic at lb (`at_upper[j] = false`): `x_new[j] = 0`
+/// - non-basic at ub (`at_upper[j] = true`): `x_new[j] = upper_bounds[j]`
+///   (no col_scale needed: `upper_bounds` lives in the pre-Ruiz-scale space,
+///   so the scale factors cancel)
+///
+/// The result is mapped back to original variables via `orig_var_info`
+/// with double-double arithmetic for free-variable split cancellation.
+pub(crate) fn extract_solution_bounded(
+    bsf: &BoundedStandardForm,
+    state: &BoundedDualState,
+    col_scale: &[f64],
+) -> Vec<f64> {
+    use twofloat::TwoFloat;
+    let mut x_new = vec![0.0f64; bsf.n_shifted];
+
+    for i in 0..bsf.m {
+        let j = state.basis[i];
+        if j < bsf.n_shifted {
+            let scale = col_scale.get(j).copied().unwrap_or(1.0);
+            x_new[j] = state.x_b[i] * scale;
+        }
+    }
+
+    if !at_upper_apply_disabled() {
+        for j in 0..bsf.n_shifted {
+            if !state.is_basic[j] && state.at_upper[j] {
+                // upper_bounds[j] is in original (pre-scale) space; col_scale cancels.
+                x_new[j] = bsf.upper_bounds[j];
+            }
+        }
+    }
+
+    let mut solution = vec![0.0f64; bsf.n_orig];
+    for (orig_j, sol_j) in solution.iter_mut().enumerate() {
+        let info = &bsf.orig_var_info[orig_j];
+        let mut value = TwoFloat::from(info.offset);
+        for &(new_idx, coeff) in &info.new_vars {
+            value = value + TwoFloat::new_mul(coeff, x_new[new_idx]);
+        }
+        *sol_j = f64::from(value);
+    }
+    solution
+}
+
+/// Recover original-problem duals, reduced costs, and slack from a bounded
+/// dual terminal state. Mirrors `extract_dual_info` but operates on
+/// `BoundedStandardForm` (no UB rows ⇒ `bsf.m == m_orig`).
+pub(crate) fn extract_dual_info_bounded(
+    bsf: &BoundedStandardForm,
+    problem: &LpProblem,
+    y_std: &[f64],
+    solution: &[f64],
+    row_scale: &[f64],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let m_orig = bsf.m;
+    let n_orig = bsf.n_orig;
+
+    let mut dual_solution = vec![0.0f64; m_orig];
+    for i in 0..m_orig {
+        let sign = if bsf.row_negated[i] { -1.0 } else { 1.0 };
+        let rs = row_scale.get(i).copied().unwrap_or(1.0);
+        dual_solution[i] = sign * rs * y_std[i];
+    }
+
+    let mut slack = problem.b.clone();
+    for (j, &sol_j) in solution.iter().enumerate().take(n_orig) {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                slack[row] -= vals[k] * sol_j;
+            }
+        }
+    }
+
+    let mut reduced_costs = problem.c.clone();
+    for (j, rc_j) in reduced_costs.iter_mut().enumerate().take(n_orig) {
+        if let Ok((rows, vals)) = problem.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                *rc_j -= dual_solution[row] * vals[k];
+            }
+        }
+    }
+
+    (dual_solution, reduced_costs, slack)
+}
+
+// ── bounded primal Phase 2 ─────────────────────────────────────────────────
+
+/// Hard iteration cap for the bounded primal Phase 2 loop.
+const PHASE2_PRIMAL_ITER_CAP: usize = 1_000_000;
+
+/// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
+///
+/// Caller supplies the state produced by `solve_bounded_dual` (perturbed-cost
+/// dual phase) and the **original** cost vector `c`. The function minimizes
+/// the original objective while maintaining primal feasibility, handling
+/// variables at their upper bound via bounded-primal ratio test.
+///
+/// Pricing: non-basic at lb enters if `rc < 0`; non-basic at ub enters if
+/// `rc > 0` (reversed, because decreasing from ub reduces the objective).
+/// Ratio test: leaving variable hits either its lb or ub; entering variable
+/// may flip to its opposite bound without a basis change (step = `u_q`).
+///
+/// Returns `(SimplexOutcome, BoundedDualState)` so the caller can extract the
+/// solution and dual variables from the terminal state.
+pub(crate) fn phase2_primal_bounded(
+    bsf: &BoundedStandardForm,
+    mut state: BoundedDualState,
+    a: &CscMatrix,
+    c: &[f64],
+    options: &SolverOptions,
+    iters: &mut usize,
+) -> (SimplexOutcome, BoundedDualState) {
+    let m = bsf.m;
+    let n_total = bsf.n_total;
+
+    let mut basis_mgr = match LuBasis::new(a, &state.basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return (SimplexOutcome::SingularBasis, state),
+    };
+
+    let mut y = vec![0.0f64; m];
+    let mut rc = vec![0.0f64; n_total];
+    let mut alpha = vec![0.0f64; m];
+
+    loop {
+        *iters = iters.saturating_add(1);
+        if *iters > PHASE2_PRIMAL_ITER_CAP {
+            return (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state);
+        }
+        if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state);
+        }
+
+        compute_reduced_costs_into(a, c, &mut basis_mgr, &state.is_basic, n_total,
+                                   &state.basis, &mut y, &mut rc);
+
+        // Pricing: most-improving non-basic (Dantzig rule).
+        // at_lb: enter if rc < 0 (increasing x improves min objective)
+        // at_ub: enter if rc > 0 (decreasing x improves min objective)
+        let mut best_score = PIVOT_TOL;
+        let mut entering: Option<usize> = None;
+        for j in 0..n_total {
+            if state.is_basic[j] {
+                continue;
+            }
+            let score = if state.at_upper[j] { rc[j] } else { -rc[j] };
+            if score > best_score {
+                best_score = score;
+                entering = Some(j);
+            }
+        }
+
+        let q = match entering {
+            None => {
+                let obj = basic_obj(c, &state.basis, &state.x_b);
+                return (SimplexOutcome::Optimal(obj, y), state);
+            }
+            Some(q) => q,
+        };
+
+        let from_ub = state.at_upper[q];
+        // dir = +1: entering from lb (x_q increases); dir = -1: from ub (decreases).
+        let dir = if from_ub { -1.0f64 } else { 1.0 };
+
+        ftran_column(a, &mut basis_mgr, q, m, &mut alpha);
+
+        // Bounded ratio test.
+        // Update rule: x_b[i] += delta[i] * theta, where delta[i] = -alpha[i] * dir.
+        // Leaving at lb: delta[r] < 0, theta = x_b[r] / (-delta[r]) = x_b[r] * dir / alpha[r]...
+        // Equivalent formulation (cleaner): treat "effective pivot column" as alpha[i]*dir.
+        // Leaving at lb: eff_alpha[r] > PIVOT_TOL, theta = x_b[r] / eff_alpha[r]
+        // Leaving at ub: eff_alpha[r] < -PIVOT_TOL, theta = (ub_r - x_b[r]) / (-eff_alpha[r])
+        let mut min_step = f64::INFINITY;
+        let mut leaving_row: Option<usize> = None;
+        let mut leaving_at_ub = false;
+
+        for i in 0..m {
+            let eff = alpha[i] * dir;
+            let xi = state.x_b[i];
+            let ub_i = bsf.upper_bounds[state.basis[i]];
+
+            if eff > PIVOT_TOL {
+                let step = xi / eff;
+                if step < min_step {
+                    min_step = step.max(0.0);
+                    leaving_row = Some(i);
+                    leaving_at_ub = false;
+                }
+            } else if eff < -PIVOT_TOL && ub_i.is_finite() {
+                let step = (ub_i - xi) / (-eff);
+                if step < min_step {
+                    min_step = step.max(0.0);
+                    leaving_row = Some(i);
+                    leaving_at_ub = true;
+                }
+            }
+        }
+
+        // Check if entering variable hits its own opposite bound first.
+        let ub_q = bsf.upper_bounds[q];
+        if ub_q.is_finite() && ub_q < min_step {
+            // Flip entering var to opposite bound; no basis change.
+            for i in 0..m {
+                state.x_b[i] -= alpha[i] * dir * ub_q;
+            }
+            state.at_upper[q] = !from_ub;
+            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                return if basis_mgr.singular_basis {
+                    (SimplexOutcome::SingularBasis, state)
+                } else {
+                    (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state)
+                };
+            }
+            continue;
+        }
+
+        let r = match leaving_row {
+            None => return (SimplexOutcome::Unbounded, state),
+            Some(r) => r,
+        };
+
+        let theta = min_step;
+        let leaving_col = state.basis[r];
+
+        // Update x_b: all rows by -alpha[i]*dir*theta, then override row r.
+        for i in 0..m {
+            state.x_b[i] -= alpha[i] * dir * theta;
+        }
+        state.x_b[r] = if from_ub { ub_q - theta } else { theta };
+
+        // Clamp near-zero (matches existing cores).
+        for v in state.x_b.iter_mut() {
+            if v.abs() < options.clamp_tol {
+                *v = 0.0;
+            }
+        }
+
+        // Bound state of outgoing / incoming columns.
+        state.at_upper[leaving_col] = leaving_at_ub;
+        state.at_upper[q] = false; // entering is now basic; basic vars carry no bound state
+        state.is_basic[leaving_col] = false;
+        state.is_basic[q] = true;
+        state.basis[r] = q;
+
+        // Eta update.
+        let (cr, cv) = a.get_column(q).unwrap();
+        let mut alpha_sv = SparseVec { indices: cr.to_vec(), values: cv.to_vec(), len: m };
+        basis_mgr.ftran(&mut alpha_sv);
+        basis_mgr.update(q, r, &alpha_sv);
+
+        if basis_mgr.needs_refactor() {
+            basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
+            if basis_mgr.refactor_failed {
+                return if basis_mgr.singular_basis {
+                    (SimplexOutcome::SingularBasis, state)
+                } else {
+                    (SimplexOutcome::Timeout(basic_obj(c, &state.basis, &state.x_b)), state)
+                };
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -944,5 +1242,338 @@ mod tests {
                 other
             ),
         }
+    }
+
+    // ── extract_solution_bounded / extract_dual_info_bounded tests ────────
+
+    /// RAII guard for `AT_UPPER_APPLY_DISABLE`.
+    struct AtUpperApplyGuard;
+    impl AtUpperApplyGuard {
+        fn disabled() -> Self {
+            set_at_upper_apply_disabled(true);
+            Self
+        }
+    }
+    impl Drop for AtUpperApplyGuard {
+        fn drop(&mut self) {
+            set_at_upper_apply_disabled(false);
+        }
+    }
+
+    /// Table-driven fixture for extract_solution_bounded.
+    ///
+    /// Each row: expected solution after manually placing at least one
+    /// non-basic variable at its upper bound (at_upper = true).
+    struct ExtractFixture {
+        name: &'static str,
+        problem: LpProblem,
+        /// Columns to flip to at_upper in the cold-start state.
+        flip_to_upper: Vec<usize>,
+        /// Expected solution after the flip.
+        expected: Vec<f64>,
+    }
+
+    /// Fixture: lb=0, ub=∞ — no variable at upper; extract_solution_bounded
+    /// must match extract_solution on the same cold-start state.
+    fn fixture_unbounded_compat() -> ExtractFixture {
+        // min x0 + 2 x1, x0 + x1 ≤ 3, x0,x1 ≥ 0 (no UB)
+        // Optimal (perturbed = original since c > 0): x0=x1=0
+        let rows = vec![0, 0];
+        let cols = vec![0, 1];
+        let vals = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, 2).unwrap();
+        let problem = LpProblem::new_general(
+            vec![1.0, 2.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        ).unwrap();
+        ExtractFixture {
+            name: "unbounded_compat",
+            problem,
+            flip_to_upper: vec![], // nothing at upper
+            expected: vec![0.0, 0.0],
+        }
+    }
+
+    /// Fixture: lb=0, ub=1 — x0 manually placed at ub=1.
+    fn fixture_boxed_ub1() -> ExtractFixture {
+        // min x0 + x1, x0 + x1 ≤ 5, 0 ≤ x0 ≤ 1, 0 ≤ x1 ≤ 1
+        // build_bounded: n_shifted=2, upper_bounds=[1,1,∞]
+        // manual: at_upper[0]=true (x0=1), x1=0 (at lb)
+        // expected: x0=1, x1=0
+        let rows = vec![0, 0];
+        let cols = vec![0, 1];
+        let vals = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, 2).unwrap();
+        let problem = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+            None,
+        ).unwrap();
+        ExtractFixture {
+            name: "boxed_ub1",
+            problem,
+            flip_to_upper: vec![0], // x0 at ub=1
+            expected: vec![1.0, 0.0],
+        }
+    }
+
+    /// Fixture: lb=−5, ub=5 — shifted variable at ub=10 (post-shift), orig=5.
+    fn fixture_nonzero_lb() -> ExtractFixture {
+        // min x0 + x1, x0 + x1 ≤ 5, -5 ≤ x0 ≤ 5, -5 ≤ x1 ≤ 5
+        // build_bounded: x0_shifted = x0 + 5, ub_shifted=10, offset=-5
+        // manual: at_upper[0]=true (x0_shifted=10 → x0=5)
+        // expected: x0=5, x1=-5 (x1 at lb default)
+        let rows = vec![0, 0];
+        let cols = vec![0, 1];
+        let vals = vec![1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 1, 2).unwrap();
+        let problem = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(-5.0, 5.0), (-5.0, 5.0)],
+            None,
+        ).unwrap();
+        ExtractFixture {
+            name: "nonzero_lb",
+            problem,
+            flip_to_upper: vec![0], // x0_shifted at ub=10 → x0=5
+            expected: vec![5.0, -5.0],
+        }
+    }
+
+    /// Build a `BoundedDualState` that reflects `flip_to_upper` columns being
+    /// at their upper bounds. Adjusts `x_b` (single basic slack) so that
+    /// `A * x_full = b` holds.
+    fn state_with_flips(bsf: &BoundedStandardForm, flip_cols: &[usize]) -> BoundedDualState {
+        let mut state = BoundedDualState::cold(bsf, &bsf.b);
+        for &j in flip_cols {
+            assert!(!state.is_basic[j], "can only flip non-basic columns");
+            assert!(bsf.upper_bounds[j].is_finite(), "flip target must have finite ub");
+            state.at_upper[j] = true;
+            // Adjust x_b[i] for each basic row: x_b[i] -= upper_bounds[j] * A[i,j]
+            let (rows, vals) = bsf.a.get_column(j).unwrap();
+            for (k, &row) in rows.iter().enumerate() {
+                if row < bsf.m {
+                    state.x_b[row] -= vals[k] * bsf.upper_bounds[j];
+                }
+            }
+        }
+        state
+    }
+
+    /// Table-driven correctness: three bound patterns each check that the
+    /// expected original-variable value is recovered after placing one or
+    /// more variables at their upper bound.
+    #[test]
+    fn extract_solution_bounded_multi_fixture() {
+        let fixtures = [
+            fixture_unbounded_compat(),
+            fixture_boxed_ub1(),
+            fixture_nonzero_lb(),
+        ];
+        const EPS: f64 = 1e-10;
+        for fx in &fixtures {
+            let bsf = build_bounded_standard_form(&fx.problem);
+            let state = state_with_flips(&bsf, &fx.flip_to_upper);
+            let sol = extract_solution_bounded(&bsf, &state, &[]);
+            assert_eq!(
+                sol.len(),
+                fx.expected.len(),
+                "{}: solution length mismatch",
+                fx.name
+            );
+            for (i, (&got, &want)) in sol.iter().zip(fx.expected.iter()).enumerate() {
+                assert!(
+                    (got - want).abs() < EPS,
+                    "{}: solution[{}] = {got:.6e}, expected {want:.6e}",
+                    fx.name,
+                    i
+                );
+            }
+        }
+    }
+
+    /// Equivalence: for the unbounded-compat fixture (all at_upper false),
+    /// extract_solution_bounded must give the same result as the unbounded
+    /// `extract_solution` on the same state — they only diverge when at_upper
+    /// is true.
+    #[test]
+    fn extract_solution_bounded_matches_unbounded_when_no_at_upper() {
+        use crate::simplex::primal::extract_solution;
+        use crate::simplex::standard_form::build_standard_form;
+        const EPS: f64 = 1e-10;
+        let fx = fixture_unbounded_compat();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let sf = build_standard_form(&fx.problem);
+        // Run bounded dual (terminates immediately; no at_upper set).
+        let opts = SolverOptions::default();
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        assert!(
+            matches!(outcome, BoundedOutcome::Optimal(..)),
+            "expected Optimal, got {:?}", outcome
+        );
+        // All non-basics must be at lb for the equivalence to hold.
+        let any_upper = state.at_upper.iter().enumerate()
+            .any(|(j, &u)| u && !state.is_basic[j]);
+        assert!(!any_upper, "unexpected at_upper set in unbounded-compat fixture");
+
+        let sol_bounded = extract_solution_bounded(&bsf, &state, &[]);
+        // For the unscaled standard form, basis and x_b come directly from bsf initial state.
+        let sol_std = extract_solution(&sf, &state.basis, &state.x_b, &[]);
+        for (i, (&a, &b)) in sol_bounded.iter().zip(sol_std.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < EPS,
+                "bounded[{}]={a:.3e} vs unbounded[{}]={b:.3e}", i, i
+            );
+        }
+    }
+
+    /// No-op proof: disabling the at_upper correction in
+    /// extract_solution_bounded causes the boxed-ub1 sentinel to produce a
+    /// wrong solution. The no-op result must differ from the correct result
+    /// by more than EPS.
+    #[test]
+    fn extract_solution_bounded_noop_proof() {
+        const EPS: f64 = 1e-6;
+        let fx = fixture_boxed_ub1();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let state = state_with_flips(&bsf, &fx.flip_to_upper);
+
+        let sol_correct = extract_solution_bounded(&bsf, &state, &[]);
+        let sol_noop = {
+            let _guard = AtUpperApplyGuard::disabled();
+            extract_solution_bounded(&bsf, &state, &[])
+        };
+
+        // Correct: x0=1 (at ub). No-op: x0=0 (at_upper correction skipped).
+        assert!(
+            (sol_correct[0] - 1.0).abs() < EPS,
+            "correct solution[0] should be 1.0, got {}", sol_correct[0]
+        );
+        assert!(
+            sol_noop[0].abs() < EPS,
+            "noop solution[0] should be 0.0 (correction disabled), got {}", sol_noop[0]
+        );
+        let max_diff = sol_correct.iter().zip(sol_noop.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_diff > EPS,
+            "no-op proof FAILED: correct and noop solutions are identical (diff={max_diff:.3e}) \
+             — the at_upper correction is not load-bearing in this fixture"
+        );
+    }
+
+    /// extract_dual_info_bounded basic smoke: row-negated flag inversion and
+    /// slack computation from the same fixture used in the equivalence test.
+    #[test]
+    fn extract_dual_info_bounded_smoke() {
+        use crate::simplex::standard_form::extract_dual_info;
+        use crate::simplex::standard_form::build_standard_form;
+        let fx = fixture_unbounded_compat();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let sf = build_standard_form(&fx.problem);
+        let opts = SolverOptions::default();
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (_, y_std) = match outcome {
+            BoundedOutcome::Optimal(obj, y) => (obj, y),
+            other => panic!("expected Optimal, got {:?}", other),
+        };
+        let solution = extract_solution_bounded(&bsf, &state, &[]);
+        let (dual_b, rc_b, slack_b) = extract_dual_info_bounded(
+            &bsf, &fx.problem, &y_std, &solution, &[],
+        );
+        // Compare with the legacy path on the equivalent standard form.
+        let (dual_s, rc_s, slack_s) = extract_dual_info(
+            &sf, &fx.problem, &y_std[..sf.m.min(y_std.len())], &solution, &[],
+        );
+        // For a Le-only non-negated problem the row_negated flags are all false;
+        // the dual vectors must match entry for entry.
+        const EPS: f64 = 1e-8;
+        for i in 0..dual_b.len() {
+            assert!(
+                (dual_b[i] - dual_s[i]).abs() < EPS,
+                "dual[{}]: bounded={:.3e}, std={:.3e}", i, dual_b[i], dual_s[i]
+            );
+        }
+        for j in 0..rc_b.len() {
+            assert!(
+                (rc_b[j] - rc_s[j]).abs() < EPS,
+                "rc[{}]: bounded={:.3e}, std={:.3e}", j, rc_b[j], rc_s[j]
+            );
+        }
+        for i in 0..slack_b.len() {
+            assert!(
+                (slack_b[i] - slack_s[i]).abs() < EPS,
+                "slack[{}]: bounded={:.3e}, std={:.3e}", i, slack_b[i], slack_s[i]
+            );
+        }
+    }
+
+    // ── phase2_primal_bounded tests ────────────────────────────────────────
+
+    /// End-to-end Phase 2: start from bounded dual Optimal (perturbed costs),
+    /// run phase2_primal_bounded with original costs, verify the known optimal.
+    ///
+    /// LP: min -x0 - x1, x0+x1 ≤ 6, x0-x1 ≤ 2, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 4
+    /// Known optimal: x0=4, x1=2, obj=-6.
+    #[test]
+    fn phase2_primal_bounded_reaches_known_optimal() {
+        let lp = lp_boxed_2x2_degenerate();
+        let bsf = build_bounded_standard_form(&lp);
+        let opts = SolverOptions::default();
+        // Bounded dual: c̃ = max(c,0) = [0,0] → terminates immediately with slack basis.
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+
+        let mut iters = 0usize;
+        let (p2_outcome, p2_state) = phase2_primal_bounded(
+            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters,
+        );
+        assert!(
+            matches!(p2_outcome, SimplexOutcome::Optimal(..)),
+            "Phase 2 did not reach Optimal: {:?}", p2_outcome
+        );
+        let sol = extract_solution_bounded(&bsf, &p2_state, &[]);
+        let obj: f64 = lp.c.iter().zip(sol.iter()).map(|(c, x)| c * x).sum();
+        assert!(
+            (obj - (-6.0)).abs() < 1e-6,
+            "expected obj=-6.0, got {obj:.6e}"
+        );
+        assert!(
+            (sol[0] - 4.0).abs() < 1e-6 && (sol[1] - 2.0).abs() < 1e-6,
+            "expected x=(4,2), got ({:.3e},{:.3e})", sol[0], sol[1]
+        );
+        assert!(iters > 0, "phase2 should have made at least one iteration");
+    }
+
+    /// Phase 2 with no original-cost improvement needed: perturbed ≡ original
+    /// (all c ≥ 0). The loop must return Optimal on the very first pricing pass.
+    #[test]
+    fn phase2_primal_bounded_noop_when_already_optimal() {
+        let fx = fixture_one_row_two_boxed(); // c = [1, 2] (all positive)
+        let bsf = build_bounded_standard_form(&fx.problem);
+        let opts = SolverOptions::default();
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
+        let mut iters = 0usize;
+        let (p2_outcome, _) = phase2_primal_bounded(
+            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters,
+        );
+        assert!(
+            matches!(p2_outcome, SimplexOutcome::Optimal(..)),
+            "expected Optimal, got {:?}", p2_outcome
+        );
+        // c = [1,2] ≥ 0 so c̃ = c; dual already optimal for original costs.
+        assert_eq!(iters, 1, "should terminate after one pricing pass (no improvement)");
     }
 }
