@@ -629,9 +629,11 @@ mod tests {
     }
 
     /// **Multi-pattern coverage**: three LP shapes all reach Optimal.
+    /// Pattern 2 (flip-trigger, finite UBs) asserts flip count > 0 as a
+    /// load-bearing sentinel — fails if bounded dispatch is bypassed.
     #[test]
     fn bfrt_wiring_multi_pattern_correct() {
-        // Pattern 1: 2x2 boxed
+        // Pattern 1: 2x2 boxed — bounded path, Phase 2 converges without BFRT flip.
         {
             let lp = lp_2x2_boxed();
             let sf = build_standard_form(&lp);
@@ -639,15 +641,19 @@ mod tests {
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 1 status");
             assert!((r.objective - (-6.0)).abs() < 1e-5, "pattern 1 obj={}", r.objective);
         }
-        // Pattern 2: flip-trigger LP, non-basic-at-ub optimal contribution
+        // Pattern 2: flip-trigger LP — entering variable hits its UB before leaving
+        // row. Flip count > 0 confirms the BFRT flip path in Phase 2 is reachable.
         {
             let lp = lp_flip_trigger();
             let sf = build_standard_form(&lp);
+            reset_bfrt_flip_invocations();
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+            let flips = bfrt_flip_invocations();
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 2 status");
             assert!((r.objective - (-9.0)).abs() < 1e-5, "pattern 2 obj={}", r.objective);
+            assert!(flips > 0, "pattern 2: flip count = 0, bounded path not exercised");
         }
-        // Pattern 3: no UBs → legacy path
+        // Pattern 3: no UBs → legacy path, no flip assertion.
         {
             let lp = lp_no_ub();
             let sf = build_standard_form(&lp);
@@ -657,12 +663,18 @@ mod tests {
     }
 
     /// Warm start from a bounded-path solve is accepted and reused.
+    /// Uses the flip-trigger LP so that the cold solve exercises the BFRT flip
+    /// path and flip count > 0 becomes a load-bearing sentinel.
     #[test]
     fn bfrt_wiring_warm_start_reuse() {
-        let lp = lp_2x2_boxed();
+        let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
+        reset_bfrt_flip_invocations();
         let r1 = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
+        let flips = bfrt_flip_invocations();
         assert_eq!(r1.status, SolveStatus::Optimal);
+        assert!(flips > 0,
+            "warm_start_reuse cold solve: flip count = 0, bounded path not exercised");
         let ws = r1.warm_start_basis.expect("bounded path must return warm_start_basis");
         let r2 = solve_dual_advanced(
             &sf, &lp,
