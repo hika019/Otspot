@@ -11,8 +11,15 @@
 //! (= 既存 QP user の wall を桁違いに伸ばさない安全装置)。
 //!
 //! # 戻り値の status
-//! - `Optimal`: queue 空 + 全 leaf が ε-feasible → 大域 ε-optimal 証明済み
-//! - `LocallyOptimal`: deadline / max_nodes / max_depth で打ち切り、incumbent あり (gap 未保証)
+//! Q の凸性 (Gershgorin 由来 `alpha == 0.0` を PSD と判定) で分岐:
+//! - **Q PSD (convex):**
+//!   - `Optimal`: BB 探索完了 (root tight or queue 空) → 凸 QP として global ε-optimal
+//!   - `LocallyOptimal`: 早期打切 (gap 未証明)。convex Q では IPM 単発で global 達成しても
+//!     budget 不足で proof が間に合わなかった希少ケース。
+//! - **Q indefinite (nonconvex):**
+//!   - `NonconvexGlobal`: BB 探索完了 → indefinite Q 上で ε-global 証明済み
+//!   - `NonconvexLocal`: 早期打切 → incumbent あり、global proof なし (caller は探索打切と
+//!     IPM 単発 `LocallyOptimal` を区別できる)
 //! - `Timeout`: deadline で打ち切り、incumbent 未発見
 //! - root と同じ status: root が Infeasible / NumericalError / Unbounded だった場合
 
@@ -103,6 +110,11 @@ pub fn solve_qp_global_with_stats(
         0.0
     };
 
+    // status 分岐用: Q が indefinite かどうかを Gershgorin で判定。
+    // gershgorin_alpha は対角 - off-diag 行和の最小値の絶対値 (Q が PSD 範囲なら 0)。
+    // use_alpha_bb=false でも判定だけは行う (status 判別は探索戦略に依存させない)。
+    let q_indefinite = is_q_indefinite(problem);
+
     let root_lb = compute_node_lower_bound(
         problem,
         &root_bounds,
@@ -118,7 +130,7 @@ pub fn solve_qp_global_with_stats(
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return (state.finalize_proven(root_lb), stats);
+        return (state.finalize_proven(root_lb, q_indefinite), stats);
     }
 
     let mut tree = BBTree::new();
@@ -131,10 +143,16 @@ pub fn solve_qp_global_with_stats(
     match select_branching_variable(&root_node, &root_x) {
         None => {
             return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (state.finalize_proven(root_lb), stats)
+                (state.finalize_proven(root_lb, q_indefinite), stats)
             } else {
                 (
-                    state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg),
+                    state.finalize_unproven(
+                        root_lb,
+                        stats.nodes_processed,
+                        0,
+                        cfg,
+                        q_indefinite,
+                    ),
                     stats,
                 )
             };
@@ -232,21 +250,31 @@ pub fn solve_qp_global_with_stats(
         let inc_obj = state.incumbent_obj;
         if proven {
             let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(lb_for_proof)
+            state.finalize_proven(lb_for_proof, q_indefinite)
         } else {
             state.finalize_unproven(
                 remaining_lb,
                 stats.nodes_processed,
                 stats.max_depth_seen,
                 cfg,
+                q_indefinite,
             )
         }
     } else {
         // queue 空 = 全探索完了 → incumbent_obj が global
         let inc_obj = state.incumbent_obj;
-        state.finalize_proven(inc_obj)
+        state.finalize_proven(inc_obj, q_indefinite)
     };
     (result, stats)
+}
+
+/// Q が indefinite (= 少なくとも 1 つの負固有値が Gershgorin で証明可能) か。
+///
+/// `gershgorin_alpha` は対角項 - off-diag 絶対値和の最小値が負のとき正値を返す
+/// (= α-BB の δ 補正量、Q が PSD 範囲内なら 0)。これを「PSD でない疑いあり」
+/// = caller 視点では nonconvex 確実、と扱う (Gershgorin は十分条件、必要ではない)。
+fn is_q_indefinite(problem: &QpProblem) -> bool {
+    gershgorin_alpha(&problem.q) > 0.0
 }
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {
@@ -320,28 +348,40 @@ impl SearchState {
         self.incumbent_result = res.clone();
     }
 
-    fn finalize_proven(mut self, lower_bound: f64) -> SolverResult {
-        self.incumbent_result.status = SolveStatus::Optimal;
+    /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
+    /// (= 「proven かつ Q indefinite」と「proven かつ Q PSD」を caller が区別可能)
+    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool) -> SolverResult {
+        self.incumbent_result.status = if q_indefinite {
+            SolveStatus::NonconvexGlobal
+        } else {
+            SolveStatus::Optimal
+        };
         log::debug!(
-            "QP global proven: obj={:.6e} lb={:.6e}",
-            self.incumbent_obj, lower_bound
+            "QP global proven: status={} obj={:.6e} lb={:.6e}",
+            self.incumbent_result.status, self.incumbent_obj, lower_bound
         );
         self.incumbent_result
     }
 
+    /// Q が indefinite なら `NonconvexLocal`、convex なら `LocallyOptimal` を set。
+    /// (= IPM 単発 inertia 補正 `LocallyOptimal` と BB 打切 `NonconvexLocal` を分離)
     fn finalize_unproven(
         mut self,
         lower_bound: f64,
         nodes: usize,
         depth: usize,
         cfg: &GlobalOptimizationConfig,
+        q_indefinite: bool,
     ) -> SolverResult {
-        // 大域最適性は未確定 → LocallyOptimal に降格 (Optimal はあくまで proof 済み枠)
-        self.incumbent_result.status = SolveStatus::LocallyOptimal;
+        self.incumbent_result.status = if q_indefinite {
+            SolveStatus::NonconvexLocal
+        } else {
+            SolveStatus::LocallyOptimal
+        };
         let gap = self.incumbent_obj - lower_bound;
         log::debug!(
-            "QP global unproven: obj={:.6e} lb={:.6e} gap={:.3e} nodes={} depth={} tol={:.0e}",
-            self.incumbent_obj, lower_bound, gap, nodes, depth, cfg.gap_tol
+            "QP global unproven: status={} obj={:.6e} lb={:.6e} gap={:.3e} nodes={} depth={} tol={:.0e}",
+            self.incumbent_result.status, self.incumbent_obj, lower_bound, gap, nodes, depth, cfg.gap_tol
         );
         self.incumbent_result
     }
@@ -371,8 +411,14 @@ mod tests {
         let cfg = GlobalOptimizationConfig::default();
         let r = solve_qp_global(&p, &opts(5.0), &cfg);
         assert!(
-            matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
-            "expected Optimal/LocallyOptimal, got {:?}",
+            matches!(
+                r.status,
+                SolveStatus::Optimal
+                    | SolveStatus::LocallyOptimal
+                    | SolveStatus::NonconvexGlobal
+                    | SolveStatus::NonconvexLocal
+            ),
+            "expected Optimal/Locally/NonconvexGlobal/NonconvexLocal, got {:?}",
             r.status
         );
         // global = -4 at x=±2. Local IPM cold solve typically gets stuck at x=0 (saddle).
@@ -401,5 +447,90 @@ mod tests {
             "global should reach corner, got {}",
             global.objective
         );
+    }
+
+    // ---- Phase 6 (#9): status 区別 sentinel ----------------------------------
+    //
+    // 観測: BB driver の return path で Q が convex (PSD) か indefinite かに応じて
+    // `Optimal` vs `NonconvexGlobal` / `LocallyOptimal` vs `NonconvexLocal` が
+    // 切り替わることを fact 検証 (no-op proof: finalize_proven / finalize_unproven
+    // を全て `Optimal` 固定にすると下記 sentinel は FAIL する = mutation 検出)。
+
+    fn diag_convex_1d(bnd: f64) -> QpProblem {
+        // f = x², box [-bnd, bnd] → global min = 0 at x=0 (PSD)
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(-bnd, bnd)]).unwrap()
+    }
+
+    #[test]
+    fn convex_q_yields_optimal_not_nonconvex_global() {
+        // PSD Q → BB が即収束 → Optimal (NonconvexGlobal でない)
+        let p = diag_convex_1d(3.0);
+        let r = solve_qp_global(&p, &opts(2.0), &GlobalOptimizationConfig::default());
+        assert!(
+            matches!(r.status, SolveStatus::Optimal),
+            "convex Q must yield Optimal, got {:?}",
+            r.status
+        );
+    }
+
+    #[test]
+    fn indefinite_q_proven_yields_nonconvex_global() {
+        // indefinite Q (-x²) + 十分な budget → NonconvexGlobal が出ることを確認。
+        // 1D concave は root 即 corner = corner で proof 完了。
+        let p = diag_concave_1d(2.0);
+        let r = solve_qp_global(&p, &opts(5.0), &GlobalOptimizationConfig::default());
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexGlobal),
+            "indefinite Q + proven must yield NonconvexGlobal, got {:?}",
+            r.status
+        );
+    }
+
+    #[test]
+    fn indefinite_q_unproven_yields_nonconvex_local() {
+        // indefinite Q + 極小 budget (max_nodes=1, max_depth=1) → proof 取れず
+        // → NonconvexLocal が出る。
+        // 2D concave (= bowl 逆さ) + 各軸 [-1,1] を box にして root 分枝が必要に。
+        let q = CscMatrix::from_triplets(
+            &[0, 1],
+            &[0, 1],
+            &[-2.0, -2.0],
+            2,
+            2,
+        )
+        .unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let p = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+        )
+        .unwrap();
+        // gap_tol を非現実的に厳しく (1e-12) + max_nodes=1 で proof 不能化
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 1,
+            max_nodes: 1,
+            ..GlobalOptimizationConfig::default()
+        };
+        let r = solve_qp_global(&p, &opts(5.0), &cfg);
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexLocal),
+            "indefinite Q + unproven must yield NonconvexLocal, got {:?}",
+            r.status
+        );
+    }
+
+    #[test]
+    fn is_q_indefinite_distinguishes_psd_and_indefinite() {
+        // gershgorin_alpha(Q) > 0 を Q indefinite と判定する直接検証 (Status 分岐の root)
+        let psd = diag_convex_1d(1.0);
+        let indef = diag_concave_1d(1.0);
+        assert!(!is_q_indefinite(&psd), "x² should be PSD");
+        assert!(is_q_indefinite(&indef), "-x² should be indefinite");
     }
 }

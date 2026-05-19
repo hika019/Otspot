@@ -342,8 +342,10 @@ impl Model {
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
             SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
-            SolveStatus::LocallyOptimal => Err(ModelError::Internal(
-                "Unexpected LocallyOptimal on LP path".to_string(),
+            SolveStatus::LocallyOptimal
+            | SolveStatus::NonconvexLocal
+            | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
+                "Unexpected nonconvex status on LP path".to_string(),
             )),
         }
     }
@@ -494,8 +496,13 @@ impl Model {
             SolveStatus::NonConvex(msg) => {
                 Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
             }
-            // LocallyOptimal: 不定 Q の KKT 点を解として返す（局所最適解）
-            SolveStatus::LocallyOptimal => Ok(build_ok(
+            // LocallyOptimal / NonconvexLocal / NonconvexGlobal: 解はあるが (NonconvexGlobal を
+            // 除き) global proof なし。Model API 経由では caller が status を観測できない
+            // 制約上、Ok(...) で解を返し objective_value を返す (caller は obj quality を別途
+            // 検証する責任)。NonconvexGlobal は global proof 済 → 安全に Ok。
+            SolveStatus::LocallyOptimal
+            | SolveStatus::NonconvexLocal
+            | SolveStatus::NonconvexGlobal => Ok(build_ok(
                 qp_result.objective,
                 qp_result.solution.clone(),
                 fold_dual(&qp_result.dual_solution),

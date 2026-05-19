@@ -786,8 +786,8 @@ fn assert_kkt_when_optimal_qp(
     label: &str,
 ) -> Result<(), TestCaseError> {
     let threshold = match res.status {
-        SolveStatus::LocallyOptimal => threshold_local,
-        SolveStatus::Optimal => threshold_global,
+        SolveStatus::LocallyOptimal | SolveStatus::NonconvexLocal => threshold_local,
+        SolveStatus::Optimal | SolveStatus::NonconvexGlobal => threshold_global,
         _ => return Ok(()),
     };
     if res.solution.len() != qp.num_vars {

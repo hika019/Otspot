@@ -198,8 +198,11 @@ fn mccormick_does_not_regress_status_on_diag_only_fixture() {
         r_a.status, r_a.objective, r_m.status, r_m.objective
     );
     // status 同等 (Optimal は Optimal、LocallyOptimal は同じか promote のみ)
-    let was_optimal = matches!(r_a.status, SolveStatus::Optimal);
-    let now_optimal = matches!(r_m.status, SolveStatus::Optimal);
+    // Phase 6 で indefinite Q は Optimal→NonconvexGlobal に分岐 (fixture は concave_2d で indefinite)。
+    let was_optimal =
+        matches!(r_a.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
+    let now_optimal =
+        matches!(r_m.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
     assert!(
         !was_optimal || now_optimal,
         "McCormick must not demote Optimal → LocallyOptimal: {:?} → {:?}",

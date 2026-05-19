@@ -46,6 +46,17 @@ pub enum SolveStatus {
     NumericalError,
     /// Q行列が不定（非凸QP）。IPMはQ正半定値を前提とする。
     NonConvex(String),
+    /// 非凸 QP の局所最適解 (= `solve_qp_global` 経由で incumbent あり、ε-global 証明なし)。
+    ///
+    /// BB driver が deadline / max_nodes / max_depth で打ち切られ、incumbent ある状態。
+    /// `LocallyOptimal` (= IPM inertia 補正後の単発解) と区別して、caller が「探索打切」
+    /// vs「単発 KKT 収束」を識別できる。`Optimal` には**含めない** (= global proof なし)。
+    NonconvexLocal,
+    /// 非凸 QP の大域 ε-最適解 (= `solve_qp_global` で gap_tol まで証明済み + Q が indefinite)。
+    ///
+    /// `Optimal` は「Q が PSD で IPM/BB が global 達成」専用に維持し、indefinite Q の場合は
+    /// 本 variant で明示分離する (caller が「global 証明済」かを fact で判別)。
+    NonconvexGlobal,
 }
 
 impl fmt::Display for SolveStatus {
@@ -60,6 +71,8 @@ impl fmt::Display for SolveStatus {
             SolveStatus::Timeout => write!(f, "Timeout"),
             SolveStatus::NumericalError => write!(f, "NumericalError"),
             SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
+            SolveStatus::NonconvexLocal => write!(f, "NonconvexLocal"),
+            SolveStatus::NonconvexGlobal => write!(f, "NonconvexGlobal"),
         }
     }
 }

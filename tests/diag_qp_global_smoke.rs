@@ -176,7 +176,13 @@ fn global_reaches_known_optimum_all_fixtures() {
     for fx in fixtures() {
         let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(GLOBAL_OBJ_TOL));
         assert!(
-            matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+            matches!(
+            r.status,
+            SolveStatus::Optimal
+                | SolveStatus::LocallyOptimal
+                | SolveStatus::NonconvexGlobal
+                | SolveStatus::NonconvexLocal
+        ),
             "{}: unexpected status {:?}",
             fx.label,
             r.status
@@ -231,14 +237,14 @@ fn global_optimal_status_proves_gap_for_simple_fixtures() {
     let mut any_optimal = false;
     for fx in fixtures() {
         let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(GLOBAL_OBJ_TOL));
-        if matches!(r.status, SolveStatus::Optimal) {
+        if matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal) {
             any_optimal = true;
             eprintln!("GLOBAL_PROVEN [{}]: obj={:.6}", fx.label, r.objective);
         }
     }
     assert!(
         any_optimal,
-        "no fixture reached SolveStatus::Optimal → BB proof path silent SKIP の疑い"
+        "no fixture reached SolveStatus::Optimal/NonconvexGlobal → BB proof path silent SKIP の疑い"
     );
 }
 
@@ -251,7 +257,7 @@ fn larger_gap_tol_improves_proof_completion() {
             .into_iter()
             .filter(|fx| {
                 let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(tol));
-                matches!(r.status, SolveStatus::Optimal)
+                matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal)
             })
             .count()
     };
@@ -289,6 +295,8 @@ fn deadline_honored_returns_incumbent_not_panics() {
             r.status,
             SolveStatus::Optimal
                 | SolveStatus::LocallyOptimal
+                | SolveStatus::NonconvexGlobal
+                | SolveStatus::NonconvexLocal
                 | SolveStatus::SuboptimalSolution
                 | SolveStatus::Timeout
                 | SolveStatus::MaxIterations
@@ -300,14 +308,17 @@ fn deadline_honored_returns_incumbent_not_panics() {
 
 #[test]
 fn max_nodes_one_returns_root_only_incumbent() {
-    // max_nodes=1 = root local solve のみ → LocallyOptimal (proof 不能なら) or Optimal
+    // max_nodes=1 = root local solve のみ → NonconvexLocal (indefinite Q, proof 不能) or NonconvexGlobal
     let fx = build_diag_concave_nd(2, 1.0);
     let mut c = cfg(1e-6);
     c.max_nodes = 1;
     let r = solve_qp_global(&fx, &opts(10.0), &c);
     assert!(matches!(
         r.status,
-        SolveStatus::Optimal | SolveStatus::LocallyOptimal
+        SolveStatus::Optimal
+            | SolveStatus::LocallyOptimal
+            | SolveStatus::NonconvexGlobal
+            | SolveStatus::NonconvexLocal
     ));
 }
 
@@ -335,9 +346,11 @@ fn unbounded_variable_returns_locally_optimal_not_optimal() {
         ..GlobalOptimizationConfig::default()
     };
     let r = solve_qp_global(&p, &opts(5.0), &cfg);
+    // Q indefinite (-2 diag) + semi-infinite bounds → BB 打切 → NonconvexLocal。
+    // 旧コードでは LocallyOptimal、Phase 6 で indefinite Q を分離。
     assert!(
-        matches!(r.status, SolveStatus::LocallyOptimal),
-        "expected LocallyOptimal under semi-infinite bounds, got {:?}",
+        matches!(r.status, SolveStatus::NonconvexLocal),
+        "expected NonconvexLocal under semi-infinite bounds (indefinite Q), got {:?}",
         r.status
     );
 }
@@ -380,9 +393,11 @@ fn pruning_keeps_node_count_well_below_cap() {
         "PRUNING_SMOKE: nodes={} pruned={} max_depth={} status={:?} obj={}",
         stats.nodes_processed, stats.pruned, stats.max_depth_seen, r.status, r.objective
     );
+    // concave Q + pruning → NonconvexGlobal (proven on indefinite Q)。
+    // (旧コード: Optimal。Phase 6 で indefinite Q を分離)
     assert!(
-        matches!(r.status, SolveStatus::Optimal),
-        "expected Optimal under pruning, got {:?} (nodes={})",
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal),
+        "expected NonconvexGlobal/Optimal under pruning, got {:?} (nodes={})",
         r.status,
         stats.nodes_processed
     );
