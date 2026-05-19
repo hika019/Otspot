@@ -597,7 +597,14 @@ mod tests {
             vec![6.0, 4.0, 4.0],
         );
 
-        let result1 = solve_with(&lp1, &SolverOptions::default());
+        // Opt-in to postsolve warm-basis recovery: lp1 is dual-fixed → presolve
+        // reduces to zero vars → simplex returns warm_start_basis=None, and the
+        // default path skips the postsolve synthesis for performance.
+        let opts1 = SolverOptions {
+            recover_warm_start_basis: true,
+            ..SolverOptions::default()
+        };
+        let result1 = solve_with(&lp1, &opts1);
         assert_eq!(result1.status, SolveStatus::Optimal);
         assert!(result1.warm_start_basis.is_some());
 

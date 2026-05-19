@@ -80,7 +80,13 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 if raw.status == SolveStatus::NumericalError {
                     return solve_without_presolve(problem, options);
                 }
-                let mut res = presolve::postsolve::run_postsolve(&raw, &presolve_result, problem, eff_opts.deadline);
+                let mut res = presolve::postsolve::run_postsolve(
+                    &raw,
+                    &presolve_result,
+                    problem,
+                    eff_opts.deadline,
+                    options.recover_warm_start_basis,
+                );
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,

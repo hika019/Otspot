@@ -689,11 +689,17 @@ fn recover_warm_start_basis(
 }
 
 /// Lift the reduced-problem solution back into the original variable / constraint space.
+///
+/// `recover_warm_basis = true` synthesises `warm_start_basis` on the original LP
+/// standard form (see `recover_warm_start_basis`). default `false` skips the
+/// build_standard_form + LTSF crash + refinement cost — large LPs paid 30–96%
+/// wall regression at presolve-reduced solves before gating.
 pub fn run_postsolve(
     result: &SolverResult,
     presolve_result: &PresolveResult,
     orig_problem: &LpProblem,
     deadline: Option<Instant>,
+    recover_warm_basis: bool,
 ) -> SolverResult {
     let n = presolve_result.orig_num_vars;
     let m = presolve_result.orig_num_constraints;
@@ -1035,7 +1041,10 @@ pub fn run_postsolve(
     // Lift the warm-start basis to the original LP standard form so the user can
     // re-warm-start with `presolve = false` next call.  Only attempt this for
     // Optimal status: Infeasible/Unbounded carry no meaningful solution.
-    let warm_start_basis = if matches!(result.status, SolveStatus::Optimal) {
+    // Default solves skip recovery (build_standard_form + LTSF crash + refinement
+    // = O(nnz) + O(m·n_nz)); the caller opts in via
+    // `SolverOptions::recover_warm_start_basis = true`.
+    let warm_start_basis = if recover_warm_basis && matches!(result.status, SolveStatus::Optimal) {
         recover_warm_start_basis(orig_problem, &solution)
     } else {
         None
@@ -1280,9 +1289,14 @@ mod warm_basis_recovery_tests {
     //! `recover_warm_start_basis` sentinels.
     //!
     //! Each sentinel asserts:
-    //!   1. presolve-reducible LP solved with defaults returns `warm_start_basis = Some(_)`,
+    //!   1. presolve-reducible LP solved with `recover_warm_start_basis = true`
+    //!      returns `warm_start_basis = Some(_)`,
     //!   2. the basis has length `m_ext` and every entry indexes a real (non-artificial) column,
     //!   3. re-solving with `warm_start = Some(basis), presolve = false` reaches Optimal.
+    //!
+    //! Perf gate (`default_skips_warm_basis_recovery`): default options must
+    //! return `warm_start_basis = None` on the same presolve-reducible LP — proves
+    //! the recovery cost is actually elided in the default path.
     //!
     //! No-op proof: temporarily forcing `recover_warm_start_basis` to return `None`
     //! flips (1) `is_none()` and breaks the warm-start round-trip — verified by
@@ -1292,6 +1306,12 @@ mod warm_basis_recovery_tests {
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::{solve, solve_with, build_standard_form};
     use crate::sparse::CscMatrix;
+
+    /// Default options + `recover_warm_start_basis = true`. The recovery path
+    /// is opt-in; sentinels covering the postsolve synthesis must enable it.
+    fn opts_recover() -> SolverOptions {
+        SolverOptions { recover_warm_start_basis: true, ..SolverOptions::default() }
+    }
 
     /// LP whose presolve dual-fixing zeroes both vars (c>0, x≥0, finite ub).
     /// Reduced LP has 0 vars → simplex `n==0` short-circuit → reduced
@@ -1364,7 +1384,7 @@ mod warm_basis_recovery_tests {
     }
 
     fn assert_warm_round_trip(lp_a: &LpProblem, lp_b: &LpProblem, context: &str) {
-        let r1 = solve(lp_a);
+        let r1 = solve_with(lp_a, &opts_recover());
         assert_eq!(r1.status, SolveStatus::Optimal, "[{}] lp_a status", context);
         let ws = r1.warm_start_basis.as_ref()
             .unwrap_or_else(|| panic!("[{}] postsolve returned warm_start_basis=None", context));
@@ -1467,5 +1487,58 @@ mod warm_basis_recovery_tests {
             basis.contains(&1) || sf.orig_var_info[1].new_vars.iter().any(|&(idx, _)| basis.contains(&idx)),
             "active x1=3 not in warm-start basis: {:?}", basis,
         );
+    }
+
+    /// Perf gate: default options must skip the recovery path so large LPs do
+    /// not pay build_standard_form + LTSF crash + refinement.  Toggle —
+    /// flipping the default to `true` (or removing the `recover_warm_basis &&`
+    /// gate in `run_postsolve`) flips both assertions.
+    #[test]
+    fn default_skips_warm_basis_recovery() {
+        // dual-fixed LP: presolve reduces to zero vars, so simplex returns
+        // warm_start_basis=None.  Without the postsolve recovery the final
+        // result must also be None — proving the gate is alive.
+        let lp = lp_dual_fixed();
+        let r_default = solve(&lp);
+        assert_eq!(r_default.status, SolveStatus::Optimal);
+        assert!(
+            r_default.warm_start_basis.is_none(),
+            "default options must NOT pay warm-basis recovery cost \
+             (postsolve recovery should be opt-in via recover_warm_start_basis=true)",
+        );
+
+        // Same LP under opt-in flag: warm_start_basis must be Some (existing contract).
+        let r_optin = solve_with(&lp, &opts_recover());
+        assert_eq!(r_optin.status, SolveStatus::Optimal);
+        assert!(
+            r_optin.warm_start_basis.is_some(),
+            "opt-in flag must restore the postsolve warm-basis synthesis",
+        );
+
+        // singleton-row LP exercises the second presolve transform; same contract.
+        let lp_sr = lp_singleton_row();
+        let r_sr_default = solve(&lp_sr);
+        assert_eq!(r_sr_default.status, SolveStatus::Optimal);
+        assert!(
+            r_sr_default.warm_start_basis.is_none(),
+            "singleton-row presolve path must also skip recovery by default",
+        );
+        let r_sr_optin = solve_with(&lp_sr, &opts_recover());
+        assert!(r_sr_optin.warm_start_basis.is_some());
+    }
+
+    /// Non-reducible path: native simplex sets warm_start_basis directly
+    /// (cheap clone of basis/x_b), so the recovery flag is irrelevant — both
+    /// default and opt-in must return Some.  Catches a regression that would
+    /// move the gate to the wrong layer (e.g. stripping basis in entry.rs).
+    #[test]
+    fn non_reducible_basis_independent_of_recovery_flag() {
+        let lp = lp_non_reducible();
+        let r_default = solve(&lp);
+        let r_optin = solve_with(&lp, &opts_recover());
+        assert!(r_default.warm_start_basis.is_some(),
+            "non-reducible default path must keep native simplex basis");
+        assert!(r_optin.warm_start_basis.is_some(),
+            "non-reducible opt-in path must keep native simplex basis");
     }
 }
