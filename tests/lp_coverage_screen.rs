@@ -223,3 +223,94 @@ fn lp_coverage_screen_all() {
 
     // テスト本体は失敗させない (screening 用)。CI で fail させたければ assert!(bugs.is_empty()).
 }
+
+/// Sample screening: 10 curated small/medium Netlib LPs for fast regression detection.
+///
+/// Covers diverse LP features: bounds, RANGES rows, EQ/LE/GE constraints, degenerate bases.
+/// Skips silently when `data/lp_problems/` is absent (requires `scripts/netlib_lp_download.sh`).
+/// Expected runtime: well under 3 min (10 problems × 15 s each).
+#[test]
+fn lp_coverage_screen_sample() {
+    let dir = Path::new(PROBLEMS_DIR);
+    if !dir.exists() {
+        eprintln!("SKIP lp_coverage_screen_sample: {} absent", PROBLEMS_DIR);
+        return;
+    }
+    let baseline = load_baseline();
+
+    // Selected for diversity: RANGES (cycle/agg), OBJSENSE (blend), bounds (bandm/capri),
+    // degenerate (etamacro), medium scale (boeing2/brandy).
+    const SAMPLE: &[&str] = &[
+        "afiro", "adlittle", "agg", "bandm", "blend",
+        "boeing2", "brandy", "capri", "cycle", "etamacro",
+    ];
+
+    let mut bugs: Vec<(String, Verdict, f64)> = Vec::new();
+    let mut found = 0;
+
+    for &name in SAMPLE {
+        let path = dir.join(format!("{}.QPS", name));
+        if !path.exists() {
+            continue;
+        }
+        found += 1;
+
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(PER_PROBLEM_TIMEOUT_SEC);
+
+        let problem = match parse_qps(&path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[parse_fail] {}: {:?}", name, e);
+                bugs.push((name.to_string(), Verdict::BadStatus {
+                    status: SolveStatus::NumericalError,
+                    expected_optimal: 0.0,
+                }, 0.0));
+                continue;
+            }
+        };
+
+        let start = Instant::now();
+        let r = solve_qp_with(&problem, &opts);
+        let elapsed = start.elapsed().as_secs_f64();
+
+        let expected = baseline.get(name).copied();
+        match (r.status, expected) {
+            (SolveStatus::Optimal, Some(exp)) => {
+                let exp_adj = exp + problem.obj_offset;
+                let rel_err = (r.objective - exp_adj).abs() / exp_adj.abs().max(1.0);
+                if rel_err > REL_TOL {
+                    eprintln!("[OBJ_MISMATCH] {}: got={:.6e} exp={:.6e} rel={:.2e} {:.2}s",
+                        name, r.objective, exp_adj, rel_err, elapsed);
+                    bugs.push((name.to_string(), Verdict::ObjMismatch {
+                        got: r.objective, expected: exp_adj, rel_err,
+                    }, elapsed));
+                } else {
+                    eprintln!("[OK] {}: obj={:.6e} {:.2}s", name, r.objective, elapsed);
+                }
+            }
+            (SolveStatus::Optimal, None) => {
+                eprintln!("[OK_NO_REF] {}: obj={:.6e} {:.2}s", name, r.objective, elapsed);
+            }
+            (SolveStatus::Timeout, _) => {
+                eprintln!("[TIMEOUT] {}: {:.2}s", name, elapsed);
+                bugs.push((name.to_string(), Verdict::Timeout, elapsed));
+            }
+            (status, exp) => {
+                eprintln!("[BAD_STATUS] {}: {:?} {:.2}s", name, status, elapsed);
+                bugs.push((name.to_string(), Verdict::BadStatus {
+                    status,
+                    expected_optimal: exp.unwrap_or(0.0),
+                }, elapsed));
+            }
+        }
+    }
+
+    if found == 0 {
+        eprintln!("SKIP lp_coverage_screen_sample: no sample QPS files found in {}", PROBLEMS_DIR);
+        return;
+    }
+
+    assert!(bugs.is_empty(),
+        "lp_coverage_screen_sample: {} failure(s): {:?}", bugs.len(), bugs);
+}

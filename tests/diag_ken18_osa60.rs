@@ -20,6 +20,7 @@
 use solver::io::qps::parse_qps;
 use solver::options::SolverOptions;
 use solver::problem::{LpProblem, SolveStatus};
+use solver::qp::solve_qp_with;
 use solver::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
@@ -216,4 +217,47 @@ fn diag_ken18_must_respect_internal_deadline() {
         #[allow(unreachable_patterns)]
         _ => panic!("[ken-18] unexpected SolveStatus variant: {:?}", r.status),
     }
+}
+
+/// Deadline contract fast-check: a small LP (bore3d, always committed to tests/) must
+/// return within budget + slack. Catches deadline enforcement regressions on any LP size.
+///
+/// bore3d solves in < 1 s, so the 5 s budget + 5 s slack is generous. This test is
+/// fast (< 5 s wall) and requires no external data download.
+#[test]
+fn diag_deadline_small_lp() {
+    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    assert!(path.exists(), "tests/lp_problems/bore3d.QPS missing from repo");
+
+    let qp = parse_qps(path).expect("parse bore3d");
+
+    const BUDGET_SECS: f64 = 5.0;
+    const WALL_SLACK_SECS: f64 = 5.0;
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(BUDGET_SECS);
+
+    let t0 = Instant::now();
+    let r = solve_qp_with(&qp, &opts);
+    let elapsed = t0.elapsed().as_secs_f64();
+
+    eprintln!(
+        "[bore3d] elapsed={:.3}s status={:?} obj={:.6e}",
+        elapsed, r.status, r.objective,
+    );
+
+    assert!(
+        elapsed <= BUDGET_SECS + WALL_SLACK_SECS,
+        "[bore3d] wall {:.2}s exceeds budget {:.1}s + {:.1}s slack — deadline enforcement regressed",
+        elapsed, BUDGET_SECS, WALL_SLACK_SECS,
+    );
+
+    assert!(
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout
+            | SolveStatus::Infeasible | SolveStatus::NumericalError
+            | SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
+            | SolveStatus::MaxIterations),
+        "[bore3d] unexpected status: {:?}",
+        r.status,
+    );
 }
