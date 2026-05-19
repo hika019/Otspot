@@ -1,7 +1,8 @@
 //! IP-PMM 主反復ループ (predictor-corrector + Gondzio + PMM ρ/δ 更新)。
 
 use super::factorize::{
-    auto_schur_enabled, factorize_kkt_with_retry, FactorizeCaches, FactorizeOutcome,
+    auto_schur_enabled, factorize_kkt_with_retry, FactorizeCaches, FactorizeContext,
+    FactorizeOutcome,
 };
 use super::init::build_initial_point;
 use super::state::{
@@ -317,12 +318,25 @@ pub(crate) fn solve_ippmm_inner(
             prof_section_start = Some(std::time::Instant::now());
         }
 
-        let factorize_outcome = factorize_kkt_with_retry(
-            problem, &a_ext, &aug_cache, &mut factor_caches,
-            &sigma_vec, &is_eq_ext, &s, &r_d_pmm, &r_p_pmm,
-            rho_matrix, delta_matrix, inertia_correction,
-            use_schur, &timeout_ctx, par, n, prof,
-        );
+        let fact_ctx = FactorizeContext {
+            problem,
+            a_ext: &a_ext,
+            aug_cache: &aug_cache,
+            sigma_vec: &sigma_vec,
+            is_eq_ext: &is_eq_ext,
+            s: &s,
+            r_d_pmm: &r_d_pmm,
+            r_p_pmm: &r_p_pmm,
+            rho_matrix,
+            delta_matrix,
+            inertia_correction,
+            use_schur,
+            timeout_ctx: &timeout_ctx,
+            par,
+            n,
+            prof,
+        };
+        let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
         let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
             FactorizeOutcome::Ok { factor, aug_mat, d_inv, rho_used } => {
                 (factor, aug_mat, d_inv, rho_used)
