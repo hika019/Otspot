@@ -509,7 +509,7 @@ pub(crate) fn solve_ippmm_inner(
         emit_step_diag(iter, alpha, ndx, ndy, nds, &r_d_pmm, &r_p_pmm);
 
         // Trust-region cap: alpha·|dv|_inf ≤ STEP_REL_CAP·max(|v|_inf, 1)。
-        // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → cap で 1 iter 3 桁以上の暴発を抑制。
+        // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → STEP_REL_CAP (=1e3) で 1 iter 3 桁以上の暴発を抑制。
         let nx_safe = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ny_safe = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ns_safe = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);

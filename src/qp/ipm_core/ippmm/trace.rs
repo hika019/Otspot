@@ -159,9 +159,7 @@ pub(super) fn emit_iter_trace(
     iter: usize, mu: f64, nr_p: f64, nr_d: f64,
     pmm: &PmmState, x: &[f64], y: &[f64], reg_limit: f64,
 ) {
-    if std::env::var("IPPMM_TRACE").ok().as_deref() != Some("1") {
-        return;
-    }
+    if !trace_enabled() { return; }
     let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
         .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
         .fold(0.0_f64, f64::max);
