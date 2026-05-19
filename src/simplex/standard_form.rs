@@ -513,6 +513,31 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     }
 }
 
+/// Scale upper bounds by the Ruiz column-scaling vector.
+///
+/// During Ruiz scaling the primal variable `j` becomes `x̃_j = x_j / col_scale[j]`.
+/// Upper bounds stored in `BoundedStandardForm.upper_bounds` are in the pre-scale
+/// space (`u_j_orig`). The effective bound in the scaled iteration space is
+/// `u_j_scaled = u_j_orig / col_scale[j]`. Pass the result as `ubs` to
+/// `solve_bounded_dual` / `iterate` / `phase2_primal_bounded` so that feasibility
+/// checks and BFRT weights operate in a consistent space.
+///
+/// `extract_solution_bounded` continues to use the **original** `bsf.upper_bounds`
+/// (the col_scale factors cancel when recovering non-basic-at-upper values).
+pub(crate) fn scale_upper_bounds(upper_bounds: &[f64], col_scale: &[f64]) -> Vec<f64> {
+    upper_bounds
+        .iter()
+        .enumerate()
+        .map(|(j, &u)| {
+            if u.is_finite() {
+                u / col_scale.get(j).copied().unwrap_or(1.0)
+            } else {
+                f64::INFINITY
+            }
+        })
+        .collect()
+}
+
 /// Expand a `BoundedStandardForm` into the legacy `StandardForm` by adding
 /// one UB row + slack per finite-upper variable. The result is bit-equivalent
 /// to `build_standard_form` on the same `LpProblem` (modulo CSC canonicalization).

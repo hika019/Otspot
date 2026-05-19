@@ -62,7 +62,7 @@ pub fn bfrt_flip_invocations() -> u64 {
     BFRT_FLIP_INVOCATIONS.with(|c| c.get())
 }
 
-fn bump_bfrt_flip_invocations() {
+pub(super) fn bump_bfrt_flip_invocations() {
     BFRT_FLIP_INVOCATIONS.with(|c| c.set(c.get().saturating_add(1)));
 }
 

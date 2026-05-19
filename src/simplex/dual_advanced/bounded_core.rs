@@ -53,7 +53,7 @@ use std::sync::atomic::Ordering;
 
 use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
-use super::bound_flip::{bfrt_select_entering, ColBound};
+use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
 
 /// Terminal status of the bounded dual simplex iteration.
 ///
@@ -203,21 +203,27 @@ pub(crate) fn solve_bounded_dual(
     b: &[f64],
     c: &[f64],
     options: &SolverOptions,
+    ubs: &[f64],
 ) -> (BoundedOutcome, BoundedDualState) {
     let state = BoundedDualState::cold(bsf, b);
-    iterate(state, bsf, a, c, options)
+    iterate(state, bsf, a, c, options, ubs)
 }
 
 /// Inner iteration loop. Accepts a pre-populated state — tests use this to
 /// inject synthetic primal infeasibilities; production cold/warm-start callers
 /// supply the matching basis. Cost perturbation is applied here so callers
 /// don't have to pre-perturb `c`.
+///
+/// `ubs` is the effective per-column upper bound slice used for bound-violation
+/// checks and flip weights. Pass `&bsf.upper_bounds` when the matrices are
+/// unscaled; pass Ruiz-scaled bounds (`u_j / col_scale[j]`) when scaled.
 pub(crate) fn iterate(
     mut state: BoundedDualState,
     bsf: &BoundedStandardForm,
     a: &CscMatrix,
     c: &[f64],
     options: &SolverOptions,
+    ubs: &[f64],
 ) -> (BoundedOutcome, BoundedDualState) {
     let m = bsf.m;
     let n_total = bsf.n_total;
@@ -242,7 +248,7 @@ pub(crate) fn iterate(
     // to this loop; the caller restores the original cost in Phase 2 primal.
     let c_perturbed: Vec<f64> = c.iter().map(|&v| v.max(0.0)).collect();
 
-    let mut buf = IterBuffers::new(m, n_total, &bsf.upper_bounds);
+    let mut buf = IterBuffers::new(m, n_total, ubs);
 
     // Initial reduced costs (r_j = c̃_j − y^T a_j with y = B^{-T} c̃_B).
     compute_reduced_costs_into(
@@ -278,7 +284,7 @@ pub(crate) fn iterate(
         let mut ub_violation_row: Option<usize> = None;
         for i in 0..m {
             let xi = state.x_b[i];
-            let ub_i = bsf.upper_bounds[state.basis[i]];
+            let ub_i = ubs[state.basis[i]];
             if xi < -best_viol {
                 best_viol = -xi;
                 leaving_row = Some(i);
@@ -354,7 +360,7 @@ pub(crate) fn iterate(
         // is a const `false` in release builds (eliminated by the optimizer).
         let apply_flip = !flip_apply_disabled();
         for &k in &bfrt.flips {
-            let u_k = bsf.upper_bounds[k];
+            let u_k = ubs[k];
             debug_assert!(
                 u_k.is_finite(),
                 "BFRT must not return infinite-upper flips"
@@ -411,7 +417,7 @@ pub(crate) fn iterate(
         }
         state.x_b[r] = step;
         if entering_at_upper {
-            let u_q = bsf.upper_bounds[entering_col];
+            let u_q = ubs[entering_col];
             debug_assert!(u_q.is_finite(), "at_upper entering must be finite");
             state.x_b[r] += u_q;
         }
@@ -622,6 +628,21 @@ pub(crate) fn extract_dual_info_bounded(
 /// Hard iteration cap for the bounded primal Phase 2 loop.
 const PHASE2_PRIMAL_ITER_CAP: usize = 1_000_000;
 
+/// Objective including non-basic at-upper-bound contributions.
+///
+/// `basic_obj` only sums over basic variables. For the bounded simplex, the
+/// full objective is c_B^T x_B + Σ_{j non-basic at ub} c_j · u_j.
+fn bounded_obj(c: &[f64], basis: &[usize], x_b: &[f64], at_upper: &[bool], ubs: &[f64]) -> f64 {
+    let basic: f64 = basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum();
+    let at_ub: f64 = at_upper
+        .iter()
+        .enumerate()
+        .filter(|&(_, &flag)| flag)
+        .map(|(j, _)| c.get(j).copied().unwrap_or(0.0) * ubs.get(j).copied().unwrap_or(0.0))
+        .sum();
+    basic + at_ub
+}
+
 /// Drive primal Phase 2 from a primal-feasible `BoundedDualState`.
 ///
 /// Caller supplies the state produced by `solve_bounded_dual` (perturbed-cost
@@ -636,6 +657,8 @@ const PHASE2_PRIMAL_ITER_CAP: usize = 1_000_000;
 ///
 /// Returns `(SimplexOutcome, BoundedDualState)` so the caller can extract the
 /// solution and dual variables from the terminal state.
+/// `ubs` must match the Ruiz-scaling space of `a` and `c` (pass
+/// `&bsf.upper_bounds` for unscaled, or scaled bounds from `scale_upper_bounds`).
 pub(crate) fn phase2_primal_bounded(
     bsf: &BoundedStandardForm,
     mut state: BoundedDualState,
@@ -643,6 +666,7 @@ pub(crate) fn phase2_primal_bounded(
     c: &[f64],
     options: &SolverOptions,
     iters: &mut usize,
+    ubs: &[f64],
 ) -> (SimplexOutcome, BoundedDualState) {
     let m = bsf.m;
     let n_total = bsf.n_total;
@@ -686,7 +710,7 @@ pub(crate) fn phase2_primal_bounded(
 
         let q = match entering {
             None => {
-                let obj = basic_obj(c, &state.basis, &state.x_b);
+                let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, ubs);
                 return (SimplexOutcome::Optimal(obj, y), state);
             }
             Some(q) => q,
@@ -711,7 +735,7 @@ pub(crate) fn phase2_primal_bounded(
         for i in 0..m {
             let eff = alpha[i] * dir;
             let xi = state.x_b[i];
-            let ub_i = bsf.upper_bounds[state.basis[i]];
+            let ub_i = ubs[state.basis[i]];
 
             if eff > PIVOT_TOL {
                 let step = xi / eff;
@@ -731,9 +755,10 @@ pub(crate) fn phase2_primal_bounded(
         }
 
         // Check if entering variable hits its own opposite bound first.
-        let ub_q = bsf.upper_bounds[q];
+        let ub_q = ubs[q];
         if ub_q.is_finite() && ub_q < min_step {
             // Flip entering var to opposite bound; no basis change.
+            bump_bfrt_flip_invocations();
             for i in 0..m {
                 state.x_b[i] -= alpha[i] * dir * ub_q;
             }
@@ -999,7 +1024,7 @@ mod tests {
         let lp = lp_boxed_2x2_degenerate();
         let bsf = build_bounded_standard_form(&lp);
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
         match outcome {
             BoundedOutcome::Optimal(_, _) => {}
             other => panic!("expected Optimal, got {:?}", other),
@@ -1022,7 +1047,7 @@ mod tests {
             deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(500)),
             ..SolverOptions::default()
         };
-        let (outcome, _state) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        let (outcome, _state) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
         match outcome {
             BoundedOutcome::Optimal(_, _) => {}
             BoundedOutcome::Timeout(_) => {}
@@ -1067,7 +1092,7 @@ mod tests {
         } else {
             None
         };
-        let (_outcome, post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        let (_outcome, post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
         let post_residual = basis_rhs_residual(&post, &bsf);
         let flips = bfrt_flip_invocations();
         (pre_residual, post_residual, flips)
@@ -1227,7 +1252,7 @@ mod tests {
             deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
             ..SolverOptions::default()
         };
-        let (outcome, _post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts);
+        let (outcome, _post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
         match outcome {
             BoundedOutcome::UbViolationOutOfScope { row, .. } => {
                 assert_eq!(row, 0);
@@ -1416,7 +1441,7 @@ mod tests {
         let sf = build_standard_form(&fx.problem);
         // Run bounded dual (terminates immediately; no at_upper set).
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
         assert!(
             matches!(outcome, BoundedOutcome::Optimal(..)),
             "expected Optimal, got {:?}", outcome
@@ -1483,7 +1508,7 @@ mod tests {
         let bsf = build_bounded_standard_form(&fx.problem);
         let sf = build_standard_form(&fx.problem);
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
         let (_, y_std) = match outcome {
             BoundedOutcome::Optimal(obj, y) => (obj, y),
             other => panic!("expected Optimal, got {:?}", other),
@@ -1532,12 +1557,12 @@ mod tests {
         let bsf = build_bounded_standard_form(&lp);
         let opts = SolverOptions::default();
         // Bounded dual: c̃ = max(c,0) = [0,0] → terminates immediately with slack basis.
-        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
         assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
 
         let mut iters = 0usize;
         let (p2_outcome, p2_state) = phase2_primal_bounded(
-            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters,
+            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters, &bsf.upper_bounds,
         );
         assert!(
             matches!(p2_outcome, SimplexOutcome::Optimal(..)),
@@ -1563,11 +1588,11 @@ mod tests {
         let fx = fixture_one_row_two_boxed(); // c = [1, 2] (all positive)
         let bsf = build_bounded_standard_form(&fx.problem);
         let opts = SolverOptions::default();
-        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts);
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
         assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
         let mut iters = 0usize;
         let (p2_outcome, _) = phase2_primal_bounded(
-            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters,
+            &bsf, dual_state, &bsf.a, &bsf.c, &opts, &mut iters, &bsf.upper_bounds,
         );
         assert!(
             matches!(p2_outcome, SimplexOutcome::Optimal(..)),
