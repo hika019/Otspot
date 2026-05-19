@@ -209,15 +209,14 @@ pub fn bfrt_select_entering(
             best_idx = k;
         }
     }
-    // Add the *non-selected* tied candidates that come before best_idx as
-    // flips (they were already counted in the residual walk for entering_idx).
-    // The variables at indices [entering_idx, best_idx) that we swap past are
-    // genuine flips: they reach θ before our final entering and must adjust.
+    // Tied losers in [entering_idx, best_idx) are flips iff they have a
+    // finite upper bound — an ∞-upper column has no second bound to flip to
+    // and downstream wiring would corrupt state if it tried.
     for k in entering_idx..best_idx {
-        // These are within the tie window of `chosen_theta`; treating them as
-        // flips matches the residual walk (they were not consumed before
-        // entering_idx, but if we now choose a later entering, they must be).
-        flips.push(breaks[k].1);
+        let col = breaks[k].1;
+        if bounds[col].upper.is_finite() {
+            flips.push(col);
+        }
     }
     // Flips that occurred during the residual walk (before entering_idx).
     let mut flips_pre: Vec<usize> = (0..entering_idx).map(|k| breaks[k].1).collect();
