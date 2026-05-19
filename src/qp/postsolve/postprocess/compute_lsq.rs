@@ -4,6 +4,7 @@ use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, LSQ_DUAL_SIZ
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
+use crate::tolerances::COMP_SLACK_REL_TOL;
 
 pub(crate) fn compute_lsq_dual_y(
     problem: &QpProblem,
@@ -100,6 +101,40 @@ pub(crate) fn compute_lsq_dual_y(
                 fixed_y[i] = Some((lo + hi) * 0.5);
                 n_fixed += 1;
             }
+        }
+    }
+    // Complementary slackness: rows whose primal is strictly non-binding (slack
+    // > COMP_SLACK_REL_TOL relative to the row magnitudes) must have y_i = 0.
+    // Without this clamp LSQ is free to assign sign-feasible but
+    // slackness-violating duals — the same drift root #45 fixed for
+    // `recover_removed_row_dual`. Overwrite (rather than skip) any existing
+    // `fixed_y[i]` so LSQ cannot resurrect a non-zero dual on a non-binding row.
+    let mut ax = vec![0.0_f64; m];
+    for col in 0..n {
+        let cs = problem.a.col_ptr[col];
+        let ce = problem.a.col_ptr[col + 1];
+        let xv = x[col];
+        for k in cs..ce {
+            ax[problem.a.row_ind[k]] += problem.a.values[k] * xv;
+        }
+    }
+    for i in 0..m {
+        if problem.constraint_types[i] == crate::problem::ConstraintType::Eq {
+            continue;
+        }
+        let b_i = problem.b[i];
+        let ax_i = ax[i];
+        let slack = match problem.constraint_types[i] {
+            crate::problem::ConstraintType::Le => b_i - ax_i,
+            crate::problem::ConstraintType::Ge => ax_i - b_i,
+            crate::problem::ConstraintType::Eq => 0.0,
+        };
+        let scale = 1.0 + b_i.abs() + ax_i.abs();
+        if slack > COMP_SLACK_REL_TOL * scale {
+            if fixed_y[i].is_none() {
+                n_fixed += 1;
+            }
+            fixed_y[i] = Some(0.0);
         }
     }
 
@@ -243,5 +278,135 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
     Some(y_full)
+}
+
+#[cfg(test)]
+mod comp_slackness_tests {
+    //! LSQ comp slackness sentinels — non-binding rows must return y_i = 0.
+    //!
+    //! Without the clamp, LSQ minimises ||A^T y + c|| subject only to the
+    //! sign convention on y; nothing stops it from absorbing residual into a
+    //! slack-positive row. Removing the `if slack > COMP_SLACK_REL_TOL` branch
+    //! flips these tests to FAIL (the LSQ y becomes non-zero on the loose row).
+    use super::*;
+    use crate::problem::{ConstraintType, SolverResult};
+    use crate::sparse::CscMatrix;
+
+    /// Threshold for declaring "y is zero" — well below COMP_SLACK_REL_TOL.
+    const Y_ZERO_TOL: f64 = 1e-9;
+
+    fn lp_qp(
+        n: usize, m: usize,
+        c: Vec<f64>, a: CscMatrix, b: Vec<f64>,
+        bounds: Vec<(f64, f64)>, cts: Vec<ConstraintType>,
+    ) -> QpProblem {
+        // Build an LP-as-QP with empty Q.
+        let q = CscMatrix::new(n, n);
+        let _ = m;
+        QpProblem::new(q, c, a, b, bounds, cts).unwrap()
+    }
+
+    /// Helper: drive `compute_lsq_dual_y` with a seeded primal and check the
+    /// returned y for each row. Returns the produced y for further inspection.
+    fn run_lsq(problem: &QpProblem, x: Vec<f64>) -> Vec<f64> {
+        let result = SolverResult { solution: x, ..Default::default() };
+        compute_lsq_dual_y(problem, &result, None)
+            .expect("LSQ should succeed on a tiny well-conditioned fixture")
+    }
+
+    /// Fixture A: 2 rows, both Le; row 0 binding at the chosen primal, row 1
+    /// strictly loose. With comp clamp, row 1's y must be 0 regardless of how
+    /// the LSQ residual would prefer to split.
+    #[test]
+    fn lsq_le_loose_row_clamped_to_zero() {
+        // min x s.t. x ≤ 1 (binding), x ≤ 10 (loose), x ∈ [0, ∞).
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+        let qp = lp_qp(
+            1, 2,
+            vec![1.0], a, vec![1.0, 10.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Le, ConstraintType::Le],
+        );
+        let y = run_lsq(&qp, vec![1.0]);
+        assert_eq!(y.len(), 2);
+        assert!(
+            y[1].abs() < Y_ZERO_TOL,
+            "loose Le row y[1]={:.3e} should be clamped to 0",
+            y[1],
+        );
+    }
+
+    /// Fixture B: 2 rows, both Ge; row 0 binding, row 1 loose. Mirrors A on
+    /// the Ge branch (proj_upper instead of proj_lower).
+    #[test]
+    fn lsq_ge_loose_row_clamped_to_zero() {
+        // min -x s.t. x ≥ 1 (binding at x=1), x ≥ -5 (loose), x ≤ 1.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+        let qp = lp_qp(
+            1, 2,
+            vec![-1.0], a, vec![1.0, -5.0],
+            vec![(f64::NEG_INFINITY, 1.0)],
+            vec![ConstraintType::Ge, ConstraintType::Ge],
+        );
+        let y = run_lsq(&qp, vec![1.0]);
+        assert_eq!(y.len(), 2);
+        assert!(
+            y[1].abs() < Y_ZERO_TOL,
+            "loose Ge row y[1]={:.3e} should be clamped to 0",
+            y[1],
+        );
+    }
+
+    /// Fixture C: mixed Le + Ge, both loose. Establishes the clamp triggers on
+    /// each constraint type independently (LSQ's proj_lower / proj_upper paths
+    /// don't accidentally re-enable y). `c` is non-zero so the LSQ target
+    /// `-(Qx + c + bound_contrib)` is non-trivial — without the clamp, LSQ
+    /// would assign y = (0, -1) on this fixture, so the assertion has teeth.
+    #[test]
+    fn lsq_mixed_loose_rows_all_clamped_to_zero() {
+        // Two columns, two rows, both rows loose at x=(1, 1).
+        //   row 0 (Le): x1 + x2 ≤ 100; slack 98
+        //   row 1 (Ge): x1 - x2 ≥ -50; ax-b = 50, slack 50
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
+        ).unwrap();
+        let qp = lp_qp(
+            2, 2,
+            vec![1.0, -1.0], a, vec![100.0, -50.0],
+            vec![(0.0, 5.0), (0.0, 5.0)],
+            vec![ConstraintType::Le, ConstraintType::Ge],
+        );
+        let y = run_lsq(&qp, vec![1.0, 1.0]);
+        for i in 0..2 {
+            assert!(
+                y[i].abs() < Y_ZERO_TOL,
+                "loose row {} y={:.3e} should be 0 (all rows non-binding at this primal)",
+                i, y[i],
+            );
+        }
+    }
+
+    /// Fixture D: binding row keeps its y free. Establishes the clamp does
+    /// NOT zero out genuinely binding rows — otherwise the LSQ output would
+    /// degenerate to all-zero on any well-posed LP.
+    #[test]
+    fn lsq_binding_row_y_is_not_clamped() {
+        // Same as A but evaluate at x=1 where row 0 (Le) is exactly binding.
+        // The LSQ should produce y[0] ≈ 1 (= -c/A) to satisfy A^T y = -c.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let qp = lp_qp(
+            1, 1,
+            vec![-1.0], a, vec![1.0],
+            vec![(0.0, 1.0)],
+            vec![ConstraintType::Le],
+        );
+        let y = run_lsq(&qp, vec![1.0]);
+        // Binding row; LSQ + sign convention should give a non-zero y.
+        assert!(
+            y[0].abs() > Y_ZERO_TOL,
+            "binding Le row y[0]={:.3e} should NOT be clamped to 0",
+            y[0],
+        );
+    }
 }
 
