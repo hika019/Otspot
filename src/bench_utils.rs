@@ -138,6 +138,51 @@ pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
     Some((obj - global_ref).abs() / (1.0 + global_ref.abs()))
 }
 
+/// Relative tolerance for objective-value matching against a known reference.
+///
+/// `|obj − ref| / (1 + |ref|) < OBJ_MATCH_REL_TOL` is the criterion used by
+/// `obj_within_tol` and the `known_optimal_obj` early-exit logic in lp_dispatch.
+pub const OBJ_MATCH_REL_TOL: f64 = 1e-4;
+
+/// Returns `true` when `obj` is within relative tolerance of `ref_obj`.
+///
+/// Uses the criterion `|obj − ref_obj| / (1 + |ref_obj|) < tol`.
+/// Returns `false` if either value is non-finite.
+pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
+    if !obj.is_finite() || !ref_obj.is_finite() {
+        return false;
+    }
+    (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
+}
+
+/// Pick the better of an IPM result and a simplex result.
+///
+/// If simplex timed out (or hit a non-convergence status) but IPM previously
+/// found a `SuboptimalSolution` or `LocallyOptimal` with a non-empty solution
+/// vector, the IPM result is returned instead.  This prevents the silent
+/// degradation where a useful IPM incumbent is thrown away when simplex runs
+/// out of deadline.
+///
+/// In all other cases the simplex result is returned unchanged.
+pub fn pick_best_ipm_or_simplex(
+    ipm_candidate: Option<SolverResult>,
+    simplex_result: SolverResult,
+) -> SolverResult {
+    let simplex_failed = matches!(
+        simplex_result.status,
+        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
+    );
+    if let Some(ipm) = ipm_candidate {
+        if simplex_failed
+            && matches!(ipm.status, SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal)
+            && !ipm.solution.is_empty()
+        {
+            return ipm;
+        }
+    }
+    simplex_result
+}
+
 /// bench harness 種別ごとの promotion policy.
 ///
 /// qps_benchmark は obj 有限性チェックなし、bench_qplib は obj 有限性も要求する
