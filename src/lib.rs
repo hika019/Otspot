@@ -71,6 +71,17 @@ pub use model::{Model, ModelResult, ModelError};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
+
+/// Re-export of the BFRT (Bound-Flipping Ratio Test) primitive (#41).
+/// Public so integration sentinels in `tests/diag_simplex_bound_flip.rs`
+/// can exercise the ratio-test step-size effect without forcing private
+/// module exposure for the whole `simplex` tree.
+pub mod bound_flip {
+    pub use crate::simplex::dual_advanced::bound_flip::{
+        bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations,
+        BfrtResult, ColBound,
+    };
+}
 pub use presolve::{
     run_presolve_with_flags, run_qp_presolve_phase1, run_qp_presolve_phase2,
     PresolveFlags, PresolveStatus,
