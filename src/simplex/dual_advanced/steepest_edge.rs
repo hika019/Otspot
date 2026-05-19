@@ -92,6 +92,14 @@ fn clamp_gamma(v: f64, needs_reset: &mut bool) -> f64 {
         *needs_reset = true;
         DSE_GAMMA_CEILING.min(1.0_f64.max(v.abs()))
     } else if v < DSE_GAMMA_FLOOR {
+        // A *negative* input (|v| > FLOOR on the negative side) is genuine drift:
+        // γ_i is a squared row-norm and cannot be < 0 in exact arithmetic, so a
+        // sub-FLOOR negative value indicates the rank-1 update lost meaningful
+        // precision. Flag for refactor symmetrically with the CEILING branch.
+        // A tiny positive < FLOOR is f64 noise, no refactor required.
+        if v < -DSE_GAMMA_FLOOR {
+            *needs_reset = true;
+        }
         DSE_GAMMA_FLOOR
     } else {
         v
@@ -248,5 +256,29 @@ mod tests {
         // Force a huge update: pivot = 1e-8, γ_p_new = 1 / 1e-16 = 1e16 → clamp ceiling.
         w.update_after_pivot(0, &[1e-8, 0.0], &[0.0, 0.0], 1e-8);
         assert!(w.needs_reset, "ceiling clamp must flag reset");
+    }
+
+    #[test]
+    fn floor_clamp_negative_drift_marks_for_reset() {
+        // Setup: m=2, γ = [1, 1], leaving=1, α=[3, 4], σ=[5, 7], pivot=4.
+        // ratio_0 = 0.75 → γ_0_new = 1 - 2*0.75*5 + 0.75² * 1 = -5.9375.
+        // Pre-fix: silently clamped to FLOOR, needs_reset stayed false → drift
+        // accumulates undetected. Post-fix: input < -FLOOR sets needs_reset.
+        let mut w = DseWeights::new(2);
+        w.update_after_pivot(1, &[3.0, 4.0], &[5.0, 7.0], 4.0);
+        assert_eq!(w.gamma(0), DSE_GAMMA_FLOOR, "γ floored to FLOOR");
+        assert!(w.needs_reset, "significantly-negative drift must flag reset");
+    }
+
+    #[test]
+    fn floor_clamp_tiny_positive_does_not_mark_reset() {
+        // A FLOOR clamp triggered by a *tiny positive* value below FLOOR is
+        // f64 noise (legitimate near-zero row-norm), not drift — do NOT
+        // refactor for it (would cost an LU rebuild per pivot in pathological
+        // problems).
+        let mut needs_reset = false;
+        let clamped = clamp_gamma(DSE_GAMMA_FLOOR / 10.0, &mut needs_reset);
+        assert_eq!(clamped, DSE_GAMMA_FLOOR);
+        assert!(!needs_reset, "tiny-positive sub-FLOOR is noise, not drift");
     }
 }
