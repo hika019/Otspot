@@ -8,7 +8,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
-use super::dual_common::{basic_obj, compute_reduced_costs_into};
+use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
 
@@ -928,7 +928,6 @@ pub(crate) fn reconcile_final_basis_state(
     max_etas: usize,
     deadline: Option<std::time::Instant>,
 ) -> Result<(), crate::error::SolverError> {
-    let m = basis.len();
     let mut basis_mgr = LuBasis::new_timed(a, basis, max_etas, deadline)?;
 
     x_b.copy_from_slice(b);
@@ -939,10 +938,7 @@ pub(crate) fn reconcile_final_basis_state(
         }
     }
 
-    for i in 0..m {
-        y[i] = c[basis[i]];
-    }
-    basis_mgr.btran_dense(y);
+    compute_dual_vars_into(c, &mut basis_mgr, basis, y);
     Ok(())
 }
 
