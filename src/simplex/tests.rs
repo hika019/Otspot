@@ -189,6 +189,7 @@ fn test_degenerate_zero_vars() {
     let lp = LpProblem::new(vec![], a, vec![]).unwrap();
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!((result.objective).abs() < PIVOT_TOL);
 }
 

@@ -247,53 +247,32 @@ fn guard_lp_optimal_load_bearing_production_path() {
     );
 }
 
-/// No-op proof sentinel: production sentinel disabled via direct hack detects
-/// false-Optimal. This test encodes an artificially corrupt "Optimal" result
-/// with |Ax-b| = 1e12 and ensures invariant check catches it.
+/// Production pass-through: `apply_lp_primal_guard` must not demote a clean result.
+///
+/// Runs a real LP through the solver and routes the result through `apply_lp_primal_guard`,
+/// the same function that guards every production LP exit. A clean Optimal result must
+/// not be demoted to NumericalError. This catches over-eager guard thresholds.
 #[test]
-fn sentinel_false_optimal_detected_by_invariant_check() {
-    // Build a simple 1-constraint LP: x1 <= 5, minimize x1
-    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+fn guard_lp_optimal_does_not_demote_clean_result() {
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let lp = LpProblem::new_general(
-        vec![1.0],
-        a.clone(),
-        vec![5.0],
+        vec![1.0, 2.0],
+        a,
+        vec![4.0],
         vec![ConstraintType::Le],
-        vec![(0.0, f64::INFINITY)],
+        vec![(0.0, f64::INFINITY); 2],
         None,
     )
     .unwrap();
 
-    // Corrupt result: claim Optimal with x = 1e12 (violates x <= 5 massively)
-    let corrupt = SolverResult {
-        status: SolveStatus::Optimal,
-        objective: 1e12,
-        solution: vec![1e12],
-        dual_solution: vec![0.0],
-        reduced_costs: vec![0.0],
-        slack: vec![0.0],
-        ..Default::default()
-    };
-
-    let pf = pfeas_normalized(&lp.a, &lp.b, &lp.constraint_types, &corrupt.solution);
-    assert!(
-        pf > 1e-3,
-        "Corrupt solution should have large pfeas_norm: got {:.3e}",
-        pf
-    );
-
-    // Verify the real solver returns clean Optimal (no false-Optimal)
     let real_result = solve_lp_with(&lp, &SolverOptions::default());
-    assert_eq!(real_result.status, SolveStatus::Optimal);
-    let real_pf = pfeas_normalized(
-        &lp.a,
-        &lp.b,
-        &lp.constraint_types,
-        &real_result.solution,
-    );
-    assert!(
-        real_pf < 1e-6,
-        "Real solver should have tiny pfeas_norm: got {:.3e}",
-        real_pf
+    assert_eq!(real_result.status, SolveStatus::Optimal, "pre-guard solve failed");
+
+    // Route through production guard: must remain Optimal.
+    let guarded = solver::apply_lp_primal_guard(real_result, &lp);
+    assert_eq!(
+        guarded.status,
+        SolveStatus::Optimal,
+        "guard must not demote a clean real Optimal result"
     );
 }

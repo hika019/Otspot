@@ -114,10 +114,12 @@ pub fn assert_solver_invariants_lp(result: &crate::problem::SolverResult, lp: &L
     if result.status != crate::problem::SolveStatus::Optimal {
         return;
     }
-    assert!(
-        !result.solution.is_empty(),
-        "Optimal result must have non-empty solution"
-    );
+    if !lp.c.is_empty() {
+        assert!(
+            !result.solution.is_empty(),
+            "Optimal result must have non-empty solution"
+        );
+    }
     let pf = pfeas_abs(&lp.a, &lp.b, &lp.constraint_types, &result.solution);
     let b_inf = lp.b.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let pf_norm = pf / (1.0 + b_inf);

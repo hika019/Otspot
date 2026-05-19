@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
+use crate::test_kkt::assert_solver_invariants_qp;
 
 /// BD-T1: baseline (presolve OFF, 全変数 box) → bound_duals.len()=4。
 #[test]
@@ -18,6 +19,7 @@ fn test_bd_t1_baseline_presolve_off() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     let sol_tol = 1e-3_f64;
     let tol = 1e-4_f64;
     assert!((result.solution[0]).abs() < sol_tol);
@@ -46,6 +48,7 @@ fn test_bd_t2_fixed_var_remap_core() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     let sol_tol = 5e-3_f64;
     let tol = 1e-4_f64;
     assert!((result.solution[0]).abs() < sol_tol);
@@ -87,6 +90,7 @@ fn test_bd_t3_fixed_var_lb_only() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     assert_eq!(result.bound_duals.len(), 3);
 }
 
@@ -110,6 +114,7 @@ fn test_bd_t4_empty_col_kkt_recovered() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     assert_eq!(result.bound_duals.len(), 2);
     let z_lb = result.bound_duals[0];
     let z_ub = result.bound_duals[1];
@@ -130,6 +135,7 @@ fn test_bd_t5_unbounded_vars_empty() {
     let opts = SolverOptions::default();
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     assert!(result.bound_duals.is_empty());
 }
 
@@ -150,6 +156,7 @@ fn test_bd_t6_ub_active_with_presolve() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     let sol_tol = 1e-3_f64;
     let tol = 1e-4_f64;
     assert!((result.solution[0] - 3.0).abs() < sol_tol);
@@ -180,6 +187,7 @@ fn test_bd_t7_constraint_active_lb_dual_nonzero_kkt() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_qp(&result, &problem);
     let sol_tol = 1e-3_f64;
     let tol = 1e-4_f64;
     assert!((result.solution[0] - 2.0).abs() < sol_tol);
