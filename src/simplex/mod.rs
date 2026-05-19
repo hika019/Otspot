@@ -10,7 +10,7 @@ pub(crate) mod primal;
 mod standard_form;
 
 pub use entry::{solve, solve_with};
-pub(crate) use entry::solve_without_presolve;
+pub(crate) use entry::{guard_lp_optimal, solve_without_presolve, with_lp_guard_disabled};
 
 pub(crate) use primal::{extract_solution, revised_simplex_core, two_phase_simplex};
 #[cfg(test)]

@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::simplex::guard_lp_optimal;
 
 use super::{ipm_solver, QpProblem};
 
@@ -90,8 +91,8 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
                 // 確定 status は simplex 再試行不要、即返却。
-                // known_optimal_obj 経由の early-exit は SuboptimalSolution arm (下) で実施。
-                return ipm_result;
+                // Optimal は primal guard で false-Optimal を除去してから返す。
+                return guard_lp_optimal(ipm_result, &lp);
             }
             SolveStatus::Unbounded
             | SolveStatus::Timeout
@@ -113,7 +114,8 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
                         crate::bench_utils::OBJ_MATCH_REL_TOL,
                     ) && !ipm_result.solution.is_empty()
                     {
-                        return SolverResult { status: SolveStatus::Optimal, ..ipm_result };
+                        let promoted = SolverResult { status: SolveStatus::Optimal, ..ipm_result };
+                        return guard_lp_optimal(promoted, &lp);
                     }
                 }
                 // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき

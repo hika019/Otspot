@@ -391,6 +391,7 @@ impl SearchState {
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+    use crate::test_kkt::assert_solver_invariants_qp;
 
     fn diag_concave_1d(bnd: f64) -> QpProblem {
         // f = -x², box [-bnd, bnd] → global min = -bnd² at corners
@@ -473,6 +474,7 @@ mod tests {
             "convex Q must yield Optimal, got {:?}",
             r.status
         );
+        assert_solver_invariants_qp(&r, &p);
     }
 
     #[test]

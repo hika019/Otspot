@@ -194,6 +194,59 @@ proptest! {
     }
 }
 
+/// Load-bearing proof for the production `guard_lp_optimal` path.
+///
+/// Constructs a corrupt `SolverResult` (status=Optimal, x=1e12 violating x≤5)
+/// and routes it through `apply_lp_primal_guard` — the same function called in
+/// production after each LP solve. Without the guard, corrupt results reach
+/// callers. With `with_lp_guard_disabled`, the guard is a no-op so the corrupt
+/// result passes through unchanged (proving the disable hook works and that
+/// the guard is the only thing catching the violation).
+///
+/// If `guard_lp_optimal` is deleted, the first assertion fails.
+/// If `with_lp_guard_disabled` is removed or broken, the second assertion fails.
+#[test]
+fn guard_lp_optimal_load_bearing_production_path() {
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![5.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+
+    // Corrupt result: claims Optimal with x=1e12 (violates x≤5 by 1e12).
+    let make_corrupt = || SolverResult {
+        status: SolveStatus::Optimal,
+        objective: 1e12,
+        solution: vec![1e12],
+        dual_solution: vec![0.0],
+        reduced_costs: vec![0.0],
+        slack: vec![0.0],
+        ..Default::default()
+    };
+
+    // Guard active (default): corrupt result must be demoted to NumericalError.
+    let guarded = solver::apply_lp_primal_guard(make_corrupt(), &lp);
+    assert_eq!(
+        guarded.status,
+        SolveStatus::NumericalError,
+        "guard_lp_optimal must catch corrupt Optimal (pfeas≈1e12); \
+         if this fails, the guard was deleted or skipped"
+    );
+
+    // Guard disabled via thread-local scope (no-op proof): corrupt result must pass through.
+    let unguarded = solver::with_lp_guard_disabled(|| solver::apply_lp_primal_guard(make_corrupt(), &lp));
+    assert_eq!(
+        unguarded.status,
+        SolveStatus::Optimal,
+        "with_lp_guard_disabled must make guard a no-op; corrupt Optimal must pass through"
+    );
+}
+
 /// No-op proof sentinel: production sentinel disabled via direct hack detects
 /// false-Optimal. This test encodes an artificially corrupt "Optimal" result
 /// with |Ax-b| = 1e12 and ensures invariant check catches it.

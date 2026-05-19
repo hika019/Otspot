@@ -9,6 +9,7 @@
 
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::qp::QpProblem;
 use crate::simplex::solve_with;
 use crate::sparse::CscMatrix;
 
@@ -208,4 +209,150 @@ pub fn assert_kkt_optimal_with(
         obj_err,
         EPS_OBJ_REL
     );
+}
+
+/// Assert solver invariants for a QP `SolverResult` against its `QpProblem`.
+///
+/// For `Optimal` / `LocallyOptimal` results: checks primal feasibility,
+/// bound feasibility, and KKT stationarity residual via the shared IPM KKT
+/// helpers. For non-Optimal results: returns immediately (honest non-Optimal
+/// is always acceptable).
+pub fn assert_solver_invariants_qp(
+    result: &crate::problem::SolverResult,
+    qp: &QpProblem,
+) {
+    use crate::problem::SolveStatus;
+    if !matches!(result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+        return;
+    }
+    assert!(
+        !result.solution.is_empty(),
+        "Optimal/LocallyOptimal QP result must have non-empty solution"
+    );
+    // Primal feasibility via shared LP helper (same Ax-b logic).
+    let pf = pfeas_abs(
+        &qp.a,
+        &qp.b,
+        &qp.constraint_types,
+        &result.solution,
+    );
+    let b_inf = qp.b.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
+    let pf_norm = pf / (1.0 + b_inf);
+    assert!(
+        pf_norm < EPS_KKT,
+        "QP Optimal result has excessive primal violation: pfeas={:.3e} norm={:.3e} > {:.3e}",
+        pf,
+        pf_norm,
+        EPS_KKT
+    );
+    // Bound feasibility.
+    let bv = bound_violation(&qp.bounds, &result.solution);
+    assert!(
+        bv < EPS_KKT,
+        "QP Optimal result has bound violation={:.3e} > {:.3e}",
+        bv,
+        EPS_KKT
+    );
+    // KKT stationarity: Qx + c + A^T y + z = 0 residual via IPM helper.
+    use crate::qp::ipm_solver::kkt::kkt_residual_rel;
+    use crate::qp::ipm_solver::outcome::ProblemView;
+    let view = ProblemView::from_problem(qp);
+    let kkt = kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
+    assert!(
+        kkt < EPS_KKT,
+        "QP Optimal result has KKT stationarity residual={:.3e} > {:.3e}",
+        kkt,
+        EPS_KKT
+    );
+}
+
+#[cfg(test)]
+mod no_op_proof_tests {
+    use super::*;
+    use crate::problem::{SolveStatus, SolverResult};
+    use crate::sparse::CscMatrix;
+
+    /// No-op proof: `assert_solver_invariants_lp` has load-bearing body.
+    ///
+    /// Passes a corrupt Optimal result (x=1e12, violates x≤5) to the helper and
+    /// expects a panic. If the helper body were emptied, this test would NOT panic
+    /// and would itself fail (since `#[should_panic]` would not be satisfied).
+    #[test]
+    #[should_panic(expected = "primal violation")]
+    fn assert_solver_invariants_lp_panics_on_primal_violation() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = crate::problem::LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let corrupt = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1e12],
+            ..Default::default()
+        };
+        assert_solver_invariants_lp(&corrupt, &lp);
+    }
+
+    /// No-op proof: `assert_solver_invariants_lp` catches bound violations.
+    ///
+    /// x is constrained to [0, 5], but the corrupt result claims x=100.
+    #[test]
+    #[should_panic(expected = "bound violation")]
+    fn assert_solver_invariants_lp_panics_on_bound_violation() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let lp = crate::problem::LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![1000.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, 5.0)],
+            None,
+        )
+        .unwrap();
+        let corrupt = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![100.0],
+            ..Default::default()
+        };
+        assert_solver_invariants_lp(&corrupt, &lp);
+    }
+
+    /// No-op proof: `assert_solver_invariants_qp` has load-bearing body.
+    ///
+    /// Passes a corrupt Optimal QP result (x=1e12, violates x=1 equality) and
+    /// expects a panic. If the helper body were emptied this test would fail.
+    #[test]
+    #[should_panic(expected = "primal violation")]
+    fn assert_solver_invariants_qp_panics_on_primal_violation() {
+        use crate::qp::QpProblem;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        let corrupt = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1e12],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0],
+            ..Default::default()
+        };
+        assert_solver_invariants_qp(&corrupt, &prob);
+    }
 }

@@ -65,6 +65,10 @@ fn run_ipm_with(
     // 後処理は Optimal と同パスで行うため一旦 Optimal に昇格。
     let is_locally_optimal = result.status == SolveStatus::LocallyOptimal;
     if is_locally_optimal {
+        debug_assert!(
+            !result.solution.is_empty(),
+            "LocallyOptimal promotion requires a non-empty solution (IPM convergence invariant)"
+        );
         result.status = SolveStatus::Optimal;
     }
 
