@@ -1,10 +1,10 @@
-//! faer per-call parallelism sentinel (#31, in-source test 専用)。
+//! faer per-call parallelism sentinel (in-source test 専用)。
 //!
 //! 検証:
 //! - `solver_par_from_threads(threads)` 経由の LDL factor + solve が
 //!   threads>1 で Par::Rayon(threads) を返す (= 配線が正しい)。
 //! - threads count が rayon pool に正しく伝達される (HW 非依存の deterministic 検証)。
-//! - 複数 data pattern (dense PSD / quasidefinite saddle-point / 規模違い)
+//! - 複数 data pattern (dense PSD / arrowhead PD / 規模違い 3 段)
 //!   table-driven (CLAUDE.md「複数パターンのデータを用意せよ」)。
 //! - threads=1 で Par::Seq 同等動作 (= 既存挙動完全互換) と同じ residual。
 //!
@@ -188,9 +188,11 @@ fn build_arrowhead_pd_upper(n: usize, tip: usize, seed: u64) -> CscMatrix {
 /// SPEEDUP_TEST_N との組合せで supernodal が複数 large supernode を生む。
 const ARROWHEAD_TIP_COLS: usize = 200;
 
-/// Returns the thread count encoded in `par`.
+/// Returns the thread count encoded in `par`. `Par::Seq` → 1, `Par::Rayon(n)` → n.
 ///
-/// `Par::Seq` → 1 (serial), `Par::Rayon(n)` → n.
+/// 保証範囲: `solver_par_from_threads` の戻り値が正しい variant + count を担う
+/// ことのみを検証。faer 内部 supernodal が実際に n thread を spawn したかは
+/// 検査しない (= 配線 sentinel であって speedup sentinel ではない)。
 fn par_thread_count(par: faer::Par) -> usize {
     match par {
         faer::Par::Seq => 1,
@@ -198,8 +200,12 @@ fn par_thread_count(par: faer::Par) -> usize {
     }
 }
 
-/// Builds a rayon `ThreadPool` with `n` threads and returns its
-/// `current_num_threads()` — directly verifies that `n` threads are active.
+/// Builds a rayon `ThreadPool` with `n` threads and queries `current_num_threads()`
+/// inside `install()`.
+///
+/// 保証範囲: rayon `ThreadPoolBuilder::num_threads(n)` が要求どおり n thread の
+/// pool を構築できることを確認 (rayon API 健全性チェック)。faer の Par::Rayon(n)
+/// が **どの** rayon pool に dispatch するかは別問題で、本 helper は cover しない。
 fn rayon_pool_active_count(n: usize) -> usize {
     rayon::ThreadPoolBuilder::new()
         .num_threads(n)
