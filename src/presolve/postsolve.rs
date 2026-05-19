@@ -2,11 +2,17 @@
 //! space by replaying `PostsolveStack` in LIFO order.
 
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::options::{SolverOptions, WarmStartBasis};
+use crate::simplex::build_standard_form;
+use crate::simplex::crash::compute_crash_basis;
 use crate::sparse::CscMatrix;
-use crate::options::SolverOptions;
 use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
+
+/// Relative tolerance below which a standard-form column is treated as at-bound
+/// (non-basic candidate) when synthesising the postsolved warm-start basis.
+const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
 
 /// Return the primal slack of original row `i` (always non-negative for feasible
 /// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
@@ -539,6 +545,149 @@ fn recover_removed_row_dual(
     }
 }
 
+/// Synthesise an original-LP standard-form basis from the postsolved primal solution.
+///
+/// Presolve renumbers variables and rows, so `result.warm_start_basis` (which indexes
+/// the reduced LP's standard form) is unusable for re-warm-starting the original LP.
+/// We rebuild a basis on the original standard form:
+///
+///   1. Translate the postsolved primal solution into the original standard-form
+///      vector `x_std` (shifted variables + slack columns).
+///   2. Triangulate with the LTSF crash to guarantee non-singularity and to handle
+///      Ge / Eq rows for which the slack alone is not a valid initial basic column.
+///   3. For each row whose crash assignment is a slack covering a tight constraint
+///      (slack ≈ 0) but where a structural column has `x_std > 0`, pivot the active
+///      structural column in. This makes the basis reflect the optimum's at-bound
+///      vs interior split (Maros & Mészáros §5).
+///
+/// Returns `None` only when the crash leaves rows uncovered (an artificial would be
+/// needed) — in that case no all-real-column basis exists, so warm-start is impossible.
+fn recover_warm_start_basis(
+    orig_problem: &LpProblem,
+    solution: &[f64],
+) -> Option<WarmStartBasis> {
+    let sf = build_standard_form(orig_problem);
+    let n_orig = orig_problem.num_vars;
+    let n_total = sf.n_total;
+    let n_shifted = sf.n_shifted;
+    let m_ext = sf.m;
+
+    if solution.len() != n_orig {
+        return None;
+    }
+
+    // Step 1: postsolved orig solution → standard-form vector.
+    let mut x_std = vec![0.0_f64; n_total];
+    for j in 0..n_orig {
+        let info = &sf.orig_var_info[j];
+        let xj = solution[j];
+        if info.new_vars.len() == 2 {
+            // Free var split: x = x_plus − x_minus, both ≥ 0.
+            let plus_idx = info.new_vars[0].0;
+            let minus_idx = info.new_vars[1].0;
+            x_std[plus_idx] = xj.max(0.0);
+            x_std[minus_idx] = (-xj).max(0.0);
+        } else {
+            let (idx, coeff) = info.new_vars[0];
+            // coeff > 0 ⇒ shifted by lb (x_std = x − lb); coeff < 0 ⇒ shifted by ub.
+            let val = if coeff > 0.0 { xj - info.offset } else { info.offset - xj };
+            x_std[idx] = val.max(0.0);
+        }
+    }
+    // Slack columns: x_std[slack] = (b[i] − Σ A_ij x_std_struct[j]) / sign(slack_coeff).
+    // Each slack column has exactly one non-zero entry at its owning row.
+    let mut row_struct_sum = vec![0.0_f64; m_ext];
+    for j in 0..n_shifted {
+        if x_std[j].abs() < WARM_BASIS_BUILD_TOL {
+            continue;
+        }
+        if let Ok((rows, vals)) = sf.a.get_column(j) {
+            for (k, &row) in rows.iter().enumerate() {
+                row_struct_sum[row] += vals[k] * x_std[j];
+            }
+        }
+    }
+    for j in n_shifted..n_total {
+        if let Ok((rows, vals)) = sf.a.get_column(j) {
+            if rows.len() == 1 && vals[0].abs() > 0.0 {
+                let i = rows[0];
+                let coeff = vals[0];
+                let slack = (sf.b[i] - row_struct_sum[i]) / coeff;
+                x_std[j] = slack.max(0.0);
+            }
+        }
+    }
+
+    // Step 2: LTSF crash for non-singular triangulation (covers Ge / Eq rows).
+    let (mut basis, _needs_art, num_art) = compute_crash_basis(
+        &sf.a,
+        &sf.b,
+        m_ext,
+        n_shifted,
+        &sf.initial_basis,
+        &sf.needs_artificial,
+    );
+    if num_art > 0 {
+        // No all-structural triangulation exists. Refuse to manufacture a basis.
+        return None;
+    }
+
+    // Step 3: solution-driven refinement. For each structural column j with
+    // `x_std[j] > tol`, swap into a row whose current basic column is an
+    // at-bound slack (x_std[basis[i]] ≈ 0). This makes the basis reflect the
+    // active variables at the postsolved optimum without breaking triangulation
+    // (we only replace 0-valued slacks, so x_B at the new basis stays consistent
+    // with x_std).
+    let mut basic_at_row: Vec<usize> = vec![usize::MAX; n_total];
+    for (i, &col) in basis.iter().enumerate() {
+        basic_at_row[col] = i;
+    }
+    // Greedy in descending x_std order so the strongest active vars get pivoted
+    // first.
+    let mut active_struct: Vec<(f64, usize)> = (0..n_shifted)
+        .filter(|&j| x_std[j] > WARM_BASIS_BUILD_TOL && basic_at_row[j] == usize::MAX)
+        .map(|j| (x_std[j], j))
+        .collect();
+    active_struct.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (_xj, j) in active_struct {
+        if let Ok((rows, vals)) = sf.a.get_column(j) {
+            // Pick the candidate row with the largest |a_ij| where the current
+            // basic column is an at-bound slack; Markowitz threshold protects
+            // against tiny pivots that would inflate B's condition number.
+            let mut col_max = 0.0_f64;
+            for &v in vals.iter() {
+                if v.abs() > col_max { col_max = v.abs(); }
+            }
+            if col_max < WARM_BASIS_BUILD_TOL { continue; }
+            let pivot_min = (0.1 * col_max).max(WARM_BASIS_BUILD_TOL);
+
+            let mut best: Option<(f64, usize)> = None;
+            for (k, &row) in rows.iter().enumerate() {
+                let abs = vals[k].abs();
+                if abs < pivot_min { continue; }
+                let cur = basis[row];
+                let cur_is_at_bound_slack = cur >= n_shifted && x_std[cur] <= WARM_BASIS_BUILD_TOL;
+                if !cur_is_at_bound_slack { continue; }
+                if best.is_none_or(|(b, _)| abs > b) {
+                    best = Some((abs, row));
+                }
+            }
+            if let Some((_, row)) = best {
+                let leaving = basis[row];
+                basic_at_row[leaving] = usize::MAX;
+                basis[row] = j;
+                basic_at_row[j] = row;
+            }
+        }
+    }
+
+    // Informational x_b at the new basis (dual-simplex warm path recomputes
+    // x_B = B^{-1} b_new, so this is purely a hint).
+    let x_b: Vec<f64> = basis.iter().map(|&j| x_std.get(j).copied().unwrap_or(0.0)).collect();
+    Some(WarmStartBasis { basis, x_b })
+}
+
 /// Lift the reduced-problem solution back into the original variable / constraint space.
 pub fn run_postsolve(
     result: &SolverResult,
@@ -883,6 +1032,15 @@ pub fn run_postsolve(
 
     let objective = result.objective + presolve_result.obj_offset;
 
+    // Lift the warm-start basis to the original LP standard form so the user can
+    // re-warm-start with `presolve = false` next call.  Only attempt this for
+    // Optimal status: Infeasible/Unbounded carry no meaningful solution.
+    let warm_start_basis = if matches!(result.status, SolveStatus::Optimal) {
+        recover_warm_start_basis(orig_problem, &solution)
+    } else {
+        None
+    };
+
     SolverResult {
         status: result.status.clone(),
         objective,
@@ -890,7 +1048,7 @@ pub fn run_postsolve(
         dual_solution,
         reduced_costs,
         slack,
-        warm_start_basis: None,
+        warm_start_basis,
         iterations: result.iterations,
         postsolve_dfeas: Some(postsolve_dfeas_recomputed),
         ..Default::default()
