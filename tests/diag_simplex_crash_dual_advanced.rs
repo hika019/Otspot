@@ -1,4 +1,4 @@
-//! Simplex crash basis → dual_advanced 配線 (#40) e2e sentinel。
+//! Simplex crash basis → dual_advanced 配線の e2e sentinel。
 //!
 //! `solve_with` 経由で DualAdvanced 経路 (default) が Ge/Eq LP を解いた際、
 //! `use_lp_crash_basis` トグルで:
