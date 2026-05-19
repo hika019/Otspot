@@ -208,7 +208,7 @@ fn test_refine_dual_projected_gradient_uses_curvature_scaled_step() {
         ..SolverResult::default()
     };
 
-    refine_dual_projected_gradient(&problem, &mut result, None);
+    refine_dual_projected_gradient(&problem, &mut result, &[], None);
 
     assert!((result.dual_solution[0] - 1.0e-3).abs() < 1e-9);
 }
@@ -229,6 +229,7 @@ fn test_refine_dual_worst_active_block_updates_row_and_bound_duals_together() {
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
     };
     let mut result = SolverResult {
         status: SolveStatus::Optimal,
@@ -244,7 +245,7 @@ fn test_refine_dual_worst_active_block_updates_row_and_bound_duals_together() {
         &result.dual_solution,
         &result.bound_duals,
     );
-    refine_dual_worst_active_block(&problem, &mut result, None);
+    refine_dual_worst_active_block(&problem, &mut result, &[], None);
     let post = crate::qp::ipm_solver::kkt::kkt_residual_rel(
         &view,
         &result.solution,
