@@ -8,6 +8,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
+use super::dual_common::{basic_obj, compute_reduced_costs_into};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
 
@@ -1049,7 +1050,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
     };
@@ -1059,8 +1060,10 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         is_basic[b] = true;
     }
 
-    // Buffers reused each iteration.
-    let mut c_b = vec![0.0f64; m];
+    // Buffers reused each iteration. y_dense / rc_vec are filled in-place by
+    // compute_reduced_costs_into; d_dense is the FTRAN result for the entering
+    // column. Per-iter allocation matters: revised simplex commonly runs
+    // 10^4–10^6 iterations on real LPs.
     let mut y_dense = vec![0.0f64; m];
     let mut d_dense = vec![0.0f64; m];
     let mut rc_vec = vec![0.0f64; n_price];
@@ -1090,30 +1093,15 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
 
-        // y = BTRAN(c_B); c_B is dense so use btran_dense.
-        for i in 0..m {
-            c_b[i] = c[basis[i]];
-        }
-        y_dense.copy_from_slice(&c_b);
-        basis_mgr.btran_dense(&mut y_dense);
-        let y = &y_dense;
-
-        for j in 0..n_price {
-            if is_basic[j] {
-                rc_vec[j] = 0.0;
-                continue;
-            }
-            let (rows, vals) = a.get_column(j).unwrap();
-            let mut ya = 0.0;
-            for (k, &row) in rows.iter().enumerate() {
-                ya += y[row] * vals[k];
-            }
-            rc_vec[j] = c[j] - ya;
-        }
+        // y = B^{-T} c_B, then r_j = c_j − y^T a_j for non-basic j. Both steps
+        // are shared with the dual paths (see `dual_common`).
+        compute_reduced_costs_into(
+            a, c, &mut basis_mgr, &is_basic, n_price, basis, &mut y_dense, &mut rc_vec,
+        );
         // Masking RC of blocked columns prevents pricing from re-selecting an
         // entering column known to produce a singular basis from `basis_snapshot`.
         for &j in &blocked_at_basis {
@@ -1124,7 +1112,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
         let entering_col = match pricing.select_entering(&rc_vec, n_price) {
             None => {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Optimal(obj, y_dense.clone());
             }
             Some(j) => j,
@@ -1168,7 +1156,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         }
                         continue;
                     } else {
-                        let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                        let obj: f64 = basic_obj(c, basis, x_b);
                         return SimplexOutcome::Timeout(obj);
                     }
                 }
@@ -1301,7 +1289,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 }
                 continue;
             } else {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
         }
@@ -1322,7 +1310,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // alone is insufficient: forplan-style Phase I (slow real progress)
         // has step > 0 and resets (b); a Phase II near the optimum sees
         // obj plateau but is gated off by (c).
-        let current_obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+        let current_obj: f64 = basic_obj(c, basis, x_b);
         let progress_eps = best_obj.abs().max(1.0) * NO_PROGRESS_REL_EPS;
         if current_obj + progress_eps < best_obj {
             best_obj = current_obj;
@@ -1343,7 +1331,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         }
     }
 
-    let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+    let obj: f64 = basic_obj(c, basis, x_b);
     SimplexOutcome::Timeout(obj)
 }
 

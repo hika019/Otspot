@@ -16,7 +16,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
-use super::super::dual_common::{compute_dual_vars, compute_reduced_costs};
+use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs};
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
 
@@ -134,7 +134,7 @@ pub(crate) fn dual_simplex_core_advanced(
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
     };
@@ -197,7 +197,7 @@ pub(crate) fn dual_simplex_core_advanced(
             .as_ref()
             .is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
 
@@ -212,7 +212,7 @@ pub(crate) fn dual_simplex_core_advanced(
         let leaving_row = match leaving_pick {
             None => {
                 // 全て x_B[i] ≥ -ε → 主実行可能 → 最適
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
                 return SimplexOutcome::Optimal(obj, y);
             }
@@ -271,7 +271,7 @@ pub(crate) fn dual_simplex_core_advanced(
             // 数値的に不安定 → refactorして被縮小費用を再計算
             basis_mgr.refactor_if_needed_timed(a, basis, options.deadline);
             if basis_mgr.refactor_failed {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
@@ -338,7 +338,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 if basis_mgr.singular_basis {
                     return SimplexOutcome::SingularBasis;
                 }
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
             // refactor後は被縮小費用の数値誤差をリセット
