@@ -326,6 +326,19 @@ pub struct SolverOptions {
     /// LP 拡張 warm start。`warm_start` より優先される。
     /// `basis` のみ与えれば既存挙動と同等で、`x_orig`/`y_orig` は将来 IPM crossover 用。
     pub warm_start_lp: Option<LpWarmStart>,
+    /// Postsolve 経路で `warm_start_basis` を復元するか (default `false`)。
+    ///
+    /// presolve が問題を縮約した場合、reduced-LP の basis 番号は元 LP に対して
+    /// 無効化される。`true` のとき `run_postsolve` 出口で元 LP の standard form
+    /// を再構築し、LTSF crash + solution-driven refinement で `warm_start_basis`
+    /// を合成する。default `false` は build_standard_form (O(nnz)) + crash +
+    /// refinement のコストを払わない (large LP で wall 数十%増を観測)。
+    /// 次回 solve で同 LP を warm-start したい呼び出し側のみ opt-in。
+    ///
+    /// presolve が走らない場合 (`presolve = false` or `was_reduced = false`)
+    /// は native simplex 出口で basis を直接 clone するため、本フラグに依らず
+    /// `warm_start_basis = Some(_)` が返る。
+    pub recover_warm_start_basis: bool,
     /// LP cold start 時 simplex crash basis を適用する。
     /// 適用範囲: primal two-phase Phase I と dual_advanced Big-M Phase I。
     /// warm_start / warm_start_lp が Some なら無視される。
@@ -410,6 +423,7 @@ impl Default for SolverOptions {
             warm_start: None,
             warm_start_qp: None,
             warm_start_lp: None,
+            recover_warm_start_basis: false,
             use_lp_crash_basis: true,
             presolve: true,
             timeout_secs: None,
