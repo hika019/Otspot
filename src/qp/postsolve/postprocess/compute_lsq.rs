@@ -359,7 +359,9 @@ mod comp_slackness_tests {
 
     /// Fixture C: mixed Le + Ge, both loose. Establishes the clamp triggers on
     /// each constraint type independently (LSQ's proj_lower / proj_upper paths
-    /// don't accidentally re-enable y).
+    /// don't accidentally re-enable y). `c` is non-zero so the LSQ target
+    /// `-(Qx + c + bound_contrib)` is non-trivial — without the clamp, LSQ
+    /// would assign y = (0, -1) on this fixture, so the assertion has teeth.
     #[test]
     fn lsq_mixed_loose_rows_all_clamped_to_zero() {
         // Two columns, two rows, both rows loose at x=(1, 1).
@@ -370,7 +372,7 @@ mod comp_slackness_tests {
         ).unwrap();
         let qp = lp_qp(
             2, 2,
-            vec![0.0, 0.0], a, vec![100.0, -50.0],
+            vec![1.0, -1.0], a, vec![100.0, -50.0],
             vec![(0.0, 5.0), (0.0, 5.0)],
             vec![ConstraintType::Le, ConstraintType::Ge],
         );
