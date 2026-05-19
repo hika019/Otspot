@@ -5,9 +5,14 @@ use crate::tolerances::FX_TOL;
 use super::outcome::ProblemView;
 
 /// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
-/// FX (lb≈ub) と `eliminated_cols[j]==true` の col は postsolve 慣例で除外。
-/// 旧来の "A 列空のみ" heuristic は非凸 QP linear-only var (A 空 / Q 非空 / c≠0) を
-/// 誤って skip する真因だったため廃止。EmptyCol 判定は presolve metadata 経由のみ。
+/// FX (lb≈ub) は postsolve 慣例で除外。
+///
+/// EmptyCol skip は `eliminated_cols[j]==true` **AND** orig 行列で A 列空 **AND** Q 列空
+/// の三条件 (= LP-style 完全孤立 var) のみ narrow:
+/// - 非凸 QP の 26 eliminated 群 (A 非空 / Q 空) は skip されず measurement に出る
+///   (これらを除くと refine 系の進捗 oracle として誤動作 #104)。
+/// - #55 linear-only var (A 空 / Q 非空 / c≠0) は skip されず stationarity 露出維持。
+/// - LP-style 完全孤立 var (A 空 / Q 空) のみ skip し cancellation noise 抑制。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     let n = prob.bounds.len();
@@ -18,6 +23,8 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
     let aty_dd = dd_impl::aty(prob.a, y, n);
     let bound_contrib = kkt_resid::bound_contrib(prob.bounds, z);
     let use_elim_mask = prob.eliminated_cols.len() == n;
+    let a_col_count = prob.a.col_ptr.len().saturating_sub(1);
+    let q_col_count = prob.q.col_ptr.len().saturating_sub(1);
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
@@ -25,7 +32,13 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
             continue;
         }
         if use_elim_mask && prob.eliminated_cols[j] {
-            continue;
+            let a_empty = j >= a_col_count
+                || prob.a.col_ptr[j + 1] == prob.a.col_ptr[j];
+            let q_empty = j >= q_col_count
+                || prob.q.col_ptr[j + 1] == prob.q.col_ptr[j];
+            if a_empty && q_empty {
+                continue;
+            }
         }
         let r_dd = qx_dd[j]
             + TwoFloat::from(prob.c[j])
@@ -219,10 +232,12 @@ mod tests {
         assert!(r > 0.4 && r < 0.6, "got r={:.3e}", r);
     }
 
-    /// FX 列は KKT 評価から自動除外、EmptyCol は明示 mask 経由で除外される。
+    /// FX 列は KKT 評価から自動除外、LP-style 完全孤立 var (A 空 AND Q 空 AND mask=true)
+    /// は明示 mask 経由で除外される。Path B narrow の skip 対象はこの一群のみ。
     #[test]
     fn kkt_residual_rel_excludes_fx_and_empty_col() {
         let q = CscMatrix::new(3, 3);
+        // 列 1 を LP-style 完全孤立 (A 空 / Q 空) にするため A の非零は col 2 に置く。
         let c = vec![1e10_f64, 1e10, 0.0];
         let a = CscMatrix::from_triplets(
             &[0], &[2], &[1.0], 1, 3,
@@ -230,7 +245,7 @@ mod tests {
         let b = vec![0.0];
         let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
         let cts = vec![ConstraintType::Eq];
-        // 列 1 が presolve で削除された EmptyCol である情景を再現。
+        // 列 0 = FX, 列 1 = LP-style 完全孤立 + mask=true, 列 2 = A 非空 (skip 対象外)。
         let mask = vec![false, true, false];
         let view = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
 
@@ -239,6 +254,89 @@ mod tests {
         let z = vec![0.0, 0.0];
         let r = kkt_residual_rel(&view, &x, &y, &z);
         assert!(r.abs() < 1e-15, "got r={:.3e}", r);
+    }
+
+    /// #112 真因 sentinel: QGFRDXPN-like 26 eliminated var (mask=true / A 非空 / Q 空 / c≠0)
+    /// は Path B narrow で skip されず stationarity に出る。
+    /// 旧 effc242 (Q 条件なし) では skip され r≈0 となり refine 進捗 oracle 退化した。
+    #[test]
+    fn kkt_residual_rel_qgfrdxpn_eliminated_var_not_skipped() {
+        // n=1, A 列非空, Q 空, c=1, mask=true, y=0 → r_j = c = 1.0
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let c = vec![1.0_f64];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq];
+        let mask = vec![true];
+        let view = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
+
+        let x = vec![0.0_f64];
+        let y = vec![0.0_f64];
+        let z: Vec<f64> = vec![];
+        let r = kkt_residual_rel(&view, &x, &y, &z);
+        // raw r = 0 + 1 + 0 + 0 = 1, scale = 1+0+1+0+0 = 2 → rel = 0.5
+        assert!(
+            r > 0.4 && r < 0.6,
+            "26 eliminated var (A 非空) は skip 対象外、r 露出必須 (got rel={:.3e})",
+            r,
+        );
+    }
+
+    /// control sentinel: #55 linear-only var (A 空 / Q 非空 / mask=true) も Path B narrow で
+    /// skip されず stationarity 露出を維持する。Q 空条件単独だと skip してしまうのを防ぐ。
+    #[test]
+    fn kkt_residual_rel_linear_only_var_not_skipped_with_mask() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let c = vec![1.0_f64];
+        let b: Vec<f64> = vec![];
+        let bounds = vec![(-2.0_f64, 2.0_f64)];
+        let cts: Vec<ConstraintType> = vec![];
+        let mask = vec![true];
+        let view = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
+
+        let x = vec![-2.0_f64];
+        let y: Vec<f64> = vec![];
+        let z = vec![0.0_f64, 0.0];
+        let r = kkt_residual_rel(&view, &x, &y, &z);
+        assert!(
+            r > 0.5,
+            "linear-only var (Q 非空) は mask=true でも skip されないこと (got rel={:.3e})",
+            r,
+        );
+    }
+
+    /// no-op proof: Path B narrow の Q 空条件を取り除いた挙動 (= effc242 の skip 規約) では
+    /// QGFRDXPN-like fixture の stationarity が 0 と評価されてしまう。同一入力に手で
+    /// "Q 空条件なし" の判定を当てて FAIL 相当の値を assert する。
+    #[test]
+    fn kkt_residual_rel_path_b_noop_proof() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let c = vec![1.0_f64];
+        let b = vec![0.0_f64];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq];
+
+        // mask 空 → effc242 経路と同等に skip されないことを base line として確認。
+        let view_no_mask = build_view(&q, &a, &c, &b, &bounds, &cts);
+        let r_no_mask = kkt_residual_rel(
+            &view_no_mask, &[0.0_f64], &[0.0_f64], &[],
+        );
+        assert!(r_no_mask > 0.4, "mask 空 base line で r が露出 (got {:.3e})", r_no_mask);
+
+        // 同 fixture を mask=true で覆っても Path B narrow なら A 非空のため skip されず r 露出。
+        let mask = vec![true];
+        let view_masked = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
+        let r_masked = kkt_residual_rel(
+            &view_masked, &[0.0_f64], &[0.0_f64], &[],
+        );
+        assert!(
+            (r_masked - r_no_mask).abs() < 1e-15,
+            "Path B: 26 eliminated 群は mask 有無で同値、effc242 (Q 条件なし) なら r_masked=0 で乖離 (no_mask={:.3e}, masked={:.3e})",
+            r_no_mask, r_masked,
+        );
     }
 
     /// mask 未供給 (= IPM 経路) の場合: A 空 / Q 非空 の linear-only var は skip されず
