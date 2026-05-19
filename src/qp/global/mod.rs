@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    // ---- Phase 6 (#9): status 区別 sentinel ----------------------------------
+    // ---- status 区別 sentinel ----------------------------------
     //
     // 観測: BB driver の return path で Q が convex (PSD) か indefinite かに応じて
     // `Optimal` vs `NonconvexGlobal` / `LocallyOptimal` vs `NonconvexLocal` が

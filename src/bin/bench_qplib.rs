@@ -214,7 +214,7 @@ fn main() {
     let mut n_skip_qcqp = 0usize;
     let mut n_skip_other = 0usize;
     let mut n_nonconvex = 0usize;
-    // Phase 6: solve_qp_global 経由の status 区別 (#9).
+    // solve_qp_global 経由の status 区別.
     // NonconvexLocal / NonconvexGlobal は現状の bench (solve_qp_with single-shot) では
     // 出ない (BB driver は別 entry) が、将来 bench が global path に切り替わった際の
     // print 経路を準備。LocallyOptimal は単発 IPM inertia 補正で発生する。
@@ -480,7 +480,7 @@ fn main() {
                 n_nonconvex += 1;
                 ("NONCONVEX".to_string(), format!("[{}] Q not PSD", method_label))
             }
-            // Phase 6 (#9): BB driver から global path 経由で来た場合の caller 視点表示。
+            // BB driver から global path 経由で来た場合の caller 視点表示。
             // 単発 IPM 経路 (apply_bench_status_promotion 後) では現状出ない (Optimal 化 or
             // LocallyOptimal で別 arm を通る)。global path 統合時にここに乗る。
             SolveStatus::NonconvexLocal => {
@@ -541,7 +541,7 @@ fn main() {
     println!("  MAXITER:           {}", n_max_iter);
     println!("  ERROR:             {}", n_error);
     println!("  SKIP:              {}", n_skip);
-    // Phase 6 (#9): SKIP 内訳を fact 出力 (parse error message 由来、推論排除).
+    // SKIP 内訳を fact 出力 (parse error message 由来、推論排除).
     println!("    SKIP:integer:    {}", n_skip_integer);
     println!("    SKIP:qcqp:       {}", n_skip_qcqp);
     println!("    SKIP:other:      {}", n_skip_other);
