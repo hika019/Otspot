@@ -14,9 +14,9 @@
 //! を共有するため本 helper に集約する。
 //!
 //! ## CSC 規約
-//! 入力 `Q` は full-symmetric / 上三角どちらも許容。`row < col` の片半 entry を
-//! 行と列双方の `R_j` に 1 度だけ反映するため、対称行列の R_j と一致する。
-//! 対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
+//! 入力 `Q` は full-symmetric / 上三角 / 下三角いずれも許容。layout は entry の
+//! `(row, col)` 並びから自動判定し、片側 triangular でも対称化された `R_j` を算出する
+//! (実装下半を参照)。対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
 
 use crate::sparse::CscMatrix;
 
@@ -33,17 +33,34 @@ pub(crate) fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
     }
     let mut diag = vec![0.0_f64; n];
     let mut row_offdiag_sum = vec![0.0_f64; n];
+    // 全 off-diag entry を 1 度だけ走査し、|v| を (row, col) 双方の R に加算する。
+    // 旧実装は `row < col` のみを反映していたため lower-triangular 入力で off-diag を
+    // 取り零し λ_min 下界を誤算出する silent failure があった。両側を見ることで
+    // 上三角 / 下三角 layout は正しく対称化される。full-symmetric (両側 entry 持ち) は
+    // 各 pair を 2 度反映するので最後に 1/2 補正する。
+    let mut has_upper = false;
+    let mut has_lower = false;
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
             let val = q.values[k];
             if row == col {
                 diag[col] = val;
-            } else if row < col {
+            } else {
+                if row < col {
+                    has_upper = true;
+                } else {
+                    has_lower = true;
+                }
                 let abs_val = val.abs();
                 row_offdiag_sum[row] += abs_val;
                 row_offdiag_sum[col] += abs_val;
             }
+        }
+    }
+    if has_upper && has_lower {
+        for r in row_offdiag_sum.iter_mut() {
+            *r *= 0.5;
         }
     }
     let mut shift = 0.0_f64;
@@ -61,6 +78,17 @@ mod tests {
     use super::*;
 
     fn upper_tri(n: usize, entries: &[(usize, usize, f64)]) -> CscMatrix {
+        let rows: Vec<usize> = entries.iter().map(|&(r, _, _)| r).collect();
+        let cols: Vec<usize> = entries.iter().map(|&(_, c, _)| c).collect();
+        let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
+        CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+    }
+
+    /// Lower-triangular CSC (row >= col) entry リストから CscMatrix を作る。
+    fn lower_tri(n: usize, entries: &[(usize, usize, f64)]) -> CscMatrix {
+        for &(r, c, _) in entries {
+            assert!(r >= c, "lower-tri requires row >= col, got ({r},{c})");
+        }
         let rows: Vec<usize> = entries.iter().map(|&(r, _, _)| r).collect();
         let cols: Vec<usize> = entries.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<f64> = entries.iter().map(|&(_, _, v)| v).collect();
@@ -126,5 +154,107 @@ mod tests {
         // helper は素 Gershgorin に専念し 0.1 を返す。caller 側で PSD 判定で吸収。
         let q = upper_tri(2, &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]);
         assert!((psd_shift_from_gershgorin(&q) - 0.1).abs() < 1e-12);
+    }
+
+    /// Lower-triangular 入力 silent failure 防御: Q=[[0,1],[1,0]] を lower (1,0)=1 のみで
+    /// 渡したとき、旧実装は off-diag をすべて取り零し shift=0 を返す。新実装は両側を
+    /// 走査して shift=1 を出すこと (= upper-only / full-symmetric と同値)。
+    #[test]
+    fn lower_triangular_only_zero_diag_bilinear_matches_upper() {
+        let q_lower = lower_tri(2, &[(1, 0, 1.0)]);
+        let q_upper = upper_tri(2, &[(0, 1, 1.0)]);
+        assert!((psd_shift_from_gershgorin(&q_lower) - 1.0).abs() < 1e-12);
+        assert_eq!(
+            psd_shift_from_gershgorin(&q_lower),
+            psd_shift_from_gershgorin(&q_upper),
+            "lower-only と upper-only は同じ shift を返すべき (対称化)"
+        );
+    }
+
+    /// Lower-triangular only 非対角支配 indefinite: Q=[[1,2],[2,1]] を lower (1,0)=2 + diag のみで
+    /// 渡したとき、shift = max(0, 2-1, 2-1) = 1。旧実装は shift=0 を返した。
+    #[test]
+    fn lower_triangular_only_offdiag_dominant_indefinite() {
+        let q_lower = lower_tri(2, &[(0, 0, 1.0), (1, 0, 2.0), (1, 1, 1.0)]);
+        assert!((psd_shift_from_gershgorin(&q_lower) - 1.0).abs() < 1e-12);
+    }
+
+    /// 3 layout (upper-only / lower-only / full-symmetric) で同じ抽象 Q に対して
+    /// 同一 shift を返すこと。layout 判定 + 1/2 補正が full-symmetric 退化させていない
+    /// ことを示す。
+    #[test]
+    fn three_layouts_agree_on_indefinite_q() {
+        // 抽象 Q = [[1, 2, 0],[2, 1, -1],[0, -1, 1]]
+        // 真 row sums = (2, 3, 1), diag = (1, 1, 1) → Gershgorin lower = (-1, -2, 0), shift = 2
+        let upper = upper_tri(3, &[
+            (0, 0, 1.0), (0, 1, 2.0),
+            (1, 1, 1.0), (1, 2, -1.0),
+            (2, 2, 1.0),
+        ]);
+        let lower = lower_tri(3, &[
+            (0, 0, 1.0),
+            (1, 0, 2.0), (1, 1, 1.0),
+            (2, 1, -1.0), (2, 2, 1.0),
+        ]);
+        // full-symmetric: triplets を CscMatrix が col 並べ替えするので順序自由
+        let full = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 2, 1, 2],
+            &[1.0, 2.0, 2.0, 1.0, -1.0, -1.0, 1.0],
+            3, 3,
+        ).unwrap();
+        let s_upper = psd_shift_from_gershgorin(&upper);
+        let s_lower = psd_shift_from_gershgorin(&lower);
+        let s_full = psd_shift_from_gershgorin(&full);
+        assert!((s_upper - 2.0).abs() < 1e-12, "upper shift = {s_upper}");
+        assert!((s_lower - 2.0).abs() < 1e-12, "lower shift = {s_lower}");
+        assert!((s_full - 2.0).abs() < 1e-12, "full shift = {s_full}");
+    }
+
+    /// no-op proof: lower-triangular 対称化 fix を撤回 (= 旧 `row < col` only) すると
+    /// `lower_triangular_only_zero_diag_bilinear_matches_upper` 等がどう FAIL するかを
+    /// 単一 inline で機械検証する。`feedback_sentinel_must_fail_under_noop` 準拠:
+    /// 新 sentinel が実装と coupled に PASS しているのではなく、fix 削除で確実に FAIL
+    /// する性質を持つことを示す。
+    #[test]
+    fn no_op_proof_lower_tri_symmetrize_required() {
+        // 旧 impl 相当 (row < col の片半のみ反映) を inline 再現。
+        fn legacy_row_lt_col_only(q: &CscMatrix) -> f64 {
+            let n = q.nrows;
+            if n == 0 { return 0.0; }
+            let mut diag = vec![0.0_f64; n];
+            let mut row_sum = vec![0.0_f64; n];
+            for col in 0..n {
+                for k in q.col_ptr[col]..q.col_ptr[col + 1] {
+                    let row = q.row_ind[k];
+                    let val = q.values[k];
+                    if row == col {
+                        diag[col] = val;
+                    } else if row < col {
+                        let abs = val.abs();
+                        row_sum[row] += abs;
+                        row_sum[col] += abs;
+                    }
+                }
+            }
+            let mut shift = 0.0_f64;
+            for j in 0..n {
+                let lower = diag[j] - row_sum[j];
+                if lower < 0.0 { shift = shift.max(-lower); }
+            }
+            shift
+        }
+        let q_lower = lower_tri(2, &[(1, 0, 1.0)]);
+        // 旧 impl: lower-only entry を取り零して shift=0 (= silent failure 再現)
+        let legacy = legacy_row_lt_col_only(&q_lower);
+        assert_eq!(legacy, 0.0, "旧 impl は lower-only off-diag を取り零し shift=0 (bug)");
+        // 新 impl: 正しく shift=1
+        let fixed = psd_shift_from_gershgorin(&q_lower);
+        assert!((fixed - 1.0).abs() < 1e-12, "新 impl は対称化 shift=1 を返す");
+        // = 新 sentinel `lower_triangular_only_*` が fix 撤回で確実に FAIL する証拠
+        assert!(
+            (legacy - fixed).abs() > 0.5,
+            "fix の有無で挙動が乖離 (legacy={legacy}, fixed={fixed}) = sentinel が active"
+        );
     }
 }

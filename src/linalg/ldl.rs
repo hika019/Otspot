@@ -389,19 +389,28 @@ fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
 /// `Q=[[0,1],[1,0]]` のような零対角 indefinite を従来は ZeroPivot 経路で PSD 誤判定
 /// していたバグの根治。
 pub fn is_q_psd_by_cholesky(q: &CscMatrix) -> bool {
-    is_q_psd_by_cholesky_probe(q, SHIFT_FACTOR, true)
+    is_q_psd_by_cholesky_impl(q, SHIFT_FACTOR, true)
 }
 
-/// `is_q_psd_by_cholesky` の挙動を構成する 2 つの fix を個別 toggle 可能にした probe 版。
+/// Test-only probe: 個別 no-op 実証 (`feedback_sentinel_must_fail_under_noop`) で
+/// 2 つの fix (shift, ZeroPivot conservative) の必要性を機械検証する。production binary
+/// には含めない (`#[cfg(test)]` で gating)。
 ///
-/// - `shift_factor`: 対角に乗せる shift の倍率。production = `SHIFT_FACTOR`(=10)。
-///   0 を渡すと shift を完全に無効化 (= 旧経路再現用)。
-/// - `zeropivot_conservative`: ZeroPivot 時の判定。production = true (`false`=indefinite と
-///   みなす)。false を渡すと旧経路の「ZeroPivot=PSD」(=true) 挙動を再現。
-///
-/// `(SHIFT_FACTOR, true)` の組合せが production。それ以外の組合せは個別 no-op 実証
-/// (`feedback_sentinel_must_fail_under_noop`) で各修正の必要性を機械検証するためにある。
+/// - `shift_factor`: 対角に乗せる shift 倍率。production = `SHIFT_FACTOR`(=10)。0 で無効化 = 旧経路。
+/// - `zeropivot_conservative`: ZeroPivot 判定。production = true (=indefinite 扱い)。
+///   false で旧「ZeroPivot=PSD」挙動を再現。
+#[cfg(test)]
 pub(crate) fn is_q_psd_by_cholesky_probe(
+    q: &CscMatrix,
+    shift_factor: f64,
+    zeropivot_conservative: bool,
+) -> bool {
+    is_q_psd_by_cholesky_impl(q, shift_factor, zeropivot_conservative)
+}
+
+/// `is_q_psd_by_cholesky` の実装本体。production と test probe で共有する。
+/// 直接呼ばないこと (production は constants 固定の wrapper 経由)。
+fn is_q_psd_by_cholesky_impl(
     q: &CscMatrix,
     shift_factor: f64,
     zeropivot_conservative: bool,
