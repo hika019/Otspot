@@ -14,9 +14,9 @@
 //! を共有するため本 helper に集約する。
 //!
 //! ## CSC 規約
-//! 入力 `Q` は full-symmetric / 上三角どちらも許容。`row < col` の片半 entry を
-//! 行と列双方の `R_j` に 1 度だけ反映するため、対称行列の R_j と一致する。
-//! 対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
+//! 入力 `Q` は full-symmetric / 上三角 / 下三角いずれも許容。layout は entry の
+//! `(row, col)` 並びから自動判定し、片側 triangular でも対称化された `R_j` を算出する
+//! (実装下半を参照)。対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
 
 use crate::sparse::CscMatrix;
 
@@ -33,17 +33,34 @@ pub(crate) fn psd_shift_from_gershgorin(q: &CscMatrix) -> f64 {
     }
     let mut diag = vec![0.0_f64; n];
     let mut row_offdiag_sum = vec![0.0_f64; n];
+    // 全 off-diag entry を 1 度だけ走査し、|v| を (row, col) 双方の R に加算する。
+    // 旧実装は `row < col` のみを反映していたため lower-triangular 入力で off-diag を
+    // 取り零し λ_min 下界を誤算出する silent failure があった。両側を見ることで
+    // 上三角 / 下三角 layout は正しく対称化される。full-symmetric (両側 entry 持ち) は
+    // 各 pair を 2 度反映するので最後に 1/2 補正する。
+    let mut has_upper = false;
+    let mut has_lower = false;
     for col in 0..n {
         for k in q.col_ptr[col]..q.col_ptr[col + 1] {
             let row = q.row_ind[k];
             let val = q.values[k];
             if row == col {
                 diag[col] = val;
-            } else if row < col {
+            } else {
+                if row < col {
+                    has_upper = true;
+                } else {
+                    has_lower = true;
+                }
                 let abs_val = val.abs();
                 row_offdiag_sum[row] += abs_val;
                 row_offdiag_sum[col] += abs_val;
             }
+        }
+    }
+    if has_upper && has_lower {
+        for r in row_offdiag_sum.iter_mut() {
+            *r *= 0.5;
         }
     }
     let mut shift = 0.0_f64;
