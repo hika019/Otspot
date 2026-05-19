@@ -4,9 +4,37 @@
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::options::SolverOptions;
-use crate::tolerances::PIVOT_TOL;
+use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
+
+/// Return the primal slack of original row `i` (always non-negative for feasible
+/// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
+/// scale `1 + |b_i| + |Ax_i|` is returned alongside so the caller can pick a
+/// relative non-binding threshold.
+fn row_slack_and_scale(
+    orig_problem: &LpProblem,
+    i: usize,
+    solution: &[f64],
+) -> (f64, f64) {
+    let row_entries = collect_row_entries(orig_problem, i);
+    let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
+    let b_i = orig_problem.b[i];
+    let slack = match orig_problem.constraint_types[i] {
+        ConstraintType::Le => b_i - ax_i,
+        ConstraintType::Ge => ax_i - b_i,
+        ConstraintType::Eq => 0.0,
+    };
+    let scale = 1.0 + b_i.abs() + ax_i.abs();
+    (slack, scale)
+}
+
+/// `true` iff row `i` is strictly non-binding at `solution` (slack exceeds the
+/// scaled complementarity tolerance), in which case KKT forces `y_i = 0`.
+fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bool {
+    let (slack, scale) = row_slack_and_scale(orig_problem, i, solution);
+    slack > COMP_SLACK_REL_TOL * scale
+}
 
 /// Build and solve a cleanup LP that recovers `y_i` for deleted rows (and optionally a
 /// perturbation on kept rows) so the full dual is KKT-consistent.
@@ -238,8 +266,15 @@ fn build_and_solve_cleanup_lp(
 
     // Variable bounds: y_del follows the row's sign convention; dy is shifted by -y_kept[i]
     // so y_kept + dy still satisfies the sign convention; slack ∈ [0, ∞).
+    // Comp slackness: non-binding rows (slack > tol) clamp `y` to 0 — for deleted
+    // rows that pins `y_del` at 0; for coupled kept rows it pins `dy` at `-y_kept_i`.
     let mut bounds_clean: Vec<(f64, f64)> = Vec::with_capacity(total_vars);
     for &i in &deleted_rows {
+        let nonbinding = is_row_nonbinding(orig_problem, i, solution);
+        if nonbinding {
+            bounds_clean.push((0.0, 0.0));
+            continue;
+        }
         match orig_problem.constraint_types[i] {
             ConstraintType::Le => bounds_clean.push((f64::NEG_INFINITY, 0.0)),
             ConstraintType::Ge => bounds_clean.push((0.0, f64::INFINITY)),
@@ -249,6 +284,11 @@ fn build_and_solve_cleanup_lp(
     if use_kept_perturbation {
         for &i in &coupled_kept {
             let y_kept_i = dual_solution_known[i];
+            let nonbinding = is_row_nonbinding(orig_problem, i, solution);
+            if nonbinding {
+                bounds_clean.push((-y_kept_i, -y_kept_i));
+                continue;
+            }
             match orig_problem.constraint_types[i] {
                 ConstraintType::Le => bounds_clean.push((f64::NEG_INFINITY, -y_kept_i)),
                 ConstraintType::Ge => bounds_clean.push((-y_kept_i, f64::INFINITY)),
@@ -351,6 +391,10 @@ fn build_and_solve_cleanup_lp(
     }
     let mut p2_bounds: Vec<(f64, f64)> = Vec::with_capacity(phase2_total_vars);
     for &i in &deleted_rows {
+        if is_row_nonbinding(orig_problem, i, solution) {
+            p2_bounds.push((0.0, 0.0));
+            continue;
+        }
         match orig_problem.constraint_types[i] {
             ConstraintType::Le => p2_bounds.push((f64::NEG_INFINITY, 0.0)),
             ConstraintType::Ge => p2_bounds.push((0.0, f64::INFINITY)),
@@ -360,6 +404,10 @@ fn build_and_solve_cleanup_lp(
     if use_kept_perturbation {
         for &i in &coupled_kept {
             let y_kept_i = dual_solution_known[i];
+            if is_row_nonbinding(orig_problem, i, solution) {
+                p2_bounds.push((-y_kept_i, -y_kept_i));
+                continue;
+            }
             match orig_problem.constraint_types[i] {
                 ConstraintType::Le => p2_bounds.push((f64::NEG_INFINITY, -y_kept_i)),
                 ConstraintType::Ge => p2_bounds.push((-y_kept_i, f64::INFINITY)),
@@ -436,19 +484,10 @@ fn recover_removed_row_dual(
     solution: &[f64],
     dual_solution: &[f64],
 ) -> f64 {
-    let row_entries = collect_row_entries(orig_problem, i);
-
-    let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
-    let b_i = orig_problem.b[i];
-    let nonbinding_slack = match orig_problem.constraint_types[i] {
-        ConstraintType::Le => b_i - ax_i,
-        ConstraintType::Ge => ax_i - b_i,
-        ConstraintType::Eq => 0.0,
-    };
-    let slack_scale = 1.0 + b_i.abs() + ax_i.abs();
-    if nonbinding_slack > BOUND_ACTIVE_TOL * slack_scale {
+    if is_row_nonbinding(orig_problem, i, solution) {
         return 0.0;
     }
+    let row_entries = collect_row_entries(orig_problem, i);
 
     let mut min_y_i = f64::NEG_INFINITY;
     let mut max_y_i = f64::INFINITY;
@@ -857,3 +896,4 @@ pub fn run_postsolve(
         ..Default::default()
     }
 }
+

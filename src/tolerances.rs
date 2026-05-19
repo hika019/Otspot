@@ -24,6 +24,14 @@ pub const PIVOT_STABILITY_THRESHOLD: f64 = 0.01;
 /// QP postsolve / refine / IPM stationarity 寄与の bound 評価で共用される。
 pub const FX_TOL: f64 = 1e-12;
 
+/// 相補性スラック判定の relative tolerance。
+///
+/// 行 i の primal slack が `COMP_SLACK_REL_TOL * (1 + |b_i| + |Ax_i|)` を超えれば
+/// non-binding と判定し、KKT の `y_i · slack_i = 0` から `y_i = 0` を強制する。
+/// LP postsolve の cleanup-LP / LSQ 経路、`recover_removed_row_dual` の
+/// non-binding short-circuit が共用する。
+pub const COMP_SLACK_REL_TOL: f64 = 1e-6;
+
 /// 数値的「同等」(near-zero) 判定の relative tolerance。
 ///
 /// `PIVOT_TOL.sqrt()` (= 1e-4 when PIVOT_TOL=1e-8)。

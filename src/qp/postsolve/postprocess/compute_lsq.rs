@@ -4,6 +4,7 @@ use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, LSQ_DUAL_SIZ
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
+use crate::tolerances::COMP_SLACK_REL_TOL;
 
 pub(crate) fn compute_lsq_dual_y(
     problem: &QpProblem,
@@ -100,6 +101,40 @@ pub(crate) fn compute_lsq_dual_y(
                 fixed_y[i] = Some((lo + hi) * 0.5);
                 n_fixed += 1;
             }
+        }
+    }
+    // Complementary slackness: rows whose primal is strictly non-binding (slack
+    // > COMP_SLACK_REL_TOL relative to the row magnitudes) must have y_i = 0.
+    // Without this clamp LSQ is free to assign sign-feasible but
+    // slackness-violating duals — the same drift root #45 fixed for
+    // `recover_removed_row_dual`. Overwrite (rather than skip) any existing
+    // `fixed_y[i]` so LSQ cannot resurrect a non-zero dual on a non-binding row.
+    let mut ax = vec![0.0_f64; m];
+    for col in 0..n {
+        let cs = problem.a.col_ptr[col];
+        let ce = problem.a.col_ptr[col + 1];
+        let xv = x[col];
+        for k in cs..ce {
+            ax[problem.a.row_ind[k]] += problem.a.values[k] * xv;
+        }
+    }
+    for i in 0..m {
+        if problem.constraint_types[i] == crate::problem::ConstraintType::Eq {
+            continue;
+        }
+        let b_i = problem.b[i];
+        let ax_i = ax[i];
+        let slack = match problem.constraint_types[i] {
+            crate::problem::ConstraintType::Le => b_i - ax_i,
+            crate::problem::ConstraintType::Ge => ax_i - b_i,
+            crate::problem::ConstraintType::Eq => 0.0,
+        };
+        let scale = 1.0 + b_i.abs() + ax_i.abs();
+        if slack > COMP_SLACK_REL_TOL * scale {
+            if fixed_y[i].is_none() {
+                n_fixed += 1;
+            }
+            fixed_y[i] = Some(0.0);
         }
     }
 
