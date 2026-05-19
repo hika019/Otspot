@@ -9,7 +9,7 @@ use crate::presolve::RuizScaler;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
-use super::dual_common::{compute_dual_vars, compute_reduced_costs};
+use super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use std::sync::atomic::Ordering;
 
@@ -266,7 +266,7 @@ pub(super) fn dual_simplex_core(
             return SimplexOutcome::SingularBasis;
         }
         Err(_) => {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
     };
@@ -291,13 +291,13 @@ pub(super) fn dual_simplex_core(
         let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
-            let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+            let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
 
         let leaving_row = match leaving_strategy.select_leaving(x_b, options.primal_tol, basis) {
             None => {
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 let y = compute_dual_vars(c, &mut basis_mgr, basis, m);
                 return SimplexOutcome::Optimal(obj, y);
             }
@@ -350,7 +350,7 @@ pub(super) fn dual_simplex_core(
                 if basis_mgr.singular_basis {
                     return SimplexOutcome::SingularBasis;
                 }
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
@@ -396,7 +396,7 @@ pub(super) fn dual_simplex_core(
                 if basis_mgr.singular_basis {
                     return SimplexOutcome::SingularBasis;
                 }
-                let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+                let obj: f64 = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
             }
             reduced_costs =
@@ -404,7 +404,7 @@ pub(super) fn dual_simplex_core(
         }
     }
 
-    let obj: f64 = (0..m).map(|i| c[basis[i]] * x_b[i]).sum();
+    let obj: f64 = basic_obj(c, basis, x_b);
     SimplexOutcome::Timeout(obj)
 }
 
