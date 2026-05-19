@@ -151,7 +151,7 @@ fn ipm_opts_for_lp(options: &SolverOptions) -> SolverOptions {
 /// 戻り値 `None` で IPM は通常 Mehrotra cold init に着地する (regression-safe)。
 fn try_build_ipm_warm_from_crash(lp: &LpProblem) -> Option<crate::options::QpWarmStart> {
     use crate::basis::{BasisManager, LuBasis};
-    use crate::simplex::{build_standard_form, crash_basis_for_ipm_warm};
+    use crate::simplex::crash_basis_for_ipm_warm;
 
     telemetry::CRASH_IPM_ATTEMPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
