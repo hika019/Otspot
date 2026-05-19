@@ -9,12 +9,19 @@ use solver::problem::{ConstraintType, LpProblem, SolveStatus};
 use solver::solve_with;
 use solver::sparse::CscMatrix;
 
-/// 本 routine の retorgression を許容する wall-clock budget (sec)。
+/// Timeout budget for the O(n_artificial × n_total) regression guard.
 ///
-/// 修正前の O(n_artificial × n_total) は K=3, N=50 で 0.5-1.0 sec 程度、
-/// K=5, N=80 で 2-3 sec 程度になる (small problem では cache 効果で大幅遅延
-/// しないため)。本 budget は退行検知 (mins-class) を確実にするための上限。
+/// Pre-fix: K=3,N=50 ≈ 0.5–1.0 s; K=5,N=80 ≈ 2–3 s; K=11,N=200 >> 3 s.
+/// The solver's timeout converts a per-iteration cost explosion into a
+/// `SolveStatus::Timeout`, which the `assert_eq!(status, Optimal)` catches.
 const MAX_SOLVE_WALL_SECS: f64 = 3.0;
+
+/// Iteration limit for cycling / algorithmic regression detection.
+///
+/// These toy problems (K artificial × N decision cols) should solve in
+/// O(K + N) simplex pivots. Any correct implementation finishes well
+/// below this ceiling; a cycling regression would exceed it.
+const MAX_PIVOT_ITERS: usize = 2_000;
 
 /// `K` 個の artificial-prone Eq 行 × `N` 非基底列の合成 LP を build。
 ///
@@ -82,24 +89,28 @@ fn assert_solve_under_budget(lp: &LpProblem, expected_obj: f64, label: &str) {
     // pivot_out 経路を確実に発火させるため presolve OFF (presolve は dummy 列を
     // EmptyColumn / FixedVar で吸収して artificial 経路を bypass しうる)。
     opts.presolve = false;
-    opts.timeout_secs = Some(MAX_SOLVE_WALL_SECS + 1.0);
+    // Timeout == budget: per-iteration cost explosion → Timeout status → fails the
+    // Optimal assert below (deterministic sentinel replacing the wall check).
+    opts.timeout_secs = Some(MAX_SOLVE_WALL_SECS);
 
     let t0 = Instant::now();
     let r = solve_with(lp, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
 
     eprintln!(
-        "[{}] elapsed={:.3}s status={:?} obj={:.3e}",
-        label, elapsed, r.status, r.objective
+        "[{}] elapsed={:.3}s status={:?} obj={:.3e} iters={}",
+        label, elapsed, r.status, r.objective, r.iterations
     );
 
+    // Primary sentinel: per-iteration cost explosion → Timeout → fails here.
     assert_eq!(r.status, SolveStatus::Optimal, "[{}] status={:?}", label, r.status);
     let obj_err = (r.objective - expected_obj).abs() / (1.0 + expected_obj.abs());
     assert!(obj_err < 1e-6, "[{}] obj={:.6e} expected={:.6e}", label, r.objective, expected_obj);
+    // Secondary sentinel: cycling → iteration explosion → fails here.
     assert!(
-        elapsed < MAX_SOLVE_WALL_SECS,
-        "[{}] elapsed={:.3}s exceeds budget {:.3}s — pivot_out 退行の可能性",
-        label, elapsed, MAX_SOLVE_WALL_SECS
+        r.iterations < MAX_PIVOT_ITERS,
+        "[{}] iterations {} ≥ {} — possible cycling regression",
+        label, r.iterations, MAX_PIVOT_ITERS
     );
 }
 
