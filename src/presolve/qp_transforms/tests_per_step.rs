@@ -4,7 +4,7 @@
 
 use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
 use super::steps_basic::step4_empty;
-use super::steps_bounds::{step10_implied_bounds, step11_dual_fixing};
+use super::steps_bounds::{step9_singleton_ineq_to_bound, step10_implied_bounds, step11_dual_fixing};
 use super::steps_free::step7_free_var;
 use super::steps_parallel::step8_parallel_row;
 use super::helpers::early_infeasibility_check;
@@ -590,6 +590,221 @@ fn phase1_truly_unbounded_empty_cols_still_detected() {
         matches!(result.presolve_status, QpPresolveStatus::Unbounded),
         "free col with c=+1 must be Unbounded"
     );
+}
+
+// -----------------------------------------------------------
+// step9_singleton_ineq_to_bound
+// -----------------------------------------------------------
+
+/// Le singleton row with positive coefficient: x <= rhs tightens upper bound.
+/// No-op disabling step9 must leave ws.removed_rows[i] = false.
+#[test]
+fn step9_le_pos_coeff_tightens_ub() {
+    // x <= 3, x in [0, 10] → new ub = 3
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[1.0],
+        1, vec![3.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Le pos coeff");
+    assert!(ws.removed_rows[0], "row must be absorbed");
+    assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub must be tightened to 3");
+}
+
+/// Le singleton row with negative coefficient: -x <= -2 means x >= 2, tightens lower bound.
+#[test]
+fn step9_le_neg_coeff_tightens_lb() {
+    // -x <= -2 ↔ x >= 2, x in [0, 10] → new lb = 2
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[-1.0],
+        1, vec![-2.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Le neg coeff");
+    assert!(ws.removed_rows[0], "row must be absorbed");
+    assert!((ws.bounds[0].0 - 2.0).abs() < 1e-12, "lb must be tightened to 2, got {}", ws.bounds[0].0);
+}
+
+/// Ge singleton row with positive coefficient: x >= 2, tightens lower bound.
+#[test]
+fn step9_ge_pos_coeff_tightens_lb() {
+    // x >= 2, x in [0, 10] → new lb = 2
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[1.0],
+        1, vec![2.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Ge],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Ge pos coeff");
+    assert!(ws.removed_rows[0], "row must be absorbed");
+    assert!((ws.bounds[0].0 - 2.0).abs() < 1e-12, "lb must be tightened to 2");
+}
+
+/// Ge singleton row with negative coefficient: -x >= -3 ↔ x <= 3, tightens upper bound.
+#[test]
+fn step9_ge_neg_coeff_tightens_ub() {
+    // -x >= -3 ↔ x <= 3, x in [0, 10] → new ub = 3
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[-1.0],
+        1, vec![-3.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Ge],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Ge neg coeff");
+    assert!(ws.removed_rows[0], "row must be absorbed");
+    assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub must be tightened to 3, got {}", ws.bounds[0].1);
+}
+
+/// Infeasibility: Le constraint produces lb > ub after absorption.
+#[test]
+fn step9_le_infeasible_when_new_ub_below_lb() {
+    // x <= -1, x in [0, 10] → new ub = -1 < lb = 0 → Infeasible
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[1.0],
+        1, vec![-1.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    let res = step9_singleton_ineq_to_bound(&prob, &mut ws, None);
+    assert!(res.is_err(), "infeasible when new ub < existing lb");
+}
+
+/// Infeasibility: Ge constraint produces new lb > existing ub after absorption.
+#[test]
+fn step9_ge_infeasible_when_new_lb_above_ub() {
+    // x >= 15, x in [0, 10] → new lb = 15 > ub = 10 → Infeasible
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0], &[0], &[1.0],
+        1, vec![15.0],
+        vec![(0.0, 10.0)],
+        vec![ConstraintType::Ge],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    let res = step9_singleton_ineq_to_bound(&prob, &mut ws, None);
+    assert!(res.is_err(), "infeasible when new lb > existing ub");
+}
+
+/// Non-singleton row (2 active vars) must NOT be touched by step9.
+#[test]
+fn step9_ignores_non_singleton_rows() {
+    // x + y <= 5, x,y in [0, 10]
+    let prob = make_qp(
+        &[], &[], &[], 2,
+        vec![0.0, 0.0],
+        &[0, 0], &[0, 1], &[1.0, 1.0],
+        1, vec![5.0],
+        vec![(0.0, 10.0), (0.0, 10.0)],
+        vec![ConstraintType::Le],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "non-singleton");
+    assert!(!ws.removed_rows[0], "2-variable row must not be absorbed");
+}
+
+/// Box constraints: Le + Ge on same FR variable — both absorbed, resulting in finite bounds.
+#[test]
+fn step9_box_constraints_both_absorbed() {
+    // 2 rows: x <= 3 (Le) and x >= 1 (Ge), x FR
+    let prob = make_qp(
+        &[], &[], &[], 1,
+        vec![0.0],
+        &[0, 1], &[0, 0], &[1.0, 1.0],
+        2, vec![3.0, 1.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+    );
+    let mut ws = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "box");
+    assert!(ws.removed_rows[0] && ws.removed_rows[1], "both rows absorbed");
+    assert!((ws.bounds[0].0 - 1.0).abs() < 1e-12, "lb = 1");
+    assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub = 3");
+}
+
+/// Postsolve stack: each absorbed row pushes SingletonIneqToBound.
+/// No-op proof: disabling step9 (QP_PRESOLVE_SKIP=9) leaves m unchanged.
+#[test]
+fn step9_postsolve_stack_pushed_and_noop_proof() {
+    // With step9 active: Le x<=3 absorbed → 1 step in stack.
+    let prob = make_qp(
+        &[0], &[0], &[2.0], 1,
+        vec![0.0],
+        &[0], &[0], &[1.0],
+        1, vec![3.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        vec![ConstraintType::Le],
+    );
+
+    // Active run: step9 must absorb
+    let mut ws_active = Workspace::from_problem(&prob);
+    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws_active, None), "step9 active run");
+    let n_steps = ws_active.postsolve_stack.steps.iter()
+        .filter(|s| matches!(s, QpPostsolveStep::SingletonIneqToBound { .. }))
+        .count();
+    assert_eq!(n_steps, 1, "step9 must push SingletonIneqToBound");
+
+    // No-op proof: env skip → m_reduced unchanged (row NOT absorbed)
+    std::env::set_var("QP_PRESOLVE_SKIP", "9");
+    let result_noop = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+    std::env::remove_var("QP_PRESOLVE_SKIP");
+    assert_eq!(result_noop.reduced.num_constraints, 1,
+        "no-op: skip step9 must leave singleton Le row in constraint matrix");
+}
+
+/// End-to-end: portfolio-like fixture with N FR variables, each bounded by a
+/// singleton Le and Ge row (±x_i ≤ rhs).  Step9 must absorb all 2N rows.
+#[test]
+fn step9_portfolio_fixture_reduces_all_ineq_rows() {
+    const N: usize = 30;
+    // Q = I_N (diagonal), c = 0
+    let q_vals: Vec<f64> = vec![1.0; N];
+    let q_rows: Vec<usize> = (0..N).collect();
+    let q_cols: Vec<usize> = (0..N).collect();
+    // 2N rows: row 2i = x_i <= 1.0, row 2i+1 = -x_i <= -0.1 (i.e. x_i >= 0.1)
+    let m = 2 * N;
+    let mut a_rows = Vec::with_capacity(m);
+    let mut a_cols = Vec::with_capacity(m);
+    let mut a_vals = Vec::with_capacity(m);
+    let mut b = Vec::with_capacity(m);
+    let mut cts = Vec::with_capacity(m);
+    for i in 0..N {
+        a_rows.push(2 * i);     a_cols.push(i); a_vals.push(1.0);  b.push(1.0);  cts.push(ConstraintType::Le);
+        a_rows.push(2 * i + 1); a_cols.push(i); a_vals.push(-1.0); b.push(-0.1); cts.push(ConstraintType::Le);
+    }
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); N];
+    let prob = make_qp(
+        &q_rows, &q_cols, &q_vals, N,
+        vec![0.0; N],
+        &a_rows, &a_cols, &a_vals,
+        m, b, bounds, cts,
+    );
+    let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
+    assert_eq!(result.reduced.num_constraints, 0,
+        "all 2N singleton ineq rows must be absorbed by step9, got {} remaining",
+        result.reduced.num_constraints);
+    // Bounds must be finite after absorption
+    for (lb, ub) in &result.reduced.bounds {
+        assert!(lb.is_finite() && ub.is_finite(),
+            "all bounds must be finite after absorption, got [{lb}, {ub}]");
+    }
 }
 
 /// `early_infeasibility_check` reports Unbounded only when all bounds are

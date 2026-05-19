@@ -109,11 +109,12 @@ fn test_ge_constraint_redundant_removal() {
         "Ge x>=-1 は strict slack (row_lb=0 > b=-1) → 削除");
 }
 
-/// Ge制約 - marginally tight な行は保持される (QPCBOEI1 真因対処)
+/// Ge制約 - singleton ineq はstep9で bounds に吸収される (no-op でも行を除去)
 #[test]
-fn test_ge_constraint_marginally_tight_kept() {
-    // x >= 0, bounds [0, 10] → row_lb = b = 0 (marginally tight) → 保持
-    // 旧 `>= b - ZERO_TOL` は削除していたが、最適 dual y[i] が非零でありえる。
+fn test_ge_constraint_singleton_absorbed_by_step9() {
+    // x >= 0, bounds [0, 10] → step9 が lb を max(0, 0)=0 に更新し行を除去
+    // 旧ステップ5は row_lb=b の marginally tight ケースを保持していたが、
+    // step9 はすべての singleton ineq を bound に吸収して dual 復元で対処する。
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
     let c = vec![0.0];
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
@@ -124,8 +125,9 @@ fn test_ge_constraint_marginally_tight_kept() {
         vec![crate::problem::ConstraintType::Ge],
     ).unwrap();
     let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
-    assert_eq!(result.reduced.num_constraints, 1,
-        "Ge x>=0 は marginally tight (row_lb=b=0) → IPM に委ねる (削除しない)");
+    assert!(!matches!(result.presolve_status, QpPresolveStatus::Infeasible), "feasible");
+    assert_eq!(result.reduced.num_constraints, 0,
+        "step9: singleton Ge x>=0 → bound 吸収 (no-op bound update でも行を除去)");
 }
 
 /// P3: Ge制約 - Infeasible検出テスト
@@ -150,10 +152,10 @@ fn test_ge_constraint_infeasible_detection() {
     );
 }
 
-/// P3: Ge制約 - 通常ケース（冗長でも実行不可能でもない）
-/// x >= 2 で x の範囲 [0, 10] → 制約は残る、解は x=2
+/// Ge制約 - step9 で bound に吸収、lb が実際に tighten される
+/// x >= 2 で x の範囲 [0, 10] → step9 が lb を 2 に更新して行を除去
 #[test]
-fn test_ge_constraint_not_redundant_not_infeasible() {
+fn test_ge_constraint_absorbed_bound_tightened() {
     let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
     let c = vec![0.0];
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
@@ -164,9 +166,13 @@ fn test_ge_constraint_not_redundant_not_infeasible() {
         vec![crate::problem::ConstraintType::Ge],
     ).unwrap();
     let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
-    // Ge制約 x >= 2 は冗長でも Infeasible でもない → 除去されない
-    assert!(!matches!(result.presolve_status, QpPresolveStatus::Infeasible), "Infeasible でないこと");
-    assert_eq!(result.reduced.num_constraints, 1, "Ge制約は除去されない");
+    assert!(!matches!(result.presolve_status, QpPresolveStatus::Infeasible), "feasible");
+    // step9: singleton Ge x>=2 with lb=0 → lb becomes 2, row removed
+    assert_eq!(result.reduced.num_constraints, 0,
+        "step9: singleton Ge x>=2 (lb=0) → lb tightened to 2, row absorbed");
+    // The tightened bound must carry through: reduced lb should be 2
+    assert!(result.reduced.bounds[0].0 >= 2.0 - 1e-12,
+        "reduced lb should be ≥ 2, got {}", result.reduced.bounds[0].0);
 }
 
 /// kahan_add: 補正項に基づく Kahan 累積が単純 f64 sum より厳密に正確になる
