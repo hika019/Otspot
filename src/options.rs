@@ -319,7 +319,10 @@ pub struct SolverOptions {
     /// `basis` のみ与えれば既存挙動と同等で、`x_orig`/`y_orig` は将来 IPM crossover 用。
     pub warm_start_lp: Option<LpWarmStart>,
     /// LP cold start 時 simplex crash basis を適用する (#15)。
+    /// 適用範囲: primal two-phase Phase I (#15) と dual_advanced Big-M Phase I (#40)。
     /// warm_start / warm_start_lp が Some なら無視される。
+    /// 実行時切替には環境変数 `LP_CRASH_DUAL_ADV_DISABLE=1` で Big-M 経路のみ
+    /// no-op 化可能 (sentinel/triage 用)。
     pub use_lp_crash_basis: bool,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
