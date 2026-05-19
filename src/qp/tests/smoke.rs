@@ -308,6 +308,64 @@ fn test_force_ipm_small() {
     assert!((result.objective - 0.5).abs() < 1e-4);
 }
 
+/// Ge 制約 (ConstraintType::Ge) で Optimal 到達。
+#[test]
+fn test_qp_ge_defensive() {
+    use crate::problem::ConstraintType;
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let c = vec![0.0, 0.0];
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+    let b = vec![1.0];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
+
+    let opts = SolverOptions {
+        timeout_secs: Some(5.0),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let result = solve_qp_with(&problem, &opts);
+    assert!(start.elapsed().as_secs_f64() < 6.0);
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_close(result.solution[0], 0.5, EPS, "x[0]");
+    assert_close(result.solution[1], 0.5, EPS, "x[1]");
+}
+
+/// Mixed Ge+Le 防御 (presolve=false でソルバ本体の正確さ; mixed presolve bug 既知)。
+#[test]
+fn test_qp_mixed_ge_le_defensive() {
+    use crate::problem::ConstraintType;
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+    let c = vec![0.0, 0.0];
+    // Row 0: x+y≥0.5 (Ge), Row 1: x-y≤1 (Le)
+    let a =
+        CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+            .unwrap();
+    let b = vec![0.5, 1.0];
+    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+    let problem = QpProblem::new(
+        q,
+        c,
+        a,
+        b,
+        bounds,
+        vec![ConstraintType::Ge, ConstraintType::Le],
+    )
+    .unwrap();
+
+    let opts = SolverOptions {
+        timeout_secs: Some(5.0),
+        presolve: false,
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    let result = solve_qp_with(&problem, &opts);
+    assert!(start.elapsed().as_secs_f64() < 6.0, "D: wall-clock 6秒超過");
+    assert_eq!(result.status, SolveStatus::Optimal, "D: status");
+    assert_close(result.solution[0], 0.25, EPS, "D: x[0]");
+    assert_close(result.solution[1], 0.25, EPS, "D: x[1]");
+}
+
 /// parallel feature 有効時の IPPMM dispatch smoke test
 #[cfg(feature = "parallel")]
 #[test]
