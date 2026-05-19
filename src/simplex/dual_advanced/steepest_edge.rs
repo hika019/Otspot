@@ -111,28 +111,12 @@ fn clamp_gamma(v: f64, needs_reset: &mut bool) -> f64 {
 /// is identical to `MostInfeasibleLeaving`, so the sentinel's "DSE faster"
 /// assertion *must* fail when this flag is set (memory:
 /// feedback_sentinel_must_fail_under_noop).
-///
-/// The switch is dev/test-only: in release builds `gamma_update_disabled`
-/// is monomorphised to `false`, so the production inner loop pays zero
-/// env-var cost. The no-op proof test still works because it runs under
-/// the dev profile (`cargo test` / `cargo nextest`).
-#[cfg(debug_assertions)]
 const DSE_DISABLE_ENV: &str = "DSE_DISABLE_GAMMA_UPDATE";
 
-#[cfg(debug_assertions)]
 fn gamma_update_disabled() -> bool {
-    // Read per-call (no caching): the no-op proof test toggles the env
-    // *after* process start, and a `OnceLock` cache would lock the first
-    // observed value for the whole process life.
     std::env::var(DSE_DISABLE_ENV)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
-}
-
-#[cfg(not(debug_assertions))]
-#[inline(always)]
-fn gamma_update_disabled() -> bool {
-    false
 }
 
 /// `DualLeavingStrategy` impl that uses DSE-scored leaving selection.
