@@ -358,6 +358,57 @@ mod tests {
         let bounds = lb_bounds(&[f64::INFINITY, f64::INFINITY]);
         let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
         assert_eq!(res.entering_col, 1, "larger |pivot| should win the tie");
+        // Reviewer P1: tie-zone losers must not be pushed as flips when their
+        // upper bound is infinite — there is no other bound to flip to, and a
+        // downstream caller iterating flips blindly would corrupt state.
+        assert!(
+            res.flips.iter().all(|&f| bounds[f].upper.is_finite()),
+            "flips must not contain infinite-upper columns: {:?}",
+            res.flips,
+        );
+    }
+
+    /// Reviewer P1 regression: when *all* tie-zone candidates have infinite
+    /// upper, the loser cannot be marked as a flip. Minimal reproduction —
+    /// independent of the tie-breaker outcome.
+    #[test]
+    fn bfrt_tie_excludes_infinite_upper() {
+        let trow = vec![1.0, 5.0];
+        let r = vec![0.1, 0.5];
+        let bounds = lb_bounds(&[f64::INFINITY, f64::INFINITY]);
+        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
+        assert!(
+            res.flips.iter().all(|&f| bounds[f].upper.is_finite()),
+            "no infinite-upper flips even on tie, got: {:?}",
+            res.flips,
+        );
+    }
+
+    /// Reviewer P1 regression: mixed tie zone (one finite, one infinite). The
+    /// finite-upper tie loser is still a legitimate flip; the infinite one
+    /// must be filtered out.
+    #[test]
+    fn bfrt_tie_filters_only_infinite_upper() {
+        // j=0: trow=1, r=0.1, u=1   → θ=0.1, |pivot|=1, weight=1
+        // j=1: trow=5, r=0.5, u=∞   → θ=0.1, |pivot|=5, weight=∞
+        // residual=10 → walk: residual(10) > weight(1) → flip j=0, residual=9
+        //               at k=1, weight=∞ → entering=j=1 (already chosen)
+        // No tie loop swap needed (entering is already the larger-|pivot|).
+        // The finite j=0 is a real walk-flip; that path is unaffected by the fix.
+        let trow = vec![1.0, 5.0];
+        let r = vec![0.1, 0.5];
+        let bounds = vec![
+            ColBound { upper: 1.0, at_upper: false },
+            ColBound { upper: f64::INFINITY, at_upper: false },
+        ];
+        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
+        assert_eq!(res.entering_col, 1);
+        assert_eq!(res.flips, vec![0], "finite-upper walk-flip must survive");
+        assert!(
+            res.flips.iter().all(|&f| bounds[f].upper.is_finite()),
+            "no infinite-upper in flips: {:?}",
+            res.flips,
+        );
     }
 
     /// Skip basic columns.
