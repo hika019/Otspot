@@ -1,4 +1,5 @@
 pub mod amd;
+pub(crate) mod gershgorin;
 pub mod kkt_solver;
 pub mod ldl;
 pub mod ldl_dd;
