@@ -54,6 +54,21 @@ const REQUIRED_NETLIB: &[&str] = &[
 /// for ill-conditioned matrices, not a DSE bug, but worth surfacing).
 const MAX_RANDOM_SKIPS: usize = 5;
 
+/// RHS perturbation magnitudes for `perturb_b_alternating`. Three tiers
+/// chosen empirically (examples/dse_check.rs) so the netlib panel exercises
+/// "how far off the cold-start basis is after a data refresh." Wide is
+/// the default; medium/tight are for LPs (scfxm1, scagr7) where wide
+/// drives the LP into ill-conditioned regimes that don't probe the
+/// γ-update path cleanly.
+const PERTURB_WIDE: (f64, f64) = (0.7, 1.3);
+const PERTURB_MEDIUM: (f64, f64) = (0.85, 1.15);
+const PERTURB_TIGHT: (f64, f64) = (0.95, 1.05);
+
+/// Backoff between collection retries when `active < MIN_ACTIVE_PATTERNS`.
+/// CPU contention spikes that cause per-LP timeout flaps typically clear
+/// within ~250ms; 500ms is a 2× safety margin.
+const COLLECT_RETRY_BACKOFF_MS: u64 = 500;
+
 // ---------- helpers ----------
 
 /// LCG (Numerical Recipes) for deterministic random LPs without a `rand` dep.
@@ -185,14 +200,14 @@ fn warm_lp_patterns() -> Vec<(String, PatternKind, LpProblem, f64, f64)> {
     // chosen from empirical exploration (examples/dse_check.rs) to land in
     // the "non-trivial warm-start re-solve" regime.
     let netlib_specs: &[(&str, f64, f64)] = &[
-        ("sc50b", 0.7, 1.3),
-        ("scfxm1", 0.95, 1.05),
-        ("scfxm1", 0.85, 1.15),
-        ("scfxm1", 0.7, 1.3),
-        ("bandm", 0.7, 1.3),
-        ("scagr25", 0.7, 1.3),
-        ("scagr7", 0.85, 1.15),
-        ("share2b", 0.7, 1.3),
+        ("sc50b", PERTURB_WIDE.0, PERTURB_WIDE.1),
+        ("scfxm1", PERTURB_TIGHT.0, PERTURB_TIGHT.1),
+        ("scfxm1", PERTURB_MEDIUM.0, PERTURB_MEDIUM.1),
+        ("scfxm1", PERTURB_WIDE.0, PERTURB_WIDE.1),
+        ("bandm", PERTURB_WIDE.0, PERTURB_WIDE.1),
+        ("scagr25", PERTURB_WIDE.0, PERTURB_WIDE.1),
+        ("scagr7", PERTURB_MEDIUM.0, PERTURB_MEDIUM.1),
+        ("share2b", PERTURB_WIDE.0, PERTURB_WIDE.1),
     ];
     for (name, lo, hi) in netlib_specs {
         let path = Path::new("data/lp_problems").join(format!("{}.QPS", name));
@@ -221,8 +236,8 @@ fn warm_lp_patterns() -> Vec<(String, PatternKind, LpProblem, f64, f64)> {
                 format!("rand_le_m{}_n{}_s{}", m, n, seed),
                 PatternKind::Random,
                 lp,
-                0.7,
-                1.3,
+                PERTURB_WIDE.0,
+                PERTURB_WIDE.1,
             ));
         }
     }
@@ -294,7 +309,7 @@ fn collect_iter_comparison_with_retry() -> CollectionResult {
             "[retry {}] active={} < {}, retrying collection",
             attempt, last.rows.len(), MIN_ACTIVE_PATTERNS,
         );
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(COLLECT_RETRY_BACKOFF_MS));
         last = collect_iter_comparison_once();
     }
     last
