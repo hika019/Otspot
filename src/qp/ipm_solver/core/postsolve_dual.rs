@@ -53,7 +53,7 @@ pub(super) fn refine_postsolve_dual_lsq(
             return;
         }
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
-        crate::qp::refine_dual_lsq(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
         crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);

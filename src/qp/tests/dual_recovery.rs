@@ -324,6 +324,6 @@ fn refine_dual_lsq_keeps_y_when_lsq_does_not_strictly_improve() {
         bound_duals: vec![],
         ..SolverResult::default()
     };
-    refine_dual_lsq(&problem, &mut result, None);
+    refine_dual_lsq(&problem, &mut result, &[], None);
     assert!(result.dual_solution[0].abs() < 1e-12, "got {}", result.dual_solution[0]);
 }

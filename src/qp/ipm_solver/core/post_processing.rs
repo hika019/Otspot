@@ -95,7 +95,7 @@ pub(super) fn refine_post_processing(
         let prev_kkt = current_kkt;
 
         let pre_dual_step = final_sol.clone();
-        crate::qp::refine_dual_lsq(orig_problem, final_sol, opts.deadline);
+        crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
         crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
@@ -146,6 +146,7 @@ pub(super) fn refine_post_processing(
         crate::qp::refine_dual_lsq_irls(
             orig_problem,
             final_sol,
+            eliminated_cols,
             user_eps,
             IRLS_INNER_MAX_ITERS,
             opts.deadline,
