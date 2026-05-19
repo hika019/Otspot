@@ -2,6 +2,7 @@ use super::*;
 use crate::options::{SimplexMethod, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::sparse::CscMatrix;
+use crate::test_kkt::assert_solver_invariants_lp;
 use crate::tolerances::PIVOT_TOL;
 
 fn make_lp(
@@ -119,6 +120,7 @@ fn test_basic_2var() {
     );
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.objective - (-4.0)).abs() < PIVOT_TOL,
         "Expected objective -4.0, got {}",
@@ -254,6 +256,7 @@ fn test_simplex_ge_defensive() {
     let result = solve_with(&lp, &opts);
     assert!(start.elapsed().as_secs_f64() < 6.0, "test_simplex_ge_defensive: wall-clock 6秒超過");
     assert_eq!(result.status, SolveStatus::Optimal, "Status should be Optimal");
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.objective - (-20.0)).abs() < PIVOT_TOL,
         "Expected obj=-20.0, got {}",
@@ -410,6 +413,7 @@ fn test_highly_degenerate_lp() {
     );
     let result = solve(&lp);
     assert_eq!(result.status, SolveStatus::Optimal, "Expected Optimal for degenerate LP");
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.objective - (-2.0)).abs() < PIVOT_TOL,
         "Expected objective=-2.0, got {}",
@@ -448,6 +452,7 @@ fn test_dual_solution_equality_constraint() {
     opts.timeout_secs = Some(10.0);
     let result = solve_with(&lp, &opts);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!(
         (result.objective - 6.0).abs() < PIVOT_TOL,
         "Expected obj=6.0, got {}",
@@ -910,6 +915,7 @@ fn test_degenerate_eq_zero_rhs_artificials() {
     let result = solve_with(&lp, &opts);
     assert_ne!(result.status, SolveStatus::NumericalError);
     assert_eq!(result.status, SolveStatus::Optimal);
+    assert_solver_invariants_lp(&result, &lp);
     assert!((result.objective - (-1.0)).abs() < 1e-6);
 }
 
