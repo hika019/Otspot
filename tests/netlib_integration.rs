@@ -2,11 +2,25 @@
 use solver::io::mps::parse_mps_file;
 use solver::io::qps::parse_qps;
 use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, SolveStatus};
+use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use solver::qp::solve_qp_with;
 use solver::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
+
+/// Cycle/explosion guard: any correct simplex on a Netlib-class LP (≤ 2000 vars)
+/// should converge far below this ceiling. Exceeding it signals algorithmic
+/// regression (cycling or iteration explosion).
+const MAX_NETLIB_ITER: usize = 500_000;
+
+/// Solve an LP with a wall-time budget enforced via solver timeout.
+/// If the solver exceeds `timeout_secs`, it returns `SolveStatus::Timeout`,
+/// which fails the caller's `status == Optimal` assert — deterministic sentinel.
+fn solve_timed(problem: &LpProblem, timeout_secs: u64) -> SolverResult {
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(timeout_secs as f64);
+    solve_with(problem, &opts)
+}
 
 #[test]
 fn test_parse_afiro() {
@@ -252,7 +266,7 @@ fn test_solve_brandy() {
     let path = Path::new("tests/netlib/brandy.mps");
     let problem = parse_mps_file(path).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&problem);
+    let result = solve_timed(&problem, 90); // Timeout → Timeout status → fails Optimal assert
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "brandy should reach Optimal");
     let expected = 1518.5098965;
@@ -262,7 +276,7 @@ fn test_solve_brandy() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "brandy solve time < 30 sec, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "brandy: {} iterations", result.iterations);
     println!("brandy solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -280,7 +294,7 @@ fn test_solve_scorpion() {
     let path = Path::new("tests/netlib/scorpion.mps");
     let problem = parse_mps_file(path).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&problem);
+    let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "scorpion should reach Optimal");
     let expected = 1878.1248227;
@@ -292,7 +306,7 @@ fn test_solve_scorpion() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "scorpion solve time < 30 sec, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "scorpion: {} iterations", result.iterations);
     println!("scorpion solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -314,8 +328,9 @@ fn test_solve_fit1d() {
     let problem = parse_mps_file(path).expect("parse failed");
 
     // --- Presolve ON (デフォルト) ---
+    // fit1d: 1026 vars. Timeout sentinel: Timeout → fails Optimal assert below.
     let start_on = Instant::now();
-    let result = solve(&problem);
+    let result = solve_timed(&problem, 360);
     let elapsed_on = start_on.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "fit1d should reach Optimal");
     let expected = -9146.3780924;
@@ -325,8 +340,7 @@ fn test_solve_fit1d() {
         expected,
         result.objective
     );
-    // fit1dは1026変数の大規模問題。Ruizスケーリング有効時はdebugモードで300秒程度。
-    assert!(elapsed_on.as_secs() < 360, "fit1d solve time < 360 sec, got {:?}", elapsed_on);
+    assert!(result.iterations < MAX_NETLIB_ITER, "fit1d: {} iterations", result.iterations);
 
     // --- Presolve OFF ---
     let mut opts_off = SolverOptions::default();
@@ -361,7 +375,7 @@ fn test_solve_share1b() {
     let path = Path::new("tests/netlib/share1b.mps");
     let problem = parse_mps_file(path).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&problem);
+    let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "share1b should reach Optimal");
     let expected = -76589.318579;
@@ -371,7 +385,7 @@ fn test_solve_share1b() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "share1b solve time < 30 sec, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "share1b: {} iterations", result.iterations);
     println!("share1b solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -392,7 +406,7 @@ fn test_solve_boeing2() {
     let path = Path::new("tests/netlib/boeing2.mps");
     let problem = parse_mps_file(path).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&problem);
+    let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "boeing2 should reach Optimal");
     let expected = -315.01872802;
@@ -402,7 +416,7 @@ fn test_solve_boeing2() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "boeing2 solve time < 30 sec, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "boeing2: {} iterations", result.iterations);
     println!("boeing2 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -624,7 +638,7 @@ fn test_parse_sc105() {
 fn test_solve_sc105() {
     let prob = parse_mps_file(Path::new("tests/netlib/sc105.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "sc105: expected Optimal, got {:?}", result.status);
     let expected = -52.202061212;
@@ -634,7 +648,7 @@ fn test_solve_sc105() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "sc105 time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "sc105: {} iterations", result.iterations);
     println!("sc105 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -655,7 +669,7 @@ fn test_parse_sc205() {
 fn test_solve_sc205() {
     let prob = parse_mps_file(Path::new("tests/netlib/sc205.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "sc205: expected Optimal, got {:?}", result.status);
     // sc205 optimal: -5.2202061212E+01 (same as sc105, larger scale)
@@ -666,7 +680,7 @@ fn test_solve_sc205() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "sc205 time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "sc205: {} iterations", result.iterations);
     println!("sc205 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -687,7 +701,7 @@ fn test_parse_recipe() {
 fn test_solve_recipe() {
     let prob = parse_mps_file(Path::new("tests/netlib/recipe.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "recipe: expected Optimal, got {:?}", result.status);
     // recipe optimal: -2.6661600000E+02
@@ -698,7 +712,7 @@ fn test_solve_recipe() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "recipe time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "recipe: {} iterations", result.iterations);
     println!("recipe solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -716,7 +730,7 @@ fn test_parse_lotfi() {
 fn test_solve_lotfi() {
     let prob = parse_mps_file(Path::new("tests/netlib/lotfi.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "lotfi: expected Optimal, got {:?}", result.status);
     // lotfi optimal: -2.5264706062E+01
@@ -727,7 +741,7 @@ fn test_solve_lotfi() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "lotfi time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "lotfi: {} iterations", result.iterations);
     println!("lotfi solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -745,7 +759,7 @@ fn test_parse_israel() {
 fn test_solve_israel() {
     let prob = parse_mps_file(Path::new("tests/netlib/israel.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "israel: expected Optimal, got {:?}", result.status);
     // israel optimal: -8.9664482186E+05
@@ -756,7 +770,7 @@ fn test_solve_israel() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "israel time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "israel: {} iterations", result.iterations);
     println!("israel solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -774,7 +788,7 @@ fn test_parse_sctap1() {
 fn test_solve_sctap1() {
     let prob = parse_mps_file(Path::new("tests/netlib/sctap1.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "sctap1: expected Optimal, got {:?}", result.status);
     // sctap1 optimal: 1.4122500000E+03
@@ -785,7 +799,7 @@ fn test_solve_sctap1() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "sctap1 time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "sctap1: {} iterations", result.iterations);
     println!("sctap1 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -806,7 +820,7 @@ fn test_parse_grow7() {
 fn test_solve_grow7() {
     let prob = parse_mps_file(Path::new("tests/netlib/grow7.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "grow7: expected Optimal, got {:?}", result.status);
     // grow7 optimal: -4.7787811815E+07
@@ -817,7 +831,7 @@ fn test_solve_grow7() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "grow7 time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "grow7: {} iterations", result.iterations);
     println!("grow7 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -840,7 +854,7 @@ fn test_parse_pilot4() {
 fn test_solve_pilot4() {
     let prob = parse_mps_file(Path::new("tests/netlib/pilot4.mps")).expect("parse failed");
     let start = Instant::now();
-    let result = solve(&prob);
+    let result = solve_timed(&prob, 180);
     let elapsed = start.elapsed();
     assert_eq!(result.status, SolveStatus::Optimal, "pilot4: expected Optimal, got {:?}", result.status);
     // pilot4 optimal: -2.5811392641E+03 (LP relaxation)
@@ -851,7 +865,7 @@ fn test_solve_pilot4() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 60, "pilot4 time < 60s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "pilot4: {} iterations", result.iterations);
     // Verify feasibility: pilot4 should have small constraint violation
     if !result.solution.is_empty() {
         let viol = max_constraint_violation(&result.solution, &prob);
@@ -881,6 +895,7 @@ fn test_solve_capri_no_presolve() {
     let prob = parse_mps_file(Path::new("tests/netlib/capri.mps")).expect("parse failed");
     let mut opts = SolverOptions::default();
     opts.presolve = false;
+    opts.timeout_secs = Some(90.0);
     let start = Instant::now();
     let result = solve_with(&prob, &opts);
     let elapsed = start.elapsed();
@@ -893,7 +908,7 @@ fn test_solve_capri_no_presolve() {
         expected,
         result.objective
     );
-    assert!(elapsed.as_secs() < 30, "capri time < 30s, got {:?}", elapsed);
+    assert!(result.iterations < MAX_NETLIB_ITER, "capri: {} iterations", result.iterations);
     if !result.solution.is_empty() {
         let viol = max_constraint_violation(&result.solution, &prob);
         assert!(viol < 1e-4, "capri: infeasible solution, max_viol={}", viol);

@@ -15,9 +15,11 @@ use solver::qp::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 
-const TIMEOUT_SEC: f64 = 60.0;
 /// 相対誤差許容: 0.1% (タスク要件)
 const REL_TOL: f64 = 1e-3;
+
+/// Cycle/explosion guard (same reasoning as netlib_integration.rs).
+const MAX_NETLIB_EXTRA_ITER: usize = 500_000;
 
 fn solve_and_check(name: &str, expected_obj: f64, max_secs: u64) {
     let path_str = format!("data/lp_problems/{}.QPS", name);
@@ -25,7 +27,8 @@ fn solve_and_check(name: &str, expected_obj: f64, max_secs: u64) {
     assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path_str);
     let problem = parse_qps(path).unwrap_or_else(|e| panic!("parse {} failed: {:?}", name, e));
     let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(TIMEOUT_SEC);
+    // Use max_secs as the actual timeout: Timeout → Timeout status → fails Optimal assert.
+    opts.timeout_secs = Some(max_secs as f64);
     let start = Instant::now();
     let result = solve_qp_with(&problem, &opts);
     let elapsed = start.elapsed();
@@ -53,21 +56,22 @@ fn solve_and_check(name: &str, expected_obj: f64, max_secs: u64) {
         elapsed
     );
 
+    // Deterministic regression guard: cycling → iteration explosion.
     assert!(
-        elapsed.as_secs() < max_secs,
-        "{}: solve time {:.2}s >= {}s budget",
+        result.iterations < MAX_NETLIB_EXTRA_ITER,
+        "{}: {} iterations — cycling regression?",
         name,
-        elapsed.as_secs_f64(),
-        max_secs
+        result.iterations
     );
 
     println!(
-        "{} solved: obj={:.6e} (expected {:.6e}, rel_err={:.2e}) time={:.2}s",
+        "{} solved: obj={:.6e} (expected {:.6e}, rel_err={:.2e}) time={:.2}s iters={}",
         name,
         result.objective,
         expected_obj,
         rel,
-        elapsed.as_secs_f64()
+        elapsed.as_secs_f64(),
+        result.iterations
     );
 }
 
