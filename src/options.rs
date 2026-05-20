@@ -226,6 +226,62 @@ impl Default for MultiStartConfig {
     }
 }
 
+/// MILP/MIQP 分枝変数選択戦略 (#14)。
+///
+/// `MostFractional`: 整数制約変数のうち relaxation 解の小数部が 0.5 に最も近い
+/// (= 最も「分数的」な) 変数で分枝する baseline 戦略。tie は変数 index 小優先で決定論的。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MipBranching {
+    MostFractional,
+}
+
+/// `MipConfig` defaults。
+///
+/// - `DEFAULT_MIP_GAP_TOL = 1e-6`: 相対 MIP optimality gap (= |UB - LB| / max(1, |UB|))。
+///   LP/QP relaxation は exact な下界を与える (spatial B&B の interval bound と違い緩くない)
+///   ため `solve_qp_global` の 1e-3 より tight に設定できる。
+/// - `DEFAULT_INTEGER_FEAS_TOL = 1e-6`: 整数性判定許容。relaxation を eps=1e-6 で解くため
+///   |x - round(x)| <= 1e-6 を整数とみなす。これより緩いと真に分数な解を整数と誤認、
+///   厳しいと solver noise で無限分枝する。
+/// - `DEFAULT_MIP_MAX_NODES = 1_000_000`: 探索 node 上限の安全装置。実用上は
+///   `timeout_secs` / `deadline` が一次的な打切り基準。
+/// - `DEFAULT_MIP_MAX_DEPTH = 1_000`: tree depth 上限の安全装置。各 level で整数変数 1 つの
+///   bound を締めるため、有界整数問題では実効 depth は遥かに小さい。
+pub const DEFAULT_MIP_GAP_TOL: f64 = 1e-6;
+pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
+pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
+pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
+
+/// MILP/MIQP branch-and-bound 設定 (#14)。
+///
+/// `solve_milp` / `solve_miqp` に渡す ε-optimal 整数最適化のパラメータ。
+///
+/// 規約:
+/// - `gap_tol >= 0`: 相対 gap。0 で厳密最適 (node 爆発の可能性)。
+/// - `integer_feas_tol > 0`: 整数性許容。
+/// - `max_nodes >= 1`, `max_depth >= 1`: 安全装置 (一次打切りは deadline)。
+#[derive(Debug, Clone)]
+pub struct MipConfig {
+    pub gap_tol: f64,
+    pub integer_feas_tol: f64,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+    pub branching: MipBranching,
+}
+
+impl Default for MipConfig {
+    fn default() -> Self {
+        Self {
+            gap_tol: DEFAULT_MIP_GAP_TOL,
+            integer_feas_tol: DEFAULT_INTEGER_FEAS_TOL,
+            max_nodes: DEFAULT_MIP_MAX_NODES,
+            max_depth: DEFAULT_MIP_MAX_DEPTH,
+            branching: MipBranching::MostFractional,
+        }
+    }
+}
+
 /// QP ソルバーの収束精度を抽象化する列挙型
 ///
 /// 各ソルバーは `Tolerance` を内部の収束基準に変換して使用する。

@@ -51,10 +51,11 @@ pub mod model;
 pub mod tolerances;
 pub mod options;
 pub use options::{
-    BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, SolverOptions,
-    Tolerance, WarmStartBasis,
+    BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, MipBranching, MipConfig,
+    SolverOptions, Tolerance, WarmStartBasis,
 };
 pub mod qp;
+pub mod mip;
 pub mod lp;
 pub mod screening;
 // linalg は ldl / kkt_solver 等にクロスモジュールテストからのみ参照される
@@ -68,8 +69,12 @@ pub(crate) mod test_kkt;
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};
-pub use model::{Model, ModelResult, ModelError};
+pub use model::{Model, ModelResult, ModelError, VarKind};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
+pub use mip::{
+    solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
+    MipProblemError, MipStats, MiqpProblem,
+};
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 

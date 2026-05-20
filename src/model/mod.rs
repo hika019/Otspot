@@ -20,7 +20,7 @@ pub mod variable;
 
 pub use constraint::{Constraint, ConstraintSense};
 pub use expression::Expression;
-pub use variable::Variable;
+pub use variable::{Variable, VarKind};
 pub use crate::constraint;
 
 use variable::VariableDefinition;
@@ -128,11 +128,29 @@ impl Model {
     /// # Returns
     /// A `Variable` handle that can be used in expressions.
     pub fn add_var(&mut self, name: &str, lb: f64, ub: f64) -> Variable {
+        self.add_var_with_kind(name, lb, ub, VarKind::Continuous)
+    }
+
+    /// Add an integer decision variable (must take integral values within `[lb, ub]`).
+    ///
+    /// Presence of any integer/binary variable routes `solve()` through the
+    /// MILP/MIQP branch-and-bound solver instead of the continuous LP/QP path.
+    pub fn add_int_var(&mut self, name: &str, lb: f64, ub: f64) -> Variable {
+        self.add_var_with_kind(name, lb, ub, VarKind::Integer)
+    }
+
+    /// Add a binary decision variable (integer, fixed to the `{0, 1}` box).
+    pub fn add_binary_var(&mut self, name: &str) -> Variable {
+        self.add_var_with_kind(name, 0.0, 1.0, VarKind::Binary)
+    }
+
+    fn add_var_with_kind(&mut self, name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
         let index = self.variables.len();
         self.variables.push(VariableDefinition {
             name: name.to_string(),
             lower_bound: lb,
             upper_bound: ub,
+            kind,
         });
         Variable { index }
     }
@@ -256,6 +274,19 @@ impl Model {
             .map(|v| (v.lower_bound, v.upper_bound))
             .collect();
 
+        // --- MIP path: any integer/binary variable routes through branch-and-bound ---
+        // (degenerate "no integer var" falls through to the existing LP/QP paths below.)
+        let integer_vars: Vec<usize> = self
+            .variables
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.kind != VarKind::Continuous)
+            .map(|(i, _)| i)
+            .collect();
+        if !integer_vars.is_empty() {
+            return self.solve_mip_internal(c, a, b, constraint_types, bounds, integer_vars);
+        }
+
         // --- QP path ---
         if let Some(ref q_orig) = self.quadratic_objective.clone() {
             return self.solve_qp_internal(c, a, b, bounds, q_orig.clone(), num_constraints);
@@ -351,16 +382,15 @@ impl Model {
         }
     }
 
-    /// QP内部求解ロジック（制約型変換・QpProblem構築・結果変換）
-    fn solve_qp_internal(
+    /// Build a `QpProblem` from the model (constraint matrix + maximize Q→-Q
+    /// negation + offset removal). Shared by the QP and MIQP paths. `c` is already
+    /// negated by `solve()` for maximize.
+    fn build_qp_problem(
         &self,
         c: Vec<f64>,
-        _lp_a: CscMatrix,
-        _lp_b: Vec<f64>,
         bounds: Vec<(f64, f64)>,
         q_orig: CscMatrix,
-        num_model_constraints: usize,
-    ) -> Result<ModelResult, ModelError> {
+    ) -> Result<crate::qp::QpProblem, ModelError> {
         use crate::qp::QpProblem;
 
         let num_vars = self.variables.len();
@@ -412,6 +442,20 @@ impl Model {
             .map_err(|e| ModelError::Internal(e.to_string()))?;
         // offset は signed_obj で post-solve 加算するため solver には渡さない。
         qp_problem.obj_offset = 0.0;
+        Ok(qp_problem)
+    }
+
+    /// QP内部求解ロジック（QpProblem構築・求解・結果変換）
+    fn solve_qp_internal(
+        &self,
+        c: Vec<f64>,
+        _lp_a: CscMatrix,
+        _lp_b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+        q_orig: CscMatrix,
+        num_model_constraints: usize,
+    ) -> Result<ModelResult, ModelError> {
+        let qp_problem = self.build_qp_problem(c, bounds, q_orig)?;
 
         let mut opts = crate::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
@@ -510,6 +554,124 @@ impl Model {
                 qp_result.solution.clone(),
                 fold_dual(&qp_result.dual_solution),
                 qp_result.bound_duals,
+            )),
+        }
+    }
+
+    /// MILP/MIQP 内部求解: 整数変数があるとき `solve()` から dispatch される。
+    ///
+    /// 二次目的なし → MILP (各 B&B node で LP relaxation)。二次目的あり → **凸** MIQP
+    /// (各 node で QP relaxation)。非凸 (Q 非PSD) は `solve_miqp` が `NonConvex` を返し、
+    /// ここで明示エラーに変換する (silent 誤答禁止)。
+    fn solve_mip_internal(
+        &self,
+        c: Vec<f64>,
+        a: CscMatrix,
+        b: Vec<f64>,
+        constraint_types: Vec<ConstraintType>,
+        bounds: Vec<(f64, f64)>,
+        integer_vars: Vec<usize>,
+    ) -> Result<ModelResult, ModelError> {
+        let mut opts = crate::options::SolverOptions::default();
+        if let Some(t) = self.timeout_secs {
+            opts.timeout_secs = Some(t);
+        }
+        if let Some(tol) = self.tolerance {
+            opts.tolerance = Some(tol);
+        }
+        if let Some(n) = self.threads {
+            opts.threads = n;
+        }
+        let cfg = crate::options::MipConfig::default();
+
+        let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
+            // MIQP: convex QP relaxation per node.
+            if let Some(flag) = self.use_ruiz_scaling {
+                opts.use_ruiz_scaling = flag;
+            }
+            let qp = self.build_qp_problem(c, bounds, q_orig.clone())?;
+            let miqp = crate::mip::MiqpProblem::new(qp, integer_vars.clone())
+                .map_err(|e| ModelError::Internal(e.to_string()))?;
+            crate::mip::solve_miqp(&miqp, &opts, &cfg)
+        } else {
+            // MILP: LP relaxation per node.
+            if let Some(flag) = self.presolve {
+                opts.presolve = flag;
+            }
+            let lp = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
+                .map_err(|e| ModelError::Internal(e.to_string()))?;
+            let milp = crate::mip::MilpProblem::new(lp, integer_vars.clone())
+                .map_err(|e| ModelError::Internal(e.to_string()))?;
+            crate::mip::solve_milp(&milp, &opts, &cfg)
+        };
+
+        self.finish_mip(result, &integer_vars)
+    }
+
+    /// Convert a MIP `SolverResult` to a `ModelResult`: apply objective sign /
+    /// offset, round integer components, and map the status. Shared by MILP/MIQP.
+    fn finish_mip(
+        &self,
+        result: crate::problem::SolverResult,
+        integer_vars: &[usize],
+    ) -> Result<ModelResult, ModelError> {
+        let signed_obj = |raw: f64| -> f64 {
+            let oriented = if self.sense == OptimizationSense::Maximize {
+                -raw
+            } else {
+                raw
+            };
+            oriented + self.obj_offset
+        };
+
+        // 整数変数成分を厳密整数に丸める (relaxation 解の 1e-6 級 noise を除去)。
+        let round_integers = |mut sol: Vec<f64>| -> Vec<f64> {
+            for &j in integer_vars {
+                if j < sol.len() {
+                    sol[j] = sol[j].round();
+                }
+            }
+            sol
+        };
+
+        let build_ok = |sr: crate::problem::SolverResult| ModelResult {
+            objective_value: signed_obj(sr.objective),
+            solution: round_integers(sr.solution),
+            dual_solution: None,
+            reduced_costs: None,
+            slack: None,
+            bound_duals: vec![],
+            stats: sr.stats,
+        };
+
+        match result.status {
+            SolveStatus::Optimal => Ok(build_ok(result)),
+            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
+            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
+            SolveStatus::Timeout => {
+                // 打ち切りでも incumbent (整数実行可能解) があれば解を返す。
+                if result.solution.is_empty() {
+                    Err(ModelError::Timeout)
+                } else {
+                    Ok(build_ok(result))
+                }
+            }
+            SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations => {
+                if result.solution.is_empty() {
+                    Err(ModelError::SolveError(SolveError::MaxIterations))
+                } else {
+                    Ok(build_ok(result))
+                }
+            }
+            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
+            // Non-convex MIQP (non-PSD Q) is out of scope — surface it as an error.
+            SolveStatus::NonConvex(msg) => {
+                Err(ModelError::Internal(format!("Non-convex MIQP: {}", msg)))
+            }
+            SolveStatus::LocallyOptimal
+            | SolveStatus::NonconvexLocal
+            | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
+                "Unexpected nonconvex status on MIP path".to_string(),
             )),
         }
     }
