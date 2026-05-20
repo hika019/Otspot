@@ -56,6 +56,10 @@ pub struct SolveStats {
     /// already met the user tolerance (`kkt_already_pass`). Deterministic sentinel for
     /// the gate: removing the gate (always refine) flips this to `false`.
     pub postsolve_krylov_ir_skipped: bool,
+    /// For LP solves via the QP dispatch (`LpForwardedFromQp`): `true` if the
+    /// returned result came from the IPM, `false` if from simplex. Lets callers
+    /// (e.g. benchmarks) label the actual route instead of a static size guess.
+    pub lp_ipm_path: bool,
 }
 
 /// ソルバーの求解結果ステータス

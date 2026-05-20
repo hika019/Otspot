@@ -76,7 +76,9 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
         let mut ipm_opts = ipm_opts_for_lp(options);
         // crash→IPM warm wiring: user 提供 warm_start_qp が無いときのみ生成。
-        if ipm_opts.warm_start_qp.is_none() && options.use_lp_crash_basis {
+        // 既定無効 (use_lp_crash_ipm_warm=false): warm-start が IPM 反復を減らさず
+        // crash-LU コストだけ嵩む net-negative を full-101 A/B で実証 (2026-05-20)。
+        if ipm_opts.warm_start_qp.is_none() && options.use_lp_crash_ipm_warm {
             crash_attempted = true;
             if let Some(ws) = try_build_ipm_warm_from_crash(&lp) {
                 ipm_opts.warm_start_qp = Some(ws);
@@ -87,6 +89,7 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         ipm_result.stats.crash_ipm_attempted = crash_attempted;
         ipm_result.stats.crash_ipm_wired = crash_wired;
         ipm_result.stats.route = SolveRoute::LpForwardedFromQp;
+        ipm_result.stats.lp_ipm_path = true;
         // ipm_solver は内部で obj_offset を加算済み → そのまま返す。
         match ipm_result.status {
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
@@ -310,5 +313,43 @@ mod tests {
         // crash stats are false for pure simplex calls
         assert!(!r1.stats.crash_ipm_attempted, "simplex path: crash not attempted");
         assert!(!r2.stats.crash_ipm_attempted, "simplex path: crash not attempted");
+    }
+
+    /// Build a zero-Q QpProblem (pure LP) from the eq fixture so `solve_qp_with`
+    /// routes through the large-LP dispatch (`solve_as_lp_pub`, IPM-first).
+    fn eq_qp_zero_q(n: usize, m: usize) -> QpProblem {
+        let lp = eq_lp_fixture(n, m);
+        let q = CscMatrix::new(n, n); // Q = 0 → LP path
+        QpProblem::new(q, lp.c, lp.a, lp.b, lp.bounds, lp.constraint_types).unwrap()
+    }
+
+    /// Load-bearing sentinel for the crash→IPM warm-start disable.
+    ///
+    /// The warm-start is net-negative (full-101 A/B: never reduces IPM iters, only
+    /// adds crash-LU cost) AND its faer LU can overflow on large/sparse crash bases
+    /// (dfl001 panic — same root cause). The default `use_lp_crash_ipm_warm=false`
+    /// must therefore not even *attempt* it (no attempt ⇒ no overflow). `n>3000`
+    /// routes IPM-first so the gate is exercised.
+    ///
+    /// No-op proof: flipping the default to `true` makes `crash_ipm_attempted`
+    /// `true` for the default solve, failing the first assert.
+    #[test]
+    fn crash_ipm_warm_disabled_by_default() {
+        let qp = eq_qp_zero_q(3500, 200);
+
+        let res_default = crate::qp::solve_qp_with(&qp, &SolverOptions::default());
+        assert!(
+            !res_default.stats.crash_ipm_attempted,
+            "default (use_lp_crash_ipm_warm=false) must NOT attempt the crash→IPM \
+             warm-start; attempting it re-introduces the net-negative LU + dfl001 overflow"
+        );
+
+        // The flag is a live gate, not dead code: enabling re-attempts the warm-start.
+        let opts_on = SolverOptions { use_lp_crash_ipm_warm: true, ..SolverOptions::default() };
+        let res_on = crate::qp::solve_qp_with(&qp, &opts_on);
+        assert!(
+            res_on.stats.crash_ipm_attempted,
+            "use_lp_crash_ipm_warm=true must attempt the crash→IPM warm-start"
+        );
     }
 }
