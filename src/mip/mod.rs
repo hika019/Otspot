@@ -17,23 +17,43 @@
 //!   semantics differ (relaxation-objective lower bound vs. interval bound;
 //!   integer-feasible incumbents vs. any feasible point).
 //!
-//! Phase 1 implements MILP; convex MIQP is added in Phase 2.
+//! MILP (LP relaxation) and convex MIQP (QP relaxation) share one generic driver
+//! ([`solve_mip_with_stats`]); only the relaxation solver differs, abstracted by
+//! the [`Relaxation`] trait. Non-convex MIQP (non-PSD `Q`) is out of scope and
+//! reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
 pub(crate) mod node;
 mod problem;
 pub(crate) mod queue;
 
-pub use problem::{MilpProblem, MipProblemError};
+pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
 use crate::options::{MipConfig, SolverOptions};
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::global::pruning::{should_prune, within_gap};
 use std::time::{Duration, Instant};
 
-use branch::{branch_bounds, is_integer_feasible, select_branching_variable};
+use branch::{
+    branch_bounds, is_integer_feasible, select_branching_variable, split_integer_box,
+    widest_splittable_integer,
+};
 use node::MipNode;
 use queue::NodeQueue;
+
+/// A continuous relaxation the MIP branch-and-bound driver can solve over
+/// arbitrary variable bounds. MILP uses an LP relaxation; convex MIQP uses a
+/// QP one. Branching tightens the bounds, so the same driver works for both —
+/// only the relaxation solver differs.
+pub(crate) trait Relaxation {
+    fn num_vars(&self) -> usize;
+    fn root_bounds(&self) -> &[(f64, f64)];
+    fn integer_vars(&self) -> &[usize];
+    /// Solve the relaxation with `bounds` substituted for the original bounds.
+    /// `opts` already has multistart / global_optimization stripped and the
+    /// deadline fixed by the driver.
+    fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
+}
 
 /// Search statistics for sentinel/regression tests (not part of the production API).
 #[derive(Debug, Clone, Copy, Default)]
@@ -59,8 +79,41 @@ pub fn solve_milp_with_stats(
     options: &SolverOptions,
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
+    solve_mip_with_stats(problem, options, cfg)
+}
+
+/// Solve a **convex** MIQP to (relative) ε-optimality via branch-and-bound.
+///
+/// Each node solves a convex QP relaxation (IP-PMM). A non-PSD `Q` (non-convex
+/// MIQP) is out of scope: the QP relaxation would not be a valid lower bound, so
+/// the solver returns [`SolveStatus::NonConvex`] rather than a silently wrong
+/// answer. Use `solve_qp_global` for non-convex continuous QP.
+pub fn solve_miqp(problem: &MiqpProblem, options: &SolverOptions, cfg: &MipConfig) -> SolverResult {
+    solve_miqp_with_stats(problem, options, cfg).0
+}
+
+/// Like [`solve_miqp`] but also returns search statistics (test sentinel hook).
+pub fn solve_miqp_with_stats(
+    problem: &MiqpProblem,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+) -> (SolverResult, MipStats) {
+    if !problem.is_convex() {
+        return (nonconvex_result(), MipStats::default());
+    }
+    solve_mip_with_stats(problem, options, cfg)
+}
+
+/// Generic branch-and-bound driver shared by MILP (LP relaxation) and convex
+/// MIQP (QP relaxation). The only difference between the two is the relaxation
+/// solver, abstracted by [`Relaxation`].
+fn solve_mip_with_stats<R: Relaxation>(
+    problem: &R,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+) -> (SolverResult, MipStats) {
     let mut stats = MipStats::default();
-    let mask = problem.integer_mask();
+    let mask = integer_mask(problem.num_vars(), problem.integer_vars());
 
     // deadline: prefer an explicit deadline, else derive from timeout_secs.
     let deadline = options.deadline.or_else(|| {
@@ -74,58 +127,35 @@ pub fn solve_milp_with_stats(
     shared.multistart = None;
     shared.global_optimization = None;
 
-    let root_bounds = problem.lp.bounds.clone();
-    let root = solve_relaxation(&problem.lp, &root_bounds, &shared);
-    stats.nodes_processed = 1;
-
-    // Degenerate: no integer variables → the relaxation is the answer (LP fallback).
-    if problem.integer_vars.is_empty() {
-        return (root, stats);
-    }
-
-    // The root relaxation must solve to optimality to drive a valid bound.
-    // Infeasible (→ MILP infeasible), Unbounded (→ MILP unbounded), Timeout /
-    // NumericalError / MaxIterations all propagate as-is.
-    if !matches!(root.status, SolveStatus::Optimal) {
-        return (root, stats);
-    }
-
-    // Root already integer-feasible → proven optimal.
-    if is_integer_feasible(&root.solution, &mask, cfg.integer_feas_tol) {
-        let mut r = root;
-        r.solution = round_integers(r.solution, &problem.integer_vars);
-        r.status = SolveStatus::Optimal;
-        return (r, stats);
+    // Degenerate: no integer variables → the relaxation is the answer (LP/QP fallback).
+    if problem.integer_vars().is_empty() {
+        return (problem.solve(problem.root_bounds(), &shared), stats);
     }
 
     let mut state = MipState::new();
     let mut q = NodeQueue::new();
+    // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
+    // Optimal relaxation. The loop solves the root uniformly with every other node, so
+    // Infeasible / Unbounded / stalling roots are all handled in one place.
+    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
 
-    // Branch the root on its most-fractional integer variable; children inherit the
-    // root relaxation objective as their (valid) lower bound.
-    let root_node = MipNode::root(root_bounds.clone(), root.objective);
-    let j = select_branching_variable(&root.solution, &mask, cfg.integer_feas_tol, cfg.branching)
-        .expect("fractional root must have a branch variable");
-    let (down, up) = branch_bounds(&root_bounds, j, root.solution[j]);
-    q.push(root_node.child(down, root.objective));
-    q.push(root_node.child(up, root.objective));
-
-    // Smallest lower bound over regions left unexplored (depth-limited / interrupted
-    // nodes that are not in the queue). Combined with the queue frontier at the end.
-    let mut open_lb = f64::INFINITY;
+    let mut open_lb = f64::INFINITY; // smallest valid bound over unexplored regions
+    let mut had_open = false; // any region left unexplored?
+    let mut proof_uncertain = false; // an unexplored region stems from a non-Optimal relaxation
     let mut deadline_stop = false;
     let mut maxnodes_stop = false;
-    let mut depth_limited = false;
     let mut unbounded = false;
 
     while let Some(node) = q.pop() {
         if deadline_hit(&deadline) {
             open_lb = open_lb.min(node.lower_bound);
+            had_open = true;
             deadline_stop = true;
             break;
         }
         if stats.nodes_processed >= cfg.max_nodes {
             open_lb = open_lb.min(node.lower_bound);
+            had_open = true;
             maxnodes_stop = true;
             break;
         }
@@ -138,7 +168,7 @@ pub fn solve_milp_with_stats(
             }
         }
 
-        let res = solve_relaxation(&problem.lp, &node.var_bounds, &shared);
+        let res = problem.solve(&node.var_bounds, &shared);
         stats.nodes_processed += 1;
         stats.max_depth_seen = stats.max_depth_seen.max(node.depth);
 
@@ -153,60 +183,84 @@ pub fn solve_milp_with_stats(
             }
             SolveStatus::Timeout => {
                 open_lb = open_lb.min(node.lower_bound);
+                had_open = true;
                 deadline_stop = true;
                 break;
             }
             _ => {}
         }
-        // Remaining: Optimal / MaxIterations / SuboptimalSolution / NumericalError.
-        if res.solution.is_empty() {
-            // No usable point (e.g. NumericalError with no solution) → discard region.
-            open_lb = open_lb.min(node.lower_bound);
-            continue;
-        }
 
-        // Only an optimally solved relaxation yields a trustworthy lower bound;
-        // otherwise keep the parent's valid bound.
-        let is_optimal = matches!(res.status, SolveStatus::Optimal);
-        let node_lb = if is_optimal {
-            node.lower_bound.max(res.objective)
-        } else {
-            node.lower_bound
-        };
+        // Trust ONLY an exactly-Optimal relaxation (this includes the fixed-point
+        // evaluator, which returns Optimal) as a lower bound. A SuboptimalSolution
+        // primal objective is an UPPER bound on the relaxation optimum, NOT a lower
+        // bound — using it to fathom would over-prune and could drop the true optimum
+        // (the box-only off-diagonal silent-wrong, #17).
+        let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
 
-        // Fathom by the freshly computed (valid) bound.
-        if let Some(inc) = state.incumbent_obj {
-            if should_prune(node_lb, Some(inc), cfg.gap_tol) {
-                stats.pruned += 1;
+        if trusted {
+            // Optimal relaxation objective is a valid lower bound for this region.
+            let node_lb = node.lower_bound.max(res.objective);
+
+            if let Some(inc) = state.incumbent_obj {
+                if should_prune(node_lb, Some(inc), cfg.gap_tol) {
+                    stats.pruned += 1;
+                    continue;
+                }
+            }
+
+            // Integer-feasible Optimal relaxation → incumbent (feasible point, exact UB).
+            if is_integer_feasible(&res.solution, &mask, cfg.integer_feas_tol) {
+                if state.consider(&res) {
+                    stats.incumbent_updates += 1;
+                }
+                continue; // integer-feasible leaf — nothing to branch on
+            }
+
+            if node.depth + 1 > cfg.max_depth {
+                open_lb = open_lb.min(node_lb);
+                had_open = true;
                 continue;
             }
-        }
 
-        // Incumbents are taken only from optimally solved relaxations (guaranteed
-        // feasible + exact objective). A degraded point is never reported as a solution.
-        if is_optimal && is_integer_feasible(&res.solution, &mask, cfg.integer_feas_tol) {
-            if state.consider(&res) {
-                stats.incumbent_updates += 1;
-            }
-            continue; // integer-feasible leaf — nothing to branch on
-        }
-
-        if node.depth + 1 > cfg.max_depth {
-            open_lb = open_lb.min(node_lb);
-            depth_limited = true;
-            continue;
-        }
-
-        match select_branching_variable(&res.solution, &mask, cfg.integer_feas_tol, cfg.branching) {
-            Some(jb) => {
-                let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-                q.push(node.child(down, node_lb));
-                q.push(node.child(up, node_lb));
-            }
-            None => {
-                // No fractional integer var but the relaxation was not Optimal, so the
-                // integer-feasible point is not trusted as an incumbent. Region stays open.
-                open_lb = open_lb.min(node_lb);
+            // Guided branching on the most-fractional integer variable.
+            let jb = select_branching_variable(
+                &res.solution,
+                &mask,
+                cfg.integer_feas_tol,
+                cfg.branching,
+            )
+            .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
+            let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
+            q.push(node.child(down, node_lb));
+            q.push(node.child(up, node_lb));
+        } else {
+            // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
+            // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region
+            // with no interior (e.g. an equality constraint pins it to a point). Its
+            // objective is NOT a valid lower bound, so neither fathom nor tighten by it.
+            // Fall back to integer-box bisection so the search still reaches an all-fixed
+            // leaf (solved exactly by the fixed-point evaluator), never silently dropping
+            // a region. The inherited (valid) parent bound is carried forward.
+            match widest_splittable_integer(&node.var_bounds, &mask) {
+                Some(_) if node.depth + 1 > cfg.max_depth => {
+                    open_lb = open_lb.min(node.lower_bound);
+                    had_open = true;
+                    proof_uncertain = true;
+                }
+                Some(jb) => {
+                    let (down, up) = split_integer_box(&node.var_bounds, jb);
+                    q.push(node.child(down, node.lower_bound));
+                    q.push(node.child(up, node.lower_bound));
+                }
+                None => {
+                    // No integer box left to split and the relaxation is unsolvable
+                    // (e.g. continuous variables in a no-interior region). The region is
+                    // left unexplored without a reliable bound → mark the proof uncertain
+                    // so the final status never falsely claims Optimal.
+                    open_lb = open_lb.min(node.lower_bound);
+                    had_open = true;
+                    proof_uncertain = true;
+                }
             }
         }
     }
@@ -224,20 +278,24 @@ pub fn solve_milp_with_stats(
     match state.incumbent.take() {
         Some(mut inc) => {
             let inc_obj = state.incumbent_obj.expect("incumbent objective set");
-            let proven = within_gap(inc_obj, remaining_lb, cfg.gap_tol);
-            inc.solution = round_integers(inc.solution, &problem.integer_vars);
+            // Proven optimal only when (a) no unexplored region can beat the incumbent
+            // by more than the gap (within_gap on a *valid* lower bound), AND (b) no
+            // region was left unresolved by a non-Optimal relaxation. Otherwise we still
+            // return the incumbent (possibly suboptimal) but never disguise it as a
+            // proven optimum.
+            let proven = !proof_uncertain && within_gap(inc_obj, remaining_lb, cfg.gap_tol);
+            inc.solution = round_integers(inc.solution, problem.integer_vars());
             inc.status = if proven {
                 SolveStatus::Optimal
             } else if deadline_stop {
                 SolveStatus::Timeout
             } else {
-                // budget (max_nodes / max_depth) exhausted with an unproven incumbent
                 SolveStatus::SuboptimalSolution
             };
             (inc, stats)
         }
         None => (
-            finalize_no_incumbent(interrupted, depth_limited, q.is_empty(), open_lb, deadline_stop),
+            finalize_no_incumbent(interrupted, had_open, q.is_empty(), deadline_stop),
             stats,
         ),
     }
@@ -245,23 +303,19 @@ pub fn solve_milp_with_stats(
 
 /// Classify the terminal status when no integer-feasible incumbent was found.
 ///
-/// Infeasibility may be claimed **only** when the whole tree was resolved: the
-/// queue is empty, there was no budget interruption, no depth limiting, **and**
-/// no region was left open by an untrusted/degraded relaxation (`open_lb` still
-/// `+∞`). A node whose relaxation was integer-feasible-but-not-`Optimal`
-/// (untrusted, not adopted as incumbent) or returned a degraded status with no
-/// usable point lowers `open_lb` to a finite value without setting a flag — that
-/// region is genuinely unresolved, so reporting `Infeasible` there would be a
-/// silent wrong answer. In that case return a no-solution status instead.
+/// `Infeasible` may be claimed **only** when the whole tree was resolved: the
+/// queue is empty, there was no budget interruption, and **no region was left
+/// unexplored** (`had_open == false`). An unexplored region (a depth/budget limit,
+/// or an unsolvable no-interior relaxation that could not be bisected) means we
+/// cannot prove infeasibility, so a no-solution status is returned instead — never
+/// a silent false `Infeasible`.
 fn finalize_no_incumbent(
     interrupted: bool,
-    depth_limited: bool,
+    had_open: bool,
     queue_empty: bool,
-    open_lb: f64,
     deadline_stop: bool,
 ) -> SolverResult {
-    let fully_resolved =
-        !interrupted && !depth_limited && queue_empty && open_lb.is_infinite();
+    let fully_resolved = !interrupted && !had_open && queue_empty;
     if fully_resolved {
         SolverResult::infeasible()
     } else if deadline_stop {
@@ -271,11 +325,27 @@ fn finalize_no_incumbent(
     }
 }
 
-/// Solve the relaxation over `bounds` by cloning the LP with swapped bounds.
-fn solve_relaxation(lp: &LpProblem, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
-    let mut sub = lp.clone();
-    sub.bounds = bounds.to_vec();
-    crate::lp::solve_lp_with(&sub, opts)
+/// Boolean mask of length `num_vars`; `true` where the variable is integral.
+fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool> {
+    let mut mask = vec![false; num_vars];
+    for &j in integer_vars {
+        if j < num_vars {
+            mask[j] = true;
+        }
+    }
+    mask
+}
+
+/// A result tagging a non-convex (non-PSD `Q`) MIQP as out of scope.
+fn nonconvex_result() -> SolverResult {
+    SolverResult {
+        status: SolveStatus::NonConvex(
+            "convex MIQP only: Q is not positive semidefinite".to_string(),
+        ),
+        objective: f64::INFINITY,
+        solution: vec![],
+        ..Default::default()
+    }
 }
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {

@@ -10,7 +10,10 @@
 
 use solver::options::{MipConfig, SolverOptions};
 use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::{solve_milp_with_stats, CscMatrix, MilpProblem, Model};
+use solver::{
+    solve_milp_with_stats, solve_miqp_with_stats, CscMatrix, MilpProblem, MiqpProblem, Model,
+    QpProblem,
+};
 
 const TOL: f64 = 1e-4;
 
@@ -383,4 +386,202 @@ fn model_fractional_integer_bounds_infeasible() {
     let err = m.solve().unwrap_err();
     println!("frac bounds err = {err:?}");
     assert!(format!("{err:?}").contains("Infeasible"), "expected infeasible, got {err:?}");
+}
+
+// --- Brute-force ground truth for convex MIQP (diagonal PSD Q) -----------------
+//
+// Objective 1/2 x'Qx + c'x with diagonal Q (q_i >= 0) is separable, so the true
+// integer optimum is exact to enumerate. A randomized sweep guards convex-MIQP
+// B&B against mis-pruning the true optimum (the QP relaxation bound is ε-tight,
+// so a small tolerance is allowed on the objective match).
+
+/// A diagonal-Q MIQP test instance over all-integer variables.
+struct MiqpCase {
+    diag: Vec<f64>, // Q diagonal (q_i), must be >= 0 for convexity
+    c: Vec<f64>,
+    cons: Vec<(Vec<f64>, ConstraintType, f64)>,
+    bounds: Vec<(i64, i64)>,
+}
+
+fn build_miqp(case: &MiqpCase) -> MiqpProblem {
+    let n = case.diag.len();
+    let m = case.cons.len();
+    let qidx: Vec<usize> = (0..n).collect();
+    let q = CscMatrix::from_triplets(&qidx, &qidx, &case.diag, n, n).unwrap();
+    let (mut rows, mut cols, mut vals, mut b, mut ctypes) =
+        (vec![], vec![], vec![], vec![], vec![]);
+    for (i, (coeffs, ct, rhs)) in case.cons.iter().enumerate() {
+        for (j, &v) in coeffs.iter().enumerate() {
+            if v != 0.0 {
+                rows.push(i);
+                cols.push(j);
+                vals.push(v);
+            }
+        }
+        b.push(*rhs);
+        ctypes.push(*ct);
+    }
+    let a = if m == 0 {
+        CscMatrix::new(0, n)
+    } else {
+        CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap()
+    };
+    let bounds: Vec<(f64, f64)> =
+        case.bounds.iter().map(|&(lo, hi)| (lo as f64, hi as f64)).collect();
+    let qp = QpProblem::new(q, case.c.clone(), a, b, bounds, ctypes).unwrap();
+    MiqpProblem::new(qp, (0..n).collect()).unwrap()
+}
+
+/// True integer optimum of 1/2 x'Qx + c'x (diagonal Q). None = infeasible.
+fn brute_force_miqp(case: &MiqpCase) -> Option<f64> {
+    let n = case.diag.len();
+    let mut idx: Vec<i64> = case.bounds.iter().map(|&(lo, _)| lo).collect();
+    let mut best: Option<f64> = None;
+    loop {
+        let x: Vec<f64> = idx.iter().map(|&v| v as f64).collect();
+        let feasible = case.cons.iter().all(|(coeffs, ct, rhs)| {
+            let lhs: f64 = coeffs.iter().zip(&x).map(|(a, b)| a * b).sum();
+            match ct {
+                ConstraintType::Le => lhs <= rhs + 1e-9,
+                ConstraintType::Ge => lhs >= rhs - 1e-9,
+                ConstraintType::Eq => (lhs - rhs).abs() <= 1e-9,
+                _ => panic!("unexpected constraint type"),
+            }
+        });
+        if feasible {
+            let obj: f64 = (0..n)
+                .map(|i| 0.5 * case.diag[i] * x[i] * x[i] + case.c[i] * x[i])
+                .sum();
+            best = Some(best.map_or(obj, |b: f64| b.min(obj)));
+        }
+        let mut k = 0;
+        loop {
+            if k == n {
+                return best;
+            }
+            idx[k] += 1;
+            if idx[k] <= case.bounds[k].1 {
+                break;
+            }
+            idx[k] = case.bounds[k].0;
+            k += 1;
+        }
+    }
+}
+
+#[test]
+fn brute_force_matches_miqp_solver() {
+    use ConstraintType::*;
+    let cases = [
+        // min (x-2)^2 + (y-2)^2 = x^2-4x+4 + y^2-4y+4, no constraint → (2,2), obj 0.
+        MiqpCase {
+            diag: vec![2.0, 2.0],
+            c: vec![-4.0, -4.0],
+            cons: vec![],
+            bounds: vec![(0, 4), (0, 4)],
+        },
+        // separable with a covering constraint forcing off-corner integers.
+        MiqpCase {
+            diag: vec![2.0, 2.0],
+            c: vec![0.0, 0.0],
+            cons: vec![(vec![1.0, 1.0], Ge, 3.0)],
+            bounds: vec![(0, 5), (0, 5)],
+        },
+        // mixed linear+quadratic, equality constraint.
+        MiqpCase {
+            diag: vec![1.0, 3.0],
+            c: vec![-2.0, 1.0],
+            cons: vec![(vec![1.0, 1.0], Eq, 4.0)],
+            bounds: vec![(0, 4), (0, 4)],
+        },
+        // 3-var, two constraints.
+        MiqpCase {
+            diag: vec![2.0, 2.0, 2.0],
+            c: vec![-1.0, -2.0, -3.0],
+            cons: vec![(vec![1.0, 1.0, 1.0], Le, 4.0), (vec![1.0, 0.0, 1.0], Ge, 1.0)],
+            bounds: vec![(0, 3), (0, 3), (0, 3)],
+        },
+    ];
+    for (idx, case) in cases.iter().enumerate() {
+        // (array, not vec!, since we only iterate)
+        let truth = brute_force_miqp(case);
+        let problem = build_miqp(case);
+        let (r, stats) = solve_miqp_with_stats(&problem, &opts(), &MipConfig::default());
+        match truth {
+            Some(opt) => {
+                assert_eq!(r.status, SolveStatus::Optimal, "case {idx} should be Optimal");
+                assert!(
+                    (r.objective - opt).abs() < 1e-3,
+                    "case {idx}: solver obj {} != brute-force {}",
+                    r.objective,
+                    opt
+                );
+                println!(
+                    "[miqp {idx}] opt={opt} nodes={} pruned={} inc={}",
+                    stats.nodes_processed, stats.pruned, stats.incumbent_updates
+                );
+            }
+            None => assert_eq!(r.status, SolveStatus::Infeasible, "case {idx} should be Infeasible"),
+        }
+    }
+}
+
+#[test]
+fn fuzz_sweep_miqp_matches_brute_force() {
+    use ConstraintType::*;
+    let mut rng = Lcg(0x1234_5678_9ABC_DEF0);
+    let mut feasible = 0;
+    let cfg = MipConfig::default();
+    for trial in 0..120 {
+        let n = rng.range(2, 3) as usize;
+        let m = rng.range(0, 2) as usize;
+        // q_i in {1,2,3,4} → strictly convex, well-conditioned diagonal Q.
+        let diag: Vec<f64> = (0..n).map(|_| rng.range(1, 4) as f64).collect();
+        let c: Vec<f64> = (0..n).map(|_| rng.range(-4, 4) as f64).collect();
+        let bounds: Vec<(i64, i64)> = (0..n)
+            .map(|_| {
+                let lo = rng.range(-1, 1);
+                (lo, lo + rng.range(1, 3))
+            })
+            .collect();
+        let cons: Vec<(Vec<f64>, ConstraintType, f64)> = (0..m)
+            .map(|_| {
+                let coeffs: Vec<f64> = (0..n).map(|_| rng.range(-2, 2) as f64).collect();
+                let ct = match rng.range(0, 2) {
+                    0 => Le,
+                    1 => Ge,
+                    _ => Eq,
+                };
+                (coeffs, ct, rng.range(-3, 4) as f64)
+            })
+            .collect();
+        let case = MiqpCase { diag, c, cons, bounds };
+        let truth = brute_force_miqp(&case);
+        let (r, _stats) = solve_miqp_with_stats(&build_miqp(&case), &opts(), &cfg);
+        match truth {
+            Some(opt) => {
+                feasible += 1;
+                assert_eq!(
+                    r.status,
+                    SolveStatus::Optimal,
+                    "trial {trial}: brute-force feasible (opt={opt}) but solver {:?}",
+                    r.status
+                );
+                assert!(
+                    (r.objective - opt).abs() < 1e-3,
+                    "trial {trial}: solver obj {} != brute-force optimum {}",
+                    r.objective,
+                    opt
+                );
+            }
+            None => assert_eq!(
+                r.status,
+                SolveStatus::Infeasible,
+                "trial {trial}: brute-force infeasible but solver {:?}",
+                r.status
+            ),
+        }
+    }
+    println!("miqp fuzz: {feasible} feasible cases — all matched brute force");
+    assert!(feasible > 30, "sweep should hit many feasible cases, got {feasible}");
 }

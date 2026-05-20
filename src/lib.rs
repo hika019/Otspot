@@ -71,7 +71,10 @@ pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};
 pub use model::{Model, ModelResult, ModelError, VarKind};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
-pub use mip::{solve_milp, solve_milp_with_stats, MilpProblem, MipProblemError, MipStats};
+pub use mip::{
+    solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
+    MipProblemError, MipStats, MiqpProblem,
+};
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 

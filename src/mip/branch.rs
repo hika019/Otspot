@@ -90,6 +90,55 @@ pub(crate) fn branch_bounds(
     (down, up)
 }
 
+/// Select an integer variable whose box still spans at least two integers
+/// (`ub - lb >= 1`), preferring the widest. Used as a **fallback** when a node's
+/// relaxation cannot be solved (no interior — e.g. an equality constraint pins
+/// the region to a point): bisecting the integer box drives the search toward an
+/// all-fixed leaf, which the fixed-point evaluator solves exactly, so a region
+/// that may hold the optimum is never silently dropped.
+///
+/// Returns `None` when every integer variable is already a singleton (no integer
+/// box left to split).
+pub(crate) fn widest_splittable_integer(
+    bounds: &[(f64, f64)],
+    integer_mask: &[bool],
+) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (j, &is_int) in integer_mask.iter().enumerate() {
+        if !is_int {
+            continue;
+        }
+        let (lb, ub) = bounds[j];
+        if !lb.is_finite() || !ub.is_finite() {
+            continue;
+        }
+        let width = ub - lb;
+        if width < 1.0 {
+            continue; // fewer than two integers → cannot split
+        }
+        if best.is_none_or(|(_, bw)| width > bw) {
+            best = Some((j, width));
+        }
+    }
+    best.map(|(j, _)| j)
+}
+
+/// Bisect integer variable `j`'s box into two non-empty integer subranges:
+/// down `[lb, mid]`, up `[mid + 1, ub]`, where `mid = floor((lb + ub) / 2)`
+/// clamped so both children are non-empty. Caller must ensure `ub - lb >= 1`.
+pub(crate) fn split_integer_box(
+    bounds: &[(f64, f64)],
+    j: usize,
+) -> (VarBounds, VarBounds) {
+    let (lb, ub) = bounds[j];
+    let mid = (0.5 * (lb + ub)).floor().max(lb).min(ub - 1.0);
+    let mut down = bounds.to_vec();
+    down[j].1 = mid;
+    let mut up = bounds.to_vec();
+    up[j].0 = mid + 1.0;
+    (down, up)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +213,35 @@ mod tests {
         let (down, _up) = branch_bounds(&parent, 0, 3.5);
         // down: upper = 3.0, lower = 3.0 → singleton (still valid, x0 = 3)
         assert_eq!(down[0], (3.0, 3.0));
+    }
+
+    #[test]
+    fn widest_splittable_integer_picks_widest_nonsingleton() {
+        // var0 width 1 (splittable), var1 singleton (skip), var2 width 4 (widest)
+        let bounds = vec![(0.0, 1.0), (3.0, 3.0), (0.0, 4.0)];
+        assert_eq!(widest_splittable_integer(&bounds, &[true, true, true]), Some(2));
+    }
+
+    #[test]
+    fn widest_splittable_integer_skips_continuous_and_singletons() {
+        let bounds = vec![(0.0, 10.0), (2.0, 2.0)];
+        // var0 is continuous (mask false) despite a wide box; var1 is a singleton.
+        assert!(widest_splittable_integer(&bounds, &[false, true]).is_none());
+    }
+
+    #[test]
+    fn split_integer_box_yields_two_nonempty_ranges() {
+        let bounds = vec![(0.0, 4.0)];
+        let (down, up) = split_integer_box(&bounds, 0);
+        assert_eq!(down[0], (0.0, 2.0)); // mid = floor(2) = 2
+        assert_eq!(up[0], (3.0, 4.0));
+    }
+
+    #[test]
+    fn split_integer_box_binary_splits_to_singletons() {
+        let bounds = vec![(0.0, 1.0)];
+        let (down, up) = split_integer_box(&bounds, 0);
+        assert_eq!(down[0], (0.0, 0.0));
+        assert_eq!(up[0], (1.0, 1.0));
     }
 }

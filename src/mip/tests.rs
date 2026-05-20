@@ -5,10 +5,14 @@
 //! no-integer LP fallback. Both the low-level `solve_milp` entry and the
 //! `Model` modeling API are exercised.
 
-use super::{finalize_no_incumbent, solve_milp, solve_milp_with_stats, MilpProblem};
+use super::{
+    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_miqp,
+    MilpProblem, MiqpProblem,
+};
 use crate::model::{Model, ModelError, SolveError};
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 
 const EPS: f64 = 1e-4;
@@ -173,33 +177,32 @@ fn two_var_general_integer_program() {
 
 #[test]
 fn no_incumbent_with_open_region_is_not_infeasible() {
-    // An untrusted/degraded relaxation left a region open (open_lb finite) while no
-    // flag was set and the queue emptied. Reporting Infeasible here would be a silent
-    // wrong answer. Sentinel: dropping `&& open_lb.is_infinite()` flips this to
-    // Infeasible and the test FAILS.
-    let r = finalize_no_incumbent(false, false, true, 1.5, false);
-    assert_ne!(r.status, SolveStatus::Infeasible, "finite open_lb must not be Infeasible");
+    // A region was left unexplored (had_open) while the queue happened to empty and no
+    // interruption fired. Reporting Infeasible here would be a silent wrong answer.
+    // Sentinel: dropping the `!had_open` guard flips this to Infeasible and the test FAILS.
+    let r = finalize_no_incumbent(false, true, true, false);
+    assert_ne!(r.status, SolveStatus::Infeasible, "open region must not be Infeasible");
     assert_eq!(r.status, SolveStatus::MaxIterations);
 }
 
 #[test]
 fn no_incumbent_fully_resolved_is_infeasible() {
-    // Every region resolved as an infeasible relaxation (open_lb stays +inf, no flags,
-    // queue empty) → genuinely Infeasible.
-    let r = finalize_no_incumbent(false, false, true, f64::INFINITY, false);
+    // Every region resolved (no open region, no interruption, queue empty) → genuinely
+    // Infeasible.
+    let r = finalize_no_incumbent(false, false, true, false);
     assert_eq!(r.status, SolveStatus::Infeasible);
 }
 
 #[test]
 fn no_incumbent_deadline_is_timeout_not_infeasible() {
-    let r = finalize_no_incumbent(true, false, false, f64::INFINITY, true);
+    let r = finalize_no_incumbent(true, true, false, true);
     assert_eq!(r.status, SolveStatus::Timeout);
 }
 
 #[test]
-fn no_incumbent_depth_limited_is_not_infeasible() {
-    // depth_limited region left open even though queue happens to be empty.
-    let r = finalize_no_incumbent(false, true, true, 2.0, false);
+fn no_incumbent_budget_exhausted_is_maxiterations_not_infeasible() {
+    // Interrupted by max_nodes (queue may be non-empty) → never Infeasible.
+    let r = finalize_no_incumbent(true, true, false, false);
     assert_eq!(r.status, SolveStatus::MaxIterations);
 }
 
@@ -257,17 +260,173 @@ fn model_integer_unbounded_errors() {
 }
 
 #[test]
-fn model_miqp_not_yet_supported() {
-    // integer + quadratic objective → explicit error (Phase 2), never a silent wrong answer.
-    let mut m = Model::new("miqp");
+fn model_convex_miqp_branches_to_integer_optimum() {
+    // min x^2 - 5x = 1/2·2·x^2 + (-5)x, x integer in [0,5].
+    // Continuous min at x=2.5 (fractional → branch); integer optima x=2 or x=3, obj = -6.
+    let mut m = Model::new("convex_miqp");
     let x = m.add_int_var("x", 0.0, 5.0);
     m.set_diagonal_q(&[2.0]);
+    m.minimize(-5.0 * x);
+    let r = m.solve().unwrap();
+    assert!((r.objective() - (-6.0)).abs() < EPS, "obj={}", r.objective());
+    let xr = r[x].round();
+    assert!(xr == 2.0 || xr == 3.0, "x must be 2 or 3, got {}", r[x]);
+    assert!((r[x] - xr).abs() < EPS, "x must be integral: {}", r[x]);
+}
+
+#[test]
+fn model_nonconvex_miqp_errors() {
+    // indefinite Q (negative curvature) → out of scope → explicit error, not silent wrong.
+    let mut m = Model::new("nonconvex_miqp");
+    let x = m.add_int_var("x", 0.0, 5.0);
+    m.set_diagonal_q(&[-2.0]);
     m.minimize(x);
     let err = m.solve().unwrap_err();
     match err {
-        ModelError::Internal(msg) => assert!(msg.contains("MIQP"), "msg={msg}"),
-        other => panic!("expected Internal MIQP error, got {other:?}"),
+        ModelError::Internal(msg) => assert!(msg.contains("Non-convex"), "msg={msg}"),
+        other => panic!("expected Internal Non-convex error, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// solve_miqp (low-level entry, convex only)
+// ---------------------------------------------------------------------------
+
+/// Build a diagonal-Q QpProblem with optional constraints.
+#[allow(clippy::too_many_arguments)] // test fixture: explicit QP parts read better than a builder
+fn qp_problem(
+    diag: &[f64],
+    c: Vec<f64>,
+    rows: &[usize],
+    cols: &[usize],
+    vals: &[f64],
+    m: usize,
+    b: Vec<f64>,
+    ctypes: Vec<ConstraintType>,
+    bounds: Vec<(f64, f64)>,
+) -> QpProblem {
+    let n = diag.len();
+    let qidx: Vec<usize> = (0..n).collect();
+    let q = CscMatrix::from_triplets(&qidx, &qidx, diag, n, n).unwrap();
+    let a = if m == 0 {
+        CscMatrix::new(0, n)
+    } else {
+        CscMatrix::from_triplets(rows, cols, vals, m, n).unwrap()
+    };
+    QpProblem::new(q, c, a, b, bounds, ctypes).unwrap()
+}
+
+fn miqp(qp: QpProblem, integer_vars: Vec<usize>) -> MiqpProblem {
+    MiqpProblem::new(qp, integer_vars).unwrap()
+}
+
+#[test]
+fn miqp_fractional_root_branches_to_integer_optimum() {
+    // min x^2 + y^2 s.t. x + y >= 3, x,y integer in [0,5].
+    // Continuous min (1.5,1.5) obj 4.5; integer optimum (1,2)/(2,1) obj 5.
+    let qp = qp_problem(
+        &[2.0, 2.0],
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!((r.objective - 5.0).abs() < 1e-3, "obj={}", r.objective);
+    let s = r.solution[0].round() + r.solution[1].round();
+    assert!((s - 3.0).abs() < EPS, "x+y={}", s);
+    assert!(stats.nodes_processed >= 2, "branching expected, nodes={}", stats.nodes_processed);
+}
+
+#[test]
+fn miqp_trivial_integer_root() {
+    // min x^2, x integer in [0,5] → x=0 (root already integral).
+    let qp = qp_problem(&[2.0], vec![0.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(r.objective.abs() < 1e-3, "obj={}", r.objective);
+    assert!(r.solution[0].abs() < EPS, "x={}", r.solution[0]);
+}
+
+#[test]
+fn miqp_infeasible_between_integers() {
+    // min x^2 s.t. 1.2 <= x <= 1.8, x integer in [0,10] → no integer → infeasible.
+    let qp = qp_problem(
+        &[2.0],
+        vec![0.0],
+        &[0, 1],
+        &[0, 0],
+        &[1.0, 1.0],
+        2,
+        vec![1.2, 1.8],
+        vec![ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible);
+}
+
+#[test]
+fn miqp_nonconvex_q_rejected() {
+    // indefinite Q → NonConvex (no silent wrong answer), never enters the B&B.
+    let qp = qp_problem(&[2.0, -3.0], vec![0.0, 0.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0); 2]);
+    let r = solve_miqp(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert!(matches!(r.status, SolveStatus::NonConvex(_)), "got {:?}", r.status);
+}
+
+#[test]
+fn miqp_no_integer_vars_falls_back_to_qp() {
+    // convex QP via MIQP entry with no integer vars must match the direct QP solve.
+    let qp = qp_problem(
+        &[2.0, 2.0],
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let direct = crate::qp::solve_qp_with(&qp.clone(), &opts());
+    let r = solve_miqp(&miqp(qp, vec![]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!((r.objective - direct.objective).abs() < 1e-3, "miqp {} vs qp {}", r.objective, direct.objective);
+}
+
+#[test]
+fn miqp_boxonly_offdiag_no_overprune_sentinel() {
+    // min x²+xy+y² −6x −6y over integer [0,4]², Q=[[2,1],[1,2]] (PSD), NO constraints.
+    // The QP IPM stalls on this box-only off-diagonal QP and returns SuboptimalSolution
+    // with an objective ABOVE the true relaxation minimum. If the driver used that
+    // suboptimal primal objective as a *lower* bound it would over-prune the node
+    // holding (2,2) and return −11 (silent-wrong, #17). The true integer optimum is
+    // −12 @ (2,2). Load-bearing sentinel: reverting "trust Optimal relaxations only as
+    // bounds" returns −11 here and FAILS this test.
+    let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
+    let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+    let qp = QpProblem::new(q, vec![-6.0, -6.0], a, vec![], vec![(0.0, 4.0), (0.0, 4.0)], vec![])
+        .unwrap();
+    let r = solve_miqp(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert!((r.objective - (-12.0)).abs() < 1e-3, "obj={} (expected −12 @ (2,2))", r.objective);
+    let s = (r.solution[0].round(), r.solution[1].round());
+    assert_eq!(s, (2.0, 2.0), "x*={:?}", r.solution);
+}
+
+// ---------------------------------------------------------------------------
+// integer_mask helper
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integer_mask_marks_only_integer_vars() {
+    assert_eq!(integer_mask(3, &[0, 2]), vec![true, false, true]);
+    assert_eq!(integer_mask(2, &[]), vec![false, false]);
 }
 
 #[test]
