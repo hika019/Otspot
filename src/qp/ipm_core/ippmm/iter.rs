@@ -619,12 +619,25 @@ pub(crate) fn solve_ippmm_inner(
             }
         }
 
-        // Algorithm PEU Step 1&2 (OR 判定): どちらか改善があれば δ,ρ 両方を mu_rate で更新。
+        // PEU Step 1&2: for box-only QPs (m_orig == 0), require both primal AND dual
+        // to improve before fast-decreasing δ,ρ (P-G 2021 Algorithm 1 outer-loop intent).
+        // Without this, δ collapses via dual-only improvement → dy ≈ r_p/δ blows up.
+        // For m_orig > 0, OR logic is kept: the original linear constraints in a_ext
+        // contribute a Schur term A_orig(Q+ρI)⁻¹A_origᵀ/δ that must grow as δ→0 to
+        // drive primal feasibility. (Bound rows remain in a_ext for both cases; it is
+        // the original-constraint Schur term that differentiates the δ requirements.)
+        let box_only = m_orig == 0;
+        let both_improved = primal_improved && dual_improved;
         let either_improved = primal_improved || dual_improved;
         let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
+        let use_fast_rate = (if box_only { both_improved } else { either_improved })
+            || force_ref_update;
+        // Update reference point whenever at least one residual improved.
         if either_improved || force_ref_update {
             pmm.y_ref.copy_from_slice(&y);
             pmm.x_ref.copy_from_slice(&x);
+        }
+        if use_fast_rate {
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
             pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
         } else {
