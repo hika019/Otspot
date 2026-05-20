@@ -27,6 +27,10 @@ pub struct IpmOutcome {
     pub infeasibility_status: Option<crate::problem::SolveStatus>,
     /// 慣性修正付き IPM が走った場合、収束時に Optimal でなく LocallyOptimal を返す。
     pub is_locally_optimal: bool,
+    /// postsolve の saddle-point Krylov IR が `kkt_already_pass` ゲートで省略されたか。
+    /// 既に user_eps を満たす収束解で重い拡大 KKT 因子化を回避した場合に true。
+    /// ゲートを外す (常時 refine) と false になる sentinel 用観測点。
+    pub postsolve_krylov_ir_skipped: bool,
 }
 
 impl IpmOutcome {
@@ -45,6 +49,7 @@ impl IpmOutcome {
             numerical_failure: false,
             infeasibility_status: None,
             is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
         }
     }
 

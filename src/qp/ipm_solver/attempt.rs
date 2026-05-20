@@ -429,6 +429,7 @@ fn finalize_outcome(
     total_deadline: Option<Instant>,
     cancelled: bool,
 ) -> SolverResult {
+    let krylov_ir_skipped = outcome.postsolve_krylov_ir_skipped;
     if let Some(infeas) = outcome.infeasibility_status {
         let objective = match infeas {
             SolveStatus::Infeasible => f64::INFINITY,
@@ -483,6 +484,10 @@ fn finalize_outcome(
         dual_solution: outcome.dual_solution,
         bound_duals: outcome.bound_duals,
         iterations: outcome.iterations,
+        stats: crate::problem::SolveStats {
+            postsolve_krylov_ir_skipped: krylov_ir_skipped,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

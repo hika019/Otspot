@@ -52,6 +52,10 @@ pub struct SolveStats {
     /// `true` iff `result.status == SolveStatus::Timeout`. Deterministic sentinel for
     /// deadline-enforcement tests: assert this field instead of measuring wall time.
     pub deadline_triggered: bool,
+    /// Whether the postsolve saddle-point Krylov IR was skipped because the solution
+    /// already met the user tolerance (`kkt_already_pass`). Deterministic sentinel for
+    /// the gate: removing the gate (always refine) flips this to `false`.
+    pub postsolve_krylov_ir_skipped: bool,
 }
 
 /// ソルバーの求解結果ステータス
