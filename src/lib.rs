@@ -66,6 +66,94 @@ pub(crate) mod linalg;
 #[cfg(test)]
 pub(crate) mod test_kkt;
 
+/// Thread-local peak-allocation tracker for memory sentinel tests.
+///
+/// Wraps the system allocator and records, per-thread, the maximum net bytes
+/// concurrently live above a caller-defined baseline.  Using thread-local
+/// storage means tests running in parallel on different threads do not
+/// interfere with each other's measurements.
+///
+/// Usage in a test:
+/// ```ignore
+/// crate::peak_alloc::begin();
+/// do_heavy_work();
+/// let peak = crate::peak_alloc::peak_bytes();
+/// assert!(peak <= MAX_BYTES, "peak {peak} exceeds limit");
+/// ```
+#[cfg(test)]
+pub(crate) mod peak_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Net bytes allocated on this thread (alloc - dealloc).
+        static CURRENT: Cell<isize> = const { Cell::new(0) };
+        /// Baseline captured by `begin()`; delta is measured above this.
+        static BASELINE: Cell<isize> = const { Cell::new(0) };
+        /// Maximum (CURRENT - BASELINE) observed since last `begin()`.
+        static PEAK_DELTA: Cell<isize> = const { Cell::new(0) };
+    }
+
+    /// Record the current allocation level as the baseline for this thread.
+    pub fn begin() {
+        CURRENT.with(|c| BASELINE.with(|b| b.set(c.get())));
+        PEAK_DELTA.with(|p| p.set(0));
+    }
+
+    /// Peak bytes allocated above the baseline captured by `begin()`.
+    pub fn peak_bytes() -> usize {
+        PEAK_DELTA.with(|p| p.get().max(0) as usize)
+    }
+
+    #[inline]
+    fn update(delta: isize) {
+        CURRENT.with(|c| {
+            let new = c.get() + delta;
+            c.set(new);
+            let above = new - BASELINE.with(|b| b.get());
+            PEAK_DELTA.with(|p| {
+                if above > p.get() {
+                    p.set(above);
+                }
+            });
+        });
+    }
+
+    pub struct TrackingAlloc;
+
+    unsafe impl GlobalAlloc for TrackingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc(layout);
+            if !ptr.is_null() {
+                update(layout.size() as isize);
+            }
+            ptr
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc_zeroed(layout);
+            if !ptr.is_null() {
+                update(layout.size() as isize);
+            }
+            ptr
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            update(-(layout.size() as isize));
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let new_ptr = System.realloc(ptr, layout, new_size);
+            if !new_ptr.is_null() {
+                update(new_size as isize - layout.size() as isize);
+            }
+            new_ptr
+        }
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
+
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};

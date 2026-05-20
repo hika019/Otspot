@@ -720,10 +720,6 @@ impl QpsParser {
         let mut a_cols: Vec<usize> = Vec::new();
         let mut a_vals: Vec<f64> = Vec::new();
 
-        // 列ごとのaccumulator
-        // (aug_row_idx, col_idx) → value
-        let mut a_triplets: HashMap<(usize, usize), f64> = HashMap::new();
-
         for (col_name, row_name, value) in &self.columns {
             if row_name == obj_row {
                 continue;
@@ -735,16 +731,13 @@ impl QpsParser {
             if let Some(indices) = row_name_to_indices.get(row_name) {
                 for &aug_idx in indices {
                     let sign = aug_rows[aug_idx].sign;
-                    *a_triplets.entry((aug_idx, col_idx)).or_insert(0.0) += sign * value;
+                    a_rows.push(aug_idx);
+                    a_cols.push(col_idx);
+                    a_vals.push(sign * value);
                 }
             }
         }
-
-        for ((row_idx, col_idx), val) in &a_triplets {
-            a_rows.push(*row_idx);
-            a_cols.push(*col_idx);
-            a_vals.push(*val);
-        }
+        // Deduplication handled by CscMatrix::from_triplets (sort-merge)
 
         let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).map_err(|e| {
             QpsError::ParseError {
@@ -791,8 +784,9 @@ impl QpsParser {
         // --- Q行列構築（QUADOBJから）---
         // QUADOBJ: 上三角格納 → 対称化
         // Q_ij = value, Q_ji = value (i != j の場合)
-        let mut q_triplets: Vec<(usize, usize, f64)> = Vec::new();
-        let mut q_acc: HashMap<(usize, usize), f64> = HashMap::new();
+        let mut q_rows: Vec<usize> = Vec::new();
+        let mut q_cols: Vec<usize> = Vec::new();
+        let mut q_vals: Vec<f64> = Vec::new();
 
         for (col1, col2, value) in &self.quadobj {
             let i = match col_map.get(col1) {
@@ -803,19 +797,12 @@ impl QpsParser {
                 Some(&idx) => idx,
                 None => continue,
             };
-            *q_acc.entry((i, j)).or_insert(0.0) += value;
+            q_rows.push(i); q_cols.push(j); q_vals.push(*value);
             if i != j {
-                *q_acc.entry((j, i)).or_insert(0.0) += value;
+                q_rows.push(j); q_cols.push(i); q_vals.push(*value);
             }
         }
-
-        for ((i, j), v) in &q_acc {
-            q_triplets.push((*i, *j, *v));
-        }
-
-        let q_rows: Vec<usize> = q_triplets.iter().map(|&(r, _, _)| r).collect();
-        let q_cols: Vec<usize> = q_triplets.iter().map(|&(_, c, _)| c).collect();
-        let q_vals: Vec<f64> = q_triplets.iter().map(|&(_, _, v)| v).collect();
+        // Deduplication handled by from_triplets sort-merge
 
         let q = if q_rows.is_empty() {
             CscMatrix::new(n, n) // Q=0（LP退化）
