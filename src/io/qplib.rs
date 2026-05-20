@@ -62,7 +62,7 @@ use crate::mip::{MilpProblem, MiqpProblem};
 use crate::problem::{ConstraintType, LpProblem};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -140,7 +140,7 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
         )));
     }
     let type_bytes = prob_type.as_bytes();
-    let obj_char = type_bytes[0] as char;
+    let _obj_char = type_bytes[0] as char;
     let var_char = type_bytes[1] as char;
     let con_char = type_bytes[2] as char;
 
@@ -184,13 +184,13 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
 
     // --- 目的関数二次項 ---
     // 目的タイプが 'L'（線形）でも nqobj 行は存在する（0になる）
-    let nqobj = if obj_char == 'L' {
-        // 線形目的: 次のトークンが数値ならnqobj、そうでなければ0と仮定
-        // ただし仕様上は0が格納されているはずなので読む
-        ts.read_usize()?
-    } else {
-        ts.read_usize()?
-    };
+    let nqobj = ts.read_usize()?;
+    // nqobj is at most n*(n+1)/2 entries (lower-triangular Q)
+    if nqobj > n.saturating_mul(n.saturating_add(1)) / 2 {
+        return Err(QplibError::ParseError(format!(
+            "nqobj {} exceeds n*(n+1)/2={} (n={})", nqobj, n.saturating_mul(n.saturating_add(1)) / 2, n
+        )));
+    }
 
     // 下三角トリプレット（1-indexed, i >= j）→ 対称化
     let mut q_triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(nqobj * 2);
@@ -219,7 +219,13 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
 
     // --- 二次制約項（Q タイプのみ: Q_k 下三角トリプレット k i j val）---
     // per-constraint triplet lists; 対称化は後でまとめて実施
-    let mut con_q_triplets: Vec<Vec<(usize, usize, f64)>> = vec![vec![]; m];
+    // Only allocate the outer Vec for QCQ problems; allocating vec![vec![]; m] for
+    // non-Q types wastes up to 6 MB on large problems (e.g. m=250K for QPLIB_8500).
+    let mut con_q_triplets: Vec<Vec<(usize, usize, f64)>> = if con_char == 'Q' {
+        vec![vec![]; m]
+    } else {
+        vec![]
+    };
     if con_char == 'Q' {
         let n_con_quad_terms = ts.read_usize()?;
         for _ in 0..n_con_quad_terms {
@@ -235,15 +241,22 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
     }
 
     // --- 制約線形項（L/N/Q タイプ: ファイルに存在。B タイプ: 存在しない）---
-    let mut a_triplets: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut a_triplets: Vec<(usize, usize, f64)> = Vec::new();
     if matches!(con_char, 'L' | 'N' | 'Q') {
         let n_con_lin_terms = ts.read_usize()?;
+        // Sanity bound: can't have more terms than n*m entries
+        if n_con_lin_terms > n.saturating_mul(m) {
+            return Err(QplibError::ParseError(format!(
+                "n_con_lin_terms {} exceeds n*m={}", n_con_lin_terms, n.saturating_mul(m)
+            )));
+        }
+        a_triplets = Vec::with_capacity(n_con_lin_terms);
         // k=constraint(1-indexed), i=variable(1-indexed), v=coefficient
         for _ in 0..n_con_lin_terms {
             let k = ts.read_index_1based(m, "constraint index")?;
             let i = ts.read_index_1based(n, "variable index")?;
             let v = ts.read_f64()?;
-            *a_triplets.entry((k, i)).or_insert(0.0) += v;
+            a_triplets.push((k, i, v));
         }
     }
 
@@ -309,15 +322,20 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
     // Q行列（maximize の場合は符号反転）
     let sign = if maximize { -1.0 } else { 1.0 };
 
-    let q_rows: Vec<usize> = q_triplets.iter().map(|&(r, _, _)| r).collect();
-    let q_cols: Vec<usize> = q_triplets.iter().map(|&(_, c, _)| c).collect();
-    let q_vals: Vec<f64> = q_triplets.iter().map(|&(_, _, v)| sign * v).collect();
-
-    let q = if q_rows.is_empty() {
-        CscMatrix::new(n, n)
-    } else {
-        CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n)
-            .map_err(|e| QplibError::ParseError(format!("Q matrix error: {}", e)))?
+    // Scope q_triplets and intermediate row/col/val Vecs so they are freed
+    // before the larger A-matrix construction begins.
+    let q = {
+        let q_rows: Vec<usize> = q_triplets.iter().map(|&(r, _, _)| r).collect();
+        let q_cols: Vec<usize> = q_triplets.iter().map(|&(_, c, _)| c).collect();
+        let q_vals: Vec<f64> = q_triplets.iter().map(|&(_, _, v)| sign * v).collect();
+        drop(q_triplets); // free before CscMatrix::from_triplets allocates its sort Vec
+        if q_rows.is_empty() {
+            CscMatrix::new(n, n)
+        } else {
+            CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n, n)
+                .map_err(|e| QplibError::ParseError(format!("Q matrix error: {}", e)))?
+        }
+        // q_rows, q_cols, q_vals dropped here
     };
 
     // c（maximize の場合は符号反転）
@@ -360,28 +378,38 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
     }
 
     let m_aug = b_vec.len();
-    let mut a_rows: Vec<usize> = Vec::new();
-    let mut a_cols: Vec<usize> = Vec::new();
-    let mut a_vals: Vec<f64> = Vec::new();
 
-    for (&(con_idx, var_idx), &val) in &a_triplets {
-        if let Some(aug_row) = aug_ub_row[con_idx] {
-            a_rows.push(aug_row);
-            a_cols.push(var_idx);
-            a_vals.push(val);
-        }
-        if let Some(aug_row) = aug_lb_row[con_idx] {
-            a_rows.push(aug_row);
-            a_cols.push(var_idx);
-            a_vals.push(-val);
-        }
-    }
+    // Build A matrix in a scoped block so a_triplets Vec is freed before
+    // CscMatrix::from_triplets allocates its internal sort Vec.
+    let a_mat = {
+        // Each a_triplets entry produces at most 2 augmented rows (lb + ub),
+        // but typically 1 (most constraints have only a finite ub or are equality).
+        let cap = a_triplets.len();
+        let mut a_rows: Vec<usize> = Vec::with_capacity(cap);
+        let mut a_cols: Vec<usize> = Vec::with_capacity(cap);
+        let mut a_vals: Vec<f64> = Vec::with_capacity(cap);
 
-    let a_mat = if a_rows.is_empty() {
-        CscMatrix::new(m_aug, n)
-    } else {
-        CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_aug, n)
-            .map_err(|e| QplibError::ParseError(format!("A matrix error: {}", e)))?
+        for &(con_idx, var_idx, val) in &a_triplets {
+            if let Some(aug_row) = aug_ub_row[con_idx] {
+                a_rows.push(aug_row);
+                a_cols.push(var_idx);
+                a_vals.push(val);
+            }
+            if let Some(aug_row) = aug_lb_row[con_idx] {
+                a_rows.push(aug_row);
+                a_cols.push(var_idx);
+                a_vals.push(-val);
+            }
+        }
+        drop(a_triplets); // free Vec before from_triplets sort Vec is allocated
+
+        if a_rows.is_empty() {
+            CscMatrix::new(m_aug, n)
+        } else {
+            CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_aug, n)
+                .map_err(|e| QplibError::ParseError(format!("A matrix error: {}", e)))?
+        }
+        // a_rows, a_cols, a_vals dropped here
     };
 
     // 変数境界（無限大の変換）
@@ -1448,5 +1476,241 @@ minimize
             "expected at least one binary/integer file to parse as Milp/Miqp (got 0 out of {count})");
         // M/G/S mixed types remain unsupported
         let _ = count_unsupported; // may be 0 if no M/G/S files
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory sentinel tests
+    //
+    // These tests verify that peak allocations during large-file parsing stay
+    // within a bounded range.
+    //
+    //   Fixed path  (~100 MB): a_triplets Vec(50) + a_rows/cols/vals(29)
+    //                          + sort-Vec(29) + CSC(21)
+    //                          – a_triplets freed before sort-Vec allocated
+    //
+    // NO-OP failure guarantee:
+    //   Removing `drop(a_triplets)` causes peak to rise to ~129 MB → FAIL.
+    //   If the system OOMs before the assertion, nextest also reports FAILED.
+    // -----------------------------------------------------------------------
+
+    /// Memory sentinel: QPLIB_8500 (25 MB, 1.2 M NZ) must parse without
+    /// exceeding `QPLIB_8500_PARSE_PEAK_LIMIT` of concurrently live allocations.
+    ///
+    /// Measured by the thread-local `peak_alloc` tracking allocator (not RSS).
+    ///
+    /// **No-op failure guarantee**: removing `drop(a_triplets)` from the scoped
+    /// block in `parse_token_stream` raises peak to ~129 MB → assertion fires.
+    ///
+    /// Threshold calibrated: Vec path measured 100.4 MB; threshold 115 MB
+    /// (100.4 + 15 MB margin). No-drop path: 129.0 MB → FAIL.
+    #[test]
+    fn test_memory_sentinel_no_double_hashmap_qplib8500() {
+        let path = data_path("data/qplib/QPLIB_8500.qplib");
+        if !path.exists() {
+            return;
+        }
+
+        // Calibrated: Vec path measured peak = 100.4 MB; limit = peak + 15 MB margin.
+        const QPLIB_8500_PARSE_PEAK_LIMIT: usize = 115 * 1024 * 1024;
+
+        crate::peak_alloc::begin();
+        parse_qplib(path.as_path()).expect("QPLIB_8500 must parse without OOM");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        assert!(
+            peak <= QPLIB_8500_PARSE_PEAK_LIMIT,
+            "QPLIB_8500 parse peak allocation {:.1} MB exceeds {:.1} MB limit.\n\
+             Vec+drop path expected ~100.4 MB; no-drop path is ~129 MB.\n\
+             Check that drop(a_triplets) is present before from_triplets call.",
+            peak as f64 / 1_048_576.0,
+            QPLIB_8500_PARSE_PEAK_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-pattern tests: large / small / sparse / dense
+    // -----------------------------------------------------------------------
+
+    /// Small LP (LCL): linear obj, 10 vars, 5 constraints, 20 A-matrix NZ.
+    /// Exercises the basic L-type constraint path with small data.
+    #[test]
+    fn test_parse_small_lp_lcl() {
+        let mut content = String::from(
+            "SMALL_LP\nLCL\nminimize\n10\n5\n0\n0.0\n0\n0.0\n20\n"
+        );
+        // 4 entries per constraint for each of the 5 constraints
+        for k in 1..=5usize {
+            for i in (k..k+4).filter(|&i| i <= 10) {
+                content.push_str(&format!("{k} {i} 1.0\n"));
+            }
+        }
+        // inf=1e308; lb_con=-inf (0 non-defaults); ub_con=100 (finite, 0 non-defaults)
+        // lb_var=0 (0 non-defaults); ub_var=+inf (0 non-defaults)
+        content.push_str(
+            "1.0e308\n-1.0e308\n0\n100.0\n0\n0.0\n0\n1.0e308\n0\n"
+        );
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "small LP parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, 10);
+        // All 5 constraints have finite ub=100 → 5 Le rows
+        assert_eq!(prob.num_constraints, 5);
+        assert!(prob.a.nnz() > 0);
+    }
+
+    /// Dense Q matrix (LCB type: linear constraints = box/bounds-only).
+    /// Generates a fully dense Q for n=80 vars: nqobj = 80*81/2 = 3240 entries.
+    /// Verifies Q is symmetric and has correct nnz after symmetrization.
+    #[test]
+    fn test_parse_dense_q_box_constraints() {
+        const N: usize = 80;
+        const NQOBJ: usize = N * (N + 1) / 2; // lower-triangular entries
+
+        let mut content = String::from(
+            "DENSE_Q\nQCB\nminimize\n80\n"
+        );
+        content.push_str(&format!("{NQOBJ}\n"));
+        for i in 1..=N {
+            for j in 1..=i {
+                content.push_str(&format!("{i} {j} 1.0\n"));
+            }
+        }
+        // default_b0=0, n_nondefault=0, objective constant q0=0
+        content.push_str("0.0\n0\n0.0\n");
+        // inf_val (always present in QPLIB format, even for box-only problems)
+        content.push_str("1.0e308\n");
+        // var bounds: lb_default=0, 0 non-defaults, ub_default=1, 0 non-defaults
+        content.push_str("0.0\n0\n1.0\n0\n");
+
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "dense Q parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, N);
+        // Q: each off-diagonal entry appears twice (symmetrization), diagonal once
+        // Total nnz = N (diag) + (NQOBJ - N) * 2 (off-diag symmetrized)
+        let expected_nnz = N + (NQOBJ - N) * 2;
+        assert_eq!(prob.q.nnz(), expected_nnz,
+            "Q nnz: expected {expected_nnz} (full {N}×{N} symmetric)");
+    }
+
+    /// Sparse A matrix: LCL type, n=500 vars, m=200 constraints, ~1000 NZ.
+    /// Verifies that the sort-merge CSC construction is correct for sparse inputs.
+    #[test]
+    fn test_parse_sparse_a_matrix_correctness() {
+        const N: usize = 500;
+        const M: usize = 200;
+
+        let mut content = format!("SPARSE_A\nLCL\nminimize\n{N}\n{M}\n0\n0.0\n0\n0.0\n");
+        // ~5 entries per constraint
+        let mut nnz = 0usize;
+        let mut entry_buf = String::new();
+        for k in 1..=M {
+            for offset in 0..5usize {
+                let i = (k * 7 + offset * 13) % N + 1;
+                entry_buf.push_str(&format!("{k} {i} 1.0\n"));
+                nnz += 1;
+            }
+        }
+        content.push_str(&format!("{nnz}\n"));
+        content.push_str(&entry_buf);
+        // inf=1e308; lb_con=-inf; ub_con=1000.0 (finite, generates Le rows); var bounds [0, +inf]
+        content.push_str("1.0e308\n-1.0e308\n0\n1000.0\n0\n0.0\n0\n1.0e308\n0\n");
+
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "sparse A parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, N);
+        assert!(prob.num_constraints >= M);
+        assert!(prob.a.nnz() > 0, "A matrix should have non-zeros");
+    }
+
+    /// nqobj sanity bound: n=2 gives max nqobj=3; declaring nqobj=4 must return ParseError.
+    #[test]
+    fn test_sanity_bound_nqobj_too_large() {
+        // n=2, nqobj=4 > n*(n+1)/2=3 → ParseError fires immediately after reading nqobj.
+        let content = "\
+SANITY_NQOBJ
+QCL
+minimize
+2
+1
+4
+";
+        let result = parse_qplib_str(content);
+        assert!(result.is_err(), "expected ParseError for nqobj=4 > n*(n+1)/2=3");
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("nqobj") || err_str.contains("exceeds"),
+            "error should mention nqobj bound, got: {}",
+            err_str
+        );
+    }
+
+    /// n_con_lin_terms sanity bound: n=2, m=1 gives max=2; declaring 3 must return ParseError.
+    #[test]
+    fn test_sanity_bound_n_con_lin_terms_too_large() {
+        // n=2, m=1, n_con_lin_terms=3 > n*m=2 → ParseError fires after reading count.
+        // Path: LCL → nqobj=0, default_b0=0.0, n_nondefault=0, q0=0.0, then n_con_lin_terms=3.
+        let content = "\
+SANITY_NCON
+LCL
+minimize
+2
+1
+0
+0.0
+0
+0.0
+3
+";
+        let result = parse_qplib_str(content);
+        assert!(result.is_err(), "expected ParseError for n_con_lin_terms=3 > n*m=2");
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("n_con_lin_terms") || err_str.contains("exceeds"),
+            "error should mention n_con_lin_terms bound, got: {}",
+            err_str
+        );
+    }
+
+    /// Duplicate linear constraint entries must be accumulated (not double-counted).
+    ///
+    /// Sentinel: if sort-merge deduplication is broken (e.g. reverted to no-dedup),
+    /// the final A matrix will have twice as many entries → nnz assertion fails.
+    #[test]
+    fn test_parse_duplicate_a_entries_accumulated() {
+        // n=2, m=1: constraint "1 1 2.0" appears twice → should give coeff 4.0
+        let qplib = "\
+DUP_TEST
+LCL
+minimize
+2
+1
+0
+0.0
+0
+0.0
+2
+1 1 2.0
+1 1 2.0
+1.0e308
+-1.0e308
+0
+0.0
+1
+1 5.0
+0.0
+0
+1.0e308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 2);
+        // Constraint upper bound is 5.0 → Le row exists
+        assert_eq!(prob.a.nnz(), 1, "duplicate entries must be merged to one NZ");
+        // The merged value should be 4.0 (2.0 + 2.0)
+        let col0 = prob.a.col_ptr[0];
+        assert!((prob.a.values[col0] - 4.0).abs() < 1e-12,
+            "accumulated coeff should be 4.0, got {}", prob.a.values[col0]);
     }
 }
