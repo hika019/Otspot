@@ -90,6 +90,7 @@ fn run_ipm_with(
             numerical_failure: true,
             infeasibility_status: None,
             is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
         };
     }
 
@@ -192,30 +193,31 @@ fn run_ipm_with(
     let kkt_already_pass = kkt_already_passes(
         orig_problem, &final_sol, &eliminated_cols, result.status == SolveStatus::Optimal, user_eps_for_skip,
     );
-    let kkt = if !final_sol.solution.is_empty()
+    // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
+    // `final_sol` only when the solution does not already meet the tolerance.
+    // The returned residual is recomputed below as `kkt_final`.
+    if !final_sol.solution.is_empty()
         && orig_problem.num_constraints > 0
         && ipm_made_progress
         && !kkt_already_pass
     {
-        refine_post_processing(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal)
-    } else {
-        let view = ProblemView {
-            q: &orig_problem.q,
-            a: &orig_problem.a,
-            c: &orig_problem.c,
-            b: &orig_problem.b,
-            bounds: &orig_problem.bounds,
-            constraint_types: &orig_problem.constraint_types,
-            eliminated_cols: &eliminated_cols,
-        };
-        kkt_residual_rel(
-            &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,
-        )
-    };
+        refine_post_processing(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
+    }
 
-    if ipm_made_progress {
+    // Skip the saddle-point Krylov IR when the solution already meets the
+    // user tolerance (kkt & primal both < eps). The IR factorizes the full
+    // augmented K = [Q+δI, Aᵀ; A, -δI] (n+m), which fills catastrophically for
+    // problems with dense constraint rows (fit2d: 110M L-nnz, ~7s/factorize)
+    // yet performs zero refinement on an already-converged point. This mirrors
+    // the `!kkt_already_pass` gate on `refine_post_processing` above.
+    let run_krylov_ir = ipm_made_progress && !kkt_already_pass;
+    if run_krylov_ir {
         refine_krylov_and_projection(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
     }
+    // Sentinel: the IR would run whenever the IPM made progress; this is true iff
+    // the gate skipped it. Derived from `run_krylov_ir` (not `kkt_already_pass`)
+    // so that dropping the `&& !kkt_already_pass` gate flips this to false.
+    let krylov_ir_skipped = ipm_made_progress && !run_krylov_ir;
 
     let view = ProblemView {
         q: &orig_problem.q,
@@ -230,7 +232,6 @@ fn run_ipm_with(
         &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,
     );
     let kkt_out = kkt_final;
-    let _ = kkt;
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
@@ -264,5 +265,6 @@ fn run_ipm_with(
         numerical_failure: false,
         infeasibility_status: None,
         is_locally_optimal,
+        postsolve_krylov_ir_skipped: krylov_ir_skipped,
     }
 }

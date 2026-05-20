@@ -290,3 +290,128 @@ fn build_view<'a>(orig_problem: &'a QpProblem, eliminated_cols: &'a [bool]) -> P
         eliminated_cols,
     }
 }
+
+#[cfg(test)]
+mod gate_predicate_tests {
+    use super::{build_view, kkt_already_passes, kkt_residual_rel, primal_residual_rel};
+    use crate::options::SolverOptions;
+    use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
+    use crate::qp::problem::QpProblem;
+
+    /// min 0.5·diag·Σx² s.t. Σx = rhs, x free. Solved deterministically.
+    fn solved(n: usize, diag: f64, rhs: f64) -> (QpProblem, crate::problem::SolverResult) {
+        let idx: Vec<usize> = (0..n).collect();
+        let q = CscMatrix::from_triplets(&idx, &idx, &vec![diag; n], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&vec![0usize; n], &idx, &vec![1.0; n], 1, n).unwrap();
+        let prob = QpProblem::new(
+            q, vec![0.0; n], a, vec![rhs],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+        let mut opts = SolverOptions::default();
+        opts.ipm.eps = 1e-6;
+        let res = crate::qp::solve_qp_with(&prob, &opts);
+        (prob, res)
+    }
+
+    /// Converged optimal solution → predicate true (gate fires).
+    #[test]
+    fn already_passes_true_for_converged() {
+        for &(n, diag, rhs) in &[(3usize, 1.0, 2.0), (5, 4.0, 1.0)] {
+            let (prob, res) = solved(n, diag, rhs);
+            assert!(
+                kkt_already_passes(&prob, &res, &[], true, 1e-6),
+                "n={n} diag={diag}: exact optimal must already pass"
+            );
+        }
+    }
+
+    /// Same solution but the dual is corrupted → stationarity residual ≫ eps →
+    /// predicate false → the gate must NOT skip the IR.
+    #[test]
+    fn already_passes_false_when_dual_violates_stationarity() {
+        let (prob, mut res) = solved(4, 2.0, 1.0);
+        assert!(kkt_already_passes(&prob, &res, &[], true, 1e-6));
+        for y in res.dual_solution.iter_mut() {
+            *y += 100.0;
+        }
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "corrupted dual breaks stationarity → must not be considered already-passing"
+        );
+    }
+
+    /// Non-Optimal IPM status → predicate false even with an exact solution
+    /// (the gate only skips for confirmed-Optimal results).
+    #[test]
+    fn already_passes_false_when_status_not_optimal() {
+        let (prob, res) = solved(3, 1.0, 2.0);
+        assert!(kkt_already_passes(&prob, &res, &[], true, 1e-6));
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], false, 1e-6),
+            "status != Optimal must gate the skip off"
+        );
+    }
+
+    /// Stationarity holds (kkt = 0) but the primal constraint is violated
+    /// (pres ≫ eps). Gives the `pres < eps` conjunct teeth: dropping it from
+    /// `kkt_already_passes` would return `true` here and fail this assertion.
+    ///
+    /// For min 0.5·Σx² s.t. Σx = rhs (x free), the point x=0, y=0 satisfies
+    /// stationarity (Qx + c − Aᵀy = 0) exactly, yet Σx = 0 ≠ rhs.
+    #[test]
+    fn already_passes_false_when_primal_infeasible_despite_stationarity() {
+        for &(n, rhs) in &[(4usize, 5.0_f64), (6, -3.0)] {
+            let idx: Vec<usize> = (0..n).collect();
+            let q = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; n], n, n).unwrap();
+            let a = CscMatrix::from_triplets(&vec![0usize; n], &idx, &vec![1.0; n], 1, n).unwrap();
+            let prob = QpProblem::new(
+                q, vec![0.0; n], a, vec![rhs],
+                vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+                vec![ConstraintType::Eq],
+            ).unwrap();
+            let mut res = crate::problem::SolverResult::default();
+            res.solution = vec![0.0; n];
+            res.dual_solution = vec![0.0; 1];
+            res.bound_duals = vec![];
+            // sanity: stationarity residual is ~0 but primal residual is large.
+            let view = build_view(&prob, &[]);
+            assert!(kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals) < 1e-6);
+            assert!(primal_residual_rel(&view, &res.solution) > 1e-6);
+            assert!(
+                !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+                "n={n} rhs={rhs}: primal-infeasible point must not be already-passing \
+                 (the `pres < eps` conjunct must hold)"
+            );
+        }
+    }
+
+    /// Degenerate inputs short-circuit to false: empty solution and m=0.
+    #[test]
+    fn already_passes_false_for_degenerate_inputs() {
+        // empty solution
+        let (prob, mut res) = solved(3, 1.0, 2.0);
+        res.solution = vec![];
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "empty solution must short-circuit to false"
+        );
+        // m = 0 (no constraints): there is nothing the IR refines.
+        let n = 3usize;
+        let idx: Vec<usize> = (0..n).collect();
+        let q = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; n], n, n).unwrap();
+        let a = CscMatrix::new(0, n);
+        let prob0 = QpProblem::new(
+            q, vec![0.0; n], a, vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+            vec![],
+        ).unwrap();
+        let mut res0 = crate::problem::SolverResult::default();
+        res0.solution = vec![0.0; n];
+        assert!(
+            !kkt_already_passes(&prob0, &res0, &[], true, 1e-6),
+            "m=0 must short-circuit to false"
+        );
+    }
+}
