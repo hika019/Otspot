@@ -317,6 +317,9 @@ pub(crate) struct BoundedStandardForm {
     pub(crate) n_shifted: usize,
     pub(crate) n_total: usize,
     pub(crate) initial_basis: Vec<usize>,
+    /// Which rows require an artificial variable. Only needed by the test
+    /// helper `wrap_to_legacy`; not read in production.
+    #[cfg(test)]
     pub(crate) needs_artificial: Vec<bool>,
     pub(crate) num_artificial: usize,
     pub(crate) obj_offset: f64,
@@ -433,6 +436,7 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
     let n_total = n_shifted + n_slack;
 
     let mut initial_basis = vec![0usize; m_orig];
+    #[cfg(test)]
     let mut needs_artificial = vec![false; m_orig];
     let mut num_artificial = 0usize;
 
@@ -445,13 +449,15 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
                 } else if b[i].abs() <= PIVOT_TOL {
                     initial_basis[i] = col;
                 } else {
-                    needs_artificial[i] = true;
+                    #[cfg(test)]
+                    { needs_artificial[i] = true; }
                     num_artificial += 1;
                     initial_basis[i] = col;
                 }
             }
             None => {
-                needs_artificial[i] = true;
+                #[cfg(test)]
+                { needs_artificial[i] = true; }
                 num_artificial += 1;
             }
         }
@@ -503,6 +509,7 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
         n_shifted,
         n_total,
         initial_basis,
+        #[cfg(test)]
         needs_artificial,
         num_artificial,
         obj_offset,
@@ -541,6 +548,9 @@ pub(crate) fn scale_upper_bounds(upper_bounds: &[f64], col_scale: &[f64]) -> Vec
 /// Expand a `BoundedStandardForm` into the legacy `StandardForm` by adding
 /// one UB row + slack per finite-upper variable. The result is bit-equivalent
 /// to `build_standard_form` on the same `LpProblem` (modulo CSC canonicalization).
+///
+/// Test-only: used by `tests_bounded_form` to verify BSF↔SF equivalence.
+#[cfg(test)]
 pub(crate) fn wrap_to_legacy(bsf: &BoundedStandardForm) -> StandardForm {
     let n_shifted = bsf.n_shifted;
     let m_orig = bsf.m;

@@ -17,11 +17,10 @@ pub(crate) enum QpPostsolveStep {
     /// Singleton Eq row `A[i,j]·x[j] = b[i]`; `row` lets postsolve recover `y[row]`.
     SingletonRow { row: usize, col: usize, val: f64 },
     /// Singleton Le/Ge row `A[i,j]·x[j] ≤/≥ b[i]` absorbed into variable bounds.
-    /// `a_ij` is the coefficient; `ct` is Le or Ge for dual sign recovery.
+    /// `ct` is Le or Ge for dual sign recovery.
     SingletonIneqToBound {
         row: usize,
         col: usize,
-        a_ij: f64,
         ct: crate::problem::ConstraintType,
     },
     EmptyCol { idx: usize, val: f64 },

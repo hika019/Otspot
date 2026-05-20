@@ -63,15 +63,21 @@ use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBou
 /// state". `Timeout`/`SingularBasis` retain their usual meaning.
 #[derive(Debug)]
 pub(crate) enum BoundedOutcome {
+    /// Phase 1 dual optimal (perturbed cost). Fields carry the perturbed
+    /// objective and dual variables; production code discards them (Phase 2
+    /// primal re-optimises from scratch). Tests use them for dual-recovery
+    /// smoke tests.
+    #[allow(dead_code)]
     Optimal(f64, Vec<f64>),
     Unbounded,
     /// Deadline or hard iteration cap. Carries the latest objective.
     Timeout(f64),
     SingularBasis,
     /// `x_B[r] > u_{basis[r]}` reached without an lb-violation candidate.
-    /// `row` is the offending basis row; `obj` is the current objective.
-    /// Callers fall back to legacy `core.rs`.
-    UbViolationOutOfScope { row: usize, obj: f64 },
+    /// `row` is the offending basis row. Callers fall back to legacy `core.rs`.
+    /// Field is read by tests; production callers use `{ .. }` to fall through.
+    #[allow(dead_code)]
+    UbViolationOutOfScope { row: usize },
 }
 
 #[cfg(test)]
@@ -297,8 +303,7 @@ pub(crate) fn iterate(
             if let Some(row) = ub_violation_row {
                 // Out-of-scope for this loop: distinct from Timeout so the
                 // wiring layer can route to the legacy core deterministically.
-                let obj = basic_obj(c, &state.basis, &state.x_b);
-                return (BoundedOutcome::UbViolationOutOfScope { row, obj }, state);
+                return (BoundedOutcome::UbViolationOutOfScope { row }, state);
             }
             let obj = basic_obj(c, &state.basis, &state.x_b);
             let mut y = vec![0.0; m];

@@ -22,8 +22,7 @@ pub(crate) use standard_form::{
 pub(crate) use standard_form::build_standard_form;
 #[cfg(test)]
 pub(crate) use standard_form::OrigVarInfo;
-#[allow(unused_imports)]
-pub(crate) use standard_form::{build_bounded_standard_form, scale_upper_bounds, wrap_to_legacy, BoundedStandardForm};
+pub(crate) use standard_form::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
 
 /// crash basis → IPM warm-start helper (`lp_dispatch.rs` 経由)。
 ///
