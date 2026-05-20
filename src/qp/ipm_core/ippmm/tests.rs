@@ -398,6 +398,172 @@ fn build_single_var_box_problem(lb: f64, ub: f64) -> QpProblem {
     QpProblem::new(q, c, a, b, bounds, vec![]).unwrap()
 }
 
+/// DIAG-STALL: Reproducer for box-only non-diagonal Q stall via solve_qp_with (full pipeline).
+/// min x^2+xy+y^2-6x-6y  s.t. [0,4]^2 → true opt (2,2), obj=-12
+/// Q stored as FULL SYMMETRIC (API convention): (0,0)=2, (0,1)=1, (1,0)=1, (1,1)=2
+#[test]
+fn test_box_only_nondiag_q_stall_reproducer() {
+    use crate::qp::solve_qp_with;
+    // Q full-symmetric: both triangles
+    let q = CscMatrix::from_triplets(
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[2.0, 1.0, 1.0, 2.0],
+        2, 2,
+    ).unwrap();
+    let c = vec![-6.0, -6.0];
+    let a = CscMatrix::new(0, 2);
+    let b = vec![];
+    let bounds = vec![(0.0_f64, 4.0_f64); 2];
+    let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    // Test both with and without Ruiz scaling
+    for use_ruiz in [false, true] {
+        let opts = SolverOptions { use_ruiz_scaling: use_ruiz, timeout_secs: Some(10.0), ..Default::default() };
+        let result = solve_qp_with(&problem, &opts);
+        eprintln!("ruiz={} STATUS={:?} x={:?} obj={:.6} iters={}", use_ruiz, result.status, result.solution, result.objective, result.iterations);
+        if let Some((pf, df, mu)) = result.final_residuals {
+            eprintln!("RESID pf={:.3e} df={:.3e} mu={:.3e}", pf, df, mu);
+        }
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "ruiz={} expected Optimal, got {:?}", use_ruiz, result.status);
+        assert!((result.solution[0] - 2.0).abs() < 0.1,
+            "ruiz={} x[0]={:.4}", use_ruiz, result.solution[0]);
+        assert!((result.solution[1] - 2.0).abs() < 0.1,
+            "ruiz={} x[1]={:.4}", use_ruiz, result.solution[1]);
+        assert!((result.objective - (-12.0)).abs() < 0.5,
+            "ruiz={} obj={:.4}", use_ruiz, result.objective);
+    }
+    // Also test via inner solver directly (no Ruiz)
+    let opts_inner = default_opts();
+    let q2 = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2).unwrap();
+    let problem2 = QpProblem::new_all_le(q2, vec![-6.0, -6.0], CscMatrix::new(0,2), vec![], vec![(0.0_f64,4.0_f64);2]).unwrap();
+    let r2 = solve_ippmm_inner(&problem2, &opts_inner, opts_inner.ipm_eps());
+    eprintln!("inner STATUS={:?} x={:?} obj={:.6}", r2.status, r2.solution, r2.objective);
+    assert_eq!(r2.status, SolveStatus::Optimal, "inner: expected Optimal, got {:?}", r2.status);
+}
+
+/// PEU AND-gate sentinel: OR→AND change is load-bearing for box-only non-diagonal Q stall.
+///
+/// This test verifies that the AND gate (both primal AND dual must improve for fast δ decrease)
+/// prevents the dual direction blow-up that causes the stall.
+///
+/// No-op check: if the AND gate is reverted to OR (either_improved → fast decrease), ruiz=true
+/// will return SuboptimalSolution instead of Optimal, failing the assertion below.
+/// That is, this test MUST fail when the fix is removed.
+#[test]
+fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
+    use crate::qp::solve_qp_with;
+    // Multi-pattern: three different box-only non-diagonal Q problems with known optima.
+    // Pattern 1: min x²+xy+y²-6x-6y on [0,4]²  → opt=(2,2), obj=-12
+    // Pattern 2: min x²+xy+y²-8x-6y on [0,6]²
+    //            KKT: 2x+y=8, x+2y=6 → 3y=4 → y=4/3, x=10/3. Feasible in [0,6]². opt=(10/3,4/3).
+    //            obj = 100/9+40/9+16/9-80/3-8 = 156/9-312/9 = -156/9 = -52/3 ≈ -17.33
+    // Pattern 3: min 2x²+xy+2y²-4x-4y on [0,3]² → KKT: 4x+y=4, x+4y=4 → 15x=12 → x=y=4/5=0.8
+    //            obj = 2*(0.64)+0.64+2*(0.64)-4*0.8-4*0.8 = 2.56-6.4 = ... let me recompute.
+    //            obj = 2(0.64)+0.8*0.8+2(0.64) - 4*0.8 - 4*0.8 = 1.28+0.64+1.28-3.2-3.2 = -3.2
+    let cases: &[(Vec<(usize,usize,f64)>, Vec<f64>, Vec<(f64,f64)>, Vec<f64>, f64, &str)] = &[
+        // Q triplets (row,col,val), c, bounds, expected_x*, expected_obj, name
+        (
+            vec![(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,2.0)],
+            vec![-6.0,-6.0],
+            vec![(0.0,4.0),(0.0,4.0)],
+            vec![2.0,2.0], -12.0,
+            "min x²+xy+y²-6x-6y [0,4]²",
+        ),
+        (
+            vec![(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,2.0)],
+            vec![-8.0,-6.0],
+            vec![(0.0,6.0),(0.0,6.0)],
+            // KKT: 2x+y=8, x+2y=6 → x=10/3, y=4/3; obj=156/9-104/3=-52/3≈-17.33
+            vec![10.0/3.0, 4.0/3.0], -52.0/3.0,
+            "min x²+xy+y²-8x-6y [0,6]²",
+        ),
+        (
+            vec![(0,0,4.0),(0,1,1.0),(1,0,1.0),(1,1,4.0)],
+            vec![-4.0,-4.0],
+            vec![(0.0,3.0),(0.0,3.0)],
+            vec![4.0/5.0, 4.0/5.0], -3.2,
+            "min 2x²+xy+2y²-4x-4y [0,3]²",
+        ),
+    ];
+
+    for (q_trips, c, bounds, x_star, obj_star, name) in cases {
+        let rows: Vec<usize> = q_trips.iter().map(|&(r,_,_)| r).collect();
+        let cols: Vec<usize> = q_trips.iter().map(|&(_,c,_)| c).collect();
+        let vals: Vec<f64>   = q_trips.iter().map(|&(_,_,v)| v).collect();
+        let n = bounds.len();
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        let a = CscMatrix::new(0, n);
+        let problem = QpProblem::new_all_le(q, c.clone(), a, vec![], bounds.clone()).unwrap();
+
+        for use_ruiz in [false, true] {
+            let opts = SolverOptions {
+                use_ruiz_scaling: use_ruiz,
+                timeout_secs: Some(10.0),
+                ..Default::default()
+            };
+            let result = solve_qp_with(&problem, &opts);
+            assert_eq!(result.status, SolveStatus::Optimal,
+                "{} ruiz={}: expected Optimal, got {:?}", name, use_ruiz, result.status);
+            for (i, &xi_star) in x_star.iter().enumerate() {
+                assert!((result.solution[i] - xi_star).abs() < 0.1,
+                    "{} ruiz={}: x[{}]={:.4} expected {:.4}", name, use_ruiz, i, result.solution[i], xi_star);
+            }
+            assert!((result.objective - obj_star).abs() < 0.5,
+                "{} ruiz={}: obj={:.4} expected {:.4}", name, use_ruiz, result.objective, obj_star);
+        }
+    }
+}
+
+/// Multiple-pattern box-only non-diagonal QP with known optima.
+/// Covers diagonal Q (should always work), near-diagonal, and strongly coupled cases.
+#[test]
+fn test_box_only_nondiag_q_multi_pattern() {
+    use crate::qp::solve_qp_with;
+
+    // (Q as (rows,cols,vals), c, bounds, x_star, obj_star, name)
+    let cases: &[(&[usize], &[usize], &[f64], &[f64], &[(f64,f64)], &[f64], f64, &str)] = &[
+        // Diagonal Q — always worked, regression check.
+        (&[0,1], &[0,1], &[2.0,2.0], &[-4.0,-4.0], &[(0.0,5.0),(0.0,5.0)], &[2.0,2.0], -8.0,
+         "diag Q baseline"),
+        // Off-diagonal: conditioned Q, box [0,4]²
+        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-6.0,-6.0], &[(0.0,4.0),(0.0,4.0)],
+         &[2.0,2.0], -12.0, "nondiag Q [0,4]²"),
+        // Off-diagonal: asymmetric c, box [0,6]²; KKT: 2x+y=8, x+2y=6 → x=10/3, y=4/3
+        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-8.0,-6.0], &[(0.0,6.0),(0.0,6.0)],
+         &[10.0/3.0,4.0/3.0], -52.0/3.0, "nondiag Q asymm-c"),
+        // Off-diagonal: tight box forcing boundary solution.
+        // min x²+xy+y²-6x-6y on [0,1]² → unconstrained opt (2,2) outside box
+        // KKT on box corner: boundary active. At x=(1,1): Qx+c=[-3,-3], dual z=[3,3]>0. ✓
+        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-6.0,-6.0], &[(0.0,1.0),(0.0,1.0)],
+         &[1.0,1.0], -9.0, "nondiag Q tight box [0,1]²"),
+    ];
+
+    for &(rows, cols, vals, c, bounds, x_star, obj_star, name) in cases {
+        let n = bounds.len();
+        let q = CscMatrix::from_triplets(rows, cols, vals, n, n).unwrap();
+        let a = CscMatrix::new(0, n);
+        let problem = QpProblem::new_all_le(q, c.to_vec(), a, vec![], bounds.to_vec()).unwrap();
+
+        for use_ruiz in [false, true] {
+            let opts = SolverOptions {
+                use_ruiz_scaling: use_ruiz,
+                timeout_secs: Some(10.0),
+                ..Default::default()
+            };
+            let result = solve_qp_with(&problem, &opts);
+            assert_eq!(result.status, SolveStatus::Optimal,
+                "{} ruiz={}: expected Optimal, got {:?}", name, use_ruiz, result.status);
+            for (i, &xi) in x_star.iter().enumerate() {
+                assert!((result.solution[i] - xi).abs() < 0.1,
+                    "{} ruiz={}: x[{}]={:.4} expected {:.4}", name, use_ruiz, i, result.solution[i], xi);
+            }
+            assert!((result.objective - obj_star).abs() < 0.5,
+                "{} ruiz={}: obj={:.4} expected {:.4}", name, use_ruiz, result.objective, obj_star);
+        }
+    }
+}
+
 fn apply_warm_and_extract_x(problem: &QpProblem, xj_warm: f64) -> f64 {
     let (a_ext, b_ext, m_ext, m_orig, _, is_eq_ext) = build_extended_constraints(problem);
     let ws = QpWarmStart {
