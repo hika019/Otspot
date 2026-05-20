@@ -808,12 +808,12 @@ fn main() {
             name, result.status, elapsed_s
         );
 
-        // QP は IPPMM 1 本。LP (Q=0) は size により simplex / IPM が分岐するため
-        // 実 dispatch を反映: 大規模 LP は IPM 経路、それ以外は simplex (cf.
-        // src/qp/lp_dispatch.rs)。誤誘導 (元 "ipm" hardcode) を是正。
+        // 実 route を反映 (`stats.lp_ipm_path`)。旧実装は size 静的関数
+        // `lp_dispatch_prefers_ipm(n,m)` で判定していたため、IPM-first だが simplex に
+        // fallback した場合などを mislabel していた (将来の分析を誤誘導)。
         let method_label = if is_qp {
             "ipm"
-        } else if solver::qp::lp_dispatch_prefers_ipm(n, m) {
+        } else if result.stats.lp_ipm_path {
             "lp-ipm"
         } else {
             "lp-simplex"
