@@ -8,7 +8,7 @@
 //! `solve_qp_with` が `timeout_secs` を honor することを検証する。
 //! 実データでの再現は別タスク (要 `data/` 配置) で取り扱う。
 
-use solver::io::qplib::parse_qplib;
+use solver::io::qplib::{parse_qplib, QplibProblem};
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::{solve_qp_with, QpProblem};
@@ -262,7 +262,10 @@ fn qp_is_lasso_300_real_data_honors_deadline() {
         path.exists(),
         "data missing: {IS_LASSO_300_PATH} — place file or remove --include-ignored"
     );
-    let problem = parse_qplib(path).expect("parse IS_LASSO_300");
+    let problem = match parse_qplib(path).expect("parse IS_LASSO_300") {
+        QplibProblem::Qp(p) => p,
+        other => panic!("expected continuous QP for lasso, got {:?}", other),
+    };
     let watchdog = Duration::from_secs_f64(IS_LASSO_300_WATCHDOG_SEC);
     let (status, wall) = solve_with_watchdog(
         problem,

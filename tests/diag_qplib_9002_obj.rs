@@ -17,7 +17,7 @@
 //! 現状 ref がない以上「正しい obj」は分からない。本 test の責務は当 solver の
 //! 当該問題上での 現状動作を pin し、未来の退行を検知すること。
 
-use solver::io::qplib::parse_qplib;
+use solver::io::qplib::{parse_qplib, QplibProblem};
 use solver::options::SolverOptions;
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
@@ -34,7 +34,10 @@ const QPLIB_9002_X_INF_CEIL: f64 = 1.0e12;
 fn qplib_9002_solver_does_not_regress_or_diverge() {
     let path = Path::new("data/qplib/QPLIB_9002.qplib");
     assert!(path.exists(), "data missing: QPLIB_9002.qplib");
-    let problem = parse_qplib(path).expect("parse");
+    let problem = match parse_qplib(path).expect("parse") {
+        QplibProblem::Qp(p) => p,
+        other => panic!("expected continuous QP for QPLIB_9002, got {:?}", other),
+    };
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(60.0);
     let t0 = Instant::now();
