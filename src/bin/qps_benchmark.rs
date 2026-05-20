@@ -631,6 +631,11 @@ fn main() {
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
+    // measurement-only: forwards to `opts.threads` for profiling per-solve
+    // factorization parallelism. Production default is threads=1 (Par::Seq);
+    // benchmarks measured a 30–50% slowdown from parallel LDL on mid-sparse
+    // KKTs (e.g. dfl001), so this is a diagnostic knob, not a production path.
+    let mut threads: usize = 1;
 
     let mut i = 1;
     while i < args.len() {
@@ -640,6 +645,7 @@ fn main() {
             println!("  --timeout         Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal   Path to known optimal values CSV (default: auto-detect)");
             println!("  --dual-advanced   LP は DualAdvanced simplex を使う (QP は無視)");
+            println!("  --threads         Per-solve factorization parallelism (default: 1 = serial)");
             std::process::exit(0);
         } else if args[i] == "--known-optimal" {
             i += 1;
@@ -655,6 +661,11 @@ fn main() {
             i += 1;
             if i < args.len() {
                 timeout_secs = args[i].parse().unwrap_or(10.0);
+            }
+        } else if args[i] == "--threads" {
+            i += 1;
+            if i < args.len() {
+                threads = args[i].parse().unwrap_or(1).max(1);
             }
         } else if args[i] == "--dual-advanced" {
             dual_advanced_mode = true;
@@ -741,6 +752,7 @@ fn main() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);
     opts.ipm.eps = eps;
+    opts.threads = threads;
     if dual_advanced_mode {
         opts.simplex_method = SimplexMethod::DualAdvanced;
     }
