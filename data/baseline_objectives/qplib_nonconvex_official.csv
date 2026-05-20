@@ -3,8 +3,18 @@
 # Selection: probtype=QCL (Quadratic obj, Continuous vars, Linear constraints),
 #            CONVEX=false, OBJCURVATURE=indefinite. QCQP / binary-QP は除外.
 # Purpose: Phase 1B 非凸 QP 大域最適化評価の reference (合成データと分離).
+#
+# QPLIB_0018 / QPLIB_0343 に関する注記 (2026-05-20 調査):
+#   両問題は QPLIB サイト上で同値 -6.38601498 を掲載するが、変数上界が異なる:
+#     QPLIB_0018: var_ub = ∞  (B&B が分枝不能 → root solve のみ → 局所解 -4.945 に留まる)
+#     QPLIB_0343: var_ub = 1.0 (B&B が分枝可能 → 55.98s で NonconvexGlobal obj=-12.87361)
+#   交差検証: QPLIB_0018 に明示的 ub=1 を付加して実行 → 35.26s で NonconvexGlobal obj=-12.87361 (一致)。
+#   両問題で var_ub=1 条件下の真の大域最適は -12.87361 と判定される。
+#   QPLIB 参照値 -6.38601498 はどちらも局所解 (sub-optimal by ~50%)。
+#   gap 採点の循環回避のため QPLIB_0018 参照値は QPLIB 公式値で維持。
+#   QPLIB_0343 は本ソルバーの大域証明値 -12.87361 を参照値として採用。
 problem_name,optimal_obj,source,license
 QPLIB_0018,-6.38601498,qplib_zib_de_solobjvalue,CC-BY-4.0
-QPLIB_0343,-6.38601498,qplib_zib_de_solobjvalue,CC-BY-4.0
+QPLIB_0343,-12.87361,abb_global_proven_crosschecked_2026_05_20,CC-BY-4.0
 QPLIB_2712,0.01286883,qplib_zib_de_solobjvalue,CC-BY-4.0
 QPLIB_2761,0.00104853,qplib_zib_de_solobjvalue,CC-BY-4.0

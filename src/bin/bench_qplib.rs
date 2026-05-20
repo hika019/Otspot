@@ -25,6 +25,7 @@ use solver::options::SolverOptions;
 use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
 use solver::qp::solve_qp_with;
+use solver::{solve_qp_global, GlobalOptimizationConfig};
 use solver::QpProblem;
 
 /// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
@@ -104,14 +105,18 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // 引数パース: [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
+    //             [--global] [--gap-tol <f64>] [--max-nodes <usize>]
     let mut data_dir = "data/qplib".to_string();
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
+    let mut use_global: bool = false;
+    let mut global_gap_tol: f64 = 1e-3;
+    let mut global_max_nodes: usize = 10_000;
 
     // known flagリスト（値を持つフラグ）
     const KNOWN_FLAGS_WITH_VALUE: &[&str] = &[
-        "--eps", "--timeout", "--known-optimal",
+        "--eps", "--timeout", "--known-optimal", "--gap-tol", "--max-nodes",
     ];
 
     let mut i = 1usize;
@@ -121,7 +126,13 @@ fn main() {
             println!("  --eps           Convergence tolerance (default: 1e-6)");
             println!("  --timeout       Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
+            println!("  --global        Use solve_qp_global (spatial B&B) instead of single-shot IPM");
+            println!("  --gap-tol       Global optimality gap tolerance (default: 1e-3)");
+            println!("  --max-nodes     B&B node limit (default: 10000)");
             std::process::exit(0);
+        } else if args[i] == "--global" {
+            use_global = true;
+            i += 1;
         } else if KNOWN_FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
             // known flag: 次引数が値 → i+=2で消費
             i += 1;
@@ -130,6 +141,8 @@ fn main() {
                     "--eps" => { eps = args[i].parse().unwrap_or(1e-6); }
                     "--timeout" => { timeout_secs = args[i].parse().unwrap_or(10.0); }
                     "--known-optimal" => { baseline_override = Some(args[i].clone()); }
+                    "--gap-tol" => { global_gap_tol = args[i].parse().unwrap_or(1e-3); }
+                    "--max-nodes" => { global_max_nodes = args[i].parse().unwrap_or(10_000); }
                     _ => {}
                 }
             }
@@ -185,6 +198,11 @@ fn main() {
     qplib_files.sort();
 
     println!("QPLIB Benchmark ({} files)", qplib_files.len());
+    if use_global {
+        println!("Mode: GLOBAL (solve_qp_global / spatial B&B, gap_tol={:.0e}, max_nodes={})", global_gap_tol, global_max_nodes);
+    } else {
+        println!("Mode: LOCAL (solve_qp_with / single-shot IPM)");
+    }
     println!();
 
     println!("Solver: IPPMM");
@@ -305,7 +323,16 @@ fn main() {
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
-        let result = solve_qp_with(&prob, &opts);
+        let result = if use_global {
+            let cfg = GlobalOptimizationConfig {
+                gap_tol: global_gap_tol,
+                max_nodes: global_max_nodes,
+                ..GlobalOptimizationConfig::default()
+            };
+            solve_qp_global(&prob, &opts, &cfg)
+        } else {
+            solve_qp_with(&prob, &opts)
+        };
         let elapsed_s = start.elapsed().as_secs_f64();
         println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
 
