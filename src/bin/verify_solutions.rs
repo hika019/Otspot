@@ -22,7 +22,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use solver::io::qps::parse_qps;
-use solver::io::qplib::{parse_qplib, QplibError};
+use solver::io::qplib::{parse_qplib, QplibError, QplibProblem};
 use solver::options::SolverOptions;
 use solver::problem::SolveStatus;
 use solver::qp::kkt_resid::f64_impl;
@@ -132,7 +132,13 @@ fn parse_qps_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
 fn parse_qplib_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
     // 旧 thread::spawn + recv_timeout は detach でメモリ累積。gtimeout で外部 kill 統一。
     match parse_qplib(path) {
-        Ok(p) => ParseResult::Ok(Box::new(p)),
+        Ok(QplibProblem::Qp(p)) => ParseResult::Ok(Box::new(p)),
+        Ok(QplibProblem::Milp(_)) => {
+            ParseResult::Unsupported("MILP (binary/integer linear): not in verify scope".to_string())
+        }
+        Ok(QplibProblem::Miqp(_)) => {
+            ParseResult::Unsupported("MIQP (binary/integer quadratic): not in verify scope".to_string())
+        }
         Err(QplibError::UnsupportedType(msg)) => ParseResult::Unsupported(msg),
         Err(e) => ParseResult::ParseErr(format!("{:?}", e)),
     }

@@ -39,9 +39,11 @@
 //!
 //! # 対応問題タイプ
 //!
-//! - 変数タイプ: C（連続）のみ。B/M/I/G（整数・バイナリ）はスキップ
+//! - 変数タイプ: C（連続）, B（二値変数・全変数）, I（整数変数・全変数）
+//!   - B/I は `QplibProblem::Milp` / `QplibProblem::Miqp` として返す
+//!   - M/G/S（混合整数）は UnsupportedType
 //! - 制約タイプ: L（線形）, B（境界のみ）, N（制約なし）, Q（二次制約）に対応
-//! - 目的タイプ: L/D/Q すべて対応
+//! - 目的タイプ: L/D/Q/C すべて対応
 //!
 //! # 制約変換
 //!
@@ -56,10 +58,12 @@
 //! `QpProblem::quadratic_constraints[k]` に対称行列 Q_k を格納する。
 //! QPLIB ファイルでは Q_k の下三角要素のみ記録され、パーサーが対称化する。
 
-use crate::problem::ConstraintType;
+use crate::mip::{MilpProblem, MiqpProblem};
+use crate::problem::{ConstraintType, LpProblem};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::io::BufRead;
 use std::path::Path;
 
 /// QPLIBパース中に発生するエラー
@@ -92,15 +96,36 @@ impl From<std::io::Error> for QplibError {
     }
 }
 
-/// ファイルパスからQPLIBファイルを読み込み `QpProblem` にパースする
-pub fn parse_qplib(path: &Path) -> Result<QpProblem, QplibError> {
-    let content = std::fs::read_to_string(path)?;
-    parse_qplib_str(&content)
+/// Parsed result of a QPLIB file.
+///
+/// Continuous-variable problems return [`Qp`]; problems with binary (`B`) or
+/// integer (`I`) variables return [`Milp`] (zero-Q) or [`Miqp`] (non-zero Q).
+#[derive(Debug)]
+pub enum QplibProblem {
+    /// Continuous-variable QP / QCQP / LP.
+    Qp(QpProblem),
+    /// Mixed-integer LP (linear objective, binary or integer variables).
+    Milp(MilpProblem),
+    /// Mixed-integer QP (quadratic objective, binary or integer variables).
+    Miqp(MiqpProblem),
 }
 
-/// QPLIB形式の文字列を `QpProblem` にパースする
-pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
-    let mut ts = TokenStream::from_str(input);
+/// ファイルパスからQPLIBファイルを読み込みパースする。
+///
+/// Uses a streaming tokenizer (`BufReader`) to avoid loading the entire file into memory.
+/// Large files (200 MB+) that would OOM with `read_to_string` are handled correctly.
+pub fn parse_qplib(path: &Path) -> Result<QplibProblem, QplibError> {
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    parse_token_stream(TokenStream::from_reader(reader))
+}
+
+/// QPLIB形式の文字列をパースする
+pub fn parse_qplib_str(input: &str) -> Result<QplibProblem, QplibError> {
+    parse_token_stream(TokenStream::from_str(input))
+}
+
+fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
 
     // --- ヘッダー ---
     // 問題名（スキップ）
@@ -119,12 +144,18 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let var_char = type_bytes[1] as char;
     let con_char = type_bytes[2] as char;
 
-    // 変数タイプ: C（連続）のみ
-    if var_char != 'C' {
-        return Err(QplibError::UnsupportedType(format!(
-            "Variable type '{}' not supported (only C=continuous supported). Type={}",
-            var_char, prob_type
-        )));
+    // 変数タイプ: C（連続）, B（全バイナリ）, I（全整数）に対応
+    // M/G/S（混合整数・半連続）は未対応
+    let var_binary = var_char == 'B';   // all vars ∈ {0,1}
+    let var_integer = var_char == 'I';  // all vars ∈ ℤ
+    match var_char {
+        'C' | 'B' | 'I' => {}
+        c => {
+            return Err(QplibError::UnsupportedType(format!(
+                "Variable type '{}' not supported (C/B/I supported; M/G/S mixed-integer unsupported). Type={}",
+                c, prob_type
+            )));
+        }
     }
 
     // 制約タイプ: L/B/N/Q に対応
@@ -244,25 +275,30 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
         }
     }
 
-    // --- 変数下界 ---
-    let lb_var_default = ts.read_f64()?;
-    let n_nondefault_lb_var = ts.read_usize()?;
-    let mut lb_var = vec![lb_var_default; n];
-    for _ in 0..n_nondefault_lb_var {
-        let i = ts.read_index_1based(n, "lb_var index")?;
-        let v = ts.read_f64()?;
-        lb_var[i] = v;
-    }
-
-    // --- 変数上界 ---
-    let ub_var_default = ts.read_f64()?;
-    let n_nondefault_ub_var = ts.read_usize()?;
-    let mut ub_var = vec![ub_var_default; n];
-    for _ in 0..n_nondefault_ub_var {
-        let i = ts.read_index_1based(n, "ub_var index")?;
-        let v = ts.read_f64()?;
-        ub_var[i] = v;
-    }
+    // --- 変数下界・上界 ---
+    // Binary ('B'): 変数は暗黙的に [0,1] — ファイルにこのセクションは存在しない
+    // Continuous ('C') / Integer ('I'): ファイルに明示的に格納されている
+    let (lb_var, ub_var) = if var_binary {
+        (vec![0.0_f64; n], vec![1.0_f64; n])
+    } else {
+        let lb_var_default = ts.read_f64()?;
+        let n_nondefault_lb_var = ts.read_usize()?;
+        let mut lb_var = vec![lb_var_default; n];
+        for _ in 0..n_nondefault_lb_var {
+            let i = ts.read_index_1based(n, "lb_var index")?;
+            let v = ts.read_f64()?;
+            lb_var[i] = v;
+        }
+        let ub_var_default = ts.read_f64()?;
+        let n_nondefault_ub_var = ts.read_usize()?;
+        let mut ub_var = vec![ub_var_default; n];
+        for _ in 0..n_nondefault_ub_var {
+            let i = ts.read_index_1based(n, "ub_var index")?;
+            let v = ts.read_f64()?;
+            ub_var[i] = v;
+        }
+        (lb_var, ub_var)
+    };
 
     // 残り（初期点・双対値・名前）は読み捨て
 
@@ -393,88 +429,174 @@ pub fn parse_qplib_str(input: &str) -> Result<QpProblem, QplibError> {
     let mut prob = QpProblem::new(q, c, a_mat, b_vec, bounds, constraint_types)
         .map_err(|e| QplibError::ParseError(e.to_string()))?;
     prob.quadratic_constraints = quadratic_constraints;
-    Ok(prob)
+
+    if var_binary || var_integer {
+        // Map all variables as integer (binary variables are integer ∈ {0,1} by bounds).
+        let integer_vars: Vec<usize> = (0..n).collect();
+        if prob.q.nnz() == 0 {
+            // Linear objective → MILP (LP relaxation for B&B nodes)
+            let lp = LpProblem::new_general(
+                prob.c,
+                prob.a,
+                prob.b,
+                prob.constraint_types,
+                prob.bounds,
+                None,
+            )
+            .map_err(|e: crate::error::SolverError| QplibError::ParseError(e.to_string()))?;
+            let milp = MilpProblem::new(lp, integer_vars)
+                .map_err(|e: crate::mip::MipProblemError| QplibError::ParseError(e.to_string()))?;
+            Ok(QplibProblem::Milp(milp))
+        } else {
+            // Quadratic objective → MIQP (QP relaxation for B&B nodes)
+            let miqp = MiqpProblem::new(prob, integer_vars)
+                .map_err(|e: crate::mip::MipProblemError| QplibError::ParseError(e.to_string()))?;
+            Ok(QplibProblem::Miqp(miqp))
+        }
+    } else {
+        Ok(QplibProblem::Qp(prob))
+    }
 }
 
-/// トークンストリーム（コメントを除去しながらフラットにトークン化）
+/// Whitespace/comment-stripping token stream.
+///
+/// Two backends:
+/// - `Mem`: all tokens pre-loaded from a `&str` (used by `parse_qplib_str` / unit tests).
+/// - `Stream`: reads one line at a time from a `BufRead` source; constant memory regardless
+///   of file size (used by `parse_qplib` to avoid OOM on 200 MB+ files).
 struct TokenStream {
-    tokens: Vec<String>,
-    pos: usize,
+    inner: TsInner,
+}
+
+enum TsInner {
+    Mem { tokens: Vec<String>, pos: usize },
+    Stream {
+        reader: Box<dyn BufRead>,
+        pending: VecDeque<String>,
+        line_buf: String,
+        /// Sticky I/O error: set on the first `read_line` failure; surfaced by `read_*`.
+        io_err: Option<std::io::Error>,
+    },
 }
 
 impl TokenStream {
     fn from_str(input: &str) -> Self {
         let mut tokens = Vec::new();
         for line in input.lines() {
-            // 行頭コメント（% または ! で始まる行）をスキップ
             let trimmed = line.trim();
             if trimmed.starts_with('%') || trimmed.starts_with('!') {
                 continue;
             }
-            // インラインコメント（# 以降）を除去
-            let line = if let Some(idx) = line.find('#') {
-                &line[..idx]
-            } else {
-                line
-            };
-            for token in line.split_whitespace() {
+            let effective = if let Some(idx) = line.find('#') { &line[..idx] } else { line };
+            for token in effective.split_whitespace() {
                 tokens.push(token.to_string());
             }
         }
-        TokenStream { tokens, pos: 0 }
+        TokenStream { inner: TsInner::Mem { tokens, pos: 0 } }
     }
 
-    fn next_str(&mut self) -> Option<&str> {
-        if self.pos < self.tokens.len() {
-            let t = &self.tokens[self.pos];
-            self.pos += 1;
-            Some(t)
-        } else {
-            None
+    fn from_reader<R: BufRead + 'static>(reader: R) -> Self {
+        TokenStream {
+            inner: TsInner::Stream {
+                reader: Box::new(reader),
+                pending: VecDeque::new(),
+                line_buf: String::new(),
+                io_err: None,
+            },
+        }
+    }
+
+    /// Returns the next token, or `None` at EOF (or after a sticky I/O error).
+    fn next_token(&mut self) -> Option<String> {
+        match &mut self.inner {
+            TsInner::Mem { tokens, pos } => {
+                if *pos < tokens.len() {
+                    let t = tokens[*pos].clone();
+                    *pos += 1;
+                    Some(t)
+                } else {
+                    None
+                }
+            }
+            TsInner::Stream { reader, pending, line_buf, io_err } => loop {
+                if io_err.is_some() {
+                    return None;
+                }
+                if let Some(tok) = pending.pop_front() {
+                    return Some(tok);
+                }
+                line_buf.clear();
+                match reader.read_line(line_buf) {
+                    Ok(0) => return None,
+                    Err(e) => {
+                        *io_err = Some(e);
+                        return None;
+                    }
+                    Ok(_) => {
+                        let trimmed = line_buf.trim();
+                        if trimmed.starts_with('%') || trimmed.starts_with('!') {
+                            continue;
+                        }
+                        let effective = if let Some(idx) = line_buf.find('#') {
+                            &line_buf[..idx]
+                        } else {
+                            line_buf.as_str()
+                        };
+                        for token in effective.split_whitespace() {
+                            pending.push_back(token.to_string());
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// Takes a sticky I/O error if one was recorded, or returns `None`.
+    fn take_io_err(&mut self) -> Option<std::io::Error> {
+        match &mut self.inner {
+            TsInner::Stream { io_err, .. } => io_err.take(),
+            TsInner::Mem { .. } => None,
         }
     }
 
     fn read_string(&mut self) -> Result<String, QplibError> {
-        match self.next_str() {
-            Some(t) => Ok(t.to_string()),
-            None => Err(QplibError::ParseError("unexpected end of file (expected string)".to_string())),
+        match self.next_token() {
+            Some(t) => Ok(t),
+            None => Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
+                QplibError::ParseError("unexpected end of file (expected string)".to_string())
+            })),
         }
     }
 
     fn read_usize(&mut self) -> Result<usize, QplibError> {
-        match self.next_str() {
-            Some(t) => {
-                // 浮動小数点として読んでから整数に変換（例: "1.0" → 1）
-                if let Ok(u) = t.parse::<usize>() {
-                    Ok(u)
-                } else if let Ok(f) = t.parse::<f64>() {
-                    Ok(f as usize)
-                } else {
-                    Err(QplibError::ParseError(format!(
-                        "expected integer, got '{}'",
-                        t
-                    )))
-                }
-            }
-            None => Err(QplibError::ParseError(
-                "unexpected end of file (expected integer)".to_string(),
-            )),
+        let t = match self.next_token() {
+            Some(t) => t,
+            None => return Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
+                QplibError::ParseError("unexpected end of file (expected integer)".to_string())
+            })),
+        };
+        // Accept float representation (e.g. "1.0" → 1)
+        if let Ok(u) = t.parse::<usize>() {
+            Ok(u)
+        } else if let Ok(f) = t.parse::<f64>() {
+            Ok(f as usize)
+        } else {
+            Err(QplibError::ParseError(format!("expected integer, got '{}'", t)))
         }
     }
 
     fn read_f64(&mut self) -> Result<f64, QplibError> {
-        match self.next_str() {
-            Some(t) => t.parse::<f64>().map_err(|_| {
-                QplibError::ParseError(format!("expected float, got '{}'", t))
-            }),
-            None => Err(QplibError::ParseError(
-                "unexpected end of file (expected float)".to_string(),
-            )),
-        }
+        let t = match self.next_token() {
+            Some(t) => t,
+            None => return Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
+                QplibError::ParseError("unexpected end of file (expected float)".to_string())
+            })),
+        };
+        t.parse::<f64>()
+            .map_err(|_| QplibError::ParseError(format!("expected float, got '{}'", t)))
     }
 
-    /// 1-indexedの整数を読み込み、0-indexedに変換して返す。
-    /// 値が0またはmax_valを超える場合はParseErrorを返す。
+    /// Reads a 1-based index, validates range, and returns the 0-based equivalent.
     fn read_index_1based(&mut self, max_val: usize, context: &str) -> Result<usize, QplibError> {
         let raw = self.read_usize()?;
         if raw == 0 || raw > max_val {
@@ -490,6 +612,14 @@ impl TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extract `QpProblem` from `QplibProblem::Qp`, panicking for MIP variants.
+    fn unwrap_qp(r: QplibProblem) -> QpProblem {
+        match r {
+            QplibProblem::Qp(p) => p,
+            other => panic!("expected Qp, got {:?}", other),
+        }
+    }
 
     /// 単純な2変数QP (QCL):
     /// min 1/2 * (x1^2 + x2^2)  s.t. x1 + x2 = 1, x1,x2 >= 0
@@ -528,7 +658,7 @@ minimize
 0
 0
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         // 等式制約 x1+x2=1 → 1行Eqとして保持（2Le展開しない）
         assert_eq!(prob.num_constraints, 1);
@@ -571,7 +701,7 @@ minimize
 0
 0
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         assert_eq!(prob.num_constraints, 0);
         assert_eq!(prob.q.nnz(), 2);
@@ -625,7 +755,7 @@ minimize
 0 # non-default var names
 0 # non-default con names
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         // lb=ub=5 → 1 Eq row
         assert_eq!(prob.num_constraints, 1);
@@ -694,7 +824,7 @@ minimize
 0
 0
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 3);
         // con1: lb=-inf, ub=4 → 1 Le row; con2: lb=ub=3 → 1 Eq row
         assert_eq!(prob.num_constraints, 2);
@@ -761,7 +891,7 @@ minimize
 0
 0
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 4);
         // con1: lb=-inf, ub=5 → 1 Le
         // con2: lb=1, ub=3 → 2 Le (ub and lb rows)
@@ -833,17 +963,18 @@ minimize
 0
 0
 ";
-        let prob = parse_qplib_str(qplib).unwrap();
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         assert!(prob.quadratic_constraints.is_empty(),
             "QCL must produce empty quadratic_constraints");
     }
 
-    /// 整数変数を含む問題（QIL）は拒否
+    /// Integer variables (QIL, n=2, linear obj nqobj=0) → MilpProblem.
     #[test]
-    fn test_parse_qplib_reject_integer() {
+    fn test_parse_qplib_integer_to_milp() {
+        // QIL: quadratic obj header, but nqobj=0 → empty Q → Milp
         let qplib = "\
-INT_QP
+INT_LP
 QIL
 minimize
 2
@@ -869,6 +1000,181 @@ minimize
 0.0
 0
 0
+0
+";
+        let parsed = parse_qplib_str(qplib).unwrap();
+        let milp = match parsed {
+            QplibProblem::Milp(m) => m,
+            other => panic!("expected Milp, got {:?}", other),
+        };
+        assert_eq!(milp.lp.num_vars, 2);
+        assert_eq!(milp.integer_vars, vec![0, 1], "all 2 vars must be integer");
+        // 1 equality constraint: lb=ub=1.0
+        assert_eq!(milp.lp.num_constraints, 1);
+    }
+
+    /// Integer variables with quadratic objective (QIL, nqobj>0) → MiqpProblem.
+    #[test]
+    fn test_parse_qplib_integer_to_miqp() {
+        // QIL with diagonal Q → Miqp
+        let qplib = "\
+INT_QP
+QIL
+minimize
+2
+1
+2
+1 1 1.0
+2 2 1.0
+0.0
+0
+0.0
+2
+1 1 1.0
+1 2 1.0
+1.79769313486232E+308
+1.0
+0
+1.0
+0
+0.0
+0
+1.79769313486232E+308
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
+";
+        let parsed = parse_qplib_str(qplib).unwrap();
+        let miqp = match parsed {
+            QplibProblem::Miqp(m) => m,
+            other => panic!("expected Miqp, got {:?}", other),
+        };
+        assert_eq!(miqp.qp.num_vars, 2);
+        assert_eq!(miqp.integer_vars, vec![0, 1], "all 2 vars must be integer");
+        assert_eq!(miqp.qp.q.nnz(), 2, "diagonal Q stored as 2 entries");
+    }
+
+    /// Binary variables (CBL, n=2, linear obj nqobj=0) → MilpProblem, bounds=[0,1].
+    #[test]
+    fn test_parse_qplib_binary_to_milp() {
+        // CBL: convex obj header (C), binary vars (B), linear constraints (L)
+        // nqobj=0 → empty Q → Milp
+        let qplib = "\
+BIN_LP
+CBL
+minimize
+2
+1
+0
+0.0
+0
+0.0
+2
+1 1 1.0
+1 2 1.0
+1.79769313486232E+308
+1.0
+0
+1.0
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
+";
+        let parsed = parse_qplib_str(qplib).unwrap();
+        let milp = match parsed {
+            QplibProblem::Milp(m) => m,
+            other => panic!("expected Milp, got {:?}", other),
+        };
+        assert_eq!(milp.lp.num_vars, 2);
+        assert_eq!(milp.integer_vars, vec![0, 1], "all 2 vars must be binary (integer)");
+        // Binary: bounds must be [0,1]
+        for &(lb, ub) in &milp.lp.bounds {
+            assert!((lb - 0.0).abs() < 1e-12, "lb must be 0");
+            assert!((ub - 1.0).abs() < 1e-12, "ub must be 1");
+        }
+        // 1 equality constraint: lb=ub=1.0
+        assert_eq!(milp.lp.num_constraints, 1);
+    }
+
+    /// Binary variables with quadratic objective → MiqpProblem with [0,1] bounds.
+    #[test]
+    fn test_parse_qplib_binary_quad_to_miqp() {
+        // CBL: C=convex-quad obj, B=binary vars, L=linear constraints
+        // nqobj=2 → Q non-empty → Miqp
+        let qplib = "\
+BIN_QP
+CBL
+minimize
+2
+1
+2
+1 1 2.0
+2 2 2.0
+0.0
+0
+0.0
+2
+1 1 1.0
+1 2 1.0
+1.79769313486232E+308
+1.0
+0
+1.0
+0
+0.0
+0
+0.0
+0
+0.0
+0
+0
+0
+";
+        let parsed = parse_qplib_str(qplib).unwrap();
+        let miqp = match parsed {
+            QplibProblem::Miqp(m) => m,
+            other => panic!("expected Miqp, got {:?}", other),
+        };
+        assert_eq!(miqp.qp.num_vars, 2);
+        assert_eq!(miqp.integer_vars, vec![0, 1]);
+        // Binary: all bounds [0,1]
+        for &(lb, ub) in &miqp.qp.bounds {
+            assert!((lb - 0.0).abs() < 1e-12, "lb must be 0");
+            assert!((ub - 1.0).abs() < 1e-12, "ub must be 1");
+        }
+        assert_eq!(miqp.qp.q.nnz(), 2);
+    }
+
+    /// Mixed-integer type 'M' remains UnsupportedType (per-var types section not yet parsed).
+    #[test]
+    fn test_parse_qplib_mixed_integer_unsupported() {
+        let qplib = "\
+MIXED_QP
+QML
+minimize
+2
+1
+0
+0.0
+0
+0.0
+0
+1.79769313486232E+308
+1.0
+0
+1.0
 0
 ";
         assert!(matches!(
@@ -900,7 +1206,7 @@ minimize
         if !path.exists() {
             return; // file not downloaded; skip
         }
-        let prob = parse_qplib(path.as_path()).expect("QPLIB_1157 parse");
+        let prob = unwrap_qp(parse_qplib(path.as_path()).expect("QPLIB_1157 parse"));
 
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 9);
@@ -954,7 +1260,7 @@ minimize
         if !path.exists() {
             return;
         }
-        let prob = parse_qplib(path.as_path()).expect("QPLIB_1353 parse");
+        let prob = unwrap_qp(parse_qplib(path.as_path()).expect("QPLIB_1353 parse"));
 
         assert_eq!(prob.num_vars, 50);
         assert_eq!(prob.num_constraints, 6);
@@ -1004,7 +1310,7 @@ minimize
         if !path.exists() {
             return;
         }
-        let prob = parse_qplib(path.as_path()).expect("QPLIB_1055 parse");
+        let prob = unwrap_qp(parse_qplib(path.as_path()).expect("QPLIB_1055 parse"));
 
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 20);
@@ -1049,7 +1355,7 @@ minimize
         if !path.exists() {
             return;
         }
-        let prob = parse_qplib(path.as_path()).expect("QPLIB_1493 parse");
+        let prob = unwrap_qp(parse_qplib(path.as_path()).expect("QPLIB_1493 parse"));
 
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 5);
@@ -1106,9 +1412,9 @@ minimize
 
     /// Regression: existing files in data/qplib/ parse without error.
     ///
-    /// Files with binary/integer variables (CBL/QBI etc.) legitimately produce
-    /// `UnsupportedType` — that is the expected, pre-existing behavior.
-    /// `ParseError` or `IoError` on any file indicates a regression.
+    /// - Binary/integer files (CBL etc.) now parse as `Milp`/`Miqp`.
+    /// - Mixed-integer types (M/G/S) still produce `UnsupportedType`.
+    /// - `ParseError` or `IoError` on any file is a regression.
     #[test]
     fn test_parse_existing_qplib_files_regression() {
         let dir = data_path("data/qplib");
@@ -1116,6 +1422,8 @@ minimize
             return;
         }
         let mut count = 0;
+        let mut count_mip = 0usize;
+        let mut count_unsupported = 0usize;
         for entry in std::fs::read_dir(&dir).expect("read_dir") {
             let entry = entry.expect("entry");
             let path = entry.path();
@@ -1123,12 +1431,22 @@ minimize
                 continue;
             }
             match parse_qplib(path.as_path()) {
-                Ok(_) => {}
-                Err(QplibError::UnsupportedType(_)) => {} // expected for binary/integer files
+                Ok(QplibProblem::Qp(_)) => {}
+                Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => {
+                    count_mip += 1;
+                }
+                Err(QplibError::UnsupportedType(_)) => {
+                    count_unsupported += 1;
+                }
                 Err(e) => panic!("parse regression: {} failed with unexpected error: {e}", path.display()),
             }
             count += 1;
         }
         assert!(count > 0, "no .qplib files found in data/qplib/");
+        // data/qplib/ contains CBL files → must produce at least some Milp/Miqp results
+        assert!(count_mip > 0,
+            "expected at least one binary/integer file to parse as Milp/Miqp (got 0 out of {count})");
+        // M/G/S mixed types remain unsupported
+        let _ = count_unsupported; // may be 0 if no M/G/S files
     }
 }

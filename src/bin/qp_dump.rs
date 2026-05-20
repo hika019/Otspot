@@ -46,7 +46,15 @@ fn main() -> ExitCode {
             }
         },
         "qplib" => match qplib::parse_qplib(in_path) {
-            Ok(p) => p,
+            Ok(qplib::QplibProblem::Qp(p)) => p,
+            Ok(qplib::QplibProblem::Miqp(m)) => {
+                eprintln!("warning: MIQP — dumping QP relaxation (integrality constraints dropped)");
+                m.qp
+            }
+            Ok(qplib::QplibProblem::Milp(_)) => {
+                eprintln!("QPLIB: MILP (binary/integer linear) — cannot dump as QP JSON");
+                return ExitCode::FAILURE;
+            }
             Err(e) => {
                 eprintln!("QPLIB parse error: {}", e);
                 return ExitCode::FAILURE;

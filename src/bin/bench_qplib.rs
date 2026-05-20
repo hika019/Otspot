@@ -20,7 +20,7 @@ use solver::bench_utils::{
     check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
     load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult,
 };
-use solver::io::qplib::{parse_qplib, QplibError};
+use solver::io::qplib::{parse_qplib, QplibError, QplibProblem};
 use solver::options::SolverOptions;
 use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use solver::problem::SolveStatus;
@@ -95,7 +95,13 @@ fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, Benc
     // parse_qplib に cancel API なし → 同期呼び出し、hang 時は
     // bench_parallel.sh の外部 gtimeout でプロセスごと kill。
     match parse_qplib(path) {
-        Ok(prob) => Ok(prob),
+        Ok(QplibProblem::Qp(prob)) => Ok(prob),
+        Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => {
+            // Binary/integer variables: MIP problem. QP bench skips these.
+            Err(BenchError::Unsupported(
+                "Variable type 'B'/'I' (binary/integer): MIP problem, use MIP bench".to_string(),
+            ))
+        }
         Err(QplibError::UnsupportedType(msg)) => Err(BenchError::Unsupported(msg)),
         Err(e) => Err(BenchError::Parse(e)),
     }

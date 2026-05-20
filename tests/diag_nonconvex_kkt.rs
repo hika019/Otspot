@@ -32,7 +32,7 @@
 //!   assert。符号規約 (`lb_dual / ub_dual / y / Q*x` の組合せ) を独立検証。
 
 use solver::bench_utils::compute_qp_kkt_max;
-use solver::io::qplib::parse_qplib;
+use solver::io::qplib::{parse_qplib, QplibProblem};
 use solver::options::SolverOptions;
 use solver::problem::{ConstraintType, SolveStatus};
 use solver::qp::kkt_resid::{self, f64_impl};
@@ -194,7 +194,10 @@ struct ProbeRecord {
 }
 
 fn solve_and_log(path: &Path, global_ref: Option<f64>) -> ProbeRecord {
-    let prob = parse_qplib(path).expect("parse");
+    let prob = match parse_qplib(path).expect("parse") {
+        QplibProblem::Qp(p) => p,
+        other => panic!("expected continuous QP for nonconvex benchmark, got {:?}", other),
+    };
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(TIMEOUT_PER_PROBLEM_SECS);
     let t0 = Instant::now();
@@ -359,7 +362,10 @@ fn kkt_perturbation_sentinel() {
     // NONCONVEX_DENSE_N20: n=20, m=0, dense indefinite Q。solve は < 1s で
     // SolverResult を返す (LocallyOptimal or Optimal いずれでも本 sentinel は成立)。
     let path = Path::new(SYNTH_DIR).join("NONCONVEX_DENSE_N20.qplib");
-    let prob = parse_qplib(&path).expect("parse NONCONVEX_DENSE_N20");
+    let prob = match parse_qplib(&path).expect("parse NONCONVEX_DENSE_N20") {
+        QplibProblem::Qp(p) => p,
+        other => panic!("expected continuous QP, got {:?}", other),
+    };
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(TIMEOUT_PER_PROBLEM_SECS);
     let res = solve_qp_with(&prob, &opts);
@@ -395,7 +401,10 @@ fn kkt_perturbation_sentinel() {
 #[test]
 fn kkt_consistency_with_bench_utils() {
     let path = Path::new(SYNTH_DIR).join("NONCONVEX_OFFDIAG_N20.qplib");
-    let prob = parse_qplib(&path).expect("parse");
+    let prob = match parse_qplib(&path).expect("parse") {
+        QplibProblem::Qp(p) => p,
+        other => panic!("expected continuous QP, got {:?}", other),
+    };
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(TIMEOUT_PER_PROBLEM_SECS);
     let res = solve_qp_with(&prob, &opts);
