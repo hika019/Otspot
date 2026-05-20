@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::time::Instant;
 
+#[cfg(test)]
 use crate::ScopedDisable;
 
 use crate::options::SolverOptions;
@@ -31,12 +32,14 @@ thread_local! {
 
 /// Runs `f` with `guard_qp_optimal` bypassed.
 ///
-/// Use in tests as a no-op scope guard: pass corrupt data through the guard
-/// while disabled and assert it is NOT demoted. The load-bearing evidence lives
-/// in the paired test that does NOT disable.
+/// Test-only: used as a no-op scope guard in `guard_qp_optimal_no_op_proof`.
+/// Pass corrupt data through the guard while disabled and assert it is NOT
+/// demoted. The load-bearing evidence lives in the paired test that does NOT
+/// disable.
 ///
 /// Thread-safe: affects only the current thread.
 /// Panic-safe: the guard is re-enabled even if `f` panics.
+#[cfg(test)]
 pub(crate) fn with_qp_guard_disabled<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,

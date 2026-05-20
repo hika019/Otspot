@@ -1,6 +1,10 @@
+#[cfg(feature = "parallel")]
 use super::super::*;
+#[cfg(feature = "parallel")]
 use super::{assert_close, EPS};
+#[cfg(feature = "parallel")]
 use crate::problem::SolveStatus;
+#[cfg(feature = "parallel")]
 use crate::sparse::CscMatrix;
 
 /// Concurrent Eq 制約。

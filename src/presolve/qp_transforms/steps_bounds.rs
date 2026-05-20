@@ -72,7 +72,7 @@ pub(super) fn step9_singleton_ineq_to_bound(
         }
         ws.bounds[j] = (new_lb, new_ub);
         ws.removed_rows[i] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::SingletonIneqToBound { row: i, col: j, a_ij, ct });
+        ws.postsolve_stack.push(QpPostsolveStep::SingletonIneqToBound { row: i, col: j, ct });
     }
     Ok(())
 }
