@@ -254,12 +254,16 @@ fn solve_aat_direct_ir(
 
 /// A·Aᵀ LSQ を解く。
 ///
-/// 戦略:
 /// 1. CG (上限 = m_sub、Krylov 理論): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速。
-///    有限 y が得られたらそれを返す (収束・未収束を問わず)。未収束の best-effort y は
-///    下流の DD-guard (refine_dual_lsq) が refine する。
+///    有限 y が得られたらそれを返す (収束・未収束を問わず)。
+///    未収束の best-effort y は下流の DD-guard (refine_dual_lsq) が refine/reject する。
 /// 2. Direct LDL+IR フォールバック: CG が NaN/Inf を返した場合のみ。
 ///    A·Aᵀ が memory budget 超なら None。
+///
+/// 非収束時に ‖Aᵀy−rhs‖ で CG vs LDL を比較しない理由:
+///   ill-cond 問題 (LISWET9 等) では LDL の陽的 A·Aᵀ 構築が数値誤差を増幅し、
+///   LDL の ‖Aᵀy−rhs‖ が見かけ上小さくても最終 KKT は CG が優る。
+///   downstream DD-guard が y を reject できるため、CG best_y を優先する方が安全。
 fn solve_aat(
     a_sub: &CscMatrix,
     n: usize,
@@ -268,13 +272,12 @@ fn solve_aat(
     deadline: Option<std::time::Instant>,
     perf_trace: bool,
 ) -> Option<Vec<f64>> {
-    // Step 1: CG — upper limit = m_sub (Krylov theory: converges in ≤ dim iters, exact
-    // arithmetic; rare non-convergence due to round-off → best-effort y, refined downstream).
+    // CG — upper limit = m_sub (Krylov theory: converges in ≤ dim, exact arithmetic).
     let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
     if y_cg.is_some() {
         return y_cg;
     }
-    // Step 2: direct LDL+IR fallback — only when CG returned NaN/Inf.
+    // CG hit NaN/Inf → direct LDL+IR fallback.
     if perf_trace {
         eprintln!(
             "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
