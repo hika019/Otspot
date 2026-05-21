@@ -60,7 +60,7 @@
 
 use crate::mip::{MilpProblem, MiqpProblem};
 use crate::problem::{ConstraintType, LpProblem};
-use crate::qp::QpProblem;
+use crate::qp::{QcqpMatrix, QpProblem};
 use crate::sparse::CscMatrix;
 use std::collections::VecDeque;
 use std::io::BufRead;
@@ -421,32 +421,23 @@ fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
         })
         .collect();
 
-    // 二次制約行列（QCQP のみ）
-    // aug 行ごとに Q_k を配置:
-    //   aug_ub_row[k] → Q_k（正符号）
-    //   aug_lb_row[k] → -Q_k（lb 反転のため符号反転）
+    // Quadratic constraint matrices (QCQP only).
+    // Stored as QcqpMatrix (COO triplets) — O(nnz) memory regardless of n.
+    // CscMatrix::from_triplets(n, n) would allocate O(n) col_ptr per constraint;
+    // for QPLIB_8683 (n=200008, m=140000) that is 224 GB → OOM.
     let quadratic_constraints = if con_char == 'Q' {
-        let mut qc = vec![CscMatrix::new(n, n); m_aug];
+        let mut qc: Vec<QcqpMatrix> = vec![QcqpMatrix::new(n); m_aug];
         for k in 0..m {
             let trips = &con_q_triplets[k];
             if trips.is_empty() {
                 continue;
             }
-            let rows: Vec<usize> = trips.iter().map(|&(r, _, _)| r).collect();
-            let cols: Vec<usize> = trips.iter().map(|&(_, c, _)| c).collect();
-            let vals: Vec<f64> = trips.iter().map(|&(_, _, v)| v).collect();
-            let qk = CscMatrix::from_triplets(&rows, &cols, &vals, n, n)
-                .map_err(|e| QplibError::ParseError(format!("Q_k[{}] matrix error: {}", k, e)))?;
-
             if let Some(aug_row) = aug_ub_row[k] {
-                qc[aug_row] = qk.clone();
+                qc[aug_row].triplets = trips.clone();
             }
             if let Some(aug_row) = aug_lb_row[k] {
-                // lb 反転行: 1/2 x^T (-Q_k) x <= -lb_k
-                let neg_vals: Vec<f64> = vals.iter().map(|v| -v).collect();
-                let neg_qk = CscMatrix::from_triplets(&rows, &cols, &neg_vals, n, n)
-                    .map_err(|e| QplibError::ParseError(format!("Q_k[{}] neg matrix error: {}", k, e)))?;
-                qc[aug_row] = neg_qk;
+                // lb row: sign-flip → 1/2 x^T (-Q_k) x <= -lb_k
+                qc[aug_row].triplets = trips.iter().map(|&(r, c, v)| (r, c, -v)).collect();
             }
         }
         qc
@@ -792,12 +783,10 @@ minimize
         // quadratic_constraints: 1 entry (one aug row), diagonal Q_1 has nnz=2
         assert_eq!(prob.quadratic_constraints.len(), 1);
         assert_eq!(prob.quadratic_constraints[0].nnz(), 2);
-        // Verify Q_1 values (after symmetrization diagonal-only: no off-diag added)
-        // CscMatrix nnz=2: entries at (0,0)=2.0 and (1,1)=4.0
+        // Verify Q_1: COO triplets at (0,0)=2.0 and (1,1)=4.0
         let qk = &prob.quadratic_constraints[0];
-        assert_eq!(qk.nrows, 2);
-        assert_eq!(qk.ncols, 2);
-        // no quadratic_constraints on standard QCL/QCN (round-trip guard)
+        assert_eq!(qk.n, 2);
+        // round-trip guard: at least one constraint has quadratic terms
         assert!(prob.quadratic_constraints.iter().any(|q| q.nnz() > 0));
     }
 
@@ -866,8 +855,7 @@ minimize
         assert_eq!(prob.quadratic_constraints[0].nnz(), 0);
         // con2 Q has nnz=2 (diagonal entries for x1 and x3)
         assert_eq!(prob.quadratic_constraints[1].nnz(), 2);
-        // Verify dimensions
-        assert_eq!(prob.quadratic_constraints[1].nrows, 3);
+        assert_eq!(prob.quadratic_constraints[1].n, 3);
     }
 
     /// QCQ: n=4, m=3, range constraint expanding to ub+lb rows (sign-flip).
@@ -947,12 +935,10 @@ minimize
         assert_eq!(prob.quadratic_constraints[3].nnz(), 3);
 
         // Verify sign flip: con2_ub val positive, con2_lb val negative
-        // Find (0,0) entry in Q[1] and Q[2]
         let q_ub = &prob.quadratic_constraints[1];
         let q_lb = &prob.quadratic_constraints[2];
-        // Both are 4x4 with nnz=1 at (0,0)
-        assert!(q_ub.values.iter().all(|&v| v > 0.0), "ub row Q_2 values must be positive");
-        assert!(q_lb.values.iter().all(|&v| v < 0.0), "lb row Q_2 values must be negative (sign flip)");
+        assert!(q_ub.triplets.iter().all(|&(_, _, v)| v > 0.0), "ub row Q_2 values must be positive");
+        assert!(q_lb.triplets.iter().all(|&(_, _, v)| v < 0.0), "lb row Q_2 values must be negative (sign flip)");
     }
 
     /// QCL/QCN round-trip: quadratic_constraints must be empty for non-Q constraint types.
@@ -1262,15 +1248,13 @@ minimize
         }
         // Constraint 9 (aug_row=8): full 40x40 Q_9, nnz=1516 after sym
         let qk = &prob.quadratic_constraints[8];
-        assert_eq!(qk.nrows, 40);
-        assert_eq!(qk.ncols, 40);
+        assert_eq!(qk.n, 40);
         assert_eq!(qk.nnz(), 1516,
             "Q_9 nnz: 40 diag + 738 off-diag*2 = 1516");
         // Diagonal (0,0) = 0.38 (file: 9 1 1 0.38)
-        let col0_start = qk.col_ptr[0];
-        assert_eq!(qk.row_ind[col0_start], 0, "first entry in col 0 must be diagonal");
-        assert!((qk.values[col0_start] - 0.38).abs() < 1e-10,
-            "Q_9[0,0] must be 0.38");
+        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v).expect("Q_9 must have (0,0) entry");
+        assert!((v00 - 0.38).abs() < 1e-10, "Q_9[0,0] must be 0.38");
     }
 
     /// QPLIB_1353: n=50, m=6 (5 equality constraints + 1 Le).
@@ -1312,15 +1296,13 @@ minimize
                 "Q_k[{i}] must be empty");
         }
         let qk = &prob.quadratic_constraints[5];
-        assert_eq!(qk.nrows, 50);
-        assert_eq!(qk.ncols, 50);
+        assert_eq!(qk.n, 50);
         assert_eq!(qk.nnz(), 2372,
             "Q_6 nnz: 50 diag + 1161 off-diag*2 = 2372");
         // Diagonal (0,0) = 0.46 (file: 6 1 1 0.46)
-        let col0_start = qk.col_ptr[0];
-        assert_eq!(qk.row_ind[col0_start], 0);
-        assert!((qk.values[col0_start] - 0.46).abs() < 1e-10,
-            "Q_6[0,0] must be 0.46");
+        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v).expect("Q_6 must have (0,0) entry");
+        assert!((v00 - 0.46).abs() < 1e-10, "Q_6[0,0] must be 0.46");
     }
 
     /// QPLIB_1055: n=40, m=20 (all Le, lb=-inf for all constraints).
@@ -1357,17 +1339,15 @@ minimize
         // All 20 Q_k are non-empty (full 40x40 lower-tri, 820 entries → 1600 after sym)
         for i in 0..20 {
             let qk = &prob.quadratic_constraints[i];
-            assert_eq!(qk.nrows, 40);
-            assert_eq!(qk.ncols, 40);
+            assert_eq!(qk.n, 40);
             assert_eq!(qk.nnz(), 1600,
                 "Q_{i} nnz must be 1600 (full 40x40 lower-tri symmetrized)");
         }
         // Q_1[0,0] = 0.839 (file: 1 1 1 0.839)
         let qk0 = &prob.quadratic_constraints[0];
-        let col0_start = qk0.col_ptr[0];
-        assert_eq!(qk0.row_ind[col0_start], 0);
-        assert!((qk0.values[col0_start] - 0.839).abs() < 1e-10,
-            "Q_1[0,0] must be 0.839");
+        let v00 = qk0.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v).expect("Q_1 must have (0,0) entry");
+        assert!((v00 - 0.839).abs() < 1e-10, "Q_1[0,0] must be 0.839");
     }
 
     /// QPLIB_1493: n=40, m=5 (4 equality + 1 Le).
@@ -1406,14 +1386,13 @@ minimize
                 "Q_k[{i}] must be empty");
         }
         let qk = &prob.quadratic_constraints[4];
-        assert_eq!(qk.nrows, 40);
+        assert_eq!(qk.n, 40);
         assert_eq!(qk.nnz(), 1547,
             "Q_5 nnz: 37 diag + 755 off-diag*2 = 1547");
         // Q_5[0,0] = 1.88 (file: 5 1 1 1.88)
-        let col0_start = qk.col_ptr[0];
-        assert_eq!(qk.row_ind[col0_start], 0);
-        assert!((qk.values[col0_start] - 1.88).abs() < 1e-10,
-            "Q_5[0,0] must be 1.88");
+        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v).expect("Q_5 must have (0,0) entry");
+        assert!((v00 - 1.88).abs() < 1e-10, "Q_5[0,0] must be 1.88");
     }
 
     /// Regression: all 6 files in data/qplib_unsupported/ parse without error.
@@ -1567,6 +1546,149 @@ minimize
              Check that drop(a_triplets) is present before from_triplets call.",
             peak as f64 / 1_048_576.0,
             QPLIB_8500_PARSE_PEAK_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    /// Memory probe: large DCL files (QPLIB_8547 = 144 MB, QPLIB_9008 = 210 MB).
+    ///
+    /// These files have ~1 M variables and ~1 M constraints. Parsing them is
+    /// memory-intensive due to the A-matrix triplet construction. This test
+    /// measures the actual peak and reports it so we can calibrate limits.
+    /// Currently set to a generous 2 GB limit — the intent is to detect
+    /// catastrophic regressions (e.g. O(n²) allocations), not to be tight.
+    #[test]
+    fn test_memory_probe_large_dcl_files() {
+        const DCL_PROBE_LIMIT: usize = 2 * 1024 * 1024 * 1024; // 2 GB generous ceiling
+
+        for name in &["QPLIB_8547", "QPLIB_9008"] {
+            let path = data_path(&format!("data/qplib/{name}.qplib"));
+            if !path.exists() {
+                continue;
+            }
+            crate::peak_alloc::begin();
+            let result = parse_qplib(path.as_path());
+            let peak = crate::peak_alloc::peak_bytes();
+            assert!(
+                result.is_ok() || matches!(result, Err(QplibError::UnsupportedType(_))),
+                "{name} parse must not fail with ParseError or IoError: {:?}", result.err()
+            );
+            assert!(
+                peak <= DCL_PROBE_LIMIT,
+                "{name} parse peak {:.1} MB exceeds {:.1} GB catastrophic-regression limit.\n\
+                 Expected O(nnz) memory not O(n·m) or O(n²).",
+                peak as f64 / 1_048_576.0,
+                DCL_PROBE_LIMIT as f64 / 1_073_741_824.0
+            );
+        }
+    }
+
+    /// Memory sentinel: QPLIB_8683 (DCQ, n=200008, m=140000).
+    ///
+    /// With the old `CscMatrix::from_triplets(&rows, &cols, &vals, n, n)` per
+    /// filled slot, each slot allocates `col_ptr = vec![0; n+1]` = 1.6 MB.
+    /// For 140000 filled slots → 224 GB → SIGKILL.
+    /// With `QcqpMatrix` (COO), all slots share only the raw triplet data:
+    /// 300000 symmetrized entries × 24 bytes ≈ 7 MB total.
+    ///
+    /// **No-op failure guarantee**: reverting the quadratic_constraints block
+    /// to `CscMatrix::from_triplets(..., n, n)` causes OOM before this assertion.
+    #[test]
+    fn test_memory_sentinel_qplib8683_qcqp() {
+        let path = data_path("data/qplib/QPLIB_8683.qplib");
+        if !path.exists() {
+            return;
+        }
+        // Peak = q_obj(~5MB) + con_quad_triplets(~14MB) + qc(~7MB)
+        //       + a_triplets(~8MB) + build_internal(~8MB) + misc
+        // Generous limit; no-op (CscMatrix per slot) raises this to 224 GB → OOM.
+        const QPLIB_8683_PEAK_LIMIT: usize = 300 * 1024 * 1024; // 300 MB
+
+        crate::peak_alloc::begin();
+        parse_qplib(path.as_path()).expect("QPLIB_8683 must parse without OOM");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        assert!(
+            peak <= QPLIB_8683_PEAK_LIMIT,
+            "QPLIB_8683 parse peak {:.1} MB exceeds {:.1} MB limit.\n\
+             QcqpMatrix (COO) path expected < 50 MB; CscMatrix per-slot causes 224 GB OOM.\n\
+             Check that quadratic_constraints uses QcqpMatrix not CscMatrix::from_triplets.",
+            peak as f64 / 1_048_576.0,
+            QPLIB_8683_PEAK_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // QCQP sparse-init sentinel
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal valid QCQ .qplib string with `n` variables and `m` equality
+    /// constraints (lb=ub=0). Only constraint 1 has a quadratic term (x1^2).
+    fn make_synthetic_qcq_content(n: usize, m: usize) -> String {
+        let mut s = String::with_capacity(256);
+        s.push_str("SYNTHETIC_QCQP\nQCQ\nminimize\n");
+        s.push_str(&format!("{n}\n{m}\n"));
+        s.push_str("0\n");   // nqobj (linear objective)
+        s.push_str("0.0\n"); // default b0 (all-zero linear obj)
+        s.push_str("0\n");   // non-default b0 count
+        s.push_str("0.0\n"); // q0 (objective constant)
+        s.push_str("1\n");   // n_con_quad_terms = 1
+        s.push_str("1 1 1 1.0\n"); // constraint 1, x1^2 diagonal entry
+        s.push_str("0\n");   // n_con_lin_terms
+        s.push_str("1.79769313486232E+308\n"); // inf
+        s.push_str("0.0\n0\n"); // lb_con default=0, non-defaults=0
+        s.push_str("0.0\n0\n"); // ub_con default=0, non-defaults=0 (lb=ub → Eq)
+        s.push_str("0.0\n0\n"); // lb_var default, non-defaults
+        s.push_str("1.79769313486232E+308\n0\n"); // ub_var default, non-defaults
+        s.push_str("0.0\n0\n0.0\n0\n0.0\n0\n0\n0\n"); // primal/dual/bound-dual/names
+        s
+    }
+
+    /// QCQP COO-storage memory sentinel.
+    ///
+    /// The old `vec![CscMatrix::new(n, n); m_aug]` allocation plus
+    /// `CscMatrix::from_triplets(..., n, n)` for filled slots both require
+    /// O(n) `col_ptr` per constraint — O(m_aug·n) total.
+    /// With `SYNTHETIC_N = 50_000` and `SYNTHETIC_M = 200`:
+    /// - Dense-init default: 200 × 50_001 × 8 ≈ 80 MB → above `QCQP_DENSE_INIT_LIMIT`
+    ///
+    /// **No-op failure guarantee**: reverting to `CscMatrix::new(n, n)` default
+    /// or `CscMatrix::from_triplets(..., n, n)` for filled slots raises peak
+    /// above `QCQP_DENSE_INIT_LIMIT` → assertion fires.
+    /// `QcqpMatrix` stores only triplets → negligible overhead.
+    #[test]
+    fn test_qcqp_sparse_init_memory_bounded() {
+        const SYNTHETIC_N: usize = 50_000;
+        const SYNTHETIC_M: usize = 200;
+        // Dense-init: 200 × 50_001 × 8 = 80 MB; limit chosen between the two paths.
+        const QCQP_DENSE_INIT_LIMIT: usize = 20 * 1024 * 1024; // 20 MB
+
+        let content = make_synthetic_qcq_content(SYNTHETIC_N, SYNTHETIC_M);
+
+        crate::peak_alloc::begin();
+        let result = parse_qplib_str(&content).expect("synthetic QCQP must parse");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        let prob = unwrap_qp(result);
+        assert_eq!(prob.num_vars, SYNTHETIC_N);
+        // All constraints are equality → m_aug = SYNTHETIC_M
+        assert_eq!(prob.num_constraints, SYNTHETIC_M);
+        assert_eq!(prob.quadratic_constraints.len(), SYNTHETIC_M);
+        // Only slot 0 (constraint 1) has a non-zero Q
+        assert_eq!(prob.quadratic_constraints[0].nnz(), 1,
+            "constraint 0 must have nnz=1 (single diagonal entry)");
+        for i in 1..SYNTHETIC_M {
+            assert_eq!(prob.quadratic_constraints[i].nnz(), 0,
+                "Q_k[{i}] must be empty for synthetic problem");
+        }
+
+        assert!(
+            peak <= QCQP_DENSE_INIT_LIMIT,
+            "synthetic QCQP parse peak {:.1} MB exceeds {:.1} MB limit.\n\
+             QcqpMatrix (COO) path expected < 1 MB; \
+             CscMatrix::new(n,n) default path ≈ 80 MB.\n\
+             Revert check: ensure quadratic_constraints uses QcqpMatrix not CscMatrix.",
+            peak as f64 / 1_048_576.0,
+            QCQP_DENSE_INIT_LIMIT as f64 / 1_048_576.0
         );
     }
 

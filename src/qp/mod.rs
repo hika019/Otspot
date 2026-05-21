@@ -33,7 +33,7 @@ pub(crate) use postsolve::refine::lsq::{refine_dual_lsq, refine_dual_lsq_irls};
 pub(crate) use postsolve::refine::primal_lsq::refine_primal_lsq;
 pub(crate) use postsolve::refine::projected_gradient::refine_dual_projected_gradient;
 pub(crate) use postsolve::refine::worst_active::refine_dual_worst_active_block;
-pub use problem::{QpProblem, QpWarmStart};
+pub use problem::{QcqpMatrix, QpProblem, QpWarmStart};
 
 use crate::options::SolverOptions;
 #[cfg(test)]

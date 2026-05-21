@@ -3,6 +3,30 @@
 use crate::problem::{ConstraintType, SolveStatus};
 use crate::sparse::CscMatrix;
 
+/// Quadratic term storage for a single QCQP constraint.
+///
+/// Uses COO (coordinate) format: symmetrized `(row, col, val)` triplets.
+/// Memory is O(nnz), unlike `CscMatrix` which requires O(n) for `col_ptr`.
+#[derive(Debug, Clone, Default)]
+pub struct QcqpMatrix {
+    /// Problem dimension (n×n symmetric matrix).
+    pub n: usize,
+    /// Symmetrized COO triplets: (row, col, value), 0-indexed.
+    pub triplets: Vec<(usize, usize, f64)>,
+}
+
+impl QcqpMatrix {
+    /// Creates an empty n×n matrix with no non-zero entries.
+    pub fn new(n: usize) -> Self {
+        Self { n, triplets: Vec::new() }
+    }
+
+    /// Returns the number of stored entries (after symmetrization).
+    pub fn nnz(&self) -> usize {
+        self.triplets.len()
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum QpProblemError {
@@ -24,7 +48,7 @@ impl std::error::Error for QpProblemError {}
 /// When `quadratic_constraints` is non-empty the problem is a QCQP.
 /// Entry `k` holds the symmetric `n×n` matrix `Q_k` for the quadratic part
 /// of constraint `k`: `1/2 x^T Q_k x + a_k^T x {<=,=,>=} b_k`.
-/// An empty `CscMatrix` at index `k` means constraint `k` has no quadratic part.
+/// An empty `QcqpMatrix` at index `k` means constraint `k` has no quadratic part.
 #[derive(Debug, Clone)]
 pub struct QpProblem {
     pub q: CscMatrix,
@@ -35,11 +59,11 @@ pub struct QpProblem {
     pub num_vars: usize,
     pub num_constraints: usize,
     pub constraint_types: Vec<ConstraintType>,
-    /// Per-constraint quadratic matrices for QCQP.
+    /// Per-constraint quadratic matrices for QCQP, stored in COO format.
     ///
-    /// Length is either 0 (pure QP/LP, no quadratic constraints) or
-    /// `num_constraints` (QCQP). Entry `k` is the symmetric `Q_k` matrix.
-    pub quadratic_constraints: Vec<CscMatrix>,
+    /// Length is either 0 (pure QP/LP) or `num_constraints` (QCQP).
+    /// Entry `k` holds symmetrized triplets for `Q_k`; empty means no quadratic part.
+    pub quadratic_constraints: Vec<QcqpMatrix>,
     /// 目的関数値 = 1/2 x^T Q x + c^T x + obj_offset
     pub obj_offset: f64,
 }
