@@ -105,6 +105,13 @@ pub(crate) mod peak_alloc {
         PEAK_DELTA.with(|p| p.get().max(0) as usize)
     }
 
+    /// Net live bytes above the baseline captured by `begin()`, right now
+    /// (not the peak). Used by accumulation sentinels to assert that memory
+    /// returns to baseline after each unit of work is dropped.
+    pub fn current_bytes() -> isize {
+        CURRENT.with(|c| c.get()) - BASELINE.with(|b| b.get())
+    }
+
     #[inline]
     fn update(delta: isize) {
         CURRENT.with(|c| {
