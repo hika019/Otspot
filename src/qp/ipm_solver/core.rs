@@ -205,11 +205,11 @@ fn run_ipm_with(
     }
 
     // Skip the saddle-point Krylov IR when the solution already meets the
-    // user tolerance (satisfies_eps: kkt + pres + bv + comp + duality_gap all
-    // pass). The IR factorizes the full augmented K = [Q+δI, Aᵀ; A, -δI] (n+m),
-    // which fills catastrophically for dense constraint rows (fit2d: ~7s) yet
-    // performs zero refinement on an already-converged point. This mirrors the
-    // `!kkt_already_pass` gate on `refine_post_processing` above.
+    // user tolerance (kkt & primal both < eps). The IR factorizes the full
+    // augmented K = [Q+δI, Aᵀ; A, -δI] (n+m), which fills catastrophically for
+    // problems with dense constraint rows (fit2d: 110M L-nnz, ~7s/factorize)
+    // yet performs zero refinement on an already-converged point. This mirrors
+    // the `!kkt_already_pass` gate on `refine_post_processing` above.
     let run_krylov_ir = ipm_made_progress && !kkt_already_pass;
     if run_krylov_ir {
         refine_krylov_and_projection(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
