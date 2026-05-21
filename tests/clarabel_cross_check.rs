@@ -1,6 +1,6 @@
 //! 外部ソルバ Clarabel との cross-check テスト。
 //!
-//! 目的: 我々の solve_qp が外部 reference と一致するか確認。
+//! 目的: 本ソルバの solve_qp が外部 reference と一致するか確認。
 //! 一致しない問題 (LISWET9 等) は parser/transform のバグの可能性。
 
 use solver::io::qps::parse_qps;
@@ -120,7 +120,7 @@ fn solve_clarabel(prob: &QpProblem) -> Option<(f64, Vec<f64>)> {
 }
 
 /// LISWET9/YAO は Clarabel default で AlmostSolved 止まり。
-/// より厳しい tol + iter で本当に「真の最適」が我々に近いか確認する。
+/// より厳しい tol + iter で本当に「真の最適」が本ソルバに近いか確認する。
 fn solve_clarabel_strict(prob: &QpProblem) -> Option<(f64, Vec<f64>, String)> {
     let (p, q, a, b, cones) = build_clarabel(prob);
     let mut settings = DefaultSettings::default();
@@ -134,7 +134,7 @@ fn solve_clarabel_strict(prob: &QpProblem) -> Option<(f64, Vec<f64>, String)> {
     Some((solver.info.cost_primal, solver.solution.x.clone(), format!("{:?} iters={}", solver.info.status, solver.info.iterations)))
 }
 
-/// 我々のソルバの obj は obj_offset を加算済みか (postsolve 経由) を確認するため、
+/// 本ソルバの obj は obj_offset を加算済みか (postsolve 経由) を確認するため、
 /// internal (offset なし) 計算で比較する。
 fn compute_internal_obj(prob: &QpProblem, x: &[f64]) -> f64 {
     let qx = prob.q.mat_vec_mul(x).expect("Qx");
@@ -149,7 +149,7 @@ fn test_simple_2var_qp_matches_clarabel() {
     use solver::sparse::CscMatrix;
     let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[1.0, 1.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
-    // 我々の new_all_le は Ax <= b。Ge 制約は -Ax <= -b で表現
+    // 本ソルバの new_all_le は Ax <= b。Ge 制約は -Ax <= -b で表現
     // x1 + x2 >= 1  →  -x1 - x2 <= -1
     let a = CscMatrix::from_triplets(&[0,0], &[0,1], &[-1.0, -1.0], 1, 2).unwrap();
     let b = vec![-1.0];
@@ -175,7 +175,7 @@ fn test_simple_2var_qp_matches_clarabel() {
 /// 出ない → Q もしくは c が違う。
 ///
 /// さらに feasibility cross check:
-/// 我々の x が Clarabel 用 b で feasible (Ax compared to b 我々の constraint_types)
+/// 本ソルバの x が Clarabel 用 b で feasible (Ax compared to b 本ソルバの constraint_types)
 /// Clarabel の x が同じく feasible
 fn deep_check(name: &str, path: &std::path::Path) -> bool {
     assert!(path.exists(), "{:?} ({}) not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path, name);
@@ -201,17 +201,16 @@ fn deep_check(name: &str, path: &std::path::Path) -> bool {
     let (cl_obj_clar, cl_x) = cl.unwrap();
     let cl_internal_obj = compute_internal_obj(&prob, &cl_x);
 
-    // 我々
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
     let our = solve_qp_with(&prob, &opts);
     let our_internal_obj = compute_internal_obj(&prob, &our.solution);
 
-    // Clarabel x で 我々の式 → Q, c の解釈チェック
+    // Clarabel x で 本ソルバの式 → Q, c の解釈チェック
     println!("Clarabel: cost_primal={:.6e}, internal_obj(via our Q,c)={:.6e}", cl_obj_clar, cl_internal_obj);
     println!("Ours: objective={:.6e}, internal_obj={:.6e}", our.objective, our_internal_obj);
 
-    // feasibility check: 我々の x で 我々の constraints
+    // feasibility check: 本ソルバの x で 本ソルバの constraints
     let check_feasibility = |x: &[f64], label: &str| {
         if !x.is_empty() && prob.num_constraints > 0 {
             let ax = prob.a.mat_vec_mul(x).unwrap();
@@ -277,7 +276,6 @@ fn test_liswet9_yao_strict_clarabel() {
         } else {
             println!("  Clarabel strict failed");
         }
-        // 我々
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(60.0);
         let our = solve_qp_with(&prob, &opts);
