@@ -18,11 +18,25 @@ Rustで書かれた高性能な線形計画法（LP）ソルバー。
 
 ## クイックスタート
 
-`Cargo.toml` に追加:
+必要環境: Rust (edition 2021, stable)。crates.io には未公開のため、git 依存またはソースビルドで利用する。
+
+別プロジェクトから依存する場合（git 依存）:
 
 ```toml
 [dependencies]
-solver = { path = "path/to/solver" }
+solver = { git = "https://github.com/hika019/solver" }
+```
+
+（左辺 `solver` は crate 名（`Cargo.toml` の `name`）、URL はリポジトリ。両者は独立に決まる。）
+
+ソースからビルド・動作確認:
+
+```bash
+git clone https://github.com/hika019/solver.git
+cd solver
+cargo build --release
+cargo run --release --example solve_lp   # LP の最小例
+cargo run --release --example solve_qp   # QP の最小例
 ```
 
 ### モデリングAPI
@@ -336,31 +350,25 @@ download script 未整備、手動配置が必要 (URL ヒントは `download_al
 
 ```
 src/
-├── lib.rs              # クレートのエントリポイント
-├── model/              # 高レベル代数モデリングAPI
-│   ├── mod.rs          # Model、ModelResult、ModelError
-│   ├── variable.rs     # 変数ハンドル
-│   ├── expression.rs   # 線形式（+、-、*演算子）
-│   └── constraint.rs   # 制約、constraint!マクロ
-├── simplex/            # 修正シンプレックスソルバー
-│   ├── mod.rs          # solve() / solve_with()
-│   └── pricing.rs      # 最急勾配価格決定戦略
-├── presolve/           # 前処理
-│   ├── mod.rs
-│   └── scaling.rs      # Ruiz均衡スケーリング
-├── basis/              # LU分解基底管理
+├── lib.rs              # クレートのエントリポイント・公開API再エクスポート
+├── model/              # 高レベル代数モデリングAPI (Model、constraint!マクロ)
+├── lp.rs               # LP求解エントリ
+├── simplex/            # 修正シンプレックス (primal / dual)
+├── qp/                 # QP求解 (内点法 IPM / IP-PMM、postsolve)
+├── mip/                # 混合整数 (MILP / MIQP) branch-and-bound
+├── presolve/           # 前処理 (Ruizスケーリング、postsolve)
+├── linalg/             # 線形代数 (LU、LDLᵀ)
+├── basis/              # 基底管理
 ├── sparse/             # CSC疎行列・疎ベクトル
-├── problem/            # LpProblem、SolverResult、SolveStatus
+├── problem/            # LpProblem / QpProblem、SolverResult、SolveStatus
+├── screening.rs        # 問題スクリーニング
 ├── options.rs          # SolverOptions
 ├── tolerances.rs       # 数値許容誤差定数
-├── error.rs            # SolverErrorエナム
-└── io/
-    ├── mod.rs
-    └── mps.rs          # MPSファイルパーサー
-benches/
-├── scaling_pricing.rs
-├── lu_bench.rs
-└── solve_bench.rs
+├── error.rs            # SolverError
+├── io/                 # 入力パーサ (mps / qps / qplib)
+└── bin/                # CLIツール (qp_runner、qp_diag、qps_benchmark ほか)
+examples/               # 利用例 (solve_lp、solve_qp)
+benches/                # Criterionベンチ (lu_bench、qp_bench、solve_bench、scaling_pricing)
 ```
 
 ## ライセンス
