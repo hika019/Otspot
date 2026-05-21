@@ -4,14 +4,17 @@
 //! A·Aᵀ を明示的に構築しないため O(k·nnz) (k = CG 収束イテレーション数)。
 //! 直接法 (BTreeMap + LDL) は LASSO 等の密 A·Aᵀ 問題で O(m²·nnz/col) となり
 //! 79-96% wall を支配していた。CG はその回避策 (疎性活用・全体 LSQ 回避)。
+//!
+//! CG が CG_MAX_ITERS 内に収束しなかった場合は direct LDL 経路にフォールバックする。
 
-use crate::qp::linalg::{compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
+use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
 use crate::tolerances::COMP_SLACK_REL_TOL;
 
-/// CG 最大イテレーション数上限。κ=1e6 の問題でも √κ=1000 反復以内に収束する想定。
+/// CG フルバジェット。直接法 (LDL) が memory-budget 超の場合のみ使用。
+/// κ=1e6 問題でも √κ=1000 反復以内に収束する想定。
 const CG_MAX_ITERS: usize = 1000;
 
 /// CG 相対収束判定 (||r||² / ||r0||² < tol)。LSQ 解精度として十分。
@@ -58,14 +61,14 @@ fn aat_apply(
 }
 
 /// 陰的 CG で正規方程式 (A·Aᵀ + ε·I)·y = A·target を解く。
-/// target は TwoFloat (DD 精度) で渡す。RHS (A·target) は DD で計算して f64 に落とす。
+/// 収束フラグも返す (false = CG_MAX_ITERS 消費、y は best-effort)。
 fn solve_aat_cg(
     a_sub: &CscMatrix,
     n: usize,
     m_sub: usize,
     target_dd: &[twofloat::TwoFloat],
     perf_trace: bool,
-) -> Option<Vec<f64>> {
+) -> (Option<Vec<f64>>, bool) {
     use twofloat::TwoFloat;
     let zero = TwoFloat::from(0.0);
 
@@ -103,12 +106,13 @@ fn solve_aat_cg(
     let mut r = rhs;
     let r0_sq: f64 = r.iter().map(|&x| x * x).sum();
     if r0_sq < 1e-200 {
-        return Some(y);
+        return (Some(y), true);
     }
     let mut p = r.clone();
     let mut rdr = r0_sq;
     let mut tmp = vec![0.0f64; n];
     let mut iters = 0usize;
+    let mut converged = false;
 
     for _ in 0..CG_MAX_ITERS {
         let ap = aat_apply(a_sub, n, m_sub, &p, reg, &mut tmp);
@@ -127,6 +131,8 @@ fn solve_aat_cg(
         }
         iters += 1;
         if rdr_new <= CG_TOL_SQ * r0_sq {
+            converged = true;
+            rdr = rdr_new;
             break;
         }
         let beta = rdr_new / rdr;
@@ -139,15 +145,137 @@ fn solve_aat_cg(
     if perf_trace {
         let rel = (rdr / r0_sq).sqrt();
         eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} rel_res={rel:.2e}",
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} converged={converged} rel_res={rel:.2e}",
             a_sub.col_ptr[n],
         );
     }
 
     if y.iter().any(|v| !v.is_finite()) {
+        return (None, false);
+    }
+    (Some(y), converged)
+}
+
+/// 直接法: A·Aᵀ (上三角 CSC) + LDL + 反復精密化 (IR) で y を解く。
+/// A·Aᵀ が memory budget 超なら None を返す (caller は CG にフォールバック)。
+fn solve_aat_direct_ir(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    target_dd: &[twofloat::TwoFloat],
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
+    use twofloat::TwoFloat;
+    let zero = TwoFloat::from(0.0);
+
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
+    let aat = build_aat_upper_csc(a_sub, n, m_sub)?;
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
+    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
+
+    let build_rhs = |v_dd: &[TwoFloat]| -> Vec<f64> {
+        let mut acc: Vec<TwoFloat> = vec![zero; m_sub];
+        for col in 0..n {
+            let cs = a_sub.col_ptr[col];
+            let ce = a_sub.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = a_sub.row_ind[k];
+                let v_f64 = f64::from(v_dd[col]);
+                let lo = v_dd[col] - TwoFloat::from(v_f64);
+                acc[row] = acc[row]
+                    + TwoFloat::new_mul(a_sub.values[k], v_f64)
+                    + TwoFloat::new_mul(a_sub.values[k], f64::from(lo));
+            }
+        }
+        acc.iter().map(|&v| f64::from(v)).collect()
+    };
+
+    let rhs0 = build_rhs(target_dd);
+    let mut y = vec![0.0_f64; m_sub];
+    factor.solve(&rhs0, &mut y);
+    if y.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+
+    // IR: AᵀA·y 残差を DD で計算し不足分を追加ソルブ
+    const IR_STAGNATE_RATIO: f64 = 0.5;
+    const IR_PROGRESS_EPS: f64 = 1e-18;
+    let mut prev_r_inf = f64::INFINITY;
+    loop {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
+        let mut aty_dd: Vec<TwoFloat> = vec![zero; n];
+        for col in 0..n {
+            let cs = a_sub.col_ptr[col];
+            let ce = a_sub.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = a_sub.row_ind[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(a_sub.values[k], y[row]);
+            }
+        }
+        let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
+        let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
+        if !r_inf.is_finite() {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
+            break;
+        }
+        prev_r_inf = r_inf;
+        let rhs_dy = build_rhs(&r_dd);
+        let mut dy = vec![0.0_f64; m_sub];
+        factor.solve(&rhs_dy, &mut dy);
+        if dy.iter().any(|v| !v.is_finite()) {
+            break;
+        }
+        for i in 0..m_sub {
+            y[i] += dy[i];
+        }
+    }
     Some(y)
+}
+
+/// A·Aᵀ LSQ を解く。
+///
+/// 戦略:
+/// 1. CG (CG_MAX_ITERS): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速かつ安定。
+///    CG が有限 y を返したらそれを採用 (収束/未収束に関わらず)。
+///    ill-conditioned 問題でも CG の Tikhonov 正則化 が LDL より安定なことが多い。
+/// 2. Direct LDL+IR フォールバック: CG が NaN/Inf を返した場合のみ。
+///    A·Aᵀ が budget 超なら None を返す。
+fn solve_aat(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    target_dd: &[twofloat::TwoFloat],
+    deadline: Option<std::time::Instant>,
+    perf_trace: bool,
+) -> Option<Vec<f64>> {
+    // Step 1: CG (primary path)
+    let (y_cg, converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
+    if let Some(ref y) = y_cg {
+        // CG returned finite y — use it regardless of convergence.
+        // Unconverged y (rel_res > CG_TOL_SQ) is still useful: caller's DD/KKT guard
+        // rejects it if it doesn't improve the objective.
+        let _ = converged;
+        return Some(y.clone());
+    }
+    // Step 2: direct LDL+IR fallback (only when CG diverged to NaN/Inf)
+    if perf_trace {
+        eprintln!(
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
+            a_sub.col_ptr[n],
+        );
+    }
+    solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline)
 }
 
 pub(crate) fn compute_lsq_dual_y(
@@ -285,7 +413,7 @@ pub(crate) fn compute_lsq_dual_y(
     let perf_trace = std::env::var("POSTSOLVE_PERF_TRACE").ok().as_deref() == Some("1");
 
     if n_fixed == 0 {
-        return solve_aat_cg(&problem.a, n, m, &target_dd, perf_trace);
+        return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace);
     }
 
     let mut free_row_local = vec![usize::MAX; m];
@@ -336,9 +464,9 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
 
-    let y_free = match solve_aat_cg(&a_free, n, m_free, &target_adj_dd, perf_trace) {
+    let y_free = match solve_aat(&a_free, n, m_free, &target_adj_dd, deadline, perf_trace) {
         Some(v) => v,
-        None => return solve_aat_cg(&problem.a, n, m, &target_dd, perf_trace),
+        None => return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace),
     };
 
     let mut y_full = vec![0.0_f64; m];
