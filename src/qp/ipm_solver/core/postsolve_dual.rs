@@ -119,7 +119,7 @@ pub(super) fn refine_postsolve_recovery(
             return;
         }
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
-        // y[row] を逆順で SingletonRow/RedundantRowFix から復元 (後退代入)
+        // y[row] を逆順で SingletonRow から復元 (後退代入)
         for step in presolve_result.postsolve_stack.steps.iter().rev() {
             let (row, col) = match step {
                 QpPostsolveStep::SingletonRow { row, col, .. } => (*row, *col),

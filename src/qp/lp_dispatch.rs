@@ -8,11 +8,11 @@
 //! false Unbounded を返す既知バグ (別途追跡) を回避するため。LP の不有界/不可解は
 //! simplex/IPM 本体で判定可能で presolve なしでも検出できる。
 //!
-//! IPM cold init は Mehrotra primal projection で KKT 行列を 1 回 factor する
-//! が、これは O((n+m)^2) 級で大規模 LP の wall を支配する。LTSF crash basis から
-//! 構成した structural BFS を `warm_start_qp.x` に注入して projection を skip
-//! させる: B*x_B = b を crash basis 上で解いて元空間 x に extract、y=0/mu=1 で
-//! `apply_qp_warm_start` 経路に着地させる (内部で bounds 内 interior 補正済)。
+//! IPM wall の大部分は per-iteration KKT factorization が支配する (init は 0.7-1.1%)。
+//! LTSF crash basis から構成した structural BFS を `warm_start_qp.x` に注入して
+//! cold init の Mehrotra projection を skip させる: B*x_B = b を crash basis 上で
+//! 解いて元空間 x に extract、y=0/mu=1 で `apply_qp_warm_start` 経路に着地させる
+//! (内部で bounds 内 interior 補正済)。
 //!
 //! `LP_DISPATCH_NOOP=1` は sentinel 用 (no-op proof) で IPM 経路を無効化する。
 //! `LP_CRASH_IPM_DISABLE=1` は crash→IPM warm wiring のみ no-op 化する

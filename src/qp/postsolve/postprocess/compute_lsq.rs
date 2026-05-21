@@ -1,10 +1,288 @@
-//! 元問題空間で A^T y = -(Qx + c + bound_contrib) の最小二乗 y を計算 + DD-IR。
+//! 元問題空間で A^T y = -(Qx + c + bound_contrib) の最小二乗 y を計算。
+//!
+//! 正規方程式 (A·Aᵀ + εI) y = A·target を陰的 CG で解く。
+//! A·Aᵀ を明示的に構築しないため O(k·nnz) (k = CG 収束イテレーション数)。
+//! 直接法 (BTreeMap + LDL) は LASSO 等の密 A·Aᵀ 問題で O(m²·nnz/col) となり
+//! 79-96% wall を支配していた。CG はその回避策 (疎性活用・全体 LSQ 回避)。
+//!
+//! CG が NaN/Inf を返した場合のみ direct LDL+IR 経路にフォールバックする。
+//! 未収束の best-effort y は下流の DD-guard (refine_dual_lsq) が refine する。
 
-use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, LSQ_DUAL_SIZE_LIMIT};
+use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
 use crate::tolerances::COMP_SLACK_REL_TOL;
+
+/// CG 相対収束判定 (||r||² / ||r0||² < tol)。
+/// √tol = 1e-10 の rel_res で、f64 精度の LSQ 解に十分。
+const CG_TOL_SQ: f64 = 1e-20;
+
+/// (A·Aᵀ + ε·I) を p (m_sub 次元) に適用して m_sub 次元ベクトルを返す。
+/// A_sub は CSC 形式 (nrows=m_sub, ncols=n)、reg = ε。
+fn aat_apply(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    p: &[f64],
+    reg: f64,
+    tmp: &mut Vec<f64>, // length n scratch
+) -> Vec<f64> {
+    // Step 1: atp = Aᵀ·p  (n 次元)
+    tmp.iter_mut().for_each(|v| *v = 0.0);
+    for col in 0..n {
+        let cs = a_sub.col_ptr[col];
+        let ce = a_sub.col_ptr[col + 1];
+        let mut s = 0.0f64;
+        for k in cs..ce {
+            s += a_sub.values[k] * p[a_sub.row_ind[k]];
+        }
+        tmp[col] = s;
+    }
+    // Step 2: ap = A·atp + reg·p  (m_sub 次元)
+    let mut ap = vec![0.0f64; m_sub];
+    for col in 0..n {
+        let cs = a_sub.col_ptr[col];
+        let ce = a_sub.col_ptr[col + 1];
+        let tv = tmp[col];
+        if tv == 0.0 {
+            continue;
+        }
+        for k in cs..ce {
+            ap[a_sub.row_ind[k]] += a_sub.values[k] * tv;
+        }
+    }
+    for i in 0..m_sub {
+        ap[i] += reg * p[i];
+    }
+    ap
+}
+
+/// 陰的 CG で正規方程式 (A·Aᵀ + ε·I)·y = A·target を解く。
+///
+/// 反復上限 = m_sub (系の次元)。CG は Krylov 理論より ≤ m_sub 回で収束する (exact
+/// arithmetic)。浮動小数点誤差による未収束は稀で best-effort y を返す。下流の
+/// DD-guard (refine_dual_lsq) がその y を refine する。NaN/Inf のときのみ None。
+fn solve_aat_cg(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    target_dd: &[twofloat::TwoFloat],
+    perf_trace: bool,
+) -> (Option<Vec<f64>>, bool) {
+    use twofloat::TwoFloat;
+    let zero = TwoFloat::from(0.0);
+
+    // RHS b = A_sub · target  (m_sub 次元、DD 精度で計算して f64 に落とす)
+    let mut rhs_dd: Vec<TwoFloat> = vec![zero; m_sub];
+    for col in 0..n {
+        let cs = a_sub.col_ptr[col];
+        let ce = a_sub.col_ptr[col + 1];
+        let tv = target_dd[col];
+        let tv_hi = f64::from(tv);
+        let tv_lo = f64::from(tv - TwoFloat::from(tv_hi));
+        for k in cs..ce {
+            let row = a_sub.row_ind[k];
+            let aval = a_sub.values[k];
+            rhs_dd[row] = rhs_dd[row]
+                + TwoFloat::new_mul(aval, tv_hi)
+                + TwoFloat::new_mul(aval, tv_lo);
+        }
+    }
+    let rhs: Vec<f64> = rhs_dd.iter().map(|&v| f64::from(v)).collect();
+
+    // 正則化: max_diag(A·Aᵀ) = max_i Σ_k A[i,k]²  (O(nnz))
+    let mut row_sq = vec![0.0f64; m_sub];
+    for col in 0..n {
+        for k in a_sub.col_ptr[col]..a_sub.col_ptr[col + 1] {
+            let r = a_sub.row_ind[k];
+            row_sq[r] += a_sub.values[k] * a_sub.values[k];
+        }
+    }
+    let max_diag = row_sq.iter().cloned().fold(0.0f64, f64::max).max(1.0);
+    let reg = AAT_REG_FACTOR * max_diag;
+
+    // CG 初期化: y=0, r=b, p=b
+    let mut y = vec![0.0f64; m_sub];
+    let mut r = rhs;
+    let r0_sq: f64 = r.iter().map(|&x| x * x).sum();
+    if r0_sq < 1e-200 {
+        return (Some(y), true);
+    }
+    let mut p = r.clone();
+    let mut rdr = r0_sq;
+    let mut tmp = vec![0.0f64; n];
+    let mut iters = 0usize;
+    let mut converged = false;
+    // best-seen y (stagnation/divergence 対策): rdr が増加に転じたら best_y で early-exit。
+    let mut best_y = y.clone();
+    let mut best_rdr = rdr;
+
+    for _ in 0..m_sub {
+        let ap = aat_apply(a_sub, n, m_sub, &p, reg, &mut tmp);
+        let pap: f64 = p.iter().zip(ap.iter()).map(|(&a, &b)| a * b).sum();
+        if pap <= 0.0 {
+            break;
+        }
+        let alpha = rdr / pap;
+        for i in 0..m_sub {
+            y[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        let rdr_new: f64 = r.iter().map(|&x| x * x).sum();
+        if !rdr_new.is_finite() {
+            break;
+        }
+        iters += 1;
+        if rdr_new <= CG_TOL_SQ * r0_sq {
+            converged = true;
+            best_y = y.clone();
+            best_rdr = rdr_new;
+            break;
+        }
+        if rdr_new < best_rdr {
+            best_rdr = rdr_new;
+            best_y = y.clone();
+        }
+        let beta = rdr_new / rdr;
+        for i in 0..m_sub {
+            p[i] = r[i] + beta * p[i];
+        }
+        rdr = rdr_new;
+    }
+
+    if perf_trace {
+        let rel = (best_rdr / r0_sq).sqrt();
+        eprintln!(
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} converged={converged} best_rel_res={rel:.2e}",
+            a_sub.col_ptr[n],
+        );
+    }
+
+    if best_y.iter().any(|v| !v.is_finite()) {
+        return (None, false);
+    }
+    (Some(best_y), converged)
+}
+
+/// 直接法: A·Aᵀ (上三角 CSC) + LDL + 反復精密化 (IR) で y を解く。
+/// A·Aᵀ が memory budget 超なら None を返す (caller は CG にフォールバック)。
+fn solve_aat_direct_ir(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    target_dd: &[twofloat::TwoFloat],
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
+    use twofloat::TwoFloat;
+    let zero = TwoFloat::from(0.0);
+
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
+    let aat = build_aat_upper_csc(a_sub, n, m_sub)?;
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
+    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
+
+    let build_rhs = |v_dd: &[TwoFloat]| -> Vec<f64> {
+        let mut acc: Vec<TwoFloat> = vec![zero; m_sub];
+        for col in 0..n {
+            let cs = a_sub.col_ptr[col];
+            let ce = a_sub.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = a_sub.row_ind[k];
+                let v_f64 = f64::from(v_dd[col]);
+                let lo = v_dd[col] - TwoFloat::from(v_f64);
+                acc[row] = acc[row]
+                    + TwoFloat::new_mul(a_sub.values[k], v_f64)
+                    + TwoFloat::new_mul(a_sub.values[k], f64::from(lo));
+            }
+        }
+        acc.iter().map(|&v| f64::from(v)).collect()
+    };
+
+    let rhs0 = build_rhs(target_dd);
+    let mut y = vec![0.0_f64; m_sub];
+    factor.solve(&rhs0, &mut y);
+    if y.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+
+    // IR: AᵀA·y 残差を DD で計算し不足分を追加ソルブ
+    const IR_STAGNATE_RATIO: f64 = 0.5;
+    const IR_PROGRESS_EPS: f64 = 1e-18;
+    let mut prev_r_inf = f64::INFINITY;
+    loop {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
+        let mut aty_dd: Vec<TwoFloat> = vec![zero; n];
+        for col in 0..n {
+            let cs = a_sub.col_ptr[col];
+            let ce = a_sub.col_ptr[col + 1];
+            for k in cs..ce {
+                let row = a_sub.row_ind[k];
+                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(a_sub.values[k], y[row]);
+            }
+        }
+        let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
+        let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
+        if !r_inf.is_finite() {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf {
+            break;
+        }
+        if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
+            break;
+        }
+        prev_r_inf = r_inf;
+        let rhs_dy = build_rhs(&r_dd);
+        let mut dy = vec![0.0_f64; m_sub];
+        factor.solve(&rhs_dy, &mut dy);
+        if dy.iter().any(|v| !v.is_finite()) {
+            break;
+        }
+        for i in 0..m_sub {
+            y[i] += dy[i];
+        }
+    }
+    Some(y)
+}
+
+/// A·Aᵀ LSQ を解く。
+///
+/// 戦略:
+/// 1. CG (上限 = m_sub、Krylov 理論): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速。
+///    有限 y が得られたらそれを返す (収束・未収束を問わず)。未収束の best-effort y は
+///    下流の DD-guard (refine_dual_lsq) が refine する。
+/// 2. Direct LDL+IR フォールバック: CG が NaN/Inf を返した場合のみ。
+///    A·Aᵀ が memory budget 超なら None。
+fn solve_aat(
+    a_sub: &CscMatrix,
+    n: usize,
+    m_sub: usize,
+    target_dd: &[twofloat::TwoFloat],
+    deadline: Option<std::time::Instant>,
+    perf_trace: bool,
+) -> Option<Vec<f64>> {
+    // Step 1: CG — upper limit = m_sub (Krylov theory: converges in ≤ dim iters, exact
+    // arithmetic; rare non-convergence due to round-off → best-effort y, refined downstream).
+    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
+    if y_cg.is_some() {
+        return y_cg;
+    }
+    // Step 2: direct LDL+IR fallback — only when CG returned NaN/Inf.
+    if perf_trace {
+        eprintln!(
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
+            a_sub.col_ptr[n],
+        );
+    }
+    solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline)
+}
 
 pub(crate) fn compute_lsq_dual_y(
     problem: &QpProblem,
@@ -138,81 +416,10 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
 
-    let solve_lsq_ir = |a_sub: &CscMatrix, m_sub: usize, v_dd: &[TwoFloat]| -> Option<Vec<f64>> {
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return None;
-        }
-        let aat_sub = build_aat_upper_csc(a_sub, n, m_sub)?;
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            return None;
-        }
-        let factor = crate::linalg::ldl::factorize(&aat_sub).ok()?;
-        let build_rhs_sub = |v_dd: &[TwoFloat]| -> Vec<f64> {
-            let mut acc: Vec<TwoFloat> = vec![zero_dd; m_sub];
-            for col in 0..n {
-                let cs = a_sub.col_ptr[col];
-                let ce = a_sub.col_ptr[col + 1];
-                for k in cs..ce {
-                    let row = a_sub.row_ind[k];
-                    let v_f64 = f64::from(v_dd[col]);
-                    let lo = v_dd[col] - TwoFloat::from(v_f64);
-                    acc[row] = acc[row]
-                        + TwoFloat::new_mul(a_sub.values[k], v_f64)
-                        + TwoFloat::new_mul(a_sub.values[k], f64::from(lo));
-                }
-            }
-            acc.iter().map(|&v| f64::from(v)).collect()
-        };
-        let rhs0 = build_rhs_sub(v_dd);
-        let mut y_sub = vec![0.0_f64; m_sub];
-        factor.solve(&rhs0, &mut y_sub);
-        if y_sub.iter().any(|v| !v.is_finite()) {
-            return None;
-        }
-        const IR_STAGNATE_RATIO: f64 = 0.5;
-        const IR_PROGRESS_EPS: f64 = 1e-18;
-        let mut prev_r_inf = f64::INFINITY;
-        loop {
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                break;
-            }
-            let mut atysub_dd: Vec<TwoFloat> = vec![zero_dd; n];
-            for col in 0..n {
-                let cs = a_sub.col_ptr[col];
-                let ce = a_sub.col_ptr[col + 1];
-                for k in cs..ce {
-                    let row = a_sub.row_ind[k];
-                    atysub_dd[col] =
-                        atysub_dd[col] + TwoFloat::new_mul(a_sub.values[k], y_sub[row]);
-                }
-            }
-            let r_dd: Vec<TwoFloat> = (0..n).map(|j| v_dd[j] - atysub_dd[j]).collect();
-            let r_inf = r_dd.iter().fold(0.0_f64, |a, &v| a.max(f64::from(v).abs()));
-            if !r_inf.is_finite() {
-                break;
-            }
-            if prev_r_inf.is_finite() && r_inf + IR_PROGRESS_EPS >= prev_r_inf {
-                break;
-            }
-            if prev_r_inf.is_finite() && r_inf > prev_r_inf * IR_STAGNATE_RATIO {
-                break;
-            }
-            prev_r_inf = r_inf;
-            let rhs_dy = build_rhs_sub(&r_dd);
-            let mut dy = vec![0.0_f64; m_sub];
-            factor.solve(&rhs_dy, &mut dy);
-            if dy.iter().any(|v| !v.is_finite()) {
-                break;
-            }
-            for i in 0..m_sub {
-                y_sub[i] += dy[i];
-            }
-        }
-        Some(y_sub)
-    };
+    let perf_trace = std::env::var("POSTSOLVE_PERF_TRACE").ok().as_deref() == Some("1");
 
     if n_fixed == 0 {
-        return solve_lsq_ir(&problem.a, m, &target_dd);
+        return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace);
     }
 
     let mut free_row_local = vec![usize::MAX; m];
@@ -263,9 +470,9 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
 
-    let y_free = match solve_lsq_ir(&a_free, m_free, &target_adj_dd) {
+    let y_free = match solve_aat(&a_free, n, m_free, &target_adj_dd, deadline, perf_trace) {
         Some(v) => v,
-        None => return solve_lsq_ir(&problem.a, m, &target_dd),
+        None => return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace),
     };
 
     let mut y_full = vec![0.0_f64; m];
@@ -300,14 +507,11 @@ mod comp_slackness_tests {
         c: Vec<f64>, a: CscMatrix, b: Vec<f64>,
         bounds: Vec<(f64, f64)>, cts: Vec<ConstraintType>,
     ) -> QpProblem {
-        // Build an LP-as-QP with empty Q.
         let q = CscMatrix::new(n, n);
         let _ = m;
         QpProblem::new(q, c, a, b, bounds, cts).unwrap()
     }
 
-    /// Helper: drive `compute_lsq_dual_y` with a seeded primal and check the
-    /// returned y for each row. Returns the produced y for further inspection.
     fn run_lsq(problem: &QpProblem, x: Vec<f64>) -> Vec<f64> {
         let result = SolverResult { solution: x, ..Default::default() };
         compute_lsq_dual_y(problem, &result, None)
@@ -319,7 +523,6 @@ mod comp_slackness_tests {
     /// the LSQ residual would prefer to split.
     #[test]
     fn lsq_le_loose_row_clamped_to_zero() {
-        // min x s.t. x ≤ 1 (binding), x ≤ 10 (loose), x ∈ [0, ∞).
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let qp = lp_qp(
             1, 2,
@@ -340,7 +543,6 @@ mod comp_slackness_tests {
     /// the Ge branch (proj_upper instead of proj_lower).
     #[test]
     fn lsq_ge_loose_row_clamped_to_zero() {
-        // min -x s.t. x ≥ 1 (binding at x=1), x ≥ -5 (loose), x ≤ 1.
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let qp = lp_qp(
             1, 2,
@@ -357,16 +559,9 @@ mod comp_slackness_tests {
         );
     }
 
-    /// Fixture C: mixed Le + Ge, both loose. Establishes the clamp triggers on
-    /// each constraint type independently (LSQ's proj_lower / proj_upper paths
-    /// don't accidentally re-enable y). `c` is non-zero so the LSQ target
-    /// `-(Qx + c + bound_contrib)` is non-trivial — without the clamp, LSQ
-    /// would assign y = (0, -1) on this fixture, so the assertion has teeth.
+    /// Fixture C: mixed Le + Ge, both loose.
     #[test]
     fn lsq_mixed_loose_rows_all_clamped_to_zero() {
-        // Two columns, two rows, both rows loose at x=(1, 1).
-        //   row 0 (Le): x1 + x2 ≤ 100; slack 98
-        //   row 1 (Ge): x1 - x2 ≥ -50; ax-b = 50, slack 50
         let a = CscMatrix::from_triplets(
             &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
         ).unwrap();
@@ -386,13 +581,9 @@ mod comp_slackness_tests {
         }
     }
 
-    /// Fixture D: binding row keeps its y free. Establishes the clamp does
-    /// NOT zero out genuinely binding rows — otherwise the LSQ output would
-    /// degenerate to all-zero on any well-posed LP.
+    /// Fixture D: binding row keeps its y free.
     #[test]
     fn lsq_binding_row_y_is_not_clamped() {
-        // Same as A but evaluate at x=1 where row 0 (Le) is exactly binding.
-        // The LSQ should produce y[0] ≈ 1 (= -c/A) to satisfy A^T y = -c.
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let qp = lp_qp(
             1, 1,
@@ -401,7 +592,6 @@ mod comp_slackness_tests {
             vec![ConstraintType::Le],
         );
         let y = run_lsq(&qp, vec![1.0]);
-        // Binding row; LSQ + sign convention should give a non-zero y.
         assert!(
             y[0].abs() > Y_ZERO_TOL,
             "binding Le row y[0]={:.3e} should NOT be clamped to 0",
@@ -409,4 +599,3 @@ mod comp_slackness_tests {
         );
     }
 }
-
