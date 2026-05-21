@@ -5,7 +5,8 @@
 //! 直接法 (BTreeMap + LDL) は LASSO 等の密 A·Aᵀ 問題で O(m²·nnz/col) となり
 //! 79-96% wall を支配していた。CG はその回避策 (疎性活用・全体 LSQ 回避)。
 //!
-//! CG が CG_MAX_ITERS 内に収束しなかった場合は direct LDL 経路にフォールバックする。
+//! CG が dim 回以内に収束しなかった場合 (numerical round-off) は
+//! direct LDL+IR 経路にフォールバックする。
 
 use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
 use crate::qp::problem::QpProblem;
@@ -13,11 +14,8 @@ use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
 use crate::tolerances::COMP_SLACK_REL_TOL;
 
-/// CG フルバジェット。直接法 (LDL) が memory-budget 超の場合のみ使用。
-/// κ=1e6 問題でも √κ=1000 反復以内に収束する想定。
-const CG_MAX_ITERS: usize = 1000;
-
-/// CG 相対収束判定 (||r||² / ||r0||² < tol)。LSQ 解精度として十分。
+/// CG 相対収束判定 (||r||² / ||r0||² < tol)。
+/// √tol = 1e-10 の rel_res で、f64 精度の LSQ 解に十分。
 const CG_TOL_SQ: f64 = 1e-20;
 
 /// (A·Aᵀ + ε·I) を p (m_sub 次元) に適用して m_sub 次元ベクトルを返す。
@@ -61,7 +59,11 @@ fn aat_apply(
 }
 
 /// 陰的 CG で正規方程式 (A·Aᵀ + ε·I)·y = A·target を解く。
-/// 収束フラグも返す (false = CG_MAX_ITERS 消費、y は best-effort)。
+///
+/// 反復上限 = m_sub (系の次元)。CG は Krylov 理論より ≤ m_sub 回で収束する (exact
+/// arithmetic)。浮動小数点誤差で未収束のまま終了した場合は converged=false を返し、
+/// caller が direct LDL+IR にフォールバックする。best_y は収束途中の最良 rdr 点を
+/// 記録しており、LDL が利用不可のときに最終手段として使われる。
 fn solve_aat_cg(
     a_sub: &CscMatrix,
     n: usize,
@@ -113,8 +115,11 @@ fn solve_aat_cg(
     let mut tmp = vec![0.0f64; n];
     let mut iters = 0usize;
     let mut converged = false;
+    // best-seen y (stagnation/divergence 対策): rdr が増加に転じたら best_y で early-exit。
+    let mut best_y = y.clone();
+    let mut best_rdr = rdr;
 
-    for _ in 0..CG_MAX_ITERS {
+    for _ in 0..m_sub {
         let ap = aat_apply(a_sub, n, m_sub, &p, reg, &mut tmp);
         let pap: f64 = p.iter().zip(ap.iter()).map(|(&a, &b)| a * b).sum();
         if pap <= 0.0 {
@@ -132,8 +137,13 @@ fn solve_aat_cg(
         iters += 1;
         if rdr_new <= CG_TOL_SQ * r0_sq {
             converged = true;
-            rdr = rdr_new;
+            best_y = y.clone();
+            best_rdr = rdr_new;
             break;
+        }
+        if rdr_new < best_rdr {
+            best_rdr = rdr_new;
+            best_y = y.clone();
         }
         let beta = rdr_new / rdr;
         for i in 0..m_sub {
@@ -143,17 +153,17 @@ fn solve_aat_cg(
     }
 
     if perf_trace {
-        let rel = (rdr / r0_sq).sqrt();
+        let rel = (best_rdr / r0_sq).sqrt();
         eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} converged={converged} rel_res={rel:.2e}",
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} converged={converged} best_rel_res={rel:.2e}",
             a_sub.col_ptr[n],
         );
     }
 
-    if y.iter().any(|v| !v.is_finite()) {
+    if best_y.iter().any(|v| !v.is_finite()) {
         return (None, false);
     }
-    (Some(y), converged)
+    (Some(best_y), converged)
 }
 
 /// 直接法: A·Aᵀ (上三角 CSC) + LDL + 反復精密化 (IR) で y を解く。
@@ -246,11 +256,11 @@ fn solve_aat_direct_ir(
 /// A·Aᵀ LSQ を解く。
 ///
 /// 戦略:
-/// 1. CG (CG_MAX_ITERS): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速かつ安定。
-///    CG が有限 y を返したらそれを採用 (収束/未収束に関わらず)。
-///    ill-conditioned 問題でも CG の Tikhonov 正則化 が LDL より安定なことが多い。
-/// 2. Direct LDL+IR フォールバック: CG が NaN/Inf を返した場合のみ。
-///    A·Aᵀ が budget 超なら None を返す。
+/// 1. CG (上限 = m_sub、Krylov 理論): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速。
+///    収束 (≤ m_sub iters) したらその y を返す。
+/// 2. Direct LDL+IR フォールバック: CG が m_sub 回で収束しなかった (numerical round-off)
+///    場合。A·Aᵀ が memory budget 超なら None。
+/// 3. CG best_y: LDL が memory budget 超で None のとき、CG の最良点を最終手段として返す。
 fn solve_aat(
     a_sub: &CscMatrix,
     n: usize,
@@ -259,23 +269,24 @@ fn solve_aat(
     deadline: Option<std::time::Instant>,
     perf_trace: bool,
 ) -> Option<Vec<f64>> {
-    // Step 1: CG (primary path)
+    // Step 1: CG — upper limit = m_sub (Krylov theory: converges in ≤ dim, exact arithmetic).
     let (y_cg, converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
-    if let Some(ref y) = y_cg {
-        // CG returned finite y — use it regardless of convergence.
-        // Unconverged y (rel_res > CG_TOL_SQ) is still useful: caller's DD/KKT guard
-        // rejects it if it doesn't improve the objective.
-        let _ = converged;
-        return Some(y.clone());
+    if converged {
+        return y_cg;
     }
-    // Step 2: direct LDL+IR fallback (only when CG diverged to NaN/Inf)
+    // Step 2: direct LDL+IR fallback.
+    // CG exhausted m_sub iterations without convergence (numerical round-off) or hit NaN/Inf.
     if perf_trace {
         eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): not converged, falling back to direct LDL",
             a_sub.col_ptr[n],
         );
     }
-    solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline)
+    if let Some(y_ldl) = solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline) {
+        return Some(y_ldl);
+    }
+    // Step 3: LDL memory budget exceeded → CG best_y as last resort.
+    y_cg
 }
 
 pub(crate) fn compute_lsq_dual_y(
