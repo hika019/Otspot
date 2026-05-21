@@ -3,8 +3,10 @@
 
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
-use crate::qp::ipm_solver::kkt::{kkt_residual_rel, primal_residual_rel};
-use crate::qp::ipm_solver::outcome::ProblemView;
+use crate::qp::ipm_solver::kkt::{
+    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+};
+use crate::qp::ipm_solver::outcome::{IpmOutcome, ProblemView};
 use crate::qp::problem::QpProblem;
 
 /// factorize 時間予算ガード。LDL 因子化が分単位かかる規模では skip。
@@ -18,8 +20,11 @@ pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
     problem_size <= PRIMAL_PROJECTION_SIZE_LIMIT
 }
 
-/// IPM 出口で既に user eps を満たした Optimal なら post-processing skip (LSQ が秒単位)。
-/// Suboptimal/Timeout は component-wise dfr が残るため skip しない。
+/// IPM 出口で既に satisfies_eps の全条件を満たした Optimal なら post-processing skip。
+///
+/// kkt + primal に加え、complementarity と duality gap も確認する。Krylov IR は
+/// kkt/pres だけでなく comp/gap も改善するため、これらが未収束の場合に skip すると
+/// satisfies_eps が失敗して SuboptimalSolution になる (commit 221432e 由来の退化)。
 pub(super) fn kkt_already_passes(
     orig_problem: &QpProblem,
     final_sol: &SolverResult,
@@ -40,8 +45,28 @@ pub(super) fn kkt_already_passes(
         &final_sol.dual_solution,
         &final_sol.bound_duals,
     );
+    if kkt0 >= user_eps {
+        return false;
+    }
     let pres0 = primal_residual_rel(&view, &final_sol.solution);
-    kkt0 < user_eps && pres0 < user_eps
+    if pres0 >= user_eps {
+        return false;
+    }
+    let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
+    if bv > user_eps {
+        return false;
+    }
+    let comp = complementarity_residual_rel(
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
+    );
+    if comp > user_eps {
+        return false;
+    }
+    let gap = super::duality_gap::compute_duality_gap_rel(orig_problem, final_sol);
+    gap < IpmOutcome::PROMOTION_GAP_TOL
 }
 
 /// Post-processing stage 1+2: primal projection + y/z 交互 refit + IRLS。
@@ -385,6 +410,54 @@ mod gate_predicate_tests {
                  (the `pres < eps` conjunct must hold)"
             );
         }
+    }
+
+    /// kkt + pres both hold exactly, but bound dual is corrupted to give large
+    /// complementarity → comp ≫ eps → predicate must return false (sentinel for
+    /// the new comp check in kkt_already_passes).
+    ///
+    /// Problem: min 0.5·x², Ax=1 (Eq), x ≥ 0.
+    /// Optimal: x=1, z_lb=0, y=-1  (stationarity: Qx+c+Aᵀy−z_lb = 1+0−1−0 = 0).
+    ///
+    /// Corrupt: z_lb=1e-3, y=z_lb−1=−0.999 so stationarity still holds exactly
+    ///   (1 + 0 + Aᵀ·y − z_lb = 1 − 0.999 − 1e-3 = 0), but
+    ///   comp = z_lb·(x−lb)/scale = 1e-3·1/~3.5 ≈ 2.9e-4 ≫ user_eps = 1e-6.
+    ///
+    /// Important: this case must fail under the "kkt+pres only" gate (the pre-fix
+    /// behaviour) so that reverting kkt_already_passes to check only kkt+pres causes
+    /// this test to FAIL (proving the sentinel is load-bearing for the comp check).
+    #[test]
+    fn already_passes_false_when_comp_fails() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q, vec![0.0], a, vec![1.0],
+            vec![(0.0_f64, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+
+        // Baseline: optimal solution (z_lb=0, comp=0) must pass the gate.
+        let mut res = crate::problem::SolverResult::default();
+        res.solution = vec![1.0];
+        res.dual_solution = vec![-1.0];
+        res.bound_duals = vec![0.0];
+        assert!(
+            kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "baseline optimal (z_lb=0, comp=0) must pass the gate"
+        );
+
+        // Corrupt: z_lb=1e-3, y=z_lb-1=-0.999.
+        // Stationarity: Qx+c+Aᵀy−z_lb = 1+(−0.999)−1e-3 = 0 → kkt=0.
+        // Primal: Ax=1=b → pres=0.
+        // Complementarity: z_lb·(x−lb)/scale = 1e-3·1/~3.5 ≈ 2.9e-4 ≫ 1e-6.
+        // Gate must return false (comp fails); reverting to kkt+pres-only would
+        // return true (kkt=pres=0), causing this assertion to fail → sentinel fires.
+        res.dual_solution = vec![-0.999_f64];
+        res.bound_duals = vec![1e-3_f64];
+        assert!(
+            !kkt_already_passes(&prob, &res, &[], true, 1e-6),
+            "z_lb=1e-3, y=-0.999: stationarity holds but comp≈2.9e-4≫1e-6 → gate must NOT skip IR"
+        );
     }
 
     /// Degenerate inputs short-circuit to false: empty solution and m=0.
