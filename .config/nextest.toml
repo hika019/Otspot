@@ -17,3 +17,15 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = "test(linalg::par_sentinel::)"
 threads-required = "num-cpus"
+
+# Memory-heavy qplib parse tests each peak ~100 MB (parsing QPLIB_8500, 25 MB
+# / ~2 M NZ). Running them concurrently stacks to ~300 MB and, under broader
+# suite contention with swap=0, can thrash and trip slow-timeout (the original
+# 72.985s SIGTERM). Serialize them so at most one runs at a time; the fix is
+# test isolation, not skipping large files.
+[test-groups]
+qplib-memory-heavy = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(io::qplib::tests::test_parse_existing_qplib_files_regression) + test(io::qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(io::qplib::tests::test_parse_sweep_no_memory_accumulation)"
+test-group = "qplib-memory-heavy"
