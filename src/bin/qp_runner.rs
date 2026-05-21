@@ -1,7 +1,7 @@
 //! Maros-Meszaros QP Runner CLI
 //!
 //! Reads QP problem data from stdin (text format) and runs solve_qp.
-//! Used by scripts/run_maros_all.py for batch testing.
+//! Used by the benchmark scripts (e.g. scripts/bench_parallel.sh) for batch testing.
 //!
 //! ## Input format (stdin):
 //! Line 1: n m_ub            <- num variables, num inequality constraints
