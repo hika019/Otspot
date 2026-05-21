@@ -225,6 +225,8 @@ fn test_refit_integration_emptycol_recovery() {
 }
 
 /// 1×1 well-conditioned で compute_lsq_dual_y が解析解 y=-3 を再現。
+/// CG + 正則化 (ε ≈ 4e-12) により解バイアスは O(ε/λ_min) ≈ 3e-12 程度。
+/// no-op 検証: y を常に 0 返却すると |0-(-3)| = 3 >> 1e-9 で FAIL。
 #[test]
 fn compute_lsq_dual_y_recovers_exact_solution_on_well_conditioned() {
     let a = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
@@ -241,7 +243,8 @@ fn compute_lsq_dual_y_recovers_exact_solution_on_well_conditioned() {
         ..SolverResult::default()
     };
     let y = compute_lsq_dual_y(&problem, &result, None).expect("LSQ should succeed");
-    assert!((y[0] - (-3.0)).abs() < 1e-12, "got {}", y[0]);
+    // CG 正則化 (ε ≈ 4e-12) によるバイアス ≈ 3e-12 を考慮した許容誤差。
+    assert!((y[0] - (-3.0)).abs() < 1e-9, "got {}", y[0]);
 }
 
 /// ill-conditioned (cond(AAT)≈1e16) で IR が residual を f64 1-shot 限界以下に縮める。
