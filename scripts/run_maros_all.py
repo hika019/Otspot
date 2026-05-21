@@ -45,6 +45,8 @@ INF_ENCODE = 1e300
 SPARSE_ZERO_TOL = 1e-15
 # Threshold for considering a bound finite.
 INF_BOUND_THRESHOLD = 1e200
+# |rl - ru| below this treats a constraint as an equality (rl == ru).
+EQ_TOL = 1e-10
 
 PROBLEM_NAMES = [
     "AUG2D", "AUG2DC", "AUG2DCQP", "AUG2DQP",
@@ -262,11 +264,11 @@ def run_problem(name, input_text, timeout_sec):
         return "ERROR", None, None, 0.0, str(e)
 
 
-def classify_problem(A, rl, ru, lb):
+def classify_problem(rl, ru, lb, ub):
     """Return a dict of problem properties for the CSV."""
-    has_bounds = bool(np.any(np.isfinite(lb)) or np.any(np.isfinite(lb)))
+    has_bounds = bool(np.any(np.isfinite(lb)) or np.any(np.isfinite(ub)))
     has_equality = bool(
-        np.any(np.isfinite(rl) & np.isfinite(ru) & (np.abs(rl - ru) < SPARSE_ZERO_TOL))
+        np.any(np.isfinite(rl) & np.isfinite(ru) & (np.abs(rl - ru) < EQ_TOL))
     )
     return {"has_bounds": has_bounds, "has_equality": has_equality}
 
@@ -330,7 +332,7 @@ def main():
 
         n = len(c)
         m_orig = len(rl)
-        props = classify_problem(A, rl, ru, lb)
+        props = classify_problem(rl, ru, lb, ub)
 
         try:
             a_rows, a_cols, a_vals, b_ub, m_ub = convert_to_ineq(A, rl, ru)
