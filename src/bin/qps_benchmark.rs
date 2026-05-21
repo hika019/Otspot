@@ -28,7 +28,7 @@ enum BenchError {
     Parse(QpsError),
 }
 
-/// §2.1: pfeas両側チェック + bfeas（設計書準拠）
+/// pfeas両側チェック + bfeas
 ///
 /// Eq制約: |Ax_i - b_i|（両方向）
 /// Ge制約: max(0, b_i - Ax_i)（下方向）
@@ -73,7 +73,7 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
-/// §2.1b: pfeas を成分相対化で評価する (本体 kkt::primal_residual_rel と同形)。
+/// pfeas を成分相対化で評価する (本体 kkt::primal_residual_rel と同形)。
 ///
 /// `max_i violation_i / (1 + |Ax_i| + |b_i|)`。
 /// OSQP 公式の全体相対化 (max_v / (1 + max(||Ax||_∞, ||b||_∞))) は ill-scaled 行列で
@@ -132,7 +132,7 @@ fn check_reported_objective(
     }
 }
 
-/// §2.2: dfeas 元空間再計算（ソルバ申告値ではなく bench 側で独立計算）
+/// dfeas 元空間再計算（ソルバ申告値ではなく bench 側で独立計算）
 ///
 /// ソルバの `result.dfeas` は内部 (Ruiz scaled) 空間の値で、unscale 後の
 /// 元空間 dfeas とは異なる。bench は「ユーザー指定 eps を元空間で満たすか」を
@@ -681,7 +681,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    // §2.4: 正解値CSV読み込み
+    // 正解値CSV読み込み
     // バイナリの実行パスからCSVを探す（--known-optimal指定またはdata_dir名から自動選択）
     let baseline_csv = {
         let root = {
@@ -730,7 +730,7 @@ fn main() {
     );
     println!("{}", "-".repeat(80));
 
-    // 集計 — §2.5の7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
+    // 集計 — 7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
     let mut n_pass = 0usize;
     let mut n_pass_noref = 0usize;
     let mut n_pass_infeasible = 0usize;   // 期待通り Infeasible と判定
@@ -758,7 +758,7 @@ fn main() {
     }
 
     // QP問題かどうかの判定用定数
-    let eps_obj: f64 = 1e-2; // §2.4: 1%閾値
+    let eps_obj: f64 = 1e-2; // 目的関数照合の相対許容誤差: 1%
 
     for path in &qps_files {
         let name = path
@@ -834,7 +834,7 @@ fn main() {
 
         let (status_str, note) = match result.status {
             SolveStatus::Optimal => {
-                // §2.5 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
+                // 判定フロー: pfeas → dfeas → 相補性 → 正解値照合
 
                 // Step 3: pfeas（行ノルム正規化版、本体ipm/mod.rsと同方式）
                 let (pfeas, bfeas) = compute_primal_quality(&prob, &result.solution);

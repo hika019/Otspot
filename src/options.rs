@@ -414,8 +414,7 @@ pub struct SolverOptions {
     ///
     /// 注意: 再有効化すると大規模 LP で crash LU が faer underflow を踏む
     /// (debug = `lu.rs` panic / release = wrap → cold fallback)。この faer underflow
-    /// root は本変更では触らない (既定 off で発火しないため moot、root は dashboard の
-    /// 低優先項目)。よって本 option は完全な「無害な復元」ではなく opt-in な退避口。
+    /// root は既定 off で発火しないため影響は限定的。よって本 option は完全な「無害な復元」ではなく opt-in な退避口。
     ///
     /// `use_lp_crash_basis` (= simplex Phase I crash) とは別物で、そちらは有効のまま。
     pub use_lp_crash_ipm_warm: bool,

@@ -235,7 +235,7 @@ fn test_netlib_stocfor1() {
     println!("stocfor1 solved: obj={}", result.objective);
 }
 
-// --- §4-2 Netlib拡充: brandy, scorpion, fit1d, share1b (cmd_089) ---
+// --- Netlib拡充: brandy, scorpion, fit1d, share1b ---
 
 #[test]
 fn test_parse_brandy() {
@@ -580,7 +580,7 @@ fn test_boyd1_direct_ipm_no_stack_overflow() {
 }
 
 // ============================================================================
-// §6: 追加 Netlib LP 問題 (check/lp-coverage-2026-05-10)
+// 追加 Netlib LP 問題
 // 問題: sc105, sc205, recipe, lotfi, israel, sctap1, pilot4, grow7, boeing1, capri
 // ============================================================================
 

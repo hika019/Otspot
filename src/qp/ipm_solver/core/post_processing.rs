@@ -24,7 +24,7 @@ pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
 ///
 /// kkt + primal に加え、complementarity と duality gap も確認する。Krylov IR は
 /// kkt/pres だけでなく comp/gap も改善するため、これらが未収束の場合に skip すると
-/// satisfies_eps が失敗して SuboptimalSolution になる (commit 221432e 由来の退化)。
+/// satisfies_eps が失敗して SuboptimalSolution になる。
 pub(super) fn kkt_already_passes(
     orig_problem: &QpProblem,
     final_sol: &SolverResult,

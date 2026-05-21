@@ -702,7 +702,7 @@ pub struct ModelResult {
     pub slack: Option<Vec<f64>>,
     /// Variable bound dual values (QP path).
     /// Layout: `[lb_dual for each var with finite lb, ub_dual for each var with finite ub]`
-    /// (see `SolverResult.bound_duals` §2.5). Empty when not provided by the solver.
+    /// Empty when not provided by the solver.
     pub bound_duals: Vec<f64>,
     /// Per-solve routing and warm-start statistics (race-free, per-result).
     pub stats: crate::problem::SolveStats,

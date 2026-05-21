@@ -41,7 +41,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 ///
 /// Known optimum: 4.0440725e+06 (netlib_lp.csv).
 ///
-/// Multi-hypothesis observation (per team-lead L27): the test records *all* of
+/// Multi-hypothesis observation: the test records *all* of
 /// `status`, `iterations`, `timing_breakdown` (presolve/solve/postsolve μs) and
 /// `solution length / |x|_inf` so we can distinguish:
 ///   (H1) Phase 2 never started (solution=slack basis → obj=0).

@@ -4,7 +4,7 @@
 //! ties break FIFO (smaller insertion `seq` first) for determinism.
 //!
 //! ## Why this duplicates `qp::global::tree::BBTree`
-//! This is an intentional, lead-approved small duplicate of the spatial QP B&B
+//! This is an intentional small duplicate of the spatial QP B&B
 //! queue — **not** an oversight. The two queues are byte-for-byte similar but the
 //! node payloads differ (`MipNode` vs `BBNode`, the latter carries a QP-specific
 //! warm start). Generalizing `BBTree` over a `lower_bound()` trait would require

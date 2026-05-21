@@ -147,7 +147,6 @@ pub struct SolverResult {
     /// Maps to original variable indices via col_map.
     /// Empty if no bound constraints are active.
     ///
-    /// 仕様 (§2.5):
     /// - 除去変数 (presolveで固定された変数) の bound_dual = 0.0 (近似)
     /// - presolve tightening で追加された境界の dual は報告しない（元問題基準）
     /// - 配列順: `[lb_dual(j0), ..., lb_dual(j_{n_lb-1}), ub_dual(j0), ..., ub_dual(j_{n_ub-1})]`
