@@ -27,7 +27,7 @@ mkdir -p "$MAT_CACHE"
 
 BASE_URL="https://raw.githubusercontent.com/YimingYAN/QP-Test-Problems/master/MAT_Files"
 
-# 138 problem 名 (PROBLEM_NAMES from scripts/run_maros_all.py、fact-based)
+# 138 problem 名 (fact-based)
 NAMES=(
   AUG2D AUG2DC AUG2DCQP AUG2DQP
   AUG3D AUG3DC AUG3DCQP AUG3DQP
