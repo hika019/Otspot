@@ -5,8 +5,8 @@
 //! 直接法 (BTreeMap + LDL) は LASSO 等の密 A·Aᵀ 問題で O(m²·nnz/col) となり
 //! 79-96% wall を支配していた。CG はその回避策 (疎性活用・全体 LSQ 回避)。
 //!
-//! CG が dim 回以内に収束しなかった場合 (numerical round-off) は
-//! direct LDL+IR 経路にフォールバックする。
+//! CG が NaN/Inf を返した場合のみ direct LDL+IR 経路にフォールバックする。
+//! 未収束の best-effort y は下流の DD-guard (refine_dual_lsq) が refine する。
 
 use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
 use crate::qp::problem::QpProblem;
@@ -61,9 +61,8 @@ fn aat_apply(
 /// 陰的 CG で正規方程式 (A·Aᵀ + ε·I)·y = A·target を解く。
 ///
 /// 反復上限 = m_sub (系の次元)。CG は Krylov 理論より ≤ m_sub 回で収束する (exact
-/// arithmetic)。浮動小数点誤差で未収束のまま終了した場合は converged=false を返し、
-/// caller が direct LDL+IR にフォールバックする。best_y は収束途中の最良 rdr 点を
-/// 記録しており、LDL が利用不可のときに最終手段として使われる。
+/// arithmetic)。浮動小数点誤差による未収束は稀で best-effort y を返す。下流の
+/// DD-guard (refine_dual_lsq) がその y を refine する。NaN/Inf のときのみ None。
 fn solve_aat_cg(
     a_sub: &CscMatrix,
     n: usize,
@@ -257,10 +256,10 @@ fn solve_aat_direct_ir(
 ///
 /// 戦略:
 /// 1. CG (上限 = m_sub、Krylov 理論): 陰的 matvec のみ。LASSO 等の密 A·Aᵀ で高速。
-///    収束 (≤ m_sub iters) したらその y を返す。
-/// 2. Direct LDL+IR フォールバック: CG が m_sub 回で収束しなかった (numerical round-off)
-///    場合。A·Aᵀ が memory budget 超なら None。
-/// 3. CG best_y: LDL が memory budget 超で None のとき、CG の最良点を最終手段として返す。
+///    有限 y が得られたらそれを返す (収束・未収束を問わず)。未収束の best-effort y は
+///    下流の DD-guard (refine_dual_lsq) が refine する。
+/// 2. Direct LDL+IR フォールバック: CG が NaN/Inf を返した場合のみ。
+///    A·Aᵀ が memory budget 超なら None。
 fn solve_aat(
     a_sub: &CscMatrix,
     n: usize,
@@ -269,24 +268,20 @@ fn solve_aat(
     deadline: Option<std::time::Instant>,
     perf_trace: bool,
 ) -> Option<Vec<f64>> {
-    // Step 1: CG — upper limit = m_sub (Krylov theory: converges in ≤ dim, exact arithmetic).
-    let (y_cg, converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
-    if converged {
+    // Step 1: CG — upper limit = m_sub (Krylov theory: converges in ≤ dim iters, exact
+    // arithmetic; rare non-convergence due to round-off → best-effort y, refined downstream).
+    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
+    if y_cg.is_some() {
         return y_cg;
     }
-    // Step 2: direct LDL+IR fallback.
-    // CG exhausted m_sub iterations without convergence (numerical round-off) or hit NaN/Inf.
+    // Step 2: direct LDL+IR fallback — only when CG returned NaN/Inf.
     if perf_trace {
         eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): not converged, falling back to direct LDL",
+            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
             a_sub.col_ptr[n],
         );
     }
-    if let Some(y_ldl) = solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline) {
-        return Some(y_ldl);
-    }
-    // Step 3: LDL memory budget exceeded → CG best_y as last resort.
-    y_cg
+    solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline)
 }
 
 pub(crate) fn compute_lsq_dual_y(
