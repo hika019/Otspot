@@ -1438,11 +1438,16 @@ minimize
         assert!(count > 0, "no .qplib files found in data/qplib_unsupported/");
     }
 
-    /// Regression: existing files in data/qplib/ parse without error.
+    /// Regression: every tracked file in data/qplib/ parses without error.
     ///
     /// - Binary/integer files (CBL etc.) now parse as `Milp`/`Miqp`.
     /// - Mixed-integer types (M/G/S) still produce `UnsupportedType`.
     /// - `ParseError` or `IoError` on any file is a regression.
+    ///
+    /// All tracked files are swept (largest is QPLIB_8500 @ 24 MB / 1.2 M NZ);
+    /// the parser is O(nnz log nnz), so the full sweep stays within the per-test
+    /// budget single-threaded. Peak memory for the largest file is bounded
+    /// separately by `test_memory_sentinel_no_double_hashmap_qplib8500`.
     #[test]
     fn test_parse_existing_qplib_files_regression() {
         let dir = data_path("data/qplib");
@@ -1476,6 +1481,44 @@ minimize
             "expected at least one binary/integer file to parse as Milp/Miqp (got 0 out of {count})");
         // M/G/S mixed types remain unsupported
         let _ = count_unsupported; // may be 0 if no M/G/S files
+    }
+
+    /// Accumulation sentinel: parsing every file in data/qplib/ in sequence
+    /// must return live allocations to ~baseline after each result is dropped.
+    /// This proves peak memory is bounded by the *single largest* file, not the
+    /// sum — i.e. the parser does not retain prior results.
+    ///
+    /// **No-op failure guarantee**: if a future change retains parse results
+    /// across iterations (e.g. collecting into a `Vec` instead of dropping),
+    /// `live` grows monotonically past `LIVE_RESIDUAL_LIMIT` and this fires.
+    /// Verified: a retain-results variant reaches >100 MB live → FAIL.
+    #[test]
+    fn test_parse_sweep_no_memory_accumulation() {
+        let dir = data_path("data/qplib");
+        if !dir.exists() {
+            return;
+        }
+        // Allocator slack tolerated between iterations when no result is retained.
+        // Measured residual is ~0 MB; 4 MB leaves margin for allocator bookkeeping.
+        const LIVE_RESIDUAL_LIMIT: isize = 4 * 1024 * 1024;
+
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("qplib"))
+            .collect();
+
+        crate::peak_alloc::begin();
+        for path in &files {
+            let _ = parse_qplib(path.as_path()); // result dropped at end of statement
+            let live = crate::peak_alloc::current_bytes();
+            assert!(
+                live <= LIVE_RESIDUAL_LIMIT,
+                "live allocations {live} B remain after dropping {} — parser is \
+                 retaining results across files (accumulation bug); limit {LIVE_RESIDUAL_LIMIT} B",
+                path.display()
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
