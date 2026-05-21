@@ -35,6 +35,7 @@ import numpy as np
 
 BASE_URL = "https://raw.githubusercontent.com/YimingYAN/QP-Test-Problems/master/MAT_Files/"
 DEFAULT_TIMEOUT_SEC = 10.0
+DEFAULT_EPS = 1e-6  # qp_runner の既定許容と一致
 RUNNER_BIN = str(Path(__file__).parent.parent / "target" / "release" / "qp_runner")
 CACHE_DIR = Path("/tmp/maros_meszaros_mat")
 DEFAULT_OUTPUT_CSV = Path(__file__).parent.parent / "reports" / "maros_meszaros_raw.csv"
@@ -116,6 +117,10 @@ def parse_args():
     parser.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT_CSV, metavar="FILE",
         help=f"CSV output path (default: {DEFAULT_OUTPUT_CSV})",
+    )
+    parser.add_argument(
+        "--eps", type=float, default=DEFAULT_EPS, metavar="EPS",
+        help=f"solver tolerance forwarded to qp_runner --eps (default: {DEFAULT_EPS})",
     )
     return parser.parse_args()
 
@@ -240,12 +245,12 @@ def make_input_text(n, m_ub, c, lb, ub, q_rows, q_cols, q_vals, a_rows, a_cols, 
     return "\n".join(lines) + "\n"
 
 
-def run_problem(name, input_text, timeout_sec):
+def run_problem(name, input_text, timeout_sec, eps):
     """Run qp_runner with input_text; return (status, objective, iterations, elapsed, error)."""
     try:
         t0 = time.time()
         proc = subprocess.run(
-            [RUNNER_BIN],
+            [RUNNER_BIN, "--eps", str(eps)],
             input=input_text.encode(),
             capture_output=True,
             timeout=timeout_sec,
@@ -353,7 +358,7 @@ def main():
         del c, lb, ub, lb_clipped, ub_clipped, rl, ru
         del a_rows, a_cols, a_vals, b_ub, q_rows, q_cols, q_vals
 
-        status, obj, iters, elapsed, err = run_problem(name, input_text, timeout_sec)
+        status, obj, iters, elapsed, err = run_problem(name, input_text, timeout_sec, args.eps)
         del input_text
         gc.collect()
 
