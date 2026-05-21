@@ -1,12 +1,7 @@
 /target
 /data
-/reports
-/scripts/__pycache__
-DONE
-echo
-EXIT:*
-=== *
-scripts/cmd843/__pycache__/
+reports/
+**/__pycache__/
 .DS_Store
 **/.DS_Store
 /bench_results
@@ -14,7 +9,5 @@ scripts/cmd843/__pycache__/
 /tmp
 /logs
 Highs.log
-
 /.claude
-/bench_results
 dashboard.md
