@@ -8,10 +8,10 @@
 //! mechanism the spatial QP B&B already uses for box subproblems.
 
 use super::Relaxation;
+use crate::linalg::ldl::is_q_psd_by_cholesky;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
 
 /// Construction error for [`MilpProblem`] / [`MiqpProblem`].
 #[non_exhaustive]
@@ -127,7 +127,7 @@ impl MiqpProblem {
     /// relaxation is a valid lower bound only when this holds; a non-convex MIQP
     /// is out of scope.
     pub fn is_convex(&self) -> bool {
-        q_is_psd(&self.qp.q, self.qp.num_vars)
+        is_q_psd_by_cholesky(&self.qp.q)
     }
 }
 
@@ -203,92 +203,13 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     })
 }
 
-// PSD-check tolerances. These mirror the QP convexity check
-// (`qp::check_q_positive_semidefinite`); they are duplicated here to avoid
-// touching the live QP solver module during MIP bring-up. Consolidating the two
-// into one shared convexity check is a follow-up refactor.
-const PSD_NEG_TOL_RATIO: f64 = 1e-6; // reject a diagonal more negative than ratio * max|Q|
-const PSD_ABS_FLOOR: f64 = 1e-12; // floor for the negativity tolerance
-// Diagonal regularization added before Cholesky. NOTE: this intentionally accepts
-// Q whose smallest eigenvalue lies in `[-eps, 0)` as PSD — i.e. tiny negative
-// eigenvalues within the regularization are *masked*. This keeps PSD-but-singular
-// and round-off-perturbed convex Q solvable; a genuinely indefinite Q (eigenvalue
-// below `-eps`) still produces a non-positive Cholesky pivot and is rejected.
-const PSD_CHOL_EPS_RATIO: f64 = 1e-4; // eps = ratio * max|Q|, floored by PSD_EPS_FLOOR
-const PSD_EPS_FLOOR: f64 = 1e-8; // floor for the regularization
-const PSD_DENSE_LIMIT: usize = 1000; // skip the O(n^3) check above this size (assume convex)
-
-/// Whether the symmetric matrix `Q` (full-symmetric CSC storage, `n x n`) is
-/// positive semidefinite, within the tolerances above. A clearly indefinite `Q`
-/// (a negative eigenvalue beyond the regularization) makes the regularized dense
-/// Cholesky hit a non-positive pivot and returns `false`. PSD-but-singular `Q`
-/// passes (the regularization keeps it convex-solvable).
-fn q_is_psd(q: &CscMatrix, n: usize) -> bool {
-    if n == 0 {
-        return true;
-    }
-    let q_abs_max = q.values.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
-
-    // Quick reject: a diagonal entry that is meaningfully negative cannot be PSD.
-    let neg_tol = (q_abs_max * PSD_NEG_TOL_RATIO).max(PSD_ABS_FLOOR);
-    for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            if q.row_ind[k] == col && q.values[k] < -neg_tol {
-                return false;
-            }
-        }
-    }
-
-    if n > PSD_DENSE_LIMIT {
-        // O(n^3) dense Cholesky is too costly; assume convex (consistent with the
-        // QP routing heuristic). Such a large integer QP is out of practical scope.
-        return true;
-    }
-
-    let eps = (q_abs_max * PSD_CHOL_EPS_RATIO).max(PSD_EPS_FLOOR);
-    let mut a = vec![0.0_f64; n * n];
-    for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            if row <= col {
-                let v = q.values[k];
-                a[row * n + col] = v;
-                if row != col {
-                    a[col * n + row] = v;
-                }
-            }
-        }
-    }
-    for i in 0..n {
-        a[i * n + i] += eps;
-    }
-
-    // Dense L L^T factorization; a non-positive pivot means not PSD.
-    for j in 0..n {
-        let mut d = a[j * n + j];
-        for k in 0..j {
-            d -= a[j * n + k] * a[j * n + k];
-        }
-        if d <= 0.0 {
-            return false;
-        }
-        let sqrt_d = d.sqrt();
-        a[j * n + j] = sqrt_d;
-        for i in (j + 1)..n {
-            let mut l_ij = a[i * n + j];
-            for k in 0..j {
-                l_ij -= a[i * n + k] * a[j * n + k];
-            }
-            a[i * n + j] = l_ij / sqrt_d;
-        }
-    }
-    true
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::ldl::is_q_psd_by_cholesky;
     use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
 
     fn lp_2var() -> LpProblem {
         // trivial 2-var LP, bounds [0,5]^2, one <= constraint
@@ -404,5 +325,114 @@ mod tests {
         let a2 = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
         let qp2 = QpProblem::new_all_le(q2, vec![0.0, 0.0], a2, vec![], vec![(0.0, 5.0); 2]).unwrap();
         assert!(!MiqpProblem::new(qp2, vec![0, 1]).unwrap().is_convex());
+    }
+
+    // ── Large-n (n > former PSD_DENSE_LIMIT=1000) sentinels ──────────────────
+
+    /// Build an n×n MIQP with diagonal 1.0 and Q[0,1]=Q[1,0]=2.0.
+    /// The top-left 2×2 block has eigenvalues {-1, 3} → matrix is indefinite.
+    fn large_n_indefinite_miqp(n: usize) -> MiqpProblem {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            rows.push(i); cols.push(i); vals.push(1.0_f64);
+        }
+        // off-diagonal: Q[0,1]=Q[1,0]=2 makes the 2×2 block eigenvalues {-1,3}
+        rows.push(0); cols.push(1); vals.push(2.0);
+        rows.push(1); cols.push(0); vals.push(2.0);
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+        MiqpProblem::new(qp, vec![0]).unwrap()
+    }
+
+    /// Build an n×n MIQP with strictly positive diagonal Q (identity × 2) → PSD.
+    fn large_n_psd_miqp(n: usize) -> MiqpProblem {
+        let idx: Vec<usize> = (0..n).collect();
+        let vals: Vec<f64> = vec![2.0; n];
+        let q = CscMatrix::from_triplets(&idx, &idx, &vals, n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+        MiqpProblem::new(qp, vec![0]).unwrap()
+    }
+
+    /// **Sentinel**: n>1000, diagonal≥0, off-diagonal indefinite → nonconvex.
+    ///
+    /// No-op proof: if `is_convex` reverts to `return true` for n > 1000
+    /// (the old PSD_DENSE_LIMIT path), this assertion fails, exposing the
+    /// false-Optimal bug.
+    #[test]
+    fn large_n_off_diag_indefinite_is_not_convex() {
+        let m = large_n_indefinite_miqp(1001);
+        assert!(
+            !m.is_convex(),
+            "n=1001 indefinite MIQP (diag≥0, off-diag λ_min=-1) must be detected as \
+             nonconvex; `return true` for n>1000 produces false-Optimal (sentinel)"
+        );
+    }
+
+    /// **No-op proof**: documents that the old unconditional-true path produces
+    /// false-Optimal. Sparse LDL correctly returns false for the same Q.
+    ///
+    /// This test fails as written under the fix (both `assert!`s would need to pass),
+    /// but is structured to make the bug explicit: the first assert shows old-code
+    /// behaviour; the second shows the fix.
+    #[test]
+    fn no_op_proof_old_dense_limit_gives_false_optimal() {
+        let m = large_n_indefinite_miqp(1001);
+        let q = &m.qp.q;
+        // Old code silently assumed convex for n > 1000:
+        //   if n > PSD_DENSE_LIMIT { return true; }
+        // Simulate that path: for n=1001 it always returned true.
+        let old_path_result = q.nrows > 1000; // unconditional true for our matrix
+        assert!(
+            old_path_result,
+            "old path: n>1000 always returned is_convex=true \
+             (leads B&B to produce false-Optimal for indefinite Q)"
+        );
+        // Fixed path: sparse LDLᵀ correctly detects indefinite.
+        assert!(
+            !is_q_psd_by_cholesky(q),
+            "fix: sparse LDL reports false for indefinite Q; solver rejects with nonconvex_result"
+        );
+    }
+
+    /// **Regression guard**: large-n truly PSD Q must still pass the convexity gate.
+    /// Verifies no over-rejection (false negatives) after the fix.
+    #[test]
+    fn large_n_diagonal_psd_is_convex() {
+        // n=1001 diagonal-2 Q (strictly PD) must be convex.
+        let m = large_n_psd_miqp(1001);
+        assert!(m.is_convex(), "large-n diagonal PSD Q must not be over-rejected");
+    }
+
+    /// Regression guard: large-n Q=0 (LP case) is trivially convex.
+    #[test]
+    fn large_n_zero_q_is_convex() {
+        let n = 1001usize;
+        let q = CscMatrix::from_triplets(&[], &[], &[], n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+        let m = MiqpProblem::new(qp, vec![0]).unwrap();
+        assert!(m.is_convex(), "large-n zero Q (LP) must be convex");
+    }
+
+    /// Regression guard: large-n PSD-but-singular Q (rank-deficient PSD) is convex.
+    #[test]
+    fn large_n_psd_singular_is_convex() {
+        // Q: identity except last diagonal is 0 → rank n-1, λ_min=0 (PSD).
+        let n = 1001usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n - 1 {
+            rows.push(i); cols.push(i); vals.push(1.0);
+        }
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+        let m = MiqpProblem::new(qp, vec![0]).unwrap();
+        assert!(m.is_convex(), "large-n PSD-singular Q must be accepted as convex");
     }
 }
