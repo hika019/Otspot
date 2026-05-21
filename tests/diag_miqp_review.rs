@@ -187,7 +187,7 @@ fn offdiag_psd_bruteforce_cases() {
     }
 }
 
-/// REPRODUCER for a P1 silent-wrong MIQP answer (reported to team-lead, #17).
+/// REPRODUCER for a P1 silent-wrong MIQP answer.
 ///
 /// min x²+xy+y²-6x-6y over integers [0,4]² (Q=[[2,1],[1,2]], c=[-6,-6], NO linear
 /// constraints). Continuous optimum is the integer point (2,2), obj -12 → the MIQP

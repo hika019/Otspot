@@ -1,4 +1,4 @@
-//! Big-M Phase I cold-start (Phase 4 of dual_simplex_design.md §3.6 / §4)
+//! Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
 //!
 //! ## 解決する問題
 //!
@@ -10,7 +10,7 @@
 //!
 //! ## アルゴリズム (Dual Phase I + Primal Phase II + Big-M)
 //!
-//! 設計書 §3.6 / §4 Phase 4 に基づく 2-phase Big-M。Dual と Primal を組み合わせる
+//! 2-phase Big-M (Dual Phase I + Primal Phase II)。Dual と Primal を組み合わせる
 //! ことで klein3 級 degenerate infeasible LP の cycling を回避する:
 //!
 //! 1. 人工変数列 a_i (係数 1) を `needs_artificial` な各行 i に追加し、
@@ -36,7 +36,7 @@
 //!    - Phase II `Unbounded` → 元 LP 非有界
 //!    - Timeout / SingularBasis → 通常処理
 //!
-//! ## M の動的算出 (設計書 §6.4)
+//! ## M の動的算出
 //!
 //! Ruiz スケーリング後の c, b から:
 //! ```text
@@ -186,10 +186,10 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
     }
 }
 
-/// Big-M ペナルティ算出時の coefficient 倍率 (設計書 §6.4 推奨)。
+/// Big-M ペナルティ算出時の coefficient 倍率。
 const BIG_M_COST_MULT: f64 = 1e3;
 
-/// Big-M ペナルティの下限 (設計書 §6.4 推奨 `1e6`)。
+/// Big-M ペナルティの下限。
 const BIG_M_FLOOR: f64 = 1e6;
 
 /// Big-M Phase I の初期状態をまとめた構造体。
@@ -471,7 +471,7 @@ fn try_build_crash_phase1_state(
 /// Big-M Phase I cold-start (Dual Phase I + Primal Phase II + Big-M penalty)
 /// for Ge/Eq 含む LP.
 ///
-/// `a, b, c` は Ruiz スケーリング後の値を渡すこと (§6.4)。
+/// `a, b, c` は Ruiz スケーリング後の値を渡すこと。
 /// `row_scale`, `col_scale` は `extract_dual_info` で必要。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn big_m_cold_start(

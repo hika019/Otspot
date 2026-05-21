@@ -3,7 +3,7 @@
 //! 既存dual.rs（warm-start基盤）を拡張し、Harris ratio test、
 //! Dual Steepest Edge、Big-M Phase Iを備えた高性能Dual Simplexを提供する。
 //!
-//! 設計書 §3.2 に準拠。
+
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};

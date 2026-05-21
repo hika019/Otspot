@@ -252,7 +252,7 @@ fn main() {
     let n_dfeas_fail: usize = 0;
     let n_pfeas_fail: usize = 0;
 
-    let eps_obj: f64 = 1e-2; // §2.4: 1%閾値
+    let eps_obj: f64 = 1e-2; // 目的関数照合の相対許容誤差: 1%
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(timeout_secs);

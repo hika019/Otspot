@@ -1,4 +1,4 @@
-//! Task #29 凸 QP mini-corpus — **bug class: bounds / bound dual recovery**
+//! 凸 QP mini-corpus — **bug class: bounds / bound dual recovery**
 //!
 //! ## 対象 bug class
 //!
@@ -6,7 +6,7 @@
 //! - **bound active 時の bound_duals** が正しく復元されるか。
 //!   - lb active: bound_dual > 0 (=Q_j x + c_j の符号反転、reduced cost 相当)
 //!   - ub active: bound_dual > 0 (上側 dual の絶対値)
-//!   - 配列順は `[lb_dual; n_lb] ++ [ub_dual; n_ub]` (SolverResult docs §2.5)
+//!   - 配列順は `[lb_dual; n_lb] ++ [ub_dual; n_ub]`
 //! - **片側 bound (lb only / ub only)** で IPM が誤った dual を返さないか。
 //! - **fixed 変数 (lb==ub)** の bound dual 復元 (presolve fix 経路)。
 //!

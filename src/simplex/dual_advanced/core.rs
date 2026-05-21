@@ -1,6 +1,5 @@
 //! Dual Simplexコアループ（強化版）
 //!
-//! 設計書 §3.3 `dual_simplex_core_advanced()` に準拠。
 //! DualLeavingStrategy / RatioTestStrategy を差し替え可能な形で実装する。
 //!
 //! 実装範囲:
@@ -106,7 +105,7 @@ fn apply_lex_perturbation(
 
 /// Dual Simplexコアループ（強化版）
 ///
-/// 設計書 §3.3 の `dual_simplex_core_advanced()` を実装する。
+/// Dual Simplex コアループを実装する。
 ///
 /// # 引数
 /// - `a`: 制約行列（Ruizスケーリング済み）

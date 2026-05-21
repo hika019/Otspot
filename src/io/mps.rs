@@ -930,7 +930,7 @@ RANGES
 ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
-        // §6-4: RANGE行は区間制約に展開される（Le上限 + Ge下限の2制約）
+        // RANGE行は区間制約に展開される（Le上限 + Ge下限の2制約）
         // L制約 + range=5.0: upper=10.0（Le）, lower=10.0-5.0=5.0（Ge）
         assert_eq!(lp.num_constraints, 2);
         assert_eq!(lp.b[0], 10.0); // Le制約のRHS（上限）

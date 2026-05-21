@@ -7,7 +7,7 @@
 //!
 //! ## 合成 LP 設計 (v2、reviewer fact-finding 後)
 //!
-//! v1 (commit 8a20524) の合成 LP は presolve が was_reduced=false で短絡し
+//! v1 の合成 LP は presolve が was_reduced=false で短絡し
 //! postsolve_us=0 即終了 → LSQ entry 未到達 = vacuous sentinel だった。
 //! v2 は `tests/lp_minimal_cleanup_lp_size.rs` の "deletable singleton + coupled
 //! residual" 構造を流用 (cleanup LP gate test で trigger 実績あり):
