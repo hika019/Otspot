@@ -1,6 +1,6 @@
-//! Clarabel で LISWET9 等を解いて、我々のソルバ出力と比較する。
+//! Clarabel で LISWET9 等を解いて、本ソルバの出力と比較する。
 //!
-//! 目的: 我々の reference obj (data/baseline_objectives/) は self-reference のため、
+//! 目的: 本ソルバの reference obj (data/baseline_objectives/) は self-reference のため、
 //! 真の最適 obj が外部ソルバで何か確認する。
 //!
 //! 使い方: `cargo run --release --example clarabel_compare -- <path/to/file.QPS>`
@@ -128,7 +128,7 @@ fn main() {
     let a_clar = ClCsc::new(total_rows, n, col_ptr, row_ind, values);
 
     // P (Hessian) は upper triangular にして渡す
-    // 我々の Q は CSC 全体形式。Clarabel は upper-triangular CSC を期待する。
+    // 本ソルバの Q は CSC 全体形式。Clarabel は upper-triangular CSC を期待する。
     let mut p_triplets: Vec<(usize, usize, f64)> = Vec::new();
     for j in 0..n {
         for ptr in prob.q.col_ptr[j]..prob.q.col_ptr[j+1] {

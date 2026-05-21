@@ -175,7 +175,7 @@ fn solve_clarabel(prob: &QpProblem) -> Option<(f64, Vec<f64>)> {
     }
 }
 
-/// 我々の objective は obj_offset 加算済みのため、internal (offset なし) で比較。
+/// 本ソルバの objective は obj_offset 加算済みのため、internal (offset なし) で比較。
 fn compute_internal_obj(prob: &QpProblem, x: &[f64]) -> f64 {
     let qx = prob.q.mat_vec_mul(x).expect("Qx");
     0.5 * qx
