@@ -484,6 +484,7 @@ fn finalize_outcome(
         dual_solution: outcome.dual_solution,
         bound_duals: outcome.bound_duals,
         iterations: outcome.iterations,
+        timing_breakdown: outcome.timing,
         stats: crate::problem::SolveStats {
             postsolve_krylov_ir_skipped: krylov_ir_skipped,
             ..Default::default()

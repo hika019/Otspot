@@ -160,12 +160,16 @@ pub(crate) fn solve_ippmm_inner(
     let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
     let mut prof_iters: usize = 0;
     let mut prof_residual_ns: u128 = 0;
-
-    let mut prof_factor_ns: u128 = 0;
     let mut prof_predcorr_ns: u128 = 0;
     let mut prof_gondzio_ns: u128 = 0;
     let mut prof_update_ns: u128 = 0;
     let prof_other_ns: u128 = 0;
+
+    // 常時収集 (prof flag 不要): result の TimingBreakdown に昇格。
+    let mut total_factorize_ns: u128 = 0;
+    let mut total_solve_ns: u128 = 0;
+    let mut total_reg_retries: u32 = 0;
+    let mut any_iterative = false;
 
     for iter in 0..options.ipm.max_iter {
         let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };
@@ -339,7 +343,11 @@ pub(crate) fn solve_ippmm_inner(
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
         let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
-            FactorizeOutcome::Ok { factor, aug_mat, d_inv, rho_used } => {
+            FactorizeOutcome::Ok { factor, aug_mat, d_inv, rho_used,
+                                   retry_count, used_iterative, factorize_ns } => {
+                total_factorize_ns += factorize_ns;
+                total_reg_retries += retry_count;
+                any_iterative |= used_iterative;
                 (factor, aug_mat, d_inv, rho_used)
             }
             FactorizeOutcome::Timeout => {
@@ -352,11 +360,11 @@ pub(crate) fn solve_ippmm_inner(
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
 
-        if let Some(t) = prof_section_start {
-            prof_factor_ns += t.elapsed().as_nanos();
+        if let Some(_t) = prof_section_start {
             prof_section_start = Some(std::time::Instant::now());
         }
 
+        let t_solve = std::time::Instant::now();
         let (pred, alpha, r_c_corr) = if use_schur {
             let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
             let pred = predictor_step_schur(
@@ -519,6 +527,9 @@ pub(crate) fn solve_ippmm_inner(
         let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
         let alpha = alpha.min(alpha_tr);
 
+        // predictor/corrector + Gondzio 全体の solve 時間を常時収集。
+        total_solve_ns += t_solve.elapsed().as_nanos();
+
         if let Some(t) = prof_section_start {
             prof_gondzio_ns += t.elapsed().as_nanos();
             prof_section_start = Some(std::time::Instant::now());
@@ -659,7 +670,7 @@ pub(crate) fn solve_ippmm_inner(
 
     if prof {
         emit_prof_summary(
-            prof_iters, prof_residual_ns, prof_factor_ns, prof_predcorr_ns,
+            prof_iters, prof_residual_ns, total_factorize_ns, prof_predcorr_ns,
             prof_gondzio_ns, prof_update_ns, prof_other_ns,
         );
     }
@@ -703,6 +714,14 @@ pub(crate) fn solve_ippmm_inner(
         status
     };
 
+    let ipm_timing = crate::problem::TimingBreakdown {
+        ipm_factorize_us: (total_factorize_ns / 1_000) as u64,
+        ipm_solve_us: (total_solve_ns / 1_000) as u64,
+        ipm_reg_retries: total_reg_retries,
+        ipm_used_iterative: any_iterative,
+        ..Default::default()
+    };
+
     SolverResult {
         status: final_status,
         objective,
@@ -717,6 +736,7 @@ pub(crate) fn solve_ippmm_inner(
         gap: final_residuals.map(|(_, _, g)| g),
         // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
         duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },
+        timing_breakdown: Some(ipm_timing),
         ..Default::default()
     }
 }

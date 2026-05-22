@@ -31,6 +31,8 @@ pub struct IpmOutcome {
     /// 既に user_eps を満たす収束解で重い拡大 KKT 因子化を回避した場合に true。
     /// ゲートを外す (常時 refine) と false になる sentinel 用観測点。
     pub postsolve_krylov_ir_skipped: bool,
+    /// IPM + postsolve stage 別計測。常時収集 (instrumentation only)。
+    pub timing: Option<crate::problem::TimingBreakdown>,
 }
 
 impl IpmOutcome {
@@ -50,6 +52,7 @@ impl IpmOutcome {
             infeasibility_status: None,
             is_locally_optimal: false,
             postsolve_krylov_ir_skipped: false,
+            timing: None,
         }
     }
 
