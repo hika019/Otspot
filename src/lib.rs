@@ -11,7 +11,7 @@
 //! | [`model`] | 代数モデリング API（`Model`、`constraint!` マクロ） |
 //! | [`sparse`] | CSC 形式の疎行列・疎ベクトル演算 |
 //! | [`problem`] | 問題定義（`LpProblem` / `QpProblem`、`SolveStatus`、`SolverResult`） |
-//! | [`simplex`] | 改訂単体法ソルバー（LP） |
+//! | [`lp`] | LP 求解エントリポイント（`solve_lp_with`） |
 //! | [`qp`] | 内点法ソルバー（QP、IPM / IP-PMM） |
 //! | [`mip`] | 混合整数ソルバー（MILP / MIQP、branch-and-bound） |
 //! | [`io`] | MPS / QPS / QPLIB 形式ファイルの読み込み |

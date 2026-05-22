@@ -11,15 +11,15 @@
 //!
 //! # Reuse vs. duplication
 //! - `pruning::{should_prune, within_gap}` is shared directly (pure `f64` logic).
-//! - The best-bound priority queue ([`queue::NodeQueue`]) is an intentional small
-//!   duplicate of `qp::global::tree::BBTree` (see `queue.rs` for the rationale).
+//! - The best-bound priority queue (`queue::NodeQueue`) is an intentional small
+//!   duplicate of `qp::global::tree::BBTree`.
 //! - The driver loop mirrors the proven spatial-B&B structure but the per-node
 //!   semantics differ (relaxation-objective lower bound vs. interval bound;
 //!   integer-feasible incumbents vs. any feasible point).
 //!
 //! MILP (LP relaxation) and convex MIQP (QP relaxation) share one generic driver
-//! ([`solve_mip_with_stats`]); only the relaxation solver differs, abstracted by
-//! the [`Relaxation`] trait. Non-convex MIQP (non-PSD `Q`) is out of scope and
+//! (`solve_mip_with_stats`); only the relaxation solver differs, abstracted by
+//! the `Relaxation` trait. Non-convex MIQP (non-PSD `Q`) is out of scope and
 //! reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
