@@ -971,3 +971,52 @@ fn test_solve_boeing1_feasibility_bug() {
     // When fixed: assert_eq!(result.status, SolveStatus::Optimal);
     //             assert!((result.objective - (-335.21356751)).abs() < 1.0);
 }
+
+/// QBORE3D regression sentinel: presolve+Ruiz amplification caused SuboptimalSolution
+/// (dfeas=7.5e-4) because the inner IPM stalls before meeting the tightened threshold.
+///
+/// Root cause: sigma_total ≈ 7.8e-4 forces eps_inner ≈ 7.8e-10, which the IPM cannot
+/// achieve (stalls at 7.7e-7). Postsolve singleton recovery then degrades j=282's dual
+/// residual from 2.3e-9 → 7.5e-4 via the overdetermined LSQ.
+///
+/// Fix: no-presolve fallback — when all presolve+Ruiz attempts fail for small problems,
+/// solve directly on the original problem (no scaling amplification). DIAG_NO_PRESOLVE=1
+/// already confirmed this converges in 43 iterations.
+///
+/// Sentinel: reverting the no-presolve fallback → SuboptimalSolution (dfeas=7.5e-4).
+#[test]
+fn test_qbore3d_optimal() {
+    let path = Path::new("data/maros_meszaros/QBORE3D.QPS");
+    assert!(
+        path.exists(),
+        "{} not found — scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
+    let problem = parse_qps(path).expect("Failed to parse QBORE3D.QPS");
+    assert_eq!(problem.num_vars, 315, "QBORE3D: expected 315 vars");
+    assert_eq!(problem.num_constraints, 233, "QBORE3D: expected 233 constraints");
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(60.0);
+    let result = solve_qp_with(&problem, &opts);
+
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "QBORE3D: should be Optimal, got {:?} \
+         (dfeas regression — presolve+Ruiz amplification fix broken?)",
+        result.status,
+    );
+    // Expected objective ≈ 3100.2 (confirmed via DIAG_NO_PRESOLVE=1: 3.100201e3).
+    let expected_obj = 3100.2_f64;
+    assert!(
+        (result.objective - expected_obj).abs() < 10.0,
+        "QBORE3D: expected obj ≈ {:.1}, got {:.6e}",
+        expected_obj,
+        result.objective,
+    );
+    println!(
+        "QBORE3D: status={:?}, obj={:.6e}, iters={}",
+        result.status, result.objective, result.iterations
+    );
+}
