@@ -254,10 +254,9 @@ println!("status: {}", result.status);
 LISWET は「凸数列の錐」への射影で、制約正規行列が離散 biharmonic 作用素（n = 10⁴ で
 cond ≈ n⁴ ≈ 1e15）、最適双対が巨大（|y|∞ ≈ 1e5–1e6）なため、f64 内点法ではここで
 ~1e-6 より小さくできない残余 primal 非実行性に目的関数が過敏に反応する。これは LDLᵀ 精度フロアではない — 分解精度を向上させても（double-double 等）
-active 制約系の条件数自体は変わらず、収束を妨げるのはその条件数である。
-Clarabel でも tol = 1e-12 で `AlmostSolved` 止まり（最大制約違反 ≈ 2e-6）で、参照目的関数自体が
-未確定（我々の解の方がむしろ実行可能性が高い）。本ソルバーは false `Optimal` を返さず、
-`SuboptimalSolution`/`Timeout` として正直に申告する。より厳しい `1e-8` では ill-conditioned
+active 制約系の条件数自体は変わらず、収束を妨げるのはその条件数である
+（Clarabel も tol = 1e-12 で `AlmostSolved` 止まり）。otspot はこれらに `Optimal` でなく
+`SuboptimalSolution`/`Timeout` を返す。より厳しい `1e-8` では ill-conditioned
 問題が主双対残差の閾値をわずかに超過 — 精度フロアの影響で収束失敗ではない。
 
 ベンチデータは gitignore 対象かつ再現可能（[ベンチマークデータ](#ベンチマークデータ)参照）。
