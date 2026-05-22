@@ -259,11 +259,10 @@ println!("status: {}", result.status);
 
 `1e-6` の QP 未達は `QBORE3D`（双対残差 7.5e-4 で停滞）と `LISWET` 系（`LISWET9`/`LISWET12`）。
 LISWET は「凸数列の錐」への射影で、制約正規行列が離散 biharmonic 作用素（n = 10⁴ で
-cond ≈ n⁴ ≈ 1e15）、最適双対が巨大（|y|∞ ≈ 1e5–1e6）なため、f64 内点法ではここで
-~1e-6 より小さくできない残余 primal 非実行性に目的関数が過敏に反応する
-（Clarabel も tol = 1e-12 で `AlmostSolved` 止まり）。otspot はこれらに `Optimal` でなく
-`SuboptimalSolution`/`Timeout` を返す。より厳しい `1e-8` では ill-conditioned
-問題が主双対残差の閾値をわずかに超過 — 精度フロアの影響で収束失敗ではない。
+cond ≈ n⁴ ≈ 1e15）、最適双対が巨大（|y|∞ ≈ 1e5–1e6）なため、f64 内点法では
+~1e-6 より小さくできない残余 primal 非実行性に目的関数が過敏に反応する。
+otspot はこれらに `SuboptimalSolution`/`Timeout` を返す。より厳しい `1e-8` では
+ill-conditioned 問題が主双対残差の閾値をわずかに超過 — 精度フロアの影響。
 
 ベンチデータは gitignore 対象かつ再現可能（[ベンチマークデータ](#ベンチマークデータ)参照）。
 
