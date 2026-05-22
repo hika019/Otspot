@@ -89,6 +89,14 @@ pub(crate) fn guard_qp_optimal(result: SolverResult, problem: &QpProblem) -> Sol
 /// 1 attempt の IPM 反復上限。500 は Maros/QPLIB 全 PASS が収まる empirical sweet spot。
 const MAX_ITER_PER_ATTEMPT: usize = 500;
 
+/// No-presolve fallback: only run on problems this size or smaller. The fallback
+/// re-solves the original (non-reduced) problem, bypassing the Ruiz amplification
+/// that can stop the inner IPM from converging tightly enough. The cap bounds the
+/// cost of re-solving without presolve reduction; it sits below PRESOLVE_SIZE_LIMIT
+/// (50_000), so problems in between still get presolve+Ruiz but are deemed too
+/// large to re-solve from scratch economically.
+const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
+
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
 /// presolve スケーリング縮小比率の下限 sigma_total。unscale 残差は 1/sigma_total 倍される。
@@ -401,6 +409,40 @@ fn solve_ipm_with_runner(
                 best = Some(outcome);
             }
             _ => {}
+        }
+    }
+
+    // No-presolve fallback: when presolve+Ruiz path fails for small problems, run
+    // the inner IPM directly on the original problem. Ruiz equilibration in
+    // presolve can force a scaled convergence threshold (eps * sigma_total) that
+    // the inner IPM cannot reach numerically, even with all tighten attempts.
+    // Without presolve, the IPM operates in the original space (no amplification)
+    // and typically converges within user_eps. Size-gated to avoid overhead on
+    // problems that are too large to re-solve without reduction.
+    let best_ok = best.as_ref().map(|b| b.satisfies_eps(user_eps)).unwrap_or(false);
+    if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
+        let fallback_pre = QpPresolveResult::no_reduction(problem);
+        for use_ruiz_fb in [false, true] {
+            if total_deadline.map_or(false, |d| Instant::now() >= d) {
+                break;
+            }
+            opts.deadline = total_deadline;
+            opts.timeout_secs = None;
+            opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+            opts.use_ruiz_scaling = use_ruiz_fb;
+            opts.tolerance = None;
+            opts.ipm.eps = user_eps.max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+            let fb = runner(problem, &fallback_pre, &opts);
+            // Replace best only when the fallback actually satisfies user_eps. A
+            // non-satisfying fallback must NOT displace the presolve result:
+            // quality_score is KKT-only and ignores objective value, so a fallback
+            // with smaller kkt_rel but a far-worse objective would wrongly win.
+            // (After the attempt loop `best` is always Some, so the prior-None
+            // branch was unreachable and is dropped.)
+            if fb.satisfies_eps(user_eps) {
+                best = Some(fb);
+                break;
+            }
         }
     }
 
