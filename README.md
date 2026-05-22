@@ -4,14 +4,14 @@
 
 A **mathematical optimization solver** written in Rust.
 
-otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, steepest-edge pricing) for LP and an **interior-point method** (Mehrotra predictor–corrector / IP-PMM) for QP, with branch-and-bound on top for mixed-integer problems (MILP / MIQP). It certifies infeasible and unbounded problems and returns full primal/dual information.
+otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, steepest-edge pricing) for LP and an **interior-point method** (Mehrotra predictor–corrector / IP-PMM) for QP, with branch-and-bound on top for mixed-integer problems. It certifies infeasible and unbounded problems and returns full primal/dual information.
 
 ## Features
 
 - **Algebraic modeling API** — express problems in natural mathematical notation
 - **Revised simplex (LP)** — sparse LU factorization with Markowitz-threshold pivoting
 - **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
-- **Mixed-integer (MILP / MIQP)** — branch-and-bound
+- **Mixed-integer (MILP)** — baseline branch-and-bound with most-fractional branching over LP relaxations; convex MIQP supported, non-convex MIQP out of scope. Cuts, primal heuristics, SOS constraints, and richer branching strategies are not implemented.
 - **Infeasibility / unboundedness certification** — an explicit status, not just a failure
 - **Ruiz equilibration** — row/column scaling preconditioner for better conditioning
 - **Steepest-edge pricing** — faster convergence via improved entering-variable choice
