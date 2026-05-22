@@ -4,10 +4,10 @@
 //! 疎LU分解 (`faer::sparse::linalg::lu`) を利用する。faer LU は COLAMD column
 //! ordering と partial pivoting で fill-in を抑え、Markowitz より高速。
 //!
-//! 設計選択: Stage 1 として `simplicial` 経路を強制利用 (`LuRef::solve_*` で
-//! `&self.symbolic, &self.numeric` を渡す)。supernodal は Stage 2 で解放予定。
-//! ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる更新層で、本 module の変更
-//! とは独立に動作する。
+//! 設計選択: Stage 1 として symbolic factorize に
+//! `SupernodalThreshold::FORCE_SIMPLICIAL` を渡し simplicial 経路を強制する。
+//! supernodal は Stage 2 で解放予定。ETA 機構 (`src/basis/eta.rs`) は LU の上に
+//! 被せる更新層で、本 module の変更とは独立に動作する。
 
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
@@ -15,7 +15,7 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::sparse::linalg::lu::{
     factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu,
 };
-use faer::sparse::linalg::LuError;
+use faer::sparse::linalg::{LuError, SupernodalThreshold};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, MatMut, Par};
 use std::time::Instant;
@@ -56,7 +56,20 @@ impl LuFactorization {
         let a_sym = unsafe {
             SymbolicSparseColMatRef::<usize>::new_unchecked(m, m, &col_ptr, None, &row_ind)
         };
-        let symbolic = factorize_symbolic_lu(a_sym, LuSymbolicParams::default())
+        // simplicial を明示的に強制する。`LuSymbolicParams::default()` の
+        // `supernodal_flop_ratio_threshold` は AUTO (1.0) で、faer は supernodal/
+        // simplicial 自動判定の col-count ヒューリスティックを走らせる。この経路
+        // (faer 0.24.0 lu.rs:2245 `h_col_counts[parent] += h_col_counts[j] - 1`)
+        // は構造的特異な基底 (空行を持つ m×m など) で usize 減算 underflow を起こし、
+        // debug では panic、release では wrap して supernodal 判定を汚染する。
+        // FORCE_SIMPLICIAL は当該ブロック全体をスキップするため両方を根絶し、
+        // 本 module 設計の "simplicial 経路を強制利用" にも一致する。構造的特異な
+        // 基底は numeric 段で SymbolicSingular として検出され SingularBasis に写る。
+        let symbolic_params = LuSymbolicParams {
+            supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
+            ..Default::default()
+        };
+        let symbolic = factorize_symbolic_lu(a_sym, symbolic_params)
             .map_err(|_| SolverError::SingularBasis { step: 0 })?;
 
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -437,6 +450,59 @@ mod tests {
             "btran: expected 0.2, got {}",
             rhs2[0]
         );
+    }
+
+    /// 構造的特異 (空行を持つ) 基底で symbolic factorize が panic しないことを
+    /// 守る load-bearing sentinel (#42)。`LuSymbolicParams::default()` (AUTO) では
+    /// faer 0.24.0 の supernodal/simplicial 自動判定が usize underflow を起こし
+    /// debug で panic する。`FORCE_SIMPLICIAL` 強制でこれを根絶し、構造的特異な
+    /// 基底は SingularBasis として返ることを検査する。
+    ///
+    /// 入力 3 件は AUTO 下で実際に panic することを確認済みの 10×10 構造
+    /// (いずれも行 9 が空 → 構造的特異)。本 fix を戻す (AUTO に戻す) と debug で
+    /// panic し本 test は FAIL する。pilot (m=4722) の実発火基底と同じ性質を
+    /// 小規模に再現したもの。
+    #[test]
+    fn test_lu_structurally_singular_no_panic() {
+        // (col_ptr, row_ind): 各列の行は昇順。行 9 はどの列にも現れない (空行)。
+        let cases: [(&[usize], &[usize]); 3] = [
+            (
+                &[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+                &[0, 8, 0, 1, 2, 3, 1, 3, 4, 8, 0, 5, 3, 6, 3, 7, 3, 8, 4, 6],
+            ),
+            (
+                &[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+                &[0, 3, 1, 5, 2, 6, 1, 3, 4, 6, 5, 6, 6, 8, 4, 7, 4, 8, 2, 3],
+            ),
+            (
+                &[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+                &[0, 8, 0, 1, 2, 7, 3, 8, 4, 8, 5, 8, 1, 6, 2, 7, 1, 8, 4, 6],
+            ),
+        ];
+        let m = 10;
+        for (idx, (col_ptr, row_ind)) in cases.iter().enumerate() {
+            // 行 9 が空であること (= 構造的特異) を明示的に確認。
+            assert!(
+                !row_ind.contains(&(m - 1)),
+                "case {idx}: row {} must be empty for structural singularity",
+                m - 1
+            );
+            let a = CscMatrix {
+                col_ptr: col_ptr.to_vec(),
+                row_ind: row_ind.to_vec(),
+                values: vec![1.0; row_ind.len()],
+                nrows: m,
+                ncols: m,
+            };
+            let basis: Vec<usize> = (0..m).collect();
+            // 旧 (AUTO) 実装ではこの呼び出しが debug で panic していた。
+            let result = LuFactorization::factorize_timed(&a, &basis, None);
+            assert!(
+                matches!(result, Err(SolverError::SingularBasis { .. })),
+                "case {idx}: structurally singular basis must return SingularBasis, got {:?}",
+                result.map(|_| "Ok")
+            );
+        }
     }
 
     #[test]
