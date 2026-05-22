@@ -55,7 +55,11 @@ pub(crate) trait Relaxation {
     fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
 }
 
-/// Search statistics for sentinel/regression tests (not part of the production API).
+/// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
+///
+/// Counters and timings instrument the branch-and-bound driver without changing
+/// its behaviour.  The timing fields help separate *exploration explosion* (many
+/// nodes) from *per-node cost* (slow relaxation solves).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MipStats {
     /// Relaxation solves performed (root included).
@@ -66,6 +70,38 @@ pub struct MipStats {
     pub pruned: usize,
     /// Number of incumbent improvements (including the first one found).
     pub incumbent_updates: usize,
+
+    // --- relaxation solve wall-clock timing (milliseconds) ---
+
+    /// Total wall time spent inside relaxation solves across all nodes (ms).
+    pub relaxation_time_total_ms: f64,
+    /// Wall time for the root node relaxation solve (ms).
+    pub relaxation_time_root_ms: f64,
+    /// Cumulative wall time for all descendant (non-root) relaxation solves (ms).
+    pub relaxation_time_desc_ms: f64,
+    /// Cumulative time in solves that returned `Optimal` (ms).
+    pub relaxation_time_optimal_ms: f64,
+    /// Cumulative time in solves that returned `Infeasible` (ms).
+    pub relaxation_time_infeasible_ms: f64,
+
+    // --- LP sub-phase timing extracted from SolverResult::timing_breakdown ---
+    // Populated only when the LP relaxation path goes through presolve *and*
+    // presolve actually reduces the problem (`was_reduced = true`).  Zero for
+    // MIQP (QP solver does not yet provide a breakdown) and for MILP nodes
+    // where presolve does not reduce (e.g. tight-bound knapsack-style nodes).
+
+    /// Cumulative LP presolve microseconds across all nodes.
+    pub lp_presolve_us_total: u64,
+    /// Cumulative LP solve (simplex) microseconds across all nodes.
+    pub lp_solve_us_total: u64,
+    /// Cumulative LP postsolve microseconds across all nodes.
+    pub lp_postsolve_us_total: u64,
+
+    // --- memory estimate ---
+
+    /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
+    /// Gives a rough idea of per-node memory traffic regardless of node count.
+    pub approx_bounds_bytes_per_node: usize,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -115,6 +151,9 @@ fn solve_mip_with_stats<R: Relaxation>(
     let mut stats = MipStats::default();
     let mask = integer_mask(problem.num_vars(), problem.integer_vars());
 
+    // Approximate per-node bounds clone cost: one (f64, f64) per variable.
+    stats.approx_bounds_bytes_per_node = problem.num_vars() * 2 * std::mem::size_of::<f64>();
+
     // deadline: prefer an explicit deadline, else derive from timeout_secs.
     let deadline = options.deadline.or_else(|| {
         options
@@ -145,6 +184,7 @@ fn solve_mip_with_stats<R: Relaxation>(
     let mut deadline_stop = false;
     let mut maxnodes_stop = false;
     let mut unbounded = false;
+    let mut root_solved = false; // first relaxation solve distinguishes root timing
 
     while let Some(node) = q.pop() {
         if deadline_hit(&deadline) {
@@ -168,9 +208,31 @@ fn solve_mip_with_stats<R: Relaxation>(
             }
         }
 
+        let t0 = Instant::now();
         let res = problem.solve(&node.var_bounds, &shared);
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
         stats.nodes_processed += 1;
         stats.max_depth_seen = stats.max_depth_seen.max(node.depth);
+
+        // Accumulate timing.
+        stats.relaxation_time_total_ms += elapsed_ms;
+        if !root_solved {
+            stats.relaxation_time_root_ms = elapsed_ms;
+            root_solved = true;
+        } else {
+            stats.relaxation_time_desc_ms += elapsed_ms;
+        }
+        match res.status {
+            SolveStatus::Optimal => stats.relaxation_time_optimal_ms += elapsed_ms,
+            SolveStatus::Infeasible => stats.relaxation_time_infeasible_ms += elapsed_ms,
+            _ => {}
+        }
+        if let Some(tb) = res.timing_breakdown {
+            stats.lp_presolve_us_total += tb.presolve_us;
+            stats.lp_solve_us_total += tb.solve_us;
+            stats.lp_postsolve_us_total += tb.postsolve_us;
+        }
 
         match res.status {
             SolveStatus::Infeasible => {

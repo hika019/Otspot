@@ -420,6 +420,163 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
 }
 
 // ---------------------------------------------------------------------------
+// MipStats timing sentinels
+//
+// These tests fail if the timing instrumentation is removed (no-op revert):
+//   - relax_total_ms > 0  requires the Instant wrapper around problem.solve()
+//   - relax_root_ms > 0   requires the root_solved branch
+//   - desc_ms > 0         requires descendant timing after first node
+//   - optimal_ms > 0      requires the Optimal arm in the timing match
+//   - infeasible_ms > 0   requires the Infeasible arm (pruned-by-solve path)
+//   - approx_bounds_bytes_per_node > 0  requires the n*2*8 assignment
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stats_timing_populated_for_milp_with_branching() {
+    // fractional root → at least 3 nodes (root + 2 children); root and descendant
+    // timing must both be non-zero.
+    let lp = build_lp(
+        vec![-1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0)],
+    );
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert!(stats.nodes_processed >= 3, "branching expected");
+    assert!(
+        stats.relaxation_time_total_ms > 0.0,
+        "relax_total_ms must be >0 (instrumentation missing?)"
+    );
+    assert!(
+        stats.relaxation_time_root_ms > 0.0,
+        "relax_root_ms must be >0"
+    );
+    assert!(
+        stats.relaxation_time_desc_ms > 0.0,
+        "relax_desc_ms must be >0 (descendant instrumentation missing?)"
+    );
+    // total ≈ root + desc (floating-point tolerance)
+    let sum = stats.relaxation_time_root_ms + stats.relaxation_time_desc_ms;
+    assert!(
+        (stats.relaxation_time_total_ms - sum).abs() < 1e-6,
+        "total={:.6} root={:.6} desc={:.6}",
+        stats.relaxation_time_total_ms,
+        stats.relaxation_time_root_ms,
+        stats.relaxation_time_desc_ms,
+    );
+    assert!(
+        stats.relaxation_time_optimal_ms > 0.0,
+        "optimal_ms must be >0"
+    );
+    assert!(
+        stats.approx_bounds_bytes_per_node > 0,
+        "bounds_bytes_per_node must be >0"
+    );
+}
+
+#[test]
+fn stats_timing_infeasible_ms_populated() {
+    // x in [0,10], 1.2 <= x <= 1.8 integer → LP feasible but branching produces
+    // infeasible children.  infeasible_ms must be non-zero.
+    let lp = build_lp(
+        vec![1.0],
+        &[0, 1],
+        &[0, 0],
+        &[1.0, 1.0],
+        2,
+        vec![1.2, 1.8],
+        vec![ConstraintType::Ge, ConstraintType::Le],
+        vec![(0.0, 10.0)],
+    );
+    let (r, stats) =
+        solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible);
+    assert!(
+        stats.relaxation_time_infeasible_ms > 0.0,
+        "infeasible_ms must be >0; pruned={} nodes={}",
+        stats.pruned,
+        stats.nodes_processed,
+    );
+}
+
+#[test]
+fn stats_timing_root_only_for_trivial_integer_root() {
+    // Root already integral → no branching → desc_ms == 0.
+    let lp = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let (_, stats) =
+        solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(stats.nodes_processed, 1);
+    assert!(stats.relaxation_time_root_ms > 0.0, "root_ms must be >0");
+    assert_eq!(
+        stats.relaxation_time_desc_ms, 0.0,
+        "no descendants → desc_ms must be 0"
+    );
+}
+
+#[test]
+fn stats_timing_populated_for_miqp_with_branching() {
+    // Same 2-var convex MIQP as miqp_fractional_root_branches_to_integer_optimum.
+    let qp = qp_problem(
+        &[2.0, 2.0],
+        vec![0.0, 0.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Ge],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let (_, stats) =
+        super::solve_miqp_with_stats(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert!(stats.nodes_processed >= 2, "branching expected");
+    assert!(
+        stats.relaxation_time_total_ms > 0.0,
+        "MIQP relax_total_ms must be >0"
+    );
+    assert!(
+        stats.relaxation_time_root_ms > 0.0,
+        "MIQP relax_root_ms must be >0"
+    );
+    assert!(
+        stats.approx_bounds_bytes_per_node > 0,
+        "MIQP bounds_bytes_per_node must be >0"
+    );
+}
+
+#[test]
+fn stats_bounds_bytes_scales_with_num_vars() {
+    // approx_bounds_bytes_per_node = n_vars * 16 (two f64 per bound pair).
+    // Two problems of different sizes: the larger must have proportionally larger bytes.
+    let lp1 = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let (_, s1) =
+        solve_milp_with_stats(&milp(lp1, vec![0]), &opts(), &MipConfig::default());
+
+    let lp4 = build_lp(
+        vec![1.0, 1.0, 1.0, 1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0); 4],
+    );
+    let (_, s4) =
+        solve_milp_with_stats(&milp(lp4, vec![0]), &opts(), &MipConfig::default());
+
+    assert_eq!(
+        s4.approx_bounds_bytes_per_node,
+        4 * s1.approx_bounds_bytes_per_node,
+        "bytes must scale 4× with 4× the variables"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // integer_mask helper
 // ---------------------------------------------------------------------------
 
