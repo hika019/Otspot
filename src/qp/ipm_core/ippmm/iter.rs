@@ -360,8 +360,6 @@ pub(crate) fn solve_ippmm_inner(
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
 
-        // factorize section timing now comes from FactorizeOutcome::factorize_ns;
-        // just restart the prof timer for the next section.
         if let Some(_t) = prof_section_start {
             prof_section_start = Some(std::time::Instant::now());
         }

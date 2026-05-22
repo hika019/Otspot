@@ -58,7 +58,9 @@ fn run_ipm_with(
         result.status,
         SolveStatus::Infeasible | SolveStatus::Unbounded | SolveStatus::NonConvex(_)
     ) {
-        return IpmOutcome::infeasibility(result.status);
+        let mut out = IpmOutcome::infeasibility(result.status);
+        out.timing = result.timing_breakdown;
+        return out;
     }
 
     // 不定 Q + 慣性修正 IPM 収束時は LocallyOptimal フラグを保持。

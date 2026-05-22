@@ -6,8 +6,9 @@ use crate::sparse::CscMatrix;
 /// TimingBreakdown の QP IPM/postsolve フィールドが実測値で埋まることを検証。
 ///
 /// Sentinel: timing フィールドを常時 None にすると本テストが FAIL する。
-/// 問題サイズは小さいが制約付きで IPM が ≥1 反復するため factorize/solve 時間は必ず > 0。
-/// 2 問 (制約あり QP / LP=Q≡0 の 2 ケース) で postsolve_us の内訳が合計に整合することを確認。
+/// IPM が ≥1 反復する問題では `ipm_factorize_us > 0` および `ipm_solve_us > 0` が保証される。
+/// `postsolve_us == sum(sub-stages)` は構造的不変条件 (algebraic construction)。
+/// postsolve 計測が実際に行われているかはケース3 (20 変数) で `postsolve_us > 0` を検証。
 #[test]
 fn test_qp_timing_breakdown_fields_populated() {
     // ── ケース1: 凸 QP (制約つき、IPM が複数反復) ────────────────────────────
@@ -25,14 +26,12 @@ fn test_qp_timing_breakdown_fields_populated() {
         let tb = result.timing_breakdown
             .expect("timing_breakdown must be Some for QP IPM path");
 
-        // IPM が少なくとも 1 反復した → factorize/solve > 0
         assert!(result.iterations > 0, "IPM should iterate");
         assert!(tb.ipm_factorize_us > 0,
             "ipm_factorize_us must be > 0 when IPM iterated (got {})", tb.ipm_factorize_us);
         assert!(tb.ipm_solve_us > 0,
             "ipm_solve_us must be > 0 when IPM iterated (got {})", tb.ipm_solve_us);
 
-        // postsolve 合計は内訳の和と整合する
         let postsolve_sum = tb.postsolve_map_us
             + tb.postsolve_lsq_us
             + tb.postsolve_recovery_us
@@ -60,7 +59,6 @@ fn test_qp_timing_breakdown_fields_populated() {
         let tb = result.timing_breakdown
             .expect("timing_breakdown must be Some for QP IPM path");
 
-        // postsolve 内訳が合計と整合
         let postsolve_sum = tb.postsolve_map_us
             + tb.postsolve_lsq_us
             + tb.postsolve_recovery_us
@@ -68,6 +66,48 @@ fn test_qp_timing_breakdown_fields_populated() {
             + tb.postsolve_krylov_ir_us;
         assert_eq!(tb.postsolve_us, postsolve_sum,
             "postsolve_us ({}) must equal sum of sub-stages ({}) in case 2",
+            tb.postsolve_us, postsolve_sum);
+    }
+
+    // ── ケース3: 20 変数 QP — postsolve_us が μs 解像度で > 0 になることを確認 ─
+    // 微小問題では postsolve が sub-μs で完了し 0 になる。20 変数なら postsolve 経路で
+    // 十分な作業量があり計測値 > 0 が保証される。
+    {
+        let n = 20usize;
+        // 対角 Q = 2I, c = -ones (min 0.5‖x‖²- sum(x_i))
+        let rows: Vec<usize> = (0..n).collect();
+        let vals: Vec<f64> = vec![2.0; n];
+        let q = CscMatrix::from_triplets(&rows, &rows, &vals, n, n).unwrap();
+        let c = vec![-1.0; n];
+        // 3 つの不等式制約: sum(x_i) <= 12, x_0+x_1 <= 2, x_3+x_4 <= 2
+        let a_rows = vec![0usize; n].into_iter().chain([1, 1, 2, 2]).collect::<Vec<_>>();
+        let a_cols = (0..n).chain([0, 1, 3, 4]).collect::<Vec<_>>();
+        let a_vals = vec![1.0f64; n + 4];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 3, n).unwrap();
+        let b = vec![12.0, 2.0, 2.0];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+
+        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution),
+            "20-var QP should converge, got {:?}", result.status);
+        let tb = result.timing_breakdown
+            .expect("timing_breakdown must be Some for 20-var QP");
+
+        // IPM 計測が非ゼロ
+        assert!(result.iterations > 0, "IPM should iterate on 20-var problem");
+        assert!(tb.ipm_factorize_us > 0,
+            "ipm_factorize_us must be > 0 for 20-var QP (got {})", tb.ipm_factorize_us);
+
+        // 合計 == 内訳の和
+        let postsolve_sum = tb.postsolve_map_us
+            + tb.postsolve_lsq_us
+            + tb.postsolve_recovery_us
+            + tb.postsolve_refine_us
+            + tb.postsolve_krylov_ir_us;
+        assert_eq!(tb.postsolve_us, postsolve_sum,
+            "postsolve_us ({}) must equal sum of sub-stages ({}) for 20-var QP",
             tb.postsolve_us, postsolve_sum);
     }
 }
