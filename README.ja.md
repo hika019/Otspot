@@ -4,14 +4,14 @@
 
 Rust で書かれた**数理最適化ソルバー**。
 
-LP には**修正シンプレックス法**（疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定）、QP には**内点法**（Mehrotra predictor–corrector / IP-PMM）を実装し、その上に混合整数問題（MILP / MIQP）の branch-and-bound を備える。実行不可能・非有界も判定し、完全な主双対情報を返す。
+LP には**修正シンプレックス法**（疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定）、QP には**内点法**（Mehrotra predictor–corrector / IP-PMM）を実装し、混合整数問題の branch-and-bound を備える。実行不可能・非有界も判定し、完全な主双対情報を返す。
 
 ## 機能
 
 - **代数モデリングAPI** — 自然な数式記法で問題を表現
 - **修正シンプレックス法（LP）** — 疎LU分解と Markowitz 閾値ピボット
 - **内点法（QP）** — 凸QPに対するMehrotra predictor–corrector / IP-PMM
-- **混合整数（MILP / MIQP）** — branch-and-bound
+- **混合整数（MILP / 凸MIQP）** — 連続緩和（MILPはLP緩和、凸MIQPはQP緩和）上の baseline branch-and-bound（most-fractional 分枝）。非凸MIQPはスコープ外。カット・主発見的手法・SOS制約・より高度な分枝戦略は未実装。
 - **実行不可能・非有界の判定** — 単なる失敗ではなく明示的なステータスを返す
 - **Ruiz均衡化** — 数値条件を改善する行/列スケーリング前処理
 - **最急勾配価格決定** — 改善された変数選択で収束を高速化

@@ -452,19 +452,20 @@ pub struct SolverOptions {
     /// **`solve_qp_with` は dispatch しない**: 明示呼び出し限定 (誤って既存 user の wall を桁違いに伸ばさないため)。
     pub global_optimization: Option<GlobalOptimizationConfig>,
 
-    /// **user 指定** 全 solver 共通の thread 上限 (LP / QP / 非凸 multistart 全て)。
+    /// Thread budget shared by all solver paths (LP / QP / multistart).
     ///
-    /// default = 1 (シリアル、既存挙動完全保護、bench worker と多重化しない)。
+    /// Default = 1 (serial; preserves existing behaviour, avoids contention
+    /// with external bench workers).
     ///
-    /// **現状の実効範囲 (2026-05-18 時点)**:
-    /// - multistart 時の並列度 = `min(n_starts, threads)` を内部で自動分配 = **実効並列**
-    /// - 各 inner solve は `threads = 1` 強制 (二重並列化抑止)
-    /// - **単発 LP/QP solve では現状 no-op** (faer 内部は `Par::Seq` hardcode、
-    ///   per-call parallelism 配線は future work)
-    /// - 単発 solve threads option 指定しても **値は受理されるが効果ゼロ**
-    ///
-    /// CLAUDE.md cpu800% 上限考慮、`bench_parallel.sh --jobs N × threads=1`
-    /// と (#31 完了後) `--jobs 1 × threads=N` のいずれも合計 N CPU で動かせる設計。
+    /// **Effect by path:**
+    /// - **QP** (`threads ≥ 2`): routes through faer parallel sparse LDL on the
+    ///   KKT system; may improve throughput for problems with denser KKT structure,
+    ///   overhead can dominate for very sparse systems.
+    /// - **LP simplex** (`threads ≥ 2`): no effect — simplex does not route
+    ///   through the faer parallel factorization path.
+    /// - **Multistart** (`threads ≥ 2`): effective — parallel degree is
+    ///   `min(n_starts, threads)`, inner solves are forced to `threads = 1`
+    ///   to prevent nested parallelism.
     pub threads: usize,
 
     /// Known optimal objective value for early-exit optimization.

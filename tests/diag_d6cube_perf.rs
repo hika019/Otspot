@@ -67,10 +67,8 @@ fn d6cube_no_false_infeasible_and_makes_progress() {
     );
 }
 
-/// Aspirational red test: d6cube should reach Optimal at eps=1e-6 within 60s.
-/// Currently FAIL (Phase II asymptotic deceleration on degenerate optimum).
+/// d6cube reaches Optimal (obj=315.49, ~34 iter, ~0.49 s) — regression guard.
 #[test]
-#[ignore = "Phase II asymptotic deceleration on degenerate optimum"]
 fn d6cube_optimal_within_60s() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
