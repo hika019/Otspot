@@ -1003,3 +1003,46 @@ fn test_hs51_free_var_no_singular_basis() {
     assert_eq!(result.status, SolveStatus::Optimal);
     assert_solver_invariants_lp(&result, &lp);
 }
+
+/// Sentinel: `pivot_out_degenerate_artificials` early-exit fires when no
+/// degenerate artificials remain after Phase I.
+///
+/// Diagonal LP: m Eq rows `x_i = 1`. Phase I pivots each artificial out at
+/// value 1.0 (non-degenerate) → no degenerate artificials remain → early-exit
+/// must fire. Removing the early-exit makes `PIVOT_CLEAN_EARLY_EXIT_COUNT`
+/// stagnate, failing the assertion below (no-op FAIL).
+#[test]
+fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
+    use std::sync::atomic::Ordering;
+
+    let before = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
+
+    // 4 Eq rows: x_i = 1 each. Phase I removes all artificials non-degenerately.
+    let m = 4;
+    let rows: Vec<usize> = (0..m).collect();
+    let cols: Vec<usize> = (0..m).collect();
+    let a = CscMatrix::from_triplets(&rows, &cols, &vec![1.0f64; m], m, m).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0f64; m],
+        a,
+        vec![1.0f64; m],
+        vec![ConstraintType::Eq; m],
+        vec![(0.0f64, f64::INFINITY); m],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false; // force artificial path
+    let result = solve_with(&lp, &opts);
+
+    assert_eq!(result.status, SolveStatus::Optimal, "diagonal Eq LP must be Optimal");
+    assert!((result.objective - 4.0).abs() < 1e-6, "obj={}", result.objective);
+
+    let after = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
+    assert!(
+        after > before,
+        "early-exit must fire when no degenerate artificials remain \
+         (before={before}, after={after}); removing the early-exit causes no-op FAIL here"
+    );
+}
