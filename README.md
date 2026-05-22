@@ -259,10 +259,8 @@ n = 10⁴) and the optimal duals are huge (|y|∞ ≈ 1e5–1e6), so the objecti
 to the residual primal infeasibility that no f64 interior-point method can drive below ~1e-6
 here. This is *not* an LDLᵀ-precision floor — improving factorization precision alone (e.g. via
 double-double) would not overcome the fundamental conditioning of the active-constraint system;
-it is the conditioning itself that prevents convergence. Even Clarabel at tol = 1e-12 only reaches
-`AlmostSolved` (max constraint violation ≈ 2e-6) on these, so the reference objective is itself
-uncertified — our solver is in fact slightly *more* feasible there. The solver reports these
-honestly as `SuboptimalSolution`/`Timeout`, never a false `Optimal`. At the tighter `1e-8`, more
+it is the conditioning itself that prevents convergence (Clarabel at tol = 1e-12 likewise only
+reaches `AlmostSolved` here). otspot returns `SuboptimalSolution`/`Timeout` on these, not `Optimal`. At the tighter `1e-8`, more
 ill-conditioned instances land just above the primal/dual residual threshold; this is an
 accuracy-floor effect, not a convergence failure.
 
