@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```
-//! use solver::model::{Model, constraint};
+//! use otspot::model::{Model, constraint};
 //!
 //! let mut model = Model::new("production");
 //! let x = model.add_var("x", 0.0, f64::INFINITY);
@@ -724,7 +724,7 @@ impl ModelResult {
 ///
 /// # Example
 /// ```rust,no_run
-/// # use solver::model::Model;
+/// # use otspot::model::Model;
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # model.minimize(x);

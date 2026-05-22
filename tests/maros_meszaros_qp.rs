@@ -1,8 +1,8 @@
 //! Maros-Meszaros / Hock-Schittkowski QP ベンチマーク (形式: min 1/2 xᵀQx+cᵀx s.t. Ax≤b, lb≤x≤ub)。
 
-use solver::qp::{solve_qp, solve_qp_warm, QpProblem, QpWarmStart};
-use solver::sparse::CscMatrix;
-use solver::SolveStatus;
+use otspot::qp::{solve_qp, solve_qp_warm, QpProblem, QpWarmStart};
+use otspot::sparse::CscMatrix;
+use otspot::SolveStatus;
 
 // 通常解変数の絶対許容値 (postsolve 後の丸め ≈ 数×eps)
 const EPS_SOL: f64 = 1e-5;

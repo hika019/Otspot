@@ -3,7 +3,7 @@
 //! - LP path で dual_solution / reduced_costs が populate されること
 //! - set_presolve(false) で presolve OFF にしても正答に到達すること
 
-use solver::model::{constraint, Model};
+use otspot::model::{constraint, Model};
 
 const TOL: f64 = 1e-5;
 

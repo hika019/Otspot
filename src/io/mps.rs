@@ -110,7 +110,7 @@ pub fn parse_mps_file(path: &Path) -> Result<LpProblem, MpsError> {
 /// # Examples
 ///
 /// ```
-/// use solver::io::mps::parse_mps;
+/// use otspot::io::mps::parse_mps;
 ///
 /// let mps = r"NAME          example
 /// ROWS

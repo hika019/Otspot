@@ -7,14 +7,14 @@
 //! Gate は **simplex postsolve** 経路の挙動を pin するもの。`#33` の LP→IPM
 //! dispatch (`src/qp/lp_dispatch.rs`) 導入後、サイズ閾値を超える LP は IPM 経路で
 //! 解かれ simplex postsolve 自体が走らない。その判定は public accessor
-//! `solver::qp::lp_dispatch_prefers_ipm(n, m)` を直接呼ぶ (`timing_breakdown`
+//! `otspot::qp::lp_dispatch_prefers_ipm(n, m)` を直接呼ぶ (`timing_breakdown`
 //! の NaN proxy は presolve OFF の simplex 経路でも NaN になるため brittle、
 //! reviewer C2 指摘で書き換え)。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::{lp_dispatch_prefers_ipm, solve_qp_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::{lp_dispatch_prefers_ipm, solve_qp_with, QpProblem};
 use std::path::Path;
 
 fn load(path: &str) -> QpProblem {

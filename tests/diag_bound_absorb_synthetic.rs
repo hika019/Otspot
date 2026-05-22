@@ -4,10 +4,10 @@
 //! 各 test は単独 LP で対応分岐を踏ませ、契約 (clamp 後 rc が dfeas 上整合 or
 //! clamp なしで raw `c − A^T y` 維持) を assert する。
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 
 /// bench 同等 dual feasibility 判定の eps (CLAUDE.md bench 標準 1e-6)。
 const BENCH_DFEAS_EPS: f64 = 1e-6;

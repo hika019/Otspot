@@ -17,11 +17,11 @@
 //! of 60-180s — too long for default `cargo test`.
 //! Run with: `cargo nextest run --run-ignored only --test diag_ken18_osa60`.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::qp::solve_qp_with;
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::qp::solve_qp_with;
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
 

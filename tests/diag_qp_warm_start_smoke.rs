@@ -4,9 +4,9 @@
 //! - iter 比 < 0.7: 決定論的、Phase 3 B&B の主要 ROI 検証
 //! - wall 比 < 0.8: noise 軽減のため iter より緩い (並列実行下の variance 配慮)
 
-use solver::qp::{solve_qp_with, QpProblem, QpWarmStart};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::qp::{solve_qp_with, QpProblem, QpWarmStart};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// warm の最低有効効果 10% (= cold の 0.9 倍以下 iter)。これより緩いと no-op
 /// fallback が検出できず sentinel として機能しない。
@@ -166,8 +166,8 @@ fn warm_start_degenerate_inputs_handled() {
 /// 倍以下に収まることを assert する。
 #[test]
 fn warm_start_propagates_through_q_diag_scaling() {
-    use solver::sparse::CscMatrix;
-    use solver::problem::ConstraintType;
+    use otspot::sparse::CscMatrix;
+    use otspot::problem::ConstraintType;
 
     let n = 120_usize;
     let m = 40_usize;
@@ -269,8 +269,8 @@ fn warm_start_propagates_through_q_diag_scaling() {
 /// 主検証は obj 整合性 + iter ≠ cold (silent drop 検出) + Optimal status。
 #[test]
 fn warm_start_propagates_through_presolve_reduction() {
-    use solver::sparse::CscMatrix;
-    use solver::problem::ConstraintType;
+    use otspot::sparse::CscMatrix;
+    use otspot::problem::ConstraintType;
 
     // 小問題で FixedVar 確実 + 数値安定: n=4, 1 FixedVar → reduced n=3。
     let q = CscMatrix::from_triplets(

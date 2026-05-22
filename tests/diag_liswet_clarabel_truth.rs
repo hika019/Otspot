@@ -1,9 +1,9 @@
 //! LISWET-family 12 問の Clarabel 真値取得 diag (baseline 再記録用)。
 //! Clarabel (tol=1e-12, max_iter=100k) を独立 reference として objective を出力。
 
-use solver::io::qps::parse_qps;
-use solver::QpProblem;
-use solver::problem::ConstraintType;
+use otspot::io::qps::parse_qps;
+use otspot::QpProblem;
+use otspot::problem::ConstraintType;
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{DefaultSolver, DefaultSettings, IPSolver, SolverStatus, SupportedConeT};
 

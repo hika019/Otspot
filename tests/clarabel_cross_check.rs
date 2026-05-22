@@ -3,11 +3,11 @@
 //! 目的: 本ソルバの solve_qp が外部 reference と一致するか確認。
 //! 一致しない問題 (LISWET9 等) は parser/transform のバグの可能性。
 
-use solver::io::qps::parse_qps;
-use solver::QpProblem;
-use solver::problem::ConstraintType;
-use solver::options::SolverOptions;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::QpProblem;
+use otspot::problem::ConstraintType;
+use otspot::options::SolverOptions;
+use otspot::qp::solve_qp_with;
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{DefaultSolver, DefaultSettings, IPSolver, SolverStatus, SupportedConeT};
 
@@ -146,7 +146,7 @@ fn compute_internal_obj(prob: &QpProblem, x: &[f64]) -> f64 {
 fn test_simple_2var_qp_matches_clarabel() {
     // min 0.5(x1^2 + x2^2)  s.t. x1 + x2 >= 1
     // 解: x1 = x2 = 0.5, obj = 0.25
-    use solver::sparse::CscMatrix;
+    use otspot::sparse::CscMatrix;
     let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[1.0, 1.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
     // 本ソルバの new_all_le は Ax <= b。Ge 制約は -Ax <= -b で表現

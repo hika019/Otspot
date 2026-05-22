@@ -4,10 +4,10 @@
 //! class (dual 退化 / cleanup coupling / cycling / 性能不足 / presolve エラー)
 //! を heuristic で推定する。全 test `#[ignore]`、個別実行用。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 
 const BOUND_TOL: f64 = 1e-6;
@@ -66,9 +66,9 @@ fn classify(qp_path: &str, eps: f64, timeout_s: f64) -> bool {
         }
         for i in 0..m {
             let viol = match prob.constraint_types[i] {
-                solver::problem::ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-                solver::problem::ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-                solver::problem::ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
+                otspot::problem::ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
+                otspot::problem::ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
+                otspot::problem::ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
                 _ => 0.0,
             };
             max_pf = max_pf.max(viol);

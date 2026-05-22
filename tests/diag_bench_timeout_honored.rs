@@ -3,8 +3,8 @@
 //! 期待挙動: 収束未達 status (Timeout / MaxIterations / NumericalError / NonConvex) は
 //! 格上げ対象外。SuboptimalSolution / LocallyOptimal のみ Optimal 化 (KKT 近傍正規 status)。
 
-use solver::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
-use solver::problem::{SolveStatus, SolverResult};
+use otspot::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
+use otspot::problem::{SolveStatus, SolverResult};
 
 fn make(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
     SolverResult { status, solution, objective, ..Default::default() }

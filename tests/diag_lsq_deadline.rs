@@ -47,10 +47,10 @@
 //! Gauss-Seidel + cleanup LP のみで 1-5ms 程度 (lp_minimal_cleanup_lp_size
 //! bug4c 観測 1.2ms)。50ms 超過は「LSQ AAT factorize が確実に走った」観測。
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 use std::time::Instant;
 
 /// LSQ 外 post-processing (cleanup LP / GS / unscale) + parallel CPU 競合余裕。

@@ -14,11 +14,11 @@
 //! in the main test would fail under no-op (sentinel guard against silent
 //! regression to MI; memory: feedback_sentinel_must_fail_under_noop).
 
-use solver::io::qps::parse_qps;
-use solver::options::{DualPricing, SimplexMethod, SolverOptions, WarmStartBasis};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::sparse::CscMatrix;
-use solver::{solve_lp_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::{DualPricing, SimplexMethod, SolverOptions, WarmStartBasis};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::sparse::CscMatrix;
+use otspot::{solve_lp_with, QpProblem};
 use std::path::Path;
 use std::sync::Mutex;
 

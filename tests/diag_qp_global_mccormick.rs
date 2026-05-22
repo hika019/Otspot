@@ -11,11 +11,11 @@
 //! envelope OFF no-op teeth の機械実証は in-source `bound_mccormick::tests` に置く。
 //! 本 file は **BB driver 経由** で end-to-end の node 削減効果を測定する (= integration)。
 
-use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
-use solver::problem::ConstraintType;
-use solver::qp::{solve_qp_global_with_stats, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::options::{BranchingStrategy, GlobalOptimizationConfig};
+use otspot::problem::ConstraintType;
+use otspot::qp::{solve_qp_global_with_stats, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// BB sentinel 共通: 3 分以内に完結する範囲。
 const TEST_MAX_DEPTH: usize = 20;

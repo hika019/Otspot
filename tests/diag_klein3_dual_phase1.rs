@@ -28,10 +28,10 @@
 //!
 //! data 欠落時は SKIP せず panic (検証空白を作らない原則)。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 
@@ -121,7 +121,7 @@ fn klein3_infeasible_via_bland_anticycling() {
     opts.timeout_secs = Some(30.0);
 
     let t0 = Instant::now();
-    let result = solver::qp::solve_qp_with(&problem, &opts);
+    let result = otspot::qp::solve_qp_with(&problem, &opts);
     let wall = t0.elapsed().as_secs_f64();
     eprintln!(
         "[klein3-bland] status={:?} wall={:.3}s iters={}",
@@ -170,7 +170,7 @@ fn klein3_primal_early_bail_speedup() {
     opts.timeout_secs = Some(60.0);
 
     let t0 = Instant::now();
-    let result = solver::qp::solve_qp_with(&problem, &opts);
+    let result = otspot::qp::solve_qp_with(&problem, &opts);
     let wall = t0.elapsed().as_secs_f64();
     eprintln!(
         "[klein3-speedup] status={:?} wall={:.3}s iters={}",

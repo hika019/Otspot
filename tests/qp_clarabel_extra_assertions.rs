@@ -5,11 +5,11 @@ use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{
     DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
 };
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::solve_qp_with;
-use solver::QpProblem;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::solve_qp_with;
+use otspot::QpProblem;
 
 const CROSS_CHECK_TIMEOUT_SECS: f64 = 60.0;
 /// 目的関数 (internal, offset 除く) の相対許容: bench eps=1e-6 と Clarabel

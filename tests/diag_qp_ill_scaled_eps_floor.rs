@@ -14,10 +14,10 @@
 //! `iter ≤ ITER_BUDGET` で floor 機能を判定。orig-space 残差も併せて gate。
 //! 実証: 一時 `IPM_EPS_NOISE_FLOOR = 0.0` 化 → 本 sentinel FAIL を確認済。
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus, SolverResult};
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus, SolverResult};
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 
 /// LCG-based deterministic pseudo-random in (-1, 1)。`std::rand` 非依存。
 fn lcg_unit(seed: &mut u64) -> f64 {

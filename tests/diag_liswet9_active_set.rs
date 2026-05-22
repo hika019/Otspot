@@ -1,11 +1,11 @@
 //! LISWET wrong-basin 観測 diag: Clarabel strict 解と本 solver 解を per-row で
 //! 比較し、active set 一致率 / slack 分布を出力する (assertion なし)。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::ConstraintType;
-use solver::qp::solve_qp_with;
-use solver::QpProblem;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::ConstraintType;
+use otspot::qp::solve_qp_with;
+use otspot::QpProblem;
 
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};

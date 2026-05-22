@@ -12,12 +12,12 @@
 //! Per-result stats (SolverResult.stats / ModelResult.stats) replace
 //! process-global AtomicU64 counters — no SENTINEL_LOCK or reset needed.
 
-use solver::constraint;
-use solver::model::Model;
-use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveRoute};
-use solver::qp::QpProblem;
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::Model;
+use otspot::options::{SimplexMethod, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveRoute};
+use otspot::qp::QpProblem;
+use otspot::sparse::CscMatrix;
 
 /// Pin `SimplexMethod::Primal`: dual paths regress textbook fixtures to
 /// x≈1.99977 instead of vertex 2.0 on current main, which is
@@ -233,10 +233,10 @@ fn assert_obj(actual: f64, expected: f64, label: &str) {
 fn lp_direct_entry_solves_all_fixtures() {
     let opts = lp_opts_strict();
     for (lp, expected, label) in lp_fixtures() {
-        let r = solver::lp::solve_lp_with(&lp, &opts);
+        let r = otspot::lp::solve_lp_with(&lp, &opts);
         assert_eq!(
             r.status,
-            solver::SolveStatus::Optimal,
+            otspot::SolveStatus::Optimal,
             "{}: status={:?}",
             label,
             r.status
@@ -264,10 +264,10 @@ fn lp_direct_entry_solves_all_fixtures() {
 fn qp_direct_entry_solves_all_fixtures() {
     let opts = SolverOptions::default();
     for (qp, expected, label) in qp_fixtures() {
-        let r = solver::solve_qp_with(&qp, &opts);
+        let r = otspot::solve_qp_with(&qp, &opts);
         assert_eq!(
             r.status,
-            solver::SolveStatus::Optimal,
+            otspot::SolveStatus::Optimal,
             "{}: status={:?}",
             label,
             r.status
@@ -354,7 +354,7 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     let (lp, expected, label) = lp_fix_le_two_var();
 
     // Direct LP entry
-    let r_direct = solver::lp::solve_lp_with(&lp, &opts);
+    let r_direct = otspot::lp::solve_lp_with(&lp, &opts);
     assert_obj(r_direct.objective, expected, "direct_lp");
     assert_eq!(r_direct.stats.route, SolveRoute::LpDirect);
 
@@ -371,7 +371,7 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     )
     .unwrap();
 
-    let r_qp = solver::solve_qp_with(&qp, &opts);
+    let r_qp = otspot::solve_qp_with(&qp, &opts);
     assert_obj(r_qp.objective, expected, "qp_zero_q_forward");
     assert_eq!(
         r_qp.stats.route,
@@ -414,7 +414,7 @@ fn sentinel_proves_lp_path_regression_detectable() {
             lp.constraint_types.clone(),
         )
         .unwrap();
-        let r = solver::solve_qp_with(&qp, &opts);
+        let r = otspot::solve_qp_with(&qp, &opts);
         assert_ne!(
             r.stats.route,
             SolveRoute::LpDirect,
@@ -435,7 +435,7 @@ fn sentinel_proves_lp_path_regression_detectable() {
 fn cross_check_lp_direct_vs_qp_forward_objective() {
     let opts = lp_opts_strict();
     for (lp, expected, label) in lp_fixtures() {
-        let r_direct = solver::lp::solve_lp_with(&lp, &opts);
+        let r_direct = otspot::lp::solve_lp_with(&lp, &opts);
 
         let n = lp.num_vars;
         let q_zero = CscMatrix::new(n, n);
@@ -448,7 +448,7 @@ fn cross_check_lp_direct_vs_qp_forward_objective() {
             lp.constraint_types.clone(),
         )
         .unwrap();
-        let r_fwd = solver::solve_qp_with(&qp, &opts);
+        let r_fwd = otspot::solve_qp_with(&qp, &opts);
 
         assert_obj(r_direct.objective, expected, &format!("{}_direct", label));
         assert_obj(r_fwd.objective, expected, &format!("{}_forward", label));
@@ -482,12 +482,12 @@ fn parallel_solve_stats_are_independent() {
     let lp_clone = lp.clone();
     let opts_clone = opts_lp.clone();
     let lp_handle = thread::spawn(move || {
-        solver::lp::solve_lp_with(&lp_clone, &opts_clone)
+        otspot::lp::solve_lp_with(&lp_clone, &opts_clone)
     });
 
     let qp_opts = SolverOptions::default();
     let qp_handle = thread::spawn(move || {
-        solver::solve_qp_with(&qp, &qp_opts)
+        otspot::solve_qp_with(&qp, &qp_opts)
     });
 
     let r_lp = lp_handle.join().unwrap();
@@ -505,7 +505,7 @@ fn parallel_solve_stats_are_independent() {
         let qp2 = QpProblem::new(
             q_zero, lp2.c, lp2.a, lp2.b, lp2.bounds, lp2.constraint_types,
         ).unwrap();
-        solver::solve_qp_with(&qp2, &opts_lp)
+        otspot::solve_qp_with(&qp2, &opts_lp)
     };
     assert_eq!(r_fwd.stats.route, SolveRoute::LpForwardedFromQp, "forwarded result route");
 }

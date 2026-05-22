@@ -14,9 +14,9 @@
 //! - 全 4 test (eq1-4) を Model API で記述。
 //! - eq4 は `ModelResult.bound_duals` (model-api-extender) で active bound 検証。
 
-use solver::constraint;
-use solver::model::Model;
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::Model;
+use otspot::sparse::CscMatrix;
 
 // solver の収束判定 `ipm_eps` の default は 1e-6 (options.rs)。
 // objective は relative tolerance、x は abs ≈ O(eps) で評価する。

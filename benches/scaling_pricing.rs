@@ -5,9 +5,9 @@
 //! - Dantzig vs Steepest-Edge pricing (internal comparison, both use scaling)
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use solver::problem::LpProblem;
-use solver::solve;
-use solver::sparse::CscMatrix;
+use otspot::problem::LpProblem;
+use otspot::solve;
+use otspot::sparse::CscMatrix;
 
 /// Build a simple LP: max sum(x_i) s.t. sum(x_i) <= 100, x_i <= 10
 fn make_dense_lp(n: usize) -> LpProblem {

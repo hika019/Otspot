@@ -2,8 +2,8 @@
 //! 退化 Eq 制約を持つ小規模 LP で Optimal が返ることを assert する
 //! (相対閾値 `feas_rel_tol() * (1 + |b| + |Ax|)` の scale 非依存性検証)。
 
-use solver::constraint;
-use solver::model::{Model, ModelError, SolveError};
+use otspot::constraint;
+use otspot::model::{Model, ModelError, SolveError};
 
 const EPS_KKT: f64 = 1e-6;
 

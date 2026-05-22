@@ -12,10 +12,10 @@
 //! 期待: iter ratio < CRASH_ITER_RATIO_UPPER (= 0.9)。
 //! no-op 化 (try_apply_crash を常に None に倒す) で sentinel が FAIL することを実証済。
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 
 /// 最低有効効果 10% (= cold の 0.9 倍以下 iter)。これより緩いと no-op fallback が
 /// sentinel から漏れる。

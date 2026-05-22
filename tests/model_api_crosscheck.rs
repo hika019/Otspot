@@ -10,11 +10,11 @@
 //! - 経路 B: QpProblem::new → solve_qp_with()
 //! 両者の (obj, x) が許容誤差内で一致することを確認する。
 
-use solver::model::{Model, ModelError, SolveError};
-use solver::options::SolverOptions;
-use solver::problem::ConstraintType;
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::model::{Model, ModelError, SolveError};
+use otspot::options::SolverOptions;
+use otspot::problem::ConstraintType;
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 
 /// 許容誤差。両経路ともに同じ IPM/Simplex 実装を使うので 1e-6 まで詰めて当たるはず。
 const TOL_OBJ: f64 = 1e-6;
@@ -250,7 +250,7 @@ fn qp_maximize_concave() {
     // Q = [[-1]] (NSD) で渡す。Model 内で -Q = [[1]] (PSD) に反転されてから solver へ。
     let q = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
-    model.add_constraint(solver::constraint!(x <= 5.0));
+    model.add_constraint(otspot::constraint!(x <= 5.0));
     model.maximize(x);
     let r_api = model.solve().expect("API solve (NSD Q for maximize)");
 
@@ -274,7 +274,7 @@ fn qp_maximize_with_psd_q_returns_error() {
     // PSD Q: maximize 時は内部で Q を符号反転して NSD (非正定値) になる
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
-    model.add_constraint(solver::constraint!(x <= 5.0));
+    model.add_constraint(otspot::constraint!(x <= 5.0));
     model.maximize(x);
     // 慣性修正付き IPM が KKT 点 (x=5) を発見し LocallyOptimal として返す。
     // model は LocallyOptimal を有効解として ModelResult に変換する。
@@ -320,8 +320,8 @@ fn qp_no_constraints_only_bounds() {
 fn lp_infeasible_returns_err() {
     let mut model = Model::new("infeas");
     let x = model.add_var("x", 0.0, f64::INFINITY);
-    model.add_constraint(solver::constraint!(x >= 5.0));
-    model.add_constraint(solver::constraint!(x <= 3.0));
+    model.add_constraint(otspot::constraint!(x >= 5.0));
+    model.add_constraint(otspot::constraint!(x <= 3.0));
     model.minimize(x);
     let err = model.solve().expect_err("should be infeasible");
     assert!(
@@ -352,7 +352,7 @@ fn qp_dual_solution_available() {
     let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
-    model.add_constraint(solver::constraint!(x >= 1.0));
+    model.add_constraint(otspot::constraint!(x >= 1.0));
     model.minimize(0.0 * x);
     let r_api = model.solve().expect("API solve");
 
@@ -381,7 +381,7 @@ fn qp_model_eq_and_bound_active_cluster_solves_consistently() {
     let y = model.add_var("y", 0.0, f64::INFINITY);
     let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
     model.set_quadratic_objective(q);
-    model.add_constraint(solver::constraint!((x + y) == 1.0));
+    model.add_constraint(otspot::constraint!((x + y) == 1.0));
     model.minimize(-1.0 * x);
 
     let result = model.solve().expect("API solve");

@@ -8,11 +8,11 @@
 //! このテストでは小規模問題を多数回 solve し、process RSS が線形に増加していない
 //! ことを確認する (許容 growth rate × iterations 内に収まることをチェック)。
 
-use solver::options::SolverOptions;
-use solver::problem::ConstraintType;
-use solver::qp::QpProblem;
-use solver::qp::solve_qp_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::ConstraintType;
+use otspot::qp::QpProblem;
+use otspot::qp::solve_qp_with;
+use otspot::sparse::CscMatrix;
 
 #[cfg(target_os = "macos")]
 fn current_rss_bytes() -> usize {
@@ -129,11 +129,11 @@ fn ipm_repeated_solve_no_runaway_memory_growth() {
 /// memory_budget 4 GiB 以下で進む。
 #[test]
 fn lasso_dense_aat_no_runaway_memory() {
-    use solver::sparse::CscMatrix;
-    use solver::qp::QpProblem;
-    use solver::qp::solve_qp_with;
-    use solver::options::SolverOptions;
-    use solver::problem::ConstraintType;
+    use otspot::sparse::CscMatrix;
+    use otspot::qp::QpProblem;
+    use otspot::qp::solve_qp_with;
+    use otspot::options::SolverOptions;
+    use otspot::problem::ConstraintType;
     let n = 300;
     let m = 400;
     // A 密 (col_density=m): LASSO 風に各列で全行を埋める。

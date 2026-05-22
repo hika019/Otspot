@@ -1,7 +1,7 @@
-//! 産業品質Dual Simplex法
+//! Dual Simplex 法（dual.rs 拡張版）
 //!
 //! 既存dual.rs（warm-start基盤）を拡張し、Harris ratio test、
-//! Dual Steepest Edge、Big-M Phase Iを備えた高性能Dual Simplexを提供する。
+//! Dual Steepest Edge、Big-M Phase Iを備えたDual Simplexを提供する。
 //!
 
 

@@ -10,10 +10,10 @@
 //! locked by the unit test on `kkt_already_passes` in `post_processing.rs`, and
 //! by the full LP/QP regression benches showing zero status change.)
 
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::sparse::CscMatrix;
-use solver::QpProblem;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::sparse::CscMatrix;
+use otspot::QpProblem;
 
 /// min 0.5·xᵀ(diag d)x + cᵀx  s.t. Σx = rhs, x ≥ 0 (well-conditioned convex QP).
 fn convex_qp_eq_sum(n: usize, diag: f64, c_val: f64, rhs: f64) -> QpProblem {
@@ -26,7 +26,7 @@ fn convex_qp_eq_sum(n: usize, diag: f64, c_val: f64, rhs: f64) -> QpProblem {
         a,
         vec![rhs],
         vec![(0.0_f64, f64::INFINITY); n],
-        vec![solver::problem::ConstraintType::Eq],
+        vec![otspot::problem::ConstraintType::Eq],
     )
     .unwrap()
 }
@@ -43,7 +43,7 @@ fn gate_skips_krylov_ir_when_already_converged() {
     for (i, prob) in cases.iter().enumerate() {
         let mut opts = SolverOptions::default();
         opts.ipm.eps = 1e-6;
-        let res = solver::qp::solve_qp_with(prob, &opts);
+        let res = otspot::qp::solve_qp_with(prob, &opts);
         assert_eq!(res.status, SolveStatus::Optimal, "case {i}: expected Optimal");
         assert!(
             res.stats.postsolve_krylov_ir_skipped,

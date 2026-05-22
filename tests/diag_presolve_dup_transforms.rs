@@ -11,9 +11,9 @@
 //!  (c) multiple data patterns (varied dimensions / scaling factors / sign
 //!      mixes) so a no-op rewrite of any one transform fails ≥ 1 case.
 
-use solver::problem::{ConstraintType, LpProblem};
-use solver::sparse::CscMatrix;
-use solver::{
+use otspot::problem::{ConstraintType, LpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{
     run_presolve_with_flags, solve_with, PresolveFlags, PresolveStatus, SolveStatus,
     SolverOptions,
 };

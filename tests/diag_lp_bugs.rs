@@ -6,12 +6,12 @@
 //! - scsd8/wood1p: simplex が失敗するか、IPM fallback で解けるか
 //! - 各解が制約を満たすか (feasibility 確認)
 
-use solver::io::mps::parse_mps_file;
-use solver::io::qps::parse_qps;
-use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::qp::solve_qp_with;
-use solver::{solve_with, solve};
+use otspot::io::mps::parse_mps_file;
+use otspot::io::qps::parse_qps;
+use otspot::options::{SimplexMethod, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::qp::solve_qp_with;
+use otspot::{solve_with, solve};
 use std::path::Path;
 use std::time::Instant;
 
@@ -368,13 +368,13 @@ fn diag_bland_rule_coverage() {
 fn diag_modszk1_primal_baseline() {
     let qps_path = std::path::Path::new("data/lp_problems/modszk1.QPS");
     assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
-    let prob = solver::io::qps::parse_qps(qps_path).expect("parse modszk1 failed");
+    let prob = otspot::io::qps::parse_qps(qps_path).expect("parse modszk1 failed");
     let known_obj = 3.21049143e2_f64;
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(60.0);
     opts.simplex_method = SimplexMethod::Primal;
     let t0 = std::time::Instant::now();
-    let result = solver::qp::solve_qp_with(&prob, &opts);
+    let result = otspot::qp::solve_qp_with(&prob, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
     println!("modszk1 Primal (a8faac6 state): status={:?} obj={:.6e} t={:.2}s", result.status, result.objective, elapsed);
     if result.status == SolveStatus::Optimal {

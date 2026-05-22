@@ -1,50 +1,52 @@
-# solver
+# otspot
 
-Rustで書かれた高性能な線形計画法（LP）ソルバー。
+**English** | [日本語](README.ja.md)
 
-疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定を備えた**修正シンプレックス法**を実装しており、実世界のLPインスタンスに対して高い性能を発揮する。
+A **mathematical optimization solver** written in Rust.
 
-## 機能
+otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, steepest-edge pricing) for LP and an **interior-point method** (Mehrotra predictor–corrector / IP-PMM) for QP, with branch-and-bound on top for mixed-integer problems (MILP / MIQP). It certifies infeasible and unbounded problems and returns full primal/dual information.
 
-- **代数モデリングAPI** — 自然な数式記法でLP問題を表現
-- **修正シンプレックス法** — 疎LU分解とMarkowitz閾値ピボットによるPhase I/II
-- **Ruiz均衡化** — 数値条件を改善するための行/列スケーリング前処理
-- **最急勾配価格決定** — 収束を高速化する改善された変数選択
-- **双対解出力** — 双対変数、簡約費用、制約スラック
-- **MPSファイル入力** — 業界標準MPSフォーマット読み込み；23件のNetlibインスタンスで検証済み
-- **設定可能なオプション** — 許容誤差、反復回数上限、LU再分解閾値
-- **ベンチマーク** — スケーリング、LU分解、ソルブのcriterionベースベンチマーク
-- **ファズテスト** — proptestベースのランダム化テスト
+## Features
 
-## クイックスタート
+- **Algebraic modeling API** — express problems in natural mathematical notation
+- **Revised simplex (LP)** — sparse LU factorization with Markowitz-threshold pivoting
+- **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
+- **Mixed-integer (MILP / MIQP)** — branch-and-bound
+- **Infeasibility / unboundedness certification** — an explicit status, not just a failure
+- **Ruiz equilibration** — row/column scaling preconditioner for better conditioning
+- **Steepest-edge pricing** — faster convergence via improved entering-variable choice
+- **Dual solution output** — dual values, reduced costs, constraint slacks
+- **Input formats** — MPS (LP) and QPS / QPLIB (QP)
+- **Configurable options** — tolerances, iteration caps, LU refactorization threshold
+- **Benchmark + fuzz suites** — criterion microbenchmarks and proptest randomized tests
 
-必要環境: Rust (edition 2021, stable)。crates.io には未公開のため、git 依存またはソースビルドで利用する。
+## Quick start
 
-別プロジェクトから依存する場合（git 依存）:
+Requires Rust (edition 2021, stable). Not yet published to crates.io; use it as a git dependency or build from source.
+
+As a git dependency:
 
 ```toml
 [dependencies]
-solver = { git = "https://github.com/hika019/solver" }
+otspot = { git = "https://github.com/hika019/otspot" }
 ```
 
-（左辺 `solver` は crate 名（`Cargo.toml` の `name`）、URL はリポジトリ。両者は独立に決まる。）
-
-ソースからビルド・動作確認:
+Build and run from source:
 
 ```bash
-git clone https://github.com/hika019/solver.git
-cd solver
+git clone https://github.com/hika019/otspot.git
+cd otspot
 cargo build --release
-cargo run --release --example solve_lp   # LP の最小例
-cargo run --release --example solve_qp   # QP の最小例
+cargo run --release --example solve_lp   # minimal LP
+cargo run --release --example solve_qp   # minimal QP
 ```
 
-### モデリングAPI
+### Modeling API
 
-LP問題を定義して解く推奨の方法:
+The recommended way to define and solve an LP:
 
 ```rust
-use solver::model::{Model, constraint};
+use otspot::model::{Model, constraint};
 
 fn main() {
     // Problem:
@@ -68,16 +70,16 @@ fn main() {
 }
 ```
 
-**出力:**
+**Output:**
 ```
 objective = 3
 x = 3
 y = 0
 ```
 
-### `constraint!` マクロ
+### The `constraint!` macro
 
-`constraint!` マクロは、単一変数および括弧で囲まれた式に対して自然な不等式構文をサポートする:
+`constraint!` supports natural inequality syntax for single variables and parenthesized expressions:
 
 ```rust
 // Single variable
@@ -89,7 +91,7 @@ model.add_constraint(constraint!(x == 5.0));
 model.add_constraint(constraint!((2.0 * x + y) <= 10.0));
 ```
 
-または、式に直接メソッドAPIを使用することもできる:
+Or use the method API directly on expressions:
 
 ```rust
 model.add_constraint((x + 2.0 * y).leq(8.0));
@@ -97,7 +99,7 @@ model.add_constraint((x - y).geq(0.0));
 model.add_constraint((x + y).eq_constraint(5.0));
 ```
 
-### 最大化
+### Maximization
 
 ```rust
 let mut model = Model::new("revenue");
@@ -113,55 +115,55 @@ println!("max revenue = {}", result.objective());
 
 ### SolverOptions
 
-ソルバーの動作を細かく調整する:
+Fine-tune solver behavior:
 
 ```rust
-use solver::SolverOptions;
-use solver::problem::LpProblem;
-use solver::simplex;
+use otspot::SolverOptions;
+use otspot::problem::LpProblem;
+use otspot::solve_with;
 
 let opts = SolverOptions {
-    primal_tol: 1e-8,          // optimality / feasibility tolerance
-    max_iterations: Some(500), // None = auto (100*(m+n)+1000)
-    max_etas: 50,              // LU refactorization threshold
-    clamp_tol: 1e-14,          // solution micro-value clamp
+    primal_tol: 1e-8,   // optimality / feasibility tolerance
+    max_etas: 50,       // LU refactorization threshold (0 = auto)
+    clamp_tol: 1e-14,   // solution micro-value clamp
+    ..Default::default()
 };
 
-let result = simplex::solve_with(&problem, &opts);
+let result = solve_with(&problem, &opts);
 ```
 
-### 双対解
+### Dual solution
 
-低レベルの `simplex::solve` と `simplex::solve_with` は完全な双対情報を含む `SolverResult` を返す:
+The `solve` and `solve_with` functions return a `SolverResult` with full dual information:
 
 ```rust
-use solver::problem::SolverResult;
+use otspot::{solve, problem::SolverResult};
 
-let result: SolverResult = simplex::solve(&problem);
+let result: SolverResult = solve(&problem);
 println!("primal:        {:?}", result.solution);
 println!("dual (shadow): {:?}", result.dual_solution);
 println!("reduced costs: {:?}", result.reduced_costs);
 println!("slacks:        {:?}", result.slack);
 ```
 
-### 二次計画法（QP）
+### Quadratic programming (QP)
 
-`solve_qp` APIで二次計画問題を解く:
+Solve a QP with the `solve_qp` API:
 
 ```rust
-use solver::qp::{solve_qp, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::qp::{solve_qp, QpProblem};
+use otspot::sparse::CscMatrix;
 
 // min  x^2 + y^2
 // s.t. x + y >= 1
-// (「1/2あり」規約: Q = [[2,0],[0,2]], min 1/2 x^T Q x)
+// (with the "1/2" convention: Q = [[2,0],[0,2]], min 1/2 x^T Q x)
 fn main() {
     let q = CscMatrix::from_triplets(
         &[0, 1], &[0, 1], &[2.0, 2.0], 2, 2
     ).unwrap();
     let c = vec![0.0, 0.0];
 
-    // x + y >= 1 → -x - y <= -1 (Ax <= b 形式)
+    // x + y >= 1  ->  -x - y <= -1  (Ax <= b form)
     let a = CscMatrix::from_triplets(
         &[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2
     ).unwrap();
@@ -172,28 +174,28 @@ fn main() {
     let result = solve_qp(&problem);
 
     println!("status:    {:?}", result.status);
-    println!("solution:  {:?}", result.solution);   // ≈ [0.5, 0.5]
-    println!("objective: {:.4}", result.objective); // ≈ 0.5
+    println!("solution:  {:?}", result.solution);   // ~ [0.5, 0.5]
+    println!("objective: {:.4}", result.objective); // ~ 0.5
 }
 ```
 
-**出力:**
+**Output:**
 ```
 status:    Optimal
 solution:  [0.5, 0.5]
 objective: 0.5000
 ```
 
-SQP反復でのWarm-startには `solve_qp_warm` を使用する（前回解の活性集合を引き継ぎ収束を高速化）。
+For warm-starts across SQP iterations use `solve_qp_warm` (it carries over the previous active set to speed up convergence).
 
-## 応用
+## Advanced
 
-高性能が求められるアプリケーションでは、制約行列をCSCフォーマットで直接構築し、低レベルAPIを呼び出せ:
+For performance-critical applications, build the constraint matrix directly in CSC format and call the low-level API:
 
 ```rust
-use solver::problem::LpProblem;
-use solver::sparse::CscMatrix;
-use solver::simplex;
+use otspot::problem::LpProblem;
+use otspot::sparse::CscMatrix;
+use otspot::solve;
 
 // minimize  -x1 - x2
 // s.t.       x1 + x2 <= 4
@@ -211,32 +213,55 @@ let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 2).unwrap();
 let b = vec![4.0, 3.0, 3.0];
 
 let problem = LpProblem::new(c, a, b).unwrap();
-let result = simplex::solve(&problem);
+let result = solve(&problem);
 
-println!("status:    {}", result.status);   // Optimal
-println!("objective: {}", result.objective); // -4
-println!("solution:  {:?}", result.solution);// [1.0, 3.0]
+println!("status:    {}", result.status);    // Optimal
+println!("objective: {}", result.objective);  // -4
+println!("solution:  {:?}", result.solution); // [1.0, 3.0]
 ```
 
-## MPS入力
+## MPS input
 
-MPSファイルからLP問題を読み込む:
+Read an LP from an MPS file:
 
 ```rust
 use std::path::Path;
-use solver::io::mps;
-use solver::simplex;
+use otspot::io::mps;
+use otspot::solve;
 
 let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS parse error");
-let result = simplex::solve(&prob);
+let result = solve(&prob);
 println!("status: {}", result.status);
 ```
 
-このソルバーは23件のNetlibベンチマークインスタンス（adlittle、afiro、sc50a、sc50b、kb2、brandy、scorpion、fit1d、share1bなど）で検証済みである。
+The parser is validated against the Netlib LP set and the Maros–Mészáros QP set (see [Performance](#performance)).
 
-## ベンチマーク
+## Performance
 
-3種類のcriterionベースベンチマークスイートが含まれている:
+Measured on standard public benchmark sets, `timeout = 1000s`, 6-way parallel, at two tolerances.
+**Optimal** = optimum verified against the known objective. **Valid** = a feasible solution meeting
+the solver's optimality criteria but with no external reference to verify against (counted separately
+from *optimal*). For infeasible / unbounded sets the metric is a correct certificate.
+
+| Problem type | Set | # | @ 1e-6 | @ 1e-8 |
+|---|---|---:|---|---|
+| Feasible LP | Netlib | 109 | 109 optimal | 106 optimal |
+| Convex QP | Maros–Mészáros | 138 | 128 optimal, 7 valid | 123 optimal, 4 valid |
+| Infeasible LP | Netlib | 29 | 28 certified¹ | 28 certified¹ |
+| Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
+
+¹ One instance unresolved (`klein3`: the simplex stalls and is cut off).
+
+The `1e-6` QP misses are `LISWET12` (timeout), `LISWET9` (objective off by ~9%, a known f64 LDLᵀ
+precision limit at cond ≈ 1e16) and `QBORE3D` (dual residual stalls at 7.5e-4). At the tighter `1e-8`,
+more ill-conditioned instances — chiefly the LISWET family — land just above the primal/dual residual
+threshold; this is an accuracy-floor effect, not a convergence failure.
+
+Benchmark data is gitignored and reproducible; see [Benchmark data](#benchmark-data).
+
+## Benchmarks (criterion)
+
+Four criterion microbenchmark suites are included:
 
 ```bash
 # All benchmarks
@@ -245,132 +270,117 @@ cargo bench
 # Individual suites
 cargo bench --bench scaling_pricing   # Ruiz scaling + steepest-edge pricing
 cargo bench --bench lu_bench          # LU factorization throughput
-cargo bench --bench solve_bench       # End-to-end LP solve
+cargo bench --bench solve_bench       # end-to-end LP solve
+cargo bench --bench qp_bench          # QP solve
 ```
 
-HTMLレポートは `target/criterion/` に生成される。
+HTML reports are generated in `target/criterion/`.
 
-## テスト
+## Tests
 
 ```bash
-# Full test suite (unit + Netlib + proptest) — bench data 必須
+# Full test suite (unit + Netlib + proptest) — requires benchmark data
 cargo nextest run --release
 
-# unit / bin test のみ (bench data 不要)
+# Unit / bin tests only (no benchmark data needed)
 cargo nextest run --release --profile lib-only
 
-# doc test
+# Doc tests
 cargo test --doc --release
 ```
 
-`tests/*.rs` の多くは `data/lp_problems_*/`, `data/qplib/` 等を `assert!(path.exists())` で
-要求し、data 欠落で **panic** する (CLAUDE.md 原則「SKIP せず panic」で検証空白を作らない)。
-data を整備していない環境では `--profile lib-only` で unit + bin test のみ走らせる。
+Many `tests/*.rs` require `data/lp_problems_*/`, `data/qplib/`, etc. and assert their
+presence (`assert!(path.exists())`), so they **panic** when data is missing — by design,
+following the project rule of "panic, don't SKIP" so that no verification gap goes
+unnoticed. On a machine without the data, use `--profile lib-only` to run only the
+unit and bin tests.
 
-bench data 取得は [開発環境 (Docker)](#開発環境-docker) section 参照、もしくは
-`bash scripts/download_all_bench_data.sh`。
+To fetch benchmark data, see [Development (Docker)](#development-docker) or run
+`bash scripts/download_all_bench_data.sh`.
 
-テストスイートに含まれるもの:
-- 全モジュールの**ユニットテスト**
-- 実世界検証のための**Netlibインスタンス integration**
-- ランダム化ファズテストのための**proptest**
-- 基本的なAPIカバレッジのための**スモークテスト**
+The suite includes:
+- **Unit tests** across all modules
+- **Netlib integration** for real-world validation
+- **proptest** randomized fuzz tests
+- **Smoke tests** for basic API coverage
 
-## 開発環境 (Docker)
+## Development (Docker)
 
-`Dockerfile.dev` は他環境で test / bench を再現するための開発用 container 定義 (Rust 1.83
-+ python3 (numpy/scipy/cvxpy/clarabel) + cargo-nextest + Netlib emps decoder pre-compile)。
+`Dockerfile.dev` is a development container that reproduces the test/bench environment
+on other machines (Rust 1.83 + python3 with numpy/scipy/cvxpy/clarabel + cargo-nextest
++ a precompiled Netlib `emps` decoder).
 
 ```bash
-# 1. Build (初回 ~5-10 分)
-docker build -f Dockerfile.dev -t solver-dev .
+# 1. Build (~5-10 min the first time)
+docker build -f Dockerfile.dev -t otspot-dev .
 
-# 2. Interactive 開発 (source を host と共有、保存即反映)
-docker run -it --rm -v "$PWD":/workspace -w /workspace solver-dev bash
+# 2. Interactive development (source shared with the host, saves apply instantly)
+docker run -it --rm -v "$PWD":/workspace -w /workspace otspot-dev bash
 
 # 3. One-shot test
-docker run --rm -v "$PWD":/workspace -w /workspace solver-dev \
+docker run --rm -v "$PWD":/workspace -w /workspace otspot-dev \
   cargo nextest run --release
 ```
 
-### Bare host 実行 (Docker を使わない場合)
+### Bare-host run (without Docker)
 
-bench data 生成 script (`scripts/gen_*.py`) は以下の Python pkg を要求:
+The data-generation scripts (`scripts/gen_*.py`) require these Python packages:
 
 ```bash
 pip install numpy scipy cvxpy clarabel
 ```
 
-`cvxpy` / `clarabel` は `osqp_bench` 系 (`osqp_bench`, `osqp_bench_*`, `qp_dense_a`)
-の生成器でのみ必要。LP suite (`lp_problems*`) は `curl` + `emps` のみで動く。
+`cvxpy` / `clarabel` are needed only by the `osqp_bench` family generators
+(`osqp_bench`, `osqp_bench_*`, `qp_dense_a`). The LP suites (`lp_problems*`) need
+only `curl` + `emps`.
 
-`scripts/download_all_bench_data.sh` は QP モード突入時に numpy/scipy の
-有無を check し、不在なら Docker / pip の手順を案内して exit する。
+`scripts/download_all_bench_data.sh` checks for numpy/scipy when entering QP mode
+and, if absent, prints the Docker / pip instructions and exits.
 
-### ベンチマークデータの取得
+### Benchmark data
 
-`data/` 配下は `.gitignore` 対象なので、clone 後に bench data を自前生成する必要がある:
+`data/` is gitignored, so after cloning you need to generate the benchmark data yourself:
 
 ```bash
-# 全部 (LP 234 + QP 出来る範囲 = ~570 問、~10-20 分)
+# Everything (Netlib LP + synthetic QP)
 bash scripts/download_all_bench_data.sh
 
-# LP のみ (Netlib 取得 + 合成、決定論的)
+# LP only (Netlib fetch + synthetic, deterministic)
 bash scripts/download_all_bench_data.sh --lp
 
-# 取得状況確認
+# Check what is present
 bash scripts/download_all_bench_data.sh --check
 ```
 
-| dir | 件数 | source | 自動化 |
-|---|---|---|---|
-| lp_problems | 109 | Netlib | ✓ |
-| lp_problems_infeas | 29 | Netlib | ✓ |
-| lp_problems_extra | 4 | Mittelmann | ✓ |
-| lp_problems_hard | 53 | various | ✓ |
-| lp_problems_canary | 27 | symlink | ✓ |
-| lp_problems_unbounded | 12 | 合成 (固定 seed) | ✓ |
-| osqp_bench | 62 | external + gen | ✓ |
-| osqp_bench_extra | 238 | 合成 (固定 seed) | ✓ |
-| osqp_bench_illscaled | 126 | 合成 (固定 seed) | ✓ |
-| osqp_bench_xl | 2 | 合成 (固定 seed) | ✓ |
-| mpc_qp | 64 | external | ✓ |
-| qp_dense_a | 8 | 合成 (固定 seed) | ✓ |
-| qp_infeasible | 12 | 合成 (固定 seed) | ✓ |
-| qp_unbounded | 9 | 合成 (固定 seed) | ✓ |
-| qplib_nonconvex | 45 | 合成 (固定 seed) | ✓ |
-| **maros_meszaros** | 139 | YimingYAN/QP-Test-Problems | **手動** |
-| **qplib** | 41 | QPLIB.zib.de | **手動** |
-| **qplib_unsupported** | 11 | QPLIB.zib.de | **手動** |
+Synthetic sets use fixed seeds, so any environment reproduces identical output. The
+Maros–Mészáros and QPLIB sets have no download script and must be placed manually
+(URL hints are in `download_all_bench_data.sh`); run `--check` to see what is present.
 
-合成系は固定 seed なので任意環境で同一出力を再現可。Maros / QPLIB (計 191 問) は
-download script 未整備、手動配置が必要 (URL ヒントは `download_all_bench_data.sh` 内に記載)。
-
-## プロジェクト構造
+## Project structure
 
 ```
 src/
-├── lib.rs              # クレートのエントリポイント・公開API再エクスポート
-├── model/              # 高レベル代数モデリングAPI (Model、constraint!マクロ)
-├── lp.rs               # LP求解エントリ
-├── simplex/            # 修正シンプレックス (primal / dual)
-├── qp/                 # QP求解 (内点法 IPM / IP-PMM、postsolve)
-├── mip/                # 混合整数 (MILP / MIQP) branch-and-bound
-├── presolve/           # 前処理 (Ruizスケーリング、postsolve)
-├── linalg/             # 線形代数 (LU、LDLᵀ)
-├── basis/              # 基底管理
-├── sparse/             # CSC疎行列・疎ベクトル
-├── problem/            # LpProblem / QpProblem、SolverResult、SolveStatus
-├── screening.rs        # 問題スクリーニング
+├── lib.rs              # crate entry point / public API re-exports
+├── model/              # high-level algebraic modeling API (Model, constraint! macro)
+├── lp.rs               # LP solve entry
+├── simplex/            # revised simplex (primal / dual)
+├── qp/                 # QP solve (interior-point IPM / IP-PMM, postsolve)
+├── mip/                # mixed-integer (MILP / MIQP) branch-and-bound
+├── presolve/           # presolve (Ruiz scaling, postsolve)
+├── linalg/             # linear algebra (LU, LDLᵀ)
+├── basis/              # basis management
+├── sparse/             # CSC sparse matrix / sparse vector
+├── problem/            # LpProblem / QpProblem, SolverResult, SolveStatus
+├── screening.rs        # problem screening
 ├── options.rs          # SolverOptions
-├── tolerances.rs       # 数値許容誤差定数
+├── tolerances.rs       # numerical tolerance constants
 ├── error.rs            # SolverError
-├── io/                 # 入力パーサ (mps / qps / qplib)
-└── bin/                # CLIツール (qp_runner、qp_diag、qps_benchmark ほか)
-examples/               # 利用例 (solve_lp、solve_qp)
-benches/                # Criterionベンチ (lu_bench、qp_bench、solve_bench、scaling_pricing)
+├── io/                 # input parsers (mps / qps / qplib)
+└── bin/                # CLI tools (qp_runner, qp_diag, qps_benchmark, ...)
+examples/               # usage examples (solve_lp, solve_qp)
+benches/                # criterion benchmarks (lu_bench, qp_bench, solve_bench, scaling_pricing)
 ```
 
-## ライセンス
+## License
 
 [GNU Affero General Public License v3.0 (AGPL-3.0-only)](LICENSE)

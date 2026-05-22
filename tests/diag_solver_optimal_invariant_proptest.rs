@@ -9,10 +9,10 @@
 //! production sentinel in entry.rs would cause this test to catch regressions.
 
 use proptest::prelude::*;
-use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use solver::solve_lp_with;
-use solver::sparse::CscMatrix;
+use otspot::options::{SimplexMethod, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use otspot::solve_lp_with;
+use otspot::sparse::CscMatrix;
 
 /// Normalized primal violation: max violation / (1 + ||b||_inf).
 fn pfeas_normalized(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) -> f64 {
@@ -230,7 +230,7 @@ fn guard_lp_optimal_load_bearing_production_path() {
     };
 
     // Guard active (default): corrupt result must be demoted to NumericalError.
-    let guarded = solver::apply_lp_primal_guard(make_corrupt(), &lp);
+    let guarded = otspot::apply_lp_primal_guard(make_corrupt(), &lp);
     assert_eq!(
         guarded.status,
         SolveStatus::NumericalError,
@@ -239,7 +239,7 @@ fn guard_lp_optimal_load_bearing_production_path() {
     );
 
     // Guard disabled via thread-local scope (no-op proof): corrupt result must pass through.
-    let unguarded = solver::with_lp_guard_disabled(|| solver::apply_lp_primal_guard(make_corrupt(), &lp));
+    let unguarded = otspot::with_lp_guard_disabled(|| otspot::apply_lp_primal_guard(make_corrupt(), &lp));
     assert_eq!(
         unguarded.status,
         SolveStatus::Optimal,
@@ -269,7 +269,7 @@ fn guard_lp_optimal_does_not_demote_clean_result() {
     assert_eq!(real_result.status, SolveStatus::Optimal, "pre-guard solve failed");
 
     // Route through production guard: must remain Optimal.
-    let guarded = solver::apply_lp_primal_guard(real_result, &lp);
+    let guarded = otspot::apply_lp_primal_guard(real_result, &lp);
     assert_eq!(
         guarded.status,
         SolveStatus::Optimal,

@@ -3,11 +3,11 @@
 //! 事実: e61f27b 以降 afiro (32x27) で DFEAS_FAIL。a1d42b1 では PASS。
 //! presolve OFF と ON で y を比較し、どちらが偏るかを切り分ける。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem};
-use solver::qp::solve_qp_with;
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem};
+use otspot::qp::solve_qp_with;
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 
 fn make_lp(qp: &QpProblem) -> LpProblem {

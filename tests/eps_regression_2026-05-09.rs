@@ -9,10 +9,10 @@
 //!
 //! このテストは bench を毎回回さなくても fix が壊れたことを検出するための回帰防壁。
 
-use solver::io::qps::parse_qps;
-use solver::options::{IpmOptions, SolverOptions, Tolerance};
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::{IpmOptions, SolverOptions, Tolerance};
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::{solve_qp_with, QpProblem};
 use std::path::Path;
 
 /// bench と同一の componentwise primal feasibility (`compute_pfeas_normalized`):
@@ -39,7 +39,7 @@ fn pfeas_normalized(prob: &QpProblem, x: &[f64]) -> f64 {
     max_rel
 }
 
-fn solve_with_eps(prob: &QpProblem, user_eps: f64) -> solver::qp::SolverResult {
+fn solve_with_eps(prob: &QpProblem, user_eps: f64) -> otspot::qp::SolverResult {
     let mut opts = SolverOptions::default();
     opts.tolerance = Some(Tolerance::Custom(user_eps));
     opts.ipm = IpmOptions { eps: user_eps, ..IpmOptions::default() };

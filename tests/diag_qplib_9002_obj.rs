@@ -17,10 +17,10 @@
 //! 現状 ref がない以上「正しい obj」は分からない。本 test の責務は当 solver の
 //! 当該問題上での 現状動作を pin し、未来の退行を検知すること。
 
-use solver::io::qplib::{parse_qplib, QplibProblem};
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qplib::{parse_qplib, QplibProblem};
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 

@@ -4,7 +4,7 @@
 //! - `ModelError::SolveError::{MaxIterations, NumericalError}` 露出
 //! - `Model::set_diagonal_q(&[f64])` ergonomic helper
 
-use solver::model::{Model, ModelError, SolveError};
+use otspot::model::{Model, ModelError, SolveError};
 
 const TOL: f64 = 1e-6;
 const QP_TOL: f64 = 2e-3;
@@ -74,7 +74,7 @@ fn model_api_set_obj_offset_lp() {
     // offset=10.0 → obj = 1 + 10 = 11
     let mut model = Model::new("lp_obj_offset");
     let x = model.add_var("x", 0.0, INF);
-    model.add_constraint(solver::model::constraint!(x >= 1.0));
+    model.add_constraint(otspot::model::constraint!(x >= 1.0));
     model.minimize(x);
     model.set_obj_offset(10.0);
 
@@ -117,7 +117,7 @@ fn model_api_set_obj_offset_maximize() {
     // max x  s.t. x <= 7, x >= 0; offset=3.0 → 7 + 3 = 10
     let mut model = Model::new("max_obj_offset");
     let x = model.add_var("x", 0.0, INF);
-    model.add_constraint(solver::model::constraint!(x <= 7.0));
+    model.add_constraint(otspot::model::constraint!(x <= 7.0));
     model.maximize(x);
     model.set_obj_offset(3.0);
 

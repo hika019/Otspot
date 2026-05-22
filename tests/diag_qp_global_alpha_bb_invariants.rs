@@ -22,9 +22,9 @@
 //! に依存し、src 側の公式テストは `bound_alpha_bb` 内の unit test と global driver
 //! 経由の `diag_qp_global_promotion_sentinel` でカバーされる。
 
-use solver::problem::ConstraintType;
-use solver::qp::QpProblem;
-use solver::sparse::CscMatrix;
+use otspot::problem::ConstraintType;
+use otspot::qp::QpProblem;
+use otspot::sparse::CscMatrix;
 
 /// L(x) と f(x) の同値判定許容 (mat_vec_mul + ULP).
 const EQUAL_TOL: f64 = 1e-9;

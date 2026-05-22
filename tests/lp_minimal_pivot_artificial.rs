@@ -4,10 +4,10 @@
 
 use std::time::Instant;
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 
 /// Timeout budget for the O(n_artificial × n_total) regression guard.
 ///

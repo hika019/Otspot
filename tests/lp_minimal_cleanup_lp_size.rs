@@ -31,10 +31,10 @@
 //! presolve_us 数百 ms に膨らむ (Ruiz が無駄なスケーリング) — 退行検知の
 //! upper bound として 2.0s budget を採用。
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 
 /// 削除行 N 個 + 残存行 M 個 + 列 (N + M) 個の合成 LP。
 ///

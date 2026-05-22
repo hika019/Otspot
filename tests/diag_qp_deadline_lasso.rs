@@ -8,11 +8,11 @@
 //! `solve_qp_with` が `timeout_secs` を honor することを検証する。
 //! 実データでの再現は別タスク (要 `data/` 配置) で取り扱う。
 
-use solver::io::qplib::{parse_qplib, QplibProblem};
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::io::qplib::{parse_qplib, QplibProblem};
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;

@@ -10,9 +10,9 @@
 //! brute force enumerates every integer point with the full quadratic form, so the
 //! true optimum is not hardcoded.
 
-use solver::options::{MipConfig, SolverOptions};
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::{solve_miqp_with_stats, CscMatrix, MiqpProblem, Model, QpProblem};
+use otspot::options::{MipConfig, SolverOptions};
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::{solve_miqp_with_stats, CscMatrix, MiqpProblem, Model, QpProblem};
 
 fn opts() -> SolverOptions {
     let mut o = SolverOptions::default();

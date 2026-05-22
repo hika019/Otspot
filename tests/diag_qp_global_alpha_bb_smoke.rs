@@ -26,10 +26,10 @@
 //! `alpha_bb_does_not_increase_total_node_count`: Phase 4 合計 node 数 ≤ Phase 3
 //! 合計 node 数 (= α-BB lb が interval より緩くないことを総量で sentinel 化)。
 
-use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
-use solver::qp::{solve_qp_global_with_stats, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::options::{BranchingStrategy, GlobalOptimizationConfig};
+use otspot::qp::{solve_qp_global_with_stats, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// 大域解の許容相対誤差。Phase 4 の gap_tol = 1e-3 と整合。
 const GLOBAL_OBJ_TOL: f64 = 1e-3;
@@ -55,7 +55,7 @@ fn cfg(use_alpha_bb: bool) -> GlobalOptimizationConfig {
     }
 }
 
-use solver::problem::ConstraintType;
+use otspot::problem::ConstraintType;
 
 /// f = -x² - y², s.t. x+y ≤ 0.5, x,y ∈ [0,1]. Global = -0.25 at (0.5,0) or (0,0.5).
 /// 制約 ignore する interval lb は box corner (1,1) で f=-2 を見る = lb=-2 (= 拙劣)。

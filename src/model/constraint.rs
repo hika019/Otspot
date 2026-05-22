@@ -32,7 +32,7 @@ pub struct Constraint {
 ///
 /// # Examples
 /// ```
-/// use solver::model::{Model, constraint};
+/// use otspot::model::{Model, constraint};
 /// let mut model = Model::new("demo");
 /// let x = model.add_var("x", 0.0, f64::INFINITY);
 /// let y = model.add_var("y", 0.0, 10.0);
@@ -47,7 +47,7 @@ pub struct Constraint {
 ///
 /// For complex LHS expressions, wrap them in parentheses:
 /// ```rust,no_run
-/// # use solver::model::{Model, constraint};
+/// # use otspot::model::{Model, constraint};
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # let y = model.add_var("y", 0.0, f64::INFINITY);
@@ -55,7 +55,7 @@ pub struct Constraint {
 /// ```
 /// or use the method API directly:
 /// ```rust,no_run
-/// # use solver::model::Model;
+/// # use otspot::model::Model;
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # let y = model.add_var("y", 0.0, f64::INFINITY);

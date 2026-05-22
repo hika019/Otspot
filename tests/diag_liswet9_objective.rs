@@ -3,11 +3,11 @@
 //!
 //! Also asserts internal objective is close to Clarabel strict reference.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::qp::solve_qp_with;
 
-fn recompute_internal(prob: &solver::QpProblem, x: &[f64]) -> f64 {
+fn recompute_internal(prob: &otspot::QpProblem, x: &[f64]) -> f64 {
     let qx = prob.q.mat_vec_mul(x).expect("Qx");
     let xqx: f64 = qx.iter().zip(x.iter()).map(|(&q, &x)| q * x).sum();
     let cx: f64 = prob.c.iter().zip(x.iter()).map(|(&c, &x)| c * x).sum();

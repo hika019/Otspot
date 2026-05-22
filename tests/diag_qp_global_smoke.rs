@@ -36,10 +36,10 @@
 //!
 //! 各 case 実装中に書換 → cargo nextest 確認 → revert PASS。Phase 3 完了直前。
 
-use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
-use solver::qp::{solve_qp_global, solve_qp_global_with_stats, solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::options::{BranchingStrategy, GlobalOptimizationConfig};
+use otspot::qp::{solve_qp_global, solve_qp_global_with_stats, solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// 大域解の許容相対誤差。gap_tol = 1e-3 と整合 (= solver の guarantee と同水準)。
 const GLOBAL_OBJ_TOL: f64 = 1e-3;
@@ -335,7 +335,7 @@ fn unbounded_variable_returns_locally_optimal_not_optimal() {
         a,
         vec![1.0],
         vec![(0.0, f64::INFINITY); 2],
-        vec![solver::problem::ConstraintType::Eq],
+        vec![otspot::problem::ConstraintType::Eq],
     )
     .unwrap();
     let cfg = GlobalOptimizationConfig {

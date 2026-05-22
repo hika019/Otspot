@@ -14,8 +14,8 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use solver::options::SolverOptions;
-use solver::screening::{is_bug, load_baseline, screen_single, DEFAULT_REL_TOL, DEFAULT_TIMEOUT_SEC};
+use otspot::options::SolverOptions;
+use otspot::screening::{is_bug, load_baseline, screen_single, DEFAULT_REL_TOL, DEFAULT_TIMEOUT_SEC};
 use std::fs;
 use std::path::Path;
 

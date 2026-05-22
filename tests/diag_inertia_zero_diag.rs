@@ -18,10 +18,10 @@
 //! `src/linalg/ldl.rs` の `is_q_psd_by_cholesky` で `shift = 0.0` に書換 →
 //! 該当 sentinel が FAIL (status=Optimal)。fix 復帰で PASS。検証済。
 
-use solver::options::SolverOptions;
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::SolveStatus;
+use otspot::options::SolverOptions;
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::SolveStatus;
 
 fn solve(p: &QpProblem) -> SolveStatus {
     let mut opts = SolverOptions::default();

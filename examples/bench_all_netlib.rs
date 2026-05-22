@@ -1,6 +1,6 @@
 use std::time::Instant;
 use std::path::Path;
-use solver::problem::SolveStatus;
+use otspot::problem::SolveStatus;
 
 fn main() {
     let problems = vec![
@@ -26,12 +26,12 @@ fn main() {
             continue;
         }
         let mps_data = std::fs::read_to_string(path).unwrap();
-        let lp = solver::io::mps::parse_mps(&mps_data).unwrap();
+        let lp = otspot::io::mps::parse_mps(&mps_data).unwrap();
         let rows = lp.a.nrows;
         let cols = lp.a.ncols;
 
         let start = Instant::now();
-        let result = solver::solve(&lp);
+        let result = otspot::solve(&lp);
         let elapsed = start.elapsed();
 
         let status = match result.status {

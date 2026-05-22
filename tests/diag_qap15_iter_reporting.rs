@@ -1,9 +1,9 @@
 //! Timeout 返却時に iterations が実 iter 数を返すことの regression sentinel。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 

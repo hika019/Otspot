@@ -8,9 +8,9 @@
 //! cuts the true optimum. Also covers maximize sign / obj_offset / mixed
 //! int+continuous / fractional integer bounds.
 
-use solver::options::{MipConfig, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::{
+use otspot::options::{MipConfig, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::{
     solve_milp_with_stats, solve_miqp_with_stats, CscMatrix, MilpProblem, MiqpProblem, Model,
     QpProblem,
 };

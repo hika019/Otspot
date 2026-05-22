@@ -8,9 +8,9 @@
 //! 3. 全係数正・全変数非負のLPはInfeasibleにならない
 
 use proptest::prelude::*;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::solve;
-use solver::sparse::CscMatrix;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::solve;
+use otspot::sparse::CscMatrix;
 
 /// 対角制約行列を生成するヘルパー
 ///

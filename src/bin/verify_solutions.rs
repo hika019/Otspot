@@ -21,13 +21,13 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use solver::io::qps::parse_qps;
-use solver::io::qplib::{parse_qplib, QplibError, QplibProblem};
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::kkt_resid::f64_impl;
-use solver::qp::solve_qp_with;
-use solver::QpProblem;
+use otspot::io::qps::parse_qps;
+use otspot::io::qplib::{parse_qplib, QplibError, QplibProblem};
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::kkt_resid::f64_impl;
+use otspot::qp::solve_qp_with;
+use otspot::QpProblem;
 
 const EPS: f64 = 1e-6;
 

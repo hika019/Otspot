@@ -6,9 +6,9 @@
 //! - LP問題をQP(Q=0)として解いたときの速度
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use solver::problem::ConstraintType;
-use solver::qp::{solve_qp, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::problem::ConstraintType;
+use otspot::qp::{solve_qp, QpProblem};
+use otspot::sparse::CscMatrix;
 
 /// QP基本問題（2変数）
 /// min x^2+y^2  s.t. x+y >= 1

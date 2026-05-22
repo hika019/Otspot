@@ -20,11 +20,11 @@
 //! ## 複数 data pattern
 //! 5 non-convex fixture × constraint 有無 × dimensionality (2D/3D/5D) で多様性確保。
 
-use solver::options::{BranchingStrategy, GlobalOptimizationConfig};
-use solver::problem::ConstraintType;
-use solver::qp::{solve_qp_global_with_stats, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::options::{BranchingStrategy, GlobalOptimizationConfig};
+use otspot::problem::ConstraintType;
+use otspot::qp::{solve_qp_global_with_stats, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// 全 fixture 合計の最小削減倍率 (Phase 3 nodes / Phase 4 nodes)。
 /// 観測 92× に対し margin 18× を取り、5× を sentinel 閾値とする。

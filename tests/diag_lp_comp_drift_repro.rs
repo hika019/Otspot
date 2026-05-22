@@ -6,10 +6,10 @@
 //! removing the postsolve complementarity short-circuit re-introduces drift
 //! above 1e-2 so the sentinel keeps teeth even if the fix is reverted.
 
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use solver::solve_lp_with;
-use solver::sparse::CscMatrix;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use otspot::solve_lp_with;
+use otspot::sparse::CscMatrix;
 
 /// Tight: post-fix the simplex+presolve path is expected to recover canonical y.
 const COMP_DRIFT_TIGHT: f64 = 1e-6;
