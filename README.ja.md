@@ -113,34 +113,40 @@ let result = model.solve().unwrap();
 println!("max revenue = {}", result.objective());
 ```
 
-### SolverOptions
+### 許容誤差とオプション
 
-ソルバーの動作を細かく調整する:
+収束許容誤差（eps）やよく使う設定は model に直接指定できる。`Tolerance` には
+preset `High`（1e-8）/ `Medium`（1e-6, 既定）/ `Fast` と `Custom(f64)` がある:
+
+```rust
+use otspot::Tolerance;
+
+model.set_tolerance(Tolerance::Custom(1e-8)); // eps = 1e-8
+model.set_presolve(true);                      // presolve の有効/無効 (既定: 有効)
+model.set_timeout(60.0);                       // 実時間上限 (秒)
+```
+
+より細かい制御は低レベルの `solve_with` に `SolverOptions` を渡す:
 
 ```rust
 use otspot::SolverOptions;
-use otspot::problem::LpProblem;
 use otspot::solve_with;
 
 let opts = SolverOptions {
-    primal_tol: 1e-8,   // optimality / feasibility tolerance
-    max_etas: 50,       // LU refactorization threshold (0 = auto)
-    clamp_tol: 1e-14,   // solution micro-value clamp
+    primal_tol: 1e-8,   // LP simplex の最適性 / 実行可能性 許容誤差
+    max_etas: 50,       // LU 再分解閾値 (0 = auto)
+    clamp_tol: 1e-14,   // 解の微小値クランプ
     ..Default::default()
 };
-
-let result = solve_with(&problem, &opts);
+let result = solve_with(&problem, &opts); // problem: &LpProblem
 ```
 
 ### 双対解
 
-`solve` と `solve_with` は完全な双対情報を含む `SolverResult` を返す:
+主解に加えて、`model.solve()` は双対変数・簡約費用・制約スラックを返す（いずれも `Option<Vec<f64>>`）:
 
 ```rust
-use otspot::{solve, problem::SolverResult};
-
-let result: SolverResult = solve(&problem);
-println!("primal:        {:?}", result.solution);
+let result = model.solve().unwrap();
 println!("dual (shadow): {:?}", result.dual_solution);
 println!("reduced costs: {:?}", result.reduced_costs);
 println!("slacks:        {:?}", result.slack);
@@ -148,45 +154,37 @@ println!("slacks:        {:?}", result.slack);
 
 ### 二次計画法（QP）
 
-`solve_qp` APIで二次計画問題を解く:
+QP は LP と同じモデリング API で書ける — 二次の目的関数を加えるだけ。`set_diagonal_q`
+（対角 Q の簡易版）または `set_quadratic_objective`（`CscMatrix` 全体）で設定する。目的関数は
+「1/2あり」規約 min ½·xᵀQx + cᵀx で、線形項 c は `minimize` / `maximize` で与える。
 
 ```rust
-use otspot::qp::{solve_qp, QpProblem};
-use otspot::sparse::CscMatrix;
+use otspot::model::{constraint, Model};
 
-// min  x^2 + y^2
+// min  x² + y²        (= ½·xᵀQx, Q = diag(2, 2))
 // s.t. x + y >= 1
-// (「1/2あり」規約: Q = [[2,0],[0,2]], min 1/2 x^T Q x)
 fn main() {
-    let q = CscMatrix::from_triplets(
-        &[0, 1], &[0, 1], &[2.0, 2.0], 2, 2
-    ).unwrap();
-    let c = vec![0.0, 0.0];
+    let mut model = Model::new("qp");
+    let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+    let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
 
-    // x + y >= 1 → -x - y <= -1 (Ax <= b 形式)
-    let a = CscMatrix::from_triplets(
-        &[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2
-    ).unwrap();
-    let b = vec![-1.0];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+    model.add_constraint(constraint!((x + y) >= 1.0));
+    model.set_diagonal_q(&[2.0, 2.0]); // Q = diag(2, 2)
+    model.minimize(0.0 * x + 0.0 * y); // 線形項 c = 0
 
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
-    let result = solve_qp(&problem);
-
-    println!("status:    {:?}", result.status);
-    println!("solution:  {:?}", result.solution);   // ≈ [0.5, 0.5]
-    println!("objective: {:.4}", result.objective); // ≈ 0.5
+    let result = model.solve().unwrap();
+    println!("objective = {:.4}", result.objective());
+    println!("x = {:.4}, y = {:.4}", result[x], result[y]);
 }
 ```
 
 **出力:**
 ```
-status:    Optimal
-solution:  [0.5, 0.5]
-objective: 0.5000
+objective = 0.5000
+x = 0.5000, y = 0.5000
 ```
 
-SQP反復でのWarm-startには `solve_qp_warm` を使用する（前回解の活性集合を引き継ぎ収束を高速化）。
+行列を直接渡したい場合は低レベルの `qp::solve_qp` / `QpProblem` API（Q, c, A, b, bounds を配列で）も使える。SQP 反復での warm-start には `solve_qp_warm`（前回解の活性集合を引き継ぐ）。
 
 ## 応用
 
