@@ -55,10 +55,10 @@ def classify(status: str) -> str:
         return "objective_mismatch"
     if status in ("DFEAS_FAIL", "PFEAS_FAIL", "KKT_FAIL"):
         return "residual_drift"
-    if status.startswith("FAIL:"):
-        # FAIL:Infeasible / FAIL:Unbounded — solver reported wrong status
+    if status in ("FAIL:Infeasible", "FAIL:Unbounded"):
         return "status_honesty"
     if status.startswith("FAIL") or status in ("ERROR", "PARSE_ERR"):
+        # FAIL:NumericalError, FAIL:Unknown, bare FAIL
         return "numerical"
     return "unknown"
 
@@ -91,8 +91,10 @@ EXT_TIMEOUT_RE = re.compile(
     r"^\s+(?P<name>\S+)\s+TIMEOUT\s+\(external_timeout=(?P<ext>\S+)"
 )
 
-# Info line written after each solve:
-#   "  => solver=METHOD iters=N [pf=X df=X gap=X] | n=N m=M nnz=Z"
+# Info line written after each solve by qps_benchmark/bench_qplib:
+#   "  => solver=METHOD iters=N ... | n=N m=M nnz=Z"
+# Note: bench_parallel.sh's AWK aggregation filters these out, so INFO_RE only
+# matches when parsing raw per-group worker logs (not the --manifest-out path).
 INFO_RE = re.compile(
     r"^\s+=>\s+solver=(?P<solver>\S+)\s+iters=(?P<iters>\d+)"
     r"(?:\s+pf=(?P<pf>\S+)\s+df=(?P<df>\S+)\s+gap=(?P<gap>\S+))?"
@@ -254,11 +256,12 @@ def _new_record(*, name: str, status: str, time_s, note: str = "",
 
 
 def merge_logs(paths: list[Path]) -> tuple[dict, list[dict]]:
-    combined_meta: dict = {}
+    combined_meta: dict = {"log_files": [str(p) for p in paths]}
     all_records: list[dict] = []
     for p in paths:
         meta, records = parse_log(p)
-        combined_meta.update({k: v for k, v in meta.items() if v is not None})
+        combined_meta.update({k: v for k, v in meta.items()
+                               if v is not None and k != "log_file"})
         all_records.extend(records)
     return combined_meta, all_records
 
@@ -291,7 +294,7 @@ def build_manifest(meta: dict, records: list[dict]) -> dict:
             "solver_commit":   meta.get("solver_commit"),
             "solver_branch":   meta.get("solver_branch"),
             "bench_timestamp": meta.get("bench_timestamp"),
-            "log_files":       [meta.get("log_file")] if "log_file" in meta else [],
+            "log_files":       meta.get("log_files") or ([meta["log_file"]] if "log_file" in meta else []),
         },
         "summary": {
             "total_problems": n_total,
