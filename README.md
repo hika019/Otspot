@@ -11,7 +11,7 @@ otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, s
 - **Algebraic modeling API** — express problems in natural mathematical notation
 - **Revised simplex (LP)** — sparse LU factorization with Markowitz-threshold pivoting
 - **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
-- **Mixed-integer (MILP)** — baseline branch-and-bound with most-fractional branching over LP relaxations; convex MIQP supported, non-convex MIQP out of scope. Cuts, primal heuristics, SOS constraints, and richer branching strategies are not implemented.
+- **Mixed-integer (MILP / convex MIQP)** — baseline branch-and-bound with most-fractional branching over continuous relaxations (LP for MILP, QP for convex MIQP); non-convex MIQP out of scope. Cuts, primal heuristics, SOS constraints, and richer branching strategies are not implemented.
 - **Infeasibility / unboundedness certification** — an explicit status, not just a failure
 - **Ruiz equilibration** — row/column scaling preconditioner for better conditioning
 - **Steepest-edge pricing** — faster convergence via improved entering-variable choice

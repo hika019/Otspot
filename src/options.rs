@@ -457,11 +457,10 @@ pub struct SolverOptions {
     /// Default = 1 (serial; preserves existing behaviour, avoids contention
     /// with external bench workers).
     ///
-    /// **Observed effect (benchmarked 2026-05-18):**
-    /// - **Dense QP** (`threads ≥ 2`): faer parallel LDL factorization gives
-    ///   roughly +10–18 % speedup on dense Q problems.
-    /// - **Sparse QP** (`threads ≥ 2`): rayon dispatch overhead dominates;
-    ///   effect is 0 to slightly negative.
+    /// **Effect by path:**
+    /// - **QP** (`threads ≥ 2`): routes through faer parallel sparse LDL on the
+    ///   KKT system; may improve throughput for problems with denser KKT structure,
+    ///   overhead can dominate for very sparse systems.
     /// - **LP simplex** (`threads ≥ 2`): no effect — simplex does not route
     ///   through the faer parallel factorization path.
     /// - **Multistart** (`threads ≥ 2`): effective — parallel degree is
