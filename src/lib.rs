@@ -8,11 +8,14 @@
 //!
 //! | モジュール | 役割 |
 //! |-----------|------|
+//! | [`model`] | 代数モデリング API（`Model`、`constraint!` マクロ） |
 //! | [`sparse`] | CSC 形式の疎行列・疎ベクトル演算 |
-//! | [`problem`] | LP 問題の定義（目的関数・制約・変数境界） |
-//! | [`simplex`] | 改訂単体法ソルバー（Primal Simplex） |
-//! | [`io`] | MPS 形式ファイルの読み込み |
-//! | `basis` | LU 分解ベースの基底管理（内部実装・非公開） |
+//! | [`problem`] | 問題定義（`LpProblem` / `QpProblem`、`SolveStatus`、`SolverResult`） |
+//! | [`lp`] | LP 求解エントリポイント（`solve_lp_with`） |
+//! | [`qp`] | 内点法ソルバー（QP、IPM / IP-PMM） |
+//! | [`mip`] | 混合整数ソルバー（MILP / MIQP、branch-and-bound） |
+//! | [`io`] | MPS / QPS / QPLIB 形式ファイルの読み込み |
+//! | [`options`] | `SolverOptions`、`Tolerance` |
 //!
 //! ## 使用例
 //!
@@ -22,20 +25,10 @@
 //! use std::path::Path;
 //! use otspot::io::mps;
 //!
-//! // MPS ファイルを読み込む
 //! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
-//!
-//! // 単体法で求解
 //! let result = otspot::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
-//!
-//! ## 開発ロードマップ
-//!
-//! - **M1 完了**: 密行列 Primal Simplex
-//! - **M2 完了**: 改訂単体法 + LU 分解 + eta ファイル更新
-//! - **M3 予定**: Dual Simplex
-//! - **将来**: 二次計画法（QP）、逐次二次計画法（SQP）
 
 pub mod error;
 pub use error::SolverError;
