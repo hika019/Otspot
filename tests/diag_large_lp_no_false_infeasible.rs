@@ -7,15 +7,28 @@
 //! The fix declares Infeasible ONLY via a verified Farkas certificate
 //! (A^T y ≤ tol ∧ b^T y > tol).
 //!
-//! ## Routing note (why some tests force simplex)
+//! ## Routing note (why some tests force simplex) and what each arm covers
 //!
 //! `solve_qp_with` routes large LPs (n > 3000 or m > 2000) to IPM first, which
-//! never touches the Big-M `any_nonzero` arms. To make the guard *load-bearing*
-//! for the simplex path we set `LP_DISPATCH_NOOP=1`, forcing the Big-M Phase I
-//! to run. Under the old heuristic these feasible LPs return false-Infeasible
-//! (verified during the #36 rework); under the certificate-only code they
-//! return Timeout/Optimal. ken-13/ken-18 are too large to factorize a basis for
-//! (m ≫ 2000), so they stay on the IPM path and only guard that route.
+//! never touches the Big-M infeasibility arms. To exercise the simplex path we
+//! set `LP_DISPATCH_NOOP=1`, forcing the Big-M Phase I to run. ken-13/ken-18
+//! are too large to factorize a basis for (m ≫ 2000), so they stay on the IPM
+//! path and only guard that route.
+//!
+//! There are two Big-M infeasibility arms; they have *different* coverage:
+//! - **Timeout-arm** (`any_artificial_left && farkas`): pilot/dfl001 exhaust
+//!   their budgets (12s/30s) before Phase I finishes, so they exit through this
+//!   arm. These sentinels are load-bearing *for the Timeout-arm only* —
+//!   flipping its `&&` to `||` (the a7b95ad band-aid) flips both to
+//!   false-Infeasible (verified via no-op rewrite). This arm was already sound
+//!   on `main`; the sentinels guard against re-introducing the band-aid.
+//! - **Optimal-arm** (`any_artificial_in_basis && farkas`): no test reaches it
+//!   with a residual nonzero artificial — Phase I never declares Optimal here
+//!   on the available data. The #36 rework removed the Optimal-arm `any_nonzero`
+//!   short-circuit; that removal is verified safe by (a) monotone-safety (the
+//!   Farkas condition is a strict subset of `any_nonzero || farkas`, so
+//!   Infeasible verdicts can only decrease) and (b) the infeasible-29 bench
+//!   being bit-identical before/after — NOT by a direct sentinel here.
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -53,10 +66,12 @@ fn assert_not_infeasible_ipm(path_str: &str, timeout_sec: f64) {
     );
 }
 
-/// Force the simplex Big-M Phase I path (`LP_DISPATCH_NOOP=1`) so the
-/// certificate-only infeasibility arms are actually exercised. LOAD-BEARING:
-/// re-introducing the `any_nonzero` residual-artificial heuristic turns these
-/// feasible LPs into false-Infeasible and fails the assert.
+/// Force the simplex Big-M Phase I path (`LP_DISPATCH_NOOP=1`). pilot/dfl001
+/// exit via the **Timeout-arm** (budget exhausted before Phase I finishes).
+/// LOAD-BEARING for that arm: changing its `any_artificial_left && farkas` to
+/// `|| farkas` (the a7b95ad band-aid) flips these feasible LPs to
+/// false-Infeasible and fails the assert. (The Optimal-arm is not reached here;
+/// see the module docstring for its verification basis.)
 fn assert_not_infeasible_forced_simplex(path_str: &str, timeout_sec: f64) {
     // SAFETY: env mutation scoped to this test; CLAUDE.md mandates nextest,
     // which isolates each test in its own process (no cross-test leak).
