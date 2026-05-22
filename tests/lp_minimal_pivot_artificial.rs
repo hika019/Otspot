@@ -1,6 +1,13 @@
-//! `pivot_out_degenerate_artificials` の BTRAN candidate scan 計算量 regression guard。
+//! `pivot_out_degenerate_artificials` を含む Phase I 経路の solve-budget regression guard。
 //! K artificial × N 非基底列の合成 LP を build し、解時間が wall budget 内に
-//! 収まることで O(n_artificial × n_total) 退行を検知する。
+//! 収まることで Phase I 全体の計算量退行を検知する。
+//!
+//! 注意 (review #28): この b=0  workload は pivot_out 呼出時点で退化 artificial を
+//! 基底に残さない (Phase I が非退化に追い出す)。よって early-exit が発火し
+//! BTRAN candidate scan には到達しない (`PIVOT_CLEAN_EARLY_EXIT_COUNT` で確認済)。
+//! 退化 artificial が残る cleanup 本体 + BTRAN scan の機能カバレッジは unit test
+//! `simplex::tests::pivot_cleanup_runs_when_degenerate_artificial_in_basis`
+//! (冗長 Eq 行で退化 artificial を実発生させる) が担う。
 
 use std::time::Instant;
 

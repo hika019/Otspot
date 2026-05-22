@@ -8,6 +8,26 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
+/// Counts `pivot_out_degenerate_artificials` early-exit firings (test-only).
+///
+/// Incremented each time the fast pre-check short-circuits the function
+/// (no degenerate artificials in the basis). Tests assert this increases
+/// to verify the early-exit fires; removing the check makes the count
+/// stagnate, failing the sentinel.
+#[cfg(test)]
+pub(crate) static PIVOT_CLEAN_EARLY_EXIT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts `pivot_out_degenerate_artificials` cleanup-body entries (test-only).
+///
+/// Incremented when the early-exit is *not* taken (a degenerate artificial is
+/// in the basis), so the LU build + BTRAN cleanup runs. The complementary
+/// sentinel asserts this increases on a degenerate-artificial LP: it proves
+/// the early-exit does not mis-fire and strand an artificial in the basis.
+#[cfg(test)]
+pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
@@ -840,6 +860,20 @@ fn pivot_out_degenerate_artificials(
     options: &SolverOptions,
 ) {
     let m = basis.len();
+
+    // Fast pre-check: skip LU build entirely when Phase I has already pivoted
+    // out all artificials. For most problems this is the common case; avoiding
+    // two LU factorizations (one here, one for validation) saves significant
+    // work — especially for large m.
+    if !basis.iter().zip(x_b.iter()).any(|(&col, &val)| col >= sf.n_total && val.abs() < PIVOT_TOL) {
+        #[cfg(test)]
+        PIVOT_CLEAN_EARLY_EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    #[cfg(test)]
+    PIVOT_CLEAN_CLEANUP_RAN_COUNT.fetch_add(1, Ordering::Relaxed);
+
     let basis_before = basis.to_vec();
 
     // Pivot stability uses |(B^{-1} a_j)[i]|, not raw A[i,j], so we need an LU.

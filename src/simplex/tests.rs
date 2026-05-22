@@ -1003,3 +1003,147 @@ fn test_hs51_free_var_no_singular_basis() {
     assert_eq!(result.status, SolveStatus::Optimal);
     assert_solver_invariants_lp(&result, &lp);
 }
+
+/// Sentinel: `pivot_out_degenerate_artificials` early-exit fires when no
+/// degenerate artificials remain after Phase I.
+///
+/// Diagonal LP: m Eq rows `x_i = 1`. Phase I pivots each artificial out at
+/// value 1.0 (non-degenerate) → no degenerate artificials remain → early-exit
+/// must fire. Removing the early-exit makes `PIVOT_CLEAN_EARLY_EXIT_COUNT`
+/// stagnate, failing the assertion below (no-op FAIL).
+#[test]
+fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
+    use std::sync::atomic::Ordering;
+
+    let before = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
+
+    // 4 Eq rows: x_i = 1 each. Phase I removes all artificials non-degenerately.
+    let m = 4;
+    let rows: Vec<usize> = (0..m).collect();
+    let cols: Vec<usize> = (0..m).collect();
+    let a = CscMatrix::from_triplets(&rows, &cols, &vec![1.0f64; m], m, m).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0f64; m],
+        a,
+        vec![1.0f64; m],
+        vec![ConstraintType::Eq; m],
+        vec![(0.0f64, f64::INFINITY); m],
+        None,
+    )
+    .unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false; // force artificial path
+    let result = solve_with(&lp, &opts);
+
+    assert_eq!(result.status, SolveStatus::Optimal, "diagonal Eq LP must be Optimal");
+    assert!((result.objective - 4.0).abs() < 1e-6, "obj={}", result.objective);
+
+    let after = primal::PIVOT_CLEAN_EARLY_EXIT_COUNT.load(Ordering::SeqCst);
+    assert!(
+        after > before,
+        "early-exit must fire when no degenerate artificials remain \
+         (before={before}, after={after}); removing the early-exit causes no-op FAIL here"
+    );
+}
+
+/// Complementary sentinel: when a degenerate artificial *is* in the basis the
+/// early-exit must NOT fire, so the LU build + BTRAN cleanup runs.
+///
+/// Construction: linearly **redundant** Eq rows (exact duplicates). Phase I
+/// pivots a real variable into the first copy and leaves the duplicate rows'
+/// artificials basic at value 0 — genuine degenerate artificials. So
+/// `pivot_out_degenerate_artificials` must take the cleanup branch,
+/// incrementing `PIVOT_CLEAN_CLEANUP_RAN_COUNT`.
+///
+/// (Note: a `b = 0` workload does NOT leave degenerate artificials — Phase I
+/// drives them out non-degenerately and the early-exit fires; see the comment
+/// on `lp_minimal_pivot_artificial`.)
+///
+/// This is the inverse of the early-exit sentinel: it guards against the feared
+/// mis-fire where the early-exit strands an artificial in the basis. If the
+/// early-exit condition were widened to fire here (no-op FAIL), the cleanup
+/// counter stagnates and the assertion trips. Table-driven over two redundancy
+/// patterns so the proof does not rest on a single input shape.
+#[test]
+fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
+    use std::sync::atomic::Ordering;
+
+    // (rows, cols, vals, m, n, b, c, expected_obj, label)
+    struct Case {
+        a: CscMatrix,
+        b: Vec<f64>,
+        c: Vec<f64>,
+        n: usize,
+        expected_obj: f64,
+        label: &'static str,
+    }
+
+    // Pattern A: `x0 = 1` duplicated → 1 redundant row, 1 artificial degenerate.
+    let case_a = Case {
+        a: CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap(),
+        b: vec![1.0, 1.0],
+        c: vec![1.0],
+        n: 1,
+        expected_obj: 1.0,
+        label: "dup_x0_eq_1",
+    };
+
+    // Pattern B: `x0 + x1 = 2` tripled → 2 redundant rows, 2 artificials degenerate.
+    let case_b = Case {
+        a: CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2],
+            &[0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            3,
+            2,
+        )
+        .unwrap(),
+        b: vec![2.0, 2.0, 2.0],
+        c: vec![1.0, 1.0],
+        n: 2,
+        expected_obj: 2.0,
+        label: "triple_x0_plus_x1_eq_2",
+    };
+
+    for case in [case_a, case_b] {
+        let before = primal::PIVOT_CLEAN_CLEANUP_RAN_COUNT.load(Ordering::SeqCst);
+
+        let lp = LpProblem::new_general(
+            case.c,
+            case.a,
+            case.b.clone(),
+            vec![ConstraintType::Eq; case.b.len()],
+            vec![(0.0, f64::INFINITY); case.n],
+            None,
+        )
+        .unwrap();
+
+        let mut opts = SolverOptions::default();
+        opts.presolve = false; // force artificial path
+        let result = solve_with(&lp, &opts);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "[{}] redundant Eq LP must be Optimal",
+            case.label
+        );
+        assert!(
+            (result.objective - case.expected_obj).abs() < 1e-6,
+            "[{}] obj={} expected={}",
+            case.label,
+            result.objective,
+            case.expected_obj
+        );
+
+        let after = primal::PIVOT_CLEAN_CLEANUP_RAN_COUNT.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "[{}] cleanup must run (early-exit must NOT fire) while a degenerate \
+             artificial is basic (before={before}, after={after}); a mis-firing \
+             early-exit would strand the artificial and stagnate this counter",
+            case.label
+        );
+    }
+}
