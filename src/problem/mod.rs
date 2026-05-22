@@ -43,10 +43,6 @@ pub enum SolveRoute {
 pub struct SolveStats {
     /// Route taken for this solve.
     pub route: SolveRoute,
-    /// Whether crash→IPM warm-start wiring was attempted (large LP IPM path).
-    pub crash_ipm_attempted: bool,
-    /// Whether crash→IPM warm-start was successfully built.
-    pub crash_ipm_wired: bool,
     /// Whether the solver stopped because the deadline (timeout_secs / deadline) was reached.
     ///
     /// `true` iff `result.status == SolveStatus::Timeout`. Deterministic sentinel for

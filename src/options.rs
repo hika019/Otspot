@@ -401,23 +401,6 @@ pub struct SolverOptions {
     /// 実行時切替には環境変数 `LP_CRASH_DUAL_ADV_DISABLE=1` で Big-M 経路のみ
     /// no-op 化可能 (sentinel/triage 用)。
     pub use_lp_crash_basis: bool,
-    /// LP→IPM (large-LP dispatch) で crash basis から IPM warm-start を構築するか。
-    ///
-    /// デフォルト `false`: full-101 LP A/B (2026-05-20) で warm-start が IPM 反復を
-    /// 1 つも減らさない (有/無で iters 完全一致) ＝ 純粋に crash-LU コストの上乗せ。
-    /// 巨大 n で致命的 (osa-30 45.9s→4.1s, osa-60 TIMEOUT→PASS when off)、全 101 で
-    /// 速くなる問題ゼロ・退化ゼロを実証。
-    ///
-    /// 再有効化はこの option を `true` にする方法のみ (opt-in)。環境変数
-    /// `LP_CRASH_IPM_DISABLE=1` は **disable 専用 kill-switch** で、再有効化はできない
-    /// (`try_build_ipm_warm_from_crash` が即 None を返す)。
-    ///
-    /// 注意: 再有効化すると大規模 LP で crash LU が faer underflow を踏む
-    /// (debug = `lu.rs` panic / release = wrap → cold fallback)。この faer underflow
-    /// root は既定 off で発火しないため影響は限定的。よって本 option は完全な「無害な復元」ではなく opt-in な退避口。
-    ///
-    /// `use_lp_crash_basis` (= simplex Phase I crash) とは別物で、そちらは有効のまま。
-    pub use_lp_crash_ipm_warm: bool,
     /// Presolve有効/無効（デフォルト: true）
     pub presolve: bool,
     /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
@@ -511,7 +494,6 @@ impl Default for SolverOptions {
             warm_start_lp: None,
             recover_warm_start_basis: false,
             use_lp_crash_basis: true,
-            use_lp_crash_ipm_warm: false,
             presolve: true,
             timeout_secs: None,
             cancel_flag: None,
