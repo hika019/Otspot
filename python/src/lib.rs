@@ -409,6 +409,11 @@ impl PyModel {
 
     /// Set a sparse Q matrix from (row, col, value) triplets.
     /// `n` must equal the number of variables. Example: `[(0,0,2.0),(1,1,2.0)]`.
+    ///
+    /// Convention: objective = 1/2 xᵀQx + cᵀx. **Q must be the full symmetric
+    /// matrix** — both (i,j) and (j,i) entries are required. The solver consumes
+    /// Q verbatim (gradient = Qx) and does NOT symmetrize, so passing only the
+    /// upper/lower triangle yields a silently wrong solution.
     fn set_quadratic_objective(
         &mut self,
         triplets: &Bound<'_, PyAny>,

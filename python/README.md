@@ -26,6 +26,10 @@ m.set_diagonal_q([2, 2])          # Q = diag(2, 2); objective = ½xᵀQx + cᵀx
 m.add_constraint(x + y <= 3)
 m.minimize(-4*x + -4*y)
 
+# Note: set_quadratic_objective expects the FULL symmetric Q (both (i,j) and
+# (j,i) triplets). Q is consumed as-is (gradient = Qx) and is NOT symmetrized,
+# so an upper-triangle-only Q gives a silently wrong answer.
+
 r = m.solve()
 print(r.objective, r[x], r[y])    # -7.5  1.5  1.5
 ```
@@ -71,7 +75,7 @@ print(r.objective, r[x], r[y])
 | `minimize(expr)` | Set minimization objective |
 | `maximize(expr)` | Set maximization objective |
 | `set_diagonal_q(list)` | Set diagonal Q matrix for QP |
-| `set_quadratic_objective(triplets, n)` | Set sparse Q from (i,j,v) list |
+| `set_quadratic_objective(triplets, n)` | Set sparse Q from (i,j,v) list (full symmetric — see note) |
 | `set_timeout(secs)` | Solver timeout in seconds |
 | `set_threads(n)` | Parallel thread count |
 | `set_presolve(flag)` | Enable/disable presolve (LP) |
