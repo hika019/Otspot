@@ -131,6 +131,10 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
                 // LP dispatch は Q=0 前提 → 非凸 status は本経路には出ないが、
                 // non-exhaustive match を防ぎ safety net として simplex に倒す。
             }
+            SolveStatus::NotSupported(_) => {
+                // Propagate immediately; simplex retry cannot help.
+                return ipm_result;
+            }
         }
     }
 

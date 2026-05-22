@@ -119,6 +119,13 @@ impl QpProblem {
         self.q.values.iter().all(|&v| v.abs() < 1e-12)
     }
 
+    /// Returns `true` if the problem has at least one constraint with a non-zero quadratic term.
+    ///
+    /// Used as a guard: the QP/LP solver cannot handle QCQP and must reject such problems.
+    pub fn has_qcqp_constraints(&self) -> bool {
+        self.quadratic_constraints.iter().any(|q| !q.triplets.is_empty())
+    }
+
     /// Q が対角行列かどうかを検査する
     pub fn is_diagonal_q(&self) -> bool {
         for col in 0..self.num_vars {
@@ -182,6 +189,18 @@ impl crate::problem::SolverResult {
             dual_solution: vec![],
             bound_duals: vec![],
 
+            iterations: 0,
+            ..Default::default()
+        }
+    }
+
+    pub fn not_supported(msg: impl Into<String>) -> Self {
+        crate::problem::SolverResult {
+            status: SolveStatus::NotSupported(msg.into()),
+            objective: f64::INFINITY,
+            solution: vec![],
+            dual_solution: vec![],
+            bound_duals: vec![],
             iterations: 0,
             ..Default::default()
         }

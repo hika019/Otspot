@@ -146,6 +146,7 @@ fn status_rank(s: &SolveStatus) -> u8 {
         NonConvex(_) => 6,
         Unbounded => 7,
         Infeasible => 8,
+        NotSupported(_) => 9,
     }
 }
 
