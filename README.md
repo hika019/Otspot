@@ -22,9 +22,16 @@ otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, s
 
 ## Quick start
 
-Requires Rust (edition 2021, stable). Not yet published to crates.io; use it as a git dependency or build from source.
+Requires Rust (edition 2021, stable).
 
-As a git dependency:
+From crates.io:
+
+```toml
+[dependencies]
+otspot = "0.1"
+```
+
+Or as a git dependency:
 
 ```toml
 [dependencies]
@@ -257,10 +264,8 @@ The `1e-6` QP misses are `QBORE3D` (dual residual stalls at 7.5e-4) and the `LIS
 their constraint normal matrix is the discrete biharmonic operator (cond ≈ n⁴ ≈ 1e15 at
 n = 10⁴) and the optimal duals are huge (|y|∞ ≈ 1e5–1e6), so the objective is hypersensitive
 to the residual primal infeasibility that no f64 interior-point method can drive below ~1e-6
-here. This is *not* an LDLᵀ-precision floor — improving factorization precision alone (e.g. via
-double-double) would not overcome the fundamental conditioning of the active-constraint system;
-it is the conditioning itself that prevents convergence (Clarabel at tol = 1e-12 likewise only
-reaches `AlmostSolved` here). otspot returns `SuboptimalSolution`/`Timeout` on these, not `Optimal`. At the tighter `1e-8`, more
+here (Clarabel at tol = 1e-12 likewise only reaches `AlmostSolved`). otspot returns
+`SuboptimalSolution`/`Timeout` on these, not `Optimal`. At the tighter `1e-8`, more
 ill-conditioned instances land just above the primal/dual residual threshold; this is an
 accuracy-floor effect, not a convergence failure.
 
