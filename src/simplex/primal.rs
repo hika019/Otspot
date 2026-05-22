@@ -18,6 +18,16 @@ use std::sync::atomic::Ordering;
 pub(crate) static PIVOT_CLEAN_EARLY_EXIT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts `pivot_out_degenerate_artificials` cleanup-body entries (test-only).
+///
+/// Incremented when the early-exit is *not* taken (a degenerate artificial is
+/// in the basis), so the LU build + BTRAN cleanup runs. The complementary
+/// sentinel asserts this increases on a degenerate-artificial LP: it proves
+/// the early-exit does not mis-fire and strand an artificial in the basis.
+#[cfg(test)]
+pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
@@ -860,6 +870,9 @@ fn pivot_out_degenerate_artificials(
         PIVOT_CLEAN_EARLY_EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     }
+
+    #[cfg(test)]
+    PIVOT_CLEAN_CLEANUP_RAN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let basis_before = basis.to_vec();
 
