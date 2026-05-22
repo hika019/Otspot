@@ -85,7 +85,10 @@ pub struct MipStats {
     pub relaxation_time_infeasible_ms: f64,
 
     // --- LP sub-phase timing extracted from SolverResult::timing_breakdown ---
-    // Non-zero on the MILP (LP relaxation) path; zero for MIQP (QP has no breakdown yet).
+    // Populated only when the LP relaxation path goes through presolve *and*
+    // presolve actually reduces the problem (`was_reduced = true`).  Zero for
+    // MIQP (QP solver does not yet provide a breakdown) and for MILP nodes
+    // where presolve does not reduce (e.g. tight-bound knapsack-style nodes).
 
     /// Cumulative LP presolve microseconds across all nodes.
     pub lp_presolve_us_total: u64,
@@ -96,7 +99,7 @@ pub struct MipStats {
 
     // --- memory estimate ---
 
-    /// Approximate bytes allocated per node for the bounds clone (`n_vars × 16`).
+    /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
     /// Gives a rough idea of per-node memory traffic regardless of node count.
     pub approx_bounds_bytes_per_node: usize,
 }
