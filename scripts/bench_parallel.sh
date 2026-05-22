@@ -30,18 +30,20 @@ FEATURES=""
 DATA_DIR=""
 TIMEOUT=""
 OUTPUT=""
+MANIFEST_OUT=""
 
 # 引数パース
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --data-dir)  DATA_DIR="$2";  shift 2 ;;
-    --timeout)   TIMEOUT="$2";   shift 2 ;;
-    --eps)       EPS="$2";       shift 2 ;;
-    --jobs)      JOBS="$2";      shift 2 ;;
-    --output)    OUTPUT="$2";    shift 2 ;;
-    --features)  FEATURES="$2";  shift 2 ;;
+    --data-dir)     DATA_DIR="$2";     shift 2 ;;
+    --timeout)      TIMEOUT="$2";      shift 2 ;;
+    --eps)          EPS="$2";          shift 2 ;;
+    --jobs)         JOBS="$2";         shift 2 ;;
+    --output)       OUTPUT="$2";       shift 2 ;;
+    --features)     FEATURES="$2";     shift 2 ;;
+    --manifest-out) MANIFEST_OUT="$2"; shift 2 ;;
     *) echo "エラー: 不明な引数 '$1'" >&2
-       echo "使い方: $0 --data-dir DIR --timeout SEC --output FILE [--eps EPS] [--jobs N] [--features FEAT]" >&2
+       echo "使い方: $0 --data-dir DIR --timeout SEC --output FILE [--eps EPS] [--jobs N] [--features FEAT] [--manifest-out DIR]" >&2
        exit 1 ;;
   esac
 done
@@ -380,10 +382,13 @@ done
 # 結果を出力ファイルとstdoutに書き込み
 {
   echo "=== bench_parallel.sh 集計結果 ==="
-  echo "data-dir : $DATA_DIR"
-  echo "timeout  : ${TIMEOUT}s"
-  echo "eps      : $EPS"
-  echo "jobs     : $JOBS"
+  echo "data-dir         : $DATA_DIR"
+  echo "timeout          : ${TIMEOUT}s"
+  echo "eps              : $EPS"
+  echo "jobs             : $JOBS"
+  echo "solver_commit    : $SOLVER_COMMIT"
+  echo "solver_branch    : $SOLVER_BRANCH"
+  echo "bench_timestamp  : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   echo ""
   if [[ ${#FAILED_GROUPS[@]} -gt 0 ]]; then
     echo "★ 異常終了グループ: ${FAILED_GROUPS[*]}"
@@ -494,6 +499,15 @@ fi
 
 echo ""
 echo "[bench_parallel.sh] 結果を $OUTPUT に出力した"
+
+# miss manifest 生成（--manifest-out 指定時）
+if [[ -n "$MANIFEST_OUT" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR/gen_miss_manifest.py" "$OUTPUT" --out "$MANIFEST_OUT"
+  else
+    echo "警告: python3 が見つからない。manifest 生成をスキップ" >&2
+  fi
+fi
 
 # 異常終了グループがあれば exit 1
 if [[ ${#FAILED_GROUPS[@]} -gt 0 ]]; then
