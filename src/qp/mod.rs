@@ -146,6 +146,11 @@ pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 /// should prefer `crate::lp::solve_lp_with` directly); Q≠0 goes to IPPMM.
 fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     use crate::problem::{SolveRoute, SolveStatus};
+    if problem.has_qcqp_constraints() {
+        return SolverResult::not_supported(
+            "QCQP (quadratic constraints) is not yet supported; only QP/LP problems are accepted",
+        );
+    }
     if problem.is_zero_q() {
         return solve_as_lp_pub(problem, options);
     }

@@ -8,6 +8,7 @@ mod pfeas;
 mod postsolve;
 mod presolve;
 mod psd_nonconvex;
+mod qcqp_guard;
 mod smoke;
 mod status_dfeas;
 

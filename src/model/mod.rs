@@ -379,6 +379,7 @@ impl Model {
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
                 "Unexpected nonconvex status on LP path".to_string(),
             )),
+            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
         }
     }
 
@@ -555,6 +556,7 @@ impl Model {
                 fold_dual(&qp_result.dual_solution),
                 qp_result.bound_duals,
             )),
+            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
         }
     }
 
@@ -673,6 +675,7 @@ impl Model {
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
                 "Unexpected nonconvex status on MIP path".to_string(),
             )),
+            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
         }
     }
 }

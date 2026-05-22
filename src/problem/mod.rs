@@ -99,6 +99,11 @@ pub enum SolveStatus {
     /// `Optimal` は「Q が PSD で IPM/BB が global 達成」専用に維持し、indefinite Q の場合は
     /// 本 variant で明示分離する (caller が「global 証明済」かを fact で判別)。
     NonconvexGlobal,
+    /// Problem type not supported by this solver.
+    ///
+    /// Returned when the caller passes a problem that cannot be handled, e.g.
+    /// a QCQP (quadratic constraints present) submitted to the QP/LP entry.
+    NotSupported(String),
 }
 
 impl fmt::Display for SolveStatus {
@@ -115,6 +120,7 @@ impl fmt::Display for SolveStatus {
             SolveStatus::NonConvex(msg) => write!(f, "NonConvex({})", msg),
             SolveStatus::NonconvexLocal => write!(f, "NonconvexLocal"),
             SolveStatus::NonconvexGlobal => write!(f, "NonconvexGlobal"),
+            SolveStatus::NotSupported(msg) => write!(f, "NotSupported({})", msg),
         }
     }
 }
