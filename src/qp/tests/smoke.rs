@@ -3,6 +3,75 @@ use super::{assert_close, EPS};
 use crate::problem::SolveStatus;
 use crate::sparse::CscMatrix;
 
+/// TimingBreakdown の QP IPM/postsolve フィールドが実測値で埋まることを検証。
+///
+/// Sentinel: timing フィールドを常時 None にすると本テストが FAIL する。
+/// 問題サイズは小さいが制約付きで IPM が ≥1 反復するため factorize/solve 時間は必ず > 0。
+/// 2 問 (制約あり QP / LP=Q≡0 の 2 ケース) で postsolve_us の内訳が合計に整合することを確認。
+#[test]
+fn test_qp_timing_breakdown_fields_populated() {
+    // ── ケース1: 凸 QP (制約つき、IPM が複数反復) ────────────────────────────
+    {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![0.0, 0.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let b = vec![-1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+        let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+
+        assert_eq!(result.status, SolveStatus::Optimal, "QP should converge");
+        let tb = result.timing_breakdown
+            .expect("timing_breakdown must be Some for QP IPM path");
+
+        // IPM が少なくとも 1 反復した → factorize/solve > 0
+        assert!(result.iterations > 0, "IPM should iterate");
+        assert!(tb.ipm_factorize_us > 0,
+            "ipm_factorize_us must be > 0 when IPM iterated (got {})", tb.ipm_factorize_us);
+        assert!(tb.ipm_solve_us > 0,
+            "ipm_solve_us must be > 0 when IPM iterated (got {})", tb.ipm_solve_us);
+
+        // postsolve 合計は内訳の和と整合する
+        let postsolve_sum = tb.postsolve_map_us
+            + tb.postsolve_lsq_us
+            + tb.postsolve_recovery_us
+            + tb.postsolve_refine_us
+            + tb.postsolve_krylov_ir_us;
+        assert_eq!(tb.postsolve_us, postsolve_sum,
+            "postsolve_us ({}) must equal sum of sub-stages ({})",
+            tb.postsolve_us, postsolve_sum);
+    }
+
+    // ── ケース2: 境界制約つき QP (bound dual が出る) ─────────────────────────
+    {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let c = vec![-1.0, -1.0];
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)];
+        let problem = QpProblem::new(
+            q, c, a, b, bounds, vec![crate::problem::ConstraintType::Le],
+        ).unwrap();
+        let opts = SolverOptions::default();
+        let result = solve_qp_with(&problem, &opts);
+
+        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution));
+        let tb = result.timing_breakdown
+            .expect("timing_breakdown must be Some for QP IPM path");
+
+        // postsolve 内訳が合計と整合
+        let postsolve_sum = tb.postsolve_map_us
+            + tb.postsolve_lsq_us
+            + tb.postsolve_recovery_us
+            + tb.postsolve_refine_us
+            + tb.postsolve_krylov_ir_us;
+        assert_eq!(tb.postsolve_us, postsolve_sum,
+            "postsolve_us ({}) must equal sum of sub-stages ({}) in case 2",
+            tb.postsolve_us, postsolve_sum);
+    }
+}
+
 /// min x²+y² s.t. x+y ≥ 1 → x*=y*=0.5, obj=0.5
 #[test]
 fn test_basic_qp_2vars() {

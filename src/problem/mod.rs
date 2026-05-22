@@ -182,15 +182,38 @@ pub struct SolverResult {
     pub stats: SolveStats,
 }
 
-/// LP solver の各 phase 所要時間 (μs精度)。
+/// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TimingBreakdown {
+    // ── LP simplex 経路 ───────────────────────────────────────────────────────
     /// Presolve 全体 (run_presolve)
     pub presolve_us: u64,
     /// 縮約後 simplex 本体 (solve_without_presolve)
     pub solve_us: u64,
-    /// Postsolve (run_postsolve、 cleanup LP 含む)
+    /// Postsolve 総計 (run_postsolve / QP 経路では下記 4 field の合計)
     pub postsolve_us: u64,
+
+    // ── QP IPM 経路: IPM 反復内部 ────────────────────────────────────────────
+    /// KKT 行列 LDL 数値因子化の累計 (全 iteration 合計)
+    pub ipm_factorize_us: u64,
+    /// KKT solve (predictor/corrector/Gondzio) の累計
+    pub ipm_solve_us: u64,
+    /// LDL regularization retry の累計回数 (健全性プローブ失敗含む)
+    pub ipm_reg_retries: u32,
+    /// MINRES (iterative) backend が 1 回以上使われたか
+    pub ipm_used_iterative: bool,
+
+    // ── QP IPM 経路: postsolve 段階別 ────────────────────────────────────────
+    /// postsolve_qp_with_dual_recovery (reduced → orig 空間写像)
+    pub postsolve_map_us: u64,
+    /// refine_postsolve_dual_lsq (元空間 y LSQ refine)
+    pub postsolve_lsq_us: u64,
+    /// refine_postsolve_recovery (Stage 0: SingletonRow 後退代入)
+    pub postsolve_recovery_us: u64,
+    /// refine_post_processing (Stage 1+2: primal projection / y-z refit)
+    pub postsolve_refine_us: u64,
+    /// refine_krylov_and_projection (saddle-point Krylov IR)
+    pub postsolve_krylov_ir_us: u64,
 }
 
 impl Default for SolverResult {

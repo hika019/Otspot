@@ -38,6 +38,12 @@ pub(super) enum FactorizeOutcome {
         /// 因子化で実際に採用された ρ (regularization retry で持ち上げ済みの値)。
         /// check_infeasible_or_unbounded の delta_p に必要。
         rho_used: f64,
+        /// この 1 iteration で発生した regularization retry 回数 (健全性プローブ失敗含む)。
+        retry_count: u32,
+        /// 採用された KktFactor が iterative (MINRES) backend か。
+        used_iterative: bool,
+        /// 数値 LDL 因子化の所要時間 (全 retry 合計、ナノ秒)。
+        factorize_ns: u128,
     },
     Timeout,
     Failure,
@@ -76,6 +82,11 @@ pub(super) fn factorize_kkt_with_retry(
     let mut aug_mat_opt: Option<CscMatrix> = None;
     let mut d_inv_opt: Option<Vec<f64>> = None;
 
+    // 計測変数 (常時収集、prof flag 不要)。
+    let mut retry_count: u32 = 0;
+    let mut total_factorize_ns: u128 = 0;
+    let mut used_iterative = false;
+
     for _retry in 0..LDL_REG_RETRY_MAX {
         if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
@@ -110,7 +121,7 @@ pub(super) fn factorize_kkt_with_retry(
         if use_pre_permuted && caches.aug_permuted.is_none() {
             caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
         }
-        let prof_t_factor = if ctx.prof { Some(std::time::Instant::now()) } else { None };
+        let t_factor = std::time::Instant::now();
         let factor_result = if use_pre_permuted {
             let permuted_cache = caches.aug_permuted.as_ref().unwrap();
             let pre_permuted = permuted_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry);
@@ -134,6 +145,7 @@ pub(super) fn factorize_kkt_with_retry(
                 ctx.par,
             )
         };
+        let iter_factorize_ns = t_factor.elapsed().as_nanos();
         if use_pre_permuted && caches.symbolic_cholesky.is_none() {
             if let Ok(ref f) = factor_result {
                 caches.symbolic_cholesky = f.symbolic_arc();
@@ -141,10 +153,11 @@ pub(super) fn factorize_kkt_with_retry(
         }
         match factor_result {
             Ok(f) => {
-                if let Some(t) = prof_t_factor {
+                if ctx.prof {
                     eprintln!("FACT_PROF section=factorize n={} t={:.3}ms",
-                        mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
+                        mat_for_factor.nrows, iter_factorize_ns as f64 / 1_000_000.0);
                 }
+                total_factorize_ns += iter_factorize_ns;
                 let prof_t_probe = if ctx.prof { Some(std::time::Instant::now()) } else { None };
                 // 健全性プローブ: factorize Ok でも cond(K) 大で LDL solve が Newton 方向
                 // を central path から外す病理を ||K·sol − rhs||/||rhs|| で直接弾く。
@@ -154,6 +167,7 @@ pub(super) fn factorize_kkt_with_retry(
                         &f, &mat_for_factor, ctx.r_d_pmm, ctx.r_p_pmm, ctx.s, ctx.is_eq_ext, ctx.n,
                     )
                 {
+                    retry_count += 1;
                     if rho_retry >= ldl_reg_ceiling {
                         break;
                     }
@@ -165,6 +179,7 @@ pub(super) fn factorize_kkt_with_retry(
                     eprintln!("FACT_PROF section=probe n={} t={:.3}ms",
                         mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
                 }
+                used_iterative = f.is_iterative();
                 fac_opt = Some(f);
                 aug_mat_opt = Some(mat_for_factor);
                 break;
@@ -173,6 +188,8 @@ pub(super) fn factorize_kkt_with_retry(
                 return FactorizeOutcome::Timeout;
             }
             Err(_) => {
+                total_factorize_ns += iter_factorize_ns;
+                retry_count += 1;
                 if rho_retry >= ldl_reg_ceiling {
                     break;
                 }
@@ -188,15 +205,19 @@ pub(super) fn factorize_kkt_with_retry(
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
         let aug_mat_fb = ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_fallback);
         let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
-        match factorize_kkt_with_cached_perm_par(
+        let t_fb = std::time::Instant::now();
+        let fb_result = factorize_kkt_with_cached_perm_par(
             &aug_mat_fb,
             &identity_perm,
             ctx.timeout_ctx.deadline,
             max_l_nnz_from_budget(),
             Some(ctx.n),
             ctx.par,
-        ) {
+        );
+        total_factorize_ns += t_fb.elapsed().as_nanos();
+        match fb_result {
             Ok(f) => {
+                used_iterative = f.is_iterative();
                 fac_opt = Some(f);
                 aug_mat_opt = Some(aug_mat_fb);
             }
@@ -211,6 +232,9 @@ pub(super) fn factorize_kkt_with_retry(
             aug_mat,
             d_inv: d_inv_opt,
             rho_used: rho_retry,
+            retry_count,
+            used_iterative,
+            factorize_ns: total_factorize_ns,
         },
         _ => FactorizeOutcome::Failure,
     }

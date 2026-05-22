@@ -173,6 +173,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
                     presolve_us, solve_us, postsolve_us,
+                    ..Default::default()
                 });
                 // Postsolve dfeas above PIVOT_TOL means dual-recovery cannot
                 // reconstruct the structure presolve removed. The original LP
@@ -198,6 +199,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                                 presolve_us: 0,
                                 solve_us: alt_solve_us,
                                 postsolve_us: 0,
+                                ..Default::default()
                             });
                             return alt;
                         }
