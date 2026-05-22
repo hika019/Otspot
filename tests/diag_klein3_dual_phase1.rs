@@ -83,9 +83,12 @@ fn klein2_infeasible_within_60s() {
 /// `Timeout + artificials residual → Infeasible` heuristic that was right for
 /// klein3 but flipped slow-but-feasible LPs (pilot/dfl001/ken-13/ken-18) to
 /// false-Infeasible. The heuristic was replaced by a Farkas certificate
-/// (A^T y ≤ 0, b^T y > 0); on klein3 the Big-M basis after 600K iters does
-/// not satisfy A^T y ≤ 0 within 60s budget, so the certificate fails and
-/// the solver returns Timeout (honest answer).
+/// (A^T y ≤ 0, b^T y > 0). klein3's Phase-I dual simplex cannot reach
+/// dual-feasibility within budget: ~20 structural columns stay dual-infeasible
+/// (max a_jᵀy ≈ 0.1, far above tol) even at 50× the anti-cycling cap, so the
+/// basis-derived certificate genuinely fails and the solver returns Timeout.
+/// honest Timeout > unsound Infeasible (#36 rework: the certificate-free
+/// `any_nonzero` short-circuit was removed; klein3 stays honest Timeout).
 ///
 /// Both verdicts are acceptable: Infeasible (presolve / Phase I converges in
 /// time) or Timeout (Phase I incomplete, no certificate). Optimal or Unbounded
@@ -143,12 +146,20 @@ fn klein3_infeasible_via_bland_anticycling() {
     );
 }
 
-/// klein3: presolve OFF で Big-M 直接実行の挙動を観測 (diagnostic)
+/// klein3: presolve OFF で Big-M 直接実行 (presolve に頼らない raw path)。
+/// presolve が infeasibility を捕まえないため Big-M Phase I が直接走るが、
+/// dual-feasibility 未到達で certificate fail → honest Timeout。Optimal/
+/// Unbounded は real bug。検証空白を作らないため status を必ず assert する。
 #[test]
 fn diag_klein3_no_presolve() {
     let (status, wall, iters) = run_klein_with_presolve("data/lp_problems_infeas/klein3.QPS", false);
     eprintln!("[diag] klein3 no-presolve: status={:?} wall={:.3}s iters={}", status, wall, iters);
-    // この test は assertion なし (観測のみ)
+    assert!(
+        matches!(status, SolveStatus::Infeasible | SolveStatus::Timeout),
+        "klein3 no-presolve must be Infeasible (certified) or Timeout (honest); got {:?}",
+        status
+    );
+    assert!(wall < TIMEOUT_SEC, "klein3 no-presolve wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
 /// LP cold-start (Ge/Eq) で `solve_dual_advanced` は

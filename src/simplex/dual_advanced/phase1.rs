@@ -572,11 +572,8 @@ pub(crate) fn big_m_cold_start(
             return SolverResult::numerical_error();
         }
         SimplexOutcome::Optimal(_, _) => {
-            // Recompute x_B = B^{-1} b to flush numerical drift accumulated
-            // during Phase I cycling (Maros §6 numerical hygiene). After Bland
-            // cycling, x_B values can be near-zero due to cancellation even
-            // when the true value is large; a fresh factorization reveals the
-            // true state of the basis (catches klein3-class infeasibility).
+            // Flush numerical drift accumulated during Phase I cycling by
+            // recomputing x_B = B^{-1} b before Phase II (Maros §6 hygiene).
             if let Ok(mut bm) = LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
                 let mut rhs = SparseVec::from_dense(b);
                 bm.ftran(&mut rhs);
@@ -584,22 +581,18 @@ pub(crate) fn big_m_cold_start(
                 x_b.copy_from_slice(&fresh);
             }
 
-            // Check for artificials in basis with non-zero value after recompute.
-            // These indicate true infeasibility (the artificial could not be
-            // driven to zero). Also run Farkas for zero-value degenerate
-            // artificials that may still certify infeasibility.
+            // Infeasibility is declared ONLY via a verified Farkas certificate
+            // (A^T y ≤ tol ∧ b^T y > tol). A residual artificial in the basis
+            // is NOT a proof on its own: that heuristic flips slow-but-feasible
+            // LPs (pilot/dfl001/ken) to false-Infeasible (#37/#43). When the
+            // certificate fails, fall through to Phase II.
             let any_artificial_in_basis = (0..m).any(|i| basis_aug[i] >= n_total);
-            if any_artificial_in_basis {
-                let any_nonzero = (0..m).any(|i| {
-                    basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
-                });
-                if any_nonzero
-                    || farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
-                {
-                    let mut r = SolverResult::infeasible();
-                    r.iterations = total_iters;
-                    return r;
-                }
+            if any_artificial_in_basis
+                && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
+            {
+                let mut r = SolverResult::infeasible();
+                r.iterations = total_iters;
+                return r;
             }
         }
     }
