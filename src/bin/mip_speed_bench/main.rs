@@ -50,18 +50,33 @@ struct Row {
     pruned: usize,
     wall_ms: f64,
     timeout_hit: bool,
+    // per-node cost breakdown
+    relax_total_ms: f64,
+    relax_root_ms: f64,
+    relax_desc_ms: f64,
+    relax_optimal_ms: f64,
+    relax_infeasible_ms: f64,
+    lp_presolve_us: u64,
+    lp_solve_us: u64,
+    lp_postsolve_us: u64,
+    bounds_bytes_per_node: usize,
 }
 
 impl Row {
     fn csv_header() -> &'static str {
         "problem_type,n,m,n_int,int_ratio,density,seed,\
          status,objective,nodes_processed,incumbent_updates,\
-         max_depth_seen,pruned,wall_ms,timeout_hit"
+         max_depth_seen,pruned,wall_ms,timeout_hit,\
+         relax_total_ms,relax_root_ms,relax_desc_ms,\
+         relax_optimal_ms,relax_infeasible_ms,\
+         lp_presolve_us,lp_solve_us,lp_postsolve_us,\
+         bounds_bytes_per_node"
     }
 
     fn csv_line(&self) -> String {
         format!(
-            "{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{:.1},{}",
+            "{},{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{:.1},{},\
+             {:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{}",
             self.problem_type,
             self.n,
             self.m,
@@ -77,6 +92,15 @@ impl Row {
             self.pruned,
             self.wall_ms,
             self.timeout_hit,
+            self.relax_total_ms,
+            self.relax_root_ms,
+            self.relax_desc_ms,
+            self.relax_optimal_ms,
+            self.relax_infeasible_ms,
+            self.lp_presolve_us,
+            self.lp_solve_us,
+            self.lp_postsolve_us,
+            self.bounds_bytes_per_node,
         )
     }
 }
@@ -117,6 +141,15 @@ fn run_milp(problem: &MilpProblem, opts: &SolverOptions, cfg: &MipConfig, timeou
         pruned: stats.pruned,
         wall_ms,
         timeout_hit,
+        relax_total_ms: stats.relaxation_time_total_ms,
+        relax_root_ms: stats.relaxation_time_root_ms,
+        relax_desc_ms: stats.relaxation_time_desc_ms,
+        relax_optimal_ms: stats.relaxation_time_optimal_ms,
+        relax_infeasible_ms: stats.relaxation_time_infeasible_ms,
+        lp_presolve_us: stats.lp_presolve_us_total,
+        lp_solve_us: stats.lp_solve_us_total,
+        lp_postsolve_us: stats.lp_postsolve_us_total,
+        bounds_bytes_per_node: stats.approx_bounds_bytes_per_node,
     }
 }
 
@@ -152,6 +185,15 @@ fn run_miqp(problem: &MiqpProblem, opts: &SolverOptions, cfg: &MipConfig, timeou
         pruned: stats.pruned,
         wall_ms,
         timeout_hit,
+        relax_total_ms: stats.relaxation_time_total_ms,
+        relax_root_ms: stats.relaxation_time_root_ms,
+        relax_desc_ms: stats.relaxation_time_desc_ms,
+        relax_optimal_ms: stats.relaxation_time_optimal_ms,
+        relax_infeasible_ms: stats.relaxation_time_infeasible_ms,
+        lp_presolve_us: stats.lp_presolve_us_total,
+        lp_solve_us: stats.lp_solve_us_total,
+        lp_postsolve_us: stats.lp_postsolve_us_total,
+        bounds_bytes_per_node: stats.approx_bounds_bytes_per_node,
     }
 }
 
