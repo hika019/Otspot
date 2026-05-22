@@ -120,7 +120,7 @@ Fine-tune solver behavior:
 ```rust
 use otspot::SolverOptions;
 use otspot::problem::LpProblem;
-use otspot::simplex;
+use otspot::solve_with;
 
 let opts = SolverOptions {
     primal_tol: 1e-8,   // optimality / feasibility tolerance
@@ -129,17 +129,17 @@ let opts = SolverOptions {
     ..Default::default()
 };
 
-let result = simplex::solve_with(&problem, &opts);
+let result = solve_with(&problem, &opts);
 ```
 
 ### Dual solution
 
-The low-level `simplex::solve` and `simplex::solve_with` return a `SolverResult` with full dual information:
+The `solve` and `solve_with` functions return a `SolverResult` with full dual information:
 
 ```rust
-use otspot::problem::SolverResult;
+use otspot::{solve, problem::SolverResult};
 
-let result: SolverResult = simplex::solve(&problem);
+let result: SolverResult = solve(&problem);
 println!("primal:        {:?}", result.solution);
 println!("dual (shadow): {:?}", result.dual_solution);
 println!("reduced costs: {:?}", result.reduced_costs);
@@ -195,7 +195,7 @@ For performance-critical applications, build the constraint matrix directly in C
 ```rust
 use otspot::problem::LpProblem;
 use otspot::sparse::CscMatrix;
-use otspot::simplex;
+use otspot::solve;
 
 // minimize  -x1 - x2
 // s.t.       x1 + x2 <= 4
@@ -213,7 +213,7 @@ let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 2).unwrap();
 let b = vec![4.0, 3.0, 3.0];
 
 let problem = LpProblem::new(c, a, b).unwrap();
-let result = simplex::solve(&problem);
+let result = solve(&problem);
 
 println!("status:    {}", result.status);    // Optimal
 println!("objective: {}", result.objective);  // -4
@@ -227,10 +227,10 @@ Read an LP from an MPS file:
 ```rust
 use std::path::Path;
 use otspot::io::mps;
-use otspot::simplex;
+use otspot::solve;
 
 let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS parse error");
-let result = simplex::solve(&prob);
+let result = solve(&prob);
 println!("status: {}", result.status);
 ```
 
