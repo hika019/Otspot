@@ -10,6 +10,27 @@ repository = "https://github.com/hika019/otspot"
 homepage = "https://github.com/hika019/otspot"
 categories = ["science", "algorithms", "mathematics"]
 
+# crates.io 公開パッケージはライブラリのみ。data/ 等は .gitignore で自動除外。
+# 追加で tracked の内部成果物 (bin / 統合テスト / benches / examples / scripts /
+# インラインテスト / dev 設定) を除外する。
+exclude = [
+    "/src/bin",
+    "/src/test_kkt.rs",
+    "/tests",
+    "/benches",
+    "/examples",
+    "/scripts",
+    "/data",
+    "/.config",
+    "/CLAUDE.md",
+    "/Dockerfile.dev",
+    "/.dockerignore",
+    "/cspell.json",
+    "**/tests",
+    "**/tests.rs",
+    "**/tests_*.rs",
+]
+
 [features]
 default = []
 # `parallel` 機能フラグは後方互換のため残置 (no-op)。rayon は必須依存に昇格
