@@ -113,34 +113,40 @@ let result = model.solve().unwrap();
 println!("max revenue = {}", result.objective());
 ```
 
-### SolverOptions
+### Tolerance and options
 
-Fine-tune solver behavior:
+Set the convergence tolerance (eps) and other common knobs directly on the model. `Tolerance`
+has presets `High` (1e-8), `Medium` (1e-6, default) and `Fast`, plus `Custom(f64)`:
+
+```rust
+use otspot::Tolerance;
+
+model.set_tolerance(Tolerance::Custom(1e-8)); // eps = 1e-8
+model.set_presolve(true);                      // presolve on/off (default: on)
+model.set_timeout(60.0);                       // wall-clock limit, seconds
+```
+
+For fine-grained control, the low-level `solve_with` takes a full `SolverOptions`:
 
 ```rust
 use otspot::SolverOptions;
-use otspot::problem::LpProblem;
 use otspot::solve_with;
 
 let opts = SolverOptions {
-    primal_tol: 1e-8,   // optimality / feasibility tolerance
+    primal_tol: 1e-8,   // LP simplex optimality / feasibility tolerance
     max_etas: 50,       // LU refactorization threshold (0 = auto)
     clamp_tol: 1e-14,   // solution micro-value clamp
     ..Default::default()
 };
-
-let result = solve_with(&problem, &opts);
+let result = solve_with(&problem, &opts); // problem: &LpProblem
 ```
 
 ### Dual solution
 
-The `solve` and `solve_with` functions return a `SolverResult` with full dual information:
+Alongside the primal solution, `model.solve()` returns dual values, reduced costs and constraint slacks (each `Option<Vec<f64>>`):
 
 ```rust
-use otspot::{solve, problem::SolverResult};
-
-let result: SolverResult = solve(&problem);
-println!("primal:        {:?}", result.solution);
+let result = model.solve().unwrap();
 println!("dual (shadow): {:?}", result.dual_solution);
 println!("reduced costs: {:?}", result.reduced_costs);
 println!("slacks:        {:?}", result.slack);
@@ -148,45 +154,39 @@ println!("slacks:        {:?}", result.slack);
 
 ### Quadratic programming (QP)
 
-Solve a QP with the `solve_qp` API:
+QP uses the same modeling API as LP — just add a quadratic objective. Set it with the
+`set_diagonal_q` shorthand (or `set_quadratic_objective` for a full `CscMatrix`). The objective
+follows the "1/2" convention, minimize ½·xᵀQx + cᵀx, where the linear part c comes from
+`minimize` / `maximize`.
 
 ```rust
-use otspot::qp::{solve_qp, QpProblem};
-use otspot::sparse::CscMatrix;
+use otspot::model::{constraint, Model};
 
-// min  x^2 + y^2
+// min  x² + y²        (= ½·xᵀQx with Q = diag(2, 2))
 // s.t. x + y >= 1
-// (with the "1/2" convention: Q = [[2,0],[0,2]], min 1/2 x^T Q x)
 fn main() {
-    let q = CscMatrix::from_triplets(
-        &[0, 1], &[0, 1], &[2.0, 2.0], 2, 2
-    ).unwrap();
-    let c = vec![0.0, 0.0];
+    let mut model = Model::new("qp");
+    let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
+    let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
 
-    // x + y >= 1  ->  -x - y <= -1  (Ax <= b form)
-    let a = CscMatrix::from_triplets(
-        &[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2
-    ).unwrap();
-    let b = vec![-1.0];
-    let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
+    model.add_constraint(constraint!((x + y) >= 1.0));
+    model.set_diagonal_q(&[2.0, 2.0]); // Q = diag(2, 2)
+    model.minimize(0.0 * x + 0.0 * y); // linear part c = 0
 
-    let problem = QpProblem::new(q, c, a, b, bounds).unwrap();
-    let result = solve_qp(&problem);
-
-    println!("status:    {:?}", result.status);
-    println!("solution:  {:?}", result.solution);   // ~ [0.5, 0.5]
-    println!("objective: {:.4}", result.objective); // ~ 0.5
+    let result = model.solve().unwrap();
+    println!("objective = {:.4}", result.objective());
+    println!("x = {:.4}, y = {:.4}", result[x], result[y]);
 }
 ```
 
 **Output:**
 ```
-status:    Optimal
-solution:  [0.5, 0.5]
-objective: 0.5000
+objective = 0.5000
+x = 0.5000, y = 0.5000
 ```
 
-For warm-starts across SQP iterations use `solve_qp_warm` (it carries over the previous active set to speed up convergence).
+For direct matrix input a low-level `qp::solve_qp` / `QpProblem` API (taking Q, c, A, b, bounds as
+arrays) is also available; `solve_qp_warm` carries the previous active set across SQP iterations.
 
 ## Advanced
 
