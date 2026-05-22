@@ -253,14 +253,14 @@ from *optimal*). For infeasible / unbounded sets the metric is a correct certifi
 | Problem type | Set | # | @ 1e-6 | @ 1e-8 |
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 106 optimal |
-| Convex QP | Maros–Mészáros | 138 | 128 optimal, 7 valid | 123 optimal, 4 valid |
+| Convex QP | Maros–Mészáros | 138 | 129 optimal, 7 valid | 124 optimal, 4 valid |
 | Infeasible LP | Netlib | 29 | 28 certified¹ | 28 certified¹ |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 ¹ One instance unresolved (`klein3`: the simplex stalls and is cut off).
 
-The `1e-6` QP misses are `QBORE3D` (dual residual stalls at 7.5e-4) and the `LISWET` family
-(`LISWET9`/`LISWET12`). The LISWET problems are projections onto the cone of convex sequences:
+The remaining `1e-6` QP misses are the `LISWET` family (`LISWET9`/`LISWET12`), projections onto the
+cone of convex sequences:
 their constraint normal matrix is the discrete biharmonic operator (cond ≈ n⁴ ≈ 1e15 at
 n = 10⁴) and the optimal duals are huge (|y|∞ ≈ 1e5–1e6), making the objective hypersensitive
 to primal residuals that f64 interior-point arithmetic cannot reduce below ~1e-6. otspot returns
