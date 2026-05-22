@@ -4,10 +4,11 @@
 //! 疎LU分解 (`faer::sparse::linalg::lu`) を利用する。faer LU は COLAMD column
 //! ordering と partial pivoting で fill-in を抑え、Markowitz より高速。
 //!
-//! 設計選択: Stage 1 として symbolic factorize に
-//! `SupernodalThreshold::FORCE_SIMPLICIAL` を渡し simplicial 経路を強制する。
-//! supernodal は Stage 2 で解放予定。ETA 機構 (`src/basis/eta.rs`) は LU の上に
-//! 被せる更新層で、本 module の変更とは独立に動作する。
+//! 設計選択: symbolic factorize に `SupernodalThreshold::FORCE_SIMPLICIAL` を渡し
+//! simplicial 経路を恒久的に強制する。faer 0.24.0 の AUTO ヒューリスティックは
+//! 構造的特異基底で usize underflow を起こす (`factorize_timed` 内コメント参照) ため、
+//! supernodal 自動選択は採用しない。ETA 機構 (`src/basis/eta.rs`) は LU の上に被せる
+//! 更新層で、本 module の変更とは独立に動作する。
 
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
@@ -62,9 +63,11 @@ impl LuFactorization {
         // (faer 0.24.0 lu.rs:2245 `h_col_counts[parent] += h_col_counts[j] - 1`)
         // は構造的特異な基底 (空行を持つ m×m など) で usize 減算 underflow を起こし、
         // debug では panic、release では wrap して supernodal 判定を汚染する。
-        // FORCE_SIMPLICIAL は当該ブロック全体をスキップするため両方を根絶し、
-        // 本 module 設計の "simplicial 経路を強制利用" にも一致する。構造的特異な
+        // FORCE_SIMPLICIAL は当該ブロックをスキップして両方を根絶する。構造的特異な
         // 基底は numeric 段で SymbolicSingular として検出され SingularBasis に写る。
+        // なお AUTO とは FP rounding が異なるため退化問題では simplex の pivot 系列が
+        // 変わり得る (当該特異基底に到達しない経路を辿る場合もある) が、LP corpus
+        // (feasible 109 / infeasible 29) で status・obj 不変を実測済み。
         let symbolic_params = LuSymbolicParams {
             supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
             ..Default::default()
