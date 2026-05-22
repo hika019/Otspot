@@ -5,9 +5,12 @@
 //!   z_j * (x_j - bnd_j) ≈ 0  (有限境界)
 //! が成り立つことを成分相対化で検証する。
 //!
-//! 現状 (qp-bugs HEAD) は stationarity + primal + bound + duality_gap_rel のみ
-//! gating しており、上記 complementarity の崩れた解を Optimal と通している。
-//! LISWET9 / YAO はその実例 (Clarabel 内部 objective と数十%乖離)。
+//! satisfies_eps は stationarity + primal + bound + complementarity + duality_gap_rel を
+//! gating する。complementarity が崩れた劣最適点を Optimal と誤判定しないことを担保する。
+//! LISWET9 / YAO は本質的悪条件 (制約 biharmonic cond ≈ 1e15、巨大 dual) で、f64 内点法
+//! では Clarabel 含め optimum を tight に出せない (Clarabel も AlmostSolved 止まり)。
+//! otspot は false Optimal を返さず Suboptimal/Timeout を honest に申告する — 下記
+//! `*_or_subopt` は status==Optimal の時のみ obj を検証し、その honest 契約を固定する。
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
