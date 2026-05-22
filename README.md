@@ -257,8 +257,9 @@ The `1e-6` QP misses are `QBORE3D` (dual residual stalls at 7.5e-4) and the `LIS
 their constraint normal matrix is the discrete biharmonic operator (cond ≈ n⁴ ≈ 1e15 at
 n = 10⁴) and the optimal duals are huge (|y|∞ ≈ 1e5–1e6), so the objective is hypersensitive
 to the residual primal infeasibility that no f64 interior-point method can drive below ~1e-6
-here. This is *not* an LDLᵀ-precision floor (double-double iterative refinement does not help);
-it is the conditioning of the active-constraint system. Even Clarabel at tol = 1e-12 only reaches
+here. This is *not* an LDLᵀ-precision floor — improving factorization precision alone (e.g. via
+double-double) would not overcome the fundamental conditioning of the active-constraint system;
+it is the conditioning itself that prevents convergence. Even Clarabel at tol = 1e-12 only reaches
 `AlmostSolved` (max constraint violation ≈ 2e-6) on these, so the reference objective is itself
 uncertified — our solver is in fact slightly *more* feasible there. The solver reports these
 honestly as `SuboptimalSolution`/`Timeout`, never a false `Optimal`. At the tighter `1e-8`, more
