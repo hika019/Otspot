@@ -9,8 +9,8 @@
 //! The unconstrained optimum is (2, 2); the constraint x + y <= 3 is active at
 //! the solution.
 
-use solver::model::{constraint, Model};
-use solver::CscMatrix;
+use otspot::model::{constraint, Model};
+use otspot::CscMatrix;
 
 fn main() {
     let mut model = Model::new("example_qp");

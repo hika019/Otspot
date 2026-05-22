@@ -4,9 +4,9 @@
 //! 計算した既知の正解を直接 assert することで、両経路に共通するバグも検出する。
 //! QP は `min ½ xᵀQx + cᵀx` 規約 (Model API と一致)。
 
-use solver::constraint;
-use solver::model::{Model, ModelError, ModelResult, SolveError};
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::{Model, ModelError, ModelResult, SolveError};
+use otspot::sparse::CscMatrix;
 
 const INF: f64 = f64::INFINITY;
 const NEG_INF: f64 = f64::NEG_INFINITY;

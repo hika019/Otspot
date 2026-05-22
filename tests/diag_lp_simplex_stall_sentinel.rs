@@ -24,11 +24,11 @@
 
 use std::path::Path;
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::ConstraintType;
-use solver::qp::QpProblem;
-use solver::{solve_qp_with, SolveStatus};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::ConstraintType;
+use otspot::qp::QpProblem;
+use otspot::{solve_qp_with, SolveStatus};
 
 const BUDGET_SECS: f64 = 180.0;
 /// Short budget for the synthetic case: 30s is plenty for IPM (≈3s observed)
@@ -111,7 +111,7 @@ fn lp_simplex_stall_real_netlib_lps_converge() {
 /// route is exercised on data outside the fixture set.
 #[test]
 fn lp_simplex_stall_synthetic_large_lp_converges() {
-    use solver::sparse::CscMatrix;
+    use otspot::sparse::CscMatrix;
 
     let m: usize = 2_500;
     let n: usize = 3_500;

@@ -18,10 +18,10 @@
 //!  - diag indefinite (concave) n=2
 //!  - diag indefinite (concave) n=3
 
-use solver::options::{MultiStartConfig, StartStrategy};
-use solver::qp::{solve_qp_multistart, solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::{SolveStatus, SolverOptions};
+use otspot::options::{MultiStartConfig, StartStrategy};
+use otspot::qp::{solve_qp_multistart, solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::{SolveStatus, SolverOptions};
 
 /// 改善幅 5.0: 最小 problem (bilinear bnd=3, gap=9) でも余裕で超える。
 /// noise (eps=1e-6 程度) と比較して 6 桁離れ、no-op 不検出を確実に防ぐ。
@@ -245,7 +245,7 @@ fn api_solver_options_threads_round_trip() {
 fn api_model_set_threads_propagates_to_solver_options() {
     // Model 経由で set_threads(N) → 内部 SolverOptions.threads = N が伝播することを
     // observable に確認する。直接 SolverOptions を取れないので solve 経路で実証する。
-    use solver::model::{Expression, Model};
+    use otspot::model::{Expression, Model};
     let mut m = Model::new("threads_round_trip");
     let x = m.add_var("x", 0.0, 1.0);
     m.minimize(x);
@@ -260,7 +260,7 @@ fn api_model_set_threads_propagates_to_solver_options() {
 fn api_model_set_threads_propagates_to_qp_solve() {
     // Model 経由で set_threads(N) → QP single solve path に伝播することを
     // observable に確認 (LP path 同等 test の QP 版、漏れ穴埋め)。
-    use solver::model::{Expression, Model};
+    use otspot::model::{Expression, Model};
     let mut m = Model::new("qp_threads_round_trip");
     let x = m.add_var("x", -1.0, 1.0);
     let y = m.add_var("y", -1.0, 1.0);
@@ -278,7 +278,7 @@ fn api_model_set_threads_propagates_to_qp_solve() {
 #[test]
 fn api_model_set_threads_clamps_zero_to_one() {
     // 0 は invalid (LCG/ThreadPool 双方で fatal)、Model::set_threads 入口で 1 に補正。
-    use solver::model::Model;
+    use otspot::model::Model;
     let mut m = Model::new("threads_zero_clamp");
     let _x = m.add_var("x", 0.0, 1.0);
     m.set_threads(0);

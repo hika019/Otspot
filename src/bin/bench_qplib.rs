@@ -16,17 +16,17 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use solver::bench_utils::{
+use otspot::bench_utils::{
     check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
     load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult,
 };
-use solver::io::qplib::{parse_qplib, QplibError, QplibProblem};
-use solver::options::SolverOptions;
-use solver::{run_qp_presolve_phase1, run_qp_presolve_phase2};
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
-use solver::{solve_qp_global, GlobalOptimizationConfig};
-use solver::QpProblem;
+use otspot::io::qplib::{parse_qplib, QplibError, QplibProblem};
+use otspot::options::SolverOptions;
+use otspot::{run_qp_presolve_phase1, run_qp_presolve_phase2};
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
+use otspot::{solve_qp_global, GlobalOptimizationConfig};
+use otspot::QpProblem;
 
 /// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
 const KKT_FAIL_EPS: f64 = 1e-4;
@@ -351,10 +351,10 @@ fn main() {
         // SuboptimalSolution / LocallyOptimal で有効解 + 有限 obj を持つ result を Optimal に
         // 格上げし baseline obj 照合に流す。Timeout / MaxIterations / NumericalError /
         // NonConvex は格上げ対象外 (収束未達 status を honest に報告する)。
-        let result = solver::bench_utils::apply_bench_status_promotion(
+        let result = otspot::bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,
-            solver::bench_utils::BenchPromotionPolicy::BenchQplib,
+            otspot::bench_utils::BenchPromotionPolicy::BenchQplib,
         );
 
         // Optimal/LocallyOptimal/Nonconvex*/Suboptimal で有効解を持つ result に KKT 残差を計測。

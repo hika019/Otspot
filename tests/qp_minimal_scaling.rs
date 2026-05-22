@@ -21,12 +21,12 @@
 //!   設計のため raw `QpProblem` を維持 (Model API 経由では非対称 Q の構築意図が
 //!   表現困難)。
 
-use solver::constraint;
-use solver::model::Model;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::Model;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_REL: f64 = 1e-4;

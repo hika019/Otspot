@@ -1,8 +1,8 @@
-//! # solver — 高性能数理最適化ソルバー
+//! # otspot — 数理最適化ソルバー
 //!
-//! 線形計画法（LP）を効率的に解くための Rust ソルバークレート。
-//! 改訂単体法（Revised Simplex）と LU 分解を核に、
-//! 高い数値精度と実用的な性能を実現する。
+//! 線形計画法（LP）・二次計画法（QP）と混合整数問題（MILP / MIQP）を解く Rust ソルバークレート。
+//! LP は改訂単体法（Revised Simplex）、QP は内点法（IPM / IP-PMM）を核とし、
+//! 実行不可能・非有界の判定と完全な主双対情報の出力に対応する。
 //!
 //! ## 主要モジュール
 //!
@@ -20,13 +20,13 @@
 //!
 //! ```rust,no_run
 //! use std::path::Path;
-//! use solver::io::mps;
+//! use otspot::io::mps;
 //!
 //! // MPS ファイルを読み込む
 //! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
 //!
 //! // 単体法で求解
-//! let result = solver::solve(&prob);
+//! let result = otspot::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
 //!

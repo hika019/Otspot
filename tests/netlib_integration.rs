@@ -1,10 +1,10 @@
 //! Integration tests: Parse Netlib MPS files and verify problem dimensions + solving
-use solver::io::mps::parse_mps_file;
-use solver::io::qps::parse_qps;
-use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use solver::qp::solve_qp_with;
-use solver::{solve, solve_with};
+use otspot::io::mps::parse_mps_file;
+use otspot::io::qps::parse_qps;
+use otspot::options::{SimplexMethod, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use otspot::qp::solve_qp_with;
+use otspot::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
 
@@ -585,7 +585,7 @@ fn test_boyd1_direct_ipm_no_stack_overflow() {
 // ============================================================================
 
 /// Helper: compute max constraint violation for a given solution and problem.
-fn max_constraint_violation(x: &[f64], prob: &solver::problem::LpProblem) -> f64 {
+fn max_constraint_violation(x: &[f64], prob: &otspot::problem::LpProblem) -> f64 {
     let a = &prob.a;
     let mut ax = vec![0.0f64; prob.num_constraints];
     for col in 0..prob.num_vars {

@@ -31,12 +31,12 @@
 //! - `kkt_sign_convention_mini_qp`: 解析解持ち convex mini QP で kkt < 1e-6 を
 //!   assert。符号規約 (`lb_dual / ub_dual / y / Q*x` の組合せ) を独立検証。
 
-use solver::bench_utils::compute_qp_kkt_max;
-use solver::io::qplib::{parse_qplib, QplibProblem};
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::kkt_resid::{self, f64_impl};
-use solver::qp::{solve_qp_with, QpProblem};
+use otspot::bench_utils::compute_qp_kkt_max;
+use otspot::io::qplib::{parse_qplib, QplibProblem};
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::kkt_resid::{self, f64_impl};
+use otspot::qp::{solve_qp_with, QpProblem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -435,7 +435,7 @@ fn kkt_consistency_with_bench_utils() {
 /// 検出力本体は `kkt_perturbation_sentinel` で担保。本 test は規約 sanity。
 #[test]
 fn kkt_sign_convention_mini_qp() {
-    use solver::sparse::CscMatrix;
+    use otspot::sparse::CscMatrix;
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     let c = vec![-2.0];
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();

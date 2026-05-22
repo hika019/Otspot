@@ -2,10 +2,10 @@
 //! optimum within `REL_TOL`. Known objective is taken from
 //! `data/baseline_objectives/netlib_lp_canary.csv`.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
 

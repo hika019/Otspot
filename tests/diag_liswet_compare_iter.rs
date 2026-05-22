@@ -1,8 +1,8 @@
 //! LISWET1 (converge OK) vs LISWET9 (wrong basin) の iter 単位 trace 比較 diag。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::qp::solve_qp_with;
 
 fn solve_with_trace(name: &str) {
     let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));

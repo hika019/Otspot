@@ -4,10 +4,10 @@
 //! 近傍で highly degenerate。Big-M Phase I の false Infeasible flip 防止 +
 //! Phase II が known optimum 近傍に到達することを guard する。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 
 const D6CUBE_KNOWN_OPT: f64 = 3.15491666666e+02;

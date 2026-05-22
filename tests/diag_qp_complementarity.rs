@@ -9,11 +9,11 @@
 //! gating しており、上記 complementarity の崩れた解を Optimal と通している。
 //! LISWET9 / YAO はその実例 (Clarabel 内部 objective と数十%乖離)。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus, SolverResult};
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus, SolverResult};
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 
 fn recompute_obj(prob: &QpProblem, x: &[f64]) -> f64 {
     let qx = prob.q.mat_vec_mul(x).expect("Qx");

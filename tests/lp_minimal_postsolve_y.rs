@@ -27,9 +27,9 @@
 //!   目的関数値の三本柱を assert。LP path で拡張済の
 //!   `ModelResult.dual_solution` / `reduced_costs` 経由で KKT 検証する。
 
-use solver::model::{Expression, Model, Variable, constraint};
-use solver::problem::ConstraintType;
-use solver::sparse::CscMatrix;
+use otspot::model::{Expression, Model, Variable, constraint};
+use otspot::problem::ConstraintType;
+use otspot::sparse::CscMatrix;
 
 // =============================================================================
 // Shared helpers

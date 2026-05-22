@@ -23,8 +23,8 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::io::{self, BufRead};
-use solver::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
-use solver::sparse::CscMatrix;
+use otspot::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
+use otspot::sparse::CscMatrix;
 
 const INF_THRESHOLD: f64 = 1e200;
 

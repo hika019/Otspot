@@ -8,8 +8,8 @@
 //! ソルバーは N-row RHS を problem.obj_offset として加算して報告するため、比較は
 //! exp_adjusted = netlib_ref + problem.obj_offset で補正する。
 
-use solver::options::SolverOptions;
-use solver::screening::{is_bug, load_baseline, screen_single, DEFAULT_REL_TOL, DEFAULT_TIMEOUT_SEC};
+use otspot::options::SolverOptions;
+use otspot::screening::{is_bug, load_baseline, screen_single, DEFAULT_REL_TOL, DEFAULT_TIMEOUT_SEC};
 use std::path::Path;
 
 const PROBLEMS_DIR: &str = "data/lp_problems";

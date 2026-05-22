@@ -9,10 +9,10 @@
 //!   "bounds_lb": [...], "bounds_ub": [...]  (Inf/-Inf は大きな値で表現)
 //! }
 
-use solver::io::{qplib, qps};
-use solver::problem::ConstraintType;
-use solver::qp::QpProblem;
-use solver::sparse::CscMatrix;
+use otspot::io::{qplib, qps};
+use otspot::problem::ConstraintType;
+use otspot::qp::QpProblem;
+use otspot::sparse::CscMatrix;
 use std::env;
 use std::fmt::Write;
 use std::path::Path;

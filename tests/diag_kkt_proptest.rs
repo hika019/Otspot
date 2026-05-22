@@ -46,12 +46,12 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
-use solver::bench_utils::{compute_qp_kkt_max, primal_feas_max};
-use solver::options::{GlobalOptimizationConfig, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use solver::qp::{solve_qp_global, solve_qp_with, QpProblem};
-use solver::solve_lp_with;
-use solver::sparse::CscMatrix;
+use otspot::bench_utils::{compute_qp_kkt_max, primal_feas_max};
+use otspot::options::{GlobalOptimizationConfig, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use otspot::qp::{solve_qp_global, solve_qp_with, QpProblem};
+use otspot::solve_lp_with;
+use otspot::sparse::CscMatrix;
 
 const EPS_KKT: f64 = 1e-4;
 /// 非凸 QP LocallyOptimal 状態の閾値。leaf local IPM の unscale 復元 drift で

@@ -9,7 +9,7 @@
 //!
 //! Optimal solution: x = 3, y = 0, objective = 3.
 
-use solver::model::{constraint, Model};
+use otspot::model::{constraint, Model};
 
 fn main() {
     let mut model = Model::new("example_lp");

@@ -20,11 +20,11 @@
 //! no-op path is covered. This file's role is *shape* coverage, not helper
 //! no-op coverage.
 
-use solver::bench_utils::compute_qp_kkt_max;
-use solver::options::{GlobalOptimizationConfig, SolverOptions};
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_global, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::bench_utils::compute_qp_kkt_max;
+use otspot::options::{GlobalOptimizationConfig, SolverOptions};
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::{solve_qp_global, QpProblem};
+use otspot::sparse::CscMatrix;
 
 const N: usize = 3;
 const M: usize = 3;

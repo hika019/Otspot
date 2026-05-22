@@ -13,9 +13,9 @@
 //! n=20, n=50, n=100 (variables/constraints)
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use solver::problem::{ConstraintType, LpProblem};
-use solver::solve;
-use solver::sparse::CscMatrix;
+use otspot::problem::{ConstraintType, LpProblem};
+use otspot::solve;
+use otspot::sparse::CscMatrix;
 
 /// Generate a random diagonally dominant LP problem with n variables and m constraints.
 ///

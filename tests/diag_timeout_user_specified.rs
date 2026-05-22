@@ -30,10 +30,10 @@
 //! Timeout 返却時に `wall / budget ≥ TIMEOUT_HONOR_RATIO_MIN` を assert。
 //! 修正前: 約 0.76 (RED), 修正後: 約 1.0 (GREEN)。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 

@@ -11,10 +11,10 @@
 //!
 //! 複数 data pattern: (n_starts, threads, deadline) 4 組 × indef shape 2 種 = 8 case。
 
-use solver::options::{MultiStartConfig, StartStrategy};
-use solver::qp::{solve_qp_multistart, QpProblem};
-use solver::sparse::CscMatrix;
-use solver::SolverOptions;
+use otspot::options::{MultiStartConfig, StartStrategy};
+use otspot::qp::{solve_qp_multistart, QpProblem};
+use otspot::sparse::CscMatrix;
+use otspot::SolverOptions;
 use std::time::Instant;
 
 /// 中規模 indefinite QP: n=20 で per-solve が deadline (300ms) より長くなりやすい。

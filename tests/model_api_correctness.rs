@@ -8,9 +8,9 @@
 //! - 各テストに手計算した解析解を期待値として埋め込む
 //! - 人間が読んで問題の意図と期待値の根拠が分かるようにコメントを書く
 
-use solver::model::{Model, ModelError, SolveError};
-use solver::constraint;
-use solver::sparse::CscMatrix;
+use otspot::model::{Model, ModelError, SolveError};
+use otspot::constraint;
+use otspot::sparse::CscMatrix;
 
 // ユニットテスト許容誤差。default user_eps=1e-6 に対して同じ基準を使う。
 // アルゴリズム (Simplex/IPM) による緩和は認めない: 簡単な問題で 1e-6 未達なら solver bug。

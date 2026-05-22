@@ -19,9 +19,9 @@
 //! - 全 6 test (mix1-6) を Model API で記述。
 //! - mix4/5 は `Model::set_obj_offset` (model-api-extender) を使用。
 
-use solver::constraint;
-use solver::model::Model;
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::Model;
+use otspot::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_ABS: f64 = 1e-5;

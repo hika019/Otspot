@@ -5,9 +5,9 @@
 //!
 //! 使い方: `cargo run --release --example clarabel_compare -- <path/to/file.QPS>`
 
-use solver::io::qps::parse_qps;
-use solver::QpProblem;
-use solver::problem::ConstraintType;
+use otspot::io::qps::parse_qps;
+use otspot::QpProblem;
+use otspot::problem::ConstraintType;
 use clarabel::algebra::CscMatrix as ClCsc;
 use clarabel::solver::{DefaultSolver, DefaultSettings, IPSolver, SolverStatus, SupportedConeT};
 

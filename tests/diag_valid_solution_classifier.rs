@@ -14,12 +14,12 @@
 //!
 //! TDD methodology: tests written first, FAILs confirmed, then impl, then PASSes.
 
-use solver::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus, SolverResult};
-use solver::qp::QpProblem;
-use solver::sparse::CscMatrix;
-use solver::solve_qp_with;
+use otspot::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus, SolverResult};
+use otspot::qp::QpProblem;
+use otspot::sparse::CscMatrix;
+use otspot::solve_qp_with;
 
 // --- helper ---
 

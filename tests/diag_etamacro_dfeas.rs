@@ -1,10 +1,10 @@
 //! Regression: etamacro must reach Optimal with dfeas_rel ≤ eps at eps=1e-6.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::tolerances::{PIVOT_TOL, ZERO_TOL};
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::tolerances::{PIVOT_TOL, ZERO_TOL};
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
 

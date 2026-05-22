@@ -7,10 +7,10 @@
 //! Data files are required; missing data panics rather than skips so absence is
 //! never silently mistaken for absence of the bug.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;

@@ -1,10 +1,10 @@
 //! SolverResult.iterations が LP simplex 経路で populated されることを保証する
 //! observability regression guard。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 
 /// afiro (32×27、軽量) で簡単な解が iter > 0 を持つことを保証。

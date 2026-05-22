@@ -16,10 +16,10 @@
 //! 観測可能で、e2e で安定再現困難なため unit test 側で実証済
 //! (`crash_disabled_env_var_collapses_to_identity`)。
 
-use solver::options::{SimplexMethod, SolverOptions};
-use solver::problem::{ConstraintType, LpProblem, SolveStatus};
-use solver::solve_with;
-use solver::sparse::CscMatrix;
+use otspot::options::{SimplexMethod, SolverOptions};
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot::solve_with;
+use otspot::sparse::CscMatrix;
 
 /// LCG (Numerical Recipes) deterministic generator (rand dep 不要)。
 struct Lcg(u64);

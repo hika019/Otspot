@@ -17,8 +17,8 @@
 //! - 片側 bound の n_lb/n_ub カウントは bounds.iter().filter(...) で計算する
 //!   ため、INF/NEG_INF 判定が誤ると配列長ずれ。
 
-use solver::model::Model;
-use solver::sparse::CscMatrix;
+use otspot::model::Model;
+use otspot::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_ABS: f64 = 1e-5;

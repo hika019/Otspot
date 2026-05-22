@@ -5,9 +5,9 @@
 //! budget を全消費していた。cleanup stagnant 時の LSQ skip が効いていれば
 //! postsolve は 1s 未満に収まる。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::qp::solve_qp_with;
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::qp::solve_qp_with;
 use std::path::Path;
 use std::time::Instant;
 

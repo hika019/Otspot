@@ -25,12 +25,12 @@
 //!   を assert する設計のため raw `QpProblem` を維持。
 //!   Model API は MaxIterations を `Timeout` 等に隠蔽するため fidelity が崩れる。
 
-use solver::constraint;
-use solver::model::{Model, ModelError, SolveError};
-use solver::options::SolverOptions;
-use solver::problem::{ConstraintType, SolveStatus};
-use solver::qp::{solve_qp_with, QpProblem};
-use solver::sparse::CscMatrix;
+use otspot::constraint;
+use otspot::model::{Model, ModelError, SolveError};
+use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus};
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::sparse::CscMatrix;
 
 const MINI_TIMEOUT_SECS: f64 = 5.0;
 

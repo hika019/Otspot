@@ -1,10 +1,10 @@
 //! Regression: greenbea must reach Optimal with dfeas_rel ≤ eps at eps=1e-6.
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::{LpProblem, SolveStatus};
-use solver::tolerances::{PIVOT_TOL, ZERO_TOL};
-use solver::{solve_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::tolerances::{PIVOT_TOL, ZERO_TOL};
+use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
 
@@ -77,7 +77,7 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
     dfeas_rel
 }
 
-fn run_once_with_timeout(label: &str, presolve_on: bool, timeout_s: f64) -> (SolveStatus, f64, f64, f64, Option<solver::problem::TimingBreakdown>) {
+fn run_once_with_timeout(label: &str, presolve_on: bool, timeout_s: f64) -> (SolveStatus, f64, f64, f64, Option<otspot::problem::TimingBreakdown>) {
     let path = locate_greenbea();
     let qp = parse_qps(path).expect("parse greenbea");
     let lp = make_lp(&qp);

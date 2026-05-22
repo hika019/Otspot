@@ -9,8 +9,8 @@
 //! Test problems: afiro, sc50a, sc50b (existing Netlib test problems)
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use solver::io::mps::parse_mps_file;
-use solver::solve;
+use otspot::io::mps::parse_mps_file;
+use otspot::solve;
 use std::path::Path;
 
 /// Benchmark solving afiro.mps (27 constraints, 32 variables)

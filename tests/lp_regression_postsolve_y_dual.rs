@@ -1,10 +1,10 @@
 //! postsolve 後の (x, y, rc) が LP KKT を満たすことを複数問題で assert する
 //! regression guard。perold は postsolve dual 復元の代表 canary。
 
-use solver::io::qps::parse_qps;
-use solver::options::SolverOptions;
-use solver::problem::SolveStatus;
-use solver::qp::{solve_qp_with, QpProblem};
+use otspot::io::qps::parse_qps;
+use otspot::options::SolverOptions;
+use otspot::problem::SolveStatus;
+use otspot::qp::{solve_qp_with, QpProblem};
 use std::path::Path;
 
 /// LP/QP dual feasibility 相対残差 (`viol_j = max(0, -rc_j)`、bound 非考慮版)。
