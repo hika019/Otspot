@@ -51,6 +51,10 @@ proptest = "1.10.0"
 clarabel = "0.11"
 tempfile = "3"
 
+[[bin]]
+name = "mip_speed_bench"
+path = "src/bin/mip_speed_bench/main.rs"
+
 [[bench]]
 name = "scaling_pricing"
 harness = false
