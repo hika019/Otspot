@@ -9,7 +9,10 @@ use crate::qp::ipm_solver::kkt::{
 use crate::qp::ipm_solver::outcome::{IpmOutcome, ProblemView};
 use crate::qp::problem::QpProblem;
 
-/// factorize 時間予算ガード。LDL 因子化が分単位かかる規模では skip。
+/// primal projection の LDL 因子化に対する時間予算ガード。memory budget は factorize
+/// 経路が別途見る (max_l_nnz_from_budget) が、予算内に収まっても巨大問題では
+/// 因子化自体が分単位かかり deadline を空費する。これは「分単位 factorize を
+/// post-processing 段で行うか否か」の時間 proxy ガード (n+m で判定)。
 const PRIMAL_PROJECTION_SIZE_LIMIT: usize = 50_000;
 const REFIT_PROGRESS_EPS: f64 = 1e-12;
 const IRLS_INNER_MAX_ITERS: usize = 30;

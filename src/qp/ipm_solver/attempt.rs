@@ -319,7 +319,10 @@ fn solve_ipm_with_runner(
     let total_deadline = opts.deadline;
     let user_eps = opts.ipm_eps();
 
-    // 50k 超の巨大問題は presolve hot loop が deadline を食い切るため skip。
+    // presolve hot loop は deadline を見る (qp_transforms/driver.rs) が、巨大問題では
+    // presolve だけで deadline 予算を食い切り IPM が走れなくなる。この上限は
+    // 「presolve に予算を配分するか IPM に回すか」の予算配分ガード (時間予算 proxy)。
+    // n か m のどちらかが上限超なら presolve を skip し IPM に予算を残す。
     const PRESOLVE_SIZE_LIMIT: usize = 50_000;
     let presolve_result = if opts.presolve
         && problem.num_vars <= PRESOLVE_SIZE_LIMIT

@@ -77,10 +77,12 @@ pub(crate) fn solve_with_iterative_refinement(
     max_iters: usize,
     deadline: Option<std::time::Instant>,
 ) {
-    let n = sol.len();
-    debug_assert_eq!(rhs.len(), n);
-    debug_assert_eq!(aug_mat.nrows, n);
-    debug_assert_eq!(aug_mat.ncols, n);
+    // aug_dim = augmented KKT 次元 = n_vars + m_ext (呼び出し側で sol/rhs を
+    // total = n + m_ext で確保するため sol.len() がそのまま拡大系の次元)。
+    let aug_dim = sol.len();
+    debug_assert_eq!(rhs.len(), aug_dim);
+    debug_assert_eq!(aug_mat.nrows, aug_dim);
+    debug_assert_eq!(aug_mat.ncols, aug_dim);
 
     fac.solve_with_deadline(rhs, sol, deadline);
 
@@ -98,9 +100,10 @@ pub(crate) fn solve_with_iterative_refinement(
     let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
     let max_iters = if use_dd_residual { max_iters.max(IR_MAX_ITERS_DD) } else { max_iters };
 
-    // 大型 (n+m_ext > 100k) は IR overhead が deadline を圧迫するため skip。
+    // 大型 (拡大系次元 aug_dim = n+m_ext > 100k) は IR overhead が deadline を
+    // 圧迫するため skip。aug_dim は既に m_ext を含むので別途加算不要。
     const IR_SKIP_LARGE_THRESHOLD: usize = 100_000;
-    if n > IR_SKIP_LARGE_THRESHOLD {
+    if aug_dim > IR_SKIP_LARGE_THRESHOLD {
         return;
     }
 
@@ -112,15 +115,15 @@ pub(crate) fn solve_with_iterative_refinement(
         rhs_inf * 1e-13
     };
 
-    let mut kx = vec![0.0_f64; n];
-    let mut residual = vec![0.0_f64; n];
-    let mut correction = vec![0.0_f64; n];
+    let mut kx = vec![0.0_f64; aug_dim];
+    let mut residual = vec![0.0_f64; aug_dim];
+    let mut correction = vec![0.0_f64; aug_dim];
 
     let trace_ir = std::env::var("IR_TRACE").ok().as_deref() == Some("1");
     if trace_ir {
         let sol_inf_initial = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-        eprintln!("IR_START n={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e} dd={}",
-            n, rhs_inf, sol_inf_initial, resid_skip_threshold, use_dd_residual);
+        eprintln!("IR_START aug_dim={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e} dd={}",
+            aug_dim, rhs_inf, sol_inf_initial, resid_skip_threshold, use_dd_residual);
     }
     for _ir_iter in 0..max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -142,13 +145,13 @@ pub(crate) fn solve_with_iterative_refinement(
                     }
                 }
             }
-            for i in 0..n {
+            for i in 0..aug_dim {
                 residual[i] = rhs[i] - kx[i];
             }
         }
 
         let mut resid_inf = 0.0_f64;
-        for i in 0..n {
+        for i in 0..aug_dim {
             resid_inf = resid_inf.max(residual[i].abs());
         }
         if resid_inf <= resid_skip_threshold {
@@ -179,7 +182,7 @@ pub(crate) fn solve_with_iterative_refinement(
             return;
         }
 
-        for i in 0..n {
+        for i in 0..aug_dim {
             sol[i] += correction[i];
         }
     }

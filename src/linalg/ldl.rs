@@ -539,6 +539,17 @@ pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
     factorize_with_par(mat, DEFAULT_PAR)
 }
 
+/// `factorize` の memory-budget 版。symbolic 完了後の L_nnz が `max_l_nnz` を
+/// 超える場合は numeric を試みず `WouldExceedBudget` を返す。AAT 直接法のように
+/// 入力 nnz は予算内でも fill-in で OOM し得る経路で使う (build 時の bytes 見積りは
+/// fill-in を捉えないため)。
+pub fn factorize_budget(mat: &CscMatrix, max_l_nnz: usize) -> Result<LdlFactorization, LdlError> {
+    let n = mat.nrows;
+    let (symbolic, l_values) =
+        do_numeric_factorize(mat, None, None, Some(max_l_nnz), DEFAULT_PAR)?;
+    Ok(LdlFactorization { symbolic, l_values, n, par: DEFAULT_PAR })
+}
+
 /// `factorize` の per-call parallelism 指定版。
 /// `par == Par::Seq` で既存挙動と完全互換。
 pub fn factorize_with_par(
@@ -830,6 +841,46 @@ mod tests {
         for i in 0..n {
             assert!((x[i] - b[i]).abs() < 1e-10, "x[{i}]={}", x[i]);
         }
+    }
+
+    /// `factorize_budget` must reject (without numeric work) when the symbolic
+    /// L_nnz exceeds the cap — this is the fill-in OOM guard that `build_aat`'s
+    /// byte estimate cannot see. A `max_l_nnz` of 1 is below any non-trivial L.
+    #[test]
+    fn factorize_budget_rejects_when_l_nnz_exceeds_max() {
+        let mat = upper_tri_csc(3, &[
+            (0, 0, 4.0), (0, 1, 1.0),
+            (1, 1, 3.0), (1, 2, 2.0),
+            (2, 2, 5.0),
+        ]);
+        match factorize_budget(&mat, 1) {
+            Err(LdlError::WouldExceedBudget { l_nnz, max_l_nnz }) => {
+                assert!(l_nnz > max_l_nnz, "l_nnz={l_nnz} should exceed max={max_l_nnz}");
+                assert_eq!(max_l_nnz, 1);
+            }
+            Err(e) => panic!("expected WouldExceedBudget, got Err({e:?})"),
+            Ok(_) => panic!("expected WouldExceedBudget, got Ok"),
+        }
+    }
+
+    /// Within budget, `factorize_budget` behaves like `factorize`.
+    #[test]
+    fn factorize_budget_accepts_within_budget() {
+        let mat = upper_tri_csc(3, &[
+            (0, 0, 4.0), (0, 1, 1.0),
+            (1, 1, 3.0), (1, 2, 2.0),
+            (2, 2, 5.0),
+        ]);
+        let fac = factorize_budget(&mat, 1_000_000).expect("within budget must succeed");
+        let b = [1.0f64, 2.0, 3.0];
+        let mut x = [0.0f64; 3];
+        fac.solve(&b, &mut x);
+        let ax0 = 4.0 * x[0] + 1.0 * x[1];
+        let ax1 = 1.0 * x[0] + 3.0 * x[1] + 2.0 * x[2];
+        let ax2 = 2.0 * x[1] + 5.0 * x[2];
+        assert!((ax0 - b[0]).abs() < 1e-8);
+        assert!((ax1 - b[1]).abs() < 1e-8);
+        assert!((ax2 - b[2]).abs() < 1e-8);
     }
 
     #[test]

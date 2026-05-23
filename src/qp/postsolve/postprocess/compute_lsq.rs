@@ -8,7 +8,7 @@
 //! CG が NaN/Inf を返した場合のみ direct LDL+IR 経路にフォールバックする。
 //! 未収束の best-effort y は下流の DD-guard (refine_dual_lsq) が refine する。
 
-use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
+use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
@@ -184,7 +184,11 @@ fn solve_aat_direct_ir(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
-    let factor = crate::linalg::ldl::factorize(&aat).ok()?;
+    let factor = crate::linalg::ldl::factorize_budget(
+        &aat,
+        crate::linalg::kkt_solver::max_l_nnz_from_budget(),
+    )
+    .ok()?;
 
     let build_rhs = |v_dd: &[TwoFloat]| -> Vec<f64> {
         let mut acc: Vec<TwoFloat> = vec![zero; m_sub];
@@ -298,9 +302,9 @@ pub(crate) fn compute_lsq_dual_y(
     if m == 0 || result.solution.len() != n {
         return None;
     }
-    if n + m > LSQ_DUAL_SIZE_LIMIT {
-        return None;
-    }
+    // 規模ガードは固定 size proxy で行わない: 主経路は matrix-free CG (solve_aat_cg、
+    // AAT 非構築で OOM 無縁)、CG 失敗時のみ direct LDL fallback が build_aat の
+    // memory_budget と factorize_budget の L_nnz 予算で skip 判定する。
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
@@ -600,5 +604,33 @@ mod comp_slackness_tests {
             "binding Le row y[0]={:.3e} should NOT be clamped to 0",
             y[0],
         );
+    }
+
+    /// Load-bearing for the removal of the fixed `n + m > 50_000` size proxy.
+    /// A large but sparse problem (n+m = 60_000, diagonal A) fits the
+    /// `memory_budget` / `factorize_budget` limits, so LSQ dual recovery must
+    /// run and return a full y. Re-introducing the proxy flips this to None.
+    #[test]
+    fn lsq_runs_on_large_sparse_above_old_size_gate() {
+        let dim = 30_000usize; // n = m = 30_000 → n + m = 60_000 > old 50_000 gate
+        let rows: Vec<usize> = (0..dim).collect();
+        let cols: Vec<usize> = (0..dim).collect();
+        let vals: Vec<f64> = vec![1.0; dim];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, dim, dim).unwrap();
+        let qp = lp_qp(
+            dim, dim,
+            vec![1.0; dim], a, vec![0.0; dim],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); dim],
+            vec![ConstraintType::Eq; dim],
+        );
+        let result = SolverResult { solution: vec![0.5; dim], ..Default::default() };
+        let y = compute_lsq_dual_y(&qp, &result, None)
+            .expect("large-sparse LSQ must run (no fixed size gate; within memory budget)");
+        assert_eq!(y.len(), dim);
+        assert!(y.iter().all(|v| v.is_finite()), "all recovered duals must be finite");
+        // Diagonal A=I, Eq rows, target=-c=-1 ⇒ AAT y = A·(-c) ⇒ y_i = -1.
+        for (i, &yi) in y.iter().enumerate().take(8) {
+            assert!((yi + 1.0).abs() < 1e-6, "y[{i}]={yi:.3e} expected ≈ -1");
+        }
     }
 }

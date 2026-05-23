@@ -449,8 +449,11 @@ fn build_and_solve_cleanup_lp(
     }
 }
 
-/// Size threshold above which kept-y perturbation is disabled (cleanup LP would
-/// otherwise grow unmanageably). Mirrors `LSQ_DUAL_SIZE_LIMIT` in `compute_lsq_dual_y`.
+/// Cleanup LP の kept-row 摂動 (`dy` 変数) を無効化する規模しきい値。摂動は
+/// deleted↔kept の bipartite closure 全体に `dy` 列を追加するため、大規模では
+/// cleanup LP 自体が解けない規模に膨らむ。この上限超でも摂動なしの cleanup LP は
+/// 走るので dual recovery は機能する (品質と可解性のトレードオフ)。
+/// memory/時間予算ではなく LP 列数膨張のガードなので固定 size で妥当。
 const CLEANUP_LP_KEPT_PERT_SIZE_LIMIT: usize = 50_000;
 
 /// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
@@ -964,34 +967,33 @@ pub fn run_postsolve(
             );
         }
         None
+    } else if m > 0 {
+        // 規模ガードは固定 size proxy ではなく compute_lsq_dual_y 内部に委ねる
+        // (主経路は matrix-free CG、direct LDL fallback のみ memory_budget で skip)。
+        let q_empty = CscMatrix::new(n, n);
+        let qp = crate::qp::QpProblem::new(
+            q_empty,
+            orig_problem.c.clone(),
+            orig_problem.a.clone(),
+            orig_problem.b.clone(),
+            orig_problem.bounds.clone(),
+            orig_problem.constraint_types.clone(),
+        ).ok();
+        qp.and_then(|qp| {
+            let seed = y_cl_pert
+                .as_ref()
+                .or(y_cl_nopert.as_ref())
+                .cloned()
+                .unwrap_or_else(|| y_gs.clone());
+            let tmp_result = crate::problem::SolverResult {
+                solution: solution.clone(),
+                dual_solution: seed,
+                ..Default::default()
+            };
+            crate::qp::compute_lsq_dual_y(&qp, &tmp_result, deadline)
+        })
     } else {
-        const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
-        if n + m <= LSQ_DUAL_SIZE_LIMIT && m > 0 {
-            let q_empty = CscMatrix::new(n, n);
-            let qp = crate::qp::QpProblem::new(
-                q_empty,
-                orig_problem.c.clone(),
-                orig_problem.a.clone(),
-                orig_problem.b.clone(),
-                orig_problem.bounds.clone(),
-                orig_problem.constraint_types.clone(),
-            ).ok();
-            qp.and_then(|qp| {
-                let seed = y_cl_pert
-                    .as_ref()
-                    .or(y_cl_nopert.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| y_gs.clone());
-                let tmp_result = crate::problem::SolverResult {
-                    solution: solution.clone(),
-                    dual_solution: seed,
-                    ..Default::default()
-                };
-                crate::qp::compute_lsq_dual_y(&qp, &tmp_result, deadline)
-            })
-        } else {
-            None
-        }
+        None
     };
 
     // Adopt the candidate with smallest dfeas_bound; ties go to the cheaper computation.
