@@ -18,6 +18,11 @@ use crate::tolerances::COMP_SLACK_REL_TOL;
 /// √tol = 1e-10 の rel_res で、f64 精度の LSQ 解に十分。
 const CG_TOL_SQ: f64 = 1e-20;
 
+/// CG 内 deadline check の周期 (iter 数)。各 iter の `aat_apply` は O(nnz) で
+/// large-sparse では非自明なため、毎 iter ではなく周期 check で overhead を抑える。
+/// size gate 除去で m_sub が大規模化し得るため、暴走 CG を deadline で打ち切る。
+const CG_DEADLINE_CHECK_STRIDE: usize = 64;
+
 /// (A·Aᵀ + ε·I) を p (m_sub 次元) に適用して m_sub 次元ベクトルを返す。
 /// A_sub は CSC 形式 (nrows=m_sub, ncols=n)、reg = ε。
 fn aat_apply(
@@ -63,11 +68,14 @@ fn aat_apply(
 /// 反復上限 = m_sub (系の次元)。CG は Krylov 理論より ≤ m_sub 回で収束する (exact
 /// arithmetic)。浮動小数点誤差による未収束は稀で best-effort y を返す。下流の
 /// DD-guard (refine_dual_lsq) がその y を refine する。NaN/Inf のときのみ None。
+///
+/// `deadline` 超過時は best-seen y で打ち切る (CG_DEADLINE_CHECK_STRIDE iter 毎に判定)。
 fn solve_aat_cg(
     a_sub: &CscMatrix,
     n: usize,
     m_sub: usize,
     target_dd: &[twofloat::TwoFloat],
+    deadline: Option<std::time::Instant>,
     perf_trace: bool,
 ) -> (Option<Vec<f64>>, bool) {
     use twofloat::TwoFloat;
@@ -118,7 +126,14 @@ fn solve_aat_cg(
     let mut best_y = y.clone();
     let mut best_rdr = rdr;
 
-    for _ in 0..m_sub {
+    for iter_idx in 0..m_sub {
+        // 暴走 CG を deadline で打ち切り best-seen y を返す (size gate 除去で
+        // m_sub が大規模化し得るため)。下流 DD-guard が best-effort y を refine/reject。
+        if iter_idx % CG_DEADLINE_CHECK_STRIDE == 0
+            && deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            break;
+        }
         let ap = aat_apply(a_sub, n, m_sub, &p, reg, &mut tmp);
         let pap: f64 = p.iter().zip(ap.iter()).map(|(&a, &b)| a * b).sum();
         if pap <= 0.0 {
@@ -277,7 +292,7 @@ fn solve_aat(
     perf_trace: bool,
 ) -> Option<Vec<f64>> {
     // CG — upper limit = m_sub (Krylov theory: converges in ≤ dim, exact arithmetic).
-    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, perf_trace);
+    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, deadline, perf_trace);
     if y_cg.is_some() {
         return y_cg;
     }
@@ -632,5 +647,37 @@ mod comp_slackness_tests {
         for (i, &yi) in y.iter().enumerate().take(8) {
             assert!((yi + 1.0).abs() < 1e-6, "y[{i}]={yi:.3e} expected ≈ -1");
         }
+    }
+
+    /// Load-bearing for the CG deadline guard (P2). A past deadline must abort
+    /// `solve_aat_cg` before any iteration (best-seen y stays at the zero init),
+    /// whereas `None` lets CG converge to the true solution. Removing the
+    /// in-loop deadline check makes the past-deadline call also converge, which
+    /// flips the `y ≈ 0` assertion to FAIL.
+    #[test]
+    fn cg_aborts_on_past_deadline() {
+        use twofloat::TwoFloat;
+        // A = diag([2,2]) (m_sub = n = 2). AAT = diag([4,4]); RHS = A·target.
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let target: Vec<TwoFloat> = vec![TwoFloat::from(2.0), TwoFloat::from(4.0)];
+
+        // No deadline → CG converges to y ≈ [1, 2].
+        let (y_ok, conv_ok) = solve_aat_cg(&a, 2, 2, &target, None, false);
+        let y_ok = y_ok.expect("finite y");
+        assert!(conv_ok, "well-conditioned 2x2 CG must converge without a deadline");
+        assert!(
+            (y_ok[0] - 1.0).abs() < 1e-6 && (y_ok[1] - 2.0).abs() < 1e-6,
+            "no-deadline CG must converge to [1,2]: y={y_ok:?}"
+        );
+
+        // Past deadline → abort at iter 0, best-seen y stays at the zero init.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let (y_dl, conv_dl) = solve_aat_cg(&a, 2, 2, &target, Some(past), false);
+        let y_dl = y_dl.expect("finite y even when aborted");
+        assert!(!conv_dl, "aborted CG must not report converged");
+        assert!(
+            y_dl.iter().all(|v| v.abs() < 1e-12),
+            "past-deadline CG must abort before any update (y≈0): y={y_dl:?}"
+        );
     }
 }
