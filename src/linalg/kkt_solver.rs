@@ -84,11 +84,9 @@ pub trait KktSolver: Send {
     fn dim(&self) -> usize;
 }
 
-/// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget`.
+/// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget_par`.
 /// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
 /// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
-///
-/// `par` は per-call parallelism。default は `Par::Seq` (= 既存挙動)。
 #[allow(dead_code)]
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
