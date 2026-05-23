@@ -24,8 +24,30 @@ const LP_IPM_FIRST_N: usize = 3_000;
 /// IPM を先に走らせる制約数閾値。LU 再因子分解 O(m·nnz(L)) を回避する。
 const LP_IPM_FIRST_M: usize = 2_000;
 
+/// IPM 先行時に IPM へ割り当てる deadline 比率 (残予算に対する)。
+///
+/// IPM が収束も infeasibility 検出もできずに緩慢進行する病理 (greenbea: 各 iter で
+/// RESIDUAL_STALL_REL_DEC 超の「有意」改善を続けるため stall 検出も発火せず、全予算を
+/// 消費) では、後段の simplex fallback が走れず Timeout となる。simplex は greenbea を
+/// ~75s で正答するため、IPM に予算上限を課して残りを simplex に確保する。
+///
+/// 値は「両 method に均等機会」= 0.5。健全な IPM は低 iter (≪予算の半分) で収束し
+/// 早期 return するため box は実質 stalling IPM のみを切り、収束 IPM を退化させない。
+/// 固定 magic を避け残予算比率で表現 (deadline 非設定時は box しない)。
+const IPM_BUDGET_FRACTION: f64 = 0.5;
+
 pub(crate) fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
     n > LP_IPM_FIRST_N || m > LP_IPM_FIRST_M
+}
+
+/// IPM 先行時の IPM 用 deadline を計算する。全体 deadline がある場合のみ、残予算の
+/// `IPM_BUDGET_FRACTION` を IPM に割り当て、残りを simplex fallback に確保する。
+/// `None` (全体 deadline 非設定) の場合は box せず (`opts.deadline` をそのまま使う)。
+fn ipm_box_deadline(options: &SolverOptions, now: Instant) -> Option<Instant> {
+    options.deadline.map(|overall| {
+        let remaining = overall.saturating_duration_since(now);
+        now + remaining.mul_f64(IPM_BUDGET_FRACTION)
+    })
 }
 
 pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
@@ -65,7 +87,9 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
     let mut ipm_subopt_candidate: Option<SolverResult> = None;
     if !dispatch_disabled && prefer_ipm_for_size(problem.num_vars, problem.num_constraints) {
-        let ipm_opts = ipm_opts_for_lp(options);
+        let mut ipm_opts = ipm_opts_for_lp(options);
+        // IPM に残予算の一部のみ割り当て、残りを simplex fallback に確保する。
+        ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
         let mut ipm_result = ipm_solver::solve_ipm(problem, &ipm_opts);
         ipm_result.stats.route = SolveRoute::LpForwardedFromQp;
         ipm_result.stats.lp_ipm_path = true;
@@ -297,6 +321,34 @@ fn verify_normalized_farkas(
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+    use std::time::Duration;
+
+    /// `ipm_box_deadline` reserves part of the remaining budget for the simplex
+    /// fallback: with an overall deadline it returns ~`IPM_BUDGET_FRACTION` of the
+    /// remaining time; without one it returns `None` (no box).
+    #[test]
+    fn ipm_box_deadline_reserves_simplex_budget() {
+        let now = Instant::now();
+        let cases = [10.0_f64, 100.0, 1000.0];
+        for &total in &cases {
+            let opts = SolverOptions {
+                deadline: Some(now + Duration::from_secs_f64(total)),
+                ..SolverOptions::default()
+            };
+            let box_dl = ipm_box_deadline(&opts, now).expect("deadline present → box");
+            let box_secs = box_dl.duration_since(now).as_secs_f64();
+            let expected = total * IPM_BUDGET_FRACTION;
+            assert!(
+                (box_secs - expected).abs() < 1e-6,
+                "box must be {IPM_BUDGET_FRACTION} of {total}s = {expected}s, got {box_secs}s",
+            );
+            // The reserved simplex share is strictly positive (fallback can run).
+            assert!(box_secs < total, "box must leave budget for simplex");
+        }
+        // No overall deadline → no box (IPM keeps its own deadline / unbounded).
+        let no_dl = SolverOptions { deadline: None, ..SolverOptions::default() };
+        assert!(ipm_box_deadline(&no_dl, now).is_none(), "no deadline → no box");
+    }
 
     fn eq_lp_fixture(n: usize, m: usize) -> LpProblem {
         let mut rows = Vec::new();

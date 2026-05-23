@@ -8,7 +8,10 @@ use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::time::Instant;
 
-const KNOWN_OBJ: f64 = -7.2462405908e+07;
+/// HiGHS-exact greenbea optimum (matches data/baseline_objectives/netlib_lp.csv;
+/// P-D objective error 2e-16). The Netlib README value -7.2462405908e7 is low
+/// precision (3 sig digits) and was the previous reference here.
+const KNOWN_OBJ: f64 = -7.2555248130e+07;
 const GREENBEA_PATH_CANDIDATES: &[&str] = &[
     "data/lp_problems_canary/greenbea.QPS",
     "data/lp_problems/greenbea.QPS",
@@ -114,11 +117,13 @@ fn diag_greenbea_dfeas_full_green() {
         "greenbea: expected Optimal at eps=1e-6, got {:?}",
         status
     );
-    // bench tolerance is eps_obj = 1e-2 (1%). HEAD obj=-7.255e7 vs Netlib -7.246e7 → rel_err 1.28e-3, well within bench PASS.
+    // KNOWN_OBJ is now the HiGHS-exact optimum, so the solver must match it
+    // tightly (was 1e-2 only to absorb the imprecise Netlib reference).
+    let obj_tol = 1e-3;
     assert!(
-        obj_rel_err < 1e-2,
-        "greenbea: obj relative error {:.2e} >= 1e-2",
-        obj_rel_err,
+        obj_rel_err < obj_tol,
+        "greenbea: obj relative error {:.2e} >= {:.0e}",
+        obj_rel_err, obj_tol,
     );
     assert!(
         dfeas_rel <= eps,

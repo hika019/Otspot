@@ -18,6 +18,17 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 filter = "test(linalg::par_sentinel::)"
 threads-required = "num-cpus"
 
+# greenbea IPM-time-box sentinel (#51): boxed IPM + simplex fallback solve is
+# ~220s (300s deadline, 400s watchdog) — inherently above the 3min default cap
+# because greenbea itself is slow. It stays `#[ignore]`d (not in the default
+# fast suite) but must remain a *functional* guard under `--run-ignored`: the
+# default 180s terminate-after kills it mid-solve. Raise the kill ceiling above
+# the test's own 400s watchdog and run it exclusively so the wall stays stable.
+[[profile.default.overrides]]
+filter = "test(diag_greenbea_ipm_timebox_reaches_optimal)"
+slow-timeout = { period = "60s", terminate-after = 8 }
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip
