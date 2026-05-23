@@ -122,11 +122,31 @@ pub(crate) fn solve_dual_advanced(
                 sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
             );
             if bigm_result.status == SolveStatus::Timeout {
-                // Phase Primal と Phase Big-M 両方 Timeout: 全体 iter 数 (sum) を
-                // observability として保持。primal_result を base にして iter のみ加算。
+                // Both phases timed out: sum iterations for observability.
                 let mut r = primal_result;
                 r.iterations = r.iterations.saturating_add(bigm_result.iterations);
                 r
+            } else {
+                bigm_result
+            }
+        }
+        SolveStatus::Infeasible => {
+            // Primal Phase I returned Infeasible without a Farkas certificate.
+            // Re-verify through Big-M Phase I (the Farkas arbiter):
+            //   - Big-M Optimal/feasible  → correct result (pilot87-class: feasible LP)
+            //   - Big-M Infeasible (certified) → true infeasible confirmed
+            //   - Big-M Timeout → inconclusive; return Timeout, never the unverified Infeasible
+            let bigm_result = phase1::big_m_cold_start(
+                sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
+            );
+            if bigm_result.status == SolveStatus::Timeout {
+                SolverResult {
+                    status: SolveStatus::Timeout,
+                    iterations: primal_result
+                        .iterations
+                        .saturating_add(bigm_result.iterations),
+                    ..primal_result
+                }
             } else {
                 bigm_result
             }

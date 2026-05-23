@@ -31,9 +31,11 @@
 //!   being bit-identical before/after — NOT by a direct sentinel here.
 
 use otspot::io::qps::parse_qps;
+use otspot::lp::solve_lp_with;
 use otspot::options::SolverOptions;
-use otspot::problem::SolveStatus;
+use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
 use otspot::qp::solve_qp_with;
+use otspot::sparse::CscMatrix;
 use std::path::Path;
 use std::time::Instant;
 
@@ -121,4 +123,96 @@ fn ken13_no_false_infeasible() {
 #[ignore = "heavy: ken-18 IPM up to 60s — individual cross-check only"]
 fn ken18_no_false_infeasible() {
     assert_not_infeasible_ipm("data/lp_problems/ken-18.QPS", 60.0);
+}
+
+// ── Infeasible-arm sentinel (new code path added to solve_dual_advanced) ──────
+//
+// The Timeout-arm tests above cover: primal Phase I Timeout → Big-M fallback.
+// These tests cover the NEW arm: primal Phase I returns Infeasible → Big-M
+// verification (Farkas arbiter). Two directions required:
+//   (A) feasible LP (pilot87): must NOT become false-Infeasible
+//   (B) infeasible LP (synthetic): must REMAIN Infeasible after Big-M check
+//
+// No-op proof for (A): reverting the `SolveStatus::Infeasible` arm back to
+// `_ => primal_result` makes pilot87 presolve=false return Infeasible (the
+// pre-fix bug), which fails assert!(!matches!(status, SolveStatus::Infeasible)).
+
+/// LOAD-BEARING: pilot87 presolve=false must not be false-Infeasible (#58).
+///
+/// pilot87 has 322 artificials (89 Ge + 233 Eq). Without presolve, primal
+/// Phase I runs ~68s on this degenerate feasible LP and returns false-Infeasible.
+/// The fix routes `Infeasible` through Big-M (Farkas arbiter), which either
+/// certifies Optimal (feasible) or times out honestly. Both are acceptable;
+/// only `Infeasible` is wrong.
+///
+/// Budget: 150s total (primal ~68s + Big-M remaining). Wall ≤ 150s < 3min.
+#[test]
+#[ignore = "heavy: pilot87 presolve=false — primal ~68s + Big-M; run with --run-ignored all"]
+fn pilot87_presolve_false_not_infeasible() {
+    let path = Path::new("data/lp_problems/pilot87.QPS");
+    assert!(path.exists(), "data missing: {}", path.display());
+    let prob = parse_qps(path).expect("parse_qps");
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.timeout_secs = Some(150.0);
+
+    let t0 = Instant::now();
+    let r = solve_qp_with(&prob, &opts);
+    let wall = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "pilot87 presolve=false -> status={:?} obj={:.6e} wall={:.2}s iters={}",
+        r.status, r.objective, wall, r.iterations
+    );
+
+    assert!(
+        !matches!(r.status, SolveStatus::Infeasible),
+        "pilot87 presolve=false returned Infeasible — feasible LP must never be \
+         certified infeasible without a Farkas certificate (#58 false-Infeasible bug)"
+    );
+}
+
+/// Bidirectional guard: a truly infeasible LP (presolve=false) must NOT be
+/// declared Optimal after the fix.
+///
+/// LP: x ≤ 1 (Le), x ≥ 2 (Ge), x ≥ 0 — clearly infeasible. The Ge constraint
+/// creates one artificial, routing: primal → Infeasible → Infeasible-arm → Big-M.
+///
+/// Acceptable outcomes: `Infeasible` (Farkas certified) or `Timeout` (Big-M
+/// inconclusive — honest, not a regression). The critical regression to prevent
+/// is `Optimal`: the fix must not somehow solve a true-infeasible LP to "feasible".
+///
+/// `Unbounded` is also a bug but structurally impossible here (bounded LP).
+#[test]
+fn infeasible_arm_bidirectional_true_infeasible_not_optimal() {
+    // x ≤ 1 (Le) AND x ≥ 2 (Ge) — trivially infeasible, one artificial,
+    // goes through primal Phase I → Infeasible arm → Big-M.
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1)
+        .expect("CscMatrix");
+    let prob = LpProblem::new_general(
+        vec![0.0],
+        a,
+        vec![1.0, 2.0],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, f64::INFINITY)],
+        None,
+    )
+    .expect("LpProblem");
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.timeout_secs = Some(10.0);
+
+    let r = solve_lp_with(&prob, &opts);
+    eprintln!(
+        "synthetic infeasible presolve=false -> status={:?} iters={}",
+        r.status, r.iterations
+    );
+    // Infeasible (Farkas certified) or Timeout (Big-M inconclusive) are both
+    // acceptable. Optimal would mean the fix declared an infeasible LP feasible.
+    assert!(
+        !matches!(r.status, SolveStatus::Optimal | SolveStatus::Unbounded),
+        "infeasible LP returned {:?} — must be Infeasible (certified) or Timeout \
+         (honest); Optimal/Unbounded = over-correction bug in Infeasible-arm",
+        r.status
+    );
 }

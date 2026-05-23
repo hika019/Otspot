@@ -348,6 +348,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+                        iterations: total_iters,
                         ..Default::default()
                     };
                 }
@@ -502,6 +503,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
+                iterations: total_iters,
                 ..Default::default()
             } },
             SimplexOutcome::Timeout(obj1) => {
