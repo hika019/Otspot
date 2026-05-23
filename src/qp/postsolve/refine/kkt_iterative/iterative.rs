@@ -255,8 +255,10 @@ pub(crate) fn refine_kkt_iterative(
             abs_max / abs_min_nz.max(1e-300)
         );
     }
-    // SingularOrIndefinite なら δ を段階的に上げて再試行 (factorize 成立する最小 δ を採用)。
-    // deadline 必須: 大規模 K factorize は単発 80s 級に達する。
+    // On SingularOrIndefinite, grow δ by FACTOR_RETRY_GROWTH and retry until
+    // factorization succeeds; the first success is the smallest δ that works
+    // (deltas grow monotonically). Deadline guards against large-K stalls.
+
     const FACTOR_RETRY_GROWTH: f64 = 10.0;
     const FACTOR_RETRY_MAX: usize = 6;
     let factor = {
@@ -364,9 +366,9 @@ pub(crate) fn refine_kkt_iterative(
         );
     }
 
-    // FX (lb≈ub) と eliminated_cols (presolve metadata) を stationarity 評価から除外。
-    // 旧来は "A col 空" heuristic で判定していたが、非凸 QP の linear-only var
-    // (A 空 / Q 非空 / c≠0) を誤 skip して #55 真因となったため presolve 明示 flag のみに変更。
+    // Exclude FX vars (lb≈ub) and presolve-eliminated columns from stationarity.
+    // The former "A col empty" heuristic incorrectly skipped linear-only vars
+    // (A empty / Q non-empty / c≠0); use explicit presolve flag only.
     use crate::tolerances::FX_TOL;
     let use_elim_mask = eliminated_cols.len() == n;
     let exclude_var: Vec<bool> = (0..n)
@@ -477,10 +479,6 @@ pub(crate) fn refine_kkt_iterative(
                 }
             }
             let mut r_d = vec![0.0_f64; n];
-            let mut max_qx = 0.0_f64;
-            let mut max_c = 0.0_f64;
-            let mut max_aty = 0.0_f64;
-            let mut max_bnd = 0.0_f64;
             for j in 0..n {
                 if exclude_var[j] {
                     continue;
@@ -488,10 +486,6 @@ pub(crate) fn refine_kkt_iterative(
                 let bc = bound_contrib_at_var(&problem.bounds, z, j);
                 let r = qx_dd[j] + TwoFloat::from(problem.c[j]) + aty_dd[j] + TwoFloat::from(bc);
                 r_d[j] = f64::from(r);
-                max_qx = max_qx.max(f64::from(qx_dd[j]).abs());
-                max_c = max_c.max(problem.c[j].abs());
-                max_aty = max_aty.max(f64::from(aty_dd[j]).abs());
-                max_bnd = max_bnd.max(bc.abs());
             }
             let mut ax_dd: Vec<TwoFloat> = vec![zero_dd; m];
             for col in 0..n {
@@ -551,10 +545,6 @@ pub(crate) fn refine_kkt_iterative(
                     df_rel_componentwise = rel_j;
                 }
             }
-            let _ = max_qx;
-            let _ = max_c;
-            let _ = max_aty;
-            let _ = max_bnd;
             (
                 r_d,
                 r_p,

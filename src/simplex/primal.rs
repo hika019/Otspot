@@ -44,6 +44,11 @@ use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_cost
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
 
+/// Minimum absolute diagonal entry to trust when dividing `x_B[i]` by the
+/// Ruiz-scaled slack/artificial column's diagonal. Prevents division by
+/// near-zero when equilibration shrinks the diagonal below f64 noise.
+const SLACK_DIAG_TOL: f64 = 1e-14;
+
 fn extract_timeout_solution_reconciled(
     sf: &StandardForm,
     a: &CscMatrix,
@@ -83,7 +88,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             let col = basis[i];
             if let Ok((rows, vals)) = a.get_column(col) {
                 for (k, &row) in rows.iter().enumerate() {
-                    if row == i && vals[k].abs() > 1e-14 {
+                    if row == i && vals[k].abs() > SLACK_DIAG_TOL {
                         x_b[i] /= vals[k];
                         break;
                     }
@@ -223,9 +228,8 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         let mut c_phase1 = vec![0.0; n_ext];
         c_phase1[sf.n_total..].fill(1.0);
 
-        // #15 crash basis: artificial を構造列で被覆して Phase I の駆出対象を縮減。
-        // 適用条件: warm_start なし & options.use_lp_crash_basis & crash 結果が non-singular。
-        // 計算した x_b に負成分があった行はロールバック (Phase I で駆出できないため)。
+        // Crash basis: cover artificial rows with structural columns to reduce
+        // Phase I pivots. Rows with negative x_b after FTRAN are rolled back.
         let crashed = if options.warm_start.is_none()
             && options.use_lp_crash_basis
             && sf.num_artificial > 0
@@ -243,7 +247,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             for i in 0..m {
                 if let Ok((rows, vals)) = a_ext.get_column(basis[i]) {
                     for (k, &row) in rows.iter().enumerate() {
-                        if row == i && vals[k].abs() > 1e-14 {
+                        if row == i && vals[k].abs() > SLACK_DIAG_TOL {
                             x_b[i] /= vals[k];
                             break;
                         }
@@ -698,24 +702,22 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
     }
 }
 
-/// #15 crash 後 partial revert の最大ラウンド数。
-/// 1 ラウンドで負 x_b 行を artificial に戻し再 FTRAN、収束しなければ次ラウンド。
-/// 3 ラウンドは観測 (中規模 ill LP) で十分な経験値。
+/// Maximum partial-revert rounds after crash basis construction.
+/// Each round restores artificial columns for rows with negative x_b and
+/// re-factorizes; 3 rounds is sufficient for observed mid-scale ill LPs.
 const CRASH_REVERT_MAX_ROUNDS: usize = 3;
 
-/// #15 crash basis: 構造列で artificial 行を被覆し Phase I の駆出対象を縮減する。
+/// Crash basis: cover artificial rows with structural columns to reduce Phase I pivots.
 ///
-/// 戻り値 `Some((crash_basis, x_b))` の意味:
-/// - `crash_basis[i]`: 行 i を被覆する列 index (構造列 or artificial col)
-/// - `x_b`: B^{-1}*b (LU FTRAN で厳密計算)
+/// Returns `Some((crash_basis, x_b))` on success, `None` if the crash is no better
+/// than a cold start or the basis is singular. Returns `None` and traces via
+/// `LP_CRASH_TRACE` in the following cases:
+/// 1. Crash result equals `cold_basis` (no structural coverage gained)
+/// 2. LU factorization fails (crashed basis singular)
+/// 3. No structural columns remain after partial revert
 ///
-/// 不採用条件 (None 帰着) で観測可能化のため LP_CRASH_TRACE で eprintln:
-/// 1. crash 結果が `cold_basis` と同一 (構造列で 1 行も被覆できなかった)
-/// 2. LU 分解失敗 (crashed basis singular)
-/// 3. partial revert 後も crash 構造列が 0 個 (実質 cold と同じ)
-///
-/// partial revert: 被覆された行で x_b < -PIVOT_TOL の行は basis[i] を artif に戻し
-/// 再因子化。Phase I で駆出できない負 x_b を持つ crashed 行を残さない。
+/// Partial revert: rows where `x_b < -PIVOT_TOL` have their crashed column replaced
+/// with the artificial and the basis is re-factorized.
 fn try_apply_crash(
     a_ext: &CscMatrix,
     m: usize,

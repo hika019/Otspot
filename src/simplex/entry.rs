@@ -315,8 +315,8 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
 
     let sf = build_standard_form(problem);
 
-    // #15: warm_start_lp.basis を warm_start にコピー (LP 専用 path で
-    // IPM crossover 等の拡張 slot を吸収) → 既存 simplex の warm path に乗る。
+    // Copy warm_start_lp.basis into warm_start so the LP-specific slot feeds
+    // the existing simplex warm path.
     let warm_lp_opts;
     let options = if let Some(ws_lp) = options.warm_start_lp.as_ref() {
         if options.warm_start.is_none() {

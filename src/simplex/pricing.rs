@@ -27,11 +27,12 @@ pub(crate) trait PricingStrategy {
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
 ///
-/// 参照実装。production は `SteepestEdgePricing` のみを使用するが、
-/// pricing 戦略間の比較テストや refactor 系のテスト fixture として保持する。
-#[allow(dead_code)]
+/// Reference implementation retained for pricing strategy comparison tests.
+/// Production uses `SteepestEdgePricing`.
+#[cfg(test)]
 pub(crate) struct DantzigPricing;
 
+#[cfg(test)]
 impl PricingStrategy for DantzigPricing {
     fn select_entering(&self, reduced_costs: &[f64], n_basic: usize) -> Option<usize> {
         let limit = n_basic.min(reduced_costs.len());
