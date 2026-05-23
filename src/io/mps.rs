@@ -25,10 +25,16 @@
 //!
 //! 本モジュールは両方のフォーマットを自動判別して解析します。
 
+use crate::mip::MilpProblem;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// MPS の INTORG/INTEND マーカーで囲まれ、かつ BOUNDS 指定が一切ない整数変数の
+/// デフォルト上限。古典的な OSL/CPLEX 規約では「明示境界のない整数変数は二値」と
+/// 解釈する (HiGHS の MPS リーダーと一致)。明示境界が 1 つでもあればこの既定は無効。
+const INTEGER_DEFAULT_UPPER_BINARY: f64 = 1.0;
 
 /// MPSファイルのパース中に発生するエラー
 #[non_exhaustive]
@@ -95,6 +101,20 @@ pub fn parse_mps_file(path: &Path) -> Result<LpProblem, MpsError> {
     parse_mps(&content)
 }
 
+/// ファイルパスからMILPを読み込み、`MilpProblem`としてパースする
+///
+/// INTORG/INTEND マーカーおよび BV/LI/UI 境界で識別した整数変数を保持する。
+/// 整数変数が存在しない場合は整数集合が空の `MilpProblem` (= LP) を返す。
+///
+/// # Errors
+///
+/// - ファイルが存在しない、または読み取り権限がない場合は`MpsError::IoError`
+/// - ファイル内容のパースに失敗した場合は各種`MpsError`バリアント
+pub fn parse_milp_file(path: &Path) -> Result<MilpProblem, MpsError> {
+    let content = std::fs::read_to_string(path)?;
+    parse_milp(&content)
+}
+
 /// MPS形式の文字列を`LpProblem`にパースする
 ///
 /// 固定幅フォーマットとフリーフォーマットの両方を自動判別して処理します。
@@ -129,7 +149,49 @@ pub fn parse_mps_file(path: &Path) -> Result<LpProblem, MpsError> {
 pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
     let lines: Vec<&str> = input.lines().collect();
     let mut parser = MpsParser::new();
-    parser.parse(&lines)
+    // LP path: 整数情報は破棄して LP relaxation のみを返す (従来挙動を維持)。
+    let (lp, _integer_vars) = parser.parse(&lines)?;
+    Ok(lp)
+}
+
+/// MPS形式の文字列を`MilpProblem`にパースする
+///
+/// `parse_mps` と同じパーサを用いるが、INTORG/INTEND マーカーおよび BV/LI/UI 境界で
+/// 識別した整数変数を保持した [`MilpProblem`] を返す。整数変数が無ければ整数集合が空の
+/// MILP (= LP relaxation) となる。
+///
+/// # Examples
+///
+/// ```
+/// use otspot::io::mps::parse_milp;
+///
+/// let mps = r"NAME          milp
+/// ROWS
+///  N  obj
+///  L  c1
+/// COLUMNS
+///     MARKER1   'MARKER'   'INTORG'
+///     x1  obj  -1.0  c1  1.0
+///     MARKER2   'MARKER'   'INTEND'
+/// RHS
+///     rhs  c1  10.5
+/// BOUNDS
+///  UP BND  x1  7.0
+/// ENDATA
+/// ";
+/// let milp = parse_milp(mps).unwrap();
+/// assert_eq!(milp.integer_vars, vec![0]);
+/// ```
+pub fn parse_milp(input: &str) -> Result<MilpProblem, MpsError> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut parser = MpsParser::new();
+    let (lp, integer_vars) = parser.parse(&lines)?;
+    // 整数変数インデックスは col_map から得るため常に範囲内。MilpProblem::new の
+    // 検証エラーは想定外なのでパースエラーへ写像する。
+    MilpProblem::new(lp, integer_vars).map_err(|e| MpsError::ParseError {
+        line: 0,
+        message: e.to_string(),
+    })
 }
 
 /// MPSファイルのパース処理を管理する内部構造体
@@ -150,6 +212,43 @@ struct MpsParser {
     bounds: Vec<(BoundType, String, Option<f64>)>,
     /// 目的関数行の行名
     obj_row: Option<String>,
+    /// 整数変数の列名集合。INTORG/INTEND マーカー領域内の列、または
+    /// BV/LI/UI 境界タイプを持つ列を整数とみなす。
+    integer_cols: HashSet<String>,
+    /// COLUMNS パース中、現在 INTORG/INTEND マーカー領域内かどうか。
+    in_integer_marker: bool,
+}
+
+/// COLUMNS セクション内の整数マーカー行の種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegerMarker {
+    /// `'MARKER' 'INTORG'`: 以降の列を整数として開始。
+    Start,
+    /// `'MARKER' 'INTEND'`: 整数領域の終了。
+    End,
+}
+
+/// COLUMNS 行が整数マーカー (`'MARKER' 'INTORG'`/`'INTEND'`) かどうかを判定する。
+///
+/// `'MARKER'` トークンと `INTORG`/`INTEND` トークンの両方が揃った行のみマーカーと
+/// みなす。クォートは除去して大文字小文字を無視する。両方揃わない通常の列名 (例えば
+/// `INTORG` という名の列) を誤検出しないため、両トークンの共起を要求する。
+fn integer_marker_kind(line: &str) -> Option<IntegerMarker> {
+    let mut has_marker = false;
+    let mut kind = None;
+    for tok in line.split_whitespace() {
+        match tok.trim_matches('\'').to_uppercase().as_str() {
+            "MARKER" => has_marker = true,
+            "INTORG" => kind = Some(IntegerMarker::Start),
+            "INTEND" => kind = Some(IntegerMarker::End),
+            _ => {}
+        }
+    }
+    if has_marker {
+        kind
+    } else {
+        None
+    }
 }
 
 /// MPSファイルのROWSセクションにおける行タイプ
@@ -182,6 +281,12 @@ enum BoundType {
     BV,
     /// Plus infinity: x <= +∞ (upper bound = +∞, lower bound unchanged at default 0)
     PL,
+    /// 整数下限 (Lower integer): x >= value かつ x は整数。LO と同じ境界効果に加え
+    /// 当該変数を整数として登録する。
+    LI,
+    /// 整数上限 (Upper integer): x <= value かつ x は整数。UP と同じ境界効果に加え
+    /// 当該変数を整数として登録する。
+    UI,
 }
 
 /// 固定幅MPSフォーマットかどうかを判定する
@@ -210,14 +315,18 @@ impl MpsParser {
             ranges: HashMap::new(),
             bounds: Vec::new(),
             obj_row: None,
+            integer_cols: HashSet::new(),
+            in_integer_marker: false,
         }
     }
 
-    /// MPSファイルの全行をセクションごとに解析し、`LpProblem`を返す
+    /// MPSファイルの全行をセクションごとに解析し、LP relaxation と整数変数インデックスを返す
     ///
     /// セクションヘッダーの検出（先頭に空白がない行）と、
     /// データ行（先頭に空白がある行）の処理を区別します。
-    fn parse(&mut self, lines: &[&str]) -> Result<LpProblem, MpsError> {
+    /// 戻り値は `(LP relaxation, ソート済み整数変数インデックス)`。整数変数が無ければ
+    /// インデックスは空 (= 純粋な LP)。
+    fn parse(&mut self, lines: &[&str]) -> Result<(LpProblem, Vec<usize>), MpsError> {
         let mut current_section = Section::None;
         let mut seen_sections = std::collections::HashSet::new();
 
@@ -337,6 +446,12 @@ impl MpsParser {
     /// 列位置を確認してフォーマットを自動判別し、
     /// 固定幅またはフリーフォーマットの対応関数に委譲します。
     fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
+        // INTORG/INTEND マーカー行は係数を持たず、整数領域の開始/終了のみを切り替える。
+        if let Some(kind) = integer_marker_kind(line) {
+            self.in_integer_marker = matches!(kind, IntegerMarker::Start);
+            return Ok(());
+        }
+
         let is_fixed_width = is_fixed_width_format(line);
 
         if is_fixed_width {
@@ -365,6 +480,9 @@ impl MpsParser {
         let col_name = line.get(4..12).unwrap_or("").trim().to_string();
         if col_name.is_empty() {
             return Ok(());
+        }
+        if self.in_integer_marker {
+            self.integer_cols.insert(col_name.clone());
         }
 
         let row_name1 = line.get(14..22).unwrap_or("").trim().to_string();
@@ -406,6 +524,9 @@ impl MpsParser {
         }
 
         let col_name = parts[0].to_string();
+        if self.in_integer_marker {
+            self.integer_cols.insert(col_name.clone());
+        }
 
         // (行名, 値) のペアを順に処理
         for i in (1..parts.len()).step_by(2) {
@@ -506,14 +627,21 @@ impl MpsParser {
             "MI" => BoundType::MI,
             "BV" => BoundType::BV,
             "PL" => BoundType::PL,
+            "LI" => BoundType::LI,
+            "UI" => BoundType::UI,
             _ => return Err(MpsError::InvalidBoundType(bound_type_str.to_string())),
         };
+
+        // BV/LI/UI は当該変数を整数として登録する (マーカー無しでも整数となる)。
+        if matches!(bound_type, BoundType::BV | BoundType::LI | BoundType::UI) {
+            self.integer_cols.insert(col_name.clone());
+        }
 
         self.bounds.push((bound_type, col_name, value));
         Ok(())
     }
 
-    /// パース済みデータから`LpProblem`を構築する
+    /// パース済みデータから`LpProblem`と整数変数インデックスを構築する
     ///
     /// 処理の流れ:
     /// 1. 行名→インデックスマップを構築（目的関数行を除く）
@@ -522,7 +650,8 @@ impl MpsParser {
     /// 4. 目的関数ベクトル`c`を構築
     /// 5. 制約行列`A`をCSC形式で構築
     /// 6. 変数の上下限ベクトルを構築
-    fn build_lp_problem(&self) -> Result<LpProblem, MpsError> {
+    /// 7. 整数変数インデックスを構築（明示境界のない整数変数に二値既定を適用）
+    fn build_lp_problem(&self) -> Result<(LpProblem, Vec<usize>), MpsError> {
         // 行名 → インデックスのマップ構築（目的関数行を除外）
         let mut row_map = HashMap::new();
         let mut constraint_types = Vec::new();
@@ -687,10 +816,39 @@ impl MpsParser {
                     // Lower bound remains unchanged (default 0).
                     bounds[*col_idx].1 = f64::INFINITY;
                 }
+                BoundType::LI => {
+                    // LI: integer lower bound. Same numeric effect as LO; integrality
+                    // is recorded separately at parse time.
+                    bounds[*col_idx].0 = value.unwrap_or(0.0);
+                }
+                BoundType::UI => {
+                    // UI: integer upper bound. Same numeric effect as UP; integrality
+                    // is recorded separately at parse time.
+                    bounds[*col_idx].1 = value.unwrap_or(f64::INFINITY);
+                }
             }
         }
 
-        LpProblem::new_general(
+        // 整数変数インデックスを構築する。
+        // 明示境界 (BOUNDS で当該列を参照する行) を持たない整数変数は、古典的 MPS 規約
+        // (HiGHS と一致) に従い二値 [0, 1] とみなす。明示境界が 1 つでもあれば、その境界を
+        // 尊重して既定上限 +∞ を維持する。
+        let explicitly_bounded: HashSet<&String> =
+            self.bounds.iter().map(|(_, name, _)| name).collect();
+
+        let mut integer_vars: Vec<usize> = Vec::with_capacity(self.integer_cols.len());
+        for col_name in &self.integer_cols {
+            if let Some(&col_idx) = col_map.get(col_name) {
+                if !explicitly_bounded.contains(col_name) {
+                    bounds[col_idx].1 = INTEGER_DEFAULT_UPPER_BINARY;
+                }
+                integer_vars.push(col_idx);
+            }
+        }
+        // HashSet 由来の非決定的順序を排し、決定論的な昇順に揃える。
+        integer_vars.sort_unstable();
+
+        let lp = LpProblem::new_general(
             c,
             a,
             rhs_vec,
@@ -701,7 +859,9 @@ impl MpsParser {
         .map_err(|e| MpsError::ParseError {
             line: 0,
             message: e.to_string(),
-        })
+        })?;
+
+        Ok((lp, integer_vars))
     }
 }
 
@@ -1201,5 +1361,336 @@ ENDATA
             is_fixed_width_format(line_with_tab),
             "列14のタブは空白として扱い固定幅と判定すべき"
         );
+    }
+
+    // ──────────────────────────────────────────────
+    // integer_marker_kind のユニットテスト
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_marker_kind_intorg_intend() {
+        assert_eq!(
+            integer_marker_kind("    M1 'MARKER' 'INTORG'"),
+            Some(IntegerMarker::Start)
+        );
+        assert_eq!(
+            integer_marker_kind("    M2 'MARKER' 'INTEND'"),
+            Some(IntegerMarker::End)
+        );
+        // 大文字小文字・クォート無しでも検出する
+        assert_eq!(
+            integer_marker_kind("    m 'marker' intorg"),
+            Some(IntegerMarker::Start)
+        );
+    }
+
+    #[test]
+    fn test_integer_marker_kind_non_marker() {
+        // 通常の COLUMNS 行はマーカーでない
+        assert_eq!(integer_marker_kind("    x1  obj  1.0  c1  2.0"), None);
+        // 'MARKER' トークンを伴わない INTORG という名の列は誤検出しない
+        assert_eq!(integer_marker_kind("    INTORG  obj  1.0"), None);
+    }
+
+    // ──────────────────────────────────────────────
+    // MILP パース: 整数変数識別 + 境界規約
+    // ──────────────────────────────────────────────
+
+    /// マーカー整数で BOUNDS 指定が無い → 二値 [0, 1]、整数登録される。
+    /// no-op proof: 二値既定 (INTEGER_DEFAULT_UPPER_BINARY) を外すと上限が +∞ となり
+    /// このアサーションが落ちる。
+    #[test]
+    fn test_milp_marker_no_bounds_is_binary() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+RHS
+    rhs  c1  10.5
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(0.0, 1.0)]);
+    }
+
+    /// マーカー整数 + 明示 UP → [0, UP]。明示境界があるので二値既定は無効。
+    #[test]
+    fn test_milp_marker_with_up_bound() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+RHS
+    rhs  c1  10.5
+BOUNDS
+ UP BND  x1  5.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(0.0, 5.0)]);
+    }
+
+    /// マーカー整数 + 明示 LO のみ → [LO, +∞]。明示境界があるので二値既定は無効。
+    #[test]
+    fn test_milp_marker_with_lo_only() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+RHS
+    rhs  c1  10.5
+BOUNDS
+ LO BND  x1  2.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(2.0, f64::INFINITY)]);
+    }
+
+    /// UI 境界はマーカー無しでも変数を整数化し、上限を設定する。
+    #[test]
+    fn test_milp_ui_bound_marks_integer() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  -1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+BOUNDS
+ UI BND  x1  7.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(0.0, 7.0)]);
+    }
+
+    /// LI 境界はマーカー無しでも変数を整数化し、下限を設定する。
+    #[test]
+    fn test_milp_li_bound_marks_integer() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+BOUNDS
+ LI BND  x1  2.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(2.0, f64::INFINITY)]);
+    }
+
+    /// BV 境界は変数を整数化し [0, 1] を設定する。
+    #[test]
+    fn test_milp_bv_bound_marks_integer() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  -1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+BOUNDS
+ BV BND  x1
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0]);
+        assert_eq!(milp.lp.bounds, vec![(0.0, 1.0)]);
+    }
+
+    /// 混合整数: マーカー領域内の変数のみ整数、領域外は連続のまま。
+    /// 二値既定はマーカー整数 (x1, 境界なし) のみに適用され、連続変数 x2 は [0,+∞]。
+    #[test]
+    fn test_milp_mixed_integer_continuous() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+    x2  obj  -1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        // x1 (idx 0) のみ整数、x2 (idx 1) は連続。
+        assert_eq!(milp.integer_vars, vec![0]);
+        // x1 は境界なしマーカー整数 → 二値 [0,1]、x2 は連続既定 [0,+∞]。
+        assert_eq!(milp.lp.bounds[0], (0.0, 1.0));
+        assert_eq!(milp.lp.bounds[1], (0.0, f64::INFINITY));
+    }
+
+    /// `parse_mps` (LP path) は整数情報を破棄して LP relaxation を返す。
+    /// 境界 (二値既定含む) は LP relaxation の正しい一部として保持される。
+    #[test]
+    fn test_parse_mps_returns_relaxation_dropping_integrality() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+RHS
+    rhs  c1  10.5
+ENDATA
+";
+        let lp = parse_mps(mps).unwrap();
+        // LP relaxation は連続。二値既定の [0,1] 境界は保持される。
+        assert_eq!(lp.num_vars, 1);
+        assert_eq!(lp.bounds, vec![(0.0, 1.0)]);
+    }
+
+    /// 純粋 LP ファイルはマーカーも整数境界も持たない → 整数集合は空。
+    #[test]
+    fn test_milp_pure_lp_has_no_integers() {
+        let mps = r"NAME lp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert!(milp.integer_vars.is_empty());
+        assert_eq!(milp.lp.bounds, vec![(0.0, f64::INFINITY)]);
+    }
+
+    /// 固定幅フォーマットのマーカー行も認識する。
+    #[test]
+    fn test_milp_fixed_format_marker() {
+        // 固定幅: 列15 (index 14) が空白。マーカー行は split_whitespace で検出される。
+        let mps = "NAME          milp\n\
+ROWS\n\
+ N  obj\n\
+ L  c1\n\
+COLUMNS\n    \
+MARKER1                 'MARKER'                 'INTORG'\n    \
+x1        c1        1.0   obj       -1.0\n    \
+MARKER2                 'MARKER'                 'INTEND'\n\
+RHS\n    \
+rhs       c1        10.5\n\
+ENDATA\n";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0], "固定幅マーカー領域の x1 が整数登録される");
+    }
+
+    /// 複数整数変数のインデックスが決定論的に昇順で返る。
+    #[test]
+    fn test_milp_integer_vars_sorted() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    a   obj  1.0  c1  1.0
+    M1 'MARKER' 'INTORG'
+    b   obj  1.0  c1  1.0
+    c   obj  1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+    d   obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        // 列順: a=0, b=1, c=2, d=3。整数は b, c。
+        assert_eq!(milp.integer_vars, vec![1, 2]);
+    }
+
+    /// MILP を実際に解いて最適値を検証する (HiGHS で独立に確認した期待値)。
+    /// テーブル駆動で複数の境界規約パターンを網羅する。
+    /// no-op proof: 二値既定やマーカー検出を外すと、対応行の期待 objective が外れる。
+    #[test]
+    fn test_milp_solve_bound_conventions() {
+        use crate::options::{MipConfig, SolverOptions};
+        use crate::problem::SolveStatus;
+
+        // (説明, BOUNDS セクション本体, 期待 objective)
+        // 全て min -x1 s.t. x1 <= 10.5, x1 整数。HiGHS で独立検証済み。
+        let cases: &[(&str, &str, f64)] = &[
+            // 境界なしマーカー整数 → 二値 [0,1] → x1=1 → obj=-1
+            ("marker_no_bounds_binary", "", -1.0),
+            // UP 5 → [0,5] → x1=5 → obj=-5
+            ("marker_up5", "BOUNDS\n UP BND  x1  5.0\n", -5.0),
+            // LO 2 のみ → [2,+inf] → x1=10 → obj=-10
+            ("marker_lo2", "BOUNDS\n LO BND  x1  2.0\n", -10.0),
+        ];
+
+        for (label, bounds_section, expected_obj) in cases {
+            let mps = format!(
+                "NAME milp\n\
+ROWS\n N  obj\n L  c1\n\
+COLUMNS\n    M1 'MARKER' 'INTORG'\n    x1  obj  -1.0  c1  1.0\n    M2 'MARKER' 'INTEND'\n\
+RHS\n    rhs  c1  10.5\n\
+{bounds_section}ENDATA\n"
+            );
+            let milp = parse_milp(&mps).unwrap();
+            let opts = SolverOptions::default();
+            let cfg = MipConfig::default();
+            let res = crate::mip::solve_milp(&milp, &opts, &cfg);
+            assert_eq!(res.status, SolveStatus::Optimal, "[{label}] should be Optimal");
+            assert!(
+                (res.objective - expected_obj).abs() < 1e-6,
+                "[{label}] expected obj={expected_obj}, got {}",
+                res.objective
+            );
+        }
+    }
+
+    /// UI 整数境界付き MILP を解く: x1 <= 7 整数, min -x1 → x1=7, obj=-7。
+    #[test]
+    fn test_milp_solve_ui_bound() {
+        use crate::options::{MipConfig, SolverOptions};
+        use crate::problem::SolveStatus;
+
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1  obj  -1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+BOUNDS
+ UI BND  x1  7.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        let res = crate::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!((res.objective - (-7.0)).abs() < 1e-6, "expected -7, got {}", res.objective);
+        assert!((res.solution[0] - 7.0).abs() < 1e-6, "x1 should be 7");
     }
 }
