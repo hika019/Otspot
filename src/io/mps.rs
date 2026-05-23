@@ -132,75 +132,42 @@ pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
     parser.parse(&lines)
 }
 
-/// MPSファイルのパース処理を管理する内部構造体
-///
-/// パース中間状態をフィールドに保持し、完了後に`LpProblem`を構築します。
+// Internal parser state holding intermediate data until `LpProblem` is built.
 struct MpsParser {
-    /// 問題名（NAMEセクションから取得）
     problem_name: Option<String>,
-    /// 行定義: (行名, 行タイプ) のリスト
     rows: Vec<(String, RowType)>,
-    /// 列係数: (列名, 行名, 係数値) のリスト
     columns: Vec<(String, String, f64)>,
-    /// 右辺値: 行名 → RHS値 のマップ
     rhs: HashMap<String, f64>,
-    /// 幅指定: 行名 → RANGE値 のマップ
     ranges: HashMap<String, f64>,
-    /// 上下限制約: (境界タイプ, 列名, 値) のリスト
     bounds: Vec<(BoundType, String, Option<f64>)>,
-    /// 目的関数行の行名
     obj_row: Option<String>,
 }
 
-/// MPSファイルのROWSセクションにおける行タイプ
 #[derive(Debug, Clone, Copy)]
 enum RowType {
-    /// 目的関数行（Nは"free"を意味する）
-    N,
-    /// 上限制約: Ax <= b
-    L,
-    /// 下限制約: Ax >= b
-    G,
-    /// 等式制約: Ax == b
-    E,
+    N, // objective (free)
+    L, // Ax <= b
+    G, // Ax >= b
+    E, // Ax == b
 }
 
-/// MPSファイルのBOUNDSセクションにおける上下限タイプ
 #[derive(Debug, Clone, Copy)]
 enum BoundType {
-    /// 下限値 (Lower bound): x >= value
-    LO,
-    /// 上限値 (Upper bound): x <= value
-    UP,
-    /// 固定値 (Fixed): x == value
-    FX,
-    /// 自由変数 (Free): -∞ <= x <= +∞
-    FR,
-    /// 下限マイナス無限大 (Minus infinity): x >= -∞
-    MI,
-    /// 2値変数 (Binary variable): x ∈ {0, 1}
-    BV,
-    /// Plus infinity: x <= +∞ (upper bound = +∞, lower bound unchanged at default 0)
-    PL,
+    LO, // lower bound
+    UP, // upper bound
+    FX, // fixed
+    FR, // free (-∞..+∞)
+    MI, // lower = -∞
+    BV, // binary {0,1}
+    PL, // upper = +∞
 }
 
-/// 固定幅MPSフォーマットかどうかを判定する
-///
-/// MPSの固定幅フォーマットは、列15（0-indexed: 14）が空白であることで識別する。
-/// 以下のケースでは自由形式（false）として扱う:
-/// - 空行
-/// - 14文字以下の行（列15が存在しない）
-/// - タブ文字は空白として扱うため `is_whitespace()` で正しく判定される
+// Fixed-width MPS: column 15 (0-indexed: 14) is whitespace.
 fn is_fixed_width_format(line: &str) -> bool {
-    // chars().nth(14) は15文字未満の行でNoneを返すため、
-    // 空行・短い行の境界ケースを自然に処理できる
-    line.chars()
-        .nth(14)
-        .is_some_and(|c| c.is_whitespace())
+    line.chars().nth(14).is_some_and(|c| c.is_whitespace())
 }
 
 impl MpsParser {
-    /// 新しい空の`MpsParser`を生成する
     fn new() -> Self {
         Self {
             problem_name: None,
@@ -213,10 +180,6 @@ impl MpsParser {
         }
     }
 
-    /// MPSファイルの全行をセクションごとに解析し、`LpProblem`を返す
-    ///
-    /// セクションヘッダーの検出（先頭に空白がない行）と、
-    /// データ行（先頭に空白がある行）の処理を区別します。
     fn parse(&mut self, lines: &[&str]) -> Result<LpProblem, MpsError> {
         let mut current_section = Section::None;
         let mut seen_sections = std::collections::HashSet::new();
@@ -225,26 +188,19 @@ impl MpsParser {
             let line_num = line_idx + 1;
             let trimmed = line.trim();
 
-            // 空行とコメント行（'*'で始まる行）をスキップ
             if trimmed.is_empty() || trimmed.starts_with('*') {
                 continue;
             }
 
-            // セクションヘッダーの検出（先頭が空白でない行がヘッダー候補）
-            // データ行は先頭に空白があるため、この条件で区別できる
+            // Section headers: non-indented lines.
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
-                    // NAMEとENDATAを除くセクションの重複チェック
                     if section != Section::Name && section != Section::EndData
                         && seen_sections.contains(&section) {
                         return Err(MpsError::DuplicateSection(format!("{:?}", section)));
                     }
-                    // 出現済みセクションとして記録
                     seen_sections.insert(section);
                     current_section = section;
-
-                    // NAMEセクション: 同一行から問題名を取得
-                    // 書式: "NAME          problem_name"
                     if section == Section::Name && trimmed.len() > 4 {
                         let name_part = trimmed[4..].trim();
                         if !name_part.is_empty() {
@@ -255,7 +211,6 @@ impl MpsParser {
                 }
             }
 
-            // 現在のセクションに応じてデータ行を処理
             match current_section {
                 Section::None => {
                     return Err(MpsError::ParseError {
@@ -263,9 +218,7 @@ impl MpsParser {
                         message: "Line appears before any section header".to_string(),
                     });
                 }
-                Section::Name => {
-                    // NAMEはセクションヘッダー検出時に処理済み
-                }
+                Section::Name => {}
                 Section::Rows => self.parse_rows_line(line, line_num)?,
                 Section::Columns => self.parse_columns_line(line, line_num)?,
                 Section::Rhs => self.parse_rhs_line(line, line_num)?,
@@ -275,12 +228,9 @@ impl MpsParser {
             }
         }
 
-        // ENDATAセクションの存在チェック
         if !seen_sections.contains(&Section::EndData) {
             return Err(MpsError::MissingSection("ENDATA".to_string()));
         }
-
-        // 必須セクション（ROWS・COLUMNS）の存在チェック
         if !seen_sections.contains(&Section::Rows) {
             return Err(MpsError::MissingSection("ROWS".to_string()));
         }
@@ -291,10 +241,6 @@ impl MpsParser {
         self.build_lp_problem()
     }
 
-    /// ROWSセクションの1行をパースして行定義を追加する
-    ///
-    /// 書式: `<行タイプ>  <行名>` （例: `L  constraint1`）
-    /// 最初に現れるNタイプの行を目的関数行として記録します。
     fn parse_rows_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 2 {
@@ -323,7 +269,6 @@ impl MpsParser {
             _ => return Err(MpsError::InvalidRowType(row_type_char)),
         };
 
-        // 最初のNタイプ行を目的関数行として登録
         if matches!(row_type, RowType::N) && self.obj_row.is_none() {
             self.obj_row = Some(row_name.clone());
         }
@@ -332,10 +277,6 @@ impl MpsParser {
         Ok(())
     }
 
-    /// COLUMNSセクションの1行をパースする
-    ///
-    /// 列位置を確認してフォーマットを自動判別し、
-    /// 固定幅またはフリーフォーマットの対応関数に委譲します。
     fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let is_fixed_width = is_fixed_width_format(line);
 
@@ -346,20 +287,11 @@ impl MpsParser {
         }
     }
 
-    /// 固定幅フォーマットのCOLUMNS行をパースする
-    ///
-    /// 固定フォーマットの列配置:
-    /// - 列5〜12: 列名 (col_name)
-    /// - 列15〜22: 行名1 (row_name)
-    /// - 列25〜36: 係数値1 (value)
-    /// - 列40〜47: 行名2（省略可）
-    /// - 列50〜61: 係数値2（省略可）
+    // Fixed-width COLUMNS: col5-12=name, col15-22=row1, col25-36=val1, [col40-47=row2, col50-61=val2]
     fn parse_columns_fixed(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        // 固定フォーマット: col5-12=col_name, col15-22=row_name, col25-36=value
-        //                [col40-47=row_name2, col50-61=value2]
 
         if line.len() < 25 {
-            return Ok(()); // 短すぎる行はスキップ
+            return Ok(());
         }
 
         let col_name = line.get(4..12).unwrap_or("").trim().to_string();
@@ -378,7 +310,6 @@ impl MpsParser {
             self.columns.push((col_name.clone(), row_name1, value1));
         }
 
-        // 2エントリ目（省略可）
         if line.len() >= 50 {
             let row_name2 = line.get(39..47).unwrap_or("").trim().to_string();
             let value2_str = line.get(49..61).unwrap_or("").trim();
@@ -395,19 +326,13 @@ impl MpsParser {
         Ok(())
     }
 
-    /// フリーフォーマットのCOLUMNS行をパースする
-    ///
-    /// 書式: `<列名>  <行名1>  <値1>  [<行名2>  <値2>]`
-    /// 1行に最大2つの (行名, 値) ペアを記述できます。
     fn parse_columns_free(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
-            return Ok(()); // 不完全な行はスキップ
+            return Ok(());
         }
 
         let col_name = parts[0].to_string();
-
-        // (行名, 値) のペアを順に処理
         for i in (1..parts.len()).step_by(2) {
             if i + 1 >= parts.len() {
                 break;
@@ -423,10 +348,6 @@ impl MpsParser {
         Ok(())
     }
 
-    /// RHSセクションの1行をパースして右辺値を登録する
-    ///
-    /// 書式: `<RHS名>  <行名1>  <値1>  [<行名2>  <値2>]`
-    /// RHS名は識別子として存在しますが、複数RHSは未サポートのため無視します。
     fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         // COLUMNSと同様のフォーマット
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -450,12 +371,7 @@ impl MpsParser {
         Ok(())
     }
 
-    /// RANGESセクションの1行をパースして幅制約値を登録する
-    ///
-    /// 書式はRHSと同様です。RANGE値は制約の幅を定義し、
-    /// `build_lp_problem`でRHS値の調整に使用されます。
     fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
-        // RHSと同様のフォーマット
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             return Ok(());
@@ -476,10 +392,6 @@ impl MpsParser {
         Ok(())
     }
 
-    /// BOUNDSセクションの1行をパースして変数の上下限を登録する
-    ///
-    /// 書式: `<境界タイプ>  <境界名>  <列名>  [<値>]`
-    /// FR・MI・BVタイプは値なしで指定できます。
     fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
@@ -487,7 +399,7 @@ impl MpsParser {
         }
 
         let bound_type_str = parts[0];
-        let _bound_name = parts[1]; // 境界名は通常無視される
+        let _bound_name = parts[1];
         let col_name = parts[2].to_string();
         let value = if parts.len() >= 4 {
             Some(parts[3].parse::<f64>().map_err(|_| MpsError::ParseError {
@@ -513,79 +425,51 @@ impl MpsParser {
         Ok(())
     }
 
-    /// パース済みデータから`LpProblem`を構築する
-    ///
-    /// 処理の流れ:
-    /// 1. 行名→インデックスマップを構築（目的関数行を除く）
-    /// 2. RANGESを適用してRHS値を調整
-    /// 3. 列名→インデックスマップを構築
-    /// 4. 目的関数ベクトル`c`を構築
-    /// 5. 制約行列`A`をCSC形式で構築
-    /// 6. 変数の上下限ベクトルを構築
     fn build_lp_problem(&self) -> Result<LpProblem, MpsError> {
-        // 行名 → インデックスのマップ構築（目的関数行を除外）
         let mut row_map = HashMap::new();
         let mut constraint_types = Vec::new();
         let mut rhs_vec = Vec::new();
 
         for (row_name, row_type) in &self.rows {
             if Some(row_name) == self.obj_row.as_ref() {
-                continue; // 目的関数行はスキップ
+                continue;
             }
-
             let idx = row_map.len();
             row_map.insert(row_name.clone(), idx);
-
             let constraint_type = match row_type {
                 RowType::L => ConstraintType::Le,
                 RowType::G => ConstraintType::Ge,
                 RowType::E => ConstraintType::Eq,
-                RowType::N => continue, // 複数のN行はスキップ
+                RowType::N => continue,
             };
             constraint_types.push(constraint_type);
-
             let rhs_val = self.rhs.get(row_name).copied().unwrap_or(0.0);
             rhs_vec.push(rhs_val);
         }
 
         let base_num_constraints = row_map.len();
 
-        // RANGESの適用: 区間制約（[lower, upper]）に変換する
-        // 各RANGE行を上限（Le）と下限（Ge）の2制約に分割する行分割アプローチ
-        //
-        // 仕様（IBM MPS標準）:
-        //   L制約: b - |r| <= Ax <= b
-        //   G制約: b <= Ax <= b + |r|
-        //   E制約(r>=0): b <= Ax <= b + |r|
-        //   E制約(r<0):  b - |r| <= Ax <= b
+        // RANGES: convert interval constraints [lower, upper] by splitting each
+        // range row into an Le (upper) and Ge (lower) pair.
+        // IBM MPS standard: L→[b-|r|,b], G→[b,b+|r|], E(r≥0)→[b,b+|r|], E(r<0)→[b-|r|,b].
         let mut range_extra_rows: Vec<(String, usize, f64)> = Vec::new();
         for (row_name, range_val) in &self.ranges {
             if let Some(&idx) = row_map.get(row_name) {
                 let b = rhs_vec[idx];
                 let abs_r = range_val.abs();
-
                 let (lower, upper) = match constraint_types[idx] {
                     ConstraintType::Le => (b - abs_r, b),
                     ConstraintType::Ge => (b, b + abs_r),
                     ConstraintType::Eq => {
-                        if *range_val >= 0.0 {
-                            (b, b + abs_r)
-                        } else {
-                            (b - abs_r, b)
-                        }
+                        if *range_val >= 0.0 { (b, b + abs_r) } else { (b - abs_r, b) }
                     }
                 };
-
-                // 既存行をLe制約（上限側）に変更
                 constraint_types[idx] = ConstraintType::Le;
                 rhs_vec[idx] = upper;
-
-                // 下限側の追加行を記録（行名, 元インデックス, lower_bound）
                 range_extra_rows.push((row_name.clone(), idx, lower));
             }
         }
 
-        // RANGE追加行のインデックスマップと制約情報を構築
         let mut range_row_map: HashMap<String, usize> = HashMap::new();
         for (row_name, _orig_idx, lower_bound) in &range_extra_rows {
             let new_idx = base_num_constraints + range_row_map.len();
@@ -596,7 +480,6 @@ impl MpsParser {
 
         let num_constraints = base_num_constraints + range_row_map.len();
 
-        // 列名 → インデックスのマップ構築
         let mut col_map = HashMap::new();
         for (col_name, _, _) in &self.columns {
             if !col_map.contains_key(col_name) {
@@ -607,7 +490,6 @@ impl MpsParser {
 
         let num_vars = col_map.len();
 
-        // 目的関数ベクトル c の構築
         let mut c = vec![0.0; num_vars];
         if let Some(obj_row_name) = &self.obj_row {
             for (col_name, row_name, value) in &self.columns {
@@ -619,10 +501,8 @@ impl MpsParser {
             }
         }
 
-        // 制約行列 A をトリプレット形式で構築
         let mut triplets = Vec::new();
         for (col_name, row_name, value) in &self.columns {
-            // 目的関数行はスキップ
             if Some(row_name) == self.obj_row.as_ref() {
                 continue;
             }
@@ -638,7 +518,6 @@ impl MpsParser {
 
             triplets.push((*row_idx, *col_idx, *value));
 
-            // RANGE追加行（下限側Ge制約）にも同じ係数を複製
             if let Some(&range_row_idx) = range_row_map.get(row_name) {
                 triplets.push((range_row_idx, *col_idx, *value));
             }
@@ -654,7 +533,6 @@ impl MpsParser {
                 message: format!("Failed to build matrix: {}", e),
             })?;
 
-        // 変数の上下限ベクトルを構築（デフォルト: [0, +∞)）
         let mut bounds = vec![(0.0, f64::INFINITY); num_vars];
         for (bound_type, col_name, value) in &self.bounds {
             let col_idx = col_map.get(col_name).ok_or_else(|| MpsError::UndefinedReference {
@@ -683,8 +561,6 @@ impl MpsParser {
                     bounds[*col_idx] = (0.0, 1.0);
                 }
                 BoundType::PL => {
-                    // PL: upper bound = +infinity (explicit, same as default).
-                    // Lower bound remains unchanged (default 0).
                     bounds[*col_idx].1 = f64::INFINITY;
                 }
             }
@@ -705,34 +581,12 @@ impl MpsParser {
     }
 }
 
-/// MPSファイルのセクション種別
-///
-/// パース中の現在処理セクションを追跡するために使用します。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Section {
-    /// セクション未検出の初期状態
-    None,
-    /// NAMEセクション（問題名）
-    Name,
-    /// ROWSセクション（行タイプ定義）
-    Rows,
-    /// COLUMNSセクション（変数係数）
-    Columns,
-    /// RHSセクション（右辺値）
-    Rhs,
-    /// RANGESセクション（幅制約）
-    Ranges,
-    /// BOUNDSセクション（上下限）
-    Bounds,
-    /// ENDATAセクション（ファイル終端）
-    EndData,
+    None, Name, Rows, Columns, Rhs, Ranges, Bounds, EndData,
 }
 
 impl Section {
-    /// 行文字列からセクション種別を判定する
-    ///
-    /// 大文字小文字を区別せず、行の先頭がセクション名と一致するか確認します。
-    /// 一致しない場合は`None`を返します。
     fn from_line(line: &str) -> Option<Self> {
         let upper = line.to_uppercase();
         if upper.starts_with("NAME") {

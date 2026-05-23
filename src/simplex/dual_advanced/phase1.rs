@@ -67,8 +67,7 @@ use super::core::dual_simplex_core_advanced;
 /// This is the only sufficient proof of infeasibility we can give without
 /// completing Phase I. If the certificate fails, the caller must return Timeout
 /// rather than guessing Infeasible from artificial residual alone — that
-/// heuristic flipped the verdict on slow-but-feasible LPs (#37: pilot/dfl001/
-/// ken-13/ken-18).
+/// heuristic produces false-infeasible verdicts on slow-but-feasible LPs.
 ///
 /// Tolerance scales with ||b||_∞ to stay correct on Ruiz-scaled inputs.
 fn farkas_infeasibility_certified(
@@ -584,7 +583,7 @@ pub(crate) fn big_m_cold_start(
             // Infeasibility is declared ONLY via a verified Farkas certificate
             // (A^T y ≤ tol ∧ b^T y > tol). A residual artificial in the basis
             // is NOT a proof on its own: that heuristic flips slow-but-feasible
-            // LPs (pilot/dfl001/ken) to false-Infeasible (#37/#43). When the
+            // LPs (pilot/dfl001/ken) to false-Infeasible. When the
             // certificate fails, fall through to Phase II.
             let any_artificial_in_basis = (0..m).any(|i| basis_aug[i] >= n_total);
             if any_artificial_in_basis

@@ -61,6 +61,13 @@ const SHIFT_FACTOR: f64 = 10.0;
 /// 公開 API の互換版 (par 引数なし) はこれを暗黙に使用する。
 const DEFAULT_PAR: faer::Par = faer::Par::Seq;
 
+/// Quasidefinite regularization delta: expected-sign pivot that is smaller than
+/// this threshold is replaced with `LDLT_REG_DELTA`. Matches `ldl_dd::DELTA`.
+const LDLT_REG_DELTA: f64 = 1e-8;
+/// Quasidefinite regularization epsilon: |D[k]| below this is pushed to
+/// `LDLT_REG_DELTA` in the expected direction. Matches `ldl_dd::EPSILON`.
+const LDLT_REG_EPSILON: f64 = 1e-13;
+
 // ── LdlFactorization (positive definite, no AMD) ──────────────────────────────
 
 /// faer high-level LDL^T factorization for positive definite matrices (no AMD).
@@ -286,8 +293,8 @@ fn do_numeric_factorize_with_cache(
 
     let regularization = LdltRegularization {
         dynamic_regularization_signs: signs,
-        dynamic_regularization_delta: 1e-8,
-        dynamic_regularization_epsilon: 1e-13,
+        dynamic_regularization_delta: LDLT_REG_DELTA,
+        dynamic_regularization_epsilon: LDLT_REG_EPSILON,
     };
 
     let mut l_values = vec![0.0f64; l_nnz];
@@ -1182,8 +1189,8 @@ mod tests {
 
             let regularization = faer::linalg::cholesky::ldlt::factor::LdltRegularization {
                 dynamic_regularization_signs: None,
-                dynamic_regularization_delta: 1e-8,
-                dynamic_regularization_epsilon: 1e-13,
+                dynamic_regularization_delta: LDLT_REG_DELTA,
+                dynamic_regularization_epsilon: LDLT_REG_EPSILON,
             };
             let mut mem3 = MemBuffer::new(StackReq::any_of(&[
                 supernodal::factorize_supernodal_numeric_ldlt_scratch::<usize, f64>(
@@ -1231,8 +1238,8 @@ mod tests {
 
             let regularization = faer::linalg::cholesky::ldlt::factor::LdltRegularization {
                 dynamic_regularization_signs: None,
-                dynamic_regularization_delta: 1e-8,
-                dynamic_regularization_epsilon: 1e-13,
+                dynamic_regularization_delta: LDLT_REG_DELTA,
+                dynamic_regularization_epsilon: LDLT_REG_EPSILON,
             };
             let l_nnz = sym_s.len_val();
             let mut l_values = vec![0.0f64; l_nnz];
