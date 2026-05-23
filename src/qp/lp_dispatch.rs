@@ -226,22 +226,29 @@ fn normalized_farkas_rows(problem: &QpProblem) -> (Vec<Vec<(usize, f64)>>, Vec<f
 /// なので絶対 tol で安全。
 const FARKAS_NORM_TOL: f64 = 1e-7;
 
-/// Cᵀy ≤ 0 残差の相対許容 (内積項 magnitude Σ|sign·a·y| に対する比)。
+/// 内積 Σ sign·a·y の f64 累積丸め誤差を見積もる 1 項あたりの後退誤差係数。
 ///
-/// 残差を絶対 tol で評価すると d (RHS) のスケールに比例して偽証明が通る:
-/// feasible な `x1+x2=1e9` で IPM が正規化 dᵀy=1 を満たす y を返すと
-/// Cᵀy≈dᵀy/d≈1e-9 となり、絶対 tol 1e-7 を下回って Infeasible を誤認定する。
-/// この残差は f64 内積丸め (~1e-15) を大きく超える「本物の正の slack」であり、
-/// 項 magnitude (≈8.76) に対する相対比 ≈1e-10 で識別できる。
-/// この定数は丸め下限 (~n·ε≈1e-15) を十分上回り、かつ d~1e9 偽証明の相対残差比
-/// (~1e-10) を下回るため、両者を分離する。
-const FARKAS_CTY_REL_TOL: f64 = 1e-11;
+/// floor は IPM 収束 tol ではなく f64 の**真の丸め境界**に置く。n 項の積和の丸め
+/// 誤差は後退誤差解析で ≲ n·u·Σ|項| (u = ε/2 は unit roundoff)。各項は積 1 回 +
+/// 和 1 回で最大 2u = ε の相対誤差を負うため、floor を `n_terms·ε·term_mag` とする。
+///
+/// これを IPM tol と分離する理由: cert IPM は infeasible な cert LP の残差を自身の
+/// 収束 tol (~1e-11) まで潰し、Eq の ± 二方向で Cᵀy = y0−y1 ≈ 1/K の微小な**正の
+/// slack** を持つ偽証明を作る。floor を 1e-11 級に置くとこれを noise と誤判定し
+/// feasible (`x1+x2=K`, K≳1e11) を false-infeasible に認定する。floor を丸め境界
+/// (~n·1e-16) に締めると、IPM 残差由来の偽証明 (Cᵀy~1e-11..1e-13) は floor の数桁
+/// 上で reject される。klein3 の genuine cert (Cᵀy<0、厳密に負) と真の丸め
+/// (~n·ε·term_mag 以下) は通過する。soundness 最優先: 偽 accept を出さないことを、
+/// 境界際 genuine cert を取りこぼす (honest Timeout 化) より優先する。
+const FARKAS_CTY_ROUNDOFF_PER_TERM: f64 = f64::EPSILON;
 
 /// 正の slack `aty = (Cᵀy)_j` が内積丸め誤差の範囲内か (= Cᵀy ≤ 0 を f64 精度で
-/// 満たすか)。`term_mag = Σ_k |sign·a·y|` はその成分の内積項 magnitude。
-/// 絶対 tol でなく magnitude 相対の roundoff floor を使うことで scale 不変にする。
-fn cty_slack_within_noise(aty: f64, term_mag: f64) -> bool {
-    aty <= FARKAS_CTY_REL_TOL * term_mag
+/// 満たすか)。`term_mag = Σ_k |sign·a·y|` はその成分の内積項 magnitude、
+/// `n_terms` は加算した項数。floor を `n_terms·ε·term_mag` とし、scale 不変かつ
+/// IPM tol から独立な丸め境界で判定する。
+fn cty_slack_within_noise(aty: f64, term_mag: f64, n_terms: usize) -> bool {
+    let roundoff_floor = (n_terms as f64) * FARKAS_CTY_ROUNDOFF_PER_TERM * term_mag;
+    aty <= roundoff_floor
 }
 
 fn verify_normalized_farkas(
@@ -270,14 +277,16 @@ fn verify_normalized_farkas(
         };
         let mut aty = 0.0;
         let mut term_mag = 0.0;
+        let mut n_terms = 0usize;
         for (k, &i) in a_rows.iter().enumerate() {
             for &(cert_col, sign) in &cert_cols_by_row[i] {
                 let term = sign * a_vals[k] * yp(cert_col);
                 aty += term;
                 term_mag += term.abs();
+                n_terms += 1;
             }
         }
-        if !aty.is_finite() || !cty_slack_within_noise(aty, term_mag) {
+        if !aty.is_finite() || !cty_slack_within_noise(aty, term_mag, n_terms) {
             return false;
         }
     }
@@ -351,61 +360,73 @@ mod tests {
         .unwrap()
     }
 
-    /// 旧実装の絶対 tol。sentinel が「相対化なし (no-op) なら誤判定する」ことを
-    /// 明示するための参照値 (実装側には残っていない)。
-    const LEGACY_ABS_TOL: f64 = 1e-7;
+    /// 旧 IPM-tol 級 floor。sentinel が「floor を IPM tol (1e-11) に戻すと
+    /// 偽証明を accept する」ことを明示するための参照値 (実装側には残っていない)。
+    const LEGACY_IPM_TOL_FLOOR: f64 = 1e-11;
 
-    /// Cᵀy 残差の noise 判定を複数パターンで cover。
-    /// 偽証明 (大 magnitude feasible) は本物の正 slack として reject、
-    /// 真の負残差/丸め以下は accept。
+    /// 丸め境界 floor `n_terms·ε·term_mag` を複数パターンで cover。
+    /// 偽証明 (IPM 残差級の正 slack) は reject、真の負残差/丸め以下は accept。
+    /// 同一 aty でも n_terms / term_mag で floor がスケールすることを確認。
     #[test]
     fn cty_slack_within_noise_separates_real_slack_from_roundoff() {
-        // (aty, term_mag, expect_within_noise, label)
+        // (aty, term_mag, n_terms, expect_within_noise, label)
         let cases = [
-            // d~1e9 feasible: residual ≈ dᵀy/d = 1e-9、項 magnitude O(1)。本物の正 slack。
-            (1e-9, 8.76, false, "d=1e9 normalized feasible"),
-            (1.8626e-9, 2.0, false, "d=1e9 (dᵀy≈1.86)"),
-            (1.49e-8, 2.0, false, "d=1e8 normalized feasible"),
+            // IPM 残差級の正 slack: floor (~n·ε·mag) の数桁上 → reject。
+            (1e-9, 8.76, 2, false, "d=1e9 normalized feasible"),
+            (1.8626e-9, 2.0, 2, false, "d=1e9 (dᵀy≈1.86)"),
+            (1.49e-8, 2.0, 2, false, "d=1e8 normalized feasible"),
+            (1.455e-11, 2.0, 2, false, "K=1e11 false-cert residual"),
+            (1.137e-13, 2.0, 2, false, "K=1e13 false-cert residual"),
             // klein3 genuine: 残差は厳密に負。
-            (-4.1e-6, 986.0, true, "klein3 genuine cert"),
-            (-1.0, 3.0, true, "strict negative residual"),
-            (0.0, 5.0, true, "exact zero residual"),
-            // f64 内積丸めレベル: noise として accept。
-            (1e-15, 8.76, true, "roundoff-level positive"),
-            (1e-13, 2.0, true, "below relative floor"),
+            (-4.1e-6, 986.0, 4, true, "klein3 genuine cert"),
+            (-1.0, 3.0, 2, true, "strict negative residual"),
+            (0.0, 5.0, 2, true, "exact zero residual"),
+            // f64 内積丸めレベル: noise として accept。floor = 2·ε·8.76 ≈ 3.9e-15。
+            (1e-15, 8.76, 2, true, "roundoff-level positive"),
+            (2e-16, 1.0, 2, true, "near machine eps"),
+            // n_terms スケール: 同 aty=1e-12 でも項数で floor が動く。
+            (1e-12, 1.0, 2, false, "small n: above roundoff floor"),
+            (1e-12, 1.0, 10_000, true, "large n: within accumulated roundoff"),
         ];
-        for (aty, mag, expect, label) in cases {
+        for (aty, mag, n_terms, expect, label) in cases {
             assert_eq!(
-                cty_slack_within_noise(aty, mag),
+                cty_slack_within_noise(aty, mag, n_terms),
                 expect,
-                "case `{label}`: aty={aty:e}, mag={mag:e}",
+                "case `{label}`: aty={aty:e}, mag={mag:e}, n_terms={n_terms}",
             );
         }
 
-        // load-bearing: 旧絶対 tol 1e-7 では正の偽 slack 1e-9 / 1.49e-8 を「noise」と
-        // 誤判定する。相対化済の実装はこれを reject する。両者が分岐することを実証。
-        for &(aty, mag) in &[(1e-9, 8.76), (1.8626e-9, 2.0), (1.49e-8, 2.0)] {
+        // load-bearing: floor を IPM tol (1e-11) に戻すと K≳1e11 の偽証明残差
+        // (1.455e-11 / 1.137e-13) を noise と誤判定する。丸め境界 floor はこれを
+        // reject する。両 floor が分岐することを実証 (sentinel が no-op で FAIL)。
+        for &(aty, mag, n_terms) in &[(1.455e-11, 2.0, 2usize), (1.137e-13, 2.0, 2)] {
             assert!(
-                aty <= LEGACY_ABS_TOL,
-                "premise: abs tol would have accepted aty={aty:e}",
+                aty <= LEGACY_IPM_TOL_FLOOR * mag,
+                "premise: IPM-tol floor would have accepted aty={aty:e}",
             );
             assert!(
-                !cty_slack_within_noise(aty, mag),
-                "relative floor must reject real positive slack aty={aty:e}",
+                !cty_slack_within_noise(aty, mag, n_terms),
+                "roundoff floor must reject IPM-residual slack aty={aty:e}",
             );
         }
     }
 
     /// 大 magnitude feasible (`x1+x2=K`) が Infeasible 認定されないこと。
     /// 偽証明 y は正規化 dᵀy≥1 を満たすが Cᵀy≈dᵀy/K の本物の正 slack を持つ。
+    /// load-bearing: K≳1e11 の偽残差は旧 IPM-tol floor (1e-11) では accept される。
     #[test]
     fn farkas_rejects_large_magnitude_feasible() {
-        // (K, g): g は y0-y1 (2 のべきで厳密表現)。dᵀy=K·g≥1 を保つ。
+        // (K, g, legacy_would_accept): g は y0-y1 (2 のべきで厳密表現)。dᵀy=K·g≥1。
+        // legacy_would_accept = 旧 IPM-tol floor (1e-11·term_mag) が Cᵀy=g を誤 accept
+        // するか。K=1e9 の残差 (~1.86e-9) は旧 floor でも既に reject されるため非 load-
+        // bearing、K≳1e11 (~1.46e-11..1.14e-13) が新 floor 固有の reject。
         let patterns = [
-            (1e9, 2.0_f64.powi(-29)), // dᵀy = 1e9·2^-29 ≈ 1.863
-            (1e8, 2.0_f64.powi(-26)), // dᵀy = 1e8·2^-26 ≈ 1.490
+            (1e9, 2.0_f64.powi(-29), false),  // Cᵀy = g ≈ 1.863e-9
+            (1e11, 2.0_f64.powi(-36), true),  // Cᵀy = g ≈ 1.455e-11
+            (1e12, 2.0_f64.powi(-39), true),  // Cᵀy = g ≈ 1.819e-12
+            (1e13, 2.0_f64.powi(-43), true),  // Cᵀy = g ≈ 1.137e-13
         ];
-        for (k, g) in patterns {
+        for (k, g, legacy_would_accept) in patterns {
             let problem = nonneg_qp(&[vec![1.0, 1.0]], &[k], &[ConstraintType::Eq]);
             let (cols, rhs) = normalized_farkas_rows(&problem);
             assert_eq!(rhs, vec![k, -k], "Eq → ±K の cert RHS");
@@ -413,14 +434,40 @@ mod tests {
             let y = vec![1.0 + g, 1.0];
             let cty = g; // y0 - y1
             let dty = k * g;
+            let term_mag = (1.0 + g) + 1.0; // |y0| + |y1|
             assert!(dty >= 1.0 - FARKAS_NORM_TOL, "premise: dᵀy={dty} must clear norm");
-            assert!(
-                cty <= LEGACY_ABS_TOL,
-                "premise: abs tol would accept Cᵀy={cty:e} for K={k:e}",
+            assert_eq!(
+                cty <= LEGACY_IPM_TOL_FLOOR * term_mag,
+                legacy_would_accept,
+                "premise: IPM-tol floor accept(Cᵀy={cty:e}) for K={k:e}",
             );
             assert!(
                 !verify_normalized_farkas(&problem, &cols, &rhs, &y),
                 "feasible x1+x2={k:e} must NOT be certified infeasible",
+            );
+        }
+    }
+
+    /// reviewer 再現を端から潰す: cert IPM を実際に走らせる end-to-end gate。
+    /// feasible 問題 (`x1+x2=K`, single-var Ge `2x1≥K`) は cert LP 自体が
+    /// infeasible なので、IPM が残差を tol まで潰した偽証明を返しても
+    /// 丸め境界 floor が reject し、Infeasible 認定されてはならない。
+    #[test]
+    fn verified_farkas_rejects_feasible_large_magnitude_end_to_end() {
+        use crate::options::SolverOptions;
+        let opts = SolverOptions::default();
+        for k in [1e9, 1e11, 1e12, 1e13] {
+            // x1+x2=K, x≥0 は feasible (例 x=(K,0))。
+            let eq = nonneg_qp(&[vec![1.0, 1.0]], &[k], &[ConstraintType::Eq]);
+            assert!(
+                !verified_farkas_timeout_fallback(&eq, &opts),
+                "feasible x1+x2={k:e} must NOT be certified infeasible",
+            );
+            // 2x1 ≥ K, x≥0 は feasible (x1=K/2)。
+            let ge = nonneg_qp(&[vec![2.0]], &[k], &[ConstraintType::Ge]);
+            assert!(
+                !verified_farkas_timeout_fallback(&ge, &opts),
+                "feasible 2x1 ≥ {k:e} must NOT be certified infeasible",
             );
         }
     }
