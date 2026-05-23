@@ -147,23 +147,7 @@ fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions
     }
 
     // Convert user rows to Cx >= d. Equality rows need both directions.
-    let mut cert_cols_by_row = vec![Vec::<(usize, f64)>::new(); problem.num_constraints];
-    let mut cert_rhs = Vec::new();
-    for (i, &kind) in problem.constraint_types.iter().enumerate() {
-        let mut push_col = |sign: f64| {
-            let col = cert_rhs.len();
-            cert_cols_by_row[i].push((col, sign));
-            cert_rhs.push(sign * problem.b[i]);
-        };
-        match kind {
-            ConstraintType::Ge => push_col(1.0),
-            ConstraintType::Le => push_col(-1.0),
-            ConstraintType::Eq => {
-                push_col(1.0);
-                push_col(-1.0);
-            }
-        }
-    }
+    let (cert_cols_by_row, cert_rhs) = normalized_farkas_rows(problem);
     if cert_rhs.is_empty() {
         return false;
     }
@@ -215,18 +199,69 @@ fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions
         && verify_normalized_farkas(problem, &cert_cols_by_row, &cert_rhs, &result.solution)
 }
 
+/// ユーザ行 (Ge/Le/Eq) を `Cx ≥ d` 形へ正規化し、行 i ごとの (cert_col, sign) と
+/// 正規化済 RHS d を返す。Eq は両向き (±) で 2 列。
+fn normalized_farkas_rows(problem: &QpProblem) -> (Vec<Vec<(usize, f64)>>, Vec<f64>) {
+    let mut cert_cols_by_row = vec![Vec::<(usize, f64)>::new(); problem.num_constraints];
+    let mut cert_rhs = Vec::new();
+    for (i, &kind) in problem.constraint_types.iter().enumerate() {
+        let mut push_col = |sign: f64| {
+            let col = cert_rhs.len();
+            cert_cols_by_row[i].push((col, sign));
+            cert_rhs.push(sign * problem.b[i]);
+        };
+        match kind {
+            ConstraintType::Ge => push_col(1.0),
+            ConstraintType::Le => push_col(-1.0),
+            ConstraintType::Eq => {
+                push_col(1.0);
+                push_col(-1.0);
+            }
+        }
+    }
+    (cert_cols_by_row, cert_rhs)
+}
+
+/// 正規化制約 dᵀy ≥ 1 の許容下限。1 は cert LP の正規化定数 (データスケール非依存)
+/// なので絶対 tol で安全。
+const FARKAS_NORM_TOL: f64 = 1e-7;
+
+/// Cᵀy ≤ 0 残差の相対許容 (内積項 magnitude Σ|sign·a·y| に対する比)。
+///
+/// 残差を絶対 tol で評価すると d (RHS) のスケールに比例して偽証明が通る:
+/// feasible な `x1+x2=1e9` で IPM が正規化 dᵀy=1 を満たす y を返すと
+/// Cᵀy≈dᵀy/d≈1e-9 となり、絶対 tol 1e-7 を下回って Infeasible を誤認定する。
+/// この残差は f64 内積丸め (~1e-15) を大きく超える「本物の正の slack」であり、
+/// 項 magnitude (≈8.76) に対する相対比 ≈1e-10 で識別できる。
+/// この定数は丸め下限 (~n·ε≈1e-15) を十分上回り、かつ d~1e9 偽証明の相対残差比
+/// (~1e-10) を下回るため、両者を分離する。
+const FARKAS_CTY_REL_TOL: f64 = 1e-11;
+
+/// 正の slack `aty = (Cᵀy)_j` が内積丸め誤差の範囲内か (= Cᵀy ≤ 0 を f64 精度で
+/// 満たすか)。`term_mag = Σ_k |sign·a·y|` はその成分の内積項 magnitude。
+/// 絶対 tol でなく magnitude 相対の roundoff floor を使うことで scale 不変にする。
+fn cty_slack_within_noise(aty: f64, term_mag: f64) -> bool {
+    aty <= FARKAS_CTY_REL_TOL * term_mag
+}
+
 fn verify_normalized_farkas(
     problem: &QpProblem,
     cert_cols_by_row: &[Vec<(usize, f64)>],
     cert_rhs: &[f64],
     y: &[f64],
 ) -> bool {
-    let tol = 1e-7;
-    if y.len() != cert_rhs.len() || y.iter().any(|&v| v < -tol || !v.is_finite()) {
+    if y.len() != cert_rhs.len() || y.iter().any(|&v| !v.is_finite()) {
         return false;
     }
-    let rhs_dot = cert_rhs.iter().zip(y).map(|(&d, &yi)| d * yi).sum::<f64>();
-    if !rhs_dot.is_finite() || rhs_dot < 1.0 - tol {
+    // 厳密な非負部分 y⁺ = max(y, 0) で検証する。IPM の僅かな負 slack を許容しても
+    // y⁺ ≥ 0 が厳密に成り立つので Farkas の健全性 (dᵀy⁺ ≤ xᵀCᵀy⁺) を崩さない。
+    let yp = |col: usize| y[col].max(0.0);
+    let rhs_dot = cert_rhs
+        .iter()
+        .enumerate()
+        .map(|(col, &d)| d * yp(col))
+        .sum::<f64>();
+    if !rhs_dot.is_finite() || rhs_dot < 1.0 - FARKAS_NORM_TOL {
         return false;
     }
     for j in 0..problem.num_vars {
@@ -234,12 +269,15 @@ fn verify_normalized_farkas(
             return false;
         };
         let mut aty = 0.0;
+        let mut term_mag = 0.0;
         for (k, &i) in a_rows.iter().enumerate() {
             for &(cert_col, sign) in &cert_cols_by_row[i] {
-                aty += sign * a_vals[k] * y[cert_col];
+                let term = sign * a_vals[k] * yp(cert_col);
+                aty += term;
+                term_mag += term.abs();
             }
         }
-        if !aty.is_finite() || aty > tol {
+        if !aty.is_finite() || !cty_slack_within_noise(aty, term_mag) {
             return false;
         }
     }
@@ -282,5 +320,141 @@ mod tests {
 
         assert_eq!(r1.stats.route, SolveRoute::LpDirect, "r1 route must be LpDirect");
         assert_eq!(r2.stats.route, SolveRoute::LpDirect, "r2 route must be LpDirect");
+    }
+
+    /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
+    fn nonneg_qp(a_rows: &[Vec<f64>], b: &[f64], types: &[ConstraintType]) -> QpProblem {
+        let m = a_rows.len();
+        let n = a_rows.first().map_or(0, |r| r.len());
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for (i, row) in a_rows.iter().enumerate() {
+            assert_eq!(row.len(), n, "rows must be rectangular");
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    rows.push(i);
+                    cols.push(j);
+                    vals.push(v);
+                }
+            }
+        }
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+        QpProblem::new(
+            CscMatrix::new(n, n),
+            vec![0.0; n],
+            a,
+            b.to_vec(),
+            vec![(0.0, f64::INFINITY); n],
+            types.to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// 旧実装の絶対 tol。sentinel が「相対化なし (no-op) なら誤判定する」ことを
+    /// 明示するための参照値 (実装側には残っていない)。
+    const LEGACY_ABS_TOL: f64 = 1e-7;
+
+    /// Cᵀy 残差の noise 判定を複数パターンで cover。
+    /// 偽証明 (大 magnitude feasible) は本物の正 slack として reject、
+    /// 真の負残差/丸め以下は accept。
+    #[test]
+    fn cty_slack_within_noise_separates_real_slack_from_roundoff() {
+        // (aty, term_mag, expect_within_noise, label)
+        let cases = [
+            // d~1e9 feasible: residual ≈ dᵀy/d = 1e-9、項 magnitude O(1)。本物の正 slack。
+            (1e-9, 8.76, false, "d=1e9 normalized feasible"),
+            (1.8626e-9, 2.0, false, "d=1e9 (dᵀy≈1.86)"),
+            (1.49e-8, 2.0, false, "d=1e8 normalized feasible"),
+            // klein3 genuine: 残差は厳密に負。
+            (-4.1e-6, 986.0, true, "klein3 genuine cert"),
+            (-1.0, 3.0, true, "strict negative residual"),
+            (0.0, 5.0, true, "exact zero residual"),
+            // f64 内積丸めレベル: noise として accept。
+            (1e-15, 8.76, true, "roundoff-level positive"),
+            (1e-13, 2.0, true, "below relative floor"),
+        ];
+        for (aty, mag, expect, label) in cases {
+            assert_eq!(
+                cty_slack_within_noise(aty, mag),
+                expect,
+                "case `{label}`: aty={aty:e}, mag={mag:e}",
+            );
+        }
+
+        // load-bearing: 旧絶対 tol 1e-7 では正の偽 slack 1e-9 / 1.49e-8 を「noise」と
+        // 誤判定する。相対化済の実装はこれを reject する。両者が分岐することを実証。
+        for &(aty, mag) in &[(1e-9, 8.76), (1.8626e-9, 2.0), (1.49e-8, 2.0)] {
+            assert!(
+                aty <= LEGACY_ABS_TOL,
+                "premise: abs tol would have accepted aty={aty:e}",
+            );
+            assert!(
+                !cty_slack_within_noise(aty, mag),
+                "relative floor must reject real positive slack aty={aty:e}",
+            );
+        }
+    }
+
+    /// 大 magnitude feasible (`x1+x2=K`) が Infeasible 認定されないこと。
+    /// 偽証明 y は正規化 dᵀy≥1 を満たすが Cᵀy≈dᵀy/K の本物の正 slack を持つ。
+    #[test]
+    fn farkas_rejects_large_magnitude_feasible() {
+        // (K, g): g は y0-y1 (2 のべきで厳密表現)。dᵀy=K·g≥1 を保つ。
+        let patterns = [
+            (1e9, 2.0_f64.powi(-29)), // dᵀy = 1e9·2^-29 ≈ 1.863
+            (1e8, 2.0_f64.powi(-26)), // dᵀy = 1e8·2^-26 ≈ 1.490
+        ];
+        for (k, g) in patterns {
+            let problem = nonneg_qp(&[vec![1.0, 1.0]], &[k], &[ConstraintType::Eq]);
+            let (cols, rhs) = normalized_farkas_rows(&problem);
+            assert_eq!(rhs, vec![k, -k], "Eq → ±K の cert RHS");
+            // y0 = 1 + g, y1 = 1。Cᵀy = y0 - y1 = g (正)、dᵀy = K·g ≥ 1。
+            let y = vec![1.0 + g, 1.0];
+            let cty = g; // y0 - y1
+            let dty = k * g;
+            assert!(dty >= 1.0 - FARKAS_NORM_TOL, "premise: dᵀy={dty} must clear norm");
+            assert!(
+                cty <= LEGACY_ABS_TOL,
+                "premise: abs tol would accept Cᵀy={cty:e} for K={k:e}",
+            );
+            assert!(
+                !verify_normalized_farkas(&problem, &cols, &rhs, &y),
+                "feasible x1+x2={k:e} must NOT be certified infeasible",
+            );
+        }
+    }
+
+    /// genuine infeasible (`x1≥1` かつ `-2x1≥1`) は証明書が通り続ける。
+    /// klein3 と同型: max Cᵀy < 0 (厳密に負)、dᵀy ≫ 1。
+    #[test]
+    fn farkas_certifies_genuine_infeasible() {
+        let problem = nonneg_qp(
+            &[vec![1.0], vec![-2.0]],
+            &[1.0, 1.0],
+            &[ConstraintType::Ge, ConstraintType::Ge],
+        );
+        let (cols, rhs) = normalized_farkas_rows(&problem);
+        assert_eq!(rhs, vec![1.0, 1.0]);
+        let y = vec![1.0, 1.0];
+        // Cᵀy = 1·1 + (-2)·1 = -1 < 0、dᵀy = 2。
+        assert!(
+            verify_normalized_farkas(&problem, &cols, &rhs, &y),
+            "genuine infeasible must remain certified",
+        );
+    }
+
+    /// 小 magnitude feasible は元々誤認定されない (正 slack が大きく floor 超過)。
+    /// 相対化が小規模問題を退化させないことの確認。
+    #[test]
+    fn farkas_rejects_modest_feasible() {
+        let problem = nonneg_qp(&[vec![1.0, 1.0]], &[2.0], &[ConstraintType::Eq]);
+        let (cols, rhs) = normalized_farkas_rows(&problem);
+        // dᵀy=1 → y0-y1=0.5 (大きな正 slack)。
+        let y = vec![0.5, 0.0];
+        assert!(
+            !verify_normalized_farkas(&problem, &cols, &rhs, &y),
+            "modest feasible must NOT be certified infeasible",
+        );
     }
 }
