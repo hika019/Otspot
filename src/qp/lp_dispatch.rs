@@ -13,8 +13,9 @@
 use std::time::Instant;
 
 use crate::options::SolverOptions;
-use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::simplex::guard_lp_optimal;
+use crate::sparse::CscMatrix;
 
 use super::{ipm_solver, QpProblem};
 
@@ -119,6 +120,15 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     // simplex (LpProblem) は obj_offset を含まないため明示的に加算。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     simplex_result.objective += problem.obj_offset;
+    if simplex_result.status == SolveStatus::Timeout
+        && simplex_result.solution.is_empty()
+        && options.deadline.is_none_or(|d| Instant::now() < d)
+        && verified_farkas_timeout_fallback(problem, options)
+    {
+        let mut certified = SolverResult::infeasible();
+        certified.iterations = simplex_result.iterations;
+        return certified;
+    }
     crate::bench_utils::pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
 }
 
@@ -127,6 +137,113 @@ fn ipm_opts_for_lp(options: &SolverOptions) -> SolverOptions {
     let mut o = options.clone();
     o.presolve = false;
     o
+}
+
+/// Try a normalized Farkas certificate after simplex Phase I stalls.
+/// This stays on nonnegative variables so bounds need no certificate terms.
+fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions) -> bool {
+    if !problem.bounds.iter().all(|&(lb, ub)| lb == 0.0 && ub == f64::INFINITY) {
+        return false;
+    }
+
+    // Convert user rows to Cx >= d. Equality rows need both directions.
+    let mut cert_cols_by_row = vec![Vec::<(usize, f64)>::new(); problem.num_constraints];
+    let mut cert_rhs = Vec::new();
+    for (i, &kind) in problem.constraint_types.iter().enumerate() {
+        let mut push_col = |sign: f64| {
+            let col = cert_rhs.len();
+            cert_cols_by_row[i].push((col, sign));
+            cert_rhs.push(sign * problem.b[i]);
+        };
+        match kind {
+            ConstraintType::Ge => push_col(1.0),
+            ConstraintType::Le => push_col(-1.0),
+            ConstraintType::Eq => {
+                push_col(1.0);
+                push_col(-1.0);
+            }
+        }
+    }
+    if cert_rhs.is_empty() {
+        return false;
+    }
+
+    // y >= 0, C^T y <= 0, d^T y >= 1 certifies Cx >= d, x >= 0 infeasible.
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    for j in 0..problem.num_vars {
+        let Ok((a_rows, a_vals)) = problem.a.get_column(j) else {
+            return false;
+        };
+        for (k, &i) in a_rows.iter().enumerate() {
+            for &(cert_col, sign) in &cert_cols_by_row[i] {
+                rows.push(j);
+                cols.push(cert_col);
+                vals.push(sign * a_vals[k]);
+            }
+        }
+    }
+    for (cert_col, &rhs) in cert_rhs.iter().enumerate() {
+        rows.push(problem.num_vars);
+        cols.push(cert_col);
+        vals.push(rhs);
+    }
+    let Ok(cert_a) = CscMatrix::from_triplets(
+        &rows, &cols, &vals, problem.num_vars + 1, cert_rhs.len(),
+    ) else {
+        return false;
+    };
+    let mut cert_b = vec![0.0; problem.num_vars];
+    cert_b.push(1.0);
+    let mut cert_types = vec![ConstraintType::Le; problem.num_vars];
+    cert_types.push(ConstraintType::Ge);
+    let Ok(cert_qp) = QpProblem::new(
+        CscMatrix::new(cert_rhs.len(), cert_rhs.len()),
+        vec![0.0; cert_rhs.len()],
+        cert_a,
+        cert_b,
+        vec![(0.0, f64::INFINITY); cert_rhs.len()],
+        cert_types,
+    ) else {
+        return false;
+    };
+
+    let result = ipm_solver::solve_ipm(&cert_qp, &ipm_opts_for_lp(options));
+    result.status == SolveStatus::Optimal
+        && result.solution.len() == cert_rhs.len()
+        && verify_normalized_farkas(problem, &cert_cols_by_row, &cert_rhs, &result.solution)
+}
+
+fn verify_normalized_farkas(
+    problem: &QpProblem,
+    cert_cols_by_row: &[Vec<(usize, f64)>],
+    cert_rhs: &[f64],
+    y: &[f64],
+) -> bool {
+    let tol = 1e-7;
+    if y.len() != cert_rhs.len() || y.iter().any(|&v| v < -tol || !v.is_finite()) {
+        return false;
+    }
+    let rhs_dot = cert_rhs.iter().zip(y).map(|(&d, &yi)| d * yi).sum::<f64>();
+    if !rhs_dot.is_finite() || rhs_dot < 1.0 - tol {
+        return false;
+    }
+    for j in 0..problem.num_vars {
+        let Ok((a_rows, a_vals)) = problem.a.get_column(j) else {
+            return false;
+        };
+        let mut aty = 0.0;
+        for (k, &i) in a_rows.iter().enumerate() {
+            for &(cert_col, sign) in &cert_cols_by_row[i] {
+                aty += sign * a_vals[k] * y[cert_col];
+            }
+        }
+        if !aty.is_finite() || aty > tol {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
