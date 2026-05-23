@@ -472,29 +472,25 @@ impl MpsParser {
     fn parse_columns_fixed(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         // 固定フォーマット: col5-12=col_name, col15-22=row_name, col25-36=value
         //                [col40-47=row_name2, col50-61=value2]
-
-        if line.len() < 25 {
-            return Ok(()); // 短すぎる行はスキップ
-        }
-
         let col_name = line.get(4..12).unwrap_or("").trim().to_string();
-        if col_name.is_empty() {
-            return Ok(());
+        let row_name1 = line.get(14..22).unwrap_or("").trim().to_string();
+        let value1_str = line.get(24..36).unwrap_or("").trim();
+
+        // 固定位置に (列名, 行名, 数値) が揃わなければ char-14 ヒューリスティックの誤判定。
+        // 実体はフリーフォーマット (例: MIPLIB は名前が短く幅広パディングのため行名が
+        // 列22以降にずれる) なのでフリー解析へ委譲する。これにより COLUMNS だけが固定
+        // 解析で entry を取りこぼし、常にフリー解析の BOUNDS と列名が食い違う事故を防ぐ。
+        if col_name.is_empty() || row_name1.is_empty() || value1_str.parse::<f64>().is_err() {
+            return self.parse_columns_free(line, line_num);
         }
         if self.in_integer_marker {
             self.integer_cols.insert(col_name.clone());
         }
 
-        let row_name1 = line.get(14..22).unwrap_or("").trim().to_string();
-        let value1_str = line.get(24..36).unwrap_or("").trim();
-
-        if !row_name1.is_empty() && !value1_str.is_empty() {
-            let value1 = value1_str.parse::<f64>().map_err(|_| MpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid numeric value: {}", value1_str),
-            })?;
-            self.columns.push((col_name.clone(), row_name1, value1));
-        }
+        let value1 = value1_str
+            .parse::<f64>()
+            .expect("value1_str parseable (checked above)");
+        self.columns.push((col_name.clone(), row_name1, value1));
 
         // 2エントリ目（省略可）
         if line.len() >= 50 {
@@ -1719,6 +1715,65 @@ ENDATA
         );
         // LP path (parse_mps) も同じパーサなので同様にエラー。
         assert!(matches!(parse_mps(mps).unwrap_err(), MpsError::UnclosedIntegerMarker));
+    }
+
+    /// 回帰 (MIPLIB enlight_hard): 列名が短く行名が列22以降にずれる幅広パディング行は
+    /// char-14 ヒューリスティックで固定幅と誤判定される。固定位置 [14:22] が空のため
+    /// 旧実装は COLUMNS entry を無警告で取りこぼし、常にフリー解析の BOUNDS と列名が
+    /// 食い違い `UndefinedReference` で parse 失敗していた。フリー解析フォールバックで解消。
+    ///
+    /// load-bearing: フォールバックを外すと x#1#1 が COLUMNS に登録されず、BOUNDS の
+    /// 参照で `UndefinedReference` になり parse_milp が Err を返す (この test が落ちる)。
+    #[test]
+    fn test_columns_free_format_misclassified_as_fixed() {
+        // 列名 "x#1#1" (5 文字) を 4 スペース後に置き、行名を列22から開始させる
+        // (固定窓 [14:22] が空白になる = enlight_hard と同一レイアウト)。char[14] は
+        // padding 内の空白なので is_fixed_width_format は true を返す。
+        let pad = " ".repeat(22 - 4 - "x#1#1".len()); // 行名を列22開始に
+        let mps = format!(
+            "NAME wide\n\
+ROWS\n N  obj\n L  c\n\
+COLUMNS\n\
+    x#1#1{pad}obj   -1.0\n\
+    x#1#1{pad}c     1.0\n\
+RHS\n    rhs{rpad}c     3.5\n\
+BOUNDS\n UI BND  x#1#1  7\n\
+ENDATA\n",
+            rpad = " ".repeat(22 - 4 - "rhs".len()),
+        );
+        // パース成功 (UndefinedReference にならない)。
+        let milp = parse_milp(&mps).expect("wide-padded free-format COLUMNS must parse");
+        assert_eq!(milp.num_vars(), 1, "x#1#1 が 1 変数として登録される");
+        assert_eq!(milp.integer_vars, vec![0], "UI 境界で整数登録");
+        assert_eq!(milp.lp.bounds, vec![(0.0, 7.0)]);
+        // 制約 c に x#1#1 の係数 1.0 が入っている (取りこぼしていない)。
+        let (rows, vals) = milp.lp.a.get_column(0).unwrap();
+        assert_eq!(rows, &[0]);
+        assert_eq!(vals, &[1.0]);
+    }
+
+    /// 上記レイアウトを実際に解いて load-bearing 性を担保: min -x, x<=3.5, x∈ℤ[0,7]
+    /// → 整数最適 x=3, obj=-3。列を取りこぼすと parse 失敗 or 解が変わる。
+    #[test]
+    fn test_columns_wide_padding_solves() {
+        use crate::options::{MipConfig, SolverOptions};
+        use crate::problem::SolveStatus;
+        let pad = " ".repeat(22 - 4 - "x#1#1".len());
+        let mps = format!(
+            "NAME wide\n\
+ROWS\n N  obj\n L  c\n\
+COLUMNS\n\
+    x#1#1{pad}obj   -1.0\n\
+    x#1#1{pad}c     1.0\n\
+RHS\n    rhs{rpad}c     3.5\n\
+BOUNDS\n UI BND  x#1#1  7\n\
+ENDATA\n",
+            rpad = " ".repeat(22 - 4 - "rhs".len()),
+        );
+        let milp = parse_milp(&mps).unwrap();
+        let res = crate::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
+        assert_eq!(res.status, SolveStatus::Optimal);
+        assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
     }
 
     /// 正しく INTEND で閉じれば後続列は連続のまま (整合性の確認)。
