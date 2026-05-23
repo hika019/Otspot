@@ -1147,3 +1147,92 @@ fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
         );
     }
 }
+
+/// B2 sentinel: `best_obj` は `f64::INFINITY` ではなく初期有限値で初期化すべき。
+///
+/// `OBJ_PROGRESS_RESET_COUNT` は `revised_simplex_core` 内で
+/// `current_obj + progress_eps < best_obj` が成立した回数を記録する。
+///
+/// **旧実装 (best_obj = INFINITY)**: `progress_eps = ∞` なので
+/// `current + ∞ < ∞` が常に false → カウンタが 0 のまま → テスト FAIL。
+///
+/// **新実装 (best_obj = basic_obj(...))**: `progress_eps` は有限、
+/// 目的関数が改善するたびに best_obj が更新され → カウンタが増加 → PASS。
+///
+/// 2 種類のデータパターン (CLAUDE.md「複数パターンのデータを用意せよ」):
+///   - Pattern A: Eq 制約 2 本の可解 LP (Phase I アーティフィシャル 2 個)
+///   - Pattern B: 大きな目的関数係数差を持つ Le 制約 LP (Phase II で大幅改善)
+#[test]
+fn b2_obj_progress_reset_fires_on_improving_objective() {
+    use std::sync::atomic::Ordering;
+
+    let before = OBJ_PROGRESS_RESET_COUNT.load(Ordering::SeqCst);
+
+    // Pattern A: Eq 制約 → Phase I が走り、アーティフィシャルを駆逐する過程で
+    // 目的関数が減少 → best_obj が更新されてカウンタが増加するはず。
+    {
+        //   min  x0 + x1 + x2
+        //   s.t. x0 + x1       = 3
+        //             x1 + x2  = 2
+        //   x0,x1,x2 >= 0
+        // 最適解: x0=1, x1=2, x2=0, obj=3
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0],
+            2, 3,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![3.0, 2.0],
+            vec![ConstraintType::Eq; 2],
+            vec![(0.0, f64::INFINITY); 3],
+            None,
+        ).unwrap();
+        let mut opts = SolverOptions::default();
+        opts.presolve = false;
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "Pattern A must be Optimal");
+        assert!((result.objective - 3.0).abs() < 1e-6, "Pattern A obj={}", result.objective);
+    }
+
+    // Pattern B: Le 制約 (Phase II で目的関数が着実に改善する LP)
+    {
+        //   min  -5*x0 - 4*x1 - 3*x2
+        //   s.t.  6*x0 + 4*x1 + 2*x2 <= 240
+        //         3*x0 + 2*x1 + 5*x2 <= 270
+        //         5*x0 + 6*x1 + 5*x2 <= 420
+        //   x0,x1,x2 >= 0
+        // 既知最適: 有限の負値 (Phase II で複数の基底交換が起きる)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 0, 1, 1, 1, 2, 2, 2],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[6.0, 4.0, 2.0, 3.0, 2.0, 5.0, 5.0, 6.0, 5.0],
+            3, 3,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![-5.0, -4.0, -3.0],
+            a,
+            vec![240.0, 270.0, 420.0],
+            vec![ConstraintType::Le; 3],
+            vec![(0.0, f64::INFINITY); 3],
+            None,
+        ).unwrap();
+        let mut opts = SolverOptions::default();
+        opts.presolve = false;
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal, "Pattern B must be Optimal");
+        // 目的関数は負 (最小化問題で負コスト → 最適値は負)
+        assert!(result.objective < 0.0, "Pattern B must have negative optimal, got {}", result.objective);
+    }
+
+    let after = OBJ_PROGRESS_RESET_COUNT.load(Ordering::SeqCst);
+    assert!(
+        after > before,
+        "OBJ_PROGRESS_RESET_COUNT must increment when objective improves \
+         (before={before}, after={after}); a non-incrementing counter means \
+         best_obj was initialized to INFINITY (B2 バグ復帰) making progress_eps=∞ \
+         so the improvement condition never fires"
+    );
+}

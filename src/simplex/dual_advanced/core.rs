@@ -77,29 +77,37 @@ fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
     gamma_truth
 }
 
-/// reduced_costs (non-basic only) と x_b に lex 摂動を加える。
+/// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
+///
+/// `perturb_x = true` は bland_mode 初回エントリ時のみ指定する。refactor 後の
+/// 再注入では `false` を渡し x_b 摂動をスキップする。x_b は refactor で
+/// リセットされないため、毎回加算すると正帰還で発散する (B4 バグ)。
+/// reduced_costs は refactor で新計算されるため毎回再注入が必要。
 fn apply_lex_perturbation(
     reduced_costs: &mut [f64],
     is_basic: &[bool],
     x_b: &mut [f64],
     m: usize,
+    perturb_x: bool,
 ) {
     let scale_r = reduced_costs
         .iter()
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max)
         .max(1.0);
-    let scale_x = x_b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
     let base_r = LEX_PERTURB_REL * scale_r;
-    let base_x = LEX_PERTURB_REL * scale_x;
     let n_price = reduced_costs.len();
     for (j, slot) in reduced_costs.iter_mut().enumerate() {
         if !is_basic[j] {
             *slot += base_r * (1.0 + (j as f64) / (n_price as f64));
         }
     }
-    for (i, slot) in x_b.iter_mut().enumerate() {
-        *slot += base_x * (1.0 + (i as f64) / (m as f64));
+    if perturb_x {
+        let scale_x = x_b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+        let base_x = LEX_PERTURB_REL * scale_x;
+        for (i, slot) in x_b.iter_mut().enumerate() {
+            *slot += base_x * (1.0 + (i as f64) / (m as f64));
+        }
     }
 }
 
@@ -292,7 +300,8 @@ pub(crate) fn dual_simplex_core_advanced(
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             if bland_mode {
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+                // rc は refactor で再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
+                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
             }
             leaving.after_refactor(m);
             continue;
@@ -360,7 +369,8 @@ pub(crate) fn dual_simplex_core_advanced(
             reduced_costs =
                 compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
             if bland_mode {
-                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+                // rc は再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
+                apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
             }
             // Stateful weight 戦略 (DSE) は drift をここでリセット +
             // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
@@ -383,8 +393,74 @@ pub(crate) fn dual_simplex_core_advanced(
                 if iters_since_progress >= k_trigger {
                     bland_mode = true;
                     bland_start_iter = *iter_count_out;
-                    apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m);
+                    // 初回エントリ: rc と x_b の両方を摂動する。
+                    apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, true);
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B4 sentinel: `apply_lex_perturbation` の `perturb_x=false` 時は x_b を変更しない。
+    ///
+    /// B4 バグ: 旧実装では refactor 後も x_b を毎回摂動していたため、
+    /// `scale_x = max|x_b|` が摂動量に比例して増大し正帰還で発散した。
+    ///
+    /// 修正後: `perturb_x=false` では x_b は変更されない (rc のみ再摂動)。
+    /// このテストを戻す (perturb_x パラメータ削除) と x_b が複数回摂動されて
+    /// 各 assert が FAIL する (no-op FAIL)。
+    ///
+    /// 2 種類のデータパターン:
+    ///   - Pattern A: 全変数非基底、x_b スケール = 1.0 (min floor)
+    ///   - Pattern B: x_b に大きな値を含む (scale_x が自明でない)
+    #[test]
+    fn b4_perturb_x_false_does_not_modify_xb() {
+        let is_basic = vec![false, false, false, false];
+
+        // Pattern A: x_b = [0.5, 1.0, 0.3]
+        {
+            let mut rc = vec![1.0, 2.0, 3.0, 0.5];
+            let mut x_b = vec![0.5_f64, 1.0, 0.3];
+            let m = x_b.len();
+
+            // 初回エントリ (perturb_x=true): x_b が変化する
+            apply_lex_perturbation(&mut rc, &is_basic, &mut x_b, m, true);
+            let x_b_after_entry = x_b.clone();
+            assert_ne!(x_b_after_entry, vec![0.5, 1.0, 0.3], "initial entry must perturb x_b");
+
+            // refactor 後 (perturb_x=false): x_b は変化しない
+            let mut rc2 = vec![1.0, 2.0, 3.0, 0.5];
+            apply_lex_perturbation(&mut rc2, &is_basic, &mut x_b, m, false);
+            assert_eq!(x_b, x_b_after_entry,
+                "Pattern A: x_b must not change with perturb_x=false (B4 バグ復帰で FAIL)");
+
+            // 2 回目 refactor (perturb_x=false): 同じく変化なし
+            let mut rc3 = vec![1.0, 2.0, 3.0, 0.5];
+            apply_lex_perturbation(&mut rc3, &is_basic, &mut x_b, m, false);
+            assert_eq!(x_b, x_b_after_entry,
+                "Pattern A: x_b must remain stable across repeated perturb_x=false calls");
+        }
+
+        // Pattern B: x_b に大きな値
+        {
+            let mut rc = vec![100.0, 200.0, 50.0, 1.0];
+            let mut x_b = vec![1000.0_f64, 500.0, 750.0];
+            let m = x_b.len();
+
+            apply_lex_perturbation(&mut rc, &is_basic, &mut x_b, m, true);
+            let x_b_after_entry = x_b.clone();
+            assert_ne!(x_b_after_entry, vec![1000.0, 500.0, 750.0], "initial entry must perturb x_b");
+
+            // 3 回連続 refactor: x_b は不変
+            for call_n in 0..3 {
+                let mut rc_n = vec![100.0, 200.0, 50.0, 1.0];
+                apply_lex_perturbation(&mut rc_n, &is_basic, &mut x_b, m, false);
+                assert_eq!(x_b, x_b_after_entry,
+                    "Pattern B: x_b must not grow after refactor call #{} (B4 バグ復帰で FAIL)", call_n);
             }
         }
     }

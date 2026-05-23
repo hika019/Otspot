@@ -28,6 +28,18 @@ pub(crate) static PIVOT_CLEAN_EARLY_EXIT_COUNT: std::sync::atomic::AtomicUsize =
 pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts obj-progress resets in `revised_simplex_core` (test-only).
+///
+/// Incremented each time the condition `current_obj + progress_eps < best_obj`
+/// is satisfied, i.e. best_obj is updated.  With the correct finite
+/// initialization (`best_obj = basic_obj(...)`) this fires whenever the
+/// objective genuinely improves.  With the old `f64::INFINITY` init,
+/// `progress_eps = ∞` so `current + ∞ < ∞` is always false and the counter
+/// never increments — the sentinel test for B2 asserts it is > 0.
+#[cfg(test)]
+pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
 use super::{StandardForm, SimplexOutcome, extract_dual_info};
@@ -1114,7 +1126,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
     let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
     let step_zero_threshold = PIVOT_TOL * STEP_DEGENERATE_FACTOR * (m as f64).max(1.0);
-    let mut best_obj: f64 = f64::INFINITY;
+    // Initialize from the actual starting objective so progress_eps is finite
+    // from iteration 1.  f64::INFINITY would make progress_eps = ∞ and the
+    // improvement condition `current + ∞ < ∞` always false, causing the
+    // obj-progress counter to increment even on genuinely improving iterations.
+    let mut best_obj: f64 = basic_obj(c, basis, x_b);
     let mut iters_since_obj_progress: usize = 0;
     let mut iters_since_step_progress: usize = 0;
 
@@ -1345,6 +1361,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         if current_obj + progress_eps < best_obj {
             best_obj = current_obj;
             iters_since_obj_progress = 0;
+            #[cfg(test)]
+            OBJ_PROGRESS_RESET_COUNT.fetch_add(1, Ordering::Relaxed);
         } else {
             iters_since_obj_progress = iters_since_obj_progress.saturating_add(1);
         }

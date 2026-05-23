@@ -15,6 +15,8 @@ pub(crate) use entry::{guard_lp_optimal, solve_without_presolve, with_lp_guard_d
 pub(crate) use primal::{extract_solution, revised_simplex_core, two_phase_simplex};
 #[cfg(test)]
 pub(crate) use primal::reconcile_final_basis_state;
+#[cfg(test)]
+pub(crate) use primal::OBJ_PROGRESS_RESET_COUNT;
 
 pub(crate) use standard_form::{
     extract_dual_info, timeout_result_with_incumbent, SimplexOutcome, StandardForm,
