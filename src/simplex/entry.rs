@@ -113,6 +113,9 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
     };
 
     let prof_t0 = std::time::Instant::now();
+    // Presolve elapsed time when presolve ran but did not reduce the problem.
+    // Used to set timing_breakdown on the fallthrough solve_without_presolve path.
+    let mut non_reduced_presolve_us: Option<u64> = None;
 
     if options.presolve {
         match presolve::run_presolve(problem, options.deadline) {
@@ -207,7 +210,11 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 }
                 return res;
             }
-            Ok(_) => {}
+            Ok(_) => {
+                // Presolve ran but did not reduce the problem. Record elapsed time
+                // so the fallthrough solve path can populate timing_breakdown.
+                non_reduced_presolve_us = Some(prof_t0.elapsed().as_micros() as u64);
+            }
         }
     }
 
@@ -226,7 +233,18 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
         };
     }
 
-    solve_without_presolve(problem, options)
+    let t_solve_start = std::time::Instant::now();
+    let mut result = solve_without_presolve(problem, options);
+    if let Some(presolve_us) = non_reduced_presolve_us {
+        let solve_us = t_solve_start.elapsed().as_micros() as u64;
+        result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            solve_us,
+            postsolve_us: 0,
+            ..Default::default()
+        });
+    }
+    result
 }
 
 /// Solve without presolve.
@@ -405,5 +423,82 @@ mod tests {
             let out = guard_lp_optimal(r, &lp);
             assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
+    }
+
+    // min x + y  s.t.  2x + y >= 3,  x + 2y >= 3,  x,y >= 0
+    // Ge constraints: dual-fix cannot push x,y to 0 (would violate Ge).
+    // No singleton rows, no Eq rows, no free vars, no parallel rows → presolve
+    // cannot remove any row or column ⇒ was_reduced=false.
+    fn make_non_reducible_lp() -> LpProblem {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[2.0, 1.0, 1.0, 2.0],
+            2, 2,
+        ).unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0, 3.0],
+            vec![ConstraintType::Ge, ConstraintType::Ge],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        ).unwrap()
+    }
+
+    // min x + y  s.t.  x = 2 (singleton Eq),  x + y <= 5,  x,y >= 0
+    // Singleton equality row fixes x — presolve reduces the problem.
+    fn make_reducible_lp() -> LpProblem {
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 1],
+            &[0, 0, 1],
+            &[1.0, 1.0, 1.0],
+            2, 2,
+        ).unwrap();
+        LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![2.0, 5.0],
+            vec![ConstraintType::Eq, ConstraintType::Le],
+            vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        ).unwrap()
+    }
+
+    /// timing_breakdown is Some on the was_reduced=false path (non-reducing presolve).
+    #[test]
+    fn timing_breakdown_set_when_presolve_does_not_reduce() {
+        let lp = make_non_reducible_lp();
+
+        // Confirm this LP actually exercises the was_reduced=false path.
+        let pr = crate::presolve::run_presolve(&lp, None)
+            .expect("non-reducible LP must not be Infeasible/Unbounded at presolve");
+        assert!(
+            !pr.was_reduced,
+            "make_non_reducible_lp() must produce an LP presolve cannot reduce (was_reduced must be false)"
+        );
+
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            result.timing_breakdown.is_some(),
+            "timing_breakdown must be Some even when presolve does not reduce the problem"
+        );
+    }
+
+    /// timing_breakdown is Some on the was_reduced=true path (reducing presolve).
+    #[test]
+    fn timing_breakdown_set_when_presolve_reduces() {
+        let lp = make_reducible_lp();
+        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let result = solve_with(&lp, &opts);
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            result.timing_breakdown.is_some(),
+            "timing_breakdown must be Some when presolve reduces the problem"
+        );
+        let tb = result.timing_breakdown.unwrap();
+        assert!(tb.presolve_us > 0 || tb.solve_us > 0, "at least one timing field must be non-zero");
     }
 }
