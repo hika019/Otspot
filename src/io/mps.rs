@@ -1,29 +1,11 @@
-//! 線形計画問題のMPSファイル形式パーサー
+//! MPS ファイル形式パーサー (LP / MILP)。
 //!
-//! # MPSフォーマットとは
+//! NAME / ROWS / COLUMNS / RHS / RANGES / BOUNDS / ENDATA セクションを、固定幅・
+//! フリーフォーマットの両方を自動判別して解析する。COLUMNS の INTORG/INTEND マーカーと
+//! BV/LI/UI 境界で整数変数を識別する。
 //!
-//! MPS（Mathematical Programming System）は、線形計画問題（LP）や
-//! 混合整数計画問題（MIP）を記述するための業界標準フォーマットです。
-//! IBM社が1960年代に開発し、現在もほぼすべてのLPソルバーがサポートしています。
-//!
-//! # サポートするMPSセクション
-//!
-//! | セクション | 説明 |
-//! |-----------|------|
-//! | `NAME`    | 問題名（オプション） |
-//! | `ROWS`    | 目的関数行・制約行の型定義 |
-//! | `COLUMNS` | 変数係数の定義 |
-//! | `RHS`     | 右辺値の定義 |
-//! | `RANGES`  | 制約の幅指定（オプション） |
-//! | `BOUNDS`  | 変数の上下限（オプション） |
-//! | `ENDATA`  | ファイル終端マーカー |
-//!
-//! # フォーマットの種類
-//!
-//! - **固定幅フォーマット**: 各フィールドが固定列位置に配置される旧来の形式
-//! - **フリーフォーマット**: 空白区切りで任意の列位置に配置できる現代的な形式
-//!
-//! 本モジュールは両方のフォーマットを自動判別して解析します。
+//! - [`parse_mps`] / [`parse_mps_file`]: `LpProblem` を返す (整数性は破棄＝LP relaxation)。
+//! - [`parse_milp`] / [`parse_milp_file`]: 整数変数付きの `MilpProblem` を返す。
 
 use crate::mip::MilpProblem;
 use crate::problem::{ConstraintType, LpProblem};
@@ -54,6 +36,9 @@ pub enum MpsError {
     InvalidBoundType(String),
     /// 未定義の行名または列名が参照された
     UndefinedReference { kind: String, name: String },
+    /// INTORG マーカーが対応する INTEND で閉じられないまま COLUMNS を抜けた。
+    /// 残り全列が無警告で整数化されるのを防ぐため明示エラーとする。
+    UnclosedIntegerMarker,
 }
 
 impl std::fmt::Display for MpsError {
@@ -69,6 +54,9 @@ impl std::fmt::Display for MpsError {
             MpsError::InvalidBoundType(s) => write!(f, "Invalid bound type: {}", s),
             MpsError::UndefinedReference { kind, name } => {
                 write!(f, "Undefined {} reference: {}", kind, name)
+            }
+            MpsError::UnclosedIntegerMarker => {
+                write!(f, "INTORG marker not closed by a matching INTEND in COLUMNS")
             }
         }
     }
@@ -118,6 +106,13 @@ pub fn parse_milp_file(path: &Path) -> Result<MilpProblem, MpsError> {
 /// MPS形式の文字列を`LpProblem`にパースする
 ///
 /// 固定幅フォーマットとフリーフォーマットの両方を自動判別して処理します。
+///
+/// # MILP ファイルを読む場合の挙動 (LP relaxation)
+///
+/// INTORG/INTEND マーカーや BV/LI/UI 境界を含む MILP ファイルを渡しても、本関数は
+/// **整数性を破棄した LP relaxation** を返します。整数変数の境界は保持され、明示境界の
+/// ない整数変数は二値 [0,1] に既定されます (`parse_milp` と同じ境界処理)。整数制約を
+/// 保持したいときは [`parse_milp`] を使ってください。
 ///
 /// # 引数
 ///
@@ -343,6 +338,11 @@ impl MpsParser {
             // データ行は先頭に空白があるため、この条件で区別できる
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
+                    // COLUMNS を抜ける時点で INTORG が INTEND で閉じられていなければエラー。
+                    // (放置すると残り全列が無警告で整数化される)
+                    if self.in_integer_marker && section != Section::Columns {
+                        return Err(MpsError::UnclosedIntegerMarker);
+                    }
                     // NAMEとENDATAを除くセクションの重複チェック
                     if section != Section::Name && section != Section::EndData
                         && seen_sections.contains(&section) {
@@ -1319,18 +1319,12 @@ ENDATA
     /// 典型的な固定幅行: 列15（index 14）がスペース → true
     #[test]
     fn test_is_fixed_width_typical_fixed() {
-        // 列5-12: col_name, 列15: space（固定幅の区切り）
-        // "    x1            obj  1.0" のように列14がスペース
-        let line = "    x1        obj   1.0";
-        //          0123456789012345...
-        //          列14（0-indexed）= 'o' ではなく、スペースが来るケース
-        // 実際に列14がスペースになる行を用意する
+        // 列5-12: col_name, index 14 がスペース（固定幅の区切り）
         let fixed_line = "    x1          obj   1.0"; // index 14 = ' '
         assert!(
             is_fixed_width_format(fixed_line),
             "列14がスペースの行は固定幅と判定すべき"
         );
-        let _ = line; // unused warning回避
     }
 
     /// 典型的な自由形式行: 列15（index 14）がスペース以外 → false
@@ -1631,29 +1625,36 @@ ENDATA
 
     /// MILP を実際に解いて最適値を検証する (HiGHS で独立に確認した期待値)。
     /// テーブル駆動で複数の境界規約パターンを網羅する。
-    /// no-op proof: 二値既定やマーカー検出を外すと、対応行の期待 objective が外れる。
+    ///
+    /// **load-bearing (no-op proof)**: 各ケースは整数強制によって最適値が LP relaxation
+    /// と分岐するよう設計してある。マーカー検出を無効化すると当該変数が連続のままとなり、
+    /// 期待 objective から外れる:
+    /// - marker_no_bounds_binary: 二値既定が消え [0,+∞] 連続 → -1 ではなく -10.5
+    /// - marker_up5_fractional: x1<=3.5 で連続なら x1=3.5 → -3 ではなく -3.5
+    /// - marker_lo2: x1<=10.5 で連続なら x1=10.5 → -10 ではなく -10.5
     #[test]
     fn test_milp_solve_bound_conventions() {
         use crate::options::{MipConfig, SolverOptions};
         use crate::problem::SolveStatus;
 
-        // (説明, BOUNDS セクション本体, 期待 objective)
-        // 全て min -x1 s.t. x1 <= 10.5, x1 整数。HiGHS で独立検証済み。
-        let cases: &[(&str, &str, f64)] = &[
+        // (説明, BOUNDS セクション本体, 制約 c1 の RHS, 整数最適 objective)。
+        // 全て min -x1 s.t. x1 <= rhs。HiGHS で独立検証済み。
+        let cases: &[(&str, &str, f64, f64)] = &[
             // 境界なしマーカー整数 → 二値 [0,1] → x1=1 → obj=-1
-            ("marker_no_bounds_binary", "", -1.0),
-            // UP 5 → [0,5] → x1=5 → obj=-5
-            ("marker_up5", "BOUNDS\n UP BND  x1  5.0\n", -5.0),
-            // LO 2 のみ → [2,+inf] → x1=10 → obj=-10
-            ("marker_lo2", "BOUNDS\n LO BND  x1  2.0\n", -10.0),
+            // (連続化すると x1<=10.5 で x1=10.5 → -10.5、よって load-bearing)
+            ("marker_no_bounds_binary", "", 10.5, -1.0),
+            // UP 5 → [0,5] 整数。x1<=3.5 → 整数 x1=3 → obj=-3 (連続なら x1=3.5 → -3.5)
+            ("marker_up5_fractional", "BOUNDS\n UP BND  x1  5.0\n", 3.5, -3.0),
+            // LO 2 のみ → [2,+inf] 整数。x1<=10.5 → 整数 x1=10 → -10 (連続なら x1=10.5 → -10.5)
+            ("marker_lo2", "BOUNDS\n LO BND  x1  2.0\n", 10.5, -10.0),
         ];
 
-        for (label, bounds_section, expected_obj) in cases {
+        for (label, bounds_section, rhs, expected_obj) in cases {
             let mps = format!(
                 "NAME milp\n\
 ROWS\n N  obj\n L  c1\n\
 COLUMNS\n    M1 'MARKER' 'INTORG'\n    x1  obj  -1.0  c1  1.0\n    M2 'MARKER' 'INTEND'\n\
-RHS\n    rhs  c1  10.5\n\
+RHS\n    rhs  c1  {rhs}\n\
 {bounds_section}ENDATA\n"
             );
             let milp = parse_milp(&mps).unwrap();
@@ -1669,7 +1670,9 @@ RHS\n    rhs  c1  10.5\n\
         }
     }
 
-    /// UI 整数境界付き MILP を解く: x1 <= 7 整数, min -x1 → x1=7, obj=-7。
+    /// UI 整数境界付き MILP を解く (load-bearing): x1 <= 3.5 の連続最適は分数 x1=3.5。
+    /// UI による整数強制で x1=3, obj=-3。UI の整数マークを無効化すると連続 x1=3.5 →
+    /// -3.5 となり期待値から外れる。HiGHS で -3 を独立確認済み。
     #[test]
     fn test_milp_solve_ui_bound() {
         use crate::options::{MipConfig, SolverOptions};
@@ -1682,7 +1685,7 @@ ROWS
 COLUMNS
     x1  obj  -1.0  c1  1.0
 RHS
-    rhs  c1  10.5
+    rhs  c1  3.5
 BOUNDS
  UI BND  x1  7.0
 ENDATA
@@ -1690,7 +1693,52 @@ ENDATA
         let milp = parse_milp(mps).unwrap();
         let res = crate::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
         assert_eq!(res.status, SolveStatus::Optimal);
-        assert!((res.objective - (-7.0)).abs() < 1e-6, "expected -7, got {}", res.objective);
-        assert!((res.solution[0] - 7.0).abs() < 1e-6, "x1 should be 7");
+        assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
+        assert!((res.solution[0] - 3.0).abs() < 1e-6, "x1 should be 3");
+    }
+
+    /// 閉じられない INTORG (INTEND 欠落) は明示エラーとする (P2②)。
+    /// 放置すると INTORG 以降の全列が無警告で整数化される。
+    #[test]
+    fn test_milp_unclosed_intorg_errors() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  -1.0  c1  1.0
+RHS
+    rhs  c1  10.5
+ENDATA
+";
+        let err = parse_milp(mps).unwrap_err();
+        assert!(
+            matches!(err, MpsError::UnclosedIntegerMarker),
+            "unclosed INTORG must error, got {err:?}"
+        );
+        // LP path (parse_mps) も同じパーサなので同様にエラー。
+        assert!(matches!(parse_mps(mps).unwrap_err(), MpsError::UnclosedIntegerMarker));
+    }
+
+    /// 正しく INTEND で閉じれば後続列は連続のまま (整合性の確認)。
+    #[test]
+    fn test_milp_closed_intorg_following_cols_continuous() {
+        let mps = r"NAME milp
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    M1 'MARKER' 'INTORG'
+    x1  obj  1.0  c1  1.0
+    M2 'MARKER' 'INTEND'
+    x2  obj  1.0  c1  1.0
+    x3  obj  1.0  c1  1.0
+RHS
+    rhs  c1  10.0
+ENDATA
+";
+        let milp = parse_milp(mps).unwrap();
+        assert_eq!(milp.integer_vars, vec![0], "x1 のみ整数、x2/x3 は連続");
     }
 }
