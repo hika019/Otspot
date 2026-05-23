@@ -41,8 +41,10 @@ pub enum LdlError {
     /// 上位層は反復法フォールバックの判断材料として用いる。
     WouldExceedBudget {
         /// symbolic 段階で実測した L の非ゼロ数
+        #[allow(dead_code)]
         l_nnz: usize,
         /// 呼び出し側が許可した最大 L_nnz
+        #[allow(dead_code)]
         max_l_nnz: usize,
     },
 }
@@ -107,9 +109,9 @@ impl LdlFactorization {
 /// faer high-level LDL^T factorization for quasidefinite matrices with AMD ordering.
 /// SupernodalThreshold::AUTO selects simplicial or supernodal automatically.
 ///
-/// `symbolic` は `Arc` 共有: IPM 反復で sparsity pattern が不変な場合、外部キャッシュ
-/// (`SymbolicCholeskyCache`) と factor 間で SymbolicCholesky を 1 度だけ計算して
-/// 再利用するため。clone は Arc::clone (refcount inc) のみ。
+/// `symbolic` は `Arc` 共有: IPM 反復で sparsity pattern が不変な場合、
+/// `symbolic_arc()` で取得した Arc を次回 factorize に渡して再利用する。
+/// clone は Arc::clone (refcount inc) のみ。
 pub struct LdlFactorizationAmd {
     symbolic: Arc<SymbolicCholesky<usize>>,
     l_values: Vec<f64>,
@@ -120,15 +122,9 @@ pub struct LdlFactorizationAmd {
     par: faer::Par,
 }
 
-/// SymbolicCholesky の外部キャッシュ。IPM 反復で sparsity pattern が不変なとき、
-/// 1 度だけ symbolic を計算して `factorize_quasidefinite_pre_permuted_with_cache`
-/// で再利用する。
-pub struct SymbolicCholeskyCache {
-    inner: Arc<SymbolicCholesky<usize>>,
-}
-
 impl LdlFactorizationAmd {
     /// L 因子の非ゼロ数を返す（デバッグ用）
+    #[allow(dead_code)]
     pub fn nnz_l(&self) -> usize {
         self.symbolic.len_val()
     }
@@ -573,6 +569,7 @@ pub fn factorize_with_par(
 /// deadline は factorize 前と symbolic 完了後（numeric 開始前）の 2 箇所でチェック。
 /// faer の numeric 因子化自体は mid-factorization キャンセル不可のため、
 /// 一旦 numeric を開始したら deadline を超えて完走する可能性がある。
+#[allow(dead_code)]
 pub fn factorize_with_deadline(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -581,6 +578,7 @@ pub fn factorize_with_deadline(
 }
 
 /// `factorize_with_deadline` の per-call parallelism 指定版。
+#[allow(dead_code)]
 pub fn factorize_with_deadline_par(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -601,6 +599,7 @@ pub fn factorize_with_deadline_par(
 /// `mat`: 元の（未置換の）augmented KKT 行列（上三角 CSC）
 /// `perm`: 事前計算済み AMD 置換ベクトル（perm[k] = 元インデックス）
 /// `deadline`: factorize 前チェックのみ（mid-factorization 未対応）
+#[allow(dead_code)]
 pub fn factorize_quasidefinite_with_cached_perm(
     mat: &CscMatrix,
     perm: &[usize],
@@ -610,6 +609,7 @@ pub fn factorize_quasidefinite_with_cached_perm(
 }
 
 /// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版。
+#[allow(dead_code)]
 pub fn factorize_quasidefinite_with_cached_perm_par(
     mat: &CscMatrix,
     perm: &[usize],
@@ -645,20 +645,7 @@ pub fn factorize_quasidefinite_with_amd(
     factorize_quasidefinite_with_amd_budget_par(mat, deadline, None, DEFAULT_PAR)
 }
 
-/// AMD 再順序化付き quasidefinite LDL^T 分解、L_nnz が `max_l_nnz` を超えたら
-/// numeric を試みず `WouldExceedBudget` で早期 return する budget 版 (既存互換)。
-///
-/// `max_l_nnz` が `None` のときは `factorize_quasidefinite_with_amd` と等価。
-/// 反復法フォールバック用 dispatcher (`KktSolver` 経路) から呼ばれる想定。
-pub fn factorize_quasidefinite_with_amd_budget(
-    mat: &CscMatrix,
-    deadline: Option<Instant>,
-    max_l_nnz: Option<usize>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_with_amd_budget_par(mat, deadline, max_l_nnz, DEFAULT_PAR)
-}
-
-/// `factorize_quasidefinite_with_amd_budget` の per-call parallelism 指定版。
+/// `factorize_quasidefinite_with_amd` の per-call parallelism + budget 指定版。
 pub fn factorize_quasidefinite_with_amd_budget_par(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -676,17 +663,7 @@ pub fn factorize_quasidefinite_with_amd_budget_par(
     factorize_quasidefinite_with_cached_perm_budget_par(mat, &perm, deadline, max_l_nnz, par)
 }
 
-/// AMD キャッシュ済み置換 + budget 版 (既存互換)。詳細は `factorize_quasidefinite_with_amd_budget`。
-pub fn factorize_quasidefinite_with_cached_perm_budget(
-    mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: Option<usize>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_with_cached_perm_budget_par(mat, perm, deadline, max_l_nnz, DEFAULT_PAR)
-}
-
-/// `factorize_quasidefinite_with_cached_perm_budget` の per-call parallelism 指定版。
+/// AMD キャッシュ済み置換 + budget 版 (per-call parallelism 指定)。
 pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     mat: &CscMatrix,
     perm: &[usize],
@@ -715,38 +692,9 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
 }
 
-/// 既に AMD 置換適用済みの行列を受け取り、`permute_sym_upper` を skip する版 (既存互換)。
-/// IPM 反復で `PermutedAugmentedKkt::materialize` から得た matrix を直接渡せる。
-///
-/// `perm` は solve 時の置換に使う (factorize 自体は pre_permuted_mat だけで完結)。
-pub fn factorize_quasidefinite_pre_permuted(
-    pre_permuted_mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: Option<usize>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_pre_permuted_cached_par(
-        pre_permuted_mat, perm, deadline, max_l_nnz, None, DEFAULT_PAR,
-    )
-}
-
-/// `factorize_quasidefinite_pre_permuted` の symbolic キャッシュ版 (既存互換)。
-/// `cached_symbolic` が `Some` のときは `build_symbolic_hl` を skip する。
-/// 戻り値の `LdlFactorizationAmd` は内部で `Arc<SymbolicCholesky>` を保持しており、
-/// caller は `factor.symbolic_arc()` で取得して次回呼び出しに使い回せる。
-pub fn factorize_quasidefinite_pre_permuted_cached(
-    pre_permuted_mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: Option<usize>,
-    cached_symbolic: Option<Arc<SymbolicCholesky<usize>>>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_pre_permuted_cached_par(
-        pre_permuted_mat, perm, deadline, max_l_nnz, cached_symbolic, DEFAULT_PAR,
-    )
-}
-
-/// `factorize_quasidefinite_pre_permuted_cached` の per-call parallelism 指定版。
+/// AMD 置換適用済みの行列を受け取る per-call parallelism + symbolic キャッシュ版。
+/// `cached_symbolic` が `Some` のときは `build_symbolic_hl` を skip して再利用する。
+/// caller は `factor.symbolic_arc()` で取得して次回呼び出しに渡せる。
 pub fn factorize_quasidefinite_pre_permuted_cached_par(
     pre_permuted_mat: &CscMatrix,
     perm: &[usize],

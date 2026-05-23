@@ -184,11 +184,7 @@ pub(super) fn step5_bounds_tightening(
             }
 
             if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
-                st.postsolve_stack.push(PostsolveStep::BoundsTightened {
-                    orig_col: j,
-                    old_lb,
-                    old_ub,
-                });
+                st.postsolve_stack.push(PostsolveStep::BoundsTightened);
                 st.bounds[j] = (new_lb, new_ub);
                 if (new_lb - new_ub).abs() < ZERO_TOL {
                     *new_fixed += 1;

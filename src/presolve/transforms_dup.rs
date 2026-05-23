@@ -340,11 +340,7 @@ fn fix_to_lb(st: &mut PresolveState, j: usize) -> Result<bool, PresolveStatus> {
     if lb > ub + ZERO_TOL {
         return Err(PresolveStatus::Infeasible);
     }
-    st.postsolve_stack.push(PostsolveStep::BoundsTightened {
-        orig_col: j,
-        old_lb: lb,
-        old_ub: ub,
-    });
+    st.postsolve_stack.push(PostsolveStep::BoundsTightened);
     st.bounds[j] = (lb, lb);
     Ok(true)
 }
@@ -360,11 +356,7 @@ fn fix_to_ub(st: &mut PresolveState, j: usize) -> Result<bool, PresolveStatus> {
     if lb > ub + ZERO_TOL {
         return Err(PresolveStatus::Infeasible);
     }
-    st.postsolve_stack.push(PostsolveStep::BoundsTightened {
-        orig_col: j,
-        old_lb: lb,
-        old_ub: ub,
-    });
+    st.postsolve_stack.push(PostsolveStep::BoundsTightened);
     st.bounds[j] = (ub, ub);
     Ok(true)
 }
