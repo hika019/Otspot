@@ -7,12 +7,17 @@
 //! greenbea in ~75s. The fix (`lp_dispatch::ipm_box_deadline`) time-boxes the IPM
 //! so simplex gets the remaining budget and reaches Optimal.
 //!
-//! Load-bearing: removing the time-box (IPM keeps the full deadline) reproduces
-//! the original Timeout — this test then FAILS on `status == Optimal`.
+//! Load-bearing: removing the time-box (IPM keeps the full deadline) lets the IPM
+//! consume the whole budget and return a non-Optimal status (SuboptimalSolution /
+//! Timeout) — this test then FAILS on `status == Optimal`. Verified by setting
+//! IPM_BUDGET_FRACTION=1.0: greenbea reverts to SuboptimalSolution at 300s.
 //!
-//! Heavy (~3-4 min: boxed IPM + simplex), so `#[ignore]`d to keep the default
-//! `cargo nextest run` under budget. Data file required; absence panics (never a
-//! silent SKIP that would hide the bug).
+//! Heavy (~220s: boxed IPM + simplex), so `#[ignore]`d to keep the default
+//! `cargo nextest run` under budget. greenbea is inherently slow, so this cannot
+//! fit the 3min per-test cap; instead a `.config/nextest.toml` override raises the
+//! terminate-after for this test so `cargo nextest run --run-ignored` runs it to
+//! completion (the default 180s cap would kill it mid-solve). Data file required;
+//! absence panics (never a silent SKIP that would hide the bug).
 
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
@@ -28,7 +33,7 @@ const GREENBEA_OPT: f64 = -7.2555248130e+07;
 const OBJ_REL_TOL: f64 = 1e-3;
 
 #[test]
-#[ignore = "heavy ~3-4min (boxed IPM + simplex fallback); run with --run-ignored"]
+#[ignore = "heavy ~220s (boxed IPM + simplex fallback); run with `cargo nextest run --run-ignored` (nextest.toml override grants the budget)"]
 fn diag_greenbea_ipm_timebox_reaches_optimal() {
     let path = Path::new("data/lp_problems/greenbea.QPS");
     assert!(path.exists(), "data required (no SKIP): {:?}", path);
