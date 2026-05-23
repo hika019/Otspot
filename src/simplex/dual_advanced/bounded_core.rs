@@ -130,12 +130,12 @@ const BOUNDED_DUAL_ITER_HARD_CAP: usize = 1_000_000;
 /// - `x_b[i] = (B^{-1} (b − Σ_{k at_upper non-basic} u_k · a_k))[i]`,
 ///   reflecting the flip-applied effective RHS.
 pub(crate) struct BoundedDualState {
-    pub basis: Vec<usize>,
-    pub at_upper: Vec<bool>,
-    pub x_b: Vec<f64>,
-    pub reduced_costs: Vec<f64>,
-    pub is_basic: Vec<bool>,
-    pub iterations: usize,
+    pub(crate) basis: Vec<usize>,
+    pub(crate) at_upper: Vec<bool>,
+    pub(crate) x_b: Vec<f64>,
+    pub(crate) reduced_costs: Vec<f64>,
+    pub(crate) is_basic: Vec<bool>,
+    pub(crate) iterations: usize,
 }
 
 impl BoundedDualState {

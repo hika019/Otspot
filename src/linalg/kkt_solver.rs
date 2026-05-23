@@ -209,6 +209,15 @@ pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 /// makes the saddle-point conditioning manageable in practice.
 const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 
+/// Default convergence tolerance for non-inexact MINRES constructors.
+/// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM
+/// relaxation — the system must be solved accurately each call.
+const MINRES_DEFAULT_TOL: f64 = 1e-9;
+
+/// Max iterations = `MINRES_MAX_ITER_MULTIPLIER × n`, giving O(n) budget that
+/// scales with problem size.
+const MINRES_MAX_ITER_MULTIPLIER: usize = 2;
+
 /// Resolve η from the `MINRES_ETA` env (constrained to `(0, 1]`), else default.
 fn minres_eta_runtime() -> f64 {
     std::env::var("MINRES_ETA")
@@ -237,7 +246,7 @@ impl PreconditionedMinres {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
+        Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
     }
 
     /// Block-diagonal preconditioner for a saddle-point K of dimension `n_top + m`.
@@ -246,7 +255,7 @@ impl PreconditionedMinres {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: 2 * n, tol: 1e-9, ir_steps: 0 }
+        Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
     }
 
     /// Inexact-Newton variant of `with_block_diag`, with env-overridable η and IR rounds.

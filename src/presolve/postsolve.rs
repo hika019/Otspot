@@ -14,6 +14,11 @@ use std::time::Instant;
 /// (non-basic candidate) when synthesising the postsolved warm-start basis.
 const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
 
+/// Maximum Gauss-Seidel iterations for dual variable recovery.
+const GS_MAX_ITER: usize = 50;
+/// Convergence tolerance for Gauss-Seidel: stops when max per-row change drops below this.
+const GS_CONV_TOL: f64 = 1e-12;
+
 /// Return the primal slack of original row `i` (always non-negative for feasible
 /// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
 /// scale `1 + |b_i| + |Ax_i|` is returned alongside so the caller can pick a
@@ -800,9 +805,7 @@ pub fn run_postsolve(
                 linsub_rows.insert(*r);
             }
         }
-        let max_iter = 50;
-        let conv_tol = 1e-12;
-        'gs_outer: for _ in 0..max_iter {
+        'gs_outer: for _ in 0..GS_MAX_ITER {
             if deadline.is_some_and(|d| Instant::now() >= d) { break 'gs_outer; }
             let mut max_diff = 0.0f64;
             for i in 0..m {
@@ -835,7 +838,7 @@ pub fn run_postsolve(
                     y[*piv] = new_y;
                 }
             }
-            if max_diff < conv_tol { break 'gs_outer; }
+            if max_diff < GS_CONV_TOL { break 'gs_outer; }
         }
         y
     };

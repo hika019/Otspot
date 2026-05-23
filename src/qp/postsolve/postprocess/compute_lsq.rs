@@ -1,12 +1,9 @@
-//! 元問題空間で A^T y = -(Qx + c + bound_contrib) の最小二乗 y を計算。
+//! Compute a least-squares `y` satisfying `A^T y ≈ -(Qx + c + bound_contrib)`.
 //!
-//! 正規方程式 (A·Aᵀ + εI) y = A·target を陰的 CG で解く。
-//! A·Aᵀ を明示的に構築しないため O(k·nnz) (k = CG 収束イテレーション数)。
-//! 直接法 (BTreeMap + LDL) は LASSO 等の密 A·Aᵀ 問題で O(m²·nnz/col) となり
-//! 79-96% wall を支配していた。CG はその回避策 (疎性活用・全体 LSQ 回避)。
-//!
-//! CG が NaN/Inf を返した場合のみ direct LDL+IR 経路にフォールバックする。
-//! 未収束の best-effort y は下流の DD-guard (refine_dual_lsq) が refine する。
+//! Solves the normal equations `(A·Aᵀ + εI) y = A·target` via implicit CG,
+//! avoiding explicit construction of `A·Aᵀ` for sparse problems.
+//! Falls back to direct LDL+IR only when CG returns NaN/Inf.
+//! Unconverged best-effort solutions are refined downstream by `refine_dual_lsq`.
 
 use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR, LSQ_DUAL_SIZE_LIMIT};
 use crate::qp::problem::QpProblem;

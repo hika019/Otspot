@@ -163,7 +163,6 @@ pub(crate) fn solve_ippmm_inner(
     let mut prof_predcorr_ns: u128 = 0;
     let mut prof_gondzio_ns: u128 = 0;
     let mut prof_update_ns: u128 = 0;
-    let prof_other_ns: u128 = 0;
 
     // 常時収集 (prof flag 不要): result の TimingBreakdown に昇格。
     let mut total_factorize_ns: u128 = 0;
@@ -594,9 +593,13 @@ pub(crate) fn solve_ippmm_inner(
             0.0
         };
 
-        // 等式 (mu=0) では mu_rate=0.9 で高速減衰、それ以外は r を [0.2, 0.9] で clamp。
-        let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { 0.9 } else { r };
-        let mu_rate = mu_rate_raw.clamp(0.2, 0.9);
+        // For equality-only problems (mu≈0) use a fixed fast-decay rate;
+        // otherwise clamp the relative mu reduction to a stable range.
+        const MU_RATE_EQ: f64 = 0.9;
+        const MU_RATE_MIN: f64 = 0.2;
+        const MU_RATE_MAX: f64 = 0.9;
+        let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { MU_RATE_EQ } else { r };
+        let mu_rate = mu_rate_raw.clamp(MU_RATE_MIN, MU_RATE_MAX);
 
         pf_history.push(nr_p);
         if pf_history.len() > PF_HISTORY_LEN {
@@ -671,7 +674,7 @@ pub(crate) fn solve_ippmm_inner(
     if prof {
         emit_prof_summary(
             prof_iters, prof_residual_ns, total_factorize_ns, prof_predcorr_ns,
-            prof_gondzio_ns, prof_update_ns, prof_other_ns,
+            prof_gondzio_ns, prof_update_ns, 0,
         );
     }
 
