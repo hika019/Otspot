@@ -113,7 +113,7 @@ EOF
     echo "[lp_vs_highs] ============================================"
 
     # ── Step 1: Ensure LP problem data exists ────────────────────────────
-    LP_COUNT=$(find "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+    LP_COUNT=$(find -L "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$LP_COUNT" -eq 0 ]]; then
         echo "[lp_vs_highs] LP data not found — downloading via netlib_lp_download.sh..."
         EMPS="/tmp/emps"
@@ -122,7 +122,7 @@ EOF
             cc -o "$EMPS" /tmp/emps.c
         fi
         EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/netlib_lp_download.sh" "$LP_DATA_DIR" || true
-        LP_COUNT=$(find "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+        LP_COUNT=$(find -L "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
         if [[ "$LP_COUNT" -eq 0 ]]; then
             echo "[lp_vs_highs] Error: download produced 0 files in $LP_DATA_DIR" >&2; exit 1
         fi
@@ -134,7 +134,7 @@ EOF
         BENCH_DATA_DIR="$RESULT_DIR/mini_subset"
         mkdir -p "$BENCH_DATA_DIR"
         for name in afiro adlittle blend; do
-            f=$(find "$LP_DATA_DIR" -maxdepth 1 -iname "${name}.qps" 2>/dev/null | head -1)
+            f=$(find -L "$LP_DATA_DIR" -maxdepth 1 -iname "${name}.qps" 2>/dev/null | head -1)
             if [[ -n "$f" ]]; then
                 ln -sf "$f" "$BENCH_DATA_DIR/$(basename "$f")"
                 echo "[lp_vs_highs] mini: included $name"
@@ -149,12 +149,12 @@ EOF
     PROBLEM_FILES=()
     while IFS= read -r f; do
         PROBLEM_FILES+=("$f")
-    done < <(find "$BENCH_DATA_DIR" -maxdepth 1 -iname "*.qps" | sort)
+    done < <(find -L "$BENCH_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | sort)
     PROBLEM_COUNT=${#PROBLEM_FILES[@]}
     echo "[lp_vs_highs] Problems to run: $PROBLEM_COUNT"
 
     if [[ $PROBLEM_COUNT -eq 0 ]]; then
-        echo "[lp_vs_highs] Error: no .qps files in $BENCH_DATA_DIR" >&2; exit 1
+        echo "[lp_vs_highs] Error: no .qps files in $BENCH_DATA_DIR (or dir is inaccessible)" >&2; exit 1
     fi
 
     # ── Step 3: Run self-solver via bench_parallel.sh ────────────────────
