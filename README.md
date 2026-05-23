@@ -254,10 +254,8 @@ from *optimal*). For infeasible / unbounded sets the metric is a correct certifi
 |---|---|---:|---|---|
 | Feasible LP | Netlib | 109 | 109 optimal | 106 optimal |
 | Convex QP | Maros–Mészáros | 138 | 129 optimal, 7 valid | 124 optimal, 4 valid |
-| Infeasible LP | Netlib | 29 | 28 certified¹ | 28 certified¹ |
+| Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
-
-¹ One instance unresolved (`klein3`: the simplex stalls and is cut off).
 
 The remaining `1e-6` QP misses are the `LISWET` family (`LISWET9`/`LISWET12`), projections onto the
 cone of convex sequences:

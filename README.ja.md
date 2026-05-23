@@ -252,10 +252,8 @@ println!("status: {}", result.status);
 |---|---|---:|---|---|
 | 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 106 |
 | 凸 QP | Maros–Mészáros | 138 | 最適解 129・有効解 7 | 最適解 124・有効解 4 |
-| 実行不可能 LP | Netlib | 29 | 正答 28¹ | 正答 28¹ |
+| 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
-
-¹ 1問 未解決（`klein3`: simplex が停滞し打ち切り）。
 
 `1e-6` の QP 未達は `LISWET` 系（`LISWET9`/`LISWET12`）。
 LISWET は「凸数列の錐」への射影で、制約正規行列が離散 biharmonic 作用素（n = 10⁴ で
