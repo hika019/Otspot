@@ -79,28 +79,13 @@ fn klein2_infeasible_within_60s() {
     assert!(wall < TIMEOUT_SEC, "klein2 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
-/// klein3: highly degenerate infeasible LP. Big-M Phase I previously used a
-/// `Timeout + artificials residual → Infeasible` heuristic that was right for
-/// klein3 but flipped slow-but-feasible LPs (pilot/dfl001/ken-13/ken-18) to
-/// false-Infeasible. The heuristic was replaced by a Farkas certificate
-/// (A^T y ≤ 0, b^T y > 0). klein3's Phase-I dual simplex cannot reach
-/// dual-feasibility within budget: ~20 structural columns stay dual-infeasible
-/// (max a_jᵀy ≈ 0.1, far above tol) even at 50× the anti-cycling cap, so the
-/// basis-derived certificate genuinely fails and the solver returns Timeout.
-/// honest Timeout > unsound Infeasible (#36 rework: the certificate-free
-/// `any_nonzero` short-circuit was removed; klein3 stays honest Timeout).
-///
-/// Both verdicts are acceptable: Infeasible (presolve / Phase I converges in
-/// time) or Timeout (Phase I incomplete, no certificate). Optimal or Unbounded
-/// would be a real bug.
+/// klein3: highly degenerate infeasible LP. Big-M Phase I does not extract a
+/// basis-derived certificate before its anti-cycling cap; LP dispatch must
+/// still certify the original nonnegative LP through a verified Farkas fallback.
 #[test]
 fn klein3_no_false_optimal_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein3.QPS");
-    assert!(
-        matches!(status, SolveStatus::Infeasible | SolveStatus::Timeout),
-        "klein3 must be Infeasible (certified) or Timeout (honest); got {:?}",
-        status
-    );
+    assert_eq!(status, SolveStatus::Infeasible, "klein3 must be certified Infeasible");
     assert!(wall < TIMEOUT_SEC, "klein3 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
 }
 
