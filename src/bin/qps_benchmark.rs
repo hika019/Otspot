@@ -631,10 +631,11 @@ fn main() {
     let mut eps: f64 = 1e-6;
     let mut timeout_secs: f64 = 10.0;
     let mut baseline_override: Option<String> = None;
-    // measurement-only: forwards to `opts.threads` for profiling per-solve
-    // factorization parallelism. Production default is threads=1 (Par::Seq);
-    // benchmarks measured a 30–50% slowdown from parallel LDL on mid-sparse
-    // KKTs (e.g. dfl001), so this is a diagnostic knob, not a production path.
+    // measurement-only: forwards to `opts.threads` to profile per-solve
+    // factorization parallelism. Production default is threads=1 (serial).
+    // Effect is problem-dependent: dense-KKT convex QPs (CVXQP*_L) speed up at
+    // threads≥2, sparser/structured systems (CONT-201) regress, very sparse
+    // ones are parity. Diagnostic knob, not a production path.
     let mut threads: usize = 1;
 
     let mut i = 1;
