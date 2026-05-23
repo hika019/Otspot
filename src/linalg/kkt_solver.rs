@@ -35,6 +35,7 @@ pub enum KktError {
     /// Singular or indefinite K; the caller may retry after regularisation.
     SingularOrIndefinite,
     /// Symbolic estimation predicts the factor would exceed the memory budget.
+    #[allow(dead_code)]
     WouldExceedMemory,
     DidNotConverge,
 }
@@ -55,6 +56,7 @@ impl std::error::Error for KktError {}
 /// Solver abstraction for the symmetric saddle-point KKT system `K · u = rhs`.
 /// `solve` is `&self` so predictor/corrector can share one factorisation; `refactor`
 /// is `&mut self` because it replaces the cached factorisation.
+#[allow(dead_code)]
 pub trait KktSolver: Send {
     /// 1 つの右辺に対して `K · u = rhs` を解いて `sol` に書き込む。
     ///
@@ -82,11 +84,10 @@ pub trait KktSolver: Send {
     fn dim(&self) -> usize;
 }
 
-/// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget`.
+/// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget_par`.
 /// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
 /// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
-///
-/// `par` は per-call parallelism。default は `Par::Seq` (= 既存挙動)。
+#[allow(dead_code)]
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
@@ -94,6 +95,7 @@ pub struct DirectLdl {
     par: faer::Par,
 }
 
+#[allow(dead_code)]
 impl DirectLdl {
     pub fn new(n: usize) -> Self {
         Self { factor: None, n, max_l_nnz: None, par: faer::Par::Seq }
@@ -212,10 +214,12 @@ const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 /// Default convergence tolerance for non-inexact MINRES constructors.
 /// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM
 /// relaxation — the system must be solved accurately each call.
+#[allow(dead_code)]
 const MINRES_DEFAULT_TOL: f64 = 1e-9;
 
 /// Max iterations = `MINRES_MAX_ITER_MULTIPLIER × n`, giving O(n) budget that
 /// scales with problem size.
+#[allow(dead_code)]
 const MINRES_MAX_ITER_MULTIPLIER: usize = 2;
 
 /// Resolve η from the `MINRES_ETA` env (constrained to `(0, 1]`), else default.
@@ -242,6 +246,7 @@ impl PreconditionedMinres {
         self.tol = tol;
     }
 
+    #[allow(dead_code)]
     pub fn new(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -251,6 +256,7 @@ impl PreconditionedMinres {
 
     /// Block-diagonal preconditioner for a saddle-point K of dimension `n_top + m`.
     /// Approximates the lower block with a Schur-complement diagonal in O(nnz(K)).
+    #[allow(dead_code)]
     pub fn with_block_diag(k: CscMatrix, n_top: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -288,11 +294,6 @@ impl PreconditionedMinres {
         }
     }
 
-    pub fn with_params(k: CscMatrix, max_iter: usize, tol: f64) -> Self {
-        let kind = PreconditionerKind::Jacobi;
-        let m_inv_diag = compute_inv_diag(&k, kind);
-        Self { k, m_inv_diag, kind, max_iter, tol, ir_steps: 0 }
-    }
 }
 
 fn compute_inv_diag(k: &CscMatrix, kind: PreconditionerKind) -> Vec<f64> {
@@ -504,16 +505,13 @@ impl KktFactor {
     pub fn is_iterative(&self) -> bool {
         matches!(self, KktFactor::Iterative(_))
     }
-
-    pub fn is_dd(&self) -> bool {
-        matches!(self, KktFactor::DirectDd(_))
-    }
 }
 
 /// LDL-compatible factorisation that falls back to MINRES when the LDL factor would
 /// exceed the memory budget. Pass `n_top = Some(n)` to enable the saddle-point
 /// block-diagonal MINRES preconditioner; `None` selects plain Jacobi (既存互換、
 /// per-call parallelism = `Par::Seq`)。
+#[allow(dead_code)]
 pub fn factorize_kkt_with_cached_perm(
     k: &CscMatrix,
     perm: &[usize],
@@ -605,6 +603,7 @@ pub fn factorize_kkt_with_cached_perm_par(
 
 /// Pre-permuted fast path. MINRES fallback uses `unpermuted_k` since it operates on
 /// the original ordering (既存互換、per-call parallelism = `Par::Seq`)。
+#[allow(dead_code)]
 pub fn factorize_kkt_pre_permuted(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -620,6 +619,7 @@ pub fn factorize_kkt_pre_permuted(
 
 /// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky
 /// (既存互換、per-call parallelism = `Par::Seq`)。
+#[allow(dead_code)]
 pub fn factorize_kkt_pre_permuted_cached(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -682,6 +682,7 @@ impl KktFactor {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KktBackend {
     Direct,
@@ -692,6 +693,7 @@ pub enum KktBackend {
 /// permanently to MINRES. Numerical / deadline failures still propagate up. The decision
 /// is driven by measured `L_nnz` vs the configured memory budget rather than any
 /// problem-size heuristic.
+#[allow(dead_code)]
 pub struct AutoKktSolver {
     n: usize,
     /// Cleared once `WouldExceedMemory` is observed so subsequent calls skip direct.
@@ -701,6 +703,7 @@ pub struct AutoKktSolver {
     last_used: Option<KktBackend>,
 }
 
+#[allow(dead_code)]
 impl AutoKktSolver {
     pub fn new(n: usize) -> Self {
         Self {

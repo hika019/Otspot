@@ -65,11 +65,7 @@ pub(super) fn step6_doubleton_equation(
             continue;
         }
         if (new_lb_o - lb_o_old).abs() > ZERO_TOL || (new_ub_o - ub_o_old).abs() > ZERO_TOL {
-            st.postsolve_stack.push(PostsolveStep::BoundsTightened {
-                orig_col: other_col,
-                old_lb: lb_o_old,
-                old_ub: ub_o_old,
-            });
+            st.postsolve_stack.push(PostsolveStep::BoundsTightened);
             st.bounds[other_col] = (new_lb_o, new_ub_o);
         }
         eliminate_variable_via_eq_row(st, i, pivot_col)?;

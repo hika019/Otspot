@@ -741,14 +741,14 @@ pub fn run_postsolve(
             PostsolveStep::EmptyRow { orig_row } => {
                 dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
-            PostsolveStep::SingletonRow { orig_col, orig_row, value, a_ij: _, c_j: _ } => {
+            PostsolveStep::SingletonRow { orig_col, orig_row, value } => {
                 solution[*orig_col] = *value;
                 dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
                 dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
-            PostsolveStep::BoundsTightened { .. } => {}
+            PostsolveStep::BoundsTightened => {}
             PostsolveStep::LinearSubstitution {
                 orig_col,
                 orig_row,

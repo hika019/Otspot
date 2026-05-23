@@ -51,9 +51,6 @@ pub mod qp;
 pub mod mip;
 pub mod lp;
 pub mod screening;
-// linalg は ldl / kkt_solver 等にクロスモジュールテストからのみ参照される
-// public helper を含むため、項目単位の dead_code 警告を抑制する。
-#[allow(dead_code)]
 pub(crate) mod linalg;
 
 #[cfg(test)]

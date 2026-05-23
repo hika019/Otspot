@@ -144,10 +144,9 @@ impl Model {
         self.add_var_with_kind(name, 0.0, 1.0, VarKind::Binary)
     }
 
-    fn add_var_with_kind(&mut self, name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
+    fn add_var_with_kind(&mut self, _name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
         let index = self.variables.len();
         self.variables.push(VariableDefinition {
-            name: name.to_string(),
             lower_bound: lb,
             upper_bound: ub,
             kind,

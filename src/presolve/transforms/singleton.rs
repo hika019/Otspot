@@ -39,8 +39,6 @@ pub(super) fn step2_singleton_row(st: &mut PresolveState) -> Result<(), Presolve
                 orig_row: i,
                 orig_col: j,
                 value,
-                a_ij,
-                c_j: c_j_snapshot,
             });
         }
     }

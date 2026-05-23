@@ -6,27 +6,19 @@ use crate::tolerances::ZERO_TOL;
 
 /// Inverse of one presolve operation. Pushed in forward order; postsolve
 /// replays it in LIFO order.
-// BoundsTightened keeps old_lb/old_ub for diagnostics; postsolve does not need them.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum PostsolveStep {
     FixedVariable { orig_col: usize, value: f64 },
     EmptyColumn { orig_col: usize, value: f64 },
     EmptyRow { orig_row: usize },
-    /// Eq row reduced to a single variable; dual reconstruction needs `a_ij` and `c_j`.
+    /// Eq row reduced to a single variable.
     SingletonRow {
         orig_row: usize,
         orig_col: usize,
         value: f64,
-        a_ij: f64,
-        c_j: f64,
     },
     RedundantConstraint { orig_row: usize },
-    BoundsTightened {
-        orig_col: usize,
-        old_lb: f64,
-        old_ub: f64,
-    },
+    BoundsTightened,
     /// Variable eliminated via a pivot Eq row. Shared by R6 (doubleton), R15 (free-var),
     /// and R5 (free-singleton-col). Postsolve restores
     ///   `orig_col = (rhs - Σ coeff_k * x_orig_other_k) / pivot`

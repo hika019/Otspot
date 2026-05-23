@@ -264,7 +264,7 @@ impl AugmentedKktCache {
     }
 }
 
-/// AMD 置換済みキャッシュ。`factorize_quasidefinite_pre_permuted` で permute_sym_upper を回避。
+/// AMD 置換済みキャッシュ。`permute_sym_upper` を事前計算しておき再因子化コストを削減する。
 pub(crate) struct PermutedAugmentedKkt {
     col_ptr: Vec<usize>,
     row_ind: Vec<usize>,

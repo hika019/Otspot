@@ -28,8 +28,6 @@ pub struct Variable {
 
 /// Metadata about a variable stored in the `Model`.
 pub(crate) struct VariableDefinition {
-    #[allow(dead_code)]  // stored for future display/debugging use
-    pub name: String,
     pub lower_bound: f64,
     pub upper_bound: f64,
     /// Integrality requirement. `Continuous` for `add_var`.

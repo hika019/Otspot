@@ -29,7 +29,7 @@ fn make_state(
 fn count_bounds_tightened(st: &PresolveState) -> usize {
     st.postsolve_stack
         .iter()
-        .filter(|s| matches!(s, PostsolveStep::BoundsTightened { .. }))
+        .filter(|s| matches!(s, PostsolveStep::BoundsTightened))
         .count()
 }
 
