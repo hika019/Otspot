@@ -4,7 +4,7 @@
 //!   DD 残差で改善した場合のみ採用 (退行防止)。
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
-use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, LSQ_DUAL_SIZE_LIMIT};
+use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib};
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
@@ -108,12 +108,12 @@ pub(crate) fn refine_dual_lsq_irls(
     if m == 0 || result.solution.len() != n {
         return;
     }
-    if n + m > LSQ_DUAL_SIZE_LIMIT {
-        return;
-    }
     if result.dual_solution.len() != m {
         return;
     }
+    // 規模ガードは固定 size proxy ではなく AAT 構築の memory_budget
+    // (build_aat_upper_csc) と factorize_budget の L_nnz 予算で行う
+    // (build が予算超で None / factorize が WouldExceedBudget → break)。
 
     let zero_dd = TwoFloat::from(0.0);
 
@@ -224,7 +224,10 @@ pub(crate) fn refine_dual_lsq_irls(
             Some(mat) => mat,
             None => break,
         };
-        let factor = match crate::linalg::ldl::factorize(&aat_w) {
+        let factor = match crate::linalg::ldl::factorize_budget(
+            &aat_w,
+            crate::linalg::kkt_solver::max_l_nnz_from_budget(),
+        ) {
             Ok(f) => f,
             Err(_) => break,
         };

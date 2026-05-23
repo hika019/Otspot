@@ -30,6 +30,10 @@ pub(crate) fn refine_kkt_iterative(
         return 0;
     }
 
+    // KKT 反復 refinement の時間予算 proxy。saddle-point K の factorize は
+    // deadline-aware (下の factorize_quasidefinite_with_amd) だが、巨大問題では
+    // 単発 factorize が deadline を空費する。post-processing 段で K factorize を
+    // 行うか否かの規模ガード (n+m で判定)。
     const REFINE_KKT_SIZE_LIMIT: usize = 50_000;
     if n + m > REFINE_KKT_SIZE_LIMIT {
         return 0;

@@ -6,9 +6,6 @@ use crate::sparse::CscMatrix;
 /// AAT 対角ε 正則化倍率 (rank-deficient 対策)。f64 eps より十分上、LDL dynamic reg より十分下。
 pub(crate) const AAT_REG_FACTOR: f64 = 1e-12;
 
-/// LSQ dual の size guard。AAT (m×m) LDL は m=186k で 30+ GB メモリを確保するため skip。
-pub(crate) const LSQ_DUAL_SIZE_LIMIT: usize = 50_000;
-
 /// BTreeMap ノードあたり実測バイト数 (key 16 + value 8 + node overhead)。memory budget の係数。
 const AAT_BUILD_BYTES_PER_ENTRY: u128 = 80;
 
