@@ -18,16 +18,17 @@ pub mod constraint;
 pub mod expression;
 pub mod variable;
 
+pub use crate::constraint;
 pub use constraint::{Constraint, ConstraintSense};
 pub use expression::Expression;
-pub use variable::{Variable, VarKind};
-pub use crate::constraint;
+pub use variable::{VarKind, Variable};
 
 use variable::VariableDefinition;
 
 use crate::options::Tolerance;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
 use crate::sparse::CscMatrix;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Index;
 
@@ -55,6 +56,7 @@ pub struct Model {
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
     /// Convention: min 1/2 x^T Q x + c^T x  ("1/2あり" standard).
     quadratic_objective: Option<CscMatrix>,
+    invalid_inputs: BTreeMap<&'static str, String>,
     /// Timeout for QP solve in seconds (None = unlimited).
     timeout_secs: Option<f64>,
     /// Ruiz スケーリング有効/無効（None = default true）
@@ -79,6 +81,7 @@ impl Model {
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
+            invalid_inputs: BTreeMap::new(),
             timeout_secs: None,
             use_ruiz_scaling: None,
             tolerance: None,
@@ -90,7 +93,17 @@ impl Model {
 
     /// Set a timeout for QP solve operations.
     pub fn set_timeout(&mut self, secs: f64) {
+        if let Err(err) = self.try_set_timeout(secs) {
+            self.record_input_error("timeout", err);
+        }
+    }
+
+    /// Set a timeout for solve operations, returning an error for invalid input.
+    pub fn try_set_timeout(&mut self, secs: f64) -> Result<&mut Self, ModelError> {
+        validate_timeout(secs)?;
         self.timeout_secs = Some(secs);
+        self.invalid_inputs.remove("timeout");
+        Ok(self)
     }
 
     /// 並列 thread 上限を設定する。0 は 1 に補正、default は SolverOptions の 1。
@@ -104,7 +117,6 @@ impl Model {
     pub fn set_use_ruiz_scaling(&mut self, flag: bool) {
         self.use_ruiz_scaling = Some(flag);
     }
-
 
     /// 精度プリセットを設定する。
     pub fn set_tolerance(&mut self, tol: Tolerance) -> &mut Self {
@@ -192,18 +204,27 @@ impl Model {
     /// 対角 Q 行列を `diag` ベクトルから構築して設定する ergonomic helper。
     /// `diag.len()` は変数数と一致する必要がある。
     pub fn set_diagonal_q(&mut self, diag: &[f64]) -> &mut Self {
+        if let Err(err) = self.try_set_diagonal_q(diag) {
+            self.record_input_error("diagonal_q", err);
+        }
+        self
+    }
+
+    /// Set a diagonal Q matrix, returning an error instead of panicking on invalid input.
+    pub fn try_set_diagonal_q(&mut self, diag: &[f64]) -> Result<&mut Self, ModelError> {
         let n = diag.len();
-        assert_eq!(
-            n,
-            self.variables.len(),
-            "set_diagonal_q: diag length {} != variable count {}",
-            n,
-            self.variables.len()
-        );
+        if n != self.variables.len() {
+            return Err(ModelError::InvalidInput(format!(
+                "set_diagonal_q: diag length {} != variable count {}",
+                n,
+                self.variables.len()
+            )));
+        }
         let idx: Vec<usize> = (0..n).collect();
         let q = CscMatrix::from_triplets(&idx, &idx, diag, n, n)
-            .expect("diagonal CSC construction must succeed");
-        self.set_quadratic_objective(q)
+            .map_err(|e| ModelError::InvalidInput(e.to_string()))?;
+        self.invalid_inputs.remove("diagonal_q");
+        Ok(self.set_quadratic_objective(q))
     }
 
     /// 目的関数の定数オフセットを設定する。
@@ -219,6 +240,10 @@ impl Model {
     /// * `ModelError::NoObjective` if `minimize` or `maximize` was not called.
     /// * `ModelError::SolveError` if the solver returns Infeasible or Unbounded.
     pub fn solve(&mut self) -> Result<ModelResult, ModelError> {
+        if let Some(msg) = self.invalid_inputs.values().next() {
+            return Err(ModelError::InvalidInput(msg.clone()));
+        }
+
         let obj_expr = self.objective.as_ref().ok_or(ModelError::NoObjective)?;
 
         let num_vars = self.variables.len();
@@ -262,8 +287,14 @@ impl Model {
         let a = if num_constraints == 0 {
             CscMatrix::new(0, num_vars)
         } else {
-            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, num_constraints, num_vars)
-                .map_err(|e| ModelError::Internal(e.to_string()))?
+            CscMatrix::from_triplets(
+                &trip_rows,
+                &trip_cols,
+                &trip_vals,
+                num_constraints,
+                num_vars,
+            )
+            .map_err(|e| ModelError::Internal(e.to_string()))?
         };
 
         // --- Variable bounds ---
@@ -372,7 +403,9 @@ impl Model {
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
             SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
-            SolveStatus::NonConvex(msg) => Err(ModelError::Internal(format!("Non-convex QP: {}", msg))),
+            SolveStatus::NonConvex(msg) => {
+                Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
+            }
             SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
@@ -677,6 +710,24 @@ impl Model {
             SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
         }
     }
+
+    fn record_input_error(&mut self, key: &'static str, err: ModelError) {
+        let msg = match err {
+            ModelError::InvalidInput(msg) => msg,
+            other => other.to_string(),
+        };
+        self.invalid_inputs.insert(key, msg);
+    }
+}
+
+fn validate_timeout(secs: f64) -> Result<(), ModelError> {
+    if secs.is_finite() && secs >= 0.0 {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidInput(format!(
+            "timeout must be finite and non-negative, got {secs}"
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +814,9 @@ impl fmt::Display for SolveError {
         match self {
             SolveError::Infeasible => write!(f, "Problem is infeasible"),
             SolveError::Unbounded => write!(f, "Problem is unbounded"),
-            SolveError::MaxIterations => write!(f, "Max iterations reached without optimal solution"),
+            SolveError::MaxIterations => {
+                write!(f, "Max iterations reached without optimal solution")
+            }
             SolveError::NumericalError => write!(f, "Numerical breakdown during solve"),
         }
     }
@@ -775,6 +828,8 @@ impl fmt::Display for SolveError {
 pub enum ModelError {
     /// `solve()` was called before `minimize()` or `maximize()`.
     NoObjective,
+    /// A modeling API input was invalid.
+    InvalidInput(String),
     /// The solver returned a non-optimal status.
     SolveError(SolveError),
     /// Solver timed out before finding an optimal solution.
@@ -790,6 +845,7 @@ impl fmt::Display for ModelError {
                 f,
                 "No objective function defined. Call model.minimize() or model.maximize() before solve()."
             ),
+            ModelError::InvalidInput(msg) => write!(f, "Invalid model input: {}", msg),
             ModelError::SolveError(e) => write!(f, "Solve failed: {}", e),
             ModelError::Timeout => write!(f, "Solver timed out"),
             ModelError::Internal(msg) => write!(f, "Internal error: {}", msg),
@@ -815,7 +871,9 @@ mod tests {
         assert!(
             (a - b).abs() < EPS,
             "{}: expected {:.8}, got {:.8}",
-            name, b, a
+            name,
+            b,
+            a
         );
     }
 
@@ -940,11 +998,7 @@ mod tests {
         model.minimize(x);
 
         let result = model.solve().unwrap();
-        assert!(
-            result[x].abs() < 1e-6,
-            "x should be 0.0, got {}",
-            result[x]
-        );
+        assert!(result[x].abs() < 1e-6, "x should be 0.0, got {}", result[x]);
 
         // Maximize x in [0, 3] → should hit ub=3
         // Note: add explicit constraint because simplex edge-case (m=0, ub only)
@@ -1070,9 +1124,21 @@ mod tests {
 
         let result = model.solve().unwrap();
         let qp_tol = 2e-3;
-        assert!((result[x] - 0.5).abs() < qp_tol, "T11: x expected 0.5, got {}", result[x]);
-        assert!((result[y] - 0.5).abs() < qp_tol, "T11: y expected 0.5, got {}", result[y]);
-        assert!((result.objective_value - 0.5).abs() < qp_tol, "T11: obj expected 0.5, got {}", result.objective_value);
+        assert!(
+            (result[x] - 0.5).abs() < qp_tol,
+            "T11: x expected 0.5, got {}",
+            result[x]
+        );
+        assert!(
+            (result[y] - 0.5).abs() < qp_tol,
+            "T11: y expected 0.5, got {}",
+            result[y]
+        );
+        assert!(
+            (result.objective_value - 0.5).abs() < qp_tol,
+            "T11: obj expected 0.5, got {}",
+            result.objective_value
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1187,13 +1253,19 @@ mod tests {
         assert_close(result[y], 0.5, "T8-2: y");
 
         // dual検証: Eq制約のshadow price = -1
-        let dual = result.dual_solution.as_ref().expect("T8-2: dual_solution is None");
-        assert!(dual.len() == 1, "T8-2: dual length expected 1, got {}", dual.len());
+        let dual = result
+            .dual_solution
+            .as_ref()
+            .expect("T8-2: dual_solution is None");
+        assert!(
+            dual.len() == 1,
+            "T8-2: dual length expected 1, got {}",
+            dual.len()
+        );
         assert!(
             (dual[0] - (-1.0)).abs() < EPS,
             "T8-2: dual[0] expected -1.0, got {}",
             dual[0]
         );
     }
-
 }
