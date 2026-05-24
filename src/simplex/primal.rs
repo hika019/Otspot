@@ -49,6 +49,61 @@ use super::{StandardForm, SimplexOutcome, extract_dual_info};
 /// near-zero when equilibration shrinks the diagonal below f64 noise.
 const SLACK_DIAG_TOL: f64 = 1e-14;
 
+/// Attempt to extract a verified Farkas infeasibility certificate from a
+/// Phase I basis that could not be driven to feasibility.
+///
+/// Constructs `y = B^{-T} e_art` (the Phase I dual, where `e_art[i] = 1` for
+/// artificial basis columns) and checks the Farkas alternative for the
+/// standard-form LP `{Ax = b, x ≥ 0}`:
+///
+///   A^T y ≤ tol  (for all non-artificial columns j < n_original)
+///   b^T y > tol
+///
+/// Returns `y` if both conditions hold, or an empty Vec if the certificate
+/// cannot be verified (LU failure, no artificials in basis, or numeric check
+/// failed). An empty return does NOT mean the LP is feasible — it means this
+/// basis cannot provide a Farkas proof; the caller should re-verify via Big-M
+/// rather than blindly trusting the unverified Infeasible verdict.
+///
+/// Tolerance: `dual_tol * max(1, ‖b‖∞)` — consistent with the Big-M Phase I
+/// Farkas checker so both paths discriminate at the same numeric threshold.
+fn extract_farkas_certificate(
+    a_ext: &CscMatrix,
+    b: &[f64],
+    basis: &[usize],
+    m: usize,
+    n_original: usize,
+    options: &SolverOptions,
+) -> Vec<f64> {
+    if !basis.iter().any(|&col| col >= n_original) {
+        return vec![];
+    }
+    let mut basis_mgr = match LuBasis::new(a_ext, basis, options.max_etas) {
+        Ok(bm) => bm,
+        Err(_) => return vec![],
+    };
+    let mut y: Vec<f64> = (0..m)
+        .map(|i| if basis[i] >= n_original { 1.0 } else { 0.0 })
+        .collect();
+    basis_mgr.btran_dense(&mut y);
+
+    let b_norm = b.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let tol = options.dual_tol * (1.0_f64).max(b_norm);
+
+    let by: f64 = b.iter().zip(y.iter()).map(|(&bi, &yi)| bi * yi).sum();
+    if by <= tol {
+        return vec![];
+    }
+    for j in 0..n_original {
+        let Ok((rows, vals)) = a_ext.get_column(j) else { return vec![]; };
+        let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
+        if aty > tol {
+            return vec![];
+        }
+    }
+    y
+}
+
 fn extract_timeout_solution_reconciled(
     sf: &StandardForm,
     a: &CscMatrix,
@@ -340,14 +395,23 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
 
                 if !phase1_feasible {
+                    // Extract and verify a Farkas certificate from the final Phase I basis.
+                    // True infeasible LPs have a valid dual ray at this basis (LP duality);
+                    // feasible LPs cycling in Phase I do not. The certificate is stored in
+                    // dual_solution so `solve_dual_advanced` can gate Big-M re-verification:
+                    // certified → trust; uncertified → pilot87-class false-Infeasible → Big-M.
+                    let farkas = extract_farkas_certificate(
+                        &a_ext, &b, &basis, m, sf.n_total, options,
+                    );
                     return SolverResult {
                         status: SolveStatus::Infeasible,
                         objective: 0.0,
                         solution: vec![],
-                        dual_solution: vec![],
+                        dual_solution: farkas,
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
+                        iterations: total_iters,
                         ..Default::default()
                     };
                 }
@@ -494,16 +558,25 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     }
                 }
             }
-            SimplexOutcome::Unbounded => { SolverResult {
-                status: SolveStatus::Infeasible,
-                objective: 0.0,
-                solution: vec![],
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-                ..Default::default()
-            } },
+            SimplexOutcome::Unbounded => {
+                // Phase I unbounded direction implies primal infeasibility. Attempt to
+                // extract a Farkas certificate from the current basis (same discriminator
+                // as the !phase1_feasible path).
+                let farkas = extract_farkas_certificate(
+                    &a_ext, &b, &basis, m, sf.n_total, options,
+                );
+                SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: 0.0,
+                    solution: vec![],
+                    dual_solution: farkas,
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    iterations: total_iters,
+                    ..Default::default()
+                }
+            },
             SimplexOutcome::Timeout(obj1) => {
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
                 // Reconcile with a fresh LU; only enter Phase II if the
