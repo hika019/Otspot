@@ -125,29 +125,32 @@ fn ken18_no_false_infeasible() {
     assert_not_infeasible_ipm("data/lp_problems/ken-18.QPS", 60.0);
 }
 
-// ── Infeasible-arm sentinel (new code path added to solve_dual_advanced) ──────
+// ── Infeasible-arm sentinels (Farkas-cert gated routing) ─────────────────────
 //
-// The Timeout-arm tests above cover: primal Phase I Timeout → Big-M fallback.
-// These tests cover the NEW arm: primal Phase I returns Infeasible → Big-M
-// verification (Farkas arbiter). Two directions required:
-//   (A) feasible LP (pilot87): must NOT become false-Infeasible
-//   (B) infeasible LP (synthetic): must REMAIN Infeasible after Big-M check
+// Routing: primal Phase I Infeasible → `extract_farkas_certificate` checks the
+// final basis. Valid cert (dual_solution non-empty) → trust immediately (no
+// Big-M). No cert → uncertified, pilot87-class → Big-M arbiter.
 //
-// No-op proof for (A): reverting the `SolveStatus::Infeasible` arm back to
-// `_ => primal_result` makes pilot87 presolve=false return Infeasible (the
-// pre-fix bug), which fails assert!(!matches!(status, SolveStatus::Infeasible)).
+// Two directions required:
+//   (A) feasible LP (pilot87): primal Infeasible is uncertified → Big-M → !Infeasible
+//   (B) infeasible LP (synthetic): primal Infeasible is Farkas-certified → Infeasible
+//
+// No-op proof for (A): removing `extract_farkas_certificate` (always empty dual_solution)
+// makes `Infeasible if !dual_solution.is_empty()` never fire, routing all to Big-M.
+// For pilot87, Big-M also times out → Timeout (still !Infeasible, test still passes).
+// Stronger no-op: reverting the entire Infeasible arm to `_ => primal_result` makes
+// pilot87 presolve=false return Infeasible (the original bug), which fails the assert.
 
 /// LOAD-BEARING: pilot87 presolve=false must not be false-Infeasible (#58).
 ///
-/// pilot87 has 322 artificials (89 Ge + 233 Eq). Without presolve, primal
-/// Phase I runs ~68s on this degenerate feasible LP and returns false-Infeasible.
-/// The fix routes `Infeasible` through Big-M (Farkas arbiter), which either
-/// certifies Optimal (feasible) or times out honestly. Both are acceptable;
-/// only `Infeasible` is wrong.
+/// pilot87 (322 artificials: 89 Ge + 233 Eq) with presolve=false routes through
+/// primal Phase I (~68s, feasible LP with cycling) → false Infeasible. The fix:
+/// Farkas check on the final basis fails (LP is feasible, no dual ray exists) →
+/// uncertified → Big-M arbiter → Optimal or Timeout. Both are !Infeasible.
 ///
-/// Budget: 150s total (primal ~68s + Big-M remaining). Wall ≤ 150s < 3min.
+/// Budget: 150s total (primal ~68s + Big-M remaining ≤ 3min guideline).
 #[test]
-#[ignore = "heavy: pilot87 presolve=false — primal ~68s + Big-M; run with --run-ignored all"]
+#[ignore = "heavy: pilot87 presolve=false primal ~68s + Big-M; run with --run-ignored all"]
 fn pilot87_presolve_false_not_infeasible() {
     let path = Path::new("data/lp_problems/pilot87.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
@@ -171,21 +174,72 @@ fn pilot87_presolve_false_not_infeasible() {
     );
 }
 
-/// Bidirectional guard: a truly infeasible LP (presolve=false) must NOT be
-/// declared Optimal after the fix.
-///
-/// LP: x ≤ 1 (Le), x ≥ 2 (Ge), x ≥ 0 — clearly infeasible. The Ge constraint
-/// creates one artificial, routing: primal → Infeasible → Infeasible-arm → Big-M.
-///
-/// Acceptable outcomes: `Infeasible` (Farkas certified) or `Timeout` (Big-M
-/// inconclusive — honest, not a regression). The critical regression to prevent
-/// is `Optimal`: the fix must not somehow solve a true-infeasible LP to "feasible".
-///
-/// `Unbounded` is also a bug but structurally impossible here (bounded LP).
+// ── Spot-check: infeasible LPs that regressed to Timeout in the naive fix ────
+//
+// galenet/ex72a/forest6 are Netlib infeasible LPs. main (before #58) returned
+// Infeasible(iters=0) instantly via primal Phase I. The first fix attempt
+// (unconditional Big-M) degraded them to Timeout. The Farkas-gated fix preserves
+// them at Infeasible by trusting the primal Phase I Farkas certificate directly.
+
+/// galenet: infeasible LP, presolve=false — must remain Infeasible (not Timeout).
 #[test]
-fn infeasible_arm_bidirectional_true_infeasible_not_optimal() {
-    // x ≤ 1 (Le) AND x ≥ 2 (Ge) — trivially infeasible, one artificial,
-    // goes through primal Phase I → Infeasible arm → Big-M.
+fn spot_check_galenet_no_presolve_infeasible() {
+    assert_not_infeasible_regression("data/lp_problems_infeas/galenet.QPS");
+}
+
+/// ex72a: infeasible LP, presolve=false — must remain Infeasible.
+#[test]
+fn spot_check_ex72a_no_presolve_infeasible() {
+    assert_not_infeasible_regression("data/lp_problems_infeas/ex72a.QPS");
+}
+
+/// forest6: infeasible LP, presolve=false — must remain Infeasible.
+#[test]
+fn spot_check_forest6_no_presolve_infeasible() {
+    assert_not_infeasible_regression("data/lp_problems_infeas/forest6.QPS");
+}
+
+/// Assert that a known-infeasible LP with presolve=false still returns
+/// `Infeasible` (Farkas-certified). A `Timeout` result means the fix is
+/// incorrectly routing via Big-M instead of trusting the primal Farkas cert.
+fn assert_not_infeasible_regression(path_str: &str) {
+    let path = Path::new(path_str);
+    assert!(path.exists(), "data missing: {}", path_str);
+    let prob = parse_qps(path).expect("parse_qps");
+    let mut opts = SolverOptions::default();
+    opts.presolve = false;
+    opts.timeout_secs = Some(30.0);
+
+    let t0 = Instant::now();
+    let r = solve_qp_with(&prob, &opts);
+    let wall = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "{} presolve=false -> status={:?} wall={:.3}s iters={}",
+        path_str, r.status, wall, r.iterations
+    );
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "{} must be Farkas-certified Infeasible with presolve=false; \
+         Timeout = regression: Farkas gate not preserving primal cert",
+        path_str
+    );
+}
+
+/// Bidirectional guard: trivially infeasible LP (presolve=false) must stay Infeasible.
+///
+/// LP: x ≤ 1 (Le), x ≥ 2 (Ge), x ≥ 0 — clearly infeasible. Primal Phase I
+/// detects infeasibility and `extract_farkas_certificate` verifies the dual ray at
+/// the final basis (b^T y > tol AND A^T y ≤ tol). The Farkas-certified result is
+/// returned directly without Big-M. Asserts `== Infeasible` (stronger than
+/// `!Optimal`) because the certificate is always valid for this trivial LP.
+///
+/// Over-correction guard: if the fix accidentally routed all Infeasible through
+/// Big-M without Farkas gating, Big-M would cycle on this degenerate 2-constraint
+/// LP and return Timeout — this test would fail.
+#[test]
+fn infeasible_arm_bidirectional_true_infeasible_farkas_certified() {
+    // x ≤ 1 (Le) AND x ≥ 2 (Ge) — trivially infeasible, one artificial.
     let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1)
         .expect("CscMatrix");
     let prob = LpProblem::new_general(
@@ -207,12 +261,10 @@ fn infeasible_arm_bidirectional_true_infeasible_not_optimal() {
         "synthetic infeasible presolve=false -> status={:?} iters={}",
         r.status, r.iterations
     );
-    // Infeasible (Farkas certified) or Timeout (Big-M inconclusive) are both
-    // acceptable. Optimal would mean the fix declared an infeasible LP feasible.
-    assert!(
-        !matches!(r.status, SolveStatus::Optimal | SolveStatus::Unbounded),
-        "infeasible LP returned {:?} — must be Infeasible (certified) or Timeout \
-         (honest); Optimal/Unbounded = over-correction bug in Infeasible-arm",
-        r.status
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "trivially infeasible LP must be Farkas-certified Infeasible; \
+         Timeout = over-routing to Big-M without Farkas gate"
     );
 }

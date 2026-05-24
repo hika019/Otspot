@@ -130,12 +130,16 @@ pub(crate) fn solve_dual_advanced(
                 bigm_result
             }
         }
+        // Primal returned a Farkas-certified Infeasible (dual_solution is the ray).
+        // True infeasible LPs (galenet/ex72a/forest6) provide a valid Farkas proof
+        // at the final Phase I basis; no Big-M re-verification needed.
+        SolveStatus::Infeasible if !primal_result.dual_solution.is_empty() => primal_result,
         SolveStatus::Infeasible => {
-            // Primal Phase I returned Infeasible without a Farkas certificate.
-            // Re-verify through Big-M Phase I (the Farkas arbiter):
-            //   - Big-M Optimal/feasible  → correct result (pilot87-class: feasible LP)
-            //   - Big-M Infeasible (certified) → true infeasible confirmed
-            //   - Big-M Timeout → inconclusive; return Timeout, never the unverified Infeasible
+            // Uncertified Infeasible: primal Phase I could not produce a Farkas proof.
+            // pilot87-class: feasible LP cycling in Phase I → Big-M is the arbiter.
+            //   - Big-M Optimal/feasible → pilot87-class false-Infeasible resolved
+            //   - Big-M Infeasible (certified via Farkas) → true infeasible confirmed
+            //   - Big-M Timeout → inconclusive; return Timeout, not the unverified Infeasible
             let bigm_result = phase1::big_m_cold_start(
                 sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
             );
