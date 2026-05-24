@@ -150,7 +150,6 @@ fn ken18_no_false_infeasible() {
 ///
 /// Budget: 150s total (primal ~68s + Big-M remaining ≤ 3min guideline).
 #[test]
-#[ignore = "heavy: pilot87 presolve=false primal ~68s + Big-M; run with --run-ignored all"]
 fn pilot87_presolve_false_not_infeasible() {
     let path = Path::new("data/lp_problems/pilot87.QPS");
     assert!(path.exists(), "data missing: {}", path.display());
