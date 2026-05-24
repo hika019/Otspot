@@ -51,7 +51,11 @@ fn model_api_bound_duals_active_lb_nonzero() {
     model.minimize(1.0 * x); // c=[1.0]
     let result = model.solve().expect("solve must succeed");
 
-    assert!(result[x].abs() < QP_TOL, "x expected 0.0, got {}", result[x]);
+    assert!(
+        result[x].abs() < QP_TOL,
+        "x expected 0.0, got {}",
+        result[x]
+    );
     assert_eq!(
         result.bound_duals.len(),
         1,
@@ -144,8 +148,16 @@ fn model_api_set_diagonal_q() {
     model.minimize(0.0 * x + 0.0 * y);
 
     let result = model.solve().unwrap();
-    assert!((result[x] - 0.5).abs() < QP_TOL, "x expected 0.5, got {}", result[x]);
-    assert!((result[y] - 0.5).abs() < QP_TOL, "y expected 0.5, got {}", result[y]);
+    assert!(
+        (result[x] - 0.5).abs() < QP_TOL,
+        "x expected 0.5, got {}",
+        result[x]
+    );
+    assert!(
+        (result[y] - 0.5).abs() < QP_TOL,
+        "y expected 0.5, got {}",
+        result[y]
+    );
     assert!(
         (result.objective_value - 0.5).abs() < QP_TOL,
         "obj expected 0.5, got {}",
@@ -154,12 +166,92 @@ fn model_api_set_diagonal_q() {
 }
 
 #[test]
-#[should_panic(expected = "diag length")]
-fn model_api_set_diagonal_q_dim_mismatch_panics() {
+fn model_api_try_set_diagonal_q_dim_mismatch_returns_error() {
     let mut model = Model::new("diag_q_bad");
     let _x = model.add_var("x", 0.0, 1.0);
-    // 1 変数しか無いのに 2 要素を渡す
+    let err = match model.try_set_diagonal_q(&[1.0, 1.0]) {
+        Ok(_) => panic!("expected dim mismatch to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, ModelError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
+
+#[test]
+fn model_api_set_diagonal_q_dim_mismatch_reports_error_at_solve() {
+    let mut model = Model::new("diag_q_bad_compat");
+    let x = model.add_var("x", 0.0, 1.0);
     model.set_diagonal_q(&[1.0, 1.0]);
+    model.minimize(x);
+
+    let err = model.solve().unwrap_err();
+    assert!(
+        matches!(err, ModelError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
+
+#[test]
+fn model_api_set_diagonal_q_can_recover_after_dim_mismatch() {
+    let mut model = Model::new("diag_q_recover");
+    let x = model.add_var("x", 0.0, 1.0);
+    model.set_diagonal_q(&[1.0, 1.0]);
+    model.set_diagonal_q(&[1.0]);
+    model.minimize(0.0 * x);
+
+    let result = model
+        .solve()
+        .expect("valid replacement should clear stale input error");
+    assert!(
+        result[x].abs() < QP_TOL,
+        "x expected 0.0, got {}",
+        result[x]
+    );
+}
+
+#[test]
+fn model_api_try_set_timeout_rejects_nan_and_negative() {
+    let mut model = Model::new("timeout_bad");
+    for timeout in [f64::NAN, -1.0] {
+        let err = match model.try_set_timeout(timeout) {
+            Ok(_) => panic!("expected invalid timeout to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "expected InvalidInput for {timeout:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn model_api_set_timeout_invalid_reports_error_at_solve() {
+    let mut model = Model::new("timeout_bad_compat");
+    let x = model.add_var("x", 0.0, 1.0);
+    model.set_timeout(f64::NAN);
+    model.minimize(x);
+
+    let err = model.solve().unwrap_err();
+    assert!(
+        matches!(err, ModelError::InvalidInput(_)),
+        "expected InvalidInput, got {err:?}"
+    );
+}
+
+#[test]
+fn model_api_set_timeout_can_recover_after_invalid_value() {
+    let mut model = Model::new("timeout_recover");
+    let x = model.add_var("x", 0.0, 1.0);
+    model.set_timeout(f64::NAN);
+    model.set_timeout(1.0);
+    model.minimize(x);
+
+    let result = model
+        .solve()
+        .expect("valid replacement should clear stale input error");
+    assert!(result[x].abs() < TOL, "x expected 0.0, got {}", result[x]);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +262,14 @@ fn solve_error_variants_exposed() {
     // コンパイル時 + matches! で variant の存在を確認 (新 variant 追加の regression guard)
     let e_max = ModelError::SolveError(SolveError::MaxIterations);
     let e_num = ModelError::SolveError(SolveError::NumericalError);
-    assert!(matches!(e_max, ModelError::SolveError(SolveError::MaxIterations)));
-    assert!(matches!(e_num, ModelError::SolveError(SolveError::NumericalError)));
+    assert!(matches!(
+        e_max,
+        ModelError::SolveError(SolveError::MaxIterations)
+    ));
+    assert!(matches!(
+        e_num,
+        ModelError::SolveError(SolveError::NumericalError)
+    ));
     // Display 実装も併せて確認
     assert!(format!("{}", SolveError::MaxIterations).contains("iterations"));
     assert!(format!("{}", SolveError::NumericalError).contains("Numerical"));
