@@ -72,6 +72,10 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?unbounded"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_unbounded.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?infeasible"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_infeasible.csv"
+elif echo "$DATA_DIR_LOWER" | grep -q "qplib_nonconvex_official"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_official.csv"
+elif echo "$DATA_DIR_LOWER" | grep -q "qplib_nonconvex"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_synthetic.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "osqp[_-]?bench"; then
@@ -88,6 +92,8 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?canary"; then
   # canary は standard / infeas 両方の問題を含むので、専用 baseline を使う
   # (生成: lp_canary_setup.sh と一緒に手動メンテ。docs/canary_suite.md 参照)
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp_canary.csv"
+elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems[_-]?unbounded"; then
+  KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/lp_problems_unbounded.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "lp[_-]?problems"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 else
