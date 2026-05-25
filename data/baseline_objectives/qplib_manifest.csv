@@ -1,0 +1,77 @@
+# QPLIB instance manifest — fact-based classification of tracked QPLIB subsets.
+# Source: local .qplib files (type code = line 2), qplib_nonconvex_official.csv, qplib.csv.
+# Convexity: confirmed only for IDs in qplib_nonconvex_official/ (nonconvex) or
+#            IDs solved by IPM with numeric result in qplib.csv (likely convex).
+#
+# Fields:
+#   id            QPLIB instance ID (full filename stem)
+#   type_code     OVC code from line 2 of .qplib file
+#                   O: Q=quadratic, D=diagonal, C=constant, L=linear
+#                   V: C=continuous, B=binary, I=integer, M=mixed
+#                   C: L=linear, B=box, N=none, Q=quadratic
+#   in_scope_qp   yes = O in {Q,D}, V=C, C in {L,B,N}  (QP solver scope)
+#   datasets      pipe-separated list of directories containing this instance
+#   bench_status  benchmarked | nonconvex_bench | no_ref | unsupported
+#   reason        explanation when not benchmarked
+#
+# Coverage (as of 2026-05-26):
+#   data/qplib/:                    41 instances
+#   data/qplib_nonconvex_official/: 4  instances (all also in qplib/)
+#   data/qplib_unsupported/:        11 instances (5 overlap with qplib/, 6 unique)
+#   Unique IDs total:               47
+#
+#   In-scope convex QP (DCL, O=D V=C C=L):     11 in qplib/, 9 benchmarked, 2 no_ref
+#   In-scope QCL (O=Q V=C C=L):                 6 in qplib/, 1 benchmarked, 1 no_ref, 4 nonconvex_bench
+#   Out-of-scope DCQ (quadratic constraints):   7 in qplib/, 0 benchmarked
+#   Out-of-scope CCQ (QCQP):                    4 in qplib/, 0 benchmarked
+#   Out-of-scope CBL (binary LP / MIP):         5 in qplib/, 0 benchmarked
+#   LP in qplib/ (CCL, CCB):                    8 in qplib/, 8 benchmarked (LP solver)
+#   Unsupported only (QCQ):                     6 unique to qplib_unsupported/
+id,type_code,in_scope_qp,datasets,bench_status,reason
+QPLIB_0018,QCL,yes,qplib|qplib_nonconvex_official,nonconvex_bench,QCL nonconvex confirmed; ref in qplib_nonconvex_official.csv
+QPLIB_0343,QCL,yes,qplib|qplib_nonconvex_official,nonconvex_bench,QCL nonconvex confirmed; ref in qplib_nonconvex_official.csv
+QPLIB_10034,DCL,yes,qplib,benchmarked,
+QPLIB_10038,DCL,yes,qplib,benchmarked,
+QPLIB_10050,CBL,no,qplib|qplib_unsupported,unsupported,binary_lp: binary variables (MILP) not in QP solver scope
+QPLIB_10056,CBL,no,qplib|qplib_unsupported,unsupported,binary_lp: binary variables (MILP) not in QP solver scope
+QPLIB_10069,CBL,no,qplib|qplib_unsupported,unsupported,binary_lp: binary variables (MILP) not in QP solver scope
+QPLIB_2546,CCQ,no,qplib,unsupported,QCQP: constant objective + quadratic constraints not in QP solver scope
+QPLIB_2712,QCL,yes,qplib|qplib_nonconvex_official,nonconvex_bench,QCL nonconvex confirmed; ref in qplib_nonconvex_official.csv
+QPLIB_2761,QCL,yes,qplib|qplib_nonconvex_official,nonconvex_bench,QCL nonconvex confirmed; ref in qplib_nonconvex_official.csv
+QPLIB_2981,CCQ,no,qplib,unsupported,QCQP: constant objective + quadratic constraints not in QP solver scope
+QPLIB_3080,CCQ,no,qplib,unsupported,QCQP: constant objective + quadratic constraints not in QP solver scope
+QPLIB_3297,CCQ,no,qplib,unsupported,QCQP: constant objective + quadratic constraints not in QP solver scope
+QPLIB_3913,CBL,no,qplib|qplib_unsupported,unsupported,binary_lp: binary variables (MILP) not in QP solver scope
+QPLIB_3980,CBL,no,qplib|qplib_unsupported,unsupported,binary_lp: binary variables (MILP) not in QP solver scope
+QPLIB_8495,DCL,yes,qplib,benchmarked,
+QPLIB_8500,DCL,yes,qplib,no_ref,DCL in-scope; not yet benchmarked (coverage gap)
+QPLIB_8505,QCL,yes,qplib,benchmarked,QCL solved by IPM → likely convex
+QPLIB_8515,CCL,no,qplib,benchmarked,LP (constant objective); solved by LP solver
+QPLIB_8547,DCL,yes,qplib,no_ref,DCL in-scope; not yet benchmarked (coverage gap)
+QPLIB_8559,CCL,no,qplib,benchmarked,LP (constant objective); solved by LP solver
+QPLIB_8567,CCL,no,qplib,benchmarked,LP (constant objective); solved by LP solver
+QPLIB_8585,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8595,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8602,DCL,yes,qplib,benchmarked,
+QPLIB_8605,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8616,DCL,yes,qplib,benchmarked,
+QPLIB_8683,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8685,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8777,QCL,yes,qplib,no_ref,QCL in-scope; convexity unverified from local data; not yet benchmarked
+QPLIB_8785,DCL,yes,qplib,benchmarked,
+QPLIB_8790,CCB,no,qplib,benchmarked,LP with box constraints; solved by LP solver
+QPLIB_8792,CCB,no,qplib,benchmarked,LP with box constraints; solved by LP solver
+QPLIB_8803,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8810,DCQ,no,qplib,unsupported,diagonal QP + quadratic constraints; not in QP solver scope
+QPLIB_8845,CCL,no,qplib,benchmarked,LP (constant objective); solved by LP solver
+QPLIB_8906,CCL,no,qplib,benchmarked,LP (constant objective); solved by LP solver
+QPLIB_8938,DCL,yes,qplib,benchmarked,
+QPLIB_8991,CCB,no,qplib,benchmarked,LP with box constraints; solved by LP solver
+QPLIB_9002,DCL,yes,qplib,no_ref,DCL in-scope; intractable - NumericalError / stall (see qplib.csv comment)
+QPLIB_9008,DCL,yes,qplib,no_ref,DCL in-scope; not yet benchmarked (coverage gap)
+QPLIB_1055,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints
+QPLIB_1143,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints
+QPLIB_1157,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints
+QPLIB_1353,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints
+QPLIB_1423,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints
+QPLIB_1493,QCQ,no,qplib_unsupported,unsupported,QCQP: quadratic objective + quadratic constraints

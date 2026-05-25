@@ -83,29 +83,87 @@ run_or_skip() {
 ##############################################################################
 # Check mode
 ##############################################################################
+
+# Verify a sample file can be parsed (header sanity, not full parse).
+# qplib: line 1 = problem name, line 2 = 3-char type code.
+# qps/QPS: line 1 must start with "NAME" (Maros-Meszaros format).
+smoke_qplib() {
+  local dir=$1
+  local sample
+  sample=$(ls "$dir"/*.qplib 2>/dev/null | head -1)
+  if [[ -z "$sample" ]]; then return 0; fi
+  local name type
+  name=$(sed -n '1p' "$sample" | tr -d '[:space:]')
+  type=$(sed -n '2p' "$sample" | tr -d '[:space:]')
+  if [[ -z "$name" || ${#type} -ne 3 ]]; then
+    echo "  [smoke-fail] $sample: unexpected header (name='$name' type='$type')"
+    return 1
+  fi
+  echo "  [smoke-ok]  $sample (name=$name type=$type)"
+}
+
+smoke_qps() {
+  local dir=$1
+  local sample
+  sample=$(ls "$dir"/*.QPS "$dir"/*.qps 2>/dev/null | head -1)
+  if [[ -z "$sample" ]]; then return 0; fi
+  local first
+  first=$(head -1 "$sample" | tr -d '[:space:]')
+  if [[ "$first" != NAME* && "$first" != "NAME"* ]]; then
+    echo "  [smoke-fail] $sample: first line does not start with NAME (got: $first)"
+    return 1
+  fi
+  echo "  [smoke-ok]  $sample (header ok)"
+}
+
 if [[ "$MODE" == "check" ]]; then
+  fail=0
+
   echo "=== LP ==="
-  check_dir data/lp_problems 109
-  check_dir data/lp_problems_infeas 29
-  check_dir data/lp_problems_extra 4
-  check_dir data/lp_problems_hard 53
-  check_dir data/lp_problems_canary 27
-  check_dir data/lp_problems_unbounded 12
+  check_dir data/lp_problems 109        || fail=1
+  check_dir data/lp_problems_infeas 29  || fail=1
+  check_dir data/lp_problems_extra 4    || fail=1
+  check_dir data/lp_problems_hard 53    || fail=1
+  check_dir data/lp_problems_canary 27  || fail=1
+  check_dir data/lp_problems_unbounded 12 || fail=1
 
   echo "=== QP ==="
-  check_dir data/maros_meszaros 138
-  check_dir data/mpc_qp 64
-  check_dir data/osqp_bench 62
-  check_dir data/osqp_bench_extra 238
-  check_dir data/osqp_bench_illscaled 126
-  check_dir data/osqp_bench_xl 2
-  check_dir data/qp_dense_a 8
-  check_dir data/qp_infeasible 12
-  check_dir data/qp_unbounded 9
-  check_dir data/qplib 41
-  check_dir data/qplib_nonconvex 45
-  check_dir data/qplib_nonconvex_official 4
-  check_dir data/qplib_unsupported 6
+  check_dir data/maros_meszaros 138     || fail=1
+  check_dir data/mpc_qp 64             || fail=1
+  check_dir data/osqp_bench 62         || fail=1
+  check_dir data/osqp_bench_extra 238  || fail=1
+  check_dir data/osqp_bench_illscaled 126 || fail=1
+  check_dir data/osqp_bench_xl 2       || fail=1
+  check_dir data/qp_dense_a 8          || fail=1
+  check_dir data/qp_infeasible 12      || fail=1
+  check_dir data/qp_unbounded 9        || fail=1
+  check_dir data/qplib 41              || fail=1
+  check_dir data/qplib_nonconvex 45    || fail=1
+  check_dir data/qplib_nonconvex_official 4 || fail=1
+  check_dir data/qplib_unsupported 6   || fail=1
+
+  echo ""
+  echo "=== parse smoke ==="
+  smoke_qplib data/qplib              || fail=1
+  smoke_qplib data/qplib_nonconvex_official || fail=1
+  smoke_qps   data/maros_meszaros     || fail=1
+
+  echo ""
+  echo "=== baseline CSV vs data dir ==="
+  if command -v python3 &>/dev/null; then
+    python3 "$SCRIPT_DIR/check_data_coverage.py" --repo-root "$REPO_ROOT" || fail=1
+  else
+    echo "  [skip] python3 not found; skipping CSV coverage check"
+  fi
+
+  if [[ "$fail" -eq 0 ]]; then
+    echo ""
+    echo "[check] all ok"
+  else
+    echo ""
+    echo "[check] FAILED — see above" >&2
+    exit 1
+  fi
   exit 0
 fi
 
