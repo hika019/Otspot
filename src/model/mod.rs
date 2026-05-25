@@ -31,6 +31,9 @@ use crate::sparse::CscMatrix;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Index;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MODEL_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // Optimization sense
@@ -48,6 +51,7 @@ enum OptimizationSense {
 
 /// A linear programming model built using the algebraic modeling API.
 pub struct Model {
+    model_id: u64,
     name: Option<String>,
     variables: Vec<VariableDefinition>,
     constraints: Vec<Constraint>,
@@ -75,6 +79,7 @@ impl Model {
     /// Create a new, empty model with the given name.
     pub fn new(name: &str) -> Self {
         Model {
+            model_id: NEXT_MODEL_ID.fetch_add(1, Ordering::Relaxed),
             name: Some(name.to_string()),
             variables: Vec::new(),
             constraints: Vec::new(),
@@ -132,38 +137,66 @@ impl Model {
 
     /// Add a decision variable to the model.
     ///
-    /// # Arguments
-    /// * `name` - Variable name (for display purposes)
-    /// * `lb`   - Lower bound
-    /// * `ub`   - Upper bound (use `f64::INFINITY` for unbounded above)
-    ///
-    /// # Returns
-    /// A `Variable` handle that can be used in expressions.
+    /// Records an error (deferred to `solve()`) if `lb > ub` or either bound is NaN.
+    /// Use [`try_add_var`](Self::try_add_var) to get an immediate `Result`.
     pub fn add_var(&mut self, name: &str, lb: f64, ub: f64) -> Variable {
-        self.add_var_with_kind(name, lb, ub, VarKind::Continuous)
+        match validate_bounds(lb, ub) {
+            Ok(()) => self.push_var(name, lb, ub, VarKind::Continuous),
+            Err(err) => {
+                self.record_input_error("variable_bounds", err);
+                self.push_var(name, 0.0, 0.0, VarKind::Continuous)
+            }
+        }
+    }
+
+    /// Add a decision variable, returning an error for invalid bounds.
+    pub fn try_add_var(&mut self, name: &str, lb: f64, ub: f64) -> Result<Variable, ModelError> {
+        validate_bounds(lb, ub)?;
+        Ok(self.push_var(name, lb, ub, VarKind::Continuous))
     }
 
     /// Add an integer decision variable (must take integral values within `[lb, ub]`).
     ///
+    /// Records an error (deferred to `solve()`) if `lb > ub` or either bound is NaN.
+    /// Use [`try_add_int_var`](Self::try_add_int_var) to get an immediate `Result`.
+    ///
     /// Presence of any integer/binary variable routes `solve()` through the
     /// MILP/MIQP branch-and-bound solver instead of the continuous LP/QP path.
     pub fn add_int_var(&mut self, name: &str, lb: f64, ub: f64) -> Variable {
-        self.add_var_with_kind(name, lb, ub, VarKind::Integer)
+        match validate_bounds(lb, ub) {
+            Ok(()) => self.push_var(name, lb, ub, VarKind::Integer),
+            Err(err) => {
+                self.record_input_error("variable_bounds", err);
+                self.push_var(name, 0.0, 0.0, VarKind::Integer)
+            }
+        }
+    }
+
+    /// Add an integer decision variable, returning an error for invalid bounds.
+    pub fn try_add_int_var(&mut self, name: &str, lb: f64, ub: f64) -> Result<Variable, ModelError> {
+        validate_bounds(lb, ub)?;
+        Ok(self.push_var(name, lb, ub, VarKind::Integer))
     }
 
     /// Add a binary decision variable (integer, fixed to the `{0, 1}` box).
     pub fn add_binary_var(&mut self, name: &str) -> Variable {
-        self.add_var_with_kind(name, 0.0, 1.0, VarKind::Binary)
+        self.push_var(name, 0.0, 1.0, VarKind::Binary)
     }
 
-    fn add_var_with_kind(&mut self, _name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
+    /// Return the name of a variable as given to [`add_var`](Self::add_var).
+    pub fn var_name(&self, var: Variable) -> &str {
+        &self.variables[var.index].name
+    }
+
+    fn push_var(&mut self, name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
         let index = self.variables.len();
         self.variables.push(VariableDefinition {
+            name: name.to_string(),
             lower_bound: lb,
             upper_bound: ub,
             kind,
         });
-        Variable { index }
+        Variable { index, model_id: self.model_id }
     }
 
     /// Add a constraint to the model.
@@ -250,8 +283,9 @@ impl Model {
         let num_constraints = self.constraints.len();
 
         // --- Build objective vector c ---
+        let mid = self.model_id;
         let mut c: Vec<f64> = (0..num_vars)
-            .map(|i| obj_expr.coefficient(Variable { index: i }))
+            .map(|i| obj_expr.coefficient(Variable { index: i, model_id: mid }))
             .collect();
 
         // For maximization, negate c (solver minimizes by default)
@@ -370,10 +404,12 @@ impl Model {
             };
             oriented + self.obj_offset
         };
+        let lp_model_id = self.model_id;
         let build_ok = |sr: crate::problem::SolverResult| {
             let (dual, rc, slack) = lp_extras(&sr);
             let status = sr.status.clone();
             ModelResult {
+                model_id: lp_model_id,
                 status: status.clone(),
                 proof: SolutionProof::from_status(&status),
                 objective_value: signed_obj(sr.objective),
@@ -524,6 +560,7 @@ impl Model {
             };
             oriented + self.obj_offset
         };
+        let qp_model_id = self.model_id;
         let build_ok = |status: SolveStatus,
                         raw_obj: f64,
                         sol: Vec<f64>,
@@ -531,6 +568,7 @@ impl Model {
                         bd: Vec<f64>| {
             let proof = SolutionProof::from_status(&status);
             ModelResult {
+                model_id: qp_model_id,
                 status,
                 proof,
                 objective_value: signed_obj(raw_obj),
@@ -671,9 +709,11 @@ impl Model {
             sol
         };
 
+        let mip_model_id = self.model_id;
         let build_ok = |sr: crate::problem::SolverResult| {
             let status = sr.status.clone();
             ModelResult {
+                model_id: mip_model_id,
                 status: status.clone(),
                 proof: SolutionProof::from_status(&status),
                 objective_value: signed_obj(sr.objective),
@@ -760,6 +800,20 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
     }
 }
 
+fn validate_bounds(lb: f64, ub: f64) -> Result<(), ModelError> {
+    if lb.is_nan() || ub.is_nan() {
+        return Err(ModelError::InvalidInput(format!(
+            "variable bounds must not be NaN: lb={lb}, ub={ub}"
+        )));
+    }
+    if lb > ub {
+        return Err(ModelError::InvalidInput(format!(
+            "variable lower bound {lb} exceeds upper bound {ub}"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ModelResult
 // ---------------------------------------------------------------------------
@@ -805,8 +859,9 @@ impl SolutionProof {
 }
 
 /// The result of a successful solve.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModelResult {
+    model_id: u64,
     /// Solver termination status associated with this returned solution.
     ///
     /// Only success-domain variants occur here (`Optimal`, `LocallyOptimal`,
@@ -842,8 +897,32 @@ pub struct ModelResult {
 
 impl ModelResult {
     /// Get the primal value of a variable.
+    ///
+    /// # Panics
+    /// Panics if the variable index is out of range. Use [`try_value`](Self::try_value)
+    /// to handle this case gracefully.
     pub fn value(&self, var: Variable) -> f64 {
         self.solution[var.index]
+    }
+
+    /// Get the primal value of a variable, returning an error instead of panicking.
+    ///
+    /// Returns `Err` if:
+    /// - `var` was created by a different model than the one that produced this result.
+    /// - `var.index` is out of range for the solution vector.
+    pub fn try_value(&self, var: Variable) -> Result<f64, ModelError> {
+        if var.model_id != self.model_id {
+            return Err(ModelError::InvalidInput(
+                "variable belongs to a different model".to_string(),
+            ));
+        }
+        self.solution.get(var.index).copied().ok_or_else(|| {
+            ModelError::InvalidInput(format!(
+                "variable index {} out of range (solution length {})",
+                var.index,
+                self.solution.len()
+            ))
+        })
     }
 
     /// Get the optimal objective value.
@@ -1553,6 +1632,252 @@ mod tests {
                 "[{name}] expected ModelError::NonConvex, got {:?}",
                 err
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel: validate_bounds rejects lb>ub and NaN.
+    // No-op'ing validate_bounds (always Ok) causes these tests to FAIL:
+    //   - add_var with lb>ub would not record error → solve() would succeed
+    //     (an LP with inverted bounds becomes infeasible but NOT an InvalidInput).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn add_var_lb_gt_ub_defers_error_to_solve() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("lb=5 > ub=3", 5.0, 3.0),
+            ("lb=1.0 > ub=0.999", 1.0, 0.999),
+            ("lb=inf > ub=0", f64::INFINITY, 0.0),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            let x = model.add_var("x", lb, ub);
+            model.minimize(x);
+            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{label}] expected InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_var_nan_bounds_defers_error_to_solve() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("lb=NaN", f64::NAN, 1.0),
+            ("ub=NaN", 0.0, f64::NAN),
+            ("both=NaN", f64::NAN, f64::NAN),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            let x = model.add_var("x", lb, ub);
+            model.minimize(x);
+            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{label}] expected InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_int_var_lb_gt_ub_defers_error_to_solve() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("int lb=3 > ub=1", 3.0, 1.0),
+            ("int lb=NaN", f64::NAN, 5.0),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            let x = model.add_int_var("x", lb, ub);
+            model.minimize(x);
+            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{label}] expected InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // try_add_var / try_add_int_var: immediate Result API.
+    // Sentinel: no-op of validate_bounds makes all these Ok → assert!(is_err()) FAILs.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn try_add_var_returns_err_for_invalid_bounds() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("lb>ub", 2.0, 1.0),
+            ("lb=NaN", f64::NAN, 1.0),
+            ("ub=NaN", 0.0, f64::NAN),
+            ("lb=inf > ub=0", f64::INFINITY, 0.0),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            let result = model.try_add_var("x", lb, ub);
+            assert!(
+                result.is_err(),
+                "[{label}] try_add_var should return Err for invalid bounds, got Ok"
+            );
+        }
+    }
+
+    #[test]
+    fn try_add_var_returns_ok_for_valid_bounds() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("lb=ub", 3.0, 3.0),
+            ("lb=0 ub=inf", 0.0, f64::INFINITY),
+            ("lb=-inf ub=inf", f64::NEG_INFINITY, f64::INFINITY),
+            ("lb=-inf ub=0", f64::NEG_INFINITY, 0.0),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            assert!(
+                model.try_add_var("x", lb, ub).is_ok(),
+                "[{label}] try_add_var should return Ok for valid bounds"
+            );
+        }
+    }
+
+    #[test]
+    fn try_add_int_var_returns_err_for_invalid_bounds() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("int lb>ub", 5.0, 2.0),
+            ("int lb=NaN", f64::NAN, 3.0),
+        ];
+        for &(label, lb, ub) in cases {
+            let mut model = Model::new(label);
+            assert!(
+                model.try_add_int_var("n", lb, ub).is_err(),
+                "[{label}] try_add_int_var should return Err"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // try_value: safe accessor — wrong model_id and out-of-range both return Err.
+    // Sentinel: removing the model_id check makes cross-model test pass/Err → Ok
+    //   causing the assert!(result.is_err()) to FAIL.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn try_value_cross_model_returns_err() {
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
+        m1.minimize(x1);
+        let r1 = m1.solve().unwrap();
+
+        // Variable from a different model — same index (0), different model_id.
+        let mut m2 = Model::new("m2");
+        let y = m2.add_var("y", 0.0, f64::INFINITY);
+
+        assert!(
+            r1.try_value(y).is_err(),
+            "try_value with variable from different model must return Err"
+        );
+        // Correct variable works fine.
+        assert!(r1.try_value(x1).is_ok());
+    }
+
+    #[test]
+    fn try_value_valid_returns_ok() {
+        let (mut model, x, y) = basic_model();
+        let result = model.solve().unwrap();
+        assert!(result.try_value(x).is_ok());
+        assert!(result.try_value(y).is_ok());
+        assert!((result.try_value(x).unwrap() - result.value(x)).abs() < 1e-12);
+    }
+
+    // Out-of-range with a *matching* model_id: a variable added to the same
+    // model after solving has an index past the result's solution vector.
+    // Sentinel for the `.ok_or_else` branch (the model_id check passes here, so
+    // no-op'ing the bounds check — e.g. `self.solution[var.index]` — panics).
+    #[test]
+    fn try_value_out_of_range_same_model_returns_err() {
+        let mut model = Model::new("grow");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x);
+        let result = model.solve().unwrap();
+
+        // Extend the same model: same model_id, index beyond solution length.
+        let late = model.add_var("late", 0.0, f64::INFINITY);
+        assert_eq!(late.model_id, result.model_id, "same model_id expected");
+        assert!(
+            late.index >= result.solution.len(),
+            "test setup: late var must be out of range"
+        );
+        assert!(
+            result.try_value(late).is_err(),
+            "try_value must return Err for an out-of-range index even when model_id matches"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ModelResult: Clone derive
+    // -----------------------------------------------------------------------
+    #[test]
+    fn model_result_clone() {
+        let (mut model, x, _y) = basic_model();
+        let result = model.solve().unwrap();
+        let cloned = result.clone();
+        assert!((cloned.objective_value - result.objective_value).abs() < 1e-12);
+        assert_eq!(cloned.solution.len(), result.solution.len());
+        assert!((cloned[x] - result[x]).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Variable name retention
+    // -----------------------------------------------------------------------
+    #[test]
+    fn var_name_is_retained() {
+        let cases = [("alpha", 0.0, 1.0), ("beta_var", 0.0, f64::INFINITY)];
+        let mut model = Model::new("named");
+        for &(name, lb, ub) in &cases {
+            let v = model.add_var(name, lb, ub);
+            assert_eq!(model.var_name(v), name, "var_name mismatch for '{name}'");
+        }
+        let iv = model.add_int_var("gamma_int", 0.0, 10.0);
+        assert_eq!(model.var_name(iv), "gamma_int");
+    }
+
+    // -----------------------------------------------------------------------
+    // set_timeout validation (already implemented; table-driven sentinel)
+    // No-op'ing validate_timeout makes negative/NaN tests succeed → FAILs.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn set_timeout_invalid_defers_error() {
+        let cases: &[(&str, f64)] = &[
+            ("negative", -1.0),
+            ("NaN", f64::NAN),
+            ("neg_inf", f64::NEG_INFINITY),
+        ];
+        for &(label, secs) in cases {
+            let mut model = Model::new(label);
+            let x = model.add_var("x", 0.0, f64::INFINITY);
+            model.minimize(x);
+            model.set_timeout(secs);
+            let err = model.solve().expect_err(&format!("[{label}] expected Err for invalid timeout"));
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{label}] expected InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_set_timeout_returns_err_for_invalid() {
+        let cases: &[(&str, f64)] = &[("negative", -0.001), ("NaN", f64::NAN), ("inf", f64::INFINITY)];
+        for &(label, secs) in cases {
+            let mut model = Model::new(label);
+            assert!(
+                model.try_set_timeout(secs).is_err(),
+                "[{label}] try_set_timeout should return Err"
+            );
+        }
+    }
+
+    #[test]
+    fn try_set_timeout_ok_for_valid() {
+        let valid = [0.0, 0.001, 1.0, 3600.0];
+        for &secs in &valid {
+            let mut model = Model::new("t");
+            assert!(model.try_set_timeout(secs).is_ok(), "should be Ok for secs={secs}");
         }
     }
 }
