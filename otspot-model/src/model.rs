@@ -243,10 +243,16 @@ impl Model {
                     self.record_input_error("quad_objective_dsl", ModelError::InvalidInput(msg));
                 }
             }
-        } else if self.quad_via_dsl {
-            // Pure-linear objective replacing a DSL-quadratic one: clear the Q.
-            self.quadratic_objective = None;
-            self.quad_via_dsl = false;
+        } else {
+            // Pure-linear path: always remove stale DSL error regardless of
+            // quad_via_dsl (P2-a: error path never set quad_via_dsl, so the
+            // old `else if` left the invalid-input entry alive).
+            self.invalid_inputs.remove("quad_objective_dsl");
+            if self.quad_via_dsl {
+                // DSL-owned Q is superseded by a pure-linear objective: clear it.
+                self.quadratic_objective = None;
+                self.quad_via_dsl = false;
+            }
         }
         // Fold the objective constant (e.g. `+4.0` in `x*x - 4x + 4.0`) into
         // obj_expr_constant.  This is reset each call so re-minimize never
@@ -270,6 +276,10 @@ impl Model {
     /// Providing a PSD Q with `maximize()` may yield an unbounded problem.
     pub fn set_quadratic_objective(&mut self, q: CscMatrix) -> &mut Self {
         self.quadratic_objective = Some(q);
+        // Mark Q as explicitly-owned (not DSL-managed).  Without this, a
+        // subsequent pure-linear minimize/maximize would see quad_via_dsl=true
+        // and silently drop the explicit Q (P2-b).
+        self.quad_via_dsl = false;
         self
     }
 
@@ -2159,6 +2169,132 @@ mod mip_model_tests {
         assert!(
             (result.objective_value - 8.0).abs() < EPS,
             "re-minimize: obj* should be 8 (1+7, not 1+3+7=11), got {}",
+            result.objective_value
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // State-machine tests for P2-a / P2-b objective-setter transitions.
+    // ---------------------------------------------------------------------------
+
+    // P2-a: NaN quad (invalid DSL) → pure-linear must clear the stale error.
+    #[test]
+    fn test_p2a_nan_dsl_quad_then_linear_is_optimal() {
+        // minimize(NaN * x*x) records InvalidInput in "quad_objective_dsl".
+        // A subsequent minimize(x) must clear that entry → solve succeeds.
+        let mut model = Model::new("p2a_nan_then_linear");
+        let x = model.add_var("x", 1.0, f64::INFINITY);
+        model.minimize(f64::NAN * (x * x));   // invalid DSL quad → error recorded
+        model.minimize(1.0 * x);              // pure-linear replaces objective
+        let result = model.solve();
+        assert!(result.is_ok(), "P2-a: should be Optimal after linear replaces NaN quad, got {result:?}");
+        let r = result.unwrap();
+        assert!((r[x] - 1.0).abs() < EPS, "P2-a: x* should be 1, got {}", r[x]);
+    }
+
+    // P2-a (reverse): valid quad → then invalid (NaN) quad → solve must error.
+    #[test]
+    fn test_p2a_valid_quad_then_nan_errors() {
+        let mut model = Model::new("p2a_valid_then_nan");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x * x + (-2.0) * x);   // valid DSL quad
+        model.minimize(f64::NAN * (x * x));    // invalid DSL quad → should error
+        let result = model.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-a: NaN quad must yield InvalidInput, got {result:?}"
+        );
+    }
+
+    // P2-a: maximize with stale DSL error must also clear on replacement.
+    #[test]
+    fn test_p2a_nan_dsl_then_maximize_linear_is_optimal() {
+        let mut model = Model::new("p2a_nan_then_max");
+        let x = model.add_var("x", 0.0, 5.0);
+        model.minimize(f64::NAN * (x * x));   // stale error
+        model.maximize(1.0 * x);              // pure-linear maximize replaces
+        let result = model.solve();
+        assert!(result.is_ok(), "P2-a: maximize should succeed after NaN DSL cleared, got {result:?}");
+        let r = result.unwrap();
+        assert!((r[x] - 5.0).abs() < EPS, "P2-a: maximize x → x*=5, got {}", r[x]);
+    }
+
+    // P2-b: DSL quad → explicit set_quadratic_objective → pure-linear minimize
+    //        must keep (and use) the explicit Q, not revert to LP.
+    #[test]
+    fn test_p2b_dsl_then_explicit_q_then_linear_keeps_explicit_q() {
+        // min 1/2·2·x^2 - 4x  s.t. x ≥ 0  →  x* = 2, obj* = 2 - 8 = -4
+        // Steps: minimize(x*x) [DSL, sets quad_via_dsl=true]
+        //        set_quadratic_objective(diag=[2]) [explicit, must clear quad_via_dsl]
+        //        minimize(-4x) [pure-linear; must NOT drop the explicit Q]
+        let mut model = Model::new("p2b_explicit_q_kept");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x * x);           // DSL quad (quad_via_dsl = true)
+        model.set_diagonal_q(&[2.0]);    // explicit Q (quad_via_dsl must → false)
+        model.minimize((-4.0) * x);     // pure-linear; explicit Q must survive
+        let result = model.solve().unwrap();
+        // If Q were silently dropped this would give obj = -∞ (unbounded LP).
+        assert!(
+            (result[x] - 2.0).abs() < EPS,
+            "P2-b: x* should be 2 (QP solved with explicit Q), got {}",
+            result[x]
+        );
+        assert!(
+            (result.objective_value - (-4.0)).abs() < EPS,
+            "P2-b: obj* = -4, got {}",
+            result.objective_value
+        );
+    }
+
+    // P2-b: explicit Q → DSL → pure-linear: DSL-owned Q must be cleared.
+    #[test]
+    fn test_p2b_explicit_q_then_dsl_then_linear_clears_dsl_q() {
+        // set_diagonal_q([2]) → minimize(x*x) [DSL replaces with quad_via_dsl=true]
+        // → minimize(-3x) [pure-linear must clear DSL Q → LP result]
+        let mut model = Model::new("p2b_dsl_then_linear");
+        let x = model.add_var("x", 0.0, 5.0);
+        model.set_diagonal_q(&[2.0]);         // explicit Q first
+        model.minimize(x * x + (-6.0) * x);  // DSL: same Q value but via DSL
+        // Now replace with pure-linear (DSL-owned Q should be cleared)
+        model.minimize((-3.0) * x);           // LP maximize-like: x*=5, obj=-15
+        let result = model.solve().unwrap();
+        // LP routing: min -3x, x in [0,5] → x*=5, obj=-15
+        assert!(
+            (result[x] - 5.0).abs() < EPS,
+            "P2-b: DSL Q cleared by linear → x*=5 (LP), got {}",
+            result[x]
+        );
+        assert!(
+            (result.objective_value - (-15.0)).abs() < EPS,
+            "P2-b: obj* should be -15 (LP), got {}",
+            result.objective_value
+        );
+    }
+
+    // Transition: DSL → explicit → DSL: each transition should be consistent.
+    #[test]
+    fn test_objective_transition_dsl_explicit_dsl() {
+        // Round-trip: DSL quad → explicit Q → DSL quad again.
+        // DSL `x*x` emits Q[0][0]=2.0 (1/2 convention: 1/2·2·x² = x²).
+        // Step 1: minimize(x*x) — DSL, quad_via_dsl=true, obj = x²
+        // Step 2: set_diagonal_q([2.0]) — explicit, quad_via_dsl=false (same Q value)
+        // Step 3: minimize(x*x + (-4.0)*x) — DSL again, Q[0][0]=2.0, c=-4
+        //   → objective = 1/2·2·x² - 4x = x² - 4x  →  x*=2, obj*=-4
+        let mut model = Model::new("dsl_explicit_dsl");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x * x);                // DSL (quad_via_dsl=true)
+        model.set_diagonal_q(&[2.0]);         // explicit (quad_via_dsl → false)
+        model.minimize(x * x + (-4.0) * x);  // DSL replaces explicit Q
+        let result = model.solve().unwrap();
+        // 1/2·2·x² - 4x = x² - 4x → min at x=2, obj=-4
+        assert!(
+            (result[x] - 2.0).abs() < EPS,
+            "DSL→explicit→DSL: x* should be 2, got {}",
+            result[x]
+        );
+        assert!(
+            (result.objective_value - (-4.0)).abs() < EPS,
+            "DSL→explicit→DSL: obj* should be -4, got {}",
             result.objective_value
         );
     }
