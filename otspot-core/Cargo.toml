@@ -9,7 +9,8 @@ homepage.workspace = true
 
 [features]
 default = []
-# `parallel` feature flag preserved for forward compat (no-op; rayon is a hard dep).
+# `parallel` enables opt-in concurrent tests (rayon is a hard dep; enabling this
+# feature does not change runtime behavior, only test coverage).
 parallel = []
 
 [dependencies]
