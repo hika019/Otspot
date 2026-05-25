@@ -79,16 +79,38 @@ run_one() {
 export -f run_one
 export MILP_SOLVE HIGHS_BIN HIGHS_OPTS RESULT_DIR TIMEOUT EPS
 
-active=()
-for f in "${FILES[@]}"; do
-  run_one "$f" &
-  active+=($!)
-  if [[ ${#active[@]} -ge $JOBS ]]; then
-    wait "${active[0]}" 2>/dev/null || true
-    active=("${active[@]:1}")
-  fi
+# Worker pool: bash 3.2 compatible (macOS default; wait -n requires 4.3+).
+# Mirrors bench_parallel.sh pattern: N workers pull from a shared counter via flock.
+_POOL_COUNTER="$RESULT_DIR/.pool_counter"
+_POOL_LOCK="$RESULT_DIR/.pool_lock"
+_POOL_TOTAL=${#FILES[@]}
+echo "0" > "$_POOL_COUNTER"
+: > "$_POOL_LOCK"
+
+_pool_worker() {
+  local wid="$1"
+  while true; do
+    local idx
+    idx=$(
+      (
+        flock -x 9
+        n=$(cat "$_POOL_COUNTER")
+        echo $(( n + 1 )) > "$_POOL_COUNTER"
+        echo "$n"
+      ) 9>"$_POOL_LOCK"
+    ) || break
+    [[ "$idx" =~ ^[0-9]+$ ]] || break
+    [[ $idx -ge $_POOL_TOTAL ]] && break
+    run_one "${FILES[$idx]}"
+  done
+}
+
+WORKER_PIDS=()
+for _w in $(seq 1 "$JOBS"); do
+  _pool_worker "$_w" &
+  WORKER_PIDS+=($!)
 done
-for pid in "${active[@]}"; do wait "$pid" 2>/dev/null || true; done
+for _pid in "${WORKER_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
 echo "[milp_vs_highs] solves complete; scoring..."
 
 export _MV_RESULT="$RESULT_DIR" _MV_TIMEOUT="$TIMEOUT" _MV_EPS="$EPS" _MV_DATA="$DATA_DIR"
