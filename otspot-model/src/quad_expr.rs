@@ -44,12 +44,30 @@ impl QuadExpr {
 
     fn merge_add(&mut self, rhs: QuadExpr) {
         for (pair, c) in rhs.quad {
-            *self.quad.entry(pair).or_insert(0.0) += c;
+            insert_quad_term(&mut self.quad, pair, c);
         }
-        // Prune cancelled-out entries so is_linear() returns true after x*y - x*y.
-        self.quad.retain(|_, c| *c != 0.0);
         let old = std::mem::take(&mut self.linear);
         self.linear = old + rhs.linear;
+    }
+}
+
+/// Accumulate a quadratic term into the map, skipping zero deltas and removing
+/// entries that cancel to exactly zero.  This is the **single insertion
+/// chokepoint** for all quad-term construction — routing every write through
+/// here prevents zero-coefficient entries from leaking into `QuadExpr::quad`
+/// and causing spurious `is_linear() == false`.
+fn insert_quad_term(
+    quad: &mut HashMap<(Variable, Variable), f64>,
+    key: (Variable, Variable),
+    delta: f64,
+) {
+    if delta == 0.0 {
+        return; // zero contribution — skip to avoid polluting the map
+    }
+    let entry = quad.entry(key).or_insert(0.0);
+    *entry += delta;
+    if *entry == 0.0 {
+        quad.remove(&key);
     }
 }
 
@@ -159,7 +177,7 @@ impl Mul<Variable> for Variable {
     type Output = QuadExpr;
     fn mul(self, rhs: Variable) -> QuadExpr {
         let mut quad = HashMap::new();
-        quad.insert(canon(self, rhs), 1.0);
+        insert_quad_term(&mut quad, canon(self, rhs), 1.0);
         QuadExpr { quad, linear: Expression::default() }
     }
 }
@@ -174,7 +192,9 @@ impl Mul<Variable> for Expression {
         let mut quad = HashMap::new();
         let mut linear = Expression::default();
         for (&v, &c) in &self.coefficients {
-            *quad.entry(canon(v, var)).or_insert(0.0) += c;
+            // Route through the single chokepoint so zero coefficients (e.g.
+            // from `(x - x) * y`) never enter the map.
+            insert_quad_term(&mut quad, canon(v, var), c);
         }
         if self.constant != 0.0 {
             *linear.coefficients.entry(var).or_insert(0.0) += self.constant;
@@ -758,5 +778,130 @@ mod tests {
                 // Error (e.g. NonConvex) is also acceptable for indefinite QP
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // P2-c: zero-coefficient prune via single chokepoint (insert_quad_term)
+    // ---------------------------------------------------------------------------
+
+    // `(x - x) * y` — Expression has coef[x]=0, must not enter quad map.
+    #[test]
+    fn test_zero_coef_expr_times_var_is_linear() {
+        let mut model = Model::new("m");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = (x - x) * y;
+        assert!(q.is_linear(), "(x-x)*y must be is_linear(); quad.len()={}", q.quad.len());
+    }
+
+    // `(x + x - 2*x) * y` — three-way cancellation.
+    #[test]
+    fn test_multi_cancel_expr_times_var_is_linear() {
+        let mut model = Model::new("m");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = (x + x + ((-2.0) * x)) * y;
+        assert!(q.is_linear(), "(x+x-2x)*y must be is_linear(); quad.len()={}", q.quad.len());
+    }
+
+    // Verify (x-x)*y minimize does NOT overwrite an explicitly-set Q.
+    // Without P2-c fix, (x-x)*y produced is_linear()=false and the
+    // apply_objective quad path replaced the explicit Q with a zero Q.
+    #[test]
+    fn test_zero_coef_quad_does_not_overwrite_explicit_q() {
+        // min 1/2·2·x² - 4x  s.t. x≥0  →  x*=2, obj=-4
+        // If explicit Q were cleared, the LP min -4x would be unbounded.
+        let mut model = Model::new("p2c_explicit_q_kept");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.set_diagonal_q(&[2.0, 0.0]);  // explicit Q, quad_via_dsl=false
+        model.minimize((x - x) * y + ((-4.0) * x));  // (x-x)*y cancels → pure-linear path
+        let result = model.solve().unwrap();
+        assert!(
+            (result[x] - 2.0).abs() < TOL,
+            "P2-c: explicit Q preserved; x*=2, got {}",
+            result[x]
+        );
+        assert!(
+            (result.objective_value - (-4.0)).abs() < TOL,
+            "P2-c: obj=-4 (QP routing), got {}",
+            result.objective_value
+        );
+    }
+
+    // x*x - x*x: merge cancellation still works (existing test extended).
+    #[test]
+    fn test_quad_sub_self_is_linear() {
+        let mut model = Model::new("m");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let q = x * x - x * x;
+        assert!(q.is_linear(), "x*x - x*x must cancel to is_linear()");
+        assert_eq!(q.quad.len(), 0, "quad map must be empty after cancellation");
+    }
+
+    // ---------------------------------------------------------------------------
+    // P2-d: cross-model variable validation in apply_objective
+    // ---------------------------------------------------------------------------
+
+    // Diagonal term from another model must be rejected.
+    #[test]
+    fn test_p2d_cross_model_diagonal_rejected() {
+        use crate::ModelError;
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
+
+        let mut m2 = Model::new("m2");
+        // x1 has m1's model_id; minimizing it in m2 must error.
+        m2.minimize(x1 * x1);
+        let result = m2.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-d: cross-model diagonal must give InvalidInput, got {result:?}"
+        );
+    }
+
+    // Cross term mixing variables from two models must be rejected.
+    #[test]
+    fn test_p2d_cross_model_mixed_term_rejected() {
+        use crate::ModelError;
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
+
+        let mut m2 = Model::new("m2");
+        let y2 = m2.add_var("y", 0.0, f64::INFINITY);
+
+        // x1 belongs to m1, y2 belongs to m2; the cross term is invalid for both.
+        m1.minimize(x1 * y2);
+        let result = m1.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-d: cross-model cross-term must give InvalidInput, got {result:?}"
+        );
+    }
+
+    // Sanity: same-model variable works correctly (no false positive).
+    #[test]
+    fn test_p2d_same_model_accepted() {
+        let mut model = Model::new("sanity");
+        let x = model.add_var("x", 1.0, f64::INFINITY);
+        model.minimize(x * x);
+        let result = model.solve();
+        assert!(result.is_ok(), "P2-d: same-model quad must be accepted, got {result:?}");
+    }
+
+    // maximize path: cross-model rejection via maximize (not just minimize).
+    #[test]
+    fn test_p2d_cross_model_maximize_rejected() {
+        use crate::ModelError;
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, 5.0);
+
+        let mut m2 = Model::new("m2");
+        m2.maximize(x1 * x1);
+        let result = m2.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-d: cross-model maximize must give InvalidInput, got {result:?}"
+        );
     }
 }

@@ -233,14 +233,33 @@ impl Model {
     /// Shared implementation for `minimize`/`maximize`.
     fn apply_objective(&mut self, q: QuadExpr, sense: OptimizationSense) -> &mut Self {
         if !q.quad.is_empty() {
-            match quad_to_csc(&q.quad, self.variables.len()) {
-                Ok(csc) => {
-                    self.quadratic_objective = Some(csc);
-                    self.quad_via_dsl = true;
-                    self.invalid_inputs.remove("quad_objective_dsl");
-                }
-                Err(msg) => {
-                    self.record_input_error("quad_objective_dsl", ModelError::InvalidInput(msg));
+            // Validate that every variable in the quad map belongs to this model.
+            // The linear path implicitly validates via model_id-keyed lookup; the
+            // quad path must do so explicitly (P2-d: cross-model silent apply).
+            let foreign = q.quad.keys().find(|(va, vb)| {
+                va.model_id != self.model_id || vb.model_id != self.model_id
+            });
+            if let Some(&(va, vb)) = foreign {
+                self.record_input_error(
+                    "quad_objective_dsl",
+                    ModelError::InvalidInput(format!(
+                        "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
+                        va.index, vb.index, va.model_id, vb.model_id, self.model_id
+                    )),
+                );
+            } else {
+                match quad_to_csc(&q.quad, self.variables.len()) {
+                    Ok(csc) => {
+                        self.quadratic_objective = Some(csc);
+                        self.quad_via_dsl = true;
+                        self.invalid_inputs.remove("quad_objective_dsl");
+                    }
+                    Err(msg) => {
+                        self.record_input_error(
+                            "quad_objective_dsl",
+                            ModelError::InvalidInput(msg),
+                        );
+                    }
                 }
             }
         } else {
