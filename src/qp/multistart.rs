@@ -314,7 +314,13 @@ pub(crate) fn solve_qp_multistart_with_hooks(
             Ok(pool) => pool.install(|| {
                 warms.into_par_iter().map(worker).collect::<Vec<SolverResult>>()
             }),
-            Err(_) => warms.into_iter().map(worker).collect(),
+            Err(e) => {
+                log::warn!(
+                    "multistart: rayon ThreadPool build failed ({e}); \
+                     falling back to serial execution"
+                );
+                warms.into_iter().map(worker).collect()
+            }
         }
     };
 
