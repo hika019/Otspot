@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Warning budget (~262 warnings) is tracked separately; -D warnings deferred.
+      - run: cargo clippy --all-targets --all-features
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@nextest
+      # data/ is gitignored and absent in CI. Integration tests that reference
+      # data/ panic on missing files rather than skipping gracefully, so we
+      # run only lib + bin targets via the lib-only nextest profile.
+      # test-threads=3 is set in the profile (matches CLAUDE.md spec).
+      - name: Unit tests (lib-only profile; data-dependent tests skipped)
+        run: cargo nextest run --profile lib-only
+      - name: Doctests
+        run: cargo test --doc
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # --no-verify skips build: verifies metadata and file inclusion only.
+      - run: cargo package --no-verify
