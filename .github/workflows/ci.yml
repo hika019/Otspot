@@ -69,6 +69,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # --no-verify skips build: verifies metadata and file inclusion only.
-      # Verify otspot-core (the published implementation crate).
-      # The otspot facade is verified at publish time (depends on crates.io otspot-core).
+      # Verify all published crates (otspot-core, otspot-io, otspot-model, otspot facade).
       - run: cargo package --no-verify -p otspot-core
+      - run: cargo package --no-verify -p otspot-io
+      - run: cargo package --no-verify -p otspot-model
+      - run: cargo package --no-verify -p otspot

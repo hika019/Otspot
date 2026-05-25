@@ -1141,7 +1141,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "otspot"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clarabel",
  "criterion",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "otspot-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clarabel",
  "criterion",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "otspot-dev"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mimalloc",
  "otspot-core",
@@ -1184,14 +1184,14 @@ dependencies = [
 
 [[package]]
 name = "otspot-io"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "otspot-core",
 ]
 
 [[package]]
 name = "otspot-model"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "otspot-core",
  "proptest",

@@ -1,11 +1,11 @@
 [package]
 name = "otspot-core"
-version = "0.1.1"
-edition = "2021"
-license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Core implementation for otspot (LP/QP/MIP solver) — published as a dependency of the otspot facade"
-repository = "https://github.com/hika019/otspot"
-homepage = "https://github.com/hika019/otspot"
+repository.workspace = true
+homepage.workspace = true
 
 [features]
 default = []
