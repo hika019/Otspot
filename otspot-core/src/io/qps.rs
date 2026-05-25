@@ -1237,10 +1237,10 @@ ENDATA\n";
     /// quadratic terms are populated so the streaming path actually exercises QUADOBJ.
     #[test]
     fn test_qps_reader_fixture_tame() {
-        let path = std::path::Path::new("tests/netlib/TAME.QPS");
-        let content = std::fs::read_to_string(path).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/netlib/TAME.QPS");
+        let content = std::fs::read_to_string(&path).unwrap();
         let expected = parse_qps_str(&content).unwrap();
-        let file = std::fs::File::open(path).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
         let got = parse_qps_reader(std::io::BufReader::new(file)).unwrap();
         assert_eq!(got.num_vars, expected.num_vars);
         assert_eq!(got.num_constraints, expected.num_constraints);

@@ -1841,10 +1841,10 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
     /// Tracked fixture: parse netlib/afiro.mps via reader API and compare to string API.
     #[test]
     fn test_mps_reader_fixture_afiro() {
-        let path = std::path::Path::new("tests/netlib/afiro.mps");
-        let content = std::fs::read_to_string(path).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/netlib/afiro.mps");
+        let content = std::fs::read_to_string(&path).unwrap();
         let expected = parse_mps(&content).unwrap();
-        let file = std::fs::File::open(path).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
         let got = parse_mps_reader(std::io::BufReader::new(file)).unwrap();
         assert_eq!(got.num_vars, expected.num_vars, "num_vars mismatch");
         assert_eq!(got.num_constraints, expected.num_constraints, "num_constraints mismatch");
