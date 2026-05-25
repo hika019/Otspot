@@ -230,53 +230,69 @@ impl Model {
         self.apply_objective(obj.into(), OptimizationSense::Maximize)
     }
 
+    // -----------------------------------------------------------------------
+    // Quad-objective state machine — three private chokepoints.
+    //
+    // The quad state triad (`quadratic_objective` / `quad_via_dsl` /
+    // `invalid_inputs["quad_objective_dsl"]`) MUST only be mutated through
+    // one of these three functions.  This is the single chokepoint that
+    // prevents the class of bugs where one setter leaves stale state that
+    // a later setter does not clear (P2-a … P2-e).
+    // -----------------------------------------------------------------------
+
+    /// Install a Q matrix (success path for both DSL and explicit API).
+    /// Clears any previous DSL error and records ownership.
+    fn install_quad(&mut self, q: CscMatrix, via_dsl: bool) {
+        self.invalid_inputs.remove("quad_objective_dsl");
+        self.quadratic_objective = Some(q);
+        self.quad_via_dsl = via_dsl;
+    }
+
+    /// Record a DSL quad failure.  Clears Q (a failed DSL attempt does not
+    /// leave a usable Q) and resets the ownership flag.
+    fn fail_dsl_quad(&mut self, msg: String) {
+        self.quadratic_objective = None;
+        self.quad_via_dsl = false;
+        self.record_input_error("quad_objective_dsl", ModelError::InvalidInput(msg));
+    }
+
+    /// Transition to a pure-linear objective: always clear the DSL error;
+    /// clear Q only when it was DSL-owned (explicit Q from
+    /// `set_quadratic_objective` / `set_diagonal_q` survives).
+    fn replace_with_linear_objective(&mut self) {
+        self.invalid_inputs.remove("quad_objective_dsl");
+        if self.quad_via_dsl {
+            self.quadratic_objective = None;
+            self.quad_via_dsl = false;
+        }
+    }
+
     /// Shared implementation for `minimize`/`maximize`.
     fn apply_objective(&mut self, q: QuadExpr, sense: OptimizationSense) -> &mut Self {
         if !q.quad.is_empty() {
             // Validate that every variable in the quad map belongs to this model.
-            // The linear path implicitly validates via model_id-keyed lookup; the
-            // quad path must do so explicitly (P2-d: cross-model silent apply).
+            // The linear path implicitly validates via model_id-keyed lookup;
+            // the quad path must do so explicitly (P2-d).
             let foreign = q.quad.keys().find(|(va, vb)| {
                 va.model_id != self.model_id || vb.model_id != self.model_id
             });
             if let Some(&(va, vb)) = foreign {
-                self.record_input_error(
-                    "quad_objective_dsl",
-                    ModelError::InvalidInput(format!(
-                        "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
-                        va.index, vb.index, va.model_id, vb.model_id, self.model_id
-                    )),
-                );
+                self.fail_dsl_quad(format!(
+                    "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
+                    va.index, vb.index, va.model_id, vb.model_id, self.model_id
+                ));
             } else {
                 match quad_to_csc(&q.quad, self.variables.len()) {
-                    Ok(csc) => {
-                        self.quadratic_objective = Some(csc);
-                        self.quad_via_dsl = true;
-                        self.invalid_inputs.remove("quad_objective_dsl");
-                    }
-                    Err(msg) => {
-                        self.record_input_error(
-                            "quad_objective_dsl",
-                            ModelError::InvalidInput(msg),
-                        );
-                    }
+                    Ok(csc) => self.install_quad(csc, true),
+                    Err(msg) => self.fail_dsl_quad(msg),
                 }
             }
         } else {
-            // Pure-linear path: always remove stale DSL error regardless of
-            // quad_via_dsl (P2-a: error path never set quad_via_dsl, so the
-            // old `else if` left the invalid-input entry alive).
-            self.invalid_inputs.remove("quad_objective_dsl");
-            if self.quad_via_dsl {
-                // DSL-owned Q is superseded by a pure-linear objective: clear it.
-                self.quadratic_objective = None;
-                self.quad_via_dsl = false;
-            }
+            self.replace_with_linear_objective();
         }
         // Fold the objective constant (e.g. `+4.0` in `x*x - 4x + 4.0`) into
-        // obj_expr_constant.  This is reset each call so re-minimize never
-        // double-counts.  The constant is added post-solve in signed_obj,
-        // after the maximize sign-flip, so it always appears with its original sign.
+        // obj_expr_constant.  Reset on every call so re-minimize never
+        // double-counts.
         self.obj_expr_constant = q.linear.constant;
         self.objective = Some(q.linear);
         self.sense = sense;
@@ -294,11 +310,8 @@ impl Model {
     /// For `maximize()` QP, Q must be negative semi-definite (NSD).
     /// Providing a PSD Q with `maximize()` may yield an unbounded problem.
     pub fn set_quadratic_objective(&mut self, q: CscMatrix) -> &mut Self {
-        self.quadratic_objective = Some(q);
-        // Mark Q as explicitly-owned (not DSL-managed).  Without this, a
-        // subsequent pure-linear minimize/maximize would see quad_via_dsl=true
-        // and silently drop the explicit Q (P2-b).
-        self.quad_via_dsl = false;
+        // Route through the single chokepoint so stale DSL errors are cleared.
+        self.install_quad(q, false);
         self
     }
 
@@ -993,6 +1006,28 @@ pub struct ModelResult {
     pub bound_duals: Vec<f64>,
     /// Per-solve routing and warm-start statistics (race-free, per-result).
     pub stats: otspot_core::problem::SolveStats,
+}
+
+// ---------------------------------------------------------------------------
+// Test-only state inspection (state-machine invariant assertions).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+impl Model {
+    /// True if there is a pending DSL-quad error (stale if a later setter
+    /// should have cleared it).
+    pub(crate) fn has_quad_dsl_error(&self) -> bool {
+        self.invalid_inputs.contains_key("quad_objective_dsl")
+    }
+
+    /// True if the quadratic objective was installed by the DSL path.
+    pub(crate) fn is_quad_via_dsl(&self) -> bool {
+        self.quad_via_dsl
+    }
+
+    /// True if any Q matrix is currently stored.
+    pub(crate) fn has_quadratic_objective(&self) -> bool {
+        self.quadratic_objective.is_some()
+    }
 }
 
 impl ModelResult {
@@ -2316,5 +2351,197 @@ mod mip_model_tests {
             "DSL→explicit→DSL: obj* should be -4, got {}",
             result.objective_value
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // P2-e: set_quadratic_objective / set_diagonal_q must clear stale DSL error
+    // State-machine invariant tests (direct field access via cfg(test) accessors)
+    // ---------------------------------------------------------------------------
+
+    // P2-e repro via set_diagonal_q.
+    #[test]
+    fn test_p2e_stale_dsl_error_cleared_by_set_diagonal_q() {
+        // 1. DSL NaN → error recorded
+        // 2. set_diagonal_q → must clear error, install Q
+        // 3. minimize(linear) → explicit Q survives → QP, x*=2
+        let mut model = Model::new("p2e_diag");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(f64::NAN * (x * x) + x);
+        assert!(model.has_quad_dsl_error(), "DSL error must be recorded after NaN quad");
+        assert!(!model.has_quadratic_objective(), "Q must be cleared on DSL fail");
+        assert!(!model.is_quad_via_dsl(), "quad_via_dsl must be false after fail");
+
+        model.set_diagonal_q(&[2.0]);
+        assert!(!model.has_quad_dsl_error(), "set_diagonal_q must clear stale DSL error (P2-e)");
+        assert!(model.has_quadratic_objective(), "Q must be installed");
+        assert!(!model.is_quad_via_dsl(), "explicit Q: quad_via_dsl must be false");
+
+        model.minimize((-4.0) * x);  // pure-linear; explicit Q survives
+        let result = model.solve().unwrap();
+        assert!((result[x] - 2.0).abs() < EPS, "P2-e: x*=2, got {}", result[x]);
+        assert!((result.objective_value - (-4.0)).abs() < EPS, "P2-e: obj=-4, got {}", result.objective_value);
+    }
+
+    // P2-e repro via set_quadratic_objective directly.
+    #[test]
+    fn test_p2e_stale_dsl_error_cleared_by_set_quadratic_objective() {
+        use otspot_core::sparse::CscMatrix;
+        let mut model = Model::new("p2e_csc");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(f64::NAN * (x * x) + x);
+        assert!(model.has_quad_dsl_error());
+
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        model.set_quadratic_objective(q);
+        assert!(!model.has_quad_dsl_error(), "set_quadratic_objective must clear stale DSL error");
+        assert!(model.has_quadratic_objective());
+        assert!(!model.is_quad_via_dsl());
+
+        model.minimize((-4.0) * x);
+        let result = model.solve().unwrap();
+        assert!((result[x] - 2.0).abs() < EPS, "P2-e: x*=2");
+    }
+
+    // State-machine: full transition table (all setter permutations × invariants).
+    // Each row: transition sequence → expected (has_error, via_dsl, has_q).
+    #[test]
+    fn test_quad_state_invariants_transition_table() {
+        // Helper: build a 1-var model with x in [0,∞) and return (model, x).
+        fn mk() -> (Model, crate::variable::Variable) {
+            let mut m = Model::new("t");
+            let x = m.add_var("x", 0.0, f64::INFINITY);
+            (m, x)
+        }
+
+        // After DSL success: no error, via_dsl=true, has_q=true.
+        {
+            let (mut m, x) = mk();
+            m.minimize(x * x);
+            assert!(!m.has_quad_dsl_error(), "DSL ok: no error");
+            assert!(m.is_quad_via_dsl(),       "DSL ok: via_dsl=true");
+            assert!(m.has_quadratic_objective(),"DSL ok: has_q=true");
+        }
+
+        // After DSL fail (NaN): error=true, via_dsl=false, has_q=false.
+        {
+            let (mut m, x) = mk();
+            m.minimize(f64::NAN * (x * x));
+            assert!(m.has_quad_dsl_error(),    "DSL fail: error recorded");
+            assert!(!m.is_quad_via_dsl(),      "DSL fail: via_dsl=false");
+            assert!(!m.has_quadratic_objective(),"DSL fail: has_q=false");
+        }
+
+        // After set_diagonal_q: no error, via_dsl=false, has_q=true.
+        {
+            let (mut m, _x) = mk();
+            m.set_diagonal_q(&[2.0]);
+            assert!(!m.has_quad_dsl_error(), "explicit diag: no error");
+            assert!(!m.is_quad_via_dsl(),    "explicit diag: via_dsl=false");
+            assert!(m.has_quadratic_objective(),"explicit diag: has_q=true");
+        }
+
+        // DSL fail → set_diagonal_q: error cleared, has_q=true.
+        {
+            let (mut m, x) = mk();
+            m.minimize(f64::NAN * (x * x));
+            m.set_diagonal_q(&[2.0]);
+            assert!(!m.has_quad_dsl_error(), "fail→diag: error cleared");
+            assert!(m.has_quadratic_objective(),"fail→diag: has_q=true");
+            assert!(!m.is_quad_via_dsl(),    "fail→diag: via_dsl=false");
+        }
+
+        // DSL success → DSL fail: error=true, via_dsl=false, has_q=false.
+        {
+            let (mut m, x) = mk();
+            m.minimize(x * x);
+            m.minimize(f64::NAN * (x * x));
+            assert!(m.has_quad_dsl_error(),    "ok→fail: error recorded");
+            assert!(!m.is_quad_via_dsl(),      "ok→fail: via_dsl=false");
+            assert!(!m.has_quadratic_objective(),"ok→fail: has_q=false");
+        }
+
+        // DSL success → linear minimize: error=false, via_dsl=false, has_q=false.
+        {
+            let (mut m, x) = mk();
+            m.minimize(x * x);
+            m.minimize(1.0 * x);
+            assert!(!m.has_quad_dsl_error(), "dsl→linear: no error");
+            assert!(!m.is_quad_via_dsl(),    "dsl→linear: via_dsl=false");
+            assert!(!m.has_quadratic_objective(),"dsl→linear: DSL Q cleared");
+        }
+
+        // Explicit Q → linear minimize: Q preserved (not DSL-owned).
+        {
+            let (mut m, x) = mk();
+            m.set_diagonal_q(&[2.0]);
+            m.minimize(1.0 * x);
+            assert!(!m.has_quad_dsl_error(), "explicit→linear: no error");
+            assert!(!m.is_quad_via_dsl(),    "explicit→linear: via_dsl=false");
+            assert!(m.has_quadratic_objective(),"explicit→linear: Q preserved");
+        }
+
+        // DSL fail → DSL fail → explicit Q: error cleared.
+        {
+            let (mut m, x) = mk();
+            m.minimize(f64::NAN * (x * x));
+            m.minimize(f64::NAN * (x * x));
+            m.set_diagonal_q(&[2.0]);
+            assert!(!m.has_quad_dsl_error(), "fail→fail→explicit: error cleared");
+            assert!(m.has_quadratic_objective(),"fail→fail→explicit: has_q=true");
+        }
+    }
+
+    // solve() result after each transition (not just state — actual Optimal/Error).
+    #[test]
+    fn test_quad_state_solve_outcome_table() {
+        let cases: &[(&str, bool)] = &[
+            // (description, expect_ok)
+            // DSL NaN then linear → Optimal (P2-a regression)
+            ("nan_then_linear", true),
+            // DSL NaN then explicit Q then linear → Optimal (P2-e)
+            ("nan_then_explicit_then_linear", true),
+            // DSL NaN alone → error
+            ("nan_alone", false),
+            // DSL ok then NaN → error (P2-a reverse)
+            ("ok_then_nan", false),
+        ];
+
+        for &(name, expect_ok) in cases {
+            let mut m = Model::new(name);
+            let x = m.add_var("x", 0.0, f64::INFINITY);
+
+            match name {
+                "nan_then_linear" => {
+                    m.minimize(f64::NAN * (x * x) + x);
+                    m.minimize(1.0 * x);
+                }
+                "nan_then_explicit_then_linear" => {
+                    m.minimize(f64::NAN * (x * x) + x);
+                    m.set_diagonal_q(&[2.0]);
+                    m.minimize((-4.0) * x);
+                }
+                "nan_alone" => {
+                    m.minimize(f64::NAN * (x * x) + x);
+                }
+                "ok_then_nan" => {
+                    m.minimize(x * x + (-4.0) * x);
+                    m.minimize(f64::NAN * (x * x) + x);
+                }
+                _ => unreachable!(),
+            }
+
+            let result = m.solve();
+            if expect_ok {
+                assert!(
+                    result.is_ok(),
+                    "case '{name}': expected Optimal, got {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(ModelError::InvalidInput(_))),
+                    "case '{name}': expected InvalidInput, got {result:?}"
+                );
+            }
+        }
     }
 }
