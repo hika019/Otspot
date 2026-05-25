@@ -19,19 +19,23 @@ name = "otspot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Mathematical optimization solver — LP (Revised Simplex) and QP (Interior Point / Mehrotra predictor-corrector)"
 readme = "README.md"
 keywords = ["linear-programming", "quadratic", "interior-point", "simplex", "optimization"]
 categories = ["science", "algorithms", "mathematics"]
 
-# crates.io 公開パッケージはライブラリのみ。data/ 等は .gitignore で自動除外。
-# 追加で tracked の内部成果物 (bin / 統合テスト / benches / examples / scripts /
-# インラインテスト / dev 設定) を除外する。
+# Exclude: internal integration tests (depend on otspot-dev path dep + private data),
+# workspace sub-crates (published separately), dev configs, and private data.
+# Data-free benches/examples (inline fixtures only) are included for discoverability.
+# solve_bench and bench_all_netlib reference tests/netlib/*.mps (excluded), so they
+# are excluded to prevent runtime panics for crates.io users.
 exclude = [
     "/src/bin",
     "/tests",
-    "/benches",
-    "/examples",
+    "/benches/solve_bench.rs",
+    "/examples/bench_all_netlib.rs",
     "/scripts",
     "/data",
     "/.config",
@@ -47,9 +51,8 @@ exclude = [
 
 [features]
 default = []
-# `parallel` 機能フラグは後方互換のため残置 (no-op)。rayon は必須依存に昇格
-# (#5 Phase 2 multi-start で常時 ThreadPool が必要)。
-# 既存 `#[cfg(feature="parallel")]` 配下の heavy parallel テストは opt-in 維持。
+# `parallel` gates opt-in concurrent tests in otspot-core (rayon is a hard dep;
+# enabling this feature does not change runtime behavior, only test coverage).
 parallel = ["otspot-core/parallel"]
 
 [dependencies]
