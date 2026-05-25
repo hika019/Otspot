@@ -214,6 +214,10 @@ pub(crate) struct MultiStartHooks {
     pub on_solve_exit: Arc<dyn Fn() + Send + Sync>,
     /// true → worker 入口の deadline shortcut を bypass (no-op 退化挙動の sentinel 用)。
     pub disable_deadline_shortcut: bool,
+    /// ThreadPool 構築を差し替えるファクトリ (None = デフォルト rayon builder)。
+    /// テストで失敗注入に使う。失敗時は serial fallback へ移行する。
+    pub thread_pool_factory:
+        Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>,
 }
 
 /// Multi-start QP solver。`config.n_starts == 1` は cold solve 1 回 (= 既存挙動)。
@@ -299,16 +303,19 @@ pub(crate) fn solve_qp_multistart_with_hooks(
             .map(worker)
             .collect()
     } else {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(parallel)
-            .build()
-            .expect("rayon ThreadPool build failed");
-        pool.install(|| {
-            warms
-                .into_par_iter()
-                .map(worker)
-                .collect::<Vec<SolverResult>>()
-        })
+        let pool_result = hooks
+            .and_then(|h| h.thread_pool_factory.as_ref().map(|f| f(parallel)))
+            .unwrap_or_else(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(parallel)
+                    .build()
+            });
+        match pool_result {
+            Ok(pool) => pool.install(|| {
+                warms.into_par_iter().map(worker).collect::<Vec<SolverResult>>()
+            }),
+            Err(_) => warms.into_iter().map(worker).collect(),
+        }
     };
 
     // index 順 reduce で並列実行下でも決定論的。
@@ -490,6 +497,7 @@ mod tests {
                     a_exit.fetch_sub(1, Ordering::SeqCst);
                 }),
                 disable_deadline_shortcut: false,
+                thread_pool_factory: None,
             };
             let cfg = MultiStartConfig {
                 n_starts,
@@ -537,6 +545,7 @@ mod tests {
                 a_exit.fetch_sub(1, Ordering::SeqCst);
             }),
             disable_deadline_shortcut: false,
+            thread_pool_factory: None,
         };
         let cfg = MultiStartConfig {
             n_starts: 6,
@@ -590,6 +599,7 @@ mod tests {
                     }),
                     on_solve_exit: Arc::new(|| {}),
                     disable_deadline_shortcut: disable,
+                    thread_pool_factory: None,
                 },
                 entered,
             )
@@ -652,6 +662,7 @@ mod tests {
             }),
             on_solve_exit: Arc::new(|| {}),
             disable_deadline_shortcut: false,
+            thread_pool_factory: None,
         };
         let cfg = MultiStartConfig {
             n_starts: 6,
@@ -672,6 +683,118 @@ mod tests {
             r.objective.is_finite(),
             "objective should be finite, got {}",
             r.objective
+        );
+    }
+
+    /// ThreadPool 構築失敗時に panic せず serial fallback で正解を返すことを検証。
+    ///
+    /// `thread_pool_factory` に `spawn_handler` 常時失敗ビルダーを注入して
+    /// `build()` を実際に `Err(ThreadPoolBuildError)` にさせる。
+    ///
+    /// **sentinel**: このテストで fallback を `expect` に戻すと `Err` に対して
+    /// `expect` が panic し、テストが FAIL する (自己実証済み)。
+    #[test]
+    fn threadpool_build_failure_falls_back_to_serial() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let c = vec![0.0_f64; 2];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let bounds = vec![(-3.0, 3.0); 2];
+        let prob = QpProblem::new(q, c, a, vec![], bounds, vec![]).unwrap();
+
+        // table-driven: 複数パターンで fallback 分岐を踏む
+        let cases: &[(usize, usize)] = &[
+            (4, 4),  // threads=4, n_starts=4
+            (2, 8),  // threads=2, n_starts=8
+            (3, 5),  // threads=3, n_starts=5
+        ];
+
+        for &(threads, n_starts) in cases {
+            let hooks = MultiStartHooks {
+                on_solve_enter: Arc::new(|| {}),
+                on_solve_exit: Arc::new(|| {}),
+                disable_deadline_shortcut: false,
+                // spawn_handler が常時 Err を返すので build() は Err(ThreadPoolBuildError)。
+                thread_pool_factory: Some(Box::new(|_n| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(1)
+                        .spawn_handler(|_| -> std::io::Result<()> {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "injected ThreadPool build failure",
+                            ))
+                        })
+                        .build()
+                })),
+            };
+
+            let cfg = MultiStartConfig {
+                n_starts,
+                seed: 42,
+                strategy: StartStrategy::RandomBox,
+            };
+            let mut opts = SolverOptions::default();
+            opts.threads = threads;
+            opts.timeout_secs = Some(20.0);
+
+            // fallback: panic しない、かつ serial と同等の有限 objective を返す。
+            let result = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
+            assert!(
+                result.objective.is_finite(),
+                "threads={threads} n_starts={n_starts}: fallback must return finite objective, got status={:?} obj={}",
+                result.status,
+                result.objective
+            );
+        }
+    }
+
+    /// serial fallback と通常並列パスの objective が一致することを確認 (fallback は no-op でない)。
+    #[test]
+    fn threadpool_fallback_result_matches_serial() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let c = vec![0.0_f64; 2];
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let bounds = vec![(-3.0, 3.0); 2];
+        let prob = QpProblem::new(q, c, a, vec![], bounds, vec![]).unwrap();
+
+        let cfg = MultiStartConfig {
+            n_starts: 6,
+            seed: 0xBEEF,
+            strategy: StartStrategy::RandomBox,
+        };
+
+        // serial baseline (threads=1)
+        let mut opts_serial = SolverOptions::default();
+        opts_serial.threads = 1;
+        opts_serial.timeout_secs = Some(20.0);
+        let baseline = solve_qp_multistart(&prob, &opts_serial, &cfg);
+
+        // fallback via injected pool failure (threads=4 → parallel path → pool fails → serial)
+        let hooks = MultiStartHooks {
+            on_solve_enter: Arc::new(|| {}),
+            on_solve_exit: Arc::new(|| {}),
+            disable_deadline_shortcut: false,
+            thread_pool_factory: Some(Box::new(|_n| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(1)
+                    .spawn_handler(|_| -> std::io::Result<()> {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "injected",
+                        ))
+                    })
+                    .build()
+            })),
+        };
+        let mut opts_fallback = SolverOptions::default();
+        opts_fallback.threads = 4;
+        opts_fallback.timeout_secs = Some(20.0);
+        let fallback_result = solve_qp_multistart_with_hooks(&prob, &opts_fallback, &cfg, Some(&hooks));
+
+        assert!(
+            (baseline.objective - fallback_result.objective).abs() < 1e-9,
+            "fallback objective {fallback} must match serial baseline {base}",
+            fallback = fallback_result.objective,
+            base = baseline.objective,
         );
     }
 }
