@@ -1,6 +1,7 @@
 //! Unit + KKT-roundtrip tests covering presolve transforms.
 
 use super::*;
+use crate::error::SolverError;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
 
@@ -68,18 +69,15 @@ fn test_fixed_variable_removal() {
 
 #[test]
 fn test_fixed_infeasible() {
-    let lp = make_lp_general(
-        vec![1.0],
-        &[],
-        &[],
-        &[],
-        0,
-        1,
-        vec![],
-        vec![],
-        vec![(3.0, 2.0)],
+    // lb > ub is now rejected at construction time (InvalidBounds), not by presolve.
+    let a = CscMatrix::new(0, 1);
+    let res = LpProblem::new_general(
+        vec![1.0], a, vec![], vec![], vec![(3.0, 2.0)], None,
     );
-    assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
+    assert!(
+        matches!(res, Err(SolverError::InvalidBounds { index: 0, lb, ub }) if lb == 3.0 && ub == 2.0),
+        "lb > ub must be rejected at construction"
+    );
 }
 
 // -----------------------------------------------------------

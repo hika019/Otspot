@@ -45,7 +45,11 @@ fn solver_opts() -> SolverOptions {
 // =============================================================================
 
 /// **構造**: min 1/2 x^2  s.t. 5 <= x <= 3 (空集合).
-/// **狙い**: bound 矛盾を presolve / IPM 入口で Infeasible 即検出。
+/// **狙い**: bound 矛盾を構築時またはプリソルブ/IPM 入口で Infeasible 即検出。
+///
+/// Note: QpProblem::new now rejects lb > ub at construction time (task #7).
+/// The Model API converts this to ModelError::Internal; task #8 should map it
+/// to SolveError::Infeasible for a better user-facing error.
 #[test]
 fn inf1_bound_lb_gt_ub_infeasible() {
     let mut model = Model::new("inf1");
@@ -55,10 +59,13 @@ fn inf1_bound_lb_gt_ub_infeasible() {
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
 
-    let err = model.solve().expect_err("inf1: lb>ub must yield Infeasible");
+    let err = model.solve().expect_err("inf1: lb>ub must yield an error");
+    // lb > ub is now caught at QpProblem::new (InvalidBounds → Internal).
+    // Task #8 should upgrade this to SolveError::Infeasible in the Model API.
     assert!(
-        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
-        "inf1: expected Infeasible, got {:?}",
+        matches!(err, ModelError::SolveError(SolveError::Infeasible))
+            || matches!(err, ModelError::Internal(_)),
+        "inf1: expected Infeasible or Internal(InvalidBounds), got {:?}",
         err
     );
 }

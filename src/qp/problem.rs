@@ -31,12 +31,22 @@ impl QcqpMatrix {
 #[derive(Debug)]
 pub enum QpProblemError {
     DimensionMismatch(String),
+    /// Non-finite coefficient (NaN or ±∞) in the named field at the given index.
+    NonFiniteCoefficient { field: &'static str, index: usize },
+    /// Invalid variable bound: NaN or lb > ub at the given index.
+    InvalidBounds { index: usize, lb: f64, ub: f64 },
 }
 
 impl std::fmt::Display for QpProblemError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             QpProblemError::DimensionMismatch(msg) => write!(f, "dimension mismatch: {}", msg),
+            QpProblemError::NonFiniteCoefficient { field, index } => {
+                write!(f, "non-finite coefficient in {}: index {}", field, index)
+            }
+            QpProblemError::InvalidBounds { index, lb, ub } => {
+                write!(f, "invalid bounds at index {}: lb={} > ub={} or NaN", index, lb, ub)
+            }
         }
     }
 }
@@ -99,6 +109,31 @@ impl QpProblem {
                 format!("constraint_types length must be {}, got {}", m, constraint_types.len())
             ));
         }
+        for (i, &v) in c.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(QpProblemError::NonFiniteCoefficient { field: "c", index: i });
+            }
+        }
+        for (i, &v) in b.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(QpProblemError::NonFiniteCoefficient { field: "b", index: i });
+            }
+        }
+        for (i, &v) in q.values.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(QpProblemError::NonFiniteCoefficient { field: "Q", index: i });
+            }
+        }
+        for (i, &v) in a.values.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(QpProblemError::NonFiniteCoefficient { field: "A", index: i });
+            }
+        }
+        for (i, &(lb, ub)) in bounds.iter().enumerate() {
+            if lb.is_nan() || ub.is_nan() || lb > ub {
+                return Err(QpProblemError::InvalidBounds { index: i, lb, ub });
+            }
+        }
         Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, quadratic_constraints: vec![], obj_offset: 0.0 })
     }
 
@@ -124,6 +159,31 @@ impl QpProblem {
     /// Used as a guard: the QP/LP solver cannot handle QCQP and must reject such problems.
     pub fn has_qcqp_constraints(&self) -> bool {
         self.quadratic_constraints.iter().any(|q| !q.triplets.is_empty())
+    }
+
+    /// Set per-constraint quadratic matrices for QCQP, with validation.
+    ///
+    /// `qcs` must be either empty (pure QP) or have length equal to `num_constraints`.
+    /// All triplet values must be finite.
+    pub fn set_quadratic_constraints(&mut self, qcs: Vec<QcqpMatrix>) -> Result<(), QpProblemError> {
+        if !qcs.is_empty() && qcs.len() != self.num_constraints {
+            return Err(QpProblemError::DimensionMismatch(format!(
+                "quadratic_constraints length must be 0 or {}, got {}",
+                self.num_constraints, qcs.len()
+            )));
+        }
+        for (k, qc) in qcs.iter().enumerate() {
+            for &(_, _, v) in &qc.triplets {
+                if !v.is_finite() {
+                    return Err(QpProblemError::NonFiniteCoefficient {
+                        field: "quadratic_constraints",
+                        index: k,
+                    });
+                }
+            }
+        }
+        self.quadratic_constraints = qcs;
+        Ok(())
     }
 
     /// Q が対角行列かどうかを検査する
@@ -208,3 +268,238 @@ impl crate::problem::SolverResult {
 }
 
 pub use crate::options::QpWarmStart;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
+
+    fn make_qp(
+        c: Vec<f64>,
+        b: Vec<f64>,
+        q_vals: Vec<f64>,
+        a_vals: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+    ) -> Result<QpProblem, QpProblemError> {
+        let n = c.len();
+        let m = b.len();
+        let q = if q_vals.is_empty() {
+            CscMatrix::new(n, n)
+        } else {
+            let idx: Vec<usize> = (0..n).collect();
+            crate::sparse::CscMatrix::from_triplets(&idx, &idx, &q_vals, n, n).unwrap()
+        };
+        let a = if a_vals.is_empty() {
+            CscMatrix::new(m, n)
+        } else {
+            let rows = vec![0usize; n];
+            let cols: Vec<usize> = (0..n).collect();
+            crate::sparse::CscMatrix::from_triplets(&rows, &cols, &a_vals, m, n).unwrap()
+        };
+        let ct = vec![ConstraintType::Le; m];
+        QpProblem::new(q, c, a, b, bounds, ct)
+    }
+
+    #[test]
+    fn valid_qp_accepted() {
+        let res = make_qp(
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![],
+            vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY), (0.0, 10.0)],
+        );
+        assert!(res.is_ok());
+    }
+
+    // --- NaN / ±inf in c ---
+    #[test]
+    fn nan_in_c_rejected() {
+        let cases = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for bad in cases {
+            let res = make_qp(vec![bad, 1.0], vec![5.0], vec![], vec![1.0, 1.0],
+                              vec![(0.0, f64::INFINITY); 2]);
+            assert!(
+                matches!(res, Err(QpProblemError::NonFiniteCoefficient { field: "c", .. })),
+                "expected NonFiniteCoefficient for c={bad}"
+            );
+        }
+    }
+
+    // --- NaN / ±inf in b ---
+    #[test]
+    fn nan_in_b_rejected() {
+        let cases = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for bad in cases {
+            let res = make_qp(vec![1.0, 2.0], vec![bad], vec![], vec![1.0, 1.0],
+                              vec![(0.0, f64::INFINITY); 2]);
+            assert!(
+                matches!(res, Err(QpProblemError::NonFiniteCoefficient { field: "b", .. })),
+                "expected NonFiniteCoefficient for b={bad}"
+            );
+        }
+    }
+
+    // --- NaN / ±inf in Q values ---
+    // Note: from_triplets drops NaN via DROP_TOL (NaN.abs() > tol == false).
+    // Inject bad values directly to test validation independent of that path.
+    #[test]
+    fn nan_in_q_rejected() {
+        let n = 2;
+        let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for bad in bad_vals {
+            let mut q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
+            q.values[0] = bad; // inject bad value directly
+            let a = CscMatrix::new(1, n);
+            let c = vec![1.0, 2.0];
+            let b = vec![5.0];
+            let bounds = vec![(0.0, f64::INFINITY); n];
+            let ct = vec![ConstraintType::Le];
+            let res = QpProblem::new(q, c, a, b, bounds, ct);
+            assert!(
+                matches!(res, Err(QpProblemError::NonFiniteCoefficient { field: "Q", .. })),
+                "expected NonFiniteCoefficient for Q val={bad}"
+            );
+        }
+    }
+
+    // --- NaN / ±inf in A values ---
+    #[test]
+    fn nan_in_a_rejected() {
+        let n = 2;
+        let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for bad in bad_vals {
+            let q = CscMatrix::new(n, n);
+            let mut a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+            a.values[0] = bad; // inject bad value directly
+            let c = vec![1.0, 2.0];
+            let b = vec![5.0];
+            let bounds = vec![(0.0, f64::INFINITY); n];
+            let ct = vec![ConstraintType::Le];
+            let res = QpProblem::new(q, c, a, b, bounds, ct);
+            assert!(
+                matches!(res, Err(QpProblemError::NonFiniteCoefficient { field: "A", .. })),
+                "expected NonFiniteCoefficient for A val={bad}"
+            );
+        }
+    }
+
+    // --- NaN in bounds ---
+    #[test]
+    fn nan_in_bounds_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (f64::NAN, 1.0),
+            (0.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+        ];
+        for (lb, ub) in cases {
+            let res = make_qp(
+                vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(QpProblemError::InvalidBounds { index: 0, .. })),
+                "expected InvalidBounds for ({lb},{ub})"
+            );
+        }
+    }
+
+    // --- lb > ub ---
+    #[test]
+    fn lb_gt_ub_rejected() {
+        let cases: Vec<(f64, f64)> = vec![
+            (5.0, 1.0),
+            (1.0, 0.0),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (0.1, 0.0),
+        ];
+        for (lb, ub) in cases {
+            let res = make_qp(
+                vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+                vec![(lb, ub), (0.0, f64::INFINITY)],
+            );
+            assert!(
+                matches!(res, Err(QpProblemError::InvalidBounds { .. })),
+                "expected InvalidBounds for lb={lb} ub={ub}"
+            );
+        }
+    }
+
+    // --- inf bounds are valid ---
+    #[test]
+    fn inf_bounds_accepted() {
+        let res = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
+        );
+        assert!(res.is_ok(), "±inf bounds should be valid");
+    }
+
+    // --- dimension mismatch still caught ---
+    #[test]
+    fn dimension_mismatch_still_caught() {
+        let n = 2;
+        let q = CscMatrix::new(n, n);
+        let a = CscMatrix::new(1, n);
+        let c = vec![1.0, 2.0, 3.0]; // wrong length
+        let b = vec![5.0];
+        let bounds = vec![(0.0, f64::INFINITY); n];
+        let ct = vec![ConstraintType::Le];
+        let res = QpProblem::new(q, c, a, b, bounds, ct);
+        assert!(matches!(res, Err(QpProblemError::DimensionMismatch(_))));
+    }
+
+    // --- set_quadratic_constraints ---
+
+    #[test]
+    fn set_quadratic_constraints_length_mismatch_rejected() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        // num_constraints = 1, so length 2 is invalid
+        let qcs = vec![QcqpMatrix::new(2), QcqpMatrix::new(2)];
+        let res = prob.set_quadratic_constraints(qcs);
+        assert!(matches!(res, Err(QpProblemError::DimensionMismatch(_))));
+    }
+
+    #[test]
+    fn set_quadratic_constraints_nan_rejected() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for bad in bad_vals {
+            let mut qc = QcqpMatrix::new(2);
+            qc.triplets.push((0, 0, bad));
+            let res = prob.set_quadratic_constraints(vec![qc]);
+            assert!(
+                matches!(res, Err(QpProblemError::NonFiniteCoefficient { field: "quadratic_constraints", .. })),
+                "expected NonFiniteCoefficient for val={bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_quadratic_constraints_empty_accepted() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        assert!(prob.set_quadratic_constraints(vec![]).is_ok());
+    }
+
+    #[test]
+    fn set_quadratic_constraints_valid_accepted() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets.push((0, 0, 2.0));
+        qc.triplets.push((1, 1, 3.0));
+        assert!(prob.set_quadratic_constraints(vec![qc]).is_ok());
+    }
+}

@@ -311,8 +311,10 @@ mod tests {
         let c = vec![0.0, 0.0];
         let a = CscMatrix::new(0, 2);
         let b = vec![];
-        let bounds = vec![(0.0, 1.0), (2.0, 1.0)];
-        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+        let mut prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        // Inject invalid bound post-construction (public field) to test diagnose detection.
+        prob.bounds[1] = (2.0, 1.0);
         let report = diagnose(&prob);
         assert!(report.has_error);
         let w = report.warnings.iter().find(|w| w.code == DiagnosticCode::VariableBoundsConflict);
@@ -399,8 +401,10 @@ mod tests {
         let c = vec![0.0, 0.0];
         let a = CscMatrix::new(0, 2);
         let b = vec![];
-        let bounds = vec![(5.0, 1.0), (0.0, 1.0)];
-        let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        let bounds = vec![(0.0, 1.0), (0.0, 1.0)];
+        let mut prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+        // Inject invalid bound post-construction to test combined error detection.
+        prob.bounds[0] = (5.0, 1.0);
         let report = diagnose(&prob);
         assert!(report.has_error);
         let errors: Vec<_> = report.warnings.iter()
