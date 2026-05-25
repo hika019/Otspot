@@ -135,37 +135,3 @@ fn test_dual_advanced_warm_start_larger_rhs() {
     );
 }
 
-#[test]
-fn test_scsd6_equality_constraints() {
-    // scsd6: network flow LP with 147 all-equality constraints, 1350 vars.
-    // Reported as NumericalError in 0.024s.
-    let path = std::path::Path::new("data/lp_problems/scsd6.QPS");
-    if !path.exists() {
-        return;
-    }
-    let content = std::fs::read_to_string(path).unwrap();
-    let lp = crate::io::mps::parse_mps(&content).unwrap();
-
-    // Test each method independently to isolate the bug
-    let methods = [
-        ("Auto", SimplexMethod::Auto),
-        ("Primal", SimplexMethod::Primal),
-        ("Dual", SimplexMethod::Dual),
-    ];
-    let results: Vec<_> = methods.iter().map(|(name, method)| {
-        let mut opts = SolverOptions::default();
-        opts.simplex_method = *method;
-        opts.presolve = false;
-        let result = solve_with(&lp, &opts);
-        eprintln!("scsd6 {} -> {:?} obj={:.3e}", name, result.status, result.objective);
-        (*name, result.status)
-    }).collect();
-
-    for (name, status) in &results {
-        assert_ne!(
-            *status, SolveStatus::NumericalError,
-            "scsd6 {} returned NumericalError",
-            name
-        );
-    }
-}

@@ -1176,9 +1176,11 @@ dependencies = [
 name = "otspot-dev"
 version = "0.1.0"
 dependencies = [
+ "mimalloc",
  "otspot-core",
  "otspot-io",
  "tempfile",
+ "twofloat",
 ]
 
 [[package]]

@@ -49,7 +49,8 @@ pub use options::{
 pub mod qp;
 pub mod mip;
 pub mod lp;
-pub(crate) mod linalg;
+#[doc(hidden)]
+pub mod linalg;
 
 #[cfg(test)]
 pub(crate) mod test_kkt;

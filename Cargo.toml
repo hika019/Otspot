@@ -58,7 +58,6 @@ tempfile = "3"
 faer = "0.24.0"
 dyn-stack = "0.13.2"
 otspot-dev = { path = "otspot-dev" }
-otspot-core = { path = "otspot-core", version = "0.1.1" }
 
 [[bin]]
 name = "mip_speed_bench"
