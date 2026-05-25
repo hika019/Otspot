@@ -474,6 +474,15 @@ fn solve_ipm_with_runner(
 /// eps 達成時は `prove_optimal` で KKT + dual_sign を再検証する。`satisfies_eps` は dual_sign
 /// チェックを含まないため、prove_optimal が唯一の Optimal mint 関数として機能する。
 /// `prove_optimal` が `Err(NotProven)` を返す場合は SuboptimalSolution に降格する。
+///
+/// ## Gap 基準の意図的な厳格化
+///
+/// `IpmOutcome::satisfies_eps` は duality gap を `PROMOTION_GAP_TOL = 1e-1` (10 %) と比較する。
+/// これは retry ループで *最良の iterate* を選ぶための構造的な緩い閾値であり、
+/// 最終的な Optimal 判定には用いない。
+/// `prove_optimal` はすべての KKT 条件 (gap 含む) を `user_eps` で検証するため、
+/// gap が (user_eps, PROMOTION_GAP_TOL) の範囲にある解は SuboptimalSolution に降格する。
+/// これはユーザが要求した精度での honest な Optimal 定義であり、意図的な supersede である。
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,
