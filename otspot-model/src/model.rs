@@ -16,6 +16,7 @@
 
 use crate::constraint::{Constraint, ConstraintSense};
 use crate::expression::Expression;
+use crate::quad_expr::{quad_to_csc, QuadExpr};
 use crate::variable::{VarKind, Variable};
 
 use crate::variable::VariableDefinition;
@@ -55,6 +56,10 @@ pub struct Model {
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
     /// Convention: min 1/2 x^T Q x + c^T x  ("1/2あり" standard).
     quadratic_objective: Option<CscMatrix>,
+    /// Whether `quadratic_objective` was set via the DSL (`minimize(x*x)`).
+    /// Used to decide whether a subsequent pure-linear `minimize`/`maximize`
+    /// call should clear the stored Q.
+    quad_via_dsl: bool,
     invalid_inputs: BTreeMap<&'static str, String>,
     /// Timeout for QP solve in seconds (None = unlimited).
     timeout_secs: Option<f64>,
@@ -81,6 +86,7 @@ impl Model {
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
+            quad_via_dsl: false,
             invalid_inputs: BTreeMap::new(),
             timeout_secs: None,
             use_ruiz_scaling: None,
@@ -201,16 +207,43 @@ impl Model {
     }
 
     /// Set the objective to minimize the given expression.
-    pub fn minimize(&mut self, obj: impl Into<Expression>) -> &mut Self {
-        self.objective = Some(obj.into());
-        self.sense = OptimizationSense::Minimize;
-        self
+    ///
+    /// Accepts any linear [`Expression`] or quadratic [`QuadExpr`] (e.g. `x * x`,
+    /// `x * y`, `x.pow2()`).  When quadratic terms are present the Q matrix is
+    /// built automatically using the 1/2 xᵀQx convention and the model is routed
+    /// through the QP solver.
+    pub fn minimize(&mut self, obj: impl Into<QuadExpr>) -> &mut Self {
+        self.apply_objective(obj.into(), OptimizationSense::Minimize)
     }
 
     /// Set the objective to maximize the given expression.
-    pub fn maximize(&mut self, obj: impl Into<Expression>) -> &mut Self {
-        self.objective = Some(obj.into());
-        self.sense = OptimizationSense::Maximize;
+    ///
+    /// See [`minimize`](Self::minimize) for details on quadratic support.
+    /// For maximization the Q matrix is negated internally (Q → -Q).
+    pub fn maximize(&mut self, obj: impl Into<QuadExpr>) -> &mut Self {
+        self.apply_objective(obj.into(), OptimizationSense::Maximize)
+    }
+
+    /// Shared implementation for `minimize`/`maximize`.
+    fn apply_objective(&mut self, q: QuadExpr, sense: OptimizationSense) -> &mut Self {
+        if !q.quad.is_empty() {
+            match quad_to_csc(&q.quad, self.variables.len()) {
+                Ok(csc) => {
+                    self.quadratic_objective = Some(csc);
+                    self.quad_via_dsl = true;
+                    self.invalid_inputs.remove("quad_objective_dsl");
+                }
+                Err(msg) => {
+                    self.record_input_error("quad_objective_dsl", ModelError::InvalidInput(msg));
+                }
+            }
+        } else if self.quad_via_dsl {
+            // Pure-linear objective replacing a DSL-quadratic one: clear the Q.
+            self.quadratic_objective = None;
+            self.quad_via_dsl = false;
+        }
+        self.objective = Some(q.linear);
+        self.sense = sense;
         self
     }
 
