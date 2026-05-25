@@ -50,7 +50,7 @@ fn solve_with_watchdog(
         "[{label}] n={} m={} nnz(A)={}",
         lp.num_vars,
         lp.num_constraints,
-        lp.a.values.len()
+        lp.a.values().len()
     );
 
     let (tx, rx) = mpsc::channel();

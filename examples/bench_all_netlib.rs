@@ -27,8 +27,8 @@ fn main() {
         }
         let mps_data = std::fs::read_to_string(path).unwrap();
         let lp = otspot::io::mps::parse_mps(&mps_data).unwrap();
-        let rows = lp.a.nrows;
-        let cols = lp.a.ncols;
+        let rows = lp.a.nrows();
+        let cols = lp.a.ncols();
 
         let start = Instant::now();
         let result = otspot::solve(&lp);

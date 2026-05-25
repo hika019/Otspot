@@ -126,12 +126,12 @@ fn main() -> ExitCode {
 
 fn dump_csc(out: &mut String, name: &str, m: &CscMatrix) {
     writeln!(out, "  \"{}\": {{", name).unwrap();
-    writeln!(out, "    \"nrows\": {},", m.nrows).unwrap();
-    writeln!(out, "    \"ncols\": {},", m.ncols).unwrap();
+    writeln!(out, "    \"nrows\": {},", m.nrows()).unwrap();
+    writeln!(out, "    \"ncols\": {},", m.ncols()).unwrap();
     writeln!(
         out,
         "    \"col_ptr\": [{}],",
-        m.col_ptr
+        m.col_ptr()
             .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
@@ -141,7 +141,7 @@ fn dump_csc(out: &mut String, name: &str, m: &CscMatrix) {
     writeln!(
         out,
         "    \"row_ind\": [{}],",
-        m.row_ind
+        m.row_ind()
             .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
@@ -151,7 +151,7 @@ fn dump_csc(out: &mut String, name: &str, m: &CscMatrix) {
     writeln!(
         out,
         "    \"values\": [{}]",
-        m.values
+        m.values()
             .iter()
             .map(|v| f64_json(*v))
             .collect::<Vec<_>>()

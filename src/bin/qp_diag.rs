@@ -104,7 +104,7 @@ fn main() {
     // 元空間 KKT 残差を bench と同じ式で再計算
     let n = prob.num_vars;
     let qx = prob.q.mat_vec_mul(&result.solution).expect("Qx");
-    let aty: Vec<f64> = if prob.a.nrows > 0 && !result.dual_solution.is_empty() {
+    let aty: Vec<f64> = if prob.a.nrows() > 0 && !result.dual_solution.is_empty() {
         prob.a.transpose().mat_vec_mul(&result.dual_solution).expect("Aty")
     } else {
         vec![0.0; n]
@@ -151,8 +151,8 @@ fn main() {
             argmax_full = j;
         }
         let is_fx = lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < 1e-12;
-        let is_empty_col = prob.a.col_ptr.len() > j + 1
-            && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0;
+        let is_empty_col = prob.a.col_ptr().len() > j + 1
+            && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0;
         if is_fx { n_fx_skipped += 1; continue; }
         if is_empty_col { n_empty_skipped += 1; continue; }
         dfeas_abs = dfeas_abs.max(r);
@@ -195,8 +195,8 @@ fn main() {
     let j = argmax_componentwise;
     let (lb, ub) = prob.bounds[j];
     let ct_count: usize = (0..prob.num_constraints).filter(|&i| {
-        prob.a.col_ptr[j+1].saturating_sub(prob.a.col_ptr[j]) > 0
-        && (prob.a.col_ptr[j]..prob.a.col_ptr[j+1]).any(|k| prob.a.row_ind[k] == i)
+        prob.a.col_ptr()[j+1].saturating_sub(prob.a.col_ptr()[j]) > 0
+        && (prob.a.col_ptr()[j]..prob.a.col_ptr()[j+1]).any(|k| prob.a.row_ind()[k] == i)
     }).count();
     println!();
     println!("worst variable j={}: x={:.6e} bounds=({},{}) refs_in_A={}",
@@ -204,17 +204,17 @@ fn main() {
     println!("  qx_j={:.3e} c_j={:.3e} aty_j={:.3e} bound_contrib_j={:.3e}",
         qx[j], prob.c[j], aty[j], bound_contrib[j]);
     println!("  sum (residual)={:.3e}", qx[j] + prob.c[j] + aty[j] + bound_contrib[j]);
-    for k in prob.a.col_ptr[j]..prob.a.col_ptr[j + 1] {
-        let row = prob.a.row_ind[k];
-        let aij = prob.a.values[k];
+    for k in prob.a.col_ptr()[j]..prob.a.col_ptr()[j + 1] {
+        let row = prob.a.row_ind()[k];
+        let aij = prob.a.values()[k];
         let yi = result.dual_solution.get(row).copied().unwrap_or(0.0);
         let mut row_lhs = 0.0_f64;
         let mut row_nnz = 0usize;
         let mut row_terms = Vec::new();
         for col in 0..prob.num_vars {
-            for kk in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-                if prob.a.row_ind[kk] == row {
-                    let coeff = prob.a.values[kk];
+            for kk in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
+                if prob.a.row_ind()[kk] == row {
+                    let coeff = prob.a.values()[kk];
                     let xcol = result.solution.get(col).copied().unwrap_or(0.0);
                     row_lhs += coeff * xcol;
                     row_nnz += 1;
@@ -299,7 +299,7 @@ fn main() {
     println!("constraint mix: Eq={} Le={} Ge={}", n_eq, n_le, n_ge);
 
     // Q が 0 か
-    let q_max = prob.q.values.iter().fold(0.0_f64, |a: f64, &v: &f64| a.max(v.abs()));
+    let q_max = prob.q.values().iter().fold(0.0_f64, |a: f64, &v: &f64| a.max(v.abs()));
     println!("Q nonzeros={} max|Q|={:.3e} (Q=0 if {})",
-        prob.q.values.len(), q_max, prob.q.values.iter().all(|&v| v == 0.0));
+        prob.q.values().len(), q_max, prob.q.values().iter().all(|&v| v == 0.0));
 }

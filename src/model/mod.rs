@@ -818,7 +818,9 @@ fn map_lp_build_err(e: crate::error::SolverError) -> ModelError {
 fn map_qp_build_err(e: crate::qp::QpProblemError) -> ModelError {
     use crate::qp::QpProblemError;
     match e {
-        QpProblemError::NonFiniteCoefficient { .. } | QpProblemError::InvalidBounds { .. } => {
+        QpProblemError::NonFiniteCoefficient { .. }
+        | QpProblemError::InvalidBounds { .. }
+        | QpProblemError::TripletIndexOutOfBounds { .. } => {
             ModelError::InvalidInput(e.to_string())
         }
         QpProblemError::DimensionMismatch(_) => ModelError::Internal(e.to_string()),

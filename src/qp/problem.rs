@@ -35,6 +35,8 @@ pub enum QpProblemError {
     NonFiniteCoefficient { field: &'static str, index: usize },
     /// Invalid variable bound: NaN or lb > ub at the given index.
     InvalidBounds { index: usize, lb: f64, ub: f64 },
+    /// A triplet (row, col) index exceeds the matrix dimension.
+    TripletIndexOutOfBounds { constraint: usize, row: usize, col: usize, n: usize },
 }
 
 impl std::fmt::Display for QpProblemError {
@@ -46,6 +48,9 @@ impl std::fmt::Display for QpProblemError {
             }
             QpProblemError::InvalidBounds { index, lb, ub } => {
                 write!(f, "invalid bounds at index {}: lb={} > ub={} or NaN", index, lb, ub)
+            }
+            QpProblemError::TripletIndexOutOfBounds { constraint, row, col, n } => {
+                write!(f, "triplet index out of bounds in constraint {}: ({},{}) >= n={}", constraint, row, col, n)
             }
         }
     }
@@ -164,7 +169,8 @@ impl QpProblem {
     /// Set per-constraint quadratic matrices for QCQP, with validation.
     ///
     /// `qcs` must be either empty (pure QP) or have length equal to `num_constraints`.
-    /// All triplet values must be finite.
+    /// Each `QcqpMatrix` must have `n == num_vars`, finite values, and triplet indices
+    /// within `[0, n)`.
     pub fn set_quadratic_constraints(&mut self, qcs: Vec<QcqpMatrix>) -> Result<(), QpProblemError> {
         if !qcs.is_empty() && qcs.len() != self.num_constraints {
             return Err(QpProblemError::DimensionMismatch(format!(
@@ -173,11 +179,25 @@ impl QpProblem {
             )));
         }
         for (k, qc) in qcs.iter().enumerate() {
-            for &(_, _, v) in &qc.triplets {
+            if qc.n != self.num_vars {
+                return Err(QpProblemError::DimensionMismatch(format!(
+                    "quadratic_constraints[{}].n must be {}, got {}",
+                    k, self.num_vars, qc.n
+                )));
+            }
+            for &(row, col, v) in &qc.triplets {
                 if !v.is_finite() {
                     return Err(QpProblemError::NonFiniteCoefficient {
                         field: "quadratic_constraints",
                         index: k,
+                    });
+                }
+                if row >= qc.n || col >= qc.n {
+                    return Err(QpProblemError::TripletIndexOutOfBounds {
+                        constraint: k,
+                        row,
+                        col,
+                        n: qc.n,
                     });
                 }
             }
@@ -501,5 +521,75 @@ mod tests {
         qc.triplets.push((0, 0, 2.0));
         qc.triplets.push((1, 1, 3.0));
         assert!(prob.set_quadratic_constraints(vec![qc]).is_ok());
+    }
+
+    // --- sentinel: n mismatch rejected (no-op rewrite → FAIL) ---
+    #[test]
+    fn set_quadratic_constraints_n_mismatch_rejected() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        // num_vars=2, but QcqpMatrix.n=3 — must be rejected
+        let mut qc = QcqpMatrix::new(3);
+        qc.triplets.push((0, 0, 1.0));
+        let res = prob.set_quadratic_constraints(vec![qc]);
+        assert!(
+            matches!(res, Err(QpProblemError::DimensionMismatch(_))),
+            "n mismatch must be rejected"
+        );
+    }
+
+    // --- sentinel: OOB triplet row index rejected (no-op rewrite → FAIL) ---
+    #[test]
+    fn set_quadratic_constraints_triplet_row_oob_rejected() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets.push((2, 0, 1.0)); // row=2 >= n=2
+        let res = prob.set_quadratic_constraints(vec![qc]);
+        assert!(
+            matches!(res, Err(QpProblemError::TripletIndexOutOfBounds { row: 2, col: 0, n: 2, .. })),
+            "row OOB must be rejected"
+        );
+    }
+
+    // --- sentinel: OOB triplet col index rejected (no-op rewrite → FAIL) ---
+    #[test]
+    fn set_quadratic_constraints_triplet_col_oob_rejected() {
+        let mut prob = make_qp(
+            vec![1.0, 2.0], vec![5.0], vec![], vec![1.0, 1.0],
+            vec![(0.0, f64::INFINITY); 2],
+        ).unwrap();
+        let mut qc = QcqpMatrix::new(2);
+        qc.triplets.push((0, 5, 1.0)); // col=5 >= n=2
+        let res = prob.set_quadratic_constraints(vec![qc]);
+        assert!(
+            matches!(res, Err(QpProblemError::TripletIndexOutOfBounds { col: 5, n: 2, .. })),
+            "col OOB must be rejected"
+        );
+    }
+
+    // --- sentinel: CscMatrix accessor returns correct data (no-op rewrite → FAIL) ---
+    #[test]
+    fn csc_accessor_returns_correct_data() {
+        let rows = vec![0usize, 1];
+        let cols = vec![0usize, 1];
+        let vals = vec![3.0f64, 7.0];
+        let m = CscMatrix::from_triplets(&rows, &cols, &vals, 2, 2).unwrap();
+        assert_eq!(m.nrows(), 2);
+        assert_eq!(m.ncols(), 2);
+        assert_eq!(m.nnz(), 2);
+        assert_eq!(m.col_ptr().len(), 3);
+        assert_eq!(m.row_ind().len(), 2);
+        assert_eq!(m.values().len(), 2);
+        let (ri, vs) = m.get_column(0).unwrap();
+        assert_eq!(ri, &[0]);
+        assert_eq!(vs, &[3.0]);
+        let (ri, vs) = m.get_column(1).unwrap();
+        assert_eq!(ri, &[1]);
+        assert_eq!(vs, &[7.0]);
     }
 }

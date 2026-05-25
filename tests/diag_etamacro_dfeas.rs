@@ -48,7 +48,7 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
         if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
             continue; // FX
         }
-        if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
+        if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
             continue; // EmptyCol
         }
         let rc = reduced_costs[j];

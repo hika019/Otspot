@@ -589,8 +589,8 @@ fn max_constraint_violation(x: &[f64], prob: &otspot::problem::LpProblem) -> f64
     let a = &prob.a;
     let mut ax = vec![0.0f64; prob.num_constraints];
     for col in 0..prob.num_vars {
-        for ptr in a.col_ptr[col]..a.col_ptr[col + 1] {
-            ax[a.row_ind[ptr]] += a.values[ptr] * x[col];
+        for ptr in a.col_ptr()[col]..a.col_ptr()[col + 1] {
+            ax[a.row_ind()[ptr]] += a.values()[ptr] * x[col];
         }
     }
     (0..prob.num_constraints)

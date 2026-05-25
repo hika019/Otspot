@@ -21,7 +21,7 @@ fn pfeas_normalized(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64])
         return 0.0;
     }
     let mut ax = vec![0.0_f64; m];
-    for j in 0..x.len().min(a.ncols) {
+    for j in 0..x.len().min(a.ncols()) {
         if let Ok((rows, vals)) = a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
                 if row < m {

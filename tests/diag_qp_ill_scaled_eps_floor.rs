@@ -137,9 +137,9 @@ fn assert_orig_primal_residual_ok(problem: &QpProblem, x: &[f64]) {
         .map(|i| {
             let mut s = 0.0;
             for col in 0..problem.num_vars {
-                for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                    if problem.a.row_ind[k] == i {
-                        s += problem.a.values[k] * x[col];
+                for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
+                    if problem.a.row_ind()[k] == i {
+                        s += problem.a.values()[k] * x[col];
                     }
                 }
             }

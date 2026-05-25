@@ -34,9 +34,9 @@ fn build_clarabel(
     let total_rows = m + n_lb + n_ub;
     let mut b_clar = vec![0.0_f64; total_rows];
     for j in 0..n {
-        for ptr in prob.a.col_ptr[j]..prob.a.col_ptr[j + 1] {
-            let orig_row = prob.a.row_ind[ptr];
-            let val = prob.a.values[ptr];
+        for ptr in prob.a.col_ptr()[j]..prob.a.col_ptr()[j + 1] {
+            let orig_row = prob.a.row_ind()[ptr];
+            let val = prob.a.values()[ptr];
             let new_row = row_pos[orig_row];
             match prob.constraint_types[orig_row] {
                 ConstraintType::Ge => triplets.push((new_row, j, -val)),
@@ -70,9 +70,9 @@ fn build_clarabel(
 
     let mut p_triplets: Vec<(usize, usize, f64)> = Vec::new();
     for j in 0..n {
-        for ptr in prob.q.col_ptr[j]..prob.q.col_ptr[j + 1] {
-            let i = prob.q.row_ind[ptr];
-            if i <= j { p_triplets.push((i, j, prob.q.values[ptr])); }
+        for ptr in prob.q.col_ptr()[j]..prob.q.col_ptr()[j + 1] {
+            let i = prob.q.row_ind()[ptr];
+            if i <= j { p_triplets.push((i, j, prob.q.values()[ptr])); }
         }
     }
     p_triplets.sort_by_key(|&(r, c, _)| (c, r));
@@ -126,9 +126,9 @@ fn max_viol_dd(prob: &QpProblem, x: &[f64]) -> f64 {
     let mut ax = vec![TwoFloat::from(0.0); m];
     for col in 0..prob.num_vars {
         let xc = x[col];
-        for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-            let r = prob.a.row_ind[k];
-            ax[r] = ax[r] + TwoFloat::new_mul(prob.a.values[k], xc);
+        for k in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
+            let r = prob.a.row_ind()[k];
+            ax[r] = ax[r] + TwoFloat::new_mul(prob.a.values()[k], xc);
         }
     }
     let mut mv = 0.0_f64;
@@ -164,8 +164,8 @@ fn aat_mul(prob: &QpProblem, v: &[f64]) -> Vec<f64> {
     let mut w = vec![0.0_f64; n];
     for col in 0..n {
         let mut acc = 0.0;
-        for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-            acc += prob.a.values[k] * v[prob.a.row_ind[k]];
+        for k in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
+            acc += prob.a.values()[k] * v[prob.a.row_ind()[k]];
         }
         w[col] = acc;
     }
@@ -173,8 +173,8 @@ fn aat_mul(prob: &QpProblem, v: &[f64]) -> Vec<f64> {
     let mut y = vec![0.0_f64; m];
     for col in 0..n {
         let wc = w[col];
-        for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
-            y[prob.a.row_ind[k]] += prob.a.values[k] * wc;
+        for k in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
+            y[prob.a.row_ind()[k]] += prob.a.values()[k] * wc;
         }
     }
     y

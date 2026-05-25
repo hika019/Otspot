@@ -62,9 +62,9 @@ fn build_clarabel(
     let mut b_clar = vec![0.0_f64; total_rows];
 
     for j in 0..n {
-        for ptr in prob.a.col_ptr[j]..prob.a.col_ptr[j + 1] {
-            let orig_row = prob.a.row_ind[ptr];
-            let val = prob.a.values[ptr];
+        for ptr in prob.a.col_ptr()[j]..prob.a.col_ptr()[j + 1] {
+            let orig_row = prob.a.row_ind()[ptr];
+            let val = prob.a.values()[ptr];
             let new_row = row_pos[orig_row];
             let ct = prob.constraint_types[orig_row];
             match ct {
@@ -118,10 +118,10 @@ fn build_clarabel(
     // P upper triangular (Clarabel 規約)
     let mut p_triplets: Vec<(usize, usize, f64)> = Vec::new();
     for j in 0..n {
-        for ptr in prob.q.col_ptr[j]..prob.q.col_ptr[j + 1] {
-            let i = prob.q.row_ind[ptr];
+        for ptr in prob.q.col_ptr()[j]..prob.q.col_ptr()[j + 1] {
+            let i = prob.q.row_ind()[ptr];
             if i <= j {
-                p_triplets.push((i, j, prob.q.values[ptr]));
+                p_triplets.push((i, j, prob.q.values()[ptr]));
             }
         }
     }

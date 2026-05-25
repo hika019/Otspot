@@ -50,7 +50,7 @@ fn assert_optimal_objective(name: &str, res: &SolverResult, prob: &QpProblem, ex
 /// 任意の制約 (A, b, cts) について complementarity 残差 max を成分相対化で返す。
 /// scale: |y_i| と (Ax 第 i 成分の大きさ + |b_i|) の積で正規化。
 fn ineq_complementarity_rel(prob: &QpProblem, x: &[f64], y: &[f64]) -> f64 {
-    if prob.a.nrows == 0 || y.is_empty() {
+    if prob.a.nrows() == 0 || y.is_empty() {
         return 0.0;
     }
     let ax = prob.a.mat_vec_mul(x).expect("Ax");

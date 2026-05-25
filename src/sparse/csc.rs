@@ -13,17 +13,11 @@ use crate::error::SolverError;
 /// 各列の行インデックスは昇順にソートされている。
 #[derive(Debug, Clone)]
 pub struct CscMatrix {
-    /// 列ポインタ配列（長さ: ncols + 1）
-    /// `col_ptr[j]` は列 j の最初の非ゼロ要素の位置を示す
-    pub col_ptr: Vec<usize>,
-    /// 各非ゼロ要素の行インデックス
-    pub row_ind: Vec<usize>,
-    /// 各非ゼロ要素の値
-    pub values: Vec<f64>,
-    /// 行数
-    pub nrows: usize,
-    /// 列数
-    pub ncols: usize,
+    pub(crate) col_ptr: Vec<usize>,
+    pub(crate) row_ind: Vec<usize>,
+    pub(crate) values: Vec<f64>,
+    pub(crate) nrows: usize,
+    pub(crate) ncols: usize,
 }
 
 impl CscMatrix {
@@ -47,6 +41,31 @@ impl CscMatrix {
     /// 非ゼロ要素の総数を返す
     pub fn nnz(&self) -> usize {
         self.values.len()
+    }
+
+    /// Returns the column pointer array (length `ncols + 1`).
+    pub fn col_ptr(&self) -> &[usize] {
+        &self.col_ptr
+    }
+
+    /// Returns the row index array for non-zero entries.
+    pub fn row_ind(&self) -> &[usize] {
+        &self.row_ind
+    }
+
+    /// Returns the value array for non-zero entries.
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+
+    /// Returns the number of rows.
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Returns the number of columns.
+    pub fn ncols(&self) -> usize {
+        self.ncols
     }
 
     /// 各行の∞ノルム（行ごとの最大絶対値）を一括計算する: O(nnz)
