@@ -1,13 +1,27 @@
-[package]
-name = "otspot"
-version = "0.1.1"
+[workspace]
+resolver = "2"
+members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-only"
+repository = "https://github.com/hika019/otspot"
+homepage = "https://github.com/hika019/otspot"
+
+[workspace.dependencies]
+otspot-core = { path = "otspot-core", version = "0.2.0" }
+otspot-io = { path = "otspot-io", version = "0.2.0" }
+otspot-model = { path = "otspot-model", version = "0.2.0" }
+
+[package]
+name = "otspot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Mathematical optimization solver — LP (Revised Simplex) and QP (Interior Point / Mehrotra predictor-corrector)"
 readme = "README.md"
 keywords = ["linear-programming", "quadratic", "interior-point", "simplex", "optimization"]
-repository = "https://github.com/hika019/otspot"
-homepage = "https://github.com/hika019/otspot"
 categories = ["science", "algorithms", "mathematics"]
 
 # crates.io 公開パッケージはライブラリのみ。data/ 等は .gitignore で自動除外。
@@ -15,7 +29,6 @@ categories = ["science", "algorithms", "mathematics"]
 # インラインテスト / dev 設定) を除外する。
 exclude = [
     "/src/bin",
-    "/src/test_kkt.rs",
     "/tests",
     "/benches",
     "/examples",
@@ -26,6 +39,7 @@ exclude = [
     "/Dockerfile.dev",
     "/.dockerignore",
     "/cspell.json",
+    "otspot-core",
     "**/tests",
     "**/tests.rs",
     "**/tests_*.rs",
@@ -36,24 +50,22 @@ default = []
 # `parallel` 機能フラグは後方互換のため残置 (no-op)。rayon は必須依存に昇格
 # (#5 Phase 2 multi-start で常時 ThreadPool が必要)。
 # 既存 `#[cfg(feature="parallel")]` 配下の heavy parallel テストは opt-in 維持。
-parallel = []
+parallel = ["otspot-core/parallel"]
 
 [dependencies]
-faer = "0.24.0"
-log = "0.4"
-mimalloc = { version = "0.1", default-features = false }
-rayon = "1"
-twofloat = "0.8"
+otspot-core = { workspace = true }
+otspot-io = { workspace = true }
+otspot-model = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.10.0"
 clarabel = "0.11"
 tempfile = "3"
-
-[[bin]]
-name = "mip_speed_bench"
-path = "src/bin/mip_speed_bench/main.rs"
+faer = "0.24.0"
+dyn-stack = "0.13.2"
+twofloat = "0.8"
+otspot-dev = { path = "otspot-dev" }
 
 [[bench]]
 name = "scaling_pricing"

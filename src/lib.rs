@@ -29,205 +29,48 @@
 //! let result = otspot::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
+//!
+//! インラインモデリング API:
+//!
+//! ```rust
+//! use otspot::model::{Model, constraint};
+//!
+//! let mut model = Model::new("example");
+//! let x = model.add_var("x", 0.0, 10.0);
+//! let y = model.add_var("y", 0.0, 10.0);
+//! model.add_constraint(constraint!((x + y) <= 8.0));
+//! model.minimize(2.0 * x + y);
+//! let result = model.solve().unwrap();
+//! assert!((result[x] + result[y] - 0.0).abs() < 1e-4);
+//! ```
+//!
+//! MPS 文字列から LP をパースして解く:
+//!
+//! ```rust
+//! use otspot::io::mps::parse_mps;
+//!
+//! let mps = "NAME  test\nROWS\n N obj\n L c1\nCOLUMNS\n x1 obj 1.0 c1 1.0\nRHS\n rhs c1 5.0\nENDATA\n";
+//! let prob = parse_mps(mps).unwrap();
+//! let result = otspot::solve(&prob);
+//! assert_eq!(prob.num_vars, 1);
+//! ```
 
-pub mod error;
-pub use error::SolverError;
-#[doc(hidden)]
-pub mod bench_utils;
-pub(crate) mod presolve;
-pub mod sparse;
-pub mod problem;
-pub(crate) mod simplex;
-pub mod io;
-pub(crate) mod basis;
-pub mod model;
-pub mod tolerances;
-pub mod options;
-pub use options::{
-    BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, MipBranching, MipConfig,
-    SolverOptions, Tolerance, WarmStartBasis,
+pub use otspot_core::*;
+
+/// Algebraic modeling API (Model, Variable, Expression, Constraint, constraint! macro).
+pub use otspot_model::{
+    Model, ModelError, ModelResult, SolutionProof, SolveError,
+    Constraint, ConstraintSense, Expression, VarKind, Variable,
 };
-pub mod qp;
-pub mod mip;
-pub mod lp;
-pub mod screening;
-pub(crate) mod linalg;
 
-#[cfg(test)]
-pub(crate) mod test_kkt;
+/// `constraint!` macro for building constraints with natural syntax.
+pub use otspot_model::constraint;
 
-/// Thread-local peak-allocation tracker for memory sentinel tests.
-///
-/// Wraps the system allocator and records, per-thread, the maximum net bytes
-/// concurrently live above a caller-defined baseline.  Using thread-local
-/// storage means tests running in parallel on different threads do not
-/// interfere with each other's measurements.
-///
-/// Usage in a test:
-/// ```ignore
-/// crate::peak_alloc::begin();
-/// do_heavy_work();
-/// let peak = crate::peak_alloc::peak_bytes();
-/// assert!(peak <= MAX_BYTES, "peak {peak} exceeds limit");
-/// ```
-#[cfg(test)]
-pub(crate) mod peak_alloc {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    thread_local! {
-        /// Net bytes allocated on this thread (alloc - dealloc).
-        static CURRENT: Cell<isize> = const { Cell::new(0) };
-        /// Baseline captured by `begin()`; delta is measured above this.
-        static BASELINE: Cell<isize> = const { Cell::new(0) };
-        /// Maximum (CURRENT - BASELINE) observed since last `begin()`.
-        static PEAK_DELTA: Cell<isize> = const { Cell::new(0) };
-    }
-
-    /// Record the current allocation level as the baseline for this thread.
-    pub fn begin() {
-        CURRENT.with(|c| BASELINE.with(|b| b.set(c.get())));
-        PEAK_DELTA.with(|p| p.set(0));
-    }
-
-    /// Peak bytes allocated above the baseline captured by `begin()`.
-    pub fn peak_bytes() -> usize {
-        PEAK_DELTA.with(|p| p.get().max(0) as usize)
-    }
-
-    /// Net live bytes above the baseline captured by `begin()`, right now
-    /// (not the peak). Used by accumulation sentinels to assert that memory
-    /// returns to baseline after each unit of work is dropped.
-    pub fn current_bytes() -> isize {
-        CURRENT.with(|c| c.get()) - BASELINE.with(|b| b.get())
-    }
-
-    #[inline]
-    fn update(delta: isize) {
-        CURRENT.with(|c| {
-            let new = c.get() + delta;
-            c.set(new);
-            let above = new - BASELINE.with(|b| b.get());
-            PEAK_DELTA.with(|p| {
-                if above > p.get() {
-                    p.set(above);
-                }
-            });
-        });
-    }
-
-    pub struct TrackingAlloc;
-
-    unsafe impl GlobalAlloc for TrackingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let ptr = System.alloc(layout);
-            if !ptr.is_null() {
-                update(layout.size() as isize);
-            }
-            ptr
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let ptr = System.alloc_zeroed(layout);
-            if !ptr.is_null() {
-                update(layout.size() as isize);
-            }
-            ptr
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            System.dealloc(ptr, layout);
-            update(-(layout.size() as isize));
-        }
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let new_ptr = System.realloc(ptr, layout, new_size);
-            if !new_ptr.is_null() {
-                update(new_size as isize - layout.size() as isize);
-            }
-            new_ptr
-        }
-    }
+/// `model` submodule — re-exports the full otspot-model API.
+pub mod model {
+    pub use otspot_model::*;
 }
 
-#[cfg(test)]
-#[global_allocator]
-static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
+/// File I/O — MPS, QPS, and QPLIB format parsers.
+pub use otspot_io as io;
 
-// --- re-export: ユーザーが最も使う型を最短パスで ---
-pub use sparse::CscMatrix;
-pub use problem::{SolveRoute, SolveStats, SolveStatus};
-pub use model::{Model, ModelError, ModelResult, SolutionProof, VarKind};
-pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
-pub use mip::{
-    solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
-    MipProblemError, MipStats, MiqpProblem,
-};
-pub use lp::solve_lp_with;
-pub use simplex::{solve, solve_with};
-
-/// Re-export of the BFRT (Bound-Flipping Ratio Test) primitive.
-/// Public so integration sentinels in `tests/diag_simplex_bound_flip.rs`
-/// can exercise the ratio-test step-size effect without forcing private
-/// module exposure for the whole `simplex` tree.
-pub mod bound_flip {
-    pub use crate::simplex::dual_advanced::bound_flip::{
-        bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations,
-        BfrtResult, ColBound,
-    };
-}
-pub use presolve::{
-    run_presolve_with_flags, run_qp_presolve_phase1, run_qp_presolve_phase2,
-    PresolveFlags, PresolveStatus,
-};
-pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
-
-/// RAII guard that disables a production sentinel for the duration of its lifetime.
-///
-/// On construction: calls `enable` to disable the sentinel.
-/// On drop: calls `restore` to re-enable the sentinel.
-/// Panic-safe: `restore` runs even if the guarded closure panics.
-///
-/// Both `enable` and `restore` are `Fn()` so they may be called from `Drop`.
-pub(crate) struct ScopedDisable<D: Fn()> {
-    restore: D,
-}
-
-impl<D: Fn()> ScopedDisable<D> {
-    pub(crate) fn new<E: Fn()>(enable: E, restore: D) -> Self {
-        enable();
-        ScopedDisable { restore }
-    }
-}
-
-impl<D: Fn()> Drop for ScopedDisable<D> {
-    fn drop(&mut self) {
-        (self.restore)();
-    }
-}
-
-/// Apply the LP primal guard to a solver result.
-///
-/// Exposed for integration-test sentinel load-bearing proofs. Production code
-/// uses `simplex::entry::guard_lp_optimal` internally; this wrapper makes it
-/// reachable from `tests/` without re-exporting the whole `simplex` tree.
-#[doc(hidden)]
-pub fn apply_lp_primal_guard(
-    result: crate::problem::SolverResult,
-    problem: &crate::problem::LpProblem,
-) -> crate::problem::SolverResult {
-    crate::simplex::guard_lp_optimal(result, problem)
-}
-
-/// Run `f` with the LP primal guard bypassed (thread-local, panic-safe).
-///
-/// Use in integration tests as a no-op scope guard: pass corrupt data through
-/// the guard while disabled and assert it is NOT demoted to `NumericalError`.
-/// The load-bearing evidence lives in the paired test that does NOT disable —
-/// removing the guard body would cause that test to FAIL.
-///
-/// Thread-safe: affects only the current thread via `thread_local!` state.
-#[doc(hidden)]
-pub fn with_lp_guard_disabled<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    crate::simplex::with_lp_guard_disabled(f)
-}

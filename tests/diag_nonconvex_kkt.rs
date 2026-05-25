@@ -31,7 +31,7 @@
 //! - `kkt_sign_convention_mini_qp`: 解析解持ち convex mini QP で kkt < 1e-6 を
 //!   assert。符号規約 (`lb_dual / ub_dual / y / Q*x` の組合せ) を独立検証。
 
-use otspot::bench_utils::compute_qp_kkt_max;
+use otspot_dev::bench_utils::compute_qp_kkt_max;
 use otspot::io::qplib::{parse_qplib, QplibProblem};
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus};

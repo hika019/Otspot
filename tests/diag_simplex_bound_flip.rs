@@ -20,7 +20,7 @@
 //! lets us prove the primitive's pivot-reduction effect on representative
 //! bound-rich data **today**, while production integration matures.
 
-use otspot::bound_flip::{
+use otspot_core::bound_flip::{
     bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations, BfrtResult, ColBound,
 };
 

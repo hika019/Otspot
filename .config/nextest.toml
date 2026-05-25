@@ -41,5 +41,5 @@ threads-required = "num-cpus"
 qplib-memory-heavy = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = "test(io::qplib::tests::test_parse_existing_qplib_files_regression) + test(io::qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(io::qplib::tests::test_parse_sweep_no_memory_accumulation) + test(io::qplib::tests::test_memory_probe_large_dcl_files) + test(io::qplib::tests::test_memory_sentinel_qplib8683_qcqp) + test(io::qplib::tests::test_qcqp_sparse_init_memory_bounded)"
+filter = "test(qplib::tests::test_parse_existing_qplib_files_regression) + test(qplib::tests::test_memory_sentinel_no_double_hashmap_qplib8500) + test(qplib::tests::test_parse_sweep_no_memory_accumulation) + test(qplib::tests::test_memory_probe_large_dcl_files) + test(qplib::tests::test_memory_sentinel_qplib8683_qcqp) + test(qplib::tests::test_qcqp_sparse_init_memory_bounded)"
 test-group = "qplib-memory-heavy"

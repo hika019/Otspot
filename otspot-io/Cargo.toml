@@ -1,0 +1,11 @@
+[package]
+name = "otspot-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "File I/O (MPS/QPS/QPLIB) for the otspot solver"
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+otspot-core = { workspace = true }
