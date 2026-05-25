@@ -11,6 +11,7 @@ mod psd_nonconvex;
 mod qcqp_guard;
 mod smoke;
 mod status_dfeas;
+mod validate_wiring;
 
 const EPS: f64 = 1e-2;
 

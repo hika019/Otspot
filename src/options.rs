@@ -1,12 +1,12 @@
-//! ソルバー設定パラメータモジュール
+//! Solver configuration parameters.
 //!
-//! [`SolverOptions`] を通じてシンプレックス法の動作を制御する。
-//! 許容誤差・反復上限・リファクタリング頻度などを一元管理する。
+//! [`SolverOptions`] controls simplex and IPM solver behaviour: tolerances,
+//! iteration limits, refactorisation frequency, and algorithm selection.
 //!
-//! ## ソルバー固有オプション
+//! ## Solver-specific options
 //!
-//! ソルバー固有パラメータは各サブ構造体で管理する:
-//! - IPM: [`SolverOptions::ipm`] ([`IpmOptions`])
+//! IPM-specific parameters live in [`IpmOptions`], accessed via
+//! [`SolverOptions::ipm`].
 
 use crate::tolerances::*;
 use std::sync::{
@@ -15,16 +15,41 @@ use std::sync::{
 };
 use std::time::Instant;
 
-/// Dual simplex の leaving (基底脱出) 戦略。
+// ---- Error type -------------------------------------------------------
+
+/// Error returned when option values fail validation.
 ///
-/// `MostInfeasible`: 最も負の x_B[i] を選ぶ素朴規則 (Dantzig 流)。安定だが
-/// 大規模問題で iter が膨らみがち。
+/// Produced by [`IpmOptions::validate`] and [`SolverOptions::validate`], and
+/// by builder methods (`with_*`) that validate on assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionsError {
+    /// Name of the offending field (e.g. `"ipm.eps"`).
+    pub field: &'static str,
+    /// Human-readable rejection reason.
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for OptionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid option `{}`: {}", self.field, self.reason)
+    }
+}
+
+impl std::error::Error for OptionsError {}
+
+// ---- Enum / simple struct types ---------------------------------------
+
+/// Dual simplex leaving (depart) strategy.
 ///
-/// `SteepestEdge`: Forrest-Goldfarb 1992 の Dual Steepest Edge。各行に重み
-/// γ_i = ||(B^{-1})_{i,:}||² を保持し score = x_B[i]² / γ_i を最大化する。
-/// HiGHS/CPLEX で 3-10x の標準的高速化、ただし 1 iter あたり追加 FTRAN 1 回。
+/// `MostInfeasible`: select the most negative x_B[i] (Dantzig rule).
+/// Stable but inflates iteration count on large problems.
 ///
-/// default は `MostInfeasible` を維持 (A/B 比較容易化 + 既存挙動保護)。
+/// `SteepestEdge`: Forrest-Goldfarb 1992 Dual Steepest Edge.
+/// Maintains weight γ_i = ||(B^{-1})_{i,:}||² and maximises
+/// score = x_B[i]² / γ_i.  Typical 3-10× speed-up (HiGHS/CPLEX) at the cost
+/// of one extra FTRAN per iteration.
+///
+/// Default: `MostInfeasible` (easy A/B comparison; preserves existing behaviour).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DualPricing {
@@ -33,48 +58,47 @@ pub enum DualPricing {
     SteepestEdge,
 }
 
-/// シンプレックス法の選択
+/// Simplex algorithm selection.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SimplexMethod {
-    /// デフォルト: warm-startの有無で自動選択
+    /// Auto-select based on warm-start availability.
     #[default]
     Auto,
-    /// 強制的にPrimal Simplex
+    /// Force Primal Simplex.
     Primal,
-    /// 強制的にDual Simplex
+    /// Force Dual Simplex.
     Dual,
-    /// 産業品質Dual Simplex（dual_advanced/モジュール）
+    /// Production-quality Dual Simplex (`dual_advanced` module).
     DualAdvanced,
 }
 
-/// warm-start用の基底情報
+/// Basis information for warm-starting simplex.
 ///
-/// 前の最適解から基底情報を保持し、次のLP求解時にDual Simplexの
-/// 初期基底として使用する。SQP統合時の主要インターフェース。
+/// Carries basis indices and primal values from a previous solve. Used as the
+/// initial basis for Dual Simplex in SQP integration.
 #[derive(Debug, Clone)]
 pub struct WarmStartBasis {
-    /// 基底変数のインデックスリスト（標準形の列番号、長さ = m）
+    /// Basis variable indices (standard-form column numbers, length = m).
     pub basis: Vec<usize>,
-    /// 基底変数の値 x_B（長さ = m）
-    /// warm-start時、新しいRHSで再計算されるため、古い値でもよい
+    /// Basis variable values x_B (length = m). Stale values are acceptable;
+    /// they are recomputed from the new RHS on warm-start entry.
     pub x_b: Vec<f64>,
 }
 
-/// QP IP-PMM の内部 interior point 引継ぎ情報。
+/// QP IP-PMM interior-point warm-start data.
 ///
-/// 前ノードの最適 (x, y, μ) を次ノードの central path 出発点として使う。
-/// LP の [`WarmStartBasis`] は basis index、QP は central path 上の点で
-/// 共存しないため別 struct で持つ。
+/// Passes the optimal (x, y, μ) from a parent B&B node as the starting point
+/// on the central path for the child node.  LP warm-start uses basis indices
+/// ([`WarmStartBasis`]); QP warm-start uses a central-path point.
 ///
-/// 規約:
-/// - `x` 長さ = n (primal)
-/// - `y` 長さ = m (元制約 dual、ユーザー符号規約。Ge は内部で反転される)
-/// - `mu` = sᵀy/m_ineq に相当する barrier parameter。
-///   再帰的 B&B では parent の final μ をそのまま渡す想定。
+/// Convention:
+/// - `x`: length = n (primal)
+/// - `y`: length = m (dual, user sign convention; Ge constraints inverted internally)
+/// - `mu`: barrier parameter ≈ sᵀy / m_ineq of the parent final iterate
 ///
-/// 入口で interior 補正される (μ floor / x bound margin / y positivity)
-/// ため境界値や 0 を渡しても安全に IPM が起動する。
+/// Interior corrections (μ floor / x bound margin / y positivity) are applied
+/// on entry so boundary or zero values are safe to pass.
 #[derive(Debug, Clone)]
 pub struct QpWarmStart {
     pub x: Vec<f64>,
@@ -82,20 +106,16 @@ pub struct QpWarmStart {
     pub mu: f64,
 }
 
-/// LP 用拡張 warm start (#15 速度改善 F1)。
+/// Extended LP warm-start.
 ///
-/// 既存 [`WarmStartBasis`] は (basis index, x_B) のみ。LP の Simplex/Dual 入口で
-/// 外部 solver 由来の (x, y, basis) を受け取って simplex に着地させるための
-/// 上位構造体。
+/// Superset of [`WarmStartBasis`]: accepts (x, y, basis) from an external
+/// solver and lands simplex at that point.  Takes priority over `warm_start`.
 ///
-/// 規約:
-/// - `basis` 長さ = m_ext (standard form 行数)、各値 < n_total (standard form 列数)。
-///   一致しない場合は silent SKIP せず eprintln + drop。
-/// - `x_orig` 長さ = problem.num_vars (元変数空間)
-/// - `y_orig` 長さ = problem.num_constraints (元制約空間、ユーザー符号)
-///
-/// `basis` のみ与えれば既存 dual simplex warm start と同等。`x_orig`/`y_orig` は
-/// 将来 IPM crossover や presolve 整合に使う slot。
+/// Convention:
+/// - `basis`: length = m_ext (standard-form rows), each value < n_total.
+///   Size mismatch: logged and dropped (not silently ignored).
+/// - `x_orig`: length = problem.num_vars (original variable space)
+/// - `y_orig`: length = problem.num_constraints (original constraint space, user sign)
 #[derive(Debug, Clone)]
 pub struct LpWarmStart {
     pub basis: Vec<usize>,
@@ -103,96 +123,77 @@ pub struct LpWarmStart {
     pub y_orig: Option<Vec<f64>>,
 }
 
-/// Multi-start サンプリング戦略 (#5 Phase 2)。
+/// Multi-start sampling strategy.
 ///
-/// IPM は inertia 補正下で「最寄り KKT 点」へ収束するため、非凸 QP では
-/// 出発点を変えると到達する local optimum が変わる。出発点生成方法の選択。
+/// IPM converges to the nearest KKT point under inertia correction, so
+/// different starting points can reach different local optima on non-convex QPs.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartStrategy {
-    /// 各変数を box bounds 内で独立一様サンプリング (LCG)。
+    /// Independent uniform sampling within box bounds (LCG).
     RandomBox,
-    /// Latin Hypercube Sampling: 各次元を `n_starts` strata に分割し列ごと permutation。
-    /// box 全域被覆性が pure random より高い。
+    /// Latin Hypercube Sampling: partition each dimension into `n_starts`
+    /// strata and permute per column.  Better global coverage than pure random.
     LatinHypercube,
 }
 
-/// Multi-start local search (#5 Phase 2) **user-facing** config。
+/// Multi-start local search user-facing config.
 ///
-/// `n_starts` 個の初期点で IPM を解き、最良の objective を採用する。
-/// 非凸 QP の脱出率向上 + Phase 3 spatial B&B の上界 (incumbent) 供給。
+/// Solves `n_starts` independent IPM problems from different starting points
+/// and returns the best objective.  Improves escape rate on non-convex QPs
+/// and supplies incumbents for spatial B&B.
 ///
-/// **user 指定 (pub field、explicit input)**:
-/// - `n_starts`: 探索並列度 (大域最適 hit 確率に直結)
-/// - `seed`: 再現性 (同 seed = 同 random init = 同 best)
-/// - `strategy`: 探索戦略 (RandomBox / LatinHypercube)
+/// **User-controlled (pub fields):**
+/// - `n_starts`: parallelism / hit probability
+/// - `seed`: reproducibility (`0` is internally clamped to 1 to avoid LCG lock)
+/// - `strategy`: sampling strategy
 ///
-/// **内部勝手に決める (user に見せない)**:
-/// - 乱数 algorithm (LCG 1664525/1013904223)
-/// - 無限境界のサンプリング半径 (`MULTISTART_UNBOUNDED_RANGE = 10.0`)
-/// - thread 並列度 (`SolverOptions::threads` から `min(n_starts, threads)` 自動分配)
-/// - 各 inner solve の `threads = 1` 強制 (faer 多重並列化を抑止)
-///
-/// 規約:
-/// - `n_starts == 1` は cold solve 1 回のみ (= 既存挙動)
-/// - `n_starts >= 2` で start #0 = cold、#1..#n_starts = random initial (warm_start_qp.x 注入)
-/// - 全 start で deadline を共有 (timeout_secs / deadline は最初に固定)
+/// `n_starts == 1`: single cold solve (existing behaviour).
+/// `n_starts >= 2`: start #0 = cold, #1..n = random (warm_start_qp.x injected).
+/// All starts share the same deadline.
 #[derive(Debug, Clone)]
 pub struct MultiStartConfig {
-    /// 初期点数 (cold #0 + random #1..#n_starts)。1 で multistart 無効化、
-    /// 2 以上で並列 escape 探索。default=1 (= 既存挙動)。
+    /// Number of starting points.  1 disables multi-start.  Default = 1.
     pub n_starts: usize,
-    /// 乱数 seed。default=`DEFAULT_MULTISTART_SEED` (= 0xC0FFEE_DEADBEEF) で
-    /// deterministic test 環境を保護。bench で variance 取るときは user が変える。
-    /// `0` は内部で 1 に補正 (LCG state=0 固着回避)。
+    /// Random seed.  Default = [`DEFAULT_MULTISTART_SEED`].
     pub seed: u64,
-    /// サンプリング戦略。default=`RandomBox` (= 各次元独立一様)。
+    /// Sampling strategy.  Default = `RandomBox`.
     pub strategy: StartStrategy,
 }
 
-/// `MultiStartConfig::seed` の default。固定値で deterministic test を保護。
-/// magic 根拠: 任意の非零値で良い。0xC0FFEE_DEADBEEF は識別性のためのフォーク値。
+/// Default seed for [`MultiStartConfig`].  Fixed non-zero value for
+/// deterministic test environments.
 pub const DEFAULT_MULTISTART_SEED: u64 = 0x_00C0_FFEE_DEAD_BEEF;
 
-/// 分枝戦略 (#6 Phase 3 spatial B&B)。
+/// Branching strategy for spatial B&B.
 ///
-/// `MaxViolation`: 現 box midpoint から x* が最も離れた連続変数を選び、x*[j] で
-/// 2 子に分割する。Phase 3 唯一の戦略。Phase 4 以降に strong branching 追加予定。
+/// `MaxViolation`: branch on the variable whose x* deviates most from the
+/// box midpoint, splitting at x*[j].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchingStrategy {
     MaxViolation,
 }
 
-/// `GlobalOptimizationConfig` defaults。
+/// Defaults for [`GlobalOptimizationConfig`].
 ///
-/// - `DEFAULT_GLOBAL_GAP_TOL = 1e-3`: 相対 ε-optimal gap。Phase 3 (interval lower
-///   bound) は緩い下界しか出ないため 1e-6 級まで詰めると node 爆発。Phase 4 (α-BB)
-///   で 1e-6 へ tighten 想定。
-/// - `DEFAULT_GLOBAL_MAX_DEPTH = 20`: tree depth 上限。2^20 ≈ 100 万 node 安全装置。
-/// - `DEFAULT_GLOBAL_MAX_NODES = 10_000`: 探索 node 上限。Phase 3 は 1 node ≈ 1 IPM
-///   solve なので n=50 で 10k node ≈ wall 数十秒の budget。
+/// - `DEFAULT_GLOBAL_GAP_TOL = 1e-3`: Phase 3 interval-arithmetic bounds are
+///   loose; tightening to 1e-6 causes node explosion.  Phase 4 (α-BB) can tighten.
+/// - `DEFAULT_GLOBAL_MAX_DEPTH = 20`: tree depth cap (2^20 ≈ 1 M nodes).
+/// - `DEFAULT_GLOBAL_MAX_NODES = 10_000`: node budget (~1 IPM solve per node).
 pub const DEFAULT_GLOBAL_GAP_TOL: f64 = 1e-3;
 pub const DEFAULT_GLOBAL_MAX_DEPTH: usize = 20;
 pub const DEFAULT_GLOBAL_MAX_NODES: usize = 10_000;
 
-/// Spatial Branch-and-Bound 設定 (#6 / #7 非凸 QP 大域最適化)。
+/// Spatial Branch-and-Bound config for global QP optimisation.
 ///
-/// **user 指定** ε-optimal global solve のパラメータ。`SolverOptions::global_optimization`
-/// に注入し、`solve_qp_global` から参照される。`solve_qp_with` の dispatch 対象には**ならない**
-/// (= 明示呼び出し)。誤って global path に倒すと既存 QP user の wall が桁違いに増える
-/// リスクを抑える。
+/// Set [`SolverOptions::global_optimization`] and call `solve_qp_global`
+/// explicitly.  `solve_qp_with` does **not** dispatch to this path (prevents
+/// accidental wall-time blow-up for existing users).
 ///
-/// 規約:
-/// - `gap_tol > 0`: 相対 gap (= |UB - LB| / max(1, |UB|))
-/// - `max_depth >= 1`: 0 は root 1 回のみ
-/// - `max_nodes >= 1`: 0 は root も解かない
-/// - `use_alpha_bb`: true で Phase 4 α-BB underestimator を下界に使う (default)。
-///   false にすると Phase 3 の interval-arithmetic bound に戻す (退化/比較用)。
-/// - `use_mccormick`: true で Phase 5 McCormick envelope lifted LP relaxation を下界に
-///   追加する (default false: bilinear-rich 問題で α-BB より tight な lb を与えるが、
-///   node あたり 1 LP solve overhead が乗るため opt-in)。caller は α-BB / interval と
-///   `max` を取って統合する。
+/// Rules:
+/// - `gap_tol > 0`: relative gap = |UB − LB| / max(1, |UB|)
+/// - `max_depth >= 1`, `max_nodes >= 1`
 #[derive(Debug, Clone)]
 pub struct GlobalOptimizationConfig {
     pub gap_tol: f64,
@@ -226,41 +227,36 @@ impl Default for MultiStartConfig {
     }
 }
 
-/// MILP/MIQP 分枝変数選択戦略 (#14)。
+/// MILP/MIQP branching variable selection strategy.
 ///
-/// `MostFractional`: 整数制約変数のうち relaxation 解の小数部が 0.5 に最も近い
-/// (= 最も「分数的」な) 変数で分枝する baseline 戦略。tie は変数 index 小優先で決定論的。
+/// `MostFractional`: branch on the integer-constrained variable whose
+/// relaxation value is closest to 0.5.  Ties broken by variable index.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MipBranching {
     MostFractional,
 }
 
-/// `MipConfig` defaults。
+/// Defaults for [`MipConfig`].
 ///
-/// - `DEFAULT_MIP_GAP_TOL = 1e-6`: 相対 MIP optimality gap (= |UB - LB| / max(1, |UB|))。
-///   LP/QP relaxation は exact な下界を与える (spatial B&B の interval bound と違い緩くない)
-///   ため `solve_qp_global` の 1e-3 より tight に設定できる。
-/// - `DEFAULT_INTEGER_FEAS_TOL = 1e-6`: 整数性判定許容。relaxation を eps=1e-6 で解くため
-///   |x - round(x)| <= 1e-6 を整数とみなす。これより緩いと真に分数な解を整数と誤認、
-///   厳しいと solver noise で無限分枝する。
-/// - `DEFAULT_MIP_MAX_NODES = 1_000_000`: 探索 node 上限の安全装置。実用上は
-///   `timeout_secs` / `deadline` が一次的な打切り基準。
-/// - `DEFAULT_MIP_MAX_DEPTH = 1_000`: tree depth 上限の安全装置。各 level で整数変数 1 つの
-///   bound を締めるため、有界整数問題では実効 depth は遥かに小さい。
+/// - `DEFAULT_MIP_GAP_TOL = 1e-6`: tighter than spatial B&B (1e-3) because LP/QP
+///   relaxations give exact lower bounds.
+/// - `DEFAULT_INTEGER_FEAS_TOL = 1e-6`: integrality threshold.
+/// - `DEFAULT_MIP_MAX_NODES = 1_000_000`: safety cap (deadline is primary cutoff).
+/// - `DEFAULT_MIP_MAX_DEPTH = 1_000`: depth cap.
 pub const DEFAULT_MIP_GAP_TOL: f64 = 1e-6;
 pub const DEFAULT_INTEGER_FEAS_TOL: f64 = 1e-6;
 pub const DEFAULT_MIP_MAX_NODES: usize = 1_000_000;
 pub const DEFAULT_MIP_MAX_DEPTH: usize = 1_000;
 
-/// MILP/MIQP branch-and-bound 設定 (#14)。
+/// MILP/MIQP branch-and-bound config.
 ///
-/// `solve_milp` / `solve_miqp` に渡す ε-optimal 整数最適化のパラメータ。
+/// Passed to `solve_milp` / `solve_miqp`.
 ///
-/// 規約:
-/// - `gap_tol >= 0`: 相対 gap。0 で厳密最適 (node 爆発の可能性)。
-/// - `integer_feas_tol > 0`: 整数性許容。
-/// - `max_nodes >= 1`, `max_depth >= 1`: 安全装置 (一次打切りは deadline)。
+/// Rules:
+/// - `gap_tol >= 0`: 0 means exact optimality (node explosion risk).
+/// - `integer_feas_tol > 0`
+/// - `max_nodes >= 1`, `max_depth >= 1`
 #[derive(Debug, Clone)]
 pub struct MipConfig {
     pub gap_tol: f64,
@@ -282,51 +278,75 @@ impl Default for MipConfig {
     }
 }
 
-/// QP ソルバーの収束精度を抽象化する列挙型
+// ---- Tolerance --------------------------------------------------------
+
+/// IPM eps for [`Tolerance::High`].
+pub const TOLERANCE_HIGH_EPS: f64 = 1e-8;
+/// IPM eps for [`Tolerance::Medium`] (default).
+pub const TOLERANCE_MEDIUM_EPS: f64 = 1e-6;
+/// IPM eps for [`Tolerance::Fast`]: 100× looser than Medium for faster convergence.
+pub const TOLERANCE_FAST_EPS: f64 = 1e-4;
+
+/// Convergence accuracy level.
 ///
-/// 各ソルバーは `Tolerance` を内部の収束基準に変換して使用する。
-/// ユーザーは IPM の `eps` を意識する必要がない。
+/// Abstracts the raw `ipm.eps` field.  When set on [`SolverOptions`], the
+/// solver derives its internal convergence threshold from this enum;
+/// `ipm.eps` is ignored.
 ///
-/// ## 内部翻訳テーブル
+/// ## Translation table
 ///
-/// | Tolerance | IPM eps |
-/// |-----------|---------|
-/// | High      | 1e-8    |
-/// | Medium    | 1e-6    |
-/// | Fast      | 1e-6    |
-/// | Custom(v) | v       |
+/// | Tolerance | IPM eps                              |
+/// |-----------|--------------------------------------|
+/// | High      | [`TOLERANCE_HIGH_EPS`] = 1e-8        |
+/// | Medium    | [`TOLERANCE_MEDIUM_EPS`] = 1e-6      |
+/// | Fast      | [`TOLERANCE_FAST_EPS`] = 1e-4        |
+/// | Custom(v) | v                                    |
 ///
-/// `Medium` はデフォルト値（Gurobi と同等の精度水準 `eps=1e-6`）。
+/// `Medium` is the default (comparable to Gurobi `eps = 1e-6`).
+/// `Fast` accepts solutions 100× less precise than Medium for reduced
+/// iteration counts — appropriate when a coarse objective estimate suffices.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tolerance {
-    /// 高精度: 精密な解が必要な研究・検証用途向け
+    /// High accuracy: research / verification workloads.
     High,
-    /// 中精度（デフォルト）: 汎用的な実用問題向け (IPM: 1e-6)
+    /// Medium accuracy (default): general-purpose workloads.
     Medium,
-    /// 高速: 計算速度優先、精度を緩める (IPM: 1e-6)
+    /// Fast: speed-priority, looser convergence (100× coarser than Medium).
     Fast,
-    /// カスタム: 各ソルバーの収束基準に直接使用する数値を指定
+    /// Custom: pass the eps value directly to each solver.
     Custom(f64),
 }
 
-/// IPM（内点法）固有オプション
+// ---- IpmOptions -------------------------------------------------------
+
+/// Default convergence tolerance for [`IpmOptions::eps`].
+pub const DEFAULT_IPM_EPS: f64 = 1e-6;
+/// Default proximity regularisation lower bound for [`IpmOptions::delta_min`].
+pub const DEFAULT_IPM_DELTA_MIN: f64 = 1e-8;
+/// Default initial proximity regularisation for [`IpmOptions::delta_p_init`]
+/// and [`IpmOptions::delta_d_init`].
+pub const DEFAULT_IPM_DELTA_INIT: f64 = 1e-6;
+/// Default Gondzio corrector count (Gondzio 1997, recommended range 2–5).
+pub const DEFAULT_IPM_MAX_CORRECTORS: usize = 3;
+
+/// IPM (interior-point method) solver options.
 ///
-/// [`SolverOptions::ipm`] フィールドに設定する。
+/// Set via [`SolverOptions::ipm`].  Call [`IpmOptions::validate`] (or
+/// [`SolverOptions::validate`]) before solving to catch invalid values early.
 #[derive(Debug, Clone)]
 pub struct IpmOptions {
-    /// 最大反復数（デフォルト: usize::MAX = 上限なし）。timeout が主ガード。
+    /// Maximum iterations.  Default: `usize::MAX` (timeout is the primary guard).
     pub max_iter: usize,
-    /// 収束 tolerance（デフォルト: 1e-6）
+    /// Convergence tolerance.  Default: [`DEFAULT_IPM_EPS`].
     pub eps: f64,
-    /// 近接正則化下限 δ_min（デフォルト: 1e-8）
+    /// Proximity regularisation lower bound δ_min.  Default: [`DEFAULT_IPM_DELTA_MIN`].
     pub delta_min: f64,
-    /// 近接正則化初期値 δ_p（デフォルト: 1e-6）
+    /// Initial primal proximity regularisation δ_p.  Default: [`DEFAULT_IPM_DELTA_INIT`].
     pub delta_p_init: f64,
-    /// 近接正則化初期値 δ_d（デフォルト: 1e-6）
+    /// Initial dual proximity regularisation δ_d.  Default: [`DEFAULT_IPM_DELTA_INIT`].
     pub delta_d_init: f64,
-    /// Gondzio多重修正子の最大corrector数（デフォルト: 3）
-    /// PARAM: 根拠=Gondzio(1997)推奨値(2-5) | 要検証=大規模問題
+    /// Maximum Gondzio correctors.  Default: [`DEFAULT_IPM_MAX_CORRECTORS`].
     pub max_correctors: usize,
 }
 
@@ -334,157 +354,178 @@ impl Default for IpmOptions {
     fn default() -> Self {
         Self {
             max_iter: usize::MAX,
-            eps: 1e-6,
-            delta_min: 1e-8,
-            delta_p_init: 1e-6,
-            delta_d_init: 1e-6,
-            max_correctors: 3,
+            eps: DEFAULT_IPM_EPS,
+            delta_min: DEFAULT_IPM_DELTA_MIN,
+            delta_p_init: DEFAULT_IPM_DELTA_INIT,
+            delta_d_init: DEFAULT_IPM_DELTA_INIT,
+            max_correctors: DEFAULT_IPM_MAX_CORRECTORS,
         }
     }
 }
 
-/// ソルバーの動作設定
+impl IpmOptions {
+    /// Validate all numeric fields.
+    ///
+    /// Returns the first `Err` in field declaration order.
+    /// Invalid: non-finite or non-positive `eps` / `delta_*`, or `max_correctors == 0`.
+    pub fn validate(&self) -> Result<(), OptionsError> {
+        if !self.eps.is_finite() || self.eps <= 0.0 {
+            return Err(OptionsError { field: "ipm.eps", reason: "must be finite and > 0" });
+        }
+        if !self.delta_min.is_finite() || self.delta_min <= 0.0 {
+            return Err(OptionsError { field: "ipm.delta_min", reason: "must be finite and > 0" });
+        }
+        if !self.delta_p_init.is_finite() || self.delta_p_init <= 0.0 {
+            return Err(OptionsError { field: "ipm.delta_p_init", reason: "must be finite and > 0" });
+        }
+        if !self.delta_d_init.is_finite() || self.delta_d_init <= 0.0 {
+            return Err(OptionsError { field: "ipm.delta_d_init", reason: "must be finite and > 0" });
+        }
+        if self.max_correctors == 0 {
+            return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
+        }
+        Ok(())
+    }
+
+    /// Builder: set `eps`, validated immediately.
+    pub fn with_eps(mut self, eps: f64) -> Result<Self, OptionsError> {
+        if !eps.is_finite() || eps <= 0.0 {
+            return Err(OptionsError { field: "ipm.eps", reason: "must be finite and > 0" });
+        }
+        self.eps = eps;
+        Ok(self)
+    }
+
+    /// Builder: set `max_correctors`, validated immediately.
+    pub fn with_max_correctors(mut self, n: usize) -> Result<Self, OptionsError> {
+        if n == 0 {
+            return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
+        }
+        self.max_correctors = n;
+        Ok(self)
+    }
+}
+
+// ---- SolverOptions ----------------------------------------------------
+
+/// Default clamp threshold for micro-values in solver output.
+pub const DEFAULT_CLAMP_TOL: f64 = 1e-14;
+
+/// Solver configuration.
 ///
-/// 許容誤差・反復上限・リファクタリング頻度などを制御する。
-/// `Default` でtolerance.rsの標準値が設定される。
+/// Controls tolerances, iteration limits, refactorisation frequency, and
+/// algorithm selection.  `Default` uses values from `tolerances.rs`.
 ///
-/// ## ソルバー固有パラメータ
+/// ## Validation
 ///
-/// `ipm` フィールドのサブ構造体を使用すること。
+/// Call [`SolverOptions::validate`] (or use builder methods) before solving
+/// to catch invalid values (NaN, zero, negative tolerances, etc.) early.
+///
+/// ## Solver-specific parameters
+///
+/// Use the [`SolverOptions::ipm`] sub-struct for IPM-specific settings.
 #[derive(Debug, Clone)]
 pub struct SolverOptions {
-    // --- 共通設定 ---
-    /// シンプレックス法の最適性・実行可能性判定の閾値（デフォルト: 1e-8）
+    // --- Common ---
+    /// Simplex primal feasibility / optimality threshold.  Default: `PIVOT_TOL`.
     pub primal_tol: f64,
-    /// eta ファイルの最大保持数（リファクタリング閾値）
+    /// Max eta-file count (refactorisation threshold).  0 = auto (from problem size).
     pub max_etas: usize,
-    /// 解の微小値クランプ閾値（デフォルト: 1e-14）
+    /// Micro-value clamp threshold.  Default: [`DEFAULT_CLAMP_TOL`].
     pub clamp_tol: f64,
-    /// シンプレックス法の選択（デフォルト: Auto）
+    /// Simplex algorithm selection.  Default: `Auto`.
     pub simplex_method: SimplexMethod,
-    /// 双対実行可能性の閾値（デフォルト: PIVOT_TOL = 1e-8）
+    /// Dual feasibility threshold.  Default: `PIVOT_TOL`.
     pub dual_tol: f64,
-    /// Dual simplex leaving 戦略 (default `MostInfeasible`)。
-    /// `SteepestEdge` 切替で `dual_advanced` 配下のみ DSE 駆動。
+    /// Dual simplex leaving strategy.  Default: `MostInfeasible`.
     pub dual_pricing: DualPricing,
-    /// Bound-Flipping Ratio Test (Maros 2003 §7.6) を有効化する。
-    /// default false: 既存 Harris ratio test。
-    /// true: dual_advanced 配下で BFRT を走らせる。Phase 2 ratio test の
-    /// `bound_flip::bfrt_select_entering` に委譲され、対象 LP に finite upper
-    /// bound 付き変数があれば dual step を複数 breakpoint まで伸ばせる。
-    /// 実行時切替 (env `BOUND_FLIP_DISABLE=1`) で sentinel/triage 用に
-    /// no-op に倒せる。
+    /// Enable Bound-Flipping Ratio Test (Maros 2003 §7.6) in `dual_advanced`.
+    /// Runtime override: `BOUND_FLIP_DISABLE=1`.
     pub enable_bound_flipping: bool,
-    /// warm-start基底情報（Noneの場合はコールドスタート）
+    /// LP warm-start basis.  `None` = cold start.
     pub warm_start: Option<WarmStartBasis>,
-    /// QP IP-PMM の interior point warm start (B&B node 間引継ぎ用)
+    /// QP IP-PMM interior-point warm start for B&B node transfer.
     pub warm_start_qp: Option<QpWarmStart>,
-    /// LP 拡張 warm start。`warm_start` より優先される。
-    /// `basis` のみ与えれば既存挙動と同等で、`x_orig`/`y_orig` は将来 IPM crossover 用。
+    /// Extended LP warm start; takes priority over `warm_start`.
     pub warm_start_lp: Option<LpWarmStart>,
-    /// Postsolve 経路で `warm_start_basis` を復元するか (default `false`)。
+    /// Reconstruct `warm_start_basis` after postsolve.  Default: `false`.
     ///
-    /// presolve が問題を縮約した場合、reduced-LP の basis 番号は元 LP に対して
-    /// 無効化される。`true` のとき `run_postsolve` 出口で元 LP の standard form
-    /// を再構築し、LTSF crash + solution-driven refinement で `warm_start_basis`
-    /// を合成する。default `false` は build_standard_form (O(nnz)) + crash +
-    /// refinement のコストを払わない。次回 solve で同 LP を warm-start
-    /// したい呼び出し側のみ opt-in。
+    /// When presolve reduces the problem the reduced-LP basis indices are
+    /// invalid for the original LP.  `true` triggers basis reconstruction at
+    /// postsolve exit (LTSF crash + solution refinement).  Opt-in only.
     ///
-    /// presolve が走らない場合 (`presolve = false` or `was_reduced = false`)
-    /// は native simplex 出口で basis を直接 clone するため、本フラグに依らず
-    /// `warm_start_basis = Some(_)` が返る。
+    /// When presolve is skipped or the problem was not reduced, the simplex
+    /// basis is cloned directly regardless of this flag.
     pub recover_warm_start_basis: bool,
-    /// LP cold start 時 simplex crash basis を適用する。
-    /// 適用範囲: primal two-phase Phase I と dual_advanced Big-M Phase I。
-    /// warm_start / warm_start_lp が Some なら無視される。
-    /// 実行時切替には環境変数 `LP_CRASH_DUAL_ADV_DISABLE=1` で Big-M 経路のみ
-    /// no-op 化可能 (sentinel/triage 用)。
+    /// Apply simplex crash basis on cold LP starts.  Ignored when
+    /// `warm_start` / `warm_start_lp` is set.
+    /// Runtime override: `LP_CRASH_DUAL_ADV_DISABLE=1` (Big-M path only).
     pub use_lp_crash_basis: bool,
-    /// Presolve有効/無効（デフォルト: true）
+    /// Enable presolve.  Default: `true`.
     pub presolve: bool,
-    /// タイムアウト時間（秒）。None の場合は無制限（デフォルト: None）
+    /// Timeout in seconds.  `None` = unlimited.
     pub timeout_secs: Option<f64>,
-    /// 並列ワーカー間共有のキャンセルフラグ（内部使用）
+    /// Shared cancellation flag (internal use).
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
-    /// タイムアウト期限（内部使用。solve の先頭で timeout_secs から計算）
+    /// Solve deadline computed from `timeout_secs` at solve entry (internal use).
     pub(crate) deadline: Option<Instant>,
 
-    // --- Ruiz スケーリング ---
-    /// IPM 実行前に Ruiz equilibration スケーリングを適用する（デフォルト: true）
+    // --- Ruiz scaling ---
+    /// Apply Ruiz equilibration scaling before IPM.  Default: `true`.
     pub use_ruiz_scaling: bool,
 
-    // --- 収束精度抽象化 ---
-    /// 収束精度の抽象レベル（None の場合は ipm.eps を直接使用）
+    // --- Tolerance abstraction ---
+    /// Convergence accuracy level.  `None` = use `ipm.eps` directly.
     ///
-    /// Some(_) の場合、各ソルバーはこの設定から eps を計算して使用する。
-    /// ipm.eps の設定は無視される。
+    /// When `Some(_)`, each solver derives eps from this; `ipm.eps` is ignored.
     pub tolerance: Option<Tolerance>,
 
-    // --- ソルバー固有オプション ---
-    /// IPM 固有オプション
+    // --- Solver-specific ---
+    /// IPM-specific options.
     pub ipm: IpmOptions,
 
-    /// Multi-start local search (#5 Phase 2)。`None` (default) は無効 = 既存挙動。
-    /// `Some(_)` かつ `n_starts >= 2` の場合 `solve_qp_with` は内部で
-    /// `solve_qp_multistart` に委譲する (再入防止のため委譲時は None に剥がす)。
+    /// Multi-start local search config.  `None` (default) = disabled.
     pub multistart: Option<MultiStartConfig>,
 
-    /// Phase 3 spatial Branch-and-Bound (#6 非凸 QP 大域最適化) の設定。
-    /// `None` (default) は無効。`Some(_)` のとき `solve_qp_global` から参照される。
-    /// **`solve_qp_with` は dispatch しない**: 明示呼び出し限定 (誤って既存 user の wall を桁違いに伸ばさないため)。
+    /// Spatial B&B global optimisation config.  `None` (default) = disabled.
+    /// Only consumed by explicit `solve_qp_global` calls.
     pub global_optimization: Option<GlobalOptimizationConfig>,
 
-    /// Thread budget shared by all solver paths (LP / QP / multistart).
+    /// Thread budget for all solver paths (LP / QP / multistart).
     ///
-    /// Default = 1 (serial; preserves existing behaviour, avoids contention
-    /// with external bench workers).
+    /// Default = 1 (serial; no contention with external bench workers).
     ///
-    /// **Effect by path:**
-    /// - **QP** (`threads ≥ 2`): routes through faer parallel sparse LDL on the
-    ///   KKT system; may improve throughput for problems with denser KKT structure,
-    ///   overhead can dominate for very sparse systems.
-    /// - **LP simplex** (`threads ≥ 2`): no effect — simplex does not route
-    ///   through the faer parallel factorization path.
-    /// - **Multistart** (`threads ≥ 2`): effective — parallel degree is
-    ///   `min(n_starts, threads)`, inner solves are forced to `threads = 1`
-    ///   to prevent nested parallelism.
+    /// - **QP** (`threads >= 2`): enables faer parallel sparse LDL on the KKT system.
+    /// - **LP simplex** (`threads >= 2`): no effect.
+    /// - **Multistart** (`threads >= 2`): `min(n_starts, threads)` parallel degree;
+    ///   inner solves forced to `threads = 1`.
     pub threads: usize,
 
-    /// Known optimal objective value for early-exit optimization.
+    /// Reference optimal objective for early-exit.
     ///
-    /// When `Some(ref_obj)`, the solver returns `Optimal` as soon as it
-    /// achieves an objective value within [`bench_utils::OBJ_MATCH_REL_TOL`]
-    /// of `ref_obj` (i.e. `|obj − ref_obj| / (1 + |ref_obj|) < tol`),
-    /// skipping any further simplex retry.  Used by the bench harness to
-    /// avoid wasting the remaining budget on a problem already solved to
-    /// reference quality.
-    ///
-    /// Default `None` preserves existing behaviour (no reference check).
+    /// When `Some(ref_obj)`, returns `Optimal` as soon as
+    /// `|obj − ref_obj| / (1 + |ref_obj|) < OBJ_MATCH_REL_TOL`.
+    /// Used by bench harnesses.  `None` = no early-exit.
     pub known_optimal_obj: Option<f64>,
 }
 
-/// max_etas の auto 計算: m に応じた動的設定 (CLAUDE.md ベンチ tuning 値排除)。
-/// 小規模 (m<1000) は 20、大規模では m/50。
+/// Auto-compute `max_etas` from problem size.
 ///
-/// 旧 m/100 は dfl001 級 (m=12857) で max_etas=128、refactor 1 回 720ms × 69 = 50s
-/// が timeout の主因 (Task #6/9 観測)。m/50 で refactor 頻度を半減、per-iter eta cost
-/// 増加とのトレードオフで dfl001 改善を狙う (eta cost は per-iter ~50us 程度の増)。
+/// Small problems (m < 1000): 20; larger: m / 50.
 pub fn default_max_etas(m: usize) -> usize {
     (m / 50).max(20)
 }
 
-/// Phase I retry 上限: revised_simplex_core が同じ basis で無限ループに入る
-/// 退化問題用の安全装置。
+/// Phase I retry cap: guards against degenerate problems that loop with an
+/// identical basis in `revised_simplex_core`.
 pub const MAX_PHASE1_RETRIES: usize = 8;
 
 impl Default for SolverOptions {
     fn default() -> Self {
         Self {
-            primal_tol: PIVOT_TOL, // 1e-8
-            // max_etas: 0 = auto (default_max_etas(m) で m から計算、各 simplex 入口で適用)
+            primal_tol: PIVOT_TOL,
             max_etas: 0,
-            clamp_tol: 1e-14,
+            clamp_tol: DEFAULT_CLAMP_TOL,
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
             dual_pricing: DualPricing::default(),
@@ -510,15 +551,96 @@ impl Default for SolverOptions {
 }
 
 impl SolverOptions {
-    /// IPM の eps を取得（tolerance が Some の場合は変換して返す）
+    /// Effective IPM eps: derived from `tolerance` if set, otherwise `ipm.eps`.
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {
-            Some(Tolerance::High)      => 1e-8,
-            Some(Tolerance::Medium)    => 1e-6,
-            Some(Tolerance::Fast)      => 1e-6,
+            Some(Tolerance::High)      => TOLERANCE_HIGH_EPS,
+            Some(Tolerance::Medium)    => TOLERANCE_MEDIUM_EPS,
+            Some(Tolerance::Fast)      => TOLERANCE_FAST_EPS,
             Some(Tolerance::Custom(v)) => v,
             None => self.ipm.eps,
         }
+    }
+
+    /// Validate all option fields.
+    ///
+    /// Returns the first `Err` encountered, in field declaration order.
+    /// Called by public solver entry points (`solve_qp_with`, `solve_qp_global`,
+    /// `solve_qp_multistart`, `solve_milp`, `solve_miqp`, `simplex::solve_with`)
+    /// before starting work; invalid options cause the entry to return
+    /// [`crate::problem::SolveStatus::NumericalError`] rather than propagating
+    /// bad values into the solver core.
+    ///
+    /// Invalid conditions:
+    /// - `primal_tol` / `dual_tol`: non-finite or <= 0
+    /// - `clamp_tol`: non-finite or < 0 (0 is allowed)
+    /// - `threads`: 0
+    /// - `timeout_secs`: `Some(v)` where v is non-finite or < 0
+    /// - `tolerance`: `Custom(v)` where v is non-finite or <= 0
+    /// - Any field in [`IpmOptions`]
+    pub fn validate(&self) -> Result<(), OptionsError> {
+        if !self.primal_tol.is_finite() || self.primal_tol <= 0.0 {
+            return Err(OptionsError { field: "primal_tol", reason: "must be finite and > 0" });
+        }
+        if !self.dual_tol.is_finite() || self.dual_tol <= 0.0 {
+            return Err(OptionsError { field: "dual_tol", reason: "must be finite and > 0" });
+        }
+        if !self.clamp_tol.is_finite() || self.clamp_tol < 0.0 {
+            return Err(OptionsError { field: "clamp_tol", reason: "must be finite and >= 0" });
+        }
+        if self.threads == 0 {
+            return Err(OptionsError { field: "threads", reason: "must be >= 1" });
+        }
+        if let Some(t) = self.timeout_secs {
+            if !t.is_finite() || t < 0.0 {
+                return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
+            }
+        }
+        if let Some(Tolerance::Custom(v)) = self.tolerance {
+            if !v.is_finite() || v <= 0.0 {
+                return Err(OptionsError {
+                    field: "tolerance.Custom",
+                    reason: "must be finite and > 0",
+                });
+            }
+        }
+        self.ipm.validate()?;
+        Ok(())
+    }
+
+    /// Builder: set `timeout_secs`, validated immediately.
+    pub fn with_timeout(mut self, secs: f64) -> Result<Self, OptionsError> {
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
+        }
+        self.timeout_secs = Some(secs);
+        Ok(self)
+    }
+
+    /// Builder: set `threads`, validated immediately.
+    pub fn with_threads(mut self, n: usize) -> Result<Self, OptionsError> {
+        if n == 0 {
+            return Err(OptionsError { field: "threads", reason: "must be >= 1" });
+        }
+        self.threads = n;
+        Ok(self)
+    }
+
+    /// Builder: set `tolerance`, validated immediately.
+    ///
+    /// `Tolerance::Custom(v)` requires v to be finite and > 0; other variants
+    /// are always accepted.
+    pub fn with_tolerance(mut self, tol: Tolerance) -> Result<Self, OptionsError> {
+        if let Tolerance::Custom(v) = tol {
+            if !v.is_finite() || v <= 0.0 {
+                return Err(OptionsError {
+                    field: "tolerance.Custom",
+                    reason: "must be finite and > 0",
+                });
+            }
+        }
+        self.tolerance = Some(tol);
+        Ok(self)
     }
 }
 
@@ -526,27 +648,241 @@ impl SolverOptions {
 mod tests {
     use super::*;
 
-    /// Tolerance 翻訳メソッドが正しい値を返すことを確認する
+    // ---- Tolerance translation -------------------------------------------
+
     #[test]
     fn test_tolerance_translation() {
-        // High
-        let opts_high = SolverOptions { tolerance: Some(Tolerance::High), ..Default::default() };
-        assert_eq!(opts_high.ipm_eps(), 1e-8, "High: ipm_eps");
+        // Table-driven: (tolerance setting, expected ipm_eps)
+        let cases: &[(Option<Tolerance>, f64)] = &[
+            (Some(Tolerance::High),         TOLERANCE_HIGH_EPS),
+            (Some(Tolerance::Medium),       TOLERANCE_MEDIUM_EPS),
+            (Some(Tolerance::Fast),         TOLERANCE_FAST_EPS),
+            (Some(Tolerance::Custom(1e-5)), 1e-5),
+            (None,                          DEFAULT_IPM_EPS), // uses ipm.eps default
+        ];
+        for (tol, expected) in cases {
+            let opts = SolverOptions { tolerance: *tol, ..Default::default() };
+            assert_eq!(opts.ipm_eps(), *expected, "tolerance = {:?}", tol);
+        }
+    }
 
-        // Medium
-        let opts_med = SolverOptions { tolerance: Some(Tolerance::Medium), ..Default::default() };
-        assert_eq!(opts_med.ipm_eps(), 1e-6, "Medium: ipm_eps");
+    #[test]
+    fn test_tolerance_fast_is_looser_than_medium() {
+        // Fast must be coarser (larger eps) than Medium; otherwise the name is misleading.
+        assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS);
+        assert!(TOLERANCE_MEDIUM_EPS > TOLERANCE_HIGH_EPS);
+    }
 
-        // Fast
-        let opts_fast = SolverOptions { tolerance: Some(Tolerance::Fast), ..Default::default() };
-        assert_eq!(opts_fast.ipm_eps(), 1e-6, "Fast: ipm_eps");
+    // ---- IpmOptions::validate -------------------------------------------
 
-        // Custom
-        let opts_custom = SolverOptions { tolerance: Some(Tolerance::Custom(1e-5)), ..Default::default() };
-        assert_eq!(opts_custom.ipm_eps(), 1e-5, "Custom: ipm_eps");
+    #[test]
+    fn test_ipm_validate_defaults_ok() {
+        assert!(IpmOptions::default().validate().is_ok());
+    }
 
-        // None → ipm.eps のデフォルト値を返す
-        let opts_none = SolverOptions::default();
-        assert_eq!(opts_none.ipm_eps(), 1e-6, "None: ipm_eps (default)");
+    #[test]
+    fn test_ipm_validate_eps() {
+        for bad in [0.0_f64, -1e-6, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let o = IpmOptions { eps: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "eps={bad} should be invalid");
+        }
+        // boundary: smallest positive finite value is valid
+        let o = IpmOptions { eps: f64::MIN_POSITIVE, ..Default::default() };
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ipm_validate_delta_min() {
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            let o = IpmOptions { delta_min: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "delta_min={bad} should be invalid");
+        }
+    }
+
+    #[test]
+    fn test_ipm_validate_delta_p_init() {
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            let o = IpmOptions { delta_p_init: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "delta_p_init={bad} should be invalid");
+        }
+    }
+
+    #[test]
+    fn test_ipm_validate_delta_d_init() {
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            let o = IpmOptions { delta_d_init: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "delta_d_init={bad} should be invalid");
+        }
+    }
+
+    #[test]
+    fn test_ipm_validate_max_correctors() {
+        let o = IpmOptions { max_correctors: 0, ..Default::default() };
+        assert!(o.validate().is_err(), "max_correctors=0 should be invalid");
+        let o = IpmOptions { max_correctors: 1, ..Default::default() };
+        assert!(o.validate().is_ok());
+    }
+
+    // ---- IpmOptions builders --------------------------------------------
+
+    #[test]
+    fn test_ipm_builder_with_eps() {
+        assert!(IpmOptions::default().with_eps(1e-4).is_ok());
+        assert!(IpmOptions::default().with_eps(f64::MIN_POSITIVE).is_ok());
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(IpmOptions::default().with_eps(bad).is_err(), "with_eps({bad}) should err");
+        }
+    }
+
+    #[test]
+    fn test_ipm_builder_with_max_correctors() {
+        assert!(IpmOptions::default().with_max_correctors(1).is_ok());
+        assert!(IpmOptions::default().with_max_correctors(10).is_ok());
+        assert!(IpmOptions::default().with_max_correctors(0).is_err());
+    }
+
+    // ---- SolverOptions::validate ----------------------------------------
+
+    #[test]
+    fn test_solver_validate_defaults_ok() {
+        assert!(SolverOptions::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_solver_validate_primal_tol() {
+        for bad in [0.0_f64, -1e-8, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let o = SolverOptions { primal_tol: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "primal_tol={bad}");
+        }
+        let o = SolverOptions { primal_tol: f64::MIN_POSITIVE, ..Default::default() };
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn test_solver_validate_dual_tol() {
+        for bad in [0.0_f64, -1e-8, f64::NAN, f64::INFINITY] {
+            let o = SolverOptions { dual_tol: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "dual_tol={bad}");
+        }
+    }
+
+    #[test]
+    fn test_solver_validate_clamp_tol() {
+        // 0.0 is valid (no clamping)
+        let o = SolverOptions { clamp_tol: 0.0, ..Default::default() };
+        assert!(o.validate().is_ok(), "clamp_tol=0 should be ok");
+        for bad in [-1.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let o = SolverOptions { clamp_tol: bad, ..Default::default() };
+            assert!(o.validate().is_err(), "clamp_tol={bad}");
+        }
+    }
+
+    #[test]
+    fn test_solver_validate_threads() {
+        let o = SolverOptions { threads: 0, ..Default::default() };
+        assert!(o.validate().is_err(), "threads=0");
+        for ok in [1_usize, 2, 8, usize::MAX] {
+            let o = SolverOptions { threads: ok, ..Default::default() };
+            assert!(o.validate().is_ok(), "threads={ok}");
+        }
+    }
+
+    #[test]
+    fn test_solver_validate_timeout_secs() {
+        // None is always valid
+        assert!(SolverOptions { timeout_secs: None, ..Default::default() }.validate().is_ok());
+        // non-negative finite: valid (0.0 = immediately-expired deadline)
+        for ok in [0.0_f64, 0.001, 1.0, 1000.0] {
+            let o = SolverOptions { timeout_secs: Some(ok), ..Default::default() };
+            assert!(o.validate().is_ok(), "timeout_secs=Some({ok}) must be valid");
+        }
+        // invalid: negative, NaN, or infinite
+        for bad in [-1.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let o = SolverOptions { timeout_secs: Some(bad), ..Default::default() };
+            assert!(o.validate().is_err(), "timeout_secs=Some({bad})");
+        }
+    }
+
+    #[test]
+    fn test_solver_validate_tolerance_custom() {
+        // Non-Custom variants are always valid
+        for tol in [Tolerance::High, Tolerance::Medium, Tolerance::Fast] {
+            let o = SolverOptions { tolerance: Some(tol), ..Default::default() };
+            assert!(o.validate().is_ok(), "tolerance={tol:?}");
+        }
+        // Custom: valid
+        let o = SolverOptions { tolerance: Some(Tolerance::Custom(1e-5)), ..Default::default() };
+        assert!(o.validate().is_ok());
+        // Custom: invalid
+        for bad in [0.0_f64, -1e-4, f64::NAN, f64::INFINITY] {
+            let o = SolverOptions { tolerance: Some(Tolerance::Custom(bad)), ..Default::default() };
+            assert!(o.validate().is_err(), "Tolerance::Custom({bad})");
+        }
+    }
+
+    #[test]
+    fn test_solver_validate_propagates_ipm() {
+        // SolverOptions::validate must propagate IpmOptions::validate errors.
+        let o = SolverOptions {
+            ipm: IpmOptions { eps: 0.0, ..Default::default() },
+            ..Default::default()
+        };
+        assert!(o.validate().is_err(), "ipm.eps=0 must propagate");
+
+        let o = SolverOptions {
+            ipm: IpmOptions { max_correctors: 0, ..Default::default() },
+            ..Default::default()
+        };
+        assert!(o.validate().is_err(), "ipm.max_correctors=0 must propagate");
+    }
+
+    // ---- SolverOptions builders -----------------------------------------
+
+    #[test]
+    fn test_solver_builder_with_timeout() {
+        assert!(SolverOptions::default().with_timeout(10.0).is_ok());
+        assert!(SolverOptions::default().with_timeout(0.001).is_ok());
+        assert!(SolverOptions::default().with_timeout(0.0).is_ok(), "0.0 = immediately-expired deadline");
+        for bad in [-1.0_f64, f64::NAN, f64::INFINITY] {
+            assert!(SolverOptions::default().with_timeout(bad).is_err(), "with_timeout({bad})");
+        }
+        // Result carries the set value
+        let o = SolverOptions::default().with_timeout(5.0).unwrap();
+        assert_eq!(o.timeout_secs, Some(5.0));
+    }
+
+    #[test]
+    fn test_solver_builder_with_threads() {
+        assert!(SolverOptions::default().with_threads(1).is_ok());
+        assert!(SolverOptions::default().with_threads(8).is_ok());
+        assert!(SolverOptions::default().with_threads(0).is_err());
+        let o = SolverOptions::default().with_threads(4).unwrap();
+        assert_eq!(o.threads, 4);
+    }
+
+    #[test]
+    fn test_solver_builder_with_tolerance() {
+        assert!(SolverOptions::default().with_tolerance(Tolerance::High).is_ok());
+        assert!(SolverOptions::default().with_tolerance(Tolerance::Medium).is_ok());
+        assert!(SolverOptions::default().with_tolerance(Tolerance::Fast).is_ok());
+        assert!(SolverOptions::default().with_tolerance(Tolerance::Custom(1e-5)).is_ok());
+        for bad in [0.0_f64, -1e-4, f64::NAN, f64::INFINITY] {
+            assert!(
+                SolverOptions::default().with_tolerance(Tolerance::Custom(bad)).is_err(),
+                "with_tolerance(Custom({bad}))"
+            );
+        }
+        let o = SolverOptions::default().with_tolerance(Tolerance::Fast).unwrap();
+        assert_eq!(o.tolerance, Some(Tolerance::Fast));
+    }
+
+    // ---- OptionsError display -------------------------------------------
+
+    #[test]
+    fn test_options_error_display() {
+        let e = OptionsError { field: "ipm.eps", reason: "must be finite and > 0" };
+        let s = e.to_string();
+        assert!(s.contains("ipm.eps"), "display: {s}");
+        assert!(s.contains("finite"), "display: {s}");
     }
 }

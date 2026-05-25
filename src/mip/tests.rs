@@ -7,7 +7,7 @@
 
 use super::{
     finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_miqp,
-    MilpProblem, MiqpProblem,
+    solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
 use crate::model::{Model, ModelError, SolveError};
 use crate::options::{MipConfig, SolverOptions};
@@ -610,4 +610,92 @@ fn model_mixed_integer_continuous() {
     let r = m.solve().unwrap();
     assert!((r.objective() - 3.5).abs() < EPS, "obj={}", r.objective());
     assert!((r[x].round() - r[x]).abs() < EPS, "x must be integral, x={}", r[x]);
+}
+
+// ---------------------------------------------------------------------------
+// Options validation wiring tests
+// ---------------------------------------------------------------------------
+
+/// Invalid options are rejected at `solve_milp` / `solve_milp_with_stats` entry.
+///
+/// Sentinel: removing `validate()` from `solve_milp_with_stats` causes these to
+/// propagate bad config into the B&B driver instead of returning NumericalError.
+#[test]
+fn invalid_options_rejected_at_milp_entry() {
+    use crate::options::IpmOptions;
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let problem = milp(lp, vec![0]);
+    let cfg = MipConfig::default();
+
+    let cases: &[(&str, SolverOptions)] = &[
+        ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+        ("zero primal_tol", SolverOptions { primal_tol: 0.0, ..Default::default() }),
+        ("neg dual_tol", SolverOptions { dual_tol: -1e-6, ..Default::default() }),
+        ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+        ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+        ("ipm eps zero", SolverOptions {
+            ipm: IpmOptions { eps: 0.0, ..Default::default() },
+            ..Default::default()
+        }),
+    ];
+    for (label, bad_opts) in cases {
+        let r = solve_milp(&problem, bad_opts, &cfg);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::NumericalError,
+            "solve_milp with {label} must return NumericalError"
+        );
+        let (r2, _) = solve_milp_with_stats(&problem, bad_opts, &cfg);
+        assert_eq!(
+            r2.status,
+            crate::problem::SolveStatus::NumericalError,
+            "solve_milp_with_stats with {label} must return NumericalError"
+        );
+    }
+}
+
+/// Invalid options are rejected at `solve_miqp` / `solve_miqp_with_stats` entry.
+///
+/// Sentinel: removing `validate()` from `solve_miqp_with_stats` causes these to
+/// propagate bad config into the B&B driver instead of returning NumericalError.
+#[test]
+fn invalid_options_rejected_at_miqp_entry() {
+    // min 0.5 x^2 s.t. x <= 5, x >= 0, x integer
+    let q = crate::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let c = vec![0.0];
+    let a = crate::sparse::CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let b = vec![5.0];
+    let bounds = vec![(0.0, f64::INFINITY)];
+    let qp = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
+    let problem = MiqpProblem::new(qp, vec![0]).unwrap();
+    let cfg = MipConfig::default();
+
+    let cases: &[(&str, SolverOptions)] = &[
+        ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+        ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+        ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+    ];
+    for (label, bad_opts) in cases {
+        let r = solve_miqp(&problem, bad_opts, &cfg);
+        assert_eq!(
+            r.status,
+            crate::problem::SolveStatus::NumericalError,
+            "solve_miqp with {label} must return NumericalError"
+        );
+        let (r2, _) = solve_miqp_with_stats(&problem, bad_opts, &cfg);
+        assert_eq!(
+            r2.status,
+            crate::problem::SolveStatus::NumericalError,
+            "solve_miqp_with_stats with {label} must return NumericalError"
+        );
+    }
 }

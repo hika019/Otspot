@@ -127,7 +127,13 @@ pub(crate) const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// `options.multistart.is_some() && n_starts >= 2` のとき multi-start に委譲する。
 /// multistart 内部の各 solve は同じ entry に戻るが options.multistart を None に剥がして
 /// 再入を断ち切る。
+///
+/// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
+/// validation (invalid tolerance, zero threads, etc.).
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if options.validate().is_err() {
+        return SolverResult::numerical_error();
+    }
     if let Some(cfg) = options.multistart.as_ref() {
         if cfg.n_starts >= 2 {
             return multistart::solve_qp_multistart(problem, options, cfg);

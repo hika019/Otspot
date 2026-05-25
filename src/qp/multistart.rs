@@ -232,6 +232,9 @@ pub fn solve_qp_multistart(
     options: &SolverOptions,
     config: &MultiStartConfig,
 ) -> SolverResult {
+    if options.validate().is_err() {
+        return SolverResult::numerical_error();
+    }
     solve_qp_multistart_with_hooks(problem, options, config, None)
 }
 
@@ -802,5 +805,32 @@ mod tests {
             fallback = fallback_result.objective,
             base = baseline.objective,
         );
+    }
+
+    /// Invalid options are rejected at `solve_qp_multistart` with NumericalError — not panic.
+    ///
+    /// Sentinel: removing `validate()` from `solve_qp_multistart` causes negative
+    /// `timeout_secs` to reach `Duration::from_secs_f64` inside the function, which **panics**.
+    /// With the guard, NumericalError is returned instead.
+    #[test]
+    fn invalid_options_rejected_at_multistart_entry() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(-2.0, 2.0)], vec![]).unwrap();
+        let cfg = MultiStartConfig { n_starts: 3, seed: 1, strategy: StartStrategy::RandomBox };
+        let cases: &[(&str, SolverOptions)] = &[
+            ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+            ("inf timeout_secs", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
+            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+        ];
+        for (label, opts) in cases {
+            let result = solve_qp_multistart(&prob, opts, &cfg);
+            assert_eq!(
+                result.status,
+                SolveStatus::NumericalError,
+                "solve_qp_multistart with {label} must return NumericalError (not panic)"
+            );
+        }
     }
 }

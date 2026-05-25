@@ -99,7 +99,13 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 
 /// Solve an LP with the supplied options. When `options.presolve` is set,
 /// presolve runs before the simplex.
+///
+/// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
+/// validation (invalid tolerance, zero threads, etc.).
 pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+    if options.validate().is_err() {
+        return SolverResult::numerical_error();
+    }
     // timeout_secs → deadline (mirrors qp_solve_impl).
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
@@ -500,5 +506,30 @@ mod tests {
         // is_some() is the load-bearing assertion; individual μs values can round
         // to zero on fast machines for this trivial LP.
         let _tb = result.timing_breakdown.unwrap();
+    }
+
+    /// Invalid options are rejected at the simplex entry with NumericalError.
+    ///
+    /// Wiring sentinel: removing the `validate()` call from `solve_with` causes
+    /// all cases to panic or produce wrong status instead of NumericalError.
+    #[test]
+    fn invalid_options_rejected_at_simplex_entry() {
+        let lp = make_trivial_lp();
+        let cases: &[(&str, SolverOptions)] = &[
+            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+            ("zero primal_tol", SolverOptions { primal_tol: 0.0, ..Default::default() }),
+            ("neg dual_tol", SolverOptions { dual_tol: -1.0, ..Default::default() }),
+            ("inf timeout", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
+            ("neg timeout", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+        ];
+        for (label, opts) in cases {
+            let result = solve_with(&lp, opts);
+            assert_eq!(
+                result.status,
+                SolveStatus::NumericalError,
+                "simplex::solve_with with {label} must return NumericalError"
+            );
+        }
     }
 }
