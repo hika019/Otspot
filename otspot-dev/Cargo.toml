@@ -1,13 +1,13 @@
 [package]
 name = "otspot-dev"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 publish = false
 description = "Dev/test utilities for otspot — not part of the public API"
 
 [dependencies]
-otspot-core = { path = "../otspot-core", version = "0.1.1" }
-otspot-io = { path = "../otspot-io" }
+otspot-core = { workspace = true }
+otspot-io = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
 twofloat = "0.8"
 
