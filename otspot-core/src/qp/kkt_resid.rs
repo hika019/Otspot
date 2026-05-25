@@ -26,7 +26,7 @@ use crate::sparse::CscMatrix;
 /// - Ge constraints: y_i ≤ 0 (violation if y_i > 0)
 /// - Eq constraints: y_i free (no sign requirement)
 /// - lb bound duals (first half of `z`): z_lb_j ≥ 0 (violation if z_lb_j < 0)
-/// - ub bound duals (second half of `z`): z_ub_j ≤ 0 (violation if z_ub_j > 0)
+/// - ub bound duals (second half of `z`): z_ub_j ≥ 0 (violation if z_ub_j < 0)
 ///
 /// Returns `max{ viol_k / (1 + |v_k|) }` over all sign-constrained components,
 /// where `viol_k = max(0, wrong-sign part)`. Returns 0 when all sign constraints hold.
@@ -68,7 +68,7 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
     }
     for &(_, ub) in bounds.iter() {
         if ub.is_finite() && idx < z.len() {
-            let v = z[idx].max(0.0); // z_ub must be <= 0
+            let v = (-z[idx]).max(0.0); // z_ub must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
                 if rel > max_rel { max_rel = rel; }
@@ -477,16 +477,27 @@ mod tests {
         assert!((v - expected).abs() < 1e-12, "got {v}");
     }
 
-    /// z_ub must be <= 0: positive z_ub is a violation.
+    /// z_ub must be >= 0: negative z_ub is a violation.
     #[test]
-    fn dual_sign_z_ub_positive_is_violation() {
+    fn dual_sign_z_ub_negative_is_violation() {
         let ct: Vec<ConstraintType> = vec![];
         let y: Vec<f64> = vec![];
         let bounds = vec![(f64::NEG_INFINITY, 1.0_f64)]; // ub finite
-        let z = vec![0.7_f64]; // ub-dual must be <= 0
+        let z = vec![-0.7_f64]; // ub-dual must be >= 0; negative is violation
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
         let expected = 0.7 / 1.7;
         assert!((v - expected).abs() < 1e-12, "got {v}");
+    }
+
+    /// z_ub positive (correct sign) → no violation.
+    #[test]
+    fn dual_sign_z_ub_positive_no_violation() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, 1.0_f64)]; // ub finite
+        let z = vec![0.7_f64]; // z_ub >= 0: correct sign
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0, "positive z_ub must not be a violation, got {v}");
     }
 
     /// z = [] means no bound duals: no violation.
@@ -537,9 +548,35 @@ mod tests {
             (f64::NEG_INFINITY, f64::INFINITY),  // free: no z
         ];
         // z: lb-half=[z_lb_0], ub-half=[z_ub_0]
-        let z = vec![0.5_f64, -0.5]; // z_lb=0.5>=0 ok, z_ub=-0.5<=0 ok
+        // z_lb >= 0 ok, z_ub >= 0 ok (both bound duals non-negative)
+        let z = vec![0.5_f64, 0.5]; // z_lb=0.5>=0 ok, z_ub=0.5>=0 ok
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
         assert_eq!(v, 0.0, "all satisfied should give 0");
+    }
+
+    /// Empirical observation: solver returns z_ub >= 0 for active upper bound.
+    ///
+    /// min (x−10)^2 s.t. 0 ≤ x ≤ 5 → optimal x=5 (ub active).
+    /// bound_duals layout: [z_lb (lb=0 finite), z_ub (ub=5 finite)].
+    /// Stationarity: 2(x−10) + z_ub = 0 → z_ub = 2*(10−5) = 10 > 0.
+    #[test]
+    fn dual_sign_z_ub_observed_positive_at_active_ub() {
+        use crate::qp::{QpProblem, solve_qp};
+        use crate::sparse::CscMatrix;
+        // min 1/2*(2)*x^2 + (-20)*x ≡ (x-10)^2 + const, 0 ≤ x ≤ 5
+        let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let prob = QpProblem::new(q, vec![-20.0], a, vec![], vec![(0.0, 5.0)], vec![]).unwrap();
+        let result = solve_qp(&prob);
+        // x* ≈ 5 (ub active)
+        assert!((result.solution[0] - 5.0).abs() < 1e-4,
+            "x should be ≈5, got {}", result.solution[0]);
+        // z = [z_lb, z_ub]; z_ub must be > 0
+        assert!(result.bound_duals.len() >= 2,
+            "expected >=2 bound duals, got {}", result.bound_duals.len());
+        let z_ub = result.bound_duals[1];
+        assert!(z_ub > 1.0,
+            "z_ub should be ≈10 (active ub dual), got {z_ub}");
     }
 
     #[test]
