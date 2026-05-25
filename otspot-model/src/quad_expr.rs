@@ -46,6 +46,8 @@ impl QuadExpr {
         for (pair, c) in rhs.quad {
             *self.quad.entry(pair).or_insert(0.0) += c;
         }
+        // Prune cancelled-out entries so is_linear() returns true after x*y - x*y.
+        self.quad.retain(|_, c| *c != 0.0);
         let old = std::mem::take(&mut self.linear);
         self.linear = old + rhs.linear;
     }
@@ -80,6 +82,11 @@ pub(crate) fn quad_to_csc(
 
     for (&(va, vb), &c) in terms {
         let (i, j) = (va.index, vb.index);
+        if !c.is_finite() {
+            return Err(format!(
+                "non-finite quad coefficient at ({i}, {j}): {c}"
+            ));
+        }
         if i >= n || j >= n {
             return Err(format!(
                 "quad term ({i}, {j}) out of range for {n} variables"
@@ -193,6 +200,8 @@ impl Mul<f64> for QuadExpr {
         for v in self.quad.values_mut() {
             *v *= rhs;
         }
+        // Prune entries zeroed by multiplication (e.g. 0.0 * x*x → is_linear = true).
+        self.quad.retain(|_, c| *c != 0.0);
         self.linear = rhs * self.linear;
         self
     }
@@ -388,34 +397,45 @@ mod tests {
         assert_eq!(q_entry(&q, 1, 0), 5.0, "cross: Q[1][0] must equal c (symmetry)");
     }
 
-    /// Sentinel: a broken implementation that only fills the upper triangle
-    /// produces an asymmetric Q.  This proves the symmetric fill is necessary.
+    /// Sentinel: verify that `quad_to_csc` fills both Q[i][j] and Q[j][i].
+    ///
+    /// A broken upper-triangle-only implementation would produce nnz=1 for a
+    /// cross term (only Q[0][1], missing Q[1][0]).  The correct implementation
+    /// produces nnz=2.  We also confirm Q[1][0] == 0 in the broken Q, proving
+    /// the missing entry would cause a wrong (asymmetric) matrix.
     #[test]
-    fn test_symmetry_sentinel_upper_only_is_asymmetric() {
-        // Upper-triangle-only Q for x·y (broken implementation):
-        let broken = CscMatrix::from_triplets(&[0], &[1], &[5.0], 2, 2).unwrap();
-        let upper = q_entry(&broken, 0, 1);
-        let lower = q_entry(&broken, 1, 0);
-        assert_ne!(
-            upper, lower,
-            "sentinel: broken upper-only Q must NOT be symmetric (upper={upper}, lower={lower})"
-        );
-        // The correct quad_to_csc does fill both:
+    fn test_symmetry_sentinel_quad_to_csc_fills_both_sides() {
         let mut model = Model::new("m");
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let y = model.add_var("y", 0.0, f64::INFINITY);
+
+        // DSL: x * y  →  quad[(x,y)] = 1.0  →  must emit Q[0][1] = Q[1][0] = 1.0
         let mut terms = HashMap::new();
         terms.insert(canon(x, y), 5.0);
         let correct = quad_to_csc(&terms, 2).unwrap();
+
+        // Both sides must be present and equal (symmetric fill):
+        assert_eq!(q_entry(&correct, 0, 1), 5.0, "sentinel: Q[0][1] must be 5.0");
         assert_eq!(
-            q_entry(&correct, 0, 1),
             q_entry(&correct, 1, 0),
-            "correct implementation must be symmetric"
+            5.0,
+            "sentinel: Q[1][0] must be 5.0 — missing this entry is the classic bug"
+        );
+        // nnz = 2: one entry per triangle
+        assert_eq!(correct.nnz(), 2, "sentinel: cross term must emit exactly 2 triplets");
+
+        // No-op proof: a broken upper-triangle-only matrix has Q[1][0] == 0.
+        let broken = CscMatrix::from_triplets(&[0], &[1], &[5.0], 2, 2).unwrap();
+        assert_eq!(broken.nnz(), 1, "broken: only 1 triplet (missing lower side)");
+        assert_eq!(
+            q_entry(&broken, 1, 0),
+            0.0,
+            "broken: Q[1][0] is 0 — this is the missing-symmetry bug"
         );
         assert_ne!(
-            q_entry(&correct, 0, 1),
-            0.0,
-            "correct implementation must be non-zero"
+            q_entry(&broken, 0, 1),
+            q_entry(&broken, 1, 0),
+            "broken: Q is not symmetric (upper ≠ lower), confirming the bug exists"
         );
     }
 
@@ -663,5 +683,80 @@ mod tests {
         let result = model.solve().unwrap();
         assert_close(result[x], 0.0, "linear via QuadExpr: x*");
         assert_close(result[y], 3.0, "linear via QuadExpr: y*");
+    }
+
+    // --- P3.1: ゼロ quad entry の pruning ---
+
+    #[test]
+    fn test_cancelled_quad_term_is_linear() {
+        // x*y - x*y should cancel to zero quad terms → is_linear() == true
+        let mut model = Model::new("m");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        let q = x * y - x * y;
+        assert!(q.is_linear(), "x*y - x*y should cancel to is_linear() == true");
+    }
+
+    #[test]
+    fn test_zero_scalar_mul_is_linear() {
+        // 0.0 * (x * x) should prune the quad entry → is_linear() == true
+        let mut model = Model::new("m");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let q = 0.0 * (x * x);
+        assert!(q.is_linear(), "0.0 * x*x should prune to is_linear() == true");
+    }
+
+    #[test]
+    fn test_cancelled_quad_routes_to_lp() {
+        // x*y - x*y (pure linear 0) minimized: routes to LP, not QP
+        // With only constant, any feasible x,y is optimal with obj=0.
+        let mut model = Model::new("cancel_route");
+        let x = model.add_var("x", 2.0, 2.0);
+        let y = model.add_var("y", 3.0, 3.0);
+        model.minimize(x * y - x * y + 1.0);  // = 1.0 (constant only, LP path)
+        let result = model.solve().unwrap();
+        assert!((result.objective_value - 1.0).abs() < TOL,
+            "cancelled quad routes to LP: obj should be 1.0, got {}", result.objective_value);
+    }
+
+    // --- P3.3: coverage gap — NaN 係数 / indefinite QP ---
+
+    #[test]
+    fn test_nan_quad_coefficient_gives_error() {
+        // NaN coefficient in quadratic term should produce an error at solve time.
+        let mut model = Model::new("nan_q");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let q_expr = f64::NAN * (x * x);
+        model.minimize(q_expr);
+        let result = model.solve();
+        assert!(
+            result.is_err(),
+            "NaN quad coefficient should produce an error, got Ok"
+        );
+    }
+
+    #[test]
+    fn test_indefinite_qp_no_silent_optimal() {
+        use crate::SolutionProof;
+        // min x·y  s.t. x+y≥1, x,y≥0 — indefinite (non-convex) QP.
+        // Must NOT silently claim GlobalOptimal.
+        let mut model = Model::new("indef");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        let y = model.add_var("y", 0.0, f64::INFINITY);
+        model.add_constraint((x + y).geq(1.0));
+        model.minimize(x * y);
+        let result = model.solve();
+        match result {
+            Ok(r) => {
+                assert_ne!(
+                    r.proof,
+                    SolutionProof::GlobalOptimal,
+                    "indefinite QP must not claim global optimality"
+                );
+            }
+            Err(_) => {
+                // Error (e.g. NonConvex) is also acceptable for indefinite QP
+            }
+        }
     }
 }

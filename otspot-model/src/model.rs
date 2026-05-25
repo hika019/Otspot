@@ -60,6 +60,11 @@ pub struct Model {
     /// Used to decide whether a subsequent pure-linear `minimize`/`maximize`
     /// call should clear the stored Q.
     quad_via_dsl: bool,
+    /// Constant term extracted from the objective expression (e.g. the `+4.0`
+    /// in `minimize(x*x - 4.0*x + 4.0)`).  Added to every `signed_obj` result
+    /// after the maximize sign-flip, independent of `obj_offset`.
+    /// Reset on every `minimize`/`maximize` call to avoid double-counting.
+    obj_expr_constant: f64,
     invalid_inputs: BTreeMap<&'static str, String>,
     /// Timeout for QP solve in seconds (None = unlimited).
     timeout_secs: Option<f64>,
@@ -87,6 +92,7 @@ impl Model {
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
             quad_via_dsl: false,
+            obj_expr_constant: 0.0,
             invalid_inputs: BTreeMap::new(),
             timeout_secs: None,
             use_ruiz_scaling: None,
@@ -242,6 +248,11 @@ impl Model {
             self.quadratic_objective = None;
             self.quad_via_dsl = false;
         }
+        // Fold the objective constant (e.g. `+4.0` in `x*x - 4x + 4.0`) into
+        // obj_expr_constant.  This is reset each call so re-minimize never
+        // double-counts.  The constant is added post-solve in signed_obj,
+        // after the maximize sign-flip, so it always appears with its original sign.
+        self.obj_expr_constant = q.linear.constant;
         self.objective = Some(q.linear);
         self.sense = sense;
         self
@@ -430,7 +441,7 @@ impl Model {
             } else {
                 raw
             };
-            oriented + self.obj_offset
+            oriented + self.obj_offset + self.obj_expr_constant
         };
         let lp_model_id = self.model_id;
         let build_ok = |sr: otspot_core::problem::SolverResult| {
@@ -582,7 +593,7 @@ impl Model {
             } else {
                 raw
             };
-            oriented + self.obj_offset
+            oriented + self.obj_offset + self.obj_expr_constant
         };
         let qp_model_id = self.model_id;
         let build_ok = |status: SolveStatus,
@@ -720,7 +731,7 @@ impl Model {
             } else {
                 raw
             };
-            oriented + self.obj_offset
+            oriented + self.obj_offset + self.obj_expr_constant
         };
 
         // 整数変数成分を厳密整数に丸める (relaxation 解の 1e-6 級 noise を除去)。
@@ -2058,5 +2069,97 @@ mod mip_model_tests {
         let r = m.solve().unwrap();
         assert!((r.objective() - 3.5).abs() < EPS, "obj={}", r.objective());
         assert!((r[x].round() - r[x]).abs() < EPS, "x must be integral, x={}", r[x]);
+    }
+
+    // --- 目的関数定数 fold テスト ---
+
+    // ① 線形 minimize: 定数 +3 が obj_value に含まれること
+    #[test]
+    fn test_linear_objective_constant_included() {
+        // min 2x + 3.0  s.t. x ≥ 1  →  x* = 1, obj* = 2*1 + 3 = 5
+        let mut model = Model::new("lin_const");
+        let x = model.add_var("x", 1.0, f64::INFINITY);
+        model.minimize(2.0 * x + 3.0);
+        let result = model.solve().unwrap();
+        assert!((result[x] - 1.0).abs() < EPS, "x* should be 1, got {}", result[x]);
+        assert!(
+            (result.objective_value - 5.0).abs() < EPS,
+            "obj* should be 5 (includes constant +3), got {}",
+            result.objective_value
+        );
+    }
+
+    // ② 二次 minimize: min (x-2)² = x²-4x+4, x≥0  →  x*=2, obj*=0
+    #[test]
+    fn test_quad_objective_constant_included() {
+        // minimize(x*x - 4.0*x + 4.0)  s.t. x ≥ 0
+        // x* = 2, obj* = 4 - 8 + 4 = 0
+        let mut model = Model::new("quad_const");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x * x + (-4.0) * x + 4.0);
+        let result = model.solve().unwrap();
+        assert!(
+            (result[x] - 2.0).abs() < 1e-4,
+            "quad_const: x* should be 2, got {}",
+            result[x]
+        );
+        assert!(
+            result.objective_value.abs() < 1e-4,
+            "quad_const: obj* should be 0 (constant +4 included), got {}",
+            result.objective_value
+        );
+    }
+
+    // ③ maximize の定数符号: max(-x + 5.0) s.t. x≥0 → x*=0, obj*=5
+    #[test]
+    fn test_maximize_objective_constant_sign() {
+        // max -x + 5.0  s.t. x ≥ 0  →  x* = 0, obj* = 0 + 5 = 5
+        let mut model = Model::new("max_const");
+        let x = model.add_var("x", 0.0, 10.0);
+        model.maximize((-1.0) * x + 5.0);
+        let result = model.solve().unwrap();
+        assert!(
+            (result[x]).abs() < EPS,
+            "max_const: x* should be 0, got {}",
+            result[x]
+        );
+        assert!(
+            (result.objective_value - 5.0).abs() < EPS,
+            "max_const: obj* should be 5 (constant not negated for max), got {}",
+            result.objective_value
+        );
+    }
+
+    // ④ set_obj_offset と DSL 定数の併用: 二重加算しないこと
+    #[test]
+    fn test_obj_offset_and_dsl_constant_no_double_count() {
+        // min x + 3.0  s.t. x ≥ 1, with set_obj_offset(10.0)
+        // obj* = 1 + 3 + 10 = 14
+        let mut model = Model::new("offset_plus_const");
+        let x = model.add_var("x", 1.0, f64::INFINITY);
+        model.minimize(1.0 * x + 3.0);
+        model.set_obj_offset(10.0);
+        let result = model.solve().unwrap();
+        assert!(
+            (result.objective_value - 14.0).abs() < EPS,
+            "offset+const: obj* should be 14 (1+3+10), got {}",
+            result.objective_value
+        );
+    }
+
+    // ⑤ 再 minimize でリセット: 定数が二重加算されないこと
+    #[test]
+    fn test_reminimize_constant_not_double_counted() {
+        // First minimize(x + 3.0), then minimize(x + 7.0): only the last constant counts.
+        let mut model = Model::new("reminimize");
+        let x = model.add_var("x", 1.0, f64::INFINITY);
+        model.minimize(1.0 * x + 3.0);  // constant = 3.0
+        model.minimize(1.0 * x + 7.0);  // constant = 7.0 (replaces 3.0)
+        let result = model.solve().unwrap();
+        assert!(
+            (result.objective_value - 8.0).abs() < EPS,
+            "re-minimize: obj* should be 8 (1+7, not 1+3+7=11), got {}",
+            result.objective_value
+        );
     }
 }
