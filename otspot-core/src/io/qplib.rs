@@ -628,8 +628,10 @@ impl TokenStream {
     }
 }
 
-#[cfg(test)]
+// Tests removed: canonical parser tests live in otspot-io. (#28 dedup)
+#[cfg(any())]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     /// Extract `QpProblem` from `QplibProblem::Qp`, panicking for MIP variants.

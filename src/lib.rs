@@ -74,5 +74,3 @@ pub mod model {
 /// File I/O — MPS, QPS, and QPLIB format parsers.
 pub use otspot_io as io;
 
-/// LP coverage screening utilities.
-pub use otspot_io::screening;

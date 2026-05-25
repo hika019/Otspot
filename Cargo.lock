@@ -1149,6 +1149,7 @@ dependencies = [
  "faer",
  "mimalloc",
  "otspot-core",
+ "otspot-dev",
  "otspot-io",
  "otspot-model",
  "proptest",
@@ -1169,6 +1170,15 @@ dependencies = [
  "rayon",
  "tempfile",
  "twofloat",
+]
+
+[[package]]
+name = "otspot-dev"
+version = "0.1.0"
+dependencies = [
+ "otspot-core",
+ "otspot-io",
+ "tempfile",
 ]
 
 [[package]]

@@ -46,7 +46,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
-use otspot::bench_utils::{compute_qp_kkt_max, primal_feas_max};
+use otspot_dev::bench_utils::{compute_qp_kkt_max, primal_feas_max};
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use otspot::qp::{solve_qp_global, solve_qp_with, QpProblem};

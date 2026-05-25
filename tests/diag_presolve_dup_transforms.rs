@@ -13,10 +13,8 @@
 
 use otspot::problem::{ConstraintType, LpProblem};
 use otspot::sparse::CscMatrix;
-use otspot::{
-    run_presolve_with_flags, solve_with, PresolveFlags, PresolveStatus, SolveStatus,
-    SolverOptions,
-};
+use otspot::{solve_with, SolveStatus, SolverOptions};
+use otspot_core::presolve::{run_presolve_with_flags, PresolveFlags, PresolveStatus};
 
 fn build_lp(
     c: Vec<f64>,

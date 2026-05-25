@@ -14,7 +14,9 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use otspot::bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
+#[path = "../bench_utils.rs"]
+mod bench_utils;
+use bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
 use otspot::io::qps::{parse_qps, QpsError};
 use otspot::options::{SimplexMethod, SolverOptions};
 use otspot::problem::{ConstraintType, SolveStatus};
@@ -594,7 +596,7 @@ mod tests {
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
     #[test]
     fn test_expected_status_infeasible_loaded() {
-        use otspot::bench_utils::{load_expected_statuses, ExpectedStatus};
+        use crate::bench_utils::{load_expected_statuses, ExpectedStatus};
         use std::io::Write;
 
         let csv = "problem_name,optimal_obj,source\n\
@@ -827,10 +829,10 @@ fn main() {
         // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
         // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。収束未達 status
         // (Timeout / MaxIterations / NumericalError / NonConvex) は honest 報告。
-        let result = otspot::bench_utils::apply_bench_status_promotion(
+        let result = bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,
-            otspot::bench_utils::BenchPromotionPolicy::QpsBenchmark,
+            bench_utils::BenchPromotionPolicy::QpsBenchmark,
         );
 
         let (status_str, note) = match result.status {

@@ -855,8 +855,10 @@ impl Section {
     }
 }
 
-#[cfg(test)]
+// Tests removed: canonical parser tests live in otspot-io. (#28 dedup)
+#[cfg(any())]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
