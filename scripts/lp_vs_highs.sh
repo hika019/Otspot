@@ -188,17 +188,45 @@ EOF
     export -f _highs_worker
     export HIGHS_BIN HIGHS_OPTS_FILE HIGHS_DIR MPS_DIR TIMEOUT
 
-    active_pids=()
+    # Worker pool: bash 3.2 compatible (macOS default; wait -n requires 4.3+).
+    # Mirrors bench_parallel.sh pattern: N workers pull from a shared counter via flock.
+    _HIGHS_COUNTER="$RESULT_DIR/.highs_counter"
+    _HIGHS_LOCK="$RESULT_DIR/.highs_lock"
+    _HIGHS_NAMES=()
     for qps_file in "${PROBLEM_FILES[@]}"; do
-        stem=$(basename "$qps_file"); name="${stem%.*}"
-        _highs_worker "$name" &
-        active_pids+=($!)
-        if [[ ${#active_pids[@]} -ge $JOBS ]]; then
-            wait "${active_pids[0]}" 2>/dev/null || true
-            active_pids=("${active_pids[@]:1}")
-        fi
+        stem=$(basename "$qps_file"); _HIGHS_NAMES+=("${stem%.*}")
     done
-    for pid in "${active_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+    _HIGHS_TOTAL=${#_HIGHS_NAMES[@]}
+    echo "0" > "$_HIGHS_COUNTER"
+    : > "$_HIGHS_LOCK"
+
+    _highs_pool_worker() {
+        local wid="$1"
+        while true; do
+            local idx
+            idx=$(
+              (
+                flock -x 9
+                n=$(cat "$_HIGHS_COUNTER")
+                echo $(( n + 1 )) > "$_HIGHS_COUNTER"
+                echo "$n"
+              ) 9>"$_HIGHS_LOCK"
+            ) || break
+            [[ "$idx" =~ ^[0-9]+$ ]] || break
+            [[ $idx -ge $_HIGHS_TOTAL ]] && break
+            # Guard under set -e: a non-zero return must not silently kill the
+            # worker (would shrink the pool). _highs_worker swallows errors itself.
+            _highs_worker "${_HIGHS_NAMES[$idx]}" || true
+        done
+    }
+
+    _HIGHS_PIDS=()
+    for _w in $(seq 1 "$JOBS"); do
+        _highs_pool_worker "$_w" &
+        _HIGHS_PIDS+=($!)
+    done
+    for _pid in "${_HIGHS_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
+    rm -f "$_HIGHS_COUNTER" "$_HIGHS_LOCK"
     echo "[lp_vs_highs] HiGHS complete"
 fi  # end normal mode
 
