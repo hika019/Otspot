@@ -798,6 +798,11 @@ impl SolutionProof {
 #[derive(Debug)]
 pub struct ModelResult {
     /// Solver termination status associated with this returned solution.
+    ///
+    /// Only success-domain variants occur here (`Optimal`, `LocallyOptimal`,
+    /// `NonconvexLocal`, `NonconvexGlobal`, `MaxIterations`, `SuboptimalSolution`,
+    /// `Timeout`); error variants surface as [`ModelError`] instead. Match on
+    /// [`ModelResult::proof`] for the optimality guarantee.
     pub status: SolveStatus,
     /// Optimality proof quality for this returned solution.
     pub proof: SolutionProof,
