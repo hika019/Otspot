@@ -25,3 +25,27 @@ path = "src/bin/qps_benchmark.rs"
 [[bin]]
 name = "lp_screen"
 path = "src/bin/lp_screen.rs"
+
+[[bin]]
+name = "milp_solve"
+path = "src/bin/milp_solve.rs"
+
+[[bin]]
+name = "mip_speed_bench"
+path = "src/bin/mip_speed_bench/main.rs"
+
+[[bin]]
+name = "qp_diag"
+path = "src/bin/qp_diag.rs"
+
+[[bin]]
+name = "qp_dump"
+path = "src/bin/qp_dump.rs"
+
+[[bin]]
+name = "qp_runner"
+path = "src/bin/qp_runner.rs"
+
+[[bin]]
+name = "verify_solutions"
+path = "src/bin/verify_solutions.rs"

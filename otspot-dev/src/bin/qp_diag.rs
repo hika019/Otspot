@@ -12,11 +12,11 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
-use otspot::io::qps::parse_qps;
-use otspot::options::SolverOptions;
-use otspot::problem::ConstraintType;
-use otspot::qp::solve_qp_with;
-use otspot::QpProblem;
+use otspot_io::qps::parse_qps;
+use otspot_core::options::SolverOptions;
+use otspot_core::problem::ConstraintType;
+use otspot_core::qp::solve_qp_with;
+use otspot_core::QpProblem;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -62,8 +62,8 @@ fn main() {
         let mut max_b = 0.0_f64;
         for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
             let v = match prob.constraint_types[i] {
-                otspot::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                otspot::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                otspot_core::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                otspot_core::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
                 _ => (ax_i - b_i).max(0.0),
             };
             let _ = i;
@@ -77,8 +77,8 @@ fn main() {
         let mut n_violated = 0_usize;
         for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
             let v = match prob.constraint_types[i] {
-                otspot::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
-                otspot::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
+                otspot_core::problem::ConstraintType::Eq => (ax_i - b_i).abs(),
+                otspot_core::problem::ConstraintType::Ge => (b_i - ax_i).max(0.0),
                 _ => (ax_i - b_i).max(0.0),
             };
             if v > 1e-12 { n_violated += 1; }

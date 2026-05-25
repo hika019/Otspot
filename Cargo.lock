@@ -1147,7 +1147,6 @@ dependencies = [
  "criterion",
  "dyn-stack",
  "faer",
- "mimalloc",
  "otspot-core",
  "otspot-dev",
  "otspot-io",

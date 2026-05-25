@@ -11,9 +11,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use otspot::io::mps::parse_milp_file;
-use otspot::options::{MipConfig, SolverOptions, Tolerance};
-use otspot::solve_milp_with_stats;
+use otspot_io::mps::parse_milp_file;
+use otspot_core::options::{MipConfig, SolverOptions, Tolerance};
+use otspot_core::solve_milp_with_stats;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;

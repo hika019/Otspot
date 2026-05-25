@@ -46,9 +46,6 @@ parallel = ["otspot-core/parallel"]
 otspot-core = { path = "otspot-core", version = "0.1.1" }
 otspot-io = { path = "otspot-io" }
 otspot-model = { path = "otspot-model" }
-# mimalloc and twofloat are used directly by bins in src/bin/
-mimalloc = { version = "0.1", default-features = false }
-twofloat = "0.8"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -57,11 +54,8 @@ clarabel = "0.11"
 tempfile = "3"
 faer = "0.24.0"
 dyn-stack = "0.13.2"
+twofloat = "0.8"
 otspot-dev = { path = "otspot-dev" }
-
-[[bin]]
-name = "mip_speed_bench"
-path = "src/bin/mip_speed_bench/main.rs"
 
 [[bench]]
 name = "scaling_pricing"
