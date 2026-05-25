@@ -29,6 +29,7 @@ use crate::problem::ConstraintType;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::Path;
 
 /// QPSファイルのパース中に発生するエラー
@@ -74,16 +75,23 @@ impl From<std::io::Error> for QpsError {
 }
 
 /// ファイルパスからQPSファイルを読み込み、`QpProblem`としてパースする
+///
+/// Uses streaming I/O (`BufReader`) — peak memory is proportional to the largest
+/// single line, not the entire file.
 pub fn parse_qps(path: &Path) -> Result<QpProblem, QpsError> {
-    let content = std::fs::read_to_string(path)?;
-    parse_qps_str(&content)
+    let file = std::fs::File::open(path)?;
+    parse_qps_reader(std::io::BufReader::new(file))
+}
+
+/// `BufRead` ストリームから QPS をパースし `QpProblem` を返す。
+pub fn parse_qps_reader<R: BufRead>(reader: R) -> Result<QpProblem, QpsError> {
+    let mut parser = QpsParser::new();
+    parser.parse_reader(reader)
 }
 
 /// QPS形式の文字列を`QpProblem`にパースする
 pub fn parse_qps_str(input: &str) -> Result<QpProblem, QpsError> {
-    let lines: Vec<&str> = input.lines().collect();
-    let mut parser = QpsParser::new();
-    parser.parse(&lines)
+    parse_qps_reader(std::io::Cursor::new(input.as_bytes()))
 }
 
 /// MPSの行タイプ
@@ -193,26 +201,27 @@ impl QpsParser {
         }
     }
 
-    fn parse(&mut self, lines: &[&str]) -> Result<QpProblem, QpsError> {
+    /// QPS ストリームを行単位で読み込み、`QpProblem` を返す。
+    ///
+    /// Uses `BufRead::lines()` so only one line is held in memory at a time.
+    fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<QpProblem, QpsError> {
         let mut current_section = Section::None;
         let mut seen_sections = std::collections::HashSet::new();
+        let mut line_num = 0;
 
-        for (line_idx, line) in lines.iter().enumerate() {
-            let line_num = line_idx + 1;
+        for line_result in reader.lines() {
+            let line = line_result.map_err(QpsError::IoError)?;
+            line_num += 1;
             let trimmed = line.trim();
 
             if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('$') {
                 continue;
             }
 
-            // セクションヘッダー: 先頭が空白でない行
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
                     seen_sections.insert(section);
                     current_section = section;
-                    if section == Section::Name && trimmed.len() > 4 {
-                        // NAME行は問題名を持つが使わない
-                    }
                     if section == Section::EndData {
                         break;
                     }
@@ -221,12 +230,12 @@ impl QpsParser {
             }
 
             match current_section {
-                Section::Rows => self.parse_rows_line(line, line_num)?,
-                Section::Columns => self.parse_columns_line(line, line_num)?,
-                Section::Rhs => self.parse_rhs_line(line, line_num)?,
-                Section::Ranges => self.parse_ranges_line(line, line_num)?,
-                Section::Bounds => self.parse_bounds_line(line, line_num)?,
-                Section::Quadobj => self.parse_quadobj_line(line, line_num)?,
+                Section::Rows => self.parse_rows_line(&line, line_num)?,
+                Section::Columns => self.parse_columns_line(&line, line_num)?,
+                Section::Rhs => self.parse_rhs_line(&line, line_num)?,
+                Section::Ranges => self.parse_ranges_line(&line, line_num)?,
+                Section::Bounds => self.parse_bounds_line(&line, line_num)?,
+                Section::Quadobj => self.parse_quadobj_line(&line, line_num)?,
                 Section::EndData => break,
                 _ => {}
             }
@@ -1182,5 +1191,107 @@ ENDATA
         let prob = parse_qps_str(qps).unwrap();
         assert_eq!(prob.bounds[0].0, 0.0, "BV: lb should be 0, got {}", prob.bounds[0].0);
         assert_eq!(prob.bounds[0].1, 1.0, "BV: ub should be 1, got {}", prob.bounds[0].1);
+    }
+
+    // ─────────────────────────────────────────
+    // Streaming API: round-trip + sentinel tests
+    // ─────────────────────────────────────────
+
+    const STREAM_QPS: &str = "NAME          stream\n\
+ROWS\n N  obj\n G  sum1\n\
+COLUMNS\n    x  obj  0.0  sum1  1.0\n    y  obj  0.0  sum1  1.0\n\
+RHS\n    rhs  sum1  1.0\n\
+BOUNDS\n FR BND  x\n FR BND  y\n\
+QUADOBJ\n    x  x  1.0\n    y  y  1.0\n\
+ENDATA\n";
+
+    /// `parse_qps_reader` produces identical result to `parse_qps_str` (round-trip).
+    #[test]
+    fn test_qps_reader_round_trip() {
+        let expected = parse_qps_str(STREAM_QPS).unwrap();
+        let got = parse_qps_reader(std::io::Cursor::new(STREAM_QPS.as_bytes())).unwrap();
+        assert_eq!(got.num_vars, expected.num_vars);
+        assert_eq!(got.num_constraints, expected.num_constraints);
+        assert_eq!(got.c, expected.c);
+        assert_eq!(got.b, expected.b);
+        assert_eq!(got.bounds, expected.bounds);
+        assert_eq!(got.q.values.len(), expected.q.values.len());
+    }
+
+    /// Tracked fixture: parse tests/netlib/afiro.QPS via reader API.
+    #[test]
+    fn test_qps_reader_fixture_afiro() {
+        let path = std::path::Path::new("tests/netlib/afiro.QPS");
+        if !path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(path).unwrap();
+        let expected = parse_qps_str(&content).unwrap();
+        let file = std::fs::File::open(path).unwrap();
+        let got = parse_qps_reader(std::io::BufReader::new(file)).unwrap();
+        assert_eq!(got.num_vars, expected.num_vars);
+        assert_eq!(got.num_constraints, expected.num_constraints);
+        assert_eq!(got.c, expected.c);
+        assert_eq!(got.b, expected.b);
+    }
+
+    // ─── Sentinel ────────────────────────────────────────────────────────────
+    //
+    // `parse_qps_reader` must call `BufRead::read_line` (via `.lines()` iterator)
+    // and NOT merely delegate to `read_to_string`.
+    //
+    // no-op proof:
+    //   If `parse_qps_reader` is reverted to:
+    //     let s = std::io::read_to_string(reader)?;
+    //     parse_qps_str(&s)
+    //   then the overridden `read_line` is never called → count == 0 → assert fails.
+
+    use std::io::{self, Read};
+
+    struct LineCountingReader<R: BufRead> {
+        inner: R,
+        pub line_call_count: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl<R: BufRead> Read for LineCountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl<R: BufRead> BufRead for LineCountingReader<R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.inner.fill_buf()
+        }
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt)
+        }
+        fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
+            let n = self.inner.read_line(buf)?;
+            if n > 0 {
+                self.line_call_count.set(self.line_call_count.get() + 1);
+            }
+            Ok(n)
+        }
+    }
+
+    /// Sentinel: `parse_qps_reader` calls `read_line` once per content line.
+    ///
+    /// Fails when reverted to `read_to_string` — counter stays 0.
+    #[test]
+    fn test_qps_reader_streaming_sentinel() {
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let reader = LineCountingReader {
+            inner: std::io::Cursor::new(STREAM_QPS.as_bytes()),
+            line_call_count: counter.clone(),
+        };
+        let prob = parse_qps_reader(reader).expect("parse must succeed");
+        assert_eq!(prob.num_vars, 2);
+        let expected_lines = STREAM_QPS.lines().count();
+        assert!(
+            counter.get() >= expected_lines,
+            "streaming must call read_line at least {expected_lines} times, got {}",
+            counter.get()
+        );
     }
 }
