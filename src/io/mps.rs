@@ -11,6 +11,7 @@ use crate::mip::MilpProblem;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
 use std::collections::{HashMap, HashSet};
+use std::io::BufRead;
 use std::path::Path;
 
 /// MPS の INTORG/INTEND マーカーで囲まれ、かつ BOUNDS 指定が一切ない整数変数の
@@ -72,35 +73,50 @@ impl From<std::io::Error> for MpsError {
 
 /// ファイルパスからMPSファイルを読み込み、`LpProblem`としてパースする
 ///
-/// # 引数
-///
-/// * `path` - 読み込むMPSファイルのパス
-///
-/// # 戻り値
-///
-/// 成功時は`LpProblem`、失敗時は`MpsError`を返す
+/// Uses streaming I/O (`BufReader`) — peak memory is proportional to the largest
+/// single line, not the entire file.
 ///
 /// # Errors
 ///
 /// - ファイルが存在しない、または読み取り権限がない場合は`MpsError::IoError`
 /// - ファイル内容のパースに失敗した場合は各種`MpsError`バリアント
 pub fn parse_mps_file(path: &Path) -> Result<LpProblem, MpsError> {
-    let content = std::fs::read_to_string(path)?;
-    parse_mps(&content)
+    let file = std::fs::File::open(path)?;
+    parse_mps_reader(std::io::BufReader::new(file))
+}
+
+/// `BufRead` ストリームから MPS をパースし `LpProblem` を返す。
+///
+/// Large files can be parsed without loading the entire content into memory.
+pub fn parse_mps_reader<R: BufRead>(reader: R) -> Result<LpProblem, MpsError> {
+    let mut parser = MpsParser::new();
+    let (lp, _integer_vars) = parser.parse_reader(reader)?;
+    Ok(lp)
 }
 
 /// ファイルパスからMILPを読み込み、`MilpProblem`としてパースする
 ///
-/// INTORG/INTEND マーカーおよび BV/LI/UI 境界で識別した整数変数を保持する。
-/// 整数変数が存在しない場合は整数集合が空の `MilpProblem` (= LP) を返す。
+/// Uses streaming I/O (`BufReader`). INTORG/INTEND マーカーおよび BV/LI/UI 境界で
+/// 識別した整数変数を保持する。整数変数が存在しない場合は整数集合が空の `MilpProblem`
+/// (= LP) を返す。
 ///
 /// # Errors
 ///
 /// - ファイルが存在しない、または読み取り権限がない場合は`MpsError::IoError`
 /// - ファイル内容のパースに失敗した場合は各種`MpsError`バリアント
 pub fn parse_milp_file(path: &Path) -> Result<MilpProblem, MpsError> {
-    let content = std::fs::read_to_string(path)?;
-    parse_milp(&content)
+    let file = std::fs::File::open(path)?;
+    parse_milp_reader(std::io::BufReader::new(file))
+}
+
+/// `BufRead` ストリームから MPS をパースし `MilpProblem` を返す。
+pub fn parse_milp_reader<R: BufRead>(reader: R) -> Result<MilpProblem, MpsError> {
+    let mut parser = MpsParser::new();
+    let (lp, integer_vars) = parser.parse_reader(reader)?;
+    MilpProblem::new(lp, integer_vars).map_err(|e| MpsError::ParseError {
+        line: 0,
+        message: e.to_string(),
+    })
 }
 
 /// MPS形式の文字列を`LpProblem`にパースする
@@ -142,11 +158,7 @@ pub fn parse_milp_file(path: &Path) -> Result<MilpProblem, MpsError> {
 /// assert_eq!(lp.num_constraints, 1);
 /// ```
 pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
-    let lines: Vec<&str> = input.lines().collect();
-    let mut parser = MpsParser::new();
-    // LP path: 整数情報は破棄して LP relaxation のみを返す (従来挙動を維持)。
-    let (lp, _integer_vars) = parser.parse(&lines)?;
-    Ok(lp)
+    parse_mps_reader(std::io::Cursor::new(input.as_bytes()))
 }
 
 /// MPS形式の文字列を`MilpProblem`にパースする
@@ -178,15 +190,7 @@ pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
 /// assert_eq!(milp.integer_vars, vec![0]);
 /// ```
 pub fn parse_milp(input: &str) -> Result<MilpProblem, MpsError> {
-    let lines: Vec<&str> = input.lines().collect();
-    let mut parser = MpsParser::new();
-    let (lp, integer_vars) = parser.parse(&lines)?;
-    // 整数変数インデックスは col_map から得るため常に範囲内。MilpProblem::new の
-    // 検証エラーは想定外なのでパースエラーへ写像する。
-    MilpProblem::new(lp, integer_vars).map_err(|e| MpsError::ParseError {
-        line: 0,
-        message: e.to_string(),
-    })
+    parse_milp_reader(std::io::Cursor::new(input.as_bytes()))
 }
 
 /// MPSファイルのパース処理を管理する内部構造体
@@ -315,56 +319,50 @@ impl MpsParser {
         }
     }
 
-    /// MPSファイルの全行をセクションごとに解析し、LP relaxation と整数変数インデックスを返す
+    /// MPS ストリームを行単位で読み込み、LP relaxation と整数変数インデックスを返す。
     ///
-    /// セクションヘッダーの検出（先頭に空白がない行）と、
-    /// データ行（先頭に空白がある行）の処理を区別します。
-    /// 戻り値は `(LP relaxation, ソート済み整数変数インデックス)`。整数変数が無ければ
-    /// インデックスは空 (= 純粋な LP)。
-    fn parse(&mut self, lines: &[&str]) -> Result<(LpProblem, Vec<usize>), MpsError> {
+    /// Uses `BufRead::lines()` so only one line is held in memory at a time.
+    /// Supports both file-backed `BufReader` and in-memory `Cursor`.
+    fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<(LpProblem, Vec<usize>), MpsError> {
         let mut current_section = Section::None;
         let mut seen_sections = std::collections::HashSet::new();
+        let mut line_num = 0;
 
-        for (line_idx, line) in lines.iter().enumerate() {
-            let line_num = line_idx + 1;
+        for line_result in reader.lines() {
+            let line = line_result.map_err(MpsError::IoError)?;
+            line_num += 1;
             let trimmed = line.trim();
 
-            // 空行とコメント行（'*'で始まる行）をスキップ
             if trimmed.is_empty() || trimmed.starts_with('*') {
                 continue;
             }
 
-            // セクションヘッダーの検出（先頭が空白でない行がヘッダー候補）
-            // データ行は先頭に空白があるため、この条件で区別できる
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
-                    // COLUMNS を抜ける時点で INTORG が INTEND で閉じられていなければエラー。
-                    // (放置すると残り全列が無警告で整数化される)
                     if self.in_integer_marker && section != Section::Columns {
                         return Err(MpsError::UnclosedIntegerMarker);
                     }
-                    // NAMEとENDATAを除くセクションの重複チェック
                     if section != Section::Name && section != Section::EndData
-                        && seen_sections.contains(&section) {
+                        && seen_sections.contains(&section)
+                    {
                         return Err(MpsError::DuplicateSection(format!("{:?}", section)));
                     }
-                    // 出現済みセクションとして記録
                     seen_sections.insert(section);
                     current_section = section;
 
-                    // NAMEセクション: 同一行から問題名を取得
-                    // 書式: "NAME          problem_name"
                     if section == Section::Name && trimmed.len() > 4 {
                         let name_part = trimmed[4..].trim();
                         if !name_part.is_empty() {
                             self.problem_name = Some(name_part.to_string());
                         }
                     }
+                    if section == Section::EndData {
+                        break;
+                    }
                     continue;
                 }
             }
 
-            // 現在のセクションに応じてデータ行を処理
             match current_section {
                 Section::None => {
                     return Err(MpsError::ParseError {
@@ -372,24 +370,19 @@ impl MpsParser {
                         message: "Line appears before any section header".to_string(),
                     });
                 }
-                Section::Name => {
-                    // NAMEはセクションヘッダー検出時に処理済み
-                }
-                Section::Rows => self.parse_rows_line(line, line_num)?,
-                Section::Columns => self.parse_columns_line(line, line_num)?,
-                Section::Rhs => self.parse_rhs_line(line, line_num)?,
-                Section::Ranges => self.parse_ranges_line(line, line_num)?,
-                Section::Bounds => self.parse_bounds_line(line, line_num)?,
+                Section::Name => {}
+                Section::Rows => self.parse_rows_line(&line, line_num)?,
+                Section::Columns => self.parse_columns_line(&line, line_num)?,
+                Section::Rhs => self.parse_rhs_line(&line, line_num)?,
+                Section::Ranges => self.parse_ranges_line(&line, line_num)?,
+                Section::Bounds => self.parse_bounds_line(&line, line_num)?,
                 Section::EndData => break,
             }
         }
 
-        // ENDATAセクションの存在チェック
         if !seen_sections.contains(&Section::EndData) {
             return Err(MpsError::MissingSection("ENDATA".to_string()));
         }
-
-        // 必須セクション（ROWS・COLUMNS）の存在チェック
         if !seen_sections.contains(&Section::Rows) {
             return Err(MpsError::MissingSection("ROWS".to_string()));
         }
@@ -1795,5 +1788,129 @@ ENDATA
 ";
         let milp = parse_milp(mps).unwrap();
         assert_eq!(milp.integer_vars, vec![0], "x1 のみ整数、x2/x3 は連続");
+    }
+
+    // ─────────────────────────────────────────
+    // Streaming API: round-trip + sentinel tests
+    // ─────────────────────────────────────────
+
+    /// Minimal fixture shared by streaming tests.
+    const STREAM_MPS: &str = "NAME          stream\n\
+ROWS\n N  obj\n L  c1\n\
+COLUMNS\n    x1  obj  3.0  c1  1.0\n    x2  obj  5.0  c1  2.0\n\
+RHS\n    rhs  c1  10.0\n\
+ENDATA\n";
+
+    /// `parse_mps_reader` produces identical result to `parse_mps` (round-trip).
+    #[test]
+    fn test_mps_reader_round_trip() {
+        let expected = parse_mps(STREAM_MPS).unwrap();
+        let got = parse_mps_reader(std::io::Cursor::new(STREAM_MPS.as_bytes())).unwrap();
+        assert_eq!(got.num_vars, expected.num_vars);
+        assert_eq!(got.num_constraints, expected.num_constraints);
+        assert_eq!(got.c, expected.c);
+        assert_eq!(got.b, expected.b);
+        assert_eq!(got.bounds, expected.bounds);
+    }
+
+    /// `parse_milp_reader` produces identical result to `parse_milp` (round-trip).
+    #[test]
+    fn test_milp_reader_round_trip() {
+        let mps = "NAME          m\nROWS\n N  obj\n L  c1\n\
+COLUMNS\n    M1 'MARKER' 'INTORG'\n    x1  obj  -1.0  c1  1.0\n    M2 'MARKER' 'INTEND'\n\
+RHS\n    rhs  c1  10.5\nENDATA\n";
+        let expected = parse_milp(mps).unwrap();
+        let got = parse_milp_reader(std::io::Cursor::new(mps.as_bytes())).unwrap();
+        assert_eq!(got.integer_vars, expected.integer_vars);
+        assert_eq!(got.lp.bounds, expected.lp.bounds);
+    }
+
+    /// CRLF line endings must parse identically to LF (BufRead::lines strips trailing \r).
+    #[test]
+    fn test_mps_reader_crlf_equivalence() {
+        let lf = parse_mps_reader(std::io::Cursor::new(STREAM_MPS.as_bytes())).unwrap();
+        let crlf_src = STREAM_MPS.replace('\n', "\r\n");
+        let crlf = parse_mps_reader(std::io::Cursor::new(crlf_src.as_bytes())).unwrap();
+        assert_eq!(crlf.num_vars, lf.num_vars);
+        assert_eq!(crlf.num_constraints, lf.num_constraints);
+        assert_eq!(crlf.c, lf.c);
+        assert_eq!(crlf.b, lf.b);
+        assert_eq!(crlf.bounds, lf.bounds);
+    }
+
+    /// Tracked fixture: parse netlib/afiro.mps via reader API and compare to string API.
+    #[test]
+    fn test_mps_reader_fixture_afiro() {
+        let path = std::path::Path::new("tests/netlib/afiro.mps");
+        let content = std::fs::read_to_string(path).unwrap();
+        let expected = parse_mps(&content).unwrap();
+        let file = std::fs::File::open(path).unwrap();
+        let got = parse_mps_reader(std::io::BufReader::new(file)).unwrap();
+        assert_eq!(got.num_vars, expected.num_vars, "num_vars mismatch");
+        assert_eq!(got.num_constraints, expected.num_constraints, "num_constraints mismatch");
+        assert_eq!(got.c, expected.c, "objective mismatch");
+        assert_eq!(got.b, expected.b, "rhs mismatch");
+    }
+
+    // ─── Sentinel ────────────────────────────────────────────────────────────
+    //
+    // `parse_mps_reader` must call `BufRead::read_line` (via the `.lines()` iterator)
+    // and NOT merely delegate to `read_to_string`.  `read_to_string` uses `fill_buf` /
+    // `consume` directly and never calls the overridden `read_line` below.
+    //
+    // no-op proof:
+    //   If `parse_mps_reader` is reverted to:
+    //     let s = std::io::read_to_string(reader)?;
+    //     parse_mps(&s)
+    //   then `read_line` is not called → `line_call_count == 0` → the assert fails.
+
+    use std::io::{self, Read};
+
+    struct LineCountingReader<R: BufRead> {
+        inner: R,
+        pub line_call_count: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl<R: BufRead> Read for LineCountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl<R: BufRead> BufRead for LineCountingReader<R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.inner.fill_buf()
+        }
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt)
+        }
+        fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
+            let n = self.inner.read_line(buf)?;
+            if n > 0 {
+                self.line_call_count.set(self.line_call_count.get() + 1);
+            }
+            Ok(n)
+        }
+    }
+
+    /// Sentinel: `parse_mps_reader` calls `read_line` once per content line (streaming).
+    ///
+    /// Fails when reverted to `read_to_string` because `read_to_string` never calls
+    /// the `read_line` override — the counter stays 0.
+    #[test]
+    fn test_mps_reader_streaming_sentinel() {
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let reader = LineCountingReader {
+            inner: std::io::Cursor::new(STREAM_MPS.as_bytes()),
+            line_call_count: counter.clone(),
+        };
+        let lp = parse_mps_reader(reader).expect("parse must succeed");
+        assert_eq!(lp.num_vars, 2);
+        let expected_lines = STREAM_MPS.lines().count();
+        assert!(
+            counter.get() >= expected_lines,
+            "streaming must call read_line at least {expected_lines} times, got {}",
+            counter.get()
+        );
     }
 }
