@@ -36,8 +36,13 @@ pub mod presolve;
 pub mod sparse;
 pub mod problem;
 pub(crate) mod simplex;
-// pub(crate) io: internal-only parsers. Tests in this module are removed;
-// otspot-io is the canonical source of parser tests.
+// Internal parsers compiled only under cfg(test), used by otspot-core's own
+// integration-style tests (e.g. qp::ipm_solver diagnostics). These are
+// source-duplicates of otspot-io's canonical, published parsers and are not
+// part of the production library. Full removal is tracked separately (the
+// ipm_solver tests depend on crate-internal IPM diagnostics).
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod io;
 pub(crate) mod basis;
 pub mod tolerances;
