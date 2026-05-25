@@ -237,7 +237,7 @@ impl Model {
     // `invalid_inputs["quad_objective_dsl"]`) MUST only be mutated through
     // one of these three functions.  This is the single chokepoint that
     // prevents the class of bugs where one setter leaves stale state that
-    // a later setter does not clear (P2-a … P2-e).
+    // a later setter does not clear (P2-a … P2-f).
     // -----------------------------------------------------------------------
 
     /// Install a Q matrix (success path for both DSL and explicit API).
@@ -267,25 +267,42 @@ impl Model {
         }
     }
 
+    /// Return an error message if `q` contains any variable from a different
+    /// model, checking **both** linear coefficients and quad pairs (P2-d/P2-f).
+    /// Returns `None` when all variables belong to this model.
+    fn find_foreign_var_error(&self, q: &QuadExpr) -> Option<String> {
+        // Linear part: coefficient keys are Variable structs with model_id.
+        // The c-vector build reconstructs Variables with self.model_id, so
+        // foreign vars would be silently dropped — detect and reject instead.
+        if let Some(&v) = q.linear.coefficients.keys().find(|v| v.model_id != self.model_id) {
+            return Some(format!(
+                "linear term (var {}) belongs to model {}, not this model ({})",
+                v.index, v.model_id, self.model_id
+            ));
+        }
+        // Quad part
+        if let Some(&(va, vb)) = q.quad.keys().find(|(va, vb)| {
+            va.model_id != self.model_id || vb.model_id != self.model_id
+        }) {
+            return Some(format!(
+                "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
+                va.index, vb.index, va.model_id, vb.model_id, self.model_id
+            ));
+        }
+        None
+    }
+
     /// Shared implementation for `minimize`/`maximize`.
     fn apply_objective(&mut self, q: QuadExpr, sense: OptimizationSense) -> &mut Self {
-        if !q.quad.is_empty() {
-            // Validate that every variable in the quad map belongs to this model.
-            // The linear path implicitly validates via model_id-keyed lookup;
-            // the quad path must do so explicitly (P2-d).
-            let foreign = q.quad.keys().find(|(va, vb)| {
-                va.model_id != self.model_id || vb.model_id != self.model_id
-            });
-            if let Some(&(va, vb)) = foreign {
-                self.fail_dsl_quad(format!(
-                    "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
-                    va.index, vb.index, va.model_id, vb.model_id, self.model_id
-                ));
-            } else {
-                match quad_to_csc(&q.quad, self.variables.len()) {
-                    Ok(csc) => self.install_quad(csc, true),
-                    Err(msg) => self.fail_dsl_quad(msg),
-                }
+        // Validate ALL variables (linear + quad) up front so foreign vars are
+        // always rejected, whether the expression is pure-linear, pure-quad, or
+        // mixed (P2-d: quad-only; P2-f: linear part was silently dropped).
+        if let Some(msg) = self.find_foreign_var_error(&q) {
+            self.fail_dsl_quad(msg);
+        } else if !q.quad.is_empty() {
+            match quad_to_csc(&q.quad, self.variables.len()) {
+                Ok(csc) => self.install_quad(csc, true),
+                Err(msg) => self.fail_dsl_quad(msg),
             }
         } else {
             self.replace_with_linear_objective();
@@ -2543,5 +2560,96 @@ mod mip_model_tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // P2-f: linear part of QuadExpr must also reject foreign-model variables
+    // ---------------------------------------------------------------------------
+
+    // Mixed: quad from m1 + linear from m2 → InvalidInput.
+    #[test]
+    fn test_p2f_mixed_quad_local_linear_foreign_rejected() {
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
+
+        let mut m2 = Model::new("m2");
+        let y2 = m2.add_var("y", 0.0, f64::INFINITY);
+
+        // x1 is local (quad ok), y2 is foreign (linear must be rejected).
+        m1.minimize(x1 * x1 + y2);
+        let result = m1.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-f mixed: foreign linear term must give InvalidInput, got {result:?}"
+        );
+    }
+
+    // Pure-linear path with a foreign variable → must also reject (not drop).
+    #[test]
+    fn test_p2f_pure_linear_foreign_rejected() {
+        let mut m1 = Model::new("m1");
+        let _x1 = m1.add_var("x", 0.0, f64::INFINITY);
+
+        let mut m2 = Model::new("m2");
+        let y2 = m2.add_var("y", 0.0, f64::INFINITY);
+
+        // minimize(y2) on m1 — y2 is foreign, must not silently drop.
+        m1.minimize(1.0 * y2);
+        let result = m1.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-f pure-linear: foreign variable must give InvalidInput (not silent drop), got {result:?}"
+        );
+    }
+
+    // Sanity: mixed with all-local variables must succeed (no false positive).
+    #[test]
+    fn test_p2f_mixed_all_local_accepted() {
+        let mut m = Model::new("m");
+        let x = m.add_var("x", 0.0, f64::INFINITY);
+        // min x^2 - 4x, x >= 0 → x*=2, obj=-4
+        m.minimize(x * x + (-4.0) * x);
+        let result = m.solve().unwrap();
+        assert!(
+            (result[x] - 2.0).abs() < EPS,
+            "P2-f no false positive: x*=2, got {}",
+            result[x]
+        );
+    }
+
+    // Cross-term (from m1+m2) + additional linear foreign: both caught.
+    #[test]
+    fn test_p2f_cross_term_plus_linear_foreign() {
+        let mut m1 = Model::new("m1");
+        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
+
+        let mut m2 = Model::new("m2");
+        let y2 = m2.add_var("y", 0.0, f64::INFINITY);
+
+        // x1 * y2 is a cross-model quad; y2 also appears linear.
+        // Both are foreign from m1's perspective.
+        m1.minimize(x1 * y2 + 2.0 * y2);
+        let result = m1.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-f cross+linear: must give InvalidInput, got {result:?}"
+        );
+    }
+
+    // maximize path: foreign linear variable also rejected via maximize.
+    #[test]
+    fn test_p2f_foreign_linear_maximize_rejected() {
+        let mut m1 = Model::new("m1");
+        let _x1 = m1.add_var("x", 0.0, 5.0);
+
+        let mut m2 = Model::new("m2");
+        let y2 = m2.add_var("y", 0.0, 5.0);
+
+        m1.maximize(1.0 * y2);
+        let result = m1.solve();
+        assert!(
+            matches!(result, Err(ModelError::InvalidInput(_))),
+            "P2-f maximize foreign linear: must give InvalidInput, got {result:?}"
+        );
     }
 }
