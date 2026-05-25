@@ -4,7 +4,8 @@
 //! - `ModelError::SolveError::{MaxIterations, NumericalError}` 露出
 //! - `Model::set_diagonal_q(&[f64])` ergonomic helper
 
-use otspot::model::{Model, ModelError, SolveError};
+use otspot::model::{Model, ModelError, SolutionProof, SolveError};
+use otspot::SolveStatus;
 
 const TOL: f64 = 1e-6;
 const QP_TOL: f64 = 2e-3;
@@ -34,6 +35,32 @@ fn model_api_exposes_bound_duals_qp() {
         "bound_duals length expected 4 (2 lb + 2 ub), got {}",
         result.bound_duals.len()
     );
+}
+
+#[test]
+fn model_result_exposes_status_and_global_proof_for_optimal_lp() {
+    let mut model = Model::new("status_proof_lp");
+    let x = model.add_var("x", 0.0, INF);
+    model.add_constraint(otspot::model::constraint!(x >= 1.0));
+    model.minimize(x);
+
+    let result = model.solve().expect("solve must succeed");
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_eq!(result.proof, SolutionProof::GlobalOptimal);
+    assert!(result.has_global_optimality_proof());
+}
+
+#[test]
+fn model_result_exposes_status_and_global_proof_for_optimal_qp() {
+    let mut model = Model::new("status_proof_qp");
+    let x = model.add_var("x", 0.0, INF);
+    model.set_diagonal_q(&[2.0]);
+    model.minimize(-2.0 * x);
+
+    let result = model.solve().expect("solve must succeed");
+    assert_eq!(result.status, SolveStatus::Optimal);
+    assert_eq!(result.proof, SolutionProof::GlobalOptimal);
+    assert!(result.has_global_optimality_proof());
 }
 
 // ---------------------------------------------------------------------------

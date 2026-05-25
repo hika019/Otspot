@@ -215,7 +215,7 @@ pub struct TimingBreakdown {
 impl Default for SolverResult {
     fn default() -> Self {
         SolverResult {
-            status: SolveStatus::Optimal,
+            status: SolveStatus::NumericalError,
             objective: 0.0,
             solution: vec![],
             dual_solution: vec![],
@@ -315,16 +315,32 @@ impl LpProblem {
     ) -> Result<Self, SolverError> {
         // Validate dimensions
         if c.len() != a.ncols {
-            return Err(SolverError::DimensionMismatch { field: "c", expected: a.ncols, got: c.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "c",
+                expected: a.ncols,
+                got: c.len(),
+            });
         }
         if b.len() != a.nrows {
-            return Err(SolverError::DimensionMismatch { field: "b", expected: a.nrows, got: b.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "b",
+                expected: a.nrows,
+                got: b.len(),
+            });
         }
         if constraint_types.len() != b.len() {
-            return Err(SolverError::DimensionMismatch { field: "constraint_types", expected: b.len(), got: constraint_types.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "constraint_types",
+                expected: b.len(),
+                got: constraint_types.len(),
+            });
         }
         if bounds.len() != c.len() {
-            return Err(SolverError::DimensionMismatch { field: "bounds", expected: c.len(), got: bounds.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "bounds",
+                expected: c.len(),
+                got: bounds.len(),
+            });
         }
 
         Ok(LpProblem {
@@ -376,7 +392,10 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "c", .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            SolverError::DimensionMismatch { field: "c", .. }
+        ));
     }
 
     #[test]
@@ -388,7 +407,10 @@ mod tests {
 
         let result = LpProblem::new(c, a, b);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SolverError::DimensionMismatch { field: "b", .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            SolverError::DimensionMismatch { field: "b", .. }
+        ));
     }
 
     #[test]
@@ -423,5 +445,12 @@ mod tests {
         };
         let display = format!("{}", result);
         assert_eq!(display, "Status: Optimal, Objective: 42.5");
+    }
+
+    #[test]
+    fn solver_result_default_is_not_success() {
+        let result = SolverResult::default();
+        assert_eq!(result.status, SolveStatus::NumericalError);
+        assert!(result.solution.is_empty());
     }
 }
