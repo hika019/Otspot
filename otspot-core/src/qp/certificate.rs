@@ -23,6 +23,16 @@ use crate::qp::kkt_resid::dual_sign_violation;
 /// 6. **Duality gap** (caller-supplied `duality_gap_rel`).
 ///
 /// Returns `Err(NotProven)` listing every condition that exceeded `tol`.
+///
+/// ## Gap threshold
+///
+/// The duality gap is checked against `tol` (= `user_eps`, typically 1e-6), which is
+/// **stricter** than the historic `PROMOTION_GAP_TOL = 1e-1` used in
+/// `IpmOutcome::satisfies_eps`. This is intentional: a solution claiming Optimal must
+/// close the gap to the user-requested precision, not merely to a structural 10 %
+/// tolerance. `satisfies_eps` retains its loose gate to select the *best available*
+/// iterate across retry attempts; `prove_optimal` then acts as the honest Optimal mint,
+/// requiring every KKT condition — including the gap — to meet `tol`.
 pub fn prove_optimal<'a>(
     view: &ProblemView<'a>,
     x: &[f64],
