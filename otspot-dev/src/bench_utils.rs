@@ -229,6 +229,8 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         || data_lower.contains("qplib-nonconvex-official")
     {
         "qplib_nonconvex_official.csv"
+    } else if data_lower.contains("qplib_nonconvex") || data_lower.contains("qplib-nonconvex") {
+        "qplib_nonconvex_synthetic.csv"
     } else if data_lower.contains("qplib") {
         "qplib.csv"
     } else if data_lower.contains("osqp_bench") || data_lower.contains("osqp-bench") {
@@ -239,6 +241,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         "netlib_lp_infeas.csv"
     } else if data_lower.contains("lp_problems_extra") || data_lower.contains("lp-problems-extra") {
         "netlib_lp_extra.csv"
+    } else if data_lower.contains("lp_problems_unbounded")
+        || data_lower.contains("lp-problems-unbounded")
+    {
+        "lp_problems_unbounded.csv"
     } else {
         "netlib_lp.csv"
     };
@@ -380,5 +386,70 @@ mod tests {
         let p = detect_csv_path("/data/lp_problems", None, root);
         assert!(p.to_string_lossy().contains("netlib_lp.csv"),
             "Expected netlib_lp.csv, got {p:?}");
+    }
+
+    #[test]
+    fn test_detect_csv_path_qplib_nonconvex_synthetic() {
+        let root = std::path::Path::new("/solver");
+        // qplib_nonconvex (no _official suffix) → synthetic CSV
+        let p = detect_csv_path("/data/qplib_nonconvex", None, root);
+        assert!(
+            p.to_string_lossy().contains("qplib_nonconvex_synthetic.csv"),
+            "Expected qplib_nonconvex_synthetic.csv, got {p:?}"
+        );
+        // Dash variant
+        let p2 = detect_csv_path("/data/qplib-nonconvex", None, root);
+        assert!(
+            p2.to_string_lossy().contains("qplib_nonconvex_synthetic.csv"),
+            "Expected qplib_nonconvex_synthetic.csv (dash), got {p2:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_csv_path_qplib_nonconvex_official_not_shadowed() {
+        let root = std::path::Path::new("/solver");
+        // qplib_nonconvex_official must still map to official CSV
+        let p = detect_csv_path("/data/qplib_nonconvex_official", None, root);
+        assert!(
+            p.to_string_lossy().contains("qplib_nonconvex_official.csv"),
+            "Expected qplib_nonconvex_official.csv, got {p:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_csv_path_lp_problems_unbounded() {
+        let root = std::path::Path::new("/solver");
+        let p = detect_csv_path("/data/lp_problems_unbounded", None, root);
+        assert!(
+            p.to_string_lossy().contains("lp_problems_unbounded.csv"),
+            "Expected lp_problems_unbounded.csv, got {p:?}"
+        );
+        // Dash variant
+        let p2 = detect_csv_path("/data/lp-problems-unbounded", None, root);
+        assert!(
+            p2.to_string_lossy().contains("lp_problems_unbounded.csv"),
+            "Expected lp_problems_unbounded.csv (dash), got {p2:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_csv_path_lp_problems_unbounded_not_shadowed_by_infeas_extra() {
+        let root = std::path::Path::new("/solver");
+        // Unbounded must not fall through to infeas/extra/default
+        let p_infeas = detect_csv_path("/data/lp_problems_infeas", None, root);
+        assert!(
+            p_infeas.to_string_lossy().contains("netlib_lp_infeas.csv"),
+            "Expected netlib_lp_infeas.csv, got {p_infeas:?}"
+        );
+        let p_extra = detect_csv_path("/data/lp_problems_extra", None, root);
+        assert!(
+            p_extra.to_string_lossy().contains("netlib_lp_extra.csv"),
+            "Expected netlib_lp_extra.csv, got {p_extra:?}"
+        );
+        let p_default = detect_csv_path("/data/lp_problems", None, root);
+        assert!(
+            p_default.to_string_lossy().contains("netlib_lp.csv"),
+            "Expected netlib_lp.csv, got {p_default:?}"
+        );
     }
 }

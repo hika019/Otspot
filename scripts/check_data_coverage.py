@@ -94,7 +94,10 @@ def read_csv_names(csv_path: Path) -> set[str]:
 
 
 def data_files(data_dir: Path, extensions: list[str] | None) -> set[str]:
-    """Return stems of data files (excluding Highs.log and hidden files)."""
+    """Return stems of data files (excluding Highs.log and hidden files).
+
+    If *extensions* is None, all file suffixes are accepted.
+    """
     result: set[str] = set()
     if not data_dir.is_dir():
         return result
@@ -104,8 +107,6 @@ def data_files(data_dir: Path, extensions: list[str] | None) -> set[str]:
         if not entry.is_file():
             continue
         if extensions is None or entry.suffix in extensions:
-            result.add(entry.stem)
-        elif extensions is None:
             result.add(entry.stem)
     return result
 
@@ -143,14 +144,7 @@ def main() -> int:
             })
             continue
 
-        # Count actual data files (exclude Highs.log, symlinks-as-dirs, hidden)
-        all_files = set()
-        for entry in data_dir.iterdir():
-            if entry.name.startswith(".") or entry.name == "Highs.log":
-                continue
-            if entry.is_file():
-                all_files.add(entry.stem)
-
+        all_files = data_files(data_dir, exts)
         csv_names = read_csv_names(csv_path) if csv_path else set()
         no_ref = all_files - csv_names  # in dir, not in CSV
         csv_gap = csv_names - all_files  # in CSV, not in dir
