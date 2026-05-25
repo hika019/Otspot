@@ -3,10 +3,10 @@
 //! Extracts the common: baseline CSV loading, per-problem solve + classify verdict,
 //! and summary reporting — so both callers share one implementation.
 
-use crate::io::qps::parse_qps;
-use crate::options::SolverOptions;
-use crate::problem::SolveStatus;
-use crate::qp::solve_qp_with;
+use crate::qps::parse_qps;
+use otspot_core::options::SolverOptions;
+use otspot_core::problem::SolveStatus;
+use otspot_core::qp::solve_qp_with;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

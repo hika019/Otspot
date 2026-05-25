@@ -56,3 +56,9 @@
 //! ```
 
 pub use otspot_core::*;
+
+/// File I/O — MPS, QPS, and QPLIB format parsers.
+pub use otspot_io as io;
+
+/// LP coverage screening utilities.
+pub use otspot_io::screening;

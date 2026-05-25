@@ -7,15 +7,15 @@
 //! - [`parse_mps`] / [`parse_mps_file`]: `LpProblem` を返す (整数性は破棄＝LP relaxation)。
 //! - [`parse_milp`] / [`parse_milp_file`]: 整数変数付きの `MilpProblem` を返す。
 
-use crate::mip::MilpProblem;
-use crate::problem::{ConstraintType, LpProblem};
-use crate::sparse::CscMatrix;
+use otspot_core::mip::MilpProblem;
+use otspot_core::problem::{ConstraintType, LpProblem};
+use otspot_core::sparse::CscMatrix;
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::Path;
 
 // MpsError lives in crate::error; re-export for path stability.
-pub use crate::error::MpsError;
+pub use otspot_core::error::MpsError;
 
 /// MPS の INTORG/INTEND マーカーで囲まれ、かつ BOUNDS 指定が一切ない整数変数の
 /// デフォルト上限。古典的な OSL/CPLEX 規約では「明示境界のない整数変数は二値」と
@@ -91,8 +91,8 @@ pub fn parse_milp_reader<R: BufRead>(reader: R) -> Result<MilpProblem, MpsError>
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use otspot_core::io::mps::parse_mps;
+/// ```
+/// use otspot_io::mps::parse_mps;
 ///
 /// let mps = r"NAME          example
 /// ROWS
@@ -120,8 +120,8 @@ pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use otspot_core::io::mps::parse_milp;
+/// ```
+/// use otspot_io::mps::parse_milp;
 ///
 /// let mps = r"NAME          milp
 /// ROWS
@@ -643,6 +643,8 @@ impl MpsParser {
                             (b - abs_r, b)
                         }
                     }
+                    // ConstraintType is #[non_exhaustive]; no other variants exist today.
+                    _ => continue,
                 };
 
                 // 既存行をLe制約（上限側）に変更
@@ -1224,8 +1226,8 @@ ENDATA
     /// 最適解: x1=3, x2=0 (or x1=0, x2=3), 最適値=3
     #[test]
     fn test_range_solve_simple() {
-        use crate::problem::SolveStatus;
-        use crate::simplex::solve;
+        use otspot_core::problem::SolveStatus;
+        use otspot_core::solve;
 
         let mps = r"NAME range_solve
 ROWS
@@ -1574,8 +1576,8 @@ ENDATA
     /// - marker_lo2: x1<=10.5 で連続なら x1=10.5 → -10 ではなく -10.5
     #[test]
     fn test_milp_solve_bound_conventions() {
-        use crate::options::{MipConfig, SolverOptions};
-        use crate::problem::SolveStatus;
+        use otspot_core::options::{MipConfig, SolverOptions};
+        use otspot_core::problem::SolveStatus;
 
         // (説明, BOUNDS セクション本体, 制約 c1 の RHS, 整数最適 objective)。
         // 全て min -x1 s.t. x1 <= rhs。HiGHS で独立検証済み。
@@ -1600,7 +1602,7 @@ RHS\n    rhs  c1  {rhs}\n\
             let milp = parse_milp(&mps).unwrap();
             let opts = SolverOptions::default();
             let cfg = MipConfig::default();
-            let res = crate::mip::solve_milp(&milp, &opts, &cfg);
+            let res = otspot_core::mip::solve_milp(&milp, &opts, &cfg);
             assert_eq!(res.status, SolveStatus::Optimal, "[{label}] should be Optimal");
             assert!(
                 (res.objective - expected_obj).abs() < 1e-6,
@@ -1615,8 +1617,8 @@ RHS\n    rhs  c1  {rhs}\n\
     /// -3.5 となり期待値から外れる。HiGHS で -3 を独立確認済み。
     #[test]
     fn test_milp_solve_ui_bound() {
-        use crate::options::{MipConfig, SolverOptions};
-        use crate::problem::SolveStatus;
+        use otspot_core::options::{MipConfig, SolverOptions};
+        use otspot_core::problem::SolveStatus;
 
         let mps = r"NAME milp
 ROWS
@@ -1631,7 +1633,7 @@ BOUNDS
 ENDATA
 ";
         let milp = parse_milp(mps).unwrap();
-        let res = crate::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
+        let res = otspot_core::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
         assert_eq!(res.status, SolveStatus::Optimal);
         assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
         assert!((res.solution[0] - 3.0).abs() < 1e-6, "x1 should be 3");
@@ -1700,8 +1702,8 @@ ENDATA\n",
     /// → 整数最適 x=3, obj=-3。列を取りこぼすと parse 失敗 or 解が変わる。
     #[test]
     fn test_columns_wide_padding_solves() {
-        use crate::options::{MipConfig, SolverOptions};
-        use crate::problem::SolveStatus;
+        use otspot_core::options::{MipConfig, SolverOptions};
+        use otspot_core::problem::SolveStatus;
         let pad = " ".repeat(22 - 4 - "x#1#1".len());
         let mps = format!(
             "NAME wide\n\
@@ -1715,7 +1717,7 @@ ENDATA\n",
             rpad = " ".repeat(22 - 4 - "rhs".len()),
         );
         let milp = parse_milp(&mps).unwrap();
-        let res = crate::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
+        let res = otspot_core::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
         assert_eq!(res.status, SolveStatus::Optimal);
         assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
     }

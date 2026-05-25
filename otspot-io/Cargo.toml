@@ -1,0 +1,12 @@
+[package]
+name = "otspot-io"
+version = "0.1.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "File I/O (MPS/QPS/QPLIB) for the otspot solver"
+repository = "https://github.com/hika019/otspot"
+homepage = "https://github.com/hika019/otspot"
+publish = false
+
+[dependencies]
+otspot-core = { path = "../otspot-core", version = "0.1.1" }
