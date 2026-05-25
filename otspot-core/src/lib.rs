@@ -32,13 +32,16 @@ pub mod error;
 pub use error::SolverError;
 pub use error::MpsError;
 #[doc(hidden)]
-pub mod bench_utils;
-pub(crate) mod presolve;
+pub mod presolve;
 pub mod sparse;
 pub mod problem;
 pub(crate) mod simplex;
-// io remains pub(crate) — internal use only; public io is in otspot-io.
-// Functions only called from test code; suppress the dead_code lint.
+// Internal parsers compiled only under cfg(test), used by otspot-core's own
+// integration-style tests (e.g. qp::ipm_solver diagnostics). These are
+// source-duplicates of otspot-io's canonical, published parsers and are not
+// part of the production library. Full removal is tracked separately (the
+// ipm_solver tests depend on crate-internal IPM diagnostics).
+#[cfg(test)]
 #[allow(dead_code)]
 pub(crate) mod io;
 pub(crate) mod basis;
@@ -51,7 +54,8 @@ pub use options::{
 pub mod qp;
 pub mod mip;
 pub mod lp;
-pub(crate) mod linalg;
+#[doc(hidden)]
+pub mod linalg;
 
 #[cfg(test)]
 pub(crate) mod test_kkt;
@@ -162,20 +166,15 @@ pub use mip::{
 pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 
-/// Re-export of the BFRT (Bound-Flipping Ratio Test) primitive.
-/// Public so integration sentinels in `tests/diag_simplex_bound_flip.rs`
-/// can exercise the ratio-test step-size effect without forcing private
-/// module exposure for the whole `simplex` tree.
+/// Internal BFRT (Bound-Flipping Ratio Test) primitives for integration tests.
+/// Deferred for removal until typed pipeline (#15) restructures the simplex tree.
+#[doc(hidden)]
 pub mod bound_flip {
     pub use crate::simplex::dual_advanced::bound_flip::{
         bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations,
         BfrtResult, ColBound,
     };
 }
-pub use presolve::{
-    run_presolve_with_flags, run_qp_presolve_phase1, run_qp_presolve_phase2,
-    PresolveFlags, PresolveStatus,
-};
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 
 /// RAII guard that disables a production sentinel for the duration of its lifetime.

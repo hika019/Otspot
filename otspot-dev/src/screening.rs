@@ -1,9 +1,8 @@
-//! Shared LP coverage screening logic for both the `lp_screen` binary and integration tests.
-//!
-//! Extracts the common: baseline CSV loading, per-problem solve + classify verdict,
-//! and summary reporting — so both callers share one implementation.
+// LP coverage screening utilities.
+// Moved from otspot-io (where it was pub) to otspot-dev (publish = false),
+// so it no longer appears in the public otspot-io API surface.
 
-use crate::qps::parse_qps;
+use otspot_io::qps::parse_qps;
 use otspot_core::options::SolverOptions;
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::solve_qp_with;
@@ -42,9 +41,6 @@ pub struct ScreenEntry {
 }
 
 /// Load the baseline objective CSV.
-///
-/// Lines starting with `#`, empty lines, and the header row (`problem_name,...`) are skipped.
-/// Returns a map from problem name to reference objective value.
 pub fn load_baseline(csv_path: &str) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     let content = match fs::read_to_string(csv_path) {
@@ -66,9 +62,6 @@ pub fn load_baseline(csv_path: &str) -> HashMap<String, f64> {
 }
 
 /// Screen a single LP file: parse, solve, classify verdict.
-///
-/// `obj_offset` (N-row RHS from QPS parser) is added to the Netlib reference value
-/// before comparison. Baseline CSV stores pure `c^T x` without the offset.
 pub fn screen_single(
     path: &Path,
     name: &str,

@@ -48,3 +48,20 @@ pub fn feas_rel_tol() -> f64 {
     PIVOT_TOL.sqrt()
 }
 
+/// Relative tolerance for objective-value matching against a known reference.
+///
+/// `|obj − ref| / (1 + |ref|) < OBJ_MATCH_REL_TOL` is used by `obj_within_tol`
+/// and the `known_optimal_obj` early-exit logic in lp_dispatch.
+pub const OBJ_MATCH_REL_TOL: f64 = 1e-4;
+
+/// Returns `true` when `obj` is within relative tolerance of `ref_obj`.
+///
+/// Criterion: `|obj − ref_obj| / (1 + |ref_obj|) < tol`.
+/// Returns `false` if either value is non-finite.
+pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
+    if !obj.is_finite() || !ref_obj.is_finite() {
+        return false;
+    }
+    (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
+}
+

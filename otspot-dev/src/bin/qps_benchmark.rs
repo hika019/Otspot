@@ -14,15 +14,14 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use otspot::bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
-use otspot::io::qps::{parse_qps, QpsError};
-use otspot::options::{SimplexMethod, SolverOptions};
-use otspot::problem::{ConstraintType, SolveStatus};
-use otspot::qp::kkt_resid::{self, dd_impl};
-use otspot::tolerances::ZERO_TOL;
-use otspot::qp::ipm_solver::solve_ipm;
-use otspot::qp::solve_qp_with;
-use otspot::QpProblem;
+use otspot_dev::bench_utils::{detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult};
+use otspot_io::qps::{parse_qps, QpsError};
+use otspot_core::options::{SimplexMethod, SolverOptions};
+use otspot_core::problem::{ConstraintType, SolveStatus};
+use otspot_core::qp::kkt_resid::{self, dd_impl};
+use otspot_core::tolerances::ZERO_TOL;
+use otspot_core::qp::ipm_solver::solve_ipm;
+use otspot_core::qp::{solve_qp_with, QpProblem};
 
 enum BenchError {
     Parse(QpsError),
@@ -189,7 +188,7 @@ fn compute_dfeas_orig(
     // `(1 + |x| + |bound|)` でスケールすれば、磁石的 magic を廃しつつ Simplex
     // 内部精度と整合した bound-hit 判定が得られる。
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
-        use otspot::tolerances::PIVOT_TOL;
+        use otspot_core::tolerances::PIVOT_TOL;
         let rel_tol = PIVOT_TOL; // 1e-8 — Simplex 内部 dual_tol と一致 (構造的派生)
         let mut dfeas_abs = 0.0_f64;
         let mut dfeas_rel = 0.0_f64;
@@ -384,8 +383,8 @@ fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, Benc
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use otspot::problem::ConstraintType;
-    use otspot::sparse::CscMatrix;
+    use otspot_core::problem::ConstraintType;
+    use otspot_core::sparse::CscMatrix;
 
     /// Eq制約の下方向違反がpfeasに反映される
     #[test]
@@ -594,7 +593,7 @@ mod tests {
     /// load_expected_statuses が INFEASIBLE エントリを正しく読む
     #[test]
     fn test_expected_status_infeasible_loaded() {
-        use otspot::bench_utils::{load_expected_statuses, ExpectedStatus};
+        use otspot_dev::bench_utils::{load_expected_statuses, ExpectedStatus};
         use std::io::Write;
 
         let csv = "problem_name,optimal_obj,source\n\
@@ -827,10 +826,10 @@ fn main() {
         // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
         // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。収束未達 status
         // (Timeout / MaxIterations / NumericalError / NonConvex) は honest 報告。
-        let result = otspot::bench_utils::apply_bench_status_promotion(
+        let result = otspot_dev::bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,
-            otspot::bench_utils::BenchPromotionPolicy::QpsBenchmark,
+            otspot_dev::bench_utils::BenchPromotionPolicy::QpsBenchmark,
         );
 
         let (status_str, note) = match result.status {

@@ -1,14 +1,8 @@
-//! 最適化問題の入出力（I/O）モジュール
-//!
-//! 各種ファイル形式で LP/QP 問題を読み書きする機能を提供する。
-//!
-//! ## サポートフォーマット
-//!
-//! | サブモジュール | 形式 | 説明 |
-//! |--------------|------|------|
-//! | [`mps`] | MPS | 業界標準の数理計画問題記述形式（LP用） |
-//! | [`qps`] | QPS | MPS + QUADOBJセクション（QP用） |
+// Internal QPS parser — a source-duplicate of otspot-io's canonical parser,
+// retained only for otspot-core's own qp::ipm_solver diagnostic tests, which
+// access crate-internal IPM machinery and pub(crate) CscMatrix fields and so
+// cannot move to otspot-io integration tests without exposing those internals.
+// Compiled under cfg(test) only (see lib.rs); not part of the production library.
+// Canonical, published parsers and their 95 tests live in otspot-io.
 
-pub mod mps;
 pub mod qps;
-pub mod qplib;

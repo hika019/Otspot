@@ -7,7 +7,7 @@ pub(crate) mod ipm_core;
 pub mod ipm_solver;
 pub mod kkt_resid;
 pub(crate) mod linalg;
-mod lp_dispatch;
+pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
@@ -18,6 +18,8 @@ pub use diagnose::{
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 pub use multistart::solve_qp_multistart;
 pub(crate) use lp_dispatch::solve_as_lp_pub;
+#[doc(hidden)]
+pub use lp_dispatch::pick_best_ipm_or_simplex;
 /// Public accessor for the LP→IPM size gate (used by qps_benchmark for label
 /// reporting). Returns `true` when an LP of size `(n, m)` will be routed via
 /// IPM-first in `solve_as_lp_pub`.

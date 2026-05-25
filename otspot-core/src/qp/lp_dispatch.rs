@@ -115,9 +115,9 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
                 }
                 // known_optimal_obj が設定されており obj が一致するなら simplex retry 不要。
                 if let Some(ref_obj) = options.known_optimal_obj {
-                    if crate::bench_utils::obj_within_tol(
+                    if crate::tolerances::obj_within_tol(
                         ipm_result.objective, ref_obj,
-                        crate::bench_utils::OBJ_MATCH_REL_TOL,
+                        crate::tolerances::OBJ_MATCH_REL_TOL,
                     ) && !ipm_result.solution.is_empty()
                     {
                         let promoted = SolverResult { status: SolveStatus::Optimal, ..ipm_result };
@@ -153,7 +153,32 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         certified.iterations = simplex_result.iterations;
         return certified;
     }
-    crate::bench_utils::pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
+    pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
+}
+
+/// Pick the better of an IPM result and a simplex result.
+///
+/// If simplex timed out (or hit a non-convergence status) but IPM previously
+/// found a `SuboptimalSolution` or `LocallyOptimal` with a non-empty solution
+/// vector, the IPM result is returned.  In all other cases the simplex result
+/// is returned unchanged.
+pub fn pick_best_ipm_or_simplex(
+    ipm_candidate: Option<SolverResult>,
+    simplex_result: SolverResult,
+) -> SolverResult {
+    let simplex_failed = matches!(
+        simplex_result.status,
+        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
+    );
+    if let Some(ipm) = ipm_candidate {
+        if simplex_failed
+            && matches!(ipm.status, SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal)
+            && !ipm.solution.is_empty()
+        {
+            return ipm;
+        }
+    }
+    simplex_result
 }
 
 /// LP→IPM 呼び出し時に presolve を無効化したオプションを生成。

@@ -3,7 +3,6 @@
 pub mod mps;
 pub mod qps;
 pub mod qplib;
-pub mod screening;
 
 /// Thread-local peak-allocation tracker for memory sentinel tests.
 ///

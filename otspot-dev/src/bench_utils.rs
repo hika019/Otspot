@@ -1,25 +1,23 @@
-//! ベンチマーク共通ユーティリティ
+//! Benchmark and test utility functions.
 //!
-//! qps_benchmark / bench_qplib 両バイナリで共有するCSV読み込み・正解値照合ロジック。
+//! Shared helpers used by integration tests, benchmark binaries, and the
+//! `lp_screen` development tool.  Not part of the public solver API.
 
-use crate::problem::{ConstraintType, SolveStatus, SolverResult};
-use crate::qp::kkt_resid::{self, f64_impl};
-use crate::qp::QpProblem;
-use crate::sparse::CscMatrix;
+use otspot_core::problem::{ConstraintType, SolveStatus, SolverResult};
+use otspot_core::qp::kkt_resid::{self, f64_impl};
+use otspot_core::qp::QpProblem;
+use otspot_core::sparse::CscMatrix;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// 制約 `Ax {op} b` と bounds `lb ≤ x ≤ ub` を成分相対化して `max` 違反を返す。
+// Re-export production utilities that also live in otspot-core.
+pub use otspot_core::tolerances::{OBJ_MATCH_REL_TOL, obj_within_tol};
+pub use otspot_core::qp::pick_best_ipm_or_simplex;
+
+/// Relative primal feasibility max-violation for LP / QP.
 ///
-/// LP / QP の primal feasibility 残差は共通形 (Le/Ge/Eq + finite bounds) なので
-/// helper として抽出。`ax = a · x` を渡せない場合は INFINITY (shape 不一致)。
-///
-/// 規約:
-///   - Le:  max(0, ax−b) / (1 + |ax| + |b|)
-///   - Ge:  max(0, b−ax) / (1 + |ax| + |b|)
-///   - Eq:  |ax−b|       / (1 + |ax| + |b|)
-///   - lb finite: max(0, lb−xⱼ) / (1 + |xⱼ| + |lb|)
-///   - ub finite: max(0, xⱼ−ub) / (1 + |xⱼ| + |ub|)
+/// Checks `Ax {op} b` and `lb ≤ x ≤ ub` component-wise with relative scaling
+/// `1 + |ax| + |b|` (or `1 + |x| + |bnd|` for bound constraints).
 pub fn primal_feas_max(
     a: &CscMatrix,
     b: &[f64],
@@ -31,7 +29,7 @@ pub fn primal_feas_max(
     if x.len() != n {
         return f64::INFINITY;
     }
-    let ax = if a.nrows > 0 {
+    let ax = if a.nrows() > 0 {
         match a.mat_vec_mul(x) {
             Ok(v) => v,
             Err(_) => return f64::INFINITY,
@@ -40,7 +38,7 @@ pub fn primal_feas_max(
         Vec::new()
     };
     let mut max_v = 0.0_f64;
-    #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
+    #[allow(unreachable_patterns)]
     for (i, cti) in ct.iter().enumerate() {
         if i >= ax.len() || i >= b.len() {
             continue;
@@ -65,21 +63,14 @@ pub fn primal_feas_max(
     max_v
 }
 
-/// QP 元空間 KKT 残差 (stationarity / primal_inf / comp_ineq / comp_bound) の
-/// 成分相対化 max。`diag_nonconvex_kkt.rs` の compute_kkt と同一規約:
-///   ∇_x L = Qx + c + Aᵀy − lb_du + ub_du
-///   primal: max(0, ax−b) for Le, max(0, b−ax) for Ge, |ax−b| for Eq + bounds
-///   comp_ineq: |yᵢ·slackᵢ| / (1 + |yᵢ|·(|axᵢ|+|bᵢ|))
-///   comp_bound: |duⱼ·(x−bnd)| / (1 + |duⱼ|·(|xⱼ|+|bnd|))
-/// 解形状不一致 (x.len() != n) なら INFINITY を返す。
+/// QP KKT residual max (stationarity / primal_inf / comp_ineq / comp_bound),
+/// component-relative-scaled.
 pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> f64 {
     let n = prob.num_vars;
     if x.len() != n {
         return f64::INFINITY;
     }
-    // 原実装は y.len() != a.nrows で mat_vec_mul err → INFINITY を返したので
-    // shape mismatch を保つ。
-    if prob.a.nrows > 0 && !y.is_empty() && y.len() != prob.a.nrows {
+    if prob.a.nrows() > 0 && !y.is_empty() && y.len() != prob.a.nrows() {
         return f64::INFINITY;
     }
 
@@ -130,7 +121,7 @@ pub fn compute_qp_kkt_max(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) ->
     max_resid
 }
 
-/// `|obj − global_ref| / (1 + |global_ref|)`。両者の finite を要求。
+/// `|obj − global_ref| / (1 + |global_ref|)`. Returns `None` if either is non-finite.
 pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
     if !obj.is_finite() || !global_ref.is_finite() {
         return None;
@@ -138,66 +129,17 @@ pub fn compute_gap_to_global(obj: f64, global_ref: f64) -> Option<f64> {
     Some((obj - global_ref).abs() / (1.0 + global_ref.abs()))
 }
 
-/// Relative tolerance for objective-value matching against a known reference.
-///
-/// `|obj − ref| / (1 + |ref|) < OBJ_MATCH_REL_TOL` is the criterion used by
-/// `obj_within_tol` and the `known_optimal_obj` early-exit logic in lp_dispatch.
-pub const OBJ_MATCH_REL_TOL: f64 = 1e-4;
-
-/// Returns `true` when `obj` is within relative tolerance of `ref_obj`.
-///
-/// Uses the criterion `|obj − ref_obj| / (1 + |ref_obj|) < tol`.
-/// Returns `false` if either value is non-finite.
-pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
-    if !obj.is_finite() || !ref_obj.is_finite() {
-        return false;
-    }
-    (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
-}
-
-/// Pick the better of an IPM result and a simplex result.
-///
-/// If simplex timed out (or hit a non-convergence status) but IPM previously
-/// found a `SuboptimalSolution` or `LocallyOptimal` with a non-empty solution
-/// vector, the IPM result is returned instead.  This prevents the silent
-/// degradation where a useful IPM incumbent is thrown away when simplex runs
-/// out of deadline.
-///
-/// In all other cases the simplex result is returned unchanged.
-pub fn pick_best_ipm_or_simplex(
-    ipm_candidate: Option<SolverResult>,
-    simplex_result: SolverResult,
-) -> SolverResult {
-    let simplex_failed = matches!(
-        simplex_result.status,
-        SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
-    );
-    if let Some(ipm) = ipm_candidate {
-        if simplex_failed
-            && matches!(ipm.status, SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal)
-            && !ipm.solution.is_empty()
-        {
-            return ipm;
-        }
-    }
-    simplex_result
-}
-
-/// bench harness 種別ごとの promotion policy.
-///
-/// qps_benchmark は obj 有限性チェックなし、bench_qplib は obj 有限性も要求する
-/// (qplib は baseline obj 照合経路に流すため obj が non-finite だと意味がない)。
+/// bench harness promotion policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchPromotionPolicy {
     QpsBenchmark,
     BenchQplib,
 }
 
-/// SuboptimalSolution / LocallyOptimal で有効な全長解を持つ result を Optimal に格上げする.
+/// Promote `SuboptimalSolution` / `LocallyOptimal` with a full solution to `Optimal`.
 ///
-/// Timeout は意図的に格上げ対象外: Primal 半 deadline incumbent を silent に Optimal 化すると
-/// 後段の品質判定 (pfeas/dfeas/obj) に流れて PFEAS_FAIL 表示となり、真因 (deadline 切れ)
-/// が観測者に隠れる。Timeout は honest に Timeout 報告。
+/// `Timeout` is intentionally excluded: surfacing an honest Timeout is more
+/// useful than silently promoting a partial incumbent.
 pub fn apply_bench_status_promotion(
     result: SolverResult,
     num_vars: usize,
@@ -207,8 +149,7 @@ pub fn apply_bench_status_promotion(
         result.status,
         SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
     );
-    let has_full_solution =
-        !result.solution.is_empty() && result.solution.len() == num_vars;
+    let has_full_solution = !result.solution.is_empty() && result.solution.len() == num_vars;
     let obj_ok = match policy {
         BenchPromotionPolicy::QpsBenchmark => true,
         BenchPromotionPolicy::BenchQplib => result.objective.is_finite(),
@@ -220,31 +161,25 @@ pub fn apply_bench_status_promotion(
     }
 }
 
-/// 正解値照合結果
+/// Objective check result.
 pub enum ObjCheckResult {
     Ok { rel_err: f64 },
     Mismatch { rel_err: f64 },
     NoRef,
 }
 
-/// CSVに記録された問題の期待ステータス
-///
-/// optimal_obj 列が INFEASIBLE / UNBOUNDED の文字列の場合に使用する。
-/// 数値の場合は Optimal (有限最適値あり)。
+/// Expected status for a benchmark problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpectedStatus {
-    /// 有限最適値 (通常問題)
     Optimal,
-    /// 主問題が実行不可能
     Infeasible,
-    /// 主問題が非有界
     Unbounded,
 }
 
-/// CSVから問題の期待ステータス一覧を読み込む
+/// Load expected statuses from a baseline CSV.
 ///
-/// 通常の float 行は Optimal、"INFEASIBLE"/"UNBOUNDED" 文字列行を
-/// それぞれ Infeasible / Unbounded として返す。
+/// Float entries → `Optimal`, `"INFEASIBLE"` → `Infeasible`, `"UNBOUNDED"` → `Unbounded`.
+/// Other values (e.g., `"no_ref"`) are skipped.
 pub fn load_expected_statuses(csv_path: &Path) -> HashMap<String, ExpectedStatus> {
     let mut map = HashMap::new();
     let content = match std::fs::read_to_string(csv_path) {
@@ -266,7 +201,6 @@ pub fn load_expected_statuses(csv_path: &Path) -> HashMap<String, ExpectedStatus
             "INFEASIBLE" => ExpectedStatus::Infeasible,
             "UNBOUNDED" => ExpectedStatus::Unbounded,
             _ => {
-                // 数値なら Optimal (parse 失敗は skip)
                 if status_str.parse::<f64>().is_ok() {
                     ExpectedStatus::Optimal
                 } else {
@@ -279,7 +213,7 @@ pub fn load_expected_statuses(csv_path: &Path) -> HashMap<String, ExpectedStatus
     map
 }
 
-/// data_dir名とオーバーライドパスからCSVパスを決定する
+/// Determine baseline CSV path from the data directory name.
 pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path) -> PathBuf {
     if let Some(p) = override_path {
         return PathBuf::from(p);
@@ -312,11 +246,10 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
     if candidate.exists() {
         return candidate;
     }
-    // フォールバック: カレントディレクトリ基準
     PathBuf::from("data/baseline_objectives").join(csv_name)
 }
 
-/// 正解値CSVを読み込む
+/// Load objective baseline CSV.
 pub fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     let content = match std::fs::read_to_string(csv_path) {
@@ -338,6 +271,30 @@ pub fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
     map
 }
 
+/// Check solver objective against a baseline CSV (1% threshold by default).
+pub fn check_baseline_objective(
+    problem_name: &str,
+    solver_obj: f64,
+    known: &HashMap<String, f64>,
+    eps_obj: f64,
+) -> ObjCheckResult {
+    match known.get(problem_name) {
+        Some(&known_obj) => {
+            if !solver_obj.is_finite() {
+                return ObjCheckResult::Mismatch { rel_err: f64::INFINITY };
+            }
+            let denom = 1.0_f64.max(known_obj.abs());
+            let rel_err = (solver_obj - known_obj).abs() / denom;
+            if rel_err > eps_obj {
+                ObjCheckResult::Mismatch { rel_err }
+            } else {
+                ObjCheckResult::Ok { rel_err }
+            }
+        }
+        None => ObjCheckResult::NoRef,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,14 +304,12 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::new().expect("tmpfile");
         tmp.write_all(content.as_bytes()).unwrap();
         let path = tmp.path().to_path_buf();
-        // keep alive by leaking (test only)
         Box::leak(Box::new(tmp));
         path
     }
 
     #[test]
     fn test_load_expected_statuses_infeasible() {
-        // INFEASIBLE / UNBOUNDED エントリが正しく読み込まれるか
         let csv = "problem_name,optimal_obj,source\n\
             galenet,INFEASIBLE,https://example.com\n\
             klein1,INFEASIBLE,https://example.com\n\
@@ -368,13 +323,11 @@ mod tests {
         assert_eq!(map.get("klein1"), Some(&ExpectedStatus::Infeasible));
         assert_eq!(map.get("unbnd_toy"), Some(&ExpectedStatus::Unbounded));
         assert_eq!(map.get("feasible_toy"), Some(&ExpectedStatus::Optimal));
-        // no_ref は parse 失敗でスキップ → None
         assert_eq!(map.get("noref_toy"), None);
     }
 
     #[test]
     fn test_load_expected_statuses_case_insensitive() {
-        // 大文字・小文字どちらでも認識
         let csv = "problem_name,optimal_obj\n\
             p1,infeasible\n\
             p2,INFEASIBLE\n\
@@ -410,7 +363,7 @@ mod tests {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems_infeas", None, root);
         assert!(p.to_string_lossy().contains("netlib_lp_infeas.csv"),
-            "Expected netlib_lp_infeas.csv, got {:?}", p);
+            "Expected netlib_lp_infeas.csv, got {p:?}");
     }
 
     #[test]
@@ -418,7 +371,7 @@ mod tests {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems_extra", None, root);
         assert!(p.to_string_lossy().contains("netlib_lp_extra.csv"),
-            "Expected netlib_lp_extra.csv, got {:?}", p);
+            "Expected netlib_lp_extra.csv, got {p:?}");
     }
 
     #[test]
@@ -426,32 +379,6 @@ mod tests {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems", None, root);
         assert!(p.to_string_lossy().contains("netlib_lp.csv"),
-            "Expected netlib_lp.csv, got {:?}", p);
-    }
-}
-
-/// 正解値と照合する（1%閾値）
-pub fn check_baseline_objective(
-    problem_name: &str,
-    solver_obj: f64,
-    known: &HashMap<String, f64>,
-    eps_obj: f64,
-) -> ObjCheckResult {
-    match known.get(problem_name) {
-        Some(&known_obj) => {
-            // NaN / Inf の solver_obj は無条件で Mismatch 扱いにする (rel_err 比較が
-            // NaN > eps = false で Ok に倒れて bug を見落とす false-positive を防ぐ)。
-            if !solver_obj.is_finite() {
-                return ObjCheckResult::Mismatch { rel_err: f64::INFINITY };
-            }
-            let denom = 1.0_f64.max(known_obj.abs());
-            let rel_err = (solver_obj - known_obj).abs() / denom;
-            if rel_err > eps_obj {
-                ObjCheckResult::Mismatch { rel_err }
-            } else {
-                ObjCheckResult::Ok { rel_err }
-            }
-        }
-        None => ObjCheckResult::NoRef,
+            "Expected netlib_lp.csv, got {p:?}");
     }
 }

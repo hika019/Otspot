@@ -14,7 +14,7 @@
 //!
 //! TDD methodology: tests written first, FAILs confirmed, then impl, then PASSes.
 
-use otspot::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
+use otspot_dev::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus, SolverResult};
 use otspot::qp::QpProblem;

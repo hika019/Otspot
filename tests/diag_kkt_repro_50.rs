@@ -20,7 +20,7 @@
 //! no-op path is covered. This file's role is *shape* coverage, not helper
 //! no-op coverage.
 
-use otspot::bench_utils::compute_qp_kkt_max;
+use otspot_dev::bench_utils::compute_qp_kkt_max;
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::{solve_qp_global, QpProblem};

@@ -16,36 +16,7 @@ mod tests {
     use crate::problem::SolveStatus;
     use std::path::Path;
 
-    #[test]
-    fn test_ipm_hs21_cmp_full_solver() {
-        let path = Path::new("data/maros_meszaros/HS21.QPS");
-        if !path.exists() {
-            eprintln!("HS21.QPS not found, skipping");
-            return;
-        }
-        let prob = parse_qps(path).expect("parse HS21");
-        let opts = SolverOptions::default();
-        let v1 = crate::qp::solve_qp_with(&prob, &opts);
-        let v2 = solve_ipm(&prob, &opts);
-        eprintln!("=== v1 ===");
-        eprintln!("  status={:?} obj={} iters={}", v1.status, v1.objective, v1.iterations);
-        eprintln!("  x={:?}", v1.solution);
-        eprintln!("  y={:?}", v1.dual_solution);
-        eprintln!("  z={:?}", v1.bound_duals);
-        eprintln!("=== v2 ===");
-        eprintln!("  status={:?} obj={} iters={}", v2.status, v2.objective, v2.iterations);
-        eprintln!("  x={:?}", v2.solution);
-        eprintln!("  y={:?}", v2.dual_solution);
-        eprintln!("  z={:?}", v2.bound_duals);
-        let view = super::outcome::ProblemView {
-            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-            bounds: &prob.bounds, constraint_types: &prob.constraint_types, eliminated_cols: &[],
-        };
-        let v1_kkt = super::kkt::kkt_residual_rel(&view, &v1.solution, &v1.dual_solution, &v1.bound_duals);
-        let v2_kkt = super::kkt::kkt_residual_rel(&view, &v2.solution, &v2.dual_solution, &v2.bound_duals);
-        eprintln!("v1 KKT_rel={:.3e}", v1_kkt);
-        eprintln!("v2 KKT_rel={:.3e}", v2_kkt);
-    }
+    // test_ipm_hs21_cmp_full_solver moved to otspot-io/tests/bug_repro.rs (#28 dedup).
 
     #[test]
     fn test_v2_hs21() {
