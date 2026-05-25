@@ -565,9 +565,11 @@ impl SolverOptions {
     /// Validate all option fields.
     ///
     /// Returns the first `Err` encountered, in field declaration order.
-    /// Called by public solver entry points before starting work; invalid
-    /// options cause the entry to return [`crate::problem::SolveStatus::NumericalError`]
-    /// rather than propagating bad values into the solver core.
+    /// Called by public solver entry points (`solve_qp_with`, `solve_qp_global`,
+    /// `solve_qp_multistart`, `solve_milp`, `solve_miqp`, `simplex::solve_with`)
+    /// before starting work; invalid options cause the entry to return
+    /// [`crate::problem::SolveStatus::NumericalError`] rather than propagating
+    /// bad values into the solver core.
     ///
     /// Invalid conditions:
     /// - `primal_tol` / `dual_tol`: non-finite or <= 0

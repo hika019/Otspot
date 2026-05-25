@@ -10,12 +10,9 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 
 /// Solve an LP directly. Sets `result.stats.route = SolveRoute::LpDirect`.
 ///
-/// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
-/// validation (invalid tolerance, zero threads, etc.).
+/// Returns [`SolveStatus::NumericalError`] if `options` fails validation;
+/// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
-    if options.validate().is_err() {
-        return SolverResult::numerical_error();
-    }
     let mut result = crate::simplex::solve_with(problem, options);
     result.stats.route = SolveRoute::LpDirect;
     result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
@@ -50,10 +47,10 @@ mod tests {
         .unwrap()
     }
 
-    /// Invalid options are rejected at the LP entry with NumericalError.
+    /// Invalid options produce NumericalError via `solve_lp_with`.
     ///
-    /// Wiring sentinel: removing the `validate()` call from `solve_lp_with` causes
-    /// all cases to pass into the solver with invalid config.
+    /// Validation is performed by `simplex::solve_with` (the load-bearing sentinel
+    /// lives in `simplex::entry::invalid_options_rejected_at_simplex_entry`).
     #[test]
     fn invalid_options_rejected_at_lp_entry() {
         let lp = make_trivial_lp();

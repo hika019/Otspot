@@ -79,6 +79,9 @@ pub fn solve_qp_global_with_stats(
     options: &SolverOptions,
     cfg: &GlobalOptimizationConfig,
 ) -> (SolverResult, GlobalStats) {
+    if options.validate().is_err() {
+        return (SolverResult::numerical_error(), GlobalStats::default());
+    }
     // deadline 計算: options.deadline 優先、無ければ timeout_secs から固定。
     let deadline = options.deadline.or_else(|| {
         options
@@ -534,5 +537,30 @@ mod tests {
         let indef = diag_concave_1d(1.0);
         assert!(!is_q_indefinite(&psd), "x² should be PSD");
         assert!(is_q_indefinite(&indef), "-x² should be indefinite");
+    }
+
+    /// Invalid options are rejected at the global entry with NumericalError — not panic.
+    ///
+    /// Sentinel: removing `validate()` from `solve_qp_global_with_stats` causes
+    /// negative `timeout_secs` to reach `Duration::from_secs_f64`, which **panics**.
+    /// With the guard present, NumericalError is returned instead.
+    #[test]
+    fn invalid_options_rejected_at_global_entry() {
+        let p = diag_concave_1d(2.0);
+        let cfg = GlobalOptimizationConfig::default();
+        let cases: &[(&str, SolverOptions)] = &[
+            ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+            ("inf timeout_secs", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
+            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+        ];
+        for (label, opts) in cases {
+            let result = solve_qp_global(&p, opts, &cfg);
+            assert_eq!(
+                result.status,
+                SolveStatus::NumericalError,
+                "solve_qp_global with {label} must return NumericalError (not panic)"
+            );
+        }
     }
 }
