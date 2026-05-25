@@ -12,6 +12,7 @@ use crate::presolve::{
     qp_transforms::{QpPresolveStatus, QpPostsolveStep},
 };
 use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::certificate::prove_optimal;
 use crate::qp::problem::QpProblem;
 use super::core::run_ipm;
 use crate::presolve::QpPresolveResult;
@@ -344,8 +345,10 @@ fn solve_ipm_with_runner(
         return SolverResult::unbounded();
     }
 
+    let view = ProblemView::from_problem(problem);
+
     if total_deadline.is_some_and(|d| Instant::now() >= d) {
-        return finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false);
+        return finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false, &view);
     }
 
     // presolve Ruiz 済なら IPM 側で重ね掛けしない (二重 scale で誤収束する)。
@@ -463,16 +466,21 @@ fn solve_ipm_with_runner(
         .cancel_flag
         .as_ref()
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-    finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled)
+    finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled, &view)
 }
 
 /// IpmOutcome → SolverResult: eps 達成→Optimal、外部停止→Timeout、内部停止→Suboptimal、解無し→NumericalError。
+///
+/// eps 達成時は `prove_optimal` で KKT + dual_sign を再検証する。`satisfies_eps` は dual_sign
+/// チェックを含まないため、prove_optimal が唯一の Optimal mint 関数として機能する。
+/// `prove_optimal` が `Err(NotProven)` を返す場合は SuboptimalSolution に降格する。
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,
     n_orig: usize,
     total_deadline: Option<Instant>,
     cancelled: bool,
+    view: &ProblemView<'_>,
 ) -> SolverResult {
     let krylov_ir_skipped = outcome.postsolve_krylov_ir_skipped;
     if let Some(infeas) = outcome.infeasibility_status {
@@ -509,10 +517,27 @@ fn finalize_outcome(
     }
 
     let status = if outcome.satisfies_eps(user_eps) {
-        if outcome.is_locally_optimal {
-            SolveStatus::LocallyOptimal
+        // prove_optimal: KKT 全条件 (stationarity / primal_feas / bound_feas /
+        // complementarity / dual_sign / duality_gap) を tol=user_eps で再検証。
+        // satisfies_eps が欠く dual_sign チェックを追加し、唯一の Optimal mint 経路にする。
+        // z layout: [lb-half (z_lb≥0), ub-half (z_ub≥0)] = bound_contrib 規約に準拠。
+        let proven = prove_optimal(
+            view,
+            &outcome.solution,
+            &outcome.dual_solution,
+            &outcome.bound_duals,
+            outcome.duality_gap_rel,
+            user_eps,
+        );
+        if proven.is_ok() {
+            if outcome.is_locally_optimal {
+                SolveStatus::LocallyOptimal
+            } else {
+                SolveStatus::Optimal
+            }
         } else {
-            SolveStatus::Optimal
+            // KKT または dual_sign が tol 超 → Optimal を主張しない。
+            SolveStatus::SuboptimalSolution
         }
     } else if timed_out {
         SolveStatus::Timeout
@@ -721,6 +746,119 @@ mod tests {
             let out = guard_qp_optimal(r, &prob);
             assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
+    }
+
+    /// prove_optimal が dual_sign 違反で Err を返す場合、finalize_outcome は
+    /// SuboptimalSolution を返す (Optimal を主張しない)。
+    ///
+    /// 構成: A=[[1],[-1]], b=[1,-1] の cancelling-Le QP で x=1 は両制約が active。
+    /// y_bad=[-v,-v] では stationarity = [1,-1]·[-v,-v] = -v+v = 0 (cancels)、
+    /// comp = y_i·slack_i = (-v)·0 = 0 (active constraint)。
+    /// よって kkt/primal/bound/comp はすべて 0 だが dual_sign は Le で y<0 → 違反。
+    /// satisfies_eps はパスするが prove_optimal が dual_sign で Err → SuboptimalSolution。
+    #[test]
+    fn finalize_outcome_dual_sign_notproven_demotes_to_suboptimal() {
+        use crate::problem::ConstraintType;
+        use crate::sparse::CscMatrix;
+
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
+        ).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![1.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le, ConstraintType::Le],
+        ).unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let user_eps = 1e-6_f64;
+
+        // y=[-0.1,-0.1] は Le 制約で dual_sign 違反 (Le → y≥0 required)。
+        // stationarity: A^T y = [1,-1]·[-0.1,-0.1] = -0.1+0.1 = 0 (キャンセル)。
+        // comp: y_i·slack_i = (-0.1)·0 = 0 (x=1 で両制約が active)。
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![-0.1, -0.1],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+
+        assert!(
+            outcome.satisfies_eps(user_eps),
+            "satisfies_eps must pass: all residuals=0, gap=0 (dual_sign は未検査)"
+        );
+        let result = finalize_outcome(outcome, user_eps, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "dual_sign 違反 → prove_optimal が Err → SuboptimalSolution に降格すべき"
+        );
+    }
+
+    /// finalize_outcome が prove_optimal を通過する正常ケースの確認。
+    ///
+    /// A=[[1],[-1]], b=[1,-1] で x=1、y=[v,v] (v>0, Le 符号正) は
+    /// dual_sign を含む全条件を通過し Optimal が返る。
+    #[test]
+    fn finalize_outcome_dual_sign_valid_returns_optimal() {
+        use crate::problem::ConstraintType;
+        use crate::sparse::CscMatrix;
+
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
+        ).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![1.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le, ConstraintType::Le],
+        ).unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let user_eps = 1e-6_f64;
+
+        // y=[v,v] (v>0) は stationarity キャンセル + Le 符号正 → 全条件通過。
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![0.1, 0.1],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+
+        assert!(outcome.satisfies_eps(user_eps));
+        let result = finalize_outcome(outcome, user_eps, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Optimal,
+            "有効な dual は prove_optimal を通過し Optimal が返るべき"
+        );
     }
 
     /// x = D·x_s、z_orig = z_s/D の逆変換を直接検証。
