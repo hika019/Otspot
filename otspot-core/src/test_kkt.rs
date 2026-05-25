@@ -9,6 +9,7 @@
 
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::qp::kkt_resid::f64_impl;
 use crate::qp::QpProblem;
 use crate::simplex::solve_with;
 use crate::sparse::CscMatrix;
@@ -64,27 +65,10 @@ pub fn dfeas_rel_bound(
 
 /// Primal feasibility (|Ax-b|∞) — Eq/Le/Ge 別に違反方向のみ取る。
 pub fn pfeas_abs(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) -> f64 {
-    let m = b.len();
-    let mut ax = vec![0.0_f64; m];
-    for j in 0..x.len() {
-        if let Ok((rows, vals)) = a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * x[j];
-            }
-        }
-    }
-    let mut max_v = 0.0_f64;
-    for i in 0..m {
-        let v = match cts[i] {
-            ConstraintType::Eq => (ax[i] - b[i]).abs(),
-            ConstraintType::Le => (ax[i] - b[i]).max(0.0),
-            ConstraintType::Ge => (b[i] - ax[i]).max(0.0),
-        };
-        if v > max_v {
-            max_v = v;
-        }
-    }
-    max_v
+    let ax = f64_impl::ax(a, x);
+    f64_impl::constraint_violations(&ax, b, cts)
+        .into_iter()
+        .fold(0.0_f64, f64::max)
 }
 
 /// Variable-bound feasibility: lb ≤ x ≤ ub の違反量 (max)。
