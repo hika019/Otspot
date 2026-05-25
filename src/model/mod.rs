@@ -1784,6 +1784,30 @@ mod tests {
         assert!((result.try_value(x).unwrap() - result.value(x)).abs() < 1e-12);
     }
 
+    // Out-of-range with a *matching* model_id: a variable added to the same
+    // model after solving has an index past the result's solution vector.
+    // Sentinel for the `.ok_or_else` branch (the model_id check passes here, so
+    // no-op'ing the bounds check — e.g. `self.solution[var.index]` — panics).
+    #[test]
+    fn try_value_out_of_range_same_model_returns_err() {
+        let mut model = Model::new("grow");
+        let x = model.add_var("x", 0.0, f64::INFINITY);
+        model.minimize(x);
+        let result = model.solve().unwrap();
+
+        // Extend the same model: same model_id, index beyond solution length.
+        let late = model.add_var("late", 0.0, f64::INFINITY);
+        assert_eq!(late.model_id, result.model_id, "same model_id expected");
+        assert!(
+            late.index >= result.solution.len(),
+            "test setup: late var must be out of range"
+        );
+        assert!(
+            result.try_value(late).is_err(),
+            "try_value must return Err for an out-of-range index even when model_id matches"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // ModelResult: Clone derive
     // -----------------------------------------------------------------------
