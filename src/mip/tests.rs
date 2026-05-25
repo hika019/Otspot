@@ -276,15 +276,27 @@ fn model_convex_miqp_branches_to_integer_optimum() {
 
 #[test]
 fn model_nonconvex_miqp_errors() {
-    // indefinite Q (negative curvature) → out of scope → explicit error, not silent wrong.
-    let mut m = Model::new("nonconvex_miqp");
-    let x = m.add_int_var("x", 0.0, 5.0);
-    m.set_diagonal_q(&[-2.0]);
-    m.minimize(x);
-    let err = m.solve().unwrap_err();
-    match err {
-        ModelError::Internal(msg) => assert!(msg.contains("Non-convex"), "msg={msg}"),
-        other => panic!("expected Internal Non-convex error, got {other:?}"),
+    // indefinite Q (negative curvature) → must return ModelError::NonConvex, not silent wrong.
+    // Table-driven: multiple negative-eigenvalue patterns.
+    let cases: &[(&str, &[f64], &[f64])] = &[
+        ("single neg", &[-2.0], &[1.0]),
+        ("neg-pos-2var", &[-3.0, 2.0], &[0.0, 1.0]),
+    ];
+    for &(name, q_diag, c_vec) in cases {
+        let n = q_diag.len();
+        let mut m = Model::new(name);
+        let vars: Vec<_> = (0..n).map(|i| m.add_int_var(&format!("x{i}"), 0.0, 5.0)).collect();
+        m.set_diagonal_q(q_diag);
+        let obj = vars.iter().zip(c_vec).fold(
+            crate::model::expression::Expression::from(0.0),
+            |acc, (&v, &c)| acc + c * v,
+        );
+        m.minimize(obj);
+        let err = m.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::NonConvex(_)),
+            "[{name}] expected ModelError::NonConvex, got {err:?}"
+        );
     }
 }
 
