@@ -57,6 +57,20 @@
 
 pub use otspot_core::*;
 
+/// Algebraic modeling API (Model, Variable, Expression, Constraint, constraint! macro).
+pub use otspot_model::{
+    Model, ModelError, ModelResult, SolutionProof, SolveError,
+    Constraint, ConstraintSense, Expression, VarKind, Variable,
+};
+
+/// `constraint!` macro for building constraints with natural syntax.
+pub use otspot_model::constraint;
+
+/// `model` submodule — re-exports the full otspot-model API.
+pub mod model {
+    pub use otspot_model::*;
+}
+
 /// File I/O — MPS, QPS, and QPLIB format parsers.
 pub use otspot_io as io;
 

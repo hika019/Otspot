@@ -1,0 +1,15 @@
+[package]
+name = "otspot-model"
+version = "0.1.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Algebraic modeling API for otspot (Model, Variable, Expression, Constraint)"
+repository = "https://github.com/hika019/otspot"
+homepage = "https://github.com/hika019/otspot"
+publish = false
+
+[dependencies]
+otspot-core = { path = "../otspot-core", version = "0.1.1" }
+
+[dev-dependencies]
+proptest = "1.10.0"

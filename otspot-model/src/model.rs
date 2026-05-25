@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```
-//! use otspot_core::model::{Model, constraint};
+//! use otspot_model::{Model, constraint};
 //!
 //! let mut model = Model::new("production");
 //! let x = model.add_var("x", 0.0, f64::INFINITY);
@@ -14,20 +14,15 @@
 //! println!("x = {}", result[x]);
 //! ```
 
-pub mod constraint;
-pub mod expression;
-pub mod variable;
+use crate::constraint::{Constraint, ConstraintSense};
+use crate::expression::Expression;
+use crate::variable::{VarKind, Variable};
 
-pub use crate::constraint;
-pub use constraint::{Constraint, ConstraintSense};
-pub use expression::Expression;
-pub use variable::{VarKind, Variable};
+use crate::variable::VariableDefinition;
 
-use variable::VariableDefinition;
-
-use crate::options::Tolerance;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-use crate::sparse::CscMatrix;
+use otspot_core::options::Tolerance;
+use otspot_core::problem::{ConstraintType, LpProblem, SolveStatus};
+use otspot_core::sparse::CscMatrix;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Index;
@@ -360,7 +355,7 @@ impl Model {
         let problem = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
             .map_err(map_lp_build_err)?;
 
-        let mut lp_opts = crate::options::SolverOptions::default();
+        let mut lp_opts = otspot_core::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
             lp_opts.timeout_secs = Some(t);
         }
@@ -373,11 +368,11 @@ impl Model {
         if let Some(n) = self.threads {
             lp_opts.threads = n;
         }
-        let solver_result = crate::lp::solve_lp_with(&problem, &lp_opts);
+        let solver_result = otspot_core::lp::solve_lp_with(&problem, &lp_opts);
 
         // SolverResult の dual/rc/slack は extract_dual_info によって
         // 元の制約空間 (Eq/Ge/Le) と変数空間 (bounds 込み) で復元済み。
-        let lp_extras = |sr: &crate::problem::SolverResult| {
+        let lp_extras = |sr: &otspot_core::problem::SolverResult| {
             let dual = if sr.dual_solution.is_empty() {
                 None
             } else {
@@ -405,7 +400,7 @@ impl Model {
             oriented + self.obj_offset
         };
         let lp_model_id = self.model_id;
-        let build_ok = |sr: crate::problem::SolverResult| {
+        let build_ok = |sr: otspot_core::problem::SolverResult| {
             let (dual, rc, slack) = lp_extras(&sr);
             let status = sr.status.clone();
             ModelResult {
@@ -457,18 +452,14 @@ impl Model {
         c: Vec<f64>,
         bounds: Vec<(f64, f64)>,
         q_orig: CscMatrix,
-    ) -> Result<crate::qp::QpProblem, ModelError> {
-        use crate::qp::QpProblem;
+    ) -> Result<otspot_core::qp::QpProblem, ModelError> {
+        use otspot_core::qp::QpProblem;
 
         let num_vars = self.variables.len();
 
         // maximize QP: negate Q (Q→-Q), c is already negated by solve()
         let qp_q = if self.sense == OptimizationSense::Maximize {
-            let mut q_neg = q_orig.clone();
-            for v in q_neg.values.iter_mut() {
-                *v = -*v;
-            }
-            q_neg
+            q_orig.scale_values(-1.0)
         } else {
             q_orig
         };
@@ -524,7 +515,7 @@ impl Model {
     ) -> Result<ModelResult, ModelError> {
         let qp_problem = self.build_qp_problem(c, bounds, q_orig)?;
 
-        let mut opts = crate::options::SolverOptions::default();
+        let mut opts = otspot_core::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
             opts.timeout_secs = Some(t);
         }
@@ -537,7 +528,7 @@ impl Model {
         if let Some(n) = self.threads {
             opts.threads = n;
         }
-        let qp_result = crate::qp::solve_qp_with(&qp_problem, &opts);
+        let qp_result = otspot_core::qp::solve_qp_with(&qp_problem, &opts);
         let qp_stats = qp_result.stats.clone();
 
         // dual_solution: Le=そのまま / Ge=符号反転済み / Eq=μ1-μ2 折り畳み済み。
@@ -647,7 +638,7 @@ impl Model {
         bounds: Vec<(f64, f64)>,
         integer_vars: Vec<usize>,
     ) -> Result<ModelResult, ModelError> {
-        let mut opts = crate::options::SolverOptions::default();
+        let mut opts = otspot_core::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
             opts.timeout_secs = Some(t);
         }
@@ -657,7 +648,7 @@ impl Model {
         if let Some(n) = self.threads {
             opts.threads = n;
         }
-        let cfg = crate::options::MipConfig::default();
+        let cfg = otspot_core::options::MipConfig::default();
 
         let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
             // MIQP: convex QP relaxation per node.
@@ -665,9 +656,9 @@ impl Model {
                 opts.use_ruiz_scaling = flag;
             }
             let qp = self.build_qp_problem(c, bounds, q_orig.clone())?;
-            let miqp = crate::mip::MiqpProblem::new(qp, integer_vars.clone())
+            let miqp = otspot_core::mip::MiqpProblem::new(qp, integer_vars.clone())
                 .map_err(|e| ModelError::Internal(e.to_string()))?;
-            crate::mip::solve_miqp(&miqp, &opts, &cfg)
+            otspot_core::mip::solve_miqp(&miqp, &opts, &cfg)
         } else {
             // MILP: LP relaxation per node.
             if let Some(flag) = self.presolve {
@@ -675,9 +666,9 @@ impl Model {
             }
             let lp = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
                 .map_err(map_lp_build_err)?;
-            let milp = crate::mip::MilpProblem::new(lp, integer_vars.clone())
+            let milp = otspot_core::mip::MilpProblem::new(lp, integer_vars.clone())
                 .map_err(|e| ModelError::Internal(e.to_string()))?;
-            crate::mip::solve_milp(&milp, &opts, &cfg)
+            otspot_core::mip::solve_milp(&milp, &opts, &cfg)
         };
 
         self.finish_mip(result, &integer_vars)
@@ -687,7 +678,7 @@ impl Model {
     /// offset, round integer components, and map the status. Shared by MILP/MIQP.
     fn finish_mip(
         &self,
-        result: crate::problem::SolverResult,
+        result: otspot_core::problem::SolverResult,
         integer_vars: &[usize],
     ) -> Result<ModelResult, ModelError> {
         let signed_obj = |raw: f64| -> f64 {
@@ -710,7 +701,7 @@ impl Model {
         };
 
         let mip_model_id = self.model_id;
-        let build_ok = |sr: crate::problem::SolverResult| {
+        let build_ok = |sr: otspot_core::problem::SolverResult| {
             let status = sr.status.clone();
             ModelResult {
                 model_id: mip_model_id,
@@ -776,10 +767,8 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
         SolveStatus::NonConvex(msg) => Some(ModelError::NonConvex(msg)),
         SolveStatus::NotSupported(msg) => Some(ModelError::NotSupported(msg)),
-        // Ok-capable or context-dependent statuses are handled by the caller's
-        // explicit match arms, never as a hard error. Listed exhaustively (no
-        // wildcard) so a new `SolveStatus` variant forces a deliberate decision
-        // here at compile time instead of silently becoming `Internal`.
+        // Ok-capable or context-dependent statuses: returned as `None` so the
+        // caller's explicit match arms decide, never as a hard error here.
         SolveStatus::Optimal
         | SolveStatus::LocallyOptimal
         | SolveStatus::MaxIterations
@@ -787,6 +776,13 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         | SolveStatus::Timeout
         | SolveStatus::NonconvexLocal
         | SolveStatus::NonconvexGlobal => None,
+        // `SolveStatus` is `#[non_exhaustive]` and lives in another crate
+        // (otspot-core), so a wildcard is mandatory here — the compile-time
+        // exhaustiveness guard the same-crate version had is lost to the crate
+        // split. Returning `None` is safe: every caller wraps this in
+        // `unwrap_or_else(|| ModelError::Internal(..))`, so an unknown future
+        // variant surfaces as `Err`, never a silent success / false Optimal.
+        _ => None,
     }
 }
 
@@ -804,8 +800,8 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
 ///
 /// Non-finite coefficients and invalid bounds are user-input errors → `InvalidInput`;
 /// dimension/structural failures (which the Model builder controls) stay `Internal`.
-fn map_lp_build_err(e: crate::error::SolverError) -> ModelError {
-    use crate::error::SolverError;
+fn map_lp_build_err(e: otspot_core::error::SolverError) -> ModelError {
+    use otspot_core::error::SolverError;
     match e {
         SolverError::NonFiniteCoefficient { .. } | SolverError::InvalidBounds { .. } => {
             ModelError::InvalidInput(e.to_string())
@@ -815,8 +811,8 @@ fn map_lp_build_err(e: crate::error::SolverError) -> ModelError {
 }
 
 /// Map a low-level `QpProblem` construction failure to a `ModelError` (see [`map_lp_build_err`]).
-fn map_qp_build_err(e: crate::qp::QpProblemError) -> ModelError {
-    use crate::qp::QpProblemError;
+fn map_qp_build_err(e: otspot_core::qp::QpProblemError) -> ModelError {
+    use otspot_core::qp::QpProblemError;
     match e {
         QpProblemError::NonFiniteCoefficient { .. }
         | QpProblemError::InvalidBounds { .. }
@@ -824,6 +820,8 @@ fn map_qp_build_err(e: crate::qp::QpProblemError) -> ModelError {
             ModelError::InvalidInput(e.to_string())
         }
         QpProblemError::DimensionMismatch(_) => ModelError::Internal(e.to_string()),
+        // #[non_exhaustive]: wildcard required for cross-crate matching.
+        _ => ModelError::Internal(e.to_string()),
     }
 }
 
@@ -881,6 +879,8 @@ impl SolutionProof {
                 );
                 SolutionProof::FeasibleUnproven
             }
+            // #[non_exhaustive]: wildcard required for cross-crate matching.
+            _ => SolutionProof::FeasibleUnproven,
         }
     }
 }
@@ -919,7 +919,7 @@ pub struct ModelResult {
     /// Empty when not provided by the solver.
     pub bound_duals: Vec<f64>,
     /// Per-solve routing and warm-start statistics (race-free, per-result).
-    pub stats: crate::problem::SolveStats,
+    pub stats: otspot_core::problem::SolveStats,
 }
 
 impl ModelResult {
@@ -967,7 +967,7 @@ impl ModelResult {
 ///
 /// # Example
 /// ```rust,no_run
-/// # use otspot_core::model::Model;
+/// # use otspot_model::Model;
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # model.minimize(x);
@@ -1059,8 +1059,8 @@ impl std::error::Error for ModelError {}
 #[cfg(test)]
 mod tests {
     use super::{classify_status_error, Model, ModelError, SolutionProof, SolveError, Variable};
-    use crate::problem::SolveStatus;
-    use crate::sparse::CscMatrix;
+    use otspot_core::problem::SolveStatus;
+    use otspot_core::sparse::CscMatrix;
 
     // concurrent solver での許容誤差（IPM/IP-PMM 並列実行）
     const EPS: f64 = 2e-3;
@@ -1524,7 +1524,7 @@ mod tests {
                 Ok(r) => {
                     assert_eq!(
                         r.status,
-                        crate::problem::SolveStatus::LocallyOptimal,
+                        otspot_core::problem::SolveStatus::LocallyOptimal,
                         "[{name}] expected LocallyOptimal, got {:?}",
                         r.status
                     );
@@ -1553,7 +1553,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_feasible_unproven_proof() {
-        use crate::options::Tolerance;
+        use otspot_core::options::Tolerance;
 
         // (name, q_diag, (lb,ub), c)
         let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
@@ -1906,5 +1906,124 @@ mod tests {
             let mut model = Model::new("t");
             assert!(model.try_set_timeout(secs).is_ok(), "should be Ok for secs={secs}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model API tests for MILP / MIQP paths.
+//
+// A lib-target module (kept separate so it runs under the CI `lib-only`
+// nextest profile, which excludes `tests/` integration targets). Exercises the
+// `Model` high-level API over the MILP/MIQP branch-and-bound solver.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mip_model_tests {
+    use super::{Model, ModelError, SolveError};
+    use crate::expression::Expression;
+
+    const EPS: f64 = 1e-4;
+
+    #[test]
+    fn model_add_int_var_maximize_branches() {
+        // max x s.t. 2x <= 3, x integer in [0,5] → x = 1, obj = 1.
+        let mut m = Model::new("milp_int");
+        let x = m.add_int_var("x", 0.0, 5.0);
+        m.add_constraint((2.0 * x).leq(3.0));
+        m.maximize(x);
+        let r = m.solve().unwrap();
+        assert!((r.objective() - 1.0).abs() < EPS, "obj={}", r.objective());
+        assert!((r[x] - 1.0).abs() < EPS, "x={}", r[x]);
+    }
+
+    #[test]
+    fn model_binary_knapsack() {
+        let mut m = Model::new("knapsack");
+        let a = m.add_binary_var("a");
+        let b = m.add_binary_var("b");
+        let c = m.add_binary_var("c");
+        let d = m.add_binary_var("d");
+        m.add_constraint((5.0 * a + 7.0 * b + 4.0 * c + 3.0 * d).leq(14.0));
+        m.maximize(8.0 * a + 11.0 * b + 6.0 * c + 4.0 * d);
+        let r = m.solve().unwrap();
+        assert!((r.objective() - 21.0).abs() < EPS, "obj={}", r.objective());
+        assert_eq!(
+            (r[a].round(), r[b].round(), r[c].round(), r[d].round()),
+            (0.0, 1.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn model_integer_infeasible_errors() {
+        let mut m = Model::new("infeasible");
+        let x = m.add_int_var("x", 0.0, 10.0);
+        m.add_constraint((1.0 * x).geq(1.2));
+        m.add_constraint((1.0 * x).leq(1.8));
+        m.minimize(x);
+        let err = m.solve().unwrap_err();
+        assert!(matches!(err, ModelError::SolveError(SolveError::Infeasible)), "got {err:?}");
+    }
+
+    #[test]
+    fn model_integer_unbounded_errors() {
+        let mut m = Model::new("unbounded");
+        let x = m.add_int_var("x", 0.0, f64::INFINITY);
+        m.maximize(x);
+        let err = m.solve().unwrap_err();
+        assert!(matches!(err, ModelError::SolveError(SolveError::Unbounded)), "got {err:?}");
+    }
+
+    #[test]
+    fn model_convex_miqp_branches_to_integer_optimum() {
+        // min x^2 - 5x = 1/2·2·x^2 + (-5)x, x integer in [0,5].
+        // Continuous min at x=2.5 (fractional → branch); integer optima x=2 or x=3, obj = -6.
+        let mut m = Model::new("convex_miqp");
+        let x = m.add_int_var("x", 0.0, 5.0);
+        m.set_diagonal_q(&[2.0]);
+        m.minimize(-5.0 * x);
+        let r = m.solve().unwrap();
+        assert!((r.objective() - (-6.0)).abs() < EPS, "obj={}", r.objective());
+        let xr = r[x].round();
+        assert!(xr == 2.0 || xr == 3.0, "x must be 2 or 3, got {}", r[x]);
+        assert!((r[x] - xr).abs() < EPS, "x must be integral: {}", r[x]);
+    }
+
+    #[test]
+    fn model_nonconvex_miqp_errors() {
+        // indefinite Q (negative curvature) → must return ModelError::NonConvex, not silent wrong.
+        let cases: &[(&str, &[f64], &[f64])] = &[
+            ("single neg", &[-2.0], &[1.0]),
+            ("neg-pos-2var", &[-3.0, 2.0], &[0.0, 1.0]),
+        ];
+        for &(name, q_diag, c_vec) in cases {
+            let n = q_diag.len();
+            let mut m = Model::new(name);
+            let vars: Vec<_> = (0..n).map(|i| m.add_int_var(&format!("x{i}"), 0.0, 5.0)).collect();
+            m.set_diagonal_q(q_diag);
+            let obj = vars.iter().zip(c_vec).fold(
+                Expression::from_constant(0.0),
+                |acc, (&v, &c)| acc + c * v,
+            );
+            m.minimize(obj);
+            let err = m.solve().unwrap_err();
+            assert!(
+                matches!(err, ModelError::NonConvex(_)),
+                "[{name}] expected ModelError::NonConvex, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_mixed_integer_continuous() {
+        // x integer in [0,5], y continuous in [0,5], x + y <= 3.5.
+        // max(x + y) → Optimum: x=3 (integer), y=0.5 → obj 3.5.
+        let mut m = Model::new("mixed");
+        let x = m.add_int_var("x", 0.0, 5.0);
+        let y = m.add_var("y", 0.0, 5.0);
+        m.add_constraint((x + y).leq(3.5));
+        m.maximize(x + y);
+        let r = m.solve().unwrap();
+        assert!((r.objective() - 3.5).abs() < EPS, "obj={}", r.objective());
+        assert!((r[x].round() - r[x]).abs() < EPS, "x must be integral, x={}", r[x]);
     }
 }

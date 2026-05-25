@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "otspot-core", "otspot-io"]
+members = [".", "otspot-core", "otspot-io", "otspot-model"]
 
 [package]
 name = "otspot"
@@ -45,6 +45,7 @@ parallel = ["otspot-core/parallel"]
 [dependencies]
 otspot-core = { path = "otspot-core", version = "0.1.1" }
 otspot-io = { path = "otspot-io" }
+otspot-model = { path = "otspot-model" }
 # mimalloc and twofloat are used directly by bins in src/bin/
 mimalloc = { version = "0.1", default-features = false }
 twofloat = "0.8"
