@@ -141,7 +141,7 @@ pub fn parse_milp_reader<R: BufRead>(reader: R) -> Result<MilpProblem, MpsError>
 /// # Examples
 ///
 /// ```
-/// use otspot::io::mps::parse_mps;
+/// use otspot_core::io::mps::parse_mps;
 ///
 /// let mps = r"NAME          example
 /// ROWS
@@ -170,7 +170,7 @@ pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
 /// # Examples
 ///
 /// ```
-/// use otspot::io::mps::parse_milp;
+/// use otspot_core::io::mps::parse_milp;
 ///
 /// let mps = r"NAME          milp
 /// ROWS

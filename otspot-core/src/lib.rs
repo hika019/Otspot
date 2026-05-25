@@ -23,10 +23,10 @@
 //!
 //! ```rust,no_run
 //! use std::path::Path;
-//! use otspot::io::mps;
+//! use otspot_core::io::mps;
 //!
 //! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
-//! let result = otspot::solve(&prob);
+//! let result = otspot_core::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
 

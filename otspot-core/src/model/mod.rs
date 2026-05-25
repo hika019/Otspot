@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```
-//! use otspot::model::{Model, constraint};
+//! use otspot_core::model::{Model, constraint};
 //!
 //! let mut model = Model::new("production");
 //! let x = model.add_var("x", 0.0, f64::INFINITY);
@@ -967,7 +967,7 @@ impl ModelResult {
 ///
 /// # Example
 /// ```rust,no_run
-/// # use otspot::model::Model;
+/// # use otspot_core::model::Model;
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # model.minimize(x);

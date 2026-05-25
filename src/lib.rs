@@ -29,5 +29,30 @@
 //! let result = otspot::solve(&prob);
 //! println!("最適値: {:?}", result);
 //! ```
+//!
+//! インラインモデリング API:
+//!
+//! ```rust
+//! use otspot::model::{Model, constraint};
+//!
+//! let mut model = Model::new("example");
+//! let x = model.add_var("x", 0.0, 10.0);
+//! let y = model.add_var("y", 0.0, 10.0);
+//! model.add_constraint(constraint!((x + y) <= 8.0));
+//! model.minimize(2.0 * x + y);
+//! let result = model.solve().unwrap();
+//! assert!((result[x] + result[y] - 0.0).abs() < 1e-4);
+//! ```
+//!
+//! MPS 文字列から LP をパースして解く:
+//!
+//! ```rust
+//! use otspot::io::mps::parse_mps;
+//!
+//! let mps = "NAME  test\nROWS\n N obj\n L c1\nCOLUMNS\n x1 obj 1.0 c1 1.0\nRHS\n rhs c1 5.0\nENDATA\n";
+//! let prob = parse_mps(mps).unwrap();
+//! let result = otspot::solve(&prob);
+//! assert_eq!(prob.num_vars, 1);
+//! ```
 
 pub use otspot_core::*;
