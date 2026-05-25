@@ -19,11 +19,11 @@
 //!
 //! ## 使用例
 //!
-//! MPS ファイルから LP 問題を読み込んで解く:
+//! MPS ファイルから LP 問題を読み込んで解く (via the `otspot` facade):
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use std::path::Path;
-//! use otspot_core::io::mps;
+//! use otspot::io::mps;
 //!
 //! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
 //! let result = otspot_core::solve(&prob);
@@ -32,13 +32,17 @@
 
 pub mod error;
 pub use error::SolverError;
+pub use error::MpsError;
 #[doc(hidden)]
 pub mod bench_utils;
 pub(crate) mod presolve;
 pub mod sparse;
 pub mod problem;
 pub(crate) mod simplex;
-pub mod io;
+// io remains pub(crate) — internal use only; public io is in otspot-io.
+// Functions only called from test code; suppress the dead_code lint.
+#[allow(dead_code)]
+pub(crate) mod io;
 pub(crate) mod basis;
 pub mod model;
 pub mod tolerances;
@@ -50,7 +54,6 @@ pub use options::{
 pub mod qp;
 pub mod mip;
 pub mod lp;
-pub mod screening;
 pub(crate) mod linalg;
 
 #[cfg(test)]
