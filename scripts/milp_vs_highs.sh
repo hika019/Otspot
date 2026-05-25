@@ -101,7 +101,9 @@ _pool_worker() {
     ) || break
     [[ "$idx" =~ ^[0-9]+$ ]] || break
     [[ $idx -ge $_POOL_TOTAL ]] && break
-    run_one "${FILES[$idx]}"
+    # Guard under set -e: a non-zero return must not silently kill the worker
+    # (would shrink the pool). run_one swallows solver errors itself.
+    run_one "${FILES[$idx]}" || true
   done
 }
 
@@ -111,6 +113,7 @@ for _w in $(seq 1 "$JOBS"); do
   WORKER_PIDS+=($!)
 done
 for _pid in "${WORKER_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
+rm -f "$_POOL_COUNTER" "$_POOL_LOCK"
 echo "[milp_vs_highs] solves complete; scoring..."
 
 export _MV_RESULT="$RESULT_DIR" _MV_TIMEOUT="$TIMEOUT" _MV_EPS="$EPS" _MV_DATA="$DATA_DIR"
