@@ -214,7 +214,9 @@ EOF
             ) || break
             [[ "$idx" =~ ^[0-9]+$ ]] || break
             [[ $idx -ge $_HIGHS_TOTAL ]] && break
-            _highs_worker "${_HIGHS_NAMES[$idx]}"
+            # Guard under set -e: a non-zero return must not silently kill the
+            # worker (would shrink the pool). _highs_worker swallows errors itself.
+            _highs_worker "${_HIGHS_NAMES[$idx]}" || true
         done
     }
 
@@ -224,6 +226,7 @@ EOF
         _HIGHS_PIDS+=($!)
     done
     for _pid in "${_HIGHS_PIDS[@]}"; do wait "$_pid" 2>/dev/null || true; done
+    rm -f "$_HIGHS_COUNTER" "$_HIGHS_LOCK"
     echo "[lp_vs_highs] HiGHS complete"
 fi  # end normal mode
 
