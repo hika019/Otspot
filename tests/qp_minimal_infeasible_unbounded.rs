@@ -45,7 +45,11 @@ fn solver_opts() -> SolverOptions {
 // =============================================================================
 
 /// **構造**: min 1/2 x^2  s.t. 5 <= x <= 3 (空集合).
-/// **狙い**: bound 矛盾を presolve / IPM 入口で Infeasible 即検出。
+/// **狙い**: bound 矛盾 (lb > ub) を Model API で入力エラーとして即拒否。
+///
+/// `add_var` (#8) が lb > ub を検出して `invalid_inputs` に記録し、`solve()` は
+/// `ModelError::InvalidInput` を返す。低レベル `QpProblem::new` (#7) も同矛盾を
+/// `InvalidBounds` で拒否するが、Model 経路ではそこへ到達する前に弾かれる。
 #[test]
 fn inf1_bound_lb_gt_ub_infeasible() {
     let mut model = Model::new("inf1");
@@ -55,12 +59,44 @@ fn inf1_bound_lb_gt_ub_infeasible() {
     let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
     model.set_quadratic_objective(q);
 
-    let err = model.solve().expect_err("inf1: lb>ub must yield Infeasible");
+    let err = model.solve().expect_err("inf1: lb>ub must yield an error");
     assert!(
-        matches!(err, ModelError::SolveError(SolveError::Infeasible)),
-        "inf1: expected Infeasible, got {:?}",
+        matches!(err, ModelError::InvalidInput(_)),
+        "inf1: expected InvalidInput for lb>ub, got {:?}",
         err
     );
+}
+
+/// 非有限係数 (NaN/±∞) を Model API に与えると `InvalidInput` で拒否される。
+///
+/// 低レベル `QpProblem::new`/`LpProblem::new_general` が `NonFiniteCoefficient` を
+/// 返し、Model 境界で `Internal` ではなく `InvalidInput` に map される (typed-error 一貫性)。
+#[test]
+fn nonfinite_objective_coefficient_is_invalid_input() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        // LP path (no quadratic objective).
+        let mut model = Model::new("nf_lp");
+        let x = model.add_var("x", 0.0, 10.0);
+        model.minimize(bad * x);
+        let err = model.solve().expect_err("non-finite c must error");
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "LP non-finite c={bad}: expected InvalidInput, got {:?}",
+            err
+        );
+
+        // Constraint rhs path.
+        let mut model = Model::new("nf_rhs");
+        let y = model.add_var("y", 0.0, 10.0);
+        model.add_constraint((1.0 * y).leq(bad));
+        model.minimize(1.0 * y);
+        let err = model.solve().expect_err("non-finite b must error");
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "non-finite b={bad}: expected InvalidInput, got {:?}",
+            err
+        );
+    }
 }
 
 // =============================================================================

@@ -358,7 +358,7 @@ impl Model {
 
         // --- LP path (existing) ---
         let problem = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
-            .map_err(|e| ModelError::Internal(e.to_string()))?;
+            .map_err(map_lp_build_err)?;
 
         let mut lp_opts = crate::options::SolverOptions::default();
         if let Some(t) = self.timeout_secs {
@@ -506,7 +506,7 @@ impl Model {
         };
 
         let mut qp_problem = QpProblem::new(qp_q, c, qp_a, qp_b, bounds, qp_constraint_types)
-            .map_err(|e| ModelError::Internal(e.to_string()))?;
+            .map_err(map_qp_build_err)?;
         // offset は signed_obj で post-solve 加算するため solver には渡さない。
         qp_problem.obj_offset = 0.0;
         Ok(qp_problem)
@@ -674,7 +674,7 @@ impl Model {
                 opts.presolve = flag;
             }
             let lp = LpProblem::new_general(c, a, b, constraint_types, bounds, self.name.clone())
-                .map_err(|e| ModelError::Internal(e.to_string()))?;
+                .map_err(map_lp_build_err)?;
             let milp = crate::mip::MilpProblem::new(lp, integer_vars.clone())
                 .map_err(|e| ModelError::Internal(e.to_string()))?;
             crate::mip::solve_milp(&milp, &opts, &cfg)
@@ -797,6 +797,31 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
         Err(ModelError::InvalidInput(format!(
             "timeout must be finite and non-negative, got {secs}"
         )))
+    }
+}
+
+/// Map a low-level `LpProblem`/`SolverError` construction failure to a `ModelError`.
+///
+/// Non-finite coefficients and invalid bounds are user-input errors → `InvalidInput`;
+/// dimension/structural failures (which the Model builder controls) stay `Internal`.
+fn map_lp_build_err(e: crate::error::SolverError) -> ModelError {
+    use crate::error::SolverError;
+    match e {
+        SolverError::NonFiniteCoefficient { .. } | SolverError::InvalidBounds { .. } => {
+            ModelError::InvalidInput(e.to_string())
+        }
+        _ => ModelError::Internal(e.to_string()),
+    }
+}
+
+/// Map a low-level `QpProblem` construction failure to a `ModelError` (see [`map_lp_build_err`]).
+fn map_qp_build_err(e: crate::qp::QpProblemError) -> ModelError {
+    use crate::qp::QpProblemError;
+    match e {
+        QpProblemError::NonFiniteCoefficient { .. } | QpProblemError::InvalidBounds { .. } => {
+            ModelError::InvalidInput(e.to_string())
+        }
+        QpProblemError::DimensionMismatch(_) => ModelError::Internal(e.to_string()),
     }
 }
 

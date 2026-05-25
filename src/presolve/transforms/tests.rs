@@ -1,6 +1,7 @@
 //! Unit + KKT-roundtrip tests covering presolve transforms.
 
 use super::*;
+use crate::error::SolverError;
 use crate::problem::{ConstraintType, LpProblem};
 use crate::sparse::CscMatrix;
 
@@ -68,7 +69,24 @@ fn test_fixed_variable_removal() {
 
 #[test]
 fn test_fixed_infeasible() {
-    let lp = make_lp_general(
+    // lb > ub is now rejected at construction time (InvalidBounds), not by presolve.
+    let a = CscMatrix::new(0, 1);
+    let res = LpProblem::new_general(
+        vec![1.0], a, vec![], vec![], vec![(3.0, 2.0)], None,
+    );
+    assert!(
+        matches!(res, Err(SolverError::InvalidBounds { index: 0, lb, ub }) if lb == 3.0 && ub == 2.0),
+        "lb > ub must be rejected at construction"
+    );
+}
+
+#[test]
+fn test_presolve_detects_lb_gt_ub() {
+    // Construction now rejects lb > ub, but presolve's bound-consistency check
+    // (step1_fixed_variable) is still reachable in production when a transform
+    // *tightens* a valid bound past its opposite. Inject lb > ub post-construction
+    // (valid build → mutate public field) to keep that detection path covered.
+    let mut lp = make_lp_general(
         vec![1.0],
         &[],
         &[],
@@ -77,9 +95,13 @@ fn test_fixed_infeasible() {
         1,
         vec![],
         vec![],
-        vec![(3.0, 2.0)],
+        vec![(0.0, 1.0)],
     );
-    assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
+    lp.bounds[0] = (3.0, 2.0); // lb > ub injected after the constructor check
+    assert!(
+        matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)),
+        "presolve must report Infeasible for lb > ub bounds"
+    );
 }
 
 // -----------------------------------------------------------

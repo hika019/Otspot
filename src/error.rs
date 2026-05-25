@@ -51,6 +51,26 @@ pub enum SolverError {
 
     /// Deadline を超過した（タイムアウト）
     DeadlineExceeded,
+
+    /// 非有限係数（NaN または ±∞）が入力された
+    ///
+    /// 例: `c[i]` が NaN、`b[j]` が Inf、行列要素が NaN
+    NonFiniteCoefficient {
+        /// どのフィールドか（"c", "b", "A" など）
+        field: &'static str,
+        /// 最初に非有限値が検出されたインデックス
+        index: usize,
+    },
+
+    /// 変数境界が無効（NaN または lb > ub）
+    InvalidBounds {
+        /// 無効な境界を持つ変数のインデックス
+        index: usize,
+        /// 下限値
+        lb: f64,
+        /// 上限値
+        ub: f64,
+    },
 }
 
 impl std::fmt::Display for SolverError {
@@ -71,6 +91,12 @@ impl std::fmt::Display for SolverError {
             }
             SolverError::DeadlineExceeded => {
                 write!(f, "Deadline exceeded during computation")
+            }
+            SolverError::NonFiniteCoefficient { field, index } => {
+                write!(f, "Non-finite coefficient in {}: index {}", field, index)
+            }
+            SolverError::InvalidBounds { index, lb, ub } => {
+                write!(f, "Invalid bounds at index {}: lb={} > ub={} or NaN", index, lb, ub)
             }
         }
     }
