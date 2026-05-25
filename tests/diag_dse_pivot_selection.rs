@@ -343,6 +343,7 @@ const MIN_STRICT_WINS: usize = 2;
 const MIN_ACTIVE_PATTERNS: usize = 8;
 
 #[test]
+#[ignore = "heavy (~150s: 6 Netlib × 2 arms × 90s cap); run via --profile heavy"]
 fn dse_iter_count_matches_or_beats_most_infeasible() {
     let _guard = DSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let collection = collect_iter_comparison_with_retry();
@@ -396,6 +397,7 @@ fn dse_iter_count_matches_or_beats_most_infeasible() {
 }
 
 #[test]
+#[ignore = "heavy (~150s: no-op proof run, same data as iter-count test); run via --profile heavy"]
 fn dse_with_gamma_update_disabled_collapses_to_most_infeasible() {
     let _guard = DSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: set_var is `unsafe` in std 1.86+ due to multi-threaded UB.
@@ -445,6 +447,7 @@ fn dse_with_gamma_update_disabled_collapses_to_most_infeasible() {
 // guaranteed to change the choice (multiple rows with comparable |x_B|).
 
 #[test]
+#[ignore = "heavy (requires Netlib data; same collection as iter-count test); run via --profile heavy"]
 fn dse_correct_status_across_perturbations() {
     let _guard = DSE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Sanity: DSE produces correct (= MI) status on the same set of LPs

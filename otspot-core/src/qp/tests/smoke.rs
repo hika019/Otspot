@@ -55,7 +55,8 @@ fn test_qp_timing_breakdown_fields_populated() {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
 
-        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution));
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "case 2: well-conditioned 2-var QP must converge to Optimal, got {:?}", result.status);
         let tb = result.timing_breakdown
             .expect("timing_breakdown must be Some for QP IPM path");
 
@@ -90,8 +91,8 @@ fn test_qp_timing_breakdown_fields_populated() {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
 
-        assert!(matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution),
-            "20-var QP should converge, got {:?}", result.status);
+        assert_eq!(result.status, SolveStatus::Optimal,
+            "case 3: 20-var well-conditioned QP must be Optimal, got {:?}", result.status);
         let tb = result.timing_breakdown
             .expect("timing_breakdown must be Some for 20-var QP");
 
@@ -351,10 +352,8 @@ fn test_qp_box_constrained_upper_bound() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert!(matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ), "got {:?}", result.status);
+    assert_eq!(result.status, SolveStatus::Optimal,
+        "box-constrained upper-bound QP must be Optimal, got {:?}", result.status);
     assert_close(result.solution[0], 1.0, EPS, "x[0]");
     assert_close(result.solution[1], 1.0, EPS, "x[1]");
     assert_close(result.objective, -6.0, EPS, "obj");
