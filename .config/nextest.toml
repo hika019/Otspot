@@ -47,7 +47,10 @@ test-group = "qplib-memory-heavy"
 # Heavy/nightly profile: runs ALL tests including #[ignore]d heavy ones.
 #
 # Usage:
-#   cargo nextest run --workspace --profile heavy --test-threads 1
+#   cargo nextest run --workspace --profile heavy --run-ignored all --test-threads 1
+#
+# run-ignored は nextest profile キーとして無効 (unknown key warning が出る)。
+# #[ignore] テストを含めるには CLI フラグ `--run-ignored all` を必ず付けること。
 #
 # What belongs in #[ignore] + heavy profile:
 #   - Individual test wall-time > 3 min (CLAUDE.md cap), OR
@@ -59,13 +62,12 @@ test-group = "qplib-memory-heavy"
 # (~30s–600s each), lp_coverage_screen (~5-6 min), greenbea IPM timebox
 # (~220s), ken-18/osa-60 (~60s each), lp_regression heavy LPs.
 [profile.heavy]
-run-ignored = "all"
 test-threads = 1
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 # lp_coverage_screen: 90 LP screen ~5–6 min — raise kill ceiling to 12 min.
 [[profile.heavy.overrides]]
-filter = "test(screen_all_90_lp_problems)"
+filter = "test(lp_coverage_screen_all)"
 slow-timeout = { period = "360s", terminate-after = 2 }
 
 # greenbea IPM timebox: ~220s (inherits default.overrides kill ceiling bump).
