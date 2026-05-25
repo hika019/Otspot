@@ -180,7 +180,7 @@ fn diag_scsd8_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/scsd8.QPS");
     assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = parse_qps(qps_path).expect("parse scsd8.QPS failed");
-    println!("scsd8: n={}, m={}", prob.a.ncols, prob.b.len());
+    println!("scsd8: n={}, m={}", prob.a.ncols(), prob.b.len());
 
     let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
     let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
@@ -241,7 +241,7 @@ fn diag_wood1p_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/wood1p.QPS");
     assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
     let prob = parse_qps(qps_path).expect("parse wood1p.QPS failed");
-    println!("wood1p: n={}, m={}", prob.a.ncols, prob.b.len());
+    println!("wood1p: n={}, m={}", prob.a.ncols(), prob.b.len());
 
     let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
     let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();

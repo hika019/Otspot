@@ -51,13 +51,13 @@ impl Lcg {
 /// 独立実装の Gershgorin α (= max_j (R_j − Q[j,j]) / 2)。
 /// src/qp/global/bound_alpha_bb.rs と独立計算で交差検証する。
 fn gershgorin_alpha_local(q: &CscMatrix) -> f64 {
-    let n = q.nrows;
+    let n = q.nrows();
     let mut diag = vec![0.0_f64; n];
     let mut row_sum = vec![0.0_f64; n];
     for col in 0..n {
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            let row = q.row_ind[k];
-            let v = q.values[k];
+        for k in q.col_ptr()[col]..q.col_ptr()[col + 1] {
+            let row = q.row_ind()[k];
+            let v = q.values()[k];
             if row == col {
                 diag[col] = v;
             } else if row < col {

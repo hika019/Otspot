@@ -198,7 +198,7 @@ fn compute_dfeas_orig(
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue; // FX 変数は presolve で除去済み
             }
-            if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
+            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
                 continue; // EmptyCol は presolve で除去済み
             }
             let rc = reduced_costs[j];
@@ -258,8 +258,8 @@ fn compute_dfeas_orig(
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
             continue;
         }
-        if prob.a.col_ptr.len() > i + 1
-            && prob.a.col_ptr[i + 1] - prob.a.col_ptr[i] == 0
+        if prob.a.col_ptr().len() > i + 1
+            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
         {
             continue;
         }
@@ -332,7 +332,7 @@ fn compute_dfeas_componentwise(
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
             }
-            if prob.a.col_ptr.len() > j + 1 && prob.a.col_ptr[j + 1] - prob.a.col_ptr[j] == 0 {
+            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
                 continue;
             }
             let rc = reduced_costs[j];
@@ -355,8 +355,8 @@ fn compute_dfeas_componentwise(
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
             continue;
         }
-        if prob.a.col_ptr.len() > i + 1
-            && prob.a.col_ptr[i + 1] - prob.a.col_ptr[i] == 0
+        if prob.a.col_ptr().len() > i + 1
+            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
         {
             continue;
         }
