@@ -110,11 +110,17 @@ pub fn solve_milp(problem: &MilpProblem, options: &SolverOptions, cfg: &MipConfi
 }
 
 /// Like [`solve_milp`] but also returns search statistics (test sentinel hook).
+///
+/// Returns `(NumericalError, default stats)` immediately if `options` fails
+/// validation (invalid tolerance, zero threads, etc.).
 pub fn solve_milp_with_stats(
     problem: &MilpProblem,
     options: &SolverOptions,
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
+    if options.validate().is_err() {
+        return (SolverResult::numerical_error(), MipStats::default());
+    }
     solve_mip_with_stats(problem, options, cfg)
 }
 
@@ -129,11 +135,17 @@ pub fn solve_miqp(problem: &MiqpProblem, options: &SolverOptions, cfg: &MipConfi
 }
 
 /// Like [`solve_miqp`] but also returns search statistics (test sentinel hook).
+///
+/// Returns `(NumericalError, default stats)` immediately if `options` fails
+/// validation (invalid tolerance, zero threads, etc.).
 pub fn solve_miqp_with_stats(
     problem: &MiqpProblem,
     options: &SolverOptions,
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
+    if options.validate().is_err() {
+        return (SolverResult::numerical_error(), MipStats::default());
+    }
     if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
     }

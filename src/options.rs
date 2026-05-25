@@ -565,13 +565,15 @@ impl SolverOptions {
     /// Validate all option fields.
     ///
     /// Returns the first `Err` encountered, in field declaration order.
-    /// Solver entry points should call this before starting work.
+    /// Called by public solver entry points before starting work; invalid
+    /// options cause the entry to return [`crate::problem::SolveStatus::NumericalError`]
+    /// rather than propagating bad values into the solver core.
     ///
     /// Invalid conditions:
     /// - `primal_tol` / `dual_tol`: non-finite or <= 0
     /// - `clamp_tol`: non-finite or < 0 (0 is allowed)
     /// - `threads`: 0
-    /// - `timeout_secs`: `Some(v)` where v is non-finite or <= 0
+    /// - `timeout_secs`: `Some(v)` where v is non-finite or < 0
     /// - `tolerance`: `Custom(v)` where v is non-finite or <= 0
     /// - Any field in [`IpmOptions`]
     pub fn validate(&self) -> Result<(), OptionsError> {
@@ -588,8 +590,8 @@ impl SolverOptions {
             return Err(OptionsError { field: "threads", reason: "must be >= 1" });
         }
         if let Some(t) = self.timeout_secs {
-            if !t.is_finite() || t <= 0.0 {
-                return Err(OptionsError { field: "timeout_secs", reason: "must be finite and > 0" });
+            if !t.is_finite() || t < 0.0 {
+                return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
             }
         }
         if let Some(Tolerance::Custom(v)) = self.tolerance {
@@ -606,8 +608,8 @@ impl SolverOptions {
 
     /// Builder: set `timeout_secs`, validated immediately.
     pub fn with_timeout(mut self, secs: f64) -> Result<Self, OptionsError> {
-        if !secs.is_finite() || secs <= 0.0 {
-            return Err(OptionsError { field: "timeout_secs", reason: "must be finite and > 0" });
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
         }
         self.timeout_secs = Some(secs);
         Ok(self)
@@ -787,11 +789,13 @@ mod tests {
     fn test_solver_validate_timeout_secs() {
         // None is always valid
         assert!(SolverOptions { timeout_secs: None, ..Default::default() }.validate().is_ok());
-        // positive finite: valid
-        assert!(SolverOptions { timeout_secs: Some(1.0), ..Default::default() }.validate().is_ok());
-        assert!(SolverOptions { timeout_secs: Some(0.001), ..Default::default() }.validate().is_ok());
-        // invalid
-        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        // non-negative finite: valid (0.0 = immediately-expired deadline)
+        for ok in [0.0_f64, 0.001, 1.0, 1000.0] {
+            let o = SolverOptions { timeout_secs: Some(ok), ..Default::default() };
+            assert!(o.validate().is_ok(), "timeout_secs=Some({ok}) must be valid");
+        }
+        // invalid: negative, NaN, or infinite
+        for bad in [-1.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let o = SolverOptions { timeout_secs: Some(bad), ..Default::default() };
             assert!(o.validate().is_err(), "timeout_secs=Some({bad})");
         }
@@ -836,7 +840,8 @@ mod tests {
     fn test_solver_builder_with_timeout() {
         assert!(SolverOptions::default().with_timeout(10.0).is_ok());
         assert!(SolverOptions::default().with_timeout(0.001).is_ok());
-        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(SolverOptions::default().with_timeout(0.0).is_ok(), "0.0 = immediately-expired deadline");
+        for bad in [-1.0_f64, f64::NAN, f64::INFINITY] {
             assert!(SolverOptions::default().with_timeout(bad).is_err(), "with_timeout({bad})");
         }
         // Result carries the set value
