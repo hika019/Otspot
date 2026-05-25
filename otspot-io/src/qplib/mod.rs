@@ -674,4 +674,424 @@ minimize
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 5);
     }
+
+    #[test]
+    fn test_parse_all_qcq_unsupported_files() {
+        let dir = data_path("data/qplib_unsupported");
+        if !dir.exists() {
+            return;
+        }
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("qplib") {
+                continue;
+            }
+            parse_qplib(path.as_path()).unwrap_or_else(|e| {
+                panic!("parse failed for {}: {e}", path.display());
+            });
+            count += 1;
+        }
+        assert!(count > 0, "no .qplib files found in data/qplib_unsupported/");
+    }
+
+    /// Regression: every tracked file in data/qplib/ parses without error.
+    ///
+    /// Binary/integer files (CBL etc.) now parse as `Milp`/`Miqp`.
+    /// Mixed-integer types (M/G/S) still produce `UnsupportedType`.
+    /// `ParseError` or `IoError` on any file is a regression.
+    #[test]
+    fn test_parse_existing_qplib_files_regression() {
+        let dir = data_path("data/qplib");
+        if !dir.exists() {
+            return;
+        }
+        let mut count = 0;
+        let mut count_mip = 0usize;
+        let mut count_unsupported = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("qplib") {
+                continue;
+            }
+            match parse_qplib(path.as_path()) {
+                Ok(QplibProblem::Qp(_)) => {}
+                Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => {
+                    count_mip += 1;
+                }
+                Err(QplibError::UnsupportedType(_)) => {
+                    count_unsupported += 1;
+                }
+                Err(e) => panic!(
+                    "parse regression: {} failed with unexpected error: {e}",
+                    path.display()
+                ),
+            }
+            count += 1;
+        }
+        assert!(count > 0, "no .qplib files found in data/qplib/");
+        assert!(
+            count_mip > 0,
+            "expected at least one binary/integer file to parse as Milp/Miqp (got 0 out of {count})"
+        );
+        let _ = count_unsupported;
+    }
+
+    /// Accumulation sentinel: parsing every file in data/qplib/ in sequence
+    /// must return live allocations to ~baseline after each result is dropped.
+    ///
+    /// **No-op failure guarantee**: retaining results across iterations causes
+    /// `live` to grow past `LIVE_RESIDUAL_LIMIT` → FAIL.
+    #[test]
+    fn test_parse_sweep_no_memory_accumulation() {
+        let dir = data_path("data/qplib");
+        if !dir.exists() {
+            return;
+        }
+        const LIVE_RESIDUAL_LIMIT: isize = 4 * 1024 * 1024;
+
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("qplib"))
+            .collect();
+
+        crate::peak_alloc::begin();
+        for path in &files {
+            let _ = parse_qplib(path.as_path());
+            let live = crate::peak_alloc::current_bytes();
+            assert!(
+                live <= LIVE_RESIDUAL_LIMIT,
+                "live allocations {live} B remain after dropping {} — parser is \
+                 retaining results across files (accumulation bug); limit {LIVE_RESIDUAL_LIMIT} B",
+                path.display()
+            );
+        }
+    }
+
+    /// Memory sentinel: QPLIB_8500 (25 MB, 1.2 M NZ) must parse without
+    /// exceeding `QPLIB_8500_PARSE_PEAK_LIMIT` of concurrently live allocations.
+    ///
+    /// **No-op failure guarantee**: removing `drop(a_triplets)` raises peak to
+    /// ~129 MB → assertion fires. Threshold calibrated: Vec path ~100.4 MB; limit 115 MB.
+    #[test]
+    fn test_memory_sentinel_no_double_hashmap_qplib8500() {
+        let path = data_path("data/qplib/QPLIB_8500.qplib");
+        if !path.exists() {
+            return;
+        }
+        const QPLIB_8500_PARSE_PEAK_LIMIT: usize = 115 * 1024 * 1024;
+
+        crate::peak_alloc::begin();
+        parse_qplib(path.as_path()).expect("QPLIB_8500 must parse without OOM");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        assert!(
+            peak <= QPLIB_8500_PARSE_PEAK_LIMIT,
+            "QPLIB_8500 parse peak allocation {:.1} MB exceeds {:.1} MB limit.\n\
+             Vec+drop path expected ~100.4 MB; no-drop path is ~129 MB.\n\
+             Check that drop(a_triplets) is present before from_triplets call.",
+            peak as f64 / 1_048_576.0,
+            QPLIB_8500_PARSE_PEAK_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    /// Memory probe: large DCL files (QPLIB_8547 = 144 MB, QPLIB_9008 = 210 MB).
+    /// Generous 2 GB limit detects catastrophic O(n²) regressions.
+    #[test]
+    fn test_memory_probe_large_dcl_files() {
+        const DCL_PROBE_LIMIT: usize = 2 * 1024 * 1024 * 1024;
+
+        for name in &["QPLIB_8547", "QPLIB_9008"] {
+            let path = data_path(&format!("data/qplib/{name}.qplib"));
+            if !path.exists() {
+                continue;
+            }
+            crate::peak_alloc::begin();
+            let result = parse_qplib(path.as_path());
+            let peak = crate::peak_alloc::peak_bytes();
+            assert!(
+                result.is_ok() || matches!(result, Err(QplibError::UnsupportedType(_))),
+                "{name} parse must not fail with ParseError or IoError: {:?}",
+                result.err()
+            );
+            assert!(
+                peak <= DCL_PROBE_LIMIT,
+                "{name} parse peak {:.1} MB exceeds {:.1} GB catastrophic-regression limit.\n\
+                 Expected O(nnz) memory not O(n·m) or O(n²).",
+                peak as f64 / 1_048_576.0,
+                DCL_PROBE_LIMIT as f64 / 1_073_741_824.0
+            );
+        }
+    }
+
+    /// Memory sentinel: QPLIB_8683 (DCQ, n=200008, m=140000).
+    ///
+    /// Old `CscMatrix::from_triplets(..., n, n)` per filled slot → 224 GB OOM.
+    /// `QcqpMatrix` (COO): ~7 MB total.
+    ///
+    /// **No-op failure guarantee**: reverting to `CscMatrix::from_triplets(..., n, n)`
+    /// causes OOM before this assertion.
+    #[test]
+    fn test_memory_sentinel_qplib8683_qcqp() {
+        let path = data_path("data/qplib/QPLIB_8683.qplib");
+        if !path.exists() {
+            return;
+        }
+        const QPLIB_8683_PEAK_LIMIT: usize = 300 * 1024 * 1024;
+
+        crate::peak_alloc::begin();
+        parse_qplib(path.as_path()).expect("QPLIB_8683 must parse without OOM");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        assert!(
+            peak <= QPLIB_8683_PEAK_LIMIT,
+            "QPLIB_8683 parse peak {:.1} MB exceeds {:.1} MB limit.\n\
+             QcqpMatrix (COO) path expected < 50 MB; CscMatrix per-slot causes 224 GB OOM.\n\
+             Check that quadratic_constraints uses QcqpMatrix not CscMatrix::from_triplets.",
+            peak as f64 / 1_048_576.0,
+            QPLIB_8683_PEAK_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // QCQP sparse-init sentinel
+    // -----------------------------------------------------------------------
+
+    fn make_synthetic_qcq_content(n: usize, m: usize) -> String {
+        let mut s = String::with_capacity(256);
+        s.push_str("SYNTHETIC_QCQP\nQCQ\nminimize\n");
+        s.push_str(&format!("{n}\n{m}\n"));
+        s.push_str("0\n");
+        s.push_str("0.0\n");
+        s.push_str("0\n");
+        s.push_str("0.0\n");
+        s.push_str("1\n");
+        s.push_str("1 1 1 1.0\n");
+        s.push_str("0\n");
+        s.push_str("1.79769313486232E+308\n");
+        s.push_str("0.0\n0\n");
+        s.push_str("0.0\n0\n");
+        s.push_str("0.0\n0\n");
+        s.push_str("1.79769313486232E+308\n0\n");
+        s.push_str("0.0\n0\n0.0\n0\n0.0\n0\n0\n0\n");
+        s
+    }
+
+    /// QCQP COO-storage memory sentinel (synthetic, data-independent).
+    ///
+    /// Old `vec![CscMatrix::new(n, n); m_aug]`: O(m·n) col_ptr allocation.
+    /// With N=50_000, M=200: 200 × 50_001 × 8 ≈ 80 MB → above `QCQP_DENSE_INIT_LIMIT`.
+    ///
+    /// **No-op failure guarantee**: reverting to `CscMatrix::new(n, n)` default raises
+    /// peak above 20 MB → assertion fires.
+    #[test]
+    fn test_qcqp_sparse_init_memory_bounded() {
+        const SYNTHETIC_N: usize = 50_000;
+        const SYNTHETIC_M: usize = 200;
+        const QCQP_DENSE_INIT_LIMIT: usize = 20 * 1024 * 1024;
+
+        let content = make_synthetic_qcq_content(SYNTHETIC_N, SYNTHETIC_M);
+
+        crate::peak_alloc::begin();
+        let result = parse_qplib_str(&content).expect("synthetic QCQP must parse");
+        let peak = crate::peak_alloc::peak_bytes();
+
+        let prob = unwrap_qp(result);
+        assert_eq!(prob.num_vars, SYNTHETIC_N);
+        assert_eq!(prob.num_constraints, SYNTHETIC_M);
+        assert_eq!(prob.quadratic_constraints.len(), SYNTHETIC_M);
+        assert_eq!(
+            prob.quadratic_constraints[0].nnz(),
+            1,
+            "constraint 0 must have nnz=1 (single diagonal entry)"
+        );
+        for i in 1..SYNTHETIC_M {
+            assert_eq!(
+                prob.quadratic_constraints[i].nnz(),
+                0,
+                "Q_k[{i}] must be empty for synthetic problem"
+            );
+        }
+
+        assert!(
+            peak <= QCQP_DENSE_INIT_LIMIT,
+            "synthetic QCQP parse peak {:.1} MB exceeds {:.1} MB limit.\n\
+             QcqpMatrix (COO) path expected < 1 MB; \
+             CscMatrix::new(n,n) default path ≈ 80 MB.\n\
+             Revert check: ensure quadratic_constraints uses QcqpMatrix not CscMatrix.",
+            peak as f64 / 1_048_576.0,
+            QCQP_DENSE_INIT_LIMIT as f64 / 1_048_576.0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-pattern tests: large / small / sparse / dense
+    // -----------------------------------------------------------------------
+
+    /// Small LP (LCL): linear obj, 10 vars, 5 constraints, 20 A-matrix NZ.
+    #[test]
+    fn test_parse_small_lp_lcl() {
+        let mut content = String::from("SMALL_LP\nLCL\nminimize\n10\n5\n0\n0.0\n0\n0.0\n20\n");
+        for k in 1..=5usize {
+            for i in (k..k + 4).filter(|&i| i <= 10) {
+                content.push_str(&format!("{k} {i} 1.0\n"));
+            }
+        }
+        content.push_str("1.0e308\n-1.0e308\n0\n100.0\n0\n0.0\n0\n1.0e308\n0\n");
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "small LP parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, 10);
+        assert_eq!(prob.num_constraints, 5);
+        assert!(prob.a.nnz() > 0);
+    }
+
+    /// Dense Q matrix (QCB type): n=80, nqobj = 80*81/2 = 3240 lower-tri entries.
+    /// Verifies Q is symmetric with correct nnz after symmetrization.
+    #[test]
+    fn test_parse_dense_q_box_constraints() {
+        const N: usize = 80;
+        const NQOBJ: usize = N * (N + 1) / 2;
+
+        let mut content = String::from("DENSE_Q\nQCB\nminimize\n80\n");
+        content.push_str(&format!("{NQOBJ}\n"));
+        for i in 1..=N {
+            for j in 1..=i {
+                content.push_str(&format!("{i} {j} 1.0\n"));
+            }
+        }
+        content.push_str("0.0\n0\n0.0\n");
+        content.push_str("1.0e308\n");
+        content.push_str("0.0\n0\n1.0\n0\n");
+
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "dense Q parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, N);
+        let expected_nnz = N + (NQOBJ - N) * 2;
+        assert_eq!(
+            prob.q.nnz(),
+            expected_nnz,
+            "Q nnz: expected {expected_nnz} (full {N}×{N} symmetric)"
+        );
+    }
+
+    /// Sparse A matrix: LCL type, n=500 vars, m=200 constraints, ~1000 NZ.
+    /// Verifies sort-merge CSC construction correctness for sparse inputs.
+    #[test]
+    fn test_parse_sparse_a_matrix_correctness() {
+        const N: usize = 500;
+        const M: usize = 200;
+
+        let mut content = format!("SPARSE_A\nLCL\nminimize\n{N}\n{M}\n0\n0.0\n0\n0.0\n");
+        let mut nnz = 0usize;
+        let mut entry_buf = String::new();
+        for k in 1..=M {
+            for offset in 0..5usize {
+                let i = (k * 7 + offset * 13) % N + 1;
+                entry_buf.push_str(&format!("{k} {i} 1.0\n"));
+                nnz += 1;
+            }
+        }
+        content.push_str(&format!("{nnz}\n"));
+        content.push_str(&entry_buf);
+        content.push_str("1.0e308\n-1.0e308\n0\n1000.0\n0\n0.0\n0\n1.0e308\n0\n");
+
+        let result = parse_qplib_str(&content);
+        assert!(result.is_ok(), "sparse A parse failed: {:?}", result.err());
+        let prob = unwrap_qp(result.unwrap());
+        assert_eq!(prob.num_vars, N);
+        assert!(prob.num_constraints >= M);
+        assert!(prob.a.nnz() > 0, "A matrix should have non-zeros");
+    }
+
+    /// nqobj sanity bound: n=2 gives max nqobj=3; declaring nqobj=4 must return ParseError.
+    #[test]
+    fn test_sanity_bound_nqobj_too_large() {
+        let content = "\
+SANITY_NQOBJ
+QCL
+minimize
+2
+1
+4
+";
+        let result = parse_qplib_str(content);
+        assert!(result.is_err(), "expected ParseError for nqobj=4 > n*(n+1)/2=3");
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("nqobj") || err_str.contains("exceeds"),
+            "error should mention nqobj bound, got: {}",
+            err_str
+        );
+    }
+
+    /// n_con_lin_terms sanity bound: n=2, m=1 gives max=2; declaring 3 must return ParseError.
+    #[test]
+    fn test_sanity_bound_n_con_lin_terms_too_large() {
+        let content = "\
+SANITY_NCON
+LCL
+minimize
+2
+1
+0
+0.0
+0
+0.0
+3
+";
+        let result = parse_qplib_str(content);
+        assert!(result.is_err(), "expected ParseError for n_con_lin_terms=3 > n*m=2");
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("n_con_lin_terms") || err_str.contains("exceeds"),
+            "error should mention n_con_lin_terms bound, got: {}",
+            err_str
+        );
+    }
+
+    /// Duplicate linear constraint entries must be accumulated (not double-counted).
+    ///
+    /// Sentinel: if sort-merge deduplication is broken, the final A matrix will
+    /// have twice as many entries → nnz assertion fails.
+    #[test]
+    fn test_parse_duplicate_a_entries_accumulated() {
+        let qplib = "\
+DUP_TEST
+LCL
+minimize
+2
+1
+0
+0.0
+0
+0.0
+2
+1 1 2.0
+1 1 2.0
+1.0e308
+-1.0e308
+0
+0.0
+1
+1 5.0
+0.0
+0
+1.0e308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 2);
+        assert_eq!(prob.a.nnz(), 1, "duplicate entries must be merged to one NZ");
+        let col0 = prob.a.col_ptr()[0];
+        assert!(
+            (prob.a.values()[col0] - 4.0).abs() < 1e-12,
+            "accumulated coeff should be 4.0, got {}",
+            prob.a.values()[col0]
+        );
+    }
 }

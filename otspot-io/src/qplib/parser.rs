@@ -29,7 +29,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         'C' | 'B' | 'I' => {}
         c => {
             return Err(QplibError::UnsupportedType(format!(
-                "Variable type '{}' not supported (C/B/I only). Type={}",
+                "Variable type '{}' not supported (C/B/I supported; M/G/S mixed-integer unsupported). Type={}",
                 c, prob_type
             )));
         }
@@ -39,7 +39,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         'L' | 'B' | 'N' | 'Q' => {}
         c => {
             return Err(QplibError::UnsupportedType(format!(
-                "Constraint type '{}' not supported (only L/B/N/Q). Type={}",
+                "Constraint type '{}' not supported (only L/B/N/Q supported). Type={}",
                 c, prob_type
             )));
         }
