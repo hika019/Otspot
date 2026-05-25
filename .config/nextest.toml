@@ -1,19 +1,23 @@
 [profile.default]
 # doctest は nextest 非対応 → `cargo test --doc` で別途実行。
-test-threads = "num-cpus"
+# test-threads=3: CLAUDE.md 準拠 (num-cpus は機種依存で非決定的)。
+test-threads = 3
 # slow-timeout.period 60s, terminate-after 3 → 180s で kill (CLAUDE.md 3min cap)。
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 # bench data 不在環境で lib/bin のみ走らせる用。integration は data を assert で要求。
+# CI もこのプロファイルを使用 (data/ gitignored)。
 [profile.lib-only]
 default-filter = "kind(lib) + kind(bin)"
-test-threads = "num-cpus"
+test-threads = 3
 slow-timeout = { period = "60s", terminate-after = 2 }
 
-# CPU 時間 sensitive な faer per-call parallelism sentinel (#31) は
-# CPU を独占しないと par scaling が安定しない (他 test と並走で wall noise)。
-# threads-required = "num-cpus" で各 sentinel test が全 CPU を要求 →
-# 他 test と排他、par_sentinel test 同士も serialize される。
+# faer per-call parallelism sentinel (#31): the asserts are deterministic
+# (thread-count + seq/par solution agreement, no wall-ratio assert), so this
+# override is not needed for correctness. It is retained to avoid CPU
+# oversubscription: each test runs a CPU-bound n=1500 dense factorization, so
+# threads-required = "num-cpus" schedules them exclusively rather than letting
+# several stack onto the same cores.
 [[profile.default.overrides]]
 filter = "test(linalg::par_sentinel::)"
 threads-required = "num-cpus"
