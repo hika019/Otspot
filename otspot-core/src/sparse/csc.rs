@@ -58,6 +58,17 @@ impl CscMatrix {
         &self.values
     }
 
+    /// Returns a new matrix with all non-zero values multiplied by `factor`.
+    pub fn scale_values(&self, factor: f64) -> Self {
+        Self {
+            col_ptr: self.col_ptr.clone(),
+            row_ind: self.row_ind.clone(),
+            values: self.values.iter().map(|&v| v * factor).collect(),
+            nrows: self.nrows,
+            ncols: self.ncols,
+        }
+    }
+
     /// Returns the number of rows.
     pub fn nrows(&self) -> usize {
         self.nrows

@@ -32,7 +32,7 @@ pub struct Constraint {
 ///
 /// # Examples
 /// ```
-/// use otspot_core::model::{Model, constraint};
+/// use otspot_model::{Model, constraint};
 /// let mut model = Model::new("demo");
 /// let x = model.add_var("x", 0.0, f64::INFINITY);
 /// let y = model.add_var("y", 0.0, 10.0);
@@ -47,7 +47,7 @@ pub struct Constraint {
 ///
 /// For complex LHS expressions, wrap them in parentheses:
 /// ```rust,no_run
-/// # use otspot_core::model::{Model, constraint};
+/// # use otspot_model::{Model, constraint};
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # let y = model.add_var("y", 0.0, f64::INFINITY);
@@ -55,7 +55,7 @@ pub struct Constraint {
 /// ```
 /// or use the method API directly:
 /// ```rust,no_run
-/// # use otspot_core::model::Model;
+/// # use otspot_model::Model;
 /// # let mut model = Model::new("demo");
 /// # let x = model.add_var("x", 0.0, f64::INFINITY);
 /// # let y = model.add_var("y", 0.0, f64::INFINITY);
@@ -65,22 +65,22 @@ pub struct Constraint {
 macro_rules! constraint {
     // Complex LHS in parentheses
     (($lhs:expr) <= $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).leq($rhs)
+        $crate::expression::Expression::from($lhs).leq($rhs)
     };
     (($lhs:expr) >= $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).geq($rhs)
+        $crate::expression::Expression::from($lhs).geq($rhs)
     };
     (($lhs:expr) == $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).eq_constraint($rhs)
+        $crate::expression::Expression::from($lhs).eq_constraint($rhs)
     };
     // Single variable (ident can be followed by <= in macro rules)
     ($lhs:ident <= $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).leq($rhs)
+        $crate::expression::Expression::from($lhs).leq($rhs)
     };
     ($lhs:ident >= $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).geq($rhs)
+        $crate::expression::Expression::from($lhs).geq($rhs)
     };
     ($lhs:ident == $rhs:expr) => {
-        $crate::model::expression::Expression::from($lhs).eq_constraint($rhs)
+        $crate::expression::Expression::from($lhs).eq_constraint($rhs)
     };
 }
