@@ -372,7 +372,10 @@ impl Model {
         };
         let build_ok = |sr: crate::problem::SolverResult| {
             let (dual, rc, slack) = lp_extras(&sr);
+            let status = sr.status.clone();
             ModelResult {
+                status: status.clone(),
+                proof: SolutionProof::from_status(&status),
                 objective_value: signed_obj(sr.objective),
                 solution: sr.solution,
                 dual_solution: dual,
@@ -526,8 +529,15 @@ impl Model {
             };
             oriented + self.obj_offset
         };
-        let build_ok =
-            |raw_obj: f64, sol: Vec<f64>, dual: Option<Vec<f64>>, bd: Vec<f64>| ModelResult {
+        let build_ok = |status: SolveStatus,
+                        raw_obj: f64,
+                        sol: Vec<f64>,
+                        dual: Option<Vec<f64>>,
+                        bd: Vec<f64>| {
+            let proof = SolutionProof::from_status(&status);
+            ModelResult {
+                status,
+                proof,
                 objective_value: signed_obj(raw_obj),
                 solution: sol,
                 dual_solution: dual,
@@ -535,10 +545,12 @@ impl Model {
                 slack: None,
                 bound_duals: bd,
                 stats: qp_stats.clone(),
-            };
+            }
+        };
 
         match qp_result.status {
             SolveStatus::Optimal => Ok(build_ok(
+                qp_result.status.clone(),
                 qp_result.objective,
                 qp_result.solution.clone(),
                 fold_dual(&qp_result.dual_solution),
@@ -551,6 +563,7 @@ impl Model {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
                     Ok(build_ok(
+                        qp_result.status.clone(),
                         qp_result.objective,
                         qp_result.solution.clone(),
                         fold_dual(&qp_result.dual_solution),
@@ -564,6 +577,7 @@ impl Model {
                     Err(ModelError::Timeout)
                 } else {
                     Ok(build_ok(
+                        qp_result.status.clone(),
                         qp_result.objective,
                         qp_result.solution.clone(),
                         fold_dual(&qp_result.dual_solution),
@@ -583,6 +597,7 @@ impl Model {
             SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
             | SolveStatus::NonconvexGlobal => Ok(build_ok(
+                qp_result.status.clone(),
                 qp_result.objective,
                 qp_result.solution.clone(),
                 fold_dual(&qp_result.dual_solution),
@@ -668,14 +683,19 @@ impl Model {
             sol
         };
 
-        let build_ok = |sr: crate::problem::SolverResult| ModelResult {
-            objective_value: signed_obj(sr.objective),
-            solution: round_integers(sr.solution),
-            dual_solution: None,
-            reduced_costs: None,
-            slack: None,
-            bound_duals: vec![],
-            stats: sr.stats,
+        let build_ok = |sr: crate::problem::SolverResult| {
+            let status = sr.status.clone();
+            ModelResult {
+                status: status.clone(),
+                proof: SolutionProof::from_status(&status),
+                objective_value: signed_obj(sr.objective),
+                solution: round_integers(sr.solution),
+                dual_solution: None,
+                reduced_costs: None,
+                slack: None,
+                bound_duals: vec![],
+                stats: sr.stats,
+            }
         };
 
         match result.status {
@@ -734,9 +754,58 @@ fn validate_timeout(secs: f64) -> Result<(), ModelError> {
 // ModelResult
 // ---------------------------------------------------------------------------
 
+/// What kind of optimality proof backs a successful [`ModelResult`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolutionProof {
+    /// A global optimum was proven.
+    GlobalOptimal,
+    /// A local KKT point was returned without a global proof.
+    LocalOptimal,
+    /// A feasible incumbent is available, but optimality was not proven.
+    FeasibleUnproven,
+}
+
+impl SolutionProof {
+    fn from_status(status: &SolveStatus) -> Self {
+        match status {
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal => SolutionProof::GlobalOptimal,
+            SolveStatus::LocallyOptimal => SolutionProof::LocalOptimal,
+            SolveStatus::MaxIterations
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
+            | SolveStatus::NonconvexLocal => SolutionProof::FeasibleUnproven,
+            // These error statuses never reach build_ok — all three paths (LP, QP, MIP)
+            // return Err(...) for them before calling build_ok. The conservative fallback
+            // below guards against future regressions; the debug_assert catches them in tests.
+            SolveStatus::Infeasible
+            | SolveStatus::Unbounded
+            | SolveStatus::NumericalError
+            | SolveStatus::NonConvex(_)
+            | SolveStatus::NotSupported(_) => {
+                debug_assert!(
+                    false,
+                    "from_status called with error status {:?}: this arm is unreachable from build_ok",
+                    status
+                );
+                SolutionProof::FeasibleUnproven
+            }
+        }
+    }
+}
+
 /// The result of a successful solve.
 #[derive(Debug)]
 pub struct ModelResult {
+    /// Solver termination status associated with this returned solution.
+    ///
+    /// Only success-domain variants occur here (`Optimal`, `LocallyOptimal`,
+    /// `NonconvexLocal`, `NonconvexGlobal`, `MaxIterations`, `SuboptimalSolution`,
+    /// `Timeout`); error variants surface as [`ModelError`] instead. Match on
+    /// [`ModelResult::proof`] for the optimality guarantee.
+    pub status: SolveStatus,
+    /// Optimality proof quality for this returned solution.
+    pub proof: SolutionProof,
     /// Optimal objective value.
     pub objective_value: f64,
     /// Primal solution vector (indexed by variable index).
@@ -770,6 +839,11 @@ impl ModelResult {
     /// Get the optimal objective value.
     pub fn objective(&self) -> f64 {
         self.objective_value
+    }
+
+    /// Returns true when the solver proved global optimality for this result.
+    pub fn has_global_optimality_proof(&self) -> bool {
+        self.proof == SolutionProof::GlobalOptimal
     }
 }
 
@@ -861,7 +935,8 @@ impl std::error::Error for ModelError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ModelError, SolveError, Variable};
+    use super::{Model, ModelError, SolutionProof, SolveError, Variable};
+    use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
     // concurrent solver での許容誤差（IPM/IP-PMM 並列実行）
@@ -1025,6 +1100,34 @@ mod tests {
         let _x = model.add_var("x", 0.0, f64::INFINITY);
         let err = model.solve().unwrap_err();
         assert!(matches!(err, ModelError::NoObjective));
+    }
+
+    #[test]
+    fn solution_proof_mapping_preserves_unproven_statuses() {
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::Optimal),
+            SolutionProof::GlobalOptimal
+        );
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::NonconvexGlobal),
+            SolutionProof::GlobalOptimal
+        );
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::LocallyOptimal),
+            SolutionProof::LocalOptimal
+        );
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::NonconvexLocal),
+            SolutionProof::FeasibleUnproven
+        );
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::Timeout),
+            SolutionProof::FeasibleUnproven
+        );
+        assert_eq!(
+            SolutionProof::from_status(&SolveStatus::SuboptimalSolution),
+            SolutionProof::FeasibleUnproven
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1267,5 +1370,105 @@ mod tests {
             "T8-2: dual[0] expected -1.0, got {}",
             dual[0]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // LocalOptimal proof: indefinite-Q QP through Model API (table-driven).
+    //
+    // Sentinel: replacing from_status with a no-op that always returns
+    // GlobalOptimal causes the assert_eq!(proof, LocalOptimal) to FAIL.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_locally_optimal_proof() {
+        // (name, q_diag, bounds, c) — all 2-variable diagonal-Q cases.
+        let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
+            // Diagonal indefinite Q: eigenvalues -2, +2.
+            ("diag(-2,2)", [-2.0, 2.0], (-1.0, 1.0), [0.0, 0.0]),
+            // Diagonal indefinite Q: eigenvalues -3, +5 with linear term.
+            ("diag(-3,5)", [-3.0, 5.0], (-2.0, 2.0), [-1.0, 0.0]),
+        ];
+
+        for &(name, q_diag, (lb, ub), c) in cases {
+            let mut model = Model::new(name);
+            let x = model.add_var("x0", lb, ub);
+            let y = model.add_var("x1", lb, ub);
+            let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &q_diag, 2, 2).unwrap();
+            model.set_quadratic_objective(q);
+            model.minimize(c[0] * x + c[1] * y);
+
+            let result = model.solve();
+            match result {
+                Ok(r) => {
+                    assert_eq!(
+                        r.status,
+                        crate::problem::SolveStatus::LocallyOptimal,
+                        "[{name}] expected LocallyOptimal, got {:?}",
+                        r.status
+                    );
+                    assert_eq!(
+                        r.proof,
+                        SolutionProof::LocalOptimal,
+                        "[{name}] expected LocalOptimal proof, got {:?}",
+                        r.proof
+                    );
+                    assert!(
+                        !r.has_global_optimality_proof(),
+                        "[{name}] has_global_optimality_proof must be false for LocallyOptimal"
+                    );
+                }
+                Err(e) => panic!("[{name}] unexpected Err: {e:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // FeasibleUnproven proof: impossibly-tight tolerance forces SuboptimalSolution
+    // on a convex QP that the IPM solves to finite residuals (table-driven).
+    //
+    // Sentinel: replacing from_status with a no-op returning GlobalOptimal
+    // causes the assert_eq!(proof, FeasibleUnproven) to FAIL.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_model_qp_feasible_unproven_proof() {
+        use crate::options::Tolerance;
+
+        // (name, q_diag, (lb,ub), c)
+        let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
+            // Convex PSD Q=2I, c=[-4,-4]. IPM converges (residuals ~1e-6) but
+            // Custom(1e-200) makes satisfies_eps always false → SuboptimalSolution.
+            ("convex_2x2_tight_tol", [2.0, 2.0], (0.0, f64::INFINITY), [-4.0, -4.0]),
+            // Convex PSD Q=4I, c=[0,-2] with box bounds.
+            ("convex_box_tight_tol", [4.0, 4.0], (0.0, 3.0), [0.0, -2.0]),
+        ];
+
+        for &(name, q_diag, (lb, ub), c) in cases {
+            let mut model = Model::new(name);
+            let x = model.add_var("x0", lb, ub);
+            let y = model.add_var("x1", lb, ub);
+            let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &q_diag, 2, 2).unwrap();
+            model.set_quadratic_objective(q);
+            model.minimize(c[0] * x + c[1] * y);
+            // Impossibly tight tolerance: IPM finds a finite-residual solution
+            // but satisfies_eps(1e-200) is always false → SuboptimalSolution.
+            model.set_tolerance(Tolerance::Custom(1e-200));
+
+            let result = model.solve();
+            match result {
+                Ok(r) => {
+                    assert_eq!(
+                        r.proof,
+                        SolutionProof::FeasibleUnproven,
+                        "[{name}] expected FeasibleUnproven proof, got {:?} (status={:?})",
+                        r.proof, r.status
+                    );
+                    assert!(
+                        !r.has_global_optimality_proof(),
+                        "[{name}] has_global_optimality_proof must be false for FeasibleUnproven"
+                    );
+                    assert!(!r.solution.is_empty(), "[{name}] solution must be non-empty");
+                }
+                Err(e) => panic!("[{name}] unexpected Err: {e:?}"),
+            }
+        }
     }
 }

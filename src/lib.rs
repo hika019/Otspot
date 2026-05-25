@@ -154,7 +154,7 @@ static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};
-pub use model::{Model, ModelResult, ModelError, VarKind};
+pub use model::{Model, ModelError, ModelResult, SolutionProof, VarKind};
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use mip::{
     solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
