@@ -671,8 +671,35 @@ minimize
             return;
         }
         let prob = unwrap_qp(parse_qplib(path.as_path()).expect("QPLIB_1493 parse"));
+
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 5);
+
+        for i in 0..4 {
+            assert_eq!(prob.constraint_types[i], otspot_core::problem::ConstraintType::Eq,
+                "constraint {i} must be Eq");
+        }
+        assert_eq!(prob.constraint_types[4], otspot_core::problem::ConstraintType::Le);
+
+        let expected_b = [-0.17_f64, 0.51, -0.41, -0.15, 67.98];
+        for (i, &exp) in expected_b.iter().enumerate() {
+            assert!((prob.b[i] - exp).abs() < 1e-10,
+                "b[{i}]: expected {exp}, got {}", prob.b[i]);
+        }
+
+        assert_eq!(prob.quadratic_constraints.len(), 5);
+        for i in 0..4 {
+            assert_eq!(prob.quadratic_constraints[i].nnz(), 0,
+                "Q_k[{i}] must be empty");
+        }
+        let qk = &prob.quadratic_constraints[4];
+        assert_eq!(qk.n, 40);
+        assert_eq!(qk.nnz(), 1547,
+            "Q_5 nnz: 37 diag + 755 off-diag*2 = 1547");
+        // Q_5[0,0] = 1.88 (file: 5 1 1 1.88)
+        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v).expect("Q_5 must have (0,0) entry");
+        assert!((v00 - 1.88).abs() < 1e-10, "Q_5[0,0] must be 1.88");
     }
 
     #[test]
