@@ -5,6 +5,12 @@ on:
     branches: ["**"]
   pull_request:
 
+# Cancel superseded in-progress runs for the same ref (e.g. rapid pushes to a
+# feature branch). PR vs push runs use distinct refs, so both still execute.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,8 +18,13 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    # No rust-cache here: `cargo fmt` does not compile, so a build cache is a
+    # no-op for this job.
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       # Informational only: ~223/261 files are currently unformatted and a
       # global `cargo fmt` would collide with the in-flight feature branches.
       # Flip to blocking (drop continue-on-error) after the branch wave lands
@@ -26,6 +37,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       # Warning budget (~262 warnings) is tracked separately; -D warnings deferred.
       - run: cargo clippy --all-targets --all-features
 
@@ -34,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       # data/ is gitignored and absent in CI. Integration tests that reference
       # data/ panic on missing files rather than skipping gracefully, so we
@@ -49,5 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # --no-verify skips build: verifies metadata and file inclusion only.
       - run: cargo package --no-verify
