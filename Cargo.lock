@@ -1145,6 +1145,21 @@ version = "0.1.1"
 dependencies = [
  "clarabel",
  "criterion",
+ "dyn-stack",
+ "faer",
+ "mimalloc",
+ "otspot-core",
+ "proptest",
+ "tempfile",
+ "twofloat",
+]
+
+[[package]]
+name = "otspot-core"
+version = "0.1.1"
+dependencies = [
+ "clarabel",
+ "criterion",
  "faer",
  "log",
  "mimalloc",

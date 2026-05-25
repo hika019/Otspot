@@ -42,7 +42,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # Warning budget (~262 warnings) is tracked separately; -D warnings deferred.
-      - run: cargo clippy --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features
 
   test:
     name: test
@@ -57,9 +57,9 @@ jobs:
       # run only lib + bin targets via the lib-only nextest profile.
       # test-threads=3 is set in the profile (matches CLAUDE.md spec).
       - name: Unit tests (lib-only profile; data-dependent tests skipped)
-        run: cargo nextest run --profile lib-only
+        run: cargo nextest run --workspace --profile lib-only
       - name: Doctests
-        run: cargo test --doc
+        run: cargo test --doc --workspace
 
   package:
     name: package
@@ -69,4 +69,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # --no-verify skips build: verifies metadata and file inclusion only.
-      - run: cargo package --no-verify
+      # Verify otspot-core (the published implementation crate).
+      # The otspot facade is verified at publish time (depends on crates.io otspot-core).
+      - run: cargo package --no-verify -p otspot-core

@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = [".", "otspot-core"]
+
 [package]
 name = "otspot"
 version = "0.1.1"
@@ -15,7 +19,6 @@ categories = ["science", "algorithms", "mathematics"]
 # インラインテスト / dev 設定) を除外する。
 exclude = [
     "/src/bin",
-    "/src/test_kkt.rs",
     "/tests",
     "/benches",
     "/examples",
@@ -26,6 +29,7 @@ exclude = [
     "/Dockerfile.dev",
     "/.dockerignore",
     "/cspell.json",
+    "otspot-core",
     "**/tests",
     "**/tests.rs",
     "**/tests_*.rs",
@@ -36,13 +40,12 @@ default = []
 # `parallel` 機能フラグは後方互換のため残置 (no-op)。rayon は必須依存に昇格
 # (#5 Phase 2 multi-start で常時 ThreadPool が必要)。
 # 既存 `#[cfg(feature="parallel")]` 配下の heavy parallel テストは opt-in 維持。
-parallel = []
+parallel = ["otspot-core/parallel"]
 
 [dependencies]
-faer = "0.24.0"
-log = "0.4"
+otspot-core = { path = "otspot-core", version = "0.1.1" }
+# mimalloc and twofloat are used directly by bins in src/bin/
 mimalloc = { version = "0.1", default-features = false }
-rayon = "1"
 twofloat = "0.8"
 
 [dev-dependencies]
@@ -50,6 +53,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.10.0"
 clarabel = "0.11"
 tempfile = "3"
+faer = "0.24.0"
+dyn-stack = "0.13.2"
 
 [[bin]]
 name = "mip_speed_bench"

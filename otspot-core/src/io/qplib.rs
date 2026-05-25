@@ -1199,9 +1199,9 @@ minimize
 
     // ── File-based tests: data/qplib_unsupported/ (QCQ instances) ──────────
 
-    /// Helper: resolve path relative to the crate manifest directory.
+    /// Helper: resolve path relative to the workspace root (one level above crate manifest).
     fn data_path(rel: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel)
     }
 
     /// QPLIB_1157: n=40, m=9 (8 equality constraints + 1 Le).
