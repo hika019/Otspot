@@ -388,8 +388,6 @@ impl Model {
 
         match solver_result.status {
             SolveStatus::Optimal => Ok(build_ok(solver_result)),
-            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
-            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
                 if solver_result.solution.is_empty() {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
@@ -405,16 +403,13 @@ impl Model {
                 }
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
-            SolveStatus::NonConvex(msg) => {
-                Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
-            }
             SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
                 "Unexpected nonconvex status on LP path".to_string(),
             )),
-            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
+            s => Err(classify_status_error(s)
+                .unwrap_or_else(|| ModelError::Internal("unhandled LP status".to_string()))),
         }
     }
 
@@ -550,22 +545,20 @@ impl Model {
 
         match qp_result.status {
             SolveStatus::Optimal => Ok(build_ok(
-                qp_result.status.clone(),
+                SolveStatus::Optimal,
                 qp_result.objective,
-                qp_result.solution.clone(),
+                qp_result.solution,
                 fold_dual(&qp_result.dual_solution),
                 qp_result.bound_duals,
             )),
-            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
-            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::MaxIterations => {
                 if qp_result.solution.is_empty() {
                     Err(ModelError::SolveError(SolveError::MaxIterations))
                 } else {
                     Ok(build_ok(
-                        qp_result.status.clone(),
+                        SolveStatus::MaxIterations,
                         qp_result.objective,
-                        qp_result.solution.clone(),
+                        qp_result.solution,
                         fold_dual(&qp_result.dual_solution),
                         qp_result.bound_duals,
                     ))
@@ -577,33 +570,28 @@ impl Model {
                     Err(ModelError::Timeout)
                 } else {
                     Ok(build_ok(
-                        qp_result.status.clone(),
+                        SolveStatus::SuboptimalSolution,
                         qp_result.objective,
-                        qp_result.solution.clone(),
+                        qp_result.solution,
                         fold_dual(&qp_result.dual_solution),
                         qp_result.bound_duals,
                     ))
                 }
             }
             SolveStatus::Timeout => Err(ModelError::Timeout),
-            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
-            SolveStatus::NonConvex(msg) => {
-                Err(ModelError::Internal(format!("Non-convex QP: {}", msg)))
-            }
-            // LocallyOptimal / NonconvexLocal / NonconvexGlobal: 解はあるが (NonconvexGlobal を
-            // 除き) global proof なし。Model API 経由では caller が status を観測できない
-            // 制約上、Ok(...) で解を返し objective_value を返す (caller は obj quality を別途
-            // 検証する責任)。NonconvexGlobal は global proof 済 → 安全に Ok。
-            SolveStatus::LocallyOptimal
+            // LocallyOptimal / NonconvexLocal / NonconvexGlobal: global proof なしだが解あり。
+            // Model API では caller が status で品質を判断する。NonconvexGlobal は global 証明済。
+            status @ (SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
-            | SolveStatus::NonconvexGlobal => Ok(build_ok(
-                qp_result.status.clone(),
+            | SolveStatus::NonconvexGlobal) => Ok(build_ok(
+                status,
                 qp_result.objective,
-                qp_result.solution.clone(),
+                qp_result.solution,
                 fold_dual(&qp_result.dual_solution),
                 qp_result.bound_duals,
             )),
-            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
+            s => Err(classify_status_error(s)
+                .unwrap_or_else(|| ModelError::Internal("unhandled QP status".to_string()))),
         }
     }
 
@@ -700,8 +688,6 @@ impl Model {
 
         match result.status {
             SolveStatus::Optimal => Ok(build_ok(result)),
-            SolveStatus::Infeasible => Err(ModelError::SolveError(SolveError::Infeasible)),
-            SolveStatus::Unbounded => Err(ModelError::SolveError(SolveError::Unbounded)),
             SolveStatus::Timeout => {
                 // 打ち切りでも incumbent (整数実行可能解) があれば解を返す。
                 if result.solution.is_empty() {
@@ -717,17 +703,13 @@ impl Model {
                     Ok(build_ok(result))
                 }
             }
-            SolveStatus::NumericalError => Err(ModelError::SolveError(SolveError::NumericalError)),
-            // Non-convex MIQP (non-PSD Q) is out of scope — surface it as an error.
-            SolveStatus::NonConvex(msg) => {
-                Err(ModelError::Internal(format!("Non-convex MIQP: {}", msg)))
-            }
             SolveStatus::LocallyOptimal
             | SolveStatus::NonconvexLocal
             | SolveStatus::NonconvexGlobal => Err(ModelError::Internal(
                 "Unexpected nonconvex status on MIP path".to_string(),
             )),
-            SolveStatus::NotSupported(msg) => Err(ModelError::Internal(msg)),
+            s => Err(classify_status_error(s)
+                .unwrap_or_else(|| ModelError::Internal("unhandled MIP status".to_string()))),
         }
     }
 
@@ -737,6 +719,24 @@ impl Model {
             other => other.to_string(),
         };
         self.invalid_inputs.insert(key, msg);
+    }
+}
+
+/// Maps `SolveStatus` variants that always produce an error to the corresponding
+/// `ModelError`. Returns `None` for statuses that may produce a successful result
+/// depending on context (e.g. `MaxIterations` with a non-empty solution).
+///
+/// Used by all three dispatch paths (LP / QP / MIP) to eliminate duplicated
+/// match arms for `Infeasible`, `Unbounded`, `NumericalError`, `NonConvex`, and
+/// `NotSupported`.
+fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
+    match status {
+        SolveStatus::Infeasible => Some(ModelError::SolveError(SolveError::Infeasible)),
+        SolveStatus::Unbounded => Some(ModelError::SolveError(SolveError::Unbounded)),
+        SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
+        SolveStatus::NonConvex(msg) => Some(ModelError::NonConvex(msg)),
+        SolveStatus::NotSupported(msg) => Some(ModelError::NotSupported(msg)),
+        _ => None,
     }
 }
 
@@ -908,7 +908,12 @@ pub enum ModelError {
     SolveError(SolveError),
     /// Solver timed out before finding an optimal solution.
     Timeout,
-    /// An internal error (e.g., dimension mismatch in matrix construction).
+    /// Problem has a non-convex (indefinite) objective; global optimality cannot
+    /// be guaranteed via IPM. Use `solve_qp_global` for non-convex continuous QP.
+    NonConvex(String),
+    /// Problem type is not supported by this solver (e.g. QCQP).
+    NotSupported(String),
+    /// An unexpected internal error (bug or invariant violation).
     Internal(String),
 }
 
@@ -922,6 +927,8 @@ impl fmt::Display for ModelError {
             ModelError::InvalidInput(msg) => write!(f, "Invalid model input: {}", msg),
             ModelError::SolveError(e) => write!(f, "Solve failed: {}", e),
             ModelError::Timeout => write!(f, "Solver timed out"),
+            ModelError::NonConvex(msg) => write!(f, "Non-convex problem: {}", msg),
+            ModelError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
             ModelError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
@@ -935,7 +942,7 @@ impl std::error::Error for ModelError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ModelError, SolutionProof, SolveError, Variable};
+    use super::{classify_status_error, Model, ModelError, SolutionProof, SolveError, Variable};
     use crate::problem::SolveStatus;
     use crate::sparse::CscMatrix;
 
@@ -1469,6 +1476,73 @@ mod tests {
                 }
                 Err(e) => panic!("[{name}] unexpected Err: {e:?}"),
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel: classify_status_error maps NonConvex/NotSupported to typed
+    // variants (not Internal). Reverting the mapping to Internal causes FAIL.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn classify_status_error_typed_variants() {
+        let cases_nonconvex = [
+            "indefinite Q: eigenvalue < 0",
+            "non-PSD matrix in MIQP",
+        ];
+        for msg in &cases_nonconvex {
+            let status = SolveStatus::NonConvex(msg.to_string());
+            let err = classify_status_error(status).expect("NonConvex must map to Some");
+            assert!(
+                matches!(err, ModelError::NonConvex(_)),
+                "NonConvex status must yield ModelError::NonConvex, got {:?}",
+                err
+            );
+        }
+
+        let cases_not_supported = [
+            "QCQP not supported",
+            "constraint type unsupported",
+        ];
+        for msg in &cases_not_supported {
+            let status = SolveStatus::NotSupported(msg.to_string());
+            let err = classify_status_error(status).expect("NotSupported must map to Some");
+            assert!(
+                matches!(err, ModelError::NotSupported(_)),
+                "NotSupported status must yield ModelError::NotSupported, got {:?}",
+                err
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel: MIQP with indefinite Q returns ModelError::NonConvex.
+    // Reverting NonConvex → Internal in finish_mip causes FAIL.
+    // Table-driven: multiple indefinite Q shapes.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn miqp_nonconvex_q_returns_nonconvex_error() {
+        let cases: &[(&str, [f64; 2])] = &[
+            ("diag(-1, 1)", [-1.0, 1.0]),
+            ("diag(-2, 3)", [-2.0, 3.0]),
+            ("diag(1, -1)", [1.0, -1.0]),
+        ];
+
+        for &(name, q_diag) in cases {
+            let mut model = Model::new(name);
+            let x = model.add_binary_var("x");
+            let y = model.add_binary_var("y");
+            let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &q_diag, 2, 2).unwrap();
+            model.set_quadratic_objective(q);
+            model.minimize(0.0 * x + 0.0 * y);
+
+            let err = model
+                .solve()
+                .expect_err(&format!("[{name}] expected Err(NonConvex), got Ok"));
+            assert!(
+                matches!(err, ModelError::NonConvex(_)),
+                "[{name}] expected ModelError::NonConvex, got {:?}",
+                err
+            );
         }
     }
 }

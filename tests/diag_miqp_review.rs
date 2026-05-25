@@ -12,7 +12,7 @@
 
 use otspot::options::{MipConfig, SolverOptions};
 use otspot::problem::{ConstraintType, SolveStatus};
-use otspot::{solve_miqp_with_stats, CscMatrix, MiqpProblem, Model, QpProblem};
+use otspot::{solve_miqp_with_stats, CscMatrix, MiqpProblem, Model, ModelError, QpProblem};
 
 fn opts() -> SolverOptions {
     let mut o = SolverOptions::default();
@@ -392,13 +392,17 @@ fn maximize_concave_miqp_matches_truth() {
 
 #[test]
 fn maximize_convex_miqp_rejected_not_silent() {
-    // maximize a convex (PSD Q) quadratic is non-convex → must error, never silent.
+    // maximize a convex (PSD Q) quadratic → negated Q is NSD → non-convex MIQP.
+    // Must return ModelError::NonConvex, never silent wrong answer.
     let mut m = Model::new("max_convex");
     let x = m.add_int_var("x", 0.0, 5.0);
     m.set_diagonal_q(&[2.0]); // PSD; maximize → -Q NSD → non-convex
     m.maximize(x);
     let err = m.solve().unwrap_err();
-    assert!(format!("{err:?}").contains("Non-convex"), "expected Non-convex error, got {err:?}");
+    assert!(
+        matches!(err, ModelError::NonConvex(_)),
+        "expected ModelError::NonConvex, got {err:?}"
+    );
 }
 
 #[test]
