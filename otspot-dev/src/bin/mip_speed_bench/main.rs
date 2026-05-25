@@ -16,7 +16,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use otspot::{
+use otspot_core::{
     options::{MipBranching, MipConfig, SolverOptions},
     solve_milp_with_stats, solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
@@ -118,7 +118,7 @@ fn run_milp(problem: &MilpProblem, opts: &SolverOptions, cfg: &MipConfig, timeou
     let (result, stats) = solve_milp_with_stats(problem, opts, cfg);
     let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    use otspot::problem::SolveStatus::*;
+    use otspot_core::problem::SolveStatus::*;
     let timeout_hit = matches!(result.status, Timeout) || wall_ms / 1000.0 >= timeout_secs * 0.99;
 
     Row {
@@ -162,7 +162,7 @@ fn run_miqp(problem: &MiqpProblem, opts: &SolverOptions, cfg: &MipConfig, timeou
     let (result, stats) = solve_miqp_with_stats(problem, opts, cfg);
     let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    use otspot::problem::SolveStatus::*;
+    use otspot_core::problem::SolveStatus::*;
     let timeout_hit = matches!(result.status, Timeout) || wall_ms / 1000.0 >= timeout_secs * 0.99;
 
     Row {

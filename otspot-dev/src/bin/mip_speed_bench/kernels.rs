@@ -8,9 +8,9 @@
 
 #![allow(dead_code)] // each #[path] consumer uses a subset.
 
-use otspot::{
+use otspot_core::{
     problem::{ConstraintType, LpProblem},
-    CscMatrix, MilpProblem, QpProblem,
+    CscMatrix, MilpProblem, MiqpProblem, QpProblem,
 };
 
 /// Deterministic LCG (Knuth MMIX parameters) so runs need no external data.
@@ -169,7 +169,7 @@ pub fn convex_q_to_csc(q_dense: &[Vec<f64>], n: usize) -> CscMatrix {
 
 /// Build a convex MIQP with `m ≈ density·n` random ≤ constraints. Integer vars
 /// (first `n_int`) range `[0, 3]`; continuous vars `[0, 5]`.
-pub fn gen_convex_miqp(n: usize, int_ratio: f64, density: f64, seed: u64) -> otspot::MiqpProblem {
+pub fn gen_convex_miqp(n: usize, int_ratio: f64, density: f64, seed: u64) -> MiqpProblem {
     let n_int = ((n as f64 * int_ratio).round() as usize).max(1);
     let mut lcg = convex_miqp_lcg(seed);
     let (q_dense, c) = build_convex_qc(&mut lcg, n);
@@ -202,5 +202,5 @@ pub fn gen_convex_miqp(n: usize, int_ratio: f64, density: f64, seed: u64) -> ots
     let bounds: Vec<(f64, f64)> =
         (0..n).map(|i| if i < n_int { (0.0, 3.0) } else { (0.0, 5.0) }).collect();
     let qp = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-    otspot::MiqpProblem::new(qp, (0..n_int).collect()).unwrap()
+    MiqpProblem::new(qp, (0..n_int).collect()).unwrap()
 }

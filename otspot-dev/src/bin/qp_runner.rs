@@ -23,8 +23,8 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::io::{self, BufRead};
-use otspot::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
-use otspot::sparse::CscMatrix;
+use otspot_core::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
+use otspot_core::sparse::CscMatrix;
 
 const INF_THRESHOLD: f64 = 1e200;
 
@@ -196,4 +196,3 @@ fn main() {
 
     println!("{} {:.10e} {}", status_str, result.objective, result.iterations);
 }
-// temp check - remove later

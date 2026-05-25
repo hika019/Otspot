@@ -19,7 +19,7 @@ use otspot::{
     solve_milp_with_stats, solve_miqp_with_stats, CscMatrix, MiqpProblem, QpProblem,
 };
 
-#[path = "../src/bin/mip_speed_bench/kernels.rs"]
+#[path = "../otspot-dev/src/bin/mip_speed_bench/kernels.rs"]
 mod kernels;
 use kernels::{
     build_convex_qc, convex_miqp_lcg, convex_q_to_csc, gen_assignment_milp, gen_knapsack_milp,
