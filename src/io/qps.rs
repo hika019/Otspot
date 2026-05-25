@@ -1218,13 +1218,26 @@ ENDATA\n";
         assert_eq!(got.q.values.len(), expected.q.values.len());
     }
 
-    /// Tracked fixture: parse tests/netlib/afiro.QPS via reader API.
+    /// CRLF line endings must parse identically to LF (BufRead::lines strips trailing \r).
     #[test]
-    fn test_qps_reader_fixture_afiro() {
-        let path = std::path::Path::new("tests/netlib/afiro.QPS");
-        if !path.exists() {
-            return;
-        }
+    fn test_qps_reader_crlf_equivalence() {
+        let lf = parse_qps_reader(std::io::Cursor::new(STREAM_QPS.as_bytes())).unwrap();
+        let crlf_src = STREAM_QPS.replace('\n', "\r\n");
+        let crlf = parse_qps_reader(std::io::Cursor::new(crlf_src.as_bytes())).unwrap();
+        assert_eq!(crlf.num_vars, lf.num_vars);
+        assert_eq!(crlf.num_constraints, lf.num_constraints);
+        assert_eq!(crlf.c, lf.c);
+        assert_eq!(crlf.b, lf.b);
+        assert_eq!(crlf.bounds, lf.bounds);
+        assert_eq!(crlf.q.values, lf.q.values);
+    }
+
+    /// Tracked fixture: real Maros-Meszaros QP with a QUADOBJ section, parsed via the
+    /// file-backed reader and compared against the in-memory string API. Asserts the
+    /// quadratic terms are populated so the streaming path actually exercises QUADOBJ.
+    #[test]
+    fn test_qps_reader_fixture_tame() {
+        let path = std::path::Path::new("tests/netlib/TAME.QPS");
         let content = std::fs::read_to_string(path).unwrap();
         let expected = parse_qps_str(&content).unwrap();
         let file = std::fs::File::open(path).unwrap();
@@ -1233,6 +1246,8 @@ ENDATA\n";
         assert_eq!(got.num_constraints, expected.num_constraints);
         assert_eq!(got.c, expected.c);
         assert_eq!(got.b, expected.b);
+        assert_eq!(got.q.values, expected.q.values, "QUADOBJ streaming mismatch");
+        assert!(!got.q.values.is_empty(), "fixture must contain quadratic terms");
     }
 
     // ─── Sentinel ────────────────────────────────────────────────────────────

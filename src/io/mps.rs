@@ -1825,13 +1825,23 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         assert_eq!(got.lp.bounds, expected.lp.bounds);
     }
 
+    /// CRLF line endings must parse identically to LF (BufRead::lines strips trailing \r).
+    #[test]
+    fn test_mps_reader_crlf_equivalence() {
+        let lf = parse_mps_reader(std::io::Cursor::new(STREAM_MPS.as_bytes())).unwrap();
+        let crlf_src = STREAM_MPS.replace('\n', "\r\n");
+        let crlf = parse_mps_reader(std::io::Cursor::new(crlf_src.as_bytes())).unwrap();
+        assert_eq!(crlf.num_vars, lf.num_vars);
+        assert_eq!(crlf.num_constraints, lf.num_constraints);
+        assert_eq!(crlf.c, lf.c);
+        assert_eq!(crlf.b, lf.b);
+        assert_eq!(crlf.bounds, lf.bounds);
+    }
+
     /// Tracked fixture: parse netlib/afiro.mps via reader API and compare to string API.
     #[test]
     fn test_mps_reader_fixture_afiro() {
         let path = std::path::Path::new("tests/netlib/afiro.mps");
-        if !path.exists() {
-            return; // fixture not tracked in this worktree
-        }
         let content = std::fs::read_to_string(path).unwrap();
         let expected = parse_mps(&content).unwrap();
         let file = std::fs::File::open(path).unwrap();
