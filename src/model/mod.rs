@@ -736,7 +736,17 @@ fn classify_status_error(status: SolveStatus) -> Option<ModelError> {
         SolveStatus::NumericalError => Some(ModelError::SolveError(SolveError::NumericalError)),
         SolveStatus::NonConvex(msg) => Some(ModelError::NonConvex(msg)),
         SolveStatus::NotSupported(msg) => Some(ModelError::NotSupported(msg)),
-        _ => None,
+        // Ok-capable or context-dependent statuses are handled by the caller's
+        // explicit match arms, never as a hard error. Listed exhaustively (no
+        // wildcard) so a new `SolveStatus` variant forces a deliberate decision
+        // here at compile time instead of silently becoming `Internal`.
+        SolveStatus::Optimal
+        | SolveStatus::LocallyOptimal
+        | SolveStatus::MaxIterations
+        | SolveStatus::SuboptimalSolution
+        | SolveStatus::Timeout
+        | SolveStatus::NonconvexLocal
+        | SolveStatus::NonconvexGlobal => None,
     }
 }
 
