@@ -1,6 +1,7 @@
 //! QP ソルバー: min 1/2 x'Qx + c'x  s.t. Ax (≤|=|≥) b, lb ≤ x ≤ ub
 //! (OSQP/qpOASES 標準の「1/2 あり」規約)
 
+pub mod certificate;
 pub mod diagnose;
 pub mod global;
 pub(crate) mod ipm_core;

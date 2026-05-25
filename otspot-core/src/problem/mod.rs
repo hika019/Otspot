@@ -3,6 +3,8 @@
 //! 線形計画問題（LP）の構造定義・制約種別・ソルバー結果の表現を提供する。
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
+pub mod certificate;
+
 use crate::error::SolverError;
 use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;

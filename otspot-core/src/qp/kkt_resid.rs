@@ -19,6 +19,66 @@
 use crate::problem::ConstraintType;
 use crate::sparse::CscMatrix;
 
+/// KKT dual-sign violation (componentwise relative max).
+///
+/// Stationarity `Qx + c + Aᵀy + bound_contrib = 0` uses the convention:
+/// - Le constraints: y_i ≥ 0 (violation if y_i < 0)
+/// - Ge constraints: y_i ≤ 0 (violation if y_i > 0)
+/// - Eq constraints: y_i free (no sign requirement)
+/// - lb bound duals (first half of `z`): z_lb_j ≥ 0 (violation if z_lb_j < 0)
+/// - ub bound duals (second half of `z`): z_ub_j ≥ 0 (violation if z_ub_j < 0)
+///
+/// Returns `max{ viol_k / (1 + |v_k|) }` over all sign-constrained components,
+/// where `viol_k = max(0, wrong-sign part)`. Returns 0 when all sign constraints hold.
+/// Scale invariant: scaling y and z by a positive scalar leaves the result unchanged.
+pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64)], z: &[f64]) -> f64 {
+    let mut max_rel = 0.0_f64;
+
+    // Constraint dual sign check.
+    let m = ct.len().min(y.len());
+    #[allow(unreachable_patterns)]
+    for i in 0..m {
+        let viol = match ct[i] {
+            ConstraintType::Le => (-y[i]).max(0.0),   // must be >= 0
+            ConstraintType::Ge => y[i].max(0.0),       // must be <= 0
+            ConstraintType::Eq => 0.0,                 // free
+            _ => 0.0,
+        };
+        if viol > 0.0 {
+            let rel = viol / (1.0 + y[i].abs());
+            if rel > max_rel { max_rel = rel; }
+        }
+    }
+
+    // Bound dual sign check (lb half: >= 0, ub half: <= 0).
+    // z layout mirrors bound_contrib: lb-finite columns first, then ub-finite columns.
+    if z.is_empty() {
+        return max_rel;
+    }
+    let mut idx = 0_usize;
+    for &(lb, _) in bounds.iter() {
+        if lb.is_finite() && idx < z.len() {
+            let v = (-z[idx]).max(0.0); // z_lb must be >= 0
+            if v > 0.0 {
+                let rel = v / (1.0 + z[idx].abs());
+                if rel > max_rel { max_rel = rel; }
+            }
+            idx += 1;
+        }
+    }
+    for &(_, ub) in bounds.iter() {
+        if ub.is_finite() && idx < z.len() {
+            let v = (-z[idx]).max(0.0); // z_ub must be >= 0
+            if v > 0.0 {
+                let rel = v / (1.0 + z[idx].abs());
+                if rel > max_rel { max_rel = rel; }
+            }
+            idx += 1;
+        }
+    }
+    max_rel
+}
+
 /// Bound dual stationarity contribution per column: `−bd_lb + bd_ub`.
 ///
 /// `bd` layout: `[lb-duals for lb-finite columns in column order, then ub-duals
@@ -324,6 +384,199 @@ mod tests {
         let p = f64_impl::comp_ineq_products(&ax, &b, &ct, &y);
         // Le: |1·(3−2)|=1, Ge: |2·(5−2)|=6, Eq: 0
         assert_eq!(p, vec![1.0, 6.0, 0.0]);
+    }
+
+    // ── dual_sign_violation tests ─────────────────────────────────────────────
+
+    /// Table-driven: Le constraint — y must be >= 0.
+    #[test]
+    fn dual_sign_le_y_negative_is_violation() {
+        use ConstraintType::*;
+        // y_Le = -0.5 (should be >= 0) → violation
+        let ct = vec![Le];
+        let y = vec![-0.5_f64];
+        let bounds: Vec<(f64, f64)> = vec![];
+        let z: Vec<f64> = vec![];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert!(v > 0.0, "Le with y=-0.5 should give violation > 0, got {}", v);
+        // expected: 0.5 / (1 + 0.5) = 0.5/1.5 ≈ 0.333
+        assert!((v - 0.5 / 1.5).abs() < 1e-12, "exact check: {}", v);
+    }
+
+    #[test]
+    fn dual_sign_le_y_positive_no_violation() {
+        use ConstraintType::*;
+        let ct = vec![Le, Le];
+        let y = vec![0.0_f64, 2.0];
+        let bounds: Vec<(f64, f64)> = vec![];
+        let z: Vec<f64> = vec![];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0, "Le with y>=0 must give 0");
+    }
+
+    /// Ge constraint — y must be <= 0.
+    #[test]
+    fn dual_sign_ge_y_positive_is_violation() {
+        use ConstraintType::*;
+        let ct = vec![Ge];
+        let y = vec![1.0_f64];
+        let bounds: Vec<(f64, f64)> = vec![];
+        let z: Vec<f64> = vec![];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert!(v > 0.0, "Ge with y=1.0 should be violation > 0, got {}", v);
+        assert!((v - 1.0 / 2.0).abs() < 1e-12, "exact: {}", v);
+    }
+
+    #[test]
+    fn dual_sign_ge_y_negative_no_violation() {
+        use ConstraintType::*;
+        let ct = vec![Ge];
+        let y = vec![-3.0_f64];
+        let bounds: Vec<(f64, f64)> = vec![];
+        let z: Vec<f64> = vec![];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0, "Ge with y=-3 must give 0");
+    }
+
+    /// Eq constraint — y is free, no violation regardless of sign.
+    #[test]
+    fn dual_sign_eq_y_any_sign_no_violation() {
+        use ConstraintType::*;
+        for yi in [-100.0, -1.0, 0.0, 1.0, 100.0] {
+            let ct = vec![Eq];
+            let y = vec![yi];
+            let v = dual_sign_violation(&ct, &y, &vec![], &vec![]);
+            assert_eq!(v, 0.0, "Eq with y={yi} should give 0");
+        }
+    }
+
+    /// Mixed Le/Ge/Eq: only the violating component contributes.
+    #[test]
+    fn dual_sign_mixed_constraints() {
+        use ConstraintType::*;
+        // Le y=0.5 (ok), Ge y=0.3 (violation), Eq y=-10 (ok)
+        let ct = vec![Le, Ge, Eq];
+        let y = vec![0.5, 0.3, -10.0];
+        let v = dual_sign_violation(&ct, &y, &vec![], &vec![]);
+        // Ge violation: 0.3 / (1 + 0.3) = 0.3/1.3 ≈ 0.2308
+        let expected = 0.3 / 1.3;
+        assert!((v - expected).abs() < 1e-12, "got {v}, expected {expected}");
+    }
+
+    /// z_lb must be >= 0: negative z_lb is a violation.
+    #[test]
+    fn dual_sign_z_lb_negative_is_violation() {
+        use ConstraintType::*;
+        let ct = vec![Le];
+        let y = vec![0.5_f64]; // Le ok
+        let bounds = vec![(0.0_f64, f64::INFINITY)]; // lb=0 finite, ub=inf
+        let z = vec![-0.4_f64]; // lb-dual must be >= 0
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        // violation from z: 0.4 / (1 + 0.4) = 0.4/1.4 ≈ 0.286
+        let expected = 0.4 / 1.4;
+        assert!((v - expected).abs() < 1e-12, "got {v}");
+    }
+
+    /// z_ub must be >= 0: negative z_ub is a violation.
+    #[test]
+    fn dual_sign_z_ub_negative_is_violation() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, 1.0_f64)]; // ub finite
+        let z = vec![-0.7_f64]; // ub-dual must be >= 0; negative is violation
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        let expected = 0.7 / 1.7;
+        assert!((v - expected).abs() < 1e-12, "got {v}");
+    }
+
+    /// z_ub positive (correct sign) → no violation.
+    #[test]
+    fn dual_sign_z_ub_positive_no_violation() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        let bounds = vec![(f64::NEG_INFINITY, 1.0_f64)]; // ub finite
+        let z = vec![0.7_f64]; // z_ub >= 0: correct sign
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0, "positive z_ub must not be a violation, got {v}");
+    }
+
+    /// z = [] means no bound duals: no violation.
+    #[test]
+    fn dual_sign_empty_z_no_violation() {
+        use ConstraintType::*;
+        let ct = vec![Le];
+        let y = vec![0.5_f64];
+        let bounds = vec![(0.0, f64::INFINITY)];
+        let v = dual_sign_violation(&ct, &y, &bounds, &[]);
+        assert_eq!(v, 0.0);
+    }
+
+    /// Scale robustness: large and small violations both give bounded results in (0, 1].
+    ///
+    /// The `1 + |v|` denominator gives componentwise relative normalisation:
+    /// violation / (1 + |violation|) is in [0, 1). Larger duals give smaller relative
+    /// violations (closer to 1), but the value is always bounded.
+    #[test]
+    fn dual_sign_scale_robust() {
+        use ConstraintType::*;
+        // Ge violation: y > 0 for Ge constraint
+        let ct = vec![Ge];
+        for &yi in &[1e-6_f64, 1.0, 1e3, 1e9] {
+            let v = dual_sign_violation(&ct, &[yi], &[], &[]);
+            assert!(v > 0.0 && v < 1.0,
+                "violation y={yi} must be in (0,1), got {v}");
+            // As yi → ∞, violation → 1
+            if yi > 100.0 {
+                assert!(v > 0.99, "large yi={yi} should give v close to 1, got {v}");
+            }
+        }
+        // No violation (correct sign) → always 0
+        for &yi in &[-1e-6_f64, -1.0, -1e9] {
+            let v = dual_sign_violation(&ct, &[yi], &[], &[]);
+            assert_eq!(v, 0.0, "no violation for yi={yi}");
+        }
+    }
+
+    /// All constraints satisfied (no violations) → 0.
+    #[test]
+    fn dual_sign_all_satisfied_returns_zero() {
+        use ConstraintType::*;
+        let ct = vec![Le, Ge, Eq, Le, Ge];
+        let y = vec![1.0, -1.0, 0.5, 0.0, -2.0];
+        let bounds = vec![
+            (0.0_f64, 1.0_f64),  // lb+ub finite: 2 z entries
+            (f64::NEG_INFINITY, f64::INFINITY),  // free: no z
+        ];
+        // z: lb-half=[z_lb_0], ub-half=[z_ub_0]
+        // z_lb >= 0 ok, z_ub >= 0 ok (both bound duals non-negative)
+        let z = vec![0.5_f64, 0.5]; // z_lb=0.5>=0 ok, z_ub=0.5>=0 ok
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert_eq!(v, 0.0, "all satisfied should give 0");
+    }
+
+    /// Empirical observation: solver returns z_ub >= 0 for active upper bound.
+    ///
+    /// min (x−10)^2 s.t. 0 ≤ x ≤ 5 → optimal x=5 (ub active).
+    /// bound_duals layout: [z_lb (lb=0 finite), z_ub (ub=5 finite)].
+    /// Stationarity: 2(x−10) + z_ub = 0 → z_ub = 2*(10−5) = 10 > 0.
+    #[test]
+    fn dual_sign_z_ub_observed_positive_at_active_ub() {
+        use crate::qp::{QpProblem, solve_qp};
+        use crate::sparse::CscMatrix;
+        // min 1/2*(2)*x^2 + (-20)*x ≡ (x-10)^2 + const, 0 ≤ x ≤ 5
+        let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let prob = QpProblem::new(q, vec![-20.0], a, vec![], vec![(0.0, 5.0)], vec![]).unwrap();
+        let result = solve_qp(&prob);
+        // x* ≈ 5 (ub active)
+        assert!((result.solution[0] - 5.0).abs() < 1e-4,
+            "x should be ≈5, got {}", result.solution[0]);
+        // z = [z_lb, z_ub]; z_ub must be > 0
+        assert!(result.bound_duals.len() >= 2,
+            "expected >=2 bound duals, got {}", result.bound_duals.len());
+        let z_ub = result.bound_duals[1];
+        assert!(z_ub > 1.0,
+            "z_ub should be ≈10 (active ub dual), got {z_ub}");
     }
 
     #[test]
