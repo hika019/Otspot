@@ -80,6 +80,30 @@ fn test_fixed_infeasible() {
     );
 }
 
+#[test]
+fn test_presolve_detects_lb_gt_ub() {
+    // Construction now rejects lb > ub, but presolve's bound-consistency check
+    // (step1_fixed_variable) is still reachable in production when a transform
+    // *tightens* a valid bound past its opposite. Inject lb > ub post-construction
+    // (valid build → mutate public field) to keep that detection path covered.
+    let mut lp = make_lp_general(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        1,
+        vec![],
+        vec![],
+        vec![(0.0, 1.0)],
+    );
+    lp.bounds[0] = (3.0, 2.0); // lb > ub injected after the constructor check
+    assert!(
+        matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)),
+        "presolve must report Infeasible for lb > ub bounds"
+    );
+}
+
 // -----------------------------------------------------------
 // 2. Empty row/column removal
 // -----------------------------------------------------------
