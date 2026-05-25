@@ -4,9 +4,10 @@
 //! `lp_screen` development tool.  Not part of the public solver API.
 
 use otspot_core::problem::{ConstraintType, SolveStatus, SolverResult};
-use otspot_core::qp::kkt_resid::{self, f64_impl};
+use otspot_core::qp::kkt_resid::{self, dd_impl, f64_impl};
 use otspot_core::qp::QpProblem;
 use otspot_core::sparse::CscMatrix;
+use otspot_core::tolerances::{PIVOT_TOL, ZERO_TOL};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -301,6 +302,210 @@ pub fn check_baseline_objective(
     }
 }
 
+/// Per-component normalised primal feasibility.
+///
+/// `max_i violation_i / (1 + |Ax_i| + |b_i|)`.
+/// Unlike the global-relative OSQP formula this detects a single
+/// badly-violated row even when the overall scale is large.
+pub fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    if prob.num_constraints == 0 {
+        return 0.0;
+    }
+    match prob.a.mat_vec_mul(solution) {
+        Ok(ax) => {
+            let mut max_rel = 0.0_f64;
+            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
+                let violation = match prob.constraint_types.get(i) {
+                    Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
+                    Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
+                    _ => (ax_i - b_i).max(0.0),
+                };
+                let scale_i = 1.0 + ax_i.abs() + b_i.abs();
+                max_rel = max_rel.max(violation / scale_i);
+            }
+            max_rel
+        }
+        Err(_) => f64::NAN,
+    }
+}
+
+/// Dual feasibility in the original (unscaled) space.
+///
+/// Returns `(dfeas_abs, dfeas_rel_componentwise)`.
+///
+/// * `dfeas_abs` = `||Qx + A^T y + bound_contrib + c||_∞`
+/// * `dfeas_rel` = component-wise relative version
+///
+/// For the LP/Simplex path (`bound_duals` empty, `reduced_costs` non-empty)
+/// a complementarity-aware bound-hit check is used instead of the full
+/// stationarity residual.
+pub fn compute_dfeas_orig(
+    prob: &QpProblem,
+    solution: &[f64],
+    dual_solution: &[f64],
+    bound_duals: &[f64],
+    reduced_costs: &[f64],
+) -> (f64, f64) {
+    use twofloat::TwoFloat;
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return (f64::NAN, f64::NAN);
+    }
+    let n = solution.len();
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
+
+    // LP/Simplex path: complementarity-aware sign check on reduced costs.
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
+        let rel_tol = PIVOT_TOL;
+        let mut dfeas_abs = 0.0_f64;
+        let mut dfeas_rel = 0.0_f64;
+        for j in 0..n {
+            let (lb_j, ub_j) = prob.bounds[j];
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
+                continue;
+            }
+            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
+                continue;
+            }
+            let rc = reduced_costs[j];
+            let x_j = solution[j];
+            let at_lb = lb_j.is_finite()
+                && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
+            let at_ub = ub_j.is_finite()
+                && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+            let viol = if at_lb && !at_ub {
+                f64::max(0.0, -rc)
+            } else if at_ub && !at_lb {
+                f64::max(0.0, rc)
+            } else {
+                0.0
+            };
+            dfeas_abs = dfeas_abs.max(viol);
+            let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
+            dfeas_rel = dfeas_rel.max(viol / scale_j);
+        }
+        return (dfeas_abs, dfeas_rel);
+    }
+
+    let mut bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
+        for j in 0..n {
+            bound_contrib[j] = -reduced_costs[j];
+        }
+    }
+    let mut dfeas_abs = 0.0_f64;
+    let mut dfeas_rel_componentwise = 0.0_f64;
+    let mut max_qx = 0.0_f64;
+    let mut max_c = 0.0_f64;
+    let mut max_aty = 0.0_f64;
+    let mut max_bnd = 0.0_f64;
+    let dump_top = std::env::var("DFEAS_DUMP_TOP").ok().as_deref() == Some("1");
+    let mut per_col: Vec<(usize, f64, f64, f64, f64, f64)> = if dump_top { Vec::with_capacity(n) } else { Vec::new() };
+    for i in 0..n {
+        let (lb_i, ub_i) = prob.bounds[i];
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
+            continue;
+        }
+        if prob.a.col_ptr().len() > i + 1
+            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
+        {
+            continue;
+        }
+        let r_dd = TwoFloat::from(qx[i])
+            + TwoFloat::from(aty[i])
+            + TwoFloat::from(bound_contrib[i])
+            + TwoFloat::from(prob.c[i]);
+        let r = f64::from(r_dd).abs();
+        dfeas_abs = dfeas_abs.max(r);
+        let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
+        dfeas_rel_componentwise = dfeas_rel_componentwise.max(r / scale_i);
+        max_qx = max_qx.max(qx[i].abs());
+        max_c = max_c.max(prob.c[i].abs());
+        max_aty = max_aty.max(aty[i].abs());
+        max_bnd = max_bnd.max(bound_contrib[i].abs());
+        if dump_top {
+            per_col.push((i, r, qx[i], aty[i], bound_contrib[i], prob.c[i]));
+        }
+    }
+    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
+    let dfeas_rel_global = dfeas_abs / scale;
+    if dump_top {
+        per_col.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        eprintln!("DFEAS_DUMP_TOP scale={:.3e} dfeas_abs={:.3e} dfeas_rel={:.3e} dfeas_relC={:.3e}",
+            scale, dfeas_abs, dfeas_rel_global, dfeas_rel_componentwise);
+        for k in 0..per_col.len().min(10) {
+            let (i, r, qxi, atyi, bndi, ci) = per_col[k];
+            let (lbi, ubi) = prob.bounds[i];
+            let xi = solution[i];
+            eprintln!("  col[{}] r={:+.3e} qx={:+.3e} aty={:+.3e} bnd={:+.3e} c={:+.3e} x={:+.3e} bounds=[{:+.3e},{:+.3e}]",
+                i, r, qxi, atyi, bndi, ci, xi, lbi, ubi);
+        }
+    }
+    (dfeas_abs, dfeas_rel_componentwise)
+}
+
+/// Component-wise dual feasibility (same numerics as [`compute_dfeas_orig`]
+/// second return value, without the `DFEAS_DUMP_TOP` side-channel).
+pub fn compute_dfeas_componentwise(
+    prob: &QpProblem,
+    solution: &[f64],
+    dual_solution: &[f64],
+    bound_duals: &[f64],
+    reduced_costs: &[f64],
+) -> f64 {
+    use twofloat::TwoFloat;
+    if solution.is_empty() || solution.len() != prob.num_vars {
+        return f64::NAN;
+    }
+    let n = solution.len();
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
+    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
+        let mut max_rel = 0.0_f64;
+        for j in 0..n {
+            let (lb_j, ub_j) = prob.bounds[j];
+            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
+                continue;
+            }
+            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
+                continue;
+            }
+            let rc = reduced_costs[j];
+            let x_j = solution.get(j).copied().unwrap_or(0.0);
+            let at_ub = ub_j.is_finite()
+                && (x_j - ub_j).abs() <= 1e-8 * (1.0 + ub_j.abs());
+            let viol = if at_ub { f64::max(0.0, rc) } else { f64::max(0.0, -rc) };
+            let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
+            max_rel = max_rel.max(viol / scale_j);
+        }
+        return max_rel;
+    }
+    let mut max_rel = 0.0_f64;
+    for i in 0..n {
+        let (lb_i, ub_i) = prob.bounds[i];
+        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
+            continue;
+        }
+        if prob.a.col_ptr().len() > i + 1
+            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
+        {
+            continue;
+        }
+        let r_dd = TwoFloat::from(qx[i])
+            + TwoFloat::from(aty[i])
+            + TwoFloat::from(bound_contrib[i])
+            + TwoFloat::from(prob.c[i]);
+        let r = f64::from(r_dd).abs();
+        let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
+        max_rel = max_rel.max(r / scale_i);
+    }
+    max_rel
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +656,103 @@ mod tests {
             p_default.to_string_lossy().contains("netlib_lp.csv"),
             "Expected netlib_lp.csv, got {p_default:?}"
         );
+    }
+
+    fn make_single_var_prob(bounds: Vec<(f64, f64)>, c: Vec<f64>, x_target: f64) -> QpProblem {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut p = QpProblem::new(
+            CscMatrix::new(1, 1),
+            c,
+            a,
+            vec![x_target],
+            bounds,
+            vec![ConstraintType::Eq],
+        ).unwrap();
+        p.obj_offset = 0.0;
+        p
+    }
+
+    /// Relative bound-hit detection in `compute_dfeas_orig` is scale-invariant.
+    /// x~1e6 (large) and x~1e-9 (tiny) are both correctly classified.
+    #[test]
+    fn test_dfeas_bound_hit_relative_structural() {
+        // A: lb=0, ub=inf, x=0 (at lb), rc=+1 → feasible (z_lb=1≥0)
+        let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 0.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[0.0], &[], &[], &[1.0]);
+        assert!(abs < 1e-15, "at lb rc=+1 (ok): dfeas={}", abs);
+
+        // B: lb=0, ub=inf, x=0 (at lb), rc=-1 → infeasible (z_lb=-1<0)
+        let (abs, _) = compute_dfeas_orig(&p, &[0.0], &[], &[], &[-1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "at lb rc=-1 (bad): dfeas={}", abs);
+
+        // C: x=100 (interior), rc=-1 → noise-tolerant (basis variable)
+        let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 100.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[100.0], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "interior rc=-1 (basis noise): dfeas={}", abs);
+
+        // D: x=10 at ub=10, rc=+1 → infeasible (z_ub=-1<0)
+        let p = make_single_var_prob(vec![(0.0, 10.0)], vec![1.0], 10.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "at ub rc=+1 (bad): dfeas={}", abs);
+
+        // E: x=10 at ub=10, rc=-1 → feasible (z_ub=1≥0)
+        let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "at ub rc=-1 (ok): dfeas={}", abs);
+
+        // F: free variable, rc=0.5 → Simplex basis noise tolerance
+        let p = make_single_var_prob(vec![(f64::NEG_INFINITY, f64::INFINITY)], vec![1.0], 5.0);
+        let (abs, _) = compute_dfeas_orig(&p, &[5.0], &[], &[], &[0.5]);
+        assert!(abs < 1e-15, "free rc=0.5 (basis noise): dfeas={}", abs);
+
+        // G: x=1e6 interior (large scale), rc=-1 → noise-tolerant
+        let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 1e6);
+        let (abs, _) = compute_dfeas_orig(&p, &[1e6], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "large-scale interior rc=-1: dfeas={}", abs);
+
+        // H: x=1e-9 (tiny, relatively at lb), rc=-1 → infeasible
+        let (abs, _) = compute_dfeas_orig(&p, &[1e-9], &[], &[], &[-1.0]);
+        assert!((abs - 1.0).abs() < 1e-15, "tiny x at lb, rc=-1: dfeas={}", abs);
+
+        // I: x=1e-5 (interior), rc=-1 → noise-tolerant
+        let (abs, _) = compute_dfeas_orig(&p, &[1e-5], &[], &[], &[-1.0]);
+        assert!(abs < 1e-15, "x=1e-5 interior rc=-1: dfeas={}", abs);
+    }
+
+    #[test]
+    fn test_pfeas_normalized_eq_both_directions() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+        // x=3: |3-5|=2, scale=1+3+5=9 → 2/9
+        let v = compute_pfeas_normalized(&prob, &[3.0]);
+        assert!((v - 2.0 / 9.0).abs() < 1e-12, "eq down: got {}", v);
+        // x=5: 0
+        let v = compute_pfeas_normalized(&prob, &[5.0]);
+        assert!(v < 1e-12, "eq sat: got {}", v);
+    }
+
+    #[test]
+    fn test_pfeas_normalized_ge() {
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Ge],
+        ).unwrap();
+        // x=3: b-ax=2, scale=1+3+5=9 → 2/9
+        let v = compute_pfeas_normalized(&prob, &[3.0]);
+        assert!((v - 2.0 / 9.0).abs() < 1e-12, "ge viol: got {}", v);
+        // x=7: 0
+        let v = compute_pfeas_normalized(&prob, &[7.0]);
+        assert!(v < 1e-12, "ge sat: got {}", v);
     }
 }
