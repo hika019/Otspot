@@ -72,9 +72,9 @@ elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?unbounded"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_unbounded.csv"
 elif echo "$DATA_DIR_LOWER" | grep -qE "qp[_-]?infeasible"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qp_infeasible.csv"
-elif echo "$DATA_DIR_LOWER" | grep -q "qplib_nonconvex_official"; then
+elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex[_-]official"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_official.csv"
-elif echo "$DATA_DIR_LOWER" | grep -q "qplib_nonconvex"; then
+elif echo "$DATA_DIR_LOWER" | grep -qE "qplib[_-]nonconvex"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib_nonconvex_synthetic.csv"
 elif echo "$DATA_DIR_LOWER" | grep -q "qplib"; then
   KNOWN_OPTIMAL="$SOLVER_ROOT/data/baseline_objectives/qplib.csv"
