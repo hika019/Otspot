@@ -20,14 +20,18 @@ pub enum VarKind {
 /// `Variable` is `Copy`, so it can be used in expressions multiple times
 /// without being consumed: `x + y` does not move `x`.
 ///
-/// Internally, a `Variable` is just an index into the `Model`'s variable list.
+/// Internally, a `Variable` carries its index and the ID of the model that
+/// created it. The model ID is used by [`ModelResult::try_value`] to detect
+/// cross-model variable misuse at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Variable {
     pub(crate) index: usize,
+    pub(crate) model_id: u64,
 }
 
 /// Metadata about a variable stored in the `Model`.
 pub(crate) struct VariableDefinition {
+    pub name: String,
     pub lower_bound: f64,
     pub upper_bound: f64,
     /// Integrality requirement. `Continuous` for `add_var`.
