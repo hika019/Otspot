@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
-use crate::simplex::guard_lp_optimal;
+use super::certificate::guard_lp_optimal;
 use crate::sparse::CscMatrix;
 
 use super::{ipm_solver, QpProblem};

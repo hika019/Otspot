@@ -187,12 +187,12 @@ pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Seve
 /// On construction: calls `enable` to disable the sentinel.
 /// On drop: calls `restore` to re-enable the sentinel.
 /// Panic-safe: `restore` runs even if the guarded closure panics.
-///
-/// Both `enable` and `restore` are `Fn()` so they may be called from `Drop`.
+#[cfg(test)]
 pub(crate) struct ScopedDisable<D: Fn()> {
     restore: D,
 }
 
+#[cfg(test)]
 impl<D: Fn()> ScopedDisable<D> {
     pub(crate) fn new<E: Fn()>(enable: E, restore: D) -> Self {
         enable();
@@ -200,37 +200,22 @@ impl<D: Fn()> ScopedDisable<D> {
     }
 }
 
+#[cfg(test)]
 impl<D: Fn()> Drop for ScopedDisable<D> {
     fn drop(&mut self) {
         (self.restore)();
     }
 }
 
-/// Apply the LP primal guard to a solver result.
+/// Apply the LP KKT optimality guard to a solver result.
 ///
-/// Exposed for integration-test sentinel load-bearing proofs. Production code
-/// uses `simplex::entry::guard_lp_optimal` internally; this wrapper makes it
-/// reachable from `tests/` without re-exporting the whole `simplex` tree.
+/// Exposed for integration-test sentinel load-bearing proofs. Runs full
+/// KKT+dual_sign verification via `prove_optimal_lp`; demotes false-Optimal
+/// to `SuboptimalSolution`. Non-Optimal results pass through unchanged.
 #[doc(hidden)]
 pub fn apply_lp_primal_guard(
     result: crate::problem::SolverResult,
     problem: &crate::problem::LpProblem,
 ) -> crate::problem::SolverResult {
-    crate::simplex::guard_lp_optimal(result, problem)
-}
-
-/// Run `f` with the LP primal guard bypassed (thread-local, panic-safe).
-///
-/// Use in integration tests as a no-op scope guard: pass corrupt data through
-/// the guard while disabled and assert it is NOT demoted to `NumericalError`.
-/// The load-bearing evidence lives in the paired test that does NOT disable —
-/// removing the guard body would cause that test to FAIL.
-///
-/// Thread-safe: affects only the current thread via `thread_local!` state.
-#[doc(hidden)]
-pub fn with_lp_guard_disabled<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    crate::simplex::with_lp_guard_disabled(f)
+    crate::qp::certificate::guard_lp_optimal(result, problem)
 }
