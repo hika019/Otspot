@@ -152,14 +152,13 @@ fn qp_diagonal_q_basic() {
     let mut model = Model::new("qp_diag");
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
-    // Q = [[1, 0], [0, 1]] (1/2 規約: 1/2 x^T Q x = (1/2)(x^2+y^2))
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q.clone());
     model.add_constraint((x + y).leq(5.0));
-    model.minimize(-2.0 * x - 3.0 * y);
+    // Q = diag(1,1): DSL では (1/2)*x*x + (1/2)*y*y
+    model.minimize(0.5 * x * x + 0.5 * y * y + (-2.0) * x + (-3.0) * y);
     let r_api = model.solve().expect("API solve");
 
     // 直接構築
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
     let c = vec![-2.0, -3.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let b = vec![5.0];
@@ -185,14 +184,15 @@ fn qp_offdiagonal_q() {
     let mut model = Model::new("qp_off");
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
-    // Q = [[1, 0.5], [0.5, 1]] (対称、上下三角両方格納が QPS 慣例)
-    let q = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 0.5, 0.5, 1.0], 2, 2)
-        .unwrap();
-    model.set_quadratic_objective(q.clone());
+    // Q = [[1, 0.5], [0.5, 1]]: DSL では 0.5*x*x + 0.5*y*y + 0.5*(x*y)
+    // (Q[i][j]=v → DSL v*xi*xj; Q[i][i]=v → DSL (v/2)*xi*xi)
     model.add_constraint((x + y).leq(4.0));
-    model.minimize(-1.0 * x - 1.0 * y);
+    model.minimize(0.5 * x * x + 0.5 * y * y + 0.5 * (x * y) + (-1.0) * x + (-1.0) * y);
     let r_api = model.solve().expect("API solve");
 
+    // 直接構築: 対称全要素格納
+    let q = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 0.5, 0.5, 1.0], 2, 2)
+        .unwrap();
     let c = vec![-1.0, -1.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let b = vec![4.0];
@@ -212,12 +212,13 @@ fn qp_eq_with_redundant_var() {
     let mut model = Model::new("qp_eq_red");
     let x = model.add_var("x", 0.0, 1.0);
     let y = model.add_var("y", 0.0, 1.0);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q.clone());
+    // Q[0][0]=1 のみ (rank-deficient): DSL では 0.5*x*x
     model.add_constraint((x + y).eq_constraint(1.0));
-    model.minimize(0.0 * x + 0.0 * y); // c = 0 ですべて Q ベース
+    model.minimize(0.5 * x * x);
     let r_api = model.solve().expect("API solve");
 
+    // 直接構築: Q[0][0]=1 のみ (2x2 rank-deficient)
+    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
     let b = vec![1.0];
@@ -242,16 +243,14 @@ fn qp_eq_with_redundant_var() {
     );
 }
 
-/// QP maximize 規約: Q は NSD で渡す (内部で -Q 反転)。concave max → opt x=1, obj=0.5。
+/// QP maximize 規約: concave max → opt x=1, obj=0.5。
 #[test]
 fn qp_maximize_concave() {
     let mut model = Model::new("qp_max");
     let x = model.add_var("x", 0.0, 5.0);
-    // Q = [[-1]] (NSD) で渡す。Model 内で -Q = [[1]] (PSD) に反転されてから solver へ。
-    let q = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // maximize(-x^2/2 + x): Q[0][0]=-1 → DSL (-1/2)*x*x
     model.add_constraint(otspot::constraint!(x <= 5.0));
-    model.maximize(x);
+    model.maximize((-0.5) * x * x + x);
     let r_api = model.solve().expect("API solve (NSD Q for maximize)");
 
     assert!(
@@ -271,21 +270,17 @@ fn qp_maximize_concave() {
 fn qp_maximize_with_psd_q_returns_error() {
     let mut model = Model::new("qp_max_psd");
     let x = model.add_var("x", 0.0, 5.0);
-    // PSD Q: maximize 時は内部で Q を符号反転して NSD (非正定値) になる
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // maximize(x^2/2 + x): convex → 非凸 maximize → KKT 境界解
     model.add_constraint(otspot::constraint!(x <= 5.0));
-    model.maximize(x);
+    model.maximize(0.5 * x * x + x);
     // 慣性修正付き IPM が KKT 点 (x=5) を発見し LocallyOptimal として返す。
-    // model は LocallyOptimal を有効解として ModelResult に変換する。
     let result = model.solve().expect("maximize with NSD Q should return a LocallyOptimal KKT solution");
     // x=5 が境界最適解
     assert!(
         (result[x] - 5.0).abs() < 1e-3,
         "maximize x^2/2 on [0,5]: x* should be 5.0, got {:.6}", result[x]
     );
-    // maximize obj = x + 1/2*x^2 at x=5: 5 + 12.5 = 17.5
-    // (maximize(x) sets linear term, set_quadratic_objective sets 1/2*Q*x^2)
+    // maximize obj = x + x^2/2 at x=5: 5 + 12.5 = 17.5
     assert!(
         (result.objective_value - 17.5).abs() < 1.0,
         "maximize x + x^2/2 at x=5: obj should be ~17.5, got {:.6}", result.objective_value
@@ -298,9 +293,8 @@ fn qp_no_constraints_only_bounds() {
     let mut model = Model::new("qp_nocon");
     let x = model.add_var("x", -2.0, 2.0);
     let y = model.add_var("y", -2.0, 2.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
-    model.minimize(-1.0 * x);
+    // Q = diag(1,1): DSL では 0.5*x*x + 0.5*y*y
+    model.minimize(0.5 * x * x + 0.5 * y * y + (-1.0) * x);
     let r_api = model.solve().expect("API solve");
     assert!(
         (r_api[x] - 1.0).abs() < 1e-3,
@@ -350,10 +344,9 @@ fn lp_unbounded_returns_err() {
 fn qp_dual_solution_available() {
     let mut model = Model::new("qp_dual");
     let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // Q[0][0]=1: DSL では 0.5*x*x
     model.add_constraint(otspot::constraint!(x >= 1.0));
-    model.minimize(0.0 * x);
+    model.minimize(0.5 * x * x);
     let r_api = model.solve().expect("API solve");
 
     assert!(
@@ -379,10 +372,9 @@ fn qp_model_eq_and_bound_active_cluster_solves_consistently() {
     let mut model = Model::new("qp_eq_bound_cluster");
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
-    let q = CscMatrix::from_triplets(&[1], &[1], &[2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    // Q[1][1]=2: DSL では (2/2)*y*y = y*y
     model.add_constraint(otspot::constraint!((x + y) == 1.0));
-    model.minimize(-1.0 * x);
+    model.minimize(y * y + (-1.0) * x);
 
     let result = model.solve().expect("API solve");
 

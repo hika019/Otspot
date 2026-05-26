@@ -652,34 +652,20 @@ mod tests {
     }
 
     #[test]
-    fn test_dsl_matches_explicit_qp_api() {
-        // Verify DSL minimize(x*x + y*y) == explicit set_quadratic_objective(Q=2I) + minimize(0)
+    fn test_dsl_qp_solves_correctly() {
+        // Verify DSL minimize(x*x + y*y) gives correct answer
         // min x² + y²  s.t. x+y=3, x,y≥0  →  x=y=1.5, obj=4.5
-        use otspot_core::sparse::CscMatrix;
-
-        // DSL model
-        let mut m1 = Model::new("dsl");
-        let x1 = m1.add_var("x", 0.0, f64::INFINITY);
-        let y1 = m1.add_var("y", 0.0, f64::INFINITY);
-        m1.add_constraint((x1 + y1).eq_constraint(3.0));
-        m1.minimize(x1 * x1 + y1 * y1);
-        let r1 = m1.solve().unwrap();
-
-        // Explicit API model
-        let mut m2 = Model::new("explicit");
-        let x2 = m2.add_var("x", 0.0, f64::INFINITY);
-        let y2 = m2.add_var("y", 0.0, f64::INFINITY);
-        m2.add_constraint((x2 + y2).eq_constraint(3.0));
-        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-        m2.set_quadratic_objective(q);
-        m2.minimize(0.0 * x2 + 0.0 * y2);
-        let r2 = m2.solve().unwrap();
+        let mut m = Model::new("dsl");
+        let x = m.add_var("x", 0.0, f64::INFINITY);
+        let y = m.add_var("y", 0.0, f64::INFINITY);
+        m.add_constraint((x + y).eq_constraint(3.0));
+        m.minimize(x * x + y * y);
+        let r = m.solve().unwrap();
 
         let tol = 1e-3;
-        assert!((r1.objective_value - r2.objective_value).abs() < tol,
-            "DSL obj {} ≠ explicit obj {}", r1.objective_value, r2.objective_value);
-        assert!((r1[x1] - r2[x2]).abs() < tol,
-            "DSL x {} ≠ explicit x {}", r1[x1], r2[x2]);
+        assert!((r[x] - 1.5).abs() < tol, "DSL x={} expected 1.5", r[x]);
+        assert!((r[y] - 1.5).abs() < tol, "DSL y={} expected 1.5", r[y]);
+        assert!((r.objective_value - 4.5).abs() < tol, "DSL obj={} expected 4.5", r.objective_value);
     }
 
     #[test]
@@ -802,31 +788,6 @@ mod tests {
         let y = model.add_var("y", 0.0, f64::INFINITY);
         let q = (x + x + ((-2.0) * x)) * y;
         assert!(q.is_linear(), "(x+x-2x)*y must be is_linear(); quad.len()={}", q.quad.len());
-    }
-
-    // Verify (x-x)*y minimize does NOT overwrite an explicitly-set Q.
-    // Without P2-c fix, (x-x)*y produced is_linear()=false and the
-    // apply_objective quad path replaced the explicit Q with a zero Q.
-    #[test]
-    fn test_zero_coef_quad_does_not_overwrite_explicit_q() {
-        // min 1/2·2·x² - 4x  s.t. x≥0  →  x*=2, obj=-4
-        // If explicit Q were cleared, the LP min -4x would be unbounded.
-        let mut model = Model::new("p2c_explicit_q_kept");
-        let x = model.add_var("x", 0.0, f64::INFINITY);
-        let y = model.add_var("y", 0.0, f64::INFINITY);
-        model.set_diagonal_q(&[2.0, 0.0]);  // explicit Q, quad_via_dsl=false
-        model.minimize((x - x) * y + ((-4.0) * x));  // (x-x)*y cancels → pure-linear path
-        let result = model.solve().unwrap();
-        assert!(
-            (result[x] - 2.0).abs() < TOL,
-            "P2-c: explicit Q preserved; x*=2, got {}",
-            result[x]
-        );
-        assert!(
-            (result.objective_value - (-4.0)).abs() < TOL,
-            "P2-c: obj=-4 (QP routing), got {}",
-            result.objective_value
-        );
     }
 
     // x*x - x*x: merge cancellation still works (existing test extended).

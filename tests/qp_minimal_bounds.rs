@@ -18,7 +18,6 @@
 //!   ため、INF/NEG_INF 判定が誤ると配列長ずれ。
 
 use otspot::model::Model;
-use otspot::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_ABS: f64 = 1e-5;
@@ -48,14 +47,12 @@ fn assert_x_close(actual: f64, expected: f64, label: &str) {
 /// **狙い**: m=0 で IPM が空行列を正しくスキップするか。bound_duals=0 報告。
 #[test]
 fn bnd1_no_constraints_interior_optimum() {
-    let n = 2;
     let mut model = Model::new("bnd1");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 0.0, 10.0);
     let x2 = model.add_var("x2", 0.0, 10.0);
-    model.minimize(-3.0 * x1 - 4.0 * x2);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    // Q=diag(1,1): 1/2*x^2 per var → DSL 0.5*(x*x)
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2 + (-3.0) * x1 + (-4.0) * x2);
 
     let result = model.solve().expect("bnd1: solve");
     assert_x_close(result[x1], 3.0, "bnd1: x1=3");
@@ -80,14 +77,11 @@ fn bnd1_no_constraints_interior_optimum() {
 /// **狙い**: lb active → bound_dual[lb idx of x1] ≈ 5 を確認。
 #[test]
 fn bnd2_lower_bound_active_dual_recovery() {
-    let n = 2;
     let mut model = Model::new("bnd2");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 0.0, 10.0);
     let x2 = model.add_var("x2", 0.0, 10.0);
-    model.minimize(5.0 * x1 - 2.0 * x2);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2 + 5.0 * x1 + (-2.0) * x2);
 
     let result = model.solve().expect("bnd2: solve");
     assert_x_close(result[x1], 0.0, "bnd2: x1=0 (lb active)");
@@ -118,13 +112,10 @@ fn bnd2_lower_bound_active_dual_recovery() {
 ///         **片側 (lb のみ / ub のみ) を混在させる効果**: x には両 bound あり。
 #[test]
 fn bnd3_upper_bound_active_dual_recovery() {
-    let n = 1;
     let mut model = Model::new("bnd3");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 0.0, 5.0);
-    model.minimize(-20.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x * x + (-20.0) * x);
 
     let result = model.solve().expect("bnd3: solve");
     assert_x_close(result[x], 5.0, "bnd3: x=5 (ub active)");
@@ -151,15 +142,15 @@ fn bnd3_upper_bound_active_dual_recovery() {
 /// **狙い**: bound_duals 配列長と並びが「有限 bound のみカウント」になっているか。
 #[test]
 fn bnd4_one_sided_bounds_array_layout() {
-    let n = 3;
     let mut model = Model::new("bnd4");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 0.0, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, 5.0);
     let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
-    model.minimize(-1.0 * x1 - 6.0 * x2 - 2.0 * x3);
-    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(
+        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3
+        + (-1.0) * x1 + (-6.0) * x2 + (-2.0) * x3,
+    );
 
     let result = model.solve().expect("bnd4: solve");
     assert_x_close(result[x1], 1.0, "bnd4: x1=1 (interior)");
@@ -186,14 +177,11 @@ fn bnd4_one_sided_bounds_array_layout() {
 ///         bound_duals は fixed 変数 idx で 0 が入る (SolverResult docs)。
 #[test]
 fn bnd5_fixed_variable_objective_offset() {
-    let n = 2;
     let mut model = Model::new("bnd5");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 2.0, 2.0); // fixed
     let x2 = model.add_var("x2", 0.0, 10.0);
-    model.minimize(-1.0 * x1 - 1.0 * x2);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2 + (-1.0) * x1 + (-1.0) * x2);
 
     let result = model.solve().expect("bnd5: solve");
     assert_x_close(result[x1], 2.0, "bnd5: x1=2 (fixed)");
@@ -212,13 +200,10 @@ fn bnd5_fixed_variable_objective_offset() {
 ///         BOUND_TOL absolute なら 1e-8 lb を「active」と誤判定する。
 #[test]
 fn bnd6_ill_scaled_bounds_interior_optimum() {
-    let n = 1;
     let mut model = Model::new("bnd6");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 1e-8, 1e8);
-    model.minimize(-1000.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x * x + (-1000.0) * x);
 
     let result = model.solve().expect("bnd6: solve");
     // x=1000 ± O(eps*scale)。1000 を中心に rel err < 1e-4 で OK。

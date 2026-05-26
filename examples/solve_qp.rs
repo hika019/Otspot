@@ -2,7 +2,7 @@
 //!
 //! Run: `cargo run --release --example solve_qp`
 //!
-//!   minimize  x^2 + y^2 - 4x - 4y     (objective is 1/2 xᵀQx + cᵀx, Q = diag(2, 2))
+//!   minimize  x^2 + y^2 - 4x - 4y
 //!   subject to  x + y <= 3
 //!               x >= 0, y >= 0
 //!
@@ -10,18 +10,14 @@
 //! the solution.
 
 use otspot::model::{constraint, Model};
-use otspot::CscMatrix;
 
 fn main() {
     let mut model = Model::new("example_qp");
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
 
-    // Hessian Q under the 1/2 xᵀQx convention: diag(2, 2) gives x^2 + y^2.
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
     model.add_constraint(constraint!((x + y) <= 3.0));
-    model.minimize(-4.0 * x + -4.0 * y);
+    model.minimize(x * x + y * y + (-4.0) * x + (-4.0) * y);
 
     match model.solve() {
         Ok(result) => {
