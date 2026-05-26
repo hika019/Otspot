@@ -4,14 +4,16 @@
 
 A **mathematical optimization solver** written in Rust.
 
-otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, steepest-edge pricing) for LP and an **interior-point method** (Mehrotra predictor–corrector / IP-PMM) for QP, with branch-and-bound on top for mixed-integer problems. It certifies infeasible and unbounded problems and returns full primal/dual information.
+otspot implements a **revised simplex method** (sparse LU, Ruiz equilibration, steepest-edge pricing) for LP and an **interior-point method** (Mehrotra predictor–corrector / IP-PMM) for QP, with **spatial branch-and-bound** (α-BB / McCormick) for non-convex QP and branch-and-bound for mixed-integer problems. `Optimal` is **proof-carrying** — verified against the full KKT system — while infeasible and unbounded problems are certified; full primal/dual information is returned.
 
 ## Features
 
-- **Algebraic modeling API** — express problems in natural mathematical notation
+- **Algebraic modeling API** — express problems in natural mathematical notation, including quadratic objectives via `x * x` / `x * y`
 - **Revised simplex (LP)** — sparse LU factorization with Markowitz-threshold pivoting
 - **Interior-point (QP)** — Mehrotra predictor–corrector / IP-PMM for convex QP
+- **Non-convex QP (global)** — spatial branch-and-bound (α-BB / McCormick); the global optimum carries a bound-gap certificate, and local-only solutions are reported honestly as `NonconvexLocal`
 - **Mixed-integer (MILP / convex MIQP)** — baseline branch-and-bound with most-fractional branching over continuous relaxations (LP for MILP, QP for convex MIQP); non-convex MIQP out of scope. Cuts, primal heuristics, SOS constraints, and richer branching strategies are not implemented.
+- **Proof-carrying optimality** — `Optimal` is issued only when a full KKT certificate verifies (stationarity, feasibility, complementarity, dual-sign, duality gap); unprovable solutions are honestly downgraded, eliminating false-`Optimal`
 - **Infeasibility / unboundedness certification** — an explicit status, not just a failure
 - **Ruiz equilibration** — row/column scaling preconditioner for better conditioning
 - **Steepest-edge pricing** — faster convergence via improved entering-variable choice
@@ -28,7 +30,7 @@ From crates.io:
 
 ```toml
 [dependencies]
-otspot = "0.1"
+otspot = "0.2"
 ```
 
 Or as a git dependency:
@@ -252,8 +254,8 @@ from *optimal*). For infeasible / unbounded sets the metric is a correct certifi
 
 | Problem type | Set | # | @ 1e-6 | @ 1e-8 |
 |---|---|---:|---|---|
-| Feasible LP | Netlib | 109 | 109 optimal | 106 optimal |
-| Convex QP | Maros–Mészáros | 138 | 129 optimal, 7 valid | 124 optimal, 4 valid |
+| Feasible LP | Netlib | 109 | 109 optimal | 105 optimal |
+| Convex QP | Maros–Mészáros | 138 | 129 optimal, 7 valid | 125 optimal, 4 valid |
 | Infeasible LP | Netlib | 29 | 29 certified | 29 certified |
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
