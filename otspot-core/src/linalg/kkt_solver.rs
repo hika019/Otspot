@@ -601,41 +601,7 @@ pub fn factorize_kkt_with_cached_perm_par(
     }
 }
 
-/// Pre-permuted fast path. MINRES fallback uses `unpermuted_k` since it operates on
-/// the original ordering (既存互換、per-call parallelism = `Par::Seq`)。
-#[allow(dead_code)]
-pub fn factorize_kkt_pre_permuted(
-    pre_permuted_k: &CscMatrix,
-    unpermuted_k: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: usize,
-    n_top: Option<usize>,
-) -> Result<KktFactor, KktError> {
-    factorize_kkt_pre_permuted_cached_par(
-        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, None, faer::Par::Seq,
-    )
-}
-
-/// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky
-/// (既存互換、per-call parallelism = `Par::Seq`)。
-#[allow(dead_code)]
-pub fn factorize_kkt_pre_permuted_cached(
-    pre_permuted_k: &CscMatrix,
-    unpermuted_k: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: usize,
-    n_top: Option<usize>,
-    cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
-) -> Result<KktFactor, KktError> {
-    factorize_kkt_pre_permuted_cached_par(
-        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, cached_symbolic,
-        faer::Par::Seq,
-    )
-}
-
-/// `factorize_kkt_pre_permuted_cached` の per-call parallelism 指定版。
+/// `factorize_kkt_pre_permuted_cached_par` convenience wrapper (per-call parallelism 指定版)。
 pub fn factorize_kkt_pre_permuted_cached_par(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
