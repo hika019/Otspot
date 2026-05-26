@@ -210,6 +210,50 @@ fn test_afiro_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/afiro.QPS");
 }
 
+/// #15-P2 safety sentinel: the QP cert EmptyCol mask (eliminated_cols at
+/// attempt.rs) must never hide an AFIRO stationarity violation.
+///
+/// The `kkt_residual_rel` skip is narrow: it fires only for columns that are
+/// eliminated AND A-empty AND Q-empty (LP-style fully isolated). AFIRO (an LP →
+/// Q is all-zero, so every column is Q-empty) has **zero** columns that are also
+/// A-empty: every variable participates in a constraint. Hence the mask provably
+/// skips no AFIRO column, and any genuine false-Optimal stays exposed to
+/// prove_optimal / guard_qp_optimal. This pins that structural premise so a future
+/// change to the skip condition that started skipping A-non-empty columns would
+/// fail here. Combined with the QP-path solve, AFIRO must not be NumericalError.
+#[test]
+fn test_afiro_qp_cert_mask_skips_no_column() {
+    let path = Path::new("data/lp_problems/afiro.QPS");
+    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    let qp = parse_qps(path).expect("parse afiro");
+    let n = qp.num_vars;
+
+    let mut struct_empty = 0usize;
+    for j in 0..n {
+        let a_empty = qp.a.get_column(j).map(|(r, _)| r.is_empty()).unwrap_or(true);
+        let q_empty = qp.q.get_column(j).map(|(r, _)| r.is_empty()).unwrap_or(true);
+        if a_empty && q_empty {
+            struct_empty += 1;
+        }
+    }
+    assert_eq!(
+        struct_empty, 0,
+        "AFIRO must have 0 (A-empty AND Q-empty) columns so the narrow EmptyCol \
+         mask cannot skip any AFIRO column (got {struct_empty})",
+    );
+
+    let mut opts = SolverOptions::default();
+    opts.presolve = true;
+    opts.timeout_secs = Some(30.0);
+    let r = solve_qp_with(&qp, &opts);
+    assert_ne!(
+        r.status,
+        otspot::problem::SolveStatus::NumericalError,
+        "AFIRO QP cert path must not catastrophically demote (status={:?})",
+        r.status,
+    );
+}
+
 #[test]
 fn test_blend_presolve_on_dual_feasibility_and_kkt() {
     check_lp_dual_kkt("data/lp_problems/blend.QPS");
