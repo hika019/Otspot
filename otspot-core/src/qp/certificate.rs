@@ -96,8 +96,9 @@ pub(crate) const LP_CERT_TOL: f64 = 1e-4; // = feas_rel_tol() = PIVOT_TOL.sqrt()
 /// - **Simplex path** (`reduced_costs` non-empty): apply universal negation to `dual_solution`,
 ///   build `z` from reduced costs: `z_lb = max(rc, 0)` for lb-finite vars,
 ///   `z_ub = max(−rc, 0)` for ub-finite vars.
-/// - **IPM path** (`bound_duals` non-empty): `dual_solution` and `bound_duals` are already
-///   in the `prove_optimal` convention — use as-is.
+/// - **IPM path** (`reduced_costs` empty): `dual_solution` and `bound_duals` are already
+///   in the `prove_optimal` convention — use as-is. This covers both bounded IPM
+///   (`bound_duals` non-empty) and all-free IPM (`bound_duals` also empty).
 pub(crate) fn prove_optimal_lp(
     problem: &LpProblem,
     result: &SolverResult,
@@ -115,8 +116,11 @@ pub(crate) fn prove_optimal_lp(
         eliminated_cols: &[],
     };
 
-    let (y_prove, z) = if !result.bound_duals.is_empty() {
-        // IPM path: already in prove_optimal convention.
+    let (y_prove, z) = if result.reduced_costs.is_empty() {
+        // IPM path: dual_solution already in prove_optimal convention.
+        // reduced_costs is empty for IPM (never computed), including all-free LP
+        // where bound_duals is also empty — the old `!bound_duals.is_empty()` check
+        // wrongly fell into the simplex branch for that case.
         (result.dual_solution.clone(), result.bound_duals.clone())
     } else {
         // Simplex path: negate ALL dual variables and convert rc→z.
@@ -494,6 +498,125 @@ mod tests {
             "LP_CERT_TOL ({LP_CERT_TOL}) must equal feas_rel_tol() ({frt}); \
              update one to match the other (see LP_CERT_TOL docstring for derivation)"
         );
+    }
+
+    // ── P2: IPM all-free LP false-demotion ───────────────────────────────────
+
+    /// IPM result for an all-free LP (no finite bounds) must not be demoted.
+    ///
+    /// An all-free LP solved by IPM has:
+    ///   - `bound_duals = []` (no finite bounds → no z terms)
+    ///   - `reduced_costs = []` (IPM never computes reduced costs)
+    ///
+    /// The old discriminant (`!bound_duals.is_empty()`) falls into the simplex
+    /// branch → negates dual_solution → KKT stationarity fails → false demotion
+    /// to SuboptimalSolution.
+    ///
+    /// **Sentinel**: reverting the discriminant back to `!result.bound_duals.is_empty()`
+    /// causes this test to FAIL (verifying the fix is load-bearing).
+    ///
+    /// Problem: min x − y  s.t.  x − y = 2, x + y = 4  (both Eq, x,y ∈ ℝ)
+    /// Optimal: x=3, y=1, obj=2.
+    /// IPM dual (prove_optimal convention, Eq free): y=[-1, 0].
+    /// Stationarity: c + Aᵀy = [1,−1] + [−1,1] = [0,0] ✓
+    #[test]
+    fn prove_optimal_lp_ipm_all_free_passes() {
+        // x − y = 2 (row 0), x + y = 4 (row 1). A is 2×2.
+        let a = CscMatrix::from_triplets(
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[1.0_f64, 1.0, -1.0, 1.0],
+            2, 2,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0_f64, -1.0],
+            a,
+            vec![2.0_f64, 4.0],
+            vec![ConstraintType::Eq, ConstraintType::Eq],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            None,
+        ).unwrap();
+
+        // IPM result: dual in prove_optimal convention, no bound_duals, no reduced_costs.
+        let ipm_result = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 2.0,
+            solution: vec![3.0_f64, 1.0],
+            dual_solution: vec![-1.0_f64, 0.0],  // IPM convention: Eq free
+            bound_duals: vec![],                   // all-free → no z
+            reduced_costs: vec![],                 // IPM never sets reduced_costs
+            ..Default::default()
+        };
+
+        let cert = prove_optimal_lp(&lp, &ipm_result, LP_CERT_TOL);
+        assert!(cert.is_ok(), "IPM all-free LP must pass prove_optimal_lp: {:?}", cert.err());
+
+        let guarded = guard_lp_optimal(ipm_result, &lp);
+        assert_eq!(guarded.status, SolveStatus::Optimal,
+            "guard_lp_optimal must not demote correct IPM all-free LP result");
+    }
+
+    /// Table-driven: 4 path×bound combinations all produce Optimal.
+    ///
+    /// Problem: min x  s.t.  x = 1  (Eq), various bound settings, simplex vs IPM result.
+    /// Optimal: x=1, obj=1.
+    #[test]
+    fn prove_optimal_lp_path_bound_cross_table() {
+        // Problem: min x  s.t.  x = 1 (Eq)
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+
+        // Case helper: build LpProblem and an exact SolverResult.
+        let run = |bounds: Vec<(f64, f64)>,
+                   dual_sol: Vec<f64>,
+                   bound_duals: Vec<f64>,
+                   reduced_costs: Vec<f64>,
+                   label: &str| {
+            let lp = LpProblem::new_general(
+                vec![1.0_f64],
+                a.clone(),
+                vec![1.0_f64],
+                vec![ConstraintType::Eq],
+                bounds,
+                None,
+            ).unwrap();
+            let r = SolverResult {
+                status: SolveStatus::Optimal,
+                objective: 1.0,
+                solution: vec![1.0_f64],
+                dual_solution: dual_sol,
+                bound_duals,
+                reduced_costs,
+                ..Default::default()
+            };
+            let cert = prove_optimal_lp(&lp, &r, LP_CERT_TOL);
+            assert!(cert.is_ok(), "case `{label}` must pass prove_optimal_lp: {:?}", cert.err());
+            let guarded = guard_lp_optimal(r, &lp);
+            assert_eq!(guarded.status, SolveStatus::Optimal,
+                "case `{label}` must remain Optimal after guard");
+        };
+
+        // Simplex + lb=0: rc=0 (basic), y_simplex=1 (Eq: c−Aᵀy=rc → 1−y=0 → y=1).
+        // Negate → y_prove=−1. Stationarity: 1 + 1*(−1) − z_lb(=0) = 0 ✓
+        run(vec![(0.0, f64::INFINITY)],
+            vec![1.0_f64], vec![], vec![0.0_f64],
+            "simplex/lb0");
+
+        // Simplex + all-free: same; no finite bounds → z=[].
+        run(vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![1.0_f64], vec![], vec![0.0_f64],
+            "simplex/free");
+
+        // IPM + lb=0: bound_duals=[z_lb=0], dual in prove_optimal convention.
+        // Stationarity: 1 + 1*(−1) + z_lb = 1 − 1 + 0 = 0 ✓
+        run(vec![(0.0, f64::INFINITY)],
+            vec![-1.0_f64], vec![0.0_f64], vec![],
+            "ipm/lb0");
+
+        // IPM + all-free: bound_duals=[], reduced_costs=[]. The bug case.
+        // Stationarity: 1 + 1*(−1) = 0 ✓
+        run(vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![-1.0_f64], vec![], vec![],
+            "ipm/free");
     }
 
     // ── P2: honesty test — residuals in (1e-6, 1e-4) must not false-demote ───
