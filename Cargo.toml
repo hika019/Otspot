@@ -61,7 +61,6 @@ otspot-io = { workspace = true }
 otspot-model = { workspace = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.10.0"
 clarabel = "0.11"
 tempfile = "3"
@@ -69,22 +68,6 @@ faer = "0.24.0"
 dyn-stack = "0.13.2"
 twofloat = "0.8"
 otspot-dev = { path = "otspot-dev" }
-
-[[bench]]
-name = "scaling_pricing"
-harness = false
-
-[[bench]]
-name = "lu_bench"
-harness = false
-
-[[bench]]
-name = "solve_bench"
-harness = false
-
-[[bench]]
-name = "qp_bench"
-harness = false
 
 [profile.test]
 opt-level = 3
