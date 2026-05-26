@@ -170,6 +170,9 @@ pub fn solve_qp_global_with_stats(
     }
 
     let mut max_depth_breached = false;
+    // 深さ上限で破棄した node の node_lb の min を保持する。これが未探索領域の下界に
+    // なるため remaining_lb に畳み込む必要がある。
+    let mut depth_discard_lb: f64 = f64::INFINITY;
 
     while let Some(node) = tree.pop() {
         if deadline_hit(&deadline) {
@@ -226,8 +229,10 @@ pub fn solve_qp_global_with_stats(
 
         // 分枝
         if node.depth + 1 > cfg.max_depth {
-            // 深さ上限超過 → 子を展開しない = unproven region 残存
+            // 深さ上限超過 → 子を展開しない = unproven region 残存。
+            // この node の lb を depth_discard_lb に畳み込む (remaining_lb に反映する)。
             max_depth_breached = true;
+            depth_discard_lb = depth_discard_lb.min(node_lb);
             continue;
         }
         if let Some(j) = select_branching_variable(&node, &res.solution) {
@@ -248,8 +253,9 @@ pub fn solve_qp_global_with_stats(
         || stats.nodes_processed >= cfg.max_nodes;
 
     let result = if halted_early {
-        // 未探索領域の下界 (queue に残った node の最小 lb)
-        let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY);
+        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限で破棄した
+        // node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
+        let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY).min(depth_discard_lb);
         let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
         let inc_obj = state.incumbent_obj;
         if proven {
@@ -595,6 +601,48 @@ mod tests {
             "expected unproven status, got {:?}", r.status
         );
         assert!(r.bound_gap_cert.is_none(), "unproven must have no BoundGapCertificate");
+    }
+
+    /// depth 超過 node の lb が remaining_lb に畳み込まれ、偽 proven を阻止する。
+    ///
+    /// Sentinel: `depth_discard_lb = depth_discard_lb.min(node_lb)` を除去すると
+    /// depth 破棄後にキューが空になり `remaining_lb = f64::INFINITY` →
+    /// `within_gap(inc_obj, ∞) = true` → NonconvexGlobal + cert が mint される (偽 proven)。
+    /// この修正により remaining_lb = depth_discard_lb (≈ -2) になり、
+    /// `within_gap(0, -2, 1e-12) = false` → NonconvexLocal、cert なし。
+    #[test]
+    fn depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert() {
+        // 2D 凹 QP (Q=diag(-2,-2), [-1,1]²): IPM は x=0 に固着 (obj=0)、
+        // コーナー最小値 = -2 には未収束。interval 下界 = -2。
+        // max_depth=1 で深さ 1 のノードが depth_exceeded → depth_discard_lb=-2。
+        // use_alpha_bb=false で alpha_bb が lb を 0 に引き上げないようにする。
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let p = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+        ).unwrap();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 1,
+            max_nodes: 10_000,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+        let r = solve_qp_global(&p, &opts(10.0), &cfg);
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexLocal),
+            "depth-exceeded lb must block false proven: expected NonconvexLocal, got {:?}",
+            r.status
+        );
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "depth-exceeded unproven must have no BoundGapCertificate"
+        );
     }
 
     /// Invalid options are rejected at the global entry with NumericalError — not panic.
