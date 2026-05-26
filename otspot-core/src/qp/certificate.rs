@@ -86,6 +86,39 @@ pub fn prove_optimal<'a>(
             failing_conditions: vec!["input_dimensions"],
         });
     }
+    // ── scalar input validation ──────────────────────────────────────────────
+    // Relative duality gap is non-negative by definition; negative or non-finite
+    // values indicate a caller error.
+    //
+    // NOTE: without this guard, gap=-1e-3 satisfies `!(−1e-3 ≤ tol)=false` and
+    // slips through the loop below, issuing a certificate for an impossible gap.
+    if !duality_gap_rel.is_finite() || duality_gap_rel < 0.0 {
+        return Err(NotProven {
+            stationarity_rel: f64::NAN,
+            primal_residual_rel: f64::NAN,
+            bound_violation: f64::NAN,
+            complementarity_rel: f64::NAN,
+            dual_sign_violation: f64::NAN,
+            duality_gap_rel,
+            tol,
+            failing_conditions: vec!["duality_gap"],
+        });
+    }
+    // tol must be finite and strictly positive; zero/negative/non-finite tolerance
+    // makes certification meaningless (+inf tol would certify any iterate).
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(NotProven {
+            stationarity_rel: f64::NAN,
+            primal_residual_rel: f64::NAN,
+            bound_violation: f64::NAN,
+            complementarity_rel: f64::NAN,
+            dual_sign_violation: f64::NAN,
+            duality_gap_rel,
+            tol,
+            failing_conditions: vec!["invalid_tolerance"],
+        });
+    }
+
     // ── residual computation ─────────────────────────────────────────────────
     let stat = kkt_residual_rel(view, x, y, z);
     let pres = primal_residual_rel(view, x);
@@ -949,6 +982,99 @@ mod tests {
         run(vec![(f64::NEG_INFINITY, f64::INFINITY)],
             vec![-1.0_f64], vec![], vec![],
             "ipm/free");
+    }
+
+    // ── P2: negative gap / invalid tol rejection ─────────────────────────────
+
+    /// Step 1: reproduce the P2 bug — gap=-1e-3 and gap=-inf must be rejected.
+    ///
+    /// Before the fix, `!(gap <= tol)` evaluated `!(-1e-3 <= 1e-6) = !true = false`,
+    /// so negative gap was never added to `failing_conditions` → `Ok(cert)` was
+    /// wrongly returned. This test fact-checks that the bug is now fixed.
+    #[test]
+    fn prove_optimal_negative_gap_bug_reproduction() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let c = vec![1.0_f64];
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let ct = vec![ConstraintType::Ge];
+        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
+        let x = vec![1.0_f64];
+        let y = vec![-1.0_f64];
+        let z = vec![0.0_f64];
+
+        // Bug: both returned Ok before the fix.
+        let r_neg = prove_optimal(&view, &x, &y, &z, -1e-3, 1e-6);
+        assert!(r_neg.is_err(), "gap=-1e-3 must be rejected");
+        let r_neginf = prove_optimal(&view, &x, &y, &z, f64::NEG_INFINITY, 1e-6);
+        assert!(r_neginf.is_err(), "gap=-inf must be rejected");
+    }
+
+    /// Table-driven: all invalid gap and tol values are rejected; happy path passes.
+    ///
+    /// Invalid gap → `Err` with `"duality_gap"` in `failing_conditions`.
+    /// Invalid tol → `Err` with `"invalid_tolerance"` in `failing_conditions`.
+    /// Happy path (gap ≥ 0 finite, tol > 0 finite) → `Ok`.
+    ///
+    /// **Sentinel**: removing the `duality_gap_rel < 0.0` guard (no-op change)
+    /// causes every negative-gap row below to return `Ok(cert)`, failing this test —
+    /// confirming the guard is load-bearing.
+    #[test]
+    fn prove_optimal_invalid_gap_and_tol_rejected() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let c = vec![1.0_f64];
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        let ct = vec![ConstraintType::Ge];
+        let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
+        let x = vec![1.0_f64];
+        let y = vec![-1.0_f64];
+        let z = vec![0.0_f64];
+
+        // ── Invalid gap values → "duality_gap" ───────────────────────────────
+        for (gap, label) in [
+            (-1e-3_f64,          "gap = -1e-3"),
+            (f64::NEG_INFINITY,  "gap = -inf"),
+            (f64::NAN,           "gap = NaN"),
+            (f64::INFINITY,      "gap = +inf"),
+        ] {
+            let r = prove_optimal(&view, &x, &y, &z, gap, 1e-6);
+            assert!(r.is_err(), "{label}: expected Err");
+            let err = r.unwrap_err();
+            assert!(
+                err.failing_conditions.contains(&"duality_gap"),
+                "{label}: 'duality_gap' must be in failing_conditions, got {:?}",
+                err.failing_conditions
+            );
+        }
+
+        // ── Invalid tol values → "invalid_tolerance" ─────────────────────────
+        for (tol, label) in [
+            (0.0_f64,           "tol = 0"),
+            (-1.0_f64,          "tol = -1"),
+            (f64::NAN,          "tol = NaN"),
+            (f64::INFINITY,     "tol = +inf"),
+        ] {
+            let r = prove_optimal(&view, &x, &y, &z, 0.0, tol);
+            assert!(r.is_err(), "{label}: expected Err");
+            let err = r.unwrap_err();
+            assert!(
+                err.failing_conditions.contains(&"invalid_tolerance"),
+                "{label}: 'invalid_tolerance' must be in failing_conditions, got {:?}",
+                err.failing_conditions
+            );
+        }
+
+        // ── Happy path: gap ∈ {0, small positive}, tol > 0 → Ok ──────────────
+        for (gap, tol, label) in [
+            (0.0_f64,   1e-6_f64, "gap=0 tol=1e-6"),
+            (1e-7_f64,  1e-6_f64, "gap=1e-7 tol=1e-6"),
+        ] {
+            let r = prove_optimal(&view, &x, &y, &z, gap, tol);
+            assert!(r.is_ok(), "{label}: expected Ok, got {:?}", r.err());
+        }
     }
 
     // ── P2: honesty test — residuals in (1e-6, 1e-4) must not false-demote ───
