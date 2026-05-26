@@ -109,7 +109,7 @@ let result = solve(&prob);
 
 ## 性能
 
-`timeout = 1000s`、6並列。
+標準公開セットでの求解率ベンチ。otspot-dev の `qps_benchmark` harness（shell スクリプト — **`cargo bench` ではない**）で計測、`timeout = 1000s`:
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
@@ -120,16 +120,12 @@ let result = solve(&prob);
 
 **最適解** = 既知最適値と照合済み。**有効解** = ソルバー判定は最適だが外部参照なし。
 QP 残余は ill-conditioned（`LISWET` 系、cond ≈ 1e15）で `SuboptimalSolution`/`Timeout`。
-ベンチデータは gitignored かつ再現可能（[ベンチマークデータ](#ベンチマークデータ)参照）。
-
-## ベンチマーク（criterion）
+再現（データは gitignored、[ベンチマークデータ](#ベンチマークデータ)参照）:
 
 ```bash
-cargo bench                              # 全スイート
-cargo bench --bench scaling_pricing     # Ruiz scaling + steepest-edge
-cargo bench --bench lu_bench            # LU分解
-cargo bench --bench solve_bench         # LP end-to-end
-cargo bench --bench qp_bench            # QP
+bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 8 --timeout 1000   # 実行可能 LP (Netlib)
+bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 8 \
+     --timeout 1000 --output /tmp/qp_maros.txt                                      # 凸 QP (Maros)
 ```
 
 ## テスト

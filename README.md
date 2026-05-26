@@ -110,7 +110,8 @@ let result = solve(&prob);
 
 ## Performance
 
-`timeout = 1000s`, 6-way parallel.
+Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark` harness
+(shell scripts — **not** `cargo bench`), `timeout = 1000s`:
 
 | Problem type | Set | # | @ 1e-6 | @ 1e-8 |
 |---|---|---:|---|---|
@@ -121,16 +122,13 @@ let result = solve(&prob);
 
 **Optimal** = verified against known objective. **Valid** = feasible, solver-optimal, no reference to verify.
 Remaining QP misses are ill-conditioned (`LISWET` family, cond ≈ 1e15); reported as `SuboptimalSolution`/`Timeout`.
-Benchmark data is gitignored and reproducible; see [Benchmark data](#benchmark-data).
 
-## Benchmarks
+Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
 ```bash
-cargo bench                              # all suites
-cargo bench --bench scaling_pricing     # Ruiz scaling + steepest-edge
-cargo bench --bench lu_bench            # LU factorization
-cargo bench --bench solve_bench         # end-to-end LP
-cargo bench --bench qp_bench            # QP
+bash scripts/run_lp_bench.sh  --suite standard --eps 1e-6 --jobs 8 --timeout 1000   # Feasible LP (Netlib)
+bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 8 \
+     --timeout 1000 --output /tmp/qp_maros.txt                                      # Convex QP (Maros)
 ```
 
 ## Tests
