@@ -196,21 +196,21 @@ proptest! {
 
 /// Load-bearing proof for the production `guard_lp_optimal` path.
 ///
-/// Constructs a corrupt `SolverResult` (status=Optimal, x=1e12 violating x≤5)
-/// and routes it through `apply_lp_primal_guard` — the same function called in
-/// production after each LP solve. Without the guard, corrupt results reach
-/// callers. With `with_lp_guard_disabled`, the guard is a no-op so the corrupt
-/// result passes through unchanged (proving the disable hook works and that
-/// the guard is the only thing catching the violation).
+/// Two complementary assertions form the sentinel:
+/// 1. A result with corrupt primal data (x=1e12 violates x≤5) is demoted to
+///    SuboptimalSolution — proves the guard is not a no-op.
+/// 2. A result with wrong-sign LP dual (Le should have y≤0 in simplex; +1 is wrong)
+///    is also demoted — proves the full KKT+dual_sign check is active.
 ///
-/// If `guard_lp_optimal` is deleted, the first assertion fails.
-/// If `with_lp_guard_disabled` is removed or broken, the second assertion fails.
+/// The `guard_lp_optimal_does_not_demote_clean_result` test below provides the
+/// complementary pass-through evidence.
 #[test]
 fn guard_lp_optimal_load_bearing_production_path() {
-    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    let lp = LpProblem::new_general(
+    // LP: min x  s.t.  x ≤ 5,  x ≥ 0.
+    let a_le = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp_le = LpProblem::new_general(
         vec![1.0],
-        a,
+        a_le,
         vec![5.0],
         vec![ConstraintType::Le],
         vec![(0.0, f64::INFINITY)],
@@ -218,8 +218,8 @@ fn guard_lp_optimal_load_bearing_production_path() {
     )
     .unwrap();
 
-    // Corrupt result: claims Optimal with x=1e12 (violates x≤5 by 1e12).
-    let make_corrupt = || SolverResult {
+    // Corrupt primal: x=1e12 violates x≤5 → primal feasibility fails → SuboptimalSolution.
+    let corrupt_primal = SolverResult {
         status: SolveStatus::Optimal,
         objective: 1e12,
         solution: vec![1e12],
@@ -228,22 +228,42 @@ fn guard_lp_optimal_load_bearing_production_path() {
         slack: vec![0.0],
         ..Default::default()
     };
-
-    // Guard active (default): corrupt result must be demoted to NumericalError.
-    let guarded = otspot::apply_lp_primal_guard(make_corrupt(), &lp);
+    let guarded = otspot::apply_lp_primal_guard(corrupt_primal, &lp_le);
     assert_eq!(
         guarded.status,
-        SolveStatus::NumericalError,
-        "guard_lp_optimal must catch corrupt Optimal (pfeas≈1e12); \
-         if this fails, the guard was deleted or skipped"
+        SolveStatus::SuboptimalSolution,
+        "guard must demote corrupt Optimal (pfeas≈1e12) to SuboptimalSolution; \
+         if Optimal is returned, the guard was deleted or skipped"
     );
 
-    // Guard disabled via thread-local scope (no-op proof): corrupt result must pass through.
-    let unguarded = otspot::with_lp_guard_disabled(|| otspot::apply_lp_primal_guard(make_corrupt(), &lp));
+    // LP: min −x  s.t.  x ≤ 1,  x ≥ 0. Optimal x=1, dual_solution = −1 (Le, simplex).
+    let a2 = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp2 = LpProblem::new_general(
+        vec![-1.0],
+        a2,
+        vec![1.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, f64::INFINITY)],
+        None,
+    )
+    .unwrap();
+
+    // Wrong-sign dual: Le should have y ≤ 0 in simplex convention; +1 is wrong.
+    let wrong_sign = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -1.0,
+        solution: vec![1.0],
+        dual_solution: vec![1.0], // should be −1 for Le
+        reduced_costs: vec![0.0],
+        slack: vec![0.0],
+        ..Default::default()
+    };
+    let guarded2 = otspot::apply_lp_primal_guard(wrong_sign, &lp2);
     assert_eq!(
-        unguarded.status,
-        SolveStatus::Optimal,
-        "with_lp_guard_disabled must make guard a no-op; corrupt Optimal must pass through"
+        guarded2.status,
+        SolveStatus::SuboptimalSolution,
+        "guard must demote wrong-sign Le dual (+1 instead of ≤0) to SuboptimalSolution; \
+         if Optimal is returned, dual_sign check is not active"
     );
 }
 

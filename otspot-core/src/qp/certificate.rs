@@ -4,13 +4,18 @@
 //! feasibility. It returns `Ok(cert)` only when every check is below `tol`; otherwise
 //! it returns `Err(NotProven)` naming the failing conditions. This "no certificate
 //! without proof" design eliminates false-Optimal status (the most common solver bug).
+//!
+//! [`prove_optimal_lp`] and [`guard_lp_optimal`] extend this to LP, handling the
+//! sign-convention difference between LP simplex duals and the prove_optimal convention.
 
 use crate::problem::certificate::{NotProven, OptimalCertificate};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::{
     bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
+use crate::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
@@ -69,6 +74,111 @@ pub fn prove_optimal<'a>(
             tol,
             failing_conditions: failing,
         })
+    }
+}
+
+/// Certificate gate tolerance for LP: `√PIVOT_TOL ≈ 1e-4`.
+///
+/// LP simplex accumulates O(√PIVOT_TOL) rounding errors in the basis solution
+/// (Wilkinson). Complementarity and duality-gap residuals at a valid optimal
+/// vertex are therefore naturally at the 1e-5..1e-4 level, not 1e-6.
+/// Using 1e-4 (= `feas_rel_tol()`) ensures well-solved LPs pass without false
+/// demotions while still catching catastrophic failures (gap ≫ 1e-4).
+pub(crate) const LP_CERT_TOL: f64 = 1e-4; // = feas_rel_tol() = PIVOT_TOL.sqrt()
+
+/// Verify LP optimality via full KKT+dual_sign.
+///
+/// **Sign convention**: LP simplex produces `dual_solution` in the `c − A^T y − rc = 0`
+/// convention (Le: y ≤ 0, Ge: y ≥ 0). `prove_optimal` expects the opposite (Le: y ≥ 0,
+/// Ge: y ≤ 0). The conversion is a universal negation: `y_prove = −y_simplex`.
+///
+/// Two paths:
+/// - **Simplex path** (`reduced_costs` non-empty): apply universal negation to `dual_solution`,
+///   build `z` from reduced costs: `z_lb = max(rc, 0)` for lb-finite vars,
+///   `z_ub = max(−rc, 0)` for ub-finite vars.
+/// - **IPM path** (`bound_duals` non-empty): `dual_solution` and `bound_duals` are already
+///   in the `prove_optimal` convention — use as-is.
+pub(crate) fn prove_optimal_lp(
+    problem: &LpProblem,
+    result: &SolverResult,
+    tol: f64,
+) -> Result<OptimalCertificate, NotProven> {
+    let n = problem.num_vars;
+    let q_zero = CscMatrix::new(n, n);
+    let view = ProblemView {
+        q: &q_zero,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
+    };
+
+    let (y_prove, z) = if !result.bound_duals.is_empty() {
+        // IPM path: already in prove_optimal convention.
+        (result.dual_solution.clone(), result.bound_duals.clone())
+    } else {
+        // Simplex path: negate ALL dual variables and convert rc→z.
+        let y_prove: Vec<f64> = result.dual_solution.iter().map(|&v| -v).collect();
+        let rc = &result.reduced_costs;
+        let mut z_lb = Vec::new();
+        let mut z_ub = Vec::new();
+        for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
+            let rc_j = rc.get(j).copied().unwrap_or(0.0);
+            if lb.is_finite() {
+                z_lb.push(rc_j.max(0.0));
+            }
+            if ub.is_finite() {
+                z_ub.push((-rc_j).max(0.0));
+            }
+        }
+        z_lb.extend(z_ub);
+        (y_prove, z_lb)
+    };
+
+    let gap_rel = lp_duality_gap_rel(problem, &result.solution, &y_prove, &z);
+    prove_optimal(&view, &result.solution, &y_prove, &z, gap_rel, tol)
+}
+
+/// LP duality gap: `|primal − dual| / max(|p|, |d|, 1)`.
+///
+/// `dual_obj = −b^T y_prove + Σ lb_j·z_lb_j − Σ ub_j·z_ub_j`.
+fn lp_duality_gap_rel(problem: &LpProblem, x: &[f64], y_prove: &[f64], z: &[f64]) -> f64 {
+    let primal_obj: f64 = problem.c.iter().zip(x.iter()).map(|(&c, &xj)| c * xj).sum();
+    let by: f64 = problem.b.iter().zip(y_prove.iter()).map(|(&b, &y)| b * y).sum();
+    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let mut bnd_term = 0.0_f64;
+    let mut lb_idx = 0_usize;
+    let mut ub_idx = n_lb;
+    for &(lb, ub) in problem.bounds.iter() {
+        if lb.is_finite() && lb_idx < z.len() {
+            bnd_term += lb * z[lb_idx];
+            lb_idx += 1;
+        }
+        if ub.is_finite() && ub_idx < z.len() {
+            bnd_term -= ub * z[ub_idx];
+            ub_idx += 1;
+        }
+    }
+    let dual_obj = -by + bnd_term;
+    let gap_abs = (primal_obj - dual_obj).abs();
+    let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    if gap_abs.is_finite() { gap_abs / denom } else { f64::INFINITY }
+}
+
+/// Full KKT+dual_sign LP Optimal gate.
+///
+/// Calls `prove_optimal_lp`; on `Err(NotProven)` downgrades to `SuboptimalSolution`
+/// (preserving the solution vector). Non-Optimal results and empty solutions pass
+/// through unchanged.
+pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> SolverResult {
+    if result.status != SolveStatus::Optimal || result.solution.is_empty() {
+        return result;
+    }
+    match prove_optimal_lp(problem, &result, LP_CERT_TOL) {
+        Ok(_) => result,
+        Err(_) => SolverResult { status: SolveStatus::SuboptimalSolution, ..result },
     }
 }
 
@@ -241,4 +351,132 @@ mod tests {
         let result = prove_optimal(&view, &[], &[], &[], 0.0, 1e-6);
         assert!(result.is_ok(), "empty problem must pass: {:?}", result.err());
     }
+
+    // ── prove_optimal_lp tests ────────────────────────────────────────────────
+
+    fn make_le_lp() -> LpProblem {
+        // min −x  s.t.  x ≤ 1,  x ≥ 0
+        // Optimal: x*=1, obj=-1.
+        // LP simplex dual: y_Le = −1 (Le dual ≤ 0), rc=0 (x is basic).
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        LpProblem::new_general(
+            vec![-1.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![ConstraintType::Le],
+            vec![(0.0_f64, f64::INFINITY)],
+            None,
+        )
+        .unwrap()
+    }
+
+    fn correct_simplex_result() -> SolverResult {
+        SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0_f64],
+            // LP simplex convention: Le dual ≤ 0. Active Le at x=1 → y = -1.
+            dual_solution: vec![-1.0_f64],
+            reduced_costs: vec![0.0_f64],
+            slack: vec![0.0_f64],
+            ..Default::default()
+        }
+    }
+
+    /// Correct LP simplex output → prove_optimal_lp returns Ok.
+    /// Verifies that the universal y-negation + rc→z conversion produces a
+    /// valid KKT certificate.
+    #[test]
+    fn prove_optimal_lp_correct_simplex_path_passes() {
+        let lp = make_le_lp();
+        let result = correct_simplex_result();
+        let cert = prove_optimal_lp(&lp, &result, 1e-6);
+        assert!(cert.is_ok(), "correct simplex result must pass: {:?}", cert.err());
+    }
+
+    /// Wrong-sign LP dual (Le should be ≤ 0 in simplex, but +1 given) → Err.
+    /// After negation: y_prove = −1 < 0 violates Le dual_sign ≥ 0 requirement.
+    ///
+    /// Load-bearing: `prove_optimal_lp_correct_simplex_path_passes` (above) shows
+    /// the same problem PASSES with correct duals, proving the gate is not a no-op.
+    #[test]
+    fn prove_optimal_lp_wrong_sign_dual_fails() {
+        let lp = make_le_lp();
+        let mut result = correct_simplex_result();
+        result.dual_solution = vec![1.0_f64]; // wrong sign: Le must be ≤ 0 in simplex
+        let cert = prove_optimal_lp(&lp, &result, 1e-6);
+        assert!(cert.is_err(), "wrong-sign dual must fail prove_optimal_lp");
+        let err = cert.unwrap_err();
+        assert!(
+            err.failing_conditions.contains(&"dual_sign")
+                || err.failing_conditions.contains(&"stationarity"),
+            "dual_sign or stationarity must fail: {:?}", err.failing_conditions,
+        );
+    }
+
+    /// Active lower bound: rc > 0 at lb → z_lb = rc, z_ub = 0.
+    /// Problem: min x  s.t.  x ≥ 2,  x ≥ 0.  Optimal x=2.
+    #[test]
+    fn prove_optimal_lp_active_lower_bound_cert() {
+        // min x  s.t.  x ≥ 2.  Optimal: x=2, obj=2.
+        // LP simplex: x basic, y_Ge = +1 (Ge dual ≥ 0), rc = 0.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0_f64],
+            a,
+            vec![2.0_f64],
+            vec![ConstraintType::Ge],
+            vec![(0.0_f64, f64::INFINITY)],
+            None,
+        ).unwrap();
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 2.0,
+            solution: vec![2.0_f64],
+            dual_solution: vec![1.0_f64], // Ge dual ≥ 0 in simplex
+            reduced_costs: vec![0.0_f64],
+            slack: vec![0.0_f64],
+            ..Default::default()
+        };
+        let cert = prove_optimal_lp(&lp, &result, 1e-6);
+        assert!(cert.is_ok(), "active Ge constraint must produce valid cert: {:?}", cert.err());
+    }
+
+    /// guard_lp_optimal passes correct KKT result through as Optimal.
+    #[test]
+    fn guard_lp_optimal_passes_correct_result() {
+        let lp = make_le_lp();
+        let result = correct_simplex_result();
+        let guarded = guard_lp_optimal(result, &lp);
+        assert_eq!(guarded.status, SolveStatus::Optimal,
+            "correct KKT result must remain Optimal");
+    }
+
+    /// guard_lp_optimal demotes wrong-sign dual to SuboptimalSolution (not NumericalError).
+    ///
+    /// Load-bearing (paired with `guard_lp_optimal_passes_correct_result`): removing
+    /// the prove_optimal_lp call from guard_lp_optimal would cause this test to PASS
+    /// incorrectly (wrong-sign result stays Optimal) while the correct-result test also
+    /// passes — thus the pair together detect a no-op guard body.
+    #[test]
+    fn guard_lp_optimal_demotes_wrong_sign_dual() {
+        let lp = make_le_lp();
+        let mut result = correct_simplex_result();
+        result.dual_solution = vec![1.0_f64]; // wrong sign for Le in simplex
+        let guarded = guard_lp_optimal(result, &lp);
+        assert_eq!(guarded.status, SolveStatus::SuboptimalSolution,
+            "wrong-sign dual must be demoted to SuboptimalSolution");
+    }
+
+    /// guard_lp_optimal is a no-op for non-Optimal statuses.
+    #[test]
+    fn guard_lp_optimal_passthrough_non_optimal_statuses() {
+        let lp = make_le_lp();
+        for status in [SolveStatus::Infeasible, SolveStatus::Timeout, SolveStatus::NumericalError] {
+            let r = SolverResult { status: status.clone(), ..Default::default() };
+            let out = guard_lp_optimal(r, &lp);
+            assert_eq!(out.status, status);
+        }
+    }
+
 }
