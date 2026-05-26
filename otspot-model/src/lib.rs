@@ -18,10 +18,12 @@
 
 pub mod constraint;
 pub mod expression;
+pub mod quad_expr;
 pub mod variable;
 mod model;
 
 pub use constraint::{Constraint, ConstraintSense};
 pub use expression::Expression;
+pub use quad_expr::QuadExpr;
 pub use variable::{VarKind, Variable};
 pub use model::{Model, ModelError, ModelResult, SolutionProof, SolveError};
