@@ -244,6 +244,10 @@ pub fn solve_qp_global_with_stats(
         // 分枝不能 (= node 内で x* が midpoint 一致) → leaf 確定、proof は incumbent 比で取れる
     }
 
+    // incumbent が分枝 node 由来の場合、その双対は sub-box 基準で回収されているため
+    // 元問題に整合させる (interior 変数への分枝境界 dual = 相補性違反を除去)。
+    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol);
+
     // 終了条件分岐:
     // - queue 空 AND max_depth 未超過 AND deadline/max_nodes 未到達 → proven
     // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
@@ -356,6 +360,39 @@ impl SearchState {
         self.incumbent_obj = res.objective;
         self.incumbent_sol = res.solution.clone();
         self.incumbent_result = res.clone();
+    }
+
+    /// 探索終了後の dual recovery polish。
+    ///
+    /// B&B incumbent の双対は分枝後の sub-box に対して回収されるため、元問題で
+    /// interior な変数にも分枝境界由来の bound dual が残り、元問題基準の相補性
+    /// (`z_j·(x_j − bnd_j) = 0`) を破る。incumbent を warm start に固定して **元問題の
+    /// box** で局所 QP を解き直し、元問題に整合した双対を回収する。
+    ///
+    /// warm を境界張り付きでも採用する点が [`solve_local_upper_bound`] と異なる
+    /// (探索中は saddle 再固着回避のため境界 warm を捨てるが、最終 polish では
+    /// incumbent corner に錨を打つのが目的)。obj が incumbent と一致する dual 回収のみ
+    /// 採用し、obj が動く解 (= 別局所解への脱落) は棄却して incumbent の x/obj/proof
+    /// 判定を変えない。
+    fn polish_incumbent_duals(&mut self, problem: &QpProblem, base_opts: &SolverOptions, gap_tol: f64) {
+        let Some(warm) = build_warm_from(&self.incumbent_result) else {
+            return;
+        };
+        if warm.x.len() != problem.num_vars {
+            return;
+        }
+        let mut opts = base_opts.clone();
+        opts.warm_start_qp = Some(warm);
+        opts.multistart = None;
+        opts.global_optimization = None;
+        let polished = crate::qp::solve_qp_with(problem, &opts);
+        if !is_feasible_result(&polished.status) || !polished.objective.is_finite() {
+            return;
+        }
+        let scale = 1.0_f64.max(self.incumbent_obj.abs());
+        if (polished.objective - self.incumbent_obj).abs() <= gap_tol * scale {
+            self.update_incumbent(&polished);
+        }
     }
 
     /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
@@ -642,6 +679,55 @@ mod tests {
         assert!(
             r.bound_gap_cert.is_none(),
             "depth-exceeded unproven must have no BoundGapCertificate"
+        );
+    }
+
+    /// 分枝 node 由来 incumbent の双対が元問題に整合する (相補性違反なし)。
+    ///
+    /// 3 変数 nonconvex QP (Q=diag(1,-1,-1)、A 第 1 行のみ非零、Le×3、box [-0.5,0.5]³)。
+    /// 大域最小 x≈[0.2,-0.5,-0.5] は var0 が interior。B&B はこの incumbent を var0 を
+    /// ub≈0.2 へ分枝した node で発見するため、polish なしでは `z_ub[0]` に分枝境界由来の
+    /// 大きな bound dual が残り、元問題基準で `z_ub[0]·(ub−x0) ≈ 0.42` の相補性違反になる。
+    ///
+    /// Sentinel: `state.polish_incumbent_duals(...)` 呼び出しを除去すると相補性残差が
+    /// `EPS_KKT` を超え FAIL する (= no-op proof)。`assert_solver_invariants_qp` は
+    /// `NonconvexLocal` を skip するため、この相補性 gate がカバーする。
+    #[test]
+    fn branched_incumbent_duals_reconciled_to_original_box() {
+        use crate::problem::ConstraintType;
+        use crate::qp::ipm_solver::kkt::complementarity_residual_rel;
+        use crate::qp::ipm_solver::outcome::ProblemView;
+        use crate::test_kkt::EPS_KKT;
+
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, -1.0, -1.0], 3, 3).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, 0.6], 3, 3).unwrap();
+        let p = QpProblem::new(
+            q,
+            vec![0.0, 0.0, 0.0],
+            a,
+            vec![-0.5, 0.5, 1.0],
+            vec![(-0.5, 0.5); 3],
+            vec![ConstraintType::Le; 3],
+        )
+        .unwrap();
+        let cfg = GlobalOptimizationConfig::default();
+        let r = solve_qp_global(&p, &opts(8.0), &cfg);
+        // 大域最小 (x0 interior の corner solution) に到達していること。
+        assert!(
+            (r.objective - (-0.23)).abs() < 1e-2,
+            "expected global ≈ -0.23, got obj={:.4} status={:?}",
+            r.objective,
+            r.status
+        );
+        let view = ProblemView::from_problem(&p);
+        let comp =
+            complementarity_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+        assert!(
+            comp < EPS_KKT,
+            "branched-incumbent duals must satisfy original-box complementarity: comp={:.3e} > {:.3e} (status={:?})",
+            comp,
+            EPS_KKT,
+            r.status
         );
     }
 
