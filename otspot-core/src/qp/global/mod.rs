@@ -334,11 +334,35 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     })
 }
 
+/// polish した解の採用可否を判定する。
+///
+/// 採用条件:
+/// 1. `status` が収束済み (Optimal / LocallyOptimal) であること。
+///    未収束 (MaxIterations / SuboptimalSolution 等) は相補性を満たさない可能性があり棄却。
+/// 2. `polished_obj` が有限かつ `incumbent_obj` より悪化していないこと。
+///    min 問題なので `polished_obj > incumbent_obj + gap_tol * scale` は棄却。
+fn is_polish_acceptable(
+    status: &SolveStatus,
+    polished_obj: f64,
+    incumbent_obj: f64,
+    gap_tol: f64,
+) -> bool {
+    let converged = matches!(status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
+    if !converged || !polished_obj.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    polished_obj <= incumbent_obj + gap_tol * scale
+}
+
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
     incumbent_obj: f64,
     incumbent_sol: Vec<f64>,
+    /// B&B ループで root 以外の incumbent が見つかった場合 true。
+    /// false のまま = root solve の解がそのまま incumbent = 元問題 box で回収済み。
+    incumbent_updated: bool,
 }
 
 impl SearchState {
@@ -349,6 +373,7 @@ impl SearchState {
             incumbent_result: root,
             incumbent_obj: obj,
             incumbent_sol: sol,
+            incumbent_updated: false,
         }
     }
 
@@ -360,6 +385,7 @@ impl SearchState {
         self.incumbent_obj = res.objective;
         self.incumbent_sol = res.solution.clone();
         self.incumbent_result = res.clone();
+        self.incumbent_updated = true;
     }
 
     /// 探索終了後の dual recovery polish。
@@ -371,10 +397,15 @@ impl SearchState {
     ///
     /// warm を境界張り付きでも採用する点が [`solve_local_upper_bound`] と異なる
     /// (探索中は saddle 再固着回避のため境界 warm を捨てるが、最終 polish では
-    /// incumbent corner に錨を打つのが目的)。obj が incumbent と一致する dual 回収のみ
-    /// 採用し、obj が動く解 (= 別局所解への脱落) は棄却して incumbent の x/obj/proof
-    /// 判定を変えない。
+    /// incumbent corner に錨を打つのが目的)。obj は gap_tol 内に保たれ proof 妥当性を
+    /// 維持 (duals を整合化)。収束済み (Optimal/LocallyOptimal) かつ obj が悪化しない
+    /// 場合のみ採用し、未収束 or obj 悪化は棄却して incumbent を保持する。
+    /// root incumbent (分枝なし) は既に元問題 box で回収済みのため skip。
     fn polish_incumbent_duals(&mut self, problem: &QpProblem, base_opts: &SolverOptions, gap_tol: f64) {
+        if !self.incumbent_updated {
+            // root solve 結果は元問題 box で回収済み; polish は冗長。
+            return;
+        }
         let Some(warm) = build_warm_from(&self.incumbent_result) else {
             return;
         };
@@ -386,11 +417,7 @@ impl SearchState {
         opts.multistart = None;
         opts.global_optimization = None;
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if !is_feasible_result(&polished.status) || !polished.objective.is_finite() {
-            return;
-        }
-        let scale = 1.0_f64.max(self.incumbent_obj.abs());
-        if (polished.objective - self.incumbent_obj).abs() <= gap_tol * scale {
+        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol) {
             self.update_incumbent(&polished);
         }
     }
@@ -729,6 +756,66 @@ mod tests {
             EPS_KKT,
             r.status
         );
+    }
+
+    // ---- polish guard sentinels ------------------------------------------------
+
+    /// P2-a: polish は収束済み (Optimal/LocallyOptimal) のみ採用。
+    ///
+    /// Sentinel: `is_polish_acceptable` の `converged` 判定を除去すると、
+    /// MaxIterations / SuboptimalSolution でも true を返すようになりこのテストが FAIL する。
+    #[test]
+    fn polish_acceptance_rejects_unconverged_status() {
+        // 収束済み → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal,        0.0, 0.0, 1e-6));
+        assert!(is_polish_acceptable(&SolveStatus::LocallyOptimal, 0.0, 0.0, 1e-6));
+        // 未収束 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::MaxIterations,     0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::SuboptimalSolution, 0.0, 0.0, 1e-6));
+        // その他の失敗 status も棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Infeasible,      0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::NumericalError,  0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::Timeout,         0.0, 0.0, 1e-6));
+    }
+
+    /// P2-b: polish は obj が悪化した場合 (min なので polished_obj > incumbent_obj + tol) を棄却。
+    ///
+    /// Sentinel: 片側 guard を abs 判定 (`|polished - incumbent| <= tol`) に戻すと、
+    /// 悪化ケース (`polished_obj > incumbent_obj + tol`) でも true を返しこのテストが FAIL する。
+    #[test]
+    fn polish_acceptance_rejects_worse_obj() {
+        let gap_tol = 1e-4_f64;
+        // incumbent_obj = -1.0 → scale = 1.0, 許容上限 = -1.0 + 1e-4
+        let inc = -1.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale; // 1e-4
+
+        // 同点 → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc,          inc, gap_tol));
+        // 改善 (より小さい) → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc - 0.5,    inc, gap_tol));
+        // tol 以内の微小悪化 → 採用可 (dual 数値誤差)
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
+        // tol を超える悪化 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
+        // 明確な悪化 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 0.0,          inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 1.0,          inc, gap_tol));
+
+        // incumbent_obj = 0.0 → scale = 1.0, 許容上限 = 0 + 1e-4
+        let inc = 0.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale;
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, 0.0,        inc, gap_tol));
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, -0.5,       inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, tol + 1e-10, inc, gap_tol));
+
+        // incumbent_obj = 100.0 → scale = 100.0, 許容上限 = 100.0 + 1e-2
+        let inc = 100.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale; // 1e-2
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
     }
 
     /// Invalid options are rejected at the global entry with NumericalError — not panic.
