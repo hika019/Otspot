@@ -187,10 +187,12 @@ pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Seve
 /// On construction: calls `enable` to disable the sentinel.
 /// On drop: calls `restore` to re-enable the sentinel.
 /// Panic-safe: `restore` runs even if the guarded closure panics.
+#[cfg(test)]
 pub(crate) struct ScopedDisable<D: Fn()> {
     restore: D,
 }
 
+#[cfg(test)]
 impl<D: Fn()> ScopedDisable<D> {
     pub(crate) fn new<E: Fn()>(enable: E, restore: D) -> Self {
         enable();
@@ -198,6 +200,7 @@ impl<D: Fn()> ScopedDisable<D> {
     }
 }
 
+#[cfg(test)]
 impl<D: Fn()> Drop for ScopedDisable<D> {
     fn drop(&mut self) {
         (self.restore)();
