@@ -46,6 +46,47 @@ pub fn prove_optimal<'a>(
     duality_gap_rel: f64,
     tol: f64,
 ) -> Result<OptimalCertificate, NotProven> {
+    // ── dimension guard (single chokepoint) ──────────────────────────────────
+    // Validate ProblemView internal consistency and input sizes before any
+    // residual computation. Mismatched slices cause index-out-of-bounds panics
+    // inside the residual helpers:
+    //   - `dd_impl::aty` accesses `y[row]` for row in a.row_ind → panics if y too short
+    //   - `dd_impl::ax` accesses `x[col]` for col in 0..a.ncols → panics if x too short
+    //
+    // Authoritative dimension sources:
+    //   num_vars        = view.bounds.len()        (the problem's variable count)
+    //   num_constraints = view.a.nrows             (number of rows in A)
+    //   expected_z_len  = n_lb_finite + n_ub_finite (z layout: lb-half then ub-half)
+    //
+    // Sentinel: removing this guard causes the short-slice test cases below to panic
+    // (index out of bounds) instead of returning Err — the test framework records
+    // that as a panic failure, not a normal assertion failure.
+    let num_vars = view.bounds.len();
+    let num_constraints = view.a.nrows;
+    let n_lb = view.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub = view.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let dim_valid = view.q.nrows == num_vars
+        && view.q.ncols == num_vars
+        && view.a.ncols == num_vars
+        && view.b.len() == num_constraints
+        && view.c.len() == num_vars
+        && view.constraint_types.len() == num_constraints
+        && x.len() == num_vars
+        && y.len() == num_constraints
+        && z.len() == n_lb + n_ub;
+    if !dim_valid {
+        return Err(NotProven {
+            stationarity_rel: f64::NAN,
+            primal_residual_rel: f64::NAN,
+            bound_violation: f64::NAN,
+            complementarity_rel: f64::NAN,
+            dual_sign_violation: f64::NAN,
+            duality_gap_rel: f64::NAN,
+            tol,
+            failing_conditions: vec!["input_dimensions"],
+        });
+    }
+    // ── residual computation ─────────────────────────────────────────────────
     let stat = kkt_residual_rel(view, x, y, z);
     let pres = primal_residual_rel(view, x);
     let bviol = bound_violation(view.bounds, x);
@@ -215,7 +256,8 @@ mod tests {
     /// Exact optimal KKT point → prove_optimal returns Ok.
     ///
     /// Problem: min x  s.t. x >= 1 (Ge), lb=0, ub=inf.
-    /// Optimal: x*=1, y*=-1 (Ge dual <= 0), z=[] (no finite bounds in z sense).
+    /// Optimal: x*=1, y*=-1 (Ge dual <= 0), z_lb=0 (lb inactive: x=1 > lb=0).
+    /// z layout: bounds=[(0,inf)] → n_lb=1, n_ub=0 → z=[z_lb]=[0.0].
     #[test]
     fn prove_optimal_exact_kkt_passes() {
         // Q=0, c=[1], A=[1], b=[1], Ge, bounds=[(0,inf)]
@@ -227,9 +269,9 @@ mod tests {
         let ct = vec![ConstraintType::Ge];
         let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
 
-        let x = vec![1.0_f64];   // primal optimal
-        let y = vec![-1.0_f64];  // Ge dual <= 0  (y*=-1)
-        let z = vec![];           // no finite bounds → no z
+        let x = vec![1.0_f64];    // primal optimal
+        let y = vec![-1.0_f64];   // Ge dual <= 0  (y*=-1)
+        let z = vec![0.0_f64];    // z_lb=0 (lb=0 inactive: x=1 > lb=0); n_lb=1, n_ub=0
         let gap = 0.0_f64;
 
         let result = prove_optimal(&view, &x, &y, &z, gap, 1e-6);
@@ -257,7 +299,7 @@ mod tests {
         // But the stationarity: c + A^T*y - z_lb + z_ub = 1 + 1*(-1) = 0 still holds.
         // Primal is feasible (x=2 >= 1). Complementarity: y*slack = -1 * (2-1) = -1 ≠ 0.
         let y = vec![-1.0_f64];
-        let z = vec![];
+        let z = vec![0.0_f64]; // z_lb=0 (inactive lb); bounds=[(0,inf)] → n_lb=1, n_ub=0
         let gap = 1.0_f64; // large gap
 
         let result = prove_optimal(&view, &x_bad, &y, &z, gap, 1e-6);
@@ -273,6 +315,7 @@ mod tests {
     /// Problem: min -x  s.t. x <= 1 (Le), 0 <= x <= inf.
     /// Optimal: x*=1, y_Le*=1 (Le dual >= 0).
     /// Corrupted: y=-1 (wrong sign). Stationarity is violated too, but dual_sign fires.
+    /// z: bounds=[(0,inf)] → n_lb=1, n_ub=0 → z=[z_lb=0] (lb inactive at x=1 > lb=0).
     #[test]
     fn prove_optimal_wrong_sign_dual_fails_dual_sign_check() {
         let q = CscMatrix::new(1, 1);
@@ -285,7 +328,7 @@ mod tests {
 
         let x = vec![1.0_f64];
         let y_wrong = vec![-1.0_f64]; // should be +1 for Le active
-        let z = vec![];
+        let z = vec![0.0_f64]; // z_lb=0 (lb inactive); n_lb=1, n_ub=0
         let gap = 0.0_f64;
 
         let result = prove_optimal(&view, &x, &y_wrong, &z, gap, 1e-6);
@@ -324,6 +367,7 @@ mod tests {
 
     /// prove_optimal is scale-invariant to a multiplicative rescaling of the problem.
     /// The same iterate satisfies the tolerances regardless of objective scale.
+    /// z: bounds=[(0,inf)] → n_lb=1, n_ub=0 → z=[0.0] (z_lb=0, lb inactive).
     #[test]
     fn prove_optimal_tol_semantics() {
         let q = CscMatrix::new(1, 1);
@@ -336,7 +380,7 @@ mod tests {
 
         let x = vec![1.0_f64];
         let y = vec![-1.0_f64];
-        let z = vec![];
+        let z = vec![0.0_f64]; // z_lb=0 (inactive lb); n_lb=1, n_ub=0
 
         // Tight tol: should pass (residuals are exact 0)
         assert!(prove_optimal(&view, &x, &y, &z, 0.0, 1e-10).is_ok());
@@ -393,7 +437,7 @@ mod tests {
             let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
             let x = vec![1.0_f64];
             let y = vec![-1.0_f64];
-            let z: Vec<f64> = vec![];
+            let z = vec![0.0_f64]; // z_lb=0; bounds=[(0,inf)] → n_lb=1, n_ub=0
             let result = prove_optimal(&view, &x, &y, &z, f64::NAN, 1e-6);
             assert!(result.is_err(), "NaN gap must be rejected");
             let err = result.unwrap_err();
@@ -407,7 +451,7 @@ mod tests {
             let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
             let x = vec![1.0_f64];
             let y = vec![-1.0_f64];
-            let z: Vec<f64> = vec![];
+            let z = vec![0.0_f64]; // z_lb=0; n_lb=1, n_ub=0
             let result = prove_optimal(&view, &x, &y, &z, f64::INFINITY, 1e-6);
             assert!(result.is_err(), "+Inf gap must be rejected");
             let err = result.unwrap_err();
@@ -423,7 +467,7 @@ mod tests {
             let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
             let x_nan = vec![f64::NAN];
             let y = vec![-1.0_f64];
-            let z: Vec<f64> = vec![];
+            let z = vec![0.0_f64]; // z_lb=0; n_lb=1, n_ub=0
             let result = prove_optimal(&view, &x_nan, &y, &z, 0.0, 1e-6);
             assert!(result.is_err(), "NaN x must be rejected");
             let err = result.unwrap_err();
@@ -439,7 +483,7 @@ mod tests {
             let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
             let x_nan = vec![f64::NAN];
             let y_nan = vec![f64::NAN];
-            let z: Vec<f64> = vec![];
+            let z = vec![0.0_f64]; // z_lb=0; n_lb=1, n_ub=0
             let result = prove_optimal(&view, &x_nan, &y_nan, &z, f64::NAN, 1e-6);
             assert!(result.is_err(), "NaN x/y/gap must be rejected");
             let err = result.unwrap_err();
@@ -456,6 +500,7 @@ mod tests {
     ///
     /// Ensures the `!(val <= tol)` change does not break the happy path where all
     /// residuals are legitimately small.
+    /// z: bounds=[(0,inf)] → n_lb=1, n_ub=0 → z=[0.0] (z_lb=0, lb inactive).
     #[test]
     fn prove_optimal_finite_below_tol_still_passes() {
         let q = CscMatrix::new(1, 1);
@@ -468,12 +513,179 @@ mod tests {
 
         let x = vec![1.0_f64];
         let y = vec![-1.0_f64];
-        let z: Vec<f64> = vec![];
+        let z = vec![0.0_f64]; // z_lb=0; n_lb=1, n_ub=0
 
         // Exact KKT point → all residuals ≈ 0.0 → must pass.
         let result = prove_optimal(&view, &x, &y, &z, 0.0, 1e-6);
         assert!(result.is_ok(),
             "exact finite KKT must still pass after NaN fix: {:?}", result.err());
+    }
+
+    // ── dimension guard tests ─────────────────────────────────────────────────
+
+    /// Table-driven: dimension mismatches return Err{["input_dimensions"]}, not panic.
+    ///
+    /// **Sentinel load-bearing**: Removing the dimension guard at the top of
+    /// `prove_optimal` causes the short-y and short-x cases to panic with
+    /// index-out-of-bounds (in `dd_impl::aty` and `dd_impl::ax` respectively).
+    /// The test framework records that as a panic failure — not a normal assertion
+    /// failure — so the Err assertion is never reached.
+    ///
+    /// Panic reproduction (pre-fix):
+    /// - y too short: `dd_impl::aty` accesses `y[row]` where row ≥ y.len() → panic.
+    /// - x too short: `dd_impl::ax` accesses `x[col]` where col ≥ x.len() → panic
+    ///   (after `kkt_residual_rel` returns INFINITY for wrong x, `primal_residual_rel`
+    ///   still calls `dd_impl::ax` without re-checking x.len()).
+    #[test]
+    fn prove_optimal_dimension_mismatch_returns_err_not_panic() {
+        let q1 = CscMatrix::new(1, 1);
+        // A: 2 rows × 1 col, with non-zero in row 0 AND row 1 (to trigger aty panic)
+        let a2x1 = CscMatrix::from_triplets(
+            &[0usize, 1], &[0, 0], &[1.0_f64, 1.0], 2, 1,
+        ).unwrap();
+        let c1 = vec![0.0_f64];
+        let b2 = vec![1.0_f64, 1.0];
+        let bounds_lb = vec![(0.0_f64, f64::INFINITY)]; // n_lb=1, n_ub=0
+        let bounds_free = vec![(f64::NEG_INFINITY, f64::INFINITY)]; // n_lb=0, n_ub=0
+        let ct2 = vec![ConstraintType::Le, ConstraintType::Le];
+
+        // ── y too short (actual panic risk without guard) ─────────────────────
+        // y.len()=1 but num_constraints=2 → dd_impl::aty accesses y[1] → panic w/o guard
+        {
+            let view = trivial_view(&q1, &a2x1, &c1, &b2, &bounds_free, &ct2);
+            let result = prove_optimal(&view, &[0.0], &[0.5], &[], 0.0, 1e-6);
+            assert!(result.is_err(), "y too short: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "y too short: {:?}", err.failing_conditions);
+            assert!(err.stationarity_rel.is_nan(), "residuals must be NaN on dim error");
+        }
+
+        // ── y too long ────────────────────────────────────────────────────────
+        {
+            let view = trivial_view(&q1, &a2x1, &c1, &b2, &bounds_free, &ct2);
+            let result = prove_optimal(&view, &[0.0], &[0.5, 0.5, 0.5], &[], 0.0, 1e-6);
+            assert!(result.is_err(), "y too long: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "y too long: {:?}", err.failing_conditions);
+        }
+
+        // ── x too short (actual panic risk without guard) ─────────────────────
+        // x.len()=0 but num_vars=1 → dd_impl::ax accesses x[0] via primal_residual_rel → panic
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let b1 = vec![1.0_f64];
+            let ct1 = vec![ConstraintType::Ge];
+            let view = trivial_view(&q1, &a1x1, &c1, &b1, &bounds_lb, &ct1);
+            let result = prove_optimal(&view, &[], &[-1.0], &[0.0], 0.0, 1e-6);
+            assert!(result.is_err(), "x empty (too short): expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "x too short: {:?}", err.failing_conditions);
+        }
+
+        // ── x too long ────────────────────────────────────────────────────────
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let b1 = vec![1.0_f64];
+            let ct1 = vec![ConstraintType::Ge];
+            let view = trivial_view(&q1, &a1x1, &c1, &b1, &bounds_lb, &ct1);
+            let result = prove_optimal(&view, &[1.0, 2.0], &[-1.0], &[0.0], 0.0, 1e-6);
+            assert!(result.is_err(), "x too long: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "x too long: {:?}", err.failing_conditions);
+        }
+
+        // ── z too short (n_lb=1, n_ub=0 → expected z.len()=1, passing z=[]) ──
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let b1 = vec![1.0_f64];
+            let ct1 = vec![ConstraintType::Ge];
+            let view = trivial_view(&q1, &a1x1, &c1, &b1, &bounds_lb, &ct1);
+            let result = prove_optimal(&view, &[1.0], &[-1.0], &[], 0.0, 1e-6);
+            assert!(result.is_err(), "z too short (empty for lb-only): expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "z too short: {:?}", err.failing_conditions);
+        }
+
+        // ── z too long ────────────────────────────────────────────────────────
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let b1 = vec![1.0_f64];
+            let ct1 = vec![ConstraintType::Ge];
+            let view = trivial_view(&q1, &a1x1, &c1, &b1, &bounds_lb, &ct1);
+            // n_lb=1, expected z=[z_lb], but passing 2 elements
+            let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0, 0.0], 0.0, 1e-6);
+            assert!(result.is_err(), "z too long: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "z too long: {:?}", err.failing_conditions);
+        }
+
+        // ── view inconsistency: c has wrong length ────────────────────────────
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let b1 = vec![1.0_f64];
+            let ct1 = vec![ConstraintType::Ge];
+            let c_wrong = vec![1.0_f64, 2.0]; // should be len=1
+            let view = ProblemView {
+                q: &q1, a: &a1x1, c: &c_wrong, b: &b1,
+                bounds: &bounds_lb, constraint_types: &ct1, eliminated_cols: &[],
+            };
+            let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0], 0.0, 1e-6);
+            assert!(result.is_err(), "view c wrong length: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "view c wrong: {:?}", err.failing_conditions);
+        }
+
+        // ── happy path: correct dims still pass ──────────────────────────────
+        // min x  s.t. x >= 1 (Ge), lb=0. Exact KKT: x=1, y=-1, z_lb=0. Should be Ok.
+        {
+            let a1x1 = CscMatrix::from_triplets(&[0usize], &[0], &[1.0_f64], 1, 1).unwrap();
+            let c_min_x = vec![1.0_f64];
+            let b1 = vec![1.0_f64];
+            let ct_ge = vec![ConstraintType::Ge];
+            let view = trivial_view(&q1, &a1x1, &c_min_x, &b1, &bounds_lb, &ct_ge);
+            let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0], 0.0, 1e-6);
+            assert!(result.is_ok(), "correct dims + exact KKT must pass: {:?}", result.err());
+        }
+    }
+
+    /// Table-driven: multiple z-length patterns for a box-constrained problem.
+    ///
+    /// bounds=[(lb, ub)] → n_lb=1, n_ub=1 → expected z.len()=2.
+    /// Verifies that z=[], z=[one], z=[a,b,c] all return "input_dimensions".
+    #[test]
+    fn prove_optimal_z_length_table_box_constraint() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::new(0, 1); // no linear constraints
+        let c = vec![0.0_f64];
+        let bounds = vec![(1.0_f64, 2.0_f64)]; // n_lb=1, n_ub=1 → expected z.len()=2
+        let ct: Vec<ConstraintType> = vec![];
+
+        for (z_bad, label) in [
+            (vec![], "z empty"),
+            (vec![0.0_f64], "z len 1 (too short)"),
+            (vec![0.0_f64, 0.0, 0.0], "z len 3 (too long)"),
+        ] {
+            let view = trivial_view(&q, &a, &c, &[], &bounds, &ct);
+            let result = prove_optimal(&view, &[1.5], &[], &z_bad, 0.0, 1e-6);
+            assert!(result.is_err(), "{label}: expected Err");
+            let err = result.unwrap_err();
+            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
+                "{label}: {:?}", err.failing_conditions);
+        }
+
+        // Correct z=[0.0, 0.0]: x=1.5 inside (1,2) → all conditions pass
+        {
+            let view = trivial_view(&q, &a, &c, &[], &bounds, &ct);
+            let result = prove_optimal(&view, &[1.5], &[], &[0.0, 0.0], 0.0, 1e-6);
+            assert!(result.is_ok(), "correct z=[0,0] with x inside bounds must pass: {:?}", result.err());
+        }
     }
 
     // ── prove_optimal_lp tests ────────────────────────────────────────────────

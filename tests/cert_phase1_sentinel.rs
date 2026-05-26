@@ -412,8 +412,10 @@ fn mutation_only_bound_feas_fails() {
         bounds: &qp.bounds, constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
-    // x=3 (ub=2 超過: bviol=1), stat=Q*3+0=0 ✓ (Q=0,c=0), pres=0 ✓, comp=0 ✓, dsign=0 ✓
-    let cert = prove_optimal(&view, &[3.0], &[], &[], 0.0, TOL);
+    // bounds=[(1,2)]: n_lb=1, n_ub=1 → z=[z_lb, z_ub].
+    // Q=0, c=0, no constraints → stationarity = -z_lb + z_ub. Use z=[0,0] (stat=0 ✓).
+    // x=3 (ub=2 超過: bviol=1), pres=0 ✓, comp=|0*(3-1)|+|0*(2-3)|=0 ✓, dsign=0 ✓
+    let cert = prove_optimal(&view, &[3.0], &[], &[0.0, 0.0], 0.0, TOL);
     assert!(cert.is_err(), "bound feasibility violation must fail");
     let err = cert.unwrap_err();
     assert!(
@@ -518,11 +520,12 @@ fn mutation_only_duality_gap_fails() {
         bounds: &qp.bounds, constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
-    // x=1, y=1 (Le active, y≥0 ✓), z=[] (no finite lb, no finite ub in z sense)
-    // stat: Q*1 + (-1) + 1*1 + 0 = -1+1 = 0 ✓
-    // pres: Ax - b = 1-1 = 0 ✓, comp: |1*0| = 0 ✓, dsign: y=1≥0 ✓
+    // bounds=[(0,inf)]: n_lb=1, n_ub=0 → z=[z_lb].
+    // x=1, y=1 (Le active, y≥0 ✓), z_lb=0 (lb inactive: x=1 > lb=0).
+    // stat: Q*1 + (-1) + 1*1 - z_lb = -1+1-0 = 0 ✓
+    // pres: Ax - b = 1-1 = 0 ✓, comp: |1*0| + |0*(1-0)| = 0 ✓, dsign: y=1≥0, z_lb=0≥0 ✓
     let large_gap = 1.0; // gap >> TOL
-    let cert = prove_optimal(&view, &[1.0], &[1.0], &[], large_gap, TOL);
+    let cert = prove_optimal(&view, &[1.0], &[1.0], &[0.0], large_gap, TOL);
     assert!(cert.is_err(), "duality_gap violation must fail");
     let err = cert.unwrap_err();
     assert!(
