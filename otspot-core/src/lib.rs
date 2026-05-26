@@ -182,6 +182,27 @@ pub mod bound_flip {
 }
 pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 
+/// RAII guard that disables a production sentinel for the duration of its lifetime.
+///
+/// On construction: calls `enable` to disable the sentinel.
+/// On drop: calls `restore` to re-enable the sentinel.
+/// Panic-safe: `restore` runs even if the guarded closure panics.
+pub(crate) struct ScopedDisable<D: Fn()> {
+    restore: D,
+}
+
+impl<D: Fn()> ScopedDisable<D> {
+    pub(crate) fn new<E: Fn()>(enable: E, restore: D) -> Self {
+        enable();
+        ScopedDisable { restore }
+    }
+}
+
+impl<D: Fn()> Drop for ScopedDisable<D> {
+    fn drop(&mut self) {
+        (self.restore)();
+    }
+}
 
 /// Apply the LP KKT optimality guard to a solver result.
 ///

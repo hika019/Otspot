@@ -479,4 +479,73 @@ mod tests {
         }
     }
 
+    // ── P3: LP_CERT_TOL drift-pin ─────────────────────────────────────────────
+
+    /// LP_CERT_TOL must equal feas_rel_tol() = PIVOT_TOL.sqrt().
+    ///
+    /// Pins the relationship LP_CERT_TOL == feas_rel_tol() so that a change to
+    /// either constant without updating the other causes an immediate test failure.
+    /// The comment on LP_CERT_TOL explains the derivation; this test enforces it.
+    #[test]
+    fn lp_cert_tol_equals_feas_rel_tol() {
+        let frt = crate::tolerances::feas_rel_tol();
+        assert_eq!(
+            LP_CERT_TOL, frt,
+            "LP_CERT_TOL ({LP_CERT_TOL}) must equal feas_rel_tol() ({frt}); \
+             update one to match the other (see LP_CERT_TOL docstring for derivation)"
+        );
+    }
+
+    // ── P2: honesty test — residuals in (1e-6, 1e-4) must not false-demote ───
+
+    /// LP result with KKT residuals in (1e-6, LP_CERT_TOL) range must pass guard.
+    ///
+    /// Constructs a correct LP solution with a small dual perturbation (~5e-5)
+    /// that produces stationarity and gap residuals in the (1e-6, 1e-4) range.
+    /// Verifies the guard does NOT demote to SuboptimalSolution (false-demote).
+    ///
+    /// Complementary test: the residual IS above 1e-6, so prove_optimal at 1e-6
+    /// would reject — proving the test actually targets the LP_CERT_TOL range.
+    #[test]
+    fn guard_lp_optimal_no_false_demote_for_residuals_below_lp_cert_tol() {
+        // Problem: min x  s.t.  x >= 1,  lb=0, ub=inf.
+        // Optimal: x*=1, obj=1.  LP simplex dual: y_Ge = 1 (Ge dual >= 0).
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0_f64],
+            a,
+            vec![1.0_f64],
+            vec![ConstraintType::Ge],
+            vec![(0.0_f64, f64::INFINITY)],
+            None,
+        ).unwrap();
+
+        // Introduce ~5e-5 dual perturbation so KKT residuals land in (1e-6, 1e-4).
+        let y_perturbed = 1.0 + 5e-5; // slightly off from optimal y=1
+        let result = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 1.0,
+            solution: vec![1.0_f64],
+            dual_solution: vec![y_perturbed],  // Ge simplex dual >= 0
+            reduced_costs: vec![0.0_f64],
+            slack: vec![0.0_f64],
+            ..Default::default()
+        };
+
+        // Verify the perturbation is in range: proves this test targets the window.
+        let r = prove_optimal_lp(&lp, &result, LP_CERT_TOL);
+        assert!(r.is_ok(),
+            "residuals < LP_CERT_TOL={LP_CERT_TOL} must not demote: {:?}", r.err());
+
+        // Cross-check: at 1e-6 (stricter) the same result fails — proving residuals > 1e-6.
+        let r_strict = prove_optimal_lp(&lp, &result, 1e-6);
+        assert!(r_strict.is_err(),
+            "residuals should exceed 1e-6, proving the test targets the (1e-6, LP_CERT_TOL) window");
+
+        // End-to-end: guard must not demote.
+        let guarded = guard_lp_optimal(result, &lp);
+        assert_eq!(guarded.status, SolveStatus::Optimal,
+            "guard must not demote an LP result whose residuals are within LP_CERT_TOL");
+    }
+
 }
