@@ -64,7 +64,6 @@ fn assert_x_rel_close(actual: f64, expected: f64, label: &str) {
 /// **狙い**: condition number 1e12 でも IPM 収束。x1, x3 の桁差を許容するか。
 #[test]
 fn scl1_diagonal_high_condition_number() {
-    let n = 3;
     let eps_q = 1e-6_f64;
     let m_q = 1e6_f64;
     let mut model = Model::new("scl1");
@@ -72,9 +71,11 @@ fn scl1_diagonal_high_condition_number() {
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
-    model.minimize(-1.0 * x1 - 1.0 * x2 - 1.0 * x3);
-    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[eps_q, 1.0, m_q], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    // Q=diag(eps_q, 1, m_q): Q[i][i]=v → (v/2)*xi*xi in DSL
+    model.minimize(
+        (eps_q / 2.0) * x1 * x1 + 0.5 * x2 * x2 + (m_q / 2.0) * x3 * x3
+        + (-1.0) * x1 + (-1.0) * x2 + (-1.0) * x3,
+    );
 
     let result = model.solve().expect("scl1: solve (cond≈1e12)");
     assert_x_rel_close(result[x1], 1.0 / eps_q, "scl1: x1=1/eps");
@@ -97,9 +98,8 @@ fn scl2_large_linear_term_c() {
     let mut model = Model::new("scl2");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
-    model.minimize(1e8_f64 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // Q[0][0]=1.0 → 0.5*x*x
+    model.minimize(0.5 * x * x + 1e8_f64 * x);
 
     let result = model.solve().expect("scl2: solve");
     assert_x_rel_close(result[x], -1e8, "scl2: x=-1e8");
@@ -120,9 +120,8 @@ fn scl3_nearly_zero_q_above_threshold() {
     let mut model = Model::new("scl3");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 0.0, 1e15);
-    model.minimize(-1.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1e-10_f64], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // Q[0][0]=1e-10: (1e-10/2)*x*x
+    model.minimize((1e-10_f64 / 2.0) * x * x + (-1.0) * x);
 
     let result = model.solve().expect("scl3: solve (Q small but ≠ 0)");
     // x=1e10 を許容 rel < 1e-3
@@ -145,16 +144,14 @@ fn scl3_nearly_zero_q_above_threshold() {
 /// **狙い**: 大係数 Q で IPM の Mehrotra step / regularization が暴れないか。
 #[test]
 fn scl4_large_q_with_equality() {
-    let n = 2;
     let big = 1e8_f64;
     let mut model = Model::new("scl4");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2) == 1.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[big, big], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    // Q=diag(big, big): (big/2)*xi*xi per var
+    model.minimize((big / 2.0) * x1 * x1 + (big / 2.0) * x2 * x2);
 
     let result = model.solve().expect("scl4: solve (Q=1e8)");
     assert_x_rel_close(result[x1], 0.5, "scl4: x1");
@@ -175,20 +172,12 @@ fn scl4_large_q_with_equality() {
 ///         本 test は全要素格納で記述。
 #[test]
 fn scl5_q_offdiagonal_full_storage() {
-    let n = 2;
     let mut model = Model::new("scl5");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
-    model.minimize(-3.0 * x1 - 3.0 * x2);
-    // Q = [[2,1],[1,2]] 全要素 (col-major)
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 0, 1],
-        &[0, 0, 1, 1],
-        &[2.0, 1.0, 1.0, 2.0],
-        n, n,
-    ).unwrap();
-    model.set_quadratic_objective(q);
+    // Q = [[2,1],[1,2]]: Q[i][i]=2 → xi*xi; Q[0][1]=Q[1][0]=1 → 1*(x1*x2)
+    model.minimize(x1 * x1 + x2 * x2 + 1.0 * (x1 * x2) + (-3.0) * x1 + (-3.0) * x2);
 
     let result = model.solve().expect("scl5: solve");
     assert_x_rel_close(result[x1], 1.0, "scl5: x1=1");

@@ -55,9 +55,7 @@ fn inf1_bound_lb_gt_ub_infeasible() {
     let mut model = Model::new("inf1");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 5.0, 3.0); // lb > ub
-    model.minimize(0.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x);
 
     let err = model.solve().expect_err("inf1: lb>ub must yield an error");
     assert!(
@@ -111,9 +109,7 @@ fn inf2_eq_outside_bounds_infeasible() {
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 0.0, 1.0);
     model.add_constraint(constraint!(x == 5.0));
-    model.minimize(0.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x);
 
     let err = model.solve().expect_err("inf2: Eq=5 vs bound [0,1] must be Infeasible");
     assert!(
@@ -136,9 +132,7 @@ fn inf3_conflicting_inequalities_infeasible() {
     let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!(x >= 10.0));
     model.add_constraint(constraint!(x <= 1.0));
-    model.minimize(0.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x);
 
     let err = model.solve().expect_err("inf3: x>=10 ∧ x<=1 must be Infeasible");
     assert!(
@@ -154,19 +148,14 @@ fn inf3_conflicting_inequalities_infeasible() {
 
 /// **構造**: min -x (LP)  s.t. x >= 0 (Ge), x free above.
 /// Q=0 ⇒ LP fallback (Simplex). c=-1, x >= 0, no upper bound → unbounded.
-/// **狙い**: Q=0 退化 LP の unbounded を Simplex 経路で正しく検出。
-///   Model API でも `set_quadratic_objective(empty_csc)` 経由で QP path に入り、
-///   QpProblem 内部の `is_zero_q()` で LP fallback がトリガーされる。
+/// **狙い**: LP unbounded を Simplex 経路で正しく検出。
 #[test]
 fn ub1_q_zero_lp_fallback_unbounded() {
-    let n = 1;
     let mut model = Model::new("ub1");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 0.0, f64::INFINITY);
     model.add_constraint(constraint!(x >= 0.0));
     model.minimize(-1.0 * x);
-    let q = CscMatrix::new(n, n); // Q=0 → QP→LP fallback inside solve_qp_with
-    model.set_quadratic_objective(q);
 
     let err = model.solve().expect_err("ub1: Q=0 LP min -x s.t. x>=0 must be Unbounded");
     assert!(
@@ -188,9 +177,7 @@ fn ub2_psd_q_finite_bounds_yields_optimal() {
     let mut model = Model::new("ub2");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x = model.add_var("x", 0.0, 100.0);
-    model.minimize(-1000.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x * x + (-1000.0) * x);
 
     let result = model.solve().expect("ub2: PSD Q + finite bounds must be Optimal");
     let exp_obj = 0.5 * 100.0 * 100.0 - 1000.0 * 100.0;
