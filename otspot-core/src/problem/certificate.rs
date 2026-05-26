@@ -88,6 +88,38 @@ pub struct NotProven {
     pub failing_conditions: Vec<&'static str>,
 }
 
+/// Branch-and-bound gap certificate — minted only by the B&B driver when:
+/// - No region was abandoned due to a non-Optimal relaxation (`proof_uncertain == false`).
+/// - `(incumbent_obj - lower_bound) / max(1, |incumbent_obj|) ≤ gap_tol`.
+///
+/// Holding this value is a proof token: the incumbent is within `gap_tol` of the global
+/// optimum. External code cannot construct it (constructor is `pub(crate)`).
+#[derive(Debug, Clone)]
+pub struct BoundGapCertificate {
+    incumbent_obj: f64,
+    lower_bound: f64,
+    gap_rel: f64,
+    gap_tol: f64,
+}
+
+impl BoundGapCertificate {
+    pub(crate) fn new(incumbent_obj: f64, lower_bound: f64, gap_rel: f64, gap_tol: f64) -> Self {
+        Self { incumbent_obj, lower_bound, gap_rel, gap_tol }
+    }
+
+    /// Best integer-feasible objective found by the search.
+    pub fn incumbent_obj(&self) -> f64 { self.incumbent_obj }
+
+    /// Authenticated lower bound on the global optimum at termination.
+    pub fn lower_bound(&self) -> f64 { self.lower_bound }
+
+    /// Relative gap: `(incumbent_obj - lower_bound) / max(1, |incumbent_obj|)`.
+    pub fn gap_rel(&self) -> f64 { self.gap_rel }
+
+    /// Tolerance against which the gap was checked when the certificate was issued.
+    pub fn gap_tol(&self) -> f64 { self.gap_tol }
+}
+
 /// Placeholder for Farkas infeasibility certificate (Phase 2+).
 #[derive(Debug, Clone)]
 pub struct FarkasCertificate;

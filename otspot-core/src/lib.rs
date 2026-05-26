@@ -159,7 +159,7 @@ static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
 pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};
 pub use problem::certificate::{
-    FarkasCertificate, IncompleteReason, NotProven, OptimalCertificate,
+    BoundGapCertificate, FarkasCertificate, IncompleteReason, NotProven, OptimalCertificate,
     SolveOutcome, UnboundedRayCertificate,
 };
 pub use qp::certificate::prove_optimal;

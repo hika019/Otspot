@@ -31,6 +31,7 @@ pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
 use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::global::pruning::{should_prune, within_gap};
 use std::time::{Duration, Instant};
 
@@ -360,6 +361,18 @@ fn solve_mip_with_stats<R: Relaxation>(
             let proven = !proof_uncertain && within_gap(inc_obj, remaining_lb, cfg.gap_tol);
             inc.solution = round_integers(inc.solution, problem.integer_vars());
             inc.status = if proven {
+                // Clamp remaining_lb to inc_obj: when the queue is fully drained
+                // (no open regions), remaining_lb = ∞ and the effective lower bound
+                // equals the incumbent itself (gap = 0).
+                let effective_lb = remaining_lb.min(inc_obj);
+                let scale = 1.0_f64.max(inc_obj.abs());
+                let gap_rel = (inc_obj - effective_lb) / scale;
+                inc.bound_gap_cert = Some(BoundGapCertificate::new(
+                    inc_obj,
+                    effective_lb,
+                    gap_rel,
+                    cfg.gap_tol,
+                ));
                 SolveStatus::Optimal
             } else if deadline_stop {
                 SolveStatus::Timeout
