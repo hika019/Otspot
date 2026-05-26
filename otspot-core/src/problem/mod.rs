@@ -3,6 +3,9 @@
 //! 線形計画問題（LP）の構造定義・制約種別・ソルバー結果の表現を提供する。
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
+pub mod certificate;
+use certificate::BoundGapCertificate;
+
 use crate::error::SolverError;
 use crate::options::WarmStartBasis;
 use crate::sparse::CscMatrix;
@@ -176,6 +179,11 @@ pub struct SolverResult {
     pub postsolve_dfeas: Option<f64>,
     /// Per-solve routing and warm-start statistics (race-free).
     pub stats: SolveStats,
+    /// Branch-and-bound gap certificate.
+    ///
+    /// Present iff the solver completed a B&B search with a fully authenticated gap
+    /// (no `proof_uncertain` region, `within_gap` satisfied). `None` for direct LP/QP solves.
+    pub bound_gap_cert: Option<BoundGapCertificate>,
 }
 
 /// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
@@ -232,6 +240,7 @@ impl Default for SolverResult {
             timing_breakdown: None,
             postsolve_dfeas: None,
             stats: SolveStats::default(),
+            bound_gap_cert: None,
         }
     }
 }

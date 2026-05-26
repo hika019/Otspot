@@ -12,6 +12,7 @@ use crate::presolve::{
     qp_transforms::{QpPresolveStatus, QpPostsolveStep},
 };
 use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::certificate::prove_optimal;
 use crate::qp::problem::QpProblem;
 use super::core::run_ipm;
 use crate::presolve::QpPresolveResult;
@@ -57,7 +58,21 @@ where
 /// Recomputes KKT stationarity, primal feasibility, and bound violation from
 /// the solution independently of the stored IpmOutcome residuals, so it catches
 /// corruption that occurs after satisfies_eps has been evaluated.
-pub(crate) fn guard_qp_optimal(result: SolverResult, problem: &QpProblem) -> SolverResult {
+///
+/// `eliminated_cols` is the presolve elimination mask (col_map[j].is_none()). It
+/// must match the mask used by `finalize_outcome`/`prove_optimal` so the guard
+/// applies the same EmptyCol stationarity convention: a LP-style fully-isolated
+/// EmptyCol (A 列空 AND Q 列空) carries the `bd=0` convention residual `c_j` that
+/// is NOT corruption. Without the mask the guard re-demotes a valid presolved
+/// Optimal that finalize just accepted (Optimal → NumericalError). The narrow
+/// skip condition in `kkt_residual_rel` never hides a non-empty column's genuine
+/// stationarity violation (= a real false-Optimal), so this stays sound.
+/// Pass `&[]` to disable skipping (length != n is ignored downstream).
+pub(crate) fn guard_qp_optimal(
+    result: SolverResult,
+    problem: &QpProblem,
+    eliminated_cols: &[bool],
+) -> SolverResult {
     if QP_GUARD_DISABLED.with(|c| c.get()) {
         return result;
     }
@@ -67,7 +82,15 @@ pub(crate) fn guard_qp_optimal(result: SolverResult, problem: &QpProblem) -> Sol
     if result.solution.is_empty() {
         return result;
     }
-    let view = ProblemView::from_problem(problem);
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols,
+    };
     let kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
     let pf = primal_residual_rel(&view, &result.solution);
     let bv = bound_violation(&problem.bounds, &result.solution);
@@ -144,14 +167,19 @@ fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
 
 /// Q が対角なら s_j=1/√Q_jj の column scaling で Q'_jj=1 に均等化し、解後 x_orig=D·x_scaled で復元。
 pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    // `eliminated_cols` is structural (q-diag column scaling preserves which columns
+    // are A-empty/Q-empty and which presolve removes), so the mask derived inside
+    // `solve_ipm_with_runner` on the scaled problem is valid for the guard on the
+    // original problem after unscale.
     if let Some((scaled_problem, col_scales)) = try_q_diagonal_scaling(problem) {
         let scaled_options = scale_warm_start_for_q_diag(options, &col_scales);
-        let mut result = solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm);
+        let (mut result, eliminated_cols) =
+            solve_ipm_with_runner(&scaled_problem, &scaled_options, run_ipm);
         unscale_q_diagonal(&mut result, &col_scales, problem);
-        return guard_qp_optimal(result, problem);
+        return guard_qp_optimal(result, problem, &eliminated_cols);
     }
-    let result = solve_ipm_with_runner(problem, options, run_ipm);
-    guard_qp_optimal(result, problem)
+    let (result, eliminated_cols) = solve_ipm_with_runner(problem, options, run_ipm);
+    guard_qp_optimal(result, problem, &eliminated_cols)
 }
 
 /// warm_start_qp.x を Q-diag column scaling (x_orig = D·x_scaled) の inverse で scaled 空間に翻訳。
@@ -300,11 +328,14 @@ fn unscale_q_diagonal(
     }
 }
 
+/// Returns the solved `SolverResult` plus the presolve elimination mask
+/// (`col_map[j].is_none()`). The mask is forwarded to `guard_qp_optimal` so the
+/// outer guard applies the same EmptyCol stationarity convention as `finalize_outcome`.
 fn solve_ipm_with_runner(
     problem: &QpProblem,
     options: &SolverOptions,
     runner: IpmRunner,
-) -> SolverResult {
+) -> (SolverResult, Vec<bool>) {
     let start_time = Instant::now();
     let mut opts = options.clone();
     let n_orig = problem.num_vars;
@@ -337,15 +368,35 @@ fn solve_ipm_with_runner(
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)
     };
+    // presolve が物理削除した col の mask (core.rs::run_ipm_with と同方式)。
+    // finalize の prove_optimal と外側 guard_qp_optimal が orig 空間 stationarity を
+    // 評価する際、LP-style 完全孤立 EmptyCol (A 列空 AND Q 列空) を kkt_residual_rel が
+    // skip するために必要。これを欠くと IPM 解に含まれない EmptyCol の bd=0 慣例値が
+    // spurious 残差を生み、valid presolved Optimal が false-demote される (kkt.rs の
+    // narrow 条件は非空列の本物の stationarity 違反は決して skip しないため AFIRO 等は安全)。
+    let eliminated_cols: Vec<bool> =
+        presolve_result.col_map.iter().map(|c| c.is_none()).collect();
+
     if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
-        return SolverResult::infeasible();
+        return (SolverResult::infeasible(), eliminated_cols);
     }
     if presolve_result.presolve_status == QpPresolveStatus::Unbounded {
-        return SolverResult::unbounded();
+        return (SolverResult::unbounded(), eliminated_cols);
     }
 
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &eliminated_cols,
+    };
+
     if total_deadline.is_some_and(|d| Instant::now() >= d) {
-        return finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false);
+        let r = finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false, &view);
+        return (r, eliminated_cols);
     }
 
     // presolve Ruiz 済なら IPM 側で重ね掛けしない (二重 scale で誤収束する)。
@@ -463,16 +514,31 @@ fn solve_ipm_with_runner(
         .cancel_flag
         .as_ref()
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
-    finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled)
+    let r = finalize_outcome(outcome, user_eps, n_orig, total_deadline, cancelled, &view);
+    (r, eliminated_cols)
 }
 
 /// IpmOutcome → SolverResult: eps 達成→Optimal、外部停止→Timeout、内部停止→Suboptimal、解無し→NumericalError。
+///
+/// eps 達成時は `prove_optimal` で KKT + dual_sign を再検証する。`satisfies_eps` は dual_sign
+/// チェックを含まないため、prove_optimal が唯一の Optimal mint 関数として機能する。
+/// `prove_optimal` が `Err(NotProven)` を返す場合は SuboptimalSolution に降格する。
+///
+/// ## Gap 基準の意図的な厳格化
+///
+/// `IpmOutcome::satisfies_eps` は duality gap を `PROMOTION_GAP_TOL = 1e-1` (10 %) と比較する。
+/// これは retry ループで *最良の iterate* を選ぶための構造的な緩い閾値であり、
+/// 最終的な Optimal 判定には用いない。
+/// `prove_optimal` はすべての KKT 条件 (gap 含む) を `user_eps` で検証するため、
+/// gap が (user_eps, PROMOTION_GAP_TOL) の範囲にある解は SuboptimalSolution に降格する。
+/// これはユーザが要求した精度での honest な Optimal 定義であり、意図的な supersede である。
 fn finalize_outcome(
     outcome: IpmOutcome,
     user_eps: f64,
     n_orig: usize,
     total_deadline: Option<Instant>,
     cancelled: bool,
+    view: &ProblemView<'_>,
 ) -> SolverResult {
     let krylov_ir_skipped = outcome.postsolve_krylov_ir_skipped;
     if let Some(infeas) = outcome.infeasibility_status {
@@ -509,10 +575,27 @@ fn finalize_outcome(
     }
 
     let status = if outcome.satisfies_eps(user_eps) {
-        if outcome.is_locally_optimal {
-            SolveStatus::LocallyOptimal
+        // prove_optimal: KKT 全条件 (stationarity / primal_feas / bound_feas /
+        // complementarity / dual_sign / duality_gap) を tol=user_eps で再検証。
+        // satisfies_eps が欠く dual_sign チェックを追加し、唯一の Optimal mint 経路にする。
+        // z layout: [lb-half (z_lb≥0), ub-half (z_ub≥0)] = bound_contrib 規約に準拠。
+        let proven = prove_optimal(
+            view,
+            &outcome.solution,
+            &outcome.dual_solution,
+            &outcome.bound_duals,
+            outcome.duality_gap_rel,
+            user_eps,
+        );
+        if proven.is_ok() {
+            if outcome.is_locally_optimal {
+                SolveStatus::LocallyOptimal
+            } else {
+                SolveStatus::Optimal
+            }
         } else {
-            SolveStatus::Optimal
+            // KKT または dual_sign が tol 超 → Optimal を主張しない。
+            SolveStatus::SuboptimalSolution
         }
     } else if timed_out {
         SolveStatus::Timeout
@@ -542,6 +625,154 @@ fn finalize_outcome(
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+
+    /// Case D fixture (#15 P2 root): 1 strictly-convex var + 1 LP-style isolated
+    /// EmptyCol whose bound-dual recovery the masked postsolve guard reverts.
+    ///
+    /// min 0.5·x0² + x1  s.t. x0∈[−10,10], x1∈[0,5], NO linear constraints.
+    /// Optimal: x0=0, x1=0 (lb), obj=0. x1 is A-empty AND Q-empty (EmptyCol),
+    /// c1=1>0 so z_lb1=1. The IPM solves x0 (already exact), so the masked refit
+    /// guard reverts x1's z to 0 → original-space stationarity for x1 = c1 = 1.
+    fn make_convex_plus_empty_col_qp() -> QpProblem {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
+        let a = CscMatrix::new(0, 2);
+        QpProblem::new_all_le(
+            q, vec![0.0, 1.0], a, vec![], vec![(-10.0, 10.0), (0.0, 5.0)],
+        )
+        .unwrap()
+    }
+
+    /// End-to-end regression: solve_ipm must report Optimal for a valid presolved
+    /// QP with an isolated EmptyCol. Before the eliminated_cols mask reached
+    /// finalize_outcome/guard_qp_optimal, this false-demoted to SuboptimalSolution
+    /// (cert) and then NumericalError (guard).
+    #[test]
+    fn empty_col_qp_solves_optimal_not_false_demoted() {
+        let prob = make_convex_plus_empty_col_qp();
+        let result = solve_ipm(&prob, &SolverOptions::default());
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Optimal,
+            "isolated EmptyCol QP must not be false-demoted (got {:?})",
+            result.status,
+        );
+        assert!((result.objective - 0.0).abs() < 1e-6, "obj={}", result.objective);
+        assert!(result.solution[0].abs() < 1e-6, "x0={}", result.solution[0]);
+        assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
+    }
+
+    /// No-op proof for the eliminated_cols mask in finalize_outcome.
+    ///
+    /// Builds the exact IPM iterate the pipeline produces for the EmptyCol fixture
+    /// (x1's z_lb reverted to 0). With the mask the EmptyCol stationarity (c1=1) is
+    /// excluded → prove_optimal passes → Optimal. WITHOUT the mask (`&[]`) the same
+    /// iterate exposes stationarity 0.5 → prove_optimal Err → SuboptimalSolution.
+    ///
+    /// **Sentinel**: dropping the mask at attempt.rs (reverting to `from_problem`)
+    /// makes the masked branch return SuboptimalSolution → this test FAILs.
+    #[test]
+    fn empty_col_mask_noop_proof_in_finalize() {
+        let prob = make_convex_plus_empty_col_qp();
+        // bound_duals layout: n_lb=2 (both lb finite), n_ub=2 → [z_lb0, z_lb1, z_ub0, z_ub1].
+        // z_lb1=0 reproduces the reverted EmptyCol dual (the bug state).
+        let outcome = IpmOutcome {
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0, 0.0, 0.0],
+            objective: 0.0,
+            iterations: 5,
+            // Stored residuals as computed by the masked core.rs path (EmptyCol excluded).
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        assert!(outcome.satisfies_eps(1e-6), "stored residuals must pass satisfies_eps");
+
+        // WITH mask: EmptyCol (col 1, A-empty AND Q-empty AND eliminated) skipped → Optimal.
+        let mask = vec![false, true];
+        let view_masked = ProblemView {
+            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            eliminated_cols: &mask,
+        };
+        let r_masked = finalize_outcome(outcome.clone(), 1e-6, 2, None, false, &view_masked);
+        assert_eq!(
+            r_masked.status,
+            crate::problem::SolveStatus::Optimal,
+            "masked view must accept the valid presolved Optimal",
+        );
+
+        // WITHOUT mask: EmptyCol stationarity (c1=1, rel=0.5) exposed → demote.
+        let view_unmasked = ProblemView::from_problem(&prob);
+        let r_unmasked = finalize_outcome(outcome, 1e-6, 2, None, false, &view_unmasked);
+        assert_eq!(
+            r_unmasked.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "no-op proof: empty mask must false-demote (mask is load-bearing)",
+        );
+    }
+
+    /// Safety sentinel: the narrow mask must NOT hide a genuine false-Optimal on a
+    /// NON-empty (A-non-empty) column — mirrors AFIRO's structure (all columns have
+    /// A entries; 0 structurally-empty cols). Even with eliminated_cols[j]=true, a
+    /// column with A entries is never skipped, so a real stationarity violation
+    /// still demotes to SuboptimalSolution.
+    ///
+    /// Fixture: min x  s.t. x = 5 (Eq, A col non-empty), x∈[0,10]. Provide a wrong
+    /// iterate x=0 with y=0, z=0 → stationarity r = c + Aᵀy + bc = 1 ≠ 0. Mark the
+    /// column eliminated (mask=true) to prove the mask does not hide it.
+    #[test]
+    fn mask_does_not_hide_nonempty_col_false_optimal() {
+        use crate::problem::ConstraintType;
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            q, vec![1.0], a, vec![5.0],
+            vec![(0.0, 10.0)],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+
+        // Wrong iterate: x=0 (violates x=5), y=0, z=0 → stationarity = c = 1, and
+        // primal violation too. Stored residuals forced to 0 so satisfies_eps passes
+        // and prove_optimal is the gate under test.
+        let outcome = IpmOutcome {
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0, 0.0],
+            objective: 0.0,
+            iterations: 5,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        // mask=true on the A-non-empty col: narrow condition (a_empty) is false → not skipped.
+        let mask = vec![true];
+        let view = ProblemView {
+            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
+            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            eliminated_cols: &mask,
+        };
+        let result = finalize_outcome(outcome, 1e-6, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "mask must NOT hide a non-empty column's genuine violation (AFIRO-safety)",
+        );
+    }
 
     #[test]
     fn test_q_diagonal_scaling_skips_non_diagonal_q() {
@@ -649,7 +880,7 @@ mod tests {
             bound_duals: vec![],
             ..Default::default()
         };
-        let guarded = guard_qp_optimal(corrupt, &prob);
+        let guarded = guard_qp_optimal(corrupt, &prob, &[]);
         assert_eq!(
             guarded.status,
             crate::problem::SolveStatus::NumericalError,
@@ -673,7 +904,7 @@ mod tests {
             bound_duals: vec![],
             ..Default::default()
         };
-        let unguarded = with_qp_guard_disabled(|| guard_qp_optimal(corrupt, &prob));
+        let unguarded = with_qp_guard_disabled(|| guard_qp_optimal(corrupt, &prob, &[]));
         assert_eq!(
             unguarded.status,
             crate::problem::SolveStatus::Optimal,
@@ -699,7 +930,7 @@ mod tests {
         let result = solve_ipm(&prob, &opts);
         assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
         // Re-run guard on the already-valid result — must remain Optimal.
-        let re_guarded = guard_qp_optimal(result.clone(), &prob);
+        let re_guarded = guard_qp_optimal(result.clone(), &prob, &[]);
         assert_eq!(
             re_guarded.status,
             crate::problem::SolveStatus::Optimal,
@@ -718,9 +949,122 @@ mod tests {
             crate::problem::SolveStatus::SuboptimalSolution,
         ] {
             let r = SolverResult { status: status.clone(), ..Default::default() };
-            let out = guard_qp_optimal(r, &prob);
+            let out = guard_qp_optimal(r, &prob, &[]);
             assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
+    }
+
+    /// prove_optimal が dual_sign 違反で Err を返す場合、finalize_outcome は
+    /// SuboptimalSolution を返す (Optimal を主張しない)。
+    ///
+    /// 構成: A=[[1],[-1]], b=[1,-1] の cancelling-Le QP で x=1 は両制約が active。
+    /// y_bad=[-v,-v] では stationarity = [1,-1]·[-v,-v] = -v+v = 0 (cancels)、
+    /// comp = y_i·slack_i = (-v)·0 = 0 (active constraint)。
+    /// よって kkt/primal/bound/comp はすべて 0 だが dual_sign は Le で y<0 → 違反。
+    /// satisfies_eps はパスするが prove_optimal が dual_sign で Err → SuboptimalSolution。
+    #[test]
+    fn finalize_outcome_dual_sign_notproven_demotes_to_suboptimal() {
+        use crate::problem::ConstraintType;
+        use crate::sparse::CscMatrix;
+
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
+        ).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![1.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le, ConstraintType::Le],
+        ).unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let user_eps = 1e-6_f64;
+
+        // y=[-0.1,-0.1] は Le 制約で dual_sign 違反 (Le → y≥0 required)。
+        // stationarity: A^T y = [1,-1]·[-0.1,-0.1] = -0.1+0.1 = 0 (キャンセル)。
+        // comp: y_i·slack_i = (-0.1)·0 = 0 (x=1 で両制約が active)。
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![-0.1, -0.1],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+
+        assert!(
+            outcome.satisfies_eps(user_eps),
+            "satisfies_eps must pass: all residuals=0, gap=0 (dual_sign は未検査)"
+        );
+        let result = finalize_outcome(outcome, user_eps, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::SuboptimalSolution,
+            "dual_sign 違反 → prove_optimal が Err → SuboptimalSolution に降格すべき"
+        );
+    }
+
+    /// finalize_outcome が prove_optimal を通過する正常ケースの確認。
+    ///
+    /// A=[[1],[-1]], b=[1,-1] で x=1、y=[v,v] (v>0, Le 符号正) は
+    /// dual_sign を含む全条件を通過し Optimal が返る。
+    #[test]
+    fn finalize_outcome_dual_sign_valid_returns_optimal() {
+        use crate::problem::ConstraintType;
+        use crate::sparse::CscMatrix;
+
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::from_triplets(
+            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
+        ).unwrap();
+        let prob = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![1.0, -1.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le, ConstraintType::Le],
+        ).unwrap();
+        let view = ProblemView::from_problem(&prob);
+        let user_eps = 1e-6_f64;
+
+        // y=[v,v] (v>0) は stationarity キャンセル + Le 符号正 → 全条件通過。
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![0.1, 0.1],
+            bound_duals: vec![],
+            objective: 0.0,
+            iterations: 1,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: false,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+
+        assert!(outcome.satisfies_eps(user_eps));
+        let result = finalize_outcome(outcome, user_eps, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::Optimal,
+            "有効な dual は prove_optimal を通過し Optimal が返るべき"
+        );
     }
 
     /// x = D·x_s、z_orig = z_s/D の逆変換を直接検証。

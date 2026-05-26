@@ -33,6 +33,7 @@ pub(crate) mod tree;
 
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::problem::QpProblem;
 use std::time::{Duration, Instant};
 
@@ -133,7 +134,7 @@ pub fn solve_qp_global_with_stats(
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return (state.finalize_proven(root_lb, q_indefinite), stats);
+        return (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats);
     }
 
     let mut tree = BBTree::new();
@@ -146,7 +147,7 @@ pub fn solve_qp_global_with_stats(
     match select_branching_variable(&root_node, &root_x) {
         None => {
             return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (state.finalize_proven(root_lb, q_indefinite), stats)
+                (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats)
             } else {
                 (
                     state.finalize_unproven(
@@ -169,6 +170,9 @@ pub fn solve_qp_global_with_stats(
     }
 
     let mut max_depth_breached = false;
+    // 深さ上限で破棄した node の node_lb の min を保持する。これが未探索領域の下界に
+    // なるため remaining_lb に畳み込む必要がある。
+    let mut depth_discard_lb: f64 = f64::INFINITY;
 
     while let Some(node) = tree.pop() {
         if deadline_hit(&deadline) {
@@ -225,8 +229,10 @@ pub fn solve_qp_global_with_stats(
 
         // 分枝
         if node.depth + 1 > cfg.max_depth {
-            // 深さ上限超過 → 子を展開しない = unproven region 残存
+            // 深さ上限超過 → 子を展開しない = unproven region 残存。
+            // この node の lb を depth_discard_lb に畳み込む (remaining_lb に反映する)。
             max_depth_breached = true;
+            depth_discard_lb = depth_discard_lb.min(node_lb);
             continue;
         }
         if let Some(j) = select_branching_variable(&node, &res.solution) {
@@ -238,6 +244,10 @@ pub fn solve_qp_global_with_stats(
         // 分枝不能 (= node 内で x* が midpoint 一致) → leaf 確定、proof は incumbent 比で取れる
     }
 
+    // incumbent が分枝 node 由来の場合、その双対は sub-box 基準で回収されているため
+    // 元問題に整合させる (interior 変数への分枝境界 dual = 相補性違反を除去)。
+    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol);
+
     // 終了条件分岐:
     // - queue 空 AND max_depth 未超過 AND deadline/max_nodes 未到達 → proven
     // - それ以外 → 未証明 (incumbent あれば LocallyOptimal)
@@ -247,13 +257,14 @@ pub fn solve_qp_global_with_stats(
         || stats.nodes_processed >= cfg.max_nodes;
 
     let result = if halted_early {
-        // 未探索領域の下界 (queue に残った node の最小 lb)
-        let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY);
+        // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限で破棄した
+        // node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
+        let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY).min(depth_discard_lb);
         let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
         let inc_obj = state.incumbent_obj;
         if proven {
             let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(lb_for_proof, q_indefinite)
+            state.finalize_proven(lb_for_proof, q_indefinite, cfg.gap_tol)
         } else {
             state.finalize_unproven(
                 remaining_lb,
@@ -266,7 +277,7 @@ pub fn solve_qp_global_with_stats(
     } else {
         // queue 空 = 全探索完了 → incumbent_obj が global
         let inc_obj = state.incumbent_obj;
-        state.finalize_proven(inc_obj, q_indefinite)
+        state.finalize_proven(inc_obj, q_indefinite, cfg.gap_tol)
     };
     (result, stats)
 }
@@ -323,11 +334,35 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     })
 }
 
+/// polish した解の採用可否を判定する。
+///
+/// 採用条件:
+/// 1. `status` が収束済み (Optimal / LocallyOptimal) であること。
+///    未収束 (MaxIterations / SuboptimalSolution 等) は相補性を満たさない可能性があり棄却。
+/// 2. `polished_obj` が有限かつ `incumbent_obj` より悪化していないこと。
+///    min 問題なので `polished_obj > incumbent_obj + gap_tol * scale` は棄却。
+fn is_polish_acceptable(
+    status: &SolveStatus,
+    polished_obj: f64,
+    incumbent_obj: f64,
+    gap_tol: f64,
+) -> bool {
+    let converged = matches!(status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
+    if !converged || !polished_obj.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    polished_obj <= incumbent_obj + gap_tol * scale
+}
+
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
     incumbent_obj: f64,
     incumbent_sol: Vec<f64>,
+    /// B&B ループで root 以外の incumbent が見つかった場合 true。
+    /// false のまま = root solve の解がそのまま incumbent = 元問題 box で回収済み。
+    incumbent_updated: bool,
 }
 
 impl SearchState {
@@ -338,6 +373,7 @@ impl SearchState {
             incumbent_result: root,
             incumbent_obj: obj,
             incumbent_sol: sol,
+            incumbent_updated: false,
         }
     }
 
@@ -349,19 +385,62 @@ impl SearchState {
         self.incumbent_obj = res.objective;
         self.incumbent_sol = res.solution.clone();
         self.incumbent_result = res.clone();
+        self.incumbent_updated = true;
+    }
+
+    /// 探索終了後の dual recovery polish。
+    ///
+    /// B&B incumbent の双対は分枝後の sub-box に対して回収されるため、元問題で
+    /// interior な変数にも分枝境界由来の bound dual が残り、元問題基準の相補性
+    /// (`z_j·(x_j − bnd_j) = 0`) を破る。incumbent を warm start に固定して **元問題の
+    /// box** で局所 QP を解き直し、元問題に整合した双対を回収する。
+    ///
+    /// warm を境界張り付きでも採用する点が [`solve_local_upper_bound`] と異なる
+    /// (探索中は saddle 再固着回避のため境界 warm を捨てるが、最終 polish では
+    /// incumbent corner に錨を打つのが目的)。obj は gap_tol 内に保たれ proof 妥当性を
+    /// 維持 (duals を整合化)。収束済み (Optimal/LocallyOptimal) かつ obj が悪化しない
+    /// 場合のみ採用し、未収束 or obj 悪化は棄却して incumbent を保持する。
+    /// root incumbent (分枝なし) は既に元問題 box で回収済みのため skip。
+    fn polish_incumbent_duals(&mut self, problem: &QpProblem, base_opts: &SolverOptions, gap_tol: f64) {
+        if !self.incumbent_updated {
+            // root solve 結果は元問題 box で回収済み; polish は冗長。
+            return;
+        }
+        let Some(warm) = build_warm_from(&self.incumbent_result) else {
+            return;
+        };
+        if warm.x.len() != problem.num_vars {
+            return;
+        }
+        let mut opts = base_opts.clone();
+        opts.warm_start_qp = Some(warm);
+        opts.multistart = None;
+        opts.global_optimization = None;
+        let polished = crate::qp::solve_qp_with(problem, &opts);
+        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol) {
+            self.update_incumbent(&polished);
+        }
     }
 
     /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
     /// (= 「proven かつ Q indefinite」と「proven かつ Q PSD」を caller が区別可能)
-    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool) -> SolverResult {
+    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool, gap_tol: f64) -> SolverResult {
+        let scale = 1.0_f64.max(self.incumbent_obj.abs());
+        let gap_rel = (self.incumbent_obj - lower_bound) / scale;
+        self.incumbent_result.bound_gap_cert = Some(BoundGapCertificate::new(
+            self.incumbent_obj,
+            lower_bound,
+            gap_rel,
+            gap_tol,
+        ));
         self.incumbent_result.status = if q_indefinite {
             SolveStatus::NonconvexGlobal
         } else {
             SolveStatus::Optimal
         };
         log::debug!(
-            "QP global proven: status={} obj={:.6e} lb={:.6e}",
-            self.incumbent_result.status, self.incumbent_obj, lower_bound
+            "QP global proven: status={} obj={:.6e} lb={:.6e} gap_rel={:.3e}",
+            self.incumbent_result.status, self.incumbent_obj, lower_bound, gap_rel
         );
         self.incumbent_result
     }
@@ -537,6 +616,206 @@ mod tests {
         let indef = diag_concave_1d(1.0);
         assert!(!is_q_indefinite(&psd), "x² should be PSD");
         assert!(is_q_indefinite(&indef), "-x² should be indefinite");
+    }
+
+    // ---- BoundGapCertificate sentinels -----------------------------------------
+
+    /// Proven QP global (convex Q) result carries BoundGapCertificate.
+    ///
+    /// Sentinel: removing `self.incumbent_result.bound_gap_cert = Some(...)` from
+    /// `finalize_proven` leaves cert as `None` → this test FAILS.
+    #[test]
+    fn qp_global_proven_convex_has_bound_gap_cert() {
+        let p = diag_convex_1d(3.0);
+        let r = solve_qp_global(&p, &opts(2.0), &GlobalOptimizationConfig::default());
+        assert!(matches!(r.status, SolveStatus::Optimal));
+        let cert = r.bound_gap_cert.as_ref()
+            .expect("proven QP global (Optimal) must carry BoundGapCertificate");
+        assert!(
+            cert.gap_rel() <= cert.gap_tol() + 1e-10,
+            "gap_rel={:.3e} must be ≤ gap_tol={:.3e}",
+            cert.gap_rel(), cert.gap_tol()
+        );
+    }
+
+    /// Proven QP global (indefinite Q) result carries BoundGapCertificate.
+    #[test]
+    fn qp_global_proven_nonconvex_has_bound_gap_cert() {
+        let p = diag_concave_1d(2.0);
+        let r = solve_qp_global(&p, &opts(5.0), &GlobalOptimizationConfig::default());
+        assert!(matches!(r.status, SolveStatus::NonconvexGlobal));
+        let cert = r.bound_gap_cert.as_ref()
+            .expect("proven QP global (NonconvexGlobal) must carry BoundGapCertificate");
+        assert!(cert.gap_rel() <= cert.gap_tol() + 1e-10);
+    }
+
+    /// Unproven QP global result has no BoundGapCertificate.
+    ///
+    /// Sentinel: attaching cert unconditionally in `finalize_unproven` causes
+    /// NonconvexLocal/LocallyOptimal to have Some(cert) → this test FAILS.
+    #[test]
+    fn qp_global_unproven_has_no_bound_gap_cert() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)]).unwrap();
+        let cfg = GlobalOptimizationConfig { gap_tol: 1e-12, max_depth: 1, max_nodes: 1, ..GlobalOptimizationConfig::default() };
+        let r = solve_qp_global(&p, &opts(5.0), &cfg);
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexLocal | SolveStatus::LocallyOptimal),
+            "expected unproven status, got {:?}", r.status
+        );
+        assert!(r.bound_gap_cert.is_none(), "unproven must have no BoundGapCertificate");
+    }
+
+    /// depth 超過 node の lb が remaining_lb に畳み込まれ、偽 proven を阻止する。
+    ///
+    /// Sentinel: `depth_discard_lb = depth_discard_lb.min(node_lb)` を除去すると
+    /// depth 破棄後にキューが空になり `remaining_lb = f64::INFINITY` →
+    /// `within_gap(inc_obj, ∞) = true` → NonconvexGlobal + cert が mint される (偽 proven)。
+    /// この修正により remaining_lb = depth_discard_lb (≈ -2) になり、
+    /// `within_gap(0, -2, 1e-12) = false` → NonconvexLocal、cert なし。
+    #[test]
+    fn depth_exceeded_lb_folds_into_remaining_lb_blocks_false_cert() {
+        // 2D 凹 QP (Q=diag(-2,-2), [-1,1]²): IPM は x=0 に固着 (obj=0)、
+        // コーナー最小値 = -2 には未収束。interval 下界 = -2。
+        // max_depth=1 で深さ 1 のノードが depth_exceeded → depth_discard_lb=-2。
+        // use_alpha_bb=false で alpha_bb が lb を 0 に引き上げないようにする。
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let p = QpProblem::new_all_le(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![],
+            vec![(-1.0, 1.0), (-1.0, 1.0)],
+        ).unwrap();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 1,
+            max_nodes: 10_000,
+            use_alpha_bb: false,
+            use_mccormick: false,
+            ..GlobalOptimizationConfig::default()
+        };
+        let r = solve_qp_global(&p, &opts(10.0), &cfg);
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexLocal),
+            "depth-exceeded lb must block false proven: expected NonconvexLocal, got {:?}",
+            r.status
+        );
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "depth-exceeded unproven must have no BoundGapCertificate"
+        );
+    }
+
+    /// 分枝 node 由来 incumbent の双対が元問題に整合する (相補性違反なし)。
+    ///
+    /// 3 変数 nonconvex QP (Q=diag(1,-1,-1)、A 第 1 行のみ非零、Le×3、box [-0.5,0.5]³)。
+    /// 大域最小 x≈[0.2,-0.5,-0.5] は var0 が interior。B&B はこの incumbent を var0 を
+    /// ub≈0.2 へ分枝した node で発見するため、polish なしでは `z_ub[0]` に分枝境界由来の
+    /// 大きな bound dual が残り、元問題基準で `z_ub[0]·(ub−x0) ≈ 0.42` の相補性違反になる。
+    ///
+    /// Sentinel: `state.polish_incumbent_duals(...)` 呼び出しを除去すると相補性残差が
+    /// `EPS_KKT` を超え FAIL する (= no-op proof)。`assert_solver_invariants_qp` は
+    /// `NonconvexLocal` を skip するため、この相補性 gate がカバーする。
+    #[test]
+    fn branched_incumbent_duals_reconciled_to_original_box() {
+        use crate::problem::ConstraintType;
+        use crate::qp::ipm_solver::kkt::complementarity_residual_rel;
+        use crate::qp::ipm_solver::outcome::ProblemView;
+        use crate::test_kkt::EPS_KKT;
+
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, -1.0, -1.0], 3, 3).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, 0.6], 3, 3).unwrap();
+        let p = QpProblem::new(
+            q,
+            vec![0.0, 0.0, 0.0],
+            a,
+            vec![-0.5, 0.5, 1.0],
+            vec![(-0.5, 0.5); 3],
+            vec![ConstraintType::Le; 3],
+        )
+        .unwrap();
+        let cfg = GlobalOptimizationConfig::default();
+        let r = solve_qp_global(&p, &opts(8.0), &cfg);
+        // 大域最小 (x0 interior の corner solution) に到達していること。
+        assert!(
+            (r.objective - (-0.23)).abs() < 1e-2,
+            "expected global ≈ -0.23, got obj={:.4} status={:?}",
+            r.objective,
+            r.status
+        );
+        let view = ProblemView::from_problem(&p);
+        let comp =
+            complementarity_residual_rel(&view, &r.solution, &r.dual_solution, &r.bound_duals);
+        assert!(
+            comp < EPS_KKT,
+            "branched-incumbent duals must satisfy original-box complementarity: comp={:.3e} > {:.3e} (status={:?})",
+            comp,
+            EPS_KKT,
+            r.status
+        );
+    }
+
+    // ---- polish guard sentinels ------------------------------------------------
+
+    /// P2-a: polish は収束済み (Optimal/LocallyOptimal) のみ採用。
+    ///
+    /// Sentinel: `is_polish_acceptable` の `converged` 判定を除去すると、
+    /// MaxIterations / SuboptimalSolution でも true を返すようになりこのテストが FAIL する。
+    #[test]
+    fn polish_acceptance_rejects_unconverged_status() {
+        // 収束済み → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal,        0.0, 0.0, 1e-6));
+        assert!(is_polish_acceptable(&SolveStatus::LocallyOptimal, 0.0, 0.0, 1e-6));
+        // 未収束 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::MaxIterations,     0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::SuboptimalSolution, 0.0, 0.0, 1e-6));
+        // その他の失敗 status も棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Infeasible,      0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::NumericalError,  0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(&SolveStatus::Timeout,         0.0, 0.0, 1e-6));
+    }
+
+    /// P2-b: polish は obj が悪化した場合 (min なので polished_obj > incumbent_obj + tol) を棄却。
+    ///
+    /// Sentinel: 片側 guard を abs 判定 (`|polished - incumbent| <= tol`) に戻すと、
+    /// 悪化ケース (`polished_obj > incumbent_obj + tol`) でも true を返しこのテストが FAIL する。
+    #[test]
+    fn polish_acceptance_rejects_worse_obj() {
+        let gap_tol = 1e-4_f64;
+        // incumbent_obj = -1.0 → scale = 1.0, 許容上限 = -1.0 + 1e-4
+        let inc = -1.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale; // 1e-4
+
+        // 同点 → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc,          inc, gap_tol));
+        // 改善 (より小さい) → 採用可
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc - 0.5,    inc, gap_tol));
+        // tol 以内の微小悪化 → 採用可 (dual 数値誤差)
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
+        // tol を超える悪化 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
+        // 明確な悪化 → 棄却
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 0.0,          inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 1.0,          inc, gap_tol));
+
+        // incumbent_obj = 0.0 → scale = 1.0, 許容上限 = 0 + 1e-4
+        let inc = 0.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale;
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, 0.0,        inc, gap_tol));
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, -0.5,       inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, tol + 1e-10, inc, gap_tol));
+
+        // incumbent_obj = 100.0 → scale = 100.0, 許容上限 = 100.0 + 1e-2
+        let inc = 100.0_f64;
+        let scale = 1.0_f64.max(inc.abs());
+        let tol = gap_tol * scale; // 1e-2
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
+        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
     }
 
     /// Invalid options are rejected at the global entry with NumericalError — not panic.

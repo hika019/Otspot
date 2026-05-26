@@ -1,96 +1,15 @@
 //! Simplex public entry + presolve/postsolve orchestration + method dispatch.
 
-use std::cell::Cell;
-
 use crate::options::{SimplexMethod, SolverOptions, WarmStartBasis};
 use crate::presolve;
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::qp::certificate::guard_lp_optimal;
 use crate::tolerances::PIVOT_TOL;
-use crate::ScopedDisable;
 
 use super::dual;
 use super::dual_advanced;
 use super::primal::two_phase_simplex;
 use super::standard_form::build_standard_form;
-
-thread_local! {
-    static LP_GUARD_DISABLED: Cell<bool> = Cell::new(false);
-}
-
-/// Runs `f` with `guard_lp_optimal` bypassed.
-///
-/// Use in tests as a no-op scope guard: pass corrupt data through the guard
-/// while disabled and assert it is NOT demoted. The load-bearing evidence lives
-/// in the paired test that does NOT disable — removing the guard body would
-/// cause that test to FAIL.
-///
-/// Thread-safe: affects only the current thread.
-/// Panic-safe: the guard is re-enabled even if `f` panics.
-pub(crate) fn with_lp_guard_disabled<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let _guard = ScopedDisable::new(
-        || LP_GUARD_DISABLED.with(|c| c.set(true)),
-        || LP_GUARD_DISABLED.with(|c| c.set(false)),
-    );
-    f()
-}
-
-/// Normalized primal violation threshold for the production sentinel.
-/// Solutions with normalized violation > this are corrupt (e.g. |Ax-b| = 1e11).
-/// Well-solved LPs typically have normalized violation < 1e-8.
-const LP_PRIMAL_SENTINEL_TOL: f64 = 1e-3;
-
-/// Normalized primal violation: max constraint violation / (1 + ||b||∞).
-fn lp_primal_violation_normalized(problem: &LpProblem, x: &[f64]) -> f64 {
-    let m = problem.b.len();
-    if m == 0 || x.is_empty() {
-        return 0.0;
-    }
-    let mut ax = vec![0.0_f64; m];
-    for j in 0..x.len().min(problem.a.ncols) {
-        if let Ok((rows, vals)) = problem.a.get_column(j) {
-            for (k, &row) in rows.iter().enumerate() {
-                if row < m {
-                    ax[row] += vals[k] * x[j];
-                }
-            }
-        }
-    }
-    let b_inf = problem.b.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let viol: f64 = (0..m)
-        .map(|i| match problem.constraint_types[i] {
-            ConstraintType::Eq => (ax[i] - problem.b[i]).abs(),
-            ConstraintType::Le => (ax[i] - problem.b[i]).max(0.0),
-            ConstraintType::Ge => (problem.b[i] - ax[i]).max(0.0),
-        })
-        .fold(0.0_f64, f64::max);
-    viol / (1.0 + b_inf)
-}
-
-/// Downgrade a false-Optimal to NumericalError when primal violation is excessive.
-///
-/// Defense-in-depth for LP solvers that may return Optimal with large |Ax-b|
-/// due to numerical corruption. Upstream solvers may have their own prevention
-/// (e.g. iter caps, x_B recompute) that catches the same corruption earlier;
-/// this guard provides a final boundary check independent of those measures.
-///
-/// Use `with_lp_guard_disabled` in tests as a thread-safe no-op scope guard.
-pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> SolverResult {
-    if LP_GUARD_DISABLED.with(|c| c.get()) {
-        return result;
-    }
-    if result.status != SolveStatus::Optimal || result.solution.is_empty() {
-        return result;
-    }
-    let viol = lp_primal_violation_normalized(problem, &result.solution);
-    if viol > LP_PRIMAL_SENTINEL_TOL {
-        SolverResult::numerical_error()
-    } else {
-        result
-    }
-}
 
 /// Solve an LP with default options.
 pub fn solve(problem: &LpProblem) -> SolverResult {
@@ -166,9 +85,10 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 let t_solve_done = std::time::Instant::now();
                 let solve_us = t_solve_done.duration_since(t_presolve_done).as_micros() as u64;
                 // The reduced LP can be unsolvable while the original is fine
-                // (SingularBasis on the reduced initial basis, Eq drift in Phase II).
-                // Fall back to solving the original LP without presolve.
-                if raw.status == SolveStatus::NumericalError {
+                // (SingularBasis on the reduced initial basis, Eq drift in Phase II,
+                // or guard_lp_optimal catching a KKT failure on the reduced form).
+                // SuboptimalSolution from the guard means KKT failed → fall back.
+                if matches!(raw.status, SolveStatus::NumericalError | SolveStatus::SuboptimalSolution) {
                     return solve_without_presolve(problem, options);
                 }
                 let mut res = presolve::postsolve::run_postsolve(
@@ -184,11 +104,13 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                     presolve_us, solve_us, postsolve_us,
                     ..Default::default()
                 });
-                // Postsolve dfeas above PIVOT_TOL means dual-recovery cannot
-                // reconstruct the structure presolve removed. The original LP
-                // solves cleanly, so re-attempt on the remaining deadline.
-                if res.status == SolveStatus::Optimal
-                    && res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
+                // Postsolve dfeas above PIVOT_TOL (or guard-caught KKT failure) means
+                // dual-recovery cannot reconstruct the structure presolve removed.
+                // The original LP solves cleanly, so re-attempt on the remaining deadline.
+                let postsolve_bad = res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
+                    || res.status == SolveStatus::SuboptimalSolution;
+                if matches!(res.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution)
+                    && postsolve_bad
                 {
                     let deadline_ok = options.deadline
                         .is_none_or(|d| std::time::Instant::now() < d);
@@ -204,10 +126,13 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                             && alt.postsolve_dfeas.is_none()
                             && alt.objective.is_finite()
                         {
+                            // Preserve the original presolve/postsolve times: both phases
+                            // ran (even if postsolve produced bad duals); only solve_us
+                            // reflects the alt direct-solve.
                             alt.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                                presolve_us: 0,
+                                presolve_us,
                                 solve_us: alt_solve_us,
-                                postsolve_us: 0,
+                                postsolve_us,
                                 ..Default::default()
                             });
                             return alt;
@@ -373,7 +298,8 @@ mod tests {
         .unwrap()
     }
 
-    /// guard_lp_optimal catches a corrupt Optimal (x = 1e12 >> b = 5).
+    /// guard_lp_optimal demotes a corrupt Optimal (x = 1e12 >> b = 5) to SuboptimalSolution.
+    /// Primal feasibility and stationarity both fail prove_optimal_lp at LP_CERT_TOL.
     #[test]
     fn guard_lp_optimal_catches_corrupt_result() {
         let lp = make_trivial_lp();
@@ -389,33 +315,8 @@ mod tests {
         let guarded = guard_lp_optimal(corrupt, &lp);
         assert_eq!(
             guarded.status,
-            SolveStatus::NumericalError,
-            "guard must demote false-Optimal with |Ax-b| >> 1e-3 to NumericalError"
-        );
-    }
-
-    /// No-op proof: `with_lp_guard_disabled` bypasses guard; corrupt result passes through.
-    ///
-    /// Load-bearing evidence: `guard_lp_optimal_catches_corrupt_result` (above) proves the
-    /// guard demotes the same corrupt data WITHOUT disabling. Together these two tests form
-    /// a complete no-op proof — removing the guard body would break the first test.
-    #[test]
-    fn guard_lp_optimal_no_op_proof() {
-        let lp = make_trivial_lp();
-        let corrupt = SolverResult {
-            status: SolveStatus::Optimal,
-            objective: 1e12,
-            solution: vec![1e12],
-            dual_solution: vec![0.0],
-            reduced_costs: vec![0.0],
-            slack: vec![0.0],
-            ..Default::default()
-        };
-        let unguarded = with_lp_guard_disabled(|| guard_lp_optimal(corrupt, &lp));
-        assert_eq!(
-            unguarded.status,
-            SolveStatus::Optimal,
-            "with_lp_guard_disabled must pass corrupt result through as Optimal"
+            SolveStatus::SuboptimalSolution,
+            "guard must demote false-Optimal with |Ax-b| >> tol to SuboptimalSolution"
         );
     }
 

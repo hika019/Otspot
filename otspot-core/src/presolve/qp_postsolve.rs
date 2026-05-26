@@ -118,6 +118,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
         timing_breakdown: reduced_sol.timing_breakdown,
         postsolve_dfeas: None,
         stats: reduced_sol.stats.clone(),
+        bound_gap_cert: None,
     }
 }
 

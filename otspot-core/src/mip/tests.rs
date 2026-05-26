@@ -590,3 +590,124 @@ fn invalid_options_rejected_at_miqp_entry() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// BoundGapCertificate sentinels
+//
+// Invariant: `bound_gap_cert` is Some iff `proven = true` iff `status == Optimal`.
+// All three sentinels mutually reinforce; removing any one guard in the B&B
+// driver causes at least one test to FAIL.
+// ---------------------------------------------------------------------------
+
+/// Optimal result carries BoundGapCertificate with correct gap fields.
+///
+/// Sentinel: removing the `inc.bound_gap_cert = Some(...)` assignment in
+/// `solve_mip_with_stats` leaves cert as `None` → this test FAILS.
+#[test]
+fn optimal_result_carries_bound_gap_cert() {
+    // min x, x in [0,5] integer → x=0, obj=0. Root already integral.
+    let lp = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let (r, _) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    let cert = r.bound_gap_cert.as_ref().expect("Optimal must carry BoundGapCertificate");
+    assert!(
+        cert.gap_rel() <= cert.gap_tol() + 1e-10,
+        "gap_rel={} must be ≤ gap_tol={}",
+        cert.gap_rel(), cert.gap_tol()
+    );
+    assert!(
+        (cert.incumbent_obj() - 0.0).abs() < 1e-6,
+        "incumbent obj must be ~0, got {}",
+        cert.incumbent_obj()
+    );
+    assert!(
+        cert.lower_bound() <= cert.incumbent_obj() + 1e-10,
+        "lb={} must be ≤ inc_obj={}",
+        cert.lower_bound(), cert.incumbent_obj()
+    );
+}
+
+/// Non-Optimal results carry no BoundGapCertificate.
+///
+/// Sentinel: attaching cert unconditionally (regardless of `proven`) causes
+/// SuboptimalSolution results to have Some(cert) → this test FAILS.
+#[test]
+fn non_optimal_result_has_no_bound_gap_cert() {
+    // max_nodes=2 on fractional-root problem: root + [0,1] processed,
+    // [2,5] still in queue → gap 0.5/1 >> 1e-6 → SuboptimalSolution.
+    let lp = build_lp(
+        vec![-1.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0)],
+    );
+    let cfg = MipConfig { max_nodes: 2, ..MipConfig::default() };
+    let (r, _) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &cfg);
+    assert_ne!(r.status, SolveStatus::Optimal, "must not claim Optimal with open queue");
+    assert!(r.bound_gap_cert.is_none(), "non-Optimal must have no BoundGapCertificate");
+}
+
+/// `proof_uncertain = true` blocks the Optimal claim even when the gap numerically
+/// appears closed.
+///
+/// Scenario (mock relaxation, 1-var x ∈ [0,2] integer):
+///   call 0 — root [0,2]: Optimal, x=0.5 (fractional), obj=1 → branch [0,0] and [1,2].
+///   call 1 — [0,0]:      SuboptimalSolution, width=0 → not splittable
+///                        → proof_uncertain=true, open_lb=1.
+///   call 2 — [1,2]:      Optimal, x=1, integer, obj=−5 → incumbent=−5.
+///
+/// After the loop: remaining_lb=1, within_gap(−5, 1, 1e-6)=true — but
+/// `proof_uncertain` must block the cert.
+///
+/// Sentinel: removing `!proof_uncertain &&` from `proven` produces `proven=true`
+/// for this scenario → Optimal + cert → this test FAILS.
+#[test]
+fn proof_uncertain_blocks_optimal_despite_closed_gap() {
+    use std::cell::Cell;
+    use crate::options::SolverOptions;
+    use crate::problem::SolverResult;
+
+    struct SeqMock {
+        call: Cell<usize>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+    impl SeqMock {
+        fn new() -> Self {
+            Self { call: Cell::new(0), root_bounds: [(0.0, 2.0)], int_vars: [0] }
+        }
+    }
+    impl super::Relaxation for SeqMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            match n {
+                // Root [0,2]: fractional → driver branches into [0,0] and [1,2].
+                0 => SolverResult { status: SolveStatus::Optimal, objective: 1.0, solution: vec![0.5], ..SolverResult::default() },
+                // [0,0]: non-Optimal, singleton, not splittable → proof_uncertain.
+                1 => SolverResult { status: SolveStatus::SuboptimalSolution, objective: 0.0, solution: vec![0.0], ..SolverResult::default() },
+                // [1,2]: Optimal, integer-feasible → incumbent = −5.
+                2 => SolverResult { status: SolveStatus::Optimal, objective: -5.0, solution: vec![1.0], ..SolverResult::default() },
+                _ => SolverResult::numerical_error(),
+            }
+        }
+    }
+
+    let mock = SeqMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_ne!(
+        r.status, SolveStatus::Optimal,
+        "proof_uncertain must block Optimal claim (within_gap is true but region unverified)"
+    );
+    assert!(
+        r.bound_gap_cert.is_none(),
+        "proof_uncertain must suppress BoundGapCertificate"
+    );
+}
