@@ -4,14 +4,16 @@
 
 Rust で書かれた**数理最適化ソルバー**。
 
-LP には**修正シンプレックス法**（疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定）、QP には**内点法**（Mehrotra predictor–corrector / IP-PMM）を実装し、混合整数問題の branch-and-bound を備える。実行不可能・非有界も判定し、完全な主双対情報を返す。
+LP には**修正シンプレックス法**（疎LU分解、Ruiz均衡スケーリング、最急勾配価格決定）、QP には**内点法**（Mehrotra predictor–corrector / IP-PMM）を実装し、非凸QPにはα-BB / McCormick による空間 branch-and-bound を備える。混合整数問題の branch-and-bound も対応。`Optimal` は完全な KKT 検証済み（**proof-carrying**）。実行不可能・非有界も証明付きで判定し、完全な主双対情報を返す。
 
 ## 機能
 
-- **代数モデリングAPI** — 自然な数式記法で問題を表現
+- **代数モデリングAPI** — 自然な数式記法で問題を記述。`x * x` / `x * y` による二次目的を含む
 - **修正シンプレックス法（LP）** — 疎LU分解と Markowitz 閾値ピボット
 - **内点法（QP）** — 凸QPに対するMehrotra predictor–corrector / IP-PMM
+- **非凸QP（大域）** — 空間 branch-and-bound（α-BB / McCormick）。大域最適解は bound-gap 証明書付き、局所解のみの場合は `NonconvexLocal` として正直に報告
 - **混合整数（MILP / 凸MIQP）** — 連続緩和（MILPはLP緩和、凸MIQPはQP緩和）上の baseline branch-and-bound（most-fractional 分枝）。非凸MIQPはスコープ外。カット・主発見的手法・SOS制約・より高度な分枝戦略は未実装。
+- **証明付き最適性** — `Optimal` は完全なKKT証明書検証済み（定常性・実行可能性・相補性・双対符号・duality gap）。証明不能な解は正直に降格
 - **実行不可能・非有界の判定** — 単なる失敗ではなく明示的なステータスを返す
 - **Ruiz均衡化** — 数値条件を改善する行/列スケーリング前処理
 - **最急勾配価格決定** — 改善された変数選択で収束を高速化
@@ -28,7 +30,7 @@ crates.io から:
 
 ```toml
 [dependencies]
-otspot = "0.1"
+otspot = "0.2"
 ```
 
 または git 依存として:
@@ -136,15 +138,12 @@ model.set_timeout(60.0);                       // 実時間上限 (秒)
 より細かい制御は低レベルの `solve_with` に `SolverOptions` を渡す:
 
 ```rust
-use otspot::SolverOptions;
-use otspot::solve_with;
+use otspot::{solve_with, SolverOptions};
 
-let opts = SolverOptions {
-    primal_tol: 1e-8,   // LP simplex の最適性 / 実行可能性 許容誤差
-    max_etas: 50,       // LU 再分解閾値 (0 = auto)
-    clamp_tol: 1e-14,   // 解の微小値クランプ
-    ..Default::default()
-};
+let mut opts = SolverOptions::default();
+opts.primal_tol = 1e-8;   // LP simplex の最適性 / 実行可能性 許容誤差
+opts.max_etas = 50;       // LU 再分解閾値 (0 = auto)
+opts.clamp_tol = 1e-14;   // 解の微小値クランプ
 let result = solve_with(&problem, &opts); // problem: &LpProblem
 ```
 
@@ -161,14 +160,12 @@ println!("slacks:        {:?}", result.slack);
 
 ### 二次計画法（QP）
 
-QP は LP と同じモデリング API で書ける — 二次の目的関数を加えるだけ。`set_diagonal_q`
-（対角 Q の簡易版）または `set_quadratic_objective`（`CscMatrix` 全体）で設定する。目的関数は
-「1/2あり」規約 min ½·xᵀQx + cᵀx で、線形項 c は `minimize` / `maximize` で与える。
+QP は LP と同じモデリング API で書ける — `x * x` / `x * y` DSL で二次項を目的関数に直接記述するだけ:
 
 ```rust
 use otspot::model::{constraint, Model};
 
-// min  x² + y²        (= ½·xᵀQx, Q = diag(2, 2))
+// min  x² + y²
 // s.t. x + y >= 1
 fn main() {
     let mut model = Model::new("qp");
@@ -176,8 +173,7 @@ fn main() {
     let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
 
     model.add_constraint(constraint!((x + y) >= 1.0));
-    model.set_diagonal_q(&[2.0, 2.0]); // Q = diag(2, 2)
-    model.minimize(0.0 * x + 0.0 * y); // 線形項 c = 0
+    model.minimize(x * x + y * y);
 
     let result = model.solve().unwrap();
     println!("objective = {:.4}", result.objective());
@@ -250,8 +246,8 @@ println!("status: {}", result.status);
 
 | 問題種別 | セット | 問題数 | @1e-6 | @1e-8 |
 |---|---|---:|---|---|
-| 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 106 |
-| 凸 QP | Maros–Mészáros | 138 | 最適解 129・有効解 7 | 最適解 124・有効解 4 |
+| 実行可能 LP | Netlib | 109 | 最適解 109 | 最適解 105 |
+| 凸 QP | Maros–Mészáros | 138 | 最適解 129・有効解 7 | 最適解 125・有効解 4 |
 | 実行不可能 LP | Netlib | 29 | 正答 29 | 正答 29 |
 | 非有界 LP | 合成 | 12 | 正答 12 | 正答 12 |
 
@@ -359,27 +355,41 @@ download script 未整備で手動配置が必要 (URL ヒントは `download_al
 
 ## プロジェクト構造
 
+Cargo workspace で 4 つの公開クレートと 1 つの dev 専用クレートで構成される:
+
 ```
-src/
-├── lib.rs              # クレートのエントリポイント・公開API再エクスポート
-├── model/              # 高レベル代数モデリングAPI (Model、constraint!マクロ)
-├── lp.rs               # LP求解エントリ
-├── simplex/            # 修正シンプレックス (primal / dual)
-├── qp/                 # QP求解 (内点法 IPM / IP-PMM、postsolve)
-├── mip/                # 混合整数 (MILP / MIQP) branch-and-bound
-├── presolve/           # 前処理 (Ruizスケーリング、postsolve)
-├── linalg/             # 線形代数 (LU、LDLᵀ)
-├── basis/              # 基底管理
-├── sparse/             # CSC疎行列・疎ベクトル
-├── problem/            # LpProblem / QpProblem、SolverResult、SolveStatus
-├── screening.rs        # 問題スクリーニング
-├── options.rs          # SolverOptions
-├── tolerances.rs       # 数値許容誤差定数
-├── error.rs            # SolverError
-├── io/                 # 入力パーサ (mps / qps / qplib)
-└── bin/                # CLIツール (qp_runner、qp_diag、qps_benchmark ほか)
-examples/               # 利用例 (solve_lp、solve_qp)
-benches/                # Criterionベンチ (lu_bench、qp_bench、solve_bench、scaling_pricing)
+src/                        # otspot (facade) — core / io / model の公開 re-export
+otspot-core/src/            # ソルバーエンジン
+├── lp.rs                   # LP求解エントリ (solve_lp_with)
+├── simplex/                # 修正シンプレックス (primal / dual)
+├── qp/                     # QP求解 (IPM / IP-PMM、postsolve、global B&B)
+├── mip/                    # 混合整数 branch-and-bound (MILP / MIQP)
+├── presolve/               # Ruizスケーリング、bound伝播、postsolve
+├── linalg/                 # LU、LDLᵀ分解
+├── basis/                  # 基底管理
+├── sparse/                 # CSC疎行列・疎ベクトル
+├── problem/                # LpProblem / QpProblem、SolverResult、SolveStatus
+├── options.rs              # SolverOptions、Tolerance
+├── tolerances.rs           # 数値許容誤差定数
+└── error.rs                # SolverError
+otspot-io/src/              # ファイルI/Oパーサ
+├── mps/                    # MPS形式 (LP)
+├── qps/                    # QPS形式 (QP)
+└── qplib/                  # QPLIB形式 (QP)
+otspot-model/src/           # 高レベル代数モデリングAPI
+├── model.rs                # Model、ModelResult、SolutionProof
+├── expression.rs           # Expression (線形)
+├── quad_expr.rs            # QuadExpr (二次、x*x / x*y DSL)
+├── constraint.rs           # Constraint、constraint!マクロ
+└── variable.rs             # Variable
+otspot-dev/                 # dev専用バイナリ (非公開)
+└── src/bin/                # qps_benchmark、qp_runner、qp_diag、qp_dump、
+                            # bench_qplib、milp_solve、lp_screen、
+                            # verify_solutions、mip_speed_bench
+examples/                   # 利用例 (solve_lp、solve_qp)
+benches/                    # Criterionベンチ (lu_bench、qp_bench、solve_bench、scaling_pricing)
+tests/                      # 統合テスト
+scripts/                    # データ生成スクリプト (gen_*.py、download_all_bench_data.sh)
 ```
 
 ## ライセンス

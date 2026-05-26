@@ -138,15 +138,12 @@ model.set_timeout(60.0);                       // wall-clock limit, seconds
 For fine-grained control, the low-level `solve_with` takes a full `SolverOptions`:
 
 ```rust
-use otspot::SolverOptions;
-use otspot::solve_with;
+use otspot::{solve_with, SolverOptions};
 
-let opts = SolverOptions {
-    primal_tol: 1e-8,   // LP simplex optimality / feasibility tolerance
-    max_etas: 50,       // LU refactorization threshold (0 = auto)
-    clamp_tol: 1e-14,   // solution micro-value clamp
-    ..Default::default()
-};
+let mut opts = SolverOptions::default();
+opts.primal_tol = 1e-8;   // LP simplex optimality / feasibility tolerance
+opts.max_etas = 50;       // LU refactorization threshold (0 = auto)
+opts.clamp_tol = 1e-14;   // solution micro-value clamp
 let result = solve_with(&problem, &opts); // problem: &LpProblem
 ```
 
@@ -163,15 +160,13 @@ println!("slacks:        {:?}", result.slack);
 
 ### Quadratic programming (QP)
 
-QP uses the same modeling API as LP — just add a quadratic objective. Set it with the
-`set_diagonal_q` shorthand (or `set_quadratic_objective` for a full `CscMatrix`). The objective
-follows the "1/2" convention, minimize ½·xᵀQx + cᵀx, where the linear part c comes from
-`minimize` / `maximize`.
+QP uses the same modeling API as LP. Express quadratic terms directly in the objective using the
+`x * x` / `x * y` DSL — no separate API call needed:
 
 ```rust
 use otspot::model::{constraint, Model};
 
-// min  x² + y²        (= ½·xᵀQx with Q = diag(2, 2))
+// min  x² + y²
 // s.t. x + y >= 1
 fn main() {
     let mut model = Model::new("qp");
@@ -179,8 +174,7 @@ fn main() {
     let y = model.add_var("y", f64::NEG_INFINITY, f64::INFINITY);
 
     model.add_constraint(constraint!((x + y) >= 1.0));
-    model.set_diagonal_q(&[2.0, 2.0]); // Q = diag(2, 2)
-    model.minimize(0.0 * x + 0.0 * y); // linear part c = 0
+    model.minimize(x * x + y * y);
 
     let result = model.solve().unwrap();
     println!("objective = {:.4}", result.objective());
@@ -368,27 +362,41 @@ Maros–Mészáros and QPLIB sets have no download script and must be placed man
 
 ## Project structure
 
+This is a Cargo workspace with four published crates and one dev-only crate:
+
 ```
-src/
-├── lib.rs              # crate entry point / public API re-exports
-├── model/              # high-level algebraic modeling API (Model, constraint! macro)
-├── lp.rs               # LP solve entry
-├── simplex/            # revised simplex (primal / dual)
-├── qp/                 # QP solve (interior-point IPM / IP-PMM, postsolve)
-├── mip/                # mixed-integer (MILP / MIQP) branch-and-bound
-├── presolve/           # presolve (Ruiz scaling, postsolve)
-├── linalg/             # linear algebra (LU, LDLᵀ)
-├── basis/              # basis management
-├── sparse/             # CSC sparse matrix / sparse vector
-├── problem/            # LpProblem / QpProblem, SolverResult, SolveStatus
-├── screening.rs        # problem screening
-├── options.rs          # SolverOptions
-├── tolerances.rs       # numerical tolerance constants
-├── error.rs            # SolverError
-├── io/                 # input parsers (mps / qps / qplib)
-└── bin/                # CLI tools (qp_runner, qp_diag, qps_benchmark, ...)
-examples/               # usage examples (solve_lp, solve_qp)
-benches/                # criterion benchmarks (lu_bench, qp_bench, solve_bench, scaling_pricing)
+src/                        # otspot (facade) — public re-exports from core / io / model
+otspot-core/src/            # solver engine
+├── lp.rs                   # LP solve entry (solve_lp_with)
+├── simplex/                # revised simplex (primal / dual)
+├── qp/                     # QP solve (IPM / IP-PMM, postsolve, global B&B)
+├── mip/                    # mixed-integer branch-and-bound (MILP / MIQP)
+├── presolve/               # Ruiz scaling, bound propagation, postsolve
+├── linalg/                 # LU, LDLᵀ factorizations
+├── basis/                  # basis management
+├── sparse/                 # CSC sparse matrix / sparse vector
+├── problem/                # LpProblem / QpProblem, SolverResult, SolveStatus
+├── options.rs              # SolverOptions, Tolerance
+├── tolerances.rs           # numerical tolerance constants
+└── error.rs                # SolverError
+otspot-io/src/              # file I/O parsers
+├── mps/                    # MPS format (LP)
+├── qps/                    # QPS format (QP)
+└── qplib/                  # QPLIB format (QP)
+otspot-model/src/           # high-level algebraic modeling API
+├── model.rs                # Model, ModelResult, SolutionProof
+├── expression.rs           # Expression (linear)
+├── quad_expr.rs            # QuadExpr (quadratic, x*x / x*y DSL)
+├── constraint.rs           # Constraint, constraint! macro
+└── variable.rs             # Variable
+otspot-dev/                 # dev-only binaries (not published)
+└── src/bin/                # qps_benchmark, qp_runner, qp_diag, qp_dump,
+                            # bench_qplib, milp_solve, lp_screen,
+                            # verify_solutions, mip_speed_bench
+examples/                   # usage examples (solve_lp, solve_qp)
+benches/                    # criterion benchmarks (lu_bench, qp_bench, solve_bench, scaling_pricing)
+tests/                      # integration tests
+scripts/                    # data-generation scripts (gen_*.py, download_all_bench_data.sh)
 ```
 
 ## License
