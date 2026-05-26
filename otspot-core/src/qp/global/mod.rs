@@ -33,6 +33,7 @@ pub(crate) mod tree;
 
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
+use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::problem::QpProblem;
 use std::time::{Duration, Instant};
 
@@ -133,7 +134,7 @@ pub fn solve_qp_global_with_stats(
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return (state.finalize_proven(root_lb, q_indefinite), stats);
+        return (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats);
     }
 
     let mut tree = BBTree::new();
@@ -146,7 +147,7 @@ pub fn solve_qp_global_with_stats(
     match select_branching_variable(&root_node, &root_x) {
         None => {
             return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (state.finalize_proven(root_lb, q_indefinite), stats)
+                (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats)
             } else {
                 (
                     state.finalize_unproven(
@@ -253,7 +254,7 @@ pub fn solve_qp_global_with_stats(
         let inc_obj = state.incumbent_obj;
         if proven {
             let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(lb_for_proof, q_indefinite)
+            state.finalize_proven(lb_for_proof, q_indefinite, cfg.gap_tol)
         } else {
             state.finalize_unproven(
                 remaining_lb,
@@ -266,7 +267,7 @@ pub fn solve_qp_global_with_stats(
     } else {
         // queue 空 = 全探索完了 → incumbent_obj が global
         let inc_obj = state.incumbent_obj;
-        state.finalize_proven(inc_obj, q_indefinite)
+        state.finalize_proven(inc_obj, q_indefinite, cfg.gap_tol)
     };
     (result, stats)
 }
@@ -353,15 +354,23 @@ impl SearchState {
 
     /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
     /// (= 「proven かつ Q indefinite」と「proven かつ Q PSD」を caller が区別可能)
-    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool) -> SolverResult {
+    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool, gap_tol: f64) -> SolverResult {
+        let scale = 1.0_f64.max(self.incumbent_obj.abs());
+        let gap_rel = (self.incumbent_obj - lower_bound) / scale;
+        self.incumbent_result.bound_gap_cert = Some(BoundGapCertificate::new(
+            self.incumbent_obj,
+            lower_bound,
+            gap_rel,
+            gap_tol,
+        ));
         self.incumbent_result.status = if q_indefinite {
             SolveStatus::NonconvexGlobal
         } else {
             SolveStatus::Optimal
         };
         log::debug!(
-            "QP global proven: status={} obj={:.6e} lb={:.6e}",
-            self.incumbent_result.status, self.incumbent_obj, lower_bound
+            "QP global proven: status={} obj={:.6e} lb={:.6e} gap_rel={:.3e}",
+            self.incumbent_result.status, self.incumbent_obj, lower_bound, gap_rel
         );
         self.incumbent_result
     }
@@ -537,6 +546,55 @@ mod tests {
         let indef = diag_concave_1d(1.0);
         assert!(!is_q_indefinite(&psd), "x² should be PSD");
         assert!(is_q_indefinite(&indef), "-x² should be indefinite");
+    }
+
+    // ---- BoundGapCertificate sentinels -----------------------------------------
+
+    /// Proven QP global (convex Q) result carries BoundGapCertificate.
+    ///
+    /// Sentinel: removing `self.incumbent_result.bound_gap_cert = Some(...)` from
+    /// `finalize_proven` leaves cert as `None` → this test FAILS.
+    #[test]
+    fn qp_global_proven_convex_has_bound_gap_cert() {
+        let p = diag_convex_1d(3.0);
+        let r = solve_qp_global(&p, &opts(2.0), &GlobalOptimizationConfig::default());
+        assert!(matches!(r.status, SolveStatus::Optimal));
+        let cert = r.bound_gap_cert.as_ref()
+            .expect("proven QP global (Optimal) must carry BoundGapCertificate");
+        assert!(
+            cert.gap_rel() <= cert.gap_tol() + 1e-10,
+            "gap_rel={:.3e} must be ≤ gap_tol={:.3e}",
+            cert.gap_rel(), cert.gap_tol()
+        );
+    }
+
+    /// Proven QP global (indefinite Q) result carries BoundGapCertificate.
+    #[test]
+    fn qp_global_proven_nonconvex_has_bound_gap_cert() {
+        let p = diag_concave_1d(2.0);
+        let r = solve_qp_global(&p, &opts(5.0), &GlobalOptimizationConfig::default());
+        assert!(matches!(r.status, SolveStatus::NonconvexGlobal));
+        let cert = r.bound_gap_cert.as_ref()
+            .expect("proven QP global (NonconvexGlobal) must carry BoundGapCertificate");
+        assert!(cert.gap_rel() <= cert.gap_tol() + 1e-10);
+    }
+
+    /// Unproven QP global result has no BoundGapCertificate.
+    ///
+    /// Sentinel: attaching cert unconditionally in `finalize_unproven` causes
+    /// NonconvexLocal/LocallyOptimal to have Some(cert) → this test FAILS.
+    #[test]
+    fn qp_global_unproven_has_no_bound_gap_cert() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)]).unwrap();
+        let cfg = GlobalOptimizationConfig { gap_tol: 1e-12, max_depth: 1, max_nodes: 1, ..GlobalOptimizationConfig::default() };
+        let r = solve_qp_global(&p, &opts(5.0), &cfg);
+        assert!(
+            matches!(r.status, SolveStatus::NonconvexLocal | SolveStatus::LocallyOptimal),
+            "expected unproven status, got {:?}", r.status
+        );
+        assert!(r.bound_gap_cert.is_none(), "unproven must have no BoundGapCertificate");
     }
 
     /// Invalid options are rejected at the global entry with NumericalError — not panic.
