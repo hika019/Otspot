@@ -35,7 +35,6 @@ pub enum KktError {
     /// Singular or indefinite K; the caller may retry after regularisation.
     SingularOrIndefinite,
     /// Symbolic estimation predicts the factor would exceed the memory budget.
-    #[allow(dead_code)]
     WouldExceedMemory,
     DidNotConverge,
 }
@@ -56,7 +55,6 @@ impl std::error::Error for KktError {}
 /// Solver abstraction for the symmetric saddle-point KKT system `K · u = rhs`.
 /// `solve` is `&self` so predictor/corrector can share one factorisation; `refactor`
 /// is `&mut self` because it replaces the cached factorisation.
-#[allow(dead_code)]
 pub trait KktSolver: Send {
     /// 1 つの右辺に対して `K · u = rhs` を解いて `sol` に書き込む。
     ///
@@ -87,7 +85,6 @@ pub trait KktSolver: Send {
 /// `KktSolver` adapter around `factorize_quasidefinite_with_amd_budget_par`.
 /// Constructing with `max_l_nnz = Some(_)` causes `refactor` to return
 /// `WouldExceedMemory` when symbolic factorisation exceeds the budget.
-#[allow(dead_code)]
 pub struct DirectLdl {
     factor: Option<crate::linalg::ldl::LdlFactorizationAmd>,
     n: usize,
@@ -95,7 +92,6 @@ pub struct DirectLdl {
     par: faer::Par,
 }
 
-#[allow(dead_code)]
 impl DirectLdl {
     pub fn new(n: usize) -> Self {
         Self { factor: None, n, max_l_nnz: None, par: faer::Par::Seq }
@@ -214,12 +210,10 @@ const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 /// Default convergence tolerance for non-inexact MINRES constructors.
 /// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM
 /// relaxation — the system must be solved accurately each call.
-#[allow(dead_code)]
 const MINRES_DEFAULT_TOL: f64 = 1e-9;
 
 /// Max iterations = `MINRES_MAX_ITER_MULTIPLIER × n`, giving O(n) budget that
 /// scales with problem size.
-#[allow(dead_code)]
 const MINRES_MAX_ITER_MULTIPLIER: usize = 2;
 
 /// Resolve η from the `MINRES_ETA` env (constrained to `(0, 1]`), else default.
@@ -246,7 +240,6 @@ impl PreconditionedMinres {
         self.tol = tol;
     }
 
-    #[allow(dead_code)]
     pub fn new(k: CscMatrix) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -254,17 +247,8 @@ impl PreconditionedMinres {
         Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
     }
 
-    /// Block-diagonal preconditioner for a saddle-point K of dimension `n_top + m`.
-    /// Approximates the lower block with a Schur-complement diagonal in O(nnz(K)).
-    #[allow(dead_code)]
-    pub fn with_block_diag(k: CscMatrix, n_top: usize) -> Self {
-        let kind = PreconditionerKind::BlockDiag { n_top };
-        let m_inv_diag = compute_inv_diag(&k, kind);
-        let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
-    }
-
-    /// Inexact-Newton variant of `with_block_diag`, with env-overridable η and IR rounds.
+    /// Inexact-Newton variant of the block-diagonal saddle-point preconditioner,
+    /// with env-overridable η and IR rounds.
     pub fn with_block_diag_inexact(k: CscMatrix, n_top: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
@@ -509,20 +493,8 @@ impl KktFactor {
 
 /// LDL-compatible factorisation that falls back to MINRES when the LDL factor would
 /// exceed the memory budget. Pass `n_top = Some(n)` to enable the saddle-point
-/// block-diagonal MINRES preconditioner; `None` selects plain Jacobi (既存互換、
-/// per-call parallelism = `Par::Seq`)。
-#[allow(dead_code)]
-pub fn factorize_kkt_with_cached_perm(
-    k: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: usize,
-    n_top: Option<usize>,
-) -> Result<KktFactor, KktError> {
-    factorize_kkt_with_cached_perm_par(k, perm, deadline, max_l_nnz, n_top, faer::Par::Seq)
-}
-
-/// `factorize_kkt_with_cached_perm` の per-call parallelism 指定版。
+/// block-diagonal MINRES preconditioner; `None` selects plain Jacobi.
+/// Per-call parallelism is controlled via `par`.
 pub fn factorize_kkt_with_cached_perm_par(
     k: &CscMatrix,
     perm: &[usize],
@@ -601,41 +573,8 @@ pub fn factorize_kkt_with_cached_perm_par(
     }
 }
 
-/// Pre-permuted fast path. MINRES fallback uses `unpermuted_k` since it operates on
-/// the original ordering (既存互換、per-call parallelism = `Par::Seq`)。
-#[allow(dead_code)]
-pub fn factorize_kkt_pre_permuted(
-    pre_permuted_k: &CscMatrix,
-    unpermuted_k: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: usize,
-    n_top: Option<usize>,
-) -> Result<KktFactor, KktError> {
-    factorize_kkt_pre_permuted_cached_par(
-        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, None, faer::Par::Seq,
-    )
-}
-
-/// Variant of `factorize_kkt_pre_permuted` that reuses a cached symbolic Cholesky
-/// (既存互換、per-call parallelism = `Par::Seq`)。
-#[allow(dead_code)]
-pub fn factorize_kkt_pre_permuted_cached(
-    pre_permuted_k: &CscMatrix,
-    unpermuted_k: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    max_l_nnz: usize,
-    n_top: Option<usize>,
-    cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
-) -> Result<KktFactor, KktError> {
-    factorize_kkt_pre_permuted_cached_par(
-        pre_permuted_k, unpermuted_k, perm, deadline, max_l_nnz, n_top, cached_symbolic,
-        faer::Par::Seq,
-    )
-}
-
-/// `factorize_kkt_pre_permuted_cached` の per-call parallelism 指定版。
+/// Pre-permuted fast path with full control (par + cached symbolic).
+/// MINRES fallback uses `unpermuted_k` since MINRES operates on the original ordering.
 pub fn factorize_kkt_pre_permuted_cached_par(
     pre_permuted_k: &CscMatrix,
     unpermuted_k: &CscMatrix,
@@ -682,7 +621,6 @@ impl KktFactor {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KktBackend {
     Direct,
@@ -693,7 +631,6 @@ pub enum KktBackend {
 /// permanently to MINRES. Numerical / deadline failures still propagate up. The decision
 /// is driven by measured `L_nnz` vs the configured memory budget rather than any
 /// problem-size heuristic.
-#[allow(dead_code)]
 pub struct AutoKktSolver {
     n: usize,
     /// Cleared once `WouldExceedMemory` is observed so subsequent calls skip direct.
@@ -703,7 +640,6 @@ pub struct AutoKktSolver {
     last_used: Option<KktBackend>,
 }
 
-#[allow(dead_code)]
 impl AutoKktSolver {
     pub fn new(n: usize) -> Self {
         Self {
@@ -1063,12 +999,12 @@ mod tests {
             "should stay iterative after first overflow");
     }
 
-    /// factorize_kkt_with_cached_perm: budget 十分なら Direct を返す
+    /// factorize_kkt_with_cached_perm_par: budget 十分なら Direct を返す
     #[test]
     fn factorize_kkt_chooses_direct_when_budget_sufficient() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
-        let factor = factorize_kkt_with_cached_perm(&k, &perm, None, 1000, None)
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, 1000, None, faer::Par::Seq)
             .expect("factor should succeed");
         assert!(matches!(factor, KktFactor::Direct(_)));
         assert!(!factor.is_iterative());
@@ -1079,7 +1015,7 @@ mod tests {
         assert!((sol[1] - 1.0).abs() < 1e-9);
     }
 
-    /// factorize_kkt_with_cached_perm: budget 不足なら Iterative を返す
+    /// factorize_kkt_with_cached_perm_par: budget 不足なら Iterative を返す
     #[test]
     fn factorize_kkt_chooses_iterative_when_budget_exceeded() {
         let k = CscMatrix::from_triplets(
@@ -1087,7 +1023,7 @@ mod tests {
             &[4.0, 0.5, 4.0, 0.5, -2.0], 3, 3
         ).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(3, &k.col_ptr, &k.row_ind, None);
-        let factor = factorize_kkt_with_cached_perm(&k, &perm, None, 1, None)
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, 1, None, faer::Par::Seq)
             .expect("factor should succeed (fallback)");
         assert!(matches!(factor, KktFactor::Iterative(_)));
         assert!(factor.is_iterative());
@@ -1150,7 +1086,7 @@ mod tests {
         let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
 
         // η = 0.1 で IR=0 (基準)
-        let mut solver_no_ir = PreconditionedMinres::with_block_diag(k.clone(), n);
+        let mut solver_no_ir = PreconditionedMinres::with_block_diag_inexact(k.clone(), n);
         solver_no_ir.tol = 0.1;
         solver_no_ir.ir_steps = 0;
         let mut sol_no_ir = vec![0.0_f64; dim];
@@ -1164,7 +1100,7 @@ mod tests {
         let rel_no_ir = r_no_ir / rhs_norm;
 
         // η = 0.1 で IR=2 (理論上 η^3 = 1e-3 まで)
-        let mut solver_ir2 = PreconditionedMinres::with_block_diag(k.clone(), n);
+        let mut solver_ir2 = PreconditionedMinres::with_block_diag_inexact(k.clone(), n);
         solver_ir2.tol = 0.1;
         solver_ir2.ir_steps = 2;
         let mut sol_ir2 = vec![0.0_f64; dim];

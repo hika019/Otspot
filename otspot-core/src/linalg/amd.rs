@@ -22,18 +22,6 @@ use faer::sparse::SymbolicSparseColMatRef;
 /// # 戻り値
 /// 置換ベクトル `perm` で `perm[k] = i` は
 /// 消去ステップ `k` に元のノード `i` を割り当てることを意味する。
-/// deadline 超過時は部分的な AMD 順序 + identity フォールバックの有効な置換を返す。
-///
-/// # アルゴリズム
-/// faer AMD-2 (`faer::sparse::linalg::amd::order`) を呼び出す。
-/// O(n + nnz) で動作するため、独自 SMD より大幅に高速。
-/// deadline 超過時は `amd_with_deadline` が identity fallback を返す。
-/// amd::order() がエラーを返した場合も identity fallback (0..n) を返す。
-#[allow(dead_code)]
-pub fn amd(n: usize, col_ptr: &[usize], row_ind: &[usize]) -> Vec<usize> {
-    amd_with_deadline(n, col_ptr, row_ind, None)
-}
-
 /// AMD 再順序化を計算する（deadline 付き）。
 ///
 /// deadline が指定された場合、faer AMD-2 呼び出し前に1回チェックし、
@@ -175,7 +163,7 @@ mod tests {
         let col_ptr = vec![0, 0, 1, 2, 3, 4];
         let row_ind = vec![0, 0, 0, 0]; // col1:(0,1), col2:(0,2), col3:(0,3), col4:(0,4)
 
-        let perm = amd(n, &col_ptr, &row_ind);
+        let perm = amd_with_deadline(n, &col_ptr, &row_ind, None);
 
         assert_eq!(perm.len(), n);
         // 中心ノード0は最初に消去されない（初期次数4 > 葉の次数1）
@@ -196,7 +184,7 @@ mod tests {
         let col_ptr = vec![0, 0, 1, 2, 3];
         let row_ind = vec![0, 1, 2];
 
-        let perm = amd(n, &col_ptr, &row_ind);
+        let perm = amd_with_deadline(n, &col_ptr, &row_ind, None);
 
         assert_eq!(perm.len(), n);
         let mut check = perm.clone();
@@ -206,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_amd_empty() {
-        let perm = amd(0, &[0], &[]);
+        let perm = amd_with_deadline(0, &[0], &[], None);
         assert!(perm.is_empty());
     }
 
