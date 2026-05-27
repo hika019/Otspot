@@ -170,7 +170,6 @@ otspot-io/       # file parsers (MPS, QPS, QPLIB)
 otspot-model/    # algebraic modeling API (Model, Variable, constraint! macro)
 otspot-dev/      # dev-only binaries (qps_benchmark, qp_runner, …; not published)
 examples/        # solve_lp, solve_qp
-benches/         # criterion suites
 tests/           # integration tests
 scripts/         # data-generation scripts
 ```

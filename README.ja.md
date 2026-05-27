@@ -167,7 +167,6 @@ otspot-io/       # ファイルパーサ (MPS, QPS, QPLIB)
 otspot-model/    # 代数モデリング API (Model, Variable, constraint! マクロ)
 otspot-dev/      # dev 専用バイナリ (qps_benchmark, qp_runner など。非公開)
 examples/        # solve_lp, solve_qp
-benches/         # criterion スイート
 tests/           # 統合テスト
 scripts/         # データ生成スクリプト
 ```
