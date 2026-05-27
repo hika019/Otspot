@@ -1,8 +1,0 @@
-/target
-/Cargo.lock
-.venv/
-.pytest_cache/
-__pycache__/
-*.so
-*.dylib
-.DS_Store

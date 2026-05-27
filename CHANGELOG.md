@@ -4,27 +4,24 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [0.2.0] - 2026-05-26
 
-### Breaking Changes
+### 破壊的変更
 
-- **Workspace split**: internal implementation moved to sub-crates (`otspot-core`, `otspot-io`, `otspot-model`). Public `otspot::` API paths are preserved via re-exports in the facade crate.
-- **Removed from public API**: `otspot::bench_utils`, `otspot::screening`, presolve function root re-exports, `bound_flip` — these were dev/internal utilities and are now in `otspot-dev` (not published).
+- **証明付き最適性 (cert-carrying status)**: `Optimal` は KKT 全条件を検証した証明を伴う場合のみ確定するようになった。`prove_optimal` を唯一の検証点とし、証明できない解は `SuboptimalSolution` 等へ正直に降格 — 証明なしの偽 `Optimal` を構造的に排除する。`OptimalCertificate` / `BoundGapCertificate` / `SolveOutcome` / `NotProven` を追加。
+- **ワークスペース分割**: 内部実装を `otspot-core` / `otspot-io` / `otspot-model` に分離。公開 `otspot::` パスは facade 再エクスポートで維持。
+- **公開 API から除外**: `bench_utils` / `screening` / presolve 関数 / `bound_flip` を dev 専用 `otspot-dev`（非公開）へ移動。
 
-### Added
+### 追加
 
-- `ModelResult.status` + `ModelResult.proof` + `SolutionProof` — typed solution status with proof obligations; all status paths covered by tests.
-- `Model::try_add_var` / `Model::try_value` — fallible variants that return `ModelError` instead of panicking.
-- `SolverOptions` / `IpmOptions` validation + builder ergonomics.
-- `Tolerance::Fast` preset (1e-4) for rapid prototyping.
-- `ModelError::NonConvex` / `ModelError::NotSupported` — typed error variants replacing string-based errors.
-- `CscMatrix` read-only encapsulation — internal invariants enforced at construction; mutation only via controlled API.
-- MPS/QPS streaming parser — replaces `read_to_string` buffering with `BufRead` for lower peak memory on large instances.
-- Multistart serial fallback — `ThreadPool` panic in rayon fallback is caught and execution continues single-threaded.
-- Solver entry `options` validation — `SolverOptions` validated before dispatching to LP/QP backends.
-
-### Known Issues / Scope
-
-- `core::io` module still retained as test-only source (`qps.rs`); full removal tracked in #29.
-- Guard hook complete removal deferred to #15.
+- **非凸 QP の大域求解** (`solve_qp_global`) — branch-and-bound + α-BB / McCormick 緩和。大域最適は `BoundGapCertificate` で証明し、局所最適のみの場合は `NonconvexLocal` として正直に区別する。
+- **証明付き最適性検証** — stationarity・実行可能性・相補性・双対符号・双対ギャップを `eps` で検証して `Optimal` を発行（LP / QP / MIP 共通）。
+- **二次目的の Expression DSL** — `x * x` / `x * y` で二次項を自然に記述。
+- `ModelResult.status` / `.proof` / `SolutionProof` — 型付き解ステータス。
+- `Model::try_add_var` / `try_value` — panic しない fallible 版（`ModelError` を返す）。
+- `SolverOptions` / `IpmOptions` の検証と builder。`Tolerance::Fast`（1e-4）プリセット。
+- `ModelError::NonConvex` / `NotSupported` — 文字列エラーを型付きに。
+- `CscMatrix` の読み取り専用カプセル化（構築時に不変条件を強制）。
+- MPS / QPS ストリーミングパーサ（`BufRead` 化で大規模インスタンスのピークメモリを削減）。
+- マルチスタートの直列フォールバック（rayon panic 時も単一スレッドで継続）。
 
 ## [0.1.1] - 2026-05-23
 

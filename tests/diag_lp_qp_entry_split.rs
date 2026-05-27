@@ -325,8 +325,8 @@ fn model_api_qp_path_uses_solve_qp_with() {
     let mut m = Model::new("qp_via_model");
     let x = m.add_var("x", 0.0, 10.0);
     m.add_constraint(constraint!(x >= 1.0));
-    m.minimize(0.0 * x);
-    m.set_diagonal_q(&[1.0]);
+    // Q[0][0]=1: (1/2)*x*x via DSL
+    m.minimize(0.5 * x * x);
     let r = m.solve().expect("model qp");
     assert_obj(r.objective_value, 0.5, "model_qp_path");
 

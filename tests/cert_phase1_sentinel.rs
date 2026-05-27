@@ -20,8 +20,8 @@ use otspot::qp::{ipm_solver::outcome::ProblemView, solve_qp_with, QpProblem, sol
 use otspot::CscMatrix;
 use std::path::Path;
 
-const HS21_PATH: &str = "data/data/maros_meszaros/HS21.QPS";
-const QADLITTL_PATH: &str = "data/data/maros_meszaros/QADLITTL.QPS";
+const HS21_PATH: &str = "data/maros_meszaros/HS21.QPS";
+const QADLITTL_PATH: &str = "data/maros_meszaros/QADLITTL.QPS";
 const TOL: f64 = 1e-5;
 
 fn load_qp_and_solve(path_str: &str) -> (otspot::QpProblem, otspot::SolverResult) {

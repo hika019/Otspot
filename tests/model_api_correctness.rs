@@ -10,7 +10,6 @@
 
 use otspot::model::{Model, ModelError, SolveError};
 use otspot::constraint;
-use otspot::sparse::CscMatrix;
 
 // ユニットテスト許容誤差。default user_eps=1e-6 に対して同じ基準を使う。
 // アルゴリズム (Simplex/IPM) による緩和は認めない: 簡単な問題で 1e-6 未達なら solver bug。
@@ -206,27 +205,23 @@ fn model_lp_unbounded() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. QP: 二次目的 (set_quadratic_objective)
+// 7. QP: 二次目的 (DSL)
 // ---------------------------------------------------------------------------
 
-/// set_quadratic_objective を使って QP を解くことを検証する。
+/// DSL で QP を解くことを検証する。
 ///
-/// 問題: minimize (1/2) * 2x^2 + (1/2) * 2y^2 - 4x - 4y
-///       (Q = [[2,0],[0,2]], c = [-4,-4], "1/2あり" 規約)
+/// 問題: minimize x^2 + y^2 - 4x - 4y
 ///       x, y in [0, +inf)
 ///
-/// 解析解: 無制約最小化 → ∂/∂x = 2x - 4 = 0 → x=2, 同様 y=2
-///   obj = (1/2)*2*(4+4) - 4*2 - 4*2 = 8 - 16 = -8
+/// 解析解: ∂/∂x = 2x - 4 = 0 → x=2, 同様 y=2
+///   obj = 4 + 4 - 8 - 8 = -8
 #[test]
 fn model_qp_simple() {
     let mut model = Model::new("qp_simple");
     let x = model.add_var("x", 0.0, f64::INFINITY);
     let y = model.add_var("y", 0.0, f64::INFINITY);
 
-    // Q = [[2, 0], [0, 2]]  ("1/2あり" 規約)
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
-    model.minimize(-4.0 * x + -4.0 * y);
+    model.minimize(x * x + y * y + (-4.0) * x + (-4.0) * y);
 
     let result = model.solve().expect("QP solve failed");
 
@@ -251,7 +246,7 @@ fn model_qp_simple() {
 /// QP の最適解での双対変数 (shadow price) が取得でき、KKT 条件から予測される値と
 /// 一致することを検証する。
 ///
-/// 問題: minimize (1/2) * x^2  (Q = [[1]], c = [0], "1/2あり" 規約)
+/// 問題: minimize (1/2) * x^2
 ///       x >= 1  (Ge 制約)
 ///       x in (-inf, +inf)
 ///
@@ -265,11 +260,9 @@ fn model_dual_variables() {
     let mut model = Model::new("dual_model");
     let x = model.add_var("x", f64::NEG_INFINITY, f64::INFINITY);
 
-    // Q = [[1]] ("1/2あり" → (1/2)*1*x^2 = x^2/2)
-    let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    // (1/2)*x^2: DSL では 0.5 * x * x
     model.add_constraint(constraint!(x >= 1.0));
-    model.minimize(0.0 * x); // 線形項は 0
+    model.minimize(0.5 * x * x);
 
     let result = model.solve().expect("QP solve failed");
 
