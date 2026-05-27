@@ -172,7 +172,7 @@ pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 
 /// Internal BFRT (Bound-Flipping Ratio Test) primitives for integration tests.
-/// Deferred for removal until typed pipeline (#15) restructures the simplex tree.
+/// Deferred for removal until typed pipeline restructures the simplex tree.
 #[doc(hidden)]
 pub mod bound_flip {
     pub use crate::simplex::dual_advanced::bound_flip::{

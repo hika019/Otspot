@@ -1,4 +1,4 @@
-//! Integer branching for MILP/MIQP branch-and-bound (#14).
+//! Integer branching for MILP/MIQP branch-and-bound.
 //!
 //! Branching tightens one integer variable's bounds around its fractional
 //! relaxation value `v`: the **down** child adds `x_j <= floor(v)` and the **up**

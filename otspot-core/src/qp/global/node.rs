@@ -1,8 +1,8 @@
-//! Spatial B&B のノード (#6 Phase 3)。
+//! Spatial B&B のノード (Phase 3)。
 //!
 //! ノード = 1 つの box subproblem。`var_bounds` は親 problem の bound を
 //! 分枝により狭めた領域。`lower_bound` は親から継承 or 自前 interval bound の
-//! 最大値。`warm` は親解 (#12 IPM warm start) を子に引き継ぐためのスナップショット。
+//! 最大値。`warm` は親解を子に引き継ぐためのスナップショット。
 
 use crate::options::QpWarmStart;
 

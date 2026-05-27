@@ -66,6 +66,12 @@ pub(super) const ALPHA_DEADLOCK_N: usize = 20;
 pub(super) const RESIDUAL_STALL_WINDOW: usize = 50;
 pub(super) const RESIDUAL_STALL_REL_DEC: f64 = 1e-3;
 
+/// rank-deficient Q + c≈0 の適応 reg trigger: ||c||_inf がこの値未満なら c≈0 とみなす。
+pub(super) const ADAPTIVE_REG_C_MAX_THRESH: f64 = 1e-6;
+
+/// Gondzio corrector trigger: alpha がこの値未満のときのみ追加補正を適用する。
+pub(super) const GONDZIO_ALPHA_TRIGGER: f64 = 0.999;
+
 pub(super) struct PmmState {
     pub(super) x_ref: Vec<f64>,
     pub(super) y_ref: Vec<f64>,

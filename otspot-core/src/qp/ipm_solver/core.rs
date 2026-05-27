@@ -164,7 +164,7 @@ fn run_ipm_with(
         diagnostics::log_bounds_clip(orig_problem, &final_sol, clip_count_pre, total_bound_clip);
     }
 
-    // presolve metadata から削除 col mask を導出 (#92 真因 fix)。orig 空間での
+    // presolve metadata から削除 col mask を導出。orig 空間での
     // kkt_residual_rel / refine 呼出は本 mask を経由してのみ EmptyCol を skip する。
     let eliminated_cols: Vec<bool> = presolve_result
         .col_map

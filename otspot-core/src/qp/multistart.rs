@@ -1,4 +1,4 @@
-//! Multi-start local search (#5 Phase 2)。
+//! Multi-start local search (Phase 2)。
 //!
 //! 非凸 QP では IPM が出発点ごとに異なる局所最適に収束する。
 //! `solve_qp_multistart` は cold + (n_starts-1) random initial を解き、
