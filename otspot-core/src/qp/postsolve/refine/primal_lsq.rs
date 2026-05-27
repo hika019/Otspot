@@ -27,8 +27,7 @@ pub(crate) fn refine_primal_lsq(
     for col in 0..n {
         let xv = x[col];
         for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            ax_dd[problem.a.row_ind[k]] =
-                ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+            ax_dd[problem.a.row_ind[k]] += TwoFloat::new_mul(problem.a.values[k], xv);
         }
     }
     let ax: Vec<f64> = ax_dd.iter().map(|&v| f64::from(v)).collect();
@@ -104,7 +103,7 @@ pub(crate) fn refine_primal_lsq(
             for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                 let i = problem.a.row_ind[k];
                 if i < m {
-                    atl_dd[j] = atl_dd[j] + TwoFloat::new_mul(problem.a.values[k], lambda[i]);
+                    atl_dd[j] += TwoFloat::new_mul(problem.a.values[k], lambda[i]);
                 }
             }
         }
@@ -150,7 +149,7 @@ pub(crate) fn refine_primal_lsq(
         for k in s..e {
             let i = problem.a.row_ind[k];
             if i < m {
-                delta_dd[j] = delta_dd[j] + TwoFloat::new_mul(problem.a.values[k], lambda[i]);
+                delta_dd[j] += TwoFloat::new_mul(problem.a.values[k], lambda[i]);
             }
         }
     }

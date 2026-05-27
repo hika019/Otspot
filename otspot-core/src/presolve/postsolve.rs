@@ -323,13 +323,10 @@ fn build_and_solve_cleanup_lp(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
     ).ok()?;
 
-    let mut opts = SolverOptions::default();
-    opts.presolve = false;
-    opts.warm_start = None;
     // Wire the parent deadline straight through so every inner stage (parse, scale,
     // factorize, simplex iterate) checks the same clock; otherwise large cleanup
     // LPs can spend minutes in setup before any per-call budget kicks in.
-    opts.deadline = deadline;
+    let opts = SolverOptions { presolve: false, warm_start: None, deadline, ..SolverOptions::default() };
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
@@ -389,7 +386,7 @@ fn build_and_solve_cleanup_lp(
             }
         };
         p2_b.push(rhs);
-        p2_ct.push(ct_clean_keep[orig_idx].clone());
+        p2_ct.push(ct_clean_keep[orig_idx]);
     }
     // (ii) Tie-break Eq rows: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0.
     for i in 0..n_yvars {
@@ -523,15 +520,11 @@ fn recover_removed_row_dual(
         if at_lb && !at_ub {
             if a_ij > 0.0 {
                 if bound_val < max_y_i { max_y_i = bound_val; }
-            } else {
-                if bound_val > min_y_i { min_y_i = bound_val; }
-            }
+            } else if bound_val > min_y_i { min_y_i = bound_val; }
         } else if at_ub && !at_lb {
             if a_ij > 0.0 {
                 if bound_val > min_y_i { min_y_i = bound_val; }
-            } else {
-                if bound_val < max_y_i { max_y_i = bound_val; }
-            }
+            } else if bound_val < max_y_i { max_y_i = bound_val; }
         } else {
             if bound_val < max_y_i { max_y_i = bound_val; }
             if bound_val > min_y_i { min_y_i = bound_val; }

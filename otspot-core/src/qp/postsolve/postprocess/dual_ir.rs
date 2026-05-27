@@ -394,7 +394,7 @@ pub(crate) fn try_dual_only_ir(
                 let mut aty = TwoFloat::from(0.0);
                 for k in problem.a.col_ptr[j]..problem.a.col_ptr[j + 1] {
                     let r = problem.a.row_ind[k];
-                    aty = aty + y_dd_new[r] * problem.a.values[k];
+                    aty += y_dd_new[r] * problem.a.values[k];
                 }
                 let bc = bound_contrib_at_var(&problem.bounds, &bound_duals_new, j);
                 let r_d = f64::from(qx + TwoFloat::from(problem.c[j]) + aty + TwoFloat::from(bc));

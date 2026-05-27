@@ -34,7 +34,7 @@ pub(crate) fn refine_dual_lsq(
         let ce = problem.q.col_ptr[col + 1];
         for k in cs..ce {
             let row = problem.q.row_ind[k];
-            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[row] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let aty_dd = |y: &[f64]| -> Vec<TwoFloat> {
@@ -44,7 +44,7 @@ pub(crate) fn refine_dual_lsq(
             let ce = problem.a.col_ptr[col + 1];
             for k in cs..ce {
                 let row = problem.a.row_ind[k];
-                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], y[row]);
+                acc[col] += TwoFloat::new_mul(problem.a.values[k], y[row]);
             }
         }
         acc
@@ -121,8 +121,7 @@ pub(crate) fn refine_dual_lsq_irls(
     for col in 0..n {
         let xv = result.solution[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] =
-                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -147,7 +146,7 @@ pub(crate) fn refine_dual_lsq_irls(
         for col in 0..n {
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
                 let row = problem.a.row_ind[k];
-                acc[col] = acc[col] + TwoFloat::new_mul(problem.a.values[k], y[row]);
+                acc[col] += TwoFloat::new_mul(problem.a.values[k], y[row]);
             }
         }
         acc.iter().map(|&v| f64::from(v)).collect()
@@ -237,7 +236,7 @@ pub(crate) fn refine_dual_lsq_irls(
             let wt = weights[col] * target[col];
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
                 let row = problem.a.row_ind[k];
-                rhs_dd[row] = rhs_dd[row] + TwoFloat::new_mul(problem.a.values[k], wt);
+                rhs_dd[row] += TwoFloat::new_mul(problem.a.values[k], wt);
             }
         }
         let rhs: Vec<f64> = rhs_dd.iter().map(|&v| f64::from(v)).collect();

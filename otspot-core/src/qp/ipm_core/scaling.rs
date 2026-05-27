@@ -27,7 +27,7 @@ fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     for col in 0..problem.a.ncols {
         let xv = x[col];
         for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-            ax_dd[problem.a.row_ind[k]] = ax_dd[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+            ax_dd[problem.a.row_ind[k]] += TwoFloat::new_mul(problem.a.values[k], xv);
         }
     }
     let mut max_v = 0.0_f64;
@@ -245,14 +245,14 @@ pub(crate) fn check_dfeas_status_relative(
     for col in 0..n {
         let xv = x[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] = qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
     if problem.a.nrows > 0 && !y.is_empty() {
         for col in 0..n {
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(problem.a.values[k], y[problem.a.row_ind[k]]);
+                aty_dd[col] += TwoFloat::new_mul(problem.a.values[k], y[problem.a.row_ind[k]]);
             }
         }
     }
@@ -312,8 +312,7 @@ fn complementarity_relative(
         for col in 0..problem.a.ncols {
             let xv = x[col];
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                ax[problem.a.row_ind[k]] =
-                    ax[problem.a.row_ind[k]] + TwoFloat::new_mul(problem.a.values[k], xv);
+                ax[problem.a.row_ind[k]] += TwoFloat::new_mul(problem.a.values[k], xv);
             }
         }
         ax

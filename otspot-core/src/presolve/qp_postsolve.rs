@@ -255,7 +255,7 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     for k in s..e {
         let r = orig.a.row_ind[k];
         if r == row { continue; }
-        aty_others_dd = aty_others_dd + TwoFloat::new_mul(orig.a.values[k], sol.dual_solution[r]);
+        aty_others_dd += TwoFloat::new_mul(orig.a.values[k], sol.dual_solution[r]);
     }
     let aty_col_others = f64::from(aty_others_dd);
 
@@ -315,7 +315,7 @@ fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
     let e = q.col_ptr[col + 1];
     for ptr in s..e {
         let k = q.row_ind[ptr];
-        sum = sum + TwoFloat::new_mul(q.values[ptr], x[k]);
+        sum += TwoFloat::new_mul(q.values[ptr], x[k]);
     }
     f64::from(sum)
 }

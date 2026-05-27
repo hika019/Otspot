@@ -32,6 +32,10 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+/// Factory function type for constructing a rayon ThreadPool (used for test injection).
+type ThreadPoolFactory =
+    Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>;
+
 /// Numerical Recipes LCG 定数 (Park-Miller-Carta 系列)。full-period 2^32。
 /// xorshift より弱いが multistart 用途では再現性とポータビリティを優先。
 const LCG_A: u64 = 1_664_525;
@@ -216,8 +220,7 @@ pub(crate) struct MultiStartHooks {
     pub disable_deadline_shortcut: bool,
     /// ThreadPool 構築を差し替えるファクトリ (None = デフォルト rayon builder)。
     /// テストで失敗注入に使う。失敗時は serial fallback へ移行する。
-    pub thread_pool_factory:
-        Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>,
+    pub thread_pool_factory: ThreadPoolFactory,
 }
 
 /// Multi-start QP solver。`config.n_starts == 1` は cold solve 1 回 (= 既存挙動)。
@@ -276,7 +279,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
 
     // worker 入口で deadline 短絡: rayon は queued task を mid-flight cancel できないため
     // 並列 path では worker 内で確認、超過済なら solve せず Timeout stub を返す。
-    let shortcut_enabled = hooks.map_or(true, |h| !h.disable_deadline_shortcut);
+    let shortcut_enabled = hooks.is_none_or(|h| !h.disable_deadline_shortcut);
     let worker = |warm: Option<QpWarmStart>| -> SolverResult {
         if shortcut_enabled && shared_opts.deadline.is_some_and(|d| Instant::now() >= d) {
             return SolverResult {
@@ -301,7 +304,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
         warms
             .into_iter()
             .take_while(|_| {
-                !shortcut_enabled || !shared_opts.deadline.is_some_and(|d| Instant::now() >= d)
+                !shortcut_enabled || shared_opts.deadline.is_none_or(|d| Instant::now() < d)
             })
             .map(worker)
             .collect()

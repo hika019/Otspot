@@ -46,9 +46,7 @@ fn compute_residual_dd(aug_mat: &CscMatrix, sol: &[f64], rhs: &[f64], out: &mut 
     let mut hi = vec![0.0_f64; n];
     let mut lo = vec![0.0_f64; n];
 
-    for i in 0..n {
-        hi[i] = rhs[i];
-    }
+    hi[..n].copy_from_slice(&rhs[..n]);
 
     for col in 0..aug_mat.ncols {
         let xv_c = sol[col];
@@ -268,7 +266,7 @@ pub(crate) fn solve_kkt_via_schur(
         for k in cs..ce {
             let row = a_ext.row_ind[k];
             let v = a_ext.values[k];
-            a_dx_dd[row] = a_dx_dd[row] + TwoFloat::new_mul(v, dx_col);
+            a_dx_dd[row] += TwoFloat::new_mul(v, dx_col);
         }
     }
     for i in 0..m_ext {

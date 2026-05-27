@@ -28,7 +28,7 @@ use super::outcome::{IpmOutcome, ProblemView};
 const QP_GUARD_CATASTROPHIC_TOL: f64 = 1e-1;
 
 thread_local! {
-    static QP_GUARD_DISABLED: Cell<bool> = Cell::new(false);
+    static QP_GUARD_DISABLED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Runs `f` with `guard_qp_optimal` bypassed.
@@ -477,7 +477,7 @@ fn solve_ipm_with_runner(
     if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
         let fallback_pre = QpPresolveResult::no_reduction(problem);
         for use_ruiz_fb in [false, true] {
-            if total_deadline.map_or(false, |d| Instant::now() >= d) {
+            if total_deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
             opts.deadline = total_deadline;

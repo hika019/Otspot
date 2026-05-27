@@ -76,11 +76,11 @@ const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 ///
 /// 各 node の local solve は `solve_qp_with` 経由 = inertia 補正付き IPM
 /// + warm start で parent 解継承。下界 default は α-BB (`bound_alpha_bb`、Phase 4)、
-/// `use_alpha_bb=false` で interval_quadratic_bounds (Phase 3 fallback) に切替可。
-/// BB 探索の統計 (テスト sentinel 用、production API には含めない)。
-/// `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
-/// `max_depth_seen`: 探索 tree 内で到達した最大 depth。
-/// `pruned`: 子展開前に枝刈で discard した node 数。
+///   `use_alpha_bb=false` で interval_quadratic_bounds (Phase 3 fallback) に切替可。
+///   BB 探索の統計 (テスト sentinel 用、production API には含めない)。
+///   `nodes_processed`: solve_local_upper_bound 呼び出し総回数 (root 含む)。
+///   `max_depth_seen`: 探索 tree 内で到達した最大 depth。
+///   `pruned`: 子展開前に枝刈で discard した node 数。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GlobalStats {
     pub nodes_processed: usize,
@@ -316,7 +316,7 @@ fn is_q_indefinite(problem: &QpProblem) -> bool {
 }
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {
-    deadline.map_or(false, |d| Instant::now() >= d)
+    deadline.is_some_and(|d| Instant::now() >= d)
 }
 
 /// 当該 box に対する lower bound。

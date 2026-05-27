@@ -139,6 +139,7 @@ pub fn prove_optimal<'a>(
         ("dual_sign",         dsign),
         ("duality_gap",       gap),
     ] {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)] // NaN must fail: !(NaN <= tol) = true, NaN > tol = false
         if !(val <= tol) { failing.push(name); }
     }
 

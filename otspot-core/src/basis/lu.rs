@@ -12,6 +12,9 @@
 
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
+
+/// (col_ptr, row_ind, values) triple for a reconstructed basis CSC matrix.
+type BasisCscParts = (Vec<usize>, Vec<usize>, Vec<f64>);
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::sparse::linalg::lu::{
     factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu,
@@ -129,7 +132,7 @@ fn build_basis_csc(
     a: &CscMatrix,
     basis: &[usize],
     m: usize,
-) -> Result<(Vec<usize>, Vec<usize>, Vec<f64>), SolverError> {
+) -> Result<BasisCscParts, SolverError> {
     let mut col_ptr = vec![0usize; m + 1];
     let mut row_ind: Vec<usize> = Vec::new();
     let mut values: Vec<f64> = Vec::new();

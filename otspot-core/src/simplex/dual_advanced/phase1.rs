@@ -19,8 +19,8 @@
 //!    - 人工変数: `c_aug[a_i] = big_m`
 //!    - 元変数 j: `c_aug[j] = c[j] + delta_j`、
 //!      `delta_j = max(0, big_m * Σ_{i: needs_art} a[i, j] - c[j])`
-//!    これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
-//!    全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
+//!      これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
+//!      全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
 //! 3. **Phase I (Dual Simplex, Harris ratio test 装備の `dual_simplex_core_advanced`)**:
 //!    x_B ≥ 0 のまま (b ≥ 0 で初期から主実行可能) なので Phase I は通常 0 反復
 //!    で即終了する。役割は「双対基底を構成し、後続 Phase II で safe な warm
@@ -275,10 +275,8 @@ fn build_identity_phase1_state(
         let delta = need.max(0.0);
         c_aug_p1[j] = c[j] + delta;
     }
-    for col_opt in artificial_col_of_row.iter() {
-        if let Some(col) = col_opt {
-            c_aug_p1[*col] = big_m;
-        }
+    for col in artificial_col_of_row.iter().flatten() {
+        c_aug_p1[*col] = big_m;
     }
 
     let mut basis_aug = sf.initial_basis.clone();
@@ -441,10 +439,8 @@ fn try_build_crash_phase1_state(
     for &col in &basis_aug { in_basis[col] = true; }
 
     let mut c_aug_p1 = vec![0.0_f64; n_aug];
-    for col_opt in artificial_col_of_row.iter() {
-        if let Some(col) = col_opt {
-            c_aug_p1[*col] = big_m;
-        }
+    for col in artificial_col_of_row.iter().flatten() {
+        c_aug_p1[*col] = big_m;
     }
     for j in 0..n_total {
         if in_basis[j] {
@@ -604,10 +600,8 @@ pub(crate) fn big_m_cold_start(
     // なら leaving (= artificial が basis から自然に追い出される)。
     let mut c_aug_p2 = vec![0.0_f64; n_aug];
     c_aug_p2[..n_total].copy_from_slice(c);
-    for col_opt in artificial_col_of_row.iter() {
-        if let Some(col) = col_opt {
-            c_aug_p2[*col] = big_m;
-        }
+    for col in artificial_col_of_row.iter().flatten() {
+        c_aug_p2[*col] = big_m;
     }
 
     let mut pricing = SteepestEdgePricing::new(n_aug);

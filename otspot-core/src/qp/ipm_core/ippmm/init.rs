@@ -139,7 +139,7 @@ fn mehrotra_cold_init(
             &k_init, &perm_init, timeout_ctx.deadline, kkt_cfg, Some(n), par,
         ) {
             let mut rhs_init = vec![0.0_f64; n + m_ext];
-            for i in 0..m_ext { rhs_init[n + i] = r_p[i]; }
+            rhs_init[n..(m_ext + n)].copy_from_slice(&r_p[..m_ext]);
             let mut sol_init = vec![0.0_f64; n + m_ext];
             fac_init.solve(&rhs_init, &mut sol_init);
             let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));

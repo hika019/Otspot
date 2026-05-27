@@ -1,3 +1,8 @@
+// QpPresolveResult is the canonical early-exit sentinel for QP presolve steps.
+// It is large (536 bytes) because it carries the reduced problem state, but it is
+// a short-lived computation result never stored long-term; boxing would complicate
+// every caller without reducing peak memory.
+#![allow(clippy::result_large_err)]
 //! QP presolve Phase 1: reductions for `min ½x'Qx + c'x  s.t. Ax ⋄ b, lb ≤ x ≤ ub`
 //! plus the postsolve metadata to reverse them. Q is stored as the full
 //! symmetric matrix.
