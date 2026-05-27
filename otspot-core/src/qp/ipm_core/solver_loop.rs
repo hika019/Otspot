@@ -268,7 +268,7 @@ pub(crate) fn solve_kkt_via_schur(
         for k in cs..ce {
             let row = a_ext.row_ind[k];
             let v = a_ext.values[k];
-            a_dx_dd[row] = a_dx_dd[row] + TwoFloat::new_mul(v, dx_col);
+            a_dx_dd[row] += TwoFloat::new_mul(v, dx_col);
         }
     }
     for i in 0..m_ext {

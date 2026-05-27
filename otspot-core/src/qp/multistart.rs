@@ -276,7 +276,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
 
     // worker 入口で deadline 短絡: rayon は queued task を mid-flight cancel できないため
     // 並列 path では worker 内で確認、超過済なら solve せず Timeout stub を返す。
-    let shortcut_enabled = hooks.map_or(true, |h| !h.disable_deadline_shortcut);
+    let shortcut_enabled = hooks.is_none_or(|h| !h.disable_deadline_shortcut);
     let worker = |warm: Option<QpWarmStart>| -> SolverResult {
         if shortcut_enabled && shared_opts.deadline.is_some_and(|d| Instant::now() >= d) {
             return SolverResult {
@@ -301,7 +301,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
         warms
             .into_iter()
             .take_while(|_| {
-                !shortcut_enabled || !shared_opts.deadline.is_some_and(|d| Instant::now() >= d)
+                !shortcut_enabled || shared_opts.deadline.is_none_or(|d| Instant::now() < d)
             })
             .map(worker)
             .collect()

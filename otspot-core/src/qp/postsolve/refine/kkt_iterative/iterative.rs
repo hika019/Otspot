@@ -465,7 +465,7 @@ pub(crate) fn refine_kkt_iterative(
                 for k in cs..ce {
                     let row = problem.q.row_ind[k];
                     let v = problem.q.values[k];
-                    qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(v, xv);
+                    qx_dd[row] += TwoFloat::new_mul(v, xv);
                 }
             }
             let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
@@ -475,7 +475,7 @@ pub(crate) fn refine_kkt_iterative(
                 for k in cs..ce {
                     let row = problem.a.row_ind[k];
                     let v = problem.a.values[k];
-                    aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(v, y[row]);
+                    aty_dd[col] += TwoFloat::new_mul(v, y[row]);
                 }
             }
             let mut r_d = vec![0.0_f64; n];
@@ -494,7 +494,7 @@ pub(crate) fn refine_kkt_iterative(
                 for k in cs..ce {
                     let row = problem.a.row_ind[k];
                     let v = problem.a.values[k];
-                    ax_dd[row] = ax_dd[row] + TwoFloat::new_mul(v, x[col]);
+                    ax_dd[row] += TwoFloat::new_mul(v, x[col]);
                 }
             }
             let mut r_p = vec![0.0_f64; m];

@@ -240,7 +240,7 @@ fn solve_aat_direct_ir(
             let ce = a_sub.col_ptr[col + 1];
             for k in cs..ce {
                 let row = a_sub.row_ind[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(a_sub.values[k], y[row]);
+                aty_dd[col] += TwoFloat::new_mul(a_sub.values[k], y[row]);
             }
         }
         let r_dd: Vec<TwoFloat> = (0..n).map(|j| target_dd[j] - aty_dd[j]).collect();
@@ -330,7 +330,7 @@ pub(crate) fn compute_lsq_dual_y(
         let ce = problem.q.col_ptr[col + 1];
         for k in cs..ce {
             let row = problem.q.row_ind[k];
-            qx_dd[row] = qx_dd[row] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[row] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
@@ -482,8 +482,7 @@ pub(crate) fn compute_lsq_dual_y(
             let orig_row = problem.a.row_ind[k];
             if let Some(yfi) = fixed_y[orig_row] {
                 if yfi != 0.0 {
-                    target_adj_dd[col] =
-                        target_adj_dd[col] - TwoFloat::new_mul(problem.a.values[k], yfi);
+                    target_adj_dd[col] -= TwoFloat::new_mul(problem.a.values[k], yfi);
                 }
             }
         }

@@ -580,7 +580,7 @@ pub(crate) fn extract_solution_bounded(
         let info = &bsf.orig_var_info[orig_j];
         let mut value = TwoFloat::from(info.offset);
         for &(new_idx, coeff) in &info.new_vars {
-            value = value + TwoFloat::new_mul(coeff, x_new[new_idx]);
+            value += TwoFloat::new_mul(coeff, x_new[new_idx]);
         }
         *sol_j = f64::from(value);
     }

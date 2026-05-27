@@ -21,8 +21,7 @@ pub(crate) fn refit_bound_duals_kkt(
     for col in 0..n {
         let xv = x[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] =
-                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -30,8 +29,7 @@ pub(crate) fn refit_bound_duals_kkt(
         let mut acc: Vec<TwoFloat> = vec![zero_dd; n];
         for col in 0..n {
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                acc[col] = acc[col]
-                    + TwoFloat::new_mul(
+                acc[col] += TwoFloat::new_mul(
                         problem.a.values[k],
                         result.dual_solution[problem.a.row_ind[k]],
                     );

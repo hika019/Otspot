@@ -153,7 +153,7 @@ where
         cs = gbar / gamma;
         sn = beta / gamma;
         let phi = cs * phibar;
-        phibar = sn * phibar;
+        phibar *= sn;
 
         // ── Update x ─────────────────────────────────
         // w_new = (v - oldeps * w2 - delta * w) / gamma

@@ -389,7 +389,7 @@ fn build_and_solve_cleanup_lp(
             }
         };
         p2_b.push(rhs);
-        p2_ct.push(ct_clean_keep[orig_idx].clone());
+        p2_ct.push(ct_clean_keep[orig_idx]);
     }
     // (ii) Tie-break Eq rows: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0.
     for i in 0..n_yvars {
@@ -523,15 +523,11 @@ fn recover_removed_row_dual(
         if at_lb && !at_ub {
             if a_ij > 0.0 {
                 if bound_val < max_y_i { max_y_i = bound_val; }
-            } else {
-                if bound_val > min_y_i { min_y_i = bound_val; }
-            }
+            } else if bound_val > min_y_i { min_y_i = bound_val; }
         } else if at_ub && !at_lb {
             if a_ij > 0.0 {
                 if bound_val > min_y_i { min_y_i = bound_val; }
-            } else {
-                if bound_val < max_y_i { max_y_i = bound_val; }
-            }
+            } else if bound_val < max_y_i { max_y_i = bound_val; }
         } else {
             if bound_val < max_y_i { max_y_i = bound_val; }
             if bound_val > min_y_i { min_y_i = bound_val; }

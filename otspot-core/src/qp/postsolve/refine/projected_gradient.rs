@@ -25,8 +25,7 @@ pub(crate) fn refine_dual_projected_gradient(
     for col in 0..n {
         let xv = result.solution[col];
         for k in problem.q.col_ptr[col]..problem.q.col_ptr[col + 1] {
-            qx_dd[problem.q.row_ind[k]] =
-                qx_dd[problem.q.row_ind[k]] + TwoFloat::new_mul(problem.q.values[k], xv);
+            qx_dd[problem.q.row_ind[k]] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();

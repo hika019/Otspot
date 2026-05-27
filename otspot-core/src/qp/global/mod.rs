@@ -316,7 +316,7 @@ fn is_q_indefinite(problem: &QpProblem) -> bool {
 }
 
 fn deadline_hit(deadline: &Option<Instant>) -> bool {
-    deadline.map_or(false, |d| Instant::now() >= d)
+    deadline.is_some_and(|d| Instant::now() >= d)
 }
 
 /// 当該 box に対する lower bound。

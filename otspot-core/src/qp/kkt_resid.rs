@@ -213,7 +213,7 @@ pub mod dd_impl {
             let xv = x[col];
             for k in q.col_ptr[col]..q.col_ptr[col + 1] {
                 let row = q.row_ind[k];
-                out[row] = out[row] + TwoFloat::new_mul(q.values[k], xv);
+                out[row] += TwoFloat::new_mul(q.values[k], xv);
             }
         }
         out
@@ -229,7 +229,7 @@ pub mod dd_impl {
         for col in 0..a.ncols {
             for k in a.col_ptr[col]..a.col_ptr[col + 1] {
                 let row = a.row_ind[k];
-                out[col] = out[col] + TwoFloat::new_mul(a.values[k], y[row]);
+                out[col] += TwoFloat::new_mul(a.values[k], y[row]);
             }
         }
         out
@@ -245,7 +245,7 @@ pub mod dd_impl {
         for col in 0..a.ncols {
             let xv = x[col];
             for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                out[a.row_ind[k]] = out[a.row_ind[k]] + TwoFloat::new_mul(a.values[k], xv);
+                out[a.row_ind[k]] += TwoFloat::new_mul(a.values[k], xv);
             }
         }
         out

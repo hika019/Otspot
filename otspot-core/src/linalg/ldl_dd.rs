@@ -62,13 +62,13 @@ impl LdlFactorizationDdAmd {
             let yj = x[j];
             for p in self.l_col_ptr[j]..self.l_col_ptr[j + 1] {
                 let i = self.l_row_ind[p];
-                x[i] = x[i] - self.l_values[p] * yj;
+                x[i] -= self.l_values[p] * yj;
             }
         }
 
         // diagonal solve: y' = y / D
         for j in 0..n {
-            x[j] = x[j] / self.d[j];
+            x[j] /= self.d[j];
         }
 
         // back solve: L^T z = y'
@@ -77,9 +77,9 @@ impl LdlFactorizationDdAmd {
             let mut sum = TwoFloat::from(0.0);
             for p in self.l_col_ptr[j]..self.l_col_ptr[j + 1] {
                 let i = self.l_row_ind[p];
-                sum = sum + self.l_values[p] * x[i];
+                sum += self.l_values[p] * x[i];
             }
-            x[j] = x[j] - sum;
+            x[j] -= sum;
         }
 
         let x_f64: Vec<f64> = x.iter().map(|&v| f64::from(v)).collect();
@@ -170,7 +170,7 @@ fn ldl_numeric_dd(
                 continue; // strict lower-tri input shouldn't occur (upper-tri storage)
             }
             // accumulate A[i_orig, k] into Y[i_orig]
-            y[i_orig] = y[i_orig] + a_values[p];
+            y[i_orig] += a_values[p];
             // collect etree path from i_orig (skip if already flagged, including i_orig==k)
             let mut i = i_orig;
             let mut len = 0usize;
@@ -210,13 +210,13 @@ fn ldl_numeric_dd(
             let ce = cs + lnz_running[i];
             for p in cs..ce {
                 let row = l_row_ind[p];
-                y[row] = y[row] - l_values[p] * yi;
+                y[row] -= l_values[p] * yi;
             }
 
             // L[k, i] = yi / D[i]
             let l_ki = yi / d[i];
             // D[k] -= L[k, i] * yi
-            dk = dk - l_ki * yi;
+            dk -= l_ki * yi;
 
             // Store L[k, i] at end of column i
             let pos = l_col_ptr[i] + lnz_running[i];
