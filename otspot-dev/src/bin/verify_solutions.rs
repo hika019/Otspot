@@ -151,9 +151,8 @@ fn main() {
 
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--qplib" => use_qplib = true,
-            _ => {}
+        if args[i].as_str() == "--qplib" {
+            use_qplib = true;
         }
         i += 1;
     }

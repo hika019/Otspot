@@ -183,8 +183,7 @@ fn main() {
         dfeas_rel_componentwise, argmax_componentwise);
     println!();
     println!("=== top 20 by component-wise residual ===");
-    for k in 0..per_col.len().min(20) {
-        let (j, r_rel, r, qxj, atyj, bndj, cj) = per_col[k];
+    for (j, r_rel, r, qxj, atyj, bndj, cj) in per_col.iter().copied().take(20) {
         let scale_j = 1.0 + qxj.abs() + atyj.abs() + bndj.abs() + cj.abs();
         let (lbj, ubj) = prob.bounds[j];
         println!("  j={} r_rel={:.3e} r={:.3e} scale={:.3e} | qx={:.3e} aty={:.3e} bnd={:.3e} c={:.3e} | bounds=[{:.3e},{:.3e}] x={:.3e}",

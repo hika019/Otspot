@@ -104,6 +104,7 @@ fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, Benc
     parse_qps(path).map_err(BenchError::Parse)
 }
 
+#[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
 mod tests {
     use super::*;

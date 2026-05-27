@@ -359,12 +359,10 @@ impl QpsParser {
             (parts[2].to_string(), None)
         } else if parts.len() >= 4 {
             (parts[2].to_string(), parts[3].parse::<f64>().ok())
+        } else if let Ok(v) = parts[2].parse::<f64>() {
+            (parts[1].to_string(), Some(v))
         } else {
-            if let Ok(v) = parts[2].parse::<f64>() {
-                (parts[1].to_string(), Some(v))
-            } else {
-                (parts[2].to_string(), None)
-            }
+            (parts[2].to_string(), None)
         };
         self.bounds.push((bound_type, col_name, value));
         Ok(())

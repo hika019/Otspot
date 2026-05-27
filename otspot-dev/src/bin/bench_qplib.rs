@@ -58,6 +58,7 @@ fn classify_unsupported(msg: &str) -> UnsupportedCategory {
     }
 }
 
+#[allow(clippy::items_after_test_module)] // fn main() and helpers follow; reorganising is disruptive
 #[cfg(test)]
 mod unsupported_classify_tests {
     use super::{classify_unsupported, UnsupportedCategory};

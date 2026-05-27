@@ -132,10 +132,10 @@ pub fn convex_miqp_lcg(seed: u64) -> Lcg {
 /// (e.g. for constraints) and reproduce the original stream bit-for-bit.
 pub fn build_convex_qc(lcg: &mut Lcg, n: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
     let mut l = vec![vec![0.0_f64; n]; n];
-    for i in 0..n {
-        l[i][i] = 1.0;
-        for j in 0..i {
-            l[i][j] = lcg.next_f64() - 0.5;
+    for (i, row) in l.iter_mut().enumerate() {
+        row[i] = 1.0;
+        for elem in &mut row[..i] {
+            *elem = lcg.next_f64() - 0.5;
         }
     }
     let mut q = vec![vec![0.0_f64; n]; n];

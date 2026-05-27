@@ -284,7 +284,7 @@ fn main() {
     let progress = |w: &mut BufWriter<File>, r: &Row, done: &mut usize| {
         writeln!(w, "{}", r.csv_line()).unwrap();
         *done += 1;
-        if *done % 10 == 0 {
+        if (*done).is_multiple_of(10) {
             print!("\r  {}/{} done...", *done, total);
             std::io::stdout().flush().unwrap();
         }
