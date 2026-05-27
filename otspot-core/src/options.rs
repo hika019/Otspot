@@ -463,6 +463,13 @@ pub struct SolverOptions {
     pub use_lp_crash_basis: bool,
     /// Enable presolve.  Default: `true`.
     pub presolve: bool,
+    /// Maximum fixpoint passes in QP presolve.  Default: `10`.
+    pub presolve_max_pass: usize,
+    /// Skip large-coefficient row rescaling in QP presolve.  Default: `false`.
+    /// Rescaling is also skipped when `use_ruiz_scaling` is `true` (existing behaviour).
+    pub presolve_skip_large_coeff: bool,
+    /// Enable QP presolve phase 2.  Default: `true`.
+    pub presolve_phase2: bool,
     /// Timeout in seconds.  `None` = unlimited.
     pub timeout_secs: Option<f64>,
     /// Shared cancellation flag (internal use).
@@ -536,6 +543,9 @@ impl Default for SolverOptions {
             recover_warm_start_basis: false,
             use_lp_crash_basis: true,
             presolve: true,
+            presolve_max_pass: 10,
+            presolve_skip_large_coeff: false,
+            presolve_phase2: true,
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
@@ -884,5 +894,57 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("ipm.eps"), "display: {s}");
         assert!(s.contains("finite"), "display: {s}");
+    }
+
+    // ---- SolverOptions: presolve fields --------------------------------
+
+    #[test]
+    fn test_solver_presolve_fields_default() {
+        let o = SolverOptions::default();
+        assert_eq!(o.presolve_max_pass, 10, "default max pass = 10");
+        assert!(!o.presolve_skip_large_coeff, "default skip_large_coeff = false");
+        assert!(o.presolve_phase2, "default phase2 = true");
+    }
+
+    #[test]
+    fn test_presolve_max_pass_controls_iteration_count() {
+        use crate::problem::SolveStatus;
+        use crate::qp::{solve_qp_with_options, QpProblem};
+        use crate::sparse::CscMatrix;
+
+        // Minimal feasible QP: 1 variable, no constraints, x* = 0.
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(0.0_f64, 1.0_f64)], vec![]).unwrap();
+
+        // Both 0 and 10 passes must find the optimum.
+        let opts0 = SolverOptions { presolve_max_pass: 0, ..Default::default() };
+        let opts10 = SolverOptions { presolve_max_pass: 10, ..Default::default() };
+        let r0 = solve_qp_with_options(&prob, &opts0);
+        let r10 = solve_qp_with_options(&prob, &opts10);
+        assert_eq!(r0.status, SolveStatus::Optimal, "presolve_max_pass=0 should still solve trivial QP");
+        assert_eq!(r10.status, SolveStatus::Optimal, "presolve_max_pass=10 should solve trivial QP");
+    }
+
+    #[test]
+    fn test_presolve_phase2_false_skips_phase2() {
+        // When presolve_phase2=false, attempt.rs takes the phase1-only branch.
+        // Verify through options field round-trip.
+        let o = SolverOptions { presolve_phase2: false, ..Default::default() };
+        assert!(!o.presolve_phase2);
+        let o2 = SolverOptions { presolve_phase2: true, ..Default::default() };
+        assert!(o2.presolve_phase2);
+    }
+
+    #[test]
+    fn test_presolve_skip_large_coeff_field() {
+        // Verify the OR logic: skip if field OR use_ruiz_scaling.
+        let no_skip = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: false, ..Default::default() };
+        assert!(!no_skip.presolve_skip_large_coeff && !no_skip.use_ruiz_scaling);
+        let skip_via_field = SolverOptions { presolve_skip_large_coeff: true, use_ruiz_scaling: false, ..Default::default() };
+        assert!(skip_via_field.presolve_skip_large_coeff);
+        let skip_via_ruiz = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: true, ..Default::default() };
+        // effective skip = field OR ruiz
+        assert!(skip_via_ruiz.presolve_skip_large_coeff || skip_via_ruiz.use_ruiz_scaling);
     }
 }

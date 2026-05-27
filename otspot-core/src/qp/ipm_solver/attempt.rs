@@ -360,10 +360,10 @@ fn solve_ipm_with_runner(
         && problem.num_constraints <= PRESOLVE_SIZE_LIMIT
     {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
-        if std::env::var("QP_PRESOLVE_PHASE2").ok().as_deref() == Some("0") {
-            phase1
-        } else {
+        if opts.presolve_phase2 {
             run_qp_presolve_phase2(phase1, &opts)
+        } else {
+            phase1
         }
     } else {
         crate::presolve::QpPresolveResult::no_reduction(problem)

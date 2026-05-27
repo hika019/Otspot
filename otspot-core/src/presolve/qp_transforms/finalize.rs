@@ -202,8 +202,7 @@ fn apply_large_coeff_if_needed(
 ) {
     let mut a_mut = reduced.a.clone();
     let mut b_mut = reduced.b.clone();
-    let skip_lcs = std::env::var("QP_PRESOLVE_SKIP_LARGE_COEFF").ok().as_deref() == Some("1")
-        || opts.use_ruiz_scaling;
+    let skip_lcs = opts.presolve_skip_large_coeff || opts.use_ruiz_scaling;
     let n_new = reduced.num_vars;
     let scales = if skip_lcs {
         vec![1.0; reduced.a.nrows]
