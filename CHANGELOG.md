@@ -2,7 +2,7 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.0] - 2026-05-26
+## [0.2.0] - 2026-05-27
 
 ### 破壊的変更
 
@@ -22,6 +22,16 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - `CscMatrix` の読み取り専用カプセル化（構築時に不変条件を強制）。
 - MPS / QPS ストリーミングパーサ（`BufRead` 化で大規模インスタンスのピークメモリを削減）。
 - マルチスタートの直列フォールバック（rayon panic 時も単一スレッドで継続）。
+
+### 修正
+
+- 全変数が presolve で消去される QP（全列が空のケース）が `NumericalError` を返していた問題を修正。presolve が完全に解いた解を、双対・証明を復元したうえで `Optimal` として正しく返す。
+- 非凸 QP の branch-and-bound で、局所解の双対回収が不十分なまま打ち切られ KKT 残差が許容を超えるケースを修正。polish 結果を KKT 残差（双対符号を含む）で直接検証して採用する。
+
+### 削除
+
+- in-tree Python バインディング（`python/`）を削除（別リポジトリで管理）。
+- 未使用の内部依存（`mimalloc` ほか）・`criterion` マイクロベンチ・dead code を整理。
 
 ## [0.1.1] - 2026-05-23
 
