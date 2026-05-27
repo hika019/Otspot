@@ -421,7 +421,7 @@ mod tests {
     /// DD LDL は ε_DD ≈ 5e-32 まで詰められること (より小さい residual を返す)。
     #[test]
     fn dd_ldl_outperforms_f64_for_ill_conditioned() {
-        use crate::linalg::ldl::factorize_quasidefinite_with_cached_perm;
+        use crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par;
         // Hilbert-like ill-conditioned 4x4 (PD)
         // H[i,j] = 1 / (i + j + 1), cond ~ 1.5e4 for n=4
         let n = 4;
@@ -437,7 +437,7 @@ mod tests {
         let fac_dd =
             factorize_quasidefinite_with_cached_perm_dd(&mat, &perm, None).expect("dd factorize");
         let fac_f64 =
-            factorize_quasidefinite_with_cached_perm(&mat, &perm, None).expect("f64 factorize");
+            factorize_quasidefinite_with_cached_perm_budget_par(&mat, &perm, None, None, faer::Par::Seq).expect("f64 factorize");
 
         let b = vec![1.0f64; n];
         let mut x_dd = vec![0.0f64; n];

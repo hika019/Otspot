@@ -62,62 +62,21 @@ pub(crate) mod test_kkt;
 
 /// Thread-local peak-allocation tracker for memory sentinel tests.
 ///
-/// Wraps the system allocator and records, per-thread, the maximum net bytes
-/// concurrently live above a caller-defined baseline.  Using thread-local
-/// storage means tests running in parallel on different threads do not
-/// interfere with each other's measurements.
-///
-/// Usage in a test:
-/// ```ignore
-/// crate::peak_alloc::begin();
-/// do_heavy_work();
-/// let peak = crate::peak_alloc::peak_bytes();
-/// assert!(peak <= MAX_BYTES, "peak {peak} exceeds limit");
-/// ```
+/// Wraps the system allocator and records per-thread net live bytes.
+/// `TrackingAlloc` is wired as the `#[global_allocator]` in test builds so
+/// that any future sentinel test can read allocation deltas via `update`.
 #[cfg(test)]
 pub(crate) mod peak_alloc {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
 
     thread_local! {
-        /// Net bytes allocated on this thread (alloc - dealloc).
         static CURRENT: Cell<isize> = const { Cell::new(0) };
-        /// Baseline captured by `begin()`; delta is measured above this.
-        static BASELINE: Cell<isize> = const { Cell::new(0) };
-        /// Maximum (CURRENT - BASELINE) observed since last `begin()`.
-        static PEAK_DELTA: Cell<isize> = const { Cell::new(0) };
-    }
-
-    /// Record the current allocation level as the baseline for this thread.
-    pub fn begin() {
-        CURRENT.with(|c| BASELINE.with(|b| b.set(c.get())));
-        PEAK_DELTA.with(|p| p.set(0));
-    }
-
-    /// Peak bytes allocated above the baseline captured by `begin()`.
-    pub fn peak_bytes() -> usize {
-        PEAK_DELTA.with(|p| p.get().max(0) as usize)
-    }
-
-    /// Net live bytes above the baseline captured by `begin()`, right now
-    /// (not the peak). Used by accumulation sentinels to assert that memory
-    /// returns to baseline after each unit of work is dropped.
-    pub fn current_bytes() -> isize {
-        CURRENT.with(|c| c.get()) - BASELINE.with(|b| b.get())
     }
 
     #[inline]
     fn update(delta: isize) {
-        CURRENT.with(|c| {
-            let new = c.get() + delta;
-            c.set(new);
-            let above = new - BASELINE.with(|b| b.get());
-            PEAK_DELTA.with(|p| {
-                if above > p.get() {
-                    p.set(above);
-                }
-            });
-        });
+        CURRENT.with(|c| c.set(c.get() + delta));
     }
 
     pub struct TrackingAlloc;
@@ -172,7 +131,7 @@ pub use lp::solve_lp_with;
 pub use simplex::{solve, solve_with};
 
 /// Internal BFRT (Bound-Flipping Ratio Test) primitives for integration tests.
-/// Deferred for removal until typed pipeline (#15) restructures the simplex tree.
+/// Deferred for removal until typed pipeline restructures the simplex tree.
 #[doc(hidden)]
 pub mod bound_flip {
     pub use crate::simplex::dual_advanced::bound_flip::{

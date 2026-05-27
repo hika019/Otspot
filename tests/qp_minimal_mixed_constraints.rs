@@ -21,7 +21,6 @@
 
 use otspot::constraint;
 use otspot::model::Model;
-use otspot::sparse::CscMatrix;
 
 const EPS_OBJ_REL: f64 = 1e-6;
 const EPS_X_ABS: f64 = 1e-5;
@@ -53,15 +52,12 @@ fn assert_x_close(actual: f64, expected: f64, label: &str) {
 /// **狙い**: Ge 単独 (Le に変換) で IPM が Optimal、|y|=0.5 が成立。
 #[test]
 fn mix1_ge_constraint_dual_magnitude() {
-    let n = 2;
     let mut model = Model::new("mix1");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2) >= 1.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2);
 
     let result = model.solve().expect("mix1: solve");
     assert_x_close(result[x1], 0.5, "mix1: x1");
@@ -91,7 +87,6 @@ fn mix1_ge_constraint_dual_magnitude() {
 /// **狙い**: 3 制約タイプ混在で dual_solution.len()=3、Le/Ge 非 active dual ≈ 0。
 #[test]
 fn mix2_eq_le_ge_mixed_inactive_inequalities() {
-    let n = 3;
     let mut model = Model::new("mix2");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
@@ -100,9 +95,7 @@ fn mix2_eq_le_ge_mixed_inactive_inequalities() {
     model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
     model.add_constraint(constraint!(x1 <= 2.0));
     model.add_constraint(constraint!(x3 >= 0.5));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3);
 
     let result = model.solve().expect("mix2: solve");
     let xs = [x1, x2, x3];
@@ -140,7 +133,6 @@ fn mix2_eq_le_ge_mixed_inactive_inequalities() {
 /// **狙い**: Le active 時の dual の正値性 (|y_le|=8.5 程度) を確認。
 #[test]
 fn mix3_eq_le_active_dual_recovery() {
-    let n = 3;
     let mut model = Model::new("mix3");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
@@ -149,9 +141,9 @@ fn mix3_eq_le_active_dual_recovery() {
     model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
     model.add_constraint(constraint!(x1 <= 2.0));
     model.add_constraint(constraint!(x3 >= 0.5));
-    model.minimize(-10.0 * x1);
-    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(
+        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3 + (-10.0) * x1,
+    );
 
     let result = model.solve().expect("mix3: solve");
     // Ge は weakly active (y_ge*=0) のため IPM complementarity z_lb·slack=μ で
@@ -183,15 +175,12 @@ fn mix3_eq_le_active_dual_recovery() {
 /// **狙い**: `Model::set_obj_offset` が SolverResult.objective に加算されているか。
 #[test]
 fn mix4_obj_offset_addition() {
-    let n = 2;
     let mut model = Model::new("mix4");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2) == 1.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2);
     model.set_obj_offset(10.0);
 
     let result = model.solve().expect("mix4: solve");
@@ -209,15 +198,12 @@ fn mix4_obj_offset_addition() {
 ///   同じ問題に offset = -100。
 #[test]
 fn mix5_obj_offset_negative() {
-    let n = 2;
     let mut model = Model::new("mix5");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2) == 1.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2);
     model.set_obj_offset(-100.0);
 
     let result = model.solve().expect("mix5: solve");
@@ -237,16 +223,13 @@ fn mix5_obj_offset_negative() {
 ///         0 が詰められて元 row 数の dual_solution が返るか。
 #[test]
 fn mix6_redundant_le_row_dual_padded() {
-    let n = 2;
     let mut model = Model::new("mix6");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 0.0, 50.0);
     let x2 = model.add_var("x2", 0.0, 50.0);
     model.add_constraint(constraint!((x1 + x2) == 1.0));
     model.add_constraint(constraint!((x1 + x2) <= 100.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2);
 
     let result = model.solve().expect("mix6: solve");
     assert_x_close(result[x1], 0.5, "mix6: x1");

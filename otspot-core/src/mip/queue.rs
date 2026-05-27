@@ -1,4 +1,4 @@
-//! Best-bound-first priority queue for MILP/MIQP branch-and-bound (#14).
+//! Best-bound-first priority queue for MILP/MIQP branch-and-bound.
 //!
 //! `pop` returns the node with the smallest `lower_bound` (best-bound search);
 //! ties break FIFO (smaller insertion `seq` first) for determinism.

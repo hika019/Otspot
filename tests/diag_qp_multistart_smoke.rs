@@ -264,11 +264,10 @@ fn api_model_set_threads_propagates_to_qp_solve() {
     let mut m = Model::new("qp_threads_round_trip");
     let x = m.add_var("x", -1.0, 1.0);
     let y = m.add_var("y", -1.0, 1.0);
-    // 簡易 PSD QP: min 0.5 (x^2 + y^2) s.t. x + y <= 1、Q diag = [1, 1] で QP path 強制
-    m.set_diagonal_q(&[1.0, 1.0]);
+    // 簡易 PSD QP: min 0.5 (x^2 + y^2) + x s.t. x + y <= 1 (QP path 強制)
     let lhs: Expression = Expression::from(x) + Expression::from(y);
     m.add_constraint(lhs.leq(1.0));
-    m.minimize(Expression::from(x));
+    m.minimize(0.5 * x * x + 0.5 * y * y + 1.0 * x);
     m.set_threads(4);
     // QP solve が成功する (= threads=4 が QP path に valid に伝播、SolverOptions 壊れない)
     // 現状 threads は単発 QP solve では no-op (#31 完了まで)、伝播 path のみ確認

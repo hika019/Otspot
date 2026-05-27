@@ -1,8 +1,8 @@
 //! Model API 拡張 単体テスト:
 //! - `ModelResult.bound_duals` 露出
 //! - `Model::set_obj_offset(f64)`
+//! - QP DSL (minimize(x*x + ...)) による二次目的関数
 //! - `ModelError::SolveError::{MaxIterations, NumericalError}` 露出
-//! - `Model::set_diagonal_q(&[f64])` ergonomic helper
 
 use otspot::model::{Model, ModelError, SolutionProof, SolveError};
 use otspot::SolveStatus;
@@ -18,13 +18,11 @@ const NEG_INF: f64 = f64::NEG_INFINITY;
 #[test]
 fn model_api_exposes_bound_duals_qp() {
     // min x^2 + y^2  s.t. x,y in [0,1], no row constraints
-    // 解析解: x=y=0, lb 活性 → lb_dual > 0 (c の負勾配を相殺するためゼロ強度の可能性あり)
     // c=0 のため bound_dual=0 だが、長さ (n_lb+n_ub=4) は配線できていることを検証する。
     let mut model = Model::new("bound_duals_check");
-    let _x = model.add_var("x", 0.0, 1.0);
-    let _y = model.add_var("y", 0.0, 1.0);
-    model.set_diagonal_q(&[2.0, 2.0]);
-    model.minimize(0.0); // c=0
+    let x = model.add_var("x", 0.0, 1.0);
+    let y = model.add_var("y", 0.0, 1.0);
+    model.minimize(x * x + y * y); // Q = diag(2,2): x*x = (2/2)*x^2 = x^2
     let result = model.solve().expect("solve must succeed");
 
     // QP 経路では bound_duals が SolverResult から伝播される。長さ = n_lb + n_ub。
@@ -54,8 +52,7 @@ fn model_result_exposes_status_and_global_proof_for_optimal_lp() {
 fn model_result_exposes_status_and_global_proof_for_optimal_qp() {
     let mut model = Model::new("status_proof_qp");
     let x = model.add_var("x", 0.0, INF);
-    model.set_diagonal_q(&[2.0]);
-    model.minimize(-2.0 * x);
+    model.minimize(x * x + (-2.0) * x); // Q=[2]: x*x = x^2, c=-2
 
     let result = model.solve().expect("solve must succeed");
     assert_eq!(result.status, SolveStatus::Optimal);
@@ -74,8 +71,7 @@ fn model_api_bound_duals_active_lb_nonzero() {
     // Q=[1] 非ゼロなので solve_as_lp dispatch を避け IPM 経路で bound_dual を計算する。
     let mut model = Model::new("bound_dual_lb_active");
     let x = model.add_var("x", 0.0, INF);
-    model.set_diagonal_q(&[1.0]);
-    model.minimize(1.0 * x); // c=[1.0]
+    model.minimize(0.5 * x * x + 1.0 * x); // Q[0][0]=1: DSL (1/2)*x*x
     let result = model.solve().expect("solve must succeed");
 
     assert!(
@@ -128,8 +124,7 @@ fn model_api_set_obj_offset_qp() {
     let x = model.add_var("x", NEG_INF, INF);
     let y = model.add_var("y", NEG_INF, INF);
     model.add_constraint((x + y).eq_constraint(1.0));
-    model.set_diagonal_q(&[2.0, 2.0]);
-    model.minimize(0.0 * x + 0.0 * y);
+    model.minimize(x * x + y * y);
     model.set_obj_offset(-2.0);
 
     let result = model.solve().unwrap();
@@ -161,18 +156,17 @@ fn model_api_set_obj_offset_maximize() {
 }
 
 // ---------------------------------------------------------------------------
-// set_diagonal_q: 対角 Q ergonomic helper の正しさ
+// QP DSL: min x^2 + y^2 s.t. x+y==1 — diagonal Q via DSL
 // ---------------------------------------------------------------------------
 #[test]
-fn model_api_set_diagonal_q() {
+fn model_api_qp_diagonal_via_dsl() {
     // min x^2 + y^2  s.t. x + y == 1, x,y free
     // 解: x=y=0.5, obj=0.5
-    let mut model = Model::new("diag_q_helper");
+    let mut model = Model::new("diag_q_dsl");
     let x = model.add_var("x", NEG_INF, INF);
     let y = model.add_var("y", NEG_INF, INF);
-    model.set_diagonal_q(&[2.0, 2.0]);
     model.add_constraint((x + y).eq_constraint(1.0));
-    model.minimize(0.0 * x + 0.0 * y);
+    model.minimize(x * x + y * y);
 
     let result = model.solve().unwrap();
     assert!(
@@ -189,52 +183,6 @@ fn model_api_set_diagonal_q() {
         (result.objective_value - 0.5).abs() < QP_TOL,
         "obj expected 0.5, got {}",
         result.objective_value
-    );
-}
-
-#[test]
-fn model_api_try_set_diagonal_q_dim_mismatch_returns_error() {
-    let mut model = Model::new("diag_q_bad");
-    let _x = model.add_var("x", 0.0, 1.0);
-    let err = match model.try_set_diagonal_q(&[1.0, 1.0]) {
-        Ok(_) => panic!("expected dim mismatch to fail"),
-        Err(err) => err,
-    };
-    assert!(
-        matches!(err, ModelError::InvalidInput(_)),
-        "expected InvalidInput, got {err:?}"
-    );
-}
-
-#[test]
-fn model_api_set_diagonal_q_dim_mismatch_reports_error_at_solve() {
-    let mut model = Model::new("diag_q_bad_compat");
-    let x = model.add_var("x", 0.0, 1.0);
-    model.set_diagonal_q(&[1.0, 1.0]);
-    model.minimize(x);
-
-    let err = model.solve().unwrap_err();
-    assert!(
-        matches!(err, ModelError::InvalidInput(_)),
-        "expected InvalidInput, got {err:?}"
-    );
-}
-
-#[test]
-fn model_api_set_diagonal_q_can_recover_after_dim_mismatch() {
-    let mut model = Model::new("diag_q_recover");
-    let x = model.add_var("x", 0.0, 1.0);
-    model.set_diagonal_q(&[1.0, 1.0]);
-    model.set_diagonal_q(&[1.0]);
-    model.minimize(0.0 * x);
-
-    let result = model
-        .solve()
-        .expect("valid replacement should clear stale input error");
-    assert!(
-        result[x].abs() < QP_TOL,
-        "x expected 0.0, got {}",
-        result[x]
     );
 }
 

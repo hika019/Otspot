@@ -854,7 +854,7 @@ pub fn run_postsolve(
     // y-candidate selection ignore the absorbable mismatch.  Columns pushed strictly
     // INTO the interior by tightening (e.g. orig (0,100) → fixed at 50) get NO override:
     // both bound multipliers are zero there, so rc = c − A^T y must hold (KKT identity),
-    // which is what #56 fixed for bandm/beaconfd/brandy/agg/scorpion/scfxm1/recipe.
+    // which is required for bandm/beaconfd/brandy/agg/scorpion/scfxm1/recipe.
     let bound_dual_absorbs: Vec<Option<BoundAbsorb>> = {
         let mut out: Vec<Option<BoundAbsorb>> = vec![None; n];
         for step in &presolve_result.postsolve_stack {
@@ -944,7 +944,7 @@ pub fn run_postsolve(
     };
 
     // Compute cleanup dfeas before the LSQ gate so we can decide whether the
-    // LSQ pass is worth the (often dominant, see #38) runtime.
+    // LSQ pass is worth the (often dominant) runtime.
     let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_min = df_cl_nopert.min(df_cl_pert);

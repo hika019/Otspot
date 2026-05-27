@@ -6,7 +6,6 @@
 
 use otspot::constraint;
 use otspot::model::{Model, ModelError, ModelResult, SolveError};
-use otspot::sparse::CscMatrix;
 
 const INF: f64 = f64::INFINITY;
 const NEG_INF: f64 = f64::NEG_INFINITY;
@@ -189,20 +188,17 @@ fn lp_degenerate() {
 // ===========================================================================
 // QP テスト
 //
-// Model API は `set_quadratic_objective(CscMatrix)` で Q を直接渡す
-// (frontend 拡張は scope 外 / follow-up)。線形項は `minimize()` で。
+// DSL: `minimize(x*x + ...)` で二次目的を直接記述する。
 // ===========================================================================
 
 /// min (x-1)²+(y-2)² の bound 内 unconstrained 最小; opt (1,2), obj=-5 (定数+5 除く)。
 #[test]
 fn qp_unconstrained_quadratic() {
-    // ½ xᵀQx + cᵀx with Q=diag(2,2), c=(-2,-4) → f = x²+y²-2x-4y
+    // f = x²+y²-2x-4y (Q=diag(2,2), c=(-2,-4))
     let mut model = Model::new("qp_unconstrained_quadratic");
     let x = model.add_var("x", -10.0, 10.0);
     let y = model.add_var("y", -10.0, 10.0);
-    model.minimize(-2.0 * x - 4.0 * y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y + (-2.0) * x + (-4.0) * y);
     let result = model.solve().expect("qp_unconstrained_quadratic solve");
 
     check_optimal(&result, -5.0, "qp_unconstrained_quadratic");
@@ -218,9 +214,7 @@ fn qp_eq_constrained() {
     let x = model.add_var("x", 0.0, INF);
     let y = model.add_var("y", 0.0, INF);
     model.add_constraint(constraint!((x + y) == 1.0));
-    model.minimize(0.0 * x + 0.0 * y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y);
     let result = model.solve().expect("qp_eq_constrained solve");
 
     check_optimal(&result, 0.5, "qp_eq_constrained");
@@ -236,9 +230,7 @@ fn qp_ineq_constrained() {
     let x = model.add_var("x", 0.0, INF);
     let y = model.add_var("y", 0.0, INF);
     model.add_constraint(constraint!((x + y) >= 2.0));
-    model.minimize(0.0 * x + 0.0 * y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y);
     let result = model.solve().expect("qp_ineq_constrained solve");
 
     check_optimal(&result, 2.0, "qp_ineq_constrained");
@@ -253,9 +245,7 @@ fn qp_bounds_only() {
     let mut model = Model::new("qp_bounds_only");
     let x = model.add_var("x", 0.0, 0.5);
     let y = model.add_var("y", 0.0, 0.5);
-    model.minimize(0.0 * x + 0.0 * y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y);
     let result = model.solve().expect("qp_bounds_only solve");
 
     // IPM バリア法では lb=0 に完全収束しない。5e-6 を許容 (obj=x²+y²)。
@@ -284,9 +274,7 @@ fn qp_with_linear() {
     let x = model.add_var("x", 0.0, INF);
     let y = model.add_var("y", 0.0, INF);
     model.add_constraint(constraint!((x + y) == 2.0));
-    model.minimize(x + y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y + x + y);
     let result = model.solve().expect("qp_with_linear solve");
 
     check_optimal(&result, 4.0, "qp_with_linear");
@@ -302,9 +290,7 @@ fn qp_infeasible() {
     let x = model.add_var("x", NEG_INF, INF);
     model.add_constraint(constraint!(x >= 2.0));
     model.add_constraint(constraint!(x <= 1.0));
-    model.minimize(0.0 * x);
-    let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x);
     let err = model.solve().unwrap_err();
     assert_infeasible(err, "qp_infeasible");
 }
@@ -356,9 +342,7 @@ fn dual_qp_eq_constrained() {
     let x = model.add_var("x", 0.0, INF);
     let y = model.add_var("y", 0.0, INF);
     model.add_constraint(constraint!((x + y) == 1.0));
-    model.minimize(0.0 * x + 0.0 * y);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(x * x + y * y);
     let result = model.solve().expect("dual_qp_eq solve");
 
     if let Some(dual) = &result.dual_solution {

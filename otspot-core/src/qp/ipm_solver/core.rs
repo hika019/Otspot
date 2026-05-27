@@ -74,9 +74,14 @@ fn run_ipm_with(
         result.status = SolveStatus::Optimal;
     }
 
-    let invalid = result.solution.is_empty()
-        || result.solution.iter().any(|v| !v.is_finite())
-        || matches!(result.status, SolveStatus::NumericalError);
+    // n_reduced==0: presolve が全変数を除去した場合。solve_unconstrained は
+    // solution=vec![] を返すが、これは正常 (postsolve が元空間を復元する)。
+    // is_empty() / any(!finite()) を n_reduced>0 の場合のみ適用する。
+    let n_reduced = reduced.num_vars;
+    let invalid = matches!(result.status, SolveStatus::NumericalError)
+        || (n_reduced > 0
+            && (result.solution.is_empty()
+                || result.solution.iter().any(|v| !v.is_finite())));
     if invalid {
         return IpmOutcome {
             solution: Vec::new(),
@@ -164,7 +169,7 @@ fn run_ipm_with(
         diagnostics::log_bounds_clip(orig_problem, &final_sol, clip_count_pre, total_bound_clip);
     }
 
-    // presolve metadata から削除 col mask を導出 (#92 真因 fix)。orig 空間での
+    // presolve metadata から削除 col mask を導出。orig 空間での
     // kkt_residual_rel / refine 呼出は本 mask を経由してのみ EmptyCol を skip する。
     let eliminated_cols: Vec<bool> = presolve_result
         .col_map

@@ -10,5 +10,3 @@ homepage.workspace = true
 [dependencies]
 otspot-core = { workspace = true }
 
-[dev-dependencies]
-proptest = "1.10.0"

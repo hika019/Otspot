@@ -384,8 +384,8 @@ fn maximize_concave_miqp_matches_truth() {
     let x = m.add_int_var("x", 0.0, 5.0);
     let y = m.add_int_var("y", 0.0, 5.0);
     m.add_constraint((x + y).leq(4.0));
-    m.set_diagonal_q(&[-2.0, -2.0]); // objective 1/2 xᵀQx = -x^2 - y^2
-    m.maximize(6.0 * x + 4.0 * y);
+    // Q=diag(-2,-2): (-2/2)*xi*xi = -xi*xi; maximize(-x^2 - y^2 + 6x + 4y)
+    m.maximize((-1.0) * (x * x) + (-1.0) * (y * y) + 6.0 * x + 4.0 * y);
     let r = m.solve().unwrap();
     assert!((r.objective() - 12.0).abs() < 1e-3, "obj={} (expected 12)", r.objective());
 }
@@ -396,8 +396,8 @@ fn maximize_convex_miqp_rejected_not_silent() {
     // Must return ModelError::NonConvex, never silent wrong answer.
     let mut m = Model::new("max_convex");
     let x = m.add_int_var("x", 0.0, 5.0);
-    m.set_diagonal_q(&[2.0]); // PSD; maximize → -Q NSD → non-convex
-    m.maximize(x);
+    // Q[0][0]=2: x*x in DSL; maximize(x*x + x) is convex maximize → non-convex MIQP
+    m.maximize(x * x + x);
     let err = m.solve().unwrap_err();
     assert!(
         matches!(err, ModelError::NonConvex(_)),

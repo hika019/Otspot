@@ -16,7 +16,6 @@
 
 use otspot::constraint;
 use otspot::model::Model;
-use otspot::sparse::CscMatrix;
 
 // solver の収束判定 `ipm_eps` の default は 1e-6 (options.rs)。
 // objective は relative tolerance、x は abs ≈ O(eps) で評価する。
@@ -59,9 +58,8 @@ fn eq1_two_free_vars_single_equality() {
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2) == 1.0));
-    model.minimize(0.0);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
-    model.set_quadratic_objective(q);
+    // Q=diag(1,1): 1/2*x^2 per var → DSL 0.5*(x*x)
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2);
 
     let result = model.solve().expect("eq1: solve");
     assert_x_close(result[x1], 0.5, "eq1: x1");
@@ -82,7 +80,6 @@ fn eq1_two_free_vars_single_equality() {
 /// **真因仮説**: もし FAIL すれば Phase I LP の自由変数初期化に bug 残存。
 #[test]
 fn eq2_hs51_cold_start_regression() {
-    let n = 5;
     let mut model = Model::new("eq2_hs51");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
@@ -94,14 +91,13 @@ fn eq2_hs51_cold_start_regression() {
     model.add_constraint(constraint!((x1 + 3.0 * x2) == 4.0));
     model.add_constraint(constraint!((x3 + x4 - 2.0 * x5) == 0.0));
     model.add_constraint(constraint!((x2 - x5) == 0.0));
-    model.minimize(-4.0 * x2 - 4.0 * x3 - 2.0 * x4 - 2.0 * x5);
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 0, 1, 2, 1, 2, 3, 4],
-        &[0, 0, 1, 1, 1, 2, 2, 3, 4],
-        &[2.0, -2.0, -2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0],
-        n, n,
-    ).unwrap();
-    model.set_quadratic_objective(q);
+    // Q=[[2,-2,0,0,0],[-2,4,2,0,0],[0,2,2,0,0],[0,0,0,2,0],[0,0,0,0,2]]
+    // Q[i][i]=v → (v/2)*xi*xi; Q[i][j]=v (i≠j) → v*(xi*xj)
+    model.minimize(
+        x1 * x1 + 2.0 * x2 * x2 + x3 * x3 + x4 * x4 + x5 * x5
+        + (-2.0) * (x1 * x2) + 2.0 * (x2 * x3)
+        + (-4.0) * x2 + (-4.0) * x3 + (-2.0) * x4 + (-2.0) * x5,
+    );
 
     let result = model.solve().expect("eq2: cold-start solve (HS51 真因確認)");
     let xs = [x1, x2, x3, x4, x5];
@@ -124,22 +120,18 @@ fn eq2_hs51_cold_start_regression() {
 ///         起こさず Optimal に到達するか。Mehrotra 系では regularization 必須。
 #[test]
 fn eq3_rank_deficient_psd_q_equality() {
-    let n = 3;
     let mut model = Model::new("eq3_rank1");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", f64::NEG_INFINITY, f64::INFINITY);
     let x2 = model.add_var("x2", f64::NEG_INFINITY, f64::INFINITY);
     let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
     model.add_constraint(constraint!((x1 + x2 + x3) == 3.0));
-    model.minimize(0.0);
-    // Q = v v^T, v=[1,1,-1] → Q = [[1,1,-1],[1,1,-1],[-1,-1,1]]
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 2, 0, 1, 2, 0, 1, 2],
-        &[0, 0, 0, 1, 1, 1, 2, 2, 2],
-        &[1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0],
-        n, n,
-    ).unwrap();
-    model.set_quadratic_objective(q);
+    // Q = v v^T, v=[1,1,-1]: 1/2*(x1+x2-x3)^2
+    // = 0.5*x1^2+0.5*x2^2+0.5*x3^2 + x1*x2 - x1*x3 - x2*x3
+    model.minimize(
+        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3
+        + 1.0 * (x1 * x2) + (-1.0) * (x1 * x3) + (-1.0) * (x2 * x3),
+    );
 
     let result = model.solve().expect("eq3: rank-1 Q + Eq の Optimal 到達");
     assert_obj_close(result.objective_value, 0.0, "eq3: obj=0");
@@ -162,15 +154,12 @@ fn eq3_rank_deficient_psd_q_equality() {
 ///         `ModelResult.bound_duals` (model-api-extender) で検証。
 #[test]
 fn eq4_equality_with_inactive_bounds() {
-    let n = 2;
     let mut model = Model::new("eq4");
     model.set_timeout(MINI_TIMEOUT_SECS);
     let x1 = model.add_var("x1", 0.0, 10.0);
     let x2 = model.add_var("x2", 0.0, 10.0);
     model.add_constraint(constraint!((x1 + x2) == 2.0));
-    model.minimize(-1.0 * x1 - 2.0 * x2);
-    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], n, n).unwrap();
-    model.set_quadratic_objective(q);
+    model.minimize(0.5 * x1 * x1 + 0.5 * x2 * x2 + (-1.0) * x1 + (-2.0) * x2);
 
     let result = model.solve().expect("eq4: solve");
     assert_x_close(result[x1], 0.5, "eq4: x1");

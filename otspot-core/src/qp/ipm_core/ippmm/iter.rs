@@ -6,11 +6,11 @@ use super::factorize::{
 };
 use super::init::build_initial_point;
 use super::state::{
-    alpha_stall_eps_for, PmmState, ALPHA_DEADLOCK_N, ALPHA_STALL_N, DELTA_INIT,
-    DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD,
-    PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN, PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD,
-    PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
-    RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
+    alpha_stall_eps_for, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
+    DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
+    MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN,
+    PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_MIN,
+    REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
 use super::trace::{
     emit_active_trace, emit_debug_infeas_continue, emit_debug_infeas_meta,
@@ -107,7 +107,7 @@ pub(crate) fn solve_ippmm_inner(
         });
     // rank-deficient Q + c≈0 で rho が floor に張り付き proximal 項が df を支配する病理を回避する適応 floor。
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let allow_adaptive_reg = c_max < 1e-6;
+    let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
     let mut reg_limit = initial_reg_limit;
 
     // pf-stagnation trigger (adaptive reg_limit の追加経路、c≠0 問題向け):
@@ -403,7 +403,7 @@ pub(crate) fn solve_ippmm_inner(
         }
 
         let mut alpha = alpha;
-        if alpha < 0.999 {
+        if alpha < GONDZIO_ALPHA_TRIGGER {
             alpha = if use_schur {
                 let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
                 gondzio_correctors_schur(
