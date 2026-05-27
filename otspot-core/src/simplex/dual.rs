@@ -107,9 +107,6 @@ fn cold_start_dual(
             return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale, total_iters);
         }
         SimplexOutcome::SingularBasis => {
-            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("[NE-TRACE] dual.rs:131 Dual Phase-I SingularBasis");
-            }
             return SolverResult::numerical_error();
         }
         SimplexOutcome::Optimal(_, _) => {}
@@ -179,9 +176,6 @@ fn warm_outcome_to_result(
             }
         }
         SimplexOutcome::SingularBasis => {
-            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("[NE-TRACE] dual.rs:206 warm_outcome_to_result SingularBasis");
-            }
             SolverResult::numerical_error()
         }
     }
@@ -238,9 +232,6 @@ fn primal_outcome_to_result(
             }
         }
         SimplexOutcome::SingularBasis => {
-            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("[NE-TRACE] dual.rs:261 primal_outcome_to_result SingularBasis");
-            }
             SolverResult::numerical_error()
         }
     }

@@ -370,11 +370,6 @@ impl KktSolver for PreconditionedMinres {
             )
         };
         let stats = do_minres(sol, rhs);
-        let trace = std::env::var("MINRES_TRACE").ok().as_deref() == Some("1");
-        if trace {
-            eprintln!("MINRES_SOLVE n={} iters={} max_iter={} tol={:.1e} resid={:.3e} conv={} kind={:?}",
-                n, stats.iters, self.max_iter, self.tol, stats.residual_estimate, stats.converged, self.kind);
-        }
 
         // Iterative refinement: each round reapplies MINRES to `r = rhs − K·sol` so the
         // effective relative residual is driven toward `tol^(ir_steps + 1)`. Bailing on
@@ -382,11 +377,8 @@ impl KktSolver for PreconditionedMinres {
         if self.ir_steps > 0 {
             let mut residual = vec![0.0_f64; n];
             let mut delta = vec![0.0_f64; n];
-            for ir_iter in 0..self.ir_steps {
+            for _ in 0..self.ir_steps {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
-                    if trace {
-                        eprintln!("MINRES_IR iter={} deadline reached, abort IR", ir_iter);
-                    }
                     break;
                 }
                 // residual = rhs - K·sol
@@ -401,21 +393,12 @@ impl KktSolver for PreconditionedMinres {
                 // bail at the f64 norm floor (1e-14), not at `tol²`.
                 let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
                 if rhs_norm > 0.0 && r_norm <= 1e-14 * rhs_norm {
-                    if trace {
-                        eprintln!("MINRES_IR iter={} early-out: r/rhs={:.3e} at f64 floor", ir_iter, r_norm / rhs_norm);
-                    }
                     break;
                 }
                 for d in delta.iter_mut() { *d = 0.0; }
-                let ir_stats = do_minres(&mut delta, &residual);
+                do_minres(&mut delta, &residual);
                 for i in 0..n {
                     sol[i] += delta[i];
-                }
-                if trace {
-                    eprintln!(
-                        "MINRES_IR iter={} pre_r={:.3e} ir_iters={} ir_resid={:.3e} ir_conv={}",
-                        ir_iter, r_norm, ir_stats.iters, ir_stats.residual_estimate, ir_stats.converged
-                    );
                 }
             }
         }
@@ -506,7 +489,6 @@ pub fn factorize_kkt_with_cached_perm_par(
     // IPM_DD_LDL=1 switches to TwoFloat (~106-bit) LDL for ill-conditioned systems
     // where the f64 forward error (cond × ε) would exceed the requested eps.
     if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
-        let trace = std::env::var("IPM_DD_LDL_TRACE").ok().as_deref() == Some("1");
         // Run the f64 symbolic factorisation to honour the same memory budget.
         // DD LDL は内部で TwoFloat (scalar) を使うため、par は f64 側 sentinel のみに伝播。
         match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
@@ -517,13 +499,6 @@ pub fn factorize_kkt_with_cached_perm_par(
                     k, perm, deadline,
                 ) {
                     Ok(f) => {
-                        if trace {
-                            eprintln!(
-                                "IPM_DD_LDL_TRACE factorize OK n={} L_nnz={}",
-                                k.nrows,
-                                f.nnz_l()
-                            );
-                        }
                         return Ok(KktFactor::DirectDd(f));
                     }
                     Err(crate::linalg::ldl::LdlError::DeadlineExceeded) => {

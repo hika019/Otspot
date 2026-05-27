@@ -238,9 +238,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
             }
             SimplexOutcome::SingularBasis => {
-                if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("[NE-TRACE] primal.rs:159 Direct-Phase-II SingularBasis (no Phase I)");
-                }
                 SolverResult::numerical_error()
             }
         }
@@ -386,9 +383,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             };
                         }
                         SimplexOutcome::SingularBasis => {
-                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                                eprintln!("[NE-TRACE] primal.rs:294 Phase-I retry SingularBasis (attempt={}, total_iters={})", attempt, total_iters);
-                            }
                             return SolverResult::numerical_error();
                         }
                     }
@@ -486,9 +480,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                         let solution = extract_solution(sf, &basis, &x_b, &col_scale);
                         if !check_eq_feasibility(problem, &solution) {
-                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                                eprintln!("[NE-TRACE] primal.rs Phase-II Optimal-but-Eq-violated NumericalError (total_iters={})", total_iters);
-                            }
                             return SolverResult {
                                 status: SolveStatus::NumericalError,
                                 objective: obj2 + sf.obj_offset,
@@ -551,9 +542,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                     }
                     SimplexOutcome::SingularBasis => {
-                        if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                            eprintln!("[NE-TRACE] primal.rs:440 Phase-II SingularBasis (total_iters={})", total_iters);
-                        }
                         SolverResult::numerical_error()
                     }
                 }
@@ -710,9 +698,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             };
                         }
                         SimplexOutcome::Timeout(obj2) => {
-                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                                eprintln!("[NE-TRACE] primal.rs Phase-II-after-Phase-I-Timeout Timeout (total_iters={}, obj2={:.6e})", total_iters, obj2);
-                            }
                             let solution = extract_timeout_solution_reconciled(
                                 sf,
                                 &a_ext,
@@ -745,9 +730,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             };
                         }
                         SimplexOutcome::SingularBasis => {
-                            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                                eprintln!("[NE-TRACE] primal.rs:615 Phase-II-after-Phase-I-Timeout SingularBasis (total_iters={})", total_iters);
-                            }
                             return SolverResult::numerical_error();
                         }
                     }
@@ -766,9 +748,6 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
             }
             SimplexOutcome::SingularBasis => {
-                if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!("[NE-TRACE] primal.rs:630 Phase-I SingularBasis (total_iters={})", total_iters);
-                }
                 SolverResult::numerical_error()
             }
         }
@@ -783,8 +762,7 @@ const CRASH_REVERT_MAX_ROUNDS: usize = 3;
 /// Crash basis: cover artificial rows with structural columns to reduce Phase I pivots.
 ///
 /// Returns `Some((crash_basis, x_b))` on success, `None` if the crash is no better
-/// than a cold start or the basis is singular. Returns `None` and traces via
-/// `LP_CRASH_TRACE` in the following cases:
+/// than a cold start or the basis is singular. Returns `None` in the following cases:
 /// 1. Crash result equals `cold_basis` (no structural coverage gained)
 /// 2. LU factorization fails (crashed basis singular)
 /// 3. No structural columns remain after partial revert
@@ -807,7 +785,6 @@ fn try_apply_crash(
 
     // 入力 needs_artificial を `cold_basis[i] >= n_total` から再構築。
     let needs_artificial: Vec<bool> = cold_basis.iter().map(|&c| c >= n_total).collect();
-    let trace = std::env::var("LP_CRASH_TRACE").ok().as_deref() == Some("1");
 
     let num_art_in = needs_artificial.iter().filter(|&&v| v).count();
     if num_art_in == 0 {
@@ -819,9 +796,6 @@ fn try_apply_crash(
     );
 
     if num_art_out == num_art_in {
-        if trace {
-            eprintln!("LP_CRASH: 0 reduction (m={}, num_art={}), skipping", m, num_art_in);
-        }
         return None;
     }
 
@@ -834,9 +808,6 @@ fn try_apply_crash(
         let mut basis_mgr = match LuBasis::new(a_ext, &basis, max_etas) {
             Ok(b) => b,
             Err(_) => {
-                if trace {
-                    eprintln!("LP_CRASH: singular basis at round {}, reverting", round);
-                }
                 return None;
             }
         };
@@ -854,12 +825,6 @@ fn try_apply_crash(
                 basis[i] = cold_basis[i];
                 reverts += 1;
             } else {
-                if trace {
-                    eprintln!(
-                        "LP_CRASH: x_b[{}]={:.3e} < 0 in non-revertable row (cold basis col {} < n_total={}), abandoning crash",
-                        i, x_b[i], cold_basis[i], n_total
-                    );
-                }
                 return None;
             }
         }
@@ -868,29 +833,11 @@ fn try_apply_crash(
         }
         crashed_count = crashed_count.saturating_sub(reverts);
         if crashed_count == 0 {
-            if trace {
-                eprintln!("LP_CRASH: all crashed rows reverted, falling back to cold");
-            }
             return None;
         }
         if round == CRASH_REVERT_MAX_ROUNDS && reverts > 0 {
-            if trace {
-                eprintln!(
-                    "LP_CRASH: revert did not converge in {} rounds, falling back",
-                    CRASH_REVERT_MAX_ROUNDS + 1
-                );
-            }
             return None;
         }
-    }
-
-    if trace {
-        let final_num_art: usize = basis.iter().filter(|&&c| c >= n_total).count();
-        eprintln!(
-            "LP_CRASH: m={} n_shifted={} num_artificial {}→{} (reduction {}, crashed_cols {})",
-            m, n_shifted, num_art_in, final_num_art,
-            num_art_in.saturating_sub(final_num_art), crashed_count
-        );
     }
 
     Some((basis, x_b))
@@ -910,11 +857,8 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
             }
         }
     }
-    let mut max_abs_viol = 0.0_f64;
-    let mut max_rel_viol = 0.0_f64;
-    let mut worst_row = (0usize, 0.0_f64, 0.0_f64, 0.0_f64);
     let mut violated = false;
-    for (i, ((ax_i, ct), bi)) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()).enumerate() {
+    for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
             ConstraintType::Le => (ax_i - bi).max(0.0),
@@ -922,19 +866,9 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         };
         let scale = 1.0 + bi.abs() + ax_i.abs();
         let rel = violation / scale;
-        if violation > max_abs_viol {
-            max_abs_viol = violation;
-            worst_row = (i, *ax_i, *bi, violation);
-        }
-        if rel > max_rel_viol { max_rel_viol = rel; }
         if rel > tol {
             violated = true;
         }
-    }
-    if std::env::var("DUMP_CHECK_EQ").ok().as_deref() == Some("1") {
-        eprintln!("[check_eq] name={:?} m={} max_abs_viol={:.3e} max_rel_viol={:.3e} tol={:.3e} worst_row=(i={}, ax={:.6e}, b={:.6e}, viol={:.3e}) PASS={}",
-            problem.name, problem.num_constraints, max_abs_viol, max_rel_viol, tol,
-            worst_row.0, worst_row.1, worst_row.2, worst_row.3, !violated);
     }
     !violated
 }
