@@ -28,7 +28,7 @@ fn aat_apply(
     m_sub: usize,
     p: &[f64],
     reg: f64,
-    tmp: &mut Vec<f64>, // length n scratch
+    tmp: &mut [f64], // length n scratch
 ) -> Vec<f64> {
     // Step 1: atp = Aᵀ·p  (n 次元)
     tmp.iter_mut().for_each(|v| *v = 0.0);

@@ -18,6 +18,9 @@ use crate::sparse::CscMatrix;
 use std::time::Instant;
 use twofloat::TwoFloat;
 
+/// (row_ind, l_values, d) triple returned by the DD-precision numeric factorize.
+type LdlDdParts = (Vec<usize>, Vec<TwoFloat>, Vec<TwoFloat>);
+
 /// Quasidefinite regularization (matches `crate::linalg::ldl::do_numeric_factorize`).
 /// 期待符号と異なる方向に小さくなった D[k] にこの値を上書きする。
 const DELTA: f64 = 1e-8;
@@ -146,7 +149,7 @@ fn ldl_numeric_dd(
     parent: &[isize],
     l_col_ptr: &[usize],
     signs: Option<&[i8]>,
-) -> Result<(Vec<usize>, Vec<TwoFloat>, Vec<TwoFloat>), LdlError> {
+) -> Result<LdlDdParts, LdlError> {
     let l_nnz_total = l_col_ptr[n];
     let mut l_row_ind = vec![0usize; l_nnz_total];
     let mut l_values = vec![TwoFloat::from(0.0); l_nnz_total];

@@ -5,8 +5,8 @@
 //! complementarity slack の重実装をここに集約する。caller 側は
 //!   - 集約方法 (max abs / max componentwise rel / global rel / 構造体格納)
 //!   - 経路 fork (LP rc 経路 / QP bound_dual 経路 / FX skip / EmptyCol skip)
-//! を選ぶ責務のみ保持し、heavy mat-vec と bound iteration ロジックは
-//! 重複しない。
+//!     を選ぶ責務のみ保持し、heavy mat-vec と bound iteration ロジックは
+//!     重複しない。
 //!
 //! ## モジュール構成
 //!

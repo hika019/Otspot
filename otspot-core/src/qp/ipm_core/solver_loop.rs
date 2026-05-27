@@ -46,9 +46,7 @@ fn compute_residual_dd(aug_mat: &CscMatrix, sol: &[f64], rhs: &[f64], out: &mut 
     let mut hi = vec![0.0_f64; n];
     let mut lo = vec![0.0_f64; n];
 
-    for i in 0..n {
-        hi[i] = rhs[i];
-    }
+    hi[..n].copy_from_slice(&rhs[..n]);
 
     for col in 0..aug_mat.ncols {
         let xv_c = sol[col];

@@ -14,7 +14,7 @@
 //! - flip apply: `x_B -= u_k · α_k` (lb→ub) or `+= u_k · α_k` (ub→lb);
 //! - pivot equation gains a `+u_q` correction at the leaving row when the
 //!   entering column is currently at its upper bound (the "符号反転 pivot"):
-//!     `x_B[r]_new = step + (u_q if at_upper[q] else 0)`
+//!   `x_B[r]_new = step + (u_q if at_upper[q] else 0)`
 //!   derived from the column-swap update with q's non-basic value u_q being
 //!   removed from the effective RHS as q enters the basis.
 //!

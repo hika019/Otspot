@@ -1,3 +1,16 @@
+// Numerical solver code uses index loops over multiple arrays (a[i], b[i], c[i])
+// where iterator-based rewrites hurt readability or introduce borrow conflicts.
+// Solver and IPM functions legitimately accept many parameters; struct-wrapping
+// would be over-engineering for hot-path internals.
+// Large Err variants (QpPresolveResult) and enum variants (FactorizeOutcome) are
+// short-lived computation results; boxing would complicate call sites without benefit.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::result_large_err,
+    clippy::large_enum_variant,
+)]
+
 //! # otspot — 数理最適化ソルバー
 //!
 //! 線形計画法（LP）・二次計画法（QP）と混合整数問題（MILP / MIQP）を解く Rust ソルバークレート。

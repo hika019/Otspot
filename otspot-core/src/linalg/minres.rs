@@ -26,7 +26,7 @@ pub struct MinresStats {
 ///
 /// * `matvec`     : closure `y ← K · v` (1 反復 1 回呼ばれる)
 /// * `precond`    : closure `z ← M^{-1} · r` (M は SPD 前処理)。M = I なら
-///                  `|r, z| z.copy_from_slice(r)` を渡す
+///   `|r, z| z.copy_from_slice(r)` を渡す
 /// * `b`          : 右辺
 /// * `x`          : 初期推定 (in) / 解 (out)。0 ベクトル可
 /// * `tol`        : 相対許容差 `||r||_2 / ||b||_2 ≤ tol` で停止

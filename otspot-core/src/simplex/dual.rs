@@ -28,27 +28,24 @@ pub(crate) fn two_phase_dual_simplex(
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
             let mut basis = warm.basis.clone();
 
-            match LuBasis::new(&a, &basis, options.max_etas) {
-                Ok(mut basis_mgr) => {
-                    // x_B = B^{-1} b_new
-                    let mut x_b_sv = SparseVec::from_dense(&b);
-                    basis_mgr.ftran(&mut x_b_sv);
-                    let mut x_b = x_b_sv.to_dense();
+            // Singular basis falls through to cold start.
+            if let Ok(mut basis_mgr) = LuBasis::new(&a, &basis, options.max_etas) {
+                // x_B = B^{-1} b_new
+                let mut x_b_sv = SparseVec::from_dense(&b);
+                basis_mgr.ftran(&mut x_b_sv);
+                let mut x_b = x_b_sv.to_dense();
 
-                    let mut total_iters: usize = 0;
-                    let outcome = dual_simplex_core(
-                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
-                        &mut total_iters,
-                    );
+                let mut total_iters: usize = 0;
+                let outcome = dual_simplex_core(
+                    &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                    &mut total_iters,
+                );
 
-                    let mut result = warm_outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
-                    );
-                    result.iterations = total_iters;
-                    return result;
-                }
-                // Singular basis: fall through to cold start.
-                Err(_) => {}
+                let mut result = warm_outcome_to_result(
+                    outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                );
+                result.iterations = total_iters;
+                return result;
             }
         }
     }

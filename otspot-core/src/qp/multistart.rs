@@ -32,6 +32,10 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+/// Factory function type for constructing a rayon ThreadPool (used for test injection).
+type ThreadPoolFactory =
+    Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>;
+
 /// Numerical Recipes LCG 定数 (Park-Miller-Carta 系列)。full-period 2^32。
 /// xorshift より弱いが multistart 用途では再現性とポータビリティを優先。
 const LCG_A: u64 = 1_664_525;
@@ -216,8 +220,7 @@ pub(crate) struct MultiStartHooks {
     pub disable_deadline_shortcut: bool,
     /// ThreadPool 構築を差し替えるファクトリ (None = デフォルト rayon builder)。
     /// テストで失敗注入に使う。失敗時は serial fallback へ移行する。
-    pub thread_pool_factory:
-        Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>,
+    pub thread_pool_factory: ThreadPoolFactory,
 }
 
 /// Multi-start QP solver。`config.n_starts == 1` は cold solve 1 回 (= 既存挙動)。

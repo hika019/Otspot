@@ -323,13 +323,10 @@ fn build_and_solve_cleanup_lp(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
     ).ok()?;
 
-    let mut opts = SolverOptions::default();
-    opts.presolve = false;
-    opts.warm_start = None;
     // Wire the parent deadline straight through so every inner stage (parse, scale,
     // factorize, simplex iterate) checks the same clock; otherwise large cleanup
     // LPs can spend minutes in setup before any per-call budget kicks in.
-    opts.deadline = deadline;
+    let opts = SolverOptions { presolve: false, warm_start: None, deadline, ..SolverOptions::default() };
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     let _ = (slack_count, m_clean);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {

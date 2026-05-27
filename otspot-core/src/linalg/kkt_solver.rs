@@ -690,10 +690,10 @@ impl KktSolver for AutoKktSolver {
             }
         }
 
-        if self.iterative.is_none() {
-            self.iterative = Some(PreconditionedMinres::new(k.clone()));
+        if let Some(it) = self.iterative.as_mut() {
+            it.refactor(k, deadline)?;
         } else {
-            self.iterative.as_mut().unwrap().refactor(k, deadline)?;
+            self.iterative = Some(PreconditionedMinres::new(k.clone()));
         }
         self.last_used = Some(KktBackend::Iterative);
         Ok(())

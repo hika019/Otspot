@@ -444,9 +444,7 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
         match slack_col_idx[i] {
             Some(s_idx) => {
                 let col = n_shifted + s_idx;
-                if slack_coeff[i] > 0.0 {
-                    initial_basis[i] = col;
-                } else if b[i].abs() <= PIVOT_TOL {
+                if slack_coeff[i] > 0.0 || b[i].abs() <= PIVOT_TOL {
                     initial_basis[i] = col;
                 } else {
                     #[cfg(test)]

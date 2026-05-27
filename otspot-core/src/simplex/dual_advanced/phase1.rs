@@ -19,8 +19,8 @@
 //!    - 人工変数: `c_aug[a_i] = big_m`
 //!    - 元変数 j: `c_aug[j] = c[j] + delta_j`、
 //!      `delta_j = max(0, big_m * Σ_{i: needs_art} a[i, j] - c[j])`
-//!    これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
-//!    全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
+//!      これにより初期 basis (B=I_aug, y_init = c_B = big_m * indicator) で
+//!      全 reduced cost r_j ≥ 0 が成立 (双対実行可能)。
 //! 3. **Phase I (Dual Simplex, Harris ratio test 装備の `dual_simplex_core_advanced`)**:
 //!    x_B ≥ 0 のまま (b ≥ 0 で初期から主実行可能) なので Phase I は通常 0 反復
 //!    で即終了する。役割は「双対基底を構成し、後続 Phase II で safe な warm
