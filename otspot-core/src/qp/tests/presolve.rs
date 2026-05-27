@@ -262,3 +262,57 @@ fn test_qp_mixed_ge_le_presolve_ruiz_regression() {
     assert_close(result_no_presolve.solution[0], 0.25, EPS, "no-presolve x[0]");
     assert_close(result_no_presolve.solution[1], 0.25, EPS, "no-presolve x[1]");
 }
+
+// ─── #39 repro: 全列 EmptyCol / presolve 完全求解 ────────────────────────────
+
+/// Pattern A (#39 repro): Q=diag(1,1), c=0, A=0, bounds fixed (lb==ub).
+/// step1_fix_var removes ALL vars → n_reduced=0 → expect Optimal.
+#[test]
+fn repro_39_a_fixed_bounds_c0() {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0_f64, 1.0_f64], 2, 2).unwrap();
+    let a = CscMatrix::new(0, 2);
+    let problem = QpProblem::new_all_le(
+        q, vec![0.0, 0.0], a, vec![],
+        vec![(2.0_f64, 2.0_f64), (3.0_f64, 3.0_f64)],
+    ).unwrap();
+    let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+    let r = solve_qp_with(&problem, &opts);
+    assert_eq!(r.status, SolveStatus::Optimal, "repro_39_a: got {:?}", r.status);
+    // obj = 0.5*(1*4 + 1*9) + 0 = 6.5
+    assert_close(r.objective, 6.5, 1e-4, "repro_39_a obj");
+    assert_close(r.solution[0], 2.0, 1e-4, "repro_39_a x[0]");
+    assert_close(r.solution[1], 3.0, 1e-4, "repro_39_a x[1]");
+}
+
+/// Pattern B (#39 repro): Q=diag(1,1), c=(1,-1), A=0, bounds fixed.
+/// Optimal: x=(2,3), obj = 0.5*(4+9) + (2-3) = 6.5 - 1 = 5.5.
+#[test]
+fn repro_39_b_fixed_bounds_c_nonzero() {
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0_f64, 1.0_f64], 2, 2).unwrap();
+    let a = CscMatrix::new(0, 2);
+    let problem = QpProblem::new_all_le(
+        q, vec![1.0, -1.0], a, vec![],
+        vec![(2.0_f64, 2.0_f64), (3.0_f64, 3.0_f64)],
+    ).unwrap();
+    let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+    let r = solve_qp_with(&problem, &opts);
+    assert_eq!(r.status, SolveStatus::Optimal, "repro_39_b: got {:?}", r.status);
+    assert_close(r.objective, 5.5, 1e-4, "repro_39_b obj");
+    assert_close(r.solution[0], 2.0, 1e-4, "repro_39_b x[0]");
+    assert_close(r.solution[1], 3.0, 1e-4, "repro_39_b x[1]");
+}
+
+/// Pattern C (#39 repro): Q=0, c=(-1,0), A=0, x[0] unbounded above.
+/// Expect Unbounded (step4_empty detects c<0 && ub=+inf).
+#[test]
+fn repro_39_c_all_empty_col_unbounded() {
+    let q = CscMatrix::new(2, 2);  // Q=0
+    let a = CscMatrix::new(0, 2);
+    let problem = QpProblem::new_all_le(
+        q, vec![-1.0, 0.0], a, vec![],
+        vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0_f64, 1.0_f64)],
+    ).unwrap();
+    let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
+    let r = solve_qp_with(&problem, &opts);
+    assert_eq!(r.status, SolveStatus::Unbounded, "repro_39_c: got {:?}", r.status);
+}

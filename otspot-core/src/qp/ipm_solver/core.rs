@@ -74,9 +74,14 @@ fn run_ipm_with(
         result.status = SolveStatus::Optimal;
     }
 
-    let invalid = result.solution.is_empty()
-        || result.solution.iter().any(|v| !v.is_finite())
-        || matches!(result.status, SolveStatus::NumericalError);
+    // n_reduced==0: presolve が全変数を除去した場合。solve_unconstrained は
+    // solution=vec![] を返すが、これは正常 (postsolve が元空間を復元する)。
+    // is_empty() / any(!finite()) を n_reduced>0 の場合のみ適用する。
+    let n_reduced = reduced.num_vars;
+    let invalid = matches!(result.status, SolveStatus::NumericalError)
+        || (n_reduced > 0
+            && (result.solution.is_empty()
+                || result.solution.iter().any(|v| !v.is_finite())));
     if invalid {
         return IpmOutcome {
             solution: Vec::new(),
