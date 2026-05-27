@@ -92,7 +92,6 @@ pub(super) fn build_initial_point(
     if warm_mu.is_none() {
         let kkt_cfg = KktConfig {
             dd_ldl: options.ipm.dd_ldl,
-            minres_eta: options.ipm.effective_minres_eta(),
             minres_ir: options.ipm.effective_minres_ir(),
             max_l_nnz: options.ipm.effective_max_l_nnz(),
         };

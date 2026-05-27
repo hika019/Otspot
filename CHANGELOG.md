@@ -8,8 +8,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 - **`IpmOptions` — KKT/MINRES 設定フィールド追加** (再現性改善):
   - `dd_ldl: bool` (default `false`) — TwoFloat (double-double, ~106-bit) LDL を使用。旧 `IPM_DD_LDL=1` 環境変数を廃止。
-  - `minres_eta: Option<f64>` (default `None` → 1e-7) — MINRES 不精確 Newton 強制項 η。旧 `MINRES_ETA` 環境変数を廃止。
-  - `minres_ir: Option<usize>` (default `None` → 0) — MINRES 反復精密化ラウンド数。旧 `MINRES_IR` 環境変数を廃止。
+  - `minres_ir: Option<usize>` (default `None` → 0, max 10) — MINRES 反復精密化ラウンド数。旧 `MINRES_IR` 環境変数を廃止。
   - `kkt_memory_budget_bytes: Option<usize>` (default `None` → 4 GiB) — KKT LDL 因子化メモリ上限。旧 `KKT_MEMORY_BUDGET_BYTES` 環境変数を廃止。
 - **`SolverOptions` — QP presolve 設定フィールド追加**:
   - `presolve_max_pass: usize` (default `10`) — QP presolve 固定点反復上限。旧 `QP_PRESOLVE_MAX_PASS` 環境変数を廃止。
@@ -20,8 +19,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 ### 非互換性 (旧環境変数)
 
 以下の環境変数は読み取られなくなった。`SolverOptions`/`IpmOptions` フィールドで同等の設定が可能:
-`IPM_DD_LDL`, `MINRES_ETA`, `MINRES_IR`, `KKT_MEMORY_BUDGET_BYTES`,
+`IPM_DD_LDL`, `MINRES_IR`, `KKT_MEMORY_BUDGET_BYTES`,
 `QP_PRESOLVE_MAX_PASS`, `QP_PRESOLVE_SKIP_LARGE_COEFF`, `QP_PRESOLVE_PHASE2`.
+
+`MINRES_ETA` は IPM main ループで Eisenstat-Walker 更新 (`set_iterative_tol`) により常に上書きされていたため、公開 Option 化は行わず廃止のみ。
 
 `QP_PRESOLVE_SKIP` はテスト限定 (`#[cfg(test)]`) で読み取りを継続。本番ビルドでは常に `false` を返す。
 

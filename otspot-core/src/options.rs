@@ -351,11 +351,9 @@ pub struct IpmOptions {
     /// Use TwoFloat (double-double, ~106-bit) LDL for KKT systems where f64 conditioning
     /// would exceed the requested accuracy.  Default: `false`.
     pub dd_ldl: bool,
-    /// MINRES inexact-Newton forcing term η ∈ (0, 1].  `None` uses 1e-7 (the default
-    /// tied to 1e-6 outer tolerance via Eisenstat-Walker).
-    pub minres_eta: Option<f64>,
     /// MINRES iterative-refinement rounds applied after each MINRES solve.
     /// `None` uses 0 (disabled by default; auto-Schur makes this unnecessary in practice).
+    /// Must be `<= 10`.
     pub minres_ir: Option<usize>,
     /// Memory budget for KKT LDL factorization in bytes.
     /// `None` uses the 4 GiB default.  Factorizations predicted to exceed the budget
@@ -373,7 +371,6 @@ impl Default for IpmOptions {
             delta_d_init: DEFAULT_IPM_DELTA_INIT,
             max_correctors: DEFAULT_IPM_MAX_CORRECTORS,
             dd_ldl: false,
-            minres_eta: None,
             minres_ir: None,
             kkt_memory_budget_bytes: None,
         }
@@ -401,9 +398,9 @@ impl IpmOptions {
         if self.max_correctors == 0 {
             return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
         }
-        if let Some(eta) = self.minres_eta {
-            if !eta.is_finite() || eta <= 0.0 || eta > 1.0 {
-                return Err(OptionsError { field: "ipm.minres_eta", reason: "must be finite and in (0, 1]" });
+        if let Some(ir) = self.minres_ir {
+            if ir > 10 {
+                return Err(OptionsError { field: "ipm.minres_ir", reason: "must be <= 10" });
             }
         }
         Ok(())
@@ -427,24 +424,21 @@ impl IpmOptions {
         Ok(self)
     }
 
-    /// Effective MINRES η: resolves `None` to the built-in default (1e-7).
-    pub(crate) fn effective_minres_eta(&self) -> f64 {
-        self.minres_eta.unwrap_or(1e-7)
-    }
-
     /// Effective MINRES iterative-refinement rounds: resolves `None` to 0.
     pub(crate) fn effective_minres_ir(&self) -> usize {
         self.minres_ir.unwrap_or(0)
     }
 
-    /// Effective KKT memory budget in bytes: resolves `None` to 4 GiB.
+    /// Effective KKT memory budget in bytes: resolves `None` to the built-in default (4 GiB).
     pub(crate) fn effective_kkt_memory_budget_bytes(&self) -> usize {
-        self.kkt_memory_budget_bytes.unwrap_or(4 * 1024 * 1024 * 1024)
+        use crate::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
+        self.kkt_memory_budget_bytes.unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
     }
 
-    /// Max L-factor entries from memory budget (budget_bytes / 16).
+    /// Max L-factor entries from memory budget (budget / bytes-per-entry).
     pub(crate) fn effective_max_l_nnz(&self) -> usize {
-        self.effective_kkt_memory_budget_bytes() / 16
+        use crate::linalg::kkt_solver::BYTES_PER_L_ENTRY;
+        self.effective_kkt_memory_budget_bytes() / BYTES_PER_L_ENTRY
     }
 }
 
@@ -944,17 +938,8 @@ mod tests {
     fn test_ipm_new_fields_default() {
         let o = IpmOptions::default();
         assert!(!o.dd_ldl, "dd_ldl default false");
-        assert!(o.minres_eta.is_none(), "minres_eta default None");
         assert!(o.minres_ir.is_none(), "minres_ir default None");
         assert!(o.kkt_memory_budget_bytes.is_none(), "kkt_memory_budget_bytes default None");
-    }
-
-    #[test]
-    fn test_ipm_effective_minres_eta_default_and_override() {
-        let o = IpmOptions::default();
-        assert_eq!(o.effective_minres_eta(), 1e-7, "default η = 1e-7");
-        let o2 = IpmOptions { minres_eta: Some(0.5), ..Default::default() };
-        assert_eq!(o2.effective_minres_eta(), 0.5);
     }
 
     #[test]
@@ -966,29 +951,31 @@ mod tests {
     }
 
     #[test]
-    fn test_ipm_effective_max_l_nnz_default_and_override() {
-        let o = IpmOptions::default();
-        assert_eq!(o.effective_kkt_memory_budget_bytes(), 4 * 1024 * 1024 * 1024);
-        assert_eq!(o.effective_max_l_nnz(), 4 * 1024 * 1024 * 1024 / 16);
-        let o2 = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
-        assert_eq!(o2.effective_max_l_nnz(), 100, "1600 / 16 = 100");
+    fn test_ipm_validate_minres_ir() {
+        use crate::linalg::kkt_solver::MINRES_INEXACT_NEWTON_IR_STEPS;
+        // Default (None) and valid values
+        assert!(IpmOptions::default().validate().is_ok());
+        for ok in [0_usize, 1, 5, 10] {
+            let o = IpmOptions { minres_ir: Some(ok), ..Default::default() };
+            assert!(o.validate().is_ok(), "minres_ir={ok} should be valid");
+        }
+        // Out of range: > 10
+        for bad in [11_usize, 100, usize::MAX] {
+            let o = IpmOptions { minres_ir: Some(bad), ..Default::default() };
+            assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
+        }
+        // Default const falls within valid range
+        assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
     }
 
     #[test]
-    fn test_ipm_validate_minres_eta() {
-        // Valid range: (0, 1]
-        for ok in [f64::MIN_POSITIVE, 0.1, 0.5, 1.0] {
-            let o = IpmOptions { minres_eta: Some(ok), ..Default::default() };
-            assert!(o.validate().is_ok(), "minres_eta={ok} should be valid");
-        }
-        // Invalid: 0, negative, > 1, NaN, infinity
-        for bad in [0.0_f64, -0.1, 1.001, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions { minres_eta: Some(bad), ..Default::default() };
-            assert!(o.validate().is_err(), "minres_eta={bad} should be invalid");
-        }
-        // None is always valid
-        let o = IpmOptions { minres_eta: None, ..Default::default() };
-        assert!(o.validate().is_ok());
+    fn test_ipm_effective_max_l_nnz_default_and_override() {
+        use crate::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
+        let o = IpmOptions::default();
+        assert_eq!(o.effective_kkt_memory_budget_bytes(), DEFAULT_MEMORY_BUDGET_BYTES);
+        assert_eq!(o.effective_max_l_nnz(), DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
+        let o2 = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
+        assert_eq!(o2.effective_max_l_nnz(), 1600 / BYTES_PER_L_ENTRY);
     }
 
     // ---- SolverOptions: presolve fields --------------------------------

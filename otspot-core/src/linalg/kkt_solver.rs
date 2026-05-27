@@ -32,8 +32,6 @@ pub fn max_l_nnz_from_budget() -> usize {
 pub struct KktConfig {
     /// Use TwoFloat DD-LDL (default: `false`).
     pub dd_ldl: bool,
-    /// MINRES inexact-Newton η ∈ (0, 1] (default: 1e-7).
-    pub minres_eta: f64,
     /// MINRES iterative-refinement rounds (default: 0).
     pub minres_ir: usize,
     /// Max L-factor entries derived from memory budget (default: 4 GiB / 16 B).
@@ -44,7 +42,6 @@ impl Default for KktConfig {
     fn default() -> Self {
         Self {
             dd_ldl: false,
-            minres_eta: MINRES_INEXACT_NEWTON_ETA,
             minres_ir: MINRES_INEXACT_NEWTON_IR_STEPS,
             max_l_nnz: DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY,
         }
@@ -229,7 +226,7 @@ pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 
 /// Default IR rounds for inexact MINRES. 0 because the auto-Schur path
 /// makes the saddle-point conditioning manageable in practice.
-const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
+pub(crate) const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
 
 /// Default convergence tolerance for non-inexact MINRES constructors.
 /// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM
@@ -494,7 +491,7 @@ pub fn factorize_kkt_with_cached_perm_par(
     n_top: Option<usize>,
     par: faer::Par,
 ) -> Result<KktFactor, KktError> {
-    let eta = cfg.minres_eta;
+    let eta = MINRES_INEXACT_NEWTON_ETA;
     let ir = cfg.minres_ir;
     if cfg.dd_ldl {
         // TwoFloat (~106-bit) LDL for ill-conditioned systems.
@@ -573,7 +570,7 @@ pub fn factorize_kkt_pre_permuted_cached_par(
             unpermuted_k, perm, deadline, cfg, n_top, par,
         );
     }
-    let eta = cfg.minres_eta;
+    let eta = MINRES_INEXACT_NEWTON_ETA;
     let ir = cfg.minres_ir;
     match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached_par(
         pre_permuted_k, perm, deadline, Some(cfg.max_l_nnz), cached_symbolic, par,
@@ -1127,13 +1124,11 @@ mod tests {
         let o = IpmOptions::default();
         let cfg = KktConfig {
             dd_ldl: o.dd_ldl,
-            minres_eta: o.effective_minres_eta(),
             minres_ir: o.effective_minres_ir(),
             max_l_nnz: o.effective_max_l_nnz(),
         };
         let dflt = KktConfig::default();
         assert_eq!(cfg.dd_ldl, dflt.dd_ldl);
-        assert_eq!(cfg.minres_eta, dflt.minres_eta);
         assert_eq!(cfg.minres_ir, dflt.minres_ir);
         assert_eq!(cfg.max_l_nnz, dflt.max_l_nnz);
     }
