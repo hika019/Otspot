@@ -1125,3 +1125,50 @@ fn sentinel_qp_swapped_bound_duals_changes_kkt() {
         base, swapped,
     );
 }
+
+/// Regression: 2f2956 case — B&B dual recovery polish (KKT < 1e-3).
+///
+/// This case previously returned KKT=5.743e-3 because the polish solve returned
+/// SuboptimalSolution (duality_gap > user_eps due to O(n*eps*||x||) accumulation)
+/// and was rejected by is_polish_acceptable, leaving the sub-box incumbent duals.
+/// The fix: accept SuboptimalSolution polish results whose KKT residuals are below
+/// POLISH_KKT_ACCEPT_FACTOR * user_eps.
+#[test]
+fn regression_2f2956_bb_polish_kkt() {
+    let q = CscMatrix::from_triplets(
+        &[0, 1], &[0, 1],
+        &[0.5199347774014249_f64, 1.6114924907303565_f64], 2, 2,
+    ).unwrap();
+    let c = vec![-1.1554333262013776_f64, 1.3835214549363157_f64];
+    let a = CscMatrix::from_triplets(
+        &[2usize, 0], &[0usize, 1],
+        &[-0.63654636737306_f64, 0.9342944804813141_f64], 3, 2,
+    ).unwrap();
+    let b_vec = vec![2.090821457603841_f64, 2.0007963900069394_f64, -2.010004968923449_f64];
+    let bounds = vec![
+        (-1.4382225919619933_f64, 1.4382225919619933_f64),
+        (-1.7758618255843723_f64, 1.7758618255843723_f64),
+    ];
+    let cts = vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Ge];
+
+    let qp = QpProblem::new(q, c, a, b_vec, bounds, cts).unwrap();
+
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(10.0);
+    let cfg = GlobalOptimizationConfig::default();
+
+    let res = solve_qp_global(&qp, &opts, &cfg);
+
+    assert!(
+        matches!(res.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::NonconvexGlobal | SolveStatus::NonconvexLocal),
+        "2f2956: expected feasible status, got {:?}",
+        res.status,
+    );
+
+    let kkt = compute_qp_kkt_max(&qp, &res.solution, &res.dual_solution, &res.bound_duals);
+    assert!(
+        kkt < EPS_KKT_NONCONVEX_LOCAL,
+        "2f2956 regression: KKT={:.3e} >= {:.0e} (sub-box dual recovery bug)",
+        kkt, EPS_KKT_NONCONVEX_LOCAL,
+    );
+}

@@ -35,6 +35,13 @@ use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::problem::QpProblem;
+use crate::qp::ipm_solver::kkt::{
+    bound_violation as kkt_bound_violation,
+    complementarity_residual_rel as kkt_comp_residual,
+    kkt_residual_rel,
+    primal_residual_rel as kkt_primal_residual,
+};
+use crate::qp::ipm_solver::outcome::ProblemView;
 use std::time::{Duration, Instant};
 
 use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
@@ -44,6 +51,15 @@ use branch::{select_branching_variable, split_node};
 use node::BBNode;
 use pruning::{should_prune, within_gap};
 use tree::BBTree;
+
+/// SuboptimalSolution な polish 結果を KKT 残差で採用するときの user_eps に対する倍率。
+///
+/// `prove_optimal` の duality_gap チェックは O(n * user_eps * ||x||) の誤差蓄積により
+/// user_eps を僅かに上回ることがある。この場合 SuboptimalSolution を返すが KKT 残差は
+/// user_eps 以下であり、dual recovery 目的の polish としては十分収束している。
+/// この倍率は「gap のみ不合格」と「本当に収束不足」を区別する緩和係数で、
+/// user_eps (典型 1e-6) の 100 倍 (= 1e-4) まで許容する。
+const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
 
 /// 大域最適化 entry。
 ///
@@ -334,13 +350,11 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     })
 }
 
-/// polish した解の採用可否を判定する。
+/// polish した解の採用可否を判定する (通常パス)。
 ///
 /// 採用条件:
 /// 1. `status` が収束済み (Optimal / LocallyOptimal) であること。
-///    未収束 (MaxIterations / SuboptimalSolution 等) は相補性を満たさない可能性があり棄却。
 /// 2. `polished_obj` が有限かつ `incumbent_obj` より悪化していないこと。
-///    min 問題なので `polished_obj > incumbent_obj + gap_tol * scale` は棄却。
 fn is_polish_acceptable(
     status: &SolveStatus,
     polished_obj: f64,
@@ -353,6 +367,46 @@ fn is_polish_acceptable(
     }
     let scale = 1.0_f64.max(incumbent_obj.abs());
     polished_obj <= incumbent_obj + gap_tol * scale
+}
+
+/// SuboptimalSolution な polish 結果を KKT 残差で採用可否を追加判定する。
+///
+/// `prove_optimal` の duality_gap チェックが `user_eps` を僅かに上回り SuboptimalSolution
+/// になった場合でも、KKT 残差が `user_eps * POLISH_KKT_ACCEPT_FACTOR` 以下なら dual
+/// recovery 目的の polish として採用する。KKT 残差を独立に再計算し、gap のみ不合格な
+/// 収束済み解と、真に収束不足の解を区別する。
+fn is_polish_suboptimal_acceptable(
+    polished: &SolverResult,
+    problem: &QpProblem,
+    incumbent_obj: f64,
+    gap_tol: f64,
+    user_eps: f64,
+) -> bool {
+    if !matches!(polished.status, SolveStatus::SuboptimalSolution) {
+        return false;
+    }
+    if !polished.objective.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    if polished.objective > incumbent_obj + gap_tol * scale {
+        return false;
+    }
+    let kkt_tol = user_eps * POLISH_KKT_ACCEPT_FACTOR;
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
+    };
+    let kkt = kkt_residual_rel(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    let pf = kkt_primal_residual(&view, &polished.solution);
+    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
+    let comp = kkt_comp_residual(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol
 }
 
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
@@ -416,8 +470,12 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
+        let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
         if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol) {
+            self.update_incumbent(&polished);
+        } else if is_polish_suboptimal_acceptable(&polished, problem, self.incumbent_obj, gap_tol, user_eps) {
+            // SuboptimalSolution でも KKT が十分なら dual recovery として採用。
             self.update_incumbent(&polished);
         }
     }
