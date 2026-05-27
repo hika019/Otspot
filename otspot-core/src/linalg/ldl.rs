@@ -4,14 +4,13 @@
 //! to automatically select simplicial or supernodal factorization based on matrix structure.
 //! Banded/sparse matrices (LISWET etc.) → simplicial; dense fill (AUG2D etc.) → supernodal.
 //!
-//! Public API (backward-compatible):
+//! Public API:
 //! - `LdlFactorization`        — positive definite, no AMD
 //! - `LdlFactorizationAmd`     — quasidefinite, with AMD permutation
 //! - `LdlError`
 //! - `factorize`
-//! - `factorize_with_deadline`
-//! - `factorize_quasidefinite_with_cached_perm`
 //! - `factorize_quasidefinite_with_amd`
+//! - `factorize_quasidefinite_with_cached_perm_budget_par`
 
 use crate::linalg::amd::{amd_with_deadline, inv_permute_vec, permute_sym_upper, permute_vec};
 use crate::sparse::CscMatrix;
@@ -561,75 +560,6 @@ pub fn factorize_with_par(
     Ok(LdlFactorization { symbolic, l_values, n, par })
 }
 
-/// deadline 付き正定値疎行列の LDL^T 分解 (per-call parallelism = `Par::Seq`、既存互換)。
-///
-/// deadline は factorize 前と symbolic 完了後（numeric 開始前）の 2 箇所でチェック。
-/// faer の numeric 因子化自体は mid-factorization キャンセル不可のため、
-/// 一旦 numeric を開始したら deadline を超えて完走する可能性がある。
-pub fn factorize_with_deadline(
-    mat: &CscMatrix,
-    deadline: Option<Instant>,
-) -> Result<LdlFactorization, LdlError> {
-    factorize_with_deadline_par(mat, deadline, DEFAULT_PAR)
-}
-
-/// `factorize_with_deadline` の per-call parallelism 指定版。
-pub fn factorize_with_deadline_par(
-    mat: &CscMatrix,
-    deadline: Option<Instant>,
-    par: faer::Par,
-) -> Result<LdlFactorization, LdlError> {
-    if let Some(d) = deadline {
-        if Instant::now() >= d {
-            return Err(LdlError::DeadlineExceeded);
-        }
-    }
-    let n = mat.nrows;
-    let (symbolic, l_values) = do_numeric_factorize(mat, None, deadline, None, par)?;
-    Ok(LdlFactorization { symbolic, l_values, n, par })
-}
-
-/// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解 (既存互換)。
-///
-/// `mat`: 元の（未置換の）augmented KKT 行列（上三角 CSC）
-/// `perm`: 事前計算済み AMD 置換ベクトル（perm[k] = 元インデックス）
-/// `deadline`: factorize 前チェックのみ（mid-factorization 未対応）
-pub fn factorize_quasidefinite_with_cached_perm(
-    mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    factorize_quasidefinite_with_cached_perm_par(mat, perm, deadline, DEFAULT_PAR)
-}
-
-/// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版。
-pub fn factorize_quasidefinite_with_cached_perm_par(
-    mat: &CscMatrix,
-    perm: &[usize],
-    deadline: Option<Instant>,
-    par: faer::Par,
-) -> Result<LdlFactorizationAmd, LdlError> {
-    if let Some(d) = deadline {
-        if Instant::now() >= d {
-            return Err(LdlError::DeadlineExceeded);
-        }
-    }
-    let n = mat.nrows;
-    let (new_col_ptr, new_row_ind, new_values) =
-        permute_sym_upper(n, &mat.col_ptr, &mat.row_ind, &mat.values, perm);
-    let perm_mat = CscMatrix {
-        col_ptr: new_col_ptr,
-        row_ind: new_row_ind,
-        values: new_values,
-        nrows: n,
-        ncols: n,
-    };
-    let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
-    let (symbolic, l_values) =
-        do_numeric_factorize(&perm_mat, Some(&signs), deadline, None, par)?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
-}
-
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算、既存互換）。
 pub fn factorize_quasidefinite_with_amd(
     mat: &CscMatrix,
@@ -833,10 +763,10 @@ mod tests {
 
     #[test]
     fn test_factorize_with_deadline_ok() {
+        // Port: production path (factorize_quasidefinite_with_amd) honours a future deadline.
         let mat = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 1.0), (1, 1, 3.0)]);
-        // deadline far in the future
         let deadline = Some(Instant::now() + std::time::Duration::from_secs(60));
-        let fac = factorize_with_deadline(&mat, deadline).expect("should succeed");
+        let fac = factorize_quasidefinite_with_amd(&mat, deadline).expect("should succeed");
         let b = [1.0f64, 0.0];
         let mut x = [0.0f64; 2];
         fac.solve(&b, &mut x);
@@ -848,9 +778,14 @@ mod tests {
 
     #[test]
     fn test_factorize_with_deadline_expired() {
+        // Port: production path (factorize_quasidefinite_with_cached_perm_budget_par) returns
+        // DeadlineExceeded when the deadline is already past on entry.
         let mat = upper_tri_csc(2, &[(0, 0, 2.0), (1, 1, 3.0)]);
+        let perm = vec![0usize, 1];
         let deadline = Some(Instant::now() - std::time::Duration::from_millis(1));
-        let result = factorize_with_deadline(&mat, deadline);
+        let result = factorize_quasidefinite_with_cached_perm_budget_par(
+            &mat, &perm, deadline, None, faer::Par::Seq,
+        );
         assert!(
             matches!(result, Err(LdlError::DeadlineExceeded)),
             "Expected DeadlineExceeded"
@@ -862,8 +797,9 @@ mod tests {
         // quasidefinite: [[3,1],[1,-2]] — D[0]>0, D[1]<0
         let mat = upper_tri_csc(2, &[(0, 0, 3.0), (0, 1, 1.0), (1, 1, -2.0)]);
         let perm = vec![0usize, 1]; // identity permutation
-        let fac = factorize_quasidefinite_with_cached_perm(&mat, &perm, None)
-            .expect("quasidefinite factorize failed");
+        let fac = factorize_quasidefinite_with_cached_perm_budget_par(
+            &mat, &perm, None, None, faer::Par::Seq,
+        ).expect("quasidefinite factorize failed");
         let b = [1.0f64, 2.0];
         let mut x = [0.0f64; 2];
         fac.solve(&b, &mut x);
@@ -1092,8 +1028,9 @@ mod tests {
             (0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0), (1, 2, 2.0), (2, 2, 5.0),
         ]);
         let perm = vec![0, 1, 2];
-        let fac = factorize_quasidefinite_with_cached_perm(&mat, &perm, None)
-            .expect("factorize failed");
+        let fac = factorize_quasidefinite_with_cached_perm_budget_par(
+            &mat, &perm, None, None, faer::Par::Seq,
+        ).expect("factorize failed");
         let nnz = fac.nnz_l();
         // supernodal len_val() includes internal storage (may exceed lower-tri count)
         assert!(nnz > 0, "nnz_l should be positive for non-trivial matrix");

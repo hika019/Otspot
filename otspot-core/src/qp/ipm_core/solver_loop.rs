@@ -880,11 +880,11 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &aug_perm, None).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &aug_perm, None, None, faer::Par::Seq).unwrap());
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap());
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
 
         let r_d = vec![0.5, -1.0, 0.2, 0.8];
         let r_p_mod = vec![0.1, 0.2, -0.3, 0.4, -0.5, 0.6];
@@ -954,11 +954,11 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let perm: Vec<usize> = (0..aug_mat.nrows).collect();
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &perm, None).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &perm, None, None, faer::Par::Seq).unwrap());
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm: Vec<usize> = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap());
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
 
         let r_d = vec![1.0, 2.0];
         let r_p_mod = vec![3.0];
