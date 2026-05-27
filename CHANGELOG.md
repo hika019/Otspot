@@ -2,6 +2,17 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased / 0.3.0]
+
+### 破壊的変更
+
+- **`SolverResult` に `#[non_exhaustive]` 付与**: 今後のフィールド追加を非破壊化。crate 外でのフィールド列挙 struct-literal は `..Default::default()` が必要。
+- **`SolverResult::opt_cert: Option<OptimalCertificate>` 追加**: B&B incumbent の KKT 証明書フィールド。`#[non_exhaustive]` 適用後の初回 breaking 追加。
+
+### 修正
+
+- **B&B `finalize_proven` の EmptyCol false-demote 修正**: presolve が消去した EmptyCol 変数 (Q 列空・A 列空) を `eliminated_cols` マスクなしで stationarity 検査すると c[j]≠0 の spurious 残差が生じ valid な proven 解が NonconvexLocal に誤降格していた。構造的マスク (`structural_empty_col_mask`) を導入して attempt.rs と同方式で解決。
+
 ## [0.2.0] - 2026-05-27
 
 ### 破壊的変更

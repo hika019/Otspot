@@ -377,6 +377,25 @@ fn is_polish_acceptable(
     polished_obj <= incumbent_obj + gap_tol * scale
 }
 
+/// Structural EmptyCol mask: `eliminated_cols[j] = true` iff column `j` has
+/// no non-zero entries in either `Q` or `A` (LP-style isolated variable).
+///
+/// This mirrors `attempt.rs`'s presolve col_map mask but derives it from
+/// the CSC sparsity pattern directly, so it is valid for any box-restriction
+/// of the same problem (B&B only changes bounds, never Q or A).
+fn structural_empty_col_mask(problem: &QpProblem) -> Vec<bool> {
+    let n = problem.num_vars;
+    let a_ncols = problem.a.col_ptr.len().saturating_sub(1);
+    let q_ncols = problem.q.col_ptr.len().saturating_sub(1);
+    (0..n)
+        .map(|j| {
+            let a_empty = j >= a_ncols || problem.a.col_ptr[j + 1] == problem.a.col_ptr[j];
+            let q_empty = j >= q_ncols || problem.q.col_ptr[j + 1] == problem.q.col_ptr[j];
+            a_empty && q_empty
+        })
+        .collect()
+}
+
 /// SuboptimalSolution な polish 結果を KKT 残差で採用可否を追加判定する。
 ///
 /// `prove_optimal` の duality_gap チェックが `user_eps` を僅かに上回り SuboptimalSolution
@@ -410,6 +429,7 @@ fn is_polish_suboptimal_acceptable(
         return false;
     }
     let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
+    let eliminated_cols = structural_empty_col_mask(problem);
     let view = ProblemView {
         q: &problem.q,
         a: &problem.a,
@@ -417,7 +437,7 @@ fn is_polish_suboptimal_acceptable(
         b: &problem.b,
         bounds: &problem.bounds,
         constraint_types: &problem.constraint_types,
-        eliminated_cols: &[],
+        eliminated_cols: &eliminated_cols,
     };
     let kkt = kkt_residual_rel(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
     let pf = kkt_primal_residual(&view, &polished.solution);
@@ -521,6 +541,7 @@ impl SearchState {
         gap_tol: f64,
         user_eps: f64,
     ) -> SolverResult {
+        let eliminated_cols = structural_empty_col_mask(problem);
         let view = ProblemView {
             q: &problem.q,
             a: &problem.a,
@@ -528,7 +549,7 @@ impl SearchState {
             b: &problem.b,
             bounds: &problem.bounds,
             constraint_types: &problem.constraint_types,
-            eliminated_cols: &[],
+            eliminated_cols: &eliminated_cols,
         };
         let duality_gap_rel = self.incumbent_result.duality_gap_rel.unwrap_or_else(|| {
             compute_duality_gap_rel(problem, &self.incumbent_result)
@@ -1198,5 +1219,66 @@ mod tests {
         );
         assert!(r.bound_gap_cert.is_none(), "demoted must have no bound_gap_cert");
         assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
+    }
+
+    /// P1 regression: `finalize_proven` must not false-demote a valid incumbent when
+    /// presolve eliminated an EmptyCol variable.
+    ///
+    /// ## Setup
+    /// Problem: `min -x₀² + x₁`, Q=diag([-2,0]), c=[0,1], A=∅, x₀∈[-1,1], x₁∈[0,1].
+    /// x₁ is EmptyCol (Q[:,1]=0, A[:,1]=0, c[1]=1>0 → presolve fixes x₁=lb=0).
+    ///
+    /// KKT at (x₀=1, x₁=0):
+    ///   stationarity x₀: (-2)·1 + (-z_lb_x0 + z_ub_x0) = -2 + 2 = 0   ✓  (z_ub=2,z_lb=0)
+    ///   stationarity x₁: 0 + c[1] + 0 = 1.0  (spurious if x₁ not skipped)
+    ///
+    /// With `eliminated_cols=&[]` (bug): kkt for x₁ = 1.0 ≫ eps → false-demote → NonconvexLocal.
+    /// With structural mask (fix): x₁ has a_empty∧q_empty → skipped → kkt=0 → NonconvexGlobal.
+    ///
+    /// ## Sentinel (no-op-fail)
+    /// Changing `structural_empty_col_mask` to return `vec![false; n]` (= disable the mask)
+    /// causes this test to FAIL: kkt for x₁ = 1.0 → prove_optimal rejects → NonconvexLocal.
+    #[test]
+    fn finalize_proven_empty_col_not_false_demoted() {
+        // Problem with EmptyCol x₁ (c[1]=1.0 > 0 → postsolve sets x₁=lb=0, z=0 by convention)
+        let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
+        let problem = QpProblem::new_all_le(
+            q,
+            vec![0.0_f64, 1.0_f64],  // c[1]=1.0: spurious stationarity = 1.0 without mask
+            a,
+            vec![],
+            vec![(-1.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)],
+        )
+        .unwrap();
+
+        // KKT-valid solution: x₀=1 (ub active), x₁=0 (EmptyCol fixed at lb).
+        // bound_duals = [z_lb_x0=0, z_lb_x1=0, z_ub_x0=2, z_ub_x1=0]
+        // stationarity x₀: Q[0,0]·1 + c[0] - z_lb_x0 + z_ub_x0 = -2 + 0 + 2 = 0  ✓
+        // duality_gap = 0: primal=-1, dual=-0.5·(-2)·1 - 1·2 = 1-2 = -1  ✓
+        let incumbent = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0_f64, 0.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![0.0_f64, 0.0_f64, 2.0_f64, 0.0_f64],
+            duality_gap_rel: Some(0.0),
+            ..Default::default()
+        };
+
+        let user_eps = 1e-6_f64;
+        let gap_tol = 1e-6_f64;
+
+        let r = SearchState::new(incumbent)
+            .finalize_proven(&problem, -1.0, true, gap_tol, user_eps);
+        assert_eq!(
+            r.status,
+            SolveStatus::NonconvexGlobal,
+            "EmptyCol incumbent must not be false-demoted: expected NonconvexGlobal, got {:?}. \
+             Sentinel: structural_empty_col_mask returning vec![false; n] causes this FAIL \
+             because kkt for x₁ (c=1,z=0) gives 1.0 ≫ eps.",
+            r.status,
+        );
+        assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
     }
 }
