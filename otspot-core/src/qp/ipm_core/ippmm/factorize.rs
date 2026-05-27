@@ -30,6 +30,9 @@ impl FactorizeCaches {
     }
 }
 
+// KktFactor is large but FactorizeOutcome is a short-lived per-iteration result;
+// boxing would add allocation overhead on the hot IPM path.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum FactorizeOutcome {
     Ok {
         factor: KktFactor,
