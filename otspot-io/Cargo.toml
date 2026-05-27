@@ -1,6 +1,6 @@
 [package]
 name = "otspot-io"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "File I/O (MPS/QPS/QPLIB) for the otspot solver"

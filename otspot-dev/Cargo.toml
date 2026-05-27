@@ -1,6 +1,6 @@
 [package]
 name = "otspot-dev"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 publish = false
 description = "Dev/test utilities for otspot — not part of the public API"
