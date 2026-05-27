@@ -16,7 +16,6 @@ parallel = []
 [dependencies]
 faer = "0.24.0"
 log = "0.4"
-mimalloc = { version = "0.1", default-features = false }
 rayon = "1"
 twofloat = "0.8"
 
