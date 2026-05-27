@@ -6,8 +6,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 破壊的変更
 
-- **`SolverResult` に `#[non_exhaustive]` 付与**: 今後のフィールド追加を非破壊化。crate 外でのフィールド列挙 struct-literal は `..Default::default()` が必要。
-- **`SolverResult::opt_cert: Option<OptimalCertificate>` 追加**: B&B incumbent の KKT 証明書フィールド。`#[non_exhaustive]` 適用後の初回 breaking 追加。
+- **`SolverResult::opt_cert: Option<OptimalCertificate>` 追加**: B&B incumbent の KKT 証明書フィールド (`prove_optimal` が発行、降格時は `None`)。`SolverResult` はソルバ出力型のため通常は受け取るだけだが、フィールド全列挙の struct-literal で構築している場合は `..Default::default()` を併用すること。
 
 ### 修正
 

@@ -130,7 +130,6 @@ impl fmt::Display for SolveStatus {
 /// LP固有フィールド（`reduced_costs`, `slack`, `warm_start_basis`）は QP求解時は空/None。
 /// QP固有フィールド（`bound_duals`, `iterations`）は LP求解時は空/0。
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SolverResult {
     /// 求解ステータス
     pub status: SolveStatus,
