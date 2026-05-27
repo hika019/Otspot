@@ -4,7 +4,7 @@
 //! 問題は標準形 `min c^T x  s.t.  Ax {<=,>=,=} b,  x in [lb, ub]` で定義される。
 
 pub mod certificate;
-use certificate::BoundGapCertificate;
+use certificate::{BoundGapCertificate, OptimalCertificate};
 
 use crate::error::SolverError;
 use crate::options::WarmStartBasis;
@@ -184,6 +184,11 @@ pub struct SolverResult {
     /// Present iff the solver completed a B&B search with a fully authenticated gap
     /// (no `proof_uncertain` region, `within_gap` satisfied). `None` for direct LP/QP solves.
     pub bound_gap_cert: Option<BoundGapCertificate>,
+    /// KKT optimality certificate — minted by `prove_optimal` on the B&B incumbent.
+    ///
+    /// Set when `finalize_proven` verifies all KKT conditions on the returned point.
+    /// `None` for demoted (LocallyOptimal/NonconvexLocal) or non-B&B results.
+    pub opt_cert: Option<OptimalCertificate>,
 }
 
 /// 各 phase 所要時間 (μs精度)。LP simplex と QP IPM の両経路で共用。
@@ -241,6 +246,7 @@ impl Default for SolverResult {
             postsolve_dfeas: None,
             stats: SolveStats::default(),
             bound_gap_cert: None,
+            opt_cert: None,
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::qp::problem::QpProblem;
 /// 元空間 双対ギャップ相対値: |primal_obj − dual_obj| / max(|p|, |d|, 1)。
 /// QP 弱双対性 dual_obj = -1/2 x'Qx - b'y + lb'z_lb - ub'z_ub。rank-deficient Q の
 /// 偽 Optimal (KKT 小だが gap 大) を弾く。FX 変数の bound 寄与は lb·停留性で解析的に置換。
-pub(super) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult) -> f64 {
+pub(crate) fn compute_duality_gap_rel(problem: &QpProblem, result: &SolverResult) -> f64 {
     let n = problem.num_vars;
     if result.solution.len() != n {
         return f64::INFINITY;

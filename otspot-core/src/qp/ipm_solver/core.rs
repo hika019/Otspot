@@ -15,7 +15,7 @@ use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
 use crate::qp::problem::QpProblem;
 
-use duality_gap::compute_duality_gap_rel;
+pub(crate) use duality_gap::compute_duality_gap_rel;
 use eps_tighten::tighten_ipm_eps_for_presolve_scale;
 use post_processing::{
     allow_primal_projection, kkt_already_passes, refine_krylov_and_projection,
