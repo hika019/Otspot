@@ -397,6 +397,15 @@ fn is_polish_suboptimal_acceptable(
     if polished.objective > incumbent_obj + gap_tol * scale {
         return false;
     }
+    // dimension guard — mirrors prove_optimal (certificate.rs ~L64)
+    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub = problem.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    if polished.solution.len() != problem.num_vars
+        || polished.dual_solution.len() != problem.num_constraints
+        || polished.bound_duals.len() != n_lb + n_ub
+    {
+        return false;
+    }
     let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
     let view = ProblemView {
         q: &problem.q,
@@ -910,5 +919,99 @@ mod tests {
                 "solve_qp_global with {label} must return NumericalError (not panic)"
             );
         }
+    }
+
+    // ---- is_polish_suboptimal_acceptable sentinels ----------------------------
+
+    /// P2-a sentinel: dual_sign gate の no-op-fail 検証。
+    ///
+    /// stationarity/primal/bound/complementarity は全て kkt_tol 以下だが、
+    /// Le 制約の dual が負 (wrong-sign) で dual_sign_violation が kkt_tol を超える場合、
+    /// `is_polish_suboptimal_acceptable` は false を返す。
+    ///
+    /// Sentinel: `&& dsign <= kkt_tol` を除去すると true を返し、このテストが FAIL する
+    /// (= no-op で FAIL する真の sentinel)。
+    #[test]
+    fn is_polish_suboptimal_acceptable_rejects_wrong_sign_duals() {
+        use crate::problem::ConstraintType;
+
+        // 1 変数、1 Le 制約、A = 0 行列 → stationarity/primal/comp は全て 0
+        // bounds = (-inf, +inf) → bound_duals は空、bound_violation = 0
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // dual = -0.5: Le 制約に対して wrong-sign
+        // dsign = 0.5 / (1 + 0.5) ≈ 0.333 >> kkt_tol (= (1e-6 * 100).min(1e-3) = 1e-4)
+        let polished = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0],
+            dual_solution: vec![-0.5],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished, &problem, 0.0, 0.1, 1e-6),
+            "wrong-sign dual (y = -0.5 for Le constraint) must be rejected by dual_sign gate",
+        );
+    }
+
+    /// P2-b sentinel: dimension guard — 次元不一致は false 返却。
+    ///
+    /// solution.len や dual_solution.len が problem 次元と合わない場合、
+    /// 残差計算前に棄却する。
+    #[test]
+    fn is_polish_suboptimal_acceptable_rejects_mismatched_dimensions() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // solution の長さが 1 (正しくは 2) → 次元不整合
+        let polished_short_sol = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0],           // wrong: should be len 2
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished_short_sol, &problem, 0.0, 0.1, 1e-6),
+            "mismatched solution dimension must be rejected",
+        );
+
+        // dual_solution の長さが 0 (正しくは 1) → 次元不整合
+        let polished_short_dual = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![],         // wrong: should be len 1
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished_short_dual, &problem, 0.0, 0.1, 1e-6),
+            "mismatched dual_solution dimension must be rejected",
+        );
     }
 }
