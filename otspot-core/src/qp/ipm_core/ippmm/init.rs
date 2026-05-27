@@ -3,7 +3,7 @@
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
 use super::warm_start::apply_qp_warm_start;
 use crate::linalg::amd::amd_with_deadline;
-use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, max_l_nnz_from_budget};
+use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, KktConfig};
 use crate::linalg::timeout::TimeoutCtx;
 use faer::Par;
 use crate::options::SolverOptions;
@@ -90,9 +90,15 @@ pub(super) fn build_initial_point(
     };
 
     if warm_mu.is_none() {
+        let kkt_cfg = KktConfig {
+            dd_ldl: options.ipm.dd_ldl,
+            minres_eta: options.ipm.effective_minres_eta(),
+            minres_ir: options.ipm.effective_minres_ir(),
+            max_l_nnz: options.ipm.effective_max_l_nnz(),
+        };
         mehrotra_cold_init(
             problem, a_ext, b_ext, is_eq_ext, m_ext, m_ineq,
-            &ax0, timeout_ctx, par,
+            &ax0, timeout_ctx, par, &kkt_cfg,
             &mut x, &mut s, &mut y,
         );
     }
@@ -112,6 +118,7 @@ fn mehrotra_cold_init(
     ax0: &[f64],
     timeout_ctx: &TimeoutCtx,
     par: Par,
+    kkt_cfg: &KktConfig,
     x: &mut [f64],
     s: &mut [f64],
     y: &mut [f64],
@@ -130,7 +137,7 @@ fn mehrotra_cold_init(
             k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
         );
         if let Ok(fac_init) = factorize_kkt_with_cached_perm_par(
-            &k_init, &perm_init, timeout_ctx.deadline, max_l_nnz_from_budget(), Some(n), par,
+            &k_init, &perm_init, timeout_ctx.deadline, kkt_cfg, Some(n), par,
         ) {
             let mut rhs_init = vec![0.0_f64; n + m_ext];
             for i in 0..m_ext { rhs_init[n + i] = r_p[i]; }

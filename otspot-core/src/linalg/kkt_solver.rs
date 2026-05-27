@@ -6,25 +6,49 @@
 use crate::sparse::CscMatrix;
 use std::time::Instant;
 
-/// Default per-factorisation memory budget (4 GiB). Overridable via
-/// `KKT_MEMORY_BUDGET_BYTES`. Applied uniformly via `L_nnz × BYTES_PER_L_ENTRY`
-/// rather than via problem-size heuristics.
-const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
+/// Default per-factorisation memory budget (4 GiB).
+/// Controlled via [`KktConfig::max_l_nnz`] / [`crate::options::IpmOptions::kkt_memory_budget_bytes`].
+pub const DEFAULT_MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// LDL の L 値 1 entry あたりのバイト数。f64 = 8B + row index usize = 8B (上限見積り)。
-const BYTES_PER_L_ENTRY: usize = 16;
+pub const BYTES_PER_L_ENTRY: usize = 16;
 
-/// 現在の memory budget (バイト) を返す。env > default の優先順位。
+/// Static default memory budget in bytes; used by callers that do not have
+/// [`crate::options::IpmOptions`] in scope (e.g. postsolve LSQ refinement).
 pub fn memory_budget_bytes() -> usize {
-    std::env::var("KKT_MEMORY_BUDGET_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+    DEFAULT_MEMORY_BUDGET_BYTES
 }
 
-/// memory budget を L_nnz 上限に変換する。
+/// Static default max L-factor entries; used by callers without IpmOptions in scope.
 pub fn max_l_nnz_from_budget() -> usize {
-    memory_budget_bytes() / BYTES_PER_L_ENTRY
+    DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY
+}
+
+/// KKT factorization/MINRES configuration derived from [`crate::options::IpmOptions`].
+///
+/// Callers in the IPM path build this from options and pass it down, avoiding
+/// env-var reads in production code.
+#[derive(Debug, Clone, Copy)]
+pub struct KktConfig {
+    /// Use TwoFloat DD-LDL (default: `false`).
+    pub dd_ldl: bool,
+    /// MINRES inexact-Newton η ∈ (0, 1] (default: 1e-7).
+    pub minres_eta: f64,
+    /// MINRES iterative-refinement rounds (default: 0).
+    pub minres_ir: usize,
+    /// Max L-factor entries derived from memory budget (default: 4 GiB / 16 B).
+    pub max_l_nnz: usize,
+}
+
+impl Default for KktConfig {
+    fn default() -> Self {
+        Self {
+            dd_ldl: false,
+            minres_eta: MINRES_INEXACT_NEWTON_ETA,
+            minres_ir: MINRES_INEXACT_NEWTON_IR_STEPS,
+            max_l_nnz: DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY,
+        }
+    }
 }
 
 /// Failure modes from `KktSolver::solve` / `refactor`.
@@ -216,23 +240,6 @@ const MINRES_DEFAULT_TOL: f64 = 1e-9;
 /// scales with problem size.
 const MINRES_MAX_ITER_MULTIPLIER: usize = 2;
 
-/// Resolve η from the `MINRES_ETA` env (constrained to `(0, 1]`), else default.
-fn minres_eta_runtime() -> f64 {
-    std::env::var("MINRES_ETA")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
-        .unwrap_or(MINRES_INEXACT_NEWTON_ETA)
-}
-
-/// Resolve IR rounds from the `MINRES_IR` env (constrained to `0..=10`), else default.
-fn minres_ir_runtime(default: usize) -> usize {
-    std::env::var("MINRES_IR")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|v| *v <= 10)
-        .unwrap_or(default)
-}
 
 impl PreconditionedMinres {
     /// Tighten η between outer IPM iterations (Eisenstat-Walker forcing).
@@ -247,9 +254,9 @@ impl PreconditionedMinres {
         Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
     }
 
-    /// Inexact-Newton variant of the block-diagonal saddle-point preconditioner,
-    /// with env-overridable η and IR rounds.
-    pub fn with_block_diag_inexact(k: CscMatrix, n_top: usize) -> Self {
+    /// Inexact-Newton variant of the block-diagonal saddle-point preconditioner.
+    /// `eta` is the MINRES forcing term η ∈ (0, 1]; `ir` is iterative-refinement rounds.
+    pub fn with_block_diag_inexact(k: CscMatrix, n_top: usize, eta: f64, ir: usize) -> Self {
         let kind = PreconditionerKind::BlockDiag { n_top };
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
@@ -258,13 +265,14 @@ impl PreconditionedMinres {
             m_inv_diag,
             kind,
             max_iter: 2 * n,
-            tol: minres_eta_runtime(),
-            ir_steps: minres_ir_runtime(MINRES_INEXACT_NEWTON_IR_STEPS),
+            tol: eta,
+            ir_steps: ir,
         }
     }
 
     /// Inexact-Newton variant of `new` (Jacobi preconditioner).
-    pub fn new_inexact(k: CscMatrix) -> Self {
+    /// `eta` is the MINRES forcing term η ∈ (0, 1]; `ir` is iterative-refinement rounds.
+    pub fn new_inexact(k: CscMatrix, eta: f64, ir: usize) -> Self {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
@@ -273,8 +281,8 @@ impl PreconditionedMinres {
             m_inv_diag,
             kind,
             max_iter: 2 * n,
-            tol: minres_eta_runtime(),
-            ir_steps: minres_ir_runtime(MINRES_INEXACT_NEWTON_IR_STEPS),
+            tol: eta,
+            ir_steps: ir,
         }
     }
 
@@ -482,17 +490,17 @@ pub fn factorize_kkt_with_cached_perm_par(
     k: &CscMatrix,
     perm: &[usize],
     deadline: Option<Instant>,
-    max_l_nnz: usize,
+    cfg: &KktConfig,
     n_top: Option<usize>,
     par: faer::Par,
 ) -> Result<KktFactor, KktError> {
-    // IPM_DD_LDL=1 switches to TwoFloat (~106-bit) LDL for ill-conditioned systems
-    // where the f64 forward error (cond × ε) would exceed the requested eps.
-    if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
-        // Run the f64 symbolic factorisation to honour the same memory budget.
-        // DD LDL は内部で TwoFloat (scalar) を使うため、par は f64 側 sentinel のみに伝播。
+    let eta = cfg.minres_eta;
+    let ir = cfg.minres_ir;
+    if cfg.dd_ldl {
+        // TwoFloat (~106-bit) LDL for ill-conditioned systems.
+        // Run f64 symbolic factorisation first to honour the same memory budget.
         match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-            k, perm, deadline, Some(max_l_nnz), par,
+            k, perm, deadline, Some(cfg.max_l_nnz), par,
         ) {
             Ok(_) => {
                 match crate::linalg::ldl_dd::factorize_quasidefinite_with_cached_perm_dd(
@@ -523,21 +531,20 @@ pub fn factorize_kkt_with_cached_perm_par(
             }
         }
         let minres = match n_top {
-            Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
-            _ => PreconditionedMinres::new_inexact(k.clone()),
+            Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir),
+            _ => PreconditionedMinres::new_inexact(k.clone(), eta, ir),
         };
         return Ok(KktFactor::Iterative(minres));
     }
 
     match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-        k, perm, deadline, Some(max_l_nnz), par,
+        k, perm, deadline, Some(cfg.max_l_nnz), par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
-            // Budget exceeded → MINRES with inexact-Newton tolerance.
             let minres = match n_top {
-                Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n),
-                _ => PreconditionedMinres::new_inexact(k.clone()),
+                Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir),
+                _ => PreconditionedMinres::new_inexact(k.clone(), eta, ir),
             };
             Ok(KktFactor::Iterative(minres))
         }
@@ -555,27 +562,29 @@ pub fn factorize_kkt_pre_permuted_cached_par(
     unpermuted_k: &CscMatrix,
     perm: &[usize],
     deadline: Option<Instant>,
-    max_l_nnz: usize,
+    cfg: &KktConfig,
     n_top: Option<usize>,
     cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
     par: faer::Par,
 ) -> Result<KktFactor, KktError> {
     // The DD LDL path doesn't accept a pre-permuted matrix; fall back to the standard route.
-    if std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1") {
+    if cfg.dd_ldl {
         return factorize_kkt_with_cached_perm_par(
-            unpermuted_k, perm, deadline, max_l_nnz, n_top, par,
+            unpermuted_k, perm, deadline, cfg, n_top, par,
         );
     }
+    let eta = cfg.minres_eta;
+    let ir = cfg.minres_ir;
     match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached_par(
-        pre_permuted_k, perm, deadline, Some(max_l_nnz), cached_symbolic, par,
+        pre_permuted_k, perm, deadline, Some(cfg.max_l_nnz), cached_symbolic, par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
             let minres = match n_top {
                 Some(n) if n <= unpermuted_k.nrows => {
-                    PreconditionedMinres::with_block_diag_inexact(unpermuted_k.clone(), n)
+                    PreconditionedMinres::with_block_diag_inexact(unpermuted_k.clone(), n, eta, ir)
                 }
-                _ => PreconditionedMinres::new_inexact(unpermuted_k.clone()),
+                _ => PreconditionedMinres::new_inexact(unpermuted_k.clone(), eta, ir),
             };
             Ok(KktFactor::Iterative(minres))
         }
@@ -619,7 +628,7 @@ impl AutoKktSolver {
     pub fn new(n: usize) -> Self {
         Self {
             n,
-            direct: Some(DirectLdl::with_budget(n, max_l_nnz_from_budget())),
+            direct: Some(DirectLdl::with_budget(n, DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY)),
             iterative: None,
             last_used: None,
         }
@@ -794,28 +803,28 @@ mod tests {
         solver.refactor(&k, None).expect("no-budget refactor should always succeed for valid K");
     }
 
-    /// memory_budget_bytes() は env 上書きが効くこと
+    /// memory_budget_bytes() は常に DEFAULT_MEMORY_BUDGET_BYTES を返す
     #[test]
-    fn memory_budget_env_override() {
-        // SAFETY: 並列テストでも他テストが同じ env を読まないため安全 (本テストでセット&クリア)
-        // テスト並列実行で環境変数が干渉する可能性があるが、一意な値で観測する
-        let unique_value = "12345678";
-        std::env::set_var("KKT_MEMORY_BUDGET_BYTES", unique_value);
-        let observed = memory_budget_bytes();
-        std::env::remove_var("KKT_MEMORY_BUDGET_BYTES");
-        assert_eq!(observed, 12345678, "env override should be respected");
-        // 削除後は default に戻る
-        let after_unset = memory_budget_bytes();
-        assert_eq!(after_unset, 4 * 1024 * 1024 * 1024, "default = 4 GiB");
+    fn memory_budget_returns_static_default() {
+        let budget = memory_budget_bytes();
+        assert_eq!(budget, DEFAULT_MEMORY_BUDGET_BYTES, "must equal 4 GiB default");
     }
 
     /// max_l_nnz_from_budget は budget をバイト→entry 数に変換する
     #[test]
     fn max_l_nnz_from_budget_conversion() {
-        std::env::set_var("KKT_MEMORY_BUDGET_BYTES", "1600");  // 1600 / 16 = 100 entries
         let l = max_l_nnz_from_budget();
-        std::env::remove_var("KKT_MEMORY_BUDGET_BYTES");
-        assert_eq!(l, 100);
+        assert_eq!(l, DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
+    }
+
+    /// IpmOptions::kkt_memory_budget_bytes オプションで budget を制御できること
+    #[test]
+    fn ipm_opts_kkt_budget_controls_max_l_nnz() {
+        use crate::options::IpmOptions;
+        let opts_default = IpmOptions::default();
+        assert_eq!(opts_default.effective_max_l_nnz(), DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
+        let opts_small = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
+        assert_eq!(opts_small.effective_max_l_nnz(), 100, "1600 / 16 = 100 entries");
     }
 
     /// trait object として `Box<dyn KktSolver>` 経由で動くこと
@@ -979,7 +988,8 @@ mod tests {
     fn factorize_kkt_chooses_direct_when_budget_sufficient() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, 1000, None, faer::Par::Seq)
+        let cfg = KktConfig { max_l_nnz: 1000, ..Default::default() };
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
             .expect("factor should succeed");
         assert!(matches!(factor, KktFactor::Direct(_)));
         assert!(!factor.is_iterative());
@@ -998,7 +1008,8 @@ mod tests {
             &[4.0, 0.5, 4.0, 0.5, -2.0], 3, 3
         ).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(3, &k.col_ptr, &k.row_ind, None);
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, 1, None, faer::Par::Seq)
+        let cfg = KktConfig { max_l_nnz: 1, ..Default::default() };
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
             .expect("factor should succeed (fallback)");
         assert!(matches!(factor, KktFactor::Iterative(_)));
         assert!(factor.is_iterative());
@@ -1061,9 +1072,7 @@ mod tests {
         let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
 
         // η = 0.1 で IR=0 (基準)
-        let mut solver_no_ir = PreconditionedMinres::with_block_diag_inexact(k.clone(), n);
-        solver_no_ir.tol = 0.1;
-        solver_no_ir.ir_steps = 0;
+        let mut solver_no_ir = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 0);
         let mut sol_no_ir = vec![0.0_f64; dim];
         let _ = solver_no_ir.solve(&rhs, &mut sol_no_ir, None);
         let mut residual_no_ir = vec![0.0_f64; dim];
@@ -1075,9 +1084,7 @@ mod tests {
         let rel_no_ir = r_no_ir / rhs_norm;
 
         // η = 0.1 で IR=2 (理論上 η^3 = 1e-3 まで)
-        let mut solver_ir2 = PreconditionedMinres::with_block_diag_inexact(k.clone(), n);
-        solver_ir2.tol = 0.1;
-        solver_ir2.ir_steps = 2;
+        let mut solver_ir2 = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 2);
         let mut sol_ir2 = vec![0.0_f64; dim];
         let _ = solver_ir2.solve(&rhs, &mut sol_ir2, None);
         let mut residual_ir2 = vec![0.0_f64; dim];
@@ -1111,5 +1118,50 @@ mod tests {
         solver.solve(&[3.0, 0.0], &mut sol, None).unwrap();
         assert!((sol[0] - 1.0).abs() < 1e-9);
         assert!((sol[1] - 1.0).abs() < 1e-9);
+    }
+
+    /// KktConfig::default() matches IpmOptions::default() derived values.
+    #[test]
+    fn kkt_config_default_matches_ipm_options_default() {
+        use crate::options::IpmOptions;
+        let o = IpmOptions::default();
+        let cfg = KktConfig {
+            dd_ldl: o.dd_ldl,
+            minres_eta: o.effective_minres_eta(),
+            minres_ir: o.effective_minres_ir(),
+            max_l_nnz: o.effective_max_l_nnz(),
+        };
+        let dflt = KktConfig::default();
+        assert_eq!(cfg.dd_ldl, dflt.dd_ldl);
+        assert_eq!(cfg.minres_eta, dflt.minres_eta);
+        assert_eq!(cfg.minres_ir, dflt.minres_ir);
+        assert_eq!(cfg.max_l_nnz, dflt.max_l_nnz);
+    }
+
+    /// dd_ldl=true returns DirectDd on a well-conditioned system.
+    #[test]
+    fn factorize_kkt_dd_ldl_true_returns_direct_dd() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
+        let cfg = KktConfig { dd_ldl: true, max_l_nnz: 1_000_000, ..Default::default() };
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+            .expect("DD-LDL factor should succeed");
+        assert!(matches!(factor, KktFactor::DirectDd(_)), "expected DirectDd with dd_ldl=true");
+        let mut sol = vec![0.0; 2];
+        factor.solve(&[3.0, 0.0], &mut sol);
+        assert!((sol[0] - 1.0).abs() < 1e-9, "sol[0]={}", sol[0]);
+        assert!((sol[1] - 1.0).abs() < 1e-9, "sol[1]={}", sol[1]);
+    }
+
+    /// dd_ldl=false (default) returns Direct on a well-conditioned system.
+    #[test]
+    fn factorize_kkt_dd_ldl_false_returns_direct() {
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
+        let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
+        let cfg = KktConfig::default();
+        assert!(!cfg.dd_ldl);
+        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+            .expect("f64 LDL factor should succeed");
+        assert!(matches!(factor, KktFactor::Direct(_)), "expected Direct with dd_ldl=false");
     }
 }
