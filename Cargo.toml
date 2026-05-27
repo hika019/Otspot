@@ -28,13 +28,11 @@ categories = ["science", "algorithms", "mathematics"]
 
 # Exclude: internal integration tests (depend on otspot-dev path dep + private data),
 # workspace sub-crates (published separately), dev configs, and private data.
-# Data-free benches/examples (inline fixtures only) are included for discoverability.
-# solve_bench and bench_all_netlib reference tests/netlib/*.mps (excluded), so they
-# are excluded to prevent runtime panics for crates.io users.
+# bench_all_netlib references tests/netlib/*.mps (excluded), so it is excluded
+# to prevent runtime panics for crates.io users.
 exclude = [
     "/src/bin",
     "/tests",
-    "/benches/solve_bench.rs",
     "/examples/bench_all_netlib.rs",
     "/scripts",
     "/data",

@@ -56,10 +56,6 @@ pub struct Model {
     /// Quadratic objective Q matrix for QP problems (None = LP mode).
     /// Convention: min 1/2 x^T Q x + c^T x  ("1/2あり" standard).
     quadratic_objective: Option<CscMatrix>,
-    /// Whether `quadratic_objective` was set via the DSL (`minimize(x*x)`).
-    /// Used to decide whether a subsequent pure-linear `minimize`/`maximize`
-    /// call should clear the stored Q.
-    quad_via_dsl: bool,
     /// Error message from the most recent DSL quad conversion failure (NaN/OOB
     /// coefficient that `quad_to_csc` rejected).  Cleared at the **start** of
     /// every `apply_objective` call so a subsequent valid `minimize`/`maximize`
@@ -97,7 +93,6 @@ impl Model {
             objective: None,
             sense: OptimizationSense::Minimize,
             quadratic_objective: None,
-            quad_via_dsl: false,
             quad_dsl_error: None,
             obj_expr_constant: 0.0,
             invalid_inputs: BTreeMap::new(),
@@ -240,11 +235,11 @@ impl Model {
     // -----------------------------------------------------------------------
     // Quad-objective state machine — three private chokepoints.
     //
-    // The quad state triad (`quadratic_objective` / `quad_via_dsl` /
-    // `quad_dsl_error`) MUST only be mutated through one of these three
-    // functions.  The companion `validate_objective` pure-function checks the
-    // *current* stored state at solve time so that setter-ordering bugs
-    // (P2-a … P2-i) cannot produce silent wrong results.
+    // The quad state pair (`quadratic_objective` / `quad_dsl_error`) MUST
+    // only be mutated through the three functions below.  The companion
+    // `validate_objective` pure-function checks the *current* stored state at
+    // solve time so that setter-ordering bugs (P2-a … P2-i) cannot produce
+    // silent wrong results.
     // -----------------------------------------------------------------------
 
     /// Validate the current objective state.  Called once in `solve()` before
@@ -294,35 +289,22 @@ impl Model {
         Ok(())
     }
 
-    /// Install a Q matrix (success path for both DSL and explicit API).
-    /// Records Q, ownership flag, and **clears `quad_dsl_error`**: installing
-    /// a valid Q matrix (whether via DSL or explicit API) means the current
-    /// quad objective is valid, so any stale DSL error is no longer relevant
-    /// (P2-i/P2-j root fix).
-    fn install_quad(&mut self, q: CscMatrix, via_dsl: bool) {
+    /// Install a Q matrix and clear any stale DSL quad error.
+    fn install_quad(&mut self, q: CscMatrix) {
         self.quadratic_objective = Some(q);
-        self.quad_via_dsl = via_dsl;
         self.quad_dsl_error = None;
     }
 
-    /// Record a DSL quad failure.  Clears Q (a failed DSL attempt does not
-    /// leave a usable Q), resets the ownership flag, and records the error in
-    /// `quad_dsl_error` for `validate_objective` to catch at solve time.
+    /// Record a DSL quad failure.  Clears Q and records the error for
+    /// `validate_objective` to surface at solve time.
     fn fail_dsl_quad(&mut self, msg: String) {
         self.quadratic_objective = None;
-        self.quad_via_dsl = false;
         self.quad_dsl_error = Some(msg);
     }
 
-    /// Transition to a pure-linear objective: clear Q only when it was
-    /// DSL-owned (Q installed via `minimize(x*x + ...)` DSL is cleared).
-    /// `quad_dsl_error` is cleared at the start of
-    /// `apply_objective` before this is called.
+    /// Transition to a pure-linear objective: clear any stored Q matrix.
     fn replace_with_linear_objective(&mut self) {
-        if self.quad_via_dsl {
-            self.quadratic_objective = None;
-            self.quad_via_dsl = false;
-        }
+        self.quadratic_objective = None;
     }
 
     /// Return an error message if `q` contains any variable from a different
@@ -364,7 +346,7 @@ impl Model {
             self.fail_dsl_quad(msg);
         } else if !q.quad.is_empty() {
             match quad_to_csc(&q.quad, self.variables.len()) {
-                Ok(csc) => self.install_quad(csc, true),
+                Ok(csc) => self.install_quad(csc),
                 Err(msg) => self.fail_dsl_quad(msg),
             }
         } else {
@@ -1066,9 +1048,9 @@ impl Model {
         self.quad_dsl_error.is_some()
     }
 
-    /// True if the quadratic objective was installed by the DSL path.
+    /// True if a quadratic objective is currently installed (always DSL-owned).
     pub(crate) fn is_quad_via_dsl(&self) -> bool {
-        self.quad_via_dsl
+        self.quadratic_objective.is_some()
     }
 
     /// True if any Q matrix is currently stored.
@@ -2545,6 +2527,40 @@ mod mip_model_tests {
         assert!(
             matches!(err, ModelError::InvalidInput(_)),
             "P2-h: Inf constant term must give InvalidInput, got {err:?}"
+        );
+    }
+
+    // Q-diagonal overflow → Inf stored in CscMatrix → validate_objective 287-293.
+    // f64::MAX is finite so quad_to_csc's is_finite() check passes, but 2*MAX
+    // overflows to INFINITY in the stored Q.  validate_objective must reject this.
+    #[test]
+    fn test_p2h_inf_q_coef_via_diagonal_overflow_rejected_at_solve() {
+        let mut m = Model::new("p2h_inf_q_diagonal");
+        let x = m.add_var("x", 0.0, f64::INFINITY);
+        // f64::MAX is finite → quad_to_csc passes the is_finite check, but
+        // stores 2.0 * f64::MAX = INFINITY in the diagonal Q entry.
+        // validate_objective (lines 287-293) must catch this.
+        m.minimize(f64::MAX * (x * x));
+        let err = m.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "P2-h: Inf Q diagonal (2*MAX overflow) must give InvalidInput, got {err:?}"
+        );
+    }
+
+    // DSL non-finite Q coefficient (NaN): caught by quad_to_csc → fail_dsl_quad
+    // → quad_dsl_error fires at line 261, not 287-293. Still InvalidInput.
+    #[test]
+    fn test_p2h_nan_q_coef_dsl_rejected_at_solve() {
+        let mut m = Model::new("p2h_nan_q_dsl");
+        let x = m.add_var("x", 0.0, f64::INFINITY);
+        // NaN coefficient is caught earlier (quad_to_csc), but the observable
+        // result is still InvalidInput at solve time.
+        m.minimize(f64::NAN * (x * x));
+        let err = m.solve().unwrap_err();
+        assert!(
+            matches!(err, ModelError::InvalidInput(_)),
+            "P2-h: NaN DSL Q coefficient must give InvalidInput, got {err:?}"
         );
     }
 
