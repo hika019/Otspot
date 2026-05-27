@@ -1019,7 +1019,6 @@ dependencies = [
  "otspot-io",
  "otspot-model",
  "proptest",
- "tempfile",
  "twofloat",
 ]
 
@@ -1027,13 +1026,9 @@ dependencies = [
 name = "otspot-core"
 version = "0.2.0"
 dependencies = [
- "clarabel",
  "faer",
  "log",
- "mimalloc",
- "proptest",
  "rayon",
- "tempfile",
  "twofloat",
 ]
 
@@ -1060,7 +1055,6 @@ name = "otspot-model"
 version = "0.2.0"
 dependencies = [
  "otspot-core",
- "proptest",
 ]
 
 [[package]]
