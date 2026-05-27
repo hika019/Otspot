@@ -35,6 +35,7 @@ use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::certificate::prove_optimal;
+use crate::qp::ipm_solver::core::compute_duality_gap_rel;
 use crate::qp::problem::QpProblem;
 use crate::qp::ipm_solver::kkt::{
     bound_violation as kkt_bound_violation,
@@ -431,58 +432,6 @@ fn is_polish_suboptimal_acceptable(
     kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
-/// Relative QP duality gap from KKT data: `|p - d| / max(|p|, |d|, 1)`.
-///
-/// `p - d = x'Qx + c'x + y'b - z_lb'lb + z_ub'ub`
-///
-/// `bound_duals` format: finite-lb multipliers first (variable order),
-/// then finite-ub multipliers (variable order), matching the IPM packing.
-/// Returns `f64::INFINITY` on any arithmetic failure.
-fn compute_duality_gap_rel(
-    problem: &QpProblem,
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
-    primal_obj: f64,
-) -> f64 {
-    let qx = match problem.q.mat_vec_mul(x) {
-        Ok(v) => v,
-        Err(_) => return f64::INFINITY,
-    };
-    let xqx: f64 = x.iter().zip(&qx).map(|(xi, qi)| xi * qi).sum();
-    let cx: f64 = problem.c.iter().zip(x).map(|(&ci, &xi)| ci * xi).sum();
-    let yb: f64 = y.iter().zip(&problem.b).map(|(&yi, &bi)| yi * bi).sum();
-
-    let n_lb_finite: usize = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
-    let mut lb_bnd = 0.0_f64;
-    let mut ub_bnd = 0.0_f64;
-    let (mut lb_idx, mut ub_idx) = (0usize, n_lb_finite);
-    for &(lb, ub) in &problem.bounds {
-        if lb.is_finite() {
-            if lb_idx < z.len() {
-                lb_bnd += z[lb_idx] * lb;
-            }
-            lb_idx += 1;
-        }
-        if ub.is_finite() {
-            if ub_idx < z.len() {
-                ub_bnd += z[ub_idx] * ub;
-            }
-            ub_idx += 1;
-        }
-    }
-
-    let gap_raw = xqx + cx + yb - lb_bnd + ub_bnd;
-    let gap_abs = gap_raw.abs();
-    let dual_obj = primal_obj - gap_raw;
-    let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
-    if gap_abs.is_finite() {
-        gap_abs / denom
-    } else {
-        f64::INFINITY
-    }
-}
-
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
@@ -581,13 +530,13 @@ impl SearchState {
             constraint_types: &problem.constraint_types,
             eliminated_cols: &[],
         };
+        let duality_gap_rel = self.incumbent_result.duality_gap_rel.unwrap_or_else(|| {
+            compute_duality_gap_rel(problem, &self.incumbent_result)
+        });
         let cert_result = {
             let x = &self.incumbent_result.solution;
             let y = &self.incumbent_result.dual_solution;
             let z = &self.incumbent_result.bound_duals;
-            let duality_gap_rel = self.incumbent_result.duality_gap_rel.unwrap_or_else(|| {
-                compute_duality_gap_rel(problem, x, y, z, self.incumbent_obj)
-            });
             prove_optimal(&view, x, y, z, duality_gap_rel, user_eps)
         };
 
