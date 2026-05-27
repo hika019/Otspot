@@ -1,4 +1,4 @@
-//! 下界 / 上界 計算 (#6 Phase 3 spatial B&B)。
+//! 下界 / 上界 計算 (Phase 3 spatial B&B)。
 //!
 //! ## 下界 (lower bound)
 //! Phase 3 は **interval arithmetic** = box 各次元の値域から f = c'x + 1/2 x'Q x の
@@ -136,7 +136,7 @@ fn warm_is_safe_for_box(warm: &QpWarmStart, bounds: &[(f64, f64)]) -> bool {
 
 /// IPM local solve on the box subproblem → upper bound (incumbent candidate)。
 ///
-/// `parent_warm` が Some なら interior point warm start で起動 (#12 利用)。
+/// `parent_warm` が Some なら interior point warm start で起動。
 /// `node_bounds` で problem.bounds を差し替えた clone を solve。
 /// silent SKIP しない: solver の status をそのまま返す。
 /// `multistart` / `global_optimization` は **強制 None** (= 再入防止 + 子 solve は単発 local)。

@@ -50,7 +50,7 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
             QpPostsolveStep::EmptyCol { idx, val } => {
                 solution[*idx] = *val;
             }
-            // #14 LargeCoeffRowScale の双対逆変換:
+            // LargeCoeffRowScale の双対逆変換:
             // スケール σ_i で縮約後制約を A[i]*σ_i, b[i]*σ_i と変換したため、
             // y_orig[i] = σ_i * y_scaled[i]
             QpPostsolveStep::LargeCoeffRowScale { row_scales } => {
@@ -239,7 +239,7 @@ fn simple_kkt_inf(
         }
     }
     // FX のみ skip。"A col 空" だけの heuristic は非凸 QP linear-only var を
-    // 誤発火させる (#92) ので排除。本関数は trace 用なので EmptyCol metadata 不要。
+    // 誤発火させるので排除。本関数は trace 用なので EmptyCol metadata 不要。
     let mut max_r = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = bounds[j];

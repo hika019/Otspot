@@ -1,4 +1,4 @@
-//! QP presolve activity-redundancy steps (#5 initial pass, #12 final pass with tightened bounds).
+//! QP presolve activity-redundancy steps (initial pass, final pass with tightened bounds).
 
 use super::helpers::skip_step;
 use super::state::{QpPresolveResult, Workspace};

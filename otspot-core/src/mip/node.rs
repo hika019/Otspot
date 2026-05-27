@@ -1,4 +1,4 @@
-//! MILP/MIQP branch-and-bound node (#14).
+//! MILP/MIQP branch-and-bound node.
 //!
 //! A node is one relaxation subproblem: the parent variable bounds tightened by
 //! integer branching (`x_j <= floor(v)` / `x_j >= ceil(v)`). `lower_bound` is the

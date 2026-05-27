@@ -1,4 +1,4 @@
-//! 枝刈り判定 (#6 Phase 3 spatial B&B)。
+//! 枝刈り判定 (Phase 3 spatial B&B)。
 //!
 //! 「node の lower bound が現 incumbent (best upper bound) に gap_tol 以内まで
 //! 接近している」 = 当該 subtree から incumbent を超える改善は見込めない → prune。

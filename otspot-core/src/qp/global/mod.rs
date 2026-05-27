@@ -1,4 +1,4 @@
-//! Phase 3 spatial Branch-and-Bound scaffolding (#6 非凸 QP 大域最適化)。
+//! Phase 3 spatial Branch-and-Bound scaffolding (非凸 QP 大域最適化)。
 //!
 //! # scope
 //! Phase 3 は **scaffolding** = BB tree / 分枝 / incumbent / 単純 pruning だけ。

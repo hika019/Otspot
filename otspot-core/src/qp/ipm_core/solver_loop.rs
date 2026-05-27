@@ -11,6 +11,15 @@ pub(crate) const IR_MAX_ITERS: usize = 3;
 /// DD 残差経路の IR 上限 (LDL precision 限界を反復で突破するため拡張)。
 pub(crate) const IR_MAX_ITERS_DD: usize = 10;
 
+/// f64 IR の残差収束判定: resid_inf ≤ rhs_inf × この係数 で早期終了。
+pub(crate) const IR_RESID_SKIP_REL: f64 = 1e-13;
+
+/// DD 残差経路の残差収束判定係数 (DD 精度 ≈ 2×10⁻³² に対応)。
+pub(crate) const IR_RESID_SKIP_DD_REL: f64 = 1e-30;
+
+/// μ が実質 0 と判定する境界: これ未満のとき centering sigma を 0 に落とす。
+pub(crate) const CENTERING_MU_FLOOR: f64 = 1e-15;
+
 /// Dekker/Knuth two-sum: a + b = s + e (s, e は f64、|e| ≤ ulp(s)/2)。
 #[inline]
 fn two_sum(a: f64, b: f64) -> (f64, f64) {
@@ -110,9 +119,9 @@ pub(crate) fn solve_with_iterative_refinement(
     let rhs_inf = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
     let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
     let resid_skip_threshold = if use_dd_residual {
-        rhs_inf * 1e-30
+        rhs_inf * IR_RESID_SKIP_DD_REL
     } else {
-        rhs_inf * 1e-13
+        rhs_inf * IR_RESID_SKIP_REL
     };
 
     let mut kx = vec![0.0_f64; aug_dim];
@@ -337,7 +346,7 @@ pub(crate) fn predictor_step_schur(
         0.0
     };
 
-    let sigma_center = if mu > 1e-15 {
+    let sigma_center = if mu > CENTERING_MU_FLOOR {
         (mu_aff / mu).powi(3).min(1.0)
     } else {
         0.0
@@ -593,7 +602,7 @@ pub(crate) fn predictor_step(
         0.0
     };
 
-    let sigma_center = if mu > 1e-15 {
+    let sigma_center = if mu > CENTERING_MU_FLOOR {
         (mu_aff / mu).powi(3).min(1.0)
     } else {
         0.0
@@ -880,11 +889,11 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &aug_perm, None).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &aug_perm, None, None, faer::Par::Seq).unwrap());
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap());
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
 
         let r_d = vec![0.5, -1.0, 0.2, 0.8];
         let r_p_mod = vec![0.1, 0.2, -0.3, 0.4, -0.5, 0.6];
@@ -954,11 +963,11 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let perm: Vec<usize> = (0..aug_mat.nrows).collect();
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&aug_mat, &perm, None).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &perm, None, None, faer::Par::Seq).unwrap());
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm: Vec<usize> = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm(&s_mat, &s_perm, None).unwrap());
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
 
         let r_d = vec![1.0, 2.0];
         let r_p_mod = vec![3.0];

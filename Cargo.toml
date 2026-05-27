@@ -61,7 +61,6 @@ otspot-model = { workspace = true }
 [dev-dependencies]
 proptest = "1.10.0"
 clarabel = "0.11"
-tempfile = "3"
 faer = "0.24.0"
 dyn-stack = "0.13.2"
 twofloat = "0.8"

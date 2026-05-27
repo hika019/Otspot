@@ -1,4 +1,4 @@
-//! 分枝戦略 (#6 Phase 3 spatial B&B)。
+//! 分枝戦略 (Phase 3 spatial B&B)。
 //!
 //! MaxViolation: x*[j] が現 box midpoint から最も離れた変数 j* を選び、x*[j] で
 //! 2 子に分割する (= 後続 IPM local solve がより細かな box で別 local optimum を
