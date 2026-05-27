@@ -35,6 +35,14 @@ use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::problem::QpProblem;
+use crate::qp::ipm_solver::kkt::{
+    bound_violation as kkt_bound_violation,
+    complementarity_residual_rel as kkt_comp_residual,
+    kkt_residual_rel,
+    primal_residual_rel as kkt_primal_residual,
+};
+use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
+use crate::qp::ipm_solver::outcome::ProblemView;
 use std::time::{Duration, Instant};
 
 use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
@@ -44,6 +52,19 @@ use branch::{select_branching_variable, split_node};
 use node::BBNode;
 use pruning::{should_prune, within_gap};
 use tree::BBTree;
+
+/// SuboptimalSolution な polish 結果を KKT 残差で採用するときの user_eps に対する倍率。
+///
+/// duality_gap のみ `user_eps` を僅かに超えて SuboptimalSolution になった polish を
+/// dual recovery 目的で採用するための緩和係数。根拠: regression threshold
+/// `EPS_KKT_NONCONVEX_LOCAL = 1e-3` に対して user_eps=1e-6 での十分な margin を確保。
+const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
+
+/// KKT 許容閾値の絶対上限。
+///
+/// `user_eps * POLISH_KKT_ACCEPT_FACTOR` が大きい (user_eps=1e-4 で 1e-2) 場合でも
+/// regression threshold `EPS_KKT_NONCONVEX_LOCAL = 1e-3` を超えないよう制限する。
+const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 
 /// 大域最適化 entry。
 ///
@@ -334,13 +355,11 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     })
 }
 
-/// polish した解の採用可否を判定する。
+/// polish した解の採用可否を判定する (通常パス)。
 ///
 /// 採用条件:
 /// 1. `status` が収束済み (Optimal / LocallyOptimal) であること。
-///    未収束 (MaxIterations / SuboptimalSolution 等) は相補性を満たさない可能性があり棄却。
 /// 2. `polished_obj` が有限かつ `incumbent_obj` より悪化していないこと。
-///    min 問題なので `polished_obj > incumbent_obj + gap_tol * scale` は棄却。
 fn is_polish_acceptable(
     status: &SolveStatus,
     polished_obj: f64,
@@ -353,6 +372,61 @@ fn is_polish_acceptable(
     }
     let scale = 1.0_f64.max(incumbent_obj.abs());
     polished_obj <= incumbent_obj + gap_tol * scale
+}
+
+/// SuboptimalSolution な polish 結果を KKT 残差で採用可否を追加判定する。
+///
+/// `prove_optimal` の duality_gap チェックが `user_eps` を僅かに上回り SuboptimalSolution
+/// になった場合でも、KKT 残差が `user_eps * POLISH_KKT_ACCEPT_FACTOR` 以下なら dual
+/// recovery 目的の polish として採用する。KKT 残差を独立に再計算し、gap のみ不合格な
+/// 収束済み解と、真に収束不足の解を区別する。
+fn is_polish_suboptimal_acceptable(
+    polished: &SolverResult,
+    problem: &QpProblem,
+    incumbent_obj: f64,
+    gap_tol: f64,
+    user_eps: f64,
+) -> bool {
+    if !matches!(polished.status, SolveStatus::SuboptimalSolution) {
+        return false;
+    }
+    if !polished.objective.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    if polished.objective > incumbent_obj + gap_tol * scale {
+        return false;
+    }
+    // dimension guard — mirrors prove_optimal (certificate.rs ~L64)
+    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub = problem.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    if polished.solution.len() != problem.num_vars
+        || polished.dual_solution.len() != problem.num_constraints
+        || polished.bound_duals.len() != n_lb + n_ub
+    {
+        return false;
+    }
+    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &[],
+    };
+    let kkt = kkt_residual_rel(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    let pf = kkt_primal_residual(&view, &polished.solution);
+    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
+    let comp = kkt_comp_residual(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    let dsign = kkt_dual_sign_violation(
+        &problem.constraint_types,
+        &polished.dual_solution,
+        &problem.bounds,
+        &polished.bound_duals,
+    );
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
@@ -416,8 +490,12 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
+        let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
         if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol) {
+            self.update_incumbent(&polished);
+        } else if is_polish_suboptimal_acceptable(&polished, problem, self.incumbent_obj, gap_tol, user_eps) {
+            // SuboptimalSolution でも KKT が十分なら dual recovery として採用。
             self.update_incumbent(&polished);
         }
     }
@@ -841,5 +919,99 @@ mod tests {
                 "solve_qp_global with {label} must return NumericalError (not panic)"
             );
         }
+    }
+
+    // ---- is_polish_suboptimal_acceptable sentinels ----------------------------
+
+    /// P2-a sentinel: dual_sign gate の no-op-fail 検証。
+    ///
+    /// stationarity/primal/bound/complementarity は全て kkt_tol 以下だが、
+    /// Le 制約の dual が負 (wrong-sign) で dual_sign_violation が kkt_tol を超える場合、
+    /// `is_polish_suboptimal_acceptable` は false を返す。
+    ///
+    /// Sentinel: `&& dsign <= kkt_tol` を除去すると true を返し、このテストが FAIL する
+    /// (= no-op で FAIL する真の sentinel)。
+    #[test]
+    fn is_polish_suboptimal_acceptable_rejects_wrong_sign_duals() {
+        use crate::problem::ConstraintType;
+
+        // 1 変数、1 Le 制約、A = 0 行列 → stationarity/primal/comp は全て 0
+        // bounds = (-inf, +inf) → bound_duals は空、bound_violation = 0
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // dual = -0.5: Le 制約に対して wrong-sign
+        // dsign = 0.5 / (1 + 0.5) ≈ 0.333 >> kkt_tol (= (1e-6 * 100).min(1e-3) = 1e-4)
+        let polished = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0],
+            dual_solution: vec![-0.5],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished, &problem, 0.0, 0.1, 1e-6),
+            "wrong-sign dual (y = -0.5 for Le constraint) must be rejected by dual_sign gate",
+        );
+    }
+
+    /// P2-b sentinel: dimension guard — 次元不一致は false 返却。
+    ///
+    /// solution.len や dual_solution.len が problem 次元と合わない場合、
+    /// 残差計算前に棄却する。
+    #[test]
+    fn is_polish_suboptimal_acceptable_rejects_mismatched_dimensions() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[], &[], &[], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 2).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        // solution の長さが 1 (正しくは 2) → 次元不整合
+        let polished_short_sol = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0],           // wrong: should be len 2
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished_short_sol, &problem, 0.0, 0.1, 1e-6),
+            "mismatched solution dimension must be rejected",
+        );
+
+        // dual_solution の長さが 0 (正しくは 1) → 次元不整合
+        let polished_short_dual = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0, 0.0],
+            dual_solution: vec![],         // wrong: should be len 1
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished_short_dual, &problem, 0.0, 0.1, 1e-6),
+            "mismatched dual_solution dimension must be rejected",
+        );
     }
 }
