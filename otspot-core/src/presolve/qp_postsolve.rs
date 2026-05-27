@@ -173,12 +173,7 @@ pub fn postsolve_qp_with_dual_recovery(
     // 上三角系は後退代入 (逆順処理) で 1 pass 厳密に解ける。
     // forward 順は下三角を仮定した前進代入であり、この問題では発散する。
     const RECOVER_PASSES: usize = 1;
-    let trace = std::env::var("POSTSOLVE_TRACE").ok().as_deref() == Some("1");
-    if trace {
-        let kkt = simple_kkt_inf(&orig_problem.q, &orig_problem.a, &orig_problem.c, &orig_problem.bounds, &sol);
-        eprintln!("POSTSOLVE [after dim expand, before recovery] kkt_inf={:.3e}", kkt);
-    }
-    for pass in 0..RECOVER_PASSES {
+    for _pass in 0..RECOVER_PASSES {
         for step in presolve_result.postsolve_stack.steps.iter().rev() {
             match step {
                 QpPostsolveStep::SingletonRow { row, col, .. } => {
@@ -200,54 +195,9 @@ pub fn postsolve_qp_with_dual_recovery(
                 _ => {}
             }
         }
-        if trace {
-            let kkt = simple_kkt_inf(&orig_problem.q, &orig_problem.a, &orig_problem.c, &orig_problem.bounds, &sol);
-            eprintln!("POSTSOLVE [after recovery pass {}] kkt_inf={:.3e}", pass, kkt);
-        }
     }
 
     sol
-}
-
-/// postsolve diagnostic 用の stationarity inf-norm (DD)。bound_contrib は除く
-/// (この時点で bound_duals は reduced レイアウトの可能性があり、orig bounds への
-/// remap は呼び出し元で行われるため)。
-fn simple_kkt_inf(
-    q: &crate::sparse::CscMatrix,
-    a: &crate::sparse::CscMatrix,
-    c: &[f64],
-    bounds: &[(f64, f64)],
-    sol: &SolverResult,
-) -> f64 {
-    use twofloat::TwoFloat;
-    let n = bounds.len();
-    if sol.solution.len() != n { return f64::NAN; }
-    let zero_dd = TwoFloat::from(0.0);
-    let mut qx_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    for col in 0..n {
-        let xv = sol.solution[col];
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            qx_dd[q.row_ind[k]] = qx_dd[q.row_ind[k]] + TwoFloat::new_mul(q.values[k], xv);
-        }
-    }
-    let mut aty_dd: Vec<TwoFloat> = vec![zero_dd; n];
-    if a.nrows > 0 && !sol.dual_solution.is_empty() {
-        for col in 0..n {
-            for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(a.values[k], sol.dual_solution[a.row_ind[k]]);
-            }
-        }
-    }
-    // FX のみ skip。"A col 空" だけの heuristic は非凸 QP linear-only var を
-    // 誤発火させるので排除。本関数は trace 用なので EmptyCol metadata 不要。
-    let mut max_r = 0.0_f64;
-    for j in 0..n {
-        let (lb, ub) = bounds[j];
-        if lb.is_finite() && ub.is_finite() && (lb - ub).abs() < 1e-12 { continue; }
-        let r = qx_dd[j] + TwoFloat::from(c[j]) + aty_dd[j];
-        max_r = max_r.max(f64::from(r).abs());
-    }
-    max_r
 }
 
 /// SingletonRow / RedundantRowFix で削除された行 `row` の dual `y[row]` を
