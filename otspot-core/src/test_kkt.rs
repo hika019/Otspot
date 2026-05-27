@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! KKT residual helpers shared across inline `#[cfg(test)]` modules.
 //!
 //! Tests that only check `result.status == Optimal` + objective value miss

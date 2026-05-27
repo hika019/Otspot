@@ -459,9 +459,6 @@ fn cold_start_advanced(
             ..Default::default()
         },
         SimplexOutcome::Timeout(obj) => {
-            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("[NE-TRACE] dual_advanced cold_start Phase-2 Timeout (total_iters={}, obj={:.6e})", total_iters, obj);
-            }
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             SolverResult {
                 status: SolveStatus::Timeout,
@@ -476,9 +473,6 @@ fn cold_start_advanced(
             }
         }
         SimplexOutcome::SingularBasis => {
-            if std::env::var("DUMP_NE_TRACE").ok().as_deref() == Some("1") {
-                eprintln!("[NE-TRACE] dual_advanced cold_start Phase-2 SingularBasis (total_iters={})", total_iters);
-            }
             SolverResult::numerical_error()
         }
     };
