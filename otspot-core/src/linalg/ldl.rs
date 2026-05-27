@@ -514,7 +514,7 @@ fn is_q_psd_by_cholesky_impl(
             );
 
             // ZeroPivot: production は conservative に false (= indefinite 扱い)。
-            // probe で `zeropivot_conservative=false` (#37 修正前) を流すと true を返す。
+            // probe で `zeropivot_conservative=false` を流すと true を返す。
             if matches!(result, Err(LdltError::ZeroPivot { .. })) {
                 return !zeropivot_conservative;
             }

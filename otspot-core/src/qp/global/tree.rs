@@ -1,4 +1,4 @@
-//! Best-bound first priority queue for spatial B&B (#6 Phase 3)。
+//! Best-bound first priority queue for spatial B&B (Phase 3)。
 //!
 //! `pop` の度に lower_bound 最小の node を返す = best-bound strategy。
 //! 同 lower bound は FIFO (seq 小優先) で決定論的に。

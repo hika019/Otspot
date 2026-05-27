@@ -10,8 +10,8 @@ use super::outcome::ProblemView;
 /// EmptyCol skip は `eliminated_cols[j]==true` **AND** orig 行列で A 列空 **AND** Q 列空
 /// の三条件 (= LP-style 完全孤立 var) のみ narrow:
 /// - 非凸 QP の 26 eliminated 群 (A 非空 / Q 空) は skip されず measurement に出る
-///   (これらを除くと refine 系の進捗 oracle として誤動作 #104)。
-/// - #55 linear-only var (A 空 / Q 非空 / c≠0) は skip されず stationarity 露出維持。
+///   (これらを除くと refine 系の進捗 oracle として誤動作)。
+/// - linear-only var (A 空 / Q 非空 / c≠0) は skip されず stationarity 露出維持。
 /// - LP-style 完全孤立 var (A 空 / Q 空) のみ skip し cancellation noise 抑制。
 pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     use twofloat::TwoFloat;

@@ -1,4 +1,4 @@
-//! Mixed-integer programming (MILP / MIQP) via branch-and-bound (#14).
+//! Mixed-integer programming (MILP / MIQP) via branch-and-bound.
 //!
 //! # Approach
 //! Each B&B node solves the **continuous relaxation** (LP for MILP, convex QP for
@@ -269,7 +269,7 @@ fn solve_mip_with_stats<R: Relaxation>(
         // evaluator, which returns Optimal) as a lower bound. A SuboptimalSolution
         // primal objective is an UPPER bound on the relaxation optimum, NOT a lower
         // bound — using it to fathom would over-prune and could drop the true optimum
-        // (the box-only off-diagonal silent-wrong, #17).
+        // (the box-only off-diagonal silent-wrong).
         let trusted = matches!(res.status, SolveStatus::Optimal) && !res.solution.is_empty();
 
         if trusted {

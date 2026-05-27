@@ -1,4 +1,4 @@
-//! MILP / MIQP problem definitions (#14).
+//! MILP / MIQP problem definitions.
 //!
 //! A MILP/MIQP is a continuous LP/QP **relaxation** plus a set of variables
 //! constrained to integer values. We deliberately wrap the existing

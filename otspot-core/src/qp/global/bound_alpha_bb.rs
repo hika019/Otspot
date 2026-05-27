@@ -1,4 +1,4 @@
-//! α-BB lower bound (#7 Phase 4 非凸 QP 大域最適化)。
+//! α-BB lower bound (Phase 4 非凸 QP 大域最適化)。
 //!
 //! ## 原理
 //! Maranas-Floudas (1995) underestimator:
