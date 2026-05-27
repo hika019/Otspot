@@ -436,8 +436,7 @@ pub fn compute_dfeas_orig(
         per_col.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         eprintln!("DFEAS_DUMP_TOP scale={:.3e} dfeas_abs={:.3e} dfeas_rel={:.3e} dfeas_relC={:.3e}",
             scale, dfeas_abs, dfeas_rel_global, dfeas_rel_componentwise);
-        for k in 0..per_col.len().min(10) {
-            let (i, r, qxi, atyi, bndi, ci) = per_col[k];
+        for (i, r, qxi, atyi, bndi, ci) in per_col.iter().copied().take(10) {
             let (lbi, ubi) = prob.bounds[i];
             let xi = solution[i];
             eprintln!("  col[{}] r={:+.3e} qx={:+.3e} aty={:+.3e} bnd={:+.3e} c={:+.3e} x={:+.3e} bounds=[{:+.3e},{:+.3e}]",
@@ -466,7 +465,7 @@ pub fn compute_dfeas_componentwise(
     let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
         let mut max_rel = 0.0_f64;
-        for j in 0..n {
+        for (j, &rc) in reduced_costs.iter().enumerate() {
             let (lb_j, ub_j) = prob.bounds[j];
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
@@ -474,7 +473,6 @@ pub fn compute_dfeas_componentwise(
             if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
                 continue;
             }
-            let rc = reduced_costs[j];
             let x_j = solution.get(j).copied().unwrap_or(0.0);
             let at_ub = ub_j.is_finite()
                 && (x_j - ub_j).abs() <= 1e-8 * (1.0 + ub_j.abs());
