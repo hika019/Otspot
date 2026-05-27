@@ -41,10 +41,8 @@ pub enum LdlError {
     /// 上位層は反復法フォールバックの判断材料として用いる。
     WouldExceedBudget {
         /// symbolic 段階で実測した L の非ゼロ数
-        #[allow(dead_code)]
         l_nnz: usize,
         /// 呼び出し側が許可した最大 L_nnz
-        #[allow(dead_code)]
         max_l_nnz: usize,
     },
 }
@@ -124,7 +122,6 @@ pub struct LdlFactorizationAmd {
 
 impl LdlFactorizationAmd {
     /// L 因子の非ゼロ数を返す（デバッグ用）
-    #[allow(dead_code)]
     pub fn nnz_l(&self) -> usize {
         self.symbolic.len_val()
     }
@@ -569,7 +566,6 @@ pub fn factorize_with_par(
 /// deadline は factorize 前と symbolic 完了後（numeric 開始前）の 2 箇所でチェック。
 /// faer の numeric 因子化自体は mid-factorization キャンセル不可のため、
 /// 一旦 numeric を開始したら deadline を超えて完走する可能性がある。
-#[allow(dead_code)]
 pub fn factorize_with_deadline(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -578,7 +574,6 @@ pub fn factorize_with_deadline(
 }
 
 /// `factorize_with_deadline` の per-call parallelism 指定版。
-#[allow(dead_code)]
 pub fn factorize_with_deadline_par(
     mat: &CscMatrix,
     deadline: Option<Instant>,
@@ -599,7 +594,6 @@ pub fn factorize_with_deadline_par(
 /// `mat`: 元の（未置換の）augmented KKT 行列（上三角 CSC）
 /// `perm`: 事前計算済み AMD 置換ベクトル（perm[k] = 元インデックス）
 /// `deadline`: factorize 前チェックのみ（mid-factorization 未対応）
-#[allow(dead_code)]
 pub fn factorize_quasidefinite_with_cached_perm(
     mat: &CscMatrix,
     perm: &[usize],
@@ -609,7 +603,6 @@ pub fn factorize_quasidefinite_with_cached_perm(
 }
 
 /// `factorize_quasidefinite_with_cached_perm` の per-call parallelism 指定版。
-#[allow(dead_code)]
 pub fn factorize_quasidefinite_with_cached_perm_par(
     mat: &CscMatrix,
     perm: &[usize],

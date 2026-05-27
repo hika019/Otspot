@@ -29,7 +29,6 @@ use faer::sparse::SymbolicSparseColMatRef;
 /// O(n + nnz) で動作するため、独自 SMD より大幅に高速。
 /// deadline 超過時は `amd_with_deadline` が identity fallback を返す。
 /// amd::order() がエラーを返した場合も identity fallback (0..n) を返す。
-#[allow(dead_code)]
 pub fn amd(n: usize, col_ptr: &[usize], row_ind: &[usize]) -> Vec<usize> {
     amd_with_deadline(n, col_ptr, row_ind, None)
 }
