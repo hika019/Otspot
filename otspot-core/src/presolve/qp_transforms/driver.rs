@@ -26,10 +26,7 @@ pub fn run_qp_presolve_phase1(prob: &QpProblem, opts: &SolverOptions) -> QpPreso
     let mut ws = Workspace::from_problem(prob);
     let deadline = opts.deadline;
 
-    let max_iter_pass = std::env::var("QP_PRESOLVE_MAX_PASS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(10);
+    let max_iter_pass = opts.presolve_max_pass;
 
     let mut prev_removed_count = 0usize;
     for _iter_pass in 0..max_iter_pass {

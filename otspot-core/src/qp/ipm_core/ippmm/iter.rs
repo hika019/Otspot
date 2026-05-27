@@ -19,7 +19,7 @@ use super::trace::{
     emit_exit_reject_false_infeas, emit_exit_residual_stall, emit_exit_timeout_bestsofar,
     emit_iter_trace, emit_prof_summary, emit_sigma_diag, emit_step_diag,
 };
-use crate::linalg::kkt_solver::inexact_eta_for_eps;
+use crate::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use crate::linalg::parallelism::solver_par_from_threads;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::options::SolverOptions;
@@ -339,6 +339,11 @@ pub(crate) fn solve_ippmm_inner(
             par,
             n,
             prof,
+            kkt_cfg: KktConfig {
+                dd_ldl: options.ipm.dd_ldl,
+                minres_ir: options.ipm.effective_minres_ir(),
+                max_l_nnz: options.ipm.effective_max_l_nnz(),
+            },
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
         let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {

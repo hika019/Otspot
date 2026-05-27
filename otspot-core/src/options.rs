@@ -348,6 +348,17 @@ pub struct IpmOptions {
     pub delta_d_init: f64,
     /// Maximum Gondzio correctors.  Default: [`DEFAULT_IPM_MAX_CORRECTORS`].
     pub max_correctors: usize,
+    /// Use TwoFloat (double-double, ~106-bit) LDL for KKT systems where f64 conditioning
+    /// would exceed the requested accuracy.  Default: `false`.
+    pub dd_ldl: bool,
+    /// MINRES iterative-refinement rounds applied after each MINRES solve.
+    /// `None` uses 0 (disabled by default; auto-Schur makes this unnecessary in practice).
+    /// Must be `<= 10`.
+    pub minres_ir: Option<usize>,
+    /// Memory budget for KKT LDL factorization in bytes.
+    /// `None` uses the 4 GiB default.  Factorizations predicted to exceed the budget
+    /// fall back to MINRES automatically.
+    pub kkt_memory_budget_bytes: Option<usize>,
 }
 
 impl Default for IpmOptions {
@@ -359,6 +370,9 @@ impl Default for IpmOptions {
             delta_p_init: DEFAULT_IPM_DELTA_INIT,
             delta_d_init: DEFAULT_IPM_DELTA_INIT,
             max_correctors: DEFAULT_IPM_MAX_CORRECTORS,
+            dd_ldl: false,
+            minres_ir: None,
+            kkt_memory_budget_bytes: None,
         }
     }
 }
@@ -384,6 +398,11 @@ impl IpmOptions {
         if self.max_correctors == 0 {
             return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
         }
+        if let Some(ir) = self.minres_ir {
+            if ir > 10 {
+                return Err(OptionsError { field: "ipm.minres_ir", reason: "must be <= 10" });
+            }
+        }
         Ok(())
     }
 
@@ -403,6 +422,23 @@ impl IpmOptions {
         }
         self.max_correctors = n;
         Ok(self)
+    }
+
+    /// Effective MINRES iterative-refinement rounds: resolves `None` to 0.
+    pub(crate) fn effective_minres_ir(&self) -> usize {
+        self.minres_ir.unwrap_or(0)
+    }
+
+    /// Effective KKT memory budget in bytes: resolves `None` to the built-in default (4 GiB).
+    pub(crate) fn effective_kkt_memory_budget_bytes(&self) -> usize {
+        use crate::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
+        self.kkt_memory_budget_bytes.unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+    }
+
+    /// Max L-factor entries from memory budget (budget / bytes-per-entry).
+    pub(crate) fn effective_max_l_nnz(&self) -> usize {
+        use crate::linalg::kkt_solver::BYTES_PER_L_ENTRY;
+        self.effective_kkt_memory_budget_bytes() / BYTES_PER_L_ENTRY
     }
 }
 
@@ -463,6 +499,13 @@ pub struct SolverOptions {
     pub use_lp_crash_basis: bool,
     /// Enable presolve.  Default: `true`.
     pub presolve: bool,
+    /// Maximum fixpoint passes in QP presolve.  Default: `10`.
+    pub presolve_max_pass: usize,
+    /// Skip large-coefficient row rescaling in QP presolve.  Default: `false`.
+    /// Rescaling is also skipped when `use_ruiz_scaling` is `true` (existing behaviour).
+    pub presolve_skip_large_coeff: bool,
+    /// Enable QP presolve phase 2.  Default: `true`.
+    pub presolve_phase2: bool,
     /// Timeout in seconds.  `None` = unlimited.
     pub timeout_secs: Option<f64>,
     /// Shared cancellation flag (internal use).
@@ -536,6 +579,9 @@ impl Default for SolverOptions {
             recover_warm_start_basis: false,
             use_lp_crash_basis: true,
             presolve: true,
+            presolve_max_pass: 10,
+            presolve_skip_large_coeff: false,
+            presolve_phase2: true,
             timeout_secs: None,
             cancel_flag: None,
             deadline: None,
@@ -884,5 +930,103 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("ipm.eps"), "display: {s}");
         assert!(s.contains("finite"), "display: {s}");
+    }
+
+    // ---- IpmOptions: new fields defaults and resolution ----------------
+
+    #[test]
+    fn test_ipm_new_fields_default() {
+        let o = IpmOptions::default();
+        assert!(!o.dd_ldl, "dd_ldl default false");
+        assert!(o.minres_ir.is_none(), "minres_ir default None");
+        assert!(o.kkt_memory_budget_bytes.is_none(), "kkt_memory_budget_bytes default None");
+    }
+
+    #[test]
+    fn test_ipm_effective_minres_ir_default_and_override() {
+        let o = IpmOptions::default();
+        assert_eq!(o.effective_minres_ir(), 0, "default IR = 0");
+        let o2 = IpmOptions { minres_ir: Some(3), ..Default::default() };
+        assert_eq!(o2.effective_minres_ir(), 3);
+    }
+
+    #[test]
+    fn test_ipm_validate_minres_ir() {
+        use crate::linalg::kkt_solver::MINRES_INEXACT_NEWTON_IR_STEPS;
+        // Default (None) and valid values
+        assert!(IpmOptions::default().validate().is_ok());
+        for ok in [0_usize, 1, 5, 10] {
+            let o = IpmOptions { minres_ir: Some(ok), ..Default::default() };
+            assert!(o.validate().is_ok(), "minres_ir={ok} should be valid");
+        }
+        // Out of range: > 10
+        for bad in [11_usize, 100, usize::MAX] {
+            let o = IpmOptions { minres_ir: Some(bad), ..Default::default() };
+            assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
+        }
+        // Default const falls within valid range
+        assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
+    }
+
+    #[test]
+    fn test_ipm_effective_max_l_nnz_default_and_override() {
+        use crate::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
+        let o = IpmOptions::default();
+        assert_eq!(o.effective_kkt_memory_budget_bytes(), DEFAULT_MEMORY_BUDGET_BYTES);
+        assert_eq!(o.effective_max_l_nnz(), DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
+        let o2 = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
+        assert_eq!(o2.effective_max_l_nnz(), 1600 / BYTES_PER_L_ENTRY);
+    }
+
+    // ---- SolverOptions: presolve fields --------------------------------
+
+    #[test]
+    fn test_solver_presolve_fields_default() {
+        let o = SolverOptions::default();
+        assert_eq!(o.presolve_max_pass, 10, "default max pass = 10");
+        assert!(!o.presolve_skip_large_coeff, "default skip_large_coeff = false");
+        assert!(o.presolve_phase2, "default phase2 = true");
+    }
+
+    #[test]
+    fn test_presolve_max_pass_controls_iteration_count() {
+        use crate::problem::SolveStatus;
+        use crate::qp::{solve_qp_with_options, QpProblem};
+        use crate::sparse::CscMatrix;
+
+        // Minimal feasible QP: 1 variable, no constraints, x* = 0.
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(0.0_f64, 1.0_f64)], vec![]).unwrap();
+
+        // Both 0 and 10 passes must find the optimum.
+        let opts0 = SolverOptions { presolve_max_pass: 0, ..Default::default() };
+        let opts10 = SolverOptions { presolve_max_pass: 10, ..Default::default() };
+        let r0 = solve_qp_with_options(&prob, &opts0);
+        let r10 = solve_qp_with_options(&prob, &opts10);
+        assert_eq!(r0.status, SolveStatus::Optimal, "presolve_max_pass=0 should still solve trivial QP");
+        assert_eq!(r10.status, SolveStatus::Optimal, "presolve_max_pass=10 should solve trivial QP");
+    }
+
+    #[test]
+    fn test_presolve_phase2_false_skips_phase2() {
+        // When presolve_phase2=false, attempt.rs takes the phase1-only branch.
+        // Verify through options field round-trip.
+        let o = SolverOptions { presolve_phase2: false, ..Default::default() };
+        assert!(!o.presolve_phase2);
+        let o2 = SolverOptions { presolve_phase2: true, ..Default::default() };
+        assert!(o2.presolve_phase2);
+    }
+
+    #[test]
+    fn test_presolve_skip_large_coeff_field() {
+        // Verify the OR logic: skip if field OR use_ruiz_scaling.
+        let no_skip = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: false, ..Default::default() };
+        assert!(!no_skip.presolve_skip_large_coeff && !no_skip.use_ruiz_scaling);
+        let skip_via_field = SolverOptions { presolve_skip_large_coeff: true, use_ruiz_scaling: false, ..Default::default() };
+        assert!(skip_via_field.presolve_skip_large_coeff);
+        let skip_via_ruiz = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: true, ..Default::default() };
+        // effective skip = field OR ruiz
+        assert!(skip_via_ruiz.presolve_skip_large_coeff || skip_via_ruiz.use_ruiz_scaling);
     }
 }

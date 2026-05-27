@@ -207,10 +207,22 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
     row_scales
 }
 
-/// Lookup of the `QP_PRESOLVE_SKIP=1,3,7` environment knob used by every per-step block.
+/// Per-step skip hook for tests: returns `true` when `QP_PRESOLVE_SKIP` contains `n`.
+///
+/// In non-test builds this always returns `false` — the env var is not read in
+/// production code.  Tests use `std::env::set_var("QP_PRESOLVE_SKIP", "9")` to
+/// exercise no-op proofs without a public Options field.
 pub(super) fn skip_step(n: usize) -> bool {
-    std::env::var("QP_PRESOLVE_SKIP")
-        .ok()
-        .map(|v| v.split(',').any(|s| s.trim().parse::<usize>().ok() == Some(n)))
-        .unwrap_or(false)
+    #[cfg(test)]
+    {
+        std::env::var("QP_PRESOLVE_SKIP")
+            .ok()
+            .map(|v| v.split(',').any(|s| s.trim().parse::<usize>().ok() == Some(n)))
+            .unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = n;
+        false
+    }
 }

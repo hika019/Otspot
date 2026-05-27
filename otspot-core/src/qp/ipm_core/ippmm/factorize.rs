@@ -3,8 +3,8 @@
 use super::state::{LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX};
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, max_l_nnz_from_budget,
-    KktError, KktFactor,
+    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par,
+    KktConfig, KktError, KktFactor,
 };
 use crate::linalg::timeout::TimeoutCtx;
 use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
@@ -68,6 +68,8 @@ pub(super) struct FactorizeContext<'a> {
     pub par: Par,
     pub n: usize,
     pub prof: bool,
+    /// KKT factorization/MINRES configuration from IpmOptions.
+    pub kkt_cfg: KktConfig,
 }
 
 pub(super) fn factorize_kkt_with_retry(
@@ -116,8 +118,7 @@ pub(super) fn factorize_kkt_with_retry(
         }
         let perm = caches.amd_perm.as_ref().unwrap();
         // Schur / DD-LDL は pre-permuted 未対応なので通常経路へ。
-        let dd_ldl = std::env::var("IPM_DD_LDL").ok().as_deref() == Some("1");
-        let use_pre_permuted = !ctx.use_schur && !dd_ldl;
+        let use_pre_permuted = !ctx.use_schur && !ctx.kkt_cfg.dd_ldl;
         if use_pre_permuted && caches.aug_permuted.is_none() {
             caches.aug_permuted = Some(ctx.aug_cache.permute(perm));
         }
@@ -130,7 +131,7 @@ pub(super) fn factorize_kkt_with_retry(
                 &mat_for_factor,
                 perm,
                 ctx.timeout_ctx.deadline,
-                max_l_nnz_from_budget(),
+                &ctx.kkt_cfg,
                 Some(ctx.n),
                 caches.symbolic_cholesky.clone(),
                 ctx.par,
@@ -140,7 +141,7 @@ pub(super) fn factorize_kkt_with_retry(
                 &mat_for_factor,
                 perm,
                 ctx.timeout_ctx.deadline,
-                max_l_nnz_from_budget(),
+                &ctx.kkt_cfg,
                 Some(ctx.n),
                 ctx.par,
             )
@@ -210,7 +211,7 @@ pub(super) fn factorize_kkt_with_retry(
             &aug_mat_fb,
             &identity_perm,
             ctx.timeout_ctx.deadline,
-            max_l_nnz_from_budget(),
+            &ctx.kkt_cfg,
             Some(ctx.n),
             ctx.par,
         );
@@ -317,7 +318,7 @@ pub(super) fn auto_schur_enabled(
         probe_aug.nrows, &probe_aug.col_ptr, &probe_aug.row_ind, timeout_ctx.deadline,
     );
     let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-        &probe_aug, &probe_perm, timeout_ctx.deadline, Some(max_l_nnz_from_budget()), par,
+        &probe_aug, &probe_perm, timeout_ctx.deadline, Some(options.ipm.effective_max_l_nnz()), par,
     );
     let exceeds = matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }));
     if exceeds && std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
