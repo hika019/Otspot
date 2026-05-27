@@ -34,6 +34,7 @@ pub(crate) mod tree;
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
+use crate::qp::certificate::prove_optimal;
 use crate::qp::problem::QpProblem;
 use crate::qp::ipm_solver::kkt::{
     bound_violation as kkt_bound_violation,
@@ -152,10 +153,11 @@ pub fn solve_qp_global_with_stats(
 
     let mut state = SearchState::new(root_solve);
     stats.nodes_processed = 1;
+    let user_eps = shared_opts.ipm_eps();
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats);
+        return (state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps), stats);
     }
 
     let mut tree = BBTree::new();
@@ -168,7 +170,7 @@ pub fn solve_qp_global_with_stats(
     match select_branching_variable(&root_node, &root_x) {
         None => {
             return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (state.finalize_proven(root_lb, q_indefinite, cfg.gap_tol), stats)
+                (state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps), stats)
             } else {
                 (
                     state.finalize_unproven(
@@ -285,7 +287,7 @@ pub fn solve_qp_global_with_stats(
         let inc_obj = state.incumbent_obj;
         if proven {
             let lb_for_proof = remaining_lb.min(inc_obj);
-            state.finalize_proven(lb_for_proof, q_indefinite, cfg.gap_tol)
+            state.finalize_proven(problem, lb_for_proof, q_indefinite, cfg.gap_tol, user_eps)
         } else {
             state.finalize_unproven(
                 remaining_lb,
@@ -298,7 +300,7 @@ pub fn solve_qp_global_with_stats(
     } else {
         // queue 空 = 全探索完了 → incumbent_obj が global
         let inc_obj = state.incumbent_obj;
-        state.finalize_proven(inc_obj, q_indefinite, cfg.gap_tol)
+        state.finalize_proven(problem, inc_obj, q_indefinite, cfg.gap_tol, user_eps)
     };
     (result, stats)
 }
@@ -429,6 +431,58 @@ fn is_polish_suboptimal_acceptable(
     kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
+/// Relative QP duality gap from KKT data: `|p - d| / max(|p|, |d|, 1)`.
+///
+/// `p - d = x'Qx + c'x + y'b - z_lb'lb + z_ub'ub`
+///
+/// `bound_duals` format: finite-lb multipliers first (variable order),
+/// then finite-ub multipliers (variable order), matching the IPM packing.
+/// Returns `f64::INFINITY` on any arithmetic failure.
+fn compute_duality_gap_rel(
+    problem: &QpProblem,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    primal_obj: f64,
+) -> f64 {
+    let qx = match problem.q.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return f64::INFINITY,
+    };
+    let xqx: f64 = x.iter().zip(&qx).map(|(xi, qi)| xi * qi).sum();
+    let cx: f64 = problem.c.iter().zip(x).map(|(&ci, &xi)| ci * xi).sum();
+    let yb: f64 = y.iter().zip(&problem.b).map(|(&yi, &bi)| yi * bi).sum();
+
+    let n_lb_finite: usize = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let mut lb_bnd = 0.0_f64;
+    let mut ub_bnd = 0.0_f64;
+    let (mut lb_idx, mut ub_idx) = (0usize, n_lb_finite);
+    for &(lb, ub) in &problem.bounds {
+        if lb.is_finite() {
+            if lb_idx < z.len() {
+                lb_bnd += z[lb_idx] * lb;
+            }
+            lb_idx += 1;
+        }
+        if ub.is_finite() {
+            if ub_idx < z.len() {
+                ub_bnd += z[ub_idx] * ub;
+            }
+            ub_idx += 1;
+        }
+    }
+
+    let gap_raw = xqx + cx + yb - lb_bnd + ub_bnd;
+    let gap_abs = gap_raw.abs();
+    let dual_obj = primal_obj - gap_raw;
+    let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
+    if gap_abs.is_finite() {
+        gap_abs / denom
+    } else {
+        f64::INFINITY
+    }
+}
+
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
@@ -501,25 +555,76 @@ impl SearchState {
     }
 
     /// Q が indefinite なら `NonconvexGlobal`、convex なら `Optimal` を set。
-    /// (= 「proven かつ Q indefinite」と「proven かつ Q PSD」を caller が区別可能)
-    fn finalize_proven(mut self, lower_bound: f64, q_indefinite: bool, gap_tol: f64) -> SolverResult {
-        let scale = 1.0_f64.max(self.incumbent_obj.abs());
-        let gap_rel = (self.incumbent_obj - lower_bound) / scale;
-        self.incumbent_result.bound_gap_cert = Some(BoundGapCertificate::new(
-            self.incumbent_obj,
-            lower_bound,
-            gap_rel,
-            gap_tol,
-        ));
-        self.incumbent_result.status = if q_indefinite {
-            SolveStatus::NonconvexGlobal
-        } else {
-            SolveStatus::Optimal
+    ///
+    /// B&B bound-gap closure だけでなく `prove_optimal` による全 KKT 条件
+    /// (stationarity / primal_feasibility / bound_feasibility / complementarity /
+    /// dual_sign / duality_gap) を検証する。検証に失敗した場合は
+    /// LocallyOptimal / NonconvexLocal へ降格し証明書は付与しない。
+    ///
+    /// ## sentinel (no-op-fail)
+    /// このメソッドの `prove_optimal` 呼び出しを除去すると、
+    /// `finalize_proven_dual_gate_table` テストが FAIL する。
+    fn finalize_proven(
+        mut self,
+        problem: &QpProblem,
+        lower_bound: f64,
+        q_indefinite: bool,
+        gap_tol: f64,
+        user_eps: f64,
+    ) -> SolverResult {
+        let view = ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols: &[],
         };
-        log::debug!(
-            "QP global proven: status={} obj={:.6e} lb={:.6e} gap_rel={:.3e}",
-            self.incumbent_result.status, self.incumbent_obj, lower_bound, gap_rel
-        );
+        let cert_result = {
+            let x = &self.incumbent_result.solution;
+            let y = &self.incumbent_result.dual_solution;
+            let z = &self.incumbent_result.bound_duals;
+            let duality_gap_rel = self.incumbent_result.duality_gap_rel.unwrap_or_else(|| {
+                compute_duality_gap_rel(problem, x, y, z, self.incumbent_obj)
+            });
+            prove_optimal(&view, x, y, z, duality_gap_rel, user_eps)
+        };
+
+        match cert_result {
+            Ok(opt_cert) => {
+                let scale = 1.0_f64.max(self.incumbent_obj.abs());
+                let gap_rel = (self.incumbent_obj - lower_bound) / scale;
+                self.incumbent_result.bound_gap_cert = Some(BoundGapCertificate::new(
+                    self.incumbent_obj,
+                    lower_bound,
+                    gap_rel,
+                    gap_tol,
+                ));
+                self.incumbent_result.opt_cert = Some(opt_cert);
+                self.incumbent_result.status = if q_indefinite {
+                    SolveStatus::NonconvexGlobal
+                } else {
+                    SolveStatus::Optimal
+                };
+                log::debug!(
+                    "QP global proven: status={} obj={:.6e} lb={:.6e} gap_rel={:.3e}",
+                    self.incumbent_result.status, self.incumbent_obj, lower_bound, gap_rel
+                );
+            }
+            Err(not_proven) => {
+                self.incumbent_result.status = if q_indefinite {
+                    SolveStatus::NonconvexLocal
+                } else {
+                    SolveStatus::LocallyOptimal
+                };
+                log::debug!(
+                    "QP global gap-closed but KKT failed ({:?}): demoted to {}",
+                    not_proven.failing_conditions,
+                    self.incumbent_result.status,
+                );
+            }
+        }
         self.incumbent_result
     }
 
@@ -1013,5 +1118,136 @@ mod tests {
             !is_polish_suboptimal_acceptable(&polished_short_dual, &problem, 0.0, 0.1, 1e-6),
             "mismatched dual_solution dimension must be rejected",
         );
+    }
+
+    // ---- finalize_proven dual-quality gate sentinels --------------------------
+
+    /// Table-driven: 4 combinations of (convex/indefinite) × (good-dual/bad-dual).
+    ///
+    /// ## Sentinel (no-op-fail requirement)
+    /// Removing the `prove_optimal` call from `finalize_proven` causes this function
+    /// to ALWAYS stamp the Optimal/NonconvexGlobal status regardless of dual quality.
+    /// The two bad-dual rows (`convex-bad-dual` → LocallyOptimal and
+    /// `indefinite-bad-dual` → NonconvexLocal) would then receive Optimal/NonconvexGlobal
+    /// and the assertions FAIL — confirming the gate is load-bearing.
+    ///
+    /// ## KKT math for test fixtures
+    ///
+    /// Convex problem: `min x²`, `Q=[[2]]`, `c=[0]`, no constraints, bounds `[-1,1]`.
+    /// - Good dual: `x=0` (interior). `z=[z_lb=0, z_ub=0]`.
+    ///   Stationarity: `2·0 + 0 - 0 + 0 = 0` ✓, `duality_gap=0` ✓.
+    /// - Bad dual: `x=0`, `z=[100, -100]`.
+    ///   Stationarity: `-100 + (-100) = -200 ≠ 0` ✗, `dual_sign_violation` for `z_ub < 0` ✗.
+    ///
+    /// Indefinite problem: `min -x²`, `Q=[[-2]]`, `c=[0]`, no constraints, bounds `[-1,1]`.
+    /// - Good dual: `x=1` (ub active). `z=[z_lb=0, z_ub=2]`.
+    ///   Stationarity: `-2·1 - 0 + 2 = 0` ✓, complementarity `z_ub·(1-1)=0` ✓.
+    /// - Bad dual: `x=1`, `z=[50, 50]`.
+    ///   Stationarity: `-2 - 50 + 50 = -2 ≠ 0` ✗.
+    #[test]
+    fn finalize_proven_dual_gate_table() {
+        // Convex: min x², box [-1, 1]
+        let q_conv = CscMatrix::from_triplets(&[0], &[0], &[2.0_f64], 1, 1).unwrap();
+        let a_empty = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let p_convex = QpProblem::new_all_le(
+            q_conv,
+            vec![0.0_f64],
+            a_empty.clone(),
+            vec![],
+            vec![(-1.0_f64, 1.0_f64)],
+        )
+        .unwrap();
+
+        // Indefinite: min -x², box [-1, 1]
+        let q_indef = CscMatrix::from_triplets(&[0], &[0], &[-2.0_f64], 1, 1).unwrap();
+        let p_indef = QpProblem::new_all_le(
+            q_indef,
+            vec![0.0_f64],
+            a_empty,
+            vec![],
+            vec![(-1.0_f64, 1.0_f64)],
+        )
+        .unwrap();
+
+        let user_eps = 1e-6_f64;
+        let gap_tol = 1e-6_f64;
+
+        // ── convex-good-dual: x=0, z=[0,0], gap=0 → Optimal ─────────────────
+        let good_conv = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![0.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![0.0_f64, 0.0_f64], // [z_lb, z_ub]
+            duality_gap_rel: Some(0.0),
+            ..Default::default()
+        };
+        let r = SearchState::new(good_conv)
+            .finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
+        assert_eq!(r.status, SolveStatus::Optimal, "convex-good-dual must be Optimal");
+        assert!(r.bound_gap_cert.is_some(), "Optimal must carry bound_gap_cert");
+        assert!(r.opt_cert.is_some(), "Optimal must carry opt_cert");
+
+        // ── convex-bad-dual: z=[100,-100], large gap → LocallyOptimal ────────
+        // Sentinel: without the gate this row returns Optimal, failing the assertion.
+        let bad_conv = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![100.0_f64, -100.0_f64], // wrong sign + stationarity violation
+            duality_gap_rel: Some(0.5),
+            ..Default::default()
+        };
+        let r = SearchState::new(bad_conv)
+            .finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
+        assert_eq!(
+            r.status,
+            SolveStatus::LocallyOptimal,
+            "convex-bad-dual must be demoted to LocallyOptimal"
+        );
+        assert!(r.bound_gap_cert.is_none(), "demoted must have no bound_gap_cert");
+        assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
+
+        // ── indefinite-good-dual: x=1 (ub active), z=[0,2] → NonconvexGlobal
+        let good_indef = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: -1.0,
+            solution: vec![1.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![0.0_f64, 2.0_f64], // z_lb=0, z_ub=2 (stationarity: -2+2=0)
+            duality_gap_rel: Some(0.0),
+            ..Default::default()
+        };
+        let r = SearchState::new(good_indef)
+            .finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
+        assert_eq!(
+            r.status,
+            SolveStatus::NonconvexGlobal,
+            "indefinite-good-dual must be NonconvexGlobal"
+        );
+        assert!(r.bound_gap_cert.is_some(), "NonconvexGlobal must carry bound_gap_cert");
+        assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
+
+        // ── indefinite-bad-dual: z=[50,50] → stationarity fails → NonconvexLocal
+        // Sentinel: without the gate this row returns NonconvexGlobal, failing the assertion.
+        let bad_indef = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: -1.0,
+            solution: vec![1.0_f64],
+            dual_solution: vec![],
+            bound_duals: vec![50.0_f64, 50.0_f64], // stationarity: -2 - 50 + 50 = -2 ≠ 0
+            duality_gap_rel: Some(0.5),
+            ..Default::default()
+        };
+        let r = SearchState::new(bad_indef)
+            .finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
+        assert_eq!(
+            r.status,
+            SolveStatus::NonconvexLocal,
+            "indefinite-bad-dual must be demoted to NonconvexLocal"
+        );
+        assert!(r.bound_gap_cert.is_none(), "demoted must have no bound_gap_cert");
+        assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
     }
 }
