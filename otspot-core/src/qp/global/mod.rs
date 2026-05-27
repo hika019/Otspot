@@ -41,6 +41,7 @@ use crate::qp::ipm_solver::kkt::{
     kkt_residual_rel,
     primal_residual_rel as kkt_primal_residual,
 };
+use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
 use crate::qp::ipm_solver::outcome::ProblemView;
 use std::time::{Duration, Instant};
 
@@ -54,12 +55,16 @@ use tree::BBTree;
 
 /// SuboptimalSolution な polish 結果を KKT 残差で採用するときの user_eps に対する倍率。
 ///
-/// `prove_optimal` の duality_gap チェックは O(n * user_eps * ||x||) の誤差蓄積により
-/// user_eps を僅かに上回ることがある。この場合 SuboptimalSolution を返すが KKT 残差は
-/// user_eps 以下であり、dual recovery 目的の polish としては十分収束している。
-/// この倍率は「gap のみ不合格」と「本当に収束不足」を区別する緩和係数で、
-/// user_eps (典型 1e-6) の 100 倍 (= 1e-4) まで許容する。
+/// duality_gap のみ `user_eps` を僅かに超えて SuboptimalSolution になった polish を
+/// dual recovery 目的で採用するための緩和係数。根拠: regression threshold
+/// `EPS_KKT_NONCONVEX_LOCAL = 1e-3` に対して user_eps=1e-6 での十分な margin を確保。
 const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
+
+/// KKT 許容閾値の絶対上限。
+///
+/// `user_eps * POLISH_KKT_ACCEPT_FACTOR` が大きい (user_eps=1e-4 で 1e-2) 場合でも
+/// regression threshold `EPS_KKT_NONCONVEX_LOCAL = 1e-3` を超えないよう制限する。
+const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 
 /// 大域最適化 entry。
 ///
@@ -392,7 +397,7 @@ fn is_polish_suboptimal_acceptable(
     if polished.objective > incumbent_obj + gap_tol * scale {
         return false;
     }
-    let kkt_tol = user_eps * POLISH_KKT_ACCEPT_FACTOR;
+    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
     let view = ProblemView {
         q: &problem.q,
         a: &problem.a,
@@ -406,7 +411,13 @@ fn is_polish_suboptimal_acceptable(
     let pf = kkt_primal_residual(&view, &polished.solution);
     let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
     let comp = kkt_comp_residual(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
-    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol
+    let dsign = kkt_dual_sign_violation(
+        &problem.constraint_types,
+        &polished.dual_solution,
+        &problem.bounds,
+        &polished.bound_duals,
+    );
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。

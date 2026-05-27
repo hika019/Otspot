@@ -50,6 +50,7 @@ use otspot_dev::bench_utils::{compute_qp_kkt_max, primal_feas_max};
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use otspot::qp::{solve_qp_global, solve_qp_with, QpProblem};
+use otspot::qp::kkt_resid::dual_sign_violation;
 use otspot::solve_lp_with;
 use otspot::sparse::CscMatrix;
 
@@ -1170,5 +1171,12 @@ fn regression_2f2956_bb_polish_kkt() {
         kkt < EPS_KKT_NONCONVEX_LOCAL,
         "2f2956 regression: KKT={:.3e} >= {:.0e} (sub-box dual recovery bug)",
         kkt, EPS_KKT_NONCONVEX_LOCAL,
+    );
+
+    let dsign = dual_sign_violation(&qp.constraint_types, &res.dual_solution, &qp.bounds, &res.bound_duals);
+    assert!(
+        dsign < EPS_KKT_NONCONVEX_LOCAL,
+        "2f2956 regression: dual_sign_violation={:.3e} >= {:.0e} (wrong-sign duals in recovered incumbent)",
+        dsign, EPS_KKT_NONCONVEX_LOCAL,
     );
 }
