@@ -1,7 +1,7 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
 //! Usage: qps_benchmark <data_dir> [--eps <value>] [--dual-advanced]
-//! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with_options で実行し、
+//! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!
 //! 各問題に10秒のタイムアウトを設ける（solver内部の協調的タイムアウト機構を使用）。
@@ -21,7 +21,6 @@ use otspot_dev::bench_utils::{
 use otspot_io::qps::{parse_qps, QpsError};
 use otspot_core::options::{SimplexMethod, SolverOptions};
 use otspot_core::problem::{ConstraintType, SolveStatus};
-use otspot_core::qp::ipm_solver::solve_ipm;
 use otspot_core::qp::{solve_qp_with, QpProblem};
 
 enum BenchError {
@@ -454,20 +453,13 @@ fn main() {
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
-        let result = if std::env::var("V2_SOLVER").is_ok() {
-            solve_ipm(&prob, &opts)
-        } else {
-            solve_qp_with(&prob, &opts)
-        };
+        let result = solve_qp_with(&prob, &opts);
         let elapsed_s = start.elapsed().as_secs_f64();
         println!(
             "SOLVE_DONE: {} {:?} ({:.3}s)",
             name, result.status, elapsed_s
         );
 
-        // 実 route を反映 (`stats.lp_ipm_path`)。旧実装は size 静的関数
-        // `lp_dispatch_prefers_ipm(n,m)` で判定していたため、IPM-first だが simplex に
-        // fallback した場合などを mislabel していた (将来の分析を誤誘導)。
         let method_label = if is_qp {
             "ipm"
         } else if result.stats.lp_ipm_path {

@@ -73,7 +73,6 @@ fn solve_aat_cg(
     m_sub: usize,
     target_dd: &[twofloat::TwoFloat],
     deadline: Option<std::time::Instant>,
-    perf_trace: bool,
 ) -> (Option<Vec<f64>>, bool) {
     use twofloat::TwoFloat;
     let zero = TwoFloat::from(0.0);
@@ -117,7 +116,6 @@ fn solve_aat_cg(
     let mut p = r.clone();
     let mut rdr = r0_sq;
     let mut tmp = vec![0.0f64; n];
-    let mut iters = 0usize;
     let mut converged = false;
     // best-seen y (stagnation/divergence 対策): rdr が増加に転じたら best_y で early-exit。
     let mut best_y = y.clone();
@@ -145,11 +143,9 @@ fn solve_aat_cg(
         if !rdr_new.is_finite() {
             break;
         }
-        iters += 1;
         if rdr_new <= CG_TOL_SQ * r0_sq {
             converged = true;
             best_y = y.clone();
-            best_rdr = rdr_new;
             break;
         }
         if rdr_new < best_rdr {
@@ -161,14 +157,6 @@ fn solve_aat_cg(
             p[i] = r[i] + beta * p[i];
         }
         rdr = rdr_new;
-    }
-
-    if perf_trace {
-        let rel = (best_rdr / r0_sq).sqrt();
-        eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): iters={iters} converged={converged} best_rel_res={rel:.2e}",
-            a_sub.col_ptr[n],
-        );
     }
 
     if best_y.iter().any(|v| !v.is_finite()) {
@@ -286,19 +274,11 @@ fn solve_aat(
     m_sub: usize,
     target_dd: &[twofloat::TwoFloat],
     deadline: Option<std::time::Instant>,
-    perf_trace: bool,
 ) -> Option<Vec<f64>> {
     // CG — upper limit = m_sub (Krylov theory: converges in ≤ dim, exact arithmetic).
-    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, deadline, perf_trace);
+    let (y_cg, _converged) = solve_aat_cg(a_sub, n, m_sub, target_dd, deadline);
     if y_cg.is_some() {
         return y_cg;
-    }
-    // CG hit NaN/Inf → direct LDL+IR fallback.
-    if perf_trace {
-        eprintln!(
-            "PERF_TRACE [compute_lsq] cg({m_sub}x{n}, nnz={}): NaN/Inf, falling back to direct LDL",
-            a_sub.col_ptr[n],
-        );
     }
     solve_aat_direct_ir(a_sub, n, m_sub, target_dd, deadline)
 }
@@ -435,10 +415,8 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
 
-    let perf_trace = std::env::var("POSTSOLVE_PERF_TRACE").ok().as_deref() == Some("1");
-
     if n_fixed == 0 {
-        return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace);
+        return solve_aat(&problem.a, n, m, &target_dd, deadline);
     }
 
     let mut free_row_local = vec![usize::MAX; m];
@@ -488,9 +466,9 @@ pub(crate) fn compute_lsq_dual_y(
         }
     }
 
-    let y_free = match solve_aat(&a_free, n, m_free, &target_adj_dd, deadline, perf_trace) {
+    let y_free = match solve_aat(&a_free, n, m_free, &target_adj_dd, deadline) {
         Some(v) => v,
-        None => return solve_aat(&problem.a, n, m, &target_dd, deadline, perf_trace),
+        None => return solve_aat(&problem.a, n, m, &target_dd, deadline),
     };
 
     let mut y_full = vec![0.0_f64; m];
@@ -658,7 +636,7 @@ mod comp_slackness_tests {
         let target: Vec<TwoFloat> = vec![TwoFloat::from(2.0), TwoFloat::from(4.0)];
 
         // No deadline → CG converges to y ≈ [1, 2].
-        let (y_ok, conv_ok) = solve_aat_cg(&a, 2, 2, &target, None, false);
+        let (y_ok, conv_ok) = solve_aat_cg(&a, 2, 2, &target, None);
         let y_ok = y_ok.expect("finite y");
         assert!(conv_ok, "well-conditioned 2x2 CG must converge without a deadline");
         assert!(
@@ -668,7 +646,7 @@ mod comp_slackness_tests {
 
         // Past deadline → abort at iter 0, best-seen y stays at the zero init.
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let (y_dl, conv_dl) = solve_aat_cg(&a, 2, 2, &target, Some(past), false);
+        let (y_dl, conv_dl) = solve_aat_cg(&a, 2, 2, &target, Some(past));
         let y_dl = y_dl.expect("finite y even when aborted");
         assert!(!conv_dl, "aborted CG must not report converged");
         assert!(

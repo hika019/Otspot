@@ -57,29 +57,15 @@ pub(crate) fn refine_kkt_iterative(
         &result.dual_solution,
         &result.bound_duals,
     );
-    let start_kkt = prev_kkt;
     let mut best_kkt = prev_kkt;
     let mut best_result = result.clone();
-    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     for _outer in 0..max_iters.max(1) {
         let mut outer_made_progress = false;
         let n_dual = try_dual_only_ir(problem, result, eliminated_cols, target_pf, deadline);
         if n_dual > 0 {
             n_dual_total += n_dual;
             outer_made_progress = true;
-            let kkt_after_dual_ir = kkt_residual_rel(
-                &view,
-                &result.solution,
-                &result.dual_solution,
-                &result.bound_duals,
-            );
-            if trace {
-                eprintln!(
-                    "DUAL_IR outer: after try_dual_only_ir kkt {:.3e}",
-                    kkt_after_dual_ir
-                );
-            }
-            let _ = run_dual_recovery_postprocess(problem, &view, result, deadline, trace);
+            let _ = run_dual_recovery_postprocess(problem, &view, result, deadline);
         } else {
             let pre_cleanup_kkt = kkt_residual_rel(
                 &view,
@@ -88,7 +74,7 @@ pub(crate) fn refine_kkt_iterative(
                 &result.bound_duals,
             );
             let post_cleanup_kkt =
-                run_dual_recovery_postprocess(problem, &view, result, deadline, trace);
+                run_dual_recovery_postprocess(problem, &view, result, deadline);
             if post_cleanup_kkt + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
                 < pre_cleanup_kkt
             {
@@ -122,12 +108,6 @@ pub(crate) fn refine_kkt_iterative(
     }
     if n_dual_total > 0 {
         *result = best_result;
-        if trace {
-            eprintln!(
-                "DUAL_IR outer: best_kkt {:.3e} (start {:.3e})",
-                best_kkt, start_kkt
-            );
-        }
         if best_kkt < target_pf || deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return n_dual_total;
         }
@@ -135,16 +115,9 @@ pub(crate) fn refine_kkt_iterative(
     // dual-only で改善できない / 不十分なら saddle-point IR に fall-through。
 
     // K = [Q+δp·I, A^T; A, -δd·I] の対角正則化。十分小さく IR で eps·‖K‖ まで refine 可。
-    // env REFINE_KKT_DELTA で上書き可。
     const DELTA_P_DEFAULT: f64 = 1e-10;
     const DELTA_D_DEFAULT: f64 = 1e-10;
-    let (delta_p, delta_d) = match std::env::var("REFINE_KKT_DELTA")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-    {
-        Some(v) if v > 0.0 => (v, v),
-        _ => (DELTA_P_DEFAULT, DELTA_D_DEFAULT),
-    };
+    let (delta_p, delta_d) = (DELTA_P_DEFAULT, DELTA_D_DEFAULT);
 
     let sigma_zero = vec![0.0_f64; m];
     let mut k_mat = crate::qp::ipm_core::kkt::build_augmented_system(
@@ -155,15 +128,12 @@ pub(crate) fn refine_kkt_iterative(
         delta_d,
     );
 
-    let trace_pre = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     let diag_on = std::env::var("REFINE_KKT_DIAG").ok().as_deref() == Some("1");
 
     // bound-active 変数の dx を K 対角 penalty で抑制 (近似 active set fix)。
-    // K は bound 制約を陽に持たず active 変数にも dx 生成、bound 超過後の clip で
-    // K·u=-r を破り reject される。env REFINE_KKT_REDUCED=0 で無効化可能。
     const ACTIVE_TOL: f64 = 1e-8;
     const ACTIVE_PENALTY_RATIO: f64 = 1e8;
-    let active_fix_enabled = std::env::var("REFINE_KKT_REDUCED").ok().as_deref() != Some("0");
+    let active_fix_enabled = true;
     if active_fix_enabled {
         let mut k_diag_max = 0.0_f64;
         for j in 0..(n + m) {
@@ -196,20 +166,10 @@ pub(crate) fn refine_kkt_iterative(
                 }
             }
         }
-        if (trace_pre || diag_on) && penalized > 0 {
+        if diag_on && penalized > 0 {
             eprintln!("REFINE_KKT bound-active fix: penalized {} vars (PENALTY={:.2e}, K_diag_max={:.2e})",
                 penalized, active_penalty, k_diag_max);
         }
-    }
-    if trace_pre {
-        eprintln!(
-            "REFINE_KKT pre-factorize: n={} m={} K_nnz={} delta_p={:.1e} delta_d={:.1e}",
-            n,
-            m,
-            k_mat.values.len(),
-            delta_p,
-            delta_d
-        );
     }
     if diag_on {
         let mut diag_top_min = f64::INFINITY;
@@ -269,7 +229,7 @@ pub(crate) fn refine_kkt_iterative(
         let mut retry_count = 0usize;
         loop {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                if trace_pre || diag_on {
+                if diag_on {
                     eprintln!(
                         "REFINE_KKT factorize abandoned due to deadline at retry={}",
                         retry_count
@@ -284,7 +244,7 @@ pub(crate) fn refine_kkt_iterative(
                 }
                 Err(e) => {
                     if retry_count >= FACTOR_RETRY_MAX {
-                        if trace_pre || diag_on {
+                        if diag_on {
                             eprintln!("REFINE_KKT factorize failed after {} retries: {:?} (last delta_p={:.1e} delta_d={:.1e})",
                                 retry_count, e, current_delta_p, current_delta_d);
                         }
@@ -336,7 +296,7 @@ pub(crate) fn refine_kkt_iterative(
                 }
             }
         }
-        if (trace_pre || diag_on) && retry_count > 0 && result_factor.is_some() {
+        if diag_on && retry_count > 0 && result_factor.is_some() {
             eprintln!("REFINE_KKT factorize succeeded after {} retries (final delta_p={:.1e} delta_d={:.1e})",
                 retry_count, current_delta_p, current_delta_d);
         }
@@ -367,8 +327,6 @@ pub(crate) fn refine_kkt_iterative(
     }
 
     // Exclude FX vars (lb≈ub) and presolve-eliminated columns from stationarity.
-    // The former "A col empty" heuristic incorrectly skipped linear-only vars
-    // (A empty / Q non-empty / c≠0); use explicit presolve flag only.
     use crate::tolerances::FX_TOL;
     let use_elim_mask = eliminated_cols.len() == n;
     let exclude_var: Vec<bool> = (0..n)
@@ -450,8 +408,8 @@ pub(crate) fn refine_kkt_iterative(
         };
 
     // Wilkinson IR の "double the working precision": Qx, A^T y, Ax を TwoFloat (DD) で積算し
-    // residual を f64 limit 以下に精密化。LDL solve は f64 のまま。env REFINE_KKT_DD=0 で f64 fallback。
-    let dd_mode = std::env::var("REFINE_KKT_DD").ok().as_deref() != Some("0");
+    // residual を f64 limit 以下に精密化。LDL solve は f64 のまま。
+    let dd_mode = true;
     let compute_residuals_dd =
         |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
             use twofloat::TwoFloat;
@@ -556,25 +514,12 @@ pub(crate) fn refine_kkt_iterative(
         };
 
     let pre_z = result.bound_duals.clone();
-    let (_, _, pre_pf, pre_df, pre_pf_rel, pre_df_rel) = if dd_mode {
+    let (_, _, _pre_pf, _pre_df, pre_pf_rel, pre_df_rel) = if dd_mode {
         compute_residuals_dd(&result.solution, &result.dual_solution, &pre_z)
     } else {
         compute_residuals(&result.solution, &result.dual_solution, &pre_z)
     };
-    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
-    if trace {
-        eprintln!(
-            "REFINE_KKT entry: n={} m={} pre_pf={:.3e} pre_df={:.3e} target_pf={:.3e} dd_mode={}",
-            n, m, pre_pf, pre_df, target_pf, dd_mode
-        );
-    }
     if pre_pf_rel < target_pf && pre_df_rel < target_pf {
-        if trace {
-            eprintln!(
-                "REFINE_KKT skip: pre_pf_rel={:.3e} pre_df_rel={:.3e} both < target_pf",
-                pre_pf_rel, pre_df_rel
-            );
-        }
         return 0;
     }
 
@@ -588,9 +533,6 @@ pub(crate) fn refine_kkt_iterative(
 
     for iter in 0..max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            if trace {
-                eprintln!("REFINE_KKT iter={} deadline reached", iter);
-            }
             break;
         }
         let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) = if dd_mode {
@@ -599,12 +541,6 @@ pub(crate) fn refine_kkt_iterative(
             compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals)
         };
         if pf_cur < target_pf && df_cur < target_pf {
-            if trace {
-                eprintln!(
-                    "REFINE_KKT iter={} early: pf_rel={:.3e} df_rel={:.3e} both < target",
-                    iter, pf_cur, df_cur
-                );
-            }
             break;
         }
         let _ = (pf_abs_cur, df_abs_cur);
@@ -620,14 +556,8 @@ pub(crate) fn refine_kkt_iterative(
         let mut sol = vec![0.0_f64; n + m];
         factor.solve(&rhs, &mut sol);
         if sol.iter().any(|v| !v.is_finite()) {
-            if trace {
-                eprintln!("REFINE_KKT iter={} solve produced NaN", iter);
-            }
             break;
         }
-
-        let dx_inf: f64 = sol[..n].iter().fold(0.0, |a, &v| a.max(v.abs()));
-        let dy_inf: f64 = sol[n..].iter().fold(0.0, |a, &v| a.max(v.abs()));
 
         let mut x_new = result.solution.clone();
         let mut y_new = result.dual_solution.clone();
@@ -685,11 +615,6 @@ pub(crate) fn refine_kkt_iterative(
             compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
         };
 
-        if trace {
-            eprintln!("REFINE_KKT iter={} pf_rel={:.3e}->{:.3e} df_rel={:.3e}->{:.3e} dx_inf={:.3e} dy_inf={:.3e} clip={:.3e}",
-                iter, pf_cur, pf_new, df_cur, df_new, dx_inf, dy_inf, clip_amt);
-        }
-
         // 採用: max(pf_rel, df_rel) strict 減少 + 両者 guardrail 内。
         let score_cur = pf_cur.max(df_cur);
         let score_new = pf_new.max(df_new);
@@ -700,14 +625,9 @@ pub(crate) fn refine_kkt_iterative(
             *result = tmp;
             accepted += 1;
         } else {
-            if trace {
-                eprintln!("REFINE_KKT iter={} REJECTED (progress={} pf_safe={} df_safe={} score:{:.3e}->{:.3e})",
-                    iter, progress, pf_safe, df_safe, score_cur, score_new);
-            }
             break;
         }
     }
 
     accepted
 }
-

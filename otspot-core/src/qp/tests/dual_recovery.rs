@@ -35,7 +35,7 @@ fn test_dual_recovery_postprocess_can_improve_without_dual_ir() {
         &result.dual_solution,
         &result.bound_duals,
     );
-    let post = run_dual_recovery_postprocess(&problem, &view, &mut result, None, false);
+    let post = run_dual_recovery_postprocess(&problem, &view, &mut result, None);
 
     assert!(post < pre);
     assert!(post < 1e-12);
@@ -279,7 +279,7 @@ fn compute_lsq_dual_y_ir_improves_ill_conditioned_problem() {
     for col in 0..2 {
         let mut s = TwoFloat::from(0.0);
         for k in a.col_ptr[col]..a.col_ptr[col + 1] {
-            s = s + TwoFloat::new_mul(a.values[k], y[a.row_ind[k]]);
+            s += TwoFloat::new_mul(a.values[k], y[a.row_ind[k]]);
         }
         let r = (f64::from(s) - target[col]).abs();
         max_abs_res = max_abs_res.max(r);

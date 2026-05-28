@@ -398,12 +398,6 @@ pub fn compute_dfeas_orig(
     }
     let mut dfeas_abs = 0.0_f64;
     let mut dfeas_rel_componentwise = 0.0_f64;
-    let mut max_qx = 0.0_f64;
-    let mut max_c = 0.0_f64;
-    let mut max_aty = 0.0_f64;
-    let mut max_bnd = 0.0_f64;
-    let dump_top = std::env::var("DFEAS_DUMP_TOP").ok().as_deref() == Some("1");
-    let mut per_col: Vec<(usize, f64, f64, f64, f64, f64)> = if dump_top { Vec::with_capacity(n) } else { Vec::new() };
     for i in 0..n {
         let (lb_i, ub_i) = prob.bounds[i];
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
@@ -422,32 +416,11 @@ pub fn compute_dfeas_orig(
         dfeas_abs = dfeas_abs.max(r);
         let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
         dfeas_rel_componentwise = dfeas_rel_componentwise.max(r / scale_i);
-        max_qx = max_qx.max(qx[i].abs());
-        max_c = max_c.max(prob.c[i].abs());
-        max_aty = max_aty.max(aty[i].abs());
-        max_bnd = max_bnd.max(bound_contrib[i].abs());
-        if dump_top {
-            per_col.push((i, r, qx[i], aty[i], bound_contrib[i], prob.c[i]));
-        }
-    }
-    let scale = 1.0 + max_qx.max(max_c).max(max_aty).max(max_bnd);
-    let dfeas_rel_global = dfeas_abs / scale;
-    if dump_top {
-        per_col.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!("DFEAS_DUMP_TOP scale={:.3e} dfeas_abs={:.3e} dfeas_rel={:.3e} dfeas_relC={:.3e}",
-            scale, dfeas_abs, dfeas_rel_global, dfeas_rel_componentwise);
-        for (i, r, qxi, atyi, bndi, ci) in per_col.iter().copied().take(10) {
-            let (lbi, ubi) = prob.bounds[i];
-            let xi = solution[i];
-            eprintln!("  col[{}] r={:+.3e} qx={:+.3e} aty={:+.3e} bnd={:+.3e} c={:+.3e} x={:+.3e} bounds=[{:+.3e},{:+.3e}]",
-                i, r, qxi, atyi, bndi, ci, xi, lbi, ubi);
-        }
     }
     (dfeas_abs, dfeas_rel_componentwise)
 }
 
-/// Component-wise dual feasibility (same numerics as [`compute_dfeas_orig`]
-/// second return value, without the `DFEAS_DUMP_TOP` side-channel).
+/// Component-wise dual feasibility (same numerics as [`compute_dfeas_orig`] second return value).
 pub fn compute_dfeas_componentwise(
     prob: &QpProblem,
     solution: &[f64],

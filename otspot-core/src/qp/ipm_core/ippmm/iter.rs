@@ -9,15 +9,9 @@ use super::state::{
     alpha_stall_eps_for, PmmState, ADAPTIVE_REG_C_MAX_THRESH, ALPHA_DEADLOCK_N, ALPHA_STALL_N,
     DELTA_INIT, DIRECTION_BLOWUP_THRESHOLD, DUALITY_GAP_TOL, GONDZIO_ALPHA_TRIGGER,
     MIN_CONSECUTIVE_INFEAS, MU_ZERO_THRESHOLD, PF_FAR_FROM_TARGET_RATIO, PF_HISTORY_LEN,
-    PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_MIN,
-    REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC, RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
-};
-use super::trace::{
-    emit_active_trace, emit_debug_infeas_continue, emit_debug_infeas_meta,
-    emit_exit_alpha_stall, emit_exit_check_infeas, emit_exit_demote_to_suboptimal,
-    emit_exit_nan_guard, emit_exit_nan_guard_no_best, emit_exit_optimal_main,
-    emit_exit_reject_false_infeas, emit_exit_residual_stall, emit_exit_timeout_bestsofar,
-    emit_iter_trace, emit_prof_summary, emit_sigma_diag, emit_step_diag,
+    PF_STUCK_RATIO, PMM_IMPROVE_THRESHOLD, PMM_SLOW_RATE, PROX_DOMINATE_RATIO, REG_LIMIT_INIT_LP,
+    REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
+    RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
 use crate::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use crate::linalg::parallelism::solver_par_from_threads;
@@ -93,18 +87,11 @@ pub(crate) fn solve_ippmm_inner(
     let inertia_correction = crate::qp::ipm_core::kkt::compute_inertia_correction(&problem.q);
     let q_is_indefinite = inertia_correction > 0.0;
 
-    // QP_REG_LIMIT で override 可。
-    let default_reg_qp = 5e-8;
-    let default_reg_lp = 5e-10;
-    let initial_reg_limit = std::env::var("QP_REG_LIMIT").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or_else(|| {
-            if problem.q.values.iter().all(|&v| v == 0.0) {
-                default_reg_lp
-            } else {
-                default_reg_qp
-            }
-        });
+    let initial_reg_limit = if problem.q.values.iter().all(|&v| v == 0.0) {
+        REG_LIMIT_INIT_LP
+    } else {
+        REG_LIMIT_INIT_QP
+    };
     // rank-deficient Q + c≈0 で rho が floor に張り付き proximal 項が df を支配する病理を回避する適応 floor。
     let c_max = problem.c.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
     let allow_adaptive_reg = c_max < ADAPTIVE_REG_C_MAX_THRESH;
@@ -134,9 +121,7 @@ pub(crate) fn solve_ippmm_inner(
     let inexact_eta = inexact_eta_for_eps(eps_orig);
 
     // augmented LDL が memory budget 超過なら Schur (n×n SPD) に切替。
-    let explicit_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
-    let auto_schur = auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par);
-    let use_schur = explicit_schur || auto_schur;
+    let use_schur = auto_schur_enabled(problem, &a_ext, m_ext, options, &timeout_ctx, par);
 
     // 終了条件は Some(Optimal) / Some(Timeout) のみ。MaxIterations 経路は除去。
     let mut status: Option<SolveStatus> = None;
@@ -157,22 +142,12 @@ pub(crate) fn solve_ippmm_inner(
     let mut last_score_improvement_iter: usize = 0;
     let mut last_score_improvement_value: f64 = f64::INFINITY;
 
-    let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
-    let mut prof_iters: usize = 0;
-    let mut prof_residual_ns: u128 = 0;
-    let mut prof_predcorr_ns: u128 = 0;
-    let mut prof_gondzio_ns: u128 = 0;
-    let mut prof_update_ns: u128 = 0;
-
-    // 常時収集 (prof flag 不要): result の TimingBreakdown に昇格。
     let mut total_factorize_ns: u128 = 0;
     let mut total_solve_ns: u128 = 0;
     let mut total_reg_retries: u32 = 0;
     let mut any_iterative = false;
 
     for iter in 0..options.ipm.max_iter {
-        let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };
-        let mut prof_section_start = prof_iter_start;
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
@@ -240,9 +215,6 @@ pub(crate) fn solve_ippmm_inner(
             }
         }
 
-        emit_iter_trace(iter, mu, nr_p, nr_d, &pmm, &x, &y, reg_limit);
-        emit_active_trace(iter, m_ineq, &s, &y, &is_eq_ext);
-
         // per-row componentwise relative (bench と同形):
         //   primal: max_i |r_p[i]| / (1 + |ax[i]| + |b_ext[i]|)
         //   dual:   max_j |r_d[j]| / (1 + |qx[j]| + |c[j]| + |aty[j]|)
@@ -266,20 +238,8 @@ pub(crate) fn solve_ippmm_inner(
             m
         };
 
-        if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
-            eprintln!(
-                "IPPMM_OPT iter={} pf_rel={:.3e}/eps={:.3e}{} df_rel={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
-                iter,
-                nr_p_rel, eps, if nr_p_rel < eps { "✓" } else { "✗" },
-                nr_d_rel, eps, if nr_d_rel < eps { "✓" } else { "✗" },
-                mu, eps, if mu < eps { "✓" } else { "✗" },
-                rel_gap, DUALITY_GAP_TOL, if rel_gap.abs() < DUALITY_GAP_TOL { "✓" } else { "✗" },
-            );
-        }
-
         // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
-            emit_exit_optimal_main(iter, nr_p_rel, nr_d_rel, rel_gap);
             status = Some(SolveStatus::Optimal);
             final_iter = iter;
             break;
@@ -305,8 +265,6 @@ pub(crate) fn solve_ippmm_inner(
         let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
 
-        emit_sigma_diag(iter, mu, &sigma_vec, &s, &y, &is_eq_ext);
-
         // 正則化は PMM 駆動。mu 依存 floor は使わない。
         let rho_matrix = pmm.rho.max(options.ipm.delta_min);
         let delta_matrix = pmm.delta.max(options.ipm.delta_min);
@@ -315,11 +273,6 @@ pub(crate) fn solve_ippmm_inner(
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
-        }
-
-        if let Some(t) = prof_section_start {
-            prof_residual_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
         }
 
         let fact_ctx = FactorizeContext {
@@ -338,7 +291,6 @@ pub(crate) fn solve_ippmm_inner(
             timeout_ctx: &timeout_ctx,
             par,
             n,
-            prof,
             kkt_cfg: KktConfig {
                 dd_ldl: options.ipm.dd_ldl,
                 minres_ir: options.ipm.effective_minres_ir(),
@@ -363,10 +315,6 @@ pub(crate) fn solve_ippmm_inner(
         };
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
-
-        if let Some(_t) = prof_section_start {
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         let t_solve = std::time::Instant::now();
         let (pred, alpha, r_c_corr) = if use_schur {
@@ -401,11 +349,6 @@ pub(crate) fn solve_ippmm_inner(
             );
             (pred, alpha, r_c_corr)
         };
-
-        if let Some(t) = prof_section_start {
-            prof_predcorr_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         let mut alpha = alpha;
         if alpha < GONDZIO_ALPHA_TRIGGER {
@@ -458,11 +401,9 @@ pub(crate) fn solve_ippmm_inner(
                 } else {
                     SolveStatus::SuboptimalSolution
                 };
-                emit_exit_nan_guard(iter, is_quasi_optimal, best_iter, best_score, best_rel_gap, best_residuals);
                 status = Some(exit_status);
             } else {
                 final_iter = iter;
-                emit_exit_nan_guard_no_best(iter);
                 status = Some(SolveStatus::NumericalError);
             }
             break;
@@ -476,8 +417,6 @@ pub(crate) fn solve_ippmm_inner(
         ) {
             consecutive_infeas_triggers += 1;
             let quality_threshold = 10.0 * eps_orig;
-            emit_debug_infeas_meta(iter, best_score, quality_threshold, eps_orig, eps,
-                best_score.is_finite(), consecutive_infeas_triggers);
             if best_score.is_finite()
                 && best_score < quality_threshold
                 && best_rel_gap.abs() < DUALITY_GAP_TOL
@@ -487,13 +426,11 @@ pub(crate) fn solve_ippmm_inner(
                 s.copy_from_slice(&best_s);
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
-                emit_exit_reject_false_infeas(iter, &infeas_status, best_iter, best_score, best_rel_gap, best_residuals);
                 status = Some(SolveStatus::Optimal);
                 break;
             }
             // N 連続 fire まで判定保留: PMM floor の false-positive に adaptive reg の猶予を与える。
             if consecutive_infeas_triggers < MIN_CONSECUTIVE_INFEAS {
-                emit_debug_infeas_continue(iter, consecutive_infeas_triggers, MIN_CONSECUTIVE_INFEAS);
             } else {
                 if best_score < quality_threshold {
                     x.copy_from_slice(&best_x);
@@ -501,11 +438,9 @@ pub(crate) fn solve_ippmm_inner(
                     s.copy_from_slice(&best_s);
                     final_iter = best_iter;
                     final_residuals = Some(best_residuals);
-                    emit_exit_demote_to_suboptimal(iter, &infeas_status, best_iter, best_score, best_residuals, consecutive_infeas_triggers);
                     status = Some(SolveStatus::SuboptimalSolution);
                     break;
                 }
-                emit_exit_check_infeas(iter, &infeas_status, best_score, consecutive_infeas_triggers);
                 status = Some(infeas_status);
                 final_iter = iter;
                 break;
@@ -518,7 +453,6 @@ pub(crate) fn solve_ippmm_inner(
         let ndx = dx.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         let ndy = dy.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
         let nds = ds.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        emit_step_diag(iter, alpha, ndx, ndy, nds, &r_d_pmm, &r_p_pmm);
 
         // Trust-region cap: alpha·|dv|_inf ≤ STEP_REL_CAP·max(|v|_inf, 1)。
         // fraction-to-boundary は s,y>0 のみ保護で dx は無制約 → STEP_REL_CAP (=1e3) で 1 iter 3 桁以上の暴発を抑制。
@@ -533,11 +467,6 @@ pub(crate) fn solve_ippmm_inner(
 
         // predictor/corrector + Gondzio 全体の solve 時間を常時収集。
         total_solve_ns += t_solve.elapsed().as_nanos();
-
-        if let Some(t) = prof_section_start {
-            prof_gondzio_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
@@ -561,8 +490,6 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            emit_exit_alpha_stall(iter, alpha_stall_converged, alpha_stall_count,
-                best_iter, best_score, best_rel_gap, pmm.rho, reg_limit, best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
         }
@@ -577,8 +504,6 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            emit_exit_residual_stall(iter, RESIDUAL_STALL_WINDOW, last_score_improvement_iter,
-                best_iter, best_score, best_rel_gap, best_residuals);
             status = Some(SolveStatus::SuboptimalSolution);
             break;
         }
@@ -648,11 +573,9 @@ pub(crate) fn solve_ippmm_inner(
         let box_only = m_orig == 0;
         let both_improved = primal_improved && dual_improved;
         let either_improved = primal_improved || dual_improved;
-        let force_ref_update = std::env::var("IPPMM_FORCE_REF_UPDATE").ok().as_deref() == Some("1");
-        let use_fast_rate = (if box_only { both_improved } else { either_improved })
-            || force_ref_update;
+        let use_fast_rate = if box_only { both_improved } else { either_improved };
         // Update reference point whenever at least one residual improved.
-        if either_improved || force_ref_update {
+        if either_improved {
             pmm.y_ref.copy_from_slice(&y);
             pmm.x_ref.copy_from_slice(&x);
         }
@@ -666,21 +589,6 @@ pub(crate) fn solve_ippmm_inner(
 
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
-
-        if let Some(t) = prof_section_start {
-            prof_update_ns += t.elapsed().as_nanos();
-        }
-        if let Some(t) = prof_iter_start {
-            let _ = t.elapsed().as_nanos();
-        }
-        prof_iters += 1;
-    }
-
-    if prof {
-        emit_prof_summary(
-            prof_iters, prof_residual_ns, total_factorize_ns, prof_predcorr_ns,
-            prof_gondzio_ns, prof_update_ns, 0,
-        );
     }
 
     let status = status.unwrap_or(SolveStatus::Timeout);
@@ -703,7 +611,6 @@ pub(crate) fn solve_ippmm_inner(
             s.copy_from_slice(&best_s);
             final_iter = best_iter;
             final_residuals = Some(best_residuals);
-            emit_exit_timeout_bestsofar(best_iter, best_score, best_rel_gap, best_residuals);
         }
     }
 

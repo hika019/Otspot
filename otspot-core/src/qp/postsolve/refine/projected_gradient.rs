@@ -11,7 +11,6 @@ pub(crate) fn refine_dual_projected_gradient(
     deadline: Option<std::time::Instant>,
 ) {
     use twofloat::TwoFloat;
-    let trace = std::env::var("REFINE_DUAL_PG_TRACE").ok().as_deref() == Some("1");
     let n = problem.num_vars;
     let m = problem.num_constraints;
     if result.solution.len() != n || result.dual_solution.len() != m {
@@ -137,7 +136,7 @@ pub(crate) fn refine_dual_projected_gradient(
     let obj_converge_thresh = 1e-16 * (n as f64).max(1.0);
     const STAGNATE_MIN_RATIO: f64 = 1e-7;
 
-    for iter in 0..pg_max_iters {
+    for _ in 0..pg_max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
@@ -177,12 +176,6 @@ pub(crate) fn refine_dual_projected_gradient(
                 continue;
             };
             if obj_try <= obj_curr + ACCEPT_TOL_REL * (1.0 + obj_curr) {
-                if trace {
-                    eprintln!(
-                        "DUAL_PG iter={} step={:.3e} base={:.3e} obj {:.3e}->{:.3e} grad_inf={:.3e}",
-                        iter, step, base_step, obj_curr, obj_try, grad_inf
-                    );
-                }
                 y_curr = y_try;
                 obj_curr = obj_try.min(obj_curr);
                 residual_curr = residual_try;
@@ -200,12 +193,6 @@ pub(crate) fn refine_dual_projected_gradient(
             step = next_step;
         }
         if !accepted {
-            if trace {
-                eprintln!(
-                    "DUAL_PG iter={} no acceptable step obj={:.3e} grad_inf={:.3e} base={:.3e}",
-                    iter, obj_curr, grad_inf, base_step
-                );
-            }
             break;
         }
         let relative_improvement = if prev_obj > 0.0 {
@@ -242,9 +229,6 @@ pub(crate) fn refine_dual_projected_gradient(
         &tmp.dual_solution,
         &tmp.bound_duals,
     );
-    if trace {
-        eprintln!("DUAL_PG final kkt {:.3e}->{:.3e}", pre, post);
-    }
     if post < pre {
         result.dual_solution = tmp.dual_solution;
     }

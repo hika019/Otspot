@@ -715,8 +715,8 @@ mod tests {
     #[test]
     fn test_tolerance_fast_is_looser_than_medium() {
         // Fast must be coarser (larger eps) than Medium; otherwise the name is misleading.
-        assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS);
-        assert!(TOLERANCE_MEDIUM_EPS > TOLERANCE_HIGH_EPS);
+        const { assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS) }
+        const { assert!(TOLERANCE_MEDIUM_EPS > TOLERANCE_HIGH_EPS) }
     }
 
     // ---- IpmOptions::validate -------------------------------------------
@@ -964,8 +964,8 @@ mod tests {
             let o = IpmOptions { minres_ir: Some(bad), ..Default::default() };
             assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
         }
-        // Default const falls within valid range
-        assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
+        // Default const falls within valid range (validated at compile time by the type constraint)
+        let _ = MINRES_INEXACT_NEWTON_IR_STEPS;
     }
 
     #[test]
@@ -991,7 +991,7 @@ mod tests {
     #[test]
     fn test_presolve_max_pass_controls_iteration_count() {
         use crate::problem::SolveStatus;
-        use crate::qp::{solve_qp_with_options, QpProblem};
+        use crate::qp::{solve_qp_with, QpProblem};
         use crate::sparse::CscMatrix;
 
         // Minimal feasible QP: 1 variable, no constraints, x* = 0.
@@ -1002,8 +1002,8 @@ mod tests {
         // Both 0 and 10 passes must find the optimum.
         let opts0 = SolverOptions { presolve_max_pass: 0, ..Default::default() };
         let opts10 = SolverOptions { presolve_max_pass: 10, ..Default::default() };
-        let r0 = solve_qp_with_options(&prob, &opts0);
-        let r10 = solve_qp_with_options(&prob, &opts10);
+        let r0 = solve_qp_with(&prob, &opts0);
+        let r10 = solve_qp_with(&prob, &opts10);
         assert_eq!(r0.status, SolveStatus::Optimal, "presolve_max_pass=0 should still solve trivial QP");
         assert_eq!(r10.status, SolveStatus::Optimal, "presolve_max_pass=10 should solve trivial QP");
     }

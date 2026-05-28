@@ -1,7 +1,6 @@
 //! IPM 数値カーネル + 後処理 (Ruiz unscale, postsolve, bound clip, 元空間 KKT)。
 //! IpmOutcome は元空間の解と残差のみ持ち、satisfies_eps(user_eps) は常に元空間判定。
 
-mod diagnostics;
 mod duality_gap;
 mod eps_tighten;
 mod post_processing;
@@ -102,21 +101,9 @@ fn run_ipm_with(
         };
     }
 
-    let post_trace = diagnostics::trace_enabled();
-    if post_trace {
-        diagnostics::log_ipm_exit_reduced(reduced, &result);
-    }
-
     // dual の LSQ refine は元空間に戻してから行う。scaled 空間で LSQ を回すと L2 ノルム
     // 最小化が scaled 残差分布に過剰適合し、unscale 後に元空間残差が悪化することがある。
     if let Some(scaler) = &presolve_result.ruiz_scaler {
-        if post_trace {
-            let (x_unscaled, y_unscaled) =
-                scaler.unscale_solution(&result.solution, &result.dual_solution);
-            diagnostics::log_ruiz_scale_ratio(
-                scaler, &result.solution, &result.dual_solution, &x_unscaled, &y_unscaled,
-            );
-        }
         let (x, y) = scaler.unscale_solution(&result.solution, &result.dual_solution);
         result.solution = x;
         result.dual_solution = y;
@@ -124,10 +111,6 @@ fn run_ipm_with(
         if scaler.c.abs() > 1e-300 {
             result.objective /= scaler.c;
         }
-    }
-    if post_trace {
-        diagnostics::log_unscaled_reduced(reduced, &result);
-        diagnostics::log_presolve_transforms(presolve_result, reduced, orig_problem);
     }
 
     // postsolve: reduced 空間 → 元問題空間。eliminated 行 / 固定変数の dual 復元込み。
@@ -143,32 +126,15 @@ fn run_ipm_with(
     }
     let postsolve_map_us = t_postsolve_map.elapsed().as_micros() as u64;
 
-    if post_trace {
-        diagnostics::log_postsolve_remap_bd(orig_problem, &final_sol);
-        diagnostics::log_violation_distribution(orig_problem, presolve_result, reduced, &final_sol);
-    }
-
     // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
-    let mut total_bound_clip = 0.0_f64;
-    let mut clip_count_pre = 0_usize;
     for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(orig_problem.bounds.iter()) {
-        let pre = *xi;
         if lb.is_finite() {
             *xi = xi.max(lb);
         }
         if ub.is_finite() {
             *xi = xi.min(ub);
         }
-        let amt = (pre - *xi).abs();
-        if amt > 0.0 {
-            clip_count_pre += 1;
-            total_bound_clip = total_bound_clip.max(amt);
-        }
     }
-    if post_trace {
-        diagnostics::log_bounds_clip(orig_problem, &final_sol, clip_count_pre, total_bound_clip);
-    }
-
     // presolve metadata から削除 col mask を導出。orig 空間での
     // kkt_residual_rel / refine 呼出は本 mask を経由してのみ EmptyCol を skip する。
     let eliminated_cols: Vec<bool> = presolve_result
@@ -199,10 +165,6 @@ fn run_ipm_with(
     // 後処理が独自解を作り cancel/Timeout セマンティクスを破壊するため skip。
     let ipm_made_progress = result.iterations > 0;
     let allow_primal = allow_primal_projection(orig_problem);
-
-    if post_trace {
-        diagnostics::log_pre_post_processing(orig_problem, &final_sol);
-    }
 
     let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = kkt_already_passes(
