@@ -25,7 +25,7 @@ use otspot_core::sparse::CscMatrix;
 /// canonical order: `(va.model_id, va.index) ≤ (vb.model_id, vb.index)`.
 ///
 /// # Q-matrix convention
-/// When converted to `CscMatrix` via [`quad_to_csc`], the "1/2 xᵀQx" convention is used:
+/// When converted to `CscMatrix` via `quad_to_csc`, the "1/2 xᵀQx" convention is used:
 /// - Diagonal `c · xi²` → `Q[i][i] = 2c`  (so `1/2 · Q[i][i] · xi² = c · xi²`)
 /// - Cross `c · xi · xj` (i≠j) → `Q[i][j] = Q[j][i] = c`  (symmetric fill, both sides)
 #[derive(Debug, Clone, Default)]

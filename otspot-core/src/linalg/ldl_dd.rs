@@ -251,7 +251,7 @@ fn ldl_numeric_dd(
 /// AMD キャッシュ済み置換付き quasidefinite LDL^T 分解 (DD 精度)。
 ///
 /// `mat`: 元の (未置換の) augmented KKT 行列、上三角 CSC
-/// `perm`: 事前計算済み AMD 置換 (perm[k] = 元インデックス)
+/// `perm`: 事前計算済み AMD 置換 (perm\[k\] = 元インデックス)
 /// `deadline`: factorize 前と symbolic 完了直後の 2 箇所でチェック
 pub fn factorize_quasidefinite_with_cached_perm_dd(
     mat: &CscMatrix,

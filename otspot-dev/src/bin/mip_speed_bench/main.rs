@@ -1,6 +1,6 @@
 //! MIP speed benchmark — MILP/MIQP scaling study.
 //!
-//! Usage: cargo run --release --bin mip_speed_bench -- [--timeout <secs>] [--out <csv>]
+//! Usage: `cargo run --release --bin mip_speed_bench -- [--timeout <secs>] [--out <csv>]`
 //!
 //! Builds synthetic MILP (knapsack/assignment-style) and convex MIQP
 //! (PSD Q = LLᵀ + ridge) problems with a deterministic LCG (see `kernels`), so

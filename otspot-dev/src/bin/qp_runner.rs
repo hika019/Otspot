@@ -5,14 +5,14 @@
 //!
 //! ## Input format (stdin):
 //! Line 1: n m_ub            <- num variables, num inequality constraints
-//! Line 2: c[0] c[1] ... c[n-1]
-//! Line 3: lb[0] lb[1] ... lb[n-1]   (use -1e300 for -inf)
-//! Line 4: ub[0] ub[1] ... ub[n-1]   (use 1e300 for +inf)
+//! Line 2: c\[0\] c\[1\] ... c\[n-1\]
+//! Line 3: lb\[0\] lb\[1\] ... lb\[n-1\]   (use -1e300 for -inf)
+//! Line 4: ub\[0\] ub\[1\] ... ub\[n-1\]   (use 1e300 for +inf)
 //! Line 5: nnz_Q
 //! Lines 6..6+nnz_Q: row col val      (upper triangular, 0-indexed)
 //! Line 6+nnz_Q: nnz_A
 //! Lines ...: row col val             (0-indexed)
-//! Last line: b[0] b[1] ... b[m_ub-1]
+//! Last line: b\[0\] b\[1\] ... b\[m_ub-1\]
 //!
 //! ## Output format (stdout):
 //! STATUS objective iterations

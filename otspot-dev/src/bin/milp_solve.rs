@@ -5,7 +5,7 @@
 //! MILP-vs-HiGHS comparison harness.
 //!
 //! Usage:
-//!   cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>]
+//!   `cargo run --release --bin milp_solve -- <file.mps> [--timeout <secs>] [--eps <tol>]`
 
 use mimalloc::MiMalloc;
 #[global_allocator]
