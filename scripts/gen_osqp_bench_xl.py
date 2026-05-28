@@ -1,16 +1,13 @@
-"""超大規模 (1M 級) OSQP-style QP を生成する。
+"""Large-scale OSQP-style QP generator.
 
-QPLIB suite に既に 1M 級が複数あるが (QPLIB_8500/8547/9008)、
-OSQP-style の問題構造で 1M 級が無いため、IPPMM チューニング時の
-汎用性担保 (大規模で挙動が変わらないか) のために追加する。
+Produces medium-to-large QP instances in QPLIB/QPS format under
+data/osqp_bench_xl/.  Problem classes mirror the OSQP benchmark suite
+(portfolio, lasso, huber, svm, control); dense-P classes (random_qp,
+eq_qp) are excluded because they become intractable above n≈1 000.
 
-class 別の現実的な 1M 級設定:
-- portfolio: k=5000 (factor model、n=k×100=500k 程度、A はブロック sparse)
-- lasso: n_features=10000 (m=100×n=1M)
-- control: state_size=2000 (n≈30k、m≈50k、sparse)
-- random_qp / eq_qp は dense P で生成自体が NG (n=1000 で nnz=1M)
-
-データは data/osqp_bench_xl/ に出力。
+SIZE_GRID is tuned to stay well within a 7 GB RAM budget (GH Actions
+runner limit).  A pre-generation byte estimate guards against edge cases
+where the grid values would still exceed available memory.
 """
 from __future__ import annotations
 
@@ -25,17 +22,38 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from qp_to_qps import write_osqp_problem  # noqa: E402
 
-# 1M 級 size grid。dense P 系 (random_qp / eq_qp) は除外。
+# Size grid tuned for ≤7 GB RAM (GH Actions runner).
+# portfolio/lasso: dense factor F[n,k] where n=100·k → 100·k² elements × 8 B
+#   k=500  → 200 MB,  k=1000 → 800 MB  (both safe)
+# huber/svm: dense feature matrix [m×n], m=100·n → 100·n² elements × 8 B
+#   n=1000 → 800 MB,  n=2000 → 3.2 GB  (both safe with headroom)
+# control: sparse but state size drives n/m; kept conservative
 SIZE_GRID: dict[str, list[int]] = {
-    "portfolio": [2500, 5000, 10000],   # factor 数 k、assets ≈ 100k
-    "lasso":     [2500, 5000, 10000],   # features n、samples = 100×n
-    "huber":     [2500, 5000],
-    "svm":       [2500, 5000],
-    "control":   [800, 1500, 2500],     # state size
+    "portfolio": [500, 1000],
+    "lasso":     [500, 1000],
+    "huber":     [1000, 2000],
+    "svm":       [1000, 2000],
+    "control":   [200, 400],
 }
 
-# 1M 級は seed 1 つだけで十分 (生成・bench とも数十分級なので)
 SEEDS = [2]
+
+# Hard cap: skip instance if estimated dense bytes exceed this threshold.
+MAX_RAM_BYTES: int = 2 * 1024 ** 3  # 2 GB per instance
+
+
+def estimate_factor_bytes(name: str, size: int) -> int:
+    """Return an upper-bound byte estimate for a single problem instance."""
+    if name in ("portfolio", "lasso"):
+        # Dense factor matrix: n = 100·size, k = size → n×k elements
+        n = 100 * size
+        k = size
+        return n * k * 8
+    if name in ("huber", "svm"):
+        # Dense feature matrix: m = 100·n, n = size → m×n elements
+        return 100 * size * size * 8
+    # control and others: sparse; use a conservative floor
+    return 10 * 1024 * 1024  # 10 MB
 
 
 def import_classes() -> dict:
@@ -57,8 +75,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=str(REPO_ROOT / "data" / "osqp_bench_xl"))
     ap.add_argument("--classes", nargs="+", default=None)
-    ap.add_argument("--max-nnz", type=int, default=200_000_000,  # 200M 上限 (生成可能内)
-                    help="P+A 合計 nnz 上限")
+    ap.add_argument("--max-nnz", type=int, default=200_000_000,
+                    help="P+A combined nnz upper bound")
     ap.add_argument("--seeds", nargs="+", type=int, default=SEEDS)
     args = ap.parse_args()
 
@@ -76,18 +94,29 @@ def main():
         cls = classes[name]
         for size in SIZE_GRID[name]:
             for seed in args.seeds:
+                est = estimate_factor_bytes(name, size)
+                if est > MAX_RAM_BYTES:
+                    print(
+                        f"[xl] skip {name}_{size}_s{seed}: "
+                        f"estimated_bytes={est} > MAX_RAM_BYTES={MAX_RAM_BYTES}"
+                    )
+                    skipped += 1
+                    continue
+
                 try:
                     inst = cls(size, seed=seed)
                 except Exception as e:
                     print(f"[xl] skip {name}_{size}_s{seed}: gen failed ({e})", file=sys.stderr)
                     skipped += 1
                     continue
+
                 qp = inst.qp_problem
                 nnz = qp["P"].nnz + qp["A"].nnz
                 if nnz > args.max_nnz:
                     print(f"[xl] skip {name}_{size}_s{seed}: nnz={nnz} > max_nnz")
                     skipped += 1
                     continue
+
                 stem = f"XL_{name}_{size}_s{seed}".upper()
                 out = out_dir / f"{stem}.qps"
                 try:
@@ -97,6 +126,7 @@ def main():
                     print(f"[xl] skip {name}_{size}_s{seed}: write failed ({e})", file=sys.stderr)
                     skipped += 1
                     continue
+
                 print(f"[xl] wrote {out.name}  n={qp['n']} m={qp['m']} nnz(P+A)={nnz}")
                 written += 1
 
