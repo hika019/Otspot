@@ -178,7 +178,11 @@ pub mod f64_impl {
     /// Per-component normalised primal feasibility (f64 path).
     ///
     /// `max_i violation_i / (1 + |Ax_i| + |b_i|)`.
+    ///
+    /// Internal utility for `otspot-dev`; not part of the stable public API.
+    #[doc(hidden)]
     pub fn primal_residual_rel(a: &CscMatrix, b: &[f64], ct: &[ConstraintType], x: &[f64]) -> f64 {
+        debug_assert_eq!(b.len(), ct.len(), "b and ct must have equal length");
         let ax = self::ax(a, x);
         if ax.is_empty() {
             return 0.0;

@@ -311,6 +311,11 @@ pub fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     if solution.is_empty() || solution.len() != prob.num_vars {
         return f64::NAN;
     }
+    // Guard: if A.ncols ≠ num_vars the matrix is internally inconsistent; treat as NaN
+    // (QpProblem construction should prevent this, but preserve old mat_vec_mul-Err semantics).
+    if prob.a.ncols() != prob.num_vars {
+        return f64::NAN;
+    }
     f64_impl::primal_residual_rel(&prob.a, &prob.b, &prob.constraint_types, solution)
 }
 
@@ -665,31 +670,50 @@ mod tests {
 
     /// Sentinel: `compute_dfeas_componentwise` must equal `compute_dfeas_orig` second value.
     ///
-    /// Interior variable (not at lb, not at ub) must yield 0.  The old buggy LP path
-    /// (at_ub-only check) returned `max(0, -rc) > 0` for such a variable.
+    /// Three cases:
+    /// - Case A (spec): interior var → 0 by spec; verifies `assert_eq!` against orig.
+    ///   A `return 0.0` no-op would pass this alone (0==0 tautology).
+    /// - Case B (no-op sentinel): at-lb var with rc=-0.5 → orig returns ~0.2;
+    ///   a `return 0.0` no-op fails `assert_eq!(0.0, 0.2)`.
+    /// - Case C (at-ub): at-ub var with rc=+0.5 → violation; verifies ub path.
     #[test]
     fn test_dfeas_componentwise_matches_orig_lp_path() {
-        // lb=2, ub=∞, x=5 (interior), rc=-0.5
-        // Correct: not at lb, not at ub → viol=0.
-        // Old buggy code: not at_ub → viol=max(0,0.5)=0.5 (false positive).
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let prob = QpProblem::new(
             CscMatrix::new(1, 1),
             vec![1.0],
-            a,
+            a.clone(),
             vec![5.0],
             vec![(2.0, f64::INFINITY)],
             vec![ConstraintType::Eq],
         ).unwrap();
+
+        // Case A: interior (x=5, lb=2, ub=∞). Old buggy code: false positive 0.5; new: 0.
+        // Note: `return 0.0` no-op also passes here (0==0). Case B is the actual sentinel.
         let dfeas_c = compute_dfeas_componentwise(&prob, &[5.0], &[], &[], &[-0.5]);
         let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[5.0], &[], &[], &[-0.5]);
-        assert_eq!(dfeas_c, dfeas_rel, "componentwise must equal orig second value");
-        assert!(dfeas_c < 1e-15, "interior var (not at lb/ub): dfeas should be 0, got {dfeas_c}");
+        assert_eq!(dfeas_c, dfeas_rel, "case A: componentwise must equal orig");
+        assert!(dfeas_c < 1e-15, "case A: interior var should be 0, got {dfeas_c}");
 
-        // x at lb=2, rc=-0.5 → violation (should be rc≥0 when at lb).
+        // Case B (no-op sentinel): x=2 at lb=2, rc=-0.5 → orig returns > 0.
+        // A `return 0.0` no-op fails assert_eq! here.
         let dfeas_c = compute_dfeas_componentwise(&prob, &[2.0], &[], &[], &[-0.5]);
         let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[2.0], &[], &[], &[-0.5]);
-        assert_eq!(dfeas_c, dfeas_rel, "at-lb: componentwise must equal orig second value");
-        assert!(dfeas_c > 0.0, "at lb with negative rc: dfeas should be > 0");
+        assert_eq!(dfeas_c, dfeas_rel, "case B: at-lb componentwise must equal orig");
+        assert!(dfeas_c > 0.0, "case B: at lb, rc<0 → violation > 0");
+
+        // Case C: at-ub (x=10, lb=0, ub=10, rc=+0.5 → violation at ub).
+        let prob_ub = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![(0.0, 10.0)],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+        let dfeas_c = compute_dfeas_componentwise(&prob_ub, &[10.0], &[], &[], &[0.5]);
+        let (_, dfeas_rel) = compute_dfeas_orig(&prob_ub, &[10.0], &[], &[], &[0.5]);
+        assert_eq!(dfeas_c, dfeas_rel, "case C: at-ub componentwise must equal orig");
+        assert!(dfeas_c > 0.0, "case C: at ub, rc>0 → violation > 0");
     }
 }
