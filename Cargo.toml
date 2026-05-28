@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
+default-members = [".", "otspot-core", "otspot-io", "otspot-model", "otspot-dev"]
 
 [workspace.package]
 version = "0.2.0"
