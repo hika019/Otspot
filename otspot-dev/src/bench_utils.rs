@@ -311,25 +311,7 @@ pub fn compute_pfeas_normalized(prob: &QpProblem, solution: &[f64]) -> f64 {
     if solution.is_empty() || solution.len() != prob.num_vars {
         return f64::NAN;
     }
-    if prob.num_constraints == 0 {
-        return 0.0;
-    }
-    match prob.a.mat_vec_mul(solution) {
-        Ok(ax) => {
-            let mut max_rel = 0.0_f64;
-            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
-                let violation = match prob.constraint_types.get(i) {
-                    Some(ConstraintType::Eq) => (ax_i - b_i).abs(),
-                    Some(ConstraintType::Ge) => (b_i - ax_i).max(0.0),
-                    _ => (ax_i - b_i).max(0.0),
-                };
-                let scale_i = 1.0 + ax_i.abs() + b_i.abs();
-                max_rel = max_rel.max(violation / scale_i);
-            }
-            max_rel
-        }
-        Err(_) => f64::NAN,
-    }
+    f64_impl::primal_residual_rel(&prob.a, &prob.b, &prob.constraint_types, solution)
 }
 
 /// Dual feasibility in the original (unscaled) space.
@@ -420,7 +402,7 @@ pub fn compute_dfeas_orig(
     (dfeas_abs, dfeas_rel_componentwise)
 }
 
-/// Component-wise dual feasibility (same numerics as [`compute_dfeas_orig`] second return value).
+/// Component-wise dual feasibility: second return value of [`compute_dfeas_orig`].
 pub fn compute_dfeas_componentwise(
     prob: &QpProblem,
     solution: &[f64],
@@ -428,53 +410,7 @@ pub fn compute_dfeas_componentwise(
     bound_duals: &[f64],
     reduced_costs: &[f64],
 ) -> f64 {
-    use twofloat::TwoFloat;
-    if solution.is_empty() || solution.len() != prob.num_vars {
-        return f64::NAN;
-    }
-    let n = solution.len();
-    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
-    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
-    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, bound_duals);
-    if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
-        let mut max_rel = 0.0_f64;
-        for (j, &rc) in reduced_costs.iter().enumerate() {
-            let (lb_j, ub_j) = prob.bounds[j];
-            if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
-                continue;
-            }
-            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
-                continue;
-            }
-            let x_j = solution.get(j).copied().unwrap_or(0.0);
-            let at_ub = ub_j.is_finite()
-                && (x_j - ub_j).abs() <= 1e-8 * (1.0 + ub_j.abs());
-            let viol = if at_ub { f64::max(0.0, rc) } else { f64::max(0.0, -rc) };
-            let scale_j = 1.0 + rc.abs() + prob.c[j].abs();
-            max_rel = max_rel.max(viol / scale_j);
-        }
-        return max_rel;
-    }
-    let mut max_rel = 0.0_f64;
-    for i in 0..n {
-        let (lb_i, ub_i) = prob.bounds[i];
-        if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
-            continue;
-        }
-        if prob.a.col_ptr().len() > i + 1
-            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
-        {
-            continue;
-        }
-        let r_dd = TwoFloat::from(qx[i])
-            + TwoFloat::from(aty[i])
-            + TwoFloat::from(bound_contrib[i])
-            + TwoFloat::from(prob.c[i]);
-        let r = f64::from(r_dd).abs();
-        let scale_i = 1.0 + qx[i].abs() + aty[i].abs() + bound_contrib[i].abs() + prob.c[i].abs();
-        max_rel = max_rel.max(r / scale_i);
-    }
-    max_rel
+    compute_dfeas_orig(prob, solution, dual_solution, bound_duals, reduced_costs).1
 }
 
 #[cfg(test)]
@@ -725,5 +661,35 @@ mod tests {
         // x=7: 0
         let v = compute_pfeas_normalized(&prob, &[7.0]);
         assert!(v < 1e-12, "ge sat: got {}", v);
+    }
+
+    /// Sentinel: `compute_dfeas_componentwise` must equal `compute_dfeas_orig` second value.
+    ///
+    /// Interior variable (not at lb, not at ub) must yield 0.  The old buggy LP path
+    /// (at_ub-only check) returned `max(0, -rc) > 0` for such a variable.
+    #[test]
+    fn test_dfeas_componentwise_matches_orig_lp_path() {
+        // lb=2, ub=∞, x=5 (interior), rc=-0.5
+        // Correct: not at lb, not at ub → viol=0.
+        // Old buggy code: not at_ub → viol=max(0,0.5)=0.5 (false positive).
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let prob = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![(2.0, f64::INFINITY)],
+            vec![ConstraintType::Eq],
+        ).unwrap();
+        let dfeas_c = compute_dfeas_componentwise(&prob, &[5.0], &[], &[], &[-0.5]);
+        let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[5.0], &[], &[], &[-0.5]);
+        assert_eq!(dfeas_c, dfeas_rel, "componentwise must equal orig second value");
+        assert!(dfeas_c < 1e-15, "interior var (not at lb/ub): dfeas should be 0, got {dfeas_c}");
+
+        // x at lb=2, rc=-0.5 → violation (should be rc≥0 when at lb).
+        let dfeas_c = compute_dfeas_componentwise(&prob, &[2.0], &[], &[], &[-0.5]);
+        let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[2.0], &[], &[], &[-0.5]);
+        assert_eq!(dfeas_c, dfeas_rel, "at-lb: componentwise must equal orig second value");
+        assert!(dfeas_c > 0.0, "at lb with negative rc: dfeas should be > 0");
     }
 }

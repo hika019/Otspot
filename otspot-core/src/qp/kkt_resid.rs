@@ -175,6 +175,23 @@ pub mod f64_impl {
         out
     }
 
+    /// Per-component normalised primal feasibility (f64 path).
+    ///
+    /// `max_i violation_i / (1 + |Ax_i| + |b_i|)`.
+    pub fn primal_residual_rel(a: &CscMatrix, b: &[f64], ct: &[ConstraintType], x: &[f64]) -> f64 {
+        let ax = self::ax(a, x);
+        if ax.is_empty() {
+            return 0.0;
+        }
+        let viols = self::constraint_violations(&ax, b, ct);
+        let mut max_rel = 0.0_f64;
+        for (i, &v) in viols.iter().enumerate() {
+            let scale_i = 1.0 + ax[i].abs() + b[i].abs();
+            max_rel = max_rel.max(v / scale_i);
+        }
+        max_rel
+    }
+
     /// 不等式 complementarity 生積 `|y_i · slack_i|`. Eq 行は 0.
     pub fn comp_ineq_products(
         ax: &[f64], b: &[f64], ct: &[ConstraintType], y: &[f64],
