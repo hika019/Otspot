@@ -167,7 +167,13 @@ fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
 }
 
 /// Q が対角なら s_j=1/√Q_jj の column scaling で Q'_jj=1 に均等化し、解後 x_orig=D·x_scaled で復元。
+///
+/// Returns [`SolverResult`] with [`SolveStatus::NumericalError`] immediately if
+/// `options` fails validation (negative timeout, zero threads, etc.).
 pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if options.validate().is_err() {
+        return SolverResult::numerical_error();
+    }
     // `eliminated_cols` is structural (q-diag column scaling preserves which columns
     // are A-empty/Q-empty and which presolve removes), so the mask derived inside
     // `solve_ipm_with_runner` on the scaled problem is valid for the guard on the
