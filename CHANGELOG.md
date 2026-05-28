@@ -10,6 +10,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 修正
 
+## [0.3.1] - 2026-05-29
+
+### 追加
+- `Model::try_var_name(var) -> Result<&str, ModelError>` checked variant 追加 (try_value と対称)
+- `Variable` の `index` / `model_id` 検証付きアクセサ
+
+### 修正
+- `solve_ipm` / `run_ipm` で `SolverOptions` validate guard 追加 (負 timeout 等で panic → ModelError に正規化)
+- `greenbea_postsolve_dual_feasibility` テストに `#[ignore]` 復活 (CPU contention 下で flaky、170s budget margin 6s)
+- `audit.rs` の `scan_observation_only_tests` で コメント行内 `// #[should_panic(...)]` の誤検出修正
+
+### 内部
+- rustdoc broken/private link 50+ 箇所整理
+- CI に `cargo doc -D warnings` job 追加
+
+### 依存
+- actions/checkout v5 → v6
+- tempfile 3.25 → 3.27
+- mimalloc 0.1.48 → 0.1.52 (otspot-dev のみ)
+
 ## [0.3.0] - 2026-05-28
 
 ### 追加
