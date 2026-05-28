@@ -354,7 +354,7 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     Some(QpWarmStart {
         x: res.solution.clone(),
         y: res.dual_solution.clone(),
-        mu: res.gap.unwrap_or(1e-6).max(1e-10),
+        mu: res.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6).max(1e-10),
     })
 }
 

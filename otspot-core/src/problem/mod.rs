@@ -160,12 +160,6 @@ pub struct SolverResult {
     pub iterations: usize,
     /// 最終反復の残差実値 (pfeas, dfeas, duality_gap)。Optimal/MaxIterations時のみ Some。
     pub final_residuals: Option<(f64, f64, f64)>,
-    /// 主実行可能性残差 (||Ax - b||_inf)。final_residuals と同値。デバッグ可視性向上用。
-    pub pfeas: Option<f64>,
-    /// 双対実行可能性残差。final_residuals と同値。デバッグ可視性向上用。
-    pub dfeas: Option<f64>,
-    /// 双対ギャップ (mu)。final_residuals と同値。デバッグ可視性向上用。
-    pub gap: Option<f64>,
     /// 相対双対ギャップ (|p_obj - d_obj| / max(|p|,|d|,1))。
     /// IPPMM 内部の best-so-far に紐づく値。unscale_ipm_result の Suboptimal→Optimal 昇格ゲート用。
     /// None = 未計測（LP simplex 等 gap を持たない経路）。
@@ -238,9 +232,6 @@ impl Default for SolverResult {
             bound_duals: vec![],
             iterations: 0,
             final_residuals: None,
-            pfeas: None,
-            dfeas: None,
-            gap: None,
             duality_gap_rel: None,
             timing_breakdown: None,
             postsolve_dfeas: None,
