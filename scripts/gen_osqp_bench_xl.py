@@ -43,16 +43,21 @@ MAX_RAM_BYTES: int = 2 * 1024 ** 3  # 2 GB per instance
 
 
 def estimate_factor_bytes(name: str, size: int) -> int:
-    """Return an upper-bound byte estimate for a single problem instance."""
-    if name in ("portfolio", "lasso"):
-        # Dense factor matrix: n = 100·size, k = size → n×k elements
-        n = 100 * size
-        k = size
-        return n * k * 8
-    if name in ("huber", "svm"):
-        # Dense feature matrix: m = 100·n, n = size → m×n elements
+    """Return an upper-bound byte estimate for a single problem instance.
+
+    Uses the dominant matrix allocation for each class:
+    - portfolio: dense factor F[n, k], n=100*size, k=size
+    - lasso/huber/svm: sparse Ad with density=0.15, m=100*size, n=size;
+      CSC storage ≈ density * nnz * (8 float64 + 4 row_ind + 4 col_ptr) bytes
+    - control: sparse; conservative 10 MB floor
+    """
+    if name == "portfolio":
         return 100 * size * size * 8
-    # control and others: sparse; use a conservative floor
+    if name in ("lasso", "huber", "svm"):
+        # density=0.15, m=100*size, n=size → nnz = 0.15 * 100 * size²
+        # CSC: 8 (float64) + 4 (row_ind) + 4 (col_ptr estimate) = 16 bytes/nnz
+        return int(0.15 * 100 * size * size * 16)
+    # control and unknowns: sparse; safe floor
     return 10 * 1024 * 1024  # 10 MB
 
 
