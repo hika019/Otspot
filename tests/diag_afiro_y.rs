@@ -26,20 +26,20 @@ fn max_pf(lp: &LpProblem, x: &[f64]) -> f64 {
     let m = lp.num_constraints;
     let n = lp.num_vars.min(x.len());
     let mut ax = vec![0.0f64; m];
-    for j in 0..n {
+    for (j, &x_j) in x.iter().enumerate().take(n) {
         if let Ok((rows, vals)) = lp.a.get_column(j) {
             for k in 0..rows.len() {
                 let row = rows[k];
-                ax[row] += vals[k] * x[j];
+                ax[row] += vals[k] * x_j;
             }
         }
     }
     let mut v_max = 0.0f64;
-    for i in 0..m {
+    for (i, &ax_i) in ax.iter().enumerate() {
         let v = match lp.constraint_types[i] {
-            ConstraintType::Eq => (ax[i] - lp.b[i]).abs(),
-            ConstraintType::Le => (ax[i] - lp.b[i]).max(0.0),
-            ConstraintType::Ge => (lp.b[i] - ax[i]).max(0.0),
+            ConstraintType::Eq => (ax_i - lp.b[i]).abs(),
+            ConstraintType::Le => (ax_i - lp.b[i]).max(0.0),
+            ConstraintType::Ge => (lp.b[i] - ax_i).max(0.0),
             _ => 0.0,
         };
         if v > v_max {

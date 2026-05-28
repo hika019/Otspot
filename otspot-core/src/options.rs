@@ -713,6 +713,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_tolerance_fast_is_looser_than_medium() {
         // Fast must be coarser (larger eps) than Medium; otherwise the name is misleading.
         const { assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS) }
@@ -951,6 +952,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants, clippy::absurd_extreme_comparisons)]
     fn test_ipm_validate_minres_ir() {
         use crate::linalg::kkt_solver::MINRES_INEXACT_NEWTON_IR_STEPS;
         // Default (None) and valid values

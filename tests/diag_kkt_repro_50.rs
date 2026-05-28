@@ -77,9 +77,7 @@ fn build_qp(
     }
     let q_csc = dense_csc(&q, N, N);
     let mut a_dense = vec![0.0_f64; M * N];
-    for j in 0..N {
-        a_dense[j] = a_row1[j];
-    }
+    a_dense[..N].copy_from_slice(a_row1);
     let a_csc = dense_csc(&a_dense, M, N);
     let bounds = vec![(-bnd, bnd); N];
     QpProblem::new(q_csc, c.to_vec(), a_csc, b.to_vec(), bounds, cts.to_vec())

@@ -1,6 +1,7 @@
 //! LISWET9/12 wrong-basin 真因切り分け diag。
 //! ours vs Clarabel strict で per-row primal violation 局在 / active-set / x 距離を出力。
 //! (assertion なし、観測専用)
+#![allow(clippy::field_reassign_with_default, clippy::needless_range_loop)]
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
@@ -54,7 +55,7 @@ fn max_viol_dd(prob: &QpProblem, x: &[f64]) -> f64 {
         let xc = x[col];
         for k in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
             let r = prob.a.row_ind()[k];
-            ax[r] = ax[r] + TwoFloat::new_mul(prob.a.values()[k], xc);
+            ax[r] += TwoFloat::new_mul(prob.a.values()[k], xc);
         }
     }
     let mut mv = 0.0_f64;

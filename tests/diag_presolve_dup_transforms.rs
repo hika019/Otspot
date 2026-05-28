@@ -16,6 +16,7 @@ use otspot::sparse::CscMatrix;
 use otspot::{solve_with, SolveStatus, SolverOptions};
 use otspot_core::presolve::{run_presolve_with_flags, PresolveFlags, PresolveStatus};
 
+#[allow(clippy::too_many_arguments)]
 fn build_lp(
     c: Vec<f64>,
     rows: &[usize],
@@ -65,14 +66,14 @@ fn solve_and_check(lp: &LpProblem, expected_obj: f64, label: &str) {
     let n = lp.num_vars;
     let m = lp.num_constraints;
     let mut ax = vec![0.0; m];
-    for j in 0..n {
+    for (j, &xj) in r.solution[..n].iter().enumerate() {
         let (rows, vals) = lp.a.get_column(j).unwrap();
         for (k, &row) in rows.iter().enumerate() {
-            ax[row] += vals[k] * r.solution[j];
+            ax[row] += vals[k] * xj;
         }
     }
-    for i in 0..m {
-        let slack = lp.b[i] - ax[i];
+    for (i, &ax_i) in ax.iter().enumerate() {
+        let slack = lp.b[i] - ax_i;
         let viol = match lp.constraint_types[i] {
             ConstraintType::Le => (-slack).max(0.0),
             ConstraintType::Ge => slack.max(0.0),
@@ -417,7 +418,7 @@ fn dual_fixing_pos_cost_multi_pattern() {
             m,
             n,
             b,
-            vec![ct.clone(); m],
+            vec![*ct; m],
             vec![(0.0, f64::INFINITY); n],
         );
         let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
@@ -553,6 +554,7 @@ fn rand_in(state: &mut u64, lo: f64, hi: f64) -> f64 {
 }
 
 #[test]
+#[allow(clippy::needless_range_loop)]
 fn random_lp_consistency_across_seeds() {
     // Seeds: 1..=6 keep the run well under the per-test 3-min cap while
     // covering enough variety to flush bad postsolve replays.
@@ -562,15 +564,13 @@ fn random_lp_consistency_across_seeds() {
         let m = 5usize;
         // Build A with some intentional duplication: row 1 = 2 * row 0.
         let mut a_dense = vec![vec![0.0; n]; m];
-        for j in 0..n {
-            a_dense[0][j] = rand_in(&mut state, 0.1, 2.0);
+        for cell in a_dense[0].iter_mut() {
+            *cell = rand_in(&mut state, 0.1, 2.0);
         }
-        for j in 0..n {
-            a_dense[1][j] = 2.0 * a_dense[0][j];
-        }
-        for i in 2..m {
-            for j in 0..n {
-                a_dense[i][j] = rand_in(&mut state, 0.1, 1.5);
+        a_dense[1] = a_dense[0].iter().map(|&v| 2.0 * v).collect();
+        for row in a_dense[2..].iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = rand_in(&mut state, 0.1, 1.5);
             }
         }
         let mut rows: Vec<usize> = Vec::new();

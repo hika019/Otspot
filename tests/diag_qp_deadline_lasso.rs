@@ -92,25 +92,21 @@ fn make_synthetic_lasso(p: usize, m_data: usize, lambda: f64, seed: u64) -> QpPr
     // 1. データ行列 A (m_data x p) と観測 y (m_data) を deterministic に生成
     let mut rng = seed;
     let mut a_data: Vec<Vec<f64>> = vec![vec![0.0; p]; m_data];
-    for i in 0..m_data {
-        for j in 0..p {
-            a_data[i][j] = lcg_unit(&mut rng);
+    for row in a_data.iter_mut() {
+        for val in row.iter_mut() {
+            *val = lcg_unit(&mut rng);
         }
     }
     let mut y = vec![0.0_f64; m_data];
-    for i in 0..m_data {
-        y[i] = lcg_unit(&mut rng);
+    for val in y.iter_mut() {
+        *val = lcg_unit(&mut rng);
     }
 
     // 2. Q_top = A^T A (dense p x p, symmetric PSD)
     let mut q_dense = vec![0.0_f64; p * p];
     for j in 0..p {
         for k in 0..p {
-            let mut s = 0.0;
-            for i in 0..m_data {
-                s += a_data[i][j] * a_data[i][k];
-            }
-            q_dense[j * p + k] = s;
+            q_dense[j * p + k] = a_data.iter().map(|row| row[j] * row[k]).sum();
         }
     }
 

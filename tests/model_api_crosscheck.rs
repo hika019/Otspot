@@ -8,6 +8,7 @@
 //! 本テストは「同じ問題」を 2 経路で組んで結果を突き合わせる。
 //! - 経路 A: Model::new → add_var → add_constraint → minimize → solve()
 //! - 経路 B: QpProblem::new → solve_qp_with()
+//!
 //! 両者の (obj, x) が許容誤差内で一致することを確認する。
 
 use otspot::model::{Model, ModelError, SolveError};

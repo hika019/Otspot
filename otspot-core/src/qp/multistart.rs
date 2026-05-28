@@ -338,6 +338,7 @@ pub(crate) fn solve_qp_multistart_with_hooks(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
@@ -577,10 +578,11 @@ mod tests {
     /// shortcut ON / OFF (disable=true) の wall-clock 比を測る。
     ///
     /// 期待 (threads=2, n_starts=8, deadline=10ms, per-solve sleep=80ms):
-    ///   - ON  : deadline 前に動いた最初の 2 worker のみ 80ms 消費、残り 6 は stub return
-    ///           wall-clock ≈ 80ms + dispatch overhead
-    ///   - OFF : 8 worker 全てが sleep を貫通、batch サイズ 2 で 4 batch × 80ms = 320ms
-    ///           wall-clock ≈ 320ms
+    /// - ON  : deadline 前に動いた最初の 2 worker のみ 80ms 消費、残り 6 は stub return
+    ///   wall-clock ≈ 80ms + dispatch overhead
+    /// - OFF : 8 worker 全てが sleep を貫通、batch サイズ 2 で 4 batch × 80ms = 320ms
+    ///   wall-clock ≈ 320ms
+    ///
     /// no-op (OFF) で wall-clock が ON の 2x 超になれば shortcut の効果が事実化される。
     #[test]
     fn deadline_shortcut_skips_post_deadline_workers() {
@@ -730,8 +732,7 @@ mod tests {
                     rayon::ThreadPoolBuilder::new()
                         .num_threads(1)
                         .spawn_handler(|_| -> std::io::Result<()> {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            Err(std::io::Error::other(
                                 "injected ThreadPool build failure",
                             ))
                         })
@@ -789,8 +790,7 @@ mod tests {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(1)
                     .spawn_handler(|_| -> std::io::Result<()> {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        Err(std::io::Error::other(
                             "injected",
                         ))
                     })

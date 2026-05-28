@@ -451,6 +451,7 @@ fn test_box_only_nondiag_q_stall_reproducer() {
 /// will return SuboptimalSolution instead of Optimal, failing the assertion below.
 /// That is, this test MUST fail when the fix is removed.
 #[test]
+#[allow(clippy::type_complexity)]
 fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
     use crate::qp::solve_qp_with;
     // Multi-pattern: three different box-only non-diagonal Q problems with known optima.
@@ -518,6 +519,7 @@ fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
 /// Multiple-pattern box-only non-diagonal QP with known optima.
 /// Covers diagonal Q (should always work), near-diagonal, and strongly coupled cases.
 #[test]
+#[allow(clippy::type_complexity)]
 fn test_box_only_nondiag_q_multi_pattern() {
     use crate::qp::solve_qp_with;
 

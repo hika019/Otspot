@@ -85,7 +85,7 @@ fn test_qp_nonconvex_large_diagonal_negative() {
     let rows: Vec<usize> = (0..n).collect();
     let cols: Vec<usize> = (0..n).collect();
     let vals: Vec<f64> = std::iter::once(-1.0_f64)
-        .chain(std::iter::repeat(1.0_f64).take(n - 1))
+        .chain(std::iter::repeat_n(1.0_f64, n - 1))
         .collect();
     let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
     assert!(!check_q_positive_semidefinite(&q));

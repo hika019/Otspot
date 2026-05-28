@@ -82,10 +82,10 @@ fn dfeas_rel_bound(
 fn pfeas_abs(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) -> f64 {
     let m = b.len();
     let mut ax = vec![0.0_f64; m];
-    for j in 0..x.len() {
+    for (j, &x_j) in x.iter().enumerate() {
         if let Ok((rows, vals)) = a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * x[j];
+                ax[row] += vals[k] * x_j;
             }
         }
     }
@@ -137,9 +137,9 @@ fn build_model(data: &LpData<'_>) -> (Model, Vec<Variable>) {
     for k in 0..data.rows.len() {
         row_terms[data.rows[k]].push((data.cols[k], data.vals[k]));
     }
-    for i in 0..m {
+    for (i, row) in row_terms.iter().enumerate() {
         let mut expr = Expression::from_constant(0.0);
-        for &(j, v) in &row_terms[i] {
+        for &(j, v) in row {
             expr = expr + v * vars[j];
         }
         let con = match data.cts[i] {

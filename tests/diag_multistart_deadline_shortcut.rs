@@ -36,6 +36,7 @@ fn build_indef_n(n: usize, bnd: f64) -> QpProblem {
 const TOLERANCE_MS: u128 = 2_000;
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn parallel_path_wallclock_bounded_by_deadline_table_driven() {
     // 4 case × 2 shape = 8 ケース、全 case で wall_clock <= deadline + TOLERANCE。
     let cases: &[(usize, usize, u64)] = &[

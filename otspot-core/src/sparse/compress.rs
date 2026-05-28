@@ -225,6 +225,7 @@ mod tests {
     /// expected output. Failing on a no-op change (reverting to HashMap) is
     /// guaranteed because correctness is checked explicitly.
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_sort_merge_matches_reference_output() {
         // Reference cases: (n_major, n_minor, input, expected_ptr, expected_ind, expected_vals)
         let cases: &[(usize, usize, &[(usize, usize, f64)], &[usize], &[usize], &[f64])] = &[

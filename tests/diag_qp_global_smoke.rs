@@ -6,6 +6,7 @@
 //!   - c = 0 の concave diag QP (cold x=0 が内部勾配 0 で固着)
 //!   - bilinear symmetric (saddle で固着)
 //!   - 制約あり symmetric QP (local 多数)
+//!
 //! Phase 2 multistart は random restart で対称性破壊するが、確率的保証のみ。
 //! Phase 3 spatial B&B は box 分割 + interval 下界 + pruning で **deterministic に**
 //! gap_tol 内まで詰める。

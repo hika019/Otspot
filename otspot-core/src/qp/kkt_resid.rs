@@ -445,7 +445,7 @@ mod tests {
         for yi in [-100.0, -1.0, 0.0, 1.0, 100.0] {
             let ct = vec![Eq];
             let y = vec![yi];
-            let v = dual_sign_violation(&ct, &y, &vec![], &vec![]);
+            let v = dual_sign_violation(&ct, &y, &[], &[]);
             assert_eq!(v, 0.0, "Eq with y={yi} should give 0");
         }
     }
@@ -457,7 +457,7 @@ mod tests {
         // Le y=0.5 (ok), Ge y=0.3 (violation), Eq y=-10 (ok)
         let ct = vec![Le, Ge, Eq];
         let y = vec![0.5, 0.3, -10.0];
-        let v = dual_sign_violation(&ct, &y, &vec![], &vec![]);
+        let v = dual_sign_violation(&ct, &y, &[], &[]);
         // Ge violation: 0.3 / (1 + 0.3) = 0.3/1.3 ≈ 0.2308
         let expected = 0.3 / 1.3;
         assert!((v - expected).abs() < 1e-12, "got {v}, expected {expected}");

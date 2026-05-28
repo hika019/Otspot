@@ -21,11 +21,11 @@ fn pfeas_normalized(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64])
         return 0.0;
     }
     let mut ax = vec![0.0_f64; m];
-    for j in 0..x.len().min(a.ncols()) {
+    for (j, &xj) in x.iter().enumerate().take(a.ncols()) {
         if let Ok((rows, vals)) = a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
                 if row < m {
-                    ax[row] += vals[k] * x[j];
+                    ax[row] += vals[k] * xj;
                 }
             }
         }
@@ -91,7 +91,7 @@ fn make_diagonal_csc(diag: &[f64], nrows: usize, ncols: usize) -> CscMatrix {
     }
     let rows: Vec<usize> = (0..k).collect();
     let cols: Vec<usize> = (0..k).collect();
-    CscMatrix::from_triplets(&rows, &cols, &diag[..k].to_vec(), nrows, ncols).unwrap()
+    CscMatrix::from_triplets(&rows, &cols, &diag[..k], nrows, ncols).unwrap()
 }
 
 fn make_opts(method: SimplexMethod) -> SolverOptions {

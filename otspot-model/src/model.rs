@@ -1616,6 +1616,7 @@ mod tests {
     // GlobalOptimal causes the assert_eq!(proof, LocalOptimal) to FAIL.
     // -----------------------------------------------------------------------
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_model_qp_locally_optimal_proof() {
         // (name, q_diag, bounds, c) — all 2-variable diagonal-Q cases.
         let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
@@ -1665,6 +1666,7 @@ mod tests {
     // causes the assert_eq!(proof, FeasibleUnproven) to FAIL.
     // -----------------------------------------------------------------------
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_model_qp_feasible_unproven_proof() {
         use otspot_core::options::Tolerance;
 

@@ -356,7 +356,7 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
         },
     ];
 
-    let is_basic_4 = vec![false; 5];
+    let is_basic_4 = [false; 5];
     for c in &cases {
         let n = c.trow.len();
         let is_basic = &is_basic_4[..n];

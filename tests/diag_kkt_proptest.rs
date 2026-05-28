@@ -14,6 +14,7 @@
 //! test が **必ず** FAIL する:
 //!   - `sentinel_qp_perturbed_solution_fails_kkt`
 //!   - `sentinel_lp_perturbed_solution_fails_kkt`
+//!
 //! 既知 optimal x* に `SENTINEL_PERTURB=1.0` を加えると KKT max が
 //! `SENTINEL_MIN_KKT=1e-2` 以上に増えることを assert する。
 //!
@@ -39,8 +40,9 @@
 //!   - illscaled: prop_lp_illscaled (48)
 //!   - medium:   prop_lp_medium (24) + prop_convex_qp_medium (24)
 //!   - shape gap: prop_lp_fixed_bound (32) + prop_convex_qp_rank_deficient (32)
-//!                + prop_lp_micro_n1 (24) + prop_convex_qp_micro_n1 (24)
-//!                + prop_nonconvex_constrained (16)
+//!     + prop_lp_micro_n1 (24) + prop_convex_qp_micro_n1 (24)
+//!     + prop_nonconvex_constrained (16)
+//!
 //! 合計 512 ケース。`3dcaf8a` commit msg に記された "440" は誤記、実数は当初 384、
 //! shape gap 補完後 512 (両方とも 440 ではない)。
 
@@ -1098,9 +1100,7 @@ fn sentinel_qp_swapped_bound_duals_changes_kkt() {
     let x_star = vec![0.0; n];
     let y_star: Vec<f64> = Vec::new();
     let mut bd_true = vec![0.0; 2 * n];
-    for i in 0..n {
-        bd_true[i] = 1.0;
-    }
+    bd_true[..n].fill(1.0);
     let mut bd_swapped = vec![0.0; 2 * n];
     for i in 0..n {
         bd_swapped[n + i] = 1.0;

@@ -70,14 +70,14 @@ fn build_pivot_workload(k_artificial: usize, n_decision: usize) -> LpProblem {
 
     // 目的: min Σ c[j] x[j], decision に正コスト、dummy は 0
     let mut c = vec![1.0_f64; n_total];
-    for j in n_decision..n_total {
-        c[j] = 0.0;
+    for cj in c[n_decision..].iter_mut() {
+        *cj = 0.0;
     }
 
     // bounds: decision in [0, 1], dummy 固定 = 0 (lb=ub=0)
     let mut bounds = vec![(0.0_f64, 1.0_f64); n_total];
-    for j in n_decision..n_total {
-        bounds[j] = (0.0, 0.0); // dummy 固定
+    for bj in bounds[n_decision..].iter_mut() {
+        *bj = (0.0, 0.0); // dummy 固定
     }
 
     // 右辺: 全 Eq 行 = 0 (dummy が 0 で吸収、decision 全 0 が一意 feasible)

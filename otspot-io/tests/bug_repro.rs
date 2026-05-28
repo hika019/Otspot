@@ -78,6 +78,7 @@ fn test_ubh1_q_psd_diagnose() {
 ///
 /// Diagnostic test — no assertions; prints KKT residuals and reconstructed duals.
 #[test]
+#[allow(clippy::needless_range_loop)]
 fn test_hs268_dual_residual_diagnose() {
     let path = Path::new("data/maros_meszaros/HS268.QPS");
     if !path.exists() {
