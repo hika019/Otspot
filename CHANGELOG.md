@@ -30,6 +30,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 - **`SolverResult::opt_cert: Option<OptimalCertificate>` 追加**: B&B incumbent の KKT 証明書フィールド (`prove_optimal` が発行、降格時は `None`)。`SolverResult` はソルバ出力型のため通常は受け取るだけだが、フィールド全列挙の struct-literal で構築している場合は `..Default::default()` を併用すること。
 
+### 削除
+
+- **`solve_qp_with_options` 削除**: 0.1.0 から deprecated だった `solve_qp_with_options` を完全削除。代わりに `solve_qp_with` を使用すること。
+
 ### 修正
 
 - **B&B `finalize_proven` の EmptyCol false-demote 修正**: presolve が消去した EmptyCol 変数 (Q 列空・A 列空) を `eliminated_cols` マスクなしで stationarity 検査すると c[j]≠0 の spurious 残差が生じ valid な proven 解が NonconvexLocal に誤降格していた。構造的マスク (`structural_empty_col_mask`) を導入して attempt.rs と同方式で解決。

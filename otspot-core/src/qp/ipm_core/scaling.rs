@@ -48,7 +48,7 @@ fn compute_pfeas_osqp(problem: &QpProblem, x: &[f64]) -> f64 {
     max_v / (1.0 + max_ax.max(max_b))
 }
 
-/// solve_qp_ipm / solve_qp_ippmm 共通の Ruiz スケーリングラッパー。
+/// solve_qp_ippmm 用の Ruiz スケーリングラッパー。
 pub(crate) fn solve_with_ruiz_scaling<F>(
     problem: &QpProblem,
     options: &SolverOptions,

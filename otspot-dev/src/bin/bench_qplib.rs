@@ -1,7 +1,7 @@
 //! QPLIBベンチマーク
 //!
 //! Usage: bench_qplib [data_dir] [--eps <value>] [--timeout <secs>] [--known-optimal <path>]
-//! 指定ディレクトリ内の全 *.qplib ファイルを parse_qplib → solve_qp_with_options で実行し、
+//! 指定ディレクトリ内の全 *.qplib ファイルを parse_qplib → solve_qp_with で実行し、
 //! 結果テーブルを stdout に出力する。
 //!
 //! Maros-Meszaros（QPS形式）とは独立した集計。
