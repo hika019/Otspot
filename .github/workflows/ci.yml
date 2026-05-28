@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release --lib
+      - run: cargo nextest run --release -E 'kind(lib) + kind(bin)'
 
   test-integration:
     name: Tests (integration, real data)
@@ -29,11 +29,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/cache@v4
+        id: cache
         with:
           path: data/
-          key: bench-data-${{ hashFiles('scripts/download_all_bench_data.sh', 'scripts/gen_osqp_bench.py', 'scripts/gen_mpc_qp.py', 'scripts/gen_dense_a_qp.py', 'scripts/gen_nonconvex_qp.py') }}
+          key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
       - name: Install python deps for data generation (cache miss only)
-        run: pip install numpy scipy cvxpy
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
+      - name: Build emps decoder (Netlib LP data 変換用)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
+          cc -o /tmp/emps /tmp/emps.c
       - name: Download CI subset (~1.2 GiB)
         run: bash scripts/download_all_bench_data.sh --ci-subset
       - uses: dtolnay/rust-toolchain@stable

@@ -39,6 +39,13 @@ case "${1:-}" in
   *) echo "usage: $0 [--lp | --qp | --check | --ci-subset [--check]]"; exit 1 ;;
 esac
 
+# Build usage flags string for error messages (MODE "all" → no flags; compound modes → split flags)
+case "$MODE" in
+  all)              USAGE_FLAGS="" ;;
+  ci-subset-check)  USAGE_FLAGS="--ci-subset --check" ;;
+  *)                USAGE_FLAGS="--$MODE" ;;
+esac
+
 check_dir() {
   local dir=$1
   local expect=$2
@@ -62,7 +69,7 @@ check_python_qp_deps() {
     echo "[error] QP bench data 生成に必要な Python pkg (numpy / scipy) が host にない。" >&2
     echo "         Docker で実行 (推奨):" >&2
     echo "           docker run --rm -v \"\$PWD\":/workspace -w /workspace solver-dev \\" >&2
-    echo "             bash scripts/download_all_bench_data.sh${MODE:+ --$MODE}" >&2
+    echo "             bash scripts/download_all_bench_data.sh${USAGE_FLAGS:+ $USAGE_FLAGS}" >&2
     echo "         または host へ install:" >&2
     echo "           pip install numpy scipy cvxpy clarabel" >&2
     echo "         (cvxpy / clarabel は osqp_bench 系 generator のみで必要)" >&2
