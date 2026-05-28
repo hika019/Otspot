@@ -7,7 +7,9 @@
 #
 # agent dispatch 前 / agent 作業冒頭 / reviewer 観点 / lead 定期 audit で使用。
 # 範囲: workspace 全 member crate の src/ (.rs)。tests/ は除外。
-# カウント: 非 test 行 (file 先頭〜最初の `#[cfg(test)]` or `mod tests` の直前まで)。
+# カウント: 非 test 行 = file 先頭〜`mod tests` 宣言の直前まで。
+#   `#[cfg(test)]` が mod tests の直前行にある場合はその行も除く。
+#   ファイル先頭付近の `#[cfg(test)] use ...` 等 test-only 属性は production の一部として扱う。
 
 set -eu
 
@@ -17,12 +19,24 @@ violations=""
 for crate_src in src otspot-core/src otspot-io/src otspot-model/src otspot-dev/src; do
   [ -d "$crate_src" ] || continue
   while IFS= read -r f; do
-    test_start=$(grep -n '^#\[cfg(test)\]\|^mod tests' "$f" 2>/dev/null | head -1 | cut -d: -f1 || true)
-    if [ -n "$test_start" ]; then
-      nontest=$((test_start - 1))
+    # `mod tests` 宣言 (可視性修飾子付きも含む) を test 開始点とする
+    test_mod_line=$(grep -nE '^[[:space:]]*(pub[[:space:]]*(\([^)]+\))?[[:space:]]+)?mod[[:space:]]+tests\b' "$f" 2>/dev/null \
+      | head -1 | cut -d: -f1 || true)
+
+    if [ -n "$test_mod_line" ] && [ "$test_mod_line" -gt 1 ]; then
+      # 直前行が #[cfg(test)] なら開始点を 1 行繰り上げ
+      prev=$(sed -n "$((test_mod_line - 1))p" "$f")
+      case "$prev" in
+        *'#[cfg(test)]'*) test_mod_line=$((test_mod_line - 1)) ;;
+      esac
+    fi
+
+    if [ -n "$test_mod_line" ]; then
+      nontest=$((test_mod_line - 1))
     else
       nontest=$(wc -l < "$f" | tr -d ' ')
     fi
+
     if [ "$nontest" -ge "$THRESHOLD" ]; then
       violations="${violations}${nontest} ${f}"$'\n'
     fi
