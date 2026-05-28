@@ -197,7 +197,7 @@ if [[ "$MODE" == "ci-subset-check" ]]; then
 
   echo "=== CI subset QP ==="
   check_dir data/maros_meszaros      138 || fail=1
-  check_dir data/osqp_bench           62 || fail=1
+  check_dir data/osqp_bench           30 || fail=1  # ci-subset: synthetic only (SuiteSparse 抜き、--all で 62)
   check_dir data/qplib                41 || fail=1
   check_dir data/mpc_qp               64 || fail=1
   check_dir data/miplib_small         20 || fail=1
@@ -282,7 +282,7 @@ if [[ "$MODE" == "ci-subset" ]]; then
 
   check_python_qp_deps
 
-  run_or_skip data/osqp_bench            62  "bash scripts/setup_extra_benches.sh && python3 scripts/gen_osqp_bench.py"
+  run_or_skip data/osqp_bench            30  "bash scripts/setup_extra_benches.sh --no-suitesparse && python3 scripts/gen_osqp_bench.py"
   run_or_skip data/mpc_qp               64   "python3 scripts/gen_mpc_qp.py"
   run_or_skip data/qp_dense_a            8   "python3 scripts/gen_dense_a_qp.py"
   run_or_skip data/qplib_nonconvex      45   "python3 scripts/gen_nonconvex_qp.py"
