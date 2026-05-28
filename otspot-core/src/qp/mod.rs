@@ -131,7 +131,7 @@ pub const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// multistart 内部の各 solve は同じ entry に戻るが options.multistart を None に剥がして
 /// 再入を断ち切る。
 ///
-/// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
+/// Returns [`crate::SolveStatus::NumericalError`] immediately if `options` fails
 /// validation (invalid tolerance, zero threads, etc.).
 pub fn solve_qp_with(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     if options.validate().is_err() {

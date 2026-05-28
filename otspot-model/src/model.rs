@@ -193,8 +193,36 @@ impl Model {
     }
 
     /// Return the name of a variable as given to [`add_var`](Self::add_var).
+    ///
+    /// # Panics
+    /// Panics if `var.index` is out of range. Passing a `Variable` from a
+    /// different model is **unchecked** and may index into unrelated data.
+    /// Use [`try_var_name`](Self::try_var_name) for a checked variant.
     pub fn var_name(&self, var: Variable) -> &str {
         &self.variables[var.index].name
+    }
+
+    /// Return the name of a variable, returning an error instead of panicking.
+    ///
+    /// Returns `Err` if:
+    /// - `var` was created by a different model.
+    /// - `var.index` is out of range for this model's variable list.
+    pub fn try_var_name(&self, var: Variable) -> Result<&str, ModelError> {
+        if var.model_id != self.model_id {
+            return Err(ModelError::InvalidInput(
+                "variable belongs to a different model".to_string(),
+            ));
+        }
+        self.variables
+            .get(var.index)
+            .map(|v| v.name.as_str())
+            .ok_or_else(|| {
+                ModelError::InvalidInput(format!(
+                    "variable index {} out of range (model has {} variables)",
+                    var.index,
+                    self.variables.len()
+                ))
+            })
     }
 
     fn push_var(&mut self, name: &str, lb: f64, ub: f64, kind: VarKind) -> Variable {
@@ -1973,6 +2001,146 @@ mod tests {
         }
         let iv = model.add_int_var("gamma_int", 0.0, 10.0);
         assert_eq!(model.var_name(iv), "gamma_int");
+    }
+
+    // -----------------------------------------------------------------------
+    // try_var_name: checked variant (model_id + index range).
+    //
+    // Sentinel: replacing try_var_name with a no-op that always returns Ok("")
+    // causes the cross-model and out-of-range ERR assertions to FAIL.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn try_var_name_ok_same_model() {
+        let cases: &[(&str, f64, f64)] = &[
+            ("x", 0.0, f64::INFINITY),
+            ("y_var", -1.0, 1.0),
+            ("z_int", 0.0, 10.0),
+        ];
+        let mut model = Model::new("try_var_name_ok");
+        let mut vars = Vec::new();
+        for &(name, lb, ub) in cases {
+            vars.push((model.add_var(name, lb, ub), name));
+        }
+        for (var, expected_name) in &vars {
+            assert_eq!(
+                model.try_var_name(*var).unwrap(),
+                *expected_name,
+                "try_var_name mismatch"
+            );
+            // P3-4: var_name and try_var_name must agree for same-model vars.
+            assert_eq!(
+                model.var_name(*var),
+                model.try_var_name(*var).unwrap(),
+                "var_name and try_var_name must return the same value for '{expected_name}'"
+            );
+        }
+    }
+
+    // P2-2: try_var_name rejects variables from multiple different models.
+    // Table-driven: model_b, model_c, model_d all independently reject model_a's var.
+    // Sentinel: removing the model_id check makes all these Err → Ok, causing FAIL.
+    #[test]
+    fn try_var_name_err_cross_model() {
+        let mut model_a = Model::new("model_a");
+        let x = model_a.add_var("x_in_a", 0.0, 1.0);
+
+        let cases: &[&str] = &["model_b", "model_c", "model_d"];
+        for &name in cases {
+            let m = Model::new(name);
+            let err = m.try_var_name(x).unwrap_err();
+            assert!(
+                matches!(err, ModelError::InvalidInput(_)),
+                "[{name}] expected InvalidInput for cross-model var, got {err:?}"
+            );
+        }
+    }
+
+    // P2-3: try_var_name boundary values — N-1 (last valid), N (exact OOB), usize::MAX.
+    // Sentinel: replacing .get(var.index) with direct indexing would panic on N/MAX.
+    #[test]
+    fn try_var_name_err_index_out_of_range() {
+        let mut model = Model::new("range_check");
+        let x = model.add_var("x", 0.0, 1.0);  // index=0, N=1 variable
+
+        // N-1 = 0: last valid index → Ok.
+        assert!(
+            model.try_var_name(x).is_ok(),
+            "index=0 (N-1) must be Ok"
+        );
+
+        // N = 1: exact out-of-bound → Err.
+        let oob_n = Variable { index: 1, model_id: x.model_id };
+        let err_n = model.try_var_name(oob_n).unwrap_err();
+        assert!(
+            matches!(err_n, ModelError::InvalidInput(_)),
+            "index=N=1: expected InvalidInput, got {err_n:?}"
+        );
+
+        // usize::MAX: extreme out-of-bound → Err.
+        let oob_max = Variable { index: usize::MAX, model_id: x.model_id };
+        let err_max = model.try_var_name(oob_max).unwrap_err();
+        assert!(
+            matches!(err_max, ModelError::InvalidInput(_)),
+            "index=usize::MAX: expected InvalidInput, got {err_max:?}"
+        );
+    }
+
+    #[test]
+    fn var_name_regression_unchecked_still_works() {
+        // Verify existing var_name behaviour is unchanged (regression sentinel).
+        let mut model = Model::new("regression");
+        let cases: &[(&str, f64, f64)] = &[("a", 0.0, 1.0), ("b", 0.0, 2.0), ("c_int", 0.0, 5.0)];
+        let mut pairs = Vec::new();
+        for &(name, lb, ub) in cases {
+            pairs.push((model.add_var(name, lb, ub), name));
+        }
+        for (var, expected) in &pairs {
+            assert_eq!(model.var_name(*var), *expected);
+        }
+    }
+
+    // P2-1: var_name is unchecked — cross-model behavior depends on whether the
+    // foreign Variable's index is in-range for the receiver model.
+    //
+    // Case A: index in-range → silently returns the *wrong* model's variable name.
+    // Case B: index out-of-range → panics (Rust slice bounds check).
+    //
+    // These tests document the hazard warned about in the var_name docstring:
+    // "unchecked and may index into unrelated data".
+
+    #[test]
+    fn var_name_cross_model_in_range_silently_returns_wrong_data() {
+        // Both models have exactly one variable (index=0).
+        // model_a's var has index=0 with the same integer position as model_b's var.
+        // var_name doesn't check model_id, so it reads model_b's slot — wrong data.
+        let mut model_a = Model::new("a");
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0);  // index=0
+
+        let mut model_b = Model::new("b");
+        let _y_b = model_b.add_var("y_in_b", 0.0, 1.0);  // index=0
+
+        // var_name is unchecked: x_a.index=0 is in-range for model_b,
+        // so it returns model_b's variable name — NOT "x_in_a".
+        let returned = model_b.var_name(x_a);
+        assert_ne!(returned, "x_in_a", "unchecked: cross-model var_name returns unrelated data");
+        assert_eq!(returned, "y_in_b", "unchecked: returns model_b's var at the same index");
+    }
+
+    // Case B: cross-model var whose index is out-of-range for the receiver panics.
+    // Sentinel: using .get() in var_name instead of direct indexing would remove
+    // the panic, causing this #[should_panic] test to FAIL.
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn var_name_cross_model_out_of_range_panics() {
+        let mut model_a = Model::new("a_2var");
+        let _x0 = model_a.add_var("x0", 0.0, 1.0);  // index=0
+        let x1 = model_a.add_var("x1", 0.0, 1.0);   // index=1
+
+        // model_b has only 1 variable (len=1). x1.index=1 is out of range → panic.
+        let mut model_b = Model::new("b_1var");
+        let _y_b = model_b.add_var("y_in_b", 0.0, 1.0);
+
+        let _ = model_b.var_name(x1);
     }
 
     // -----------------------------------------------------------------------

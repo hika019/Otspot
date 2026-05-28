@@ -203,7 +203,8 @@ mod tests {
             }
 
             let is_test_attr = trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]");
-            let has_should_panic = trimmed.contains("#[should_panic]");
+            // Match both `#[should_panic]` and `#[should_panic(expected = "...")]`.
+            let has_should_panic = trimmed.contains("#[should_panic");
 
             if !is_test_attr && !has_should_panic {
                 i += 1;
@@ -218,7 +219,12 @@ mod tests {
             let window = (i + 10).min(n) - (i + 1);
             for (j, t) in lines.iter().enumerate().skip(i + 1).take(window) {
                 let t = t.trim();
-                if t.contains("#[should_panic]") {
+                // Skip comment lines so `// #[should_panic(...)]` is not mistaken
+                // for the real attribute.
+                if t.starts_with("//") {
+                    continue;
+                }
+                if t.contains("#[should_panic") {
                     should_panic_seen = true;
                 }
                 if t.starts_with("fn ") || t.starts_with("async fn ") || t.starts_with("pub fn ") {
@@ -413,5 +419,27 @@ mod tests {
             }
             panic!("{msg}");
         }
+    }
+
+    // ── Unit tests for scanner helpers ──────────────────────────────────────
+
+    /// Sentinel: a `// #[should_panic(...)]` comment above a `#[test]` function
+    /// must NOT suppress the observation-only violation.  Before the fix the
+    /// look-ahead treated it as the real attribute and silently skipped the body.
+    #[test]
+    fn scan_observation_only_tests_ignores_commented_should_panic() {
+        let content = r#"#[test]
+// #[should_panic(expected = "boom")]
+fn fake_should_panic() {
+    let _x = 1;
+}
+"#;
+        let violations = scan_observation_only_tests(content);
+        assert!(
+            violations.iter().any(|(_, name)| name == "fake_should_panic"),
+            "commented #[should_panic] must not suppress observation-only detection; \
+             violations: {:?}",
+            violations
+        );
     }
 }

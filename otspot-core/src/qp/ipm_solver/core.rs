@@ -27,11 +27,17 @@ use warm_start::translate_warm_start_for_presolve;
 pub type InnerSolver = fn(&QpProblem, &SolverOptions) -> crate::problem::SolverResult;
 
 /// 1 回の IPPMM 呼出 + 後処理。元空間の解と残差を返す。
+///
+/// Returns an [`IpmOutcome`] with `numerical_failure = true` immediately if
+/// `opts` fails validation (negative timeout, zero threads, etc.).
 pub fn run_ipm(
     orig_problem: &QpProblem,
     presolve_result: &QpPresolveResult,
     opts: &SolverOptions,
 ) -> IpmOutcome {
+    if opts.validate().is_err() {
+        return IpmOutcome { numerical_failure: true, ..IpmOutcome::empty() };
+    }
     run_ipm_with(
         orig_problem,
         presolve_result,

@@ -167,7 +167,13 @@ fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
 }
 
 /// Q が対角なら s_j=1/√Q_jj の column scaling で Q'_jj=1 に均等化し、解後 x_orig=D·x_scaled で復元。
+///
+/// Returns [`SolverResult`] with [`SolveStatus::NumericalError`] immediately if
+/// `options` fails validation (negative timeout, zero threads, etc.).
 pub fn solve_ipm(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+    if options.validate().is_err() {
+        return SolverResult::numerical_error();
+    }
     // `eliminated_cols` is structural (q-diag column scaling preserves which columns
     // are A-empty/Q-empty and which presolve removes), so the mask derived inside
     // `solve_ipm_with_runner` on the scaled problem is valid for the guard on the
@@ -555,6 +561,21 @@ fn finalize_outcome(
     }
 
     let timed_out = cancelled || total_deadline.is_some_and(|d| Instant::now() >= d);
+
+    // numerical_failure は run_ipm の validate ガードまたは内部ソルバー失敗が
+    // 明示セットする。solution.is_empty() に依存せず直接 NumericalError へ map
+    // することで、numerical_failure=true かつ solution 非空の誤分類を防ぐ。
+    if outcome.numerical_failure {
+        return SolverResult {
+            status: SolveStatus::NumericalError,
+            objective: f64::INFINITY,
+            solution: Vec::new(),
+            dual_solution: Vec::new(),
+            bound_duals: Vec::new(),
+            iterations: outcome.iterations,
+            ..Default::default()
+        };
+    }
 
     if outcome.solution.is_empty() {
         let status = if timed_out {
@@ -1063,6 +1084,42 @@ mod tests {
             result.status,
             crate::problem::SolveStatus::Optimal,
             "有効な dual は prove_optimal を通過し Optimal が返るべき"
+        );
+    }
+
+    /// finalize_outcome は numerical_failure=true を solution 非空でも NumericalError へ map する。
+    ///
+    /// **Sentinel**: `finalize_outcome` の `numerical_failure` 明示チェックを削除すると、
+    /// non-empty solution は `solution.is_empty()` を通過し `satisfies_eps` 判定に進む。
+    /// `numerical_failure=true` は `satisfies_eps` を false にするため `SuboptimalSolution` が返り、
+    /// このテストは FAIL する。
+    #[test]
+    fn finalize_outcome_numerical_failure_maps_to_numerical_error() {
+        let prob = make_simple_eq_qp();
+        let view = ProblemView::from_problem(&prob);
+        // numerical_failure=true だが solution は非空 — solution.is_empty() では捕捉されない。
+        let outcome = IpmOutcome {
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![0.0, 0.0],
+            objective: 1.0,
+            iterations: 3,
+            kkt_residual_rel: 0.0,
+            primal_residual_rel: 0.0,
+            bound_violation: 0.0,
+            complementarity_residual_rel: 0.0,
+            duality_gap_rel: 0.0,
+            numerical_failure: true,
+            infeasibility_status: None,
+            is_locally_optimal: false,
+            postsolve_krylov_ir_skipped: false,
+            timing: None,
+        };
+        let result = finalize_outcome(outcome, 1e-6, 1, None, false, &view);
+        assert_eq!(
+            result.status,
+            crate::problem::SolveStatus::NumericalError,
+            "numerical_failure=true は solution 非空でも NumericalError でなければならない",
         );
     }
 

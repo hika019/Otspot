@@ -1,11 +1,11 @@
 //! Proof-carrying certificate types for solver outcomes.
 //!
-//! An [`OptimalCertificate`] can only be obtained by running [`prove_optimal`]
+//! An [`OptimalCertificate`] can only be obtained by running [`crate::qp::certificate::prove_optimal`]
 //! (defined in `crate::qp::certificate`), which verifies all KKT conditions.
 //! Holding a certificate is a proof token: it is impossible to construct one
 //! without passing the full verifier.
 
-/// KKT optimality certificate — all fields private, minted only by [`prove_optimal`].
+/// KKT optimality certificate — all fields private, minted only by [`crate::qp::certificate::prove_optimal`].
 ///
 /// Construction is only possible via the `pub(crate) new` method called from
 /// `crate::qp::certificate::prove_optimal`. External code cannot build this
@@ -65,7 +65,7 @@ impl OptimalCertificate {
     pub fn tol(&self) -> f64 { self.tol }
 }
 
-/// Reason why [`prove_optimal`] failed to issue an [`OptimalCertificate`].
+/// Reason why [`crate::qp::certificate::prove_optimal`] failed to issue an [`OptimalCertificate`].
 ///
 /// Contains the observed residuals and the names of the conditions that exceeded `tol`.
 #[derive(Debug, Clone)]
