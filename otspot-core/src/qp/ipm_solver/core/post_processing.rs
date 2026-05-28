@@ -320,6 +320,7 @@ fn build_view<'a>(orig_problem: &'a QpProblem, eliminated_cols: &'a [bool]) -> P
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod gate_predicate_tests {
     use super::{build_view, kkt_already_passes, kkt_residual_rel, primal_residual_rel};
     use crate::options::SolverOptions;

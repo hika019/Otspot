@@ -251,10 +251,10 @@ fn collect_all() -> Vec<ProbeRecord> {
 /// status=Optimal/LocallyOptimal を主張した解について:
 /// - primal feasibility: `prim < EPS_KKT` を強制 (解空間内必須)
 /// - complementarity:    `comp_* < EPS_KKT` を強制
-/// - stationarity:       LocallyOptimal のみ `stat < EPS_KKT` を強制。
-///                       Optimal は WARN log のみ (Q非PSD で solver が Optimal を
-///                       主張する経路には unscale 後 bound_dual 復元の pre-existing
-///                       不整合があり、Phase 1A scope 外として記録)
+/// - stationarity: LocallyOptimal のみ `stat < EPS_KKT` を強制。
+///   Optimal は WARN log のみ (Q非PSD で solver が Optimal を主張する経路には
+///   unscale 後 bound_dual 復元の pre-existing 不整合あり、Phase 1A scope 外)
+///
 /// status=SuboptimalSolution/Timeout/その他は honest non-convergence 申告として
 /// assert 除外し、log のみ。
 #[test]

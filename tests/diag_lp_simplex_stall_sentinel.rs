@@ -134,9 +134,9 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
             vals.push(v);
         }
     }
-    for j in 0..n {
+    for xj in x_star.iter_mut() {
         lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        x_star[j] = ((lcg >> 33) & 0xFF) as f64 / 256.0; // ∈ [0,1)
+        *xj = ((lcg >> 33) & 0xFF) as f64 / 256.0; // ∈ [0,1)
     }
     let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
 

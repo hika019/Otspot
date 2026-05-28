@@ -912,12 +912,14 @@ mod tests {
         use crate::presolve::RuizScaler;
         let sf = crate::simplex::build_standard_form(lp);
         let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
-        let mut opts = SolverOptions::default();
-        opts.use_lp_crash_basis = use_crash;
-        opts.timeout_secs = Some(deadline_secs);
-        opts.max_etas = crate::options::default_max_etas(sf.m);
-        opts.deadline = Some(std::time::Instant::now()
-            + std::time::Duration::from_secs_f64(deadline_secs));
+        let opts = SolverOptions {
+            use_lp_crash_basis: use_crash,
+            timeout_secs: Some(deadline_secs),
+            max_etas: crate::options::default_max_etas(sf.m),
+            deadline: Some(std::time::Instant::now()
+                + std::time::Duration::from_secs_f64(deadline_secs)),
+            ..Default::default()
+        };
 
         super::crash_probe::clear();
         let result = super::big_m_cold_start(&sf, lp, &opts, &a, &b, &c, &row_scale, &col_scale);
@@ -986,7 +988,7 @@ mod tests {
         let b: Vec<f64> = (0..m).map(|i| if i < n_eq { 1.0 } else { 0.5 }).collect();
         let c: Vec<f64> = (0..n).map(|_| (next() + 1.0) * 0.5).collect();
         let mut ct = vec![ConstraintType::Eq; n_eq];
-        ct.extend(std::iter::repeat(ConstraintType::Ge).take(n_ge));
+        ct.extend(std::iter::repeat_n(ConstraintType::Ge, n_ge));
         let bounds = vec![(0.0_f64, 10.0_f64); n];
         LpProblem::new_general(c, a, b, ct, bounds, None).unwrap()
     }

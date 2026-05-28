@@ -13,7 +13,7 @@
 //! - `klein1.QPS`  小型 infeasible
 //! - `klein2.QPS`  中型 infeasible
 //! - `klein3.QPS`  大型 infeasible (88 × 994、Phase I cycling で
-//!                  60s timeout 内に Infeasible 検出に失敗していた症状)
+//!   60s timeout 内に Infeasible 検出に失敗していた症状)
 //!
 //! ## 期待挙動 (TDD GREEN 基準)
 //!

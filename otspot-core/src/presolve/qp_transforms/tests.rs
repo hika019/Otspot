@@ -196,7 +196,7 @@ fn test_kahan_add_eliminates_sequential_accumulation_error() {
     // 真値 (DD)
     let mut sum_dd = TwoFloat::from(1234.5);
     for &v in &vs {
-        sum_dd = sum_dd + TwoFloat::from(v);
+        sum_dd += TwoFloat::from(v);
     }
     let truth = f64::from(sum_dd);
 
@@ -258,7 +258,7 @@ fn test_apply_fixed_variable_kahan_accumulation_matches_dd() {
     // DD 真値
     let mut b_true_dd = TwoFloat::from(1000.0);
     for j in 0..n {
-        b_true_dd = b_true_dd - TwoFloat::new_mul(1.0 + j as f64, 0.5 + (j as f64) * 0.01);
+        b_true_dd -= TwoFloat::new_mul(1.0 + j as f64, 0.5 + (j as f64) * 0.01);
     }
     let b_true = f64::from(b_true_dd);
 

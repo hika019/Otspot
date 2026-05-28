@@ -21,11 +21,11 @@ fn build_degenerate_eq_model(n_eq_zero: usize, value_last: f64, scale_mix: bool)
         .map(|i| model.add_var(&format!("x{}", i), 0.0, f64::INFINITY))
         .collect();
 
-    for i in 0..n_eq_zero {
+    for (i, &vi) in vars[..n_eq_zero].iter().enumerate() {
         let coeff = if scale_mix && i == 0 { 1e3 }
                     else if scale_mix && i == 1 { 1e-3 }
                     else { 1.0 };
-        model.add_constraint(constraint!((coeff * vars[i]) == 0.0));
+        model.add_constraint(constraint!((coeff * vi) == 0.0));
     }
     let last = vars[n_eq_zero];
     model.add_constraint(constraint!((1.0 * last) == value_last));
@@ -94,8 +94,8 @@ fn bug5e_large_b_scale_degenerate() {
     let vars: Vec<_> = (0..6)
         .map(|i| model.add_var(&format!("x{}", i), 0.0, f64::INFINITY))
         .collect();
-    for i in 0..5 {
-        model.add_constraint(constraint!((1.0 * vars[i]) == 0.0));
+    for &vi in vars[..5].iter() {
+        model.add_constraint(constraint!((1.0 * vi) == 0.0));
     }
     let x5 = vars[5];
     model.add_constraint(constraint!((1.0 * x5) == 1e6));

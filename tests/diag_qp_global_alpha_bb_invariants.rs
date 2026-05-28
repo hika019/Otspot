@@ -97,9 +97,9 @@ fn eval_l(p: &QpProblem, x: &[f64], alpha: f64) -> f64 {
     let two_alpha_xx: f64 = 2.0 * alpha * x.iter().map(|v| v * v).sum::<f64>();
     let mut cmod_x: f64 = 0.0;
     let mut offset_extra: f64 = 0.0;
-    for i in 0..p.num_vars {
+    for (i, &x_i) in x.iter().enumerate().take(p.num_vars) {
         let (l, u) = p.bounds[i];
-        cmod_x += (p.c[i] - alpha * (l + u)) * x[i];
+        cmod_x += (p.c[i] - alpha * (l + u)) * x_i;
         offset_extra += alpha * l * u;
     }
     0.5 * (xqx + two_alpha_xx) + cmod_x + p.obj_offset + offset_extra

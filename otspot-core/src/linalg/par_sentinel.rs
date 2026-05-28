@@ -142,6 +142,7 @@ fn faer_par_speedup_arrowhead_pd() {
 /// arrowhead PD 上三角を構築する。
 /// - 最初 `tip` 列: 全行と coupling (= dense tip → 完全 fill-in trigger)
 /// - 残り n-tip 列: 対角のみ
+///
 /// AMD なしで identity perm 経路。dense PSD と異なる supernodal 構造を生む。
 fn build_arrowhead_pd_upper(n: usize, tip: usize, seed: u64) -> CscMatrix {
     let mut state = seed.max(1);
@@ -211,7 +212,7 @@ fn rayon_pool_active_count(n: usize) -> usize {
         .num_threads(n)
         .build()
         .expect("ThreadPool build")
-        .install(|| rayon::current_num_threads())
+        .install(rayon::current_num_threads)
 }
 
 /// table-driven 規模違い: 小規模・中規模・大規模で `solver_par_from_threads(8)` が

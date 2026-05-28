@@ -91,14 +91,14 @@ fn build_ill_scaled_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> L
     let mut a_cols: Vec<usize> = Vec::new();
     let mut a_vals: Vec<f64> = Vec::new();
 
-    for i in 0..n_flow {
+    for (i, &scale) in flow_scale[..n_flow].iter().enumerate() {
         a_rows.push(i);
         a_cols.push(i);
-        a_vals.push(flow_scale[i]);
+        a_vals.push(scale);
     }
     for h in 0..n_hub {
-        for i in 0..n_flow {
-            let v = (0.01 + 0.02 * (next(&mut seed) + 1.0) * 0.5) * flow_scale[i];
+        for (i, &scale) in flow_scale[..n_flow].iter().enumerate() {
+            let v = (0.01 + 0.02 * (next(&mut seed) + 1.0) * 0.5) * scale;
             a_rows.push(i);
             a_cols.push(n_flow + h);
             a_vals.push(v);

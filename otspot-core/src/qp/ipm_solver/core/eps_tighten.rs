@@ -69,6 +69,7 @@ pub(super) fn tighten_ipm_eps_for_presolve_scale(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod eps_tighten_tests {
     use super::*;
     use crate::options::{IpmOptions, SolverOptions, Tolerance};

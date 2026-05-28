@@ -380,7 +380,7 @@ fn fill_in_budget_blocks_high_fill() {
     }
     let m = 1 + n_rows_extra;
     let mut cts = vec![ConstraintType::Eq];
-    cts.extend(std::iter::repeat(ConstraintType::Le).take(n_rows_extra));
+    cts.extend(std::iter::repeat_n(ConstraintType::Le, n_rows_extra));
     let mut b = vec![8.0];
     b.extend((1..=n_rows_extra).map(|k| k as f64));
     let bounds = vec![(0.0, 10.0); n_cols];

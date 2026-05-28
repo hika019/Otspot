@@ -608,10 +608,7 @@ pub(crate) fn wrap_to_legacy(bsf: &BoundedStandardForm) -> StandardForm {
         trip_cols.push(slack_col);
         trip_vals.push(slack_coeff);
 
-        if slack_coeff > 0.0 {
-            initial_basis.push(slack_col);
-            needs_artificial.push(false);
-        } else if b_new.abs() <= PIVOT_TOL {
+        if slack_coeff > 0.0 || b_new.abs() <= PIVOT_TOL {
             initial_basis.push(slack_col);
             needs_artificial.push(false);
         } else {
@@ -624,7 +621,7 @@ pub(crate) fn wrap_to_legacy(bsf: &BoundedStandardForm) -> StandardForm {
     let a = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m_ext, n_total).unwrap();
 
     let mut c = bsf.c.clone();
-    c.extend(std::iter::repeat(0.0).take(n_ub));
+    c.extend(std::iter::repeat_n(0.0, n_ub));
 
     let orig_var_info = bsf
         .orig_var_info

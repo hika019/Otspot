@@ -1268,7 +1268,7 @@ mod cleanup_comp_tests {
         for (i, (ct, b, ax, expected)) in cases.iter().enumerate() {
             let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
             let lp = LpProblem::new_general(
-                vec![0.0], a, vec![*b], vec![ct.clone()],
+                vec![0.0], a, vec![*b], vec![*ct],
                 vec![(f64::NEG_INFINITY, f64::INFINITY)], None,
             ).unwrap();
             let got = is_row_nonbinding(&lp, 0, &[*ax]);

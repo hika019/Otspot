@@ -59,7 +59,7 @@ fn diag_cycle_must_reach_known_objective() {
         (tb.presolve_us + tb.solve_us + tb.postsolve_us) as f64 / 1000.0,
     );
 
-    const KNOWN_OBJ: f64 = -5.2263930248924400e+00;
+    const KNOWN_OBJ: f64 = -5.226_393_024_892_44;
     const REL_TOL: f64 = 1.0e-4;
 
     assert_eq!(

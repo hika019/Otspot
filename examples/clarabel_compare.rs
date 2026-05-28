@@ -161,12 +161,7 @@ fn main() {
         cones.push(SupportedConeT::NonnegativeConeT(n_le_ge + n_lb + n_ub));
     }
 
-    let mut settings = DefaultSettings::default();
-    settings.verbose = false;
-    settings.tol_gap_abs = 1e-9;
-    settings.tol_gap_rel = 1e-9;
-    settings.tol_feas = 1e-9;
-    settings.max_iter = 2000;
+    let settings = DefaultSettings { verbose: false, tol_gap_abs: 1e-9, tol_gap_rel: 1e-9, tol_feas: 1e-9, max_iter: 2000, ..Default::default() };
 
     println!("\nSolving with Clarabel (eps=1e-9)...");
     let mut solver = DefaultSolver::new(&p_clar, &prob.c, &a_clar, &b_clar, &cones, settings).expect("Clarabel new");

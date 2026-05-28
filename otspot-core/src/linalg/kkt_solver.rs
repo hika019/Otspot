@@ -1069,7 +1069,7 @@ mod tests {
         let rhs_norm = rhs.iter().fold(0.0_f64, |a, &v| a + v * v).sqrt();
 
         // η = 0.1 で IR=0 (基準)
-        let mut solver_no_ir = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 0);
+        let solver_no_ir = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 0);
         let mut sol_no_ir = vec![0.0_f64; dim];
         let _ = solver_no_ir.solve(&rhs, &mut sol_no_ir, None);
         let mut residual_no_ir = vec![0.0_f64; dim];
@@ -1081,7 +1081,7 @@ mod tests {
         let rel_no_ir = r_no_ir / rhs_norm;
 
         // η = 0.1 で IR=2 (理論上 η^3 = 1e-3 まで)
-        let mut solver_ir2 = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 2);
+        let solver_ir2 = PreconditionedMinres::with_block_diag_inexact(k.clone(), n, 0.1, 2);
         let mut sol_ir2 = vec![0.0_f64; dim];
         let _ = solver_ir2.solve(&rhs, &mut sol_ir2, None);
         let mut residual_ir2 = vec![0.0_f64; dim];

@@ -617,8 +617,8 @@ mod tests {
             .expect("n=8 dense bilinear must solve");
         assert!(lb.is_finite(), "n=8 lb must be finite, got {lb}");
         // x=1 ベクトル等の corner 評価で valid underestimator を確認
-        let qx = p.q.mat_vec_mul(&vec![1.0; N]).unwrap();
-        let xqx: f64 = vec![1.0; N].iter().zip(qx.iter()).map(|(a, b)| a * b).sum();
+        let qx = p.q.mat_vec_mul(&[1.0; N]).unwrap();
+        let xqx: f64 = [1.0; N].iter().zip(qx.iter()).map(|(a, b)| a * b).sum();
         let f_corner = 0.5 * xqx;
         assert!(
             lb <= f_corner + 1e-5,

@@ -2,6 +2,8 @@
 //! regression guard。perold は postsolve dual 復元の代表 canary。
 
 use otspot::io::qps::parse_qps;
+
+type ViolEntry = (usize, f64, f64, f64, f64, &'static str, f64, f64, f64);
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
 use otspot::qp::{solve_qp_with, QpProblem};
@@ -12,8 +14,7 @@ fn dfeas_abs_rel(prob: &QpProblem, rc: &[f64]) -> (f64, f64) {
     let n = prob.c.len().min(rc.len());
     let mut dfeas_abs = 0.0_f64;
     let mut dfeas_rel = 0.0_f64;
-    for j in 0..n {
-        let r = rc[j];
+    for (j, &r) in rc.iter().enumerate().take(n) {
         let viol = f64::max(0.0, -r);
         dfeas_abs = dfeas_abs.max(viol);
         let scale = 1.0 + r.abs() + prob.c[j].abs();
@@ -185,7 +186,7 @@ fn perold_diagnostic_dump_worst_violations() {
     let n = prob.c.len();
 
     // 違反列を集めて top 10 を print
-    let mut viols: Vec<(usize, f64, f64, f64, f64, &'static str, f64, f64, f64)> = Vec::new();
+    let mut viols: Vec<ViolEntry> = Vec::new();
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
@@ -319,7 +320,7 @@ fn greenbea_diagnostic_dump_worst_violations() {
     let n = prob.c.len();
     let m = prob.num_constraints;
 
-    let mut viols: Vec<(usize, f64, f64, f64, f64, &'static str, f64, f64, f64)> = Vec::new();
+    let mut viols: Vec<ViolEntry> = Vec::new();
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;

@@ -20,19 +20,19 @@ fn max_violation_lp(x: &[f64], prob: &LpProblem) -> f64 {
     let m = prob.num_constraints;
     let n = prob.num_vars.min(x.len());
     let mut ax = vec![0.0f64; m];
-    for j in 0..n {
+    for (j, &x_j) in x.iter().enumerate().take(n) {
         if let Ok((rows, vals)) = prob.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
-                ax[row] += vals[k] * x[j];
+                ax[row] += vals[k] * x_j;
             }
         }
     }
     let mut max_viol = 0.0f64;
-    for i in 0..m {
+    for (i, &ax_i) in ax.iter().enumerate() {
         let viol = match prob.constraint_types[i] {
-            ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-            ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-            ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
+            ConstraintType::Eq => (ax_i - prob.b[i]).abs(),
+            ConstraintType::Le => (ax_i - prob.b[i]).max(0.0),
+            ConstraintType::Ge => (prob.b[i] - ax_i).max(0.0),
             _ => 0.0,
         };
         if viol > max_viol {

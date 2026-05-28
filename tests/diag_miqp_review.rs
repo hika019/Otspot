@@ -132,7 +132,7 @@ fn offdiag_psd_bruteforce_cases() {
     // NOTE: the box-only / no-linear-constraint case (continuous opt at (2,2), obj -12)
     // is split out into `miqp_boxonly_offdiag_relaxation_stall_repro` below because it
     // currently FAILS (P1 silent-wrong: the QP IPM stalls on box-only off-diagonal QPs).
-    let cases = vec![
+    let cases = [
         // coupling + Ge constraint forcing off-corner.
         MiqpCase {
             q: vec![vec![4.0, 2.0], vec![2.0, 4.0]],
@@ -237,9 +237,9 @@ fn fuzz_boxonly_offdiag_miqp_optimum_and_status() {
     for trial in 0..120 {
         let n = rng.range(2, 3) as usize;
         let mut l = vec![vec![0.0; n]; n];
-        for i in 0..n {
-            for j in 0..=i {
-                l[i][j] = rng.unit() * 2.0 - 1.0;
+        for (i, row) in l.iter_mut().enumerate() {
+            for val in &mut row[..=i] {
+                *val = rng.unit() * 2.0 - 1.0;
             }
         }
         let mut q = vec![vec![0.0; n]; n];
@@ -283,25 +283,22 @@ fn fuzz_boxonly_offdiag_miqp_optimum_and_status() {
 #[test]
 fn fuzz_offdiag_psd_miqp() {
     use ConstraintType::*;
-    let mut rng = Lcg(0xC0FFEE_1234_5678);
+    let mut rng = Lcg(0xC0FFEE12345678);
     let mut feasible = 0;
     let cfg = MipConfig::default();
     for trial in 0..150 {
         let n = rng.range(2, 3) as usize;
         // Q = L Lᵀ + ridge·I → symmetric PSD, well-conditioned.
         let mut l = vec![vec![0.0; n]; n];
-        for i in 0..n {
-            for j in 0..=i {
-                l[i][j] = rng.unit() * 2.0 - 1.0;
+        for (i, row) in l.iter_mut().enumerate() {
+            for val in &mut row[..=i] {
+                *val = rng.unit() * 2.0 - 1.0;
             }
         }
         let mut q = vec![vec![0.0; n]; n];
         for i in 0..n {
             for j in 0..n {
-                let mut s = 0.0;
-                for k in 0..n {
-                    s += l[i][k] * l[j][k];
-                }
+                let s: f64 = l[i].iter().zip(l[j].iter()).map(|(a, b)| a * b).sum();
                 q[i][j] = s;
             }
             q[i][i] += 0.5; // ridge: strictly PD, well-conditioned

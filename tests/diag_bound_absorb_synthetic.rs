@@ -179,11 +179,11 @@ fn bound_absorb_interior_skip() {
 
     // 両 col とも interior-fixed → BoundAbsorb None、rc == raw が契約。
     let raw = raw_rc(&lp, &r.dual_solution);
-    for j in 0..lp.num_vars {
+    for (j, &raw_j) in raw.iter().enumerate() {
         assert!(
-            (r.reduced_costs[j] - raw[j]).abs() < RC_RAW_MATCH_TOL,
+            (r.reduced_costs[j] - raw_j).abs() < RC_RAW_MATCH_TOL,
             "interior-skip 違反: rc[x{}]={} != raw={} (clamp 誤適用)",
-            j + 1, r.reduced_costs[j], raw[j],
+            j + 1, r.reduced_costs[j], raw_j,
         );
     }
     let dfr = bench_dfeas(&lp, &r.solution, &r.reduced_costs);
@@ -220,11 +220,11 @@ fn bound_absorb_truly_fixed_skip() {
 
     // x1, x2 とも元から fixed → BoundAbsorb 早期 continue、rc == raw が契約。
     let raw = raw_rc(&lp, &r.dual_solution);
-    for j in 0..2 {
+    for (j, &raw_j) in raw.iter().enumerate().take(2) {
         assert!(
-            (r.reduced_costs[j] - raw[j]).abs() < RC_RAW_MATCH_TOL,
+            (r.reduced_costs[j] - raw_j).abs() < RC_RAW_MATCH_TOL,
             "truly_fixed-skip 違反: rc[x{}]={} != raw={} (clamp 誤適用)",
-            j + 1, r.reduced_costs[j], raw[j],
+            j + 1, r.reduced_costs[j], raw_j,
         );
     }
     let dfr = bench_dfeas(&lp, &r.solution, &r.reduced_costs);

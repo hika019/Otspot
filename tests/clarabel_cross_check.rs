@@ -17,12 +17,14 @@ use clarabel_helper::{build_clarabel, compute_internal_obj, solve_clarabel};
 /// より厳しい tol + iter で本当に「真の最適」が本ソルバに近いか確認する。
 fn solve_clarabel_strict(prob: &otspot::QpProblem) -> Option<(f64, Vec<f64>, String)> {
     let (p, q, a, b, cones) = build_clarabel(prob);
-    let mut settings = DefaultSettings::default();
-    settings.verbose = false;
-    settings.tol_gap_abs = 1e-12;
-    settings.tol_gap_rel = 1e-12;
-    settings.tol_feas = 1e-12;
-    settings.max_iter = 100_000;
+    let settings = DefaultSettings::<f64> {
+        verbose: false,
+        tol_gap_abs: 1e-12,
+        tol_gap_rel: 1e-12,
+        tol_feas: 1e-12,
+        max_iter: 100_000,
+        ..Default::default()
+    };
     let mut solver = DefaultSolver::new(&p, &q, &a, &b, &cones, settings).ok()?;
     solver.solve();
     Some((solver.info.cost_primal, solver.solution.x.clone(), format!("{:?} iters={}", solver.info.status, solver.info.iterations)))
@@ -142,16 +144,15 @@ fn max_violation_dd(prob: &QpProblem, x: &[f64]) -> f64 {
     use twofloat::TwoFloat;
     let m = prob.num_constraints;
     let mut ax = vec![TwoFloat::from(0.0); m];
-    for col in 0..prob.num_vars {
-        let xc = x[col];
+    for (col, &xc) in x.iter().enumerate().take(prob.num_vars) {
         for k in prob.a.col_ptr()[col]..prob.a.col_ptr()[col + 1] {
             let r = prob.a.row_ind()[k];
-            ax[r] = ax[r] + TwoFloat::new_mul(prob.a.values()[k], xc);
+            ax[r] += TwoFloat::new_mul(prob.a.values()[k], xc);
         }
     }
     let mut mv = 0.0_f64;
-    for i in 0..m {
-        let axi = f64::from(ax[i]);
+    for (i, ax_i) in ax.iter().enumerate() {
+        let axi = f64::from(ax_i);
         let v = match prob.constraint_types[i] {
             ConstraintType::Ge => (prob.b[i] - axi).max(0.0),
             ConstraintType::Le => (axi - prob.b[i]).max(0.0),

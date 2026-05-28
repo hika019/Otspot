@@ -623,6 +623,7 @@ mod tests {
     /// indefinite 判定し、δ_ic > 0 を返すこと。複数 data pattern。
     /// no-op proof: `is_q_psd_by_cholesky` の shift を 0 に戻すと FAIL。
     #[test]
+    #[allow(clippy::type_complexity)]
     fn sentinel_inertia_zero_diag_indefinite_multi_pattern() {
         // (label, n, entries, expected_min_delta)
         let cases: &[(&str, usize, &[(usize, usize, f64)], f64)] = &[
@@ -651,6 +652,7 @@ mod tests {
     /// 真の PSD/PD は perturbation 後も δ_ic=0 を維持。
     /// shift が大きすぎて全 PSD に過剰補正を出さないことを確認。
     #[test]
+    #[allow(clippy::type_complexity)]
     fn sentinel_inertia_psd_no_over_correction() {
         // (label, n, entries)
         let psd_cases: &[(&str, usize, &[(usize, usize, f64)])] = &[

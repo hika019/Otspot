@@ -3,7 +3,7 @@
 //! Included via `#[path = "helpers/clarabel_utils.rs"]` in integration tests
 //! that need to run Clarabel as a reference solver.  Not a standalone test file.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::field_reassign_with_default, clippy::type_complexity)]
 
 use otspot::problem::ConstraintType;
 use otspot::QpProblem;

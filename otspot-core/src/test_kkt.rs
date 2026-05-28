@@ -128,9 +128,7 @@ pub fn assert_solver_invariants_lp(result: &crate::problem::SolverResult, lp: &L
 /// shows up in failure messages so tests calling this twice with different
 /// settings can be disambiguated.
 pub fn assert_kkt_optimal(lp: &LpProblem, expected_obj: f64, label: &'static str) {
-    let mut opts = SolverOptions::default();
-    opts.presolve = true;
-    opts.timeout_secs = Some(MINI_TIMEOUT_SECS);
+    let opts = SolverOptions { presolve: true, timeout_secs: Some(MINI_TIMEOUT_SECS), ..Default::default() };
     assert_kkt_optimal_with(lp, expected_obj, label, &opts);
 }
 

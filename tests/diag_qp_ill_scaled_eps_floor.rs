@@ -33,22 +33,22 @@ fn lcg_unit(seed: &mut u64) -> f64 {
 fn lasso_ill_scaled(p: usize, m_data: usize, lambda: f64, scale_max: f64, seed: u64) -> QpProblem {
     let mut rng = seed;
     let mut a_data = vec![vec![0.0_f64; p]; m_data];
-    for i in 0..m_data {
-        for j in 0..p {
-            a_data[i][j] = lcg_unit(&mut rng);
+    for row in a_data.iter_mut() {
+        for cell in row.iter_mut() {
+            *cell = lcg_unit(&mut rng);
         }
     }
     let mut y = vec![0.0_f64; m_data];
-    for i in 0..m_data {
-        y[i] = lcg_unit(&mut rng);
+    for yi in y.iter_mut() {
+        *yi = lcg_unit(&mut rng);
     }
 
     let mut q_dense = vec![0.0_f64; p * p];
     for j in 0..p {
         for k in 0..p {
             let mut s = 0.0;
-            for i in 0..m_data {
-                s += a_data[i][j] * a_data[i][k];
+            for row in a_data.iter() {
+                s += row[j] * row[k];
             }
             q_dense[j * p + k] = s;
         }
@@ -69,9 +69,9 @@ fn lasso_ill_scaled(p: usize, m_data: usize, lambda: f64, scale_max: f64, seed: 
 
     let mut d_diag = vec![1.0_f64; n_var];
     let mut rng2 = seed.wrapping_mul(31).wrapping_add(7);
-    for j in 0..n_var {
+    for dj in d_diag.iter_mut() {
         let u = 0.5 * (lcg_unit(&mut rng2) + 1.0); // [0, 1]
-        d_diag[j] = 10.0_f64.powf(u * scale_max);
+        *dj = 10.0_f64.powf(u * scale_max);
     }
 
     // Q' = D Q D (左上 p×p block)
@@ -136,10 +136,10 @@ fn assert_orig_primal_residual_ok(problem: &QpProblem, x: &[f64]) {
     let ax: Vec<f64> = (0..problem.num_constraints)
         .map(|i| {
             let mut s = 0.0;
-            for col in 0..problem.num_vars {
+            for (col, &xc) in x.iter().enumerate().take(problem.num_vars) {
                 for k in problem.a.col_ptr()[col]..problem.a.col_ptr()[col + 1] {
                     if problem.a.row_ind()[k] == i {
-                        s += problem.a.values()[k] * x[col];
+                        s += problem.a.values()[k] * xc;
                     }
                 }
             }

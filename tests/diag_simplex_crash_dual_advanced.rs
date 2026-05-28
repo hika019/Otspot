@@ -57,7 +57,7 @@ fn build_eq_ge_network_lp(n_flow: usize, n_hub: usize, n_eq: usize, seed: u64) -
     let b: Vec<f64> = (0..m).map(|_| 1.0 + 0.5 * g.f01()).collect();
     let c: Vec<f64> = (0..n).map(|_| g.f01()).collect();
     let mut ct = vec![ConstraintType::Eq; n_eq];
-    ct.extend(std::iter::repeat(ConstraintType::Ge).take(m - n_eq));
+    ct.extend(std::iter::repeat_n(ConstraintType::Ge, m - n_eq));
     let bounds = vec![(0.0_f64, 10.0_f64); n];
     LpProblem::new_general(c, a, b, ct, bounds, None).unwrap()
 }

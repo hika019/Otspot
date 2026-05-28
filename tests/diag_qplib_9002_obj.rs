@@ -7,7 +7,8 @@
 //!   - 当 solver は residual_stall で SuboptimalSolution / obj ~ 1.97e10
 //!   - diagonal Q が 1e-12 〜 2.0 (12 桁 condition number) のため IPM が
 //!     dual feasibility ~0.5 で停滞、5.698e9 は再現不能
-//! → baseline CSV から数値 ref を撤去 (no_ref 化)。本 test は次の退行を検知する:
+//!
+//! baseline CSV から数値 ref を撤去 (no_ref 化)。本 test は次の退行を検知する:
 //!   1. obj / x が NaN/Inf でない (numerical_failure)
 //!   2. obj が現状 best (~2e10) より極端に悪化していない (3e10 を超えたら退行)
 //!   3. ||x||_inf が問題境界 (~1e11) を 1 order 超える発散をしていない

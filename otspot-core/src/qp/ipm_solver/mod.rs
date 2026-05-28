@@ -9,6 +9,7 @@ pub mod attempt;
 pub use attempt::solve_ipm;
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::type_complexity)]
 mod tests {
     use super::*;
     use crate::io::qps::parse_qps;
@@ -292,7 +293,7 @@ mod tests {
         for col in 0..n {
             let xv = r.solution[col];
             for k in prob.q.col_ptr[col]..prob.q.col_ptr[col + 1] {
-                qx_dd[prob.q.row_ind[k]] = qx_dd[prob.q.row_ind[k]] + TwoFloat::new_mul(prob.q.values[k], xv);
+                qx_dd[prob.q.row_ind[k]] += TwoFloat::new_mul(prob.q.values[k], xv);
             }
         }
         let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
@@ -300,7 +301,7 @@ mod tests {
         for col in 0..n {
             for k in prob.a.col_ptr[col]..prob.a.col_ptr[col + 1] {
                 let row = prob.a.row_ind[k];
-                aty_dd[col] = aty_dd[col] + TwoFloat::new_mul(prob.a.values[k], r.dual_solution[row]);
+                aty_dd[col] += TwoFloat::new_mul(prob.a.values[k], r.dual_solution[row]);
             }
         }
         let aty: Vec<f64> = aty_dd.iter().map(|&v| f64::from(v)).collect();

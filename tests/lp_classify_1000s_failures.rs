@@ -64,11 +64,11 @@ fn classify(qp_path: &str, eps: f64, timeout_s: f64) -> bool {
                 }
             }
         }
-        for i in 0..m {
+        for (i, &ax_i) in ax.iter().enumerate() {
             let viol = match prob.constraint_types[i] {
-                otspot::problem::ConstraintType::Eq => (ax[i] - prob.b[i]).abs(),
-                otspot::problem::ConstraintType::Le => (ax[i] - prob.b[i]).max(0.0),
-                otspot::problem::ConstraintType::Ge => (prob.b[i] - ax[i]).max(0.0),
+                otspot::problem::ConstraintType::Eq => (ax_i - prob.b[i]).abs(),
+                otspot::problem::ConstraintType::Le => (ax_i - prob.b[i]).max(0.0),
+                otspot::problem::ConstraintType::Ge => (prob.b[i] - ax_i).max(0.0),
                 _ => 0.0,
             };
             max_pf = max_pf.max(viol);
