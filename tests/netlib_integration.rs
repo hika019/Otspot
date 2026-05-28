@@ -476,7 +476,7 @@ fn test_dual_simplex_netlib_3() {
 fn test_solve_bore3d_primal() {
     // T1: bore3d を Primal Simplex 経路（QP presolve → LP simplex）で解く
     // 正常修正後: Optimal, obj ≈ 1373.08
-    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    let path = Path::new("data/lp_problems/bore3d.QPS");
     let prob = parse_qps(path).expect("Failed to parse bore3d.QPS");
     let opts = SolverOptions::default();
     let start = Instant::now();
@@ -502,7 +502,7 @@ fn test_solve_bore3d_primal() {
 fn test_solve_bore3d_dual() {
     // T4: bore3d を Dual Simplex 経路で解く
     // 正常修正後: Optimal, obj ≈ 1373.08
-    let path = Path::new("tests/lp_problems/bore3d.QPS");
+    let path = Path::new("data/lp_problems/bore3d.QPS");
     let prob = parse_qps(path).expect("Failed to parse bore3d.QPS");
     let mut opts = SolverOptions::default();
     opts.simplex_method = SimplexMethod::Dual;
