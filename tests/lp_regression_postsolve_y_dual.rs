@@ -282,11 +282,13 @@ fn cre_b_postsolve_dual_feasibility() {
     }
 }
 
-/// greenbea: perold と同類の dual 退化パターン。cleanup LP が 60s 内に未収束で GREEN 未達。
+/// greenbea: IPM-pathological LP (5405 vars × 2392 rows)。
+/// LP dispatch は IPM に IPM_BUDGET_FRACTION (=0.5) 配分 → simplex は残予算で ~75s で収束。
+/// 旧 60s ignore 理由「cleanup LP 未収束」は misdiagnosis。真因は IPM-time-box (~simplex 75s 必要)
+/// で、cleanup LP は実走に至らない。test budget は nextest slow-timeout (180s) 上限直下。
 #[test]
-#[ignore = "GREEN target 未達: cleanup LP が 60s 内に未収束"]
 fn greenbea_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 60.0);
+    let r = check_postsolve_dual_feasibility("data/lp_problems/greenbea.QPS", 1e-6, 170.0);
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
