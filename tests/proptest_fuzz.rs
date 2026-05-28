@@ -45,8 +45,15 @@ proptest! {
         let a = make_diagonal_csc(&diag, m, n);
 
         let prob = LpProblem::new(c, a, b_m).unwrap();
-        let _result = solve(&prob);
-        // solve() がパニックしないことを確認（戻り値のステータスは問わない）
+        let result = solve(&prob);
+        prop_assert!(
+            matches!(
+                result.status,
+                SolveStatus::Optimal | SolveStatus::Infeasible | SolveStatus::Unbounded |
+                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+            ),
+            "solve() returned unrecognized status: {:?}", result.status
+        );
     }
 
     /// テスト2: 目的関数がゼロのLPは常にOptimalを返す

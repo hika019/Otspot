@@ -13,6 +13,7 @@ use std::sync::{
     atomic::AtomicBool,
     Arc,
 };
+
 use std::time::Instant;
 
 // ---- Error type -------------------------------------------------------
@@ -1031,4 +1032,5 @@ mod tests {
         // effective skip = field OR ruiz
         assert!(skip_via_ruiz.presolve_skip_large_coeff || skip_via_ruiz.use_ruiz_scaling);
     }
+
 }

@@ -277,13 +277,13 @@ fn api_model_set_threads_propagates_to_qp_solve() {
 #[test]
 fn api_model_set_threads_clamps_zero_to_one() {
     // 0 は invalid (LCG/ThreadPool 双方で fatal)、Model::set_threads 入口で 1 に補正。
-    use otspot::model::Model;
+    use otspot::model::{Expression, Model};
     let mut m = Model::new("threads_zero_clamp");
-    let _x = m.add_var("x", 0.0, 1.0);
+    let x = m.add_var("x", 0.0, 1.0);
+    m.minimize(Expression::from(x));
     m.set_threads(0);
-    // 後段で panic しないこと。set_threads が saturating であることを smoke で確認。
-    // (内部 field は private なので直接 assert 不可、ただし solve_qp_with でも同様に
-    // SolverOptions::threads.max(1) しているので 0 でも crash しない契約。)
+    // After clamping 0→1, the model must remain solvable.
+    assert!(m.solve().is_ok(), "set_threads(0) must not prevent solve (clamps to 1)");
 }
 
 #[test]

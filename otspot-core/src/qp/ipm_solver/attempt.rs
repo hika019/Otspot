@@ -192,11 +192,6 @@ fn scale_warm_start_for_q_diag(options: &SolverOptions, col_scales: &[f64]) -> S
                 ws.x[j] /= col_scales[j];
             }
         } else {
-            eprintln!(
-                "[warm_start_qp dropped] q_diag_scaling dim mismatch: ws.x.len={} col_scales.len={}",
-                ws.x.len(),
-                col_scales.len()
-            );
             scaled.warm_start_qp = None;
         }
     }

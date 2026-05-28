@@ -1,4 +1,5 @@
 //! faer per-call parallelism sentinel (in-source test 専用)。
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 //!
 //! 検証:
 //! - `solver_par_from_threads(threads)` 経由の LDL factor + solve が

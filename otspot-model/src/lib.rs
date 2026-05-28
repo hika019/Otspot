@@ -1,3 +1,4 @@
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 //! Algebraic modeling API for `otspot`.
 //!
 //! Provides [`Model`], [`Variable`], [`Expression`], [`Constraint`],

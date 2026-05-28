@@ -668,6 +668,7 @@ pub(crate) fn big_m_cold_start(
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     //! Big-M Phase I の全分岐 (feasible / infeasible / Ge / Eq / 混在) を
     //! 小規模合成 LP で網羅検証する。

@@ -444,8 +444,9 @@ mod tests {
         let prob = make_qp_simple(3, 2);
         let opts = SolverOptions::default();
         let phase1 = crate::presolve::run_qp_presolve_phase1(&prob, &opts);
-        let _phase2 = run_qp_presolve_phase2(phase1, &opts);
-        // クラッシュしなければ OK
+        let phase2 = run_qp_presolve_phase2(phase1, &opts);
+        assert_eq!(phase2.orig_num_vars, 3, "orig_num_vars preserved through phase2");
+        assert_eq!(phase2.orig_num_constraints, 2, "orig_num_constraints preserved through phase2");
     }
 
     #[test]

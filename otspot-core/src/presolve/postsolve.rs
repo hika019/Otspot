@@ -955,13 +955,6 @@ pub fn run_postsolve(
     // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
     // full y vector when coupling is strong.
     let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || cleanup_stagnant {
-        #[cfg(debug_assertions)]
-        if cleanup_stagnant {
-            eprintln!(
-                "[postsolve] LSQ skip: improvement-stagnant (cheap_min={:.3e} df_cl_min={:.3e})",
-                cheap_min, df_cl_min
-            );
-        }
         None
     } else if m > 0 {
         // 規模ガードは固定 size proxy ではなく compute_lsq_dual_y 内部に委ねる

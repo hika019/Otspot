@@ -705,6 +705,7 @@ impl KktSolver for AutoKktSolver {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;

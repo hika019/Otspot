@@ -1,4 +1,5 @@
 //! IP-PMM 単体テスト。
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use super::iter::solve_ippmm_inner;
 use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN};
