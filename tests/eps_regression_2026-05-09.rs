@@ -39,7 +39,7 @@ fn pfeas_normalized(prob: &QpProblem, x: &[f64]) -> f64 {
     max_rel
 }
 
-fn solve_with_eps(prob: &QpProblem, user_eps: f64) -> otspot::qp::SolverResult {
+fn solve_with_eps(prob: &QpProblem, user_eps: f64) -> otspot::SolverResult {
     let mut opts = SolverOptions::default();
     opts.tolerance = Some(Tolerance::Custom(user_eps));
     opts.ipm = IpmOptions { eps: user_eps, ..IpmOptions::default() };

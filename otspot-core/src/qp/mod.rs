@@ -11,7 +11,6 @@ pub(crate) mod lp_dispatch;
 pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
-pub use crate::problem::SolverResult;
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
 pub use multistart::solve_qp_multistart;
 pub(crate) use lp_dispatch::solve_as_lp_pub;
@@ -35,6 +34,7 @@ pub(crate) use postsolve::refine::worst_active::refine_dual_worst_active_block;
 pub use problem::{QcqpMatrix, QpProblem, QpProblemError, QpWarmStart};
 
 use crate::options::SolverOptions;
+use crate::problem::SolverResult;
 #[cfg(test)]
 use crate::sparse::CscMatrix;
 

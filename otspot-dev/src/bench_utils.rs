@@ -8,6 +8,8 @@ use otspot_core::qp::kkt_resid::{self, dd_impl, f64_impl};
 use otspot_core::qp::QpProblem;
 use otspot_core::sparse::CscMatrix;
 use otspot_core::tolerances::{PIVOT_TOL, ZERO_TOL};
+use otspot_io::qplib::{parse_qplib, QplibError, QplibProblem};
+use otspot_io::qps::parse_qps;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -278,20 +280,26 @@ pub fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
     map
 }
 
-/// Check solver objective against a baseline CSV (1% threshold by default).
+/// Check solver objective against a baseline CSV.
+///
+/// `obj_offset` is added to the CSV reference before comparison. Pass `0.0` for
+/// most problem sets; pass `prob.obj_offset` for Netlib LP (which stores shifted
+/// objectives in the CSV).
 pub fn check_baseline_objective(
     problem_name: &str,
     solver_obj: f64,
     known: &HashMap<String, f64>,
     eps_obj: f64,
+    obj_offset: f64,
 ) -> ObjCheckResult {
     match known.get(problem_name) {
         Some(&known_obj) => {
             if !solver_obj.is_finite() {
                 return ObjCheckResult::Mismatch { rel_err: f64::INFINITY };
             }
-            let denom = 1.0_f64.max(known_obj.abs());
-            let rel_err = (solver_obj - known_obj).abs() / denom;
+            let expected = known_obj + obj_offset;
+            let denom = expected.abs().max(1.0);
+            let rel_err = (solver_obj - expected).abs() / denom;
             if rel_err > eps_obj {
                 ObjCheckResult::Mismatch { rel_err }
             } else {
@@ -299,6 +307,40 @@ pub fn check_baseline_objective(
             }
         }
         None => ObjCheckResult::NoRef,
+    }
+}
+
+/// Result of parsing a QPLIB file for QP benchmarking.
+pub enum ParseQplibOutcome {
+    /// Continuous QP problem ready to solve.
+    Qp(Box<QpProblem>),
+    /// Problem type not in scope (MIP / quadratic constraints).
+    Unsupported(String),
+    /// Parse failure.
+    ParseError(String),
+}
+
+/// Parse a QPS file, ignoring the unused timeout argument.
+///
+/// The timeout is not enforced at the Rust level; external process-level
+/// timeout (e.g. `gtimeout` in `bench_parallel.sh`) handles runaway parses.
+pub fn parse_qps_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, String> {
+    parse_qps(path).map_err(|e| e.to_string())
+}
+
+/// Parse a QPLIB file and extract the continuous QP case.
+///
+/// MIP (MILP/MIQP) and quadratically-constrained problems are returned as
+/// [`ParseQplibOutcome::Unsupported`]. Parse failures map to
+/// [`ParseQplibOutcome::ParseError`].
+pub fn parse_qplib_with_timeout(path: &Path, _timeout_secs: u64) -> ParseQplibOutcome {
+    match parse_qplib(path) {
+        Ok(QplibProblem::Qp(prob)) => ParseQplibOutcome::Qp(Box::new(prob)),
+        Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => ParseQplibOutcome::Unsupported(
+            "Variable type 'B'/'I' (binary/integer): MIP problem".to_string(),
+        ),
+        Err(QplibError::UnsupportedType(msg)) => ParseQplibOutcome::Unsupported(msg),
+        Err(e) => ParseQplibOutcome::ParseError(e.to_string()),
     }
 }
 
