@@ -11,3 +11,4 @@ reports/
 Highs.log
 /.claude
 dashboard.md
+.worktrees/
