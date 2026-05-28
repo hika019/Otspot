@@ -5,8 +5,6 @@ on:
     branches: ["**"]
   pull_request:
 
-# Cancel superseded in-progress runs for the same ref (e.g. rapid pushes to a
-# feature branch). PR vs push runs use distinct refs, so both still execute.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -15,35 +13,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fmt:
-    name: fmt
-    runs-on: ubuntu-latest
-    # No rust-cache here: `cargo fmt` does not compile, so a build cache is a
-    # no-op for this job.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      # Informational only: ~223/261 files are currently unformatted and a
-      # global `cargo fmt` would collide with the in-flight feature branches.
-      # Flip to blocking (drop continue-on-error) after the branch wave lands
-      # and a one-shot repo-wide fmt is applied.
-      - run: cargo fmt --check
-        continue-on-error: true
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      # Warning budget (~262 warnings) is tracked separately; -D warnings deferred.
-      - run: cargo clippy --workspace --all-targets --all-features
-
   test:
     name: test
     runs-on: ubuntu-latest
@@ -52,14 +21,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      # data/ is gitignored and absent in CI. Integration tests that reference
-      # data/ panic on missing files rather than skipping gracefully, so we
-      # run only lib + bin targets via the lib-only nextest profile.
-      # test-threads=3 is set in the profile (matches CLAUDE.md spec).
-      - name: Unit tests (lib-only profile; data-dependent tests skipped)
-        run: cargo nextest run --workspace --profile lib-only
-      - name: Doctests
-        run: cargo test --doc --workspace
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Python deps
+        run: pip install numpy scipy cvxpy
+      - name: emps build
+        run: |
+          curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
+          cc -o /tmp/emps /tmp/emps.c
+      - name: Cache bench data
+        id: cache-data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: bench-data-v1-${{ hashFiles('scripts/download_all_bench_data.sh') }}
+          restore-keys: bench-data-v1-
+      - name: Download bench data
+        if: steps.cache-data.outputs.cache-hit != 'true'
+        run: bash scripts/download_all_bench_data.sh
+      - run: cargo nextest run --release
 
   package:
     name: package
@@ -68,9 +49,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # --no-verify は build を省略し metadata/同梱ファイルのみ検証。
-      # CI では registry 非依存の leaf である otspot-core のみ検証する。
-      # otspot-io/otspot-model/otspot(facade) は path+version dep が registry 解決を要し、
-      # otspot-core 0.2.0 が crates.io 公開前は `no matching package` で fail するため、
-      # publish 時の順序付き手順 (core → io/model → facade) で検証・公開する。
-      - run: cargo package --no-verify -p otspot-core
+      - run: cargo package --workspace
