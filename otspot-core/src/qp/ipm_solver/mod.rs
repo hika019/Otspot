@@ -29,6 +29,8 @@ mod tests {
         assert_eq!(r.status, SolveStatus::Optimal);
     }
 
+    // (diagnostic tests removed in #53)
+
     /// QADLITTL の DFEAS_FAIL を z, y, r_j 単位で診断。
     #[test]
     fn test_ipm_qadlittl_diagnose() {
@@ -368,6 +370,7 @@ mod tests {
         }
     }
 
+=======
     /// DPKLO1 が hang せず timeout/optimal で返ること。
     #[test]
     fn test_ipm_dpklo1() {
@@ -377,8 +380,7 @@ mod tests {
             return;
         }
         let prob = parse_qps(path).expect("parse DPKLO1");
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(5.0);
+        let opts = SolverOptions { timeout_secs: Some(5.0), ..Default::default() };
         let r = solve_ipm(&prob, &opts);
         eprintln!("DPKLO1 v2: status={:?} obj={} iters={}", r.status, r.objective, r.iterations);
         assert!(matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout));

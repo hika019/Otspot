@@ -90,8 +90,6 @@ pub(crate) fn refit_bound_duals_kkt(
     if accepted_bd.len() < new_bd.len() {
         accepted_bd.resize(new_bd.len(), 0.0);
     }
-    let mut updated_lb = 0usize;
-    let mut updated_ub = 0usize;
     let mut lb_slot = 0usize;
     let mut ub_slot = n_lb;
     for (j, &(lb, ub)) in problem.bounds.iter().enumerate() {
@@ -109,28 +107,16 @@ pub(crate) fn refit_bound_duals_kkt(
         let take_new = !is_fx && r_post <= r_pre;
         if lb.is_finite() {
             if take_new && lb_slot < new_bd.len() {
-                if accepted_bd[lb_slot] != new_bd[lb_slot] {
-                    updated_lb += 1;
-                }
                 accepted_bd[lb_slot] = new_bd[lb_slot];
             }
             lb_slot += 1;
         }
         if ub.is_finite() {
             if take_new && ub_slot < new_bd.len() {
-                if accepted_bd[ub_slot] != new_bd[ub_slot] {
-                    updated_ub += 1;
-                }
                 accepted_bd[ub_slot] = new_bd[ub_slot];
             }
             ub_slot += 1;
         }
-    }
-    if std::env::var("REFIT_BD_TRACE").ok().as_deref() == Some("1") {
-        eprintln!(
-            "REFIT_BD per-col: updated_lb={} updated_ub={} (n={})",
-            updated_lb, updated_ub, n
-        );
     }
     result.bound_duals = accepted_bd;
 }

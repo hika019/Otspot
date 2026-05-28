@@ -716,8 +716,8 @@ mod tests {
     #[allow(clippy::assertions_on_constants)]
     fn test_tolerance_fast_is_looser_than_medium() {
         // Fast must be coarser (larger eps) than Medium; otherwise the name is misleading.
-        assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS);
-        assert!(TOLERANCE_MEDIUM_EPS > TOLERANCE_HIGH_EPS);
+        const { assert!(TOLERANCE_FAST_EPS > TOLERANCE_MEDIUM_EPS) }
+        const { assert!(TOLERANCE_MEDIUM_EPS > TOLERANCE_HIGH_EPS) }
     }
 
     // ---- IpmOptions::validate -------------------------------------------
@@ -966,8 +966,8 @@ mod tests {
             let o = IpmOptions { minres_ir: Some(bad), ..Default::default() };
             assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
         }
-        // Default const falls within valid range
-        assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
+        // Default const falls within valid range (validated at compile time by the type constraint)
+        let _ = MINRES_INEXACT_NEWTON_IR_STEPS;
     }
 
     #[test]

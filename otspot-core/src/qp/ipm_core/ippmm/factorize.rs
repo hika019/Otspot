@@ -70,7 +70,6 @@ pub(super) struct FactorizeContext<'a> {
     pub timeout_ctx: &'a TimeoutCtx,
     pub par: Par,
     pub n: usize,
-    pub prof: bool,
     /// KKT factorization/MINRES configuration from IpmOptions.
     pub kkt_cfg: KktConfig,
 }
@@ -96,7 +95,6 @@ pub(super) fn factorize_kkt_with_retry(
         if ctx.timeout_ctx.should_stop() {
             return FactorizeOutcome::Timeout;
         }
-        let prof_t_build = if ctx.prof { Some(std::time::Instant::now()) } else { None };
         let mat_for_factor = if ctx.use_schur {
             let (s_mat, d_inv) = build_schur_system(
                 &ctx.problem.q, ctx.a_ext, ctx.sigma_vec, rho_retry, delta_retry,
@@ -106,11 +104,6 @@ pub(super) fn factorize_kkt_with_retry(
         } else {
             ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry)
         };
-        if let Some(t) = prof_t_build {
-            eprintln!("FACT_PROF section=build n={} nnz={} t={:.3}ms",
-                mat_for_factor.nrows, mat_for_factor.values.len(),
-                t.elapsed().as_secs_f64() * 1000.0);
-        }
         if caches.amd_perm.is_none() {
             caches.amd_perm = Some(amd_with_deadline(
                 mat_for_factor.nrows,
@@ -157,15 +150,9 @@ pub(super) fn factorize_kkt_with_retry(
         }
         match factor_result {
             Ok(f) => {
-                if ctx.prof {
-                    eprintln!("FACT_PROF section=factorize n={} t={:.3}ms",
-                        mat_for_factor.nrows, iter_factorize_ns as f64 / 1_000_000.0);
-                }
                 total_factorize_ns += iter_factorize_ns;
-                let prof_t_probe = if ctx.prof { Some(std::time::Instant::now()) } else { None };
-                // 健全性プローブ: factorize Ok でも cond(K) 大で LDL solve が Newton 方向
-                // を central path から外す病理を ||K·sol − rhs||/||rhs|| で直接弾く。
-                // iterative backend は LDL 精度概念が無いので skip。
+                // Sanity probe: even factorize Ok can yield ill-conditioned K; reject via ||K·sol−rhs||/||rhs||.
+                // Iterative backend has no LDL precision concept, skip.
                 if !f.is_iterative()
                     && !probe_ldl_health(
                         &f, &mat_for_factor, ctx.r_d_pmm, ctx.r_p_pmm, ctx.s, ctx.is_eq_ext, ctx.n,
@@ -178,10 +165,6 @@ pub(super) fn factorize_kkt_with_retry(
                     rho_retry = (rho_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                     delta_retry = (delta_retry * LDL_REG_GROWTH).min(ldl_reg_ceiling);
                     continue;
-                }
-                if let Some(t) = prof_t_probe {
-                    eprintln!("FACT_PROF section=probe n={} t={:.3}ms",
-                        mat_for_factor.nrows, t.elapsed().as_secs_f64() * 1000.0);
                 }
                 used_iterative = f.is_iterative();
                 fac_opt = Some(f);
@@ -308,11 +291,6 @@ pub(super) fn auto_schur_enabled(
     timeout_ctx: &TimeoutCtx,
     par: Par,
 ) -> bool {
-    let explicit_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
-    let auto_schur_disabled = std::env::var("QP_NO_AUTO_SCHUR").ok().as_deref() == Some("1");
-    if explicit_schur || auto_schur_disabled {
-        return false;
-    }
     use crate::qp::ipm_core::kkt::build_augmented_system;
     let probe_sigma: Vec<f64> = vec![1.0; m_ext];
     let probe_rho = options.ipm.delta_min;
@@ -323,9 +301,5 @@ pub(super) fn auto_schur_enabled(
     let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
         &probe_aug, &probe_perm, timeout_ctx.deadline, Some(options.ipm.effective_max_l_nnz()), par,
     );
-    let exceeds = matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }));
-    if exceeds && std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-        eprintln!("IPPMM_AUTO_SCHUR: augmented L_nnz exceeds budget, switching to Schur formulation");
-    }
-    exceeds
+    matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }))
 }

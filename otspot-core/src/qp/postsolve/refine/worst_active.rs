@@ -17,7 +17,6 @@ pub(crate) fn refine_dual_worst_active_block(
     eliminated_cols: &[bool],
     deadline: Option<std::time::Instant>,
 ) {
-    let trace = std::env::var("REFINE_DUAL_BLOCK_TRACE").ok().as_deref() == Some("1");
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return;
     }
@@ -192,17 +191,6 @@ pub(crate) fn refine_dual_worst_active_block(
         &provisional_residual,
     );
 
-    if trace {
-        eprintln!(
-            "DUAL_BLOCK worst_j={} worst_rel={:.3e} active_rows={} touched_cols={} local_bounds={}",
-            worst_j,
-            worst_rel,
-            rows.len(),
-            cols.len(),
-            local_bounds.len()
-        );
-    }
-
     let ulen = rlen + local_bounds.len();
     if ulen == 0 {
         return;
@@ -343,9 +331,6 @@ pub(crate) fn refine_dual_worst_active_block(
             break;
         }
         step = next_step;
-    }
-    if trace {
-        eprintln!("DUAL_BLOCK kkt {:.3e}->{:.3e}", pre, best_kkt);
     }
     if best_kkt < pre {
         result.dual_solution = best.dual_solution;

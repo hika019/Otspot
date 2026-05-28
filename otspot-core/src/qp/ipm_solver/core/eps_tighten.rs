@@ -56,12 +56,6 @@ pub(super) fn tighten_ipm_eps_for_presolve_scale(
         let eps_scaled = (eps_orig * sigma_total).max(IPM_EPS_NOISE_FLOOR);
         tightened.tolerance = None;
         tightened.ipm.eps = eps_scaled;
-        if std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1") {
-            eprintln!(
-                "POST_STAGE [IPM eps tighten] σ_total={:.3e} eps_orig={:.3e} → eps_scaled={:.3e}",
-                sigma_total, eps_orig, eps_scaled
-            );
-        }
         tightened
     } else {
         opts.clone()
@@ -104,9 +98,11 @@ mod eps_tighten_tests {
         let sigma = 1e-3;
 
         let pre = presolve_with_ruiz_e(sigma);
-        let mut opts = SolverOptions::default();
-        opts.tolerance = Some(Tolerance::Custom(user_eps));
-        opts.ipm = IpmOptions { eps: user_eps / tighten, ..IpmOptions::default() };
+        let opts = SolverOptions {
+            tolerance: Some(Tolerance::Custom(user_eps)),
+            ipm: IpmOptions { eps: user_eps / tighten, ..IpmOptions::default() },
+            ..Default::default()
+        };
 
         let result = tighten_ipm_eps_for_presolve_scale(&opts, &pre);
 
@@ -138,9 +134,11 @@ mod eps_tighten_tests {
         let sigma = 1e-3;
 
         let pre = presolve_with_ruiz_e(sigma);
-        let mut opts = SolverOptions::default();
-        opts.tolerance = None;
-        opts.ipm = IpmOptions { eps: ipm_eps, ..IpmOptions::default() };
+        let opts = SolverOptions {
+            tolerance: None,
+            ipm: IpmOptions { eps: ipm_eps, ..IpmOptions::default() },
+            ..Default::default()
+        };
 
         let result = tighten_ipm_eps_for_presolve_scale(&opts, &pre);
         let expected = (ipm_eps * sigma).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);

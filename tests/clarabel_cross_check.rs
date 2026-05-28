@@ -8,27 +8,10 @@ use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::options::SolverOptions;
 use otspot::qp::solve_qp_with;
 use otspot::QpProblem;
-use clarabel::solver::{DefaultSolver, DefaultSettings, IPSolver};
 
 #[path = "helpers/clarabel_utils.rs"]
 mod clarabel_helper;
-use clarabel_helper::{build_clarabel, compute_internal_obj, solve_clarabel};
-
-/// より厳しい tol + iter で本当に「真の最適」が本ソルバに近いか確認する。
-fn solve_clarabel_strict(prob: &otspot::QpProblem) -> Option<(f64, Vec<f64>, String)> {
-    let (p, q, a, b, cones) = build_clarabel(prob);
-    let settings = DefaultSettings::<f64> {
-        verbose: false,
-        tol_gap_abs: 1e-12,
-        tol_gap_rel: 1e-12,
-        tol_feas: 1e-12,
-        max_iter: 100_000,
-        ..Default::default()
-    };
-    let mut solver = DefaultSolver::new(&p, &q, &a, &b, &cones, settings).ok()?;
-    solver.solve();
-    Some((solver.info.cost_primal, solver.solution.x.clone(), format!("{:?} iters={}", solver.info.status, solver.info.iterations)))
-}
+use clarabel_helper::solve_clarabel;
 
 #[test]
 fn test_simple_2var_qp_matches_clarabel() {
@@ -56,86 +39,6 @@ fn test_simple_2var_qp_matches_clarabel() {
     assert!((our_obj - cl_obj).abs() < 1e-4, "obj differs: ours={}, cl={}", our_obj, cl_obj);
     // 期待値 0.25
     assert!((our_obj - 0.25).abs() < 1e-4);
-}
-
-/// 深掘り: 同じ x で同じ obj が出るかの sanity check.
-/// 出る → Q, c は parser で同じに読まれている。
-/// 出ない → Q もしくは c が違う。
-///
-/// さらに feasibility cross check:
-/// 本ソルバの x が Clarabel 用 b で feasible (Ax compared to b 本ソルバの constraint_types)
-/// Clarabel の x が同じく feasible
-fn deep_check(name: &str, path: &std::path::Path) -> bool {
-    assert!(path.exists(), "{:?} ({}) not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path, name);
-    let prob = parse_qps(path).expect("parse failed");
-
-    println!("\n=== {} ===", name);
-    println!("obj_offset={:.6e}, n={}, m={}", prob.obj_offset, prob.num_vars, prob.num_constraints);
-
-    let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
-    let n_lb = prob.bounds.iter().filter(|&&(lb, _): &&(f64, f64)| lb.is_finite()).count();
-    let n_ub = prob.bounds.iter().filter(|&&(_, ub): &&(f64, f64)| ub.is_finite()).count();
-    println!("constraint mix: Eq={} Le={} Ge={}", n_eq, n_le, n_ge);
-    println!("bounds: n_lb={}, n_ub={}", n_lb, n_ub);
-
-    // Clarabel
-    let cl = solve_clarabel(&prob);
-    if cl.is_none() {
-        println!("Clarabel failed to solve");
-        return false;
-    }
-    let (cl_obj_clar, cl_x) = cl.unwrap();
-    let cl_internal_obj = compute_internal_obj(&prob, &cl_x);
-
-    let mut opts = SolverOptions::default();
-    opts.timeout_secs = Some(30.0);
-    let our = solve_qp_with(&prob, &opts);
-    let our_internal_obj = compute_internal_obj(&prob, &our.solution);
-
-    // Clarabel x で 本ソルバの式 → Q, c の解釈チェック
-    println!("Clarabel: cost_primal={:.6e}, internal_obj(via our Q,c)={:.6e}", cl_obj_clar, cl_internal_obj);
-    println!("Ours: objective={:.6e}, internal_obj={:.6e}", our.objective, our_internal_obj);
-
-    // feasibility check: 本ソルバの x で 本ソルバの constraints
-    let check_feasibility = |x: &[f64], label: &str| {
-        if !x.is_empty() && prob.num_constraints > 0 {
-            let ax = prob.a.mat_vec_mul(x).unwrap();
-            let mut max_v = 0.0_f64;
-            for (i, (&ax_i, &b_i)) in ax.iter().zip(prob.b.iter()).enumerate() {
-                let v = match prob.constraint_types[i] {
-                    ConstraintType::Eq => (ax_i - b_i).abs(),
-                    ConstraintType::Ge => (b_i - ax_i).max(0.0),
-                    _ => (ax_i - b_i).max(0.0),
-                };
-                max_v = max_v.max(v);
-            }
-            // bound check
-            let mut bound_v = 0.0_f64;
-            for (xi, &(lb, ub)) in x.iter().zip(prob.bounds.iter()) {
-                if lb.is_finite() { bound_v = bound_v.max((lb - xi).max(0.0)); }
-                if ub.is_finite() { bound_v = bound_v.max((xi - ub).max(0.0)); }
-            }
-            println!("{} feas: max_constr_violation={:.3e}, max_bound_violation={:.3e}",
-                label, max_v, bound_v);
-        }
-    };
-    check_feasibility(&cl_x, "Clarabel x");
-    check_feasibility(&our.solution, "Ours x");
-
-    // |x| 比較
-    let cl_x_inf: f64 = cl_x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let our_x_inf: f64 = our.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    println!("|x|_inf: ours={:.3e}, cl={:.3e}", our_x_inf, cl_x_inf);
-
-    let diff = (our_internal_obj - cl_internal_obj).abs();
-    let rel = diff / our_internal_obj.abs().max(cl_internal_obj.abs()).max(1.0);
-    println!("internal obj diff={:.3e}, rel={:.3e}", diff, rel);
-
-    let ok = rel < 1e-3;
-    println!("MATCH: {}", ok);
-    ok
 }
 
 /// Double-double (cancellation-safe) max Ge/Le/Eq 違反。LISWET の 2 階差分行は
@@ -210,63 +113,3 @@ fn liswet_family_honest_no_false_optimal() {
     }
 }
 
-/// LISWET9 / YAO で Clarabel を厳しく走らせて真の最適を確認
-#[test]
-#[ignore = "diag (~12s; Clarabel strict tol=1e-12 / max_iter=100k 出力のみ、assertion なし)"]
-fn test_liswet9_yao_strict_clarabel() {
-    for name in &["LISWET9", "YAO"] {
-        let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
-        let prob = parse_qps(&path).expect("parse");
-        println!("\n=== {} (strict Clarabel) ===", name);
-        let cl = solve_clarabel_strict(&prob);
-        if let Some((cost, x, status)) = cl {
-            let internal = compute_internal_obj(&prob, &x);
-            let xinf: f64 = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            println!("  Clarabel strict: status={}, cost={:.6e}, internal={:.6e}, |x|_inf={:.3e}",
-                status, cost, internal, xinf);
-        } else {
-            println!("  Clarabel strict failed");
-        }
-        let mut opts = SolverOptions::default();
-        opts.timeout_secs = Some(60.0);
-        let our = solve_qp_with(&prob, &opts);
-        let our_internal = compute_internal_obj(&prob, &our.solution);
-        let our_xinf: f64 = our.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        println!("  Ours: objective={:.6e}, internal={:.6e}, |x|_inf={:.3e}",
-            our.objective, our_internal, our_xinf);
-    }
-}
-
-/// 横展開: 様々な問題で internal obj が一致するか
-#[test]
-#[ignore = "diag (~44s; 35 Maros 問題で Clarabel cross-check、SUMMARY 出力のみ assertion なし)"]
-fn test_multi_problems_match_clarabel() {
-    let problems = [
-        "HS21", "HS35", "HS35MOD", "HS268", "HS76",
-        "AUG2D", "AUG3D", "AUG2DC", "AUG3DC",
-        "QADLITTL", "QSC205", "QSCAGR7", "QSCFXM1",
-        "DUALC1", "DUALC2", "DUALC5", "DUALC8",
-        "GENHS28", "ZECEVIC2", "S268", "TAME",
-        "STCQP1", "STCQP2", "STADAT1",
-        "PRIMAL1", "PRIMAL2", "PRIMAL3", "PRIMAL4",
-        "QPCBOEI1", "QPCSTAIR",
-        "LISWET1", "LISWET9",
-        "YAO",
-        "QSHIP04L", "QSHARE1B",
-    ];
-    let mut results = Vec::new();
-    for name in &problems {
-        let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path);
-        let ok = std::panic::catch_unwind(|| deep_check(name, &path)).unwrap_or(false);
-        results.push((name.to_string(), if ok { "MATCH".to_string() } else { "MISMATCH".to_string() }));
-    }
-    println!("\n========= SUMMARY =========");
-    for (n, r) in &results {
-        println!("{:20} {}", n, r);
-    }
-    let mismatches: Vec<&String> = results.iter().filter(|(_, r)| r == "MISMATCH").map(|(n, _)| n).collect();
-    println!("\nTotal mismatches: {}", mismatches.len());
-    for n in &mismatches { println!("  - {}", n); }
-}

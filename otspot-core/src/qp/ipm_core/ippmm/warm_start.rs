@@ -84,14 +84,5 @@ pub(super) fn apply_qp_warm_start(
         y[i] = (mu / s[i]).max(WARM_SY_MIN);
     }
 
-    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-        let x_inf = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let y_inf = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let s_inf = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        eprintln!(
-            "IPPMM_INIT_WARM: μ={:.3e} |x|_inf={:.3e} |y|_inf={:.3e} |s|_inf={:.3e}",
-            mu, x_inf, y_inf, s_inf
-        );
-    }
     Some(mu)
 }

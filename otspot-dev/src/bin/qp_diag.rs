@@ -2,10 +2,7 @@
 //! `result.solution`, `result.dual_solution`, `result.bound_duals` から
 //! 元空間 KKT 残差を bench と同じ式で再計算し、内訳を表示する。
 //!
-//! 使い方: `qp_diag <path/to/problem.QPS>`
-//! 環境変数:
-//!   DIAG_NO_RUIZ=1     — Ruiz scaling 無効化
-//!   DIAG_NO_PRESOLVE=1 — presolve 無効化
+//! 使い方: `qp_diag <path/to/problem.QPS> [--timeout <secs>] [--no-ruiz] [--no-presolve]`
 
 use mimalloc::MiMalloc;
 #[global_allocator]
@@ -21,23 +18,37 @@ use otspot_core::QpProblem;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <path/to/file.QPS>", args[0]);
+        eprintln!("Usage: {} <path/to/file.QPS> [--timeout <secs>] [--no-ruiz] [--no-presolve]", args[0]);
         std::process::exit(2);
     }
     let path = PathBuf::from(&args[1]);
 
+    let mut timeout = 30.0_f64;
+    let mut no_ruiz = false;
+    let mut no_presolve = false;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" => {
+                i += 1;
+                timeout = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(30.0);
+            }
+            "--no-ruiz" => no_ruiz = true,
+            "--no-presolve" => no_presolve = true,
+            other => eprintln!("[DIAG] unknown arg: {}", other),
+        }
+        i += 1;
+    }
+
     let prob_box = parse_qps(&path).expect("parse failed");
     let prob: &QpProblem = &prob_box;
     let mut opts = SolverOptions::default();
-    let timeout = std::env::var("DIAG_TIMEOUT").ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(30.0);
     opts.timeout_secs = Some(timeout);
-    if std::env::var("DIAG_NO_RUIZ").ok().as_deref() == Some("1") {
+    if no_ruiz {
         opts.use_ruiz_scaling = false;
         println!("[DIAG] Ruiz scaling DISABLED");
     }
-    if std::env::var("DIAG_NO_PRESOLVE").ok().as_deref() == Some("1") {
+    if no_presolve {
         opts.presolve = false;
         println!("[DIAG] presolve DISABLED");
     }

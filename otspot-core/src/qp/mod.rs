@@ -171,11 +171,6 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
 
 pub(crate) use crate::tolerances::FX_TOL;
 
-#[deprecated(since = "0.1.0", note = "use `solve_qp_with` instead")]
-pub fn solve_qp_with_options(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
-    solve_qp_with(problem, options)
-}
-
 /// Warm-start 付きで QP を解く (B&B node 間引継ぎなど)。
 ///
 /// `warm_start` を `options.warm_start_qp` に注入して `solve_qp_with` へ委譲する。

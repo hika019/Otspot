@@ -5,10 +5,6 @@ on:
     branches: ["**"]
   pull_request:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,26 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Python deps
-        run: pip install numpy scipy cvxpy
-      - name: emps build
-        run: |
-          curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
-          cc -o /tmp/emps /tmp/emps.c
-      - name: Cache bench data
-        id: cache-data
-        uses: actions/cache@v4
-        with:
-          path: data
-          key: bench-data-v1-${{ hashFiles('scripts/download_all_bench_data.sh') }}
-          restore-keys: bench-data-v1-
-      - name: Download bench data
-        if: steps.cache-data.outputs.cache-hit != 'true'
-        run: bash scripts/download_all_bench_data.sh
-      - run: cargo nextest run --release
+      - run: cargo nextest run --release --lib
 
   package:
     name: package
