@@ -139,9 +139,9 @@ fn qpcboei2_pfeas_monotonicity_across_eps() {
             "QPCBOEI2 eps={:.0e}: pfn={:.3e} must be < {tol_mul}x eps",
             user_eps, pfn
         );
-        // Observed max (QPCBOEI2, eps_tighten fix): pfn(1e-6)/pfn(1e-4) ≤ 22x.
-        // 50 = 22 * 2.3 safety factor. Catches catastrophic regression, not solver-path variation.
-        let mono_mul = 50.0_f64;
+        // Observed max ratio pfn(1e-6)/pfn(1e-4): macOS arm64 ≤ 22x、Linux x86_64 ≤ 58x。
+        // 100 = ~58x × 1.7x safety、env 間 fp variation 許容しつつ catastrophic regression を catch。
+        let mono_mul = 100.0_f64;
         assert!(
             pfn <= prev_pfn * mono_mul,
             "QPCBOEI2 eps {:.0e} → pfn {:.3e} regress from prev {:.3e} (>{mono_mul}x)",

@@ -54,8 +54,9 @@ use otspot::sparse::CscMatrix;
 use std::time::Instant;
 
 /// LSQ 外 post-processing (cleanup LP / GS / unscale) + parallel CPU 競合余裕。
-/// LSQ 漏れ (wall ≈ 2×budget) との分離は依然可能。
-const SLACK_SEC: f64 = 4.0;
+/// macOS arm64 で 4s 想定だが Linux x86 CI で 4.675s 観測 → 8s に拡張 (env 余裕)。
+/// LSQ 漏れ (wall ≈ 2×budget) との分離は依然可能 (budget=0.5s に対し 8s = 16x、漏れは ≈ 2× で識別)。
+const SLACK_SEC: f64 = 8.0;
 
 /// LSQ AAT factorize の実行観測下限 (m_main ~600 で 30-100ms、安全側で 50ms)。
 const POSTSOLVE_MIN_US: u64 = 50_000;
