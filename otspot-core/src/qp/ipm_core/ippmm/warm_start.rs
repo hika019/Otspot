@@ -26,6 +26,10 @@ pub(super) fn apply_qp_warm_start(
 ) -> Option<f64> {
     let n = problem.num_vars;
     if ws.x.len() != n || ws.y.len() != m_orig {
+        log::warn!(
+            "warm_start_qp ignored: ippmm dim mismatch (x: {}/{}, y: {}/{})",
+            ws.x.len(), n, ws.y.len(), m_orig
+        );
         return None;
     }
     let mu = ws.mu.max(WARM_MU_MIN);

@@ -27,12 +27,18 @@ mod tests {
     /// `in_str_in` carries multi-line string state from the previous line.
     /// Returns `(opens, closes, in_str_out)`.
     fn count_braces(line: &str, in_str_in: bool) -> (i32, i32, bool) {
-        let code = line.split("//").next().unwrap_or(line);
         let mut opens = 0i32;
         let mut closes = 0i32;
         let mut in_str = in_str_in;
-        let mut prev = '\0';
-        for ch in code.chars() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            let prev = if i > 0 { chars[i - 1] } else { '\0' };
+            // Check for line comment only when not in a string
+            if !in_str && ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                break; // rest of line is a comment
+            }
             if ch == '"' && prev != '\\' {
                 in_str = !in_str;
             }
@@ -40,7 +46,7 @@ mod tests {
                 if ch == '{' { opens += 1; }
                 if ch == '}' { closes += 1; }
             }
-            prev = ch;
+            i += 1;
         }
         (opens, closes, in_str)
     }
@@ -64,6 +70,9 @@ mod tests {
         // Pending flags: set when an attribute is seen; cleared once we open a block.
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false; // #[test] / #[tokio::test]
+        // Stack of depths at which #[allow(clippy::print_stderr/stdout)] was seen.
+        // Print macros at depth > allow_stack.last() are exempted.
+        let mut allow_print_stack: Vec<i32> = Vec::new();
 
         for (line_idx, raw_line) in content.lines().enumerate() {
             let line_no = line_idx + 1;
@@ -82,6 +91,10 @@ mod tests {
             while skip_stack.last().is_some_and(|&d| depth <= d) {
                 skip_stack.pop();
             }
+            // Pop allow_print exemptions when depth drops below their entry depth.
+            while allow_print_stack.last().is_some_and(|&d| depth < d) {
+                allow_print_stack.pop();
+            }
 
             // Apply opens
             depth += opens;
@@ -93,10 +106,18 @@ mod tests {
             if trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]") {
                 pending_test_attr = true;
             }
+            // #[allow(clippy::print_stderr/stdout)] exempts prints at deeper depth.
+            if trimmed.contains("#[allow(clippy::print_stderr")
+                || trimmed.contains("#[allow(clippy::print_stdout")
+            {
+                allow_print_stack.push(depth);
+            }
 
-            // `mod tests {` or `mod test {` on the same line
+            // `mod tests {` or `mod test {` on the same line (including pub variants)
             let is_mod_tests = (trimmed.starts_with("mod tests")
-                || trimmed.starts_with("mod test "))
+                || trimmed.starts_with("mod test ")
+                || trimmed.starts_with("pub mod tests")
+                || trimmed.starts_with("pub(crate) mod tests"))
                 && opens > 0;
 
             // Enter skip zone if:
@@ -124,11 +145,15 @@ mod tests {
             }
 
             // Check for print macros (strip comment before checking)
-            let code_part = raw_line.split("//").next().unwrap_or(raw_line);
-            for &macro_name in PRINT_MACROS {
-                if code_part.contains(macro_name) {
-                    violations.push((line_no, macro_name.trim_end_matches('(').to_string() + "!"));
-                    break;
+            // Skip if inside an #[allow(clippy::print_stderr/stdout)] scope.
+            let print_is_allowed = allow_print_stack.last().is_some_and(|&d| depth >= d);
+            if !print_is_allowed {
+                let code_part = raw_line.split("//").next().unwrap_or(raw_line);
+                for &macro_name in PRINT_MACROS {
+                    if code_part.contains(macro_name) {
+                        violations.push((line_no, macro_name.trim_end_matches('(').to_string() + "!"));
+                        break;
+                    }
                 }
             }
         }
