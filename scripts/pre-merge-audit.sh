@@ -1,7 +1,7 @@
 #!/bin/bash
 # lead が merge 判定前に走らせる pre-merge gate.
 # CLAUDE.md 「実施者とレビュアーは別エージェント」+ memory feedback_agent_self_report_unreliable_verify_independently 対応.
-set -e
+set -eo pipefail
 
 echo "=== pre-merge audit ==="
 echo
@@ -22,7 +22,7 @@ git diff --stat main..HEAD | tail -3
 echo
 echo "=== public API diff ==="
 if command -v cargo-public-api >/dev/null 2>&1; then
-  cargo public-api diff main..HEAD 2>&1 | head -30 || true
+  cargo public-api diff main 2>&1 | head -30 || true
 else
   echo "(cargo-public-api 未 install、CI で確認)"
 fi
@@ -37,15 +37,15 @@ echo
 echo "=== magic number scan (diff のみ) ==="
 echo "--- 新規 const without /// docstring ---"
 git diff main..HEAD --unified=2 -- '*.rs' | awk '
-  /^\+(pub )?(const|static) [A-Z_]+:/ {
-    if (prev !~ /^\+\/\/\//) print "(new const w/o doc) " $0
+  /^\+(pub(\([^)]+\))?[[:space:]]+)?(const|static) [A-Z_]+:/ {
+    if (prev !~ /^[ +]\/\/\//) print "(new const w/o doc) " $0
   }
   { prev = $0 }
 ' | head -10
-echo "--- 新規 inline numeric literal (production source 内) ---"
+echo "--- 新規 inline numeric literal (production source 内、2桁以上) ---"
 git diff main..HEAD --unified=0 -- 'otspot-core/src/*.rs' 'otspot-io/src/*.rs' 'otspot-model/src/*.rs' | \
-  grep -E '^\+[^+]*\b[0-9]+(_[0-9]+)*(\.[0-9]+)?([eE][+-]?[0-9]+)?\b' | \
-  grep -vE 'cfg\(test\)|//|test_' | head -20
+  grep -E '^\+[^+]*\b[0-9]{2,}(_[0-9]+)*(\.[0-9]+)?([eE][+-]?[0-9]+)?\b' | \
+  grep -vE 'cfg\(test\)|//|test_' | head -20 || true
 
 echo
 echo "=== audit complete ==="

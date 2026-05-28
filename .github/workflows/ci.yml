@@ -73,7 +73,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-public-api
-      - run: cargo public-api diff origin/main..HEAD || true
+      - run: cargo public-api diff origin/main || true
 
   todo-budget:
     name: todo-budget
