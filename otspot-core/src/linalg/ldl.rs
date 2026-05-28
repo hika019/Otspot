@@ -356,7 +356,7 @@ fn upper_tri_with_diag_shift(q_upper: &CscMatrix, shift: f64) -> CscMatrix {
 ///
 /// 1. 必要条件チェック: 全対角 ≥ 0 でなければ即 false。
 /// 2. Q の対角を `shift = max(10·n·|Q|_max·ε, 10·ε)` で持ち上げ、`Q + shift·I` を LDL^T:
-///    - 完了 → D[j] < -fp_threshold が一つでもあれば indefinite。
+///    - 完了 → D\[j\] < -fp_threshold が一つでもあれば indefinite。
 ///    - ZeroPivot → 縮約 Schur complement が連続して degenerate な病的ケース。
 ///      conservative に false (= 呼出側 Gershgorin 経路で補正) を返す。
 ///

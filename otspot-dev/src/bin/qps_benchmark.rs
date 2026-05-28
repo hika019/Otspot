@@ -1,6 +1,6 @@
 //! Maros-Meszaros QPS ベンチマーク
 //!
-//! Usage: qps_benchmark <data_dir> [--eps <value>] [--dual-advanced]
+//! Usage: `qps_benchmark <data_dir> [--eps <value>] [--dual-advanced]`
 //! 指定ディレクトリ内の全*.QPSファイルを parse_qps → solve_qp_with で実行し、
 //! 結果テーブルをstdoutに出力する。
 //!

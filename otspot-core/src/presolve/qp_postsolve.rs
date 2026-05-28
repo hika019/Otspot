@@ -140,18 +140,18 @@ pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResu
 /// **SingletonRow / RedundantRowFix { row, col, val }**:
 ///   行 i = row は singleton (Eq) または activity-tightened Eq で削除済。
 ///   変数 col は val に固定。元 KKT for col:
-///     Q[col,:]·x + c[col] + Σ_k A[k,col]·y[k] - z_lb[col] + z_ub[col] = 0
+///     Q\[col,:\]·x + c\[col\] + Σ_k A\[k,col\]·y\[k\] - z_lb\[col\] + z_ub\[col\] = 0
 ///   col が bound 内部 (lb < val < ub) なら z=0 で確定:
-///     y[row] = -(Q[col,:]·x + c[col] + Σ_{k≠row} A[k,col]·y[k]) / A[row, col]
-///   col が boundary なら z を後段で再計算 (本関数では y[row] のみ復元)
+///     y\[row\] = -(Q\[col,:\]·x + c\[col\] + Σ_{k≠row} A\[k,col\]·y\[k\]) / A\[row, col\]
+///   col が boundary なら z を後段で再計算 (本関数では y\[row\] のみ復元)
 ///
 /// **FixedVar { idx, val }**:
 ///   変数 idx を val に固定 (lb==ub または activity から)。
 ///   z 復元は `core.rs::refit_bound_duals_kkt` が一括で行う (本関数は val のみ書き戻す)。
 ///
 /// **EmptyCol { idx, val }**:
-///   Q[idx,:]=0, A[:,idx]=0 で固定。KKT: c[idx] = z_lb[idx] - z_ub[idx]
-///   c[idx] > 0 → val=lb, z_lb=c, c<0 → val=ub, z_ub=-c
+///   Q\[idx,:\]=0, A\[:,idx\]=0 で固定。KKT: c\[idx\] = z_lb\[idx\] - z_ub\[idx\]
+///   c\[idx\] > 0 → val=lb, z_lb=c, c<0 → val=ub, z_ub=-c
 pub fn postsolve_qp_with_dual_recovery(
     presolve_result: &QpPresolveResult,
     reduced_sol: &SolverResult,

@@ -6,13 +6,13 @@
 //! 変換 x = D * x_s (D = diag(d)) を用いて、以下のスケール済み問題を構築する:
 //!   min 1/2 x_s^T Q_s x_s + q_s^T x_s  s.t. A_s x_s <= b_s, lb_s <= x_s <= ub_s
 //! ここで:
-//!   Q_s = c * D * Q * D   （Q_s[i,j] = c * d[i] * Q[i,j] * d[j]）
-//!   q_s = c * D * q       （q_s[j] = c * d[j] * q[j]）
-//!   A_s = E * A * D       （A_s[i,j] = e[i] * A[i,j] * d[j]）
-//!   b_s = E * b           （b_s[i] = e[i] * b[i]）
+//!   Q_s = c * D * Q * D   （Q_s\[i,j\] = c * d\[i\] * Q\[i,j\] * d\[j\]）
+//!   q_s = c * D * q       （q_s\[j\] = c * d\[j\] * q\[j\]）
+//!   A_s = E * A * D       （A_s\[i,j\] = e\[i\] * A\[i,j\] * d\[j\]）
+//!   b_s = E * b           （b_s\[i\] = e\[i\] * b\[i\]）
 //!   bounds_s = (lb/d, ub/d)
 //!
-//! 双対変数の逆変換（KKT条件より導出）: y[i] = e[i] * y_s[i] / c
+//! 双対変数の逆変換（KKT条件より導出）: y\[i\] = e\[i\] * y_s\[i\] / c
 //! 目的関数の逆変換: obj = obj_s / c
 //!
 //! # 参考文献
