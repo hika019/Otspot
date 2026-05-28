@@ -96,6 +96,8 @@ mod tests {
         let cases: &[(&str, SolverOptions)] = &[
             ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
             ("nan primal_tol",   SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
+            ("zero primal_tol",  SolverOptions { primal_tol: 0.0, ..Default::default() }),
+            ("neg dual_tol",     SolverOptions { dual_tol: -1e-6, ..Default::default() }),
             ("zero threads",     SolverOptions { threads: 0, ..Default::default() }),
             ("ipm eps zero",     SolverOptions {
                 ipm: IpmOptions { eps: 0.0, ..Default::default() },
