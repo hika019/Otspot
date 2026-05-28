@@ -10,10 +10,12 @@
 #   - emps コンパイル済み (Netlib 用、未存在なら自動 build)
 #
 # 使い方:
-#   bash scripts/download_all_bench_data.sh           # 全部
-#   bash scripts/download_all_bench_data.sh --lp      # LP のみ
-#   bash scripts/download_all_bench_data.sh --qp      # QP のみ
-#   bash scripts/download_all_bench_data.sh --check   # 取得済み/未取得確認のみ
+#   bash scripts/download_all_bench_data.sh                     # 全部
+#   bash scripts/download_all_bench_data.sh --lp                # LP のみ
+#   bash scripts/download_all_bench_data.sh --qp                # QP のみ
+#   bash scripts/download_all_bench_data.sh --check             # 取得済み/未取得確認のみ
+#   bash scripts/download_all_bench_data.sh --ci-subset         # CI subset (11 dataset, ~1.2 GiB) のみ取得
+#   bash scripts/download_all_bench_data.sh --ci-subset --check # CI subset の確認のみ
 
 set -u
 
@@ -26,8 +28,22 @@ case "${1:-}" in
   --lp) MODE="lp" ;;
   --qp) MODE="qp" ;;
   --check) MODE="check" ;;
+  --ci-subset)
+    case "${2:-}" in
+      --check) MODE="ci-subset-check" ;;
+      "") MODE="ci-subset" ;;
+      *) echo "usage: $0 --ci-subset [--check]"; exit 1 ;;
+    esac
+    ;;
   "") ;;
-  *) echo "usage: $0 [--lp | --qp | --check]"; exit 1 ;;
+  *) echo "usage: $0 [--lp | --qp | --check | --ci-subset [--check]]"; exit 1 ;;
+esac
+
+# Build usage flags string for error messages (MODE "all" → no flags; compound modes → split flags)
+case "$MODE" in
+  all)              USAGE_FLAGS="" ;;
+  ci-subset-check)  USAGE_FLAGS="--ci-subset --check" ;;
+  *)                USAGE_FLAGS="--$MODE" ;;
 esac
 
 check_dir() {
@@ -53,7 +69,7 @@ check_python_qp_deps() {
     echo "[error] QP bench data 生成に必要な Python pkg (numpy / scipy) が host にない。" >&2
     echo "         Docker で実行 (推奨):" >&2
     echo "           docker run --rm -v \"\$PWD\":/workspace -w /workspace solver-dev \\" >&2
-    echo "             bash scripts/download_all_bench_data.sh${MODE:+ --$MODE}" >&2
+    echo "             bash scripts/download_all_bench_data.sh${USAGE_FLAGS:+ $USAGE_FLAGS}" >&2
     echo "         または host へ install:" >&2
     echo "           pip install numpy scipy cvxpy clarabel" >&2
     echo "         (cvxpy / clarabel は osqp_bench 系 generator のみで必要)" >&2
@@ -168,6 +184,45 @@ if [[ "$MODE" == "check" ]]; then
 fi
 
 ##############################################################################
+# CI subset check mode
+##############################################################################
+
+if [[ "$MODE" == "ci-subset-check" ]]; then
+  fail=0
+
+  echo "=== CI subset LP ==="
+  check_dir data/lp_problems         109 || fail=1
+  check_dir data/lp_problems_infeas   29 || fail=1
+  check_dir data/lp_problems_extra     4 || fail=1
+
+  echo "=== CI subset QP ==="
+  check_dir data/maros_meszaros      138 || fail=1
+  check_dir data/osqp_bench           62 || fail=1
+  check_dir data/qplib                41 || fail=1
+  check_dir data/mpc_qp               64 || fail=1
+  check_dir data/miplib_small         20 || fail=1
+  check_dir data/qplib_nonconvex      45 || fail=1
+  check_dir data/qplib_nonconvex_official 4 || fail=1
+  check_dir data/qp_dense_a            8 || fail=1
+
+  echo ""
+  echo "=== parse smoke ==="
+  smoke_qplib data/qplib                    || fail=1
+  smoke_qplib data/qplib_nonconvex_official || fail=1
+  smoke_qps   data/maros_meszaros           || fail=1
+
+  if [[ "$fail" -eq 0 ]]; then
+    echo ""
+    echo "[ci-subset check] all ok"
+  else
+    echo ""
+    echo "[ci-subset check] FAILED — see above" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+##############################################################################
 # LP suites
 ##############################################################################
 if [[ "$MODE" == "all" || "$MODE" == "lp" ]]; then
@@ -211,6 +266,36 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   run_or_skip data/qplib_unsupported         6   "bash scripts/qplib_unsupported_download.sh"
 fi
 
+##############################################################################
+# CI subset suites
+##############################################################################
+if [[ "$MODE" == "ci-subset" ]]; then
+  echo ""
+  echo "########## CI subset LP data ##########"
+
+  run_or_skip data/lp_problems           109 "bash scripts/netlib_lp_download.sh"
+  run_or_skip data/lp_problems_infeas    29  "bash scripts/netlib_lp_infeas_download.sh"
+  run_or_skip data/lp_problems_extra     4   "bash scripts/lp_extra_download.sh"
+
+  echo ""
+  echo "########## CI subset QP data ##########"
+
+  check_python_qp_deps
+
+  run_or_skip data/osqp_bench            62  "bash scripts/setup_extra_benches.sh && python3 scripts/gen_osqp_bench.py"
+  run_or_skip data/mpc_qp               64   "python3 scripts/gen_mpc_qp.py"
+  run_or_skip data/qp_dense_a            8   "python3 scripts/gen_dense_a_qp.py"
+  run_or_skip data/qplib_nonconvex      45   "python3 scripts/gen_nonconvex_qp.py"
+  run_or_skip data/maros_meszaros       138  "bash scripts/maros_meszaros_download.sh"
+  run_or_skip data/qplib                41   "bash scripts/qplib_download.sh"
+  run_or_skip data/qplib_nonconvex_official 4 "bash scripts/qplib_nonconvex_download.sh"
+  run_or_skip data/miplib_small         20   "bash scripts/miplib_small_download.sh"
+fi
+
 echo ""
 echo "[done] check status:"
-bash "$0" --check
+if [[ "$MODE" == "ci-subset" ]]; then
+  bash "$0" --ci-subset --check
+else
+  bash "$0" --check
+fi
