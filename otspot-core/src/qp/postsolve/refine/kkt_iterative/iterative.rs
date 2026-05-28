@@ -559,10 +559,6 @@ pub(crate) fn refine_kkt_iterative(
             break;
         }
 
-        let dx_inf: f64 = sol[..n].iter().fold(0.0, |a, &v| a.max(v.abs()));
-        let dy_inf: f64 = sol[n..].iter().fold(0.0, |a, &v| a.max(v.abs()));
-        let _ = (dx_inf, dy_inf);
-
         let mut x_new = result.solution.clone();
         let mut y_new = result.dual_solution.clone();
         let mut clip_amt = 0.0_f64;

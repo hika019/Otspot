@@ -13,7 +13,6 @@ mod factorize;
 mod init;
 mod iter;
 mod state;
-mod trace;
 mod warm_start;
 
 pub(crate) use iter::solve_ippmm_inner;

@@ -13,7 +13,6 @@ use super::state::{
     REG_LIMIT_INIT_QP, REG_LIMIT_MIN, REG_LIMIT_STEP, RESIDUAL_STALL_REL_DEC,
     RESIDUAL_STALL_WINDOW, RHO_INIT, STEP_REL_CAP,
 };
-use super::trace::{emit_prof_summary, emit_sigma_diag};
 use crate::linalg::kkt_solver::{inexact_eta_for_eps, KktConfig};
 use crate::linalg::parallelism::solver_par_from_threads;
 use crate::linalg::timeout::TimeoutCtx;
@@ -143,22 +142,12 @@ pub(crate) fn solve_ippmm_inner(
     let mut last_score_improvement_iter: usize = 0;
     let mut last_score_improvement_value: f64 = f64::INFINITY;
 
-    let prof = std::env::var("IPM_PROF").ok().as_deref() == Some("1");
-    let mut prof_iters: usize = 0;
-    let mut prof_residual_ns: u128 = 0;
-    let mut prof_predcorr_ns: u128 = 0;
-    let mut prof_gondzio_ns: u128 = 0;
-    let mut prof_update_ns: u128 = 0;
-
-    // 常時収集 (prof flag 不要): result の TimingBreakdown に昇格。
     let mut total_factorize_ns: u128 = 0;
     let mut total_solve_ns: u128 = 0;
     let mut total_reg_retries: u32 = 0;
     let mut any_iterative = false;
 
     for iter in 0..options.ipm.max_iter {
-        let prof_iter_start = if prof { Some(std::time::Instant::now()) } else { None };
-        let mut prof_section_start = prof_iter_start;
         if timeout_ctx.should_stop() {
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
@@ -249,17 +238,6 @@ pub(crate) fn solve_ippmm_inner(
             m
         };
 
-        if std::env::var("IPPMM_OPT_DIAG").ok().as_deref() == Some("1") {
-            eprintln!(
-                "IPPMM_OPT iter={} pf_rel={:.3e}/eps={:.3e}{} df_rel={:.3e}/eps={:.3e}{} mu={:.3e}/eps={:.3e}{} relgap={:.3e}/tol={:.3e}{}",
-                iter,
-                nr_p_rel, eps, if nr_p_rel < eps { "✓" } else { "✗" },
-                nr_d_rel, eps, if nr_d_rel < eps { "✓" } else { "✗" },
-                mu, eps, if mu < eps { "✓" } else { "✗" },
-                rel_gap, DUALITY_GAP_TOL, if rel_gap.abs() < DUALITY_GAP_TOL { "✓" } else { "✗" },
-            );
-        }
-
         // 残差小・duality gap 大の偽 Optimal (rank-deficient Q + c=0) を弾くため rel_gap も要求。
         if nr_p_rel < eps && nr_d_rel < eps && mu < eps && rel_gap.abs() < DUALITY_GAP_TOL {
             status = Some(SolveStatus::Optimal);
@@ -287,8 +265,6 @@ pub(crate) fn solve_ippmm_inner(
         let sigma_max = 1.0 / options.ipm.delta_min.max(MU_ZERO_THRESHOLD);
         let sigma_vec = compute_sigma_vec(&s, &y, &is_eq_ext, sigma_max);
 
-        emit_sigma_diag(iter, mu, &sigma_vec, &s, &y, &is_eq_ext);
-
         // 正則化は PMM 駆動。mu 依存 floor は使わない。
         let rho_matrix = pmm.rho.max(options.ipm.delta_min);
         let delta_matrix = pmm.delta.max(options.ipm.delta_min);
@@ -297,11 +273,6 @@ pub(crate) fn solve_ippmm_inner(
             status = Some(SolveStatus::Timeout);
             final_iter = iter;
             break;
-        }
-
-        if let Some(t) = prof_section_start {
-            prof_residual_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
         }
 
         let fact_ctx = FactorizeContext {
@@ -320,7 +291,6 @@ pub(crate) fn solve_ippmm_inner(
             timeout_ctx: &timeout_ctx,
             par,
             n,
-            prof,
             kkt_cfg: KktConfig {
                 dd_ldl: options.ipm.dd_ldl,
                 minres_ir: options.ipm.effective_minres_ir(),
@@ -345,10 +315,6 @@ pub(crate) fn solve_ippmm_inner(
         };
         // MINRES (iterative) backend のみ user eps 由来 η を反映、Direct/DirectDd では no-op。
         fac.set_iterative_tol(inexact_eta);
-
-        if let Some(_t) = prof_section_start {
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         let t_solve = std::time::Instant::now();
         let (pred, alpha, r_c_corr) = if use_schur {
@@ -383,11 +349,6 @@ pub(crate) fn solve_ippmm_inner(
             );
             (pred, alpha, r_c_corr)
         };
-
-        if let Some(t) = prof_section_start {
-            prof_predcorr_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         let mut alpha = alpha;
         if alpha < GONDZIO_ALPHA_TRIGGER {
@@ -506,11 +467,6 @@ pub(crate) fn solve_ippmm_inner(
 
         // predictor/corrector + Gondzio 全体の solve 時間を常時収集。
         total_solve_ns += t_solve.elapsed().as_nanos();
-
-        if let Some(t) = prof_section_start {
-            prof_gondzio_ns += t.elapsed().as_nanos();
-            prof_section_start = Some(std::time::Instant::now());
-        }
 
         update_variables(&mut x, &mut s, &mut y, &dx, &ds, &dy, alpha, &is_eq_ext);
 
@@ -633,21 +589,6 @@ pub(crate) fn solve_ippmm_inner(
 
         pmm.prev_nr_p = nr_p;
         pmm.prev_nr_d = nr_d;
-
-        if let Some(t) = prof_section_start {
-            prof_update_ns += t.elapsed().as_nanos();
-        }
-        if let Some(t) = prof_iter_start {
-            let _ = t.elapsed().as_nanos();
-        }
-        prof_iters += 1;
-    }
-
-    if prof {
-        emit_prof_summary(
-            prof_iters, prof_residual_ns, total_factorize_ns, prof_predcorr_ns,
-            prof_gondzio_ns, prof_update_ns, 0,
-        );
     }
 
     let status = status.unwrap_or(SolveStatus::Timeout);

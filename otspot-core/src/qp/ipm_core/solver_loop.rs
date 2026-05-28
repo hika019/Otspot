@@ -749,7 +749,7 @@ mod tests {
     use crate::linalg::amd::amd_with_deadline;
     use crate::sparse::CscMatrix;
 
-/// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
+    /// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
     #[test]
     fn test_schur_matches_augmented_realistic() {
         let n = 4;
