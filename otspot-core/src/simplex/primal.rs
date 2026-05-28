@@ -1067,9 +1067,6 @@ const STEP_BAIL_RATIO: usize = 10;
 /// `current + best * REL_EPS < best`: relative threshold above f64 noise
 /// (~1e-15) that filters degenerate step≈0 "non-progress" from real moves.
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
-// step_zero_threshold = PIVOT_TOL * m: degenerate pivot threshold.
-// Charnes perturbation bound: x_b[i] ≤ PIVOT_TOL * m, O(1) d[leaving] → step ≤ PIVOT_TOL * m.
-
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
 ///
@@ -1130,6 +1127,8 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     // Phase I cycling early-bail state.
     let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
     let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
+    // Charnes perturbation bound: x_b[i] ≤ PIVOT_TOL * m for a degenerate basis,
+    // so O(1) leaving-direction d[leaving] → step ≤ PIVOT_TOL * m.
     let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     // Initialize from the actual starting objective so progress_eps is finite
     // from iteration 1.  f64::INFINITY would make progress_eps = ∞ and the

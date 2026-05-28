@@ -115,9 +115,10 @@ const MAX_ITER_PER_ATTEMPT: usize = 500;
 /// No-presolve fallback: only run on problems this size or smaller. The fallback
 /// re-solves the original (non-reduced) problem, bypassing the Ruiz amplification
 /// that can stop the inner IPM from converging tightly enough. The cap bounds the
-/// cost of re-solving without presolve reduction; it sits below PRESOLVE_SIZE_LIMIT
-/// (50_000), so problems in between still get presolve+Ruiz but are deemed too
-/// large to re-solve from scratch economically.
+/// cost of re-solving without presolve reduction; it sits below
+/// [`LARGE_PROBLEM_THRESHOLD`](crate::tolerances::LARGE_PROBLEM_THRESHOLD) (50_000),
+/// so problems in between still get presolve+Ruiz but are deemed too large to
+/// re-solve from scratch economically.
 const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;

@@ -70,10 +70,12 @@ pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
 pub const UNDERFLOW_GUARD: f64 = 1e-300;
 
-/// 規模ガード閾値 (n+m または単独次元)。
+/// Size gate shared across expensive post-processing sites.
 ///
-/// この閾値を超える問題では高コストな post-processing (primal projection /
-/// KKT refinement / presolve perturbation など) をスキップし、
-/// IPM 本体に予算を確保する。全サイトで共有する基準値。
+/// Problems above this threshold skip high-cost operations (primal projection,
+/// KKT refinement, presolve perturbation) to reserve budget for the IPM core.
+///
+/// Usage varies by site: some compare `n + m` against this value; others
+/// check each dimension individually (`num_vars <= T && num_constraints <= T`).
 pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
 

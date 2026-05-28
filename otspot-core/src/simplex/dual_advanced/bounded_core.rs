@@ -114,6 +114,8 @@ fn flip_apply_disabled() -> bool {
 /// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
 const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
 
+/// Hard cap for the bounded dual simplex loop (alias of [`SIMPLEX_ITER_HARD_CAP`]).
+/// Guarantees termination when deadline is absent (unit tests) or pricing degenerates.
 const BOUNDED_DUAL_ITER_HARD_CAP: usize = SIMPLEX_ITER_HARD_CAP;
 
 /// Internal state of the bounded dual simplex iteration. Built from

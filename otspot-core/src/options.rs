@@ -559,7 +559,7 @@ const MAX_ETAS_DIVISOR: usize = 50;
 const MAX_ETAS_FLOOR: usize = 20;
 
 /// Default maximum fixpoint passes for QP presolve.
-pub const DEFAULT_PRESOLVE_MAX_PASS: usize = 10;
+pub(crate) const DEFAULT_PRESOLVE_MAX_PASS: usize = 10;
 
 /// Auto-compute `max_etas` from problem size.
 ///

@@ -122,6 +122,7 @@ pub fn solve_qp(problem: &QpProblem) -> SolverResult {
 /// faer supernodal Cholesky requires more stack than Rust's default 2 MiB thread stack
 /// on large problems (e.g. BOYD1, n=93261). Callers spawning solver threads should
 /// use this constant to ensure no stack overflow.
+#[doc(hidden)]
 pub const SOLVE_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// QP をカスタム設定で解く (8 MB scoped thread で stack overflow を防ぐ)。
