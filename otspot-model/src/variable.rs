@@ -21,7 +21,8 @@ pub enum VarKind {
 /// without being consumed: `x + y` does not move `x`.
 ///
 /// Internally, a `Variable` carries its index and the ID of the model that
-/// created it. The model ID is used by [`ModelResult::try_value`] to detect
+/// created it. The model ID is used by checked variants such as
+/// [`crate::Model::try_var_name`] and [`crate::ModelResult::try_value`] to detect
 /// cross-model variable misuse at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Variable {
