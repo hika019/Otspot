@@ -9,6 +9,7 @@ pub mod attempt;
 pub use attempt::solve_ipm;
 
 #[cfg(test)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     use super::*;
     use crate::io::qps::parse_qps;

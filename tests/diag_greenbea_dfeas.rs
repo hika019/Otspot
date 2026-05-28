@@ -142,4 +142,8 @@ fn diag_greenbea_presolve_off_baseline() {
         "[greenbea/presolve_off] status={:?} elapsed={:.2}s dfeas_rel={:.3e}",
         status, elapsed, dfeas_rel
     );
+    assert_ne!(
+        status, SolveStatus::NumericalError,
+        "presolve=off must not cause NumericalError (solver instability)"
+    );
 }

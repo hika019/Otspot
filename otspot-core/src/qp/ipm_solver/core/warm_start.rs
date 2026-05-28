@@ -30,8 +30,8 @@ pub(super) fn translate_warm_start_for_presolve(
     let n_orig = presolve_result.orig_num_vars;
     let m_orig = presolve_result.orig_num_constraints;
     if ws.x.len() != n_orig || ws.y.len() != m_orig {
-        eprintln!(
-            "[warm_start_qp dropped] presolve dim mismatch: ws.x={}/{} ws.y={}/{}",
+        log::warn!(
+            "warm_start_qp ignored: presolve dim mismatch (x: {}/{}, y: {}/{})",
             ws.x.len(), n_orig, ws.y.len(), m_orig
         );
         opts.warm_start_qp = None;
@@ -69,8 +69,8 @@ pub(super) fn translate_warm_start_for_presolve(
         if scaler.d.len() != n_red || scaler.e.len() != m_red
             || !scaler.c.is_finite() || scaler.c <= 0.0
         {
-            eprintln!(
-                "[warm_start_qp dropped] ruiz scaler dim/c invalid: d={}/{} e={}/{} c={}",
+            log::warn!(
+                "warm_start_qp ignored: ruiz scaler dim/c invalid (d: {}/{}, e: {}/{}, c: {})",
                 scaler.d.len(), n_red, scaler.e.len(), m_red, scaler.c
             );
             opts.warm_start_qp = None;
@@ -79,7 +79,7 @@ pub(super) fn translate_warm_start_for_presolve(
         for k in 0..n_red {
             let dk = scaler.d[k];
             if !dk.is_finite() || dk == 0.0 {
-                eprintln!("[warm_start_qp dropped] ruiz d[{}]={} non-finite/zero", k, dk);
+                log::warn!("warm_start_qp ignored: ruiz d[{}]={} non-finite/zero", k, dk);
                 opts.warm_start_qp = None;
                 return;
             }
@@ -88,7 +88,7 @@ pub(super) fn translate_warm_start_for_presolve(
         for i in 0..m_red {
             let ei = scaler.e[i];
             if !ei.is_finite() || ei == 0.0 {
-                eprintln!("[warm_start_qp dropped] ruiz e[{}]={} non-finite/zero", i, ei);
+                log::warn!("warm_start_qp ignored: ruiz e[{}]={} non-finite/zero", i, ei);
                 opts.warm_start_qp = None;
                 return;
             }

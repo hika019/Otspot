@@ -128,8 +128,6 @@ pub(crate) fn refine_kkt_iterative(
         delta_d,
     );
 
-    let diag_on = std::env::var("REFINE_KKT_DIAG").ok().as_deref() == Some("1");
-
     // bound-active 変数の dx を K 対角 penalty で抑制 (近似 active set fix)。
     const ACTIVE_TOL: f64 = 1e-8;
     const ACTIVE_PENALTY_RATIO: f64 = 1e8;
@@ -147,7 +145,6 @@ pub(crate) fn refine_kkt_iterative(
             }
         }
         let active_penalty = (k_diag_max * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
-        let mut penalized = 0_usize;
         for j in 0..n {
             let x = result.solution[j];
             let (lb, ub) = problem.bounds[j];
@@ -161,64 +158,15 @@ pub(crate) fn refine_kkt_iterative(
             for k in col_start..col_end {
                 if k_mat.row_ind[k] == j {
                     k_mat.values[k] += active_penalty;
-                    penalized += 1;
                     break;
                 }
             }
         }
-        if diag_on && penalized > 0 {
-            eprintln!("REFINE_KKT bound-active fix: penalized {} vars (PENALTY={:.2e}, K_diag_max={:.2e})",
-                penalized, active_penalty, k_diag_max);
-        }
     }
-    if diag_on {
-        let mut diag_top_min = f64::INFINITY;
-        let mut diag_top_max = f64::NEG_INFINITY;
-        let mut diag_top_abs_min = f64::INFINITY;
-        let mut diag_bot_min = f64::INFINITY;
-        let mut diag_bot_max = f64::NEG_INFINITY;
-        let mut diag_bot_abs_min = f64::INFINITY;
-        for j in 0..(n + m) {
-            let col_start = k_mat.col_ptr[j];
-            let col_end = k_mat.col_ptr[j + 1];
-            for k in col_start..col_end {
-                if k_mat.row_ind[k] == j {
-                    let v = k_mat.values[k];
-                    if j < n {
-                        diag_top_min = diag_top_min.min(v);
-                        diag_top_max = diag_top_max.max(v);
-                        diag_top_abs_min = diag_top_abs_min.min(v.abs());
-                    } else {
-                        diag_bot_min = diag_bot_min.min(v);
-                        diag_bot_max = diag_bot_max.max(v);
-                        diag_bot_abs_min = diag_bot_abs_min.min(v.abs());
-                    }
-                    break;
-                }
-            }
-        }
-        eprintln!(
-            "REFINE_KKT_DIAG K_diag top(Q+δp·I)=[min={:.3e} max={:.3e} abs_min={:.3e}] bot(-δd·I)=[min={:.3e} max={:.3e} abs_min={:.3e}]",
-            diag_top_min, diag_top_max, diag_top_abs_min,
-            diag_bot_min, diag_bot_max, diag_bot_abs_min
-        );
-        let abs_max = k_mat.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let abs_min_nz = k_mat
-            .values
-            .iter()
-            .filter(|&&v| v != 0.0)
-            .fold(f64::INFINITY, |a, &v| a.min(v.abs()));
-        eprintln!(
-            "REFINE_KKT_DIAG K_all abs_max={:.3e} abs_min_nz={:.3e} ratio={:.3e}",
-            abs_max,
-            abs_min_nz,
-            abs_max / abs_min_nz.max(1e-300)
-        );
-    }
+
     // On SingularOrIndefinite, grow δ by FACTOR_RETRY_GROWTH and retry until
     // factorization succeeds; the first success is the smallest δ that works
     // (deltas grow monotonically). Deadline guards against large-K stalls.
-
     const FACTOR_RETRY_GROWTH: f64 = 10.0;
     const FACTOR_RETRY_MAX: usize = 6;
     let factor = {
@@ -229,12 +177,6 @@ pub(crate) fn refine_kkt_iterative(
         let mut retry_count = 0usize;
         loop {
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                if diag_on {
-                    eprintln!(
-                        "REFINE_KKT factorize abandoned due to deadline at retry={}",
-                        retry_count
-                    );
-                }
                 break;
             }
             match crate::linalg::ldl::factorize_quasidefinite_with_amd(&current_k, deadline) {
@@ -242,12 +184,8 @@ pub(crate) fn refine_kkt_iterative(
                     result_factor = Some(f);
                     break;
                 }
-                Err(e) => {
+                Err(_) => {
                     if retry_count >= FACTOR_RETRY_MAX {
-                        if diag_on {
-                            eprintln!("REFINE_KKT factorize failed after {} retries: {:?} (last delta_p={:.1e} delta_d={:.1e})",
-                                retry_count, e, current_delta_p, current_delta_d);
-                        }
                         break;
                     }
                     retry_count += 1;
@@ -296,35 +234,11 @@ pub(crate) fn refine_kkt_iterative(
                 }
             }
         }
-        if diag_on && retry_count > 0 && result_factor.is_some() {
-            eprintln!("REFINE_KKT factorize succeeded after {} retries (final delta_p={:.1e} delta_d={:.1e})",
-                retry_count, current_delta_p, current_delta_d);
-        }
         match result_factor {
             Some(f) => f,
             None => return 0,
         }
     };
-    if diag_on {
-        // cond 代理: ||K^-1·r||_∞ / ||r||_∞ (xorshift64 RHS)。
-        let mut rng_state: u64 = 0x9E3779B97F4A7C15;
-        let mut rhs = vec![0.0_f64; n + m];
-        for v in rhs.iter_mut() {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            *v = ((rng_state as f64) / (u64::MAX as f64)) * 2.0 - 1.0;
-        }
-        let rhs_inf = rhs.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let mut sol = vec![0.0_f64; n + m];
-        factor.solve(&rhs, &mut sol);
-        let sol_inf = sol.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let any_nan = sol.iter().any(|v| !v.is_finite());
-        eprintln!(
-            "REFINE_KKT_DIAG cond_proxy: ||K^-1·rand||_∞ / ||rand||_∞ = {:.3e} / {:.3e} = {:.3e} nan={}",
-            sol_inf, rhs_inf, sol_inf / rhs_inf.max(1e-300), any_nan
-        );
-    }
 
     // Exclude FX vars (lb≈ub) and presolve-eliminated columns from stationarity.
     use crate::tolerances::FX_TOL;
@@ -531,7 +445,7 @@ pub(crate) fn refine_kkt_iterative(
     let pf_limit = (pre_pf_rel * RESID_TOLERANCE_FACTOR).max(resid_floor);
     let df_limit = (pre_df_rel * RESID_TOLERANCE_FACTOR).max(resid_floor);
 
-    for iter in 0..max_iters {
+    for _iter in 0..max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
@@ -561,9 +475,6 @@ pub(crate) fn refine_kkt_iterative(
 
         let mut x_new = result.solution.clone();
         let mut y_new = result.dual_solution.clone();
-        let mut clip_amt = 0.0_f64;
-        let mut clip_count = 0_usize;
-        let mut clip_top: Vec<(usize, f64)> = Vec::new();
         for j in 0..n {
             let raw = x_new[j] + sol[j];
             let (lb, ub) = problem.bounds[j];
@@ -574,31 +485,7 @@ pub(crate) fn refine_kkt_iterative(
             if ub.is_finite() {
                 clipped = clipped.min(ub);
             }
-            let amt = (raw - clipped).abs();
-            clip_amt = clip_amt.max(amt);
-            if amt > 0.0 {
-                clip_count += 1;
-                if diag_on {
-                    clip_top.push((j, amt));
-                }
-            }
             x_new[j] = clipped;
-        }
-        if diag_on && !clip_top.is_empty() {
-            clip_top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top5: Vec<String> = clip_top
-                .iter()
-                .take(5)
-                .map(|(j, a)| format!("x[{}]={:.2e}", j, a))
-                .collect();
-            eprintln!(
-                "REFINE_KKT_DIAG iter={} clip_count={}/{} clip_max={:.3e} top5: {}",
-                iter,
-                clip_count,
-                n,
-                clip_amt,
-                top5.join(", ")
-            );
         }
         for i in 0..m {
             y_new[i] += sol[n + i];

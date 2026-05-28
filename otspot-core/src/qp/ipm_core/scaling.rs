@@ -86,8 +86,8 @@ where
                     for j in 0..n { ws.x[j] /= scaler.d[j]; }
                     for i in 0..m { ws.y[i] = scaler.c * ws.y[i] / scaler.e[i]; }
                 } else {
-                    eprintln!(
-                        "[warm_start_qp dropped] ruiz dim mismatch: ws.x={}/{} ws.y={}/{}",
+                    log::warn!(
+                        "warm_start_qp ignored: ruiz dim mismatch (x: {}/{}, y: {}/{})",
                         ws.x.len(), n, ws.y.len(), m
                     );
                     adjusted_opts.warm_start_qp = None;

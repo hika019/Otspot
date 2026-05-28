@@ -6,6 +6,7 @@
     clippy::needless_range_loop,
     clippy::too_many_arguments,
 )]
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 //! # otspot — 数理最適化ソルバー
 //!

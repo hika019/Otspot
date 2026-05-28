@@ -26,8 +26,8 @@ pub(super) fn apply_qp_warm_start(
 ) -> Option<f64> {
     let n = problem.num_vars;
     if ws.x.len() != n || ws.y.len() != m_orig {
-        eprintln!(
-            "[warm_start_qp dropped] ippmm dim mismatch: ws.x={}/{} ws.y={}/{}",
+        log::warn!(
+            "warm_start_qp ignored: ippmm dim mismatch (x: {}/{}, y: {}/{})",
             ws.x.len(), n, ws.y.len(), m_orig
         );
         return None;

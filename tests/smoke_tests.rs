@@ -1,33 +1,36 @@
-/// Smoke tests: verify that key modules exist and are accessible
-/// (対策6: cmd_094消失事故の再発防止)
-#[cfg(test)]
-mod smoke_tests {
-    #[test]
-    fn scaling_module_exists() {
-        // presolve は pub(crate) のため外部から型参照不可。
-        // solve() を通じて presolve (RuizScaler) が動作することを確認。
-        use otspot::problem::LpProblem;
-        use otspot::sparse::CscMatrix;
-        use otspot::solve;
-        let a = CscMatrix::new(0, 1);
-        let prob = LpProblem::new_general(
-            vec![1.0], a, vec![], vec![], vec![(0.0, 1.0)], None
-        ).unwrap();
-        // solve() 内部で presolve (RuizScaler) が呼ばれる
-        let _ = solve(&prob);
-    }
+//! LP integration smoke tests — verify solve() returns Optimal on basic LPs.
 
-    #[test]
-    fn pricing_module_exists() {
-        // SteepestEdgePricing は pub(crate) （内部実装）のため直接アクセス不可。
-        // simplex::solve を通じて pricing が動作することを確認。
-        use otspot::problem::LpProblem;
-        use otspot::sparse::CscMatrix;
-        use otspot::solve;
-        let a = CscMatrix::new(0, 1);
-        let prob = LpProblem::new_general(
-            vec![1.0], a, vec![], vec![], vec![(0.0, 1.0)], None
-        ).unwrap();
-        let _ = solve(&prob);
-    }
+use otspot::problem::{LpProblem, SolveStatus};
+use otspot::solve;
+use otspot::sparse::CscMatrix;
+
+fn unit_diagonal_csc(n: usize) -> CscMatrix {
+    let rows: Vec<usize> = (0..n).collect();
+    let cols: Vec<usize> = (0..n).collect();
+    let vals: Vec<f64> = vec![1.0; n];
+    CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap()
+}
+
+/// Scaling module integration: tiny LP with unit scaling must reach Optimal.
+#[test]
+fn scaling_module_exists() {
+    let n = 3;
+    let c = vec![1.0, 2.0, 3.0];
+    let a = unit_diagonal_csc(n);
+    let b = vec![10.0, 10.0, 10.0];
+    let prob = LpProblem::new(c, a, b).unwrap();
+    let result = solve(&prob);
+    assert_eq!(result.status, SolveStatus::Optimal, "scaling smoke: expected Optimal, got {:?}", result.status);
+}
+
+/// Pricing module integration: LP with all-ones objective must reach Optimal.
+#[test]
+fn pricing_module_exists() {
+    let n = 4;
+    let c = vec![1.0; n];
+    let a = unit_diagonal_csc(n);
+    let b = vec![5.0; n];
+    let prob = LpProblem::new(c, a, b).unwrap();
+    let result = solve(&prob);
+    assert_eq!(result.status, SolveStatus::Optimal, "pricing smoke: expected Optimal, got {:?}", result.status);
 }

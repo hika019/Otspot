@@ -956,11 +956,14 @@ pub fn run_postsolve(
     // full y vector when coupling is strong.
     let y_lsq: Option<Vec<f64>> = if cheap_min <= gate || cleanup_stagnant {
         #[cfg(debug_assertions)]
-        if cleanup_stagnant {
-            eprintln!(
-                "[postsolve] LSQ skip: improvement-stagnant (cheap_min={:.3e} df_cl_min={:.3e})",
-                cheap_min, df_cl_min
-            );
+        {
+            #[allow(clippy::print_stderr)]
+            if cleanup_stagnant {
+                eprintln!(
+                    "[postsolve] LSQ skip: improvement-stagnant (cheap_min={:.3e} df_cl_min={:.3e})",
+                    cheap_min, df_cl_min
+                );
+            }
         }
         None
     } else if m > 0 {

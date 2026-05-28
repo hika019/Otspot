@@ -1041,6 +1041,7 @@ dependencies = [
  "otspot-io",
  "tempfile",
  "twofloat",
+ "walkdir",
 ]
 
 [[package]]

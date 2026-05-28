@@ -4,5 +4,6 @@
 //! integration tests, benchmarks, and development binaries — never by
 //! production crates.
 
+pub mod audit;
 pub mod bench_utils;
 pub mod screening;

@@ -68,6 +68,7 @@ pub fn parse_qps_str(input: &str) -> Result<QpProblem, QpsError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     use super::*;
     use otspot_core::problem::SolveStatus;

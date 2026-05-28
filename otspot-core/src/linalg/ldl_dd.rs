@@ -290,6 +290,7 @@ pub fn factorize_quasidefinite_with_cached_perm_dd(
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
