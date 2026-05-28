@@ -164,15 +164,11 @@ fn dual_sign_convention_observation_qadlittl() {
 
     for i in 0..m.min(result.dual_solution.len()) {
         match qp.constraint_types[i] {
-            ConstraintType::Le => {
-                if result.dual_solution[i] < -eps {
-                    le_max_neg = le_max_neg.max(-result.dual_solution[i]);
-                }
+            ConstraintType::Le if result.dual_solution[i] < -eps => {
+                le_max_neg = le_max_neg.max(-result.dual_solution[i]);
             }
-            ConstraintType::Ge => {
-                if result.dual_solution[i] > eps {
-                    ge_max_pos = ge_max_pos.max(result.dual_solution[i]);
-                }
+            ConstraintType::Ge if result.dual_solution[i] > eps => {
+                ge_max_pos = ge_max_pos.max(result.dual_solution[i]);
             }
             _ => {}
         }
