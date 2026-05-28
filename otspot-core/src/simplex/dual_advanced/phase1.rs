@@ -1242,10 +1242,11 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((seed >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0
         };
+        /// Max random probe attempts to generate a negative-x_B test configuration.
+        const RANDOM_PROBE_RETRIES: usize = 20;
         let mut found = false;
         let mut last_outcome = super::crash_probe::Outcome::DisabledOption;
-        // 短い deadline (0.5s) で hard LP に詰まらないよう保護。試行 20 回。
-        for _ in 0..20 {
+        for _ in 0..RANDOM_PROBE_RETRIES {
             let n = 6usize;
             let m = 4usize;
             let mut rows = Vec::new();

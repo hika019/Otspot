@@ -353,10 +353,9 @@ fn solve_ipm_with_runner(
     // presolve だけで deadline 予算を食い切り IPM が走れなくなる。この上限は
     // 「presolve に予算を配分するか IPM に回すか」の予算配分ガード (時間予算 proxy)。
     // n か m のどちらかが上限超なら presolve を skip し IPM に予算を残す。
-    const PRESOLVE_SIZE_LIMIT: usize = 50_000;
     let presolve_result = if opts.presolve
-        && problem.num_vars <= PRESOLVE_SIZE_LIMIT
-        && problem.num_constraints <= PRESOLVE_SIZE_LIMIT
+        && problem.num_vars <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
+        && problem.num_constraints <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
     {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
         if opts.presolve_phase2 {

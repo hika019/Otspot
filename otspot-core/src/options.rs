@@ -553,11 +553,19 @@ pub struct SolverOptions {
     pub known_optimal_obj: Option<f64>,
 }
 
+/// Divisor for the `max_etas` heuristic: floor(m / MAX_ETAS_DIVISOR).
+const MAX_ETAS_DIVISOR: usize = 50;
+/// Minimum value for `default_max_etas`.
+const MAX_ETAS_FLOOR: usize = 20;
+
+/// Default maximum fixpoint passes for QP presolve.
+pub const DEFAULT_PRESOLVE_MAX_PASS: usize = 10;
+
 /// Auto-compute `max_etas` from problem size.
 ///
-/// Small problems (m < 1000): 20; larger: m / 50.
+/// Small problems (m < 1000): `MAX_ETAS_FLOOR`; larger: m / `MAX_ETAS_DIVISOR`.
 pub fn default_max_etas(m: usize) -> usize {
-    (m / 50).max(20)
+    (m / MAX_ETAS_DIVISOR).max(MAX_ETAS_FLOOR)
 }
 
 /// Phase I retry cap: guards against degenerate problems that loop with an
@@ -580,7 +588,7 @@ impl Default for SolverOptions {
             recover_warm_start_basis: false,
             use_lp_crash_basis: true,
             presolve: true,
-            presolve_max_pass: 10,
+            presolve_max_pass: DEFAULT_PRESOLVE_MAX_PASS,
             presolve_skip_large_coeff: false,
             presolve_phase2: true,
             timeout_secs: None,
@@ -986,7 +994,7 @@ mod tests {
     #[test]
     fn test_solver_presolve_fields_default() {
         let o = SolverOptions::default();
-        assert_eq!(o.presolve_max_pass, 10, "default max pass = 10");
+        assert_eq!(o.presolve_max_pass, DEFAULT_PRESOLVE_MAX_PASS, "default max pass");
         assert!(!o.presolve_skip_large_coeff, "default skip_large_coeff = false");
         assert!(o.presolve_phase2, "default phase2 = true");
     }

@@ -65,3 +65,15 @@ pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
     (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
 }
 
+/// アンダーフロー防止ガード閾値。行/列の最大絶対値がこれ以下の場合、
+/// スケール係数の逆数計算によるオーバーフローを防ぐため 1.0 に固定する。
+/// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
+pub const UNDERFLOW_GUARD: f64 = 1e-300;
+
+/// 規模ガード閾値 (n+m または単独次元)。
+///
+/// この閾値を超える問題では高コストな post-processing (primal projection /
+/// KKT refinement / presolve perturbation など) をスキップし、
+/// IPM 本体に予算を確保する。全サイトで共有する基準値。
+pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
+

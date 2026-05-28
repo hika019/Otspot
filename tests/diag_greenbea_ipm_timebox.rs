@@ -21,7 +21,7 @@
 
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
-use otspot::qp::solve_qp_with;
+use otspot::qp::{solve_qp_with, SOLVE_STACK_SIZE};
 use otspot::io::qps::parse_qps;
 use std::path::Path;
 use std::sync::mpsc;
@@ -47,8 +47,7 @@ fn diag_greenbea_ipm_timebox_reaches_optimal() {
     let (tx, rx) = mpsc::channel();
     let handle = thread::Builder::new()
         .name("greenbea-solver".into())
-        // 8 MiB stack: faer supernodal recursion overflows the default on large bases.
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(SOLVE_STACK_SIZE)
         .spawn(move || {
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(timeout_secs);

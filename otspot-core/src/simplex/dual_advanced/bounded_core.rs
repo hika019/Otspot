@@ -110,11 +110,11 @@ fn flip_apply_disabled() -> bool {
     false
 }
 
-/// Hard iteration cap to guarantee termination even when the pricing
-/// degenerates. Matches the existing dual cores' implicit budget via deadline;
-/// here the cap is the only safety net because `BoundedDualState` callers may
-/// pass `options.deadline = None` in unit tests.
-const BOUNDED_DUAL_ITER_HARD_CAP: usize = 1_000_000;
+/// Hard iteration cap shared by both bounded dual and bounded primal Phase 2 loops.
+/// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
+const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
+
+const BOUNDED_DUAL_ITER_HARD_CAP: usize = SIMPLEX_ITER_HARD_CAP;
 
 /// Internal state of the bounded dual simplex iteration. Built from
 /// `BoundedStandardForm` (cold) or hand-populated by tests / warm-start
@@ -630,8 +630,7 @@ pub(crate) fn extract_dual_info_bounded(
 
 // ── bounded primal Phase 2 ─────────────────────────────────────────────────
 
-/// Hard iteration cap for the bounded primal Phase 2 loop.
-const PHASE2_PRIMAL_ITER_CAP: usize = 1_000_000;
+const PHASE2_PRIMAL_ITER_CAP: usize = SIMPLEX_ITER_HARD_CAP;
 
 /// Objective including non-basic at-upper-bound contributions.
 ///
