@@ -4,7 +4,8 @@
 //!   DD 残差で改善した場合のみ採用 (退行防止)。
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
-use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib};
+use crate::qp::kkt_resid;
+use crate::qp::linalg::build_aat_upper_csc;
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
@@ -51,7 +52,7 @@ pub(crate) fn refine_dual_lsq(
     };
     let aty_old_dd = aty_dd(&result.dual_solution);
     let aty_new_dd = aty_dd(&y_new);
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
     // componentwise rel = |r_j| / (1 + |Qx_j| + |c_j| + |Aty_j| + |z_j|) で比較。
     // abs max では ill-scaled 問題で外れ残差が巨大スケールに埋もれる。
     let mut max_rel_old = 0.0_f64;
@@ -125,7 +126,7 @@ pub(crate) fn refine_dual_lsq_irls(
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
     let target: Vec<f64> = (0..n)
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();

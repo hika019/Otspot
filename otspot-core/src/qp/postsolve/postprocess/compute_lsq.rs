@@ -5,7 +5,8 @@
 //! Falls back to direct LDL+IR only when CG returns NaN/Inf.
 //! Unconverged best-effort solutions are refined downstream by `refine_dual_lsq`.
 
-use crate::qp::linalg::{build_aat_upper_csc, compute_bound_contrib, AAT_REG_FACTOR};
+use crate::qp::kkt_resid;
+use crate::qp::linalg::{build_aat_upper_csc, AAT_REG_FACTOR};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
@@ -313,7 +314,7 @@ pub(crate) fn compute_lsq_dual_y(
             qx_dd[row] += TwoFloat::new_mul(problem.q.values[k], xv);
         }
     }
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
     let target_dd: Vec<TwoFloat> = (0..n)
         .map(|j| -(qx_dd[j] + TwoFloat::from(problem.c[j]) + TwoFloat::from(bound_contrib[j])))
         .collect();

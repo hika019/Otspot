@@ -1,7 +1,7 @@
 //! worst residual 列に接続する active cluster を局所的に再最適化。
 //! [active row duals ; active bound duals] 連成で解く (row dual 単独では bound 押し返しで悪化)。
 
-use crate::qp::linalg::compute_bound_contrib;
+use crate::qp::kkt_resid;
 use crate::qp::postsolve::dual_recovery::{
     compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds,
     row_is_active_for_dual_recovery, select_dual_recovery_local_bounds,
@@ -40,7 +40,7 @@ pub(crate) fn refine_dual_worst_active_block(
     let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
         return;
     };
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
 
     let use_elim_mask = eliminated_cols.len() == n;
     let mut worst_j = None;

@@ -1,6 +1,6 @@
 //! 不等式符号 / inactive 0 制約を保ちつつ ‖A^T y - target‖² を projected gradient で下げる。
 
-use crate::qp::linalg::compute_bound_contrib;
+use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 
@@ -28,7 +28,7 @@ pub(crate) fn refine_dual_projected_gradient(
         }
     }
     let qx: Vec<f64> = qx_dd.iter().map(|&v| f64::from(v)).collect();
-    let bound_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
     let target: Vec<f64> = (0..n)
         .map(|j| -(qx[j] + problem.c[j] + bound_contrib[j]))
         .collect();
