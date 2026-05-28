@@ -646,9 +646,6 @@ pub(crate) fn solve_ippmm_inner(
 
         iterations: final_iter,
         final_residuals,
-        pfeas: final_residuals.map(|(pf, _, _)| pf),
-        dfeas: final_residuals.map(|(_, df, _)| df),
-        gap: final_residuals.map(|(_, _, g)| g),
         // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
         duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },
         timing_breakdown: Some(ipm_timing),

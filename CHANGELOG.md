@@ -32,6 +32,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 削除
 
+- **`SolveOutcome` enum および関連型削除**: `SolveOutcome`、`FarkasCertificate`、`UnboundedRayCertificate`、`IncompleteReason` を公開 API から削除。証明付き結果は `SolverResult` + `OptimalCertificate` / `BoundGapCertificate` で表現する。
+- **`diagnose()` 関数および関連型削除**: `diagnose()`、`DiagnosticReport`、`DiagnosticWarning`、`DiagnosticCode`、`Severity`、`ProblemInfo` を公開 API から削除。
+- **`SolverResult::pfeas`、`dfeas`、`gap` フィールド削除**: `final_residuals: Option<(f64, f64, f64)>` フィールドに集約済みの重複フィールドを削除。移行: `result.gap` → `result.final_residuals.map(|(_, _, g)| g)`。
 - **`solve_qp_with_options` 削除**: 0.1.0 から deprecated だった `solve_qp_with_options` を完全削除。代わりに `solve_qp_with` を使用すること。
 
 ### 修正

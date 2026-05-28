@@ -126,10 +126,7 @@ static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;
 pub use problem::{SolveRoute, SolveStats, SolveStatus};
-pub use problem::certificate::{
-    BoundGapCertificate, FarkasCertificate, IncompleteReason, NotProven, OptimalCertificate,
-    SolveOutcome, UnboundedRayCertificate,
-};
+pub use problem::certificate::{BoundGapCertificate, NotProven, OptimalCertificate};
 pub use qp::certificate::prove_optimal;
 pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, SolverResult, QpWarmStart};
 pub use mip::{
@@ -148,7 +145,6 @@ pub mod bound_flip {
         BfrtResult, ColBound,
     };
 }
-pub use qp::{diagnose, DiagnosticReport, DiagnosticWarning, DiagnosticCode, Severity, ProblemInfo};
 
 /// RAII guard that disables a production sentinel for the duration of its lifetime.
 ///

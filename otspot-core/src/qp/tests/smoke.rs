@@ -219,7 +219,7 @@ fn test_warm_start_consistency() {
     let ws = crate::qp::QpWarmStart {
         x: result1.solution.clone(),
         y: result1.dual_solution.clone(),
-        mu: result1.gap.unwrap_or(1e-6),
+        mu: result1.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6),
     };
     let result2 = solve_qp_warm(&problem2, &ws, &SolverOptions::default());
 
