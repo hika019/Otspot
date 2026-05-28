@@ -3,6 +3,7 @@
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 
 /// `user_eps / amplification` の machine-noise floor。
@@ -203,22 +204,7 @@ pub(crate) fn check_dfeas_status(
     } else {
         vec![0.0; n]
     };
-    let mut bound_contrib = vec![0.0f64; n];
-    if !bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] -= bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] += bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    }
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, bound_duals);
     let dfeas = (0..n)
         .map(|i| (qx[i] + aty[i] + bound_contrib[i] + problem.c[i]).abs())
         .fold(0.0_f64, f64::max);
@@ -256,22 +242,7 @@ pub(crate) fn check_dfeas_status_relative(
             }
         }
     }
-    let mut bound_contrib = vec![0.0f64; n];
-    if !bound_duals.is_empty() {
-        let mut bd_idx = 0usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] -= bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && bd_idx < bound_duals.len() {
-                bound_contrib[j] += bound_duals[bd_idx];
-                bd_idx += 1;
-            }
-        }
-    }
+    let bound_contrib = kkt_resid::bound_contrib(&problem.bounds, bound_duals);
     // 全体最大値スケールでは外れ残差を 1 成分でマスクするため、各成分 j を独立正規化して max。
     let mut dfeas_relative = 0.0_f64;
     for j in 0..n {

@@ -18,21 +18,16 @@ use std::time::Instant;
 
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
-    load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult,
+    load_baseline_objectives, load_expected_statuses, parse_qplib_with_timeout, ExpectedStatus,
+    ObjCheckResult, ParseQplibOutcome,
 };
-use otspot_io::qplib::{parse_qplib, QplibError, QplibProblem};
 use otspot_core::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot_core::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
 use otspot_core::problem::SolveStatus;
-use otspot_core::qp::{solve_qp_global, solve_qp_with, QpProblem};
+use otspot_core::qp::{solve_qp_global, solve_qp_with};
 
 /// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
 const KKT_FAIL_EPS: f64 = 1e-4;
-
-enum BenchError {
-    Parse(QplibError),
-    Unsupported(String),
-}
 
 /// QPLIB UnsupportedType の category (parse error message 由来).
 ///
@@ -90,21 +85,6 @@ mod unsupported_classify_tests {
     }
 }
 
-fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
-    // parse_qplib に cancel API なし → 同期呼び出し、hang 時は
-    // bench_parallel.sh の外部 gtimeout でプロセスごと kill。
-    match parse_qplib(path) {
-        Ok(QplibProblem::Qp(prob)) => Ok(prob),
-        Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => {
-            // Binary/integer variables: MIP problem. QP bench skips these.
-            Err(BenchError::Unsupported(
-                "Variable type 'B'/'I' (binary/integer): MIP problem, use MIP bench".to_string(),
-            ))
-        }
-        Err(QplibError::UnsupportedType(msg)) => Err(BenchError::Unsupported(msg)),
-        Err(e) => Err(BenchError::Parse(e)),
-    }
-}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -267,9 +247,9 @@ fn main() {
         let parse_start = Instant::now();
         println!("PARSE_START: {}", name);
 
-        let prob = match parse_with_timeout(path, 30) {
-            Ok(p) => p,
-            Err(BenchError::Unsupported(msg)) => {
+        let prob = match parse_qplib_with_timeout(path, 30) {
+            ParseQplibOutcome::Qp(p) => *p,
+            ParseQplibOutcome::Unsupported(msg) => {
                 // parse_qplib::UnsupportedType message に基づき category 分類
                 // (src/io/qplib.rs:115 "Variable type '..." / :125 "Constraint type '...")
                 let category = classify_unsupported(&msg);
@@ -291,8 +271,7 @@ fn main() {
                 n_skip += 1;
                 continue;
             }
-            Err(BenchError::Parse(e)) => {
-                let note = format!("{}", e);
+            ParseQplibOutcome::ParseError(note) => {
                 println!(
                     "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
@@ -412,6 +391,7 @@ fn main() {
                             result.objective,
                             &baseline_objectives,
                             eps_obj,
+                            0.0,
                         ) {
                             ObjCheckResult::Ok { rel_err } => {
                                 n_pass += 1;

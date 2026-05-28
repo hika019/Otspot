@@ -1,4 +1,4 @@
-//! 線形代数 / 行列ビルダー: bound 寄与の集約と A·Aᵀ の上三角 CSC 構築。
+//! 線形代数 / 行列ビルダー: A·Aᵀ の上三角 CSC 構築。
 //! refine 系 helper が共通で必要とする小規模 utility のみ置く。
 
 use crate::sparse::CscMatrix;
@@ -8,32 +8,6 @@ pub(crate) const AAT_REG_FACTOR: f64 = 1e-12;
 
 /// BTreeMap ノードあたり実測バイト数 (key 16 + value 8 + node overhead)。memory budget の係数。
 const AAT_BUILD_BYTES_PER_ENTRY: u128 = 80;
-
-/// bound dual `z` の stationarity への寄与: contrib_j = -z_lb,j + z_ub,j。
-pub(crate) fn compute_bound_contrib(
-    bounds: &[(f64, f64)],
-    bound_duals: &[f64],
-    n: usize,
-) -> Vec<f64> {
-    let mut contrib = vec![0.0_f64; n];
-    if bound_duals.is_empty() {
-        return contrib;
-    }
-    let mut idx = 0usize;
-    for (j, &(lb, _)) in bounds.iter().enumerate() {
-        if lb.is_finite() && idx < bound_duals.len() {
-            contrib[j] -= bound_duals[idx];
-            idx += 1;
-        }
-    }
-    for (j, &(_, ub)) in bounds.iter().enumerate() {
-        if ub.is_finite() && idx < bound_duals.len() {
-            contrib[j] += bound_duals[idx];
-            idx += 1;
-        }
-    }
-    contrib
-}
 
 /// A·A^T (m×m, 上三角 CSC) + 対角 ε 正則化 (rank-deficient でも factorize 可)。
 /// nnz upper bound × 80 B が memory_budget 超なら None を返し caller は skip。

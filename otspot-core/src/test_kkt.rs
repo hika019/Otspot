@@ -70,8 +70,8 @@ pub fn pfeas_abs(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) ->
         .fold(0.0_f64, f64::max)
 }
 
-/// Variable-bound feasibility: lb ≤ x ≤ ub の違反量 (max)。
-pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
+/// Variable-bound primal feasibility: `max_j max(lb_j − x_j, x_j − ub_j, 0)` (absolute).
+pub fn pfeas_abs_bounds(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     let mut max_v = 0.0_f64;
     for j in 0..x.len() {
         let (lb, ub) = bounds[j];
@@ -114,7 +114,7 @@ pub fn assert_solver_invariants_lp(result: &crate::problem::SolverResult, lp: &L
         pf_norm,
         LP_CERT_TOL
     );
-    let bv = bound_violation(&lp.bounds, &result.solution);
+    let bv = pfeas_abs_bounds(&lp.bounds, &result.solution);
     assert!(
         bv < LP_CERT_TOL,
         "Optimal result has bound violation={:.3e} > {:.3e}",
@@ -168,7 +168,7 @@ pub fn assert_kkt_optimal_with(
         r.objective
     );
 
-    let bv = bound_violation(&lp.bounds, &r.solution);
+    let bv = pfeas_abs_bounds(&lp.bounds, &r.solution);
     assert!(
         bv < EPS_KKT,
         "[{}] bound violation={:.3e} > {:.3e} (x={:?})",
@@ -247,7 +247,7 @@ pub fn assert_solver_invariants_qp(
         EPS_KKT
     );
     // Bound feasibility.
-    let bv = bound_violation(&qp.bounds, &result.solution);
+    let bv = pfeas_abs_bounds(&qp.bounds, &result.solution);
     assert!(
         bv < EPS_KKT,
         "QP Optimal result has bound violation={:.3e} > {:.3e}",

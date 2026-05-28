@@ -1,7 +1,7 @@
 //! x, y を不変としたまま bound_duals を KKT stationarity から再計算 (postsolve 後の 0 埋め解消)。
 //! bound_contrib = -z_lb + z_ub = -(Qx+c+A^T y) より符号で z_lb/z_ub を候補化、per-col guard 採用。
 
-use crate::qp::linalg::compute_bound_contrib;
+use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 
@@ -84,8 +84,8 @@ pub(crate) fn refit_bound_duals_kkt(
     }
 
     // per-col guard: col 単位で改善時のみ採用 (max ベース guard は 1 col 悪化で全 reject になる)。
-    let pre_contrib = compute_bound_contrib(&problem.bounds, &result.bound_duals, n);
-    let post_contrib = compute_bound_contrib(&problem.bounds, &new_bd, n);
+    let pre_contrib = kkt_resid::bound_contrib(&problem.bounds, &result.bound_duals);
+    let post_contrib = kkt_resid::bound_contrib(&problem.bounds, &new_bd);
     let mut accepted_bd = result.bound_duals.clone();
     if accepted_bd.len() < new_bd.len() {
         accepted_bd.resize(new_bd.len(), 0.0);

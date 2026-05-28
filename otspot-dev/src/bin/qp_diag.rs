@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use otspot_io::qps::parse_qps;
 use otspot_core::options::SolverOptions;
 use otspot_core::problem::ConstraintType;
-use otspot_core::qp::solve_qp_with;
+use otspot_core::qp::{kkt_resid, solve_qp_with};
 use otspot_core::QpProblem;
 
 fn main() {
@@ -121,23 +121,7 @@ fn main() {
         vec![0.0; n]
     };
 
-    // bound_contrib: -y_lb (lb 有限) + y_ub (ub 有限)
-    let mut bound_contrib = vec![0.0_f64; n];
-    let mut bd_idx = 0usize;
-    for (j, &(lb, _ub)) in prob.bounds.iter().enumerate() {
-        let lb: f64 = lb;
-        if lb.is_finite() && bd_idx < result.bound_duals.len() {
-            bound_contrib[j] -= result.bound_duals[bd_idx];
-            bd_idx += 1;
-        }
-    }
-    for (j, &(_lb, ub)) in prob.bounds.iter().enumerate() {
-        let ub: f64 = ub;
-        if ub.is_finite() && bd_idx < result.bound_duals.len() {
-            bound_contrib[j] += result.bound_duals[bd_idx];
-            bd_idx += 1;
-        }
-    }
+    let bound_contrib = kkt_resid::bound_contrib(&prob.bounds, &result.bound_duals);
 
     // FX/EmptyCol を skip した bench 形式 (成分相対化 = bench の dfr と同式)
     let mut max_r_full = 0.0_f64;

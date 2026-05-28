@@ -21,8 +21,7 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use otspot_io::qps::parse_qps;
-use otspot_io::qplib::{parse_qplib, QplibError, QplibProblem};
+use otspot_dev::bench_utils::{parse_qplib_with_timeout, parse_qps_with_timeout, ParseQplibOutcome};
 use otspot_core::options::SolverOptions;
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::kkt_resid::f64_impl;
@@ -115,34 +114,6 @@ fn check_violation(r: &KktResiduals) -> bool {
         || r.min_dual_y < -EPS
 }
 
-enum ParseResult {
-    Ok(Box<QpProblem>),
-    ParseErr(String),
-    Unsupported(String),
-}
-
-fn parse_qps_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
-    // 旧 thread::spawn + recv_timeout は detach でメモリ累積。gtimeout で外部 kill 統一。
-    match parse_qps(path) {
-        Ok(p) => ParseResult::Ok(Box::new(p)),
-        Err(e) => ParseResult::ParseErr(format!("{}", e)),
-    }
-}
-
-fn parse_qplib_with_timeout(path: &Path, _timeout_secs: u64) -> ParseResult {
-    // 旧 thread::spawn + recv_timeout は detach でメモリ累積。gtimeout で外部 kill 統一。
-    match parse_qplib(path) {
-        Ok(QplibProblem::Qp(p)) => ParseResult::Ok(Box::new(p)),
-        Ok(QplibProblem::Milp(_)) => {
-            ParseResult::Unsupported("MILP (binary/integer linear): not in verify scope".to_string())
-        }
-        Ok(QplibProblem::Miqp(_)) => {
-            ParseResult::Unsupported("MIQP (binary/integer quadratic): not in verify scope".to_string())
-        }
-        Err(QplibError::UnsupportedType(msg)) => ParseResult::Unsupported(msg),
-        Err(e) => ParseResult::ParseErr(format!("{:?}", e)),
-    }
-}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -205,13 +176,13 @@ fn main() {
 
         let prob = if use_qplib {
             match parse_qplib_with_timeout(path, 30) {
-                ParseResult::Ok(p) => *p,
-                ParseResult::Unsupported(msg) => {
+                ParseQplibOutcome::Qp(p) => *p,
+                ParseQplibOutcome::Unsupported(msg) => {
                     println!("{:<20} {:>8}  (skipped: {})", name, "SKIP", &msg[..msg.len().min(40)]);
                     n_skip += 1;
                     continue;
                 }
-                ParseResult::ParseErr(e) => {
+                ParseQplibOutcome::ParseError(e) => {
                     println!("{:<20} {:>8}  (parse error: {})", name, "ERR", &e[..e.len().min(40)]);
                     n_skip += 1;
                     continue;
@@ -219,13 +190,12 @@ fn main() {
             }
         } else {
             match parse_qps_with_timeout(path, 30) {
-                ParseResult::Ok(p) => *p,
-                ParseResult::ParseErr(e) => {
+                Ok(p) => p,
+                Err(e) => {
                     println!("{:<20} {:>8}  (parse error: {})", name, "ERR", &e[..e.len().min(40)]);
                     n_skip += 1;
                     continue;
                 }
-                ParseResult::Unsupported(_) => unreachable!(),
             }
         };
 

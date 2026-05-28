@@ -15,17 +15,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use otspot_dev::bench_utils::{
-    compute_dfeas_componentwise, compute_dfeas_orig, compute_pfeas_normalized,
-    detect_csv_path, load_baseline_objectives, load_expected_statuses, ExpectedStatus, ObjCheckResult,
+    check_baseline_objective, compute_dfeas_componentwise, compute_dfeas_orig,
+    compute_pfeas_normalized, detect_csv_path, load_baseline_objectives, load_expected_statuses,
+    parse_qps_with_timeout, ExpectedStatus, ObjCheckResult,
 };
-use otspot_io::qps::{parse_qps, QpsError};
 use otspot_core::options::{SimplexMethod, SolverOptions};
 use otspot_core::problem::{ConstraintType, SolveStatus};
 use otspot_core::qp::{solve_qp_with, QpProblem};
-
-enum BenchError {
-    Parse(QpsError),
-}
 
 /// pfeas両側チェック + bfeas
 ///
@@ -72,36 +68,6 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
-fn check_reported_objective(
-    problem_name: &str,
-    reported_objective: f64,
-    prob: &QpProblem,
-    baseline_csv_path: Option<&str>,
-    baseline_objectives: &std::collections::HashMap<String, f64>,
-    eps_obj: f64,
-) -> ObjCheckResult {
-    let expected = match baseline_objectives.get(problem_name) {
-        Some(v) => *v,
-        None => return ObjCheckResult::NoRef,
-    };
-    let expected_reported = match baseline_csv_path {
-        Some(path) if path.ends_with("netlib_lp.csv") => expected + prob.obj_offset,
-        _ => expected,
-    };
-    let denom = expected_reported.abs().max(1.0);
-    let rel_err = (reported_objective - expected_reported).abs() / denom;
-    if rel_err <= eps_obj {
-        ObjCheckResult::Ok { rel_err }
-    } else {
-        ObjCheckResult::Mismatch { rel_err }
-    }
-}
-
-fn parse_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, BenchError> {
-    // parse_qps 自体に cancellation API がないため同期呼び出し。hang 時は
-    // bench_parallel.sh の外部 gtimeout でプロセスごと殺される設計。
-    parse_qps(path).map_err(BenchError::Parse)
-}
 
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
@@ -194,54 +160,32 @@ mod tests {
 
     #[test]
     fn test_netlib_objective_check_adds_obj_offset_to_reference() {
-        let mut prob = QpProblem::new(
-            CscMatrix::new(1, 1),
-            vec![0.0],
-            CscMatrix::new(0, 1),
-            vec![],
-            vec![(0.0, f64::INFINITY)],
-            vec![],
-        )
-        .unwrap();
-        prob.obj_offset = -7.113;
-
         let mut known = HashMap::new();
         known.insert("e226".to_string(), -18.751_929_066);
 
-        let result = check_reported_objective(
+        // Netlib: obj_offset = -7.113; solver reports known_obj + offset = -25.864...
+        let result = check_baseline_objective(
             "e226",
             -25.864_929_066,
-            &prob,
-            Some("data/baseline_objectives/netlib_lp.csv"),
             &known,
             1e-9,
+            -7.113,
         );
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
     }
 
     #[test]
     fn test_non_netlib_objective_check_does_not_add_obj_offset() {
-        let mut prob = QpProblem::new(
-            CscMatrix::new(1, 1),
-            vec![0.0],
-            CscMatrix::new(0, 1),
-            vec![],
-            vec![(0.0, f64::INFINITY)],
-            vec![],
-        )
-        .unwrap();
-        prob.obj_offset = -7.113;
-
         let mut known = HashMap::new();
         known.insert("toy".to_string(), 12.5);
 
-        let result = check_reported_objective(
+        // Non-netlib: obj_offset = 0.0; solver reports known_obj directly.
+        let result = check_baseline_objective(
             "toy",
             12.5,
-            &prob,
-            Some("data/baseline_objectives/maros_meszaros.csv"),
             &known,
             1e-9,
+            0.0,
         );
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
     }
@@ -427,10 +371,9 @@ fn main() {
         println!("PARSE_START: {}", name);
 
         // パース（30秒タイムアウト付き）
-        let prob = match parse_with_timeout(path, 30) {
+        let prob = match parse_qps_with_timeout(path, 30) {
             Ok(p) => p,
-            Err(BenchError::Parse(e)) => {
-                let note = format!("{}", e);
+            Err(note) => {
                 println!(
                     "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
                     name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
@@ -555,16 +498,19 @@ fn main() {
                             )
                         } else {
                             // Step 9: 正解値照合
-                            // ベースライン CSV は result.objective (obj_offset 込み) を使って生成されているため、
-                            // result.objective をそのまま比較する。
-                            // (9e83748 で誤って obj_offset を引いていたが、ベースラインは offset 込み値で作成済み)
-                            match check_reported_objective(
+                            // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
+                            // (solver は result.objective に offset 込みで返すため)。
+                            let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
+                                prob.obj_offset
+                            } else {
+                                0.0
+                            };
+                            match check_baseline_objective(
                                 &name,
                                 result.objective,
-                                &prob,
-                                Some(&baseline_csv_str),
                                 &baseline_objectives,
                                 eps_obj,
+                                obj_offset,
                             ) {
                                 ObjCheckResult::Mismatch { rel_err } => {
                                     n_obj_mismatch += 1;
