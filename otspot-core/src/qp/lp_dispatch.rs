@@ -19,21 +19,23 @@ use crate::sparse::CscMatrix;
 
 use super::{ipm_solver, QpProblem};
 
-/// IPM を先に走らせる変数数閾値。Netlib 中央値 n≈800 の約 4 倍。
+/// IPM を先に走らせる変数数閾値 / 制約数閾値。
+///
+/// 値根拠 (#67 撤退実証、2026-05-28): d6cube (n=415,m=404)、ken-13、ken-18、cre-b、pilot は
+/// simplex 単独で 60s timeout (d6cube 4.25% gap)。これら IPM 依存 LP を IPM 経路に乗せ、
+/// median Netlib (n<800) を simplex 経路に維持する両立点。bench 実測 backed = 必須 dispatch。
+/// 撤廃すると Netlib 109/109 → 約 104/109 退化。
 const LP_IPM_FIRST_N: usize = 3_000;
-/// IPM を先に走らせる制約数閾値。LU 再因子分解 O(m·nnz(L)) を回避する。
 const LP_IPM_FIRST_M: usize = 2_000;
 
 /// IPM 先行時に IPM へ割り当てる deadline 比率 (残予算に対する)。
 ///
-/// IPM が収束も infeasibility 検出もできずに緩慢進行する病理 (greenbea: 各 iter で
-/// RESIDUAL_STALL_REL_DEC 超の「有意」改善を続けるため stall 検出も発火せず、全予算を
-/// 消費) では、後段の simplex fallback が走れず Timeout となる。simplex は greenbea を
-/// ~75s で正答するため、IPM に予算上限を課して残りを simplex に確保する。
-///
-/// 値は「両 method に均等機会」= 0.5。健全な IPM は低 iter (≪予算の半分) で収束し
-/// 早期 return するため box は実質 stalling IPM のみを切り、収束 IPM を退化させない。
-/// 固定 magic を避け残予算比率で表現 (deadline 非設定時は box しない)。
+/// 値 0.5 の根拠 (#67 撤退実証、2026-05-28):
+/// (1) greenbea stalling 対策: IPM が全予算消費 → simplex に時間なし。0.5 fraction で simplex
+///     fallback に予算確保 (simplex ~75s で完収束)。
+/// (2) dfl001 postsolve LSQ skip gate 発火: IPM 部分実行 → simplex で primal 準備 →
+///     postsolve LSQ skip 経路で <1s 完了。撤廃すると IPM 60s フル消費 → postsolve 43s 退化。
+/// 両ケース bench 実測 backed = 必須 knob。
 const IPM_BUDGET_FRACTION: f64 = 0.5;
 
 pub(crate) fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
