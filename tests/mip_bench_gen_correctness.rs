@@ -10,13 +10,13 @@
 //! Strategy:
 //!  - All-integer knapsack (n ≤ 10): brute-force verifies the solver to 1e-3.
 //!  - Convex MIQP: PSD assertion + brute-force objective over the integer box.
-//!  - Assignment MILP: status valid (Optimal/Infeasible) across seeds/densities.
+//!  - Assignment MILP: Infeasible claims double-checked by brute-force oracle.
 //!  - Multiple data patterns (3 seeds per case) guard against single-seed luck.
 
 use otspot::{
     options::{MipConfig, SolverOptions},
-    problem::SolveStatus,
-    solve_milp_with_stats, solve_miqp_with_stats, CscMatrix, MiqpProblem, QpProblem,
+    problem::{ConstraintType, SolveStatus},
+    solve_milp_with_stats, solve_miqp_with_stats, CscMatrix, MilpProblem, MiqpProblem, QpProblem,
 };
 
 #[path = "../otspot-dev/src/bin/mip_speed_bench/kernels.rs"]
@@ -104,6 +104,49 @@ fn default_opts_20s() -> SolverOptions {
 
 fn default_cfg() -> MipConfig {
     MipConfig::default()
+}
+
+// ---------------------------------------------------------------------------
+// Assignment MILP brute-force oracle
+// ---------------------------------------------------------------------------
+
+/// Enumerate all binary combinations of the integer variables (each in {lo, hi}),
+/// fixing continuous variables at their lower bound.  Returns `true` if any
+/// assignment satisfies all constraints — i.e., the problem has a feasible
+/// integer point.
+///
+/// Only safe for small `integer_vars.len()` (≤ 20).  The assignment-MILP
+/// generator uses `int_ratio ≤ 1.0` on `n ≤ 10`, so at most 2^10 = 1024
+/// iterations, well within the 3-minute test limit.
+fn brute_force_milp_has_feasible(prob: &MilpProblem) -> bool {
+    let n_int = prob.integer_vars.len();
+    assert!(n_int <= 20, "brute-force: too many integer vars ({n_int})");
+    let total = 1usize << n_int;
+    for mask in 0..total {
+        // Start every variable at its lower bound (0.0 for these problems).
+        let mut x: Vec<f64> = prob.lp.bounds.iter().map(|&(lo, _)| lo).collect();
+        // Set each integer variable to either lower or upper bound per `mask`.
+        for (bit, &vi) in prob.integer_vars.iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                x[vi] = prob.lp.bounds[vi].1;
+            }
+        }
+        let ax = prob.lp.a.mat_vec_mul(&x).expect("mat_vec_mul");
+        let feasible = ax
+            .iter()
+            .zip(&prob.lp.constraint_types)
+            .zip(&prob.lp.b)
+            .all(|((&lhs, ct), &rhs)| match ct {
+                ConstraintType::Le => lhs <= rhs + 1e-9,
+                ConstraintType::Ge => lhs >= rhs - 1e-9,
+                ConstraintType::Eq => (lhs - rhs).abs() <= 1e-9,
+                _ => false,
+            });
+        if feasible {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +279,12 @@ fn convex_miqp_objective_matches_brute_force_multiple_seeds() {
 // Tests: Assignment MILP — structural checks (multiple seeds, densities)
 // ---------------------------------------------------------------------------
 
-/// Assignment MILP n=8 solves quickly with a valid status.
+/// Assignment MILP n=8 solves quickly; any Infeasible claim is verified by
+/// brute-force oracle over all 2^8 = 256 binary assignments.
+///
+/// Sentinel: replacing `res.status == SolveStatus::Infeasible` with `true`
+/// causes the oracle to run unconditionally, find a feasible point (x=0 always
+/// satisfies the ≤ constraints here), and fail `assert!(!has_feasible)`.
 #[test]
 fn assignment_milp_n8_optimal_multiple_seeds() {
     let opts = default_opts_20s();
@@ -245,17 +293,31 @@ fn assignment_milp_n8_optimal_multiple_seeds() {
         for &density in &[0.3_f64, 0.6] {
             let prob = gen_assignment_milp(8, 1.0, density, seed);
             let (res, _) = solve_milp_with_stats(&prob, &opts, &cfg);
-            // Optimal or Infeasible (tight rhs may make it infeasible).
             assert!(
                 matches!(res.status, SolveStatus::Optimal | SolveStatus::Infeasible),
                 "n=8 seed={} density={}: unexpected status {:?}",
                 seed, density, res.status
             );
+            if res.status == SolveStatus::Infeasible {
+                let has_feasible = brute_force_milp_has_feasible(&prob);
+                assert!(
+                    !has_feasible,
+                    "false-Infeasible: n=8 seed={} density={}: solver returned Infeasible \
+                     but brute-force found a feasible integer assignment",
+                    seed, density
+                );
+            }
         }
     }
 }
 
-/// Mixed-integer (50% int, 50% continuous) assignment MILP n=10 converges.
+/// Mixed-integer (50% int, 50% continuous) assignment MILP n=10 converges;
+/// any Infeasible claim is verified by brute-force oracle over 2^5 = 32
+/// integer assignments (continuous vars at lower bound).
+///
+/// Sentinel: same no-op structure as the n=8 test — replacing the
+/// `== Infeasible` condition with `true` triggers the oracle, which finds
+/// a feasible point and fails `assert!(!has_feasible)`.
 #[test]
 fn assignment_milp_mixed_n10_converges_3seeds() {
     let opts = default_opts_20s();
@@ -267,6 +329,15 @@ fn assignment_milp_mixed_n10_converges_3seeds() {
             matches!(res.status, SolveStatus::Optimal | SolveStatus::Infeasible),
             "seed={}: unexpected {:?}", seed, res.status
         );
+        if res.status == SolveStatus::Infeasible {
+            let has_feasible = brute_force_milp_has_feasible(&prob);
+            assert!(
+                !has_feasible,
+                "false-Infeasible: n=10 mixed seed={}: solver returned Infeasible \
+                 but brute-force found a feasible integer assignment",
+                seed
+            );
+        }
     }
 }
 
@@ -288,5 +359,41 @@ fn knapsack_mixed_int_cont_objective_le_all_int_bound() {
                 seed, r_mixed.objective, r_allint.objective
             );
         }
+    }
+}
+
+/// No-op proof for the Infeasible oracle in the assignment MILP tests.
+///
+/// The generator produces only `≤` constraints with all-positive coefficients
+/// and rhs ≥ 1.0, so x = 0 always satisfies every constraint — these problems
+/// are structurally always feasible.  This test directly asserts that the
+/// oracle detects at least one feasible assignment for every seed/density used
+/// in the two assignment-MILP tests above.
+///
+/// Consequence: if the condition `res.status == SolveStatus::Infeasible` in
+/// those tests were replaced with `true` (no-op), the oracle would run,
+/// `has_feasible` would be `true`, and `assert!(!has_feasible)` would **FAIL**
+/// — confirming the sentinel is correctly wired.
+#[test]
+fn assignment_milp_infeasible_oracle_noop_proof() {
+    // n=8, int_ratio=1.0 (all binary, 2^8 = 256 points)
+    for &seed in &[10u64, 20, 30] {
+        for &density in &[0.3_f64, 0.6] {
+            let prob = gen_assignment_milp(8, 1.0, density, seed);
+            assert!(
+                brute_force_milp_has_feasible(&prob),
+                "oracle must find feasible assignment: n=8 seed={seed} density={density} \
+                 (x=0 satisfies all ≤ constraints — false-Infeasible sentinel proof)"
+            );
+        }
+    }
+    // n=10, int_ratio=0.5 (5 binary integer vars, 2^5 = 32 points)
+    for &seed in &[7u64, 77, 777] {
+        let prob = gen_assignment_milp(10, 0.5, 0.4, seed);
+        assert!(
+            brute_force_milp_has_feasible(&prob),
+            "oracle must find feasible assignment: n=10 mixed seed={seed} \
+             (x=0 satisfies all ≤ constraints — false-Infeasible sentinel proof)"
+        );
     }
 }
