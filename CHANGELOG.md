@@ -6,40 +6,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 追加
 
-- **`IpmOptions` — KKT/MINRES 設定フィールド追加** (再現性改善):
-  - `dd_ldl: bool` (default `false`) — TwoFloat (double-double, ~106-bit) LDL を使用。旧 `IPM_DD_LDL=1` 環境変数を廃止。
-  - `minres_ir: Option<usize>` (default `None` → 0, max 10) — MINRES 反復精密化ラウンド数。旧 `MINRES_IR` 環境変数を廃止。
-  - `kkt_memory_budget_bytes: Option<usize>` (default `None` → 4 GiB) — KKT LDL 因子化メモリ上限。旧 `KKT_MEMORY_BUDGET_BYTES` 環境変数を廃止。
-- **`SolverOptions` — QP presolve 設定フィールド追加**:
-  - `presolve_max_pass: usize` (default `10`) — QP presolve 固定点反復上限。旧 `QP_PRESOLVE_MAX_PASS` 環境変数を廃止。
-  - `presolve_skip_large_coeff: bool` (default `false`) — 大係数行スケーリングをスキップ。旧 `QP_PRESOLVE_SKIP_LARGE_COEFF` 環境変数を廃止。
-  - `presolve_phase2: bool` (default `true`) — QP presolve phase 2 を有効化。旧 `QP_PRESOLVE_PHASE2=0` 環境変数を廃止。
-- **`KktConfig` 構造体** (`linalg::kkt_solver`) — KKT 因子化設定を型付きで伝搬する内部型。
-
-### 非互換性 (旧環境変数)
-
-以下の環境変数は読み取られなくなった。`SolverOptions`/`IpmOptions` フィールドで同等の設定が可能:
-`IPM_DD_LDL`, `MINRES_IR`, `KKT_MEMORY_BUDGET_BYTES`,
-`QP_PRESOLVE_MAX_PASS`, `QP_PRESOLVE_SKIP_LARGE_COEFF`, `QP_PRESOLVE_PHASE2`.
-
-`MINRES_ETA` は IPM main ループで Eisenstat-Walker 更新 (`set_iterative_tol`) により常に上書きされていたため、公開 Option 化は行わず廃止のみ。
-
-`QP_PRESOLVE_SKIP` はテスト限定 (`#[cfg(test)]`) で読み取りを継続。本番ビルドでは常に `false` を返す。
-
-### 破壊的変更
-
-- **`SolverResult::opt_cert: Option<OptimalCertificate>` 追加**: B&B incumbent の KKT 証明書フィールド (`prove_optimal` が発行、降格時は `None`)。`SolverResult` はソルバ出力型のため通常は受け取るだけだが、フィールド全列挙の struct-literal で構築している場合は `..Default::default()` を併用すること。
-
-### 削除
-
-- **`SolveOutcome` enum および関連型削除**: `SolveOutcome`、`FarkasCertificate`、`UnboundedRayCertificate`、`IncompleteReason` を公開 API から削除。証明付き結果は `SolverResult` + `OptimalCertificate` / `BoundGapCertificate` で表現する。
-- **`diagnose()` 関数および関連型削除**: `diagnose()`、`DiagnosticReport`、`DiagnosticWarning`、`DiagnosticCode`、`Severity`、`ProblemInfo` を公開 API から削除。
-- **`SolverResult::pfeas`、`dfeas`、`gap` フィールド削除**: `final_residuals: Option<(f64, f64, f64)>` フィールドに集約済みの重複フィールドを削除。移行: `result.gap` → `result.final_residuals.map(|(_, _, g)| g)`。
-- **`solve_qp_with_options` 削除**: 0.1.0 から deprecated だった `solve_qp_with_options` を完全削除。代わりに `solve_qp_with` を使用すること。
+### 変更
 
 ### 修正
 
-- **B&B `finalize_proven` の EmptyCol false-demote 修正**: presolve が消去した EmptyCol 変数 (Q 列空・A 列空) を `eliminated_cols` マスクなしで stationarity 検査すると c[j]≠0 の spurious 残差が生じ valid な proven 解が NonconvexLocal に誤降格していた。構造的マスク (`structural_empty_col_mask`) を導入して attempt.rs と同方式で解決。
+## [0.3.0] - 2026-05-28
+
+### 追加
+- `IpmOptions` に dd_ldl / minres_ir / kkt_memory_budget_bytes フィールド
+- `SolverOptions` に presolve_max_pass / presolve_skip_large_coeff / presolve_phase2 フィールド
+
+### 破壊的変更
+- `SolverResult` に opt_cert フィールド追加
+- `SolveOutcome` / `FarkasCertificate` / `UnboundedRayCertificate` / `IncompleteReason` を削除
+- `diagnose()` 系 API を削除
+- `SolverResult::pfeas` / `dfeas` / `gap` フィールドを削除 (`final_residuals` に集約)
+- deprecated `solve_qp_with_options` を削除
+- 環境変数読み取りを全廃 (`IPM_DD_LDL` / `MINRES_IR` / `MINRES_ETA` / `KKT_MEMORY_BUDGET_BYTES` / `QP_PRESOLVE_MAX_PASS` / `QP_PRESOLVE_SKIP_LARGE_COEFF` / `QP_PRESOLVE_PHASE2`)
+
+### 修正
+- B&B finalize_proven が EmptyCol を未マスクで誤降格していたバグを修正
 
 ## [0.2.0] - 2026-05-27
 
