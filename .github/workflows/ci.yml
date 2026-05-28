@@ -84,3 +84,14 @@ jobs:
         run: |
           COUNT=$(grep -rE 'TODO|FIXME|XXX|HACK' otspot-core/src otspot-io/src otspot-model/src otspot-dev/src src 2>/dev/null | wc -l)
           echo "todo_count=$COUNT"
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
