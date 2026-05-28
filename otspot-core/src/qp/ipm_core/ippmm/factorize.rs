@@ -308,11 +308,6 @@ pub(super) fn auto_schur_enabled(
     timeout_ctx: &TimeoutCtx,
     par: Par,
 ) -> bool {
-    let explicit_schur = std::env::var("QP_SCHUR").ok().as_deref() == Some("1");
-    let auto_schur_disabled = std::env::var("QP_NO_AUTO_SCHUR").ok().as_deref() == Some("1");
-    if explicit_schur || auto_schur_disabled {
-        return false;
-    }
     use crate::qp::ipm_core::kkt::build_augmented_system;
     let probe_sigma: Vec<f64> = vec![1.0; m_ext];
     let probe_rho = options.ipm.delta_min;
@@ -323,9 +318,5 @@ pub(super) fn auto_schur_enabled(
     let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
         &probe_aug, &probe_perm, timeout_ctx.deadline, Some(options.ipm.effective_max_l_nnz()), par,
     );
-    let exceeds = matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }));
-    if exceeds && std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-        eprintln!("IPPMM_AUTO_SCHUR: augmented L_nnz exceeds budget, switching to Schur formulation");
-    }
-    exceeds
+    matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }))
 }

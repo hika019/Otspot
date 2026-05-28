@@ -95,18 +95,6 @@ pub(super) fn refine_post_processing(
             // x 改善時は z を新 x に合わせて refit。
             crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
         }
-        if std::env::var("PRIMAL_LSQ_TRACE").ok().as_deref() == Some("1") {
-            let post_pres2 = primal_residual_rel(&view, &final_sol.solution);
-            let post_kkt2 = kkt_residual_rel(
-                &view,
-                &final_sol.solution,
-                &final_sol.dual_solution,
-                &final_sol.bound_duals,
-            );
-            eprintln!("PRIMAL_LSQ: pre_pres={:.3e} post_pres={:.3e} final_pres={:.3e} final_kkt={:.3e} guard={}",
-                pre_pres, post_pres, post_pres2, post_kkt2,
-                if post_pres > pre_pres { "REVERT" } else { "ACCEPT" });
-        }
     }
 
     // (2) y/z 交互 refit。
@@ -232,21 +220,7 @@ pub(super) fn refine_krylov_and_projection(
     let view = build_view(orig_problem, eliminated_cols);
     let user_eps = opts.ipm_eps();
     let target_pf = user_eps;
-    let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
-    if post_trace {
-        let pres_pre = primal_residual_rel(&view, &final_sol.solution);
-        let kkt_pre = kkt_residual_rel(
-            &view,
-            &final_sol.solution,
-            &final_sol.dual_solution,
-            &final_sol.bound_duals,
-        );
-        eprintln!(
-            "POST_STAGE [pre saddle-point IR] pres_rel={:.3e} kkt_rel={:.3e}",
-            pres_pre, kkt_pre
-        );
-    }
-    let refined = crate::qp::refine_kkt_iterative(
+    crate::qp::refine_kkt_iterative(
         orig_problem,
         final_sol,
         eliminated_cols,
@@ -254,19 +228,6 @@ pub(super) fn refine_krylov_and_projection(
         target_pf,
         opts.deadline,
     );
-    if post_trace {
-        let pres_post = primal_residual_rel(&view, &final_sol.solution);
-        let kkt_post = kkt_residual_rel(
-            &view,
-            &final_sol.solution,
-            &final_sol.dual_solution,
-            &final_sol.bound_duals,
-        );
-        eprintln!(
-            "POST_STAGE [post saddle-point IR] refined_iters={} pres_rel={:.3e} kkt_rel={:.3e}",
-            refined, pres_post, kkt_post
-        );
-    }
 
     // (3b) KKT IR 後に pres > eps なら primal projection を 1 回追加。
     // 採用条件: pres 改善 AND kkt <= user_eps を厳守 (df 退行防止)。
@@ -297,9 +258,6 @@ pub(super) fn refine_krylov_and_projection(
             );
             if kkt_after2 > user_eps {
                 *final_sol = pre_sol2;
-            } else if post_trace {
-                eprintln!("POST_STAGE [2nd primal proj] pre_pres={:.3e} post_pres={:.3e} kkt_after={:.3e} ACCEPT",
-                    pres_post_ir, post_pres2, kkt_after2);
             }
         } else {
             *final_sol = pre_sol2;
@@ -399,10 +357,12 @@ mod gate_predicate_tests {
                 vec![(f64::NEG_INFINITY, f64::INFINITY); n],
                 vec![ConstraintType::Eq],
             ).unwrap();
-            let mut res = crate::problem::SolverResult::default();
-            res.solution = vec![0.0; n];
-            res.dual_solution = vec![0.0; 1];
-            res.bound_duals = vec![];
+            let res = crate::problem::SolverResult {
+                solution: vec![0.0; n],
+                dual_solution: vec![0.0; 1],
+                bound_duals: vec![],
+                ..Default::default()
+            };
             // sanity: stationarity residual is ~0 but primal residual is large.
             let view = build_view(&prob, &[]);
             assert!(kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals) < 1e-6);
@@ -440,10 +400,12 @@ mod gate_predicate_tests {
         ).unwrap();
 
         // Baseline: optimal solution (z_lb=0, comp=0) must pass the gate.
-        let mut res = crate::problem::SolverResult::default();
-        res.solution = vec![1.0];
-        res.dual_solution = vec![-1.0];
-        res.bound_duals = vec![0.0];
+        let mut res = crate::problem::SolverResult {
+            solution: vec![1.0],
+            dual_solution: vec![-1.0],
+            bound_duals: vec![0.0],
+            ..Default::default()
+        };
         assert!(
             kkt_already_passes(&prob, &res, &[], true, 1e-6),
             "baseline optimal (z_lb=0, comp=0) must pass the gate"
@@ -483,8 +445,10 @@ mod gate_predicate_tests {
             vec![(f64::NEG_INFINITY, f64::INFINITY); n],
             vec![],
         ).unwrap();
-        let mut res0 = crate::problem::SolverResult::default();
-        res0.solution = vec![0.0; n];
+        let res0 = crate::problem::SolverResult {
+            solution: vec![0.0; n],
+            ..Default::default()
+        };
         assert!(
             !kkt_already_passes(&prob0, &res0, &[], true, 1e-6),
             "m=0 must short-circuit to false"

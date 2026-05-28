@@ -5,75 +5,14 @@ use crate::sparse::CscMatrix;
 use super::common::fraction_to_boundary_masked;
 use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 
-/// 標準 f64 IR の反復上限。3 を超えると LDL 精度限界で利得が出ないため。
+/// f64 IR の反復上限。3 を超えると LDL 精度限界で利得が出ないため。
 pub(crate) const IR_MAX_ITERS: usize = 3;
-
-/// DD 残差経路の IR 上限 (LDL precision 限界を反復で突破するため拡張)。
-pub(crate) const IR_MAX_ITERS_DD: usize = 10;
 
 /// f64 IR の残差収束判定: resid_inf ≤ rhs_inf × この係数 で早期終了。
 pub(crate) const IR_RESID_SKIP_REL: f64 = 1e-13;
 
-/// DD 残差経路の残差収束判定係数 (DD 精度 ≈ 2×10⁻³² に対応)。
-pub(crate) const IR_RESID_SKIP_DD_REL: f64 = 1e-30;
-
 /// μ が実質 0 と判定する境界: これ未満のとき centering sigma を 0 に落とす。
 pub(crate) const CENTERING_MU_FLOOR: f64 = 1e-15;
-
-/// Dekker/Knuth two-sum: a + b = s + e (s, e は f64、|e| ≤ ulp(s)/2)。
-#[inline]
-fn two_sum(a: f64, b: f64) -> (f64, f64) {
-    let s = a + b;
-    let bb = s - a;
-    let e = (a - (s - bb)) + (b - bb);
-    (s, e)
-}
-
-/// FMA-based two-product: a * b = hi + lo (真値一致)。
-#[inline]
-fn two_prod(a: f64, b: f64) -> (f64, f64) {
-    let hi = a * b;
-    let lo = a.mul_add(b, -hi);
-    (hi, lo)
-}
-
-/// double-double 残差 r = rhs − K·sol。LDL precision floor を Wilkinson IR で eps_residual まで詰める。
-fn compute_residual_dd(aug_mat: &CscMatrix, sol: &[f64], rhs: &[f64], out: &mut [f64]) {
-    let n = sol.len();
-    debug_assert_eq!(rhs.len(), n);
-    debug_assert_eq!(out.len(), n);
-
-    let mut hi = vec![0.0_f64; n];
-    let mut lo = vec![0.0_f64; n];
-
-    hi[..n].copy_from_slice(&rhs[..n]);
-
-    for col in 0..aug_mat.ncols {
-        let xv_c = sol[col];
-        for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
-            let row = aug_mat.row_ind[ptr];
-            let val = aug_mat.values[ptr];
-            let (p_hi, p_lo) = two_prod(val, xv_c);
-            let (s, e1) = two_sum(hi[row], -p_hi);
-            let (s2, e2) = two_sum(lo[row], e1 - p_lo);
-            hi[row] = s;
-            lo[row] = s2 + e2;
-
-            if row != col {
-                let xv_r = sol[row];
-                let (p_hi2, p_lo2) = two_prod(val, xv_r);
-                let (s3, e3) = two_sum(hi[col], -p_hi2);
-                let (s4, e4) = two_sum(lo[col], e3 - p_lo2);
-                hi[col] = s3;
-                lo[col] = s4 + e4;
-            }
-        }
-    }
-
-    for i in 0..n {
-        out[i] = hi[i] + lo[i];
-    }
-}
 
 /// aug_mat は fac に factorize された対称上三角 CSC である必要がある。
 pub(crate) fn solve_with_iterative_refinement(
@@ -104,9 +43,6 @@ pub(crate) fn solve_with_iterative_refinement(
         return;
     }
 
-    let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
-    let max_iters = if use_dd_residual { max_iters.max(IR_MAX_ITERS_DD) } else { max_iters };
-
     // 大型 (拡大系次元 aug_dim = n+m_ext > 100k) は IR overhead が deadline を
     // 圧迫するため skip。aug_dim は既に m_ext を含むので別途加算不要。
     const IR_SKIP_LARGE_THRESHOLD: usize = 100_000;
@@ -115,46 +51,31 @@ pub(crate) fn solve_with_iterative_refinement(
     }
 
     let rhs_inf = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-    let use_dd_residual = std::env::var("IR_DD").ok().as_deref() == Some("1");
-    let resid_skip_threshold = if use_dd_residual {
-        rhs_inf * IR_RESID_SKIP_DD_REL
-    } else {
-        rhs_inf * IR_RESID_SKIP_REL
-    };
+    let resid_skip_threshold = rhs_inf * IR_RESID_SKIP_REL;
 
     let mut kx = vec![0.0_f64; aug_dim];
     let mut residual = vec![0.0_f64; aug_dim];
     let mut correction = vec![0.0_f64; aug_dim];
 
-    let trace_ir = std::env::var("IR_TRACE").ok().as_deref() == Some("1");
-    if trace_ir {
-        let sol_inf_initial = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-        eprintln!("IR_START aug_dim={} rhs_inf={:.3e} sol_inf={:.3e} thr={:.3e} dd={}",
-            aug_dim, rhs_inf, sol_inf_initial, resid_skip_threshold, use_dd_residual);
-    }
     for _ir_iter in 0..max_iters {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return;
         }
-        if use_dd_residual {
-            compute_residual_dd(aug_mat, sol, rhs, &mut residual);
-        } else {
-            for v in kx.iter_mut() {
-                *v = 0.0;
-            }
-            for col in 0..aug_mat.ncols {
-                for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
-                    let row = aug_mat.row_ind[ptr];
-                    let val = aug_mat.values[ptr];
-                    kx[row] += val * sol[col];
-                    if row != col {
-                        kx[col] += val * sol[row];
-                    }
+        for v in kx.iter_mut() {
+            *v = 0.0;
+        }
+        for col in 0..aug_mat.ncols {
+            for ptr in aug_mat.col_ptr[col]..aug_mat.col_ptr[col + 1] {
+                let row = aug_mat.row_ind[ptr];
+                let val = aug_mat.values[ptr];
+                kx[row] += val * sol[col];
+                if row != col {
+                    kx[col] += val * sol[row];
                 }
             }
-            for i in 0..aug_dim {
-                residual[i] = rhs[i] - kx[i];
-            }
+        }
+        for i in 0..aug_dim {
+            residual[i] = rhs[i] - kx[i];
         }
 
         let mut resid_inf = 0.0_f64;
@@ -162,7 +83,6 @@ pub(crate) fn solve_with_iterative_refinement(
             resid_inf = resid_inf.max(residual[i].abs());
         }
         if resid_inf <= resid_skip_threshold {
-            if trace_ir { eprintln!("IR iter={} EXIT_resid_small resid_inf={:.3e}", _ir_iter, resid_inf); }
             return;
         }
 
@@ -174,18 +94,13 @@ pub(crate) fn solve_with_iterative_refinement(
         // Backtrack guard: NaN/Inf protection
         let any_bad = correction.iter().any(|v| !v.is_finite());
         if any_bad {
-            if trace_ir { eprintln!("IR iter={} EXIT_nan resid_inf={:.3e}", _ir_iter, resid_inf); }
             return;
         }
 
         // correction が sol を超える = LDL 精度限界の虚偽補正 → IR を打ち切る。
         let correction_inf = correction.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let sol_inf = sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
-        if trace_ir {
-            eprintln!("IR iter={} resid_inf={:.3e} correction_inf={:.3e} sol_inf={:.3e}", _ir_iter, resid_inf, correction_inf, sol_inf);
-        }
         if correction_inf > sol_inf {
-            if trace_ir { eprintln!("IR iter={} EXIT_correction_too_large", _ir_iter); }
             return;
         }
 
@@ -834,28 +749,7 @@ mod tests {
     use crate::linalg::amd::amd_with_deadline;
     use crate::sparse::CscMatrix;
 
-    /// DD 残差は f64 では相殺で消える値を exact に返すこと。
-    #[test]
-    fn test_dd_residual_precision_vs_f64() {
-        use super::compute_residual_dd;
-        let n = 2;
-        let a = 1.0_f64 + 1e-16;
-        let mat = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 1],
-            &[a, 1.0],
-            n, n,
-        ).unwrap();
-        let sol = vec![1.0_f64, 1.0_f64];
-        let rhs = vec![a, 1.0_f64];
-        let mut r_dd = vec![0.0_f64; n];
-        compute_residual_dd(&mat, &sol, &rhs, &mut r_dd);
-        for &v in &r_dd {
-            assert!(v.abs() < 1e-30, "got {:e}", v);
-        }
-    }
-
-    /// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
+/// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
     #[test]
     fn test_schur_matches_augmented_realistic() {
         let n = 4;

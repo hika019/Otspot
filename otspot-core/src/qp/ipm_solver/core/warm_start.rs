@@ -96,13 +96,6 @@ pub(super) fn translate_warm_start_for_presolve(
         }
     }
 
-    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-        eprintln!(
-            "[warm_start_qp translated] presolve reduction n:{}→{} m:{}→{} ruiz={}",
-            n_orig, n_red, m_orig, m_red, needs_ruiz
-        );
-    }
-
     ws.x = x_red;
     ws.y = y_red;
 }

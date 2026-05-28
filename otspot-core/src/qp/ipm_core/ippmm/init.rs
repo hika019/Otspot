@@ -113,7 +113,7 @@ fn mehrotra_cold_init(
     b_ext: &[f64],
     is_eq_ext: &[bool],
     m_ext: usize,
-    m_ineq: usize,
+    _m_ineq: usize,
     ax0: &[f64],
     timeout_ctx: &TimeoutCtx,
     par: Par,
@@ -162,13 +162,6 @@ fn mehrotra_cold_init(
                         (false, false) => x_new,
                     };
                 }
-                if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-                    eprintln!(
-                        "IPPMM_INIT_PROJ: r_p_inf={:.3e} dx_inf={:.3e} |x|_inf={:.3e}",
-                        r_p_inf, dx_inf,
-                        x.iter().fold(0.0_f64, |a, &v| a.max(v.abs()))
-                    );
-                }
             }
         }
     }
@@ -213,13 +206,4 @@ fn mehrotra_cold_init(
         y[i] = if is_eq_ext[i] { 0.0 } else { y_pos[i] + delta_y_corr };
     }
 
-    if std::env::var("IPPMM_TRACE").ok().as_deref() == Some("1") {
-        let s_inf = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        let y_inf = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        eprintln!(
-            "IPPMM_INIT_MEHROTRA: δ_s={:.3e} δ_y={:.3e} δ_s_corr={:.3e} δ_y_corr={:.3e} |s|_inf={:.3e} |y|_inf={:.3e} mu_init={:.3e}",
-            delta_s, delta_y, delta_s_corr, delta_y_corr, s_inf, y_inf,
-            sy_sum / m_ineq.max(1) as f64
-        );
-    }
 }

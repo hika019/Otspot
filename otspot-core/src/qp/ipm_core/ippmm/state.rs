@@ -37,6 +37,9 @@ pub(super) const DUALITY_GAP_TOL: f64 = 1e-3;
 /// reg_limit 下限と一段引下げ倍率。
 pub(super) const REG_LIMIT_MIN: f64 = 1e-14;
 pub(super) const REG_LIMIT_STEP: f64 = 1e-3;
+/// initial_reg_limit のデフォルト値 (QP / LP)。
+pub(super) const REG_LIMIT_INIT_QP: f64 = 5e-8;
+pub(super) const REG_LIMIT_INIT_LP: f64 = 5e-10;
 /// prox 項が dual residual を支配と判定する比率。
 pub(super) const PROX_DOMINATE_RATIO: f64 = 0.5;
 

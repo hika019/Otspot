@@ -22,7 +22,6 @@ pub(crate) fn try_dual_only_ir(
     use twofloat::TwoFloat;
 
     let m = problem.num_constraints;
-    let trace = std::env::var("REFINE_KKT_TRACE").ok().as_deref() == Some("1");
     let view = crate::qp::ipm_solver::outcome::ProblemView {
         q: &problem.q,
         a: &problem.a,
@@ -41,18 +40,13 @@ pub(crate) fn try_dual_only_ir(
 
     // G + δ·I の正則化。F64 round-off の cancellation を防ぐ最小値。
     // δ × ‖α‖ が new r_d_free の floor (典型 1e-12 × 1e2 = 1e-10、target 1e-6 を十分下回る)。
-    let dual_ir_reg = std::env::var("DUAL_IR_REG")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(1e-12);
+    const DUAL_IR_REG_DEFAULT: f64 = 1e-12;
+    let dual_ir_reg = DUAL_IR_REG_DEFAULT;
 
     // 1. free 変数の特定 (active = bound 近傍 or A col 空)
     let free_eval_idx = collect_dual_recovery_free_columns(problem, result, eliminated_cols);
     let n_free_eval = free_eval_idx.len();
     if n_free_eval == 0 {
-        if trace {
-            eprintln!("DUAL_IR skip: n_free=0");
-        }
         return 0;
     }
 
@@ -62,9 +56,6 @@ pub(crate) fn try_dual_only_ir(
     let mut r_d_eval = vec![0.0_f64; n_free_eval];
     let mut r_d_rel_eval = vec![0.0_f64; n_free_eval];
     let mut df_rel_pre = 0.0_f64;
-    let mut df_abs_pre = 0.0_f64;
-    let mut worst_idx = 0;
-    let mut worst_qx = 0.0_f64;
     for (fi, &j) in free_eval_idx.iter().enumerate() {
         // r_d_free 用に Q x も加算する必要 (Q≠0 の QP で正確性必須)
         let mut qx = TwoFloat::from(0.0);
@@ -87,27 +78,10 @@ pub(crate) fn try_dual_only_ir(
         r_d_rel_eval[fi] = rel;
         if rel > df_rel_pre {
             df_rel_pre = rel;
-            worst_idx = j;
-            worst_qx = qx_f;
-        }
-        if r_d.abs() > df_abs_pre {
-            df_abs_pre = r_d.abs();
         }
     }
     if df_rel_pre < target_pf {
-        if trace {
-            eprintln!(
-                "DUAL_IR skip: df_rel_pre={:.3e} < target {:.3e}",
-                df_rel_pre, target_pf
-            );
-        }
         return 0;
-    }
-    if trace {
-        eprintln!(
-            "DUAL_IR pre: n_free_eval={} df_abs_max={:.3e} df_rel_max={:.3e} worst_j={} qx={:.3e}",
-            n_free_eval, df_abs_pre, df_rel_pre, worst_idx, worst_qx
-        );
     }
 
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -131,9 +105,6 @@ pub(crate) fn try_dual_only_ir(
         &row_abs_activity,
         target_pf,
     ) else {
-        if trace {
-            eprintln!("DUAL_IR skip: no active row cluster");
-        }
         return 0;
     };
     let mut seed_rows = Vec::new();
@@ -159,16 +130,7 @@ pub(crate) fn try_dual_only_ir(
     }
     let m_active = active_rows.len();
     if m_active == 0 {
-        if trace {
-            eprintln!("DUAL_IR skip: m_active=0");
-        }
         return 0;
-    }
-    if trace {
-        eprintln!(
-            "DUAL_IR cluster_rows={}/{} worst_j={} seed_worst_j={}",
-            m_active, m, worst_idx, worst_j
-        );
     }
 
     let mut free_idx = Vec::new();
@@ -180,14 +142,6 @@ pub(crate) fn try_dual_only_ir(
         }
     }
     if !seed_rows.is_empty() && free_idx.len() * 2 > n_free_eval && active_rows.len() > seed_rows.len() {
-        if trace {
-            eprintln!(
-                "DUAL_IR cluster fallback: expanded_rows={} expanded_free={} seed_rows={}",
-                active_rows.len(),
-                free_idx.len(),
-                seed_rows.len()
-            );
-        }
         active_rows = seed_rows;
         active_row_pos.fill(usize::MAX);
         for (pos, &row) in active_rows.iter().enumerate() {
@@ -204,13 +158,7 @@ pub(crate) fn try_dual_only_ir(
     }
     let n_free = free_idx.len();
     if n_free == 0 {
-        if trace {
-            eprintln!("DUAL_IR skip: cluster has no free columns");
-        }
         return 0;
-    }
-    if trace {
-        eprintln!("DUAL_IR cluster_free={}/{}", n_free, n_free_eval);
     }
 
     // y/z を [row duals ; active bound duals] 連成で局所 LS。row-only は bound 押し返しで悪化。
@@ -222,8 +170,6 @@ pub(crate) fn try_dual_only_ir(
         .map(|&v| TwoFloat::from(v))
         .collect();
     let mut df_rel_post = df_rel_pre;
-    let mut df_abs_post = df_abs_pre;
-    let mut total_dy_inf = 0.0_f64;
     let mut accepted_iters = 0;
     let mut current_r_d_free: Vec<f64> = free_idx
         .iter()
@@ -237,7 +183,6 @@ pub(crate) fn try_dual_only_ir(
         .collect();
     const DUAL_IR_ACCEPT_REL_TOL: f64 = 1e-12;
     const DUAL_IR_MIN_PROGRESS_RATIO: f64 = 1e-4;
-    let mut inner = 0usize;
     loop {
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
@@ -320,19 +265,11 @@ pub(crate) fn try_dual_only_ir(
         };
         let factor = match crate::linalg::ldl::factorize(&gram_csc) {
             Ok(f) => f,
-            Err(e) => {
-                if trace {
-                    eprintln!("DUAL_IR factorize failed: {:?}", e);
-                }
-                break;
-            }
+            Err(_) => break,
         };
         let mut delta = vec![0.0_f64; ulen];
         factor.solve(&rhs, &mut delta);
         if delta.iter().any(|v| !v.is_finite()) {
-            if trace {
-                eprintln!("DUAL_IR inner={} solve NaN, abort", inner);
-            }
             break;
         }
         let mut dy_dd = vec![TwoFloat::from(0.0); m];
@@ -345,15 +282,12 @@ pub(crate) fn try_dual_only_ir(
         if !dy_inf.is_finite() {
             break;
         }
-        total_dy_inf = total_dy_inf.max(dy_inf);
 
         let mut accepted = false;
         let mut accepted_df_rel = df_rel_post;
-        let mut accepted_df_abs = df_abs_post;
         let mut accepted_r_d_free = current_r_d_free.clone();
         let mut accepted_y_dd = y_dd.clone();
         let mut accepted_bound_duals = tmp.bound_duals.clone();
-        let mut accepted_step_scale = 0.0_f64;
         let mut step_scale = 1.0_f64;
         while step_scale > 0.0 {
             let mut y_dd_new: Vec<TwoFloat> = y_dd
@@ -384,7 +318,6 @@ pub(crate) fn try_dual_only_ir(
             // 新 r_d_free を y_dd_new から DD 精度で計算 (Q x は変化なし、aty のみ更新)
             let mut new_r_d_free = vec![0.0_f64; n_free];
             let mut new_df_rel = 0.0_f64;
-            let mut new_df_abs = 0.0_f64;
             for &j in &free_eval_idx {
                 let mut qx = TwoFloat::from(0.0);
                 for k in problem.q.col_ptr[j]..problem.q.col_ptr[j + 1] {
@@ -408,18 +341,13 @@ pub(crate) fn try_dual_only_ir(
                 if rel > new_df_rel {
                     new_df_rel = rel;
                 }
-                if r_d.abs() > new_df_abs {
-                    new_df_abs = r_d.abs();
-                }
             }
             if new_df_rel <= df_rel_post + DUAL_IR_ACCEPT_REL_TOL * (1.0 + df_rel_post) {
                 accepted = true;
                 accepted_df_rel = new_df_rel;
-                accepted_df_abs = new_df_abs;
                 accepted_r_d_free = new_r_d_free;
                 accepted_y_dd = y_dd_new;
                 accepted_bound_duals = bound_duals_new;
-                accepted_step_scale = step_scale;
                 break;
             }
             let next_step_scale = step_scale * 0.5;
@@ -429,12 +357,6 @@ pub(crate) fn try_dual_only_ir(
             step_scale = next_step_scale;
         }
         if !accepted {
-            if trace {
-                eprintln!(
-                    "DUAL_IR inner={} regression, breaking (rel {:.3e} -> rejected all backtracks)",
-                    inner, df_rel_post
-                );
-            }
             break;
         }
 
@@ -445,12 +367,6 @@ pub(crate) fn try_dual_only_ir(
             0.0
         };
         if accepted_iters > 0 && progress_ratio <= DUAL_IR_MIN_PROGRESS_RATIO {
-            if trace {
-                eprintln!(
-                    "DUAL_IR inner={} stagnated: df_rel {:.3e} -> {:.3e} ratio={:.3e}",
-                    inner, df_rel_post, accepted_df_rel, progress_ratio
-                );
-            }
             break;
         }
 
@@ -461,15 +377,7 @@ pub(crate) fn try_dual_only_ir(
         tmp.bound_duals = accepted_bound_duals;
         current_r_d_free = accepted_r_d_free;
         df_rel_post = accepted_df_rel;
-        df_abs_post = accepted_df_abs;
         accepted_iters += 1;
-        inner += 1;
-        if trace && accepted_step_scale < 1.0 {
-            eprintln!(
-                "DUAL_IR inner={} accepted with step_scale={:.3e}",
-                inner, accepted_step_scale
-            );
-        }
         // 早期 break: target を達成したら終了
         if df_rel_post < target_pf {
             break;
@@ -487,24 +395,10 @@ pub(crate) fn try_dual_only_ir(
         &tmp.dual_solution,
         &tmp.bound_duals,
     );
-    if trace {
-        eprintln!(
-            "DUAL_IR cluster_free={} df_abs {:.3e}->{:.3e} df_rel {:.3e}->{:.3e} dy_inf={:.3e} iters={}",
-            n_free, df_abs_pre, df_abs_post, df_rel_pre, df_rel_post, total_dy_inf, accepted_iters
-        );
-        eprintln!("DUAL_IR kkt {:.3e}->{:.3e}", kkt_pre, kkt_post);
-    }
     if df_rel_post < df_rel_pre && kkt_post <= kkt_pre {
         *result = tmp;
         accepted_iters
     } else {
-        if trace {
-            eprintln!(
-                "DUAL_IR rejected: df_improved={} kkt_safe={}",
-                df_rel_post < df_rel_pre,
-                kkt_post <= kkt_pre
-            );
-        }
         0
     }
 }

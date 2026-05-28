@@ -45,8 +45,6 @@ pub(super) fn refine_postsolve_dual_lsq(
         &final_sol.bound_duals,
     );
     let mut best_sol = final_sol.clone();
-    let mut pass = 0usize;
-    let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
     loop {
         if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             *final_sol = best_sol;
@@ -65,19 +63,12 @@ pub(super) fn refine_postsolve_dual_lsq(
             &final_sol.dual_solution,
             &final_sol.bound_duals,
         );
-        if post_trace {
-            eprintln!(
-                "POST_STAGE [postsolve dual_lsq pass {}] kkt_rel={:.3e}",
-                pass, cur
-            );
-        }
         if cur + POST_LSQ_PROGRESS_EPS >= prev {
             *final_sol = best_sol;
             return;
         }
         prev = cur;
         best_sol = final_sol.clone();
-        pass += 1;
     }
 }
 
@@ -111,8 +102,6 @@ pub(super) fn refine_postsolve_recovery(
         &final_sol.bound_duals,
     );
     let mut best_sol = final_sol.clone();
-    let mut pass = 0usize;
-    let post_trace = std::env::var("POST_STAGE_TRACE").ok().as_deref() == Some("1");
     loop {
         if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             *final_sol = best_sol;
@@ -139,18 +128,11 @@ pub(super) fn refine_postsolve_recovery(
             &final_sol.dual_solution,
             &final_sol.bound_duals,
         );
-        if post_trace {
-            eprintln!(
-                "POST_STAGE [postsolve recovery pass {}] kkt_rel={:.3e}",
-                pass, cur_kkt
-            );
-        }
         if cur_kkt + STAGE0_PROGRESS_EPS >= prev_kkt {
             *final_sol = best_sol;
             return;
         }
         prev_kkt = cur_kkt;
         best_sol = final_sol.clone();
-        pass += 1;
     }
 }
