@@ -13,8 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test
+  test-lib:
+    name: Tests (lib unit, fast)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -22,6 +22,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --release --lib
+
+  test-integration:
+    name: Tests (integration, real data)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v4
+        with:
+          path: data/
+          key: bench-data-${{ hashFiles('scripts/download_all_bench_data.sh', 'scripts/gen_osqp_bench.py', 'scripts/gen_mpc_qp.py', 'scripts/gen_dense_a_qp.py', 'scripts/gen_nonconvex_qp.py') }}
+      - name: Install python deps for data generation (cache miss only)
+        run: pip install numpy scipy cvxpy
+      - name: Download CI subset (~1.2 GiB)
+        run: bash scripts/download_all_bench_data.sh --ci-subset
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --release -E 'kind(test)' --test-threads 3
 
   clippy:
     name: clippy
