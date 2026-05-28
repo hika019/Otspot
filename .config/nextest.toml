@@ -39,6 +39,12 @@ threads-required = "num-cpus"
 filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
+# diag_liswet_basin_9_12: 2 × LISWET+Clarabel solve (measured 141s solo).
+# CPU 専有で 180s kill を安定回避。
+[[profile.default.overrides]]
+filter = "test(diag_liswet_basin::diag_liswet_basin_9_12)"
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip

@@ -114,14 +114,12 @@ fn solve_qps(path: &std::path::Path) -> (QpProblem, SolverResult) {
 }
 
 #[test]
-#[ignore = "bench corpus 必須"]
 fn liswet9_complementarity_or_subopt() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"));
     assert_optimal_objective("LISWET9", &res, &prob, -1977.359);
 }
 
 #[test]
-#[ignore = "bench corpus 必須"]
 fn yao_complementarity_or_subopt() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/YAO.QPS"));
     assert_optimal_objective("YAO", &res, &prob, -151.5405);

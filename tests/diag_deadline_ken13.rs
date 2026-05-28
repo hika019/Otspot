@@ -126,10 +126,8 @@ fn diag_dfl001_deadline_regression_guard() {
     let _ = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "dfl001");
 }
 
-/// pds-20 needs ~60s solve budget; gate behind `#[ignore]` to keep default
-/// `cargo nextest run` under 3 minutes (see CLAUDE.md test budget).
+/// pds-20 needs ~60s solve budget; measured at 61s, within the 180s nextest cap.
 #[test]
-#[ignore = "heavy ~60s; run with --run-ignored only"]
 fn diag_pds20_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/pds-20.QPS");
     let _ = solve_with_watchdog(path, 60.0, Duration::from_secs(100), "pds-20");

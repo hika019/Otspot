@@ -58,7 +58,6 @@ fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expecte
 }
 
 #[test]
-#[ignore = "bench corpus 必須"]
 fn liswet9_objective_self_consistent() {
     assert_objective_self_consistent(
         "LISWET9",
@@ -67,7 +66,6 @@ fn liswet9_objective_self_consistent() {
 }
 
 #[test]
-#[ignore = "bench corpus 必須"]
 fn yao_objective_self_consistent() {
     assert_objective_self_consistent(
         "YAO",
@@ -76,7 +74,7 @@ fn yao_objective_self_consistent() {
 }
 
 #[test]
-#[ignore = "bench corpus 必須、Clarabel strict reference"]
+#[ignore = "known failing: QP local minimum (LP perf #75 未対応); 要 data/maros_meszaros/LISWET9.QPS"]
 fn liswet9_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "LISWET9",
@@ -86,7 +84,7 @@ fn liswet9_objective_matches_clarabel() {
 }
 
 #[test]
-#[ignore = "bench corpus 必須、Clarabel strict reference"]
+#[ignore = "known failing: QP local minimum (#75 未対応); 要 data/maros_meszaros/YAO.QPS"]
 fn yao_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "YAO",

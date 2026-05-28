@@ -132,10 +132,8 @@ fn diag_greenbea_dfeas_full_green() {
     );
 }
 
-/// Observation: confirms presolve=off claim from handoff (28s GREEN).
-/// Not a strict regression — just records the fact for triage.
+/// greenbea presolve=off must not NumericalError (~91s; within 180s nextest cap).
 #[test]
-#[ignore = "diagnostic: run with `--ignored` to verify presolve=off baseline"]
 fn diag_greenbea_presolve_off_baseline() {
     let (status, elapsed, _obj_rel, dfeas_rel, _timing) = run_once_with_timeout("presolve_off_120", false, 120.0);
     eprintln!(
