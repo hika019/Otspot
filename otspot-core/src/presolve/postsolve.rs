@@ -52,7 +52,7 @@ fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bo
 ///
 /// Phase 1 minimises `Σ slack` for feasibility; Phase 2 fixes the Phase-1 slack and
 /// minimises `Σ|y_del| + Σ|dy|` to break ties. Kept-row perturbation is required when
-/// kept↔deleted coupling is strong; it is disabled above `CLEANUP_LP_KEPT_PERT_SIZE_LIMIT`.
+/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_THRESHOLD`.
 /// Returns an `m`-sized y vector, or `None` on construction/solve failure.
 fn build_and_solve_cleanup_lp(
     orig_problem: &LpProblem,
@@ -81,7 +81,7 @@ fn build_and_solve_cleanup_lp(
         .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
 
     let use_kept_perturbation =
-        allow_kept_perturbation && n + m <= CLEANUP_LP_KEPT_PERT_SIZE_LIMIT;
+        allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
     // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
     // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
     // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
@@ -456,7 +456,7 @@ fn build_and_solve_cleanup_lp(
 /// cleanup LP 自体が解けない規模に膨らむ。この上限超でも摂動なしの cleanup LP は
 /// 走るので dual recovery は機能する (品質と可解性のトレードオフ)。
 /// memory/時間予算ではなく LP 列数膨張のガードなので固定 size で妥当。
-const CLEANUP_LP_KEPT_PERT_SIZE_LIMIT: usize = 50_000;
+use crate::tolerances::LARGE_PROBLEM_THRESHOLD;
 
 /// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {

@@ -1067,13 +1067,6 @@ const STEP_BAIL_RATIO: usize = 10;
 /// `current + best * REL_EPS < best`: relative threshold above f64 noise
 /// (~1e-15) that filters degenerate step≈0 "non-progress" from real moves.
 const NO_PROGRESS_REL_EPS: f64 = 1e-12;
-/// `step` magnitudes at or below this are treated as degenerate (step ≈ 0).
-/// Sized to cover the Charnes perturbation upper bound: `x_b[i]` after
-/// perturbation is at most `PIVOT_TOL * m`, and a pivot whose `d[leaving]`
-/// is O(1) yields `step <= PIVOT_TOL * m`. We pad by a factor for the
-/// general O(1/|d|) blow-up case.
-const STEP_DEGENERATE_FACTOR: f64 = 1.0;
-
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
 ///
@@ -1134,7 +1127,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
     // Phase I cycling early-bail state.
     let obj_bail_trigger = (BAIL_TRIGGER_FACTOR * m).max(BAIL_TRIGGER_MIN);
     let step_bail_trigger = obj_bail_trigger / STEP_BAIL_RATIO;
-    let step_zero_threshold = PIVOT_TOL * STEP_DEGENERATE_FACTOR * (m as f64).max(1.0);
+    // Charnes perturbation bound: x_b[i] ≤ PIVOT_TOL * m for a degenerate basis,
+    // so O(1) leaving-direction d[leaving] → step ≤ PIVOT_TOL * m.
+    let step_zero_threshold = PIVOT_TOL * (m as f64).max(1.0);
     // Initialize from the actual starting objective so progress_eps is finite
     // from iteration 1.  f64::INFINITY would make progress_eps = ∞ and the
     // improvement condition `current + ∞ < ∞` always false, causing the

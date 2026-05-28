@@ -13,6 +13,7 @@ use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
 use crate::qp::problem::QpProblem;
+use crate::tolerances::UNDERFLOW_GUARD;
 
 pub(crate) use duality_gap::compute_duality_gap_rel;
 use eps_tighten::tighten_ipm_eps_for_presolve_scale;
@@ -108,7 +109,7 @@ fn run_ipm_with(
         result.solution = x;
         result.dual_solution = y;
         result.bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &reduced.bounds);
-        if scaler.c.abs() > 1e-300 {
+        if scaler.c.abs() > UNDERFLOW_GUARD {
             result.objective /= scaler.c;
         }
     }

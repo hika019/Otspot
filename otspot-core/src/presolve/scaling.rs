@@ -4,6 +4,14 @@
 //! the maximum absolute entry in each row/column is close to 1.
 
 use crate::sparse::CscMatrix;
+use crate::tolerances::UNDERFLOW_GUARD;
+
+/// Maximum Ruiz equilibration sweeps for LP presolve.
+/// QP uses a separate RUIZ_SWEEPS (53) in `qp/ipm_core/scaling.rs`.
+const LP_RUIZ_MAX_SWEEPS: usize = 20;
+
+/// Convergence tolerance for LP Ruiz scaling: stop early when max scale change < this value.
+const LP_RUIZ_CONV_TOL: f64 = 1e-4;
 
 /// Ruiz equilibration namespace.
 ///
@@ -36,7 +44,7 @@ impl RuizScaler {
         let mut cur_b = b.to_vec();
         let mut cur_c = c.to_vec();
 
-        for _ in 0..20 {
+        for _ in 0..LP_RUIZ_MAX_SWEEPS {
             // Compute row maximums (iterate over all non-zeros)
             let mut row_max = vec![0.0f64; m];
             for k in 0..a.row_ind.len() {
@@ -63,11 +71,11 @@ impl RuizScaler {
             // Compute scale factors: 1/sqrt(max), or 1.0 for empty rows/cols
             let row_factor: Vec<f64> = row_max
                 .iter()
-                .map(|&mx| if mx > 1e-300 { 1.0 / mx.sqrt() } else { 1.0 })
+                .map(|&mx| if mx > UNDERFLOW_GUARD { 1.0 / mx.sqrt() } else { 1.0 })
                 .collect();
             let col_factor: Vec<f64> = col_max
                 .iter()
-                .map(|&mx| if mx > 1e-300 { 1.0 / mx.sqrt() } else { 1.0 })
+                .map(|&mx| if mx > UNDERFLOW_GUARD { 1.0 / mx.sqrt() } else { 1.0 })
                 .collect();
 
             // Check convergence: max deviation of factors from 1.0
@@ -103,7 +111,7 @@ impl RuizScaler {
                 cumul_col[j] *= col_factor[j];
             }
 
-            if max_change < 1e-4 {
+            if max_change < LP_RUIZ_CONV_TOL {
                 break;
             }
         }

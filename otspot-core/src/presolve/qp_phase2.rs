@@ -4,7 +4,7 @@
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::ZERO_TOL;
+use crate::tolerances::{DROP_TOL, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Detect Le-Le pairs that form an equality (A[j,*] = -A[i,*] and b[j] = -b[i]) and
@@ -143,7 +143,7 @@ pub fn equality_constraint_qr(
                 continue;
             }
             let factor = work[k][col] / pivot;
-            if factor.abs() < 1e-15 {
+            if factor.abs() < DROP_TOL {
                 continue;
             }
             #[allow(clippy::needless_range_loop)]

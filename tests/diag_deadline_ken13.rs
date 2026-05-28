@@ -10,6 +10,7 @@
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::{LpProblem, SolveStatus};
+use otspot::qp::SOLVE_STACK_SIZE;
 use otspot::{solve_with, QpProblem};
 use std::path::Path;
 use std::sync::mpsc;
@@ -57,7 +58,7 @@ fn solve_with_watchdog(
     let lp_clone = lp.clone();
     let handle = thread::Builder::new()
         .name(format!("{label}-solver"))
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(SOLVE_STACK_SIZE)
         .spawn(move || {
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(timeout_secs);

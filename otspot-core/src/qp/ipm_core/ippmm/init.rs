@@ -5,6 +5,7 @@ use super::warm_start::apply_qp_warm_start;
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, KktConfig};
 use crate::linalg::timeout::TimeoutCtx;
+use crate::tolerances::UNDERFLOW_GUARD;
 use faer::Par;
 use crate::options::SolverOptions;
 use crate::qp::ipm_core::kkt::build_augmented_system;
@@ -198,8 +199,8 @@ fn mehrotra_cold_init(
     let sy_sum: f64 = s_pos.iter().zip(y_pos.iter()).map(|(&si, &yi)| si * yi).sum();
     let s_sum_pos: f64 = s_pos.iter().sum();
     let y_sum_pos: f64 = y_pos.iter().sum();
-    let delta_s_corr = if y_sum_pos > 1e-300 { sy_sum / (2.0 * y_sum_pos) } else { 0.0 };
-    let delta_y_corr = if s_sum_pos > 1e-300 { sy_sum / (2.0 * s_sum_pos) } else { 0.0 };
+    let delta_s_corr = if y_sum_pos > UNDERFLOW_GUARD { sy_sum / (2.0 * y_sum_pos) } else { 0.0 };
+    let delta_y_corr = if s_sum_pos > UNDERFLOW_GUARD { sy_sum / (2.0 * s_sum_pos) } else { 0.0 };
 
     for i in 0..m_ext {
         s[i] = if is_eq_ext[i] { 0.0 } else { s_pos[i] + delta_s_corr };

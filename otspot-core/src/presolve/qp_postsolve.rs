@@ -7,6 +7,14 @@ use crate::problem::SolverResult;
 use crate::qp::QpProblem;
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 
+/// Pivot singularity threshold for dual recovery.
+///
+/// When |A[row, col]| < SINGULARITY_TOL, the pivot is treated as numerically
+/// singular and the dual recovery for that singleton row is skipped.
+/// Note: 1e-30 is much stricter than DROP_TOL (1e-15); value is retained as-is
+/// pending further audit of the numerical justification.
+const SINGULARITY_TOL: f64 = 1e-30;
+
 /// 縮約後の解を元 QP 問題の解空間に復元する。
 ///
 /// # 引数
@@ -170,28 +178,25 @@ pub fn postsolve_qp_with_dual_recovery(
     //   → active 問題では A[r_k, j_l] = 0 → 逆に k > l のとき A[r_k, j_l] ≠ 0 が許される
     // 上三角系は後退代入 (逆順処理) で 1 pass 厳密に解ける。
     // forward 順は下三角を仮定した前進代入であり、この問題では発散する。
-    const RECOVER_PASSES: usize = 1;
-    for _pass in 0..RECOVER_PASSES {
-        for step in presolve_result.postsolve_stack.steps.iter().rev() {
-            match step {
-                QpPostsolveStep::SingletonRow { row, col, .. } => {
-                    recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
-                }
-                QpPostsolveStep::SingletonIneqToBound { row, col, ct, .. } => {
-                    recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
-                    // Clamp to the feasible dual sign per complementary slackness.
-                    let y = sol.dual_solution[*row];
-                    sol.dual_solution[*row] = match ct {
-                        crate::problem::ConstraintType::Le => y.max(0.0),
-                        crate::problem::ConstraintType::Ge => y.min(0.0),
-                        _ => y,
-                    };
-                }
-                // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が
-                // 一括で行う (bound_duals レイアウトが core.rs::remap で確定するため、
-                // ここで z を計算しても上書きされる)。
-                _ => {}
+    for step in presolve_result.postsolve_stack.steps.iter().rev() {
+        match step {
+            QpPostsolveStep::SingletonRow { row, col, .. } => {
+                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
             }
+            QpPostsolveStep::SingletonIneqToBound { row, col, ct, .. } => {
+                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+                // Clamp to the feasible dual sign per complementary slackness.
+                let y = sol.dual_solution[*row];
+                sol.dual_solution[*row] = match ct {
+                    crate::problem::ConstraintType::Le => y.max(0.0),
+                    crate::problem::ConstraintType::Ge => y.min(0.0),
+                    _ => y,
+                };
+            }
+            // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が
+            // 一括で行う (bound_duals レイアウトが core.rs::remap で確定するため、
+            // ここで z を計算しても上書きされる)。
+            _ => {}
         }
     }
 
@@ -240,7 +245,7 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
             break;
         }
     }
-    if a_row_col.abs() < 1e-30 {
+    if a_row_col.abs() < SINGULARITY_TOL {
         return;
     }
 
