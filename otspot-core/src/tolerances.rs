@@ -65,6 +65,19 @@ pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
     (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
 }
 
+/// Integer bound rounding tolerance.
+///
+/// When an implied bound for an integer variable is within this tolerance of an
+/// integer value, it is rounded to that integer rather than away from it.  This
+/// guards against floating-point drift: e.g. `0.3 / 0.1` evaluates to
+/// `2.9999999999999996` in IEEE 754, so `floor` without tolerance would
+/// incorrectly give `2` instead of `3`.
+///
+/// Chosen to be between `ZERO_TOL` (1e-12, structural zero) and `PIVOT_TOL`
+/// (1e-8, solver primal tolerance), so that genuine non-integer implied bounds
+/// are unaffected while float-arithmetic drift is absorbed.
+pub const INT_ROUND_TOL: f64 = 1e-9;
+
 /// アンダーフロー防止ガード閾値。行/列の最大絶対値がこれ以下の場合、
 /// スケール係数の逆数計算によるオーバーフローを防ぐため 1.0 に固定する。
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)

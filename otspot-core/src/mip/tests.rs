@@ -61,17 +61,75 @@ fn trivial_integer_root_is_optimal_without_branching() {
     assert_eq!(stats.nodes_processed, 1, "integral root must not branch");
 }
 
+/// BT detects infeasibility before B&B starts: `nodes_processed` must be zero.
+///
+/// `x ≤ 3.7 ∧ x ≥ 3.5` with `x ∈ [0,10]` integer.
+/// BT: floor(3.7)=3 → ub=3; ceil(3.5)=4 → lb=4; lb > ub → infeasible.
+/// The early-exit path in `solve_milp_with_stats` returns before entering
+/// the B&B driver, so `nodes_processed == 0`.
+///
+/// Sentinel: disabling `tighten_integer_bounds` lets B&B run (nodes > 0) and
+/// this assertion FAILS. The unit test in `presolve.rs` is insufficient alone
+/// because it does not cover the integration path through `solve_milp_with_stats`.
 #[test]
-fn fractional_root_branches_to_integer_optimum() {
-    // max x s.t. 2x <= 3, x in [0,5] integer → x = 1 (LP optimum x = 1.5).
-    // minimization form: min -x.
+fn bt_detects_infeasibility_before_bb() {
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![3.7, 3.5],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "x≤3.7 ∧ x≥3.5 integer → empty domain");
+    assert_eq!(stats.nodes_processed, 0, "infeasibility detected by BT, not B&B");
+}
+
+/// Equality row with a non-integer rhs drives both lb and ub of the same integer
+/// variable past each other, which must be caught as infeasibility before B&B.
+///
+/// `x = 3.5`, `x ∈ [0, 10]` integer.
+/// BT (Eq path): implied_ub = floor(3.5) = 3, implied_lb = ceil(3.5) = 4.
+/// new_lb=4 > new_ub=3 → infeasible; `nodes_processed` must be 0.
+///
+/// Sentinel: removing the cross-bound check (`new_lb > new_ub`) in
+/// `propagate_row_bounds` allows the invalid bounds to propagate, the LP
+/// relaxation then becomes infeasible or the solver returns a wrong status,
+/// but `nodes_processed` will no longer be 0, causing this test to FAIL.
+#[test]
+fn equality_row_integer_var_crossed_bounds_detect_infeasibility() {
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![3.5],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 10.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "x=3.5 integer → no feasible integer → infeasible");
+    assert_eq!(stats.nodes_processed, 0, "BT must detect crossing before B&B");
+}
+
+/// Bound tightening resolves the fractional-root LP at the root node without branching.
+///
+/// min -x s.t. 2x ≤ 3, x ∈ [0,5] integer.
+/// Without BT: LP relaxation gives x=1.5 (fractional) → branching needed.
+/// With BT: x ≤ floor(3/2) = 1 → LP root gives x=1 (integer) → 1 node.
+///
+/// Sentinel: reverting `tighten_root_bounds` to a no-op causes nodes_processed=3
+/// and this test FAILS on the `nodes_processed == 1` assertion.
+#[test]
+fn bt_resolves_root_as_integer_feasible() {
     let lp = build_lp(
         vec![-1.0],
-        &[0],
-        &[0],
-        &[2.0],
-        1,
-        vec![3.0],
+        &[0], &[0], &[2.0],
+        1, vec![3.0],
         vec![ConstraintType::Le],
         vec![(0.0, 5.0)],
     );
@@ -79,8 +137,35 @@ fn fractional_root_branches_to_integer_optimum() {
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!((r.objective - (-1.0)).abs() < EPS, "obj={}", r.objective);
     assert!((r.solution[0] - 1.0).abs() < EPS, "x={}", r.solution[0]);
-    assert!(stats.nodes_processed >= 3, "branching expected, nodes={}", stats.nodes_processed);
-    assert!(stats.pruned >= 1, "infeasible x>=2 child must be pruned");
+    assert_eq!(stats.nodes_processed, 1, "BT tightens x ≤ 1 → root is integer-feasible, no branching");
+    assert_eq!(stats.incumbent_updates, 1);
+}
+
+/// Branching fires when BT tightens bounds but the LP relaxation is still fractional.
+///
+/// min -(x+y) s.t. x+y ≤ 3.5, x,y ∈ [0,5] integer.
+/// BT: x ≤ floor(3.5)=3, y ≤ floor(3.5)=3 (both tightened).
+/// Root LP over [0,3]² gives (3, 0.5) — y is fractional → branching needed.
+/// Integer optimum: x+y=3, obj=-3.
+///
+/// Sentinel: removing the branching loop and returning only the root relaxation
+/// value gives obj=-3.5 (wrong, fractional) → this test FAILS.
+#[test]
+fn branching_fires_when_bt_insufficient() {
+    let lp = build_lp(
+        vec![-1.0, -1.0],
+        &[0, 0], &[0, 1], &[1.0, 1.0],
+        1, vec![3.5],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!((r.objective - (-3.0)).abs() < EPS, "obj={}", r.objective);
+    let s = r.solution[0].round() + r.solution[1].round();
+    assert!((s - 3.0).abs() < EPS, "x+y={}", s);
+    assert!(stats.nodes_processed >= 3, "fractional LP root causes branching, nodes={}", stats.nodes_processed);
+    assert!(stats.pruned >= 1, "at least one pruned/infeasible child expected");
     assert!(stats.incumbent_updates >= 1);
 }
 
@@ -403,21 +488,22 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
 //   - approx_bounds_bytes_per_node > 0  requires the n*2*8 assignment
 // ---------------------------------------------------------------------------
 
+/// Timing stats populate for a MILP that requires branching after BT.
+///
+/// Uses x+y ≤ 3.5, x,y ∈ [0,5] integer. BT tightens to [0,3]; LP root is still
+/// fractional → branching → desc_ms > 0.
+///
+/// Sentinel: removing timing instrumentation leaves desc_ms == 0 → FAILS.
 #[test]
-fn stats_timing_populated_for_milp_with_branching() {
-    // fractional root → at least 3 nodes (root + 2 children); root and descendant
-    // timing must both be non-zero.
+fn stats_timing_populated_for_milp_bt_then_branch() {
     let lp = build_lp(
-        vec![-1.0],
-        &[0],
-        &[0],
-        &[2.0],
-        1,
-        vec![3.0],
+        vec![-1.0, -1.0],
+        &[0, 0], &[0, 1], &[1.0, 1.0],
+        1, vec![3.5],
         vec![ConstraintType::Le],
-        vec![(0.0, 5.0)],
+        vec![(0.0, 5.0), (0.0, 5.0)],
     );
-    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
     assert!(stats.nodes_processed >= 3, "branching expected");
     assert!(
         stats.relaxation_time_total_ms > 0.0,
@@ -431,47 +517,45 @@ fn stats_timing_populated_for_milp_with_branching() {
         stats.relaxation_time_desc_ms > 0.0,
         "relax_desc_ms must be >0 (descendant instrumentation missing?)"
     );
-    // total ≈ root + desc (floating-point tolerance)
     let sum = stats.relaxation_time_root_ms + stats.relaxation_time_desc_ms;
     assert!(
         (stats.relaxation_time_total_ms - sum).abs() < 1e-6,
         "total={:.6} root={:.6} desc={:.6}",
-        stats.relaxation_time_total_ms,
-        stats.relaxation_time_root_ms,
-        stats.relaxation_time_desc_ms,
+        stats.relaxation_time_total_ms, stats.relaxation_time_root_ms, stats.relaxation_time_desc_ms,
     );
-    assert!(
-        stats.relaxation_time_optimal_ms > 0.0,
-        "optimal_ms must be >0"
-    );
-    assert!(
-        stats.approx_bounds_bytes_per_node > 0,
-        "bounds_bytes_per_node must be >0"
-    );
+    assert!(stats.relaxation_time_optimal_ms > 0.0, "optimal_ms must be >0");
+    assert!(stats.approx_bounds_bytes_per_node > 0, "bounds_bytes_per_node must be >0");
 }
 
+/// LP relaxation infeasibility at the root populates infeasible_ms.
+///
+/// x+y ≤ 1 AND x+y ≥ 2, x,y ∈ [0,3] integer.
+/// BT: from Le x,y ≤ 1; from Ge x,y ≥ 1 → domain [1,1]×[1,1].
+/// Root LP with x=y=1 violates x+y ≤ 1 → LP returns Infeasible → infeasible_ms > 0.
+///
+/// Sentinel: removing the infeasible timing arm leaves infeasible_ms == 0 → FAILS.
 #[test]
-fn stats_timing_infeasible_ms_populated() {
-    // x in [0,10], 1.2 <= x <= 1.8 integer → LP feasible but branching produces
-    // infeasible children.  infeasible_ms must be non-zero.
-    let lp = build_lp(
-        vec![1.0],
-        &[0, 1],
-        &[0, 0],
-        &[1.0, 1.0],
-        2,
-        vec![1.2, 1.8],
-        vec![ConstraintType::Ge, ConstraintType::Le],
-        vec![(0.0, 10.0)],
-    );
+fn stats_timing_infeasible_ms_from_lp_after_bt() {
+    let a = crate::sparse::CscMatrix::from_triplets(
+        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
+    )
+    .unwrap();
+    let lp = crate::problem::LpProblem::new_general(
+        vec![1.0, 1.0],
+        a,
+        vec![1.0, 2.0],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+        None,
+    )
+    .unwrap();
     let (r, stats) =
-        solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+        solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Infeasible);
     assert!(
         stats.relaxation_time_infeasible_ms > 0.0,
         "infeasible_ms must be >0; pruned={} nodes={}",
-        stats.pruned,
-        stats.nodes_processed,
+        stats.pruned, stats.nodes_processed,
     );
 }
 
@@ -710,22 +794,25 @@ fn optimal_result_carries_bound_gap_cert() {
 ///
 /// Sentinel: attaching cert unconditionally (regardless of `proven`) causes
 /// SuboptimalSolution results to have Some(cert) → this test FAILS.
+/// Early termination (max_nodes) produces SuboptimalSolution with no BoundGapCertificate.
+///
+/// Uses max 8a+11b s.t. 5a+7b ≤ 10, a,b ∈ [0,1] integer.
+/// BT: implied ubs are floor(2.8)=2 ≥ 1 and floor(1.43)=1 → no tightening.
+/// Root LP gives a≈0.6 (fractional). With max_nodes=2: root + down(a=0) processed;
+/// up(a=1) child is left in queue → gap > 1e-6 → SuboptimalSolution + no cert.
+///
+/// Sentinel: attaching cert unconditionally gives Some(cert) here → FAILS.
 #[test]
-fn non_optimal_result_has_no_bound_gap_cert() {
-    // max_nodes=2 on fractional-root problem: root + [0,1] processed,
-    // [2,5] still in queue → gap 0.5/1 >> 1e-6 → SuboptimalSolution.
+fn knapsack_truncated_has_no_bound_gap_cert() {
     let lp = build_lp(
-        vec![-1.0],
-        &[0],
-        &[0],
-        &[2.0],
-        1,
-        vec![3.0],
+        vec![-8.0, -11.0],
+        &[0, 0], &[0, 1], &[5.0, 7.0],
+        1, vec![10.0],
         vec![ConstraintType::Le],
-        vec![(0.0, 5.0)],
+        vec![(0.0, 1.0), (0.0, 1.0)],
     );
     let cfg = MipConfig { max_nodes: 2, ..MipConfig::default() };
-    let (r, _) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &cfg);
+    let (r, _) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
     assert_ne!(r.status, SolveStatus::Optimal, "must not claim Optimal with open queue");
     assert!(r.bound_gap_cert.is_none(), "non-Optimal must have no BoundGapCertificate");
 }
