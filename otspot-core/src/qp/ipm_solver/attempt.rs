@@ -655,7 +655,6 @@ mod tests {
     /// B.1 sentinel: IPM finalize_outcome must never set reduced_costs.
     /// The debug_assert fires if any code path were to populate this field.
     /// Verified by `..Default::default()` contract; sentinel catches future regressions.
-    #[cfg(debug_assertions)]
     #[test]
     fn ipm_finalize_outcome_reduced_costs_empty() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();

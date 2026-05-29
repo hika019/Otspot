@@ -34,6 +34,11 @@ use crate::sparse::CscMatrix;
 ///
 /// Returns `f64::INFINITY` if any element of `y` is non-finite (NaN or ±Inf).
 ///
+/// NaN entries in `z` are not detected here and return 0.0 (silent suppress via
+/// `(-NaN).max(0.0) == 0.0`). NaN-z is indirectly caught through
+/// `complementarity_residual_rel` where `NaN * finite = NaN`, causing that metric
+/// to return NaN; `NaN < eps` evaluates to false, resulting in `SuboptimalSolution`.
+///
 /// **Caller responsibility**: `z` must have length `n_lb_finite + n_ub_finite` where
 /// `n_lb_finite` / `n_ub_finite` are the counts of finite lower / upper bounds in
 /// `bounds`. Passing a shorter `z` is a contract violation detected by `debug_assert`

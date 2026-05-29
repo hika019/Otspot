@@ -1091,6 +1091,46 @@ mod tests {
         );
     }
 
+    /// P2 sentinel: dimension guard rejects wrong bound_duals length before reaching
+    /// kkt_dual_sign_violation.
+    ///
+    /// Sentinel: removing `|| polished.bound_duals.len() != n_lb + n_ub` from the
+    /// dimension guard in `is_polish_suboptimal_acceptable` allows wrong-length z to
+    /// reach `kkt_dual_sign_violation`, which returns 0.0 (z[0]=0.0 is non-violating:
+    /// ≥0 check passes, viol=0) and the function would return true — FAIL.
+    #[test]
+    fn is_polish_suboptimal_acceptable_rejects_mismatched_bound_duals() {
+        use crate::problem::ConstraintType;
+
+        // 1 variable, lb=0 (finite), ub=∞ → n_lb=1, n_ub=0 → expected bound_duals.len()=1
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![],
+            vec![(0.0_f64, f64::INFINITY)],
+            vec![ConstraintType::Le; 0],
+        )
+        .unwrap();
+
+        // correct bound_duals len = 1 (n_lb=1, n_ub=0)
+        // pass len=2 → mismatch → must return false
+        let polished_wrong_bd = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            objective: 0.0,
+            solution: vec![0.0],
+            dual_solution: vec![],
+            bound_duals: vec![0.0, 0.0], // wrong: should be len 1
+            ..SolverResult::default()
+        };
+        assert!(
+            !is_polish_suboptimal_acceptable(&polished_wrong_bd, &problem, 0.0, 0.1, 1e-6),
+            "mismatched bound_duals length must be rejected by dimension guard",
+        );
+    }
+
     // ---- finalize_proven dual-quality gate sentinels --------------------------
 
     /// Table-driven: 4 combinations of (convex/indefinite) × (good-dual/bad-dual).

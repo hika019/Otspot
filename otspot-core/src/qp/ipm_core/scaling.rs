@@ -425,23 +425,16 @@ mod tests {
     fn check_dfeas_status_relative_complementarity_agrees_with_ipm_kkt() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
-        let c = vec![0.0, 0.0];
-        let b = vec![-1.0];
-        let bounds = vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)];
         let problem = crate::qp::problem::QpProblem::new_all_le(
-            q.clone(), c.clone(), a.clone(), b.clone(), bounds.clone(),
+            q, vec![0.0, 0.0], a, vec![-1.0],
+            vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)],
         ).unwrap();
 
         let x = vec![0.5, 0.5];
         let y = vec![1.0]; // Le constraint dual >= 0
         let bound_duals = vec![0.0, 0.0];
 
-        let view = ProblemView {
-            q: &q, a: &a, c: &c, b: &b,
-            bounds: &bounds,
-            constraint_types: &problem.constraint_types,
-            eliminated_cols: &[],
-        };
+        let view = ProblemView::from_problem(&problem);
         let comp_new = complementarity_residual_rel(&view, &x, &y, &bound_duals);
         let status = check_dfeas_status_relative(&problem, &x, &y, &bound_duals, 1e-4);
         assert!(comp_new < 1e-4, "complementarity_residual_rel at optimal: {comp_new:.3e}");
