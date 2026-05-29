@@ -82,6 +82,7 @@ fn max_violation_dd(prob: &QpProblem, x: &[f64]) -> f64 {
 /// load-bearing: solver が false Optimal を返す / feasibility が桁で退化すると FAIL。
 /// (Clarabel との maxviol competitive 比較は `diag_liswet_basin.rs` の観測に残す。)
 #[test]
+#[ignore = "tier-2 (Mac ~20s / CI 2.5x ~50s); heavy profile で実行 (#97)"]
 fn liswet_family_honest_no_false_optimal() {
     // 観測値: ours maxviol_dd は ~1e-7〜1.6e-6 (timeout/初期点で変動)。
     // FEAS_TOL=1e-5 は実測 worst の ~6×、「feasible / 桁退化していない」を principled に判定。
