@@ -106,6 +106,65 @@ fn lp_simplex_stall_real_netlib_lps_converge() {
     assert!(failures.is_empty(), "stalled LPs did not converge:\n{}", failures.join("\n"));
 }
 
+/// Short auto-verified no-op proof: d6cube (n=6_184 > LP_IPM_FIRST_N=3_000).
+///
+/// Two-phase sentinel (memory `feedback_sentinel_must_fail_under_noop`):
+///  1. Noop-proof: `LP_DISPATCH_NOOP=1` + 10 s budget → simplex stalls
+///     (lp_dispatch.rs bench evidence: 4.25% gap at 60s), result must NOT
+///     be Optimal/LocallyOptimal.
+///  2. Dispatch-enabled: 60 s budget → IPM converges to truth within REL_TOL.
+///
+/// Runs in the default suite. Exits early with a warning if
+/// `data/lp_problems/d6cube.QPS` is absent.
+#[test]
+fn lp_simplex_stall_d6cube_noop_proof_short() {
+    const D6CUBE_TRUTH: f64 = 3.1549166667e2;
+    const NOOP_BUDGET_SECS: f64 = 10.0;
+    const IPM_BUDGET_SECS: f64 = 60.0;
+
+    let Some(qp) = load_qp("d6cube") else {
+        eprintln!(
+            "[lp_simplex_stall_d6cube_noop_proof_short] SKIP: \
+             data/lp_problems/d6cube.QPS not found"
+        );
+        return;
+    };
+
+    // Phase 1: noop proof.
+    // SAFETY: LP_DISPATCH_NOOP is process-wide; nextest isolates each test
+    // in its own process, so no cross-test env-var leak occurs.
+    unsafe { std::env::set_var("LP_DISPATCH_NOOP", "1"); }
+    let noop_result = {
+        let mut opts = SolverOptions::default();
+        opts.timeout_secs = Some(NOOP_BUDGET_SECS);
+        solve_qp_with(&qp, &opts)
+    };
+    unsafe { std::env::remove_var("LP_DISPATCH_NOOP"); }
+
+    assert!(
+        !matches!(noop_result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+        "LP_DISPATCH_NOOP=1 + {}s: d6cube must NOT converge in simplex \
+         (sentinel has no teeth if this passes). status={:?} obj={:.6e}",
+        NOOP_BUDGET_SECS, noop_result.status, noop_result.objective
+    );
+
+    // Phase 2: dispatch-enabled correctness check.
+    let mut opts = SolverOptions::default();
+    opts.timeout_secs = Some(IPM_BUDGET_SECS);
+    let r = solve_qp_with(&qp, &opts);
+
+    assert!(
+        matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+        "d6cube with IPM dispatch must converge within {}s: status={:?} obj={:.6e}",
+        IPM_BUDGET_SECS, r.status, r.objective
+    );
+    assert!(
+        rel_err(r.objective, D6CUBE_TRUTH) <= REL_TOL,
+        "d6cube obj {:.6e} deviates from truth {:.6e} by {:.2e} (>= tol {:.2e})",
+        r.objective, D6CUBE_TRUTH, rel_err(r.objective, D6CUBE_TRUTH), REL_TOL
+    );
+}
+
 /// Synthetic large LP: random sparse A, dense c, all Eq, large enough to
 /// trigger the IPM-first dispatch (m > 2000). Validates that the dispatch
 /// route is exercised on data outside the fixture set.

@@ -134,7 +134,7 @@ bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 
 ## Tests
 
 ```bash
-cargo nextest run --release                          # full suite (requires data/)
+cargo nextest run --release --test-threads 3          # full suite (requires data/)
 cargo nextest run --release --profile lib-only       # unit tests only, no data needed
 cargo test --doc --release
 ```

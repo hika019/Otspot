@@ -1,0 +1,45 @@
+name: CI (heavy)
+
+# tier-2 sentinel gate (#97 で #[ignore = "tier-2"] 化した 20 test を復活させる).
+# 通常 push/PR では起動しない (CI 時間爆発回避)。
+# トリガ:
+#   1. nightly cron (毎日 18:00 UTC = JST 翌 03:00)
+#   2. workflow_dispatch (手動実行)
+#   3. push で commit message に "[heavy]" を含む場合
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+jobs:
+  test-heavy:
+    name: Tests (heavy, tier-2 sentinel)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       contains(github.event.head_commit.message, '[heavy]'))
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: data/
+          key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
+      - name: Install python deps for data generation
+        run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
+      - name: Build emps decoder (Netlib LP data 変換用)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
+          cc -o /tmp/emps /tmp/emps.c
+      - name: Download CI subset
+        run: bash scripts/download_all_bench_data.sh --ci-subset
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Run heavy (tier-2) tests
+        run: cargo nextest run --release --profile heavy --run-ignored all -E 'kind(test)' --test-threads 1
