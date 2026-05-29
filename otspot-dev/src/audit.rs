@@ -421,7 +421,290 @@ mod tests {
         }
     }
 
+    // ── Layer C: dead-param detector ────────────────────────────────────────
+
+    /// Returns `true` when `ident` appears as a standalone word in `text`
+    /// at a location that is NOT a `let _ = ident;` discard statement.
+    fn ident_used_elsewhere(text: &str, ident: &str) -> bool {
+        // The dead-discard prefix is exactly "let _ = " (8 bytes).
+        const DEAD_PREFIX: &str = "let _ = ";
+        let mut search = text;
+        while let Some(pos) = search.find(ident) {
+            let before = if pos == 0 { b' ' } else { search.as_bytes()[pos - 1] };
+            let after_pos = pos + ident.len();
+            let after = search.as_bytes().get(after_pos).copied().unwrap_or(b' ');
+            let is_word = !before.is_ascii_alphanumeric() && before != b'_'
+                && !after.is_ascii_alphanumeric() && after != b'_';
+            if is_word {
+                // True dead-discard: exactly "let _ = <ident>" immediately before.
+                let is_dead_let = pos >= DEAD_PREFIX.len()
+                    && &search[pos - DEAD_PREFIX.len()..pos] == DEAD_PREFIX;
+                if !is_dead_let {
+                    return true;
+                }
+            }
+            search = &search[pos + 1..];
+        }
+        false
+    }
+
+    /// Returns `(1-based line number, parameter name)` for every `let _ = name;`
+    /// where `name` is an explicit named parameter of the immediately enclosing
+    /// function AND `name` is not used anywhere else in that function.
+    ///
+    /// Skips test-context blocks (`mod tests`, `#[cfg(test)]`, `#[test]` bodies).
+    fn scan_dead_params(content: &str) -> Vec<(usize, String)> {
+        let mut violations = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Track test/cfg(test) skip zones identically to scan_production_prints,
+        // but using net depth change (opens - closes) to avoid premature pop
+        // from balanced same-line expressions like `use foo::{A, B};`.
+        let mut depth: i32 = 0;
+        let mut in_str_state = false;
+        let mut skip_stack: Vec<i32> = Vec::new();
+        let mut pending_cfg_test = false;
+        let mut pending_test_attr = false;
+
+        for (idx, &line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            let (opens, closes, in_str_next) = count_braces(line, in_str_state);
+            in_str_state = in_str_next;
+            // Use net change so balanced `{...}` on a single line doesn't
+            // prematurely pop an enclosing skip-zone.
+            depth += opens - closes;
+            while skip_stack.last().is_some_and(|&d| depth <= d) {
+                skip_stack.pop();
+            }
+
+            if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
+            if trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]") {
+                pending_test_attr = true;
+            }
+            let is_mod_tests = (trimmed.starts_with("mod tests")
+                || trimmed.starts_with("mod test ")
+                || trimmed.starts_with("pub mod tests")
+                || trimmed.starts_with("pub(crate) mod tests"))
+                && opens > 0;
+            if (pending_cfg_test || pending_test_attr || is_mod_tests) && opens > 0 {
+                let entry_floor = depth - opens;
+                skip_stack.push(entry_floor);
+                pending_cfg_test = false;
+                pending_test_attr = false;
+            }
+            let in_skip = skip_stack.last().is_some_and(|&d| depth > d);
+            if in_skip { continue; }
+            if opens > 0 { pending_cfg_test = false; pending_test_attr = false; }
+
+            if trimmed.starts_with("//") { continue; }
+
+            // Match `let _ = ident;`
+            let ident = {
+                let Some(rest) = trimmed.strip_prefix("let _ = ") else { continue };
+                let candidate = rest.trim_end_matches(';').trim();
+                if candidate.is_empty()
+                    || !candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    continue;
+                }
+                candidate.to_string()
+            };
+
+            // Find the nearest enclosing `fn` by searching backward from idx.
+            // Simple backward scan for `fn ` (handles nested blocks correctly because
+            // we want the entire function body, not just the immediately enclosing block).
+            let fn_line = {
+                let mut found = None;
+                for back in (0..idx).rev() {
+                    if idx - back > 200 { break; }
+                    let bl = lines[back].trim();
+                    if !bl.starts_with("//") && lines[back].contains("fn ") {
+                        found = Some(back);
+                        break;
+                    }
+                }
+                match found { Some(l) => l, None => continue }
+            };
+
+            // Find the function's opening `{` by scanning forward from fn_line.
+            let body_line = {
+                let mut found = None;
+                let end = (fn_line + 40).min(lines.len().saturating_sub(1));
+                for (fwd, l) in lines.iter().enumerate().skip(fn_line).take(end.saturating_sub(fn_line) + 1) {
+                    if l.contains('{') {
+                        found = Some(fwd);
+                        break;
+                    }
+                }
+                match found { Some(l) => l, None => continue }
+            };
+
+            // Collect signature text (fn_line..=body_line).
+            let sig: String = lines[fn_line..=body_line].join("\n");
+
+            // Extract parameter region between first `(` and `{`.
+            let paren_start = match sig.find('(') { Some(i) => i, None => continue };
+            let brace_end = sig.find('{').unwrap_or(sig.len());
+            let param_region = &sig[paren_start..brace_end.min(sig.len())];
+
+            let needle = format!("{}:", ident);
+            let is_param = {
+                let mut found = false;
+                let mut sf = 0;
+                while let Some(pos) = param_region[sf..].find(&needle) {
+                    let abs = sf + pos;
+                    let before = if abs == 0 { b'(' }
+                    else { *param_region.as_bytes().get(abs - 1).unwrap_or(&b'(') };
+                    if matches!(before, b'(' | b' ' | b'\t' | b'\n' | b',') {
+                        found = true; break;
+                    }
+                    sf = abs + 1;
+                }
+                found
+            };
+            if !is_param { continue; }
+
+            // Collect function body text (after the opening `{`, before closing `}`)
+            // to check if ident is used anywhere other than `let _ = ident;`.
+            let fn_body: String = {
+                let mut body = String::new();
+                let mut d: i32 = 0;
+                let mut after_open = false;
+                'outer: for (fwd, &l) in lines.iter().enumerate().skip(body_line) {
+                    if !after_open {
+                        // Emit only what follows the opening `{` on this line.
+                        if let Some(brace_pos) = l.find('{') {
+                            body.push_str(&l[brace_pos + 1..]);
+                            body.push('\n');
+                            after_open = true;
+                            d = 1;
+                            // Account for braces after the first `{` on this line.
+                            let rest = &l[brace_pos + 1..];
+                            d += rest.chars().filter(|&c| c == '{').count() as i32;
+                            d -= rest.chars().filter(|&c| c == '}').count() as i32;
+                            if d <= 0 { break 'outer; }
+                        }
+                    } else {
+                        let opens_f = l.chars().filter(|&c| c == '{').count() as i32;
+                        let closes_f = l.chars().filter(|&c| c == '}').count() as i32;
+                        d += opens_f - closes_f;
+                        if d <= 0 { break 'outer; }
+                        body.push_str(l);
+                        body.push('\n');
+                    }
+                    if fwd - body_line > 500 { break; }
+                }
+                body
+            };
+
+            // Only report if ident is NOT used anywhere else in the function body.
+            if !ident_used_elsewhere(&fn_body, &ident) {
+                violations.push((idx + 1, ident));
+            }
+        }
+
+        violations
+    }
+
+    /// Verifies that production source files contain no `let _ = name;` where
+    /// `name` is an explicit named parameter of the enclosing function.
+    ///
+    /// This pattern silently discards a caller-supplied value, making the
+    /// parameter dead code that misleads both callers and readers.
+    #[test]
+    fn no_dead_params_in_production() {
+        let root = workspace_root();
+        let prod_dirs = [
+            root.join("otspot-core/src"),
+            root.join("otspot-io/src"),
+            root.join("otspot-model/src"),
+            root.join("src"),
+        ];
+
+        let mut all_violations: Vec<(std::path::PathBuf, usize, String)> = Vec::new();
+
+        for dir in &prod_dirs {
+            for entry in WalkDir::new(dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path().to_path_buf();
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.components().any(|c| c.as_os_str() == "bin") {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                // Only scan files that contain the pattern (fast skip).
+                if !content.contains("let _ = ") {
+                    continue;
+                }
+                for (line_no, param) in scan_dead_params(&content) {
+                    all_violations.push((path.clone(), line_no, param));
+                }
+            }
+        }
+
+        if !all_violations.is_empty() {
+            let mut msg = String::from(
+                "dead function parameters detected (remove from signature or use the value):\n",
+            );
+            for (path, line_no, param) in &all_violations {
+                msg.push_str(&format!("  {}:{}: `let _ = {};`\n", path.display(), line_no, param));
+            }
+            panic!("{msg}");
+        }
+    }
+
     // ── Unit tests for scanner helpers ──────────────────────────────────────
+
+    /// Sentinel: `let _ = name;` where name is a function parameter must be detected.
+    #[test]
+    fn scan_dead_params_detects_dead_param() {
+        let content = r#"
+fn example(s_mat: &str, n: usize, x: f64) {
+    let result = x + 1.0;
+    let _ = s_mat;
+    let _ = n;
+    result
+}
+"#;
+        let violations = scan_dead_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"s_mat"),
+            "s_mat should be detected as dead param; violations: {:?}",
+            violations
+        );
+        assert!(
+            names.contains(&"n"),
+            "n should be detected as dead param; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: `let _ = local_var;` where the name is NOT a parameter must NOT be flagged.
+    #[test]
+    fn scan_dead_params_ignores_non_params() {
+        let content = r#"
+fn compute(x: f64) -> f64 {
+    let tmp = x * 2.0;
+    let _ = tmp;
+    x
+}
+"#;
+        let violations = scan_dead_params(content);
+        assert!(
+            violations.is_empty(),
+            "local variable `tmp` must not be flagged; violations: {:?}",
+            violations
+        );
+    }
 
     /// Sentinel: a `// #[should_panic(...)]` comment above a `#[test]` function
     /// must NOT suppress the observation-only violation.  Before the fix the

@@ -151,7 +151,6 @@ pub(crate) fn compute_sigma_vec(
 /// dy の back-substitution は TwoFloat (DD ≈106 bit) で計算する。
 pub(crate) fn solve_kkt_via_schur(
     s_fac: &KktFactor,
-    s_mat: &CscMatrix,
     d_inv: &[f64],
     a_ext: &CscMatrix,
     r_d: &[f64],
@@ -178,8 +177,6 @@ pub(crate) fn solve_kkt_via_schur(
         .collect();
 
     s_fac.solve(&rhs_s, dx_out);
-    let _ = s_mat;
-    let _ = n;
 
     let zero_dd = TwoFloat::from(0.0);
     let mut a_dx_dd: Vec<TwoFloat> = vec![zero_dd; m_ext];
@@ -211,10 +208,8 @@ pub(crate) fn predictor_step_schur(
     r_primal: &[f64],
     sigma_vec: &[f64],
     s_fac: &KktFactor,
-    s_mat: &CscMatrix,
     d_inv: &[f64],
     a_ext: &CscMatrix,
-    n: usize,
     m_ext: usize,
     mu: f64,
 ) -> PredictorResult {
@@ -235,9 +230,9 @@ pub(crate) fn predictor_step_schur(
         })
         .collect();
 
-    let mut dx = vec![0.0_f64; n];
+    let mut dx = vec![0.0_f64; r_dual.len()];
     let mut dy_pred = vec![0.0_f64; m_ext];
-    solve_kkt_via_schur(s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_pred, &mut dx, &mut dy_pred);
+    solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_pred, &mut dx, &mut dy_pred);
 
     let mut ds_pred = vec![0.0_f64; m_ext];
     for i in 0..m_ext {
@@ -292,10 +287,8 @@ pub(crate) fn corrector_step_schur(
     r_primal: &[f64],
     sigma_vec: &[f64],
     s_fac: &KktFactor,
-    s_mat: &CscMatrix,
     d_inv: &[f64],
     a_ext: &CscMatrix,
-    n: usize,
     m_ext: usize,
     dx: &mut [f64],
     dy: &mut [f64],
@@ -326,8 +319,7 @@ pub(crate) fn corrector_step_schur(
         })
         .collect();
 
-    solve_kkt_via_schur(s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy);
-    let _ = n;
+    solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy);
 
     for i in 0..m_ext {
         if is_eq_ext[i] {
@@ -355,10 +347,8 @@ pub(crate) fn gondzio_correctors_schur(
     r_c_corr: &[f64],
     sigma_vec: &[f64],
     s_fac: &KktFactor,
-    s_mat: &CscMatrix,
     d_inv: &[f64],
     a_ext: &CscMatrix,
-    n: usize,
     m_ext: usize,
     max_correctors: usize,
     alpha_init: f64,
@@ -421,10 +411,10 @@ pub(crate) fn gondzio_correctors_schur(
             })
             .collect();
 
-        let mut dx_new = vec![0.0_f64; n];
+        let mut dx_new = vec![0.0_f64; r_dual.len()];
         let mut dy_new = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            s_fac, s_mat, d_inv, a_ext, r_dual, &r_p_mod_gondzio, &mut dx_new, &mut dy_new,
+            s_fac, d_inv, a_ext, r_dual, &r_p_mod_gondzio, &mut dx_new, &mut dy_new,
         );
 
         let ds_new: Vec<f64> = (0..m_ext)
@@ -811,7 +801,7 @@ mod tests {
         let mut dx_schur = vec![0.0_f64; n];
         let mut dy_schur = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            &s_fac, &s_mat, &d_inv, &a_ext, &r_d, &r_p_mod,
+            &s_fac, &d_inv, &a_ext, &r_d, &r_p_mod,
             &mut dx_schur, &mut dy_schur,
         );
 
@@ -885,7 +875,7 @@ mod tests {
         let mut dx_schur = vec![0.0_f64; n];
         let mut dy_schur = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            &s_fac, &s_mat, &d_inv, &a_ext, &r_d, &r_p_mod,
+            &s_fac, &d_inv, &a_ext, &r_d, &r_p_mod,
             &mut dx_schur, &mut dy_schur,
         );
 
