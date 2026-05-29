@@ -8,8 +8,17 @@ use crate::basis::LuBasis;
 
 const EPS: f64 = 1e-8;
 
-/// Minimum weight floor, preventing division blow-up and keeping sqrt safe.
+/// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 const GAMMA_FLOOR: f64 = 1e-10;
+
+/// Guard for skipping the weight update when the pivot is numerically negligible.
+///
+/// Distinct from `GAMMA_FLOOR`: `GAMMA_FLOOR` is a *weight* floor used in the
+/// scoring denominator; this constant guards the *update* path.  Using `GAMMA_FLOOR`
+/// here would silently skip valid pivots in the range `|pivot| ∈ (3.16e-6, PIVOT_TOL)`
+/// and leave `γ[leaving]` stale (= 1.0).  The guard is set to `PIVOT_TOL² = 1e-16`
+/// so any pivot that passes the ratio-test tolerance also triggers a weight update.
+const MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE: f64 = 1e-16; // PIVOT_TOL²
 
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {
@@ -72,6 +81,12 @@ impl PricingStrategy for DantzigPricing {
 ///   γ[entering] ← 1.0   (reset; entering becomes basic)
 ///   γ[other j]  unchanged (approximation; exact update requires per-column FTRAN)
 ///
+/// The formula `‖η‖² / p²` is the practical Devex approximation (Harris 1973,
+/// Bixby simplification).  The exact expression would be
+/// `(‖η‖² − η[leaving_row]² + 1) / p²`; the `1 − η[leaving_row]²/p²` term is
+/// dropped because it is bounded and the max-accumulation strategy absorbs the
+/// error over successive pivots.
+///
 /// Weights start at 1.0 and are non-decreasing per column (the `max` prevents
 /// reducing a weight). Columns that never leave the basis retain γ = 1.0 and
 /// are scored as `-rc_j` (Dantzig-equivalent for those columns).
@@ -86,7 +101,7 @@ impl SteepestEdgePricing {
         }
     }
 
-    /// Reset all weights to 1.0 (e.g. after LU refactor to wipe drift).
+    /// Reset all weights to 1.0. Exposed for tests only.
     #[cfg(test)]
     pub(crate) fn reset_weights(&mut self, n_vars: usize) {
         if self.weights.len() != n_vars {
@@ -122,7 +137,10 @@ impl PricingStrategy for SteepestEdgePricing {
     ///
     /// `‖η‖² / pivot²` is the Devex approximation to `‖B_new^{-1} a_leaving‖²`.
     /// Taking the max keeps weights non-decreasing, preventing score inflation
-    /// from a temporarily small pivot.
+    /// from a temporarily small pivot.  The update is skipped when
+    /// `pivot² ≤ MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE` (= PIVOT_TOL²); pivots below
+    /// that threshold do not pass the ratio test and would produce an
+    /// unreliable weight.
     fn update_weights(
         &mut self,
         _basis: &LuBasis,
@@ -134,7 +152,7 @@ impl PricingStrategy for SteepestEdgePricing {
         let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
         let pivot_sq = pivot * pivot;
 
-        if leaving < self.weights.len() && pivot_sq > GAMMA_FLOOR {
+        if leaving < self.weights.len() && pivot_sq > MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE {
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
             let new_weight = (eta_norm_sq / pivot_sq).max(GAMMA_FLOOR);
             self.weights[leaving] = self.weights[leaving].max(new_weight);
@@ -304,6 +322,9 @@ mod tests {
         // Expected: γ[leaving=3] = max(1.0, 25/9) = 25/9 ≈ 2.778.
         // Old formula: max(1.0, 25/γ[entering=1.0]) = 25.
         let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0];
+
+        // Pre-set entering weight to a non-1 value so the reset assertion is non-vacuous.
+        pricing.weights[2] = 7.0;
 
         let a_id = crate::sparse::CscMatrix::from_triplets(
             &[0, 1], &[0, 1], &[1.0, 1.0], 2, 2,
