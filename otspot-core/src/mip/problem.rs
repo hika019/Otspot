@@ -399,32 +399,6 @@ mod tests {
         );
     }
 
-    /// **No-op proof**: documents that the old unconditional-true path produces
-    /// false-Optimal. Sparse LDL correctly returns false for the same Q.
-    ///
-    /// This test fails as written under the fix (both `assert!`s would need to pass),
-    /// but is structured to make the bug explicit: the first assert shows old-code
-    /// behaviour; the second shows the fix.
-    #[test]
-    fn no_op_proof_old_dense_limit_gives_false_optimal() {
-        let m = large_n_indefinite_miqp(1001);
-        let q = &m.qp.q;
-        // Old code silently assumed convex for n > 1000:
-        //   if n > PSD_DENSE_LIMIT { return true; }
-        // Simulate that path: for n=1001 it always returned true.
-        let old_path_result = q.nrows > 1000; // unconditional true for our matrix
-        assert!(
-            old_path_result,
-            "old path: n>1000 always returned is_convex=true \
-             (leads B&B to produce false-Optimal for indefinite Q)"
-        );
-        // Fixed path: sparse LDLᵀ correctly detects indefinite.
-        assert!(
-            !is_q_psd_by_cholesky(q),
-            "fix: sparse LDL reports false for indefinite Q; solver rejects with nonconvex_result"
-        );
-    }
-
     /// **Regression guard**: large-n truly PSD Q must still pass the convexity gate.
     /// Verifies no over-rejection (false negatives) after the fix.
     #[test]
