@@ -174,6 +174,32 @@ pub fn solve_miqp_with_stats(
     if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
     }
+    // MIQP root presolve: bound tightening via coefficient propagation.
+    // `tighten_bounds_linear` ignores Q (quadratic term) and operates on the
+    // same linear constraints as MILP, so it is valid for convex MIQP too.
+    if !problem.integer_vars.is_empty() {
+        let n = problem.qp.num_vars;
+        let mask = integer_mask(n, &problem.integer_vars);
+        match presolve::tighten_bounds_linear(
+            n,
+            &problem.qp.a,
+            &problem.qp.b,
+            &problem.qp.constraint_types,
+            &problem.qp.bounds,
+            &mask,
+        ) {
+            None => return (SolverResult::infeasible(), MipStats::default()),
+            Some(tightened) if tightened != problem.qp.bounds => {
+                let mut qp_bt = problem.qp.clone();
+                qp_bt.bounds = tightened;
+                let problem_bt = MiqpProblem { qp: qp_bt, integer_vars: problem.integer_vars.clone() };
+                return solve_mip_core(&problem_bt, options, cfg, mask);
+            }
+            Some(_) => {
+                return solve_mip_core(problem, options, cfg, mask);
+            }
+        }
+    }
     solve_mip_with_stats(problem, options, cfg)
 }
 

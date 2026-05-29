@@ -31,7 +31,12 @@ pub(crate) fn solve_with_iterative_refinement(
     debug_assert_eq!(aug_mat.nrows, aug_dim);
     debug_assert_eq!(aug_mat.ncols, aug_dim);
 
-    fac.solve_with_deadline(rhs, sol, deadline);
+    // Primary solve: propagate MINRES errors by zeroing sol so the IPM sees a zero
+    // Newton direction (safe stall) rather than a partial-iterate contaminating it.
+    if fac.solve_with_deadline(rhs, sol, deadline).is_err() {
+        for v in sol.iter_mut() { *v = 0.0; }
+        return;
+    }
 
     if max_iters == 0 {
         return;
@@ -90,7 +95,10 @@ pub(crate) fn solve_with_iterative_refinement(
         for v in correction.iter_mut() {
             *v = 0.0;
         }
-        fac.solve_with_deadline(&residual, &mut correction, deadline);
+        // IR solve error: correction stays zero; the partial correction would corrupt sol.
+        if fac.solve_with_deadline(&residual, &mut correction, deadline).is_err() {
+            break;
+        }
 
         // Backtrack guard: NaN/Inf protection
         let any_bad = any_nonfinite(&correction);
