@@ -614,6 +614,12 @@ mod tests {
                 expect_ipm: true,
             },
             Case {
+                name: "SuboptimalSolution + Timeout + non-empty → ipm",
+                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
+                expect_ipm: true,
+            },
+            Case {
                 name: "SuboptimalSolution + NumericalError + non-empty → ipm",
                 ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
                 simplex: make_result(SolveStatus::NumericalError, vec![], SIMP_OBJ),
@@ -675,19 +681,21 @@ mod tests {
     // ── F.2: verified_farkas_timeout_fallback 早期 false return ────────────
 
     /// 非負制約 (lb=0, ub=∞) を持たない問題は Farkas 経路に入れない → false。
-    /// no-op: 境界チェックを削除すると true を返す可能性があり fail。
+    ///
+    /// sentinel: 各入力は制約 `-x ≥ 1` (x ≤ -1) を使う。nonneg 解釈では infeasible
+    /// なので cert LP が Optimal を返す。境界チェックを削除すると true を返し fail。
     #[test]
     fn farkas_false_on_non_nonneg_bounds() {
         use crate::options::SolverOptions;
         let opts = SolverOptions::default();
 
-        // lb < 0
+        // lb < 0: 問題は feasible (x=-2 で -(-2)=2≥1)、nonneg 解釈では infeasible。
         let neg_lb = QpProblem::new(
             CscMatrix::new(1, 1),
             vec![0.0],
-            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap(),
             vec![1.0],
-            vec![(-1.0, f64::INFINITY)],
+            vec![(-2.0, f64::INFINITY)],
             vec![ConstraintType::Ge],
         )
         .unwrap();
@@ -696,11 +704,11 @@ mod tests {
             "lb < 0 must return false (non-nonneg bounds)",
         );
 
-        // finite ub (not infinity)
+        // finite ub: 境界チェック除去後 cert LP が Optimal → sentinel。
         let finite_ub = QpProblem::new(
             CscMatrix::new(1, 1),
             vec![0.0],
-            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap(),
             vec![1.0],
             vec![(0.0, 10.0)],
             vec![ConstraintType::Ge],
@@ -710,10 +718,28 @@ mod tests {
             !verified_farkas_timeout_fallback(&finite_ub, &opts),
             "finite ub must return false (non-nonneg bounds)",
         );
+
+        // lb > 0 (lb=0.5): lb=0 でない非負でない境界も同様。
+        let lb_positive = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap(),
+            vec![1.0],
+            vec![(0.5, f64::INFINITY)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        assert!(
+            !verified_farkas_timeout_fallback(&lb_positive, &opts),
+            "lb=0.5 must return false (non-nonneg bounds)",
+        );
     }
 
-    /// 制約がゼロ本の問題は cert_rhs が空になり早期 false return。
-    /// no-op: `cert_rhs.is_empty()` チェックを削除するとパニックや誤 true になり fail。
+    /// 制約がゼロ本の問題は cert_rhs が空になり早期 false を返す (regression)。
+    ///
+    /// `cert_rhs.is_empty()` ガードの除去後は 0 変数 cert LP が IPM に渡り、
+    /// Infeasible 返却になるため no-op では fail しない (sentinel 要件非充足)。
+    /// 既知 early-exit 動作の文書化テスト。
     #[test]
     fn farkas_false_on_empty_constraints() {
         use crate::options::SolverOptions;
