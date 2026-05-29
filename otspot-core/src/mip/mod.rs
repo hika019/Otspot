@@ -211,10 +211,10 @@ pub fn solve_miqp_with_stats(
                 let mut qp_bt = problem.qp.clone();
                 qp_bt.bounds = tightened;
                 let problem_bt = MiqpProblem { qp: qp_bt, integer_vars: problem.integer_vars.clone() };
-                return solve_mip_core(&problem_bt, options, cfg, mask);
+                return solve_mip_core(&problem_bt, options, cfg, mask, None);
             }
             Some(_) => {
-                return solve_mip_core(problem, options, cfg, mask);
+                return solve_mip_core(problem, options, cfg, mask, None);
             }
         }
     }
