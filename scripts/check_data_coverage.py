@@ -131,6 +131,17 @@ def main() -> int:
     ok = True
     rows = []
 
+    # Build union of all CSV names per directory across all DATASETS entries.
+    # Multiple entries sharing a directory (e.g. core + optional CSVs) must be
+    # unioned before computing no_ref to avoid false positives in --strict mode.
+    dir_to_union_csv: dict[str, set[str]] = {}
+    for entry in DATASETS:
+        dir_name, csv_rel = entry[0], entry[1]
+        if csv_rel:
+            dir_to_union_csv.setdefault(dir_name, set()).update(
+                read_csv_names(root / csv_rel)
+            )
+
     for entry in DATASETS:
         dir_name, csv_rel, exts, origin = entry[:4]
         optional = entry[4] if len(entry) > 4 else False
@@ -153,8 +164,9 @@ def main() -> int:
 
         all_files = data_files(data_dir, exts)
         csv_names = read_csv_names(csv_path) if csv_path else set()
-        no_ref = all_files - csv_names  # in dir, not in CSV
-        csv_gap = csv_names - all_files  # in CSV, not in dir
+        union_csv_names = dir_to_union_csv.get(dir_name, set())
+        no_ref = all_files - union_csv_names  # in dir, not in any CSV for this dir
+        csv_gap = csv_names - all_files  # in this entry's CSV, not in dir
 
         status_parts = []
         if csv_gap:
