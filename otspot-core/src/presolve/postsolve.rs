@@ -480,15 +480,21 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
 const BOUND_ACTIVE_REL_TOL: f64 = 1e-6;
 
 /// Tolerance for `x ≈ lb`: scales with lb magnitude only.
+///
+/// # Precondition
+/// `lb` must be finite; all callers guard with `lb.is_finite() &&` before calling.
 #[inline]
 fn at_lb_tol(lb: f64) -> f64 {
-    BOUND_ACTIVE_REL_TOL * (1.0 + if lb.is_finite() { lb.abs() } else { 0.0 })
+    BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs())
 }
 
 /// Tolerance for `x ≈ ub`: scales with ub magnitude only.
+///
+/// # Precondition
+/// `ub` must be finite; all callers guard with `ub.is_finite() &&` before calling.
 #[inline]
 fn at_ub_tol(ub: f64) -> f64 {
-    BOUND_ACTIVE_REL_TOL * (1.0 + if ub.is_finite() { ub.abs() } else { 0.0 })
+    BOUND_ACTIVE_REL_TOL * (1.0 + ub.abs())
 }
 
 /// Tolerance for `ub - lb ≈ 0` (variable effectively fixed): scales with max magnitude.

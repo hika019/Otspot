@@ -679,9 +679,8 @@ mod tests {
         };
         // SINGULARITY_TOL=1e-15: |1e-20| < 1e-15 → singular → y stays 0.0
         recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
-        assert!(sol.dual_solution[0].is_finite() && sol.dual_solution[0].abs() < 1.0,
-            "near-singular pivot must be skipped (y={}); \
-             SINGULARITY_TOL=1e-30 regression would give y≈-1e20",
+        assert!(sol.dual_solution[0] == 0.0,
+            "near-singular pivot must be skipped: y stays at initial 0.0, got {}",
             sol.dual_solution[0]);
     }
 

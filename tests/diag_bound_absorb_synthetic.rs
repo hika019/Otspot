@@ -11,7 +11,8 @@ use otspot::sparse::CscMatrix;
 
 /// bench 同等 dual feasibility 判定の eps (CLAUDE.md bench 標準 1e-6)。
 const BENCH_DFEAS_EPS: f64 = 1e-6;
-/// at-bound 判定 (postsolve.rs::BOUND_ACTIVE_REL_TOL = 1e-6 と整合、relative 形式)。
+/// at-bound 判定: absolute 1e-6 (合成 LP は unit-scale のため本実装の relative 化と結果一致、
+/// large-scale fixture では本実装の at_lb_tol を使う)。
 const BOUND_ACTIVE_REL_TOL: f64 = 1e-6;
 /// 解値の許容 (合成 LP は cleanup LP で十分小さく出る)。
 const SOLUTION_TOL: f64 = 1e-9;
