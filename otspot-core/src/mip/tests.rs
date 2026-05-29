@@ -88,6 +88,34 @@ fn bt_detects_infeasibility_before_bb() {
     assert_eq!(stats.nodes_processed, 0, "infeasibility detected by BT, not B&B");
 }
 
+/// Equality row with a non-integer rhs drives both lb and ub of the same integer
+/// variable past each other, which must be caught as infeasibility before B&B.
+///
+/// `x = 3.5`, `x ∈ [0, 10]` integer.
+/// BT (Eq path): implied_ub = floor(3.5) = 3, implied_lb = ceil(3.5) = 4.
+/// new_lb=4 > new_ub=3 → infeasible; `nodes_processed` must be 0.
+///
+/// Sentinel: removing the cross-bound check (`new_lb > new_ub`) in
+/// `propagate_row_bounds` allows the invalid bounds to propagate, the LP
+/// relaxation then becomes infeasible or the solver returns a wrong status,
+/// but `nodes_processed` will no longer be 0, causing this test to FAIL.
+#[test]
+fn equality_row_integer_var_crossed_bounds_detect_infeasibility() {
+    let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![3.5],
+        vec![ConstraintType::Eq],
+        vec![(0.0, 10.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "x=3.5 integer → no feasible integer → infeasible");
+    assert_eq!(stats.nodes_processed, 0, "BT must detect crossing before B&B");
+}
+
 /// Bound tightening resolves the fractional-root LP at the root node without branching.
 ///
 /// min -x s.t. 2x ≤ 3, x ∈ [0,5] integer.

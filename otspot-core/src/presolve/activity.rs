@@ -229,6 +229,14 @@ pub(crate) fn propagate_row_bounds(
             }
         }
 
+        // Cross-bound check: Eq path can tighten both lb and ub for the same integer
+        // variable in one shot (floor(rhs/a) < ceil(rhs/a) when rhs is non-integer).
+        // Each per-side check only compares against the original bound, so the combined
+        // result `new_lb > new_ub` must be caught here.
+        if new_lb > new_ub + ZERO_TOL {
+            return None;
+        }
+
         if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
             updates.push((j, new_lb, new_ub));
         }

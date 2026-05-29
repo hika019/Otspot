@@ -235,6 +235,21 @@ mod tests {
         assert!((bounds[1].1 - 5.0).abs() < 1e-9, "y ub: {}", bounds[1].1);
     }
 
+    /// Eq row with non-integer rhs: both bounds of the same integer variable are
+    /// tightened to crossing values within a single propagation pass.
+    ///
+    /// `x = 3.5`, integer, `[0, 10]`.
+    /// implied_ub = floor(3.5) = 3; implied_lb = ceil(3.5) = 4; new_lb > new_ub → None.
+    ///
+    /// Sentinel: removing the `new_lb > new_ub` cross-check in `propagate_row_bounds`
+    /// allows the contradiction to escape, and `None` is not returned → assertion fails.
+    #[test]
+    fn eq_non_integer_rhs_integer_var_crossed_bounds_is_infeasible() {
+        let lp = single_var_lp(1.0, 3.5, ConstraintType::Eq, (0.0, 10.0));
+        let result = tighten_integer_bounds(&lp, &[true]);
+        assert!(result.is_none(), "x=3.5 integer → floor(3.5)=3 < ceil(3.5)=4 → infeasible");
+    }
+
     /// Infinite upper bound of a variable blocks Ge-direction propagation.
     ///
     /// x + y ≥ 3, y ∈ [0, ∞), x ∈ [0, 10] integer.
