@@ -13,6 +13,7 @@
 #   bash scripts/download_all_bench_data.sh                     # 全部
 #   bash scripts/download_all_bench_data.sh --lp                # LP のみ
 #   bash scripts/download_all_bench_data.sh --qp                # QP のみ
+#   bash scripts/download_all_bench_data.sh --miplib-ext        # MIPLIB 2017 benchmark のみ
 #   bash scripts/download_all_bench_data.sh --check             # 取得済み/未取得確認のみ
 #   bash scripts/download_all_bench_data.sh --ci-subset         # CI subset (11 dataset, ~1.2 GiB) のみ取得
 #   bash scripts/download_all_bench_data.sh --ci-subset --check # CI subset の確認のみ
@@ -27,6 +28,7 @@ MODE="all"
 case "${1:-}" in
   --lp) MODE="lp" ;;
   --qp) MODE="qp" ;;
+  --miplib-ext) MODE="miplib-ext" ;;
   --check) MODE="check" ;;
   --ci-subset)
     case "${2:-}" in
@@ -36,7 +38,7 @@ case "${1:-}" in
     esac
     ;;
   "") ;;
-  *) echo "usage: $0 [--lp | --qp | --check | --ci-subset [--check]]"; exit 1 ;;
+  *) echo "usage: $0 [--lp | --qp | --miplib-ext | --check | --ci-subset [--check]]"; exit 1 ;;
 esac
 
 # Build usage flags string for error messages (MODE "all" → no flags; compound modes → split flags)
@@ -132,6 +134,20 @@ smoke_qps() {
   echo "  [smoke-ok]  $sample (header ok)"
 }
 
+smoke_mps() {
+  local dir=$1
+  local sample
+  sample=$(ls "$dir"/*.mps 2>/dev/null | head -1)
+  if [[ -z "$sample" ]]; then return 0; fi
+  local first
+  first=$(head -1 "$sample" | tr -d '[:space:]')
+  if [[ "$first" != NAME* && "$first" != "NAME"* ]]; then
+    echo "  [smoke-fail] $sample: first line does not start with NAME (got: $first)"
+    return 1
+  fi
+  echo "  [smoke-ok]  $sample (header ok)"
+}
+
 if [[ "$MODE" == "check" ]]; then
   fail=0
 
@@ -163,6 +179,8 @@ if [[ "$MODE" == "check" ]]; then
   smoke_qplib data/qplib              || fail=1
   smoke_qplib data/qplib_nonconvex_official || fail=1
   smoke_qps   data/maros_meszaros     || fail=1
+  smoke_mps   data/miplib_small       || fail=1
+  smoke_mps   data/miplib_2017        || fail=1
 
   echo ""
   echo "=== baseline CSV vs data dir ==="
@@ -264,6 +282,19 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   run_or_skip data/qplib                     41  "bash scripts/qplib_download.sh"
   run_or_skip data/qplib_nonconvex_official  4   "bash scripts/qplib_nonconvex_download.sh"
   run_or_skip data/qplib_unsupported         6   "bash scripts/qplib_unsupported_download.sh"
+fi
+
+##############################################################################
+# MIP suites (--miplib-ext)
+##############################################################################
+if [[ "$MODE" == "miplib-ext" ]]; then
+  echo ""
+  echo "########## MIP data ##########"
+
+  # MIPLIB 2017 benchmark: 240+ instances, ~317 MB (explicit opt-in, not in --all)
+  # License: ZIB (academic/research), instances in MPS format
+  # Source: https://miplib.zib.de/downloads/benchmark.zip
+  run_or_skip data/miplib_2017 1 "bash scripts/miplib_2017_download.sh"
 fi
 
 ##############################################################################
