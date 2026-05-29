@@ -69,7 +69,7 @@ fn rel_err(got: f64, truth: f64) -> f64 {
 /// All 5 large Netlib LPs that previously TIMED OUT in simplex must now
 /// converge within the budget. Optimal or LocallyOptimal (close obj) accepted.
 #[test]
-#[ignore = "long-running; gated behind --ignored, run via bench script"]
+#[ignore = "long-running: 5 LP × 180s budget → 900s 超; --profile heavy で実行"]
 fn lp_simplex_stall_real_netlib_lps_converge() {
     let mut failures: Vec<String> = Vec::new();
     for case in REAL_CASES {

@@ -1,6 +1,6 @@
-//! LISWET9/12 wrong-basin 真因切り分け diag。
-//! ours vs Clarabel strict で per-row primal violation 局在 / active-set / x 距離を出力。
-//! (assertion なし、観測専用)
+//! LISWET9/12 regression guard: ill-conditioned QP feasibility vs Clarabel strict.
+//! Asserts status != Optimal (f64 insufficient to certify) and max constraint
+//! violation is within 10× of Clarabel's.
 #![allow(clippy::field_reassign_with_default, clippy::needless_range_loop)]
 
 use otspot::io::qps::parse_qps;
@@ -243,8 +243,8 @@ fn diagnose(name: &str) {
         "{}: ours maxviol {:.3e} が clarabel {:.3e} の 10× 超 = competitive 退化", name, ours_mv, cl_mv);
 }
 
+/// ~141s measured solo; serialised via nextest override to avoid flaky timeout.
 #[test]
-#[ignore = "diag: LISWET wrong-basin root-cause (clarabel strict + 60s solve)"]
 fn diag_liswet_basin_9_12() {
     diagnose("LISWET9");
     diagnose("LISWET12");

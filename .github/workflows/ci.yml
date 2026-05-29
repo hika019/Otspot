@@ -33,8 +33,7 @@ jobs:
         with:
           path: data/
           key: bench-data-${{ hashFiles('scripts/*.sh', 'scripts/gen_*.py') }}
-      - name: Install python deps for data generation (cache miss only)
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Install python deps for data generation
         run: pip install 'numpy==1.26.*' 'scipy==1.13.*' 'cvxpy==1.5.*'
       - name: Build emps decoder (Netlib LP data 変換用)
         if: steps.cache.outputs.cache-hit != 'true'
