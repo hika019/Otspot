@@ -408,6 +408,11 @@ fn solve_ipm_with_runner(
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
 
+    // user の ipm.max_iter を全 attempt の累積 iter 上限 (outer guard) として追跡する。
+    // per-attempt 上限は min(MAX_ITER_PER_ATTEMPT, remaining) で動的決定。
+    let user_max_iter = options.ipm.max_iter;
+    let mut iter_used: usize = 0;
+
     // (use_ruiz, eps_tighten) 試行配列。tighten は user_eps/1e-8 から導出、
     // base → base×10 → base/10 → 1 の段階で reg_limit 適応を促す。
     let sigma_total = compute_presolve_sigma_total(&presolve_result);
@@ -448,15 +453,16 @@ fn solve_ipm_with_runner(
         if let Some(d) = total_deadline {
             if Instant::now() >= d { break; }
         }
+        if iter_used >= user_max_iter { break; }
+        let remaining = user_max_iter.saturating_sub(iter_used);
         opts.deadline = total_deadline;
         opts.timeout_secs = None;
-        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT.min(remaining);
         opts.use_ruiz_scaling = use_ruiz;
-        // IPM_EPS_NOISE_FLOOR (100×ε) で統一 (attempt level でも machine noise 直近 eps
-        // を回避、reviewer 観点で 3 種共存 → 2 種集約)。
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
         let outcome = runner(problem, &presolve_result, &opts);
+        iter_used = iter_used.saturating_add(outcome.iterations);
 
         if outcome.satisfies_eps(user_eps) {
             best = Some(outcome);
@@ -485,13 +491,16 @@ fn solve_ipm_with_runner(
             if total_deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
+            if iter_used >= user_max_iter { break; }
+            let remaining = user_max_iter.saturating_sub(iter_used);
             opts.deadline = total_deadline;
             opts.timeout_secs = None;
-            opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+            opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT.min(remaining);
             opts.use_ruiz_scaling = use_ruiz_fb;
             opts.tolerance = None;
             opts.ipm.eps = user_eps.max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let fb = runner(problem, &fallback_pre, &opts);
+            iter_used = iter_used.saturating_add(fb.iterations);
             // Replace best only when the fallback actually satisfies user_eps. A
             // non-satisfying fallback must NOT displace the presolve result:
             // quality_score is KKT-only and ignores objective value, so a fallback
