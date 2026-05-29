@@ -11,10 +11,8 @@
 //! crash は primal.rs 既存配線で発動するため、ここでは「dual_advanced 入口に
 //! 新規追加した crash 経路が退化を生まない」ことの regression sentinel に集中。
 //!
-//! no-op proof: `LP_CRASH_DUAL_ADV_DISABLE=1` で Big-M 経路の crash が強制
-//! no-op 化される。これは Big-M フォールバック (primal timeout 後) でのみ
-//! 観測可能で、e2e で安定再現困難なため unit test 側で実証済
-//! (`crash_disabled_env_var_collapses_to_identity`)。
+//! no-op proof: `LP_CRASH_DUAL_ADV_DISABLE` 環境変数は #101 audit A2 で env-var 全廃に
+//! 伴い撤去済。crash の on/off は `use_lp_crash_basis` option 経由のみ。
 
 use otspot::options::{SimplexMethod, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus};

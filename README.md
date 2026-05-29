@@ -121,7 +121,7 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective. **Valid** = feasible, solver-optimal, no reference to verify.
-Remaining QP misses are ill-conditioned (`LISWET` family, cond ≈ 1e15); reported as `SuboptimalSolution`/`Timeout`.
+Remaining QP misses (9 instances): LISWET family (LISWET1/7/8/9/10/12, 6 instances) + QGFRDXPN/QPCBOEI2/YAO (3 instances); status PFEAS\_FAIL (8) / DFEAS\_FAIL (1, QGFRDXPN obj≈1e11).
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
