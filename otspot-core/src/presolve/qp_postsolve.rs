@@ -28,6 +28,8 @@ use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 ///
 /// relative 化再開条件: pivot accept 後の numerical refinement (iterative refinement) で
 /// KKT 残差を再検証する経路を追加してから再評価。
+///
+/// 撤退 commit: `0f343f1` (audit-123-p1-relative branch、削除済)
 const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。

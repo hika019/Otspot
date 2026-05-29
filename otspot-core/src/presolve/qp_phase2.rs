@@ -176,8 +176,6 @@ pub fn equality_constraint_qr(
 
 /// Drop Q off-diagonal entries below `Q_OFFDIAG_ABS` to improve sparsity.
 pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
-    let eps_q = Q_OFFDIAG_ABS;
-
     let mut new_col_ptr = vec![0usize; n + 1];
     let mut new_row_ind: Vec<usize> = Vec::new();
     let mut new_values: Vec<f64> = Vec::new();
@@ -188,7 +186,7 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
         for k in start..end {
             let row = q.row_ind[k];
             let val = q.values[k];
-            if row == j || val.abs() >= eps_q {
+            if row == j || val.abs() >= Q_OFFDIAG_ABS {
                 new_row_ind.push(row);
                 new_values.push(val);
             }
@@ -545,9 +543,9 @@ mod tests {
     }
 
     /// Sentinel: `near_zero_q_removal` uses absolute `Q_OFFDIAG_ABS = 1e-10`.
-    /// Off-diagonal entry 5e-11 < 1e-10 is pruned; no-op (EPS_Q=0) leaves it.
+    /// Off-diagonal entry 5e-11 < 1e-10 is pruned; no-op (Q_OFFDIAG_ABS=0) leaves it.
     ///
-    /// **Sentinel**: removing the drop threshold (EPS_Q→0) keeps the 5e-11 entry
+    /// **Sentinel**: removing the drop threshold (Q_OFFDIAG_ABS→0) keeps the 5e-11 entry
     /// → values.len() == 4 (not 2) → this test FAIL.
     #[test]
     fn near_zero_q_removal_absolute_threshold_sentinel() {
