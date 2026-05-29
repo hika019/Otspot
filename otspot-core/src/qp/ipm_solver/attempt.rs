@@ -408,8 +408,9 @@ fn solve_ipm_with_runner(
     let presolve_did_ruiz = presolve_result.ruiz_scaler.is_some();
     let mut best: Option<IpmOutcome> = None;
 
-    // (use_ruiz, eps_tighten) 試行配列。tighten は user_eps/1e-8 から導出、
-    // base → base×10 → base/10 → 1 の段階で reg_limit 適応を促す。
+    let user_max_iter = options.ipm.max_iter;
+    let mut iter_used: usize = 0;
+
     let sigma_total = compute_presolve_sigma_total(&presolve_result);
     let base_tighten = dynamic_base_tighten(sigma_total, user_eps);
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
@@ -448,15 +449,25 @@ fn solve_ipm_with_runner(
         if let Some(d) = total_deadline {
             if Instant::now() >= d { break; }
         }
+        if iter_used >= user_max_iter { break; }
+        let remaining = user_max_iter.saturating_sub(iter_used);
+        let per_attempt_cap = MAX_ITER_PER_ATTEMPT.min(remaining);
         opts.deadline = total_deadline;
         opts.timeout_secs = None;
-        opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+        opts.ipm.max_iter = per_attempt_cap;
         opts.use_ruiz_scaling = use_ruiz;
-        // IPM_EPS_NOISE_FLOOR (100×ε) で統一 (attempt level でも machine noise 直近 eps
-        // を回避、reviewer 観点で 3 種共存 → 2 種集約)。
         opts.ipm.eps = (user_eps / tighten).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
 
         let outcome = runner(problem, &presolve_result, &opts);
+        // Charge per_attempt_cap for failed attempts: stall paths return best_iter which
+        // can be far below the actual iterations consumed, causing the outer guard to
+        // undercount and permit more total iterations than user_max_iter.
+        let charged = if outcome.satisfies_eps(user_eps) {
+            outcome.iterations
+        } else {
+            per_attempt_cap
+        };
+        iter_used = iter_used.saturating_add(charged);
 
         if outcome.satisfies_eps(user_eps) {
             best = Some(outcome);
@@ -485,13 +496,18 @@ fn solve_ipm_with_runner(
             if total_deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
+            if iter_used >= user_max_iter { break; }
+            let remaining = user_max_iter.saturating_sub(iter_used);
+            let per_attempt_cap = MAX_ITER_PER_ATTEMPT.min(remaining);
             opts.deadline = total_deadline;
             opts.timeout_secs = None;
-            opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT;
+            opts.ipm.max_iter = per_attempt_cap;
             opts.use_ruiz_scaling = use_ruiz_fb;
             opts.tolerance = None;
             opts.ipm.eps = user_eps.max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let fb = runner(problem, &fallback_pre, &opts);
+            let charged_fb = if fb.satisfies_eps(user_eps) { fb.iterations } else { per_attempt_cap };
+            iter_used = iter_used.saturating_add(charged_fb);
             // Replace best only when the fallback actually satisfies user_eps. A
             // non-satisfying fallback must NOT displace the presolve result:
             // quality_score is KKT-only and ignores objective value, so a fallback
@@ -1174,5 +1190,51 @@ mod tests {
         assert!((result.bound_duals[1] - 40.0).abs() < 1e-12);
         assert!((result.bound_duals[2] - 15.0).abs() < 1e-12);
         assert!((result.bound_duals[3] - 10.0).abs() < 1e-12);
+    }
+
+    /// Sentinel: per_attempt_cap is charged for failed attempts, not outcome.iterations.
+    ///
+    /// Injects a mock runner that always returns `iterations=0` (simulating stall paths
+    /// where `IpmOutcome.iterations = best_iter << actual iterations consumed`). With
+    /// `user_max_iter=2`, the first attempt charges `per_attempt_cap=2`; the guard
+    /// `iter_used >= user_max_iter` triggers immediately and the loop stops.
+    ///
+    /// **Sentinel**: reverting to `iter_used += outcome.iterations` leaves iter_used=0
+    /// after the first attempt → the guard never triggers → all attempts run (count > 1).
+    #[test]
+    fn iter_guard_charges_per_attempt_cap_on_failed_attempt() {
+        use std::cell::Cell;
+        thread_local! {
+            static CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+        }
+
+        fn mock_runner(
+            _: &QpProblem,
+            _: &QpPresolveResult,
+            _: &SolverOptions,
+        ) -> IpmOutcome {
+            CALL_COUNT.with(|c| c.set(c.get() + 1));
+            // iterations=0 simulates stall best_iter undercount; never converges.
+            IpmOutcome::empty()
+        }
+
+        let prob = make_simple_eq_qp();
+        let mut opts = SolverOptions::default();
+        opts.ipm.max_iter = 2;
+        opts.presolve = false; // skip presolve to isolate the attempt loop
+        CALL_COUNT.with(|c| c.set(0));
+
+        let _ = solve_ipm_with_runner(&prob, &opts, mock_runner);
+
+        let count = CALL_COUNT.with(|c| c.get());
+        // With the fix: attempt 1 charges per_attempt_cap=2 → iter_used=2 >= 2 → stops.
+        // Without fix (charge outcome.iterations=0): iter_used never advances → all
+        // attempts run → count >> 1.
+        assert_eq!(
+            count, 1,
+            "iter guard must stop after 1 attempt when per_attempt_cap charges full budget \
+             (got {} runner calls)",
+            count
+        );
     }
 }
