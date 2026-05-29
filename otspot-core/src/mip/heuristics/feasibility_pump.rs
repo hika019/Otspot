@@ -10,7 +10,9 @@ use crate::lp::solve_lp_with;
 use crate::mip::branch::{fractionality, is_integer_feasible};
 use crate::mip::integer_mask;
 use crate::options::SolverOptions;
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use crate::sparse::CscMatrix;
+use crate::tolerances::PIVOT_TOL;
 
 /// Maximum number of FP projection iterations before giving up.
 const MAX_FP_ITER: usize = 30;
@@ -31,6 +33,12 @@ const HALF_INTEGER_THRESHOLD: f64 = 0.5;
 /// original `lp.c`) if the pump converges within [`MAX_FP_ITER`] iterations,
 /// or `None` on failure. A `None` return is benign — the caller proceeds with
 /// pure branch-and-bound.
+///
+/// Before accepting a rounded candidate as an incumbent the solution is validated
+/// against the original variable bounds and linear constraints. A rounded value
+/// can violate a bound when the LP solution sits within `integer_feas_tol` of an
+/// integer that lies outside the feasible region (e.g. UB = 0.9999999, rounded
+/// to 1.0). Seeding B&B with such a point would yield an out-of-bounds optimal.
 ///
 /// Sentinel: removing the `integer_vars.is_empty()` guard causes a vacuously
 /// integer-feasible LP root to be returned for pure-LP problems → callers
@@ -55,7 +63,12 @@ pub(crate) fn run_feasibility_pump(
 
     if is_integer_feasible(&root.solution, &mask, integer_feas_tol) {
         let x_rounded = round_integer_vars(&root.solution, &mask);
-        return Some(make_result(&lp.c, x_rounded));
+        if validate_against_bounds(&x_rounded, &lp.bounds)
+            && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
+        {
+            return Some(make_result(&lp.c, x_rounded));
+        }
+        return None;
     }
 
     let mut x_lp = root.solution;
@@ -77,7 +90,12 @@ pub(crate) fn run_feasibility_pump(
 
         if is_integer_feasible(&x_lp, &mask, integer_feas_tol) {
             let x_rounded = round_integer_vars(&x_lp, &mask);
-            return Some(make_result(&lp.c, x_rounded));
+            if validate_against_bounds(&x_rounded, &lp.bounds)
+                && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
+            {
+                return Some(make_result(&lp.c, x_rounded));
+            }
+            break;
         }
 
         let new_x_int = round_integer_vars(&x_lp, &mask);
@@ -154,6 +172,36 @@ fn perturb(x_int: &[f64], x_lp: &[f64], mask: &[bool], flip_count: usize) -> Vec
         };
     }
     result
+}
+
+/// Returns `true` if every component of `x` satisfies its variable bound.
+///
+/// Checks `lb ≤ x_j ≤ ub` exactly. No tolerance is applied because `x` is a
+/// rounded integer solution — a bound violation here reflects a genuine
+/// infeasibility, not floating-point noise.
+fn validate_against_bounds(x: &[f64], bounds: &[(f64, f64)]) -> bool {
+    x.iter().zip(bounds.iter()).all(|(&xi, &(lb, ub))| lb <= xi && xi <= ub)
+}
+
+/// Returns `true` if `x` satisfies all linear constraints within [`PIVOT_TOL`].
+///
+/// Computes `A x` and checks each row against `b` per [`ConstraintType`].
+/// Returns `false` on dimension mismatch.
+fn validate_against_constraints(
+    x: &[f64],
+    a: &CscMatrix,
+    b: &[f64],
+    constraint_types: &[ConstraintType],
+) -> bool {
+    let ax = match a.mat_vec_mul(x) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    ax.iter().zip(b.iter()).zip(constraint_types.iter()).all(|((&ax_i, &b_i), &ct)| match ct {
+        ConstraintType::Le => ax_i <= b_i + PIVOT_TOL,
+        ConstraintType::Ge => ax_i >= b_i - PIVOT_TOL,
+        ConstraintType::Eq => (ax_i - b_i).abs() <= PIVOT_TOL,
+    })
 }
 
 /// Build a `SolverResult` from a feasible integer solution and the original objective.
@@ -242,23 +290,49 @@ mod tests {
 
     /// FP incumbent objective is computed on the rounded solution, not the raw LP point.
     ///
-    /// Setup: x is fixed via equal bounds at `1.0 - 1e-7` (fractionality = 1e-7 ≤ 1e-6 tol)
-    /// so the LP root is integer-feasible within tolerance.
-    /// Fix: rounds the integer component to 1.0 before `make_result`.
+    /// Setup: bounds `[near_one, 1.5]` where `near_one = 1.0 - 1e-7`. The LP root
+    /// sits at the lower bound `near_one` (fractionality 1e-7 ≤ 1e-6 tol), so
+    /// `is_integer_feasible` fires immediately. Rounded value is 1.0, which is inside
+    /// `[near_one, 1.5]`.
     ///
-    /// Sentinel: removing the `round_integer_vars` call leaves obj = 0.9999999 ≠ 1.0 → FAIL.
+    /// Sentinel: removing `round_integer_vars` leaves solution = near_one ≈ 0.9999999
+    /// and obj = 0.9999999 ≠ 1.0 → FAIL.
     #[test]
-    fn fp_incumbent_uses_rounded_objective() {
-        // x fixed at near_one = 1.0 - 1e-7 via lb = ub (fractionality ≈ 1e-7 << 1e-6 tol).
-        // is_integer_feasible returns true at the LP root immediately.
-        // With rounding: solution = 1.0, objective = 1.0.
-        // Without rounding: solution = near_one, objective = near_one ≈ 0.9999999 → assertion fails.
+    fn fp_incumbent_uses_rounded_objective_valid_bounds() {
         let near_one = 1.0 - 1e-7;
-        let lp = single_constraint_lp(vec![1.0], &[1.0], 2.0, vec![(near_one, near_one)]);
+        // min x s.t. x ≤ 1.5, x ∈ [near_one, 1.5] integer.
+        // LP optimal: x = near_one (lb active). Rounded to 1.0, within bounds.
+        let lp = single_constraint_lp(vec![1.0], &[1.0], 1.5, vec![(near_one, 1.5)]);
         let r = run_feasibility_pump(&lp, &[0], 1e-6, &opts())
-            .expect("LP root integer-feasible within tol → Some");
+            .expect("LP root integer-feasible within tol, rounded in bounds → Some");
         assert!((r.solution[0] - 1.0).abs() < 1e-9, "solution should be rounded to 1.0, got {}", r.solution[0]);
         assert!((r.objective - 1.0).abs() < 1e-9, "objective should use rounded value 1.0, got {}", r.objective);
+    }
+
+    /// FP rejects a rounded incumbent that violates the original variable bounds.
+    ///
+    /// Setup: `x ∈ [0, 0.9999999]` (near_ub < 1), objective `min -x` (LP pushes x to UB).
+    /// LP root = near_ub ≈ 0.9999999, within `integer_feas_tol = 1e-6` of 1.
+    /// Rounded x = 1.0 exceeds UB = 0.9999999 → bounds validation rejects it.
+    ///
+    /// Sentinel: removing `validate_against_bounds` lets rounded x = 1.0 become the
+    /// incumbent, causing `run_feasibility_pump` to return `Some` with solution[0] = 1.0
+    /// even though 1.0 violates the original bound → FAIL.
+    #[test]
+    fn fp_rejects_rounded_incumbent_violating_bounds() {
+        let near_ub = 1.0 - 1e-7;
+        // min -x  s.t. x ≤ near_ub,  x ∈ [0, near_ub]  (integer)
+        // LP root: x = near_ub (maximises x within LP).
+        // is_integer_feasible: |near_ub − 1| = 1e-7 ≤ 1e-6 → true.
+        // round(near_ub) = 1.0,  but 1.0 > near_ub = UB → validation rejects.
+        let lp = single_constraint_lp(vec![-1.0], &[1.0], near_ub, vec![(0.0, near_ub)]);
+        let result = run_feasibility_pump(&lp, &[0], 1e-6, &opts());
+        assert!(
+            result.is_none(),
+            "FP must reject rounded incumbent that violates UB={}; \
+             no-op (remove validate_against_bounds) returns Some(solution[0]=1.0) → FAIL",
+            near_ub
+        );
     }
 
     /// `perturb` flips the rounded value of the most-fractional variable.
