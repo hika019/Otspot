@@ -54,7 +54,8 @@ pub(crate) fn run_feasibility_pump(
     }
 
     if is_integer_feasible(&root.solution, &mask, integer_feas_tol) {
-        return Some(make_result(&lp.c, root.solution));
+        let x_rounded = round_integer_vars(&root.solution, &mask);
+        return Some(make_result(&lp.c, x_rounded));
     }
 
     let mut x_lp = root.solution;
@@ -75,7 +76,8 @@ pub(crate) fn run_feasibility_pump(
         x_lp = fp_res.solution;
 
         if is_integer_feasible(&x_lp, &mask, integer_feas_tol) {
-            return Some(make_result(&lp.c, x_lp));
+            let x_rounded = round_integer_vars(&x_lp, &mask);
+            return Some(make_result(&lp.c, x_rounded));
         }
 
         let new_x_int = round_integer_vars(&x_lp, &mask);
@@ -236,6 +238,27 @@ mod tests {
         ).unwrap();
         let result = run_feasibility_pump(&lp, &[0], 1e-6, &opts());
         assert!(result.is_none(), "expected None for integer-infeasible problem, got Some");
+    }
+
+    /// FP incumbent objective is computed on the rounded solution, not the raw LP point.
+    ///
+    /// Setup: x is fixed via equal bounds at `1.0 - 1e-7` (fractionality = 1e-7 ≤ 1e-6 tol)
+    /// so the LP root is integer-feasible within tolerance.
+    /// Fix: rounds the integer component to 1.0 before `make_result`.
+    ///
+    /// Sentinel: removing the `round_integer_vars` call leaves obj = 0.9999999 ≠ 1.0 → FAIL.
+    #[test]
+    fn fp_incumbent_uses_rounded_objective() {
+        // x fixed at near_one = 1.0 - 1e-7 via lb = ub (fractionality ≈ 1e-7 << 1e-6 tol).
+        // is_integer_feasible returns true at the LP root immediately.
+        // With rounding: solution = 1.0, objective = 1.0.
+        // Without rounding: solution = near_one, objective = near_one ≈ 0.9999999 → assertion fails.
+        let near_one = 1.0 - 1e-7;
+        let lp = single_constraint_lp(vec![1.0], &[1.0], 2.0, vec![(near_one, near_one)]);
+        let r = run_feasibility_pump(&lp, &[0], 1e-6, &opts())
+            .expect("LP root integer-feasible within tol → Some");
+        assert!((r.solution[0] - 1.0).abs() < 1e-9, "solution should be rounded to 1.0, got {}", r.solution[0]);
+        assert!((r.objective - 1.0).abs() < 1e-9, "objective should use rounded value 1.0, got {}", r.objective);
     }
 
     /// `perturb` flips the rounded value of the most-fractional variable.
