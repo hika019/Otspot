@@ -47,9 +47,9 @@ DATASETS = [
      [".qplib"], "official"),
     # QP official-derived (generated from official problem definitions)
     ("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
-     [".npz", ".mat"], "official_gen"),
+     [".qps"], "official_gen"),
     ("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
-     [".npz", ".mat"], "official_gen"),
+     [".qps"], "official_gen"),
     # QP synthetic (no external reference by design)
     ("osqp_bench_extra", None, None, "synthetic"),
     ("osqp_bench_illscaled", None, None, "synthetic"),
