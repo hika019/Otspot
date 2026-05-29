@@ -1,5 +1,8 @@
 /target
-/data
+/data/*
+!/data/baseline_objectives/
+/data/baseline_objectives/*
+!/data/baseline_objectives/*.csv
 reports/
 **/__pycache__/
 .DS_Store

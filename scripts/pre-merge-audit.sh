@@ -11,6 +11,7 @@ cargo build --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --release --test-threads 3
 bash scripts/check_file_size.sh
+python3 tests/test_check_data_coverage.py
 
 # 2. commit 情報
 echo

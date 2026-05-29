@@ -20,3 +20,5 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+      - name: data coverage sentinel
+        run: python3 tests/test_check_data_coverage.py
