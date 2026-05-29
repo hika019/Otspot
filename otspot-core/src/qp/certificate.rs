@@ -5,7 +5,7 @@
 //! it returns `Err(NotProven)` naming the failing conditions. This "no certificate
 //! without proof" design eliminates false-Optimal status (the most common solver bug).
 //!
-//! [`prove_optimal_lp`] and [`guard_lp_optimal`] extend this to LP, handling the
+//! `prove_optimal_lp` and `guard_lp_optimal` extend this to LP, handling the
 //! sign-convention difference between LP simplex duals and the prove_optimal convention.
 
 use crate::problem::certificate::{NotProven, OptimalCertificate};

@@ -10,6 +10,26 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 修正
 
+### 内部
+
+### 依存
+
+## [0.3.1] - 2026-05-29
+
+### 追加
+- `try_var_name` checked variant (try_value と対称)
+
+### 修正
+- `solve_ipm` / `run_ipm` で SolverOptions validate guard (panic → ModelError)
+- `greenbea_postsolve_dual_feasibility` を `#[ignore]` 化 (bench 並行下 flaky)
+- audit.rs の should_panic 誤検出修正
+
+### 内部
+- rustdoc broken link 整理 + CI doc job 追加
+
+### 依存
+- actions/checkout v6 / tempfile 3.27 / mimalloc 0.1.52 / log 0.4.30 / rayon 1.12.0 / proptest 1.11.0
+
 ## [0.3.0] - 2026-05-28
 
 ### 追加
