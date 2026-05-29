@@ -6,7 +6,7 @@
 //!   A.2 QPS DuplicateSection error.
 //!   A.3 QPS unknown section reject.
 
-use otspot::io::mps::{parse_mps, MpsError};
+use otspot::io::mps::parse_mps;
 use otspot::io::qps::{parse_qps_str, QpsError};
 use otspot::model::{Model, ModelError};
 use otspot::constraint;

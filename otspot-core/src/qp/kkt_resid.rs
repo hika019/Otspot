@@ -31,7 +31,23 @@ use crate::sparse::CscMatrix;
 /// Returns `max{ viol_k / (1 + |v_k|) }` over all sign-constrained components,
 /// where `viol_k = max(0, wrong-sign part)`. Returns 0 when all sign constraints hold.
 /// Scale invariant: scaling y and z by a positive scalar leaves the result unchanged.
+///
+/// Returns `f64::INFINITY` if any element of `y` is non-finite (NaN or ±Inf).
+///
+/// NaN entries in `z` are not detected here and return 0.0 (silent suppress via
+/// `(-NaN).max(0.0) == 0.0`). NaN-z is indirectly caught through
+/// `complementarity_residual_rel` where `NaN * finite = NaN`, causing that metric
+/// to return NaN; `NaN < eps` evaluates to false, resulting in `SuboptimalSolution`.
+///
+/// **Caller responsibility**: `z` must have length `n_lb_finite + n_ub_finite` where
+/// `n_lb_finite` / `n_ub_finite` are the counts of finite lower / upper bounds in
+/// `bounds`. Passing a shorter `z` is a contract violation detected by `debug_assert`
+/// in debug builds; in release builds the z-processing is skipped when `z` is empty.
 pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64)], z: &[f64]) -> f64 {
+    if y.iter().any(|v| !v.is_finite()) {
+        return f64::INFINITY;
+    }
+
     let mut max_rel = 0.0_f64;
 
     // Constraint dual sign check.
@@ -50,8 +66,15 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
         }
     }
 
-    // Bound dual sign check (lb half: >= 0, ub half: <= 0).
+    // Bound dual sign check (lb half: >= 0, ub half: >= 0).
     // z layout mirrors bound_contrib: lb-finite columns first, then ub-finite columns.
+    let n_lb_finite = bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let n_ub_finite = bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    debug_assert_eq!(
+        z.len(), n_lb_finite + n_ub_finite,
+        "z.len()={} must equal n_lb_finite={} + n_ub_finite={}: caller must pass z with correct length",
+        z.len(), n_lb_finite, n_ub_finite,
+    );
     if z.is_empty() {
         return max_rel;
     }
@@ -178,6 +201,16 @@ pub mod f64_impl {
     /// Per-component normalised primal feasibility (f64 path).
     ///
     /// `max_i violation_i / (1 + |Ax_i| + |b_i|)`.
+    ///
+    /// **Drift catch oracle** — `ipm_solver::kkt::primal_residual_rel` と同型の
+    /// f64 経路。DD 版は catastrophic cancellation を回避するが (テスト
+    /// `primal_residual_rel_uses_dd_to_avoid_f64_cancellation` 参照)、f64 版は
+    /// 敢えて単精度で演算し、同一入力に対して DD 版と比較することで数値 drift を
+    /// 表面化させるオラクルとして機能する。generic 化しないのはこの経路分離を
+    /// 維持するためである。
+    ///
+    /// `bench_utils` 報告専用。ゲートとして依存されていないことを実測確認済み
+    /// (撤廃で標準 test suite 非 ignored 全件 PASS、`primal_residual_rel_uses_dd_to_avoid_f64_cancellation` 参照)。
     ///
     /// Internal utility for `otspot-dev`; not part of the stable public API.
     #[doc(hidden)]
@@ -521,15 +554,32 @@ mod tests {
         assert_eq!(v, 0.0, "positive z_ub must not be a violation, got {v}");
     }
 
-    /// z = [] means no bound duals: no violation.
+    /// A.1 sentinel: z length mismatch triggers debug_assert in debug builds.
+    /// Removing the debug_assert_eq! must make this test PASS (instead of panic)
+    /// → sentinel would fail because `should_panic` would not fire.
+    #[cfg(debug_assertions)]
     #[test]
-    fn dual_sign_empty_z_no_violation() {
+    #[should_panic]
+    fn dual_sign_z_length_mismatch_debug_assert() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        // bounds has 1 finite lb → n_lb_finite=1, n_ub_finite=0; z.len()=0 ≠ 1
+        let bounds = vec![(0.0_f64, f64::INFINITY)];
+        dual_sign_violation(&ct, &y, &bounds, &[]);
+    }
+
+    /// A.3 sentinel: NaN in y must return INFINITY, not silently pass as 0.0.
+    /// Without the `y.iter().any(|v| !v.is_finite())` guard, f64::NAN.max(0.0)==0.0
+    /// would suppress the violation and return 0.0 → sentinel fails.
+    #[test]
+    fn dual_sign_nan_y_returns_infinity() {
         use ConstraintType::*;
         let ct = vec![Le];
-        let y = vec![0.5_f64];
-        let bounds = vec![(0.0, f64::INFINITY)];
-        let v = dual_sign_violation(&ct, &y, &bounds, &[]);
-        assert_eq!(v, 0.0);
+        let y = vec![f64::NAN];
+        let bounds: Vec<(f64, f64)> = vec![];
+        let z: Vec<f64> = vec![];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert!(v.is_infinite() && v > 0.0, "NaN y must give +INFINITY, got {v}");
     }
 
     /// Scale robustness: large and small violations both give bounded results in (0, 1].

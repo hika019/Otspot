@@ -3,6 +3,8 @@
 use crate::linalg::ruiz::RuizScaler;
 use crate::options::SolverOptions;
 use crate::problem::{SolveStatus, SolverResult};
+use crate::qp::ipm_solver::kkt::complementarity_residual_rel;
+use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid;
 use crate::qp::problem::QpProblem;
 
@@ -258,112 +260,13 @@ pub(crate) fn check_dfeas_status_relative(
     if dfeas_relative >= eps {
         return SolveStatus::SuboptimalSolution;
     }
-    let comp = complementarity_relative(problem, x, y, bound_duals);
+    let view = ProblemView::from_problem(problem);
+    let comp = complementarity_residual_rel(&view, x, y, bound_duals);
     if comp < eps {
         SolveStatus::Optimal
     } else {
         SolveStatus::SuboptimalSolution
     }
-}
-
-/// 元空間 complementarity 残差 (問題全体スケール正規化)。
-fn complementarity_relative(
-    problem: &QpProblem,
-    x: &[f64],
-    y: &[f64],
-    bound_duals: &[f64],
-) -> f64 {
-    use crate::problem::ConstraintType;
-    use twofloat::TwoFloat;
-    let zero_dd = TwoFloat::from(0.0);
-
-    let m = problem.a.nrows;
-    let ax_dd: Vec<TwoFloat> = if m > 0 {
-        let mut ax = vec![zero_dd; m];
-        for col in 0..problem.a.ncols {
-            let xv = x[col];
-            for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
-                ax[problem.a.row_ind[k]] += TwoFloat::new_mul(problem.a.values[k], xv);
-            }
-        }
-        ax
-    } else {
-        Vec::new()
-    };
-
-    let yb: f64 = y.iter().zip(problem.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
-    let yax: f64 = y
-        .iter()
-        .zip(ax_dd.iter())
-        .map(|(&yi, &ax_dd_i)| yi * f64::from(ax_dd_i))
-        .sum();
-    let zx: f64 = {
-        let mut s = 0.0_f64;
-        let mut idx = 0_usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bound_duals.len() {
-                s += bound_duals[idx] * x[j];
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bound_duals.len() {
-                s += bound_duals[idx] * x[j];
-                idx += 1;
-            }
-        }
-        s
-    };
-    let cx: f64 = problem.c.iter().zip(x.iter()).map(|(&c, &xi)| c * xi).sum();
-    let xqx: f64 = {
-        let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
-        qx.iter().zip(x.iter()).map(|(&q, &xi)| q * xi).sum()
-    };
-    let scale = 1.0
-        + yb.abs()
-        + yax.abs()
-        + zx.abs()
-        + cx.abs()
-        + (0.5 * xqx).abs();
-
-    let mut max_abs = 0.0_f64;
-
-    if m > 0 && !y.is_empty() {
-        for (i, ct) in problem.constraint_types.iter().enumerate() {
-            let slack_dd = match ct {
-                ConstraintType::Eq => continue,
-                ConstraintType::Le => TwoFloat::from(problem.b[i]) - ax_dd[i],
-                ConstraintType::Ge => ax_dd[i] - TwoFloat::from(problem.b[i]),
-            };
-            let prod = (f64::from(slack_dd) * y[i]).abs();
-            if prod > max_abs {
-                max_abs = prod;
-            }
-        }
-    }
-
-    if !bound_duals.is_empty() {
-        let mut idx = 0_usize;
-        for (j, &(lb, _)) in problem.bounds.iter().enumerate() {
-            if lb.is_finite() && idx < bound_duals.len() {
-                let prod = (bound_duals[idx] * (x[j] - lb)).abs();
-                if prod > max_abs {
-                    max_abs = prod;
-                }
-                idx += 1;
-            }
-        }
-        for (j, &(_, ub)) in problem.bounds.iter().enumerate() {
-            if ub.is_finite() && idx < bound_duals.len() {
-                let prod = (bound_duals[idx] * (ub - x[j])).abs();
-                if prod > max_abs {
-                    max_abs = prod;
-                }
-                idx += 1;
-            }
-        }
-    }
-    max_abs / scale
 }
 
 /// unscale 残差増幅率 = max(1/min(e), 1/(c·min(d)))。MIN_POSITIVE で div0 防護。
@@ -506,6 +409,59 @@ pub(crate) fn unscale_ipm_result(
 mod tests {
     use super::*;
     use crate::linalg::ruiz::RuizScaler;
+    use crate::qp::ipm_solver::kkt::complementarity_residual_rel;
+    use crate::qp::ipm_solver::outcome::ProblemView;
+    use crate::sparse::CscMatrix;
+
+    /// D.1 regression: `check_dfeas_status_relative` via the new routing
+    /// (`complementarity_residual_rel + ProblemView`) accepts a KKT-optimal point.
+    ///
+    /// Problem: `min x^2 + y^2  s.t. -(x+y) <= -1  (i.e. x+y >= 1)`, `x,y >= 0`.
+    /// At the optimal `x=y=0.5`: the Le-constraint dual is `y_dual=1` (sign: >= 0
+    /// for Le).  Stationarity: `Qx + A^T y = [1,1] + [-1,-1]*1 = 0` ✓.
+    /// Bound slacks: `x-lb = 0.5 > 0` (inactive), so `bound_duals=[0,0]`.
+    /// Complementarity: `y_dual * (Ax - b) = 1 * (-1 - (-1)) = 0` ✓.
+    #[test]
+    fn check_dfeas_status_relative_complementarity_agrees_with_ipm_kkt() {
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
+        let problem = crate::qp::problem::QpProblem::new_all_le(
+            q, vec![0.0, 0.0], a, vec![-1.0],
+            vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)],
+        ).unwrap();
+
+        let x = vec![0.5, 0.5];
+        let y = vec![1.0]; // Le constraint dual >= 0
+        let bound_duals = vec![0.0, 0.0];
+
+        let view = ProblemView::from_problem(&problem);
+        let comp_new = complementarity_residual_rel(&view, &x, &y, &bound_duals);
+        let status = check_dfeas_status_relative(&problem, &x, &y, &bound_duals, 1e-4);
+        assert!(comp_new < 1e-4, "complementarity_residual_rel at optimal: {comp_new:.3e}");
+        assert_eq!(status, crate::problem::SolveStatus::Optimal);
+    }
+
+    /// D.1 sentinel: `check_dfeas_status_relative` via `complementarity_residual_rel`
+    /// correctly rejects a point where stationarity holds but complementarity does not.
+    ///
+    /// Problem: `min x  s.t. x >= 0`.  At `x=1` with `z_lb=1`:
+    /// - Stationarity: `c - z_lb = 1 - 1 = 0` ✓
+    /// - Complementarity: `z_lb * (x - lb) = 1 * (1-0) = 1 >> 0` → SuboptimalSolution.
+    #[test]
+    fn check_dfeas_status_relative_detects_nonzero_complementarity() {
+        let q = CscMatrix::new(1, 1);
+        let a = CscMatrix::new(0, 1);
+        let problem = crate::qp::problem::QpProblem::new_all_le(
+            q, vec![1.0], a, vec![], vec![(0.0_f64, f64::INFINITY)],
+        ).unwrap();
+
+        let x = vec![1.0];
+        let y: Vec<f64> = vec![];
+        let bound_duals = vec![1.0]; // z_lb=1 satisfies stationarity (c - z_lb = 0)
+        let status = check_dfeas_status_relative(&problem, &x, &y, &bound_duals, 1e-6);
+        // comp = 1 * (1-0) / scale ≈ 0.33 >> 1e-6 → SuboptimalSolution
+        assert_eq!(status, crate::problem::SolveStatus::SuboptimalSolution);
+    }
 
     #[test]
     fn compute_amplification_includes_dual_side() {

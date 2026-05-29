@@ -171,9 +171,9 @@ fn build_and_solve_cleanup_lp(
     for j in 0..n {
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
-        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_ACTIVE_TOL;
-        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_ACTIVE_TOL;
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
         if fixed { continue; }
 
         let mut col_terms: Vec<(usize, f64)> = Vec::new();
@@ -473,8 +473,40 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
     out
 }
 
-/// Distance below which `x[j]` is treated as active at its lb / ub.
-const BOUND_ACTIVE_TOL: f64 = 1e-6;
+/// Relative tolerance for treating `x[j]` as active at a bound or for detecting fixed variables.
+///
+/// Each check uses only the relevant bound's magnitude to avoid inflating the threshold
+/// with the opposite bound (e.g. `at_lb` for `lb=0, ub=1e12` gives `tol≈1e-6`, not `≈1.0`).
+const BOUND_ACTIVE_REL_TOL: f64 = 1e-6;
+
+/// Tolerance for `x ≈ lb`: scales with lb magnitude only.
+///
+/// # Precondition
+/// `lb` must be finite; all callers guard with `lb.is_finite() &&` before calling.
+#[inline]
+fn at_lb_tol(lb: f64) -> f64 {
+    BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs())
+}
+
+/// Tolerance for `x ≈ ub`: scales with ub magnitude only.
+///
+/// # Precondition
+/// `ub` must be finite; all callers guard with `ub.is_finite() &&` before calling.
+#[inline]
+fn at_ub_tol(ub: f64) -> f64 {
+    BOUND_ACTIVE_REL_TOL * (1.0 + ub.abs())
+}
+
+/// Tolerance for `ub - lb ≈ 0` (variable effectively fixed): scales with max magnitude.
+///
+/// Using max avoids doubling the threshold when both bounds are large (e.g. `[1e6, 1e6+1.5]`
+/// would give `tol≈2.0` with sum but `tol≈1.0` with max, correctly leaving the gap=1.5 unclassified).
+#[inline]
+fn fixed_tol(lb: f64, ub: f64) -> f64 {
+    let lb_s = if lb.is_finite() { lb.abs() } else { 0.0 };
+    let ub_s = if ub.is_finite() { ub.abs() } else { 0.0 };
+    BOUND_ACTIVE_REL_TOL * (1.0 + lb_s.max(ub_s))
+}
 
 /// Marker for bound-tightened-fixed columns that landed on one of their *original*
 /// bounds.  At such a column the bound-multiplier pair (μ_lb, μ_ub) is degenerate;
@@ -512,9 +544,9 @@ fn recover_removed_row_dual(
         }
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
-        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < BOUND_ACTIVE_TOL;
-        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < BOUND_ACTIVE_TOL;
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
         if fixed { continue; }
         let bound_val = rc_at_y0 / a_ij;
         if at_lb && !at_ub {
@@ -856,13 +888,13 @@ pub fn run_postsolve(
                 if j >= n { continue; }
                 let (orig_lb, orig_ub) = orig_problem.bounds[j];
                 let truly_fixed = orig_lb.is_finite() && orig_ub.is_finite()
-                    && (orig_ub - orig_lb).abs() < BOUND_ACTIVE_TOL;
+                    && (orig_ub - orig_lb).abs() < fixed_tol(orig_lb, orig_ub);
                 if truly_fixed { continue; }
                 let x = solution[j];
                 let at_orig_lb = orig_lb.is_finite()
-                    && (x - orig_lb).abs() < BOUND_ACTIVE_TOL;
+                    && (x - orig_lb).abs() < at_lb_tol(orig_lb);
                 let at_orig_ub = orig_ub.is_finite()
-                    && (x - orig_ub).abs() < BOUND_ACTIVE_TOL;
+                    && (x - orig_ub).abs() < at_ub_tol(orig_ub);
                 if at_orig_lb && !at_orig_ub {
                     out[j] = Some(BoundAbsorb::AtLb);
                 } else if at_orig_ub && !at_orig_lb {
@@ -882,10 +914,10 @@ pub fn run_postsolve(
         for j in 0..n {
             let (lb_j, ub_j) = orig_problem.bounds[j];
             let fixed = lb_j.is_finite() && ub_j.is_finite()
-                && (ub_j - lb_j).abs() < BOUND_ACTIVE_TOL;
+                && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
             if fixed { continue; }
-            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < BOUND_ACTIVE_TOL;
-            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < BOUND_ACTIVE_TOL;
+            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
+            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
             let mut rc = orig_problem.c[j];
             if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
                 for (k, &row) in rows.iter().enumerate() {
@@ -942,11 +974,11 @@ pub fn run_postsolve(
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_min = df_cl_nopert.min(df_cl_pert);
 
-    // When both cleanup variants failed to improve the cheap candidates beyond
-    // numerical drift, LSQ shares the same data path (A, c, x*) and is expected
-    // to stagnate as well; running it only burns budget (dfl001: 98% of ~3s
-    // postsolve). The 0.1% relative-improvement floor lets genuine cleanup
-    // progress (≥0.1% of cheap_min) still trigger LSQ.
+    // LSQ skip gate: cleanup が cheap_min より 0.1% 以上改善していない場合は
+    // LSQ が同一データで stagnate すると期待されるため skip する
+    // (dfl001: LSQ が postsolve の 98% ≈ ~3s を消費、lp_dispatch.rs bench 実測)。
+    // 撤廃 (0.0) では標準 test suite に退化なし (dfl001 は #[ignore])。
+    // (lp_dispatch.rs: dfl001 bench 実測) skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
     const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
     let cleanup_stagnant = df_cl_min.is_finite()
         && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
@@ -1541,5 +1573,85 @@ mod warm_basis_recovery_tests {
             "non-reducible default path must keep native simplex basis");
         assert!(r_optin.warm_start_basis.is_some(),
             "non-reducible opt-in path must keep native simplex basis");
+    }
+}
+
+#[cfg(test)]
+mod bound_active_tol_tests {
+    use super::*;
+
+    /// Sentinel C.4: `at_lb_tol` scales with lb magnitude only.
+    ///
+    /// With an absolute 1e-6 threshold, x = lb + 0.5 (|x−lb|=0.5) would be
+    /// classified as interior for lb=1e6, violating complementary slackness.
+    /// `at_lb_tol(lb=1e6) ≈ 1.0`, so the same deviation is correctly at-lb.
+    ///
+    /// Regresses if `at_lb_tol` reverts to the old absolute 1e-6.
+    #[test]
+    fn test_sentinel_c4_large_scale_bound_active_tol() {
+        let lb = 1e6_f64;
+        let x = lb + 0.5;
+
+        assert!((x - lb).abs() > BOUND_ACTIVE_REL_TOL,
+            "absolute BOUND_ACTIVE_REL_TOL alone would misclassify x as interior");
+
+        let tol = at_lb_tol(lb);
+        assert!((x - lb).abs() < tol,
+            "at_lb_tol={} must classify x=lb+0.5 as at-lb for lb=1e6", tol);
+    }
+
+    /// Unit-scale bounds (lb=0, ub=1) give tolerances close to BOUND_ACTIVE_REL_TOL.
+    #[test]
+    fn test_bound_active_tol_unit_scale() {
+        assert!((at_lb_tol(0.0) - 1e-6).abs() < 1e-20,
+            "at_lb_tol(0) should be 1e-6, got {}", at_lb_tol(0.0));
+        assert!((at_ub_tol(1.0) - 2e-6).abs() < 1e-20,
+            "at_ub_tol(1) should be 2e-6, got {}", at_ub_tol(1.0));
+        assert!((fixed_tol(0.0, 1.0) - 2e-6).abs() < 1e-20,
+            "fixed_tol(0,1) should be 2e-6, got {}", fixed_tol(0.0, 1.0));
+    }
+
+    /// Sentinel C.4 (codex): lb=0, ub=1e12, x=5e5 must NOT be at-lb.
+    ///
+    /// Old formula `1e-6*(1+|lb|+|ub|) ≈ 1.0e6` made `(x-lb)=5e5 < 1e6` → at_lb (wrong).
+    /// New lb-only formula `1e-6*(1+|lb|) = 1e-6` correctly rejects x=5e5 as interior.
+    /// No-op regression: reverts if `at_lb_tol` re-adds ub to its formula.
+    #[test]
+    fn test_sentinel_c4_independent_lb_ub_scaling_at_lb() {
+        let lb = 0.0_f64;
+        let ub = 1e12_f64;
+        let x = 5e5_f64;
+
+        // Old formula would give tol ≈ 1e6, making x look at-lb.
+        let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
+        assert!((x - lb).abs() < old_tol,
+            "old formula must mis-classify x=5e5 as at-lb (old_tol={})", old_tol);
+
+        // New lb-only formula correctly classifies x as interior.
+        let new_tol = at_lb_tol(lb);
+        assert!((x - lb).abs() >= new_tol,
+            "at_lb_tol={} must NOT classify x=5e5 as at-lb for lb=0,ub=1e12", new_tol);
+    }
+
+    /// Sentinel C.4 (reviewer): lb=1e6, ub=1e6+1.5 must NOT be fixed.
+    ///
+    /// Old formula `1e-6*(1+|lb|+|ub|) ≈ 2.0` made `gap=1.5 < 2.0` → fixed (wrong).
+    /// New max formula `1e-6*(1+max(|lb|,|ub|)) ≈ 1.0` gives `gap=1.5 > 1.0` → not fixed.
+    /// No-op regression: reverts if `fixed_tol` re-sums both magnitudes.
+    #[test]
+    fn test_sentinel_c4_independent_lb_ub_scaling_fixed() {
+        let lb = 1e6_f64;
+        let ub = 1e6_f64 + 1.5_f64;
+        let gap = ub - lb;
+
+        // Old formula must classify this as fixed.
+        let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
+        assert!(gap < old_tol,
+            "old formula must mis-classify [1e6,1e6+1.5] as fixed (old_tol={})", old_tol);
+
+        // New max formula correctly leaves the range as non-fixed.
+        let new_tol = fixed_tol(lb, ub);
+        assert!(gap >= new_tol,
+            "fixed_tol={} must NOT classify [1e6,1e6+1.5] as fixed (gap={})", new_tol, gap);
     }
 }
