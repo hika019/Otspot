@@ -179,6 +179,17 @@ pub mod f64_impl {
     ///
     /// `max_i violation_i / (1 + |Ax_i| + |b_i|)`.
     ///
+    /// **Drift catch oracle** — `ipm_solver::kkt::primal_residual_rel` と同型の
+    /// f64 経路。DD 版は catastrophic cancellation を回避するが (テスト
+    /// `primal_residual_rel_uses_dd_to_avoid_f64_cancellation` 参照)、f64 版は
+    /// 敢えて単精度で演算し、同一入力に対して DD 版と比較することで数値 drift を
+    /// 表面化させるオラクルとして機能する。generic 化しないのはこの経路分離を
+    /// 維持するためである。
+    ///
+    /// 用途: `bench_utils` 報告専用。`prove_optimal` の primal 残差ゲートは
+    /// DD 版を使用する。撤廃 (常時 0.0 返却) では標準 test suite 912 件が全 PASS —
+    /// ゲートとして依存されていないことを実測確認済み。
+    ///
     /// Internal utility for `otspot-dev`; not part of the stable public API.
     #[doc(hidden)]
     pub fn primal_residual_rel(a: &CscMatrix, b: &[f64], ct: &[ConstraintType], x: &[f64]) -> f64 {
