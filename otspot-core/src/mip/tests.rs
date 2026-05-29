@@ -1245,8 +1245,8 @@ fn feasibility_pump_handles_pure_lp_pass_through() {
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!(
         !stats.fp_incumbent_found,
-        "FP must be skipped for pure LP (empty integer_vars); \
-         unconditional FP call sets fp_incumbent_found=true → FAIL"
+        "pure LP must not set fp_incumbent_found; \
+         FP is gated by `!integer_vars.is_empty()` in solve_milp_with_stats"
     );
 }
 
