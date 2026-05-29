@@ -451,6 +451,8 @@ mod tests {
         assert!(m.is_convex(), "large-n PSD-singular Q must be accepted as convex");
     }
 
+    // Integration-test counterpart with identical Q structure: tests/diag_psd_check_soundness.rs.
+    // Cross-crate boundary prevents sharing; kept separate intentionally.
     fn indefinite_q_n1001() -> QpProblem {
         let n = 1001_usize;
         let mut rows = vec![];

@@ -9,7 +9,7 @@ use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
-/// `m > 2n` since the elimination cost is O(n²m).
+/// `m > 2n` since the elimination cost is O(mn²).
 pub fn equality_constraint_qr(
     prob: &QpProblem,
     removed_rows: &mut [bool],
@@ -21,7 +21,7 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // Minimum ratio of rows to columns: elimination cost is O(n²m) and only
+    // Minimum ratio of rows to columns: elimination cost is O(mn²) and only
     // pays off in strongly over-determined systems (m > n * ROW_OVERDETERMINED_RATIO).
     const ROW_OVERDETERMINED_RATIO: usize = 2;
     const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
@@ -476,5 +476,69 @@ mod tests {
         // 少なくとも1行が除去されているべき（重複行）
         let removed_count = removed.iter().filter(|&&b| b).count();
         assert!(removed_count >= 2, "at least one redundant pair removed, got {}", removed_count);
+    }
+
+    /// Sentinel: ROW_OVERDETERMINED_RATIO boundary — m = n*2 skips QR (skip path).
+    ///
+    /// **Sentinel**: changing ROW_OVERDETERMINED_RATIO from 2 to 1 activates QR at m=2n,
+    /// which removes redundant rows → removed_count > 0 → this test FAIL.
+    #[test]
+    fn equality_constraint_qr_skip_at_boundary_m_eq_2n() {
+        // n=2, m=4 = n*ROW_OVERDETERMINED_RATIO: condition `m <= n*2` is true → skip.
+        // Even with a redundant Le-Le pair present, nothing is removed.
+        let n = 2usize;
+        let m = 4usize; // exactly n*ROW_OVERDETERMINED_RATIO
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3],
+            &[0, 1, 0, 1, 0, 1, 0, 1],
+            &[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
+            m, n,
+        ).unwrap();
+        let b = vec![1.0, -1.0, 1.0, -1.0]; // rows 0,1 and rows 2,3 are the same Le-Le pair
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        ).unwrap();
+        let mut removed = vec![false; m];
+        equality_constraint_qr(&prob, &mut removed);
+        let removed_count = removed.iter().filter(|&&b| b).count();
+        assert_eq!(
+            removed_count, 0,
+            "m=n*ROW_OVERDETERMINED_RATIO: QR is skipped, nothing removed (got {})",
+            removed_count
+        );
+    }
+
+    /// Sentinel: ROW_OVERDETERMINED_RATIO boundary — m = n*2+1 runs QR (run path).
+    ///
+    /// **Sentinel**: changing ROW_OVERDETERMINED_RATIO from 2 to 3 makes `m <= n*3` true
+    /// for m=5, n=2 → skips QR → removed_count = 0 → this test FAIL.
+    #[test]
+    fn equality_constraint_qr_runs_at_boundary_m_eq_2n_plus_1() {
+        // n=2, m=5 = n*ROW_OVERDETERMINED_RATIO + 1: condition `m <= n*2` is false → run.
+        let n = 2usize;
+        let m = 5usize; // n*ROW_OVERDETERMINED_RATIO + 1
+        // Rows 0,1: x+y<=1 / -(x+y)<=-1  (Le-Le pair 1)
+        // Rows 2,3: same pair (redundant)
+        // Row  4: lone x<=5 (no pair, not removed)
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0],
+            &[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0],
+            m, n,
+        ).unwrap();
+        let b = vec![1.0, -1.0, 1.0, -1.0, 5.0];
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        ).unwrap();
+        let mut removed = vec![false; m];
+        equality_constraint_qr(&prob, &mut removed);
+        let removed_count = removed.iter().filter(|&&b| b).count();
+        assert!(
+            removed_count >= 2,
+            "m > n*ROW_OVERDETERMINED_RATIO: QR runs and removes redundant rows (got {})",
+            removed_count
+        );
     }
 }
