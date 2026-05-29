@@ -5,15 +5,18 @@
 
 use crate::problem::SolverResult;
 use crate::qp::QpProblem;
+use crate::tolerances::DROP_TOL;
 use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 
 /// Pivot singularity threshold for dual recovery.
 ///
-/// When |A[row, col]| < SINGULARITY_TOL, the pivot is treated as numerically
-/// singular and the dual recovery for that singleton row is skipped.
-/// Note: 1e-30 is much stricter than DROP_TOL (1e-15); value is retained as-is
-/// pending further audit of the numerical justification.
-const SINGULARITY_TOL: f64 = 1e-30;
+/// When `|A[row, col]| < SINGULARITY_TOL`, the pivot is treated as numerically
+/// singular and the dual recovery for that singleton row is skipped to prevent
+/// `y_new = target / a_row_col` from blowing up.
+///
+/// Aligned with `DROP_TOL` (1e-15): entries this small are already discarded
+/// during matrix construction, so treating them as singular is consistent.
+const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。
 ///
@@ -178,14 +181,16 @@ pub fn postsolve_qp_with_dual_recovery(
     //   → active 問題では A[r_k, j_l] = 0 → 逆に k > l のとき A[r_k, j_l] ≠ 0 が許される
     // 上三角系は後退代入 (逆順処理) で 1 pass 厳密に解ける。
     // forward 順は下三角を仮定した前進代入であり、この問題では発散する。
+    // bound_duals are still in reduced-space layout here; pass 0.0 explicitly.
+    // The refine_postsolve_recovery pass in core.rs re-runs this after
+    // remap_bound_duals_to_orig, supplying the correct bound_contrib per variable.
     for step in presolve_result.postsolve_stack.steps.iter().rev() {
         match step {
             QpPostsolveStep::SingletonRow { row, col, .. } => {
-                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
+                recover_y_for_singleton_row_with_bound(*row, *col, orig_problem, &mut sol, 0.0);
             }
             QpPostsolveStep::SingletonIneqToBound { row, col, ct, .. } => {
-                recover_y_for_singleton_row(*row, *col, orig_problem, &mut sol);
-                // Clamp to the feasible dual sign per complementary slackness.
+                recover_y_for_singleton_row_with_bound(*row, *col, orig_problem, &mut sol, 0.0);
                 let y = sol.dual_solution[*row];
                 sol.dual_solution[*row] = match ct {
                     crate::problem::ConstraintType::Le => y.max(0.0),
@@ -193,9 +198,6 @@ pub fn postsolve_qp_with_dual_recovery(
                     _ => y,
                 };
             }
-            // FixedVar / EmptyCol の z 復元は core.rs::refit_bound_duals_kkt が
-            // 一括で行う (bound_duals レイアウトが core.rs::remap で確定するため、
-            // ここで z を計算しても上書きされる)。
             _ => {}
         }
     }
@@ -203,25 +205,14 @@ pub fn postsolve_qp_with_dual_recovery(
     sol
 }
 
-/// SingletonRow / RedundantRowFix で削除された行 `row` の dual `y[row]` を
-/// 元 KKT 停留性から解析的に復元する。
+/// Recover `y[row]` for a singleton row from KKT stationarity.
 ///
-/// 前提: 行 `row` は variable `col` のみが係数を持つ singleton。
-///   A[row, col] * x[col] = b[row] (Eq), x[col] = val
+/// The row was eliminated by presolve (singleton Eq or activity-tightened Eq).
+/// KKT for `col`: `Q[col,:]·x + c[col] + Σ_k A[k,col]·y[k] + bound_contrib_col = 0`
 ///
-/// `bound_contrib_col`: KKT for col の bound 寄与 (-z_lb + z_ub) で、
-/// bound_duals が orig 空間にレイアウト確定済みなら正しい値を渡す。
-/// reduced 空間レイアウトの段階では 0 を渡す (本関数の初回 pass)。
-pub(crate) fn recover_y_for_singleton_row(
-    row: usize,
-    col: usize,
-    orig: &QpProblem,
-    sol: &mut SolverResult,
-) {
-    recover_y_for_singleton_row_with_bound(row, col, orig, sol, 0.0);
-}
-
-/// `recover_y_for_singleton_row` の bound_contrib 明示版。
+/// `bound_contrib_col` = `-z_lb + z_ub` for variable `col`.  Pass the value
+/// from `bound_contrib_at_var` once `bound_duals` are mapped to the original
+/// space.  Before that mapping (initial postsolve pass), pass `0.0` explicitly.
 pub(crate) fn recover_y_for_singleton_row_with_bound(
     row: usize,
     col: usize,
@@ -580,29 +571,24 @@ mod tests {
             "final_residuals must be preserved after postsolve");
     }
 
-    /// recover_y_for_singleton_row: SingletonRow 削除時の y[row] を KKT 停留性で復元する
-    /// 解析公式が、y を入れ直すと col の stationarity が 0 になることを直接確認。
+    /// `recover_y_for_singleton_row_with_bound`: FR var (bound_contrib=0) の
+    /// stationarity をゼロにできることを直接確認。
     ///
-    /// 設計:
-    ///   2 行 1 列。row 0: 2·x = 4 (singleton で削除、x = 2 に固定)、row 1: x ≤ 10。
-    ///   c = 5、Q = 0、bounds = (-inf, inf)。
-    ///   KKT for col 0: 0 + 5 + 2·y[0] + 1·y[1] = 0
-    ///   y[1] (row 1 の dual) を 0 として recover_y → y[0] = -(5 + 0) / 2 = -2.5
+    /// 設計: 2 行 1 列。row 0: 2·x = 4 (singleton)、row 1: x ≤ 10、FR 変数。
+    ///   KKT for col 0: 0 + 5 + 2·y[0] + 1·y[1] = 0 → y[0] = -2.5
     #[test]
-    fn test_recover_y_for_singleton_row_zeroes_stationarity() {
+    fn test_recover_y_with_bound_zeroes_stationarity() {
         use crate::problem::ConstraintType;
         let n = 1usize;
         let m = 2usize;
         let q = CscMatrix::new(n, n);
         let c = vec![5.0_f64];
-        // A: row 0 = [2.0] (singleton), row 1 = [1.0]
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[2.0_f64, 1.0], m, n).unwrap();
         let b = vec![4.0_f64, 10.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
         let cts = vec![ConstraintType::Eq, ConstraintType::Le];
         let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
 
-        // x = 2 (singleton で固定された値)、y = [0, 0] (初期)、bound_contrib = 0
         let mut sol = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![2.0],
@@ -610,17 +596,92 @@ mod tests {
             bound_duals: vec![],
             ..SolverResult::default()
         };
-        // row=0, col=0 を SingletonRow として復元
-        recover_y_for_singleton_row(0, 0, &prob, &mut sol);
-        // 期待: y[0] = -(qx + c + a_others_y + bnd) / A[0, 0]
-        //     = -(0 + 5 + 1*0 + 0) / 2 = -2.5
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
         assert!((sol.dual_solution[0] - (-2.5)).abs() < 1e-12,
             "y[0] should be -2.5, got {}", sol.dual_solution[0]);
-
-        // 復元後 stationarity = qx + c + (A^T y)[0] = 0 + 5 + (2·(-2.5) + 1·0) = 0
         let aty0 = 2.0 * sol.dual_solution[0] + 1.0 * sol.dual_solution[1];
         let stat = 0.0 + 5.0 + aty0;
         assert!(stat.abs() < 1e-12, "stationarity zeroed after recovery, got {}", stat);
+    }
+
+    /// Sentinel C.1: boundary col (x at lb, z_lb>0) で bound_contrib=0 は y を誤る。
+    /// 正しい bound_contrib を渡すと stationarity が 0 になる。
+    /// `recover_y_for_singleton_row_with_bound` が `bound_contrib_col` 引数を無視する実装に退行した場合 fail する設計。
+    #[test]
+    fn test_sentinel_c1_boundary_col_needs_bound_contrib() {
+        use crate::problem::ConstraintType;
+        // 1 var (x), 1 Eq row, lb=1, FR ub.
+        // Q=0, c=2, A[0,0]=1, b=1.  x*=1 (at lb).
+        // z_lb=3 → bound_contrib = -z_lb = -3
+        // KKT: 0 + 2 + 1*y[0] + (-3) = 0 → y[0] = 1
+        // With bound_contrib=0: y[0] = -2 (wrong)
+        let n = 1usize;
+        let m = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![2.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], m, n).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(1.0_f64, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq];
+        let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        // With bound_contrib=0: y[0] = -(0+2+0+0)/1 = -2; stationarity at bound_contrib=-3 non-zero.
+        let mut sol_zero = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol_zero, 0.0);
+        let resid_zero = (0.0 + 2.0 + sol_zero.dual_solution[0] + (-3.0_f64)).abs();
+        assert!(resid_zero > 0.1,
+            "bound_contrib=0 must give wrong y for boundary col (resid={})", resid_zero);
+
+        // With correct bound_contrib=-3: y[0] = -(0+2+(-3))/1 = 1; stationarity = 0.
+        let mut sol_corr = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol_corr, -3.0);
+        let resid_corr = (0.0 + 2.0 + sol_corr.dual_solution[0] + (-3.0_f64)).abs();
+        assert!(resid_corr < 1e-12,
+            "correct bound_contrib must zero stationarity (resid={})", resid_corr);
+    }
+
+    /// Sentinel C.3: |A[row,col]|=1e-20 は SINGULARITY_TOL=DROP_TOL=1e-15 で
+    /// singular 判定されて skip → y 爆発しない。
+    /// SINGULARITY_TOL を 1e-30 に戻すと y_new = -1/1e-20 = -1e20 になり fail する。
+    #[test]
+    fn test_sentinel_c3_near_singular_pivot_skipped() {
+        use crate::problem::ConstraintType;
+        // A[0,0] = 1e-20, c=1, Q=0, x=b/A=1e20, FR bounds.
+        // target = -(0+1+0+0) = -1. If not singular: y_new = -1/1e-20 = -1e20 (bad).
+        let n = 1usize;
+        let m = 1usize;
+        let q = CscMatrix::new(n, n);
+        let c = vec![1.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1e-20_f64], m, n).unwrap();
+        let b = vec![1.0];
+        let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let cts = vec![ConstraintType::Eq];
+        let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        let mut sol = SolverResult {
+            status: SolveStatus::Optimal,
+            solution: vec![1e20_f64],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        // SINGULARITY_TOL=1e-15: |1e-20| < 1e-15 → singular → y stays 0.0
+        recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
+        assert!(sol.dual_solution[0] == 0.0,
+            "near-singular pivot must be skipped: y stays at initial 0.0, got {}",
+            sol.dual_solution[0]);
     }
 
     /// compute_qx_at: 対称 Q の col j に対して Σ_k Q[k,j]·x[k] を返すこと、かつ off-diag を
