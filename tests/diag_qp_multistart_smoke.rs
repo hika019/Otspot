@@ -19,7 +19,8 @@
 //!  - diag indefinite (concave) n=3
 
 use otspot::options::{MultiStartConfig, StartStrategy};
-use otspot::qp::{solve_qp_multistart, solve_qp_with, QpProblem};
+use otspot::qp::{solve_qp_with, QpProblem};
+use otspot::qp::multistart::solve_qp_multistart;
 use otspot::sparse::CscMatrix;
 use otspot::{SolveStatus, SolverOptions};
 

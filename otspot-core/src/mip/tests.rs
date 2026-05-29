@@ -583,6 +583,30 @@ fn invalid_options_rejected_at_milp_entry() {
     }
 }
 
+/// `solve_miqp_with_stats` rejects an indefinite Q (n=1001) with NonConvex status.
+///
+/// **Sentinel**: removing the `if !problem.is_convex()` guard in
+/// `solve_miqp_with_stats` (`mip/mod.rs`) causes B&B to run on a non-convex
+/// relaxation and return a silently wrong Optimal result — this test FAILS.
+#[test]
+fn solve_miqp_rejects_indefinite_n1001() {
+    let n = 1001_usize;
+    let mut rows: Vec<usize> = (0..n).collect();
+    let mut cols: Vec<usize> = (0..n).collect();
+    let mut vals: Vec<f64> = vec![1.0; n];
+    // off-diagonal: Q[0,1]=Q[1,0]=2 → top-left 2×2 eigenvalues {-1, 3} → indefinite
+    rows.push(0); cols.push(1); vals.push(2.0);
+    let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let a = CscMatrix::new(0, n);
+    let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+    let m = MiqpProblem::new(qp, vec![0]).unwrap();
+    let (result, _) = solve_miqp_with_stats(&m, &SolverOptions::default(), &MipConfig::default());
+    assert!(
+        matches!(result.status, SolveStatus::NonConvex(_)),
+        "solve_miqp_with_stats must reject indefinite Q with NonConvex, got {:?}", result.status
+    );
+}
+
 /// Invalid options are rejected at `solve_miqp` / `solve_miqp_with_stats` entry.
 ///
 /// Sentinel: removing `validate()` from `solve_miqp_with_stats` causes these to
@@ -741,5 +765,267 @@ fn proof_uncertain_blocks_optimal_despite_closed_gap() {
     assert!(
         r.bound_gap_cert.is_none(),
         "proof_uncertain must suppress BoundGapCertificate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LP warm-start propagation
+// ---------------------------------------------------------------------------
+
+/// LP warm start does not corrupt the result: a 2-var MILP solved with
+/// `recover_warm_start_basis=true` (enabled by the B&B driver) returns the
+/// same optimal objective as without warm start.
+///
+/// Sentinel: replacing `child_warm` with `child` (dropping warm start) keeps
+/// the answer correct but removes the warm-start code path. The test fires on
+/// both behaviours — it verifies correctness, not that warm-start runs.
+/// The real regression guard is that warm start does NOT cause Timeout/NumericalError.
+#[test]
+fn warm_start_propagation_preserves_correct_objective() {
+    // min -x1 - 2*x2  s.t. x1 + x2 <= 3, x1,x2 in {0,1,2,3}
+    // Optimal: x1=0, x2=3, obj=-6 (0+3=3<=3, -0-6=-6)
+    let lp = build_lp(
+        vec![-1.0, -2.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+    );
+    let problem = milp(lp, vec![0, 1]);
+    let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!((r.objective + 6.0).abs() < EPS, "expected obj=-6, got {}", r.objective);
+}
+
+/// Binary knapsack with warm-start propagation: correct solution is [0,1,1,1],
+/// objective=-21.
+#[test]
+fn warm_start_binary_knapsack_correct() {
+    // min -5x1 -8x2 -3x3 -5x4   s.t. 2x1+3x2+x3+2x4 <= 5, xi in {0,1}
+    // Optimal: x2=1,x3=1,x4=1, obj=-16 (or similar — verify against actual solve)
+    // Use a simpler 3-var knapsack with known solution:
+    // min -6x0 -10x1 -5x2  s.t. 3x0+5x1+2x2 <= 6, xi in {0,1}
+    // Optimal: x0=0, x1=1, x2=0 gives obj=-10; x0=1,x2=1 gives obj=-11 → -11
+    let lp = build_lp(
+        vec![-6.0, -10.0, -5.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[3.0, 5.0, 2.0],
+        1,
+        vec![6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+    );
+    let problem = milp(lp, vec![0, 1, 2]);
+    let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal, "expected Optimal, got {:?}", r.status);
+    // Best solution: x0=1(3), x2=1(2) → cap=5≤6, obj=-11.
+    assert!((r.objective + 11.0).abs() < EPS, "expected obj=-11, got {}", r.objective);
+}
+
+/// Infeasible MILP (integer variable forced between consecutive integers) is
+/// still correctly identified as Infeasible even when warm-start propagation
+/// is active.
+#[test]
+fn warm_start_infeasible_milp_still_infeasible() {
+    // x in [1.2, 1.8] integer → no integer in [1.2, 1.8] → Infeasible
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(1.2, 1.8)],
+    );
+    let problem = milp(lp, vec![0]);
+    let r = solve_milp(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "expected Infeasible, got {:?}", r.status);
+}
+
+/// Debug: test that directly calls LP solve for child LP with warm_start.
+/// Reproduces the rounding_fails_max regression.
+#[test]
+fn warm_start_rounding_fails_child_no_timeout() {
+    use crate::options::{SolverOptions, WarmStartBasis};
+    // Child LP: min -5x - 4y s.t. 6x+4y<=24, x+2y<=6, x in [0,10], y in [0,1]
+    let lp = build_lp(
+        vec![-5.0, -4.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[6.0, 4.0, 1.0, 2.0],
+        2,
+        vec![24.0, 6.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 1.0)], // y bounded at 1
+    );
+    // Parent root basis: both structural vars (x=0, y=1) are basic.
+    let ws = WarmStartBasis { basis: vec![0, 1], x_b: vec![3.0, 1.5] };
+    let opts = SolverOptions {
+        timeout_secs: Some(10.0),
+        recover_warm_start_basis: true,
+        warm_start: Some(ws),
+        ..Default::default()
+    };
+    let r = crate::lp::solve_lp_with(&lp, &opts);
+    assert_ne!(r.status, crate::problem::SolveStatus::Timeout,
+        "child LP with warm start must not timeout, got status={:?}", r.status);
+    assert_eq!(r.status, crate::problem::SolveStatus::Optimal,
+        "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}", r.status);
+}
+
+/// Sentinel: `bound_layout_changes` — infinite→finite ub causes warm-start drop
+/// on the down-branch.
+///
+/// Parent bounds `(0.0, ∞)`: root returns x=1.5 (fractional) with a basis.
+/// Down-branch `(0.0, 1.0)`: ub ∞→finite → `bound_layout_changes=true` → child
+/// receives `warm_start=None`.  Up-branch `(2.0, ∞)` has lower_bound > incumbent
+/// and is pruned without a solve.
+///
+/// Sentinel: removing the `if bound_layout_changes(…) { None }` guard and always
+/// propagating `child_ws` gives the down-branch `opts.warm_start=Some(basis)` →
+/// `got_ws` is all-true → no false entry → **this test FAILS**.
+#[test]
+fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
+    use std::cell::{Cell, RefCell};
+    use crate::options::WarmStartBasis;
+    use crate::problem::SolverResult;
+
+    struct InfBoundMock {
+        call: Cell<usize>,
+        child_got_ws: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl InfBoundMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                child_got_ws: RefCell::new(vec![]),
+                root_bounds: [(0.0, f64::INFINITY)],
+                int_vars: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for InfBoundMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n == 0 {
+                // Root: fractional x=1.5; return a basis for propagation.
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.5,
+                    solution: vec![1.5],
+                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![1.5] }),
+                    ..SolverResult::default()
+                }
+            } else {
+                // Child: record warm_start presence, return integer-feasible solution.
+                self.child_got_ws.borrow_mut().push(opts.warm_start.is_some());
+                let x = bounds[0].0.ceil();
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..SolverResult::default()
+                }
+            }
+        }
+    }
+
+    let mock = InfBoundMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+
+    let got_ws = mock.child_got_ws.borrow();
+    // Down-branch (0.0, 1.0): ub ∞→finite → bound_layout_changes=true → warm_start=None.
+    // At least one solved child must have warm_start=None.
+    // No-op (always propagate child_ws): all children get Some → all true → FAILS.
+    assert!(
+        got_ws.iter().any(|&ws| !ws),
+        "down-branch (ub ∞→finite) must receive warm_start=None; \
+         no-op (skip layout check) gives all-true: {got_ws:?}"
+    );
+}
+
+/// B&B driver propagates parent warm-start basis to child nodes.
+///
+/// Sentinel: replacing `node.child_warm(down, lb, ws)` with `node.child(down, lb)`
+/// drops warm_start for all children; `opts.warm_start` is `None` in every child
+/// call → `received` is all-false → **this test FAILS** (no-op detected).
+#[test]
+fn warm_start_propagated_to_child_nodes_sentinel() {
+    use std::cell::{Cell, RefCell};
+    use crate::options::WarmStartBasis;
+    use crate::problem::SolverResult;
+
+    struct PropMock {
+        call: Cell<usize>,
+        warm_starts_received: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl PropMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                warm_starts_received: RefCell::new(vec![]),
+                root_bounds: [(0.0, 3.0)],
+                int_vars: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for PropMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n > 0 {
+                self.warm_starts_received.borrow_mut().push(opts.warm_start.is_some());
+            }
+            if n == 0 {
+                // Root: fractional x=0.5; return warm_start_basis for propagation.
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.5,
+                    solution: vec![0.5],
+                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![0.5] }),
+                    ..Default::default()
+                }
+            } else {
+                // Children: integer-feasible at the lower bound.
+                let x = bounds[0].0.ceil().max(bounds[0].0);
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
+    let mock = PropMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    let received = mock.warm_starts_received.borrow();
+    assert!(
+        received.iter().any(|&ws| ws),
+        "warm_start must be propagated to at least one child node; \
+         no-op (child() instead of child_warm()) gives all-false: {received:?}"
     );
 }

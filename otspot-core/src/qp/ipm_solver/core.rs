@@ -13,7 +13,7 @@ use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
 use crate::qp::problem::QpProblem;
-use crate::tolerances::UNDERFLOW_GUARD;
+use crate::tolerances::{any_nonfinite, UNDERFLOW_GUARD};
 
 pub(crate) use duality_gap::compute_duality_gap_rel;
 use eps_tighten::tighten_ipm_eps_for_presolve_scale;
@@ -87,7 +87,7 @@ fn run_ipm_with(
     let invalid = matches!(result.status, SolveStatus::NumericalError)
         || (n_reduced > 0
             && (result.solution.is_empty()
-                || result.solution.iter().any(|v| !v.is_finite())));
+                || any_nonfinite(&result.solution)));
     if invalid {
         return IpmOutcome {
             solution: Vec::new(),

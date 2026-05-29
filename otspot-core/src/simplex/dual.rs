@@ -5,7 +5,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::RuizScaler;
+use crate::presolve::LpEquilibration;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
@@ -22,7 +22,7 @@ pub(crate) fn two_phase_dual_simplex(
     options: &SolverOptions,
 ) -> SolverResult {
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {
@@ -35,17 +35,25 @@ pub(crate) fn two_phase_dual_simplex(
                 basis_mgr.ftran(&mut x_b_sv);
                 let mut x_b = x_b_sv.to_dense();
 
-                let mut total_iters: usize = 0;
-                let outcome = dual_simplex_core(
-                    &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
-                    &mut total_iters,
-                );
+                // WarmStartBasis lacks at_upper, so nonbasic variables are assumed
+                // at lb=0. For the "up" branch, the branched variable's lb is raised
+                // above its parent value → x_b becomes negative (lb violation).
+                // The legacy dual simplex has no cost-perturbation anti-cycling;
+                // starting from an lb-violating point leads to cycling/Timeout.
+                // Fall through to cold start when any lb violation is present.
+                if !super::has_lb_violation(&x_b, options.primal_tol) {
+                    let mut total_iters: usize = 0;
+                    let outcome = dual_simplex_core(
+                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                        &mut total_iters,
+                    );
 
-                let mut result = warm_outcome_to_result(
-                    outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
-                );
-                result.iterations = total_iters;
-                return result;
+                    let mut result = warm_outcome_to_result(
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                    );
+                    result.iterations = total_iters;
+                    return result;
+                }
             }
         }
     }
