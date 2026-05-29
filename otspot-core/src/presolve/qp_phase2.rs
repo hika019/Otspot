@@ -21,9 +21,11 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // Skip when Gaussian-elimination cost (≈ m·n) is prohibitive.
+    // Minimum ratio of rows to columns: elimination cost is O(n²m) and only
+    // pays off in strongly over-determined systems (m > n * ROW_OVERDETERMINED_RATIO).
+    const ROW_OVERDETERMINED_RATIO: usize = 2;
     const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
-    if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * 2 || n == 0 {
+    if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * ROW_OVERDETERMINED_RATIO || n == 0 {
         return;
     }
 
