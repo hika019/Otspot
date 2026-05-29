@@ -1,4 +1,25 @@
-//! Row activity range over variable bounds, shared by LP/QP presolve.
+//! Row activity range and implied-bound propagation, shared by LP/QP/MIP presolve.
+
+use crate::problem::ConstraintType;
+use crate::tolerances::{INT_ROUND_TOL, ZERO_TOL};
+
+/// Round down to the nearest integer, absorbing float-arithmetic drift.
+///
+/// `(x + INT_ROUND_TOL).floor()` maps a value within `INT_ROUND_TOL` of an
+/// integer upward before flooring, so `2.9999999999999996` → `3` instead of `2`.
+#[inline]
+fn integer_floor(x: f64) -> f64 {
+    (x + INT_ROUND_TOL).floor()
+}
+
+/// Round up to the nearest integer, absorbing float-arithmetic drift.
+///
+/// `(x - INT_ROUND_TOL).ceil()` maps a value within `INT_ROUND_TOL` of an
+/// integer downward before ceiling, so `3.0000000000000004` → `3` instead of `4`.
+#[inline]
+fn integer_ceil(x: f64) -> f64 {
+    (x - INT_ROUND_TOL).ceil()
+}
 
 /// Compute `[row_lb, row_ub]` of `sum_j a_ij * x_j` over `x_j ∈ bounds[j]`.
 ///
@@ -45,6 +66,183 @@ pub(crate) fn activity_range(
         }
     }
     (row_lb, row_ub, lb_finite, ub_finite)
+}
+
+/// Propagate implied variable bounds for one constraint row.
+///
+/// For each `(j, a_ij)` in `entries`, derives the tightest implied lb/ub consistent
+/// with the constraint `sum_j a_ij x_j {ct} b`. When `int_mask[j]` is `true`, the
+/// implied bound is additionally rounded (`floor` for ub, `ceil` for lb) — this is
+/// the MIP-presolve rounding that is strictly stronger than the continuous implied bound.
+///
+/// Returns `None` when infeasibility is detected (the rounded implied bound crosses
+/// the existing opposite bound). Returns the tightened `(j, new_lb, new_ub)` triples
+/// for variables whose bounds changed; unchanged variables are omitted.
+pub(crate) fn propagate_row_bounds(
+    entries: &[(usize, f64)],
+    bounds: &[(f64, f64)],
+    ct: ConstraintType,
+    b: f64,
+    int_mask: Option<&[bool]>,
+) -> Option<Vec<(usize, f64, f64)>> {
+    if entries.is_empty() {
+        return Some(vec![]);
+    }
+
+    // Per-entry activity contributions (row_lb/ub = sum; inf counts guard division).
+    let mut row_lb = 0.0f64;
+    let mut row_ub = 0.0f64;
+    let mut inf_lb_count = 0usize;
+    let mut inf_ub_count = 0usize;
+    let mut e_lb_contrib = Vec::with_capacity(entries.len());
+    let mut e_ub_contrib = Vec::with_capacity(entries.len());
+    let mut e_lb_inf = Vec::with_capacity(entries.len());
+    let mut e_ub_inf = Vec::with_capacity(entries.len());
+
+    for &(j, a_ij) in entries {
+        let (lb, ub) = bounds[j];
+        if a_ij > 0.0 {
+            if lb == f64::NEG_INFINITY {
+                inf_lb_count += 1;
+                e_lb_inf.push(true);
+                e_lb_contrib.push(0.0);
+            } else {
+                let c = a_ij * lb;
+                e_lb_inf.push(false);
+                e_lb_contrib.push(c);
+                row_lb += c;
+            }
+            if ub == f64::INFINITY {
+                inf_ub_count += 1;
+                e_ub_inf.push(true);
+                e_ub_contrib.push(0.0);
+            } else {
+                let c = a_ij * ub;
+                e_ub_inf.push(false);
+                e_ub_contrib.push(c);
+                row_ub += c;
+            }
+        } else if a_ij < 0.0 {
+            if ub == f64::INFINITY {
+                inf_lb_count += 1;
+                e_lb_inf.push(true);
+                e_lb_contrib.push(0.0);
+            } else {
+                let c = a_ij * ub;
+                e_lb_inf.push(false);
+                e_lb_contrib.push(c);
+                row_lb += c;
+            }
+            if lb == f64::NEG_INFINITY {
+                inf_ub_count += 1;
+                e_ub_inf.push(true);
+                e_ub_contrib.push(0.0);
+            } else {
+                let c = a_ij * lb;
+                e_ub_inf.push(false);
+                e_ub_contrib.push(c);
+                row_ub += c;
+            }
+        } else {
+            e_lb_inf.push(false);
+            e_ub_inf.push(false);
+            e_lb_contrib.push(0.0);
+            e_ub_contrib.push(0.0);
+        }
+    }
+
+    let mut updates = Vec::new();
+
+    for (k, &(j, a_ij)) in entries.iter().enumerate() {
+        if a_ij.abs() < ZERO_TOL {
+            continue;
+        }
+        let (old_lb, old_ub) = bounds[j];
+        let is_int = int_mask.and_then(|m| m.get(j)).copied().unwrap_or(false);
+
+        let rest_inf_lb = if e_lb_inf[k] { inf_lb_count - 1 } else { inf_lb_count };
+        let rest_inf_ub = if e_ub_inf[k] { inf_ub_count - 1 } else { inf_ub_count };
+        let rest_lb = row_lb - e_lb_contrib[k];
+        let rest_ub = row_ub - e_ub_contrib[k];
+        let rest_lb_fin = rest_inf_lb == 0;
+        let rest_ub_fin = rest_inf_ub == 0;
+
+        let mut new_lb = old_lb;
+        let mut new_ub = old_ub;
+
+        match ct {
+            ConstraintType::Le => {
+                if a_ij > 0.0 && rest_lb_fin {
+                    let mut implied_ub = (b - rest_lb) / a_ij;
+                    if is_int { implied_ub = integer_floor(implied_ub); }
+                    if implied_ub < old_lb - ZERO_TOL { return None; }
+                    if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                } else if a_ij < 0.0 && rest_lb_fin {
+                    let mut implied_lb = (b - rest_lb) / a_ij;
+                    if is_int { implied_lb = integer_ceil(implied_lb); }
+                    if implied_lb > old_ub + ZERO_TOL { return None; }
+                    if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                }
+            }
+            ConstraintType::Ge => {
+                if a_ij > 0.0 && rest_ub_fin {
+                    let mut implied_lb = (b - rest_ub) / a_ij;
+                    if is_int { implied_lb = integer_ceil(implied_lb); }
+                    if implied_lb > old_ub + ZERO_TOL { return None; }
+                    if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                } else if a_ij < 0.0 && rest_ub_fin {
+                    let mut implied_ub = (b - rest_ub) / a_ij;
+                    if is_int { implied_ub = integer_floor(implied_ub); }
+                    if implied_ub < old_lb - ZERO_TOL { return None; }
+                    if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                }
+            }
+            ConstraintType::Eq => {
+                if a_ij > 0.0 {
+                    if rest_lb_fin {
+                        let mut implied_ub = (b - rest_lb) / a_ij;
+                        if is_int { implied_ub = integer_floor(implied_ub); }
+                        if implied_ub < old_lb - ZERO_TOL { return None; }
+                        if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                    }
+                    if rest_ub_fin {
+                        let mut implied_lb = (b - rest_ub) / a_ij;
+                        if is_int { implied_lb = integer_ceil(implied_lb); }
+                        if implied_lb > old_ub + ZERO_TOL { return None; }
+                        if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                    }
+                } else {
+                    // a_ij < 0
+                    if rest_lb_fin {
+                        let mut implied_lb = (b - rest_lb) / a_ij;
+                        if is_int { implied_lb = integer_ceil(implied_lb); }
+                        if implied_lb > old_ub + ZERO_TOL { return None; }
+                        if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                    }
+                    if rest_ub_fin {
+                        let mut implied_ub = (b - rest_ub) / a_ij;
+                        if is_int { implied_ub = integer_floor(implied_ub); }
+                        if implied_ub < old_lb - ZERO_TOL { return None; }
+                        if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                    }
+                }
+            }
+        }
+
+        // Cross-bound check: Eq path can tighten both lb and ub for the same integer
+        // variable in one shot (floor(rhs/a) < ceil(rhs/a) when rhs is non-integer).
+        // Each per-side check only compares against the original bound, so the combined
+        // result `new_lb > new_ub` must be caught here.
+        if new_lb > new_ub + ZERO_TOL {
+            return None;
+        }
+
+        if (new_lb - old_lb).abs() > ZERO_TOL || (new_ub - old_ub).abs() > ZERO_TOL {
+            updates.push((j, new_lb, new_ub));
+        }
+    }
+
+    Some(updates)
 }
 
 #[cfg(test)]

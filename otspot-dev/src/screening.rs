@@ -7,7 +7,6 @@ use otspot_core::options::SolverOptions;
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::solve_qp_with;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
@@ -40,25 +39,9 @@ pub struct ScreenEntry {
     pub elapsed_secs: f64,
 }
 
-/// Load the baseline objective CSV.
+/// Load the baseline objective CSV. Panics if the file cannot be read.
 pub fn load_baseline(csv_path: &str) -> HashMap<String, f64> {
-    let mut map = HashMap::new();
-    let content = match fs::read_to_string(csv_path) {
-        Ok(c) => c,
-        Err(e) => panic!("Failed to read baseline {}: {}", csv_path, e),
-    };
-    for line in content.lines() {
-        if line.starts_with('#') || line.is_empty() || line.starts_with("problem_name") {
-            continue;
-        }
-        let cols: Vec<&str> = line.split(',').collect();
-        if cols.len() >= 2 {
-            if let Ok(v) = cols[1].parse::<f64>() {
-                map.insert(cols[0].to_string(), v);
-            }
-        }
-    }
-    map
+    crate::bench_utils::load_baseline_objectives(std::path::Path::new(csv_path), true)
 }
 
 /// Screen a single LP file: parse, solve, classify verdict.
