@@ -19,7 +19,7 @@
 # - .qps と .qplib の混在ディレクトリは非対応（エラーで終了）
 # - ワークプール方式: 問題を3問/グループに分割し、Nワーカーが動的に取得
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

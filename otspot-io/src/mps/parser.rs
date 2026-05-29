@@ -21,6 +21,7 @@ pub(super) struct MpsParser {
     obj_row: Option<String>,
     integer_cols: HashSet<String>,
     in_integer_marker: bool,
+    maximize: bool,
 }
 
 impl MpsParser {
@@ -35,6 +36,7 @@ impl MpsParser {
             obj_row: None,
             integer_cols: HashSet::new(),
             in_integer_marker: false,
+            maximize: false,
         }
     }
 
@@ -91,6 +93,7 @@ impl MpsParser {
                     });
                 }
                 Section::Name => {}
+                Section::ObjSense => self.parse_objsense_line(&line, line_num)?,
                 Section::Rows => self.parse_rows_line(&line, line_num)?,
                 Section::Columns => self.parse_columns_line(&line, line_num)?,
                 Section::Rhs => self.parse_rhs_line(&line, line_num)?,
@@ -111,6 +114,21 @@ impl MpsParser {
         }
 
         self.build_lp_problem()
+    }
+
+    fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
+        let upper = line.trim().to_uppercase();
+        match upper.as_str() {
+            "MAX" => self.maximize = true,
+            "MIN" => self.maximize = false,
+            _ => {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid OBJSENSE value '{}'; expected MIN or MAX", line.trim()),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn parse_rows_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
@@ -389,6 +407,12 @@ impl MpsParser {
                         c[col_idx] += *value;
                     }
                 }
+            }
+        }
+        // Normalize MAX → MIN by negating the objective.
+        if self.maximize {
+            for v in &mut c {
+                *v = -*v;
             }
         }
 

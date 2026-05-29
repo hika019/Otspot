@@ -25,7 +25,7 @@
 #   curl -s https://www.netlib.org/lp/data/emps.c -o /tmp/emps.c
 #   cc -o /tmp/emps /tmp/emps.c
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOLVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

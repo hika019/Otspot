@@ -21,6 +21,7 @@ pub(super) enum BoundType {
 pub(super) enum Section {
     None,
     Name,
+    ObjSense,
     Rows,
     Columns,
     Rhs,
@@ -35,6 +36,8 @@ impl Section {
         let upper = line.to_uppercase();
         if upper.starts_with("NAME") {
             Some(Section::Name)
+        } else if upper.starts_with("OBJSENSE") {
+            Some(Section::ObjSense)
         } else if upper.starts_with("ROWS") {
             Some(Section::Rows)
         } else if upper.starts_with("COLUMNS") {

@@ -17,6 +17,7 @@ pub(super) struct QpsParser {
     /// QUADOBJ entries: (col1, col2, value) in upper-triangular order.
     quadobj: Vec<(String, String, f64)>,
     obj_row: Option<String>,
+    maximize: bool,
 }
 
 impl QpsParser {
@@ -29,6 +30,7 @@ impl QpsParser {
             bounds: Vec::new(),
             quadobj: Vec::new(),
             obj_row: None,
+            maximize: false,
         }
     }
 
@@ -51,16 +53,28 @@ impl QpsParser {
 
             if !line.starts_with(' ') && !line.starts_with('\t') {
                 if let Some(section) = Section::from_line(trimmed) {
+                    if section != Section::Name
+                        && section != Section::EndData
+                        && seen_sections.contains(&section)
+                    {
+                        return Err(QpsError::DuplicateSection(format!("{:?}", section)));
+                    }
                     seen_sections.insert(section);
                     current_section = section;
                     if section == Section::EndData {
                         break;
                     }
                     continue;
+                } else {
+                    return Err(QpsError::ParseError {
+                        line: line_num,
+                        message: format!("Unrecognized section header: '{}'", trimmed),
+                    });
                 }
             }
 
             match current_section {
+                Section::ObjSense => self.parse_objsense_line(&line, line_num)?,
                 Section::Rows => self.parse_rows_line(&line, line_num)?,
                 Section::Columns => self.parse_columns_line(&line, line_num)?,
                 Section::Rhs => self.parse_rhs_line(&line, line_num)?,
@@ -68,7 +82,7 @@ impl QpsParser {
                 Section::Bounds => self.parse_bounds_line(&line, line_num)?,
                 Section::Quadobj => self.parse_quadobj_line(&line, line_num)?,
                 Section::EndData => break,
-                _ => {}
+                Section::None | Section::Name => {}
             }
         }
 
@@ -83,6 +97,21 @@ impl QpsParser {
         }
 
         self.build_qp_problem()
+    }
+
+    fn parse_objsense_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
+        let upper = line.trim().to_uppercase();
+        match upper.as_str() {
+            "MAX" => self.maximize = true,
+            "MIN" => self.maximize = false,
+            _ => {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid OBJSENSE value '{}'; expected MIN or MAX", line.trim()),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn parse_rows_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
@@ -566,6 +595,16 @@ impl QpsParser {
             q_rows.push(i); q_cols.push(j); q_vals.push(*value);
             if i != j {
                 q_rows.push(j); q_cols.push(i); q_vals.push(*value);
+            }
+        }
+
+        // Normalize MAX → MIN by negating objective (c and Q).
+        if self.maximize {
+            for v in &mut c {
+                *v = -*v;
+            }
+            for v in &mut q_vals {
+                *v = -*v;
             }
         }
 
