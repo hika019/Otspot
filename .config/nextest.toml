@@ -40,10 +40,26 @@ threads-required = "num-cpus"
 filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
-# diag_liswet_basin_9_12: 2 × LISWET+Clarabel solve (measured 141s solo).
-# CPU 専有で 180s kill を安定回避。
+# diag_liswet_basin_9_12: 2 × LISWET+Clarabel solve (measured 103s solo, up to
+# 179s under test-threads=3 queue wait). Raise kill ceiling to 5 min so the
+# 180s default does not kill it when the queue is slightly delayed.
 [[profile.default.overrides]]
 filter = "test(diag_liswet_basin::diag_liswet_basin_9_12)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+threads-required = "num-cpus"
+
+# lp_simplex_stall_synthetic_large_lp_converges: 2500×3500 sparse LP routed through
+# IPM, needs ~11s solo but times out at 30s budget under CPU contention from other
+# tests. Run exclusively so faer parallelism gets all cores.
+[[profile.default.overrides]]
+filter = "test(lp_simplex_stall_synthetic_large_lp_converges)"
+threads-required = "num-cpus"
+
+# lp_simplex_stall_d6cube_noop_proof_short: noop-proof phase (10s simplex stall)
+# + IPM solve (up to 60s). Run exclusively for stable timing and safe set_var
+# isolation (no concurrent env-var mutation from other tests in this binary).
+[[profile.default.overrides]]
+filter = "test(lp_simplex_stall_d6cube_noop_proof_short)"
 threads-required = "num-cpus"
 
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
@@ -65,15 +81,19 @@ test-group = "qplib-memory-heavy"
 # run-ignored は nextest profile キーとして無効 (unknown key warning が出る)。
 # #[ignore] テストを含めるには CLI フラグ `--run-ignored all` を必ず付けること。
 #
-# What belongs in #[ignore] + heavy profile:
-#   - Individual test wall-time > 3 min (CLAUDE.md cap), OR
-#   - Diagnostic traces with no assertions (diag_ prefix, assertion なし), OR
-#   - Tests that need large external data sets (bench corpus / lp_problems_hard)
-#     not guaranteed to be present in every dev environment.
+# Tier 分類 (#97):
+#   - tier-1 (< 30s Mac / < 12s Mac): デフォルト実行 (default profile)
+#   - tier-2 (Mac 12-180s / CI 2.5x 30-450s): #[ignore = "tier-2"] + heavy profile
+#   - tier-3 (> 180s Mac): 既存 #[ignore] 維持
 #
 # Tests gated here include: DSE pivot sentinel (~150s), lp_classify_1000s
 # (~30s–600s each), lp_coverage_screen (~5-6 min), greenbea IPM timebox
 # (~220s), ken-18/osa-60 (~60s each), lp_regression heavy LPs.
+# tier-2 追加 (#97): greenbea presolve-off (~88s), pilot87 (~142s),
+# dfl001 postsolve (~60s), pds-20 (~62s), ken18/ken13/ken11 (~28-34s),
+# liswet family (~20s), nonconvex kkt (~20s), qap15 (~18s),
+# liswet9 complementarity (~16s), kkt_repro_50 (~16s), klein3 (~12-14s),
+# dfl001 forced simplex (~30s), prop_nonconvex_constrained (~29s).
 [profile.heavy]
 test-threads = 1
 slow-timeout = { period = "300s", terminate-after = 2 }
@@ -95,4 +115,23 @@ threads-required = "num-cpus"
 # Serialise to avoid env-var (DSE_DISABLE_GAMMA_UPDATE) cross-contamination.
 [[profile.heavy.overrides]]
 filter = "test(dse_iter_count_matches_or_beats_most_infeasible) + test(dse_with_gamma_update_disabled_collapses_to_most_infeasible) + test(dse_correct_status_across_perturbations)"
+threads-required = "num-cpus"
+
+# pilot87 presolve=false (~142s): primal Phase I cycling + Big-M. Raise kill
+# ceiling to 5 min (well above the 150s solver budget).
+[[profile.heavy.overrides]]
+filter = "test(pilot87_presolve_false_not_infeasible)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+threads-required = "num-cpus"
+
+# greenbea presolve=off (~88s): raise kill ceiling to 3 min.
+[[profile.heavy.overrides]]
+filter = "test(diag_greenbea_presolve_off_baseline)"
+slow-timeout = { period = "60s", terminate-after = 4 }
+threads-required = "num-cpus"
+
+# dfl001 postsolve speedup (~60s) and pds-20 deadline guard (~62s): raise to 3 min.
+[[profile.heavy.overrides]]
+filter = "test(dfl001_postsolve_skips_lsq_when_cleanup_stagnant) + test(diag_pds20_deadline_regression_guard)"
+slow-timeout = { period = "60s", terminate-after = 3 }
 threads-required = "num-cpus"

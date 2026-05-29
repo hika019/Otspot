@@ -293,13 +293,6 @@ fn build_identity_phase1_state(
     })
 }
 
-/// Test/runtime escape hatch: 環境変数 `LP_CRASH_DUAL_ADV_DISABLE=1` で
-/// `try_build_crash_phase1_state` を強制 no-op 化する (sentinel no-op proof +
-/// runtime triage)。
-fn crash_disabled_by_env() -> bool {
-    std::env::var("LP_CRASH_DUAL_ADV_DISABLE").ok().as_deref() == Some("1")
-}
-
 /// `try_build_crash_phase1_state` 内の経路観測点。test sentinel が短絡無し
 /// (= real big_m_cold_start path) で「どの guard が発動したか」を直接観測する
 /// ためのフック。`#[cfg(test)]` 限定の thread-local counter で privacy 漏れ
@@ -313,7 +306,6 @@ mod crash_probe {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Outcome {
         DisabledOption,
-        DisabledEnv,
         NoArtificial,
         NotReduced,
         BuildAaugFailed,
@@ -342,7 +334,7 @@ mod crash_probe {
 /// 構成できれば `Some(state)`、いずれかの guard で弾かれたら `None` を返す。
 ///
 /// Guard:
-/// 1. `options.use_lp_crash_basis` && env disable 切替
+/// 1. `options.use_lp_crash_basis`
 /// 2. `sf.num_artificial > 0` (Le-only は no-op)
 /// 3. crash で num_artificial が真に減少
 /// 4. LU 分解成功
@@ -363,10 +355,6 @@ fn try_build_crash_phase1_state(
 ) -> Option<BigMPhase1State> {
     if !options.use_lp_crash_basis {
         #[cfg(test)] crash_probe::record(crash_probe::Outcome::DisabledOption);
-        return None;
-    }
-    if crash_disabled_by_env() {
-        #[cfg(test)] crash_probe::record(crash_probe::Outcome::DisabledEnv);
         return None;
     }
     if sf.num_artificial == 0 {
@@ -878,10 +866,9 @@ mod tests {
     // big_m_cold_start を直接呼び crash on/off で num_artificial と iter を比較。
     // solve_with は primal-first に倒れて Big-M を経由しないため、ここでは
     // build_standard_form / RuizScaler / big_m_cold_start を `super::` 経由で
-    // 直接呼ぶ。env LP_CRASH_DUAL_ADV_DISABLE を立てる test は SERIAL_LOCK で
-    // 並列干渉を避ける。
+    // 直接呼ぶ。SERIAL_LOCK で thread-local probe の並列干渉を避ける。
     //
-    // 経路観測は `crash_probe` thread-local hook を経由し、env 抑止 / LU 失敗 /
+    // 経路観測は `crash_probe` thread-local hook を経由し、LU 失敗 /
     // x_B 負などの分岐が実際に踏まれたことを直接 assert する (sentinel が
     // observed 値を内部で再計算する短絡 = tautology を排除)。
 
@@ -1110,50 +1097,34 @@ mod tests {
     }
 
     /// no-op proof (memory: feedback_sentinel_must_fail_under_noop):
-    /// `LP_CRASH_DUAL_ADV_DISABLE=1` 下で crash 経路が `DisabledEnv` 短絡を踏み、
-    /// かつ iter / objective が crash-off と一致することを probe + 実測で確認。
-    /// 旧 sentinel は `invoke_big_m_with_option` 内で observed 値を再計算して
-    /// `sf.num_artificial` を返すため、両側が自明真で env 抑止の no-op 化を
-    /// 実証できなかった (tautology)。
+    /// `use_lp_crash_basis: false` で crash 経路が `DisabledOption` 短絡を踏み、
+    /// option が唯一の disable 経路であることを probe + 実測で確認する。
+    /// sentinel は option=true→false のトグルで確実に fail することを保証する。
     #[test]
-    fn crash_disabled_env_var_collapses_to_identity() {
+    fn crash_disabled_option_collapses_to_identity() {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let lp = build_network_eq_lp(60, 2, 0xDEAD_BEEF_CAFE_F00D);
 
-        // crash off (baseline): use_crash=false で DisabledOption 経由。
+        // option=false → DisabledOption (identity path, no crash)
         let (r_off, n_off, out_off) = invoke_big_m_with_option(&lp, false);
         assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption),
-            "off baseline must take DisabledOption; got {:?}", out_off);
+            "use_lp_crash_basis=false must short-circuit on DisabledOption; got {:?}", out_off);
 
-        // env 抑止: use_crash=true でも DisabledEnv 経由で identity に倒す。
-        // SAFETY: set_var は std 1.86+ で unsafe。SERIAL_LOCK で直列化、必ず remove。
-        unsafe { std::env::set_var("LP_CRASH_DUAL_ADV_DISABLE", "1"); }
-        let (r_on_disabled, _n_disabled, out_disabled) = invoke_big_m_with_option(&lp, true);
-        unsafe { std::env::remove_var("LP_CRASH_DUAL_ADV_DISABLE"); }
-        assert!(matches!(out_disabled, super::crash_probe::Outcome::DisabledEnv),
-            "env 抑止が hook で検知できない: {:?}", out_disabled);
-
-        // env 抑止下: identity 経路を踏むので iter / objective が crash-off と一致。
-        // sf.num_artificial は両側 identity なので tautology — iter/obj で実測する。
-        assert_eq!(r_off.status, r_on_disabled.status,
-            "env disable で status drift: off={:?} disabled={:?}",
-            r_off.status, r_on_disabled.status);
-        assert_eq!(r_off.iterations, r_on_disabled.iterations,
-            "env disable で iter drift: off={} disabled={}",
-            r_off.iterations, r_on_disabled.iterations);
-        if r_off.status == SolveStatus::Optimal {
-            let obj_diff = (r_off.objective - r_on_disabled.objective).abs()
-                / (1.0 + r_off.objective.abs());
-            assert!(obj_diff < 1e-9,
-                "env disable で obj drift: {:.3e}", obj_diff);
-        }
-
-        // env 解除後は実際に crash が走ることを probe で確認 (sanity)。
-        let (_r_on, n_on, out_on) = invoke_big_m_with_option(&lp, true);
+        // option=true → crash actually adopted (proves sentinel is non-trivial)
+        let (r_on, n_on, out_on) = invoke_big_m_with_option(&lp, true);
         assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
-            "env 解除後 crash が adopt されない: {:?}", out_on);
+            "use_lp_crash_basis=true must adopt crash; got {:?}", out_on);
+
+        // crash reduces num_artificial (non-tautological: the two paths differ)
         assert!(n_on < n_off,
-            "env 解除後 crash が機能していない: off={} on={}", n_off, n_on);
+            "crash must reduce num_artificial: off={} on={}", n_off, n_on);
+
+        // both paths reach Optimal on the same LP
+        assert_eq!(r_off.status, SolveStatus::Optimal, "off must be Optimal");
+        assert_eq!(r_on.status,  SolveStatus::Optimal, "on must be Optimal");
+        let obj_diff = (r_off.objective - r_on.objective).abs()
+            / (1.0 + r_off.objective.abs());
+        assert!(obj_diff < 1e-6, "objective must match regardless of crash: {:.3e}", obj_diff);
     }
 
     // -------- crash fallback 直接 test --------

@@ -18,7 +18,7 @@
 #   bash scripts/download_all_bench_data.sh --ci-subset         # CI subset (11 dataset, ~1.2 GiB) のみ取得
 #   bash scripts/download_all_bench_data.sh --ci-subset --check # CI subset の確認のみ
 
-set -u
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

@@ -41,7 +41,7 @@
 //! model.add_constraint(constraint!((x + y) <= 8.0));
 //! model.minimize(2.0 * x + y);
 //! let result = model.solve().unwrap();
-//! assert!((result[x] + result[y] - 0.0).abs() < 1e-4);
+//! assert!((result.objective_value - 0.0).abs() < 1e-4);
 //! ```
 //!
 //! MPS 文字列から LP をパースして解く:

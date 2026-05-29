@@ -258,6 +258,7 @@ fn collect_all() -> Vec<ProbeRecord> {
 /// status=SuboptimalSolution/Timeout/その他は honest non-convergence 申告として
 /// assert 除外し、log のみ。
 #[test]
+#[ignore = "tier-2 (Mac ~20s / CI 2.5x ~50s); heavy profile で実行 (#97)"]
 fn nonconvex_kkt_all_49_problems() {
     let records = collect_all();
 

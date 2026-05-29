@@ -9,7 +9,7 @@ echo
 # 1. build + test + clippy + file size
 cargo build --release
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --release --lib --test-threads 3
+cargo nextest run --release --test-threads 3
 bash scripts/check_file_size.sh
 
 # 2. commit 情報

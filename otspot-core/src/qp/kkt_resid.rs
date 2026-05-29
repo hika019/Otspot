@@ -1,7 +1,7 @@
 //! QP KKT 残差の per-component primitives.
 //!
-//! 7 callers (bench_utils / ipm_solver::kkt 3 / qps_benchmark / diag_nonconvex_kkt /
-//! verify_solutions) が散在的に持っていた Q·x / A^T·y / A·x / bound_contrib /
+//! caller (bench_utils / ipm_solver::kkt 3 / qps_benchmark / diag_nonconvex_kkt)
+//! が散在的に持っていた Q·x / A^T·y / A·x / bound_contrib /
 //! complementarity slack の重実装をここに集約する。caller 側は
 //!   - 集約方法 (max abs / max componentwise rel / global rel / 構造体格納)
 //!   - 経路 fork (LP rc 経路 / QP bound_dual 経路 / FX skip / EmptyCol skip)
@@ -10,7 +10,7 @@
 //!
 //! ## モジュール構成
 //!
-//! - `f64_impl`: 倍精度経路 (verify_solutions / diag_nonconvex_kkt / bench_utils 等)
+//! - `f64_impl`: 倍精度経路 (diag_nonconvex_kkt / bench_utils 等)
 //! - `dd_impl`:  TwoFloat 経路 (kkt_residual_rel / compute_dfeas_orig 等)
 //!
 //! generic trait 化はしない (band-aid 回避; f64 と DD は数値経路として明確に

@@ -238,6 +238,14 @@ impl Model {
 
     /// Add a constraint to the model.
     pub fn add_constraint(&mut self, c: Constraint) -> &mut Self {
+        if let Some(v) = c.lhs.coefficients.keys().find(|v| v.model_id != self.model_id) {
+            let msg = format!(
+                "constraint lhs: var {} belongs to model {}, not this model ({})",
+                v.index, v.model_id, self.model_id
+            );
+            self.record_input_error("constraint_cross_model", ModelError::InvalidInput(msg));
+            return self;
+        }
         self.constraints.push(c);
         self
     }

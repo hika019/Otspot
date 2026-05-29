@@ -114,6 +114,7 @@ fn solve_qps(path: &std::path::Path) -> (QpProblem, SolverResult) {
 }
 
 #[test]
+#[ignore = "tier-2 (Mac ~16s / CI 2.5x ~40s); heavy profile で実行 (#97)"]
 fn liswet9_complementarity_or_subopt() {
     let (prob, res) = solve_qps(&std::path::PathBuf::from("data/maros_meszaros/LISWET9.QPS"));
     assert_optimal_objective("LISWET9", &res, &prob, -1977.359);

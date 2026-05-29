@@ -22,6 +22,8 @@ pub enum QpsError {
     ParseError { line: usize, message: String },
     /// A required section (ROWS / COLUMNS / ENDATA) is missing.
     MissingSection(String),
+    /// A section appears more than once.
+    DuplicateSection(String),
     /// An undefined column or row name was referenced.
     UndefinedReference { kind: String, name: String },
     /// The N-row RHS value (obj_offset) is NaN or infinite.
@@ -36,6 +38,7 @@ impl std::fmt::Display for QpsError {
                 write!(f, "Parse error at line {}: {}", line, message)
             }
             QpsError::MissingSection(s) => write!(f, "Missing required section: {}", s),
+            QpsError::DuplicateSection(s) => write!(f, "Duplicate section: {}", s),
             QpsError::UndefinedReference { kind, name } => {
                 write!(f, "Undefined {} reference: {}", kind, name)
             }

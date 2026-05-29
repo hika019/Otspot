@@ -46,14 +46,6 @@ pub mod presolve;
 pub mod sparse;
 pub mod problem;
 pub(crate) mod simplex;
-// Internal parsers compiled only under cfg(test), used by otspot-core's own
-// integration-style tests (e.g. qp::ipm_solver diagnostics). These are
-// source-duplicates of otspot-io's canonical, published parsers and are not
-// part of the production library. Full removal is tracked separately (the
-// ipm_solver tests depend on crate-internal IPM diagnostics).
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) mod io;
 pub(crate) mod basis;
 pub mod tolerances;
 pub mod options;
@@ -69,60 +61,6 @@ pub mod linalg;
 
 #[cfg(test)]
 pub(crate) mod test_kkt;
-
-/// Thread-local peak-allocation tracker for memory sentinel tests.
-///
-/// Wraps the system allocator and records per-thread net live bytes.
-/// `TrackingAlloc` is wired as the `#[global_allocator]` in test builds so
-/// that any future sentinel test can read allocation deltas via `update`.
-#[cfg(test)]
-pub(crate) mod peak_alloc {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    thread_local! {
-        static CURRENT: Cell<isize> = const { Cell::new(0) };
-    }
-
-    #[inline]
-    fn update(delta: isize) {
-        CURRENT.with(|c| c.set(c.get() + delta));
-    }
-
-    pub struct TrackingAlloc;
-
-    unsafe impl GlobalAlloc for TrackingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let ptr = System.alloc(layout);
-            if !ptr.is_null() {
-                update(layout.size() as isize);
-            }
-            ptr
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let ptr = System.alloc_zeroed(layout);
-            if !ptr.is_null() {
-                update(layout.size() as isize);
-            }
-            ptr
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            System.dealloc(ptr, layout);
-            update(-(layout.size() as isize));
-        }
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let new_ptr = System.realloc(ptr, layout, new_size);
-            if !new_ptr.is_null() {
-                update(new_size as isize - layout.size() as isize);
-            }
-            new_ptr
-        }
-    }
-}
-
-#[cfg(test)]
-#[global_allocator]
-static TEST_ALLOC: peak_alloc::TrackingAlloc = peak_alloc::TrackingAlloc;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
 pub use sparse::CscMatrix;

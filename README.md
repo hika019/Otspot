@@ -121,7 +121,7 @@ Solve-rate benchmark on standard public sets via the `otspot-dev` `qps_benchmark
 | Unbounded LP | synthetic | 12 | 12 certified | 12 certified |
 
 **Optimal** = verified against known objective. **Valid** = feasible, solver-optimal, no reference to verify.
-Remaining QP misses are ill-conditioned (`LISWET` family, cond ≈ 1e15); reported as `SuboptimalSolution`/`Timeout`.
+Remaining QP misses (9 instances): LISWET family (LISWET1/7/8/9/10/12, 6 instances) + QGFRDXPN/QPCBOEI2/YAO (3 instances); status PFEAS\_FAIL (8) / DFEAS\_FAIL (1, QGFRDXPN obj≈1e11).
 
 Reproduce (data is gitignored; see [Benchmark data](#benchmark-data)):
 
@@ -134,8 +134,8 @@ bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 
 ## Tests
 
 ```bash
-cargo nextest run --release                          # full suite (requires data/)
-cargo nextest run --release --profile lib-only       # unit tests only, no data needed
+cargo nextest run --release --test-threads 3          # full suite (requires data/)
+cargo nextest run --release --profile lib-only       # lib + bin tests (kind=lib + kind=bin), no integration data needed
 cargo test --doc --release
 ```
 
@@ -151,13 +151,12 @@ docker run -it --rm -v "$PWD":/workspace -w /workspace otspot-dev bash
 ### Benchmark data
 
 ```bash
-bash scripts/download_all_bench_data.sh          # Netlib LP + synthetic QP
+bash scripts/download_all_bench_data.sh          # Netlib LP + Maros-Meszaros + QPLIB + synthetic QP
 bash scripts/download_all_bench_data.sh --lp     # LP only
 bash scripts/download_all_bench_data.sh --check  # check what is present
 ```
 
-QP data generation requires `numpy scipy cvxpy clarabel` (`pip install`).
-Maros–Mészáros / QPLIB must be placed manually (URL hints in the script).
+QP data generation (synthetic suites) requires `numpy scipy cvxpy clarabel` (`pip install`).
 
 ## Project structure
 

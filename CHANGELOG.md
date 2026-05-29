@@ -12,6 +12,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 内部
 
+- `LP_CRASH_DUAL_ADV_DISABLE` 環境変数削除 (`use_lp_crash_basis` option と dual-path 完全冗長、#101 audit A2、commit 713d9be)
+- otspot-dev 未参照 bin 4 件削除 (`qp_dump` / `lp_screen` / `verify_solutions` / `qp_diag`、#101 audit deadcode、commit dcfde53)
+- step9 混合型並行行スキップに撤退根拠 docstring 化 (#99、commit 2b0e66a)
+
 ### 依存
 
 ## [0.3.1] - 2026-05-29
@@ -42,7 +46,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - `diagnose()` 系 API を削除
 - `SolverResult::pfeas` / `dfeas` / `gap` フィールドを削除 (`final_residuals` に集約)
 - deprecated `solve_qp_with_options` を削除
-- 環境変数読み取りを全廃 (`IPM_DD_LDL` / `MINRES_IR` / `MINRES_ETA` / `KKT_MEMORY_BUDGET_BYTES` / `QP_PRESOLVE_MAX_PASS` / `QP_PRESOLVE_SKIP_LARGE_COEFF` / `QP_PRESOLVE_PHASE2`)
+- ユーザ向け環境変数読み取りを全廃 (`IPM_DD_LDL` / `MINRES_IR` / `MINRES_ETA` / `KKT_MEMORY_BUDGET_BYTES` / `QP_PRESOLVE_MAX_PASS` / `QP_PRESOLVE_SKIP_LARGE_COEFF` / `QP_PRESOLVE_PHASE2`。sentinel hook `LP_DISPATCH_NOOP` / `DSE_DISABLE_GAMMA_UPDATE` は test 専用に意図保持)
 
 ### 修正
 - B&B finalize_proven が EmptyCol を未マスクで誤降格していたバグを修正

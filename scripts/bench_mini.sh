@@ -19,7 +19,7 @@
 # - 小〜中規模 (各問題 < 30s)
 # - 過去 DFEAS_FAIL 経験あり (regression 検出)
 
-set -e
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
