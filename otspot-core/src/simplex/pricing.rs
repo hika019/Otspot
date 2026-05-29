@@ -24,14 +24,12 @@ pub(crate) trait PricingStrategy {
     ///
     /// `entering` = column index entering the basis.
     /// `leaving`  = column index leaving the basis (not the row index).
-    /// `pivot`    = `eta[leaving_row]`, the pivot element.
     /// `eta`      = B⁻¹ * a_entering (FTRAN of entering column, dense).
     fn update_weights(
         &mut self,
         basis: &LuBasis,
         entering: usize,
         leaving: usize,
-        pivot: f64,
         eta: &[f64],
     );
 }
@@ -58,7 +56,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: f64, _: &[f64]) {}
+    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -154,7 +152,6 @@ impl PricingStrategy for SteepestEdgePricing {
         _basis: &LuBasis,
         entering: usize,
         leaving: usize,
-        _pivot: f64,
         eta: &[f64],
     ) {
         if leaving < self.weights.len() {
@@ -324,9 +321,8 @@ mod tests {
     ///
     /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
     ///
-    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering] = 7.0, pivot = 3.0:
+    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering] = 7.0:
     ///   γ[entering] formula: 25 / 7 ≈ 3.571
-    ///   pivot² formula:      25 / 9 ≈ 2.778  (different — no-op test would see this)
     ///
     /// A no-op implementation (e.g. returning early without updating) would leave
     /// γ[leaving] = 1.0, which is strictly less than 3.571 and fails the assertion.
@@ -335,11 +331,10 @@ mod tests {
         let mut pricing = SteepestEdgePricing::new(5);
         pricing.weights[2] = 7.0; // γ[entering] = 7.0
         let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0]; // ‖η‖² = 25
-        let pivot = 3.0; // passed through but must NOT be used
         let expected = 25.0_f64 / 7.0_f64; // γ[entering] formula
 
         let basis_id = make_identity_basis_2x2();
-        pricing.update_weights(&basis_id, 2, 3, pivot, &eta);
+        pricing.update_weights(&basis_id, 2, 3, &eta);
 
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
@@ -350,15 +345,13 @@ mod tests {
         assert_eq!(pricing.weights[2], 1.0, "entering column weight must reset to 1");
     }
 
-    /// Sentinel: degenerate pivot does NOT blow up γ[leaving] (γ[entering] damps it).
+    /// Sentinel: degenerate-pivot scenario produces a finite γ[leaving] (γ[entering] damps).
     ///
-    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering] = 2.0, pivot = 1e-5:
+    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering] = 2.0:
     ///   γ[entering] formula: 16.0001 / 2.0 ≈ 8.0  (finite, no cap needed)
-    ///   pivot² formula:      16.0001 / 1e-10 ≈ 1.6e11  (blow-up, required explicit cap)
+    ///   For contrast: pivot² with pivot=1e-5 gives 16.0001 / 1e-10 ≈ 1.6e11  (blow-up)
     ///
-    /// This confirms that γ[entering] provides implicit numerical damping for degenerate
-    /// pivots without needing a hard cap.  Other column weights must remain untouched
-    /// (no global reset side-effect).
+    /// Other column weights must remain untouched (no global reset side-effect).
     #[test]
     fn devex_degenerate_pivot_no_blowup() {
         let mut pricing = SteepestEdgePricing::new(5);
@@ -366,12 +359,11 @@ mod tests {
         pricing.weights[1] = 5.0;
         pricing.weights[2] = 2.0; // γ[entering] = 2.0
         let eta = vec![0.0, 0.01_f64, 4.0, 0.0, 0.0]; // ‖η‖² ≈ 16.0001
-        let pivot = 1e-5_f64; // degenerate; must NOT enter denominator
         let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
         let expected = eta_norm_sq / 2.0; // γ[entering]=2.0
 
         let basis_id = make_identity_basis_2x2();
-        pricing.update_weights(&basis_id, 2, 3, pivot, &eta);
+        pricing.update_weights(&basis_id, 2, 3, &eta);
 
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-10,
