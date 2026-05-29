@@ -143,7 +143,12 @@ pub fn complementarity_residual_rel(
 }
 
 /// 成分相対化 bounds 違反 max_j violation_j/(1+|x_j|+|bound_j|)。
+///
+/// Returns `f64::INFINITY` if any element of `x` is non-finite (NaN or ±Inf).
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
+    if x.iter().any(|v| !v.is_finite()) {
+        return f64::INFINITY;
+    }
     let mut max_rel = 0.0_f64;
     for (&xi, &(lb, ub)) in x.iter().zip(bounds.iter()) {
         let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
@@ -337,6 +342,17 @@ mod tests {
             "Path B: 26 eliminated 群は mask 有無で同値、effc242 (Q 条件なし) なら r_masked=0 で乖離 (no_mask={:.3e}, masked={:.3e})",
             r_no_mask, r_masked,
         );
+    }
+
+    /// A.2 sentinel: NaN in x must return INFINITY, not suppress violation as 0.0.
+    /// Without the `x.iter().any(|v| !v.is_finite())` guard, `f64::NAN.max(0.0)==0.0`
+    /// silently masks any bound violation → sentinel fails.
+    #[test]
+    fn bound_violation_nan_x_returns_infinity() {
+        let bounds = vec![(0.0_f64, 1.0_f64)];
+        let x = vec![f64::NAN];
+        let v = bound_violation(&bounds, &x);
+        assert!(v.is_infinite() && v > 0.0, "NaN x must give +INFINITY, got {v}");
     }
 
     /// mask 未供給 (= IPM 経路) の場合: A 空 / Q 非空 の linear-only var は skip されず
