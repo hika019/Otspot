@@ -24,6 +24,7 @@
 
 pub(crate) mod branch;
 pub(crate) mod node;
+pub(crate) mod presolve;
 mod problem;
 pub(crate) mod queue;
 
@@ -54,6 +55,13 @@ pub(crate) trait Relaxation {
     /// `opts` already has multistart / global_optimization stripped and the
     /// deadline fixed by the driver.
     fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
+    /// Tighten the root bounds via coefficient propagation (MIP presolve).
+    ///
+    /// Returns `None` when infeasibility is detected (empty domain after
+    /// integer rounding). Default: no tightening.
+    fn tighten_root_bounds(&self) -> Option<Vec<(f64, f64)>> {
+        Some(self.root_bounds().to_vec())
+    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -186,10 +194,17 @@ fn solve_mip_with_stats<R: Relaxation>(
 
     let mut state = MipState::new();
     let mut q = NodeQueue::new();
+    // Root-node bound tightening: coefficient propagation narrows integer variable
+    // domains before the first relaxation solve. Infeasibility detected here is
+    // exact (empty integer domain), so return immediately without entering the B&B.
+    let root_bounds = match problem.tighten_root_bounds() {
+        Some(b) => b,
+        None => return (SolverResult::infeasible(), stats),
+    };
     // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
     // Optimal relaxation. The loop solves the root uniformly with every other node, so
     // Infeasible / Unbounded / stalling roots are all handled in one place.
-    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
+    q.push(MipNode::root(root_bounds, f64::NEG_INFINITY));
 
     let mut open_lb = f64::INFINITY; // smallest valid bound over unexplored regions
     let mut had_open = false; // any region left unexplored?
