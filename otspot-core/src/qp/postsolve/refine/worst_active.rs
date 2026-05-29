@@ -2,6 +2,7 @@
 //! [active row duals ; active bound duals] 連成で解く (row dual 単独では bound 押し返しで悪化)。
 
 use crate::qp::kkt_resid;
+use crate::tolerances::any_nonfinite;
 use crate::qp::postsolve::dual_recovery::{
     compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds,
     row_is_active_for_dual_recovery, select_dual_recovery_local_bounds,
@@ -270,7 +271,7 @@ pub(crate) fn refine_dual_worst_active_block(
     };
     let mut block_sol = vec![0.0_f64; ulen];
     factor.solve(&rhs, &mut block_sol);
-    if block_sol.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(&block_sol) {
         return;
     }
 

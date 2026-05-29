@@ -4,6 +4,7 @@ use super::bound_refit::refit_bound_duals_kkt;
 use crate::qp::postsolve::dual_recovery::dual_recovery_progress_tol;
 use crate::qp::postsolve::postprocess::{run_dual_recovery_postprocess, try_dual_only_ir};
 use crate::qp::problem::QpProblem;
+use crate::tolerances::any_nonfinite;
 
 pub(crate) fn refine_kkt_iterative(
     problem: &QpProblem,
@@ -468,7 +469,7 @@ pub(crate) fn refine_kkt_iterative(
 
         let mut sol = vec![0.0_f64; n + m];
         factor.solve(&rhs, &mut sol);
-        if sol.iter().any(|v| !v.is_finite()) {
+        if any_nonfinite(&sol) {
             break;
         }
 

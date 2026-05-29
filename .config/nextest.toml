@@ -40,14 +40,6 @@ threads-required = "num-cpus"
 filter = "test(lp_regression_postsolve_y_dual::greenbea_postsolve_dual_feasibility)"
 threads-required = "num-cpus"
 
-# diag_liswet_basin_9_12: 2 × LISWET+Clarabel solve (measured 103s solo, up to
-# 179s under test-threads=3 queue wait). Raise kill ceiling to 5 min so the
-# 180s default does not kill it when the queue is slightly delayed.
-[[profile.default.overrides]]
-filter = "test(diag_liswet_basin::diag_liswet_basin_9_12)"
-slow-timeout = { period = "60s", terminate-after = 5 }
-threads-required = "num-cpus"
-
 # lp_simplex_stall_synthetic_large_lp_converges: 2500×3500 sparse LP routed through
 # IPM, needs ~11s solo but times out at 30s budget under CPU contention from other
 # tests. Run exclusively so faer parallelism gets all cores.

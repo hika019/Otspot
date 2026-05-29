@@ -554,6 +554,30 @@ fn invalid_options_rejected_at_milp_entry() {
     }
 }
 
+/// `solve_miqp_with_stats` rejects an indefinite Q (n=1001) with NonConvex status.
+///
+/// **Sentinel**: removing the `if !problem.is_convex()` guard in
+/// `solve_miqp_with_stats` (`mip/mod.rs`) causes B&B to run on a non-convex
+/// relaxation and return a silently wrong Optimal result — this test FAILS.
+#[test]
+fn solve_miqp_rejects_indefinite_n1001() {
+    let n = 1001_usize;
+    let mut rows: Vec<usize> = (0..n).collect();
+    let mut cols: Vec<usize> = (0..n).collect();
+    let mut vals: Vec<f64> = vec![1.0; n];
+    // off-diagonal: Q[0,1]=Q[1,0]=2 → top-left 2×2 eigenvalues {-1, 3} → indefinite
+    rows.push(0); cols.push(1); vals.push(2.0);
+    let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+    let a = CscMatrix::new(0, n);
+    let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
+    let m = MiqpProblem::new(qp, vec![0]).unwrap();
+    let (result, _) = solve_miqp_with_stats(&m, &SolverOptions::default(), &MipConfig::default());
+    assert!(
+        matches!(result.status, SolveStatus::NonConvex(_)),
+        "solve_miqp_with_stats must reject indefinite Q with NonConvex, got {:?}", result.status
+    );
+}
+
 /// Invalid options are rejected at `solve_miqp` / `solve_miqp_with_stats` entry.
 ///
 /// Sentinel: removing `validate()` from `solve_miqp_with_stats` causes these to
