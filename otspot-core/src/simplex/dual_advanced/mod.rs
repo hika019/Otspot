@@ -8,7 +8,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::RuizScaler;
+use crate::presolve::LpEquilibration;
 use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
@@ -59,7 +59,7 @@ pub(crate) fn solve_dual_advanced(
     }
 
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
         // Warm start: 提供された基底でx_Bを新しいRHSから再計算
@@ -199,7 +199,7 @@ fn try_bounded(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> Option<SolverResult> {
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&bsf.a, &bsf.b, &bsf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&bsf.a, &bsf.b, &bsf.c);
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
     // total_iters is always assigned before read (warm branch overwrites before
     // passing &mut to finish_bounded; cold path overwrites before return).

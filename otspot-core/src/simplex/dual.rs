@@ -5,7 +5,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::RuizScaler;
+use crate::presolve::LpEquilibration;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
@@ -22,7 +22,7 @@ pub(crate) fn two_phase_dual_simplex(
     options: &SolverOptions,
 ) -> SolverResult {
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
         if warm.basis.len() == m && warm.basis.iter().all(|&idx| idx < sf.n_total) {

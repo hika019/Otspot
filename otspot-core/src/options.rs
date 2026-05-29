@@ -501,9 +501,6 @@ pub struct SolverOptions {
     pub presolve: bool,
     /// Maximum fixpoint passes in QP presolve.  Default: `10`.
     pub presolve_max_pass: usize,
-    /// Skip large-coefficient row rescaling in QP presolve.  Default: `false`.
-    /// Rescaling is also skipped when `use_ruiz_scaling` is `true` (existing behaviour).
-    pub presolve_skip_large_coeff: bool,
     /// Enable QP presolve phase 2.  Default: `true`.
     pub presolve_phase2: bool,
     /// Timeout in seconds.  `None` = unlimited.
@@ -588,7 +585,6 @@ impl Default for SolverOptions {
             use_lp_crash_basis: true,
             presolve: true,
             presolve_max_pass: DEFAULT_PRESOLVE_MAX_PASS,
-            presolve_skip_large_coeff: false,
             presolve_phase2: true,
             timeout_secs: None,
             cancel_flag: None,
@@ -620,7 +616,7 @@ impl SolverOptions {
     ///
     /// Returns the first `Err` encountered, in field declaration order.
     /// Called by public solver entry points (`solve_qp_with`, `solve_qp_global`,
-    /// `solve_qp_multistart`, `solve_milp`, `solve_miqp`, `simplex::solve_with`)
+    /// `multistart::solve_qp_multistart`, `solve_milp`, `solve_miqp`, `simplex::solve_with`)
     /// before starting work; invalid options cause the entry to return
     /// [`crate::problem::SolveStatus::NumericalError`] rather than propagating
     /// bad values into the solver core.
@@ -994,7 +990,6 @@ mod tests {
     fn test_solver_presolve_fields_default() {
         let o = SolverOptions::default();
         assert_eq!(o.presolve_max_pass, DEFAULT_PRESOLVE_MAX_PASS, "default max pass");
-        assert!(!o.presolve_skip_large_coeff, "default skip_large_coeff = false");
         assert!(o.presolve_phase2, "default phase2 = true");
     }
 
@@ -1026,18 +1021,6 @@ mod tests {
         assert!(!o.presolve_phase2);
         let o2 = SolverOptions { presolve_phase2: true, ..Default::default() };
         assert!(o2.presolve_phase2);
-    }
-
-    #[test]
-    fn test_presolve_skip_large_coeff_field() {
-        // Verify the OR logic: skip if field OR use_ruiz_scaling.
-        let no_skip = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: false, ..Default::default() };
-        assert!(!no_skip.presolve_skip_large_coeff && !no_skip.use_ruiz_scaling);
-        let skip_via_field = SolverOptions { presolve_skip_large_coeff: true, use_ruiz_scaling: false, ..Default::default() };
-        assert!(skip_via_field.presolve_skip_large_coeff);
-        let skip_via_ruiz = SolverOptions { presolve_skip_large_coeff: false, use_ruiz_scaling: true, ..Default::default() };
-        // effective skip = field OR ruiz
-        assert!(skip_via_ruiz.presolve_skip_large_coeff || skip_via_ruiz.use_ruiz_scaling);
     }
 
 }

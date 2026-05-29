@@ -528,7 +528,7 @@ pub fn factorize_budget(mat: &CscMatrix, max_l_nnz: usize) -> Result<LdlFactoriz
 
 /// `factorize` の per-call parallelism 指定版。
 /// `par == Par::Seq` で既存挙動と完全互換。
-pub fn factorize_with_par(
+pub(crate) fn factorize_with_par(
     mat: &CscMatrix,
     par: faer::Par,
 ) -> Result<LdlFactorization, LdlError> {

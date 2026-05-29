@@ -14,8 +14,6 @@
 pub struct OptimalCertificate {
     stationarity_rel: f64,
     primal_residual_rel: f64,
-    bound_violation: f64,
-    complementarity_rel: f64,
     dual_sign_violation: f64,
     duality_gap_rel: f64,
     tol: f64,
@@ -26,8 +24,6 @@ impl OptimalCertificate {
     pub(crate) fn new(
         stationarity_rel: f64,
         primal_residual_rel: f64,
-        bound_violation: f64,
-        complementarity_rel: f64,
         dual_sign_violation: f64,
         duality_gap_rel: f64,
         tol: f64,
@@ -35,8 +31,6 @@ impl OptimalCertificate {
         Self {
             stationarity_rel,
             primal_residual_rel,
-            bound_violation,
-            complementarity_rel,
             dual_sign_violation,
             duality_gap_rel,
             tol,
@@ -48,12 +42,6 @@ impl OptimalCertificate {
 
     /// Componentwise relative primal violation: `max_i viol_i / scale_i`.
     pub fn primal_residual_rel(&self) -> f64 { self.primal_residual_rel }
-
-    /// Primal bound violation: `max_j max(lb_j−x_j, x_j−ub_j, 0) / scale_j`.
-    pub fn bound_violation(&self) -> f64 { self.bound_violation }
-
-    /// Complementarity: `max(|y_i · slack_i|, |z_j · (x_j−bnd_j)|) / normaliser`.
-    pub fn complementarity_rel(&self) -> f64 { self.complementarity_rel }
 
     /// Dual-sign violation: `max_k viol_k / (1 + |v_k|)` over sign-constrained duals.
     pub fn dual_sign_violation(&self) -> f64 { self.dual_sign_violation }
