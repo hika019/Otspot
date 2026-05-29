@@ -29,7 +29,7 @@ pub(crate) mod queue;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
-use crate::options::{MipConfig, SolverOptions};
+use crate::options::{MipConfig, SolverOptions, WarmStartBasis};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::global::pruning::{should_prune, within_gap};
@@ -178,6 +178,9 @@ fn solve_mip_with_stats<R: Relaxation>(
     shared.timeout_secs = None;
     shared.multistart = None;
     shared.global_optimization = None;
+    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
+    shared.recover_warm_start_basis = true;
+    shared.warm_start = None;
 
     // Degenerate: no integer variables → the relaxation is the answer (LP/QP fallback).
     if problem.integer_vars().is_empty() {
@@ -222,7 +225,13 @@ fn solve_mip_with_stats<R: Relaxation>(
         }
 
         let t0 = Instant::now();
-        let res = problem.solve(&node.var_bounds, &shared);
+        let res = if let Some(ref ws) = node.warm_start {
+            let mut no = shared.clone();
+            no.warm_start = Some(ws.clone());
+            problem.solve(&node.var_bounds, &no)
+        } else {
+            problem.solve(&node.var_bounds, &shared)
+        };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         stats.nodes_processed += 1;
@@ -306,8 +315,11 @@ fn solve_mip_with_stats<R: Relaxation>(
             )
             .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
             let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-            q.push(node.child(down, node_lb));
-            q.push(node.child(up, node_lb));
+            // Propagate parent LP basis: one bound change leaves the basis dual-feasible
+            // for the child; dual simplex restores primal feasibility cheaply.
+            let child_ws: Option<WarmStartBasis> = res.warm_start_basis.clone();
+            q.push(node.child_warm(down, node_lb, child_ws.clone()));
+            q.push(node.child_warm(up, node_lb, child_ws));
         } else {
             // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
             // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region

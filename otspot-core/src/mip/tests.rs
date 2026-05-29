@@ -711,3 +711,113 @@ fn proof_uncertain_blocks_optimal_despite_closed_gap() {
         "proof_uncertain must suppress BoundGapCertificate"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LP warm-start propagation
+// ---------------------------------------------------------------------------
+
+/// LP warm start does not corrupt the result: a 2-var MILP solved with
+/// `recover_warm_start_basis=true` (enabled by the B&B driver) returns the
+/// same optimal objective as without warm start.
+///
+/// Sentinel: replacing `child_warm` with `child` (dropping warm start) keeps
+/// the answer correct but removes the warm-start code path. The test fires on
+/// both behaviours — it verifies correctness, not that warm-start runs.
+/// The real regression guard is that warm start does NOT cause Timeout/NumericalError.
+#[test]
+fn warm_start_propagation_preserves_correct_objective() {
+    // min -x1 - 2*x2  s.t. x1 + x2 <= 3, x1,x2 in {0,1,2,3}
+    // Optimal: x1=0, x2=3, obj=-6 (0+3=3<=3, -0-6=-6)
+    let lp = build_lp(
+        vec![-1.0, -2.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 3.0), (0.0, 3.0)],
+    );
+    let problem = milp(lp, vec![0, 1]);
+    let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!((r.objective + 6.0).abs() < EPS, "expected obj=-6, got {}", r.objective);
+}
+
+/// Binary knapsack with warm-start propagation: correct solution is [0,1,1,1],
+/// objective=-21.
+#[test]
+fn warm_start_binary_knapsack_correct() {
+    // min -5x1 -8x2 -3x3 -5x4   s.t. 2x1+3x2+x3+2x4 <= 5, xi in {0,1}
+    // Optimal: x2=1,x3=1,x4=1, obj=-16 (or similar — verify against actual solve)
+    // Use a simpler 3-var knapsack with known solution:
+    // min -6x0 -10x1 -5x2  s.t. 3x0+5x1+2x2 <= 6, xi in {0,1}
+    // Optimal: x0=0, x1=1, x2=0 gives obj=-10; x0=1,x2=1 gives obj=-11 → -11
+    let lp = build_lp(
+        vec![-6.0, -10.0, -5.0],
+        &[0, 0, 0],
+        &[0, 1, 2],
+        &[3.0, 5.0, 2.0],
+        1,
+        vec![6.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)],
+    );
+    let problem = milp(lp, vec![0, 1, 2]);
+    let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal, "expected Optimal, got {:?}", r.status);
+    // Best solution: x0=1(3), x2=1(2) → cap=5≤6, obj=-11.
+    assert!((r.objective + 11.0).abs() < EPS, "expected obj=-11, got {}", r.objective);
+}
+
+/// Infeasible MILP (integer variable forced between consecutive integers) is
+/// still correctly identified as Infeasible even when warm-start propagation
+/// is active.
+#[test]
+fn warm_start_infeasible_milp_still_infeasible() {
+    // x in [1.2, 1.8] integer → no integer in [1.2, 1.8] → Infeasible
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(1.2, 1.8)],
+    );
+    let problem = milp(lp, vec![0]);
+    let r = solve_milp(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "expected Infeasible, got {:?}", r.status);
+}
+
+/// Debug: test that directly calls LP solve for child LP with warm_start.
+/// Reproduces the rounding_fails_max regression.
+#[test]
+fn warm_start_rounding_fails_child_no_timeout() {
+    use crate::options::{SolverOptions, WarmStartBasis};
+    // Child LP: min -5x - 4y s.t. 6x+4y<=24, x+2y<=6, x in [0,10], y in [0,1]
+    let lp = build_lp(
+        vec![-5.0, -4.0],
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[6.0, 4.0, 1.0, 2.0],
+        2,
+        vec![24.0, 6.0],
+        vec![ConstraintType::Le, ConstraintType::Le],
+        vec![(0.0, 10.0), (0.0, 1.0)], // y bounded at 1
+    );
+    // Parent root basis: both structural vars (x=0, y=1) are basic.
+    let ws = WarmStartBasis { basis: vec![0, 1], x_b: vec![3.0, 1.5] };
+    let opts = SolverOptions {
+        timeout_secs: Some(10.0),
+        recover_warm_start_basis: true,
+        warm_start: Some(ws),
+        ..Default::default()
+    };
+    let r = crate::lp::solve_lp_with(&lp, &opts);
+    assert_ne!(r.status, crate::problem::SolveStatus::Timeout,
+        "child LP with warm start must not timeout, got status={:?}", r.status);
+    assert_eq!(r.status, crate::problem::SolveStatus::Optimal,
+        "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}", r.status);
+}

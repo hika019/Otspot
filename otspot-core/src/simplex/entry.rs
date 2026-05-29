@@ -88,8 +88,17 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 // (SingularBasis on the reduced initial basis, Eq drift in Phase II,
                 // or guard_lp_optimal catching a KKT failure on the reduced form).
                 // SuboptimalSolution from the guard means KKT failed → fall back.
+                // Strip warm_start if present: the reduction renumbered variables,
+                // so any caller-supplied basis is invalid for the original LP.
                 if matches!(raw.status, SolveStatus::NumericalError | SolveStatus::SuboptimalSolution) {
-                    return solve_without_presolve(problem, options);
+                    let fallback_opts;
+                    let fb = if options.warm_start.is_some() {
+                        fallback_opts = SolverOptions { warm_start: None, ..options.clone() };
+                        &fallback_opts
+                    } else {
+                        options
+                    };
+                    return solve_without_presolve(problem, fb);
                 }
                 let mut res = presolve::postsolve::run_postsolve(
                     &raw,

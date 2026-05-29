@@ -5,6 +5,8 @@
 //! parent relaxation objective (a valid lower bound on every descendant, since
 //! tightening bounds can only raise the minimum). `depth` is the branching depth.
 
+use crate::options::WarmStartBasis;
+
 /// Per-variable `(lower, upper)` bounds for a relaxation subproblem.
 pub(crate) type VarBounds = Vec<(f64, f64)>;
 
@@ -16,15 +18,28 @@ pub(crate) struct MipNode {
     pub lower_bound: f64,
     /// Branching depth (root = 0).
     pub depth: usize,
+    /// LP basis from the parent relaxation. After one bound change the parent
+    /// basis is dual-feasible for the child; dual simplex restores primal
+    /// feasibility cheaply. `None` at root and after MIQP nodes.
+    pub warm_start: Option<WarmStartBasis>,
 }
 
 impl MipNode {
     pub fn root(var_bounds: VarBounds, lower_bound: f64) -> Self {
-        Self { var_bounds, lower_bound, depth: 0 }
+        Self { var_bounds, lower_bound, depth: 0, warm_start: None }
     }
 
     pub fn child(&self, new_bounds: VarBounds, lower_bound: f64) -> Self {
-        Self { var_bounds: new_bounds, lower_bound, depth: self.depth + 1 }
+        Self { var_bounds: new_bounds, lower_bound, depth: self.depth + 1, warm_start: None }
+    }
+
+    pub fn child_warm(
+        &self,
+        new_bounds: VarBounds,
+        lower_bound: f64,
+        warm_start: Option<WarmStartBasis>,
+    ) -> Self {
+        Self { var_bounds: new_bounds, lower_bound, depth: self.depth + 1, warm_start }
     }
 }
 
