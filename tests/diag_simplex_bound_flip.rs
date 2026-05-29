@@ -9,17 +9,10 @@
 //!    genuinely flips at least one variable; reverting wiring (passing
 //!    infinite uppers) makes the counter stay at 0.
 //!
-//! ## Why a mini simplex in the test file
-//!
-//! Production wiring of BFRT into `dual_advanced/core.rs` requires an
-//! alternate `StandardForm` that does **not** expand bounded variables to
-//! upper-bound rows (otherwise BFRT sees only x ≥ 0 columns with no flip
-//! handles). That refactor is a follow-up task. The mini simplex below
-//! lets us prove the primitive's pivot-reduction effect on representative
-//! bound-rich data **today**, while production integration matures.
+//! Production wiring is complete; this file validates the BFRT primitive in isolation.
 
 use otspot_core::bound_flip::{
-    bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations, BfrtResult, ColBound,
+    bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations, ColBound,
 };
 
 const PIVOT_TOL: f64 = 1e-8;
