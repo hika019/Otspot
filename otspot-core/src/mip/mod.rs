@@ -131,12 +131,18 @@ pub fn solve_milp_with_stats(
         let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
         match presolve::tighten_integer_bounds(&problem.lp, &mask) {
             None => return (SolverResult::infeasible(), MipStats::default()),
-            Some(tightened) => {
+            Some(tightened) if tightened != problem.lp.bounds => {
+                // Bounds were tightened: build the BT-reduced problem and solve.
+                // Pass the precomputed mask to avoid recomputing it in the driver.
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
                 let problem_bt =
                     MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
-                return solve_mip_with_stats(&problem_bt, options, cfg);
+                return solve_mip_core(&problem_bt, options, cfg, mask);
+            }
+            Some(_) => {
+                // BT produced no tighter bounds: skip the LP clone and proceed.
+                return solve_mip_core(problem, options, cfg, mask);
             }
         }
     }
@@ -179,11 +185,22 @@ fn solve_mip_with_stats<R: Relaxation>(
     options: &SolverOptions,
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
-    let mut stats = MipStats::default();
     let mask = integer_mask(problem.num_vars(), problem.integer_vars());
+    solve_mip_core(problem, options, cfg, mask)
+}
 
-    // Approximate per-node bounds clone cost: one (f64, f64) per variable.
-    stats.approx_bounds_bytes_per_node = problem.num_vars() * 2 * std::mem::size_of::<f64>();
+/// Core B&B driver that accepts a precomputed `integer_mask` to avoid
+/// recomputing it when the caller (e.g. `solve_milp_with_stats`) already has it.
+fn solve_mip_core<R: Relaxation>(
+    problem: &R,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+    mask: Vec<bool>,
+) -> (SolverResult, MipStats) {
+    let mut stats = MipStats {
+        approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
+        ..MipStats::default()
+    };
 
     // deadline: prefer an explicit deadline, else derive from timeout_secs.
     let deadline = options.deadline.or_else(|| {

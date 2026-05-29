@@ -24,7 +24,10 @@ pub(super) fn step5_bounds_tightening(
             &st.bounds,
             ct,
             st.b[i],
-            None, // LP presolve: no integer rounding
+            // LP presolve passes int_mask=None; acceptance is unconditional
+            // (aggressive tightening, unlike MIP presolve which must not cut off
+            // integer solutions).
+            None,
         )
         .ok_or(PresolveStatus::Infeasible)?;
 

@@ -61,6 +61,33 @@ fn trivial_integer_root_is_optimal_without_branching() {
     assert_eq!(stats.nodes_processed, 1, "integral root must not branch");
 }
 
+/// BT detects infeasibility before B&B starts: `nodes_processed` must be zero.
+///
+/// `x ≤ 3.7 ∧ x ≥ 3.5` with `x ∈ [0,10]` integer.
+/// BT: floor(3.7)=3 → ub=3; ceil(3.5)=4 → lb=4; lb > ub → infeasible.
+/// The early-exit path in `solve_milp_with_stats` returns before entering
+/// the B&B driver, so `nodes_processed == 0`.
+///
+/// Sentinel: disabling `tighten_integer_bounds` lets B&B run (nodes > 0) and
+/// this assertion FAILS. The unit test in `presolve.rs` is insufficient alone
+/// because it does not cover the integration path through `solve_milp_with_stats`.
+#[test]
+fn bt_detects_infeasibility_before_bb() {
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+    let lp = LpProblem::new_general(
+        vec![1.0],
+        a,
+        vec![3.7, 3.5],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+        None,
+    )
+    .unwrap();
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Infeasible, "x≤3.7 ∧ x≥3.5 integer → empty domain");
+    assert_eq!(stats.nodes_processed, 0, "infeasibility detected by BT, not B&B");
+}
+
 /// Bound tightening resolves the fractional-root LP at the root node without branching.
 ///
 /// min -x s.t. 2x ≤ 3, x ∈ [0,5] integer.
