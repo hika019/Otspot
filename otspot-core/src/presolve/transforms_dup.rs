@@ -92,6 +92,14 @@ pub(super) fn step9_parallel_row(st: &mut PresolveState) -> Result<(), PresolveS
                 if !proportional {
                     continue;
                 }
+                // Mixed types (Eq+Le, Eq+Ge, etc.) are intentionally skipped.
+                // Eliminating Le/Ge rows dominated by a parallel Eq row is logically
+                // correct but produced mixed Netlib results (Netlib-109, 2026-05-29:
+                // 39 improvements, 46 regressions up to 2x). Removing these rows
+                // alters the simplex basis structure in ways that hurt convergence on
+                // network-structured instances (pilot, ken, ship families). Left as a
+                // known gap; revisit only if a basis-repair or warm-start mechanism
+                // can compensate.
                 if st.constraint_types[i] != st.constraint_types[k] {
                     continue;
                 }
