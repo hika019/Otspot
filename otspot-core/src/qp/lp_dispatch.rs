@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 use crate::options::SolverOptions;
+use crate::tolerances::any_nonfinite;
 use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use super::certificate::guard_lp_optimal;
 use crate::sparse::CscMatrix;
@@ -308,7 +309,7 @@ fn verify_normalized_farkas(
     cert_rhs: &[f64],
     y: &[f64],
 ) -> bool {
-    if y.len() != cert_rhs.len() || y.iter().any(|&v| !v.is_finite()) {
+    if y.len() != cert_rhs.len() || any_nonfinite(y) {
         return false;
     }
     // 厳密な非負部分 y⁺ = max(y, 0) で検証する。IPM の僅かな負 slack を許容しても
