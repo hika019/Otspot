@@ -22,23 +22,6 @@ fn simple_convex_qp() -> QpProblem {
     .unwrap()
 }
 
-/// Pattern A: max_iter=50 は per-attempt cap として機能し、iterations は 50 以内に収まる。
-///
-/// Note: simple_convex_qp (n=2) は自然収束 ~10 iter なので修正 revert 時も PASS する。
-/// load-bearing sentinel は Pattern C (max_iter=1) を参照。
-#[test]
-fn max_iter_50_honored() {
-    let problem = simple_convex_qp();
-    let mut opts = SolverOptions::default();
-    opts.ipm.max_iter = 50;
-    let result = solve_qp_with(&problem, &opts);
-    assert!(
-        result.iterations <= 50,
-        "max_iter=50 が無視された: iterations={} (上限 50 超)",
-        result.iterations
-    );
-}
-
 /// Pattern B: デフォルト (max_iter=usize::MAX) では正常収束する。
 #[test]
 fn max_iter_default_converges() {
