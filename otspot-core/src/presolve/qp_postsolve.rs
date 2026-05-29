@@ -606,7 +606,7 @@ mod tests {
 
     /// Sentinel C.1: boundary col (x at lb, z_lb>0) で bound_contrib=0 は y を誤る。
     /// 正しい bound_contrib を渡すと stationarity が 0 になる。
-    /// wrapper を復活させて 0 固定で呼ぶと本テストが fail する設計。
+    /// `recover_y_for_singleton_row_with_bound` が `bound_contrib_col` 引数を無視する実装に退行した場合 fail する設計。
     #[test]
     fn test_sentinel_c1_boundary_col_needs_bound_contrib() {
         use crate::problem::ConstraintType;
