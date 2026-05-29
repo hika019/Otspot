@@ -7,6 +7,8 @@
 //! switch absorbs less infeasibility than a normal pivot can flip lb↔ub
 //! mid-iter instead of forcing a small dual step.
 //!
+//! BFRT is unconditionally applied; there is no user-facing disable flag.
+//!
 //! Maros (2003) §7.6 reference algorithm:
 //! - leaving pricing detects rows where `x_B[r]` violates a bound;
 //! - BFRT returns `(entering, theta, flips)` — `flips` ⊂ non-basic columns
