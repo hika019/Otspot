@@ -292,7 +292,7 @@ pub(crate) fn bound_contrib_at_var(
     contrib
 }
 
-/// 対称行列 Q (全要素格納の対称 Q、`spmv_q` と同じ慣例) で Q[col, :] · x を計算する。
+/// 対称行列 Q (全要素格納の対称 Q、CSC col-major 慣例) で Q[col, :] · x を計算する。
 ///
 /// (Q*x)[col] を計算。
 ///

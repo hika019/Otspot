@@ -30,18 +30,6 @@ pub(crate) fn spmtv(a: &CscMatrix, v: &[f64], out: &mut [f64]) {
 }
 
 #[inline]
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn spmv_q(q: &CscMatrix, x: &[f64], out: &mut [f64]) {
-    out.iter_mut().for_each(|v| *v = 0.0);
-    for col in 0..q.ncols {
-        let xv = x[col];
-        for k in q.col_ptr[col]..q.col_ptr[col + 1] {
-            out[q.row_ind[k]] += q.values[k] * xv;
-        }
-    }
-}
-
-#[inline]
 pub(crate) fn norm_inf(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |a, &x| a.max(x.abs()))
 }

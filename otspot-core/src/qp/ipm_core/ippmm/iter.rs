@@ -22,7 +22,7 @@ use crate::qp::ipm_core::common::{
     check_infeasible_or_unbounded, numerical_error_result, solve_unconstrained, timeout_result,
 };
 use crate::qp::ipm_core::kkt::{
-    build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv, spmv_q,
+    build_extended_constraints, collapse_extended_dual, norm_inf, spmtv, spmv,
 };
 use crate::qp::ipm_core::solver_loop::{
     compute_sigma_vec, corrector_step, corrector_step_schur, gondzio_correctors,
@@ -156,7 +156,7 @@ pub(crate) fn solve_ippmm_inner(
 
         spmv(&a_ext, &x, &mut ax);
         spmtv(&a_ext, &y, &mut aty);
-        spmv_q(&problem.q, &x, &mut qx);
+        spmv(&problem.q, &x, &mut qx);
 
         for i in 0..n {
             r_d[i] = -(qx[i] + problem.c[i] + aty[i]);
@@ -614,7 +614,7 @@ pub(crate) fn solve_ippmm_inner(
         }
     }
 
-    spmv_q(&problem.q, &x, &mut qx);
+    spmv(&problem.q, &x, &mut qx);
     let objective = 0.5
         * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
         + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
