@@ -221,7 +221,7 @@ fn test_warm_start_consistency() {
         y: result1.dual_solution.clone(),
         mu: result1.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6),
     };
-    let result2 = solve_qp_warm(&problem2, &ws, &SolverOptions::default());
+    let result2 = solve_qp_with(&problem2, &crate::options::SolverOptions { warm_start_qp: Some(ws), ..crate::options::SolverOptions::default() });
 
     assert_eq!(result2.status, SolveStatus::Optimal);
     assert_close(result2.solution[0], 0.5, EPS, "x[0]");
