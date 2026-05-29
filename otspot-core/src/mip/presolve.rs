@@ -189,6 +189,26 @@ mod tests {
         );
     }
 
+    /// Tolerance-aware rounding retains integer values within float-arithmetic drift.
+    ///
+    /// `0.1 * x <= 0.3` with `x ∈ [0, 5]` integer.
+    /// In IEEE 754: `0.3f64 / 0.1f64 = 2.9999999999999996`, so raw `floor()` gives 2,
+    /// incorrectly cutting off the feasible solution `x = 3` (`0.1 * 3 = 0.3`).
+    /// `integer_floor` adds `INT_ROUND_TOL` before flooring, mapping `2.9999999999999996`
+    /// to `3.0`, preserving the feasible domain `[0, 3]`.
+    ///
+    /// Sentinel: replacing `integer_floor` with raw `floor()` gives ub = 2 ≠ 3 → assertion fails.
+    #[test]
+    fn tolerance_aware_floor_retains_boundary_integer() {
+        let lp = single_var_lp(0.1, 0.3, ConstraintType::Le, (0.0, 5.0));
+        let bounds = tighten_integer_bounds(&lp, &[true]).expect("feasible: x=3 satisfies 0.1*3=0.3");
+        assert!(
+            (bounds[0].1 - 3.0).abs() < 1e-9,
+            "integer ub from 0.1*x<=0.3 must be 3 (not 2 from raw floor), got {}",
+            bounds[0].1
+        );
+    }
+
     /// Finite lower bound propagates implied ub even when one variable has an
     /// infinite upper bound.
     ///

@@ -1,7 +1,25 @@
 //! Row activity range and implied-bound propagation, shared by LP/QP/MIP presolve.
 
 use crate::problem::ConstraintType;
-use crate::tolerances::ZERO_TOL;
+use crate::tolerances::{INT_ROUND_TOL, ZERO_TOL};
+
+/// Round down to the nearest integer, absorbing float-arithmetic drift.
+///
+/// `(x + INT_ROUND_TOL).floor()` maps a value within `INT_ROUND_TOL` of an
+/// integer upward before flooring, so `2.9999999999999996` → `3` instead of `2`.
+#[inline]
+fn integer_floor(x: f64) -> f64 {
+    (x + INT_ROUND_TOL).floor()
+}
+
+/// Round up to the nearest integer, absorbing float-arithmetic drift.
+///
+/// `(x - INT_ROUND_TOL).ceil()` maps a value within `INT_ROUND_TOL` of an
+/// integer downward before ceiling, so `3.0000000000000004` → `3` instead of `4`.
+#[inline]
+fn integer_ceil(x: f64) -> f64 {
+    (x - INT_ROUND_TOL).ceil()
+}
 
 /// Compute `[row_lb, row_ub]` of `sum_j a_ij * x_j` over `x_j ∈ bounds[j]`.
 ///
@@ -156,12 +174,12 @@ pub(crate) fn propagate_row_bounds(
             ConstraintType::Le => {
                 if a_ij > 0.0 && rest_lb_fin {
                     let mut implied_ub = (b - rest_lb) / a_ij;
-                    if is_int { implied_ub = implied_ub.floor(); }
+                    if is_int { implied_ub = integer_floor(implied_ub); }
                     if implied_ub < old_lb - ZERO_TOL { return None; }
                     if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
                 } else if a_ij < 0.0 && rest_lb_fin {
                     let mut implied_lb = (b - rest_lb) / a_ij;
-                    if is_int { implied_lb = implied_lb.ceil(); }
+                    if is_int { implied_lb = integer_ceil(implied_lb); }
                     if implied_lb > old_ub + ZERO_TOL { return None; }
                     if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
                 }
@@ -169,12 +187,12 @@ pub(crate) fn propagate_row_bounds(
             ConstraintType::Ge => {
                 if a_ij > 0.0 && rest_ub_fin {
                     let mut implied_lb = (b - rest_ub) / a_ij;
-                    if is_int { implied_lb = implied_lb.ceil(); }
+                    if is_int { implied_lb = integer_ceil(implied_lb); }
                     if implied_lb > old_ub + ZERO_TOL { return None; }
                     if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
                 } else if a_ij < 0.0 && rest_ub_fin {
                     let mut implied_ub = (b - rest_ub) / a_ij;
-                    if is_int { implied_ub = implied_ub.floor(); }
+                    if is_int { implied_ub = integer_floor(implied_ub); }
                     if implied_ub < old_lb - ZERO_TOL { return None; }
                     if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
                 }
@@ -183,13 +201,13 @@ pub(crate) fn propagate_row_bounds(
                 if a_ij > 0.0 {
                     if rest_lb_fin {
                         let mut implied_ub = (b - rest_lb) / a_ij;
-                        if is_int { implied_ub = implied_ub.floor(); }
+                        if is_int { implied_ub = integer_floor(implied_ub); }
                         if implied_ub < old_lb - ZERO_TOL { return None; }
                         if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
                     }
                     if rest_ub_fin {
                         let mut implied_lb = (b - rest_ub) / a_ij;
-                        if is_int { implied_lb = implied_lb.ceil(); }
+                        if is_int { implied_lb = integer_ceil(implied_lb); }
                         if implied_lb > old_ub + ZERO_TOL { return None; }
                         if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
                     }
@@ -197,13 +215,13 @@ pub(crate) fn propagate_row_bounds(
                     // a_ij < 0
                     if rest_lb_fin {
                         let mut implied_lb = (b - rest_lb) / a_ij;
-                        if is_int { implied_lb = implied_lb.ceil(); }
+                        if is_int { implied_lb = integer_ceil(implied_lb); }
                         if implied_lb > old_ub + ZERO_TOL { return None; }
                         if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
                     }
                     if rest_ub_fin {
                         let mut implied_ub = (b - rest_ub) / a_ij;
-                        if is_int { implied_ub = implied_ub.floor(); }
+                        if is_int { implied_ub = integer_floor(implied_ub); }
                         if implied_ub < old_lb - ZERO_TOL { return None; }
                         if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
                     }
