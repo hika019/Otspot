@@ -1,13 +1,9 @@
 name: CI (heavy)
 
 # tier-2 sentinel gate (#97 で #[ignore = "tier-2"] 化した 20 test を復活させる).
-# トリガ:
-#   1. nightly cron (毎日 18:00 UTC = JST 翌 03:00)
-#   2. workflow_dispatch (手動実行 — Actions tab "Run workflow" ボタン)
-#
-# push trigger は意図的に除外 (job-level if: で skip すると Actions tab に
-# "skipped" run が大量表示されノイズになるため、workflow 自体を起動させない)。
-# 手動 heavy 実行が必要なら workflow_dispatch を使う。
+# トリガ (user policy 3b97a37):
+#   1. 全 branch push で auto-run (cron 廃止、push 必ず走らせる)
+#   2. workflow_dispatch (Actions tab "Run workflow" ボタン)
 on:
   workflow_dispatch:
   push:
@@ -56,4 +52,4 @@ jobs:
         run: |
           cargo nextest run --release --profile heavy --run-ignored all \
             -E 'kind(test) and not (test(=liswet9_objective_matches_clarabel) | test(=yao_objective_matches_clarabel) | test(=diag_osa60_must_reach_known_objective) | test(=diag_ken18_must_respect_internal_deadline) | test(=timeout_honored_on_neos_bigm_cold_start) | test(=qp_is_lasso_300_real_data_honors_deadline) | test(=greenbea_postsolve_dual_feasibility))' \
-            --test-threads 1
+            --test-threads 3
