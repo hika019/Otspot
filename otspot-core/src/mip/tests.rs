@@ -846,6 +846,86 @@ fn warm_start_rounding_fails_child_no_timeout() {
         "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}", r.status);
 }
 
+/// Sentinel: `bound_layout_changes` — infinite→finite ub causes warm-start drop
+/// on the down-branch.
+///
+/// Parent bounds `(0.0, ∞)`: root returns x=1.5 (fractional) with a basis.
+/// Down-branch `(0.0, 1.0)`: ub ∞→finite → `bound_layout_changes=true` → child
+/// receives `warm_start=None`.  Up-branch `(2.0, ∞)` has lower_bound > incumbent
+/// and is pruned without a solve.
+///
+/// Sentinel: removing the `if bound_layout_changes(…) { None }` guard and always
+/// propagating `child_ws` gives the down-branch `opts.warm_start=Some(basis)` →
+/// `got_ws` is all-true → no false entry → **this test FAILS**.
+#[test]
+fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
+    use std::cell::{Cell, RefCell};
+    use crate::options::WarmStartBasis;
+    use crate::problem::SolverResult;
+
+    struct InfBoundMock {
+        call: Cell<usize>,
+        child_got_ws: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl InfBoundMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                child_got_ws: RefCell::new(vec![]),
+                root_bounds: [(0.0, f64::INFINITY)],
+                int_vars: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for InfBoundMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n == 0 {
+                // Root: fractional x=1.5; return a basis for propagation.
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.5,
+                    solution: vec![1.5],
+                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![1.5] }),
+                    ..SolverResult::default()
+                }
+            } else {
+                // Child: record warm_start presence, return integer-feasible solution.
+                self.child_got_ws.borrow_mut().push(opts.warm_start.is_some());
+                let x = bounds[0].0.ceil();
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..SolverResult::default()
+                }
+            }
+        }
+    }
+
+    let mock = InfBoundMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+
+    let got_ws = mock.child_got_ws.borrow();
+    // Down-branch (0.0, 1.0): ub ∞→finite → bound_layout_changes=true → warm_start=None.
+    // At least one solved child must have warm_start=None.
+    // No-op (always propagate child_ws): all children get Some → all true → FAILS.
+    assert!(
+        got_ws.iter().any(|&ws| !ws),
+        "down-branch (ub ∞→finite) must receive warm_start=None; \
+         no-op (skip layout check) gives all-true: {got_ws:?}"
+    );
+}
+
 /// B&B driver propagates parent warm-start basis to child nodes.
 ///
 /// Sentinel: replacing `node.child_warm(down, lb, ws)` with `node.child(down, lb)`
