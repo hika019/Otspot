@@ -215,29 +215,33 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     if n == 0 { return None; }
 
     let mut q_diag = vec![0.0_f64; n];
-    let mut q_offdiag_max = 0.0_f64;
-    let mut q_abs_max = 0.0_f64;
+    for col in 0..n {
+        let cs = problem.q.col_ptr[col];
+        let ce = problem.q.col_ptr[col + 1];
+        for k in cs..ce {
+            if problem.q.row_ind[k] == col {
+                q_diag[col] = problem.q.values[k];
+            }
+        }
+    }
+
+    // Gate 1: each off-diagonal entry is compared against the local diagonal scale
+    // min(|Q_ii|, |Q_jj|) so that a dominant unrelated diagonal (e.g. Q_kk >> Q_ii)
+    // cannot accept an off-diagonal that would be amplified by column scaling
+    // (s_j = 1/√Q_jj amplifies Q_ij by 1/√(Q_ii·Q_jj)).
     for col in 0..n {
         let cs = problem.q.col_ptr[col];
         let ce = problem.q.col_ptr[col + 1];
         for k in cs..ce {
             let row = problem.q.row_ind[k];
-            let v = problem.q.values[k];
-            let a = v.abs();
-            if a > q_abs_max { q_abs_max = a; }
-            if row == col {
-                q_diag[col] = v;
-            } else {
-                q_offdiag_max = q_offdiag_max.max(a);
+            if row != col {
+                let local_scale = q_diag[row].abs().min(q_diag[col].abs());
+                let offdiag_eps = Q_OFFDIAG_REL * local_scale + UNDERFLOW_GUARD;
+                if problem.q.values[k].abs() > offdiag_eps {
+                    return None;
+                }
             }
         }
-    }
-
-    // Gate 1: off-diagonal nearness check uses scale-relative threshold so that
-    // entries negligible relative to Q's scale do not block diagonal detection.
-    let offdiag_eps = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
-    if q_offdiag_max > offdiag_eps {
-        return None;
     }
 
     // Gates 2 & 3: use Q_OFFDIAG_ABS as the absolute floor for diagonal-positive
@@ -838,6 +842,34 @@ mod tests {
             result.status,
             crate::problem::SolveStatus::SuboptimalSolution,
             "mask must NOT hide a non-empty column's genuine violation (AFIRO-safety)",
+        );
+    }
+
+    /// Gate 1 sentinel: `try_q_diagonal_scaling` uses local diagonal scale
+    /// `min(|Q_ii|, |Q_jj|)` for each off-diagonal entry, not `Q_OFFDIAG_ABS`.
+    ///
+    /// Fixture: Q = diag([1e9, 1e3]) with off-diagonal 5e-10.
+    /// - local_scale = min(1e9, 1e3) = 1e3
+    /// - offdiag_eps = Q_OFFDIAG_REL × 1e3 = 1e-9
+    /// - 5e-10 < 1e-9 → Gate 1 passes; range = 1e6 → Gate 3 passes → Some
+    ///
+    /// **Sentinel**: reverting Gate 1 to `offdiag_eps = Q_OFFDIAG_ABS = 1e-10`
+    /// makes 5e-10 > 1e-10 → Gate 1 fails → None → this test FAILS.
+    #[test]
+    fn try_q_diagonal_scaling_gate1_local_scale_sentinel() {
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 1],
+            &[1e9_f64, 5e-10, 1e3],
+            2, 2,
+        ).unwrap();
+        let prob = QpProblem::new_all_le(
+            q, vec![0.0, 0.0], CscMatrix::new(0, 2), vec![],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+        ).unwrap();
+        assert!(
+            try_q_diagonal_scaling(&prob).is_some(),
+            "Gate 1 local scale: 5e-10 < Q_OFFDIAG_REL×1e3=1e-9 → scaling must trigger"
         );
     }
 
