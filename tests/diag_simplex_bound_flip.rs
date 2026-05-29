@@ -5,9 +5,7 @@
 //!    at-upper handling, tie breaking, degenerate cases.
 //! 2. **Pivot reduction via a mini bounded dual simplex** — Harris vs BFRT
 //!    on synthetic bound-rich LPs; asserts ≥ 30 % pivot reduction.
-//! 3. **No-op proof** — `BOUND_FLIP_DISABLE=1` env hook drops BFRT back to
-//!    Harris choice; sentinel ratio collapses to ~1.0.
-//! 4. **Probe wiring** — flip-invocation counter increments only when BFRT
+//! 3. **Probe wiring** — flip-invocation counter increments only when BFRT
 //!    genuinely flips at least one variable; reverting wiring (passing
 //!    infinite uppers) makes the counter stay at 0.
 //!
@@ -29,47 +27,6 @@ const PIVOT_TOL: f64 = 1e-8;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Honor `BOUND_FLIP_DISABLE=1` env hook. When set, the wrapper degenerates
-/// BFRT to Harris (smallest breakpoint, no flips). Mirrors the production
-/// no-op contract documented on `SolverOptions::enable_bound_flipping`.
-fn bfrt_or_harris(
-    trow: &[f64],
-    reduced_costs: &[f64],
-    is_basic: &[bool],
-    bounds: &[ColBound],
-    n_price: usize,
-    leaving_residual: f64,
-) -> Option<BfrtResult> {
-    if std::env::var("BOUND_FLIP_DISABLE").ok().as_deref() == Some("1") {
-        // Harris equivalent: treat all uppers as infinite → no flips ever.
-        let harris_bounds: Vec<ColBound> = bounds
-            .iter()
-            .map(|b| ColBound {
-                upper: f64::INFINITY,
-                at_upper: b.at_upper,
-            })
-            .collect();
-        return bfrt_select_entering(
-            trow,
-            reduced_costs,
-            is_basic,
-            &harris_bounds,
-            n_price,
-            PIVOT_TOL,
-            leaving_residual,
-        );
-    }
-    bfrt_select_entering(
-        trow,
-        reduced_costs,
-        is_basic,
-        bounds,
-        n_price,
-        PIVOT_TOL,
-        leaving_residual,
-    )
-}
 
 /// Mini bounded dual simplex: counts pivots when solving Bx_B = b with
 /// `n_price` non-basic candidates, each with finite upper bound. Returns the
@@ -205,53 +162,6 @@ fn sentinel_bfrt_reduces_pivots_on_bound_rich_lp() {
         total_h,
         total_b,
         reduction * 100.0
-    );
-}
-
-#[test]
-fn sentinel_bfrt_no_op_when_disabled() {
-    // Saturate `BOUND_FLIP_DISABLE=1` for the duration of this test thread.
-    // The wrapper must degenerate to Harris choice → pivot counts collide.
-    // SAFETY: env::set_var is unsafe in Rust 1.86+ because it is process-wide
-    // and not thread-safe across libc; we accept the racy semantics here
-    // because the sentinel runs serially per nextest's default `-j1` per
-    // test, and we unset before returning.
-    unsafe { std::env::set_var("BOUND_FLIP_DISABLE", "1"); }
-    let seed = 0xC0FFEE_u64;
-    let harris = mini_bounded_simplex(50, 40, 30.0, seed, false);
-    // bfrt_or_harris honors the env var: this should produce Harris pivots.
-    let bfrt_disabled_pivots = {
-        let mut state = seed | 1;
-        let mut lcg = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((state >> 32) as u32 as f64) / (u32::MAX as f64)
-        };
-        let trow: Vec<f64> = (0..40).map(|_| 0.5 + 2.0 * lcg()).collect();
-        let r: Vec<f64> = (0..40).map(|_| 0.01 + 0.49 * lcg()).collect();
-        let bounds: Vec<ColBound> = (0..40)
-            .map(|_| ColBound { upper: 0.1 + 1.4 * lcg(), at_upper: false })
-            .collect();
-        let is_basic = vec![false; 40];
-        let mut residual = 30.0;
-        let mut pivots = 0usize;
-        while residual > 1e-9 && pivots < 10_000 {
-            let pick = bfrt_or_harris(&trow, &r, &is_basic, &bounds, 40, residual);
-            let Some(res) = pick else { break };
-            let abs_pivot = trow[res.entering_col].abs();
-            let mut consumed = res.theta * abs_pivot;
-            for &f in &res.flips {
-                consumed += bounds[f].upper * trow[f].abs();
-            }
-            if consumed <= 1e-12 { break; }
-            residual = (residual - consumed).max(0.0);
-            pivots += 1;
-        }
-        pivots
-    };
-    unsafe { std::env::remove_var("BOUND_FLIP_DISABLE"); }
-    assert_eq!(
-        bfrt_disabled_pivots, harris.pivots,
-        "BOUND_FLIP_DISABLE=1 must collapse BFRT to Harris pivot count"
     );
 }
 

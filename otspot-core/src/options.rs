@@ -479,9 +479,6 @@ pub struct SolverOptions {
     pub dual_tol: f64,
     /// Dual simplex leaving strategy.  Default: `MostInfeasible`.
     pub dual_pricing: DualPricing,
-    /// Enable Bound-Flipping Ratio Test (Maros 2003 §7.6) in `dual_advanced`.
-    /// Runtime override: `BOUND_FLIP_DISABLE=1`.
-    pub enable_bound_flipping: bool,
     /// LP warm-start basis.  `None` = cold start.
     pub warm_start: Option<WarmStartBasis>,
     /// QP IP-PMM interior-point warm start for B&B node transfer.
@@ -595,7 +592,6 @@ impl Default for SolverOptions {
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
             dual_pricing: DualPricing::default(),
-            enable_bound_flipping: false,
             warm_start: None,
             warm_start_qp: None,
             warm_start_lp: None,
