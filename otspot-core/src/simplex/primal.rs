@@ -433,8 +433,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     }
                 }
                 // Charnes perturbation for Phase II anti-cycling.
-                // Rows with x_b ≈ 0 cause ratio-test step=0. The final reconcile restores
-                // exact B^{-1}b after Phase II completes.
+                // Perturbs only near-zero rows (|x_b[i]| < PIVOT_TOL); the final
+                // reconcile restores exact B^{-1}b after Phase II completes.
+                //
+                // Retreat (#165): all-rows perturbation (ε added to every row when
+                // >30% of rows are near-zero) caused grow22 PFEAS_FAIL (bf=2e-3).
+                // Adding ε to non-degenerate rows shifts the simplex to an incorrect
+                // basis whose reconciled solution violates bounds. Per-row only is safe.
                 for i in 0..m {
                     if x_b[i].abs() < PIVOT_TOL {
                         x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
@@ -636,6 +641,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             Err(_) => return SolverResult::numerical_error(),
                         }
                     }
+                    // Charnes perturbation — per-row only (see note at Phase II entry).
                     for i in 0..m {
                         if x_b[i].abs() < PIVOT_TOL {
                             x_b[i] = PIVOT_TOL * (i as f64 + 1.0);
