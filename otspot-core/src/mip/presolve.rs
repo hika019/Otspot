@@ -5,7 +5,8 @@
 //! which is strictly stronger: a real-valued implied ub of 3.7 gives only `x ≤ 3`
 //! for an integer variable rather than `x ≤ 3.7`.
 
-use crate::problem::{ConstraintType, LpProblem};
+use crate::presolve::activity::propagate_row_bounds;
+use crate::problem::LpProblem;
 use crate::tolerances::ZERO_TOL;
 
 /// Tighten variable bounds by one pass of coefficient propagation.
@@ -24,7 +25,7 @@ pub(crate) fn tighten_integer_bounds(
     let n = lp.num_vars;
     let m = lp.num_constraints;
 
-    // Build CSR row index from the CSC matrix (one pass).
+    // Build CSR row index from the CSC matrix (one pass, filtering near-zero entries).
     let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
     for j in 0..n {
         for k in lp.a.col_ptr[j]..lp.a.col_ptr[j + 1] {
@@ -39,195 +40,14 @@ pub(crate) fn tighten_integer_bounds(
     let mut bounds = lp.bounds.clone();
 
     for i in 0..m {
-        let ct = lp.constraint_types[i];
-        let b_i = lp.b[i];
-        let entries = &rows[i];
-        if entries.is_empty() {
-            continue;
-        }
-
-        // Row activity bounds: min and max of sum a_j * x_j over current variable bounds.
-        let mut row_lb = 0.0f64;
-        let mut row_ub = 0.0f64;
-        let mut inf_lb_count = 0usize;
-        let mut inf_ub_count = 0usize;
-
-        let mut e_lb_contrib: Vec<f64> = Vec::with_capacity(entries.len());
-        let mut e_ub_contrib: Vec<f64> = Vec::with_capacity(entries.len());
-        let mut e_lb_inf: Vec<bool> = Vec::with_capacity(entries.len());
-        let mut e_ub_inf: Vec<bool> = Vec::with_capacity(entries.len());
-
-        for &(j, a_ij) in entries.iter() {
-            let (lb, ub) = bounds[j];
-            if a_ij > 0.0 {
-                if lb == f64::NEG_INFINITY {
-                    inf_lb_count += 1;
-                    e_lb_inf.push(true);
-                    e_lb_contrib.push(0.0);
-                } else {
-                    let c = a_ij * lb;
-                    e_lb_inf.push(false);
-                    e_lb_contrib.push(c);
-                    row_lb += c;
-                }
-                if ub == f64::INFINITY {
-                    inf_ub_count += 1;
-                    e_ub_inf.push(true);
-                    e_ub_contrib.push(0.0);
-                } else {
-                    let c = a_ij * ub;
-                    e_ub_inf.push(false);
-                    e_ub_contrib.push(c);
-                    row_ub += c;
-                }
-            } else {
-                // a_ij < 0: contribution to row_lb uses ub, and row_ub uses lb.
-                if ub == f64::INFINITY {
-                    inf_lb_count += 1;
-                    e_lb_inf.push(true);
-                    e_lb_contrib.push(0.0);
-                } else {
-                    let c = a_ij * ub;
-                    e_lb_inf.push(false);
-                    e_lb_contrib.push(c);
-                    row_lb += c;
-                }
-                if lb == f64::NEG_INFINITY {
-                    inf_ub_count += 1;
-                    e_ub_inf.push(true);
-                    e_ub_contrib.push(0.0);
-                } else {
-                    let c = a_ij * lb;
-                    e_ub_inf.push(false);
-                    e_ub_contrib.push(c);
-                    row_ub += c;
-                }
-            }
-        }
-
-        for (k, &(j, a_ij)) in entries.iter().enumerate() {
-            let (old_lb, old_ub) = bounds[j];
-            let is_int = integer_mask.get(j).copied().unwrap_or(false);
-
-            let rest_inf_lb =
-                if e_lb_inf[k] { inf_lb_count - 1 } else { inf_lb_count };
-            let rest_inf_ub =
-                if e_ub_inf[k] { inf_ub_count - 1 } else { inf_ub_count };
-            let rest_lb = row_lb - e_lb_contrib[k];
-            let rest_ub = row_ub - e_ub_contrib[k];
-            let rest_lb_fin = rest_inf_lb == 0;
-            let rest_ub_fin = rest_inf_ub == 0;
-
-            let mut new_lb = old_lb;
-            let mut new_ub = old_ub;
-
-            match ct {
-                ConstraintType::Le => {
-                    if a_ij > 0.0 && rest_lb_fin {
-                        let mut implied_ub = (b_i - rest_lb) / a_ij;
-                        if is_int {
-                            implied_ub = implied_ub.floor();
-                        }
-                        if implied_ub < old_lb - ZERO_TOL {
-                            return None;
-                        }
-                        if implied_ub < new_ub - ZERO_TOL {
-                            new_ub = implied_ub;
-                        }
-                    } else if a_ij < 0.0 && rest_lb_fin {
-                        let mut implied_lb = (b_i - rest_lb) / a_ij;
-                        if is_int {
-                            implied_lb = implied_lb.ceil();
-                        }
-                        if implied_lb > old_ub + ZERO_TOL {
-                            return None;
-                        }
-                        if implied_lb > new_lb + ZERO_TOL {
-                            new_lb = implied_lb;
-                        }
-                    }
-                }
-                ConstraintType::Ge => {
-                    if a_ij > 0.0 && rest_ub_fin {
-                        let mut implied_lb = (b_i - rest_ub) / a_ij;
-                        if is_int {
-                            implied_lb = implied_lb.ceil();
-                        }
-                        if implied_lb > old_ub + ZERO_TOL {
-                            return None;
-                        }
-                        if implied_lb > new_lb + ZERO_TOL {
-                            new_lb = implied_lb;
-                        }
-                    } else if a_ij < 0.0 && rest_ub_fin {
-                        let mut implied_ub = (b_i - rest_ub) / a_ij;
-                        if is_int {
-                            implied_ub = implied_ub.floor();
-                        }
-                        if implied_ub < old_lb - ZERO_TOL {
-                            return None;
-                        }
-                        if implied_ub < new_ub - ZERO_TOL {
-                            new_ub = implied_ub;
-                        }
-                    }
-                }
-                ConstraintType::Eq => {
-                    if a_ij > 0.0 {
-                        if rest_lb_fin {
-                            let mut implied_ub = (b_i - rest_lb) / a_ij;
-                            if is_int {
-                                implied_ub = implied_ub.floor();
-                            }
-                            if implied_ub < old_lb - ZERO_TOL {
-                                return None;
-                            }
-                            if implied_ub < new_ub - ZERO_TOL {
-                                new_ub = implied_ub;
-                            }
-                        }
-                        if rest_ub_fin {
-                            let mut implied_lb = (b_i - rest_ub) / a_ij;
-                            if is_int {
-                                implied_lb = implied_lb.ceil();
-                            }
-                            if implied_lb > old_ub + ZERO_TOL {
-                                return None;
-                            }
-                            if implied_lb > new_lb + ZERO_TOL {
-                                new_lb = implied_lb;
-                            }
-                        }
-                    } else {
-                        // a_ij < 0
-                        if rest_lb_fin {
-                            let mut implied_lb = (b_i - rest_lb) / a_ij;
-                            if is_int {
-                                implied_lb = implied_lb.ceil();
-                            }
-                            if implied_lb > old_ub + ZERO_TOL {
-                                return None;
-                            }
-                            if implied_lb > new_lb + ZERO_TOL {
-                                new_lb = implied_lb;
-                            }
-                        }
-                        if rest_ub_fin {
-                            let mut implied_ub = (b_i - rest_ub) / a_ij;
-                            if is_int {
-                                implied_ub = implied_ub.floor();
-                            }
-                            if implied_ub < old_lb - ZERO_TOL {
-                                return None;
-                            }
-                            if implied_ub < new_ub - ZERO_TOL {
-                                new_ub = implied_ub;
-                            }
-                        }
-                    }
-                }
-            }
-
+        let updates = propagate_row_bounds(
+            &rows[i],
+            &bounds,
+            lp.constraint_types[i],
+            lp.b[i],
+            Some(integer_mask),
+        )?;
+        for (j, new_lb, new_ub) in updates {
             bounds[j] = (new_lb, new_ub);
         }
     }
@@ -274,24 +94,28 @@ mod tests {
         );
     }
 
-    /// Infeasibility detected when rounded bounds produce an empty domain.
+    /// Infeasibility detected when integer rounding produces an empty domain.
     ///
-    /// x ≤ 3.7 → ub=3, then x ≥ 4 → lb=4 > ub=3 → None.
-    /// Sentinel: without floor/ceil the bounds stay [3.2, 3.7] and None is not returned.
+    /// x ≤ 3.7 ∧ x ≥ 3.5 is LP-feasible (domain [3.5, 3.7]).
+    /// Integer rounding: floor(3.7)=3 (ub), ceil(3.5)=4 (lb) → lb=4 > ub=3 → None.
+    ///
+    /// Sentinel: without floor/ceil the bounds stay [3.5, 3.7] and None is not
+    /// returned. The LP-feasibility of rhs=[3.7, 3.5] ensures integer rounding is
+    /// required to detect infeasibility (rhs=[3.7, 4.0] would fail without rounding).
     #[test]
     fn infeasibility_detected_by_integer_rounding() {
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0],
             a,
-            vec![3.7, 4.0],
+            vec![3.7, 3.5],
             vec![ConstraintType::Le, ConstraintType::Ge],
             vec![(0.0, 10.0)],
             None,
         )
         .unwrap();
         let result = tighten_integer_bounds(&lp, &[true]);
-        assert!(result.is_none(), "x ≤ 3.7 ∧ x ≥ 4 integer → empty domain → None");
+        assert!(result.is_none(), "x ≤ 3.7 ∧ x ≥ 3.5 integer → empty domain → None");
     }
 
     /// Continuous variables are not rounded.
@@ -365,14 +189,15 @@ mod tests {
         );
     }
 
-    /// Infinite variable bound: when the "rest" has an infinite contribution the
-    /// propagation is skipped for that variable (no bound derived).
+    /// Finite lower bound propagates implied ub even when one variable has an
+    /// infinite upper bound.
+    ///
+    /// x + y ≤ 5, y ∈ [0, ∞), x ∈ [0, 10] integer.
+    /// For x (Le, a=1): rest_lb uses y's lb=0 (finite) → implied_ub=5 → floor(5)=5.
+    /// For y (Le, a=1): rest_lb uses x's lb=0 (finite) → implied_ub=5 (continuous, no floor).
+    /// y's infinite ub does not block the Le-direction propagation (Le uses rest_lb).
     #[test]
-    fn infinite_rest_skips_propagation() {
-        // x + y ≤ 5, y ∈ [0, ∞), x ∈ [0, 10] integer.
-        // For x: rest_lb uses y's lb=0 (fin), implied_ub = 5-0 = 5 → x ≤ 5 ✓
-        // For y: rest_lb uses x's lb=0 (fin), implied_ub = 5-0 = 5 → but y is not integer
-        //         so ub stays 5.0 (continuous). y's ub was ∞; with y continuous → 5.0
+    fn finite_lower_bound_propagates_with_infinite_upper_bound() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0, 1.0],
@@ -388,5 +213,30 @@ mod tests {
         assert!((bounds[0].1 - 5.0).abs() < 1e-9, "x ub: {}", bounds[0].1);
         // y: rest_lb=x*1*0=0 (finite), implied_ub=5 (continuous, no floor)
         assert!((bounds[1].1 - 5.0).abs() < 1e-9, "y ub: {}", bounds[1].1);
+    }
+
+    /// Infinite upper bound of a variable blocks Ge-direction propagation.
+    ///
+    /// x + y ≥ 3, y ∈ [0, ∞), x ∈ [0, 10] integer.
+    /// For x (Ge, a=1): rest_ub uses y's contribution: a_y=1, ub_y=∞ → rest_ub infinite
+    ///                  → rest_ub_fin=false → propagation skipped → x lb stays 0.
+    ///
+    /// Sentinel: removing the `rest_ub_fin` guard propagates with an invalid rest_ub
+    /// and would tighten x lb incorrectly.
+    #[test]
+    fn infinite_upper_skips_ge_propagation() {
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
+            vec![ConstraintType::Ge],
+            vec![(0.0, 10.0), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        let bounds = tighten_integer_bounds(&lp, &[true, false]).expect("feasible");
+        // x: rest_ub infinite (y_ub=∞) → skip → x lb stays 0
+        assert_eq!(bounds[0].0, 0.0, "x lb must stay 0 (Ge propagation skipped, y_ub=∞)");
     }
 }

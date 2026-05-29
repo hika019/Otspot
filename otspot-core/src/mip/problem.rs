@@ -7,7 +7,6 @@
 //! branch-and-bound node solves the relaxation by swapping `bounds` — the same
 //! mechanism the spatial QP B&B already uses for box subproblems.
 
-use super::presolve::tighten_integer_bounds;
 use super::Relaxation;
 use crate::linalg::ldl::is_q_psd_by_cholesky;
 use crate::options::SolverOptions;
@@ -91,13 +90,6 @@ impl Relaxation for MilpProblem {
         let mut sub = self.lp.clone();
         sub.bounds = bounds.to_vec();
         crate::lp::solve_lp_with(&sub, opts)
-    }
-    fn tighten_root_bounds(&self) -> Option<Vec<(f64, f64)>> {
-        let mut mask = vec![false; self.lp.num_vars];
-        for &j in &self.integer_vars {
-            mask[j] = true;
-        }
-        tighten_integer_bounds(&self.lp, &mask)
     }
 }
 

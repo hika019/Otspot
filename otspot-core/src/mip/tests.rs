@@ -385,7 +385,7 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
 ///
 /// Sentinel: removing timing instrumentation leaves desc_ms == 0 → FAILS.
 #[test]
-fn stats_timing_populated_for_milp_with_branching() {
+fn stats_timing_populated_for_milp_bt_then_branch() {
     let lp = build_lp(
         vec![-1.0, -1.0],
         &[0, 0], &[0, 1], &[1.0, 1.0],
@@ -425,7 +425,7 @@ fn stats_timing_populated_for_milp_with_branching() {
 ///
 /// Sentinel: removing the infeasible timing arm leaves infeasible_ms == 0 → FAILS.
 #[test]
-fn stats_timing_infeasible_ms_populated() {
+fn stats_timing_infeasible_ms_from_lp_after_bt() {
     let a = crate::sparse::CscMatrix::from_triplets(
         &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
     )
@@ -669,7 +669,7 @@ fn optimal_result_carries_bound_gap_cert() {
 ///
 /// Sentinel: attaching cert unconditionally gives Some(cert) here → FAILS.
 #[test]
-fn non_optimal_result_has_no_bound_gap_cert() {
+fn knapsack_truncated_has_no_bound_gap_cert() {
     let lp = build_lp(
         vec![-8.0, -11.0],
         &[0, 0], &[0, 1], &[5.0, 7.0],

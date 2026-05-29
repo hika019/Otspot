@@ -55,13 +55,6 @@ pub(crate) trait Relaxation {
     /// `opts` already has multistart / global_optimization stripped and the
     /// deadline fixed by the driver.
     fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult;
-    /// Tighten the root bounds via coefficient propagation (MIP presolve).
-    ///
-    /// Returns `None` when infeasibility is detected (empty domain after
-    /// integer rounding). Default: no tightening.
-    fn tighten_root_bounds(&self) -> Option<Vec<(f64, f64)>> {
-        Some(self.root_bounds().to_vec())
-    }
 }
 
 /// Search statistics returned by [`solve_milp_with_stats`] / [`solve_miqp_with_stats`].
@@ -130,6 +123,23 @@ pub fn solve_milp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    // MILP-specific root presolve: coefficient propagation tightens integer bounds.
+    // Presolve is skipped when there are no integer variables (pure LP fallback is
+    // handled inside the generic driver). Non-empty integer_vars with infeasible
+    // integer rounding return early here before entering the B&B.
+    if !problem.integer_vars.is_empty() {
+        let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
+        match presolve::tighten_integer_bounds(&problem.lp, &mask) {
+            None => return (SolverResult::infeasible(), MipStats::default()),
+            Some(tightened) => {
+                let mut lp_bt = problem.lp.clone();
+                lp_bt.bounds = tightened;
+                let problem_bt =
+                    MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
+                return solve_mip_with_stats(&problem_bt, options, cfg);
+            }
+        }
+    }
     solve_mip_with_stats(problem, options, cfg)
 }
 
@@ -194,17 +204,10 @@ fn solve_mip_with_stats<R: Relaxation>(
 
     let mut state = MipState::new();
     let mut q = NodeQueue::new();
-    // Root-node bound tightening: coefficient propagation narrows integer variable
-    // domains before the first relaxation solve. Infeasibility detected here is
-    // exact (empty integer domain), so return immediately without entering the B&B.
-    let root_bounds = match problem.tighten_root_bounds() {
-        Some(b) => b,
-        None => return (SolverResult::infeasible(), stats),
-    };
     // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
     // Optimal relaxation. The loop solves the root uniformly with every other node, so
     // Infeasible / Unbounded / stalling roots are all handled in one place.
-    q.push(MipNode::root(root_bounds, f64::NEG_INFINITY));
+    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
 
     let mut open_lb = f64::INFINITY; // smallest valid bound over unexplored regions
     let mut had_open = false; // any region left unexplored?
