@@ -166,6 +166,11 @@ pub fn prove_optimal<'a>(
 /// vertex are therefore naturally at the 1e-5..1e-4 level, not 1e-6.
 /// Using 1e-4 (= `feas_rel_tol()`) ensures well-solved LPs pass without false
 /// demotions while still catching catastrophic failures (gap ≫ 1e-4).
+///
+/// 撤廃 (1e-8 に変更) で退化するテスト:
+/// - `guard_lp_optimal_no_false_demote_for_residuals_below_lp_cert_tol`:
+///   5e-5 dual 摂動で (1e-6, 1e-4) 範囲の残差を合成した LP が誤 demote される。
+/// - `lp_cert_tol_equals_feas_rel_tol`: drift-pin が LP_CERT_TOL ≠ feas_rel_tol() を検出。
 pub(crate) const LP_CERT_TOL: f64 = 1e-4; // = feas_rel_tol() = PIVOT_TOL.sqrt()
 
 /// Verify LP optimality via full KKT+dual_sign.

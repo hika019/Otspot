@@ -337,7 +337,10 @@ pub const DEFAULT_IPM_MAX_CORRECTORS: usize = 3;
 /// [`SolverOptions::validate`]) before solving to catch invalid values early.
 #[derive(Debug, Clone)]
 pub struct IpmOptions {
-    /// Maximum iterations.  Default: `usize::MAX` (timeout is the primary guard).
+    /// Total IPM iterations across all attempts. Default: `usize::MAX` (timeout is the primary guard).
+    ///
+    /// Each attempt is internally capped at `MAX_ITER_PER_ATTEMPT` (currently 500);
+    /// this field is the cumulative budget across all retry attempts.
     pub max_iter: usize,
     /// Convergence tolerance.  Default: [`DEFAULT_IPM_EPS`].
     pub eps: f64,
@@ -476,9 +479,6 @@ pub struct SolverOptions {
     pub dual_tol: f64,
     /// Dual simplex leaving strategy.  Default: `MostInfeasible`.
     pub dual_pricing: DualPricing,
-    /// Enable Bound-Flipping Ratio Test (Maros 2003 §7.6) in `dual_advanced`.
-    /// Runtime override: `BOUND_FLIP_DISABLE=1`.
-    pub enable_bound_flipping: bool,
     /// LP warm-start basis.  `None` = cold start.
     pub warm_start: Option<WarmStartBasis>,
     /// QP IP-PMM interior-point warm start for B&B node transfer.
@@ -550,6 +550,18 @@ pub struct SolverOptions {
     /// `|obj − ref_obj| / (1 + |ref_obj|) < OBJ_MATCH_REL_TOL`.
     /// Used by bench harnesses.  `None` = no early-exit.
     pub known_optimal_obj: Option<f64>,
+
+    /// Maximum `Q` matrix dimension for the convex-detection Cholesky in MIQP.
+    ///
+    /// `solve_miqp` guards against nonconvex Q via `is_q_psd_by_cholesky`. For
+    /// very large dense Q the factorisation can be expensive. Setting this to
+    /// `Some(n)` skips the check for `Q.nrows > n`, treating the problem as
+    /// convex. **Soundness warning**: a nonconvex Q accepted this way makes the
+    /// QP relaxation an invalid lower bound. Use `solve_qp_global_with` instead
+    /// for large nonconvex QP.
+    ///
+    /// `None` (default): always check, regardless of size.
+    pub psd_check_max_n: Option<usize>,
 }
 
 /// Divisor for the `max_etas` heuristic: floor(m / MAX_ETAS_DIVISOR).
@@ -580,7 +592,6 @@ impl Default for SolverOptions {
             simplex_method: SimplexMethod::Auto,
             dual_tol: PIVOT_TOL,
             dual_pricing: DualPricing::default(),
-            enable_bound_flipping: false,
             warm_start: None,
             warm_start_qp: None,
             warm_start_lp: None,
@@ -600,6 +611,7 @@ impl Default for SolverOptions {
             global_optimization: None,
             threads: 1,
             known_optimal_obj: None,
+            psd_check_max_n: None,
         }
     }
 }
