@@ -14,7 +14,8 @@
 use otspot::problem::{ConstraintType, LpProblem};
 use otspot::sparse::CscMatrix;
 use otspot::{solve_with, SolveStatus, SolverOptions};
-use otspot_core::presolve::{run_presolve_with_flags, PresolveFlags, PresolveStatus};
+use otspot_core::presolve::PresolveStatus;
+use otspot_core::presolve::transforms::{run_presolve_with_flags, PresolveFlags};
 
 #[allow(clippy::too_many_arguments)]
 fn build_lp(

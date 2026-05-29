@@ -3,7 +3,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use crate::presolve::RuizScaler;
+use crate::presolve::LpEquilibration;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
@@ -131,7 +131,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
     let m = sf.m;
     let mut total_iters: usize = 0;
 
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
 
     if sf.num_artificial == 0 {
         // Direct Phase II.

@@ -5,6 +5,7 @@
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
 use crate::qp::kkt_resid;
+use crate::tolerances::any_nonfinite;
 use crate::qp::linalg::build_aat_upper_csc;
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
@@ -244,7 +245,7 @@ pub(crate) fn refine_dual_lsq_irls(
 
         let mut y_new = vec![0.0_f64; m];
         factor.solve(&rhs, &mut y_new);
-        if y_new.iter().any(|v| !v.is_finite()) {
+        if any_nonfinite(&y_new) {
             break;
         }
 

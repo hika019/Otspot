@@ -4,7 +4,7 @@
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{DROP_TOL, ZERO_TOL};
+use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
@@ -174,10 +174,8 @@ pub fn equality_constraint_qr(
     }
 }
 
-/// Drop Q off-diagonal entries with `|Q[i,j]| < EPS_Q` to improve sparsity.
+/// Drop Q off-diagonal entries below `Q_OFFDIAG_ABS` to improve sparsity.
 pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
-    const EPS_Q: f64 = 1e-10;
-
     let mut new_col_ptr = vec![0usize; n + 1];
     let mut new_row_ind: Vec<usize> = Vec::new();
     let mut new_values: Vec<f64> = Vec::new();
@@ -188,7 +186,7 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
         for k in start..end {
             let row = q.row_ind[k];
             let val = q.values[k];
-            if row == j || val.abs() >= EPS_Q {
+            if row == j || val.abs() >= Q_OFFDIAG_ABS {
                 new_row_ind.push(row);
                 new_values.push(val);
             }
@@ -541,6 +539,28 @@ mod tests {
             removed_count >= 2,
             "m > n*ROW_OVERDETERMINED_RATIO: QR runs and removes redundant rows (got {})",
             removed_count
+        );
+    }
+
+    /// Sentinel: `near_zero_q_removal` uses absolute `Q_OFFDIAG_ABS = 1e-10`.
+    /// Off-diagonal entry 5e-11 < 1e-10 is pruned; no-op (Q_OFFDIAG_ABS=0) leaves it.
+    ///
+    /// **Sentinel**: removing the drop threshold (Q_OFFDIAG_ABS→0) keeps the 5e-11 entry
+    /// → values.len() == 4 (not 2) → this test FAIL.
+    #[test]
+    fn near_zero_q_removal_absolute_threshold_sentinel() {
+        // Q = [[1.0, 5e-11], [5e-11, 1.0]]; off-diag 5e-11 < Q_OFFDIAG_ABS=1e-10 → pruned.
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1.0, 5e-11, 5e-11, 1.0],
+            2, 2,
+        ).unwrap();
+        let q_clean = near_zero_q_removal(&q, 2);
+        assert_eq!(
+            q_clean.values.len(), 2,
+            "off-diag 5e-11 should be pruned (Q_OFFDIAG_ABS=1e-10), got {} entries",
+            q_clean.values.len()
         );
     }
 }

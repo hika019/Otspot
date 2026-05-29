@@ -12,7 +12,8 @@
 //! 複数 data pattern: (n_starts, threads, deadline) 4 組 × indef shape 2 種 = 8 case。
 
 use otspot::options::{MultiStartConfig, StartStrategy};
-use otspot::qp::{solve_qp_multistart, QpProblem};
+use otspot::qp::QpProblem;
+use otspot::qp::multistart::solve_qp_multistart;
 use otspot::sparse::CscMatrix;
 use otspot::SolverOptions;
 use std::time::Instant;

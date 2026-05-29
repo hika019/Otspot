@@ -65,10 +65,43 @@ pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
     (obj - ref_obj).abs() / (1.0 + ref_obj.abs()) < tol
 }
 
+/// Integer bound rounding tolerance.
+///
+/// When an implied bound for an integer variable is within this tolerance of an
+/// integer value, it is rounded to that integer rather than away from it.  This
+/// guards against floating-point drift: e.g. `0.3 / 0.1` evaluates to
+/// `2.9999999999999996` in IEEE 754, so `floor` without tolerance would
+/// incorrectly give `2` instead of `3`.
+///
+/// Chosen to be between `ZERO_TOL` (1e-12, structural zero) and `PIVOT_TOL`
+/// (1e-8, solver primal tolerance), so that genuine non-integer implied bounds
+/// are unaffected while float-arithmetic drift is absorbed.
+pub const INT_ROUND_TOL: f64 = 1e-9;
+
 /// アンダーフロー防止ガード閾値。行/列の最大絶対値がこれ以下の場合、
 /// スケール係数の逆数計算によるオーバーフローを防ぐため 1.0 に固定する。
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
 pub const UNDERFLOW_GUARD: f64 = 1e-300;
+
+/// Absolute drop threshold for Q off-diagonal pruning in `near_zero_q_removal`.
+///
+/// Off-diagonal entries `|Q[i,j]| < Q_OFFDIAG_ABS` are removed to improve
+/// sparsity before IPM solve. Uses an absolute (not scale-relative) threshold
+/// because empirical evidence shows that a purely relative threshold can leave
+/// entries that change IPM trajectory and cause spurious Optimal convergence
+/// (e.g. QPLIB_9002, 2026-05-30 audit#123).
+pub const Q_OFFDIAG_ABS: f64 = 1e-10;
+
+/// Relative tolerance for Q off-diagonal near-zero detection in `is_diagonal_q`
+/// and `try_q_diagonal_scaling`.
+///
+/// An off-diagonal entry `|Q[i,j]|` is treated as structurally zero when
+/// `|Q[i,j]| < Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD`,
+/// where `q_abs_max` is the global maximum absolute entry of Q.
+///
+/// Usage: `presolve/qp_transforms/helpers::is_diagonal_q` and
+/// `qp/ipm_solver/attempt::try_q_diagonal_scaling`.
+pub const Q_OFFDIAG_REL: f64 = 1e-12;
 
 /// Size gate shared across expensive post-processing sites.
 ///
@@ -78,4 +111,9 @@ pub const UNDERFLOW_GUARD: f64 = 1e-300;
 /// Usage varies by site: some compare `n + m` against this value; others
 /// check each dimension individually (`num_vars <= T && num_constraints <= T`).
 pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
+
+/// Returns `true` if any element of `v` is non-finite (NaN or ±Inf).
+pub(crate) fn any_nonfinite(v: &[f64]) -> bool {
+    v.iter().any(|x| !x.is_finite())
+}
 

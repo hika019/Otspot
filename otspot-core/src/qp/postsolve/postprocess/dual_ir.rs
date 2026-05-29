@@ -1,6 +1,7 @@
 //! dual-only IR: x 固定で y のみ更新し r_d_free を厳密に 0 にする。
 //! A_free^T δy = -r_d_free の最小ノルム解 δy = -A_free α、G α = r_d_free (G SPD)。
 
+use crate::tolerances::any_nonfinite;
 use crate::qp::postsolve::dual_recovery::{
     collect_dual_recovery_cluster_rows, collect_dual_recovery_free_columns,
     compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds,
@@ -270,7 +271,7 @@ pub(crate) fn try_dual_only_ir(
         };
         let mut delta = vec![0.0_f64; ulen];
         factor.solve(&rhs, &mut delta);
-        if delta.iter().any(|v| !v.is_finite()) {
+        if any_nonfinite(&delta) {
             break;
         }
         let mut dy_dd = vec![TwoFloat::from(0.0); m];

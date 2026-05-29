@@ -1,6 +1,6 @@
 //! Maros-Meszaros / Hock-Schittkowski QP ベンチマーク (形式: min 1/2 xᵀQx+cᵀx s.t. Ax≤b, lb≤x≤ub)。
 
-use otspot::qp::{solve_qp, solve_qp_warm, QpProblem, QpWarmStart};
+use otspot::qp::{solve_qp, solve_qp_with, QpProblem, QpWarmStart};
 use otspot::sparse::CscMatrix;
 use otspot::SolveStatus;
 
@@ -140,7 +140,9 @@ fn test_hs51() {
         y: vec![0.0; 6],
         mu: 1.0,
     };
-    let result = solve_qp_warm(&problem, &ws, &Default::default());
+    let mut opts: otspot::SolverOptions = Default::default();
+    opts.warm_start_qp = Some(ws);
+    let result = solve_qp_with(&problem, &opts);
     assert_eq!(result.status, SolveStatus::Optimal, "HS51: status should be Optimal");
     for i in 0..n {
         assert_close(

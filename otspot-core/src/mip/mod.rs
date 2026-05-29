@@ -24,6 +24,7 @@
 
 pub(crate) mod branch;
 pub(crate) mod node;
+pub(crate) mod presolve;
 mod problem;
 pub(crate) mod queue;
 
@@ -122,6 +123,29 @@ pub fn solve_milp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    // MILP-specific root presolve: coefficient propagation tightens integer bounds.
+    // Presolve is skipped when there are no integer variables (pure LP fallback is
+    // handled inside the generic driver). Non-empty integer_vars with infeasible
+    // integer rounding return early here before entering the B&B.
+    if !problem.integer_vars.is_empty() {
+        let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
+        match presolve::tighten_integer_bounds(&problem.lp, &mask) {
+            None => return (SolverResult::infeasible(), MipStats::default()),
+            Some(tightened) if tightened != problem.lp.bounds => {
+                // Bounds were tightened: build the BT-reduced problem and solve.
+                // Pass the precomputed mask to avoid recomputing it in the driver.
+                let mut lp_bt = problem.lp.clone();
+                lp_bt.bounds = tightened;
+                let problem_bt =
+                    MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
+                return solve_mip_core(&problem_bt, options, cfg, mask);
+            }
+            Some(_) => {
+                // BT produced no tighter bounds: skip the LP clone and proceed.
+                return solve_mip_core(problem, options, cfg, mask);
+            }
+        }
+    }
     solve_mip_with_stats(problem, options, cfg)
 }
 
@@ -147,7 +171,7 @@ pub fn solve_miqp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
-    if !problem.is_convex_with_limit(options.psd_check_max_n) {
+    if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
     }
     solve_mip_with_stats(problem, options, cfg)
@@ -161,11 +185,22 @@ fn solve_mip_with_stats<R: Relaxation>(
     options: &SolverOptions,
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
-    let mut stats = MipStats::default();
     let mask = integer_mask(problem.num_vars(), problem.integer_vars());
+    solve_mip_core(problem, options, cfg, mask)
+}
 
-    // Approximate per-node bounds clone cost: one (f64, f64) per variable.
-    stats.approx_bounds_bytes_per_node = problem.num_vars() * 2 * std::mem::size_of::<f64>();
+/// Core B&B driver that accepts a precomputed `integer_mask` to avoid
+/// recomputing it when the caller (e.g. `solve_milp_with_stats`) already has it.
+fn solve_mip_core<R: Relaxation>(
+    problem: &R,
+    options: &SolverOptions,
+    cfg: &MipConfig,
+    mask: Vec<bool>,
+) -> (SolverResult, MipStats) {
+    let mut stats = MipStats {
+        approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
+        ..MipStats::default()
+    };
 
     // deadline: prefer an explicit deadline, else derive from timeout_secs.
     let deadline = options.deadline.or_else(|| {
@@ -179,10 +214,16 @@ fn solve_mip_with_stats<R: Relaxation>(
     shared.multistart = None;
     shared.global_optimization = None;
 
-    // Degenerate: no integer variables → the relaxation is the answer (LP/QP fallback).
+    // Degenerate: no integer variables → pure LP/QP passthrough.
+    // Return before applying MIP-specific warm-start mutations so the caller's
+    // `warm_start` and `recover_warm_start_basis` settings are preserved.
     if problem.integer_vars().is_empty() {
         return (problem.solve(problem.root_bounds(), &shared), stats);
     }
+
+    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
+    shared.recover_warm_start_basis = true;
+    shared.warm_start = None;
 
     let mut state = MipState::new();
     let mut q = NodeQueue::new();
@@ -222,7 +263,13 @@ fn solve_mip_with_stats<R: Relaxation>(
         }
 
         let t0 = Instant::now();
-        let res = problem.solve(&node.var_bounds, &shared);
+        let res = if let Some(ref ws) = node.warm_start {
+            let mut no = shared.clone();
+            no.warm_start = Some(ws.clone());
+            problem.solve(&node.var_bounds, &no)
+        } else {
+            problem.solve(&node.var_bounds, &shared)
+        };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         stats.nodes_processed += 1;
@@ -306,8 +353,15 @@ fn solve_mip_with_stats<R: Relaxation>(
             )
             .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
             let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-            q.push(node.child(down, node_lb));
-            q.push(node.child(up, node_lb));
+            // Propagate parent basis to children. Skip warm-start when the
+            // branching variable's bound type changes (e.g. ub=∞→finite adds
+            // a UB row in standard form, invalidating basis indices). The
+            // up-branch typically triggers lb-violation and cold-starts anyway.
+            let child_ws = res.warm_start_basis.clone();
+            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) { None } else { child_ws.clone() };
+            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) { None } else { child_ws };
+            q.push(node.child_warm(down, node_lb, down_ws));
+            q.push(node.child_warm(up, node_lb, up_ws));
         } else {
             // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
             // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region
@@ -447,6 +501,16 @@ fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
         }
     }
     sol
+}
+
+/// Returns `true` when tightening var `j`'s bound changes the standard-form
+/// column layout vs the parent. An infinite bound becoming finite (ub: ∞→boxed,
+/// or lb: free→lower-bounded) changes the number of structural columns or adds
+/// a UB constraint row, making the parent basis index-incompatible.
+fn bound_layout_changes(parent_bounds: &[(f64, f64)], child_bounds: &[(f64, f64)], j: usize) -> bool {
+    let (p_lb, p_ub) = parent_bounds[j];
+    let (c_lb, c_ub) = child_bounds[j];
+    (p_ub.is_infinite() && c_ub.is_finite()) || (p_lb.is_infinite() && c_lb.is_finite())
 }
 
 /// A result carrying no usable solution, tagged with `status`.

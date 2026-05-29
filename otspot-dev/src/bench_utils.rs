@@ -259,11 +259,19 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
 }
 
 /// Load objective baseline CSV.
-pub fn load_baseline_objectives(csv_path: &Path) -> HashMap<String, f64> {
+///
+/// If `strict_missing` is `true`, panics when the file cannot be read.
+/// If `false`, returns an empty map on any read error.
+pub fn load_baseline_objectives(csv_path: &Path, strict_missing: bool) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     let content = match std::fs::read_to_string(csv_path) {
         Ok(c) => c,
-        Err(_) => return map,
+        Err(e) => {
+            if strict_missing {
+                panic!("Failed to read baseline {}: {}", csv_path.display(), e);
+            }
+            return map;
+        }
     };
     for line in content.lines() {
         let line = line.trim();

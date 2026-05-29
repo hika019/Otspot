@@ -8,6 +8,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 変更
 
+- **BREAKING**: `SolverOptions.psd_check_max_n` フィールド削除 — production caller 0 件、soundness 穴 (size-skip) の除去 (#130)
+
 ### 修正
 
 ### 内部
@@ -15,6 +17,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - `LP_CRASH_DUAL_ADV_DISABLE` 環境変数削除 (`use_lp_crash_basis` option と dual-path 完全冗長、#101 audit A2、commit 713d9be)
 - otspot-dev 未参照 bin 4 件削除 (`qp_dump` / `lp_screen` / `verify_solutions` / `qp_diag`、#101 audit deadcode、commit dcfde53)
 - step9 混合型並行行スキップに撤退根拠 docstring 化 (#99、commit 2b0e66a)
+- NaN-guard 18 箇所を `tolerances::any_nonfinite` helper に統合 (#130)
+- `dual_sign_violation` の z NaN-guard 追加 (y と同等の defense-in-depth、#130)
 
 ### 依存
 

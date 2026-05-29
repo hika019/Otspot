@@ -8,7 +8,7 @@
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::RuizScaler;
+use crate::presolve::LpEquilibration;
 use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
@@ -59,7 +59,7 @@ pub(crate) fn solve_dual_advanced(
     }
 
     let m = sf.m;
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
 
     if let Some(warm) = &options.warm_start {
         // Warm start: 提供された基底でx_Bを新しいRHSから再計算
@@ -73,20 +73,26 @@ pub(crate) fn solve_dual_advanced(
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
 
-                    let mut leaving = make_leaving_strategy(options.dual_pricing, m);
-                    let mut total_iters: usize = 0;
-                    let outcome = core::dual_simplex_core_advanced(
-                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
-                        leaving.as_mut(),
-                        &mut total_iters,
-                    );
+                    // WarmStartBasis does not store at_upper, so nonbasics are assumed
+                    // at lb=0. For the "up" branch, the branched variable's lb is raised
+                    // above its parent value → x_b becomes negative (lb-violation);
+                    // fall through to cold start.
+                    if !super::has_lb_violation(&x_b, options.primal_tol) {
+                        let mut leaving = make_leaving_strategy(options.dual_pricing, m);
+                        let mut total_iters: usize = 0;
+                        let outcome = core::dual_simplex_core_advanced(
+                            &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                            leaving.as_mut(),
+                            &mut total_iters,
+                        );
 
-                    let mut result = outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
-                        true, // dual_unbounded → Infeasible
-                    );
-                    result.iterations = total_iters;
-                    return result;
+                        let mut result = outcome_to_result(
+                            outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                            true, // dual_unbounded → Infeasible
+                        );
+                        result.iterations = total_iters;
+                        return result;
+                    }
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
@@ -193,7 +199,7 @@ fn try_bounded(
     problem: &LpProblem,
     options: &SolverOptions,
 ) -> Option<SolverResult> {
-    let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&bsf.a, &bsf.b, &bsf.c);
+    let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&bsf.a, &bsf.b, &bsf.c);
     let ubs = scale_upper_bounds(&bsf.upper_bounds, &col_scale);
     // total_iters is always assigned before read (warm branch overwrites before
     // passing &mut to finish_bounded; cold path overwrites before return).
@@ -211,29 +217,34 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                let mut is_basic = vec![false; bsf.n_total];
-                for &j in &warm.basis {
-                    is_basic[j] = true;
+                // WarmStartBasis does not store at_upper, so nonbasics are assumed
+                // at lb=0. If a basic variable's lb is tightened (up-branch), x_b
+                // becomes negative (lb-violation); fall through to cold start.
+                if !super::has_lb_violation(&x_b, options.primal_tol) {
+                    let mut is_basic = vec![false; bsf.n_total];
+                    for &j in &warm.basis {
+                        is_basic[j] = true;
+                    }
+                    let state = BoundedDualState {
+                        basis: warm.basis.clone(),
+                        at_upper: vec![false; bsf.n_total],
+                        x_b,
+                        reduced_costs: vec![0.0; bsf.n_total],
+                        is_basic,
+                        iterations: 0,
+                    };
+                    let (dual_out, dual_state) =
+                        bounded_iterate(state, bsf, &a, &c, options, &ubs);
+                    total_iters = dual_state.iterations;
+                    let result = finish_bounded(
+                        dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
+                        problem, options, &mut total_iters,
+                    );
+                    if result.is_some() {
+                        return result;
+                    }
+                    // UbViolationOutOfScope from warm start → cold start
                 }
-                let state = BoundedDualState {
-                    basis: warm.basis.clone(),
-                    at_upper: vec![false; bsf.n_total],
-                    x_b,
-                    reduced_costs: vec![0.0; bsf.n_total],
-                    is_basic,
-                    iterations: 0,
-                };
-                let (dual_out, dual_state) =
-                    bounded_iterate(state, bsf, &a, &c, options, &ubs);
-                total_iters = dual_state.iterations;
-                let result = finish_bounded(
-                    dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
-                    problem, options, &mut total_iters,
-                );
-                if result.is_some() {
-                    return result;
-                }
-                // UbViolationOutOfScope from warm start → cold start
             }
             // Singular warm basis → cold start
         }
