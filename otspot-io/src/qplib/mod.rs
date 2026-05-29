@@ -47,8 +47,8 @@ impl From<std::io::Error> for QplibError {
 
 /// Parsed result of a QPLIB file.
 ///
-/// Continuous-variable problems return [`Qp`]; problems with binary (`B`) or
-/// integer (`I`) variables return [`Milp`] (zero-Q) or [`Miqp`] (non-zero Q).
+/// Continuous-variable problems return [`QplibProblem::Qp`]; problems with binary (`B`) or
+/// integer (`I`) variables return [`QplibProblem::Milp`] (zero-Q) or [`QplibProblem::Miqp`] (non-zero Q).
 #[derive(Debug)]
 pub enum QplibProblem {
     /// Continuous-variable QP / QCQP / LP.

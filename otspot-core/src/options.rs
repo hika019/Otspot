@@ -42,12 +42,12 @@ impl std::error::Error for OptionsError {}
 
 /// Dual simplex leaving (depart) strategy.
 ///
-/// `MostInfeasible`: select the most negative x_B[i] (Dantzig rule).
+/// `MostInfeasible`: select the most negative x_B\[i\] (Dantzig rule).
 /// Stable but inflates iteration count on large problems.
 ///
 /// `SteepestEdge`: Forrest-Goldfarb 1992 Dual Steepest Edge.
 /// Maintains weight γ_i = ||(B^{-1})_{i,:}||² and maximises
-/// score = x_B[i]² / γ_i.  Typical 3-10× speed-up (HiGHS/CPLEX) at the cost
+/// score = x_B\[i\]² / γ_i.  Typical 3-10× speed-up (HiGHS/CPLEX) at the cost
 /// of one extra FTRAN per iteration.
 ///
 /// Default: `MostInfeasible` (easy A/B comparison; preserves existing behaviour).
@@ -169,7 +169,7 @@ pub const DEFAULT_MULTISTART_SEED: u64 = 0x_00C0_FFEE_DEAD_BEEF;
 /// Branching strategy for spatial B&B.
 ///
 /// `MaxViolation`: branch on the variable whose x* deviates most from the
-/// box midpoint, splitting at x*[j].
+/// box midpoint, splitting at x*\[j\].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchingStrategy {

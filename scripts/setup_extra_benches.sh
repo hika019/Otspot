@@ -12,6 +12,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+NO_SUITESPARSE=0
+case "${1:-}" in
+  --no-suitesparse) NO_SUITESPARSE=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--no-suitesparse]"; exit 1 ;;
+esac
+
 cd "$REPO_ROOT"
 
 EXT="$REPO_ROOT/tmp/external"
@@ -42,9 +49,11 @@ if ! python3 -c "import cvxpy" >/dev/null 2>&1; then
 fi
 
 # --- Python deps チェック (SuiteSparse 用) ---
-if ! python3 -c "import tables, ssgetpy" >/dev/null 2>&1; then
-  echo "[setup_extra_benches] WARN: tables / ssgetpy が無い (SuiteSparse 系をスキップする場合 OK)"
-  echo "  追加: pip install tables ssgetpy"
+if [[ $NO_SUITESPARSE -eq 0 ]]; then
+  if ! python3 -c "import tables, ssgetpy" >/dev/null 2>&1; then
+    echo "[setup_extra_benches] WARN: tables / ssgetpy が無い (SuiteSparse 系をスキップする場合 OK)"
+    echo "  追加: pip install tables ssgetpy"
+  fi
 fi
 
 # --- 生成 ---
@@ -52,7 +61,9 @@ echo "[setup_extra_benches] OSQP synthetic .qps 生成 -> data/osqp_bench/"
 python3 scripts/gen_osqp_bench.py
 
 echo "[setup_extra_benches] OSQP SuiteSparse .qps 生成 -> data/osqp_bench/"
-if python3 -c "import tables, ssgetpy" >/dev/null 2>&1; then
+if [[ $NO_SUITESPARSE -eq 1 ]]; then
+  echo "  (skip: --no-suitesparse)"
+elif python3 -c "import tables, ssgetpy" >/dev/null 2>&1; then
   python3 scripts/gen_osqp_suitesparse.py
 else
   echo "  (skip: tables / ssgetpy 未導入)"

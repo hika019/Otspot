@@ -7,7 +7,7 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
-/// Detect Le-Le pairs that form an equality (A[j,*] = -A[i,*] and b[j] = -b[i]) and
+/// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(n²m).
 pub fn equality_constraint_qr(

@@ -231,8 +231,8 @@ fn diag_ken18_must_respect_internal_deadline() {
 /// Case B to assert false (no-op proof).  No wall-clock measurement.
 #[test]
 fn diag_deadline_small_lp() {
-    let path = Path::new("tests/lp_problems/bore3d.QPS");
-    assert!(path.exists(), "tests/lp_problems/bore3d.QPS missing from repo");
+    let path = Path::new("data/lp_problems/bore3d.QPS");
+    assert!(path.exists(), "data/lp_problems/bore3d.QPS missing (run scripts/download_all_bench_data.sh)");
 
     let qp = parse_qps(path).expect("parse bore3d");
 

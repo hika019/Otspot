@@ -77,7 +77,7 @@ pub fn inverse_perm(perm: &[usize]) -> Vec<usize> {
 /// 対称行列を置換する: P A P^T の上三角 CSC を返す。
 ///
 /// `perm[k] = i` は新ノード k が元ノード i に対応することを意味する。
-/// 元の上三角 A の各エントリ A[i,j] (i≤j) が
+/// 元の上三角 A の各エントリ A\[i,j\] (i≤j) が
 /// P A P^T[inv_perm\[i\], inv_perm\[j\]] にマップされる。
 ///
 /// # 戻り値
