@@ -7,6 +7,7 @@ use std::time::Instant;
 use crate::ScopedDisable;
 
 use crate::options::SolverOptions;
+use crate::tolerances::{Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
     qp_transforms::{QpPresolveStatus, QpPostsolveStep},
@@ -214,30 +215,42 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     if n == 0 { return None; }
 
     let mut q_diag = vec![0.0_f64; n];
-    let mut q_offdiag_max = 0.0_f64;
+    for col in 0..n {
+        let cs = problem.q.col_ptr[col];
+        let ce = problem.q.col_ptr[col + 1];
+        for k in cs..ce {
+            if problem.q.row_ind[k] == col {
+                q_diag[col] = problem.q.values[k];
+            }
+        }
+    }
+
+    // Gate 1: each off-diagonal entry is compared against the local diagonal scale
+    // min(|Q_ii|, |Q_jj|) so that a dominant unrelated diagonal (e.g. Q_kk >> Q_ii)
+    // cannot accept an off-diagonal that would be amplified by column scaling
+    // (s_j = 1/√Q_jj amplifies Q_ij by 1/√(Q_ii·Q_jj)).
     for col in 0..n {
         let cs = problem.q.col_ptr[col];
         let ce = problem.q.col_ptr[col + 1];
         for k in cs..ce {
             let row = problem.q.row_ind[k];
-            let v = problem.q.values[k];
-            if row == col {
-                q_diag[col] = v;
-            } else {
-                q_offdiag_max = q_offdiag_max.max(v.abs());
+            if row != col {
+                let local_scale = q_diag[row].abs().min(q_diag[col].abs());
+                let offdiag_eps = Q_OFFDIAG_REL * local_scale + UNDERFLOW_GUARD;
+                if problem.q.values[k].abs() > offdiag_eps {
+                    return None;
+                }
             }
         }
     }
 
-    const Q_OFFDIAG_TOL: f64 = 1e-10;
-    if q_offdiag_max > Q_OFFDIAG_TOL {
-        return None;
-    }
-
+    // Gates 2 & 3: use Q_OFFDIAG_ABS as the absolute floor for diagonal-positive
+    // check. Scaling columns with Q_jj < Q_OFFDIAG_ABS produces extreme scale
+    // factors (1/√Q_jj > 1e5) that destabilise the IPM.
     let mut q_pos_min = f64::INFINITY;
     let mut q_pos_max = 0.0_f64;
     for &v in &q_diag {
-        if v > Q_OFFDIAG_TOL {
+        if v > Q_OFFDIAG_ABS {
             q_pos_min = q_pos_min.min(v);
             q_pos_max = q_pos_max.max(v);
         }
@@ -254,7 +267,7 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     // s_j = 1/√Q_jj (Q_jj=0 の LP-like 列は s_j=1)、Q'_jj = 1。
     let mut col_scales = vec![1.0_f64; n];
     for j in 0..n {
-        if q_diag[j] > Q_OFFDIAG_TOL {
+        if q_diag[j] > Q_OFFDIAG_ABS {
             col_scales[j] = 1.0 / q_diag[j].sqrt();
         }
     }
@@ -829,6 +842,34 @@ mod tests {
             result.status,
             crate::problem::SolveStatus::SuboptimalSolution,
             "mask must NOT hide a non-empty column's genuine violation (AFIRO-safety)",
+        );
+    }
+
+    /// Gate 1 sentinel: `try_q_diagonal_scaling` uses local diagonal scale
+    /// `min(|Q_ii|, |Q_jj|)` for each off-diagonal entry, not `Q_OFFDIAG_ABS`.
+    ///
+    /// Fixture: Q = diag([1e9, 1e3]) with off-diagonal 5e-10.
+    /// - local_scale = min(1e9, 1e3) = 1e3
+    /// - offdiag_eps = Q_OFFDIAG_REL × 1e3 = 1e-9
+    /// - 5e-10 < 1e-9 → Gate 1 passes; range = 1e6 → Gate 3 passes → Some
+    ///
+    /// **Sentinel**: reverting Gate 1 to `offdiag_eps = Q_OFFDIAG_ABS = 1e-10`
+    /// makes 5e-10 > 1e-10 → Gate 1 fails → None → this test FAILS.
+    #[test]
+    fn try_q_diagonal_scaling_gate1_local_scale_sentinel() {
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1],
+            &[0, 1, 1],
+            &[1e9_f64, 5e-10, 1e3],
+            2, 2,
+        ).unwrap();
+        let prob = QpProblem::new_all_le(
+            q, vec![0.0, 0.0], CscMatrix::new(0, 2), vec![],
+            vec![(0.0, 1.0), (0.0, 1.0)],
+        ).unwrap();
+        assert!(
+            try_q_diagonal_scaling(&prob).is_some(),
+            "Gate 1 local scale: 5e-10 < Q_OFFDIAG_REL×1e3=1e-9 → scaling must trigger"
         );
     }
 
