@@ -296,7 +296,7 @@ fn main() {
         detect_csv_path(&data_dir, baseline_override.as_deref(), &root)
     };
     let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
-    let baseline_objectives = load_baseline_objectives(&baseline_csv);
+    let baseline_objectives = load_baseline_objectives(&baseline_csv, false);
     let expected_statuses = load_expected_statuses(&baseline_csv);
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
     let n_infeasible_ref = expected_statuses.values().filter(|s| **s == ExpectedStatus::Infeasible).count();

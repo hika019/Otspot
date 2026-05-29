@@ -5,7 +5,7 @@ use crate::linalg::timeout::TimeoutCtx;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
-use super::kkt::{spmv_q, norm_inf};
+use super::kkt::{spmv, norm_inf};
 
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 #[allow(clippy::too_many_arguments)]
@@ -67,7 +67,7 @@ pub(crate) fn check_infeasible_or_unbounded(
         c_dx / norm_dx < -EPS_INF
     } else {
         let mut qdx = vec![0.0f64; n];
-        spmv_q(&problem.q, dx, &mut qdx);
+        spmv(&problem.q, dx, &mut qdx);
         for i in 0..n {
             qdx[i] += delta_p * dx[i];
         }
@@ -172,7 +172,7 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
             fac.solve(&rhs, &mut x);
 
             let mut qx = vec![0.0f64; n];
-            spmv_q(&problem.q, &x, &mut qx);
+            spmv(&problem.q, &x, &mut qx);
             let objective = 0.5
                 * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
                 + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
