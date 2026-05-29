@@ -70,15 +70,23 @@ pub fn obj_within_tol(obj: f64, ref_obj: f64, tol: f64) -> bool {
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
 pub const UNDERFLOW_GUARD: f64 = 1e-300;
 
-/// Relative tolerance for Q off-diagonal near-zero classification.
+/// Absolute drop threshold for Q off-diagonal pruning in `near_zero_q_removal`.
+///
+/// Off-diagonal entries `|Q[i,j]| < Q_OFFDIAG_ABS` are removed to improve
+/// sparsity before IPM solve. Uses an absolute (not scale-relative) threshold
+/// because empirical evidence shows that a purely relative threshold can leave
+/// entries that change IPM trajectory and cause spurious Optimal convergence
+/// (e.g. QPLIB_9002, 2026-05-30 audit#123).
+pub const Q_OFFDIAG_ABS: f64 = 1e-10;
+
+/// Relative tolerance for Q off-diagonal near-zero detection in `is_diagonal_q`
+/// and `try_q_diagonal_scaling`.
 ///
 /// An off-diagonal entry `|Q[i,j]|` is treated as structurally zero when
 /// `|Q[i,j]| < Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD`,
 /// where `q_abs_max` is the global maximum absolute entry of Q.
 ///
-/// Analogous to `QPS_NEG_TOL_RATIO` in `qp/mod.rs`. Three usage sites are
-/// unified under this single constant: `presolve/qp_phase2::near_zero_q_removal`,
-/// `presolve/qp_transforms/helpers::is_diagonal_q`, and
+/// Usage: `presolve/qp_transforms/helpers::is_diagonal_q` and
 /// `qp/ipm_solver/attempt::try_q_diagonal_scaling`.
 pub const Q_OFFDIAG_REL: f64 = 1e-12;
 

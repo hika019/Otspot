@@ -4,7 +4,7 @@
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{DROP_TOL, Q_OFFDIAG_REL, UNDERFLOW_GUARD, ZERO_TOL};
+use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
@@ -174,12 +174,9 @@ pub fn equality_constraint_qr(
     }
 }
 
-/// Drop Q off-diagonal entries below the scale-relative threshold to improve sparsity.
-///
-/// Threshold: `eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD`.
+/// Drop Q off-diagonal entries below `Q_OFFDIAG_ABS` to improve sparsity.
 pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
-    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    let eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
+    let eps_q = Q_OFFDIAG_ABS;
 
     let mut new_col_ptr = vec![0usize; n + 1];
     let mut new_row_ind: Vec<usize> = Vec::new();
@@ -547,36 +544,25 @@ mod tests {
         );
     }
 
-    /// Sentinel: Q_OFFDIAG_REL relative threshold — q_abs_max=1e6, off-diag=1e-8
-    /// is correctly classified as diagonal (1e-8 < Q_OFFDIAG_REL*1e6 = 1e-6).
+    /// Sentinel: `near_zero_q_removal` uses absolute `Q_OFFDIAG_ABS = 1e-10`.
+    /// Off-diagonal entry 5e-11 < 1e-10 is pruned; no-op (EPS_Q=0) leaves it.
     ///
-    /// **Sentinel**: replacing `Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD` with
-    /// absolute `1e-10` makes eps_q=1e-10, and 1e-8 > 1e-10 → off-diag NOT removed
+    /// **Sentinel**: removing the drop threshold (EPS_Q→0) keeps the 5e-11 entry
     /// → values.len() == 4 (not 2) → this test FAIL.
     #[test]
-    fn near_zero_q_removal_relative_threshold_sentinel() {
-        // Q = [[1e6, 1e-8], [1e-8, 1e6]] (symmetric, stored as full CSC)
-        // q_abs_max = 1e6, eps_q = Q_OFFDIAG_REL * 1e6 + UNDERFLOW_GUARD ≈ 1e-6
-        // off-diag |1e-8| < 1e-6 → removed. Diagonal 1e6 kept.
+    fn near_zero_q_removal_absolute_threshold_sentinel() {
+        // Q = [[1.0, 5e-11], [5e-11, 1.0]]; off-diag 5e-11 < Q_OFFDIAG_ABS=1e-10 → pruned.
         let q = CscMatrix::from_triplets(
             &[0, 0, 1, 1],
             &[0, 1, 0, 1],
-            &[1e6, 1e-8, 1e-8, 1e6],
+            &[1.0, 5e-11, 5e-11, 1.0],
             2, 2,
         ).unwrap();
         let q_clean = near_zero_q_removal(&q, 2);
         assert_eq!(
             q_clean.values.len(), 2,
-            "off-diag 1e-8 should be pruned when q_abs_max=1e6 (eps_q≈1e-6), got {} entries",
+            "off-diag 5e-11 should be pruned (Q_OFFDIAG_ABS=1e-10), got {} entries",
             q_clean.values.len()
         );
-        // Remaining entries are the two diagonal values.
-        for (&row, &val) in q_clean.row_ind.iter().zip(q_clean.values.iter()) {
-            assert!(
-                (val - 1e6).abs() < 1.0,
-                "remaining entry should be diagonal 1e6, got row={} val={}",
-                row, val
-            );
-        }
     }
 }

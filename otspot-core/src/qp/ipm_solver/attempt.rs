@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::ScopedDisable;
 
 use crate::options::SolverOptions;
-use crate::tolerances::{Q_OFFDIAG_REL, UNDERFLOW_GUARD};
+use crate::tolerances::{Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
     qp_transforms::{QpPresolveStatus, QpPostsolveStep},
@@ -233,15 +233,20 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
         }
     }
 
-    let eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
-    if q_offdiag_max > eps_q {
+    // Gate 1: off-diagonal nearness check uses scale-relative threshold so that
+    // entries negligible relative to Q's scale do not block diagonal detection.
+    let offdiag_eps = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
+    if q_offdiag_max > offdiag_eps {
         return None;
     }
 
+    // Gates 2 & 3: use Q_OFFDIAG_ABS as the absolute floor for diagonal-positive
+    // check. Scaling columns with Q_jj < Q_OFFDIAG_ABS produces extreme scale
+    // factors (1/√Q_jj > 1e5) that destabilise the IPM.
     let mut q_pos_min = f64::INFINITY;
     let mut q_pos_max = 0.0_f64;
     for &v in &q_diag {
-        if v > eps_q {
+        if v > Q_OFFDIAG_ABS {
             q_pos_min = q_pos_min.min(v);
             q_pos_max = q_pos_max.max(v);
         }
@@ -258,7 +263,7 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     // s_j = 1/√Q_jj (Q_jj=0 の LP-like 列は s_j=1)、Q'_jj = 1。
     let mut col_scales = vec![1.0_f64; n];
     for j in 0..n {
-        if q_diag[j] > eps_q {
+        if q_diag[j] > Q_OFFDIAG_ABS {
             col_scales[j] = 1.0 / q_diag[j].sqrt();
         }
     }
