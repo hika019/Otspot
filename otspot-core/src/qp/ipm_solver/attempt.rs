@@ -625,7 +625,7 @@ fn finalize_outcome(
 
     debug_assert_eq!(outcome.solution.len(), n_orig, "outcome solution dimension mismatch");
 
-    SolverResult {
+    let result = SolverResult {
         status,
         objective: outcome.objective,
         solution: outcome.solution,
@@ -638,13 +638,35 @@ fn finalize_outcome(
             ..Default::default()
         },
         ..Default::default()
-    }
+    };
+    debug_assert!(
+        result.reduced_costs.is_empty(),
+        "IPM SolverResult must never contain reduced_costs; got len={}",
+        result.reduced_costs.len(),
+    );
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sparse::CscMatrix;
+
+    /// B.1 sentinel: IPM finalize_outcome must never set reduced_costs.
+    /// The debug_assert fires if any code path were to populate this field.
+    /// Verified by `..Default::default()` contract; sentinel catches future regressions.
+    #[test]
+    fn ipm_finalize_outcome_reduced_costs_empty() {
+        let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
+        let a = CscMatrix::new(0, 1);
+        let prob = QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(f64::NEG_INFINITY, f64::INFINITY)]).unwrap();
+        let result = solve_ipm(&prob, &SolverOptions::default());
+        assert!(
+            result.reduced_costs.is_empty(),
+            "IPM result must never contain reduced_costs (len={})",
+            result.reduced_costs.len(),
+        );
+    }
 
     /// Case D fixture (#15 P2 root): 1 strictly-convex var + 1 LP-style isolated
     /// EmptyCol whose bound-dual recovery the masked postsolve guard reverts.
