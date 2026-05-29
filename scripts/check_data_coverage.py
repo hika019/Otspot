@@ -3,9 +3,10 @@
 
 Checks:
   1. Every required CSV row has a corresponding data file (CSV_GAP → exit 1).
-  2. Optional CSV rows (4th column = "*") with no data file emit [opt-gap] but do not fail.
-  3. Files present in the directory but missing from the CSV are reported as no_ref.
-     no_ref alone does not fail unless --strict is passed.
+  2. Optional CSV rows (name starts with ``SS_``) with no data file emit
+     [opt-gap] but do not fail.
+  3. Files present in the directory but missing from the CSV are reported as
+     no_ref.  no_ref alone does not fail unless --strict is passed.
 
 Exit code: 0 = all checks pass, 1 = CSV_GAP (required row missing) or --strict + no_ref.
 
@@ -15,6 +16,11 @@ Usage:
 Options:
     --repo-root DIR   Path to repo root (default: parent of this script's dir).
     --strict          Exit 1 if any no_ref files exist.
+
+Optional-row detection: rows whose ``problem_name`` starts with ``SS_`` are
+treated as optional.  This prefix-based rule is regen-stable — tools such as
+``baseline_from_bench_log.py --merge`` that emit only 3 CSV columns cannot
+silently strip the optional marker.
 
 Policies (fact-based, updated 2026-05-30):
   MIPLIB gate (miplib_small):
@@ -31,7 +37,8 @@ Policies (fact-based, updated 2026-05-30):
 
   osqp_bench optional rows (SS_*):
     SuiteSparse matrix problems added by setup_extra_benches.sh (skipped
-    with --no-suitesparse). Marked optional? = * in osqp_bench.csv.
+    with --no-suitesparse). Detected by ``SS_`` name prefix (regen-stable;
+    4th-column marker was dropped to eliminate fragility).
     Missing SS_* files → [opt-gap] warning only, exit 0.
 
     Design note: an earlier split design (case a) used a separate
@@ -66,7 +73,7 @@ DATASETS: list[Dataset] = [
             [".qplib"], "official"),
     # QP official-derived (generated from official problem definitions)
     # osqp_bench.csv contains both required OSQP_* rows and optional SS_* rows
-    # (optional? column = "*"); bench_utils::detect_csv_path loads this single file.
+    # (detected by SS_* prefix); bench_utils::detect_csv_path loads this single file.
     Dataset("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
             [".qps"], "official_gen"),
     Dataset("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
@@ -102,8 +109,10 @@ DATASETS: list[Dataset] = [
 def read_csv_rows(csv_path: Path) -> list[tuple[str, bool]]:
     """Return (problem_name, is_optional) for each data row in the CSV.
 
-    The 4th column (optional?) marks optional rows: "*" or "1" = optional,
-    absent or empty = required.
+    Rows whose name starts with ``SS_`` are optional (SuiteSparse problems
+    added by setup_extra_benches.sh without --no-suitesparse).  All other
+    rows are required.  The 4th column is not used; prefix-based detection
+    is regen-stable across tools that emit only 3 columns.
     """
     rows: list[tuple[str, bool]] = []
     if not csv_path.exists():
@@ -116,7 +125,7 @@ def read_csv_rows(csv_path: Path) -> list[tuple[str, bool]]:
         if parts[0] == "problem_name":
             continue
         name = parts[0]
-        optional = len(parts) >= 4 and parts[3].strip() in ("*", "1")
+        optional = name.startswith("SS_")
         rows.append((name, optional))
     return rows
 
