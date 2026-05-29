@@ -583,4 +583,154 @@ mod tests {
             "modest feasible must NOT be certified infeasible",
         );
     }
+
+    // ── F.1: pick_best_ipm_or_simplex 全分岐 table-driven ──────────────────
+
+    fn make_result(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
+        SolverResult { status, solution, objective, ..SolverResult::default() }
+    }
+
+    /// `pick_best_ipm_or_simplex` の 3 条件 (simplex_failed × ipm_status × solution) を
+    /// 全パターン cover する table-driven sentinel。
+    /// no-op: 条件分岐を削除すると expected route と異なるオブジェクティブが返り fail。
+    #[test]
+    fn pick_best_ipm_or_simplex_all_branches() {
+        const IPM_OBJ: f64 = 1.0;
+        const SIMP_OBJ: f64 = 2.0;
+
+        struct Case {
+            name: &'static str,
+            ipm: Option<SolverResult>,
+            simplex: SolverResult,
+            expect_ipm: bool,
+        }
+
+        let cases = vec![
+            // (A) 全 3 条件 true → ipm を返す
+            Case {
+                name: "LocallyOptimal + Timeout + non-empty → ipm",
+                ipm: Some(make_result(SolveStatus::LocallyOptimal, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
+                expect_ipm: true,
+            },
+            Case {
+                name: "SuboptimalSolution + NumericalError + non-empty → ipm",
+                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::NumericalError, vec![], SIMP_OBJ),
+                expect_ipm: true,
+            },
+            Case {
+                name: "SuboptimalSolution + MaxIterations + non-empty → ipm",
+                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![2.0, 3.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::MaxIterations, vec![], SIMP_OBJ),
+                expect_ipm: true,
+            },
+            // (B) solution.is_empty() で条件破れ → simplex を返す
+            Case {
+                name: "LocallyOptimal + Timeout + empty solution → simplex",
+                ipm: Some(make_result(SolveStatus::LocallyOptimal, vec![], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
+                expect_ipm: false,
+            },
+            // (C) simplex_failed=false で条件破れ → simplex を返す
+            Case {
+                name: "SuboptimalSolution + Optimal simplex → simplex",
+                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Optimal, vec![1.0], SIMP_OBJ),
+                expect_ipm: false,
+            },
+            Case {
+                name: "SuboptimalSolution + Infeasible simplex → simplex",
+                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Infeasible, vec![], SIMP_OBJ),
+                expect_ipm: false,
+            },
+            // (D) ipm_candidate=None → simplex を返す
+            Case {
+                name: "None + Timeout → simplex",
+                ipm: None,
+                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
+                expect_ipm: false,
+            },
+            // (E) ipm.status が対象外 (Optimal) → simplex を返す
+            Case {
+                name: "ipm Optimal + Timeout + non-empty → simplex",
+                ipm: Some(make_result(SolveStatus::Optimal, vec![1.0], IPM_OBJ)),
+                simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
+                expect_ipm: false,
+            },
+        ];
+
+        for case in &cases {
+            let result = pick_best_ipm_or_simplex(case.ipm.clone(), case.simplex.clone());
+            let expected_obj = if case.expect_ipm { IPM_OBJ } else { SIMP_OBJ };
+            assert_eq!(
+                result.objective, expected_obj,
+                "case `{}`: expected {} (ipm={}), got {}",
+                case.name, expected_obj, case.expect_ipm, result.objective,
+            );
+        }
+    }
+
+    // ── F.2: verified_farkas_timeout_fallback 早期 false return ────────────
+
+    /// 非負制約 (lb=0, ub=∞) を持たない問題は Farkas 経路に入れない → false。
+    /// no-op: 境界チェックを削除すると true を返す可能性があり fail。
+    #[test]
+    fn farkas_false_on_non_nonneg_bounds() {
+        use crate::options::SolverOptions;
+        let opts = SolverOptions::default();
+
+        // lb < 0
+        let neg_lb = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            vec![1.0],
+            vec![(-1.0, f64::INFINITY)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        assert!(
+            !verified_farkas_timeout_fallback(&neg_lb, &opts),
+            "lb < 0 must return false (non-nonneg bounds)",
+        );
+
+        // finite ub (not infinity)
+        let finite_ub = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap(),
+            vec![1.0],
+            vec![(0.0, 10.0)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        assert!(
+            !verified_farkas_timeout_fallback(&finite_ub, &opts),
+            "finite ub must return false (non-nonneg bounds)",
+        );
+    }
+
+    /// 制約がゼロ本の問題は cert_rhs が空になり早期 false return。
+    /// no-op: `cert_rhs.is_empty()` チェックを削除するとパニックや誤 true になり fail。
+    #[test]
+    fn farkas_false_on_empty_constraints() {
+        use crate::options::SolverOptions;
+        let opts = SolverOptions::default();
+
+        let zero_constraints = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            CscMatrix::new(0, 1),
+            vec![],
+            vec![(0.0, f64::INFINITY)],
+            vec![],
+        )
+        .unwrap();
+        assert!(
+            !verified_farkas_timeout_fallback(&zero_constraints, &opts),
+            "zero constraints → empty cert_rhs must return false",
+        );
+    }
 }
