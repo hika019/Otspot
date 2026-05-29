@@ -1,7 +1,9 @@
 // IPM solver 診断テスト — otspot-io canonical parser 経由
 // (元: otspot-core/src/qp/ipm_solver/mod.rs の inline test、#109 A.1 で移動)
 
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::type_complexity)]
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
+type CaseMaker = fn() -> SolverOptions;
 
 use otspot_core::options::{IpmOptions, SolverOptions};
 use otspot_core::presolve::QpPresolveResult;
@@ -48,7 +50,7 @@ fn test_ipm_dpklo1() {
 #[test]
 fn invalid_options_rejected_at_solve_ipm() {
     let prob = minimal_qp();
-    let make_cases: &[(&str, fn() -> SolverOptions)] = &[
+    let make_cases: &[(&str, CaseMaker)] = &[
         ("neg timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(-1.0); o }),
         ("nan primal_tol",   || { let mut o = SolverOptions::default(); o.primal_tol = f64::NAN; o }),
         ("zero primal_tol",  || { let mut o = SolverOptions::default(); o.primal_tol = 0.0; o }),
@@ -74,7 +76,7 @@ fn invalid_options_rejected_at_solve_ipm() {
 fn invalid_options_rejected_at_run_ipm() {
     let prob = minimal_qp();
     let presolve = QpPresolveResult::no_reduction(&prob);
-    let make_cases: &[(&str, fn() -> SolverOptions)] = &[
+    let make_cases: &[(&str, CaseMaker)] = &[
         ("neg timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(-1.0); o }),
         ("nan primal_tol",   || { let mut o = SolverOptions::default(); o.primal_tol = f64::NAN; o }),
         ("zero primal_tol",  || { let mut o = SolverOptions::default(); o.primal_tol = 0.0; o }),
