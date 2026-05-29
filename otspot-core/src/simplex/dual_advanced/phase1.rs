@@ -186,6 +186,16 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
 }
 
 /// Big-M ペナルティ算出時の coefficient 倍率。
+///
+/// `big_m = max(||c||_∞ × MULT, ||b||_∞ × MULT, BIG_M_FLOOR)` で人工変数コストを
+/// 問題スケールの 1000 倍に設定し、simplex が必ず人工変数を駆出できるようにする。
+///
+/// 撤廃 (1.0 に変更) の影響: ||c||_∞ < 1000 かつ ||b||_∞ < 1000 の問題では
+/// BIG_M_FLOOR = 1e6 が支配するため実質変化なし (標準 test suite で退化なし、実測確認)。
+/// ||b||_∞ >> 1000 の Netlib 問題 (例: dfl001 の ||b||_∞ ≈ 1e6) では
+/// big_m が 1e9 → 1e6 に低下し問題スケールと同程度になるため
+/// 人工変数コストが目的関数に対して支配的でなくなり Phase I が収束不全になる可能性がある
+/// (`lp_coverage_screen_all` で確認可能)。
 const BIG_M_COST_MULT: f64 = 1e3;
 
 /// Big-M ペナルティの下限。
