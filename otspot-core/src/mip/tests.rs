@@ -821,3 +821,75 @@ fn warm_start_rounding_fails_child_no_timeout() {
     assert_eq!(r.status, crate::problem::SolveStatus::Optimal,
         "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}", r.status);
 }
+
+/// B&B driver propagates parent warm-start basis to child nodes.
+///
+/// Sentinel: replacing `node.child_warm(down, lb, ws)` with `node.child(down, lb)`
+/// drops warm_start for all children; `opts.warm_start` is `None` in every child
+/// call → `received` is all-false → **this test FAILS** (no-op detected).
+#[test]
+fn warm_start_propagated_to_child_nodes_sentinel() {
+    use std::cell::{Cell, RefCell};
+    use crate::options::WarmStartBasis;
+    use crate::problem::SolverResult;
+
+    struct PropMock {
+        call: Cell<usize>,
+        warm_starts_received: RefCell<Vec<bool>>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 1],
+    }
+
+    impl PropMock {
+        fn new() -> Self {
+            Self {
+                call: Cell::new(0),
+                warm_starts_received: RefCell::new(vec![]),
+                root_bounds: [(0.0, 3.0)],
+                int_vars: [0],
+            }
+        }
+    }
+
+    impl super::Relaxation for PropMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            let n = self.call.get();
+            self.call.set(n + 1);
+            if n > 0 {
+                self.warm_starts_received.borrow_mut().push(opts.warm_start.is_some());
+            }
+            if n == 0 {
+                // Root: fractional x=0.5; return warm_start_basis for propagation.
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 0.5,
+                    solution: vec![0.5],
+                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![0.5] }),
+                    ..Default::default()
+                }
+            } else {
+                // Children: integer-feasible at the lower bound.
+                let x = bounds[0].0.ceil().max(bounds[0].0);
+                SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: x,
+                    solution: vec![x],
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
+    let mock = PropMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    let received = mock.warm_starts_received.borrow();
+    assert!(
+        received.iter().any(|&ws| ws),
+        "warm_start must be propagated to at least one child node; \
+         no-op (child() instead of child_warm()) gives all-false: {received:?}"
+    );
+}

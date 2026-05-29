@@ -29,7 +29,7 @@ pub(crate) mod queue;
 
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
-use crate::options::{MipConfig, SolverOptions, WarmStartBasis};
+use crate::options::{MipConfig, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
 use crate::qp::global::pruning::{should_prune, within_gap};
@@ -315,11 +315,15 @@ fn solve_mip_with_stats<R: Relaxation>(
             )
             .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
             let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-            // Propagate parent LP basis: one bound change leaves the basis dual-feasible
-            // for the child; dual simplex restores primal feasibility cheaply.
-            let child_ws: Option<WarmStartBasis> = res.warm_start_basis.clone();
-            q.push(node.child_warm(down, node_lb, child_ws.clone()));
-            q.push(node.child_warm(up, node_lb, child_ws));
+            // Propagate parent basis to children. Skip warm-start when the
+            // branching variable's bound type changes (e.g. ub=∞→finite adds
+            // a UB row in standard form, invalidating basis indices). The
+            // up-branch typically triggers lb-violation and cold-starts anyway.
+            let child_ws = res.warm_start_basis.clone();
+            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) { None } else { child_ws.clone() };
+            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) { None } else { child_ws };
+            q.push(node.child_warm(down, node_lb, down_ws));
+            q.push(node.child_warm(up, node_lb, up_ws));
         } else {
             // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
             // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region
@@ -459,6 +463,16 @@ fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
         }
     }
     sol
+}
+
+/// Returns `true` when tightening var `j`'s bound changes the standard-form
+/// column layout vs the parent. An infinite bound becoming finite (ub: ∞→boxed,
+/// or lb: free→lower-bounded) changes the number of structural columns or adds
+/// a UB constraint row, making the parent basis index-incompatible.
+fn bound_layout_changes(parent_bounds: &[(f64, f64)], child_bounds: &[(f64, f64)], j: usize) -> bool {
+    let (p_lb, p_ub) = parent_bounds[j];
+    let (c_lb, c_ub) = child_bounds[j];
+    (p_ub.is_infinite() && c_ub.is_finite()) || (p_lb.is_infinite() && c_lb.is_finite())
 }
 
 /// A result carrying no usable solution, tagged with `status`.

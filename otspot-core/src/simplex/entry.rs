@@ -88,8 +88,8 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
                 // (SingularBasis on the reduced initial basis, Eq drift in Phase II,
                 // or guard_lp_optimal catching a KKT failure on the reduced form).
                 // SuboptimalSolution from the guard means KKT failed → fall back.
-                // Strip warm_start if present: the reduction renumbered variables,
-                // so any caller-supplied basis is invalid for the original LP.
+                // Strip warm_start if present: a stale basis passed to the
+                // cold-start retry of the original LP can cause cycling.
                 if matches!(raw.status, SolveStatus::NumericalError | SolveStatus::SuboptimalSolution) {
                     let fallback_opts;
                     let fb = if options.warm_start.is_some() {

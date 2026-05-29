@@ -41,7 +41,7 @@ pub(crate) fn two_phase_dual_simplex(
                 // The legacy dual simplex has no cost-perturbation anti-cycling;
                 // starting from an lb-violating point leads to cycling/Timeout.
                 // Fall through to cold start when any lb violation is present.
-                if !x_b.iter().any(|&v| v < -options.primal_tol) {
+                if !super::has_lb_violation(&x_b, options.primal_tol) {
                     let mut total_iters: usize = 0;
                     let outcome = dual_simplex_core(
                         &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,

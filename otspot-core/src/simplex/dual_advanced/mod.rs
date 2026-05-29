@@ -75,13 +75,9 @@ pub(crate) fn solve_dual_advanced(
 
                     // WarmStartBasis does not store at_upper, so nonbasics are assumed
                     // at lb=0. For the "up" branch, the branched variable's lb is raised
-                    // above its parent value → x_b becomes negative. The legacy dual
-                    // simplex does not have a cost perturbation fallback; an lb-violation
-                    // with a cycling-prone starting point returns Timeout via Bland mode.
-                    // Reject the warm start and fall through to cold start.
-                    if x_b.iter().any(|&v| v < -options.primal_tol) {
-                        // lb-violation: cold start is safe and terminates correctly.
-                    } else {
+                    // above its parent value → x_b becomes negative (lb-violation);
+                    // fall through to cold start.
+                    if !super::has_lb_violation(&x_b, options.primal_tol) {
                         let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                         let mut total_iters: usize = 0;
                         let outcome = core::dual_simplex_core_advanced(
@@ -221,16 +217,10 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                // WarmStartBasis does not store at_upper, so nonbasic variables are
-                // assumed at lb=0. This is incorrect when some nonbasic was at its UB
-                // in the parent LP. If a basic variable's lb is tightened above its
-                // parent value (the "up" branch), x_b will be negative — an lb-violation.
-                // With all-zero perturbed costs (c̃_j = max(c_j,0) = 0 when all c_j ≤ 0),
-                // the BFRT ratio test is degenerate (theta=0) and the dual loop cycles.
-                // Fall back to cold start whenever the warm-start x_b has an lb-violation.
-                if x_b.iter().any(|&v| v < -options.primal_tol) {
-                    // lb-violation in warm start x_b: cold start is safe and terminates.
-                } else {
+                // WarmStartBasis does not store at_upper, so nonbasics are assumed
+                // at lb=0. If a basic variable's lb is tightened (up-branch), x_b
+                // becomes negative (lb-violation); fall through to cold start.
+                if !super::has_lb_violation(&x_b, options.primal_tol) {
                     let mut is_basic = vec![false; bsf.n_total];
                     for &j in &warm.basis {
                         is_basic[j] = true;

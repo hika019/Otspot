@@ -18,9 +18,9 @@ pub(crate) struct MipNode {
     pub lower_bound: f64,
     /// Branching depth (root = 0).
     pub depth: usize,
-    /// LP basis from the parent relaxation. After one bound change the parent
-    /// basis is dual-feasible for the child; dual simplex restores primal
-    /// feasibility cheaply. `None` at root and after MIQP nodes.
+    /// LP basis for warm-starting the child LP. `None` at root, after MIQP
+    /// nodes, or when the standard-form layout changes (bound-type mismatch).
+    /// The up-branch commonly falls through to cold start (lb-violation check).
     pub warm_start: Option<WarmStartBasis>,
 }
 
@@ -30,9 +30,14 @@ impl MipNode {
     }
 
     pub fn child(&self, new_bounds: VarBounds, lower_bound: f64) -> Self {
-        Self { var_bounds: new_bounds, lower_bound, depth: self.depth + 1, warm_start: None }
+        self.child_warm(new_bounds, lower_bound, None)
     }
 
+    /// Creates a child node with an explicit warm-start basis.
+    ///
+    /// `warm_start = None` triggers cold start. The simplex also falls back to
+    /// cold start when any basic variable violates its lower bound (typical on
+    /// the up-branch) or when presolve reduces the child LP.
     pub fn child_warm(
         &self,
         new_bounds: VarBounds,
