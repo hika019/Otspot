@@ -568,8 +568,8 @@ mod tests {
     }
 
     /// A.3 sentinel: NaN in y must return INFINITY, not silently pass as 0.0.
-    /// Without the `y.iter().any(|v| !v.is_finite())` guard, f64::NAN.max(0.0)==0.0
-    /// would suppress the violation and return 0.0 → sentinel fails.
+    /// Without the `any_nonfinite(y)` guard, f64::NAN.max(0.0)==0.0 would suppress
+    /// the violation and return 0.0 → sentinel fails.
     #[test]
     fn dual_sign_nan_y_returns_infinity() {
         use ConstraintType::*;
@@ -579,6 +579,19 @@ mod tests {
         let z: Vec<f64> = vec![];
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
         assert!(v.is_infinite() && v > 0.0, "NaN y must give +INFINITY, got {v}");
+    }
+
+    /// A.4 sentinel: NaN in z must return INFINITY (symmetric to y).
+    /// Without the `any_nonfinite(z)` guard, a NaN bound dual would be silently
+    /// ignored and return 0.0 → sentinel fails.
+    #[test]
+    fn dual_sign_nan_z_returns_infinity() {
+        let ct: Vec<ConstraintType> = vec![];
+        let y: Vec<f64> = vec![];
+        let bounds = vec![(0.0_f64, f64::INFINITY)]; // n_lb_finite=1, n_ub_finite=0
+        let z = vec![f64::NAN];
+        let v = dual_sign_violation(&ct, &y, &bounds, &z);
+        assert!(v.is_infinite() && v > 0.0, "NaN z must give +INFINITY, got {v}");
     }
 
     /// Scale robustness: large and small violations both give bounded results in (0, 1].
