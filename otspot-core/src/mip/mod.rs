@@ -127,6 +127,17 @@ pub fn solve_milp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
+    // Establish a shared deadline before FP so that FP and B&B draw from the same
+    // budget.  Without this, each LP in FP gets a fresh `timeout_secs` window and
+    // `solve_mip_core` resets the clock again — allowing up to (MAX_FP_ITER + 1)×
+    // timeout consumption.  If the caller already set an explicit deadline, honour it.
+    let deadline = options.deadline.or_else(|| {
+        options.timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s))
+    });
+    let mut opts_with_dl = options.clone();
+    opts_with_dl.deadline = deadline;
+    opts_with_dl.timeout_secs = None;
+
     // MILP-specific root presolve: coefficient propagation tightens integer bounds.
     // Presolve is skipped when there are no integer variables (pure LP fallback is
     // handled inside the generic driver). Non-empty integer_vars with infeasible
@@ -141,19 +152,19 @@ pub fn solve_milp_with_stats(
                 let problem_bt =
                     MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
                 let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem_bt.lp, &problem_bt.integer_vars, cfg.integer_feas_tol, options,
+                    &problem_bt.lp, &problem_bt.integer_vars, cfg.integer_feas_tol, &opts_with_dl,
                 );
-                return solve_mip_core(&problem_bt, options, cfg, mask, fp_inc);
+                return solve_mip_core(&problem_bt, &opts_with_dl, cfg, mask, fp_inc);
             }
             Some(_) => {
                 let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem.lp, &problem.integer_vars, cfg.integer_feas_tol, options,
+                    &problem.lp, &problem.integer_vars, cfg.integer_feas_tol, &opts_with_dl,
                 );
-                return solve_mip_core(problem, options, cfg, mask, fp_inc);
+                return solve_mip_core(problem, &opts_with_dl, cfg, mask, fp_inc);
             }
         }
     }
-    solve_mip_with_stats(problem, options, cfg)
+    solve_mip_with_stats(problem, &opts_with_dl, cfg)
 }
 
 /// Solve a **convex** MIQP to (relative) ε-optimality via branch-and-bound.
@@ -489,7 +500,7 @@ fn finalize_no_incumbent(
 }
 
 /// Boolean mask of length `num_vars`; `true` where the variable is integral.
-fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool> {
+pub(crate) fn integer_mask(num_vars: usize, integer_vars: &[usize]) -> Vec<bool> {
     let mut mask = vec![false; num_vars];
     for &j in integer_vars {
         if j < num_vars {

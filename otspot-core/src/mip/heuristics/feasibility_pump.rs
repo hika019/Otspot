@@ -6,8 +6,9 @@
 //! continuous solution toward the rounded target. Convergence (x_lp ≈ x_int)
 //! yields a feasible integer point.
 
-use crate::mip::branch::{fractionality, is_integer_feasible};
 use crate::lp::solve_lp_with;
+use crate::mip::branch::{fractionality, is_integer_feasible};
+use crate::mip::integer_mask;
 use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 
@@ -20,12 +21,20 @@ const STALL_THRESHOLD: usize = 5;
 /// Number of most-fractional integer variables to flip on perturbation.
 const PERTURB_FLIP_COUNT: usize = 3;
 
+/// Threshold for deciding which rounding direction a variable is closest to.
+/// Values within this distance of their floor are considered "rounded down".
+const HALF_INTEGER_THRESHOLD: f64 = 0.5;
+
 /// Run the feasibility pump heuristic on a MILP LP relaxation.
 ///
 /// Returns an integer-feasible `SolverResult` (objective evaluated under the
 /// original `lp.c`) if the pump converges within [`MAX_FP_ITER`] iterations,
 /// or `None` on failure. A `None` return is benign — the caller proceeds with
 /// pure branch-and-bound.
+///
+/// Sentinel: removing the `integer_vars.is_empty()` guard causes a vacuously
+/// integer-feasible LP root to be returned for pure-LP problems → callers
+/// observe a spurious incumbent (`fp_incumbent_found = true`) → FAILS.
 pub(crate) fn run_feasibility_pump(
     lp: &LpProblem,
     integer_vars: &[usize],
@@ -37,7 +46,7 @@ pub(crate) fn run_feasibility_pump(
     }
 
     let n = lp.num_vars;
-    let mask = build_mask(n, integer_vars);
+    let mask = integer_mask(n, integer_vars);
 
     let root = solve_lp_with(lp, opts);
     if !matches!(root.status, SolveStatus::Optimal) || root.solution.is_empty() {
@@ -86,17 +95,6 @@ pub(crate) fn run_feasibility_pump(
     None
 }
 
-/// Build a boolean integer mask.
-fn build_mask(n: usize, integer_vars: &[usize]) -> Vec<bool> {
-    let mut mask = vec![false; n];
-    for &j in integer_vars {
-        if j < n {
-            mask[j] = true;
-        }
-    }
-    mask
-}
-
 /// Round integer-constrained components to the nearest integer; leave others unchanged.
 fn round_integer_vars(x: &[f64], mask: &[bool]) -> Vec<f64> {
     x.iter()
@@ -128,7 +126,7 @@ fn signed_fp_cost(x_lp: &[f64], x_int: &[f64], mask: &[bool], n: usize) -> Vec<f
 /// True when the integer components of `a` and `b` are the same rounded value.
 fn integers_same(a: &[f64], b: &[f64], mask: &[bool]) -> bool {
     a.iter().zip(b.iter()).zip(mask.iter()).all(|((&ai, &bi), &is_int)| {
-        !is_int || (ai - bi).abs() < 0.5
+        !is_int || (ai - bi).abs() < HALF_INTEGER_THRESHOLD
     })
 }
 
@@ -147,7 +145,11 @@ fn perturb(x_int: &[f64], x_lp: &[f64], mask: &[bool], flip_count: usize) -> Vec
     for &(j, _) in frac_vars.iter().take(flip_count) {
         let floor_val = x_lp[j].floor();
         let ceil_val = x_lp[j].ceil();
-        result[j] = if (result[j] - floor_val).abs() < 0.5 { ceil_val } else { floor_val };
+        result[j] = if (result[j] - floor_val).abs() < HALF_INTEGER_THRESHOLD {
+            ceil_val
+        } else {
+            floor_val
+        };
     }
     result
 }
@@ -178,6 +180,10 @@ mod tests {
     }
 
     /// FP on a pure-LP problem (no integer vars) returns None.
+    ///
+    /// Sentinel: removing `if integer_vars.is_empty() { return None; }` causes a
+    /// vacuously integer-feasible LP root (empty mask ⇒ all vars pass the check)
+    /// to be returned as `Some(_)` → FAILS.
     #[test]
     fn fp_skips_empty_integer_vars() {
         let lp = single_constraint_lp(vec![1.0, 1.0], &[1.0, 1.0], 5.0, vec![(0.0, 3.0); 2]);
@@ -193,14 +199,10 @@ mod tests {
         assert!((r.solution[0] - 0.0).abs() < 1e-6, "sol={}", r.solution[0]);
     }
 
-    /// FP converges on a 4-variable binary knapsack in one iteration.
+    /// FP converges on a 4-variable binary knapsack within one iteration.
     ///
-    /// LP relaxation: x=(0,1,0,0.5), fractional at x3.
-    /// Round: x_int=(0,1,0,1) (infeasible but target).
-    /// FP LP (maximise x3): x=(1,0,0,1), integer feasible.
-    ///
-    /// Sentinel: removing the FP loop causes `run_feasibility_pump` to return `None`
-    /// → assertion fails.
+    /// Sentinel: removing the FP iteration loop causes `run_feasibility_pump` to
+    /// return `None` → assertion fails.
     #[test]
     fn fp_converges_binary_knapsack_one_iter() {
         // min -(3x0+5x1+2x2+4x3) s.t. 3x0+5x1+2x2+4x3 <= 7, x in {0,1}^4
@@ -212,28 +214,17 @@ mod tests {
         );
         let r = run_feasibility_pump(&lp, &[0, 1, 2, 3], 1e-6, &opts())
             .expect("FP must converge");
-        // Solution must be integer feasible.
         let frac: f64 = r.solution.iter().map(|&v| (v - v.round()).abs()).sum();
         assert!(frac < 1e-6, "solution not integer: {:?}", r.solution);
-        // Objective is computed under original c.
-        let obj_recheck: f64 = [-3.0f64, -5.0, -2.0, -4.0].iter().zip(r.solution.iter()).map(|(c, x)| c * x).sum();
+        let obj_recheck: f64 =
+            [-3.0f64, -5.0, -2.0, -4.0].iter().zip(r.solution.iter()).map(|(c, x)| c * x).sum();
         assert!((r.objective - obj_recheck).abs() < 1e-6);
     }
 
-    /// Perturbation is applied after STALL_THRESHOLD consecutive identical roundings.
-    ///
-    /// Uses a 1-variable problem where the LP always returns the same fractional
-    /// value (0.5). After STALL_THRESHOLD iterations, the perturb() call flips
-    /// the rounding, potentially breaking the cycle.
-    ///
-    /// This test verifies the perturbation path is reachable (code coverage)
-    /// and doesn't panic. No-op proof: removing the stall counter keeps stall_count=0
-    /// and perturbation never fires; the stall loop still produces None (not wrong)
-    /// but this test serves as a coverage guard rather than a correctness sentinel.
+    /// Perturbation path is reachable and doesn't panic (coverage guard).
     #[test]
     fn fp_stall_perturbation_does_not_panic() {
-        // x in [0.4, 0.6] integer — LP always returns 0.5, rounds to 0 or 1, never feasible.
-        // FP should exhaust MAX_FP_ITER and return None.
+        // x in [0.4, 0.6] integer — LP always returns ~0.5, rounds but never converges.
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, -1.0], 2, 1).unwrap();
         let lp = LpProblem::new_general(
             vec![1.0],
@@ -243,9 +234,32 @@ mod tests {
             vec![(0.0, 1.0)],
             None,
         ).unwrap();
-        // This problem has no integer feasible solution (0.4 < x < 0.6 forces non-integer).
         let result = run_feasibility_pump(&lp, &[0], 1e-6, &opts());
-        // FP should return None (no integer feasible solution found).
         assert!(result.is_none(), "expected None for integer-infeasible problem, got Some");
+    }
+
+    /// `perturb` flips the rounded value of the most-fractional variable.
+    ///
+    /// Sentinel: a no-op `perturb` (returning `x_int` unchanged) leaves the flipped
+    /// variable at its original rounded value → assertion fails.
+    #[test]
+    fn perturb_flips_most_fractional_variable() {
+        // x_int = [1, 0], x_lp = [0.4, 0.7]
+        // fractionality: j=0 → 0.4; j=1 → 0.3  (j=0 most fractional)
+        // j=0: result[0]=1, floor(0.4)=0; |1-0|=1 ≥ 0.5 → flip to floor → 0
+        let x_int = vec![1.0, 0.0];
+        let x_lp = vec![0.4, 0.7];
+        let mask = vec![true, true];
+        let result = perturb(&x_int, &x_lp, &mask, 1);
+        assert!(
+            (result[0] - 0.0).abs() < 1e-9,
+            "most-fractional var should flip 1→0; got {}",
+            result[0],
+        );
+        assert!(
+            (result[1] - 0.0).abs() < 1e-9,
+            "unflipped var should remain 0; got {}",
+            result[1],
+        );
     }
 }
