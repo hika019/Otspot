@@ -17,8 +17,9 @@ use std::time::Instant;
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_dfeas_componentwise, compute_dfeas_orig,
     compute_pfeas_normalized, detect_csv_path, load_baseline_objectives, load_expected_statuses,
-    parse_qps_with_timeout, ExpectedStatus, ObjCheckResult,
+    ExpectedStatus, ObjCheckResult,
 };
+use otspot_io::qps::parse_qps;
 use otspot_core::options::{SimplexMethod, SolverOptions};
 use otspot_core::problem::{ConstraintType, SolveStatus};
 use otspot_core::qp::{solve_qp_with, QpProblem};
@@ -370,8 +371,7 @@ fn main() {
         let parse_start = Instant::now();
         println!("PARSE_START: {}", name);
 
-        // パース（30秒タイムアウト付き）
-        let prob = match parse_qps_with_timeout(path, 30) {
+        let prob = match parse_qps(path).map_err(|e| e.to_string()) {
             Ok(p) => p,
             Err(note) => {
                 println!(
