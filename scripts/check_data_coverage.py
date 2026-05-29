@@ -34,50 +34,59 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
-# (dir_glob, csv_path, file_extensions, origin)
+
+class Dataset(NamedTuple):
+    name: str
+    csv_path: str | None
+    exts: list[str] | None
+    origin: str
+    optional: bool = False
+
+
 # origin: "official" | "official_gen" | "synthetic"
-DATASETS = [
+DATASETS: list[Dataset] = [
     # QP official
-    ("maros_meszaros", "data/baseline_objectives/maros_meszaros.csv",
-     [".QPS"], "official"),
-    ("qplib", "data/baseline_objectives/qplib.csv",
-     [".qplib"], "official"),
-    ("qplib_nonconvex_official", "data/baseline_objectives/qplib_nonconvex_official.csv",
-     [".qplib"], "official"),
+    Dataset("maros_meszaros", "data/baseline_objectives/maros_meszaros.csv",
+            [".QPS"], "official"),
+    Dataset("qplib", "data/baseline_objectives/qplib.csv",
+            [".qplib"], "official"),
+    Dataset("qplib_nonconvex_official", "data/baseline_objectives/qplib_nonconvex_official.csv",
+            [".qplib"], "official"),
     # QP official-derived (generated from official problem definitions)
-    ("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
-     [".qps"], "official_gen"),
+    Dataset("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
+            [".qps"], "official_gen"),
     # SuiteSparse problems added by setup_extra_benches.sh (skipped with --no-suitesparse)
-    ("osqp_bench", "data/baseline_objectives/osqp_bench_optional.csv",
-     [".qps"], "official_gen", True),
-    ("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
-     [".qps"], "official_gen"),
+    Dataset("osqp_bench", "data/baseline_objectives/osqp_bench_optional.csv",
+            [".qps"], "official_gen", optional=True),
+    Dataset("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
+            [".qps"], "official_gen"),
     # QP synthetic (no external reference by design)
-    ("osqp_bench_extra", None, None, "synthetic"),
-    ("osqp_bench_illscaled", None, None, "synthetic"),
-    ("osqp_bench_xl", None, None, "synthetic"),
-    ("qplib_nonconvex", "data/baseline_objectives/qplib_nonconvex_synthetic.csv",
-     [".qplib", ".npz", ".mat"], "synthetic"),
+    Dataset("osqp_bench_extra", None, None, "synthetic"),
+    Dataset("osqp_bench_illscaled", None, None, "synthetic"),
+    Dataset("osqp_bench_xl", None, None, "synthetic"),
+    Dataset("qplib_nonconvex", "data/baseline_objectives/qplib_nonconvex_synthetic.csv",
+            [".qplib", ".npz", ".mat"], "synthetic"),
     # LP official
-    ("lp_problems", "data/baseline_objectives/netlib_lp.csv",
-     [".mps", ".lp", ".SIF"], "official"),
-    ("lp_problems_infeas", "data/baseline_objectives/netlib_lp_infeas.csv",
-     [".mps", ".lp", ".SIF"], "official"),
-    ("lp_problems_canary", "data/baseline_objectives/netlib_lp_canary.csv",
-     [".mps", ".lp", ".SIF", ".gz"], "official"),
+    Dataset("lp_problems", "data/baseline_objectives/netlib_lp.csv",
+            [".mps", ".lp", ".SIF"], "official"),
+    Dataset("lp_problems_infeas", "data/baseline_objectives/netlib_lp_infeas.csv",
+            [".mps", ".lp", ".SIF"], "official"),
+    Dataset("lp_problems_canary", "data/baseline_objectives/netlib_lp_canary.csv",
+            [".mps", ".lp", ".SIF", ".gz"], "official"),
     # LP without baseline (extension sets or synthetic)
-    ("lp_problems_extra", None, None, "official"),
-    ("lp_problems_hard", None, None, "official"),
-    ("lp_problems_unbounded", "data/baseline_objectives/lp_problems_unbounded.csv",
-     [".QPS", ".mps", ".lp"], "synthetic"),
+    Dataset("lp_problems_extra", None, None, "official"),
+    Dataset("lp_problems_hard", None, None, "official"),
+    Dataset("lp_problems_unbounded", "data/baseline_objectives/lp_problems_unbounded.csv",
+            [".QPS", ".mps", ".lp"], "synthetic"),
     # QP generated infeasible / unbounded
-    ("qp_infeasible", "data/baseline_objectives/qp_infeasible.csv",
-     [".npz", ".mat"], "synthetic"),
-    ("qp_unbounded", "data/baseline_objectives/qp_unbounded.csv",
-     [".npz", ".mat"], "synthetic"),
+    Dataset("qp_infeasible", "data/baseline_objectives/qp_infeasible.csv",
+            [".npz", ".mat"], "synthetic"),
+    Dataset("qp_unbounded", "data/baseline_objectives/qp_unbounded.csv",
+            [".npz", ".mat"], "synthetic"),
     # MIP
-    ("miplib_small", None, None, "official"),
+    Dataset("miplib_small", None, None, "official"),
 ]
 
 
@@ -135,25 +144,21 @@ def main() -> int:
     # Multiple entries sharing a directory (e.g. core + optional CSVs) must be
     # unioned before computing no_ref to avoid false positives in --strict mode.
     dir_to_union_csv: dict[str, set[str]] = {}
-    for entry in DATASETS:
-        dir_name, csv_rel = entry[0], entry[1]
-        if csv_rel:
-            dir_to_union_csv.setdefault(dir_name, set()).update(
-                read_csv_names(root / csv_rel)
+    for ds in DATASETS:
+        if ds.csv_path:
+            dir_to_union_csv.setdefault(ds.name, set()).update(
+                read_csv_names(root / ds.csv_path)
             )
 
-    for entry in DATASETS:
-        dir_name, csv_rel, exts, origin = entry[:4]
-        optional = entry[4] if len(entry) > 4 else False
-        label = f"{dir_name}[opt]" if optional else dir_name
-
-        data_dir = root / "data" / dir_name
-        csv_path = root / csv_rel if csv_rel else None
+    for ds in DATASETS:
+        data_dir = root / "data" / ds.name
+        csv_path = root / ds.csv_path if ds.csv_path else None
 
         if not data_dir.is_dir():
             rows.append({
-                "dataset": label,
-                "origin": origin,
+                "dataset": ds.name,
+                "optional": ds.optional,
+                "origin": ds.origin,
                 "files": 0,
                 "csv_rows": 0,
                 "no_ref": 0,
@@ -162,16 +167,16 @@ def main() -> int:
             })
             continue
 
-        all_files = data_files(data_dir, exts)
+        all_files = data_files(data_dir, ds.exts)
         csv_names = read_csv_names(csv_path) if csv_path else set()
-        union_csv_names = dir_to_union_csv.get(dir_name, set())
+        union_csv_names = dir_to_union_csv.get(ds.name, set())
         no_ref = all_files - union_csv_names  # in dir, not in any CSV for this dir
         csv_gap = csv_names - all_files  # in this entry's CSV, not in dir
 
         status_parts = []
         if csv_gap:
-            if optional:
-                status_parts.append(f"CSV_GAP:{len(csv_gap)}[opt]")
+            if ds.optional:
+                status_parts.append(f"CSV_GAP:{len(csv_gap)} (opt)")
             else:
                 status_parts.append(f"CSV_GAP:{len(csv_gap)}")
                 ok = False
@@ -181,8 +186,9 @@ def main() -> int:
         status = " ".join(status_parts) if status_parts else "ok"
 
         rows.append({
-            "dataset": label,
-            "origin": origin,
+            "dataset": ds.name,
+            "optional": ds.optional,
+            "origin": ds.origin,
             "files": len(all_files),
             "csv_rows": len(csv_names),
             "no_ref": len(no_ref),
@@ -193,22 +199,23 @@ def main() -> int:
         })
 
     # Print summary table
-    col_w = [max(len(r["dataset"]) for r in rows) + 2, 14, 7, 9, 7, 9, 20]
-    header = ["dataset", "origin", "files", "csv_rows", "no_ref", "csv_gap", "status"]
+    col_w = [max(len(r["dataset"]) for r in rows) + 2, 14, 4, 7, 9, 7, 9, 20]
+    header = ["dataset", "origin", "opt", "files", "csv_rows", "no_ref", "csv_gap", "status"]
     sep = "  ".join("-" * w for w in col_w)
     fmt = "  ".join(f"{{:<{w}}}" for w in col_w)
     print(fmt.format(*header))
     print(sep)
     for r in rows:
+        opt_flag = "*" if r["optional"] else ""
         print(fmt.format(
-            r["dataset"], r["origin"], r["files"], r["csv_rows"],
+            r["dataset"], r["origin"], opt_flag, r["files"], r["csv_rows"],
             r["no_ref"], r["csv_gap"], r["status"],
         ))
 
     # Detail for gaps
     for r in rows:
         if r.get("csv_gap_names"):
-            tag = "[CSV_GAP/opt]" if r["dataset"].endswith("[opt]") else "[CSV_GAP]"
+            tag = "[CSV_GAP/opt]" if r.get("optional") else "[CSV_GAP]"
             print(f"\n{tag} {r['dataset']}: in CSV but not in dir ({len(r['csv_gap_names'])} files):")
             for n in r["csv_gap_names"]:
                 print(f"  {n}")
