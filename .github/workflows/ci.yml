@@ -107,7 +107,7 @@ jobs:
         with:
           tool: cargo-public-api
       - name: Diff public API against main
-        run: cargo public-api diff origin/main..HEAD || true
+        run: cargo public-api diff origin/main..HEAD
 
   todo-budget:
     name: todo-budget
