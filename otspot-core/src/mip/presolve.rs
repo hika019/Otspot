@@ -6,10 +6,54 @@
 //! for an integer variable rather than `x ≤ 3.7`.
 
 use crate::presolve::activity::propagate_row_bounds;
-use crate::problem::LpProblem;
+use crate::problem::{ConstraintType, LpProblem};
+use crate::sparse::CscMatrix;
 use crate::tolerances::ZERO_TOL;
 
-/// Tighten variable bounds by one pass of coefficient propagation.
+/// Core bound-tightening logic operating on raw linear-constraint data.
+///
+/// Shared by MILP (`tighten_integer_bounds`) and MIQP (called directly from
+/// `solve_miqp_with_stats`) to avoid duplicating the CSR construction and
+/// propagation loop.
+pub(crate) fn tighten_bounds_linear(
+    n: usize,
+    a: &CscMatrix,
+    b: &[f64],
+    constraint_types: &[ConstraintType],
+    bounds: &[(f64, f64)],
+    integer_mask: &[bool],
+) -> Option<Vec<(f64, f64)>> {
+    let m = b.len();
+
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for j in 0..n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let row = a.row_ind[k];
+            let val = a.values[k];
+            if val.abs() >= ZERO_TOL {
+                rows[row].push((j, val));
+            }
+        }
+    }
+
+    let mut new_bounds = bounds.to_vec();
+    for i in 0..m {
+        let updates = propagate_row_bounds(
+            &rows[i],
+            &new_bounds,
+            constraint_types[i],
+            b[i],
+            Some(integer_mask),
+        )?;
+        for (j, new_lb, new_ub) in updates {
+            new_bounds[j] = (new_lb, new_ub);
+        }
+    }
+
+    Some(new_bounds)
+}
+
+/// Tighten variable bounds by one pass of coefficient propagation (MILP entry).
 ///
 /// For each constraint row and each variable in that row the implied bound is
 /// derived from the activity of the remaining variables. Integer variables are
@@ -22,37 +66,14 @@ pub(crate) fn tighten_integer_bounds(
     lp: &LpProblem,
     integer_mask: &[bool],
 ) -> Option<Vec<(f64, f64)>> {
-    let n = lp.num_vars;
-    let m = lp.num_constraints;
-
-    // Build CSR row index from the CSC matrix (one pass, filtering near-zero entries).
-    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
-    for j in 0..n {
-        for k in lp.a.col_ptr[j]..lp.a.col_ptr[j + 1] {
-            let row = lp.a.row_ind[k];
-            let val = lp.a.values[k];
-            if val.abs() >= ZERO_TOL {
-                rows[row].push((j, val));
-            }
-        }
-    }
-
-    let mut bounds = lp.bounds.clone();
-
-    for i in 0..m {
-        let updates = propagate_row_bounds(
-            &rows[i],
-            &bounds,
-            lp.constraint_types[i],
-            lp.b[i],
-            Some(integer_mask),
-        )?;
-        for (j, new_lb, new_ub) in updates {
-            bounds[j] = (new_lb, new_ub);
-        }
-    }
-
-    Some(bounds)
+    tighten_bounds_linear(
+        lp.num_vars,
+        &lp.a,
+        &lp.b,
+        &lp.constraint_types,
+        &lp.bounds,
+        integer_mask,
+    )
 }
 
 #[cfg(test)]
