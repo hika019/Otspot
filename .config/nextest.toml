@@ -55,6 +55,13 @@ threads-required = "num-cpus"
 filter = "test(lp_simplex_stall_synthetic_large_lp_converges)"
 threads-required = "num-cpus"
 
+# lp_simplex_stall_d6cube_noop_proof_short: noop-proof phase (10s simplex stall)
+# + IPM solve (up to 60s). Run exclusively for stable timing and safe set_var
+# isolation (no concurrent env-var mutation from other tests in this binary).
+[[profile.default.overrides]]
+filter = "test(lp_simplex_stall_d6cube_noop_proof_short)"
+threads-required = "num-cpus"
+
 # Memory-heavy qplib parse tests peak 100-800 MB each (QPLIB_8500 = 100 MB,
 # QPLIB_8683 = ~50 MB post-fix, QPLIB_8547/9008 DCL = ~700 MB).
 # Running them concurrently stacks memory and can thrash (swap=0) or trip
