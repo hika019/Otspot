@@ -453,24 +453,36 @@ impl KktFactor {
     }
 
     /// Infallible `K · sol = rhs` solve (mirrors `LdlFactorizationAmd::solve`).
-    /// Iterative-backend errors are swallowed; the best-effort solution is left in `sol`.
+    ///
+    /// For the iterative (MINRES) backend the error is swallowed and the
+    /// best-effort partial solution is left in `sol`. Callers that need
+    /// honest failure propagation should use [`Self::solve_with_deadline`].
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
-        self.solve_with_deadline(rhs, sol, None);
+        let _ = self.solve_with_deadline(rhs, sol, None);
     }
 
     /// `solve` with a deadline that the iterative backend honours.
+    ///
+    /// Returns `Err` when the MINRES backend fails to converge or hits the
+    /// deadline. Direct/DirectDd backends always return `Ok(())`. On error,
+    /// `sol` may contain a partial MINRES iterate — callers that need a clean
+    /// failure state should zero `sol` before re-using it.
     pub fn solve_with_deadline(
         &self,
         rhs: &[f64],
         sol: &mut [f64],
         deadline: Option<Instant>,
-    ) {
+    ) -> Result<(), KktError> {
         match self {
-            KktFactor::Direct(ldl) => ldl.solve(rhs, sol),
-            KktFactor::DirectDd(ldl_dd) => ldl_dd.solve(rhs, sol),
-            KktFactor::Iterative(minres) => {
-                let _ = minres.solve(rhs, sol, deadline);
+            KktFactor::Direct(ldl) => {
+                ldl.solve(rhs, sol);
+                Ok(())
             }
+            KktFactor::DirectDd(ldl_dd) => {
+                ldl_dd.solve(rhs, sol);
+                Ok(())
+            }
+            KktFactor::Iterative(minres) => minres.solve(rhs, sol, deadline),
         }
     }
 
@@ -1159,5 +1171,27 @@ mod tests {
         let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
             .expect("f64 LDL factor should succeed");
         assert!(matches!(factor, KktFactor::Direct(_)), "expected Direct with dd_ldl=false");
+    }
+
+    /// Sentinel (P2-A): KktFactor::Iterative::solve_with_deadline propagates Err on MINRES failure.
+    ///
+    /// A past deadline forces MINRES to check stop immediately → DidNotConverge/DeadlineExceeded.
+    ///
+    /// No-op proof: reverting `solve_with_deadline` to return `()` (the old `let _ = ...` form)
+    /// makes this assert fail because the function always returns Ok(()) regardless of MINRES outcome.
+    #[test]
+    fn minres_kkt_factor_solve_with_deadline_err_propagates() {
+        let k = CscMatrix::from_triplets(
+            &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2,
+        ).unwrap();
+        let factor = KktFactor::Iterative(PreconditionedMinres::new(k));
+        let rhs = vec![1.0, 0.0];
+        let mut sol = vec![0.0; 2];
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let result = factor.solve_with_deadline(&rhs, &mut sol, Some(past));
+        assert!(
+            result.is_err(),
+            "MINRES failure must surface as Err; no-op `let _ =` would hide it and return Ok(())"
+        );
     }
 }

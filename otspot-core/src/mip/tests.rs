@@ -1139,3 +1139,41 @@ fn warm_start_propagated_to_child_nodes_sentinel() {
          no-op (child() instead of child_warm()) gives all-false: {received:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-B sentinel: MIQP presolve (tighten_bounds_linear) is applied
+// ---------------------------------------------------------------------------
+
+/// Sentinel (P2-B): MIQP presolve detects infeasibility before B&B.
+///
+/// `x ≤ 3.7 ∧ x ≥ 3.5` with `x ∈ [0,10]` integer and quadratic objective `x²`.
+/// BT: floor(3.7)=3 (ub), ceil(3.5)=4 (lb) → lb > ub → infeasible.
+/// `solve_miqp_with_stats` must return early with `nodes_processed == 0`.
+///
+/// No-op proof: removing `tighten_bounds_linear` from `solve_miqp_with_stats`
+/// causes B&B to run (nodes_processed > 0) → the `nodes_processed == 0` assertion FAILS.
+#[test]
+fn miqp_bt_detects_infeasibility_before_bb() {
+    let qp = qp_problem(
+        &[2.0],
+        vec![0.0],
+        &[0, 1],
+        &[0, 0],
+        &[1.0, 1.0],
+        2,
+        vec![3.7, 3.5],
+        vec![ConstraintType::Le, ConstraintType::Ge],
+        vec![(0.0, 10.0)],
+    );
+    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "x²: x≤3.7 ∧ x≥3.5 integer → BT detects empty domain → Infeasible"
+    );
+    assert_eq!(
+        stats.nodes_processed,
+        0,
+        "MIQP BT must detect infeasibility before B&B (no-op: nodes_processed > 0)"
+    );
+}
