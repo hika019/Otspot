@@ -138,6 +138,7 @@ fn diag_greenbea_dfeas_full_green() {
 
 /// greenbea presolve=off must not NumericalError (~91s; within 180s nextest cap).
 #[test]
+#[ignore = "tier-2 (Mac ~88s / CI 2.5x ~220s); heavy profile で実行 (#97)"]
 fn diag_greenbea_presolve_off_baseline() {
     let (status, elapsed, _obj_rel, dfeas_rel, _timing) = run_once_with_timeout("presolve_off_120", false, 120.0);
     eprintln!(

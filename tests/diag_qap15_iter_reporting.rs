@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::Instant;
 
 #[test]
+#[ignore = "tier-2 (Mac ~18s / CI 2.5x ~44s); heavy profile で実行 (#97)"]
 fn qap15_timeout_reports_nonzero_iter() {
     let path = Path::new("data/lp_problems_extra/qap15.QPS");
     assert!(path.exists(), "data missing: qap15.QPS");

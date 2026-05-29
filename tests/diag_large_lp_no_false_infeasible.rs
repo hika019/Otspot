@@ -98,6 +98,7 @@ fn pilot_no_false_infeasible() {
 /// in the budget so artificials remain in the basis at Timeout; the old
 /// `any_nonzero` heuristic declared this Infeasible (verified during rework).
 #[test]
+#[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
 fn pilot_no_false_infeasible_forced_simplex() {
     assert_not_infeasible_forced_simplex("data/lp_problems/pilot.QPS", 12.0);
 }
@@ -105,6 +106,7 @@ fn pilot_no_false_infeasible_forced_simplex() {
 /// LOAD-BEARING: dfl001 forced through Big-M simplex (un-ignored per #36).
 /// Same mechanism as pilot, larger instance. ~30s (within per-test budget).
 #[test]
+#[ignore = "tier-2 (Mac ~30s / CI 2.5x ~75s); heavy profile で実行 (#97)"]
 fn dfl001_no_false_infeasible_forced_simplex() {
     assert_not_infeasible_forced_simplex("data/lp_problems/dfl001.QPS", 30.0);
 }
@@ -118,6 +120,7 @@ fn ken13_no_false_infeasible() {
 
 /// ken-18 via IPM (~96s; within 180s nextest cap).
 #[test]
+#[ignore = "tier-2 (Mac ~28s / CI 2.5x ~70s); heavy profile で実行 (#97)"]
 fn ken18_no_false_infeasible() {
     assert_not_infeasible_ipm("data/lp_problems/ken-18.QPS", 60.0);
 }
@@ -147,6 +150,7 @@ fn ken18_no_false_infeasible() {
 ///
 /// Budget: 150s total (primal ~68s + Big-M remaining ≤ 3min guideline).
 #[test]
+#[ignore = "tier-2 (Mac ~142s / CI 2.5x ~355s); heavy profile で実行 (#97)"]
 fn pilot87_presolve_false_not_infeasible() {
     let path = Path::new("data/lp_problems/pilot87.QPS");
     assert!(path.exists(), "data missing: {}", path.display());

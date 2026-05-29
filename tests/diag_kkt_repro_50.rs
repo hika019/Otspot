@@ -89,6 +89,7 @@ fn build_qp(
 /// deterministic shape-targeted sentinel. Threshold matches
 /// `diag_kkt_proptest::EPS_KKT_NONCONVEX_LOCAL` / `_GLOBAL`.
 #[test]
+#[ignore = "tier-2 (Mac ~16s / CI 2.5x ~41s); heavy profile で実行 (#97)"]
 fn repro_nonconvex_constrained_shape_sweep() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(QP_TIMEOUT_SECS);

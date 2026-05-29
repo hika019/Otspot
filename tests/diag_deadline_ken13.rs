@@ -98,6 +98,7 @@ fn solve_with_watchdog(
 }
 
 #[test]
+#[ignore = "tier-2 (Mac ~34s / CI 2.5x ~85s); heavy profile で実行 (#97)"]
 fn diag_ken13_deadline_must_stop_within_watchdog() {
     let path = Path::new("data/lp_problems/ken-13.QPS");
     let (status, _) = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-13");
@@ -115,12 +116,14 @@ fn diag_ken13_deadline_must_stop_within_watchdog() {
 }
 
 #[test]
+#[ignore = "tier-2 (Mac ~30s / CI 2.5x ~75s); heavy profile で実行 (#97)"]
 fn diag_ken11_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/ken-11.QPS");
     let _ = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "ken-11");
 }
 
 #[test]
+#[ignore = "tier-2 (Mac ~30s / CI 2.5x ~75s); heavy profile で実行 (#97)"]
 fn diag_dfl001_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/dfl001.QPS");
     let _ = solve_with_watchdog(path, 30.0, Duration::from_secs(60), "dfl001");
@@ -128,6 +131,7 @@ fn diag_dfl001_deadline_regression_guard() {
 
 /// pds-20 needs ~60s solve budget; measured at 61s, within the 180s nextest cap.
 #[test]
+#[ignore = "tier-2 (Mac ~62s / CI 2.5x ~155s); heavy profile で実行 (#97)"]
 fn diag_pds20_deadline_regression_guard() {
     let path = Path::new("data/lp_problems/pds-20.QPS");
     let _ = solve_with_watchdog(path, 60.0, Duration::from_secs(100), "pds-20");
