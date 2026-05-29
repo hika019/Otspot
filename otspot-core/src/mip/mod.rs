@@ -178,14 +178,17 @@ fn solve_mip_with_stats<R: Relaxation>(
     shared.timeout_secs = None;
     shared.multistart = None;
     shared.global_optimization = None;
-    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
-    shared.recover_warm_start_basis = true;
-    shared.warm_start = None;
 
-    // Degenerate: no integer variables → the relaxation is the answer (LP/QP fallback).
+    // Degenerate: no integer variables → pure LP/QP passthrough.
+    // Return before applying MIP-specific warm-start mutations so the caller's
+    // `warm_start` and `recover_warm_start_basis` settings are preserved.
     if problem.integer_vars().is_empty() {
         return (problem.solve(problem.root_bounds(), &shared), stats);
     }
+
+    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
+    shared.recover_warm_start_basis = true;
+    shared.warm_start = None;
 
     let mut state = MipState::new();
     let mut q = NodeQueue::new();
