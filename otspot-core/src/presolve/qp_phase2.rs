@@ -7,6 +7,11 @@ use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
+/// Minimum ratio of rows to columns for equality-constraint QR elimination.
+/// Elimination cost is O(mn²) and only pays off in strongly over-determined
+/// systems (m > n * ROW_OVERDETERMINED_RATIO).
+const ROW_OVERDETERMINED_RATIO: usize = 2;
+
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
@@ -21,9 +26,6 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    // Minimum ratio of rows to columns: elimination cost is O(mn²) and only
-    // pays off in strongly over-determined systems (m > n * ROW_OVERDETERMINED_RATIO).
-    const ROW_OVERDETERMINED_RATIO: usize = 2;
     const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
     if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * ROW_OVERDETERMINED_RATIO || n == 0 {
         return;
