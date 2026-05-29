@@ -129,6 +129,21 @@ impl MiqpProblem {
     pub fn is_convex(&self) -> bool {
         is_q_psd_by_cholesky(&self.qp.q)
     }
+
+    /// Convexity check with an optional size limit.
+    ///
+    /// When `max_n` is `Some(limit)` and `Q.nrows > limit`, skips the Cholesky
+    /// PSD test and returns `true` (assumed convex). Setting a limit lower than
+    /// the actual matrix size creates a soundness hole: a nonconvex Q is accepted,
+    /// making the QP relaxation an invalid lower bound.
+    pub(crate) fn is_convex_with_limit(&self, max_n: Option<usize>) -> bool {
+        if let Some(n) = max_n {
+            if self.qp.q.nrows > n {
+                return true;
+            }
+        }
+        is_q_psd_by_cholesky(&self.qp.q)
+    }
 }
 
 impl Relaxation for MiqpProblem {
@@ -434,5 +449,57 @@ mod tests {
         let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
         let m = MiqpProblem::new(qp, vec![0]).unwrap();
         assert!(m.is_convex(), "large-n PSD-singular Q must be accepted as convex");
+    }
+
+    // Integration-test counterpart with identical Q structure: tests/diag_psd_check_soundness.rs.
+    // Cross-crate boundary prevents sharing; kept separate intentionally.
+    fn indefinite_q_n1001() -> QpProblem {
+        let n = 1001_usize;
+        let mut rows = vec![];
+        let mut cols = vec![];
+        let mut vals = vec![];
+        for i in 0..n {
+            rows.push(i); cols.push(i); vals.push(1.0_f64);
+        }
+        rows.push(0); cols.push(1); vals.push(2.0_f64);
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
+        QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap()
+    }
+
+    /// `is_convex_with_limit(None)` は size 制限なしで indefinite Q を正しく検出する。
+    ///
+    /// **Sentinel**: limit=None で size check を早期 return するよう壊すと false が
+    /// 返らなくなり、このテストが FAIL する。
+    #[test]
+    fn is_convex_with_limit_none_detects_indefinite_n1001() {
+        let m = MiqpProblem::new(indefinite_q_n1001(), vec![0]).unwrap();
+        assert!(
+            !m.is_convex_with_limit(None),
+            "limit=None: n=1001 indefinite Q は non-PSD と検出すべき"
+        );
+    }
+
+    /// `is_convex_with_limit(Some(1000))` は n=1001 > 1000 のためチェックをスキップし true を返す (soundness 穴)。
+    ///
+    /// **Sentinel**: size check を削除すると `is_q_psd_by_cholesky` が走り false を返す
+    /// → このテストが FAIL する。
+    #[test]
+    fn is_convex_with_limit_some_1000_skips_n1001() {
+        let m = MiqpProblem::new(indefinite_q_n1001(), vec![0]).unwrap();
+        assert!(
+            m.is_convex_with_limit(Some(1000)),
+            "limit=Some(1000): n=1001 > 1000 → skip → true (soundness 穴の確認)"
+        );
+    }
+
+    /// `is_convex_with_limit(Some(2000))` は n=1001 ≤ 2000 なので Cholesky が走り false を返す。
+    #[test]
+    fn is_convex_with_limit_some_2000_detects_n1001() {
+        let m = MiqpProblem::new(indefinite_q_n1001(), vec![0]).unwrap();
+        assert!(
+            !m.is_convex_with_limit(Some(2000)),
+            "limit=Some(2000): n=1001 ≤ 2000 → Cholesky → non-PSD 検出"
+        );
     }
 }
