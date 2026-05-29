@@ -21,7 +21,7 @@
 #   これらの問題は全て実行不可能 (INFEASIBLE) であることが既知。
 #   ベンチマーク用途: ソルバーが正しく Infeasible を検出できるか検証する。
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOLVER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

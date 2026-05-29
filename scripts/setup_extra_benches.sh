@@ -8,7 +8,7 @@
 # baseline_objectives/{osqp_bench,mpc_qp}.csv の populate は別途
 # scripts/bench_parallel.sh を回して scripts/baseline_from_bench_log.py で抽出。
 
-set -e
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 

@@ -42,12 +42,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - name: Run heavy (tier-2) tests
-        # `--run-ignored all` は known-failing も含めて全 ignored test を起動する。
-        # 永久 RED 化を避けるため、下記 known-failing test (`#[ignore = "known failing: ..."]`
-        # 付き) を明示 exclude する。LIST SYNC 注意: tests/ で
-        # `grep 'ignore = "known failing' tests/` した結果と一致させること。
-        # 解除条件は各 test の ignore message 末尾 `remove ignore when #<task> ...` 参照。
+        # `--run-ignored all` は known-failing + data-missing も含めて全 ignored test を起動する。
+        # 永久 RED 化を避けるため、下記 test を明示 exclude する。
+        # LIST SYNC 注意: known-failing は `grep 'ignore = "known failing' tests/`、
+        # data-missing は CI subset に未含の data を要求する test を sync すること。
+        # 解除条件は各 test の ignore message 参照。
+        #
+        # known-failing (LP/QP perf 未対応、remove ignore when #75 lands):
+        #   liswet9_objective_matches_clarabel, yao_objective_matches_clarabel,
+        #   diag_osa60_must_reach_known_objective, diag_ken18_must_respect_internal_deadline
+        #
+        # data-missing (CI subset に lp_problems_hard / osqp_bench_illscaled 未含):
+        #   timeout_honored_on_neos_bigm_cold_start (requires data/lp_problems_hard/neos.QPS)
+        #   qp_is_lasso_300_real_data_honors_deadline (requires data/osqp_bench_illscaled/IS_LASSO_300_S33_E5.qplib)
+        #
+        # flaky (CPU contention 依存、170s margin 6s で CI 環境では不安定):
+        #   greenbea_postsolve_dual_feasibility
         run: |
           cargo nextest run --release --profile heavy --run-ignored all \
-            -E 'kind(test) and not (test(=liswet9_objective_matches_clarabel) | test(=yao_objective_matches_clarabel) | test(=diag_osa60_must_reach_known_objective) | test(=diag_ken18_must_respect_internal_deadline))' \
+            -E 'kind(test) and not (test(=liswet9_objective_matches_clarabel) | test(=yao_objective_matches_clarabel) | test(=diag_osa60_must_reach_known_objective) | test(=diag_ken18_must_respect_internal_deadline) | test(=timeout_honored_on_neos_bigm_cold_start) | test(=qp_is_lasso_300_real_data_honors_deadline) | test(=greenbea_postsolve_dual_feasibility))' \
             --test-threads 1

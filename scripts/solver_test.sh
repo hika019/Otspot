@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # solver_test.sh — cargo nextest run のラッパー
 # --release --features parallel を強制注入（debugビルド禁止）
 # 使い方: ./scripts/solver_test.sh [nextest追加オプション]

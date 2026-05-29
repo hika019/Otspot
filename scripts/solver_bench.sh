@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # solver_bench.sh — ベンチマークバイナリのラッパー
 # --release ビルドを強制する。`--eps` は呼出側 (bench_parallel.sh) から指定する。
 # qps_benchmark と bench_qplib の両方に対応。
