@@ -1301,9 +1301,10 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                 *val = 0.0;
             }
         }
+        let pivot = d[leaving_row];
         let leaving_col = basis[leaving_row];
 
-        pricing.update_weights(&basis_mgr, entering_col, leaving_col, d);
+        pricing.update_weights(&basis_mgr, entering_col, leaving_col, pivot, d);
 
         is_basic[leaving_col] = false;
         is_basic[entering_col] = true;

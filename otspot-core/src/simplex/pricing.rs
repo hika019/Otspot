@@ -24,8 +24,16 @@ pub(crate) trait PricingStrategy {
     ///
     /// `entering` = column index entering the basis.
     /// `leaving`  = column index leaving the basis (not the row index).
+    /// `pivot`    = `eta[leaving_row]`, the pivot element.
     /// `eta`      = B⁻¹ * a_entering (FTRAN of entering column, dense).
-    fn update_weights(&mut self, basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]);
+    fn update_weights(
+        &mut self,
+        basis: &LuBasis,
+        entering: usize,
+        leaving: usize,
+        pivot: f64,
+        eta: &[f64],
+    );
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -50,7 +58,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {}
+    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: f64, _: &[f64]) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -58,21 +66,37 @@ impl PricingStrategy for DantzigPricing {
 /// Maintains γ[j] ≈ ‖B⁻¹ a_j‖² for each non-basic column j.
 /// Selects the entering variable maximising `-rc_j / sqrt(γ_j)`.
 ///
-/// Weight update after a pivot with pivot column η = B⁻¹ a_entering:
+/// Weight update after a pivot:
 ///   γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
 ///   γ[entering] ← 1.0   (reset; entering becomes basic)
 ///   γ[other j]  unchanged (approximation; exact update requires per-column FTRAN)
 ///
-/// **Attempted simplification (reverted)**: `‖η‖² / pivot²` (pivot = η[leaving_row],
-/// the textbook Devex formula, Harris 1973 § 5 / Bixby 1992) was tested but caused
-/// `NumericalError` (SingularBasis) on wood1p (n=2594, m=244).  Root cause: when
-/// large η components exist outside the Harris ratio-test window, ‖η‖²/pivot² blows
-/// up → permanent column exclusion → numerically unstable basis sequences.  On
-/// grow22 the new formula reduced iterations 63 % and on 25fv47 69 %, but wood1p
-/// broke — mixed result, not universally better (memory `feedback_single_path_maintenance`).
-/// The `‖η‖² / γ[entering]` formula provides implicit damping via accumulated γ
-/// values that prevents this pathology.  Do not re-introduce `‖η‖²/pivot²` without
-/// a weight cap (e.g., clip at `m`) or a per-refactor reset to counter blow-up.
+/// The numerically exact leaving-column weight is `‖η‖²/pivot²` (Sherman-Morrison
+/// update of B⁻¹).  Three attempts at that formula all produced bench regressions
+/// on the Netlib LP suite (see retreat history below), so we use `γ[entering]`
+/// as the denominator.  When |pivot| is small, γ[entering] tends to be large
+/// (the entering column had high steepest-edge weight), providing implicit damping
+/// that keeps γ[leaving] finite without any explicit cap.
+///
+/// **Retreat history — pivot² variants tried in #146 (all rejected):**
+///
+/// Attempt 1 (pivot² with per-column cap at 1·m): wood1p 14s → 2.7s, but
+/// maros (m=846) DFEAS_FAIL.  Normal pivots produce weights in [m, 100·m];
+/// capping at m distorts pricing for those problems.
+///
+/// Attempt 2 (pivot² with per-column cap at 100·m): wood1p PASS, grow22 PASS,
+/// but maros FAIL:Infeasible (feasible problem declared infeasible in 0.7s).
+/// Large weights under cap-100m altered the pricing sequence enough to trigger
+/// a false infeasibility conclusion in Phase 1.
+///
+/// Attempt 3 (pivot² with global weight reset when any weight > 100·m): maros
+/// PASS, but grow22 PFEAS_FAIL.  A full reset wipes pricing history for all
+/// columns, causing Dantzig-like selection mid-solve that reaches a different
+/// optimal vertex and exposes a postsolve bound-check failure.
+///
+/// All three are mixed (improve some, regress others) and violate the
+/// single-path principle (CLAUDE.md).  Retreat to γ[entering] formula confirmed
+/// on full Netlib LP bench: 109/109 PASS, eps=1e-6, timeout=1000s.
 ///
 /// Weights start at 1.0 and are non-decreasing per column (the `max` prevents
 /// reducing a weight). Columns that never leave the basis retain γ = 1.0 and
@@ -118,25 +142,25 @@ impl PricingStrategy for SteepestEdgePricing {
         entering
     }
 
-    /// Devex weight update for the leaving column.
+    /// Devex weight update using γ[entering] as denominator.
     ///
     /// γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
+    /// γ[entering] ← 1.0
     ///
-    /// Using γ[entering] in the denominator provides implicit damping: columns
-    /// that accumulated large weights before entering suppress the update,
-    /// preventing unbounded γ growth.  See struct docstring for the reverted
-    /// `‖η‖²/pivot²` variant and why the damping property matters.
-    fn update_weights(&mut self, _basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]) {
-        let gamma_entering = self
-            .weights
-            .get(entering)
-            .copied()
-            .unwrap_or(1.0)
-            .max(GAMMA_FLOOR);
-
+    /// See struct docstring for the retreat history documenting why the
+    /// numerically exact pivot² formula was abandoned.
+    fn update_weights(
+        &mut self,
+        _basis: &LuBasis,
+        entering: usize,
+        leaving: usize,
+        _pivot: f64,
+        eta: &[f64],
+    ) {
         if leaving < self.weights.len() {
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let new_weight = (eta_norm_sq / gamma_entering).max(GAMMA_FLOOR);
+            let gamma_e = self.weights.get(entering).copied().unwrap_or(1.0).max(GAMMA_FLOOR);
+            let new_weight = (eta_norm_sq / gamma_e).max(GAMMA_FLOOR);
             self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
 
@@ -289,37 +313,34 @@ mod tests {
         assert!(entering == Some(0) || entering == Some(1));
     }
 
+    fn make_identity_basis_2x2() -> crate::basis::LuBasis {
+        let a = crate::sparse::CscMatrix::from_triplets(
+            &[0, 1], &[0, 1], &[1.0, 1.0], 2, 2,
+        ).unwrap();
+        crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
+    }
+
     /// Sentinel: `update_weights` uses γ[entering] in the denominator (not pivot²).
     ///
     /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
     ///
-    /// With η = [0, 3, 4, 0, 0] and γ[entering=2] = 7.0:
-    ///   ‖η‖² = 25, new_weight = 25/7 ≈ 3.571
+    /// With η = [0, 3, 4, 0, 0] (‖η‖² = 25), γ[entering] = 7.0, pivot = 3.0:
+    ///   γ[entering] formula: 25 / 7 ≈ 3.571
+    ///   pivot² formula:      25 / 9 ≈ 2.778  (different — no-op test would see this)
     ///
-    /// If pivot² were used (pivot = η[1] = 3, pivot² = 9): 25/9 ≈ 2.778 — different.
-    /// Using γ[entering] provides implicit weight damping (see struct docstring).
-    /// Changing the denominator to pivot² re-introduces the reverted formula.
+    /// A no-op implementation (e.g. returning early without updating) would leave
+    /// γ[leaving] = 1.0, which is strictly less than 3.571 and fails the assertion.
     #[test]
     fn devex_leaving_weight_uses_gamma_entering() {
         let mut pricing = SteepestEdgePricing::new(5);
-        // Pre-set entering weight to a non-1 value so the formula is non-trivial.
-        pricing.weights[2] = 7.0;
+        pricing.weights[2] = 7.0; // γ[entering] = 7.0
+        let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0]; // ‖η‖² = 25
+        let pivot = 3.0; // passed through but must NOT be used
+        let expected = 25.0_f64 / 7.0_f64; // γ[entering] formula
 
-        let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0];
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, pivot, &eta);
 
-        let a_id = crate::sparse::CscMatrix::from_triplets(
-            &[0, 1], &[0, 1], &[1.0, 1.0], 2, 2,
-        ).unwrap();
-        let basis_id = crate::basis::LuBasis::new(&a_id, &[0, 1], 50).unwrap();
-
-        pricing.update_weights(
-            &basis_id,
-            2, // entering (γ = 7.0)
-            3, // leaving col
-            &eta,
-        );
-
-        let expected = 25.0_f64 / 7.0_f64; // ‖η‖² / γ[entering]
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
             "expected γ[leaving] = {:.6} (‖η‖²/γ[entering]), got {:.6}",
@@ -327,6 +348,47 @@ mod tests {
             pricing.weights[3]
         );
         assert_eq!(pricing.weights[2], 1.0, "entering column weight must reset to 1");
+    }
+
+    /// Sentinel: degenerate pivot does NOT blow up γ[leaving] (γ[entering] damps it).
+    ///
+    /// With η = [0, 0.01, 4, 0, 0] (‖η‖² ≈ 16.0001), γ[entering] = 2.0, pivot = 1e-5:
+    ///   γ[entering] formula: 16.0001 / 2.0 ≈ 8.0  (finite, no cap needed)
+    ///   pivot² formula:      16.0001 / 1e-10 ≈ 1.6e11  (blow-up, required explicit cap)
+    ///
+    /// This confirms that γ[entering] provides implicit numerical damping for degenerate
+    /// pivots without needing a hard cap.  Other column weights must remain untouched
+    /// (no global reset side-effect).
+    #[test]
+    fn devex_degenerate_pivot_no_blowup() {
+        let mut pricing = SteepestEdgePricing::new(5);
+        pricing.weights[0] = 3.0;
+        pricing.weights[1] = 5.0;
+        pricing.weights[2] = 2.0; // γ[entering] = 2.0
+        let eta = vec![0.0, 0.01_f64, 4.0, 0.0, 0.0]; // ‖η‖² ≈ 16.0001
+        let pivot = 1e-5_f64; // degenerate; must NOT enter denominator
+        let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
+        let expected = eta_norm_sq / 2.0; // γ[entering]=2.0
+
+        let basis_id = make_identity_basis_2x2();
+        pricing.update_weights(&basis_id, 2, 3, pivot, &eta);
+
+        assert!(
+            (pricing.weights[3] - expected).abs() < 1e-10,
+            "degenerate pivot: expected γ[leaving]={:.6} (finite), got {:.6}",
+            expected,
+            pricing.weights[3]
+        );
+        assert!(
+            (pricing.weights[0] - 3.0).abs() < 1e-15,
+            "γ[0] must stay at 3.0 (no global reset), got {:.6}",
+            pricing.weights[0]
+        );
+        assert!(
+            (pricing.weights[1] - 5.0).abs() < 1e-15,
+            "γ[1] must stay at 5.0 (no global reset), got {:.6}",
+            pricing.weights[1]
+        );
     }
 
     /// Sentinel: `reset_weights` clears all weights to 1.0.
