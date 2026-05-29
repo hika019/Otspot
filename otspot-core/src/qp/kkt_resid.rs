@@ -186,9 +186,8 @@ pub mod f64_impl {
     /// 表面化させるオラクルとして機能する。generic 化しないのはこの経路分離を
     /// 維持するためである。
     ///
-    /// 用途: `bench_utils` 報告専用。`prove_optimal` の primal 残差ゲートは
-    /// DD 版を使用する。撤廃 (常時 0.0 返却) では標準 test suite 912 件が全 PASS —
-    /// ゲートとして依存されていないことを実測確認済み。
+    /// `bench_utils` 報告専用。ゲートとして依存されていないことを実測確認済み
+    /// (撤廃で標準 test suite 非 ignored 全件 PASS、`primal_residual_rel_uses_dd_to_avoid_f64_cancellation` 参照)。
     ///
     /// Internal utility for `otspot-dev`; not part of the stable public API.
     #[doc(hidden)]

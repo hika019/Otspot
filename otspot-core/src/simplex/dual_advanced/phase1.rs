@@ -195,7 +195,7 @@ impl DualLeavingStrategy for ArtificialPriorityLeaving {
 /// ||b||_∞ >> 1000 の Netlib 問題 (例: dfl001 の ||b||_∞ ≈ 1e6) では
 /// big_m が 1e9 → 1e6 に低下し問題スケールと同程度になるため
 /// 人工変数コストが目的関数に対して支配的でなくなり Phase I が収束不全になる可能性がある
-/// (`lp_coverage_screen_all` で確認可能)。
+/// (heavy tier: `lp_coverage_screen_all` で確認可能)。
 const BIG_M_COST_MULT: f64 = 1e3;
 
 /// Big-M ペナルティの下限。

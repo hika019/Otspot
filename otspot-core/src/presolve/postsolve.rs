@@ -946,8 +946,7 @@ pub fn run_postsolve(
     // LSQ が同一データで stagnate すると期待されるため skip する
     // (dfl001: LSQ が postsolve の 98% ≈ ~3s を消費、lp_dispatch.rs bench 実測)。
     // 撤廃 (0.0) では標準 test suite に退化なし (dfl001 は #[ignore])。
-    // lp_dispatch.rs の IPM_BUDGET_FRACTION コメント参照:
-    //   skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
+    // (lp_dispatch.rs: dfl001 bench 実測) skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
     const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
     let cleanup_stagnant = df_cl_min.is_finite()
         && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
