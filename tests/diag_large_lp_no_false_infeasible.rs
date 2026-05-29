@@ -116,11 +116,8 @@ fn ken13_no_false_infeasible() {
     assert_not_infeasible_ipm("data/lp_problems/ken-13.QPS", 60.0);
 }
 
-/// ken-18 via IPM. Heaviest instance — kept ignored for the normal suite
-/// (CLAUDE.md 3-min guideline); run individually for cross-check:
-/// `cargo nextest run --release ken18_no_false_infeasible --run-ignored all`.
+/// ken-18 via IPM (~96s; within 180s nextest cap).
 #[test]
-#[ignore = "heavy: ken-18 IPM up to 60s — individual cross-check only"]
 fn ken18_no_false_infeasible() {
     assert_not_infeasible_ipm("data/lp_problems/ken-18.QPS", 60.0);
 }
