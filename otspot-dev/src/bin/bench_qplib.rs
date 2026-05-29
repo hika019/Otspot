@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
-    load_baseline_objectives, load_expected_statuses, parse_qplib_with_timeout, ExpectedStatus,
+    load_baseline_objectives, load_expected_statuses, parse_qplib_outcome, ExpectedStatus,
     ObjCheckResult, ParseQplibOutcome,
 };
 use otspot_core::options::{GlobalOptimizationConfig, SolverOptions};
@@ -247,7 +247,7 @@ fn main() {
         let parse_start = Instant::now();
         println!("PARSE_START: {}", name);
 
-        let prob = match parse_qplib_with_timeout(path, 30) {
+        let prob = match parse_qplib_outcome(path) {
             ParseQplibOutcome::Qp(p) => *p,
             ParseQplibOutcome::Unsupported(msg) => {
                 // parse_qplib::UnsupportedType message に基づき category 分類

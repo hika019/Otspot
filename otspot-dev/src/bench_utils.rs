@@ -9,7 +9,6 @@ use otspot_core::qp::QpProblem;
 use otspot_core::sparse::CscMatrix;
 use otspot_core::tolerances::{PIVOT_TOL, ZERO_TOL};
 use otspot_io::qplib::{parse_qplib, QplibError, QplibProblem};
-use otspot_io::qps::parse_qps;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -328,20 +327,15 @@ pub enum ParseQplibOutcome {
     ParseError(String),
 }
 
-/// Parse a QPS file, ignoring the unused timeout argument.
-///
-/// The timeout is not enforced at the Rust level; external process-level
-/// timeout (e.g. `gtimeout` in `bench_parallel.sh`) handles runaway parses.
-pub fn parse_qps_with_timeout(path: &Path, _timeout_secs: u64) -> Result<QpProblem, String> {
-    parse_qps(path).map_err(|e| e.to_string())
-}
-
-/// Parse a QPLIB file and extract the continuous QP case.
+/// Parse a QPLIB file and classify the result as [`ParseQplibOutcome`].
 ///
 /// MIP (MILP/MIQP) and quadratically-constrained problems are returned as
 /// [`ParseQplibOutcome::Unsupported`]. Parse failures map to
 /// [`ParseQplibOutcome::ParseError`].
-pub fn parse_qplib_with_timeout(path: &Path, _timeout_secs: u64) -> ParseQplibOutcome {
+///
+/// External process-level timeout (e.g. `gtimeout` in `bench_parallel.sh`)
+/// handles runaway parses; no Rust-level timeout is applied.
+pub fn parse_qplib_outcome(path: &Path) -> ParseQplibOutcome {
     match parse_qplib(path) {
         Ok(QplibProblem::Qp(prob)) => ParseQplibOutcome::Qp(Box::new(prob)),
         Ok(QplibProblem::Milp(_)) | Ok(QplibProblem::Miqp(_)) => ParseQplibOutcome::Unsupported(

@@ -181,8 +181,6 @@ pub fn postsolve_qp_with_dual_recovery(
         return sol;
     }
 
-    let n = orig_problem.num_vars;
-    let _ = n;
     // bound_duals レイアウトを正しく orig_problem の bounds に揃える。
     // postsolve_qp は reduced 空間の bound_duals をそのまま clone してくるため、
     // 元 bounds の lb/ub 数と長さが合わない場合がある。core.rs::run_ipm_with の

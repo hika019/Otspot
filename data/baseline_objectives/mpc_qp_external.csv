@@ -1,0 +1,71 @@
+# 出典: Clarabel (主) eps=1e-9, fallback OSQP. 外部リファレンス。
+# 用途: 自ソルバ obj との独立 cross-check (PASS と別軸の正当性検証)。
+# Source: independent Clarabel/OSQP solve at high accuracy.
+# Purpose: cross-validate own solver's obj (independent of self-PASS).
+# 注意: OSQP は ADMM ベースで偽 infeasibility を出すケースがあり、
+#       Clarabel (IPM) を主に使用。LIPMWALK4 等で OSQP が誤判定する実例あり。
+problem_name,optimal_obj,source,ext_status
+LIPMWALK0,-2.342658e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK1,-3.726735e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK10,-1.071416e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK11,-1.000287e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK12,-2.701781e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK13,-4.565130e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK14,-6.538104e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK15,-8.502613e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK16,-9.939536e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK17,-1.021310e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK18,-8.782419e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK19,-6.225833e-02,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK2,-2.541377e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK20,-3.298270e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK21,-5.083389e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK22,-6.927890e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK23,-8.779909e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK24,-1.013583e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK25,-1.036808e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK26,-8.928381e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK27,-6.479970e-02,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK28,-3.245257e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK29,-5.046432e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK3,-4.589481e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK4,-4.372917e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK5,-2.911764e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK6,-2.845288e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK7,-3.935298e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK8,-5.989491e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+LIPMWALK9,-8.578035e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+QUADCMPC1,3.499175e-03,clarabel_eps1e-9_t0s,clarabel:Solved
+QUADCMPC2,4.089082e-03,clarabel_eps1e-9_t0s,clarabel:Solved
+QUADCMPC3,3.246521e-21,clarabel_eps1e-9_t0s,clarabel:Solved
+QUADCMPC4,5.127754e-21,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL0,-4.568031e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL1,-1.072486e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL10,-1.218460e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL11,-1.108648e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL12,-1.005371e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL13,-9.087718e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL14,-8.188485e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL15,-7.355125e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL16,-6.586080e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL17,-5.879257e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL18,-5.232141e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL19,-4.641892e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL2,-4.445160e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL20,-4.105434e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL21,-3.619543e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL22,-3.180914e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL23,-2.786230e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL24,-2.432209e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL25,-2.115647e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL26,-1.833454e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL27,-1.582672e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL28,-1.360500e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL29,-1.164297e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL3,-1.076435e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL4,-1.648849e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL5,-1.751798e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL6,-1.688601e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL7,-1.577133e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL8,-1.455162e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+WHLIPBAL9,-1.334375e+04,clarabel_eps1e-9_t0s,clarabel:Solved

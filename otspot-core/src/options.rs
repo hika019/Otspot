@@ -358,10 +358,12 @@ pub struct IpmOptions {
     /// MINRES iterative-refinement rounds applied after each MINRES solve.
     /// `None` uses 0 (disabled by default; auto-Schur makes this unnecessary in practice).
     /// Must be `<= 10`.
+    #[doc(hidden)]
     pub minres_ir: Option<usize>,
     /// Memory budget for KKT LDL factorization in bytes.
     /// `None` uses the 4 GiB default.  Factorizations predicted to exceed the budget
     /// fall back to MINRES automatically.
+    #[doc(hidden)]
     pub kkt_memory_budget_bytes: Option<usize>,
 }
 

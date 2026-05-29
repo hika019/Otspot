@@ -178,7 +178,10 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     let x: Vec<f64> = bounds.iter().map(|&(l, u)| 0.5 * (l + u)).collect();
 
     if qp.num_constraints > 0 {
-        let lhs = qp.a.mat_vec_mul(&x).ok()?;
+        let lhs = match qp.a.mat_vec_mul(&x) {
+            Ok(v) => v,
+            Err(_) => return Some(SolverResult::numerical_error()),
+        };
         for ((&lhs_k, &ct), &b_k) in lhs.iter().zip(&qp.constraint_types).zip(&qp.b) {
             let feasible = match ct {
                 ConstraintType::Le => lhs_k <= b_k + FIXED_POINT_FEAS_TOL,
@@ -192,7 +195,10 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     }
 
     // Objective 1/2 x'Qx + c'x + offset (Q is full-symmetric CSC storage).
-    let qx = qp.q.mat_vec_mul(&x).ok()?;
+    let qx = match qp.q.mat_vec_mul(&x) {
+        Ok(v) => v,
+        Err(_) => return Some(SolverResult::numerical_error()),
+    };
     let quad: f64 = 0.5 * x.iter().zip(&qx).map(|(xi, qxi)| xi * qxi).sum::<f64>();
     let lin: f64 = qp.c.iter().zip(&x).map(|(ci, xi)| ci * xi).sum::<f64>();
     Some(SolverResult {
@@ -311,6 +317,27 @@ mod tests {
     }
 
     #[test]
+    fn fixed_point_dim_mismatch_q_returns_numerical_error() {
+        // 2-var QP but only 1 bound: x.len()=1 != Q.ncols=2 → mat_vec_mul error.
+        // Must return Some(NumericalError), not None (which would silently fall to IPM).
+        let qp = qp_diag(&[2.0, 2.0]);
+        let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
+        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
+    }
+
+    #[test]
+    fn fixed_point_dim_mismatch_a_returns_numerical_error() {
+        // 2-var QP with a constraint: x.len()=1 but A.ncols=2 → A mat_vec_mul error.
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![5.0], vec![(0.0, 5.0); 2]).unwrap();
+        let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
+        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
+    }
+
+    #[test]
     fn psd_with_off_diagonal_detected() {
         // Q = [[2,1],[1,2]] (full-symmetric storage) is PSD (eigenvalues 1, 3).
         let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
@@ -369,32 +396,6 @@ mod tests {
             !m.is_convex(),
             "n=1001 indefinite MIQP (diag≥0, off-diag λ_min=-1) must be detected as \
              nonconvex; `return true` for n>1000 produces false-Optimal (sentinel)"
-        );
-    }
-
-    /// **No-op proof**: documents that the old unconditional-true path produces
-    /// false-Optimal. Sparse LDL correctly returns false for the same Q.
-    ///
-    /// This test fails as written under the fix (both `assert!`s would need to pass),
-    /// but is structured to make the bug explicit: the first assert shows old-code
-    /// behaviour; the second shows the fix.
-    #[test]
-    fn no_op_proof_old_dense_limit_gives_false_optimal() {
-        let m = large_n_indefinite_miqp(1001);
-        let q = &m.qp.q;
-        // Old code silently assumed convex for n > 1000:
-        //   if n > PSD_DENSE_LIMIT { return true; }
-        // Simulate that path: for n=1001 it always returned true.
-        let old_path_result = q.nrows > 1000; // unconditional true for our matrix
-        assert!(
-            old_path_result,
-            "old path: n>1000 always returned is_convex=true \
-             (leads B&B to produce false-Optimal for indefinite Q)"
-        );
-        // Fixed path: sparse LDLᵀ correctly detects indefinite.
-        assert!(
-            !is_q_psd_by_cholesky(q),
-            "fix: sparse LDL reports false for indefinite Q; solver rejects with nonconvex_result"
         );
     }
 
