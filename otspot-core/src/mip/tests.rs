@@ -149,6 +149,61 @@ fn no_integer_vars_falls_back_to_lp() {
     assert!((r.objective - direct.objective).abs() < EPS);
 }
 
+/// Sentinel: LP/QP fallback (empty `integer_vars`) preserves caller's `warm_start`.
+///
+/// When `integer_vars()` is empty the driver is a pure LP/QP passthrough.
+/// The MIP-specific mutations (`recover_warm_start_basis=true`, `warm_start=None`)
+/// must be applied **after** the early-return check so the caller's options reach
+/// the underlying solver unmodified.
+///
+/// Sentinel: moving the mutations before the early-return silently discards
+/// `opts.warm_start` → mock receives `None` → `warm_start_received=false` →
+/// **this test FAILS**.
+#[test]
+fn no_integer_vars_fallback_preserves_caller_warm_start() {
+    use std::cell::Cell;
+    use crate::options::WarmStartBasis;
+    use crate::problem::SolverResult;
+
+    struct PureLpMock {
+        warm_start_received: Cell<bool>,
+        root_bounds: [(f64, f64); 1],
+        int_vars: [usize; 0],
+    }
+
+    impl PureLpMock {
+        fn new() -> Self {
+            Self { warm_start_received: Cell::new(false), root_bounds: [(0.0, 5.0)], int_vars: [] }
+        }
+    }
+
+    impl super::Relaxation for PureLpMock {
+        fn num_vars(&self) -> usize { 1 }
+        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
+        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
+            self.warm_start_received.set(opts.warm_start.is_some());
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: 0.0,
+                solution: vec![0.0],
+                ..SolverResult::default()
+            }
+        }
+    }
+
+    let user_ws = WarmStartBasis { basis: vec![0], x_b: vec![0.0] };
+    let opts_with_ws = SolverOptions { warm_start: Some(user_ws), ..opts() };
+    let mock = PureLpMock::new();
+    let (r, _) = super::solve_mip_with_stats(&mock, &opts_with_ws, &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        mock.warm_start_received.get(),
+        "LP/QP fallback must forward caller's warm_start to the solver; \
+         no-op (mutate before early-return) gives warm_start=None → false"
+    );
+}
+
 #[test]
 fn two_var_general_integer_program() {
     // min -(x + y) s.t. x + y <= 3.5, x <= 2.5, y <= 2.5, x,y in [0,5] integer.
