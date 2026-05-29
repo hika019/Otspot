@@ -2,7 +2,9 @@
 # 用途: 退行検知（過去の自己ベストとの比較）。
 # Source: measured by this solver's benchmark runs. NOT externally verified optimal values.
 # Purpose: regression detection (comparison against own historical best).
-problem_name,optimal_obj,source
+# optional? column: empty = required (OSQP_* problems); * = optional (SS_* SuiteSparse problems,
+#   only present when setup_extra_benches.sh runs without --no-suitesparse).
+problem_name,optimal_obj,source,optional?
 OSQP_CONTROL_10,1.010000e+00,bench_2026-05-06_osqp_full_600s
 OSQP_CONTROL_20,5.130000e+00,bench_2026-05-06_osqp_full_600s
 OSQP_CONTROL_50,9.830000e+00,bench_2026-05-06_osqp_full_600s
@@ -33,3 +35,35 @@ OSQP_SVM_10,4.080000e+02,bench_2026-05-06_osqp_full_600s
 OSQP_SVM_100,4.060000e+03,bench_2026-05-06_osqp_full_600s
 OSQP_SVM_20,8.130000e+02,bench_2026-05-06_osqp_full_600s
 OSQP_SVM_50,2.010000e+03,bench_2026-05-06_osqp_full_600s
+SS_HUBER_ABB313,8.160000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH219,5.640000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH292,3.200000e-01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH331,8.750000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH608,1.730000e+02,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH85,2.560000e-09,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ASH958,2.740000e+02,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ILLC1033,2.830000e-01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_ILLC1850,8.170000e-01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_MARAGAL_1,-1.870000e-06,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_MARAGAL_2,-1.450000e-07,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_MARAGAL_3,-1.050000e-04,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_MARAGAL_4,-1.130000e-04,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_MARAGAL_5,-1.340000e-06,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_WELL1033,2.830000e-01,bench_2026-05-06_osqp_full_600s,*
+SS_HUBER_WELL1850,8.170000e-01,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ABB313,1.020000e+03,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH219,3.880000e+02,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH292,1.480000e+03,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH331,7.330000e+02,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH608,1.090000e+03,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH85,2.670000e+02,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ASH958,1.740000e+03,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ILLC1033,2.070000e+07,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_ILLC1850,2.210000e+07,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_MARAGAL_1,1.870000e+00,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_MARAGAL_2,2.000000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_MARAGAL_3,1.960000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_MARAGAL_4,3.730000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_MARAGAL_5,8.760000e+01,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_WELL1033,1.360000e+07,bench_2026-05-06_osqp_full_600s,*
+SS_LASSO_WELL1850,1.600000e+07,bench_2026-05-06_osqp_full_600s,*

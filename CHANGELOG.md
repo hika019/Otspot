@@ -14,6 +14,9 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 内部
 
+- `osqp_bench.csv` に SS_* SuiteSparse 行を統合 (optional? 列 `*` でマーク、旧 `osqp_bench_optional.csv` 削除、#133):
+  以前の split 設計 (osqp_bench.csv + osqp_bench_optional.csv) は bench_utils::detect_csv_path が optional CSV を
+  load しないため SS_* baseline が bench runner の退行検知から除外される欠陥があった。single-file 設計で修正。
 - `LP_CRASH_DUAL_ADV_DISABLE` 環境変数削除 (`use_lp_crash_basis` option と dual-path 完全冗長、#101 audit A2、commit 713d9be)
 - otspot-dev 未参照 bin 4 件削除 (`qp_dump` / `lp_screen` / `verify_solutions` / `qp_diag`、#101 audit deadcode、commit dcfde53)
 - step9 混合型並行行スキップに撤退根拠 docstring 化 (#99、commit 2b0e66a)

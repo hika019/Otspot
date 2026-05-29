@@ -2,12 +2,12 @@
 """Verify baseline CSV vs actual data directory consistency.
 
 Checks:
-  1. File count in data dir matches or exceeds CSV row count.
-  2. Every CSV name has a corresponding data file (CSV_GAP → exit 1).
-  3. Reports files present in the directory but missing from the CSV (no_ref gap).
+  1. Every required CSV row has a corresponding data file (CSV_GAP → exit 1).
+  2. Optional CSV rows (4th column = "*") with no data file emit [opt-gap] but do not fail.
+  3. Files present in the directory but missing from the CSV are reported as no_ref.
      no_ref alone does not fail unless --strict is passed.
 
-Exit code: 0 = all checks pass, 1 = CSV_GAP found (or --strict + no_ref).
+Exit code: 0 = all checks pass, 1 = CSV_GAP (required row missing) or --strict + no_ref.
 
 Usage:
     python3 scripts/check_data_coverage.py [--repo-root DIR] [--strict]
@@ -16,7 +16,7 @@ Options:
     --repo-root DIR   Path to repo root (default: parent of this script's dir).
     --strict          Exit 1 if any no_ref files exist.
 
-Policies (fact-based, updated 2026-05-26):
+Policies (fact-based, updated 2026-05-30):
   MIPLIB gate (miplib_small):
     No CSV baseline. MIP bench is informational only; not a CI gate until
     B&B cut/presolve lands (Plan#9 #22). When promoted: create
@@ -28,6 +28,17 @@ Policies (fact-based, updated 2026-05-26):
     tests/fixtures/ (or tests/data/). These bypass the data/ download
     requirement for unit tests. Implementation: task #17.
     Candidates: QPLIB_8495, AUG2D (Maros), afiro (Netlib LP).
+
+  osqp_bench optional rows (SS_*):
+    SuiteSparse matrix problems added by setup_extra_benches.sh (skipped
+    with --no-suitesparse). Marked optional? = * in osqp_bench.csv.
+    Missing SS_* files → [opt-gap] warning only, exit 0.
+
+    Design note: an earlier split design (case a) used a separate
+    osqp_bench_optional.csv loaded only by check_data_coverage.py, not by
+    bench_utils::detect_csv_path. This caused SS_* baselines to be silently
+    excluded from bench runner regression checks (PASS[no_ref] regression).
+    Single-file design (case b, current) avoids that coverage gap.
 """
 
 import argparse
@@ -42,7 +53,6 @@ class Dataset(NamedTuple):
     csv_path: str | None
     exts: list[str] | None
     origin: str
-    optional: bool = False
 
 
 # origin: "official" | "official_gen" | "synthetic"
@@ -55,11 +65,10 @@ DATASETS: list[Dataset] = [
     Dataset("qplib_nonconvex_official", "data/baseline_objectives/qplib_nonconvex_official.csv",
             [".qplib"], "official"),
     # QP official-derived (generated from official problem definitions)
+    # osqp_bench.csv contains both required OSQP_* rows and optional SS_* rows
+    # (optional? column = "*"); bench_utils::detect_csv_path loads this single file.
     Dataset("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
             [".qps"], "official_gen"),
-    # SuiteSparse problems added by setup_extra_benches.sh (skipped with --no-suitesparse)
-    Dataset("osqp_bench", "data/baseline_objectives/osqp_bench_optional.csv",
-            [".qps"], "official_gen", optional=True),
     Dataset("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
             [".qps"], "official_gen"),
     # QP synthetic (no external reference by design)
@@ -90,10 +99,15 @@ DATASETS: list[Dataset] = [
 ]
 
 
-def read_csv_names(csv_path: Path) -> set[str]:
-    names: set[str] = set()
+def read_csv_rows(csv_path: Path) -> list[tuple[str, bool]]:
+    """Return (problem_name, is_optional) for each data row in the CSV.
+
+    The 4th column (optional?) marks optional rows: "*" or "1" = optional,
+    absent or empty = required.
+    """
+    rows: list[tuple[str, bool]] = []
     if not csv_path.exists():
-        return names
+        return rows
     for line in csv_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -101,8 +115,10 @@ def read_csv_names(csv_path: Path) -> set[str]:
         parts = line.split(",")
         if parts[0] == "problem_name":
             continue
-        names.add(parts[0])
-    return names
+        name = parts[0]
+        optional = len(parts) >= 4 and parts[3].strip() in ("*", "1")
+        rows.append((name, optional))
+    return rows
 
 
 def data_files(data_dir: Path, extensions: list[str] | None) -> set[str]:
@@ -140,16 +156,6 @@ def main() -> int:
     ok = True
     rows = []
 
-    # Build union of all CSV names per directory across all DATASETS entries.
-    # Multiple entries sharing a directory (e.g. core + optional CSVs) must be
-    # unioned before computing no_ref to avoid false positives in --strict mode.
-    dir_to_union_csv: dict[str, set[str]] = {}
-    for ds in DATASETS:
-        if ds.csv_path:
-            dir_to_union_csv.setdefault(ds.name, set()).update(
-                read_csv_names(root / ds.csv_path)
-            )
-
     for ds in DATASETS:
         data_dir = root / "data" / ds.name
         csv_path = root / ds.csv_path if ds.csv_path else None
@@ -157,29 +163,32 @@ def main() -> int:
         if not data_dir.is_dir():
             rows.append({
                 "dataset": ds.name,
-                "optional": ds.optional,
                 "origin": ds.origin,
                 "files": 0,
                 "csv_rows": 0,
                 "no_ref": 0,
                 "csv_gap": 0,
+                "opt_gap": 0,
                 "status": "MISSING_DIR",
             })
             continue
 
         all_files = data_files(data_dir, ds.exts)
-        csv_names = read_csv_names(csv_path) if csv_path else set()
-        union_csv_names = dir_to_union_csv.get(ds.name, set())
-        no_ref = all_files - union_csv_names  # in dir, not in any CSV for this dir
-        csv_gap = csv_names - all_files  # in this entry's CSV, not in dir
+        csv_row_list = read_csv_rows(csv_path) if csv_path else []
+        csv_all_names = {name for name, _ in csv_row_list}
+        csv_required = {name for name, opt in csv_row_list if not opt}
+        csv_optional = {name for name, opt in csv_row_list if opt}
+
+        no_ref = all_files - csv_all_names
+        csv_gap = csv_required - all_files      # required rows with no file → fail
+        opt_gap = csv_optional - all_files      # optional rows with no file → warn only
 
         status_parts = []
         if csv_gap:
-            if ds.optional:
-                status_parts.append(f"CSV_GAP:{len(csv_gap)} (opt)")
-            else:
-                status_parts.append(f"CSV_GAP:{len(csv_gap)}")
-                ok = False
+            status_parts.append(f"CSV_GAP:{len(csv_gap)}")
+            ok = False
+        if opt_gap:
+            status_parts.append(f"opt-gap:{len(opt_gap)}")
         if no_ref and args.strict:
             status_parts.append(f"NO_REF:{len(no_ref)}")
             ok = False
@@ -187,38 +196,43 @@ def main() -> int:
 
         rows.append({
             "dataset": ds.name,
-            "optional": ds.optional,
             "origin": ds.origin,
             "files": len(all_files),
-            "csv_rows": len(csv_names),
+            "csv_rows": len(csv_row_list),
             "no_ref": len(no_ref),
             "csv_gap": len(csv_gap),
+            "opt_gap": len(opt_gap),
             "status": status,
             "no_ref_names": sorted(no_ref),
             "csv_gap_names": sorted(csv_gap),
+            "opt_gap_names": sorted(opt_gap),
         })
 
     # Print summary table
-    col_w = [max(len(r["dataset"]) for r in rows) + 2, 14, 4, 7, 9, 7, 9, 20]
-    header = ["dataset", "origin", "opt", "files", "csv_rows", "no_ref", "csv_gap", "status"]
+    col_w = [max(len(r["dataset"]) for r in rows) + 2, 14, 5, 7, 9, 7, 7, 22]
+    header = ["dataset", "origin", "files", "csv_rows", "no_ref", "csv_gap", "opt_gap", "status"]
     sep = "  ".join("-" * w for w in col_w)
     fmt = "  ".join(f"{{:<{w}}}" for w in col_w)
     print(fmt.format(*header))
     print(sep)
     for r in rows:
-        opt_flag = "*" if r["optional"] else ""
         print(fmt.format(
-            r["dataset"], r["origin"], opt_flag, r["files"], r["csv_rows"],
-            r["no_ref"], r["csv_gap"], r["status"],
+            r["dataset"], r["origin"], r["files"], r["csv_rows"],
+            r["no_ref"], r["csv_gap"], r["opt_gap"], r["status"],
         ))
 
     # Detail for gaps
     for r in rows:
         if r.get("csv_gap_names"):
-            tag = "[CSV_GAP/opt]" if r.get("optional") else "[CSV_GAP]"
-            print(f"\n{tag} {r['dataset']}: in CSV but not in dir ({len(r['csv_gap_names'])} files):")
+            print(f"\n[CSV_GAP] {r['dataset']}: in CSV but not in dir ({len(r['csv_gap_names'])} files):")
             for n in r["csv_gap_names"]:
                 print(f"  {n}")
+        if r.get("opt_gap_names"):
+            print(f"\n[opt-gap] {r['dataset']}: optional CSV rows with no data file ({len(r['opt_gap_names'])} files):")
+            for n in r["opt_gap_names"][:20]:
+                print(f"  {n}")
+            if len(r["opt_gap_names"]) > 20:
+                print(f"  ... ({len(r['opt_gap_names']) - 20} more)")
         if r.get("no_ref_names") and (args.strict or r.get("csv_gap_names")):
             print(f"\n[no_ref] {r['dataset']}: in dir but not in CSV ({len(r['no_ref_names'])} files):")
             for n in sorted(r["no_ref_names"])[:20]:
