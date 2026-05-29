@@ -1257,9 +1257,12 @@ fn feasibility_pump_handles_pure_lp_pass_through() {
 /// Timeout budget for `fp_timeout_does_not_exceed_user_limit`.
 const FP_TIMEOUT_BUDGET_SECS: f64 = 1.0;
 
-/// Elapsed must stay below timeout × margin; 1.5 gives 50% headroom for jitter
-/// while still catching the ~31× overrun that occurs without the shared deadline.
-const FP_TIMEOUT_MARGIN: f64 = 1.5;
+/// Multiplier for wall-clock upper bound in FP timeout sentinels.
+///
+/// Elapsed must stay below `timeout × TIMEOUT_WALL_MARGIN_MULT`. A 5× factor gives
+/// comfortable headroom for scheduler and solver-cleanup jitter (observed up to ~1.7×
+/// in CI) while still catching the ~31× overrun that occurs without the shared deadline.
+const TIMEOUT_WALL_MARGIN_MULT: f64 = 5.0;
 
 /// A moderately large binary MILP (n=500 vars, m=100 constraints, density ≈ 0.5)
 /// where FP LP solves are non-trivial. Provides enough wall-clock exposure to
@@ -1305,7 +1308,7 @@ fn fp_timeout_sentinel_milp() -> MilpProblem {
     milp(lp, (0..n).collect())
 }
 
-/// Shared deadline prevents total elapsed from exceeding `timeout_secs × FP_TIMEOUT_MARGIN`.
+/// Shared deadline prevents total elapsed from exceeding `timeout_secs × TIMEOUT_WALL_MARGIN_MULT`.
 ///
 /// Without the fix, each FP LP and `solve_mip_core` each receive a fresh
 /// `timeout_secs` window; up to `MAX_FP_ITER + 1 = 31` resets are possible,
@@ -1313,7 +1316,7 @@ fn fp_timeout_sentinel_milp() -> MilpProblem {
 ///
 /// Sentinel: removing the shared deadline from `solve_milp_with_stats` lets
 /// `solve_mip_core` restart the clock after FP, causing elapsed to exceed
-/// `FP_TIMEOUT_BUDGET_SECS × FP_TIMEOUT_MARGIN` → **FAILS**.
+/// `FP_TIMEOUT_BUDGET_SECS × TIMEOUT_WALL_MARGIN_MULT` → **FAILS**.
 #[test]
 fn fp_timeout_does_not_exceed_user_limit() {
     let problem = fp_timeout_sentinel_milp();
@@ -1334,12 +1337,12 @@ fn fp_timeout_does_not_exceed_user_limit() {
         r.status,
     );
     assert!(
-        elapsed < FP_TIMEOUT_BUDGET_SECS * FP_TIMEOUT_MARGIN,
+        elapsed < FP_TIMEOUT_BUDGET_SECS * TIMEOUT_WALL_MARGIN_MULT,
         "elapsed {:.3}s exceeds budget {:.1}s × margin {:.1}; \
          removing shared-deadline fix lets B&B receive a fresh window after FP → overrun",
         elapsed,
         FP_TIMEOUT_BUDGET_SECS,
-        FP_TIMEOUT_MARGIN,
+        TIMEOUT_WALL_MARGIN_MULT,
     );
 }
 
@@ -1359,23 +1362,21 @@ fn fp_timeout_aborts_iteration() {
     let t0 = std::time::Instant::now();
     let (r, _) = solve_milp_with_stats(&problem, &opts, &MipConfig::default());
     let elapsed = t0.elapsed().as_secs_f64();
-    assert!(
-        matches!(
-            r.status,
-            SolveStatus::Optimal
-                | SolveStatus::SuboptimalSolution
-                | SolveStatus::Timeout
-                | SolveStatus::Infeasible
-                | SolveStatus::MaxIterations
-        ),
-        "FP timeout must not panic; unexpected status {:?}",
+    // Deterministic sentinel: a 0.1 s budget cannot solve a 500-variable binary MILP;
+    // the solver must always signal Timeout.  Without deadline propagation into FP LP
+    // calls the solver still eventually returns Timeout — but only after the wall-clock
+    // check below fires, so this assertion provides an independent, zero-noise signal.
+    assert_eq!(
+        r.status,
+        SolveStatus::Timeout,
+        "FP timeout must not panic and must signal Timeout; got {:?}",
         r.status,
     );
     assert!(
-        elapsed < short_timeout * FP_TIMEOUT_MARGIN,
+        elapsed < short_timeout * TIMEOUT_WALL_MARGIN_MULT,
         "elapsed {:.3}s exceeds {:.2}s × {:.1}; FP deadline not honored",
         elapsed,
         short_timeout,
-        FP_TIMEOUT_MARGIN,
+        TIMEOUT_WALL_MARGIN_MULT,
     );
 }
