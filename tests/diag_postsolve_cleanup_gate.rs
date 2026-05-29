@@ -7,14 +7,14 @@
 //! Gate は **simplex postsolve** 経路の挙動を pin するもの。`#33` の LP→IPM
 //! dispatch (`src/qp/lp_dispatch.rs`) 導入後、サイズ閾値を超える LP は IPM 経路で
 //! 解かれ simplex postsolve 自体が走らない。その判定は public accessor
-//! `otspot::qp::lp_dispatch_prefers_ipm(n, m)` を直接呼ぶ (`timing_breakdown`
+//! `otspot::qp::prefer_ipm_for_size(n, m)` を直接呼ぶ (`timing_breakdown`
 //! の NaN proxy は presolve OFF の simplex 経路でも NaN になるため brittle、
 //! reviewer C2 指摘で書き換え)。
 
 use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
-use otspot::qp::{lp_dispatch_prefers_ipm, solve_qp_with, QpProblem};
+use otspot::qp::{prefer_ipm_for_size, solve_qp_with, QpProblem};
 use std::path::Path;
 
 fn load(path: &str) -> QpProblem {
@@ -45,7 +45,7 @@ fn wood1p_postsolve_under_2s() {
     let prob = load("data/lp_problems/wood1p.QPS");
     // wood1p: n=2594, m=244 → simplex 経路 (n<3000, m<2000)。gate 適用対象。
     assert!(
-        !lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints),
+        !prefer_ipm_for_size(prob.num_vars, prob.num_constraints),
         "wood1p must remain on simplex path for this gate to apply"
     );
     let (status, _wall, postsolve_s) = solve(&prob, 60.0);
@@ -62,7 +62,7 @@ fn wood1p_postsolve_under_2s() {
 #[test]
 fn d6cube_postsolve_under_1s() {
     let prob = load("data/lp_problems/d6cube.QPS");
-    if lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints) {
+    if prefer_ipm_for_size(prob.num_vars, prob.num_constraints) {
         // IPM 経路で解かれる → simplex cleanup-LP は走らない。
         return;
     }
@@ -79,7 +79,7 @@ fn d6cube_postsolve_under_1s() {
 #[test]
 fn greenbea_postsolve_under_5s() {
     let prob = load("data/lp_problems/greenbea.QPS");
-    if lp_dispatch_prefers_ipm(prob.num_vars, prob.num_constraints) {
+    if prefer_ipm_for_size(prob.num_vars, prob.num_constraints) {
         return;
     }
     let (_status, _wall, postsolve_s) = solve(&prob, 60.0);

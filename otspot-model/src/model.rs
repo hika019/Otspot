@@ -70,8 +70,6 @@ pub struct Model {
     invalid_inputs: BTreeMap<&'static str, String>,
     /// Timeout for QP solve in seconds (None = unlimited).
     timeout_secs: Option<f64>,
-    /// Ruiz スケーリング有効/無効（None = default true）
-    use_ruiz_scaling: Option<bool>,
     /// 収束精度プリセット（None = デフォルト Medium = 1e-6）
     tolerance: Option<Tolerance>,
     /// Presolve 有効/無効（None = SolverOptions::default() に従う = true）
@@ -97,7 +95,6 @@ impl Model {
             obj_expr_constant: 0.0,
             invalid_inputs: BTreeMap::new(),
             timeout_secs: None,
-            use_ruiz_scaling: None,
             tolerance: None,
             presolve: None,
             threads: None,
@@ -125,11 +122,6 @@ impl Model {
     pub fn set_threads(&mut self, n: usize) -> &mut Self {
         self.threads = Some(n.max(1));
         self
-    }
-
-    /// Ruiz equilibration スケーリングの有効/無効を設定する（デフォルト: true）
-    pub fn set_use_ruiz_scaling(&mut self, flag: bool) {
-        self.use_ruiz_scaling = Some(flag);
     }
 
     /// 精度プリセットを設定する。
@@ -670,9 +662,6 @@ impl Model {
         if let Some(t) = self.timeout_secs {
             opts.timeout_secs = Some(t);
         }
-        if let Some(flag) = self.use_ruiz_scaling {
-            opts.use_ruiz_scaling = flag;
-        }
         if let Some(tol) = self.tolerance {
             opts.tolerance = Some(tol);
         }
@@ -803,9 +792,6 @@ impl Model {
 
         let result = if let Some(ref q_orig) = self.quadratic_objective.clone() {
             // MIQP: convex QP relaxation per node.
-            if let Some(flag) = self.use_ruiz_scaling {
-                opts.use_ruiz_scaling = flag;
-            }
             let qp = self.build_qp_problem(c, bounds, q_orig.clone())?;
             let miqp = otspot_core::mip::MiqpProblem::new(qp, integer_vars.clone())
                 .map_err(|e| ModelError::Internal(e.to_string()))?;

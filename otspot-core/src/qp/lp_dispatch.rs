@@ -39,7 +39,7 @@ const LP_IPM_FIRST_M: usize = 2_000;
 /// 両ケース bench 実測 backed = 必須 knob。
 const IPM_BUDGET_FRACTION: f64 = 0.5;
 
-pub(crate) fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
+pub fn prefer_ipm_for_size(n: usize, m: usize) -> bool {
     n > LP_IPM_FIRST_N || m > LP_IPM_FIRST_M
 }
 

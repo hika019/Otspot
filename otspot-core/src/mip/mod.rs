@@ -178,6 +178,9 @@ fn solve_mip_with_stats<R: Relaxation>(
     shared.timeout_secs = None;
     shared.multistart = None;
     shared.global_optimization = None;
+    // Enable basis recovery so LP solves return warm_start_basis for child nodes.
+    shared.recover_warm_start_basis = true;
+    shared.warm_start = None;
 
     // Degenerate: no integer variables → the relaxation is the answer (LP/QP fallback).
     if problem.integer_vars().is_empty() {
@@ -222,7 +225,13 @@ fn solve_mip_with_stats<R: Relaxation>(
         }
 
         let t0 = Instant::now();
-        let res = problem.solve(&node.var_bounds, &shared);
+        let res = if let Some(ref ws) = node.warm_start {
+            let mut no = shared.clone();
+            no.warm_start = Some(ws.clone());
+            problem.solve(&node.var_bounds, &no)
+        } else {
+            problem.solve(&node.var_bounds, &shared)
+        };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         stats.nodes_processed += 1;
@@ -306,8 +315,15 @@ fn solve_mip_with_stats<R: Relaxation>(
             )
             .expect("a non-integer-feasible Optimal relaxation has a fractional integer var");
             let (down, up) = branch_bounds(&node.var_bounds, jb, res.solution[jb]);
-            q.push(node.child(down, node_lb));
-            q.push(node.child(up, node_lb));
+            // Propagate parent basis to children. Skip warm-start when the
+            // branching variable's bound type changes (e.g. ub=∞→finite adds
+            // a UB row in standard form, invalidating basis indices). The
+            // up-branch typically triggers lb-violation and cold-starts anyway.
+            let child_ws = res.warm_start_basis.clone();
+            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) { None } else { child_ws.clone() };
+            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) { None } else { child_ws };
+            q.push(node.child_warm(down, node_lb, down_ws));
+            q.push(node.child_warm(up, node_lb, up_ws));
         } else {
             // Relaxation did not solve to Optimal: a SuboptimalSolution from an IPM stall
             // (box-only off-diagonal QP), MaxIterations, or NumericalError on a region
@@ -447,6 +463,16 @@ fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
         }
     }
     sol
+}
+
+/// Returns `true` when tightening var `j`'s bound changes the standard-form
+/// column layout vs the parent. An infinite bound becoming finite (ub: ∞→boxed,
+/// or lb: free→lower-bounded) changes the number of structural columns or adds
+/// a UB constraint row, making the parent basis index-incompatible.
+fn bound_layout_changes(parent_bounds: &[(f64, f64)], child_bounds: &[(f64, f64)], j: usize) -> bool {
+    let (p_lb, p_ub) = parent_bounds[j];
+    let (c_lb, c_ub) = child_bounds[j];
+    (p_ub.is_infinite() && c_ub.is_finite()) || (p_lb.is_infinite() && c_lb.is_finite())
 }
 
 /// A result carrying no usable solution, tagged with `status`.

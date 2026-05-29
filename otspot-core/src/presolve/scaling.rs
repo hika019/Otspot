@@ -13,12 +13,12 @@ const LP_RUIZ_MAX_SWEEPS: usize = 20;
 /// Convergence tolerance for LP Ruiz scaling: stop early when max scale change < this value.
 const LP_RUIZ_CONV_TOL: f64 = 1e-4;
 
-/// Ruiz equilibration namespace.
+/// LP equilibration via Ruiz scaling.
 ///
-/// 静的 `scale()` のみを提供する。インスタンス化される設計ではない。
-pub struct RuizScaler;
+/// Static `scale()` only; not intended for instantiation.
+pub struct LpEquilibration;
 
-impl RuizScaler {
+impl LpEquilibration {
     /// Apply Ruiz equilibration to a matrix, RHS vector, and cost vector.
     ///
     /// Returns `(scaled_matrix, scaled_b, scaled_c, row_scale, col_scale)`.
@@ -151,7 +151,7 @@ mod tests {
         );
         let b = vec![1.0, 2.0];
         let c = vec![1.0, 1.0];
-        let (_, scaled_b, scaled_c, row_scale, col_scale) = RuizScaler::scale(&a, &b, &c);
+        let (_, scaled_b, scaled_c, row_scale, col_scale) = LpEquilibration::scale(&a, &b, &c);
 
         // Scales should be close to 1
         for &s in row_scale.iter().chain(col_scale.iter()) {
@@ -175,7 +175,7 @@ mod tests {
         );
         let b = vec![1.0, 1.0];
         let c = vec![1.0, 1.0];
-        let (scaled_a, _, _, _, _) = RuizScaler::scale(&a, &b, &c);
+        let (scaled_a, _, _, _, _) = LpEquilibration::scale(&a, &b, &c);
 
         // After scaling, all entries should be close to 1 in magnitude
         for k in 0..scaled_a.values.len() {

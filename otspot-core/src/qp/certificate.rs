@@ -144,7 +144,7 @@ pub fn prove_optimal<'a>(
     }
 
     if failing.is_empty() {
-        Ok(OptimalCertificate::new(stat, pres, bviol, comp, dsign, gap, tol))
+        Ok(OptimalCertificate::new(stat, pres, dsign, gap, tol))
     } else {
         Err(NotProven {
             stationarity_rel: stat,

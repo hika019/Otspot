@@ -875,7 +875,7 @@ mod tests {
     //
     // big_m_cold_start を直接呼び crash on/off で num_artificial と iter を比較。
     // solve_with は primal-first に倒れて Big-M を経由しないため、ここでは
-    // build_standard_form / RuizScaler / big_m_cold_start を `super::` 経由で
+    // build_standard_form / LpEquilibration / big_m_cold_start を `super::` 経由で
     // 直接呼ぶ。SERIAL_LOCK で thread-local probe の並列干渉を避ける。
     //
     // 経路観測は `crash_probe` thread-local hook を経由し、LU 失敗 /
@@ -886,7 +886,7 @@ mod tests {
     static SERIAL_LOCK: Mutex<()> = Mutex::new(());
 
     /// 直接呼出し helper: big_m_cold_start に必要な事前変換 (build_standard_form +
-    /// RuizScaler) を内側で完結させ、(SolverResult, n_art_post, probe_outcome) を返す。
+    /// LpEquilibration) を内側で完結させ、(SolverResult, n_art_post, probe_outcome) を返す。
     ///
     /// observed n_art は `crash_probe` の最終 Outcome から派生する。
     /// - `Adopted(n)` → crash 採用、basis に残った artificial 数 = n
@@ -907,9 +907,9 @@ mod tests {
         use_crash: bool,
         deadline_secs: f64,
     ) -> (crate::problem::SolverResult, usize, super::crash_probe::Outcome) {
-        use crate::presolve::RuizScaler;
+        use crate::presolve::LpEquilibration;
         let sf = crate::simplex::build_standard_form(lp);
-        let (a, b, c, row_scale, col_scale) = RuizScaler::scale(&sf.a, &sf.b, &sf.c);
+        let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
         let opts = SolverOptions {
             use_lp_crash_basis: use_crash,
             timeout_secs: Some(deadline_secs),

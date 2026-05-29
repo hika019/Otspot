@@ -142,7 +142,8 @@ impl QpProblem {
         Ok(QpProblem { q, c, a, b, bounds, num_vars: n, num_constraints: m, constraint_types, quadratic_constraints: vec![], obj_offset: 0.0 })
     }
 
-    /// 全制約 Le として構築するヘルパー。
+    /// Convenience constructor: all constraints are `≤`.
+    #[doc(hidden)]
     pub fn new_all_le(
         q: CscMatrix,
         c: Vec<f64>,
