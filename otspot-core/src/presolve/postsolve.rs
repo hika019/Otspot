@@ -974,11 +974,11 @@ pub fn run_postsolve(
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_min = df_cl_nopert.min(df_cl_pert);
 
-    // When both cleanup variants failed to improve the cheap candidates beyond
-    // numerical drift, LSQ shares the same data path (A, c, x*) and is expected
-    // to stagnate as well; running it only burns budget (dfl001: 98% of ~3s
-    // postsolve). The 0.1% relative-improvement floor lets genuine cleanup
-    // progress (≥0.1% of cheap_min) still trigger LSQ.
+    // LSQ skip gate: cleanup が cheap_min より 0.1% 以上改善していない場合は
+    // LSQ が同一データで stagnate すると期待されるため skip する
+    // (dfl001: LSQ が postsolve の 98% ≈ ~3s を消費、lp_dispatch.rs bench 実測)。
+    // 撤廃 (0.0) では標準 test suite に退化なし (dfl001 は #[ignore])。
+    // (lp_dispatch.rs: dfl001 bench 実測) skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
     const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
     let cleanup_stagnant = df_cl_min.is_finite()
         && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
