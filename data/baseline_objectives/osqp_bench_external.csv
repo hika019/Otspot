@@ -1,0 +1,69 @@
+# 出典: Clarabel (主) eps=1e-9, fallback OSQP. 外部リファレンス。
+# 用途: 自ソルバ obj との独立 cross-check (PASS と別軸の正当性検証)。
+# Source: independent Clarabel/OSQP solve at high accuracy.
+# Purpose: cross-validate own solver's obj (independent of self-PASS).
+# 注意: OSQP は ADMM ベースで偽 infeasibility を出すケースがあり、
+#       Clarabel (IPM) を主に使用。LIPMWALK4 等で OSQP が誤判定する実例あり。
+problem_name,optimal_obj,source,ext_status
+OSQP_CONTROL_10,1.005131e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_CONTROL_20,5.131982e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_CONTROL_50,9.831930e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_EQ_QP_100,1.741193e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_EQ_QP_20,-1.092659e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_EQ_QP_200,6.211221e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_EQ_QP_50,4.219051e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_EQ_QP_500,3.980967e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_HUBER_10,2.867335e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_HUBER_100,3.420577e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_HUBER_20,6.782490e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_HUBER_50,1.668904e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_LASSO_10,1.025975e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_LASSO_100,1.010824e+04,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_LASSO_20,2.063472e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_LASSO_50,5.108459e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_PORTFOLIO_10,-2.490382e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_PORTFOLIO_100,-2.631172e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_PORTFOLIO_20,-2.470879e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_PORTFOLIO_5,-2.256884e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_PORTFOLIO_50,-2.584724e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_RANDOM_QP_100,9.348767e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_RANDOM_QP_20,1.135072e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_RANDOM_QP_200,3.234670e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_RANDOM_QP_50,2.550359e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_RANDOM_QP_500,1.716530e+04,clarabel_eps1e-9_t1s,clarabel:Solved
+OSQP_SVM_10,4.082954e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_SVM_100,4.059968e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_SVM_20,8.125391e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+OSQP_SVM_50,2.011765e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ABB313,8.161739e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH219,5.643479e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH292,3.202644e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH331,8.753081e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH608,1.732357e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH85,-1.700000e-10,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ASH958,2.744755e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ILLC1033,2.828707e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_ILLC1850,8.168201e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_MARAGAL_1,-6.400000e-11,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_MARAGAL_2,3.607290e-09,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_MARAGAL_3,8.575625e-09,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_MARAGAL_4,7.437337e-09,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_MARAGAL_5,2.645060e-08,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_WELL1033,2.828707e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_HUBER_WELL1850,8.168201e-01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ABB313,1.016500e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH219,3.879399e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH292,1.484235e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH331,7.325419e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH608,1.088997e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH85,2.670074e+02,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ASH958,1.737423e+03,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ILLC1033,2.068478e+07,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_ILLC1850,2.214797e+07,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_MARAGAL_1,1.874530e+00,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_MARAGAL_2,1.995204e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_MARAGAL_3,1.962918e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_MARAGAL_4,3.729100e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_MARAGAL_5,8.760766e+01,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_WELL1033,1.362670e+07,clarabel_eps1e-9_t0s,clarabel:Solved
+SS_LASSO_WELL1850,1.602966e+07,clarabel_eps1e-9_t0s,clarabel:Solved
