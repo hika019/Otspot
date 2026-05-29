@@ -7,6 +7,7 @@ use std::time::Instant;
 use crate::ScopedDisable;
 
 use crate::options::SolverOptions;
+use crate::tolerances::{Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
     qp_transforms::{QpPresolveStatus, QpPostsolveStep},
@@ -215,29 +216,32 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
 
     let mut q_diag = vec![0.0_f64; n];
     let mut q_offdiag_max = 0.0_f64;
+    let mut q_abs_max = 0.0_f64;
     for col in 0..n {
         let cs = problem.q.col_ptr[col];
         let ce = problem.q.col_ptr[col + 1];
         for k in cs..ce {
             let row = problem.q.row_ind[k];
             let v = problem.q.values[k];
+            let a = v.abs();
+            if a > q_abs_max { q_abs_max = a; }
             if row == col {
                 q_diag[col] = v;
             } else {
-                q_offdiag_max = q_offdiag_max.max(v.abs());
+                q_offdiag_max = q_offdiag_max.max(a);
             }
         }
     }
 
-    const Q_OFFDIAG_TOL: f64 = 1e-10;
-    if q_offdiag_max > Q_OFFDIAG_TOL {
+    let eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
+    if q_offdiag_max > eps_q {
         return None;
     }
 
     let mut q_pos_min = f64::INFINITY;
     let mut q_pos_max = 0.0_f64;
     for &v in &q_diag {
-        if v > Q_OFFDIAG_TOL {
+        if v > eps_q {
             q_pos_min = q_pos_min.min(v);
             q_pos_max = q_pos_max.max(v);
         }
@@ -254,7 +258,7 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     // s_j = 1/√Q_jj (Q_jj=0 の LP-like 列は s_j=1)、Q'_jj = 1。
     let mut col_scales = vec![1.0_f64; n];
     for j in 0..n {
-        if q_diag[j] > Q_OFFDIAG_TOL {
+        if q_diag[j] > eps_q {
             col_scales[j] = 1.0 / q_diag[j].sqrt();
         }
     }

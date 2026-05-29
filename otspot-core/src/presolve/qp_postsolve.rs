@@ -16,6 +16,18 @@ use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 ///
 /// Aligned with `DROP_TOL` (1e-15): entries this small are already discarded
 /// during matrix construction, so treating them as singular is consistent.
+///
+/// **設計判断 (2026-05-30)**: SINGULARITY_TOL は **absolute** (`DROP_TOL = 1e-15`) で固定。
+///
+/// row-relative pivot tolerance (LAPACK xGECON 形式: `PIVOT_REL * row_inf + UNDERFLOW_GUARD`) を
+/// audit#123 で検討・実装したが、qplib_9002 で false-positive Optimal を mint
+/// (status=Optimal、`||x||_inf=7.934e9`、KKT 残差発散) するため撤退済。
+///
+/// 撤退理由: pivot accept 結果を KKT 検証経路で再 validate しない設計のため、
+/// relative pivot で「数値的に valid だが KKT 不能」な解を accept してしまう。
+///
+/// relative 化再開条件: pivot accept 後の numerical refinement (iterative refinement) で
+/// KKT 残差を再検証する経路を追加してから再評価。
 const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。

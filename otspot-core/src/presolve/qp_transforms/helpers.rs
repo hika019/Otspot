@@ -5,7 +5,7 @@
 use super::state::Workspace;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::ZERO_TOL;
+use crate::tolerances::{Q_OFFDIAG_REL, UNDERFLOW_GUARD, ZERO_TOL};
 use super::state::QpPresolveStatus;
 
 pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
@@ -145,14 +145,18 @@ pub(super) fn count_block_components(q: &CscMatrix, a: &CscMatrix, n: usize) -> 
     roots.len()
 }
 
-/// True when every Q off-diagonal entry is below 1e-10 in magnitude.
+/// True when every Q off-diagonal entry is below the scale-relative threshold.
+///
+/// Threshold: `eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD`.
 pub(super) fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
+    let q_abs_max = q.values.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+    let eps_q = Q_OFFDIAG_REL * q_abs_max + UNDERFLOW_GUARD;
     for j in 0..n {
         let start = q.col_ptr[j];
         let end = q.col_ptr[j + 1];
         for k in start..end {
             let row = q.row_ind[k];
-            if row != j && q.values[k].abs() > 1e-10 {
+            if row != j && q.values[k].abs() > eps_q {
                 return false;
             }
         }
@@ -224,5 +228,29 @@ pub(super) fn skip_step(n: usize) -> bool {
     {
         let _ = n;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sentinel: `is_diagonal_q` uses scale-relative threshold — q_abs_max=1e6, off-diag=1e-8
+    /// is correctly classified as diagonal (1e-8 < Q_OFFDIAG_REL*1e6 = 1e-6).
+    ///
+    /// **Sentinel**: reverting to absolute `1e-10` makes eps_q=1e-10, and
+    /// 1e-8 > 1e-10 → returns `false` → this test FAIL.
+    #[test]
+    fn is_diagonal_q_relative_threshold_sentinel() {
+        let q = CscMatrix::from_triplets(
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[1e6, 1e-8, 1e-8, 1e6],
+            2, 2,
+        ).unwrap();
+        assert!(
+            is_diagonal_q(&q, 2),
+            "off-diag 1e-8 should be below eps_q (Q_OFFDIAG_REL*1e6≈1e-6) → diagonal"
+        );
     }
 }
