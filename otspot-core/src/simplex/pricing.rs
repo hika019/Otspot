@@ -11,15 +11,6 @@ const EPS: f64 = 1e-8;
 /// Minimum weight floor to keep `sqrt(γ)` safe (prevents div-by-zero in score).
 const GAMMA_FLOOR: f64 = 1e-10;
 
-/// Guard for skipping the weight update when the pivot is numerically negligible.
-///
-/// Distinct from `GAMMA_FLOOR`: `GAMMA_FLOOR` is a *weight* floor used in the
-/// scoring denominator; this constant guards the *update* path.  Using `GAMMA_FLOOR`
-/// here would silently skip valid pivots in the range `|pivot| ∈ (3.16e-6, PIVOT_TOL)`
-/// and leave `γ[leaving]` stale (= 1.0).  The guard is set to `PIVOT_TOL² = 1e-16`
-/// so any pivot that passes the ratio-test tolerance also triggers a weight update.
-const MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE: f64 = 1e-16; // PIVOT_TOL²
-
 /// Strategy for selecting the entering variable in the revised simplex.
 pub(crate) trait PricingStrategy {
     /// Select the entering column index.
@@ -31,18 +22,10 @@ pub(crate) trait PricingStrategy {
 
     /// Update internal weights after a pivot.
     ///
-    /// `entering`     = column index entering the basis.
-    /// `leaving`      = column index leaving the basis.
-    /// `leaving_row`  = row index of the leaving variable.
-    /// `eta`          = B⁻¹ * a_entering (FTRAN of entering column, dense, length m).
-    fn update_weights(
-        &mut self,
-        basis: &LuBasis,
-        entering: usize,
-        leaving: usize,
-        leaving_row: usize,
-        eta: &[f64],
-    );
+    /// `entering` = column index entering the basis.
+    /// `leaving`  = column index leaving the basis (not the row index).
+    /// `eta`      = B⁻¹ * a_entering (FTRAN of entering column, dense).
+    fn update_weights(&mut self, basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]);
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -67,7 +50,7 @@ impl PricingStrategy for DantzigPricing {
         entering
     }
 
-    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: usize, _: &[f64]) {}
+    fn update_weights(&mut self, _: &LuBasis, _: usize, _: usize, _: &[f64]) {}
 }
 
 /// Devex approximate steepest-edge pricing (Harris 1973 / Price 1987).
@@ -75,17 +58,21 @@ impl PricingStrategy for DantzigPricing {
 /// Maintains γ[j] ≈ ‖B⁻¹ a_j‖² for each non-basic column j.
 /// Selects the entering variable maximising `-rc_j / sqrt(γ_j)`.
 ///
-/// Weight update after a pivot with pivot column η = B⁻¹ a_entering and
-/// pivot element p = η[leaving_row]:
-///   γ[leaving] ← max(γ[leaving], ‖η‖² / p²)
+/// Weight update after a pivot with pivot column η = B⁻¹ a_entering:
+///   γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
 ///   γ[entering] ← 1.0   (reset; entering becomes basic)
 ///   γ[other j]  unchanged (approximation; exact update requires per-column FTRAN)
 ///
-/// The formula `‖η‖² / p²` is the practical Devex approximation (Harris 1973,
-/// Bixby simplification).  The exact expression would be
-/// `(‖η‖² − η[leaving_row]² + 1) / p²`; the `1 − η[leaving_row]²/p²` term is
-/// dropped because it is bounded and the max-accumulation strategy absorbs the
-/// error over successive pivots.
+/// **Attempted simplification (reverted)**: `‖η‖² / pivot²` (pivot = η[leaving_row],
+/// the textbook Devex formula, Harris 1973 § 5 / Bixby 1992) was tested but caused
+/// `NumericalError` (SingularBasis) on wood1p (n=2594, m=244).  Root cause: when
+/// large η components exist outside the Harris ratio-test window, ‖η‖²/pivot² blows
+/// up → permanent column exclusion → numerically unstable basis sequences.  On
+/// grow22 the new formula reduced iterations 63 % and on 25fv47 69 %, but wood1p
+/// broke — mixed result, not universally better (memory `feedback_single_path_maintenance`).
+/// The `‖η‖² / γ[entering]` formula provides implicit damping via accumulated γ
+/// values that prevents this pathology.  Do not re-introduce `‖η‖²/pivot²` without
+/// a weight cap (e.g., clip at `m`) or a per-refactor reset to counter blow-up.
 ///
 /// Weights start at 1.0 and are non-decreasing per column (the `max` prevents
 /// reducing a weight). Columns that never leave the basis retain γ = 1.0 and
@@ -133,28 +120,23 @@ impl PricingStrategy for SteepestEdgePricing {
 
     /// Devex weight update for the leaving column.
     ///
-    /// γ[leaving] ← max(γ[leaving], ‖η‖² / η[leaving_row]²)
+    /// γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
     ///
-    /// `‖η‖² / pivot²` is the Devex approximation to `‖B_new^{-1} a_leaving‖²`.
-    /// Taking the max keeps weights non-decreasing, preventing score inflation
-    /// from a temporarily small pivot.  The update is skipped when
-    /// `pivot² ≤ MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE` (= PIVOT_TOL²); pivots below
-    /// that threshold do not pass the ratio test and would produce an
-    /// unreliable weight.
-    fn update_weights(
-        &mut self,
-        _basis: &LuBasis,
-        entering: usize,
-        leaving: usize,
-        leaving_row: usize,
-        eta: &[f64],
-    ) {
-        let pivot = eta.get(leaving_row).copied().unwrap_or(0.0);
-        let pivot_sq = pivot * pivot;
+    /// Using γ[entering] in the denominator provides implicit damping: columns
+    /// that accumulated large weights before entering suppress the update,
+    /// preventing unbounded γ growth.  See struct docstring for the reverted
+    /// `‖η‖²/pivot²` variant and why the damping property matters.
+    fn update_weights(&mut self, _basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]) {
+        let gamma_entering = self
+            .weights
+            .get(entering)
+            .copied()
+            .unwrap_or(1.0)
+            .max(GAMMA_FLOOR);
 
-        if leaving < self.weights.len() && pivot_sq > MIN_PIVOT_SQ_FOR_WEIGHT_UPDATE {
+        if leaving < self.weights.len() {
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let new_weight = (eta_norm_sq / pivot_sq).max(GAMMA_FLOOR);
+            let new_weight = (eta_norm_sq / gamma_entering).max(GAMMA_FLOOR);
             self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
 
@@ -307,24 +289,23 @@ mod tests {
         assert!(entering == Some(0) || entering == Some(1));
     }
 
-    /// Sentinel: `update_weights` uses pivot² (not γ[entering]) in the denominator.
+    /// Sentinel: `update_weights` uses γ[entering] in the denominator (not pivot²).
     ///
-    /// Old formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
-    /// New formula: γ[leaving] ← max(γ[leaving], ‖η‖² / η[leaving_row]²)
+    /// Formula: γ[leaving] ← max(γ[leaving], ‖η‖² / γ[entering])
     ///
-    /// With γ[entering]=1.0 and pivot=3, these differ: old gives 25, new gives 25/9.
-    /// Removing the leaving_row parameter or reusing γ[entering] fails this test.
+    /// With η = [0, 3, 4, 0, 0] and γ[entering=2] = 7.0:
+    ///   ‖η‖² = 25, new_weight = 25/7 ≈ 3.571
+    ///
+    /// If pivot² were used (pivot = η[1] = 3, pivot² = 9): 25/9 ≈ 2.778 — different.
+    /// Using γ[entering] provides implicit weight damping (see struct docstring).
+    /// Changing the denominator to pivot² re-introduces the reverted formula.
     #[test]
-    fn devex_leaving_weight_uses_pivot_squared() {
+    fn devex_leaving_weight_uses_gamma_entering() {
         let mut pricing = SteepestEdgePricing::new(5);
-        // η = [0, 3, 4, 0, 0], leaving_row=1 → pivot=3, pivot²=9.
-        // ‖η‖² = 9 + 16 = 25.
-        // Expected: γ[leaving=3] = max(1.0, 25/9) = 25/9 ≈ 2.778.
-        // Old formula: max(1.0, 25/γ[entering=1.0]) = 25.
-        let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0];
-
-        // Pre-set entering weight to a non-1 value so the reset assertion is non-vacuous.
+        // Pre-set entering weight to a non-1 value so the formula is non-trivial.
         pricing.weights[2] = 7.0;
+
+        let eta = vec![0.0, 3.0, 4.0, 0.0, 0.0];
 
         let a_id = crate::sparse::CscMatrix::from_triplets(
             &[0, 1], &[0, 1], &[1.0, 1.0], 2, 2,
@@ -333,15 +314,15 @@ mod tests {
 
         pricing.update_weights(
             &basis_id,
-            2, // entering
+            2, // entering (γ = 7.0)
             3, // leaving col
-            1, // leaving_row (pivot = η[1] = 3.0)
             &eta,
         );
-        let expected = 25.0_f64 / 9.0_f64;
+
+        let expected = 25.0_f64 / 7.0_f64; // ‖η‖² / γ[entering]
         assert!(
             (pricing.weights[3] - expected).abs() < 1e-12,
-            "expected γ[leaving] = {:.6}, got {:.6}",
+            "expected γ[leaving] = {:.6} (‖η‖²/γ[entering]), got {:.6}",
             expected,
             pricing.weights[3]
         );
