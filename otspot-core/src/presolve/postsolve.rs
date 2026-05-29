@@ -171,10 +171,9 @@ fn build_and_solve_cleanup_lp(
     for j in 0..n {
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
-        let tol_j = bound_active_tol(lb_j, ub_j);
-        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < tol_j;
-        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < tol_j;
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < tol_j;
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
         if fixed { continue; }
 
         let mut col_terms: Vec<(usize, f64)> = Vec::new();
@@ -474,21 +473,33 @@ fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> 
     out
 }
 
-/// Relative tolerance for treating `x[j]` as active at a bound.
+/// Relative tolerance for treating `x[j]` as active at a bound or for detecting fixed variables.
 ///
-/// The effective threshold is `BOUND_ACTIVE_REL_TOL * (1 + |lb| + |ub|)`,
-/// so detection scales with the problem's bound magnitudes.  An absolute
-/// 1e-6 fails for large-scale problems (e.g. |lb|≈1e6) where the solver's
-/// primal residual is O(1), causing interior mis-classification and
-/// complementary slackness violations in dual recovery.
+/// Each check uses only the relevant bound's magnitude to avoid inflating the threshold
+/// with the opposite bound (e.g. `at_lb` for `lb=0, ub=1e12` gives `tol≈1e-6`, not `≈1.0`).
 const BOUND_ACTIVE_REL_TOL: f64 = 1e-6;
 
-/// Compute the at-bound tolerance for variable bounds `(lb, ub)`.
+/// Tolerance for `x ≈ lb`: scales with lb magnitude only.
 #[inline]
-fn bound_active_tol(lb: f64, ub: f64) -> f64 {
+fn at_lb_tol(lb: f64) -> f64 {
+    BOUND_ACTIVE_REL_TOL * (1.0 + if lb.is_finite() { lb.abs() } else { 0.0 })
+}
+
+/// Tolerance for `x ≈ ub`: scales with ub magnitude only.
+#[inline]
+fn at_ub_tol(ub: f64) -> f64 {
+    BOUND_ACTIVE_REL_TOL * (1.0 + if ub.is_finite() { ub.abs() } else { 0.0 })
+}
+
+/// Tolerance for `ub - lb ≈ 0` (variable effectively fixed): scales with max magnitude.
+///
+/// Using max avoids doubling the threshold when both bounds are large (e.g. `[1e6, 1e6+1.5]`
+/// would give `tol≈2.0` with sum but `tol≈1.0` with max, correctly leaving the gap=1.5 unclassified).
+#[inline]
+fn fixed_tol(lb: f64, ub: f64) -> f64 {
     let lb_s = if lb.is_finite() { lb.abs() } else { 0.0 };
     let ub_s = if ub.is_finite() { ub.abs() } else { 0.0 };
-    BOUND_ACTIVE_REL_TOL * (1.0 + lb_s + ub_s)
+    BOUND_ACTIVE_REL_TOL * (1.0 + lb_s.max(ub_s))
 }
 
 /// Marker for bound-tightened-fixed columns that landed on one of their *original*
@@ -527,10 +538,9 @@ fn recover_removed_row_dual(
         }
         let x_j = solution[j];
         let (lb_j, ub_j) = orig_problem.bounds[j];
-        let tol_j = bound_active_tol(lb_j, ub_j);
-        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < tol_j;
-        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < tol_j;
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < tol_j;
+        let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
+        let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
+        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
         if fixed { continue; }
         let bound_val = rc_at_y0 / a_ij;
         if at_lb && !at_ub {
@@ -871,15 +881,14 @@ pub fn run_postsolve(
                 let j = *orig_col;
                 if j >= n { continue; }
                 let (orig_lb, orig_ub) = orig_problem.bounds[j];
-                let tol_j = bound_active_tol(orig_lb, orig_ub);
                 let truly_fixed = orig_lb.is_finite() && orig_ub.is_finite()
-                    && (orig_ub - orig_lb).abs() < tol_j;
+                    && (orig_ub - orig_lb).abs() < fixed_tol(orig_lb, orig_ub);
                 if truly_fixed { continue; }
                 let x = solution[j];
                 let at_orig_lb = orig_lb.is_finite()
-                    && (x - orig_lb).abs() < tol_j;
+                    && (x - orig_lb).abs() < at_lb_tol(orig_lb);
                 let at_orig_ub = orig_ub.is_finite()
-                    && (x - orig_ub).abs() < tol_j;
+                    && (x - orig_ub).abs() < at_ub_tol(orig_ub);
                 if at_orig_lb && !at_orig_ub {
                     out[j] = Some(BoundAbsorb::AtLb);
                 } else if at_orig_ub && !at_orig_lb {
@@ -898,12 +907,11 @@ pub fn run_postsolve(
         let mut max_viol = 0.0f64;
         for j in 0..n {
             let (lb_j, ub_j) = orig_problem.bounds[j];
-            let tol_j = bound_active_tol(lb_j, ub_j);
             let fixed = lb_j.is_finite() && ub_j.is_finite()
-                && (ub_j - lb_j).abs() < tol_j;
+                && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
             if fixed { continue; }
-            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < tol_j;
-            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < tol_j;
+            let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
+            let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
             let mut rc = orig_problem.c[j];
             if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
                 for (k, &row) in rows.iter().enumerate() {
@@ -1566,43 +1574,78 @@ mod warm_basis_recovery_tests {
 mod bound_active_tol_tests {
     use super::*;
 
-    /// Sentinel C.4: `bound_active_tol` scales with bound magnitude.
+    /// Sentinel C.4: `at_lb_tol` scales with lb magnitude only.
     ///
     /// With an absolute 1e-6 threshold, x = lb + 0.5 (|x−lb|=0.5) would be
     /// classified as interior for lb=1e6, violating complementary slackness.
-    /// The relative formula `1e-6 * (1 + |lb| + |ub|)` gives ≈ 4.0, so the
-    /// same deviation is correctly treated as at-bound.
+    /// `at_lb_tol(lb=1e6) ≈ 1.0`, so the same deviation is correctly at-lb.
     ///
-    /// Regresses if `bound_active_tol` is replaced by the old absolute 1e-6.
+    /// Regresses if `at_lb_tol` reverts to the old absolute 1e-6.
     #[test]
     fn test_sentinel_c4_large_scale_bound_active_tol() {
         let lb = 1e6_f64;
-        let ub = 3e6_f64;
         let x = lb + 0.5;
 
-        // Absolute 1e-6 misclassifies x as interior.
         assert!((x - lb).abs() > BOUND_ACTIVE_REL_TOL,
-            "absolute BOUND_ACTIVE_REL_TOL alone would incorrectly classify x as interior");
+            "absolute BOUND_ACTIVE_REL_TOL alone would misclassify x as interior");
 
-        // Relative scaling correctly classifies x as at-lb.
-        let tol = bound_active_tol(lb, ub);
-        let at_lb = (x - lb).abs() < tol;
-        assert!(at_lb,
-            "bound_active_tol={} must classify x=lb+0.5 as at-lb for lb=1e6, ub=3e6",
-            tol);
+        let tol = at_lb_tol(lb);
+        assert!((x - lb).abs() < tol,
+            "at_lb_tol={} must classify x=lb+0.5 as at-lb for lb=1e6", tol);
     }
 
-    /// Verify that unit-scale bounds (lb=0, ub=1) give tolerance ≈ BOUND_ACTIVE_REL_TOL.
-    ///
-    /// Ensures the relative formula does not inflate the effective tolerance
-    /// for typical unit-box problems, preserving pre-existing behavior.
+    /// Unit-scale bounds (lb=0, ub=1) give tolerances close to BOUND_ACTIVE_REL_TOL.
     #[test]
     fn test_bound_active_tol_unit_scale() {
+        assert!((at_lb_tol(0.0) - 1e-6).abs() < 1e-20,
+            "at_lb_tol(0) should be 1e-6, got {}", at_lb_tol(0.0));
+        assert!((at_ub_tol(1.0) - 2e-6).abs() < 1e-20,
+            "at_ub_tol(1) should be 2e-6, got {}", at_ub_tol(1.0));
+        assert!((fixed_tol(0.0, 1.0) - 2e-6).abs() < 1e-20,
+            "fixed_tol(0,1) should be 2e-6, got {}", fixed_tol(0.0, 1.0));
+    }
+
+    /// Sentinel C.4 (codex): lb=0, ub=1e12, x=5e5 must NOT be at-lb.
+    ///
+    /// Old formula `1e-6*(1+|lb|+|ub|) ≈ 1.0e6` made `(x-lb)=5e5 < 1e6` → at_lb (wrong).
+    /// New lb-only formula `1e-6*(1+|lb|) = 1e-6` correctly rejects x=5e5 as interior.
+    /// No-op regression: reverts if `at_lb_tol` re-adds ub to its formula.
+    #[test]
+    fn test_sentinel_c4_independent_lb_ub_scaling_at_lb() {
         let lb = 0.0_f64;
-        let ub = 1.0_f64;
-        let tol = bound_active_tol(lb, ub);
-        // Expected: 1e-6 * (1 + 0 + 1) = 2e-6
-        assert!((tol - 2e-6).abs() < 1e-20,
-            "unit-scale tol should be 2e-6, got {}", tol);
+        let ub = 1e12_f64;
+        let x = 5e5_f64;
+
+        // Old formula would give tol ≈ 1e6, making x look at-lb.
+        let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
+        assert!((x - lb).abs() < old_tol,
+            "old formula must mis-classify x=5e5 as at-lb (old_tol={})", old_tol);
+
+        // New lb-only formula correctly classifies x as interior.
+        let new_tol = at_lb_tol(lb);
+        assert!((x - lb).abs() >= new_tol,
+            "at_lb_tol={} must NOT classify x=5e5 as at-lb for lb=0,ub=1e12", new_tol);
+    }
+
+    /// Sentinel C.4 (reviewer): lb=1e6, ub=1e6+1.5 must NOT be fixed.
+    ///
+    /// Old formula `1e-6*(1+|lb|+|ub|) ≈ 2.0` made `gap=1.5 < 2.0` → fixed (wrong).
+    /// New max formula `1e-6*(1+max(|lb|,|ub|)) ≈ 1.0` gives `gap=1.5 > 1.0` → not fixed.
+    /// No-op regression: reverts if `fixed_tol` re-sums both magnitudes.
+    #[test]
+    fn test_sentinel_c4_independent_lb_ub_scaling_fixed() {
+        let lb = 1e6_f64;
+        let ub = 1e6_f64 + 1.5_f64;
+        let gap = ub - lb;
+
+        // Old formula must classify this as fixed.
+        let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
+        assert!(gap < old_tol,
+            "old formula must mis-classify [1e6,1e6+1.5] as fixed (old_tol={})", old_tol);
+
+        // New max formula correctly leaves the range as non-fixed.
+        let new_tol = fixed_tol(lb, ub);
+        assert!(gap >= new_tol,
+            "fixed_tol={} must NOT classify [1e6,1e6+1.5] as fixed (gap={})", new_tol, gap);
     }
 }

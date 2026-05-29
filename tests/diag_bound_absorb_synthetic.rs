@@ -11,8 +11,8 @@ use otspot::sparse::CscMatrix;
 
 /// bench 同等 dual feasibility 判定の eps (CLAUDE.md bench 標準 1e-6)。
 const BENCH_DFEAS_EPS: f64 = 1e-6;
-/// at-bound 判定 (postsolve.rs::BOUND_ACTIVE_TOL = 1e-6 と整合)。
-const AT_BOUND_TOL: f64 = 1e-6;
+/// at-bound 判定 (postsolve.rs::BOUND_ACTIVE_REL_TOL = 1e-6 と整合、relative 形式)。
+const BOUND_ACTIVE_REL_TOL: f64 = 1e-6;
 /// 解値の許容 (合成 LP は cleanup LP で十分小さく出る)。
 const SOLUTION_TOL: f64 = 1e-9;
 /// 「rc に clamp が走らなかった」の同値判定 (interior / truly_fixed branch)。
@@ -42,12 +42,12 @@ fn bench_dfeas(lp: &LpProblem, sol: &[f64], rc: &[f64]) -> f64 {
     let mut worst = 0.0f64;
     for j in 0..n {
         let (lb, ub) = lp.bounds[j];
-        if lb.is_finite() && ub.is_finite() && (ub - lb).abs() < AT_BOUND_TOL {
+        if lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_ACTIVE_REL_TOL {
             continue;
         }
         let xj = sol[j];
-        let at_lb = lb.is_finite() && (xj - lb).abs() < AT_BOUND_TOL;
-        let at_ub = ub.is_finite() && (xj - ub).abs() < AT_BOUND_TOL;
+        let at_lb = lb.is_finite() && (xj - lb).abs() < BOUND_ACTIVE_REL_TOL;
+        let at_ub = ub.is_finite() && (xj - ub).abs() < BOUND_ACTIVE_REL_TOL;
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -rc[j])
         } else if at_ub && !at_lb {
