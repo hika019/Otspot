@@ -178,7 +178,10 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     let x: Vec<f64> = bounds.iter().map(|&(l, u)| 0.5 * (l + u)).collect();
 
     if qp.num_constraints > 0 {
-        let lhs = qp.a.mat_vec_mul(&x).ok()?;
+        let lhs = match qp.a.mat_vec_mul(&x) {
+            Ok(v) => v,
+            Err(_) => return Some(SolverResult::numerical_error()),
+        };
         for ((&lhs_k, &ct), &b_k) in lhs.iter().zip(&qp.constraint_types).zip(&qp.b) {
             let feasible = match ct {
                 ConstraintType::Le => lhs_k <= b_k + FIXED_POINT_FEAS_TOL,
@@ -192,7 +195,10 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     }
 
     // Objective 1/2 x'Qx + c'x + offset (Q is full-symmetric CSC storage).
-    let qx = qp.q.mat_vec_mul(&x).ok()?;
+    let qx = match qp.q.mat_vec_mul(&x) {
+        Ok(v) => v,
+        Err(_) => return Some(SolverResult::numerical_error()),
+    };
     let quad: f64 = 0.5 * x.iter().zip(&qx).map(|(xi, qxi)| xi * qxi).sum::<f64>();
     let lin: f64 = qp.c.iter().zip(&x).map(|(ci, xi)| ci * xi).sum::<f64>();
     Some(SolverResult {
@@ -308,6 +314,27 @@ mod tests {
         let qp = qp_diag(&[2.0]);
         let r = solve_fixed_point(&qp, &[(3.0, 2.0)]).expect("empty box → Some");
         assert_eq!(r.status, SolveStatus::Infeasible);
+    }
+
+    #[test]
+    fn fixed_point_dim_mismatch_q_returns_numerical_error() {
+        // 2-var QP but only 1 bound: x.len()=1 != Q.ncols=2 → mat_vec_mul error.
+        // Must return Some(NumericalError), not None (which would silently fall to IPM).
+        let qp = qp_diag(&[2.0, 2.0]);
+        let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
+        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
+    }
+
+    #[test]
+    fn fixed_point_dim_mismatch_a_returns_numerical_error() {
+        // 2-var QP with a constraint: x.len()=1 but A.ncols=2 → A mat_vec_mul error.
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let qp = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![5.0], vec![(0.0, 5.0); 2]).unwrap();
+        let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
+        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
     }
 
     #[test]

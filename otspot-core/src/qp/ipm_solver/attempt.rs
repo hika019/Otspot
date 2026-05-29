@@ -10,7 +10,7 @@ use crate::options::SolverOptions;
 use crate::tolerances::{Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
-    qp_transforms::{QpPresolveStatus, QpPostsolveStep},
+    qp_transforms::QpPresolveStatus,
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
@@ -125,40 +125,14 @@ const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
 /// presolve スケーリング縮小比率の下限 sigma_total。unscale 残差は 1/sigma_total 倍される。
-fn compute_presolve_sigma_total(presolve_result: &QpPresolveResult) -> f64 {
-    let mut primal_row_scale_min = 1.0_f64;
-    for step in presolve_result.postsolve_stack.steps.iter() {
-        if let QpPostsolveStep::LargeCoeffRowScale { row_scales } = step {
-            let local_min = row_scales.iter()
-                .filter(|&&v| v > 0.0 && v.is_finite())
-                .fold(f64::INFINITY, |a, &v| a.min(v));
-            if local_min.is_finite() {
-                primal_row_scale_min *= local_min;
-            }
-        }
-    }
-    let mut dual_col_scale_min = f64::INFINITY;
-    if let Some(scaler) = &presolve_result.ruiz_scaler {
-        let e_min = scaler.e.iter()
-            .filter(|&&v| v > 0.0 && v.is_finite())
-            .fold(f64::INFINITY, |a, &v| a.min(v));
-        if e_min.is_finite() {
-            primal_row_scale_min *= e_min;
-        }
-        let d_min = scaler.d.iter()
-            .filter(|&&v| v > 0.0 && v.is_finite())
-            .fold(f64::INFINITY, |a, &v| a.min(v));
-        if d_min.is_finite() && scaler.c.is_finite() && scaler.c > 0.0 {
-            dual_col_scale_min = scaler.c * d_min;
-        }
-    }
-    primal_row_scale_min.min(dual_col_scale_min)
-}
-
 /// tighten = ceil_pow10(user_eps / 1e-8) ∈ [1, 1000]。上限 1000 は IPM floor 制約。
-fn dynamic_base_tighten(sigma_total: f64, user_eps: f64) -> f64 {
+///
+/// `sigma_total` (minimum Ruiz / row-scale factor) was considered as an additional
+/// divisor here, but bench showed it causes over-tightening that the no-presolve
+/// fallback (below) must undo anyway. The fallback is the correct fix for ill-scaled
+/// problems; removing sigma_total from this path is strictly simpler.
+fn dynamic_base_tighten(user_eps: f64) -> f64 {
     const REF_EPS: f64 = 1e-8;
-    let _ = sigma_total;
     let ratio = user_eps / REF_EPS;
     if ratio <= 1.0 {
         return 1.0;
@@ -424,8 +398,7 @@ fn solve_ipm_with_runner(
     let user_max_iter = options.ipm.max_iter;
     let mut iter_used: usize = 0;
 
-    let sigma_total = compute_presolve_sigma_total(&presolve_result);
-    let base_tighten = dynamic_base_tighten(sigma_total, user_eps);
+    let base_tighten = dynamic_base_tighten(user_eps);
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
         let mut v = vec![
             (false, base_tighten),
