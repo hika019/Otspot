@@ -131,8 +131,8 @@ bash scripts/bench_parallel.sh --data-dir data/maros_meszaros --eps 1e-6 --jobs 
 ## テスト
 
 ```bash
-cargo nextest run --release                          # 全スイート (data/ 必須)
-cargo nextest run --release --profile lib-only       # ユニットテストのみ
+cargo nextest run --release --test-threads 3          # 全スイート (data/ 必須)
+cargo nextest run --release --profile lib-only       # lib + bin テスト (kind=lib + kind=bin)、統合データ不要
 cargo test --doc --release
 ```
 
@@ -148,13 +148,12 @@ docker run -it --rm -v "$PWD":/workspace -w /workspace otspot-dev bash
 ### ベンチマークデータ
 
 ```bash
-bash scripts/download_all_bench_data.sh          # Netlib LP + 合成 QP
+bash scripts/download_all_bench_data.sh          # Netlib LP + Maros-Meszaros + QPLIB + 合成 QP
 bash scripts/download_all_bench_data.sh --lp     # LP のみ
 bash scripts/download_all_bench_data.sh --check  # 取得状況確認
 ```
 
-QP データ生成には `numpy scipy cvxpy clarabel` が必要（`pip install`）。
-Maros–Mészáros / QPLIB は手動配置（URL ヒントはスクリプト内）。
+合成 QP データ生成には `numpy scipy cvxpy clarabel` が必要（`pip install`）。
 
 ## プロジェクト構造
 
