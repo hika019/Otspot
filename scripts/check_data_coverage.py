@@ -48,6 +48,9 @@ DATASETS = [
     # QP official-derived (generated from official problem definitions)
     ("osqp_bench", "data/baseline_objectives/osqp_bench.csv",
      [".qps"], "official_gen"),
+    # SuiteSparse problems added by setup_extra_benches.sh (skipped with --no-suitesparse)
+    ("osqp_bench", "data/baseline_objectives/osqp_bench_optional.csv",
+     [".qps"], "official_gen", True),
     ("mpc_qp", "data/baseline_objectives/mpc_qp.csv",
      [".qps"], "official_gen"),
     # QP synthetic (no external reference by design)
@@ -128,13 +131,17 @@ def main() -> int:
     ok = True
     rows = []
 
-    for (dir_name, csv_rel, exts, origin) in DATASETS:
+    for entry in DATASETS:
+        dir_name, csv_rel, exts, origin = entry[:4]
+        optional = entry[4] if len(entry) > 4 else False
+        label = f"{dir_name}[opt]" if optional else dir_name
+
         data_dir = root / "data" / dir_name
         csv_path = root / csv_rel if csv_rel else None
 
         if not data_dir.is_dir():
             rows.append({
-                "dataset": dir_name,
+                "dataset": label,
                 "origin": origin,
                 "files": 0,
                 "csv_rows": 0,
@@ -151,15 +158,18 @@ def main() -> int:
 
         status_parts = []
         if csv_gap:
-            status_parts.append(f"CSV_GAP:{len(csv_gap)}")
-            ok = False
+            if optional:
+                status_parts.append(f"CSV_GAP:{len(csv_gap)}[opt]")
+            else:
+                status_parts.append(f"CSV_GAP:{len(csv_gap)}")
+                ok = False
         if no_ref and args.strict:
             status_parts.append(f"NO_REF:{len(no_ref)}")
             ok = False
         status = " ".join(status_parts) if status_parts else "ok"
 
         rows.append({
-            "dataset": dir_name,
+            "dataset": label,
             "origin": origin,
             "files": len(all_files),
             "csv_rows": len(csv_names),
@@ -186,7 +196,8 @@ def main() -> int:
     # Detail for gaps
     for r in rows:
         if r.get("csv_gap_names"):
-            print(f"\n[CSV_GAP] {r['dataset']}: in CSV but not in dir ({len(r['csv_gap_names'])} files):")
+            tag = "[CSV_GAP/opt]" if r["dataset"].endswith("[opt]") else "[CSV_GAP]"
+            print(f"\n{tag} {r['dataset']}: in CSV but not in dir ({len(r['csv_gap_names'])} files):")
             for n in r["csv_gap_names"]:
                 print(f"  {n}")
         if r.get("no_ref_names") and (args.strict or r.get("csv_gap_names")):
