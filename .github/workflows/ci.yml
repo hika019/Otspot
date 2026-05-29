@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release -E 'kind(lib) + kind(bin)'
+      - run: cargo nextest run --release --features parallel -E 'kind(lib) + kind(bin)'
 
   test-integration:
     name: Tests (integration, real data)
@@ -45,7 +45,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --release -E 'kind(test)' --test-threads 3
+      - run: cargo nextest run --release --features parallel -E 'kind(test)' --test-threads 3
 
   clippy:
     name: clippy
