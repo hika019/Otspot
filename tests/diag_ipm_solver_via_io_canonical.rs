@@ -1,7 +1,7 @@
 // IPM solver 診断テスト — otspot-io canonical parser 経由
 // (元: otspot-core/src/qp/ipm_solver/mod.rs の inline test、#109 A.1 で移動)
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::type_complexity)]
 
 use otspot_core::options::{IpmOptions, SolverOptions};
 use otspot_core::presolve::QpPresolveResult;
