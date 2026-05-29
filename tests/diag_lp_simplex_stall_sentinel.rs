@@ -168,7 +168,12 @@ fn lp_simplex_stall_d6cube_noop_proof_short() {
 /// Synthetic large LP: random sparse A, dense c, all Eq, large enough to
 /// trigger the IPM-first dispatch (m > 2000). Validates that the dispatch
 /// route is exercised on data outside the fixture set.
+///
+/// **Heavy tier**: IPM solve takes ~7–13s solo but hits the 30s budget under
+/// CPU contention in full nextest runs (same pattern as LISWET #139).
+/// Run via `--profile heavy --run-ignored ignored-only`.
 #[test]
+#[ignore = "heavy: CPU contention 30s budget hit (2026-05-30 #130 lead-verify retest で再現)、deep dive は #75 LP perf track"]
 fn lp_simplex_stall_synthetic_large_lp_converges() {
     use otspot::sparse::CscMatrix;
 
