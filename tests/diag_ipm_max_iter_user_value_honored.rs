@@ -1,20 +1,5 @@
-//! `IpmOptions.max_iter` が全 attempt の cumulative budget として機能することを verify する sentinel。
-//!
-//! ## 修正前の挙動
-//!
-//! `attempt.rs` のループ内で `opts.ipm.max_iter = MAX_ITER_PER_ATTEMPT (500)` を
-//! 毎 attempt 上書きしていたため、user が設定した `ipm.max_iter` は無視されていた。
-//!
-//! ## 修正後の挙動
-//!
-//! `ipm.max_iter` は全 attempt を通じた累積 iter の上限 (outer guard) として機能する。
-//! per-attempt cap は `min(MAX_ITER_PER_ATTEMPT, remaining_user_budget)` で決定される。
-//!
-//! ## sentinel 検出力 (no-op proof)
-//!
-//! - Pattern A: `max_iter=50` → `result.iterations ≤ 50` (修正前は最大 500 だった)
-//! - Pattern B: `max_iter=usize::MAX` (default) → 正常収束、退化しない
-//! - Pattern C: `max_iter=1` → 1 iter で打ち切り、panic しない
+//! Sentinel: `IpmOptions.max_iter` is respected as the cumulative iteration budget
+//! across all attempts. Pattern C is the load-bearing sentinel.
 
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
@@ -37,10 +22,10 @@ fn simple_convex_qp() -> QpProblem {
     .unwrap()
 }
 
-/// Pattern A: max_iter=50 が1回 attempt の iter を 50 以内に制限する。
+/// Pattern A: max_iter=50 は per-attempt cap として機能し、iterations は 50 以内に収まる。
 ///
-/// **Sentinel**: `attempt.rs` の outer guard を削除して毎 attempt 500 固定に戻すと
-/// `result.iterations` が 50 を超えうる → このテストが FAIL する。
+/// Note: simple_convex_qp (n=2) は自然収束 ~10 iter なので修正 revert 時も PASS する。
+/// load-bearing sentinel は Pattern C (max_iter=1) を参照。
 #[test]
 fn max_iter_50_honored() {
     let problem = simple_convex_qp();
@@ -64,14 +49,17 @@ fn max_iter_default_converges() {
     assert!((result.objective - 0.5).abs() < 1e-5, "obj={}", result.objective);
 }
 
-/// Pattern C: max_iter=1 でも panic せず、何らかのステータスで返る。
+/// Pattern C: max_iter=1 でも panic せず、iterations が 1 以内に収まる。
+///
+/// **Sentinel**: outer guard を削除して `opts.ipm.max_iter = 500` を毎 attempt に
+/// 固定（修正 revert）すると、simple_convex_qp は ~10 iter で収束するため
+/// `result.iterations = 10 > 1` となりこのテストが FAIL する。
 #[test]
 fn max_iter_1_no_panic() {
     let problem = simple_convex_qp();
     let mut opts = SolverOptions::default();
     opts.ipm.max_iter = 1;
     let result = solve_qp_with(&problem, &opts);
-    // 1 iter で収束は期待しないが、panic / 異常終了してはならない。
     assert!(
         result.iterations <= 1,
         "max_iter=1 が無視された: iterations={}",
