@@ -29,6 +29,7 @@ use crate::qp::ipm_core::solver_loop::{
     gondzio_correctors_schur, predictor_step, predictor_step_schur, update_variables,
 };
 use crate::qp::problem::QpProblem;
+use crate::tolerances::any_nonfinite;
 
 /// IP-PMM 内部ソルバー (Ruiz scaling 後の problem を受け取る)。
 pub(crate) fn solve_ippmm_inner(
@@ -379,9 +380,9 @@ pub(crate) fn solve_ippmm_inner(
         // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
         let direction_finite_but_huge = dx.iter().chain(dy.iter()).chain(ds.iter())
             .any(|v| v.is_finite() && v.abs() > DIRECTION_BLOWUP_THRESHOLD);
-        if dx.iter().any(|v| !v.is_finite())
-            || dy.iter().any(|v| !v.is_finite())
-            || ds.iter().any(|v| !v.is_finite())
+        if any_nonfinite(&dx)
+            || any_nonfinite(&dy)
+            || any_nonfinite(&ds)
             || direction_finite_but_huge
         {
             if best_score.is_finite() {

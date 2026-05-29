@@ -10,7 +10,7 @@ use crate::qp::linalg::{build_aat_upper_csc, AAT_REG_FACTOR};
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
 use crate::sparse::CscMatrix;
-use crate::tolerances::COMP_SLACK_REL_TOL;
+use crate::tolerances::{any_nonfinite, COMP_SLACK_REL_TOL};
 
 /// CG 相対収束判定 (||r||² / ||r0||² < tol)。
 /// √tol = 1e-10 の rel_res で、f64 精度の LSQ 解に十分。
@@ -160,7 +160,7 @@ fn solve_aat_cg(
         rdr = rdr_new;
     }
 
-    if best_y.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(&best_y) {
         return (None, false);
     }
     (Some(best_y), converged)
@@ -211,7 +211,7 @@ fn solve_aat_direct_ir(
     let rhs0 = build_rhs(target_dd);
     let mut y = vec![0.0_f64; m_sub];
     factor.solve(&rhs0, &mut y);
-    if y.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(&y) {
         return None;
     }
 
@@ -247,7 +247,7 @@ fn solve_aat_direct_ir(
         let rhs_dy = build_rhs(&r_dd);
         let mut dy = vec![0.0_f64; m_sub];
         factor.solve(&rhs_dy, &mut dy);
-        if dy.iter().any(|v| !v.is_finite()) {
+        if any_nonfinite(&dy) {
             break;
         }
         for i in 0..m_sub {

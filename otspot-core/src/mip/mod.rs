@@ -147,7 +147,7 @@ pub fn solve_miqp_with_stats(
     if options.validate().is_err() {
         return (SolverResult::numerical_error(), MipStats::default());
     }
-    if !problem.is_convex_with_limit(options.psd_check_max_n) {
+    if !problem.is_convex() {
         return (nonconvex_result(), MipStats::default());
     }
     solve_mip_with_stats(problem, options, cfg)

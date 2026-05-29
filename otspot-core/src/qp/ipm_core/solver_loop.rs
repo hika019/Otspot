@@ -2,6 +2,7 @@
 
 use crate::linalg::kkt_solver::KktFactor;
 use crate::sparse::CscMatrix;
+use crate::tolerances::any_nonfinite;
 use super::common::fraction_to_boundary_masked;
 use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 
@@ -92,7 +93,7 @@ pub(crate) fn solve_with_iterative_refinement(
         fac.solve_with_deadline(&residual, &mut correction, deadline);
 
         // Backtrack guard: NaN/Inf protection
-        let any_bad = correction.iter().any(|v| !v.is_finite());
+        let any_bad = any_nonfinite(&correction);
         if any_bad {
             return;
         }

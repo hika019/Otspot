@@ -1,7 +1,7 @@
 //! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
 use crate::qp::kkt_resid::{self, dd_impl};
-use crate::tolerances::FX_TOL;
+use crate::tolerances::{any_nonfinite, FX_TOL};
 use super::outcome::ProblemView;
 
 /// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
@@ -146,7 +146,7 @@ pub fn complementarity_residual_rel(
 ///
 /// Returns `f64::INFINITY` if any element of `x` is non-finite (NaN or ±Inf).
 pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
-    if x.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(x) {
         return f64::INFINITY;
     }
     let mut max_rel = 0.0_f64;
