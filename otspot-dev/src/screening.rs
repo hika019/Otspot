@@ -11,9 +11,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-pub const DEFAULT_TIMEOUT_SEC: f64 = 20.0;
-pub const DEFAULT_REL_TOL: f64 = 1e-3;
-
 /// Classification of a single problem's solve result.
 #[derive(Debug)]
 pub enum ScreenVerdict {
@@ -38,11 +35,6 @@ pub struct ScreenEntry {
     pub name: String,
     pub verdict: ScreenVerdict,
     pub elapsed_secs: f64,
-}
-
-/// Load the baseline objective CSV. Panics if the file cannot be read.
-pub fn load_baseline(csv_path: &str) -> HashMap<String, f64> {
-    crate::bench_utils::load_baseline_objectives(std::path::Path::new(csv_path), true)
 }
 
 /// Screen a single LP file: parse, solve, classify verdict.

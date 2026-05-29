@@ -9,8 +9,12 @@
 //! exp_adjusted = netlib_ref + problem.obj_offset で補正する。
 
 use otspot::options::SolverOptions;
-use otspot_dev::screening::{is_bug, load_baseline, screen_single, DEFAULT_REL_TOL, DEFAULT_TIMEOUT_SEC};
+use otspot_dev::bench_utils::load_baseline_objectives;
+use otspot_dev::screening::{is_bug, screen_single};
 use std::path::Path;
+
+const DEFAULT_TIMEOUT_SEC: f64 = 20.0;
+const DEFAULT_REL_TOL: f64 = 1e-3;
 
 const PROBLEMS_DIR: &str = "data/lp_problems";
 const FIXTURE_DIR: &str = "tests/lp_problems";
@@ -24,7 +28,7 @@ fn lp_coverage_screen_all() {
     let dir = Path::new(PROBLEMS_DIR);
     assert!(dir.exists(),
         "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", PROBLEMS_DIR);
-    let baseline = load_baseline(BASELINE_CSV);
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV), true);
 
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .expect("read_dir failed")
@@ -76,7 +80,7 @@ fn lp_coverage_screen_all() {
 /// Expected runtime: well under 3 min.
 #[test]
 fn lp_coverage_screen_sample() {
-    let baseline = load_baseline(BASELINE_CSV);
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV), true);
 
     // afiro is a committed fixture — always present, always tested.
     let afiro_path = Path::new(FIXTURE_DIR).join("afiro.QPS");
