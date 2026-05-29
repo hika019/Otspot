@@ -9,9 +9,9 @@ name: CI (heavy)
 # "skipped" run が大量表示されノイズになるため、workflow 自体を起動させない)。
 # 手動 heavy 実行が必要なら workflow_dispatch を使う。
 on:
-  schedule:
-    - cron: "0 18 * * *"
   workflow_dispatch:
+  push:
+    branches: ["**"]
 
 jobs:
   test-heavy:
