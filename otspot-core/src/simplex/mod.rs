@@ -26,6 +26,13 @@ pub(crate) use standard_form::build_standard_form;
 pub(crate) use standard_form::OrigVarInfo;
 pub(crate) use standard_form::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
 
+/// Returns `true` when any basic variable value violates its lower bound.
+/// Triggers cold-start fallback in the warm-start path.
+#[inline]
+pub(crate) fn has_lb_violation(x_b: &[f64], tol: f64) -> bool {
+    x_b.iter().any(|&v| v < -tol)
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
