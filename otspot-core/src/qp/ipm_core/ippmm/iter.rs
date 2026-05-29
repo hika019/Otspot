@@ -323,13 +323,13 @@ pub(crate) fn solve_ippmm_inner(
             let pred = predictor_step_schur(
                 &s, &y, &is_eq_ext, m_ineq,
                 &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, &aug_mat, d_inv, &a_ext, n, m_ext, mu,
+                &sigma_vec, &fac, d_inv, &a_ext, m_ext, mu,
             );
             let (alpha, r_c_corr) = corrector_step_schur(
                 &s, &y, &is_eq_ext,
                 &pred, mu,
                 &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, &aug_mat, d_inv, &a_ext, n, m_ext,
+                &sigma_vec, &fac, d_inv, &a_ext, m_ext,
                 &mut dx, &mut dy, &mut ds,
             );
             (pred, alpha, r_c_corr)
@@ -358,7 +358,7 @@ pub(crate) fn solve_ippmm_inner(
                 gondzio_correctors_schur(
                     &s, &y, &is_eq_ext, m_ineq,
                     &r_d_pmm, &r_p_pmm,
-                    &r_c_corr, &sigma_vec, &fac, &aug_mat, d_inv, &a_ext, n, m_ext,
+                    &r_c_corr, &sigma_vec, &fac, d_inv, &a_ext, m_ext,
                     options.ipm.max_correctors, alpha,
                     &mut dx, &mut dy, &mut ds,
                     timeout_ctx.deadline,

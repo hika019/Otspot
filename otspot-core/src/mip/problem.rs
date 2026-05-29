@@ -213,7 +213,6 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::ldl::is_q_psd_by_cholesky;
     use crate::problem::ConstraintType;
     use crate::sparse::CscMatrix;
 
