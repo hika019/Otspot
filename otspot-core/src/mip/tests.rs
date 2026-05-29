@@ -6,11 +6,11 @@
 //! exercised here. Model API tests live in `otspot-model/tests/mip_model.rs`.
 
 use super::{
-    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_miqp,
-    solve_miqp_with_stats, MilpProblem, MiqpProblem,
+    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_mip_core,
+    solve_miqp, solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
 use crate::options::{MipConfig, SolverOptions};
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 
@@ -1137,5 +1137,116 @@ fn warm_start_propagated_to_child_nodes_sentinel() {
         received.iter().any(|&ws| ws),
         "warm_start must be propagated to at least one child node; \
          no-op (child() instead of child_warm()) gives all-false: {received:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feasibility pump sentinels
+// ---------------------------------------------------------------------------
+
+/// Construct the FP sentinel problem.
+///
+/// min -(3x0+5x1+2x2+4x3) s.t. 3x0+5x1+2x2+4x3 <= 7, x in {0,1}^4.
+///
+/// LP relaxation optimal: x=(0,1,0,0.5), obj=-7, x3 fractional.
+/// FP step 1: round → (0,1,0,1); fp-cost pushes x3 up → LP gives (1,0,0,1);
+///            (1,0,0,1) is integer feasible → FP returns with obj=-7.
+///
+/// BT: all upper bounds already at 1 (floor(7/coeff) >= 1 for all coeffs) → no tightening.
+fn fp_sentinel_problem() -> MilpProblem {
+    let lp = build_lp(
+        vec![-3.0, -5.0, -2.0, -4.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[3.0, 5.0, 2.0, 4.0],
+        1,
+        vec![7.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); 4],
+    );
+    milp(lp, vec![0, 1, 2, 3])
+}
+
+/// Feasibility pump finds an initial integer-feasible solution before B&B.
+///
+/// `stats.fp_incumbent_found` is set only when `run_feasibility_pump` returns
+/// `Some(...)` and `solve_mip_core` adopts it. Removing the FP call in
+/// `solve_milp_with_stats` leaves `fp_incumbent_found = false` → **FAILS**.
+#[test]
+fn feasibility_pump_finds_initial_integer_solution() {
+    let problem = fp_sentinel_problem();
+    let (r, stats) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        stats.fp_incumbent_found,
+        "FP must find an initial integer solution; \
+         removing FP call gives fp_incumbent_found=false → FAIL"
+    );
+    assert!(stats.incumbent_updates >= 1, "incumbent_updates must reflect FP find");
+}
+
+/// A known integer-feasible solution seeds `solve_mip_core` and reduces B&B nodes.
+///
+/// Injects solution (1,0,0,1) (obj=−7) as a pre-computed initial incumbent.
+/// The LP relaxation returns obj ≈ −7 (lower bound ≥ −7), so the root is
+/// immediately fathomed after solving: `nodes_processed == 1`.
+/// Without the incumbent B&B branches, processing multiple nodes.
+///
+/// Sentinel: removing `initial_incumbent` handling in `solve_mip_core` (always
+/// treating it as `None`) makes both calls process the same tree → assertion fails.
+///
+/// Complement: `feasibility_pump_finds_initial_integer_solution` verifies that
+/// `solve_milp_with_stats` actually calls `run_feasibility_pump` and sets
+/// `fp_incumbent_found`. Together the two sentinels cover the full FP integration.
+#[test]
+fn feasibility_pump_reduces_bb_nodes() {
+    let problem = fp_sentinel_problem();
+    let cfg = MipConfig::default();
+    let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
+
+    // (1,0,0,1) is integer-feasible with obj = −(3+4) = −7.
+    let known_inc = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -7.0,
+        solution: vec![1.0, 0.0, 0.0, 1.0],
+        ..SolverResult::default()
+    };
+
+    let (_, with_inc) = solve_mip_core(&problem, &opts(), &cfg, mask.clone(), Some(known_inc));
+    let (_, no_inc)   = solve_mip_core(&problem, &opts(), &cfg, mask, None);
+
+    assert!(
+        with_inc.nodes_processed < no_inc.nodes_processed,
+        "initial incumbent must reduce B&B nodes: with={} without={}",
+        with_inc.nodes_processed, no_inc.nodes_processed
+    );
+}
+
+/// Feasibility pump is skipped for pure LP problems (empty integer_vars).
+///
+/// The LP/QP passthrough in `solve_milp_with_stats` returns before reaching
+/// the FP call. `fp_incumbent_found` must be false.
+///
+/// Sentinel: calling FP unconditionally (ignoring empty integer_vars) either
+/// panics or sets `fp_incumbent_found=true` → **FAILS**.
+#[test]
+fn feasibility_pump_handles_pure_lp_pass_through() {
+    let lp = build_lp(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let problem = milp(lp, vec![]); // no integer vars
+    let (r, stats) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        !stats.fp_incumbent_found,
+        "FP must be skipped for pure LP (empty integer_vars); \
+         unconditional FP call sets fp_incumbent_found=true → FAIL"
     );
 }

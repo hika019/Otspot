@@ -23,6 +23,7 @@
 //! reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
+pub(crate) mod heuristics;
 pub(crate) mod node;
 pub(crate) mod presolve;
 mod problem;
@@ -104,6 +105,9 @@ pub struct MipStats {
     /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
     /// Gives a rough idea of per-node memory traffic regardless of node count.
     pub approx_bounds_bytes_per_node: usize,
+
+    /// Whether the feasibility pump found an initial incumbent before branch-and-bound.
+    pub fp_incumbent_found: bool,
 }
 
 /// Solve a MILP to (relative) ε-optimality via branch-and-bound.
@@ -132,17 +136,20 @@ pub fn solve_milp_with_stats(
         match presolve::tighten_integer_bounds(&problem.lp, &mask) {
             None => return (SolverResult::infeasible(), MipStats::default()),
             Some(tightened) if tightened != problem.lp.bounds => {
-                // Bounds were tightened: build the BT-reduced problem and solve.
-                // Pass the precomputed mask to avoid recomputing it in the driver.
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
                 let problem_bt =
                     MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
-                return solve_mip_core(&problem_bt, options, cfg, mask);
+                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
+                    &problem_bt.lp, &problem_bt.integer_vars, cfg.integer_feas_tol, options,
+                );
+                return solve_mip_core(&problem_bt, options, cfg, mask, fp_inc);
             }
             Some(_) => {
-                // BT produced no tighter bounds: skip the LP clone and proceed.
-                return solve_mip_core(problem, options, cfg, mask);
+                let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
+                    &problem.lp, &problem.integer_vars, cfg.integer_feas_tol, options,
+                );
+                return solve_mip_core(problem, options, cfg, mask, fp_inc);
             }
         }
     }
@@ -186,16 +193,22 @@ fn solve_mip_with_stats<R: Relaxation>(
     cfg: &MipConfig,
 ) -> (SolverResult, MipStats) {
     let mask = integer_mask(problem.num_vars(), problem.integer_vars());
-    solve_mip_core(problem, options, cfg, mask)
+    solve_mip_core(problem, options, cfg, mask, None)
 }
 
 /// Core B&B driver that accepts a precomputed `integer_mask` to avoid
 /// recomputing it when the caller (e.g. `solve_milp_with_stats`) already has it.
+///
+/// `initial_incumbent` is an optional integer-feasible solution found by a
+/// pre-B&B heuristic (e.g., feasibility pump). When provided it is adopted as
+/// the starting incumbent so B&B can immediately prune nodes whose relaxation
+/// bound is already within the gap tolerance.
 fn solve_mip_core<R: Relaxation>(
     problem: &R,
     options: &SolverOptions,
     cfg: &MipConfig,
     mask: Vec<bool>,
+    initial_incumbent: Option<SolverResult>,
 ) -> (SolverResult, MipStats) {
     let mut stats = MipStats {
         approx_bounds_bytes_per_node: problem.num_vars() * 2 * std::mem::size_of::<f64>(),
@@ -226,6 +239,15 @@ fn solve_mip_core<R: Relaxation>(
     shared.warm_start = None;
 
     let mut state = MipState::new();
+
+    // Seed with an initial incumbent (e.g., from the feasibility pump heuristic).
+    if let Some(inc) = initial_incumbent {
+        if state.consider(&inc) {
+            stats.incumbent_updates += 1;
+            stats.fp_incumbent_found = true;
+        }
+    }
+
     let mut q = NodeQueue::new();
     // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
     // Optimal relaxation. The loop solves the root uniformly with every other node, so
