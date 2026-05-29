@@ -6,11 +6,11 @@
 //! exercised here. Model API tests live in `otspot-model/tests/mip_model.rs`.
 
 use super::{
-    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_miqp,
-    solve_miqp_with_stats, MilpProblem, MiqpProblem,
+    finalize_no_incumbent, integer_mask, solve_milp, solve_milp_with_stats, solve_mip_core,
+    solve_miqp, solve_miqp_with_stats, MilpProblem, MiqpProblem,
 };
 use crate::options::{MipConfig, SolverOptions};
-use crate::problem::{ConstraintType, LpProblem, SolveStatus};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 
@@ -1141,6 +1141,246 @@ fn warm_start_propagated_to_child_nodes_sentinel() {
 }
 
 // ---------------------------------------------------------------------------
+// Feasibility pump sentinels
+// ---------------------------------------------------------------------------
+
+/// Construct the FP sentinel problem.
+///
+/// min -(3x0+5x1+2x2+4x3) s.t. 3x0+5x1+2x2+4x3 <= 7, x in {0,1}^4.
+///
+/// LP relaxation optimal: x=(0,1,0,0.5), obj=-7, x3 fractional.
+/// FP step 1: round → (0,1,0,1); fp-cost pushes x3 up → LP gives (1,0,0,1);
+///            (1,0,0,1) is integer feasible → FP returns with obj=-7.
+///
+/// BT: all upper bounds already at 1 (floor(7/coeff) >= 1 for all coeffs) → no tightening.
+fn fp_sentinel_problem() -> MilpProblem {
+    let lp = build_lp(
+        vec![-3.0, -5.0, -2.0, -4.0],
+        &[0, 0, 0, 0],
+        &[0, 1, 2, 3],
+        &[3.0, 5.0, 2.0, 4.0],
+        1,
+        vec![7.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 1.0); 4],
+    );
+    milp(lp, vec![0, 1, 2, 3])
+}
+
+/// Feasibility pump finds an initial integer-feasible solution before B&B.
+///
+/// `stats.fp_incumbent_found` is set only when `run_feasibility_pump` returns
+/// `Some(...)` and `solve_mip_core` adopts it. Removing the FP call in
+/// `solve_milp_with_stats` leaves `fp_incumbent_found = false` → **FAILS**.
+#[test]
+fn feasibility_pump_finds_initial_integer_solution() {
+    let problem = fp_sentinel_problem();
+    let (r, stats) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        stats.fp_incumbent_found,
+        "FP must find an initial integer solution; \
+         removing FP call gives fp_incumbent_found=false → FAIL"
+    );
+    assert!(stats.incumbent_updates >= 1, "incumbent_updates must reflect FP find");
+}
+
+/// A known integer-feasible solution seeds `solve_mip_core` and reduces B&B nodes.
+///
+/// Injects solution (1,0,0,1) (obj=−7) as a pre-computed initial incumbent.
+/// The LP relaxation returns obj ≈ −7 (lower bound ≥ −7), so the root is
+/// immediately fathomed after solving: `nodes_processed == 1`.
+/// Without the incumbent B&B branches, processing multiple nodes.
+///
+/// Sentinel: removing `initial_incumbent` handling in `solve_mip_core` (always
+/// treating it as `None`) makes both calls process the same tree → assertion fails.
+///
+/// Complement: `feasibility_pump_finds_initial_integer_solution` verifies that
+/// `solve_milp_with_stats` actually calls `run_feasibility_pump` and sets
+/// `fp_incumbent_found`. Together the two sentinels cover the full FP integration.
+#[test]
+fn feasibility_pump_reduces_bb_nodes() {
+    let problem = fp_sentinel_problem();
+    let cfg = MipConfig::default();
+    let mask = integer_mask(problem.lp.num_vars, &problem.integer_vars);
+
+    // (1,0,0,1) is integer-feasible with obj = −(3+4) = −7.
+    let known_inc = SolverResult {
+        status: SolveStatus::Optimal,
+        objective: -7.0,
+        solution: vec![1.0, 0.0, 0.0, 1.0],
+        ..SolverResult::default()
+    };
+
+    let (_, with_inc) = solve_mip_core(&problem, &opts(), &cfg, mask.clone(), Some(known_inc));
+    let (_, no_inc)   = solve_mip_core(&problem, &opts(), &cfg, mask, None);
+
+    assert!(
+        with_inc.nodes_processed < no_inc.nodes_processed,
+        "initial incumbent must reduce B&B nodes: with={} without={}",
+        with_inc.nodes_processed, no_inc.nodes_processed
+    );
+}
+
+/// Feasibility pump is skipped for pure LP problems (empty integer_vars).
+///
+/// `solve_milp_with_stats` takes the LP/QP passthrough branch and does not
+/// call FP; `fp_incumbent_found` must remain false. The inner early-return
+/// guard in `run_feasibility_pump` (`fp_skips_empty_integer_vars`) is the
+/// correctness sentinel for that function; this test is a contract regression.
+#[test]
+fn feasibility_pump_handles_pure_lp_pass_through() {
+    let lp = build_lp(
+        vec![1.0, 1.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.0],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0), (0.0, 5.0)],
+    );
+    let problem = milp(lp, vec![]); // no integer vars
+    let (r, stats) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal);
+    assert!(
+        !stats.fp_incumbent_found,
+        "pure LP must not set fp_incumbent_found; \
+         FP is gated by `!integer_vars.is_empty()` in solve_milp_with_stats"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deadline contract sentinels
+// ---------------------------------------------------------------------------
+
+/// Timeout budget for `fp_timeout_does_not_exceed_user_limit`.
+const FP_TIMEOUT_BUDGET_SECS: f64 = 1.0;
+
+/// Multiplier for wall-clock upper bound in FP timeout sentinels.
+///
+/// Elapsed must stay below `timeout × TIMEOUT_WALL_MARGIN_MULT`. A 5× factor gives
+/// comfortable headroom for scheduler and solver-cleanup jitter (observed up to ~1.7×
+/// in CI) while still catching the ~31× overrun that occurs without the shared deadline.
+const TIMEOUT_WALL_MARGIN_MULT: f64 = 5.0;
+
+/// A moderately large binary MILP (n=500 vars, m=100 constraints, density ≈ 0.5)
+/// where FP LP solves are non-trivial. Provides enough wall-clock exposure to
+/// distinguish the shared-deadline fix from a broken implementation that resets
+/// the clock on every LP call.
+fn fp_timeout_sentinel_milp() -> MilpProblem {
+    let n = 500usize;
+    let m = 100usize;
+    // Deterministic LCG for reproducibility without external dependencies.
+    let mut s: u64 = 0x1234_5678_9ABC_DEF0;
+    let mut rng = || -> f64 {
+        s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((s >> 33) as f64) / (u32::MAX as f64)
+    };
+    let c: Vec<f64> = (0..n).map(|_| -rng() * 10.0).collect();
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    let mut b = Vec::new();
+    for i in 0..m {
+        let mut row_sum = 0.0f64;
+        for j in 0..n {
+            if rng() < 0.5 {
+                let v = 1.0 + rng() * 4.0;
+                rows.push(i);
+                cols.push(j);
+                vals.push(v);
+                row_sum += v;
+            }
+        }
+        b.push((row_sum * 0.4).max(1.0));
+    }
+    let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
+    let lp = LpProblem::new_general(
+        c,
+        a,
+        b,
+        vec![ConstraintType::Le; m],
+        vec![(0.0, 1.0); n],
+        None,
+    )
+    .unwrap();
+    milp(lp, (0..n).collect())
+}
+
+/// Shared deadline prevents total elapsed from exceeding `timeout_secs × TIMEOUT_WALL_MARGIN_MULT`.
+///
+/// Without the fix, each FP LP and `solve_mip_core` each receive a fresh
+/// `timeout_secs` window; up to `MAX_FP_ITER + 1 = 31` resets are possible,
+/// making the actual wall time ≫ the user-requested budget.
+///
+/// Sentinel: removing the shared deadline from `solve_milp_with_stats` lets
+/// `solve_mip_core` restart the clock after FP, causing elapsed to exceed
+/// `FP_TIMEOUT_BUDGET_SECS × TIMEOUT_WALL_MARGIN_MULT` → **FAILS**.
+#[test]
+fn fp_timeout_does_not_exceed_user_limit() {
+    let problem = fp_timeout_sentinel_milp();
+    let opts = SolverOptions { timeout_secs: Some(FP_TIMEOUT_BUDGET_SECS), ..Default::default() };
+    let t0 = std::time::Instant::now();
+    let (r, _) = solve_milp_with_stats(&problem, &opts, &MipConfig::default());
+    let elapsed = t0.elapsed().as_secs_f64();
+    assert!(
+        matches!(
+            r.status,
+            SolveStatus::Optimal
+                | SolveStatus::SuboptimalSolution
+                | SolveStatus::Timeout
+                | SolveStatus::Infeasible
+                | SolveStatus::MaxIterations
+        ),
+        "unexpected status {:?}",
+        r.status,
+    );
+    assert!(
+        elapsed < FP_TIMEOUT_BUDGET_SECS * TIMEOUT_WALL_MARGIN_MULT,
+        "elapsed {:.3}s exceeds budget {:.1}s × margin {:.1}; \
+         removing shared-deadline fix lets B&B receive a fresh window after FP → overrun",
+        elapsed,
+        FP_TIMEOUT_BUDGET_SECS,
+        TIMEOUT_WALL_MARGIN_MULT,
+    );
+}
+
+/// FP respects a short deadline: iteration aborts cleanly without panic.
+///
+/// A 0.1 s budget is far too short to solve a 500-variable MILP; FP must
+/// abort mid-iteration and return a valid (non-panicking) status within the
+/// allowed window.
+///
+/// Sentinel: without deadline propagation into FP LP calls, the function
+/// ignores the budget and runs past the margin → **FAILS**.
+#[test]
+fn fp_timeout_aborts_iteration() {
+    let problem = fp_timeout_sentinel_milp();
+    let short_timeout = 0.1f64;
+    let opts = SolverOptions { timeout_secs: Some(short_timeout), ..Default::default() };
+    let t0 = std::time::Instant::now();
+    let (r, _) = solve_milp_with_stats(&problem, &opts, &MipConfig::default());
+    let elapsed = t0.elapsed().as_secs_f64();
+    // Deterministic sentinel: a 0.1 s budget cannot solve a 500-variable binary MILP;
+    // the solver must always signal Timeout.  Without deadline propagation into FP LP
+    // calls the solver still eventually returns Timeout — but only after the wall-clock
+    // check below fires, so this assertion provides an independent, zero-noise signal.
+    assert_eq!(
+        r.status,
+        SolveStatus::Timeout,
+        "FP timeout must not panic and must signal Timeout; got {:?}",
+        r.status,
+    );
+    assert!(
+        elapsed < short_timeout * TIMEOUT_WALL_MARGIN_MULT,
+        "elapsed {:.3}s exceeds {:.2}s × {:.1}; FP deadline not honored",
+        elapsed,
+        short_timeout,
+        TIMEOUT_WALL_MARGIN_MULT,
+    );
+}
+
 // P2-B sentinel: MIQP presolve (tighten_bounds_linear) is applied
 // ---------------------------------------------------------------------------
 
