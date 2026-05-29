@@ -1,27 +1,22 @@
 name: CI (heavy)
 
 # tier-2 sentinel gate (#97 で #[ignore = "tier-2"] 化した 20 test を復活させる).
-# 通常 push/PR では起動しない (CI 時間爆発回避)。
 # トリガ:
 #   1. nightly cron (毎日 18:00 UTC = JST 翌 03:00)
-#   2. workflow_dispatch (手動実行)
-#   3. push で commit message に "[heavy]" を含む場合
+#   2. workflow_dispatch (手動実行 — Actions tab "Run workflow" ボタン)
+#
+# push trigger は意図的に除外 (job-level if: で skip すると Actions tab に
+# "skipped" run が大量表示されノイズになるため、workflow 自体を起動させない)。
+# 手動 heavy 実行が必要なら workflow_dispatch を使う。
 on:
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
-  push:
-    branches: ["**"]
 
 jobs:
   test-heavy:
     name: Tests (heavy, tier-2 sentinel)
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       contains(github.event.head_commit.message, '[heavy]'))
     steps:
       - uses: actions/checkout@v6
       - uses: actions/cache@v4
