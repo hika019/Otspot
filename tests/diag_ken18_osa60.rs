@@ -56,7 +56,7 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 /// converges to 4.044e6. So the test FAILS at HEAD with 60 s budget and
 /// would PASS once `pivot_out_degenerate_artificials` is sped up.
 #[test]
-#[ignore = "known failing: LP perf regression (#75 未対応); obj 誤差 5.2% > 5%; 要 data/lp_problems/osa-60.QPS"]
+#[ignore = "known failing: obj 誤差 5.2% > 5% (LP perf regression); remove ignore when #75 phase X lands"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
     assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);
@@ -148,7 +148,7 @@ fn diag_osa60_must_reach_known_objective() {
 /// At HEAD this FAILS: empirically wall ≈ 365 s for a 120 s internal
 /// budget. Scaled to 30 s internal it lands well past the 60 s slack ceiling.
 #[test]
-#[ignore = "known failing: postsolve cleanup_lp deadline violation (wall 72s > 60s budget); 要 data/lp_problems/ken-18.QPS"]
+#[ignore = "known failing: postsolve cleanup_lp deadline (wall 72s > 60s); remove ignore when #75 phase X lands"]
 fn diag_ken18_must_respect_internal_deadline() {
     let path = Path::new("data/lp_problems/ken-18.QPS");
     assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);

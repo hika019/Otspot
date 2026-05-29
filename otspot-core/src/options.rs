@@ -496,7 +496,6 @@ pub struct SolverOptions {
     pub recover_warm_start_basis: bool,
     /// Apply simplex crash basis on cold LP starts.  Ignored when
     /// `warm_start` / `warm_start_lp` is set.
-    /// Runtime override: `LP_CRASH_DUAL_ADV_DISABLE=1` (Big-M path only).
     pub use_lp_crash_basis: bool,
     /// Enable presolve.  Default: `true`.
     pub presolve: bool,
