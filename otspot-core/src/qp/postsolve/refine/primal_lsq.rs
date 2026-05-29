@@ -3,6 +3,7 @@
 
 use crate::qp::linalg::build_aat_upper_csc;
 use crate::qp::problem::QpProblem;
+use crate::tolerances::any_nonfinite;
 
 pub(crate) fn refine_primal_lsq(
     problem: &QpProblem,
@@ -88,7 +89,7 @@ pub(crate) fn refine_primal_lsq(
     };
     let mut lambda = vec![0.0_f64; m];
     factor.solve(&target, &mut lambda);
-    if lambda.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(&lambda) {
         return;
     }
     const IR_STAGNATE_RATIO: f64 = 0.5;
@@ -134,7 +135,7 @@ pub(crate) fn refine_primal_lsq(
         prev_r_inf = r_inf;
         let mut dlambda = vec![0.0_f64; m];
         factor.solve(&r_f64, &mut dlambda);
-        if dlambda.iter().any(|v| !v.is_finite()) {
+        if any_nonfinite(&dlambda) {
             break;
         }
         for i in 0..m {
@@ -154,7 +155,7 @@ pub(crate) fn refine_primal_lsq(
         }
     }
     let delta: Vec<f64> = delta_dd.iter().map(|&v| f64::from(v)).collect();
-    if delta.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(&delta) {
         return;
     }
 

@@ -79,3 +79,8 @@ pub const UNDERFLOW_GUARD: f64 = 1e-300;
 /// check each dimension individually (`num_vars <= T && num_constraints <= T`).
 pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
 
+/// Returns `true` if any element of `v` is non-finite (NaN or ±Inf).
+pub(crate) fn any_nonfinite(v: &[f64]) -> bool {
+    v.iter().any(|x| !x.is_finite())
+}
+

@@ -18,6 +18,7 @@
 
 use crate::problem::ConstraintType;
 use crate::sparse::CscMatrix;
+use crate::tolerances::any_nonfinite;
 
 /// KKT dual-sign violation (componentwise relative max).
 ///
@@ -32,19 +33,14 @@ use crate::sparse::CscMatrix;
 /// where `viol_k = max(0, wrong-sign part)`. Returns 0 when all sign constraints hold.
 /// Scale invariant: scaling y and z by a positive scalar leaves the result unchanged.
 ///
-/// Returns `f64::INFINITY` if any element of `y` is non-finite (NaN or ±Inf).
-///
-/// NaN entries in `z` are not detected here and return 0.0 (silent suppress via
-/// `(-NaN).max(0.0) == 0.0`). NaN-z is indirectly caught through
-/// `complementarity_residual_rel` where `NaN * finite = NaN`, causing that metric
-/// to return NaN; `NaN < eps` evaluates to false, resulting in `SuboptimalSolution`.
+/// Returns `f64::INFINITY` if any element of `y` or `z` is non-finite (NaN or ±Inf).
 ///
 /// **Caller responsibility**: `z` must have length `n_lb_finite + n_ub_finite` where
 /// `n_lb_finite` / `n_ub_finite` are the counts of finite lower / upper bounds in
 /// `bounds`. Passing a shorter `z` is a contract violation detected by `debug_assert`
 /// in debug builds; in release builds the z-processing is skipped when `z` is empty.
 pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64)], z: &[f64]) -> f64 {
-    if y.iter().any(|v| !v.is_finite()) {
+    if any_nonfinite(y) {
         return f64::INFINITY;
     }
 
@@ -75,6 +71,9 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
         "z.len()={} must equal n_lb_finite={} + n_ub_finite={}: caller must pass z with correct length",
         z.len(), n_lb_finite, n_ub_finite,
     );
+    if any_nonfinite(z) {
+        return f64::INFINITY;
+    }
     if z.is_empty() {
         return max_rel;
     }
