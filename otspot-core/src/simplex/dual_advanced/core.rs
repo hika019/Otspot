@@ -347,23 +347,7 @@ pub(crate) fn dual_simplex_core_advanced(
                 // rc は再計算済み; x_b は初回エントリ時に摂動済みなので再注入しない。
                 apply_lex_perturbation(&mut reduced_costs, &is_basic, x_b, m, false);
             }
-            // Stateful weight 戦略 (DSE) は drift をここでリセット +
-            // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
             leaving.after_refactor(m);
-            if needs_sigma {
-                match recompute_gamma_truth(
-                    &mut basis_mgr,
-                    m,
-                    options.deadline,
-                    options.cancel_flag.as_deref(),
-                ) {
-                    None => {
-                        let obj = basic_obj(c, basis, x_b);
-                        return SimplexOutcome::Timeout(obj);
-                    }
-                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
-                }
-            }
         }
 
         // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
@@ -506,5 +490,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #202 sentinel: `set_initial_gamma` must be invoked exactly once
+    /// (cold-start). The per-refactor m-BTRAN re-init was redundant — the
+    /// rank-1 update is exact (Forrest-Goldfarb 1992) and `after_refactor`
+    /// handles CEILING-flagged drift via identity reset.
+    ///
+    /// no-op proof: restoring the `recompute_gamma_truth` block after the
+    /// `needs_refactor` branch makes the call counter > 1 (1 cold + N refactors).
+    #[test]
+    fn recompute_gamma_after_refactor_not_called() {
+        use super::super::super::pricing::DualLeavingStrategy;
+        use std::cell::Cell;
+
+        struct CountingDseLeaving<'a> {
+            init_calls: &'a Cell<usize>,
+            refactor_calls: &'a Cell<usize>,
+        }
+        impl<'a> DualLeavingStrategy for CountingDseLeaving<'a> {
+            fn select_leaving(
+                &mut self,
+                x_b: &[f64],
+                primal_tol: f64,
+                _basis: &[usize],
+            ) -> Option<usize> {
+                let mut best_row = None;
+                let mut max_violation = primal_tol;
+                for (i, &val) in x_b.iter().enumerate() {
+                    if val < -max_violation {
+                        max_violation = -val;
+                        best_row = Some(i);
+                    }
+                }
+                best_row
+            }
+            fn needs_sigma(&self) -> bool {
+                true
+            }
+            fn after_refactor(&mut self, _m: usize) {
+                self.refactor_calls.set(self.refactor_calls.get() + 1);
+            }
+            fn set_initial_gamma(&mut self, _gamma_truth: &[f64]) {
+                self.init_calls.set(self.init_calls.get() + 1);
+            }
+        }
+
+        // m=3 LP with 3 lb-violated rows + 3 non-zero non-basic cols + 3 slacks.
+        // A · x = b with x ≥ 0:
+        //   -x0 - x1                + s0           = -1
+        //         -x1 - x2               + s1      = -2
+        //   -x0       - x2                    + s2 = -1
+        // c = [4, 5, 6, 0, 0, 0]: r_j ≥ 0 at slack basis → dual-feasible.
+        // max_etas=1 forces refactor after every successful pivot.
+        let rows = [0, 2, 0, 1, 1, 2, 0, 1, 2];
+        let cols = [0, 0, 1, 1, 2, 2, 3, 4, 5];
+        let vals = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 6).unwrap();
+        let c = vec![4.0, 5.0, 6.0, 0.0, 0.0, 0.0];
+        let mut basis = vec![3usize, 4, 5];
+        let mut x_b = vec![-1.0_f64, -2.0, -1.0];
+        let opts = SolverOptions {
+            max_etas: 1,
+            ..SolverOptions::default()
+        };
+        let init_calls = Cell::new(0);
+        let refactor_calls = Cell::new(0);
+        let mut leaving = CountingDseLeaving {
+            init_calls: &init_calls,
+            refactor_calls: &refactor_calls,
+        };
+        let mut iters = 0usize;
+        let _ = dual_simplex_core_advanced(
+            &a, &mut x_b, &c, &mut basis, 3, 6, &opts, &mut leaving, &mut iters,
+        );
+
+        assert!(
+            refactor_calls.get() >= 1,
+            "test data must trigger at least one refactor; got {} (raise max_etas trigger?)",
+            refactor_calls.get(),
+        );
+        assert_eq!(
+            init_calls.get(),
+            1,
+            "set_initial_gamma must fire exactly once (cold-start only); got {} \
+             across {} refactor(s) — recompute_gamma_truth re-introduced after refactor?",
+            init_calls.get(),
+            refactor_calls.get(),
+        );
     }
 }

@@ -232,8 +232,10 @@ pub(crate) trait DualLeavingStrategy {
     /// `needs_sigma()` returned true.
     fn after_pivot(&mut self, _leaving_row: usize, _alpha: &[f64], _sigma: &[f64], _pivot: f64) {}
 
-    /// Called after the basis is refactored. Stateful weights that may drift
-    /// (DSE) reset here to identity; stateless strategies leave the no-op.
+    /// Called after the basis is refactored. Stateful weights (DSE) keep the
+    /// rank-1-updated values across refactor (Forrest-Goldfarb 1992); identity
+    /// reset only fires on CEILING-flagged drift or size mismatch. Stateless
+    /// strategies leave the no-op.
     fn after_refactor(&mut self, _m: usize) {}
 
     /// Initialise γ_i = ||(B^{-1})_{i,:}||² for arbitrary starting basis.

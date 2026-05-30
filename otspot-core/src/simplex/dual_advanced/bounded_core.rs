@@ -506,27 +506,6 @@ pub(crate) fn iterate(
                 return (BoundedOutcome::Timeout(obj), state);
             }
             leaving.after_refactor(m);
-            if needs_sigma {
-                match recompute_gamma_truth(
-                    &mut basis_mgr,
-                    m,
-                    options.deadline,
-                    options.cancel_flag.as_deref(),
-                ) {
-                    None => {
-                        let obj = bounded_obj(
-                            c,
-                            &state.basis,
-                            &state.x_b,
-                            &state.at_upper,
-                            &state.is_basic,
-                            ubs,
-                        );
-                        return (BoundedOutcome::Timeout(obj), state);
-                    }
-                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
-                }
-            }
             compute_reduced_costs_into(
                 a,
                 &c_perturbed,
@@ -631,27 +610,6 @@ pub(crate) fn iterate(
                 return (BoundedOutcome::Timeout(obj), state);
             }
             leaving.after_refactor(m);
-            if needs_sigma {
-                match recompute_gamma_truth(
-                    &mut basis_mgr,
-                    m,
-                    options.deadline,
-                    options.cancel_flag.as_deref(),
-                ) {
-                    None => {
-                        let obj = bounded_obj(
-                            c,
-                            &state.basis,
-                            &state.x_b,
-                            &state.at_upper,
-                            &state.is_basic,
-                            ubs,
-                        );
-                        return (BoundedOutcome::Timeout(obj), state);
-                    }
-                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
-                }
-            }
             compute_reduced_costs_into(
                 a,
                 &c_perturbed,
