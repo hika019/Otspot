@@ -1,13 +1,5 @@
 //! QP KKT 残差の per-component primitives.
 //!
-//! caller (bench_utils / ipm_solver::kkt 3 / qps_benchmark / diag_nonconvex_kkt)
-//! が散在的に持っていた Q·x / A^T·y / A·x / bound_contrib /
-//! complementarity slack の重実装をここに集約する。caller 側は
-//!   - 集約方法 (max abs / max componentwise rel / global rel / 構造体格納)
-//!   - 経路 fork (LP rc 経路 / QP bound_dual 経路 / FX skip / EmptyCol skip)
-//!     を選ぶ責務のみ保持し、heavy mat-vec と bound iteration ロジックは
-//!     重複しない。
-//!
 //! ## モジュール構成
 //!
 //! - `f64_impl`: 倍精度経路 (diag_nonconvex_kkt / bench_utils 等)

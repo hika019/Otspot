@@ -1,17 +1,7 @@
 //! Dual simplex ratio test 戦略 (HarrisRatioTest 2 パス法)。
 
 pub(crate) trait RatioTestStrategy {
-    /// 双対比率テスト: 入基変数を選択する
-    ///
-    /// # 引数
-    /// - `trow`: pivot行の非基底係数（長さ `n_price`）
-    /// - `reduced_costs`: 被縮小費用（長さ `n_price`）
-    /// - `is_basic`: 各変数が基底変数かどうかのフラグ（長さ `n_price`）
-    /// - `n_price`: 対象変数数
-    ///
-    /// # 戻り値
-    /// - `Some((entering_col, theta))`: 入基変数インデックスと双対ステップ
-    /// - `None`: 候補なし（双対非有界 = 主実行不可）
+    /// Dual ratio test: select the entering variable.
     fn select_entering(
         &self,
         trow: &[f64],

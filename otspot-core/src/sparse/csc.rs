@@ -38,22 +38,18 @@ impl CscMatrix {
         }
     }
 
-    /// 非ゼロ要素の総数を返す
     pub fn nnz(&self) -> usize {
         self.values.len()
     }
 
-    /// Returns the column pointer array (length `ncols + 1`).
     pub fn col_ptr(&self) -> &[usize] {
         &self.col_ptr
     }
 
-    /// Returns the row index array for non-zero entries.
     pub fn row_ind(&self) -> &[usize] {
         &self.row_ind
     }
 
-    /// Returns the value array for non-zero entries.
     pub fn values(&self) -> &[f64] {
         &self.values
     }
@@ -69,12 +65,10 @@ impl CscMatrix {
         }
     }
 
-    /// Returns the number of rows.
     pub fn nrows(&self) -> usize {
         self.nrows
     }
 
-    /// Returns the number of columns.
     pub fn ncols(&self) -> usize {
         self.ncols
     }
@@ -94,21 +88,9 @@ impl CscMatrix {
         norms
     }
 
-    /// COO（座標形式）のトリプレットから CSC 行列を構築する
+    /// Builds a CSC matrix from COO triplets.
     ///
-    /// 同一 (row, col) への重複エントリは自動的に加算される。
-    /// ゼロ近傍の結果値（絶対値 DROP_TOL 以下）は格納しない。
-    ///
-    /// # 引数
-    /// - `rows`: 各エントリの行インデックス
-    /// - `cols`: 各エントリの列インデックス
-    /// - `vals`: 各エントリの値
-    /// - `nrows`: 行列の行数
-    /// - `ncols`: 行列の列数
-    ///
-    /// # エラー
-    /// - `rows`、`cols`、`vals` の長さが異なる場合
-    /// - 行/列インデックスが範囲外の場合
+    /// Duplicate `(row, col)` entries are summed; results with `|v| ≤ DROP_TOL` are dropped.
     pub fn from_triplets(
         rows: &[usize],
         cols: &[usize],
@@ -183,16 +165,7 @@ impl CscMatrix {
         }
     }
 
-    /// 行列ベクトル積を計算する: y = A * x
-    ///
-    /// CSC 形式の列走査を利用して O(nnz) で計算する。
-    ///
-    /// # 引数
-    /// - `x`: 入力ベクトル（長さ: ncols）
-    ///
-    /// # 戻り値
-    /// - `Ok(y)`: 結果ベクトル（長さ: nrows）
-    /// - `Err`: `x` の長さが `ncols` と一致しない場合
+    /// Matrix-vector product y = A * x. O(nnz).
     pub fn mat_vec_mul(&self, x: &[f64]) -> Result<Vec<f64>, SolverError> {
         if x.len() != self.ncols {
             return Err(SolverError::DimensionMismatch {
@@ -215,17 +188,7 @@ impl CscMatrix {
         Ok(y)
     }
 
-    /// 列 j の非ゼロ要素を取得する
-    ///
-    /// 行インデックス配列と値配列のスライスを返す。両スライスの長さは等しく、
-    /// 行インデックスは昇順にソートされている。
-    ///
-    /// # 引数
-    /// - `j`: 取得する列インデックス（0-based）
-    ///
-    /// # 戻り値
-    /// - `Ok((row_indices, values))`: 列 j の行インデックスと値のスライスペア
-    /// - `Err`: `j` が範囲外の場合
+    /// Returns `(row_indices, values)` slices for column `j`; both are sorted by row index.
     pub fn get_column(&self, j: usize) -> Result<(&[usize], &[f64]), SolverError> {
         if j >= self.ncols {
             return Err(SolverError::IndexOutOfBounds {
@@ -239,12 +202,6 @@ impl CscMatrix {
         Ok((&self.row_ind[start..end], &self.values[start..end]))
     }
 
-    /// n×n 単位行列を CSC 形式で生成する
-    ///
-    /// 対角要素が 1.0 で、非対角要素がゼロの正方行列を返す。
-    ///
-    /// # 引数
-    /// - `n`: 行列のサイズ（n×n）
     pub fn identity(n: usize) -> Self {
         let col_ptr: Vec<usize> = (0..=n).collect();
         let row_ind: Vec<usize> = (0..n).collect();

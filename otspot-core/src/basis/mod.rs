@@ -55,15 +55,6 @@ pub(crate) struct LuBasis {
 }
 
 impl LuBasis {
-    /// 初期基底を LU 分解して `LuBasis` を作成する
-    ///
-    /// # 引数
-    /// - `a`: 全制約行列（CSC 形式）
-    /// - `basis`: 初期基底変数のインデックス列
-    /// - `max_etas`: 再因子分解を促すイータ行列の最大保持数
-    ///
-    /// # エラー
-    /// 基底行列が特異または数値的に不安定な場合は `Err` を返す
     pub fn new(a: &CscMatrix, basis: &[usize], max_etas: usize) -> Result<Self, SolverError> {
         Self::new_timed(a, basis, max_etas, None)
     }

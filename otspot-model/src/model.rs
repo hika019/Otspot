@@ -273,16 +273,6 @@ impl Model {
         self.apply_objective(obj.into(), OptimizationSense::Maximize)
     }
 
-    // -----------------------------------------------------------------------
-    // Quad-objective state machine — three private chokepoints.
-    //
-    // The quad state pair (`quadratic_objective` / `quad_dsl_error`) MUST
-    // only be mutated through the three functions below.  The companion
-    // `validate_objective` pure-function checks the *current* stored state at
-    // solve time so that setter-ordering bugs (P2-a … P2-i) cannot produce
-    // silent wrong results.
-    // -----------------------------------------------------------------------
-
     /// Validate the current objective state.  Called once in `solve()` before
     /// building the LP/QP/MIP problem so that the **actual objective being
     /// solved** is always verified, regardless of setter order.
@@ -409,11 +399,8 @@ impl Model {
         self
     }
 
-    /// Set the quadratic objective Q matrix for QP problems.
-    ///
-    /// **Convention** ("1/2あり"): the objective is min 1/2 x^T Q x + c^T x
-    /// 目的関数の定数オフセットを設定する。
-    /// `objective_value = (1/2 x^T Q x +) c^T x + offset` として最終結果に加算される。
+    /// Sets a constant offset added to the objective value:
+    /// `objective_value = (1/2 x^T Q x +) c^T x + offset`.
     pub fn set_obj_offset(&mut self, offset: f64) -> &mut Self {
         self.obj_offset = offset;
         self
@@ -1272,9 +1259,6 @@ mod tests {
         (model, x, y)
     }
 
-    // -----------------------------------------------------------------------
-    // Test 1: Basic LP – 3-variable, 3-constraint problem
-    // -----------------------------------------------------------------------
     #[test]
     fn test_basic_lp_3var_3con() {
         // min  x + 2y + 3z
@@ -1303,9 +1287,6 @@ mod tests {
         assert!(result.objective_value > 0.0, "objective should be positive");
     }
 
-    // -----------------------------------------------------------------------
-    // Test 2: Unbounded problem
-    // -----------------------------------------------------------------------
     #[test]
     fn test_unbounded() {
         // min -x  s.t. x >= 0  (objective goes to -inf)
@@ -1321,9 +1302,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 3: Infeasible problem
-    // -----------------------------------------------------------------------
     #[test]
     fn test_infeasible() {
         // x >= 5, x <= 3  (contradictory)
@@ -1342,9 +1320,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 4: Equality constraint
-    // -----------------------------------------------------------------------
     #[test]
     fn test_equality_constraint() {
         // min x + y  s.t. x + y == 5, x,y >= 0
@@ -1364,9 +1339,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 5: Variable bounds are respected
-    // -----------------------------------------------------------------------
     #[test]
     fn test_variable_bounds() {
         // min x  s.t. x in [0, 3]
@@ -1394,9 +1366,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 6: NoObjective error
-    // -----------------------------------------------------------------------
     #[test]
     fn test_no_objective_error() {
         let mut model = Model::new("no_obj");
@@ -1433,9 +1402,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 7: result[x] indexing and result.value(x) agree
-    // -----------------------------------------------------------------------
     #[test]
     fn test_result_index_and_value_agree() {
         let (mut model, x, y) = basic_model();
@@ -1444,9 +1410,6 @@ mod tests {
         assert!((result[y] - result.value(y)).abs() < 1e-12);
     }
 
-    // -----------------------------------------------------------------------
-    // Test 8: Maximize a simple LP (also tests constraint! macro)
-    // -----------------------------------------------------------------------
     #[test]
     fn test_maximize() {
         // max x  s.t. x <= 7, x >= 0
@@ -1469,9 +1432,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 9: Model QP basic – Q=2I, c=(-4,-4), no constraints, bounds=[0,∞)
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_basic() {
         // min x^2+y^2 - 4x - 4y  (1/2*[[2,0],[0,2]]*[x,y]^T + [-4,-4]*[x,y])
@@ -1488,9 +1448,6 @@ mod tests {
         assert_close(result.objective_value, -8.0, "T9: obj");
     }
 
-    // -----------------------------------------------------------------------
-    // Test 10: Model QP with Eq constraint – Eq→2行変換の検証
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_equality() {
         // min x^2+y^2  s.t. x+y=1, x,y ∈ (-∞,∞)
@@ -1507,9 +1464,6 @@ mod tests {
         assert_close(result.objective_value, 0.5, "T10: obj");
     }
 
-    // -----------------------------------------------------------------------
-    // Test 11: Model QP with Ge constraint – Ge→符号反転変換の検証
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_ge_constraint() {
         // min x^2+y^2  s.t. x+y >= 1, x,y ∈ (-∞,∞)
@@ -1539,9 +1493,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 12: Model QP maximize – max -(x^2+y^2) s.t. x+y>=1, x,y>=0
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_maximize() {
         // max -(x^2+y^2), constraint: x+y >= 1, x,y >= 0
@@ -1558,9 +1509,6 @@ mod tests {
         assert_close(result.objective_value, -0.5, "T12: obj");
     }
 
-    // -----------------------------------------------------------------------
-    // Test 13: Model QP box bounds – bounds=[0,1], T11相当
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_box_bounds() {
         // min x^2+y^2-4x-4y, bounds=[0,1]
@@ -1577,9 +1525,6 @@ mod tests {
         assert_close(result.objective_value, -6.0, "T13: obj");
     }
 
-    // -----------------------------------------------------------------------
-    // Test 14: Model QP timeout – timeout=0.001秒でTimeout返却
-    // -----------------------------------------------------------------------
     #[test]
     fn test_model_qp_timeout() {
         // Use a well-defined small QP but set an extremely short timeout.

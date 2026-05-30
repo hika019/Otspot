@@ -39,7 +39,6 @@ pub struct Constraint {
 /// model.add_constraint(constraint!((2.0 * x + 3.0 * y) <= 12.0));
 /// model.add_constraint(constraint!((x + y) >= 3.0));
 /// ```
-/// Build a `Constraint` using natural inequality syntax.
 ///
 /// Supported forms:
 /// - `constraint!(x <= 5.0)` — single variable on the left
