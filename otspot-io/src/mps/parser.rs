@@ -6,15 +6,18 @@ use otspot_core::problem::{ConstraintType, LpProblem};
 use otspot_core::sparse::CscMatrix;
 pub use otspot_core::error::MpsError;
 
+use crate::common::{RowType, is_fixed_width_format, parse_mps_free_pairs};
 use super::types::{
-    BoundType, IntegerMarker, RowType, Section,
-    INTEGER_DEFAULT_UPPER_BINARY, integer_marker_kind, is_fixed_width_format,
+    BoundType, IntegerMarker, Section,
+    INTEGER_DEFAULT_UPPER_BINARY, integer_marker_kind,
 };
 
 pub(super) struct MpsParser {
     problem_name: Option<String>,
     rows: Vec<(String, RowType)>,
     columns: Vec<(String, String, f64)>,
+    /// Tracks (col_name, row_name) pairs seen in COLUMNS to detect duplicates.
+    columns_seen: HashSet<(String, String)>,
     rhs: HashMap<String, f64>,
     ranges: HashMap<String, f64>,
     bounds: Vec<(BoundType, String, Option<f64>)>,
@@ -30,6 +33,7 @@ impl MpsParser {
             problem_name: None,
             rows: Vec::new(),
             columns: Vec::new(),
+            columns_seen: HashSet::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
             bounds: Vec::new(),
@@ -197,6 +201,20 @@ impl MpsParser {
         let value1 = value1_str
             .parse::<f64>()
             .expect("value1_str parseable (checked above)");
+        // C: reject non-finite coefficient
+        if !value1.is_finite() {
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name1),
+            });
+        }
+        // B: reject duplicate (col, row) pair
+        if !self.columns_seen.insert((col_name.clone(), row_name1.clone())) {
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name1),
+            });
+        }
         self.columns.push((col_name.clone(), row_name1, value1));
 
         if line.len() >= 50 {
@@ -208,6 +226,20 @@ impl MpsParser {
                     line: line_num,
                     message: format!("Invalid numeric value: {}", value2_str),
                 })?;
+                // C: reject non-finite coefficient
+                if !value2.is_finite() {
+                    return Err(MpsError::ParseError {
+                        line: line_num,
+                        message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name2),
+                    });
+                }
+                // B: reject duplicate (col, row) pair
+                if !self.columns_seen.insert((col_name.clone(), row_name2.clone())) {
+                    return Err(MpsError::ParseError {
+                        line: line_num,
+                        message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name2),
+                    });
+                }
                 self.columns.push((col_name.clone(), row_name2, value2));
             }
         }
@@ -217,8 +249,12 @@ impl MpsParser {
 
     fn parse_columns_free(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
+        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
-            return Ok(());
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: "COLUMNS line requires at least 3 fields (col row value)".to_string(),
+            });
         }
 
         let col_name = parts[0].to_string();
@@ -235,6 +271,20 @@ impl MpsParser {
                 line: line_num,
                 message: format!("Invalid numeric value: {}", parts[i + 1]),
             })?;
+            // C: reject non-finite coefficient
+            if !value.is_finite() {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name),
+                });
+            }
+            // B: reject duplicate (col, row) pair
+            if !self.columns_seen.insert((col_name.clone(), row_name.clone())) {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name),
+                });
+            }
             self.columns.push((col_name.clone(), row_name, value));
         }
 
@@ -243,60 +293,66 @@ impl MpsParser {
 
     fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
+        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
-            return Ok(());
-        }
-
-        for i in (1..parts.len()).step_by(2) {
-            if i + 1 >= parts.len() {
-                break;
-            }
-            let row_name = parts[i].to_string();
-            let value = parts[i + 1].parse::<f64>().map_err(|_| MpsError::ParseError {
+            return Err(MpsError::ParseError {
                 line: line_num,
-                message: format!("Invalid numeric value: {}", parts[i + 1]),
-            })?;
-            self.rhs.insert(row_name, value);
+                message: "RHS line requires at least 3 fields (rhs_name row value)".to_string(),
+            });
         }
-
+        // E: shared free-format pair parser; also enforces finite values (C)
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", true)
+            .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
+        for (name, value) in pairs {
+            self.rhs.insert(name, value);
+        }
         Ok(())
     }
 
     fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
+        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
-            return Ok(());
-        }
-
-        for i in (1..parts.len()).step_by(2) {
-            if i + 1 >= parts.len() {
-                break;
-            }
-            let row_name = parts[i].to_string();
-            let value = parts[i + 1].parse::<f64>().map_err(|_| MpsError::ParseError {
+            return Err(MpsError::ParseError {
                 line: line_num,
-                message: format!("Invalid numeric value: {}", parts[i + 1]),
-            })?;
-            self.ranges.insert(row_name, value);
+                message: "RANGES line requires at least 3 fields (rhs_name row value)".to_string(),
+            });
         }
-
+        // E: shared free-format pair parser; also enforces finite values (C)
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", true)
+            .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
+        for (name, value) in pairs {
+            self.ranges.insert(name, value);
+        }
         Ok(())
     }
 
     fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), MpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
+        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
-            return Ok(());
+            return Err(MpsError::ParseError {
+                line: line_num,
+                message: "BOUNDS line requires at least 3 fields (type name col)".to_string(),
+            });
         }
 
         let bound_type_str = parts[0];
         let _bound_name = parts[1];
         let col_name = parts[2].to_string();
         let value = if parts.len() >= 4 {
-            Some(parts[3].parse::<f64>().map_err(|_| MpsError::ParseError {
+            let v = parts[3].parse::<f64>().map_err(|_| MpsError::ParseError {
                 line: line_num,
                 message: format!("Invalid numeric value: {}", parts[3]),
-            })?)
+            })?;
+            // C: reject non-finite bound value
+            if !v.is_finite() {
+                return Err(MpsError::ParseError {
+                    line: line_num,
+                    message: format!("Non-finite BOUNDS value for col='{}'", col_name),
+                });
+            }
+            Some(v)
         } else {
             None
         };

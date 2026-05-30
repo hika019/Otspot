@@ -212,21 +212,6 @@ ENDATA
     }
 
     #[test]
-    fn test_parse_qps_accumulates_duplicate_objective_entries() {
-        let qps = r"NAME          DUP_QP
-ROWS
- N  obj
- L  c1
-COLUMNS
-    x1    obj    1.5    c1    1.0
-    x1    obj    2.5
-ENDATA
-";
-        let prob = parse_qps_str(qps).unwrap();
-        assert_eq!(prob.c, vec![4.0]);
-    }
-
-    #[test]
     fn test_e226_obj_offset() {
         let path = std::path::Path::new("data/lp_problems/e226.QPS");
         if !path.exists() {
@@ -441,5 +426,76 @@ ENDATA\n";
             "streaming must call read_line at least {expected_lines} times, got {}",
             counter.get()
         );
+    }
+
+    // ── Sentinel tests: audit#141 parser strictness (A/B/C) ──────────────────
+
+    fn minimal_qps_with_columns(col_section: &str) -> String {
+        format!(
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n{}\nRHS\n    rhs c1 10.0\nENDATA\n",
+            col_section
+        )
+    }
+
+    /// A: COLUMNS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_columns_malformed_too_few_fields_is_error() {
+        let qps = minimal_qps_with_columns("    x1  obj");
+        assert!(parse_qps_str(&qps).is_err(), "< 3 fields in COLUMNS must error");
+    }
+
+    /// A: QUADOBJ line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_quadobj_malformed_too_few_fields_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "< 3 fields in QUADOBJ must error");
+    }
+
+    /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_bounds_malformed_too_few_fields_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "< 3 fields in BOUNDS must error");
+    }
+
+    /// B: duplicate (col, row) pair in COLUMNS must be an error.
+    #[test]
+    fn test_qps_columns_duplicate_entry_is_error() {
+        let qps = minimal_qps_with_columns("    x1 c1 2.0\n    x1 c1 3.0");
+        let err = parse_qps_str(&qps);
+        assert!(err.is_err(), "duplicate (col, row) in COLUMNS must error");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    }
+
+    /// B: duplicate (col1, col2) pair in QUADOBJ must be an error.
+    #[test]
+    fn test_qps_quadobj_duplicate_entry_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1 x1 2.0\n    x1 x1 3.0\nENDATA\n";
+        let err = parse_qps_str(qps);
+        assert!(err.is_err(), "duplicate entry in QUADOBJ must error");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    }
+
+    /// C: NaN coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_qps_columns_nan_value_is_error() {
+        let qps = minimal_qps_with_columns("    x1 c1 NaN");
+        assert!(parse_qps_str(&qps).is_err(), "NaN in COLUMNS must error");
+    }
+
+    /// C: Inf coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_qps_columns_inf_value_is_error() {
+        let qps = minimal_qps_with_columns("    x1 c1 Inf");
+        assert!(parse_qps_str(&qps).is_err(), "Inf in COLUMNS must error");
+    }
+
+    /// C: NaN in QUADOBJ must be an error.
+    #[test]
+    fn test_qps_quadobj_nan_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1 x1 NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in QUADOBJ must error");
     }
 }

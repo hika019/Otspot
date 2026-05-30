@@ -6,6 +6,16 @@ use otspot_core::sparse::CscMatrix;
 use super::token_stream::TokenStream;
 use super::{QplibError, QplibProblem};
 
+/// Relative tolerance for the QPLIB declared-infinity marker.
+///
+/// QPLIB files include an explicit `inf_val` field.  Any bound `x` satisfying
+/// `|x| >= QPLIB_INF_REL_TOL * inf_val` is treated as ±∞.  The 1% margin
+/// absorbs rounding during file generation without falsely classifying
+/// finite bounds as infinite.
+///
+/// Source: QPLIB format (Furini et al., *Math. Prog. Computation* 2019, §3).
+const QPLIB_INF_REL_TOL: f64 = 0.99;
+
 pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
     // Problem name (skip)
     let _name = ts.read_string()?;
@@ -130,8 +140,8 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
 
     // Infinity value
     let inf_val = ts.read_f64()?;
-    let is_pos_inf = |x: f64| x >= inf_val * 0.99;
-    let is_neg_inf = |x: f64| x <= -inf_val * 0.99;
+    let is_pos_inf = |x: f64| x >= inf_val * QPLIB_INF_REL_TOL;
+    let is_neg_inf = |x: f64| x <= -inf_val * QPLIB_INF_REL_TOL;
 
     // Constraint bounds (L/N/Q types)
     let mut lb_con = vec![f64::NEG_INFINITY; m];
