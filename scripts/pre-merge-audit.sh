@@ -28,10 +28,20 @@ else
   echo "(cargo-public-api 未 install、CI で確認)"
 fi
 
-# 4. TODO/FIXME 増分
+# 4. コメント品質 (CLAUDE.md L45-46)
 echo
-echo "=== TODO/FIXME 増分 ==="
-git diff main..HEAD | grep -E '^\+.*TODO|^\+.*FIXME|^\+.*XXX|^\+.*HACK' | head -10 || echo "(増分なし)"
+echo "=== comment quality ==="
+MEMO_HITS=$(grep -rnE '(TODO|FIXME|XXX|HACK)' \
+  otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
+  --include='*.rs' 2>/dev/null || true)
+if [ -n "$MEMO_HITS" ]; then
+  echo "ERROR: production memo comments found:"
+  echo "$MEMO_HITS"
+  exit 1
+fi
+echo "(memo comments: none)"
+bash scripts/check_comment_block_size.sh
+bash scripts/check_comment_ratio.sh
 
 # 5. magic 検出 (diff scope のみ、memory feedback_review_magic_detection)
 echo
