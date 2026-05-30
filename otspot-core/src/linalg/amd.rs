@@ -65,7 +65,7 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
 /// 置換ベクトルの逆置換を計算する。
 ///
 /// `perm[k] = i` → `inv_perm[i] = k`
-pub fn inverse_perm(perm: &[usize]) -> Vec<usize> {
+fn inverse_perm(perm: &[usize]) -> Vec<usize> {
     let n = perm.len();
     let mut inv = vec![0usize; n];
     for (k, &i) in perm.iter().enumerate() {

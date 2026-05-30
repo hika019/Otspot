@@ -33,6 +33,12 @@
 //! 二重実装は避けるが、LP は bound dual を rc に折り畳む構造的差異があるため
 //! 完全集約はしない。両 helper の no-op 化はそれぞれ別 sentinel test で検出する。
 //!
+//! ## regression seed ファイル
+//!
+//! `diag_kkt_proptest.proptest-regressions` は proptest が過去に発見した
+//! failure seed を保持する。このファイルは VCS に必ず commit すること
+//! (削除すると旧 failure case の再現保証が失われる)。
+//!
 //! ## 実 proptest case 総数
 //!
 //! 各 proptest body の `cases` を合算した実総数は以下:
@@ -836,7 +842,6 @@ proptest! {
     /// (∇f − Aᵀy − z = 0) は status に依らず KKT 必須。WARN-only は sentinel teeth
     /// を失わせるため不可。
     #[test]
-    #[ignore = "CI Linux x86_64 で flaky (LocallyOptimal status で KKT 残差が threshold 1e-3 超、random seed 依存)。真因 (status 整合 vs 数値 fp variation) は #97 で深掘り"]
     fn prop_nonconvex_qp_kkt_invariants(qp in nonconvex_qp_strategy_inner(3)) {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(GLOBAL_TIMEOUT_SECS);

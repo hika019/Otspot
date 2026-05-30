@@ -83,7 +83,7 @@ fn check_postsolve_dual_feasibility(
 /// perold: postsolve dual 復元退化の canary。
 #[test]
 fn perold_postsolve_dual_feasibility() {
-    let r = check_postsolve_dual_feasibility("data/lp_problems/perold.QPS", 1e-6, 180.0);
+    let r = check_postsolve_dual_feasibility("data/lp_problems/perold.QPS", 1e-6, 120.0);
     match r {
         Ok(s) => eprintln!("PASS {}", s),
         Err(e) => panic!("{}", e),
@@ -99,7 +99,7 @@ fn perold_presolve_off_baseline() {
     let prob = parse_qps(path).expect("parse perold");
     let mut opts = SolverOptions::default();
     opts.presolve = false;
-    opts.timeout_secs = Some(180.0);
+    opts.timeout_secs = Some(120.0);
     let r = solve_qp_with(&prob, &opts);
     // rc = c − A^T y 規約 (extract_dual_info)。at_ub 変数は rc = −μ_ub ≤ 0 を取り得るため、
     // strict `max(0, −rc)` 形式 (`dfeas_abs_rel`) は at_ub を誤検出する。bound-aware を主判定に。

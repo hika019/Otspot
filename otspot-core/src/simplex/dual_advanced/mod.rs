@@ -12,6 +12,7 @@ use crate::presolve::LpEquilibration;
 use crate::sparse::SparseVec;
 use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
 use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
+use super::dual_common::outcome_to_result;
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
 use bounded_core::{
     BoundedDualState, BoundedOutcome, extract_solution_bounded, extract_dual_info_bounded,
@@ -119,8 +120,7 @@ pub(crate) fn solve_dual_advanced(
                         );
 
                         let mut result = outcome_to_result(
-                            outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
-                            true, // dual_unbounded → Infeasible
+                            outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
                         );
                         result.iterations = total_iters;
                         return result;
@@ -546,81 +546,6 @@ fn cold_start_advanced(
     };
     result.iterations = total_iters;
     result
-}
-
-/// SimplexOutcome → SolverResult 変換
-///
-/// `dual_unbounded_is_infeasible`: trueの場合、Unbounded = 双対非有界 = 主実行不可
-#[allow(clippy::too_many_arguments)]
-fn outcome_to_result(
-    outcome: SimplexOutcome,
-    sf: &StandardForm,
-    problem: &LpProblem,
-    basis: &[usize],
-    x_b: &[f64],
-    col_scale: &[f64],
-    row_scale: &[f64],
-    dual_unbounded_is_infeasible: bool,
-) -> SolverResult {
-    match outcome {
-        SimplexOutcome::Optimal(obj, y) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            let (dual_solution, reduced_costs, slack) =
-                extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
-            SolverResult {
-                status: SolveStatus::Optimal,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution,
-                reduced_costs,
-                slack,
-                warm_start_basis: Some(ws),
-                ..Default::default()
-            }
-        }
-        SimplexOutcome::Unbounded => {
-            if dual_unbounded_is_infeasible {
-                // 双対非有界 = 主実行不可
-                SolverResult {
-                    status: SolveStatus::Infeasible,
-                    objective: 0.0,
-                    solution: vec![],
-                    dual_solution: vec![],
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    ..Default::default()
-                }
-            } else {
-                SolverResult {
-                    status: SolveStatus::Unbounded,
-                    objective: f64::NEG_INFINITY,
-                    solution: vec![],
-                    dual_solution: vec![],
-                    reduced_costs: vec![],
-                    slack: vec![],
-                    warm_start_basis: None,
-                    ..Default::default()
-                }
-            }
-        }
-        SimplexOutcome::Timeout(obj) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            // iterations は呼び出し側 (solve_dual_advanced) で total_iters を上書き
-            SolverResult {
-                status: SolveStatus::Timeout,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-                ..Default::default()
-            }
-        }
-        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
-    }
 }
 
 // ── Wiring sentinels ──────────────────────────────────────────────────────────

@@ -259,19 +259,12 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
 
 /// Load objective baseline CSV.
 ///
-/// If `strict_missing` is `true`, panics when the file cannot be read.
-/// If `false`, returns an empty map on any read error.
-pub fn load_baseline_objectives(csv_path: &Path, strict_missing: bool) -> HashMap<String, f64> {
+/// Returns an error when the file cannot be read. Callers that need a
+/// best-effort empty map should use `.unwrap_or_default()`; callers that
+/// require the file to exist should use `.expect(...)`.
+pub fn load_baseline_objectives(csv_path: &Path) -> Result<HashMap<String, f64>, std::io::Error> {
     let mut map = HashMap::new();
-    let content = match std::fs::read_to_string(csv_path) {
-        Ok(c) => c,
-        Err(e) => {
-            if strict_missing {
-                panic!("Failed to read baseline {}: {}", csv_path.display(), e);
-            }
-            return map;
-        }
-    };
+    let content = std::fs::read_to_string(csv_path)?;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("problem_name") {
@@ -284,7 +277,7 @@ pub fn load_baseline_objectives(csv_path: &Path, strict_missing: bool) -> HashMa
             }
         }
     }
-    map
+    Ok(map)
 }
 
 /// Check solver objective against a baseline CSV.

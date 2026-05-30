@@ -69,7 +69,6 @@ pub(super) fn step6_doubleton_equation(
             st.bounds[other_col] = (new_lb_o, new_ub_o);
         }
         eliminate_variable_via_eq_row(st, i, pivot_col)?;
-        let _ = other_a;
         *new_subst += 1;
     }
     Ok(())

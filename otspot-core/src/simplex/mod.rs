@@ -9,7 +9,9 @@ pub mod pricing;
 pub(crate) mod primal;
 mod standard_form;
 
-pub use entry::{solve, solve_with};
+#[cfg(test)]
+pub(crate) use entry::solve;
+pub(crate) use entry::solve_with;
 pub(crate) use entry::solve_without_presolve;
 
 pub(crate) use primal::{extract_solution, revised_simplex_core, two_phase_simplex};

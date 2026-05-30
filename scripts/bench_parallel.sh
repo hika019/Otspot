@@ -1,5 +1,6 @@
 #!/bin/bash
 # bench_parallel.sh — 汎用ベンチ並列実行スクリプト (ワークプール方式)
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 #
 # solver_bench.sh経由で --jobs 数のワーカーが問題キューを処理し、結果を集計する。
 # .qps / .qplib の両形式に対応。

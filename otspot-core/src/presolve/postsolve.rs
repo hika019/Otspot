@@ -6,13 +6,18 @@ use crate::options::{SolverOptions, WarmStartBasis};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL};
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
 /// (non-basic candidate) when synthesising the postsolved warm-start basis.
 const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
+
+/// Markowitz threshold for LU factorization stability: a column pivot is accepted only
+/// if its absolute value exceeds this fraction of the column maximum. Prevents tiny
+/// pivots that would inflate the basis matrix condition number.
+const MARKOWITZ_PIVOT_RATIO: f64 = 0.1;
 
 /// Maximum Gauss-Seidel iterations for dual variable recovery.
 const GS_MAX_ITER: usize = 50;
@@ -316,9 +321,12 @@ fn build_and_solve_cleanup_lp(
 
     let a_clean = CscMatrix::from_triplets(
         &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
-    ).ok()?;
+    ).expect("triplets invariant");
     let b_clean_keep = b_clean.clone();
     let ct_clean_keep = ct_clean.clone();
+    // LpProblem::new_general can reject ±Inf in derived b_clean (large coefficient overflow case);
+    // preserve the cheap postsolve fallback by returning None instead of panicking.
+    // See codex review on #185 a5de15d.
     let cleanup_lp = LpProblem::new_general(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
     ).ok()?;
@@ -328,7 +336,6 @@ fn build_and_solve_cleanup_lp(
     // LPs can spend minutes in setup before any per-call budget kicks in.
     let opts = SolverOptions { presolve: false, warm_start: None, deadline, ..SolverOptions::default() };
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
-    let _ = (slack_count, m_clean);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
         return None;
     }
@@ -450,13 +457,6 @@ fn build_and_solve_cleanup_lp(
         Some(assemble_full_y(&y_del_phase1, &dy_phase1))
     }
 }
-
-/// Cleanup LP の kept-row 摂動 (`dy` 変数) を無効化する規模しきい値。摂動は
-/// deleted↔kept の bipartite closure 全体に `dy` 列を追加するため、大規模では
-/// cleanup LP 自体が解けない規模に膨らむ。この上限超でも摂動なしの cleanup LP は
-/// 走るので dual recovery は機能する (品質と可解性のトレードオフ)。
-/// memory/時間予算ではなく LP 列数膨張のガードなので固定 size で妥当。
-use crate::tolerances::LARGE_PROBLEM_THRESHOLD;
 
 /// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {
@@ -693,7 +693,7 @@ fn recover_warm_start_basis(
                 if v.abs() > col_max { col_max = v.abs(); }
             }
             if col_max < WARM_BASIS_BUILD_TOL { continue; }
-            let pivot_min = (0.1 * col_max).max(WARM_BASIS_BUILD_TOL);
+            let pivot_min = (MARKOWITZ_PIVOT_RATIO * col_max).max(WARM_BASIS_BUILD_TOL);
 
             let mut best: Option<(f64, usize)> = None;
             for (k, &row) in rows.iter().enumerate() {

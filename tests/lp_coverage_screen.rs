@@ -28,7 +28,8 @@ fn lp_coverage_screen_all() {
     let dir = Path::new(PROBLEMS_DIR);
     assert!(dir.exists(),
         "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", PROBLEMS_DIR);
-    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV), true);
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
+        .expect("baseline CSV missing — run scripts/netlib_lp_download.sh");
 
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .expect("read_dir failed")
@@ -80,7 +81,8 @@ fn lp_coverage_screen_all() {
 /// Expected runtime: well under 3 min.
 #[test]
 fn lp_coverage_screen_sample() {
-    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV), true);
+    let baseline = load_baseline_objectives(Path::new(BASELINE_CSV))
+        .expect("baseline CSV missing — run scripts/netlib_lp_download.sh");
 
     // afiro is a committed fixture — always present, always tested.
     let afiro_path = Path::new(FIXTURE_DIR).join("afiro.QPS");

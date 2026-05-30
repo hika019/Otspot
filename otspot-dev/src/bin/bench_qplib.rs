@@ -160,7 +160,7 @@ fn main() {
             p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()
         };
         let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        (load_baseline_objectives(&csv, false), load_expected_statuses(&csv))
+        (load_baseline_objectives(&csv).unwrap_or_default(), load_expected_statuses(&csv))
     };
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
     eprintln!("Expected statuses loaded: {} problems", expected_statuses.len());
@@ -226,10 +226,6 @@ fn main() {
     // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。
     // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
     let mut n_kkt_fail = 0usize;
-
-    // QPLIBベンチでは実行可能性判定なし → 常に0
-    let n_dfeas_fail: usize = 0;
-    let n_pfeas_fail: usize = 0;
 
     let eps_obj: f64 = 1e-2; // 目的関数照合の相対許容誤差: 1%
 
@@ -542,8 +538,6 @@ fn main() {
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  TIMEOUT:           {}", n_timeout);
     println!("  FAIL:              {}", n_fail);
-    println!("  DFEAS_FAIL:        {}", n_dfeas_fail);
-    println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
     println!("  KKT_FAIL:          {}", n_kkt_fail);
     println!("  NONCONVEX:         {}", n_nonconvex);

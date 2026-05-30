@@ -9,6 +9,7 @@
 
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
+use crate::tolerances::SLACK_TOL_REL;
 
 /// 行 i が active 判定される際の slack 相対許容係数 (KKT residual と同 scale)。
 pub(crate) const DUAL_RECOVERY_ACTIVE_TOL_REL: f64 = 1e-8;
@@ -64,7 +65,7 @@ pub(crate) fn compute_dual_recovery_row_activity(
     problem: &QpProblem,
     solution: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let ax = problem.a.mat_vec_mul(solution).ok()?;
+    let ax = problem.a.mat_vec_mul(solution).expect("dim validated upstream");
     let mut row_abs_activity = vec![0.0_f64; problem.num_constraints];
     for j in 0..problem.num_vars {
         let xabs = solution[j].abs();
@@ -91,7 +92,7 @@ pub(crate) fn compute_dual_recovery_row_bounds(
         return None;
     }
 
-    let qx = problem.q.mat_vec_mul(solution).ok()?;
+    let qx = problem.q.mat_vec_mul(solution).expect("dim validated upstream");
     let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, solution)?;
 
     let mut lower = vec![f64::NEG_INFINITY; m];
@@ -104,7 +105,6 @@ pub(crate) fn compute_dual_recovery_row_bounds(
             crate::problem::ConstraintType::Eq => {}
         }
     }
-    const SLACK_TOL_REL: f64 = 1e-8;
     for i in 0..m {
         let slack = match problem.constraint_types[i] {
             crate::problem::ConstraintType::Le => problem.b[i] - ax[i],
@@ -175,7 +175,6 @@ pub(crate) fn collect_dual_recovery_cluster_rows(
     candidate_rel: &[f64],
     ax: &[f64],
     row_abs_activity: &[f64],
-    _target_pf: f64,
 ) -> Option<(usize, Vec<usize>)> {
     debug_assert_eq!(candidate_cols.len(), candidate_rel.len());
     if candidate_cols.is_empty() {
@@ -522,5 +521,43 @@ mod free_columns_tests {
                 free_idx
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::{compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds};
+    use crate::problem::ConstraintType;
+    use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
+
+    fn make_2var_problem() -> QpProblem {
+        let q = CscMatrix::new(2, 2);
+        let c = vec![1.0_f64, 1.0_f64];
+        let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();
+        let b = vec![1.0_f64];
+        let bounds = vec![(0.0_f64, f64::INFINITY); 2];
+        QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap()
+    }
+
+    /// dim validated upstream sentinel: compute_dual_recovery_row_activity with wrong solution length panics.
+    #[test]
+    #[should_panic(expected = "dim validated upstream")]
+    fn row_activity_dim_mismatch_panics() {
+        let problem = make_2var_problem();
+        let wrong_solution = vec![1.0_f64];
+        compute_dual_recovery_row_activity(&problem, &wrong_solution);
+    }
+
+    /// compute_dual_recovery_row_bounds returns None when solution length != num_vars.
+    #[test]
+    fn row_bounds_dim_mismatch_returns_none() {
+        let problem = make_2var_problem();
+        // problem has n=2; pass solution of length 1 → early None
+        let wrong_solution = vec![1.0_f64];
+        assert!(
+            compute_dual_recovery_row_bounds(&problem, &wrong_solution).is_none(),
+            "expected None for mismatched solution length"
+        );
     }
 }

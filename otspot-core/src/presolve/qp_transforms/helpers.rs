@@ -5,7 +5,7 @@
 use super::state::Workspace;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{Q_OFFDIAG_REL, UNDERFLOW_GUARD, ZERO_TOL};
+use crate::tolerances::{LARGE_A_COEFF_TRIGGER, Q_OFFDIAG_REL, SCALING_SIGMA_FLOOR, UNDERFLOW_GUARD, ZERO_TOL};
 use super::state::QpPresolveStatus;
 
 pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
@@ -164,12 +164,12 @@ pub(super) fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
     true
 }
 
-/// If A contains entries `|a_ij| > 1e6`, scale each affected row by
-/// `σ_i = 1/√(max|A[i,*]|)` (capped at `SIGMA_FLOOR`) so subsequent Ruiz / IPM is
+/// If A contains entries `|a_ij| > LARGE_A_COEFF_TRIGGER`, scale each affected row by
+/// `σ_i = 1/√(max|A[i,*]|)` (capped at `SCALING_SIGMA_FLOOR`) so subsequent Ruiz / IPM is
 /// well-conditioned. Returns the per-row scales for dual unscaling.
 pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: usize) -> Vec<f64> {
     let m = a.nrows;
-    let has_large = a.values.iter().chain(std::iter::empty()).any(|&v| v.abs() > 1e6);
+    let has_large = a.values.iter().any(|&v| v.abs() > LARGE_A_COEFF_TRIGGER);
     if !has_large {
         return vec![1.0; m];
     }
@@ -187,12 +187,11 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
         }
     }
 
-    // Cap per-row amplification at 1/SIGMA_FLOOR so the composite scaling
+    // Cap per-row amplification at 1/SCALING_SIGMA_FLOOR so the composite scaling
     // (phase1 · phase2 · Ruiz) stays within the IPM's achievable scaled accuracy.
-    const SIGMA_FLOOR: f64 = 1e-3;
     let row_scales: Vec<f64> = row_max
         .iter()
-        .map(|&mx| if mx > 1.0 { (1.0 / mx.sqrt()).max(SIGMA_FLOOR) } else { 1.0 })
+        .map(|&mx| if mx > 1.0 { (1.0 / mx.sqrt()).max(SCALING_SIGMA_FLOOR) } else { 1.0 })
         .collect();
 
     for col in 0..n.min(a.ncols) {

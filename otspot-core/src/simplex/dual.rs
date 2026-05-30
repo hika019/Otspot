@@ -3,13 +3,13 @@
 //! changes (e.g. SQP).
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::options::{SolverOptions, WarmStartBasis};
+use crate::options::SolverOptions;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::presolve::LpEquilibration;
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
-use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info, timeout_result_with_incumbent};
-use super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs};
+use super::{StandardForm, SimplexOutcome, timeout_result_with_incumbent};
+use super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, outcome_to_result};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
 use std::sync::atomic::Ordering;
 
@@ -48,8 +48,8 @@ pub(crate) fn two_phase_dual_simplex(
                         &mut total_iters,
                     );
 
-                    let mut result = warm_outcome_to_result(
-                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                    let mut result = outcome_to_result(
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale, true,
                     );
                     result.iterations = total_iters;
                     return result;
@@ -123,123 +123,11 @@ fn cold_start_dual(
         &mut total_iters, false,
     );
 
-    let mut result = primal_outcome_to_result(
-        phase2_outcome, sf, problem, &basis, &x_b, col_scale, row_scale,
+    let mut result = outcome_to_result(
+        phase2_outcome, sf, problem, &basis, &x_b, col_scale, row_scale, false,
     );
     result.iterations = total_iters;
     result
-}
-
-/// Convert dual-simplex outcome to `SolverResult` (Unbounded ⇒ Infeasible).
-fn warm_outcome_to_result(
-    outcome: SimplexOutcome,
-    sf: &StandardForm,
-    problem: &LpProblem,
-    basis: &[usize],
-    x_b: &[f64],
-    col_scale: &[f64],
-    row_scale: &[f64],
-) -> SolverResult {
-    match outcome {
-        SimplexOutcome::Optimal(obj, y) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            let (dual_solution, reduced_costs, slack) =
-                extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
-            SolverResult {
-                status: SolveStatus::Optimal,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution,
-                reduced_costs,
-                slack,
-                warm_start_basis: Some(ws),
-            ..Default::default()
-            }
-        }
-        SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Infeasible,
-            objective: 0.0,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            ..Default::default()
-        },
-        SimplexOutcome::Timeout(obj) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            SolverResult {
-                status: SolveStatus::Timeout,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            }
-        }
-        SimplexOutcome::SingularBasis => {
-            SolverResult::numerical_error()
-        }
-    }
-}
-
-/// Convert primal-simplex outcome to `SolverResult`.
-fn primal_outcome_to_result(
-    outcome: SimplexOutcome,
-    sf: &StandardForm,
-    problem: &LpProblem,
-    basis: &[usize],
-    x_b: &[f64],
-    col_scale: &[f64],
-    row_scale: &[f64],
-) -> SolverResult {
-    match outcome {
-        SimplexOutcome::Optimal(obj, y) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            let (dual_solution, reduced_costs, slack) =
-                extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
-            SolverResult {
-                status: SolveStatus::Optimal,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution,
-                reduced_costs,
-                slack,
-                warm_start_basis: Some(ws),
-            ..Default::default()
-            }
-        }
-        SimplexOutcome::Unbounded => SolverResult {
-            status: SolveStatus::Unbounded,
-            objective: f64::NEG_INFINITY,
-            solution: vec![],
-            dual_solution: vec![],
-            reduced_costs: vec![],
-            slack: vec![],
-            warm_start_basis: None,
-            ..Default::default()
-        },
-        SimplexOutcome::Timeout(obj) => {
-            let solution = extract_solution(sf, basis, x_b, col_scale);
-            SolverResult {
-                status: SolveStatus::Timeout,
-                objective: obj + sf.obj_offset,
-                solution,
-                dual_solution: vec![],
-                reduced_costs: vec![],
-                slack: vec![],
-                warm_start_basis: None,
-            ..Default::default()
-            }
-        }
-        SimplexOutcome::SingularBasis => {
-            SolverResult::numerical_error()
-        }
-    }
 }
 
 /// Dual simplex core. Caller must establish dual feasibility (warm-start or

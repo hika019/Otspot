@@ -73,7 +73,68 @@ pub use mip::{
     MipProblemError, MipStats, MiqpProblem,
 };
 pub use lp::solve_lp_with;
-pub use simplex::{solve, solve_with};
+
+/// Solve an LP with default options. Includes `problem.obj_offset` in the returned objective.
+///
+/// Delegates to [`solve_lp_with`].
+pub fn solve(problem: &crate::problem::LpProblem) -> crate::problem::SolverResult {
+    lp::solve_lp_with(problem, &SolverOptions::default())
+}
+
+/// Solve an LP with the supplied options. Includes `problem.obj_offset` in the returned objective.
+///
+/// Delegates to [`solve_lp_with`].
+pub fn solve_with(problem: &crate::problem::LpProblem, options: &SolverOptions) -> crate::problem::SolverResult {
+    lp::solve_lp_with(problem, options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::problem::{ConstraintType, SolveStatus};
+    use crate::sparse::CscMatrix;
+
+    fn make_offset_lp(obj_offset: f64) -> crate::problem::LpProblem {
+        // min x  s.t. x <= 5,  x >= 0;  optimal x* = 0, c^T x* = 0
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut lp = crate::problem::LpProblem::new_general(
+            vec![1.0],
+            a,
+            vec![5.0],
+            vec![ConstraintType::Le],
+            vec![(0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
+        lp.obj_offset = obj_offset;
+        lp
+    }
+
+    /// `solve` and `solve_with` must include `obj_offset` in the returned objective.
+    ///
+    /// Sentinel: removing `result.objective += problem.obj_offset` from
+    /// `lp::solve_lp_with` causes `result.objective == 0.0` instead of 5.0 → FAIL.
+    #[test]
+    fn test_legacy_lp_exports_apply_obj_offset() {
+        let lp = make_offset_lp(5.0);
+
+        let r1 = solve(&lp);
+        assert_eq!(r1.status, SolveStatus::Optimal);
+        assert!(
+            (r1.objective - 5.0).abs() < 1e-9,
+            "solve: expected 5.0 (c^Tx=0 + offset 5), got {}",
+            r1.objective
+        );
+
+        let r2 = solve_with(&lp, &SolverOptions::default());
+        assert_eq!(r2.status, SolveStatus::Optimal);
+        assert!(
+            (r2.objective - 5.0).abs() < 1e-9,
+            "solve_with: expected 5.0 (c^Tx=0 + offset 5), got {}",
+            r2.objective
+        );
+    }
+}
 
 /// Internal BFRT (Bound-Flipping Ratio Test) primitives for integration tests.
 /// Deferred for removal until typed pipeline restructures the simplex tree.

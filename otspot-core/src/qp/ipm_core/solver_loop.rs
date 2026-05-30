@@ -31,8 +31,8 @@ pub(crate) fn solve_with_iterative_refinement(
     debug_assert_eq!(aug_mat.nrows, aug_dim);
     debug_assert_eq!(aug_mat.ncols, aug_dim);
 
-    // Primary solve: propagate MINRES errors by zeroing sol so the IPM sees a zero
-    // Newton direction (safe stall) rather than a partial-iterate contaminating it.
+    // Primary solve: zero sol on MINRES error to prevent NaN; IPM continues with
+    // degraded steps until residual stall or max_iter.
     if fac.solve_with_deadline(rhs, sol, deadline).is_err() {
         for v in sol.iter_mut() { *v = 0.0; }
         return;
@@ -176,7 +176,11 @@ pub(crate) fn solve_kkt_via_schur(
         .map(|(&r, &v)| r + v)
         .collect();
 
-    s_fac.solve(&rhs_s, dx_out);
+    if s_fac.solve_with_deadline(&rhs_s, dx_out, None).is_err() {
+        for v in dx_out.iter_mut() { *v = 0.0; }
+        for v in dy_out.iter_mut() { *v = 0.0; }
+        return;
+    }
 
     let zero_dd = TwoFloat::from(0.0);
     let mut a_dx_dd: Vec<TwoFloat> = vec![zero_dd; m_ext];
@@ -431,13 +435,13 @@ pub(crate) fn gondzio_correctors_schur(
         let alpha_y_new = fraction_to_boundary_masked(y, &dy_new, TAU, is_eq_ext);
         let alpha_new = alpha_s_new.min(alpha_y_new);
 
-        if alpha_new <= alpha_prev * ALPHA_IMPROVE_THRESHOLD {
+        if alpha_new < alpha_prev + ALPHA_IMPROVE_THRESHOLD {
             break;
         }
-        alpha_prev = alpha_new;
         dx.copy_from_slice(&dx_new);
         dy.copy_from_slice(&dy_new);
         ds.copy_from_slice(&ds_new);
+        alpha_prev = alpha_new;
     }
     alpha_prev
 }
@@ -744,8 +748,9 @@ pub(crate) fn update_variables(
 #[cfg(test)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
-    use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur};
+    use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur, gondzio_correctors_schur};
     use crate::qp::ipm_core::kkt::{build_augmented_system, build_schur_system};
+    use crate::qp::ipm_core::ALPHA_IMPROVE_THRESHOLD;
     use crate::linalg::amd::amd_with_deadline;
     use crate::sparse::CscMatrix;
 
@@ -925,5 +930,69 @@ mod tests {
         assert_eq!(s[1], 1e-12);
         assert!((y[0] - 1.1).abs() < 1e-12);
         assert!((y[1] - 1.1).abs() < 1e-12);
+    }
+
+    /// Regression sentinel for audit#166 P1-A: Schur gondzio path used multiplicative stop
+    /// condition (`alpha_new <= alpha_prev * threshold`) instead of the correct additive form
+    /// (`alpha_new < alpha_prev + threshold`).
+    ///
+    /// With all-equality constraints, `fraction_to_boundary_masked` skips every row, so
+    /// `alpha_new = 1.0` regardless of the correction direction.
+    /// Setting `alpha_init = 0.9999`:
+    ///   - additive (correct): `1.0 < 0.9999 + 0.001` → true → early stop → returns 0.9999
+    ///   - multiplicative (drift): `1.0 <= 0.9999 * 0.001` → false → loop runs to completion → returns 1.0
+    #[test]
+    fn test_gondzio_schur_stop_additive_sentinel() {
+        let n = 2;
+        let m_ext = 1;
+
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        // Single equality constraint: x0 + x1 = 1
+        let a_ext = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], m_ext, n).unwrap();
+
+        let is_eq_ext = vec![true]; // all equality
+        let sigma_vec = vec![0.0_f64];
+        let rho_p = 0.1_f64;
+        let delta_d = 0.05_f64;
+
+        let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
+        let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
+            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+                &s_mat, &s_perm, None, None, faer::Par::Seq,
+            )
+            .unwrap(),
+        );
+
+        // alpha_init just below 1.0: improvement = 1.0 - 0.9999 = 0.0001 < ALPHA_IMPROVE_THRESHOLD
+        // so the additive check fires on the first iteration and the loop returns alpha_init.
+        let alpha_init = 0.9999_f64;
+        let s = vec![0.0_f64; m_ext];
+        let y = vec![1.0_f64; m_ext];
+        let r_dual = vec![0.0_f64; n];
+        let r_primal = vec![0.0_f64; m_ext];
+        let r_c_corr = vec![0.0_f64; m_ext];
+        let sigma_vec_loop = vec![0.0_f64; m_ext];
+        let mut dx = vec![0.0_f64; n];
+        let mut dy = vec![0.0_f64; m_ext];
+        let mut ds = vec![0.0_f64; m_ext];
+
+        let result = gondzio_correctors_schur(
+            &s, &y, &is_eq_ext, 0, &r_dual, &r_primal, &r_c_corr,
+            &sigma_vec_loop, &s_fac, &d_inv, &a_ext, m_ext,
+            /*max_correctors=*/ 5,
+            alpha_init, &mut dx, &mut dy, &mut ds, None,
+        );
+
+        // With the fix (additive): loop breaks on first iteration → returns alpha_init.
+        // Under drift (multiplicative): 1.0 <= 0.9999 * 0.001 = false → loop continues
+        // → alpha_prev updated to 1.0 → returns 1.0.
+        assert!(
+            (result - alpha_init).abs() < 1e-12,
+            "expected early stop (additive criterion), got result={} (drift would return 1.0); \
+             ALPHA_IMPROVE_THRESHOLD={}",
+            result,
+            ALPHA_IMPROVE_THRESHOLD,
+        );
     }
 }

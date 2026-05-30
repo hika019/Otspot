@@ -1,3 +1,8 @@
+/// Re-export from `crate::common` so that tests in `mps::mod` can access it
+/// via `types::is_fixed_width_format`.
+#[cfg(test)]
+pub(super) use crate::common::is_fixed_width_format;
+
 /// Default upper bound for integer variables that appear only inside an
 /// INTORG/INTEND marker block and have no explicit BOUNDS entry.
 ///
@@ -25,14 +30,6 @@ pub(super) fn integer_marker_kind(line: &str) -> Option<IntegerMarker> {
         }
     }
     if has_marker { kind } else { None }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum RowType {
-    N,
-    L,
-    G,
-    E,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,10 +81,4 @@ impl Section {
             None
         }
     }
-}
-
-/// Returns `true` when column 15 (0-indexed: 14) is whitespace, indicating
-/// fixed-width MPS format. Short or empty lines return `false`.
-pub(super) fn is_fixed_width_format(line: &str) -> bool {
-    line.chars().nth(14).is_some_and(|c| c.is_whitespace())
 }

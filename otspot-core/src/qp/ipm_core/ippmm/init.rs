@@ -28,7 +28,6 @@ pub(super) fn build_initial_point(
     is_eq_ext: &[bool],
     m_orig: usize,
     m_ext: usize,
-    m_ineq: usize,
     timeout_ctx: &TimeoutCtx,
     par: Par,
 ) -> InitialPoint {
@@ -97,7 +96,7 @@ pub(super) fn build_initial_point(
             max_l_nnz: options.ipm.effective_max_l_nnz(),
         };
         mehrotra_cold_init(
-            problem, a_ext, b_ext, is_eq_ext, m_ext, m_ineq,
+            problem, a_ext, b_ext, is_eq_ext, m_ext,
             &ax0, timeout_ctx, par, &kkt_cfg,
             &mut x, &mut s, &mut y,
         );
@@ -114,7 +113,6 @@ fn mehrotra_cold_init(
     b_ext: &[f64],
     is_eq_ext: &[bool],
     m_ext: usize,
-    _m_ineq: usize,
     ax0: &[f64],
     timeout_ctx: &TimeoutCtx,
     par: Par,
@@ -142,26 +140,27 @@ fn mehrotra_cold_init(
             let mut rhs_init = vec![0.0_f64; n + m_ext];
             rhs_init[n..(m_ext + n)].copy_from_slice(&r_p[..m_ext]);
             let mut sol_init = vec![0.0_f64; n + m_ext];
-            fac_init.solve(&rhs_init, &mut sol_init);
-            let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-            if dx_inf.is_finite() && dx_inf < 1e15 {
-                for j in 0..n {
-                    let x_new = x[j] + sol_init[j];
-                    let (lb, ub) = problem.bounds[j];
-                    x[j] = match (lb.is_finite(), ub.is_finite()) {
-                        (true, true) => {
-                            let range = ub - lb;
-                            let margin = range * WARM_BOUND_REL_MARGIN;
-                            if range > 2.0 * margin {
-                                x_new.clamp(lb + margin, ub - margin)
-                            } else {
-                                0.5 * (lb + ub)
+            if fac_init.solve_with_deadline(&rhs_init, &mut sol_init, None).is_ok() {
+                let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+                if dx_inf.is_finite() && dx_inf < 1e15 {
+                    for j in 0..n {
+                        let x_new = x[j] + sol_init[j];
+                        let (lb, ub) = problem.bounds[j];
+                        x[j] = match (lb.is_finite(), ub.is_finite()) {
+                            (true, true) => {
+                                let range = ub - lb;
+                                let margin = range * WARM_BOUND_REL_MARGIN;
+                                if range > 2.0 * margin {
+                                    x_new.clamp(lb + margin, ub - margin)
+                                } else {
+                                    0.5 * (lb + ub)
+                                }
                             }
-                        }
-                        (true, false) => x_new.max(lb + warm_bound_margin(lb)),
-                        (false, true) => x_new.min(ub - warm_bound_margin(ub)),
-                        (false, false) => x_new,
-                    };
+                            (true, false) => x_new.max(lb + warm_bound_margin(lb)),
+                            (false, true) => x_new.min(ub - warm_bound_margin(ub)),
+                            (false, false) => x_new,
+                        };
+                    }
                 }
             }
         }

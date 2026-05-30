@@ -83,6 +83,26 @@ pub const INT_ROUND_TOL: f64 = 1e-9;
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
 pub const UNDERFLOW_GUARD: f64 = 1e-300;
 
+/// Minimum per-row scale factor for large-coefficient rescaling.
+///
+/// When a row contains entries with `|A[i,j]| > LARGE_A_COEFF_TRIGGER`, each
+/// affected row is scaled by `σ_i = 1/√(max|A[i,*]|)`, clamped from below by
+/// this value.  Clamping caps the per-stage amplification at `1/SCALING_SIGMA_FLOOR = 1e3`,
+/// so the composite scaling (phase1 · phase2 · Ruiz) stays within the IPM's
+/// achievable scaled accuracy.
+pub const SCALING_SIGMA_FLOOR: f64 = 1e-3;
+
+/// Trigger threshold for presolve row-scaling when `|A[i,j]|` exceeds this magnitude.
+/// Units: A entry magnitude.
+/// Used in: `presolve::qp_transforms::helpers::apply_large_coeff_rescaling`.
+pub const LARGE_A_COEFF_TRIGGER: f64 = 1e6;
+
+/// Dimensionless ratio threshold for Q diagonal range: if `q_pos_max / q_pos_min`
+/// exceeds this value, IPM Q-diagonal scaling is applied to reduce conditioning.
+/// Units: dimensionless ratio.
+/// Used in: `qp::ipm_solver::attempt::try_q_diagonal_scaling`.
+pub const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
+
 /// Absolute drop threshold for Q off-diagonal pruning in `near_zero_q_removal`.
 ///
 /// Off-diagonal entries `|Q[i,j]| < Q_OFFDIAG_ABS` are removed to improve
@@ -103,14 +123,36 @@ pub const Q_OFFDIAG_ABS: f64 = 1e-10;
 /// `qp/ipm_solver/attempt::try_q_diagonal_scaling`.
 pub const Q_OFFDIAG_REL: f64 = 1e-12;
 
-/// Size gate shared across expensive post-processing sites.
+/// Absolute feasibility tolerance for the MIP fixed-point subproblem.
 ///
-/// Problems above this threshold skip high-cost operations (primal projection,
-/// KKT refinement, presolve perturbation) to reserve budget for the IPM core.
+/// Used in `solve_fixed_point` when every variable is pinned to a single value
+/// (zero-width box). The check `|Ax_k - b_k| <= FIXED_POINT_FEAS_TOL` is purely
+/// absolute because x is already uniquely determined; there is no free scale.
 ///
-/// Usage varies by site: some compare `n + m` against this value; others
-/// check each dimension individually (`num_vars <= T && num_constraints <= T`).
-pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
+/// Intentionally distinct from `COMP_SLACK_REL_TOL` (a relative scale factor
+/// for LP postsolve): conflating them would cause LP postsolve tuning to silently
+/// alter the MIP fixed-point feasibility gate.
+pub const FIXED_POINT_FEAS_TOL: f64 = 1e-6;
+
+/// Size gate for expensive post-processing: skip when `n + m > LARGE_PROBLEM_THRESHOLD`
+/// (sum form) or when `num_vars > LARGE_PROBLEM_THRESHOLD || num_constraints > LARGE_PROBLEM_THRESHOLD`
+/// (per-dim form).
+///
+/// Sites:
+/// - `presolve::postsolve` — kept-perturbation LP (n+m sum)
+/// - `qp::postsolve::refine::kkt_iterative` — saddle-point K factorize (n+m sum)
+/// - `qp::ipm_solver::core::post_processing` — primal projection LDL (n+m sum)
+/// - `qp::ipm_solver::attempt` — presolve skip gate (per-dim)
+///
+/// 2026-05-30 audit-post-aac2b64: `LARGE_PROBLEM_SIZE_SUM` / `LARGE_PROBLEM_DIM_INDIVIDUAL`
+/// split撤退。値が乖離した実証なく alias 化していたため単一定数に統合。
+pub(crate) const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
+
+/// Relative tolerance for slack-based non-binding row detection in dual recovery.
+///
+/// Row i is considered non-binding when
+/// `slack_i <= SLACK_TOL_REL * (1 + |b_i| + |Ax_i| + row_abs_activity_i)`.
+pub(crate) const SLACK_TOL_REL: f64 = 1e-8;
 
 /// Returns `true` if any element of `v` is non-finite (NaN or ±Inf).
 pub(crate) fn any_nonfinite(v: &[f64]) -> bool {

@@ -569,7 +569,7 @@ pub fn default_max_etas(m: usize) -> usize {
 
 /// Phase I retry cap: guards against degenerate problems that loop with an
 /// identical basis in `revised_simplex_core`.
-pub const MAX_PHASE1_RETRIES: usize = 8;
+pub(crate) const MAX_PHASE1_RETRIES: usize = 8;
 
 impl Default for SolverOptions {
     fn default() -> Self {

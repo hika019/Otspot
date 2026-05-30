@@ -66,7 +66,7 @@ pub(crate) fn run_feasibility_pump(
         if validate_against_bounds(&x_rounded, &lp.bounds)
             && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
         {
-            return Some(make_result(&lp.c, x_rounded));
+            return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
         }
         return None;
     }
@@ -93,7 +93,7 @@ pub(crate) fn run_feasibility_pump(
             if validate_against_bounds(&x_rounded, &lp.bounds)
                 && validate_against_constraints(&x_rounded, &lp.a, &lp.b, &lp.constraint_types)
             {
-                return Some(make_result(&lp.c, x_rounded));
+                return Some(make_result(&lp.c, lp.obj_offset, x_rounded));
             }
             break;
         }
@@ -204,9 +204,9 @@ fn validate_against_constraints(
     })
 }
 
-/// Build a `SolverResult` from a feasible integer solution and the original objective.
-fn make_result(c: &[f64], x: Vec<f64>) -> SolverResult {
-    let obj: f64 = c.iter().zip(x.iter()).map(|(ci, xi)| ci * xi).sum();
+/// Build a `SolverResult` from a feasible integer solution, original cost vector, and constant offset.
+fn make_result(c: &[f64], obj_offset: f64, x: Vec<f64>) -> SolverResult {
+    let obj: f64 = c.iter().zip(x.iter()).map(|(ci, xi)| ci * xi).sum::<f64>() + obj_offset;
     SolverResult { status: SolveStatus::Optimal, objective: obj, solution: x, ..SolverResult::default() }
 }
 
@@ -332,6 +332,26 @@ mod tests {
             "FP must reject rounded incumbent that violates UB={}; \
              no-op (remove validate_against_bounds) returns Some(solution[0]=1.0) → FAIL",
             near_ub
+        );
+    }
+
+    /// FP incumbent objective includes `obj_offset`.
+    ///
+    /// LP root is already integer-feasible (x=0, minimum of `min x` on [0,5]).
+    /// With `obj_offset = 7.0`, expected objective = c^T(0) + 7.0 = 7.0.
+    ///
+    /// Sentinel: removing `+ obj_offset` from `make_result` causes objective = 0.0 ≠ 7.0 → FAIL.
+    #[test]
+    fn test_milp_feasibility_pump_includes_obj_offset() {
+        // min x  s.t. x <= 3,  x in [0, 5]  integer.  LP root: x=0 (already integer).
+        let mut lp = single_constraint_lp(vec![1.0], &[1.0], 3.0, vec![(0.0, 5.0)]);
+        lp.obj_offset = 7.0;
+        let r = run_feasibility_pump(&lp, &[0], 1e-6, &opts())
+            .expect("LP root is integer-feasible → FP must return Some");
+        assert!(
+            (r.objective - 7.0).abs() < 1e-9,
+            "FP incumbent must include obj_offset 7.0; removing makes obj=0.0 → FAIL. Got {}",
+            r.objective
         );
     }
 

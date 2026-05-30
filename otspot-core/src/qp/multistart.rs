@@ -520,7 +520,7 @@ mod tests {
             let mut opts = SolverOptions::default();
             opts.timeout_secs = Some(30.0);
             opts.threads = threads;
-            let _ = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
+            solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
 
             let observed = peak.load(Ordering::SeqCst);
             assert!(
@@ -568,7 +568,7 @@ mod tests {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(20.0);
         opts.threads = 1;
-        let _ = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
+        solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&hooks));
         assert_eq!(peak.load(Ordering::SeqCst), 1, "threads=1 must be serial");
     }
 
@@ -622,7 +622,7 @@ mod tests {
         // ON: shortcut 有効 → deadline 前に走った worker 数 < n_starts (= skip 確実)
         let (h_on, entered_on) = make_hooks(false);
         let t0_on = Instant::now();
-        let _ = solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&h_on));
+        solve_qp_multistart_with_hooks(&prob, &opts, &cfg, Some(&h_on));
         let dur_on = t0_on.elapsed();
         let n_entered_on = entered_on.load(Ordering::SeqCst);
 
@@ -631,7 +631,7 @@ mod tests {
         opts_off.deadline = Some(Instant::now() + Duration::from_millis(10));
         let (h_off, entered_off) = make_hooks(true);
         let t0_off = Instant::now();
-        let _ = solve_qp_multistart_with_hooks(&prob, &opts_off, &cfg, Some(&h_off));
+        solve_qp_multistart_with_hooks(&prob, &opts_off, &cfg, Some(&h_off));
         let dur_off = t0_off.elapsed();
         let n_entered_off = entered_off.load(Ordering::SeqCst);
 

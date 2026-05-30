@@ -4,7 +4,7 @@
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, ZERO_TOL};
+use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, SCALING_SIGMA_FLOOR, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
@@ -12,10 +12,34 @@ use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 /// systems (m > n * ROW_OVERDETERMINED_RATIO).
 const ROW_OVERDETERMINED_RATIO: usize = 2;
 
+/// Pivot candidate is treated as zero when its absolute value falls below this
+/// threshold during partial-pivot Gaussian elimination.
+const PIVOT_CANDIDATE_ZERO_TOL: f64 = 1e-10;
+
+/// A row's max absolute coefficient must exceed `1.0 + SCALE_EXCESS_TOL` to
+/// trigger per-row normalisation; rows near 1.0 are left unscaled.
+const SCALE_EXCESS_TOL: f64 = 1e-10;
+
+/// Maximum `m * n` product before equality-constraint QR elimination is skipped.
+///
+/// QR elimination is O(mn²); at 10⁸ the dense multiply already takes ~seconds for
+/// typical n~10³ problems.  Problems this size are unlikely to have large numbers of
+/// Le-Le equality pairs anyway, so the skip is loss-free in practice.
+const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
+
+/// Quantisation factor for RHS hashing in the Le-Le equality pair detector.
+///
+/// `|b[i]| * RHS_HASH_QUANTIZE` is rounded to `i64` so that rows whose RHS values
+/// agree within ~1e-9 relative hash into the same bucket.  Collisions between truly
+/// distinct rows are harmless — the exact comparison below the bucket lookup rejects
+/// non-pairs.  The value 1e9 was chosen so that the quantisation error (~1e-9) is
+/// well below `ZERO_TOL` (1e-12 × scale) for typical RHS magnitudes.
+const RHS_HASH_QUANTIZE: f64 = 1e9;
+
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
-pub fn equality_constraint_qr(
+fn equality_constraint_qr(
     prob: &QpProblem,
     removed_rows: &mut [bool],
 ) {
@@ -26,7 +50,6 @@ pub fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
     if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * ROW_OVERDETERMINED_RATIO || n == 0 {
         return;
     }
@@ -61,9 +84,7 @@ pub fn equality_constraint_qr(
             continue;
         }
         let ch = col_pattern_hash(&row_entries[i]);
-        // Quantise |b| at 1e-9 so rows agreeing within rounding hash together; collisions
-        // are harmless because the real comparison runs below.
-        let bk = (prob.b[i].abs() * 1e9).round() as i64;
+        let bk = (prob.b[i].abs() * RHS_HASH_QUANTIZE).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }
 
@@ -133,7 +154,7 @@ pub fn equality_constraint_qr(
             }
         }
 
-        if max_row == usize::MAX || max_val < 1e-10 || used_pivot_col[col] {
+        if max_row == usize::MAX || max_val < PIVOT_CANDIDATE_ZERO_TOL || used_pivot_col[col] {
             continue;
         }
 
@@ -175,7 +196,7 @@ pub fn equality_constraint_qr(
 }
 
 /// Drop Q off-diagonal entries below `Q_OFFDIAG_ABS` to improve sparsity.
-pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
+fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
     let mut new_col_ptr = vec![0usize; n + 1];
     let mut new_row_ind: Vec<usize> = Vec::new();
     let mut new_values: Vec<f64> = Vec::new();
@@ -203,9 +224,9 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
     }
 }
 
-/// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SIGMA_FLOOR`).
+/// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
 /// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
-pub fn constraint_precond(
+fn constraint_precond(
     a: &mut CscMatrix,
     b: &mut [f64],
 ) -> Vec<f64> {
@@ -223,14 +244,13 @@ pub fn constraint_precond(
         }
     }
 
-    // SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
+    // SCALING_SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
     // amp (phase1·phase2·Ruiz) stays within the IPM's achievable scaled tolerance.
-    const SIGMA_FLOOR: f64 = 1e-3;
     let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
-        if mx > 1.0 + 1e-10 { (1.0 / mx).max(SIGMA_FLOOR) } else { 1.0 }
+        if mx > 1.0 + SCALE_EXCESS_TOL { (1.0 / mx).max(SCALING_SIGMA_FLOOR) } else { 1.0 }
     }).collect();
 
-    let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
+    let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > ZERO_TOL);
     if !has_any {
         return sigmas;
     }
@@ -371,7 +391,7 @@ pub fn run_qp_presolve_phase2(
         }
     }
 
-    let has_precond_scaling = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);
+    let has_precond_scaling = sigmas.iter().any(|&s| (s - 1.0).abs() > ZERO_TOL);
     if has_precond_scaling {
         result.postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: sigmas });
     }
@@ -411,14 +431,7 @@ mod tests {
             &[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1e-15, 1e-15, 2.0], 2, 2
         ).unwrap();
         let q_clean = near_zero_q_removal(&q, 2);
-        // 非対角 (0,1)=(1,0) が除去されている
-        let diag_count = q_clean.values.iter().zip(q_clean.row_ind.iter()).filter(|(_, &_r)| {
-            // どの列かは不明なのでゼロ化された数を確認
-            true
-        }).count();
-        // 非対角2要素が除去され対角2要素のみ残る
         assert_eq!(q_clean.values.len(), 2, "off-diag removed");
-        let _ = diag_count;
     }
 
     #[test]
