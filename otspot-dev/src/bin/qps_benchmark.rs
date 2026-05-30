@@ -436,9 +436,9 @@ fn main() {
             None => String::new(),
         };
 
-        // SuboptimalSolution / LocallyOptimal で有効解を保持している場合のみ Optimal フロー
-        // に乗せて品質判定 (pfeas/bfeas/dfeas/obj_check) を通す。収束未達 status
-        // (Timeout / MaxIterations / NumericalError / NonConvex) は honest 報告。
+        // LocallyOptimal で有効解を保持している場合のみ Optimal フローに乗せて品質判定
+        // (pfeas/bfeas/dfeas/obj_check) を通す。SuboptimalSolution / Timeout /
+        // MaxIterations / NumericalError / NonConvex は honest 報告。
         let result = otspot_dev::bench_utils::apply_bench_status_promotion(
             result,
             prob.num_vars,

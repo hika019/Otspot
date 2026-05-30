@@ -713,6 +713,11 @@ mod tests {
             (result.objective - 7.0).abs() < 1e-9,
             "objective must include presolve contribution and QP obj_offset"
         );
+        let timing = result
+            .timing_breakdown
+            .expect("LP-dispatched QP presolve/postsolve path must keep timing");
+        assert!(timing.presolve_us > 0, "presolve timing must be recorded");
+        assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
