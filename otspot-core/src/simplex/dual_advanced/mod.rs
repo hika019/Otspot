@@ -295,7 +295,7 @@ fn try_bounded(
                     // numerical failure rather than true primal infeasibility.
                     // Fall through to cold start for a clean re-solve.
                     let warm_infeasible_with_lb_viol = has_lb_violation
-                        && result.as_ref().map_or(false, |r| r.status == SolveStatus::Infeasible);
+                        && result.as_ref().is_some_and(|r| r.status == SolveStatus::Infeasible);
                     if result.is_some() && !warm_infeasible_with_lb_viol {
                         return result;
                     }
