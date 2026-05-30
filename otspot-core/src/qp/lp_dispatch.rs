@@ -275,6 +275,20 @@ fn solve_reduced_lp_from_qp(
             | SolveStatus::Timeout
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
+        if raw.status == SolveStatus::Timeout
+            && options.deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            let mut timeout = raw;
+            timeout.stats.route = SolveRoute::LpForwardedFromQp;
+            timeout.stats.deadline_triggered = true;
+            timeout.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                presolve_us,
+                solve_us,
+                postsolve_us: 0,
+                ..Default::default()
+            });
+            return timeout;
+        }
         let t_postsolve = Instant::now();
         let mut lifted = presolve::postsolve::run_postsolve(
             &raw,
