@@ -73,26 +73,25 @@ pub(crate) fn solve_dual_advanced(
                     basis_mgr.ftran(&mut x_b_sv);
                     let mut x_b = x_b_sv.to_dense();
 
-                    // WarmStartBasis does not store at_upper, so nonbasics are assumed
-                    // at lb=0. For the "up" branch, the branched variable's lb is raised
-                    // above its parent value → x_b becomes negative (lb-violation);
-                    // fall through to cold start.
-                    if !super::has_lb_violation(&x_b, options.primal_tol) {
-                        let mut leaving = make_leaving_strategy(options.dual_pricing, m);
-                        let mut total_iters: usize = 0;
-                        let outcome = core::dual_simplex_core_advanced(
-                            &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
-                            leaving.as_mut(),
-                            &mut total_iters,
-                        );
+                    // The warm-start basis is dual-feasible under the original costs c
+                    // (it was optimal for the cold-solve LP). If b changed since the
+                    // cold solve, x_B may have lb-violations; the dual simplex with
+                    // original costs repairs them. No guard: always prefer the
+                    // warm-start basis over a cold re-start from scratch.
+                    let mut leaving = make_leaving_strategy(options.dual_pricing, m);
+                    let mut total_iters: usize = 0;
+                    let outcome = core::dual_simplex_core_advanced(
+                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                        leaving.as_mut(),
+                        &mut total_iters,
+                    );
 
-                        let mut result = outcome_to_result(
-                            outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
-                            true, // dual_unbounded → Infeasible
-                        );
-                        result.iterations = total_iters;
-                        return result;
-                    }
+                    let mut result = outcome_to_result(
+                        outcome, sf, problem, &basis, &x_b, &col_scale, &row_scale,
+                        true, // dual_unbounded → Infeasible
+                    );
+                    result.iterations = total_iters;
+                    return result;
                 }
                 Err(_) => {
                     // 基底が特異 → cold-startにフォールバック
