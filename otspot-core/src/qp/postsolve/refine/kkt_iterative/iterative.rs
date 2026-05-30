@@ -255,9 +255,9 @@ pub(crate) fn refine_kkt_iterative(
 
     // Wilkinson IR の "double the working precision": Qx, A^T y, Ax を TwoFloat (DD) で積算し
     // residual を f64 limit 以下に精密化。LDL solve は f64 のまま。
-    // 戻り値: (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)、pf_rel/df_rel は OSQP-style componentwise。
+    // 戻り値: (r_d, r_p, pf_rel, df_rel)、pf_rel/df_rel は OSQP-style componentwise。
     let compute_residuals =
-        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
+        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64) {
             use twofloat::TwoFloat;
             let zero_dd = TwoFloat::from(0.0);
             // Q は全要素格納 (上下三角両方)、symmetric duplication せず CSC 全走査。
@@ -302,7 +302,6 @@ pub(crate) fn refine_kkt_iterative(
                 }
             }
             let mut r_p = vec![0.0_f64; m];
-            let mut pf_abs = 0.0_f64;
             let mut pf_rel_componentwise = 0.0_f64;
             for i in 0..m {
                 let raw_dd = ax_dd[i] - TwoFloat::from(problem.b[i]);
@@ -325,7 +324,6 @@ pub(crate) fn refine_kkt_iterative(
                     }
                 };
                 r_p[i] = v;
-                pf_abs = pf_abs.max(v.abs());
                 let ax_i_abs = f64::from(ax_dd[i]).abs();
                 let scale_i = 1.0 + ax_i_abs + problem.b[i].abs();
                 let rel_i = v.abs() / scale_i;
@@ -333,7 +331,6 @@ pub(crate) fn refine_kkt_iterative(
                     pf_rel_componentwise = rel_i;
                 }
             }
-            let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
             // componentwise が必須 (全体相対化は ill-scaled で 1 成分外れを見逃す)。
             let mut df_rel_componentwise = 0.0_f64;
             for j in 0..n {
@@ -349,18 +346,11 @@ pub(crate) fn refine_kkt_iterative(
                     df_rel_componentwise = rel_j;
                 }
             }
-            (
-                r_d,
-                r_p,
-                pf_abs,
-                df_abs,
-                pf_rel_componentwise,
-                df_rel_componentwise,
-            )
+            (r_d, r_p, pf_rel_componentwise, df_rel_componentwise)
         };
 
     let pre_z = result.bound_duals.clone();
-    let (_, _, _pre_pf, _pre_df, pre_pf_rel, pre_df_rel) =
+    let (_, _, pre_pf_rel, pre_df_rel) =
         compute_residuals(&result.solution, &result.dual_solution, &pre_z);
     if pre_pf_rel < target_pf && pre_df_rel < target_pf {
         return 0;
@@ -378,12 +368,11 @@ pub(crate) fn refine_kkt_iterative(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) =
+        let (r_d, r_p, pf_cur, df_cur) =
             compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals);
         if pf_cur < target_pf && df_cur < target_pf {
             break;
         }
-        let _ = (pf_abs_cur, df_abs_cur);
 
         let mut rhs = vec![0.0_f64; n + m];
         for j in 0..n {
@@ -422,7 +411,7 @@ pub(crate) fn refine_kkt_iterative(
         tmp.dual_solution = y_new;
         refit_bound_duals_kkt(problem, &mut tmp);
 
-        let (_, _, _pf_abs_new, _df_abs_new, pf_new, df_new) =
+        let (_, _, pf_new, df_new) =
             compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
 
         // 採用: max(pf_rel, df_rel) strict 減少 + 両者 guardrail 内。

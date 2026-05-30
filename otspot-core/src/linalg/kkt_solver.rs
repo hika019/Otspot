@@ -234,6 +234,10 @@ pub(crate) const MINRES_INEXACT_NEWTON_ETA: f64 = 1e-7;
 /// Default IR rounds for inexact MINRES. 0 because the auto-Schur path
 /// makes the saddle-point conditioning manageable in practice.
 pub(crate) const MINRES_INEXACT_NEWTON_IR_STEPS: usize = 0;
+// Stay within `IpmOptions::validate()` upper bound (10). Trivially true while
+// the default is 0; tripwire if the default is ever raised past 10.
+#[allow(clippy::absurd_extreme_comparisons)]
+const _: () = assert!(MINRES_INEXACT_NEWTON_IR_STEPS <= 10);
 
 /// Default convergence tolerance for non-inexact MINRES constructors.
 /// Tighter than `MINRES_INEXACT_NEWTON_ETA` because there is no outer IPM

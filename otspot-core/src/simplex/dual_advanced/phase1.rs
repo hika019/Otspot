@@ -218,7 +218,6 @@ struct BigMPhase1State {
     x_b: Vec<f64>,
     artificial_col_of_row: Vec<Option<usize>>,
     n_aug: usize,
-    n_art: usize,
 }
 
 /// Helper: A_aug = [A | I_art] for the given `artificial_col_of_row` map.
@@ -312,7 +311,6 @@ fn build_identity_phase1_state(
         x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     })
 }
 
@@ -496,7 +494,6 @@ fn try_build_crash_phase1_state(
         x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     })
 }
 
@@ -529,7 +526,6 @@ pub(crate) fn big_m_cold_start(
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
     let crash_state = try_build_crash_phase1_state(a, b, c, sf, options, big_m, n_total);
-    let crash_used = crash_state.is_some();
     let BigMPhase1State {
         a_aug,
         mut basis_aug,
@@ -537,7 +533,6 @@ pub(crate) fn big_m_cold_start(
         mut x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     } = match crash_state {
         Some(s) => s,
         None => match build_identity_phase1_state(a, b, c, sf, big_m, n_total) {
@@ -545,7 +540,6 @@ pub(crate) fn big_m_cold_start(
             None => return SolverResult::numerical_error(),
         },
     };
-    let _ = (crash_used, n_art); // tracing reserved
 
     // === Step 6: Phase I (Dual Simplex with Harris ratio test + Artificial-aware) ===
     //
