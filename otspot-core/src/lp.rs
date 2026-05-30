@@ -14,7 +14,7 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 /// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout) {
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpDirect;
@@ -25,7 +25,7 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
 /// LP entry from `solve_qp_with(Q=0)`. Sets `result.stats.route = SolveRoute::LpForwardedFromQp`.
 pub(crate) fn solve_lp_forwarded_from_qp(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout) {
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpForwardedFromQp;
@@ -51,6 +51,47 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// Timeout incumbent must include `problem.obj_offset`.
+    ///
+    /// Sentinel: removing `SolveStatus::Timeout` from the match in `solve_lp_with`
+    /// causes `result.objective == 0.0` instead of 42.5 → FAIL.
+    ///
+    /// `cancel_flag = true` with `deadline = None` bypasses the pre-simplex
+    /// INFINITY timeout (entry.rs only checks `deadline.is_some_and(...)`).
+    /// The simplex loop's first-iteration cancel check fires → Timeout with
+    /// initial BFS (x_decision = 0, c^T x = 0, sf.obj_offset = 0).
+    #[test]
+    fn test_lp_timeout_incumbent_includes_obj_offset() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let mut lp = make_trivial_lp();
+        lp.obj_offset = 42.5;
+
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            presolve: false,
+            ..Default::default()
+        };
+
+        let result = solve_lp_with(&lp, &opts);
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout"
+        );
+        assert!(
+            result.objective.is_finite(),
+            "Timeout incumbent must have finite objective (not INFINITY); got {}",
+            result.objective
+        );
+        assert!(
+            (result.objective - 42.5).abs() < 1e-9,
+            "Timeout incumbent must include obj_offset 42.5; got {} \
+             (sentinel: removing Timeout from match yields 0.0 ≠ 42.5)",
+            result.objective
+        );
     }
 
     /// Invalid options produce NumericalError via `solve_lp_with`.
