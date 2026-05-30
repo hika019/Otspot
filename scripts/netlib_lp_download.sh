@@ -125,9 +125,12 @@ done
 echo "" >&2
 echo "=== 追加標準問題 (pilot.ja, pilot.we, vtp.base) ===" >&2
 # ドットをダッシュに変換してファイル名衝突を回避
-declare -A DOTNAME_MAP=( ["pilot.ja"]="pilot-ja" ["pilot.we"]="pilot-we" ["vtp.base"]="vtp-base" )
 for orig in "pilot.ja" "pilot.we" "vtp.base"; do
-    safe="${DOTNAME_MAP[$orig]}"
+    case "$orig" in
+        pilot.ja) safe="pilot-ja" ;;
+        pilot.we) safe="pilot-we" ;;
+        vtp.base) safe="vtp-base" ;;
+    esac
     OUT_FILE="$OUTPUT_DIR/${safe}.QPS"
     if [ -f "$OUT_FILE" ]; then
         echo "EXISTS: $safe" >&2

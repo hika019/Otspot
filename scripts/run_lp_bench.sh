@@ -107,6 +107,15 @@ suite_download_script() {
     esac
 }
 
+qps_count_in_dir() {
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        echo 0
+        return
+    fi
+    find "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
+}
+
 # タイムスタンプ
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 
@@ -147,12 +156,12 @@ run_one() {
 
     # データが存在しなければダウンロード
     local qps_count
-    qps_count=$(find "$data_dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+    qps_count="$(qps_count_in_dir "$data_dir")"
     if [[ "$qps_count" -eq 0 ]]; then
         echo "[run_lp_bench] $data_dir に問題ファイルがないため、ダウンロードします..." >&2
         ensure_emps
         EMPS_BIN="$EMPS" bash "$dl_script" "$data_dir"
-        qps_count=$(find "$data_dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+        qps_count="$(qps_count_in_dir "$data_dir")"
         echo "[run_lp_bench] ダウンロード完了: ${qps_count} 問" >&2
     else
         echo "[run_lp_bench] データ確認済み: ${qps_count} 問 ($data_dir)" >&2

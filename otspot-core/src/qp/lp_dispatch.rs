@@ -4,9 +4,8 @@
 //! forward する。`n > LP_IPM_FIRST_N` または `m > LP_IPM_FIRST_M` を満たす大規模 LP は
 //! IPM を先行し、収束しなければ残時間で simplex にフォールバック。
 //!
-//! IPM 呼び出し時は QP presolve を無効化する。Empty-Column 解析が pure LP で
-//! false Unbounded を返す既知バグ (別途追跡) を回避するため。LP の不有界/不可解は
-//! simplex/IPM 本体で判定可能で presolve なしでも検出できる。
+//! QP presolve は Q=0 では使わない。LP presolve を先に通した上で、縮約後の
+//! LP に対して simplex/IPM を選ぶ。
 //!
 //! `LP_DISPATCH_NOOP=1` は sentinel 用 (no-op proof) で IPM 経路を無効化する。
 
@@ -14,6 +13,7 @@ use std::time::Instant;
 
 use super::certificate::guard_lp_optimal;
 use crate::options::SolverOptions;
+use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
@@ -83,6 +83,68 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         Err(_) => return SolverResult::infeasible(),
     };
 
+    if options.presolve {
+        let t_presolve = Instant::now();
+        match presolve::run_presolve(&lp, options.deadline) {
+            Err(presolve::PresolveStatus::Infeasible) => {
+                let mut result = SolverResult::infeasible();
+                result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                    presolve_us: t_presolve.elapsed().as_micros() as u64,
+                    ..Default::default()
+                });
+                result.stats.route = SolveRoute::LpForwardedFromQp;
+                return result;
+            }
+            Err(presolve::PresolveStatus::Unbounded) => {
+                let mut result = SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    ..Default::default()
+                };
+                result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                    presolve_us: t_presolve.elapsed().as_micros() as u64,
+                    ..Default::default()
+                });
+                result.stats.route = SolveRoute::LpForwardedFromQp;
+                return result;
+            }
+            Ok(presolve_result) if presolve_result.was_reduced => {
+                let presolve_us = t_presolve.elapsed().as_micros() as u64;
+                return solve_reduced_lp_from_qp(
+                    &lp,
+                    problem.obj_offset,
+                    presolve_result,
+                    options,
+                    presolve_us,
+                );
+            }
+            Ok(_) => {
+                let presolve_us = t_presolve.elapsed().as_micros() as u64;
+                let t_solve = Instant::now();
+                let mut no_presolve_opts = options.clone();
+                no_presolve_opts.presolve = false;
+                let mut result = solve_unpresolved_lp_from_qp(&lp, problem, &no_presolve_opts);
+                if result.timing_breakdown.is_none() {
+                    result.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                        presolve_us,
+                        solve_us: t_solve.elapsed().as_micros() as u64,
+                        postsolve_us: 0,
+                        ..Default::default()
+                    });
+                }
+                return result;
+            }
+        }
+    }
+
+    solve_unpresolved_lp_from_qp(&lp, problem, options)
+}
+
+fn solve_unpresolved_lp_from_qp(
+    lp: &LpProblem,
+    problem: &QpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
     // 大規模 LP: IPM 先行、Timeout/NumericalError/Unbounded/MaxIter は simplex 再試行。
     // Optimal/LocallyOptimal/Infeasible は確定的 → 即返却。
     // Unbounded は IPM 側 Q=0 数値リスクがあるため simplex で再確認。
@@ -101,7 +163,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
                 // 確定 status は simplex 再試行不要、即返却。
                 // Optimal は primal guard で false-Optimal を除去してから返す。
-                return guard_lp_optimal(ipm_result, &lp);
+                return guard_lp_optimal(ipm_result, lp);
             }
             SolveStatus::Unbounded
             | SolveStatus::Timeout
@@ -128,7 +190,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
                             status: SolveStatus::Optimal,
                             ..ipm_result
                         };
-                        return guard_lp_optimal(promoted, &lp);
+                        return guard_lp_optimal(promoted, lp);
                     }
                 }
                 // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき
@@ -150,7 +212,7 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
-    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
+    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
     if matches!(
         simplex_result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -167,6 +229,172 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         return certified;
     }
     pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
+}
+
+fn solve_reduced_lp_from_qp(
+    original_lp: &LpProblem,
+    qp_obj_offset: f64,
+    presolve_result: presolve::transforms::PresolveResult,
+    options: &SolverOptions,
+    presolve_us: u64,
+) -> SolverResult {
+    let reduced_lp = &presolve_result.reduced_problem;
+    let mut reduced_opts = options.clone();
+    reduced_opts.presolve = false;
+    reduced_opts.warm_start = None;
+    reduced_opts.warm_start_lp = None;
+
+    let t_solve = Instant::now();
+    let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
+    let solve_us = t_solve.elapsed().as_micros() as u64;
+    if (raw.status == SolveStatus::NumericalError
+        || (raw.status == SolveStatus::SuboptimalSolution && raw.solution.is_empty()))
+        && options.deadline.is_none_or(|d| Instant::now() < d)
+    {
+        let mut fallback_opts = options.clone();
+        fallback_opts.presolve = false;
+        fallback_opts.warm_start = None;
+        fallback_opts.warm_start_lp = None;
+        let t_fallback = Instant::now();
+        let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
+        add_qp_obj_offset(&mut fallback, qp_obj_offset);
+        fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            solve_us: t_fallback.elapsed().as_micros() as u64,
+            postsolve_us: 0,
+            ..Default::default()
+        });
+        return fallback;
+    }
+
+    if matches!(
+        raw.status,
+        SolveStatus::Optimal
+            | SolveStatus::LocallyOptimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
+    ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
+    {
+        let t_postsolve = Instant::now();
+        let mut lifted = presolve::postsolve::run_postsolve(
+            &raw,
+            &presolve_result,
+            original_lp,
+            options.deadline,
+            options.recover_warm_start_basis,
+        );
+        lifted.stats.route = SolveRoute::LpForwardedFromQp;
+        lifted.stats.lp_ipm_path = raw.stats.lp_ipm_path;
+        lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
+        lifted = guard_lp_optimal(lifted, original_lp);
+        let postsolve_us = t_postsolve.elapsed().as_micros() as u64;
+        lifted.timing_breakdown = Some(crate::problem::TimingBreakdown {
+            presolve_us,
+            solve_us,
+            postsolve_us,
+            ..Default::default()
+        });
+        if postsolved_lp_needs_direct_retry(&lifted)
+            && options.deadline.is_none_or(|d| Instant::now() < d)
+        {
+            let keep_lifted = lifted.clone();
+            let mut fallback_opts = options.clone();
+            fallback_opts.presolve = false;
+            fallback_opts.warm_start = None;
+            fallback_opts.warm_start_lp = None;
+            let t_fallback = Instant::now();
+            let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
+            add_qp_obj_offset(&mut fallback, qp_obj_offset);
+            if !matches!(
+                fallback.status,
+                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
+            ) {
+                fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
+                    presolve_us,
+                    solve_us: t_fallback.elapsed().as_micros() as u64,
+                    postsolve_us,
+                    ..Default::default()
+                });
+                return fallback;
+            }
+            lifted = keep_lifted;
+        }
+        add_qp_obj_offset(&mut lifted, qp_obj_offset);
+        return lifted;
+    }
+
+    raw
+}
+
+fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
+    let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
+    let mut ipm_subopt_candidate: Option<SolverResult> = None;
+    if !dispatch_disabled && prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
+        if let Some(qp) = qp_from_lp(lp) {
+            let mut ipm_opts = ipm_opts_for_lp(options);
+            ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
+            let mut ipm = ipm_solver::solve_ipm(&qp, &ipm_opts);
+            ipm.stats.route = SolveRoute::LpForwardedFromQp;
+            ipm.stats.lp_ipm_path = true;
+            if matches!(
+                ipm.status,
+                SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible
+            ) {
+                return guard_lp_optimal(ipm, lp);
+            }
+            if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                return ipm;
+            }
+            if matches!(ipm.status, SolveStatus::SuboptimalSolution) && !ipm.solution.is_empty() {
+                ipm_subopt_candidate = Some(ipm);
+            }
+        }
+    }
+
+    let simplex = crate::lp::solve_lp_forwarded_from_qp(lp, options);
+    pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex)
+}
+
+fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
+    if prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
+        solve_lp_backend_no_presolve(lp, options)
+    } else {
+        crate::lp::solve_lp_forwarded_from_qp(lp, options)
+    }
+}
+
+fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
+    let mut qp = QpProblem::new(
+        CscMatrix::new(lp.num_vars, lp.num_vars),
+        lp.c.clone(),
+        lp.a.clone(),
+        lp.b.clone(),
+        lp.bounds.clone(),
+        lp.constraint_types.clone(),
+    )
+    .ok()?;
+    qp.obj_offset = lp.obj_offset;
+    Some(qp)
+}
+
+fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
+    if matches!(
+        result.status,
+        SolveStatus::Optimal
+            | SolveStatus::LocallyOptimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
+    ) {
+        result.objective += qp_obj_offset;
+    }
+}
+
+fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
+    matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+    ) && (result.postsolve_dfeas.is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
+        || result.status == SolveStatus::SuboptimalSolution)
 }
 
 /// Pick the better of an IPM result and a simplex result.
@@ -443,6 +671,47 @@ mod tests {
             r2.stats.route,
             SolveRoute::LpDirect,
             "r2 route must be LpDirect"
+        );
+    }
+
+    /// Q=0 QP entry must run LP presolve before size-based IPM dispatch.
+    ///
+    /// The unreduced problem has `n > LP_IPM_FIRST_N`, so skipping presolve would
+    /// set `lp_ipm_path=true`. LP presolve fixes the singleton row and empty
+    /// positive-cost columns, leaving a zero-size reduced LP that postsolves back
+    /// to the original space.
+    #[test]
+    fn qp_zero_path_presolve_reduces_before_ipm_dispatch() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        let n = LP_IPM_FIRST_N + 1;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(n, n),
+            vec![2.0; n],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        problem.obj_offset = 5.0;
+
+        let result = solve_as_lp(&problem, &SolverOptions::default());
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(
+            !result.stats.lp_ipm_path,
+            "presolve must reduce before size-based IPM dispatch"
+        );
+        assert_eq!(result.solution.len(), n);
+        assert!((result.solution[0] - 1.0).abs() < 1e-9);
+        assert!(result.solution[1..].iter().all(|&x| x.abs() < 1e-9));
+        assert!(
+            (result.objective - 7.0).abs() < 1e-9,
+            "objective must include presolve contribution and QP obj_offset"
         );
     }
 
