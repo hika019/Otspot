@@ -54,10 +54,10 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
         let rc = reduced_costs[j];
         let x_j = solution[j];
         let rel_tol = PIVOT_TOL;
-        let at_lb = lb_j.is_finite()
-            && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
-        let at_ub = ub_j.is_finite()
-            && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+        let at_lb =
+            lb_j.is_finite() && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
+        let at_ub =
+            ub_j.is_finite() && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -rc)
         } else if at_ub && !at_lb {

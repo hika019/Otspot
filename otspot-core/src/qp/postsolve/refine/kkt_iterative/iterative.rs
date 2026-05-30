@@ -73,9 +73,9 @@ pub(crate) fn refine_kkt_iterative(
                 &result.dual_solution,
                 &result.bound_duals,
             );
-            let post_cleanup_kkt =
-                run_dual_recovery_postprocess(problem, &view, result, deadline);
-            if post_cleanup_kkt + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
+            let post_cleanup_kkt = run_dual_recovery_postprocess(problem, &view, result, deadline);
+            if post_cleanup_kkt
+                + dual_recovery_progress_tol(pre_cleanup_kkt, post_cleanup_kkt, target_pf)
                 < pre_cleanup_kkt
             {
                 outer_made_progress = true;

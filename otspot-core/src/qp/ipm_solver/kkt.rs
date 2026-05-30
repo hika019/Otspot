@@ -1,8 +1,8 @@
 //! 元空間 KKT 残差 (bench compute_dfeas_orig と同形・成分相対化)。
 
+use super::outcome::ProblemView;
 use crate::qp::kkt_resid::{self, dd_impl};
 use crate::tolerances::{any_nonfinite, FX_TOL};
-use super::outcome::ProblemView;
 
 /// 成分相対化 stationarity max_j |r_j|/(1+|Qx_j|+|c_j|+|Aᵀy_j|+|z_j|) を DD 精度で計算。
 /// FX (lb≈ub) は postsolve 慣例で除外。
@@ -32,18 +32,14 @@ pub fn kkt_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> 
             continue;
         }
         if use_elim_mask && prob.eliminated_cols[j] {
-            let a_empty = j >= a_col_count
-                || prob.a.col_ptr[j + 1] == prob.a.col_ptr[j];
-            let q_empty = j >= q_col_count
-                || prob.q.col_ptr[j + 1] == prob.q.col_ptr[j];
+            let a_empty = j >= a_col_count || prob.a.col_ptr[j + 1] == prob.a.col_ptr[j];
+            let q_empty = j >= q_col_count || prob.q.col_ptr[j + 1] == prob.q.col_ptr[j];
             if a_empty && q_empty {
                 continue;
             }
         }
-        let r_dd = qx_dd[j]
-            + TwoFloat::from(prob.c[j])
-            + aty_dd[j]
-            + TwoFloat::from(bound_contrib[j]);
+        let r_dd =
+            qx_dd[j] + TwoFloat::from(prob.c[j]) + aty_dd[j] + TwoFloat::from(bound_contrib[j]);
         let r = f64::from(r_dd).abs();
         let qx_j = f64::from(qx_dd[j]).abs();
         let aty_j = f64::from(aty_dd[j]).abs();
@@ -92,12 +88,7 @@ pub fn primal_residual_rel(prob: &ProblemView, x: &[f64]) -> f64 {
 ///
 /// 等式制約は y·0=0 (primal feas で担保) のためスキップ。FX (lb≈ub) は postsolve で
 /// z=0 埋めされ slack=0 にもなるため自動的に 0 寄与。
-pub fn complementarity_residual_rel(
-    prob: &ProblemView,
-    x: &[f64],
-    y: &[f64],
-    z: &[f64],
-) -> f64 {
+pub fn complementarity_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z: &[f64]) -> f64 {
     let ax_dd = dd_impl::ax(prob.a, x);
 
     let yb: f64 = y.iter().zip(prob.b.iter()).map(|(&yi, &bi)| yi * bi).sum();
@@ -128,16 +119,14 @@ pub fn complementarity_residual_rel(
         let qx = prob.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; x.len()]);
         qx.iter().zip(x.iter()).map(|(&q, &xi)| q * xi).sum()
     };
-    let scale = 1.0
-        + yb.abs()
-        + yax.abs()
-        + zx.abs()
-        + cx.abs()
-        + (0.5 * xqx).abs();
+    let scale = 1.0 + yb.abs() + yax.abs() + zx.abs() + cx.abs() + (0.5 * xqx).abs();
 
     let comp_i = dd_impl::comp_ineq_products(&ax_dd, prob.b, prob.constraint_types, y);
     let comp_b = kkt_resid::comp_bound_products(prob.bounds, x, z);
-    let max_abs = comp_i.iter().chain(comp_b.iter()).fold(0.0_f64, |a, &b| a.max(b));
+    let max_abs = comp_i
+        .iter()
+        .chain(comp_b.iter())
+        .fold(0.0_f64, |a, &b| a.max(b));
 
     max_abs / scale
 }
@@ -151,8 +140,16 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
     }
     let mut max_rel = 0.0_f64;
     for (&xi, &(lb, ub)) in x.iter().zip(bounds.iter()) {
-        let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-        let hi = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+        let lo = if lb.is_finite() {
+            (lb - xi).max(0.0)
+        } else {
+            0.0
+        };
+        let hi = if ub.is_finite() {
+            (xi - ub).max(0.0)
+        } else {
+            0.0
+        };
         let v = lo.max(hi);
         let bnd = if lb.is_finite() && ub.is_finite() {
             lb.abs().max(ub.abs())
@@ -175,29 +172,53 @@ pub fn bound_violation(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sparse::CscMatrix;
     use crate::problem::ConstraintType;
+    use crate::sparse::CscMatrix;
 
     fn build_view<'a>(
-        q: &'a CscMatrix, a: &'a CscMatrix, c: &'a [f64], b: &'a [f64],
-        bounds: &'a [(f64, f64)], cts: &'a [ConstraintType],
+        q: &'a CscMatrix,
+        a: &'a CscMatrix,
+        c: &'a [f64],
+        b: &'a [f64],
+        bounds: &'a [(f64, f64)],
+        cts: &'a [ConstraintType],
     ) -> ProblemView<'a> {
-        ProblemView { q, a, c, b, bounds, constraint_types: cts, eliminated_cols: &[] }
+        ProblemView {
+            q,
+            a,
+            c,
+            b,
+            bounds,
+            constraint_types: cts,
+            eliminated_cols: &[],
+        }
     }
 
     fn build_view_with_mask<'a>(
-        q: &'a CscMatrix, a: &'a CscMatrix, c: &'a [f64], b: &'a [f64],
-        bounds: &'a [(f64, f64)], cts: &'a [ConstraintType], mask: &'a [bool],
+        q: &'a CscMatrix,
+        a: &'a CscMatrix,
+        c: &'a [f64],
+        b: &'a [f64],
+        bounds: &'a [(f64, f64)],
+        cts: &'a [ConstraintType],
+        mask: &'a [bool],
     ) -> ProblemView<'a> {
-        ProblemView { q, a, c, b, bounds, constraint_types: cts, eliminated_cols: mask }
+        ProblemView {
+            q,
+            a,
+            c,
+            b,
+            bounds,
+            constraint_types: cts,
+            eliminated_cols: mask,
+        }
     }
 
     /// f64 で消える 1.0 residual を DD が拾うこと。
     #[test]
     fn kkt_residual_rel_uses_dd_to_avoid_f64_cancellation() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 2], &[0, 0, 0], &[1.0_f64, 1.0e16, -1.0e16], 3, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 0, 0], &[1.0_f64, 1.0e16, -1.0e16], 3, 1)
+            .unwrap();
         let q = CscMatrix::new(1, 1);
         let c = vec![0.0_f64];
         let b = vec![0.0_f64; 3];
@@ -218,9 +239,8 @@ mod tests {
 
     #[test]
     fn primal_residual_rel_uses_dd_to_avoid_f64_cancellation() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 0], &[0, 1, 2], &[1.0_f64, 1.0e16, -1.0e16], 1, 3,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0_f64, 1.0e16, -1.0e16], 1, 3)
+            .unwrap();
         let q = CscMatrix::new(3, 3);
         let c = vec![0.0_f64; 3];
         let b = vec![0.0_f64];
@@ -244,9 +264,7 @@ mod tests {
         let q = CscMatrix::new(3, 3);
         // 列 1 を LP-style 完全孤立 (A 空 / Q 空) にするため A の非零は col 2 に置く。
         let c = vec![1e10_f64, 1e10, 0.0];
-        let a = CscMatrix::from_triplets(
-            &[0], &[2], &[1.0], 1, 3,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[2], &[1.0], 1, 3).unwrap();
         let b = vec![0.0];
         let bounds = vec![(1.0, 1.0), (0.0, f64::INFINITY), (0.0, f64::INFINITY)];
         let cts = vec![ConstraintType::Eq];
@@ -326,17 +344,17 @@ mod tests {
 
         // mask 空 → effc242 経路と同等に skip されないことを base line として確認。
         let view_no_mask = build_view(&q, &a, &c, &b, &bounds, &cts);
-        let r_no_mask = kkt_residual_rel(
-            &view_no_mask, &[0.0_f64], &[0.0_f64], &[],
+        let r_no_mask = kkt_residual_rel(&view_no_mask, &[0.0_f64], &[0.0_f64], &[]);
+        assert!(
+            r_no_mask > 0.4,
+            "mask 空 base line で r が露出 (got {:.3e})",
+            r_no_mask
         );
-        assert!(r_no_mask > 0.4, "mask 空 base line で r が露出 (got {:.3e})", r_no_mask);
 
         // 同 fixture を mask=true で覆っても Path B narrow なら A 非空のため skip されず r 露出。
         let mask = vec![true];
         let view_masked = build_view_with_mask(&q, &a, &c, &b, &bounds, &cts, &mask);
-        let r_masked = kkt_residual_rel(
-            &view_masked, &[0.0_f64], &[0.0_f64], &[],
-        );
+        let r_masked = kkt_residual_rel(&view_masked, &[0.0_f64], &[0.0_f64], &[]);
         assert!(
             (r_masked - r_no_mask).abs() < 1e-15,
             "Path B: 26 eliminated 群は mask 有無で同値、effc242 (Q 条件なし) なら r_masked=0 で乖離 (no_mask={:.3e}, masked={:.3e})",
@@ -352,7 +370,10 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64)];
         let x = vec![f64::NAN];
         let v = bound_violation(&bounds, &x);
-        assert!(v.is_infinite() && v > 0.0, "NaN x must give +INFINITY, got {v}");
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "NaN x must give +INFINITY, got {v}"
+        );
     }
 
     /// mask 未供給 (= IPM 経路) の場合: A 空 / Q 非空 の linear-only var は skip されず
@@ -375,6 +396,10 @@ mod tests {
         let y: Vec<f64> = vec![];
         let z = vec![0.0_f64, 0.0]; // [z_lb, z_ub] 両方 0
         let r = kkt_residual_rel(&view, &x, &y, &z);
-        assert!(r > 0.5, "linear-only var の stationarity が露出するべき (got rel={:.3e})", r);
+        assert!(
+            r > 0.5,
+            "linear-only var の stationarity が露出するべき (got rel={:.3e})",
+            r
+        );
     }
 }

@@ -14,7 +14,10 @@ pub(super) struct TokenStream {
 }
 
 enum TsInner {
-    Mem { tokens: Vec<String>, pos: usize },
+    Mem {
+        tokens: Vec<String>,
+        pos: usize,
+    },
     Stream {
         reader: Box<dyn BufRead>,
         pending: VecDeque<String>,
@@ -32,12 +35,18 @@ impl TokenStream {
             if trimmed.starts_with('%') || trimmed.starts_with('!') {
                 continue;
             }
-            let effective = if let Some(idx) = line.find('#') { &line[..idx] } else { line };
+            let effective = if let Some(idx) = line.find('#') {
+                &line[..idx]
+            } else {
+                line
+            };
             for token in effective.split_whitespace() {
                 tokens.push(token.to_string());
             }
         }
-        TokenStream { inner: TsInner::Mem { tokens, pos: 0 } }
+        TokenStream {
+            inner: TsInner::Mem { tokens, pos: 0 },
+        }
     }
 
     pub(super) fn from_reader<R: BufRead + 'static>(reader: R) -> Self {
@@ -63,7 +72,12 @@ impl TokenStream {
                     None
                 }
             }
-            TsInner::Stream { reader, pending, line_buf, io_err } => loop {
+            TsInner::Stream {
+                reader,
+                pending,
+                line_buf,
+                io_err,
+            } => loop {
                 if io_err.is_some() {
                     return None;
                 }
@@ -107,9 +121,12 @@ impl TokenStream {
     pub(super) fn read_string(&mut self) -> Result<String, QplibError> {
         match self.next_token() {
             Some(t) => Ok(t),
-            None => Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
-                QplibError::ParseError("unexpected end of file (expected string)".to_string())
-            })),
+            None => Err(self
+                .take_io_err()
+                .map(QplibError::IoError)
+                .unwrap_or_else(|| {
+                    QplibError::ParseError("unexpected end of file (expected string)".to_string())
+                })),
         }
     }
 
@@ -117,11 +134,14 @@ impl TokenStream {
         let t = match self.next_token() {
             Some(t) => t,
             None => {
-                return Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
-                    QplibError::ParseError(
-                        "unexpected end of file (expected integer)".to_string(),
-                    )
-                }))
+                return Err(self
+                    .take_io_err()
+                    .map(QplibError::IoError)
+                    .unwrap_or_else(|| {
+                        QplibError::ParseError(
+                            "unexpected end of file (expected integer)".to_string(),
+                        )
+                    }))
             }
         };
         if let Ok(u) = t.parse::<usize>() {
@@ -129,7 +149,10 @@ impl TokenStream {
         } else if let Ok(f) = t.parse::<f64>() {
             Ok(f as usize)
         } else {
-            Err(QplibError::ParseError(format!("expected integer, got '{}'", t)))
+            Err(QplibError::ParseError(format!(
+                "expected integer, got '{}'",
+                t
+            )))
         }
     }
 
@@ -137,11 +160,14 @@ impl TokenStream {
         let t = match self.next_token() {
             Some(t) => t,
             None => {
-                return Err(self.take_io_err().map(QplibError::IoError).unwrap_or_else(|| {
-                    QplibError::ParseError(
-                        "unexpected end of file (expected float)".to_string(),
-                    )
-                }))
+                return Err(self
+                    .take_io_err()
+                    .map(QplibError::IoError)
+                    .unwrap_or_else(|| {
+                        QplibError::ParseError(
+                            "unexpected end of file (expected float)".to_string(),
+                        )
+                    }))
             }
         };
         t.parse::<f64>()

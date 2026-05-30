@@ -82,17 +82,11 @@ pub(super) fn build_result(
         }
     }
 
-    let mut reduced = match QpProblem::new(
-        q_new,
-        c_new,
-        a_new,
-        b_new,
-        bounds_new,
-        constraint_types_new,
-    ) {
-        Ok(p) => p,
-        Err(_) => return QpPresolveResult::no_reduction(prob),
-    };
+    let mut reduced =
+        match QpProblem::new(q_new, c_new, a_new, b_new, bounds_new, constraint_types_new) {
+            Ok(p) => p,
+            Err(_) => return QpPresolveResult::no_reduction(prob),
+        };
 
     let detected_diagonal_q = is_diagonal_q(&reduced.q, n_new);
     let detected_block_components = count_block_components(&reduced.q, &reduced.a, n_new);
@@ -243,7 +237,14 @@ fn maybe_apply_ruiz(
         &reduced.b,
         &reduced.bounds,
     );
-    match QpProblem::new(q_s, c_s, a_s, b_s, bounds_s, reduced.constraint_types.clone()) {
+    match QpProblem::new(
+        q_s,
+        c_s,
+        a_s,
+        b_s,
+        bounds_s,
+        reduced.constraint_types.clone(),
+    ) {
         Ok(p) => {
             *reduced = p;
             Some(scaler)

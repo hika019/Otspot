@@ -10,8 +10,8 @@
 
 use otspot::options::SolverOptions;
 use otspot::problem::ConstraintType;
-use otspot::qp::QpProblem;
 use otspot::qp::solve_qp_with;
+use otspot::qp::QpProblem;
 use otspot::sparse::CscMatrix;
 
 #[cfg(target_os = "macos")]
@@ -38,7 +38,12 @@ fn current_rss_bytes() -> usize {
     for line in status.lines() {
         if let Some(v) = line.strip_prefix("VmRSS:") {
             let v = v.trim();
-            let kb = v.split_whitespace().next().unwrap_or("0").parse::<usize>().unwrap_or(0);
+            let kb = v
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse::<usize>()
+                .unwrap_or(0);
             return kb * 1024;
         }
     }
@@ -117,7 +122,9 @@ fn ipm_repeated_solve_no_runaway_memory_growth() {
     assert!(
         growth_mb < MAX_ALLOWED_GROWTH_MB,
         "Memory leak suspected: RSS grew {:.1} MB over {} solves (limit {:.1} MB)",
-        growth_mb, ITERATIONS, MAX_ALLOWED_GROWTH_MB
+        growth_mb,
+        ITERATIONS,
+        MAX_ALLOWED_GROWTH_MB
     );
 }
 
@@ -129,11 +136,11 @@ fn ipm_repeated_solve_no_runaway_memory_growth() {
 /// memory_budget 4 GiB 以下で進む。
 #[test]
 fn lasso_dense_aat_no_runaway_memory() {
-    use otspot::sparse::CscMatrix;
-    use otspot::qp::QpProblem;
-    use otspot::qp::solve_qp_with;
     use otspot::options::SolverOptions;
     use otspot::problem::ConstraintType;
+    use otspot::qp::solve_qp_with;
+    use otspot::qp::QpProblem;
+    use otspot::sparse::CscMatrix;
     let n = 300;
     let m = 400;
     // A 密 (col_density=m): LASSO 風に各列で全行を埋める。
@@ -152,9 +159,13 @@ fn lasso_dense_aat_no_runaway_memory() {
         &(0..n).collect::<Vec<_>>(),
         &(0..n).collect::<Vec<_>>(),
         &vec![1.0_f64; n],
-        n, n,
-    ).unwrap();
-    let c: Vec<f64> = (0..n).map(|j| ((j as f64) - n as f64 / 2.0) * 0.01).collect();
+        n,
+        n,
+    )
+    .unwrap();
+    let c: Vec<f64> = (0..n)
+        .map(|j| ((j as f64) - n as f64 / 2.0) * 0.01)
+        .collect();
     let b: Vec<f64> = (0..m).map(|i| 1.0 + (i as f64) * 0.001).collect();
     let bounds = vec![(0.0_f64, 100.0_f64); n];
     let cts = vec![ConstraintType::Le; m];
@@ -184,6 +195,7 @@ fn lasso_dense_aat_no_runaway_memory() {
     assert!(
         growth_mb < MAX_GROWTH_MB,
         "AAT build memory regression: RSS grew {:.1} MB on dense-A QP (limit {:.1} MB)",
-        growth_mb, MAX_GROWTH_MB
+        growth_mb,
+        MAX_GROWTH_MB
     );
 }

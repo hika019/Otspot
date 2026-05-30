@@ -126,10 +126,7 @@ pub(crate) fn widest_splittable_integer(
 /// Bisect integer variable `j`'s box into two non-empty integer subranges:
 /// down `[lb, mid]`, up `[mid + 1, ub]`, where `mid = floor((lb + ub) / 2)`
 /// clamped so both children are non-empty. Caller must ensure `ub - lb >= 1`.
-pub(crate) fn split_integer_box(
-    bounds: &[(f64, f64)],
-    j: usize,
-) -> (VarBounds, VarBounds) {
+pub(crate) fn split_integer_box(bounds: &[(f64, f64)], j: usize) -> (VarBounds, VarBounds) {
     let (lb, ub) = bounds[j];
     let mid = (0.5 * (lb + ub)).floor().max(lb).min(ub - 1.0);
     let mut down = bounds.to_vec();
@@ -172,8 +169,9 @@ mod tests {
     fn select_picks_most_fractional_then_lowest_index() {
         // var0 frac 0.2, var1 frac 0.5, var2 frac 0.5 → tie var1/var2 → var1 (lower idx)
         let x = vec![1.2, 1.5, 2.5];
-        let j = select_branching_variable(&x, &[true, true, true], 1e-6, MipBranching::MostFractional)
-            .unwrap();
+        let j =
+            select_branching_variable(&x, &[true, true, true], 1e-6, MipBranching::MostFractional)
+                .unwrap();
         assert_eq!(j, 1);
     }
 
@@ -181,18 +179,22 @@ mod tests {
     fn select_skips_continuous_and_integral_vars() {
         // var0 continuous (frac 0.5 but not integer-constrained), var1 integral, var2 frac 0.4
         let x = vec![0.5, 3.0, 2.4];
-        let j = select_branching_variable(&x, &[false, true, true], 1e-6, MipBranching::MostFractional)
-            .unwrap();
+        let j =
+            select_branching_variable(&x, &[false, true, true], 1e-6, MipBranching::MostFractional)
+                .unwrap();
         assert_eq!(j, 2);
     }
 
     #[test]
     fn select_returns_none_when_all_integral() {
         let x = vec![1.0, 2.0, 3.0];
-        assert!(
-            select_branching_variable(&x, &[true, true, true], 1e-6, MipBranching::MostFractional)
-                .is_none()
-        );
+        assert!(select_branching_variable(
+            &x,
+            &[true, true, true],
+            1e-6,
+            MipBranching::MostFractional
+        )
+        .is_none());
     }
 
     #[test]
@@ -201,7 +203,7 @@ mod tests {
         let (down, up) = branch_bounds(&parent, 0, 2.4);
         assert_eq!(down[0], (0.0, 2.0)); // x0 <= floor(2.4) = 2
         assert_eq!(up[0], (3.0, 5.0)); // x0 >= ceil(2.4) = 3
-        // untouched var preserved
+                                       // untouched var preserved
         assert_eq!(down[1], (0.0, 5.0));
         assert_eq!(up[1], (0.0, 5.0));
     }
@@ -219,7 +221,10 @@ mod tests {
     fn widest_splittable_integer_picks_widest_nonsingleton() {
         // var0 width 1 (splittable), var1 singleton (skip), var2 width 4 (widest)
         let bounds = vec![(0.0, 1.0), (3.0, 3.0), (0.0, 4.0)];
-        assert_eq!(widest_splittable_integer(&bounds, &[true, true, true]), Some(2));
+        assert_eq!(
+            widest_splittable_integer(&bounds, &[true, true, true]),
+            Some(2)
+        );
     }
 
     #[test]

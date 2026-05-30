@@ -8,11 +8,11 @@
 //! DualAdvanced) and verify that no false-Optimal is returned. Removing the
 //! production sentinel in entry.rs would cause this test to catch regressions.
 
-use proptest::prelude::*;
 use otspot::options::{SimplexMethod, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use otspot::solve_lp_with;
 use otspot::sparse::CscMatrix;
+use proptest::prelude::*;
 
 /// Normalized primal violation: max violation / (1 + ||b||_inf).
 fn pfeas_normalized(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) -> f64 {
@@ -48,8 +48,16 @@ fn bound_viol(bounds: &[(f64, f64)], x: &[f64]) -> f64 {
         .iter()
         .zip(x.iter())
         .map(|(&(lb, ub), &xi)| {
-            let lo = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-            let hi = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+            let lo = if lb.is_finite() {
+                (lb - xi).max(0.0)
+            } else {
+                0.0
+            };
+            let hi = if ub.is_finite() {
+                (xi - ub).max(0.0)
+            } else {
+                0.0
+            };
             lo.max(hi)
         })
         .fold(0.0_f64, f64::max)
@@ -286,7 +294,11 @@ fn guard_lp_optimal_does_not_demote_clean_result() {
     .unwrap();
 
     let real_result = solve_lp_with(&lp, &SolverOptions::default());
-    assert_eq!(real_result.status, SolveStatus::Optimal, "pre-guard solve failed");
+    assert_eq!(
+        real_result.status,
+        SolveStatus::Optimal,
+        "pre-guard solve failed"
+    );
 
     // Route through production guard: must remain Optimal.
     let guarded = otspot::apply_lp_primal_guard(real_result, &lp);

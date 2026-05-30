@@ -30,9 +30,9 @@ pub(crate) fn refit_bound_duals_kkt(
         for col in 0..n {
             for k in problem.a.col_ptr[col]..problem.a.col_ptr[col + 1] {
                 acc[col] += TwoFloat::new_mul(
-                        problem.a.values[k],
-                        result.dual_solution[problem.a.row_ind[k]],
-                    );
+                    problem.a.values[k],
+                    result.dual_solution[problem.a.row_ind[k]],
+                );
             }
         }
         acc.iter().map(|&v| f64::from(v)).collect()
@@ -120,4 +120,3 @@ pub(crate) fn refit_bound_duals_kkt(
     }
     result.bound_duals = accepted_bd;
 }
-

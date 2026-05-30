@@ -88,9 +88,14 @@ fn build_deletable_workload(n_deletable: usize, m_remain: usize) -> LpProblem {
     let bounds = vec![(0.0_f64, f64::INFINITY); n_total];
 
     LpProblem::new_general(
-        c, a, b, cts, bounds,
+        c,
+        a,
+        b,
+        cts,
+        bounds,
         Some(format!("cleanup_workload_N{}_M{}", n_deletable, m_remain)),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 /// 共通 assert: presolve ON で解き、timing_breakdown.postsolve_us と全体時間を
@@ -102,7 +107,10 @@ fn assert_cleanup_under_budget(lp: &LpProblem, budget_secs: f64, label: &str) {
 
     let r = solve_with(lp, &opts);
 
-    let pp_us = r.timing_breakdown.map(|t| t.postsolve_us).unwrap_or(u64::MAX);
+    let pp_us = r
+        .timing_breakdown
+        .map(|t| t.postsolve_us)
+        .unwrap_or(u64::MAX);
     let solve_us = r.timing_breakdown.map(|t| t.solve_us).unwrap_or(0);
     let pre_us = r.timing_breakdown.map(|t| t.presolve_us).unwrap_or(0);
     eprintln!(
@@ -110,7 +118,13 @@ fn assert_cleanup_under_budget(lp: &LpProblem, budget_secs: f64, label: &str) {
         label, r.status, r.objective, pre_us, solve_us, pp_us
     );
 
-    assert_eq!(r.status, SolveStatus::Optimal, "[{}] status={:?}", label, r.status);
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "[{}] status={:?}",
+        label,
+        r.status
+    );
 
     // postsolve_us が budget の 80% を超えたら deadline 継承が破綻している可能性。
     // 80% threshold は固定 (mini test の polynomial 性質を考えると 1 秒 budget で
@@ -119,7 +133,9 @@ fn assert_cleanup_under_budget(lp: &LpProblem, budget_secs: f64, label: &str) {
     assert!(
         pp_secs < budget_secs * 0.8,
         "[{}] postsolve {:.3}s exceeds 80% of {:.3}s budget — cleanup LP deadline 退行?",
-        label, pp_secs, budget_secs
+        label,
+        pp_secs,
+        budget_secs
     );
 }
 

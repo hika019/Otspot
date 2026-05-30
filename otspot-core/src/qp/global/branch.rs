@@ -111,10 +111,7 @@ mod tests {
 
     #[test]
     fn skips_infinite_bounds() {
-        let n = BBNode::root(
-            vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, 1.0)],
-            0.0,
-        );
+        let n = BBNode::root(vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, 1.0)], 0.0);
         let x = vec![0.0, 0.9];
         let j = select_branching_variable(&n, &x).expect("should branch");
         assert_eq!(j, 1, "infinite-bound var skipped");

@@ -76,14 +76,8 @@ fn test_ippmm_unconstrained() {
 fn test_ippmm_equality_constraint() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[1.0, 1.0, -1.0, -1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+        .unwrap();
     let b = vec![1.0, -1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -113,7 +107,6 @@ fn test_ippmm_box_constrained() {
     close(result.solution[1], 1.0, "IPPMM-T4: x[1]");
     close(result.objective, -6.0, "IPPMM-T4: objective");
 }
-
 
 /// IPPMM-T5: タイムアウト動作確認
 #[test]
@@ -158,7 +151,10 @@ fn test_ippmm_eq_convergence_check() {
     };
     let start = std::time::Instant::now();
     let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
-    assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+    assert!(
+        start.elapsed().as_secs_f64() < 6.0,
+        "Test exceeded 6 second wall-clock limit"
+    );
     assert_eq!(result.status, SolveStatus::Optimal, "conv-eq: status");
     close(result.solution[0], 0.5, "conv-eq: x[0]");
     close(result.solution[1], 0.5, "conv-eq: x[1]");
@@ -182,7 +178,10 @@ fn test_ippmm_le_convergence_check() {
     };
     let start = std::time::Instant::now();
     let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
-    assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+    assert!(
+        start.elapsed().as_secs_f64() < 6.0,
+        "Test exceeded 6 second wall-clock limit"
+    );
     assert_eq!(result.status, SolveStatus::Optimal, "conv-le: status");
     close(result.solution[0], 0.5, "conv-le: x[0]");
     close(result.solution[1], 0.5, "conv-le: x[1]");
@@ -206,7 +205,10 @@ fn test_ippmm_ge_defensive() {
     };
     let start = std::time::Instant::now();
     let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
-    assert!(start.elapsed().as_secs_f64() < 6.0, "Test exceeded 6 second wall-clock limit");
+    assert!(
+        start.elapsed().as_secs_f64() < 6.0,
+        "Test exceeded 6 second wall-clock limit"
+    );
     assert_eq!(result.status, SolveStatus::Optimal, "ge-defensive: status");
     close(result.solution[0], 0.5, "ge-defensive: x[0]");
     close(result.solution[1], 0.5, "ge-defensive: x[1]");
@@ -229,7 +231,11 @@ fn test_ippmm_empty_constraints() {
         ..Default::default()
     };
     let result = solve_ippmm_inner(&problem, &opts, opts.ipm_eps());
-    assert_eq!(result.status, SolveStatus::Optimal, "empty-constraints: status");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "empty-constraints: status"
+    );
     close(result.solution[0], 1.0, "empty-constraints: x[0]");
     close(result.solution[1], 1.0, "empty-constraints: x[1]");
 }
@@ -240,15 +246,19 @@ fn test_ippmm_empty_constraints() {
 fn test_ippmm_multiple_equality_constraints() {
     let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
     let c = vec![0.0, 0.0, 0.0];
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 1, 2],
-        &[1.0, 1.0, 1.0, 1.0],
-        2, 3,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+        .unwrap();
     let b = vec![1.0, 1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
-    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq, ConstraintType::Eq]).unwrap();
+    let problem = QpProblem::new(
+        q,
+        c,
+        a,
+        b,
+        bounds,
+        vec![ConstraintType::Eq, ConstraintType::Eq],
+    )
+    .unwrap();
 
     let opts = SolverOptions {
         timeout_secs: Some(5.0),
@@ -287,7 +297,9 @@ fn test_warm_bound_margin_scale_tracking() {
         assert!(
             ((got - expected) / denom).abs() < 1e-12,
             "warm_bound_margin({}) = {:.6e}, expected {:.6e} (旧 ABS=1.0 fixed retention 疑い)",
-            b, got, expected,
+            b,
+            got,
+            expected,
         );
     }
     // |b|=1 で margin が old=1.0 から大きく縮小していることを明示。
@@ -317,16 +329,21 @@ fn test_warm_start_half_finite_bound_scale_tracking() {
     // multi-pattern: 各 |lb| scale × xj 位置パターンを cover。
     let cases: [(f64, f64, f64, &str); 5] = [
         // |lb|=1: 旧 margin=1.0 では 0.5 → 1.0 に過剰押込み。新 margin≈1e-6 で warm 尊重。
-        (1.0,    1.5, 1.5,                          "|lb|=1 well-interior"),
+        (1.0, 1.5, 1.5, "|lb|=1 well-interior"),
         // |lb|=0: 旧 margin=1.0 では 0.1 → 1.0。新 margin=REL で 0.1 尊重。
-        (0.0,    0.1, 0.1,                          "|lb|=0 small warm"),
+        (0.0, 0.1, 0.1, "|lb|=0 small warm"),
         // |lb|=10: 旧 margin=1.0 では 10.1 → 11.0。新 margin=REL*10=1e-5 で 10.1 尊重。
-        (10.0,   10.1, 10.1,                        "|lb|=10 close warm"),
+        (10.0, 10.1, 10.1, "|lb|=10 close warm"),
         // |lb|=1e8: 旧 margin=1.0 では 1e8+0.5 → 1e8+1.0、足りない。新 margin=100 で push 必要。
-        (1e8,    1e8 + 50.0, 1e8 + 100.0,           "|lb|=1e8 needs scaled push"),
+        (1e8, 1e8 + 50.0, 1e8 + 100.0, "|lb|=1e8 needs scaled push"),
         // |lb|=1e6: 旧 margin=1.0, 新 margin=1.0 (たまたま一致) なので push 量同じ。境界 case。
         // ただし xj=0.999e6 (lb 未満) は旧 margin=1.0 → 1e6+1、新も同。
-        (1e6,    0.999e6, 1e6 + 1.0,                "|lb|=1e6 below bound floors at lb+margin"),
+        (
+            1e6,
+            0.999e6,
+            1e6 + 1.0,
+            "|lb|=1e6 below bound floors at lb+margin",
+        ),
     ];
     for (lb, xj, expected, name) in cases {
         let problem = build_single_var_lb_problem(lb);
@@ -334,7 +351,11 @@ fn test_warm_start_half_finite_bound_scale_tracking() {
         assert!(
             (x_out - expected).abs() < 1e-9 * expected.abs().max(1.0),
             "{}: x={:.6e}, expected {:.6e} (lb={:.1e}, xj_warm={:.6e})",
-            name, x_out, expected, lb, xj,
+            name,
+            x_out,
+            expected,
+            lb,
+            xj,
         );
     }
 }
@@ -362,7 +383,10 @@ fn test_warm_start_both_finite_bound_scale_tracking() {
         let problem = build_single_var_box_problem(0.0, 1e6);
         // 内部 well-interior: warm が範囲内なら維持。
         let x_out = apply_warm_and_extract_x(&problem, 5e5);
-        assert!((x_out - 5e5).abs() < 1e-6, "mid-range box well-interior 維持");
+        assert!(
+            (x_out - 5e5).abs() < 1e-6,
+            "mid-range box well-interior 維持"
+        );
     }
     // 小 range: [0, 1], range=1。旧 margin=min(1e-6, 1.0)=1e-6、新 margin=1e-6。一致。
     {
@@ -377,7 +401,10 @@ fn test_warm_start_both_finite_bound_scale_tracking() {
     {
         let problem = build_single_var_box_problem(3.0, 3.0);
         let x_out = apply_warm_and_extract_x(&problem, 100.0);
-        assert!((x_out - 3.0).abs() < 1e-12, "collapsed box (lb=ub): midpoint=lb=ub");
+        assert!(
+            (x_out - 3.0).abs() < 1e-12,
+            "collapsed box (lb=ub): midpoint=lb=ub"
+        );
     }
 }
 
@@ -406,12 +433,8 @@ fn build_single_var_box_problem(lb: f64, ub: f64) -> QpProblem {
 fn test_box_only_nondiag_q_stall_reproducer() {
     use crate::qp::solve_qp_with;
     // Q full-symmetric: both triangles
-    let q = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[2.0, 1.0, 1.0, 2.0],
-        2, 2,
-    ).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
     let c = vec![-6.0, -6.0];
     let a = CscMatrix::new(0, 2);
     let b = vec![];
@@ -419,28 +442,68 @@ fn test_box_only_nondiag_q_stall_reproducer() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
     // Test both with and without Ruiz scaling
     for use_ruiz in [false, true] {
-        let opts = SolverOptions { use_ruiz_scaling: use_ruiz, timeout_secs: Some(10.0), ..Default::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: use_ruiz,
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        };
         let result = solve_qp_with(&problem, &opts);
-        eprintln!("ruiz={} STATUS={:?} x={:?} obj={:.6} iters={}", use_ruiz, result.status, result.solution, result.objective, result.iterations);
+        eprintln!(
+            "ruiz={} STATUS={:?} x={:?} obj={:.6} iters={}",
+            use_ruiz, result.status, result.solution, result.objective, result.iterations
+        );
         if let Some((pf, df, mu)) = result.final_residuals {
             eprintln!("RESID pf={:.3e} df={:.3e} mu={:.3e}", pf, df, mu);
         }
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "ruiz={} expected Optimal, got {:?}", use_ruiz, result.status);
-        assert!((result.solution[0] - 2.0).abs() < 0.1,
-            "ruiz={} x[0]={:.4}", use_ruiz, result.solution[0]);
-        assert!((result.solution[1] - 2.0).abs() < 0.1,
-            "ruiz={} x[1]={:.4}", use_ruiz, result.solution[1]);
-        assert!((result.objective - (-12.0)).abs() < 0.5,
-            "ruiz={} obj={:.4}", use_ruiz, result.objective);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "ruiz={} expected Optimal, got {:?}",
+            use_ruiz,
+            result.status
+        );
+        assert!(
+            (result.solution[0] - 2.0).abs() < 0.1,
+            "ruiz={} x[0]={:.4}",
+            use_ruiz,
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 2.0).abs() < 0.1,
+            "ruiz={} x[1]={:.4}",
+            use_ruiz,
+            result.solution[1]
+        );
+        assert!(
+            (result.objective - (-12.0)).abs() < 0.5,
+            "ruiz={} obj={:.4}",
+            use_ruiz,
+            result.objective
+        );
     }
     // Also test via inner solver directly (no Ruiz)
     let opts_inner = default_opts();
-    let q2 = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2).unwrap();
-    let problem2 = QpProblem::new_all_le(q2, vec![-6.0, -6.0], CscMatrix::new(0,2), vec![], vec![(0.0_f64,4.0_f64);2]).unwrap();
+    let q2 = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
+    let problem2 = QpProblem::new_all_le(
+        q2,
+        vec![-6.0, -6.0],
+        CscMatrix::new(0, 2),
+        vec![],
+        vec![(0.0_f64, 4.0_f64); 2],
+    )
+    .unwrap();
     let r2 = solve_ippmm_inner(&problem2, &opts_inner, opts_inner.ipm_eps());
-    eprintln!("inner STATUS={:?} x={:?} obj={:.6}", r2.status, r2.solution, r2.objective);
-    assert_eq!(r2.status, SolveStatus::Optimal, "inner: expected Optimal, got {:?}", r2.status);
+    eprintln!(
+        "inner STATUS={:?} x={:?} obj={:.6}",
+        r2.status, r2.solution, r2.objective
+    );
+    assert_eq!(
+        r2.status,
+        SolveStatus::Optimal,
+        "inner: expected Optimal, got {:?}",
+        r2.status
+    );
 }
 
 /// PEU AND-gate sentinel: OR→AND change is load-bearing for box-only non-diagonal Q stall.
@@ -463,36 +526,46 @@ fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
     // Pattern 3: min 2x²+xy+2y²-4x-4y on [0,3]² → KKT: 4x+y=4, x+4y=4 → 15x=12 → x=y=4/5=0.8
     //            obj = 2*(0.64)+0.64+2*(0.64)-4*0.8-4*0.8 = 2.56-6.4 = ... let me recompute.
     //            obj = 2(0.64)+0.8*0.8+2(0.64) - 4*0.8 - 4*0.8 = 1.28+0.64+1.28-3.2-3.2 = -3.2
-    let cases: &[(Vec<(usize,usize,f64)>, Vec<f64>, Vec<(f64,f64)>, Vec<f64>, f64, &str)] = &[
+    let cases: &[(
+        Vec<(usize, usize, f64)>,
+        Vec<f64>,
+        Vec<(f64, f64)>,
+        Vec<f64>,
+        f64,
+        &str,
+    )] = &[
         // Q triplets (row,col,val), c, bounds, expected_x*, expected_obj, name
         (
-            vec![(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,2.0)],
-            vec![-6.0,-6.0],
-            vec![(0.0,4.0),(0.0,4.0)],
-            vec![2.0,2.0], -12.0,
+            vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 2.0)],
+            vec![-6.0, -6.0],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            vec![2.0, 2.0],
+            -12.0,
             "min x²+xy+y²-6x-6y [0,4]²",
         ),
         (
-            vec![(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,2.0)],
-            vec![-8.0,-6.0],
-            vec![(0.0,6.0),(0.0,6.0)],
+            vec![(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 2.0)],
+            vec![-8.0, -6.0],
+            vec![(0.0, 6.0), (0.0, 6.0)],
             // KKT: 2x+y=8, x+2y=6 → x=10/3, y=4/3; obj=156/9-104/3=-52/3≈-17.33
-            vec![10.0/3.0, 4.0/3.0], -52.0/3.0,
+            vec![10.0 / 3.0, 4.0 / 3.0],
+            -52.0 / 3.0,
             "min x²+xy+y²-8x-6y [0,6]²",
         ),
         (
-            vec![(0,0,4.0),(0,1,1.0),(1,0,1.0),(1,1,4.0)],
-            vec![-4.0,-4.0],
-            vec![(0.0,3.0),(0.0,3.0)],
-            vec![4.0/5.0, 4.0/5.0], -3.2,
+            vec![(0, 0, 4.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 4.0)],
+            vec![-4.0, -4.0],
+            vec![(0.0, 3.0), (0.0, 3.0)],
+            vec![4.0 / 5.0, 4.0 / 5.0],
+            -3.2,
             "min 2x²+xy+2y²-4x-4y [0,3]²",
         ),
     ];
 
     for (q_trips, c, bounds, x_star, obj_star, name) in cases {
-        let rows: Vec<usize> = q_trips.iter().map(|&(r,_,_)| r).collect();
-        let cols: Vec<usize> = q_trips.iter().map(|&(_,c,_)| c).collect();
-        let vals: Vec<f64>   = q_trips.iter().map(|&(_,_,v)| v).collect();
+        let rows: Vec<usize> = q_trips.iter().map(|&(r, _, _)| r).collect();
+        let cols: Vec<usize> = q_trips.iter().map(|&(_, c, _)| c).collect();
+        let vals: Vec<f64> = q_trips.iter().map(|&(_, _, v)| v).collect();
         let n = bounds.len();
         let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let a = CscMatrix::new(0, n);
@@ -505,14 +578,33 @@ fn test_peu_and_gate_box_only_nondiag_stall_sentinel() {
                 ..Default::default()
             };
             let result = solve_qp_with(&problem, &opts);
-            assert_eq!(result.status, SolveStatus::Optimal,
-                "{} ruiz={}: expected Optimal, got {:?}", name, use_ruiz, result.status);
+            assert_eq!(
+                result.status,
+                SolveStatus::Optimal,
+                "{} ruiz={}: expected Optimal, got {:?}",
+                name,
+                use_ruiz,
+                result.status
+            );
             for (i, &xi_star) in x_star.iter().enumerate() {
-                assert!((result.solution[i] - xi_star).abs() < 0.1,
-                    "{} ruiz={}: x[{}]={:.4} expected {:.4}", name, use_ruiz, i, result.solution[i], xi_star);
+                assert!(
+                    (result.solution[i] - xi_star).abs() < 0.1,
+                    "{} ruiz={}: x[{}]={:.4} expected {:.4}",
+                    name,
+                    use_ruiz,
+                    i,
+                    result.solution[i],
+                    xi_star
+                );
             }
-            assert!((result.objective - obj_star).abs() < 0.5,
-                "{} ruiz={}: obj={:.4} expected {:.4}", name, use_ruiz, result.objective, obj_star);
+            assert!(
+                (result.objective - obj_star).abs() < 0.5,
+                "{} ruiz={}: obj={:.4} expected {:.4}",
+                name,
+                use_ruiz,
+                result.objective,
+                obj_star
+            );
         }
     }
 }
@@ -525,21 +617,62 @@ fn test_box_only_nondiag_q_multi_pattern() {
     use crate::qp::solve_qp_with;
 
     // (Q as (rows,cols,vals), c, bounds, x_star, obj_star, name)
-    let cases: &[(&[usize], &[usize], &[f64], &[f64], &[(f64,f64)], &[f64], f64, &str)] = &[
+    let cases: &[(
+        &[usize],
+        &[usize],
+        &[f64],
+        &[f64],
+        &[(f64, f64)],
+        &[f64],
+        f64,
+        &str,
+    )] = &[
         // Diagonal Q — always worked, regression check.
-        (&[0,1], &[0,1], &[2.0,2.0], &[-4.0,-4.0], &[(0.0,5.0),(0.0,5.0)], &[2.0,2.0], -8.0,
-         "diag Q baseline"),
+        (
+            &[0, 1],
+            &[0, 1],
+            &[2.0, 2.0],
+            &[-4.0, -4.0],
+            &[(0.0, 5.0), (0.0, 5.0)],
+            &[2.0, 2.0],
+            -8.0,
+            "diag Q baseline",
+        ),
         // Off-diagonal: conditioned Q, box [0,4]²
-        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-6.0,-6.0], &[(0.0,4.0),(0.0,4.0)],
-         &[2.0,2.0], -12.0, "nondiag Q [0,4]²"),
+        (
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[2.0, 1.0, 1.0, 2.0],
+            &[-6.0, -6.0],
+            &[(0.0, 4.0), (0.0, 4.0)],
+            &[2.0, 2.0],
+            -12.0,
+            "nondiag Q [0,4]²",
+        ),
         // Off-diagonal: asymmetric c, box [0,6]²; KKT: 2x+y=8, x+2y=6 → x=10/3, y=4/3
-        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-8.0,-6.0], &[(0.0,6.0),(0.0,6.0)],
-         &[10.0/3.0,4.0/3.0], -52.0/3.0, "nondiag Q asymm-c"),
+        (
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[2.0, 1.0, 1.0, 2.0],
+            &[-8.0, -6.0],
+            &[(0.0, 6.0), (0.0, 6.0)],
+            &[10.0 / 3.0, 4.0 / 3.0],
+            -52.0 / 3.0,
+            "nondiag Q asymm-c",
+        ),
         // Off-diagonal: tight box forcing boundary solution.
         // min x²+xy+y²-6x-6y on [0,1]² → unconstrained opt (2,2) outside box
         // KKT on box corner: boundary active. At x=(1,1): Qx+c=[-3,-3], dual z=[3,3]>0. ✓
-        (&[0,0,1,1], &[0,1,0,1], &[2.0,1.0,1.0,2.0], &[-6.0,-6.0], &[(0.0,1.0),(0.0,1.0)],
-         &[1.0,1.0], -9.0, "nondiag Q tight box [0,1]²"),
+        (
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[2.0, 1.0, 1.0, 2.0],
+            &[-6.0, -6.0],
+            &[(0.0, 1.0), (0.0, 1.0)],
+            &[1.0, 1.0],
+            -9.0,
+            "nondiag Q tight box [0,1]²",
+        ),
     ];
 
     for &(rows, cols, vals, c, bounds, x_star, obj_star, name) in cases {
@@ -555,14 +688,33 @@ fn test_box_only_nondiag_q_multi_pattern() {
                 ..Default::default()
             };
             let result = solve_qp_with(&problem, &opts);
-            assert_eq!(result.status, SolveStatus::Optimal,
-                "{} ruiz={}: expected Optimal, got {:?}", name, use_ruiz, result.status);
+            assert_eq!(
+                result.status,
+                SolveStatus::Optimal,
+                "{} ruiz={}: expected Optimal, got {:?}",
+                name,
+                use_ruiz,
+                result.status
+            );
             for (i, &xi) in x_star.iter().enumerate() {
-                assert!((result.solution[i] - xi).abs() < 0.1,
-                    "{} ruiz={}: x[{}]={:.4} expected {:.4}", name, use_ruiz, i, result.solution[i], xi);
+                assert!(
+                    (result.solution[i] - xi).abs() < 0.1,
+                    "{} ruiz={}: x[{}]={:.4} expected {:.4}",
+                    name,
+                    use_ruiz,
+                    i,
+                    result.solution[i],
+                    xi
+                );
             }
-            assert!((result.objective - obj_star).abs() < 0.5,
-                "{} ruiz={}: obj={:.4} expected {:.4}", name, use_ruiz, result.objective, obj_star);
+            assert!(
+                (result.objective - obj_star).abs() < 0.5,
+                "{} ruiz={}: obj={:.4} expected {:.4}",
+                name,
+                use_ruiz,
+                result.objective,
+                obj_star
+            );
         }
     }
 }
@@ -578,8 +730,7 @@ fn apply_warm_and_extract_x(problem: &QpProblem, xj_warm: f64) -> f64 {
     let mut y = vec![0.0_f64; m_ext];
     let mut s = vec![0.0_f64; m_ext];
     let mu = apply_qp_warm_start(
-        &ws, problem, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext,
-        &mut x, &mut y, &mut s,
+        &ws, problem, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext, &mut x, &mut y, &mut s,
     );
     assert!(mu.is_some(), "apply_qp_warm_start dropped (dim mismatch?)");
     x[0]

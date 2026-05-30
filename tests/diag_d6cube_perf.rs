@@ -20,7 +20,10 @@ const D6CUBE_OBJ_REL_PROGRESS: f64 = 0.05;
 fn d6cube_no_false_infeasible_and_makes_progress() {
     let path = Path::new("data/lp_problems/d6cube.QPS");
     if !path.exists() {
-        panic!("data missing: {} — required for d6cube guard", path.display());
+        panic!(
+            "data missing: {} — required for d6cube guard",
+            path.display()
+        );
     }
     let prob = parse_qps(path).expect("parse d6cube");
     let mut opts = SolverOptions::default();
@@ -31,8 +34,7 @@ fn d6cube_no_false_infeasible_and_makes_progress() {
     let r = solve_qp_with(&prob, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
 
-    let rel_err = (r.objective - D6CUBE_KNOWN_OPT).abs()
-        / (1.0_f64).max(D6CUBE_KNOWN_OPT.abs());
+    let rel_err = (r.objective - D6CUBE_KNOWN_OPT).abs() / (1.0_f64).max(D6CUBE_KNOWN_OPT.abs());
     eprintln!(
         "d6cube: status={:?} obj={:.6e} (known {:.6e}, rel_err={:.2e}) elapsed={:.2}s iters={}",
         r.status, r.objective, D6CUBE_KNOWN_OPT, rel_err, elapsed, r.iterations
@@ -63,7 +65,10 @@ fn d6cube_no_false_infeasible_and_makes_progress() {
         rel_err < D6CUBE_OBJ_REL_PROGRESS,
         "d6cube obj rel_err={:.2e} exceeds progress bound {:.0e}; \
          obj={:.6e} vs known {:.6e}",
-        rel_err, D6CUBE_OBJ_REL_PROGRESS, r.objective, D6CUBE_KNOWN_OPT
+        rel_err,
+        D6CUBE_OBJ_REL_PROGRESS,
+        r.objective,
+        D6CUBE_KNOWN_OPT
     );
 }
 
@@ -78,13 +83,15 @@ fn d6cube_optimal_within_60s() {
     opts.timeout_secs = Some(D6CUBE_TIMEOUT_S);
 
     let r = solve_qp_with(&prob, &opts);
-    let rel_err = (r.objective - D6CUBE_KNOWN_OPT).abs()
-        / (1.0_f64).max(D6CUBE_KNOWN_OPT.abs());
+    let rel_err = (r.objective - D6CUBE_KNOWN_OPT).abs() / (1.0_f64).max(D6CUBE_KNOWN_OPT.abs());
     eprintln!(
         "d6cube: status={:?} obj={:.6e} rel_err={:.2e} iters={}",
         r.status, r.objective, rel_err, r.iterations
     );
 
-    assert!(matches!(r.status, SolveStatus::Optimal), "d6cube must reach Optimal");
+    assert!(
+        matches!(r.status, SolveStatus::Optimal),
+        "d6cube must reach Optimal"
+    );
     assert!(rel_err < 1e-4, "d6cube obj rel_err {:.2e} >= 1e-4", rel_err);
 }

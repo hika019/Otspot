@@ -31,7 +31,10 @@ fn assert_obj_close(actual: f64, expected: f64, label: &str) {
     assert!(
         rel < EPS_OBJ_REL,
         "[{}] obj actual={:.9e} expected={:.9e} rel_err={:.3e}",
-        label, actual, expected, rel
+        label,
+        actual,
+        expected,
+        rel
     );
 }
 
@@ -40,7 +43,10 @@ fn assert_x_close(actual: f64, expected: f64, label: &str) {
     assert!(
         diff < EPS_X_ABS,
         "[{}] x actual={:.9e} expected={:.9e} diff={:.3e}",
-        label, actual, expected, diff
+        label,
+        actual,
+        expected,
+        diff
     );
 }
 
@@ -67,7 +73,11 @@ fn eq1_two_free_vars_single_equality() {
     assert_obj_close(result.objective_value, 0.25, "eq1: obj");
     let dual = result.dual_solution.as_ref().expect("eq1: dual_solution");
     assert_eq!(dual.len(), 1, "eq1: dual length");
-    assert!((dual[0].abs() - 0.5).abs() < EPS_DUAL_ABS, "eq1: |y|=0.5, got {}", dual[0]);
+    assert!(
+        (dual[0].abs() - 0.5).abs() < EPS_DUAL_ABS,
+        "eq1: |y|=0.5, got {}",
+        dual[0]
+    );
 }
 
 // =============================================================================
@@ -94,12 +104,22 @@ fn eq2_hs51_cold_start_regression() {
     // Q=[[2,-2,0,0,0],[-2,4,2,0,0],[0,2,2,0,0],[0,0,0,2,0],[0,0,0,0,2]]
     // Q[i][i]=v → (v/2)*xi*xi; Q[i][j]=v (i≠j) → v*(xi*xj)
     model.minimize(
-        x1 * x1 + 2.0 * x2 * x2 + x3 * x3 + x4 * x4 + x5 * x5
-        + (-2.0) * (x1 * x2) + 2.0 * (x2 * x3)
-        + (-4.0) * x2 + (-4.0) * x3 + (-2.0) * x4 + (-2.0) * x5,
+        x1 * x1
+            + 2.0 * x2 * x2
+            + x3 * x3
+            + x4 * x4
+            + x5 * x5
+            + (-2.0) * (x1 * x2)
+            + 2.0 * (x2 * x3)
+            + (-4.0) * x2
+            + (-4.0) * x3
+            + (-2.0) * x4
+            + (-2.0) * x5,
     );
 
-    let result = model.solve().expect("eq2: cold-start solve (HS51 真因確認)");
+    let result = model
+        .solve()
+        .expect("eq2: cold-start solve (HS51 真因確認)");
     let xs = [x1, x2, x3, x4, x5];
     for (i, &v) in xs.iter().enumerate() {
         assert_x_close(result[v], 1.0, &format!("eq2: x{}=1", i + 1));
@@ -129,8 +149,12 @@ fn eq3_rank_deficient_psd_q_equality() {
     // Q = v v^T, v=[1,1,-1]: 1/2*(x1+x2-x3)^2
     // = 0.5*x1^2+0.5*x2^2+0.5*x3^2 + x1*x2 - x1*x3 - x2*x3
     model.minimize(
-        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3
-        + 1.0 * (x1 * x2) + (-1.0) * (x1 * x3) + (-1.0) * (x2 * x3),
+        0.5 * x1 * x1
+            + 0.5 * x2 * x2
+            + 0.5 * x3 * x3
+            + 1.0 * (x1 * x2)
+            + (-1.0) * (x1 * x3)
+            + (-1.0) * (x2 * x3),
     );
 
     let result = model.solve().expect("eq3: rank-1 Q + Eq の Optimal 到達");
@@ -167,6 +191,11 @@ fn eq4_equality_with_inactive_bounds() {
     assert_obj_close(result.objective_value, -2.25, "eq4: obj");
     // bound_duals: 全 bound inactive → 全要素 ≈ 0 (CLAUDE.md L20「実装を正とするな」 — 期待値で assert)
     for (k, &bd) in result.bound_duals.iter().enumerate() {
-        assert!(bd.abs() < EPS_DUAL_ABS, "eq4: bound_dual[{}]={} expected 0 (bound inactive)", k, bd);
+        assert!(
+            bd.abs() < EPS_DUAL_ABS,
+            "eq4: bound_dual[{}]={} expected 0 (bound inactive)",
+            k,
+            bd
+        );
     }
 }

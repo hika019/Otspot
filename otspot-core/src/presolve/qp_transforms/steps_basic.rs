@@ -37,14 +37,18 @@ pub(super) fn step1_fix_var(prob: &QpProblem, ws: &mut Workspace) -> Result<(), 
             }
             apply_fixed_variable(j, val, prob, ws);
             ws.removed_cols[j] = true;
-            ws.postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+            ws.postsolve_stack
+                .push(QpPostsolveStep::FixedVar { idx: j, val });
         }
     }
     Ok(())
 }
 
 /// Step 2: singleton rows — Eq fixes the variable, Le/Ge tightens bounds.
-pub(super) fn step2_singleton_row(prob: &QpProblem, ws: &mut Workspace) -> Result<(), QpPresolveResult> {
+pub(super) fn step2_singleton_row(
+    prob: &QpProblem,
+    ws: &mut Workspace,
+) -> Result<(), QpPresolveResult> {
     if skip_step(2) {
         return Ok(());
     }
@@ -73,7 +77,11 @@ pub(super) fn step2_singleton_row(prob: &QpProblem, ws: &mut Workspace) -> Resul
                 apply_fixed_variable(j, val, prob, ws);
                 ws.removed_cols[j] = true;
                 ws.removed_rows[i] = true;
-                ws.postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
+                ws.postsolve_stack.push(QpPostsolveStep::SingletonRow {
+                    row: i,
+                    col: j,
+                    val,
+                });
             }
             continue;
         }
@@ -85,7 +93,11 @@ pub(super) fn step2_singleton_row(prob: &QpProblem, ws: &mut Workspace) -> Resul
             apply_fixed_variable(j, val, prob, ws);
             ws.removed_cols[j] = true;
             ws.removed_rows[i] = true;
-            ws.postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
+            ws.postsolve_stack.push(QpPostsolveStep::SingletonRow {
+                row: i,
+                col: j,
+                val,
+            });
         }
     }
     Ok(())
@@ -114,7 +126,9 @@ pub(super) fn step3_singleton_col(
         let q_nnz_j = {
             let start = prob.q.col_ptr[j];
             let end = prob.q.col_ptr[j + 1];
-            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+            (start..end)
+                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
+                .count()
         };
         if q_nnz_j > 0 {
             continue;
@@ -152,12 +166,24 @@ pub(super) fn step3_singleton_col(
         // otherwise defer to the IPM.
         let (lb, ub) = ws.bounds[j];
         let val = if ws.c[j] > ZERO_TOL && a_ij > ZERO_TOL {
-            if lb == f64::NEG_INFINITY { 0.0 } else { lb }
+            if lb == f64::NEG_INFINITY {
+                0.0
+            } else {
+                lb
+            }
         } else if ws.c[j] < -ZERO_TOL && a_ij < -ZERO_TOL {
-            if ub == f64::INFINITY { 0.0 } else { ub }
+            if ub == f64::INFINITY {
+                0.0
+            } else {
+                ub
+            }
         } else if ws.c[j].abs() <= ZERO_TOL {
             if a_ij > ZERO_TOL {
-                if lb == f64::NEG_INFINITY { 0.0 } else { lb }
+                if lb == f64::NEG_INFINITY {
+                    0.0
+                } else {
+                    lb
+                }
             } else if ub == f64::INFINITY {
                 0.0
             } else {
@@ -169,7 +195,8 @@ pub(super) fn step3_singleton_col(
 
         apply_fixed_variable(j, val, prob, ws);
         ws.removed_cols[j] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::FixedVar { idx: j, val });
+        ws.postsolve_stack
+            .push(QpPostsolveStep::FixedVar { idx: j, val });
     }
     Ok(())
 }
@@ -225,7 +252,9 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
         let q_nnz = {
             let start = prob.q.col_ptr[j];
             let end = prob.q.col_ptr[j + 1];
-            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+            (start..end)
+                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
+                .count()
         };
         if q_nnz > 0 {
             continue;
@@ -254,7 +283,8 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
 
         ws.obj_offset += cj * val;
         ws.removed_cols[j] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::EmptyCol { idx: j, val });
+        ws.postsolve_stack
+            .push(QpPostsolveStep::EmptyCol { idx: j, val });
     }
 
     // Suppress unused QpPresolveStatus warning when step bodies are inlined.

@@ -64,7 +64,11 @@ fn plain_qp_not_rejected() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
     // quadratic_constraints is empty by default — must reach the solver normally.
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "plain QP should solve normally");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "plain QP should solve normally"
+    );
 }
 
 /// A QpProblem with a quadratic_constraints vec where every QcqpMatrix is empty

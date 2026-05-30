@@ -59,7 +59,11 @@ fn make_lp(qp: &QpProblem) -> LpProblem {
 #[ignore = "permanent ignore — LP perf regression (obj err 5.2% > 5%); fix tracked in #88/#89"]
 fn diag_osa60_must_reach_known_objective() {
     let path = Path::new("data/lp_problems/osa-60.QPS");
-    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);
+    assert!(
+        path.exists(),
+        "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path
+    );
     let qp = parse_qps(path).expect("parse osa-60");
     let lp = make_lp(&qp);
 
@@ -100,13 +104,12 @@ fn diag_osa60_must_reach_known_objective() {
     // post-remap status the bench sees (otherwise we'd report Timeout here and
     // pass while bench fails on OBJ_MISMATCH).
     let original_status = format!("{:?}", r.status);
-    let post_remap_status = if matches!(r.status, SolveStatus::Timeout)
-        && r.solution.len() == lp.num_vars
-    {
-        SolveStatus::Optimal
-    } else {
-        r.status.clone()
-    };
+    let post_remap_status =
+        if matches!(r.status, SolveStatus::Timeout) && r.solution.len() == lp.num_vars {
+            SolveStatus::Optimal
+        } else {
+            r.status.clone()
+        };
 
     const KNOWN_OBJ: f64 = 4.0440725e6;
     let rel_err = (r.objective - KNOWN_OBJ).abs() / KNOWN_OBJ.abs();
@@ -151,7 +154,11 @@ fn diag_osa60_must_reach_known_objective() {
 #[ignore = "permanent ignore — postsolve cleanup_lp deadline (wall 72s > 60s); LP perf improvement tracked in #88/#89"]
 fn diag_ken18_must_respect_internal_deadline() {
     let path = Path::new("data/lp_problems/ken-18.QPS");
-    assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path);
+    assert!(
+        path.exists(),
+        "{:?} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path
+    );
     let qp = parse_qps(path).expect("parse ken-18");
     let lp = make_lp(&qp);
 
@@ -232,7 +239,10 @@ fn diag_ken18_must_respect_internal_deadline() {
 #[test]
 fn diag_deadline_small_lp() {
     let path = Path::new("data/lp_problems/bore3d.QPS");
-    assert!(path.exists(), "data/lp_problems/bore3d.QPS missing (run scripts/download_all_bench_data.sh)");
+    assert!(
+        path.exists(),
+        "data/lp_problems/bore3d.QPS missing (run scripts/download_all_bench_data.sh)"
+    );
 
     let qp = parse_qps(path).expect("parse bore3d");
 
@@ -241,12 +251,20 @@ fn diag_deadline_small_lp() {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(30.0);
         let r = solve_qp_with(&qp, &opts);
-        eprintln!("[bore3d/A] status={:?} obj={:.6e} deadline_triggered={}",
-            r.status, r.objective, r.stats.deadline_triggered);
-        assert_eq!(r.status, SolveStatus::Optimal,
-            "[bore3d/A] expected Optimal with generous budget, got {:?}", r.status);
-        assert!(!r.stats.deadline_triggered,
-            "[bore3d/A] deadline should not have triggered with 30 s budget");
+        eprintln!(
+            "[bore3d/A] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "[bore3d/A] expected Optimal with generous budget, got {:?}",
+            r.status
+        );
+        assert!(
+            !r.stats.deadline_triggered,
+            "[bore3d/A] deadline should not have triggered with 30 s budget"
+        );
     }
 
     // Case B: 1 ms budget — forces Timeout, proving deadline enforcement is wired.
@@ -254,11 +272,19 @@ fn diag_deadline_small_lp() {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(0.001);
         let r = solve_qp_with(&qp, &opts);
-        eprintln!("[bore3d/B] status={:?} obj={:.6e} deadline_triggered={}",
-            r.status, r.objective, r.stats.deadline_triggered);
-        assert_eq!(r.status, SolveStatus::Timeout,
-            "[bore3d/B] expected Timeout with 1 ms budget, got {:?}", r.status);
-        assert!(r.stats.deadline_triggered,
-            "[bore3d/B] deadline_triggered must be true when status == Timeout");
+        eprintln!(
+            "[bore3d/B] status={:?} obj={:.6e} deadline_triggered={}",
+            r.status, r.objective, r.stats.deadline_triggered
+        );
+        assert_eq!(
+            r.status,
+            SolveStatus::Timeout,
+            "[bore3d/B] expected Timeout with 1 ms budget, got {:?}",
+            r.status
+        );
+        assert!(
+            r.stats.deadline_triggered,
+            "[bore3d/B] deadline_triggered must be true when status == Timeout"
+        );
     }
 }

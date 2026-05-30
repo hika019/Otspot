@@ -72,7 +72,8 @@ pub(super) fn step9_singleton_ineq_to_bound(
         }
         ws.bounds[j] = (new_lb, new_ub);
         ws.removed_rows[i] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::SingletonIneqToBound { row: i, col: j, ct });
+        ws.postsolve_stack
+            .push(QpPostsolveStep::SingletonIneqToBound { row: i, col: j, ct });
     }
     Ok(())
 }
@@ -187,7 +188,9 @@ pub(super) fn step11_dual_fixing(
         let q_nnz = {
             let start = prob.q.col_ptr[j];
             let end = prob.q.col_ptr[j + 1];
-            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+            (start..end)
+                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
+                .count()
         };
         if q_nnz > 0 {
             continue;
@@ -226,7 +229,8 @@ pub(super) fn step11_dual_fixing(
         ws.obj_offset += ws.c[j] * val;
         ws.bounds[j] = (val, val);
         ws.removed_cols[j] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::EmptyCol { idx: j, val });
+        ws.postsolve_stack
+            .push(QpPostsolveStep::EmptyCol { idx: j, val });
     }
     Ok(())
 }

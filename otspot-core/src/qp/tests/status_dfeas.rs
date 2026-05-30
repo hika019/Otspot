@@ -21,7 +21,12 @@ fn test_qp_all_vars_fixed() {
     let start = std::time::Instant::now();
     let result = solve_qp_with(&problem, &opts);
     assert!(start.elapsed().as_secs_f64() < 6.0);
-    assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "got {:?}",
+        result.status
+    );
     assert_close(result.solution[0], 1.0, EPS, "x[0]");
 }
 
@@ -45,10 +50,14 @@ fn test_suboptimal_to_optimal_mapping() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_ne!(result.status, SolveStatus::MaxIterations);
-    assert!(matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
-    ), "got {:?}", result.status);
+    assert!(
+        matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+        ),
+        "got {:?}",
+        result.status
+    );
 }
 
 /// MaxIterations が外部 API に漏れないこと。
@@ -71,10 +80,14 @@ fn test_max_iterations_to_timeout_mapping() {
     };
     let result = solve_qp_with(&problem, &opts);
     assert_ne!(result.status, SolveStatus::MaxIterations);
-    assert!(matches!(
-        result.status,
-        SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
-    ), "got {:?}", result.status);
+    assert!(
+        matches!(
+            result.status,
+            SolveStatus::Optimal | SolveStatus::Timeout | SolveStatus::SuboptimalSolution
+        ),
+        "got {:?}",
+        result.status
+    );
 }
 
 /// 正常解で dfeas check が Optimal を維持。
@@ -110,7 +123,12 @@ fn test_dfeas_scale_invariant() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "got {:?}",
+        result.status
+    );
     assert_close(result.solution[0], 0.5, 1e-4, "x[0]");
     assert_close(result.solution[1], 0.5, 1e-4, "x[1]");
 }
@@ -135,8 +153,7 @@ fn test_dfeas_bad_solution_downgraded() {
     let status_ok = ipm_core::check_dfeas_status(&problem, &bad_x, &bad_y, &bad_bd, 10.0);
     assert_eq!(status_ok, SolveStatus::Optimal);
 
-    let status_rel =
-        ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
+    let status_rel = ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 0.01);
     assert_eq!(status_rel, SolveStatus::SuboptimalSolution);
     let status_rel_ok =
         ipm_core::check_dfeas_status_relative(&problem, &bad_x, &bad_y, &bad_bd, 1.0);
@@ -155,8 +172,17 @@ fn test_dfeas_relative_threshold_large_kkt() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
-    assert!((result.solution[0] - 5e-7).abs() < 1e-9, "x*=5e-7, got {:.2e}", result.solution[0]);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "got {:?}",
+        result.status
+    );
+    assert!(
+        (result.solution[0] - 5e-7).abs() < 1e-9,
+        "x*=5e-7, got {:.2e}",
+        result.solution[0]
+    );
 }
 
 /// 巨大項キャンセレーション (Qx ≈ -A^Ty): 成分相対なら正確に判定。
@@ -173,8 +199,7 @@ fn test_dfeas_cancellation_pattern() {
     let big_x = vec![5e9, 5e9];
     let empty_y: Vec<f64> = vec![];
     let empty_bd: Vec<f64> = vec![];
-    let status =
-        ipm_core::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
+    let status = ipm_core::check_dfeas_status_relative(&problem, &big_x, &empty_y, &empty_bd, 0.01);
     assert_eq!(status, SolveStatus::SuboptimalSolution);
 
     let good_x = vec![1e-12, 1e-12];

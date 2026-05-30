@@ -18,7 +18,10 @@ const EPS: f64 = 1e-4;
 
 fn opts() -> SolverOptions {
     // safety net; tiny problems finish instantly
-    SolverOptions { timeout_secs: Some(10.0), ..Default::default() }
+    SolverOptions {
+        timeout_secs: Some(10.0),
+        ..Default::default()
+    }
 }
 
 /// Build an LpProblem from triplets.
@@ -53,7 +56,16 @@ fn milp(lp: LpProblem, integer_vars: Vec<usize>) -> MilpProblem {
 #[test]
 fn trivial_integer_root_is_optimal_without_branching() {
     // min x, x in [0,5] integer → x = 0. Root relaxation already integral.
-    let lp = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!((r.objective - 0.0).abs() < EPS, "obj={}", r.objective);
@@ -84,8 +96,15 @@ fn bt_detects_infeasibility_before_bb() {
     )
     .unwrap();
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
-    assert_eq!(r.status, SolveStatus::Infeasible, "x≤3.7 ∧ x≥3.5 integer → empty domain");
-    assert_eq!(stats.nodes_processed, 0, "infeasibility detected by BT, not B&B");
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "x≤3.7 ∧ x≥3.5 integer → empty domain"
+    );
+    assert_eq!(
+        stats.nodes_processed, 0,
+        "infeasibility detected by BT, not B&B"
+    );
 }
 
 /// Equality row with a non-integer rhs drives both lb and ub of the same integer
@@ -112,8 +131,15 @@ fn equality_row_integer_var_crossed_bounds_detect_infeasibility() {
     )
     .unwrap();
     let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
-    assert_eq!(r.status, SolveStatus::Infeasible, "x=3.5 integer → no feasible integer → infeasible");
-    assert_eq!(stats.nodes_processed, 0, "BT must detect crossing before B&B");
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "x=3.5 integer → no feasible integer → infeasible"
+    );
+    assert_eq!(
+        stats.nodes_processed, 0,
+        "BT must detect crossing before B&B"
+    );
 }
 
 /// Bound tightening resolves the fractional-root LP at the root node without branching.
@@ -128,8 +154,11 @@ fn equality_row_integer_var_crossed_bounds_detect_infeasibility() {
 fn bt_resolves_root_as_integer_feasible() {
     let lp = build_lp(
         vec![-1.0],
-        &[0], &[0], &[2.0],
-        1, vec![3.0],
+        &[0],
+        &[0],
+        &[2.0],
+        1,
+        vec![3.0],
         vec![ConstraintType::Le],
         vec![(0.0, 5.0)],
     );
@@ -137,7 +166,10 @@ fn bt_resolves_root_as_integer_feasible() {
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!((r.objective - (-1.0)).abs() < EPS, "obj={}", r.objective);
     assert!((r.solution[0] - 1.0).abs() < EPS, "x={}", r.solution[0]);
-    assert_eq!(stats.nodes_processed, 1, "BT tightens x ≤ 1 → root is integer-feasible, no branching");
+    assert_eq!(
+        stats.nodes_processed, 1,
+        "BT tightens x ≤ 1 → root is integer-feasible, no branching"
+    );
     assert_eq!(stats.incumbent_updates, 1);
 }
 
@@ -154,8 +186,11 @@ fn bt_resolves_root_as_integer_feasible() {
 fn branching_fires_when_bt_insufficient() {
     let lp = build_lp(
         vec![-1.0, -1.0],
-        &[0, 0], &[0, 1], &[1.0, 1.0],
-        1, vec![3.5],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.5],
         vec![ConstraintType::Le],
         vec![(0.0, 5.0), (0.0, 5.0)],
     );
@@ -164,8 +199,15 @@ fn branching_fires_when_bt_insufficient() {
     assert!((r.objective - (-3.0)).abs() < EPS, "obj={}", r.objective);
     let s = r.solution[0].round() + r.solution[1].round();
     assert!((s - 3.0).abs() < EPS, "x+y={}", s);
-    assert!(stats.nodes_processed >= 3, "fractional LP root causes branching, nodes={}", stats.nodes_processed);
-    assert!(stats.pruned >= 1, "at least one pruned/infeasible child expected");
+    assert!(
+        stats.nodes_processed >= 3,
+        "fractional LP root causes branching, nodes={}",
+        stats.nodes_processed
+    );
+    assert!(
+        stats.pruned >= 1,
+        "at least one pruned/infeasible child expected"
+    );
     assert!(stats.incumbent_updates >= 1);
 }
 
@@ -210,7 +252,16 @@ fn integer_infeasible_between_consecutive_integers() {
 #[test]
 fn unbounded_relaxation_reports_unbounded() {
     // max x, x in [0, inf) integer, no constraints → unbounded.
-    let lp = build_lp(vec![-1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, f64::INFINITY)]);
+    let lp = build_lp(
+        vec![-1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, f64::INFINITY)],
+    );
     let r = solve_milp(&milp(lp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Unbounded);
 }
@@ -246,9 +297,9 @@ fn no_integer_vars_falls_back_to_lp() {
 /// **this test FAILS**.
 #[test]
 fn no_integer_vars_fallback_preserves_caller_warm_start() {
-    use std::cell::Cell;
     use crate::options::WarmStartBasis;
     use crate::problem::SolverResult;
+    use std::cell::Cell;
 
     struct PureLpMock {
         warm_start_received: Cell<bool>,
@@ -258,14 +309,24 @@ fn no_integer_vars_fallback_preserves_caller_warm_start() {
 
     impl PureLpMock {
         fn new() -> Self {
-            Self { warm_start_received: Cell::new(false), root_bounds: [(0.0, 5.0)], int_vars: [] }
+            Self {
+                warm_start_received: Cell::new(false),
+                root_bounds: [(0.0, 5.0)],
+                int_vars: [],
+            }
         }
     }
 
     impl super::Relaxation for PureLpMock {
-        fn num_vars(&self) -> usize { 1 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, _bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
             self.warm_start_received.set(opts.warm_start.is_some());
             SolverResult {
@@ -277,8 +338,14 @@ fn no_integer_vars_fallback_preserves_caller_warm_start() {
         }
     }
 
-    let user_ws = WarmStartBasis { basis: vec![0], x_b: vec![0.0] };
-    let opts_with_ws = SolverOptions { warm_start: Some(user_ws), ..opts() };
+    let user_ws = WarmStartBasis {
+        basis: vec![0],
+        x_b: vec![0.0],
+    };
+    let opts_with_ws = SolverOptions {
+        warm_start: Some(user_ws),
+        ..opts()
+    };
     let mock = PureLpMock::new();
     let (r, _) = super::solve_mip_with_stats(&mock, &opts_with_ws, &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
@@ -320,7 +387,11 @@ fn no_incumbent_with_open_region_is_not_infeasible() {
     // interruption fired. Reporting Infeasible here would be a silent wrong answer.
     // Sentinel: dropping the `!had_open` guard flips this to Infeasible and the test FAILS.
     let r = finalize_no_incumbent(false, true, true, false);
-    assert_ne!(r.status, SolveStatus::Infeasible, "open region must not be Infeasible");
+    assert_ne!(
+        r.status,
+        SolveStatus::Infeasible,
+        "open region must not be Infeasible"
+    );
     assert_eq!(r.status, SolveStatus::MaxIterations);
 }
 
@@ -392,18 +463,33 @@ fn miqp_fractional_root_branches_to_integer_optimum() {
         vec![ConstraintType::Ge],
         vec![(0.0, 5.0), (0.0, 5.0)],
     );
-    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
+    let (r, stats) =
+        super::solve_miqp_with_stats(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!((r.objective - 5.0).abs() < 1e-3, "obj={}", r.objective);
     let s = r.solution[0].round() + r.solution[1].round();
     assert!((s - 3.0).abs() < EPS, "x+y={}", s);
-    assert!(stats.nodes_processed >= 2, "branching expected, nodes={}", stats.nodes_processed);
+    assert!(
+        stats.nodes_processed >= 2,
+        "branching expected, nodes={}",
+        stats.nodes_processed
+    );
 }
 
 #[test]
 fn miqp_trivial_integer_root() {
     // min x^2, x integer in [0,5] → x=0 (root already integral).
-    let qp = qp_problem(&[2.0], vec![0.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let qp = qp_problem(
+        &[2.0],
+        vec![0.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
     let r = solve_miqp(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!(r.objective.abs() < 1e-3, "obj={}", r.objective);
@@ -431,9 +517,23 @@ fn miqp_infeasible_between_integers() {
 #[test]
 fn miqp_nonconvex_q_rejected() {
     // indefinite Q → NonConvex (no silent wrong answer), never enters the B&B.
-    let qp = qp_problem(&[2.0, -3.0], vec![0.0, 0.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0); 2]);
+    let qp = qp_problem(
+        &[2.0, -3.0],
+        vec![0.0, 0.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0); 2],
+    );
     let r = solve_miqp(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
-    assert!(matches!(r.status, SolveStatus::NonConvex(_)), "got {:?}", r.status);
+    assert!(
+        matches!(r.status, SolveStatus::NonConvex(_)),
+        "got {:?}",
+        r.status
+    );
 }
 
 #[test]
@@ -453,7 +553,12 @@ fn miqp_no_integer_vars_falls_back_to_qp() {
     let direct = crate::qp::solve_qp_with(&qp.clone(), &opts());
     let r = solve_miqp(&miqp(qp, vec![]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert!((r.objective - direct.objective).abs() < 1e-3, "miqp {} vs qp {}", r.objective, direct.objective);
+    assert!(
+        (r.objective - direct.objective).abs() < 1e-3,
+        "miqp {} vs qp {}",
+        r.objective,
+        direct.objective
+    );
 }
 
 #[test]
@@ -468,10 +573,21 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
     let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
         .unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-    let qp = QpProblem::new(q, vec![-6.0, -6.0], a, vec![], vec![(0.0, 4.0), (0.0, 4.0)], vec![])
-        .unwrap();
+    let qp = QpProblem::new(
+        q,
+        vec![-6.0, -6.0],
+        a,
+        vec![],
+        vec![(0.0, 4.0), (0.0, 4.0)],
+        vec![],
+    )
+    .unwrap();
     let r = solve_miqp(&miqp(qp, vec![0, 1]), &opts(), &MipConfig::default());
-    assert!((r.objective - (-12.0)).abs() < 1e-3, "obj={} (expected −12 @ (2,2))", r.objective);
+    assert!(
+        (r.objective - (-12.0)).abs() < 1e-3,
+        "obj={} (expected −12 @ (2,2))",
+        r.objective
+    );
     let s = (r.solution[0].round(), r.solution[1].round());
     assert_eq!(s, (2.0, 2.0), "x*={:?}", r.solution);
 }
@@ -498,8 +614,11 @@ fn miqp_boxonly_offdiag_no_overprune_sentinel() {
 fn stats_timing_populated_for_milp_bt_then_branch() {
     let lp = build_lp(
         vec![-1.0, -1.0],
-        &[0, 0], &[0, 1], &[1.0, 1.0],
-        1, vec![3.5],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![3.5],
         vec![ConstraintType::Le],
         vec![(0.0, 5.0), (0.0, 5.0)],
     );
@@ -521,10 +640,18 @@ fn stats_timing_populated_for_milp_bt_then_branch() {
     assert!(
         (stats.relaxation_time_total_ms - sum).abs() < 1e-6,
         "total={:.6} root={:.6} desc={:.6}",
-        stats.relaxation_time_total_ms, stats.relaxation_time_root_ms, stats.relaxation_time_desc_ms,
+        stats.relaxation_time_total_ms,
+        stats.relaxation_time_root_ms,
+        stats.relaxation_time_desc_ms,
     );
-    assert!(stats.relaxation_time_optimal_ms > 0.0, "optimal_ms must be >0");
-    assert!(stats.approx_bounds_bytes_per_node > 0, "bounds_bytes_per_node must be >0");
+    assert!(
+        stats.relaxation_time_optimal_ms > 0.0,
+        "optimal_ms must be >0"
+    );
+    assert!(
+        stats.approx_bounds_bytes_per_node > 0,
+        "bounds_bytes_per_node must be >0"
+    );
 }
 
 /// LP relaxation infeasibility at the root populates infeasible_ms.
@@ -537,7 +664,11 @@ fn stats_timing_populated_for_milp_bt_then_branch() {
 #[test]
 fn stats_timing_infeasible_ms_from_lp_after_bt() {
     let a = crate::sparse::CscMatrix::from_triplets(
-        &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
+        &[0, 0, 1, 1],
+        &[0, 1, 0, 1],
+        &[1.0, 1.0, 1.0, 1.0],
+        2,
+        2,
     )
     .unwrap();
     let lp = crate::problem::LpProblem::new_general(
@@ -549,22 +680,30 @@ fn stats_timing_infeasible_ms_from_lp_after_bt() {
         None,
     )
     .unwrap();
-    let (r, stats) =
-        solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
+    let (r, stats) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Infeasible);
     assert!(
         stats.relaxation_time_infeasible_ms > 0.0,
         "infeasible_ms must be >0; pruned={} nodes={}",
-        stats.pruned, stats.nodes_processed,
+        stats.pruned,
+        stats.nodes_processed,
     );
 }
 
 #[test]
 fn stats_timing_root_only_for_trivial_integer_root() {
     // Root already integral → no branching → desc_ms == 0.
-    let lp = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
-    let (_, stats) =
-        solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let (_, stats) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(stats.nodes_processed, 1);
     assert!(stats.relaxation_time_root_ms > 0.0, "root_ms must be >0");
     assert_eq!(
@@ -608,9 +747,17 @@ fn stats_timing_populated_for_miqp_with_branching() {
 fn stats_bounds_bytes_scales_with_num_vars() {
     // approx_bounds_bytes_per_node = n_vars * 16 (two f64 per bound pair).
     // Two problems of different sizes: the larger must have proportionally larger bytes.
-    let lp1 = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
-    let (_, s1) =
-        solve_milp_with_stats(&milp(lp1, vec![0]), &opts(), &MipConfig::default());
+    let lp1 = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
+    let (_, s1) = solve_milp_with_stats(&milp(lp1, vec![0]), &opts(), &MipConfig::default());
 
     let lp4 = build_lp(
         vec![1.0, 1.0, 1.0, 1.0],
@@ -622,8 +769,7 @@ fn stats_bounds_bytes_scales_with_num_vars() {
         vec![],
         vec![(0.0, 5.0); 4],
     );
-    let (_, s4) =
-        solve_milp_with_stats(&milp(lp4, vec![0]), &opts(), &MipConfig::default());
+    let (_, s4) = solve_milp_with_stats(&milp(lp4, vec![0]), &opts(), &MipConfig::default());
 
     assert_eq!(
         s4.approx_bounds_bytes_per_node,
@@ -667,15 +813,51 @@ fn invalid_options_rejected_at_milp_entry() {
     let cfg = MipConfig::default();
 
     let cases: &[(&str, SolverOptions)] = &[
-        ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-        ("zero primal_tol", SolverOptions { primal_tol: 0.0, ..Default::default() }),
-        ("neg dual_tol", SolverOptions { dual_tol: -1e-6, ..Default::default() }),
-        ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
-        ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
-        ("ipm eps zero", SolverOptions {
-            ipm: IpmOptions { eps: 0.0, ..Default::default() },
-            ..Default::default()
-        }),
+        (
+            "nan primal_tol",
+            SolverOptions {
+                primal_tol: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "zero primal_tol",
+            SolverOptions {
+                primal_tol: 0.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "neg dual_tol",
+            SolverOptions {
+                dual_tol: -1e-6,
+                ..Default::default()
+            },
+        ),
+        (
+            "neg timeout_secs",
+            SolverOptions {
+                timeout_secs: Some(-1.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero threads",
+            SolverOptions {
+                threads: 0,
+                ..Default::default()
+            },
+        ),
+        (
+            "ipm eps zero",
+            SolverOptions {
+                ipm: IpmOptions {
+                    eps: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
     ];
     for (label, bad_opts) in cases {
         let r = solve_milp(&problem, bad_opts, &cfg);
@@ -705,7 +887,9 @@ fn solve_miqp_rejects_indefinite_n1001() {
     let mut cols: Vec<usize> = (0..n).collect();
     let mut vals: Vec<f64> = vec![1.0; n];
     // off-diagonal: Q[0,1]=Q[1,0]=2 → top-left 2×2 eigenvalues {-1, 3} → indefinite
-    rows.push(0); cols.push(1); vals.push(2.0);
+    rows.push(0);
+    cols.push(1);
+    vals.push(2.0);
     let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
     let a = CscMatrix::new(0, n);
     let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
@@ -713,7 +897,8 @@ fn solve_miqp_rejects_indefinite_n1001() {
     let (result, _) = solve_miqp_with_stats(&m, &SolverOptions::default(), &MipConfig::default());
     assert!(
         matches!(result.status, SolveStatus::NonConvex(_)),
-        "solve_miqp_with_stats must reject indefinite Q with NonConvex, got {:?}", result.status
+        "solve_miqp_with_stats must reject indefinite Q with NonConvex, got {:?}",
+        result.status
     );
 }
 
@@ -734,9 +919,27 @@ fn invalid_options_rejected_at_miqp_entry() {
     let cfg = MipConfig::default();
 
     let cases: &[(&str, SolverOptions)] = &[
-        ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-        ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
-        ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
+        (
+            "nan primal_tol",
+            SolverOptions {
+                primal_tol: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "zero threads",
+            SolverOptions {
+                threads: 0,
+                ..Default::default()
+            },
+        ),
+        (
+            "neg timeout_secs",
+            SolverOptions {
+                timeout_secs: Some(-1.0),
+                ..Default::default()
+            },
+        ),
     ];
     for (label, bad_opts) in cases {
         let r = solve_miqp(&problem, bad_opts, &cfg);
@@ -769,14 +972,27 @@ fn invalid_options_rejected_at_miqp_entry() {
 #[test]
 fn optimal_result_carries_bound_gap_cert() {
     // min x, x in [0,5] integer → x=0, obj=0. Root already integral.
-    let lp = build_lp(vec![1.0], &[], &[], &[], 0, vec![], vec![], vec![(0.0, 5.0)]);
+    let lp = build_lp(
+        vec![1.0],
+        &[],
+        &[],
+        &[],
+        0,
+        vec![],
+        vec![],
+        vec![(0.0, 5.0)],
+    );
     let (r, _) = solve_milp_with_stats(&milp(lp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    let cert = r.bound_gap_cert.as_ref().expect("Optimal must carry BoundGapCertificate");
+    let cert = r
+        .bound_gap_cert
+        .as_ref()
+        .expect("Optimal must carry BoundGapCertificate");
     assert!(
         cert.gap_rel() <= cert.gap_tol() + 1e-10,
         "gap_rel={} must be ≤ gap_tol={}",
-        cert.gap_rel(), cert.gap_tol()
+        cert.gap_rel(),
+        cert.gap_tol()
     );
     assert!(
         (cert.incumbent_obj() - 0.0).abs() < 1e-6,
@@ -786,7 +1002,8 @@ fn optimal_result_carries_bound_gap_cert() {
     assert!(
         cert.lower_bound() <= cert.incumbent_obj() + 1e-10,
         "lb={} must be ≤ inc_obj={}",
-        cert.lower_bound(), cert.incumbent_obj()
+        cert.lower_bound(),
+        cert.incumbent_obj()
     );
 }
 
@@ -806,15 +1023,28 @@ fn optimal_result_carries_bound_gap_cert() {
 fn knapsack_truncated_has_no_bound_gap_cert() {
     let lp = build_lp(
         vec![-8.0, -11.0],
-        &[0, 0], &[0, 1], &[5.0, 7.0],
-        1, vec![10.0],
+        &[0, 0],
+        &[0, 1],
+        &[5.0, 7.0],
+        1,
+        vec![10.0],
         vec![ConstraintType::Le],
         vec![(0.0, 1.0), (0.0, 1.0)],
     );
-    let cfg = MipConfig { max_nodes: 2, ..MipConfig::default() };
+    let cfg = MipConfig {
+        max_nodes: 2,
+        ..MipConfig::default()
+    };
     let (r, _) = solve_milp_with_stats(&milp(lp, vec![0, 1]), &opts(), &cfg);
-    assert_ne!(r.status, SolveStatus::Optimal, "must not claim Optimal with open queue");
-    assert!(r.bound_gap_cert.is_none(), "non-Optimal must have no BoundGapCertificate");
+    assert_ne!(
+        r.status,
+        SolveStatus::Optimal,
+        "must not claim Optimal with open queue"
+    );
+    assert!(
+        r.bound_gap_cert.is_none(),
+        "non-Optimal must have no BoundGapCertificate"
+    );
 }
 
 /// `proof_uncertain = true` blocks the Optimal claim even when the gap numerically
@@ -833,9 +1063,9 @@ fn knapsack_truncated_has_no_bound_gap_cert() {
 /// for this scenario → Optimal + cert → this test FAILS.
 #[test]
 fn proof_uncertain_blocks_optimal_despite_closed_gap() {
-    use std::cell::Cell;
     use crate::options::SolverOptions;
     use crate::problem::SolverResult;
+    use std::cell::Cell;
 
     struct SeqMock {
         call: Cell<usize>,
@@ -844,23 +1074,48 @@ fn proof_uncertain_blocks_optimal_despite_closed_gap() {
     }
     impl SeqMock {
         fn new() -> Self {
-            Self { call: Cell::new(0), root_bounds: [(0.0, 2.0)], int_vars: [0] }
+            Self {
+                call: Cell::new(0),
+                root_bounds: [(0.0, 2.0)],
+                int_vars: [0],
+            }
         }
     }
     impl super::Relaxation for SeqMock {
-        fn num_vars(&self) -> usize { 1 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, _bounds: &[(f64, f64)], _opts: &SolverOptions) -> SolverResult {
             let n = self.call.get();
             self.call.set(n + 1);
             match n {
                 // Root [0,2]: fractional → driver branches into [0,0] and [1,2].
-                0 => SolverResult { status: SolveStatus::Optimal, objective: 1.0, solution: vec![0.5], ..SolverResult::default() },
+                0 => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: 1.0,
+                    solution: vec![0.5],
+                    ..SolverResult::default()
+                },
                 // [0,0]: non-Optimal, singleton, not splittable → proof_uncertain.
-                1 => SolverResult { status: SolveStatus::SuboptimalSolution, objective: 0.0, solution: vec![0.0], ..SolverResult::default() },
+                1 => SolverResult {
+                    status: SolveStatus::SuboptimalSolution,
+                    objective: 0.0,
+                    solution: vec![0.0],
+                    ..SolverResult::default()
+                },
                 // [1,2]: Optimal, integer-feasible → incumbent = −5.
-                2 => SolverResult { status: SolveStatus::Optimal, objective: -5.0, solution: vec![1.0], ..SolverResult::default() },
+                2 => SolverResult {
+                    status: SolveStatus::Optimal,
+                    objective: -5.0,
+                    solution: vec![1.0],
+                    ..SolverResult::default()
+                },
                 _ => SolverResult::numerical_error(),
             }
         }
@@ -869,7 +1124,8 @@ fn proof_uncertain_blocks_optimal_despite_closed_gap() {
     let mock = SeqMock::new();
     let (r, _) = super::solve_mip_with_stats(&mock, &opts(), &MipConfig::default());
     assert_ne!(
-        r.status, SolveStatus::Optimal,
+        r.status,
+        SolveStatus::Optimal,
         "proof_uncertain must block Optimal claim (within_gap is true but region unverified)"
     );
     assert!(
@@ -907,7 +1163,11 @@ fn warm_start_propagation_preserves_correct_objective() {
     let problem = milp(lp, vec![0, 1]);
     let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert!((r.objective + 6.0).abs() < EPS, "expected obj=-6, got {}", r.objective);
+    assert!(
+        (r.objective + 6.0).abs() < EPS,
+        "expected obj=-6, got {}",
+        r.objective
+    );
 }
 
 /// Binary knapsack with warm-start propagation: correct solution is [0,1,1,1],
@@ -931,9 +1191,18 @@ fn warm_start_binary_knapsack_correct() {
     );
     let problem = milp(lp, vec![0, 1, 2]);
     let (r, _) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
-    assert_eq!(r.status, SolveStatus::Optimal, "expected Optimal, got {:?}", r.status);
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "expected Optimal, got {:?}",
+        r.status
+    );
     // Best solution: x0=1(3), x2=1(2) → cap=5≤6, obj=-11.
-    assert!((r.objective + 11.0).abs() < EPS, "expected obj=-11, got {}", r.objective);
+    assert!(
+        (r.objective + 11.0).abs() < EPS,
+        "expected obj=-11, got {}",
+        r.objective
+    );
 }
 
 /// Infeasible MILP (integer variable forced between consecutive integers) is
@@ -954,7 +1223,12 @@ fn warm_start_infeasible_milp_still_infeasible() {
     );
     let problem = milp(lp, vec![0]);
     let r = solve_milp(&problem, &opts(), &MipConfig::default());
-    assert_eq!(r.status, SolveStatus::Infeasible, "expected Infeasible, got {:?}", r.status);
+    assert_eq!(
+        r.status,
+        SolveStatus::Infeasible,
+        "expected Infeasible, got {:?}",
+        r.status
+    );
 }
 
 /// Debug: test that directly calls LP solve for child LP with warm_start.
@@ -974,7 +1248,10 @@ fn warm_start_rounding_fails_child_no_timeout() {
         vec![(0.0, 10.0), (0.0, 1.0)], // y bounded at 1
     );
     // Parent root basis: both structural vars (x=0, y=1) are basic.
-    let ws = WarmStartBasis { basis: vec![0, 1], x_b: vec![3.0, 1.5] };
+    let ws = WarmStartBasis {
+        basis: vec![0, 1],
+        x_b: vec![3.0, 1.5],
+    };
     let opts = SolverOptions {
         timeout_secs: Some(10.0),
         recover_warm_start_basis: true,
@@ -982,10 +1259,18 @@ fn warm_start_rounding_fails_child_no_timeout() {
         ..Default::default()
     };
     let r = crate::lp::solve_lp_with(&lp, &opts);
-    assert_ne!(r.status, crate::problem::SolveStatus::Timeout,
-        "child LP with warm start must not timeout, got status={:?}", r.status);
-    assert_eq!(r.status, crate::problem::SolveStatus::Optimal,
-        "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}", r.status);
+    assert_ne!(
+        r.status,
+        crate::problem::SolveStatus::Timeout,
+        "child LP with warm start must not timeout, got status={:?}",
+        r.status
+    );
+    assert_eq!(
+        r.status,
+        crate::problem::SolveStatus::Optimal,
+        "child LP should be Optimal (x=3 or x=4, y=1), got status={:?}",
+        r.status
+    );
 }
 
 /// Sentinel: `bound_layout_changes` — infinite→finite ub causes warm-start drop
@@ -1001,9 +1286,9 @@ fn warm_start_rounding_fails_child_no_timeout() {
 /// `got_ws` is all-true → no false entry → **this test FAILS**.
 #[test]
 fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
-    use std::cell::{Cell, RefCell};
     use crate::options::WarmStartBasis;
     use crate::problem::SolverResult;
+    use std::cell::{Cell, RefCell};
 
     struct InfBoundMock {
         call: Cell<usize>,
@@ -1024,9 +1309,15 @@ fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
     }
 
     impl super::Relaxation for InfBoundMock {
-        fn num_vars(&self) -> usize { 1 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
             let n = self.call.get();
             self.call.set(n + 1);
@@ -1036,12 +1327,17 @@ fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
                     status: SolveStatus::Optimal,
                     objective: 1.5,
                     solution: vec![1.5],
-                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![1.5] }),
+                    warm_start_basis: Some(WarmStartBasis {
+                        basis: vec![0],
+                        x_b: vec![1.5],
+                    }),
                     ..SolverResult::default()
                 }
             } else {
                 // Child: record warm_start presence, return integer-feasible solution.
-                self.child_got_ws.borrow_mut().push(opts.warm_start.is_some());
+                self.child_got_ws
+                    .borrow_mut()
+                    .push(opts.warm_start.is_some());
                 let x = bounds[0].0.ceil();
                 SolverResult {
                     status: SolveStatus::Optimal,
@@ -1075,9 +1371,9 @@ fn bound_layout_changes_inf_ub_to_finite_drops_warm_start() {
 /// call → `received` is all-false → **this test FAILS** (no-op detected).
 #[test]
 fn warm_start_propagated_to_child_nodes_sentinel() {
-    use std::cell::{Cell, RefCell};
     use crate::options::WarmStartBasis;
     use crate::problem::SolverResult;
+    use std::cell::{Cell, RefCell};
 
     struct PropMock {
         call: Cell<usize>,
@@ -1098,14 +1394,22 @@ fn warm_start_propagated_to_child_nodes_sentinel() {
     }
 
     impl super::Relaxation for PropMock {
-        fn num_vars(&self) -> usize { 1 }
-        fn root_bounds(&self) -> &[(f64, f64)] { &self.root_bounds }
-        fn integer_vars(&self) -> &[usize] { &self.int_vars }
+        fn num_vars(&self) -> usize {
+            1
+        }
+        fn root_bounds(&self) -> &[(f64, f64)] {
+            &self.root_bounds
+        }
+        fn integer_vars(&self) -> &[usize] {
+            &self.int_vars
+        }
         fn solve(&self, bounds: &[(f64, f64)], opts: &SolverOptions) -> SolverResult {
             let n = self.call.get();
             self.call.set(n + 1);
             if n > 0 {
-                self.warm_starts_received.borrow_mut().push(opts.warm_start.is_some());
+                self.warm_starts_received
+                    .borrow_mut()
+                    .push(opts.warm_start.is_some());
             }
             if n == 0 {
                 // Root: fractional x=0.5; return warm_start_basis for propagation.
@@ -1113,7 +1417,10 @@ fn warm_start_propagated_to_child_nodes_sentinel() {
                     status: SolveStatus::Optimal,
                     objective: 0.5,
                     solution: vec![0.5],
-                    warm_start_basis: Some(WarmStartBasis { basis: vec![0], x_b: vec![0.5] }),
+                    warm_start_basis: Some(WarmStartBasis {
+                        basis: vec![0],
+                        x_b: vec![0.5],
+                    }),
                     ..Default::default()
                 }
             } else {
@@ -1182,7 +1489,10 @@ fn feasibility_pump_finds_initial_integer_solution() {
         "FP must find an initial integer solution; \
          removing FP call gives fp_incumbent_found=false → FAIL"
     );
-    assert!(stats.incumbent_updates >= 1, "incumbent_updates must reflect FP find");
+    assert!(
+        stats.incumbent_updates >= 1,
+        "incumbent_updates must reflect FP find"
+    );
 }
 
 /// A known integer-feasible solution seeds `solve_mip_core` and reduces B&B nodes.
@@ -1213,12 +1523,13 @@ fn feasibility_pump_reduces_bb_nodes() {
     };
 
     let (_, with_inc) = solve_mip_core(&problem, &opts(), &cfg, mask.clone(), Some(known_inc));
-    let (_, no_inc)   = solve_mip_core(&problem, &opts(), &cfg, mask, None);
+    let (_, no_inc) = solve_mip_core(&problem, &opts(), &cfg, mask, None);
 
     assert!(
         with_inc.nodes_processed < no_inc.nodes_processed,
         "initial incumbent must reduce B&B nodes: with={} without={}",
-        with_inc.nodes_processed, no_inc.nodes_processed
+        with_inc.nodes_processed,
+        no_inc.nodes_processed
     );
 }
 
@@ -1274,7 +1585,9 @@ fn fp_timeout_sentinel_milp() -> MilpProblem {
     // Deterministic LCG for reproducibility without external dependencies.
     let mut s: u64 = 0x1234_5678_9ABC_DEF0;
     let mut rng = || -> f64 {
-        s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         ((s >> 33) as f64) / (u32::MAX as f64)
     };
     let c: Vec<f64> = (0..n).map(|_| -rng() * 10.0).collect();
@@ -1320,7 +1633,10 @@ fn fp_timeout_sentinel_milp() -> MilpProblem {
 #[test]
 fn fp_timeout_does_not_exceed_user_limit() {
     let problem = fp_timeout_sentinel_milp();
-    let opts = SolverOptions { timeout_secs: Some(FP_TIMEOUT_BUDGET_SECS), ..Default::default() };
+    let opts = SolverOptions {
+        timeout_secs: Some(FP_TIMEOUT_BUDGET_SECS),
+        ..Default::default()
+    };
     let t0 = std::time::Instant::now();
     let (r, _) = solve_milp_with_stats(&problem, &opts, &MipConfig::default());
     let elapsed = t0.elapsed().as_secs_f64();
@@ -1358,7 +1674,10 @@ fn fp_timeout_does_not_exceed_user_limit() {
 fn fp_timeout_aborts_iteration() {
     let problem = fp_timeout_sentinel_milp();
     let short_timeout = 0.1f64;
-    let opts = SolverOptions { timeout_secs: Some(short_timeout), ..Default::default() };
+    let opts = SolverOptions {
+        timeout_secs: Some(short_timeout),
+        ..Default::default()
+    };
     let t0 = std::time::Instant::now();
     let (r, _) = solve_milp_with_stats(&problem, &opts, &MipConfig::default());
     let elapsed = t0.elapsed().as_secs_f64();
@@ -1405,15 +1724,15 @@ fn miqp_bt_detects_infeasibility_before_bb() {
         vec![ConstraintType::Le, ConstraintType::Ge],
         vec![(0.0, 10.0)],
     );
-    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    let (r, stats) =
+        super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
     assert_eq!(
         r.status,
         SolveStatus::Infeasible,
         "x²: x≤3.7 ∧ x≥3.5 integer → BT detects empty domain → Infeasible"
     );
     assert_eq!(
-        stats.nodes_processed,
-        0,
+        stats.nodes_processed, 0,
         "MIQP BT must detect infeasibility before B&B (no-op: nodes_processed > 0)"
     );
 }
@@ -1441,16 +1760,20 @@ fn miqp_bt_tightens_bounds_reduces_bb_nodes() {
         vec![ConstraintType::Le],
         vec![(0.0, 5.0)],
     );
-    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
-    assert_eq!(r.status, SolveStatus::Optimal, "x²-7x: x≤3.7 integer → feasible");
+    let (r, stats) =
+        super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "x²-7x: x≤3.7 integer → feasible"
+    );
     assert!(
         (r.objective - (-12.0)).abs() < EPS,
         "optimal x=3 → obj=9-21=-12, got {}",
         r.objective
     );
     assert_eq!(
-        stats.nodes_processed,
-        3,
+        stats.nodes_processed, 3,
         "BT tightens x ≤ 3: 3 nodes (root+[0,2]+[3,3]); no-op leaves [0,5] giving 5 nodes"
     );
 }

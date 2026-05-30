@@ -35,8 +35,7 @@ fn test_bd_t1_baseline_presolve_off() {
 #[test]
 fn test_bd_t2_fixed_var_remap_core() {
     let n = 3usize;
-    let q =
-        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
     let c = vec![2.0, 1.0, 1.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
     let b = vec![10.0];
@@ -143,8 +142,7 @@ fn test_bd_t5_unbounded_vars_empty() {
 #[test]
 fn test_bd_t6_ub_active_with_presolve() {
     let n = 3usize;
-    let q =
-        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
     let c = vec![-1.0, -1.0, 1.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
     let b = vec![10.0];

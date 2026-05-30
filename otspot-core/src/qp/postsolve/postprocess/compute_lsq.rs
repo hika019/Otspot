@@ -89,9 +89,8 @@ fn solve_aat_cg(
         for k in cs..ce {
             let row = a_sub.row_ind[k];
             let aval = a_sub.values[k];
-            rhs_dd[row] = rhs_dd[row]
-                + TwoFloat::new_mul(aval, tv_hi)
-                + TwoFloat::new_mul(aval, tv_lo);
+            rhs_dd[row] =
+                rhs_dd[row] + TwoFloat::new_mul(aval, tv_hi) + TwoFloat::new_mul(aval, tv_lo);
         }
     }
     let rhs: Vec<f64> = rhs_dd.iter().map(|&v| f64::from(v)).collect();
@@ -503,9 +502,13 @@ mod comp_slackness_tests {
     const Y_ZERO_TOL: f64 = 1e-9;
 
     fn lp_qp(
-        n: usize, m: usize,
-        c: Vec<f64>, a: CscMatrix, b: Vec<f64>,
-        bounds: Vec<(f64, f64)>, cts: Vec<ConstraintType>,
+        n: usize,
+        m: usize,
+        c: Vec<f64>,
+        a: CscMatrix,
+        b: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+        cts: Vec<ConstraintType>,
     ) -> QpProblem {
         let q = CscMatrix::new(n, n);
         let _ = m;
@@ -513,7 +516,10 @@ mod comp_slackness_tests {
     }
 
     fn run_lsq(problem: &QpProblem, x: Vec<f64>) -> Vec<f64> {
-        let result = SolverResult { solution: x, ..Default::default() };
+        let result = SolverResult {
+            solution: x,
+            ..Default::default()
+        };
         compute_lsq_dual_y(problem, &result, None)
             .expect("LSQ should succeed on a tiny well-conditioned fixture")
     }
@@ -525,8 +531,11 @@ mod comp_slackness_tests {
     fn lsq_le_loose_row_clamped_to_zero() {
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let qp = lp_qp(
-            1, 2,
-            vec![1.0], a, vec![1.0, 10.0],
+            1,
+            2,
+            vec![1.0],
+            a,
+            vec![1.0, 10.0],
             vec![(0.0, f64::INFINITY)],
             vec![ConstraintType::Le, ConstraintType::Le],
         );
@@ -545,8 +554,11 @@ mod comp_slackness_tests {
     fn lsq_ge_loose_row_clamped_to_zero() {
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let qp = lp_qp(
-            1, 2,
-            vec![-1.0], a, vec![1.0, -5.0],
+            1,
+            2,
+            vec![-1.0],
+            a,
+            vec![1.0, -5.0],
             vec![(f64::NEG_INFINITY, 1.0)],
             vec![ConstraintType::Ge, ConstraintType::Ge],
         );
@@ -562,12 +574,15 @@ mod comp_slackness_tests {
     /// Fixture C: mixed Le + Ge, both loose.
     #[test]
     fn lsq_mixed_loose_rows_all_clamped_to_zero() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+                .unwrap();
         let qp = lp_qp(
-            2, 2,
-            vec![1.0, -1.0], a, vec![100.0, -50.0],
+            2,
+            2,
+            vec![1.0, -1.0],
+            a,
+            vec![100.0, -50.0],
             vec![(0.0, 5.0), (0.0, 5.0)],
             vec![ConstraintType::Le, ConstraintType::Ge],
         );
@@ -576,7 +591,8 @@ mod comp_slackness_tests {
             assert!(
                 y[i].abs() < Y_ZERO_TOL,
                 "loose row {} y={:.3e} should be 0 (all rows non-binding at this primal)",
-                i, y[i],
+                i,
+                y[i],
             );
         }
     }
@@ -586,8 +602,11 @@ mod comp_slackness_tests {
     fn lsq_binding_row_y_is_not_clamped() {
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let qp = lp_qp(
-            1, 1,
-            vec![-1.0], a, vec![1.0],
+            1,
+            1,
+            vec![-1.0],
+            a,
+            vec![1.0],
             vec![(0.0, 1.0)],
             vec![ConstraintType::Le],
         );
@@ -611,16 +630,25 @@ mod comp_slackness_tests {
         let vals: Vec<f64> = vec![1.0; dim];
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, dim, dim).unwrap();
         let qp = lp_qp(
-            dim, dim,
-            vec![1.0; dim], a, vec![0.0; dim],
+            dim,
+            dim,
+            vec![1.0; dim],
+            a,
+            vec![0.0; dim],
             vec![(f64::NEG_INFINITY, f64::INFINITY); dim],
             vec![ConstraintType::Eq; dim],
         );
-        let result = SolverResult { solution: vec![0.5; dim], ..Default::default() };
+        let result = SolverResult {
+            solution: vec![0.5; dim],
+            ..Default::default()
+        };
         let y = compute_lsq_dual_y(&qp, &result, None)
             .expect("large-sparse LSQ must run (no fixed size gate; within memory budget)");
         assert_eq!(y.len(), dim);
-        assert!(y.iter().all(|v| v.is_finite()), "all recovered duals must be finite");
+        assert!(
+            y.iter().all(|v| v.is_finite()),
+            "all recovered duals must be finite"
+        );
         // Diagonal A=I, Eq rows, target=-c=-1 ⇒ AAT y = A·(-c) ⇒ y_i = -1.
         for (i, &yi) in y.iter().enumerate().take(8) {
             assert!((yi + 1.0).abs() < 1e-6, "y[{i}]={yi:.3e} expected ≈ -1");
@@ -642,7 +670,10 @@ mod comp_slackness_tests {
         // No deadline → CG converges to y ≈ [1, 2].
         let (y_ok, conv_ok) = solve_aat_cg(&a, 2, 2, &target, None);
         let y_ok = y_ok.expect("finite y");
-        assert!(conv_ok, "well-conditioned 2x2 CG must converge without a deadline");
+        assert!(
+            conv_ok,
+            "well-conditioned 2x2 CG must converge without a deadline"
+        );
         assert!(
             (y_ok[0] - 1.0).abs() < 1e-6 && (y_ok[1] - 2.0).abs() < 1e-6,
             "no-deadline CG must converge to [1,2]: y={y_ok:?}"

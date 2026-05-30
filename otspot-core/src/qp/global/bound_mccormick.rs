@@ -62,7 +62,13 @@ pub(crate) fn mccormick_lower_bound(
     base_opts: &SolverOptions,
     deadline: Option<Instant>,
 ) -> Option<f64> {
-    solve_lifted_lp(problem, node_bounds, base_opts, deadline, /* include_envelope = */ true)
+    solve_lifted_lp(
+        problem,
+        node_bounds,
+        base_opts,
+        deadline,
+        /* include_envelope = */ true,
+    )
 }
 
 /// 共通 driver: lifted LP を構築 (`include_envelope=false` で McCormick 不等式を省略) し
@@ -286,38 +292,73 @@ fn build_mccormick_lp(
 
         if term.i == term.j {
             // x² LB tangent at l: w − 2l x ≥ −l²
-            push_row_3(&mut rows, &mut cols, &mut vals, row, term.i, w_col, -2.0 * li, 1.0);
+            push_row_3(
+                &mut rows,
+                &mut cols,
+                &mut vals,
+                row,
+                term.i,
+                w_col,
+                -2.0 * li,
+                1.0,
+            );
             b.push(-li * li);
             types.push(ConstraintType::Ge);
             row += 1;
             // x² LB tangent at u: w − 2u x ≥ −u²
-            push_row_3(&mut rows, &mut cols, &mut vals, row, term.i, w_col, -2.0 * ui, 1.0);
+            push_row_3(
+                &mut rows,
+                &mut cols,
+                &mut vals,
+                row,
+                term.i,
+                w_col,
+                -2.0 * ui,
+                1.0,
+            );
             b.push(-ui * ui);
             types.push(ConstraintType::Ge);
             row += 1;
             // x² UB secant: w − (l+u) x ≤ −l u
-            push_row_3(&mut rows, &mut cols, &mut vals, row, term.i, w_col, -(li + ui), 1.0);
+            push_row_3(
+                &mut rows,
+                &mut cols,
+                &mut vals,
+                row,
+                term.i,
+                w_col,
+                -(li + ui),
+                1.0,
+            );
             b.push(-li * ui);
             types.push(ConstraintType::Le);
             row += 1;
         } else {
             // LB: w − l_j x_i − l_i x_j ≥ −l_i l_j
-            push_row_4(&mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -lj, -li, 1.0);
+            push_row_4(
+                &mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -lj, -li, 1.0,
+            );
             b.push(-li * lj);
             types.push(ConstraintType::Ge);
             row += 1;
             // LB: w − u_j x_i − u_i x_j ≥ −u_i u_j
-            push_row_4(&mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -uj, -ui, 1.0);
+            push_row_4(
+                &mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -uj, -ui, 1.0,
+            );
             b.push(-ui * uj);
             types.push(ConstraintType::Ge);
             row += 1;
             // UB: w − u_j x_i − l_i x_j ≤ −l_i u_j
-            push_row_4(&mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -uj, -li, 1.0);
+            push_row_4(
+                &mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -uj, -li, 1.0,
+            );
             b.push(-li * uj);
             types.push(ConstraintType::Le);
             row += 1;
             // UB: w − l_j x_i − u_i x_j ≤ −u_i l_j
-            push_row_4(&mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -lj, -ui, 1.0);
+            push_row_4(
+                &mut rows, &mut cols, &mut vals, row, term.i, term.j, w_col, -lj, -ui, 1.0,
+            );
             b.push(-ui * lj);
             types.push(ConstraintType::Le);
             row += 1;
@@ -443,8 +484,14 @@ mod tests {
         let lb_alpha = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None).expect("α-BB");
         let lb_mc = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("McCormick");
         // 両 lb とも valid (≤ −2)、ただし McCormick は厳密に tight、α-BB は緩い。
-        assert!(lb_mc <= -2.0 + 1e-4, "McCormick lb {lb_mc} must underestimate global -2");
-        assert!(lb_alpha <= -2.0 + 1e-4, "α-BB lb {lb_alpha} must underestimate global -2");
+        assert!(
+            lb_mc <= -2.0 + 1e-4,
+            "McCormick lb {lb_mc} must underestimate global -2"
+        );
+        assert!(
+            lb_alpha <= -2.0 + 1e-4,
+            "α-BB lb {lb_alpha} must underestimate global -2"
+        );
         // McCormick が strict に tight ( > α-BB lb )
         assert!(
             lb_mc > lb_alpha + 1e-3,
@@ -464,7 +511,10 @@ mod tests {
         let p = build_problem(q, vec![0.0, 0.0], vec![(-1.0, 1.0); 2]);
         let opts = SolverOptions::default();
         let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("McCormick");
-        assert!(lb <= -1.0 + 1e-6, "lb {lb} must underestimate global min -1");
+        assert!(
+            lb <= -1.0 + 1e-6,
+            "lb {lb} must underestimate global min -1"
+        );
     }
 
     #[test]
@@ -483,7 +533,10 @@ mod tests {
         .unwrap();
         let opts = SolverOptions::default();
         let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None).expect("McCormick");
-        assert!(lb.is_finite() && lb <= -1.0 + 1e-4, "lb {lb} should be ≤ -1");
+        assert!(
+            lb.is_finite() && lb <= -1.0 + 1e-4,
+            "lb {lb} should be ≤ -1"
+        );
     }
 
     #[test]
@@ -517,14 +570,23 @@ mod tests {
         let opts = SolverOptions::default();
         let lb_full = solve_lifted_lp(&p, &p.bounds, &opts, None, true).expect("full");
         let lb_noop = solve_lifted_lp(&p, &p.bounds, &opts, None, false).expect("noop");
-        assert!(lb_noop.is_finite(), "noop must remain finite, got {lb_noop}");
+        assert!(
+            lb_noop.is_finite(),
+            "noop must remain finite, got {lb_noop}"
+        );
         assert!(
             lb_full > lb_noop + 0.5,
             "McCormick envelope must add real tightness: full={lb_full}, noop={lb_noop}"
         );
         // sanity: 両者とも global f*=0 を underestimate
-        assert!(lb_full <= 0.0 + 1e-4, "full lb {lb_full} must underestimate 0");
-        assert!(lb_noop <= 0.0 + 1e-4, "noop lb {lb_noop} must underestimate 0");
+        assert!(
+            lb_full <= 0.0 + 1e-4,
+            "full lb {lb_full} must underestimate 0"
+        );
+        assert!(
+            lb_noop <= 0.0 + 1e-4,
+            "noop lb {lb_noop} must underestimate 0"
+        );
     }
 
     /// Ge constraint type: x+y ≥ 1, min -x²-y² on [0,1]². global = -1 at (1,0)/(0,1)/(1,1)。
@@ -588,7 +650,10 @@ mod tests {
         let p_above = build_problem(q_above, vec![0.0], vec![(-1.0, 1.0)]);
         let lb = mccormick_lower_bound(&p_above, &p_above.bounds, &opts, None)
             .expect("above-threshold Q must yield lb");
-        assert!(lb.is_finite(), "above-threshold lb must be finite, got {lb}");
+        assert!(
+            lb.is_finite(),
+            "above-threshold lb must be finite, got {lb}"
+        );
     }
 
     /// 大規模 fixture (n=8): dense bilinear + box bound で BB 経路に乗らず純 lb 評価。
@@ -610,8 +675,7 @@ mod tests {
         }
         let q = CscMatrix::from_triplets(&rows, &cols, &vals, N, N).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, N).unwrap();
-        let p = QpProblem::new(q, vec![0.0; N], a, vec![], vec![(-1.0, 1.0); N], vec![])
-            .unwrap();
+        let p = QpProblem::new(q, vec![0.0; N], a, vec![], vec![(-1.0, 1.0); N], vec![]).unwrap();
         let opts = SolverOptions::default();
         let lb = mccormick_lower_bound(&p, &p.bounds, &opts, None)
             .expect("n=8 dense bilinear must solve");

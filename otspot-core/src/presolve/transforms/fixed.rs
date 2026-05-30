@@ -23,7 +23,8 @@ pub(super) fn step1_fixed_variable(st: &mut PresolveState) -> Result<(), Presolv
             }
             st.obj_offset += st.c[j] * value;
             st.removed_cols[j] = true;
-            st.postsolve_stack.push(PostsolveStep::FixedVariable { orig_col: j, value });
+            st.postsolve_stack
+                .push(PostsolveStep::FixedVariable { orig_col: j, value });
         }
     }
     Ok(())

@@ -42,7 +42,10 @@ pub(crate) struct HarrisRatioTest {
 
 impl HarrisRatioTest {
     pub fn new(harris_tol: f64, pivot_tol: f64) -> Self {
-        Self { harris_tol, pivot_tol }
+        Self {
+            harris_tol,
+            pivot_tol,
+        }
     }
 }
 
@@ -60,7 +63,9 @@ impl RatioTestStrategy for HarrisRatioTest {
         // Pass 1: θ_max = min_j { (r_j + α_H) / trow[j] } for trow[j] > pivot_tol
         let mut theta_max = f64::INFINITY;
         for j in 0..n_price {
-            if is_basic[j] { continue; }
+            if is_basic[j] {
+                continue;
+            }
             if trow[j] > pivot_tol {
                 let relaxed_ratio = (reduced_costs[j] + alpha_h) / trow[j];
                 if relaxed_ratio < theta_max {
@@ -81,7 +86,9 @@ impl RatioTestStrategy for HarrisRatioTest {
         let mut best_theta = f64::INFINITY;
 
         for j in 0..n_price {
-            if is_basic[j] { continue; }
+            if is_basic[j] {
+                continue;
+            }
             if trow[j] > pivot_tol {
                 let ratio = reduced_costs[j] / trow[j];
                 if ratio <= theta_max {
@@ -103,10 +110,13 @@ impl RatioTestStrategy for HarrisRatioTest {
         let mut fallback_j: Option<usize> = None;
         let mut fallback_theta = f64::INFINITY;
         for j in 0..n_price {
-            if is_basic[j] { continue; }
+            if is_basic[j] {
+                continue;
+            }
             if trow[j] > pivot_tol {
                 let ratio = reduced_costs[j] / trow[j];
-                if fallback_j.is_none() || ratio < fallback_theta
+                if fallback_j.is_none()
+                    || ratio < fallback_theta
                     || (ratio == fallback_theta && j < fallback_j.unwrap())
                 {
                     fallback_j = Some(j);
@@ -185,7 +195,11 @@ mod tests {
         assert!(result.is_some());
         let (col, theta) = result.unwrap();
         assert_eq!(col, 1, "j=1 should be selected (only candidate)");
-        assert!((theta - 0.2).abs() < 1e-6, "theta should be ~0.2, got {}", theta);
+        assert!(
+            (theta - 0.2).abs() < 1e-6,
+            "theta should be ~0.2, got {}",
+            theta
+        );
     }
 
     /// Pass 2: 複数候補から |trow[j]| 最大が選ばれる（数値安定性重視）
@@ -204,7 +218,10 @@ mod tests {
         let result = harris.select_entering(&trow, &r, &is_basic, 3);
         assert!(result.is_some());
         let (col, _theta) = result.unwrap();
-        assert_eq!(col, 1, "j=1 has largest |trow[j]|=5.0, should be selected for stability");
+        assert_eq!(
+            col, 1,
+            "j=1 has largest |trow[j]|=5.0, should be selected for stability"
+        );
     }
 
     /// Pass 2の安定性: 同率の候補が複数ある時に最大|trow[j]|が選ばれる
@@ -241,7 +258,10 @@ mod tests {
         let is_basic = no_basic(2);
         let harris = HarrisRatioTest::new(0.0, PIVOT_TOL);
         let result = harris.select_entering(&trow, &r, &is_basic, 2);
-        assert!(result.is_some(), "Should return Some even with harris_tol=0");
+        assert!(
+            result.is_some(),
+            "Should return Some even with harris_tol=0"
+        );
         let (col, _) = result.unwrap();
         assert_eq!(col, 1, "j=1 (ratio=0.05) should be the candidate");
     }
@@ -328,5 +348,4 @@ mod tests {
         assert_eq!(col, 1);
         assert!((theta - 0.5).abs() < 1e-9);
     }
-
 }

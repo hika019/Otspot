@@ -6,10 +6,10 @@
 //!   A.2 QPS DuplicateSection error.
 //!   A.3 QPS unknown section reject.
 
+use otspot::constraint;
 use otspot::io::mps::parse_mps;
 use otspot::io::qps::{parse_qps_str, QpsError};
 use otspot::model::{Model, ModelError};
-use otspot::constraint;
 
 // ── A.1 MPS OBJSENSE MAX ─────────────────────────────────────────────────────
 
@@ -177,9 +177,17 @@ fn add_constraint_accepts_same_model_variable() {
     m.minimize(x);
     m.add_constraint(constraint!(x <= 5.0));
     let result = m.solve();
-    assert!(result.is_ok(), "same-model constraint must succeed, got {:?}", result);
+    assert!(
+        result.is_ok(),
+        "same-model constraint must succeed, got {:?}",
+        result
+    );
     let r = result.unwrap();
-    assert!(r.objective_value.abs() < 1e-6, "expected obj≈0, got {}", r.objective_value);
+    assert!(
+        r.objective_value.abs() < 1e-6,
+        "expected obj≈0, got {}",
+        r.objective_value
+    );
 }
 
 // ── A.2 QPS DuplicateSection error ───────────────────────────────────────────

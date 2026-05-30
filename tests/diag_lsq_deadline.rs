@@ -117,7 +117,11 @@ fn build_lsq_trigger_lp(n_del: usize, m_main: usize) -> LpProblem {
     let bounds = vec![(0.0_f64, f64::INFINITY); n_total];
 
     LpProblem::new_general(
-        c, a, b, cts, bounds,
+        c,
+        a,
+        b,
+        cts,
+        bounds,
         Some(format!("lsq_trigger_del{n_del}_m{m_main}")),
     )
     .expect("LpProblem::new_general")

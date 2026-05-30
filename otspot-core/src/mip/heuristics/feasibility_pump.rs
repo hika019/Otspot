@@ -100,7 +100,9 @@ pub(crate) fn run_feasibility_pump(
 
         let new_x_int = round_integer_vars(&x_lp, &mask);
 
-        let stalled = prev_x_int.as_ref().is_some_and(|p| integers_same(p, &new_x_int, &mask));
+        let stalled = prev_x_int
+            .as_ref()
+            .is_some_and(|p| integers_same(p, &new_x_int, &mask));
         stall_count = if stalled { stall_count + 1 } else { 0 };
 
         x_int = if stall_count >= STALL_THRESHOLD {
@@ -138,16 +140,23 @@ fn signed_fp_cost(x_lp: &[f64], x_int: &[f64], mask: &[bool], n: usize) -> Vec<f
             continue;
         }
         let diff = x_lp[j] - x_int[j];
-        cost[j] = if diff > 0.0 { 1.0 } else if diff < 0.0 { -1.0 } else { 0.0 };
+        cost[j] = if diff > 0.0 {
+            1.0
+        } else if diff < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
     }
     cost
 }
 
 /// True when the integer components of `a` and `b` are the same rounded value.
 fn integers_same(a: &[f64], b: &[f64], mask: &[bool]) -> bool {
-    a.iter().zip(b.iter()).zip(mask.iter()).all(|((&ai, &bi), &is_int)| {
-        !is_int || (ai - bi).abs() < HALF_INTEGER_THRESHOLD
-    })
+    a.iter()
+        .zip(b.iter())
+        .zip(mask.iter())
+        .all(|((&ai, &bi), &is_int)| !is_int || (ai - bi).abs() < HALF_INTEGER_THRESHOLD)
 }
 
 /// Perturb `x_int` by flipping the rounding direction of the `flip_count`
@@ -180,7 +189,9 @@ fn perturb(x_int: &[f64], x_lp: &[f64], mask: &[bool], flip_count: usize) -> Vec
 /// rounded integer solution — a bound violation here reflects a genuine
 /// infeasibility, not floating-point noise.
 fn validate_against_bounds(x: &[f64], bounds: &[(f64, f64)]) -> bool {
-    x.iter().zip(bounds.iter()).all(|(&xi, &(lb, ub))| lb <= xi && xi <= ub)
+    x.iter()
+        .zip(bounds.iter())
+        .all(|(&xi, &(lb, ub))| lb <= xi && xi <= ub)
 }
 
 /// Returns `true` if `x` satisfies all linear constraints within [`PIVOT_TOL`].
@@ -197,17 +208,25 @@ fn validate_against_constraints(
         Ok(v) => v,
         Err(_) => return false,
     };
-    ax.iter().zip(b.iter()).zip(constraint_types.iter()).all(|((&ax_i, &b_i), &ct)| match ct {
-        ConstraintType::Le => ax_i <= b_i + PIVOT_TOL,
-        ConstraintType::Ge => ax_i >= b_i - PIVOT_TOL,
-        ConstraintType::Eq => (ax_i - b_i).abs() <= PIVOT_TOL,
-    })
+    ax.iter()
+        .zip(b.iter())
+        .zip(constraint_types.iter())
+        .all(|((&ax_i, &b_i), &ct)| match ct {
+            ConstraintType::Le => ax_i <= b_i + PIVOT_TOL,
+            ConstraintType::Ge => ax_i >= b_i - PIVOT_TOL,
+            ConstraintType::Eq => (ax_i - b_i).abs() <= PIVOT_TOL,
+        })
 }
 
 /// Build a `SolverResult` from a feasible integer solution, original cost vector, and constant offset.
 fn make_result(c: &[f64], obj_offset: f64, x: Vec<f64>) -> SolverResult {
     let obj: f64 = c.iter().zip(x.iter()).map(|(ci, xi)| ci * xi).sum::<f64>() + obj_offset;
-    SolverResult { status: SolveStatus::Optimal, objective: obj, solution: x, ..SolverResult::default() }
+    SolverResult {
+        status: SolveStatus::Optimal,
+        objective: obj,
+        solution: x,
+        ..SolverResult::default()
+    }
 }
 
 #[cfg(test)]
@@ -218,10 +237,18 @@ mod tests {
     use crate::sparse::CscMatrix;
 
     fn opts() -> SolverOptions {
-        SolverOptions { timeout_secs: Some(10.0), ..Default::default() }
+        SolverOptions {
+            timeout_secs: Some(10.0),
+            ..Default::default()
+        }
     }
 
-    fn single_constraint_lp(c: Vec<f64>, a_vals: &[f64], b: f64, bounds: Vec<(f64, f64)>) -> LpProblem {
+    fn single_constraint_lp(
+        c: Vec<f64>,
+        a_vals: &[f64],
+        b: f64,
+        bounds: Vec<(f64, f64)>,
+    ) -> LpProblem {
         let n = c.len();
         let rows: Vec<usize> = vec![0; n];
         let cols: Vec<usize> = (0..n).collect();
@@ -262,12 +289,14 @@ mod tests {
             7.0,
             vec![(0.0, 1.0); 4],
         );
-        let r = run_feasibility_pump(&lp, &[0, 1, 2, 3], 1e-6, &opts())
-            .expect("FP must converge");
+        let r = run_feasibility_pump(&lp, &[0, 1, 2, 3], 1e-6, &opts()).expect("FP must converge");
         let frac: f64 = r.solution.iter().map(|&v| (v - v.round()).abs()).sum();
         assert!(frac < 1e-6, "solution not integer: {:?}", r.solution);
-        let obj_recheck: f64 =
-            [-3.0f64, -5.0, -2.0, -4.0].iter().zip(r.solution.iter()).map(|(c, x)| c * x).sum();
+        let obj_recheck: f64 = [-3.0f64, -5.0, -2.0, -4.0]
+            .iter()
+            .zip(r.solution.iter())
+            .map(|(c, x)| c * x)
+            .sum();
         assert!((r.objective - obj_recheck).abs() < 1e-6);
     }
 
@@ -283,9 +312,13 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, 1.0)],
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let result = run_feasibility_pump(&lp, &[0], 1e-6, &opts());
-        assert!(result.is_none(), "expected None for integer-infeasible problem, got Some");
+        assert!(
+            result.is_none(),
+            "expected None for integer-infeasible problem, got Some"
+        );
     }
 
     /// FP incumbent objective is computed on the rounded solution, not the raw LP point.
@@ -305,8 +338,16 @@ mod tests {
         let lp = single_constraint_lp(vec![1.0], &[1.0], 1.5, vec![(near_one, 1.5)]);
         let r = run_feasibility_pump(&lp, &[0], 1e-6, &opts())
             .expect("LP root integer-feasible within tol, rounded in bounds → Some");
-        assert!((r.solution[0] - 1.0).abs() < 1e-9, "solution should be rounded to 1.0, got {}", r.solution[0]);
-        assert!((r.objective - 1.0).abs() < 1e-9, "objective should use rounded value 1.0, got {}", r.objective);
+        assert!(
+            (r.solution[0] - 1.0).abs() < 1e-9,
+            "solution should be rounded to 1.0, got {}",
+            r.solution[0]
+        );
+        assert!(
+            (r.objective - 1.0).abs() < 1e-9,
+            "objective should use rounded value 1.0, got {}",
+            r.objective
+        );
     }
 
     /// FP rejects a rounded incumbent that violates the original variable bounds.

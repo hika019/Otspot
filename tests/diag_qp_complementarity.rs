@@ -42,7 +42,8 @@ fn assert_optimal_objective(name: &str, res: &SolverResult, prob: &QpProblem, ex
         assert!(
             rel < 1e-3,
             "{}: status=Optimal だが ref obj から rel={:.3e} 乖離 (Optimal の保証違反)",
-            name, rel
+            name,
+            rel
         );
     }
 }
@@ -146,13 +147,25 @@ fn synth_inequality_active_complementarity() {
     let cts = vec![ConstraintType::Le];
     let prob = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
     let res = solve_qp_with(&prob, &SolverOptions::default());
-    assert_eq!(res.status, SolveStatus::Optimal, "trivial inequality QP must converge");
+    assert_eq!(
+        res.status,
+        SolveStatus::Optimal,
+        "trivial inequality QP must converge"
+    );
     let internal = recompute_obj(&prob, &res.solution);
     // 0.5*1 + (-2)*1 = -1.5 (= 1/2(1-2)^2 - 2 の constant 部抜き)
     let expected = -1.5;
-    assert!((internal - expected).abs() < 1e-6, "obj={:.6e} ref=-1.5", internal);
+    assert!(
+        (internal - expected).abs() < 1e-6,
+        "obj={:.6e} ref=-1.5",
+        internal
+    );
     let comp = ineq_complementarity_rel(&prob, &res.solution, &res.dual_solution);
-    assert!(comp < 1e-6, "complementarity rel={:.3e} (active constraint)", comp);
+    assert!(
+        comp < 1e-6,
+        "complementarity rel={:.3e} (active constraint)",
+        comp
+    );
 }
 
 /// min 1/2 x^2  s.t.  x <= 10  (inactive).
@@ -169,7 +182,11 @@ fn synth_inequality_inactive_complementarity() {
     let res = solve_qp_with(&prob, &SolverOptions::default());
     assert_eq!(res.status, SolveStatus::Optimal);
     let comp = ineq_complementarity_rel(&prob, &res.solution, &res.dual_solution);
-    assert!(comp < 1e-6, "inactive 制約で complementarity が崩れている: {:.3e}", comp);
+    assert!(
+        comp < 1e-6,
+        "inactive 制約で complementarity が崩れている: {:.3e}",
+        comp
+    );
     let bcomp = bound_complementarity_rel(&prob, &res.solution, &res.bound_duals);
     assert!(bcomp < 1e-6, "bound complementarity: {:.3e}", bcomp);
 }
@@ -191,7 +208,15 @@ fn synth_two_inequality_active_inactive() {
     let internal = recompute_obj(&prob, &res.solution);
     // 0.5*(0.25+0.25) + (-0.5 + -0.5) = 0.25 - 1 = -0.75.
     let expected = -0.75;
-    assert!((internal - expected).abs() < 1e-6, "obj={:.6e} ref=-0.75", internal);
+    assert!(
+        (internal - expected).abs() < 1e-6,
+        "obj={:.6e} ref=-0.75",
+        internal
+    );
     let comp = ineq_complementarity_rel(&prob, &res.solution, &res.dual_solution);
-    assert!(comp < 1e-6, "complementarity (active + inactive 混在) rel={:.3e}", comp);
+    assert!(
+        comp < 1e-6,
+        "complementarity (active + inactive 混在) rel={:.3e}",
+        comp
+    );
 }

@@ -5,11 +5,11 @@
 //! - `refine_dual_lsq_irls`: IRLS で componentwise rel を最小化 (L∞ 漸近)。
 
 use crate::qp::kkt_resid;
-use crate::tolerances::any_nonfinite;
 use crate::qp::linalg::build_aat_upper_csc;
 use crate::qp::postsolve::postprocess::compute_lsq_dual_y;
 use crate::qp::problem::QpProblem;
 use crate::qp::FX_TOL;
+use crate::tolerances::any_nonfinite;
 
 pub(crate) fn refine_dual_lsq(
     problem: &QpProblem,
@@ -272,7 +272,6 @@ pub(crate) fn refine_dual_lsq_irls(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,15 +368,8 @@ mod tests {
         let c = vec![100.0_f64, 0.0_f64];
         let b = vec![0.5_f64];
         let bounds = vec![(-10.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
-        let problem = QpProblem::new(
-            q,
-            c,
-            a,
-            b,
-            bounds,
-            vec![crate::problem::ConstraintType::Eq],
-        )
-        .unwrap();
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
         let mut result_with_mask = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![0.0_f64, 0.5_f64],
@@ -411,15 +403,8 @@ mod tests {
         let c = vec![100.0_f64, 0.0_f64];
         let b = vec![0.5_f64];
         let bounds = vec![(-10.0_f64, 10.0_f64), (-10.0_f64, 10.0_f64)];
-        let problem = QpProblem::new(
-            q,
-            c,
-            a,
-            b,
-            bounds,
-            vec![crate::problem::ConstraintType::Eq],
-        )
-        .unwrap();
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
         let mut result = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![0.0_f64, 0.5_f64],

@@ -52,14 +52,7 @@ fn sentinel_bilinear_zero_diag_status_not_optimal() {
 /// 検出済み (zero-diag 寄与なし) なので、これは control case。
 #[test]
 fn sentinel_mixed_zero_neg_diag_status_not_optimal() {
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 1],
-        &[1, 0, 1],
-        &[1.0, 1.0, -1.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 1], &[1, 0, 1], &[1.0, 1.0, -1.0], 2, 2).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
     let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2]).unwrap();
     let status = solve(&p);
@@ -75,23 +68,10 @@ fn sentinel_mixed_zero_neg_diag_status_not_optimal() {
 /// (LDL^T pre-check 通過、ZeroPivot at col 0)。
 #[test]
 fn sentinel_zero_diag_chain_3var_status_not_optimal() {
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 1, 2],
-        &[1, 0, 2, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        3,
-        3,
-    )
-    .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 1, 2], &[1, 0, 2, 1], &[1.0, 1.0, 1.0, 1.0], 3, 3)
+        .unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 3).unwrap();
-    let p = QpProblem::new_all_le(
-        q,
-        vec![0.0; 3],
-        a,
-        vec![],
-        vec![(-1.0, 1.0); 3],
-    )
-    .unwrap();
+    let p = QpProblem::new_all_le(q, vec![0.0; 3], a, vec![], vec![(-1.0, 1.0); 3]).unwrap();
     let status = solve(&p);
     assert!(
         !matches!(status, SolveStatus::Optimal),
@@ -105,14 +85,8 @@ fn sentinel_zero_diag_chain_3var_status_not_optimal() {
 #[test]
 fn sentinel_psd_q_remains_optimal() {
     // Q=[[2,1],[1,2]] PD (λ=1, 3), box [-1,1]²。
-    let q = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[2.0, 1.0, 1.0, 2.0],
-        2,
-        2,
-    )
-    .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
+        .unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
     let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2]).unwrap();
     let status = solve(&p);

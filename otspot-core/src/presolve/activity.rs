@@ -160,8 +160,16 @@ pub(crate) fn propagate_row_bounds(
         let (old_lb, old_ub) = bounds[j];
         let is_int = int_mask.and_then(|m| m.get(j)).copied().unwrap_or(false);
 
-        let rest_inf_lb = if e_lb_inf[k] { inf_lb_count - 1 } else { inf_lb_count };
-        let rest_inf_ub = if e_ub_inf[k] { inf_ub_count - 1 } else { inf_ub_count };
+        let rest_inf_lb = if e_lb_inf[k] {
+            inf_lb_count - 1
+        } else {
+            inf_lb_count
+        };
+        let rest_inf_ub = if e_ub_inf[k] {
+            inf_ub_count - 1
+        } else {
+            inf_ub_count
+        };
         let rest_lb = row_lb - e_lb_contrib[k];
         let rest_ub = row_ub - e_ub_contrib[k];
         let rest_lb_fin = rest_inf_lb == 0;
@@ -174,56 +182,104 @@ pub(crate) fn propagate_row_bounds(
             ConstraintType::Le => {
                 if a_ij > 0.0 && rest_lb_fin {
                     let mut implied_ub = (b - rest_lb) / a_ij;
-                    if is_int { implied_ub = integer_floor(implied_ub); }
-                    if implied_ub < old_lb - ZERO_TOL { return None; }
-                    if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                    if is_int {
+                        implied_ub = integer_floor(implied_ub);
+                    }
+                    if implied_ub < old_lb - ZERO_TOL {
+                        return None;
+                    }
+                    if implied_ub < new_ub - ZERO_TOL {
+                        new_ub = implied_ub;
+                    }
                 } else if a_ij < 0.0 && rest_lb_fin {
                     let mut implied_lb = (b - rest_lb) / a_ij;
-                    if is_int { implied_lb = integer_ceil(implied_lb); }
-                    if implied_lb > old_ub + ZERO_TOL { return None; }
-                    if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                    if is_int {
+                        implied_lb = integer_ceil(implied_lb);
+                    }
+                    if implied_lb > old_ub + ZERO_TOL {
+                        return None;
+                    }
+                    if implied_lb > new_lb + ZERO_TOL {
+                        new_lb = implied_lb;
+                    }
                 }
             }
             ConstraintType::Ge => {
                 if a_ij > 0.0 && rest_ub_fin {
                     let mut implied_lb = (b - rest_ub) / a_ij;
-                    if is_int { implied_lb = integer_ceil(implied_lb); }
-                    if implied_lb > old_ub + ZERO_TOL { return None; }
-                    if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                    if is_int {
+                        implied_lb = integer_ceil(implied_lb);
+                    }
+                    if implied_lb > old_ub + ZERO_TOL {
+                        return None;
+                    }
+                    if implied_lb > new_lb + ZERO_TOL {
+                        new_lb = implied_lb;
+                    }
                 } else if a_ij < 0.0 && rest_ub_fin {
                     let mut implied_ub = (b - rest_ub) / a_ij;
-                    if is_int { implied_ub = integer_floor(implied_ub); }
-                    if implied_ub < old_lb - ZERO_TOL { return None; }
-                    if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                    if is_int {
+                        implied_ub = integer_floor(implied_ub);
+                    }
+                    if implied_ub < old_lb - ZERO_TOL {
+                        return None;
+                    }
+                    if implied_ub < new_ub - ZERO_TOL {
+                        new_ub = implied_ub;
+                    }
                 }
             }
             ConstraintType::Eq => {
                 if a_ij > 0.0 {
                     if rest_lb_fin {
                         let mut implied_ub = (b - rest_lb) / a_ij;
-                        if is_int { implied_ub = integer_floor(implied_ub); }
-                        if implied_ub < old_lb - ZERO_TOL { return None; }
-                        if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                        if is_int {
+                            implied_ub = integer_floor(implied_ub);
+                        }
+                        if implied_ub < old_lb - ZERO_TOL {
+                            return None;
+                        }
+                        if implied_ub < new_ub - ZERO_TOL {
+                            new_ub = implied_ub;
+                        }
                     }
                     if rest_ub_fin {
                         let mut implied_lb = (b - rest_ub) / a_ij;
-                        if is_int { implied_lb = integer_ceil(implied_lb); }
-                        if implied_lb > old_ub + ZERO_TOL { return None; }
-                        if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                        if is_int {
+                            implied_lb = integer_ceil(implied_lb);
+                        }
+                        if implied_lb > old_ub + ZERO_TOL {
+                            return None;
+                        }
+                        if implied_lb > new_lb + ZERO_TOL {
+                            new_lb = implied_lb;
+                        }
                     }
                 } else {
                     // a_ij < 0
                     if rest_lb_fin {
                         let mut implied_lb = (b - rest_lb) / a_ij;
-                        if is_int { implied_lb = integer_ceil(implied_lb); }
-                        if implied_lb > old_ub + ZERO_TOL { return None; }
-                        if implied_lb > new_lb + ZERO_TOL { new_lb = implied_lb; }
+                        if is_int {
+                            implied_lb = integer_ceil(implied_lb);
+                        }
+                        if implied_lb > old_ub + ZERO_TOL {
+                            return None;
+                        }
+                        if implied_lb > new_lb + ZERO_TOL {
+                            new_lb = implied_lb;
+                        }
                     }
                     if rest_ub_fin {
                         let mut implied_ub = (b - rest_ub) / a_ij;
-                        if is_int { implied_ub = integer_floor(implied_ub); }
-                        if implied_ub < old_lb - ZERO_TOL { return None; }
-                        if implied_ub < new_ub - ZERO_TOL { new_ub = implied_ub; }
+                        if is_int {
+                            implied_ub = integer_floor(implied_ub);
+                        }
+                        if implied_ub < old_lb - ZERO_TOL {
+                            return None;
+                        }
+                        if implied_ub < new_ub - ZERO_TOL {
+                            new_ub = implied_ub;
+                        }
                     }
                 }
             }

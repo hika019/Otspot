@@ -5,12 +5,12 @@ use super::warm_start::apply_qp_warm_start;
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{factorize_kkt_with_cached_perm_par, KktConfig};
 use crate::linalg::timeout::TimeoutCtx;
-use crate::tolerances::UNDERFLOW_GUARD;
-use faer::Par;
 use crate::options::SolverOptions;
 use crate::qp::ipm_core::kkt::build_augmented_system;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
+use crate::tolerances::UNDERFLOW_GUARD;
+use faer::Par;
 
 pub(super) struct InitialPoint {
     pub(super) x: Vec<f64>,
@@ -68,7 +68,11 @@ pub(super) fn build_initial_point(
         .zip(ax0.iter())
         .enumerate()
         .map(|(i, (&bi, &axi))| {
-            if is_eq_ext[i] { 0.0 } else { (bi - axi).max(1.0) }
+            if is_eq_ext[i] {
+                0.0
+            } else {
+                (bi - axi).max(1.0)
+            }
         })
         .collect();
     let y0: Vec<f64> = (0..m_ext)
@@ -82,8 +86,7 @@ pub(super) fn build_initial_point(
     // warm start が渡されていれば Mehrotra init を skip し、interior 補正のみ適用する。
     let warm_mu = if let Some(ws) = options.warm_start_qp.as_ref() {
         apply_qp_warm_start(
-            ws, problem, a_ext, b_ext, is_eq_ext, m_orig, m_ext,
-            &mut x, &mut y, &mut s,
+            ws, problem, a_ext, b_ext, is_eq_ext, m_orig, m_ext, &mut x, &mut y, &mut s,
         )
     } else {
         None
@@ -96,9 +99,18 @@ pub(super) fn build_initial_point(
             max_l_nnz: options.ipm.effective_max_l_nnz(),
         };
         mehrotra_cold_init(
-            problem, a_ext, b_ext, is_eq_ext, m_ext,
-            &ax0, timeout_ctx, par, &kkt_cfg,
-            &mut x, &mut s, &mut y,
+            problem,
+            a_ext,
+            b_ext,
+            is_eq_ext,
+            m_ext,
+            &ax0,
+            timeout_ctx,
+            par,
+            &kkt_cfg,
+            &mut x,
+            &mut s,
+            &mut y,
         );
     }
 
@@ -123,7 +135,9 @@ fn mehrotra_cold_init(
 ) {
     let n = problem.num_vars;
 
-    let r_p: Vec<f64> = b_ext.iter().zip(ax0.iter())
+    let r_p: Vec<f64> = b_ext
+        .iter()
+        .zip(ax0.iter())
         .map(|(&bi, &axi)| bi - axi)
         .collect();
     let r_p_inf = r_p.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
@@ -132,15 +146,26 @@ fn mehrotra_cold_init(
         let sigma_zero = vec![0.0_f64; m_ext];
         let k_init = build_augmented_system(&q_zero, a_ext, &sigma_zero, 1.0, 1.0);
         let perm_init = amd_with_deadline(
-            k_init.nrows, &k_init.col_ptr, &k_init.row_ind, timeout_ctx.deadline,
+            k_init.nrows,
+            &k_init.col_ptr,
+            &k_init.row_ind,
+            timeout_ctx.deadline,
         );
         if let Ok(fac_init) = factorize_kkt_with_cached_perm_par(
-            &k_init, &perm_init, timeout_ctx.deadline, kkt_cfg, Some(n), par,
+            &k_init,
+            &perm_init,
+            timeout_ctx.deadline,
+            kkt_cfg,
+            Some(n),
+            par,
         ) {
             let mut rhs_init = vec![0.0_f64; n + m_ext];
             rhs_init[n..(m_ext + n)].copy_from_slice(&r_p[..m_ext]);
             let mut sol_init = vec![0.0_f64; n + m_ext];
-            if fac_init.solve_with_deadline(&rhs_init, &mut sol_init, None).is_ok() {
+            if fac_init
+                .solve_with_deadline(&rhs_init, &mut sol_init, None)
+                .is_ok()
+            {
                 let dx_inf = sol_init[..n].iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
                 if dx_inf.is_finite() && dx_inf < 1e15 {
                     for j in 0..n {
@@ -172,38 +197,68 @@ fn mehrotra_cold_init(
             ax_new[a_ext.row_ind[k]] += a_ext.values[k] * x[col];
         }
     }
-    let s_hat: Vec<f64> = b_ext.iter().zip(ax_new.iter()).enumerate()
+    let s_hat: Vec<f64> = b_ext
+        .iter()
+        .zip(ax_new.iter())
+        .enumerate()
         .map(|(i, (&bi, &axi))| if is_eq_ext[i] { 0.0 } else { bi - axi })
         .collect();
     let y_hat: Vec<f64> = (0..m_ext)
         .map(|i| if is_eq_ext[i] { 0.0 } else { 1.0 })
         .collect();
 
-    let s_min_ineq = s_hat.iter().zip(is_eq_ext.iter())
+    let s_min_ineq = s_hat
+        .iter()
+        .zip(is_eq_ext.iter())
         .filter_map(|(&v, &eq)| if eq { None } else { Some(v) })
         .fold(f64::INFINITY, f64::min);
-    let y_min_ineq = y_hat.iter().zip(is_eq_ext.iter())
+    let y_min_ineq = y_hat
+        .iter()
+        .zip(is_eq_ext.iter())
         .filter_map(|(&v, &eq)| if eq { None } else { Some(v) })
         .fold(f64::INFINITY, f64::min);
     let delta_s = (-1.5 * s_min_ineq).max(0.0) + 1.0;
     let delta_y = (-1.5 * y_min_ineq).max(0.0) + 1.0;
 
-    let s_pos: Vec<f64> = s_hat.iter().enumerate()
+    let s_pos: Vec<f64> = s_hat
+        .iter()
+        .enumerate()
         .map(|(i, &v)| if is_eq_ext[i] { 0.0 } else { v + delta_s })
         .collect();
-    let y_pos: Vec<f64> = y_hat.iter().enumerate()
+    let y_pos: Vec<f64> = y_hat
+        .iter()
+        .enumerate()
         .map(|(i, &v)| if is_eq_ext[i] { 0.0 } else { v + delta_y })
         .collect();
 
-    let sy_sum: f64 = s_pos.iter().zip(y_pos.iter()).map(|(&si, &yi)| si * yi).sum();
+    let sy_sum: f64 = s_pos
+        .iter()
+        .zip(y_pos.iter())
+        .map(|(&si, &yi)| si * yi)
+        .sum();
     let s_sum_pos: f64 = s_pos.iter().sum();
     let y_sum_pos: f64 = y_pos.iter().sum();
-    let delta_s_corr = if y_sum_pos > UNDERFLOW_GUARD { sy_sum / (2.0 * y_sum_pos) } else { 0.0 };
-    let delta_y_corr = if s_sum_pos > UNDERFLOW_GUARD { sy_sum / (2.0 * s_sum_pos) } else { 0.0 };
+    let delta_s_corr = if y_sum_pos > UNDERFLOW_GUARD {
+        sy_sum / (2.0 * y_sum_pos)
+    } else {
+        0.0
+    };
+    let delta_y_corr = if s_sum_pos > UNDERFLOW_GUARD {
+        sy_sum / (2.0 * s_sum_pos)
+    } else {
+        0.0
+    };
 
     for i in 0..m_ext {
-        s[i] = if is_eq_ext[i] { 0.0 } else { s_pos[i] + delta_s_corr };
-        y[i] = if is_eq_ext[i] { 0.0 } else { y_pos[i] + delta_y_corr };
+        s[i] = if is_eq_ext[i] {
+            0.0
+        } else {
+            s_pos[i] + delta_s_corr
+        };
+        y[i] = if is_eq_ext[i] {
+            0.0
+        } else {
+            y_pos[i] + delta_y_corr
+        };
     }
-
 }

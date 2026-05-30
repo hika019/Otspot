@@ -283,8 +283,16 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
 
     let bounds: Vec<(f64, f64)> = (0..n)
         .map(|i| {
-            let lb = if is_neg_inf(lb_var[i]) { f64::NEG_INFINITY } else { lb_var[i] };
-            let ub = if is_pos_inf(ub_var[i]) { f64::INFINITY } else { ub_var[i] };
+            let lb = if is_neg_inf(lb_var[i]) {
+                f64::NEG_INFINITY
+            } else {
+                lb_var[i]
+            };
+            let ub = if is_pos_inf(ub_var[i]) {
+                f64::INFINITY
+            } else {
+                ub_var[i]
+            };
             (lb, ub)
         })
         .collect();
@@ -302,8 +310,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
                 qc[aug_row].triplets = trips.clone();
             }
             if let Some(aug_row) = aug_lb_row[k] {
-                qc[aug_row].triplets =
-                    trips.iter().map(|&(r, c, v)| (r, c, -v)).collect();
+                qc[aug_row].triplets = trips.iter().map(|&(r, c, v)| (r, c, -v)).collect();
             }
         }
         qc
@@ -329,9 +336,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
                 prob.bounds,
                 None,
             )
-            .map_err(|e: otspot_core::error::SolverError| {
-                QplibError::ParseError(e.to_string())
-            })?;
+            .map_err(|e: otspot_core::error::SolverError| QplibError::ParseError(e.to_string()))?;
             lp.obj_offset = q0_offset;
             let milp = MilpProblem::new(lp, integer_vars).map_err(
                 |e: otspot_core::mip::MipProblemError| QplibError::ParseError(e.to_string()),

@@ -1,10 +1,10 @@
 //! IP-PMM (Pougkakiotis-Gondzio 2021) による QP 求解。
 
 pub(crate) mod common;
-pub(crate) mod kkt;
 pub(crate) mod ippmm;
-pub(crate) mod solver_loop;
+pub(crate) mod kkt;
 pub(crate) mod scaling;
+pub(crate) mod solver_loop;
 
 use crate::options::SolverOptions;
 use crate::problem::SolverResult;
@@ -43,8 +43,10 @@ pub fn solve_qp_ippmm(problem: &QpProblem, options: &SolverOptions) -> SolverRes
 
 #[cfg(test)]
 mod tests {
+    use super::scaling::{
+        compute_amplification, post_verify_solution, unscale_ipm_result, EPS_FLOOR,
+    };
     use super::*;
-    use super::scaling::{unscale_ipm_result, compute_amplification, EPS_FLOOR, post_verify_solution};
     use crate::linalg::ruiz::RuizScaler;
     use crate::options::SolverOptions;
     use crate::problem::SolveStatus;
@@ -106,19 +108,17 @@ mod tests {
     fn test_ipm_equality_constraint() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1.0, 1.0, -1.0, -1.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        let opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..default_opts()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
         close(result.solution[0], 0.5, "x[0]");
@@ -137,7 +137,10 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions { timeout_secs: Some(10.0), ..default_opts() };
+        let mut opts = SolverOptions {
+            timeout_secs: Some(10.0),
+            ..default_opts()
+        };
         opts.ipm.eps = 1e-7;
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
@@ -149,14 +152,7 @@ mod tests {
     /// min 1/2 w^T Σ w  s.t. sum(w)=1, w >= 0 (対称ポートフォリオ)
     #[test]
     fn test_ipm_portfolio() {
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[2.0, 2.0, 2.0],
-            3,
-            3,
-        )
-        .unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
         let c = vec![0.0, 0.0, 0.0];
         let a = CscMatrix::from_triplets(
             &[0, 0, 0, 1, 1, 1, 2, 3, 4],
@@ -187,15 +183,18 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let mut opts = SolverOptions { timeout_secs: Some(0.0001), ..Default::default() };
+        let mut opts = SolverOptions {
+            timeout_secs: Some(0.0001),
+            ..Default::default()
+        };
         opts.use_ruiz_scaling = false;
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
-            "got {:?}", result.status
+            "got {:?}",
+            result.status
         );
     }
-
 
     /// scaled 空間で Optimal でも元空間 pfeas 違反なら降格すべき。
     #[test]
@@ -223,7 +222,12 @@ mod tests {
         let eps = 1e-6_f64;
         let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
 
-        assert_ne!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+        assert_ne!(
+            result.status,
+            SolveStatus::Optimal,
+            "got {:?}",
+            result.status
+        );
         assert_eq!(result.status, SolveStatus::SuboptimalSolution);
         close(result.solution[0], 2.0, "x[0] unscaled");
     }
@@ -275,7 +279,12 @@ mod tests {
         let eps = 1e-6_f64;
         let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
 
-        assert_ne!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+        assert_ne!(
+            result.status,
+            SolveStatus::Optimal,
+            "got {:?}",
+            result.status
+        );
         assert_eq!(result.status, SolveStatus::SuboptimalSolution);
     }
 
@@ -326,7 +335,12 @@ mod tests {
         let eps = 1e-6_f64;
         let result = unscale_ipm_result(mock_result, &scaler, &problem, eps);
 
-        assert_ne!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+        assert_ne!(
+            result.status,
+            SolveStatus::Optimal,
+            "got {:?}",
+            result.status
+        );
         assert_eq!(result.status, SolveStatus::SuboptimalSolution);
     }
 
@@ -388,15 +402,23 @@ mod tests {
         let bounds = vec![(1.0_f64, f64::INFINITY)];
         let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
 
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.solution[0] - 1.0).abs() < 1e-4, "got {:.6}", result.solution[0]);
+        assert!(
+            (result.solution[0] - 1.0).abs() < 1e-4,
+            "got {:.6}",
+            result.solution[0]
+        );
         assert!(!result.bound_duals.is_empty());
         assert!(
             (result.bound_duals[0] - 1.001).abs() < 0.1,
-            "got {:.6}", result.bound_duals[0]
+            "got {:.6}",
+            result.bound_duals[0]
         );
     }
 
@@ -410,13 +432,24 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, 0.5_f64)];
         let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
 
         assert_eq!(result.status, SolveStatus::Optimal);
-        assert!((result.solution[0] - 0.5).abs() < 1e-4, "got {:.6}", result.solution[0]);
+        assert!(
+            (result.solution[0] - 0.5).abs() < 1e-4,
+            "got {:.6}",
+            result.solution[0]
+        );
         assert!(!result.bound_duals.is_empty());
-        assert!((result.bound_duals[0] - 1.0).abs() < 0.1, "got {:.6}", result.bound_duals[0]);
+        assert!(
+            (result.bound_duals[0] - 1.0).abs() < 0.1,
+            "got {:.6}",
+            result.bound_duals[0]
+        );
     }
 
     /// 両端有限 box: x=y=1 で ub 活性、bound_duals 順は [lb_x, lb_y, ub_x, ub_y]。
@@ -429,7 +462,10 @@ mod tests {
         let bounds = vec![(0.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)];
         let problem = QpProblem::new_all_le(q, c_vec, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
 
         assert_eq!(result.status, SolveStatus::Optimal);
@@ -437,8 +473,16 @@ mod tests {
         assert!((result.solution[1] - 1.0).abs() < 0.01);
 
         assert_eq!(result.bound_duals.len(), 4);
-        assert!(result.bound_duals[2] > 0.5, "got {:.6}", result.bound_duals[2]);
-        assert!(result.bound_duals[3] > 0.5, "got {:.6}", result.bound_duals[3]);
+        assert!(
+            result.bound_duals[2] > 0.5,
+            "got {:.6}",
+            result.bound_duals[2]
+        );
+        assert!(
+            result.bound_duals[3] > 0.5,
+            "got {:.6}",
+            result.bound_duals[3]
+        );
     }
 
     /// Ruiz 有効時 POST_VERIFY ループが deadline を 2× 以内に収めること。
@@ -446,13 +490,17 @@ mod tests {
     fn test_ipm_post_verify_timeout_stays_within_budget() {
         let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 2.0, 2.0], 3, 3).unwrap();
         let c = vec![0.0; 3];
-        let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[-1.0, -1.0, -1.0], 1, 3).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[-1.0, -1.0, -1.0], 1, 3).unwrap();
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 3];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
         let timeout_secs = 0.01;
-        let mut opts = SolverOptions { timeout_secs: Some(timeout_secs), ..Default::default() };
+        let mut opts = SolverOptions {
+            timeout_secs: Some(timeout_secs),
+            ..Default::default()
+        };
         opts.use_ruiz_scaling = true;
 
         let start = std::time::Instant::now();
@@ -461,7 +509,8 @@ mod tests {
 
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
-            "got {:?}", result.status
+            "got {:?}",
+            result.status
         );
         assert!(elapsed < timeout_secs * 2.0, "elapsed={:.3}s", elapsed);
     }
@@ -478,7 +527,10 @@ mod tests {
 
         let result_ruiz = crate::qp::solve_qp_with(&problem, &SolverOptions::default());
 
-        let opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts_no_ruiz = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
         let result_no_ruiz = crate::qp::solve_qp_with(&problem, &opts_no_ruiz);
 
         assert_eq!(result_ruiz.status, SolveStatus::Optimal);
@@ -496,13 +548,17 @@ mod tests {
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { timeout_secs: Some(0.0), ..SolverOptions::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(0.0),
+            ..SolverOptions::default()
+        };
         let start = std::time::Instant::now();
         let result = crate::qp::solve_qp_with(&problem, &opts);
         let elapsed = start.elapsed().as_secs_f64();
         assert!(
             result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
-            "got: {:?}", result.status
+            "got: {:?}",
+            result.status
         );
         assert!(elapsed < 0.5, "elapsed={:.3}s", elapsed);
     }
@@ -511,14 +567,17 @@ mod tests {
     fn test_a5s01_scaling_solution_equivalence_constrained() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let c = vec![0.0, 0.0];
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+                .unwrap();
         let b = vec![1.0, -1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
         let result_ruiz = crate::qp::solve_qp_with(&problem, &SolverOptions::default());
-        let opts_no_ruiz = SolverOptions { use_ruiz_scaling: false, ..SolverOptions::default() };
+        let opts_no_ruiz = SolverOptions {
+            use_ruiz_scaling: false,
+            ..SolverOptions::default()
+        };
         let result_no_ruiz = crate::qp::solve_qp_with(&problem, &opts_no_ruiz);
         assert_eq!(result_ruiz.status, SolveStatus::Optimal);
         assert_eq!(result_no_ruiz.status, SolveStatus::Optimal);
@@ -535,7 +594,10 @@ mod tests {
         let b = vec![-1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
-        let opts = SolverOptions { use_ruiz_scaling: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: true,
+            ..SolverOptions::default()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
         assert_ne!(result.status, SolveStatus::SuboptimalSolution);
         assert_eq!(result.status, SolveStatus::Optimal);
@@ -552,9 +614,14 @@ mod tests {
         let b = vec![1e6_f64, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Eq, ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
         let delta = 1e-5_f64;
         let mock_result = SolverResult {
@@ -567,7 +634,12 @@ mod tests {
         let eps = 1e-6_f64;
         let result = post_verify_solution(mock_result, &problem, eps);
 
-        assert_eq!(result.status, SolveStatus::SuboptimalSolution, "got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::SuboptimalSolution,
+            "got {:?}",
+            result.status
+        );
     }
 
     #[test]
@@ -580,9 +652,14 @@ mod tests {
         let b = vec![1e6_f64, 1.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(
-            q, c, a, b, bounds,
+            q,
+            c,
+            a,
+            b,
+            bounds,
             vec![ConstraintType::Eq, ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mock_result = SolverResult {
             status: SolveStatus::SuboptimalSolution,
@@ -594,7 +671,12 @@ mod tests {
         let eps = 1e-6_f64;
         let result = post_verify_solution(mock_result, &problem, eps);
 
-        assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "got {:?}",
+            result.status
+        );
     }
 
     /// Ge制約付き QP の wall-clock ガード。
@@ -609,7 +691,10 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Ge]).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..SolverOptions::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..SolverOptions::default()
+        };
         let start = std::time::Instant::now();
         let result = crate::qp::solve_qp_with(&problem, &opts);
         let elapsed = start.elapsed().as_secs_f64();
@@ -630,7 +715,10 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { timeout_secs: Some(5.0), ..SolverOptions::default() };
+        let opts = SolverOptions {
+            timeout_secs: Some(5.0),
+            ..SolverOptions::default()
+        };
         let result = crate::qp::solve_qp_with(&problem, &opts);
 
         assert_eq!(result.status, SolveStatus::Optimal);

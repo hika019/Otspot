@@ -14,15 +14,15 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
+use otspot_core::options::{SimplexMethod, SolverOptions};
+use otspot_core::problem::{ConstraintType, SolveStatus};
+use otspot_core::qp::{solve_qp_with, QpProblem};
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_dfeas_componentwise, compute_dfeas_orig,
     compute_pfeas_normalized, detect_csv_path, load_baseline_objectives, load_expected_statuses,
     ExpectedStatus, ObjCheckResult,
 };
 use otspot_io::qps::parse_qps;
-use otspot_core::options::{SimplexMethod, SolverOptions};
-use otspot_core::problem::{ConstraintType, SolveStatus};
-use otspot_core::qp::{solve_qp_with, QpProblem};
 
 /// pfeas両側チェック + bfeas
 ///
@@ -53,8 +53,16 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     let mut max_x = 0.0_f64;
     let mut max_bnd = 0.0_f64;
     for (&xi, &(lb, ub)) in solution.iter().zip(prob.bounds.iter()) {
-        let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-        let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+        let lb_viol = if lb.is_finite() {
+            (lb - xi).max(0.0)
+        } else {
+            0.0
+        };
+        let ub_viol = if ub.is_finite() {
+            (xi - ub).max(0.0)
+        } else {
+            0.0
+        };
         max_v = max_v.max(lb_viol.max(ub_viol));
         max_x = max_x.max(xi.abs());
         if lb.is_finite() {
@@ -69,14 +77,13 @@ fn compute_primal_quality(prob: &QpProblem, solution: &[f64]) -> (f64, f64) {
     (pfeas, bfeas)
 }
 
-
 #[allow(clippy::items_after_test_module)] // fn main() follows this module; reorganising is disruptive
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use otspot_core::problem::ConstraintType;
     use otspot_core::sparse::CscMatrix;
+    use std::collections::HashMap;
 
     /// Eq制約の下方向違反がpfeasに反映される
     #[test]
@@ -165,13 +172,7 @@ mod tests {
         known.insert("e226".to_string(), -18.751_929_066);
 
         // Netlib: obj_offset = -7.113; solver reports known_obj + offset = -25.864...
-        let result = check_baseline_objective(
-            "e226",
-            -25.864_929_066,
-            &known,
-            1e-9,
-            -7.113,
-        );
+        let result = check_baseline_objective("e226", -25.864_929_066, &known, 1e-9, -7.113);
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
     }
 
@@ -181,13 +182,7 @@ mod tests {
         known.insert("toy".to_string(), 12.5);
 
         // Non-netlib: obj_offset = 0.0; solver reports known_obj directly.
-        let result = check_baseline_objective(
-            "toy",
-            12.5,
-            &known,
-            1e-9,
-            0.0,
-        );
+        let result = check_baseline_objective("toy", 12.5, &known, 1e-9, 0.0);
         assert!(matches!(result, ObjCheckResult::Ok { .. }));
     }
 
@@ -246,7 +241,9 @@ fn main() {
             println!("  --timeout         Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal   Path to known optimal values CSV (default: auto-detect)");
             println!("  --dual-advanced   LP は DualAdvanced simplex を使う (QP は無視)");
-            println!("  --threads         Per-solve factorization parallelism (default: 1 = serial)");
+            println!(
+                "  --threads         Per-solve factorization parallelism (default: 1 = serial)"
+            );
             std::process::exit(0);
         } else if args[i] == "--known-optimal" {
             i += 1;
@@ -291,7 +288,11 @@ fn main() {
                 .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
                 .unwrap_or_default();
             // target/release から solver ルートに遡る
-            p = p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default();
+            p = p
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
             p
         };
         detect_csv_path(&data_dir, baseline_override.as_deref(), &root)
@@ -299,11 +300,23 @@ fn main() {
     let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
     let baseline_objectives = load_baseline_objectives(&baseline_csv).unwrap_or_default();
     let expected_statuses = load_expected_statuses(&baseline_csv);
-    eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
-    let n_infeasible_baseline = expected_statuses.values().filter(|s| **s == ExpectedStatus::Infeasible).count();
-    let n_unbounded_baseline = expected_statuses.values().filter(|s| **s == ExpectedStatus::Unbounded).count();
+    eprintln!(
+        "Baseline objectives loaded: {} problems",
+        baseline_objectives.len()
+    );
+    let n_infeasible_baseline = expected_statuses
+        .values()
+        .filter(|s| **s == ExpectedStatus::Infeasible)
+        .count();
+    let n_unbounded_baseline = expected_statuses
+        .values()
+        .filter(|s| **s == ExpectedStatus::Unbounded)
+        .count();
     if n_infeasible_baseline > 0 || n_unbounded_baseline > 0 {
-        eprintln!("  (うち INFEASIBLE: {}, UNBOUNDED: {})", n_infeasible_baseline, n_unbounded_baseline);
+        eprintln!(
+            "  (うち INFEASIBLE: {}, UNBOUNDED: {})",
+            n_infeasible_baseline, n_unbounded_baseline
+        );
     }
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
@@ -334,8 +347,8 @@ fn main() {
     // 集計 — 7カテゴリ + 既存カテゴリ + infeasible/unbounded 正答
     let mut n_pass = 0usize;
     let mut n_pass_noref = 0usize;
-    let mut n_pass_infeasible = 0usize;   // 期待通り Infeasible と判定
-    let mut n_pass_unbounded = 0usize;    // 期待通り Unbounded と判定
+    let mut n_pass_infeasible = 0usize; // 期待通り Infeasible と判定
+    let mut n_pass_unbounded = 0usize; // 期待通り Unbounded と判定
     let mut n_pfeas_fail = 0usize;
     let mut n_dfeas_fail = 0usize;
     let mut n_obj_mismatch = 0usize;
@@ -346,7 +359,11 @@ fn main() {
     let mut n_nonconvex = 0usize;
     let mut n_suboptimal = 0usize;
 
-    let solver_label = if dual_advanced_mode { "DualAdvanced (LP) + IPPMM (QP)" } else { "IPPMM" };
+    let solver_label = if dual_advanced_mode {
+        "DualAdvanced (LP) + IPPMM (QP)"
+    } else {
+        "IPPMM"
+    };
     println!("Solver: {}", solver_label);
 
     let mut opts = SolverOptions::default();
@@ -375,7 +392,12 @@ fn main() {
             Err(note) => {
                 println!(
                     "{:<20} {:>6} {:>6} {:>15} {:>10.3} {}",
-                    name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
+                    name,
+                    "?",
+                    "?",
+                    "PARSE_ERR",
+                    0.0,
+                    &note[..note.len().min(40)]
                 );
                 n_error += 1;
                 continue;
@@ -466,52 +488,55 @@ fn main() {
                     } else {
                         let dfeas = dfeas_abs;
                         // Step 9: 正解値照合
-                            // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
-                            // (solver は result.objective に offset 込みで返すため)。
-                            let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
-                                prob.obj_offset
-                            } else {
-                                0.0
-                            };
-                            match check_baseline_objective(
-                                &name,
-                                result.objective,
-                                &baseline_objectives,
-                                eps_obj,
-                                obj_offset,
-                            ) {
-                                ObjCheckResult::Mismatch { rel_err } => {
-                                    n_obj_mismatch += 1;
-                                    (
-                                        "OBJ_MISMATCH".to_string(),
-                                        format!(
-                                            "[{}] obj={:.2e} known={:.2e} err={:.1}%",
-                                            method_label,
-                                            result.objective,
-                                            baseline_objectives.get(&name).unwrap(),
-                                            rel_err * 100.0
-                                        ),
+                        // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
+                        // (solver は result.objective に offset 込みで返すため)。
+                        let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
+                            prob.obj_offset
+                        } else {
+                            0.0
+                        };
+                        match check_baseline_objective(
+                            &name,
+                            result.objective,
+                            &baseline_objectives,
+                            eps_obj,
+                            obj_offset,
+                        ) {
+                            ObjCheckResult::Mismatch { rel_err } => {
+                                n_obj_mismatch += 1;
+                                (
+                                    "OBJ_MISMATCH".to_string(),
+                                    format!(
+                                        "[{}] obj={:.2e} known={:.2e} err={:.1}%",
+                                        method_label,
+                                        result.objective,
+                                        baseline_objectives.get(&name).unwrap(),
+                                        rel_err * 100.0
+                                    ),
+                                )
+                            }
+                            ObjCheckResult::Ok { rel_err } => {
+                                n_pass += 1;
+                                // 判定値 (pfn 全体相対化, dfr 全体相対化) と
+                                // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
+                                // 同じ eps で見て componentwise も満たすか可視化する。
+                                let pfc = compute_pfeas_normalized(&prob, &result.solution);
+                                let dfc = compute_dfeas_componentwise(
+                                    &prob,
+                                    &result.solution,
+                                    &result.dual_solution,
+                                    &result.bound_duals,
+                                    &result.reduced_costs,
+                                );
+                                let df_str = if dfeas.is_nan() {
+                                    "df=NA dfr=NA dfc=NA".to_string()
+                                } else {
+                                    format!(
+                                        "df={:.1e} dfr={:.1e} dfc={:.1e}",
+                                        dfeas, dfeas_rel, dfc
                                     )
-                                }
-                                ObjCheckResult::Ok { rel_err } => {
-                                    n_pass += 1;
-                                    // 判定値 (pfn 全体相対化, dfr 全体相対化) と
-                                    // 厳しい代替 (pfc, dfc 成分相対化) を併記し、
-                                    // 同じ eps で見て componentwise も満たすか可視化する。
-                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
-                                    let dfc = compute_dfeas_componentwise(
-                                        &prob,
-                                        &result.solution,
-                                        &result.dual_solution,
-                                        &result.bound_duals,
-                                        &result.reduced_costs,
-                                    );
-                                    let df_str = if dfeas.is_nan() {
-                                        "df=NA dfr=NA dfc=NA".to_string()
-                                    } else {
-                                        format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
-                                    };
-                                    (
+                                };
+                                (
                                         "PASS".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} obj_err={:.3}%",
@@ -525,23 +550,26 @@ fn main() {
                                             rel_err * 100.0
                                         ),
                                     )
-                                }
-                                ObjCheckResult::NoRef => {
-                                    n_pass_noref += 1;
-                                    let pfc = compute_pfeas_normalized(&prob, &result.solution);
-                                    let dfc = compute_dfeas_componentwise(
-                                        &prob,
-                                        &result.solution,
-                                        &result.dual_solution,
-                                        &result.bound_duals,
-                                        &result.reduced_costs,
-                                    );
-                                    let df_str = if dfeas.is_nan() {
-                                        "df=NA dfr=NA dfc=NA".to_string()
-                                    } else {
-                                        format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
-                                    };
-                                    (
+                            }
+                            ObjCheckResult::NoRef => {
+                                n_pass_noref += 1;
+                                let pfc = compute_pfeas_normalized(&prob, &result.solution);
+                                let dfc = compute_dfeas_componentwise(
+                                    &prob,
+                                    &result.solution,
+                                    &result.dual_solution,
+                                    &result.bound_duals,
+                                    &result.reduced_costs,
+                                );
+                                let df_str = if dfeas.is_nan() {
+                                    "df=NA dfr=NA dfc=NA".to_string()
+                                } else {
+                                    format!(
+                                        "df={:.1e} dfr={:.1e} dfc={:.1e}",
+                                        dfeas, dfeas_rel, dfc
+                                    )
+                                };
+                                (
                                         "PASS[no_ref]".to_string(),
                                         format!(
                                             "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {}",
@@ -554,8 +582,8 @@ fn main() {
                                             df_str
                                         ),
                                     )
-                                }
                             }
+                        }
                     }
                 }
             }
@@ -570,7 +598,10 @@ fn main() {
                     Some(ExpectedStatus::Optimal) => {
                         // 最適を期待していたのに Infeasible → 解けていない
                         n_fail += 1;
-                        ("FAIL:Infeasible".to_string(), "(expected Optimal)".to_string())
+                        (
+                            "FAIL:Infeasible".to_string(),
+                            "(expected Optimal)".to_string(),
+                        )
                     }
                     _ => {
                         // no_ref: 正解不明。FAIL として記録するが expected Optimal ではない
@@ -579,22 +610,23 @@ fn main() {
                     }
                 }
             }
-            SolveStatus::Unbounded => {
-                match expected_statuses.get(&name) {
-                    Some(ExpectedStatus::Unbounded) => {
-                        n_pass_unbounded += 1;
-                        ("PASS:Unbounded".to_string(), String::new())
-                    }
-                    Some(ExpectedStatus::Optimal) => {
-                        n_fail += 1;
-                        ("FAIL:Unbounded".to_string(), "(expected Optimal)".to_string())
-                    }
-                    _ => {
-                        n_fail += 1;
-                        ("FAIL:Unbounded".to_string(), String::new())
-                    }
+            SolveStatus::Unbounded => match expected_statuses.get(&name) {
+                Some(ExpectedStatus::Unbounded) => {
+                    n_pass_unbounded += 1;
+                    ("PASS:Unbounded".to_string(), String::new())
                 }
-            }
+                Some(ExpectedStatus::Optimal) => {
+                    n_fail += 1;
+                    (
+                        "FAIL:Unbounded".to_string(),
+                        "(expected Optimal)".to_string(),
+                    )
+                }
+                _ => {
+                    n_fail += 1;
+                    ("FAIL:Unbounded".to_string(), String::new())
+                }
+            },
             SolveStatus::MaxIterations => {
                 n_max_iter += 1;
                 (
@@ -610,8 +642,12 @@ fn main() {
                 let obj_str = if result.solution.is_empty() {
                     "obj=NA solution=EMPTY".to_string()
                 } else if result.solution.len() != prob.num_vars {
-                    format!("obj={:.3e} sol_len={}/{}_MISMATCH",
-                        result.objective, result.solution.len(), prob.num_vars)
+                    format!(
+                        "obj={:.3e} sol_len={}/{}_MISMATCH",
+                        result.objective,
+                        result.solution.len(),
+                        prob.num_vars
+                    )
                 } else {
                     let pfn = compute_pfeas_normalized(&prob, &result.solution);
                     format!("obj={:.3e} pfn={:.1e}", result.objective, pfn)
@@ -629,8 +665,7 @@ fn main() {
                 // Timeout でも有効解があれば品質情報を表示（diagnostic 価値）
                 // best-so-far 解を保持する `apply_api_boundary_conversion` 修正と組合せて、
                 // 「真に解けていないのか、ほぼ解けているが時間切れなのか」を可視化する。
-                let extra = if !result.solution.is_empty()
-                    && result.solution.len() == prob.num_vars
+                let extra = if !result.solution.is_empty() && result.solution.len() == prob.num_vars
                 {
                     let (_, bfeas) = compute_primal_quality(&prob, &result.solution);
                     let pfeas_norm = compute_pfeas_normalized(&prob, &result.solution);

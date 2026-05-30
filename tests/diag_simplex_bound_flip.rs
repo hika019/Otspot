@@ -49,7 +49,9 @@ fn mini_bounded_simplex(
     // progress: BFRT consumes more residual per pivot, so fewer pivots.
     let mut state = seed | 1;
     let mut lcg = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state >> 32) as u32 as f64) / (u32::MAX as f64)
     };
 
@@ -108,7 +110,10 @@ fn mini_bounded_simplex(
         flips_total += res.flips.len();
         pivots += 1;
     }
-    MiniSimplexResult { pivots, flips_total }
+    MiniSimplexResult {
+        pivots,
+        flips_total,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +126,13 @@ fn sentinel_bfrt_reduces_pivots_on_bound_rich_lp() {
     // data per `feedback_test_multi_data_pattern`). For each seed, BFRT
     // pivots must be strictly fewer than Harris pivots, and the average
     // reduction across seeds must clear the 30 % gate.
-    let seeds = [0xC0FFEE_u64, 0xDEAD_BEEF, 0xABCD_1234, 0xFEED_FACE, 0x4242_4242];
+    let seeds = [
+        0xC0FFEE_u64,
+        0xDEAD_BEEF,
+        0xABCD_1234,
+        0xFEED_FACE,
+        0x4242_4242,
+    ];
     let mut total_h = 0usize;
     let mut total_b = 0usize;
     for &seed in &seeds {
@@ -170,9 +181,18 @@ fn sentinel_probe_counter_proves_wiring_live() {
     let trow = vec![1.0, 1.0, 1.0];
     let r = vec![0.1, 0.2, 0.3];
     let bounds_bounded = vec![
-        ColBound { upper: 1.0, at_upper: false },
-        ColBound { upper: 1.0, at_upper: false },
-        ColBound { upper: f64::INFINITY, at_upper: false },
+        ColBound {
+            upper: 1.0,
+            at_upper: false,
+        },
+        ColBound {
+            upper: 1.0,
+            at_upper: false,
+        },
+        ColBound {
+            upper: f64::INFINITY,
+            at_upper: false,
+        },
     ];
     let is_basic = vec![false; 3];
 
@@ -183,11 +203,21 @@ fn sentinel_probe_counter_proves_wiring_live() {
 
     // Run #2: all infinite (= Harris emulation) → counter unchanged
     let bounds_unbounded = vec![
-        ColBound { upper: f64::INFINITY, at_upper: false },
-        ColBound { upper: f64::INFINITY, at_upper: false },
-        ColBound { upper: f64::INFINITY, at_upper: false },
+        ColBound {
+            upper: f64::INFINITY,
+            at_upper: false,
+        },
+        ColBound {
+            upper: f64::INFINITY,
+            at_upper: false,
+        },
+        ColBound {
+            upper: f64::INFINITY,
+            at_upper: false,
+        },
     ];
-    let _ = bfrt_select_entering(&trow, &r, &is_basic, &bounds_unbounded, 3, PIVOT_TOL, 2.5).unwrap();
+    let _ =
+        bfrt_select_entering(&trow, &r, &is_basic, &bounds_unbounded, 3, PIVOT_TOL, 2.5).unwrap();
     assert_eq!(
         bfrt_flip_invocations(),
         after_real,
@@ -217,8 +247,14 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
             trow: vec![1.0, 1.0],
             r: vec![0.1, 0.5],
             bounds: vec![
-                ColBound { upper: 1.0, at_upper: false },
-                ColBound { upper: f64::INFINITY, at_upper: false },
+                ColBound {
+                    upper: 1.0,
+                    at_upper: false,
+                },
+                ColBound {
+                    upper: f64::INFINITY,
+                    at_upper: false,
+                },
             ],
             residual: 2.0,
             harris_theta: 0.1,
@@ -228,7 +264,13 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
             name: "no bounded → harris equivalent",
             trow: vec![1.0, 2.0, 3.0],
             r: vec![0.3, 0.4, 0.9],
-            bounds: vec![ColBound { upper: f64::INFINITY, at_upper: false }; 3],
+            bounds: vec![
+                ColBound {
+                    upper: f64::INFINITY,
+                    at_upper: false
+                };
+                3
+            ],
             residual: 1.0,
             harris_theta: 0.2,
             min_bfrt_theta: 0.2,
@@ -238,7 +280,10 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
             trow: vec![1.0, 1.0, 1.0, 1.0, 1.0],
             r: vec![0.01, 0.02, 0.03, 0.04, 0.05],
             bounds: (0..5)
-                .map(|_| ColBound { upper: 1.0, at_upper: false })
+                .map(|_| ColBound {
+                    upper: 1.0,
+                    at_upper: false,
+                })
                 .collect(),
             residual: 4.5,
             harris_theta: 0.01,
@@ -249,9 +294,18 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
             trow: vec![-1.0, 2.0, 1.5],
             r: vec![-0.05, 0.6, 0.3],
             bounds: vec![
-                ColBound { upper: 1.0, at_upper: true },  // breakpoint = 0.05, weight = 1
-                ColBound { upper: f64::INFINITY, at_upper: false }, // breakpoint = 0.3, weight = ∞
-                ColBound { upper: 0.5, at_upper: false }, // breakpoint = 0.2, weight = 0.75
+                ColBound {
+                    upper: 1.0,
+                    at_upper: true,
+                }, // breakpoint = 0.05, weight = 1
+                ColBound {
+                    upper: f64::INFINITY,
+                    at_upper: false,
+                }, // breakpoint = 0.3, weight = ∞
+                ColBound {
+                    upper: 0.5,
+                    at_upper: false,
+                }, // breakpoint = 0.2, weight = 0.75
             ],
             residual: 1.5,
             harris_theta: 0.05,
@@ -263,8 +317,9 @@ fn sentinel_table_driven_step_size_increases_with_bounds() {
     for c in &cases {
         let n = c.trow.len();
         let is_basic = &is_basic_4[..n];
-        let res = bfrt_select_entering(&c.trow, &c.r, is_basic, &c.bounds, n, PIVOT_TOL, c.residual)
-            .unwrap_or_else(|| panic!("{}: BFRT must return Some", c.name));
+        let res =
+            bfrt_select_entering(&c.trow, &c.r, is_basic, &c.bounds, n, PIVOT_TOL, c.residual)
+                .unwrap_or_else(|| panic!("{}: BFRT must return Some", c.name));
         assert!(
             res.theta + 1e-12 >= c.min_bfrt_theta,
             "{}: BFRT theta {:.6} must be ≥ {:.6}",

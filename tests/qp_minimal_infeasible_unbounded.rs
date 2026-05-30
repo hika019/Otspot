@@ -111,7 +111,9 @@ fn inf2_eq_outside_bounds_infeasible() {
     model.add_constraint(constraint!(x == 5.0));
     model.minimize(x * x);
 
-    let err = model.solve().expect_err("inf2: Eq=5 vs bound [0,1] must be Infeasible");
+    let err = model
+        .solve()
+        .expect_err("inf2: Eq=5 vs bound [0,1] must be Infeasible");
     assert!(
         matches!(err, ModelError::SolveError(SolveError::Infeasible)),
         "inf2: expected Infeasible, got {:?}",
@@ -134,7 +136,9 @@ fn inf3_conflicting_inequalities_infeasible() {
     model.add_constraint(constraint!(x <= 1.0));
     model.minimize(x * x);
 
-    let err = model.solve().expect_err("inf3: x>=10 ∧ x<=1 must be Infeasible");
+    let err = model
+        .solve()
+        .expect_err("inf3: x>=10 ∧ x<=1 must be Infeasible");
     assert!(
         matches!(err, ModelError::SolveError(SolveError::Infeasible)),
         "inf3: expected Infeasible, got {:?}",
@@ -157,7 +161,9 @@ fn ub1_q_zero_lp_fallback_unbounded() {
     model.add_constraint(constraint!(x >= 0.0));
     model.minimize(-1.0 * x);
 
-    let err = model.solve().expect_err("ub1: Q=0 LP min -x s.t. x>=0 must be Unbounded");
+    let err = model
+        .solve()
+        .expect_err("ub1: Q=0 LP min -x s.t. x>=0 must be Unbounded");
     assert!(
         matches!(err, ModelError::SolveError(SolveError::Unbounded)),
         "ub1: expected Unbounded, got {:?}",
@@ -179,7 +185,9 @@ fn ub2_psd_q_finite_bounds_yields_optimal() {
     let x = model.add_var("x", 0.0, 100.0);
     model.minimize(0.5 * x * x + (-1000.0) * x);
 
-    let result = model.solve().expect("ub2: PSD Q + finite bounds must be Optimal");
+    let result = model
+        .solve()
+        .expect("ub2: PSD Q + finite bounds must be Optimal");
     let exp_obj = 0.5 * 100.0 * 100.0 - 1000.0 * 100.0;
     let rel = (result.objective_value - exp_obj).abs() / (1.0 + exp_obj.abs());
     assert!(
@@ -220,7 +228,11 @@ fn ub3_q_null_space_with_linear_term_unbounded() {
     // Unbounded detection は QP 内点法では難しい (Phase I が x→∞ で発散しない)。
     // solver 仕様: status は Unbounded / MaxIterations / NumericalError のいずれか。
     // Optimal を返すなら bug。
-    assert_ne!(r.status, SolveStatus::Optimal,
+    assert_ne!(
+        r.status,
+        SolveStatus::Optimal,
         "ub3: null(Q)+c≠0 with no upper bound must NOT be Optimal, got {:?} obj={}",
-        r.status, r.objective);
+        r.status,
+        r.objective
+    );
 }

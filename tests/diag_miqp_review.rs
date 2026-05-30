@@ -24,7 +24,10 @@ fn opts() -> SolverOptions {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn range(&mut self, lo: i64, hi: i64) -> i64 {
@@ -70,9 +73,16 @@ fn build(case: &MiqpCase) -> MiqpProblem {
         b.push(*rhs);
         ct.push(*c);
     }
-    let a =
-        if m == 0 { CscMatrix::new(0, n) } else { CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap() };
-    let bounds: Vec<(f64, f64)> = case.bounds.iter().map(|&(l, u)| (l as f64, u as f64)).collect();
+    let a = if m == 0 {
+        CscMatrix::new(0, n)
+    } else {
+        CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap()
+    };
+    let bounds: Vec<(f64, f64)> = case
+        .bounds
+        .iter()
+        .map(|&(l, u)| (l as f64, u as f64))
+        .collect();
     let qp = QpProblem::new(q, case.c.clone(), a, b, bounds, ct).unwrap();
     MiqpProblem::new(qp, (0..n).collect()).unwrap()
 }
@@ -164,7 +174,12 @@ fn offdiag_psd_bruteforce_cases() {
         let (r, stats) = solve_miqp_with_stats(&build(case), &opts(), &MipConfig::default());
         match truth {
             Some((opt, xstar)) => {
-                assert_eq!(r.status, SolveStatus::Optimal, "case {i} status {:?}", r.status);
+                assert_eq!(
+                    r.status,
+                    SolveStatus::Optimal,
+                    "case {i} status {:?}",
+                    r.status
+                );
                 assert!(
                     (r.objective - opt).abs() < 1e-3,
                     "case {i}: solver {} != truth {} (x*={:?})",
@@ -173,14 +188,20 @@ fn offdiag_psd_bruteforce_cases() {
                     xstar
                 );
                 // recompute objective from the reported (rounded) integer solution
-                let recomputed = quad_obj(case, &r.solution.iter().map(|v| v.round()).collect::<Vec<_>>());
+                let recomputed = quad_obj(
+                    case,
+                    &r.solution.iter().map(|v| v.round()).collect::<Vec<_>>(),
+                );
                 assert!(
                     (recomputed - opt).abs() < 1e-3,
                     "case {i}: recomputed {} != truth {}",
                     recomputed,
                     opt
                 );
-                println!("[offdiag {i}] opt={opt} nodes={} pruned={}", stats.nodes_processed, stats.pruned);
+                println!(
+                    "[offdiag {i}] opt={opt} nodes={} pruned={}",
+                    stats.nodes_processed, stats.pruned
+                );
             }
             None => assert_eq!(r.status, SolveStatus::Infeasible, "case {i}"),
         }
@@ -214,7 +235,10 @@ fn miqp_boxonly_offdiag_relaxation_stall_repro() {
         bounds: vec![(0, 4), (0, 4)],
     };
     let (opt, xstar) = brute_force(&case).unwrap();
-    assert!((opt - (-12.0)).abs() < 1e-9, "brute truth {opt} (expected -12 at {xstar:?})");
+    assert!(
+        (opt - (-12.0)).abs() < 1e-9,
+        "brute truth {opt} (expected -12 at {xstar:?})"
+    );
     let (r, _) = solve_miqp_with_stats(&build(&case), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
     assert!(
@@ -252,7 +276,12 @@ fn fuzz_boxonly_offdiag_miqp_optimum_and_status() {
         // larger linear term → optimum pushed away from the IPM's interior start.
         let c: Vec<f64> = (0..n).map(|_| rng.range(-8, 8) as f64).collect();
         let bounds: Vec<(i64, i64)> = (0..n).map(|_| (0, rng.range(3, 5))).collect();
-        let case = MiqpCase { q, c, cons: vec![], bounds }; // NO constraints (P1 trigger)
+        let case = MiqpCase {
+            q,
+            c,
+            cons: vec![],
+            bounds,
+        }; // NO constraints (P1 trigger)
         let truth = brute_force(&case);
         let (r, _s) = solve_miqp_with_stats(&build(&case), &opts(), &MipConfig::default());
         match truth {
@@ -304,13 +333,21 @@ fn fuzz_offdiag_psd_miqp() {
             q[i][i] += 0.5; // ridge: strictly PD, well-conditioned
         }
         let c: Vec<f64> = (0..n).map(|_| rng.range(-4, 4) as f64).collect();
-        let bounds: Vec<(i64, i64)> =
-            (0..n).map(|_| { let lo = rng.range(-1, 1); (lo, lo + rng.range(1, 3)) }).collect();
+        let bounds: Vec<(i64, i64)> = (0..n)
+            .map(|_| {
+                let lo = rng.range(-1, 1);
+                (lo, lo + rng.range(1, 3))
+            })
+            .collect();
         let m = rng.range(0, 2) as usize;
         let cons: Vec<(Vec<f64>, ConstraintType, f64)> = (0..m)
             .map(|_| {
                 let coeffs: Vec<f64> = (0..n).map(|_| rng.range(-2, 2) as f64).collect();
-                let ct = match rng.range(0, 2) { 0 => Le, 1 => Ge, _ => Eq };
+                let ct = match rng.range(0, 2) {
+                    0 => Le,
+                    1 => Ge,
+                    _ => Eq,
+                };
                 (coeffs, ct, rng.range(-3, 4) as f64)
             })
             .collect();
@@ -343,7 +380,10 @@ fn fuzz_offdiag_psd_miqp() {
         }
     }
     println!("offdiag MIQP fuzz: {feasible} feasible — all matched brute force");
-    assert!(feasible > 30, "expected many feasible cases, got {feasible}");
+    assert!(
+        feasible > 30,
+        "expected many feasible cases, got {feasible}"
+    );
 }
 
 #[test]
@@ -363,7 +403,11 @@ fn tight_integrality_gap_not_overpruned() {
     assert!((truth - (-6.0)).abs() < 1e-9, "brute truth {truth}");
     let (r, _) = solve_miqp_with_stats(&build(&case), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert!((r.objective - (-6.0)).abs() < 1e-3, "obj={} (expected -6)", r.objective);
+    assert!(
+        (r.objective - (-6.0)).abs() < 1e-3,
+        "obj={} (expected -6)",
+        r.objective
+    );
     let xr = r.solution[0].round();
     assert!(xr == 2.0 || xr == 3.0, "x={}", r.solution[0]);
 }
@@ -384,7 +428,11 @@ fn maximize_concave_miqp_matches_truth() {
     // Q=diag(-2,-2): (-2/2)*xi*xi = -xi*xi; maximize(-x^2 - y^2 + 6x + 4y)
     m.maximize((-1.0) * (x * x) + (-1.0) * (y * y) + 6.0 * x + 4.0 * y);
     let r = m.solve().unwrap();
-    assert!((r.objective() - 12.0).abs() < 1e-3, "obj={} (expected 12)", r.objective());
+    assert!(
+        (r.objective() - 12.0).abs() < 1e-3,
+        "obj={} (expected 12)",
+        r.objective()
+    );
 }
 
 #[test]
@@ -415,7 +463,13 @@ fn binary_miqp_bruteforce() {
     let (opt, xstar) = brute_force(&case).unwrap();
     let (r, _) = solve_miqp_with_stats(&build(&case), &opts(), &MipConfig::default());
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert!((r.objective - opt).abs() < 1e-3, "solver {} != truth {} x*={:?}", r.objective, opt, xstar);
+    assert!(
+        (r.objective - opt).abs() < 1e-3,
+        "solver {} != truth {} x*={:?}",
+        r.objective,
+        opt,
+        xstar
+    );
 }
 
 /// Point 3 (#17 fix): mixed integer + CONTINUOUS where the continuous relaxation
@@ -468,16 +522,21 @@ fn mixed_continuous_stall_no_false_optimal() {
         assert!(
             matches!(
                 r.status,
-                SolveStatus::SuboptimalSolution
-                    | SolveStatus::MaxIterations
-                    | SolveStatus::Timeout
+                SolveStatus::SuboptimalSolution | SolveStatus::MaxIterations | SolveStatus::Timeout
             ),
             "unexpected status {:?}",
             r.status
         );
         if !r.solution.is_empty() {
-            assert!(r.objective >= -12.0 - 1e-2, "incumbent {} below true optimum", r.objective);
-            assert!((r.solution[0].round() - r.solution[0]).abs() < 1e-6, "x must be integral");
+            assert!(
+                r.objective >= -12.0 - 1e-2,
+                "incumbent {} below true optimum",
+                r.objective
+            );
+            assert!(
+                (r.solution[0].round() - r.solution[0]).abs() < 1e-6,
+                "x must be integral"
+            );
         }
     }
 }

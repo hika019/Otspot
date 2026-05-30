@@ -40,11 +40,7 @@ fn solve_with_watchdog(
     watchdog: Duration,
     label: &str,
 ) -> (SolveStatus, f64) {
-    assert!(
-        qps_path.exists(),
-        "data required (no SKIP): {:?}",
-        qps_path
-    );
+    assert!(qps_path.exists(), "data required (no SKIP): {:?}", qps_path);
     let qp = parse_qps(qps_path).expect("parse QPS");
     let lp = make_lp(&qp);
     eprintln!(

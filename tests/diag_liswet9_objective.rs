@@ -32,8 +32,14 @@ fn assert_objective_self_consistent(name: &str, path: &std::path::Path) {
         "{} self-consistency: status={:?}, reported={:.6e}, recomputed={:.6e}, rel_diff={:.3e}",
         name, res.status, res.objective, expected, rel
     );
-    assert!(rel < 1e-9, "{}: reported objective ({:.6e}) ≠ 0.5 x'Qx+c'x+offset ({:.6e}); rel_diff={:.3e}",
-        name, res.objective, expected, rel);
+    assert!(
+        rel < 1e-9,
+        "{}: reported objective ({:.6e}) ≠ 0.5 x'Qx+c'x+offset ({:.6e}); rel_diff={:.3e}",
+        name,
+        res.objective,
+        expected,
+        rel
+    );
 }
 
 /// internal objective が external reference (Clarabel strict optimum) に近いことを assert。
@@ -52,9 +58,14 @@ fn assert_objective_matches_clarabel(name: &str, path: &std::path::Path, expecte
         "{} vs Clarabel internal: ours_internal={:.6e}, clarabel={:.6e}, rel_diff={:.3e}",
         name, internal, expected_internal, rel
     );
-    assert!(rel < 1e-3,
+    assert!(
+        rel < 1e-3,
         "{}: ours internal ({:.6e}) too far from Clarabel ({:.6e}); rel_diff={:.3e}",
-        name, internal, expected_internal, rel);
+        name,
+        internal,
+        expected_internal,
+        rel
+    );
 }
 
 #[test]

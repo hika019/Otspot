@@ -32,9 +32,8 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
     let mut opts_with_deadline;
     let options = if let (Some(secs), true) = (options.timeout_secs, options.deadline.is_none()) {
         opts_with_deadline = options.clone();
-        opts_with_deadline.deadline = Some(
-            std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
-        );
+        opts_with_deadline.deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs));
         &opts_with_deadline
     } else {
         options
@@ -56,7 +55,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
-            ..Default::default()
+                    ..Default::default()
                 };
             }
             Err(presolve::PresolveStatus::Unbounded) => {
@@ -68,7 +67,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
-            ..Default::default()
+                    ..Default::default()
                 };
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
@@ -93,10 +92,16 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // SuboptimalSolution from the guard means KKT failed → fall back.
                 // Strip warm_start if present: a stale basis passed to the
                 // cold-start retry of the original LP can cause cycling.
-                if matches!(raw.status, SolveStatus::NumericalError | SolveStatus::SuboptimalSolution) {
+                if matches!(
+                    raw.status,
+                    SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+                ) {
                     let fallback_opts;
                     let fb = if options.warm_start.is_some() {
-                        fallback_opts = SolverOptions { warm_start: None, ..options.clone() };
+                        fallback_opts = SolverOptions {
+                            warm_start: None,
+                            ..options.clone()
+                        };
                         &fallback_opts
                     } else {
                         options
@@ -113,7 +118,9 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 res = guard_lp_optimal(res, problem);
                 let postsolve_us = t_solve_done.elapsed().as_micros() as u64;
                 res.timing_breakdown = Some(crate::problem::TimingBreakdown {
-                    presolve_us, solve_us, postsolve_us,
+                    presolve_us,
+                    solve_us,
+                    postsolve_us,
                     ..Default::default()
                 });
                 // Postsolve dfeas above PIVOT_TOL (or guard-caught KKT failure) means
@@ -121,10 +128,13 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
                 // The original LP solves cleanly, so re-attempt on the remaining deadline.
                 let postsolve_bad = res.postsolve_dfeas.is_some_and(|d| d > PIVOT_TOL)
                     || res.status == SolveStatus::SuboptimalSolution;
-                if matches!(res.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution)
-                    && postsolve_bad
+                if matches!(
+                    res.status,
+                    SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+                ) && postsolve_bad
                 {
-                    let deadline_ok = options.deadline
+                    let deadline_ok = options
+                        .deadline
                         .is_none_or(|d| std::time::Instant::now() < d);
                     if deadline_ok {
                         let mut opts_off = options.clone();
@@ -162,7 +172,10 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
 
     // Catch deadline overrun before build_standard_form (presolve may have
     // returned early without reducing).
-    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+    if options
+        .deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+    {
         return SolverResult {
             status: SolveStatus::Timeout,
             objective: f64::INFINITY,
@@ -205,7 +218,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
                     reduced_costs: vec![],
                     slack: vec![],
                     warm_start_basis: None,
-            ..Default::default()
+                    ..Default::default()
                 };
             }
         }
@@ -237,7 +250,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
                         reduced_costs: vec![],
                         slack: vec![],
                         warm_start_basis: None,
-            ..Default::default()
+                        ..Default::default()
                     };
                 }
                 *x_j = ub;
@@ -336,8 +349,15 @@ mod tests {
     #[test]
     fn guard_lp_optimal_passthrough_non_optimal() {
         let lp = make_trivial_lp();
-        for status in [SolveStatus::Infeasible, SolveStatus::Timeout, SolveStatus::NumericalError] {
-            let r = SolverResult { status: status.clone(), ..Default::default() };
+        for status in [
+            SolveStatus::Infeasible,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+        ] {
+            let r = SolverResult {
+                status: status.clone(),
+                ..Default::default()
+            };
             let out = guard_lp_optimal(r, &lp);
             assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
@@ -348,12 +368,8 @@ mod tests {
     // No singleton rows, no Eq rows, no free vars, no parallel rows → presolve
     // cannot remove any row or column ⇒ was_reduced=false.
     fn make_non_reducible_lp() -> LpProblem {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 0, 1],
-            &[0, 0, 1, 1],
-            &[2.0, 1.0, 1.0, 2.0],
-            2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[2.0, 1.0, 1.0, 2.0], 2, 2)
+            .unwrap();
         LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -361,18 +377,14 @@ mod tests {
             vec![ConstraintType::Ge, ConstraintType::Ge],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // min x + y  s.t.  x = 2 (singleton Eq),  x + y <= 5,  x,y >= 0
     // Singleton equality row fixes x — presolve reduces the problem.
     fn make_reducible_lp() -> LpProblem {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 1],
-            &[0, 0, 1],
-            &[1.0, 1.0, 1.0],
-            2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0], 2, 2).unwrap();
         LpProblem::new_general(
             vec![1.0, 1.0],
             a,
@@ -380,7 +392,8 @@ mod tests {
             vec![ConstraintType::Eq, ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// timing_breakdown is Some on the was_reduced=false path (non-reducing presolve).
@@ -396,7 +409,10 @@ mod tests {
             "make_non_reducible_lp() must produce an LP presolve cannot reduce (was_reduced must be false)"
         );
 
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
@@ -409,7 +425,10 @@ mod tests {
     #[test]
     fn timing_breakdown_set_when_presolve_reduces() {
         let lp = make_reducible_lp();
-        let opts = SolverOptions { presolve: true, ..SolverOptions::default() };
+        let opts = SolverOptions {
+            presolve: true,
+            ..SolverOptions::default()
+        };
         let result = solve_with(&lp, &opts);
         assert_eq!(result.status, SolveStatus::Optimal);
         assert!(
@@ -429,12 +448,48 @@ mod tests {
     fn invalid_options_rejected_at_simplex_entry() {
         let lp = make_trivial_lp();
         let cases: &[(&str, SolverOptions)] = &[
-            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-            ("zero primal_tol", SolverOptions { primal_tol: 0.0, ..Default::default() }),
-            ("neg dual_tol", SolverOptions { dual_tol: -1.0, ..Default::default() }),
-            ("inf timeout", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
-            ("neg timeout", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
-            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+            (
+                "nan primal_tol",
+                SolverOptions {
+                    primal_tol: f64::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "zero primal_tol",
+                SolverOptions {
+                    primal_tol: 0.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "neg dual_tol",
+                SolverOptions {
+                    dual_tol: -1.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "inf timeout",
+                SolverOptions {
+                    timeout_secs: Some(f64::INFINITY),
+                    ..Default::default()
+                },
+            ),
+            (
+                "neg timeout",
+                SolverOptions {
+                    timeout_secs: Some(-1.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zero threads",
+                SolverOptions {
+                    threads: 0,
+                    ..Default::default()
+                },
+            ),
         ];
         for (label, opts) in cases {
             let result = solve_with(&lp, opts);

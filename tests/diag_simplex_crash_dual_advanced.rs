@@ -22,9 +22,14 @@ use otspot::sparse::CscMatrix;
 /// LCG (Numerical Recipes) deterministic generator (rand dep 不要)。
 struct Lcg(u64);
 impl Lcg {
-    fn new(s: u64) -> Self { Self(if s == 0 { 0xDEAD_BEEF_CAFE_F00D } else { s }) }
+    fn new(s: u64) -> Self {
+        Self(if s == 0 { 0xDEAD_BEEF_CAFE_F00D } else { s })
+    }
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn f01(&mut self) -> f64 {
@@ -41,7 +46,9 @@ fn build_eq_ge_network_lp(n_flow: usize, n_hub: usize, n_eq: usize, seed: u64) -
     let mut a_cols = Vec::new();
     let mut a_vals = Vec::new();
     for i in 0..n_flow {
-        a_rows.push(i); a_cols.push(i); a_vals.push(1.0); // singleton flow
+        a_rows.push(i);
+        a_cols.push(i);
+        a_vals.push(1.0); // singleton flow
     }
     for h in 0..n_hub {
         for i in 0..n_flow {
@@ -67,17 +74,17 @@ fn build_textbook_eq_lp() -> (LpProblem, f64) {
     //          x2 + x3 = 1
     //      x_i ≥ 0
     // 解: x1=1, x2=0, x3=1 or x1=0, x2=1, x3=0; obj=1 ※後者
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 1, 2],
-        &[1.0, 1.0, 1.0, 1.0],
-        2, 3,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+        .unwrap();
     let lp = LpProblem::new_general(
-        vec![1.0, 1.0, 1.0], a, vec![1.0, 1.0],
+        vec![1.0, 1.0, 1.0],
+        a,
+        vec![1.0, 1.0],
         vec![ConstraintType::Eq, ConstraintType::Eq],
-        vec![(0.0, f64::INFINITY); 3], None,
-    ).unwrap();
+        vec![(0.0, f64::INFINITY); 3],
+        None,
+    )
+    .unwrap();
     (lp, 1.0)
 }
 
@@ -97,16 +104,29 @@ fn assert_crash_consistent(lp: &LpProblem, name: &str) {
 
     eprintln!(
         "[{}] off status={:?} obj={:.6e} iter={} | on status={:?} obj={:.6e} iter={}",
-        name, r_off.status, r_off.objective, r_off.iterations,
-        r_on.status, r_on.objective, r_on.iterations,
+        name,
+        r_off.status,
+        r_off.objective,
+        r_off.iterations,
+        r_on.status,
+        r_on.objective,
+        r_on.iterations,
     );
 
     // 状態は一致 (退化禁止)
-    assert_eq!(r_off.status, r_on.status, "[{}] crash 退化: off={:?} on={:?}",
-        name, r_off.status, r_on.status);
+    assert_eq!(
+        r_off.status, r_on.status,
+        "[{}] crash 退化: off={:?} on={:?}",
+        name, r_off.status, r_on.status
+    );
     if r_off.status == SolveStatus::Optimal {
         let obj_diff = (r_on.objective - r_off.objective).abs() / (1.0 + r_off.objective.abs());
-        assert!(obj_diff < 1e-6, "[{}] objective drift {:.3e}", name, obj_diff);
+        assert!(
+            obj_diff < 1e-6,
+            "[{}] objective drift {:.3e}",
+            name,
+            obj_diff
+        );
     }
 }
 
@@ -137,8 +157,12 @@ fn crash_dual_advanced_textbook_eq() {
     opts.use_lp_crash_basis = true;
     let r = solve_with(&lp, &opts);
     assert_eq!(r.status, SolveStatus::Optimal);
-    assert!((r.objective - obj_expected).abs() < 1e-6,
-        "expected obj={}, got {}", obj_expected, r.objective);
+    assert!(
+        (r.objective - obj_expected).abs() < 1e-6,
+        "expected obj={}, got {}",
+        obj_expected,
+        r.objective
+    );
 }
 
 /// 複数 LCG seed で random Ge/Eq LP を生成し regression を集計検証

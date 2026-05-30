@@ -6,19 +6,18 @@ use std::time::Instant;
 #[cfg(test)]
 use crate::ScopedDisable;
 
+use super::core::run_ipm;
+use super::kkt::{bound_violation, kkt_residual_rel, primal_residual_rel};
+use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
-use crate::tolerances::{Q_DIAG_RANGE_TRIGGER, Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
+use crate::presolve::QpPresolveResult;
 use crate::presolve::{
-    run_qp_presolve_phase1, run_qp_presolve_phase2,
-    qp_transforms::QpPresolveStatus,
+    qp_transforms::QpPresolveStatus, run_qp_presolve_phase1, run_qp_presolve_phase2,
 };
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
 use crate::qp::problem::QpProblem;
-use super::core::run_ipm;
-use crate::presolve::QpPresolveResult;
-use super::kkt::{kkt_residual_rel, primal_residual_rel, bound_violation};
-use super::outcome::{IpmOutcome, ProblemView};
+use crate::tolerances::{Q_DIAG_RANGE_TRIGGER, Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 
 /// Residual threshold above which an Optimal/LocallyOptimal QP result is
 /// considered catastrophically corrupt and demoted to NumericalError.
@@ -77,7 +76,10 @@ pub(crate) fn guard_qp_optimal(
     if QP_GUARD_DISABLED.with(|c| c.get()) {
         return result;
     }
-    if !matches!(result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+    if !matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal
+    ) {
         return result;
     }
     if result.solution.is_empty() {
@@ -92,7 +94,12 @@ pub(crate) fn guard_qp_optimal(
         constraint_types: &problem.constraint_types,
         eliminated_cols,
     };
-    let kkt = kkt_residual_rel(&view, &result.solution, &result.dual_solution, &result.bound_duals);
+    let kkt = kkt_residual_rel(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+    );
     let pf = primal_residual_rel(&view, &result.solution);
     let bv = bound_violation(&problem.bounds, &result.solution);
     if kkt > QP_GUARD_CATASTROPHIC_TOL
@@ -175,7 +182,8 @@ fn scale_warm_start_for_q_diag(options: &SolverOptions, col_scales: &[f64]) -> S
         } else {
             log::warn!(
                 "warm_start_qp ignored: q_diag_scaling dim mismatch (x: {}, scales: {})",
-                ws.x.len(), col_scales.len()
+                ws.x.len(),
+                col_scales.len()
             );
             scaled.warm_start_qp = None;
         }
@@ -185,7 +193,9 @@ fn scale_warm_start_for_q_diag(options: &SolverOptions, col_scales: &[f64]) -> S
 
 fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> {
     let n = problem.num_vars;
-    if n == 0 { return None; }
+    if n == 0 {
+        return None;
+    }
 
     let mut q_diag = vec![0.0_f64; n];
     for col in 0..n {
@@ -267,19 +277,30 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     }
 
     // c' = D c (column-scale)
-    let c_s: Vec<f64> = problem.c.iter().enumerate()
+    let c_s: Vec<f64> = problem
+        .c
+        .iter()
+        .enumerate()
         .map(|(j, &v)| v * col_scales[j])
         .collect();
 
     // bounds' = bounds / D (s_j > 0 なので符号変わらず)
-    let bounds_s: Vec<(f64, f64)> = problem.bounds.iter().enumerate()
+    let bounds_s: Vec<(f64, f64)> = problem
+        .bounds
+        .iter()
+        .enumerate()
         .map(|(j, &(lb, ub))| (lb / col_scales[j], ub / col_scales[j]))
         .collect();
 
     // QpProblem を作る (b は不変、constraint_types も不変)。
     // obj_offset は scaling 不変なため orig から引き継ぐ。
     let mut scaled = match QpProblem::new(
-        q_s, c_s, a_s, problem.b.clone(), bounds_s, problem.constraint_types.clone(),
+        q_s,
+        c_s,
+        a_s,
+        problem.b.clone(),
+        bounds_s,
+        problem.constraint_types.clone(),
     ) {
         Ok(p) => p,
         Err(_) => return None,
@@ -291,11 +312,7 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
 
 /// `try_q_diagonal_scaling` で行った column scaling を逆変換する。
 /// x_orig = D × x_scaled, y は不変, y_lb/y_ub /= D.
-fn unscale_q_diagonal(
-    result: &mut SolverResult,
-    col_scales: &[f64],
-    orig_problem: &QpProblem,
-) {
+fn unscale_q_diagonal(result: &mut SolverResult, col_scales: &[f64], orig_problem: &QpProblem) {
     let n = orig_problem.num_vars;
     if result.solution.len() == n {
         for j in 0..n {
@@ -365,8 +382,11 @@ fn solve_ipm_with_runner(
     // skip するために必要。これを欠くと IPM 解に含まれない EmptyCol の bd=0 慣例値が
     // spurious 残差を生み、valid presolved Optimal が false-demote される (kkt.rs の
     // narrow 条件は非空列の本物の stationarity 違反は決して skip しないため AFIRO 等は安全)。
-    let eliminated_cols: Vec<bool> =
-        presolve_result.col_map.iter().map(|c| c.is_none()).collect();
+    let eliminated_cols: Vec<bool> = presolve_result
+        .col_map
+        .iter()
+        .map(|c| c.is_none())
+        .collect();
 
     if presolve_result.presolve_status == QpPresolveStatus::Infeasible {
         return (SolverResult::infeasible(), eliminated_cols);
@@ -386,7 +406,14 @@ fn solve_ipm_with_runner(
     };
 
     if total_deadline.is_some_and(|d| Instant::now() >= d) {
-        let r = finalize_outcome(IpmOutcome::empty(), user_eps, n_orig, total_deadline, false, &view);
+        let r = finalize_outcome(
+            IpmOutcome::empty(),
+            user_eps,
+            n_orig,
+            total_deadline,
+            false,
+            &view,
+        );
         return (r, eliminated_cols);
     }
 
@@ -399,10 +426,7 @@ fn solve_ipm_with_runner(
 
     let base_tighten = dynamic_base_tighten(user_eps);
     let attempts: Vec<(bool, f64)> = if presolve_did_ruiz {
-        let mut v = vec![
-            (false, base_tighten),
-            (false, base_tighten * 10.0),
-        ];
+        let mut v = vec![(false, base_tighten), (false, base_tighten * 10.0)];
         if base_tighten > 10.0 {
             v.push((false, base_tighten / 10.0));
         }
@@ -412,19 +436,19 @@ fn solve_ipm_with_runner(
         v
     } else {
         let mut v = vec![
-            (true,  base_tighten),
+            (true, base_tighten),
             (false, base_tighten),
-            (true,  base_tighten * 10.0),
+            (true, base_tighten * 10.0),
             (false, base_tighten * 10.0),
-            (true,  base_tighten * 100.0),
+            (true, base_tighten * 100.0),
             (false, base_tighten * 100.0),
         ];
         if base_tighten > 10.0 {
-            v.push((true,  base_tighten / 10.0));
+            v.push((true, base_tighten / 10.0));
             v.push((false, base_tighten / 10.0));
         }
         if base_tighten > 1.0 {
-            v.push((true,  1.0));
+            v.push((true, 1.0));
             v.push((false, 1.0));
         }
         v
@@ -432,9 +456,13 @@ fn solve_ipm_with_runner(
 
     for &(use_ruiz, tighten) in attempts.iter() {
         if let Some(d) = total_deadline {
-            if Instant::now() >= d { break; }
+            if Instant::now() >= d {
+                break;
+            }
         }
-        if iter_used >= user_max_iter { break; }
+        if iter_used >= user_max_iter {
+            break;
+        }
         let remaining = user_max_iter.saturating_sub(iter_used);
         let per_attempt_cap = MAX_ITER_PER_ATTEMPT.min(remaining);
         opts.deadline = total_deadline;
@@ -474,14 +502,19 @@ fn solve_ipm_with_runner(
     // Without presolve, the IPM operates in the original space (no amplification)
     // and typically converges within user_eps. Size-gated to avoid overhead on
     // problems that are too large to re-solve without reduction.
-    let best_ok = best.as_ref().map(|b| b.satisfies_eps(user_eps)).unwrap_or(false);
+    let best_ok = best
+        .as_ref()
+        .map(|b| b.satisfies_eps(user_eps))
+        .unwrap_or(false);
     if !best_ok && presolve_did_ruiz && n_orig <= NO_PRESOLVE_FALLBACK_LIMIT {
         let fallback_pre = QpPresolveResult::no_reduction(problem);
         for use_ruiz_fb in [false, true] {
             if total_deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
-            if iter_used >= user_max_iter { break; }
+            if iter_used >= user_max_iter {
+                break;
+            }
             let remaining = user_max_iter.saturating_sub(iter_used);
             let per_attempt_cap = MAX_ITER_PER_ATTEMPT.min(remaining);
             opts.deadline = total_deadline;
@@ -491,7 +524,11 @@ fn solve_ipm_with_runner(
             opts.tolerance = None;
             opts.ipm.eps = user_eps.max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
             let fb = runner(problem, &fallback_pre, &opts);
-            let charged_fb = if fb.satisfies_eps(user_eps) { fb.iterations } else { per_attempt_cap };
+            let charged_fb = if fb.satisfies_eps(user_eps) {
+                fb.iterations
+            } else {
+                per_attempt_cap
+            };
             iter_used = iter_used.saturating_add(charged_fb);
             // Replace best only when the fallback actually satisfies user_eps. A
             // non-satisfying fallback must NOT displace the presolve result:
@@ -624,7 +661,11 @@ fn finalize_outcome(
         SolveStatus::SuboptimalSolution
     };
 
-    debug_assert_eq!(outcome.solution.len(), n_orig, "outcome solution dimension mismatch");
+    debug_assert_eq!(
+        outcome.solution.len(),
+        n_orig,
+        "outcome solution dimension mismatch"
+    );
 
     let result = SolverResult {
         status,
@@ -660,7 +701,14 @@ mod tests {
     fn ipm_finalize_outcome_reduced_costs_empty() {
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
         let a = CscMatrix::new(0, 1);
-        let prob = QpProblem::new_all_le(q, vec![0.0], a, vec![], vec![(f64::NEG_INFINITY, f64::INFINITY)]).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0],
+            a,
+            vec![],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        )
+        .unwrap();
         let result = solve_ipm(&prob, &SolverOptions::default());
         assert!(
             result.reduced_costs.is_empty(),
@@ -680,7 +728,11 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 2).unwrap();
         let a = CscMatrix::new(0, 2);
         QpProblem::new_all_le(
-            q, vec![0.0, 1.0], a, vec![], vec![(-10.0, 10.0), (0.0, 5.0)],
+            q,
+            vec![0.0, 1.0],
+            a,
+            vec![],
+            vec![(-10.0, 10.0), (0.0, 5.0)],
         )
         .unwrap()
     }
@@ -699,7 +751,11 @@ mod tests {
             "isolated EmptyCol QP must not be false-demoted (got {:?})",
             result.status,
         );
-        assert!((result.objective - 0.0).abs() < 1e-6, "obj={}", result.objective);
+        assert!(
+            (result.objective - 0.0).abs() < 1e-6,
+            "obj={}",
+            result.objective
+        );
         assert!(result.solution[0].abs() < 1e-6, "x0={}", result.solution[0]);
         assert!(result.solution[1].abs() < 1e-6, "x1={}", result.solution[1]);
     }
@@ -736,13 +792,20 @@ mod tests {
             postsolve_krylov_ir_skipped: false,
             timing: None,
         };
-        assert!(outcome.satisfies_eps(1e-6), "stored residuals must pass satisfies_eps");
+        assert!(
+            outcome.satisfies_eps(1e-6),
+            "stored residuals must pass satisfies_eps"
+        );
 
         // WITH mask: EmptyCol (col 1, A-empty AND Q-empty AND eliminated) skipped → Optimal.
         let mask = vec![false, true];
         let view_masked = ProblemView {
-            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            q: &prob.q,
+            a: &prob.a,
+            c: &prob.c,
+            b: &prob.b,
+            bounds: &prob.bounds,
+            constraint_types: &prob.constraint_types,
             eliminated_cols: &mask,
         };
         let r_masked = finalize_outcome(outcome.clone(), 1e-6, 2, None, false, &view_masked);
@@ -777,10 +840,14 @@ mod tests {
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 1).unwrap();
         let prob = QpProblem::new(
-            q, vec![1.0], a, vec![5.0],
+            q,
+            vec![1.0],
+            a,
+            vec![5.0],
             vec![(0.0, 10.0)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Wrong iterate: x=0 (violates x=5), y=0, z=0 → stationarity = c = 1, and
         // primal violation too. Stored residuals forced to 0 so satisfies_eps passes
@@ -805,8 +872,12 @@ mod tests {
         // mask=true on the A-non-empty col: narrow condition (a_empty) is false → not skipped.
         let mask = vec![true];
         let view = ProblemView {
-            q: &prob.q, a: &prob.a, c: &prob.c, b: &prob.b,
-            bounds: &prob.bounds, constraint_types: &prob.constraint_types,
+            q: &prob.q,
+            a: &prob.a,
+            c: &prob.c,
+            b: &prob.b,
+            bounds: &prob.bounds,
+            constraint_types: &prob.constraint_types,
             eliminated_cols: &mask,
         };
         let result = finalize_outcome(outcome, 1e-6, 1, None, false, &view);
@@ -829,16 +900,16 @@ mod tests {
     /// makes 5e-10 > 1e-10 → Gate 1 fails → None → this test FAILS.
     #[test]
     fn try_q_diagonal_scaling_gate1_local_scale_sentinel() {
-        let q = CscMatrix::from_triplets(
-            &[0, 0, 1],
-            &[0, 1, 1],
-            &[1e9_f64, 5e-10, 1e3],
-            2, 2,
-        ).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1e9_f64, 5e-10, 1e3], 2, 2).unwrap();
         let prob = QpProblem::new_all_le(
-            q, vec![0.0, 0.0], CscMatrix::new(0, 2), vec![],
+            q,
+            vec![0.0, 0.0],
+            CscMatrix::new(0, 2),
+            vec![],
             vec![(0.0, 1.0), (0.0, 1.0)],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             try_q_diagonal_scaling(&prob).is_some(),
             "Gate 1 local scale: 5e-10 < Q_OFFDIAG_REL×1e3=1e-9 → scaling must trigger"
@@ -876,17 +947,27 @@ mod tests {
         let b = vec![1.0];
         let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
         let prob = QpProblem::new(
-            q.clone(), c.clone(), a.clone(), b.clone(), bounds.clone(),
+            q.clone(),
+            c.clone(),
+            a.clone(),
+            b.clone(),
+            bounds.clone(),
             vec![crate::problem::ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let (scaled, col_scales) = try_q_diagonal_scaling(&prob)
-            .expect("ill-cond diag Q must trigger");
+        let (scaled, col_scales) =
+            try_q_diagonal_scaling(&prob).expect("ill-cond diag Q must trigger");
         let q_s = &scaled.q;
         for col in 0..2 {
             for k in q_s.col_ptr[col]..q_s.col_ptr[col + 1] {
                 if q_s.row_ind[k] == col {
-                    assert!((q_s.values[k] - 1.0).abs() < 1e-12, "got {} at col {}", q_s.values[k], col);
+                    assert!(
+                        (q_s.values[k] - 1.0).abs() < 1e-12,
+                        "got {} at col {}",
+                        q_s.values[k],
+                        col
+                    );
                 }
             }
         }
@@ -904,10 +985,8 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![1.0];
         let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
-        let prob = QpProblem::new(
-            q, c, a, b, bounds,
-            vec![crate::problem::ConstraintType::Eq],
-        ).unwrap();
+        let prob =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Eq]).unwrap();
 
         let opts = SolverOptions::default();
         let result = solve_ipm(&prob, &opts);
@@ -993,10 +1072,14 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let prob = QpProblem::new(
-            q, vec![0.0, 0.0], a, vec![1.0],
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![1.0],
             vec![(0.0, 100.0), (0.0, 100.0)],
             vec![crate::problem::ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         let opts = SolverOptions::default();
         let result = solve_ipm(&prob, &opts);
         assert_eq!(result.status, crate::problem::SolveStatus::Optimal);
@@ -1019,7 +1102,10 @@ mod tests {
             crate::problem::SolveStatus::NumericalError,
             crate::problem::SolveStatus::SuboptimalSolution,
         ] {
-            let r = SolverResult { status: status.clone(), ..Default::default() };
+            let r = SolverResult {
+                status: status.clone(),
+                ..Default::default()
+            };
             let out = guard_qp_optimal(r, &prob, &[]);
             assert_eq!(out.status, status, "guard must pass through {status:?}");
         }
@@ -1039,9 +1125,7 @@ mod tests {
         use crate::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
-        let a = CscMatrix::from_triplets(
-            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
         let prob = QpProblem::new(
             q,
             vec![0.0],
@@ -1049,7 +1133,8 @@ mod tests {
             vec![1.0, -1.0],
             vec![(f64::NEG_INFINITY, f64::INFINITY)],
             vec![ConstraintType::Le, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
         let view = ProblemView::from_problem(&prob);
         let user_eps = 1e-6_f64;
 
@@ -1096,9 +1181,7 @@ mod tests {
         use crate::sparse::CscMatrix;
 
         let q = CscMatrix::new(1, 1);
-        let a = CscMatrix::from_triplets(
-            &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
         let prob = QpProblem::new(
             q,
             vec![0.0],
@@ -1106,7 +1189,8 @@ mod tests {
             vec![1.0, -1.0],
             vec![(f64::NEG_INFINITY, f64::INFINITY)],
             vec![ConstraintType::Le, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
         let view = ProblemView::from_problem(&prob);
         let user_eps = 1e-6_f64;
 
@@ -1179,14 +1263,15 @@ mod tests {
     fn unscale_q_diagonal_reverses_x_and_bound_duals() {
         use crate::sparse::CscMatrix;
         let n = 3;
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2], &[0, 1, 2], &[1.0, 4.0, 9.0], n, n,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 4.0, 9.0], n, n).unwrap();
         let prob = QpProblem::new_all_le(
-            q, vec![1.0_f64; n],
-            CscMatrix::new(0, n), vec![],
+            q,
+            vec![1.0_f64; n],
+            CscMatrix::new(0, n),
+            vec![],
             vec![(0.0, 5.0), (0.0, f64::INFINITY), (f64::NEG_INFINITY, 3.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let col_scales = vec![2.0_f64, 0.5, 4.0];
         let mut result = SolverResult {
             status: SolveStatus::Optimal,
@@ -1221,11 +1306,7 @@ mod tests {
             static CALL_COUNT: Cell<usize> = const { Cell::new(0) };
         }
 
-        fn mock_runner(
-            _: &QpProblem,
-            _: &QpPresolveResult,
-            _: &SolverOptions,
-        ) -> IpmOutcome {
+        fn mock_runner(_: &QpProblem, _: &QpPresolveResult, _: &SolverOptions) -> IpmOutcome {
             CALL_COUNT.with(|c| c.set(c.get() + 1));
             // iterations=0 simulates stall best_iter undercount; never converges.
             IpmOutcome::empty()

@@ -14,7 +14,10 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 /// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout) {
+    if matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpDirect;
@@ -23,9 +26,15 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
 }
 
 /// LP entry from `solve_qp_with(Q=0)`. Sets `result.stats.route = SolveRoute::LpForwardedFromQp`.
-pub(crate) fn solve_lp_forwarded_from_qp(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_lp_forwarded_from_qp(
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout) {
+    if matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
         result.objective += problem.obj_offset;
     }
     result.stats.route = SolveRoute::LpForwardedFromQp;
@@ -64,7 +73,7 @@ mod tests {
     /// initial BFS (x_decision = 0, c^T x = 0, sf.obj_offset = 0).
     #[test]
     fn test_lp_timeout_incumbent_includes_obj_offset() {
-        use std::sync::{Arc, atomic::AtomicBool};
+        use std::sync::{atomic::AtomicBool, Arc};
 
         let mut lp = make_trivial_lp();
         lp.obj_offset = 42.5;
@@ -102,11 +111,41 @@ mod tests {
     fn invalid_options_rejected_at_lp_entry() {
         let lp = make_trivial_lp();
         let cases: &[(&str, SolverOptions)] = &[
-            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-            ("inf primal_tol", SolverOptions { primal_tol: f64::INFINITY, ..Default::default() }),
-            ("neg timeout_secs", SolverOptions { timeout_secs: Some(-0.5), ..Default::default() }),
-            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
-            ("nan dual_tol", SolverOptions { dual_tol: f64::NAN, ..Default::default() }),
+            (
+                "nan primal_tol",
+                SolverOptions {
+                    primal_tol: f64::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "inf primal_tol",
+                SolverOptions {
+                    primal_tol: f64::INFINITY,
+                    ..Default::default()
+                },
+            ),
+            (
+                "neg timeout_secs",
+                SolverOptions {
+                    timeout_secs: Some(-0.5),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zero threads",
+                SolverOptions {
+                    threads: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "nan dual_tol",
+                SolverOptions {
+                    dual_tol: f64::NAN,
+                    ..Default::default()
+                },
+            ),
         ];
         for (label, opts) in cases {
             let result = solve_lp_with(&lp, opts);

@@ -19,10 +19,10 @@
 //! completion (the default 180s cap would kill it mid-solve). Data file required;
 //! absence panics (never a silent SKIP that would hide the bug).
 
+use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::SolveStatus;
 use otspot::qp::{solve_qp_with, SOLVE_STACK_SIZE};
-use otspot::io::qps::parse_qps;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -62,7 +62,9 @@ fn diag_greenbea_ipm_timebox_reaches_optimal() {
             let _ = handle.join();
             eprintln!(
                 "[greenbea-timebox] status={:?} obj={:.6e} wall={:.1}s (timeout={timeout_secs}s)",
-                status, obj, elapsed.as_secs_f64()
+                status,
+                obj,
+                elapsed.as_secs_f64()
             );
             assert_eq!(
                 status,

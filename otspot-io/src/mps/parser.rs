@@ -1,16 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 
+pub use otspot_core::error::MpsError;
 use otspot_core::mip::MilpProblem;
 use otspot_core::problem::{ConstraintType, LpProblem};
 use otspot_core::sparse::CscMatrix;
-pub use otspot_core::error::MpsError;
 
-use crate::common::{RowType, is_fixed_width_format, parse_mps_free_pairs};
 use super::types::{
-    BoundType, IntegerMarker, Section,
-    INTEGER_DEFAULT_UPPER_BINARY, integer_marker_kind,
+    integer_marker_kind, BoundType, IntegerMarker, Section, INTEGER_DEFAULT_UPPER_BINARY,
 };
+use crate::common::{is_fixed_width_format, parse_mps_free_pairs, RowType};
 
 pub(super) struct MpsParser {
     problem_name: Option<String>,
@@ -125,7 +124,10 @@ impl MpsParser {
             _ => {
                 return Err(MpsError::ParseError {
                     line: line_num,
-                    message: format!("Invalid OBJSENSE value '{}'; expected MIN or MAX", line.trim()),
+                    message: format!(
+                        "Invalid OBJSENSE value '{}'; expected MIN or MAX",
+                        line.trim()
+                    ),
                 });
             }
         }
@@ -201,7 +203,10 @@ impl MpsParser {
         if !value1.is_finite() {
             return Err(MpsError::ParseError {
                 line: line_num,
-                message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name1),
+                message: format!(
+                    "Non-finite COLUMNS value for col='{}' row='{}'",
+                    col_name, row_name1
+                ),
             });
         }
         self.columns.push((col_name.clone(), row_name1, value1));
@@ -211,14 +216,19 @@ impl MpsParser {
             let value2_str = line.get(49..61).unwrap_or("").trim();
 
             if !row_name2.is_empty() && !value2_str.is_empty() {
-                let value2 = value2_str.parse::<f64>().map_err(|_| MpsError::ParseError {
-                    line: line_num,
-                    message: format!("Invalid numeric value: {}", value2_str),
-                })?;
+                let value2 = value2_str
+                    .parse::<f64>()
+                    .map_err(|_| MpsError::ParseError {
+                        line: line_num,
+                        message: format!("Invalid numeric value: {}", value2_str),
+                    })?;
                 if !value2.is_finite() {
                     return Err(MpsError::ParseError {
                         line: line_num,
-                        message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name2),
+                        message: format!(
+                            "Non-finite COLUMNS value for col='{}' row='{}'",
+                            col_name, row_name2
+                        ),
                     });
                 }
                 self.columns.push((col_name.clone(), row_name2, value2));
@@ -247,14 +257,19 @@ impl MpsParser {
                 break;
             }
             let row_name = parts[i].to_string();
-            let value = parts[i + 1].parse::<f64>().map_err(|_| MpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid numeric value: {}", parts[i + 1]),
-            })?;
+            let value = parts[i + 1]
+                .parse::<f64>()
+                .map_err(|_| MpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid numeric value: {}", parts[i + 1]),
+                })?;
             if !value.is_finite() {
                 return Err(MpsError::ParseError {
                     line: line_num,
-                    message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name),
+                    message: format!(
+                        "Non-finite COLUMNS value for col='{}' row='{}'",
+                        col_name, row_name
+                    ),
                 });
             }
             self.columns.push((col_name.clone(), row_name, value));
@@ -273,8 +288,12 @@ impl MpsParser {
         }
         // Pass None: non-finite values are rejected for all rows including the N-row.
         // The obj_offset (N-row RHS) is extracted in build_lp_problem after all sections parse.
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", None)
-            .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", None).map_err(|msg| {
+            MpsError::ParseError {
+                line: line_num,
+                message: msg,
+            }
+        })?;
         for (name, value) in pairs {
             self.rhs.insert(name, value);
         }
@@ -289,8 +308,12 @@ impl MpsParser {
                 message: "RANGES line requires at least 3 fields (rhs_name row value)".to_string(),
             });
         }
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", None)
-            .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", None).map_err(|msg| {
+            MpsError::ParseError {
+                line: line_num,
+                message: msg,
+            }
+        })?;
         for (name, value) in pairs {
             self.ranges.insert(name, value);
         }
@@ -445,7 +468,11 @@ impl MpsParser {
         // as a finite f64 at parse time (see `parse_rhs_section`).
         let obj_offset = if let Some(obj_row_name) = &self.obj_row {
             let raw = self.rhs.get(obj_row_name.as_str()).copied().unwrap_or(0.0);
-            if self.maximize { -raw } else { raw }
+            if self.maximize {
+                -raw
+            } else {
+                raw
+            }
         } else {
             0.0
         };
@@ -456,14 +483,18 @@ impl MpsParser {
                 continue;
             }
 
-            let col_idx = col_map.get(col_name).ok_or_else(|| MpsError::UndefinedReference {
-                kind: "column".to_string(),
-                name: col_name.clone(),
-            })?;
-            let row_idx = row_map.get(row_name).ok_or_else(|| MpsError::UndefinedReference {
-                kind: "row".to_string(),
-                name: row_name.clone(),
-            })?;
+            let col_idx = col_map
+                .get(col_name)
+                .ok_or_else(|| MpsError::UndefinedReference {
+                    kind: "column".to_string(),
+                    name: col_name.clone(),
+                })?;
+            let row_idx = row_map
+                .get(row_name)
+                .ok_or_else(|| MpsError::UndefinedReference {
+                    kind: "row".to_string(),
+                    name: row_name.clone(),
+                })?;
 
             triplets.push((*row_idx, *col_idx, *value));
 
@@ -476,18 +507,21 @@ impl MpsParser {
         let cols: Vec<usize> = triplets.iter().map(|&(_, c, _)| c).collect();
         let vals: Vec<f64> = triplets.iter().map(|&(_, _, v)| v).collect();
 
-        let a = CscMatrix::from_triplets(&rows, &cols, &vals, num_constraints, num_vars)
-            .map_err(|e| MpsError::ParseError {
+        let a = CscMatrix::from_triplets(&rows, &cols, &vals, num_constraints, num_vars).map_err(
+            |e| MpsError::ParseError {
                 line: 0,
                 message: format!("Failed to build matrix: {}", e),
-            })?;
+            },
+        )?;
 
         let mut bounds = vec![(0.0, f64::INFINITY); num_vars];
         for (bound_type, col_name, value) in &self.bounds {
-            let col_idx = col_map.get(col_name).ok_or_else(|| MpsError::UndefinedReference {
-                kind: "column".to_string(),
-                name: col_name.clone(),
-            })?;
+            let col_idx = col_map
+                .get(col_name)
+                .ok_or_else(|| MpsError::UndefinedReference {
+                    kind: "column".to_string(),
+                    name: col_name.clone(),
+                })?;
 
             match bound_type {
                 BoundType::LO => bounds[*col_idx].0 = value.unwrap_or(0.0),

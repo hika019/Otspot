@@ -1,11 +1,11 @@
 //! QP presolve Phase 2: equality-constraint redundancy elimination, near-zero Q
 //! off-diagonal pruning, and row-norm constraint preconditioning.
 
+use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
 use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, SCALING_SIGMA_FLOOR, ZERO_TOL};
-use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
 /// Elimination cost is O(mn²) and only pays off in strongly over-determined
@@ -39,12 +39,9 @@ const RHS_HASH_QUANTIZE: f64 = 1e9;
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
-fn equality_constraint_qr(
-    prob: &QpProblem,
-    removed_rows: &mut [bool],
-) {
-    use std::collections::HashMap;
+fn equality_constraint_qr(prob: &QpProblem, removed_rows: &mut [bool]) {
     use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
     let n = prob.num_vars;
@@ -62,7 +59,10 @@ fn equality_constraint_qr(
         for k in start..end {
             let row = prob.a.row_ind[k];
             if !removed_rows[row]
-                && matches!(prob.constraint_types[row], crate::problem::ConstraintType::Le)
+                && matches!(
+                    prob.constraint_types[row],
+                    crate::problem::ConstraintType::Le
+                )
             {
                 row_entries[row].push((j, prob.a.values[k]));
             }
@@ -85,7 +85,10 @@ fn equality_constraint_qr(
         }
         let ch = col_pattern_hash(&row_entries[i]);
         let bk = (prob.b[i].abs() * RHS_HASH_QUANTIZE).round() as i64;
-        groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
+        groups
+            .entry((row_entries[i].len(), ch, bk))
+            .or_default()
+            .push(i);
     }
 
     let mut eq_pos_rows: Vec<usize> = Vec::new();
@@ -108,9 +111,12 @@ fn equality_constraint_qr(
                 if (b_i + prob.b[j]).abs() > ZERO_TOL * (1.0 + b_i.abs()) {
                     continue;
                 }
-                let is_neg = entries_i.iter().zip(entries_j.iter()).all(|((c1, v1), (c2, v2))| {
-                    *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
-                });
+                let is_neg = entries_i
+                    .iter()
+                    .zip(entries_j.iter())
+                    .all(|((c1, v1), (c2, v2))| {
+                        *c1 == *c2 && (v1 + v2).abs() < ZERO_TOL * (1.0 + v1.abs())
+                    });
                 if is_neg {
                     eq_pos_rows.push(i);
                     paired[i] = true;
@@ -226,10 +232,7 @@ fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
 
 /// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
 /// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
-fn constraint_precond(
-    a: &mut CscMatrix,
-    b: &mut [f64],
-) -> Vec<f64> {
+fn constraint_precond(a: &mut CscMatrix, b: &mut [f64]) -> Vec<f64> {
     let m = a.nrows;
     let n = a.ncols;
 
@@ -240,15 +243,24 @@ fn constraint_precond(
         for k in start..end {
             let row = a.row_ind[k];
             let v = a.values[k].abs();
-            if v > row_max[row] { row_max[row] = v; }
+            if v > row_max[row] {
+                row_max[row] = v;
+            }
         }
     }
 
     // SCALING_SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
     // amp (phase1·phase2·Ruiz) stays within the IPM's achievable scaled tolerance.
-    let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
-        if mx > 1.0 + SCALE_EXCESS_TOL { (1.0 / mx).max(SCALING_SIGMA_FLOOR) } else { 1.0 }
-    }).collect();
+    let sigmas: Vec<f64> = row_max
+        .iter()
+        .map(|&mx| {
+            if mx > 1.0 + SCALE_EXCESS_TOL {
+                (1.0 / mx).max(SCALING_SIGMA_FLOOR)
+            } else {
+                1.0
+            }
+        })
+        .collect();
 
     let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > ZERO_TOL);
     if !has_any {
@@ -285,7 +297,10 @@ pub fn run_qp_presolve_phase2(
         return phase1_result;
     }
 
-    if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+    if opts
+        .deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+    {
         return phase1_result;
     }
 
@@ -354,7 +369,14 @@ pub fn run_qp_presolve_phase2(
         .collect();
     let c_clone = prob.c.clone();
     let bounds_clone = prob.bounds.clone();
-    let reduced_new = match QpProblem::new(q_cleaned, c_clone, a_precond, b_precond, bounds_clone, constraint_types_new) {
+    let reduced_new = match QpProblem::new(
+        q_cleaned,
+        c_clone,
+        a_precond,
+        b_precond,
+        bounds_clone,
+        constraint_types_new,
+    ) {
         Ok(p) => p,
         Err(_) => return phase1_result,
     };
@@ -393,7 +415,9 @@ pub fn run_qp_presolve_phase2(
 
     let has_precond_scaling = sigmas.iter().any(|&s| (s - 1.0).abs() > ZERO_TOL);
     if has_precond_scaling {
-        result.postsolve_stack.push(QpPostsolveStep::LargeCoeffRowScale { row_scales: sigmas });
+        result
+            .postsolve_stack
+            .push(QpPostsolveStep::LargeCoeffRowScale { row_scales: sigmas });
     }
     result
 }
@@ -411,25 +435,41 @@ mod tests {
             &(0..n).collect::<Vec<_>>(),
             &(0..n).collect::<Vec<_>>(),
             &vec![2.0; n],
-            n, n,
-        ).unwrap();
+            n,
+            n,
+        )
+        .unwrap();
         let a_m = m.min(n);
         let a = CscMatrix::from_triplets(
             &(0..a_m).collect::<Vec<_>>(),
             &(0..a_m).collect::<Vec<_>>(),
             &vec![1.0; a_m],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![1.0; m];
-        QpProblem::new_all_le(q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n]).unwrap()
+        QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap()
     }
 
     #[test]
     fn test_near_zero_q_removal_removes_small_offdiag() {
         // Q = [[2.0, 1e-15], [1e-15, 2.0]] → 非対角を除去
         let q = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1e-15, 1e-15, 2.0], 2, 2
-        ).unwrap();
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
+            &[2.0, 1e-15, 1e-15, 2.0],
+            2,
+            2,
+        )
+        .unwrap();
         let q_clean = near_zero_q_removal(&q, 2);
         assert_eq!(q_clean.values.len(), 2, "off-diag removed");
     }
@@ -440,16 +480,23 @@ mod tests {
         let n = 2usize;
         let m = 2usize;
         let mut a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[0, 1, 0, 1],
             &[1.0, 1.0, 1000.0, 1000.0],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let mut b = vec![1.0, 1000.0];
         let sigmas = constraint_precond(&mut a, &mut b);
         // 行0: max=1.0 → σ=1.0（変化なし）
         // 行1: max=1000.0 → σ=0.001
         assert!((sigmas[0] - 1.0).abs() < 1e-10, "row0 unchanged");
-        assert!((sigmas[1] - 0.001).abs() < 1e-7, "row1 scaled: σ={}", sigmas[1]);
+        assert!(
+            (sigmas[1] - 0.001).abs() < 1e-7,
+            "row1 scaled: σ={}",
+            sigmas[1]
+        );
         // b[1] がスケールされていること
         assert!((b[1] - 1.0).abs() < 1e-7, "b[1] scaled: {}", b[1]);
     }
@@ -460,8 +507,14 @@ mod tests {
         let opts = SolverOptions::default();
         let phase1 = crate::presolve::run_qp_presolve_phase1(&prob, &opts);
         let phase2 = run_qp_presolve_phase2(phase1, &opts);
-        assert_eq!(phase2.orig_num_vars, 3, "orig_num_vars preserved through phase2");
-        assert_eq!(phase2.orig_num_constraints, 2, "orig_num_constraints preserved through phase2");
+        assert_eq!(
+            phase2.orig_num_vars, 3,
+            "orig_num_vars preserved through phase2"
+        );
+        assert_eq!(
+            phase2.orig_num_constraints, 2,
+            "orig_num_constraints preserved through phase2"
+        );
     }
 
     #[test]
@@ -476,19 +529,34 @@ mod tests {
         // rows 2,3: x+y<=1 と -(x+y)<=-1 (重複)
         // rows 4,5: x-y<=0 と -(x-y)<=0
         let a = CscMatrix::from_triplets(
-            &[0,0, 1,1, 2,2, 3,3, 4,4, 5,5],
-            &[0,1, 0,1, 0,1, 0,1, 0,1, 0,1],
-            &[1.0,1.0, -1.0,-1.0, 1.0,1.0, -1.0,-1.0, 1.0,-1.0, -1.0,1.0],
-            m, n,
-        ).unwrap();
+            &[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5],
+            &[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+            &[
+                1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
+            ],
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![1.0, -1.0, 1.0, -1.0, 0.0, 0.0];
-        let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[2.0,2.0], n, n).unwrap();
-        let prob = QpProblem::new_all_le(q, vec![0.0;n], a, b, vec![(f64::NEG_INFINITY,f64::INFINITY);n]).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
+        let prob = QpProblem::new_all_le(
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
         let mut removed = vec![false; m];
         equality_constraint_qr(&prob, &mut removed);
         // 少なくとも1行が除去されているべき（重複行）
         let removed_count = removed.iter().filter(|&&b| b).count();
-        assert!(removed_count >= 2, "at least one redundant pair removed, got {}", removed_count);
+        assert!(
+            removed_count >= 2,
+            "at least one redundant pair removed, got {}",
+            removed_count
+        );
     }
 
     /// Sentinel: ROW_OVERDETERMINED_RATIO boundary — m = n*2 skips QR (skip path).
@@ -505,13 +573,20 @@ mod tests {
             &[0, 0, 1, 1, 2, 2, 3, 3],
             &[0, 1, 0, 1, 0, 1, 0, 1],
             &[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![1.0, -1.0, 1.0, -1.0]; // rows 0,1 and rows 2,3 are the same Le-Le pair
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
         let prob = QpProblem::new_all_le(
-            q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n],
-        ).unwrap();
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
         let mut removed = vec![false; m];
         equality_constraint_qr(&prob, &mut removed);
         let removed_count = removed.iter().filter(|&&b| b).count();
@@ -531,20 +606,27 @@ mod tests {
         // n=2, m=5 = n*ROW_OVERDETERMINED_RATIO + 1: condition `m <= n*2` is false → run.
         let n = 2usize;
         let m = 5usize; // n*ROW_OVERDETERMINED_RATIO + 1
-        // Rows 0,1: x+y<=1 / -(x+y)<=-1  (Le-Le pair 1)
-        // Rows 2,3: same pair (redundant)
-        // Row  4: lone x<=5 (no pair, not removed)
+                        // Rows 0,1: x+y<=1 / -(x+y)<=-1  (Le-Le pair 1)
+                        // Rows 2,3: same pair (redundant)
+                        // Row  4: lone x<=5 (no pair, not removed)
         let a = CscMatrix::from_triplets(
             &[0, 0, 1, 1, 2, 2, 3, 3, 4],
             &[0, 1, 0, 1, 0, 1, 0, 1, 0],
             &[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![1.0, -1.0, 1.0, -1.0, 5.0];
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], n, n).unwrap();
         let prob = QpProblem::new_all_le(
-            q, vec![0.0; n], a, b, vec![(f64::NEG_INFINITY, f64::INFINITY); n],
-        ).unwrap();
+            q,
+            vec![0.0; n],
+            a,
+            b,
+            vec![(f64::NEG_INFINITY, f64::INFINITY); n],
+        )
+        .unwrap();
         let mut removed = vec![false; m];
         equality_constraint_qr(&prob, &mut removed);
         let removed_count = removed.iter().filter(|&&b| b).count();
@@ -567,11 +649,14 @@ mod tests {
             &[0, 0, 1, 1],
             &[0, 1, 0, 1],
             &[1.0, 5e-11, 5e-11, 1.0],
-            2, 2,
-        ).unwrap();
+            2,
+            2,
+        )
+        .unwrap();
         let q_clean = near_zero_q_removal(&q, 2);
         assert_eq!(
-            q_clean.values.len(), 2,
+            q_clean.values.len(),
+            2,
             "off-diag 5e-11 should be pruned (Q_OFFDIAG_ABS=1e-10), got {} entries",
             q_clean.values.len()
         );

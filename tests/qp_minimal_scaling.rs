@@ -40,17 +40,27 @@ fn solver_opts() -> SolverOptions {
 
 fn assert_obj_close(actual: f64, expected: f64, label: &str) {
     let rel = (actual - expected).abs() / (1.0 + expected.abs());
-    assert!(rel < EPS_OBJ_REL,
+    assert!(
+        rel < EPS_OBJ_REL,
         "[{}] obj actual={:.9e} expected={:.9e} rel_err={:.3e}",
-        label, actual, expected, rel);
+        label,
+        actual,
+        expected,
+        rel
+    );
 }
 
 fn assert_x_rel_close(actual: f64, expected: f64, label: &str) {
     let denom = 1.0 + expected.abs();
     let rel = (actual - expected).abs() / denom;
-    assert!(rel < EPS_X_REL,
+    assert!(
+        rel < EPS_X_REL,
         "[{}] x actual={:.6e} expected={:.6e} rel_err={:.3e}",
-        label, actual, expected, rel);
+        label,
+        actual,
+        expected,
+        rel
+    );
 }
 
 // =============================================================================
@@ -73,8 +83,12 @@ fn scl1_diagonal_high_condition_number() {
     let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
     // Q=diag(eps_q, 1, m_q): Q[i][i]=v → (v/2)*xi*xi in DSL
     model.minimize(
-        (eps_q / 2.0) * x1 * x1 + 0.5 * x2 * x2 + (m_q / 2.0) * x3 * x3
-        + (-1.0) * x1 + (-1.0) * x2 + (-1.0) * x3,
+        (eps_q / 2.0) * x1 * x1
+            + 0.5 * x2 * x2
+            + (m_q / 2.0) * x3 * x3
+            + (-1.0) * x1
+            + (-1.0) * x2
+            + (-1.0) * x3,
     );
 
     let result = model.solve().expect("scl1: solve (cond≈1e12)");
@@ -126,12 +140,22 @@ fn scl3_nearly_zero_q_above_threshold() {
     let result = model.solve().expect("scl3: solve (Q small but ≠ 0)");
     // x=1e10 を許容 rel < 1e-3
     let rel = (result[x] - 1e10).abs() / 1e10;
-    assert!(rel < 1e-3, "scl3: x≈1e10, got {} (rel={:.3e})", result[x], rel);
+    assert!(
+        rel < 1e-3,
+        "scl3: x≈1e10, got {} (rel={:.3e})",
+        result[x],
+        rel
+    );
     // obj 計算誤差は |x|^2 * Q オーダーで桁落ち。EPS_OBJ_REL より緩めて 1e-4。
     let exp_obj = -0.5e10;
     let obj_rel = (result.objective_value - exp_obj).abs() / exp_obj.abs();
-    assert!(obj_rel < 1e-4, "scl3: obj={:.6e} expected={:.6e} (rel={:.3e})",
-        result.objective_value, exp_obj, obj_rel);
+    assert!(
+        obj_rel < 1e-4,
+        "scl3: obj={:.6e} expected={:.6e} (rel={:.3e})",
+        result.objective_value,
+        exp_obj,
+        obj_rel
+    );
 }
 
 // =============================================================================
@@ -206,31 +230,27 @@ fn scl5_q_offdiagonal_full_storage() {
 fn scl6_q_upper_only_violates_input_contract() {
     let n = 2;
     // Q upper-only (非対称) — 入力契約違反。
-    let q_upper = CscMatrix::from_triplets(
-        &[0, 0, 1],
-        &[0, 1, 1],
-        &[2.0, 1.0, 2.0],
-        n, n,
-    ).unwrap();
+    let q_upper = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0], n, n).unwrap();
     let c = vec![-3.0, -3.0];
     let a = CscMatrix::new(0, n);
     let b = vec![];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
-    let prob_upper = QpProblem::new_all_le(q_upper, c.clone(), a.clone(), b.clone(), bounds.clone()).unwrap();
+    let prob_upper =
+        QpProblem::new_all_le(q_upper, c.clone(), a.clone(), b.clone(), bounds.clone()).unwrap();
     let r_upper = solve_qp_with(&prob_upper, &solver_opts());
 
     // 対称格納 (契約通り) reference
-    let q_sym = CscMatrix::from_triplets(
-        &[0, 1, 0, 1],
-        &[0, 0, 1, 1],
-        &[2.0, 1.0, 1.0, 2.0],
-        n, n,
-    ).unwrap();
+    let q_sym = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[2.0, 1.0, 1.0, 2.0], n, n)
+        .unwrap();
     let prob_sym = QpProblem::new_all_le(q_sym, c, a, b, bounds).unwrap();
     let r_sym = solve_qp_with(&prob_sym, &solver_opts());
 
     // 契約通り (sym) は Optimal、x=[1,1], obj=-3
-    assert_eq!(r_sym.status, SolveStatus::Optimal, "scl6: sym Q must be Optimal");
+    assert_eq!(
+        r_sym.status,
+        SolveStatus::Optimal,
+        "scl6: sym Q must be Optimal"
+    );
     assert_x_rel_close(r_sym.solution[0], 1.0, "scl6 sym: x1");
     assert_obj_close(r_sym.objective, -3.0, "scl6 sym: obj");
 
@@ -238,8 +258,11 @@ fn scl6_q_upper_only_violates_input_contract() {
     let upper_failed = r_upper.status != SolveStatus::Optimal
         || (r_upper.solution[0] - 1.0).abs() > 1e-3
         || (r_upper.objective - (-3.0)).abs() > 1e-3;
-    assert!(upper_failed,
+    assert!(
+        upper_failed,
         "scl6: upper-only Q が偶然 Optimal を返したら IPM が symmetrize を始めた\
          可能性。docs を更新するか test を Optimal assertion に切り替えよ。\
-         status={:?} x={:?} obj={}", r_upper.status, r_upper.solution, r_upper.objective);
+         status={:?} x={:?} obj={}",
+        r_upper.status, r_upper.solution, r_upper.objective
+    );
 }

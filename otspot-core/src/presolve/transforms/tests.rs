@@ -71,9 +71,7 @@ fn test_fixed_variable_removal() {
 fn test_fixed_infeasible() {
     // lb > ub is now rejected at construction time (InvalidBounds), not by presolve.
     let a = CscMatrix::new(0, 1);
-    let res = LpProblem::new_general(
-        vec![1.0], a, vec![], vec![], vec![(3.0, 2.0)], None,
-    );
+    let res = LpProblem::new_general(vec![1.0], a, vec![], vec![], vec![(3.0, 2.0)], None);
     assert!(
         matches!(res, Err(SolverError::InvalidBounds { index: 0, lb, ub }) if lb == 3.0 && ub == 2.0),
         "lb > ub must be rejected at construction"
@@ -137,7 +135,10 @@ fn test_empty_row_infeasible() {
         vec![ConstraintType::Le, ConstraintType::Le],
         vec![(0.0, f64::INFINITY)],
     );
-    assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
+    assert!(matches!(
+        run_presolve(&lp, None),
+        Err(PresolveStatus::Infeasible)
+    ));
 }
 
 #[test]
@@ -167,7 +168,10 @@ fn test_empty_column_unbounded() {
         None,
     )
     .unwrap();
-    assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Unbounded)));
+    assert!(matches!(
+        run_presolve(&lp, None),
+        Err(PresolveStatus::Unbounded)
+    ));
 }
 
 // -----------------------------------------------------------
@@ -205,7 +209,10 @@ fn test_singleton_row_infeasible() {
         vec![ConstraintType::Eq],
         vec![(0.0, 1.0)],
     );
-    assert!(matches!(run_presolve(&lp, None), Err(PresolveStatus::Infeasible)));
+    assert!(matches!(
+        run_presolve(&lp, None),
+        Err(PresolveStatus::Infeasible)
+    ));
 }
 
 // -----------------------------------------------------------
@@ -225,8 +232,14 @@ fn test_redundant_le() {
         vec![(0.0, 3.0), (0.0, 3.0)],
     );
     let result = run_presolve(&lp, None).unwrap();
-    assert_eq!(result.reduced_problem.num_constraints, 0, "all 3 constraints should be redundant");
-    assert_eq!(result.reduced_problem.num_vars, 0, "vars removed as empty cols after constraints gone");
+    assert_eq!(
+        result.reduced_problem.num_constraints, 0,
+        "all 3 constraints should be redundant"
+    );
+    assert_eq!(
+        result.reduced_problem.num_vars, 0,
+        "vars removed as empty cols after constraints gone"
+    );
 
     // Use negative cost so dual fixing (Step 11) cannot collapse the LP:
     // c < 0 with Le a > 0 disqualifies neg-pressure, c < 0 fails pos-pressure cost gate.
@@ -242,7 +255,10 @@ fn test_redundant_le() {
         vec![(0.0, 10.0), (0.0, 10.0)],
     );
     let result2 = run_presolve(&lp2, None).unwrap();
-    assert_eq!(result2.reduced_problem.num_constraints, 1, "x1+x2<=2 is not redundant");
+    assert_eq!(
+        result2.reduced_problem.num_constraints, 1,
+        "x1+x2<=2 is not redundant"
+    );
 }
 
 // -----------------------------------------------------------
@@ -281,7 +297,10 @@ fn test_bounds_tightening_negative_coeff_le_feasible() {
         vec![ConstraintType::Le],
         vec![(0.0, 10.0), (0.0, 3.0)],
     );
-    assert!(run_presolve(&lp, None).is_ok(), "x - y <= 5 should be feasible");
+    assert!(
+        run_presolve(&lp, None).is_ok(),
+        "x - y <= 5 should be feasible"
+    );
 }
 
 #[test]
@@ -297,7 +316,10 @@ fn test_bounds_tightening_negative_coeff_ge_feasible() {
         vec![ConstraintType::Ge],
         vec![(0.0, 5.0), (0.0, 8.0)],
     );
-    assert!(run_presolve(&lp, None).is_ok(), "-x + y >= 3 should be feasible");
+    assert!(
+        run_presolve(&lp, None).is_ok(),
+        "-x + y >= 3 should be feasible"
+    );
 }
 
 // -----------------------------------------------------------
@@ -369,7 +391,10 @@ fn presolve_doubleton_eq_basic() {
         .postsolve_stack
         .iter()
         .any(|s| matches!(s, PostsolveStep::LinearSubstitution { .. }));
-    assert!(has_subst, "Doubleton equation should produce LinearSubstitution");
+    assert!(
+        has_subst,
+        "Doubleton equation should produce LinearSubstitution"
+    );
 }
 
 #[test]
@@ -447,9 +472,15 @@ fn presolve_free_var_subst_basic() {
         .postsolve_stack
         .iter()
         .any(|s| matches!(s, PostsolveStep::LinearSubstitution { .. }));
-    assert!(has_subst, "Free var substitution should produce LinearSubstitution");
+    assert!(
+        has_subst,
+        "Free var substitution should produce LinearSubstitution"
+    );
     // z が消去されているはず
-    assert!(result.col_map[2].is_none(), "z (col 2) should be eliminated");
+    assert!(
+        result.col_map[2].is_none(),
+        "z (col 2) should be eliminated"
+    );
 }
 
 #[test]
@@ -505,7 +536,10 @@ fn presolve_doubleton_dual_recovery_eq_le() {
     let (c_orig, pivot) = lin.unwrap();
     // pivot=1 (x1 の係数), c_orig = c_x1 = 1
     assert!((pivot - 1.0).abs() < 1e-12);
-    assert!((c_orig - 1.0).abs() < 1e-12, "c_orig must capture pre-distribution c[x1]=1");
+    assert!(
+        (c_orig - 1.0).abs() < 1e-12,
+        "c_orig must capture pre-distribution c[x1]=1"
+    );
 }
 
 #[test]
@@ -549,8 +583,11 @@ mod roundtrip_kkt {
     fn roundtrip_doubleton_eq_simple() {
         let lp = make_lp_general(
             vec![1.0, 1.0],
-            &[0, 0], &[0, 1], &[1.0, 1.0],
-            1, 2,
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            1,
+            2,
             vec![4.0],
             vec![ConstraintType::Eq],
             vec![(0.0, 3.0), (0.0, 3.0)],
@@ -565,8 +602,11 @@ mod roundtrip_kkt {
     fn roundtrip_doubleton_eq_nonunit_coeffs() {
         let lp = make_lp_general(
             vec![1.0, 2.0],
-            &[0, 0], &[0, 1], &[2.0, 3.0],
-            1, 2,
+            &[0, 0],
+            &[0, 1],
+            &[2.0, 3.0],
+            1,
+            2,
             vec![12.0],
             vec![ConstraintType::Eq],
             vec![(0.0, 4.0), (0.0, 4.0)],
@@ -583,7 +623,8 @@ mod roundtrip_kkt {
             &[0, 0, 0, 1, 1],
             &[0, 1, 2, 0, 1],
             &[1.0, 1.0, 1.0, 1.0, 1.0],
-            2, 3,
+            2,
+            3,
             vec![5.0, 10.0],
             vec![ConstraintType::Eq, ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
@@ -601,7 +642,8 @@ mod roundtrip_kkt {
             &[0, 0, 1, 1],
             &[0, 1, 0, 2],
             &[1.0, 1.0, 1.0, 1.0],
-            2, 3,
+            2,
+            3,
             vec![3.0, 7.0],
             vec![ConstraintType::Ge, ConstraintType::Eq],
             vec![(0.0, 10.0), (0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)],
@@ -622,7 +664,8 @@ mod roundtrip_kkt {
             &[0, 1, 1],
             &[0, 1, 2],
             &[1.0, 1.0, 1.0],
-            2, 3,
+            2,
+            3,
             vec![5.0, 4.0],
             vec![ConstraintType::Eq, ConstraintType::Eq],
             vec![(0.0, 10.0), (0.0, 3.0), (0.0, 3.0)],
@@ -647,7 +690,8 @@ mod roundtrip_kkt {
             &[0, 0, 1, 1],
             &[0, 1, 0, 1],
             &[1.0, 1.0, 1.0, 1.0],
-            2, 2,
+            2,
+            2,
             vec![100.0, 4.0],
             vec![ConstraintType::Le, ConstraintType::Eq],
             vec![(0.0, 3.0), (0.0, 3.0)],
@@ -669,12 +713,15 @@ mod roundtrip_kkt {
             &[0, 0, 1, 1, 2, 2],
             &[0, 1, 2, 3, 0, 2],
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            3, 4,
+            3,
+            4,
             vec![3.0, 2.0, 100.0],
             vec![ConstraintType::Eq, ConstraintType::Eq, ConstraintType::Le],
             vec![
-                (0.0, 2.0), (0.0, 2.0),
-                (f64::NEG_INFINITY, f64::INFINITY), (0.0, 5.0),
+                (0.0, 2.0),
+                (0.0, 2.0),
+                (f64::NEG_INFINITY, f64::INFINITY),
+                (0.0, 5.0),
             ],
         );
         assert_kkt_optimal(&lp, 5.0, "roundtrip_mixed_transforms");
@@ -687,8 +734,11 @@ mod roundtrip_kkt {
         // min x+y, x+y >= 3, x∈[0,5], y∈[0,5] → x+y=3 (任意)、obj=3
         let lp = make_lp_general(
             vec![1.0, 1.0],
-            &[0, 0], &[0, 1], &[1.0, 1.0],
-            1, 2,
+            &[0, 0],
+            &[0, 1],
+            &[1.0, 1.0],
+            1,
+            2,
             vec![3.0],
             vec![ConstraintType::Ge],
             vec![(0.0, 5.0), (0.0, 5.0)],

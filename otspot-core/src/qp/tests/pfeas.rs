@@ -3,14 +3,7 @@ use crate::sparse::CscMatrix;
 /// row_infinity_norms 基本。
 #[test]
 fn test_row_infinity_norms_basic() {
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 0],
-        &[0, 1, 2],
-        &[1.0, 2.5, -3.0],
-        2,
-        3,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 1, 0], &[0, 1, 2], &[1.0, 2.5, -3.0], 2, 3).unwrap();
     let norms = a.row_infinity_norms();
     assert_eq!(norms.len(), 2);
     assert!((norms[0] - 3.0).abs() < 1e-15);

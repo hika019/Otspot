@@ -7,8 +7,8 @@
 //! - [`parse_mps`] / [`parse_mps_file`]: returns an `LpProblem` (integrality dropped).
 //! - [`parse_milp`] / [`parse_milp_file`]: returns a `MilpProblem` with integer vars.
 
-mod types;
 mod parser;
+mod types;
 
 use std::path::Path;
 
@@ -16,7 +16,7 @@ use otspot_core::mip::MilpProblem;
 use otspot_core::problem::LpProblem;
 
 pub use otspot_core::error::MpsError;
-pub use parser::{parse_mps_reader, parse_milp_reader};
+pub use parser::{parse_milp_reader, parse_mps_reader};
 
 /// Parse an MPS file from `path`, returning an LP relaxation.
 ///
@@ -368,7 +368,10 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.num_constraints, 2);
-        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(
+            lp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Ge]
+        );
         assert_eq!(lp.b[0], 10.0);
         assert_eq!(lp.b[1], 8.0);
     }
@@ -389,7 +392,10 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.num_constraints, 2);
-        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(
+            lp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Ge]
+        );
         assert_eq!(lp.b[0], 8.0);
         assert_eq!(lp.b[1], 5.0);
     }
@@ -410,7 +416,10 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.num_constraints, 2);
-        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(
+            lp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Ge]
+        );
         assert_eq!(lp.b[0], 9.0);
         assert_eq!(lp.b[1], 7.0);
     }
@@ -431,7 +440,10 @@ ENDATA
 ";
         let lp = parse_mps(mps).unwrap();
         assert_eq!(lp.num_constraints, 2);
-        assert_eq!(lp.constraint_types, vec![ConstraintType::Le, ConstraintType::Ge]);
+        assert_eq!(
+            lp.constraint_types,
+            vec![ConstraintType::Le, ConstraintType::Ge]
+        );
         assert_eq!(lp.b[0], 7.0);
         assert_eq!(lp.b[1], 5.0);
     }
@@ -492,7 +504,7 @@ ENDATA
 
     #[test]
     fn test_integer_marker_kind_intorg_intend() {
-        use types::{IntegerMarker, integer_marker_kind};
+        use types::{integer_marker_kind, IntegerMarker};
         assert_eq!(
             integer_marker_kind("    M1 'MARKER' 'INTORG'"),
             Some(IntegerMarker::Start)
@@ -734,7 +746,12 @@ ENDATA
 
         let cases: &[(&str, &str, f64, f64)] = &[
             ("marker_no_bounds_binary", "", 10.5, -1.0),
-            ("marker_up5_fractional", "BOUNDS\n UP BND  x1  5.0\n", 3.5, -3.0),
+            (
+                "marker_up5_fractional",
+                "BOUNDS\n UP BND  x1  5.0\n",
+                3.5,
+                -3.0,
+            ),
             ("marker_lo2", "BOUNDS\n LO BND  x1  2.0\n", 10.5, -10.0),
         ];
 
@@ -750,7 +767,11 @@ RHS\n    rhs  c1  {rhs}\n\
             let opts = SolverOptions::default();
             let cfg = MipConfig::default();
             let res = otspot_core::mip::solve_milp(&milp, &opts, &cfg);
-            assert_eq!(res.status, SolveStatus::Optimal, "[{label}] should be Optimal");
+            assert_eq!(
+                res.status,
+                SolveStatus::Optimal,
+                "[{label}] should be Optimal"
+            );
             assert!(
                 (res.objective - expected_obj).abs() < 1e-6,
                 "[{label}] expected obj={expected_obj}, got {}",
@@ -777,13 +798,14 @@ BOUNDS
 ENDATA
 ";
         let milp = parse_milp(mps).unwrap();
-        let res = otspot_core::mip::solve_milp(
-            &milp,
-            &SolverOptions::default(),
-            &MipConfig::default(),
-        );
+        let res =
+            otspot_core::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
         assert_eq!(res.status, SolveStatus::Optimal);
-        assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
+        assert!(
+            (res.objective - (-3.0)).abs() < 1e-6,
+            "expected -3, got {}",
+            res.objective
+        );
         assert!((res.solution[0] - 3.0).abs() < 1e-6, "x1 should be 3");
     }
 
@@ -805,7 +827,10 @@ ENDATA
             matches!(err, MpsError::UnclosedIntegerMarker),
             "unclosed INTORG must error, got {err:?}"
         );
-        assert!(matches!(parse_mps(mps).unwrap_err(), MpsError::UnclosedIntegerMarker));
+        assert!(matches!(
+            parse_mps(mps).unwrap_err(),
+            MpsError::UnclosedIntegerMarker
+        ));
     }
 
     #[test]
@@ -851,7 +876,11 @@ ENDATA\n",
         let res =
             otspot_core::mip::solve_milp(&milp, &SolverOptions::default(), &MipConfig::default());
         assert_eq!(res.status, SolveStatus::Optimal);
-        assert!((res.objective - (-3.0)).abs() < 1e-6, "expected -3, got {}", res.objective);
+        assert!(
+            (res.objective - (-3.0)).abs() < 1e-6,
+            "expected -3, got {}",
+            res.objective
+        );
     }
 
     #[test]
@@ -986,7 +1015,8 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
     /// A: RHS line with only 2 fields must be an error, not a silent skip.
     #[test]
     fn test_mps_rhs_malformed_too_few_fields_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    c1\nENDATA\n";
+        let mps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    c1\nENDATA\n";
         assert!(parse_mps(mps).is_err(), "< 3 fields in RHS must error");
     }
 
@@ -1021,23 +1051,34 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
     /// C: NaN coefficient in COLUMNS must be an error.
     #[test]
     fn test_mps_columns_nan_value_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 NaN\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let mps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 NaN\nRHS\n    rhs c1 10.0\nENDATA\n";
         let err = parse_mps(mps);
-        assert!(err.is_err(), "NaN coefficient in COLUMNS must error: {:?}", err);
+        assert!(
+            err.is_err(),
+            "NaN coefficient in COLUMNS must error: {:?}",
+            err
+        );
     }
 
     /// C: Inf coefficient in COLUMNS must be an error.
     #[test]
     fn test_mps_columns_inf_value_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 Inf\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let mps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 Inf\nRHS\n    rhs c1 10.0\nENDATA\n";
         let err = parse_mps(mps);
-        assert!(err.is_err(), "Inf coefficient in COLUMNS must error: {:?}", err);
+        assert!(
+            err.is_err(),
+            "Inf coefficient in COLUMNS must error: {:?}",
+            err
+        );
     }
 
     /// C: NaN in RHS value must be an error.
     #[test]
     fn test_mps_rhs_nan_value_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs c1 NaN\nENDATA\n";
+        let mps =
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs c1 NaN\nENDATA\n";
         let err = parse_mps(mps);
         assert!(err.is_err(), "NaN in RHS must error: {:?}", err);
     }
@@ -1055,7 +1096,11 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
     fn test_mps_rhs_n_row_nan_is_error() {
         let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs obj NaN\n    rhs c1 1.0\nENDATA\n";
         let result = parse_mps(mps);
-        assert!(result.is_err(), "N-row RHS NaN must be rejected: {:?}", result);
+        assert!(
+            result.is_err(),
+            "N-row RHS NaN must be rejected: {:?}",
+            result
+        );
     }
 
     /// N-row RHS with a finite value must propagate to LpProblem.obj_offset.

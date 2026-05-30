@@ -15,7 +15,10 @@ use std::time::Instant;
 #[ignore = "tier-2 (Mac ~60s / CI 2.5x ~150s); heavy profile で実行 (#97)"]
 fn dfl001_postsolve_skips_lsq_when_cleanup_stagnant() {
     let path = Path::new("data/lp_problems/dfl001.QPS");
-    assert!(path.exists(), "data missing: dfl001.QPS — lp_download script で取得");
+    assert!(
+        path.exists(),
+        "data missing: dfl001.QPS — lp_download script で取得"
+    );
     let problem = parse_qps(path).expect("parse");
     // budget は dfl001 の実測 wall (~90s) + ~−30s 安全マージン。
     // 主検査対象は wall ではなく postsolve_us なので、timeout で primal が打ち切られても

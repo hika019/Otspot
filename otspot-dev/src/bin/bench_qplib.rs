@@ -16,15 +16,15 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
+use otspot_core::options::{GlobalOptimizationConfig, SolverOptions};
+use otspot_core::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
+use otspot_core::problem::SolveStatus;
+use otspot_core::qp::{solve_qp_global, solve_qp_with};
 use otspot_dev::bench_utils::{
     check_baseline_objective, compute_gap_to_global, compute_qp_kkt_max, detect_csv_path,
     load_baseline_objectives, load_expected_statuses, parse_qplib_outcome, ExpectedStatus,
     ObjCheckResult, ParseQplibOutcome,
 };
-use otspot_core::options::{GlobalOptimizationConfig, SolverOptions};
-use otspot_core::presolve::{run_qp_presolve_phase1, run_qp_presolve_phase2};
-use otspot_core::problem::SolveStatus;
-use otspot_core::qp::{solve_qp_global, solve_qp_with};
 
 /// QP 元空間 KKT 残差の PASS 閾値 (Ruiz 振幅 100 級まで許容、`diag_nonconvex_kkt::EPS_KKT` 整合)。
 const KKT_FAIL_EPS: f64 = 1e-4;
@@ -85,7 +85,6 @@ mod unsupported_classify_tests {
     }
 }
 
-
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -101,7 +100,11 @@ fn main() {
 
     // known flagリスト（値を持つフラグ）
     const KNOWN_FLAGS_WITH_VALUE: &[&str] = &[
-        "--eps", "--timeout", "--known-optimal", "--gap-tol", "--max-nodes",
+        "--eps",
+        "--timeout",
+        "--known-optimal",
+        "--gap-tol",
+        "--max-nodes",
     ];
 
     let mut i = 1usize;
@@ -111,7 +114,9 @@ fn main() {
             println!("  --eps           Convergence tolerance (default: 1e-6)");
             println!("  --timeout       Solver timeout in seconds (default: 10.0)");
             println!("  --known-optimal Path to known optimal values CSV (default: auto-detect)");
-            println!("  --global        Use solve_qp_global (spatial B&B) instead of single-shot IPM");
+            println!(
+                "  --global        Use solve_qp_global (spatial B&B) instead of single-shot IPM"
+            );
             println!("  --gap-tol       Global optimality gap tolerance (default: 1e-3)");
             println!("  --max-nodes     B&B node limit (default: 10000)");
             std::process::exit(0);
@@ -123,11 +128,21 @@ fn main() {
             i += 1;
             if i < args.len() {
                 match args[i - 1].as_str() {
-                    "--eps" => { eps = args[i].parse().unwrap_or(1e-6); }
-                    "--timeout" => { timeout_secs = args[i].parse().unwrap_or(10.0); }
-                    "--known-optimal" => { baseline_override = Some(args[i].clone()); }
-                    "--gap-tol" => { global_gap_tol = args[i].parse().unwrap_or(1e-3); }
-                    "--max-nodes" => { global_max_nodes = args[i].parse().unwrap_or(10_000); }
+                    "--eps" => {
+                        eps = args[i].parse().unwrap_or(1e-6);
+                    }
+                    "--timeout" => {
+                        timeout_secs = args[i].parse().unwrap_or(10.0);
+                    }
+                    "--known-optimal" => {
+                        baseline_override = Some(args[i].clone());
+                    }
+                    "--gap-tol" => {
+                        global_gap_tol = args[i].parse().unwrap_or(1e-3);
+                    }
+                    "--max-nodes" => {
+                        global_max_nodes = args[i].parse().unwrap_or(10_000);
+                    }
                     _ => {}
                 }
             }
@@ -157,13 +172,25 @@ fn main() {
                 .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
                 .unwrap_or_default();
             // target/release から solver ルートに遡る
-            p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()
+            p.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default()
         };
         let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        (load_baseline_objectives(&csv).unwrap_or_default(), load_expected_statuses(&csv))
+        (
+            load_baseline_objectives(&csv).unwrap_or_default(),
+            load_expected_statuses(&csv),
+        )
     };
-    eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
-    eprintln!("Expected statuses loaded: {} problems", expected_statuses.len());
+    eprintln!(
+        "Baseline objectives loaded: {} problems",
+        baseline_objectives.len()
+    );
+    eprintln!(
+        "Expected statuses loaded: {} problems",
+        expected_statuses.len()
+    );
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
     }
@@ -184,7 +211,10 @@ fn main() {
 
     println!("QPLIB Benchmark ({} files)", qplib_files.len());
     if use_global {
-        println!("Mode: GLOBAL (solve_qp_global / spatial B&B, gap_tol={:.0e}, max_nodes={})", global_gap_tol, global_max_nodes);
+        println!(
+            "Mode: GLOBAL (solve_qp_global / spatial B&B, gap_tol={:.0e}, max_nodes={})",
+            global_gap_tol, global_max_nodes
+        );
     } else {
         println!("Mode: LOCAL (solve_qp_with / single-shot IPM)");
     }
@@ -270,7 +300,12 @@ fn main() {
             ParseQplibOutcome::ParseError(note) => {
                 println!(
                     "{:<24} {:>6} {:>6} {:>15} {:>10.3} {}",
-                    name, "?", "?", "PARSE_ERR", 0.0, &note[..note.len().min(40)]
+                    name,
+                    "?",
+                    "?",
+                    "PARSE_ERR",
+                    0.0,
+                    &note[..note.len().min(40)]
                 );
                 n_error += 1;
                 continue;
@@ -290,16 +325,17 @@ fn main() {
         // presolve削減量を取得（ベンチ計装のみ）
         // 大規模問題はpresolveに長時間かかるためスキップ（タイムアウト計測の精度を確保）
         const PRESOLVE_INSTR_MAX: usize = 50_000;
-        let (n_after, m_after, nnz_after) = if opts.presolve && n <= PRESOLVE_INSTR_MAX && m <= PRESOLVE_INSTR_MAX {
-            let phase1 = run_qp_presolve_phase1(&prob, &opts);
-            let presolve_result = run_qp_presolve_phase2(phase1, &opts);
-            let rn = presolve_result.reduced.num_vars;
-            let rm = presolve_result.reduced.num_constraints;
-            let rnnz = presolve_result.reduced.q.nnz() + presolve_result.reduced.a.nnz();
-            (rn, rm, rnnz)
-        } else {
-            (n, m, nnz_before)
-        };
+        let (n_after, m_after, nnz_after) =
+            if opts.presolve && n <= PRESOLVE_INSTR_MAX && m <= PRESOLVE_INSTR_MAX {
+                let phase1 = run_qp_presolve_phase1(&prob, &opts);
+                let presolve_result = run_qp_presolve_phase2(phase1, &opts);
+                let rn = presolve_result.reduced.num_vars;
+                let rm = presolve_result.reduced.num_constraints;
+                let rnnz = presolve_result.reduced.q.nnz() + presolve_result.reduced.a.nnz();
+                (rn, rm, rnnz)
+            } else {
+                (n, m, nnz_before)
+            };
 
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
@@ -314,7 +350,10 @@ fn main() {
             solve_qp_with(&prob, &opts)
         };
         let elapsed_s = start.elapsed().as_secs_f64();
-        println!("SOLVE_DONE: {} {:?} ({:.3}s)", name, result.status, elapsed_s);
+        println!(
+            "SOLVE_DONE: {} {:?} ({:.3}s)",
+            name, result.status, elapsed_s
+        );
 
         let method_label = "ipm";
         let resid_str = match result.final_residuals {
@@ -370,8 +409,9 @@ fn main() {
             SolveStatus::Optimal => {
                 if result.objective.is_finite() {
                     // KKT_FAIL: status=Optimal だが元空間で KKT 違反 → PASS 判定の優先打ち消し。
-                    let kkt_violation =
-                        kkt_max.map(|v| !v.is_finite() || v >= KKT_FAIL_EPS).unwrap_or(false);
+                    let kkt_violation = kkt_max
+                        .map(|v| !v.is_finite() || v >= KKT_FAIL_EPS)
+                        .unwrap_or(false);
                     if kkt_violation {
                         n_kkt_fail += 1;
                         (
@@ -395,8 +435,11 @@ fn main() {
                                     "PASS".to_string(),
                                     format!(
                                         "[{}] obj={:.6e} obj_err={:.3}% {} {}",
-                                        method_label, result.objective, rel_err * 100.0,
-                                        kkt_str, gap_str,
+                                        method_label,
+                                        result.objective,
+                                        rel_err * 100.0,
+                                        kkt_str,
+                                        gap_str,
                                     ),
                                 )
                             }
@@ -410,7 +453,8 @@ fn main() {
                                         result.objective,
                                         baseline_objectives.get(&name).unwrap(),
                                         rel_err * 100.0,
-                                        kkt_str, gap_str,
+                                        kkt_str,
+                                        gap_str,
                                     ),
                                 )
                             }
@@ -428,7 +472,10 @@ fn main() {
                     }
                 } else {
                     n_fail += 1;
-                    ("FAIL:NumericalError".to_string(), format!("[{}] obj={}", method_label, result.objective))
+                    (
+                        "FAIL:NumericalError".to_string(),
+                        format!("[{}] obj={}", method_label, result.objective),
+                    )
                 }
             }
             SolveStatus::Infeasible => {
@@ -459,34 +506,60 @@ fn main() {
             }
             SolveStatus::MaxIterations => {
                 n_max_iter += 1;
-                ("MAXITER".to_string(), format!("[{}] iters={} {}", method_label, result.iterations, resid_str))
+                (
+                    "MAXITER".to_string(),
+                    format!(
+                        "[{}] iters={} {}",
+                        method_label, result.iterations, resid_str
+                    ),
+                )
             }
             SolveStatus::SuboptimalSolution => {
                 n_suboptimal += 1;
                 let extra = if result.solution.is_empty() {
                     "obj=NA solution=EMPTY".to_string()
                 } else if result.solution.len() != prob.num_vars {
-                    format!("obj={:.3e} sol_len={}/{}_MISMATCH",
-                        result.objective, result.solution.len(), prob.num_vars)
+                    format!(
+                        "obj={:.3e} sol_len={}/{}_MISMATCH",
+                        result.objective,
+                        result.solution.len(),
+                        prob.num_vars
+                    )
                 } else {
                     let x_inf = result.solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
                     format!("obj={:.6e} x_inf={:.2e}", result.objective, x_inf)
                 };
-                ("SUBOPTIMAL".to_string(),
-                    format!("[{}] iters={} {} {} {} {}",
-                        method_label, result.iterations, extra, resid_str, kkt_str, gap_str))
+                (
+                    "SUBOPTIMAL".to_string(),
+                    format!(
+                        "[{}] iters={} {} {} {} {}",
+                        method_label, result.iterations, extra, resid_str, kkt_str, gap_str
+                    ),
+                )
             }
             SolveStatus::Timeout => {
                 n_timeout += 1;
-                ("TIMEOUT".to_string(), format!("[{}] {:.3}s iters={}", method_label, elapsed_s, result.iterations))
+                (
+                    "TIMEOUT".to_string(),
+                    format!(
+                        "[{}] {:.3}s iters={}",
+                        method_label, elapsed_s, result.iterations
+                    ),
+                )
             }
             SolveStatus::NumericalError => {
                 n_fail += 1;
-                ("FAIL:NumericalError".to_string(), format!("[{}]", method_label))
+                (
+                    "FAIL:NumericalError".to_string(),
+                    format!("[{}]", method_label),
+                )
             }
             SolveStatus::NonConvex(_) => {
                 n_nonconvex += 1;
-                ("NONCONVEX".to_string(), format!("[{}] Q not PSD", method_label))
+                (
+                    "NONCONVEX".to_string(),
+                    format!("[{}] Q not PSD", method_label),
+                )
             }
             // BB driver から global path 経由で来た場合の caller 視点表示。
             // 単発 IPM 経路 (apply_bench_status_promotion 後) では現状出ない (Optimal 化 or
@@ -495,14 +568,20 @@ fn main() {
                 n_nonconvex_local += 1;
                 (
                     "NONCONVEX_LOCAL".to_string(),
-                    format!("[{}] obj={:.6e} {} {}", method_label, result.objective, kkt_str, gap_str),
+                    format!(
+                        "[{}] obj={:.6e} {} {}",
+                        method_label, result.objective, kkt_str, gap_str
+                    ),
                 )
             }
             SolveStatus::NonconvexGlobal => {
                 n_nonconvex_global += 1;
                 (
                     "NONCONVEX_GLOBAL".to_string(),
-                    format!("[{}] obj={:.6e} {} {}", method_label, result.objective, kkt_str, gap_str),
+                    format!(
+                        "[{}] obj={:.6e} {} {}",
+                        method_label, result.objective, kkt_str, gap_str
+                    ),
                 )
             }
             _ => {
@@ -553,9 +632,20 @@ fn main() {
     println!("    SKIP:other:      {}", n_skip_other);
     println!(
         "  TOTAL:             {}",
-        n_pass + n_pass_noref + n_pass_infeasible + n_pass_unbounded
-            + n_timeout + n_fail + n_obj_mismatch + n_kkt_fail
-            + n_nonconvex + n_nonconvex_local + n_nonconvex_global
-            + n_suboptimal + n_max_iter + n_error + n_skip
+        n_pass
+            + n_pass_noref
+            + n_pass_infeasible
+            + n_pass_unbounded
+            + n_timeout
+            + n_fail
+            + n_obj_mismatch
+            + n_kkt_fail
+            + n_nonconvex
+            + n_nonconvex_local
+            + n_nonconvex_global
+            + n_suboptimal
+            + n_max_iter
+            + n_error
+            + n_skip
     );
 }

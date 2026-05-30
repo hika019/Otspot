@@ -2,11 +2,13 @@
 //! transforms that do not need the per-pass workspace (early infeasibility,
 //! block-structure detection, large-coefficient rescaling).
 
+use super::state::QpPresolveStatus;
 use super::state::Workspace;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{LARGE_A_COEFF_TRIGGER, Q_OFFDIAG_REL, SCALING_SIGMA_FLOOR, UNDERFLOW_GUARD, ZERO_TOL};
-use super::state::QpPresolveStatus;
+use crate::tolerances::{
+    LARGE_A_COEFF_TRIGGER, Q_OFFDIAG_REL, SCALING_SIGMA_FLOOR, UNDERFLOW_GUARD, ZERO_TOL,
+};
 
 pub(super) fn q_diagonal(q: &CscMatrix, j: usize) -> f64 {
     let start = q.col_ptr[j];
@@ -36,7 +38,11 @@ pub(super) fn apply_fixed_variable(j: usize, val: f64, prob: &QpProblem, ws: &mu
     let m = prob.num_constraints;
 
     let q_jj = q_diagonal(&prob.q, j);
-    kahan_add(&mut ws.obj_offset, &mut ws.obj_offset_comp, 0.5 * q_jj * val * val);
+    kahan_add(
+        &mut ws.obj_offset,
+        &mut ws.obj_offset_comp,
+        0.5 * q_jj * val * val,
+    );
     kahan_add(&mut ws.obj_offset, &mut ws.obj_offset_comp, ws.c[j] * val);
 
     // c[k] += Q[k,j]·val for k ≠ j (symmetric Q stored in full).
@@ -72,7 +78,10 @@ pub(super) fn early_infeasibility_check(prob: &QpProblem) -> Option<QpPresolveSt
     }
 
     if prob.num_constraints == 0
-        && prob.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
+        && prob
+            .bounds
+            .iter()
+            .all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
     {
         let all_q_diag_neg = (0..prob.num_vars).all(|j| q_diagonal(&prob.q, j) < -ZERO_TOL);
         if all_q_diag_neg && prob.num_vars > 0 {
@@ -191,7 +200,13 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
     // (phase1 · phase2 · Ruiz) stays within the IPM's achievable scaled accuracy.
     let row_scales: Vec<f64> = row_max
         .iter()
-        .map(|&mx| if mx > 1.0 { (1.0 / mx.sqrt()).max(SCALING_SIGMA_FLOOR) } else { 1.0 })
+        .map(|&mx| {
+            if mx > 1.0 {
+                (1.0 / mx.sqrt()).max(SCALING_SIGMA_FLOOR)
+            } else {
+                1.0
+            }
+        })
         .collect();
 
     for col in 0..n.min(a.ncols) {
@@ -220,7 +235,10 @@ pub(super) fn skip_step(n: usize) -> bool {
     {
         std::env::var("QP_PRESOLVE_SKIP")
             .ok()
-            .map(|v| v.split(',').any(|s| s.trim().parse::<usize>().ok() == Some(n)))
+            .map(|v| {
+                v.split(',')
+                    .any(|s| s.trim().parse::<usize>().ok() == Some(n))
+            })
             .unwrap_or(false)
     }
     #[cfg(not(test))]
@@ -241,12 +259,9 @@ mod tests {
     /// 1e-8 > 1e-10 → returns `false` → this test FAIL.
     #[test]
     fn is_diagonal_q_relative_threshold_sentinel() {
-        let q = CscMatrix::from_triplets(
-            &[0, 0, 1, 1],
-            &[0, 1, 0, 1],
-            &[1e6, 1e-8, 1e-8, 1e6],
-            2, 2,
-        ).unwrap();
+        let q =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1e6, 1e-8, 1e-8, 1e6], 2, 2)
+                .unwrap();
         assert!(
             is_diagonal_q(&q, 2),
             "off-diag 1e-8 should be below eps_q (Q_OFFDIAG_REL*1e6≈1e-6) → diagonal"

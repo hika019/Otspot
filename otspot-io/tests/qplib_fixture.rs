@@ -4,9 +4,9 @@
 //! representative QPLIB patterns: QCL / QCN / QCB / QCQ (with equality and
 //! range constraints), minimize/maximize, integer and binary variables.
 
-use otspot_io::qplib::{parse_qplib_str, QplibProblem};
 use otspot_core::problem::ConstraintType;
 use otspot_core::qp::QpProblem;
+use otspot_io::qplib::{parse_qplib_str, QplibProblem};
 
 fn unwrap_qp(r: QplibProblem) -> QpProblem {
     match r {
@@ -191,9 +191,7 @@ minimize
 1.0
 0
 ";
-    let prob = unwrap_qp(
-        parse_qplib_str(input).expect("QCB parse"),
-    );
+    let prob = unwrap_qp(parse_qplib_str(input).expect("QCB parse"));
     assert_eq!(prob.num_vars, 2);
     assert_eq!(prob.num_constraints, 0, "QCB has no linear constraints");
     assert_eq!(prob.q.nnz(), 2);

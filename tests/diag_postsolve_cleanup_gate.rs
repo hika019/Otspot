@@ -30,7 +30,10 @@ fn solve(prob: &QpProblem, timeout_s: f64) -> (SolveStatus, f64, f64) {
     let t0 = std::time::Instant::now();
     let r = solve_qp_with(prob, &opts);
     let wall = t0.elapsed().as_secs_f64();
-    let postsolve_s = r.timing_breakdown.map(|t| t.postsolve_us as f64 / 1e6).unwrap_or(f64::NAN);
+    let postsolve_s = r
+        .timing_breakdown
+        .map(|t| t.postsolve_us as f64 / 1e6)
+        .unwrap_or(f64::NAN);
     eprintln!(
         "n={} m={}: status={:?} wall={:.2}s postsolve={:.2}s",
         prob.num_vars, prob.num_constraints, r.status, wall, postsolve_s
@@ -49,7 +52,10 @@ fn wood1p_postsolve_under_2s() {
         "wood1p must remain on simplex path for this gate to apply"
     );
     let (status, _wall, postsolve_s) = solve(&prob, 60.0);
-    assert!(matches!(status, SolveStatus::Optimal), "wood1p must reach Optimal");
+    assert!(
+        matches!(status, SolveStatus::Optimal),
+        "wood1p must reach Optimal"
+    );
     assert!(
         postsolve_s < 2.0,
         "wood1p postsolve {:.2}s exceeded 2s — cleanup-LP gate likely regressed",

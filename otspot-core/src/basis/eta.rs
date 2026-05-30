@@ -188,7 +188,10 @@ mod tests {
             assert!(
                 (a[i] - b[i]).abs() < tol,
                 "Mismatch at {}: {} vs {} (diff={})",
-                i, a[i], b[i], (a[i] - b[i]).abs()
+                i,
+                a[i],
+                b[i],
+                (a[i] - b[i]).abs()
             );
         }
     }

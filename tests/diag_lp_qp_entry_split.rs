@@ -221,7 +221,11 @@ fn assert_obj(actual: f64, expected: f64, label: &str) {
     assert!(
         diff < tol,
         "{}: obj={:.9e} expected={:.9e} diff={:.3e} (tol={:.3e})",
-        label, actual, expected, diff, tol
+        label,
+        actual,
+        expected,
+        diff,
+        tol
     );
 }
 
@@ -245,17 +249,20 @@ fn lp_direct_entry_solves_all_fixtures() {
         assert_eq!(
             r.stats.route,
             SolveRoute::LpDirect,
-            "{}: route must be LpDirect", label
+            "{}: route must be LpDirect",
+            label
         );
         assert_ne!(
             r.stats.route,
             SolveRoute::LpForwardedFromQp,
-            "{}: forward path must not fire on direct entry", label
+            "{}: forward path must not fire on direct entry",
+            label
         );
         assert_ne!(
             r.stats.route,
             SolveRoute::QpIpm,
-            "{}: QP IPM must not fire for LP entry", label
+            "{}: QP IPM must not fire for LP entry",
+            label
         );
     }
 }
@@ -276,17 +283,20 @@ fn qp_direct_entry_solves_all_fixtures() {
         assert_eq!(
             r.stats.route,
             SolveRoute::QpIpm,
-            "{}: route must be QpIpm (Q!=0 → IPM)", label
+            "{}: route must be QpIpm (Q!=0 → IPM)",
+            label
         );
         assert_ne!(
             r.stats.route,
             SolveRoute::LpDirect,
-            "{}: LP direct counter must stay 0 on QP entry", label
+            "{}: LP direct counter must stay 0 on QP entry",
+            label
         );
         assert_ne!(
             r.stats.route,
             SolveRoute::LpForwardedFromQp,
-            "{}: LP forward route must not fire (Q!=0)", label
+            "{}: LP forward route must not fire (Q!=0)",
+            label
         );
     }
 }
@@ -376,23 +386,29 @@ fn qp_entry_with_zero_q_forwards_to_lp_module() {
     assert_eq!(
         r_qp.stats.route,
         SolveRoute::LpForwardedFromQp,
-        "{}: solve_qp_with(Q=0) must use LpForwardedFromQp route", label
+        "{}: solve_qp_with(Q=0) must use LpForwardedFromQp route",
+        label
     );
     assert_ne!(
         r_qp.stats.route,
         SolveRoute::LpDirect,
-        "{}: solve_qp_with(Q=0) must NOT use LpDirect route", label
+        "{}: solve_qp_with(Q=0) must NOT use LpDirect route",
+        label
     );
     assert_ne!(
         r_qp.stats.route,
         SolveRoute::QpIpm,
-        "{}: Q=0 must NOT trigger IPM route", label
+        "{}: Q=0 must NOT trigger IPM route",
+        label
     );
 
     // Objective equivalence
     assert!(
         (r_direct.objective - r_qp.objective).abs() < TOL_OBJ * (1.0 + expected.abs()),
-        "{}: direct LP obj {:.9e} vs QP-forward obj {:.9e}", label, r_direct.objective, r_qp.objective
+        "{}: direct LP obj {:.9e} vs QP-forward obj {:.9e}",
+        label,
+        r_direct.objective,
+        r_qp.objective
     );
 }
 
@@ -454,14 +470,26 @@ fn cross_check_lp_direct_vs_qp_forward_objective() {
         assert_obj(r_fwd.objective, expected, &format!("{}_forward", label));
         assert!(
             (r_direct.objective - r_fwd.objective).abs() < TOL_OBJ * (1.0 + expected.abs()),
-            "{}: direct={:.9e} forward={:.9e}", label, r_direct.objective, r_fwd.objective
+            "{}: direct={:.9e} forward={:.9e}",
+            label,
+            r_direct.objective,
+            r_fwd.objective
         );
         if !r_direct.solution.is_empty() && !r_fwd.solution.is_empty() {
             assert_eq!(r_direct.solution.len(), r_fwd.solution.len());
-            for (i, (a, b)) in r_direct.solution.iter().zip(r_fwd.solution.iter()).enumerate() {
+            for (i, (a, b)) in r_direct
+                .solution
+                .iter()
+                .zip(r_fwd.solution.iter())
+                .enumerate()
+            {
                 assert!(
                     (a - b).abs() < TOL_SOL * (1.0 + a.abs() + b.abs()),
-                    "{}: solution[{}] direct={:.9e} forward={:.9e}", label, i, a, b
+                    "{}: solution[{}] direct={:.9e} forward={:.9e}",
+                    label,
+                    i,
+                    a,
+                    b
                 );
             }
         }
@@ -481,14 +509,10 @@ fn parallel_solve_stats_are_independent() {
     // Spawn LP and QP solves "simultaneously" via threads.
     let lp_clone = lp.clone();
     let opts_clone = opts_lp.clone();
-    let lp_handle = thread::spawn(move || {
-        otspot::lp::solve_lp_with(&lp_clone, &opts_clone)
-    });
+    let lp_handle = thread::spawn(move || otspot::lp::solve_lp_with(&lp_clone, &opts_clone));
 
     let qp_opts = SolverOptions::default();
-    let qp_handle = thread::spawn(move || {
-        otspot::solve_qp_with(&qp, &qp_opts)
-    });
+    let qp_handle = thread::spawn(move || otspot::solve_qp_with(&qp, &qp_opts));
 
     let r_lp = lp_handle.join().unwrap();
     let r_qp = qp_handle.join().unwrap();
@@ -503,9 +527,19 @@ fn parallel_solve_stats_are_independent() {
         let n = lp2.num_vars;
         let q_zero = CscMatrix::new(n, n);
         let qp2 = QpProblem::new(
-            q_zero, lp2.c, lp2.a, lp2.b, lp2.bounds, lp2.constraint_types,
-        ).unwrap();
+            q_zero,
+            lp2.c,
+            lp2.a,
+            lp2.b,
+            lp2.bounds,
+            lp2.constraint_types,
+        )
+        .unwrap();
         otspot::solve_qp_with(&qp2, &opts_lp)
     };
-    assert_eq!(r_fwd.stats.route, SolveRoute::LpForwardedFromQp, "forwarded result route");
+    assert_eq!(
+        r_fwd.stats.route,
+        SolveRoute::LpForwardedFromQp,
+        "forwarded result route"
+    );
 }

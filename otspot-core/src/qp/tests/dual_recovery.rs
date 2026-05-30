@@ -194,7 +194,11 @@ fn test_duality_gap_rejects_rank_deficient_false_optimal() {
     let opts = SolverOptions::default();
     let result = solve_qp_with(&problem, &opts);
     if result.status == SolveStatus::Optimal {
-        assert!((result.objective - (-0.5)).abs() < 1e-3, "got {}", result.objective);
+        assert!(
+            (result.objective - (-0.5)).abs() < 1e-3,
+            "got {}",
+            result.objective
+        );
     }
 }
 
@@ -202,8 +206,7 @@ fn test_duality_gap_rejects_rank_deficient_false_optimal() {
 #[test]
 fn test_refit_integration_emptycol_recovery() {
     let n = 3usize;
-    let q =
-        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[0.001, 0.001, 0.001], n, n).unwrap();
     let c = vec![-1.0, -1.0, 2.0];
     let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, n).unwrap();
     let b = vec![5.0_f64];
@@ -328,5 +331,9 @@ fn refine_dual_lsq_keeps_y_when_lsq_does_not_strictly_improve() {
         ..SolverResult::default()
     };
     refine_dual_lsq(&problem, &mut result, &[], None);
-    assert!(result.dual_solution[0].abs() < 1e-12, "got {}", result.dual_solution[0]);
+    assert!(
+        result.dual_solution[0].abs() < 1e-12,
+        "got {}",
+        result.dual_solution[0]
+    );
 }

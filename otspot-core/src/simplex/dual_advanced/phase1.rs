@@ -46,15 +46,15 @@
 //! ```
 //! いずれも問題スケールから派生する算式 (固定マジック値ではない)。
 
+use super::super::crash;
+use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
+use super::super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
+use super::core::dual_simplex_core_advanced;
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::{DROP_TOL, PIVOT_TOL};
-use super::super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
-use super::super::crash;
-use super::super::pricing::{DualLeavingStrategy, SteepestEdgePricing};
-use super::core::dual_simplex_core_advanced;
 
 /// Farkas certificate verification for primal infeasibility.
 ///
@@ -306,7 +306,13 @@ fn build_identity_phase1_state(
     let x_b = b.to_vec();
 
     Some(BigMPhase1State {
-        a_aug, basis_aug, c_aug_p1, x_b, artificial_col_of_row, n_aug, n_art,
+        a_aug,
+        basis_aug,
+        c_aug_p1,
+        x_b,
+        artificial_col_of_row,
+        n_aug,
+        n_art,
     })
 }
 
@@ -371,20 +377,28 @@ fn try_build_crash_phase1_state(
     n_total: usize,
 ) -> Option<BigMPhase1State> {
     if !options.use_lp_crash_basis {
-        #[cfg(test)] crash_probe::record(crash_probe::Outcome::DisabledOption);
+        #[cfg(test)]
+        crash_probe::record(crash_probe::Outcome::DisabledOption);
         return None;
     }
     if sf.num_artificial == 0 {
-        #[cfg(test)] crash_probe::record(crash_probe::Outcome::NoArtificial);
+        #[cfg(test)]
+        crash_probe::record(crash_probe::Outcome::NoArtificial);
         return None;
     }
 
     let m = sf.m;
     let (basis_pre, needs_artificial, n_art) = crash::compute_crash_basis(
-        a, b, m, sf.n_shifted, &sf.initial_basis, &sf.needs_artificial,
+        a,
+        b,
+        m,
+        sf.n_shifted,
+        &sf.initial_basis,
+        &sf.needs_artificial,
     );
     if n_art >= sf.num_artificial {
-        #[cfg(test)] crash_probe::record(crash_probe::Outcome::NotReduced);
+        #[cfg(test)]
+        crash_probe::record(crash_probe::Outcome::NotReduced);
         return None;
     }
 
@@ -402,7 +416,8 @@ fn try_build_crash_phase1_state(
     let a_aug = match build_a_aug(a, &artificial_col_of_row, m, n_total, n_aug) {
         Some(a) => a,
         None => {
-            #[cfg(test)] crash_probe::record(crash_probe::Outcome::BuildAaugFailed);
+            #[cfg(test)]
+            crash_probe::record(crash_probe::Outcome::BuildAaugFailed);
             return None;
         }
     };
@@ -417,7 +432,8 @@ fn try_build_crash_phase1_state(
     let mut basis_mgr = match LuBasis::new(&a_aug, &basis_aug, options.max_etas) {
         Ok(bm) => bm,
         Err(_) => {
-            #[cfg(test)] crash_probe::record(crash_probe::Outcome::LuFailed);
+            #[cfg(test)]
+            crash_probe::record(crash_probe::Outcome::LuFailed);
             return None;
         }
     };
@@ -427,21 +443,30 @@ fn try_build_crash_phase1_state(
     basis_mgr.ftran(&mut x_b_sv);
     let x_b = x_b_sv.to_dense();
     if x_b.iter().any(|&v| v < -PIVOT_TOL) {
-        #[cfg(test)] crash_probe::record(crash_probe::Outcome::XbNegative);
+        #[cfg(test)]
+        crash_probe::record(crash_probe::Outcome::XbNegative);
         return None;
     }
 
     // y = B^{-T} c_B; c_B[i] = c_aug[basis_aug[i]] = big_m (artif) or c[col] (struct/slack)
-    let mut c_b: Vec<f64> = (0..m).map(|i| {
-        let col = basis_aug[i];
-        if col >= n_total { big_m } else { c[col] }
-    }).collect();
+    let mut c_b: Vec<f64> = (0..m)
+        .map(|i| {
+            let col = basis_aug[i];
+            if col >= n_total {
+                big_m
+            } else {
+                c[col]
+            }
+        })
+        .collect();
     basis_mgr.btran_dense(&mut c_b);
     let y = c_b;
 
     // c_aug for non-basic structural cols: delta_j = max(0, a_j^T y - c[j])
     let mut in_basis = vec![false; n_aug];
-    for &col in &basis_aug { in_basis[col] = true; }
+    for &col in &basis_aug {
+        in_basis[col] = true;
+    }
 
     let mut c_aug_p1 = vec![0.0_f64; n_aug];
     for col in artificial_col_of_row.iter().flatten() {
@@ -462,9 +487,16 @@ fn try_build_crash_phase1_state(
         }
     }
 
-    #[cfg(test)] crash_probe::record(crash_probe::Outcome::Adopted(n_art));
+    #[cfg(test)]
+    crash_probe::record(crash_probe::Outcome::Adopted(n_art));
     Some(BigMPhase1State {
-        a_aug, basis_aug, c_aug_p1, x_b, artificial_col_of_row, n_aug, n_art,
+        a_aug,
+        basis_aug,
+        c_aug_p1,
+        x_b,
+        artificial_col_of_row,
+        n_aug,
+        n_art,
     })
 }
 
@@ -496,9 +528,7 @@ pub(crate) fn big_m_cold_start(
 
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
-    let crash_state = try_build_crash_phase1_state(
-        a, b, c, sf, options, big_m, n_total,
-    );
+    let crash_state = try_build_crash_phase1_state(a, b, c, sf, options, big_m, n_total);
     let crash_used = crash_state.is_some();
     let BigMPhase1State {
         a_aug,
@@ -537,7 +567,14 @@ pub(crate) fn big_m_cold_start(
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
-        &a_aug, &mut x_b, &c_aug_p1, &mut basis_aug, m, n_aug, options, &mut leaving,
+        &a_aug,
+        &mut x_b,
+        &c_aug_p1,
+        &mut basis_aug,
+        m,
+        n_aug,
+        options,
+        &mut leaving,
         &mut total_iters,
     );
 
@@ -553,9 +590,8 @@ pub(crate) fn big_m_cold_start(
             // slow-feasible LP (pilot/dfl001/ken-13/ken-18) でも発火する不健全
             // ヒューリスティック。Farkas 証明書 (A^T y ≤ 0, b^T y > 0) が
             // 通った場合のみ Infeasible を返し、検証不能なら Timeout で honest に返す。
-            let any_artificial_left = (0..m).any(|i| {
-                basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol
-            });
+            let any_artificial_left =
+                (0..m).any(|i| basis_aug[i] >= n_total && x_b[i].abs() > options.primal_tol);
             if any_artificial_left
                 && farkas_infeasibility_certified(&a_aug, b, &basis_aug, m, n_total, options)
             {
@@ -564,7 +600,12 @@ pub(crate) fn big_m_cold_start(
                 return r;
             }
             let r = super::super::timeout_result_with_incumbent(
-                sf, problem, &basis_aug, &x_b, col_scale, total_iters,
+                sf,
+                problem,
+                &basis_aug,
+                &x_b,
+                col_scale,
+                total_iters,
             );
             return r;
         }
@@ -611,8 +652,18 @@ pub(crate) fn big_m_cold_start(
 
     let mut pricing = SteepestEdgePricing::new(n_aug);
     let phase2_outcome = super::super::revised_simplex_core(
-        &a_aug, &mut x_b, &c_aug_p2, b, &mut basis_aug,
-        m, n_aug, n_aug, &mut pricing, options, &mut total_iters, false,
+        &a_aug,
+        &mut x_b,
+        &c_aug_p2,
+        b,
+        &mut basis_aug,
+        m,
+        n_aug,
+        n_aug,
+        &mut pricing,
+        options,
+        &mut total_iters,
+        false,
     );
 
     // === Step 8: Phase II 結果 + 人工変数残存判定 ===
@@ -633,14 +684,21 @@ pub(crate) fn big_m_cold_start(
 
             // warm-start: artificial が basis に残るケースは除外
             let ws = if basis_aug.iter().all(|&idx| idx < n_total) {
-                Some(WarmStartBasis { basis: basis_aug.clone(), x_b: x_b.clone() })
+                Some(WarmStartBasis {
+                    basis: basis_aug.clone(),
+                    x_b: x_b.clone(),
+                })
             } else {
                 None
             };
 
             // obj は元コスト c (Big-M ペナルティを含まない) で再計算
-            let obj_orig: f64 = problem.c.iter().zip(solution.iter())
-                .map(|(&ci, &xi)| ci * xi).sum();
+            let obj_orig: f64 = problem
+                .c
+                .iter()
+                .zip(solution.iter())
+                .map(|(&ci, &xi)| ci * xi)
+                .sum();
 
             SolverResult {
                 status: SolveStatus::Optimal,
@@ -665,9 +723,14 @@ pub(crate) fn big_m_cold_start(
             iterations: total_iters,
             ..Default::default()
         },
-        SimplexOutcome::Timeout(_) => {
-            super::super::timeout_result_with_incumbent(sf, problem, &basis_aug, &x_b, col_scale, total_iters)
-        }
+        SimplexOutcome::Timeout(_) => super::super::timeout_result_with_incumbent(
+            sf,
+            problem,
+            &basis_aug,
+            &x_b,
+            col_scale,
+            total_iters,
+        ),
         SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     }
 }
@@ -692,10 +755,14 @@ mod tests {
     fn big_m_phase1_feasible_eq() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![3.0],
+            vec![1.0, 1.0],
+            a,
+            vec![3.0],
             vec![ConstraintType::Eq],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_feasible_eq");
     }
 
@@ -703,52 +770,75 @@ mod tests {
     fn big_m_phase1_feasible_ge() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![5.0],
+            vec![1.0, 1.0],
+            a,
+            vec![5.0],
             vec![ConstraintType::Ge],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 5.0, "big_m_phase1_feasible_ge");
     }
 
     #[test]
     fn big_m_phase1_infeasible_eq_contradiction() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![5.0, 2.0],
+            vec![1.0, 1.0],
+            a,
+            vec![5.0, 2.0],
             vec![ConstraintType::Eq, ConstraintType::Eq],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Infeasible, "got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "got {:?}",
+            result.status
+        );
     }
 
     #[test]
     fn big_m_phase1_infeasible_ge_eq_mix() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![5.0, 2.0],
+            vec![1.0, 1.0],
+            a,
+            vec![5.0, 2.0],
             vec![ConstraintType::Ge, ConstraintType::Eq],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         let result = solve_with(&lp, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Infeasible, "got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "got {:?}",
+            result.status
+        );
     }
 
     /// 3 ≤ x1+x2 ≤ 7, min x1+x2 → obj=3
     #[test]
     fn big_m_phase1_le_ge_range_feasible() {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 2, 2)
+            .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![7.0, 3.0],
+            vec![1.0, 1.0],
+            a,
+            vec![7.0, 3.0],
             vec![ConstraintType::Le, ConstraintType::Ge],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 3.0, "big_m_phase1_le_ge_range_feasible");
     }
 
@@ -757,10 +847,14 @@ mod tests {
     fn big_m_phase1_ge_b_zero_bypasses_bigm() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![0.0],
+            vec![1.0, 1.0],
+            a,
+            vec![0.0],
             vec![ConstraintType::Ge],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 0.0, "big_m_phase1_ge_b_zero_bypasses_bigm");
     }
 
@@ -773,14 +867,17 @@ mod tests {
         // x1 + x3 = 1  (b=1 Eq)
         // min x3
         // → x1=x2=0, x3=1, obj=1
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 2], &[1.0, 1.0, 1.0, 1.0], 2, 3)
+            .unwrap();
         let lp = LpProblem::new_general(
-            vec![0.0, 0.0, 1.0], a, vec![0.0, 1.0],
+            vec![0.0, 0.0, 1.0],
+            a,
+            vec![0.0, 1.0],
             vec![ConstraintType::Eq, ConstraintType::Eq],
-            vec![(0.0, f64::INFINITY); 3], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 3],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 1.0, "big_m_phase1_degenerate_eq_zero_rhs");
     }
 
@@ -792,14 +889,18 @@ mod tests {
         // x1=1 で Eq 違反 (e6 + x2 = 2e6 → x2 = 1e6) → x2=1e6
         // → x1=1, x2=1e6 を最適化: x1+x2=1e6+1。x1↑にすると x2↓ で合計減 → x1=2, x2=0
         //   sum=2 だが Eq 確認: 2e6+0=2e6 ✓、Ge: 2>=1 ✓ → obj=2
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0e6, 1.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0e6, 1.0, 1.0, 1.0], 2, 2)
+                .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![2.0e6, 1.0],
+            vec![1.0, 1.0],
+            a,
+            vec![2.0e6, 1.0],
             vec![ConstraintType::Eq, ConstraintType::Ge],
-            vec![(0.0, f64::INFINITY); 2], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 2],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 2.0, "big_m_phase1_large_coeff_eq_ge_mix");
     }
 
@@ -817,7 +918,11 @@ mod tests {
         let basis = vec![1usize, n_total]; // row 0: orig var, row 1: artificial
         let x_b = vec![0.5_f64, 2.0_f64];
         let pick = strat.bland_leaving(&x_b, 1e-9, &basis);
-        assert_eq!(pick, Some(1), "bland_leaving must select artificial row when x_B >= 0");
+        assert_eq!(
+            pick,
+            Some(1),
+            "bland_leaving must select artificial row when x_B >= 0"
+        );
 
         // No artificials → None
         let basis2 = vec![0usize, 1usize];
@@ -854,14 +959,24 @@ mod tests {
             &[0, 0, 0, 1, 1, 1, 2, 2, 2],
             &[0, 1, 2, 0, 1, 2, 0, 1, 2],
             &[5.0, 3.0, 2.0, 2.0, 7.0, 1.0, 1.0, 1.0, 1.0],
-            3, 3,
-        ).unwrap();
+            3,
+            3,
+        )
+        .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0, 1.0], a, vec![10.0, 5.0, 3.0],
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![10.0, 5.0, 3.0],
             vec![ConstraintType::Eq; 3],
-            vec![(0.0, f64::INFINITY); 3], None,
-        ).unwrap();
-        assert_kkt_optimal(&lp, 3.0, "big_m_phase1_no_false_infeasible_when_blandmode_triggers");
+            vec![(0.0, f64::INFINITY); 3],
+            None,
+        )
+        .unwrap();
+        assert_kkt_optimal(
+            &lp,
+            3.0,
+            "big_m_phase1_no_false_infeasible_when_blandmode_triggers",
+        );
     }
 
     /// 自由変数 + Eq: split-variable + Phase I の組合せで feasibility が崩れないか。
@@ -871,10 +986,14 @@ mod tests {
         // → x1=2-x2, obj = 2 (任意の feasible で)
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![2.0],
+            vec![1.0, 1.0],
+            a,
+            vec![2.0],
             vec![ConstraintType::Eq],
-            vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)], None,
-        ).unwrap();
+            vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
+            None,
+        )
+        .unwrap();
         assert_kkt_optimal(&lp, 2.0, "big_m_phase1_free_var_eq");
     }
 
@@ -905,7 +1024,11 @@ mod tests {
     fn invoke_big_m_with_option(
         lp: &LpProblem,
         use_crash: bool,
-    ) -> (crate::problem::SolverResult, usize, super::crash_probe::Outcome) {
+    ) -> (
+        crate::problem::SolverResult,
+        usize,
+        super::crash_probe::Outcome,
+    ) {
         invoke_big_m_with_option_deadline_secs(lp, use_crash, 60.0)
     }
 
@@ -913,7 +1036,11 @@ mod tests {
         lp: &LpProblem,
         use_crash: bool,
         deadline_secs: f64,
-    ) -> (crate::problem::SolverResult, usize, super::crash_probe::Outcome) {
+    ) -> (
+        crate::problem::SolverResult,
+        usize,
+        super::crash_probe::Outcome,
+    ) {
         use crate::presolve::LpEquilibration;
         let sf = crate::simplex::build_standard_form(lp);
         let (a, b, c, row_scale, col_scale) = LpEquilibration::scale(&sf.a, &sf.b, &sf.c);
@@ -921,8 +1048,9 @@ mod tests {
             use_lp_crash_basis: use_crash,
             timeout_secs: Some(deadline_secs),
             max_etas: crate::options::default_max_etas(sf.m),
-            deadline: Some(std::time::Instant::now()
-                + std::time::Duration::from_secs_f64(deadline_secs)),
+            deadline: Some(
+                std::time::Instant::now() + std::time::Duration::from_secs_f64(deadline_secs),
+            ),
             ..Default::default()
         };
 
@@ -942,7 +1070,9 @@ mod tests {
     fn build_network_eq_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
         let mut seed = seed_init;
         let mut next = || -> f64 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
         };
         let n = n_flow + n_hub;
@@ -951,7 +1081,9 @@ mod tests {
         let mut a_cols = Vec::new();
         let mut a_vals = Vec::new();
         for i in 0..n_flow {
-            a_rows.push(i); a_cols.push(i); a_vals.push(1.0);
+            a_rows.push(i);
+            a_cols.push(i);
+            a_vals.push(1.0);
         }
         for h in 0..n_hub {
             for i in 0..n_flow {
@@ -968,10 +1100,17 @@ mod tests {
     }
 
     /// Ge/Eq 混在 + 多変量。crash 行被覆 + Phase I の Big-M penalty 駆出が結合。
-    fn build_ge_eq_mix_lp(n_eq: usize, n_ge: usize, n_struct_extra: usize, seed_init: u64) -> LpProblem {
+    fn build_ge_eq_mix_lp(
+        n_eq: usize,
+        n_ge: usize,
+        n_struct_extra: usize,
+        seed_init: u64,
+    ) -> LpProblem {
         let mut seed = seed_init;
         let mut next = || -> f64 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
         };
         let m = n_eq + n_ge;
@@ -980,7 +1119,9 @@ mod tests {
         let mut a_cols = Vec::new();
         let mut a_vals = Vec::new();
         for i in 0..m {
-            a_rows.push(i); a_cols.push(i); a_vals.push(1.0); // singleton diag
+            a_rows.push(i);
+            a_cols.push(i);
+            a_vals.push(1.0); // singleton diag
         }
         for j in 0..n_struct_extra {
             for i in 0..m {
@@ -1004,10 +1145,12 @@ mod tests {
         // 3 行 × 4 列、各行に diag entry + 共有 col
         let a = CscMatrix::from_triplets(
             &[0, 1, 2, 0, 1, 2, 0, 1, 2, 0],
-            &[0, 1, 2, 3, 3, 3, 0, 1, 2, 1],  // 重複しないよう注意
+            &[0, 1, 2, 3, 3, 3, 0, 1, 2, 1], // 重複しないよう注意
             &[1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.0001],
-            3, 4,
-        ).unwrap();
+            3,
+            4,
+        )
+        .unwrap();
         let b = vec![1.0, 2.0, 3.0];
         let c = vec![1.0, 1.0, 1.0, 0.5];
         let bounds = vec![(0.0_f64, 100.0_f64); 4];
@@ -1020,19 +1163,35 @@ mod tests {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let lp = build_network_eq_lp(80, 3, 0xF1F2_F3F4_F5F6_F7F8);
         let (_r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
-        let (_r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
-        eprintln!("CRASH_BIGM_NETWORK: n_art_off={} n_art_on={} out_off={:?} out_on={:?}",
-            n_art_off, n_art_on, out_off, out_on);
-        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption),
-            "off path must short-circuit on use_lp_crash_basis=false; got {:?}", out_off);
-        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
-            "on path must adopt crash state; got {:?}", out_on);
-        assert!(n_art_on < n_art_off,
-            "crash must reduce num_artificial: off={} on={}", n_art_off, n_art_on);
+        let (_r_on, n_art_on, out_on) = invoke_big_m_with_option(&lp, true);
+        eprintln!(
+            "CRASH_BIGM_NETWORK: n_art_off={} n_art_on={} out_off={:?} out_on={:?}",
+            n_art_off, n_art_on, out_off, out_on
+        );
+        assert!(
+            matches!(out_off, super::crash_probe::Outcome::DisabledOption),
+            "off path must short-circuit on use_lp_crash_basis=false; got {:?}",
+            out_off
+        );
+        assert!(
+            matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
+            "on path must adopt crash state; got {:?}",
+            out_on
+        );
+        assert!(
+            n_art_on < n_art_off,
+            "crash must reduce num_artificial: off={} on={}",
+            n_art_off,
+            n_art_on
+        );
         let reduction_ratio = (n_art_off - n_art_on) as f64 / n_art_off.max(1) as f64;
-        assert!(reduction_ratio >= 0.30,
+        assert!(
+            reduction_ratio >= 0.30,
             "crash artificial reduction {:.2} < 0.30 (off={} on={})",
-            reduction_ratio, n_art_off, n_art_on);
+            reduction_ratio,
+            n_art_off,
+            n_art_on
+        );
     }
 
     /// Ge/Eq 混在で crash が num_artificial と iter を共に減らす。
@@ -1041,26 +1200,34 @@ mod tests {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let lp = build_ge_eq_mix_lp(40, 30, 4, 0xA1A2_A3A4_A5A6_A7A8);
         let (r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
-        let (r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+        let (r_on, n_art_on, out_on) = invoke_big_m_with_option(&lp, true);
         eprintln!(
             "CRASH_BIGM_MIX: n_art_off={} n_art_on={} iter_off={} iter_on={} status_off={:?} status_on={:?} out_on={:?}",
             n_art_off, n_art_on, r_off.iterations, r_on.iterations, r_off.status, r_on.status, out_on,
         );
         assert_eq!(r_off.status, SolveStatus::Optimal, "off must be Optimal");
-        assert_eq!(r_on.status,  SolveStatus::Optimal, "on must be Optimal");
-        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption));
-        assert!(matches!(out_on,  super::crash_probe::Outcome::Adopted(_)));
+        assert_eq!(r_on.status, SolveStatus::Optimal, "on must be Optimal");
+        assert!(matches!(
+            out_off,
+            super::crash_probe::Outcome::DisabledOption
+        ));
+        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)));
         let obj_diff = (r_on.objective - r_off.objective).abs() / (1.0 + r_off.objective.abs());
         assert!(obj_diff < 1e-6, "crash obj drift: {:.3e}", obj_diff);
-        assert!(n_art_on < n_art_off,
-            "crash artif reduction expected: off={} on={}", n_art_off, n_art_on);
+        assert!(
+            n_art_on < n_art_off,
+            "crash artif reduction expected: off={} on={}",
+            n_art_off,
+            n_art_on
+        );
         // iter 削減 sentinel: wiring revert で確実に FAIL するよう assert 化。
         // 観測 96→26 (27%) でマージン十分、閾値は 0.7 (= 30% 削減) で設定。
         const ITER_REDUCTION_THRESHOLD: f64 = 0.7;
         assert!(
             (r_on.iterations as f64) < (r_off.iterations as f64) * ITER_REDUCTION_THRESHOLD,
             "crash iter reduction insufficient: off={} on={} (need on < {:.0})",
-            r_off.iterations, r_on.iterations,
+            r_off.iterations,
+            r_on.iterations,
             (r_off.iterations as f64) * ITER_REDUCTION_THRESHOLD,
         );
     }
@@ -1071,15 +1238,18 @@ mod tests {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let lp = build_beale_eq_lp();
         let (r_off, n_art_off, out_off) = invoke_big_m_with_option(&lp, false);
-        let (r_on,  n_art_on,  out_on)  = invoke_big_m_with_option(&lp, true);
+        let (r_on, n_art_on, out_on) = invoke_big_m_with_option(&lp, true);
         eprintln!(
             "CRASH_BIGM_BEALE: n_art_off={} n_art_on={} iter_off={} iter_on={} out_off={:?} out_on={:?}",
             n_art_off, n_art_on, r_off.iterations, r_on.iterations, out_off, out_on,
         );
         assert_eq!(r_off.status, SolveStatus::Optimal, "off Optimal");
-        assert_eq!(r_on.status,  SolveStatus::Optimal, "on Optimal");
-        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(0)),
-            "Beale: crash must adopt with n_art=0; got {:?}", out_on);
+        assert_eq!(r_on.status, SolveStatus::Optimal, "on Optimal");
+        assert!(
+            matches!(out_on, super::crash_probe::Outcome::Adopted(0)),
+            "Beale: crash must adopt with n_art=0; got {:?}",
+            out_on
+        );
         assert!(n_art_on <= n_art_off);
         assert_eq!(n_art_on, 0, "Beale 縮約は全 artif を crash で除去できる");
     }
@@ -1100,17 +1270,30 @@ mod tests {
         for &seed in seeds {
             let lp = build_network_eq_lp(50, 2, seed);
             let (_, n_off, _) = invoke_big_m_with_option(&lp, false);
-            let (_, n_on,  out_on)  = invoke_big_m_with_option(&lp, true);
-            eprintln!("CRASH_BIGM_SEED 0x{:x}: off={} on={} out_on={:?}", seed, n_off, n_on, out_on);
-            if matches!(out_on, super::crash_probe::Outcome::Adopted(_)) { adopt_count += 1; }
-            if n_on < n_off { wins += 1; }
+            let (_, n_on, out_on) = invoke_big_m_with_option(&lp, true);
+            eprintln!(
+                "CRASH_BIGM_SEED 0x{:x}: off={} on={} out_on={:?}",
+                seed, n_off, n_on, out_on
+            );
+            if matches!(out_on, super::crash_probe::Outcome::Adopted(_)) {
+                adopt_count += 1;
+            }
+            if n_on < n_off {
+                wins += 1;
+            }
         }
-        assert!(wins >= 4,
+        assert!(
+            wins >= 4,
             "crash reduced num_artificial on {}/{} seeds (need ≥ 4)",
-            wins, seeds.len());
-        assert!(adopt_count >= 4,
+            wins,
+            seeds.len()
+        );
+        assert!(
+            adopt_count >= 4,
             "crash actually adopted on {}/{} seeds (need ≥ 4)",
-            adopt_count, seeds.len());
+            adopt_count,
+            seeds.len()
+        );
     }
 
     /// no-op proof (memory: feedback_sentinel_must_fail_under_noop):
@@ -1124,24 +1307,37 @@ mod tests {
 
         // option=false → DisabledOption (identity path, no crash)
         let (r_off, n_off, out_off) = invoke_big_m_with_option(&lp, false);
-        assert!(matches!(out_off, super::crash_probe::Outcome::DisabledOption),
-            "use_lp_crash_basis=false must short-circuit on DisabledOption; got {:?}", out_off);
+        assert!(
+            matches!(out_off, super::crash_probe::Outcome::DisabledOption),
+            "use_lp_crash_basis=false must short-circuit on DisabledOption; got {:?}",
+            out_off
+        );
 
         // option=true → crash actually adopted (proves sentinel is non-trivial)
         let (r_on, n_on, out_on) = invoke_big_m_with_option(&lp, true);
-        assert!(matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
-            "use_lp_crash_basis=true must adopt crash; got {:?}", out_on);
+        assert!(
+            matches!(out_on, super::crash_probe::Outcome::Adopted(_)),
+            "use_lp_crash_basis=true must adopt crash; got {:?}",
+            out_on
+        );
 
         // crash reduces num_artificial (non-tautological: the two paths differ)
-        assert!(n_on < n_off,
-            "crash must reduce num_artificial: off={} on={}", n_off, n_on);
+        assert!(
+            n_on < n_off,
+            "crash must reduce num_artificial: off={} on={}",
+            n_off,
+            n_on
+        );
 
         // both paths reach Optimal on the same LP
         assert_eq!(r_off.status, SolveStatus::Optimal, "off must be Optimal");
-        assert_eq!(r_on.status,  SolveStatus::Optimal, "on must be Optimal");
-        let obj_diff = (r_off.objective - r_on.objective).abs()
-            / (1.0 + r_off.objective.abs());
-        assert!(obj_diff < 1e-6, "objective must match regardless of crash: {:.3e}", obj_diff);
+        assert_eq!(r_on.status, SolveStatus::Optimal, "on must be Optimal");
+        let obj_diff = (r_off.objective - r_on.objective).abs() / (1.0 + r_off.objective.abs());
+        assert!(
+            obj_diff < 1e-6,
+            "objective must match regardless of crash: {:.3e}",
+            obj_diff
+        );
     }
 
     // -------- crash fallback 直接 test --------
@@ -1176,21 +1372,30 @@ mod tests {
             &[0, 1, 0, 1, 2],
             &[0, 0, 1, 1, 2],
             &[1.0, 1.0, 1.0, 1.0, 1.0],
-            3, 3,
-        ).unwrap();
+            3,
+            3,
+        )
+        .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0, 1.0], a, vec![1.0, 1.0, 1.0],
+            vec![1.0, 1.0, 1.0],
+            a,
+            vec![1.0, 1.0, 1.0],
             vec![ConstraintType::Eq; 3],
-            vec![(0.0, f64::INFINITY); 3], None,
-        ).unwrap();
+            vec![(0.0, f64::INFINITY); 3],
+            None,
+        )
+        .unwrap();
         let (_r, _n, out) = invoke_big_m_with_option(&lp, true);
         // crash が dup 列を pick して LU で singular に堕ちる、または
         // dup col の rank 漏れで NotReduced に倒れるのいずれか。後者でも
         // identity fallback の安全性は変わらず — adopt しないことが本質。
         assert!(
-            matches!(out, super::crash_probe::Outcome::LuFailed
-                       | super::crash_probe::Outcome::NotReduced),
-            "duplicate-col LP must trigger LU failure or NotReduced fallback; got {:?}", out,
+            matches!(
+                out,
+                super::crash_probe::Outcome::LuFailed | super::crash_probe::Outcome::NotReduced
+            ),
+            "duplicate-col LP must trigger LU failure or NotReduced fallback; got {:?}",
+            out,
         );
     }
 
@@ -1227,7 +1432,9 @@ mod tests {
         // 1 件でも観測したら成功とする。
         let mut seed: u64 = 0xCAFEBABE_DEADBEEF;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0
         };
         /// Max random probe attempts to generate a negative-x_B test configuration.
@@ -1242,24 +1449,38 @@ mod tests {
             let mut vals = Vec::new();
             // 各 row に singleton-like diag (符号混在) + 隣接 row の off-diag
             for i in 0..m {
-                rows.push(i); cols.push(i); vals.push(if next() < 0.0 { -1.0 } else { 1.0 });
-                rows.push(i); cols.push((i + 1) % m); vals.push(next() * 0.5);
+                rows.push(i);
+                cols.push(i);
+                vals.push(if next() < 0.0 { -1.0 } else { 1.0 });
+                rows.push(i);
+                cols.push((i + 1) % m);
+                vals.push(next() * 0.5);
             }
             // 余剰列 (hub)
             for j in m..n {
                 for i in 0..m {
-                    rows.push(i); cols.push(j); vals.push(next() * 0.3);
+                    rows.push(i);
+                    cols.push(j);
+                    vals.push(next() * 0.3);
                 }
             }
             let a = match CscMatrix::from_triplets(&rows, &cols, &vals, m, n) {
-                Ok(a) => a, Err(_) => continue,
+                Ok(a) => a,
+                Err(_) => continue,
             };
             let b: Vec<f64> = (0..m).map(|_| 0.5 + next().abs()).collect();
             let c: Vec<f64> = (0..n).map(|_| next().abs()).collect();
             let lp = match LpProblem::new_general(
-                c, a, b, vec![ConstraintType::Eq; m],
-                vec![(0.0, f64::INFINITY); n], None,
-            ) { Ok(lp) => lp, Err(_) => continue };
+                c,
+                a,
+                b,
+                vec![ConstraintType::Eq; m],
+                vec![(0.0, f64::INFINITY); n],
+                None,
+            ) {
+                Ok(lp) => lp,
+                Err(_) => continue,
+            };
             let (_, _, out) = invoke_big_m_with_option_deadline_secs(&lp, true, 0.5);
             last_outcome = out;
             if matches!(out, super::crash_probe::Outcome::XbNegative) {
@@ -1269,8 +1490,10 @@ mod tests {
         }
         // XbNegative 直接ヒットしなくとも、Adopted 以外 (= identity に倒れる) は
         // safe fallback として許容 — adopt して numerical error を生まない。
-        assert!(found || !matches!(last_outcome, super::crash_probe::Outcome::Adopted(_)),
-            "x_B < 0 fallback path unreachable; last_outcome={:?}", last_outcome,
+        assert!(
+            found || !matches!(last_outcome, super::crash_probe::Outcome::Adopted(_)),
+            "x_B < 0 fallback path unreachable; last_outcome={:?}",
+            last_outcome,
         );
     }
 

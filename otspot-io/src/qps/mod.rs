@@ -3,8 +3,8 @@
 //! QPS = MPS + QUADOBJ section.  The `1/2` convention is used:
 //! `min 1/2 x^T Q x + c^T x` — consistent with the Maros-Mészáros benchmark.
 
-mod types;
 mod parser;
+mod types;
 
 use std::path::Path;
 
@@ -393,8 +393,8 @@ ENDATA\n";
 
     #[test]
     fn test_qps_reader_fixture_tame() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/netlib/TAME.QPS");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/netlib/TAME.QPS");
         let content = std::fs::read_to_string(&path).unwrap();
         let expected = parse_qps_str(&content).unwrap();
         let file = std::fs::File::open(&path).unwrap();
@@ -493,21 +493,30 @@ ENDATA
     #[test]
     fn test_qps_columns_malformed_too_few_fields_is_error() {
         let qps = minimal_qps_with_columns("    x1  obj");
-        assert!(parse_qps_str(&qps).is_err(), "< 3 fields in COLUMNS must error");
+        assert!(
+            parse_qps_str(&qps).is_err(),
+            "< 3 fields in COLUMNS must error"
+        );
     }
 
     /// A: QUADOBJ line with only 2 fields must be an error, not a silent skip.
     #[test]
     fn test_qps_quadobj_malformed_too_few_fields_is_error() {
         let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1\nENDATA\n";
-        assert!(parse_qps_str(qps).is_err(), "< 3 fields in QUADOBJ must error");
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "< 3 fields in QUADOBJ must error"
+        );
     }
 
     /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
     #[test]
     fn test_qps_bounds_malformed_too_few_fields_is_error() {
         let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO\nENDATA\n";
-        assert!(parse_qps_str(qps).is_err(), "< 3 fields in BOUNDS must error");
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "< 3 fields in BOUNDS must error"
+        );
     }
 
     /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
@@ -527,8 +536,12 @@ ENDATA
     /// P2-1: NaN in constraint RHS (2-field shorthand) must error.
     #[test]
     fn test_qps_rhs_nan_constraint_row_is_error() {
-        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    c1  NaN\nENDATA\n";
-        assert!(parse_qps_str(qps).is_err(), "NaN in constraint RHS must error");
+        let qps =
+            "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    c1  NaN\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "NaN in constraint RHS must error"
+        );
     }
 
     /// P2-2: symmetric QUADOBJ entry (x2,x1) when (x1,x2) already present must error.
@@ -538,7 +551,11 @@ ENDATA
         let err = parse_qps_str(qps);
         assert!(err.is_err(), "(x1,x2) and (x2,x1) in QUADOBJ must error");
         let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+        assert!(
+            msg.contains("Duplicate"),
+            "error should mention 'Duplicate': {}",
+            msg
+        );
     }
 
     /// B: duplicate (col1, col2) pair in QUADOBJ must be an error.
@@ -548,7 +565,11 @@ ENDATA
         let err = parse_qps_str(qps);
         assert!(err.is_err(), "duplicate entry in QUADOBJ must error");
         let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+        assert!(
+            msg.contains("Duplicate"),
+            "error should mention 'Duplicate': {}",
+            msg
+        );
     }
 
     /// C: NaN coefficient in COLUMNS must be an error.
@@ -576,14 +597,20 @@ ENDATA
     #[test]
     fn test_qps_rhs_nan_constraint_row_3field_is_error() {
         let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  NaN\nENDATA\n";
-        assert!(parse_qps_str(qps).is_err(), "NaN in constraint-row RHS (3-field) must error");
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "NaN in constraint-row RHS (3-field) must error"
+        );
     }
 
     /// Inf in a constraint-row RHS (3-field format) must error.
     #[test]
     fn test_qps_rhs_inf_constraint_row_3field_is_error() {
         let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  Inf\nENDATA\n";
-        assert!(parse_qps_str(qps).is_err(), "Inf in constraint-row RHS (3-field) must error");
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "Inf in constraint-row RHS (3-field) must error"
+        );
     }
 
     /// NaN for an undefined (typo) row name in RHS must error, not be silently accepted.

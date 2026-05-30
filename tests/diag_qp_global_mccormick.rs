@@ -47,7 +47,15 @@ fn cfg(use_alpha_bb: bool, use_mccormick: bool) -> GlobalOptimizationConfig {
 fn asym_bilinear_2d() -> QpProblem {
     let q = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[-1.0, -1.0], 2, 2).unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-    QpProblem::new(q, vec![0.0, 0.0], a, vec![], vec![(-2.0, 1.0), (-1.0, 2.0)], vec![]).unwrap()
+    QpProblem::new(
+        q,
+        vec![0.0, 0.0],
+        a,
+        vec![],
+        vec![(-2.0, 1.0), (-1.0, 2.0)],
+        vec![],
+    )
+    .unwrap()
 }
 
 /// diag only (純 concave): f = -x² -y² on [-1, 1]² 。McCormick と α-BB が同等の想定 fixture。
@@ -199,10 +207,14 @@ fn mccormick_does_not_regress_status_on_diag_only_fixture() {
     );
     // status 同等 (Optimal は Optimal、LocallyOptimal は同じか promote のみ)
     // Phase 6 で indefinite Q は Optimal→NonconvexGlobal に分岐 (fixture は concave_2d で indefinite)。
-    let was_optimal =
-        matches!(r_a.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
-    let now_optimal =
-        matches!(r_m.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
+    let was_optimal = matches!(
+        r_a.status,
+        SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+    );
+    let now_optimal = matches!(
+        r_m.status,
+        SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+    );
     assert!(
         !was_optimal || now_optimal,
         "McCormick must not demote Optimal → LocallyOptimal: {:?} → {:?}",

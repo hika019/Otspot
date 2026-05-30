@@ -39,7 +39,12 @@ use crate::tolerances::any_nonfinite;
 /// `n_lb_finite` / `n_ub_finite` are the counts of finite lower / upper bounds in
 /// `bounds`. Passing a shorter `z` is a contract violation detected by `debug_assert`
 /// in debug builds; in release builds the z-processing is skipped when `z` is empty.
-pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64)], z: &[f64]) -> f64 {
+pub fn dual_sign_violation(
+    ct: &[ConstraintType],
+    y: &[f64],
+    bounds: &[(f64, f64)],
+    z: &[f64],
+) -> f64 {
     if any_nonfinite(y) {
         return f64::INFINITY;
     }
@@ -51,14 +56,16 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
     #[allow(unreachable_patterns)]
     for i in 0..m {
         let viol = match ct[i] {
-            ConstraintType::Le => (-y[i]).max(0.0),   // must be >= 0
-            ConstraintType::Ge => y[i].max(0.0),       // must be <= 0
-            ConstraintType::Eq => 0.0,                 // free
+            ConstraintType::Le => (-y[i]).max(0.0), // must be >= 0
+            ConstraintType::Ge => y[i].max(0.0),    // must be <= 0
+            ConstraintType::Eq => 0.0,              // free
             _ => 0.0,
         };
         if viol > 0.0 {
             let rel = viol / (1.0 + y[i].abs());
-            if rel > max_rel { max_rel = rel; }
+            if rel > max_rel {
+                max_rel = rel;
+            }
         }
     }
 
@@ -83,7 +90,9 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
             let v = (-z[idx]).max(0.0); // z_lb must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
-                if rel > max_rel { max_rel = rel; }
+                if rel > max_rel {
+                    max_rel = rel;
+                }
             }
             idx += 1;
         }
@@ -93,7 +102,9 @@ pub fn dual_sign_violation(ct: &[ConstraintType], y: &[f64], bounds: &[(f64, f64
             let v = (-z[idx]).max(0.0); // z_ub must be >= 0
             if v > 0.0 {
                 let rel = v / (1.0 + z[idx].abs());
-                if rel > max_rel { max_rel = rel; }
+                if rel > max_rel {
+                    max_rel = rel;
+                }
             }
             idx += 1;
         }
@@ -167,7 +178,9 @@ pub mod f64_impl {
         if a.nrows == 0 || y.is_empty() {
             return vec![0.0; n];
         }
-        a.transpose().mat_vec_mul(y).unwrap_or_else(|_| vec![0.0; n])
+        a.transpose()
+            .mat_vec_mul(y)
+            .unwrap_or_else(|_| vec![0.0; n])
     }
 
     /// A·x (per-row sum). `A` が 0 行なら空 Vec。
@@ -229,9 +242,7 @@ pub mod f64_impl {
     }
 
     /// 不等式 complementarity 生積 `|y_i · slack_i|`. Eq 行は 0.
-    pub fn comp_ineq_products(
-        ax: &[f64], b: &[f64], ct: &[ConstraintType], y: &[f64],
-    ) -> Vec<f64> {
+    pub fn comp_ineq_products(ax: &[f64], b: &[f64], ct: &[ConstraintType], y: &[f64]) -> Vec<f64> {
         let m = ct.len();
         let mut out = vec![0.0_f64; m];
         if ax.is_empty() || y.is_empty() {
@@ -305,9 +316,7 @@ pub mod dd_impl {
     }
 
     /// per-row primal 違反, DD `Ax − b` を取って f64 に truncate. Le/Ge/Eq 別.
-    pub fn constraint_violations(
-        ax_dd: &[TwoFloat], b: &[f64], ct: &[ConstraintType],
-    ) -> Vec<f64> {
+    pub fn constraint_violations(ax_dd: &[TwoFloat], b: &[f64], ct: &[ConstraintType]) -> Vec<f64> {
         let m = ct.len();
         let mut out = vec![0.0_f64; m];
         #[allow(unreachable_patterns)] // ConstraintType is #[non_exhaustive].
@@ -328,7 +337,10 @@ pub mod dd_impl {
 
     /// 不等式 complementarity 生積 `|y_i · slack_i|`, slack を DD で計算.
     pub fn comp_ineq_products(
-        ax_dd: &[TwoFloat], b: &[f64], ct: &[ConstraintType], y: &[f64],
+        ax_dd: &[TwoFloat],
+        b: &[f64],
+        ct: &[ConstraintType],
+        y: &[f64],
     ) -> Vec<f64> {
         let m = ct.len();
         let mut out = vec![0.0_f64; m];
@@ -364,7 +376,11 @@ mod tests {
     fn bound_contrib_lb_then_ub_layout() {
         // bounds: col0 lb=0/ub=10 (両方 finite), col1 free, col2 lb=5 のみ
         // bd layout: [lb half: col0, col2], [ub half: col0]
-        let bounds = vec![(0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY), (5.0, f64::INFINITY)];
+        let bounds = vec![
+            (0.0, 10.0),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (5.0, f64::INFINITY),
+        ];
         let bd = vec![1.0, 2.0, 3.0];
         let c = bound_contrib(&bounds, &bd);
         assert_eq!(c, vec![-1.0 + 3.0, 0.0, -2.0]);
@@ -420,7 +436,10 @@ mod tests {
         use twofloat::TwoFloat;
         use ConstraintType::*;
         // f64 で ax = 1.0 + 1e16 - 1e16 = 0 だが、DD なら 1.0 を保つ。b=0, Eq → 違反 1.0.
-        let ax_dd = vec![TwoFloat::from(1.0_f64) + TwoFloat::new_mul(1.0e16, 1.0) - TwoFloat::new_mul(1.0e16, 1.0)];
+        let ax_dd = vec![
+            TwoFloat::from(1.0_f64) + TwoFloat::new_mul(1.0e16, 1.0)
+                - TwoFloat::new_mul(1.0e16, 1.0),
+        ];
         let b = vec![0.0];
         let ct = vec![Eq];
         let v = dd_impl::constraint_violations(&ax_dd, &b, &ct);
@@ -451,7 +470,11 @@ mod tests {
         let bounds: Vec<(f64, f64)> = vec![];
         let z: Vec<f64> = vec![];
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
-        assert!(v > 0.0, "Le with y=-0.5 should give violation > 0, got {}", v);
+        assert!(
+            v > 0.0,
+            "Le with y=-0.5 should give violation > 0, got {}",
+            v
+        );
         // expected: 0.5 / (1 + 0.5) = 0.5/1.5 ≈ 0.333
         assert!((v - 0.5 / 1.5).abs() < 1e-12, "exact check: {}", v);
     }
@@ -578,7 +601,10 @@ mod tests {
         let bounds: Vec<(f64, f64)> = vec![];
         let z: Vec<f64> = vec![];
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
-        assert!(v.is_infinite() && v > 0.0, "NaN y must give +INFINITY, got {v}");
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "NaN y must give +INFINITY, got {v}"
+        );
     }
 
     /// A.4 sentinel: NaN in z must return INFINITY (symmetric to y).
@@ -591,7 +617,10 @@ mod tests {
         let bounds = vec![(0.0_f64, f64::INFINITY)]; // n_lb_finite=1, n_ub_finite=0
         let z = vec![f64::NAN];
         let v = dual_sign_violation(&ct, &y, &bounds, &z);
-        assert!(v.is_infinite() && v > 0.0, "NaN z must give +INFINITY, got {v}");
+        assert!(
+            v.is_infinite() && v > 0.0,
+            "NaN z must give +INFINITY, got {v}"
+        );
     }
 
     /// Scale robustness: large and small violations both give bounded results in (0, 1].
@@ -606,8 +635,10 @@ mod tests {
         let ct = vec![Ge];
         for &yi in &[1e-6_f64, 1.0, 1e3, 1e9] {
             let v = dual_sign_violation(&ct, &[yi], &[], &[]);
-            assert!(v > 0.0 && v < 1.0,
-                "violation y={yi} must be in (0,1), got {v}");
+            assert!(
+                v > 0.0 && v < 1.0,
+                "violation y={yi} must be in (0,1), got {v}"
+            );
             // As yi → ∞, violation → 1
             if yi > 100.0 {
                 assert!(v > 0.99, "large yi={yi} should give v close to 1, got {v}");
@@ -627,8 +658,8 @@ mod tests {
         let ct = vec![Le, Ge, Eq, Le, Ge];
         let y = vec![1.0, -1.0, 0.5, 0.0, -2.0];
         let bounds = vec![
-            (0.0_f64, 1.0_f64),  // lb+ub finite: 2 z entries
-            (f64::NEG_INFINITY, f64::INFINITY),  // free: no z
+            (0.0_f64, 1.0_f64),                 // lb+ub finite: 2 z entries
+            (f64::NEG_INFINITY, f64::INFINITY), // free: no z
         ];
         // z: lb-half=[z_lb_0], ub-half=[z_ub_0]
         // z_lb >= 0 ok, z_ub >= 0 ok (both bound duals non-negative)
@@ -644,7 +675,7 @@ mod tests {
     /// Stationarity: 2(x−10) + z_ub = 0 → z_ub = 2*(10−5) = 10 > 0.
     #[test]
     fn dual_sign_z_ub_observed_positive_at_active_ub() {
-        use crate::qp::{QpProblem, solve_qp};
+        use crate::qp::{solve_qp, QpProblem};
         use crate::sparse::CscMatrix;
         // min 1/2*(2)*x^2 + (-20)*x ≡ (x-10)^2 + const, 0 ≤ x ≤ 5
         let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
@@ -652,14 +683,22 @@ mod tests {
         let prob = QpProblem::new(q, vec![-20.0], a, vec![], vec![(0.0, 5.0)], vec![]).unwrap();
         let result = solve_qp(&prob);
         // x* ≈ 5 (ub active)
-        assert!((result.solution[0] - 5.0).abs() < 1e-4,
-            "x should be ≈5, got {}", result.solution[0]);
+        assert!(
+            (result.solution[0] - 5.0).abs() < 1e-4,
+            "x should be ≈5, got {}",
+            result.solution[0]
+        );
         // z = [z_lb, z_ub]; z_ub must be > 0
-        assert!(result.bound_duals.len() >= 2,
-            "expected >=2 bound duals, got {}", result.bound_duals.len());
+        assert!(
+            result.bound_duals.len() >= 2,
+            "expected >=2 bound duals, got {}",
+            result.bound_duals.len()
+        );
         let z_ub = result.bound_duals[1];
-        assert!(z_ub > 1.0,
-            "z_ub should be ≈10 (active ub dual), got {z_ub}");
+        assert!(
+            z_ub > 1.0,
+            "z_ub should be ≈10 (active ub dual), got {z_ub}"
+        );
     }
 
     #[test]
@@ -675,7 +714,10 @@ mod tests {
         assert_eq!(qx_f, qx_d);
 
         let aty_f = f64_impl::aty(&a, &y, 2);
-        let aty_d: Vec<f64> = dd_impl::aty(&a, &y, 2).iter().map(|&v| f64::from(v)).collect();
+        let aty_d: Vec<f64> = dd_impl::aty(&a, &y, 2)
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect();
         assert_eq!(aty_f, aty_d);
 
         let ax_f = f64_impl::ax(&a, &x);

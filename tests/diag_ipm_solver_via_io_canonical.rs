@@ -24,7 +24,9 @@ fn minimal_qp() -> QpProblem {
 #[test]
 fn test_v2_hs21() {
     let path = Path::new("data/maros_meszaros/HS21.QPS");
-    if !path.exists() { return; }
+    if !path.exists() {
+        return;
+    }
     let prob = parse_qps(path).expect("parse HS21");
     let opts = SolverOptions::default();
     let r = ipm_solver::solve_ipm(&prob, &opts);
@@ -43,22 +45,63 @@ fn test_ipm_dpklo1() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(5.0);
     let r = ipm_solver::solve_ipm(&prob, &opts);
-    eprintln!("DPKLO1 v2: status={:?} obj={} iters={}", r.status, r.objective, r.iterations);
-    assert!(matches!(r.status, SolveStatus::Optimal | SolveStatus::Timeout));
+    eprintln!(
+        "DPKLO1 v2: status={:?} obj={} iters={}",
+        r.status, r.objective, r.iterations
+    );
+    assert!(matches!(
+        r.status,
+        SolveStatus::Optimal | SolveStatus::Timeout
+    ));
 }
 
 #[test]
 fn invalid_options_rejected_at_solve_ipm() {
     let prob = minimal_qp();
     let make_cases: &[(&str, CaseMaker)] = &[
-        ("neg timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(-1.0); o }),
-        ("nan primal_tol",   || { let mut o = SolverOptions::default(); o.primal_tol = f64::NAN; o }),
-        ("zero primal_tol",  || { let mut o = SolverOptions::default(); o.primal_tol = 0.0; o }),
-        ("neg dual_tol",     || { let mut o = SolverOptions::default(); o.dual_tol = -1e-6; o }),
-        ("zero threads",     || { let mut o = SolverOptions::default(); o.threads = 0; o }),
-        ("ipm eps zero",     || { let mut o = SolverOptions::default(); o.ipm = IpmOptions { eps: 0.0, ..Default::default() }; o }),
-        ("inf timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(f64::INFINITY); o }),
-        ("nan timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(f64::NAN); o }),
+        ("neg timeout_secs", || {
+            let mut o = SolverOptions::default();
+            o.timeout_secs = Some(-1.0);
+            o
+        }),
+        ("nan primal_tol", || {
+            let mut o = SolverOptions::default();
+            o.primal_tol = f64::NAN;
+            o
+        }),
+        ("zero primal_tol", || {
+            let mut o = SolverOptions::default();
+            o.primal_tol = 0.0;
+            o
+        }),
+        ("neg dual_tol", || {
+            let mut o = SolverOptions::default();
+            o.dual_tol = -1e-6;
+            o
+        }),
+        ("zero threads", || {
+            let mut o = SolverOptions::default();
+            o.threads = 0;
+            o
+        }),
+        ("ipm eps zero", || {
+            let mut o = SolverOptions::default();
+            o.ipm = IpmOptions {
+                eps: 0.0,
+                ..Default::default()
+            };
+            o
+        }),
+        ("inf timeout_secs", || {
+            let mut o = SolverOptions::default();
+            o.timeout_secs = Some(f64::INFINITY);
+            o
+        }),
+        ("nan timeout_secs", || {
+            let mut o = SolverOptions::default();
+            o.timeout_secs = Some(f64::NAN);
+            o
+        }),
     ];
     for (label, make) in make_cases {
         let bad_opts = make();
@@ -77,14 +120,49 @@ fn invalid_options_rejected_at_run_ipm() {
     let prob = minimal_qp();
     let presolve = QpPresolveResult::no_reduction(&prob);
     let make_cases: &[(&str, CaseMaker)] = &[
-        ("neg timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(-1.0); o }),
-        ("nan primal_tol",   || { let mut o = SolverOptions::default(); o.primal_tol = f64::NAN; o }),
-        ("zero primal_tol",  || { let mut o = SolverOptions::default(); o.primal_tol = 0.0; o }),
-        ("neg dual_tol",     || { let mut o = SolverOptions::default(); o.dual_tol = -1e-6; o }),
-        ("zero threads",     || { let mut o = SolverOptions::default(); o.threads = 0; o }),
-        ("ipm eps zero",     || { let mut o = SolverOptions::default(); o.ipm = IpmOptions { eps: 0.0, ..Default::default() }; o }),
-        ("neg clamp_tol",    || { let mut o = SolverOptions::default(); o.clamp_tol = -1.0; o }),
-        ("inf timeout_secs", || { let mut o = SolverOptions::default(); o.timeout_secs = Some(f64::INFINITY); o }),
+        ("neg timeout_secs", || {
+            let mut o = SolverOptions::default();
+            o.timeout_secs = Some(-1.0);
+            o
+        }),
+        ("nan primal_tol", || {
+            let mut o = SolverOptions::default();
+            o.primal_tol = f64::NAN;
+            o
+        }),
+        ("zero primal_tol", || {
+            let mut o = SolverOptions::default();
+            o.primal_tol = 0.0;
+            o
+        }),
+        ("neg dual_tol", || {
+            let mut o = SolverOptions::default();
+            o.dual_tol = -1e-6;
+            o
+        }),
+        ("zero threads", || {
+            let mut o = SolverOptions::default();
+            o.threads = 0;
+            o
+        }),
+        ("ipm eps zero", || {
+            let mut o = SolverOptions::default();
+            o.ipm = IpmOptions {
+                eps: 0.0,
+                ..Default::default()
+            };
+            o
+        }),
+        ("neg clamp_tol", || {
+            let mut o = SolverOptions::default();
+            o.clamp_tol = -1.0;
+            o
+        }),
+        ("inf timeout_secs", || {
+            let mut o = SolverOptions::default();
+            o.timeout_secs = Some(f64::INFINITY);
+            o
+        }),
     ];
     for (label, make) in make_cases {
         let bad_opts = make();

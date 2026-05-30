@@ -25,13 +25,7 @@ pub(crate) trait PricingStrategy {
     /// `entering` = column index entering the basis.
     /// `leaving`  = column index leaving the basis (not the row index).
     /// `eta`      = B⁻¹ * a_entering (FTRAN of entering column, dense).
-    fn update_weights(
-        &mut self,
-        basis: &LuBasis,
-        entering: usize,
-        leaving: usize,
-        eta: &[f64],
-    );
+    fn update_weights(&mut self, basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]);
 }
 
 /// Classic Dantzig pricing: select the column with the most negative reduced cost.
@@ -169,16 +163,15 @@ impl PricingStrategy for SteepestEdgePricing {
     ///
     /// See struct docstring for the retreat history documenting why the
     /// numerically exact pivot² formula was abandoned.
-    fn update_weights(
-        &mut self,
-        _basis: &LuBasis,
-        entering: usize,
-        leaving: usize,
-        eta: &[f64],
-    ) {
+    fn update_weights(&mut self, _basis: &LuBasis, entering: usize, leaving: usize, eta: &[f64]) {
         if leaving < self.weights.len() {
             let eta_norm_sq: f64 = eta.iter().map(|&x| x * x).sum();
-            let gamma_e = self.weights.get(entering).copied().unwrap_or(1.0).max(GAMMA_FLOOR);
+            let gamma_e = self
+                .weights
+                .get(entering)
+                .copied()
+                .unwrap_or(1.0)
+                .max(GAMMA_FLOOR);
             let new_weight = (eta_norm_sq / gamma_e).max(GAMMA_FLOOR);
             self.weights[leaving] = self.weights[leaving].max(new_weight);
         }
@@ -237,14 +230,7 @@ pub(crate) trait DualLeavingStrategy {
     /// Post-pivot hook. Stateful weight updates (DSE) wire this; stateless
     /// strategies leave the default no-op. `sigma` is only valid when
     /// `needs_sigma()` returned true.
-    fn after_pivot(
-        &mut self,
-        _leaving_row: usize,
-        _alpha: &[f64],
-        _sigma: &[f64],
-        _pivot: f64,
-    ) {
-    }
+    fn after_pivot(&mut self, _leaving_row: usize, _alpha: &[f64], _sigma: &[f64], _pivot: f64) {}
 
     /// Called after the basis is refactored. Stateful weights that may drift
     /// (DSE) reset here to identity; stateless strategies leave the no-op.
@@ -308,7 +294,7 @@ mod tests {
     fn test_dantzig_respects_n_basic_limit() {
         let pricing = DantzigPricing;
         let rc = vec![-0.1, -0.5, -1.0]; // most negative is index 2
-        // Only look at first 2
+                                         // Only look at first 2
         let entering = pricing.select_entering(&rc, 2);
         assert_eq!(entering, Some(1)); // index 1 within limit
     }
@@ -343,9 +329,8 @@ mod tests {
     }
 
     fn make_identity_basis_2x2() -> crate::basis::LuBasis {
-        let a = crate::sparse::CscMatrix::from_triplets(
-            &[0, 1], &[0, 1], &[1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a =
+            crate::sparse::CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
         crate::basis::LuBasis::new(&a, &[0, 1], 50).unwrap()
     }
 
@@ -374,7 +359,10 @@ mod tests {
             expected,
             pricing.weights[3]
         );
-        assert_eq!(pricing.weights[2], 1.0, "entering column weight must reset to 1");
+        assert_eq!(
+            pricing.weights[2], 1.0,
+            "entering column weight must reset to 1"
+        );
     }
 
     /// Sentinel: degenerate-pivot scenario produces a finite γ[leaving] (γ[entering] damps).

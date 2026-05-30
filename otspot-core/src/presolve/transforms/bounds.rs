@@ -20,10 +20,7 @@ pub(super) fn step5_bounds_tightening(
         }
 
         let updates = propagate_row_bounds(
-            &entries,
-            &st.bounds,
-            ct,
-            st.b[i],
+            &entries, &st.bounds, ct, st.b[i],
             // LP presolve passes int_mask=None; acceptance is unconditional
             // (aggressive tightening, unlike MIP presolve which must not cut off
             // integer solutions).

@@ -13,9 +13,16 @@ pub enum QpPresolveStatus {
 
 #[derive(Debug, Clone)]
 pub(crate) enum QpPostsolveStep {
-    FixedVar { idx: usize, val: f64 },
+    FixedVar {
+        idx: usize,
+        val: f64,
+    },
     /// Singleton Eq row `A[i,j]·x[j] = b[i]`; `row` lets postsolve recover `y[row]`.
-    SingletonRow { row: usize, col: usize, val: f64 },
+    SingletonRow {
+        row: usize,
+        col: usize,
+        val: f64,
+    },
     /// Singleton Le/Ge row `A[i,j]·x[j] ≤/≥ b[i]` absorbed into variable bounds.
     /// `ct` is Le or Ge for dual sign recovery.
     SingletonIneqToBound {
@@ -23,9 +30,14 @@ pub(crate) enum QpPostsolveStep {
         col: usize,
         ct: crate::problem::ConstraintType,
     },
-    EmptyCol { idx: usize, val: f64 },
+    EmptyCol {
+        idx: usize,
+        val: f64,
+    },
     /// Per-row scaling factor used to unscale the dual after large-coefficient rescaling.
-    LargeCoeffRowScale { row_scales: Vec<f64> },
+    LargeCoeffRowScale {
+        row_scales: Vec<f64>,
+    },
 }
 
 pub(crate) struct QpPostsolveStack {

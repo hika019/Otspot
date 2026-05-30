@@ -3,8 +3,8 @@
 use super::state::{LDL_FALLBACK_DELTA_MIN, LDL_REG_CEILING, LDL_REG_GROWTH, LDL_REG_RETRY_MAX};
 use crate::linalg::amd::amd_with_deadline;
 use crate::linalg::kkt_solver::{
-    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par,
-    KktConfig, KktError, KktFactor,
+    factorize_kkt_pre_permuted_cached_par, factorize_kkt_with_cached_perm_par, KktConfig, KktError,
+    KktFactor,
 };
 use crate::linalg::timeout::TimeoutCtx;
 use crate::qp::ipm_core::kkt::{build_schur_system, AugmentedKktCache, PermutedAugmentedKkt};
@@ -97,12 +97,17 @@ pub(super) fn factorize_kkt_with_retry(
         }
         let mat_for_factor = if ctx.use_schur {
             let (s_mat, d_inv) = build_schur_system(
-                &ctx.problem.q, ctx.a_ext, ctx.sigma_vec, rho_retry, delta_retry,
+                &ctx.problem.q,
+                ctx.a_ext,
+                ctx.sigma_vec,
+                rho_retry,
+                delta_retry,
             );
             d_inv_opt = Some(d_inv);
             s_mat
         } else {
-            ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_retry)
+            ctx.aug_cache
+                .materialize(ctx.sigma_vec, rho_retry, delta_retry)
         };
         if caches.amd_perm.is_none() {
             caches.amd_perm = Some(amd_with_deadline(
@@ -155,7 +160,13 @@ pub(super) fn factorize_kkt_with_retry(
                 // Iterative backend has no LDL precision concept, skip.
                 if !f.is_iterative()
                     && !probe_ldl_health(
-                        &f, &mat_for_factor, ctx.r_d_pmm, ctx.r_p_pmm, ctx.s, ctx.is_eq_ext, ctx.n,
+                        &f,
+                        &mat_for_factor,
+                        ctx.r_d_pmm,
+                        ctx.r_p_pmm,
+                        ctx.s,
+                        ctx.is_eq_ext,
+                        ctx.n,
                     )
                 {
                     retry_count += 1;
@@ -190,7 +201,9 @@ pub(super) fn factorize_kkt_with_retry(
     if fac_opt.is_none() {
         caches.amd_perm = None;
         let delta_fallback = LDL_FALLBACK_DELTA_MIN.max(rho_retry).max(delta_retry);
-        let aug_mat_fb = ctx.aug_cache.materialize(ctx.sigma_vec, rho_retry, delta_fallback);
+        let aug_mat_fb = ctx
+            .aug_cache
+            .materialize(ctx.sigma_vec, rho_retry, delta_fallback);
         let identity_perm: Vec<usize> = (0..aug_mat_fb.nrows).collect();
         let t_fb = std::time::Instant::now();
         let fb_result = factorize_kkt_with_cached_perm_par(
@@ -243,7 +256,11 @@ fn probe_ldl_health(
     probe_rhs[..n].copy_from_slice(r_d_pmm);
     // 予測子 RHS 下半分: 不等式行は r_p + s、等式行は r_p。
     for (i, slot) in probe_rhs[n..].iter_mut().enumerate() {
-        *slot = if is_eq_ext[i] { r_p_pmm[i] } else { r_p_pmm[i] + s[i] };
+        *slot = if is_eq_ext[i] {
+            r_p_pmm[i]
+        } else {
+            r_p_pmm[i] + s[i]
+        };
     }
     let rhs_inf = probe_rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if rhs_inf <= 0.0 || !rhs_inf.is_finite() {
@@ -268,7 +285,9 @@ fn probe_ldl_health(
     let mut resid_inf = 0.0_f64;
     for i in 0..probe_dim {
         let r = (probe_rhs[i] - kx[i]).abs();
-        if r > resid_inf { resid_inf = r; }
+        if r > resid_inf {
+            resid_inf = r;
+        }
     }
     let rel_resid = resid_inf / rhs_inf;
     let sol_inf = probe_sol.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -296,10 +315,20 @@ pub(super) fn auto_schur_enabled(
     let probe_rho = options.ipm.delta_min;
     let probe_aug = build_augmented_system(&problem.q, a_ext, &probe_sigma, probe_rho, probe_rho);
     let probe_perm = amd_with_deadline(
-        probe_aug.nrows, &probe_aug.col_ptr, &probe_aug.row_ind, timeout_ctx.deadline,
+        probe_aug.nrows,
+        &probe_aug.col_ptr,
+        &probe_aug.row_ind,
+        timeout_ctx.deadline,
     );
     let probe_result = crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-        &probe_aug, &probe_perm, timeout_ctx.deadline, Some(options.ipm.effective_max_l_nnz()), par,
+        &probe_aug,
+        &probe_perm,
+        timeout_ctx.deadline,
+        Some(options.ipm.effective_max_l_nnz()),
+        par,
     );
-    matches!(probe_result, Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }))
+    matches!(
+        probe_result,
+        Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. })
+    )
 }

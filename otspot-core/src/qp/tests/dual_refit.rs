@@ -22,7 +22,11 @@ fn test_refit_bound_duals_lb_only_active() {
         ..SolverResult::default()
     };
     refit_bound_duals_kkt(&problem, &mut result);
-    assert!((result.bound_duals[0] - 2.5).abs() < 1e-9, "got {}", result.bound_duals[0]);
+    assert!(
+        (result.bound_duals[0] - 2.5).abs() < 1e-9,
+        "got {}",
+        result.bound_duals[0]
+    );
 }
 
 /// REFIT-T2: ub 活性 + c<0 で y_ub = -c。
@@ -45,7 +49,11 @@ fn test_refit_bound_duals_ub_only_active() {
         ..SolverResult::default()
     };
     refit_bound_duals_kkt(&problem, &mut result);
-    assert!((result.bound_duals[0] - 3.0).abs() < 1e-9, "got {}", result.bound_duals[0]);
+    assert!(
+        (result.bound_duals[0] - 3.0).abs() < 1e-9,
+        "got {}",
+        result.bound_duals[0]
+    );
 }
 
 /// REFIT-T3: 内点では y_lb=y_ub=0 維持。
@@ -92,7 +100,11 @@ fn test_refit_bound_duals_kkt_guard_no_regression() {
         ..SolverResult::default()
     };
     refit_bound_duals_kkt(&problem, &mut result);
-    assert!((result.bound_duals[0] - 2.0).abs() < 1e-9, "got {}", result.bound_duals[0]);
+    assert!(
+        (result.bound_duals[0] - 2.0).abs() < 1e-9,
+        "got {}",
+        result.bound_duals[0]
+    );
 }
 
 /// REFIT-T5: 制約あり (A^T y 非ゼロ) で bound_dual 計算。

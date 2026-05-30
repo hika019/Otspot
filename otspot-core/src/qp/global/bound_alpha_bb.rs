@@ -134,11 +134,7 @@ mod tests {
     use crate::problem::ConstraintType;
     use crate::sparse::CscMatrix;
 
-    fn build_problem(
-        diag: &[f64],
-        c: &[f64],
-        bounds: Vec<(f64, f64)>,
-    ) -> QpProblem {
+    fn build_problem(diag: &[f64], c: &[f64], bounds: Vec<(f64, f64)>) -> QpProblem {
         let n = diag.len();
         let rows: Vec<usize> = (0..n).collect();
         let cols: Vec<usize> = (0..n).collect();
@@ -217,7 +213,10 @@ mod tests {
         // Same on lower corner
         let f_lo = eval_obj(&problem, &[-2.0]);
         let l_lo = eval_obj(&sub, &[-2.0]);
-        assert!((l_lo - f_lo).abs() < 1e-9, "L at lower corner: f={f_lo}, L={l_lo}");
+        assert!(
+            (l_lo - f_lo).abs() < 1e-9,
+            "L at lower corner: f={f_lo}, L={l_lo}"
+        );
     }
 
     #[test]
@@ -274,10 +273,10 @@ mod tests {
         let problem_wide = build_problem(&[-2.0], &[0.0], vec![(-2.0, 2.0)]);
         let alpha = gershgorin_alpha(&problem_wide.q);
         let opts = SolverOptions::default();
-        let lb_wide = alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None)
-            .expect("wide");
-        let lb_narrow = alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None)
-            .expect("narrow");
+        let lb_wide =
+            alpha_bb_lower_bound(&problem_wide, &[(-2.0, 2.0)], alpha, &opts, None).expect("wide");
+        let lb_narrow =
+            alpha_bb_lower_bound(&problem_wide, &[(0.0, 1.0)], alpha, &opts, None).expect("narrow");
         assert!(
             lb_narrow >= lb_wide - 1e-9,
             "narrow lb ({lb_narrow}) should not be worse than wide ({lb_wide})"
@@ -302,7 +301,9 @@ mod tests {
         let opts = SolverOptions::default();
         let lb = alpha_bb_lower_bound(&p, &p.bounds, alpha, &opts, None)
             .expect("constrained α-BB must solve");
-        assert!(lb.is_finite() && lb <= -1.0 + 1e-6,
-            "lb must be ≤ -1 (global) and finite, got {lb}");
+        assert!(
+            lb.is_finite() && lb <= -1.0 + 1e-6,
+            "lb must be ≤ -1 (global) and finite, got {lb}"
+        );
     }
 }

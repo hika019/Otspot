@@ -11,7 +11,7 @@ use otspot::io::qps::parse_qps;
 use otspot::options::{SimplexMethod, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus};
 use otspot::qp::solve_qp_with;
-use otspot::{solve_with, solve};
+use otspot::{solve, solve_with};
 use std::path::Path;
 use std::time::Instant;
 
@@ -46,26 +46,69 @@ fn max_violation_lp(x: &[f64], prob: &LpProblem) -> f64 {
 #[test]
 fn diag_capri_presolve_vs_no_presolve() {
     let mps_path = Path::new("tests/netlib/capri.mps");
-    assert!(mps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", mps_path.display());
+    assert!(
+        mps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        mps_path.display()
+    );
     let prob = parse_mps_file(mps_path).expect("parse capri.mps failed");
     println!("capri: n={}, m={}", prob.num_vars, prob.num_constraints);
 
     // constraint type 分布
-    let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
+    let n_eq = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Eq)
+        .count();
+    let n_le = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Le)
+        .count();
+    let n_ge = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Ge)
+        .count();
     println!("  constraints: Eq={}, Le={}, Ge={}", n_eq, n_le, n_ge);
 
     // bounds 分布
-    let n_fixed = prob.bounds.iter().filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12).count();
-    let n_finite_lb_nonzero = prob.bounds.iter().filter(|&&(lo, _)| lo.is_finite() && lo.abs() > 1e-12).count();
-    let n_finite_ub = prob.bounds.iter().filter(|&&(_, hi)| hi.is_finite()).count();
-    let n_fr = prob.bounds.iter().filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY).count();
-    println!("  bounds: fixed={}, finite_lb(nonzero)={}, finite_ub={}, free={}", n_fixed, n_finite_lb_nonzero, n_finite_ub, n_fr);
+    let n_fixed = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12)
+        .count();
+    let n_finite_lb_nonzero = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, _)| lo.is_finite() && lo.abs() > 1e-12)
+        .count();
+    let n_finite_ub = prob
+        .bounds
+        .iter()
+        .filter(|&&(_, hi)| hi.is_finite())
+        .count();
+    let n_fr = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY)
+        .count();
+    println!(
+        "  bounds: fixed={}, finite_lb(nonzero)={}, finite_ub={}, free={}",
+        n_fixed, n_finite_lb_nonzero, n_finite_ub, n_fr
+    );
 
     // lb の最大値
-    let max_lb = prob.bounds.iter().filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None }).fold(f64::NEG_INFINITY, f64::max);
-    let min_lb = prob.bounds.iter().filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None }).fold(f64::INFINITY, f64::min);
+    let max_lb = prob
+        .bounds
+        .iter()
+        .filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None })
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_lb = prob
+        .bounds
+        .iter()
+        .filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None })
+        .fold(f64::INFINITY, f64::min);
     println!("  lb range: [{:.4}, {:.4}]", min_lb, max_lb);
 
     // b の範囲
@@ -78,7 +121,12 @@ fn diag_capri_presolve_vs_no_presolve() {
     opts_off.presolve = false;
     let t0 = Instant::now();
     let result_off = solve_with(&prob, &opts_off);
-    println!("capri presolve=OFF: status={:?}, obj={:.6e}, time={:.3}s", result_off.status, result_off.objective, t0.elapsed().as_secs_f64());
+    println!(
+        "capri presolve=OFF: status={:?}, obj={:.6e}, time={:.3}s",
+        result_off.status,
+        result_off.objective,
+        t0.elapsed().as_secs_f64()
+    );
     if !result_off.solution.is_empty() {
         let viol = max_violation_lp(&result_off.solution, &prob);
         println!("  max_violation={:.2e}", viol);
@@ -89,7 +137,12 @@ fn diag_capri_presolve_vs_no_presolve() {
     opts_on.presolve = true;
     let t1 = Instant::now();
     let result_on = solve_with(&prob, &opts_on);
-    println!("capri presolve=ON:  status={:?}, obj={:.6e}, time={:.3}s", result_on.status, result_on.objective, t1.elapsed().as_secs_f64());
+    println!(
+        "capri presolve=ON:  status={:?}, obj={:.6e}, time={:.3}s",
+        result_on.status,
+        result_on.objective,
+        t1.elapsed().as_secs_f64()
+    );
     if !result_on.solution.is_empty() {
         let viol = max_violation_lp(&result_on.solution, &prob);
         println!("  max_violation={:.2e}", viol);
@@ -108,7 +161,11 @@ fn diag_capri_presolve_vs_no_presolve() {
 #[test]
 fn diag_forplan_presolve_vs_no_presolve() {
     let qps_path = Path::new("data/lp_problems/forplan.QPS");
-    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
+    assert!(
+        qps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qps_path.display()
+    );
     let prob_raw = parse_qps(qps_path).expect("parse forplan.QPS failed");
 
     // QpProblem から LpProblem を構築
@@ -119,23 +176,59 @@ fn diag_forplan_presolve_vs_no_presolve() {
         prob_raw.constraint_types.clone(),
         prob_raw.bounds.clone(),
         None,
-    ).expect("forplan LpProblem construction failed");
+    )
+    .expect("forplan LpProblem construction failed");
 
     println!("forplan: n={}, m={}", lp.num_vars, lp.num_constraints);
 
-    let n_eq = lp.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = lp.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = lp.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
+    let n_eq = lp
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Eq)
+        .count();
+    let n_le = lp
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Le)
+        .count();
+    let n_ge = lp
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Ge)
+        .count();
     println!("  constraints: Eq={}, Le={}, Ge={}", n_eq, n_le, n_ge);
 
-    let n_fixed = lp.bounds.iter().filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12).count();
-    let n_finite_lb_nonzero = lp.bounds.iter().filter(|&&(lo, _)| lo.is_finite() && lo.abs() > 1e-12).count();
+    let n_fixed = lp
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12)
+        .count();
+    let n_finite_lb_nonzero = lp
+        .bounds
+        .iter()
+        .filter(|&&(lo, _)| lo.is_finite() && lo.abs() > 1e-12)
+        .count();
     let n_finite_ub = lp.bounds.iter().filter(|&&(_, hi)| hi.is_finite()).count();
-    let n_fr = lp.bounds.iter().filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY).count();
-    println!("  bounds: fixed={}, finite_lb(nonzero)={}, finite_ub={}, free={}", n_fixed, n_finite_lb_nonzero, n_finite_ub, n_fr);
+    let n_fr = lp
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY)
+        .count();
+    println!(
+        "  bounds: fixed={}, finite_lb(nonzero)={}, finite_ub={}, free={}",
+        n_fixed, n_finite_lb_nonzero, n_finite_ub, n_fr
+    );
 
-    let max_lb = lp.bounds.iter().filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None }).fold(f64::NEG_INFINITY, f64::max);
-    let min_lb = lp.bounds.iter().filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None }).fold(f64::INFINITY, f64::min);
+    let max_lb = lp
+        .bounds
+        .iter()
+        .filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None })
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_lb = lp
+        .bounds
+        .iter()
+        .filter_map(|&(lo, _)| if lo.is_finite() { Some(lo) } else { None })
+        .fold(f64::INFINITY, f64::min);
     println!("  lb range: [{:.4}, {:.4}]", min_lb, max_lb);
 
     let max_b = lp.b.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -147,7 +240,12 @@ fn diag_forplan_presolve_vs_no_presolve() {
     opts_off.presolve = false;
     let t0 = Instant::now();
     let result_off = solve_with(&lp, &opts_off);
-    println!("forplan presolve=OFF: status={:?}, obj={:.6e}, time={:.3}s", result_off.status, result_off.objective, t0.elapsed().as_secs_f64());
+    println!(
+        "forplan presolve=OFF: status={:?}, obj={:.6e}, time={:.3}s",
+        result_off.status,
+        result_off.objective,
+        t0.elapsed().as_secs_f64()
+    );
     if !result_off.solution.is_empty() {
         let viol = max_violation_lp(&result_off.solution, &lp);
         println!("  max_violation={:.2e}", viol);
@@ -158,7 +256,12 @@ fn diag_forplan_presolve_vs_no_presolve() {
     opts_on.presolve = true;
     let t1 = Instant::now();
     let result_on = solve_with(&lp, &opts_on);
-    println!("forplan presolve=ON:  status={:?}, obj={:.6e}, time={:.3}s", result_on.status, result_on.objective, t1.elapsed().as_secs_f64());
+    println!(
+        "forplan presolve=ON:  status={:?}, obj={:.6e}, time={:.3}s",
+        result_on.status,
+        result_on.objective,
+        t1.elapsed().as_secs_f64()
+    );
     if !result_on.solution.is_empty() {
         let viol = max_violation_lp(&result_on.solution, &lp);
         println!("  max_violation={:.2e}", viol);
@@ -178,22 +281,49 @@ fn diag_forplan_presolve_vs_no_presolve() {
 #[test]
 fn diag_scsd8_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/scsd8.QPS");
-    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
+    assert!(
+        qps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qps_path.display()
+    );
     let prob = parse_qps(qps_path).expect("parse scsd8.QPS failed");
     println!("scsd8: n={}, m={}", prob.a.ncols(), prob.b.len());
 
-    let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
+    let n_eq = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Eq)
+        .count();
+    let n_le = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Le)
+        .count();
+    let n_ge = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Ge)
+        .count();
     println!("  constraints: Eq={}, Le={}, Ge={}", n_eq, n_le, n_ge);
 
     let max_b = prob.b.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min_b = prob.b.iter().cloned().fold(f64::INFINITY, f64::min);
     let n_b_nonzero = prob.b.iter().filter(|&&bi| bi.abs() > 1e-12).count();
-    println!("  b range: [{:.4e}, {:.4e}], b≠0 count={}", min_b, max_b, n_b_nonzero);
+    println!(
+        "  b range: [{:.4e}, {:.4e}], b≠0 count={}",
+        min_b, max_b, n_b_nonzero
+    );
 
-    let n_fixed = prob.bounds.iter().filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12).count();
-    let n_fr = prob.bounds.iter().filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY).count();
+    let n_fixed = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12)
+        .count();
+    let n_fr = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY)
+        .count();
     println!("  bounds: fixed={}, free={}", n_fixed, n_fr);
 
     // プリマル単体法で実行 (デフォルト)
@@ -202,14 +332,24 @@ fn diag_scsd8_simplex_behavior() {
     opts_primal.simplex_method = SimplexMethod::Primal;
     let t0 = Instant::now();
     let result_primal = solve_qp_with(&prob, &opts_primal);
-    println!("scsd8 Primal Simplex: status={:?}, obj={:.6e}, time={:.3}s", result_primal.status, result_primal.objective, t0.elapsed().as_secs_f64());
+    println!(
+        "scsd8 Primal Simplex: status={:?}, obj={:.6e}, time={:.3}s",
+        result_primal.status,
+        result_primal.objective,
+        t0.elapsed().as_secs_f64()
+    );
 
     // Default (Simplex → IPM fallback)
     let mut opts_default = SolverOptions::default();
     opts_default.timeout_secs = Some(30.0);
     let t1 = Instant::now();
     let result_default = solve_qp_with(&prob, &opts_default);
-    println!("scsd8 Default:        status={:?}, obj={:.6e}, time={:.3}s", result_default.status, result_default.objective, t1.elapsed().as_secs_f64());
+    println!(
+        "scsd8 Default:        status={:?}, obj={:.6e}, time={:.3}s",
+        result_default.status,
+        result_default.objective,
+        t1.elapsed().as_secs_f64()
+    );
 
     // feasibility 確認 (scsd8 は QpProblem なので LpProblem に変換)
     let lp = LpProblem::new_general(
@@ -219,7 +359,8 @@ fn diag_scsd8_simplex_behavior() {
         prob.constraint_types.clone(),
         prob.bounds.clone(),
         None,
-    ).expect("scsd8 LpProblem construction failed");
+    )
+    .expect("scsd8 LpProblem construction failed");
 
     if !result_default.solution.is_empty() {
         let viol = max_violation_lp(&result_default.solution, &lp);
@@ -239,32 +380,71 @@ fn diag_scsd8_simplex_behavior() {
 #[test]
 fn diag_wood1p_simplex_behavior() {
     let qps_path = Path::new("data/lp_problems/wood1p.QPS");
-    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
+    assert!(
+        qps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qps_path.display()
+    );
     let prob = parse_qps(qps_path).expect("parse wood1p.QPS failed");
     println!("wood1p: n={}, m={}", prob.a.ncols(), prob.b.len());
 
-    let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
+    let n_eq = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Eq)
+        .count();
+    let n_le = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Le)
+        .count();
+    let n_ge = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Ge)
+        .count();
     println!("  constraints: Eq={}, Le={}, Ge={}", n_eq, n_le, n_ge);
 
     // b の値の範囲 (Eq制約のbが0かを確認)
     let n_b_zero = prob.b.iter().filter(|&&bi| bi.abs() < 1e-12).count();
     let max_b = prob.b.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let min_b = prob.b.iter().cloned().fold(f64::INFINITY, f64::min);
-    println!("  b range: [{:.4e}, {:.4e}], b≈0 count={}", min_b, max_b, n_b_zero);
+    println!(
+        "  b range: [{:.4e}, {:.4e}], b≈0 count={}",
+        min_b, max_b, n_b_zero
+    );
 
-    let n_fixed = prob.bounds.iter().filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12).count();
-    let n_fr = prob.bounds.iter().filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY).count();
-    let n_default = prob.bounds.iter().filter(|&&(lo, hi)| lo == 0.0 && hi == f64::INFINITY).count();
-    println!("  bounds: fixed={}, free={}, default(0,∞)={}", n_fixed, n_fr, n_default);
+    let n_fixed = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| (lo - hi).abs() < 1e-12)
+        .count();
+    let n_fr = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| lo == f64::NEG_INFINITY && hi == f64::INFINITY)
+        .count();
+    let n_default = prob
+        .bounds
+        .iter()
+        .filter(|&&(lo, hi)| lo == 0.0 && hi == f64::INFINITY)
+        .count();
+    println!(
+        "  bounds: fixed={}, free={}, default(0,∞)={}",
+        n_fixed, n_fr, n_default
+    );
 
     // Default solve (Simplex → IPM fallback if SingularBasis)
     let mut opts_default = SolverOptions::default();
     opts_default.timeout_secs = Some(60.0);
     let t0 = Instant::now();
     let result_default = solve_qp_with(&prob, &opts_default);
-    println!("wood1p Default:       status={:?}, obj={:.6e}, time={:.3}s", result_default.status, result_default.objective, t0.elapsed().as_secs_f64());
+    println!(
+        "wood1p Default:       status={:?}, obj={:.6e}, time={:.3}s",
+        result_default.status,
+        result_default.objective,
+        t0.elapsed().as_secs_f64()
+    );
 
     // feasibility 確認
     let lp = LpProblem::new_general(
@@ -274,7 +454,8 @@ fn diag_wood1p_simplex_behavior() {
         prob.constraint_types.clone(),
         prob.bounds.clone(),
         None,
-    ).expect("wood1p LpProblem construction failed");
+    )
+    .expect("wood1p LpProblem construction failed");
 
     if !result_default.solution.is_empty() {
         let viol = max_violation_lp(&result_default.solution, &lp);
@@ -293,25 +474,49 @@ fn diag_wood1p_simplex_behavior() {
 #[test]
 fn diag_boeing1_current_state() {
     let mps_path = Path::new("tests/netlib/boeing1.mps");
-    assert!(mps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", mps_path.display());
+    assert!(
+        mps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        mps_path.display()
+    );
     let prob = parse_mps_file(mps_path).expect("parse boeing1.mps failed");
     println!("boeing1: n={}, m={}", prob.num_vars, prob.num_constraints);
 
-    let n_eq = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Eq).count();
-    let n_le = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Le).count();
-    let n_ge = prob.constraint_types.iter().filter(|&&ct| ct == ConstraintType::Ge).count();
+    let n_eq = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Eq)
+        .count();
+    let n_le = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Le)
+        .count();
+    let n_ge = prob
+        .constraint_types
+        .iter()
+        .filter(|&&ct| ct == ConstraintType::Ge)
+        .count();
     println!("  constraints: Eq={}, Le={}, Ge={}", n_eq, n_le, n_ge);
 
     let t0 = Instant::now();
     let result = solve(&prob);
-    println!("boeing1: status={:?}, obj={:.6e}, time={:.3}s", result.status, result.objective, t0.elapsed().as_secs_f64());
+    println!(
+        "boeing1: status={:?}, obj={:.6e}, time={:.3}s",
+        result.status,
+        result.objective,
+        t0.elapsed().as_secs_f64()
+    );
 
     let expected = -3.3521356751e+02;
     if !result.solution.is_empty() {
         let viol = max_violation_lp(&result.solution, &prob);
         println!("  max_violation={:.2e}", viol);
         if viol > 1e-4 {
-            println!("  INFEASIBLE SOLUTION! max_viol={:.2e} (expected < 1e-4)", viol);
+            println!(
+                "  INFEASIBLE SOLUTION! max_viol={:.2e} (expected < 1e-4)",
+                viol
+            );
         } else {
             println!("  solution is feasible");
         }
@@ -337,7 +542,11 @@ fn diag_bland_rule_coverage() {
     // デフォルト: Simplex が SingularBasis で失敗 → solve_as_lp が IPM fallback
     // Primal only: SingularBasis を返すはず
     let qps_path = Path::new("data/lp_problems/scsd8.QPS");
-    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
+    assert!(
+        qps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qps_path.display()
+    );
     let prob = parse_qps(qps_path).expect("parse scsd8.QPS failed");
 
     // Simplex のみ (IPM fallback を起こさないよう presolve=false, simplex only)
@@ -352,13 +561,18 @@ fn diag_bland_rule_coverage() {
     let t0 = Instant::now();
     let result = solve_qp_with(&prob, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("scsd8 Primal-only: status={:?}, obj={:.6e}, time={:.3}s", result.status, result.objective, elapsed);
+    println!(
+        "scsd8 Primal-only: status={:?}, obj={:.6e}, time={:.3}s",
+        result.status, result.objective, elapsed
+    );
 
     // SingularBasis が NumericalError として伝搬し、IPM fallback で Optimal になるはず
     // (solve_as_lp 内の fallback)
     match result.status {
         SolveStatus::Optimal => println!("  -> Optimal (via IPM fallback or simplex success)"),
-        SolveStatus::NumericalError => println!("  -> NumericalError (simplex failed, no IPM fallback triggered)"),
+        SolveStatus::NumericalError => {
+            println!("  -> NumericalError (simplex failed, no IPM fallback triggered)")
+        }
         _ => println!("  -> unexpected status: {:?}", result.status),
     }
 }
@@ -367,7 +581,11 @@ fn diag_bland_rule_coverage() {
 #[test]
 fn diag_modszk1_primal_baseline() {
     let qps_path = std::path::Path::new("data/lp_problems/modszk1.QPS");
-    assert!(qps_path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qps_path.display());
+    assert!(
+        qps_path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qps_path.display()
+    );
     let prob = otspot::io::qps::parse_qps(qps_path).expect("parse modszk1 failed");
     let known_obj = 3.21049143e2_f64;
     let mut opts = SolverOptions::default();
@@ -376,7 +594,10 @@ fn diag_modszk1_primal_baseline() {
     let t0 = std::time::Instant::now();
     let result = otspot::qp::solve_qp_with(&prob, &opts);
     let elapsed = t0.elapsed().as_secs_f64();
-    println!("modszk1 Primal (a8faac6 state): status={:?} obj={:.6e} t={:.2}s", result.status, result.objective, elapsed);
+    println!(
+        "modszk1 Primal (a8faac6 state): status={:?} obj={:.6e} t={:.2}s",
+        result.status, result.objective, elapsed
+    );
     if result.status == SolveStatus::Optimal {
         let rel_err = (result.objective - known_obj).abs() / known_obj.abs().max(1.0);
         println!("  rel_err={:.2e}", rel_err);

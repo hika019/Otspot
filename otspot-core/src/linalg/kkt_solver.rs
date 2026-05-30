@@ -93,11 +93,7 @@ pub trait KktSolver: Send {
     ///
     /// 直接法: AMD + symbolic + numeric を実行。
     /// 反復法: K の参照を更新し、必要なら前処理を再構築。
-    fn refactor(
-        &mut self,
-        k: &CscMatrix,
-        deadline: Option<Instant>,
-    ) -> Result<(), KktError>;
+    fn refactor(&mut self, k: &CscMatrix, deadline: Option<Instant>) -> Result<(), KktError>;
 
     /// 行列の次元 (= n + m for KKT 鞍点系)。
     fn dim(&self) -> usize;
@@ -115,11 +111,21 @@ pub struct DirectLdl {
 
 impl DirectLdl {
     pub fn new(n: usize) -> Self {
-        Self { factor: None, n, max_l_nnz: None, par: faer::Par::Seq }
+        Self {
+            factor: None,
+            n,
+            max_l_nnz: None,
+            par: faer::Par::Seq,
+        }
     }
 
     pub fn with_budget(n: usize, max_l_nnz: usize) -> Self {
-        Self { factor: None, n, max_l_nnz: Some(max_l_nnz), par: faer::Par::Seq }
+        Self {
+            factor: None,
+            n,
+            max_l_nnz: Some(max_l_nnz),
+            par: faer::Par::Seq,
+        }
     }
 
     /// per-call parallelism を指定する。
@@ -151,16 +157,15 @@ impl KktSolver for DirectLdl {
         Ok(())
     }
 
-    fn refactor(
-        &mut self,
-        k: &CscMatrix,
-        deadline: Option<Instant>,
-    ) -> Result<(), KktError> {
+    fn refactor(&mut self, k: &CscMatrix, deadline: Option<Instant>) -> Result<(), KktError> {
         if k.nrows != self.n || k.ncols != self.n {
             return Err(KktError::SingularOrIndefinite);
         }
         match crate::linalg::ldl::factorize_quasidefinite_with_amd_budget_par(
-            k, deadline, self.max_l_nnz, self.par,
+            k,
+            deadline,
+            self.max_l_nnz,
+            self.par,
         ) {
             Ok(f) => {
                 self.factor = Some(f);
@@ -207,7 +212,9 @@ const MIN_DIAG: f64 = 1e-12;
 pub enum PreconditionerKind {
     Jacobi,
     /// Block-diagonal preconditioner for a saddle-point K = [top × top; bottom × bottom].
-    BlockDiag { n_top: usize },
+    BlockDiag {
+        n_top: usize,
+    },
 }
 
 /// Tie the inexact-Newton forcing term η to the user-specified eps so the
@@ -237,7 +244,6 @@ const MINRES_DEFAULT_TOL: f64 = 1e-9;
 /// scales with problem size.
 const MINRES_MAX_ITER_MULTIPLIER: usize = 2;
 
-
 impl PreconditionedMinres {
     /// Tighten η between outer IPM iterations (Eisenstat-Walker forcing).
     pub fn set_inexact_tol(&mut self, tol: f64) {
@@ -248,7 +254,14 @@ impl PreconditionedMinres {
         let kind = PreconditionerKind::Jacobi;
         let m_inv_diag = compute_inv_diag(&k, kind);
         let n = k.nrows;
-        Self { k, m_inv_diag, kind, max_iter: MINRES_MAX_ITER_MULTIPLIER * n, tol: MINRES_DEFAULT_TOL, ir_steps: 0 }
+        Self {
+            k,
+            m_inv_diag,
+            kind,
+            max_iter: MINRES_MAX_ITER_MULTIPLIER * n,
+            tol: MINRES_DEFAULT_TOL,
+            ir_steps: 0,
+        }
     }
 
     /// Inexact-Newton variant of the block-diagonal saddle-point preconditioner.
@@ -282,7 +295,6 @@ impl PreconditionedMinres {
             ir_steps: ir,
         }
     }
-
 }
 
 fn compute_inv_diag(k: &CscMatrix, kind: PreconditionerKind) -> Vec<f64> {
@@ -355,7 +367,9 @@ impl KktSolver for PreconditionedMinres {
         sol: &mut [f64],
         deadline: Option<Instant>,
     ) -> Result<(), KktError> {
-        for s in sol.iter_mut() { *s = 0.0; }
+        for s in sol.iter_mut() {
+            *s = 0.0;
+        }
         let k = &self.k;
         let m_inv = &self.m_inv_diag;
         let n = k.nrows;
@@ -400,7 +414,9 @@ impl KktSolver for PreconditionedMinres {
                 if rhs_norm > 0.0 && r_norm <= 1e-14 * rhs_norm {
                     break;
                 }
-                for d in delta.iter_mut() { *d = 0.0; }
+                for d in delta.iter_mut() {
+                    *d = 0.0;
+                }
                 do_minres(&mut delta, &residual);
                 for i in 0..n {
                     sol[i] += delta[i];
@@ -417,11 +433,7 @@ impl KktSolver for PreconditionedMinres {
         }
     }
 
-    fn refactor(
-        &mut self,
-        k: &CscMatrix,
-        _deadline: Option<Instant>,
-    ) -> Result<(), KktError> {
+    fn refactor(&mut self, k: &CscMatrix, _deadline: Option<Instant>) -> Result<(), KktError> {
         if k.nrows != self.dim() || k.ncols != self.dim() {
             return Err(KktError::SingularOrIndefinite);
         }
@@ -509,7 +521,11 @@ pub fn factorize_kkt_with_cached_perm_par(
         // TwoFloat (~106-bit) LDL for ill-conditioned systems.
         // Run f64 symbolic factorisation first to honour the same memory budget.
         match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-            k, perm, deadline, Some(cfg.max_l_nnz), par,
+            k,
+            perm,
+            deadline,
+            Some(cfg.max_l_nnz),
+            par,
         ) {
             Ok(_) => {
                 match crate::linalg::ldl_dd::factorize_quasidefinite_with_cached_perm_dd(
@@ -540,19 +556,27 @@ pub fn factorize_kkt_with_cached_perm_par(
             }
         }
         let minres = match n_top {
-            Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir),
+            Some(n) if n <= k.nrows => {
+                PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir)
+            }
             _ => PreconditionedMinres::new_inexact(k.clone(), eta, ir),
         };
         return Ok(KktFactor::Iterative(minres));
     }
 
     match crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-        k, perm, deadline, Some(cfg.max_l_nnz), par,
+        k,
+        perm,
+        deadline,
+        Some(cfg.max_l_nnz),
+        par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
             let minres = match n_top {
-                Some(n) if n <= k.nrows => PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir),
+                Some(n) if n <= k.nrows => {
+                    PreconditionedMinres::with_block_diag_inexact(k.clone(), n, eta, ir)
+                }
                 _ => PreconditionedMinres::new_inexact(k.clone(), eta, ir),
             };
             Ok(KktFactor::Iterative(minres))
@@ -573,19 +597,24 @@ pub fn factorize_kkt_pre_permuted_cached_par(
     deadline: Option<Instant>,
     cfg: &KktConfig,
     n_top: Option<usize>,
-    cached_symbolic: Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>>,
+    cached_symbolic: Option<
+        std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
+    >,
     par: faer::Par,
 ) -> Result<KktFactor, KktError> {
     // The DD LDL path doesn't accept a pre-permuted matrix; fall back to the standard route.
     if cfg.dd_ldl {
-        return factorize_kkt_with_cached_perm_par(
-            unpermuted_k, perm, deadline, cfg, n_top, par,
-        );
+        return factorize_kkt_with_cached_perm_par(unpermuted_k, perm, deadline, cfg, n_top, par);
     }
     let eta = MINRES_INEXACT_NEWTON_ETA;
     let ir = cfg.minres_ir;
     match crate::linalg::ldl::factorize_quasidefinite_pre_permuted_cached_par(
-        pre_permuted_k, perm, deadline, Some(cfg.max_l_nnz), cached_symbolic, par,
+        pre_permuted_k,
+        perm,
+        deadline,
+        Some(cfg.max_l_nnz),
+        cached_symbolic,
+        par,
     ) {
         Ok(f) => Ok(KktFactor::Direct(f)),
         Err(crate::linalg::ldl::LdlError::WouldExceedBudget { .. }) => {
@@ -606,7 +635,9 @@ pub fn factorize_kkt_pre_permuted_cached_par(
 
 impl KktFactor {
     /// Shared SymbolicCholesky for the Direct backend (None for Iterative / DirectDd).
-    pub fn symbolic_arc(&self) -> Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> {
+    pub fn symbolic_arc(
+        &self,
+    ) -> Option<std::sync::Arc<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>> {
         match self {
             KktFactor::Direct(f) => Some(f.symbolic_arc()),
             _ => None,
@@ -637,7 +668,10 @@ impl AutoKktSolver {
     pub fn new(n: usize) -> Self {
         Self {
             n,
-            direct: Some(DirectLdl::with_budget(n, DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY)),
+            direct: Some(DirectLdl::with_budget(
+                n,
+                DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY,
+            )),
             iterative: None,
             last_used: None,
         }
@@ -679,11 +713,7 @@ impl KktSolver for AutoKktSolver {
         }
     }
 
-    fn refactor(
-        &mut self,
-        k: &CscMatrix,
-        deadline: Option<Instant>,
-    ) -> Result<(), KktError> {
+    fn refactor(&mut self, k: &CscMatrix, deadline: Option<Instant>) -> Result<(), KktError> {
         if k.nrows != self.n || k.ncols != self.n {
             return Err(KktError::SingularOrIndefinite);
         }
@@ -793,8 +823,10 @@ mod tests {
             &[0, 0, 1, 0, 1, 2, 3, 3, 4],
             &[0, 1, 1, 2, 2, 2, 3, 4, 4],
             &[1.0, 0.1, 1.0, 0.1, 0.1, 1.0, -1.0, 0.1, -1.0],
-            5, 5,
-        ).unwrap();
+            5,
+            5,
+        )
+        .unwrap();
         // budget = 1 entry のみ → 必ず超過
         let mut solver = DirectLdl::with_budget(5, 1);
         let result = solver.refactor(&k, None);
@@ -809,15 +841,20 @@ mod tests {
     #[test]
     fn directldl_without_budget_is_unconstrained() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let mut solver = DirectLdl::new(2);  // budget なし
-        solver.refactor(&k, None).expect("no-budget refactor should always succeed for valid K");
+        let mut solver = DirectLdl::new(2); // budget なし
+        solver
+            .refactor(&k, None)
+            .expect("no-budget refactor should always succeed for valid K");
     }
 
     /// memory_budget_bytes() は常に DEFAULT_MEMORY_BUDGET_BYTES を返す
     #[test]
     fn memory_budget_returns_static_default() {
         let budget = memory_budget_bytes();
-        assert_eq!(budget, DEFAULT_MEMORY_BUDGET_BYTES, "must equal 4 GiB default");
+        assert_eq!(
+            budget, DEFAULT_MEMORY_BUDGET_BYTES,
+            "must equal 4 GiB default"
+        );
     }
 
     /// max_l_nnz_from_budget は budget をバイト→entry 数に変換する
@@ -832,9 +869,19 @@ mod tests {
     fn ipm_opts_kkt_budget_controls_max_l_nnz() {
         use crate::options::IpmOptions;
         let opts_default = IpmOptions::default();
-        assert_eq!(opts_default.effective_max_l_nnz(), DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
-        let opts_small = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
-        assert_eq!(opts_small.effective_max_l_nnz(), 100, "1600 / 16 = 100 entries");
+        assert_eq!(
+            opts_default.effective_max_l_nnz(),
+            DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY
+        );
+        let opts_small = IpmOptions {
+            kkt_memory_budget_bytes: Some(1600),
+            ..Default::default()
+        };
+        assert_eq!(
+            opts_small.effective_max_l_nnz(),
+            100,
+            "1600 / 16 = 100 entries"
+        );
     }
 
     /// trait object として `Box<dyn KktSolver>` 経由で動くこと
@@ -842,11 +889,12 @@ mod tests {
     #[test]
     fn kkt_solver_works_as_trait_object() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
-        let solver: Box<dyn KktSolver> = Box::new(
-            DirectLdl::from_matrix(&k, None).expect("factorize"),
-        );
+        let solver: Box<dyn KktSolver> =
+            Box::new(DirectLdl::from_matrix(&k, None).expect("factorize"));
         let mut sol = vec![0.0; 2];
-        solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
+        solver
+            .solve(&[3.0, 0.0], &mut sol, None)
+            .expect("solve via trait");
         assert!((sol[0] - 1.0).abs() < 1e-10);
         assert!((sol[1] - 1.0).abs() < 1e-10);
     }
@@ -857,7 +905,9 @@ mod tests {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let solver = PreconditionedMinres::new(k);
         let mut sol = vec![0.0; 2];
-        solver.solve(&[3.0, 0.0], &mut sol, None).expect("MINRES solve");
+        solver
+            .solve(&[3.0, 0.0], &mut sol, None)
+            .expect("MINRES solve");
         assert!((sol[0] - 1.0).abs() < 1e-7);
         assert!((sol[1] - 1.0).abs() < 1e-7);
         assert_eq!(solver.dim(), 2);
@@ -867,9 +917,15 @@ mod tests {
     #[test]
     fn minres_kkt_5x5_matches_direct_ldl() {
         let entries = [
-            (0, 0, 4.0), (0, 1, 0.5), (1, 1, 4.0), (1, 2, 0.5), (2, 2, 4.0),
+            (0, 0, 4.0),
+            (0, 1, 0.5),
+            (1, 1, 4.0),
+            (1, 2, 0.5),
+            (2, 2, 4.0),
             (0, 3, 0.3),
-            (3, 3, -2.0), (3, 4, 0.4), (4, 4, -2.0),
+            (3, 3, -2.0),
+            (3, 4, 0.4),
+            (4, 4, -2.0),
         ];
         let rows: Vec<usize> = entries.iter().map(|(r, _, _)| *r).collect();
         let cols: Vec<usize> = entries.iter().map(|(_, c, _)| *c).collect();
@@ -883,12 +939,17 @@ mod tests {
 
         let mut x_minres = vec![0.0; 5];
         let minres_solver = PreconditionedMinres::new(k);
-        minres_solver.solve(&b, &mut x_minres, None).expect("MINRES solve");
+        minres_solver
+            .solve(&b, &mut x_minres, None)
+            .expect("MINRES solve");
 
         for i in 0..5 {
             assert!(
                 (x_ldl[i] - x_minres[i]).abs() < 1e-6,
-                "x[{}]: LDL={}, MINRES={}", i, x_ldl[i], x_minres[i]
+                "x[{}]: LDL={}, MINRES={}",
+                i,
+                x_ldl[i],
+                x_minres[i]
             );
         }
     }
@@ -921,7 +982,8 @@ mod tests {
         let result = solver.solve(&[1.0, 1.0], &mut sol, Some(past));
         assert!(
             matches!(result, Err(KktError::DeadlineExceeded)),
-            "past deadline should yield DeadlineExceeded, got {:?}", result.err()
+            "past deadline should yield DeadlineExceeded, got {:?}",
+            result.err()
         );
     }
 
@@ -931,7 +993,9 @@ mod tests {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let solver: Box<dyn KktSolver> = Box::new(PreconditionedMinres::new(k));
         let mut sol = vec![0.0; 2];
-        solver.solve(&[3.0, 0.0], &mut sol, None).expect("solve via trait");
+        solver
+            .solve(&[3.0, 0.0], &mut sol, None)
+            .expect("solve via trait");
         assert!((sol[0] - 1.0).abs() < 1e-7);
         assert!((sol[1] - 1.0).abs() < 1e-7);
     }
@@ -958,8 +1022,10 @@ mod tests {
             &[0, 0, 1, 1, 2, 2, 3, 3, 4],
             &[0, 1, 1, 2, 2, 3, 3, 4, 4],
             &[4.0, 0.5, 4.0, 0.5, 4.0, 0.3, -2.0, 0.4, -2.0],
-            5, 5,
-        ).unwrap();
+            5,
+            5,
+        )
+        .unwrap();
         // budget 1 entry → 必ず超過 → iterative にフォールバック
         let mut solver = AutoKktSolver::with_budget(5, 1);
         solver.refactor(&k, None).expect("refactor (iterative)");
@@ -975,7 +1041,11 @@ mod tests {
         for i in 0..5 {
             assert!(
                 (sol[i] - sol_ldl[i]).abs() < 1e-6,
-                "auto[{}]={} vs ldl[{}]={}", i, sol[i], i, sol_ldl[i]
+                "auto[{}]={} vs ldl[{}]={}",
+                i,
+                sol[i],
+                i,
+                sol_ldl[i]
             );
         }
     }
@@ -985,12 +1055,15 @@ mod tests {
     fn auto_remembers_iterative_after_first_overflow() {
         let k1 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, -1.0], 2, 2).unwrap();
         let k2 = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[4.0, -2.0], 2, 2).unwrap();
-        let mut solver = AutoKktSolver::with_budget(2, 1);  // 必ず超過
+        let mut solver = AutoKktSolver::with_budget(2, 1); // 必ず超過
         solver.refactor(&k1, None).unwrap();
         assert_eq!(solver.last_backend(), Some(KktBackend::Iterative));
         solver.refactor(&k2, None).unwrap();
-        assert_eq!(solver.last_backend(), Some(KktBackend::Iterative),
-            "should stay iterative after first overflow");
+        assert_eq!(
+            solver.last_backend(),
+            Some(KktBackend::Iterative),
+            "should stay iterative after first overflow"
+        );
     }
 
     /// factorize_kkt_with_cached_perm_par: budget 十分なら Direct を返す
@@ -998,9 +1071,13 @@ mod tests {
     fn factorize_kkt_chooses_direct_when_budget_sufficient() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
-        let cfg = KktConfig { max_l_nnz: 1000, ..Default::default() };
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
-            .expect("factor should succeed");
+        let cfg = KktConfig {
+            max_l_nnz: 1000,
+            ..Default::default()
+        };
+        let factor =
+            factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+                .expect("factor should succeed");
         assert!(matches!(factor, KktFactor::Direct(_)));
         assert!(!factor.is_iterative());
 
@@ -1014,13 +1091,21 @@ mod tests {
     #[test]
     fn factorize_kkt_chooses_iterative_when_budget_exceeded() {
         let k = CscMatrix::from_triplets(
-            &[0, 0, 1, 1, 2], &[0, 1, 1, 2, 2],
-            &[4.0, 0.5, 4.0, 0.5, -2.0], 3, 3
-        ).unwrap();
+            &[0, 0, 1, 1, 2],
+            &[0, 1, 1, 2, 2],
+            &[4.0, 0.5, 4.0, 0.5, -2.0],
+            3,
+            3,
+        )
+        .unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(3, &k.col_ptr, &k.row_ind, None);
-        let cfg = KktConfig { max_l_nnz: 1, ..Default::default() };
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
-            .expect("factor should succeed (fallback)");
+        let cfg = KktConfig {
+            max_l_nnz: 1,
+            ..Default::default()
+        };
+        let factor =
+            factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+                .expect("factor should succeed (fallback)");
         assert!(matches!(factor, KktFactor::Iterative(_)));
         assert!(factor.is_iterative());
 
@@ -1037,7 +1122,12 @@ mod tests {
         for i in 0..3 {
             assert!(
                 (sol[i] - sol_ldl[i]).abs() < tol.max(1e-6),
-                "MINRES[{}]={} vs LDL[{}]={} (tol={})", i, sol[i], i, sol_ldl[i], tol
+                "MINRES[{}]={} vs LDL[{}]={} (tol={})",
+                i,
+                sol[i],
+                i,
+                sol_ldl[i],
+                tol
             );
         }
     }
@@ -1060,7 +1150,8 @@ mod tests {
         // Upper triangle of K = [diag(Q+ρ),  A^T;  A, -diag(σ+δ)]
         // Q diag values vary (ill-cond):
         for i in 0..n {
-            rows.push(i); cols.push(i);
+            rows.push(i);
+            cols.push(i);
             vals.push(1.0 + 1e-3 * (i as f64).sqrt());
         }
         // A^T entries (col = n..n+m, row < n)
@@ -1068,13 +1159,17 @@ mod tests {
             for j in 0..n {
                 let v = ((k * 7 + j * 13) % 17) as f64 / 17.0 - 0.5;
                 if v.abs() > 0.1 {
-                    rows.push(j); cols.push(n + k); vals.push(v);
+                    rows.push(j);
+                    cols.push(n + k);
+                    vals.push(v);
                 }
             }
         }
         // -S diag
         for i in 0..m {
-            rows.push(n + i); cols.push(n + i); vals.push(-1e-6 * (1.0 + i as f64));
+            rows.push(n + i);
+            cols.push(n + i);
+            vals.push(-1e-6 * (1.0 + i as f64));
         }
         let k = CscMatrix::from_triplets(&rows, &cols, &vals, dim, dim).unwrap();
 
@@ -1151,10 +1246,18 @@ mod tests {
     fn factorize_kkt_dd_ldl_true_returns_direct_dd() {
         let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
-        let cfg = KktConfig { dd_ldl: true, max_l_nnz: 1_000_000, ..Default::default() };
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
-            .expect("DD-LDL factor should succeed");
-        assert!(matches!(factor, KktFactor::DirectDd(_)), "expected DirectDd with dd_ldl=true");
+        let cfg = KktConfig {
+            dd_ldl: true,
+            max_l_nnz: 1_000_000,
+            ..Default::default()
+        };
+        let factor =
+            factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+                .expect("DD-LDL factor should succeed");
+        assert!(
+            matches!(factor, KktFactor::DirectDd(_)),
+            "expected DirectDd with dd_ldl=true"
+        );
         let mut sol = vec![0.0; 2];
         factor.solve(&[3.0, 0.0], &mut sol);
         assert!((sol[0] - 1.0).abs() < 1e-9, "sol[0]={}", sol[0]);
@@ -1168,9 +1271,13 @@ mod tests {
         let perm = crate::linalg::amd::amd_with_deadline(2, &k.col_ptr, &k.row_ind, None);
         let cfg = KktConfig::default();
         assert!(!cfg.dd_ldl);
-        let factor = factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
-            .expect("f64 LDL factor should succeed");
-        assert!(matches!(factor, KktFactor::Direct(_)), "expected Direct with dd_ldl=false");
+        let factor =
+            factorize_kkt_with_cached_perm_par(&k, &perm, None, &cfg, None, faer::Par::Seq)
+                .expect("f64 LDL factor should succeed");
+        assert!(
+            matches!(factor, KktFactor::Direct(_)),
+            "expected Direct with dd_ldl=false"
+        );
     }
 
     /// Sentinel (P2-A): KktFactor::Iterative::solve_with_deadline propagates Err on MINRES failure.
@@ -1181,9 +1288,7 @@ mod tests {
     /// makes this assert fail because the function always returns Ok(()) regardless of MINRES outcome.
     #[test]
     fn minres_kkt_factor_solve_with_deadline_err_propagates() {
-        let k = CscMatrix::from_triplets(
-            &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2,
-        ).unwrap();
+        let k = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, -1.0], 2, 2).unwrap();
         let factor = KktFactor::Iterative(PreconditionedMinres::new(k));
         let rhs = vec![1.0, 0.0];
         let mut sol = vec![0.0; 2];

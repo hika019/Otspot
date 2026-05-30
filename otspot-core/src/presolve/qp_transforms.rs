@@ -27,5 +27,5 @@ mod tests;
 mod tests_per_step;
 
 pub use driver::run_qp_presolve_phase1;
-pub use state::{QpPresolveResult, QpPresolveStatus};
 pub(crate) use state::QpPostsolveStep;
+pub use state::{QpPresolveResult, QpPresolveStatus};

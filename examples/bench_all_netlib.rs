@@ -1,23 +1,26 @@
-use std::time::Instant;
-use std::path::Path;
 use otspot::problem::SolveStatus;
+use std::path::Path;
+use std::time::Instant;
 
 fn main() {
     let problems = vec![
-        ("afiro",    "tests/netlib/afiro.mps"),
-        ("blend",    "tests/netlib/blend.mps"),
-        ("kb2",      "tests/netlib/kb2.mps"),
+        ("afiro", "tests/netlib/afiro.mps"),
+        ("blend", "tests/netlib/blend.mps"),
+        ("kb2", "tests/netlib/kb2.mps"),
         ("adlittle", "tests/netlib/adlittle.mps"),
-        ("share2b",  "tests/netlib/share2b.mps"),
-        ("share1b",  "tests/netlib/share1b.mps"),
+        ("share2b", "tests/netlib/share2b.mps"),
+        ("share1b", "tests/netlib/share1b.mps"),
         ("stocfor1", "tests/netlib/stocfor1.mps"),
-        ("brandy",   "tests/netlib/brandy.mps"),
+        ("brandy", "tests/netlib/brandy.mps"),
         ("scorpion", "tests/netlib/scorpion.mps"),
-        ("boeing2",  "tests/netlib/boeing2.mps"),
-        ("fit1d",    "tests/netlib/fit1d.mps"),
+        ("boeing2", "tests/netlib/boeing2.mps"),
+        ("fit1d", "tests/netlib/fit1d.mps"),
     ];
 
-    println!("{:<12} {:>6} {:>6} {:>12} Status", "Problem", "Rows", "Cols", "Time");
+    println!(
+        "{:<12} {:>6} {:>6} {:>12} Status",
+        "Problem", "Rows", "Cols", "Time"
+    );
     println!("{}", "-".repeat(65));
 
     for (name, path) in &problems {
@@ -53,6 +56,9 @@ fn main() {
             format!("{:.1}µs", elapsed.as_secs_f64() * 1_000_000.0)
         };
 
-        println!("{:<12} {:>6} {:>6} {:>12} {}", name, rows, cols, time_str, status);
+        println!(
+            "{:<12} {:>6} {:>6} {:>12} {}",
+            name, rows, cols, time_str, status
+        );
     }
 }

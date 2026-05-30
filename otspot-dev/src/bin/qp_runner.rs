@@ -22,9 +22,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use std::io::{self, BufRead};
-use otspot_core::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
 use otspot_core::sparse::CscMatrix;
+use otspot_core::{solve_qp_with, QpProblem, SolveStatus, SolverOptions};
+use std::io::{self, BufRead};
 
 const INF_THRESHOLD: f64 = 1e200;
 
@@ -32,9 +32,13 @@ fn parse_floats(s: &str) -> Vec<f64> {
     s.split_whitespace()
         .map(|t| {
             let v: f64 = t.parse().unwrap_or(0.0);
-            if v > INF_THRESHOLD { f64::INFINITY }
-            else if v < -INF_THRESHOLD { f64::NEG_INFINITY }
-            else { v }
+            if v > INF_THRESHOLD {
+                f64::INFINITY
+            } else if v < -INF_THRESHOLD {
+                f64::NEG_INFINITY
+            } else {
+                v
+            }
         })
         .collect()
 }
@@ -71,7 +75,7 @@ fn main() {
                     return;
                 }
             }
-        }
+        };
     }
 
     // Line 1: n m_ub
@@ -87,17 +91,26 @@ fn main() {
     // Line 2: c
     let c_line = next_line!();
     let c = parse_floats(&c_line);
-    if c.len() != n { println!("Error 0.0 0"); return; }
+    if c.len() != n {
+        println!("Error 0.0 0");
+        return;
+    }
 
     // Line 3: lb
     let lb_line = next_line!();
     let lb = parse_floats(&lb_line);
-    if lb.len() != n { println!("Error 0.0 0"); return; }
+    if lb.len() != n {
+        println!("Error 0.0 0");
+        return;
+    }
 
     // Line 4: ub
     let ub_line = next_line!();
     let ub = parse_floats(&ub_line);
-    if ub.len() != n { println!("Error 0.0 0"); return; }
+    if ub.len() != n {
+        println!("Error 0.0 0");
+        return;
+    }
 
     let bounds: Vec<(f64, f64)> = lb.iter().zip(ub.iter()).map(|(&l, &u)| (l, u)).collect();
 
@@ -112,7 +125,10 @@ fn main() {
     for _ in 0..nnz_q {
         let entry = next_line!();
         let parts: Vec<&str> = entry.split_whitespace().collect();
-        if parts.len() < 3 { println!("Error 0.0 0"); return; }
+        if parts.len() < 3 {
+            println!("Error 0.0 0");
+            return;
+        }
         let r: usize = parts[0].parse().unwrap_or(0);
         let c_idx: usize = parts[1].parse().unwrap_or(0);
         let v: f64 = parts[2].parse().unwrap_or(0.0);
@@ -145,7 +161,10 @@ fn main() {
     for _ in 0..nnz_a {
         let entry = next_line!();
         let parts: Vec<&str> = entry.split_whitespace().collect();
-        if parts.len() < 3 { println!("Error 0.0 0"); return; }
+        if parts.len() < 3 {
+            println!("Error 0.0 0");
+            return;
+        }
         let r: usize = parts[0].parse().unwrap_or(0);
         let c_idx: usize = parts[1].parse().unwrap_or(0);
         let v: f64 = parts[2].parse().unwrap_or(0.0);
@@ -157,7 +176,10 @@ fn main() {
     let a = if m_ub > 0 {
         match CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_ub, n) {
             Ok(m) => m,
-            Err(_) => { println!("Error 0.0 0"); return; }
+            Err(_) => {
+                println!("Error 0.0 0");
+                return;
+            }
         }
     } else {
         CscMatrix::new(0, n)
@@ -167,7 +189,10 @@ fn main() {
     let b = if m_ub > 0 {
         let b_line = next_line!();
         let b_vals = parse_floats(&b_line);
-        if b_vals.len() != m_ub { println!("Error 0.0 0"); return; }
+        if b_vals.len() != m_ub {
+            println!("Error 0.0 0");
+            return;
+        }
         b_vals
     } else {
         vec![]
@@ -176,7 +201,10 @@ fn main() {
     // Build and solve
     let problem = match QpProblem::new_all_le(q, c, a, b, bounds) {
         Ok(p) => p,
-        Err(_) => { println!("Error 0.0 0"); return; }
+        Err(_) => {
+            println!("Error 0.0 0");
+            return;
+        }
     };
 
     let mut options = SolverOptions::default();
@@ -194,5 +222,8 @@ fn main() {
         _ => "Unknown",
     };
 
-    println!("{} {:.10e} {}", status_str, result.objective, result.iterations);
+    println!(
+        "{} {:.10e} {}",
+        status_str, result.objective, result.iterations
+    );
 }

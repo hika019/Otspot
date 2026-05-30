@@ -101,9 +101,7 @@ pub(crate) fn quad_to_csc(
     for (&(va, vb), &c) in terms {
         let (i, j) = (va.index, vb.index);
         if !c.is_finite() {
-            return Err(format!(
-                "non-finite quad coefficient at ({i}, {j}): {c}"
-            ));
+            return Err(format!("non-finite quad coefficient at ({i}, {j}): {c}"));
         }
         if i >= n || j >= n {
             return Err(format!(
@@ -126,8 +124,7 @@ pub(crate) fn quad_to_csc(
         }
     }
 
-    CscMatrix::from_triplets(&rows, &cols, &vals, n, n)
-        .map_err(|e| e.to_string())
+    CscMatrix::from_triplets(&rows, &cols, &vals, n, n).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -147,25 +144,37 @@ impl Variable {
 
 impl From<Variable> for QuadExpr {
     fn from(v: Variable) -> Self {
-        QuadExpr { quad: HashMap::new(), linear: Expression::from(v) }
+        QuadExpr {
+            quad: HashMap::new(),
+            linear: Expression::from(v),
+        }
     }
 }
 
 impl From<Expression> for QuadExpr {
     fn from(e: Expression) -> Self {
-        QuadExpr { quad: HashMap::new(), linear: e }
+        QuadExpr {
+            quad: HashMap::new(),
+            linear: e,
+        }
     }
 }
 
 impl From<f64> for QuadExpr {
     fn from(c: f64) -> Self {
-        QuadExpr { quad: HashMap::new(), linear: Expression::from(c) }
+        QuadExpr {
+            quad: HashMap::new(),
+            linear: Expression::from(c),
+        }
     }
 }
 
 impl From<i32> for QuadExpr {
     fn from(c: i32) -> Self {
-        QuadExpr { quad: HashMap::new(), linear: Expression::from(c) }
+        QuadExpr {
+            quad: HashMap::new(),
+            linear: Expression::from(c),
+        }
     }
 }
 
@@ -178,7 +187,10 @@ impl Mul<Variable> for Variable {
     fn mul(self, rhs: Variable) -> QuadExpr {
         let mut quad = HashMap::new();
         insert_quad_term(&mut quad, canon(self, rhs), 1.0);
-        QuadExpr { quad, linear: Expression::default() }
+        QuadExpr {
+            quad,
+            linear: Expression::default(),
+        }
     }
 }
 
@@ -414,7 +426,11 @@ mod tests {
         terms.insert(canon(x, y), 5.0);
         let q = quad_to_csc(&terms, 2).unwrap();
         assert_eq!(q_entry(&q, 0, 1), 5.0, "cross: Q[0][1] must equal c");
-        assert_eq!(q_entry(&q, 1, 0), 5.0, "cross: Q[1][0] must equal c (symmetry)");
+        assert_eq!(
+            q_entry(&q, 1, 0),
+            5.0,
+            "cross: Q[1][0] must equal c (symmetry)"
+        );
     }
 
     /// Sentinel: verify that `quad_to_csc` fills both Q[i][j] and Q[j][i].
@@ -435,18 +451,30 @@ mod tests {
         let correct = quad_to_csc(&terms, 2).unwrap();
 
         // Both sides must be present and equal (symmetric fill):
-        assert_eq!(q_entry(&correct, 0, 1), 5.0, "sentinel: Q[0][1] must be 5.0");
+        assert_eq!(
+            q_entry(&correct, 0, 1),
+            5.0,
+            "sentinel: Q[0][1] must be 5.0"
+        );
         assert_eq!(
             q_entry(&correct, 1, 0),
             5.0,
             "sentinel: Q[1][0] must be 5.0 — missing this entry is the classic bug"
         );
         // nnz = 2: one entry per triangle
-        assert_eq!(correct.nnz(), 2, "sentinel: cross term must emit exactly 2 triplets");
+        assert_eq!(
+            correct.nnz(),
+            2,
+            "sentinel: cross term must emit exactly 2 triplets"
+        );
 
         // No-op proof: a broken upper-triangle-only matrix has Q[1][0] == 0.
         let broken = CscMatrix::from_triplets(&[0], &[1], &[5.0], 2, 2).unwrap();
-        assert_eq!(broken.nnz(), 1, "broken: only 1 triplet (missing lower side)");
+        assert_eq!(
+            broken.nnz(),
+            1,
+            "broken: only 1 triplet (missing lower side)"
+        );
         assert_eq!(
             q_entry(&broken, 1, 0),
             0.0,
@@ -494,7 +522,10 @@ mod tests {
         let q = 3.0 * (x * x);
         assert_eq!(q.quad.len(), 1);
         let c: f64 = q.quad.values().copied().sum();
-        assert!((c - 3.0).abs() < 1e-12, "scalar mul: coefficient should be 3.0, got {c}");
+        assert!(
+            (c - 3.0).abs() < 1e-12,
+            "scalar mul: coefficient should be 3.0, got {c}"
+        );
     }
 
     #[test]
@@ -508,7 +539,10 @@ mod tests {
         assert!(!q.is_linear());
         // Extract coefficient for the x-y pair
         let c: f64 = q.quad.values().copied().sum();
-        assert!((c - 2.0).abs() < 1e-12, "expr*var: coefficient should be 2.0, got {c}");
+        assert!(
+            (c - 2.0).abs() < 1e-12,
+            "expr*var: coefficient should be 2.0, got {c}"
+        );
     }
 
     #[test]
@@ -527,7 +561,10 @@ mod tests {
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let q = -(x * x);
         let c: f64 = q.quad.values().copied().sum();
-        assert!((c + 1.0).abs() < 1e-12, "neg: coefficient should be -1.0, got {c}");
+        assert!(
+            (c + 1.0).abs() < 1e-12,
+            "neg: coefficient should be -1.0, got {c}"
+        );
     }
 
     #[test]
@@ -542,7 +579,10 @@ mod tests {
         assert_eq!(q.quad.len(), 2);
         // Linear part should have y with coefficient 1.0
         let lin_y = q.linear.coefficient(y);
-        assert!((lin_y - 1.0).abs() < 1e-12, "linear y coeff should be 1.0, got {lin_y}");
+        assert!(
+            (lin_y - 1.0).abs() < 1e-12,
+            "linear y coeff should be 1.0, got {lin_y}"
+        );
     }
 
     // --- Model solve tests (through Model API) ---
@@ -665,7 +705,11 @@ mod tests {
         let tol = 1e-3;
         assert!((r[x] - 1.5).abs() < tol, "DSL x={} expected 1.5", r[x]);
         assert!((r[y] - 1.5).abs() < tol, "DSL y={} expected 1.5", r[y]);
-        assert!((r.objective_value - 4.5).abs() < tol, "DSL obj={} expected 4.5", r.objective_value);
+        assert!(
+            (r.objective_value - 4.5).abs() < tol,
+            "DSL obj={} expected 4.5",
+            r.objective_value
+        );
     }
 
     #[test]
@@ -685,7 +729,7 @@ mod tests {
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let y = model.add_var("y", 0.0, 10.0);
         model.add_constraint((x + y).geq(3.0));
-        model.minimize(2.0 * x + y);  // Expression into QuadExpr (no quad terms)
+        model.minimize(2.0 * x + y); // Expression into QuadExpr (no quad terms)
         let result = model.solve().unwrap();
         assert_close(result[x], 0.0, "linear via QuadExpr: x*");
         assert_close(result[y], 3.0, "linear via QuadExpr: y*");
@@ -700,7 +744,10 @@ mod tests {
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let y = model.add_var("y", 0.0, f64::INFINITY);
         let q = x * y - x * y;
-        assert!(q.is_linear(), "x*y - x*y should cancel to is_linear() == true");
+        assert!(
+            q.is_linear(),
+            "x*y - x*y should cancel to is_linear() == true"
+        );
     }
 
     #[test]
@@ -709,7 +756,10 @@ mod tests {
         let mut model = Model::new("m");
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let q = 0.0 * (x * x);
-        assert!(q.is_linear(), "0.0 * x*x should prune to is_linear() == true");
+        assert!(
+            q.is_linear(),
+            "0.0 * x*x should prune to is_linear() == true"
+        );
     }
 
     #[test]
@@ -719,10 +769,13 @@ mod tests {
         let mut model = Model::new("cancel_route");
         let x = model.add_var("x", 2.0, 2.0);
         let y = model.add_var("y", 3.0, 3.0);
-        model.minimize(x * y - x * y + 1.0);  // = 1.0 (constant only, LP path)
+        model.minimize(x * y - x * y + 1.0); // = 1.0 (constant only, LP path)
         let result = model.solve().unwrap();
-        assert!((result.objective_value - 1.0).abs() < TOL,
-            "cancelled quad routes to LP: obj should be 1.0, got {}", result.objective_value);
+        assert!(
+            (result.objective_value - 1.0).abs() < TOL,
+            "cancelled quad routes to LP: obj should be 1.0, got {}",
+            result.objective_value
+        );
     }
 
     // --- P3.3: coverage gap — NaN 係数 / indefinite QP ---
@@ -777,7 +830,11 @@ mod tests {
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let y = model.add_var("y", 0.0, f64::INFINITY);
         let q = (x - x) * y;
-        assert!(q.is_linear(), "(x-x)*y must be is_linear(); quad.len()={}", q.quad.len());
+        assert!(
+            q.is_linear(),
+            "(x-x)*y must be is_linear(); quad.len()={}",
+            q.quad.len()
+        );
     }
 
     // `(x + x - 2*x) * y` — three-way cancellation.
@@ -787,7 +844,11 @@ mod tests {
         let x = model.add_var("x", 0.0, f64::INFINITY);
         let y = model.add_var("y", 0.0, f64::INFINITY);
         let q = (x + x + ((-2.0) * x)) * y;
-        assert!(q.is_linear(), "(x+x-2x)*y must be is_linear(); quad.len()={}", q.quad.len());
+        assert!(
+            q.is_linear(),
+            "(x+x-2x)*y must be is_linear(); quad.len()={}",
+            q.quad.len()
+        );
     }
 
     // x*x - x*x: merge cancellation still works (existing test extended).
@@ -847,7 +908,10 @@ mod tests {
         let x = model.add_var("x", 1.0, f64::INFINITY);
         model.minimize(x * x);
         let result = model.solve();
-        assert!(result.is_ok(), "P2-d: same-model quad must be accepted, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "P2-d: same-model quad must be accepted, got {result:?}"
+        );
     }
 
     // maximize path: cross-model rejection via maximize (not just minimize).

@@ -43,11 +43,26 @@ struct Case {
 }
 
 const REAL_CASES: &[Case] = &[
-    Case { name: "ken-13", truth: -1.0257395e10 },
-    Case { name: "ken-18", truth: -5.2217025e10 },
-    Case { name: "cre-b",  truth:  2.3129640e7  },
-    Case { name: "d6cube", truth:  3.1549166667e2 },
-    Case { name: "pilot",  truth: -5.5740430007e2 },
+    Case {
+        name: "ken-13",
+        truth: -1.0257395e10,
+    },
+    Case {
+        name: "ken-18",
+        truth: -5.2217025e10,
+    },
+    Case {
+        name: "cre-b",
+        truth: 2.3129640e7,
+    },
+    Case {
+        name: "d6cube",
+        truth: 3.1549166667e2,
+    },
+    Case {
+        name: "pilot",
+        truth: -5.5740430007e2,
+    },
 ];
 
 fn dispatch_disabled() -> bool {
@@ -57,7 +72,9 @@ fn dispatch_disabled() -> bool {
 fn load_qp(name: &str) -> Option<QpProblem> {
     let path_str = format!("data/lp_problems/{}.QPS", name);
     let path = Path::new(&path_str);
-    if !path.exists() { return None; }
+    if !path.exists() {
+        return None;
+    }
     parse_qps(path).ok()
 }
 
@@ -81,15 +98,15 @@ fn lp_simplex_stall_real_netlib_lps_converge() {
         opts.timeout_secs = Some(BUDGET_SECS);
         // No warm start; cold-start large LP is the failure mode.
         let r = solve_qp_with(&qp, &opts);
-        let converged = matches!(
-            r.status,
-            SolveStatus::Optimal | SolveStatus::LocallyOptimal
-        );
+        let converged = matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
         let close = r.objective.is_finite() && rel_err(r.objective, case.truth) <= REL_TOL;
         if !(converged && close) {
             failures.push(format!(
                 "{}: status={:?} obj={:.6e} truth={:.6e} rel_err={:.2e}",
-                case.name, r.status, r.objective, case.truth,
+                case.name,
+                r.status,
+                r.objective,
+                case.truth,
                 rel_err(r.objective, case.truth)
             ));
         }
@@ -100,10 +117,17 @@ fn lp_simplex_stall_real_netlib_lps_converge() {
             !failures.is_empty(),
             "LP_DISPATCH_NOOP=1 should regress at least one real LP"
         );
-        eprintln!("LP_DISPATCH_NOOP=1 observed failures (expected): {:#?}", failures);
+        eprintln!(
+            "LP_DISPATCH_NOOP=1 observed failures (expected): {:#?}",
+            failures
+        );
         return;
     }
-    assert!(failures.is_empty(), "stalled LPs did not converge:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "stalled LPs did not converge:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Short auto-verified no-op proof: d6cube (n=6_184 > LP_IPM_FIRST_N=3_000).
@@ -133,19 +157,28 @@ fn lp_simplex_stall_d6cube_noop_proof_short() {
     // Phase 1: noop proof.
     // SAFETY: LP_DISPATCH_NOOP is process-wide; nextest isolates each test
     // in its own process, so no cross-test env-var leak occurs.
-    unsafe { std::env::set_var("LP_DISPATCH_NOOP", "1"); }
+    unsafe {
+        std::env::set_var("LP_DISPATCH_NOOP", "1");
+    }
     let noop_result = {
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(NOOP_BUDGET_SECS);
         solve_qp_with(&qp, &opts)
     };
-    unsafe { std::env::remove_var("LP_DISPATCH_NOOP"); }
+    unsafe {
+        std::env::remove_var("LP_DISPATCH_NOOP");
+    }
 
     assert!(
-        !matches!(noop_result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+        !matches!(
+            noop_result.status,
+            SolveStatus::Optimal | SolveStatus::LocallyOptimal
+        ),
         "LP_DISPATCH_NOOP=1 + {}s: d6cube must NOT converge in simplex \
          (sentinel has no teeth if this passes). status={:?} obj={:.6e}",
-        NOOP_BUDGET_SECS, noop_result.status, noop_result.objective
+        NOOP_BUDGET_SECS,
+        noop_result.status,
+        noop_result.objective
     );
 
     // Phase 2: dispatch-enabled correctness check.
@@ -156,12 +189,17 @@ fn lp_simplex_stall_d6cube_noop_proof_short() {
     assert!(
         matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
         "d6cube with IPM dispatch must converge within {}s: status={:?} obj={:.6e}",
-        IPM_BUDGET_SECS, r.status, r.objective
+        IPM_BUDGET_SECS,
+        r.status,
+        r.objective
     );
     assert!(
         rel_err(r.objective, D6CUBE_TRUTH) <= REL_TOL,
         "d6cube obj {:.6e} deviates from truth {:.6e} by {:.2e} (>= tol {:.2e})",
-        r.objective, D6CUBE_TRUTH, rel_err(r.objective, D6CUBE_TRUTH), REL_TOL
+        r.objective,
+        D6CUBE_TRUTH,
+        rel_err(r.objective, D6CUBE_TRUTH),
+        REL_TOL
     );
 }
 
@@ -179,7 +217,10 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
 
     let m: usize = 2_500;
     let n: usize = 3_500;
-    assert!(m > 2_000, "must exceed LP_IPM_FIRST_M for size gate to fire");
+    assert!(
+        m > 2_000,
+        "must exceed LP_IPM_FIRST_M for size gate to fire"
+    );
 
     // Reproducible random A: each row picks ~6 columns via a deterministic LCG.
     let mut rows: Vec<usize> = Vec::new();
@@ -189,7 +230,9 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
     let mut lcg: u64 = 0xC0FFEE;
     for i in 0..m {
         for _ in 0..6 {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = ((lcg >> 33) as usize) % n;
             rows.push(i);
             cols.push(j);
@@ -199,7 +242,9 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
         }
     }
     for xj in x_star.iter_mut() {
-        lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lcg = lcg
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *xj = ((lcg >> 33) & 0xFF) as f64 / 256.0; // ∈ [0,1)
     }
     let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
@@ -239,7 +284,8 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
             !matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
             "LP_DISPATCH_NOOP=1: simplex unexpectedly converged \
              (sentinel cannot fail). status={:?} iters={}",
-            r.status, r.iterations
+            r.status,
+            r.iterations
         );
         return;
     }
@@ -252,7 +298,9 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
     assert!(
         matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
         "synthetic large LP must converge: status={:?} iters={} obj={:.3e}",
-        r.status, r.iterations, r.objective
+        r.status,
+        r.iterations,
+        r.objective
     );
 
     // Objective validity (reviewer M2):
@@ -271,11 +319,13 @@ fn lp_simplex_stall_synthetic_large_lp_converges() {
     assert!(
         r.objective <= obj_at_xstar + OBJ_TOL * scale,
         "synthetic objective {:.6e} worse than feasible incumbent obj_at_xstar={:.6e}",
-        r.objective, obj_at_xstar
+        r.objective,
+        obj_at_xstar
     );
     assert!(
         r.objective >= obj_lb_bound_only - OBJ_TOL * scale,
         "synthetic objective {:.6e} below sum-of-negative-cj LB {:.6e} (dual infeasible?)",
-        r.objective, obj_lb_bound_only
+        r.objective,
+        obj_lb_bound_only
     );
 }

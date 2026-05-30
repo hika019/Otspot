@@ -117,12 +117,21 @@ impl CscMatrix {
         ncols: usize,
     ) -> Result<Self, SolverError> {
         if rows.len() != cols.len() || rows.len() != vals.len() {
-            return Err(SolverError::DimensionMismatch { field: "triplet_arrays", expected: rows.len(), got: vals.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "triplet_arrays",
+                expected: rows.len(),
+                got: vals.len(),
+            });
         }
         // CSC: 主軸=列、副軸=行
-        let (col_ptr, row_ind, values) =
-            build_compressed_format(ncols, nrows, cols, rows, vals)?;
-        Ok(Self { col_ptr, row_ind, values, nrows, ncols })
+        let (col_ptr, row_ind, values) = build_compressed_format(ncols, nrows, cols, rows, vals)?;
+        Ok(Self {
+            col_ptr,
+            row_ind,
+            values,
+            nrows,
+            ncols,
+        })
     }
 
     /// 転置行列を生成する（新しい CSC 行列として返す）
@@ -186,7 +195,11 @@ impl CscMatrix {
     /// - `Err`: `x` の長さが `ncols` と一致しない場合
     pub fn mat_vec_mul(&self, x: &[f64]) -> Result<Vec<f64>, SolverError> {
         if x.len() != self.ncols {
-            return Err(SolverError::DimensionMismatch { field: "vector", expected: self.ncols, got: x.len() });
+            return Err(SolverError::DimensionMismatch {
+                field: "vector",
+                expected: self.ncols,
+                got: x.len(),
+            });
         }
 
         let mut y = vec![0.0; self.nrows];
@@ -215,7 +228,11 @@ impl CscMatrix {
     /// - `Err`: `j` が範囲外の場合
     pub fn get_column(&self, j: usize) -> Result<(&[usize], &[f64]), SolverError> {
         if j >= self.ncols {
-            return Err(SolverError::IndexOutOfBounds { context: "column", index: j, bound: self.ncols });
+            return Err(SolverError::IndexOutOfBounds {
+                context: "column",
+                index: j,
+                bound: self.ncols,
+            });
         }
         let start = self.col_ptr[j];
         let end = self.col_ptr[j + 1];

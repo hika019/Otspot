@@ -199,7 +199,11 @@ impl AugmentedKktCache {
                 let row = self.row_ind[s];
                 let new_row = inv_perm[row];
                 let new_col = new_col_for_orig_col;
-                let (r, c) = if new_row <= new_col { (new_row, new_col) } else { (new_col, new_row) };
+                let (r, c) = if new_row <= new_col {
+                    (new_row, new_col)
+                } else {
+                    (new_col, new_row)
+                };
                 perm_entries.push((r, c, s));
             }
         }
@@ -459,10 +463,7 @@ pub(crate) fn build_schur_system(
     let n = q.nrows;
     let m_ext = a_ext.nrows;
 
-    let d_inv: Vec<f64> = sigma_vec
-        .iter()
-        .map(|&s| 1.0 / (s + delta_d))
-        .collect();
+    let d_inv: Vec<f64> = sigma_vec.iter().map(|&s| 1.0 / (s + delta_d)).collect();
 
     let a_t = a_ext.transpose();
 
@@ -619,13 +620,23 @@ mod tests {
             ("pure_bilinear_2x2", 2, &[(0, 1, 1.0)], 1.0),
             // mixed zero + negative diag: Q=[[0,1],[1,-1]], indefinite
             // diag=(0,-1), row sums = (1,1) → Gershgorin = (-1,-2) → δ ≥ 2
-            ("zero_plus_negative_diag", 2, &[(0, 1, 1.0), (1, 1, -1.0)], 2.0),
+            (
+                "zero_plus_negative_diag",
+                2,
+                &[(0, 1, 1.0), (1, 1, -1.0)],
+                2.0,
+            ),
             // 3x3 zero-diag bilinear: Q=[[0,1,0],[1,0,1],[0,1,0]]
             // row sums = (1,2,1), diag=(0,0,0) → max(R-Q)=2 → δ ≥ 2
             ("zero_diag_3x3_chain", 3, &[(0, 1, 1.0), (1, 2, 1.0)], 2.0),
             // 4x4 partial zero-diag: Q[0,0]=2, Q[0,3]=3, rest zero
             // row sums = (3,0,0,3), diag=(2,0,0,0) → Gershgorin = (-1,0,0,-3) → δ ≥ 3
-            ("zero_diag_4x4_extreme_offdiag", 4, &[(0, 0, 2.0), (0, 3, 3.0)], 3.0),
+            (
+                "zero_diag_4x4_extreme_offdiag",
+                4,
+                &[(0, 0, 2.0), (0, 3, 3.0)],
+                3.0,
+            ),
         ];
         for &(label, n, entries, expected_min) in cases {
             let q = upper_tri_csc(n, entries);
@@ -645,11 +656,22 @@ mod tests {
         // (label, n, entries)
         let psd_cases: &[(&str, usize, &[(usize, usize, f64)])] = &[
             ("pd_2x2_diag", 2, &[(0, 0, 1.0), (1, 1, 1.0)]),
-            ("pd_2x2_offdiag", 2, &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0)]),
-            ("psd_singular_rank1", 2, &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)]),
+            (
+                "pd_2x2_offdiag",
+                2,
+                &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0)],
+            ),
+            (
+                "psd_singular_rank1",
+                2,
+                &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)],
+            ),
             ("psd_with_zero_eig_3x3", 3, &[(0, 0, 1.0), (1, 1, 1.0)]),
-            ("pd_large_offdiag_gershgorin_false_alarm", 2,
-             &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]),
+            (
+                "pd_large_offdiag_gershgorin_false_alarm",
+                2,
+                &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)],
+            ),
         ];
         for &(label, n, entries) in psd_cases {
             let q = upper_tri_csc(n, entries);
@@ -660,7 +682,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn test_collect_part1_diag_indices() {
@@ -730,13 +751,9 @@ mod tests {
         use crate::qp::problem::QpProblem;
         let a = CscMatrix::from_triplets(&[0usize, 0], &[0usize, 1], &[1.0f64, 1.0], 1, 2).unwrap();
         let q = CscMatrix::new(2, 2);
-        let prob = QpProblem::new_all_le(
-            q,
-            vec![0.0; 2],
-            a,
-            vec![3.0],
-            vec![(0.0, f64::INFINITY); 2],
-        ).unwrap();
+        let prob =
+            QpProblem::new_all_le(q, vec![0.0; 2], a, vec![3.0], vec![(0.0, f64::INFINITY); 2])
+                .unwrap();
         let (a_ext, b_ext, m_ext, m_orig, n_lb, is_eq_ext) = build_extended_constraints(&prob);
         assert_eq!(m_orig, 1);
         assert_eq!(n_lb, 2);
@@ -779,7 +796,13 @@ mod tests {
         let aug_ref = build_augmented_system(&q, &a_ext, &sigma2, dp2, dd2);
 
         assert_eq!(cache.mat.values.len(), aug_ref.values.len());
-        for (i, (&got, &expected)) in cache.mat.values.iter().zip(aug_ref.values.iter()).enumerate() {
+        for (i, (&got, &expected)) in cache
+            .mat
+            .values
+            .iter()
+            .zip(aug_ref.values.iter())
+            .enumerate()
+        {
             assert!(
                 (got - expected).abs() < 1e-14,
                 "values[{i}]: got={got} expected={expected}"
@@ -794,9 +817,13 @@ mod tests {
         let q = CscMatrix::new(2, 2);
         let a = CscMatrix::new(0, 2);
         let prob = QpProblem::new_all_le(
-            q, vec![0.0; 2], a, vec![],
+            q,
+            vec![0.0; 2],
+            a,
+            vec![],
             vec![(0.0, 5.0), (f64::NEG_INFINITY, 10.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let (a_ext, b_ext, m_ext, m_orig, n_lb, _) = build_extended_constraints(&prob);
         assert_eq!(m_orig, 0);
         assert_eq!(n_lb, 1);

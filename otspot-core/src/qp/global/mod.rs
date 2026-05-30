@@ -32,19 +32,17 @@ pub(crate) mod pruning;
 pub(crate) mod tree;
 
 use crate::options::{GlobalOptimizationConfig, QpWarmStart, SolverOptions};
-use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
+use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::certificate::prove_optimal;
 use crate::qp::ipm_solver::core::compute_duality_gap_rel;
-use crate::qp::problem::QpProblem;
 use crate::qp::ipm_solver::kkt::{
-    bound_violation as kkt_bound_violation,
-    complementarity_residual_rel as kkt_comp_residual,
-    kkt_residual_rel,
-    primal_residual_rel as kkt_primal_residual,
+    bound_violation as kkt_bound_violation, complementarity_residual_rel as kkt_comp_residual,
+    kkt_residual_rel, primal_residual_rel as kkt_primal_residual,
 };
-use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
 use crate::qp::ipm_solver::outcome::ProblemView;
+use crate::qp::kkt_resid::dual_sign_violation as kkt_dual_sign_violation;
+use crate::qp::problem::QpProblem;
 use std::time::{Duration, Instant};
 
 use bound::{interval_quadratic_bounds, is_feasible_result, solve_local_upper_bound};
@@ -158,7 +156,10 @@ pub fn solve_qp_global_with_stats(
 
     // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-        return (state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps), stats);
+        return (
+            state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
+            stats,
+        );
     }
 
     let mut tree = BBTree::new();
@@ -171,16 +172,13 @@ pub fn solve_qp_global_with_stats(
     match select_branching_variable(&root_node, &root_x) {
         None => {
             return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps), stats)
+                (
+                    state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
+                    stats,
+                )
             } else {
                 (
-                    state.finalize_unproven(
-                        root_lb,
-                        stats.nodes_processed,
-                        0,
-                        cfg,
-                        q_indefinite,
-                    ),
+                    state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
                     stats,
                 )
             };
@@ -233,12 +231,8 @@ pub fn solve_qp_global_with_stats(
             stats.max_depth_seen = node.depth;
         }
 
-        let res = solve_local_upper_bound(
-            problem,
-            &node.var_bounds,
-            &shared_opts,
-            node.warm.as_ref(),
-        );
+        let res =
+            solve_local_upper_bound(problem, &node.var_bounds, &shared_opts, node.warm.as_ref());
         if !is_feasible_result(&res.status) {
             // この box は infeasible / numerical issue → discard (上の region は
             // 他 branch に任せる; 下界 ≥ 0 補正は Phase 4 で α-BB と併せて検討)。
@@ -283,7 +277,10 @@ pub fn solve_qp_global_with_stats(
     let result = if halted_early {
         // 未探索領域の下界: queue に残った node の最小 lb と、深さ上限で破棄した
         // node の lb の両方を考慮する。どちらの領域も「未証明」であるため min を取る。
-        let remaining_lb = tree.best_lower_bound().unwrap_or(f64::INFINITY).min(depth_discard_lb);
+        let remaining_lb = tree
+            .best_lower_bound()
+            .unwrap_or(f64::INFINITY)
+            .min(depth_discard_lb);
         let proven = within_gap(state.incumbent_obj, remaining_lb, cfg.gap_tol);
         let inc_obj = state.incumbent_obj;
         if proven {
@@ -354,7 +351,11 @@ fn build_warm_from(res: &SolverResult) -> Option<QpWarmStart> {
     Some(QpWarmStart {
         x: res.solution.clone(),
         y: res.dual_solution.clone(),
-        mu: res.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6).max(1e-10),
+        mu: res
+            .final_residuals
+            .map(|(_, _, g)| g)
+            .unwrap_or(1e-6)
+            .max(1e-10),
     })
 }
 
@@ -420,8 +421,16 @@ fn is_polish_suboptimal_acceptable(
         return false;
     }
     // dimension guard — mirrors prove_optimal (certificate.rs ~L64)
-    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
-    let n_ub = problem.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = problem
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
     if polished.solution.len() != problem.num_vars
         || polished.dual_solution.len() != problem.num_constraints
         || polished.bound_duals.len() != n_lb + n_ub
@@ -439,10 +448,20 @@ fn is_polish_suboptimal_acceptable(
         constraint_types: &problem.constraint_types,
         eliminated_cols: &eliminated_cols,
     };
-    let kkt = kkt_residual_rel(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    let kkt = kkt_residual_rel(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
     let pf = kkt_primal_residual(&view, &polished.solution);
     let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
-    let comp = kkt_comp_residual(&view, &polished.solution, &polished.dual_solution, &polished.bound_duals);
+    let comp = kkt_comp_residual(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
     let dsign = kkt_dual_sign_violation(
         &problem.constraint_types,
         &polished.dual_solution,
@@ -498,7 +517,12 @@ impl SearchState {
     /// 維持 (duals を整合化)。収束済み (Optimal/LocallyOptimal) かつ obj が悪化しない
     /// 場合のみ採用し、未収束 or obj 悪化は棄却して incumbent を保持する。
     /// root incumbent (分枝なし) は既に元問題 box で回収済みのため skip。
-    fn polish_incumbent_duals(&mut self, problem: &QpProblem, base_opts: &SolverOptions, gap_tol: f64) {
+    fn polish_incumbent_duals(
+        &mut self,
+        problem: &QpProblem,
+        base_opts: &SolverOptions,
+        gap_tol: f64,
+    ) {
         if !self.incumbent_updated {
             // root solve 結果は元問題 box で回収済み; polish は冗長。
             return;
@@ -515,9 +539,20 @@ impl SearchState {
         opts.global_optimization = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol) {
+        if is_polish_acceptable(
+            &polished.status,
+            polished.objective,
+            self.incumbent_obj,
+            gap_tol,
+        ) {
             self.update_incumbent(&polished);
-        } else if is_polish_suboptimal_acceptable(&polished, problem, self.incumbent_obj, gap_tol, user_eps) {
+        } else if is_polish_suboptimal_acceptable(
+            &polished,
+            problem,
+            self.incumbent_obj,
+            gap_tol,
+            user_eps,
+        ) {
             // SuboptimalSolution でも KKT が十分なら dual recovery として採用。
             self.update_incumbent(&polished);
         }
@@ -551,9 +586,10 @@ impl SearchState {
             constraint_types: &problem.constraint_types,
             eliminated_cols: &eliminated_cols,
         };
-        let duality_gap_rel = self.incumbent_result.duality_gap_rel.unwrap_or_else(|| {
-            compute_duality_gap_rel(problem, &self.incumbent_result)
-        });
+        let duality_gap_rel = self
+            .incumbent_result
+            .duality_gap_rel
+            .unwrap_or_else(|| compute_duality_gap_rel(problem, &self.incumbent_result));
         let cert_result = {
             let x = &self.incumbent_result.solution;
             let y = &self.incumbent_result.dual_solution;
@@ -579,7 +615,10 @@ impl SearchState {
                 };
                 log::debug!(
                     "QP global proven: status={} obj={:.6e} lb={:.6e} gap_rel={:.3e}",
-                    self.incumbent_result.status, self.incumbent_obj, lower_bound, gap_rel
+                    self.incumbent_result.status,
+                    self.incumbent_obj,
+                    lower_bound,
+                    gap_rel
                 );
             }
             Err(not_proven) => {
@@ -731,23 +770,10 @@ mod tests {
         // indefinite Q + 極小 budget (max_nodes=1, max_depth=1) → proof 取れず
         // → NonconvexLocal が出る。
         // 2D concave (= bowl 逆さ) + 各軸 [-1,1] を box にして root 分枝が必要に。
-        let q = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 1],
-            &[-2.0, -2.0],
-            2,
-            2,
-        )
-        .unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-        let p = QpProblem::new_all_le(
-            q,
-            vec![0.0, 0.0],
-            a,
-            vec![],
-            vec![(-1.0, 1.0), (-1.0, 1.0)],
-        )
-        .unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)])
+            .unwrap();
         // gap_tol を非現実的に厳しく (1e-12) + max_nodes=1 で proof 不能化
         let cfg = GlobalOptimizationConfig {
             gap_tol: 1e-12,
@@ -783,12 +809,15 @@ mod tests {
         let p = diag_convex_1d(3.0);
         let r = solve_qp_global(&p, &opts(2.0), &GlobalOptimizationConfig::default());
         assert!(matches!(r.status, SolveStatus::Optimal));
-        let cert = r.bound_gap_cert.as_ref()
+        let cert = r
+            .bound_gap_cert
+            .as_ref()
             .expect("proven QP global (Optimal) must carry BoundGapCertificate");
         assert!(
             cert.gap_rel() <= cert.gap_tol() + 1e-10,
             "gap_rel={:.3e} must be ≤ gap_tol={:.3e}",
-            cert.gap_rel(), cert.gap_tol()
+            cert.gap_rel(),
+            cert.gap_tol()
         );
     }
 
@@ -798,7 +827,9 @@ mod tests {
         let p = diag_concave_1d(2.0);
         let r = solve_qp_global(&p, &opts(5.0), &GlobalOptimizationConfig::default());
         assert!(matches!(r.status, SolveStatus::NonconvexGlobal));
-        let cert = r.bound_gap_cert.as_ref()
+        let cert = r
+            .bound_gap_cert
+            .as_ref()
             .expect("proven QP global (NonconvexGlobal) must carry BoundGapCertificate");
         assert!(cert.gap_rel() <= cert.gap_tol() + 1e-10);
     }
@@ -811,14 +842,27 @@ mod tests {
     fn qp_global_unproven_has_no_bound_gap_cert() {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)]).unwrap();
-        let cfg = GlobalOptimizationConfig { gap_tol: 1e-12, max_depth: 1, max_nodes: 1, ..GlobalOptimizationConfig::default() };
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)])
+            .unwrap();
+        let cfg = GlobalOptimizationConfig {
+            gap_tol: 1e-12,
+            max_depth: 1,
+            max_nodes: 1,
+            ..GlobalOptimizationConfig::default()
+        };
         let r = solve_qp_global(&p, &opts(5.0), &cfg);
         assert!(
-            matches!(r.status, SolveStatus::NonconvexLocal | SolveStatus::LocallyOptimal),
-            "expected unproven status, got {:?}", r.status
+            matches!(
+                r.status,
+                SolveStatus::NonconvexLocal | SolveStatus::LocallyOptimal
+            ),
+            "expected unproven status, got {:?}",
+            r.status
         );
-        assert!(r.bound_gap_cert.is_none(), "unproven must have no BoundGapCertificate");
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "unproven must have no BoundGapCertificate"
+        );
     }
 
     /// depth 超過 node の lb が remaining_lb に畳み込まれ、偽 proven を阻止する。
@@ -836,13 +880,8 @@ mod tests {
         // use_alpha_bb=false で alpha_bb が lb を 0 に引き上げないようにする。
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, -2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-        let p = QpProblem::new_all_le(
-            q,
-            vec![0.0, 0.0],
-            a,
-            vec![],
-            vec![(-1.0, 1.0), (-1.0, 1.0)],
-        ).unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0), (-1.0, 1.0)])
+            .unwrap();
         let cfg = GlobalOptimizationConfig {
             gap_tol: 1e-12,
             max_depth: 1,
@@ -921,15 +960,40 @@ mod tests {
     #[test]
     fn polish_acceptance_rejects_unconverged_status() {
         // 収束済み → 採用可
-        assert!(is_polish_acceptable(&SolveStatus::Optimal,        0.0, 0.0, 1e-6));
-        assert!(is_polish_acceptable(&SolveStatus::LocallyOptimal, 0.0, 0.0, 1e-6));
+        assert!(is_polish_acceptable(&SolveStatus::Optimal, 0.0, 0.0, 1e-6));
+        assert!(is_polish_acceptable(
+            &SolveStatus::LocallyOptimal,
+            0.0,
+            0.0,
+            1e-6
+        ));
         // 未収束 → 棄却
-        assert!(!is_polish_acceptable(&SolveStatus::MaxIterations,     0.0, 0.0, 1e-6));
-        assert!(!is_polish_acceptable(&SolveStatus::SuboptimalSolution, 0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::MaxIterations,
+            0.0,
+            0.0,
+            1e-6
+        ));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::SuboptimalSolution,
+            0.0,
+            0.0,
+            1e-6
+        ));
         // その他の失敗 status も棄却
-        assert!(!is_polish_acceptable(&SolveStatus::Infeasible,      0.0, 0.0, 1e-6));
-        assert!(!is_polish_acceptable(&SolveStatus::NumericalError,  0.0, 0.0, 1e-6));
-        assert!(!is_polish_acceptable(&SolveStatus::Timeout,         0.0, 0.0, 1e-6));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Infeasible,
+            0.0,
+            0.0,
+            1e-6
+        ));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::NumericalError,
+            0.0,
+            0.0,
+            1e-6
+        ));
+        assert!(!is_polish_acceptable(&SolveStatus::Timeout, 0.0, 0.0, 1e-6));
     }
 
     /// P2-b: polish は obj が悪化した場合 (min なので polished_obj > incumbent_obj + tol) を棄却。
@@ -945,31 +1009,86 @@ mod tests {
         let tol = gap_tol * scale; // 1e-4
 
         // 同点 → 採用可
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc,          inc, gap_tol));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc,
+            inc,
+            gap_tol
+        ));
         // 改善 (より小さい) → 採用可
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc - 0.5,    inc, gap_tol));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc - 0.5,
+            inc,
+            gap_tol
+        ));
         // tol 以内の微小悪化 → 採用可 (dual 数値誤差)
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc + tol * 0.5,
+            inc,
+            gap_tol
+        ));
         // tol を超える悪化 → 棄却
-        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc + tol + 1e-10,
+            inc,
+            gap_tol
+        ));
         // 明確な悪化 → 棄却
-        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 0.0,          inc, gap_tol));
-        assert!(!is_polish_acceptable(&SolveStatus::Optimal, 1.0,          inc, gap_tol));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Optimal,
+            0.0,
+            inc,
+            gap_tol
+        ));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Optimal,
+            1.0,
+            inc,
+            gap_tol
+        ));
 
         // incumbent_obj = 0.0 → scale = 1.0, 許容上限 = 0 + 1e-4
         let inc = 0.0_f64;
         let scale = 1.0_f64.max(inc.abs());
         let tol = gap_tol * scale;
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, 0.0,        inc, gap_tol));
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, -0.5,       inc, gap_tol));
-        assert!(!is_polish_acceptable(&SolveStatus::Optimal, tol + 1e-10, inc, gap_tol));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            0.0,
+            inc,
+            gap_tol
+        ));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            -0.5,
+            inc,
+            gap_tol
+        ));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Optimal,
+            tol + 1e-10,
+            inc,
+            gap_tol
+        ));
 
         // incumbent_obj = 100.0 → scale = 100.0, 許容上限 = 100.0 + 1e-2
         let inc = 100.0_f64;
         let scale = 1.0_f64.max(inc.abs());
         let tol = gap_tol * scale; // 1e-2
-        assert!(is_polish_acceptable(&SolveStatus::Optimal, inc + tol * 0.5, inc, gap_tol));
-        assert!(!is_polish_acceptable(&SolveStatus::Optimal, inc + tol + 1e-10, inc, gap_tol));
+        assert!(is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc + tol * 0.5,
+            inc,
+            gap_tol
+        ));
+        assert!(!is_polish_acceptable(
+            &SolveStatus::Optimal,
+            inc + tol + 1e-10,
+            inc,
+            gap_tol
+        ));
     }
 
     /// Invalid options are rejected at the global entry with NumericalError — not panic.
@@ -982,10 +1101,34 @@ mod tests {
         let p = diag_concave_1d(2.0);
         let cfg = GlobalOptimizationConfig::default();
         let cases: &[(&str, SolverOptions)] = &[
-            ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
-            ("inf timeout_secs", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
-            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+            (
+                "neg timeout_secs",
+                SolverOptions {
+                    timeout_secs: Some(-1.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inf timeout_secs",
+                SolverOptions {
+                    timeout_secs: Some(f64::INFINITY),
+                    ..Default::default()
+                },
+            ),
+            (
+                "nan primal_tol",
+                SolverOptions {
+                    primal_tol: f64::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "zero threads",
+                SolverOptions {
+                    threads: 0,
+                    ..Default::default()
+                },
+            ),
         ];
         for (label, opts) in cases {
             let result = solve_qp_global(&p, opts, &cfg);
@@ -1066,7 +1209,7 @@ mod tests {
         let polished_short_sol = SolverResult {
             status: SolveStatus::SuboptimalSolution,
             objective: 0.0,
-            solution: vec![0.0],           // wrong: should be len 2
+            solution: vec![0.0], // wrong: should be len 2
             dual_solution: vec![0.0],
             bound_duals: vec![],
             ..SolverResult::default()
@@ -1081,7 +1224,7 @@ mod tests {
             status: SolveStatus::SuboptimalSolution,
             objective: 0.0,
             solution: vec![0.0, 0.0],
-            dual_solution: vec![],         // wrong: should be len 1
+            dual_solution: vec![], // wrong: should be len 1
             bound_duals: vec![],
             ..SolverResult::default()
         };
@@ -1193,10 +1336,17 @@ mod tests {
             duality_gap_rel: Some(0.0),
             ..Default::default()
         };
-        let r = SearchState::new(good_conv)
-            .finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
-        assert_eq!(r.status, SolveStatus::Optimal, "convex-good-dual must be Optimal");
-        assert!(r.bound_gap_cert.is_some(), "Optimal must carry bound_gap_cert");
+        let r =
+            SearchState::new(good_conv).finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
+        assert_eq!(
+            r.status,
+            SolveStatus::Optimal,
+            "convex-good-dual must be Optimal"
+        );
+        assert!(
+            r.bound_gap_cert.is_some(),
+            "Optimal must carry bound_gap_cert"
+        );
         assert!(r.opt_cert.is_some(), "Optimal must carry opt_cert");
 
         // ── convex-bad-dual: z=[100,-100], large gap → LocallyOptimal ────────
@@ -1210,14 +1360,17 @@ mod tests {
             duality_gap_rel: Some(0.5),
             ..Default::default()
         };
-        let r = SearchState::new(bad_conv)
-            .finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
+        let r =
+            SearchState::new(bad_conv).finalize_proven(&p_convex, 0.0, false, gap_tol, user_eps);
         assert_eq!(
             r.status,
             SolveStatus::LocallyOptimal,
             "convex-bad-dual must be demoted to LocallyOptimal"
         );
-        assert!(r.bound_gap_cert.is_none(), "demoted must have no bound_gap_cert");
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "demoted must have no bound_gap_cert"
+        );
         assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
 
         // ── indefinite-good-dual: x=1 (ub active), z=[0,2] → NonconvexGlobal
@@ -1230,14 +1383,17 @@ mod tests {
             duality_gap_rel: Some(0.0),
             ..Default::default()
         };
-        let r = SearchState::new(good_indef)
-            .finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
+        let r =
+            SearchState::new(good_indef).finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
         assert_eq!(
             r.status,
             SolveStatus::NonconvexGlobal,
             "indefinite-good-dual must be NonconvexGlobal"
         );
-        assert!(r.bound_gap_cert.is_some(), "NonconvexGlobal must carry bound_gap_cert");
+        assert!(
+            r.bound_gap_cert.is_some(),
+            "NonconvexGlobal must carry bound_gap_cert"
+        );
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
 
         // ── indefinite-bad-dual: z=[50,50] → stationarity fails → NonconvexLocal
@@ -1251,14 +1407,17 @@ mod tests {
             duality_gap_rel: Some(0.5),
             ..Default::default()
         };
-        let r = SearchState::new(bad_indef)
-            .finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
+        let r =
+            SearchState::new(bad_indef).finalize_proven(&p_indef, -1.0, true, gap_tol, user_eps);
         assert_eq!(
             r.status,
             SolveStatus::NonconvexLocal,
             "indefinite-bad-dual must be demoted to NonconvexLocal"
         );
-        assert!(r.bound_gap_cert.is_none(), "demoted must have no bound_gap_cert");
+        assert!(
+            r.bound_gap_cert.is_none(),
+            "demoted must have no bound_gap_cert"
+        );
         assert!(r.opt_cert.is_none(), "demoted must have no opt_cert");
     }
 
@@ -1286,7 +1445,7 @@ mod tests {
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
         let problem = QpProblem::new_all_le(
             q,
-            vec![0.0_f64, 1.0_f64],  // c[1]=1.0: spurious stationarity = 1.0 without mask
+            vec![0.0_f64, 1.0_f64], // c[1]=1.0: spurious stationarity = 1.0 without mask
             a,
             vec![],
             vec![(-1.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)],
@@ -1310,8 +1469,8 @@ mod tests {
         let user_eps = 1e-6_f64;
         let gap_tol = 1e-6_f64;
 
-        let r = SearchState::new(incumbent)
-            .finalize_proven(&problem, -1.0, true, gap_tol, user_eps);
+        let r =
+            SearchState::new(incumbent).finalize_proven(&problem, -1.0, true, gap_tol, user_eps);
         assert_eq!(
             r.status,
             SolveStatus::NonconvexGlobal,

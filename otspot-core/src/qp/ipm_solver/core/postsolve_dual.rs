@@ -46,7 +46,10 @@ pub(super) fn refine_postsolve_dual_lsq(
     );
     let mut best_sol = final_sol.clone();
     loop {
-        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if opts
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             *final_sol = best_sol;
             return;
         }
@@ -54,8 +57,18 @@ pub(super) fn refine_postsolve_dual_lsq(
         crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
+        crate::qp::refine_dual_worst_active_block(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
         let cur = kkt_residual_rel(
             &view0,
@@ -103,7 +116,10 @@ pub(super) fn refine_postsolve_recovery(
     );
     let mut best_sol = final_sol.clone();
     loop {
-        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if opts
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             *final_sol = best_sol;
             return;
         }
@@ -119,8 +135,18 @@ pub(super) fn refine_postsolve_recovery(
         }
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
+        crate::qp::refine_dual_worst_active_block(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
         crate::qp::refit_bound_duals_kkt(orig_problem, final_sol);
         let cur_kkt = kkt_residual_rel(
             &view0,

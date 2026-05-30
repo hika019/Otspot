@@ -52,15 +52,15 @@
 //! 合計 512 ケース。`3dcaf8a` commit msg に記された "440" は誤記、実数は当初 384、
 //! shape gap 補完後 512 (両方とも 440 ではない)。
 
-use proptest::prelude::*;
-use proptest::test_runner::Config as ProptestConfig;
-use otspot_dev::bench_utils::{compute_qp_kkt_max, primal_feas_max};
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
-use otspot::qp::{solve_qp_global, solve_qp_with, QpProblem};
 use otspot::qp::kkt_resid::dual_sign_violation;
+use otspot::qp::{solve_qp_global, solve_qp_with, QpProblem};
 use otspot::solve_lp_with;
 use otspot::sparse::CscMatrix;
+use otspot_dev::bench_utils::{compute_qp_kkt_max, primal_feas_max};
+use proptest::prelude::*;
+use proptest::test_runner::Config as ProptestConfig;
 
 const EPS_KKT: f64 = 1e-4;
 /// 非凸 QP LocallyOptimal 状態の閾値。leaf local IPM の unscale 復元 drift で
@@ -102,7 +102,10 @@ struct LpKktResid {
 
 impl LpKktResid {
     fn invalid() -> Self {
-        Self { prim_stat: f64::INFINITY, comp: f64::INFINITY }
+        Self {
+            prim_stat: f64::INFINITY,
+            comp: f64::INFINITY,
+        }
     }
     fn max(&self) -> f64 {
         self.prim_stat.max(self.comp)
@@ -323,134 +326,146 @@ fn lp_strategy_inner(
         let cr = coeff_range.clone();
         (
             Just((n, m)),
-            prop::collection::vec(cr.clone(), n),                 // c
-            prop::collection::vec(cr.clone(), nm),                // A dense
-            prop::collection::vec(any::<bool>(), nm),             // A mask
-            prop::collection::vec(0.1f64..5.0, m),                // |b|
-            prop::collection::vec(0u8..=2, m),                    // ct shape
-            prop::collection::vec(0u8..=3, n),                    // bound shape
-            prop::collection::vec(0.5f64..3.0, n),                // bound mag
+            prop::collection::vec(cr.clone(), n),     // c
+            prop::collection::vec(cr.clone(), nm),    // A dense
+            prop::collection::vec(any::<bool>(), nm), // A mask
+            prop::collection::vec(0.1f64..5.0, m),    // |b|
+            prop::collection::vec(0u8..=2, m),        // ct shape
+            prop::collection::vec(0u8..=3, n),        // bound shape
+            prop::collection::vec(0.5f64..3.0, n),    // bound mag
         )
-            .prop_map(move |(dims, c, a_vals, a_mask, b_mag, cts_raw, bnd_raw, bnd_mag)| {
-                let (n, m) = dims;
-                let a = sparsify(&a_vals, &a_mask, m, n);
-                let cts: Vec<CtShape> = cts_raw
-                    .iter()
-                    .map(|t| match t {
-                        0 => CtShape::Le,
-                        1 => CtShape::Ge,
-                        _ => CtShape::Eq,
-                    })
-                    .collect();
-                let b: Vec<f64> = cts
-                    .iter()
-                    .zip(b_mag.iter())
-                    .map(|(c, &mag)| match c {
-                        CtShape::Le => mag,
-                        CtShape::Ge => -mag,
-                        CtShape::Eq => 0.0,
-                    })
-                    .collect();
-                let bounds: Vec<(f64, f64)> = bnd_raw
-                    .iter()
-                    .zip(bnd_mag.iter())
-                    .map(|(s, &mag)| {
-                        let shape = match s {
-                            0 => BoundShape::NonNegLimited,
-                            1 => BoundShape::Free,
-                            2 => BoundShape::TwoSided,
-                            _ => BoundShape::OneSidedUpper,
-                        };
-                        apply_bound(shape, mag)
-                    })
-                    .collect();
-                let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
-                LpProblem::new_general(c, a, b, ct_vec, bounds, None).expect("LpProblem")
-            })
+            .prop_map(
+                move |(dims, c, a_vals, a_mask, b_mag, cts_raw, bnd_raw, bnd_mag)| {
+                    let (n, m) = dims;
+                    let a = sparsify(&a_vals, &a_mask, m, n);
+                    let cts: Vec<CtShape> = cts_raw
+                        .iter()
+                        .map(|t| match t {
+                            0 => CtShape::Le,
+                            1 => CtShape::Ge,
+                            _ => CtShape::Eq,
+                        })
+                        .collect();
+                    let b: Vec<f64> = cts
+                        .iter()
+                        .zip(b_mag.iter())
+                        .map(|(c, &mag)| match c {
+                            CtShape::Le => mag,
+                            CtShape::Ge => -mag,
+                            CtShape::Eq => 0.0,
+                        })
+                        .collect();
+                    let bounds: Vec<(f64, f64)> = bnd_raw
+                        .iter()
+                        .zip(bnd_mag.iter())
+                        .map(|(s, &mag)| {
+                            let shape = match s {
+                                0 => BoundShape::NonNegLimited,
+                                1 => BoundShape::Free,
+                                2 => BoundShape::TwoSided,
+                                _ => BoundShape::OneSidedUpper,
+                            };
+                            apply_bound(shape, mag)
+                        })
+                        .collect();
+                    let ct_vec: Vec<ConstraintType> =
+                        cts.iter().copied().map(ct_to_constraint).collect();
+                    LpProblem::new_general(c, a, b, ct_vec, bounds, None).expect("LpProblem")
+                },
+            )
     })
 }
 
-fn convex_qp_strategy_inner(
-    nmax: usize,
-    mmax: usize,
-) -> impl Strategy<Value = QpProblem> {
+fn convex_qp_strategy_inner(nmax: usize, mmax: usize) -> impl Strategy<Value = QpProblem> {
     (2usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
         let nm = n * m;
         let nn = n * n;
         (
             Just((n, m)),
-            prop::collection::vec(-1.0f64..1.0, nn),         // L (lower tri)
-            prop::collection::vec(0.3f64..1.5, n),           // L diag (positive PSD)
-            prop::collection::vec(-2.0f64..2.0, n),          // c
-            prop::collection::vec(-1.0f64..1.0, nm),         // A
-            prop::collection::vec(any::<bool>(), nm),        // A mask
-            prop::collection::vec(0.1f64..3.0, m),           // |b|
-            prop::collection::vec(0u8..=2, m),               // ct
-            prop::collection::vec(0u8..=3, n),               // bound shape
-            prop::collection::vec(0.5f64..3.0, n),           // bound mag
+            prop::collection::vec(-1.0f64..1.0, nn), // L (lower tri)
+            prop::collection::vec(0.3f64..1.5, n),   // L diag (positive PSD)
+            prop::collection::vec(-2.0f64..2.0, n),  // c
+            prop::collection::vec(-1.0f64..1.0, nm), // A
+            prop::collection::vec(any::<bool>(), nm), // A mask
+            prop::collection::vec(0.1f64..3.0, m),   // |b|
+            prop::collection::vec(0u8..=2, m),       // ct
+            prop::collection::vec(0u8..=3, n),       // bound shape
+            prop::collection::vec(0.5f64..3.0, n),   // bound mag
         )
-            .prop_map(move |(dims, mut l_off, l_diag, c, a_vals, a_mask, b_mag, cts_raw, bnd_raw, bnd_mag)| {
-                let (n, m) = dims;
-                // 上三角部 / 対角を厳格に再設定: L[i,i]=l_diag[i], L[i,j>i]=0
-                for i in 0..n {
-                    for j in 0..n {
-                        if j > i {
-                            l_off[i * n + j] = 0.0;
-                        } else if j == i {
-                            l_off[i * n + j] = l_diag[i];
+            .prop_map(
+                move |(
+                    dims,
+                    mut l_off,
+                    l_diag,
+                    c,
+                    a_vals,
+                    a_mask,
+                    b_mag,
+                    cts_raw,
+                    bnd_raw,
+                    bnd_mag,
+                )| {
+                    let (n, m) = dims;
+                    // 上三角部 / 対角を厳格に再設定: L[i,i]=l_diag[i], L[i,j>i]=0
+                    for i in 0..n {
+                        for j in 0..n {
+                            if j > i {
+                                l_off[i * n + j] = 0.0;
+                            } else if j == i {
+                                l_off[i * n + j] = l_diag[i];
+                            }
                         }
                     }
-                }
-                let q = build_psd_q(&l_off, n);
-                let a = sparsify(&a_vals, &a_mask, m, n);
-                let cts: Vec<CtShape> = cts_raw
-                    .iter()
-                    .map(|t| match t {
-                        0 => CtShape::Le,
-                        1 => CtShape::Ge,
-                        _ => CtShape::Eq,
-                    })
-                    .collect();
-                let b: Vec<f64> = cts
-                    .iter()
-                    .zip(b_mag.iter())
-                    .map(|(c, &mag)| match c {
-                        CtShape::Le => mag,
-                        CtShape::Ge => -mag,
-                        CtShape::Eq => 0.0,
-                    })
-                    .collect();
-                let bounds: Vec<(f64, f64)> = bnd_raw
-                    .iter()
-                    .zip(bnd_mag.iter())
-                    .map(|(s, &mag)| {
-                        let shape = match s {
-                            0 => BoundShape::NonNegLimited,
-                            1 => BoundShape::Free,
-                            2 => BoundShape::TwoSided,
-                            _ => BoundShape::OneSidedUpper,
-                        };
-                        apply_bound(shape, mag)
-                    })
-                    .collect();
-                let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
-                QpProblem::new(q, c, a, b, bounds, ct_vec).expect("QpProblem convex")
-            })
+                    let q = build_psd_q(&l_off, n);
+                    let a = sparsify(&a_vals, &a_mask, m, n);
+                    let cts: Vec<CtShape> = cts_raw
+                        .iter()
+                        .map(|t| match t {
+                            0 => CtShape::Le,
+                            1 => CtShape::Ge,
+                            _ => CtShape::Eq,
+                        })
+                        .collect();
+                    let b: Vec<f64> = cts
+                        .iter()
+                        .zip(b_mag.iter())
+                        .map(|(c, &mag)| match c {
+                            CtShape::Le => mag,
+                            CtShape::Ge => -mag,
+                            CtShape::Eq => 0.0,
+                        })
+                        .collect();
+                    let bounds: Vec<(f64, f64)> = bnd_raw
+                        .iter()
+                        .zip(bnd_mag.iter())
+                        .map(|(s, &mag)| {
+                            let shape = match s {
+                                0 => BoundShape::NonNegLimited,
+                                1 => BoundShape::Free,
+                                2 => BoundShape::TwoSided,
+                                _ => BoundShape::OneSidedUpper,
+                            };
+                            apply_bound(shape, mag)
+                        })
+                        .collect();
+                    let ct_vec: Vec<ConstraintType> =
+                        cts.iter().copied().map(ct_to_constraint).collect();
+                    QpProblem::new(q, c, a, b, bounds, ct_vec).expect("QpProblem convex")
+                },
+            )
     })
 }
 
-fn nonconvex_qp_strategy_inner(
-    nmax: usize,
-) -> impl Strategy<Value = QpProblem> {
+fn nonconvex_qp_strategy_inner(nmax: usize) -> impl Strategy<Value = QpProblem> {
     (2usize..=nmax,).prop_flat_map(move |(n,)| {
         let nn = n * n;
         (
             Just(n),
             prop::collection::vec(-0.8f64..0.8, nn),
             prop::collection::vec(0.4f64..1.5, n),
-            prop::collection::vec(0u8..=1, n),               // 0: positive, 1: negative diag
-            prop::collection::vec(-1.5f64..1.5, n),          // c
-            prop::collection::vec(0.5f64..3.0, n),           // bound mag (常に TwoSided)
+            prop::collection::vec(0u8..=1, n), // 0: positive, 1: negative diag
+            prop::collection::vec(-1.5f64..1.5, n), // c
+            prop::collection::vec(0.5f64..3.0, n), // bound mag (常に TwoSided)
         )
             .prop_map(move |(n, mut l_off, l_diag, d_sign, c, bnd_mag)| {
                 for i in 0..n {
@@ -468,10 +483,7 @@ fn nonconvex_qp_strategy_inner(
                     .collect();
                 let q = build_indefinite_q(&l_off, &d, n);
                 let a = zero_csc(0, n);
-                let bounds: Vec<(f64, f64)> = bnd_mag
-                    .iter()
-                    .map(|&mag| (-mag, mag))
-                    .collect();
+                let bounds: Vec<(f64, f64)> = bnd_mag.iter().map(|&mag| (-mag, mag)).collect();
                 QpProblem::new(q, c, a, vec![], bounds, vec![]).expect("QpProblem nonconvex")
             })
     })
@@ -494,35 +506,38 @@ fn lp_strategy_fixed_bound(nmax: usize, mmax: usize) -> impl Strategy<Value = Lp
             prop::collection::vec(-0.5f64..0.5, n),
             prop::collection::vec(0.5f64..2.0, n),
         )
-            .prop_map(move |(dims, c, a_vals, a_mask, b_mag, cts_raw, fix_mask, fix_val, bnd_mag)| {
-                let (n, m) = dims;
-                let a = sparsify(&a_vals, &a_mask, m, n);
-                let cts: Vec<CtShape> = cts_raw
-                    .iter()
-                    .map(|t| match t {
-                        0 => CtShape::Le,
-                        1 => CtShape::Ge,
-                        _ => CtShape::Eq,
-                    })
-                    .collect();
-                let b: Vec<f64> = cts
-                    .iter()
-                    .zip(b_mag.iter())
-                    .map(|(c, &mag)| match c {
-                        CtShape::Le => mag,
-                        CtShape::Ge => -mag,
-                        CtShape::Eq => 0.0,
-                    })
-                    .collect();
-                let bounds: Vec<(f64, f64)> = fix_mask
-                    .iter()
-                    .zip(fix_val.iter())
-                    .zip(bnd_mag.iter())
-                    .map(|((fix, &v), &mag)| if *fix { (v, v) } else { (-mag, mag) })
-                    .collect();
-                let ct_vec: Vec<ConstraintType> = cts.iter().copied().map(ct_to_constraint).collect();
-                LpProblem::new_general(c, a, b, ct_vec, bounds, None).expect("fixed-bound LP")
-            })
+            .prop_map(
+                move |(dims, c, a_vals, a_mask, b_mag, cts_raw, fix_mask, fix_val, bnd_mag)| {
+                    let (n, m) = dims;
+                    let a = sparsify(&a_vals, &a_mask, m, n);
+                    let cts: Vec<CtShape> = cts_raw
+                        .iter()
+                        .map(|t| match t {
+                            0 => CtShape::Le,
+                            1 => CtShape::Ge,
+                            _ => CtShape::Eq,
+                        })
+                        .collect();
+                    let b: Vec<f64> = cts
+                        .iter()
+                        .zip(b_mag.iter())
+                        .map(|(c, &mag)| match c {
+                            CtShape::Le => mag,
+                            CtShape::Ge => -mag,
+                            CtShape::Eq => 0.0,
+                        })
+                        .collect();
+                    let bounds: Vec<(f64, f64)> = fix_mask
+                        .iter()
+                        .zip(fix_val.iter())
+                        .zip(bnd_mag.iter())
+                        .map(|((fix, &v), &mag)| if *fix { (v, v) } else { (-mag, mag) })
+                        .collect();
+                    let ct_vec: Vec<ConstraintType> =
+                        cts.iter().copied().map(ct_to_constraint).collect();
+                    LpProblem::new_general(c, a, b, ct_vec, bounds, None).expect("fixed-bound LP")
+                },
+            )
     })
 }
 
@@ -573,11 +588,11 @@ fn lp_strategy_micro_n1() -> impl Strategy<Value = LpProblem> {
 /// n=1 micro 凸 QP。Q = [q] (q ≥ 0)、stationarity が単一スカラに退化する経路。
 fn convex_qp_strategy_micro_n1() -> impl Strategy<Value = QpProblem> {
     (
-        0.3f64..1.5,                                     // q
-        -2.0f64..2.0,                                    // c
-        prop::collection::vec(-1.0f64..1.0, 2),          // A (2 row, 1 col)
-        prop::collection::vec(0u8..=2, 2),               // ct
-        prop::collection::vec(0.1f64..2.0, 2),           // |b|
+        0.3f64..1.5,                            // q
+        -2.0f64..2.0,                           // c
+        prop::collection::vec(-1.0f64..1.0, 2), // A (2 row, 1 col)
+        prop::collection::vec(0u8..=2, 2),      // ct
+        prop::collection::vec(0.1f64..2.0, 2),  // |b|
         0u8..=3,
         0.5f64..3.0,
     )
@@ -619,10 +634,7 @@ fn convex_qp_strategy_micro_n1() -> impl Strategy<Value = QpProblem> {
 /// Q rank deficient な凸 QP (l_diag に 0 を許容)。null space を持つ Q で
 /// stationarity の不変式が成立するかを cover。`l_diag` の最初の要素を必ず
 /// 0 にして rank<n を保証する。
-fn convex_qp_strategy_rank_deficient(
-    nmax: usize,
-    mmax: usize,
-) -> impl Strategy<Value = QpProblem> {
+fn convex_qp_strategy_rank_deficient(nmax: usize, mmax: usize) -> impl Strategy<Value = QpProblem> {
     (3usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
         let nm = n * m;
         let nn = n * n;
@@ -639,7 +651,18 @@ fn convex_qp_strategy_rank_deficient(
             prop::collection::vec(0.5f64..3.0, n),
         )
             .prop_map(
-                move |(dims, mut l_off, mut l_diag, c, a_vals, a_mask, b_mag, cts_raw, bnd_raw, bnd_mag)| {
+                move |(
+                    dims,
+                    mut l_off,
+                    mut l_diag,
+                    c,
+                    a_vals,
+                    a_mask,
+                    b_mag,
+                    cts_raw,
+                    bnd_raw,
+                    bnd_mag,
+                )| {
                     let (n, m) = dims;
                     l_diag[0] = 0.0;
                     for i in 0..n {
@@ -694,10 +717,7 @@ fn convex_qp_strategy_rank_deficient(
 /// 線形制約付き 非凸 QP。既存 `nonconvex_qp_strategy_inner` は a = zero_csc のみ
 /// で制約あり経路 (Aᵀy 寄与 + comp_ineq) を踏まない。Le/Ge のみ (Eq は global
 /// solver が Infeasible を返しやすく Optimal-claim サンプル枯渇)。
-fn nonconvex_qp_strategy_constrained(
-    nmax: usize,
-    mmax: usize,
-) -> impl Strategy<Value = QpProblem> {
+fn nonconvex_qp_strategy_constrained(nmax: usize, mmax: usize) -> impl Strategy<Value = QpProblem> {
     (2usize..=nmax, 1usize..=mmax).prop_flat_map(move |(n, m)| {
         let nn = n * n;
         let nm = n * m;
@@ -714,7 +734,18 @@ fn nonconvex_qp_strategy_constrained(
             prop::collection::vec(0.5f64..3.0, n),
         )
             .prop_map(
-                move |(dims, mut l_off, l_diag, d_sign, c, a_vals, a_mask, b_mag, cts_raw, bnd_mag)| {
+                move |(
+                    dims,
+                    mut l_off,
+                    l_diag,
+                    d_sign,
+                    c,
+                    a_vals,
+                    a_mask,
+                    b_mag,
+                    cts_raw,
+                    bnd_mag,
+                )| {
                     let (n, m) = dims;
                     for i in 0..n {
                         for j in 0..n {
@@ -769,14 +800,18 @@ fn assert_kkt_when_optimal_lp(
     if res.solution.len() != lp.num_vars {
         return Err(TestCaseError::fail(format!(
             "{}: Optimal なのに solution shape 不一致 (got len={}, expected {})",
-            label, res.solution.len(), lp.num_vars,
+            label,
+            res.solution.len(),
+            lp.num_vars,
         )));
     }
     let k = lp_kkt_resid(lp, res);
     prop_assert!(
         k.prim_stat.is_finite() && k.prim_stat < EPS_KKT,
         "{}: LP Optimal の prim_stat={:.3e} >= {:.0e}",
-        label, k.prim_stat, EPS_KKT,
+        label,
+        k.prim_stat,
+        EPS_KKT,
     );
     if !k.comp.is_finite() || k.comp >= EPS_KKT_LP_COMP_WARN {
         eprintln!(
@@ -802,14 +837,20 @@ fn assert_kkt_when_optimal_qp(
     if res.solution.len() != qp.num_vars {
         return Err(TestCaseError::fail(format!(
             "{}: {} 主張なのに solution shape 不一致 (got {} expected {})",
-            label, res.status, res.solution.len(), qp.num_vars,
+            label,
+            res.status,
+            res.solution.len(),
+            qp.num_vars,
         )));
     }
     let kkt = compute_qp_kkt_max(qp, &res.solution, &res.dual_solution, &res.bound_duals);
     prop_assert!(
         kkt.is_finite() && kkt < threshold,
         "{}: status={:?} KKT max={:.3e} >= {:.0e}",
-        label, res.status, kkt, threshold,
+        label,
+        res.status,
+        kkt,
+        threshold,
     );
     Ok(())
 }
@@ -1017,28 +1058,40 @@ fn sentinel_lp_perturbed_solution_fails_kkt() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(LP_TIMEOUT_SECS);
     let res = solve_lp_with(&lp, &opts);
-    assert_eq!(res.status, SolveStatus::Optimal, "analytic LP must be Optimal");
+    assert_eq!(
+        res.status,
+        SolveStatus::Optimal,
+        "analytic LP must be Optimal"
+    );
 
     let base = lp_kkt_resid(&lp, &res);
-    eprintln!("[sentinel_lp] base prim_stat={:.3e} comp={:.3e}", base.prim_stat, base.comp);
+    eprintln!(
+        "[sentinel_lp] base prim_stat={:.3e} comp={:.3e}",
+        base.prim_stat, base.comp
+    );
     // analytic LP: 解析的に KKT 完全成立を期待。base.max() < EPS_KKT_LP_COMP_WARN
     // で十分 (prim/stat ~ 1e-8、comp は x*=(1,0) で y=1, slack=0 → 0)。
     assert!(
         base.max() < EPS_KKT_LP_COMP_WARN,
         "base analytic LP KKT max={:.3e} not below {:.0e}; helper broken",
-        base.max(), EPS_KKT_LP_COMP_WARN,
+        base.max(),
+        EPS_KKT_LP_COMP_WARN,
     );
 
     // x* に SENTINEL_PERTURB を加えて Eq 制約 (x1+x2=1) を破る + bounds を破る
     let mut perturbed = res.clone();
     perturbed.solution[0] += SENTINEL_PERTURB;
     let pk = lp_kkt_resid(&lp, &perturbed);
-    eprintln!("[sentinel_lp] perturbed prim_stat={:.3e} comp={:.3e}", pk.prim_stat, pk.comp);
+    eprintln!(
+        "[sentinel_lp] perturbed prim_stat={:.3e} comp={:.3e}",
+        pk.prim_stat, pk.comp
+    );
     assert!(
         pk.max() >= SENTINEL_MIN_KKT,
         "sentinel broken: perturbed LP KKT max={:.3e} < {:.0e}; \
          lp_kkt_resid が no-op 化されていないか確認",
-        pk.max(), SENTINEL_MIN_KKT,
+        pk.max(),
+        SENTINEL_MIN_KKT,
     );
 }
 
@@ -1049,7 +1102,10 @@ fn sentinel_qp_perturbed_solution_fails_kkt() {
     opts.timeout_secs = Some(QP_TIMEOUT_SECS);
     let res = solve_qp_with(&qp, &opts);
     assert!(
-        matches!(res.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal),
+        matches!(
+            res.status,
+            SolveStatus::Optimal | SolveStatus::LocallyOptimal
+        ),
         "analytic convex QP must be Optimal/LocallyOptimal, got {:?}",
         res.status,
     );
@@ -1059,7 +1115,8 @@ fn sentinel_qp_perturbed_solution_fails_kkt() {
     assert!(
         base_kkt < EPS_KKT,
         "base analytic QP KKT={:.3e} not below {:.0e}; helper broken",
-        base_kkt, EPS_KKT,
+        base_kkt,
+        EPS_KKT,
     );
 
     let mut x_p = res.solution.clone();
@@ -1070,7 +1127,8 @@ fn sentinel_qp_perturbed_solution_fails_kkt() {
         perturbed_kkt >= SENTINEL_MIN_KKT,
         "sentinel broken: perturbed QP KKT={:.3e} < {:.0e}; \
          compute_qp_kkt_max が no-op 化されていないか確認",
-        perturbed_kkt, SENTINEL_MIN_KKT,
+        perturbed_kkt,
+        SENTINEL_MIN_KKT,
     );
 }
 
@@ -1120,17 +1178,20 @@ fn sentinel_qp_swapped_bound_duals_changes_kkt() {
     assert!(
         base.is_finite() && base < EPS_KKT,
         "true bd に対する KKT={:.3e} not below {:.0e} — helper bug or 規約 mismatch",
-        base, EPS_KKT,
+        base,
+        EPS_KKT,
     );
     assert!(
         swapped >= SENTINEL_MIN_KKT,
         "swap した bd で KKT={:.3e} < {:.0e} — bd 引数 no-op の疑い",
-        swapped, SENTINEL_MIN_KKT,
+        swapped,
+        SENTINEL_MIN_KKT,
     );
     assert!(
         swapped > base * 100.0 || swapped >= SENTINEL_MIN_KKT,
         "swap 前後で KKT が変化していない (base={:.3e}, swapped={:.3e})",
-        base, swapped,
+        base,
+        swapped,
     );
 }
 
@@ -1144,15 +1205,27 @@ fn sentinel_qp_swapped_bound_duals_changes_kkt() {
 #[test]
 fn regression_2f2956_bb_polish_kkt() {
     let q = CscMatrix::from_triplets(
-        &[0, 1], &[0, 1],
-        &[0.5199347774014249_f64, 1.6114924907303565_f64], 2, 2,
-    ).unwrap();
+        &[0, 1],
+        &[0, 1],
+        &[0.5199347774014249_f64, 1.6114924907303565_f64],
+        2,
+        2,
+    )
+    .unwrap();
     let c = vec![-1.1554333262013776_f64, 1.3835214549363157_f64];
     let a = CscMatrix::from_triplets(
-        &[2usize, 0], &[0usize, 1],
-        &[-0.63654636737306_f64, 0.9342944804813141_f64], 3, 2,
-    ).unwrap();
-    let b_vec = vec![2.090821457603841_f64, 2.0007963900069394_f64, -2.010004968923449_f64];
+        &[2usize, 0],
+        &[0usize, 1],
+        &[-0.63654636737306_f64, 0.9342944804813141_f64],
+        3,
+        2,
+    )
+    .unwrap();
+    let b_vec = vec![
+        2.090821457603841_f64,
+        2.0007963900069394_f64,
+        -2.010004968923449_f64,
+    ];
     let bounds = vec![
         (-1.4382225919619933_f64, 1.4382225919619933_f64),
         (-1.7758618255843723_f64, 1.7758618255843723_f64),
@@ -1168,7 +1241,13 @@ fn regression_2f2956_bb_polish_kkt() {
     let res = solve_qp_global(&qp, &opts, &cfg);
 
     assert!(
-        matches!(res.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::NonconvexGlobal | SolveStatus::NonconvexLocal),
+        matches!(
+            res.status,
+            SolveStatus::Optimal
+                | SolveStatus::LocallyOptimal
+                | SolveStatus::NonconvexGlobal
+                | SolveStatus::NonconvexLocal
+        ),
         "2f2956: expected feasible status, got {:?}",
         res.status,
     );
@@ -1177,10 +1256,16 @@ fn regression_2f2956_bb_polish_kkt() {
     assert!(
         kkt < EPS_KKT_NONCONVEX_LOCAL,
         "2f2956 regression: KKT={:.3e} >= {:.0e} (sub-box dual recovery bug)",
-        kkt, EPS_KKT_NONCONVEX_LOCAL,
+        kkt,
+        EPS_KKT_NONCONVEX_LOCAL,
     );
 
-    let dsign = dual_sign_violation(&qp.constraint_types, &res.dual_solution, &qp.bounds, &res.bound_duals);
+    let dsign = dual_sign_violation(
+        &qp.constraint_types,
+        &res.dual_solution,
+        &qp.bounds,
+        &res.bound_duals,
+    );
     assert!(
         dsign < EPS_KKT_NONCONVEX_LOCAL,
         "2f2956 regression: dual_sign_violation={:.3e} >= {:.0e} (wrong-sign duals in recovered incumbent)",

@@ -275,16 +275,20 @@ fn qp_maximize_with_psd_q_returns_error() {
     model.add_constraint(otspot::constraint!(x <= 5.0));
     model.maximize(0.5 * x * x + x);
     // 慣性修正付き IPM が KKT 点 (x=5) を発見し LocallyOptimal として返す。
-    let result = model.solve().expect("maximize with NSD Q should return a LocallyOptimal KKT solution");
+    let result = model
+        .solve()
+        .expect("maximize with NSD Q should return a LocallyOptimal KKT solution");
     // x=5 が境界最適解
     assert!(
         (result[x] - 5.0).abs() < 1e-3,
-        "maximize x^2/2 on [0,5]: x* should be 5.0, got {:.6}", result[x]
+        "maximize x^2/2 on [0,5]: x* should be 5.0, got {:.6}",
+        result[x]
     );
     // maximize obj = x + x^2/2 at x=5: 5 + 12.5 = 17.5
     assert!(
         (result.objective_value - 17.5).abs() < 1.0,
-        "maximize x + x^2/2 at x=5: obj should be ~17.5, got {:.6}", result.objective_value
+        "maximize x + x^2/2 at x=5: obj should be ~17.5, got {:.6}",
+        result.objective_value
     );
 }
 

@@ -53,7 +53,10 @@ pub(crate) struct NodeQueue {
 
 impl NodeQueue {
     pub fn new() -> Self {
-        Self { heap: BinaryHeap::new(), next_seq: 0 }
+        Self {
+            heap: BinaryHeap::new(),
+            next_seq: 0,
+        }
     }
 
     pub fn push(&mut self, node: MipNode) {

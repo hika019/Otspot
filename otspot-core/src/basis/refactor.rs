@@ -3,9 +3,9 @@
 //! eta ファイルが蓄積して数値精度が低下した際に、
 //! 基底行列を最初から LU 分解し直す機能を提供する。
 
+use super::lu::LuFactorization;
 use crate::error::SolverError;
 use crate::sparse::CscMatrix;
-use super::lu::LuFactorization;
 use std::time::Instant;
 
 /// deadline 付き基底行列再因子分解
@@ -21,6 +21,10 @@ use std::time::Instant;
 ///
 /// # エラー
 /// LU 分解が失敗（特異）または deadline 超過した場合は `Err` を返す
-pub(crate) fn refactor_timed(a: &CscMatrix, basis: &[usize], deadline: Option<Instant>) -> Result<LuFactorization, SolverError> {
+pub(crate) fn refactor_timed(
+    a: &CscMatrix,
+    basis: &[usize],
+    deadline: Option<Instant>,
+) -> Result<LuFactorization, SolverError> {
     LuFactorization::factorize_timed(a, basis, deadline)
 }

@@ -3,11 +3,16 @@
 //! 期待挙動: 収束未達 status (Timeout / MaxIterations / NumericalError / NonConvex) は
 //! 格上げ対象外。SuboptimalSolution / LocallyOptimal のみ Optimal 化 (KKT 近傍正規 status)。
 
-use otspot_dev::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
 use otspot::problem::{SolveStatus, SolverResult};
+use otspot_dev::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
 
 fn make(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
-    SolverResult { status, solution, objective, ..Default::default() }
+    SolverResult {
+        status,
+        solution,
+        objective,
+        ..Default::default()
+    }
 }
 
 /// regression sentinel: Timeout + 有効解 でも Optimal 格上げしない。
@@ -112,7 +117,11 @@ fn max_iterations_not_promoted() {
 
 #[test]
 fn nonconvex_not_promoted() {
-    let r_in = make(SolveStatus::NonConvex("indefinite Q".into()), vec![1.0; 3], 1.0);
+    let r_in = make(
+        SolveStatus::NonConvex("indefinite Q".into()),
+        vec![1.0; 3],
+        1.0,
+    );
     let r_out = apply_bench_status_promotion(r_in, 3, BenchPromotionPolicy::BenchQplib);
     assert!(matches!(r_out.status, SolveStatus::NonConvex(_)));
 }

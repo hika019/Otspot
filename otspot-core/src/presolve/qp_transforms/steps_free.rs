@@ -33,7 +33,9 @@ pub(super) fn step7_free_var(
         let q_nnz_j = {
             let start = prob.q.col_ptr[j];
             let end = prob.q.col_ptr[j + 1];
-            (start..end).filter(|&k| prob.q.values[k].abs() > ZERO_TOL).count()
+            (start..end)
+                .filter(|&k| prob.q.values[k].abs() > ZERO_TOL)
+                .count()
         };
         if q_nnz_j > 0 {
             continue;
@@ -74,7 +76,11 @@ pub(super) fn step7_free_var(
         apply_fixed_variable(j, val, prob, ws);
         ws.removed_cols[j] = true;
         ws.removed_rows[i] = true;
-        ws.postsolve_stack.push(QpPostsolveStep::SingletonRow { row: i, col: j, val });
+        ws.postsolve_stack.push(QpPostsolveStep::SingletonRow {
+            row: i,
+            col: j,
+            val,
+        });
     }
     Ok(())
 }

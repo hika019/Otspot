@@ -5,8 +5,8 @@
 //! bound types, RANGES, and obj_offset.  Each case is table-driven with at
 //! least two distinct data patterns.
 
-use otspot_io::qps::{parse_qps_str, QpsError};
 use otspot_core::problem::ConstraintType;
+use otspot_io::qps::{parse_qps_str, QpsError};
 
 // ── LP-only (no QUADOBJ) ──────────────────────────────────────────────────────
 
@@ -153,7 +153,11 @@ QUADOBJ
 ENDATA
 ";
     let p2 = parse_qps_str(full_qps).unwrap();
-    assert_eq!(p2.q.nnz(), 4, "full 2×2 symmetric Q: 4 entries after symmetrization");
+    assert_eq!(
+        p2.q.nnz(),
+        4,
+        "full 2×2 symmetric Q: 4 entries after symmetrization"
+    );
 }
 
 // ── Bound types ───────────────────────────────────────────────────────────────
@@ -285,13 +289,19 @@ RHS
 ENDATA
 ";
     let p_zero = parse_qps_str(qps_zero).unwrap();
-    assert!(p_zero.obj_offset.abs() < 1e-12, "zero offset when N-row RHS absent");
+    assert!(
+        p_zero.obj_offset.abs() < 1e-12,
+        "zero offset when N-row RHS absent"
+    );
 
     // Invalid offset (inf) → error
     let qps_inf =
         "NAME  INF\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x  obj  1.0  c1  1.0\nRHS\n    rhs  obj  inf\n    rhs  c1  5.0\nENDATA\n";
     assert!(
-        matches!(parse_qps_str(qps_inf), Err(QpsError::InvalidObjectiveOffset(_))),
+        matches!(
+            parse_qps_str(qps_inf),
+            Err(QpsError::InvalidObjectiveOffset(_))
+        ),
         "inf offset must produce error"
     );
 }
@@ -318,6 +328,10 @@ ENDATA
     let prob = parse_qps_str(qps).unwrap();
     // Le stays Le; Ge is sign-flipped internally to Le; Eq stays Eq.
     assert_eq!(prob.constraint_types[0], ConstraintType::Le, "le1");
-    assert_eq!(prob.constraint_types[1], ConstraintType::Le, "ge1 → sign-flipped Le");
+    assert_eq!(
+        prob.constraint_types[1],
+        ConstraintType::Le,
+        "ge1 → sign-flipped Le"
+    );
     assert_eq!(prob.constraint_types[2], ConstraintType::Eq, "eq1");
 }

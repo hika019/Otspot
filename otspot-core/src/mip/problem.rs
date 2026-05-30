@@ -203,7 +203,6 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,7 +240,13 @@ mod tests {
     #[test]
     fn new_rejects_out_of_range_index() {
         let err = MilpProblem::new(lp_2var(), vec![0, 2]).unwrap_err();
-        assert_eq!(err, MipProblemError::InvalidIntegerVar { index: 2, num_vars: 2 });
+        assert_eq!(
+            err,
+            MipProblemError::InvalidIntegerVar {
+                index: 2,
+                num_vars: 2
+            }
+        );
     }
 
     #[test]
@@ -253,7 +258,13 @@ mod tests {
     #[test]
     fn miqp_new_validates_indices() {
         let err = MiqpProblem::new(qp_diag(&[2.0, 2.0]), vec![2]).unwrap_err();
-        assert_eq!(err, MipProblemError::InvalidIntegerVar { index: 2, num_vars: 2 });
+        assert_eq!(
+            err,
+            MipProblemError::InvalidIntegerVar {
+                index: 2,
+                num_vars: 2
+            }
+        );
     }
 
     #[test]
@@ -265,7 +276,10 @@ mod tests {
     #[test]
     fn indefinite_q_is_not_convex() {
         let m = MiqpProblem::new(qp_diag(&[2.0, -3.0]), vec![0, 1]).unwrap();
-        assert!(!m.is_convex(), "negative eigenvalue must be detected as non-convex");
+        assert!(
+            !m.is_convex(),
+            "negative eigenvalue must be detected as non-convex"
+        );
     }
 
     #[test]
@@ -296,8 +310,15 @@ mod tests {
         // x fixed to 2 but constraint x >= 5 → infeasible.
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-        let qp = QpProblem::new(q, vec![0.0], a, vec![5.0], vec![(2.0, 2.0)], vec![ConstraintType::Ge])
-            .unwrap();
+        let qp = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![5.0],
+            vec![(2.0, 2.0)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
         let r = solve_fixed_point(&qp, &[(2.0, 2.0)]).expect("all fixed → Some");
         assert_eq!(r.status, SolveStatus::Infeasible);
     }
@@ -315,7 +336,10 @@ mod tests {
         // Must return Some(NumericalError), not None (which would silently fall to IPM).
         let qp = qp_diag(&[2.0, 2.0]);
         let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
-        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert!(
+            r.is_some(),
+            "dim mismatch must not return None (IPM fallback)"
+        );
         assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
     }
 
@@ -324,9 +348,13 @@ mod tests {
         // 2-var QP with a constraint: x.len()=1 but A.ncols=2 → A mat_vec_mul error.
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
-        let qp = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![5.0], vec![(0.0, 5.0); 2]).unwrap();
+        let qp =
+            QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![5.0], vec![(0.0, 5.0); 2]).unwrap();
         let r = solve_fixed_point(&qp, &[(1.0, 1.0)]);
-        assert!(r.is_some(), "dim mismatch must not return None (IPM fallback)");
+        assert!(
+            r.is_some(),
+            "dim mismatch must not return None (IPM fallback)"
+        );
         assert_eq!(r.unwrap().status, SolveStatus::NumericalError);
     }
 
@@ -340,10 +368,12 @@ mod tests {
         assert!(MiqpProblem::new(qp, vec![0, 1]).unwrap().is_convex());
 
         // Q = [[1,2],[2,1]] is indefinite (eigenvalues -1, 3).
-        let q2 = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 2.0, 2.0, 1.0], 2, 2)
-            .unwrap();
+        let q2 =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 2.0, 2.0, 1.0], 2, 2)
+                .unwrap();
         let a2 = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-        let qp2 = QpProblem::new_all_le(q2, vec![0.0, 0.0], a2, vec![], vec![(0.0, 5.0); 2]).unwrap();
+        let qp2 =
+            QpProblem::new_all_le(q2, vec![0.0, 0.0], a2, vec![], vec![(0.0, 5.0); 2]).unwrap();
         assert!(!MiqpProblem::new(qp2, vec![0, 1]).unwrap().is_convex());
     }
 
@@ -356,11 +386,17 @@ mod tests {
         let mut cols = Vec::new();
         let mut vals = Vec::new();
         for i in 0..n {
-            rows.push(i); cols.push(i); vals.push(1.0_f64);
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0_f64);
         }
         // off-diagonal: Q[0,1]=Q[1,0]=2 makes the 2×2 block eigenvalues {-1,3}
-        rows.push(0); cols.push(1); vals.push(2.0);
-        rows.push(1); cols.push(0); vals.push(2.0);
+        rows.push(0);
+        cols.push(1);
+        vals.push(2.0);
+        rows.push(1);
+        cols.push(0);
+        vals.push(2.0);
         let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
         let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
@@ -398,7 +434,10 @@ mod tests {
     fn large_n_diagonal_psd_is_convex() {
         // n=1001 diagonal-2 Q (strictly PD) must be convex.
         let m = large_n_psd_miqp(1001);
-        assert!(m.is_convex(), "large-n diagonal PSD Q must not be over-rejected");
+        assert!(
+            m.is_convex(),
+            "large-n diagonal PSD Q must not be over-rejected"
+        );
     }
 
     /// Regression guard: large-n Q=0 (LP case) is trivially convex.
@@ -421,13 +460,18 @@ mod tests {
         let mut cols: Vec<usize> = Vec::new();
         let mut vals: Vec<f64> = Vec::new();
         for i in 0..n - 1 {
-            rows.push(i); cols.push(i); vals.push(1.0);
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
         }
         let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
         let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
         let m = MiqpProblem::new(qp, vec![0]).unwrap();
-        assert!(m.is_convex(), "large-n PSD-singular Q must be accepted as convex");
+        assert!(
+            m.is_convex(),
+            "large-n PSD-singular Q must be accepted as convex"
+        );
     }
 
     /// `is_convex` detects indefinite Q (n=1001) via Cholesky.
@@ -440,13 +484,20 @@ mod tests {
         let mut cols = vec![];
         let mut vals = vec![];
         for i in 0..n {
-            rows.push(i); cols.push(i); vals.push(1.0_f64);
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0_f64);
         }
-        rows.push(0); cols.push(1); vals.push(2.0_f64);
+        rows.push(0);
+        cols.push(1);
+        vals.push(2.0_f64);
         let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();
         let qp = QpProblem::new_all_le(q, vec![0.0; n], a, vec![], vec![(0.0, 5.0); n]).unwrap();
         let m = MiqpProblem::new(qp, vec![0]).unwrap();
-        assert!(!m.is_convex(), "n=1001 indefinite Q must be detected as non-PSD");
+        assert!(
+            !m.is_convex(),
+            "n=1001 indefinite Q must be detected as non-PSD"
+        );
     }
 }

@@ -67,44 +67,62 @@ where
         let mut scaler = RuizScaler::new(n, m);
         scaler.compute_with_rhs(&problem.q, &problem.a, &problem.c, &[]);
 
-        let (q_s, a_s, c_s, b_s, bounds_s) =
-            scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);
+        let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
+            &problem.q,
+            &problem.a,
+            &problem.c,
+            &problem.b,
+            &problem.bounds,
+        );
 
         if let Ok(mut scaled_problem) = QpProblem::new(
-            q_s, c_s, a_s, b_s, bounds_s, problem.constraint_types.clone(),
+            q_s,
+            c_s,
+            a_s,
+            b_s,
+            bounds_s,
+            problem.constraint_types.clone(),
         ) {
             scaled_problem.obj_offset = problem.obj_offset;
             // unscale 後に元空間 eps を保証するため scaled 空間 eps を amp 倍 tighten。
             let amplification = compute_amplification(&scaler);
             let mut adjusted_opts = options.clone();
-            adjusted_opts.ipm.eps =
-                (options.ipm_eps() / amplification).max(EPS_FLOOR);
+            adjusted_opts.ipm.eps = (options.ipm_eps() / amplification).max(EPS_FLOOR);
             // warm start: user 空間 (x, y) を scaled 空間に変換 (Ruiz: x = D·x_s, y = E·y_s/c)
             if let Some(ws) = adjusted_opts.warm_start_qp.as_mut() {
                 if ws.x.len() == n && ws.y.len() == m {
-                    for j in 0..n { ws.x[j] /= scaler.d[j]; }
-                    for i in 0..m { ws.y[i] = scaler.c * ws.y[i] / scaler.e[i]; }
+                    for j in 0..n {
+                        ws.x[j] /= scaler.d[j];
+                    }
+                    for i in 0..m {
+                        ws.y[i] = scaler.c * ws.y[i] / scaler.e[i];
+                    }
                 } else {
                     log::warn!(
                         "warm_start_qp ignored: ruiz dim mismatch (x: {}/{}, y: {}/{})",
-                        ws.x.len(), n, ws.y.len(), m
+                        ws.x.len(),
+                        n,
+                        ws.y.len(),
+                        m
                     );
                     adjusted_opts.warm_start_qp = None;
                 }
             }
 
-            let scaled_result = inner_solver(
-                &scaled_problem,
-                &adjusted_opts,
-                options.ipm_eps(),
-            );
+            let scaled_result = inner_solver(&scaled_problem, &adjusted_opts, options.ipm_eps());
             let result = unscale_ipm_result(scaled_result, &scaler, problem, options.ipm_eps());
 
             if result.status == SolveStatus::MaxIterations {
                 if !result.solution.is_empty() {
-                    return SolverResult { status: SolveStatus::SuboptimalSolution, ..result };
+                    return SolverResult {
+                        status: SolveStatus::SuboptimalSolution,
+                        ..result
+                    };
                 } else {
-                    return SolverResult { status: SolveStatus::Timeout, ..result };
+                    return SolverResult {
+                        status: SolveStatus::Timeout,
+                        ..result
+                    };
                 }
             }
             return result;
@@ -169,8 +187,16 @@ pub(crate) fn check_bfeas_status(x: &[f64], bounds: &[(f64, f64)], eps: f64) -> 
         .iter()
         .zip(bounds.iter())
         .map(|(&xi, &(lb, ub))| {
-            let lb_viol = if lb.is_finite() { (lb - xi).max(0.0) } else { 0.0 };
-            let ub_viol = if ub.is_finite() { (xi - ub).max(0.0) } else { 0.0 };
+            let lb_viol = if lb.is_finite() {
+                (lb - xi).max(0.0)
+            } else {
+                0.0
+            };
+            let ub_viol = if ub.is_finite() {
+                (xi - ub).max(0.0)
+            } else {
+                0.0
+            };
             lb_viol.max(ub_viol)
         })
         .fold(0.0_f64, f64::max);
@@ -245,7 +271,8 @@ pub(crate) fn check_dfeas_status_relative(
     // 全体最大値スケールでは外れ残差を 1 成分でマスクするため、各成分 j を独立正規化して max。
     let mut dfeas_relative = 0.0_f64;
     for j in 0..n {
-        let r_dd = qx_dd[j] + aty_dd[j] + TwoFloat::from(bound_contrib[j]) + TwoFloat::from(problem.c[j]);
+        let r_dd =
+            qx_dd[j] + aty_dd[j] + TwoFloat::from(bound_contrib[j]) + TwoFloat::from(problem.c[j]);
         let r = f64::from(r_dd).abs();
         let scale_j = 1.0
             + f64::from(qx_dd[j]).abs()
@@ -271,12 +298,22 @@ pub(crate) fn compute_amplification(scaler: &RuizScaler) -> f64 {
     let e_min = if scaler.e.is_empty() {
         1.0
     } else {
-        scaler.e.iter().cloned().fold(f64::INFINITY, f64::min).max(f64::MIN_POSITIVE)
+        scaler
+            .e
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+            .max(f64::MIN_POSITIVE)
     };
     let d_min = if scaler.d.is_empty() {
         1.0
     } else {
-        scaler.d.iter().cloned().fold(f64::INFINITY, f64::min).max(f64::MIN_POSITIVE)
+        scaler
+            .d
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+            .max(f64::MIN_POSITIVE)
     };
     (1.0 / e_min).max(1.0 / (scaler.c * d_min))
 }
@@ -422,9 +459,13 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
         let problem = crate::qp::problem::QpProblem::new_all_le(
-            q, vec![0.0, 0.0], a, vec![-1.0],
+            q,
+            vec![0.0, 0.0],
+            a,
+            vec![-1.0],
             vec![(0.0_f64, f64::INFINITY), (0.0_f64, f64::INFINITY)],
-        ).unwrap();
+        )
+        .unwrap();
 
         let x = vec![0.5, 0.5];
         let y = vec![1.0]; // Le constraint dual >= 0
@@ -433,7 +474,10 @@ mod tests {
         let view = ProblemView::from_problem(&problem);
         let comp_new = complementarity_residual_rel(&view, &x, &y, &bound_duals);
         let status = check_dfeas_status_relative(&problem, &x, &y, &bound_duals, 1e-4);
-        assert!(comp_new < 1e-4, "complementarity_residual_rel at optimal: {comp_new:.3e}");
+        assert!(
+            comp_new < 1e-4,
+            "complementarity_residual_rel at optimal: {comp_new:.3e}"
+        );
         assert_eq!(status, crate::problem::SolveStatus::Optimal);
     }
 
@@ -448,8 +492,13 @@ mod tests {
         let q = CscMatrix::new(1, 1);
         let a = CscMatrix::new(0, 1);
         let problem = crate::qp::problem::QpProblem::new_all_le(
-            q, vec![1.0], a, vec![], vec![(0.0_f64, f64::INFINITY)],
-        ).unwrap();
+            q,
+            vec![1.0],
+            a,
+            vec![],
+            vec![(0.0_f64, f64::INFINITY)],
+        )
+        .unwrap();
 
         let x = vec![1.0];
         let y: Vec<f64> = vec![];

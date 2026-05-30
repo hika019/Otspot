@@ -15,7 +15,10 @@ fn assert_obj_close(actual: f64, expected: f64, name: &str) {
     assert!(
         rel < 1e-6,
         "{}: expected {:.8}, got {:.8} (rel_err={:.2e})",
-        name, expected, actual, rel
+        name,
+        expected,
+        actual,
+        rel
     );
 }
 
@@ -44,9 +47,23 @@ fn test_hs21() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "HS21: status should be Optimal");
-    assert_close(result.solution[0], 10.0, EPS_SOL, "HS21: x1* = 10 (upper bound active)");
-    assert_close(result.solution[1], 0.5, EPS_SOL, "HS21: x2* = 0.5 (interior min)");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "HS21: status should be Optimal"
+    );
+    assert_close(
+        result.solution[0],
+        10.0,
+        EPS_SOL,
+        "HS21: x1* = 10 (upper bound active)",
+    );
+    assert_close(
+        result.solution[1],
+        0.5,
+        EPS_SOL,
+        "HS21: x2* = 0.5 (interior min)",
+    );
     // QP 目的関数値 = -99.25（原問題値と同一、定数項なし）
     assert_obj_close(result.objective, -99.25, "HS21: QP objective = -99.25");
 }
@@ -66,14 +83,17 @@ fn test_hs35() {
     .unwrap();
     let c = vec![-8.0, -6.0, -4.0];
     // A = [[1, 1, 2]],  b = [3]
-    let a =
-        CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 2.0], 1, n).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 0], &[0, 1, 2], &[1.0, 1.0, 2.0], 1, n).unwrap();
     let b = vec![3.0];
     let bounds = vec![(0.0_f64, f64::INFINITY); n];
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "HS35: status should be Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "HS35: status should be Optimal"
+    );
     assert_close(result.solution[0], 4.0 / 3.0, EPS_SOL, "HS35: x1* = 4/3");
     assert_close(result.solution[1], 7.0 / 9.0, EPS_SOL, "HS35: x2* = 7/9");
     assert_close(result.solution[2], 4.0 / 9.0, EPS_SOL, "HS35: x3* = 4/9");
@@ -119,11 +139,7 @@ fn test_hs51() {
         &[0, 1, 0, 1, 4, 5, 2, 3, 2, 3, 2, 3, 4, 5],
         &[0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4],
         &[
-            1.0, -1.0,
-            3.0, -3.0, 1.0, -1.0,
-            1.0, -1.0,
-            1.0, -1.0,
-            -2.0, 2.0, -1.0, 1.0,
+            1.0, -1.0, 3.0, -3.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -2.0, 2.0, -1.0, 1.0,
         ],
         6,
         n,
@@ -143,7 +159,11 @@ fn test_hs51() {
     let mut opts: otspot::SolverOptions = Default::default();
     opts.warm_start_qp = Some(ws);
     let result = solve_qp_with(&problem, &opts);
-    assert_eq!(result.status, SolveStatus::Optimal, "HS51: status should be Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "HS51: status should be Optimal"
+    );
     for i in 0..n {
         assert_close(
             result.solution[i],
@@ -174,7 +194,11 @@ fn test_cvxqp1_s() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "CVXQP1_S: status should be Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "CVXQP1_S: status should be Optimal"
+    );
     // λ*=0 (制約境界上で dual が零): 解変数の精度は O(sqrt(eps)) ≈ 5e-4 (EPS_DEG)
     // 目的値は O(eps) まで収束するので EPS_OBJ を使う
     for i in 0..n {
@@ -215,10 +239,24 @@ fn test_qpcstair_like() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal, "QPCSTAIR: status should be Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "QPCSTAIR: status should be Optimal"
+    );
     for k in 0..3 {
-        assert_close(result.solution[2 * k], 1.25, EPS_SOL, &format!("QPCSTAIR: x{}* = 1.25", 2*k+1));
-        assert_close(result.solution[2 * k + 1], 0.75, EPS_SOL, &format!("QPCSTAIR: x{}* = 0.75", 2*k+2));
+        assert_close(
+            result.solution[2 * k],
+            1.25,
+            EPS_SOL,
+            &format!("QPCSTAIR: x{}* = 1.25", 2 * k + 1),
+        );
+        assert_close(
+            result.solution[2 * k + 1],
+            0.75,
+            EPS_SOL,
+            &format!("QPCSTAIR: x{}* = 0.75", 2 * k + 2),
+        );
     }
     assert_obj_close(result.objective, -9.375, "QPCSTAIR: QP objective = -9.375");
 }

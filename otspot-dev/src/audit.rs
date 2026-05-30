@@ -43,8 +43,12 @@ mod tests {
                 in_str = !in_str;
             }
             if !in_str {
-                if ch == '{' { opens += 1; }
-                if ch == '}' { closes += 1; }
+                if ch == '{' {
+                    opens += 1;
+                }
+                if ch == '}' {
+                    closes += 1;
+                }
             }
             i += 1;
         }
@@ -70,8 +74,8 @@ mod tests {
         // Pending flags: set when an attribute is seen; cleared once we open a block.
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false; // #[test] / #[tokio::test]
-        // Stack of depths at which #[allow(clippy::print_stderr/stdout)] was seen.
-        // Print macros at depth > allow_stack.last() are exempted.
+                                           // Stack of depths at which #[allow(clippy::print_stderr/stdout)] was seen.
+                                           // Print macros at depth > allow_stack.last() are exempted.
         let mut allow_print_stack: Vec<i32> = Vec::new();
 
         for (line_idx, raw_line) in content.lines().enumerate() {
@@ -151,7 +155,8 @@ mod tests {
                 let code_part = raw_line.split("//").next().unwrap_or(raw_line);
                 for &macro_name in PRINT_MACROS {
                     if code_part.contains(macro_name) {
-                        violations.push((line_no, macro_name.trim_end_matches('(').to_string() + "!"));
+                        violations
+                            .push((line_no, macro_name.trim_end_matches('(').to_string() + "!"));
                         break;
                     }
                 }
@@ -242,7 +247,8 @@ mod tests {
             };
 
             // Extract function name
-            let fn_name = extract_fn_name(lines[fn_idx]).unwrap_or_else(|| format!("<line_{}>", fn_idx + 1));
+            let fn_name =
+                extract_fn_name(lines[fn_idx]).unwrap_or_else(|| format!("<line_{}>", fn_idx + 1));
 
             // should_panic functions are always valid
             if should_panic_seen {
@@ -326,10 +332,7 @@ mod tests {
         let mut all_violations: Vec<(PathBuf, usize, String)> = Vec::new();
 
         for dir in &prod_dirs {
-            for entry in WalkDir::new(dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path().to_path_buf();
                 if path.extension().and_then(|s| s.to_str()) != Some("rs") {
                     continue;
@@ -387,10 +390,7 @@ mod tests {
         let mut all_violations: Vec<(PathBuf, usize, String)> = Vec::new();
 
         for dir in integration_dirs.iter().chain(src_dirs.iter()) {
-            for entry in WalkDir::new(dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path().to_path_buf();
                 if path.extension().and_then(|s| s.to_str()) != Some("rs") {
                     continue;
@@ -411,9 +411,8 @@ mod tests {
         }
 
         if !all_violations.is_empty() {
-            let mut msg = String::from(
-                "observation-only tests detected (add assertions or delete):\n",
-            );
+            let mut msg =
+                String::from("observation-only tests detected (add assertions or delete):\n");
             for (path, line_no, name) in &all_violations {
                 msg.push_str(&format!("  {}:{}: fn {}\n", path.display(), line_no, name));
             }
@@ -430,11 +429,17 @@ mod tests {
         const DEAD_PREFIX: &str = "let _ = ";
         let mut search = text;
         while let Some(pos) = search.find(ident) {
-            let before = if pos == 0 { b' ' } else { search.as_bytes()[pos - 1] };
+            let before = if pos == 0 {
+                b' '
+            } else {
+                search.as_bytes()[pos - 1]
+            };
             let after_pos = pos + ident.len();
             let after = search.as_bytes().get(after_pos).copied().unwrap_or(b' ');
-            let is_word = !before.is_ascii_alphanumeric() && before != b'_'
-                && !after.is_ascii_alphanumeric() && after != b'_';
+            let is_word = !before.is_ascii_alphanumeric()
+                && before != b'_'
+                && !after.is_ascii_alphanumeric()
+                && after != b'_';
             if is_word {
                 // True dead-discard: exactly "let _ = <ident>" immediately before.
                 let is_dead_let = pos >= DEAD_PREFIX.len()
@@ -478,7 +483,9 @@ mod tests {
                 skip_stack.pop();
             }
 
-            if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
+            if trimmed.contains("#[cfg(test)]") {
+                pending_cfg_test = true;
+            }
             if trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]") {
                 pending_test_attr = true;
             }
@@ -494,17 +501,28 @@ mod tests {
                 pending_test_attr = false;
             }
             let in_skip = skip_stack.last().is_some_and(|&d| depth > d);
-            if in_skip { continue; }
-            if opens > 0 { pending_cfg_test = false; pending_test_attr = false; }
+            if in_skip {
+                continue;
+            }
+            if opens > 0 {
+                pending_cfg_test = false;
+                pending_test_attr = false;
+            }
 
-            if trimmed.starts_with("//") { continue; }
+            if trimmed.starts_with("//") {
+                continue;
+            }
 
             // Match `let _ = ident;`
             let ident = {
-                let Some(rest) = trimmed.strip_prefix("let _ = ") else { continue };
+                let Some(rest) = trimmed.strip_prefix("let _ = ") else {
+                    continue;
+                };
                 let candidate = rest.trim_end_matches(';').trim();
                 if candidate.is_empty()
-                    || !candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || !candidate
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 {
                     continue;
                 }
@@ -517,34 +535,50 @@ mod tests {
             let fn_line = {
                 let mut found = None;
                 for back in (0..idx).rev() {
-                    if idx - back > 200 { break; }
+                    if idx - back > 200 {
+                        break;
+                    }
                     let bl = lines[back].trim();
                     if !bl.starts_with("//") && lines[back].contains("fn ") {
                         found = Some(back);
                         break;
                     }
                 }
-                match found { Some(l) => l, None => continue }
+                match found {
+                    Some(l) => l,
+                    None => continue,
+                }
             };
 
             // Find the function's opening `{` by scanning forward from fn_line.
             let body_line = {
                 let mut found = None;
                 let end = (fn_line + 40).min(lines.len().saturating_sub(1));
-                for (fwd, l) in lines.iter().enumerate().skip(fn_line).take(end.saturating_sub(fn_line) + 1) {
+                for (fwd, l) in lines
+                    .iter()
+                    .enumerate()
+                    .skip(fn_line)
+                    .take(end.saturating_sub(fn_line) + 1)
+                {
                     if l.contains('{') {
                         found = Some(fwd);
                         break;
                     }
                 }
-                match found { Some(l) => l, None => continue }
+                match found {
+                    Some(l) => l,
+                    None => continue,
+                }
             };
 
             // Collect signature text (fn_line..=body_line).
             let sig: String = lines[fn_line..=body_line].join("\n");
 
             // Extract parameter region between first `(` and `{`.
-            let paren_start = match sig.find('(') { Some(i) => i, None => continue };
+            let paren_start = match sig.find('(') {
+                Some(i) => i,
+                None => continue,
+            };
             let brace_end = sig.find('{').unwrap_or(sig.len());
             let param_region = &sig[paren_start..brace_end.min(sig.len())];
 
@@ -554,16 +588,22 @@ mod tests {
                 let mut sf = 0;
                 while let Some(pos) = param_region[sf..].find(&needle) {
                     let abs = sf + pos;
-                    let before = if abs == 0 { b'(' }
-                    else { *param_region.as_bytes().get(abs - 1).unwrap_or(&b'(') };
+                    let before = if abs == 0 {
+                        b'('
+                    } else {
+                        *param_region.as_bytes().get(abs - 1).unwrap_or(&b'(')
+                    };
                     if matches!(before, b'(' | b' ' | b'\t' | b'\n' | b',') {
-                        found = true; break;
+                        found = true;
+                        break;
                     }
                     sf = abs + 1;
                 }
                 found
             };
-            if !is_param { continue; }
+            if !is_param {
+                continue;
+            }
 
             // Collect function body text (after the opening `{`, before closing `}`)
             // to check if ident is used anywhere other than `let _ = ident;`.
@@ -583,17 +623,23 @@ mod tests {
                             let rest = &l[brace_pos + 1..];
                             d += rest.chars().filter(|&c| c == '{').count() as i32;
                             d -= rest.chars().filter(|&c| c == '}').count() as i32;
-                            if d <= 0 { break 'outer; }
+                            if d <= 0 {
+                                break 'outer;
+                            }
                         }
                     } else {
                         let opens_f = l.chars().filter(|&c| c == '{').count() as i32;
                         let closes_f = l.chars().filter(|&c| c == '}').count() as i32;
                         d += opens_f - closes_f;
-                        if d <= 0 { break 'outer; }
+                        if d <= 0 {
+                            break 'outer;
+                        }
                         body.push_str(l);
                         body.push('\n');
                     }
-                    if fwd - body_line > 500 { break; }
+                    if fwd - body_line > 500 {
+                        break;
+                    }
                 }
                 body
             };
@@ -625,10 +671,7 @@ mod tests {
         let mut all_violations: Vec<(std::path::PathBuf, usize, String)> = Vec::new();
 
         for dir in &prod_dirs {
-            for entry in WalkDir::new(dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path().to_path_buf();
                 if path.extension().and_then(|s| s.to_str()) != Some("rs") {
                     continue;
@@ -655,7 +698,12 @@ mod tests {
                 "dead function parameters detected (remove from signature or use the value):\n",
             );
             for (path, line_no, param) in &all_violations {
-                msg.push_str(&format!("  {}:{}: `let _ = {};`\n", path.display(), line_no, param));
+                msg.push_str(&format!(
+                    "  {}:{}: `let _ = {};`\n",
+                    path.display(),
+                    line_no,
+                    param
+                ));
             }
             panic!("{msg}");
         }
@@ -719,8 +767,7 @@ mod tests {
             // Handles same-line brace (`impl Trait for Foo {`), next-line brace
             // (`impl Trait for Foo\n{`), and rustfmt-wrapped headers where `impl`
             // and `for` appear on separate lines (`impl<T>\n    SomeTrait for Foo<T>\n{`).
-            let is_impl_line =
-                trimmed.starts_with("impl ") || trimmed.starts_with("impl<");
+            let is_impl_line = trimmed.starts_with("impl ") || trimmed.starts_with("impl<");
             let is_trait_impl_line = is_impl_line && trimmed.contains(" for ");
             let is_trait_def_line = trimmed.starts_with("trait ")
                 || trimmed.starts_with("pub trait ")
@@ -799,7 +846,9 @@ mod tests {
                 }
             }
 
-            if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
+            if trimmed.contains("#[cfg(test)]") {
+                pending_cfg_test = true;
+            }
             if trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]") {
                 pending_test_attr = true;
             }
@@ -823,8 +872,13 @@ mod tests {
                 fn_sig_buf.clear();
                 continue;
             }
-            if opens > 0 { pending_cfg_test = false; pending_test_attr = false; }
-            if trimmed.starts_with("//") { continue; }
+            if opens > 0 {
+                pending_cfg_test = false;
+                pending_test_attr = false;
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
 
             // Detect start of a function signature.
             if !in_fn_sig && line.contains("fn ") && line.contains('(') {
@@ -895,7 +949,9 @@ mod tests {
                                 violations.push((fn_start_line, full_name));
                             }
                             search = &search[pos + 1..];
-                            if search.is_empty() { break; }
+                            if search.is_empty() {
+                                break;
+                            }
                         }
                     }
                     in_fn_sig = false;
@@ -922,10 +978,7 @@ mod tests {
         let mut all_violations: Vec<(std::path::PathBuf, usize, String)> = Vec::new();
 
         for dir in &prod_dirs {
-            for entry in WalkDir::new(dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path().to_path_buf();
                 if path.extension().and_then(|s| s.to_str()) != Some("rs") {
                     continue;
@@ -952,7 +1005,12 @@ mod tests {
                  (remove from signature or use the value):\n",
             );
             for (path, line_no, param) in &all_violations {
-                msg.push_str(&format!("  {}:{}: param `{}`\n", path.display(), line_no, param));
+                msg.push_str(&format!(
+                    "  {}:{}: param `{}`\n",
+                    path.display(),
+                    line_no,
+                    param
+                ));
             }
             panic!("{msg}");
         }
@@ -1259,7 +1317,9 @@ fn fake_should_panic() {
 "#;
         let violations = scan_observation_only_tests(content);
         assert!(
-            violations.iter().any(|(_, name)| name == "fake_should_panic"),
+            violations
+                .iter()
+                .any(|(_, name)| name == "fake_should_panic"),
             "commented #[should_panic] must not suppress observation-only detection; \
              violations: {:?}",
             violations

@@ -152,19 +152,18 @@ fn bound_absorb_interior_skip() {
     //             x2 <= 30     (Le → ub=30)
     //             x2 >= 30     (Ge → lb=30, x2 fixed at 30 ∈ (0,80) interior)
     //        0 <= x1 <= 100, 0 <= x2 <= 80
-    let a = CscMatrix::from_triplets(
-        &[0, 1, 2, 3],
-        &[0, 0, 1, 1],
-        &[1.0, 1.0, 1.0, 1.0],
-        4,
-        2,
-    )
-    .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 1, 2, 3], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 1.0], 4, 2)
+        .unwrap();
     let lp = LpProblem::new_general(
         vec![1.0, -1.0],
         a,
         vec![50.0, 50.0, 30.0, 30.0],
-        vec![ConstraintType::Le, ConstraintType::Ge, ConstraintType::Le, ConstraintType::Ge],
+        vec![
+            ConstraintType::Le,
+            ConstraintType::Ge,
+            ConstraintType::Le,
+            ConstraintType::Ge,
+        ],
         vec![(0.0, 100.0), (0.0, 80.0)],
         None,
     )
@@ -184,7 +183,9 @@ fn bound_absorb_interior_skip() {
         assert!(
             (r.reduced_costs[j] - raw_j).abs() < RC_RAW_MATCH_TOL,
             "interior-skip 違反: rc[x{}]={} != raw={} (clamp 誤適用)",
-            j + 1, r.reduced_costs[j], raw_j,
+            j + 1,
+            r.reduced_costs[j],
+            raw_j,
         );
     }
     let dfr = bench_dfeas(&lp, &r.solution, &r.reduced_costs);
@@ -225,7 +226,9 @@ fn bound_absorb_truly_fixed_skip() {
         assert!(
             (r.reduced_costs[j] - raw_j).abs() < RC_RAW_MATCH_TOL,
             "truly_fixed-skip 違反: rc[x{}]={} != raw={} (clamp 誤適用)",
-            j + 1, r.reduced_costs[j], raw_j,
+            j + 1,
+            r.reduced_costs[j],
+            raw_j,
         );
     }
     let dfr = bench_dfeas(&lp, &r.solution, &r.reduced_costs);

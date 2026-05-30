@@ -26,16 +26,26 @@ const MINI_TIMEOUT_SECS: f64 = 5.0;
 
 fn assert_obj_close(actual: f64, expected: f64, label: &str) {
     let rel = (actual - expected).abs() / (1.0 + expected.abs());
-    assert!(rel < EPS_OBJ_REL,
+    assert!(
+        rel < EPS_OBJ_REL,
         "[{}] obj actual={:.9e} expected={:.9e} rel_err={:.3e}",
-        label, actual, expected, rel);
+        label,
+        actual,
+        expected,
+        rel
+    );
 }
 
 fn assert_x_close(actual: f64, expected: f64, label: &str) {
     let diff = (actual - expected).abs();
-    assert!(diff < EPS_X_ABS,
+    assert!(
+        diff < EPS_X_ABS,
         "[{}] x actual={:.9e} expected={:.9e} diff={:.3e}",
-        label, actual, expected, diff);
+        label,
+        actual,
+        expected,
+        diff
+    );
 }
 
 // =============================================================================
@@ -58,11 +68,18 @@ fn bnd1_no_constraints_interior_optimum() {
     assert_x_close(result[x1], 3.0, "bnd1: x1=3");
     assert_x_close(result[x2], 4.0, "bnd1: x2=4");
     assert_obj_close(result.objective_value, -12.5, "bnd1: obj");
-    assert!(result.dual_solution.is_none() || result.dual_solution.as_ref().unwrap().is_empty(),
-        "bnd1: dual_solution empty (m=0)");
+    assert!(
+        result.dual_solution.is_none() || result.dual_solution.as_ref().unwrap().is_empty(),
+        "bnd1: dual_solution empty (m=0)"
+    );
     // bound_duals: 全 inactive → 各 ≈ 0
     for (k, &bd) in result.bound_duals.iter().enumerate() {
-        assert!(bd.abs() < EPS_DUAL_ABS, "bnd1: bound_dual[{}]={} expected 0", k, bd);
+        assert!(
+            bd.abs() < EPS_DUAL_ABS,
+            "bnd1: bound_dual[{}]={} expected 0",
+            k,
+            bd
+        );
     }
 }
 
@@ -89,15 +106,31 @@ fn bnd2_lower_bound_active_dual_recovery() {
     assert_obj_close(result.objective_value, -2.0, "bnd2: obj");
     // bound_duals = [lb_dual(x0), lb_dual(x1), ub_dual(x0), ub_dual(x1)]
     // 期待: lb_dual(x0)=5, lb_dual(x1)≈0, ub_dual=0 全部
-    assert_eq!(result.bound_duals.len(), 4, "bnd2: bound_duals length n_lb+n_ub = 2+2");
-    assert!((result.bound_duals[0] - 5.0).abs() < EPS_DUAL_ABS,
-        "bnd2: lb_dual(x0)=5 expected, got {}", result.bound_duals[0]);
-    assert!(result.bound_duals[1].abs() < EPS_DUAL_ABS,
-        "bnd2: lb_dual(x1)≈0 expected, got {}", result.bound_duals[1]);
-    assert!(result.bound_duals[2].abs() < EPS_DUAL_ABS,
-        "bnd2: ub_dual(x0)≈0 expected, got {}", result.bound_duals[2]);
-    assert!(result.bound_duals[3].abs() < EPS_DUAL_ABS,
-        "bnd2: ub_dual(x1)≈0 expected, got {}", result.bound_duals[3]);
+    assert_eq!(
+        result.bound_duals.len(),
+        4,
+        "bnd2: bound_duals length n_lb+n_ub = 2+2"
+    );
+    assert!(
+        (result.bound_duals[0] - 5.0).abs() < EPS_DUAL_ABS,
+        "bnd2: lb_dual(x0)=5 expected, got {}",
+        result.bound_duals[0]
+    );
+    assert!(
+        result.bound_duals[1].abs() < EPS_DUAL_ABS,
+        "bnd2: lb_dual(x1)≈0 expected, got {}",
+        result.bound_duals[1]
+    );
+    assert!(
+        result.bound_duals[2].abs() < EPS_DUAL_ABS,
+        "bnd2: ub_dual(x0)≈0 expected, got {}",
+        result.bound_duals[2]
+    );
+    assert!(
+        result.bound_duals[3].abs() < EPS_DUAL_ABS,
+        "bnd2: ub_dual(x1)≈0 expected, got {}",
+        result.bound_duals[3]
+    );
 }
 
 // =============================================================================
@@ -122,10 +155,16 @@ fn bnd3_upper_bound_active_dual_recovery() {
     assert_obj_close(result.objective_value, -87.5, "bnd3: obj");
     // bound_duals = [lb_dual(x0), ub_dual(x0)] (n_lb=1, n_ub=1)
     assert_eq!(result.bound_duals.len(), 2, "bnd3: bound_duals length");
-    assert!(result.bound_duals[0].abs() < EPS_DUAL_ABS,
-        "bnd3: lb_dual≈0 (x=5 not at lb), got {}", result.bound_duals[0]);
-    assert!((result.bound_duals[1] - 15.0).abs() < EPS_DUAL_ABS,
-        "bnd3: ub_dual=15 expected, got {}", result.bound_duals[1]);
+    assert!(
+        result.bound_duals[0].abs() < EPS_DUAL_ABS,
+        "bnd3: lb_dual≈0 (x=5 not at lb), got {}",
+        result.bound_duals[0]
+    );
+    assert!(
+        (result.bound_duals[1] - 15.0).abs() < EPS_DUAL_ABS,
+        "bnd3: ub_dual=15 expected, got {}",
+        result.bound_duals[1]
+    );
 }
 
 // =============================================================================
@@ -148,8 +187,7 @@ fn bnd4_one_sided_bounds_array_layout() {
     let x2 = model.add_var("x2", f64::NEG_INFINITY, 5.0);
     let x3 = model.add_var("x3", f64::NEG_INFINITY, f64::INFINITY);
     model.minimize(
-        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3
-        + (-1.0) * x1 + (-6.0) * x2 + (-2.0) * x3,
+        0.5 * x1 * x1 + 0.5 * x2 * x2 + 0.5 * x3 * x3 + (-1.0) * x1 + (-6.0) * x2 + (-2.0) * x3,
     );
 
     let result = model.solve().expect("bnd4: solve");
@@ -158,12 +196,21 @@ fn bnd4_one_sided_bounds_array_layout() {
     assert_x_close(result[x3], 2.0, "bnd4: x3=2 (free interior)");
     assert_obj_close(result.objective_value, -20.0, "bnd4: obj");
     // bound_duals = [lb_dual(x1), ub_dual(x2)] (length 2)
-    assert_eq!(result.bound_duals.len(), 2,
-        "bnd4: bound_duals length must equal n_lb_finite + n_ub_finite = 1+1");
-    assert!(result.bound_duals[0].abs() < EPS_DUAL_ABS,
-        "bnd4: lb_dual(x1)≈0 expected, got {}", result.bound_duals[0]);
-    assert!((result.bound_duals[1] - 1.0).abs() < EPS_DUAL_ABS,
-        "bnd4: ub_dual(x2)=1 expected, got {}", result.bound_duals[1]);
+    assert_eq!(
+        result.bound_duals.len(),
+        2,
+        "bnd4: bound_duals length must equal n_lb_finite + n_ub_finite = 1+1"
+    );
+    assert!(
+        result.bound_duals[0].abs() < EPS_DUAL_ABS,
+        "bnd4: lb_dual(x1)≈0 expected, got {}",
+        result.bound_duals[0]
+    );
+    assert!(
+        (result.bound_duals[1] - 1.0).abs() < EPS_DUAL_ABS,
+        "bnd4: ub_dual(x2)=1 expected, got {}",
+        result.bound_duals[1]
+    );
 }
 
 // =============================================================================
@@ -208,12 +255,23 @@ fn bnd6_ill_scaled_bounds_interior_optimum() {
     let result = model.solve().expect("bnd6: solve");
     // x=1000 ± O(eps*scale)。1000 を中心に rel err < 1e-4 で OK。
     let rel = (result[x] - 1000.0).abs() / 1000.0;
-    assert!(rel < 1e-4, "bnd6: x≈1000, got {} (rel={:.3e})", result[x], rel);
+    assert!(
+        rel < 1e-4,
+        "bnd6: x≈1000, got {} (rel={:.3e})",
+        result[x],
+        rel
+    );
     assert_obj_close(result.objective_value, -500_000.0, "bnd6: obj=-5e5");
     // bound_duals は両方 inactive → ≈0
     for (k, &bd) in result.bound_duals.iter().enumerate() {
         // 大スケール bound → dual も多少ノイズ。EPS_DUAL_ABS * scale 許容。
         let tol = EPS_DUAL_ABS * (1.0 + result[x].abs());
-        assert!(bd.abs() < tol, "bnd6: bound_dual[{}]={} (tol={:.1e})", k, bd, tol);
+        assert!(
+            bd.abs() < tol,
+            "bnd6: bound_dual[{}]={} (tol={:.1e})",
+            k,
+            bd,
+            tol
+        );
     }
 }

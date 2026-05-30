@@ -74,7 +74,10 @@ fn timeout_honored_on_neos_bigm_cold_start() {
         assert!(
             ratio >= TIMEOUT_HONOR_RATIO_MIN,
             "user-specified timeout halving 残存: wall {:.3}s / budget {}s = {:.3} < {:.2}",
-            wall, NEOS_BUDGET_SEC, ratio, TIMEOUT_HONOR_RATIO_MIN
+            wall,
+            NEOS_BUDGET_SEC,
+            ratio,
+            TIMEOUT_HONOR_RATIO_MIN
         );
     }
 }

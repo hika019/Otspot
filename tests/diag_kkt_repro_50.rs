@@ -20,11 +20,11 @@
 //! no-op path is covered. This file's role is *shape* coverage, not helper
 //! no-op coverage.
 
-use otspot_dev::bench_utils::compute_qp_kkt_max;
 use otspot::options::{GlobalOptimizationConfig, SolverOptions};
 use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::{solve_qp_global, QpProblem};
 use otspot::sparse::CscMatrix;
+use otspot_dev::bench_utils::compute_qp_kkt_max;
 
 const N: usize = 3;
 const M: usize = 3;
@@ -80,8 +80,7 @@ fn build_qp(
     a_dense[..N].copy_from_slice(a_row1);
     let a_csc = dense_csc(&a_dense, M, N);
     let bounds = vec![(-bnd, bnd); N];
-    QpProblem::new(q_csc, c.to_vec(), a_csc, b.to_vec(), bounds, cts.to_vec())
-        .expect("QpProblem")
+    QpProblem::new(q_csc, c.to_vec(), a_csc, b.to_vec(), bounds, cts.to_vec()).expect("QpProblem")
 }
 
 /// 3-var nonconvex Q × A row-1-only-nonzero × Le×3 × symmetric bound. Sweep
@@ -104,21 +103,9 @@ fn repro_nonconvex_constrained_shape_sweep() {
         [-1.0, -1.0, -1.0],
     ];
     let l_offs = [0.0_f64, 0.4];
-    let c_vecs: Vec<[f64; N]> = vec![
-        [0.0, 0.0, 0.0],
-        [1.0, -1.0, 0.5],
-        [-1.5, 0.8, -0.3],
-    ];
-    let a_rows: Vec<[f64; N]> = vec![
-        [1.0, 0.0, 0.0],
-        [0.5, -0.3, 0.8],
-        [-1.0, 0.6, 0.0],
-    ];
-    let b_vecs: Vec<[f64; M]> = vec![
-        [0.5, 0.5, 0.5],
-        [2.0, 0.3, 0.1],
-        [-0.5, 0.5, 1.0],
-    ];
+    let c_vecs: Vec<[f64; N]> = vec![[0.0, 0.0, 0.0], [1.0, -1.0, 0.5], [-1.5, 0.8, -0.3]];
+    let a_rows: Vec<[f64; N]> = vec![[1.0, 0.0, 0.0], [0.5, -0.3, 0.8], [-1.0, 0.6, 0.0]];
+    let b_vecs: Vec<[f64; M]> = vec![[0.5, 0.5, 0.5], [2.0, 0.3, 0.1], [-0.5, 0.5, 1.0]];
     let bnds = [0.5_f64, 1.0, 2.0];
 
     let mut fails = Vec::new();
@@ -156,11 +143,7 @@ fn repro_nonconvex_constrained_shape_sweep() {
             }
         }
     }
-    eprintln!(
-        "repro sweep: total={} fails={}",
-        total,
-        fails.len()
-    );
+    eprintln!("repro sweep: total={} fails={}", total, fails.len());
     for f in fails.iter().take(8) {
         eprintln!(
             "FAIL d={:?} l_off={} c={:?} a={:?} b={:?} bnd={} status={:?} kkt={:.3e}",

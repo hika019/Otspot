@@ -22,9 +22,13 @@ fn build_degenerate_eq_model(n_eq_zero: usize, value_last: f64, scale_mix: bool)
         .collect();
 
     for (i, &vi) in vars[..n_eq_zero].iter().enumerate() {
-        let coeff = if scale_mix && i == 0 { 1e3 }
-                    else if scale_mix && i == 1 { 1e-3 }
-                    else { 1.0 };
+        let coeff = if scale_mix && i == 0 {
+            1e3
+        } else if scale_mix && i == 1 {
+            1e-3
+        } else {
+            1.0
+        };
         model.add_constraint(constraint!((coeff * vi) == 0.0));
     }
     let last = vars[n_eq_zero];
@@ -34,10 +38,16 @@ fn build_degenerate_eq_model(n_eq_zero: usize, value_last: f64, scale_mix: bool)
 }
 
 fn assert_optimal_with_value(model: &mut Model, expected: f64, label: &str) {
-    let r = model
-        .solve()
-        .unwrap_or_else(|e| panic!("[{}] expected Optimal, got {:?} (check_eq_feasibility 過剰発火の疑い)", label, e));
-    eprintln!("[{}] obj={:.6e} expected={:.6e}", label, r.objective_value, expected);
+    let r = model.solve().unwrap_or_else(|e| {
+        panic!(
+            "[{}] expected Optimal, got {:?} (check_eq_feasibility 過剰発火の疑い)",
+            label, e
+        )
+    });
+    eprintln!(
+        "[{}] obj={:.6e} expected={:.6e}",
+        label, r.objective_value, expected
+    );
     let obj_err = (r.objective_value - expected).abs() / (1.0 + expected.abs());
     assert!(obj_err < EPS_KKT, "[{}] obj err {:.3e}", label, obj_err);
 }
@@ -47,7 +57,9 @@ fn assert_infeasible(model: &mut Model, label: &str) {
     eprintln!("[{}] err={:?}", label, err);
     assert!(
         matches!(err, ModelError::SolveError(SolveError::Infeasible)),
-        "[{}] expected Infeasible, got {:?}", label, err
+        "[{}] expected Infeasible, got {:?}",
+        label,
+        err
     );
 }
 

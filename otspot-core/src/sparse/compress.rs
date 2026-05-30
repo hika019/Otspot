@@ -156,8 +156,7 @@ mod tests {
     #[test]
     fn test_duplicates_cancel_to_zero_dropped() {
         // (0,0) = 1.0 + (-1.0) = 0.0 → filtered by DROP_TOL
-        let (ptr, ind, vals) =
-            bcf(2, 2, &[0, 0, 1], &[0, 0, 1], &[1.0, -1.0, 5.0]);
+        let (ptr, ind, vals) = bcf(2, 2, &[0, 0, 1], &[0, 0, 1], &[1.0, -1.0, 5.0]);
         assert_eq!(ptr, vec![0, 0, 1]);
         assert_eq!(ind, vec![1]);
         assert_eq!(vals, vec![5.0]);
@@ -209,8 +208,7 @@ mod tests {
             min.push((i * 13) % N);
             v.push(1.0);
         }
-        let (ptr, ind, vals) =
-            build_compressed_format(N, N, &maj, &min, &v).unwrap();
+        let (ptr, ind, vals) = build_compressed_format(N, N, &maj, &min, &v).unwrap();
         assert_eq!(ptr.len(), N + 1);
         assert_eq!(ind.len(), vals.len());
         // Sanity: total nnz ≤ NNZ (duplicates may have been merged)
@@ -228,21 +226,48 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn test_sort_merge_matches_reference_output() {
         // Reference cases: (n_major, n_minor, input, expected_ptr, expected_ind, expected_vals)
-        let cases: &[(usize, usize, &[(usize, usize, f64)], &[usize], &[usize], &[f64])] = &[
+        let cases: &[(
+            usize,
+            usize,
+            &[(usize, usize, f64)],
+            &[usize],
+            &[usize],
+            &[f64],
+        )] = &[
             // Single duplicate merged: (0,0)×2→7.0, (1,1)→1.0
-            (2, 2, &[(0,0,3.0),(0,0,4.0),(1,1,1.0)], &[0,1,2], &[0,1], &[7.0,1.0]),
+            (
+                2,
+                2,
+                &[(0, 0, 3.0), (0, 0, 4.0), (1, 1, 1.0)],
+                &[0, 1, 2],
+                &[0, 1],
+                &[7.0, 1.0],
+            ),
             // Out-of-order, no duplicates
-            (3, 3, &[(2,0,1.0),(0,2,2.0),(1,1,3.0)], &[0,1,2,3], &[2,1,0], &[2.0,3.0,1.0]),
+            (
+                3,
+                3,
+                &[(2, 0, 1.0), (0, 2, 2.0), (1, 1, 3.0)],
+                &[0, 1, 2, 3],
+                &[2, 1, 0],
+                &[2.0, 3.0, 1.0],
+            ),
             // Cancellation: (0,0) = 5.0 - 5.0 = 0 → dropped
-            (2, 2, &[(0,0,5.0),(0,0,-5.0),(1,0,2.0)], &[0,0,1], &[0], &[2.0]),
+            (
+                2,
+                2,
+                &[(0, 0, 5.0), (0, 0, -5.0), (1, 0, 2.0)],
+                &[0, 0, 1],
+                &[0],
+                &[2.0],
+            ),
         ];
 
         for &(n_maj, n_min, input, exp_ptr, exp_ind, exp_vals) in cases {
-            let maj: Vec<usize> = input.iter().map(|&(m,_,_)| m).collect();
-            let min: Vec<usize> = input.iter().map(|&(_,n,_)| n).collect();
-            let vals: Vec<f64> = input.iter().map(|&(_,_,v)| v).collect();
-            let (ptr, ind, v) =
-                build_compressed_format(n_maj, n_min, &maj, &min, &vals).unwrap();
+            let maj: Vec<usize> = input.iter().map(|&(m, _, _)| m).collect();
+            let min: Vec<usize> = input.iter().map(|&(_, n, _)| n).collect();
+            let vals: Vec<f64> = input.iter().map(|&(_, _, v)| v).collect();
+            let (ptr, ind, v) = build_compressed_format(n_maj, n_min, &maj, &min, &vals).unwrap();
             assert_eq!(ptr, exp_ptr, "ptr mismatch for case n_maj={n_maj}");
             assert_eq!(ind, exp_ind, "ind mismatch");
             for (got, exp) in v.iter().zip(exp_vals.iter()) {

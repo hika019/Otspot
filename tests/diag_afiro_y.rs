@@ -73,7 +73,11 @@ fn kkt_residual(qp: &QpProblem, y: &[f64], rc: &[f64]) -> (Vec<f64>, f64) {
 #[test]
 fn diag_afiro_y_presolve_off_vs_on() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path.display()
+    );
     let qp = parse_qps(path).expect("parse afiro");
     let lp = make_lp(&qp);
     let n = lp.num_vars;
@@ -92,19 +96,38 @@ fn diag_afiro_y_presolve_off_vs_on() {
 
     println!("status off={:?} on={:?}", r_off.status, r_on.status);
     println!("obj    off={:e} on={:e}", r_off.objective, r_on.objective);
-    println!("pf     off={:e} on={:e}", max_pf(&lp, &r_off.solution), max_pf(&lp, &r_on.solution));
+    println!(
+        "pf     off={:e} on={:e}",
+        max_pf(&lp, &r_off.solution),
+        max_pf(&lp, &r_on.solution)
+    );
 
-    let max_y_off = r_off.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-    let max_y_on = r_on.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    let max_y_off = r_off
+        .dual_solution
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
+    let max_y_on = r_on
+        .dual_solution
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
     println!("max|y| off={:e} on={:e}", max_y_off, max_y_on);
 
     let (_diff_off, kkt_off) = kkt_residual(&qp, &r_off.dual_solution, &r_off.reduced_costs);
     let (_diff_on, kkt_on) = kkt_residual(&qp, &r_on.dual_solution, &r_on.reduced_costs);
-    println!("KKT (c - A^T y - rc) max abs:  off={:e} on={:e}", kkt_off, kkt_on);
+    println!(
+        "KKT (c - A^T y - rc) max abs:  off={:e} on={:e}",
+        kkt_off, kkt_on
+    );
 
     // bench DFEAS_FAIL 判定相当: df = max(0, -rc[j]) (LP 経路, bound_duals empty)
-    let df_off = r_off.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
-    let df_on = r_on.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    let df_off = r_off
+        .reduced_costs
+        .iter()
+        .fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    let df_on = r_on
+        .reduced_costs
+        .iter()
+        .fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
     println!("df (bench DFEAS judge): off={:e} on={:e}", df_off, df_on);
 
     // slack[12] 観測 (RedundantConstraint で削除された行)
@@ -168,7 +191,11 @@ const BOUND_TOL: f64 = 1e-6;
 
 fn check_lp_dual_kkt(qp_path: &str) {
     let path = Path::new(qp_path);
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qp_path);
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qp_path
+    );
     let qp = parse_qps(path).expect("parse failed");
 
     let mut opts = SolverOptions::default();
@@ -184,15 +211,31 @@ fn check_lp_dual_kkt(qp_path: &str) {
         let at_lb = lb.is_finite() && (x - lb).abs() < BOUND_TOL;
         let at_ub = ub.is_finite() && (x - ub).abs() < BOUND_TOL;
         let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
-        if fixed { continue; }
+        if fixed {
+            continue;
+        }
         if at_lb && !at_ub {
-            assert!(rc >= -RC_NONNEG_TOL,
+            assert!(
+                rc >= -RC_NONNEG_TOL,
                 "[{}] x[{}]={} at lb={} なのに rc={} < -{}",
-                qp_path, j, x, lb, rc, RC_NONNEG_TOL);
+                qp_path,
+                j,
+                x,
+                lb,
+                rc,
+                RC_NONNEG_TOL
+            );
         } else if at_ub && !at_lb {
-            assert!(rc <= RC_NONNEG_TOL,
+            assert!(
+                rc <= RC_NONNEG_TOL,
                 "[{}] x[{}]={} at ub={} なのに rc={} > {}",
-                qp_path, j, x, ub, rc, RC_NONNEG_TOL);
+                qp_path,
+                j,
+                x,
+                ub,
+                rc,
+                RC_NONNEG_TOL
+            );
         }
         // interior は rc ≈ 0 を厳格に要求しない (退化解で簡単に壊れる)
     }
@@ -201,7 +244,9 @@ fn check_lp_dual_kkt(qp_path: &str) {
     assert!(
         kkt_max < KKT_TOL,
         "[{}] KKT 残差 |c - A^T y - rc|_∞ = {} >= {}",
-        qp_path, kkt_max, KKT_TOL
+        qp_path,
+        kkt_max,
+        KKT_TOL
     );
 }
 
@@ -224,14 +269,24 @@ fn test_afiro_presolve_on_dual_feasibility_and_kkt() {
 #[test]
 fn test_afiro_qp_cert_mask_skips_no_column() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path.display()
+    );
     let qp = parse_qps(path).expect("parse afiro");
     let n = qp.num_vars;
 
     let mut struct_empty = 0usize;
     for j in 0..n {
-        let a_empty = qp.a.get_column(j).map(|(r, _)| r.is_empty()).unwrap_or(true);
-        let q_empty = qp.q.get_column(j).map(|(r, _)| r.is_empty()).unwrap_or(true);
+        let a_empty =
+            qp.a.get_column(j)
+                .map(|(r, _)| r.is_empty())
+                .unwrap_or(true);
+        let q_empty =
+            qp.q.get_column(j)
+                .map(|(r, _)| r.is_empty())
+                .unwrap_or(true);
         if a_empty && q_empty {
             struct_empty += 1;
         }
@@ -325,14 +380,21 @@ fn test_beaconfd_presolve_on_dual_feasibility_and_kkt() {
 #[test]
 fn test_timing_breakdown_recorded_for_presolved_lp() {
     let path = Path::new("data/lp_problems/afiro.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path.display()
+    );
     let qp = parse_qps(path).expect("parse");
     let lp = make_lp(&qp);
     let mut opts = SolverOptions::default();
     opts.presolve = true;
     opts.timeout_secs = Some(10.0);
     let r = solve_with(&lp, &opts);
-    assert!(r.timing_breakdown.is_some(), "timing_breakdown must be Some when presolve reduced");
+    assert!(
+        r.timing_breakdown.is_some(),
+        "timing_breakdown must be Some when presolve reduced"
+    );
     let tb = r.timing_breakdown.unwrap();
     // presolve / solve は実時間で μs 単位、 0 は不自然
     assert!(tb.presolve_us > 0, "presolve_us={}", tb.presolve_us);
@@ -345,7 +407,11 @@ fn test_timing_breakdown_recorded_for_presolved_lp() {
 #[test]
 fn diag_scorpion_y_off_vs_on() {
     let path = Path::new("data/lp_problems/scorpion.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path.display()
+    );
     let qp = parse_qps(path).expect("parse");
     let lp = make_lp(&qp);
     let n = lp.num_vars;
@@ -363,29 +429,55 @@ fn diag_scorpion_y_off_vs_on() {
     let r_on = solve_qp_with(&qp, &opts_on);
 
     println!("status off={:?} on={:?}", r_off.status, r_on.status);
-    println!("pf off={:e} on={:e}", max_pf(&lp, &r_off.solution), max_pf(&lp, &r_on.solution));
-    let max_y_off = r_off.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-    let max_y_on = r_on.dual_solution.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    println!(
+        "pf off={:e} on={:e}",
+        max_pf(&lp, &r_off.solution),
+        max_pf(&lp, &r_on.solution)
+    );
+    let max_y_off = r_off
+        .dual_solution
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
+    let max_y_on = r_on
+        .dual_solution
+        .iter()
+        .fold(0.0f64, |a, &v| a.max(v.abs()));
     println!("max|y| off={:e} on={:e}", max_y_off, max_y_on);
 
-    let df_off = r_off.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
-    let df_on = r_on.reduced_costs.iter().fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    let df_off = r_off
+        .reduced_costs
+        .iter()
+        .fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
+    let df_on = r_on
+        .reduced_costs
+        .iter()
+        .fold(0.0f64, |a, &rc| a.max(f64::max(0.0, -rc)));
     println!("df (max(0,-rc)) off={:e} on={:e}", df_off, df_on);
 
     let mut max_y_diff = 0.0f64;
     let mut argmax_i = 0usize;
     for i in 0..m {
         let d = (r_off.dual_solution[i] - r_on.dual_solution[i]).abs();
-        if d > max_y_diff { max_y_diff = d; argmax_i = i; }
+        if d > max_y_diff {
+            max_y_diff = d;
+            argmax_i = i;
+        }
     }
-    println!("max|y_off - y_on| = {:e} at i={} (y_off={} y_on={})",
-        max_y_diff, argmax_i, r_off.dual_solution[argmax_i], r_on.dual_solution[argmax_i]);
+    println!(
+        "max|y_off - y_on| = {:e} at i={} (y_off={} y_on={})",
+        max_y_diff, argmax_i, r_off.dual_solution[argmax_i], r_on.dual_solution[argmax_i]
+    );
 
     let mut min_rc_on = f64::INFINITY;
     let mut argmin_j = 0usize;
     for j in 0..n {
-        if r_on.reduced_costs[j] < min_rc_on { min_rc_on = r_on.reduced_costs[j]; argmin_j = j; }
+        if r_on.reduced_costs[j] < min_rc_on {
+            min_rc_on = r_on.reduced_costs[j];
+            argmin_j = j;
+        }
     }
-    println!("min rc on = {} at j={} (x[j]={}, bounds={:?})",
-        min_rc_on, argmin_j, r_on.solution[argmin_j], qp.bounds[argmin_j]);
+    println!(
+        "min rc on = {} at j={} (x[j]={}, bounds={:?})",
+        min_rc_on, argmin_j, r_on.solution[argmin_j], qp.bounds[argmin_j]
+    );
 }

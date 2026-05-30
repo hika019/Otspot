@@ -1,8 +1,6 @@
 //! Warm-start を受け取って interior 補正のみ適用する初期化経路。
 
-use super::state::{
-    warm_bound_margin, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN,
-};
+use super::state::{warm_bound_margin, WARM_BOUND_REL_MARGIN, WARM_MU_MIN, WARM_SY_MIN};
 use crate::problem::ConstraintType;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
@@ -28,7 +26,10 @@ pub(super) fn apply_qp_warm_start(
     if ws.x.len() != n || ws.y.len() != m_orig {
         log::warn!(
             "warm_start_qp ignored: ippmm dim mismatch (x: {}/{}, y: {}/{})",
-            ws.x.len(), n, ws.y.len(), m_orig
+            ws.x.len(),
+            n,
+            ws.y.len(),
+            m_orig
         );
         return None;
     }
@@ -61,7 +62,11 @@ pub(super) fn apply_qp_warm_start(
             ConstraintType::Ge => -ws.y[i],
             _ => ws.y[i],
         };
-        y[i] = if is_eq_ext[i] { yi } else { yi.max(WARM_SY_MIN) };
+        y[i] = if is_eq_ext[i] {
+            yi
+        } else {
+            yi.max(WARM_SY_MIN)
+        };
     }
 
     // 自然な slack s = b_ext − A_ext·x (ineq は WARM_SY_MIN で boundary 退避)。

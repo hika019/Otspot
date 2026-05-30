@@ -51,7 +51,11 @@ where
     let n = b.len();
     debug_assert_eq!(x.len(), n);
     if n == 0 {
-        return MinresStats { iters: 0, residual_estimate: 0.0, converged: true };
+        return MinresStats {
+            iters: 0,
+            residual_estimate: 0.0,
+            converged: true,
+        };
     }
 
     let b_norm = norm2(b).max(f64::MIN_POSITIVE);
@@ -62,7 +66,11 @@ where
     let mut r1: Vec<f64> = b.iter().zip(kx.iter()).map(|(&bi, &ki)| bi - ki).collect();
     let r1_norm = norm2(&r1);
     if r1_norm <= tol * b_norm {
-        return MinresStats { iters: 0, residual_estimate: r1_norm, converged: true };
+        return MinresStats {
+            iters: 0,
+            residual_estimate: r1_norm,
+            converged: true,
+        };
     }
 
     // y = M^{-1} r1
@@ -256,8 +264,11 @@ mod tests {
             100,
             || false,
         );
-        assert!(stats.converged, "should converge for 2x2 SPD, iters={} resid={:.2e}",
-            stats.iters, stats.residual_estimate);
+        assert!(
+            stats.converged,
+            "should converge for 2x2 SPD, iters={} resid={:.2e}",
+            stats.iters, stats.residual_estimate
+        );
         assert!((x[0] - 1.0 / 11.0).abs() < 1e-9, "x[0]≈1/11, got {}", x[0]);
         assert!((x[1] - 7.0 / 11.0).abs() < 1e-9, "x[1]≈7/11, got {}", x[1]);
     }
@@ -278,7 +289,11 @@ mod tests {
             100,
             || false,
         );
-        assert!(stats.converged, "should converge for 2x2 indef, iters={}", stats.iters);
+        assert!(
+            stats.converged,
+            "should converge for 2x2 indef, iters={}",
+            stats.iters
+        );
         assert!((x[0] - 1.0).abs() < 1e-9, "x[0]≈1, got {}", x[0]);
         assert!((x[1] - 1.0).abs() < 1e-9, "x[1]≈1, got {}", x[1]);
     }
@@ -287,9 +302,15 @@ mod tests {
     #[test]
     fn minres_5x5_matches_ldl() {
         let entries = [
-            (0, 0, 4.0), (0, 1, 0.5), (1, 1, 4.0), (1, 2, 0.5), (2, 2, 4.0),
+            (0, 0, 4.0),
+            (0, 1, 0.5),
+            (1, 1, 4.0),
+            (1, 2, 0.5),
+            (2, 2, 4.0),
             (0, 3, 0.3),
-            (3, 3, -2.0), (3, 4, 0.4), (4, 4, -2.0),
+            (3, 3, -2.0),
+            (3, 4, 0.4),
+            (4, 4, -2.0),
         ];
         let rows: Vec<usize> = entries.iter().map(|(r, _, _)| *r).collect();
         let cols: Vec<usize> = entries.iter().map(|(_, c, _)| *c).collect();
@@ -320,7 +341,10 @@ mod tests {
             assert!(
                 (x_ldl[i] - x_minres[i]).abs() < 1e-7,
                 "x[{}]: LDL={}, MINRES={}, diff={:.2e}",
-                i, x_ldl[i], x_minres[i], (x_ldl[i] - x_minres[i]).abs()
+                i,
+                x_ldl[i],
+                x_minres[i],
+                (x_ldl[i] - x_minres[i]).abs()
             );
         }
     }
