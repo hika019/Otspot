@@ -247,10 +247,6 @@ fn main() {
     let mut n_skip_qcqp = 0usize;
     let mut n_skip_other = 0usize;
     let mut n_nonconvex = 0usize;
-    // solve_qp_global 経由の status 区別.
-    // NonconvexLocal / NonconvexGlobal は現状の bench (solve_qp_with single-shot) では
-    // 出ない (BB driver は別 entry) が、将来 bench が global path に切り替わった際の
-    // print 経路を準備。LocallyOptimal は単発 IPM inertia 補正で発生する。
     let mut n_nonconvex_local = 0usize;
     let mut n_nonconvex_global = 0usize;
     // Phase 1A: status=Optimal だが元空間 KKT 残差 >= KKT_FAIL_EPS の解。

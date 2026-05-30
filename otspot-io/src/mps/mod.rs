@@ -73,28 +73,8 @@ pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
 
 /// Parse an MPS string, returning a `MilpProblem`.
 ///
-/// # Examples
-///
-/// ```
-/// use otspot_io::mps::parse_milp;
-///
-/// let mps = r"NAME          milp
-/// ROWS
-///  N  obj
-///  L  c1
-/// COLUMNS
-///     MARKER1   'MARKER'   'INTORG'
-///     x1  obj  -1.0  c1  1.0
-///     MARKER2   'MARKER'   'INTEND'
-/// RHS
-///     rhs  c1  10.5
-/// BOUNDS
-///  UP BND  x1  7.0
-/// ENDATA
-/// ";
-/// let milp = parse_milp(mps).unwrap();
-/// assert_eq!(milp.integer_vars, vec![0]);
-/// ```
+/// See [`parse_mps`] for format details. Integer variables are preserved via
+/// INTORG/INTEND markers and BV/LI/UI bound types.
 pub fn parse_milp(input: &str) -> Result<MilpProblem, MpsError> {
     parse_milp_reader(std::io::Cursor::new(input.as_bytes()))
 }

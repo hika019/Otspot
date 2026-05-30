@@ -17,12 +17,6 @@
 //! 全 thread から書き込まれる共有 state は無い (各 start は独立に SolverOptions を
 //! clone)。結果は `Vec<SolverResult>` に index 順で collect → 順次 `pick_better`
 //! で reduce。同 seed なら thread 数によらず結果は決定論的。
-//!
-//! ## test-only hooks
-//!
-//! `MultiStartHooks` は thread sentinel (peak parallelism 検証) 用の hook 注入
-//! 機構。`pub(crate)` で外部に公開しない。`solve_qp_multistart` は内部で hooks
-//! = None を渡し production code は影響なし。
 
 use crate::options::{MultiStartConfig, QpWarmStart, SolverOptions, StartStrategy};
 use crate::problem::{SolveStatus, SolverResult};

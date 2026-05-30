@@ -43,11 +43,8 @@ use std::cell::Cell;
 /// merging genuinely distinct breakpoints and inflating the dual step.
 pub(crate) const BFRT_TIE_TOL: f64 = 1e-8;
 
-// Process-global probe counter incremented every time BFRT *successfully*
-// returns a result that includes ≥ 1 bound flip. Sentinel tests read this to
-// prove wiring is live — Harris-equivalent calls leave it at 0.
-// `Cell` + `thread_local!` keeps the hook cheap (no atomic on hot path) and
-// test-friendly (each `#[test]` thread sees an independent counter).
+// BFRT flip probe counter — sentinel tests verify wiring is live.
+// `Cell` + `thread_local!`: no atomic on hot path, isolated per `#[test]` thread.
 thread_local! {
     static BFRT_FLIP_INVOCATIONS: Cell<u64> = const { Cell::new(0) };
 }

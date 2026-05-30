@@ -218,7 +218,6 @@ struct BigMPhase1State {
     x_b: Vec<f64>,
     artificial_col_of_row: Vec<Option<usize>>,
     n_aug: usize,
-    n_art: usize,
 }
 
 /// Helper: A_aug = [A | I_art] for the given `artificial_col_of_row` map.
@@ -312,7 +311,6 @@ fn build_identity_phase1_state(
         x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     })
 }
 
@@ -496,7 +494,6 @@ fn try_build_crash_phase1_state(
         x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     })
 }
 
@@ -529,7 +526,6 @@ pub(crate) fn big_m_cold_start(
     // crash 採用で artificial 列を structural 列に置換し Phase I 駆出対象を縮減。
     // LU / x_B ≥ 0 / dual feasibility のいずれかで失敗したら identity 経路に倒す。
     let crash_state = try_build_crash_phase1_state(a, b, c, sf, options, big_m, n_total);
-    let crash_used = crash_state.is_some();
     let BigMPhase1State {
         a_aug,
         mut basis_aug,
@@ -537,7 +533,6 @@ pub(crate) fn big_m_cold_start(
         mut x_b,
         artificial_col_of_row,
         n_aug,
-        n_art,
     } = match crash_state {
         Some(s) => s,
         None => match build_identity_phase1_state(a, b, c, sf, big_m, n_total) {
@@ -545,7 +540,6 @@ pub(crate) fn big_m_cold_start(
             None => return SolverResult::numerical_error(),
         },
     };
-    let _ = (crash_used, n_art); // tracing reserved
 
     // === Step 6: Phase I (Dual Simplex with Harris ratio test + Artificial-aware) ===
     //
@@ -555,15 +549,7 @@ pub(crate) fn big_m_cold_start(
     // これにより Big-M Phase I 本来の「人工変数を basis から追い出す」役割を
     // 標準 dual simplex ループ (Harris ratio test 装備) で実現する。
     //
-    // ## Phase I 時間配分
-    //
-    // Phase I は元 deadline を honor する。以前は `remaining / 2` を割り当て
-    // Phase II にも半分を残していたが、外側 `solve_dual_advanced` の Primal-first
-    // halving と二重になり wall = 0.75 × user_budget の bug を生んだ。
-    // - Phase I が Optimal 完走: Phase II は当然残り deadline で動く。
-    // - Phase I が Timeout: Phase II は遅延の起点になっても意味がないので
-    //   そのまま Timeout 返却 (Farkas 検証 fail 時)。元の「half-deadline 到達 →
-    //   Infeasibility 推定」は Farkas 証明書に置き換え済。
+    // Phase I は元 deadline を使用 (外側 split との二重 halving 回避)。
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
@@ -1410,26 +1396,7 @@ mod tests {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 3 Eq 行 × 4 列、b = [1, 1, 1]。crash が選んだ basis で
         // B^{-1} b の特定成分が負になるよう、非対角 entry を仕込む。
-        //
-        // basis = [col 0 (row 0), col 1 (row 1), col 2 (row 2)] を crash が pick →
-        // B = [[1, -2, 0],
-        //      [0,  1, 0],
-        //      [0,  0, 1]]
-        // B^{-1} b = [1 + 2*1, 1, 1] = [3, 1, 1] (全 ≥ 0、これでは XbNegative 出ない)
-        //
-        // 別構成: col 0 row 0=1, col 1 row 0=1 (off-diag), row 1=1
-        //   B^{-1} で row 0 の値が打ち消し合う...複雑。
-        //
-        // 単純化: b に負 RHS は presolve 前提に反するため、係数で工夫。
-        // 試案: A = [[1, 1, 0], [-1, 0, 1], [0, 0, 1]], b = [1, 0, 1]
-        //   crash candidate basis = [col 0, col 1, col 2] (singleton-like)
-        //   B = [[1,1,0],[-1,0,1],[0,0,1]]
-        //   det = 1*(0-0) - 1*(-1-0) + 0 = 1
-        //   B^{-1} b: 解 [x0, x1, x2] s.t. x0 + x1 = 1, -x0 + x2 = 0, x2 = 1
-        //     → x2=1, x0=1, x1=0 (全非負、ダメ)
-        //
-        // 結局 random LP の方が再現性ある。LCG で多数候補生成し、XbNegative を
-        // 1 件でも観測したら成功とする。
+        // random LCG fixture で候補生成、XbNegative を 1 件でも観測したら成功。
         let mut seed: u64 = 0xCAFEBABE_DEADBEEF;
         let mut next = || {
             seed = seed

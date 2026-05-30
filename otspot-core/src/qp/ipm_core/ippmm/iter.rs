@@ -341,7 +341,7 @@ pub(crate) fn solve_ippmm_inner(
         fac.set_iterative_tol(inexact_eta);
 
         let t_solve = std::time::Instant::now();
-        let (pred, alpha, r_c_corr) = if use_schur {
+        let (alpha, r_c_corr) = if use_schur {
             let d_inv = d_inv_opt
                 .as_ref()
                 .expect("d_inv must be set when use_schur");
@@ -349,11 +349,10 @@ pub(crate) fn solve_ippmm_inner(
                 &s, &y, &is_eq_ext, m_ineq, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
                 m_ext, mu,
             );
-            let (alpha, r_c_corr) = corrector_step_schur(
+            corrector_step_schur(
                 &s, &y, &is_eq_ext, &pred, mu, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
                 m_ext, &mut dx, &mut dy, &mut ds,
-            );
-            (pred, alpha, r_c_corr)
+            )
         } else {
             let pred = predictor_step(
                 &s,
@@ -370,7 +369,7 @@ pub(crate) fn solve_ippmm_inner(
                 mu,
                 timeout_ctx.deadline,
             );
-            let (alpha, r_c_corr) = corrector_step(
+            corrector_step(
                 &s,
                 &y,
                 &is_eq_ext,
@@ -387,8 +386,7 @@ pub(crate) fn solve_ippmm_inner(
                 &mut dy,
                 &mut ds,
                 timeout_ctx.deadline,
-            );
-            (pred, alpha, r_c_corr)
+            )
         };
 
         let mut alpha = alpha;
@@ -440,8 +438,6 @@ pub(crate) fn solve_ippmm_inner(
                 )
             };
         }
-
-        let _ = pred;
 
         // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
         let direction_finite_but_huge = dx

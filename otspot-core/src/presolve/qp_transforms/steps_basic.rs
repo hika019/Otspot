@@ -1,7 +1,7 @@
 //! QP presolve steps 1-4: fix variables, singleton row/column, empty row/column.
 
 use super::helpers::{apply_fixed_variable, skip_step};
-use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
+use super::state::{QpPostsolveStep, QpPresolveResult, Workspace};
 use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
 
@@ -287,7 +287,5 @@ pub(super) fn step4_empty(prob: &QpProblem, ws: &mut Workspace) -> Result<(), Qp
             .push(QpPostsolveStep::EmptyCol { idx: j, val });
     }
 
-    // Suppress unused QpPresolveStatus warning when step bodies are inlined.
-    let _ = QpPresolveStatus::Feasible;
     Ok(())
 }

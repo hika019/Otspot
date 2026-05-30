@@ -184,9 +184,6 @@ fn solve_aat_direct_ir(
     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return None;
     }
-    // A·Aᵀ が memory budget 超なら None を返す (caller は CG にフォールバック)。
-    // factorize_budget は BudgetExceeded・NotPositiveDefinite など複数 Err 種別を持ち、
-    // いずれも正当な runtime 条件であるため .ok()? でフォールバックする。
     let factor = crate::linalg::ldl::factorize_budget(
         &aat,
         crate::linalg::kkt_solver::max_l_nnz_from_budget(),

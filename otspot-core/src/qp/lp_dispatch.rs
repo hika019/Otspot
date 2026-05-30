@@ -150,8 +150,6 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
-    // Optimal/SuboptimalSolution/Timeout (incumbent あり) の場合に加算。
-    // Infeasible/NumericalError 等は加算しない。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     if matches!(
         simplex_result.status,

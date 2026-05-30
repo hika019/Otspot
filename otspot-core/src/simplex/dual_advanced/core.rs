@@ -22,9 +22,6 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
-// Bland's rule leaving と progress metric は `DualLeavingStrategy::bland_leaving`
-// と `::progress_metric` (default + strategy override) に委譲した。
-
 /// Lex 摂動: bland_mode 起動時に reduced_costs (non-basic) と x_b
 /// (basis values) の両方に `eps * (1 + i/n) * scale` を加算し degeneracy を
 /// 解消、Bland's rule の有限終了を保証する。
@@ -79,22 +76,9 @@ fn apply_lex_perturbation(
     }
 }
 
-/// Dual Simplexコアループ（強化版）
+/// Dual simplex core loop (advanced variant).
 ///
-/// Dual Simplex コアループを実装する。
-///
-/// # 引数
-/// - `a`: 制約行列（Ruizスケーリング済み）
-/// - `x_b`: 基底変数値ベクトル（mutable、反復ごとに更新）
-/// - `c`: 目的関数係数（スケーリング済み）
-/// - `basis`: 基底インデックス配列（mutable）
-/// - `m`: 制約数
-/// - `n_price`: price対象の列数
-/// - `options`: ソルバーオプション
-/// - `leaving`: 離基変数選択戦略（DualLeavingStrategy実装。`&mut` でDSE等の状態更新を許容）
-///
-/// # 戻り値
-/// SimplexOutcome (Optimal/Unbounded/Timeout)
+/// - `leaving`: leaving-variable selection strategy (`&mut` to allow DSE weight updates).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dual_simplex_core_advanced(
     a: &CscMatrix,

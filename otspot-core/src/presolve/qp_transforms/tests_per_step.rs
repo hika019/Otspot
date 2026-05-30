@@ -2,7 +2,7 @@
 //! (`steps_bounds`, `steps_free`, `steps_parallel`) is driven directly via the
 //! `Workspace` so a no-op rewrite of a step body produces an observable FAIL.
 
-use super::helpers::early_infeasibility_check;
+use super::helpers::{early_infeasibility_check, with_skip_steps};
 use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
 use super::steps_basic::step4_empty;
 use super::steps_bounds::{
@@ -883,7 +883,7 @@ fn step9_box_constraints_both_absorbed() {
 }
 
 /// Postsolve stack: each absorbed row pushes SingletonIneqToBound.
-/// No-op proof: disabling step9 (QP_PRESOLVE_SKIP=9) leaves m unchanged.
+/// No-op proof: disabling step9 via `with_skip_steps(&[9], ...)` leaves m unchanged.
 #[test]
 fn step9_postsolve_stack_pushed_and_noop_proof() {
     // With step9 active: Le x<=3 absorbed → 1 step in stack.
@@ -916,10 +916,9 @@ fn step9_postsolve_stack_pushed_and_noop_proof() {
         .count();
     assert_eq!(n_steps, 1, "step9 must push SingletonIneqToBound");
 
-    // No-op proof: env skip → m_reduced unchanged (row NOT absorbed)
-    std::env::set_var("QP_PRESOLVE_SKIP", "9");
-    let result_noop = run_qp_presolve_phase1(&prob, &SolverOptions::default());
-    std::env::remove_var("QP_PRESOLVE_SKIP");
+    // No-op proof: thread-local skip → m_reduced unchanged (row NOT absorbed)
+    let result_noop =
+        with_skip_steps(&[9], || run_qp_presolve_phase1(&prob, &SolverOptions::default()));
     assert_eq!(
         result_noop.reduced.num_constraints, 1,
         "no-op: skip step9 must leave singleton Le row in constraint matrix"
