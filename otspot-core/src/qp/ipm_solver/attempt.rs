@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::ScopedDisable;
 
 use crate::options::SolverOptions;
-use crate::tolerances::{Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
+use crate::tolerances::{LARGE_A_COEFF_TRIGGER, Q_OFFDIAG_ABS, Q_OFFDIAG_REL, UNDERFLOW_GUARD};
 use crate::presolve::{
     run_qp_presolve_phase1, run_qp_presolve_phase2,
     qp_transforms::QpPresolveStatus,
@@ -124,7 +124,6 @@ const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
-/// presolve スケーリング縮小比率の下限 sigma_total。unscale 残差は 1/sigma_total 倍される。
 /// tighten = ceil_pow10(user_eps / 1e-8) ∈ [1, 1000]。上限 1000 は IPM floor 制約。
 ///
 /// `sigma_total` (minimum Ruiz / row-scale factor) was considered as an additional
@@ -232,9 +231,9 @@ fn try_q_diagonal_scaling(problem: &QpProblem) -> Option<(QpProblem, Vec<f64>)> 
     if !q_pos_min.is_finite() || q_pos_max <= 0.0 {
         return None;
     }
-    // dynamic range が狭い Q では IPM K-行列 conditioning 悪化リスクが上回るため gate。
-    const Q_DIAG_RANGE_TRIGGER: f64 = 1e6;
-    if q_pos_max / q_pos_min < Q_DIAG_RANGE_TRIGGER {
+    // Gate on Q diagonal range: only scale when range >= LARGE_A_COEFF_TRIGGER, since
+    // narrow-range Q does not benefit from diagonal scaling.
+    if q_pos_max / q_pos_min < LARGE_A_COEFF_TRIGGER {
         return None;
     }
 
