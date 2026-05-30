@@ -1050,11 +1050,12 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         assert!(err.is_err(), "NaN in BOUNDS must error: {:?}", err);
     }
 
-    /// NaN in a constraint-row RHS (3-field format) must error.
+    /// be70df0 で N 行 RHS NaN は silently accepted (LpProblem に obj_offset 概念なし)。
+    /// `obj_row.as_deref()` を `None` に置換すると N 行も constraint 扱い → NaN reject → assertion 失敗。
     #[test]
-    fn test_mps_rhs_nan_constraint_row_3field_is_error() {
-        let mps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  NaN\nENDATA\n";
-        let err = parse_mps(mps);
-        assert!(err.is_err(), "NaN in constraint-row RHS (3-field) must error: {:?}", err);
+    fn test_mps_rhs_n_row_nan_is_silently_ok() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs obj NaN\n    rhs c1 1.0\nENDATA\n";
+        let result = parse_mps(mps);
+        assert!(result.is_ok(), "N-row RHS NaN must be silently accepted (LpProblem has no obj_offset): {:?}", result);
     }
 }

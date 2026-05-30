@@ -229,6 +229,31 @@ ENDATA
         assert!(matches!(result, Err(QpsError::InvalidObjectiveOffset(_))));
     }
 
+    /// QPS fixed-format (`force_fixed` path) での N 行 RHS NaN が `InvalidObjectiveOffset` を返すことを sentinel 化。
+    /// `obj_row.as_deref()` を `None` に置換すると obj 行 NaN が ParseError 化 →
+    /// `InvalidObjectiveOffset` でなくなる → assertion 失敗 (no-op fail 設計)。
+    ///
+    /// RHS 行: pos 4-11 空 + pos 14-21 "obj" で `force_fixed=true` → `parse_mps_fixed_pairs` 経由。
+    #[test]
+    fn test_qps_fixed_format_obj_row_nan_invalidates_offset() {
+        // Fixed-format RHS line: pos 0-13 spaces, pos 14-16 "obj", pos 24-26 "NaN",
+        // pos 39-40 "c1", pos 49-51 "1.0". mps_field(line,4,12)="" → force_fixed=true.
+        let qps = concat!(
+            "NAME          FIXFMT_NAN\n",
+            "ROWS\n N  obj\n L  c1\n",
+            "COLUMNS\n    x1  c1  1.0\n    x1  obj  1.0\n",
+            "RHS\n",
+            "              obj       NaN            c1        1.0\n",
+            "ENDATA\n",
+        );
+        let result = parse_qps_str(qps);
+        assert!(
+            matches!(result, Err(QpsError::InvalidObjectiveOffset(_))),
+            "fixed-format obj-row NaN must trigger InvalidObjectiveOffset: {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_solve_with_obj_offset() {
         let qps = r"NAME          OFFSET_INTEG
