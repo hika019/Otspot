@@ -1,22 +1,11 @@
 //! 下界 / 上界 計算 (Phase 3 spatial B&B)。
 //!
-//! ## 下界 (lower bound)
-//! Phase 3 は **interval arithmetic** = box 各次元の値域から f = c'x + 1/2 x'Q x の
-//! 各項を独立に上下限化、和を取る。線形制約 Ax = b は無視するため **緩い** 下界
-//! (Phase 4 で α-BB / McCormick に置換予定)。それでも box pruning に最低限の
-//! discrimination 力はある (= ∞ よりは tight)。
+//! 下界は interval arithmetic (各次元の値域から f の各項を独立に上下限化して和)。
+//! `Ax = b` を無視するため緩いが box pruning には十分。上界は IPM 非凸 inertia
+//! 補正で local solve、warm start で parent 解継承。
 //!
-//! ## 上界 (upper bound)
-//! IPM (非凸 inertia 補正付き) で local solve、解 obj = 当該 box 内 feasible point
-//! の objective = incumbent 候補。warm start で parent 解継承で iter 削減。
-//!
-//! ## Q storage 規約
-//! `QpProblem::q` は **full symmetric storage** (CSC で両半 (i,j) と (j,i) の両 entry)。
-//! objective は solver 内部で `Q.mat_vec_mul(x)` を使って `0.5 x' Q x` を計算する
-//! ため、Q は格納どおりに literal 解釈される。テスト fixture も両半 store が標準
-//! (src/qp/tests.rs::test_qp_least_squares, tests/diag_qp_multistart_smoke.rs)。
-//!
-//! 区間 bound 計算は全 entry を走査し 0.5*v_ij の寄与を累積する。
+//! `QpProblem::q` は full symmetric storage (両半 entry)、`mat_vec_mul` で literal
+//! 解釈される。bound 計算も全 entry 走査で `0.5·v_ij` を累積する。
 
 use crate::options::{QpWarmStart, SolverOptions};
 use crate::problem::{SolveStatus, SolverResult};

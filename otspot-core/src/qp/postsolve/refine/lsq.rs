@@ -342,25 +342,10 @@ mod tests {
         }
     }
 
-    /// #92 F2: empty A col + 未消去 var を含む問題で DD guard 評価が新旧で割れる。
-    ///
-    /// Fixture:
-    /// - n=2, m=1。A: row 0 = [0, 1] (col 0 が空、col 1 非空)。
-    /// - Q=0、c=(100, 0)、bounds [-10,10]^2、x=(0, 0.5)、初期 y=-3 (suboptimal)。
-    /// - LSQ y_new = 0 (row 1 のみで y を決定、row 0 は A 空で y 無関係)。
-    ///
-    /// 評価値:
-    /// - r[0]=Qx+c+A^Ty+bc=0+100+0+0=100 (y 独立)、scale[0]=1+0+100+0+0=101 → rel=0.99
-    /// - r[1]_old=-3, scale[1]_old=4 → rel=0.75 ; r[1]_new=0, rel=0
-    ///
-    /// 期待挙動 (mask `[false,false]`、新 logic):
-    /// - max_rel_old=max(0.99, 0.75)=0.99、max_rel_new=max(0.99, 0)=0.99
-    /// - guard 不通過 → y_new 不採用 → y=-3 を保持
-    ///
-    /// 旧 A-only logic (col 0 skip) では row 0 を除外して max_rel_old=0.75 / max_rel_new=0
-    /// → strict 改善判定で y_new 採用 → y=0 になり assert に FAIL する。
-    /// no-op 化検証: skip 条件を `A.col_ptr[j+1]-col_ptr[j]==0` に手動 revert すると
-    /// assert "should keep y=-3" が FAIL することを実機確認済。
+    /// #92 F2 sentinel: empty A col + 未消去 var の DD guard 新旧 drift。
+    /// 旧 A-only skip では row 0 除外で `y_new` 採用、新 logic は guard 不通過で
+    /// `y=-3` 保持。skip 条件を `col_ptr[j+1]-col_ptr[j]==0` に revert すると
+    /// assert "should keep y=-3" が FAIL する (実機検証済の no-op proof)。
     #[test]
     fn refine_dual_lsq_does_not_skip_empty_a_col_when_not_eliminated() {
         let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();

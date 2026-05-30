@@ -14,23 +14,13 @@ use crate::tolerances::any_nonfinite;
 
 /// KKT dual-sign violation (componentwise relative max).
 ///
-/// Stationarity `Qx + c + Aᵀy + bound_contrib = 0` uses the convention:
-/// - Le constraints: y_i ≥ 0 (violation if y_i < 0)
-/// - Ge constraints: y_i ≤ 0 (violation if y_i > 0)
-/// - Eq constraints: y_i free (no sign requirement)
-/// - lb bound duals (first half of `z`): z_lb_j ≥ 0 (violation if z_lb_j < 0)
-/// - ub bound duals (second half of `z`): z_ub_j ≥ 0 (violation if z_ub_j < 0)
+/// Stationarity `Qx + c + Aᵀy + bound_contrib = 0` の符号規約:
+/// Le `y_i ≥ 0` / Ge `y_i ≤ 0` / Eq free / z_lb,z_ub `≥ 0`。
+/// Returns `max{viol_k / (1+|v_k|)}` (sign-scale invariant)、全合致で 0。
+/// `y` or `z` に non-finite があれば `f64::INFINITY`。
 ///
-/// Returns `max{ viol_k / (1 + |v_k|) }` over all sign-constrained components,
-/// where `viol_k = max(0, wrong-sign part)`. Returns 0 when all sign constraints hold.
-/// Scale invariant: scaling y and z by a positive scalar leaves the result unchanged.
-///
-/// Returns `f64::INFINITY` if any element of `y` or `z` is non-finite (NaN or ±Inf).
-///
-/// **Caller responsibility**: `z` must have length `n_lb_finite + n_ub_finite` where
-/// `n_lb_finite` / `n_ub_finite` are the counts of finite lower / upper bounds in
-/// `bounds`. Passing a shorter `z` is a contract violation detected by `debug_assert`
-/// in debug builds; in release builds the z-processing is skipped when `z` is empty.
+/// Contract: `z.len() == n_lb_finite + n_ub_finite`。debug は `debug_assert`、
+/// release は `z` 空のとき skip する。
 pub fn dual_sign_violation(
     ct: &[ConstraintType],
     y: &[f64],

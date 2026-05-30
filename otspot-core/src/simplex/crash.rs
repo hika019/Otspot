@@ -1,27 +1,13 @@
-//! Simplex crash basis (Lower-Triangular Sparse Factor, LTSF).
+//! Simplex crash basis (LTSF: Lower-Triangular Sparse Factor)。
 //!
-//! 大規模 LP (dfl001, ken-13/18, pds-20 等) で cold start の人工変数 Phase I が
-//! 反復数の主因。構造列で行を被覆して `needs_artificial` を減らすことで Phase I
-//! の最適化対象が縮減される。
+//! 大規模 LP の cold start で Phase I 反復削減が目的。構造列で行を被覆し
+//! `needs_artificial` を減らす。Maros 2003 §5.5 + Bixby 1992 §4 sign-aware pivot。
 //!
-//! アルゴリズム: Maros 2003 §5.5 LTSF crash + Bixby 1992 §4 sign-aware pivot.
-//!
-//! 1. 既に slack で被覆できる行はそのまま (`needs_artificial[i] == false`)。
-//! 2. 構造列の「未被覆行 nnz」(active count) を動的に管理:
-//!    - 初期化: 構造列ごとに未被覆 artificial 行に持つ entry を数える。
-//!    - bucket queue: buckets[k] = active count が k の列 list。
-//!    - 行が被覆されるたび、その行に entry を持つ列の count を decrement する。
-//! 3. ループ: bucket 最小 k から pop し、未被覆行のうち以下を満たす行から
-//!    最大 |pivot| 行を pivot として割り当てる:
-//!    - `|a[i,j]| >= CRASH_PIVOT_REL * max_in_col` (Markowitz 安定性)
-//!    - `b[i] == 0` または `sign(a[i,j]) == sign(b[i])` (x_B ≥ 0 不変式)
-//! 4. pivot 割当後、その行に entry を持つ他列の active count を 1 減らして
-//!    bucket を更新。Singleton (active count==1) が新生したら次の pop で
-//!    強制的に処理されるため、自然な triangular ordering が得られる。
-//!
-//! 動的 re-prioritization が LTSF の本質。静的 sort では singleton chase ができず、
-//! 多数の columns が 1 度の pass で未被覆行を取り合う quasi-triangle 構造で
-//! 退化する。
+//! active count (未被覆行 nnz) を bucket queue で動的管理し、最小 bucket から
+//! pop して `|a[i,j]| ≥ CRASH_PIVOT_REL · max_in_col` (Markowitz) かつ
+//! `b[i]=0 ∨ sign 一致` (x_B≥0) を満たす最大 |pivot| 行を pivot 割当。pivot 後
+//! 同行 entry を持つ他列の count を decrement し singleton chase を誘発する。
+//! 動的 re-prioritization が LTSF の本質 (静的 sort は quasi-triangle で退化)。
 
 use crate::sparse::CscMatrix;
 

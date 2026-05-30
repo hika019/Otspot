@@ -1,22 +1,9 @@
-//! Multi-start local search (Phase 2)。
+//! Multi-start local search (Phase 2): cold + (n_starts-1) random initial で最良
+//! objective を選ぶ。spatial B&B の incumbent 供給用。単独では大域保証なし。
 //!
-//! 非凸 QP では IPM が出発点ごとに異なる局所最適に収束する。
-//! `solve_qp_multistart` は cold + (n_starts-1) random initial を解き、
-//! 最良 objective を持つ結果を採用する。
-//!
-//! Phase 3 spatial Branch-and-Bound の incumbent (上界) 供給を主用途とする。
-//! 単独では大域最適保証は無く、α-BB / McCormick (Phase 4-5) と組み合わせて
-//! 完全な大域最適化器となる。
-//!
-//! ## 並列化
-//!
-//! `SolverOptions::threads` (user 指定) を使い、`min(n_starts, threads)` の
-//! ローカル `rayon::ThreadPool` を構築し並列実行する。各 inner solve は
-//! `threads = 1` 強制 (二重並列化抑止)。
-//!
-//! 全 thread から書き込まれる共有 state は無い (各 start は独立に SolverOptions を
-//! clone)。結果は `Vec<SolverResult>` に index 順で collect → 順次 `pick_better`
-//! で reduce。同 seed なら thread 数によらず結果は決定論的。
+//! `SolverOptions::threads` で `min(n_starts, threads)` の rayon pool を構築し
+//! 並列実行。inner solve は `threads=1` 強制 (二重並列抑止)。共有 mutable state
+//! なし、結果は index 順 collect → `pick_better` で reduce、同 seed なら決定論的。
 
 use crate::options::{MultiStartConfig, QpWarmStart, SolverOptions, StartStrategy};
 use crate::problem::{SolveStatus, SolverResult};

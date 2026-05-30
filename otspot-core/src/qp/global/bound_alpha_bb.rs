@@ -1,27 +1,13 @@
-//! α-BB lower bound (Phase 4 非凸 QP 大域最適化)。
+//! α-BB lower bound (Maranas-Floudas 1995, Phase 4 非凸 QP 大域最適化)。
 //!
-//! ## 原理
-//! Maranas-Floudas (1995) underestimator:
+//! `L(x; α, l, u) = f(x) + α Σ_i (x_i − l_i)(x_i − u_i)` は box 上で `L ≤ f`、
+//! corner で `L = f`。`2α ≥ −λ_min(Q)` を満たせば `∇²L = Q + 2α·I` PSD で
+//! convex underestimator となる。凸化 QP に既存 IpPMM をそのまま適用し、obj 値が
+//! box 上 lb となる。
 //!
-//!   L(x; α, l, u) = f(x) + α Σ_i (x_i − l_i)(x_i − u_i)
-//!
-//! `(x_i − l_i)(x_i − u_i) ≤ 0` on box `[l, u]`、端点で `= 0` なので `L ≤ f` 全域、
-//! corner では `L = f`。Hessian は `∇²L = Q + 2α·I` で、`2α ≥ −λ_min(Q)` を満たせば PSD
-//! (= L は box 上の convex underestimator)。
-//!
-//! 凸化問題は box constraint + 既存線形制約 `Ax {=,≤,≥} b` をそのまま使い、
-//! 既存 IpPMM (`solve_qp_with`) を呼ぶだけで box+linear で global min が得られる。
-//! その obj 値 = 元 non-convex f の box 上 lower bound。
-//!
-//! ## α 計算
-//! raw Gershgorin で δ s.t. `Q + δ·I` PSD を計算 (`gershgorin_alpha`)、`α = δ / 2`
-//! で `Q + 2α·I` PSD = α-BB の要求を満たす。LDL^T 経路は α-BB に不要なオーバヘッドで、
-//! 凸化 lb の保守性を素直に表せる raw Gershgorin を独立実装する。
-//!
-//! ## semi-infinite box
-//! `(x_i − l_i)(x_i − u_i)` 項は有限境界を要求する。l_i や u_i が ±∞ の変数があれば
-//! α-BB underestimator は box 上で `-∞` まで落ちうるので意味のある lb にならない。
-//! その場合 `None` を返し、caller (= mod.rs) は interval lb / `-∞` に fall back する。
+//! α は raw Gershgorin (`α = δ/2`, `δ s.t. Q+δI` PSD) で計算。LDL^T 経路は不要 OH。
+//! 半無限 box (l_i or u_i = ±∞) は underestimator が `-∞` まで落ち得るため `None`
+//! を返し、caller は interval lb / `-∞` に fall back する。
 
 use std::time::Instant;
 

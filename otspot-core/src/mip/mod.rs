@@ -1,26 +1,9 @@
 //! Mixed-integer programming (MILP / MIQP) via branch-and-bound.
 //!
-//! # Approach
-//! Each B&B node solves the **continuous relaxation** (LP for MILP, convex QP for
-//! MIQP) over the node's variable bounds. Integer branching tightens one integer
-//! variable's bounds (`x_j <= floor(v)` / `x_j >= ceil(v)`) — the same node
-//! mechanism the spatial QP B&B uses for box splitting, so relaxations are solved
-//! by swapping the bounds vector. The relaxation objective is a valid lower bound;
-//! integer-feasible relaxation solutions are upper-bound incumbents. Fathoming
-//! reuses the spatial B&B's relative-gap pruning (`qp::global::pruning`).
-//!
-//! # Reuse vs. duplication
-//! - `pruning::{should_prune, within_gap}` is shared directly (pure `f64` logic).
-//! - The best-bound priority queue (`queue::NodeQueue`) is an intentional small
-//!   duplicate of `qp::global::tree::BBTree`.
-//! - The driver loop mirrors the proven spatial-B&B structure but the per-node
-//!   semantics differ (relaxation-objective lower bound vs. interval bound;
-//!   integer-feasible incumbents vs. any feasible point).
-//!
 //! MILP (LP relaxation) and convex MIQP (QP relaxation) share one generic driver
-//! (`solve_mip_with_stats`); only the relaxation solver differs, abstracted by
-//! the `Relaxation` trait. Non-convex MIQP (non-PSD `Q`) is out of scope and
-//! reported as [`SolveStatus::NonConvex`].
+//! (`solve_mip_with_stats`); the per-node solver is abstracted by `Relaxation`.
+//! Pruning (`qp::global::pruning`) is reused from the spatial QP B&B. Non-convex
+//! MIQP is out of scope and reported as [`SolveStatus::NonConvex`].
 
 pub(crate) mod branch;
 pub(crate) mod heuristics;

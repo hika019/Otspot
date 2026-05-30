@@ -1,27 +1,12 @@
-//! Phase 3 spatial Branch-and-Bound scaffolding (非凸 QP 大域最適化)。
+//! Phase 3 spatial Branch-and-Bound (非凸 QP 大域最適化)。
 //!
-//! # scope
-//! Phase 3 は **scaffolding** = BB tree / 分枝 / incumbent / 単純 pruning だけ。
-//! 下界は box 上 interval arithmetic = 制約 Ax=b 無視で緩い。実用 (gap_tol=1e-3
-//! で実問題確実 hit) は Phase 4 (α-BB) 必須。
+//! [`solve_qp_global`] を `solve_qp_with` と別 entry で提供する (既存 QP user の
+//! wall を桁違いに伸ばさない安全装置)。下界は box 上の interval arithmetic で
+//! 制約を無視するため緩い — 実用には Phase 4 (α-BB) 必須。
 //!
-//! # API
-//! [`solve_qp_global`] を [`crate::qp::solve_qp_with`] とは別の明示 entry として提供。
-//! `SolverOptions::global_optimization` が Some でも `solve_qp_with` は dispatch しない
-//! (= 既存 QP user の wall を桁違いに伸ばさない安全装置)。
-//!
-//! # 戻り値の status
-//! Q の凸性 (Gershgorin 由来 `alpha == 0.0` を PSD と判定) で分岐:
-//! - **Q PSD (convex):**
-//!   - `Optimal`: BB 探索完了 (root tight or queue 空) → 凸 QP として global ε-optimal
-//!   - `LocallyOptimal`: 早期打切 (gap 未証明)。convex Q では IPM 単発で global 達成しても
-//!     budget 不足で proof が間に合わなかった希少ケース。
-//! - **Q indefinite (nonconvex):**
-//!   - `NonconvexGlobal`: BB 探索完了 → indefinite Q 上で ε-global 証明済み
-//!   - `NonconvexLocal`: 早期打切 → incumbent あり、global proof なし (caller は探索打切と
-//!     IPM 単発 `LocallyOptimal` を区別できる)
-//! - `Timeout`: deadline で打ち切り、incumbent 未発見
-//! - root と同じ status: root が Infeasible / NumericalError / Unbounded だった場合
+//! 戻り status: PSD なら `Optimal` / `LocallyOptimal`、indefinite なら
+//! `NonconvexGlobal` / `NonconvexLocal`、deadline は `Timeout`、root が
+//! Infeasible/NumericalError/Unbounded ならそのまま伝播。
 
 pub(crate) mod bound;
 pub(crate) mod bound_alpha_bb;
@@ -1276,28 +1261,10 @@ mod tests {
 
     // ---- finalize_proven dual-quality gate sentinels --------------------------
 
-    /// Table-driven: 4 combinations of (convex/indefinite) × (good-dual/bad-dual).
-    ///
-    /// ## Sentinel (no-op-fail requirement)
-    /// Removing the `prove_optimal` call from `finalize_proven` causes this function
-    /// to ALWAYS stamp the Optimal/NonconvexGlobal status regardless of dual quality.
-    /// The two bad-dual rows (`convex-bad-dual` → LocallyOptimal and
-    /// `indefinite-bad-dual` → NonconvexLocal) would then receive Optimal/NonconvexGlobal
-    /// and the assertions FAIL — confirming the gate is load-bearing.
-    ///
-    /// ## KKT math for test fixtures
-    ///
-    /// Convex problem: `min x²`, `Q=[[2]]`, `c=[0]`, no constraints, bounds `[-1,1]`.
-    /// - Good dual: `x=0` (interior). `z=[z_lb=0, z_ub=0]`.
-    ///   Stationarity: `2·0 + 0 - 0 + 0 = 0` ✓, `duality_gap=0` ✓.
-    /// - Bad dual: `x=0`, `z=[100, -100]`.
-    ///   Stationarity: `-100 + (-100) = -200 ≠ 0` ✗, `dual_sign_violation` for `z_ub < 0` ✗.
-    ///
-    /// Indefinite problem: `min -x²`, `Q=[[-2]]`, `c=[0]`, no constraints, bounds `[-1,1]`.
-    /// - Good dual: `x=1` (ub active). `z=[z_lb=0, z_ub=2]`.
-    ///   Stationarity: `-2·1 - 0 + 2 = 0` ✓, complementarity `z_ub·(1-1)=0` ✓.
-    /// - Bad dual: `x=1`, `z=[50, 50]`.
-    ///   Stationarity: `-2 - 50 + 50 = -2 ≠ 0` ✗.
+    /// Sentinel: 4 combinations of (convex/indefinite) × (good-dual/bad-dual).
+    /// Removing the `prove_optimal` call from `finalize_proven` would always stamp
+    /// Optimal/NonconvexGlobal regardless of dual quality; the bad-dual rows then
+    /// FAIL their assertion (no-op-fail requirement, gate is load-bearing).
     #[test]
     fn finalize_proven_dual_gate_table() {
         // Convex: min x², box [-1, 1]

@@ -22,24 +22,15 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
-/// Lex 摂動: bland_mode 起動時に reduced_costs (non-basic) と x_b
-/// (basis values) の両方に `eps * (1 + i/n) * scale` を加算し degeneracy を
-/// 解消、Bland's rule の有限終了を保証する。
+/// Lex 摂動 (bland_mode 起動時): reduced_costs (non-basic) と x_b に
+/// `eps·(1+i/n)·scale` を加算し ratio test の tie を解消、Bland's rule の有限終了
+/// を保証する。reduced_costs 摂動が cycle 解消の本体 (klein3 観測 2-cycle 起因)、
+/// x_b 摂動は leaving degeneracy 補助。`c` 直接摂動は dual feasibility を破るため
+/// 不採用。positive 加算で `r_j > 0` を保つ。refactor 後は摂動が失われるため
+/// 逐次再注入する。
 ///
-/// **reduced_costs 摂動が cycle 解消の本体**: klein3 観測の 2-cycle は entering
-/// ratio test の tie (j=43 / j=63 が ほぼ同じ ratio を持ち is_basic 切替で交互
-/// 選択) が原因。reduced_costs を positive 値で線形に摂動 → ratio test の tie
-/// 解消 → 一意 entering。**c (objective) を直接摂動すると dual feasibility を
-/// 破る** (推奨されない経路) ので reduced_costs 経路を選択。
-/// **x_b 摂動は補助**: leaving の degeneracy 解消用。
-///
-/// 摂動は positive 加算なので `r_j > 0` を保ち dual feasibility 維持。
-/// 注意: refactor 後 (`needs_refactor()` で reduced_costs 再計算) は摂動が
-/// 失われるため、Bland mode 中も逐次再注入が必要 (実装側で対応)。
-///
-/// `LEX_PERTURB_REL = 1e-4` は reduced_costs / x_b スケールに対する相対摂動。
-/// 1e-6 では cycle 行の reduced_cost diff (~1e-3 オーダー) を上回れず tie 残存。
-/// 1e-3 では Phase 1 の Infeasible 判定境界に影響しうるため間を取った。
+/// `1e-4` の bench evidence: 1e-6 は cycle 行 reduced_cost diff (~1e-3) を上回れず
+/// tie 残存、1e-3 は Phase 1 Infeasible 判定境界に影響する。
 const LEX_PERTURB_REL: f64 = 1e-4;
 
 /// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
