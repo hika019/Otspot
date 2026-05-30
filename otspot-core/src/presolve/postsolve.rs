@@ -319,9 +319,12 @@ fn build_and_solve_cleanup_lp(
     ).expect("triplets invariant");
     let b_clean_keep = b_clean.clone();
     let ct_clean_keep = ct_clean.clone();
+    // LpProblem::new_general can reject ±Inf in derived b_clean (large coefficient overflow case);
+    // preserve the cheap postsolve fallback by returning None instead of panicking.
+    // See codex review on #185 a5de15d.
     let cleanup_lp = LpProblem::new_general(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
-    ).expect("lp invariant");
+    ).ok()?;
 
     // Wire the parent deadline straight through so every inner stage (parse, scale,
     // factorize, simplex iterate) checks the same clock; otherwise large cleanup
