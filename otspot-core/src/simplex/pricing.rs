@@ -93,9 +93,10 @@ impl PricingStrategy for DantzigPricing {
 /// Attempt 2 (per-column cap at 100·m): wood1p PASS, grow22 PASS. Retreat
 /// claim "maros FAIL:Infeasible (0.7s)" **does not reproduce in current codebase**
 /// (post-2026-05-30, #178 Agent C verified). cap-100m is strictly better in
-/// tested 3: wood1p 17.6× faster, grow22 1.66× faster, maros parity.  Phase 1 /
-/// dual_advanced / postsolve / KKT guard improvements since #146 absorbed the
-/// perturbation.  Full Netlib 109 + Maros 138 validation pending (#182).
+/// tested 3: wood1p 17.6× faster, grow22 1.66× faster, maros parity, possibly
+/// because Phase 1 / dual_advanced / postsolve / KKT guard improvements since
+/// #146 reduced the perturbation sensitivity (unverified; #182 bisect で特定中).
+/// Full Netlib 109 + Maros 138 validation pending (#182).
 ///
 /// Attempt 3 (global weight reset when any weight > 100·m): maros PASS, but
 /// grow22 PFEAS_FAIL.  A full reset wipes pricing history for all columns,
@@ -106,8 +107,7 @@ impl PricingStrategy for DantzigPricing {
 /// grow22 PFEAS_FAIL. Mechanism (#178 verified 2026-05-30, Agent B): bfeas=1.957e-3,
 /// x_b_neg=4 (basis truly primal-infeasible). ε addition skews ratio test →
 /// ineligible leaving row selected → reconciled basis primal-infeasible. Algorithm
-/// invalid (Scenario D pure); retreat confirmed. 事実化済 (#178 検証, Agent B,
-/// 2026-05-30).
+/// invalid (Scenario D pure); retreat confirmed.
 ///
 /// **Future pivot² guard:** A guard `pivot_sq > 1e-16` is f64-boundary weak:
 /// `(1e-8)² = 1.0000000000000001e-16 > 1e-16` passes the guard. wood1p
