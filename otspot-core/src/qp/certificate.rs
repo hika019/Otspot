@@ -11,7 +11,8 @@
 use crate::problem::certificate::{NotProven, OptimalCertificate};
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::qp::ipm_solver::kkt::{
-    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+    bound_violation, complementarity_componentwise_rel, complementarity_residual_rel,
+    kkt_residual_rel, primal_residual_rel,
 };
 use crate::qp::ipm_solver::outcome::ProblemView;
 use crate::qp::kkt_resid::dual_sign_violation;
@@ -119,7 +120,8 @@ pub fn prove_optimal<'a>(
     let stat = kkt_residual_rel(view, x, y, z);
     let pres = primal_residual_rel(view, x);
     let bviol = bound_violation(view.bounds, x);
-    let comp = complementarity_residual_rel(view, x, y, z);
+    let comp = complementarity_residual_rel(view, x, y, z)
+        .max(complementarity_componentwise_rel(view, x, y, z));
     let dsign = dual_sign_violation(view.constraint_types, y, view.bounds, z);
     let gap = duality_gap_rel;
 

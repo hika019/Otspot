@@ -131,6 +131,47 @@ pub fn complementarity_residual_rel(prob: &ProblemView, x: &[f64], y: &[f64], z:
     max_abs / scale
 }
 
+/// Component-wise relative complementarity residual.
+///
+/// This catches a single inactive row/bound carrying a nonzero dual even when the
+/// problem-level complementarity scale is large enough to hide it.
+pub fn complementarity_componentwise_rel(
+    prob: &ProblemView,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+) -> f64 {
+    let ax_dd = dd_impl::ax(prob.a, x);
+    let comp_i = dd_impl::comp_ineq_products(&ax_dd, prob.b, prob.constraint_types, y);
+    let mut worst = 0.0_f64;
+    for (i, &prod) in comp_i.iter().enumerate() {
+        if prod == 0.0 {
+            continue;
+        }
+        let ax_i = f64::from(ax_dd[i]);
+        let scale = 1.0 + y[i].abs() * (ax_i.abs() + prob.b[i].abs());
+        worst = worst.max(prod / scale);
+    }
+
+    let comp_b = kkt_resid::comp_bound_products(prob.bounds, x, z);
+    let mut idx = 0_usize;
+    for (j, &(lb, _)) in prob.bounds.iter().enumerate() {
+        if lb.is_finite() && idx < z.len() {
+            let scale = 1.0 + z[idx].abs() * (x[j].abs() + lb.abs());
+            worst = worst.max(comp_b[idx] / scale);
+            idx += 1;
+        }
+    }
+    for (j, &(_, ub)) in prob.bounds.iter().enumerate() {
+        if ub.is_finite() && idx < z.len() {
+            let scale = 1.0 + z[idx].abs() * (x[j].abs() + ub.abs());
+            worst = worst.max(comp_b[idx] / scale);
+            idx += 1;
+        }
+    }
+    worst
+}
+
 /// 成分相対化 bounds 違反 max_j violation_j/(1+|x_j|+|bound_j|)。
 ///
 /// Returns `f64::INFINITY` if any element of `x` is non-finite (NaN or ±Inf).
