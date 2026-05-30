@@ -51,6 +51,16 @@ const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
 /// regression threshold `EPS_KKT_NONCONVEX_LOCAL = 1e-3` を超えないよう制限する。
 const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 
+/// polish solve の fallback timeout (秒)。
+///
+/// `polish_incumbent_duals` は B&B `deadline` の残時間を優先継承し、残時間が
+/// 0 (B&B budget 枯渇) の場合のみこの値を fresh budget として用いる。
+/// 5.0 sec は polish IPM の典型 iteration 数 (~10) と problem 規模 (B&B が
+/// 解ける範囲 = 数百変数) に対する経験値で、収束に十分なゆとりを持つ。
+/// B&B が timeout 前に正常終了した場合は残時間継承により timeout_secs 契約を
+/// 破らない。
+const POLISH_TIMEOUT_SECS: f64 = 5.0;
+
 /// 大域最適化 entry。
 ///
 /// 入力: convex / nonconvex QP (`QpProblem`) + 共通 solver options + 大域設定。
@@ -139,8 +149,8 @@ pub fn solve_qp_global_with_stats(
     stats.nodes_processed = 1;
     let user_eps = shared_opts.ipm_eps();
 
-    // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+        state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
         return (
             state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
             stats,
@@ -156,17 +166,17 @@ pub fn solve_qp_global_with_stats(
     let root_x = state.incumbent_sol.clone();
     match select_branching_variable(&root_node, &root_x) {
         None => {
-            return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (
+            if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+                state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
+                return (
                     state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
                     stats,
-                )
-            } else {
-                (
-                    state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
-                    stats,
-                )
-            };
+                );
+            }
+            return (
+                state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
+                stats,
+            );
         }
         Some(j) => {
             let warm = state.build_warm();
@@ -247,9 +257,8 @@ pub fn solve_qp_global_with_stats(
         // 分枝不能 (= node 内で x* が midpoint 一致) → leaf 確定、proof は incumbent 比で取れる
     }
 
-    // incumbent が分枝 node 由来の場合、その双対は sub-box 基準で回収されているため
-    // 元問題に整合させる (interior 変数への分枝境界 dual = 相補性違反を除去)。
-    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol);
+    // B&B incumbent の sub-box dual を元問題に整合させる (bound comp 修復)。
+    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
 
     // 終了条件分岐:
     // - queue 空 AND max_depth 未超過 AND deadline/max_nodes 未到達 → proven
@@ -456,13 +465,85 @@ fn is_polish_suboptimal_acceptable(
     kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
+/// 非凸 B&B 向け KKT recovery accept: 目的関数制約なしで IPM 収束 + 全 KKT を確認する。
+///
+/// sub-box incumbent は bound comp を原問題基準で破ることがある。polish が
+/// Optimal/LocallyOptimal で全 KKT を満たし、かつ目的が incumbent から
+/// `gap_tol * scale` 以上悪化していなければ採用する。obj 悪化 reject は
+/// 非凸で polish が異なる local に流れた場合の incumbent 退化を防ぐ。
+fn is_polish_kkt_recovery(
+    polished: &SolverResult,
+    problem: &QpProblem,
+    incumbent_obj: f64,
+    gap_tol: f64,
+    user_eps: f64,
+) -> bool {
+    if !matches!(polished.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+        return false;
+    }
+    if !polished.objective.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    if polished.objective > incumbent_obj + gap_tol * scale {
+        return false;
+    }
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = problem
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
+    if polished.solution.len() != problem.num_vars
+        || polished.dual_solution.len() != problem.num_constraints
+        || polished.bound_duals.len() != n_lb + n_ub
+    {
+        return false;
+    }
+    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
+    let eliminated_cols = structural_empty_col_mask(problem);
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &eliminated_cols,
+    };
+    let kkt = kkt_residual_rel(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
+    let pf = kkt_primal_residual(&view, &polished.solution);
+    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
+    let comp = kkt_comp_residual(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
+    let dsign = kkt_dual_sign_violation(
+        &problem.constraint_types,
+        &polished.dual_solution,
+        &problem.bounds,
+        &polished.bound_duals,
+    );
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
+}
+
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
     incumbent_obj: f64,
     incumbent_sol: Vec<f64>,
-    /// B&B ループで root 以外の incumbent が見つかった場合 true。
-    /// false のまま = root solve の解がそのまま incumbent = 元問題 box で回収済み。
+    /// true when B&B found a sub-box incumbent better than root.
     incumbent_updated: bool,
 }
 
@@ -489,27 +570,23 @@ impl SearchState {
         self.incumbent_updated = true;
     }
 
-    /// 探索終了後の dual recovery polish。
+    /// Dual recovery polish: re-solves on original bounds to fix sub-box-contaminated duals.
     ///
-    /// B&B incumbent の双対は分枝後の sub-box に対して回収されるため、元問題で
-    /// interior な変数にも分枝境界由来の bound dual が残り、元問題基準の相補性
-    /// (`z_j·(x_j − bnd_j) = 0`) を破る。incumbent を warm start に固定して **元問題の
-    /// box** で局所 QP を解き直し、元問題に整合した双対を回収する。
-    ///
-    /// warm を境界張り付きでも採用する点が [`solve_local_upper_bound`] と異なる
-    /// (探索中は saddle 再固着回避のため境界 warm を捨てるが、最終 polish では
-    /// incumbent corner に錨を打つのが目的)。obj は gap_tol 内に保たれ proof 妥当性を
-    /// 維持 (duals を整合化)。収束済み (Optimal/LocallyOptimal) かつ obj が悪化しない
-    /// 場合のみ採用し、未収束 or obj 悪化は棄却して incumbent を保持する。
-    /// root incumbent (分枝なし) は既に元問題 box で回収済みのため skip。
+    /// Skipped only when root already returned Optimal/LocallyOptimal on original bounds.
+    /// SuboptimalSolution root carries barrier-contaminated bound duals and must not be skipped.
     fn polish_incumbent_duals(
         &mut self,
         problem: &QpProblem,
         base_opts: &SolverOptions,
         gap_tol: f64,
+        relax_for_nonconvex: bool,
     ) {
-        if !self.incumbent_updated {
-            // root solve 結果は元問題 box で回収済み; polish は冗長。
+        if !self.incumbent_updated
+            && matches!(
+                self.incumbent_result.status,
+                SolveStatus::Optimal | SolveStatus::LocallyOptimal
+            )
+        {
             return;
         }
         let Some(warm) = build_warm_from(&self.incumbent_result) else {
@@ -522,23 +599,34 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
+        // B&B 残時間を優先継承し、枯渇時のみ POLISH_TIMEOUT_SECS の fresh budget を使う
+        // (timeout_secs 契約破り回避 + budget 枯渇時 fallback 両立)。
+        let now = Instant::now();
+        let polish_deadline = match base_opts.deadline {
+            Some(d) if d > now => d,
+            _ => now + Duration::from_secs_f64(POLISH_TIMEOUT_SECS),
+        };
+        opts.deadline = Some(polish_deadline);
+        opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if is_polish_acceptable(
-            &polished.status,
-            polished.objective,
-            self.incumbent_obj,
-            gap_tol,
-        ) {
-            self.update_incumbent(&polished);
-        } else if is_polish_suboptimal_acceptable(
-            &polished,
-            problem,
-            self.incumbent_obj,
-            gap_tol,
-            user_eps,
-        ) {
-            // SuboptimalSolution でも KKT が十分なら dual recovery として採用。
+        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol)
+            || is_polish_suboptimal_acceptable(
+                &polished,
+                problem,
+                self.incumbent_obj,
+                gap_tol,
+                user_eps,
+            )
+            || (relax_for_nonconvex
+                && is_polish_kkt_recovery(
+                    &polished,
+                    problem,
+                    self.incumbent_obj,
+                    gap_tol,
+                    user_eps,
+                ))
+        {
             self.update_incumbent(&polished);
         }
     }
@@ -1259,6 +1347,159 @@ mod tests {
         );
     }
 
+    // ---- is_polish_kkt_recovery sentinels -------------------------------------
+
+    /// 5 軸 sentinel: `is_polish_kkt_recovery` の accept/reject 全 gate を検証。
+    ///
+    /// Fixture: 1 var、A = 0、bounds = (-∞, +∞)、Le 制約 1 本、dual = 0
+    /// → 全 KKT 残差は 0 で構成上 trivially feasible。各 axis を 1 つずつ破る。
+    ///
+    /// ## Sentinel (no-op-fail proof)
+    /// - axis 1 (status): Optimal/LocallyOptimal 以外を許容に書き換えると case 1 が FAIL
+    /// - axis 2 (dim): 次元 guard を除去すると case 2 が FAIL
+    /// - axis 3 (KKT): wrong-sign dual を許容すると case 3 が FAIL
+    /// - axis 5 (obj guard): `polished.objective > incumbent_obj + gap_tol*scale` の reject
+    ///   を `if polished.objective < 0.0 { return false; }` (常に通過) に書き換えると
+    ///   case 5 が FAIL する → axis 5 が load-bearing であることを確認 (P1-A 検証用)
+    #[test]
+    fn is_polish_kkt_recovery_five_axis_gates() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        let incumbent_obj = 0.0_f64;
+        let gap_tol = 0.1_f64;
+        let user_eps = 1e-6_f64;
+
+        // axis 4 (accept 通過): valid Optimal + 全 KKT 0 + obj 同点 → true
+        let valid = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            is_polish_kkt_recovery(&valid, &problem, incumbent_obj, gap_tol, user_eps),
+            "axis 4 (accept): all gates pass must return true",
+        );
+
+        // axis 1 (status 棄却): SuboptimalSolution / MaxIterations / Timeout → false
+        for bad_status in [
+            SolveStatus::SuboptimalSolution,
+            SolveStatus::MaxIterations,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+            SolveStatus::Infeasible,
+        ] {
+            let polished = SolverResult {
+                status: bad_status.clone(),
+                ..valid.clone()
+            };
+            assert!(
+                !is_polish_kkt_recovery(&polished, &problem, incumbent_obj, gap_tol, user_eps),
+                "axis 1 (status): {:?} must be rejected",
+                bad_status,
+            );
+        }
+
+        // axis 2 (dim mismatch): solution.len / dual_solution.len 不一致 → false
+        let polished_short_sol = SolverResult {
+            solution: vec![],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_short_sol,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 2 (dim): wrong solution.len must be rejected",
+        );
+        let polished_short_dual = SolverResult {
+            dual_solution: vec![],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_short_dual,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 2 (dim): wrong dual_solution.len must be rejected",
+        );
+
+        // axis 3 (KKT failing): Le 制約に対して wrong-sign dual → dsign violation
+        let polished_wrong_sign = SolverResult {
+            dual_solution: vec![-0.5],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_wrong_sign,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 3 (KKT): wrong-sign dual must be rejected",
+        );
+
+        // axis 5 (obj 悪化 reject, P1-A): polished.objective が incumbent + tol を上回る
+        // → 非凸で polish が悪い local に流れたケース、incumbent 退化を防ぐ。
+        // incumbent_obj=0, gap_tol=0.1, scale=1.0 → threshold=0.1。obj=1.0 → reject。
+        let polished_worse = SolverResult {
+            objective: 1.0,
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_worse,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 5 (obj guard): polished obj {} > incumbent + gap_tol*scale = {} must be rejected (P1-A)",
+            polished_worse.objective,
+            incumbent_obj + gap_tol * 1.0_f64.max(incumbent_obj.abs()),
+        );
+
+        // axis 5 二重確認: scale-aware 動作。incumbent=-10 → scale=10 → threshold=-10+1=-9.
+        // obj=-9.5 (改善) → accept。obj=-8 (悪化、scale*tol 超過) → reject。
+        let polished_within_tol = SolverResult {
+            objective: -9.5,
+            ..valid.clone()
+        };
+        assert!(
+            is_polish_kkt_recovery(&polished_within_tol, &problem, -10.0, gap_tol, user_eps),
+            "axis 5: improvement within scaled tol must be accepted",
+        );
+        let polished_outside_tol = SolverResult {
+            objective: -8.0,
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(&polished_outside_tol, &problem, -10.0, gap_tol, user_eps),
+            "axis 5: obj outside scaled tol (-8 > -10 + 0.1*10 = -9) must be rejected",
+        );
+    }
+
     // ---- finalize_proven dual-quality gate sentinels --------------------------
 
     /// Sentinel: 4 combinations of (convex/indefinite) × (good-dual/bad-dual).
@@ -1447,5 +1688,85 @@ mod tests {
             r.status,
         );
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
+    }
+
+    /// Regression: proptest seed a46bde58 — PD Q (Gershgorin false positive) must satisfy KKT.
+    ///
+    /// The a46bde58 problem has a truly PD Q (Cholesky succeeds) but Gershgorin reports
+    /// indefinite (Q[0,0]=0.16 < off-diag sum 0.358). The global solver must return
+    /// complementarity < 1e-3 for NonconvexLocal/NonconvexGlobal status.
+    #[test]
+    fn proptest_seed_a46bde58_kkt_regression() {
+        use crate::problem::ConstraintType;
+
+        let rows = vec![0usize, 1, 2, 0, 1, 2, 0, 1, 2];
+        let cols = vec![0usize, 0, 0, 1, 1, 1, 2, 2, 2];
+        let vals = vec![
+            0.16000000000000003_f64,
+            -0.03915063848637796,
+            0.3192145885469365,
+            -0.03915063848637796,
+            0.460208173753392,
+            -0.17436676978450188,
+            0.3192145885469365,
+            -0.17436676978450188,
+            1.0576743304356357,
+        ];
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 3).unwrap();
+        let c = vec![
+            0.653536572287863_f64,
+            -0.010836684577960307,
+            -1.445105979349165,
+        ];
+        let a_rows = vec![1usize];
+        let a_cols = vec![0usize];
+        let a_vals = vec![0.3965134170122774_f64];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 2, 3).unwrap();
+        let b = vec![2.477268994387253_f64, -0.7050675637248502];
+        let bounds = vec![
+            (-0.5_f64, 0.5),
+            (-2.519765539465491, 2.519765539465491),
+            (-0.6799197663837497, 0.6799197663837497),
+        ];
+        let cts = vec![ConstraintType::Le, ConstraintType::Ge];
+        let problem = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        let mut o = SolverOptions::default();
+        o.timeout_secs = Some(15.0);
+        let cfg = GlobalOptimizationConfig::default();
+        let res = solve_qp_global(&problem, &o, &cfg);
+
+        assert!(
+            matches!(res.status, SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal),
+            "expected NonconvexLocal/NonconvexGlobal, got {:?}",
+            res.status
+        );
+
+        let elim = structural_empty_col_mask(&problem);
+        let view = ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols: &elim,
+        };
+        let comp = kkt_comp_residual(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        let stat = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let pf = kkt_primal_residual(&view, &res.solution);
+        assert!(
+            comp < 1e-3,
+            "a46bde58: complementarity={:.3e} >= 1e-3 (status={:?} stat={:.3e} pf={:.3e})",
+            comp,
+            res.status,
+            stat,
+            pf,
+        );
     }
 }
