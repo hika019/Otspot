@@ -33,6 +33,12 @@
 //! 二重実装は避けるが、LP は bound dual を rc に折り畳む構造的差異があるため
 //! 完全集約はしない。両 helper の no-op 化はそれぞれ別 sentinel test で検出する。
 //!
+//! ## regression seed ファイル
+//!
+//! `diag_kkt_proptest.proptest-regressions` は proptest が過去に発見した
+//! failure seed を保持する。このファイルは VCS に必ず commit すること
+//! (削除すると旧 failure case の再現保証が失われる)。
+//!
 //! ## 実 proptest case 総数
 //!
 //! 各 proptest body の `cases` を合算した実総数は以下:
