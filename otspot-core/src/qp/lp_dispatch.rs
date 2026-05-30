@@ -163,7 +163,9 @@ fn solve_unpresolved_lp_from_qp(
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
                 // 確定 status は simplex 再試行不要、即返却。
                 // Optimal は primal guard で false-Optimal を除去してから返す。
-                return guard_lp_optimal(ipm_result, lp);
+                let mut guarded = guard_lp_optimal(ipm_result, lp);
+                fill_lp_reduced_costs_from_dual(&mut guarded, lp);
+                return guarded;
             }
             SolveStatus::Unbounded
             | SolveStatus::Timeout
@@ -230,6 +232,7 @@ fn solve_unpresolved_lp_from_qp(
     }
     let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result);
     promote_known_objective_incumbent(&mut result, lp, options);
+    fill_lp_reduced_costs_from_dual(&mut result, lp);
     result
 }
 
@@ -359,7 +362,9 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
                 ipm.status,
                 SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible
             ) {
-                return guard_lp_optimal(ipm, lp);
+                let mut guarded = guard_lp_optimal(ipm, lp);
+                fill_lp_reduced_costs_from_dual(&mut guarded, lp);
+                return guarded;
             }
             if options.deadline.is_some_and(|d| Instant::now() >= d) {
                 return ipm;
@@ -371,7 +376,9 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
     }
 
     let simplex = crate::lp::solve_lp_forwarded_from_qp(lp, options);
-    pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex)
+    let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex);
+    fill_lp_reduced_costs_from_dual(&mut result, lp);
+    result
 }
 
 fn solve_original_lp_direct_retry(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
@@ -477,6 +484,68 @@ fn lp_primal_feasible(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     true
+}
+
+fn fill_lp_reduced_costs_from_dual(result: &mut SolverResult, problem: &LpProblem) {
+    if result.reduced_costs.len() == problem.num_vars {
+        return;
+    }
+    if result.solution.len() != problem.num_vars
+        || result.dual_solution.len() != problem.num_constraints
+    {
+        return;
+    }
+    if !matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+    ) {
+        return;
+    }
+    let mut rc_minus = problem.c.clone();
+    let mut rc_plus = problem.c.clone();
+    for j in 0..problem.num_vars {
+        let Ok((rows, vals)) = problem.a.get_column(j) else {
+            result.reduced_costs.clear();
+            return;
+        };
+        for (k, &row) in rows.iter().enumerate() {
+            let term = vals[k] * result.dual_solution[row];
+            rc_minus[j] -= term;
+            rc_plus[j] += term;
+        }
+    }
+    let df_minus = lp_reduced_cost_bound_violation(problem, &result.solution, &rc_minus);
+    let df_plus = lp_reduced_cost_bound_violation(problem, &result.solution, &rc_plus);
+    result.reduced_costs = if df_plus < df_minus {
+        rc_plus
+    } else {
+        rc_minus
+    };
+}
+
+fn lp_reduced_cost_bound_violation(problem: &LpProblem, x: &[f64], rc: &[f64]) -> f64 {
+    let n = problem.num_vars.min(x.len()).min(rc.len());
+    let mut max_rel = 0.0_f64;
+    for j in 0..n {
+        let (lb, ub) = problem.bounds[j];
+        let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < 1e-6;
+        if fixed {
+            continue;
+        }
+        let at_lb = lb.is_finite() && (x[j] - lb).abs() < 1e-6;
+        let at_ub = ub.is_finite() && (x[j] - ub).abs() < 1e-6;
+        let r = rc[j];
+        let viol = if at_lb && !at_ub {
+            f64::max(0.0, -r)
+        } else if at_ub && !at_lb {
+            f64::max(0.0, r)
+        } else {
+            0.0
+        };
+        let scale = 1.0 + r.abs() + problem.c[j].abs();
+        max_rel = max_rel.max(viol / scale);
+    }
+    max_rel
 }
 
 fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {

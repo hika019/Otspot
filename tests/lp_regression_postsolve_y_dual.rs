@@ -80,8 +80,16 @@ fn check_postsolve_dual_feasibility(
     let (df_abs, df_rel_strict) = dfeas_abs_rel(&prob, &r.reduced_costs);
     let df_rel_bound = dfeas_rel_bound_aware(&prob, &r.solution, &r.reduced_costs);
     let summary = format!(
-        "{}: status={:?} obj={:.4e} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
-        qp_path, r.status, r.objective, df_abs, df_rel_strict, df_rel_bound
+        "{}: status={:?} obj={:.4e} sol_len={} rc_len={} n={} df_abs={:.2e} df_rel_strict={:.2e} df_rel_bound={:.2e}",
+        qp_path,
+        r.status,
+        r.objective,
+        r.solution.len(),
+        r.reduced_costs.len(),
+        prob.num_vars,
+        df_abs,
+        df_rel_strict,
+        df_rel_bound
     );
     if r.solution.len() != prob.num_vars || r.reduced_costs.len() != prob.num_vars {
         return Err(format!(
@@ -93,7 +101,10 @@ fn check_postsolve_dual_feasibility(
         return Err(format!("{} | incumbent vectors must be finite", summary));
     }
     if !has_usable_incumbent(&r.status) {
-        return Err(format!("{} | status must carry a usable incumbent", summary));
+        return Err(format!(
+            "{} | status must carry a usable incumbent",
+            summary
+        ));
     }
     // bound 考慮版を主判定にする (c69959d 以降の bench と同等)。
     if df_rel_bound > eps_dual {
