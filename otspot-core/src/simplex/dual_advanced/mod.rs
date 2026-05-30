@@ -224,30 +224,30 @@ fn try_bounded(
                 // whenever lb-violations are detected; `core.rs` (legacy path)
                 // handles them safely via Bland's rule (see 9597aa2 / #175).
                 if !super::has_lb_violation(&x_b, options.primal_tol) {
-                let mut is_basic = vec![false; bsf.n_total];
-                for &j in &warm.basis {
-                    is_basic[j] = true;
-                }
-                let state = BoundedDualState {
-                    basis: warm.basis.clone(),
-                    at_upper: vec![false; bsf.n_total],
-                    x_b,
-                    reduced_costs: vec![0.0; bsf.n_total],
-                    is_basic,
-                    iterations: 0,
-                };
-                let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
-                let (dual_out, dual_state) =
-                    bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
-                total_iters = dual_state.iterations;
-                let result = finish_bounded(
-                    dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
-                    problem, options, &mut total_iters,
-                );
-                if result.is_some() {
-                    return result;
-                }
-                // UbViolationOutOfScope from warm start → cold start
+                    let mut is_basic = vec![false; bsf.n_total];
+                    for &j in &warm.basis {
+                        is_basic[j] = true;
+                    }
+                    let state = BoundedDualState {
+                        basis: warm.basis.clone(),
+                        at_upper: vec![false; bsf.n_total],
+                        x_b,
+                        reduced_costs: vec![0.0; bsf.n_total],
+                        is_basic,
+                        iterations: 0,
+                    };
+                    let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
+                    let (dual_out, dual_state) =
+                        bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
+                    total_iters = dual_state.iterations;
+                    let result = finish_bounded(
+                        dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
+                        problem, options, &mut total_iters,
+                    );
+                    if result.is_some() {
+                        return result;
+                    }
+                    // UbViolationOutOfScope from warm start → cold start
                 } // lb-violation guard: fall through to cold start
             }
             // Singular warm basis → cold start
@@ -759,53 +759,52 @@ mod tests {
             "warm {:.6e} != cold {:.6e}", r_warm.objective, r_cold_p.objective);
     }
 
-    /// **P2-B (bounded path)** — Warm start with lb-violations is accepted
-    /// on the bounded path after guard removal in `try_bounded` (#175).
+    /// **P2-A sentinel**: bounded-path warm-start whose FTRAN yields lb-violations
+    /// falls through to cold-start and converges to Optimal.
     ///
-    /// LP: min -x0 - x1, x0+x1≤6, x0-x1≤5, 0≤x0≤4, 0≤x1≤4.
-    /// Cold optimal: x0=4, x1=2, obj=-6. Perturb b[1]: 2→5.
-    /// The warm basis at cold optimal has B⁻¹·b_eff with lb-violation on
-    /// one basic variable. Without the guard, the bounded dual simplex
-    /// repairs it and returns Optimal.
+    /// Warm basis [x0=0, x1=1] on LP with A=[[1,2],[1,1]], b=[1,3] gives
+    /// FTRAN = B^{-1}·b = [[-1,2],[1,-1]]·[1,3] = [5,−2] — genuine lb-violation
+    /// at row 1. The `has_lb_violation` guard in `try_bounded` detects this and
+    /// falls through to cold start (x_b = b = [1,3] ≥ 0 → Optimal immediately).
+    ///
+    /// no-op proof: removing the `has_lb_violation` guard calls bounded `iterate`
+    /// with x_b=[5,−2]. The step formula `x_b[r] = x_b[r]/pivot` preserves the
+    /// negative value at each pivot — the iterate cycles until the deadline fires
+    /// → Timeout ≠ Optimal → test fails.
     #[test]
-    fn bounded_warm_start_lb_violation_repairs_and_converges() {
+    fn bounded_warm_start_lb_violation_falls_through_to_cold_start() {
         use crate::sparse::CscMatrix;
-        const OBJ_TOL: f64 = 1e-5;
+        use crate::options::WarmStartBasis;
+        const OBJ_TOL: f64 = 1e-6;
 
-        // Bounded path (finite UBs on x0, x1).
-        let make_lp = |b1: f64| {
-            let a = CscMatrix::from_triplets(
-                &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
-            ).unwrap();
-            LpProblem::new_general(
-                vec![-1.0, -1.0], a, vec![6.0, b1],
-                vec![ConstraintType::Le, ConstraintType::Le],
-                vec![(0.0, 4.0), (0.0, 4.0)],
-                None,
-            ).unwrap()
+        // LP: 2 Le rows, 2 structural vars with finite UBs → bounded path.
+        // A = [[1,2],[1,1]], b = [1,3], c = [1,1], 0 ≤ x0,x1 ≤ 4.
+        // Optimal: x0=x1=0, obj=0 (c ≥ 0; trivially optimal at lb).
+        let a = CscMatrix::from_triplets(
+            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 2.0, 1.0, 1.0], 2, 2,
+        ).unwrap();
+        let lp = LpProblem::new_general(
+            vec![1.0, 1.0], a, vec![1.0, 3.0],
+            vec![ConstraintType::Le, ConstraintType::Le],
+            vec![(0.0, 4.0), (0.0, 4.0)],
+            None,
+        ).unwrap();
+        let sf = build_standard_form(&lp);
+
+        // warm.basis=[0,1]: B=[[1,2],[1,1]], B^{-1}=[[-1,2],[1,-1]].
+        // FTRAN(b=[1,3]) = [5,-2] — lb-violation at row 1 → guard fires → cold start.
+        let ws = WarmStartBasis { basis: vec![0, 1], x_b: vec![] };
+        let opts = SolverOptions {
+            warm_start: Some(ws),
+            timeout_secs: Some(1.0), // no-op: iterate cycles until deadline → Timeout
+            ..SolverOptions::default()
         };
-
-        // Cold solve with b1=2 (original lp_2x2_boxed): x0=4, x1=2, obj=-6.
-        let lp_orig = make_lp(2.0);
-        let sf_orig = build_standard_form(&lp_orig);
-        let r_cold = solve_dual_advanced(&sf_orig, &lp_orig, &SolverOptions::default());
-        assert_eq!(r_cold.status, SolveStatus::Optimal, "cold: {:?}", r_cold.status);
-        assert!((r_cold.objective - (-6.0)).abs() < OBJ_TOL,
-            "cold obj={:.6e} expected -6", r_cold.objective);
-        let warm = r_cold.warm_start_basis.expect("bounded cold solve must return warm_start_basis");
-
-        // Perturb b1=2→5: warm basis has lb-violation in B⁻¹·b_eff.
-        // LP remains feasible; x0=4, x1=2 is still optimal (x0-x1=2≤5 ✓).
-        let lp_p = make_lp(5.0);
-        let sf_p = build_standard_form(&lp_p);
-        let r_warm = solve_dual_advanced(
-            &sf_p, &lp_p,
-            &SolverOptions { warm_start: Some(warm), ..SolverOptions::default() },
-        );
-        assert_eq!(r_warm.status, SolveStatus::Optimal,
-            "bounded warm re-solve: {:?} — guard still in try_bounded?", r_warm.status);
-        assert!((r_warm.objective - (-6.0)).abs() < OBJ_TOL,
-            "bounded warm re-solve obj={:.6e} expected -6", r_warm.objective);
+        let r = solve_dual_advanced(&sf, &lp, &opts);
+        assert_eq!(r.status, SolveStatus::Optimal,
+            "bounded warm-start with lb-violation must fall through to cold start \
+             and converge; Timeout = has_lb_violation guard removed (iterate cycling)");
+        assert!(r.objective.abs() < OBJ_TOL,
+            "expected obj=0, got {:.6e}", r.objective);
     }
 
     /// Warm start from a bounded-path solve is accepted and reused.

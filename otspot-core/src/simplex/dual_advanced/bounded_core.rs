@@ -268,8 +268,13 @@ pub(crate) fn iterate(
 
     let needs_sigma = leaving.needs_sigma();
     if needs_sigma {
-        let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-        leaving.set_initial_gamma(&gamma_truth);
+        match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+            None => {
+                let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
+                return (BoundedOutcome::Timeout(obj), state);
+            }
+            Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+        }
     }
 
     // Cost perturbation: c̃_j = max(c_j, 0). With slack initial basis (y = 0)
@@ -426,8 +431,13 @@ pub(crate) fn iterate(
             }
             leaving.after_refactor(m);
             if needs_sigma {
-                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-                leaving.set_initial_gamma(&gamma_truth);
+                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                    None => {
+                        let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
+                        return (BoundedOutcome::Timeout(obj), state);
+                    }
+                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+                }
             }
             compute_reduced_costs_into(
                 a,
@@ -511,8 +521,13 @@ pub(crate) fn iterate(
             }
             leaving.after_refactor(m);
             if needs_sigma {
-                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-                leaving.set_initial_gamma(&gamma_truth);
+                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                    None => {
+                        let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
+                        return (BoundedOutcome::Timeout(obj), state);
+                    }
+                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+                }
             }
             compute_reduced_costs_into(
                 a,

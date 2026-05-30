@@ -105,16 +105,36 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
         .sum()
 }
 
+/// Periodic deadline-check interval inside the m-BTRAN gamma loop.
+/// Checked every `GAMMA_DEADLINE_CHECK_INTERVAL` rows; large enough to
+/// amortize the `Instant::now()` syscall but small enough to catch an
+/// expired deadline before a full O(m²) budget overrun on large warm-starts.
+const GAMMA_DEADLINE_CHECK_INTERVAL: usize = 10;
+
 /// γ_i = ||(B^{-1})_{i,:}||² for each basis row i via m BTRANs.
 ///
 /// Used by DSE leaving strategies at warm-start and after refactor to set
 /// the exact initial weights. Cost O(m²); called once per warm-start solve
 /// or refactor boundary.
-pub(super) fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
+///
+/// Returns `None` when `deadline` is `Some` and the deadline expires inside
+/// the loop (checked every `GAMMA_DEADLINE_CHECK_INTERVAL` rows). Callers
+/// must propagate this as a `Timeout` outcome so the solver stays within its
+/// time budget on large warm-start solves.
+pub(super) fn recompute_gamma_truth(
+    basis_mgr: &mut LuBasis,
+    m: usize,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<f64>> {
     let mut gamma_truth = vec![0.0f64; m];
     let mut e_i = vec![0.0f64; m];
     let mut rho_i = vec![0.0f64; m];
     for i in 0..m {
+        if i % GAMMA_DEADLINE_CHECK_INTERVAL == 0
+            && deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return None;
+        }
         e_i.iter_mut().for_each(|v| *v = 0.0);
         e_i[i] = 1.0;
         let mut sv = SparseVec::from_dense(&e_i);
@@ -122,7 +142,7 @@ pub(super) fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f6
         sv.to_dense_into(&mut rho_i);
         gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
     }
-    gamma_truth
+    Some(gamma_truth)
 }
 
 #[cfg(test)]
@@ -311,5 +331,29 @@ mod tests {
         let x_b = vec![-1.0, 2.0, -3.0];
         // obj = -1 + 4 + -9 = -6
         assert!((basic_obj(&c, &basis, &x_b) - (-6.0)).abs() < 1e-14);
+    }
+
+    /// An already-expired deadline must short-circuit the BTRAN loop immediately
+    /// (checked at i=0) and return `None`.
+    ///
+    /// no-op proof: removing the deadline check inside the loop (reverting
+    /// `recompute_gamma_truth` to a `-> Vec<f64>` that ignores `deadline`) makes
+    /// this test fail — it would return `Some(...)` instead of `None`.
+    #[test]
+    fn dse_expired_deadline_during_gamma_loop_returns_timeout() {
+        let m = 4;
+        let (a, _c, basis) = make_identity_plus(m + 2, m);
+        let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
+        // deadline 1 second in the past — already expired before the first BTRAN
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let result = recompute_gamma_truth(&mut bm, m, Some(past));
+        assert!(
+            result.is_none(),
+            "expired deadline must short-circuit the BTRAN loop and return None; \
+             got Some (deadline check is missing or not firing at i=0)"
+        );
+        // No-deadline call must always succeed.
+        let result_no_dl = recompute_gamma_truth(&mut bm, m, None);
+        assert!(result_no_dl.is_some(), "None deadline must always return Some");
     }
 }

@@ -167,8 +167,13 @@ pub(crate) fn dual_simplex_core_advanced(
     // to FLOOR within a few pivots (verified on textbook degenerate LP).
     // Cost: O(m²). Acceptable: one-shot per warm-start solve.
     if needs_sigma {
-        let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-        leaving.set_initial_gamma(&gamma_truth);
+        match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+            None => {
+                let obj = basic_obj(c, basis, x_b);
+                return SimplexOutcome::Timeout(obj);
+            }
+            Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+        }
     }
 
     // Anti-cycling state: progress_metric が K iter 改善なし → Bland fallback。
@@ -267,6 +272,29 @@ pub(crate) fn dual_simplex_core_advanced(
         } else {
             ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
         };
+
+        // lb-violation fallback: if no candidates exist in the sign-flipped
+        // (lb-repair) direction, restore the original trow and retry with the
+        // standard ub-violation direction. This prevents false `Unbounded`
+        // returns during Big-M Phase I where numerical cycling can produce
+        // small lb-violations (≈ −primal_tol) with no valid reverse-direction
+        // entering column. Genuine lb-violations (large negative x_B[r]) always
+        // find candidates in the lb direction; the fallback only fires for the
+        // degenerate numerical-drift case.
+        let (ratio_pick, lb_violation) = if lb_violation && ratio_pick.is_none() {
+            for t in trow[..n_price].iter_mut() {
+                *t = -*t; // restore original direction
+            }
+            let fallback = if bland_mode {
+                bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
+            } else {
+                ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
+            };
+            (fallback, false)
+        } else {
+            (ratio_pick, lb_violation)
+        };
+
         let (entering_col, theta) = match ratio_pick {
             None => {
                 // 候補なし: 双対非有界 = 主実行不可
@@ -374,8 +402,13 @@ pub(crate) fn dual_simplex_core_advanced(
             // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
             leaving.after_refactor(m);
             if needs_sigma {
-                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
-                leaving.set_initial_gamma(&gamma_truth);
+                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                    None => {
+                        let obj = basic_obj(c, basis, x_b);
+                        return SimplexOutcome::Timeout(obj);
+                    }
+                    Some(gamma_truth) => leaving.set_initial_gamma(&gamma_truth),
+                }
             }
         }
 
