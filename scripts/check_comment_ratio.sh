@@ -2,9 +2,11 @@
 # Fail if any production .rs file (>=100 lines) has comment ratio >= THRESHOLD%.
 # CLAUDE.md L45 「コメントが過多. OSSとしてふさわしい程度にしろ」.
 #
-# THRESHOLD=27: reviewer-203 P1-1 で user 指摘 core.rs (27.9% ratio) を catch
-# するため、`r >= threshold` 経路で 27 に設定 (元 35、30 では 27.9% を catch 不能で
-# 「上っ面修正」抵触)。warning → hard-fail (exit 1) 昇格は user L45 強調 directive。
+# THRESHOLD=27: hard-fail (exit 1) で密集コメント file を block。
+# user 指摘 core.rs (元 27.9% → #201 trim 後 25.8%) は block_size gate (MAX=18)
+# が L25-42 の 18 行 LEX_PERTURB_REL block を primary catch。本 ratio gate は
+# 密集小コメント file の別 vector 検出が主目的 (lib.rs 30.5%、bound_flip.rs 30.4% 等)。
+# warning → hard-fail 昇格は CLAUDE.md L45 強調 directive。
 set -euo pipefail
 
 THRESHOLD=27

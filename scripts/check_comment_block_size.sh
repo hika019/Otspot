@@ -18,9 +18,9 @@ declare -a ALLOWLIST=(
   "otspot-core/src/simplex/dual_advanced/phase1.rs"
 )
 
-HITS=$(find otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
-  -name '*.rs' -type f -print0 | \
-  xargs -0 awk -v max="$MAX_BLOCK" '
+HITS=""
+while IFS= read -r f; do
+  out=$(awk -v max="$MAX_BLOCK" -v fname="$f" '
     /^[[:space:]]*\/\//{
       if (block_start == 0) block_start = FNR
       block_count++
@@ -29,17 +29,20 @@ HITS=$(find otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
     {
       if (block_count >= max) {
         printf "%s:%d-%d: comment block %d lines (>= MAX_BLOCK=%d)\n",
-          FILENAME, block_start, FNR-1, block_count, max
+          fname, block_start, FNR-1, block_count, max
       }
       block_start = 0; block_count = 0
     }
     END {
       if (block_count >= max) {
         printf "%s:%d-%d: comment block %d lines (>= MAX_BLOCK=%d)\n",
-          FILENAME, block_start, FNR, block_count, max
+          fname, block_start, FNR, block_count, max
       }
     }
-  ')
+  ' "$f")
+  [ -n "$out" ] && HITS+="$out"$'\n'
+done < <(find otspot-core/src otspot-io/src otspot-model/src otspot-dev/src \
+  -name '*.rs' -type f)
 
 FILTERED=""
 while IFS= read -r line; do
