@@ -1402,26 +1402,7 @@ mod tests {
         let _guard = SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 3 Eq 行 × 4 列、b = [1, 1, 1]。crash が選んだ basis で
         // B^{-1} b の特定成分が負になるよう、非対角 entry を仕込む。
-        //
-        // basis = [col 0 (row 0), col 1 (row 1), col 2 (row 2)] を crash が pick →
-        // B = [[1, -2, 0],
-        //      [0,  1, 0],
-        //      [0,  0, 1]]
-        // B^{-1} b = [1 + 2*1, 1, 1] = [3, 1, 1] (全 ≥ 0、これでは XbNegative 出ない)
-        //
-        // 別構成: col 0 row 0=1, col 1 row 0=1 (off-diag), row 1=1
-        //   B^{-1} で row 0 の値が打ち消し合う...複雑。
-        //
-        // 単純化: b に負 RHS は presolve 前提に反するため、係数で工夫。
-        // 試案: A = [[1, 1, 0], [-1, 0, 1], [0, 0, 1]], b = [1, 0, 1]
-        //   crash candidate basis = [col 0, col 1, col 2] (singleton-like)
-        //   B = [[1,1,0],[-1,0,1],[0,0,1]]
-        //   det = 1*(0-0) - 1*(-1-0) + 0 = 1
-        //   B^{-1} b: 解 [x0, x1, x2] s.t. x0 + x1 = 1, -x0 + x2 = 0, x2 = 1
-        //     → x2=1, x0=1, x1=0 (全非負、ダメ)
-        //
-        // 結局 random LP の方が再現性ある。LCG で多数候補生成し、XbNegative を
-        // 1 件でも観測したら成功とする。
+        // random LCG fixture で候補生成、XbNegative を 1 件でも観測したら成功。
         let mut seed: u64 = 0xCAFEBABE_DEADBEEF;
         let mut next = || {
             seed = seed
