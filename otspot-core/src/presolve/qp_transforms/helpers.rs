@@ -225,27 +225,50 @@ pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: u
     row_scales
 }
 
-/// Per-step skip hook for tests: returns `true` when `QP_PRESOLVE_SKIP` contains `n`.
+/// Per-step skip hook for tests: returns `true` when step `n` is currently
+/// marked as skipped in this thread.
 ///
-/// In non-test builds this always returns `false` — the env var is not read in
-/// production code.  Tests use `std::env::set_var("QP_PRESOLVE_SKIP", "9")` to
-/// exercise no-op proofs without a public Options field.
+/// In non-test builds this always returns `false`. Tests inject the mask via
+/// [`with_skip_steps`] so parallel tests stay isolated (the previous
+/// `QP_PRESOLVE_SKIP` env-var hook was process-global and caused #183 flake).
 pub(super) fn skip_step(n: usize) -> bool {
     #[cfg(test)]
     {
-        std::env::var("QP_PRESOLVE_SKIP")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .any(|s| s.trim().parse::<usize>().ok() == Some(n))
-            })
-            .unwrap_or(false)
+        if n < 64 {
+            return SKIP_STEPS_MASK.with(|c| (c.get() >> n) & 1 == 1);
+        }
+        false
     }
     #[cfg(not(test))]
     {
         let _ = n;
         false
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SKIP_STEPS_MASK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` with the given presolve step indices marked as skipped on this
+/// thread. Restores the previous mask on return (including panic unwind).
+#[cfg(test)]
+pub(crate) fn with_skip_steps<R>(steps: &[usize], f: impl FnOnce() -> R) -> R {
+    let mut mask: u64 = 0;
+    for &n in steps {
+        debug_assert!(n < 64, "presolve step index {n} out of range");
+        mask |= 1u64 << n;
+    }
+    let prev = SKIP_STEPS_MASK.with(|c| c.replace(mask));
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SKIP_STEPS_MASK.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(prev);
+    f()
 }
 
 #[cfg(test)]
