@@ -15,26 +15,12 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
-use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, recompute_gamma_truth};
+use super::super::dual_common::{
+    basic_obj, compute_dual_vars, compute_reduced_costs, made_progress, recompute_gamma_truth,
+    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+};
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
-
-/// No-progress 判定で Bland's rule に切り替える反復数:
-///   `K = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
-/// m 個の basis 変数を全置換するのに最低 m iter 必要、3 倍は実用的安全マージン
-/// (典型的 cycle 長は m 以下)。下限 100 は m が小さい問題の degenerate
-/// な揺り戻しを許容する床。
-const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
-const NO_PROGRESS_MIN: usize = 100;
-
-/// Bland mode hard iteration cap factor: after `BLAND_ITER_CAP_FACTOR * n_price`
-/// iterations in Bland mode, bail with Timeout so the caller can run a Farkas
-/// infeasibility check rather than cycling indefinitely (e.g. klein3 class).
-const BLAND_ITER_CAP_FACTOR: usize = 10;
-
-/// 進歩判定の相対閾値: `best - current > best * REL_EPS` のとき改善とみなす。
-/// 1e-12 は f64 の数値ノイズ (~1e-15) より十分大きく、有意な改善のみ拾う。
-const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 
 // Bland's rule leaving と progress metric は `DualLeavingStrategy::bland_leaving`
 // と `::progress_metric` (default + strategy override) に委譲した。
@@ -404,8 +390,7 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
         if !bland_mode {
             let current = leaving.progress_metric(x_b, basis);
-            let threshold = best_infeas * (1.0 - NO_PROGRESS_REL_EPS);
-            if current < threshold {
+            if made_progress(best_infeas, current) {
                 best_infeas = current;
                 iters_since_progress = 0;
             } else {
