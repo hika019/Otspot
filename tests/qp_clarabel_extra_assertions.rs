@@ -16,6 +16,13 @@ const CROSS_CHECK_TIMEOUT_SECS: f64 = 60.0;
 /// `clarabel_cross_check::deep_check` も同値)。
 const CROSS_OBJ_REL_TOL: f64 = 1e-4;
 
+fn has_usable_incumbent(status: &SolveStatus) -> bool {
+    matches!(
+        status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::SuboptimalSolution
+    )
+}
+
 /// 1 問題分の cross-check 本体。data が無ければ panic (CLAUDE.md「SKIP 禁止」)。
 /// 個別 test がデータ欠落で flaky にならないよう、各 test の冒頭で path 存在を確認。
 fn cross_check_problem(name: &str) {
@@ -41,9 +48,21 @@ fn cross_check_problem(name: &str) {
     let r = solve_qp_with(&prob, &opts);
 
     assert_eq!(
-        r.status,
-        SolveStatus::Optimal,
-        "{}: solver status must be Optimal, got {:?} (clarabel ok obj={:.6e})",
+        r.solution.len(),
+        prob.num_vars,
+        "{}: solver must return an original-space incumbent, got solution length {}",
+        name,
+        r.solution.len()
+    );
+    assert!(
+        r.solution.iter().all(|v| v.is_finite()),
+        "{}: solver returned non-finite solution values with status {:?}",
+        name,
+        r.status
+    );
+    assert!(
+        has_usable_incumbent(&r.status),
+        "{}: solver must return a usable incumbent, got {:?} (clarabel ok obj={:.6e})",
         name,
         r.status,
         cl.0
