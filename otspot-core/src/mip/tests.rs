@@ -1417,3 +1417,40 @@ fn miqp_bt_detects_infeasibility_before_bb() {
         "MIQP BT must detect infeasibility before B&B (no-op: nodes_processed > 0)"
     );
 }
+
+/// Sentinel (P2-B): MIQP BT tightens bounds (feasible) and reduces B&B node count.
+///
+/// min x²-7x s.t. x ≤ 3.7, x ∈ [0,5] integer.
+/// BT: floor(3.7)=3 → ub tightened 5→3, search space reduced by 40%.
+/// With BT bounds [0,3]: root QP at x≈3 (boundary) → fractional → branch into
+/// [0,2] and [3,3]; total 3 nodes.
+///
+/// No-op proof: removing `tighten_bounds_linear` from `solve_miqp_with_stats`
+/// leaves bounds [0,5]; root QP at x=3.5 + extra [4,5] infeasible child →
+/// 5 nodes total → the `nodes_processed == 3` assertion FAILS.
+#[test]
+fn miqp_bt_tightens_bounds_reduces_bb_nodes() {
+    let qp = qp_problem(
+        &[2.0],
+        vec![-7.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![3.7],
+        vec![ConstraintType::Le],
+        vec![(0.0, 5.0)],
+    );
+    let (r, stats) = super::solve_miqp_with_stats(&miqp(qp, vec![0]), &opts(), &MipConfig::default());
+    assert_eq!(r.status, SolveStatus::Optimal, "x²-7x: x≤3.7 integer → feasible");
+    assert!(
+        (r.objective - (-12.0)).abs() < EPS,
+        "optimal x=3 → obj=9-21=-12, got {}",
+        r.objective
+    );
+    assert_eq!(
+        stats.nodes_processed,
+        3,
+        "BT tightens x ≤ 3: 3 nodes (root+[0,2]+[3,3]); no-op leaves [0,5] giving 5 nodes"
+    );
+}

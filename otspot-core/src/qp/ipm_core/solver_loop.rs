@@ -31,8 +31,8 @@ pub(crate) fn solve_with_iterative_refinement(
     debug_assert_eq!(aug_mat.nrows, aug_dim);
     debug_assert_eq!(aug_mat.ncols, aug_dim);
 
-    // Primary solve: propagate MINRES errors by zeroing sol so the IPM sees a zero
-    // Newton direction (safe stall) rather than a partial-iterate contaminating it.
+    // Primary solve: zero sol on MINRES error to prevent NaN; IPM continues with
+    // degraded steps until residual stall or max_iter.
     if fac.solve_with_deadline(rhs, sol, deadline).is_err() {
         for v in sol.iter_mut() { *v = 0.0; }
         return;
@@ -176,7 +176,11 @@ pub(crate) fn solve_kkt_via_schur(
         .map(|(&r, &v)| r + v)
         .collect();
 
-    s_fac.solve(&rhs_s, dx_out);
+    if s_fac.solve_with_deadline(&rhs_s, dx_out, None).is_err() {
+        for v in dx_out.iter_mut() { *v = 0.0; }
+        for v in dy_out.iter_mut() { *v = 0.0; }
+        return;
+    }
 
     let zero_dd = TwoFloat::from(0.0);
     let mut a_dx_dd: Vec<TwoFloat> = vec![zero_dd; m_ext];
