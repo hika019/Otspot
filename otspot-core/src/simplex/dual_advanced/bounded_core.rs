@@ -121,6 +121,18 @@ const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
 /// Guarantees termination when deadline is absent (unit tests) or pricing degenerates.
 const BOUNDED_DUAL_ITER_HARD_CAP: usize = SIMPLEX_ITER_HARD_CAP;
 
+/// Anti-cycling: enter Bland mode after this many consecutive no-progress iters.
+/// `K = (factor * m).max(MIN)` mirrors the threshold used in `core.rs`.
+const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
+const NO_PROGRESS_MIN: usize = 100;
+
+/// Once in Bland mode, bail after this many additional iters (× n_total).
+const BLAND_ITER_CAP_FACTOR: usize = 10;
+
+/// Relative improvement threshold: progress only counted when
+/// `best - current > best * REL_EPS`.
+const NO_PROGRESS_REL_EPS: f64 = 1e-12;
+
 /// Internal state of the bounded dual simplex iteration. Built from
 /// `BoundedStandardForm` (cold) or hand-populated by tests / warm-start
 /// callers, and consumed by `iterate`.
@@ -299,6 +311,13 @@ pub(crate) fn iterate(
         &mut state.reduced_costs,
     );
 
+    // Anti-cycling: track progress; switch to Bland's rule when stalled.
+    let k_trigger = (NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN);
+    let mut best_infeas = leaving.progress_metric(&state.x_b, &state.basis);
+    let mut iters_since_progress: usize = 0;
+    let mut bland_mode = false;
+    let mut bland_start_iter: usize = 0;
+
     loop {
         state.iterations = state.iterations.saturating_add(1);
         if state.iterations > BOUNDED_DUAL_ITER_HARD_CAP {
@@ -315,6 +334,12 @@ pub(crate) fn iterate(
             return (BoundedOutcome::Timeout(obj), state);
         }
 
+        // Bland mode hard cap: bail after BLAND_ITER_CAP_FACTOR × n_total iters.
+        if bland_mode && state.iterations - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_total {
+            let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
+            return (BoundedOutcome::Timeout(obj), state);
+        }
+
         // ub-violation scan (separate from lb-violation leaving selection).
         let mut ub_violation_row: Option<usize> = None;
         for i in 0..m {
@@ -324,7 +349,11 @@ pub(crate) fn iterate(
                 ub_violation_row.get_or_insert(i);
             }
         }
-        let leaving_row = leaving.select_leaving(&state.x_b, options.primal_tol, &state.basis);
+        let leaving_row = if bland_mode {
+            leaving.bland_leaving(&state.x_b, options.primal_tol, &state.basis)
+        } else {
+            leaving.select_leaving(&state.x_b, options.primal_tol, &state.basis)
+        };
         if leaving_row.is_none() {
             if let Some(row) = ub_violation_row {
                 // Out-of-scope for this loop: distinct from Timeout so the
@@ -514,6 +543,22 @@ pub(crate) fn iterate(
         state.basis[r] = entering_col;
 
         leaving.after_pivot(r, &buf.alpha, &buf.sigma, pivot_element);
+
+        // Anti-cycling progress check. If no improvement for k_trigger iters, enter
+        // Bland mode (smallest-index leaving rule) so the loop terminates finitely.
+        if !bland_mode {
+            let current = leaving.progress_metric(&state.x_b, &state.basis);
+            if best_infeas - current > best_infeas.abs() * NO_PROGRESS_REL_EPS {
+                best_infeas = current;
+                iters_since_progress = 0;
+            } else {
+                iters_since_progress += 1;
+                if iters_since_progress >= k_trigger {
+                    bland_mode = true;
+                    bland_start_iter = state.iterations;
+                }
+            }
+        }
 
         // Refactor + reduced-cost refresh on the LU's request (eta cap).
         if basis_mgr.needs_refactor() {
