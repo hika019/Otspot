@@ -53,7 +53,7 @@ fn ipm_box_deadline(options: &SolverOptions, now: Instant) -> Option<Instant> {
     })
 }
 
-pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let opts_with_deadline;
     let options: &SolverOptions = if options.deadline.is_none() {
         if let Some(secs) = options.timeout_secs {
@@ -146,8 +146,15 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
+    // Optimal/SuboptimalSolution/Timeout (incumbent あり) の場合に加算。
+    // Infeasible/NumericalError 等は加算しない。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
-    simplex_result.objective += problem.obj_offset;
+    if matches!(
+        simplex_result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
+        simplex_result.objective += problem.obj_offset;
+    }
     if simplex_result.status == SolveStatus::Timeout
         && simplex_result.solution.is_empty()
         && options.deadline.is_none_or(|d| Instant::now() < d)
@@ -572,6 +579,38 @@ mod tests {
         );
     }
 
+    /// Infeasible LP dispatched via QP path must return `f64::INFINITY` as objective,
+    /// regardless of `problem.obj_offset`.
+    ///
+    /// Sentinel: removing `objective: f64::INFINITY` from any simplex Infeasible arm
+    /// (e.g. reverting to `objective: 0.0`) causes the assert to fail.
+    /// The status guard at lp_dispatch.rs:150-153 ensures the INFINITY value is
+    /// not further modified (INFINITY absorbs, but Timeout/NumericalError are also guarded).
+    #[test]
+    fn infeasible_lp_dispatch_obj_offset_not_added() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveStatus;
+        // Infeasible: x >= 2 AND x <= 1 (empty feasible set), obj_offset = 42.5
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![2.0, 1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        ).unwrap();
+        problem.obj_offset = 42.5;
+        let result = solve_as_lp(&problem, &SolverOptions::default());
+        assert_eq!(result.status, SolveStatus::Infeasible,
+            "expected Infeasible, got {:?}", result.status);
+        assert!(
+            result.objective.is_infinite() && result.objective.is_sign_positive(),
+            "Infeasible objective must be +INFINITY (convention); got {} (obj_offset={})",
+            result.objective, problem.obj_offset,
+        );
+    }
+
     /// 小 magnitude feasible は元々誤認定されない (正 slack が大きく floor 超過)。
     /// 相対化が小規模問題を退化させないことの確認。
     #[test]
@@ -734,6 +773,61 @@ mod tests {
         assert!(
             !verified_farkas_timeout_fallback(&lb_positive, &opts),
             "lb=0.5 must return false (non-nonneg bounds)",
+        );
+    }
+
+    /// zero-Q QpProblem が simplex 経由で Timeout を返した場合、`obj_offset` が
+    /// 加算されることを確認する。
+    ///
+    /// sentinel: `SolveStatus::Timeout` を match から削除すると
+    /// `simplex_result.objective += problem.obj_offset` が実行されず、
+    /// `result.objective == 0.0` のまま → assert FAIL。
+    ///
+    /// `c = [0.0]` により c^T x* = 0 (incumbent 不定でも)。cancel_flag=true で
+    /// 初回イテレーション即キャンセル → Timeout with initial BFS objective = 0。
+    #[test]
+    fn test_qp_simplex_dispatch_timeout_includes_obj_offset() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        const OBJ_OFFSET: f64 = 42.0;
+
+        // min 0·x s.t. x >= 1, x in [0, ∞).  c=0 → c^T x* = 0 for any incumbent.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        problem.obj_offset = OBJ_OFFSET;
+
+        // cancel_flag=true + presolve=false: simplex fires cancel at first iteration,
+        // returns Timeout with initial BFS (objective = 0.0 before offset).
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            presolve: false,
+            ..SolverOptions::default()
+        };
+
+        let result = solve_as_lp(&problem, &opts);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout; got {:?}",
+            result.status,
+        );
+        // c^T x* = 0 (zero cost), so objective must equal obj_offset exactly.
+        // Sentinel: removing SolveStatus::Timeout from the match leaves
+        // objective = 0.0 (no offset added) → assert fails.
+        assert!(
+            (result.objective - OBJ_OFFSET).abs() < 1e-9,
+            "Timeout objective must include obj_offset {OBJ_OFFSET}; got {} \
+             (sentinel: removing Timeout from match yields 0.0 ≠ {OBJ_OFFSET})",
+            result.objective,
         );
     }
 

@@ -139,7 +139,7 @@ pub(super) fn outcome_to_result(
             if dual_unbounded_is_infeasible {
                 SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],

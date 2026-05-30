@@ -15,7 +15,7 @@ use super::standard_form::build_standard_form;
 ///
 /// Use [`crate::solve`] for the full pipeline including `obj_offset`.
 #[cfg(test)]
-pub fn solve(problem: &LpProblem) -> SolverResult {
+pub(crate) fn solve(problem: &LpProblem) -> SolverResult {
     solve_with(problem, &SolverOptions::default())
 }
 
@@ -24,7 +24,7 @@ pub fn solve(problem: &LpProblem) -> SolverResult {
 ///
 /// Returns [`SolveStatus::NumericalError`] immediately if `options` fails
 /// validation (invalid tolerance, zero threads, etc.).
-pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     if options.validate().is_err() {
         return SolverResult::numerical_error();
     }
@@ -50,7 +50,7 @@ pub fn solve_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult 
             Err(presolve::PresolveStatus::Infeasible) => {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],
@@ -199,7 +199,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
             if problem.b[i] < -options.primal_tol {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],

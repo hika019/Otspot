@@ -99,7 +99,7 @@ fn cold_start_dual(
             // Dual-unbounded ⇒ primal-infeasible.
             return SolverResult {
                 status: SolveStatus::Infeasible,
-                objective: 0.0,
+                objective: f64::INFINITY,
                 solution: vec![],
                 dual_solution: vec![],
                 reduced_costs: vec![],

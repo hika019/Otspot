@@ -48,20 +48,6 @@ impl RuizScaler {
         }
     }
 
-    /// Q と A のみで Ruiz equilibration を実行する。
-    /// l, u は API 完全性のため受け取るがノルム計算には使わない。
-    #[allow(clippy::needless_range_loop)]
-    pub fn compute(
-        &mut self,
-        q: &CscMatrix,
-        a: &CscMatrix,
-        q_vec: &[f64],
-        _l: &[f64],
-        _u: &[f64],
-    ) {
-        self.compute_with_rhs(q, a, q_vec, &[]);
-    }
-
     /// b を行ノルムに含めた Ruiz equilibration (presolve 後に b が大きい場合用)。
     #[allow(clippy::needless_range_loop)]
     pub fn compute_with_rhs(
@@ -317,11 +303,8 @@ mod tests {
             &[1.0, 1.0, 1.0],
             m, n,
         ).unwrap();
-        let l = vec![0.0; n];
-        let u = vec![1.0; n];
-
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &l, &u);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
 
         // d, e はほぼ 1.0（恒等変換に近い）
         for j in 0..n {
@@ -455,7 +438,7 @@ mod tests {
         let bounds = vec![(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 3], &[10.0; 3]);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
 
         // 任意の orig 空間 (x, y) で round-trip を確認:
         //   scaled_x = D^{-1} x  (公式: x = D x_s → x_s = D^{-1} x)
@@ -494,7 +477,7 @@ mod tests {
         let bounds = vec![(0.0_f64, 10.0); 2];
 
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&q, &a, &q_vec, &[0.0; 2], &[10.0; 2]);
+        scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
         let (q_s, a_s, q_s_vec, _b_s, _bounds_s) =
             scaler.scale_problem(&q, &a, &q_vec, &b, &bounds);
 

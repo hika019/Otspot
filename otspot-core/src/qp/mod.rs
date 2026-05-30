@@ -12,11 +12,11 @@ pub mod multistart;
 pub(crate) mod postsolve;
 mod problem;
 pub use global::{solve_qp_global, solve_qp_global_with_stats, GlobalStats};
-pub(crate) use lp_dispatch::solve_as_lp_pub;
+pub(crate) use lp_dispatch::solve_as_lp;
 #[doc(hidden)]
 pub use lp_dispatch::pick_best_ipm_or_simplex;
 /// Returns `true` when an LP of size `(n, m)` will be routed via IPM-first
-/// in `solve_as_lp_pub` (used by diagnostic tests for routing assertions).
+/// in `solve_as_lp` (used by diagnostic tests for routing assertions).
 pub use lp_dispatch::prefer_ipm_for_size;
 pub(crate) use postsolve::bound_dual::{
     project_duals_from_singleton_columns, remap_bound_duals_to_orig, zero_inactive_inequality_duals,
@@ -157,7 +157,7 @@ fn dispatch_solve_qp(problem: &QpProblem, options: &SolverOptions) -> SolverResu
         );
     }
     if problem.is_zero_q() {
-        return solve_as_lp_pub(problem, options);
+        return solve_as_lp(problem, options);
     }
     let mut result = ipm_solver::solve_ipm(problem, options);
     result.stats.route = SolveRoute::QpIpm;

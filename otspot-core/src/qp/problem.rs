@@ -250,18 +250,6 @@ impl crate::problem::SolverResult {
         }
     }
 
-    pub fn max_iterations(x: Vec<f64>, obj: f64, iters: usize) -> Self {
-        crate::problem::SolverResult {
-            status: SolveStatus::MaxIterations,
-            objective: obj,
-            solution: x,
-            dual_solution: vec![],
-            bound_duals: vec![],
-            iterations: iters,
-            ..Default::default()
-        }
-    }
-
     pub fn numerical_error() -> Self {
         crate::problem::SolverResult {
             status: SolveStatus::NumericalError,

@@ -13,7 +13,7 @@ use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
 use crate::problem::{SolveStatus, TimingBreakdown};
 use crate::qp::problem::QpProblem;
-use crate::tolerances::{any_nonfinite, UNDERFLOW_GUARD};
+use crate::tolerances::any_nonfinite;
 
 pub(crate) use duality_gap::compute_duality_gap_rel;
 use eps_tighten::tighten_ipm_eps_for_presolve_scale;
@@ -115,9 +115,8 @@ fn run_ipm_with(
         result.solution = x;
         result.dual_solution = y;
         result.bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &reduced.bounds);
-        if scaler.c.abs() > UNDERFLOW_GUARD {
-            result.objective /= scaler.c;
-        }
+        // result.objective /= scaler.c  would be correct here but is dead code:
+        // objective_recomputed below overrides it from orig_problem directly.
     }
 
     // postsolve: reduced 空間 → 元問題空間。eliminated 行 / 固定変数の dual 復元込み。

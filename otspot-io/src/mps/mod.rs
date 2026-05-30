@@ -1070,6 +1070,34 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         );
     }
 
+    /// MPS OBJSENSE MAX with N-row RHS must sign-flip obj_offset (MAX→MIN negation).
+    ///
+    /// Sentinel: removing the `if self.maximize { -raw } else { raw }` sign-flip in
+    /// `mps/parser.rs` causes `obj_offset == +10.0` instead of `-10.0` → FAIL.
+    #[test]
+    fn test_mps_objsense_max_obj_offset_sign_flip() {
+        let mps = concat!(
+            "NAME  MAX_OFFSET\n",
+            "OBJSENSE\n",
+            "    MAX\n",
+            "ROWS\n",
+            " N  obj\n",
+            " L  c1\n",
+            "COLUMNS\n",
+            "    x1    obj    1.0    c1    1.0\n",
+            "RHS\n",
+            "    rhs   obj    10.0\n",
+            "    rhs   c1    5.0\n",
+            "ENDATA\n",
+        );
+        let lp = parse_mps(mps).expect("valid MPS with OBJSENSE MAX + N-row RHS");
+        assert!(
+            (lp.obj_offset - (-10.0)).abs() < 1e-12,
+            "OBJSENSE MAX with N-row RHS=10.0 must yield obj_offset=-10.0; got {}",
+            lp.obj_offset,
+        );
+    }
+
     /// MPS N-row RHS (obj_offset) must appear in the solve result objective end-to-end.
     ///
     /// Problem: min x  s.t. x <= 5,  x >= 0,  N-row RHS = 10.0

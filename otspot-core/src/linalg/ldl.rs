@@ -559,7 +559,6 @@ pub fn factorize_quasidefinite_with_amd_budget_par(
             return Err(LdlError::DeadlineExceeded);
         }
     }
-    let _ = n;
     factorize_quasidefinite_with_cached_perm_budget_par(mat, &perm, deadline, max_l_nnz, par)
 }
 

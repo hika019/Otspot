@@ -441,6 +441,8 @@ impl MpsParser {
         }
 
         // Extract objective constant (N-row RHS); sign-flip mirrors the MAX→MIN transform above.
+        // `raw` is finite by construction: every value inserted into `self.rhs` is validated
+        // as a finite f64 at parse time (see `parse_rhs_section`).
         let obj_offset = if let Some(obj_row_name) = &self.obj_row {
             let raw = self.rhs.get(obj_row_name.as_str()).copied().unwrap_or(0.0);
             if self.maximize { -raw } else { raw }

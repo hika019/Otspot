@@ -64,11 +64,8 @@ where
         let n = problem.num_vars;
         let m = problem.num_constraints;
 
-        let lb: Vec<f64> = problem.bounds.iter().map(|&(l, _)| l).collect();
-        let ub: Vec<f64> = problem.bounds.iter().map(|&(_, u)| u).collect();
-
         let mut scaler = RuizScaler::new(n, m);
-        scaler.compute(&problem.q, &problem.a, &problem.c, &lb, &ub);
+        scaler.compute_with_rhs(&problem.q, &problem.a, &problem.c, &[]);
 
         let (q_s, a_s, c_s, b_s, bounds_s) =
             scaler.scale_problem(&problem.q, &problem.a, &problem.c, &problem.b, &problem.bounds);

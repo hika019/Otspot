@@ -399,7 +399,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     );
                     return SolverResult {
                         status: SolveStatus::Infeasible,
-                        objective: 0.0,
+                        objective: f64::INFINITY,
                         solution: vec![],
                         dual_solution: farkas,
                         reduced_costs: vec![],
@@ -555,7 +555,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 );
                 SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: farkas,
                     reduced_costs: vec![],
