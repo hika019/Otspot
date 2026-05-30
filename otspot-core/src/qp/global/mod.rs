@@ -66,10 +66,14 @@ const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
 /// regression threshold `EPS_KKT_NONCONVEX_LOCAL = 1e-3` を超えないよう制限する。
 const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 
-/// polish solve の independent timeout (秒)。
+/// polish solve の fallback timeout (秒)。
 ///
-/// B&B が全 budget を消費した後でも `polish_incumbent_duals` が実行できるよう、
-/// B&B の deadline とは独立した fresh budget を与える。
+/// `polish_incumbent_duals` は B&B `deadline` の残時間を優先継承し、残時間が
+/// 0 (B&B budget 枯渇) の場合のみこの値を fresh budget として用いる。
+/// 5.0 sec は polish IPM の典型 iteration 数 (~10) と problem 規模 (B&B が
+/// 解ける範囲 = 数百変数) に対する経験値で、収束に十分なゆとりを持つ。
+/// B&B が timeout 前に正常終了した場合は残時間継承により timeout_secs 契約を
+/// 破らない。
 const POLISH_TIMEOUT_SECS: f64 = 5.0;
 
 /// 大域最適化 entry。
@@ -479,13 +483,24 @@ fn is_polish_suboptimal_acceptable(
 /// 非凸 B&B 向け KKT recovery accept: 目的関数制約なしで IPM 収束 + 全 KKT を確認する。
 ///
 /// sub-box incumbent は bound comp を原問題基準で破ることがある。polish が
-/// Optimal/LocallyOptimal で全 KKT を満たせば、目的が悪化していても採用する。
-/// NonconvexLocal セマンティクスでは目的は certified bound でないため適切。
-fn is_polish_kkt_recovery(polished: &SolverResult, problem: &QpProblem, user_eps: f64) -> bool {
+/// Optimal/LocallyOptimal で全 KKT を満たし、かつ目的が incumbent から
+/// `gap_tol * scale` 以上悪化していなければ採用する。obj 悪化 reject は
+/// 非凸で polish が異なる local に流れた場合の incumbent 退化を防ぐ。
+fn is_polish_kkt_recovery(
+    polished: &SolverResult,
+    problem: &QpProblem,
+    incumbent_obj: f64,
+    gap_tol: f64,
+    user_eps: f64,
+) -> bool {
     if !matches!(polished.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
         return false;
     }
     if !polished.objective.is_finite() {
+        return false;
+    }
+    let scale = 1.0_f64.max(incumbent_obj.abs());
+    if polished.objective > incumbent_obj + gap_tol * scale {
         return false;
     }
     let n_lb = problem
@@ -599,9 +614,14 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
-        // Polish は B&B deadline とは独立した fresh timeout を使う。
-        // B&B が budget を使い切った後でも polish IPM が実行できるよう保証する。
-        opts.deadline = Some(Instant::now() + Duration::from_secs_f64(POLISH_TIMEOUT_SECS));
+        // B&B 残時間を優先継承し、枯渇時のみ POLISH_TIMEOUT_SECS の fresh budget を使う
+        // (timeout_secs 契約破り回避 + budget 枯渇時 fallback 両立)。
+        let now = Instant::now();
+        let polish_deadline = match base_opts.deadline {
+            Some(d) if d > now => d,
+            _ => now + Duration::from_secs_f64(POLISH_TIMEOUT_SECS),
+        };
+        opts.deadline = Some(polish_deadline);
         opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
@@ -613,7 +633,14 @@ impl SearchState {
                 gap_tol,
                 user_eps,
             )
-            || (relax_for_nonconvex && is_polish_kkt_recovery(&polished, problem, user_eps))
+            || (relax_for_nonconvex
+                && is_polish_kkt_recovery(
+                    &polished,
+                    problem,
+                    self.incumbent_obj,
+                    gap_tol,
+                    user_eps,
+                ))
         {
             self.update_incumbent(&polished);
         }
@@ -1332,6 +1359,159 @@ mod tests {
         assert!(
             !is_polish_suboptimal_acceptable(&polished_wrong_bd, &problem, 0.0, 0.1, 1e-6),
             "mismatched bound_duals length must be rejected by dimension guard",
+        );
+    }
+
+    // ---- is_polish_kkt_recovery sentinels -------------------------------------
+
+    /// 5 軸 sentinel: `is_polish_kkt_recovery` の accept/reject 全 gate を検証。
+    ///
+    /// Fixture: 1 var、A = 0、bounds = (-∞, +∞)、Le 制約 1 本、dual = 0
+    /// → 全 KKT 残差は 0 で構成上 trivially feasible。各 axis を 1 つずつ破る。
+    ///
+    /// ## Sentinel (no-op-fail proof)
+    /// - axis 1 (status): Optimal/LocallyOptimal 以外を許容に書き換えると case 1 が FAIL
+    /// - axis 2 (dim): 次元 guard を除去すると case 2 が FAIL
+    /// - axis 3 (KKT): wrong-sign dual を許容すると case 3 が FAIL
+    /// - axis 5 (obj guard): `polished.objective > incumbent_obj + gap_tol*scale` の reject
+    ///   を `if polished.objective < 0.0 { return false; }` (常に通過) に書き換えると
+    ///   case 5 が FAIL する → axis 5 が load-bearing であることを確認 (P1-A 検証用)
+    #[test]
+    fn is_polish_kkt_recovery_five_axis_gates() {
+        use crate::problem::ConstraintType;
+
+        let q = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let a = CscMatrix::from_triplets(&[], &[], &[], 1, 1).unwrap();
+        let problem = QpProblem::new(
+            q,
+            vec![0.0],
+            a,
+            vec![0.0],
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![ConstraintType::Le],
+        )
+        .unwrap();
+
+        let incumbent_obj = 0.0_f64;
+        let gap_tol = 0.1_f64;
+        let user_eps = 1e-6_f64;
+
+        // axis 4 (accept 通過): valid Optimal + 全 KKT 0 + obj 同点 → true
+        let valid = SolverResult {
+            status: SolveStatus::Optimal,
+            objective: 0.0,
+            solution: vec![0.0],
+            dual_solution: vec![0.0],
+            bound_duals: vec![],
+            ..SolverResult::default()
+        };
+        assert!(
+            is_polish_kkt_recovery(&valid, &problem, incumbent_obj, gap_tol, user_eps),
+            "axis 4 (accept): all gates pass must return true",
+        );
+
+        // axis 1 (status 棄却): SuboptimalSolution / MaxIterations / Timeout → false
+        for bad_status in [
+            SolveStatus::SuboptimalSolution,
+            SolveStatus::MaxIterations,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+            SolveStatus::Infeasible,
+        ] {
+            let polished = SolverResult {
+                status: bad_status.clone(),
+                ..valid.clone()
+            };
+            assert!(
+                !is_polish_kkt_recovery(&polished, &problem, incumbent_obj, gap_tol, user_eps),
+                "axis 1 (status): {:?} must be rejected",
+                bad_status,
+            );
+        }
+
+        // axis 2 (dim mismatch): solution.len / dual_solution.len 不一致 → false
+        let polished_short_sol = SolverResult {
+            solution: vec![],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_short_sol,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 2 (dim): wrong solution.len must be rejected",
+        );
+        let polished_short_dual = SolverResult {
+            dual_solution: vec![],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_short_dual,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 2 (dim): wrong dual_solution.len must be rejected",
+        );
+
+        // axis 3 (KKT failing): Le 制約に対して wrong-sign dual → dsign violation
+        let polished_wrong_sign = SolverResult {
+            dual_solution: vec![-0.5],
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_wrong_sign,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 3 (KKT): wrong-sign dual must be rejected",
+        );
+
+        // axis 5 (obj 悪化 reject, P1-A): polished.objective が incumbent + tol を上回る
+        // → 非凸で polish が悪い local に流れたケース、incumbent 退化を防ぐ。
+        // incumbent_obj=0, gap_tol=0.1, scale=1.0 → threshold=0.1。obj=1.0 → reject。
+        let polished_worse = SolverResult {
+            objective: 1.0,
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(
+                &polished_worse,
+                &problem,
+                incumbent_obj,
+                gap_tol,
+                user_eps
+            ),
+            "axis 5 (obj guard): polished obj {} > incumbent + gap_tol*scale = {} must be rejected (P1-A)",
+            polished_worse.objective,
+            incumbent_obj + gap_tol * 1.0_f64.max(incumbent_obj.abs()),
+        );
+
+        // axis 5 二重確認: scale-aware 動作。incumbent=-10 → scale=10 → threshold=-10+1=-9.
+        // obj=-9.5 (改善) → accept。obj=-8 (悪化、scale*tol 超過) → reject。
+        let polished_within_tol = SolverResult {
+            objective: -9.5,
+            ..valid.clone()
+        };
+        assert!(
+            is_polish_kkt_recovery(&polished_within_tol, &problem, -10.0, gap_tol, user_eps),
+            "axis 5: improvement within scaled tol must be accepted",
+        );
+        let polished_outside_tol = SolverResult {
+            objective: -8.0,
+            ..valid.clone()
+        };
+        assert!(
+            !is_polish_kkt_recovery(&polished_outside_tol, &problem, -10.0, gap_tol, user_eps),
+            "axis 5: obj outside scaled tol (-8 > -10 + 0.1*10 = -9) must be rejected",
         );
     }
 
