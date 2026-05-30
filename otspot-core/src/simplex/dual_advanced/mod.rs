@@ -249,11 +249,18 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                // Fall through only when the warm basis is dual-infeasible under
+                // BFRT-based lb-violation repair requires at least one positive
+                // reduced cost (c_perturbed = max(c,0) must be non-zero) so that
+                // the dual step θ = r_j / trow[j] > 0 can make progress. When
+                // all costs are non-positive (c_perturbed ≡ 0), θ = 0 for every
+                // candidate column and the dual loop cannot reduce the violation;
+                // fall through to cold start in that case.
+                //
+                // Also fall through when the warm basis is dual-infeasible under
                 // the new cost vector c: the dual simplex would exit immediately as
-                // Optimal (no lb-violations in x_B) with a wrong objective value.
-                // lb-violations are handled by `bounded_core::iterate` which now has
-                // Bland anti-cycling (added #175).
+                // Optimal with a wrong objective value.
+                let has_positive_c = c.iter().any(|&v| v > 0.0);
+                let has_lb_violation = super::has_lb_violation(&x_b, options.primal_tol);
                 let is_basic_bounded: Vec<bool> = {
                     let mut v = vec![false; bsf.n_total];
                     for &j in &warm.basis {
@@ -261,10 +268,12 @@ fn try_bounded(
                     }
                     v
                 };
-                if warm_basis_is_dual_feasible(
-                    &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
-                    bsf.n_total, bsf.m, options.dual_tol,
-                ) {
+                if !(has_lb_violation && !has_positive_c)
+                    && warm_basis_is_dual_feasible(
+                        &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
+                        bsf.n_total, bsf.m, options.dual_tol,
+                    )
+                {
                     let state = BoundedDualState {
                         basis: warm.basis.clone(),
                         at_upper: vec![false; bsf.n_total],
@@ -285,7 +294,7 @@ fn try_bounded(
                         return result;
                     }
                     // UbViolationOutOfScope from warm start → cold start
-                } // dual-infeasibility guard: fall through to cold start
+                } // dual-infeasibility or unrepairable-lb-violation: fall through to cold start
             }
             // Singular warm basis → cold start
         }
