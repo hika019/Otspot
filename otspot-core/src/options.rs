@@ -1110,9 +1110,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants, clippy::absurd_extreme_comparisons)]
     fn test_ipm_validate_minres_ir() {
-        use crate::linalg::kkt_solver::MINRES_INEXACT_NEWTON_IR_STEPS;
         // Default (None) and valid values
         assert!(IpmOptions::default().validate().is_ok());
         for ok in [0_usize, 1, 5, 10] {
@@ -1130,8 +1128,7 @@ mod tests {
             };
             assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
         }
-        // Default const falls within valid range (validated at compile time by the type constraint)
-        let _ = MINRES_INEXACT_NEWTON_IR_STEPS;
+        // Default const upper-bound is guaranteed by const_assert next to definition.
     }
 
     #[test]

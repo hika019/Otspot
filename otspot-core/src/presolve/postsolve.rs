@@ -1231,7 +1231,6 @@ mod cleanup_comp_tests {
     use crate::presolve::transforms::{PostsolveStep, PresolveResult};
     use crate::problem::{ConstraintType, LpProblem};
     use crate::sparse::CscMatrix;
-    use std::collections::HashMap;
     use std::sync::Once;
 
     /// Drifted dual for kept rows — large enough that a non-binding deleted row
@@ -1479,7 +1478,6 @@ mod cleanup_comp_tests {
                 i, ct, b, ax, expected, got,
             );
         }
-        let _ = HashMap::<usize, usize>::new(); // keep import alive on toolchains that warn
     }
 }
 
