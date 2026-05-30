@@ -268,7 +268,7 @@ fn try_bounded(
                     }
                     v
                 };
-                if !(has_lb_violation && !has_positive_c)
+                if (!has_lb_violation || has_positive_c)
                     && warm_basis_is_dual_feasible(
                         &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
                         bsf.n_total, bsf.m, options.dual_tol,
