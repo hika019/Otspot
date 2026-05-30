@@ -3,10 +3,10 @@
 // so it no longer appears in the public otspot-io API surface.
 
 use crate::bench_utils::{check_baseline_objective, ObjCheckResult};
-use otspot_io::qps::parse_qps;
 use otspot_core::options::SolverOptions;
 use otspot_core::problem::SolveStatus;
 use otspot_core::qp::solve_qp_with;
+use otspot_io::qps::parse_qps;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -23,9 +23,16 @@ pub enum ScreenVerdict {
     /// Optimal and objective matches baseline within tolerance.
     Optimal,
     /// Optimal status but objective deviates from baseline.
-    ObjMismatch { got: f64, expected: f64, rel_err: f64 },
+    ObjMismatch {
+        got: f64,
+        expected: f64,
+        rel_err: f64,
+    },
     /// Non-optimal status when Optimal was expected.
-    BadStatus { status: SolveStatus, expected_optimal: f64 },
+    BadStatus {
+        status: SolveStatus,
+        expected_optimal: f64,
+    },
     /// Solver returned Timeout.
     Timeout,
     /// Small problem solved correctly but too slowly.
@@ -79,7 +86,13 @@ pub fn screen_single(
             match (r.status, expected) {
                 (SolveStatus::Optimal, Some(exp)) => {
                     let exp_adj = exp + problem.obj_offset;
-                    match check_baseline_objective(name, r.objective, baseline, rel_tol, problem.obj_offset) {
+                    match check_baseline_objective(
+                        name,
+                        r.objective,
+                        baseline,
+                        rel_tol,
+                        problem.obj_offset,
+                    ) {
                         ObjCheckResult::Mismatch { rel_err } => {
                             if problem.obj_offset != 0.0 {
                                 eprintln!(
@@ -92,10 +105,16 @@ pub fn screen_single(
                                     name, r.objective, exp_adj, rel_err, elapsed
                                 );
                             }
-                            ScreenVerdict::ObjMismatch { got: r.objective, expected: exp_adj, rel_err }
+                            ScreenVerdict::ObjMismatch {
+                                got: r.objective,
+                                expected: exp_adj,
+                                rel_err,
+                            }
                         }
                         _ => {
-                            if problem.num_vars < SMALL_PROBLEM_NVARS && elapsed > SLOWNESS_THRESHOLD_SECS {
+                            if problem.num_vars < SMALL_PROBLEM_NVARS
+                                && elapsed > SLOWNESS_THRESHOLD_SECS
+                            {
                                 eprintln!("[SLOW] {}: small problem took {:.2}s", name, elapsed);
                                 ScreenVerdict::Slow { secs: elapsed }
                             } else {
@@ -105,7 +124,10 @@ pub fn screen_single(
                                         name, r.objective, exp, problem.obj_offset, elapsed
                                     );
                                 } else {
-                                    eprintln!("[OK] {}: obj={:.6e} {:.2}s", name, r.objective, elapsed);
+                                    eprintln!(
+                                        "[OK] {}: obj={:.6e} {:.2}s",
+                                        name, r.objective, elapsed
+                                    );
                                 }
                                 ScreenVerdict::Optimal
                             }
@@ -113,7 +135,10 @@ pub fn screen_single(
                     }
                 }
                 (SolveStatus::Optimal, None) => {
-                    eprintln!("[OK_NO_REF] {}: obj={:.6e} {:.2}s", name, r.objective, elapsed);
+                    eprintln!(
+                        "[OK_NO_REF] {}: obj={:.6e} {:.2}s",
+                        name, r.objective, elapsed
+                    );
                     ScreenVerdict::Optimal
                 }
                 (SolveStatus::Timeout, _) => {
@@ -121,7 +146,10 @@ pub fn screen_single(
                     ScreenVerdict::Timeout
                 }
                 (status, exp) => {
-                    eprintln!("[BAD_STATUS] {}: {:?} exp={:?} {:.2}s", name, status, exp, elapsed);
+                    eprintln!(
+                        "[BAD_STATUS] {}: {:?} exp={:?} {:.2}s",
+                        name, status, exp, elapsed
+                    );
                     ScreenVerdict::BadStatus {
                         status,
                         expected_optimal: exp.unwrap_or(0.0),
@@ -131,7 +159,11 @@ pub fn screen_single(
         }
     };
 
-    ScreenEntry { name: name.to_string(), verdict, elapsed_secs: elapsed }
+    ScreenEntry {
+        name: name.to_string(),
+        verdict,
+        elapsed_secs: elapsed,
+    }
 }
 
 /// Returns `true` if the verdict represents a failure (not Optimal / Slow).

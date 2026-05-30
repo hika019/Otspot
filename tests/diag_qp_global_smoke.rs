@@ -107,14 +107,8 @@ fn build_mixed_diag() -> QpProblem {
 /// Q full-symmetric storage (両半 (0,1) と (1,0)) で 0.5 x'Qx = xy になる。
 fn build_bilinear_saddle(bnd: f64) -> QpProblem {
     // Q = [[2e-6, 1.0], [1.0, 2e-6]] → 0.5 x'Qx = 1e-6 x² + xy + 1e-6 y²
-    let q = CscMatrix::from_triplets(
-        &[0, 0, 1, 1],
-        &[0, 1, 0, 1],
-        &[2e-6, 1.0, 1.0, 2e-6],
-        2,
-        2,
-    )
-    .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[2e-6, 1.0, 1.0, 2e-6], 2, 2)
+        .unwrap();
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
     QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-bnd, bnd); 2]).unwrap()
 }
@@ -178,12 +172,12 @@ fn global_reaches_known_optimum_all_fixtures() {
         let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(GLOBAL_OBJ_TOL));
         assert!(
             matches!(
-            r.status,
-            SolveStatus::Optimal
-                | SolveStatus::LocallyOptimal
-                | SolveStatus::NonconvexGlobal
-                | SolveStatus::NonconvexLocal
-        ),
+                r.status,
+                SolveStatus::Optimal
+                    | SolveStatus::LocallyOptimal
+                    | SolveStatus::NonconvexGlobal
+                    | SolveStatus::NonconvexLocal
+            ),
             "{}: unexpected status {:?}",
             fx.label,
             r.status
@@ -238,7 +232,10 @@ fn global_optimal_status_proves_gap_for_simple_fixtures() {
     let mut any_optimal = false;
     for fx in fixtures() {
         let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(GLOBAL_OBJ_TOL));
-        if matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal) {
+        if matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+        ) {
             any_optimal = true;
             eprintln!("GLOBAL_PROVEN [{}]: obj={:.6}", fx.label, r.objective);
         }
@@ -258,7 +255,10 @@ fn larger_gap_tol_improves_proof_completion() {
             .into_iter()
             .filter(|fx| {
                 let r = solve_qp_global(&fx.problem, &opts(30.0), &cfg(tol));
-                matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal)
+                matches!(
+                    r.status,
+                    SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+                )
             })
             .count()
     };
@@ -266,10 +266,7 @@ fn larger_gap_tol_improves_proof_completion() {
     let loose = count_optimal(0.5);
     eprintln!(
         "GLOBAL_GAP_TOL: optimal at tol=1e-6 -> {}/{}, at tol=0.5 -> {}/{}",
-        strict,
-        7,
-        loose,
-        7
+        strict, 7, loose, 7
     );
     assert!(
         loose >= strict,
@@ -369,7 +366,11 @@ fn pure_convex_qp_solves_at_root_with_optimal_status() {
         r.status,
         SolveStatus::Optimal | SolveStatus::LocallyOptimal
     ));
-    assert!(r.objective.abs() < 1e-4, "convex QP obj should be ~0, got {}", r.objective);
+    assert!(
+        r.objective.abs() < 1e-4,
+        "convex QP obj should be ~0, got {}",
+        r.objective
+    );
 }
 
 /// Pruning sentinel: 5D concave QP で枝刈が有効ならば node 数は max_nodes 上限の
@@ -397,7 +398,10 @@ fn pruning_keeps_node_count_well_below_cap() {
     // concave Q + pruning → NonconvexGlobal (proven on indefinite Q)。
     // (旧コード: Optimal。Phase 6 で indefinite Q を分離)
     assert!(
-        matches!(r.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal),
+        matches!(
+            r.status,
+            SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+        ),
         "expected NonconvexGlobal/Optimal under pruning, got {:?} (nodes={})",
         r.status,
         stats.nodes_processed
@@ -419,7 +423,8 @@ fn pruning_keeps_node_count_well_below_cap() {
     assert!(
         stats.pruned > 0,
         "枝刈 fire 0 件 = pruning logic 機能停止疑い: nodes={} pruned={}",
-        stats.nodes_processed, stats.pruned,
+        stats.nodes_processed,
+        stats.pruned,
     );
 }
 
@@ -428,7 +433,10 @@ fn pruning_keeps_node_count_well_below_cap() {
 #[test]
 fn fixture_global_objs_strictly_below_zero_for_concave_cases() {
     for fx in fixtures() {
-        if fx.label.contains("concave") || fx.label.contains("bilinear") || fx.label.contains("mixed") {
+        if fx.label.contains("concave")
+            || fx.label.contains("bilinear")
+            || fx.label.contains("mixed")
+        {
             assert!(
                 fx.global_obj < -1.0,
                 "{}: expected global ≪ 0 (non-trivial), got {}",

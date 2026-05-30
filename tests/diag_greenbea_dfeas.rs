@@ -60,10 +60,10 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
         let rc = reduced_costs[j];
         let x_j = solution[j];
         let rel_tol = PIVOT_TOL;
-        let at_lb = lb_j.is_finite()
-            && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
-        let at_ub = ub_j.is_finite()
-            && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+        let at_lb =
+            lb_j.is_finite() && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
+        let at_ub =
+            ub_j.is_finite() && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
         let viol = if at_lb && !at_ub {
             f64::max(0.0, -rc)
         } else if at_ub && !at_lb {
@@ -80,7 +80,17 @@ fn compute_dfeas_rel(prob: &QpProblem, solution: &[f64], reduced_costs: &[f64]) 
     dfeas_rel
 }
 
-fn run_once_with_timeout(label: &str, presolve_on: bool, timeout_s: f64) -> (SolveStatus, f64, f64, f64, Option<otspot::problem::TimingBreakdown>) {
+fn run_once_with_timeout(
+    label: &str,
+    presolve_on: bool,
+    timeout_s: f64,
+) -> (
+    SolveStatus,
+    f64,
+    f64,
+    f64,
+    Option<otspot::problem::TimingBreakdown>,
+) {
     let path = locate_greenbea();
     let qp = parse_qps(path).expect("parse greenbea");
     let lp = make_lp(&qp);
@@ -104,7 +114,13 @@ fn run_once_with_timeout(label: &str, presolve_on: bool, timeout_s: f64) -> (Sol
         r.status, r.objective, KNOWN_OBJ, r.iterations, r.timing_breakdown,
     );
 
-    (r.status, elapsed, obj_rel_err, dfeas_rel, r.timing_breakdown)
+    (
+        r.status,
+        elapsed,
+        obj_rel_err,
+        dfeas_rel,
+        r.timing_breakdown,
+    )
 }
 
 /// Primary regression: presolve=on (default), must converge to dfeas_rel ≤ eps.
@@ -114,7 +130,8 @@ fn run_once_with_timeout(label: &str, presolve_on: bool, timeout_s: f64) -> (Sol
 #[test]
 #[ignore = "env-sensitive: Mac ~48s / CI Linux > 120s budget。heavy profile で実行、#97 で深掘り"]
 fn diag_greenbea_dfeas_full_green() {
-    let (status, _elapsed, obj_rel_err, dfeas_rel, _timing) = run_once_with_timeout("presolve_on", true, 120.0);
+    let (status, _elapsed, obj_rel_err, dfeas_rel, _timing) =
+        run_once_with_timeout("presolve_on", true, 120.0);
     let eps = 1e-6;
     assert!(
         matches!(status, SolveStatus::Optimal),
@@ -127,12 +144,14 @@ fn diag_greenbea_dfeas_full_green() {
     assert!(
         obj_rel_err < obj_tol,
         "greenbea: obj relative error {:.2e} >= {:.0e}",
-        obj_rel_err, obj_tol,
+        obj_rel_err,
+        obj_tol,
     );
     assert!(
         dfeas_rel <= eps,
         "greenbea: dfeas_rel {:.3e} > eps {:.1e} (DFEAS_FAIL)",
-        dfeas_rel, eps,
+        dfeas_rel,
+        eps,
     );
 }
 
@@ -140,13 +159,15 @@ fn diag_greenbea_dfeas_full_green() {
 #[test]
 #[ignore = "tier-2 (Mac ~88s / CI 2.5x ~220s); heavy profile で実行 (#97)"]
 fn diag_greenbea_presolve_off_baseline() {
-    let (status, elapsed, _obj_rel, dfeas_rel, _timing) = run_once_with_timeout("presolve_off_120", false, 120.0);
+    let (status, elapsed, _obj_rel, dfeas_rel, _timing) =
+        run_once_with_timeout("presolve_off_120", false, 120.0);
     eprintln!(
         "[greenbea/presolve_off] status={:?} elapsed={:.2}s dfeas_rel={:.3e}",
         status, elapsed, dfeas_rel
     );
     assert_ne!(
-        status, SolveStatus::NumericalError,
+        status,
+        SolveStatus::NumericalError,
         "presolve=off must not cause NumericalError (solver instability)"
     );
 }

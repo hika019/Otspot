@@ -55,10 +55,7 @@ fn product_interval(a1: f64, b1: f64, a2: f64, b2: f64) -> (f64, f64) {
 /// 区間演算で f(x) = obj_offset + c'x + 1/2 x'Q x の box 上下限を返す。
 /// 戻り値 = (lower, upper)。
 /// 制約 Ax = b は無視するため "true" 下界より緩い。Phase 3 scaffolding 用。
-pub(crate) fn interval_quadratic_bounds(
-    problem: &QpProblem,
-    bounds: &[(f64, f64)],
-) -> (f64, f64) {
+pub(crate) fn interval_quadratic_bounds(problem: &QpProblem, bounds: &[(f64, f64)]) -> (f64, f64) {
     let n = problem.num_vars;
     debug_assert_eq!(bounds.len(), n, "bounds length mismatch");
 
@@ -264,8 +261,7 @@ mod tests {
         // On [-1,1]^2 → range [-1, 1].
         let q = CscMatrix::from_triplets(&[0, 1], &[1, 0], &[1.0, 1.0], 2, 2).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
-        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2])
-            .unwrap();
+        let p = QpProblem::new_all_le(q, vec![0.0, 0.0], a, vec![], vec![(-1.0, 1.0); 2]).unwrap();
         let (lo, hi) = interval_quadratic_bounds(&p, &p.bounds);
         assert!((lo - (-1.0)).abs() < 1e-12, "lo={lo}");
         assert!((hi - 1.0).abs() < 1e-12, "hi={hi}");

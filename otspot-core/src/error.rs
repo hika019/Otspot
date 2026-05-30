@@ -36,7 +36,10 @@ impl std::fmt::Display for MpsError {
                 write!(f, "Undefined {} reference: {}", kind, name)
             }
             MpsError::UnclosedIntegerMarker => {
-                write!(f, "INTORG marker not closed by a matching INTEND in COLUMNS")
+                write!(
+                    f,
+                    "INTORG marker not closed by a matching INTEND in COLUMNS"
+                )
             }
         }
     }
@@ -122,11 +125,27 @@ pub enum SolverError {
 impl std::fmt::Display for SolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SolverError::DimensionMismatch { field, expected, got } => {
-                write!(f, "Dimension mismatch: {} expected {} but got {}", field, expected, got)
+            SolverError::DimensionMismatch {
+                field,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "Dimension mismatch: {} expected {} but got {}",
+                    field, expected, got
+                )
             }
-            SolverError::IndexOutOfBounds { context, index, bound } => {
-                write!(f, "{} index {} out of bounds (size={})", context, index, bound)
+            SolverError::IndexOutOfBounds {
+                context,
+                index,
+                bound,
+            } => {
+                write!(
+                    f,
+                    "{} index {} out of bounds (size={})",
+                    context, index, bound
+                )
             }
             SolverError::SingularBasis { step } => {
                 write!(f, "Singular matrix detected at step {}", step)
@@ -141,7 +160,11 @@ impl std::fmt::Display for SolverError {
                 write!(f, "Non-finite coefficient in {}: index {}", field, index)
             }
             SolverError::InvalidBounds { index, lb, ub } => {
-                write!(f, "Invalid bounds at index {}: lb={} > ub={} or NaN", index, lb, ub)
+                write!(
+                    f,
+                    "Invalid bounds at index {}: lb={} > ub={} or NaN",
+                    index, lb, ub
+                )
             }
         }
     }

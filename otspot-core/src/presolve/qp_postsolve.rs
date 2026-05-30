@@ -3,10 +3,10 @@
 //! Presolve で縮約した QP 問題の解を元問題の解空間に復元する。
 //! `QpPostsolveStack` を逆順（LIFO）に適用する。
 
+use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 use crate::problem::SolverResult;
 use crate::qp::QpProblem;
 use crate::tolerances::DROP_TOL;
-use super::qp_transforms::{QpPostsolveStep, QpPresolveResult};
 
 /// Pivot singularity threshold for dual recovery.
 ///
@@ -40,7 +40,10 @@ const SINGULARITY_TOL: f64 = DROP_TOL;
 ///
 /// # 戻り値
 /// 元問題の変数・制約数に合わせた SolverResult
-pub fn postsolve_qp(presolve_result: &QpPresolveResult, reduced_sol: &SolverResult) -> SolverResult {
+pub fn postsolve_qp(
+    presolve_result: &QpPresolveResult,
+    reduced_sol: &SolverResult,
+) -> SolverResult {
     let n = presolve_result.orig_num_vars;
     let m = presolve_result.orig_num_constraints;
 
@@ -259,7 +262,9 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
     let mut aty_others_dd = TwoFloat::from(0.0);
     for k in s..e {
         let r = orig.a.row_ind[k];
-        if r == row { continue; }
+        if r == row {
+            continue;
+        }
         aty_others_dd += TwoFloat::new_mul(orig.a.values[k], sol.dual_solution[r]);
     }
     let aty_col_others = f64::from(aty_others_dd);
@@ -275,11 +280,7 @@ pub(crate) fn recover_y_for_singleton_row_with_bound(
 
 /// orig 空間の bound_duals レイアウトから 1 変数の bound_contrib (-z_lb + z_ub) を取得。
 /// `bound_duals` 長 = n_lb + n_ub (orig.bounds 順)。
-pub(crate) fn bound_contrib_at_var(
-    bounds: &[(f64, f64)],
-    bound_duals: &[f64],
-    var: usize,
-) -> f64 {
+pub(crate) fn bound_contrib_at_var(bounds: &[(f64, f64)], bound_duals: &[f64], var: usize) -> f64 {
     if bound_duals.is_empty() {
         return 0.0;
     }
@@ -328,8 +329,8 @@ fn compute_qx_at(q: &crate::sparse::CscMatrix, x: &[f64], col: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presolve::qp_transforms::run_qp_presolve_phase1;
     use crate::options::SolverOptions;
+    use crate::presolve::qp_transforms::run_qp_presolve_phase1;
     use crate::problem::SolveStatus;
     use crate::qp::{solve_qp_with, QpProblem};
     use crate::sparse::CscMatrix;
@@ -356,7 +357,11 @@ mod tests {
 
         // 縮約後問題を解く
         let reduced_sol = solve_qp_with(&presolve_result.reduced, &opts);
-        assert_eq!(reduced_sol.status, SolveStatus::Optimal, "reduced sol optimal");
+        assert_eq!(
+            reduced_sol.status,
+            SolveStatus::Optimal,
+            "reduced sol optimal"
+        );
 
         // postsolve
         let final_sol = postsolve_qp(&presolve_result, &reduced_sol);
@@ -395,8 +400,11 @@ mod tests {
         let final_sol = solve_qp_with(&prob, &opts);
         assert_eq!(final_sol.status, SolveStatus::Optimal);
         // dual_solution は元制約空間（長さ 2）でなければならない
-        assert_eq!(final_sol.dual_solution.len(), 2,
-            "dual_solution must have orig_num_constraints length after postsolve");
+        assert_eq!(
+            final_sol.dual_solution.len(),
+            2,
+            "dual_solution must have orig_num_constraints length after postsolve"
+        );
     }
 
     /// dual_solution の値が正しく逆変換されることを確認:
@@ -423,8 +431,11 @@ mod tests {
         assert_eq!(result.dual_solution.len(), 1, "dual len=1");
         assert!(result.dual_solution[0] >= -1e-6, "dual >= 0");
         // 最適値付近では dual ≈ 1.0
-        assert!((result.dual_solution[0] - 1.0).abs() < 1e-4,
-            "dual ≈ 1.0, got {}", result.dual_solution[0]);
+        assert!(
+            (result.dual_solution[0] - 1.0).abs() < 1e-4,
+            "dual ≈ 1.0, got {}",
+            result.dual_solution[0]
+        );
     }
 
     /// SingletonRow で FR var が presolve で fix されたときの dual 復元が KKT を満たすか。
@@ -454,12 +465,8 @@ mod tests {
         // A:
         //   row 0: 3*x = 6           → A[0,0]=3
         //   row 1: 1*x + 1*y + 1*z = 5  → A[1,0]=1, A[1,1]=1, A[1,2]=1
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 1, 1],
-            &[0, 0, 1, 2],
-            &[3.0, 1.0, 1.0, 1.0],
-            m, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 1, 1], &[0, 0, 1, 2], &[3.0, 1.0, 1.0, 1.0], m, n)
+            .unwrap();
         let b = vec![6.0, 5.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n]; // 全 FR
         let constraint_types = vec![
@@ -473,14 +480,30 @@ mod tests {
 
         assert_eq!(result.status, SolveStatus::Optimal, "should converge");
         // x ≈ 2, y ≈ z ≈ 1.5
-        assert!((result.solution[0] - 2.0).abs() < 1e-5, "x≈2 (fixed by singleton), got {}", result.solution[0]);
-        assert!((result.solution[1] - 1.5).abs() < 1e-5, "y≈1.5, got {}", result.solution[1]);
-        assert!((result.solution[2] - 1.5).abs() < 1e-5, "z≈1.5, got {}", result.solution[2]);
+        assert!(
+            (result.solution[0] - 2.0).abs() < 1e-5,
+            "x≈2 (fixed by singleton), got {}",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 1.5).abs() < 1e-5,
+            "y≈1.5, got {}",
+            result.solution[1]
+        );
+        assert!(
+            (result.solution[2] - 1.5).abs() < 1e-5,
+            "z≈1.5, got {}",
+            result.solution[2]
+        );
 
         // KKT 残差を元空間で計算: r_d[j] = (Qx)[j] + c[j] + (A^T y)[j]
         // (FR 変数なので bound_contrib = 0)
         let qx = prob.q.mat_vec_mul(&result.solution).unwrap();
-        let aty = prob.a.transpose().mat_vec_mul(&result.dual_solution).unwrap();
+        let aty = prob
+            .a
+            .transpose()
+            .mat_vec_mul(&result.dual_solution)
+            .unwrap();
         let mut max_rd = 0.0_f64;
         for j in 0..n {
             let r = (qx[j] + prob.c[j] + aty[j]).abs();
@@ -519,8 +542,10 @@ mod tests {
             &[0, 1, 1, 2, 2],
             &[0, 0, 1, 2, 3],
             &[1e-3, 1e6, 1.0, 1.0, 1.0],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![1e-3, 1e6 + 1.0, 2.0];
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); n];
         let constraint_types = vec![crate::problem::ConstraintType::Eq; 3];
@@ -538,7 +563,11 @@ mod tests {
 
         // KKT 残差 (元空間) 計算
         let qx = prob.q.mat_vec_mul(&result.solution).unwrap();
-        let aty = prob.a.transpose().mat_vec_mul(&result.dual_solution).unwrap();
+        let aty = prob
+            .a
+            .transpose()
+            .mat_vec_mul(&result.dual_solution)
+            .unwrap();
         let mut max_rd = 0.0_f64;
         let mut max_aty = 0.0_f64;
         for j in 0..n {
@@ -579,8 +608,10 @@ mod tests {
         assert_eq!(reduced_sol.status, SolveStatus::Optimal);
 
         let final_sol = postsolve_qp(&presolve_result, &reduced_sol);
-        assert_eq!(final_sol.final_residuals, reduced_sol.final_residuals,
-            "final_residuals must be preserved after postsolve");
+        assert_eq!(
+            final_sol.final_residuals, reduced_sol.final_residuals,
+            "final_residuals must be preserved after postsolve"
+        );
     }
 
     /// `recover_y_for_singleton_row_with_bound`: FR var (bound_contrib=0) の
@@ -609,11 +640,18 @@ mod tests {
             ..SolverResult::default()
         };
         recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
-        assert!((sol.dual_solution[0] - (-2.5)).abs() < 1e-12,
-            "y[0] should be -2.5, got {}", sol.dual_solution[0]);
+        assert!(
+            (sol.dual_solution[0] - (-2.5)).abs() < 1e-12,
+            "y[0] should be -2.5, got {}",
+            sol.dual_solution[0]
+        );
         let aty0 = 2.0 * sol.dual_solution[0] + 1.0 * sol.dual_solution[1];
         let stat = 0.0 + 5.0 + aty0;
-        assert!(stat.abs() < 1e-12, "stationarity zeroed after recovery, got {}", stat);
+        assert!(
+            stat.abs() < 1e-12,
+            "stationarity zeroed after recovery, got {}",
+            stat
+        );
     }
 
     /// Sentinel C.1: boundary col (x at lb, z_lb>0) で bound_contrib=0 は y を誤る。
@@ -647,8 +685,11 @@ mod tests {
         };
         recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol_zero, 0.0);
         let resid_zero = (0.0 + 2.0 + sol_zero.dual_solution[0] + (-3.0_f64)).abs();
-        assert!(resid_zero > 0.1,
-            "bound_contrib=0 must give wrong y for boundary col (resid={})", resid_zero);
+        assert!(
+            resid_zero > 0.1,
+            "bound_contrib=0 must give wrong y for boundary col (resid={})",
+            resid_zero
+        );
 
         // With correct bound_contrib=-3: y[0] = -(0+2+(-3))/1 = 1; stationarity = 0.
         let mut sol_corr = SolverResult {
@@ -660,8 +701,11 @@ mod tests {
         };
         recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol_corr, -3.0);
         let resid_corr = (0.0 + 2.0 + sol_corr.dual_solution[0] + (-3.0_f64)).abs();
-        assert!(resid_corr < 1e-12,
-            "correct bound_contrib must zero stationarity (resid={})", resid_corr);
+        assert!(
+            resid_corr < 1e-12,
+            "correct bound_contrib must zero stationarity (resid={})",
+            resid_corr
+        );
     }
 
     /// Sentinel C.3: |A[row,col]|=1e-20 は SINGULARITY_TOL=DROP_TOL=1e-15 で
@@ -691,9 +735,11 @@ mod tests {
         };
         // SINGULARITY_TOL=1e-15: |1e-20| < 1e-15 → singular → y stays 0.0
         recover_y_for_singleton_row_with_bound(0, 0, &prob, &mut sol, 0.0);
-        assert!(sol.dual_solution[0] == 0.0,
+        assert!(
+            sol.dual_solution[0] == 0.0,
             "near-singular pivot must be skipped: y stays at initial 0.0, got {}",
-            sol.dual_solution[0]);
+            sol.dual_solution[0]
+        );
     }
 
     /// compute_qx_at: 対称 Q の col j に対して Σ_k Q[k,j]·x[k] を返すこと、かつ off-diag を
@@ -702,8 +748,13 @@ mod tests {
     fn test_compute_qx_at_symmetric_q() {
         // Q = [[2, 3], [3, 4]] (対称)、CSC は両方の (i, j) と (j, i) を格納する。
         let q = CscMatrix::from_triplets(
-            &[0, 1, 0, 1], &[0, 0, 1, 1], &[2.0_f64, 3.0, 3.0, 4.0], 2, 2,
-        ).unwrap();
+            &[0, 1, 0, 1],
+            &[0, 0, 1, 1],
+            &[2.0_f64, 3.0, 3.0, 4.0],
+            2,
+            2,
+        )
+        .unwrap();
         let x = vec![1.0_f64, 1.0];
         // (Q*x)[0] = 2·1 + 3·1 = 5; (Q*x)[1] = 3·1 + 4·1 = 7
         assert!((compute_qx_at(&q, &x, 0) - 5.0).abs() < 1e-12);

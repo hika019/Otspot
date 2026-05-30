@@ -14,8 +14,8 @@
 use otspot::problem::{ConstraintType, LpProblem};
 use otspot::sparse::CscMatrix;
 use otspot::{solve_with, SolveStatus, SolverOptions};
-use otspot_core::presolve::PresolveStatus;
 use otspot_core::presolve::transforms::{run_presolve_with_flags, PresolveFlags};
+use otspot_core::presolve::PresolveStatus;
 
 #[allow(clippy::too_many_arguments)]
 fn build_lp(
@@ -154,8 +154,7 @@ fn parallel_row_le_multi_pattern_reduces() {
             vec![(0.0, f64::INFINITY); n],
         );
         let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
-        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false))
-            .unwrap();
+        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false)).unwrap();
         assert!(
             on.reduced_problem.num_constraints < off.reduced_problem.num_constraints
                 || on.reduced_problem.num_constraints == 0,
@@ -325,8 +324,7 @@ fn dominated_col_unsafe_when_partner_bounded_above() {
         vec![ConstraintType::Le],
         vec![(0.0, 5.0), (0.0, f64::INFINITY)],
     );
-    let only_dup = run_presolve_with_flags(&lp, None, flags_only(false, true, false))
-        .unwrap();
+    let only_dup = run_presolve_with_flags(&lp, None, flags_only(false, true, false)).unwrap();
     // Step 10 alone (parallel-row off, dual-fixing off) must not eliminate
     // col 1 because the partner (col 0) cannot absorb extra z.
     assert!(
@@ -423,8 +421,7 @@ fn dual_fixing_pos_cost_multi_pattern() {
             vec![(0.0, f64::INFINITY); n],
         );
         let on = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
-        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false))
-            .unwrap();
+        let off = run_presolve_with_flags(&lp, None, flags_only(false, false, false)).unwrap();
         assert_eq!(
             on.reduced_problem.num_vars, 0,
             "[idx={}] expected all vars dual-fixed (got {} remaining)",
@@ -433,7 +430,8 @@ fn dual_fixing_pos_cost_multi_pattern() {
         assert!(
             off.reduced_problem.num_vars > 0,
             "[idx={}] without dual fixing, ≥1 var should survive (got {})",
-            idx, off.reduced_problem.num_vars
+            idx,
+            off.reduced_problem.num_vars
         );
     }
 }
@@ -545,7 +543,9 @@ fn noop_baseline_three_parallel_le_with_pos_cost() {
 // ----------------------------------------------------------
 
 fn lcg_next(state: &mut u64) -> u64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *state
 }
 
@@ -587,15 +587,17 @@ fn random_lp_consistency_across_seeds() {
             }
         }
         let c: Vec<f64> = (0..n).map(|_| rand_in(&mut state, 0.5, 2.0)).collect();
-        let b: Vec<f64> = (0..m).map(|i| {
-            if i == 1 {
-                // Keep row 1 strictly looser than row 0 so parallel detection
-                // can drop it without changing feasibility.
-                2.0 * rand_in(&mut state, 5.0, 10.0)
-            } else {
-                rand_in(&mut state, 5.0, 10.0)
-            }
-        }).collect();
+        let b: Vec<f64> = (0..m)
+            .map(|i| {
+                if i == 1 {
+                    // Keep row 1 strictly looser than row 0 so parallel detection
+                    // can drop it without changing feasibility.
+                    2.0 * rand_in(&mut state, 5.0, 10.0)
+                } else {
+                    rand_in(&mut state, 5.0, 10.0)
+                }
+            })
+            .collect();
         let lp = build_lp(
             c,
             &rows,
@@ -631,8 +633,7 @@ fn random_lp_consistency_across_seeds() {
             seed,
             r_pre.status
         );
-        let obj_err = (r_no.objective - r_pre.objective).abs()
-            / (1.0 + r_no.objective.abs());
+        let obj_err = (r_no.objective - r_pre.objective).abs() / (1.0 + r_no.objective.abs());
         assert!(
             obj_err < 1e-5,
             "[seed {}] obj mismatch: no_presolve={:.6e} pre={:.6e} rel_err={:.3e}",
@@ -654,7 +655,9 @@ fn random_lp_consistency_across_seeds() {
 // ----------------------------------------------------------
 
 fn reduction_pct(before: usize, after: usize) -> f64 {
-    if before == 0 { return 0.0; }
+    if before == 0 {
+        return 0.0;
+    }
     100.0 * (before - after) as f64 / before as f64
 }
 
@@ -684,8 +687,11 @@ fn reduction_rate_fact_synthetic_battery() {
         let b = vec![20.0, 50.0, 80.0, 12.0];
         build_lp(
             vec![-1.0; 5],
-            &rows, &cols, &vals,
-            4, 5,
+            &rows,
+            &cols,
+            &vals,
+            4,
+            5,
             b,
             vec![ConstraintType::Le; 4],
             vec![(0.0, 100.0); 5],
@@ -704,8 +710,12 @@ fn reduction_rate_fact_synthetic_battery() {
         for i in 0..m {
             for k in 0..3 {
                 let v = 1.0 + (i + k) as f64 * 0.3;
-                rows.push(i); cols.push(k);     vals.push(v); // cheap col k
-                rows.push(i); cols.push(k + 3); vals.push(v); // dominated col k+3
+                rows.push(i);
+                cols.push(k);
+                vals.push(v); // cheap col k
+                rows.push(i);
+                cols.push(k + 3);
+                vals.push(v); // dominated col k+3
             }
         }
         let mut bounds = vec![(0.0, f64::INFINITY); 3];
@@ -714,8 +724,11 @@ fn reduction_rate_fact_synthetic_battery() {
         c.extend(vec![5.0; 3]);
         build_lp(
             c,
-            &rows, &cols, &vals,
-            m, n,
+            &rows,
+            &cols,
+            &vals,
+            m,
+            n,
             vec![50.0; m],
             vec![ConstraintType::Le; m],
             bounds,
@@ -731,13 +744,18 @@ fn reduction_rate_fact_synthetic_battery() {
         let mut vals: Vec<f64> = Vec::new();
         for i in 0..m {
             for j in 0..n {
-                rows.push(i); cols.push(j); vals.push(0.5 + (i + j) as f64 * 0.1);
+                rows.push(i);
+                cols.push(j);
+                vals.push(0.5 + (i + j) as f64 * 0.1);
             }
         }
         build_lp(
             vec![1.0; n],
-            &rows, &cols, &vals,
-            m, n,
+            &rows,
+            &cols,
+            &vals,
+            m,
+            n,
             vec![100.0; m],
             vec![ConstraintType::Le; m],
             vec![(0.0, f64::INFINITY); n],
@@ -782,12 +800,16 @@ fn reduction_rate_fact_synthetic_battery() {
         assert!(
             row_pct >= case.min_row_reduction_pct,
             "[{}] row reduction {:.1}% below required {:.1}%",
-            case.label, row_pct, case.min_row_reduction_pct
+            case.label,
+            row_pct,
+            case.min_row_reduction_pct
         );
         assert!(
             col_pct >= case.min_col_reduction_pct,
             "[{}] col reduction {:.1}% below required {:.1}%",
-            case.label, col_pct, case.min_col_reduction_pct
+            case.label,
+            col_pct,
+            case.min_col_reduction_pct
         );
 
         // Repeat with all new flags off so the delta is attributable.

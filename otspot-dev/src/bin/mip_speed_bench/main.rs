@@ -109,7 +109,12 @@ impl Row {
 // Runner
 // ---------------------------------------------------------------------------
 
-fn run_milp(problem: &MilpProblem, opts: &SolverOptions, cfg: &MipConfig, timeout_secs: f64) -> Row {
+fn run_milp(
+    problem: &MilpProblem,
+    opts: &SolverOptions,
+    cfg: &MipConfig,
+    timeout_secs: f64,
+) -> Row {
     let n = problem.num_vars();
     let m = problem.lp.num_constraints;
     let n_int = problem.integer_vars.len();
@@ -153,7 +158,12 @@ fn run_milp(problem: &MilpProblem, opts: &SolverOptions, cfg: &MipConfig, timeou
     }
 }
 
-fn run_miqp(problem: &MiqpProblem, opts: &SolverOptions, cfg: &MipConfig, timeout_secs: f64) -> Row {
+fn run_miqp(
+    problem: &MiqpProblem,
+    opts: &SolverOptions,
+    cfg: &MipConfig,
+    timeout_secs: f64,
+) -> Row {
     let n = problem.num_vars();
     let m = problem.qp.num_constraints;
     let n_int = problem.integer_vars.len();
@@ -266,7 +276,10 @@ fn main() {
     let knapsack_cases = sizes.len() * int_ratios.len() * seeds.len();
     let density_cases = sizes.len() * int_ratios.len() * densities.len() * seeds.len() * 2;
     let total = knapsack_cases + density_cases;
-    println!("MIP speed bench: {} cases, timeout={:.0}s each", total, timeout_secs);
+    println!(
+        "MIP speed bench: {} cases, timeout={:.0}s each",
+        total, timeout_secs
+    );
     println!("Output: {}", out_path);
 
     if let Some(parent) = std::path::Path::new(&out_path).parent() {

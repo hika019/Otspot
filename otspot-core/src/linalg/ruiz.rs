@@ -50,13 +50,7 @@ impl RuizScaler {
 
     /// b を行ノルムに含めた Ruiz equilibration (presolve 後に b が大きい場合用)。
     #[allow(clippy::needless_range_loop)]
-    pub fn compute_with_rhs(
-        &mut self,
-        q: &CscMatrix,
-        a: &CscMatrix,
-        q_vec: &[f64],
-        b: &[f64],
-    ) {
+    pub fn compute_with_rhs(&mut self, q: &CscMatrix, a: &CscMatrix, q_vec: &[f64], b: &[f64]) {
         let n = q.ncols;
         let m = a.nrows;
         const EPS: f64 = 1e-6;
@@ -186,10 +180,7 @@ impl RuizScaler {
 
         // b_s[i] = e[i] * b[i]
         let b_s: Vec<f64> = if m > 0 {
-            b.iter()
-                .enumerate()
-                .map(|(i, &v)| self.e[i] * v)
-                .collect()
+            b.iter().enumerate().map(|(i, &v)| self.e[i] * v).collect()
         } else {
             vec![]
         };
@@ -227,7 +218,10 @@ impl RuizScaler {
             if lb.is_finite() {
                 result.push(bound_duals_s[idx] / (self.c * self.d[j]));
                 idx += 1;
-                debug_assert!(idx <= bound_duals_s.len(), "bound_duals_s index out of bounds (lb)");
+                debug_assert!(
+                    idx <= bound_duals_s.len(),
+                    "bound_duals_s index out of bounds (lb)"
+                );
             }
         }
         // 上界分（ub が有限な変数、変数番号昇順）
@@ -235,10 +229,17 @@ impl RuizScaler {
             if ub.is_finite() {
                 result.push(bound_duals_s[idx] / (self.c * self.d[j]));
                 idx += 1;
-                debug_assert!(idx <= bound_duals_s.len(), "bound_duals_s index out of bounds (ub)");
+                debug_assert!(
+                    idx <= bound_duals_s.len(),
+                    "bound_duals_s index out of bounds (ub)"
+                );
             }
         }
-        debug_assert_eq!(idx, bound_duals_s.len(), "unscale_bound_duals: idx != bound_duals_s.len()");
+        debug_assert_eq!(
+            idx,
+            bound_duals_s.len(),
+            "unscale_bound_duals: idx != bound_duals_s.len()"
+        );
         result
     }
 
@@ -288,21 +289,11 @@ mod tests {
         let n = 3usize;
         let m = 3usize;
         // Q = I_3
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[1.0, 1.0, 1.0],
-            n, n,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], n, n).unwrap();
         // q_vec = 0
         let q_vec = vec![0.0; n];
         // A = I_3
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[1.0, 1.0, 1.0],
-            m, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], m, n).unwrap();
         let mut scaler = RuizScaler::new(n, m);
         scaler.compute_with_rhs(&q, &a, &q_vec, &[]);
 
@@ -311,14 +302,16 @@ mod tests {
             assert!(
                 (scaler.d[j] - 1.0).abs() < 0.2,
                 "d[{}] = {:.6} (expected ~1.0)",
-                j, scaler.d[j]
+                j,
+                scaler.d[j]
             );
         }
         for i in 0..m {
             assert!(
                 (scaler.e[i] - 1.0).abs() < 0.2,
                 "e[{}] = {:.6} (expected ~1.0)",
-                i, scaler.e[i]
+                i,
+                scaler.e[i]
             );
         }
     }
@@ -329,9 +322,9 @@ mod tests {
     /// Q = diag(1,100,1,100,1)（意図的に悪くスケーリングされた問題）
     #[test]
     fn test_ruiz_scaling_correctness() {
-        use crate::qp::QpProblem;
         use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
+        use crate::qp::QpProblem;
 
         // Q = diag(1, 100, 1, 100, 1) — 条件数が大きい
         let n = 5usize;
@@ -351,19 +344,27 @@ mod tests {
             &[0, 0, 1, 1, 2, 2],
             &[0, 1, 2, 3, 0, 4],
             &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            m, n,
-        ).unwrap();
+            m,
+            n,
+        )
+        .unwrap();
         let b = vec![2.0, 2.0, 2.0];
         let bounds = vec![(0.0f64, f64::INFINITY); n];
 
         let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
         // スケーリングなし
-        let opts_no_scale = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts_no_scale = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
         let r_no_scale = crate::qp::solve_qp_with(&problem, &opts_no_scale);
 
         // スケーリングあり
-        let opts_scale = SolverOptions { use_ruiz_scaling: true, ..Default::default() };
+        let opts_scale = SolverOptions {
+            use_ruiz_scaling: true,
+            ..Default::default()
+        };
         let r_scale = crate::qp::solve_qp_with(&problem, &opts_scale);
 
         // 両方 Optimal (偽Optimal検出時はSuboptimalSolutionも許容)
@@ -371,13 +372,15 @@ mod tests {
             r_no_scale.status == SolveStatus::Optimal
                 || r_no_scale.status == SolveStatus::Timeout
                 || r_no_scale.status == SolveStatus::SuboptimalSolution,
-            "no_scale: {:?}", r_no_scale.status
+            "no_scale: {:?}",
+            r_no_scale.status
         );
         assert!(
             r_scale.status == SolveStatus::Optimal
                 || r_scale.status == SolveStatus::Timeout
                 || r_scale.status == SolveStatus::SuboptimalSolution,
-            "scale: {:?}", r_scale.status
+            "scale: {:?}",
+            r_scale.status
         );
 
         // 両方 Optimal なら解が近い
@@ -386,13 +389,16 @@ mod tests {
                 assert!(
                     (r_no_scale.solution[j] - r_scale.solution[j]).abs() < 0.1,
                     "x[{}]: no_scale={:.6}, scale={:.6}",
-                    j, r_no_scale.solution[j], r_scale.solution[j]
+                    j,
+                    r_no_scale.solution[j],
+                    r_scale.solution[j]
                 );
             }
             assert!(
                 (r_no_scale.objective - r_scale.objective).abs() < 0.1,
                 "obj: no_scale={:.6}, scale={:.6}",
-                r_no_scale.objective, r_scale.objective
+                r_no_scale.objective,
+                r_scale.objective
             );
         }
     }
@@ -401,9 +407,9 @@ mod tests {
     /// use_ruiz_scaling=false で従来通りの動作（スケーリングなし）
     #[test]
     fn test_ruiz_disabled() {
-        use crate::qp::QpProblem;
         use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
+        use crate::qp::QpProblem;
 
         // 簡単な QP: min x^2 + y^2  s.t. x+y >= 1
         let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
@@ -413,12 +419,28 @@ mod tests {
         let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
         let problem = QpProblem::new_all_le(q, q_vec, a, b, bounds).unwrap();
 
-        let opts = SolverOptions { use_ruiz_scaling: false, ..Default::default() };
+        let opts = SolverOptions {
+            use_ruiz_scaling: false,
+            ..Default::default()
+        };
 
         let result = crate::qp::solve_qp_with(&problem, &opts);
-        assert_eq!(result.status, SolveStatus::Optimal, "disabled: {:?}", result.status);
-        assert!((result.solution[0] - 0.5).abs() < 0.05, "x[0]={}", result.solution[0]);
-        assert!((result.solution[1] - 0.5).abs() < 0.05, "x[1]={}", result.solution[1]);
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "disabled: {:?}",
+            result.status
+        );
+        assert!(
+            (result.solution[0] - 0.5).abs() < 0.05,
+            "x[0]={}",
+            result.solution[0]
+        );
+        assert!(
+            (result.solution[1] - 0.5).abs() < 0.05,
+            "x[1]={}",
+            result.solution[1]
+        );
     }
 
     /// scale_problem → unscale_solution の round-trip が恒等であること。
@@ -427,13 +449,10 @@ mod tests {
     fn scale_unscale_round_trip_identity() {
         let n = 3usize;
         let m = 2usize;
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 4.0], n, n,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 4.0], n, n).unwrap();
         let q_vec = vec![1.0, 2.0, 3.0];
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 2.0, 3.0, 4.0], m, n,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 1, 2], &[1.0, 2.0, 3.0, 4.0], m, n)
+            .unwrap();
         let b = vec![5.0, 6.0];
         let bounds = vec![(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)];
 
@@ -454,13 +473,23 @@ mod tests {
         // 期待値: x = D x_s = d[j] * x_s[j], y = E y_s / c
         for j in 0..n {
             let expected = scaler.d[j] * x_s[j];
-            assert!((x_orig[j] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
-                "x_orig[{}]={} expected {}", j, x_orig[j], expected);
+            assert!(
+                (x_orig[j] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
+                "x_orig[{}]={} expected {}",
+                j,
+                x_orig[j],
+                expected
+            );
         }
         for i in 0..m {
             let expected = scaler.e[i] * y_s[i] / scaler.c;
-            assert!((y_orig[i] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
-                "y_orig[{}]={} expected {}", i, y_orig[i], expected);
+            assert!(
+                (y_orig[i] - expected).abs() < 1e-12 * (1.0 + expected.abs()),
+                "y_orig[{}]={} expected {}",
+                i,
+                y_orig[i],
+                expected
+            );
         }
     }
 
@@ -499,8 +528,15 @@ mod tests {
         // 関係: r_d[j] ≈ r_d_s[j] / (c * d[j])
         for j in 0..n {
             let expected = r_d_s[j] / (scaler.c * scaler.d[j]);
-            assert!((r_d[j] - expected).abs() < 1e-10 * (1.0 + expected.abs()),
-                "r_d[{}]={} expected {} (= r_d_s[{}] / (c×d[{}]))", j, r_d[j], expected, j, j);
+            assert!(
+                (r_d[j] - expected).abs() < 1e-10 * (1.0 + expected.abs()),
+                "r_d[{}]={} expected {} (= r_d_s[{}] / (c×d[{}]))",
+                j,
+                r_d[j],
+                expected,
+                j,
+                j
+            );
         }
     }
 }

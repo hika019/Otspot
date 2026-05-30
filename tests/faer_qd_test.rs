@@ -18,12 +18,7 @@ use faer::sparse::linalg::cholesky::{simplicial, supernodal};
 use faer::sparse::{SparseColMat, Triplet};
 
 /// Helper: compute ||Mx - b||_2 for a dense matrix M given as triplets
-fn residual_norm(
-    dim: usize,
-    triplets: &[(usize, usize, f64)],
-    x: &[f64],
-    b: &[f64],
-) -> f64 {
+fn residual_norm(dim: usize, triplets: &[(usize, usize, f64)], x: &[f64], b: &[f64]) -> f64 {
     let mut r = vec![0.0f64; dim];
     for &(row, col, val) in triplets {
         r[row] += val * x[col];
@@ -478,8 +473,7 @@ fn supernodal_ldlt_solve(
         Default::default(),
     );
 
-    let ldlt =
-        supernodal::SupernodalLdltRef::<'_, usize, f64>::new(&symbolic, &l_values);
+    let ldlt = supernodal::SupernodalLdltRef::<'_, usize, f64>::new(&symbolic, &l_values);
 
     let mut sol_mat = faer::MatMut::from_column_major_slice_mut(sol.as_mut_slice(), dim, 1);
     ldlt.solve_in_place_with_conj(faer::Conj::No, sol_mat.rb_mut(), faer::Par::Seq, stack);

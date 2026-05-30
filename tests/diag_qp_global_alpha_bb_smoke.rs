@@ -210,8 +210,7 @@ fn rel_err(actual: f64, expected: f64) -> f64 {
 #[test]
 fn alpha_bb_reaches_global_objective_on_all_fixtures() {
     for fx in fixtures() {
-        let (r, stats) =
-            solve_qp_global_with_stats(&fx.problem, &opts(30.0), &cfg(true));
+        let (r, stats) = solve_qp_global_with_stats(&fx.problem, &opts(30.0), &cfg(true));
         let err = rel_err(r.objective, fx.global_obj);
         eprintln!(
             "ALPHA_BB_OBJ [{}]: obj={:.6} (exp {:.6}, rel_err={:.2e}) status={:?} nodes={}",
@@ -294,8 +293,14 @@ fn use_alpha_bb_false_preserves_phase3_semantics() {
         "phase4 obj wrong: {}",
         r4.objective
     );
-    let phase3_proven = matches!(r3.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
-    let phase4_proven = matches!(r4.status, SolveStatus::Optimal | SolveStatus::NonconvexGlobal);
+    let phase3_proven = matches!(
+        r3.status,
+        SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+    );
+    let phase4_proven = matches!(
+        r4.status,
+        SolveStatus::Optimal | SolveStatus::NonconvexGlobal
+    );
     // Phase 4 が Phase 3 で proven なものを退化させていない (Optimal → LocallyOptimal 不可)
     if phase3_proven {
         assert!(

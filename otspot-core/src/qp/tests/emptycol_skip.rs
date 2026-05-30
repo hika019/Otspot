@@ -40,8 +40,16 @@ fn test_emptycol_skip_strict_linear_only_x0_and_nonconvex_x1() {
         result.status
     );
     // 期待値: x[0]=lb=-2 (c>0 → 下端最小), x[1]=lb=-2 (-2x² で発散方向、box 内最小は端点)
-    assert!((result.solution[0] - (-2.0)).abs() < 1e-5, "x[0]: {}", result.solution[0]);
-    assert!((result.solution[1] - (-2.0)).abs() < 1e-5, "x[1]: {}", result.solution[1]);
+    assert!(
+        (result.solution[0] - (-2.0)).abs() < 1e-5,
+        "x[0]: {}",
+        result.solution[0]
+    );
+    assert!(
+        (result.solution[1] - (-2.0)).abs() < 1e-5,
+        "x[1]: {}",
+        result.solution[1]
+    );
 
     // 元空間 KKT 残差: r[j] = (Qx)[j] + c[j] + (A^Ty)[j] + bound_contrib[j]
     // x[0]: 0 + 1 + 0 + bc[0]=0  → bd_lb[0] = 1 で r=0
@@ -78,9 +86,18 @@ fn test_emptycol_skip_strict_lp_like_full_elimination() {
     };
     let result = solve_qp_with(&problem, &opts);
 
-    assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "got {:?}",
+        result.status
+    );
     // x[0]: c=1>0 → minimise x → x=0
-    assert!(result.solution[0].abs() < 1e-6, "x[0]: {}", result.solution[0]);
+    assert!(
+        result.solution[0].abs() < 1e-6,
+        "x[0]: {}",
+        result.solution[0]
+    );
 }
 
 /// Pattern C: presolve で真に empty (A 空 + Q 空 + c=0) → solver が走り、解は任意の box 値で OK。
@@ -93,15 +110,7 @@ fn test_emptycol_skip_strict_truly_empty_col_preserved() {
     let a = CscMatrix::from_triplets(&[0], &[1], &[1.0_f64], 1, 2).unwrap();
     let b = vec![0.5_f64];
     let bounds = vec![(0.0_f64, 1.0_f64), (0.0_f64, 1.0_f64)];
-    let problem = QpProblem::new(
-        q,
-        c,
-        a,
-        b,
-        bounds,
-        vec![ConstraintType::Eq],
-    )
-    .unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Eq]).unwrap();
 
     let opts = SolverOptions {
         timeout_secs: Some(5.0),
@@ -109,9 +118,18 @@ fn test_emptycol_skip_strict_truly_empty_col_preserved() {
     };
     let result = solve_qp_with(&problem, &opts);
 
-    assert_eq!(result.status, SolveStatus::Optimal, "got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "got {:?}",
+        result.status
+    );
     // x[1] = 0.5 (= b/A[0,1])
-    assert!((result.solution[1] - 0.5).abs() < 1e-6, "x[1]: {}", result.solution[1]);
+    assert!(
+        (result.solution[1] - 0.5).abs() < 1e-6,
+        "x[1]: {}",
+        result.solution[1]
+    );
     // x[0] は任意 (c=0 / Q=0 / A=0)、status が Optimal で十分。
 }
 
@@ -125,15 +143,7 @@ fn test_emptycol_skip_strict_with_active_constraint_unchanged() {
     let a = CscMatrix::from_triplets(&[0], &[0], &[1.0_f64], 1, 2).unwrap();
     let b = vec![5.0_f64]; // Le → x[0] ≤ 5、bound 内では effective 制約なし
     let bounds = vec![(-2.0_f64, 2.0_f64), (-2.0_f64, 2.0_f64)];
-    let problem = QpProblem::new(
-        q,
-        c,
-        a,
-        b,
-        bounds,
-        vec![ConstraintType::Le],
-    )
-    .unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
 
     let opts = SolverOptions {
         timeout_secs: Some(5.0),

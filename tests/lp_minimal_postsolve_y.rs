@@ -27,7 +27,7 @@
 //!   目的関数値の三本柱を assert。LP path で拡張済の
 //!   `ModelResult.dual_solution` / `reduced_costs` 経由で KKT 検証する。
 
-use otspot::model::{Expression, Model, Variable, constraint};
+use otspot::model::{constraint, Expression, Model, Variable};
 use otspot::problem::ConstraintType;
 use otspot::sparse::CscMatrix;
 
@@ -49,19 +49,16 @@ const MINI_TIMEOUT_SECS: f64 = 5.0;
 ///
 /// fixed (lb==ub) は除外、at_lb のみで rc<0 を、at_ub のみで rc>0 を、
 /// interior は rc=0 (両端 hit は判定除外、複合扱い) で違反量を測る。
-fn dfeas_rel_bound(
-    c: &[f64],
-    bounds: &[(f64, f64)],
-    x: &[f64],
-    rc: &[f64],
-) -> f64 {
+fn dfeas_rel_bound(c: &[f64], bounds: &[(f64, f64)], x: &[f64], rc: &[f64]) -> f64 {
     const BOUND_TOL: f64 = 1e-6;
     let n = c.len().min(rc.len()).min(x.len());
     let mut max_rel = 0.0_f64;
     for j in 0..n {
         let (lb, ub) = bounds[j];
         let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
-        if fixed { continue; }
+        if fixed {
+            continue;
+        }
         let at_lb = lb.is_finite() && (x[j] - lb).abs() < BOUND_TOL;
         let at_ub = ub.is_finite() && (x[j] - ub).abs() < BOUND_TOL;
         let r = rc[j];
@@ -99,7 +96,9 @@ fn pfeas_abs(a: &CscMatrix, b: &[f64], cts: &[ConstraintType], x: &[f64]) -> f64
             // 違反 0 扱いで bench 退化を起こさない方が安全。
             _ => 0.0,
         };
-        if v > max_v { max_v = v; }
+        if v > max_v {
+            max_v = v;
+        }
     }
     max_v
 }
@@ -189,16 +188,16 @@ fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
     );
 
     // (i) primal feasibility — 元 A 構造で評価 (Model 構築前の triplet)
-    let a = CscMatrix::from_triplets(
-        data.rows, data.cols, data.vals,
-        data.b.len(), data.c.len(),
-    )
-    .expect("CscMatrix::from_triplets");
+    let a = CscMatrix::from_triplets(data.rows, data.cols, data.vals, data.b.len(), data.c.len())
+        .expect("CscMatrix::from_triplets");
     let pf = pfeas_abs(&a, data.b, data.cts, &x);
     assert!(
         pf < EPS_KKT,
         "[{}] pfeas={:.3e} > eps={:.3e} (x={:?})",
-        data.name, pf, EPS_KKT, &x
+        data.name,
+        pf,
+        EPS_KKT,
+        &x
     );
 
     // (ii) dual feasibility (bound-aware) — 3-way fix の本丸検証
@@ -206,7 +205,12 @@ fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
     assert!(
         df < EPS_KKT,
         "[{}] dfeas_rel_bound={:.3e} > eps={:.3e} | x={:?} rc={:?} y={:?}",
-        data.name, df, EPS_KKT, &x, rc, dual
+        data.name,
+        df,
+        EPS_KKT,
+        &x,
+        rc,
+        dual
     );
 
     // (iii) 目的関数値
@@ -214,7 +218,11 @@ fn assert_kkt_optimal(data: &LpData<'_>, expected_obj: f64) {
     assert!(
         obj_err < EPS_OBJ_REL,
         "[{}] obj={:.9e} expected={:.9e} rel_err={:.3e} > {:.3e}",
-        data.name, r.objective_value, expected_obj, obj_err, EPS_OBJ_REL
+        data.name,
+        r.objective_value,
+        expected_obj,
+        obj_err,
+        EPS_OBJ_REL
     );
 }
 
@@ -254,8 +262,13 @@ fn bug1a_singleton_row_zero_cost_col() {
     ];
     let data = LpData {
         name: "bug1a_singleton_row_zero_cost_col",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     assert_kkt_optimal(&data, 4.0);
 }
@@ -276,8 +289,13 @@ fn bug1b_redundant_constraint_zero_cost_col() {
     let bounds = [(0.0, 1.0), (0.0, 5.0), (0.0, 5.0)];
     let data = LpData {
         name: "bug1b_redundant_constraint_zero_cost_col",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     // x0 自由 (c=0, redundant 1 行のみ); x1+x2=5, x1<=3 で min x1+x2 → 5
     assert_kkt_optimal(&data, 5.0);
@@ -303,8 +321,13 @@ fn bug1c_redundant_constraint_only_entry_at_lb() {
     let bounds = [(0.0, 10.0); 3];
     let data = LpData {
         name: "bug1c_redundant_constraint_only_entry_at_lb",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     assert_kkt_optimal(&data, 3.0);
 }
@@ -330,14 +353,21 @@ fn bug2a_two_singleton_rows_coupled_dual() {
     let vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
     let b = [7.0, 3.0, 4.0, 2.0];
     let cts = [
-        ConstraintType::Eq, ConstraintType::Eq,
-        ConstraintType::Eq, ConstraintType::Eq,
+        ConstraintType::Eq,
+        ConstraintType::Eq,
+        ConstraintType::Eq,
+        ConstraintType::Eq,
     ];
     let bounds = [(0.0, f64::INFINITY); 5];
     let data = LpData {
         name: "bug2a_two_singleton_rows_coupled_dual",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     assert_kkt_optimal(&data, 4.0);
 }
@@ -362,8 +392,13 @@ fn bug2b_two_deleted_rows_bound_active_col() {
     let bounds = [(0.0, 2.0), (0.0, 4.0), (0.0, 10.0)];
     let data = LpData {
         name: "bug2b_two_deleted_rows_bound_active_col",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     assert_kkt_optimal(&data, 5.0);
 }
@@ -394,8 +429,13 @@ fn bug2c_linear_substitution_plus_singleton() {
     ];
     let data = LpData {
         name: "bug2c_linear_substitution_plus_singleton",
-        c: &c, rows: &rows, cols: &cols, vals: &vals,
-        b: &b, cts: &cts, bounds: &bounds,
+        c: &c,
+        rows: &rows,
+        cols: &cols,
+        vals: &vals,
+        b: &b,
+        cts: &cts,
+        bounds: &bounds,
     };
     assert_kkt_optimal(&data, 7.0);
 }

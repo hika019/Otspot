@@ -242,7 +242,10 @@ mod tests {
     fn lb_bounds(uppers: &[f64]) -> Vec<ColBound> {
         uppers
             .iter()
-            .map(|&u| ColBound { upper: u, at_upper: false })
+            .map(|&u| ColBound {
+                upper: u,
+                at_upper: false,
+            })
             .collect()
     }
 
@@ -279,11 +282,21 @@ mod tests {
         let trow = vec![1.0, 2.0, 0.5];
         let r = vec![0.1, 1.0, 0.5];
         let bounds = vec![
-            ColBound { upper: 1.0, at_upper: false },
-            ColBound { upper: 1.0, at_upper: false },
-            ColBound { upper: f64::INFINITY, at_upper: false },
+            ColBound {
+                upper: 1.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: 1.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: f64::INFINITY,
+                at_upper: false,
+            },
         ];
-        let res = bfrt_select_entering(&trow, &r, &no_basic(3), &bounds, 3, PIVOT_TOL, 1.5).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(3), &bounds, 3, PIVOT_TOL, 1.5).unwrap();
         assert_eq!(res.entering_col, 1, "BFRT should skip j=0 and pick j=1");
         assert!((res.theta - 0.5).abs() < 1e-9);
         assert_eq!(res.flips, vec![0], "j=0 must be marked as a flip");
@@ -302,12 +315,25 @@ mod tests {
         let trow = vec![1.0, 1.0, 1.0, 1.0];
         let r = vec![0.1, 0.2, 0.3, 0.4];
         let bounds = vec![
-            ColBound { upper: 1.0, at_upper: false },
-            ColBound { upper: 2.0, at_upper: false },
-            ColBound { upper: 3.0, at_upper: false },
-            ColBound { upper: f64::INFINITY, at_upper: false },
+            ColBound {
+                upper: 1.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: 2.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: 3.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: f64::INFINITY,
+                at_upper: false,
+            },
         ];
-        let res = bfrt_select_entering(&trow, &r, &no_basic(4), &bounds, 4, PIVOT_TOL, 10.0).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(4), &bounds, 4, PIVOT_TOL, 10.0).unwrap();
         assert_eq!(res.entering_col, 3);
         assert_eq!(res.flips, vec![0, 1, 2]);
         assert!((res.theta - 0.4).abs() < 1e-9);
@@ -327,10 +353,17 @@ mod tests {
         let trow = vec![-1.0, 2.0];
         let r = vec![-0.2, 0.6];
         let bounds = vec![
-            ColBound { upper: 1.0, at_upper: true },
-            ColBound { upper: f64::INFINITY, at_upper: false },
+            ColBound {
+                upper: 1.0,
+                at_upper: true,
+            },
+            ColBound {
+                upper: f64::INFINITY,
+                at_upper: false,
+            },
         ];
-        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 0.5).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 0.5).unwrap();
         assert_eq!(res.entering_col, 0);
         assert!((res.theta - 0.2).abs() < 1e-9);
         assert!(res.flips.is_empty());
@@ -356,7 +389,8 @@ mod tests {
         let trow = vec![1.0, 5.0];
         let r = vec![0.1, 0.5];
         let bounds = lb_bounds(&[f64::INFINITY, f64::INFINITY]);
-        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
         assert_eq!(res.entering_col, 1, "larger |pivot| should win the tie");
         // Reviewer P1: tie-zone losers must not be pushed as flips when their
         // upper bound is infinite — there is no other bound to flip to, and a
@@ -376,7 +410,8 @@ mod tests {
         let trow = vec![1.0, 5.0];
         let r = vec![0.1, 0.5];
         let bounds = lb_bounds(&[f64::INFINITY, f64::INFINITY]);
-        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
         assert!(
             res.flips.iter().all(|&f| bounds[f].upper.is_finite()),
             "no infinite-upper flips even on tie, got: {:?}",
@@ -398,10 +433,17 @@ mod tests {
         let trow = vec![1.0, 5.0];
         let r = vec![0.1, 0.5];
         let bounds = vec![
-            ColBound { upper: 1.0, at_upper: false },
-            ColBound { upper: f64::INFINITY, at_upper: false },
+            ColBound {
+                upper: 1.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: f64::INFINITY,
+                at_upper: false,
+            },
         ];
-        let res = bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(2), &bounds, 2, PIVOT_TOL, 10.0).unwrap();
         assert_eq!(res.entering_col, 1);
         assert_eq!(res.flips, vec![0], "finite-upper walk-flip must survive");
         assert!(
@@ -442,8 +484,14 @@ mod tests {
 
         // Case 2: a real flip → counter increments by 1
         let bounds = vec![
-            ColBound { upper: 1.0, at_upper: false },
-            ColBound { upper: f64::INFINITY, at_upper: false },
+            ColBound {
+                upper: 1.0,
+                at_upper: false,
+            },
+            ColBound {
+                upper: f64::INFINITY,
+                at_upper: false,
+            },
         ];
         let _ = bfrt_select_entering(
             &[1.0, 1.0],
@@ -482,13 +530,20 @@ mod tests {
         for k in 1..=10 {
             trow.push(1.0);
             r.push(0.01 * k as f64);
-            bounds.push(ColBound { upper: 1.0, at_upper: false });
+            bounds.push(ColBound {
+                upper: 1.0,
+                at_upper: false,
+            });
         }
         trow.push(1.0);
         r.push(1.0);
-        bounds.push(ColBound { upper: f64::INFINITY, at_upper: false });
+        bounds.push(ColBound {
+            upper: f64::INFINITY,
+            at_upper: false,
+        });
 
-        let res = bfrt_select_entering(&trow, &r, &no_basic(11), &bounds, 11, PIVOT_TOL, 5.0).unwrap();
+        let res =
+            bfrt_select_entering(&trow, &r, &no_basic(11), &bounds, 11, PIVOT_TOL, 5.0).unwrap();
         // residual=5, walk: after 4 flips residual=1, at k=4 residual(1) ≤ weight(1)
         // → entering=j=4 (0-indexed, the 5th column), θ=0.05, flips=[0,1,2,3]
         assert_eq!(res.entering_col, 4);

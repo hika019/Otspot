@@ -32,7 +32,9 @@ const CRASH_ITER_RATIO_UPPER: f64 = 1.0 - CRASH_ITER_REDUCTION_MARGIN;
 fn build_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
     let mut seed: u64 = seed_init;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
     };
 
@@ -60,13 +62,13 @@ fn build_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
     let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_eq, n).unwrap();
 
     // b は正 + epsilon noise (実行可能性確保)
-    let b: Vec<f64> = (0..m_eq).map(|_| 1.0 + (next(&mut seed) + 1.0) * 0.25).collect();
+    let b: Vec<f64> = (0..m_eq)
+        .map(|_| 1.0 + (next(&mut seed) + 1.0) * 0.25)
+        .collect();
     let c: Vec<f64> = (0..n).map(|_| next(&mut seed)).collect();
     let bounds = vec![(0.0_f64, 10.0_f64); n];
 
-    LpProblem::new_general(
-        c, a, b, vec![ConstraintType::Eq; m_eq], bounds, None,
-    ).unwrap()
+    LpProblem::new_general(c, a, b, vec![ConstraintType::Eq; m_eq], bounds, None).unwrap()
 }
 
 /// ill-scaled network LP: build_network_lp 同型構造に列 scale 8 桁 dynamic range を
@@ -75,17 +77,21 @@ fn build_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
 fn build_ill_scaled_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> LpProblem {
     let mut seed: u64 = seed_init;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
     };
 
     let n = n_flow + n_hub;
     let m_eq = n_flow;
     // log-uniform [1e-4, 1e4] scaling per flow col (singleton pivot もこれで scaled)
-    let flow_scale: Vec<f64> = (0..n_flow).map(|j| {
-        let exp = -4.0 + 8.0 * (j as f64 / (n_flow - 1) as f64);
-        10.0_f64.powf(exp)
-    }).collect();
+    let flow_scale: Vec<f64> = (0..n_flow)
+        .map(|j| {
+            let exp = -4.0 + 8.0 * (j as f64 / (n_flow - 1) as f64);
+            10.0_f64.powf(exp)
+        })
+        .collect();
 
     let mut a_rows: Vec<usize> = Vec::new();
     let mut a_cols: Vec<usize> = Vec::new();
@@ -107,13 +113,13 @@ fn build_ill_scaled_network_lp(n_flow: usize, n_hub: usize, seed_init: u64) -> L
     let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_eq, n).unwrap();
 
     // b は flow_scale を反映して符号一致が自明な構造に。
-    let b: Vec<f64> = (0..m_eq).map(|i| flow_scale[i] * (1.0 + (next(&mut seed) + 1.0) * 0.25)).collect();
+    let b: Vec<f64> = (0..m_eq)
+        .map(|i| flow_scale[i] * (1.0 + (next(&mut seed) + 1.0) * 0.25))
+        .collect();
     let c: Vec<f64> = (0..n).map(|_| next(&mut seed)).collect();
     let bounds = vec![(0.0_f64, 100.0_f64); n];
 
-    LpProblem::new_general(
-        c, a, b, vec![ConstraintType::Eq; m_eq], bounds, None,
-    ).unwrap()
+    LpProblem::new_general(c, a, b, vec![ConstraintType::Eq; m_eq], bounds, None).unwrap()
 }
 
 /// network-style LP で crash が iter 数を削減すること。
@@ -125,18 +131,25 @@ fn crash_basis_reduces_iters_network_lp() {
     cold_opts.use_lp_crash_basis = false;
     cold_opts.timeout_secs = Some(60.0);
     let cold = solve_with(&problem, &cold_opts);
-    assert_eq!(cold.status, SolveStatus::Optimal,
-        "cold must be Optimal; got {:?}", cold.status);
+    assert_eq!(
+        cold.status,
+        SolveStatus::Optimal,
+        "cold must be Optimal; got {:?}",
+        cold.status
+    );
 
     let mut crash_opts = SolverOptions::default();
     crash_opts.use_lp_crash_basis = true;
     crash_opts.timeout_secs = Some(60.0);
     let crashed = solve_with(&problem, &crash_opts);
-    assert_eq!(crashed.status, SolveStatus::Optimal,
-        "crash must be Optimal; got {:?}", crashed.status);
+    assert_eq!(
+        crashed.status,
+        SolveStatus::Optimal,
+        "crash must be Optimal; got {:?}",
+        crashed.status
+    );
 
-    let obj_diff = (crashed.objective - cold.objective).abs()
-        / (1.0 + cold.objective.abs());
+    let obj_diff = (crashed.objective - cold.objective).abs() / (1.0 + cold.objective.abs());
     assert!(obj_diff < 1e-6, "crash obj drift: {:.3e}", obj_diff);
 
     let iter_ratio = crashed.iterations as f64 / cold.iterations.max(1) as f64;
@@ -149,13 +162,17 @@ fn crash_basis_reduces_iters_network_lp() {
     assert!(
         crashed.iterations < cold.iterations,
         "crash appears silently dropped: cold={} crash={} (expected crash < cold)",
-        cold.iterations, crashed.iterations
+        cold.iterations,
+        crashed.iterations
     );
 
     assert!(
         iter_ratio < CRASH_ITER_RATIO_UPPER,
         "crash iter reduction below margin: ratio={:.3} ≥ {:.3} (cold={} crash={})",
-        iter_ratio, CRASH_ITER_RATIO_UPPER, cold.iterations, crashed.iterations
+        iter_ratio,
+        CRASH_ITER_RATIO_UPPER,
+        cold.iterations,
+        crashed.iterations
     );
 }
 
@@ -169,19 +186,30 @@ fn crash_basis_handles_ill_scaled_network_lp() {
     cold_opts.use_lp_crash_basis = false;
     cold_opts.timeout_secs = Some(60.0);
     let cold = solve_with(&problem, &cold_opts);
-    assert_eq!(cold.status, SolveStatus::Optimal,
-        "ill-scaled cold must Optimal; got {:?}", cold.status);
+    assert_eq!(
+        cold.status,
+        SolveStatus::Optimal,
+        "ill-scaled cold must Optimal; got {:?}",
+        cold.status
+    );
 
     let mut crash_opts = SolverOptions::default();
     crash_opts.use_lp_crash_basis = true;
     crash_opts.timeout_secs = Some(60.0);
     let crashed = solve_with(&problem, &crash_opts);
-    assert_eq!(crashed.status, SolveStatus::Optimal,
-        "ill-scaled crash must Optimal; got {:?}", crashed.status);
+    assert_eq!(
+        crashed.status,
+        SolveStatus::Optimal,
+        "ill-scaled crash must Optimal; got {:?}",
+        crashed.status
+    );
 
-    let obj_diff = (crashed.objective - cold.objective).abs()
-        / (1.0 + cold.objective.abs());
-    assert!(obj_diff < 1e-4, "ill-scaled crash obj drift: {:.3e}", obj_diff);
+    let obj_diff = (crashed.objective - cold.objective).abs() / (1.0 + cold.objective.abs());
+    assert!(
+        obj_diff < 1e-4,
+        "ill-scaled crash obj drift: {:.3e}",
+        obj_diff
+    );
 
     let iter_ratio = crashed.iterations as f64 / cold.iterations.max(1) as f64;
     eprintln!(
@@ -192,12 +220,16 @@ fn crash_basis_handles_ill_scaled_network_lp() {
     assert!(
         crashed.iterations < cold.iterations,
         "ill-scaled crash silently dropped: cold={} crash={}",
-        cold.iterations, crashed.iterations
+        cold.iterations,
+        crashed.iterations
     );
 
     assert!(
         iter_ratio < CRASH_ITER_RATIO_UPPER,
         "ill-scaled crash iter reduction insufficient: ratio={:.3} ≥ {:.3} (cold={} crash={})",
-        iter_ratio, CRASH_ITER_RATIO_UPPER, cold.iterations, crashed.iterations
+        iter_ratio,
+        CRASH_ITER_RATIO_UPPER,
+        cold.iterations,
+        crashed.iterations
     );
 }

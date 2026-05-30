@@ -2,10 +2,10 @@
 //!
 //! CSC形式の疎行列・疎ベクトルを提供する。
 
-mod vec;
-mod csc;
 mod compress;
+mod csc;
+mod vec;
 
 // Public re-exports
-pub use vec::SparseVec;
 pub use csc::CscMatrix;
+pub use vec::SparseVec;

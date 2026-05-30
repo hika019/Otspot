@@ -96,11 +96,7 @@ impl LdlFactorizationDdAmd {
 /// 戻り値: (parent, l_col_ptr)
 /// - `parent[k]` = etree 上の親 (-1 = root)
 /// - `l_col_ptr[k+1] - l_col_ptr[k]` = 列 k 以下三角における非ゼロ数
-fn ldl_symbolic(
-    n: usize,
-    a_col_ptr: &[usize],
-    a_row_ind: &[usize],
-) -> (Vec<isize>, Vec<usize>) {
+fn ldl_symbolic(n: usize, a_col_ptr: &[usize], a_row_ind: &[usize]) -> (Vec<isize>, Vec<usize>) {
     let mut parent = vec![-1isize; n];
     let mut flag = vec![usize::MAX; n];
     let mut lnz = vec![0usize; n];
@@ -276,8 +272,15 @@ pub fn factorize_quasidefinite_with_cached_perm_dd(
     }
 
     let signs = crate::linalg::ldl::extract_diagonal_signs(n, &col_ptr, &row_ind, &values);
-    let (l_row_ind, l_values, d_vec) =
-        ldl_numeric_dd(n, &col_ptr, &row_ind, &values, &parent, &l_col_ptr, Some(&signs))?;
+    let (l_row_ind, l_values, d_vec) = ldl_numeric_dd(
+        n,
+        &col_ptr,
+        &row_ind,
+        &values,
+        &parent,
+        &l_col_ptr,
+        Some(&signs),
+    )?;
 
     Ok(LdlFactorizationDdAmd {
         n,
@@ -375,8 +378,7 @@ mod tests {
         let b = [1.0f64, 2.0];
         let mut x = [0.0f64; 2];
         fac.solve(&b, &mut x);
-        let full: &[(usize, usize, f64)] =
-            &[(0, 0, 3.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, -2.0)];
+        let full: &[(usize, usize, f64)] = &[(0, 0, 3.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, -2.0)];
         assert!(residual_inf(full, &x, &b) < 1e-14);
     }
 
@@ -399,7 +401,8 @@ mod tests {
             ],
         );
         // identity perm でも AMD 結果でも動くはず。ここは identity でテスト。
-        let fac = factorize_quasidefinite_with_cached_perm_dd(&mat, &[0, 1, 2, 3, 4], None).unwrap();
+        let fac =
+            factorize_quasidefinite_with_cached_perm_dd(&mat, &[0, 1, 2, 3, 4], None).unwrap();
         let b = [1.0f64, 2.0, 0.5, -0.5, 1.0];
         let mut x = [0.0f64; 5];
         fac.solve(&b, &mut x);
@@ -440,8 +443,14 @@ mod tests {
 
         let fac_dd =
             factorize_quasidefinite_with_cached_perm_dd(&mat, &perm, None).expect("dd factorize");
-        let fac_f64 =
-            factorize_quasidefinite_with_cached_perm_budget_par(&mat, &perm, None, None, faer::Par::Seq).expect("f64 factorize");
+        let fac_f64 = factorize_quasidefinite_with_cached_perm_budget_par(
+            &mat,
+            &perm,
+            None,
+            None,
+            faer::Par::Seq,
+        )
+        .expect("f64 factorize");
 
         let b = vec![1.0f64; n];
         let mut x_dd = vec![0.0f64; n];
@@ -462,7 +471,10 @@ mod tests {
         let r_dd = residual_inf(&full, &x_dd, &b);
         let r_f64 = residual_inf(&full, &x_f64, &b);
         // DD residual should be at least as small as f64 (typically much smaller)
-        assert!(r_dd <= r_f64 * 1.01 + 1e-15, "DD residual {r_dd:.3e} should not exceed f64 {r_f64:.3e}");
+        assert!(
+            r_dd <= r_f64 * 1.01 + 1e-15,
+            "DD residual {r_dd:.3e} should not exceed f64 {r_f64:.3e}"
+        );
         // Both should solve to working precision for n=4 (cond ~1e4)
         assert!(r_dd < 1e-13, "DD residual {r_dd:.3e}");
         eprintln!("Hilbert n=4: f64 residual={r_f64:.3e}, DD residual={r_dd:.3e}");

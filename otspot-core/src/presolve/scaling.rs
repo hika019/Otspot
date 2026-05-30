@@ -71,11 +71,23 @@ impl LpEquilibration {
             // Compute scale factors: 1/sqrt(max), or 1.0 for empty rows/cols
             let row_factor: Vec<f64> = row_max
                 .iter()
-                .map(|&mx| if mx > UNDERFLOW_GUARD { 1.0 / mx.sqrt() } else { 1.0 })
+                .map(|&mx| {
+                    if mx > UNDERFLOW_GUARD {
+                        1.0 / mx.sqrt()
+                    } else {
+                        1.0
+                    }
+                })
                 .collect();
             let col_factor: Vec<f64> = col_max
                 .iter()
-                .map(|&mx| if mx > UNDERFLOW_GUARD { 1.0 / mx.sqrt() } else { 1.0 })
+                .map(|&mx| {
+                    if mx > UNDERFLOW_GUARD {
+                        1.0 / mx.sqrt()
+                    } else {
+                        1.0
+                    }
+                })
                 .collect();
 
             // Check convergence: max deviation of factors from 1.0
@@ -118,7 +130,6 @@ impl LpEquilibration {
 
         (a, cur_b, cur_c, cumul_row, cumul_col)
     }
-
 }
 
 #[cfg(test)]
@@ -144,11 +155,7 @@ mod tests {
     #[test]
     fn test_ruiz_scale_identity() {
         // Identity matrix — already balanced, scales should stay near 1
-        let a = make_dense_csc(
-            &[vec![1.0, 0.0], vec![0.0, 1.0]],
-            2,
-            2,
-        );
+        let a = make_dense_csc(&[vec![1.0, 0.0], vec![0.0, 1.0]], 2, 2);
         let b = vec![1.0, 2.0];
         let c = vec![1.0, 1.0];
         let (_, scaled_b, scaled_c, row_scale, col_scale) = LpEquilibration::scale(&a, &b, &c);
@@ -168,11 +175,7 @@ mod tests {
     fn test_ruiz_scale_unbalanced() {
         // Matrix with very unbalanced entries
         // [[1000, 1], [1, 0.001]]
-        let a = make_dense_csc(
-            &[vec![1000.0, 1.0], vec![1.0, 0.001]],
-            2,
-            2,
-        );
+        let a = make_dense_csc(&[vec![1000.0, 1.0], vec![1.0, 0.001]], 2, 2);
         let b = vec![1.0, 1.0];
         let c = vec![1.0, 1.0];
         let (scaled_a, _, _, _, _) = LpEquilibration::scale(&a, &b, &c);
@@ -186,5 +189,4 @@ mod tests {
             );
         }
     }
-
 }

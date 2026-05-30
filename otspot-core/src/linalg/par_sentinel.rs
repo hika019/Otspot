@@ -97,11 +97,15 @@ fn faer_par_speedup_supernodal_dense() {
     let (_, seq_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
     let (_, par_sol) = measure_factorize_solve(&mat, &rhs, par8);
     let diff = max_abs_diff(&seq_sol, &par_sol);
-    eprintln!("[dense PSD n={n}] threads={encoded} seq/par max_diff={:.3e}", diff);
+    eprintln!(
+        "[dense PSD n={n}] threads={encoded} seq/par max_diff={:.3e}",
+        diff
+    );
     assert!(
         diff < SOLVE_AGREEMENT_TOL,
         "seq/par sol mismatch: max_diff={:.3e} > {:.3e}",
-        diff, SOLVE_AGREEMENT_TOL
+        diff,
+        SOLVE_AGREEMENT_TOL
     );
 }
 
@@ -234,7 +238,8 @@ fn faer_par_table_driven_size_sweep() {
         "solver_par_from_threads(8) encodes {encoded} threads; expected 8 (helper no-op?)"
     );
     assert_eq!(
-        rayon_pool_active_count(encoded), encoded,
+        rayon_pool_active_count(encoded),
+        encoded,
         "rayon pool with {encoded} threads reports wrong active count"
     );
 
@@ -249,11 +254,15 @@ fn faer_par_table_driven_size_sweep() {
         let (_, seq_sol) = measure_factorize_solve(&mat, &rhs, faer::Par::Seq);
         let (_, par_sol) = measure_factorize_solve(&mat, &rhs, par8);
         let diff = max_abs_diff(&seq_sol, &par_sol);
-        eprintln!("[{label}] n={n} threads={encoded} seq/par max_diff={:.3e}", diff);
+        eprintln!(
+            "[{label}] n={n} threads={encoded} seq/par max_diff={:.3e}",
+            diff
+        );
         assert!(
             diff < SOLVE_AGREEMENT_TOL,
             "{label} (n={n}): seq/par solution mismatch max_diff={:.3e} >= {:.3e}",
-            diff, SOLVE_AGREEMENT_TOL
+            diff,
+            SOLVE_AGREEMENT_TOL
         );
     }
 }
@@ -283,17 +292,22 @@ fn faer_par_threads_sweep_monotone() {
         );
         if t >= 2 {
             assert_eq!(
-                rayon_pool_active_count(encoded), encoded,
+                rayon_pool_active_count(encoded),
+                encoded,
                 "rayon pool with {encoded} threads (t={t}) reports wrong active count"
             );
         }
         let (_, sol) = measure_factorize_solve(&mat, &rhs, par);
         let diff = max_abs_diff(&ref_sol, &sol);
-        eprintln!("[sweep n={n}] threads={t} encoded={encoded} sol_diff={:.3e}", diff);
+        eprintln!(
+            "[sweep n={n}] threads={t} encoded={encoded} sol_diff={:.3e}",
+            diff
+        );
         assert!(
             diff < SOLVE_AGREEMENT_TOL,
             "sweep t={t}: solution diverges from Par::Seq: max_diff={:.3e} >= {:.3e}",
-            diff, SOLVE_AGREEMENT_TOL
+            diff,
+            SOLVE_AGREEMENT_TOL
         );
     }
 }

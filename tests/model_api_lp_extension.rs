@@ -120,6 +120,7 @@ fn model_api_set_presolve_on_off_agree() {
     assert!(
         (r_on.objective_value - r_off.objective_value).abs() < 1e-4,
         "presolve on/off で obj 不一致: on={}, off={}",
-        r_on.objective_value, r_off.objective_value
+        r_on.objective_value,
+        r_off.objective_value
     );
 }

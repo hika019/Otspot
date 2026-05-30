@@ -158,4 +158,3 @@ pub(crate) const SLACK_TOL_REL: f64 = 1e-8;
 pub(crate) fn any_nonfinite(v: &[f64]) -> bool {
     v.iter().any(|x| !x.is_finite())
 }
-

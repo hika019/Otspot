@@ -28,10 +28,10 @@ pub(super) fn step6_doubleton_equation(
         }
         // Pivot choice: prefer the original-free side (avoids postsolve bound checks);
         // otherwise pick the larger-magnitude coefficient for numerical stability.
-        let j1_free = st.orig_bounds[j1].0 == f64::NEG_INFINITY
-            && st.orig_bounds[j1].1 == f64::INFINITY;
-        let j2_free = st.orig_bounds[j2].0 == f64::NEG_INFINITY
-            && st.orig_bounds[j2].1 == f64::INFINITY;
+        let j1_free =
+            st.orig_bounds[j1].0 == f64::NEG_INFINITY && st.orig_bounds[j1].1 == f64::INFINITY;
+        let j2_free =
+            st.orig_bounds[j2].0 == f64::NEG_INFINITY && st.orig_bounds[j2].1 == f64::INFINITY;
         let (pivot_col, pivot_a, other_col, other_a) = if j1_free && !j2_free {
             (j1, a1, j2, a2)
         } else if j2_free && !j1_free {
@@ -46,12 +46,28 @@ pub(super) fn step6_doubleton_equation(
         let ratio = pivot_a / other_a;
         let bo = st.b[i] / other_a;
         let (other_lb_impl, other_ub_impl) = if ratio > 0.0 {
-            let lo = if ub_p == f64::INFINITY { f64::NEG_INFINITY } else { bo - ratio * ub_p };
-            let hi = if lb_p == f64::NEG_INFINITY { f64::INFINITY } else { bo - ratio * lb_p };
+            let lo = if ub_p == f64::INFINITY {
+                f64::NEG_INFINITY
+            } else {
+                bo - ratio * ub_p
+            };
+            let hi = if lb_p == f64::NEG_INFINITY {
+                f64::INFINITY
+            } else {
+                bo - ratio * lb_p
+            };
             (lo, hi)
         } else if ratio < 0.0 {
-            let lo = if lb_p == f64::NEG_INFINITY { f64::NEG_INFINITY } else { bo - ratio * lb_p };
-            let hi = if ub_p == f64::INFINITY { f64::INFINITY } else { bo - ratio * ub_p };
+            let lo = if lb_p == f64::NEG_INFINITY {
+                f64::NEG_INFINITY
+            } else {
+                bo - ratio * lb_p
+            };
+            let hi = if ub_p == f64::INFINITY {
+                f64::INFINITY
+            } else {
+                bo - ratio * ub_p
+            };
             (lo, hi)
         } else {
             (f64::NEG_INFINITY, f64::INFINITY)

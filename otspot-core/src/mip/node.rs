@@ -26,7 +26,12 @@ pub(crate) struct MipNode {
 
 impl MipNode {
     pub fn root(var_bounds: VarBounds, lower_bound: f64) -> Self {
-        Self { var_bounds, lower_bound, depth: 0, warm_start: None }
+        Self {
+            var_bounds,
+            lower_bound,
+            depth: 0,
+            warm_start: None,
+        }
     }
 
     pub fn child(&self, new_bounds: VarBounds, lower_bound: f64) -> Self {
@@ -44,7 +49,12 @@ impl MipNode {
         lower_bound: f64,
         warm_start: Option<WarmStartBasis>,
     ) -> Self {
-        Self { var_bounds: new_bounds, lower_bound, depth: self.depth + 1, warm_start }
+        Self {
+            var_bounds: new_bounds,
+            lower_bound,
+            depth: self.depth + 1,
+            warm_start,
+        }
     }
 }
 

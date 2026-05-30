@@ -69,11 +69,13 @@ pub(super) fn step8_parallel_row(
                 }
 
                 let alpha = entries2[0].1 / entries1[0].1;
-                let is_parallel = entries1.iter().zip(entries2.iter()).all(
-                    |((c1, v1), (c2, v2))| {
-                        *c1 == *c2 && (v2 - alpha * v1).abs() < ZERO_TOL * (1.0 + v1.abs())
-                    },
-                );
+                let is_parallel =
+                    entries1
+                        .iter()
+                        .zip(entries2.iter())
+                        .all(|((c1, v1), (c2, v2))| {
+                            *c1 == *c2 && (v2 - alpha * v1).abs() < ZERO_TOL * (1.0 + v1.abs())
+                        });
 
                 if !is_parallel {
                     continue;

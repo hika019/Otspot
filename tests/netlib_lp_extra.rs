@@ -24,7 +24,11 @@ const MAX_NETLIB_EXTRA_ITER: usize = 500_000;
 fn solve_and_check(name: &str, expected_obj: f64, max_secs: u64) {
     let path_str = format!("data/lp_problems/{}.QPS", name);
     let path = Path::new(&path_str);
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path_str);
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path_str
+    );
     let problem = parse_qps(path).unwrap_or_else(|e| panic!("parse {} failed: {:?}", name, e));
     let mut opts = SolverOptions::default();
     // Use max_secs as the actual timeout: Timeout → Timeout status → fails Optimal assert.

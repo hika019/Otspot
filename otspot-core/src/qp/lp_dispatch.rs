@@ -12,11 +12,11 @@
 
 use std::time::Instant;
 
-use crate::options::SolverOptions;
-use crate::tolerances::any_nonfinite;
-use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use super::certificate::guard_lp_optimal;
+use crate::options::SolverOptions;
+use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
+use crate::tolerances::any_nonfinite;
 
 use super::{ipm_solver, QpProblem};
 
@@ -119,11 +119,15 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
                 // known_optimal_obj が設定されており obj が一致するなら simplex retry 不要。
                 if let Some(ref_obj) = options.known_optimal_obj {
                     if crate::tolerances::obj_within_tol(
-                        ipm_result.objective, ref_obj,
+                        ipm_result.objective,
+                        ref_obj,
                         crate::tolerances::OBJ_MATCH_REL_TOL,
                     ) && !ipm_result.solution.is_empty()
                     {
-                        let promoted = SolverResult { status: SolveStatus::Optimal, ..ipm_result };
+                        let promoted = SolverResult {
+                            status: SolveStatus::Optimal,
+                            ..ipm_result
+                        };
                         return guard_lp_optimal(promoted, &lp);
                     }
                 }
@@ -183,7 +187,10 @@ pub fn pick_best_ipm_or_simplex(
     );
     if let Some(ipm) = ipm_candidate {
         if simplex_failed
-            && matches!(ipm.status, SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal)
+            && matches!(
+                ipm.status,
+                SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
+            )
             && !ipm.solution.is_empty()
         {
             return ipm;
@@ -202,7 +209,11 @@ fn ipm_opts_for_lp(options: &SolverOptions) -> SolverOptions {
 /// Try a normalized Farkas certificate after simplex Phase I stalls.
 /// This stays on nonnegative variables so bounds need no certificate terms.
 fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions) -> bool {
-    if !problem.bounds.iter().all(|&(lb, ub)| lb == 0.0 && ub == f64::INFINITY) {
+    if !problem
+        .bounds
+        .iter()
+        .all(|&(lb, ub)| lb == 0.0 && ub == f64::INFINITY)
+    {
         return false;
     }
 
@@ -233,9 +244,9 @@ fn verified_farkas_timeout_fallback(problem: &QpProblem, options: &SolverOptions
         cols.push(cert_col);
         vals.push(rhs);
     }
-    let Ok(cert_a) = CscMatrix::from_triplets(
-        &rows, &cols, &vals, problem.num_vars + 1, cert_rhs.len(),
-    ) else {
+    let Ok(cert_a) =
+        CscMatrix::from_triplets(&rows, &cols, &vals, problem.num_vars + 1, cert_rhs.len())
+    else {
         return false;
     };
     let mut cert_b = vec![0.0; problem.num_vars];
@@ -382,8 +393,14 @@ mod tests {
             assert!(box_secs < total, "box must leave budget for simplex");
         }
         // No overall deadline → no box (IPM keeps its own deadline / unbounded).
-        let no_dl = SolverOptions { deadline: None, ..SolverOptions::default() };
-        assert!(ipm_box_deadline(&no_dl, now).is_none(), "no deadline → no box");
+        let no_dl = SolverOptions {
+            deadline: None,
+            ..SolverOptions::default()
+        };
+        assert!(
+            ipm_box_deadline(&no_dl, now).is_none(),
+            "no deadline → no box"
+        );
     }
 
     fn eq_lp_fixture(n: usize, m: usize) -> LpProblem {
@@ -391,8 +408,12 @@ mod tests {
         let mut cols = Vec::new();
         let mut vals = Vec::new();
         for i in 0..m {
-            rows.push(i); cols.push(i);     vals.push(1.0);
-            rows.push(i); cols.push(i + m); vals.push(1.0);
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
+            rows.push(i);
+            cols.push(i + m);
+            vals.push(1.0);
         }
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap();
         let b = vec![2.0_f64; m];
@@ -415,8 +436,16 @@ mod tests {
         let r1 = crate::lp::solve_lp_with(&lp, &opts);
         let r2 = crate::lp::solve_lp_with(&lp2, &opts);
 
-        assert_eq!(r1.stats.route, SolveRoute::LpDirect, "r1 route must be LpDirect");
-        assert_eq!(r2.stats.route, SolveRoute::LpDirect, "r2 route must be LpDirect");
+        assert_eq!(
+            r1.stats.route,
+            SolveRoute::LpDirect,
+            "r1 route must be LpDirect"
+        );
+        assert_eq!(
+            r2.stats.route,
+            SolveRoute::LpDirect,
+            "r2 route must be LpDirect"
+        );
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
@@ -474,7 +503,13 @@ mod tests {
             (2e-16, 1.0, 2, true, "near machine eps"),
             // n_terms スケール: 同 aty=1e-12 でも項数で floor が動く。
             (1e-12, 1.0, 2, false, "small n: above roundoff floor"),
-            (1e-12, 1.0, 10_000, true, "large n: within accumulated roundoff"),
+            (
+                1e-12,
+                1.0,
+                10_000,
+                true,
+                "large n: within accumulated roundoff",
+            ),
         ];
         for (aty, mag, n_terms, expect, label) in cases {
             assert_eq!(
@@ -509,10 +544,10 @@ mod tests {
         // するか。K=1e9 の残差 (~1.86e-9) は旧 floor でも既に reject されるため非 load-
         // bearing、K≳1e11 (~1.46e-11..1.14e-13) が新 floor 固有の reject。
         let patterns = [
-            (1e9, 2.0_f64.powi(-29), false),  // Cᵀy = g ≈ 1.863e-9
-            (1e11, 2.0_f64.powi(-36), true),  // Cᵀy = g ≈ 1.455e-11
-            (1e12, 2.0_f64.powi(-39), true),  // Cᵀy = g ≈ 1.819e-12
-            (1e13, 2.0_f64.powi(-43), true),  // Cᵀy = g ≈ 1.137e-13
+            (1e9, 2.0_f64.powi(-29), false), // Cᵀy = g ≈ 1.863e-9
+            (1e11, 2.0_f64.powi(-36), true), // Cᵀy = g ≈ 1.455e-11
+            (1e12, 2.0_f64.powi(-39), true), // Cᵀy = g ≈ 1.819e-12
+            (1e13, 2.0_f64.powi(-43), true), // Cᵀy = g ≈ 1.137e-13
         ];
         for (k, g, legacy_would_accept) in patterns {
             let problem = nonneg_qp(&[vec![1.0, 1.0]], &[k], &[ConstraintType::Eq]);
@@ -523,7 +558,10 @@ mod tests {
             let cty = g; // y0 - y1
             let dty = k * g;
             let term_mag = (1.0 + g) + 1.0; // |y0| + |y1|
-            assert!(dty >= 1.0 - FARKAS_NORM_TOL, "premise: dᵀy={dty} must clear norm");
+            assert!(
+                dty >= 1.0 - FARKAS_NORM_TOL,
+                "premise: dᵀy={dty} must clear norm"
+            );
             assert_eq!(
                 cty <= LEGACY_IPM_TOL_FLOOR * term_mag,
                 legacy_would_accept,
@@ -599,15 +637,21 @@ mod tests {
             vec![2.0, 1.0],
             vec![(0.0, f64::INFINITY)],
             vec![ConstraintType::Ge, ConstraintType::Le],
-        ).unwrap();
+        )
+        .unwrap();
         problem.obj_offset = 42.5;
         let result = solve_as_lp(&problem, &SolverOptions::default());
-        assert_eq!(result.status, SolveStatus::Infeasible,
-            "expected Infeasible, got {:?}", result.status);
+        assert_eq!(
+            result.status,
+            SolveStatus::Infeasible,
+            "expected Infeasible, got {:?}",
+            result.status
+        );
         assert!(
             result.objective.is_infinite() && result.objective.is_sign_positive(),
             "Infeasible objective must be +INFINITY (convention); got {} (obj_offset={})",
-            result.objective, problem.obj_offset,
+            result.objective,
+            problem.obj_offset,
         );
     }
 
@@ -628,7 +672,12 @@ mod tests {
     // ── F.1: pick_best_ipm_or_simplex 全分岐 table-driven ──────────────────
 
     fn make_result(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
-        SolverResult { status, solution, objective, ..SolverResult::default() }
+        SolverResult {
+            status,
+            solution,
+            objective,
+            ..SolverResult::default()
+        }
     }
 
     /// `pick_best_ipm_or_simplex` の 3 条件 (simplex_failed × ipm_status × solution) を
@@ -656,19 +705,31 @@ mod tests {
             },
             Case {
                 name: "SuboptimalSolution + Timeout + non-empty → ipm",
-                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                ipm: Some(make_result(
+                    SolveStatus::SuboptimalSolution,
+                    vec![1.0],
+                    IPM_OBJ,
+                )),
                 simplex: make_result(SolveStatus::Timeout, vec![], SIMP_OBJ),
                 expect_ipm: true,
             },
             Case {
                 name: "SuboptimalSolution + NumericalError + non-empty → ipm",
-                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                ipm: Some(make_result(
+                    SolveStatus::SuboptimalSolution,
+                    vec![1.0],
+                    IPM_OBJ,
+                )),
                 simplex: make_result(SolveStatus::NumericalError, vec![], SIMP_OBJ),
                 expect_ipm: true,
             },
             Case {
                 name: "SuboptimalSolution + MaxIterations + non-empty → ipm",
-                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![2.0, 3.0], IPM_OBJ)),
+                ipm: Some(make_result(
+                    SolveStatus::SuboptimalSolution,
+                    vec![2.0, 3.0],
+                    IPM_OBJ,
+                )),
                 simplex: make_result(SolveStatus::MaxIterations, vec![], SIMP_OBJ),
                 expect_ipm: true,
             },
@@ -682,13 +743,21 @@ mod tests {
             // (C) simplex_failed=false で条件破れ → simplex を返す
             Case {
                 name: "SuboptimalSolution + Optimal simplex → simplex",
-                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                ipm: Some(make_result(
+                    SolveStatus::SuboptimalSolution,
+                    vec![1.0],
+                    IPM_OBJ,
+                )),
                 simplex: make_result(SolveStatus::Optimal, vec![1.0], SIMP_OBJ),
                 expect_ipm: false,
             },
             Case {
                 name: "SuboptimalSolution + Infeasible simplex → simplex",
-                ipm: Some(make_result(SolveStatus::SuboptimalSolution, vec![1.0], IPM_OBJ)),
+                ipm: Some(make_result(
+                    SolveStatus::SuboptimalSolution,
+                    vec![1.0],
+                    IPM_OBJ,
+                )),
                 simplex: make_result(SolveStatus::Infeasible, vec![], SIMP_OBJ),
                 expect_ipm: false,
             },
@@ -787,7 +856,7 @@ mod tests {
     /// 初回イテレーション即キャンセル → Timeout with initial BFS objective = 0。
     #[test]
     fn test_qp_simplex_dispatch_timeout_includes_obj_offset() {
-        use std::sync::{Arc, atomic::AtomicBool};
+        use std::sync::{atomic::AtomicBool, Arc};
 
         const OBJ_OFFSET: f64 = 42.0;
 

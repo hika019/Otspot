@@ -66,7 +66,6 @@ impl SparseVec {
             buf[idx] = self.values[k];
         }
     }
-
 }
 
 #[cfg(test)]

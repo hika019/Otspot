@@ -9,17 +9,17 @@
 //! - DSE 重み更新 (3j): `leaving.needs_sigma()` が true のとき σ = B^{-1} ρ_p
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
-use crate::basis::{BasisManager, LuBasis};
-use crate::options::SolverOptions;
-use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::PIVOT_TOL;
-use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
-use super::super::SimplexOutcome;
 use super::super::dual_common::{
     basic_obj, compute_dual_vars, compute_reduced_costs, made_progress, recompute_gamma_truth,
     BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
+use super::super::SimplexOutcome;
+use super::ratio_test::{bland_ratio_test, HarrisRatioTest, RatioTestStrategy};
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::SolverOptions;
+use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
 // Bland's rule leaving と progress metric は `DualLeavingStrategy::bland_leaving`
@@ -154,7 +154,9 @@ pub(crate) fn dual_simplex_core_advanced(
     // Cost: O(m²). Acceptable: one-shot per warm-start solve.
     if needs_sigma {
         match recompute_gamma_truth(
-            &mut basis_mgr, m, options.deadline,
+            &mut basis_mgr,
+            m,
+            options.deadline,
             options.cancel_flag.as_deref(),
         ) {
             None => {
@@ -180,7 +182,9 @@ pub(crate) fn dual_simplex_core_advanced(
     loop {
         *iter_count_out = iter_count_out.saturating_add(1);
         // 3a: タイムアウト/キャンセルチェック
-        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        let timed_out = options
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d);
         let cancelled = options
             .cancel_flag
             .as_ref()
@@ -193,9 +197,7 @@ pub(crate) fn dual_simplex_core_advanced(
         // Bland mode hard cap: if we have iterated > BLAND_ITER_CAP_FACTOR * n_price
         // iterations in Bland mode, bail so the caller can run Farkas infeasibility
         // check (catches klein3-class cycling that produces corrupt basis state).
-        if bland_mode
-            && *iter_count_out - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_price
-        {
+        if bland_mode && *iter_count_out - bland_start_iter > BLAND_ITER_CAP_FACTOR * n_price {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
         }
@@ -375,7 +377,9 @@ pub(crate) fn dual_simplex_core_advanced(
             leaving.after_refactor(m);
             if needs_sigma {
                 match recompute_gamma_truth(
-                    &mut basis_mgr, m, options.deadline,
+                    &mut basis_mgr,
+                    m,
+                    options.deadline,
                     options.cancel_flag.as_deref(),
                 ) {
                     None => {
@@ -408,10 +412,10 @@ pub(crate) fn dual_simplex_core_advanced(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::sparse::CscMatrix;
-    use crate::options::SolverOptions;
     use super::super::super::pricing::MostInfeasibleLeaving;
+    use super::*;
+    use crate::options::SolverOptions;
+    use crate::sparse::CscMatrix;
 
     /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
     /// = dual-simplex infeasibility proof → must return `SimplexOutcome::Unbounded`.
@@ -430,14 +434,21 @@ mod tests {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let c = vec![0.0_f64, 0.0];
         let mut basis = vec![1usize]; // s in basis
-        let mut x_b = vec![-1.0_f64];  // lb-violation
+        let mut x_b = vec![-1.0_f64]; // lb-violation
         let opts = SolverOptions::default();
         let mut leaving = MostInfeasibleLeaving;
         let mut iters = 0usize;
 
         let outcome = dual_simplex_core_advanced(
-            &a, &mut x_b, &c, &mut basis,
-            1, 2, &opts, &mut leaving, &mut iters,
+            &a,
+            &mut x_b,
+            &c,
+            &mut basis,
+            1,
+            2,
+            &opts,
+            &mut leaving,
+            &mut iters,
         );
         assert!(
             matches!(outcome, SimplexOutcome::Unbounded),
@@ -472,19 +483,27 @@ mod tests {
             // 初回エントリ (perturb_x=true): x_b が変化する
             apply_lex_perturbation(&mut rc, &is_basic, &mut x_b, m, true);
             let x_b_after_entry = x_b.clone();
-            assert_ne!(x_b_after_entry, vec![0.5, 1.0, 0.3], "initial entry must perturb x_b");
+            assert_ne!(
+                x_b_after_entry,
+                vec![0.5, 1.0, 0.3],
+                "initial entry must perturb x_b"
+            );
 
             // refactor 後 (perturb_x=false): x_b は変化しない
             let mut rc2 = vec![1.0, 2.0, 3.0, 0.5];
             apply_lex_perturbation(&mut rc2, &is_basic, &mut x_b, m, false);
-            assert_eq!(x_b, x_b_after_entry,
-                "Pattern A: x_b must not change with perturb_x=false (B4 バグ復帰で FAIL)");
+            assert_eq!(
+                x_b, x_b_after_entry,
+                "Pattern A: x_b must not change with perturb_x=false (B4 バグ復帰で FAIL)"
+            );
 
             // 2 回目 refactor (perturb_x=false): 同じく変化なし
             let mut rc3 = vec![1.0, 2.0, 3.0, 0.5];
             apply_lex_perturbation(&mut rc3, &is_basic, &mut x_b, m, false);
-            assert_eq!(x_b, x_b_after_entry,
-                "Pattern A: x_b must remain stable across repeated perturb_x=false calls");
+            assert_eq!(
+                x_b, x_b_after_entry,
+                "Pattern A: x_b must remain stable across repeated perturb_x=false calls"
+            );
         }
 
         // Pattern B: x_b に大きな値
@@ -495,14 +514,21 @@ mod tests {
 
             apply_lex_perturbation(&mut rc, &is_basic, &mut x_b, m, true);
             let x_b_after_entry = x_b.clone();
-            assert_ne!(x_b_after_entry, vec![1000.0, 500.0, 750.0], "initial entry must perturb x_b");
+            assert_ne!(
+                x_b_after_entry,
+                vec![1000.0, 500.0, 750.0],
+                "initial entry must perturb x_b"
+            );
 
             // 3 回連続 refactor: x_b は不変
             for call_n in 0..3 {
                 let mut rc_n = vec![100.0, 200.0, 50.0, 1.0];
                 apply_lex_perturbation(&mut rc_n, &is_basic, &mut x_b, m, false);
-                assert_eq!(x_b, x_b_after_entry,
-                    "Pattern B: x_b must not grow after refactor call #{} (B4 バグ復帰で FAIL)", call_n);
+                assert_eq!(
+                    x_b, x_b_after_entry,
+                    "Pattern B: x_b must not grow after refactor call #{} (B4 バグ復帰で FAIL)",
+                    call_n
+                );
             }
         }
     }

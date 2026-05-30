@@ -4,8 +4,8 @@
 //! MPS/QPS.  The parser uses a streaming tokenizer so that 200 MB+ files
 //! are handled without OOM.
 
-mod token_stream;
 mod parser;
+mod token_stream;
 
 use std::io::BufRead;
 use std::path::Path;
@@ -127,7 +127,10 @@ minimize
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         assert_eq!(prob.num_constraints, 1);
-        assert_eq!(prob.constraint_types[0], otspot_core::problem::ConstraintType::Eq);
+        assert_eq!(
+            prob.constraint_types[0],
+            otspot_core::problem::ConstraintType::Eq
+        );
         assert_eq!(prob.q.nnz(), 2);
     }
 
@@ -209,7 +212,10 @@ minimize
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
         assert_eq!(prob.num_constraints, 1);
-        assert_eq!(prob.constraint_types[0], otspot_core::problem::ConstraintType::Eq);
+        assert_eq!(
+            prob.constraint_types[0],
+            otspot_core::problem::ConstraintType::Eq
+        );
         assert_eq!(prob.b[0], 5.0);
         assert_eq!(prob.quadratic_constraints.len(), 1);
         assert_eq!(prob.quadratic_constraints[0].nnz(), 2);
@@ -262,8 +268,14 @@ minimize
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 3);
         assert_eq!(prob.num_constraints, 2);
-        assert_eq!(prob.constraint_types[0], otspot_core::problem::ConstraintType::Le);
-        assert_eq!(prob.constraint_types[1], otspot_core::problem::ConstraintType::Eq);
+        assert_eq!(
+            prob.constraint_types[0],
+            otspot_core::problem::ConstraintType::Le
+        );
+        assert_eq!(
+            prob.constraint_types[1],
+            otspot_core::problem::ConstraintType::Eq
+        );
         assert_eq!(prob.b[0], 4.0);
         assert_eq!(prob.b[1], 3.0);
         assert_eq!(prob.quadratic_constraints.len(), 2);
@@ -577,7 +589,9 @@ minimize
     }
 
     fn data_path(rel: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(rel)
     }
 
     #[test]
@@ -590,9 +604,15 @@ minimize
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 9);
         for i in 0..8 {
-            assert_eq!(prob.constraint_types[i], otspot_core::problem::ConstraintType::Eq);
+            assert_eq!(
+                prob.constraint_types[i],
+                otspot_core::problem::ConstraintType::Eq
+            );
         }
-        assert_eq!(prob.constraint_types[8], otspot_core::problem::ConstraintType::Le);
+        assert_eq!(
+            prob.constraint_types[8],
+            otspot_core::problem::ConstraintType::Le
+        );
         let expected_b = [0.56_f64, -0.16, -0.4, -0.25, 0.45, 0.3, 0.99, 0.77, 16.22];
         for (i, &exp) in expected_b.iter().enumerate() {
             assert!((prob.b[i] - exp).abs() < 1e-10);
@@ -604,8 +624,12 @@ minimize
         let qk = &prob.quadratic_constraints[8];
         assert_eq!(qk.n, 40);
         assert_eq!(qk.nnz(), 1516);
-        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
-            .map(|&(_, _, v)| v).expect("Q_9 must have (0,0) entry");
+        let v00 = qk
+            .triplets
+            .iter()
+            .find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v)
+            .expect("Q_9 must have (0,0) entry");
         assert!((v00 - 0.38).abs() < 1e-10);
     }
 
@@ -619,9 +643,15 @@ minimize
         assert_eq!(prob.num_vars, 50);
         assert_eq!(prob.num_constraints, 6);
         for i in 0..5 {
-            assert_eq!(prob.constraint_types[i], otspot_core::problem::ConstraintType::Eq);
+            assert_eq!(
+                prob.constraint_types[i],
+                otspot_core::problem::ConstraintType::Eq
+            );
         }
-        assert_eq!(prob.constraint_types[5], otspot_core::problem::ConstraintType::Le);
+        assert_eq!(
+            prob.constraint_types[5],
+            otspot_core::problem::ConstraintType::Le
+        );
         let expected_b = [0.13_f64, -0.4, 0.1, -0.63, 0.57, 18.74];
         for (i, &exp) in expected_b.iter().enumerate() {
             assert!((prob.b[i] - exp).abs() < 1e-10);
@@ -633,8 +663,12 @@ minimize
         let qk = &prob.quadratic_constraints[5];
         assert_eq!(qk.n, 50);
         assert_eq!(qk.nnz(), 2372);
-        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
-            .map(|&(_, _, v)| v).expect("Q_6 must have (0,0) entry");
+        let v00 = qk
+            .triplets
+            .iter()
+            .find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v)
+            .expect("Q_6 must have (0,0) entry");
         assert!((v00 - 0.46).abs() < 1e-10);
     }
 
@@ -648,7 +682,10 @@ minimize
         assert_eq!(prob.num_vars, 40);
         assert_eq!(prob.num_constraints, 20);
         for i in 0..20 {
-            assert_eq!(prob.constraint_types[i], otspot_core::problem::ConstraintType::Le);
+            assert_eq!(
+                prob.constraint_types[i],
+                otspot_core::problem::ConstraintType::Le
+            );
         }
         assert!((prob.b[0] - 71.197).abs() < 1e-10);
         assert!((prob.b[19] - 30.278).abs() < 1e-10);
@@ -659,8 +696,12 @@ minimize
             assert_eq!(qk.nnz(), 1600);
         }
         let qk0 = &prob.quadratic_constraints[0];
-        let v00 = qk0.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
-            .map(|&(_, _, v)| v).expect("Q_1 must have (0,0) entry");
+        let v00 = qk0
+            .triplets
+            .iter()
+            .find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v)
+            .expect("Q_1 must have (0,0) entry");
         assert!((v00 - 0.839).abs() < 1e-10);
     }
 
@@ -676,29 +717,44 @@ minimize
         assert_eq!(prob.num_constraints, 5);
 
         for i in 0..4 {
-            assert_eq!(prob.constraint_types[i], otspot_core::problem::ConstraintType::Eq,
-                "constraint {i} must be Eq");
+            assert_eq!(
+                prob.constraint_types[i],
+                otspot_core::problem::ConstraintType::Eq,
+                "constraint {i} must be Eq"
+            );
         }
-        assert_eq!(prob.constraint_types[4], otspot_core::problem::ConstraintType::Le);
+        assert_eq!(
+            prob.constraint_types[4],
+            otspot_core::problem::ConstraintType::Le
+        );
 
         let expected_b = [-0.17_f64, 0.51, -0.41, -0.15, 67.98];
         for (i, &exp) in expected_b.iter().enumerate() {
-            assert!((prob.b[i] - exp).abs() < 1e-10,
-                "b[{i}]: expected {exp}, got {}", prob.b[i]);
+            assert!(
+                (prob.b[i] - exp).abs() < 1e-10,
+                "b[{i}]: expected {exp}, got {}",
+                prob.b[i]
+            );
         }
 
         assert_eq!(prob.quadratic_constraints.len(), 5);
         for i in 0..4 {
-            assert_eq!(prob.quadratic_constraints[i].nnz(), 0,
-                "Q_k[{i}] must be empty");
+            assert_eq!(
+                prob.quadratic_constraints[i].nnz(),
+                0,
+                "Q_k[{i}] must be empty"
+            );
         }
         let qk = &prob.quadratic_constraints[4];
         assert_eq!(qk.n, 40);
-        assert_eq!(qk.nnz(), 1547,
-            "Q_5 nnz: 37 diag + 755 off-diag*2 = 1547");
+        assert_eq!(qk.nnz(), 1547, "Q_5 nnz: 37 diag + 755 off-diag*2 = 1547");
         // Q_5[0,0] = 1.88 (file: 5 1 1 1.88)
-        let v00 = qk.triplets.iter().find(|&&(r, c, _)| r == 0 && c == 0)
-            .map(|&(_, _, v)| v).expect("Q_5 must have (0,0) entry");
+        let v00 = qk
+            .triplets
+            .iter()
+            .find(|&&(r, c, _)| r == 0 && c == 0)
+            .map(|&(_, _, v)| v)
+            .expect("Q_5 must have (0,0) entry");
         assert!((v00 - 1.88).abs() < 1e-10, "Q_5[0,0] must be 1.88");
     }
 
@@ -720,7 +776,10 @@ minimize
             });
             count += 1;
         }
-        assert!(count > 0, "no .qplib files found in data/qplib_unsupported/");
+        assert!(
+            count > 0,
+            "no .qplib files found in data/qplib_unsupported/"
+        );
     }
 
     /// Regression: every tracked file in data/qplib/ parses without error.
@@ -1047,7 +1106,10 @@ minimize
 4
 ";
         let result = parse_qplib_str(content);
-        assert!(result.is_err(), "expected ParseError for nqobj=4 > n*(n+1)/2=3");
+        assert!(
+            result.is_err(),
+            "expected ParseError for nqobj=4 > n*(n+1)/2=3"
+        );
         let err_str = format!("{:?}", result.unwrap_err());
         assert!(
             err_str.contains("nqobj") || err_str.contains("exceeds"),
@@ -1072,7 +1134,10 @@ minimize
 3
 ";
         let result = parse_qplib_str(content);
-        assert!(result.is_err(), "expected ParseError for n_con_lin_terms=3 > n*m=2");
+        assert!(
+            result.is_err(),
+            "expected ParseError for n_con_lin_terms=3 > n*m=2"
+        );
         let err_str = format!("{:?}", result.unwrap_err());
         assert!(
             err_str.contains("n_con_lin_terms") || err_str.contains("exceeds"),
@@ -1152,21 +1217,28 @@ NaN
         );
     }
 
-    /// Sentinel: `maximize` sense must negate q0 before storing as `obj_offset`.
+    /// Sentinel: `maximize` sense must negate q0, c, and Q before storing.
     ///
-    /// **No-op failure guarantee**: changing `let q0_offset = if maximize { -q0 } else { q0 }`
-    /// to `let q0_offset = q0` (removing the sign flip) leaves `obj_offset = +42.5`
-    /// instead of `-42.5` → assertion fires.
+    /// **No-op failure guarantees**:
+    /// - Removing `let q0_offset = if maximize { -q0 } else { q0 }` sign flip
+    ///   leaves `obj_offset = +42.5` → assertion fires.
+    /// - Removing `*v = -*v` in the `if maximize` block for `c` leaves
+    ///   `c[0] = +3.0` instead of `-3.0` → assertion fires.
+    /// - Changing `sign * v` to `v` in Q construction removes the sign flip
+    ///   → `q.values()[0] = +1.0` instead of `-1.0` → assertion fires.
     #[test]
     fn test_qplib_maximize_negates_obj_offset() {
+        // nqobj=1 (Q[1,1]=1.0), default linear c=3.0, q0=42.5.
+        // After maximize parsing: obj_offset=-42.5, c[0]=-3.0, Q[0,0]=-1.0.
         let qplib = "\
 Q0_MAX
 LCL
 maximize
 1
 1
-0
-0.0
+1
+1 1 1.0
+3.0
 0
 42.5
 1
@@ -1187,6 +1259,17 @@ maximize
             (prob.obj_offset - (-42.5)).abs() < 1e-12,
             "maximize with q0=42.5 must store obj_offset=-42.5; got {}",
             prob.obj_offset
+        );
+        assert!(
+            (prob.c[0] - (-3.0)).abs() < 1e-12,
+            "maximize must negate c: source c=3.0 → stored c[0]=-3.0; got {}",
+            prob.c[0]
+        );
+        assert_eq!(prob.q.nnz(), 1, "Q must have exactly 1 nonzero (diagonal)");
+        assert!(
+            (prob.q.values()[0] - (-1.0)).abs() < 1e-12,
+            "maximize must negate Q: source Q[0,0]=1.0 → stored -1.0; got {}",
+            prob.q.values()[0]
         );
     }
 
@@ -1222,7 +1305,11 @@ minimize
 ";
         let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
         assert_eq!(prob.num_vars, 2);
-        assert_eq!(prob.a.nnz(), 1, "duplicate entries must be merged to one NZ");
+        assert_eq!(
+            prob.a.nnz(),
+            1,
+            "duplicate entries must be merged to one NZ"
+        );
         let col0 = prob.a.col_ptr()[0];
         assert!(
             (prob.a.values()[col0] - 4.0).abs() < 1e-12,

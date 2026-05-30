@@ -22,7 +22,9 @@ fn build_medium_convex_qp(n: usize, m: usize, density: f64) -> QpProblem {
         ((*s >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
     };
 
-    let q_diag: Vec<f64> = (0..n).map(|_| 0.5 + 0.5 * (next(&mut seed) + 1.0)).collect();
+    let q_diag: Vec<f64> = (0..n)
+        .map(|_| 0.5 + 0.5 * (next(&mut seed) + 1.0))
+        .collect();
     let q_rows: Vec<usize> = (0..n).collect();
     let q_cols: Vec<usize> = (0..n).collect();
     let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_diag, n, n).unwrap();
@@ -43,7 +45,9 @@ fn build_medium_convex_qp(n: usize, m: usize, density: f64) -> QpProblem {
     }
     let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
 
-    let b_rhs: Vec<f64> = (0..m).map(|_| 0.5 + (next(&mut seed) + 1.0) * 0.5).collect();
+    let b_rhs: Vec<f64> = (0..m)
+        .map(|_| 0.5 + (next(&mut seed) + 1.0) * 0.5)
+        .collect();
     let bounds = vec![(-2.0_f64, 2.0_f64); n];
     QpProblem::new_all_le(q, c, a, b_rhs, bounds).unwrap()
 }
@@ -55,36 +59,52 @@ fn warm_start_30pct_speedup_smoke() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(60.0);
     let cold_result = solve_qp_with(&problem, &opts);
-    assert_eq!(cold_result.status, SolveStatus::Optimal, "cold must be Optimal");
+    assert_eq!(
+        cold_result.status,
+        SolveStatus::Optimal,
+        "cold must be Optimal"
+    );
     let cold_iters = cold_result.iterations;
 
     let ws = QpWarmStart {
         x: cold_result.solution.clone(),
         y: cold_result.dual_solution.clone(),
-        mu: cold_result.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6).max(1e-10),
+        mu: cold_result
+            .final_residuals
+            .map(|(_, _, g)| g)
+            .unwrap_or(1e-6)
+            .max(1e-10),
     };
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(60.0);
     warm_opts.warm_start_qp = Some(ws.clone());
     let warm_result = solve_qp_with(&problem, &warm_opts);
-    assert_eq!(warm_result.status, SolveStatus::Optimal, "warm must be Optimal");
+    assert_eq!(
+        warm_result.status,
+        SolveStatus::Optimal,
+        "warm must be Optimal"
+    );
     let warm_iters = warm_result.iterations;
 
-    let obj_diff = (warm_result.objective - cold_result.objective).abs()
-        / (1.0 + cold_result.objective.abs());
+    let obj_diff =
+        (warm_result.objective - cold_result.objective).abs() / (1.0 + cold_result.objective.abs());
     assert!(obj_diff < 1e-4, "warm obj drift: {:.3e}", obj_diff);
 
     const N: usize = 5;
     let measure = |with_ws: bool| -> f64 {
-        let walls: Vec<f64> = (0..N).map(|_| {
-            let mut o = SolverOptions::default();
-            o.timeout_secs = Some(60.0);
-            if with_ws { o.warm_start_qp = Some(ws.clone()); }
-            let t = std::time::Instant::now();
-            let r = solve_qp_with(&problem, &o);
-            assert_eq!(r.status, SolveStatus::Optimal);
-            t.elapsed().as_secs_f64()
-        }).collect();
+        let walls: Vec<f64> = (0..N)
+            .map(|_| {
+                let mut o = SolverOptions::default();
+                o.timeout_secs = Some(60.0);
+                if with_ws {
+                    o.warm_start_qp = Some(ws.clone());
+                }
+                let t = std::time::Instant::now();
+                let r = solve_qp_with(&problem, &o);
+                assert_eq!(r.status, SolveStatus::Optimal);
+                t.elapsed().as_secs_f64()
+            })
+            .collect();
         walls.iter().cloned().fold(f64::INFINITY, f64::min)
     };
     let cold_wall = measure(false);
@@ -99,12 +119,16 @@ fn warm_start_30pct_speedup_smoke() {
     assert!(
         iter_ratio < 0.7,
         "warm/cold iter ratio expected < 0.7, got {:.3} (cold={} warm={})",
-        iter_ratio, cold_iters, warm_iters
+        iter_ratio,
+        cold_iters,
+        warm_iters
     );
     assert!(
         wall_ratio < 0.75,
         "warm/cold wall ratio expected < 0.75, got {:.3} (cold={:.3}ms warm={:.3}ms)",
-        wall_ratio, cold_wall * 1000.0, warm_wall * 1000.0
+        wall_ratio,
+        cold_wall * 1000.0,
+        warm_wall * 1000.0
     );
 }
 
@@ -128,8 +152,12 @@ fn warm_start_degenerate_inputs_handled() {
     opts.timeout_secs = Some(30.0);
     opts.warm_start_qp = Some(ws);
     let r = solve_qp_with(&problem, &opts);
-    assert_eq!(r.status, SolveStatus::Optimal,
-        "degenerate warm must still converge; got {:?}", r.status);
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "degenerate warm must still converge; got {:?}",
+        r.status
+    );
 
     // 退化 warm の iter は cold より大きくなりやすいが、その差が観測できることが
     // 「warm が adapter を通過した」証拠。iter_ratio == 1.0 なら apply_qp_warm_start
@@ -137,7 +165,8 @@ fn warm_start_degenerate_inputs_handled() {
     assert!(
         r.iterations != cold.iterations,
         "degenerate warm appears silently dropped (iter ratio = 1.0): warm={} cold={}",
-        r.iterations, cold.iterations
+        r.iterations,
+        cold.iterations
     );
 
     // IPM 暴発の上限 (cold の 4 倍以内)。退化点から interior 復帰 + 収束のオーバーヘッド
@@ -146,7 +175,9 @@ fn warm_start_degenerate_inputs_handled() {
     assert!(
         iter_ratio < 4.0,
         "degenerate warm iter blowup: warm={} cold={} ratio={:.2}",
-        r.iterations, cold.iterations, iter_ratio
+        r.iterations,
+        cold.iterations,
+        iter_ratio
     );
 }
 
@@ -166,27 +197,34 @@ fn warm_start_degenerate_inputs_handled() {
 /// 倍以下に収まることを assert する。
 #[test]
 fn warm_start_propagates_through_q_diag_scaling() {
-    use otspot::sparse::CscMatrix;
     use otspot::problem::ConstraintType;
+    use otspot::sparse::CscMatrix;
 
     let n = 120_usize;
     let m = 40_usize;
     let mut seed: u64 = 0x_A5A5_1234_BEEF_0001;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 16) as f64 / (u64::MAX >> 16) as f64) * 2.0 - 1.0
     };
 
     // diag Q with 8-decade dynamic range → q_pos_max/q_pos_min ≥ 1e6 trigger Q-diag scaling.
-    let q_diag: Vec<f64> = (0..n).map(|j| {
-        let exp = -4.0 + 8.0 * (j as f64 / (n - 1) as f64);
-        10.0_f64.powf(exp)
-    }).collect();
+    let q_diag: Vec<f64> = (0..n)
+        .map(|j| {
+            let exp = -4.0 + 8.0 * (j as f64 / (n - 1) as f64);
+            10.0_f64.powf(exp)
+        })
+        .collect();
     let q = CscMatrix::from_triplets(
         &(0..n).collect::<Vec<_>>(),
         &(0..n).collect::<Vec<_>>(),
-        &q_diag, n, n,
-    ).unwrap();
+        &q_diag,
+        n,
+        n,
+    )
+    .unwrap();
 
     let c: Vec<f64> = (0..n).map(|_| next(&mut seed)).collect();
 
@@ -203,15 +241,19 @@ fn warm_start_propagates_through_q_diag_scaling() {
         }
     }
     let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap();
-    let b: Vec<f64> = (0..m).map(|_| 0.5 + (next(&mut seed) + 1.0) * 0.5).collect();
+    let b: Vec<f64> = (0..m)
+        .map(|_| 0.5 + (next(&mut seed) + 1.0) * 0.5)
+        .collect();
     let bounds = vec![(-2.0_f64, 2.0_f64); n];
-    let problem = QpProblem::new(
-        q, c, a, b, bounds, vec![ConstraintType::Le; m],
-    ).unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Le; m]).unwrap();
 
     let q_range = q_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
         / q_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-    assert!(q_range >= 1e6, "Q-diag scaling trigger requires range≥1e6, got {:.2e}", q_range);
+    assert!(
+        q_range >= 1e6,
+        "Q-diag scaling trigger requires range≥1e6, got {:.2e}",
+        q_range
+    );
 
     let mut cold_opts = SolverOptions::default();
     cold_opts.timeout_secs = Some(60.0);
@@ -221,7 +263,11 @@ fn warm_start_propagates_through_q_diag_scaling() {
     let ws = QpWarmStart {
         x: cold.solution.clone(),
         y: cold.dual_solution.clone(),
-        mu: cold.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6).max(1e-10),
+        mu: cold
+            .final_residuals
+            .map(|(_, _, g)| g)
+            .unwrap_or(1e-6)
+            .max(1e-10),
     };
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(60.0);
@@ -244,7 +290,8 @@ fn warm_start_propagates_through_q_diag_scaling() {
     assert!(
         warm.iterations != cold.iterations,
         "Q-diag warm appears silently dropped: warm={} cold={}",
-        warm.iterations, cold.iterations
+        warm.iterations,
+        cold.iterations
     );
 
     // warm が機能していれば cold の (1 - WARM_ITER_REDUCTION_MARGIN) 倍以下に収まる。
@@ -257,7 +304,10 @@ fn warm_start_propagates_through_q_diag_scaling() {
     assert!(
         iter_ratio < WARM_ITER_RATIO_UPPER,
         "Q-diag warm not reducing iter as expected: ratio={:.3} ≥ {:.3} (warm={} cold={})",
-        iter_ratio, WARM_ITER_RATIO_UPPER, warm.iterations, cold.iterations
+        iter_ratio,
+        WARM_ITER_RATIO_UPPER,
+        warm.iterations,
+        cold.iterations
     );
 }
 
@@ -269,17 +319,15 @@ fn warm_start_propagates_through_q_diag_scaling() {
 /// 主検証は obj 整合性 + iter ≠ cold (silent drop 検出) + Optimal status。
 #[test]
 fn warm_start_propagates_through_presolve_reduction() {
-    use otspot::sparse::CscMatrix;
     use otspot::problem::ConstraintType;
+    use otspot::sparse::CscMatrix;
 
     // 小問題で FixedVar 確実 + 数値安定: n=4, 1 FixedVar → reduced n=3。
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 2, 3], &[0, 1, 2, 3], &[2.0, 2.0, 2.0, 2.0], 4, 4,
-    ).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2, 3], &[0, 1, 2, 3], &[2.0, 2.0, 2.0, 2.0], 4, 4)
+        .unwrap();
     let c = vec![-1.0, -2.0, -3.0, 1.0];
-    let a = CscMatrix::from_triplets(
-        &[0, 0, 0, 0], &[0, 1, 2, 3], &[1.0, 1.0, 1.0, 1.0], 1, 4,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 0, 0], &[0, 1, 2, 3], &[1.0, 1.0, 1.0, 1.0], 1, 4)
+        .unwrap();
     let b = vec![3.0];
     // 末尾 var を lb=ub=0.5 で固定 → presolve FixedVar reduction。
     let bounds = vec![
@@ -288,20 +336,30 @@ fn warm_start_propagates_through_presolve_reduction() {
         (0.0_f64, 5.0_f64),
         (0.5_f64, 0.5_f64),
     ];
-    let problem = QpProblem::new(
-        q, c, a, b, bounds, vec![ConstraintType::Le],
-    ).unwrap();
+    let problem = QpProblem::new(q, c, a, b, bounds, vec![ConstraintType::Le]).unwrap();
 
     let mut cold_opts = SolverOptions::default();
     cold_opts.timeout_secs = Some(10.0);
     let cold = solve_qp_with(&problem, &cold_opts);
-    assert_eq!(cold.status, SolveStatus::Optimal, "cold must Optimal; got {:?}", cold.status);
-    assert!((cold.solution[3] - 0.5).abs() < 1e-6, "fixed var must be 0.5");
+    assert_eq!(
+        cold.status,
+        SolveStatus::Optimal,
+        "cold must Optimal; got {:?}",
+        cold.status
+    );
+    assert!(
+        (cold.solution[3] - 0.5).abs() < 1e-6,
+        "fixed var must be 0.5"
+    );
 
     let ws = QpWarmStart {
         x: cold.solution.clone(),
         y: cold.dual_solution.clone(),
-        mu: cold.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6).max(1e-10),
+        mu: cold
+            .final_residuals
+            .map(|(_, _, g)| g)
+            .unwrap_or(1e-6)
+            .max(1e-10),
     };
     let mut warm_opts = SolverOptions::default();
     warm_opts.timeout_secs = Some(10.0);
@@ -325,7 +383,8 @@ fn warm_start_propagates_through_presolve_reduction() {
     assert!(
         warm.iterations != cold.iterations,
         "presolve warm appears silently dropped: warm={} cold={}",
-        warm.iterations, cold.iterations
+        warm.iterations,
+        cold.iterations
     );
 
     // Ruiz scaler 適用 (B-2 fix) が機能していれば warm path は cold より大幅短縮。
@@ -335,6 +394,9 @@ fn warm_start_propagates_through_presolve_reduction() {
     assert!(
         iter_ratio < WARM_ITER_RATIO_UPPER,
         "presolve warm not reducing iter as expected: ratio={:.3} ≥ {:.3} (warm={} cold={})",
-        iter_ratio, WARM_ITER_RATIO_UPPER, warm.iterations, cold.iterations
+        iter_ratio,
+        WARM_ITER_RATIO_UPPER,
+        warm.iterations,
+        cold.iterations
     );
 }

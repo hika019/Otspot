@@ -250,18 +250,12 @@ mod tests {
     /// 単純対角ケース: artif 行が n 個、対角構造列で全行被覆できる。
     #[test]
     fn diagonal_crash_eliminates_all_artificials() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[1.0, 1.0, 1.0],
-            3, 3,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0], 3, 3).unwrap();
         let b = vec![1.0, 2.0, 3.0];
         let initial_basis = vec![0usize, 0, 0];
         let needs_artif = vec![true, true, true];
-        let (basis, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 3, 3, &initial_basis, &needs_artif,
-        );
+        let (basis, needs_out, num_art) =
+            compute_crash_basis(&a, &b, 3, 3, &initial_basis, &needs_artif);
         assert_eq!(num_art, 0, "全行被覆可能");
         assert_eq!(basis, vec![0, 1, 2]);
         assert_eq!(needs_out, vec![false; 3]);
@@ -270,15 +264,12 @@ mod tests {
     /// pivot 不安定列は使わない: 列内の最大が tiny、relative pivot 失格。
     #[test]
     fn small_pivot_column_rejected() {
-        let a = CscMatrix::from_triplets(
-            &[0], &[0], &[1e-12], 1, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1e-12], 1, 1).unwrap();
         let b = vec![1.0];
         let initial_basis = vec![0usize];
         let needs_artif = vec![true];
-        let (_, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 1, 1, &initial_basis, &needs_artif,
-        );
+        let (_, needs_out, num_art) =
+            compute_crash_basis(&a, &b, 1, 1, &initial_basis, &needs_artif);
         assert_eq!(num_art, 1, "tiny pivot は被覆しない");
         assert_eq!(needs_out, vec![true]);
     }
@@ -286,16 +277,13 @@ mod tests {
     /// 既に slack で被覆済の行はそのまま、artificial 行のみ crash 対象。
     #[test]
     fn covered_rows_kept_as_is() {
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 1, 0], &[0, 0, 1, 2], &[1.0, 2.0, 0.5, 1.0],
-            2, 3,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 1, 0], &[0, 0, 1, 2], &[1.0, 2.0, 0.5, 1.0], 2, 3)
+            .unwrap();
         let b = vec![1.0, 1.0];
         let initial_basis = vec![2usize, 0];
         let needs_artif = vec![false, true];
-        let (basis, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 2, 2, &initial_basis, &needs_artif,
-        );
+        let (basis, needs_out, num_art) =
+            compute_crash_basis(&a, &b, 2, 2, &initial_basis, &needs_artif);
         assert_eq!(num_art, 0);
         assert_eq!(basis[0], 2, "行 0 の slack basis 維持");
         assert!(basis[1] == 0 || basis[1] == 1, "行 1 は構造列で被覆");
@@ -305,15 +293,12 @@ mod tests {
     /// 部分被覆: artif 行が 2 つ、構造列が 1 つしか被覆できないケース。
     #[test]
     fn partial_coverage() {
-        let a = CscMatrix::from_triplets(
-            &[0], &[0], &[1.0], 2, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 2, 1).unwrap();
         let b = vec![1.0, 1.0];
         let initial_basis = vec![0usize, 0];
         let needs_artif = vec![true, true];
-        let (basis, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 2, 1, &initial_basis, &needs_artif,
-        );
+        let (basis, needs_out, num_art) =
+            compute_crash_basis(&a, &b, 2, 1, &initial_basis, &needs_artif);
         assert_eq!(num_art, 1);
         assert_eq!(basis[0], 0);
         assert!(needs_out[1], "行 1 は artificial 必要");
@@ -322,30 +307,22 @@ mod tests {
     /// 符号不一致は被覆を見送る: x_B < 0 を避けるための feasibility-aware 選択。
     #[test]
     fn sign_mismatch_rejected() {
-        let a = CscMatrix::from_triplets(
-            &[0], &[0], &[1.0], 1, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let b = vec![-1.0];
         let initial_basis = vec![0usize];
         let needs_artif = vec![true];
-        let (_, _, num_art) = compute_crash_basis(
-            &a, &b, 1, 1, &initial_basis, &needs_artif,
-        );
+        let (_, _, num_art) = compute_crash_basis(&a, &b, 1, 1, &initial_basis, &needs_artif);
         assert_eq!(num_art, 1, "符号不一致行は被覆しない");
     }
 
     /// 符号一致なら被覆する。
     #[test]
     fn sign_match_accepted() {
-        let a = CscMatrix::from_triplets(
-            &[0], &[0], &[-1.0], 1, 1,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0], &[0], &[-1.0], 1, 1).unwrap();
         let b = vec![-1.0];
         let initial_basis = vec![0usize];
         let needs_artif = vec![true];
-        let (basis, _, num_art) = compute_crash_basis(
-            &a, &b, 1, 1, &initial_basis, &needs_artif,
-        );
+        let (basis, _, num_art) = compute_crash_basis(&a, &b, 1, 1, &initial_basis, &needs_artif);
         assert_eq!(num_art, 0);
         assert_eq!(basis[0], 0);
     }
@@ -377,14 +354,17 @@ mod tests {
         let b = vec![1.0, 1.0, 1.0];
         let initial = vec![0, 0, 0];
         let needs = vec![true, true, true];
-        let (basis, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 3, 3, &initial, &needs,
+        let (basis, needs_out, num_art) = compute_crash_basis(&a, &b, 3, 3, &initial, &needs);
+        assert_eq!(
+            num_art, 0,
+            "LTSF should chase singletons and cover all rows"
         );
-        assert_eq!(num_art, 0, "LTSF should chase singletons and cover all rows");
         assert_eq!(needs_out, vec![false; 3]);
         // 全列が distinct
         let mut seen = std::collections::HashSet::new();
-        for &c in &basis { assert!(seen.insert(c), "duplicate column in basis: {:?}", basis); }
+        for &c in &basis {
+            assert!(seen.insert(c), "duplicate column in basis: {:?}", basis);
+        }
     }
 
     /// 動的 re-priority sentinel:
@@ -398,36 +378,28 @@ mod tests {
     #[test]
     fn ltsf_dynamic_repriority_full_cover() {
         let rows = vec![
-            0, 1, 2, 3,   // col0
-            0, 1, 2,      // col1
-            1, 2, 3,      // col2
-            0,            // col3
-            3,            // col4
+            0, 1, 2, 3, // col0
+            0, 1, 2, // col1
+            1, 2, 3, // col2
+            0, // col3
+            3, // col4
         ];
-        let cols = vec![
-            0, 0, 0, 0,
-            1, 1, 1,
-            2, 2, 2,
-            3,
-            4,
-        ];
-        let vals = vec![
-            5.0, 5.0, 5.0, 5.0,
-            3.0, 3.0, 3.0,
-            3.0, 3.0, 3.0,
-            7.0,
-            7.0,
-        ];
+        let cols = vec![0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 4];
+        let vals = vec![5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 7.0, 7.0];
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, 4, 5).unwrap();
         let b = vec![1.0, 1.0, 1.0, 1.0];
         let initial = vec![0, 0, 0, 0];
         let needs = vec![true, true, true, true];
-        let (basis, _, num_art) = compute_crash_basis(
-            &a, &b, 4, 5, &initial, &needs,
+        let (basis, _, num_art) = compute_crash_basis(&a, &b, 4, 5, &initial, &needs);
+        assert_eq!(
+            num_art, 0,
+            "dynamic re-priority should cover all 4 rows; basis={:?}",
+            basis
         );
-        assert_eq!(num_art, 0, "dynamic re-priority should cover all 4 rows; basis={:?}", basis);
         let mut seen = std::collections::HashSet::new();
-        for &c in &basis { assert!(seen.insert(c), "duplicate column in basis: {:?}", basis); }
+        for &c in &basis {
+            assert!(seen.insert(c), "duplicate column in basis: {:?}", basis);
+        }
     }
 
     /// LTSF basis 不変式: 列は一意かつ range 内、5×6 疎構造で ≥ 4 行被覆。
@@ -437,16 +409,14 @@ mod tests {
     #[test]
     fn ltsf_basis_columns_unique_and_in_range() {
         // 雑多な疎構造で basis 一意性と範囲を検証
-        let rows = vec![0,1,2,3,4, 0,1, 1,2, 2,3, 3,4, 4,0];
-        let cols = vec![0,0,0,0,0, 1,1, 2,2, 3,3, 4,4, 5,5];
-        let vals = vec![1.0;15];
+        let rows = vec![0, 1, 2, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4, 4, 0];
+        let cols = vec![0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5];
+        let vals = vec![1.0; 15];
         let a = CscMatrix::from_triplets(&rows, &cols, &vals, 5, 6).unwrap();
-        let b = vec![1.0;5];
-        let initial = vec![0;5];
-        let needs = vec![true;5];
-        let (basis, needs_out, num_art) = compute_crash_basis(
-            &a, &b, 5, 6, &initial, &needs,
-        );
+        let b = vec![1.0; 5];
+        let initial = vec![0; 5];
+        let needs = vec![true; 5];
+        let (basis, needs_out, num_art) = compute_crash_basis(&a, &b, 5, 6, &initial, &needs);
         let mut seen = std::collections::HashSet::new();
         for (i, &c) in basis.iter().enumerate() {
             if !needs_out[i] {
@@ -456,6 +426,10 @@ mod tests {
         }
         // 5 行のうち少なくとも 4 行は被覆できる (LTSF singleton chase で 5 行全部
         // 可能だが、sign 制約等で 1 行残る可能性を許容)
-        assert!(num_art <= 1, "LTSF should cover ≥ 4 rows out of 5; got num_art={}", num_art);
+        assert!(
+            num_art <= 1,
+            "LTSF should cover ≥ 4 rows out of 5; got num_art={}",
+            num_art
+        );
     }
 }

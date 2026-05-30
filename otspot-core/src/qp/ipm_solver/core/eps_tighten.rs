@@ -66,8 +66,8 @@ pub(super) fn tighten_ipm_eps_for_presolve_scale(
 #[allow(clippy::field_reassign_with_default)]
 mod eps_tighten_tests {
     use super::*;
-    use crate::options::{IpmOptions, SolverOptions, Tolerance};
     use crate::linalg::ruiz::RuizScaler;
+    use crate::options::{IpmOptions, SolverOptions, Tolerance};
     use crate::presolve::QpPresolveResult;
     use crate::problem::ConstraintType;
     use crate::qp::problem::QpProblem;
@@ -77,14 +77,22 @@ mod eps_tighten_tests {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let prob = QpProblem::new(
-            q, vec![0.0], a, vec![1.0],
+            q,
+            vec![0.0],
+            a,
+            vec![1.0],
             vec![(0.0_f64, f64::INFINITY)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         let mut pre = QpPresolveResult::no_reduction(&prob);
         // e=[e_min] → primal_row_scale_min=e_min; d=[1], c=1 → dual_col_scale_min=1
         // sigma_total = min(e_min, 1) = e_min  (when e_min < 1)
-        pre.ruiz_scaler = Some(RuizScaler { e: vec![e_min], d: vec![1.0], c: 1.0 });
+        pre.ruiz_scaler = Some(RuizScaler {
+            e: vec![e_min],
+            d: vec![1.0],
+            c: 1.0,
+        });
         pre
     }
 
@@ -100,7 +108,10 @@ mod eps_tighten_tests {
         let pre = presolve_with_ruiz_e(sigma);
         let opts = SolverOptions {
             tolerance: Some(Tolerance::Custom(user_eps)),
-            ipm: IpmOptions { eps: user_eps / tighten, ..IpmOptions::default() },
+            ipm: IpmOptions {
+                eps: user_eps / tighten,
+                ..IpmOptions::default()
+            },
             ..Default::default()
         };
 
@@ -108,8 +119,7 @@ mod eps_tighten_tests {
 
         // Correct: eps_scaled = (user_eps/tighten) * sigma = 1e-7 * 1e-3 = 1e-10
         let attempt_eps = user_eps / tighten;
-        let expected = (attempt_eps * sigma)
-            .max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
+        let expected = (attempt_eps * sigma).max(crate::qp::ipm_core::IPM_EPS_NOISE_FLOOR);
         // Pre-fix wrong value: (user_eps) * sigma = 1e-4 * 1e-3 = 1e-7 (1000x looser)
         let pre_fix_wrong = user_eps * sigma;
 
@@ -117,14 +127,21 @@ mod eps_tighten_tests {
             (result.ipm.eps - expected).abs() < 1e-30,
             "must use ipm.eps={:.3e} (attempt-tightened), not ipm_eps()={:.3e} (Custom bypass). \
              expected={:.3e}, got={:.3e}",
-            attempt_eps, user_eps, expected, result.ipm.eps
+            attempt_eps,
+            user_eps,
+            expected,
+            result.ipm.eps
         );
         assert!(
             result.ipm.eps < pre_fix_wrong * 0.01,
             "pre-fix would give {:.3e} (1000x looser); got {:.3e}",
-            pre_fix_wrong, result.ipm.eps
+            pre_fix_wrong,
+            result.ipm.eps
         );
-        assert!(result.tolerance.is_none(), "Custom tolerance must be cleared");
+        assert!(
+            result.tolerance.is_none(),
+            "Custom tolerance must be cleared"
+        );
     }
 
     /// Without Custom tolerance, ipm_eps() == ipm.eps; fix must not change this path.
@@ -136,7 +153,10 @@ mod eps_tighten_tests {
         let pre = presolve_with_ruiz_e(sigma);
         let opts = SolverOptions {
             tolerance: None,
-            ipm: IpmOptions { eps: ipm_eps, ..IpmOptions::default() },
+            ipm: IpmOptions {
+                eps: ipm_eps,
+                ..IpmOptions::default()
+            },
             ..Default::default()
         };
 
@@ -146,7 +166,8 @@ mod eps_tighten_tests {
         assert!(
             (result.ipm.eps - expected).abs() < 1e-30,
             "without Custom tolerance, output must be ipm.eps*sigma={:.3e}; got {:.3e}",
-            expected, result.ipm.eps
+            expected,
+            result.ipm.eps
         );
     }
 }

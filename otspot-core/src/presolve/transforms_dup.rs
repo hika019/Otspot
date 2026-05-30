@@ -113,36 +113,31 @@ pub(super) fn step9_parallel_row(st: &mut PresolveState) -> Result<(), PresolveS
                             return Err(PresolveStatus::Infeasible);
                         }
                         st.removed_rows[k] = true;
-                        st.postsolve_stack.push(PostsolveStep::RedundantConstraint {
-                            orig_row: k,
-                        });
+                        st.postsolve_stack
+                            .push(PostsolveStep::RedundantConstraint { orig_row: k });
                     }
                     ConstraintType::Le => {
                         // a_k^T x ≤ min(b_i/α, b_k); in i's frame: drop the larger b.
                         if bi <= bk_scaled {
                             st.removed_rows[k] = true;
-                            st.postsolve_stack.push(PostsolveStep::RedundantConstraint {
-                                orig_row: k,
-                            });
+                            st.postsolve_stack
+                                .push(PostsolveStep::RedundantConstraint { orig_row: k });
                         } else {
                             st.removed_rows[i] = true;
-                            st.postsolve_stack.push(PostsolveStep::RedundantConstraint {
-                                orig_row: i,
-                            });
+                            st.postsolve_stack
+                                .push(PostsolveStep::RedundantConstraint { orig_row: i });
                             break; // i removed, advance outer loop
                         }
                     }
                     ConstraintType::Ge => {
                         if bi >= bk_scaled {
                             st.removed_rows[k] = true;
-                            st.postsolve_stack.push(PostsolveStep::RedundantConstraint {
-                                orig_row: k,
-                            });
+                            st.postsolve_stack
+                                .push(PostsolveStep::RedundantConstraint { orig_row: k });
                         } else {
                             st.removed_rows[i] = true;
-                            st.postsolve_stack.push(PostsolveStep::RedundantConstraint {
-                                orig_row: i,
-                            });
+                            st.postsolve_stack
+                                .push(PostsolveStep::RedundantConstraint { orig_row: i });
                             break;
                         }
                     }
@@ -372,9 +367,7 @@ fn fix_to_ub(st: &mut PresolveState, j: usize) -> Result<bool, PresolveStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presolve::transforms::{
-        run_presolve_with_flags, PresolveFlags,
-    };
+    use crate::presolve::transforms::{run_presolve_with_flags, PresolveFlags};
     use crate::problem::{ConstraintType, LpProblem};
     use crate::sparse::CscMatrix;
 
@@ -407,8 +400,7 @@ mod tests {
             vec![ConstraintType::Eq, ConstraintType::Eq],
             vec![(0.0, 5.0), (0.0, 5.0)],
         );
-        let with_flags =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let with_flags = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         let without = run_presolve_with_flags(
             &lp,
             None,
@@ -421,8 +413,7 @@ mod tests {
         .unwrap();
         // With Step 9 we must shave a row beyond what the baseline manages.
         assert!(
-            with_flags.reduced_problem.num_constraints
-                < without.reduced_problem.num_constraints
+            with_flags.reduced_problem.num_constraints < without.reduced_problem.num_constraints
                 || with_flags.reduced_problem.num_constraints == 0,
             "parallel_row should drop at least one row (with={}, without={})",
             with_flags.reduced_problem.num_constraints,
@@ -464,8 +455,7 @@ mod tests {
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, 10.0), (0.0, 10.0)],
         );
-        let result =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         // The looser of the two Le rows must be removed by Step 9.
         // (Step 4 with finite bounds may further compress, but at least one row goes.)
         assert!(
@@ -490,8 +480,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, 5.0), (0.0, 5.0)],
         );
-        let result =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         assert_eq!(result.reduced_problem.num_vars, 0);
         assert!((result.obj_offset).abs() < 1e-10);
     }
@@ -511,8 +500,7 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0, 4.0)],
         );
-        let result =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         assert_eq!(result.reduced_problem.num_vars, 0);
         assert!(
             (result.obj_offset + 4.0).abs() < 1e-10,
@@ -570,8 +558,7 @@ mod tests {
             vec![ConstraintType::Eq],
             vec![(0.0, 5.0); 3],
         );
-        let result =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let result = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         // All three vars must survive — Step 11 must not collapse them.
         assert_eq!(
             result.reduced_problem.num_vars, 3,
@@ -600,8 +587,7 @@ mod tests {
             vec![ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, 5.0)],
         );
-        let with_flags =
-            run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
+        let with_flags = run_presolve_with_flags(&lp, None, PresolveFlags::default()).unwrap();
         // x_1 (col 1) must be eliminated by dominated-col + Step 1 fix.
         assert!(
             with_flags.col_map[1].is_none(),

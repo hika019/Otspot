@@ -35,10 +35,7 @@ pub(super) fn kkt_already_passes(
     ipm_status_optimal: bool,
     user_eps: f64,
 ) -> bool {
-    if final_sol.solution.is_empty()
-        || orig_problem.num_constraints == 0
-        || !ipm_status_optimal
-    {
+    if final_sol.solution.is_empty() || orig_problem.num_constraints == 0 || !ipm_status_optimal {
         return false;
     }
     let view = build_view(orig_problem, eliminated_cols);
@@ -105,7 +102,10 @@ pub(super) fn refine_post_processing(
         &final_sol.bound_duals,
     );
     loop {
-        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if opts
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             break;
         }
         let prev_kkt = current_kkt;
@@ -114,8 +114,18 @@ pub(super) fn refine_post_processing(
         crate::qp::refine_dual_lsq(orig_problem, final_sol, eliminated_cols, opts.deadline);
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
+        crate::qp::refine_dual_worst_active_block(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
         let post_kkt = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -153,7 +163,10 @@ pub(super) fn refine_post_processing(
         if current_kkt <= user_eps {
             break;
         }
-        if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if opts
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             break;
         }
         let prev_kkt = current_kkt;
@@ -169,8 +182,18 @@ pub(super) fn refine_post_processing(
         );
         crate::qp::zero_inactive_inequality_duals(orig_problem, final_sol);
         crate::qp::project_duals_from_singleton_columns(orig_problem, final_sol);
-        crate::qp::refine_dual_projected_gradient(orig_problem, final_sol, eliminated_cols, opts.deadline);
-        crate::qp::refine_dual_worst_active_block(orig_problem, final_sol, eliminated_cols, opts.deadline);
+        crate::qp::refine_dual_projected_gradient(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
+        crate::qp::refine_dual_worst_active_block(
+            orig_problem,
+            final_sol,
+            eliminated_cols,
+            opts.deadline,
+        );
         let post_kkt_irls = kkt_residual_rel(
             &view,
             &final_sol.solution,
@@ -234,7 +257,10 @@ pub(super) fn refine_krylov_and_projection(
     if !allow_primal {
         return;
     }
-    if opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+    if opts
+        .deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+    {
         return;
     }
     let pres_post_ir = primal_residual_rel(&view, &final_sol.solution);
@@ -283,8 +309,8 @@ mod gate_predicate_tests {
     use super::{build_view, kkt_already_passes, kkt_residual_rel, primal_residual_rel};
     use crate::options::SolverOptions;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
     use crate::qp::problem::QpProblem;
+    use crate::sparse::CscMatrix;
 
     /// min 0.5·diag·Σx² s.t. Σx = rhs, x free. Solved deterministically.
     fn solved(n: usize, diag: f64, rhs: f64) -> (QpProblem, crate::problem::SolverResult) {
@@ -292,10 +318,14 @@ mod gate_predicate_tests {
         let q = CscMatrix::from_triplets(&idx, &idx, &vec![diag; n], n, n).unwrap();
         let a = CscMatrix::from_triplets(&vec![0usize; n], &idx, &vec![1.0; n], 1, n).unwrap();
         let prob = QpProblem::new(
-            q, vec![0.0; n], a, vec![rhs],
+            q,
+            vec![0.0; n],
+            a,
+            vec![rhs],
             vec![(f64::NEG_INFINITY, f64::INFINITY); n],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         let mut opts = SolverOptions::default();
         opts.ipm.eps = 1e-6;
         let res = crate::qp::solve_qp_with(&prob, &opts);
@@ -354,10 +384,14 @@ mod gate_predicate_tests {
             let q = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; n], n, n).unwrap();
             let a = CscMatrix::from_triplets(&vec![0usize; n], &idx, &vec![1.0; n], 1, n).unwrap();
             let prob = QpProblem::new(
-                q, vec![0.0; n], a, vec![rhs],
+                q,
+                vec![0.0; n],
+                a,
+                vec![rhs],
                 vec![(f64::NEG_INFINITY, f64::INFINITY); n],
                 vec![ConstraintType::Eq],
-            ).unwrap();
+            )
+            .unwrap();
             let res = crate::problem::SolverResult {
                 solution: vec![0.0; n],
                 dual_solution: vec![0.0; 1],
@@ -366,7 +400,9 @@ mod gate_predicate_tests {
             };
             // sanity: stationarity residual is ~0 but primal residual is large.
             let view = build_view(&prob, &[]);
-            assert!(kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals) < 1e-6);
+            assert!(
+                kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals) < 1e-6
+            );
             assert!(primal_residual_rel(&view, &res.solution) > 1e-6);
             assert!(
                 !kkt_already_passes(&prob, &res, &[], true, 1e-6),
@@ -395,10 +431,14 @@ mod gate_predicate_tests {
         let q = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
         let prob = QpProblem::new(
-            q, vec![0.0], a, vec![1.0],
+            q,
+            vec![0.0],
+            a,
+            vec![1.0],
             vec![(0.0_f64, f64::INFINITY)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Baseline: optimal solution (z_lb=0, comp=0) must pass the gate.
         let mut res = crate::problem::SolverResult {
@@ -442,10 +482,14 @@ mod gate_predicate_tests {
         let q = CscMatrix::from_triplets(&idx, &idx, &vec![1.0; n], n, n).unwrap();
         let a = CscMatrix::new(0, n);
         let prob0 = QpProblem::new(
-            q, vec![0.0; n], a, vec![],
+            q,
+            vec![0.0; n],
+            a,
+            vec![],
             vec![(f64::NEG_INFINITY, f64::INFINITY); n],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
         let res0 = crate::problem::SolverResult {
             solution: vec![0.0; n],
             ..Default::default()

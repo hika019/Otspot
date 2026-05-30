@@ -89,7 +89,10 @@ fn test_hs268_dual_residual_diagnose() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(5.0);
     let result = solve_qp_with(&prob, &opts);
-    eprintln!("HS268 status={:?} obj={:.6e}", result.status, result.objective);
+    eprintln!(
+        "HS268 status={:?} obj={:.6e}",
+        result.status, result.objective
+    );
     let x = &result.solution;
     let y = &result.dual_solution;
     let bd = &result.bound_duals;
@@ -180,9 +183,15 @@ fn test_ipm_hs21_cmp_full_solver() {
     let v1 = solve_qp_with(&prob, &opts);
     let v2 = solve_ipm(&prob, &opts);
     eprintln!("=== v1 ===");
-    eprintln!("  status={:?} obj={} iters={}", v1.status, v1.objective, v1.iterations);
+    eprintln!(
+        "  status={:?} obj={} iters={}",
+        v1.status, v1.objective, v1.iterations
+    );
     eprintln!("=== v2 ===");
-    eprintln!("  status={:?} obj={} iters={}", v2.status, v2.objective, v2.iterations);
+    eprintln!(
+        "  status={:?} obj={} iters={}",
+        v2.status, v2.objective, v2.iterations
+    );
     let view = ProblemView {
         q: &prob.q,
         a: &prob.a,
@@ -214,14 +223,20 @@ fn test_scsd6_equality_constraints() {
         ("Primal", SimplexMethod::Primal),
         ("Dual", SimplexMethod::Dual),
     ];
-    let results: Vec<_> = methods.iter().map(|(name, method)| {
-        let mut opts = SolverOptions::default();
-        opts.simplex_method = *method;
-        opts.presolve = false;
-        let result = otspot_core::lp::solve_lp_with(&lp, &opts);
-        eprintln!("scsd6 {} -> {:?} obj={:.3e}", name, result.status, result.objective);
-        (*name, result.status)
-    }).collect();
+    let results: Vec<_> = methods
+        .iter()
+        .map(|(name, method)| {
+            let mut opts = SolverOptions::default();
+            opts.simplex_method = *method;
+            opts.presolve = false;
+            let result = otspot_core::lp::solve_lp_with(&lp, &opts);
+            eprintln!(
+                "scsd6 {} -> {:?} obj={:.3e}",
+                name, result.status, result.objective
+            );
+            (*name, result.status)
+        })
+        .collect();
 
     for (name, status) in &results {
         assert_ne!(

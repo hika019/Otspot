@@ -9,10 +9,7 @@
 //! [`SolverOptions::ipm`].
 
 use crate::tolerances::*;
-use std::sync::{
-    atomic::AtomicBool,
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use std::time::Instant;
 
@@ -390,23 +387,41 @@ impl IpmOptions {
     /// Invalid: non-finite or non-positive `eps` / `delta_*`, or `max_correctors == 0`.
     pub fn validate(&self) -> Result<(), OptionsError> {
         if !self.eps.is_finite() || self.eps <= 0.0 {
-            return Err(OptionsError { field: "ipm.eps", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "ipm.eps",
+                reason: "must be finite and > 0",
+            });
         }
         if !self.delta_min.is_finite() || self.delta_min <= 0.0 {
-            return Err(OptionsError { field: "ipm.delta_min", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "ipm.delta_min",
+                reason: "must be finite and > 0",
+            });
         }
         if !self.delta_p_init.is_finite() || self.delta_p_init <= 0.0 {
-            return Err(OptionsError { field: "ipm.delta_p_init", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "ipm.delta_p_init",
+                reason: "must be finite and > 0",
+            });
         }
         if !self.delta_d_init.is_finite() || self.delta_d_init <= 0.0 {
-            return Err(OptionsError { field: "ipm.delta_d_init", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "ipm.delta_d_init",
+                reason: "must be finite and > 0",
+            });
         }
         if self.max_correctors == 0 {
-            return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
+            return Err(OptionsError {
+                field: "ipm.max_correctors",
+                reason: "must be >= 1",
+            });
         }
         if let Some(ir) = self.minres_ir {
             if ir > 10 {
-                return Err(OptionsError { field: "ipm.minres_ir", reason: "must be <= 10" });
+                return Err(OptionsError {
+                    field: "ipm.minres_ir",
+                    reason: "must be <= 10",
+                });
             }
         }
         Ok(())
@@ -415,7 +430,10 @@ impl IpmOptions {
     /// Builder: set `eps`, validated immediately.
     pub fn with_eps(mut self, eps: f64) -> Result<Self, OptionsError> {
         if !eps.is_finite() || eps <= 0.0 {
-            return Err(OptionsError { field: "ipm.eps", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "ipm.eps",
+                reason: "must be finite and > 0",
+            });
         }
         self.eps = eps;
         Ok(self)
@@ -424,7 +442,10 @@ impl IpmOptions {
     /// Builder: set `max_correctors`, validated immediately.
     pub fn with_max_correctors(mut self, n: usize) -> Result<Self, OptionsError> {
         if n == 0 {
-            return Err(OptionsError { field: "ipm.max_correctors", reason: "must be >= 1" });
+            return Err(OptionsError {
+                field: "ipm.max_correctors",
+                reason: "must be >= 1",
+            });
         }
         self.max_correctors = n;
         Ok(self)
@@ -438,7 +459,8 @@ impl IpmOptions {
     /// Effective KKT memory budget in bytes: resolves `None` to the built-in default (4 GiB).
     pub(crate) fn effective_kkt_memory_budget_bytes(&self) -> usize {
         use crate::linalg::kkt_solver::DEFAULT_MEMORY_BUDGET_BYTES;
-        self.kkt_memory_budget_bytes.unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+        self.kkt_memory_budget_bytes
+            .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
     }
 
     /// Max L-factor entries from memory budget (budget / bytes-per-entry).
@@ -549,7 +571,6 @@ pub struct SolverOptions {
     /// `|obj − ref_obj| / (1 + |ref_obj|) < OBJ_MATCH_REL_TOL`.
     /// Used by bench harnesses.  `None` = no early-exit.
     pub known_optimal_obj: Option<f64>,
-
 }
 
 /// Divisor for the `max_etas` heuristic: floor(m / MAX_ETAS_DIVISOR).
@@ -606,9 +627,9 @@ impl SolverOptions {
     /// Effective IPM eps: derived from `tolerance` if set, otherwise `ipm.eps`.
     pub fn ipm_eps(&self) -> f64 {
         match self.tolerance {
-            Some(Tolerance::High)      => TOLERANCE_HIGH_EPS,
-            Some(Tolerance::Medium)    => TOLERANCE_MEDIUM_EPS,
-            Some(Tolerance::Fast)      => TOLERANCE_FAST_EPS,
+            Some(Tolerance::High) => TOLERANCE_HIGH_EPS,
+            Some(Tolerance::Medium) => TOLERANCE_MEDIUM_EPS,
+            Some(Tolerance::Fast) => TOLERANCE_FAST_EPS,
             Some(Tolerance::Custom(v)) => v,
             None => self.ipm.eps,
         }
@@ -632,20 +653,35 @@ impl SolverOptions {
     /// - Any field in [`IpmOptions`]
     pub fn validate(&self) -> Result<(), OptionsError> {
         if !self.primal_tol.is_finite() || self.primal_tol <= 0.0 {
-            return Err(OptionsError { field: "primal_tol", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "primal_tol",
+                reason: "must be finite and > 0",
+            });
         }
         if !self.dual_tol.is_finite() || self.dual_tol <= 0.0 {
-            return Err(OptionsError { field: "dual_tol", reason: "must be finite and > 0" });
+            return Err(OptionsError {
+                field: "dual_tol",
+                reason: "must be finite and > 0",
+            });
         }
         if !self.clamp_tol.is_finite() || self.clamp_tol < 0.0 {
-            return Err(OptionsError { field: "clamp_tol", reason: "must be finite and >= 0" });
+            return Err(OptionsError {
+                field: "clamp_tol",
+                reason: "must be finite and >= 0",
+            });
         }
         if self.threads == 0 {
-            return Err(OptionsError { field: "threads", reason: "must be >= 1" });
+            return Err(OptionsError {
+                field: "threads",
+                reason: "must be >= 1",
+            });
         }
         if let Some(t) = self.timeout_secs {
             if !t.is_finite() || t < 0.0 {
-                return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
+                return Err(OptionsError {
+                    field: "timeout_secs",
+                    reason: "must be finite and >= 0",
+                });
             }
         }
         if let Some(Tolerance::Custom(v)) = self.tolerance {
@@ -663,7 +699,10 @@ impl SolverOptions {
     /// Builder: set `timeout_secs`, validated immediately.
     pub fn with_timeout(mut self, secs: f64) -> Result<Self, OptionsError> {
         if !secs.is_finite() || secs < 0.0 {
-            return Err(OptionsError { field: "timeout_secs", reason: "must be finite and >= 0" });
+            return Err(OptionsError {
+                field: "timeout_secs",
+                reason: "must be finite and >= 0",
+            });
         }
         self.timeout_secs = Some(secs);
         Ok(self)
@@ -672,7 +711,10 @@ impl SolverOptions {
     /// Builder: set `threads`, validated immediately.
     pub fn with_threads(mut self, n: usize) -> Result<Self, OptionsError> {
         if n == 0 {
-            return Err(OptionsError { field: "threads", reason: "must be >= 1" });
+            return Err(OptionsError {
+                field: "threads",
+                reason: "must be >= 1",
+            });
         }
         self.threads = n;
         Ok(self)
@@ -706,14 +748,17 @@ mod tests {
     fn test_tolerance_translation() {
         // Table-driven: (tolerance setting, expected ipm_eps)
         let cases: &[(Option<Tolerance>, f64)] = &[
-            (Some(Tolerance::High),         TOLERANCE_HIGH_EPS),
-            (Some(Tolerance::Medium),       TOLERANCE_MEDIUM_EPS),
-            (Some(Tolerance::Fast),         TOLERANCE_FAST_EPS),
+            (Some(Tolerance::High), TOLERANCE_HIGH_EPS),
+            (Some(Tolerance::Medium), TOLERANCE_MEDIUM_EPS),
+            (Some(Tolerance::Fast), TOLERANCE_FAST_EPS),
             (Some(Tolerance::Custom(1e-5)), 1e-5),
-            (None,                          DEFAULT_IPM_EPS), // uses ipm.eps default
+            (None, DEFAULT_IPM_EPS), // uses ipm.eps default
         ];
         for (tol, expected) in cases {
-            let opts = SolverOptions { tolerance: *tol, ..Default::default() };
+            let opts = SolverOptions {
+                tolerance: *tol,
+                ..Default::default()
+            };
             assert_eq!(opts.ipm_eps(), *expected, "tolerance = {:?}", tol);
         }
     }
@@ -736,18 +781,27 @@ mod tests {
     #[test]
     fn test_ipm_validate_eps() {
         for bad in [0.0_f64, -1e-6, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let o = IpmOptions { eps: bad, ..Default::default() };
+            let o = IpmOptions {
+                eps: bad,
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "eps={bad} should be invalid");
         }
         // boundary: smallest positive finite value is valid
-        let o = IpmOptions { eps: f64::MIN_POSITIVE, ..Default::default() };
+        let o = IpmOptions {
+            eps: f64::MIN_POSITIVE,
+            ..Default::default()
+        };
         assert!(o.validate().is_ok());
     }
 
     #[test]
     fn test_ipm_validate_delta_min() {
         for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions { delta_min: bad, ..Default::default() };
+            let o = IpmOptions {
+                delta_min: bad,
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "delta_min={bad} should be invalid");
         }
     }
@@ -755,24 +809,42 @@ mod tests {
     #[test]
     fn test_ipm_validate_delta_p_init() {
         for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions { delta_p_init: bad, ..Default::default() };
-            assert!(o.validate().is_err(), "delta_p_init={bad} should be invalid");
+            let o = IpmOptions {
+                delta_p_init: bad,
+                ..Default::default()
+            };
+            assert!(
+                o.validate().is_err(),
+                "delta_p_init={bad} should be invalid"
+            );
         }
     }
 
     #[test]
     fn test_ipm_validate_delta_d_init() {
         for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            let o = IpmOptions { delta_d_init: bad, ..Default::default() };
-            assert!(o.validate().is_err(), "delta_d_init={bad} should be invalid");
+            let o = IpmOptions {
+                delta_d_init: bad,
+                ..Default::default()
+            };
+            assert!(
+                o.validate().is_err(),
+                "delta_d_init={bad} should be invalid"
+            );
         }
     }
 
     #[test]
     fn test_ipm_validate_max_correctors() {
-        let o = IpmOptions { max_correctors: 0, ..Default::default() };
+        let o = IpmOptions {
+            max_correctors: 0,
+            ..Default::default()
+        };
         assert!(o.validate().is_err(), "max_correctors=0 should be invalid");
-        let o = IpmOptions { max_correctors: 1, ..Default::default() };
+        let o = IpmOptions {
+            max_correctors: 1,
+            ..Default::default()
+        };
         assert!(o.validate().is_ok());
     }
 
@@ -783,7 +855,10 @@ mod tests {
         assert!(IpmOptions::default().with_eps(1e-4).is_ok());
         assert!(IpmOptions::default().with_eps(f64::MIN_POSITIVE).is_ok());
         for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(IpmOptions::default().with_eps(bad).is_err(), "with_eps({bad}) should err");
+            assert!(
+                IpmOptions::default().with_eps(bad).is_err(),
+                "with_eps({bad}) should err"
+            );
         }
     }
 
@@ -804,17 +879,26 @@ mod tests {
     #[test]
     fn test_solver_validate_primal_tol() {
         for bad in [0.0_f64, -1e-8, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let o = SolverOptions { primal_tol: bad, ..Default::default() };
+            let o = SolverOptions {
+                primal_tol: bad,
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "primal_tol={bad}");
         }
-        let o = SolverOptions { primal_tol: f64::MIN_POSITIVE, ..Default::default() };
+        let o = SolverOptions {
+            primal_tol: f64::MIN_POSITIVE,
+            ..Default::default()
+        };
         assert!(o.validate().is_ok());
     }
 
     #[test]
     fn test_solver_validate_dual_tol() {
         for bad in [0.0_f64, -1e-8, f64::NAN, f64::INFINITY] {
-            let o = SolverOptions { dual_tol: bad, ..Default::default() };
+            let o = SolverOptions {
+                dual_tol: bad,
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "dual_tol={bad}");
         }
     }
@@ -822,20 +906,32 @@ mod tests {
     #[test]
     fn test_solver_validate_clamp_tol() {
         // 0.0 is valid (no clamping)
-        let o = SolverOptions { clamp_tol: 0.0, ..Default::default() };
+        let o = SolverOptions {
+            clamp_tol: 0.0,
+            ..Default::default()
+        };
         assert!(o.validate().is_ok(), "clamp_tol=0 should be ok");
         for bad in [-1.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let o = SolverOptions { clamp_tol: bad, ..Default::default() };
+            let o = SolverOptions {
+                clamp_tol: bad,
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "clamp_tol={bad}");
         }
     }
 
     #[test]
     fn test_solver_validate_threads() {
-        let o = SolverOptions { threads: 0, ..Default::default() };
+        let o = SolverOptions {
+            threads: 0,
+            ..Default::default()
+        };
         assert!(o.validate().is_err(), "threads=0");
         for ok in [1_usize, 2, 8, usize::MAX] {
-            let o = SolverOptions { threads: ok, ..Default::default() };
+            let o = SolverOptions {
+                threads: ok,
+                ..Default::default()
+            };
             assert!(o.validate().is_ok(), "threads={ok}");
         }
     }
@@ -843,15 +939,29 @@ mod tests {
     #[test]
     fn test_solver_validate_timeout_secs() {
         // None is always valid
-        assert!(SolverOptions { timeout_secs: None, ..Default::default() }.validate().is_ok());
+        assert!(SolverOptions {
+            timeout_secs: None,
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
         // non-negative finite: valid (0.0 = immediately-expired deadline)
         for ok in [0.0_f64, 0.001, 1.0, 1000.0] {
-            let o = SolverOptions { timeout_secs: Some(ok), ..Default::default() };
-            assert!(o.validate().is_ok(), "timeout_secs=Some({ok}) must be valid");
+            let o = SolverOptions {
+                timeout_secs: Some(ok),
+                ..Default::default()
+            };
+            assert!(
+                o.validate().is_ok(),
+                "timeout_secs=Some({ok}) must be valid"
+            );
         }
         // invalid: negative, NaN, or infinite
         for bad in [-1.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let o = SolverOptions { timeout_secs: Some(bad), ..Default::default() };
+            let o = SolverOptions {
+                timeout_secs: Some(bad),
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "timeout_secs=Some({bad})");
         }
     }
@@ -860,15 +970,24 @@ mod tests {
     fn test_solver_validate_tolerance_custom() {
         // Non-Custom variants are always valid
         for tol in [Tolerance::High, Tolerance::Medium, Tolerance::Fast] {
-            let o = SolverOptions { tolerance: Some(tol), ..Default::default() };
+            let o = SolverOptions {
+                tolerance: Some(tol),
+                ..Default::default()
+            };
             assert!(o.validate().is_ok(), "tolerance={tol:?}");
         }
         // Custom: valid
-        let o = SolverOptions { tolerance: Some(Tolerance::Custom(1e-5)), ..Default::default() };
+        let o = SolverOptions {
+            tolerance: Some(Tolerance::Custom(1e-5)),
+            ..Default::default()
+        };
         assert!(o.validate().is_ok());
         // Custom: invalid
         for bad in [0.0_f64, -1e-4, f64::NAN, f64::INFINITY] {
-            let o = SolverOptions { tolerance: Some(Tolerance::Custom(bad)), ..Default::default() };
+            let o = SolverOptions {
+                tolerance: Some(Tolerance::Custom(bad)),
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "Tolerance::Custom({bad})");
         }
     }
@@ -877,13 +996,19 @@ mod tests {
     fn test_solver_validate_propagates_ipm() {
         // SolverOptions::validate must propagate IpmOptions::validate errors.
         let o = SolverOptions {
-            ipm: IpmOptions { eps: 0.0, ..Default::default() },
+            ipm: IpmOptions {
+                eps: 0.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(o.validate().is_err(), "ipm.eps=0 must propagate");
 
         let o = SolverOptions {
-            ipm: IpmOptions { max_correctors: 0, ..Default::default() },
+            ipm: IpmOptions {
+                max_correctors: 0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(o.validate().is_err(), "ipm.max_correctors=0 must propagate");
@@ -895,9 +1020,15 @@ mod tests {
     fn test_solver_builder_with_timeout() {
         assert!(SolverOptions::default().with_timeout(10.0).is_ok());
         assert!(SolverOptions::default().with_timeout(0.001).is_ok());
-        assert!(SolverOptions::default().with_timeout(0.0).is_ok(), "0.0 = immediately-expired deadline");
+        assert!(
+            SolverOptions::default().with_timeout(0.0).is_ok(),
+            "0.0 = immediately-expired deadline"
+        );
         for bad in [-1.0_f64, f64::NAN, f64::INFINITY] {
-            assert!(SolverOptions::default().with_timeout(bad).is_err(), "with_timeout({bad})");
+            assert!(
+                SolverOptions::default().with_timeout(bad).is_err(),
+                "with_timeout({bad})"
+            );
         }
         // Result carries the set value
         let o = SolverOptions::default().with_timeout(5.0).unwrap();
@@ -915,17 +1046,29 @@ mod tests {
 
     #[test]
     fn test_solver_builder_with_tolerance() {
-        assert!(SolverOptions::default().with_tolerance(Tolerance::High).is_ok());
-        assert!(SolverOptions::default().with_tolerance(Tolerance::Medium).is_ok());
-        assert!(SolverOptions::default().with_tolerance(Tolerance::Fast).is_ok());
-        assert!(SolverOptions::default().with_tolerance(Tolerance::Custom(1e-5)).is_ok());
+        assert!(SolverOptions::default()
+            .with_tolerance(Tolerance::High)
+            .is_ok());
+        assert!(SolverOptions::default()
+            .with_tolerance(Tolerance::Medium)
+            .is_ok());
+        assert!(SolverOptions::default()
+            .with_tolerance(Tolerance::Fast)
+            .is_ok());
+        assert!(SolverOptions::default()
+            .with_tolerance(Tolerance::Custom(1e-5))
+            .is_ok());
         for bad in [0.0_f64, -1e-4, f64::NAN, f64::INFINITY] {
             assert!(
-                SolverOptions::default().with_tolerance(Tolerance::Custom(bad)).is_err(),
+                SolverOptions::default()
+                    .with_tolerance(Tolerance::Custom(bad))
+                    .is_err(),
                 "with_tolerance(Custom({bad}))"
             );
         }
-        let o = SolverOptions::default().with_tolerance(Tolerance::Fast).unwrap();
+        let o = SolverOptions::default()
+            .with_tolerance(Tolerance::Fast)
+            .unwrap();
         assert_eq!(o.tolerance, Some(Tolerance::Fast));
     }
 
@@ -933,7 +1076,10 @@ mod tests {
 
     #[test]
     fn test_options_error_display() {
-        let e = OptionsError { field: "ipm.eps", reason: "must be finite and > 0" };
+        let e = OptionsError {
+            field: "ipm.eps",
+            reason: "must be finite and > 0",
+        };
         let s = e.to_string();
         assert!(s.contains("ipm.eps"), "display: {s}");
         assert!(s.contains("finite"), "display: {s}");
@@ -946,14 +1092,20 @@ mod tests {
         let o = IpmOptions::default();
         assert!(!o.dd_ldl, "dd_ldl default false");
         assert!(o.minres_ir.is_none(), "minres_ir default None");
-        assert!(o.kkt_memory_budget_bytes.is_none(), "kkt_memory_budget_bytes default None");
+        assert!(
+            o.kkt_memory_budget_bytes.is_none(),
+            "kkt_memory_budget_bytes default None"
+        );
     }
 
     #[test]
     fn test_ipm_effective_minres_ir_default_and_override() {
         let o = IpmOptions::default();
         assert_eq!(o.effective_minres_ir(), 0, "default IR = 0");
-        let o2 = IpmOptions { minres_ir: Some(3), ..Default::default() };
+        let o2 = IpmOptions {
+            minres_ir: Some(3),
+            ..Default::default()
+        };
         assert_eq!(o2.effective_minres_ir(), 3);
     }
 
@@ -964,12 +1116,18 @@ mod tests {
         // Default (None) and valid values
         assert!(IpmOptions::default().validate().is_ok());
         for ok in [0_usize, 1, 5, 10] {
-            let o = IpmOptions { minres_ir: Some(ok), ..Default::default() };
+            let o = IpmOptions {
+                minres_ir: Some(ok),
+                ..Default::default()
+            };
             assert!(o.validate().is_ok(), "minres_ir={ok} should be valid");
         }
         // Out of range: > 10
         for bad in [11_usize, 100, usize::MAX] {
-            let o = IpmOptions { minres_ir: Some(bad), ..Default::default() };
+            let o = IpmOptions {
+                minres_ir: Some(bad),
+                ..Default::default()
+            };
             assert!(o.validate().is_err(), "minres_ir={bad} should be invalid");
         }
         // Default const falls within valid range (validated at compile time by the type constraint)
@@ -980,9 +1138,18 @@ mod tests {
     fn test_ipm_effective_max_l_nnz_default_and_override() {
         use crate::linalg::kkt_solver::{BYTES_PER_L_ENTRY, DEFAULT_MEMORY_BUDGET_BYTES};
         let o = IpmOptions::default();
-        assert_eq!(o.effective_kkt_memory_budget_bytes(), DEFAULT_MEMORY_BUDGET_BYTES);
-        assert_eq!(o.effective_max_l_nnz(), DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY);
-        let o2 = IpmOptions { kkt_memory_budget_bytes: Some(1600), ..Default::default() };
+        assert_eq!(
+            o.effective_kkt_memory_budget_bytes(),
+            DEFAULT_MEMORY_BUDGET_BYTES
+        );
+        assert_eq!(
+            o.effective_max_l_nnz(),
+            DEFAULT_MEMORY_BUDGET_BYTES / BYTES_PER_L_ENTRY
+        );
+        let o2 = IpmOptions {
+            kkt_memory_budget_bytes: Some(1600),
+            ..Default::default()
+        };
         assert_eq!(o2.effective_max_l_nnz(), 1600 / BYTES_PER_L_ENTRY);
     }
 
@@ -991,7 +1158,10 @@ mod tests {
     #[test]
     fn test_solver_presolve_fields_default() {
         let o = SolverOptions::default();
-        assert_eq!(o.presolve_max_pass, DEFAULT_PRESOLVE_MAX_PASS, "default max pass");
+        assert_eq!(
+            o.presolve_max_pass, DEFAULT_PRESOLVE_MAX_PASS,
+            "default max pass"
+        );
         assert!(o.presolve_phase2, "default phase2 = true");
     }
 
@@ -1004,25 +1174,45 @@ mod tests {
         // Minimal feasible QP: 1 variable, no constraints, x* = 0.
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
         let a = CscMatrix::new(0, 1);
-        let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(0.0_f64, 1.0_f64)], vec![]).unwrap();
+        let prob =
+            QpProblem::new(q, vec![0.0], a, vec![], vec![(0.0_f64, 1.0_f64)], vec![]).unwrap();
 
         // Both 0 and 10 passes must find the optimum.
-        let opts0 = SolverOptions { presolve_max_pass: 0, ..Default::default() };
-        let opts10 = SolverOptions { presolve_max_pass: 10, ..Default::default() };
+        let opts0 = SolverOptions {
+            presolve_max_pass: 0,
+            ..Default::default()
+        };
+        let opts10 = SolverOptions {
+            presolve_max_pass: 10,
+            ..Default::default()
+        };
         let r0 = solve_qp_with(&prob, &opts0);
         let r10 = solve_qp_with(&prob, &opts10);
-        assert_eq!(r0.status, SolveStatus::Optimal, "presolve_max_pass=0 should still solve trivial QP");
-        assert_eq!(r10.status, SolveStatus::Optimal, "presolve_max_pass=10 should solve trivial QP");
+        assert_eq!(
+            r0.status,
+            SolveStatus::Optimal,
+            "presolve_max_pass=0 should still solve trivial QP"
+        );
+        assert_eq!(
+            r10.status,
+            SolveStatus::Optimal,
+            "presolve_max_pass=10 should solve trivial QP"
+        );
     }
 
     #[test]
     fn test_presolve_phase2_false_skips_phase2() {
         // When presolve_phase2=false, attempt.rs takes the phase1-only branch.
         // Verify through options field round-trip.
-        let o = SolverOptions { presolve_phase2: false, ..Default::default() };
+        let o = SolverOptions {
+            presolve_phase2: false,
+            ..Default::default()
+        };
         assert!(!o.presolve_phase2);
-        let o2 = SolverOptions { presolve_phase2: true, ..Default::default() };
+        let o2 = SolverOptions {
+            presolve_phase2: true,
+            ..Default::default()
+        };
         assert!(o2.presolve_phase2);
     }
-
 }

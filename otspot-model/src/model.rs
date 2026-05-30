@@ -174,7 +174,12 @@ impl Model {
     }
 
     /// Add an integer decision variable, returning an error for invalid bounds.
-    pub fn try_add_int_var(&mut self, name: &str, lb: f64, ub: f64) -> Result<Variable, ModelError> {
+    pub fn try_add_int_var(
+        &mut self,
+        name: &str,
+        lb: f64,
+        ub: f64,
+    ) -> Result<Variable, ModelError> {
         validate_bounds(lb, ub)?;
         Ok(self.push_var(name, lb, ub, VarKind::Integer))
     }
@@ -225,12 +230,20 @@ impl Model {
             upper_bound: ub,
             kind,
         });
-        Variable { index, model_id: self.model_id }
+        Variable {
+            index,
+            model_id: self.model_id,
+        }
     }
 
     /// Add a constraint to the model.
     pub fn add_constraint(&mut self, c: Constraint) -> &mut Self {
-        if let Some(v) = c.lhs.coefficients.keys().find(|v| v.model_id != self.model_id) {
+        if let Some(v) = c
+            .lhs
+            .coefficients
+            .keys()
+            .find(|v| v.model_id != self.model_id)
+        {
             let msg = format!(
                 "constraint lhs: var {} belongs to model {}, not this model ({})",
                 v.index, v.model_id, self.model_id
@@ -342,16 +355,23 @@ impl Model {
         // Linear part: coefficient keys are Variable structs with model_id.
         // The c-vector build reconstructs Variables with self.model_id, so
         // foreign vars would be silently dropped — detect and reject instead.
-        if let Some(&v) = q.linear.coefficients.keys().find(|v| v.model_id != self.model_id) {
+        if let Some(&v) = q
+            .linear
+            .coefficients
+            .keys()
+            .find(|v| v.model_id != self.model_id)
+        {
             return Some(format!(
                 "linear term (var {}) belongs to model {}, not this model ({})",
                 v.index, v.model_id, self.model_id
             ));
         }
         // Quad part
-        if let Some(&(va, vb)) = q.quad.keys().find(|(va, vb)| {
-            va.model_id != self.model_id || vb.model_id != self.model_id
-        }) {
+        if let Some(&(va, vb)) = q
+            .quad
+            .keys()
+            .find(|(va, vb)| va.model_id != self.model_id || vb.model_id != self.model_id)
+        {
             return Some(format!(
                 "quad term ({},{}) belongs to model(s) {}/{}, not this model ({})",
                 va.index, vb.index, va.model_id, vb.model_id, self.model_id
@@ -423,7 +443,12 @@ impl Model {
         // --- Build objective vector c ---
         let mid = self.model_id;
         let mut c: Vec<f64> = (0..num_vars)
-            .map(|i| obj_expr.coefficient(Variable { index: i, model_id: mid }))
+            .map(|i| {
+                obj_expr.coefficient(Variable {
+                    index: i,
+                    model_id: mid,
+                })
+            })
             .collect();
 
         // For maximization, negate c (solver minimizes by default)
@@ -951,9 +976,7 @@ fn map_qp_build_err(e: otspot_core::qp::QpProblemError) -> ModelError {
     match e {
         QpProblemError::NonFiniteCoefficient { .. }
         | QpProblemError::InvalidBounds { .. }
-        | QpProblemError::TripletIndexOutOfBounds { .. } => {
-            ModelError::InvalidInput(e.to_string())
-        }
+        | QpProblemError::TripletIndexOutOfBounds { .. } => ModelError::InvalidInput(e.to_string()),
         QpProblemError::DimensionMismatch(_) => ModelError::Internal(e.to_string()),
         // #[non_exhaustive]: wildcard required for cross-crate matching.
         _ => ModelError::Internal(e.to_string()),
@@ -1651,7 +1674,9 @@ mod tests {
             let x = model.add_var("x0", lb, ub);
             let y = model.add_var("x1", lb, ub);
             // Q = diag(q_diag): DSL term (d/2)*xi*xi per variable
-            model.minimize((q_diag[0] / 2.0) * x * x + (q_diag[1] / 2.0) * y * y + c[0] * x + c[1] * y);
+            model.minimize(
+                (q_diag[0] / 2.0) * x * x + (q_diag[1] / 2.0) * y * y + c[0] * x + c[1] * y,
+            );
 
             let result = model.solve();
             match result {
@@ -1694,7 +1719,12 @@ mod tests {
         let cases: &[(&str, [f64; 2], (f64, f64), [f64; 2])] = &[
             // Convex PSD Q=2I, c=[-4,-4]. IPM converges (residuals ~1e-6) but
             // Custom(1e-200) makes satisfies_eps always false → SuboptimalSolution.
-            ("convex_2x2_tight_tol", [2.0, 2.0], (0.0, f64::INFINITY), [-4.0, -4.0]),
+            (
+                "convex_2x2_tight_tol",
+                [2.0, 2.0],
+                (0.0, f64::INFINITY),
+                [-4.0, -4.0],
+            ),
             // Convex PSD Q=4I, c=[0,-2] with box bounds.
             ("convex_box_tight_tol", [4.0, 4.0], (0.0, 3.0), [0.0, -2.0]),
         ];
@@ -1703,7 +1733,9 @@ mod tests {
             let mut model = Model::new(name);
             let x = model.add_var("x0", lb, ub);
             let y = model.add_var("x1", lb, ub);
-            model.minimize((q_diag[0] / 2.0) * x * x + (q_diag[1] / 2.0) * y * y + c[0] * x + c[1] * y);
+            model.minimize(
+                (q_diag[0] / 2.0) * x * x + (q_diag[1] / 2.0) * y * y + c[0] * x + c[1] * y,
+            );
             // Impossibly tight tolerance: IPM finds a finite-residual solution
             // but satisfies_eps(1e-200) is always false → SuboptimalSolution.
             model.set_tolerance(Tolerance::Custom(1e-200));
@@ -1715,13 +1747,17 @@ mod tests {
                         r.proof,
                         SolutionProof::FeasibleUnproven,
                         "[{name}] expected FeasibleUnproven proof, got {:?} (status={:?})",
-                        r.proof, r.status
+                        r.proof,
+                        r.status
                     );
                     assert!(
                         !r.has_global_optimality_proof(),
                         "[{name}] has_global_optimality_proof must be false for FeasibleUnproven"
                     );
-                    assert!(!r.solution.is_empty(), "[{name}] solution must be non-empty");
+                    assert!(
+                        !r.solution.is_empty(),
+                        "[{name}] solution must be non-empty"
+                    );
                 }
                 Err(e) => panic!("[{name}] unexpected Err: {e:?}"),
             }
@@ -1734,10 +1770,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn classify_status_error_typed_variants() {
-        let cases_nonconvex = [
-            "indefinite Q: eigenvalue < 0",
-            "non-PSD matrix in MIQP",
-        ];
+        let cases_nonconvex = ["indefinite Q: eigenvalue < 0", "non-PSD matrix in MIQP"];
         for msg in &cases_nonconvex {
             let status = SolveStatus::NonConvex(msg.to_string());
             let err = classify_status_error(status).expect("NonConvex must map to Some");
@@ -1748,10 +1781,7 @@ mod tests {
             );
         }
 
-        let cases_not_supported = [
-            "QCQP not supported",
-            "constraint type unsupported",
-        ];
+        let cases_not_supported = ["QCQP not supported", "constraint type unsupported"];
         for msg in &cases_not_supported {
             let status = SolveStatus::NotSupported(msg.to_string());
             let err = classify_status_error(status).expect("NotSupported must map to Some");
@@ -1811,7 +1841,9 @@ mod tests {
             let mut model = Model::new(label);
             let x = model.add_var("x", lb, ub);
             model.minimize(x);
-            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            let err = model
+                .solve()
+                .expect_err(&format!("[{label}] expected Err, got Ok"));
             assert!(
                 matches!(err, ModelError::InvalidInput(_)),
                 "[{label}] expected InvalidInput, got {err:?}"
@@ -1830,7 +1862,9 @@ mod tests {
             let mut model = Model::new(label);
             let x = model.add_var("x", lb, ub);
             model.minimize(x);
-            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            let err = model
+                .solve()
+                .expect_err(&format!("[{label}] expected Err, got Ok"));
             assert!(
                 matches!(err, ModelError::InvalidInput(_)),
                 "[{label}] expected InvalidInput, got {err:?}"
@@ -1840,15 +1874,15 @@ mod tests {
 
     #[test]
     fn add_int_var_lb_gt_ub_defers_error_to_solve() {
-        let cases: &[(&str, f64, f64)] = &[
-            ("int lb=3 > ub=1", 3.0, 1.0),
-            ("int lb=NaN", f64::NAN, 5.0),
-        ];
+        let cases: &[(&str, f64, f64)] =
+            &[("int lb=3 > ub=1", 3.0, 1.0), ("int lb=NaN", f64::NAN, 5.0)];
         for &(label, lb, ub) in cases {
             let mut model = Model::new(label);
             let x = model.add_int_var("x", lb, ub);
             model.minimize(x);
-            let err = model.solve().expect_err(&format!("[{label}] expected Err, got Ok"));
+            let err = model
+                .solve()
+                .expect_err(&format!("[{label}] expected Err, got Ok"));
             assert!(
                 matches!(err, ModelError::InvalidInput(_)),
                 "[{label}] expected InvalidInput, got {err:?}"
@@ -1897,10 +1931,7 @@ mod tests {
 
     #[test]
     fn try_add_int_var_returns_err_for_invalid_bounds() {
-        let cases: &[(&str, f64, f64)] = &[
-            ("int lb>ub", 5.0, 2.0),
-            ("int lb=NaN", f64::NAN, 3.0),
-        ];
+        let cases: &[(&str, f64, f64)] = &[("int lb>ub", 5.0, 2.0), ("int lb=NaN", f64::NAN, 3.0)];
         for &(label, lb, ub) in cases {
             let mut model = Model::new(label);
             assert!(
@@ -2052,16 +2083,16 @@ mod tests {
     #[test]
     fn try_var_name_err_index_out_of_range() {
         let mut model = Model::new("range_check");
-        let x = model.add_var("x", 0.0, 1.0);  // index=0, N=1 variable
+        let x = model.add_var("x", 0.0, 1.0); // index=0, N=1 variable
 
         // N-1 = 0: last valid index → Ok.
-        assert!(
-            model.try_var_name(x).is_ok(),
-            "index=0 (N-1) must be Ok"
-        );
+        assert!(model.try_var_name(x).is_ok(), "index=0 (N-1) must be Ok");
 
         // N = 1: exact out-of-bound → Err.
-        let oob_n = Variable { index: 1, model_id: x.model_id };
+        let oob_n = Variable {
+            index: 1,
+            model_id: x.model_id,
+        };
         let err_n = model.try_var_name(oob_n).unwrap_err();
         assert!(
             matches!(err_n, ModelError::InvalidInput(_)),
@@ -2069,7 +2100,10 @@ mod tests {
         );
 
         // usize::MAX: extreme out-of-bound → Err.
-        let oob_max = Variable { index: usize::MAX, model_id: x.model_id };
+        let oob_max = Variable {
+            index: usize::MAX,
+            model_id: x.model_id,
+        };
         let err_max = model.try_var_name(oob_max).unwrap_err();
         assert!(
             matches!(err_max, ModelError::InvalidInput(_)),
@@ -2106,16 +2140,22 @@ mod tests {
         // model_a's var has index=0 with the same integer position as model_b's var.
         // var_name doesn't check model_id, so it reads model_b's slot — wrong data.
         let mut model_a = Model::new("a");
-        let x_a = model_a.add_var("x_in_a", 0.0, 1.0);  // index=0
+        let x_a = model_a.add_var("x_in_a", 0.0, 1.0); // index=0
 
         let mut model_b = Model::new("b");
-        let _y_b = model_b.add_var("y_in_b", 0.0, 1.0);  // index=0
+        let _y_b = model_b.add_var("y_in_b", 0.0, 1.0); // index=0
 
         // var_name is unchecked: x_a.index=0 is in-range for model_b,
         // so it returns model_b's variable name — NOT "x_in_a".
         let returned = model_b.var_name(x_a);
-        assert_ne!(returned, "x_in_a", "unchecked: cross-model var_name returns unrelated data");
-        assert_eq!(returned, "y_in_b", "unchecked: returns model_b's var at the same index");
+        assert_ne!(
+            returned, "x_in_a",
+            "unchecked: cross-model var_name returns unrelated data"
+        );
+        assert_eq!(
+            returned, "y_in_b",
+            "unchecked: returns model_b's var at the same index"
+        );
     }
 
     // Case B: cross-model var whose index is out-of-range for the receiver panics.
@@ -2125,8 +2165,8 @@ mod tests {
     #[should_panic(expected = "index out of bounds")]
     fn var_name_cross_model_out_of_range_panics() {
         let mut model_a = Model::new("a_2var");
-        let _x0 = model_a.add_var("x0", 0.0, 1.0);  // index=0
-        let x1 = model_a.add_var("x1", 0.0, 1.0);   // index=1
+        let _x0 = model_a.add_var("x0", 0.0, 1.0); // index=0
+        let x1 = model_a.add_var("x1", 0.0, 1.0); // index=1
 
         // model_b has only 1 variable (len=1). x1.index=1 is out of range → panic.
         let mut model_b = Model::new("b_1var");
@@ -2151,7 +2191,9 @@ mod tests {
             let x = model.add_var("x", 0.0, f64::INFINITY);
             model.minimize(x);
             model.set_timeout(secs);
-            let err = model.solve().expect_err(&format!("[{label}] expected Err for invalid timeout"));
+            let err = model
+                .solve()
+                .expect_err(&format!("[{label}] expected Err for invalid timeout"));
             assert!(
                 matches!(err, ModelError::InvalidInput(_)),
                 "[{label}] expected InvalidInput, got {err:?}"
@@ -2161,7 +2203,11 @@ mod tests {
 
     #[test]
     fn try_set_timeout_returns_err_for_invalid() {
-        let cases: &[(&str, f64)] = &[("negative", -0.001), ("NaN", f64::NAN), ("inf", f64::INFINITY)];
+        let cases: &[(&str, f64)] = &[
+            ("negative", -0.001),
+            ("NaN", f64::NAN),
+            ("inf", f64::INFINITY),
+        ];
         for &(label, secs) in cases {
             let mut model = Model::new(label);
             assert!(
@@ -2176,7 +2222,10 @@ mod tests {
         let valid = [0.0, 0.001, 1.0, 3600.0];
         for &secs in &valid {
             let mut model = Model::new("t");
-            assert!(model.try_set_timeout(secs).is_ok(), "should be Ok for secs={secs}");
+            assert!(
+                model.try_set_timeout(secs).is_ok(),
+                "should be Ok for secs={secs}"
+            );
         }
     }
 }
@@ -2232,7 +2281,10 @@ mod mip_model_tests {
         m.add_constraint((1.0 * x).leq(1.8));
         m.minimize(x);
         let err = m.solve().unwrap_err();
-        assert!(matches!(err, ModelError::SolveError(SolveError::Infeasible)), "got {err:?}");
+        assert!(
+            matches!(err, ModelError::SolveError(SolveError::Infeasible)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -2241,7 +2293,10 @@ mod mip_model_tests {
         let x = m.add_int_var("x", 0.0, f64::INFINITY);
         m.maximize(x);
         let err = m.solve().unwrap_err();
-        assert!(matches!(err, ModelError::SolveError(SolveError::Unbounded)), "got {err:?}");
+        assert!(
+            matches!(err, ModelError::SolveError(SolveError::Unbounded)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -2252,7 +2307,11 @@ mod mip_model_tests {
         let x = m.add_int_var("x", 0.0, 5.0);
         m.minimize(x * x + (-5.0) * x);
         let r = m.solve().unwrap();
-        assert!((r.objective() - (-6.0)).abs() < EPS, "obj={}", r.objective());
+        assert!(
+            (r.objective() - (-6.0)).abs() < EPS,
+            "obj={}",
+            r.objective()
+        );
         let xr = r[x].round();
         assert!(xr == 2.0 || xr == 3.0, "x must be 2 or 3, got {}", r[x]);
         assert!((r[x] - xr).abs() < EPS, "x must be integral: {}", r[x]);
@@ -2268,7 +2327,9 @@ mod mip_model_tests {
         for &(name, q_diag, c_vec) in cases {
             let n = q_diag.len();
             let mut m = Model::new(name);
-            let vars: Vec<_> = (0..n).map(|i| m.add_int_var(&format!("x{i}"), 0.0, 5.0)).collect();
+            let vars: Vec<_> = (0..n)
+                .map(|i| m.add_int_var(&format!("x{i}"), 0.0, 5.0))
+                .collect();
             // Build objective: sum (d_i/2)*x_i^2 + c_i*x_i via DSL
             let obj = vars.iter().zip(q_diag).zip(c_vec).fold(
                 crate::quad_expr::QuadExpr::from(0.0_f64),
@@ -2294,7 +2355,11 @@ mod mip_model_tests {
         m.maximize(x + y);
         let r = m.solve().unwrap();
         assert!((r.objective() - 3.5).abs() < EPS, "obj={}", r.objective());
-        assert!((r[x].round() - r[x]).abs() < EPS, "x must be integral, x={}", r[x]);
+        assert!(
+            (r[x].round() - r[x]).abs() < EPS,
+            "x must be integral, x={}",
+            r[x]
+        );
     }
 
     // --- 目的関数定数 fold テスト ---
@@ -2307,7 +2372,11 @@ mod mip_model_tests {
         let x = model.add_var("x", 1.0, f64::INFINITY);
         model.minimize(2.0 * x + 3.0);
         let result = model.solve().unwrap();
-        assert!((result[x] - 1.0).abs() < EPS, "x* should be 1, got {}", result[x]);
+        assert!(
+            (result[x] - 1.0).abs() < EPS,
+            "x* should be 1, got {}",
+            result[x]
+        );
         assert!(
             (result.objective_value - 5.0).abs() < EPS,
             "obj* should be 5 (includes constant +3), got {}",
@@ -2379,8 +2448,8 @@ mod mip_model_tests {
         // First minimize(x + 3.0), then minimize(x + 7.0): only the last constant counts.
         let mut model = Model::new("reminimize");
         let x = model.add_var("x", 1.0, f64::INFINITY);
-        model.minimize(1.0 * x + 3.0);  // constant = 3.0
-        model.minimize(1.0 * x + 7.0);  // constant = 7.0 (replaces 3.0)
+        model.minimize(1.0 * x + 3.0); // constant = 3.0
+        model.minimize(1.0 * x + 7.0); // constant = 7.0 (replaces 3.0)
         let result = model.solve().unwrap();
         assert!(
             (result.objective_value - 8.0).abs() < EPS,
@@ -2400,12 +2469,19 @@ mod mip_model_tests {
         // A subsequent minimize(x) clears it (at the start of apply_objective) → solve succeeds.
         let mut model = Model::new("p2a_nan_then_linear");
         let x = model.add_var("x", 1.0, f64::INFINITY);
-        model.minimize(f64::NAN * (x * x));   // invalid DSL quad → error recorded
-        model.minimize(1.0 * x);              // pure-linear replaces objective
+        model.minimize(f64::NAN * (x * x)); // invalid DSL quad → error recorded
+        model.minimize(1.0 * x); // pure-linear replaces objective
         let result = model.solve();
-        assert!(result.is_ok(), "P2-a: should be Optimal after linear replaces NaN quad, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "P2-a: should be Optimal after linear replaces NaN quad, got {result:?}"
+        );
         let r = result.unwrap();
-        assert!((r[x] - 1.0).abs() < EPS, "P2-a: x* should be 1, got {}", r[x]);
+        assert!(
+            (r[x] - 1.0).abs() < EPS,
+            "P2-a: x* should be 1, got {}",
+            r[x]
+        );
     }
 
     // P2-a (reverse): valid quad → then invalid (NaN) quad → solve must error.
@@ -2413,8 +2489,8 @@ mod mip_model_tests {
     fn test_p2a_valid_quad_then_nan_errors() {
         let mut model = Model::new("p2a_valid_then_nan");
         let x = model.add_var("x", 0.0, f64::INFINITY);
-        model.minimize(x * x + (-2.0) * x);   // valid DSL quad
-        model.minimize(f64::NAN * (x * x));    // invalid DSL quad → should error
+        model.minimize(x * x + (-2.0) * x); // valid DSL quad
+        model.minimize(f64::NAN * (x * x)); // invalid DSL quad → should error
         let result = model.solve();
         assert!(
             matches!(result, Err(ModelError::InvalidInput(_))),
@@ -2427,12 +2503,19 @@ mod mip_model_tests {
     fn test_p2a_nan_dsl_then_maximize_linear_is_optimal() {
         let mut model = Model::new("p2a_nan_then_max");
         let x = model.add_var("x", 0.0, 5.0);
-        model.minimize(f64::NAN * (x * x));   // stale error
-        model.maximize(1.0 * x);              // pure-linear maximize replaces
+        model.minimize(f64::NAN * (x * x)); // stale error
+        model.maximize(1.0 * x); // pure-linear maximize replaces
         let result = model.solve();
-        assert!(result.is_ok(), "P2-a: maximize should succeed after NaN DSL cleared, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "P2-a: maximize should succeed after NaN DSL cleared, got {result:?}"
+        );
         let r = result.unwrap();
-        assert!((r[x] - 5.0).abs() < EPS, "P2-a: maximize x → x*=5, got {}", r[x]);
+        assert!(
+            (r[x] - 5.0).abs() < EPS,
+            "P2-a: maximize x → x*=5, got {}",
+            r[x]
+        );
     }
 
     // State-machine: DSL transition table (DSL paths only × invariants).
@@ -2451,17 +2534,17 @@ mod mip_model_tests {
             let (mut m, x) = mk();
             m.minimize(x * x);
             assert!(!m.has_quad_dsl_error(), "DSL ok: no error");
-            assert!(m.is_quad_via_dsl(),       "DSL ok: via_dsl=true");
-            assert!(m.has_quadratic_objective(),"DSL ok: has_q=true");
+            assert!(m.is_quad_via_dsl(), "DSL ok: via_dsl=true");
+            assert!(m.has_quadratic_objective(), "DSL ok: has_q=true");
         }
 
         // After DSL fail (NaN): error=true, via_dsl=false, has_q=false.
         {
             let (mut m, x) = mk();
             m.minimize(f64::NAN * (x * x));
-            assert!(m.has_quad_dsl_error(),    "DSL fail: error recorded");
-            assert!(!m.is_quad_via_dsl(),      "DSL fail: via_dsl=false");
-            assert!(!m.has_quadratic_objective(),"DSL fail: has_q=false");
+            assert!(m.has_quad_dsl_error(), "DSL fail: error recorded");
+            assert!(!m.is_quad_via_dsl(), "DSL fail: via_dsl=false");
+            assert!(!m.has_quadratic_objective(), "DSL fail: has_q=false");
         }
 
         // DSL success → DSL fail: error=true, via_dsl=false, has_q=false.
@@ -2469,9 +2552,9 @@ mod mip_model_tests {
             let (mut m, x) = mk();
             m.minimize(x * x);
             m.minimize(f64::NAN * (x * x));
-            assert!(m.has_quad_dsl_error(),    "ok→fail: error recorded");
-            assert!(!m.is_quad_via_dsl(),      "ok→fail: via_dsl=false");
-            assert!(!m.has_quadratic_objective(),"ok→fail: has_q=false");
+            assert!(m.has_quad_dsl_error(), "ok→fail: error recorded");
+            assert!(!m.is_quad_via_dsl(), "ok→fail: via_dsl=false");
+            assert!(!m.has_quadratic_objective(), "ok→fail: has_q=false");
         }
 
         // DSL success → linear minimize: error=false, via_dsl=false, has_q=false.
@@ -2480,8 +2563,8 @@ mod mip_model_tests {
             m.minimize(x * x);
             m.minimize(1.0 * x);
             assert!(!m.has_quad_dsl_error(), "dsl→linear: no error");
-            assert!(!m.is_quad_via_dsl(),    "dsl→linear: via_dsl=false");
-            assert!(!m.has_quadratic_objective(),"dsl→linear: DSL Q cleared");
+            assert!(!m.is_quad_via_dsl(), "dsl→linear: via_dsl=false");
+            assert!(!m.has_quadratic_objective(), "dsl→linear: DSL Q cleared");
         }
     }
 
@@ -2735,19 +2818,35 @@ mod mip_model_tests {
     fn test_p2i_nan_quad_replaced_by_valid_quad_is_optimal() {
         let mut model = Model::new("p2i_nan_then_valid");
         let x = model.add_var("x", 0.0, f64::INFINITY);
-        model.minimize(f64::NAN * (x * x));   // DSL fail: quad_dsl_error set
-        assert!(model.has_quad_dsl_error(), "P2-i setup: error must be recorded");
+        model.minimize(f64::NAN * (x * x)); // DSL fail: quad_dsl_error set
+        assert!(
+            model.has_quad_dsl_error(),
+            "P2-i setup: error must be recorded"
+        );
 
-        model.minimize(x * x + (-4.0) * x);   // new minimize: clears quad_dsl_error, installs valid Q
-        assert!(!model.has_quad_dsl_error(), "P2-i: valid minimize must clear quad_dsl_error");
-        assert!(model.has_quadratic_objective(), "P2-i: valid Q must be installed");
+        model.minimize(x * x + (-4.0) * x); // new minimize: clears quad_dsl_error, installs valid Q
+        assert!(
+            !model.has_quad_dsl_error(),
+            "P2-i: valid minimize must clear quad_dsl_error"
+        );
+        assert!(
+            model.has_quadratic_objective(),
+            "P2-i: valid Q must be installed"
+        );
 
         // min x² - 4x, x≥0 → x*=2, obj*=-4
         let result = model.solve();
-        assert!(result.is_ok(), "P2-i: valid quad after NaN must be Optimal, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "P2-i: valid quad after NaN must be Optimal, got {result:?}"
+        );
         let r = result.unwrap();
         assert!((r[x] - 2.0).abs() < EPS, "P2-i: x*=2, got {}", r[x]);
-        assert!((r.objective_value - (-4.0)).abs() < EPS, "P2-i: obj*=-4, got {}", r.objective_value);
+        assert!(
+            (r.objective_value - (-4.0)).abs() < EPS,
+            "P2-i: obj*=-4, got {}",
+            r.objective_value
+        );
     }
 
     // NaN quad alone still gives InvalidInput (regression guard).
@@ -2770,32 +2869,52 @@ mod mip_model_tests {
         type Setup = fn(&mut Model, crate::variable::Variable);
         let cases: &[(&str, Setup, bool)] = &[
             // NaN → valid quad → Optimal (P2-i core)
-            ("nan→valid_quad", |m, x| {
-                m.minimize(f64::NAN * (x * x));
-                m.minimize(x * x + (-4.0) * x);
-            }, true),
+            (
+                "nan→valid_quad",
+                |m, x| {
+                    m.minimize(f64::NAN * (x * x));
+                    m.minimize(x * x + (-4.0) * x);
+                },
+                true,
+            ),
             // NaN → NaN → valid quad → Optimal
-            ("nan→nan→valid_quad", |m, x| {
-                m.minimize(f64::NAN * (x * x));
-                m.minimize(f64::NAN * (x * x));
-                m.minimize(x * x + (-4.0) * x);
-            }, true),
+            (
+                "nan→nan→valid_quad",
+                |m, x| {
+                    m.minimize(f64::NAN * (x * x));
+                    m.minimize(f64::NAN * (x * x));
+                    m.minimize(x * x + (-4.0) * x);
+                },
+                true,
+            ),
             // valid quad → NaN → InvalidInput
-            ("valid→nan", |m, x| {
-                m.minimize(x * x + (-4.0) * x);
-                m.minimize(f64::NAN * (x * x));
-            }, false),
+            (
+                "valid→nan",
+                |m, x| {
+                    m.minimize(x * x + (-4.0) * x);
+                    m.minimize(f64::NAN * (x * x));
+                },
+                false,
+            ),
             // NaN → linear → Optimal (P2-a, must still pass)
-            ("nan→linear", |m, x| {
-                m.minimize(f64::NAN * (x * x));
-                m.minimize(1.0 * x);  // minimize x, x≥0 → x*=0
-            }, true),
+            (
+                "nan→linear",
+                |m, x| {
+                    m.minimize(f64::NAN * (x * x));
+                    m.minimize(1.0 * x); // minimize x, x≥0 → x*=0
+                },
+                true,
+            ),
             // NaN → valid quad → NaN → InvalidInput
-            ("nan→valid→nan", |m, x| {
-                m.minimize(f64::NAN * (x * x));
-                m.minimize(x * x + (-4.0) * x);
-                m.minimize(f64::NAN * (x * x));
-            }, false),
+            (
+                "nan→valid→nan",
+                |m, x| {
+                    m.minimize(f64::NAN * (x * x));
+                    m.minimize(x * x + (-4.0) * x);
+                    m.minimize(f64::NAN * (x * x));
+                },
+                false,
+            ),
         ];
 
         for &(label, setup, expect_optimal) in cases {
@@ -2804,7 +2923,10 @@ mod mip_model_tests {
             setup(&mut m, x);
             let result = m.solve();
             if expect_optimal {
-                assert!(result.is_ok(), "P2-i [{label}]: expected Optimal, got {result:?}");
+                assert!(
+                    result.is_ok(),
+                    "P2-i [{label}]: expected Optimal, got {result:?}"
+                );
             } else {
                 assert!(
                     matches!(result, Err(ModelError::InvalidInput(_))),
@@ -2813,5 +2935,4 @@ mod mip_model_tests {
             }
         }
     }
-
 }

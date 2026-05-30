@@ -138,8 +138,7 @@ fn make_synthetic_lasso(p: usize, m_data: usize, lambda: f64, seed: u64) -> QpPr
             }
         }
     }
-    let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n_var, n_var)
-        .expect("Q csc build");
+    let q = CscMatrix::from_triplets(&q_rows, &q_cols, &q_vals, n_var, n_var).expect("Q csc build");
 
     // 5. 制約行列 A_constr: [[ I_p, -I_p ], [-I_p, -I_p]] (m=2p, n=2p)
     let m_constr = 2 * p;
@@ -162,8 +161,8 @@ fn make_synthetic_lasso(p: usize, m_data: usize, lambda: f64, seed: u64) -> QpPr
         a_cols.push(p + i);
         a_vals.push(-1.0);
     }
-    let a_constr = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_constr, n_var)
-        .expect("A csc build");
+    let a_constr =
+        CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m_constr, n_var).expect("A csc build");
     let b = vec![0.0_f64; m_constr];
     let cts = vec![ConstraintType::Le; m_constr];
 

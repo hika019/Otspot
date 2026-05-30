@@ -16,7 +16,7 @@ use otspot::io::qps::parse_qps;
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::prove_optimal;
-use otspot::qp::{ipm_solver::outcome::ProblemView, solve_qp_with, QpProblem, solve_qp};
+use otspot::qp::{ipm_solver::outcome::ProblemView, solve_qp, solve_qp_with, QpProblem};
 use otspot::CscMatrix;
 use std::path::Path;
 
@@ -36,9 +36,11 @@ fn load_qp_and_solve(path_str: &str) -> (otspot::QpProblem, otspot::SolverResult
     opts.timeout_secs = Some(30.0);
     let result = solve_qp_with(&qp, &opts);
     assert_eq!(
-        result.status, SolveStatus::Optimal,
+        result.status,
+        SolveStatus::Optimal,
         "{} must solve to Optimal, got {:?}",
-        path_str, result.status
+        path_str,
+        result.status
     );
     (qp, result)
 }
@@ -63,16 +65,35 @@ fn prove_optimal_accepts_true_optimal_hs21() {
     let (qp, result) = load_qp_and_solve(HS21_PATH);
     let view = make_view(&qp);
     let gap = result.duality_gap_rel.unwrap_or(0.0);
-    let cert = prove_optimal(&view, &result.solution, &result.dual_solution, &result.bound_duals, gap, TOL);
+    let cert = prove_optimal(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+        gap,
+        TOL,
+    );
     assert!(
         cert.is_ok(),
         "HS21 最適解は prove_optimal が Ok を返すべき: {:?}",
         cert.err()
     );
     let c = cert.unwrap();
-    assert!(c.stationarity_rel() < TOL, "stat={:.3e}", c.stationarity_rel());
-    assert!(c.primal_residual_rel() < TOL, "pres={:.3e}", c.primal_residual_rel());
-    assert!(c.dual_sign_violation() < TOL, "dsign={:.3e}", c.dual_sign_violation());
+    assert!(
+        c.stationarity_rel() < TOL,
+        "stat={:.3e}",
+        c.stationarity_rel()
+    );
+    assert!(
+        c.primal_residual_rel() < TOL,
+        "pres={:.3e}",
+        c.primal_residual_rel()
+    );
+    assert!(
+        c.dual_sign_violation() < TOL,
+        "dsign={:.3e}",
+        c.dual_sign_violation()
+    );
 }
 
 /// 主変数を 2 倍に改竄 → prove_optimal は Err を返す。
@@ -84,7 +105,14 @@ fn prove_optimal_rejects_scaled_primal_hs21() {
     let view = make_view(&qp);
     let x_bad: Vec<f64> = result.solution.iter().map(|&v| v * 2.0 + 1.0).collect();
     let gap = 1.0;
-    let cert = prove_optimal(&view, &x_bad, &result.dual_solution, &result.bound_duals, gap, TOL);
+    let cert = prove_optimal(
+        &view,
+        &x_bad,
+        &result.dual_solution,
+        &result.bound_duals,
+        gap,
+        TOL,
+    );
     assert!(
         cert.is_err(),
         "改竄された主変数 (2x+1) は prove_optimal が Err を返すべき"
@@ -105,7 +133,9 @@ fn prove_optimal_dual_sign_sentinel_active_constraint_y_negated_qadlittl() {
     let view = make_view(&qp);
     let m = qp.num_constraints;
 
-    let ax = qp.a.mat_vec_mul(&result.solution).unwrap_or_else(|_| vec![0.0_f64; m]);
+    let ax =
+        qp.a.mat_vec_mul(&result.solution)
+            .unwrap_or_else(|_| vec![0.0_f64; m]);
 
     let tol_slack = 1e-3;
     let tol_y = 1e-5;
@@ -125,7 +155,10 @@ fn prove_optimal_dual_sign_sentinel_active_constraint_y_negated_qadlittl() {
         !active_indices.is_empty(),
         "QADLITTL に active な不等式制約 (|y|>{tol_y}, slack<{tol_slack}) が見つからない:\n\
         num_constraints={m}, max|y|={:.3e}",
-        result.dual_solution.iter().fold(0.0_f64, |a, &v| a.max(v.abs()))
+        result
+            .dual_solution
+            .iter()
+            .fold(0.0_f64, |a, &v| a.max(v.abs()))
     );
 
     let idx = active_indices[0];
@@ -133,7 +166,14 @@ fn prove_optimal_dual_sign_sentinel_active_constraint_y_negated_qadlittl() {
     y_bad[idx] = -y_bad[idx];
 
     let gap = result.duality_gap_rel.unwrap_or(0.0);
-    let cert = prove_optimal(&view, &result.solution, &y_bad, &result.bound_duals, gap, TOL);
+    let cert = prove_optimal(
+        &view,
+        &result.solution,
+        &y_bad,
+        &result.bound_duals,
+        gap,
+        TOL,
+    );
 
     assert!(
         cert.is_err(),
@@ -192,7 +232,14 @@ fn dual_sign_convention_observation_qadlittl() {
 
     let view = make_view(&qp);
     let gap = result.duality_gap_rel.unwrap_or(0.0);
-    let cert = prove_optimal(&view, &result.solution, &result.dual_solution, &result.bound_duals, gap, TOL);
+    let cert = prove_optimal(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+        gap,
+        TOL,
+    );
     assert!(
         cert.is_ok(),
         "QADLITTL 最適解は prove_optimal が Ok を返すべき: {:?}",
@@ -209,7 +256,11 @@ fn solve_box_qp() -> otspot::SolverResult {
     let a = CscMatrix::new(0, 1);
     let prob = QpProblem::new(q, vec![-20.0], a, vec![], vec![(0.0, 5.0)], vec![]).unwrap();
     let result = solve_qp(&prob);
-    assert_eq!(result.status, SolveStatus::Optimal, "box QP must solve to Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "box QP must solve to Optimal"
+    );
     result
 }
 
@@ -230,13 +281,28 @@ fn prove_optimal_accepts_active_ub_box_qp() {
     assert!(z_ub > 1.0, "z_ub at active ub must be >0, got {z_ub}");
 
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     let gap = result.duality_gap_rel.unwrap_or(0.0);
-    let cert = prove_optimal(&view, &result.solution, &result.dual_solution, &result.bound_duals, gap, TOL);
-    assert!(cert.is_ok(), "box QP active-ub 最適解は Ok を返すべき: {:?}", cert.err());
+    let cert = prove_optimal(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &result.bound_duals,
+        gap,
+        TOL,
+    );
+    assert!(
+        cert.is_ok(),
+        "box QP active-ub 最適解は Ok を返すべき: {:?}",
+        cert.err()
+    );
 }
 
 /// z_ub を符号反転 → prove_optimal は Err(dual_sign) を返す。
@@ -256,19 +322,31 @@ fn prove_optimal_rejects_negated_z_ub_box_qp() {
     assert!(z_ub_orig > 0.0, "前提: z_ub_orig > 0 (実測確認済み)");
 
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     let gap = result.duality_gap_rel.unwrap_or(0.0);
-    let cert = prove_optimal(&view, &result.solution, &result.dual_solution, &z_bad, gap, TOL);
+    let cert = prove_optimal(
+        &view,
+        &result.solution,
+        &result.dual_solution,
+        &z_bad,
+        gap,
+        TOL,
+    );
     assert!(cert.is_err(), "z_ub 符号反転は Err を返すべき");
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"dual_sign"),
         "dual_sign が failing_conditions に含まれるべき (z_ub < 0 violation): {:?}\n\
         dual_sign_violation={:.3e}, z_ub_orig={z_ub_orig:.3e}",
-        err.failing_conditions, err.dual_sign_violation,
+        err.failing_conditions,
+        err.dual_sign_violation,
     );
 }
 
@@ -292,40 +370,54 @@ fn prove_optimal_rejects_negated_z_ub_box_qp() {
 fn prove_optimal_dual_sign_isolated_stationarity_zero_cancelling_le() {
     // A = [[1], [-1]] (2 Le constraints), b = [1, -1], c = [0], Q = 0
     let q = CscMatrix::new(1, 1);
-    let a = CscMatrix::from_triplets(
-        &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
     let c = vec![0.0_f64];
     let b = vec![1.0_f64, -1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
     let ct = vec![ConstraintType::Le, ConstraintType::Le];
     let qp = QpProblem::new(q, c, a, b, bounds, ct).unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
 
     let x = vec![1.0_f64]; // 両制約 active (slack = 0)
-    let v = 0.1_f64;       // dual magnitude (well above TOL=1e-5)
+    let v = 0.1_f64; // dual magnitude (well above TOL=1e-5)
 
     // 正当な双対: stat=0, dsign=0
     let y_good = vec![v, v];
     let cert_good = prove_optimal(&view, &x, &y_good, &[], 0.0, TOL);
-    assert!(cert_good.is_ok(), "正当な双対は Ok を返すべき: {:?}", cert_good.err());
+    assert!(
+        cert_good.is_ok(),
+        "正当な双対は Ok を返すべき: {:?}",
+        cert_good.err()
+    );
 
     // 符号反転双対: stat=0 (キャンセル), comp=0 (active), dsign>tol
     let y_bad = vec![-v, -v];
     let cert_bad = prove_optimal(&view, &x, &y_bad, &[], 0.0, TOL);
-    assert!(cert_bad.is_err(), "符号反転双対 (stationarity=0 保持) は Err を返すべき");
+    assert!(
+        cert_bad.is_err(),
+        "符号反転双対 (stationarity=0 保持) は Err を返すべき"
+    );
     let err = cert_bad.unwrap_err();
     assert_eq!(
-        err.failing_conditions, vec!["dual_sign"],
+        err.failing_conditions,
+        vec!["dual_sign"],
         "dual_sign のみが failing_conditions に含まれるべき (stationarity は 0 で pass): {:?}\n\
         stat={:.3e}, pres={:.3e}, bviol={:.3e}, comp={:.3e}, dsign={:.3e}, gap={:.3e}",
         err.failing_conditions,
-        err.stationarity_rel, err.primal_residual_rel, err.bound_violation,
-        err.complementarity_rel, err.dual_sign_violation, err.duality_gap_rel,
+        err.stationarity_rel,
+        err.primal_residual_rel,
+        err.bound_violation,
+        err.complementarity_rel,
+        err.dual_sign_violation,
+        err.duality_gap_rel,
     );
 }
 
@@ -340,12 +432,21 @@ fn mutation_only_stationarity_fails() {
     let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
     let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
     let qp = QpProblem::new(
-        q, vec![0.0], a, vec![-1.0], vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        q,
+        vec![0.0],
+        a,
+        vec![-1.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
         vec![ConstraintType::Le],
-    ).unwrap();
+    )
+    .unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     // x=-1.5 (Le: -1.5 ≤ -1 ✓), y=0 (stationarity: 2*(-1.5)+0+0 = -3 ≠ 0)
@@ -355,12 +456,21 @@ fn mutation_only_stationarity_fails() {
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"stationarity"),
-        "stationarity must be in failing_conditions: {:?}", err.failing_conditions
+        "stationarity must be in failing_conditions: {:?}",
+        err.failing_conditions
     );
     // primal, bviol, comp, dsign, gap は pass を確認
-    assert!(err.primal_residual_rel < TOL, "pres should pass, got {:.3e}", err.primal_residual_rel);
+    assert!(
+        err.primal_residual_rel < TOL,
+        "pres should pass, got {:.3e}",
+        err.primal_residual_rel
+    );
     assert!(err.bound_violation < TOL, "bviol should pass");
-    assert!(err.complementarity_rel < TOL, "comp should pass, got {:.3e}", err.complementarity_rel);
+    assert!(
+        err.complementarity_rel < TOL,
+        "comp should pass, got {:.3e}",
+        err.complementarity_rel
+    );
     assert!(err.dual_sign_violation < TOL, "dsign should pass");
     assert!(err.duality_gap_rel < TOL, "gap should pass");
 }
@@ -371,12 +481,21 @@ fn mutation_only_primal_feas_fails() {
     let q = CscMatrix::from_triplets(&[0usize], &[0usize], &[2.0_f64], 1, 1).unwrap();
     let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
     let qp = QpProblem::new(
-        q, vec![0.0], a, vec![-1.0], vec![(f64::NEG_INFINITY, f64::INFINITY)],
+        q,
+        vec![0.0],
+        a,
+        vec![-1.0],
+        vec![(f64::NEG_INFINITY, f64::INFINITY)],
         vec![ConstraintType::Le],
-    ).unwrap();
+    )
+    .unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     // x=0 (Le: 0 ≤ -1 違反!), y=0 (stat: Q*0+0+0=0 ✓), z=[]
@@ -386,9 +505,14 @@ fn mutation_only_primal_feas_fails() {
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"primal_feasibility"),
-        "primal_feasibility must fail: {:?}", err.failing_conditions
+        "primal_feasibility must fail: {:?}",
+        err.failing_conditions
     );
-    assert!(err.stationarity_rel < TOL, "stat should pass, got {:.3e}", err.stationarity_rel);
+    assert!(
+        err.stationarity_rel < TOL,
+        "stat should pass, got {:.3e}",
+        err.stationarity_rel
+    );
     assert!(err.bound_violation < TOL, "bviol should pass");
     assert!(err.complementarity_rel < TOL, "comp should pass");
     assert!(err.dual_sign_violation < TOL, "dsign should pass");
@@ -400,12 +524,14 @@ fn mutation_only_primal_feas_fails() {
 fn mutation_only_bound_feas_fails() {
     let q = CscMatrix::new(1, 1);
     let a = CscMatrix::new(0, 1);
-    let qp = QpProblem::new(
-        q, vec![0.0], a, vec![], vec![(1.0, 2.0)], vec![],
-    ).unwrap();
+    let qp = QpProblem::new(q, vec![0.0], a, vec![], vec![(1.0, 2.0)], vec![]).unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     // bounds=[(1,2)]: n_lb=1, n_ub=1 → z=[z_lb, z_ub].
@@ -416,7 +542,8 @@ fn mutation_only_bound_feas_fails() {
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"bound_feasibility"),
-        "bound_feasibility must fail: {:?}", err.failing_conditions
+        "bound_feasibility must fail: {:?}",
+        err.failing_conditions
     );
     assert!(err.stationarity_rel < TOL, "stat should pass");
     assert!(err.primal_residual_rel < TOL, "pres should pass");
@@ -434,20 +561,24 @@ fn mutation_only_bound_feas_fails() {
 #[test]
 fn mutation_only_complementarity_fails() {
     // Q = diag(2, 2), c = [-2, -2], A = [1, 1] (Le ≤ 3)
-    let q = CscMatrix::from_triplets(
-        &[0usize, 1], &[0, 1], &[2.0_f64, 2.0], 2, 2,
-    ).unwrap();
-    let a = CscMatrix::from_triplets(
-        &[0usize, 0], &[0, 1], &[1.0_f64, 1.0], 1, 2,
-    ).unwrap();
+    let q = CscMatrix::from_triplets(&[0usize, 1], &[0, 1], &[2.0_f64, 2.0], 2, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0usize, 0], &[0, 1], &[1.0_f64, 1.0], 1, 2).unwrap();
     let qp = QpProblem::new(
-        q, vec![-2.0, -2.0], a, vec![3.0],
+        q,
+        vec![-2.0, -2.0],
+        a,
+        vec![3.0],
         vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
         vec![ConstraintType::Le],
-    ).unwrap();
+    )
+    .unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     // x = [0.75, 0.75]: stat = 2*0.75−2+0.5 = 0 for each component ✓
@@ -459,12 +590,21 @@ fn mutation_only_complementarity_fails() {
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"complementarity"),
-        "complementarity must fail: {:?}", err.failing_conditions
+        "complementarity must fail: {:?}",
+        err.failing_conditions
     );
-    assert!(err.stationarity_rel < TOL, "stat should pass, got {:.3e}", err.stationarity_rel);
+    assert!(
+        err.stationarity_rel < TOL,
+        "stat should pass, got {:.3e}",
+        err.stationarity_rel
+    );
     assert!(err.primal_residual_rel < TOL, "pres should pass");
     assert!(err.bound_violation < TOL, "bviol should pass");
-    assert!(err.dual_sign_violation < TOL, "dsign should pass, got {:.3e}", err.dual_sign_violation);
+    assert!(
+        err.dual_sign_violation < TOL,
+        "dsign should pass, got {:.3e}",
+        err.dual_sign_violation
+    );
     assert!(err.duality_gap_rel < TOL, "gap should pass");
 }
 
@@ -475,17 +615,23 @@ fn mutation_only_complementarity_fails() {
 #[test]
 fn mutation_only_dual_sign_fails() {
     let q = CscMatrix::new(1, 1);
-    let a = CscMatrix::from_triplets(
-        &[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1,
-    ).unwrap();
+    let a = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, -1.0], 2, 1).unwrap();
     let qp = QpProblem::new(
-        q, vec![0.0], a, vec![1.0, -1.0],
+        q,
+        vec![0.0],
+        a,
+        vec![1.0, -1.0],
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
         vec![ConstraintType::Le, ConstraintType::Le],
-    ).unwrap();
+    )
+    .unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     let x = vec![1.0_f64];
@@ -495,8 +641,10 @@ fn mutation_only_dual_sign_fails() {
     assert!(cert.is_err());
     let err = cert.unwrap_err();
     assert_eq!(
-        err.failing_conditions, vec!["dual_sign"],
-        "dual_sign のみ fail: {:?}", err.failing_conditions
+        err.failing_conditions,
+        vec!["dual_sign"],
+        "dual_sign のみ fail: {:?}",
+        err.failing_conditions
     );
 }
 
@@ -507,13 +655,21 @@ fn mutation_only_duality_gap_fails() {
     let q = CscMatrix::new(1, 1);
     let a = CscMatrix::from_triplets(&[0usize], &[0usize], &[1.0_f64], 1, 1).unwrap();
     let qp = QpProblem::new(
-        q, vec![-1.0], a, vec![1.0],
+        q,
+        vec![-1.0],
+        a,
+        vec![1.0],
         vec![(0.0, f64::INFINITY)],
         vec![ConstraintType::Le],
-    ).unwrap();
+    )
+    .unwrap();
     let view = ProblemView {
-        q: &qp.q, a: &qp.a, c: &qp.c, b: &qp.b,
-        bounds: &qp.bounds, constraint_types: &qp.constraint_types,
+        q: &qp.q,
+        a: &qp.a,
+        c: &qp.c,
+        b: &qp.b,
+        bounds: &qp.bounds,
+        constraint_types: &qp.constraint_types,
         eliminated_cols: &[],
     };
     // bounds=[(0,inf)]: n_lb=1, n_ub=0 → z=[z_lb].
@@ -526,11 +682,20 @@ fn mutation_only_duality_gap_fails() {
     let err = cert.unwrap_err();
     assert!(
         err.failing_conditions.contains(&"duality_gap"),
-        "duality_gap must fail: {:?}", err.failing_conditions
+        "duality_gap must fail: {:?}",
+        err.failing_conditions
     );
-    assert!(err.stationarity_rel < TOL, "stat should pass, got {:.3e}", err.stationarity_rel);
+    assert!(
+        err.stationarity_rel < TOL,
+        "stat should pass, got {:.3e}",
+        err.stationarity_rel
+    );
     assert!(err.primal_residual_rel < TOL, "pres should pass");
     assert!(err.bound_violation < TOL, "bviol should pass");
-    assert!(err.complementarity_rel < TOL, "comp should pass, got {:.3e}", err.complementarity_rel);
+    assert!(
+        err.complementarity_rel < TOL,
+        "comp should pass, got {:.3e}",
+        err.complementarity_rel
+    );
     assert!(err.dual_sign_violation < TOL, "dsign should pass");
 }

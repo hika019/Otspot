@@ -1,11 +1,11 @@
 //! IPM/IP-PMM 共通関数。
 
+use super::kkt::{norm_inf, spmv};
 use crate::linalg::ldl;
 use crate::linalg::timeout::TimeoutCtx;
 use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
-use super::kkt::{spmv, norm_inf};
 
 /// ステップ方向 (Δx, Δy) から infeasibility / unboundedness を検出する。
 #[allow(clippy::too_many_arguments)]
@@ -44,7 +44,12 @@ pub(crate) fn check_infeasible_or_unbounded(
                 }
             }
             let cond_a = norm_inf(&at_dy) / norm_dy < EPS_INF;
-            let b_dy: f64 = problem.b.iter().zip(dy_orig.iter()).map(|(&bi, &dyi)| bi * dyi).sum();
+            let b_dy: f64 = problem
+                .b
+                .iter()
+                .zip(dy_orig.iter())
+                .map(|(&bi, &dyi)| bi * dyi)
+                .sum();
             let cond_b = b_dy / norm_dy < -EPS_INF;
             if cond_a && cond_b {
                 return Some(SolveStatus::Infeasible);
@@ -63,7 +68,12 @@ pub(crate) fn check_infeasible_or_unbounded(
 
     let is_lp = problem.q.values.iter().all(|&v| v == 0.0);
     let cond_obj = if is_lp {
-        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
+        let c_dx: f64 = problem
+            .c
+            .iter()
+            .zip(dx.iter())
+            .map(|(&ci, &dxi)| ci * dxi)
+            .sum();
         c_dx / norm_dx < -EPS_INF
     } else {
         let mut qdx = vec![0.0f64; n];
@@ -72,7 +82,12 @@ pub(crate) fn check_infeasible_or_unbounded(
             qdx[i] += delta_p * dx[i];
         }
         let norm_qdx: f64 = qdx.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
-        let c_dx: f64 = problem.c.iter().zip(dx.iter()).map(|(&ci, &dxi)| ci * dxi).sum();
+        let c_dx: f64 = problem
+            .c
+            .iter()
+            .zip(dx.iter())
+            .map(|(&ci, &dxi)| ci * dxi)
+            .sum();
         (norm_qdx / norm_dx < EPS_INF) && (c_dx / norm_dx < -EPS_INF)
     };
     if !cond_obj {
@@ -98,7 +113,12 @@ pub(crate) fn check_infeasible_or_unbounded(
 }
 
 /// α = min(1, τ · min_i { -v_i / Δv_i  for Δv_i < 0, skip_mask[i] == false } )
-pub(crate) fn fraction_to_boundary_masked(v: &[f64], dv: &[f64], tau: f64, skip_mask: &[bool]) -> f64 {
+pub(crate) fn fraction_to_boundary_masked(
+    v: &[f64],
+    dv: &[f64],
+    tau: f64,
+    skip_mask: &[bool],
+) -> f64 {
     let mut alpha = 1.0_f64;
     for (i, (&vi, &dvi)) in v.iter().zip(dv.iter()).enumerate() {
         if skip_mask[i] {
@@ -163,7 +183,8 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
         }
     }
 
-    let q_reg = CscMatrix::from_triplets(&triplet_rows, &triplet_cols, &triplet_vals, n, n).unwrap();
+    let q_reg =
+        CscMatrix::from_triplets(&triplet_rows, &triplet_cols, &triplet_vals, n, n).unwrap();
 
     match ldl::factorize(&q_reg) {
         Ok(fac) => {
@@ -174,8 +195,16 @@ pub(crate) fn solve_unconstrained(problem: &QpProblem, timeout_ctx: &TimeoutCtx)
             let mut qx = vec![0.0f64; n];
             spmv(&problem.q, &x, &mut qx);
             let objective = 0.5
-                * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
-                + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
+                * qx.iter()
+                    .zip(x.iter())
+                    .map(|(&qi, &xi)| qi * xi)
+                    .sum::<f64>()
+                + problem
+                    .c
+                    .iter()
+                    .zip(x.iter())
+                    .map(|(&ci, &xi)| ci * xi)
+                    .sum::<f64>();
 
             SolverResult {
                 status: SolveStatus::Optimal,

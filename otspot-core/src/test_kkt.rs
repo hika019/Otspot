@@ -30,12 +30,7 @@ const BOUND_TOL: f64 = 1e-6;
 /// `compute_dfeas_orig` (bench) と同型: fixed (lb==ub) を除外し、active な
 /// 下端のみで rc<0、active な上端のみで rc>0、interior で rc!=0 の違反量を
 /// `(1 + |rc| + |c|)` で正規化して取る。
-pub fn dfeas_rel_bound(
-    c: &[f64],
-    bounds: &[(f64, f64)],
-    x: &[f64],
-    rc: &[f64],
-) -> f64 {
+pub fn dfeas_rel_bound(c: &[f64], bounds: &[(f64, f64)], x: &[f64], rc: &[f64]) -> f64 {
     let n = c.len().min(rc.len()).min(x.len());
     let mut max_rel = 0.0_f64;
     for j in 0..n {
@@ -146,7 +141,11 @@ pub fn assert_solver_invariants_lp(result: &crate::problem::SolverResult, lp: &L
 /// shows up in failure messages so tests calling this twice with different
 /// settings can be disambiguated.
 pub fn assert_kkt_optimal(lp: &LpProblem, expected_obj: f64, label: &'static str) {
-    let opts = SolverOptions { presolve: true, timeout_secs: Some(MINI_TIMEOUT_SECS), ..Default::default() };
+    let opts = SolverOptions {
+        presolve: true,
+        timeout_secs: Some(MINI_TIMEOUT_SECS),
+        ..Default::default()
+    };
     assert_kkt_optimal_with(lp, expected_obj, label, &opts);
 }
 
@@ -218,12 +217,12 @@ pub fn assert_kkt_optimal_with(
 /// bound feasibility, and KKT stationarity residual via the shared IPM KKT
 /// helpers. For non-Optimal results: returns immediately (honest non-Optimal
 /// is always acceptable).
-pub fn assert_solver_invariants_qp(
-    result: &crate::problem::SolverResult,
-    qp: &QpProblem,
-) {
+pub fn assert_solver_invariants_qp(result: &crate::problem::SolverResult, qp: &QpProblem) {
     use crate::problem::SolveStatus;
-    if !matches!(result.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+    if !matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::LocallyOptimal
+    ) {
         return;
     }
     assert!(
@@ -231,12 +230,7 @@ pub fn assert_solver_invariants_qp(
         "Optimal/LocallyOptimal QP result must have non-empty solution"
     );
     // Primal feasibility via shared LP helper (same Ax-b logic).
-    let pf = pfeas_abs(
-        &qp.a,
-        &qp.b,
-        &qp.constraint_types,
-        &result.solution,
-    );
+    let pf = pfeas_abs(&qp.a, &qp.b, &qp.constraint_types, &result.solution);
     let b_inf = qp.b.iter().fold(0.0_f64, |a, &v: &f64| a.max(v.abs()));
     let pf_norm = pf / (1.0 + b_inf);
     assert!(
@@ -351,7 +345,7 @@ mod no_op_proof_tests {
         let corrupt = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![1.0],
-            dual_solution: vec![0.0],   // should be 1.0 (Ge simplex dual >= 0)
+            dual_solution: vec![0.0], // should be 1.0 (Ge simplex dual >= 0)
             reduced_costs: vec![0.0],
             ..Default::default()
         };
@@ -379,7 +373,7 @@ mod no_op_proof_tests {
         let corrupt = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![1.0],
-            dual_solution: vec![1.0],   // wrong sign: Le simplex dual must be ≤ 0
+            dual_solution: vec![1.0], // wrong sign: Le simplex dual must be ≤ 0
             reduced_costs: vec![0.0],
             ..Default::default()
         };
@@ -455,15 +449,7 @@ mod no_op_proof_tests {
         use crate::qp::QpProblem;
         let a = CscMatrix::new(0, 1);
         let q = CscMatrix::from_triplets(&[0], &[0], &[2.0], 1, 1).unwrap();
-        let prob = QpProblem::new(
-            q,
-            vec![0.0],
-            a,
-            vec![],
-            vec![(0.0, 1.0)],
-            vec![],
-        )
-        .unwrap();
+        let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(0.0, 1.0)], vec![]).unwrap();
         let corrupt = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![5.0],
@@ -498,7 +484,7 @@ mod no_op_proof_tests {
         let corrupt = SolverResult {
             status: SolveStatus::Optimal,
             solution: vec![1.0],
-            dual_solution: vec![0.0],   // should be -2.0; Qx+c+Aty = 2+0+0 = 2 ≠ 0
+            dual_solution: vec![0.0], // should be -2.0; Qx+c+Aty = 2+0+0 = 2 ≠ 0
             bound_duals: vec![0.0],
             ..Default::default()
         };
@@ -553,11 +539,16 @@ mod no_op_proof_tests {
             vec![ConstraintType::Eq],
         )
         .unwrap();
-        for status in [SolveStatus::Infeasible, SolveStatus::Timeout, SolveStatus::NumericalError,
-                       SolveStatus::MaxIterations, SolveStatus::SuboptimalSolution] {
+        for status in [
+            SolveStatus::Infeasible,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+            SolveStatus::MaxIterations,
+            SolveStatus::SuboptimalSolution,
+        ] {
             let r = SolverResult {
                 status,
-                solution: vec![1e12],   // corrupt, but status is non-Optimal
+                solution: vec![1e12], // corrupt, but status is non-Optimal
                 dual_solution: vec![0.0],
                 bound_duals: vec![0.0],
                 ..Default::default()

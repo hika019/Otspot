@@ -19,8 +19,8 @@
 //!  - diag indefinite (concave) n=3
 
 use otspot::options::{MultiStartConfig, StartStrategy};
-use otspot::qp::{solve_qp_with, QpProblem};
 use otspot::qp::multistart::solve_qp_multistart;
+use otspot::qp::{solve_qp_with, QpProblem};
 use otspot::sparse::CscMatrix;
 use otspot::{SolveStatus, SolverOptions};
 
@@ -47,14 +47,8 @@ fn opts_with_timeout(secs: f64) -> SolverOptions {
 /// bilinear xy + 微小対角 (LP fallback 回避): f = 1e-6 x² + xy + 1e-6 y²。
 /// c=0 で saddle (0,0) 固着 → 大域 (bnd, -bnd) と (-bnd, bnd) で obj = -bnd²。
 fn build_bilinear_zero_c(bnd: f64) -> QpProblem {
-    let q = CscMatrix::from_triplets(
-        &[0, 1, 0, 1],
-        &[0, 0, 1, 1],
-        &[1e-6, 1.0, 1.0, 1e-6],
-        2,
-        2,
-    )
-    .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1e-6, 1.0, 1.0, 1e-6], 2, 2)
+        .unwrap();
     let c = vec![0.0_f64, 0.0];
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
     let bounds = vec![(-bnd, bnd); 2];
@@ -103,7 +97,10 @@ fn multistart_n1_equals_cold_solve() {
     let (cs, co) = cold_solve(&prob);
     let (ms, mo) = multi_solve(&prob, 1, 42, StartStrategy::RandomBox);
     assert_eq!(cs, ms, "status must match for n_starts=1");
-    assert!((co - mo).abs() < 1e-9, "objective must match: cold={co} ms={mo}");
+    assert!(
+        (co - mo).abs() < 1e-9,
+        "objective must match: cold={co} ms={mo}"
+    );
 }
 
 #[test]
@@ -125,7 +122,10 @@ fn multistart_bilinear_bnd3_escapes_cold_saddle() {
     let prob = build_bilinear_zero_c(3.0);
     let (cs, cold_obj) = cold_solve(&prob);
     assert!(is_solved(&cs), "cold solved status: {cs:?}");
-    assert!(cold_obj.abs() < 1e-3, "cold should sit at saddle obj≈0, got {cold_obj}");
+    assert!(
+        cold_obj.abs() < 1e-3,
+        "cold should sit at saddle obj≈0, got {cold_obj}"
+    );
     let (ms, ms_obj) = multi_solve(&prob, 10, 0xC0FFEE, StartStrategy::RandomBox);
     assert!(is_solved(&ms), "ms solved status: {ms:?}");
     assert!(ms_obj <= cold_obj + 1e-9, "ms never worse than cold");
@@ -144,14 +144,20 @@ fn multistart_bilinear_bnd3_escapes_cold_saddle() {
 fn multistart_diag_concave_2d_escapes_cold_saddle() {
     let prob = build_diag_concave(2, 3.0);
     let (_, cold_obj) = cold_solve(&prob);
-    assert!(cold_obj.abs() < 1e-3, "diag 2D cold saddle obj≈0, got {cold_obj}");
+    assert!(
+        cold_obj.abs() < 1e-3,
+        "diag 2D cold saddle obj≈0, got {cold_obj}"
+    );
     let (_, ms_obj) = multi_solve(&prob, 12, 0xBEEF, StartStrategy::RandomBox);
     let improvement = cold_obj - ms_obj;
     assert!(
         improvement >= STRICT_IMPROVEMENT_MARGIN,
         "diag 2D improvement: cold={cold_obj} ms={ms_obj}"
     );
-    assert!((ms_obj - (-18.0)).abs() < 1e-3, "ms global -18, got {ms_obj}");
+    assert!(
+        (ms_obj - (-18.0)).abs() < 1e-3,
+        "ms global -18, got {ms_obj}"
+    );
 }
 
 #[test]
@@ -165,7 +171,10 @@ fn multistart_diag_concave_3d_escapes_cold_saddle() {
         improvement >= STRICT_IMPROVEMENT_MARGIN,
         "diag 3D improvement: cold={cold_obj} ms={ms_obj}"
     );
-    assert!((ms_obj - (-27.0)).abs() < 1e-3, "ms global -27, got {ms_obj}");
+    assert!(
+        (ms_obj - (-27.0)).abs() < 1e-3,
+        "ms global -27, got {ms_obj}"
+    );
 }
 
 #[test]
@@ -232,7 +241,10 @@ fn multistart_deterministic_with_same_seed() {
 #[test]
 fn api_solver_options_threads_default_is_1() {
     let o = SolverOptions::default();
-    assert_eq!(o.threads, 1, "default threads must be 1 (= existing behavior)");
+    assert_eq!(
+        o.threads, 1,
+        "default threads must be 1 (= existing behavior)"
+    );
 }
 
 #[test]
@@ -284,7 +296,10 @@ fn api_model_set_threads_clamps_zero_to_one() {
     m.minimize(Expression::from(x));
     m.set_threads(0);
     // After clamping 0→1, the model must remain solvable.
-    assert!(m.solve().is_ok(), "set_threads(0) must not prevent solve (clamps to 1)");
+    assert!(
+        m.solve().is_ok(),
+        "set_threads(0) must not prevent solve (clamps to 1)"
+    );
 }
 
 #[test]

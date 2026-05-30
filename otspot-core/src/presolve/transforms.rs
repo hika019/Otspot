@@ -27,5 +27,5 @@ mod tests;
 mod tests_per_step;
 
 pub use driver::{run_presolve, run_presolve_with_flags};
-pub use state::{PresolveFlags, PresolveResult, PresolveStatus};
 pub(crate) use state::{PostsolveStep, PresolveState};
+pub use state::{PresolveFlags, PresolveResult, PresolveStatus};

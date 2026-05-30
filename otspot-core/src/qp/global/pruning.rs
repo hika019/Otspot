@@ -8,11 +8,7 @@
 
 /// node が ε-optimal 圏内か (= prune 可)。
 /// `incumbent` None (= まだ feasible 解見つかってない) は prune できない。
-pub(crate) fn should_prune(
-    node_lower_bound: f64,
-    incumbent: Option<f64>,
-    gap_tol: f64,
-) -> bool {
+pub(crate) fn should_prune(node_lower_bound: f64, incumbent: Option<f64>, gap_tol: f64) -> bool {
     match incumbent {
         None => false,
         Some(inc) => within_gap(inc, node_lower_bound, gap_tol),

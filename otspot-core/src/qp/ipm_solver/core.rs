@@ -7,7 +7,9 @@ mod post_processing;
 mod postsolve_dual;
 mod warm_start;
 
-use super::kkt::{bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel};
+use super::kkt::{
+    bound_violation, complementarity_residual_rel, kkt_residual_rel, primal_residual_rel,
+};
 use super::outcome::{IpmOutcome, ProblemView};
 use crate::options::SolverOptions;
 use crate::presolve::{postsolve_qp_with_dual_recovery, QpPresolveResult};
@@ -36,7 +38,10 @@ pub fn run_ipm(
     opts: &SolverOptions,
 ) -> IpmOutcome {
     if opts.validate().is_err() {
-        return IpmOutcome { numerical_failure: true, ..IpmOutcome::empty() };
+        return IpmOutcome {
+            numerical_failure: true,
+            ..IpmOutcome::empty()
+        };
     }
     run_ipm_with(
         orig_problem,
@@ -85,9 +90,7 @@ fn run_ipm_with(
     // is_empty() / any(!finite()) を n_reduced>0 の場合のみ適用する。
     let n_reduced = reduced.num_vars;
     let invalid = matches!(result.status, SolveStatus::NumericalError)
-        || (n_reduced > 0
-            && (result.solution.is_empty()
-                || any_nonfinite(&result.solution)));
+        || (n_reduced > 0 && (result.solution.is_empty() || any_nonfinite(&result.solution)));
     if invalid {
         return IpmOutcome {
             solution: Vec::new(),
@@ -131,7 +134,11 @@ fn run_ipm_with(
     let postsolve_map_us = t_postsolve_map.elapsed().as_micros() as u64;
 
     // bounds clip (Ruiz unscale 増幅由来の微小違反補正)
-    for (xi, &(lb, ub)) in final_sol.solution.iter_mut().zip(orig_problem.bounds.iter()) {
+    for (xi, &(lb, ub)) in final_sol
+        .solution
+        .iter_mut()
+        .zip(orig_problem.bounds.iter())
+    {
         if lb.is_finite() {
             *xi = xi.max(lb);
         }
@@ -156,7 +163,11 @@ fn run_ipm_with(
         let t_recovery = std::time::Instant::now();
         if result.iterations > 0 {
             refine_postsolve_recovery(
-                orig_problem, presolve_result, &eliminated_cols, &mut final_sol, opts,
+                orig_problem,
+                presolve_result,
+                &eliminated_cols,
+                &mut final_sol,
+                opts,
             );
         }
         postsolve_recovery_us = t_recovery.elapsed().as_micros() as u64;
@@ -172,7 +183,11 @@ fn run_ipm_with(
 
     let user_eps_for_skip = opts.ipm_eps();
     let kkt_already_pass = kkt_already_passes(
-        orig_problem, &final_sol, &eliminated_cols, result.status == SolveStatus::Optimal, user_eps_for_skip,
+        orig_problem,
+        &final_sol,
+        &eliminated_cols,
+        result.status == SolveStatus::Optimal,
+        user_eps_for_skip,
     );
     // Stage 1+2 (primal projection + y/z refit/IRLS): run for side effects on
     // `final_sol` only when the solution does not already meet the tolerance.
@@ -183,7 +198,13 @@ fn run_ipm_with(
         && ipm_made_progress
         && !kkt_already_pass
     {
-        refine_post_processing(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
+        refine_post_processing(
+            orig_problem,
+            &mut final_sol,
+            &eliminated_cols,
+            opts,
+            allow_primal,
+        );
     }
     let postsolve_refine_us = t_refine.elapsed().as_micros() as u64;
 
@@ -196,7 +217,13 @@ fn run_ipm_with(
     let run_krylov_ir = ipm_made_progress && !kkt_already_pass;
     let t_krylov = std::time::Instant::now();
     if run_krylov_ir {
-        refine_krylov_and_projection(orig_problem, &mut final_sol, &eliminated_cols, opts, allow_primal);
+        refine_krylov_and_projection(
+            orig_problem,
+            &mut final_sol,
+            &eliminated_cols,
+            opts,
+            allow_primal,
+        );
     }
     let postsolve_krylov_ir_us = t_krylov.elapsed().as_micros() as u64;
     // Sentinel: the IR would run whenever the IPM made progress; this is true iff
@@ -223,14 +250,20 @@ fn run_ipm_with(
         eliminated_cols: &eliminated_cols,
     };
     let kkt_final = kkt_residual_rel(
-        &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
     );
     let kkt_out = kkt_final;
 
     let pres = primal_residual_rel(&view, &final_sol.solution);
     let bv = bound_violation(orig_problem.bounds.as_slice(), &final_sol.solution);
     let comp = complementarity_residual_rel(
-        &view, &final_sol.solution, &final_sol.dual_solution, &final_sol.bound_duals,
+        &view,
+        &final_sol.solution,
+        &final_sol.dual_solution,
+        &final_sol.bound_duals,
     );
     let dual_gap = compute_duality_gap_rel(orig_problem, &final_sol);
 
@@ -240,8 +273,17 @@ fn run_ipm_with(
             .q
             .mat_vec_mul(&final_sol.solution)
             .unwrap_or_else(|_| vec![0.0; orig_problem.num_vars]);
-        let xqx: f64 = qx.iter().zip(final_sol.solution.iter()).map(|(&q, &x)| q * x).sum();
-        let cx: f64 = orig_problem.c.iter().zip(final_sol.solution.iter()).map(|(&c, &x)| c * x).sum();
+        let xqx: f64 = qx
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&q, &x)| q * x)
+            .sum();
+        let cx: f64 = orig_problem
+            .c
+            .iter()
+            .zip(final_sol.solution.iter())
+            .map(|(&c, &x)| c * x)
+            .sum();
         0.5 * xqx + cx + orig_problem.obj_offset
     };
 

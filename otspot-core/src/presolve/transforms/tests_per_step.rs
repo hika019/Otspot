@@ -62,7 +62,10 @@ fn step5_le_positive_coeff_tightens_ub() {
     step5_bounds_tightening(&mut st, &mut fixed).unwrap();
     let (lb_y, ub_y) = st.bounds[1];
     assert_eq!(lb_y, 0.0);
-    assert!((ub_y - 2.0).abs() < 1e-10, "y_ub should tighten to 2, got {ub_y}");
+    assert!(
+        (ub_y - 2.0).abs() < 1e-10,
+        "y_ub should tighten to 2, got {ub_y}"
+    );
     assert!(count_bounds_tightened(&st) >= 1);
 }
 
@@ -83,7 +86,10 @@ fn step5_ge_positive_coeff_tightens_lb() {
     let mut fixed = 0usize;
     step5_bounds_tightening(&mut st, &mut fixed).unwrap();
     let (lb_x, _) = st.bounds[0];
-    assert!((lb_x - 0.5).abs() < 1e-10, "x_lb should tighten to 0.5, got {lb_x}");
+    assert!(
+        (lb_x - 0.5).abs() < 1e-10,
+        "x_lb should tighten to 0.5, got {lb_x}"
+    );
     assert!(count_bounds_tightened(&st) >= 1);
 }
 
@@ -171,7 +177,10 @@ fn step6_prefers_free_pivot() {
     let mut subst = 0usize;
     step6_doubleton_equation(&mut st, &mut subst).unwrap();
     assert_eq!(subst, 1);
-    assert!(st.removed_cols[1], "free col y should be pivot, not bounded x");
+    assert!(
+        st.removed_cols[1],
+        "free col y should be pivot, not bounded x"
+    );
     assert!(!st.removed_cols[0]);
 }
 
@@ -259,11 +268,16 @@ fn step7_picks_largest_magnitude_pivot() {
     step7_free_var_substitution(&mut st, &mut subst).unwrap();
     assert_eq!(subst, 1);
     let pivot_mag = st.postsolve_stack.iter().find_map(|s| match s {
-        PostsolveStep::LinearSubstitution { pivot, orig_col, .. } if *orig_col == 2 => Some(pivot.abs()),
+        PostsolveStep::LinearSubstitution {
+            pivot, orig_col, ..
+        } if *orig_col == 2 => Some(pivot.abs()),
         _ => None,
     });
     assert!(pivot_mag.is_some(), "free col z should be eliminated");
-    assert!((pivot_mag.unwrap() - 3.0).abs() < 1e-10, "should pick |3| over |1|");
+    assert!(
+        (pivot_mag.unwrap() - 3.0).abs() < 1e-10,
+        "should pick |3| over |1|"
+    );
 }
 
 // -----------------------------------------------------------
@@ -350,7 +364,10 @@ fn fill_in_budget_allows_dense_pivot_with_few_targets() {
         vec![ConstraintType::Eq, ConstraintType::Le],
         vec![(0.0, 10.0); 3],
     );
-    assert!(!fill_in_exceeds_budget(&st, 0, 0), "low fill-in must not be skipped");
+    assert!(
+        !fill_in_exceeds_budget(&st, 0, 0),
+        "low fill-in must not be skipped"
+    );
 }
 
 #[test]
@@ -395,5 +412,8 @@ fn fill_in_budget_blocks_high_fill() {
         cts,
         bounds,
     );
-    assert!(fill_in_exceeds_budget(&st, 0, 0), "dense disjoint fill should exceed budget");
+    assert!(
+        fill_in_exceeds_budget(&st, 0, 0),
+        "dense disjoint fill should exceed budget"
+    );
 }

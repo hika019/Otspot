@@ -18,13 +18,13 @@ use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::ldlt::factor::{LdltError, LdltRegularization};
 use faer::reborrow::*;
 use faer::sparse::linalg::cholesky::{
-    factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRef, SymbolicCholesky,
-    SymbolicCholeskyRaw, SymmetricOrdering, simplicial, supernodal,
+    factorize_symbolic_cholesky, simplicial, supernodal, CholeskySymbolicParams, LdltRef,
+    SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
 };
 use faer::sparse::linalg::SupernodalThreshold;
-use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 #[cfg(test)]
 use faer::sparse::Triplet;
+use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -85,19 +85,11 @@ impl LdlFactorization {
     /// LDL^T x = b を解く。sol に解を書き込む。
     pub fn solve(&self, rhs: &[f64], sol: &mut [f64]) {
         sol.copy_from_slice(rhs);
-        let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(1, self.par),
-        );
+        let mut mem = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(1, self.par));
         let stack = MemStack::new(&mut mem);
         let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
-        let mut sol_mat =
-            faer::MatMut::from_column_major_slice_mut(sol, self.n, 1);
-        ldlt.solve_in_place_with_conj(
-            faer::Conj::No,
-            sol_mat.rb_mut(),
-            self.par,
-            stack,
-        );
+        let mut sol_mat = faer::MatMut::from_column_major_slice_mut(sol, self.n, 1);
+        ldlt.solve_in_place_with_conj(faer::Conj::No, sol_mat.rb_mut(), self.par, stack);
     }
 }
 
@@ -135,24 +127,15 @@ impl LdlFactorizationAmd {
         let b_p = permute_vec(rhs, &self.perm);
         let mut x_p = b_p;
 
-        let mut mem = MemBuffer::new(
-            self.symbolic.solve_in_place_scratch::<f64>(1, self.par),
-        );
+        let mut mem = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(1, self.par));
         let stack = MemStack::new(&mut mem);
         let ldlt = LdltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
-        let mut sol_mat =
-            faer::MatMut::from_column_major_slice_mut(&mut x_p, n, 1);
-        ldlt.solve_in_place_with_conj(
-            faer::Conj::No,
-            sol_mat.rb_mut(),
-            self.par,
-            stack,
-        );
+        let mut sol_mat = faer::MatMut::from_column_major_slice_mut(&mut x_p, n, 1);
+        ldlt.solve_in_place_with_conj(faer::Conj::No, sol_mat.rb_mut(), self.par, stack);
 
         let x = inv_permute_vec(&x_p, &self.perm);
         sol.copy_from_slice(&x);
     }
-
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
@@ -167,13 +150,8 @@ impl LdlFactorizationAmd {
 /// `try_new_from_triplets` の sort/compress を回避し、BOYD2 で 5ms → ~1ms 級。
 fn csc_upper_to_faer_upper(mat: &CscMatrix) -> SparseColMat<usize, f64> {
     let n = mat.nrows;
-    let symbolic = SymbolicSparseColMat::new_checked(
-        n,
-        n,
-        mat.col_ptr.clone(),
-        None,
-        mat.row_ind.clone(),
-    );
+    let symbolic =
+        SymbolicSparseColMat::new_checked(n, n, mat.col_ptr.clone(), None, mat.row_ind.clone());
     SparseColMat::new(symbolic, mat.values.clone())
 }
 
@@ -261,7 +239,10 @@ fn do_numeric_factorize_with_cache(
     let l_nnz = symbolic.len_val();
     if let Some(max) = max_l_nnz {
         if l_nnz > max {
-            return Err(LdlError::WouldExceedBudget { l_nnz, max_l_nnz: max });
+            return Err(LdlError::WouldExceedBudget {
+                l_nnz,
+                max_l_nnz: max,
+            });
         }
     }
 
@@ -442,7 +423,8 @@ fn is_q_psd_by_cholesky_impl(
     match symbolic.raw() {
         SymbolicCholeskyRaw::Simplicial(simp_sym) => {
             // Simplicial 経路: D 対角は col_ptr[j] 位置に格納されている。
-            let scratch_ldlt = simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n);
+            let scratch_ldlt =
+                simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n);
             let scratch_solve = simp_sym.solve_in_place_scratch::<f64>(1);
             let mut mem = MemBuffer::new(StackReq::any_of(&[scratch_ldlt, scratch_solve]));
             let stack = MemStack::new(&mut mem);
@@ -472,7 +454,8 @@ fn is_q_psd_by_cholesky_impl(
             // D 対角の読み出し:
             // 各スーパーノード s について SupernodalLdltRef::supernode(s).val() は
             // (s_nrows × s_ncols) の MatRef。val()[(j, j)] = D[s_start + j]。
-            let scratch = symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default());
+            let scratch =
+                symbolic.factorize_numeric_ldlt_scratch::<f64>(faer::Par::Seq, Default::default());
             let mut mem = MemBuffer::new(scratch);
             let stack = MemStack::new(&mut mem);
 
@@ -521,9 +504,13 @@ pub fn factorize(mat: &CscMatrix) -> Result<LdlFactorization, LdlError> {
 /// fill-in を捉えないため)。
 pub fn factorize_budget(mat: &CscMatrix, max_l_nnz: usize) -> Result<LdlFactorization, LdlError> {
     let n = mat.nrows;
-    let (symbolic, l_values) =
-        do_numeric_factorize(mat, None, None, Some(max_l_nnz), DEFAULT_PAR)?;
-    Ok(LdlFactorization { symbolic, l_values, n, par: DEFAULT_PAR })
+    let (symbolic, l_values) = do_numeric_factorize(mat, None, None, Some(max_l_nnz), DEFAULT_PAR)?;
+    Ok(LdlFactorization {
+        symbolic,
+        l_values,
+        n,
+        par: DEFAULT_PAR,
+    })
 }
 
 /// `factorize` の per-call parallelism 指定版。
@@ -534,7 +521,12 @@ pub(crate) fn factorize_with_par(
 ) -> Result<LdlFactorization, LdlError> {
     let n = mat.nrows;
     let (symbolic, l_values) = do_numeric_factorize(mat, None, None, None, par)?;
-    Ok(LdlFactorization { symbolic, l_values, n, par })
+    Ok(LdlFactorization {
+        symbolic,
+        l_values,
+        n,
+        par,
+    })
 }
 
 /// AMD 再順序化付き quasidefinite LDL^T 分解（AMD を内部で計算、既存互換）。
@@ -588,7 +580,13 @@ pub fn factorize_quasidefinite_with_cached_perm_budget_par(
     let signs = extract_diagonal_signs(n, &perm_mat.col_ptr, &perm_mat.row_ind, &perm_mat.values);
     let (symbolic, l_values) =
         do_numeric_factorize(&perm_mat, Some(&signs), deadline, max_l_nnz, par)?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
+    Ok(LdlFactorizationAmd {
+        symbolic,
+        l_values,
+        perm: perm.to_vec(),
+        n,
+        par,
+    })
 }
 
 /// AMD 置換適用済みの行列を受け取る per-call parallelism + symbolic キャッシュ版。
@@ -615,9 +613,20 @@ pub fn factorize_quasidefinite_pre_permuted_cached_par(
         &pre_permuted_mat.values,
     );
     let (symbolic, l_values) = do_numeric_factorize_with_cache(
-        pre_permuted_mat, Some(&signs), deadline, max_l_nnz, cached_symbolic, par,
+        pre_permuted_mat,
+        Some(&signs),
+        deadline,
+        max_l_nnz,
+        cached_symbolic,
+        par,
     )?;
-    Ok(LdlFactorizationAmd { symbolic, l_values, perm: perm.to_vec(), n, par })
+    Ok(LdlFactorizationAmd {
+        symbolic,
+        l_values,
+        perm: perm.to_vec(),
+        n,
+        par,
+    })
 }
 
 impl LdlFactorizationAmd {
@@ -658,17 +667,28 @@ mod tests {
                 values[start + idx] = val;
             }
         }
-        CscMatrix { col_ptr, row_ind, values, nrows: n, ncols: n }
+        CscMatrix {
+            col_ptr,
+            row_ind,
+            values,
+            nrows: n,
+            ncols: n,
+        }
     }
 
     #[test]
     fn test_factorize_pd_3x3_solve() {
         // A = [[4,1,0],[1,3,2],[0,2,5]] — positive definite
-        let mat = upper_tri_csc(3, &[
-            (0, 0, 4.0), (0, 1, 1.0),
-            (1, 1, 3.0), (1, 2, 2.0),
-            (2, 2, 5.0),
-        ]);
+        let mat = upper_tri_csc(
+            3,
+            &[
+                (0, 0, 4.0),
+                (0, 1, 1.0),
+                (1, 1, 3.0),
+                (1, 2, 2.0),
+                (2, 2, 5.0),
+            ],
+        );
         let fac = factorize(&mat).expect("factorize failed");
         let b = [1.0f64, 2.0, 3.0];
         let mut x = [0.0f64; 3];
@@ -703,14 +723,22 @@ mod tests {
     /// byte estimate cannot see. A `max_l_nnz` of 1 is below any non-trivial L.
     #[test]
     fn factorize_budget_rejects_when_l_nnz_exceeds_max() {
-        let mat = upper_tri_csc(3, &[
-            (0, 0, 4.0), (0, 1, 1.0),
-            (1, 1, 3.0), (1, 2, 2.0),
-            (2, 2, 5.0),
-        ]);
+        let mat = upper_tri_csc(
+            3,
+            &[
+                (0, 0, 4.0),
+                (0, 1, 1.0),
+                (1, 1, 3.0),
+                (1, 2, 2.0),
+                (2, 2, 5.0),
+            ],
+        );
         match factorize_budget(&mat, 1) {
             Err(LdlError::WouldExceedBudget { l_nnz, max_l_nnz }) => {
-                assert!(l_nnz > max_l_nnz, "l_nnz={l_nnz} should exceed max={max_l_nnz}");
+                assert!(
+                    l_nnz > max_l_nnz,
+                    "l_nnz={l_nnz} should exceed max={max_l_nnz}"
+                );
                 assert_eq!(max_l_nnz, 1);
             }
             Err(e) => panic!("expected WouldExceedBudget, got Err({e:?})"),
@@ -721,11 +749,16 @@ mod tests {
     /// Within budget, `factorize_budget` behaves like `factorize`.
     #[test]
     fn factorize_budget_accepts_within_budget() {
-        let mat = upper_tri_csc(3, &[
-            (0, 0, 4.0), (0, 1, 1.0),
-            (1, 1, 3.0), (1, 2, 2.0),
-            (2, 2, 5.0),
-        ]);
+        let mat = upper_tri_csc(
+            3,
+            &[
+                (0, 0, 4.0),
+                (0, 1, 1.0),
+                (1, 1, 3.0),
+                (1, 2, 2.0),
+                (2, 2, 5.0),
+            ],
+        );
         let fac = factorize_budget(&mat, 1_000_000).expect("within budget must succeed");
         let b = [1.0f64, 2.0, 3.0];
         let mut x = [0.0f64; 3];
@@ -761,7 +794,11 @@ mod tests {
         let perm = vec![0usize, 1];
         let deadline = Some(Instant::now() - std::time::Duration::from_millis(1));
         let result = factorize_quasidefinite_with_cached_perm_budget_par(
-            &mat, &perm, deadline, None, faer::Par::Seq,
+            &mat,
+            &perm,
+            deadline,
+            None,
+            faer::Par::Seq,
         );
         assert!(
             matches!(result, Err(LdlError::DeadlineExceeded)),
@@ -775,8 +812,13 @@ mod tests {
         let mat = upper_tri_csc(2, &[(0, 0, 3.0), (0, 1, 1.0), (1, 1, -2.0)]);
         let perm = vec![0usize, 1]; // identity permutation
         let fac = factorize_quasidefinite_with_cached_perm_budget_par(
-            &mat, &perm, None, None, faer::Par::Seq,
-        ).expect("quasidefinite factorize failed");
+            &mat,
+            &perm,
+            None,
+            None,
+            faer::Par::Seq,
+        )
+        .expect("quasidefinite factorize failed");
         let b = [1.0f64, 2.0];
         let mut x = [0.0f64; 2];
         fac.solve(&b, &mut x);
@@ -792,30 +834,51 @@ mod tests {
     fn test_quasidefinite_with_amd() {
         // 5x5 quasidefinite: Q=diag(1,2), A=[[1,0],[0,1],[1,1]], δ=1e-4
         let delta = 1e-4f64;
-        let mat = upper_tri_csc(5, &[
-            (0, 0, 1.0 + delta), (1, 1, 2.0 + delta),
-            (2, 2, -delta), (3, 3, -delta), (4, 4, -delta),
-            (0, 2, 1.0), (1, 3, 1.0), (0, 4, 1.0), (1, 4, 1.0),
-        ]);
-        let fac = factorize_quasidefinite_with_amd(&mat, None)
-            .expect("quasidefinite_with_amd failed");
+        let mat = upper_tri_csc(
+            5,
+            &[
+                (0, 0, 1.0 + delta),
+                (1, 1, 2.0 + delta),
+                (2, 2, -delta),
+                (3, 3, -delta),
+                (4, 4, -delta),
+                (0, 2, 1.0),
+                (1, 3, 1.0),
+                (0, 4, 1.0),
+                (1, 4, 1.0),
+            ],
+        );
+        let fac =
+            factorize_quasidefinite_with_amd(&mat, None).expect("quasidefinite_with_amd failed");
         let b = [1.0f64, 2.0, 0.5, -0.5, 1.0];
         let mut x = [0.0f64; 5];
         fac.solve(&b, &mut x);
         // Full matrix for residual check (symmetric)
         let full: &[(usize, usize, f64)] = &[
-            (0, 0, 1.0 + delta), (1, 1, 2.0 + delta),
-            (2, 2, -delta), (3, 3, -delta), (4, 4, -delta),
-            (0, 2, 1.0), (2, 0, 1.0),
-            (1, 3, 1.0), (3, 1, 1.0),
-            (0, 4, 1.0), (4, 0, 1.0),
-            (1, 4, 1.0), (4, 1, 1.0),
+            (0, 0, 1.0 + delta),
+            (1, 1, 2.0 + delta),
+            (2, 2, -delta),
+            (3, 3, -delta),
+            (4, 4, -delta),
+            (0, 2, 1.0),
+            (2, 0, 1.0),
+            (1, 3, 1.0),
+            (3, 1, 1.0),
+            (0, 4, 1.0),
+            (4, 0, 1.0),
+            (1, 4, 1.0),
+            (4, 1, 1.0),
         ];
         let mut r = [0.0f64; 5];
         for &(row, col, val) in full {
             r[row] += val * x[col];
         }
-        let res: f64 = r.iter().zip(b.iter()).map(|(&ri, &bi)| (ri - bi).powi(2)).sum::<f64>().sqrt();
+        let res: f64 = r
+            .iter()
+            .zip(b.iter())
+            .map(|(&ri, &bi)| (ri - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
         assert!(res < 1e-8, "residual={res:.3e}");
     }
 
@@ -824,7 +887,10 @@ mod tests {
     fn test_is_q_psd_psd_matrix() {
         // Q = [[4,1],[1,3]] — PD (固有値 ≈ 2.38, 4.62)
         let q = upper_tri_csc(2, &[(0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0)]);
-        assert!(is_q_psd_by_cholesky(&q), "PD matrix should be identified as PSD");
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "PD matrix should be identified as PSD"
+        );
     }
 
     /// is_q_psd_by_cholesky: 不定行列は false を返す
@@ -832,7 +898,10 @@ mod tests {
     fn test_is_q_psd_indefinite_matrix() {
         // Q = [[1,0],[0,-1]] — indefinite (固有値 +1, -1)
         let q = upper_tri_csc(2, &[(0, 0, 1.0), (1, 1, -1.0)]);
-        assert!(!is_q_psd_by_cholesky(&q), "Indefinite matrix should NOT be identified as PSD");
+        assert!(
+            !is_q_psd_by_cholesky(&q),
+            "Indefinite matrix should NOT be identified as PSD"
+        );
     }
 
     /// is_q_psd_by_cholesky: 大きい対角外要素を持つ PSD 行列でも true を返す
@@ -853,8 +922,10 @@ mod tests {
         let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.1), (1, 1, 2.0)]);
         // det = 1*2 - 1.1*1.1 = 2 - 1.21 = 0.79 > 0 → PD
         // is_q_psd_by_cholesky はここで true を返すべき (Gershgorin は false の誤判定)
-        assert!(is_q_psd_by_cholesky(&q),
-            "PSD matrix with large off-diagonal (Gershgorin false alarm) should be true");
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "PSD matrix with large off-diagonal (Gershgorin false alarm) should be true"
+        );
     }
 
     /// is_q_psd_by_cholesky: PSD (特異) 行列 → ZeroPivot → true を返す
@@ -865,7 +936,10 @@ mod tests {
     fn test_is_q_psd_singular_psd() {
         // Q = [[1,1],[1,1]] — PSD (rank 1, λ = 0 and 2)
         let q = upper_tri_csc(2, &[(0, 0, 1.0), (0, 1, 1.0), (1, 1, 1.0)]);
-        assert!(is_q_psd_by_cholesky(&q), "Singular PSD matrix should be identified as PSD");
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "Singular PSD matrix should be identified as PSD"
+        );
     }
 
     /// is_q_psd_by_cholesky: 不定行列 (対角外が大きく不定) → false を返す
@@ -875,21 +949,30 @@ mod tests {
     fn test_is_q_psd_offdiag_indefinite() {
         // Q = [[2,3],[3,2]] — indefinite (det=4-9=-5 < 0, λ = -1, 5)
         let q = upper_tri_csc(2, &[(0, 0, 2.0), (0, 1, 3.0), (1, 1, 2.0)]);
-        assert!(!is_q_psd_by_cholesky(&q), "Indefinite matrix with off-diag should be false");
+        assert!(
+            !is_q_psd_by_cholesky(&q),
+            "Indefinite matrix with off-diag should be false"
+        );
     }
 
     /// is_q_psd_by_cholesky: ゼロ行列は true を返す (LP ケース)
     #[test]
     fn test_is_q_psd_zero_matrix() {
         let q = upper_tri_csc(3, &[]);
-        assert!(is_q_psd_by_cholesky(&q), "Zero matrix (LP) should be identified as PSD");
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "Zero matrix (LP) should be identified as PSD"
+        );
     }
 
     /// is_q_psd_by_cholesky: n=0 は true を返す
     #[test]
     fn test_is_q_psd_empty_matrix() {
         let q = CscMatrix::new(0, 0);
-        assert!(is_q_psd_by_cholesky(&q), "Empty matrix should be identified as PSD");
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "Empty matrix should be identified as PSD"
+        );
     }
 
     /// Indefinite Q where a ZeroPivot column appears *after* a negative D[i]; the
@@ -898,15 +981,13 @@ mod tests {
     fn test_is_q_psd_zeropivot_masks_negative_d() {
         // 上三角形式: (row, col, val) with row <= col
         // Q[0,0]=2, Q[0,1]=1, Q[0,2]=-1  (rows 1,2,3 have zero diagonal)
-        let q = upper_tri_csc(4, &[
-            (0, 0, 2.0),
-            (0, 1, 1.0),
-            (0, 2, -1.0),
-        ]);
+        let q = upper_tri_csc(4, &[(0, 0, 2.0), (0, 1, 1.0), (0, 2, -1.0)]);
         // LDL^T: D[0]=2, D[1]=-0.5, D[2]=-0.5, D[3]=0 (ZeroPivot at col 3)
         // D[1] < 0 → indefinite
-        assert!(!is_q_psd_by_cholesky(&q),
-            "Indefinite matrix (ZeroPivot masks earlier negative D) must return false");
+        assert!(
+            !is_q_psd_by_cholesky(&q),
+            "Indefinite matrix (ZeroPivot masks earlier negative D) must return false"
+        );
     }
 
     /// is_q_psd_by_cholesky: ZeroPivot が来ても先行列が全て非負なら PSD
@@ -916,13 +997,18 @@ mod tests {
     /// → true (PSD, 零固有値あり)
     #[test]
     fn test_is_q_psd_zeropivot_all_nonneg_d_is_psd() {
-        let q = upper_tri_csc(3, &[
-            (0, 0, 1.0),
-            (1, 1, 1.0),
-            // col 2: no entry → D[2] = 0
-        ]);
-        assert!(is_q_psd_by_cholesky(&q),
-            "PSD matrix with zero eigenvalue (ZeroPivot) must return true");
+        let q = upper_tri_csc(
+            3,
+            &[
+                (0, 0, 1.0),
+                (1, 1, 1.0),
+                // col 2: no entry → D[2] = 0
+            ],
+        );
+        assert!(
+            is_q_psd_by_cholesky(&q),
+            "PSD matrix with zero eigenvalue (ZeroPivot) must return true"
+        );
     }
 
     // ---- 個別 no-op proof ----
@@ -1001,13 +1087,25 @@ mod tests {
         // nnz_l should be positive for a non-trivial matrix
         // (supernodal stores diagonal + fill-in, upper bound = n*(n+1)/2)
         let n = 3usize;
-        let mat = upper_tri_csc(n, &[
-            (0, 0, 4.0), (0, 1, 1.0), (1, 1, 3.0), (1, 2, 2.0), (2, 2, 5.0),
-        ]);
+        let mat = upper_tri_csc(
+            n,
+            &[
+                (0, 0, 4.0),
+                (0, 1, 1.0),
+                (1, 1, 3.0),
+                (1, 2, 2.0),
+                (2, 2, 5.0),
+            ],
+        );
         let perm = vec![0, 1, 2];
         let fac = factorize_quasidefinite_with_cached_perm_budget_par(
-            &mat, &perm, None, None, faer::Par::Seq,
-        ).expect("factorize failed");
+            &mat,
+            &perm,
+            None,
+            None,
+            faer::Par::Seq,
+        )
+        .expect("factorize failed");
         let nnz = fac.nnz_l();
         // supernodal len_val() includes internal storage (may exceed lower-tri count)
         assert!(nnz > 0, "nnz_l should be positive for non-trivial matrix");
@@ -1028,14 +1126,22 @@ mod tests {
         let mut lo_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         for i in 0..n {
             lo_triplets.push(Triplet::new(i, i, 4.0));
-            if i + 1 < n { lo_triplets.push(Triplet::new(i + 1, i, -1.0)); }
-            if i + 2 < n { lo_triplets.push(Triplet::new(i + 2, i, -0.5)); }
+            if i + 1 < n {
+                lo_triplets.push(Triplet::new(i + 1, i, -1.0));
+            }
+            if i + 2 < n {
+                lo_triplets.push(Triplet::new(i + 2, i, -0.5));
+            }
         }
         let a_lower = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &lo_triplets)
             .expect("build lower failed");
 
         let a_nnz = a_lower.compute_nnz();
-        let a_upper_sym = a_lower.rb().transpose().symbolic().to_col_major()
+        let a_upper_sym = a_lower
+            .rb()
+            .transpose()
+            .symbolic()
+            .to_col_major()
             .expect("transpose failed");
 
         // etree / col_counts (共通)
@@ -1048,7 +1154,10 @@ mod tests {
             ]));
             let stack = MemStack::new(&mut mem);
             simplicial::prefactorize_symbolic_cholesky(
-                &mut etree_buf, &mut col_counts_buf, a_upper_sym.rb(), stack,
+                &mut etree_buf,
+                &mut col_counts_buf,
+                a_upper_sym.rb(),
+                stack,
             );
         }
 
@@ -1070,10 +1179,15 @@ mod tests {
             let mut etree = etree_buf.clone();
             let mut col_counts = col_counts_buf.clone();
             simplicial::prefactorize_symbolic_cholesky(
-                &mut etree, &mut col_counts, a_upper_sym.rb(), stack,
+                &mut etree,
+                &mut col_counts,
+                a_upper_sym.rb(),
+                stack,
             );
 
-            let mut mem2 = MemBuffer::new(supernodal::factorize_supernodal_symbolic_cholesky_scratch::<usize>(n));
+            let mut mem2 = MemBuffer::new(
+                supernodal::factorize_supernodal_symbolic_cholesky_scratch::<usize>(n),
+            );
             let stack2 = MemStack::new(&mut mem2);
             let t0 = Instant::now();
             let sym = supernodal::factorize_supernodal_symbolic_cholesky(
@@ -1082,7 +1196,8 @@ mod tests {
                 &col_counts,
                 stack2,
                 faer::sparse::linalg::SymbolicSupernodalParams { relax: Some(relax) },
-            ).expect("symbolic failed");
+            )
+            .expect("symbolic failed");
             let sym_t = t0.elapsed();
 
             let n_sn = sym.n_supernodes();
@@ -1100,16 +1215,25 @@ mod tests {
             };
             let mut mem3 = MemBuffer::new(StackReq::any_of(&[
                 supernodal::factorize_supernodal_numeric_ldlt_scratch::<usize, f64>(
-                    &sym, faer::Par::Seq, Default::default()),
+                    &sym,
+                    faer::Par::Seq,
+                    Default::default(),
+                ),
                 sym.solve_in_place_scratch::<f64>(n, faer::Par::Seq),
             ]));
             let stack3 = MemStack::new(&mut mem3);
             let mut l_values = vec![0.0f64; sym.len_val()];
             let t1 = Instant::now();
             supernodal::factorize_supernodal_numeric_ldlt::<usize, f64>(
-                &mut l_values, a_lower.rb(), regularization, &sym,
-                faer::Par::Seq, stack3, Default::default(),
-            ).expect("numeric failed");
+                &mut l_values,
+                a_lower.rb(),
+                regularization,
+                &sym,
+                faer::Par::Seq,
+                stack3,
+                Default::default(),
+            )
+            .expect("numeric failed");
             let num_t = t1.elapsed();
 
             println!(
@@ -1128,10 +1252,15 @@ mod tests {
             ]));
             let stack = MemStack::new(&mut mem);
             simplicial::prefactorize_symbolic_cholesky(
-                &mut etree, &mut col_counts, a_upper_sym.rb(), stack,
+                &mut etree,
+                &mut col_counts,
+                a_upper_sym.rb(),
+                stack,
             );
 
-            let mut mem2 = MemBuffer::new(simplicial::factorize_simplicial_symbolic_cholesky_scratch::<usize>(n));
+            let mut mem2 = MemBuffer::new(
+                simplicial::factorize_simplicial_symbolic_cholesky_scratch::<usize>(n),
+            );
             let stack2 = MemStack::new(&mut mem2);
             let t0 = Instant::now();
             let sym_s = simplicial::factorize_simplicial_symbolic_cholesky(
@@ -1139,7 +1268,8 @@ mod tests {
                 unsafe { simplicial::EliminationTreeRef::from_inner(&etree) },
                 &col_counts,
                 stack2,
-            ).expect("simplicial symbolic failed");
+            )
+            .expect("simplicial symbolic failed");
             let sym_t = t0.elapsed();
 
             let regularization = faer::linalg::cholesky::ldlt::factor::LdltRegularization {
@@ -1149,14 +1279,20 @@ mod tests {
             };
             let l_nnz = sym_s.len_val();
             let mut l_values = vec![0.0f64; l_nnz];
-            let mut mem3 = MemBuffer::new(
-                simplicial::factorize_simplicial_numeric_ldlt_scratch::<usize, f64>(n)
-            );
+            let mut mem3 = MemBuffer::new(simplicial::factorize_simplicial_numeric_ldlt_scratch::<
+                usize,
+                f64,
+            >(n));
             let stack3 = MemStack::new(&mut mem3);
             let t1 = Instant::now();
             simplicial::factorize_simplicial_numeric_ldlt::<usize, f64>(
-                &mut l_values, a_lower.rb(), regularization, &sym_s, stack3,
-            ).expect("simplicial numeric failed");
+                &mut l_values,
+                a_lower.rb(),
+                regularization,
+                &sym_s,
+                stack3,
+            )
+            .expect("simplicial numeric failed");
             let num_t = t1.elapsed();
 
             println!(

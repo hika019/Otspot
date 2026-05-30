@@ -43,9 +43,7 @@ const COLLECT_RETRY_BUDGET: usize = 3;
 /// All netlib bench LPs the sentinel depends on. Asserted to exist at test
 /// start — silent skip (the previous `if !path.exists() { continue; }`) is
 /// a portability anti-pattern that lets an empty data dir pass MIN_ACTIVE.
-const REQUIRED_NETLIB: &[&str] = &[
-    "sc50b", "scfxm1", "bandm", "scagr25", "scagr7", "share2b",
-];
+const REQUIRED_NETLIB: &[&str] = &["sc50b", "scfxm1", "bandm", "scagr25", "scagr7", "share2b"];
 
 /// Random-LP skip cap. Random LPs can fail to solve cold (returning None
 /// for `warm_start_basis` or hitting Infeasible/Unbounded on pathological
@@ -78,7 +76,10 @@ impl Lcg {
         Self(if s == 0 { 0xDEAD_BEEF_CAFE_F00D } else { s })
     }
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn f64(&mut self) -> f64 {
@@ -146,7 +147,9 @@ fn make_random_le_lp(m: usize, n: usize, seed: u64, density: f64) -> LpProblem {
     b.push(BUDGET);
     let c: Vec<f64> = (0..n).map(|_| -(rng.f64() + 0.1)).collect();
     LpProblem::new_general(
-        c, a, b,
+        c,
+        a,
+        b,
         vec![ConstraintType::Le; total_rows],
         vec![(0.0, f64::INFINITY); n],
         Some(format!("rand_le_m{}_n{}_s{}", m, n, seed)),
@@ -179,7 +182,10 @@ fn warm_iter(lp: &LpProblem, basis: Vec<usize>, pricing: DualPricing) -> (usize,
     opts.presolve = false;
     opts.timeout_secs = Some(PER_LP_TIMEOUT_SECS);
     opts.dual_pricing = pricing;
-    opts.warm_start = Some(WarmStartBasis { basis, x_b: Vec::new() });
+    opts.warm_start = Some(WarmStartBasis {
+        basis,
+        x_b: Vec::new(),
+    });
     let r = solve_lp_with(lp, &opts);
     (r.iterations, r.status)
 }
@@ -227,8 +233,8 @@ fn warm_lp_patterns() -> Vec<(String, PatternKind, LpProblem, f64, f64)> {
     ];
     for (name, lo, hi) in netlib_specs {
         let path = Path::new("data/lp_problems").join(format!("{}.QPS", name));
-        let qp = parse_qps(&path)
-            .unwrap_or_else(|e| panic!("parse_qps({:?}) failed: {:?}", path, e));
+        let qp =
+            parse_qps(&path).unwrap_or_else(|e| panic!("parse_qps({:?}) failed: {:?}", path, e));
         out.push((
             format!("{}_pert{:.2}_{:.2}", name, lo, hi),
             PatternKind::Netlib,
@@ -293,7 +299,10 @@ fn collect_iter_comparison_once() -> CollectionResult {
         let (mi, ms) = warm_iter(&lp_w, basis.clone(), DualPricing::MostInfeasible);
         let (dse, ds) = warm_iter(&lp_w, basis, DualPricing::SteepestEdge);
         if ms != ds {
-            eprintln!("[{}] status diverged MI={:?} DSE={:?} — borderline, skip", name, ms, ds);
+            eprintln!(
+                "[{}] status diverged MI={:?} DSE={:?} — borderline, skip",
+                name, ms, ds
+            );
             match kind {
                 PatternKind::Netlib => netlib_skipped += 1,
                 PatternKind::Random => random_skipped += 1,
@@ -307,7 +316,11 @@ fn collect_iter_comparison_once() -> CollectionResult {
         }
         rows.push((name, kind, mi, dse));
     }
-    CollectionResult { rows, netlib_skipped, random_skipped }
+    CollectionResult {
+        rows,
+        netlib_skipped,
+        random_skipped,
+    }
 }
 
 /// Retries collection up to `COLLECT_RETRY_BUDGET` times if `active <
@@ -323,7 +336,9 @@ fn collect_iter_comparison_with_retry() -> CollectionResult {
         }
         eprintln!(
             "[retry {}] active={} < {}, retrying collection",
-            attempt, last.rows.len(), MIN_ACTIVE_PATTERNS,
+            attempt,
+            last.rows.len(),
+            MIN_ACTIVE_PATTERNS,
         );
         std::thread::sleep(std::time::Duration::from_millis(COLLECT_RETRY_BACKOFF_MS));
         last = collect_iter_comparison_once();
@@ -371,9 +386,15 @@ fn dse_iter_count_matches_or_beats_most_infeasible() {
     for (name, _kind, mi, dse) in &collection.rows {
         total_mi += *mi as u64;
         total_dse += *dse as u64;
-        let tag = if dse < mi { wins += 1; "WIN " }
-                  else if dse > mi { losses += 1; "LOSE" }
-                  else { "tie " };
+        let tag = if dse < mi {
+            wins += 1;
+            "WIN "
+        } else if dse > mi {
+            losses += 1;
+            "LOSE"
+        } else {
+            "tie "
+        };
         eprintln!("[{}] {} MI={:>6} DSE={:>6}", name, tag, mi, dse);
     }
     let ratio = total_dse as f64 / total_mi.max(1) as f64;
@@ -386,7 +407,8 @@ fn dse_iter_count_matches_or_beats_most_infeasible() {
     assert!(
         active >= MIN_ACTIVE_PATTERNS,
         "only {} active patterns (min {}); sentinel cannot certify",
-        active, MIN_ACTIVE_PATTERNS,
+        active,
+        MIN_ACTIVE_PATTERNS,
     );
     assert_eq!(
         collection.netlib_skipped, 0,
@@ -397,18 +419,22 @@ fn dse_iter_count_matches_or_beats_most_infeasible() {
     assert!(
         collection.random_skipped <= MAX_RANDOM_SKIPS,
         "random arm skipped {} of 15 (cap {}); seeds may have regressed",
-        collection.random_skipped, MAX_RANDOM_SKIPS,
+        collection.random_skipped,
+        MAX_RANDOM_SKIPS,
     );
     assert!(
         ratio <= DSE_AGGREGATE_RATIO_MAX,
         "DSE aggregate iter ratio {:.4} > cap {}",
-        ratio, DSE_AGGREGATE_RATIO_MAX,
+        ratio,
+        DSE_AGGREGATE_RATIO_MAX,
     );
     assert!(
         wins >= MIN_STRICT_WINS,
         "DSE strictly faster on only {} of {} active LPs (min {} required); \
          γ update may have regressed to no-op",
-        wins, active, MIN_STRICT_WINS,
+        wins,
+        active,
+        MIN_STRICT_WINS,
     );
 }
 
@@ -434,7 +460,10 @@ fn dse_with_gamma_update_disabled_collapses_to_most_infeasible() {
     assert!(
         active >= MIN_ACTIVE_PATTERNS,
         "no-op proof: only {} active patterns (min {}, netlib_skip={}, random_skip={})",
-        active, MIN_ACTIVE_PATTERNS, collection.netlib_skipped, collection.random_skipped,
+        active,
+        MIN_ACTIVE_PATTERNS,
+        collection.netlib_skipped,
+        collection.random_skipped,
     );
 
     let mut mismatches: Vec<(String, usize, usize)> = Vec::new();
@@ -452,7 +481,9 @@ fn dse_with_gamma_update_disabled_collapses_to_most_infeasible() {
     assert!(
         mismatches.is_empty(),
         "no-op DSE diverged from MI on {} of {} patterns: {:?}",
-        mismatches.len(), active, mismatches,
+        mismatches.len(),
+        active,
+        mismatches,
     );
 }
 

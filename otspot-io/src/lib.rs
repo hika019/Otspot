@@ -2,8 +2,8 @@
 //! File I/O for the otspot solver — MPS, QPS, and QPLIB format parsers.
 
 pub mod mps;
-pub mod qps;
 pub mod qplib;
+pub mod qps;
 
 mod common;
 

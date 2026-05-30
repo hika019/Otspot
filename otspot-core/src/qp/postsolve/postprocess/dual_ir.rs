@@ -1,7 +1,6 @@
 //! dual-only IR: x 固定で y のみ更新し r_d_free を厳密に 0 にする。
 //! A_free^T δy = -r_d_free の最小ノルム解 δy = -A_free α、G α = r_d_free (G SPD)。
 
-use crate::tolerances::any_nonfinite;
 use crate::qp::postsolve::dual_recovery::{
     collect_dual_recovery_cluster_rows, collect_dual_recovery_free_columns,
     compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds,
@@ -11,6 +10,7 @@ use crate::qp::postsolve::dual_recovery::{
 use crate::qp::postsolve::refine::kkt_iterative::refit_bound_duals_kkt;
 use crate::qp::problem::QpProblem;
 use crate::sparse::CscMatrix;
+use crate::tolerances::any_nonfinite;
 
 /// G + δ·I regularization: prevents F64 round-off cancellation.
 /// δ × ‖α‖ acts as a floor for the new r_d_free (typically 1e-12 × 1e2 = 1e-10, well below target 1e-6).
@@ -96,7 +96,9 @@ pub(crate) fn try_dual_only_ir(
     };
     let (proj_lower, proj_upper) = (&row_bounds.0, &row_bounds.1);
 
-    let Some((ax, row_abs_activity)) = compute_dual_recovery_row_activity(problem, &result.solution) else {
+    let Some((ax, row_abs_activity)) =
+        compute_dual_recovery_row_activity(problem, &result.solution)
+    else {
         return 0;
     };
     let Some((worst_j, active_rows)) = collect_dual_recovery_cluster_rows(
@@ -142,7 +144,10 @@ pub(crate) fn try_dual_only_ir(
             free_idx.push(j);
         }
     }
-    if !seed_rows.is_empty() && free_idx.len() * 2 > n_free_eval && active_rows.len() > seed_rows.len() {
+    if !seed_rows.is_empty()
+        && free_idx.len() * 2 > n_free_eval
+        && active_rows.len() > seed_rows.len()
+    {
         active_rows = seed_rows;
         active_row_pos.fill(usize::MAX);
         for (pos, &row) in active_rows.iter().enumerate() {
@@ -219,7 +224,8 @@ pub(crate) fn try_dual_only_ir(
                 aty_j += problem.a.values[k] * f64::from(y_dd[problem.a.row_ind[k]]);
             }
             let bc_j = bound_contrib_at_var(&problem.bounds, &tmp.bound_duals, j);
-            let scale_j = (1.0 + qx_j.abs() + problem.c[j].abs() + aty_j.abs() + bc_j.abs()).max(1.0);
+            let scale_j =
+                (1.0 + qx_j.abs() + problem.c[j].abs() + aty_j.abs() + bc_j.abs()).max(1.0);
             let inv_scale2 = 1.0 / (scale_j * scale_j);
 
             let mut col_vec = vec![0.0_f64; ulen];
@@ -403,4 +409,3 @@ pub(crate) fn try_dual_only_ir(
         0
     }
 }
-

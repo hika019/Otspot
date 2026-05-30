@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // Re-export production utilities that also live in otspot-core.
-pub use otspot_core::tolerances::{OBJ_MATCH_REL_TOL, obj_within_tol};
 pub use otspot_core::qp::pick_best_ipm_or_simplex;
+pub use otspot_core::tolerances::{obj_within_tol, OBJ_MATCH_REL_TOL};
 
 /// Relative primal feasibility max-violation for LP / QP.
 ///
@@ -157,7 +157,10 @@ pub fn apply_bench_status_promotion(
         BenchPromotionPolicy::BenchQplib => result.objective.is_finite(),
     };
     if eligible_status && has_full_solution && obj_ok {
-        SolverResult { status: SolveStatus::Optimal, ..result }
+        SolverResult {
+            status: SolveStatus::Optimal,
+            ..result
+        }
     } else {
         result
     }
@@ -239,7 +242,8 @@ pub fn detect_csv_path(data_dir: &str, override_path: Option<&str>, root: &Path)
         "osqp_bench.csv"
     } else if data_lower.contains("mpc_qp") || data_lower.contains("mpc-qp") {
         "mpc_qp.csv"
-    } else if data_lower.contains("lp_problems_infeas") || data_lower.contains("lp-problems-infeas") {
+    } else if data_lower.contains("lp_problems_infeas") || data_lower.contains("lp-problems-infeas")
+    {
         "netlib_lp_infeas.csv"
     } else if data_lower.contains("lp_problems_extra") || data_lower.contains("lp-problems-extra") {
         "netlib_lp_extra.csv"
@@ -295,7 +299,9 @@ pub fn check_baseline_objective(
     match known.get(problem_name) {
         Some(&known_obj) => {
             if !solver_obj.is_finite() {
-                return ObjCheckResult::Mismatch { rel_err: f64::INFINITY };
+                return ObjCheckResult::Mismatch {
+                    rel_err: f64::INFINITY,
+                };
             }
             let expected = known_obj + obj_offset;
             let denom = expected.abs().max(1.0);
@@ -378,8 +384,14 @@ pub fn compute_dfeas_orig(
         return (f64::NAN, f64::NAN);
     }
     let n = solution.len();
-    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution).iter().map(|&v| f64::from(v)).collect();
-    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n).iter().map(|&v| f64::from(v)).collect();
+    let qx: Vec<f64> = dd_impl::qx(&prob.q, solution)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
+    let aty: Vec<f64> = dd_impl::aty(&prob.a, dual_solution, n)
+        .iter()
+        .map(|&v| f64::from(v))
+        .collect();
 
     // LP/Simplex path: complementarity-aware sign check on reduced costs.
     if bound_duals.is_empty() && !reduced_costs.is_empty() && reduced_costs.len() == n {
@@ -391,15 +403,16 @@ pub fn compute_dfeas_orig(
             if lb_j.is_finite() && ub_j.is_finite() && (lb_j - ub_j).abs() < ZERO_TOL {
                 continue;
             }
-            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0 {
+            if prob.a.col_ptr().len() > j + 1 && prob.a.col_ptr()[j + 1] - prob.a.col_ptr()[j] == 0
+            {
                 continue;
             }
             let rc = reduced_costs[j];
             let x_j = solution[j];
-            let at_lb = lb_j.is_finite()
-                && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
-            let at_ub = ub_j.is_finite()
-                && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
+            let at_lb =
+                lb_j.is_finite() && (x_j - lb_j).abs() <= rel_tol * (1.0 + x_j.abs() + lb_j.abs());
+            let at_ub =
+                ub_j.is_finite() && (x_j - ub_j).abs() <= rel_tol * (1.0 + x_j.abs() + ub_j.abs());
             let viol = if at_lb && !at_ub {
                 f64::max(0.0, -rc)
             } else if at_ub && !at_lb {
@@ -427,9 +440,7 @@ pub fn compute_dfeas_orig(
         if lb_i.is_finite() && ub_i.is_finite() && (lb_i - ub_i).abs() < ZERO_TOL {
             continue;
         }
-        if prob.a.col_ptr().len() > i + 1
-            && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0
-        {
+        if prob.a.col_ptr().len() > i + 1 && prob.a.col_ptr()[i + 1] - prob.a.col_ptr()[i] == 0 {
             continue;
         }
         let r_dd = TwoFloat::from(qx[i])
@@ -522,24 +533,30 @@ mod tests {
     fn test_detect_csv_path_infeas() {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems_infeas", None, root);
-        assert!(p.to_string_lossy().contains("netlib_lp_infeas.csv"),
-            "Expected netlib_lp_infeas.csv, got {p:?}");
+        assert!(
+            p.to_string_lossy().contains("netlib_lp_infeas.csv"),
+            "Expected netlib_lp_infeas.csv, got {p:?}"
+        );
     }
 
     #[test]
     fn test_detect_csv_path_extra() {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems_extra", None, root);
-        assert!(p.to_string_lossy().contains("netlib_lp_extra.csv"),
-            "Expected netlib_lp_extra.csv, got {p:?}");
+        assert!(
+            p.to_string_lossy().contains("netlib_lp_extra.csv"),
+            "Expected netlib_lp_extra.csv, got {p:?}"
+        );
     }
 
     #[test]
     fn test_detect_csv_path_default_netlib() {
         let root = std::path::Path::new("/solver");
         let p = detect_csv_path("/data/lp_problems", None, root);
-        assert!(p.to_string_lossy().contains("netlib_lp.csv"),
-            "Expected netlib_lp.csv, got {p:?}");
+        assert!(
+            p.to_string_lossy().contains("netlib_lp.csv"),
+            "Expected netlib_lp.csv, got {p:?}"
+        );
     }
 
     #[test]
@@ -548,13 +565,15 @@ mod tests {
         // qplib_nonconvex (no _official suffix) → synthetic CSV
         let p = detect_csv_path("/data/qplib_nonconvex", None, root);
         assert!(
-            p.to_string_lossy().contains("qplib_nonconvex_synthetic.csv"),
+            p.to_string_lossy()
+                .contains("qplib_nonconvex_synthetic.csv"),
             "Expected qplib_nonconvex_synthetic.csv, got {p:?}"
         );
         // Dash variant
         let p2 = detect_csv_path("/data/qplib-nonconvex", None, root);
         assert!(
-            p2.to_string_lossy().contains("qplib_nonconvex_synthetic.csv"),
+            p2.to_string_lossy()
+                .contains("qplib_nonconvex_synthetic.csv"),
             "Expected qplib_nonconvex_synthetic.csv (dash), got {p2:?}"
         );
     }
@@ -616,7 +635,8 @@ mod tests {
             vec![x_target],
             bounds,
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         p.obj_offset = 0.0;
         p
     }
@@ -632,7 +652,11 @@ mod tests {
 
         // B: lb=0, ub=inf, x=0 (at lb), rc=-1 → infeasible (z_lb=-1<0)
         let (abs, _) = compute_dfeas_orig(&p, &[0.0], &[], &[], &[-1.0]);
-        assert!((abs - 1.0).abs() < 1e-15, "at lb rc=-1 (bad): dfeas={}", abs);
+        assert!(
+            (abs - 1.0).abs() < 1e-15,
+            "at lb rc=-1 (bad): dfeas={}",
+            abs
+        );
 
         // C: x=100 (interior), rc=-1 → noise-tolerant (basis variable)
         let p = make_single_var_prob(vec![(0.0, f64::INFINITY)], vec![1.0], 100.0);
@@ -642,7 +666,11 @@ mod tests {
         // D: x=10 at ub=10, rc=+1 → infeasible (z_ub=-1<0)
         let p = make_single_var_prob(vec![(0.0, 10.0)], vec![1.0], 10.0);
         let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[1.0]);
-        assert!((abs - 1.0).abs() < 1e-15, "at ub rc=+1 (bad): dfeas={}", abs);
+        assert!(
+            (abs - 1.0).abs() < 1e-15,
+            "at ub rc=+1 (bad): dfeas={}",
+            abs
+        );
 
         // E: x=10 at ub=10, rc=-1 → feasible (z_ub=1≥0)
         let (abs, _) = compute_dfeas_orig(&p, &[10.0], &[], &[], &[-1.0]);
@@ -660,7 +688,11 @@ mod tests {
 
         // H: x=1e-9 (tiny, relatively at lb), rc=-1 → infeasible
         let (abs, _) = compute_dfeas_orig(&p, &[1e-9], &[], &[], &[-1.0]);
-        assert!((abs - 1.0).abs() < 1e-15, "tiny x at lb, rc=-1: dfeas={}", abs);
+        assert!(
+            (abs - 1.0).abs() < 1e-15,
+            "tiny x at lb, rc=-1: dfeas={}",
+            abs
+        );
 
         // I: x=1e-5 (interior), rc=-1 → noise-tolerant
         let (abs, _) = compute_dfeas_orig(&p, &[1e-5], &[], &[], &[-1.0]);
@@ -677,7 +709,8 @@ mod tests {
             vec![5.0],
             vec![(0.0, f64::INFINITY)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         // x=3: |3-5|=2, scale=1+3+5=9 → 2/9
         let v = compute_pfeas_normalized(&prob, &[3.0]);
         assert!((v - 2.0 / 9.0).abs() < 1e-12, "eq down: got {}", v);
@@ -696,7 +729,8 @@ mod tests {
             vec![5.0],
             vec![(0.0, f64::INFINITY)],
             vec![ConstraintType::Ge],
-        ).unwrap();
+        )
+        .unwrap();
         // x=3: b-ax=2, scale=1+3+5=9 → 2/9
         let v = compute_pfeas_normalized(&prob, &[3.0]);
         assert!((v - 2.0 / 9.0).abs() < 1e-12, "ge viol: got {}", v);
@@ -723,20 +757,27 @@ mod tests {
             vec![5.0],
             vec![(2.0, f64::INFINITY)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Case A: interior (x=5, lb=2, ub=∞). Old buggy code: false positive 0.5; new: 0.
         // Note: `return 0.0` no-op also passes here (0==0). Case B is the actual sentinel.
         let dfeas_c = compute_dfeas_componentwise(&prob, &[5.0], &[], &[], &[-0.5]);
         let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[5.0], &[], &[], &[-0.5]);
         assert_eq!(dfeas_c, dfeas_rel, "case A: componentwise must equal orig");
-        assert!(dfeas_c < 1e-15, "case A: interior var should be 0, got {dfeas_c}");
+        assert!(
+            dfeas_c < 1e-15,
+            "case A: interior var should be 0, got {dfeas_c}"
+        );
 
         // Case B (no-op sentinel): x=2 at lb=2, rc=-0.5 → orig returns > 0.
         // A `return 0.0` no-op fails assert_eq! here.
         let dfeas_c = compute_dfeas_componentwise(&prob, &[2.0], &[], &[], &[-0.5]);
         let (_, dfeas_rel) = compute_dfeas_orig(&prob, &[2.0], &[], &[], &[-0.5]);
-        assert_eq!(dfeas_c, dfeas_rel, "case B: at-lb componentwise must equal orig");
+        assert_eq!(
+            dfeas_c, dfeas_rel,
+            "case B: at-lb componentwise must equal orig"
+        );
         assert!(dfeas_c > 0.0, "case B: at lb, rc<0 → violation > 0");
 
         // Case C: at-ub (x=10, lb=0, ub=10, rc=+0.5 → violation at ub).
@@ -747,10 +788,14 @@ mod tests {
             vec![5.0],
             vec![(0.0, 10.0)],
             vec![ConstraintType::Eq],
-        ).unwrap();
+        )
+        .unwrap();
         let dfeas_c = compute_dfeas_componentwise(&prob_ub, &[10.0], &[], &[], &[0.5]);
         let (_, dfeas_rel) = compute_dfeas_orig(&prob_ub, &[10.0], &[], &[], &[0.5]);
-        assert_eq!(dfeas_c, dfeas_rel, "case C: at-ub componentwise must equal orig");
+        assert_eq!(
+            dfeas_c, dfeas_rel,
+            "case C: at-ub componentwise must equal orig"
+        );
         assert!(dfeas_c > 0.0, "case C: at ub, rc>0 → violation > 0");
     }
 }

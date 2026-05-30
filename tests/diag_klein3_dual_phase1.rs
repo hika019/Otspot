@@ -68,7 +68,12 @@ fn run_klein_with_presolve(path_str: &str, presolve: bool) -> (SolveStatus, f64,
 fn klein1_infeasible_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein1.QPS");
     assert_eq!(status, SolveStatus::Infeasible, "klein1 must be Infeasible");
-    assert!(wall < TIMEOUT_SEC, "klein1 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
+    assert!(
+        wall < TIMEOUT_SEC,
+        "klein1 wall {:.3}s exceeded {}s",
+        wall,
+        TIMEOUT_SEC
+    );
 }
 
 /// klein2: 中型 infeasible (regression sentinel)
@@ -76,7 +81,12 @@ fn klein1_infeasible_within_60s() {
 fn klein2_infeasible_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein2.QPS");
     assert_eq!(status, SolveStatus::Infeasible, "klein2 must be Infeasible");
-    assert!(wall < TIMEOUT_SEC, "klein2 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
+    assert!(
+        wall < TIMEOUT_SEC,
+        "klein2 wall {:.3}s exceeded {}s",
+        wall,
+        TIMEOUT_SEC
+    );
 }
 
 /// klein3: highly degenerate infeasible LP. Big-M Phase I does not extract a
@@ -86,8 +96,17 @@ fn klein2_infeasible_within_60s() {
 #[ignore = "tier-2 (Mac ~13s / CI 2.5x ~33s); heavy profile で実行 (#97)"]
 fn klein3_no_false_optimal_within_60s() {
     let (status, wall, _iters) = run_klein("data/lp_problems_infeas/klein3.QPS");
-    assert_eq!(status, SolveStatus::Infeasible, "klein3 must be certified Infeasible");
-    assert!(wall < TIMEOUT_SEC, "klein3 wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
+    assert_eq!(
+        status,
+        SolveStatus::Infeasible,
+        "klein3 must be certified Infeasible"
+    );
+    assert!(
+        wall < TIMEOUT_SEC,
+        "klein3 wall {:.3}s exceeded {}s",
+        wall,
+        TIMEOUT_SEC
+    );
 }
 
 /// Anti-cycling: bland_mode 起動時に lex 摂動を注入することで
@@ -119,7 +138,10 @@ fn klein3_infeasible_via_bland_anticycling() {
     );
 
     assert!(
-        matches!(result.status, SolveStatus::Infeasible | SolveStatus::Timeout),
+        matches!(
+            result.status,
+            SolveStatus::Infeasible | SolveStatus::Timeout
+        ),
         "klein3 は Infeasible (Farkas certified) または Timeout (honest) で
          なければならない; got {:?}",
         result.status
@@ -140,14 +162,23 @@ fn klein3_infeasible_via_bland_anticycling() {
 #[test]
 #[ignore = "tier-2 (Mac ~12s / CI 2.5x ~30s); heavy profile で実行 (#97)"]
 fn diag_klein3_no_presolve() {
-    let (status, wall, iters) = run_klein_with_presolve("data/lp_problems_infeas/klein3.QPS", false);
-    eprintln!("[diag] klein3 no-presolve: status={:?} wall={:.3}s iters={}", status, wall, iters);
+    let (status, wall, iters) =
+        run_klein_with_presolve("data/lp_problems_infeas/klein3.QPS", false);
+    eprintln!(
+        "[diag] klein3 no-presolve: status={:?} wall={:.3}s iters={}",
+        status, wall, iters
+    );
     assert!(
         matches!(status, SolveStatus::Infeasible | SolveStatus::Timeout),
         "klein3 no-presolve must be Infeasible (certified) or Timeout (honest); got {:?}",
         status
     );
-    assert!(wall < TIMEOUT_SEC, "klein3 no-presolve wall {:.3}s exceeded {}s", wall, TIMEOUT_SEC);
+    assert!(
+        wall < TIMEOUT_SEC,
+        "klein3 no-presolve wall {:.3}s exceeded {}s",
+        wall,
+        TIMEOUT_SEC
+    );
 }
 
 /// LP cold-start (Ge/Eq) で `solve_dual_advanced` は
@@ -178,7 +209,10 @@ fn klein3_primal_early_bail_speedup() {
     );
 
     assert!(
-        matches!(result.status, SolveStatus::Infeasible | SolveStatus::Timeout),
+        matches!(
+            result.status,
+            SolveStatus::Infeasible | SolveStatus::Timeout
+        ),
         "klein3 は Infeasible (Farkas certified) または Timeout (honest); got {:?}",
         result.status
     );

@@ -47,14 +47,24 @@ pub(crate) fn row_is_active_for_dual_recovery(
         crate::problem::ConstraintType::Eq => true,
         crate::problem::ConstraintType::Le => {
             let slack = problem.b[row] - ax[row];
-            let tol =
-                dual_recovery_row_slack_tol(problem, row, ax[row], row_abs_activity[row], slack_tol_rel);
+            let tol = dual_recovery_row_slack_tol(
+                problem,
+                row,
+                ax[row],
+                row_abs_activity[row],
+                slack_tol_rel,
+            );
             slack.abs() <= tol
         }
         crate::problem::ConstraintType::Ge => {
             let slack = ax[row] - problem.b[row];
-            let tol =
-                dual_recovery_row_slack_tol(problem, row, ax[row], row_abs_activity[row], slack_tol_rel);
+            let tol = dual_recovery_row_slack_tol(
+                problem,
+                row,
+                ax[row],
+                row_abs_activity[row],
+                slack_tol_rel,
+            );
             slack.abs() <= tol
         }
     }
@@ -65,7 +75,10 @@ pub(crate) fn compute_dual_recovery_row_activity(
     problem: &QpProblem,
     solution: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let ax = problem.a.mat_vec_mul(solution).expect("dim validated upstream");
+    let ax = problem
+        .a
+        .mat_vec_mul(solution)
+        .expect("dim validated upstream");
     let mut row_abs_activity = vec![0.0_f64; problem.num_constraints];
     for j in 0..problem.num_vars {
         let xabs = solution[j].abs();
@@ -92,7 +105,10 @@ pub(crate) fn compute_dual_recovery_row_bounds(
         return None;
     }
 
-    let qx = problem.q.mat_vec_mul(solution).expect("dim validated upstream");
+    let qx = problem
+        .q
+        .mat_vec_mul(solution)
+        .expect("dim validated upstream");
     let (ax, row_abs_activity) = compute_dual_recovery_row_activity(problem, solution)?;
 
     let mut lower = vec![f64::NEG_INFINITY; m];
@@ -111,7 +127,8 @@ pub(crate) fn compute_dual_recovery_row_bounds(
             crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
             crate::problem::ConstraintType::Eq => continue,
         };
-        let tol = dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
+        let tol =
+            dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
         if slack > tol {
             lower[i] = 0.0;
             upper[i] = 0.0;
@@ -258,7 +275,9 @@ pub(crate) enum DualRecoveryBoundVar {
 impl DualRecoveryBoundVar {
     pub(crate) fn var(self) -> usize {
         match self {
-            DualRecoveryBoundVar::Lower { var, .. } | DualRecoveryBoundVar::Upper { var, .. } => var,
+            DualRecoveryBoundVar::Lower { var, .. } | DualRecoveryBoundVar::Upper { var, .. } => {
+                var
+            }
         }
     }
 

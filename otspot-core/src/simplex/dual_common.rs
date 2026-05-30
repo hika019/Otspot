@@ -13,12 +13,12 @@
 //! `basic_obj` consolidates `c_B^T x_B`, repeated 19× across the simplex tree
 //! for objective reporting on Optimal/Timeout/SingularBasis exits.
 
+use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::WarmStartBasis;
 use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use std::sync::atomic::{AtomicBool, Ordering};
-use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
 /// dimension m; the caller owns the allocation so a hot loop can reuse it.
@@ -93,7 +93,14 @@ pub(super) fn compute_reduced_costs(
     let mut y = vec![0.0f64; m];
     let mut reduced_costs = vec![0.0f64; n_price];
     compute_reduced_costs_into(
-        a, c, basis_mgr, is_basic, n_price, basis, &mut y, &mut reduced_costs,
+        a,
+        c,
+        basis_mgr,
+        is_basic,
+        n_price,
+        basis,
+        &mut y,
+        &mut reduced_costs,
     );
     reduced_costs
 }
@@ -124,7 +131,10 @@ pub(super) fn outcome_to_result(
             let solution = extract_solution(sf, basis, x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
+            let ws = WarmStartBasis {
+                basis: basis.to_vec(),
+                x_b: x_b.to_vec(),
+            };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,
@@ -182,11 +192,7 @@ pub(super) fn outcome_to_result(
 /// objective reporting on Optimal / Timeout / SingularBasis exits.
 pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
     debug_assert_eq!(basis.len(), x_b.len());
-    basis
-        .iter()
-        .zip(x_b.iter())
-        .map(|(&j, &v)| c[j] * v)
-        .sum()
+    basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum()
 }
 
 /// Anti-cycling: enter Bland mode after K = `(NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
@@ -201,11 +207,21 @@ pub(super) const BLAND_ITER_CAP_FACTOR: usize = 10;
 /// improvement is counted only when `best - current > |best| * NO_PROGRESS_REL_EPS`.
 pub(super) const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 
+/// Returns `true` when `current` is strictly better than `best` by more than
+/// the relative noise floor `best.abs().max(floor) * NO_PROGRESS_REL_EPS`.
+///
+/// - `floor = 0.0` is equivalent to [`made_progress`].
+/// - `floor = 1.0` guards against noise resets when `best ≈ 0`, preventing
+///   sub-eps improvements from counting as real progress (primal Phase I).
+pub(super) fn made_progress_with_floor(best: f64, current: f64, floor: f64) -> bool {
+    best - current > best.abs().max(floor) * NO_PROGRESS_REL_EPS
+}
+
 /// Returns `true` when `current` is strictly better than `best_infeas` by more than
 /// the relative noise floor `NO_PROGRESS_REL_EPS * |best_infeas|`.
 /// `best_infeas == 0` ⇒ `false` (no progress possible from zero).
 pub(super) fn made_progress(best_infeas: f64, current: f64) -> bool {
-    best_infeas - current > best_infeas.abs() * NO_PROGRESS_REL_EPS
+    made_progress_with_floor(best_infeas, current, 0.0)
 }
 
 /// Periodic deadline-check interval inside the m-BTRAN gamma loop.
@@ -288,7 +304,13 @@ mod tests {
         let mut bm = LuBasis::new(&a, &basis, 32).unwrap();
         let y = compute_dual_vars(&c, &mut bm, &basis, m);
         for i in 0..m {
-            assert!((y[i] - c[i]).abs() < 1e-12, "y[{}] = {} expected {}", i, y[i], c[i]);
+            assert!(
+                (y[i] - c[i]).abs() < 1e-12,
+                "y[{}] = {} expected {}",
+                i,
+                y[i],
+                c[i]
+            );
         }
     }
 
@@ -308,7 +330,9 @@ mod tests {
         }
         // Second call into the same buffer (stale sentinel left from above) must
         // still produce the canonical answer — covers buffer-reuse correctness.
-        for slot in y_into.iter_mut() { *slot = -42.0; }
+        for slot in y_into.iter_mut() {
+            *slot = -42.0;
+        }
         compute_dual_vars_into(&c, &mut bm, &basis, &mut y_into);
         for i in 0..m {
             assert!((y_into[i] - y_alloc[i]).abs() < 1e-14);
@@ -329,7 +353,13 @@ mod tests {
         }
         for j in m..n {
             let expected = c[j] - 2.0 * c[(j - m) % m];
-            assert!((r[j] - expected).abs() < 1e-12, "r[{}] = {} expected {}", j, r[j], expected);
+            assert!(
+                (r[j] - expected).abs() < 1e-12,
+                "r[{}] = {} expected {}",
+                j,
+                r[j],
+                expected
+            );
         }
     }
 
@@ -349,7 +379,16 @@ mod tests {
         let mut y_buf = vec![0.0f64; m];
         // Pre-fill rc_out with garbage to ensure basic-slot zeroing happens.
         let mut rc_out = vec![123.456f64; n];
-        compute_reduced_costs_into(&a, &c, &mut bm, &is_basic, n, &basis, &mut y_buf, &mut rc_out);
+        compute_reduced_costs_into(
+            &a,
+            &c,
+            &mut bm,
+            &is_basic,
+            n,
+            &basis,
+            &mut y_buf,
+            &mut rc_out,
+        );
         for j in 0..n {
             assert!((rc_out[j] - r_alloc[j]).abs() < 1e-14, "j={}", j);
         }
@@ -393,8 +432,13 @@ mod tests {
             for (k, &row) in rs.iter().enumerate() {
                 dot += y[row] * vs[k];
             }
-            assert!((dot - c[basis[i]]).abs() < 1e-12,
-                "y^T a_{{basis[{}]}} = {} expected {}", i, dot, c[basis[i]]);
+            assert!(
+                (dot - c[basis[i]]).abs() < 1e-12,
+                "y^T a_{{basis[{}]}} = {} expected {}",
+                i,
+                dot,
+                c[basis[i]]
+            );
         }
     }
 
@@ -462,7 +506,10 @@ mod tests {
         );
         // No-deadline call must always succeed.
         let result_no_dl = recompute_gamma_truth(&mut bm, m, None, None);
-        assert!(result_no_dl.is_some(), "None deadline must always return Some");
+        assert!(
+            result_no_dl.is_some(),
+            "None deadline must always return Some"
+        );
     }
 
     /// A pre-set cancel_flag must abort the BTRAN loop and return `None`.
@@ -486,10 +533,16 @@ mod tests {
         // Cleared flag: sweep must complete.
         flag.store(false, Ordering::Relaxed);
         let result_ok = recompute_gamma_truth(&mut bm, m, None, Some(&flag));
-        assert!(result_ok.is_some(), "cleared cancel_flag must allow sweep to complete");
+        assert!(
+            result_ok.is_some(),
+            "cleared cancel_flag must allow sweep to complete"
+        );
         // No flag at all: must always succeed.
         let result_no_flag = recompute_gamma_truth(&mut bm, m, None, None);
-        assert!(result_no_flag.is_some(), "None cancel_flag must always return Some");
+        assert!(
+            result_no_flag.is_some(),
+            "None cancel_flag must always return Some"
+        );
     }
 
     /// `made_progress` must return true iff improvement exceeds the relative
@@ -522,5 +575,36 @@ mod tests {
         assert!(!made_progress(1.0, 1.0), "no improvement must return false");
         // best == 0: no progress possible from zero.
         assert!(!made_progress(0.0, 0.0), "best == 0 must return false");
+    }
+
+    /// `made_progress_with_floor`: floor=1.0 keeps near-zero `best` from treating
+    /// sub-eps values as noise-free progress; floor=0.0 must equal `made_progress`.
+    ///
+    /// no-op proof: stubbing `made_progress_with_floor` to always return `false`
+    /// means `best_obj` in primal Phase I never updates → `OBJ_PROGRESS_RESET_COUNT`
+    /// stays 0 → `b2_obj_progress_reset_fires_on_improving_objective` FAIL.
+    #[test]
+    fn made_progress_with_floor_protects_near_zero_best() {
+        // floor=1.0: improvement < floor*eps = 1e-12 is rejected even when best ≈ 0.
+        assert!(
+            !made_progress_with_floor(0.0, -0.5e-12, 1.0),
+            "near-zero best, floor=1.0: improvement below floor*eps must be rejected"
+        );
+        // floor=0.0 (same as made_progress): 0 − (−0.5e-12) = 0.5e-12 > 0*eps = 0 → accepted.
+        assert!(
+            made_progress_with_floor(0.0, -0.5e-12, 0.0),
+            "floor=0 must accept any positive improvement (matches made_progress)"
+        );
+        // floor=1.0 with improvement above the floor*eps threshold.
+        assert!(
+            made_progress_with_floor(0.0, -1.5e-12, 1.0),
+            "floor=1.0, improvement > floor*eps must pass"
+        );
+        // floor=0.0 must agree with made_progress on typical values.
+        assert_eq!(
+            made_progress_with_floor(1.0, 0.0, 0.0),
+            made_progress(1.0, 0.0),
+            "made_progress_with_floor(x, y, 0.0) must equal made_progress(x, y)"
+        );
     }
 }

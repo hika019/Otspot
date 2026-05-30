@@ -33,7 +33,10 @@ const EQUAL_TOL: f64 = 1e-9;
 struct Lcg(u64);
 impl Lcg {
     fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407),
+        )
     }
     fn next_f64(&mut self) -> f64 {
         self.0 = self
@@ -296,7 +299,11 @@ fn underestimator_equals_objective_at_corners() {
             let x: Vec<f64> = (0..n)
                 .map(|i| {
                     let (l, u) = fx.problem.bounds[i];
-                    if (mask >> i) & 1 == 1 { u } else { l }
+                    if (mask >> i) & 1 == 1 {
+                        u
+                    } else {
+                        l
+                    }
                 })
                 .collect();
             let f = eval_f(&fx.problem, &x);

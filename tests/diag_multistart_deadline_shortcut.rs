@@ -12,8 +12,8 @@
 //! 複数 data pattern: (n_starts, threads, deadline) 4 組 × indef shape 2 種 = 8 case。
 
 use otspot::options::{MultiStartConfig, StartStrategy};
-use otspot::qp::QpProblem;
 use otspot::qp::multistart::solve_qp_multistart;
+use otspot::qp::QpProblem;
 use otspot::sparse::CscMatrix;
 use otspot::SolverOptions;
 use std::time::Instant;
@@ -24,7 +24,9 @@ fn build_indef_n(n: usize, bnd: f64) -> QpProblem {
     let rows: Vec<usize> = (0..n).collect();
     let cols: Vec<usize> = (0..n).collect();
     // 半数を負 (concave) 半数を正 (convex) で indefinite 構成
-    let vals: Vec<f64> = (0..n).map(|i| if i % 2 == 0 { -2.0 } else { 2.0 }).collect();
+    let vals: Vec<f64> = (0..n)
+        .map(|i| if i % 2 == 0 { -2.0 } else { 2.0 })
+        .collect();
     let q = CscMatrix::from_triplets(&rows, &cols, &vals, n, n).unwrap();
     let c = vec![0.0; n];
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, n).unwrap();

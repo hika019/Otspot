@@ -56,8 +56,11 @@ fn build(case: &Case) -> MilpProblem {
     } else {
         CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap()
     };
-    let bounds: Vec<(f64, f64)> =
-        case.bounds.iter().map(|&(lo, hi)| (lo as f64, hi as f64)).collect();
+    let bounds: Vec<(f64, f64)> = case
+        .bounds
+        .iter()
+        .map(|&(lo, hi)| (lo as f64, hi as f64))
+        .collect();
     let lp = LpProblem::new_general(case.c.clone(), a, b, ctypes, bounds, None).unwrap();
     let integer_vars: Vec<usize> = (0..n).collect();
     MilpProblem::new(lp, integer_vars).unwrap()
@@ -113,10 +116,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "rounding_fails_max",
             c: vec![-5.0, -4.0],
-            cons: vec![
-                (vec![6.0, 4.0], Le, 24.0),
-                (vec![1.0, 2.0], Le, 6.0),
-            ],
+            cons: vec![(vec![6.0, 4.0], Le, 24.0), (vec![1.0, 2.0], Le, 6.0)],
             bounds: vec![(0, 10), (0, 10)],
         },
         // Equality constraint: 2x+3y=12, maximize x+y → (6,0).
@@ -155,20 +155,14 @@ fn cases() -> Vec<Case> {
         Case {
             name: "mixed_sign_obj",
             c: vec![2.0, -3.0],
-            cons: vec![
-                (vec![1.0, 1.0], Le, 4.0),
-                (vec![1.0, -1.0], Ge, -2.0),
-            ],
+            cons: vec![(vec![1.0, 1.0], Le, 4.0), (vec![1.0, -1.0], Ge, -2.0)],
             bounds: vec![(0, 4), (0, 4)],
         },
         // Minimize with Ge constraints (covering, integer optimum > 0).
         Case {
             name: "covering_min",
             c: vec![3.0, 5.0],
-            cons: vec![
-                (vec![1.0, 2.0], Ge, 5.0),
-                (vec![3.0, 1.0], Ge, 6.0),
-            ],
+            cons: vec![(vec![1.0, 2.0], Ge, 5.0), (vec![3.0, 1.0], Ge, 6.0)],
             bounds: vec![(0, 5), (0, 5)],
         },
         // Negative-only objective with negative lower bounds (push to corner).
@@ -189,7 +183,12 @@ fn brute_force_matches_solver_all_cases() {
         let (r, stats) = solve_milp_with_stats(&problem, &opts(), &MipConfig::default());
         match truth {
             Some(opt) => {
-                assert_eq!(r.status, SolveStatus::Optimal, "case {} should be Optimal", case.name);
+                assert_eq!(
+                    r.status,
+                    SolveStatus::Optimal,
+                    "case {} should be Optimal",
+                    case.name
+                );
                 assert!(
                     (r.objective - opt).abs() < TOL,
                     "case {}: solver obj {} != brute-force {}",
@@ -208,8 +207,12 @@ fn brute_force_matches_solver_all_cases() {
                     );
                 }
                 // recompute objective from rounded solution to detect any obj/solution mismatch
-                let recomputed: f64 =
-                    case.c.iter().zip(&r.solution).map(|(a, b)| a * b.round()).sum();
+                let recomputed: f64 = case
+                    .c
+                    .iter()
+                    .zip(&r.solution)
+                    .map(|(a, b)| a * b.round())
+                    .sum();
                 assert!(
                     (recomputed - opt).abs() < TOL,
                     "case {}: recomputed obj {} from solution != truth {}",
@@ -238,7 +241,10 @@ fn brute_force_matches_solver_all_cases() {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
     fn range(&mut self, lo: i64, hi: i64) -> i64 {
@@ -281,7 +287,12 @@ fn fuzz_sweep_solver_matches_brute_force() {
                 (coeffs, ct, rhs)
             })
             .collect();
-        let case = Case { name: "fuzz", c, cons, bounds };
+        let case = Case {
+            name: "fuzz",
+            c,
+            cons,
+            bounds,
+        };
         let truth = brute_force(&case);
         let problem = build(&case);
         let (r, _stats) = solve_milp_with_stats(&problem, &opts(), &cfg);
@@ -301,8 +312,12 @@ fn fuzz_sweep_solver_matches_brute_force() {
                     opt
                 );
                 // The reported solution must reproduce the objective (no obj/solution drift).
-                let recomputed: f64 =
-                    case.c.iter().zip(&r.solution).map(|(a, b)| a * b.round()).sum();
+                let recomputed: f64 = case
+                    .c
+                    .iter()
+                    .zip(&r.solution)
+                    .map(|(a, b)| a * b.round())
+                    .sum();
                 assert!(
                     (recomputed - opt).abs() < 1e-3,
                     "trial {trial}: solution recompute {} != optimum {}",
@@ -322,8 +337,14 @@ fn fuzz_sweep_solver_matches_brute_force() {
         }
     }
     println!("fuzz sweep: {feasible} feasible, {infeasible} infeasible — all matched brute force");
-    assert!(feasible > 50, "sweep should hit many feasible cases, got {feasible}");
-    assert!(infeasible > 5, "sweep should hit some infeasible cases, got {infeasible}");
+    assert!(
+        feasible > 50,
+        "sweep should hit many feasible cases, got {feasible}"
+    );
+    assert!(
+        infeasible > 5,
+        "sweep should hit some infeasible cases, got {infeasible}"
+    );
 }
 
 // --- Model API direct checks (maximize sign / mixed / guards) ---
@@ -336,7 +357,11 @@ fn model_maximize_negative_optimum() {
     m.add_constraint((1.0 * x).geq(2.0));
     m.maximize(-1.0 * x);
     let r = m.solve().unwrap();
-    assert!((r.objective() - (-2.0)).abs() < TOL, "obj={}", r.objective());
+    assert!(
+        (r.objective() - (-2.0)).abs() < TOL,
+        "obj={}",
+        r.objective()
+    );
     assert!((r[x] - 2.0).abs() < TOL, "x={}", r[x]);
 }
 
@@ -351,8 +376,16 @@ fn model_mixed_int_continuous_truth() {
     m.add_constraint((x + y).leq(3.7));
     m.maximize(x + 2.0 * y);
     let r = m.solve().unwrap();
-    assert!((r.objective() - 5.4).abs() < TOL, "obj={} (expected 5.4)", r.objective());
-    assert!((r[x].round() - r[x]).abs() < TOL, "x must be integral: {}", r[x]);
+    assert!(
+        (r.objective() - 5.4).abs() < TOL,
+        "obj={} (expected 5.4)",
+        r.objective()
+    );
+    assert!(
+        (r[x].round() - r[x]).abs() < TOL,
+        "x must be integral: {}",
+        r[x]
+    );
     assert!((r[x] - 2.0).abs() < TOL, "x expected 2, got {}", r[x]);
 }
 
@@ -366,7 +399,11 @@ fn model_obj_offset_with_integer() {
     m.minimize(x);
     m.set_obj_offset(10.0);
     let r = m.solve().unwrap();
-    assert!((r.objective() - 13.0).abs() < TOL, "obj={} (expected 13)", r.objective());
+    assert!(
+        (r.objective() - 13.0).abs() < TOL,
+        "obj={} (expected 13)",
+        r.objective()
+    );
 
     // maximize with offset: max x (x<=4 int) + offset 100 → x=4, obj = 4 + 100 = 104.
     let mut m2 = Model::new("offset_max");
@@ -374,7 +411,11 @@ fn model_obj_offset_with_integer() {
     m2.maximize(x2);
     m2.set_obj_offset(100.0);
     let r2 = m2.solve().unwrap();
-    assert!((r2.objective() - 104.0).abs() < TOL, "obj={} (expected 104)", r2.objective());
+    assert!(
+        (r2.objective() - 104.0).abs() < TOL,
+        "obj={} (expected 104)",
+        r2.objective()
+    );
 }
 
 #[test]
@@ -385,7 +426,10 @@ fn model_fractional_integer_bounds_infeasible() {
     m.minimize(x);
     let err = m.solve().unwrap_err();
     println!("frac bounds err = {err:?}");
-    assert!(format!("{err:?}").contains("Infeasible"), "expected infeasible, got {err:?}");
+    assert!(
+        format!("{err:?}").contains("Infeasible"),
+        "expected infeasible, got {err:?}"
+    );
 }
 
 // --- Brute-force ground truth for convex MIQP (diagonal PSD Q) -----------------
@@ -426,8 +470,11 @@ fn build_miqp(case: &MiqpCase) -> MiqpProblem {
     } else {
         CscMatrix::from_triplets(&rows, &cols, &vals, m, n).unwrap()
     };
-    let bounds: Vec<(f64, f64)> =
-        case.bounds.iter().map(|&(lo, hi)| (lo as f64, hi as f64)).collect();
+    let bounds: Vec<(f64, f64)> = case
+        .bounds
+        .iter()
+        .map(|&(lo, hi)| (lo as f64, hi as f64))
+        .collect();
     let qp = QpProblem::new(q, case.c.clone(), a, b, bounds, ctypes).unwrap();
     MiqpProblem::new(qp, (0..n).collect()).unwrap()
 }
@@ -498,7 +545,10 @@ fn brute_force_matches_miqp_solver() {
         MiqpCase {
             diag: vec![2.0, 2.0, 2.0],
             c: vec![-1.0, -2.0, -3.0],
-            cons: vec![(vec![1.0, 1.0, 1.0], Le, 4.0), (vec![1.0, 0.0, 1.0], Ge, 1.0)],
+            cons: vec![
+                (vec![1.0, 1.0, 1.0], Le, 4.0),
+                (vec![1.0, 0.0, 1.0], Ge, 1.0),
+            ],
             bounds: vec![(0, 3), (0, 3), (0, 3)],
         },
     ];
@@ -509,7 +559,11 @@ fn brute_force_matches_miqp_solver() {
         let (r, stats) = solve_miqp_with_stats(&problem, &opts(), &MipConfig::default());
         match truth {
             Some(opt) => {
-                assert_eq!(r.status, SolveStatus::Optimal, "case {idx} should be Optimal");
+                assert_eq!(
+                    r.status,
+                    SolveStatus::Optimal,
+                    "case {idx} should be Optimal"
+                );
                 assert!(
                     (r.objective - opt).abs() < 1e-3,
                     "case {idx}: solver obj {} != brute-force {}",
@@ -521,7 +575,11 @@ fn brute_force_matches_miqp_solver() {
                     stats.nodes_processed, stats.pruned, stats.incumbent_updates
                 );
             }
-            None => assert_eq!(r.status, SolveStatus::Infeasible, "case {idx} should be Infeasible"),
+            None => assert_eq!(
+                r.status,
+                SolveStatus::Infeasible,
+                "case {idx} should be Infeasible"
+            ),
         }
     }
 }
@@ -555,7 +613,12 @@ fn fuzz_sweep_miqp_matches_brute_force() {
                 (coeffs, ct, rng.range(-3, 4) as f64)
             })
             .collect();
-        let case = MiqpCase { diag, c, cons, bounds };
+        let case = MiqpCase {
+            diag,
+            c,
+            cons,
+            bounds,
+        };
         let truth = brute_force_miqp(&case);
         let (r, _stats) = solve_miqp_with_stats(&build_miqp(&case), &opts(), &cfg);
         match truth {
@@ -583,5 +646,8 @@ fn fuzz_sweep_miqp_matches_brute_force() {
         }
     }
     println!("miqp fuzz: {feasible} feasible cases — all matched brute force");
-    assert!(feasible > 30, "sweep should hit many feasible cases, got {feasible}");
+    assert!(
+        feasible > 30,
+        "sweep should hit many feasible cases, got {feasible}"
+    );
 }

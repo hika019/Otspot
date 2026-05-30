@@ -14,17 +14,22 @@
 //!
 //! TDD methodology: tests written first, FAILs confirmed, then impl, then PASSes.
 
-use otspot_dev::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus, SolverResult};
 use otspot::qp::QpProblem;
-use otspot::sparse::CscMatrix;
 use otspot::solve_qp_with;
+use otspot::sparse::CscMatrix;
+use otspot_dev::bench_utils::{obj_within_tol, pick_best_ipm_or_simplex, OBJ_MATCH_REL_TOL};
 
 // --- helper ---
 
 fn make_result(status: SolveStatus, solution: Vec<f64>, objective: f64) -> SolverResult {
-    SolverResult { status, solution, objective, ..Default::default() }
+    SolverResult {
+        status,
+        solution,
+        objective,
+        ..Default::default()
+    }
 }
 
 /// Simple LP: min x1+x2, s.t. x1+x2 = 1, x1,x2 >= 0
@@ -74,7 +79,11 @@ fn small_lp_optimal_early_exit_within_eps() {
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
     let r = solve_qp_with(&qp, &opts);
-    assert_eq!(r.status, SolveStatus::Optimal, "small LP must converge to Optimal");
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "small LP must converge to Optimal"
+    );
     assert!(!r.solution.is_empty(), "solution must be non-empty");
     let obj_err = (r.objective - 1.0).abs();
     assert!(obj_err < 1e-6, "obj must be ~1.0, got {}", r.objective);
@@ -88,7 +97,11 @@ fn small_lp_no_ref_returns_optimal_when_kkt_within_eps() {
     let qp = small_lp();
     let opts = SolverOptions::default();
     let r = solve_qp_with(&qp, &opts);
-    assert_eq!(r.status, SolveStatus::Optimal, "KKT satisfied → Optimal (no ref needed)");
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "KKT satisfied → Optimal (no ref needed)"
+    );
     assert!(!r.solution.is_empty());
 }
 
@@ -107,7 +120,8 @@ fn large_lp_with_known_ref_exits_early_as_optimal() {
     opts.known_optimal_obj = Some(known_opt);
     let r = solve_qp_with(&qp, &opts);
     assert_eq!(
-        r.status, SolveStatus::Optimal,
+        r.status,
+        SolveStatus::Optimal,
         "large LP with known ref must return Optimal (IPM path), got {:?}",
         r.status
     );
@@ -116,7 +130,9 @@ fn large_lp_with_known_ref_exits_early_as_optimal() {
     assert!(
         rel_err < 1e-4,
         "large LP obj mismatch: got {:.6e}, expected {:.6e}, rel_err={:.2e}",
-        r.objective, known_opt, rel_err
+        r.objective,
+        known_opt,
+        rel_err
     );
 }
 
@@ -131,11 +147,7 @@ fn large_lp_with_known_ref_exits_early_as_optimal() {
 /// FAILS before implementation because pick_best_ipm_or_simplex returns simplex (no-op stub).
 #[test]
 fn ipm_suboptimal_not_silently_degraded_to_timeout() {
-    let ipm_subopt = make_result(
-        SolveStatus::SuboptimalSolution,
-        vec![0.5, 0.3, 0.2],
-        1.23,
-    );
+    let ipm_subopt = make_result(SolveStatus::SuboptimalSolution, vec![0.5, 0.3, 0.2], 1.23);
     let simplex_timeout = make_result(SolveStatus::Timeout, vec![], f64::INFINITY);
 
     let result = pick_best_ipm_or_simplex(Some(ipm_subopt.clone()), simplex_timeout);
@@ -144,8 +156,14 @@ fn ipm_suboptimal_not_silently_degraded_to_timeout() {
         SolveStatus::SuboptimalSolution,
         "IPM SuboptimalSolution must be preserved over simplex Timeout"
     );
-    assert_eq!(result.solution, ipm_subopt.solution, "solution must come from IPM result");
-    assert_eq!(result.objective, ipm_subopt.objective, "objective must come from IPM result");
+    assert_eq!(
+        result.solution, ipm_subopt.solution,
+        "solution must come from IPM result"
+    );
+    assert_eq!(
+        result.objective, ipm_subopt.objective,
+        "objective must come from IPM result"
+    );
 }
 
 /// When simplex succeeds (Optimal), prefer simplex over IPM SuboptimalSolution.
@@ -155,7 +173,11 @@ fn simplex_optimal_preferred_over_ipm_suboptimal() {
     let simplex_opt = make_result(SolveStatus::Optimal, vec![0.1; 3], 1.0);
 
     let result = pick_best_ipm_or_simplex(Some(ipm_subopt), simplex_opt.clone());
-    assert_eq!(result.status, SolveStatus::Optimal, "simplex Optimal beats IPM SuboptimalSolution");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "simplex Optimal beats IPM SuboptimalSolution"
+    );
 }
 
 /// When IPM had no candidate (e.g., IPM returned Timeout immediately), simplex result flows through.
@@ -163,7 +185,11 @@ fn simplex_optimal_preferred_over_ipm_suboptimal() {
 fn no_ipm_candidate_simplex_result_flows_through() {
     let simplex_timeout = make_result(SolveStatus::Timeout, vec![], f64::INFINITY);
     let result = pick_best_ipm_or_simplex(None, simplex_timeout.clone());
-    assert_eq!(result.status, SolveStatus::Timeout, "no IPM candidate → Timeout preserved");
+    assert_eq!(
+        result.status,
+        SolveStatus::Timeout,
+        "no IPM candidate → Timeout preserved"
+    );
 }
 
 /// IPM SuboptimalSolution with empty solution must not replace simplex Timeout.
@@ -220,8 +246,20 @@ fn numerical_error_from_ipm_preserved_when_simplex_also_fails() {
 /// obj_within_tol: |obj - ref| / (1 + |ref|) < tol
 #[test]
 fn obj_within_tol_basic() {
-    assert!(obj_within_tol(1.0, 1.0, OBJ_MATCH_REL_TOL), "identical objs match");
-    assert!(obj_within_tol(1.0, 1.0 + 1e-7, OBJ_MATCH_REL_TOL), "tiny diff matches");
-    assert!(!obj_within_tol(1.0, 2.0, OBJ_MATCH_REL_TOL), "far apart does not match");
-    assert!(!obj_within_tol(f64::INFINITY, 1.0, OBJ_MATCH_REL_TOL), "infinite obj no match");
+    assert!(
+        obj_within_tol(1.0, 1.0, OBJ_MATCH_REL_TOL),
+        "identical objs match"
+    );
+    assert!(
+        obj_within_tol(1.0, 1.0 + 1e-7, OBJ_MATCH_REL_TOL),
+        "tiny diff matches"
+    );
+    assert!(
+        !obj_within_tol(1.0, 2.0, OBJ_MATCH_REL_TOL),
+        "far apart does not match"
+    );
+    assert!(
+        !obj_within_tol(f64::INFINITY, 1.0, OBJ_MATCH_REL_TOL),
+        "infinite obj no match"
+    );
 }

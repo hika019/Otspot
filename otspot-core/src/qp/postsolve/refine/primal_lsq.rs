@@ -51,24 +51,22 @@ pub(crate) fn refine_primal_lsq(
     }
     // target = ax − b で A δ = target を解く (Le/Ge/Eq とも一貫した符号)。
     let target: Vec<f64> = (0..m)
-        .map(|i| {
-            match problem.constraint_types[i] {
-                ConstraintType::Eq => ax[i] - problem.b[i],
-                ConstraintType::Ge => {
-                    let r = ax[i] - problem.b[i];
-                    if r < -PRIMAL_VIOLATION_TOL {
-                        r
-                    } else {
-                        0.0
-                    }
+        .map(|i| match problem.constraint_types[i] {
+            ConstraintType::Eq => ax[i] - problem.b[i],
+            ConstraintType::Ge => {
+                let r = ax[i] - problem.b[i];
+                if r < -PRIMAL_VIOLATION_TOL {
+                    r
+                } else {
+                    0.0
                 }
-                ConstraintType::Le => {
-                    let r = ax[i] - problem.b[i];
-                    if r > PRIMAL_VIOLATION_TOL {
-                        r
-                    } else {
-                        0.0
-                    }
+            }
+            ConstraintType::Le => {
+                let r = ax[i] - problem.b[i];
+                if r > PRIMAL_VIOLATION_TOL {
+                    r
+                } else {
+                    0.0
                 }
             }
         })
@@ -204,4 +202,3 @@ pub(crate) fn refine_primal_lsq(
         *x = x_new;
     }
 }
-

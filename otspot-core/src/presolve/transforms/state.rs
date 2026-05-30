@@ -8,16 +8,26 @@ use crate::tolerances::ZERO_TOL;
 /// replays it in LIFO order.
 #[derive(Debug, Clone)]
 pub(crate) enum PostsolveStep {
-    FixedVariable { orig_col: usize, value: f64 },
-    EmptyColumn { orig_col: usize, value: f64 },
-    EmptyRow { orig_row: usize },
+    FixedVariable {
+        orig_col: usize,
+        value: f64,
+    },
+    EmptyColumn {
+        orig_col: usize,
+        value: f64,
+    },
+    EmptyRow {
+        orig_row: usize,
+    },
     /// Eq row reduced to a single variable.
     SingletonRow {
         orig_row: usize,
         orig_col: usize,
         value: f64,
     },
-    RedundantConstraint { orig_row: usize },
+    RedundantConstraint {
+        orig_row: usize,
+    },
     BoundsTightened,
     /// Variable eliminated via a pivot Eq row. Shared by R6 (doubleton), R15 (free-var),
     /// and R5 (free-singleton-col). Postsolve restores

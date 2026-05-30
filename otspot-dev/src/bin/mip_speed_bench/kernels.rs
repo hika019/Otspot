@@ -20,7 +20,9 @@ pub struct Lcg {
 
 impl Lcg {
     pub fn new(seed: u64) -> Self {
-        Self { state: seed.wrapping_add(1) }
+        Self {
+            state: seed.wrapping_add(1),
+        }
     }
 
     pub fn next_u64(&mut self) -> u64 {
@@ -199,8 +201,9 @@ pub fn gen_convex_miqp(n: usize, int_ratio: f64, density: f64, seed: u64) -> Miq
         CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, m, n).unwrap()
     };
 
-    let bounds: Vec<(f64, f64)> =
-        (0..n).map(|i| if i < n_int { (0.0, 3.0) } else { (0.0, 5.0) }).collect();
+    let bounds: Vec<(f64, f64)> = (0..n)
+        .map(|i| if i < n_int { (0.0, 3.0) } else { (0.0, 5.0) })
+        .collect();
     let qp = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
     MiqpProblem::new(qp, (0..n_int).collect()).unwrap()
 }

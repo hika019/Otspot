@@ -240,8 +240,7 @@ fn assert_not_infeasible_regression(path_str: &str) {
 #[test]
 fn infeasible_arm_bidirectional_true_infeasible_farkas_certified() {
     // x ≤ 1 (Le) AND x ≥ 2 (Ge) — trivially infeasible, one artificial.
-    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1)
-        .expect("CscMatrix");
+    let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).expect("CscMatrix");
     let prob = LpProblem::new_general(
         vec![0.0],
         a,

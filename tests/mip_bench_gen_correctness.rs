@@ -36,7 +36,10 @@ const MIQP_INT_UB: i64 = 3;
 fn brute_force_all_int_knapsack(n: usize, c: &[f64], weights: &[f64], cap: f64) -> Option<f64> {
     let mut best = None::<f64>;
     for mask in 0u32..(1u32 << n) {
-        let w: f64 = (0..n).filter(|&j| mask & (1 << j) != 0).map(|j| weights[j]).sum();
+        let w: f64 = (0..n)
+            .filter(|&j| mask & (1 << j) != 0)
+            .map(|j| weights[j])
+            .sum();
         if w <= cap + 1e-9 {
             let obj: f64 = (0..n).filter(|&j| mask & (1 << j) != 0).map(|j| c[j]).sum();
             best = Some(best.map_or(obj, |b: f64| b.min(obj)));
@@ -162,15 +165,23 @@ fn knapsack_all_int_n6_matches_brute_force_3seeds() {
         let prob = gen_knapsack_milp(6, 1.0, seed);
         let c = prob.lp.c.clone();
         let (weights, cap) = knapsack_weights_capacity(6, seed);
-        let bf = brute_force_all_int_knapsack(6, &c, &weights, cap)
-            .expect("6-var knapsack feasible");
+        let bf =
+            brute_force_all_int_knapsack(6, &c, &weights, cap).expect("6-var knapsack feasible");
         let (res, _stats) = solve_milp_with_stats(&prob, &opts, &cfg);
-        assert_eq!(res.status, SolveStatus::Optimal, "seed={} must solve to Optimal", seed);
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "seed={} must solve to Optimal",
+            seed
+        );
         let solver_obj = res.objective;
         assert!(
             (solver_obj - bf).abs() < 1e-3,
             "seed={}: solver={:.4} bf={:.4} diff={:.4}",
-            seed, solver_obj, bf, (solver_obj - bf).abs()
+            seed,
+            solver_obj,
+            bf,
+            (solver_obj - bf).abs()
         );
     }
 }
@@ -184,14 +195,21 @@ fn knapsack_all_int_n8_matches_brute_force_3seeds() {
         let prob = gen_knapsack_milp(8, 1.0, seed);
         let c = prob.lp.c.clone();
         let (weights, cap) = knapsack_weights_capacity(8, seed);
-        let bf = brute_force_all_int_knapsack(8, &c, &weights, cap)
-            .expect("8-var knapsack feasible");
+        let bf =
+            brute_force_all_int_knapsack(8, &c, &weights, cap).expect("8-var knapsack feasible");
         let (res, _stats) = solve_milp_with_stats(&prob, &opts, &cfg);
-        assert_eq!(res.status, SolveStatus::Optimal, "seed={} must solve to Optimal", seed);
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "seed={} must solve to Optimal",
+            seed
+        );
         assert!(
             (res.objective - bf).abs() < 1e-3,
             "seed={}: solver={:.4} bf={:.4}",
-            seed, res.objective, bf
+            seed,
+            res.objective,
+            bf
         );
     }
 }
@@ -205,14 +223,16 @@ fn knapsack_all_int_n10_matches_brute_force_3seeds() {
         let prob = gen_knapsack_milp(10, 1.0, seed);
         let c = prob.lp.c.clone();
         let (weights, cap) = knapsack_weights_capacity(10, seed);
-        let bf = brute_force_all_int_knapsack(10, &c, &weights, cap)
-            .expect("10-var knapsack feasible");
+        let bf =
+            brute_force_all_int_knapsack(10, &c, &weights, cap).expect("10-var knapsack feasible");
         let (res, _) = solve_milp_with_stats(&prob, &opts, &cfg);
         assert_eq!(res.status, SolveStatus::Optimal, "seed={}", seed);
         assert!(
             (res.objective - bf).abs() < 1e-3,
             "seed={}: solver={:.4} bf={:.4}",
-            seed, res.objective, bf
+            seed,
+            res.objective,
+            bf
         );
     }
 }
@@ -230,7 +250,8 @@ fn convex_miqp_generator_is_always_psd_multiple_seeds() {
             assert!(
                 prob.is_convex(),
                 "n={} seed={}: Q = LLᵀ + ridge must be PSD (gen bug)",
-                n, seed
+                n,
+                seed
             );
         }
     }
@@ -244,10 +265,22 @@ fn convex_miqp_n4_solves_optimal_3seeds() {
     for &seed in &[42u64, 137, 999] {
         let (prob, _, _) = build_test_miqp(4, seed);
         let (res, stats) = solve_miqp_with_stats(&prob, &opts, &cfg);
-        assert_eq!(res.status, SolveStatus::Optimal,
-            "n=4 seed={} should be Optimal, got {:?}", seed, res.status);
-        assert!(res.objective.is_finite(), "objective finite n=4 seed={}", seed);
-        assert!(stats.nodes_processed > 0, "must have explored at least root");
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "n=4 seed={} should be Optimal, got {:?}",
+            seed,
+            res.status
+        );
+        assert!(
+            res.objective.is_finite(),
+            "objective finite n=4 seed={}",
+            seed
+        );
+        assert!(
+            stats.nodes_processed > 0,
+            "must have explored at least root"
+        );
     }
 }
 
@@ -264,12 +297,22 @@ fn convex_miqp_objective_matches_brute_force_multiple_seeds() {
             let (prob, q_dense, c) = build_test_miqp(n, seed);
             let bf = brute_force_miqp(&q_dense, &c, n, MIQP_INT_UB);
             let (res, _) = solve_miqp_with_stats(&prob, &opts, &cfg);
-            assert_eq!(res.status, SolveStatus::Optimal,
-                "n={} seed={} must be Optimal, got {:?}", n, seed, res.status);
+            assert_eq!(
+                res.status,
+                SolveStatus::Optimal,
+                "n={} seed={} must be Optimal, got {:?}",
+                n,
+                seed,
+                res.status
+            );
             assert!(
                 (res.objective - bf).abs() < 1e-3,
                 "n={} seed={}: solver={:.6} brute_force={:.6} diff={:.6}",
-                n, seed, res.objective, bf, (res.objective - bf).abs()
+                n,
+                seed,
+                res.objective,
+                bf,
+                (res.objective - bf).abs()
             );
         }
     }
@@ -296,7 +339,9 @@ fn assignment_milp_n8_optimal_multiple_seeds() {
             assert!(
                 matches!(res.status, SolveStatus::Optimal | SolveStatus::Infeasible),
                 "n=8 seed={} density={}: unexpected status {:?}",
-                seed, density, res.status
+                seed,
+                density,
+                res.status
             );
             if res.status == SolveStatus::Infeasible {
                 let has_feasible = brute_force_milp_has_feasible(&prob);
@@ -327,7 +372,9 @@ fn assignment_milp_mixed_n10_converges_3seeds() {
         let (res, _) = solve_milp_with_stats(&prob, &opts, &cfg);
         assert!(
             matches!(res.status, SolveStatus::Optimal | SolveStatus::Infeasible),
-            "seed={}: unexpected {:?}", seed, res.status
+            "seed={}: unexpected {:?}",
+            seed,
+            res.status
         );
         if res.status == SolveStatus::Infeasible {
             let has_feasible = brute_force_milp_has_feasible(&prob);
@@ -356,7 +403,9 @@ fn knapsack_mixed_int_cont_objective_le_all_int_bound() {
             assert!(
                 r_mixed.objective <= r_allint.objective + 1e-4,
                 "seed={}: mixed_obj={:.4} should be ≤ allint_obj={:.4}",
-                seed, r_mixed.objective, r_allint.objective
+                seed,
+                r_mixed.objective,
+                r_allint.objective
             );
         }
     }

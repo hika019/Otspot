@@ -15,46 +15,55 @@ fn test_qp_nonconvex_indefinite_q() {
     let result = solve_qp(&problem);
     assert!(
         !matches!(result.status, SolveStatus::NonConvex(_)),
-        "got {:?}", result.status
+        "got {:?}",
+        result.status
     );
     assert!(
         matches!(
             result.status,
-            SolveStatus::LocallyOptimal | SolveStatus::Optimal
-            | SolveStatus::Unbounded | SolveStatus::Timeout
-            | SolveStatus::SuboptimalSolution | SolveStatus::NumericalError
+            SolveStatus::LocallyOptimal
+                | SolveStatus::Optimal
+                | SolveStatus::Unbounded
+                | SolveStatus::Timeout
+                | SolveStatus::SuboptimalSolution
+                | SolveStatus::NumericalError
         ),
-        "got {:?}", result.status
+        "got {:?}",
+        result.status
     );
 }
 
 /// 不定 Q + bounds → LocallyOptimal/Optimal/Suboptimal。
 #[test]
 fn test_qp_nonconvex_with_bounds() {
-    let q = CscMatrix::from_triplets(
-        &[0, 1],
-        &[0, 1],
-        &[-2.0, 2.0],
-        2,
-        2,
-    ).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[-2.0, 2.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
     let a = CscMatrix::from_triplets(&[], &[], &[], 0, 2).unwrap();
     let b = vec![];
     let bounds = vec![(-1.0_f64, 1.0_f64); 2];
     let problem = QpProblem::new_all_le(q, c, a, b, bounds.clone()).unwrap();
 
-    let opts = SolverOptions { timeout_secs: Some(10.0), ..Default::default() };
+    let opts = SolverOptions {
+        timeout_secs: Some(10.0),
+        ..Default::default()
+    };
     let result = solve_qp_with(&problem, &opts);
 
     assert!(
         !matches!(result.status, SolveStatus::NonConvex(_)),
-        "got {:?}", result.status
+        "got {:?}",
+        result.status
     );
     assert!(
-        matches!(result.status, SolveStatus::LocallyOptimal | SolveStatus::Optimal
-            | SolveStatus::SuboptimalSolution | SolveStatus::Timeout),
-        "got {:?}", result.status
+        matches!(
+            result.status,
+            SolveStatus::LocallyOptimal
+                | SolveStatus::Optimal
+                | SolveStatus::SuboptimalSolution
+                | SolveStatus::Timeout
+        ),
+        "got {:?}",
+        result.status
     );
     if !result.solution.is_empty() {
         for (&xi, &(lb, ub)) in result.solution.iter().zip(bounds.iter()) {
@@ -105,24 +114,21 @@ fn test_qp_psd_large_diagonal_positive() {
 /// 閾値 ‖Q‖_max × 1e-6 内の僅かな負対角値は PSD 扱い (QPS encoding noise)。
 #[test]
 fn test_qp_diagonal_boundary_below_threshold() {
-    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-11_f64, 1.0, 1.0], 3, 3)
-        .unwrap();
+    let q =
+        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-11_f64, 1.0, 1.0], 3, 3).unwrap();
     assert!(check_q_positive_semidefinite(&q));
 }
 
 /// noise floor (Q[0,0]=-1e-7, ‖Q‖_max=1) は PSD。
 #[test]
 fn test_qp_diagonal_boundary_at_noise_floor() {
-    let q =
-        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-7_f64, 1.0, 1.0], 3, 3).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-7_f64, 1.0, 1.0], 3, 3).unwrap();
     assert!(check_q_positive_semidefinite(&q));
 }
 
 /// 閾値 |‖Q‖_max × 1e-6| 超 (Q[0,0]=-1e-4) → NonConvex。
 #[test]
 fn test_qp_diagonal_boundary_above_threshold() {
-    let q =
-        CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-4_f64, 1.0, 1.0], 3, 3).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1, 2], &[0, 1, 2], &[-1e-4_f64, 1.0, 1.0], 3, 3).unwrap();
     assert!(!check_q_positive_semidefinite(&q));
 }
-

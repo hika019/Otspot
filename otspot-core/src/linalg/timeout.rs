@@ -32,7 +32,6 @@ impl TimeoutCtx {
 
     #[inline]
     pub(crate) fn should_stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-            || self.deadline.is_some_and(|d| Instant::now() >= d)
+        self.cancel.load(Ordering::Relaxed) || self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 }

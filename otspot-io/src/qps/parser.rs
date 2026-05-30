@@ -5,9 +5,9 @@ use otspot_core::problem::ConstraintType;
 use otspot_core::qp::QpProblem;
 use otspot_core::sparse::CscMatrix;
 
-use crate::common::{RowType, mps_field, parse_mps_free_pairs, parse_mps_fixed_pairs};
 use super::types::{BoundType, Section};
 use super::QpsError;
+use crate::common::{mps_field, parse_mps_fixed_pairs, parse_mps_free_pairs, RowType};
 
 pub(super) struct QpsParser {
     rows: Vec<(String, RowType)>,
@@ -38,10 +38,7 @@ impl QpsParser {
         }
     }
 
-    pub(super) fn parse_reader<R: BufRead>(
-        &mut self,
-        reader: R,
-    ) -> Result<QpProblem, QpsError> {
+    pub(super) fn parse_reader<R: BufRead>(&mut self, reader: R) -> Result<QpProblem, QpsError> {
         let mut current_section = Section::None;
         let mut seen_sections = std::collections::HashSet::new();
         let mut line_num = 0;
@@ -111,7 +108,10 @@ impl QpsParser {
             _ => {
                 return Err(QpsError::ParseError {
                     line: line_num,
-                    message: format!("Invalid OBJSENSE value '{}'; expected MIN or MAX", line.trim()),
+                    message: format!(
+                        "Invalid OBJSENSE value '{}'; expected MIN or MAX",
+                        line.trim()
+                    ),
                 });
             }
         }
@@ -206,7 +206,10 @@ impl QpsParser {
                     if !value1.is_finite() {
                         return Err(QpsError::ParseError {
                             line: line_num,
-                            message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name1),
+                            message: format!(
+                                "Non-finite COLUMNS value for col='{}' row='{}'",
+                                col_name, row_name1
+                            ),
                         });
                     }
                     self.columns.push((col_name.clone(), row_name1, value1));
@@ -223,7 +226,10 @@ impl QpsParser {
                     if !value2.is_finite() {
                         return Err(QpsError::ParseError {
                             line: line_num,
-                            message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name2),
+                            message: format!(
+                                "Non-finite COLUMNS value for col='{}' row='{}'",
+                                col_name, row_name2
+                            ),
                         });
                     }
                     self.columns.push((col_name, row_name2, value2));
@@ -236,14 +242,19 @@ impl QpsParser {
         let mut i = 1;
         while i + 1 < parts.len() {
             let row_name = parts[i].to_string();
-            let value = parts[i + 1].parse::<f64>().map_err(|_| QpsError::ParseError {
-                line: line_num,
-                message: format!("Invalid value: {}", parts[i + 1]),
-            })?;
+            let value = parts[i + 1]
+                .parse::<f64>()
+                .map_err(|_| QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Invalid value: {}", parts[i + 1]),
+                })?;
             if !value.is_finite() {
                 return Err(QpsError::ParseError {
                     line: line_num,
-                    message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name),
+                    message: format!(
+                        "Non-finite COLUMNS value for col='{}' row='{}'",
+                        col_name, row_name
+                    ),
                 });
             }
             self.columns.push((col_name.clone(), row_name, value));
@@ -277,8 +288,7 @@ impl QpsParser {
             self.rhs.insert(row_name, value);
             return Ok(());
         }
-        let force_fixed =
-            mps_field(line, 4, 12).is_empty() && !mps_field(line, 14, 22).is_empty();
+        let force_fixed = mps_field(line, 4, 12).is_empty() && !mps_field(line, 14, 22).is_empty();
         let is_free = if force_fixed {
             false
         } else {
@@ -298,7 +308,10 @@ impl QpsParser {
         } else {
             parse_mps_fixed_pairs(line, line_num, "RHS", self.obj_row.as_deref())
         }
-        .map_err(|msg| QpsError::ParseError { line: line_num, message: msg })?;
+        .map_err(|msg| QpsError::ParseError {
+            line: line_num,
+            message: msg,
+        })?;
         for (name, value) in pairs {
             self.rhs.insert(name, value);
         }
@@ -346,7 +359,10 @@ impl QpsParser {
         } else {
             parse_mps_fixed_pairs(line, line_num, "RANGES", None)
         }
-        .map_err(|msg| QpsError::ParseError { line: line_num, message: msg })?;
+        .map_err(|msg| QpsError::ParseError {
+            line: line_num,
+            message: msg,
+        })?;
         for (name, value) in pairs {
             self.ranges.insert(name, value);
         }
@@ -442,7 +458,11 @@ impl QpsParser {
         let (col1, col2, val_str) = if parts.len() == 3 {
             (parts[0], parts[1], parts[2])
         } else {
-            (mps_field(line, 4, 12), mps_field(line, 14, 22), mps_field(line, 24, 36))
+            (
+                mps_field(line, 4, 12),
+                mps_field(line, 14, 22),
+                mps_field(line, 24, 36),
+            )
         };
         let value = val_str.parse::<f64>().map_err(|_| QpsError::ParseError {
             line: line_num,
@@ -468,7 +488,8 @@ impl QpsParser {
                 message: format!("Duplicate QUADOBJ entry: ({}, {})", col1, col2),
             });
         }
-        self.quadobj.push((col1.to_string(), col2.to_string(), value));
+        self.quadobj
+            .push((col1.to_string(), col2.to_string(), value));
         Ok(())
     }
 
@@ -539,11 +560,14 @@ impl QpsParser {
                     rtype: RowType::L,
                     rhs: le_rhs,
                 });
-                range_extra.push((row.name.clone(), ConstraintRow {
-                    name: row.name.clone(),
-                    rtype: RowType::G,
-                    rhs: ge_rhs,
-                }));
+                range_extra.push((
+                    row.name.clone(),
+                    ConstraintRow {
+                        name: row.name.clone(),
+                        rtype: RowType::G,
+                        rhs: ge_rhs,
+                    },
+                ));
             } else {
                 base_rows.push(row);
             }
@@ -562,15 +586,27 @@ impl QpsParser {
         for row in base_rows {
             match row.rtype {
                 RowType::L => {
-                    aug_rows.push(AugRow { name: row.name, sign: 1.0, rhs: row.rhs });
+                    aug_rows.push(AugRow {
+                        name: row.name,
+                        sign: 1.0,
+                        rhs: row.rhs,
+                    });
                     constraint_types.push(ConstraintType::Le);
                 }
                 RowType::G => {
-                    aug_rows.push(AugRow { name: row.name, sign: -1.0, rhs: -row.rhs });
+                    aug_rows.push(AugRow {
+                        name: row.name,
+                        sign: -1.0,
+                        rhs: -row.rhs,
+                    });
                     constraint_types.push(ConstraintType::Le);
                 }
                 RowType::E => {
-                    aug_rows.push(AugRow { name: row.name, sign: 1.0, rhs: row.rhs });
+                    aug_rows.push(AugRow {
+                        name: row.name,
+                        sign: 1.0,
+                        rhs: row.rhs,
+                    });
                     constraint_types.push(ConstraintType::Eq);
                 }
                 RowType::N => {}
@@ -581,7 +617,10 @@ impl QpsParser {
 
         let mut row_name_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, ar) in aug_rows.iter().enumerate() {
-            row_name_to_indices.entry(ar.name.clone()).or_default().push(i);
+            row_name_to_indices
+                .entry(ar.name.clone())
+                .or_default()
+                .push(i);
         }
 
         let mut a_rows: Vec<usize> = Vec::new();
@@ -649,9 +688,13 @@ impl QpsParser {
                 Some(&idx) => idx,
                 None => continue,
             };
-            q_rows.push(i); q_cols.push(j); q_vals.push(*value);
+            q_rows.push(i);
+            q_cols.push(j);
+            q_vals.push(*value);
             if i != j {
-                q_rows.push(j); q_cols.push(i); q_vals.push(*value);
+                q_rows.push(j);
+                q_cols.push(i);
+                q_vals.push(*value);
             }
         }
 
@@ -679,7 +722,11 @@ impl QpsParser {
         let obj_offset = match &self.obj_row {
             Some(obj_row_name) => {
                 let raw = self.rhs.get(obj_row_name).copied().unwrap_or(0.0);
-                if self.maximize { -raw } else { raw }
+                if self.maximize {
+                    -raw
+                } else {
+                    raw
+                }
             }
             None => 0.0,
         };

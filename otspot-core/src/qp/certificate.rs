@@ -63,8 +63,16 @@ pub fn prove_optimal<'a>(
     // that as a panic failure, not a normal assertion failure.
     let num_vars = view.bounds.len();
     let num_constraints = view.a.nrows;
-    let n_lb = view.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
-    let n_ub = view.bounds.iter().filter(|&&(_, ub)| ub.is_finite()).count();
+    let n_lb = view
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = view
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
     let dim_valid = view.q.nrows == num_vars
         && view.q.ncols == num_vars
         && view.a.ncols == num_vars
@@ -132,15 +140,18 @@ pub fn prove_optimal<'a>(
     // so `!(NaN <= tol)` is true — NaN and ±Inf are correctly rejected.
     let mut failing: Vec<&'static str> = Vec::new();
     for (name, val) in [
-        ("stationarity",      stat),
+        ("stationarity", stat),
         ("primal_feasibility", pres),
         ("bound_feasibility", bviol),
-        ("complementarity",   comp),
-        ("dual_sign",         dsign),
-        ("duality_gap",       gap),
+        ("complementarity", comp),
+        ("dual_sign", dsign),
+        ("duality_gap", gap),
     ] {
-        #[allow(clippy::neg_cmp_op_on_partial_ord)] // NaN must fail: !(NaN <= tol) = true, NaN > tol = false
-        if !(val <= tol) { failing.push(name); }
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        // NaN must fail: !(NaN <= tol) = true, NaN > tol = false
+        if !(val <= tol) {
+            failing.push(name);
+        }
     }
 
     if failing.is_empty() {
@@ -237,8 +248,17 @@ pub(crate) fn prove_optimal_lp(
 /// `dual_obj = −b^T y_prove + Σ lb_j·z_lb_j − Σ ub_j·z_ub_j`.
 fn lp_duality_gap_rel(problem: &LpProblem, x: &[f64], y_prove: &[f64], z: &[f64]) -> f64 {
     let primal_obj: f64 = problem.c.iter().zip(x.iter()).map(|(&c, &xj)| c * xj).sum();
-    let by: f64 = problem.b.iter().zip(y_prove.iter()).map(|(&b, &y)| b * y).sum();
-    let n_lb = problem.bounds.iter().filter(|&&(lb, _)| lb.is_finite()).count();
+    let by: f64 = problem
+        .b
+        .iter()
+        .zip(y_prove.iter())
+        .map(|(&b, &y)| b * y)
+        .sum();
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
     let mut bnd_term = 0.0_f64;
     let mut lb_idx = 0_usize;
     let mut ub_idx = n_lb;
@@ -255,7 +275,11 @@ fn lp_duality_gap_rel(problem: &LpProblem, x: &[f64], y_prove: &[f64], z: &[f64]
     let dual_obj = -by + bnd_term;
     let gap_abs = (primal_obj - dual_obj).abs();
     let denom = primal_obj.abs().max(dual_obj.abs()).max(1.0);
-    if gap_abs.is_finite() { gap_abs / denom } else { f64::INFINITY }
+    if gap_abs.is_finite() {
+        gap_abs / denom
+    } else {
+        f64::INFINITY
+    }
 }
 
 /// Full KKT+dual_sign LP Optimal gate.
@@ -269,7 +293,10 @@ pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> Sol
     }
     match prove_optimal_lp(problem, &result, LP_CERT_TOL) {
         Ok(_) => result,
-        Err(_) => SolverResult { status: SolveStatus::SuboptimalSolution, ..result },
+        Err(_) => SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            ..result
+        },
     }
 }
 
@@ -277,8 +304,8 @@ pub(crate) fn guard_lp_optimal(result: SolverResult, problem: &LpProblem) -> Sol
 mod tests {
     use super::*;
     use crate::problem::ConstraintType;
-    use crate::sparse::CscMatrix;
     use crate::qp::ipm_solver::outcome::ProblemView;
+    use crate::sparse::CscMatrix;
 
     // Helper: build a ProblemView for a trivial LP.
     fn trivial_view<'a>(
@@ -289,7 +316,15 @@ mod tests {
         bounds: &'a [(f64, f64)],
         ct: &'a [ConstraintType],
     ) -> ProblemView<'a> {
-        ProblemView { q, a, c, b, bounds, constraint_types: ct, eliminated_cols: &[] }
+        ProblemView {
+            q,
+            a,
+            c,
+            b,
+            bounds,
+            constraint_types: ct,
+            eliminated_cols: &[],
+        }
     }
 
     /// Exact optimal KKT point → prove_optimal returns Ok.
@@ -308,9 +343,9 @@ mod tests {
         let ct = vec![ConstraintType::Ge];
         let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
 
-        let x = vec![1.0_f64];    // primal optimal
-        let y = vec![-1.0_f64];   // Ge dual <= 0  (y*=-1)
-        let z = vec![0.0_f64];    // z_lb=0 (lb=0 inactive: x=1 > lb=0); n_lb=1, n_ub=0
+        let x = vec![1.0_f64]; // primal optimal
+        let y = vec![-1.0_f64]; // Ge dual <= 0  (y*=-1)
+        let z = vec![0.0_f64]; // z_lb=0 (lb=0 inactive: x=1 > lb=0); n_lb=1, n_ub=0
         let gap = 0.0_f64;
 
         let result = prove_optimal(&view, &x, &y, &z, gap, 1e-6);
@@ -334,9 +369,9 @@ mod tests {
         let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
 
         let x_bad = vec![2.0_f64]; // primal infeasible (Ge: 2*1 >= 1 ok, but dual mismatch)
-        // Actually for the Le convention: Ge means x >= b=1, x=2 is feasible.
-        // But the stationarity: c + A^T*y - z_lb + z_ub = 1 + 1*(-1) = 0 still holds.
-        // Primal is feasible (x=2 >= 1). Complementarity: y*slack = -1 * (2-1) = -1 ≠ 0.
+                                   // Actually for the Le convention: Ge means x >= b=1, x=2 is feasible.
+                                   // But the stationarity: c + A^T*y - z_lb + z_ub = 1 + 1*(-1) = 0 still holds.
+                                   // Primal is feasible (x=2 >= 1). Complementarity: y*slack = -1 * (2-1) = -1 ≠ 0.
         let y = vec![-1.0_f64];
         let z = vec![0.0_f64]; // z_lb=0 (inactive lb); bounds=[(0,inf)] → n_lb=1, n_ub=0
         let gap = 1.0_f64; // large gap
@@ -373,8 +408,11 @@ mod tests {
         let result = prove_optimal(&view, &x, &y_wrong, &z, gap, 1e-6);
         assert!(result.is_err(), "wrong-sign dual must fail");
         let err = result.unwrap_err();
-        assert!(err.failing_conditions.contains(&"dual_sign"),
-            "dual_sign must be in failing_conditions: {:?}", err.failing_conditions);
+        assert!(
+            err.failing_conditions.contains(&"dual_sign"),
+            "dual_sign must be in failing_conditions: {:?}",
+            err.failing_conditions
+        );
         assert!(err.dual_sign_violation > 0.0);
     }
 
@@ -400,8 +438,11 @@ mod tests {
         let result = prove_optimal(&view, &x, &y, &z_bad, gap, 1e-6);
         assert!(result.is_err(), "stationarity violation must fail");
         let err = result.unwrap_err();
-        assert!(err.failing_conditions.contains(&"stationarity"),
-            "stationarity must fail: {:?}", err.failing_conditions);
+        assert!(
+            err.failing_conditions.contains(&"stationarity"),
+            "stationarity must fail: {:?}",
+            err.failing_conditions
+        );
     }
 
     /// prove_optimal is scale-invariant to a multiplicative rescaling of the problem.
@@ -429,7 +470,10 @@ mod tests {
         // NOTE: gap=-1 would be pathological; test with positive non-zero gap
         let result_gap_fail = prove_optimal(&view, &x, &y, &z, 1e-5, 1e-6);
         assert!(result_gap_fail.is_err());
-        assert!(result_gap_fail.unwrap_err().failing_conditions.contains(&"duality_gap"));
+        assert!(result_gap_fail
+            .unwrap_err()
+            .failing_conditions
+            .contains(&"duality_gap"));
     }
 
     /// Empty slices (LP, no bounds, no constraints) → prove_optimal handles gracefully.
@@ -443,7 +487,11 @@ mod tests {
         let ct: Vec<ConstraintType> = vec![];
         let view = trivial_view(&q, &a, &c, &b, &bounds, &ct);
         let result = prove_optimal(&view, &[], &[], &[], 0.0, 1e-6);
-        assert!(result.is_ok(), "empty problem must pass: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "empty problem must pass: {:?}",
+            result.err()
+        );
     }
 
     // ── NaN / ±Inf soundness guard ────────────────────────────────────────────
@@ -480,9 +528,11 @@ mod tests {
             let result = prove_optimal(&view, &x, &y, &z, f64::NAN, 1e-6);
             assert!(result.is_err(), "NaN gap must be rejected");
             let err = result.unwrap_err();
-            assert!(err.failing_conditions.contains(&"duality_gap"),
+            assert!(
+                err.failing_conditions.contains(&"duality_gap"),
                 "NaN gap: duality_gap must be in failing_conditions, got {:?}",
-                err.failing_conditions);
+                err.failing_conditions
+            );
         }
 
         // Case B: gap = +Inf → duality_gap must be in failing_conditions.
@@ -494,9 +544,11 @@ mod tests {
             let result = prove_optimal(&view, &x, &y, &z, f64::INFINITY, 1e-6);
             assert!(result.is_err(), "+Inf gap must be rejected");
             let err = result.unwrap_err();
-            assert!(err.failing_conditions.contains(&"duality_gap"),
+            assert!(
+                err.failing_conditions.contains(&"duality_gap"),
                 "+Inf gap: duality_gap must be in failing_conditions, got {:?}",
-                err.failing_conditions);
+                err.failing_conditions
+            );
         }
 
         // Case C: x = NaN → at least one residual becomes non-finite → Err.
@@ -510,8 +562,11 @@ mod tests {
             let result = prove_optimal(&view, &x_nan, &y, &z, 0.0, 1e-6);
             assert!(result.is_err(), "NaN x must be rejected");
             let err = result.unwrap_err();
-            assert!(!err.failing_conditions.is_empty(),
-                "NaN x: at least one condition must fail, got {:?}", err.failing_conditions);
+            assert!(
+                !err.failing_conditions.is_empty(),
+                "NaN x: at least one condition must fail, got {:?}",
+                err.failing_conditions
+            );
         }
 
         // Case D: NaN gap + NaN x/y → at least duality_gap must be caught.
@@ -526,12 +581,16 @@ mod tests {
             let result = prove_optimal(&view, &x_nan, &y_nan, &z, f64::NAN, 1e-6);
             assert!(result.is_err(), "NaN x/y/gap must be rejected");
             let err = result.unwrap_err();
-            assert!(!err.failing_conditions.is_empty(),
+            assert!(
+                !err.failing_conditions.is_empty(),
                 "NaN inputs: at least one condition must fail, got {:?}",
-                err.failing_conditions);
-            assert!(err.failing_conditions.contains(&"duality_gap"),
+                err.failing_conditions
+            );
+            assert!(
+                err.failing_conditions.contains(&"duality_gap"),
                 "NaN gap: duality_gap must always be in failing_conditions, got {:?}",
-                err.failing_conditions);
+                err.failing_conditions
+            );
         }
     }
 
@@ -556,8 +615,11 @@ mod tests {
 
         // Exact KKT point → all residuals ≈ 0.0 → must pass.
         let result = prove_optimal(&view, &x, &y, &z, 0.0, 1e-6);
-        assert!(result.is_ok(),
-            "exact finite KKT must still pass after NaN fix: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "exact finite KKT must still pass after NaN fix: {:?}",
+            result.err()
+        );
     }
 
     // ── dimension guard tests ─────────────────────────────────────────────────
@@ -579,9 +641,7 @@ mod tests {
     fn prove_optimal_dimension_mismatch_returns_err_not_panic() {
         let q1 = CscMatrix::new(1, 1);
         // A: 2 rows × 1 col, with non-zero in row 0 AND row 1 (to trigger aty panic)
-        let a2x1 = CscMatrix::from_triplets(
-            &[0usize, 1], &[0, 0], &[1.0_f64, 1.0], 2, 1,
-        ).unwrap();
+        let a2x1 = CscMatrix::from_triplets(&[0usize, 1], &[0, 0], &[1.0_f64, 1.0], 2, 1).unwrap();
         let c1 = vec![0.0_f64];
         let b2 = vec![1.0_f64, 1.0];
         let bounds_lb = vec![(0.0_f64, f64::INFINITY)]; // n_lb=1, n_ub=0
@@ -595,9 +655,16 @@ mod tests {
             let result = prove_optimal(&view, &[0.0], &[0.5], &[], 0.0, 1e-6);
             assert!(result.is_err(), "y too short: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "y too short: {:?}", err.failing_conditions);
-            assert!(err.stationarity_rel.is_nan(), "residuals must be NaN on dim error");
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "y too short: {:?}",
+                err.failing_conditions
+            );
+            assert!(
+                err.stationarity_rel.is_nan(),
+                "residuals must be NaN on dim error"
+            );
         }
 
         // ── y too long ────────────────────────────────────────────────────────
@@ -606,8 +673,12 @@ mod tests {
             let result = prove_optimal(&view, &[0.0], &[0.5, 0.5, 0.5], &[], 0.0, 1e-6);
             assert!(result.is_err(), "y too long: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "y too long: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "y too long: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── x too short (actual panic risk without guard) ─────────────────────
@@ -620,8 +691,12 @@ mod tests {
             let result = prove_optimal(&view, &[], &[-1.0], &[0.0], 0.0, 1e-6);
             assert!(result.is_err(), "x empty (too short): expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "x too short: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "x too short: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── x too long ────────────────────────────────────────────────────────
@@ -633,8 +708,12 @@ mod tests {
             let result = prove_optimal(&view, &[1.0, 2.0], &[-1.0], &[0.0], 0.0, 1e-6);
             assert!(result.is_err(), "x too long: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "x too long: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "x too long: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── z too short (n_lb=1, n_ub=0 → expected z.len()=1, passing z=[]) ──
@@ -644,10 +723,17 @@ mod tests {
             let ct1 = vec![ConstraintType::Ge];
             let view = trivial_view(&q1, &a1x1, &c1, &b1, &bounds_lb, &ct1);
             let result = prove_optimal(&view, &[1.0], &[-1.0], &[], 0.0, 1e-6);
-            assert!(result.is_err(), "z too short (empty for lb-only): expected Err");
+            assert!(
+                result.is_err(),
+                "z too short (empty for lb-only): expected Err"
+            );
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "z too short: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "z too short: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── z too long ────────────────────────────────────────────────────────
@@ -660,8 +746,12 @@ mod tests {
             let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0, 0.0], 0.0, 1e-6);
             assert!(result.is_err(), "z too long: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "z too long: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "z too long: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── view inconsistency: c has wrong length ────────────────────────────
@@ -671,14 +761,23 @@ mod tests {
             let ct1 = vec![ConstraintType::Ge];
             let c_wrong = vec![1.0_f64, 2.0]; // should be len=1
             let view = ProblemView {
-                q: &q1, a: &a1x1, c: &c_wrong, b: &b1,
-                bounds: &bounds_lb, constraint_types: &ct1, eliminated_cols: &[],
+                q: &q1,
+                a: &a1x1,
+                c: &c_wrong,
+                b: &b1,
+                bounds: &bounds_lb,
+                constraint_types: &ct1,
+                eliminated_cols: &[],
             };
             let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0], 0.0, 1e-6);
             assert!(result.is_err(), "view c wrong length: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "view c wrong: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "view c wrong: {:?}",
+                err.failing_conditions
+            );
         }
 
         // ── happy path: correct dims still pass ──────────────────────────────
@@ -690,7 +789,11 @@ mod tests {
             let ct_ge = vec![ConstraintType::Ge];
             let view = trivial_view(&q1, &a1x1, &c_min_x, &b1, &bounds_lb, &ct_ge);
             let result = prove_optimal(&view, &[1.0], &[-1.0], &[0.0], 0.0, 1e-6);
-            assert!(result.is_ok(), "correct dims + exact KKT must pass: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "correct dims + exact KKT must pass: {:?}",
+                result.err()
+            );
         }
     }
 
@@ -715,15 +818,23 @@ mod tests {
             let result = prove_optimal(&view, &[1.5], &[], &z_bad, 0.0, 1e-6);
             assert!(result.is_err(), "{label}: expected Err");
             let err = result.unwrap_err();
-            assert_eq!(err.failing_conditions, vec!["input_dimensions"],
-                "{label}: {:?}", err.failing_conditions);
+            assert_eq!(
+                err.failing_conditions,
+                vec!["input_dimensions"],
+                "{label}: {:?}",
+                err.failing_conditions
+            );
         }
 
         // Correct z=[0.0, 0.0]: x=1.5 inside (1,2) → all conditions pass
         {
             let view = trivial_view(&q, &a, &c, &[], &bounds, &ct);
             let result = prove_optimal(&view, &[1.5], &[], &[0.0, 0.0], 0.0, 1e-6);
-            assert!(result.is_ok(), "correct z=[0,0] with x inside bounds must pass: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "correct z=[0,0] with x inside bounds must pass: {:?}",
+                result.err()
+            );
         }
     }
 
@@ -766,7 +877,11 @@ mod tests {
         let lp = make_le_lp();
         let result = correct_simplex_result();
         let cert = prove_optimal_lp(&lp, &result, 1e-6);
-        assert!(cert.is_ok(), "correct simplex result must pass: {:?}", cert.err());
+        assert!(
+            cert.is_ok(),
+            "correct simplex result must pass: {:?}",
+            cert.err()
+        );
     }
 
     /// Wrong-sign LP dual (Le should be ≤ 0 in simplex, but +1 given) → Err.
@@ -785,7 +900,8 @@ mod tests {
         assert!(
             err.failing_conditions.contains(&"dual_sign")
                 || err.failing_conditions.contains(&"stationarity"),
-            "dual_sign or stationarity must fail: {:?}", err.failing_conditions,
+            "dual_sign or stationarity must fail: {:?}",
+            err.failing_conditions,
         );
     }
 
@@ -803,7 +919,8 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0_f64, f64::INFINITY)],
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let result = SolverResult {
             status: SolveStatus::Optimal,
             objective: 2.0,
@@ -814,7 +931,11 @@ mod tests {
             ..Default::default()
         };
         let cert = prove_optimal_lp(&lp, &result, 1e-6);
-        assert!(cert.is_ok(), "active Ge constraint must produce valid cert: {:?}", cert.err());
+        assert!(
+            cert.is_ok(),
+            "active Ge constraint must produce valid cert: {:?}",
+            cert.err()
+        );
     }
 
     /// guard_lp_optimal passes correct KKT result through as Optimal.
@@ -823,8 +944,11 @@ mod tests {
         let lp = make_le_lp();
         let result = correct_simplex_result();
         let guarded = guard_lp_optimal(result, &lp);
-        assert_eq!(guarded.status, SolveStatus::Optimal,
-            "correct KKT result must remain Optimal");
+        assert_eq!(
+            guarded.status,
+            SolveStatus::Optimal,
+            "correct KKT result must remain Optimal"
+        );
     }
 
     /// guard_lp_optimal demotes wrong-sign dual to SuboptimalSolution (not NumericalError).
@@ -839,16 +963,26 @@ mod tests {
         let mut result = correct_simplex_result();
         result.dual_solution = vec![1.0_f64]; // wrong sign for Le in simplex
         let guarded = guard_lp_optimal(result, &lp);
-        assert_eq!(guarded.status, SolveStatus::SuboptimalSolution,
-            "wrong-sign dual must be demoted to SuboptimalSolution");
+        assert_eq!(
+            guarded.status,
+            SolveStatus::SuboptimalSolution,
+            "wrong-sign dual must be demoted to SuboptimalSolution"
+        );
     }
 
     /// guard_lp_optimal is a no-op for non-Optimal statuses.
     #[test]
     fn guard_lp_optimal_passthrough_non_optimal_statuses() {
         let lp = make_le_lp();
-        for status in [SolveStatus::Infeasible, SolveStatus::Timeout, SolveStatus::NumericalError] {
-            let r = SolverResult { status: status.clone(), ..Default::default() };
+        for status in [
+            SolveStatus::Infeasible,
+            SolveStatus::Timeout,
+            SolveStatus::NumericalError,
+        ] {
+            let r = SolverResult {
+                status: status.clone(),
+                ..Default::default()
+            };
             let out = guard_lp_optimal(r, &lp);
             assert_eq!(out.status, status);
         }
@@ -897,8 +1031,10 @@ mod tests {
             &[0, 1, 0, 1],
             &[0, 0, 1, 1],
             &[1.0_f64, 1.0, -1.0, 1.0],
-            2, 2,
-        ).unwrap();
+            2,
+            2,
+        )
+        .unwrap();
         let lp = LpProblem::new_general(
             vec![1.0_f64, -1.0],
             a,
@@ -906,25 +1042,33 @@ mod tests {
             vec![ConstraintType::Eq, ConstraintType::Eq],
             vec![(f64::NEG_INFINITY, f64::INFINITY); 2],
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // IPM result: dual in prove_optimal convention, no bound_duals, no reduced_costs.
         let ipm_result = SolverResult {
             status: SolveStatus::Optimal,
             objective: 2.0,
             solution: vec![3.0_f64, 1.0],
-            dual_solution: vec![-1.0_f64, 0.0],  // IPM convention: Eq free
-            bound_duals: vec![],                   // all-free → no z
-            reduced_costs: vec![],                 // IPM never sets reduced_costs
+            dual_solution: vec![-1.0_f64, 0.0], // IPM convention: Eq free
+            bound_duals: vec![],                // all-free → no z
+            reduced_costs: vec![],              // IPM never sets reduced_costs
             ..Default::default()
         };
 
         let cert = prove_optimal_lp(&lp, &ipm_result, LP_CERT_TOL);
-        assert!(cert.is_ok(), "IPM all-free LP must pass prove_optimal_lp: {:?}", cert.err());
+        assert!(
+            cert.is_ok(),
+            "IPM all-free LP must pass prove_optimal_lp: {:?}",
+            cert.err()
+        );
 
         let guarded = guard_lp_optimal(ipm_result, &lp);
-        assert_eq!(guarded.status, SolveStatus::Optimal,
-            "guard_lp_optimal must not demote correct IPM all-free LP result");
+        assert_eq!(
+            guarded.status,
+            SolveStatus::Optimal,
+            "guard_lp_optimal must not demote correct IPM all-free LP result"
+        );
     }
 
     /// Table-driven: 4 path×bound combinations all produce Optimal.
@@ -949,7 +1093,8 @@ mod tests {
                 vec![ConstraintType::Eq],
                 bounds,
                 None,
-            ).unwrap();
+            )
+            .unwrap();
             let r = SolverResult {
                 status: SolveStatus::Optimal,
                 objective: 1.0,
@@ -960,34 +1105,57 @@ mod tests {
                 ..Default::default()
             };
             let cert = prove_optimal_lp(&lp, &r, LP_CERT_TOL);
-            assert!(cert.is_ok(), "case `{label}` must pass prove_optimal_lp: {:?}", cert.err());
+            assert!(
+                cert.is_ok(),
+                "case `{label}` must pass prove_optimal_lp: {:?}",
+                cert.err()
+            );
             let guarded = guard_lp_optimal(r, &lp);
-            assert_eq!(guarded.status, SolveStatus::Optimal,
-                "case `{label}` must remain Optimal after guard");
+            assert_eq!(
+                guarded.status,
+                SolveStatus::Optimal,
+                "case `{label}` must remain Optimal after guard"
+            );
         };
 
         // Simplex + lb=0: rc=0 (basic), y_simplex=1 (Eq: c−Aᵀy=rc → 1−y=0 → y=1).
         // Negate → y_prove=−1. Stationarity: 1 + 1*(−1) − z_lb(=0) = 0 ✓
-        run(vec![(0.0, f64::INFINITY)],
-            vec![1.0_f64], vec![], vec![0.0_f64],
-            "simplex/lb0");
+        run(
+            vec![(0.0, f64::INFINITY)],
+            vec![1.0_f64],
+            vec![],
+            vec![0.0_f64],
+            "simplex/lb0",
+        );
 
         // Simplex + all-free: same; no finite bounds → z=[].
-        run(vec![(f64::NEG_INFINITY, f64::INFINITY)],
-            vec![1.0_f64], vec![], vec![0.0_f64],
-            "simplex/free");
+        run(
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![1.0_f64],
+            vec![],
+            vec![0.0_f64],
+            "simplex/free",
+        );
 
         // IPM + lb=0: bound_duals=[z_lb=0], dual in prove_optimal convention.
         // Stationarity: 1 + 1*(−1) + z_lb = 1 − 1 + 0 = 0 ✓
-        run(vec![(0.0, f64::INFINITY)],
-            vec![-1.0_f64], vec![0.0_f64], vec![],
-            "ipm/lb0");
+        run(
+            vec![(0.0, f64::INFINITY)],
+            vec![-1.0_f64],
+            vec![0.0_f64],
+            vec![],
+            "ipm/lb0",
+        );
 
         // IPM + all-free: bound_duals=[], reduced_costs=[]. The bug case.
         // Stationarity: 1 + 1*(−1) = 0 ✓
-        run(vec![(f64::NEG_INFINITY, f64::INFINITY)],
-            vec![-1.0_f64], vec![], vec![],
-            "ipm/free");
+        run(
+            vec![(f64::NEG_INFINITY, f64::INFINITY)],
+            vec![-1.0_f64],
+            vec![],
+            vec![],
+            "ipm/free",
+        );
     }
 
     // ── P2: negative gap / invalid tol rejection ─────────────────────────────
@@ -1041,10 +1209,10 @@ mod tests {
 
         // ── Invalid gap values → "duality_gap" ───────────────────────────────
         for (gap, label) in [
-            (-1e-3_f64,          "gap = -1e-3"),
-            (f64::NEG_INFINITY,  "gap = -inf"),
-            (f64::NAN,           "gap = NaN"),
-            (f64::INFINITY,      "gap = +inf"),
+            (-1e-3_f64, "gap = -1e-3"),
+            (f64::NEG_INFINITY, "gap = -inf"),
+            (f64::NAN, "gap = NaN"),
+            (f64::INFINITY, "gap = +inf"),
         ] {
             let r = prove_optimal(&view, &x, &y, &z, gap, 1e-6);
             assert!(r.is_err(), "{label}: expected Err");
@@ -1058,10 +1226,10 @@ mod tests {
 
         // ── Invalid tol values → "invalid_tolerance" ─────────────────────────
         for (tol, label) in [
-            (0.0_f64,           "tol = 0"),
-            (-1.0_f64,          "tol = -1"),
-            (f64::NAN,          "tol = NaN"),
-            (f64::INFINITY,     "tol = +inf"),
+            (0.0_f64, "tol = 0"),
+            (-1.0_f64, "tol = -1"),
+            (f64::NAN, "tol = NaN"),
+            (f64::INFINITY, "tol = +inf"),
         ] {
             let r = prove_optimal(&view, &x, &y, &z, 0.0, tol);
             assert!(r.is_err(), "{label}: expected Err");
@@ -1075,8 +1243,8 @@ mod tests {
 
         // ── Happy path: gap ∈ {0, small positive}, tol > 0 → Ok ──────────────
         for (gap, tol, label) in [
-            (0.0_f64,   1e-6_f64, "gap=0 tol=1e-6"),
-            (1e-7_f64,  1e-6_f64, "gap=1e-7 tol=1e-6"),
+            (0.0_f64, 1e-6_f64, "gap=0 tol=1e-6"),
+            (1e-7_f64, 1e-6_f64, "gap=1e-7 tol=1e-6"),
         ] {
             let r = prove_optimal(&view, &x, &y, &z, gap, tol);
             assert!(r.is_ok(), "{label}: expected Ok, got {:?}", r.err());
@@ -1105,7 +1273,8 @@ mod tests {
             vec![ConstraintType::Ge],
             vec![(0.0_f64, f64::INFINITY)],
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Introduce ~5e-5 dual perturbation so KKT residuals land in (1e-6, 1e-4).
         let y_perturbed = 1.0 + 5e-5; // slightly off from optimal y=1
@@ -1113,7 +1282,7 @@ mod tests {
             status: SolveStatus::Optimal,
             objective: 1.0,
             solution: vec![1.0_f64],
-            dual_solution: vec![y_perturbed],  // Ge simplex dual >= 0
+            dual_solution: vec![y_perturbed], // Ge simplex dual >= 0
             reduced_costs: vec![0.0_f64],
             slack: vec![0.0_f64],
             ..Default::default()
@@ -1121,18 +1290,25 @@ mod tests {
 
         // Verify the perturbation is in range: proves this test targets the window.
         let r = prove_optimal_lp(&lp, &result, LP_CERT_TOL);
-        assert!(r.is_ok(),
-            "residuals < LP_CERT_TOL={LP_CERT_TOL} must not demote: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "residuals < LP_CERT_TOL={LP_CERT_TOL} must not demote: {:?}",
+            r.err()
+        );
 
         // Cross-check: at 1e-6 (stricter) the same result fails — proving residuals > 1e-6.
         let r_strict = prove_optimal_lp(&lp, &result, 1e-6);
-        assert!(r_strict.is_err(),
-            "residuals should exceed 1e-6, proving the test targets the (1e-6, LP_CERT_TOL) window");
+        assert!(
+            r_strict.is_err(),
+            "residuals should exceed 1e-6, proving the test targets the (1e-6, LP_CERT_TOL) window"
+        );
 
         // End-to-end: guard must not demote.
         let guarded = guard_lp_optimal(result, &lp);
-        assert_eq!(guarded.status, SolveStatus::Optimal,
-            "guard must not demote an LP result whose residuals are within LP_CERT_TOL");
+        assert_eq!(
+            guarded.status,
+            SolveStatus::Optimal,
+            "guard must not demote an LP result whose residuals are within LP_CERT_TOL"
+        );
     }
-
 }

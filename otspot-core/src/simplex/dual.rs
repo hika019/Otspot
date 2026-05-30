@@ -2,15 +2,15 @@
 //! feasibility (x_B ≥ 0). Primary use: warm-start re-optimization after RHS
 //! changes (e.g. SQP).
 
-use crate::basis::{BasisManager, LuBasis};
-use crate::options::SolverOptions;
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::LpEquilibration;
-use crate::sparse::{CscMatrix, SparseVec};
-use crate::tolerances::*;
-use super::{StandardForm, SimplexOutcome, timeout_result_with_incumbent};
 use super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, outcome_to_result};
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving, SteepestEdgePricing};
+use super::{timeout_result_with_incumbent, SimplexOutcome, StandardForm};
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::SolverOptions;
+use crate::presolve::LpEquilibration;
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::sparse::{CscMatrix, SparseVec};
+use crate::tolerances::*;
 use std::sync::atomic::Ordering;
 
 /// Two-phase dual simplex entry point. Warm-start path recomputes x_B from the
@@ -44,7 +44,13 @@ pub(crate) fn two_phase_dual_simplex(
                 if !super::has_lb_violation(&x_b, options.primal_tol) {
                     let mut total_iters: usize = 0;
                     let outcome = dual_simplex_core(
-                        &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                        &a,
+                        &mut x_b,
+                        &c,
+                        &mut basis,
+                        m,
+                        sf.n_total,
+                        options,
                         &mut total_iters,
                     );
 
@@ -90,7 +96,13 @@ fn cold_start_dual(
 
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core(
-        a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options,
+        a,
+        &mut x_b,
+        &c_perturbed,
+        &mut basis,
+        m,
+        sf.n_total,
+        options,
         &mut total_iters,
     );
 
@@ -105,11 +117,18 @@ fn cold_start_dual(
                 reduced_costs: vec![],
                 slack: vec![],
                 warm_start_basis: None,
-            ..Default::default()
+                ..Default::default()
             };
         }
         SimplexOutcome::Timeout(_) => {
-            return timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale, total_iters);
+            return timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -119,12 +138,29 @@ fn cold_start_dual(
 
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
-        a, &mut x_b, c, b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
-        &mut total_iters, false,
+        a,
+        &mut x_b,
+        c,
+        b,
+        &mut basis,
+        m,
+        sf.n_total,
+        sf.n_total,
+        &mut pricing,
+        options,
+        &mut total_iters,
+        false,
     );
 
     let mut result = outcome_to_result(
-        phase2_outcome, sf, problem, &basis, &x_b, col_scale, row_scale, false,
+        phase2_outcome,
+        sf,
+        problem,
+        &basis,
+        &x_b,
+        col_scale,
+        row_scale,
+        false,
     );
     result.iterations = total_iters;
     result
@@ -163,7 +199,8 @@ pub(super) fn dual_simplex_core(
     }
 
     // r_j = c_j - y^T a_j, y = B^{-T} c_B
-    let mut reduced_costs = compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
+    let mut reduced_costs =
+        compute_reduced_costs(a, c, &mut basis_mgr, &is_basic, n_price, m, basis);
 
     let mut leaving_strategy = MostInfeasibleLeaving;
     let mut rho_dense = vec![0.0f64; m];
@@ -172,8 +209,13 @@ pub(super) fn dual_simplex_core(
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
-        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
-        let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
+        let timed_out = options
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d);
+        let cancelled = options
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
@@ -209,12 +251,11 @@ pub(super) fn dual_simplex_core(
             trow[j] = dot;
         }
 
-        let (entering_col, theta) = match dual_ratio_test(
-            &trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL,
-        ) {
-            None => return SimplexOutcome::Unbounded,
-            Some(result) => result,
-        };
+        let (entering_col, theta) =
+            match dual_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL) {
+                None => return SimplexOutcome::Unbounded,
+                Some(result) => result,
+            };
 
         // FTRAN: α = B^{-1} a_q
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
@@ -311,7 +352,9 @@ fn dual_ratio_test(
     let mut entering = None;
 
     for j in 0..n_price {
-        if is_basic[j] { continue; }
+        if is_basic[j] {
+            continue;
+        }
 
         if trow[j] > pivot_tol {
             let ratio = reduced_costs[j] / trow[j];
@@ -514,7 +557,12 @@ mod tests {
         let pf = pfeas_abs(&lp2.a, &lp2.b, &lp2.constraint_types, &result2.solution);
         assert!(pf < EPS_KKT, "pfeas={:.3e} > {:.3e}", pf, EPS_KKT);
 
-        let df = dfeas_rel_bound(&lp2.c, &lp2.bounds, &result2.solution, &result2.reduced_costs);
+        let df = dfeas_rel_bound(
+            &lp2.c,
+            &lp2.bounds,
+            &result2.solution,
+            &result2.reduced_costs,
+        );
         assert!(df < EPS_KKT, "dfeas_rel_bound={:.3e} > {:.3e}", df, EPS_KKT);
 
         for &rc in &result2.reduced_costs {
@@ -559,10 +607,11 @@ mod tests {
         let mut basis = vec![0usize, 0];
         let opts = SolverOptions::default();
         let mut iters = 0usize;
-        let outcome = dual_simplex_core(
-            &a, &mut x_b, &c, &mut basis, 2, 2, &opts, &mut iters,
-        );
+        let outcome = dual_simplex_core(&a, &mut x_b, &c, &mut basis, 2, 2, &opts, &mut iters);
         assert!(!matches!(outcome, SimplexOutcome::Optimal(..)));
-        assert!(matches!(outcome, SimplexOutcome::Timeout(..) | SimplexOutcome::SingularBasis));
+        assert!(matches!(
+            outcome,
+            SimplexOutcome::Timeout(..) | SimplexOutcome::SingularBasis
+        ));
     }
 }

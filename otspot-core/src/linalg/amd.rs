@@ -27,7 +27,12 @@ use faer::sparse::SymbolicSparseColMatRef;
 /// deadline が指定された場合、faer AMD-2 呼び出し前に1回チェックし、
 /// 超過時は identity 置換 (0..n) を返す。
 /// faer amd::order() がエラーを返した場合も identity fallback を返す。
-pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadline: Option<Instant>) -> Vec<usize> {
+pub fn amd_with_deadline(
+    n: usize,
+    col_ptr: &[usize],
+    row_ind: &[usize],
+    deadline: Option<Instant>,
+) -> Vec<usize> {
     if n == 0 {
         return vec![];
     }
@@ -45,11 +50,8 @@ pub fn amd_with_deadline(n: usize, col_ptr: &[usize], row_ind: &[usize], deadlin
     let mut perm = vec![0usize; n];
     let mut perm_inv = vec![0usize; n];
 
-    let a = unsafe {
-        SymbolicSparseColMatRef::<usize>::new_unchecked(
-            n, n, col_ptr, None, row_ind,
-        )
-    };
+    let a =
+        unsafe { SymbolicSparseColMatRef::<usize>::new_unchecked(n, n, col_ptr, None, row_ind) };
 
     let req = amd::order_scratch::<usize>(n, nnz);
     let mut mem = MemBuffer::new(req);
@@ -100,7 +102,11 @@ pub fn permute_sym_upper(
             let v = values[idx];
             let new_i = inv_perm[i];
             // 上三角に正規化: row <= col
-            let (r, c) = if new_i <= new_j { (new_i, new_j) } else { (new_j, new_i) };
+            let (r, c) = if new_i <= new_j {
+                (new_i, new_j)
+            } else {
+                (new_j, new_i)
+            };
             entries.push((r, c, v));
         }
     }
@@ -169,7 +175,10 @@ mod tests {
         // 中心ノード0は最初に消去されない（初期次数4 > 葉の次数1）
         assert_ne!(perm[0], 0, "Central node 0 should not be eliminated first");
         // 最初に消去されるのは葉ノード（次数1）のいずれか
-        assert!(perm[0] >= 1 && perm[0] <= 4, "First eliminated node should be a leaf");
+        assert!(
+            perm[0] >= 1 && perm[0] <= 4,
+            "First eliminated node should be a leaf"
+        );
         // 全て有効な順列であること
         let mut check = perm.clone();
         check.sort_unstable();
@@ -227,9 +236,21 @@ mod tests {
         assert_eq!(new_col_ptr, vec![0, 1, 3]);
         assert_eq!(new_row_ind, vec![0, 0, 1]);
         let eps = 1e-14;
-        assert!((new_values[0] - 3.0).abs() < eps, "A_p[0,0]={}", new_values[0]);
-        assert!((new_values[1] - 1.0).abs() < eps, "A_p[0,1]={}", new_values[1]);
-        assert!((new_values[2] - 4.0).abs() < eps, "A_p[1,1]={}", new_values[2]);
+        assert!(
+            (new_values[0] - 3.0).abs() < eps,
+            "A_p[0,0]={}",
+            new_values[0]
+        );
+        assert!(
+            (new_values[1] - 1.0).abs() < eps,
+            "A_p[0,1]={}",
+            new_values[1]
+        );
+        assert!(
+            (new_values[2] - 4.0).abs() < eps,
+            "A_p[1,1]={}",
+            new_values[2]
+        );
     }
 
     #[test]

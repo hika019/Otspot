@@ -1,13 +1,13 @@
 //! Postsolve: lift a reduced LP's solution back to the original variable / constraint
 //! space by replaying `PostsolveStack` in LIFO order.
 
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
+use super::transforms::{PostsolveStep, PresolveResult};
 use crate::options::{SolverOptions, WarmStartBasis};
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
 use crate::sparse::CscMatrix;
 use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL};
-use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
 
 /// Relative tolerance below which a standard-form column is treated as at-bound
@@ -28,11 +28,7 @@ const GS_CONV_TOL: f64 = 1e-12;
 /// solutions): `b_i - Ax_i` for `Le`, `Ax_i - b_i` for `Ge`, `0` for `Eq`. The
 /// scale `1 + |b_i| + |Ax_i|` is returned alongside so the caller can pick a
 /// relative non-binding threshold.
-fn row_slack_and_scale(
-    orig_problem: &LpProblem,
-    i: usize,
-    solution: &[f64],
-) -> (f64, f64) {
+fn row_slack_and_scale(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> (f64, f64) {
     let row_entries = collect_row_entries(orig_problem, i);
     let ax_i: f64 = row_entries.iter().map(|&(j, a)| a * solution[j]).sum();
     let b_i = orig_problem.b[i];
@@ -80,13 +76,17 @@ fn build_and_solve_cleanup_lp(
         .filter(|&i| presolve_result.row_map[i].is_none())
         .collect();
     let k = deleted_rows.len();
-    if k == 0 { return None; }
+    if k == 0 {
+        return None;
+    }
 
     let row_to_var: std::collections::HashMap<usize, usize> = deleted_rows
-        .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
+        .iter()
+        .enumerate()
+        .map(|(idx, &r)| (r, idx))
+        .collect();
 
-    let use_kept_perturbation =
-        allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
+    let use_kept_perturbation = allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
     // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
     // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
     // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
@@ -145,8 +145,11 @@ fn build_and_solve_cleanup_lp(
     } else {
         Vec::new()
     };
-    let row_to_kept_var: std::collections::HashMap<usize, usize> =
-        coupled_kept.iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
+    let row_to_kept_var: std::collections::HashMap<usize, usize> = coupled_kept
+        .iter()
+        .enumerate()
+        .map(|(idx, &r)| (r, idx))
+        .collect();
     let m_kept = coupled_kept.len();
 
     // Variable layout: [y_del | dy | slack].
@@ -178,8 +181,11 @@ fn build_and_solve_cleanup_lp(
         let (lb_j, ub_j) = orig_problem.bounds[j];
         let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
         let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
-        if fixed { continue; }
+        let fixed =
+            lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
+        if fixed {
+            continue;
+        }
 
         let mut col_terms: Vec<(usize, f64)> = Vec::new();
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
@@ -193,7 +199,9 @@ fn build_and_solve_cleanup_lp(
                 }
             }
         }
-        if col_terms.is_empty() { continue; }
+        if col_terms.is_empty() {
+            continue;
+        }
 
         // Complementary slackness sign on rc[j]: at lb → rc ≥ 0, at ub → rc ≤ 0,
         // interior → rc = 0. Phase-1 slack absorbs any infeasibility from degeneracy.
@@ -230,7 +238,9 @@ fn build_and_solve_cleanup_lp(
                     }
                 }
             }
-            if col_terms.is_empty() { continue; }
+            if col_terms.is_empty() {
+                continue;
+            }
             let row_idx = b_clean.len();
             for &(var_idx, a) in &col_terms {
                 tri_rows.push(row_idx);
@@ -242,7 +252,9 @@ fn build_and_solve_cleanup_lp(
         }
     }
 
-    if b_clean.is_empty() { return None; }
+    if b_clean.is_empty() {
+        return None;
+    }
 
     // Add Phase-1 slack to guarantee feasibility: Le/Ge use one slack, Eq uses ± pair.
     // Objective `min Σ slack` returns 0 iff exact rc-sign satisfaction is possible.
@@ -317,24 +329,29 @@ fn build_and_solve_cleanup_lp(
     }
 
     let mut c_clean = vec![0.0f64; total_vars];
-    for j in slack_offset..total_vars { c_clean[j] = 1.0; }
+    for j in slack_offset..total_vars {
+        c_clean[j] = 1.0;
+    }
 
-    let a_clean = CscMatrix::from_triplets(
-        &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
-    ).expect("triplets invariant");
+    let a_clean = CscMatrix::from_triplets(&tri_rows, &tri_cols, &tri_vals, m_clean, total_vars)
+        .expect("triplets invariant");
     let b_clean_keep = b_clean.clone();
     let ct_clean_keep = ct_clean.clone();
     // LpProblem::new_general can reject ±Inf in derived b_clean (large coefficient overflow case);
     // preserve the cheap postsolve fallback by returning None instead of panicking.
     // See codex review on #185 a5de15d.
-    let cleanup_lp = LpProblem::new_general(
-        c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
-    ).ok()?;
+    let cleanup_lp =
+        LpProblem::new_general(c_clean, a_clean, b_clean, ct_clean, bounds_clean, None).ok()?;
 
     // Wire the parent deadline straight through so every inner stage (parse, scale,
     // factorize, simplex iterate) checks the same clock; otherwise large cleanup
     // LPs can spend minutes in setup before any per-call budget kicks in.
-    let opts = SolverOptions { presolve: false, warm_start: None, deadline, ..SolverOptions::default() };
+    let opts = SolverOptions {
+        presolve: false,
+        warm_start: None,
+        deadline,
+        ..SolverOptions::default()
+    };
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
         return None;
@@ -376,9 +393,13 @@ fn build_and_solve_cleanup_lp(
     // (i) Replicate Phase-1 a*y constraints without slack, with RHS relaxed by Phase-1 slack.
     for (orig_idx, (slack_pos, slack_neg_opt)) in slack_cols_per_row.iter().enumerate() {
         for (k_t, &row) in tri_rows.iter().enumerate() {
-            if row != orig_idx { continue; }
+            if row != orig_idx {
+                continue;
+            }
             let col = tri_cols[k_t];
-            if col >= p2_slack_offset { continue; }
+            if col >= p2_slack_offset {
+                continue;
+            }
             p2_tri_rows.push(orig_idx);
             p2_tri_cols.push(col);
             p2_tri_vals.push(tri_vals[k_t]);
@@ -398,9 +419,15 @@ fn build_and_solve_cleanup_lp(
     // (ii) Tie-break Eq rows: (y_del|dy)[i] - d_pos[i] + d_neg[i] = 0.
     for i in 0..n_yvars {
         let row_idx = m_clean + i;
-        p2_tri_rows.push(row_idx); p2_tri_cols.push(i);                  p2_tri_vals.push(1.0);
-        p2_tri_rows.push(row_idx); p2_tri_cols.push(n_yvars + i);        p2_tri_vals.push(-1.0);
-        p2_tri_rows.push(row_idx); p2_tri_cols.push(2 * n_yvars + i);    p2_tri_vals.push(1.0);
+        p2_tri_rows.push(row_idx);
+        p2_tri_cols.push(i);
+        p2_tri_vals.push(1.0);
+        p2_tri_rows.push(row_idx);
+        p2_tri_cols.push(n_yvars + i);
+        p2_tri_vals.push(-1.0);
+        p2_tri_rows.push(row_idx);
+        p2_tri_cols.push(2 * n_yvars + i);
+        p2_tri_vals.push(1.0);
         p2_b.push(0.0);
         p2_ct.push(ConstraintType::Eq);
     }
@@ -430,12 +457,20 @@ fn build_and_solve_cleanup_lp(
             }
         }
     }
-    for _ in 0..(2 * n_yvars) { p2_bounds.push((0.0, f64::INFINITY)); }
+    for _ in 0..(2 * n_yvars) {
+        p2_bounds.push((0.0, f64::INFINITY));
+    }
     let mut p2_c = vec![0.0f64; phase2_total_vars];
-    for j in n_yvars..(3 * n_yvars) { p2_c[j] = 1.0; }
+    for j in n_yvars..(3 * n_yvars) {
+        p2_c[j] = 1.0;
+    }
 
     let p2_a = match CscMatrix::from_triplets(
-        &p2_tri_rows, &p2_tri_cols, &p2_tri_vals, phase2_total_cons, phase2_total_vars
+        &p2_tri_rows,
+        &p2_tri_cols,
+        &p2_tri_vals,
+        phase2_total_cons,
+        phase2_total_vars,
     ) {
         Ok(m) => m,
         Err(_) => return Some(assemble_full_y(&y_del_phase1, &dy_phase1)),
@@ -514,7 +549,10 @@ fn fixed_tol(lb: f64, ub: f64) -> f64 {
 /// has to be reported as the now-implicit `μ_ub` (resp. `μ_lb`) so the externally
 /// visible rc stays dual-feasible at the active bound.
 #[derive(Clone, Copy)]
-enum BoundAbsorb { AtLb, AtUb }
+enum BoundAbsorb {
+    AtLb,
+    AtUb,
+}
 
 /// Recover `y_i` of a removed row to satisfy LP dual feasibility, given the rest of `y`.
 /// For each column the required rc sign yields a permissible range on `y_i`; the row's
@@ -535,7 +573,9 @@ fn recover_removed_row_dual(
     let mut min_y_i = f64::NEG_INFINITY;
     let mut max_y_i = f64::INFINITY;
     for &(j, a_ij) in &row_entries {
-        if a_ij.abs() < f64::EPSILON { continue; }
+        if a_ij.abs() < f64::EPSILON {
+            continue;
+        }
         let mut rc_at_y0 = orig_problem.c[j];
         if let Ok((rows, vals)) = orig_problem.a.get_column(j) {
             for (k, &row) in rows.iter().enumerate() {
@@ -546,20 +586,35 @@ fn recover_removed_row_dual(
         let (lb_j, ub_j) = orig_problem.bounds[j];
         let at_lb = lb_j.is_finite() && (x_j - lb_j).abs() < at_lb_tol(lb_j);
         let at_ub = ub_j.is_finite() && (x_j - ub_j).abs() < at_ub_tol(ub_j);
-        let fixed = lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
-        if fixed { continue; }
+        let fixed =
+            lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
+        if fixed {
+            continue;
+        }
         let bound_val = rc_at_y0 / a_ij;
         if at_lb && !at_ub {
             if a_ij > 0.0 {
-                if bound_val < max_y_i { max_y_i = bound_val; }
-            } else if bound_val > min_y_i { min_y_i = bound_val; }
+                if bound_val < max_y_i {
+                    max_y_i = bound_val;
+                }
+            } else if bound_val > min_y_i {
+                min_y_i = bound_val;
+            }
         } else if at_ub && !at_lb {
             if a_ij > 0.0 {
-                if bound_val > min_y_i { min_y_i = bound_val; }
-            } else if bound_val < max_y_i { max_y_i = bound_val; }
+                if bound_val > min_y_i {
+                    min_y_i = bound_val;
+                }
+            } else if bound_val < max_y_i {
+                max_y_i = bound_val;
+            }
         } else {
-            if bound_val < max_y_i { max_y_i = bound_val; }
-            if bound_val > min_y_i { min_y_i = bound_val; }
+            if bound_val < max_y_i {
+                max_y_i = bound_val;
+            }
+            if bound_val > min_y_i {
+                min_y_i = bound_val;
+            }
         }
     }
     let (sign_lb, sign_ub) = match orig_problem.constraint_types[i] {
@@ -570,9 +625,13 @@ fn recover_removed_row_dual(
     let lb_y = sign_lb.max(min_y_i);
     let ub_y = sign_ub.min(max_y_i);
     if lb_y <= ub_y {
-        if lb_y <= 0.0 && ub_y >= 0.0 { 0.0 }
-        else if ub_y < 0.0 { ub_y }
-        else { lb_y }
+        if lb_y <= 0.0 && ub_y >= 0.0 {
+            0.0
+        } else if ub_y < 0.0 {
+            ub_y
+        } else {
+            lb_y
+        }
     } else {
         0.0
     }
@@ -595,10 +654,7 @@ fn recover_removed_row_dual(
 ///
 /// Returns `None` only when the crash leaves rows uncovered (an artificial would be
 /// needed) — in that case no all-real-column basis exists, so warm-start is impossible.
-fn recover_warm_start_basis(
-    orig_problem: &LpProblem,
-    solution: &[f64],
-) -> Option<WarmStartBasis> {
+fn recover_warm_start_basis(orig_problem: &LpProblem, solution: &[f64]) -> Option<WarmStartBasis> {
     let sf = build_standard_form(orig_problem);
     let n_orig = orig_problem.num_vars;
     let n_total = sf.n_total;
@@ -623,7 +679,11 @@ fn recover_warm_start_basis(
         } else {
             let (idx, coeff) = info.new_vars[0];
             // coeff > 0 ⇒ shifted by lb (x_std = x − lb); coeff < 0 ⇒ shifted by ub.
-            let val = if coeff > 0.0 { xj - info.offset } else { info.offset - xj };
+            let val = if coeff > 0.0 {
+                xj - info.offset
+            } else {
+                info.offset - xj
+            };
             x_std[idx] = val.max(0.0);
         }
     }
@@ -690,18 +750,26 @@ fn recover_warm_start_basis(
             // against tiny pivots that would inflate B's condition number.
             let mut col_max = 0.0_f64;
             for &v in vals.iter() {
-                if v.abs() > col_max { col_max = v.abs(); }
+                if v.abs() > col_max {
+                    col_max = v.abs();
+                }
             }
-            if col_max < WARM_BASIS_BUILD_TOL { continue; }
+            if col_max < WARM_BASIS_BUILD_TOL {
+                continue;
+            }
             let pivot_min = (MARKOWITZ_PIVOT_RATIO * col_max).max(WARM_BASIS_BUILD_TOL);
 
             let mut best: Option<(f64, usize)> = None;
             for (k, &row) in rows.iter().enumerate() {
                 let abs = vals[k].abs();
-                if abs < pivot_min { continue; }
+                if abs < pivot_min {
+                    continue;
+                }
                 let cur = basis[row];
                 let cur_is_at_bound_slack = cur >= n_shifted && x_std[cur] <= WARM_BASIS_BUILD_TOL;
-                if !cur_is_at_bound_slack { continue; }
+                if !cur_is_at_bound_slack {
+                    continue;
+                }
                 if best.is_none_or(|(b, _)| abs > b) {
                     best = Some((abs, row));
                 }
@@ -717,7 +785,10 @@ fn recover_warm_start_basis(
 
     // Informational x_b at the new basis (dual-simplex warm path recomputes
     // x_B = B^{-1} b_new, so this is purely a hint).
-    let x_b: Vec<f64> = basis.iter().map(|&j| x_std.get(j).copied().unwrap_or(0.0)).collect();
+    let x_b: Vec<f64> = basis
+        .iter()
+        .map(|&j| x_std.get(j).copied().unwrap_or(0.0))
+        .collect();
     Some(WarmStartBasis { basis, x_b })
 }
 
@@ -764,14 +835,21 @@ pub fn run_postsolve(
                 solution[*orig_col] = *value;
             }
             PostsolveStep::EmptyRow { orig_row } => {
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] =
+                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
-            PostsolveStep::SingletonRow { orig_col, orig_row, value } => {
+            PostsolveStep::SingletonRow {
+                orig_col,
+                orig_row,
+                value,
+            } => {
                 solution[*orig_col] = *value;
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] =
+                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::RedundantConstraint { orig_row } => {
-                dual_solution[*orig_row] = recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
+                dual_solution[*orig_row] =
+                    recover_removed_row_dual(orig_problem, *orig_row, &solution, &dual_solution);
             }
             PostsolveStep::BoundsTightened => {}
             PostsolveStep::LinearSubstitution {
@@ -829,22 +907,33 @@ pub fn run_postsolve(
         let mut y = y_loop.clone();
         let mut linsub_rows: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for step in &presolve_result.postsolve_stack {
-            if let PostsolveStep::LinearSubstitution { orig_row: Some(r), .. } = step {
+            if let PostsolveStep::LinearSubstitution {
+                orig_row: Some(r), ..
+            } = step
+            {
                 linsub_rows.insert(*r);
             }
         }
         'gs_outer: for _ in 0..GS_MAX_ITER {
-            if deadline.is_some_and(|d| Instant::now() >= d) { break 'gs_outer; }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break 'gs_outer;
+            }
             let mut max_diff = 0.0f64;
             for i in 0..m {
-                if presolve_result.row_map[i].is_some() { continue; }
-                if linsub_rows.contains(&i) { continue; }
+                if presolve_result.row_map[i].is_some() {
+                    continue;
+                }
+                if linsub_rows.contains(&i) {
+                    continue;
+                }
                 if i & 0x3ff == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
                     break 'gs_outer;
                 }
                 let new_y = recover_removed_row_dual(orig_problem, i, &solution, &y);
                 let diff = (y[i] - new_y).abs();
-                if diff > max_diff { max_diff = diff; }
+                if diff > max_diff {
+                    max_diff = diff;
+                }
                 y[i] = new_y;
             }
             for step in &presolve_result.postsolve_stack {
@@ -854,19 +943,26 @@ pub fn run_postsolve(
                     c_orig,
                     pivot,
                     ..
-                } = step {
+                } = step
+                {
                     let mut sum = 0.0f64;
                     for &(row_i, a_ij) in col_orig_entries {
-                        if row_i == *piv { continue; }
+                        if row_i == *piv {
+                            continue;
+                        }
                         sum += a_ij * y[row_i];
                     }
                     let new_y = (c_orig - sum) / pivot;
                     let diff = (y[*piv] - new_y).abs();
-                    if diff > max_diff { max_diff = diff; }
+                    if diff > max_diff {
+                        max_diff = diff;
+                    }
                     y[*piv] = new_y;
                 }
             }
-            if max_diff < GS_CONV_TOL { break 'gs_outer; }
+            if max_diff < GS_CONV_TOL {
+                break 'gs_outer;
+            }
         }
         y
     };
@@ -885,16 +981,19 @@ pub fn run_postsolve(
         for step in &presolve_result.postsolve_stack {
             if let PostsolveStep::FixedVariable { orig_col, .. } = step {
                 let j = *orig_col;
-                if j >= n { continue; }
+                if j >= n {
+                    continue;
+                }
                 let (orig_lb, orig_ub) = orig_problem.bounds[j];
-                let truly_fixed = orig_lb.is_finite() && orig_ub.is_finite()
+                let truly_fixed = orig_lb.is_finite()
+                    && orig_ub.is_finite()
                     && (orig_ub - orig_lb).abs() < fixed_tol(orig_lb, orig_ub);
-                if truly_fixed { continue; }
+                if truly_fixed {
+                    continue;
+                }
                 let x = solution[j];
-                let at_orig_lb = orig_lb.is_finite()
-                    && (x - orig_lb).abs() < at_lb_tol(orig_lb);
-                let at_orig_ub = orig_ub.is_finite()
-                    && (x - orig_ub).abs() < at_ub_tol(orig_ub);
+                let at_orig_lb = orig_lb.is_finite() && (x - orig_lb).abs() < at_lb_tol(orig_lb);
+                let at_orig_ub = orig_ub.is_finite() && (x - orig_ub).abs() < at_ub_tol(orig_ub);
                 if at_orig_lb && !at_orig_ub {
                     out[j] = Some(BoundAbsorb::AtLb);
                 } else if at_orig_ub && !at_orig_lb {
@@ -913,9 +1012,11 @@ pub fn run_postsolve(
         let mut max_viol = 0.0f64;
         for j in 0..n {
             let (lb_j, ub_j) = orig_problem.bounds[j];
-            let fixed = lb_j.is_finite() && ub_j.is_finite()
-                && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
-            if fixed { continue; }
+            let fixed =
+                lb_j.is_finite() && ub_j.is_finite() && (ub_j - lb_j).abs() < fixed_tol(lb_j, ub_j);
+            if fixed {
+                continue;
+            }
             let at_lb = lb_j.is_finite() && (solution[j] - lb_j).abs() < at_lb_tol(lb_j);
             let at_ub = ub_j.is_finite() && (solution[j] - ub_j).abs() < at_ub_tol(ub_j);
             let mut rc = orig_problem.c[j];
@@ -924,10 +1025,16 @@ pub fn run_postsolve(
                     rc -= vals[k] * y[row];
                 }
             }
-            let viol = if at_lb && !at_ub { f64::max(0.0, -rc) }
-                else if at_ub && !at_lb { f64::max(0.0, rc) }
-                else { 0.0 };
-            if viol > max_viol { max_viol = viol; }
+            let viol = if at_lb && !at_ub {
+                f64::max(0.0, -rc)
+            } else if at_ub && !at_lb {
+                f64::max(0.0, rc)
+            } else {
+                0.0
+            };
+            if viol > max_viol {
+                max_viol = viol;
+            }
         }
         max_viol
     };
@@ -945,7 +1052,12 @@ pub fn run_postsolve(
     } else {
         let t0_nopert = std::time::Instant::now();
         let y_nopert = build_and_solve_cleanup_lp(
-            orig_problem, presolve_result, &solution, &y_gs, deadline, false,
+            orig_problem,
+            presolve_result,
+            &solution,
+            &y_gs,
+            deadline,
+            false,
         );
         let t_nopert = t0_nopert.elapsed();
         let df_nopert = y_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
@@ -962,7 +1074,12 @@ pub fn run_postsolve(
                 None => Some(now + pert_budget),
             };
             build_and_solve_cleanup_lp(
-                orig_problem, presolve_result, &solution, &y_gs, pert_deadline, true,
+                orig_problem,
+                presolve_result,
+                &solution,
+                &y_gs,
+                pert_deadline,
+                true,
             )
         };
         (y_nopert, y_pert)
@@ -970,7 +1087,9 @@ pub fn run_postsolve(
 
     // Compute cleanup dfeas before the LSQ gate so we can decide whether the
     // LSQ pass is worth the (often dominant) runtime.
-    let df_cl_nopert = y_cl_nopert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
+    let df_cl_nopert = y_cl_nopert
+        .as_ref()
+        .map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_pert = y_cl_pert.as_ref().map_or(f64::INFINITY, |y| dfeas_bound(y));
     let df_cl_min = df_cl_nopert.min(df_cl_pert);
 
@@ -980,8 +1099,8 @@ pub fn run_postsolve(
     // 撤廃 (0.0) では標準 test suite に退化なし (dfl001 は #[ignore])。
     // (lp_dispatch.rs: dfl001 bench 実測) skip gate 撤廃 → dfl001 で IPM 60s 全消費 + postsolve 43s 退化。
     const LSQ_CLEANUP_REL_IMPROVE: f64 = 1e-3;
-    let cleanup_stagnant = df_cl_min.is_finite()
-        && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
+    let cleanup_stagnant =
+        df_cl_min.is_finite() && df_cl_min >= cheap_min * (1.0 - LSQ_CLEANUP_REL_IMPROVE);
 
     // LSQ projection (A^T y ≈ -c) as a fourth candidate. Cleanup LP only adjusts
     // deleted-row y; LSQ ignores the kept/deleted boundary and can rebalance the
@@ -1009,7 +1128,8 @@ pub fn run_postsolve(
             orig_problem.b.clone(),
             orig_problem.bounds.clone(),
             orig_problem.constraint_types.clone(),
-        ).ok();
+        )
+        .ok();
         qp.and_then(|qp| {
             let seed = y_cl_pert
                 .as_ref()
@@ -1120,18 +1240,23 @@ mod cleanup_comp_tests {
     /// Comp residual threshold for asserting the fix is alive.
     const COMP_RESID_TIGHT: f64 = 1e-9;
 
-    fn presolve_result_with_deleted_row(
-        problem: &LpProblem,
-        deleted_row: usize,
-    ) -> PresolveResult {
+    fn presolve_result_with_deleted_row(problem: &LpProblem, deleted_row: usize) -> PresolveResult {
         let n = problem.num_vars;
         let m = problem.num_constraints;
         // Keep all columns; only the chosen row is removed.
         let col_map = (0..n).map(Some).collect();
         let row_map: Vec<Option<usize>> = (0..m)
-            .map(|i| if i == deleted_row { None } else { Some(if i < deleted_row { i } else { i - 1 }) })
+            .map(|i| {
+                if i == deleted_row {
+                    None
+                } else {
+                    Some(if i < deleted_row { i } else { i - 1 })
+                }
+            })
             .collect();
-        let postsolve_stack = vec![PostsolveStep::EmptyRow { orig_row: deleted_row }];
+        let postsolve_stack = vec![PostsolveStep::EmptyRow {
+            orig_row: deleted_row,
+        }];
         PresolveResult {
             reduced_problem: problem.clone(),
             postsolve_stack,
@@ -1158,10 +1283,16 @@ mod cleanup_comp_tests {
                     rc -= vals[k] * y[row];
                 }
             }
-            let v = if at_lb && !at_ub { (-rc).max(0.0) }
-                else if at_ub && !at_lb { rc.max(0.0) }
-                else { rc.abs() };
-            if v > max_v { max_v = v; }
+            let v = if at_lb && !at_ub {
+                (-rc).max(0.0)
+            } else if at_ub && !at_lb {
+                rc.max(0.0)
+            } else {
+                rc.abs()
+            };
+            if v > max_v {
+                max_v = v;
+            }
         }
         max_v
     }
@@ -1172,7 +1303,9 @@ mod cleanup_comp_tests {
         for i in 0..problem.num_constraints {
             let (slack, scale) = row_slack_and_scale(problem, i, solution);
             let prod = (y[i] * slack).abs() / scale;
-            if prod > max_c { max_c = prod; }
+            if prod > max_c {
+                max_c = prod;
+            }
         }
         max_c
     }
@@ -1183,15 +1316,16 @@ mod cleanup_comp_tests {
     fn fixture_eq_kept_le_deleted() -> (LpProblem, Vec<f64>, Vec<f64>, usize) {
         // min x1 + x2 s.t. x1 + x2 = 1, x2 ≤ 10, x ≥ 0.
         // Optimum: x* = (0, 1), row 0 binding, row 1 slack = 9.
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1], &[0, 1, 1], &[1.0, 1.0, 1.0], 2, 2).unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![1.0, 10.0],
+            vec![1.0, 1.0],
+            a,
+            vec![1.0, 10.0],
             vec![ConstraintType::Eq, ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let solution = vec![0.0, 1.0];
         // Drifted kept dual: true y_0 = 1.0; drift breaks rc sign for x1.
         let dual_known = vec![1.0 + DRIFT_MAGNITUDE, 0.0];
@@ -1206,15 +1340,18 @@ mod cleanup_comp_tests {
     fn fixture_eq_kept_ge_deleted() -> (LpProblem, Vec<f64>, Vec<f64>, usize) {
         // min x1 + x2 s.t. x1 + x2 = 1, -x1 - x2 ≥ -10, x ≥ 0.
         // Optimum x* = (0, 1); row 0 binding, row 1 slack = 9.
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+                .unwrap();
         let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![1.0, -10.0],
+            vec![1.0, 1.0],
+            a,
+            vec![1.0, -10.0],
             vec![ConstraintType::Eq, ConstraintType::Ge],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let solution = vec![0.0, 1.0];
         let dual_known = vec![1.0 + DRIFT_MAGNITUDE, 0.0];
         (lp, solution, dual_known, 1)
@@ -1226,13 +1363,22 @@ mod cleanup_comp_tests {
     }
 
     fn run_fixture(
-        problem: &LpProblem, solution: &[f64], dual_known: &[f64], deleted_row: usize,
+        problem: &LpProblem,
+        solution: &[f64],
+        dual_known: &[f64],
+        deleted_row: usize,
     ) -> Vec<f64> {
         init_logger();
         let presolve_result = presolve_result_with_deleted_row(problem, deleted_row);
         let y = build_and_solve_cleanup_lp(
-            problem, &presolve_result, solution, dual_known, None, false,
-        ).expect("cleanup LP must converge for the sentinel fixture");
+            problem,
+            &presolve_result,
+            solution,
+            dual_known,
+            None,
+            false,
+        )
+        .expect("cleanup LP must converge for the sentinel fixture");
         assert_eq!(y.len(), problem.num_constraints);
         y
     }
@@ -1245,10 +1391,17 @@ mod cleanup_comp_tests {
         assert!(
             comp < COMP_RESID_TIGHT,
             "comp={:.3e} >= {:.0e}; y={:?} (clamp on non-binding Le row must pin y[{}]=0)",
-            comp, COMP_RESID_TIGHT, y, del,
+            comp,
+            COMP_RESID_TIGHT,
+            y,
+            del,
         );
         // y for the deleted non-binding Le row must be exactly 0.
-        assert_eq!(y[del], 0.0, "non-binding Le deleted row y must be 0, got {}", y[del]);
+        assert_eq!(
+            y[del], 0.0,
+            "non-binding Le deleted row y must be 0, got {}",
+            y[del]
+        );
     }
 
     #[test]
@@ -1259,9 +1412,16 @@ mod cleanup_comp_tests {
         assert!(
             comp < COMP_RESID_TIGHT,
             "comp={:.3e} >= {:.0e}; y={:?} (clamp on non-binding Ge row must pin y[{}]=0)",
-            comp, COMP_RESID_TIGHT, y, del,
+            comp,
+            COMP_RESID_TIGHT,
+            y,
+            del,
         );
-        assert_eq!(y[del], 0.0, "non-binding Ge deleted row y must be 0, got {}", y[del]);
+        assert_eq!(
+            y[del], 0.0,
+            "non-binding Ge deleted row y must be 0, got {}",
+            y[del]
+        );
     }
 
     /// No-op proof: feed in the dual the un-clamped cleanup-LP would have
@@ -1278,7 +1438,8 @@ mod cleanup_comp_tests {
         assert!(
             comp >= DRIFT_MAGNITUDE * 0.5,
             "broken dual comp={:.3e} should be >= {:.3e}; detector is no-op'd",
-            comp, DRIFT_MAGNITUDE * 0.5,
+            comp,
+            DRIFT_MAGNITUDE * 0.5,
         );
         // Sanity: rc_sign_violation alone is NOT a substitute — the un-clamped
         // dual passes rc-sign on the interior x2 column even though it violates
@@ -1293,19 +1454,24 @@ mod cleanup_comp_tests {
     fn is_row_nonbinding_detects_known_patterns() {
         let cases: Vec<(ConstraintType, f64, f64, bool)> = vec![
             // (ct, b, ax, expected_nonbinding)
-            (ConstraintType::Le, 10.0, 5.0, true),    // slack 5 ≫ tol
-            (ConstraintType::Le, 10.0, 10.0, false),  // slack 0, binding
-            (ConstraintType::Ge, 1.0, 100.0, true),   // slack 99
+            (ConstraintType::Le, 10.0, 5.0, true), // slack 5 ≫ tol
+            (ConstraintType::Le, 10.0, 10.0, false), // slack 0, binding
+            (ConstraintType::Ge, 1.0, 100.0, true), // slack 99
             (ConstraintType::Ge, 1.0, 1.0, false),
             (ConstraintType::Eq, 1.0, 1.0, false),
-            (ConstraintType::Eq, 1.0, 0.5, false),    // Eq is never non-binding
+            (ConstraintType::Eq, 1.0, 0.5, false), // Eq is never non-binding
         ];
         for (i, (ct, b, ax, expected)) in cases.iter().enumerate() {
             let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
             let lp = LpProblem::new_general(
-                vec![0.0], a, vec![*b], vec![*ct],
-                vec![(f64::NEG_INFINITY, f64::INFINITY)], None,
-            ).unwrap();
+                vec![0.0],
+                a,
+                vec![*b],
+                vec![*ct],
+                vec![(f64::NEG_INFINITY, f64::INFINITY)],
+                None,
+            )
+            .unwrap();
             let got = is_row_nonbinding(&lp, 0, &[*ax]);
             assert_eq!(
                 got, *expected,
@@ -1337,44 +1503,48 @@ mod warm_basis_recovery_tests {
     use super::*;
     use crate::options::{SimplexMethod, SolverOptions};
     use crate::problem::{ConstraintType, LpProblem, SolveStatus};
-    use crate::simplex::{solve, solve_with, build_standard_form};
+    use crate::simplex::{build_standard_form, solve, solve_with};
     use crate::sparse::CscMatrix;
 
     /// Default options + `recover_warm_start_basis = true`. The recovery path
     /// is opt-in; sentinels covering the postsolve synthesis must enable it.
     fn opts_recover() -> SolverOptions {
-        SolverOptions { recover_warm_start_basis: true, ..SolverOptions::default() }
+        SolverOptions {
+            recover_warm_start_basis: true,
+            ..SolverOptions::default()
+        }
     }
 
     /// LP whose presolve dual-fixing zeroes both vars (c>0, x≥0, finite ub).
     /// Reduced LP has 0 vars → simplex `n==0` short-circuit → reduced
     /// warm_start_basis = None. Postsolve must still synthesise a basis.
     fn lp_dual_fixed() -> LpProblem {
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 2], &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0], 3, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
+            .unwrap();
         LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![6.0, 4.0, 4.0],
+            vec![1.0, 1.0],
+            a,
+            vec![6.0, 4.0, 4.0],
             vec![ConstraintType::Le; 3],
             vec![(0.0, f64::INFINITY); 2],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// LP with a singleton-row Eq: x0 = 2; presolve fixes x0 then propagates.
     fn lp_singleton_row() -> LpProblem {
         // min x0 + x1 s.t. x0 = 2 (Eq), x0 + x1 ≤ 5; x ≥ 0
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0],
-            2, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 1, 1], &[0, 0, 1], &[1.0, 1.0, 1.0], 2, 2).unwrap();
         LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![2.0, 5.0],
+            vec![1.0, 1.0],
+            a,
+            vec![2.0, 5.0],
             vec![ConstraintType::Eq, ConstraintType::Le],
             vec![(0.0, f64::INFINITY); 2],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// LP that survives presolve untouched (no reducible structure) — the
@@ -1383,35 +1553,47 @@ mod warm_basis_recovery_tests {
     /// postsolve fix didn't regress the non-reducible path).
     fn lp_non_reducible() -> LpProblem {
         // min -x0 - 2*x1 s.t. x0 + x1 ≤ 4; x0 ≤ 3; x1 ≤ 3
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 2], &[0, 1, 0, 1],
-            &[1.0, 1.0, 1.0, 1.0], 3, 2,
-        ).unwrap();
+        let a = CscMatrix::from_triplets(&[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
+            .unwrap();
         LpProblem::new_general(
-            vec![-1.0, -2.0], a, vec![4.0, 3.0, 3.0],
+            vec![-1.0, -2.0],
+            a,
+            vec![4.0, 3.0, 3.0],
             vec![ConstraintType::Le; 3],
             vec![(0.0, f64::INFINITY); 2],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn assert_basis_well_formed(lp: &LpProblem, basis: &[usize], context: &str) {
         let sf = build_standard_form(lp);
         assert_eq!(
-            basis.len(), sf.m,
-            "[{}] basis len {} != m_ext {}", context, basis.len(), sf.m,
+            basis.len(),
+            sf.m,
+            "[{}] basis len {} != m_ext {}",
+            context,
+            basis.len(),
+            sf.m,
         );
         for (i, &col) in basis.iter().enumerate() {
             assert!(
                 col < sf.n_total,
                 "[{}] basis[{}] = {} ≥ n_total {} (artificial leakage)",
-                context, i, col, sf.n_total,
+                context,
+                i,
+                col,
+                sf.n_total,
             );
         }
         // Uniqueness: each column appears at most once in the basis.
         let mut seen = vec![false; sf.n_total];
         for &col in basis {
-            assert!(!seen[col], "[{}] basis has duplicate column {}", context, col);
+            assert!(
+                !seen[col],
+                "[{}] basis has duplicate column {}",
+                context, col
+            );
             seen[col] = true;
         }
     }
@@ -1419,7 +1601,9 @@ mod warm_basis_recovery_tests {
     fn assert_warm_round_trip(lp_a: &LpProblem, lp_b: &LpProblem, context: &str) {
         let r1 = solve_with(lp_a, &opts_recover());
         assert_eq!(r1.status, SolveStatus::Optimal, "[{}] lp_a status", context);
-        let ws = r1.warm_start_basis.as_ref()
+        let ws = r1
+            .warm_start_basis
+            .as_ref()
             .unwrap_or_else(|| panic!("[{}] postsolve returned warm_start_basis=None", context));
         assert_basis_well_formed(lp_a, &ws.basis, context);
 
@@ -1431,8 +1615,10 @@ mod warm_basis_recovery_tests {
         };
         let r2 = solve_with(lp_b, &opts_warm);
         assert_eq!(
-            r2.status, SolveStatus::Optimal,
-            "[{}] warm-start round-trip on lp_b did not reach Optimal", context,
+            r2.status,
+            SolveStatus::Optimal,
+            "[{}] warm-start round-trip on lp_b did not reach Optimal",
+            context,
         );
     }
 
@@ -1465,7 +1651,11 @@ mod warm_basis_recovery_tests {
             r.warm_start_basis.is_some(),
             "non-reducible path lost its native simplex warm_start_basis",
         );
-        assert_basis_well_formed(&lp, &r.warm_start_basis.as_ref().unwrap().basis, "non_reducible");
+        assert_basis_well_formed(
+            &lp,
+            &r.warm_start_basis.as_ref().unwrap().basis,
+            "non_reducible",
+        );
     }
 
     /// No-op proof: a re-implementation that always returns `None` makes the
@@ -1513,12 +1703,22 @@ mod warm_basis_recovery_tests {
         let basis = &r.warm_start_basis.as_ref().unwrap().basis;
         let sf = build_standard_form(&lp);
         assert!(
-            basis.contains(&0) || sf.orig_var_info[0].new_vars.iter().any(|&(idx, _)| basis.contains(&idx)),
-            "active x0=1 not in warm-start basis: {:?}", basis,
+            basis.contains(&0)
+                || sf.orig_var_info[0]
+                    .new_vars
+                    .iter()
+                    .any(|&(idx, _)| basis.contains(&idx)),
+            "active x0=1 not in warm-start basis: {:?}",
+            basis,
         );
         assert!(
-            basis.contains(&1) || sf.orig_var_info[1].new_vars.iter().any(|&(idx, _)| basis.contains(&idx)),
-            "active x1=3 not in warm-start basis: {:?}", basis,
+            basis.contains(&1)
+                || sf.orig_var_info[1]
+                    .new_vars
+                    .iter()
+                    .any(|&(idx, _)| basis.contains(&idx)),
+            "active x1=3 not in warm-start basis: {:?}",
+            basis,
         );
     }
 
@@ -1569,10 +1769,14 @@ mod warm_basis_recovery_tests {
         let lp = lp_non_reducible();
         let r_default = solve(&lp);
         let r_optin = solve_with(&lp, &opts_recover());
-        assert!(r_default.warm_start_basis.is_some(),
-            "non-reducible default path must keep native simplex basis");
-        assert!(r_optin.warm_start_basis.is_some(),
-            "non-reducible opt-in path must keep native simplex basis");
+        assert!(
+            r_default.warm_start_basis.is_some(),
+            "non-reducible default path must keep native simplex basis"
+        );
+        assert!(
+            r_optin.warm_start_basis.is_some(),
+            "non-reducible opt-in path must keep native simplex basis"
+        );
     }
 }
 
@@ -1592,23 +1796,37 @@ mod bound_active_tol_tests {
         let lb = 1e6_f64;
         let x = lb + 0.5;
 
-        assert!((x - lb).abs() > BOUND_ACTIVE_REL_TOL,
-            "absolute BOUND_ACTIVE_REL_TOL alone would misclassify x as interior");
+        assert!(
+            (x - lb).abs() > BOUND_ACTIVE_REL_TOL,
+            "absolute BOUND_ACTIVE_REL_TOL alone would misclassify x as interior"
+        );
 
         let tol = at_lb_tol(lb);
-        assert!((x - lb).abs() < tol,
-            "at_lb_tol={} must classify x=lb+0.5 as at-lb for lb=1e6", tol);
+        assert!(
+            (x - lb).abs() < tol,
+            "at_lb_tol={} must classify x=lb+0.5 as at-lb for lb=1e6",
+            tol
+        );
     }
 
     /// Unit-scale bounds (lb=0, ub=1) give tolerances close to BOUND_ACTIVE_REL_TOL.
     #[test]
     fn test_bound_active_tol_unit_scale() {
-        assert!((at_lb_tol(0.0) - 1e-6).abs() < 1e-20,
-            "at_lb_tol(0) should be 1e-6, got {}", at_lb_tol(0.0));
-        assert!((at_ub_tol(1.0) - 2e-6).abs() < 1e-20,
-            "at_ub_tol(1) should be 2e-6, got {}", at_ub_tol(1.0));
-        assert!((fixed_tol(0.0, 1.0) - 2e-6).abs() < 1e-20,
-            "fixed_tol(0,1) should be 2e-6, got {}", fixed_tol(0.0, 1.0));
+        assert!(
+            (at_lb_tol(0.0) - 1e-6).abs() < 1e-20,
+            "at_lb_tol(0) should be 1e-6, got {}",
+            at_lb_tol(0.0)
+        );
+        assert!(
+            (at_ub_tol(1.0) - 2e-6).abs() < 1e-20,
+            "at_ub_tol(1) should be 2e-6, got {}",
+            at_ub_tol(1.0)
+        );
+        assert!(
+            (fixed_tol(0.0, 1.0) - 2e-6).abs() < 1e-20,
+            "fixed_tol(0,1) should be 2e-6, got {}",
+            fixed_tol(0.0, 1.0)
+        );
     }
 
     /// Sentinel C.4 (codex): lb=0, ub=1e12, x=5e5 must NOT be at-lb.
@@ -1624,13 +1842,19 @@ mod bound_active_tol_tests {
 
         // Old formula would give tol ≈ 1e6, making x look at-lb.
         let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
-        assert!((x - lb).abs() < old_tol,
-            "old formula must mis-classify x=5e5 as at-lb (old_tol={})", old_tol);
+        assert!(
+            (x - lb).abs() < old_tol,
+            "old formula must mis-classify x=5e5 as at-lb (old_tol={})",
+            old_tol
+        );
 
         // New lb-only formula correctly classifies x as interior.
         let new_tol = at_lb_tol(lb);
-        assert!((x - lb).abs() >= new_tol,
-            "at_lb_tol={} must NOT classify x=5e5 as at-lb for lb=0,ub=1e12", new_tol);
+        assert!(
+            (x - lb).abs() >= new_tol,
+            "at_lb_tol={} must NOT classify x=5e5 as at-lb for lb=0,ub=1e12",
+            new_tol
+        );
     }
 
     /// Sentinel C.4 (reviewer): lb=1e6, ub=1e6+1.5 must NOT be fixed.
@@ -1646,12 +1870,19 @@ mod bound_active_tol_tests {
 
         // Old formula must classify this as fixed.
         let old_tol = BOUND_ACTIVE_REL_TOL * (1.0 + lb.abs() + ub.abs());
-        assert!(gap < old_tol,
-            "old formula must mis-classify [1e6,1e6+1.5] as fixed (old_tol={})", old_tol);
+        assert!(
+            gap < old_tol,
+            "old formula must mis-classify [1e6,1e6+1.5] as fixed (old_tol={})",
+            old_tol
+        );
 
         // New max formula correctly leaves the range as non-fixed.
         let new_tol = fixed_tol(lb, ub);
-        assert!(gap >= new_tol,
-            "fixed_tol={} must NOT classify [1e6,1e6+1.5] as fixed (gap={})", new_tol, gap);
+        assert!(
+            gap >= new_tol,
+            "fixed_tol={} must NOT classify [1e6,1e6+1.5] as fixed (gap={})",
+            new_tol,
+            gap
+        );
     }
 }

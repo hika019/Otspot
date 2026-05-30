@@ -7,7 +7,10 @@ use crate::qp::QpProblem;
 use crate::tolerances::ZERO_TOL;
 
 /// Step 5: drop constraints dominated by activity range; only strict slack qualifies.
-pub(super) fn step5_redundant(prob: &QpProblem, ws: &mut Workspace) -> Result<(), QpPresolveResult> {
+pub(super) fn step5_redundant(
+    prob: &QpProblem,
+    ws: &mut Workspace,
+) -> Result<(), QpPresolveResult> {
     if skip_step(5) {
         return Ok(());
     }

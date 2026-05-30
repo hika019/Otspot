@@ -1,10 +1,10 @@
 //! Predictor-Corrector-Gondzio 共通ループ部品。
 
+use super::common::fraction_to_boundary_masked;
+use super::{ALPHA_IMPROVE_THRESHOLD, BETA_GONDZIO, GAMMA_L, GAMMA_U, TAU};
 use crate::linalg::kkt_solver::KktFactor;
 use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
-use super::common::fraction_to_boundary_masked;
-use super::{TAU, BETA_GONDZIO, GAMMA_L, GAMMA_U, ALPHA_IMPROVE_THRESHOLD};
 
 /// f64 IR の反復上限。3 を超えると LDL 精度限界で利得が出ないため。
 pub(crate) const IR_MAX_ITERS: usize = 3;
@@ -34,7 +34,9 @@ pub(crate) fn solve_with_iterative_refinement(
     // Primary solve: zero sol on MINRES error to prevent NaN; IPM continues with
     // degraded steps until residual stall or max_iter.
     if fac.solve_with_deadline(rhs, sol, deadline).is_err() {
-        for v in sol.iter_mut() { *v = 0.0; }
+        for v in sol.iter_mut() {
+            *v = 0.0;
+        }
         return;
     }
 
@@ -96,7 +98,10 @@ pub(crate) fn solve_with_iterative_refinement(
             *v = 0.0;
         }
         // IR solve error: correction stays zero; the partial correction would corrupt sol.
-        if fac.solve_with_deadline(&residual, &mut correction, deadline).is_err() {
+        if fac
+            .solve_with_deadline(&residual, &mut correction, deadline)
+            .is_err()
+        {
             break;
         }
 
@@ -140,7 +145,11 @@ pub(crate) fn compute_sigma_vec(
                 0.0
             } else {
                 let v = si / yi;
-                if v.is_finite() { v } else { sigma_max }
+                if v.is_finite() {
+                    v
+                } else {
+                    sigma_max
+                }
             }
         })
         .collect()
@@ -177,8 +186,12 @@ pub(crate) fn solve_kkt_via_schur(
         .collect();
 
     if s_fac.solve_with_deadline(&rhs_s, dx_out, None).is_err() {
-        for v in dx_out.iter_mut() { *v = 0.0; }
-        for v in dy_out.iter_mut() { *v = 0.0; }
+        for v in dx_out.iter_mut() {
+            *v = 0.0;
+        }
+        for v in dy_out.iter_mut() {
+            *v = 0.0;
+        }
         return;
     }
 
@@ -200,7 +213,6 @@ pub(crate) fn solve_kkt_via_schur(
         dy_out[i] = f64::from(scaled);
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predictor_step_schur(
@@ -229,14 +241,28 @@ pub(crate) fn predictor_step_schur(
         .zip(r_c_pred.iter())
         .zip(y.iter())
         .enumerate()
-        .map(|(i, ((&rpi, &rci), &yi))| {
-            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-        })
+        .map(
+            |(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] {
+                    rpi
+                } else {
+                    rpi - rci / yi
+                }
+            },
+        )
         .collect();
 
     let mut dx = vec![0.0_f64; r_dual.len()];
     let mut dy_pred = vec![0.0_f64; m_ext];
-    solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_pred, &mut dx, &mut dy_pred);
+    solve_kkt_via_schur(
+        s_fac,
+        d_inv,
+        a_ext,
+        r_dual,
+        &r_p_mod_pred,
+        &mut dx,
+        &mut dy_pred,
+    );
 
     let mut ds_pred = vec![0.0_f64; m_ext];
     for i in 0..m_ext {
@@ -318,9 +344,15 @@ pub(crate) fn corrector_step_schur(
         .zip(r_c_corr.iter())
         .zip(y.iter())
         .enumerate()
-        .map(|(i, ((&rpi, &rci), &yi))| {
-            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-        })
+        .map(
+            |(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] {
+                    rpi
+                } else {
+                    rpi - rci / yi
+                }
+            },
+        )
         .collect();
 
     solve_kkt_via_schur(s_fac, d_inv, a_ext, r_dual, &r_p_mod_corr, dx, dy);
@@ -410,15 +442,27 @@ pub(crate) fn gondzio_correctors_schur(
             .zip(r_c_gondzio.iter())
             .zip(y.iter())
             .enumerate()
-            .map(|(i, ((&rpi, &rci), &yi))| {
-                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-            })
+            .map(
+                |(i, ((&rpi, &rci), &yi))| {
+                    if is_eq_ext[i] {
+                        rpi
+                    } else {
+                        rpi - rci / yi
+                    }
+                },
+            )
             .collect();
 
         let mut dx_new = vec![0.0_f64; r_dual.len()];
         let mut dy_new = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            s_fac, d_inv, a_ext, r_dual, &r_p_mod_gondzio, &mut dx_new, &mut dy_new,
+            s_fac,
+            d_inv,
+            a_ext,
+            r_dual,
+            &r_p_mod_gondzio,
+            &mut dx_new,
+            &mut dy_new,
         );
 
         let ds_new: Vec<f64> = (0..m_ext)
@@ -478,9 +522,15 @@ pub(crate) fn predictor_step(
         .zip(r_c_pred.iter())
         .zip(y.iter())
         .enumerate()
-        .map(|(i, ((&rpi, &rci), &yi))| {
-            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-        })
+        .map(
+            |(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] {
+                    rpi
+                } else {
+                    rpi - rci / yi
+                }
+            },
+        )
         .collect();
 
     rhs[..n].copy_from_slice(r_dual);
@@ -575,9 +625,15 @@ pub(crate) fn corrector_step(
         .zip(r_c_corr.iter())
         .zip(y.iter())
         .enumerate()
-        .map(|(i, ((&rpi, &rci), &yi))| {
-            if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-        })
+        .map(
+            |(i, ((&rpi, &rci), &yi))| {
+                if is_eq_ext[i] {
+                    rpi
+                } else {
+                    rpi - rci / yi
+                }
+            },
+        )
         .collect();
 
     rhs[..n].copy_from_slice(r_dual);
@@ -676,9 +732,15 @@ pub(crate) fn gondzio_correctors(
             .zip(r_c_gondzio.iter())
             .zip(y.iter())
             .enumerate()
-            .map(|(i, ((&rpi, &rci), &yi))| {
-                if is_eq_ext[i] { rpi } else { rpi - rci / yi }
-            })
+            .map(
+                |(i, ((&rpi, &rci), &yi))| {
+                    if is_eq_ext[i] {
+                        rpi
+                    } else {
+                        rpi - rci / yi
+                    }
+                },
+            )
             .collect();
 
         rhs[..n].copy_from_slice(r_dual);
@@ -748,10 +810,12 @@ pub(crate) fn update_variables(
 #[cfg(test)]
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 mod tests {
-    use super::{compute_sigma_vec, update_variables, solve_kkt_via_schur, gondzio_correctors_schur};
+    use super::{
+        compute_sigma_vec, gondzio_correctors_schur, solve_kkt_via_schur, update_variables,
+    };
+    use crate::linalg::amd::amd_with_deadline;
     use crate::qp::ipm_core::kkt::{build_augmented_system, build_schur_system};
     use crate::qp::ipm_core::ALPHA_IMPROVE_THRESHOLD;
-    use crate::linalg::amd::amd_with_deadline;
     use crate::sparse::CscMatrix;
 
     /// 多制約・等式・不等式混在で σ 幅広い range の下、Schur が augmented と数値一致すること。
@@ -760,12 +824,8 @@ mod tests {
         let n = 4;
         let m_ext = 6;
 
-        let q = CscMatrix::from_triplets(
-            &[0, 1, 2, 3],
-            &[0, 1, 2, 3],
-            &[2.0, 4.0, 0.5, 1.0],
-            n, n,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1, 2, 3], &[0, 1, 2, 3], &[2.0, 4.0, 0.5, 1.0], n, n)
+            .unwrap();
 
         // A_ext: 6×4 にいくつかの非ゼロ
         // 行 0: x0 + x1 (eq)
@@ -786,11 +846,29 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let aug_perm = amd_with_deadline(aug_mat.nrows, &aug_mat.col_ptr, &aug_mat.row_ind, None);
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &aug_perm, None, None, faer::Par::Seq).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(
+            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+                &aug_mat,
+                &aug_perm,
+                None,
+                None,
+                faer::Par::Seq,
+            )
+            .unwrap(),
+        );
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
+            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+                &s_mat,
+                &s_perm,
+                None,
+                None,
+                faer::Par::Seq,
+            )
+            .unwrap(),
+        );
 
         let r_d = vec![0.5, -1.0, 0.2, 0.8];
         let r_p_mod = vec![0.1, 0.2, -0.3, 0.4, -0.5, 0.6];
@@ -806,8 +884,13 @@ mod tests {
         let mut dx_schur = vec![0.0_f64; n];
         let mut dy_schur = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            &s_fac, &d_inv, &a_ext, &r_d, &r_p_mod,
-            &mut dx_schur, &mut dy_schur,
+            &s_fac,
+            &d_inv,
+            &a_ext,
+            &r_d,
+            &r_p_mod,
+            &mut dx_schur,
+            &mut dy_schur,
         );
 
         eprintln!("dx_aug   = {:?}", dx_aug);
@@ -820,7 +903,10 @@ mod tests {
             assert!(
                 diff / scale < 1e-6,
                 "dx[{}]: aug={}, schur={}, rel_diff={}",
-                i, dx_aug[i], dx_schur[i], diff / scale
+                i,
+                dx_aug[i],
+                dx_schur[i],
+                diff / scale
             );
         }
         for i in 0..m_ext {
@@ -829,7 +915,10 @@ mod tests {
             assert!(
                 diff / scale < 1e-6,
                 "dy[{}]: aug={}, schur={}, rel_diff={}",
-                i, dy_aug[i], dy_schur[i], diff / scale
+                i,
+                dy_aug[i],
+                dy_schur[i],
+                diff / scale
             );
         }
     }
@@ -840,19 +929,9 @@ mod tests {
         let n = 2;
         let m_ext = 1;
 
-        let q = CscMatrix::from_triplets(
-            &[0, 1],
-            &[0, 1],
-            &[2.0, 4.0],
-            n, n,
-        ).unwrap();
+        let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 4.0], n, n).unwrap();
 
-        let a_ext = CscMatrix::from_triplets(
-            &[0, 0],
-            &[0, 1],
-            &[1.0, 1.0],
-            m_ext, n,
-        ).unwrap();
+        let a_ext = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], m_ext, n).unwrap();
 
         let sigma_vec = vec![0.5_f64];
         let rho_p = 0.1_f64;
@@ -860,11 +939,30 @@ mod tests {
 
         let aug_mat = build_augmented_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
         let perm: Vec<usize> = (0..aug_mat.nrows).collect();
-        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&aug_mat, &perm, None, None, faer::Par::Seq).unwrap());
+        let aug_fac = crate::linalg::kkt_solver::KktFactor::Direct(
+            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+                &aug_mat,
+                &perm,
+                None,
+                None,
+                faer::Par::Seq,
+            )
+            .unwrap(),
+        );
 
         let (s_mat, d_inv) = build_schur_system(&q, &a_ext, &sigma_vec, rho_p, delta_d);
-        let s_perm: Vec<usize> = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
-        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(&s_mat, &s_perm, None, None, faer::Par::Seq).unwrap());
+        let s_perm: Vec<usize> =
+            amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
+        let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
+            crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
+                &s_mat,
+                &s_perm,
+                None,
+                None,
+                faer::Par::Seq,
+            )
+            .unwrap(),
+        );
 
         let r_d = vec![1.0, 2.0];
         let r_p_mod = vec![3.0];
@@ -880,8 +978,13 @@ mod tests {
         let mut dx_schur = vec![0.0_f64; n];
         let mut dy_schur = vec![0.0_f64; m_ext];
         solve_kkt_via_schur(
-            &s_fac, &d_inv, &a_ext, &r_d, &r_p_mod,
-            &mut dx_schur, &mut dy_schur,
+            &s_fac,
+            &d_inv,
+            &a_ext,
+            &r_d,
+            &r_p_mod,
+            &mut dx_schur,
+            &mut dy_schur,
         );
 
         eprintln!("dx_aug = {:?}", dx_aug);
@@ -891,17 +994,22 @@ mod tests {
         for i in 0..n {
             assert!(
                 (dx_aug[i] - dx_schur[i]).abs() < 1e-9,
-                "dx[{}]: aug={}, schur={}", i, dx_aug[i], dx_schur[i]
+                "dx[{}]: aug={}, schur={}",
+                i,
+                dx_aug[i],
+                dx_schur[i]
             );
         }
         for i in 0..m_ext {
             assert!(
                 (dy_aug[i] - dy_schur[i]).abs() < 1e-9,
-                "dy[{}]: aug={}, schur={}", i, dy_aug[i], dy_schur[i]
+                "dy[{}]: aug={}, schur={}",
+                i,
+                dy_aug[i],
+                dy_schur[i]
             );
         }
     }
-
 
     #[test]
     fn test_compute_sigma_vec_eq_row_is_zero() {
@@ -959,7 +1067,11 @@ mod tests {
         let s_perm = amd_with_deadline(s_mat.nrows, &s_mat.col_ptr, &s_mat.row_ind, None);
         let s_fac = crate::linalg::kkt_solver::KktFactor::Direct(
             crate::linalg::ldl::factorize_quasidefinite_with_cached_perm_budget_par(
-                &s_mat, &s_perm, None, None, faer::Par::Seq,
+                &s_mat,
+                &s_perm,
+                None,
+                None,
+                faer::Par::Seq,
             )
             .unwrap(),
         );
@@ -978,10 +1090,24 @@ mod tests {
         let mut ds = vec![0.0_f64; m_ext];
 
         let result = gondzio_correctors_schur(
-            &s, &y, &is_eq_ext, 0, &r_dual, &r_primal, &r_c_corr,
-            &sigma_vec_loop, &s_fac, &d_inv, &a_ext, m_ext,
+            &s,
+            &y,
+            &is_eq_ext,
+            0,
+            &r_dual,
+            &r_primal,
+            &r_c_corr,
+            &sigma_vec_loop,
+            &s_fac,
+            &d_inv,
+            &a_ext,
+            m_ext,
             /*max_correctors=*/ 5,
-            alpha_init, &mut dx, &mut dy, &mut ds, None,
+            alpha_init,
+            &mut dx,
+            &mut dy,
+            &mut ds,
+            None,
         );
 
         // With the fix (additive): loop breaks on first iteration → returns alpha_init.

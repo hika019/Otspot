@@ -179,7 +179,9 @@ pub(crate) fn build_standard_form(problem: &LpProblem) -> StandardForm {
                 } else {
                     // Clamp b ∈ [-PIVOT_TOL, 0) noise to 0 so the slack
                     // doesn't start at a tiny negative value.
-                    if b[i] < 0.0 { b[i] = 0.0; }
+                    if b[i] < 0.0 {
+                        b[i] = 0.0;
+                    }
                     slack_coeff[i] = 1.0;
                 }
                 slack_col_idx.push(Some(n_slack));
@@ -354,7 +356,11 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
                 offset: lb,
                 new_vars: vec![(idx, 1.0)],
             });
-            var_upper.push(if ub.is_finite() { ub - lb } else { f64::INFINITY });
+            var_upper.push(if ub.is_finite() {
+                ub - lb
+            } else {
+                f64::INFINITY
+            });
         } else if ub.is_finite() {
             let idx = n_shifted;
             n_shifted += 1;
@@ -406,7 +412,9 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
                     b[i] = -b[i];
                     slack_coeff[i] = -1.0;
                 } else {
-                    if b[i] < 0.0 { b[i] = 0.0; }
+                    if b[i] < 0.0 {
+                        b[i] = 0.0;
+                    }
                     slack_coeff[i] = 1.0;
                 }
                 slack_col_idx.push(Some(n_slack));
@@ -448,14 +456,18 @@ pub(crate) fn build_bounded_standard_form(problem: &LpProblem) -> BoundedStandar
                     initial_basis[i] = col;
                 } else {
                     #[cfg(test)]
-                    { needs_artificial[i] = true; }
+                    {
+                        needs_artificial[i] = true;
+                    }
                     num_artificial += 1;
                     initial_basis[i] = col;
                 }
             }
             None => {
                 #[cfg(test)]
-                { needs_artificial[i] = true; }
+                {
+                    needs_artificial[i] = true;
+                }
                 num_artificial += 1;
             }
         }
@@ -592,7 +604,9 @@ pub(crate) fn wrap_to_legacy(bsf: &BoundedStandardForm) -> StandardForm {
             b_new = -b_new;
             (true, -1.0)
         } else {
-            if b_new < 0.0 { b_new = 0.0; }
+            if b_new < 0.0 {
+                b_new = 0.0;
+            }
             (false, 1.0)
         };
         b.push(b_new);

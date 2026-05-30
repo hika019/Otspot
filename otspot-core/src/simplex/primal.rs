@@ -2,8 +2,8 @@
 
 use crate::basis::{BasisManager, LuBasis};
 use crate::options::{SolverOptions, WarmStartBasis};
-use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::presolve::LpEquilibration;
+use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::*;
 use std::sync::atomic::Ordering;
@@ -40,9 +40,11 @@ pub(crate) static PIVOT_CLEAN_CLEANUP_RAN_COUNT: std::sync::atomic::AtomicUsize 
 pub(crate) static OBJ_PROGRESS_RESET_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-use super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
+use super::dual_common::{
+    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
+};
 use super::pricing::{PricingStrategy, SteepestEdgePricing};
-use super::{StandardForm, SimplexOutcome, extract_dual_info};
+use super::{extract_dual_info, SimplexOutcome, StandardForm};
 
 /// Minimum absolute diagonal entry to trust when dividing `x_B[i]` by the
 /// Ruiz-scaled slack/artificial column's diagonal. Prevents division by
@@ -95,7 +97,9 @@ fn extract_farkas_certificate(
         return vec![];
     }
     for j in 0..n_original {
-        let Ok((rows, vals)) = a_ext.get_column(j) else { return vec![]; };
+        let Ok((rows, vals)) = a_ext.get_column(j) else {
+            return vec![];
+        };
         let aty: f64 = rows.iter().zip(vals.iter()).map(|(&r, &v)| v * y[r]).sum();
         if aty > tol {
             return vec![];
@@ -117,7 +121,18 @@ fn extract_timeout_solution_reconciled(
 ) -> Vec<f64> {
     let mut x_b_reconciled = x_b.to_vec();
     let mut y = vec![0.0_f64; basis.len()];
-    if reconcile_final_basis_state(a, b, c, basis, &mut x_b_reconciled, &mut y, max_etas, deadline).is_ok() {
+    if reconcile_final_basis_state(
+        a,
+        b,
+        c,
+        basis,
+        &mut x_b_reconciled,
+        &mut y,
+        max_etas,
+        deadline,
+    )
+    .is_ok()
+    {
         extract_solution(sf, basis, &x_b_reconciled, col_scale)
     } else {
         extract_solution(sf, basis, x_b, col_scale)
@@ -127,7 +142,11 @@ fn extract_timeout_solution_reconciled(
 /// Two-phase primal simplex on a standard-form LP. Skips Phase I when no
 /// artificials are needed. Phase I minimizes the sum of artificials; a
 /// positive minimum proves Infeasible. Ruiz equilibration is applied first.
-pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn two_phase_simplex(
+    sf: &StandardForm,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
     let m = sf.m;
     let mut total_iters: usize = 0;
 
@@ -152,10 +171,31 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let mut pricing = SteepestEdgePricing::new(sf.n_total);
 
-        match revised_simplex_core(&a, &mut x_b, &c, &b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options, &mut total_iters, false)
-        {
+        match revised_simplex_core(
+            &a,
+            &mut x_b,
+            &c,
+            &b,
+            &mut basis,
+            m,
+            sf.n_total,
+            sf.n_total,
+            &mut pricing,
+            options,
+            &mut total_iters,
+            false,
+        ) {
             SimplexOutcome::Optimal(obj, mut y) => {
-                match reconcile_final_basis_state(&a, &b, &c, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                match reconcile_final_basis_state(
+                    &a,
+                    &b,
+                    &c,
+                    &basis,
+                    &mut x_b,
+                    &mut y,
+                    options.max_etas,
+                    options.deadline,
+                ) {
                     Ok(()) => {}
                     Err(crate::error::SolverError::DeadlineExceeded) => {
                         let solution = extract_timeout_solution_reconciled(
@@ -169,7 +209,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             options.max_etas,
                             options.deadline,
                         );
-                        return SolverResult { status: SolveStatus::Timeout, objective: obj + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
+                        return SolverResult {
+                            status: SolveStatus::Timeout,
+                            objective: obj + sf.obj_offset,
+                            solution,
+                            iterations: total_iters,
+                            ..Default::default()
+                        };
                     }
                     Err(_) => return SolverResult::numerical_error(),
                 }
@@ -189,7 +235,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 }
                 let (dual_solution, reduced_costs, slack) =
                     extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                let ws = WarmStartBasis {
+                    basis: basis.clone(),
+                    x_b: x_b.clone(),
+                };
                 SolverResult {
                     status: SolveStatus::Optimal,
                     objective: obj + sf.obj_offset,
@@ -199,7 +248,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     slack,
                     warm_start_basis: Some(ws),
                     iterations: total_iters,
-            ..Default::default()
+                    ..Default::default()
                 }
             }
             SimplexOutcome::Unbounded => SolverResult {
@@ -211,7 +260,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 slack: vec![],
                 warm_start_basis: None,
                 iterations: total_iters,
-            ..Default::default()
+                ..Default::default()
             },
             SimplexOutcome::Timeout(obj) => {
                 let solution = extract_timeout_solution_reconciled(
@@ -234,12 +283,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     slack: vec![],
                     warm_start_basis: None,
                     iterations: total_iters,
-            ..Default::default()
+                    ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => {
-                SolverResult::numerical_error()
-            }
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     } else {
         // Phase I + Phase II (Ruiz-scaled system)
@@ -264,7 +311,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
 
         // All artificials in [sf.n_total, n_ext) — no split.
         for i in 0..m {
-            if !sf.needs_artificial[i] { continue; }
+            if !sf.needs_artificial[i] {
+                continue;
+            }
             trip_rows.push(i);
             trip_cols.push(art_col);
             trip_vals.push(1.0);
@@ -273,8 +322,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
         }
         let n_ext = art_col;
 
-        let a_ext =
-            CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
+        let a_ext = CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_ext).unwrap();
 
         // Phase I cost: penalize all artificials.
         let mut c_phase1 = vec![0.0; n_ext];
@@ -286,7 +334,15 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
             && options.use_lp_crash_basis
             && sf.num_artificial > 0
         {
-            try_apply_crash(&a_ext, m, sf.n_shifted, sf.n_total, &b, options.max_etas, &basis)
+            try_apply_crash(
+                &a_ext,
+                m,
+                sf.n_shifted,
+                sf.n_total,
+                &b,
+                options.max_etas,
+                &basis,
+            )
         } else {
             None
         };
@@ -341,31 +397,56 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 use crate::options::MAX_PHASE1_RETRIES;
                 let mut phase1_feasible = false;
                 'retry: for attempt in 0..=MAX_PHASE1_RETRIES {
-                    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    if options
+                        .deadline
+                        .is_some_and(|d| std::time::Instant::now() >= d)
+                    {
                         break 'retry;
                     }
                     let mut y_dummy = vec![0.0f64; m];
                     let rec_obj = match reconcile_final_basis_state(
-                        &a_ext, &b, &c_phase1, &basis, &mut x_b, &mut y_dummy,
-                        options.max_etas, options.deadline,
+                        &a_ext,
+                        &b,
+                        &c_phase1,
+                        &basis,
+                        &mut x_b,
+                        &mut y_dummy,
+                        options.max_etas,
+                        options.deadline,
                     ) {
-                        Ok(()) => {
-                            (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum::<f64>()
-                        }
+                        Ok(()) => (0..m)
+                            .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
+                            .sum::<f64>(),
                         Err(_) => break 'retry,
                     };
-                    if rec_obj <= PIVOT_TOL { phase1_feasible = true; break 'retry; }
-                    if attempt == MAX_PHASE1_RETRIES { break 'retry; }
+                    if rec_obj <= PIVOT_TOL {
+                        phase1_feasible = true;
+                        break 'retry;
+                    }
+                    if attempt == MAX_PHASE1_RETRIES {
+                        break 'retry;
+                    }
 
                     // Artificials remain positive: clamp drift and retry Phase I.
                     for v in x_b.iter_mut() {
-                        if *v < 0.0 { *v = 0.0; }
+                        if *v < 0.0 {
+                            *v = 0.0;
+                        }
                     }
                     let mut pricing_retry = SteepestEdgePricing::new(n_ext);
                     match revised_simplex_core(
-                        &a_ext, &mut x_b, &c_phase1, &b, &mut basis,
-                        m, n_ext, n_ext, &mut pricing_retry, options,
-                        &mut total_iters, true,
+                        &a_ext,
+                        &mut x_b,
+                        &c_phase1,
+                        &b,
+                        &mut basis,
+                        m,
+                        n_ext,
+                        n_ext,
+                        &mut pricing_retry,
+                        options,
+                        &mut total_iters,
+                        true,
                     ) {
                         SimplexOutcome::Optimal(_, _) => {}
                         SimplexOutcome::Unbounded => break 'retry,
@@ -394,9 +475,8 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     // feasible LPs cycling in Phase I do not. The certificate is stored in
                     // dual_solution so `solve_dual_advanced` can gate Big-M re-verification:
                     // certified → trust; uncertified → pilot87-class false-Infeasible → Big-M.
-                    let farkas = extract_farkas_certificate(
-                        &a_ext, &b, &basis, m, sf.n_total, options,
-                    );
+                    let farkas =
+                        extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
                     return SolverResult {
                         status: SolveStatus::Infeasible,
                         objective: f64::INFINITY,
@@ -418,16 +498,35 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                 {
                     let mut y_transition = vec![0.0f64; m];
                     match reconcile_final_basis_state(
-                        &a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y_transition,
-                        options.max_etas, options.deadline,
+                        &a_ext,
+                        &b,
+                        &c_phase2,
+                        &basis,
+                        &mut x_b,
+                        &mut y_transition,
+                        options.max_etas,
+                        options.deadline,
                     ) {
                         Ok(()) => {}
                         Err(crate::error::SolverError::DeadlineExceeded) => {
                             let solution = extract_timeout_solution_reconciled(
-                                sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
-                                options.max_etas, options.deadline,
+                                sf,
+                                &a_ext,
+                                &b,
+                                &c_phase2,
+                                &basis,
+                                &x_b,
+                                &col_scale,
+                                options.max_etas,
+                                options.deadline,
                             );
-                            return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
+                            return SolverResult {
+                                status: SolveStatus::Timeout,
+                                objective: sf.obj_offset,
+                                solution,
+                                iterations: total_iters,
+                                ..Default::default()
+                            };
                         }
                         Err(_) => return SolverResult::numerical_error(),
                     }
@@ -441,7 +540,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     }
                 }
                 for v in x_b.iter_mut() {
-                    if *v < 0.0 { *v = 0.0; }
+                    if *v < 0.0 {
+                        *v = 0.0;
+                    }
                 }
 
                 let mut pricing2 = SteepestEdgePricing::new(n_ext);
@@ -460,7 +561,16 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     false,
                 ) {
                     SimplexOutcome::Optimal(obj2, mut y) => {
-                        match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                        match reconcile_final_basis_state(
+                            &a_ext,
+                            &b,
+                            &c_phase2,
+                            &basis,
+                            &mut x_b,
+                            &mut y,
+                            options.max_etas,
+                            options.deadline,
+                        ) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
                                 let solution = extract_timeout_solution_reconciled(
@@ -474,7 +584,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                     options.max_etas,
                                     options.deadline,
                                 );
-                                return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
+                                return SolverResult {
+                                    status: SolveStatus::Timeout,
+                                    objective: obj2 + sf.obj_offset,
+                                    solution,
+                                    iterations: total_iters,
+                                    ..Default::default()
+                                };
                             }
                             Err(_) => return SolverResult::numerical_error(),
                         }
@@ -493,7 +609,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                         let (dual_solution, reduced_costs, slack) =
                             extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                        let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                        let ws = WarmStartBasis {
+                            basis: basis.clone(),
+                            x_b: x_b.clone(),
+                        };
                         SolverResult {
                             status: SolveStatus::Optimal,
                             objective: obj2 + sf.obj_offset,
@@ -541,18 +660,14 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             ..Default::default()
                         }
                     }
-                    SimplexOutcome::SingularBasis => {
-                        SolverResult::numerical_error()
-                    }
+                    SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
                 }
             }
             SimplexOutcome::Unbounded => {
                 // Phase I unbounded direction implies primal infeasibility. Attempt to
                 // extract a Farkas certificate from the current basis (same discriminator
                 // as the !phase1_feasible path).
-                let farkas = extract_farkas_certificate(
-                    &a_ext, &b, &basis, m, sf.n_total, options,
-                );
+                let farkas = extract_farkas_certificate(&a_ext, &b, &basis, m, sf.n_total, options);
                 SolverResult {
                     status: SolveStatus::Infeasible,
                     objective: f64::INFINITY,
@@ -564,7 +679,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     iterations: total_iters,
                     ..Default::default()
                 }
-            },
+            }
             SimplexOutcome::Timeout(obj1) => {
                 // obj1 ≤ PIVOT_TOL ⇒ artificials look near-zero at timeout.
                 // Reconcile with a fresh LU; only enter Phase II if the
@@ -599,9 +714,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     }
                     // After reconcile: if arts still > PIVOT_TOL, Phase I hasn't
                     // converged — do not run Phase II from an infeasible start.
-                    let rec_obj: f64 = (0..m)
-                        .map(|i| c_phase1[basis[i]] * x_b[i].max(0.0))
-                        .sum();
+                    let rec_obj: f64 = (0..m).map(|i| c_phase1[basis[i]] * x_b[i].max(0.0)).sum();
                     if rec_obj > PIVOT_TOL {
                         return SolverResult {
                             status: SolveStatus::Timeout,
@@ -622,16 +735,35 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     {
                         let mut y_transition = vec![0.0f64; m];
                         match reconcile_final_basis_state(
-                            &a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y_transition,
-                            options.max_etas, options.deadline,
+                            &a_ext,
+                            &b,
+                            &c_phase2,
+                            &basis,
+                            &mut x_b,
+                            &mut y_transition,
+                            options.max_etas,
+                            options.deadline,
                         ) {
                             Ok(()) => {}
                             Err(crate::error::SolverError::DeadlineExceeded) => {
                                 let solution = extract_timeout_solution_reconciled(
-                                    sf, &a_ext, &b, &c_phase2, &basis, &x_b, &col_scale,
-                                    options.max_etas, options.deadline,
+                                    sf,
+                                    &a_ext,
+                                    &b,
+                                    &c_phase2,
+                                    &basis,
+                                    &x_b,
+                                    &col_scale,
+                                    options.max_etas,
+                                    options.deadline,
                                 );
-                                return SolverResult { status: SolveStatus::Timeout, objective: sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
+                                return SolverResult {
+                                    status: SolveStatus::Timeout,
+                                    objective: sf.obj_offset,
+                                    solution,
+                                    iterations: total_iters,
+                                    ..Default::default()
+                                };
                             }
                             Err(_) => return SolverResult::numerical_error(),
                         }
@@ -642,7 +774,9 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         }
                     }
                     for v in x_b.iter_mut() {
-                        if *v < 0.0 { *v = 0.0; }
+                        if *v < 0.0 {
+                            *v = 0.0;
+                        }
                     }
 
                     let mut pricing2 = SteepestEdgePricing::new(n_ext);
@@ -661,7 +795,16 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                         false,
                     ) {
                         SimplexOutcome::Optimal(obj2, mut y) => {
-                            match reconcile_final_basis_state(&a_ext, &b, &c_phase2, &basis, &mut x_b, &mut y, options.max_etas, options.deadline) {
+                            match reconcile_final_basis_state(
+                                &a_ext,
+                                &b,
+                                &c_phase2,
+                                &basis,
+                                &mut x_b,
+                                &mut y,
+                                options.max_etas,
+                                options.deadline,
+                            ) {
                                 Ok(()) => {}
                                 Err(crate::error::SolverError::DeadlineExceeded) => {
                                     let solution = extract_timeout_solution_reconciled(
@@ -675,7 +818,13 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                                         options.max_etas,
                                         options.deadline,
                                     );
-                                    return SolverResult { status: SolveStatus::Timeout, objective: obj2 + sf.obj_offset, solution, iterations: total_iters, ..Default::default() };
+                                    return SolverResult {
+                                        status: SolveStatus::Timeout,
+                                        objective: obj2 + sf.obj_offset,
+                                        solution,
+                                        iterations: total_iters,
+                                        ..Default::default()
+                                    };
                                 }
                                 Err(_) => return SolverResult::numerical_error(),
                             }
@@ -685,7 +834,10 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                             }
                             let (dual_solution, reduced_costs, slack) =
                                 extract_dual_info(sf, problem, &y, &solution, &row_scale);
-                            let ws = WarmStartBasis { basis: basis.clone(), x_b: x_b.clone() };
+                            let ws = WarmStartBasis {
+                                basis: basis.clone(),
+                                x_b: x_b.clone(),
+                            };
                             return SolverResult {
                                 status: SolveStatus::Optimal,
                                 objective: obj2 + sf.obj_offset,
@@ -747,9 +899,7 @@ pub(crate) fn two_phase_simplex(sf: &StandardForm, problem: &LpProblem, options:
                     ..Default::default()
                 }
             }
-            SimplexOutcome::SingularBasis => {
-                SolverResult::numerical_error()
-            }
+            SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
         }
     }
 }
@@ -778,9 +928,9 @@ fn try_apply_crash(
     max_etas: usize,
     cold_basis: &[usize],
 ) -> Option<(Vec<usize>, Vec<f64>)> {
+    use super::crash;
     use crate::basis::{BasisManager, LuBasis};
     use crate::sparse::SparseVec;
-    use super::crash;
     use crate::tolerances::PIVOT_TOL;
 
     // 入力 needs_artificial を `cold_basis[i] >= n_total` から再構築。
@@ -791,9 +941,8 @@ fn try_apply_crash(
         return None;
     }
 
-    let (mut basis, _, num_art_out) = crash::compute_crash_basis(
-        a_ext, b_scaled, m, n_shifted, cold_basis, &needs_artificial,
-    );
+    let (mut basis, _, num_art_out) =
+        crash::compute_crash_basis(a_ext, b_scaled, m, n_shifted, cold_basis, &needs_artificial);
 
     if num_art_out == num_art_in {
         return None;
@@ -858,7 +1007,11 @@ fn check_eq_feasibility(problem: &LpProblem, solution: &[f64]) -> bool {
         }
     }
     let mut violated = false;
-    for ((ax_i, ct), bi) in ax.iter().zip(problem.constraint_types.iter()).zip(problem.b.iter()) {
+    for ((ax_i, ct), bi) in ax
+        .iter()
+        .zip(problem.constraint_types.iter())
+        .zip(problem.b.iter())
+    {
         let violation = match ct {
             ConstraintType::Eq => (ax_i - bi).abs(),
             ConstraintType::Le => (ax_i - bi).max(0.0),
@@ -886,7 +1039,11 @@ fn pivot_out_degenerate_artificials(
     // out all artificials. For most problems this is the common case; avoiding
     // two LU factorizations (one here, one for validation) saves significant
     // work — especially for large m.
-    if !basis.iter().zip(x_b.iter()).any(|(&col, &val)| col >= sf.n_total && val.abs() < PIVOT_TOL) {
+    if !basis
+        .iter()
+        .zip(x_b.iter())
+        .any(|(&col, &val)| col >= sf.n_total && val.abs() < PIVOT_TOL)
+    {
         #[cfg(test)]
         PIVOT_CLEAN_EARLY_EXIT_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
@@ -914,7 +1071,10 @@ fn pivot_out_degenerate_artificials(
     // artificial ≈ O(m + nnz(A)), vs. O(n_total · FTRAN) for the naive form.
     let mut z_dense = vec![0.0_f64; m];
     for i in 0..m {
-        if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if options
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
             return;
         }
         if basis[i] < sf.n_total || x_b[i].abs() >= PIVOT_TOL {
@@ -1005,7 +1165,12 @@ pub(crate) fn reconcile_final_basis_state(
 /// `x = x+ − x-`; when the simplex leaves both components large (e.g. on the
 /// order of 1e16) f64 subtraction loses the unit-scale residual entirely.
 /// The contract is locked by `tests::test_extract_solution_uses_dd_for_split_variable_cancellation`.
-pub(crate) fn extract_solution(sf: &StandardForm, basis: &[usize], x_b: &[f64], col_scale: &[f64]) -> Vec<f64> {
+pub(crate) fn extract_solution(
+    sf: &StandardForm,
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+) -> Vec<f64> {
     use twofloat::TwoFloat;
     let mut x_new = vec![0.0; sf.n_shifted];
     for i in 0..sf.m {
@@ -1064,9 +1229,6 @@ const BAIL_TRIGGER_MIN: usize = 5_000;
 /// plateau (which can also come from f64 noise on real decrements), so
 /// fewer consecutive occurrences are required.
 const STEP_BAIL_RATIO: usize = 10;
-/// `current + best * REL_EPS < best`: relative threshold above f64 noise
-/// (~1e-15) that filters degenerate step≈0 "non-progress" from real moves.
-const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 /// Revised simplex core: BTRAN → pricing → FTRAN → Harris ratio test →
 /// rank-1 basis update, with on-demand LU refactor.
 ///
@@ -1140,8 +1302,13 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
     for _iter in 0..max_iter {
         *iter_count_out = iter_count_out.saturating_add(1);
-        let timed_out = options.deadline.is_some_and(|d| std::time::Instant::now() >= d);
-        let cancelled = options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
+        let timed_out = options
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d);
+        let cancelled = options
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed));
         if timed_out || cancelled {
             let obj: f64 = basic_obj(c, basis, x_b);
             return SimplexOutcome::Timeout(obj);
@@ -1150,7 +1317,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // y = B^{-T} c_B, then r_j = c_j − y^T a_j for non-basic j. Both steps
         // are shared with the dual paths (see `dual_common`).
         compute_reduced_costs_into(
-            a, c, &mut basis_mgr, &is_basic, n_price, basis, &mut y_dense, &mut rc_vec,
+            a,
+            c,
+            &mut basis_mgr,
+            &is_basic,
+            n_price,
+            basis,
+            &mut y_dense,
+            &mut rc_vec,
         );
         // Masking RC of blocked columns prevents pricing from re-selecting an
         // entering column known to produce a singular basis from `basis_snapshot`.
@@ -1171,7 +1345,10 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // FTRAN: d = B^{-1} a_entering
         let (col_rows, col_vals) = a.get_column(entering_col).unwrap();
         // Save inf-norm of original column for the corruption check below.
-        let orig_col_norm = col_vals.iter().cloned().fold(0.0f64, |acc, v| acc.max(v.abs()));
+        let orig_col_norm = col_vals
+            .iter()
+            .cloned()
+            .fold(0.0f64, |acc, v| acc.max(v.abs()));
         let mut d_sv = SparseVec {
             indices: col_rows.to_vec(),
             values: col_vals.to_vec(),
@@ -1184,10 +1361,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // signals eta-accumulated blow-up; reset and recompute d.
         {
             let d_max_abs = d_dense.iter().cloned().fold(0.0f64, |acc, v| {
-                if v.is_finite() { acc.max(v.abs()) } else { f64::INFINITY }
+                if v.is_finite() {
+                    acc.max(v.abs())
+                } else {
+                    f64::INFINITY
+                }
             });
-            let d_corrupt = !d_max_abs.is_finite()
-                || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
+            let d_corrupt =
+                !d_max_abs.is_finite() || (orig_col_norm > 0.0 && d_max_abs > 1e12 * orig_col_norm);
             if d_corrupt && basis_mgr.eta_count() > 0 {
                 basis_mgr.force_refactor_timed(a, basis, options.deadline);
                 if basis_mgr.refactor_failed {
@@ -1199,8 +1380,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                         }
                         stable_mode = true;
                         if !revert_to_snapshot(
-                            a, basis, x_b, b_rhs, &basis_snapshot,
-                            &mut is_basic, &mut basis_mgr, options,
+                            a,
+                            basis,
+                            x_b,
+                            b_rhs,
+                            &basis_snapshot,
+                            &mut is_basic,
+                            &mut basis_mgr,
+                            options,
                         ) {
                             return SimplexOutcome::SingularBasis;
                         }
@@ -1211,7 +1398,11 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
                     }
                 }
                 let (cr2, cv2) = a.get_column(entering_col).unwrap();
-                d_sv = SparseVec { indices: cr2.to_vec(), values: cv2.to_vec(), len: m };
+                d_sv = SparseVec {
+                    indices: cr2.to_vec(),
+                    values: cv2.to_vec(),
+                    len: m,
+                };
                 basis_mgr.ftran(&mut d_sv);
                 d_sv.to_dense_into(&mut d_dense);
                 basis_snapshot.copy_from_slice(basis);
@@ -1250,7 +1441,9 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
             for i in 0..m {
                 if d[i] > PIVOT_TOL {
                     let ratio = x_b[i] / d[i];
-                    if ratio < min_ratio { min_ratio = ratio; }
+                    if ratio < min_ratio {
+                        min_ratio = ratio;
+                    }
                 }
             }
             PIVOT_TOL
@@ -1332,8 +1525,14 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
 
                 stable_mode = true;
                 if !revert_to_snapshot(
-                    a, basis, x_b, b_rhs, &basis_snapshot,
-                    &mut is_basic, &mut basis_mgr, options,
+                    a,
+                    basis,
+                    x_b,
+                    b_rhs,
+                    &basis_snapshot,
+                    &mut is_basic,
+                    &mut basis_mgr,
+                    options,
                 ) {
                     return SimplexOutcome::SingularBasis;
                 }
@@ -1361,8 +1560,7 @@ pub(crate) fn revised_simplex_core<P: PricingStrategy>(
         // has step > 0 and resets (b); a Phase II near the optimum sees
         // obj plateau but is gated off by (c).
         let current_obj: f64 = basic_obj(c, basis, x_b);
-        let progress_eps = best_obj.abs().max(1.0) * NO_PROGRESS_REL_EPS;
-        if current_obj + progress_eps < best_obj {
+        if made_progress_with_floor(best_obj, current_obj, 1.0) {
             best_obj = current_obj;
             iters_since_obj_progress = 0;
             #[cfg(test)]
@@ -1400,7 +1598,9 @@ fn revert_to_snapshot(
     options: &SolverOptions,
 ) -> bool {
     basis.copy_from_slice(basis_snapshot);
-    for v in is_basic.iter_mut() { *v = false; }
+    for v in is_basic.iter_mut() {
+        *v = false;
+    }
     for &col in basis.iter() {
         is_basic[col] = true;
     }
@@ -1410,7 +1610,9 @@ fn revert_to_snapshot(
             x_b.copy_from_slice(b_rhs);
             mgr.ftran_dense(x_b);
             for v in x_b.iter_mut() {
-                if v.abs() < options.clamp_tol { *v = 0.0; }
+                if v.abs() < options.clamp_tol {
+                    *v = 0.0;
+                }
             }
             *basis_mgr = mgr;
             true

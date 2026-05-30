@@ -27,9 +27,17 @@ fn simple_convex_qp() -> QpProblem {
 fn max_iter_default_converges() {
     let problem = simple_convex_qp();
     let result = solve_qp_with(&problem, &SolverOptions::default());
-    assert_eq!(result.status, SolveStatus::Optimal, "default opts で Optimal 必須");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "default opts で Optimal 必須"
+    );
     // 1/2 x'Qx + c'x で Q=[2,2], x*=[0.5,0.5] → 1/2*(2*0.25+2*0.25) = 0.5
-    assert!((result.objective - 0.5).abs() < 1e-5, "obj={}", result.objective);
+    assert!(
+        (result.objective - 0.5).abs() < 1e-5,
+        "obj={}",
+        result.objective
+    );
 }
 
 /// Pattern C: max_iter=1 でも panic せず、iterations が 1 以内に収まる。

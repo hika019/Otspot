@@ -158,9 +158,10 @@ fn assert_orig_primal_residual_ok(problem: &QpProblem, x: &[f64]) {
         })
         .fold(0.0_f64, f64::max);
     let denom = 1.0
-        + ax.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(
-            problem.b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max),
-        );
+        + ax.iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+            .max(problem.b.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     let pres_rel = max_v / denom;
     assert!(
         pres_rel < PRES_REL_BUDGET,

@@ -32,8 +32,8 @@ pub(crate) mod queue;
 pub use problem::{MilpProblem, MipProblemError, MiqpProblem};
 
 use crate::options::{MipConfig, SolverOptions};
-use crate::problem::{SolveStatus, SolverResult};
 use crate::problem::certificate::BoundGapCertificate;
+use crate::problem::{SolveStatus, SolverResult};
 use crate::qp::global::pruning::{should_prune, within_gap};
 use std::time::{Duration, Instant};
 
@@ -75,7 +75,6 @@ pub struct MipStats {
     pub incumbent_updates: usize,
 
     // --- relaxation solve wall-clock timing (milliseconds) ---
-
     /// Total wall time spent inside relaxation solves across all nodes (ms).
     pub relaxation_time_total_ms: f64,
     /// Wall time for the root node relaxation solve (ms).
@@ -92,7 +91,6 @@ pub struct MipStats {
     // presolve actually reduces the problem (`was_reduced = true`).  Zero for
     // MIQP (QP solver does not yet provide a breakdown) and for MILP nodes
     // where presolve does not reduce (e.g. tight-bound knapsack-style nodes).
-
     /// Cumulative LP presolve microseconds across all nodes.
     pub lp_presolve_us_total: u64,
     /// Cumulative LP solve (simplex) microseconds across all nodes.
@@ -101,7 +99,6 @@ pub struct MipStats {
     pub lp_postsolve_us_total: u64,
 
     // --- memory estimate ---
-
     /// Approximate bytes per node for the bounds clone: `n_vars × 2 × size_of::<f64>()`.
     /// Gives a rough idea of per-node memory traffic regardless of node count.
     pub approx_bounds_bytes_per_node: usize,
@@ -132,7 +129,9 @@ pub fn solve_milp_with_stats(
     // `solve_mip_core` resets the clock again — allowing up to (MAX_FP_ITER + 1)×
     // timeout consumption.  If the caller already set an explicit deadline, honour it.
     let deadline = options.deadline.or_else(|| {
-        options.timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s))
+        options
+            .timeout_secs
+            .map(|s| Instant::now() + Duration::from_secs_f64(s))
     });
     let mut opts_with_dl = options.clone();
     opts_with_dl.deadline = deadline;
@@ -149,16 +148,24 @@ pub fn solve_milp_with_stats(
             Some(tightened) if tightened != problem.lp.bounds => {
                 let mut lp_bt = problem.lp.clone();
                 lp_bt.bounds = tightened;
-                let problem_bt =
-                    MilpProblem { lp: lp_bt, integer_vars: problem.integer_vars.clone() };
+                let problem_bt = MilpProblem {
+                    lp: lp_bt,
+                    integer_vars: problem.integer_vars.clone(),
+                };
                 let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem_bt.lp, &problem_bt.integer_vars, cfg.integer_feas_tol, &opts_with_dl,
+                    &problem_bt.lp,
+                    &problem_bt.integer_vars,
+                    cfg.integer_feas_tol,
+                    &opts_with_dl,
                 );
                 return solve_mip_core(&problem_bt, &opts_with_dl, cfg, mask, fp_inc);
             }
             Some(_) => {
                 let fp_inc = heuristics::feasibility_pump::run_feasibility_pump(
-                    &problem.lp, &problem.integer_vars, cfg.integer_feas_tol, &opts_with_dl,
+                    &problem.lp,
+                    &problem.integer_vars,
+                    cfg.integer_feas_tol,
+                    &opts_with_dl,
                 );
                 return solve_mip_core(problem, &opts_with_dl, cfg, mask, fp_inc);
             }
@@ -210,7 +217,10 @@ pub fn solve_miqp_with_stats(
             Some(tightened) if tightened != problem.qp.bounds => {
                 let mut qp_bt = problem.qp.clone();
                 qp_bt.bounds = tightened;
-                let problem_bt = MiqpProblem { qp: qp_bt, integer_vars: problem.integer_vars.clone() };
+                let problem_bt = MiqpProblem {
+                    qp: qp_bt,
+                    integer_vars: problem.integer_vars.clone(),
+                };
                 return solve_mip_core(&problem_bt, options, cfg, mask, None);
             }
             Some(_) => {
@@ -289,7 +299,10 @@ fn solve_mip_core<R: Relaxation>(
     // The root carries no valid lower bound yet (−∞): a bound is adopted only from an
     // Optimal relaxation. The loop solves the root uniformly with every other node, so
     // Infeasible / Unbounded / stalling roots are all handled in one place.
-    q.push(MipNode::root(problem.root_bounds().to_vec(), f64::NEG_INFINITY));
+    q.push(MipNode::root(
+        problem.root_bounds().to_vec(),
+        f64::NEG_INFINITY,
+    ));
 
     let mut open_lb = f64::INFINITY; // smallest valid bound over unexplored regions
     let mut had_open = false; // any region left unexplored?
@@ -417,8 +430,16 @@ fn solve_mip_core<R: Relaxation>(
             // a UB row in standard form, invalidating basis indices). The
             // up-branch typically triggers lb-violation and cold-starts anyway.
             let child_ws = res.warm_start_basis.clone();
-            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) { None } else { child_ws.clone() };
-            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) { None } else { child_ws };
+            let down_ws = if bound_layout_changes(&node.var_bounds, &down, jb) {
+                None
+            } else {
+                child_ws.clone()
+            };
+            let up_ws = if bound_layout_changes(&node.var_bounds, &up, jb) {
+                None
+            } else {
+                child_ws
+            };
             q.push(node.child_warm(down, node_lb, down_ws));
             q.push(node.child_warm(up, node_lb, up_ws));
         } else {
@@ -566,7 +587,11 @@ fn round_integers(mut sol: Vec<f64>, integer_vars: &[usize]) -> Vec<f64> {
 /// column layout vs the parent. An infinite bound becoming finite (ub: ∞→boxed,
 /// or lb: free→lower-bounded) changes the number of structural columns or adds
 /// a UB constraint row, making the parent basis index-incompatible.
-fn bound_layout_changes(parent_bounds: &[(f64, f64)], child_bounds: &[(f64, f64)], j: usize) -> bool {
+fn bound_layout_changes(
+    parent_bounds: &[(f64, f64)],
+    child_bounds: &[(f64, f64)],
+    j: usize,
+) -> bool {
     let (p_lb, p_ub) = parent_bounds[j];
     let (c_lb, c_ub) = child_bounds[j];
     (p_ub.is_infinite() && c_ub.is_finite()) || (p_lb.is_infinite() && c_lb.is_finite())
@@ -590,7 +615,10 @@ struct MipState {
 
 impl MipState {
     fn new() -> Self {
-        Self { incumbent: None, incumbent_obj: None }
+        Self {
+            incumbent: None,
+            incumbent_obj: None,
+        }
     }
 
     /// Adopt `res` as the new incumbent if it strictly improves the objective.

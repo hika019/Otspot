@@ -33,8 +33,9 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 /// Factory function type for constructing a rayon ThreadPool (used for test injection).
-type ThreadPoolFactory =
-    Option<Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>>;
+type ThreadPoolFactory = Option<
+    Box<dyn Fn(usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> + Send + Sync>,
+>;
 
 /// Numerical Recipes LCG 定数 (Park-Miller-Carta 系列)。full-period 2^32。
 /// xorshift より弱いが multistart 用途では再現性とポータビリティを優先。
@@ -318,7 +319,10 @@ pub(crate) fn solve_qp_multistart_with_hooks(
             });
         match pool_result {
             Ok(pool) => pool.install(|| {
-                warms.into_par_iter().map(worker).collect::<Vec<SolverResult>>()
+                warms
+                    .into_par_iter()
+                    .map(worker)
+                    .collect::<Vec<SolverResult>>()
             }),
             Err(e) => {
                 log::warn!(
@@ -493,12 +497,8 @@ mod tests {
                     // 既存 peak より大きければ書き戻し
                     let mut prev = p_enter.load(Ordering::SeqCst);
                     while n > prev {
-                        match p_enter.compare_exchange(
-                            prev,
-                            n,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        ) {
+                        match p_enter.compare_exchange(prev, n, Ordering::SeqCst, Ordering::SeqCst)
+                        {
                             Ok(_) => break,
                             Err(actual) => prev = actual,
                         }
@@ -644,7 +644,8 @@ mod tests {
         );
         // OFF: 全 n_starts が hook を通過 (shortcut bypass の事実化)
         assert_eq!(
-            n_entered_off, cfg.n_starts,
+            n_entered_off,
+            cfg.n_starts,
             "shortcut OFF: all {n_starts} workers must enter, got {n}",
             n_starts = cfg.n_starts,
             n = n_entered_off
@@ -717,9 +718,9 @@ mod tests {
 
         // table-driven: 複数パターンで fallback 分岐を踏む
         let cases: &[(usize, usize)] = &[
-            (4, 4),  // threads=4, n_starts=4
-            (2, 8),  // threads=2, n_starts=8
-            (3, 5),  // threads=3, n_starts=5
+            (4, 4), // threads=4, n_starts=4
+            (2, 8), // threads=2, n_starts=8
+            (3, 5), // threads=3, n_starts=5
         ];
 
         for &(threads, n_starts) in cases {
@@ -732,9 +733,7 @@ mod tests {
                     rayon::ThreadPoolBuilder::new()
                         .num_threads(1)
                         .spawn_handler(|_| -> std::io::Result<()> {
-                            Err(std::io::Error::other(
-                                "injected ThreadPool build failure",
-                            ))
+                            Err(std::io::Error::other("injected ThreadPool build failure"))
                         })
                         .build()
                 })),
@@ -790,9 +789,7 @@ mod tests {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(1)
                     .spawn_handler(|_| -> std::io::Result<()> {
-                        Err(std::io::Error::other(
-                            "injected",
-                        ))
+                        Err(std::io::Error::other("injected"))
                     })
                     .build()
             })),
@@ -800,7 +797,8 @@ mod tests {
         let mut opts_fallback = SolverOptions::default();
         opts_fallback.threads = 4;
         opts_fallback.timeout_secs = Some(20.0);
-        let fallback_result = solve_qp_multistart_with_hooks(&prob, &opts_fallback, &cfg, Some(&hooks));
+        let fallback_result =
+            solve_qp_multistart_with_hooks(&prob, &opts_fallback, &cfg, Some(&hooks));
 
         assert!(
             (baseline.objective - fallback_result.objective).abs() < 1e-9,
@@ -820,12 +818,40 @@ mod tests {
         let q = CscMatrix::from_triplets(&[0], &[0], &[-2.0], 1, 1).unwrap();
         let a = CscMatrix::from_triplets(&[], &[], &[], 0, 1).unwrap();
         let prob = QpProblem::new(q, vec![0.0], a, vec![], vec![(-2.0, 2.0)], vec![]).unwrap();
-        let cfg = MultiStartConfig { n_starts: 3, seed: 1, strategy: StartStrategy::RandomBox };
+        let cfg = MultiStartConfig {
+            n_starts: 3,
+            seed: 1,
+            strategy: StartStrategy::RandomBox,
+        };
         let cases: &[(&str, SolverOptions)] = &[
-            ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
-            ("inf timeout_secs", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
-            ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-            ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
+            (
+                "neg timeout_secs",
+                SolverOptions {
+                    timeout_secs: Some(-1.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inf timeout_secs",
+                SolverOptions {
+                    timeout_secs: Some(f64::INFINITY),
+                    ..Default::default()
+                },
+            ),
+            (
+                "nan primal_tol",
+                SolverOptions {
+                    primal_tol: f64::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "zero threads",
+                SolverOptions {
+                    threads: 0,
+                    ..Default::default()
+                },
+            ),
         ];
         for (label, opts) in cases {
             let result = solve_qp_multistart(&prob, opts, &cfg);

@@ -44,7 +44,11 @@ fn gate_skips_krylov_ir_when_already_converged() {
         let mut opts = SolverOptions::default();
         opts.ipm.eps = 1e-6;
         let res = otspot::qp::solve_qp_with(prob, &opts);
-        assert_eq!(res.status, SolveStatus::Optimal, "case {i}: expected Optimal");
+        assert_eq!(
+            res.status,
+            SolveStatus::Optimal,
+            "case {i}: expected Optimal"
+        );
         assert!(
             res.stats.postsolve_krylov_ir_skipped,
             "case {i}: a converged solution must skip the Krylov IR (gate must fire). \

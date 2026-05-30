@@ -85,9 +85,14 @@ fn build_pivot_workload(k_artificial: usize, n_decision: usize) -> LpProblem {
     let cts = vec![ConstraintType::Eq; m];
 
     LpProblem::new_general(
-        c, a, b, cts, bounds,
+        c,
+        a,
+        b,
+        cts,
+        bounds,
         Some(format!("pivot_workload_K{}_N{}", k_artificial, n_decision)),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 /// 共通 assert: 解時間が `MAX_SOLVE_WALL_SECS` を超えたら退行とみなす。
@@ -110,14 +115,28 @@ fn assert_solve_under_budget(lp: &LpProblem, expected_obj: f64, label: &str) {
     );
 
     // Primary sentinel: per-iteration cost explosion → Timeout → fails here.
-    assert_eq!(r.status, SolveStatus::Optimal, "[{}] status={:?}", label, r.status);
+    assert_eq!(
+        r.status,
+        SolveStatus::Optimal,
+        "[{}] status={:?}",
+        label,
+        r.status
+    );
     let obj_err = (r.objective - expected_obj).abs() / (1.0 + expected_obj.abs());
-    assert!(obj_err < 1e-6, "[{}] obj={:.6e} expected={:.6e}", label, r.objective, expected_obj);
+    assert!(
+        obj_err < 1e-6,
+        "[{}] obj={:.6e} expected={:.6e}",
+        label,
+        r.objective,
+        expected_obj
+    );
     // Secondary sentinel: cycling → iteration explosion → fails here.
     assert!(
         r.iterations < MAX_PIVOT_ITERS,
         "[{}] iterations {} ≥ {} — possible cycling regression",
-        label, r.iterations, MAX_PIVOT_ITERS
+        label,
+        r.iterations,
+        MAX_PIVOT_ITERS
     );
 }
 

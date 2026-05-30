@@ -30,7 +30,8 @@ pub(super) fn step3a_empty_row(st: &mut PresolveState) -> Result<(), PresolveSta
                 }
             }
             st.removed_rows[i] = true;
-            st.postsolve_stack.push(PostsolveStep::EmptyRow { orig_row: i });
+            st.postsolve_stack
+                .push(PostsolveStep::EmptyRow { orig_row: i });
         }
     }
     Ok(())
@@ -50,12 +51,20 @@ pub(super) fn step3b_empty_column(st: &mut PresolveState) -> Result<(), Presolve
                 if lb == f64::NEG_INFINITY {
                     return Err(PresolveStatus::Unbounded);
                 }
-                if lb.is_finite() { lb } else { 0.0 }
+                if lb.is_finite() {
+                    lb
+                } else {
+                    0.0
+                }
             } else if cj < -ZERO_TOL {
                 if ub == f64::INFINITY {
                     return Err(PresolveStatus::Unbounded);
                 }
-                if ub.is_finite() { ub } else { 0.0 }
+                if ub.is_finite() {
+                    ub
+                } else {
+                    0.0
+                }
             } else if lb.is_finite() {
                 lb
             } else if ub.is_finite() {
@@ -65,7 +74,8 @@ pub(super) fn step3b_empty_column(st: &mut PresolveState) -> Result<(), Presolve
             };
             st.obj_offset += cj * value;
             st.removed_cols[j] = true;
-            st.postsolve_stack.push(PostsolveStep::EmptyColumn { orig_col: j, value });
+            st.postsolve_stack
+                .push(PostsolveStep::EmptyColumn { orig_col: j, value });
         }
     }
     Ok(())
@@ -85,14 +95,13 @@ pub(super) fn step4_redundant_constraint(st: &mut PresolveState) -> Result<(), P
             ConstraintType::Le => ub_fin && row_ub <= st.b[i] + ZERO_TOL,
             ConstraintType::Ge => lb_fin && row_lb >= st.b[i] - ZERO_TOL,
             ConstraintType::Eq => {
-                lb_fin && ub_fin
-                    && row_lb >= st.b[i] - ZERO_TOL
-                    && row_ub <= st.b[i] + ZERO_TOL
+                lb_fin && ub_fin && row_lb >= st.b[i] - ZERO_TOL && row_ub <= st.b[i] + ZERO_TOL
             }
         };
         if redundant {
             st.removed_rows[i] = true;
-            st.postsolve_stack.push(PostsolveStep::RedundantConstraint { orig_row: i });
+            st.postsolve_stack
+                .push(PostsolveStep::RedundantConstraint { orig_row: i });
         }
     }
     Ok(())

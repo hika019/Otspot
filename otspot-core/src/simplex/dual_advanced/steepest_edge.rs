@@ -160,7 +160,8 @@ impl DualLeavingStrategy for DualSteepestEdgeLeaving {
         if gamma_update_disabled() {
             return;
         }
-        self.weights.update_after_pivot(leaving_row, alpha, sigma, pivot);
+        self.weights
+            .update_after_pivot(leaving_row, alpha, sigma, pivot);
     }
 
     fn after_refactor(&mut self, m: usize) {
@@ -223,7 +224,10 @@ mod tests {
         let mut w = DseWeights::new(2);
         w.update_after_pivot(1, &[3.0, 4.0], &[5.0, 7.0], 4.0);
         assert!(w.gamma(0) >= DSE_GAMMA_FLOOR, "γ floored");
-        assert!((w.gamma(1) - (1.0_f64 / 16.0)).abs() < 1e-12, "pivot row 1/α²");
+        assert!(
+            (w.gamma(1) - (1.0_f64 / 16.0)).abs() < 1e-12,
+            "pivot row 1/α²"
+        );
     }
 
     #[test]
@@ -267,7 +271,10 @@ mod tests {
         let mut w = DseWeights::new(2);
         w.update_after_pivot(1, &[3.0, 4.0], &[5.0, 7.0], 4.0);
         assert_eq!(w.gamma(0), DSE_GAMMA_FLOOR, "γ floored to FLOOR");
-        assert!(w.needs_reset, "significantly-negative drift must flag reset");
+        assert!(
+            w.needs_reset,
+            "significantly-negative drift must flag reset"
+        );
     }
 
     #[test]

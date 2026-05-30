@@ -20,7 +20,12 @@ fn scaling_module_exists() {
     let b = vec![10.0, 10.0, 10.0];
     let prob = LpProblem::new(c, a, b).unwrap();
     let result = solve(&prob);
-    assert_eq!(result.status, SolveStatus::Optimal, "scaling smoke: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "scaling smoke: expected Optimal, got {:?}",
+        result.status
+    );
 }
 
 /// Pricing module integration: LP with all-ones objective must reach Optimal.
@@ -32,5 +37,10 @@ fn pricing_module_exists() {
     let b = vec![5.0; n];
     let prob = LpProblem::new(c, a, b).unwrap();
     let result = solve(&prob);
-    assert_eq!(result.status, SolveStatus::Optimal, "pricing smoke: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "pricing smoke: expected Optimal, got {:?}",
+        result.status
+    );
 }

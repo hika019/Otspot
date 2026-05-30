@@ -42,7 +42,10 @@ fn pfeas_normalized(prob: &QpProblem, x: &[f64]) -> f64 {
 fn solve_with_eps(prob: &QpProblem, user_eps: f64) -> otspot::SolverResult {
     let mut opts = SolverOptions::default();
     opts.tolerance = Some(Tolerance::Custom(user_eps));
-    opts.ipm = IpmOptions { eps: user_eps, ..IpmOptions::default() };
+    opts.ipm = IpmOptions {
+        eps: user_eps,
+        ..IpmOptions::default()
+    };
     opts.timeout_secs = Some(60.0);
     solve_qp_with(prob, &opts)
 }
@@ -52,7 +55,6 @@ fn maros_path(name: &str) -> std::path::PathBuf {
     Path::new(manifest).join("data/maros_meszaros").join(name)
 }
 
-
 /// QPCBOEI2: Ruiz 後の OSQP 全体正規化 (`pfeas_thr ≈ 5.7e-5` at eps_scaled=4.8e-9)
 /// が `pf=5.3e-5` で満たされ Optimal_main 早期 exit → unscale 後 pf_orig=1.7e-2 /
 /// pfn_orig=1.8e-6 だった (eps=1e-6 で fail)。fix 後は componentwise gate が効き
@@ -60,14 +62,19 @@ fn maros_path(name: &str) -> std::path::PathBuf {
 #[test]
 fn qpcboei2_pfeas_componentwise_at_loose_eps_1e4() {
     let path = maros_path("QPCBOEI2.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-4);
     let pfn = pfeas_normalized(&prob, &result.solution);
     assert!(
         matches!(result.status, SolveStatus::Optimal),
         "QPCBOEI2 eps=1e-4 expected Optimal, got {:?} pfn={:.3e}",
-        result.status, pfn
+        result.status,
+        pfn
     );
     assert!(
         pfn < 1e-4,
@@ -79,14 +86,19 @@ fn qpcboei2_pfeas_componentwise_at_loose_eps_1e4() {
 #[test]
 fn qpcboei2_pfeas_componentwise_at_default_eps_1e6() {
     let path = maros_path("QPCBOEI2.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-6);
     let pfn = pfeas_normalized(&prob, &result.solution);
     assert!(
         matches!(result.status, SolveStatus::Optimal),
         "QPCBOEI2 eps=1e-6 expected Optimal, got {:?} pfn={:.3e}",
-        result.status, pfn
+        result.status,
+        pfn
     );
     assert!(
         pfn < 1e-6,
@@ -100,7 +112,11 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
     // 1e-8 は f64 限界に近いため Optimal/Suboptimal どちらでも許容するが、
     // pfn 自体が user_eps を満たすことは bench で要求する PASS の条件。
     let path = maros_path("QPCBOEI2.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let result = solve_with_eps(&prob, 1e-8);
     let pfn = pfeas_normalized(&prob, &result.solution);
@@ -125,7 +141,11 @@ fn qpcboei2_pfeas_componentwise_at_tight_eps_1e8() {
 #[test]
 fn qpcboei2_pfeas_monotonicity_across_eps() {
     let path = maros_path("QPCBOEI2.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let prob = parse_qps(&path).expect("parse QPCBOEI2");
     let mut prev_pfn = f64::INFINITY;
     for &user_eps in &[1e-4_f64, 1e-6, 1e-8] {
@@ -137,7 +157,8 @@ fn qpcboei2_pfeas_monotonicity_across_eps() {
         assert!(
             pfn < user_eps * tol_mul,
             "QPCBOEI2 eps={:.0e}: pfn={:.3e} must be < {tol_mul}x eps",
-            user_eps, pfn
+            user_eps,
+            pfn
         );
         // Observed max ratio pfn(1e-6)/pfn(1e-4): macOS arm64 ≤ 22x、Linux x86_64 ≤ 58x。
         // 100 = ~58x × 1.7x safety、env 間 fp variation 許容しつつ catastrophic regression を catch。
@@ -145,7 +166,9 @@ fn qpcboei2_pfeas_monotonicity_across_eps() {
         assert!(
             pfn <= prev_pfn * mono_mul,
             "QPCBOEI2 eps {:.0e} → pfn {:.3e} regress from prev {:.3e} (>{mono_mul}x)",
-            user_eps, pfn, prev_pfn
+            user_eps,
+            pfn,
+            prev_pfn
         );
         prev_pfn = pfn;
     }

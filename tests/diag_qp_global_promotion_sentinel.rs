@@ -304,15 +304,42 @@ struct Case {
 
 fn cases() -> Vec<Case> {
     vec![
-        Case { label: "concave_2d_sumcap", problem: concave_2d_sumcap() },
-        Case { label: "concave_3d_sumcap", problem: concave_3d_sumcap() },
-        Case { label: "bilinear_eq_2d", problem: bilinear_eq_2d() },
-        Case { label: "mixed_eq_2d", problem: mixed_eq_2d() },
-        Case { label: "concave_5d_sumcap", problem: concave_5d_sumcap() },
-        Case { label: "concave_6d_sumcap", problem: concave_6d_sumcap() },
-        Case { label: "mixed_concave_4d", problem: mixed_concave_4d() },
-        Case { label: "bilinear_5d_box", problem: bilinear_5d_box() },
-        Case { label: "concave_7d_sumcap", problem: concave_7d_sumcap() },
+        Case {
+            label: "concave_2d_sumcap",
+            problem: concave_2d_sumcap(),
+        },
+        Case {
+            label: "concave_3d_sumcap",
+            problem: concave_3d_sumcap(),
+        },
+        Case {
+            label: "bilinear_eq_2d",
+            problem: bilinear_eq_2d(),
+        },
+        Case {
+            label: "mixed_eq_2d",
+            problem: mixed_eq_2d(),
+        },
+        Case {
+            label: "concave_5d_sumcap",
+            problem: concave_5d_sumcap(),
+        },
+        Case {
+            label: "concave_6d_sumcap",
+            problem: concave_6d_sumcap(),
+        },
+        Case {
+            label: "mixed_concave_4d",
+            problem: mixed_concave_4d(),
+        },
+        Case {
+            label: "bilinear_5d_box",
+            problem: bilinear_5d_box(),
+        },
+        Case {
+            label: "concave_7d_sumcap",
+            problem: concave_7d_sumcap(),
+        },
     ]
 }
 
@@ -467,10 +494,7 @@ fn alpha_bb_promotes_locally_optimal_to_optimal_on_multiple_fixtures() {
             r4.status,
             SolveStatus::Optimal | SolveStatus::NonconvexGlobal
         );
-        eprintln!(
-            "PROMO [{}]: p3={:?} p4={:?}",
-            c.label, r3.status, r4.status
-        );
+        eprintln!("PROMO [{}]: p3={:?} p4={:?}", c.label, r3.status, r4.status);
         if was_locally && now_optimal {
             promotions += 1;
             promoted_labels.push(c.label);

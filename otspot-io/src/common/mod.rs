@@ -63,9 +63,9 @@ pub(crate) fn parse_mps_free_pairs(
     while i + 1 < parts.len() {
         let name = parts[i].to_string();
         let raw = parts[i + 1];
-        let value = raw.parse::<f64>().map_err(|_| {
-            format!("line {}: Invalid {} value '{}'", line_num, section, raw)
-        })?;
+        let value = raw
+            .parse::<f64>()
+            .map_err(|_| format!("line {}: Invalid {} value '{}'", line_num, section, raw))?;
         let is_exempt = allow_nonfinite_for_row == Some(name.as_str());
         if !is_exempt && !value.is_finite() {
             return Err(format!(
@@ -105,7 +105,10 @@ pub(crate) fn parse_mps_fixed_pairs(
         let val_str1 = mps_field(line, 24, 36);
         if !val_str1.is_empty() {
             let value1 = val_str1.parse::<f64>().map_err(|_| {
-                format!("line {}: Invalid {} value '{}'", line_num, section, val_str1)
+                format!(
+                    "line {}: Invalid {} value '{}'",
+                    line_num, section, val_str1
+                )
             })?;
             let is_exempt1 = allow_nonfinite_for_row == Some(name1.as_str());
             if !is_exempt1 && !value1.is_finite() {
@@ -123,7 +126,10 @@ pub(crate) fn parse_mps_fixed_pairs(
         let val_str2 = mps_field(line, 49, 61);
         if !val_str2.is_empty() {
             let value2 = val_str2.parse::<f64>().map_err(|_| {
-                format!("line {}: Invalid {} value '{}'", line_num, section, val_str2)
+                format!(
+                    "line {}: Invalid {} value '{}'",
+                    line_num, section, val_str2
+                )
             })?;
             let is_exempt2 = allow_nonfinite_for_row == Some(name2.as_str());
             if !is_exempt2 && !value2.is_finite() {

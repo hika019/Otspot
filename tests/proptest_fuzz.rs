@@ -7,10 +7,10 @@
 //! 2. 目的関数ゼロのLPは常にOptimalを返す
 //! 3. 全係数正・全変数非負のLPはInfeasibleにならない
 
-use proptest::prelude::*;
 use otspot::problem::{LpProblem, SolveStatus};
 use otspot::solve;
 use otspot::sparse::CscMatrix;
+use proptest::prelude::*;
 
 /// 対角制約行列を生成するヘルパー
 ///

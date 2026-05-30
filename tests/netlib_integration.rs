@@ -35,7 +35,10 @@ fn test_parse_afiro() {
     // afiro: 27 rows (excluding objective), 32 columns
     assert!(problem.num_constraints > 0, "afiro should have constraints");
     assert!(problem.num_vars > 0, "afiro should have variables");
-    println!("afiro: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "afiro: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -45,9 +48,15 @@ fn test_parse_kb2() {
     assert!(problem.num_constraints > 0);
     assert!(problem.num_vars > 0);
     // kb2 uses BOUNDS heavily — verify bounds are not all default
-    let has_non_default_bounds = problem.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    let has_non_default_bounds = problem
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
     assert!(has_non_default_bounds, "kb2 should have non-default bounds");
-    println!("kb2: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "kb2: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -56,7 +65,10 @@ fn test_parse_sc50a() {
     let problem = parse_mps_file(path).expect("Failed to parse sc50a.mps");
     assert!(problem.num_constraints > 0);
     assert!(problem.num_vars > 0);
-    println!("sc50a: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "sc50a: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -65,7 +77,10 @@ fn test_parse_sc50b() {
     let problem = parse_mps_file(path).expect("Failed to parse sc50b.mps");
     assert!(problem.num_constraints > 0);
     assert!(problem.num_vars > 0);
-    println!("sc50b: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "sc50b: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -77,7 +92,10 @@ fn test_parse_blend() {
     // blend has equality constraints
     let has_eq = problem.constraint_types.contains(&ConstraintType::Eq);
     assert!(has_eq, "blend should have equality constraints");
-    println!("blend: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "blend: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 // --- Solving tests ---
@@ -176,7 +194,11 @@ fn test_netlib_adlittle() {
 
     let result = solve_timed(&problem, 30);
 
-    assert_eq!(result.status, SolveStatus::Optimal, "adlittle should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "adlittle should reach Optimal"
+    );
 
     // adlittle optimal: 2.2549496316E+05
     let expected = 225494.96316;
@@ -186,7 +208,11 @@ fn test_netlib_adlittle() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "adlittle: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "adlittle: {} iterations",
+        result.iterations
+    );
 
     println!("adlittle solved: obj={}", result.objective);
 }
@@ -198,7 +224,11 @@ fn test_netlib_share2b() {
 
     let result = solve_timed(&problem, 30);
 
-    assert_eq!(result.status, SolveStatus::Optimal, "share2b should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "share2b should reach Optimal"
+    );
 
     // share2b optimal: -4.1573224074E+02
     let expected = -415.73224074;
@@ -208,7 +238,11 @@ fn test_netlib_share2b() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "share2b: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "share2b: {} iterations",
+        result.iterations
+    );
 
     println!("share2b solved: obj={}", result.objective);
 }
@@ -220,7 +254,11 @@ fn test_netlib_stocfor1() {
 
     let result = solve_timed(&problem, 30);
 
-    assert_eq!(result.status, SolveStatus::Optimal, "stocfor1 should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "stocfor1 should reach Optimal"
+    );
 
     // stocfor1 optimal: -4.1131976219E+04
     let expected = -41131.976219;
@@ -230,7 +268,11 @@ fn test_netlib_stocfor1() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "stocfor1: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "stocfor1: {} iterations",
+        result.iterations
+    );
 
     println!("stocfor1 solved: obj={}", result.objective);
 }
@@ -241,9 +283,15 @@ fn test_netlib_stocfor1() {
 fn test_parse_brandy() {
     let path = Path::new("tests/netlib/brandy.mps");
     let problem = parse_mps_file(path).expect("Failed to parse brandy.mps");
-    assert!(problem.num_constraints > 0, "brandy should have constraints");
+    assert!(
+        problem.num_constraints > 0,
+        "brandy should have constraints"
+    );
     assert!(problem.num_vars > 0, "brandy should have variables");
-    println!("brandy: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "brandy: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -253,7 +301,11 @@ fn test_solve_brandy() {
     let start = Instant::now();
     let result = solve_timed(&problem, 90); // Timeout → Timeout status → fails Optimal assert
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "brandy should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "brandy should reach Optimal"
+    );
     let expected = 1518.5098965;
     assert!(
         (result.objective - expected).abs() < 1.0,
@@ -261,17 +313,30 @@ fn test_solve_brandy() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "brandy: {} iterations", result.iterations);
-    println!("brandy solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "brandy: {} iterations",
+        result.iterations
+    );
+    println!(
+        "brandy solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
 fn test_parse_scorpion() {
     let path = Path::new("tests/netlib/scorpion.mps");
     let problem = parse_mps_file(path).expect("Failed to parse scorpion.mps");
-    assert!(problem.num_constraints > 0, "scorpion should have constraints");
+    assert!(
+        problem.num_constraints > 0,
+        "scorpion should have constraints"
+    );
     assert!(problem.num_vars > 0, "scorpion should have variables");
-    println!("scorpion: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "scorpion: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -281,7 +346,11 @@ fn test_solve_scorpion() {
     let start = Instant::now();
     let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "scorpion should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "scorpion should reach Optimal"
+    );
     let expected = 1878.1248227;
     // scorpionは条件数1.47×10^16の高退化問題（多くのソルバーで苦戦）。
     // 数値精度の限界により許容誤差を5.0に設定（相対誤差0.27%未満）。
@@ -291,8 +360,15 @@ fn test_solve_scorpion() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "scorpion: {} iterations", result.iterations);
-    println!("scorpion solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "scorpion: {} iterations",
+        result.iterations
+    );
+    println!(
+        "scorpion solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
@@ -302,9 +378,18 @@ fn test_parse_fit1d() {
     assert!(problem.num_constraints > 0, "fit1d should have constraints");
     assert!(problem.num_vars > 0, "fit1d should have variables");
     // fit1d uses BOUNDS (UP type) — verify non-default bounds exist
-    let has_non_default_bounds = problem.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
-    assert!(has_non_default_bounds, "fit1d should have non-default bounds from BOUNDS section");
-    println!("fit1d: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    let has_non_default_bounds = problem
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    assert!(
+        has_non_default_bounds,
+        "fit1d should have non-default bounds from BOUNDS section"
+    );
+    println!(
+        "fit1d: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -317,7 +402,11 @@ fn test_solve_fit1d() {
     let start_on = Instant::now();
     let result = solve_timed(&problem, 360);
     let elapsed_on = start_on.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "fit1d should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "fit1d should reach Optimal"
+    );
     let expected = -9146.3780924;
     assert!(
         (result.objective - expected).abs() < 1.0,
@@ -325,7 +414,11 @@ fn test_solve_fit1d() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "fit1d: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "fit1d: {} iterations",
+        result.iterations
+    );
 
     // --- Presolve OFF ---
     let mut opts_off = SolverOptions::default();
@@ -333,7 +426,11 @@ fn test_solve_fit1d() {
     let start_off = Instant::now();
     let result_off = solve_with(&problem, &opts_off);
     let elapsed_off = start_off.elapsed();
-    assert_eq!(result_off.status, SolveStatus::Optimal, "fit1d (no presolve) should reach Optimal");
+    assert_eq!(
+        result_off.status,
+        SolveStatus::Optimal,
+        "fit1d (no presolve) should reach Optimal"
+    );
 
     // タイミング比較出力
     eprintln!(
@@ -342,17 +439,25 @@ fn test_solve_fit1d() {
         elapsed_off,
         elapsed_off.as_secs_f64() / elapsed_on.as_secs_f64().max(1e-6)
     );
-    println!("fit1d solved: obj={}, time_with_presolve={:?}, time_without_presolve={:?}",
-        result.objective, elapsed_on, elapsed_off);
+    println!(
+        "fit1d solved: obj={}, time_with_presolve={:?}, time_without_presolve={:?}",
+        result.objective, elapsed_on, elapsed_off
+    );
 }
 
 #[test]
 fn test_parse_share1b() {
     let path = Path::new("tests/netlib/share1b.mps");
     let problem = parse_mps_file(path).expect("Failed to parse share1b.mps");
-    assert!(problem.num_constraints > 0, "share1b should have constraints");
+    assert!(
+        problem.num_constraints > 0,
+        "share1b should have constraints"
+    );
     assert!(problem.num_vars > 0, "share1b should have variables");
-    println!("share1b: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    println!(
+        "share1b: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -362,7 +467,11 @@ fn test_solve_share1b() {
     let start = Instant::now();
     let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "share1b should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "share1b should reach Optimal"
+    );
     let expected = -76589.318579;
     assert!(
         (result.objective - expected).abs() < 10.0,
@@ -370,8 +479,15 @@ fn test_solve_share1b() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "share1b: {} iterations", result.iterations);
-    println!("share1b solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "share1b: {} iterations",
+        result.iterations
+    );
+    println!(
+        "share1b solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
@@ -379,11 +495,20 @@ fn test_parse_boeing2() {
     let path = Path::new("tests/netlib/boeing2.mps");
     let problem = parse_mps_file(path).expect("Failed to parse boeing2.mps");
     // boeing2: 167 rows, 143 cols + RANGES追加行
-    assert!(problem.num_constraints > 0, "boeing2 should have constraints");
+    assert!(
+        problem.num_constraints > 0,
+        "boeing2 should have constraints"
+    );
     assert!(problem.num_vars > 0, "boeing2 should have variables");
     // RANGES使用問題: 通常より多くの制約行が生成される
-    assert!(problem.num_constraints > 167, "boeing2 should have extra constraints from RANGES");
-    println!("boeing2: {} constraints, {} vars", problem.num_constraints, problem.num_vars);
+    assert!(
+        problem.num_constraints > 167,
+        "boeing2 should have extra constraints from RANGES"
+    );
+    println!(
+        "boeing2: {} constraints, {} vars",
+        problem.num_constraints, problem.num_vars
+    );
 }
 
 #[test]
@@ -393,7 +518,11 @@ fn test_solve_boeing2() {
     let start = Instant::now();
     let result = solve_timed(&problem, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "boeing2 should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "boeing2 should reach Optimal"
+    );
     let expected = -315.01872802;
     assert!(
         (result.objective - expected).abs() < 1.0,
@@ -401,8 +530,15 @@ fn test_solve_boeing2() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "boeing2: {} iterations", result.iterations);
-    println!("boeing2 solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "boeing2: {} iterations",
+        result.iterations
+    );
+    println!(
+        "boeing2 solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- HIGH-2: Dual Simplex Netlib検証 (cmd_155) ---
@@ -417,7 +553,11 @@ fn test_dual_simplex_netlib_1() {
     let start = Instant::now();
     let result = solve_with(&problem, &opts);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "afiro (Dual) should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "afiro (Dual) should reach Optimal"
+    );
     let expected = -464.7531428571429;
     assert!(
         (result.objective - expected).abs() < 0.01,
@@ -425,7 +565,10 @@ fn test_dual_simplex_netlib_1() {
         expected,
         result.objective
     );
-    println!("afiro (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "afiro (Dual Simplex) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
@@ -438,7 +581,11 @@ fn test_dual_simplex_netlib_2() {
     let start = Instant::now();
     let result = solve_with(&problem, &opts);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "sc50a (Dual) should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "sc50a (Dual) should reach Optimal"
+    );
     let expected = -64.575077059;
     assert!(
         (result.objective - expected).abs() < 0.01,
@@ -446,7 +593,10 @@ fn test_dual_simplex_netlib_2() {
         expected,
         result.objective
     );
-    println!("sc50a (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "sc50a (Dual Simplex) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
@@ -459,7 +609,11 @@ fn test_dual_simplex_netlib_3() {
     let start = Instant::now();
     let result = solve_with(&problem, &opts);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "adlittle (Dual) should reach Optimal");
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "adlittle (Dual) should reach Optimal"
+    );
     let expected = 225494.96316;
     assert!(
         (result.objective - expected).abs() < 1.0,
@@ -467,7 +621,10 @@ fn test_dual_simplex_netlib_3() {
         expected,
         result.objective
     );
-    println!("adlittle (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "adlittle (Dual Simplex) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- bore3d: QP Presolve Eq制約修正確認 (cmd_703) ---
@@ -495,7 +652,10 @@ fn test_solve_bore3d_primal() {
         expected,
         result.objective
     );
-    println!("bore3d (Primal Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "bore3d (Primal Simplex) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 #[test]
@@ -522,7 +682,10 @@ fn test_solve_bore3d_dual() {
         expected,
         result.objective
     );
-    println!("bore3d (Dual Simplex) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "bore3d (Dual Simplex) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 /// BOYD1 regression test: 87GBメモリ爆発防止 [cmd_824]
@@ -538,10 +701,17 @@ fn test_solve_bore3d_dual() {
 #[test]
 fn test_boyd1_no_memory_explosion() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
     assert_eq!(problem.num_vars, 93261, "BOYD1: expected 93261 vars");
-    assert_eq!(problem.num_constraints, 18, "BOYD1: expected 18 constraints");
+    assert_eq!(
+        problem.num_constraints, 18,
+        "BOYD1: expected 18 constraints"
+    );
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
@@ -556,7 +726,8 @@ fn test_boyd1_no_memory_explosion() {
     assert!(
         result.iterations < BOYD1_MEMORY_ITER_CAP,
         "BOYD1: {} IPM iterations (cap {}). Possible iterative-refine explosion regression.",
-        result.iterations, BOYD1_MEMORY_ITER_CAP,
+        result.iterations,
+        BOYD1_MEMORY_ITER_CAP,
     );
     println!(
         "BOYD1: status={:?}, obj={:.6e}, iters={}",
@@ -564,19 +735,30 @@ fn test_boyd1_no_memory_explosion() {
     );
 }
 
-
 /// Stack-overflow regression: BOYD1 級でも IPPMM 経路で stack 保護されるか
 #[test]
 fn test_boyd1_direct_ipm_no_stack_overflow() {
     let path = Path::new("data/maros_meszaros/BOYD1.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/maros_meszaros_download.sh を実行",
+        path.display()
+    );
     let problem = parse_qps(path).expect("Failed to parse BOYD1.QPS");
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(30.0);
     let result = solve_qp_with(&problem, &opts);
     println!("BOYD1 direct IPPMM: status={:?}", result.status);
     // status は Optimal/Suboptimal/Timeout どれでも良い。stack overflow しないことだけ検証。
-    assert!(!result.solution.is_empty() || matches!(result.status, SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::SuboptimalSolution));
+    assert!(
+        !result.solution.is_empty()
+            || matches!(
+                result.status,
+                SolveStatus::Timeout
+                    | SolveStatus::NumericalError
+                    | SolveStatus::SuboptimalSolution
+            )
+    );
 }
 
 // ============================================================================
@@ -613,7 +795,10 @@ fn test_parse_sc105() {
     // sc105: 106 rows (105 non-obj), 103 cols
     assert_eq!(prob.num_constraints, 105, "sc105: expected 105 constraints");
     assert_eq!(prob.num_vars, 103, "sc105: expected 103 vars");
-    println!("sc105: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "sc105: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -622,7 +807,12 @@ fn test_solve_sc105() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "sc105: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "sc105: expected Optimal, got {:?}",
+        result.status
+    );
     let expected = -52.202061212;
     assert!(
         (result.objective - expected).abs() < 0.01,
@@ -630,7 +820,11 @@ fn test_solve_sc105() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "sc105: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "sc105: {} iterations",
+        result.iterations
+    );
     println!("sc105 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -644,7 +838,10 @@ fn test_parse_sc205() {
     // sc205: 206 rows (205 non-obj), 203 cols
     assert_eq!(prob.num_constraints, 205, "sc205: expected 205 constraints");
     assert_eq!(prob.num_vars, 203, "sc205: expected 203 vars");
-    println!("sc205: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "sc205: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -653,7 +850,12 @@ fn test_solve_sc205() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "sc205: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "sc205: expected Optimal, got {:?}",
+        result.status
+    );
     // sc205 optimal: -5.2202061212E+01 (same as sc105, larger scale)
     let expected = -52.202061212;
     assert!(
@@ -662,7 +864,11 @@ fn test_solve_sc205() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "sc205: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "sc205: {} iterations",
+        result.iterations
+    );
     println!("sc205 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -674,9 +880,18 @@ fn test_parse_recipe() {
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
     // recipe uses BOUNDS (UP/LO/FX)
-    let has_non_default_bounds = prob.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
-    assert!(has_non_default_bounds, "recipe should have non-default bounds");
-    println!("recipe: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    let has_non_default_bounds = prob
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    assert!(
+        has_non_default_bounds,
+        "recipe should have non-default bounds"
+    );
+    println!(
+        "recipe: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -685,7 +900,12 @@ fn test_solve_recipe() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "recipe: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "recipe: expected Optimal, got {:?}",
+        result.status
+    );
     // recipe optimal: -2.6661600000E+02
     let expected = -266.616;
     assert!(
@@ -694,8 +914,15 @@ fn test_solve_recipe() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "recipe: {} iterations", result.iterations);
-    println!("recipe solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "recipe: {} iterations",
+        result.iterations
+    );
+    println!(
+        "recipe solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- lotfi ---
@@ -705,7 +932,10 @@ fn test_parse_lotfi() {
     let prob = parse_mps_file(Path::new("tests/netlib/lotfi.mps")).expect("parse failed");
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
-    println!("lotfi: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "lotfi: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -714,7 +944,12 @@ fn test_solve_lotfi() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "lotfi: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "lotfi: expected Optimal, got {:?}",
+        result.status
+    );
     // lotfi optimal: -2.5264706062E+01
     let expected = -25.264706062;
     assert!(
@@ -723,7 +958,11 @@ fn test_solve_lotfi() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "lotfi: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "lotfi: {} iterations",
+        result.iterations
+    );
     println!("lotfi solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -734,7 +973,10 @@ fn test_parse_israel() {
     let prob = parse_mps_file(Path::new("tests/netlib/israel.mps")).expect("parse failed");
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
-    println!("israel: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "israel: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -743,7 +985,12 @@ fn test_solve_israel() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "israel: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "israel: expected Optimal, got {:?}",
+        result.status
+    );
     // israel optimal: -8.9664482186E+05
     let expected = -896644.82186;
     assert!(
@@ -752,8 +999,15 @@ fn test_solve_israel() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "israel: {} iterations", result.iterations);
-    println!("israel solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "israel: {} iterations",
+        result.iterations
+    );
+    println!(
+        "israel solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- sctap1 ---
@@ -763,7 +1017,10 @@ fn test_parse_sctap1() {
     let prob = parse_mps_file(Path::new("tests/netlib/sctap1.mps")).expect("parse failed");
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
-    println!("sctap1: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "sctap1: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -772,7 +1029,12 @@ fn test_solve_sctap1() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "sctap1: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "sctap1: expected Optimal, got {:?}",
+        result.status
+    );
     // sctap1 optimal: 1.4122500000E+03
     let expected = 1412.25;
     assert!(
@@ -781,8 +1043,15 @@ fn test_solve_sctap1() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "sctap1: {} iterations", result.iterations);
-    println!("sctap1 solved: obj={}, time={:?}", result.objective, elapsed);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "sctap1: {} iterations",
+        result.iterations
+    );
+    println!(
+        "sctap1 solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- grow7 ---
@@ -793,9 +1062,15 @@ fn test_parse_grow7() {
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
     // grow7 uses BOUNDS (UP type)
-    let has_bounds = prob.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    let has_bounds = prob
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
     assert!(has_bounds, "grow7 should have non-default bounds");
-    println!("grow7: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "grow7: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -804,7 +1079,12 @@ fn test_solve_grow7() {
     let start = Instant::now();
     let result = solve_timed(&prob, 90);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "grow7: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "grow7: expected Optimal, got {:?}",
+        result.status
+    );
     // grow7 optimal: -4.7787811815E+07
     let expected = -47787811.815;
     assert!(
@@ -813,7 +1093,11 @@ fn test_solve_grow7() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "grow7: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "grow7: {} iterations",
+        result.iterations
+    );
     println!("grow7 solved: obj={}, time={:?}", result.objective, elapsed);
 }
 
@@ -823,13 +1107,23 @@ fn test_solve_grow7() {
 fn test_parse_pilot4() {
     // pilot4 uses PL (plus infinity upper bound) in its BOUNDS section.
     // BUG FIX: MPS parser previously rejected PL with "Invalid bound type: PL".
-    let prob = parse_mps_file(Path::new("tests/netlib/pilot4.mps")).expect("parse failed: PL bound type must be supported");
+    let prob = parse_mps_file(Path::new("tests/netlib/pilot4.mps"))
+        .expect("parse failed: PL bound type must be supported");
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
     // pilot4 uses PL bounds (upper = +inf) and FX/FR bounds
-    let has_bounds = prob.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
-    assert!(has_bounds, "pilot4 should have non-default bounds (LO/FX/FR)");
-    println!("pilot4: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    let has_bounds = prob
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    assert!(
+        has_bounds,
+        "pilot4 should have non-default bounds (LO/FX/FR)"
+    );
+    println!(
+        "pilot4: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -838,7 +1132,12 @@ fn test_solve_pilot4() {
     let start = Instant::now();
     let result = solve_timed(&prob, 180);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "pilot4: expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "pilot4: expected Optimal, got {:?}",
+        result.status
+    );
     // pilot4 optimal: -2.5811392641E+03 (LP relaxation)
     let expected = -2581.1392641;
     assert!(
@@ -847,13 +1146,24 @@ fn test_solve_pilot4() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "pilot4: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "pilot4: {} iterations",
+        result.iterations
+    );
     // Verify feasibility: pilot4 should have small constraint violation
     if !result.solution.is_empty() {
         let viol = max_constraint_violation(&result.solution, &prob);
-        assert!(viol < 1e-4, "pilot4: infeasible solution, max_viol={}", viol);
+        assert!(
+            viol < 1e-4,
+            "pilot4: infeasible solution, max_viol={}",
+            viol
+        );
     }
-    println!("pilot4 solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "pilot4 solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 // --- capri: presolve NumericalError regression ---
@@ -864,9 +1174,15 @@ fn test_parse_capri() {
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
     // capri uses BOUNDS (UP, FX, FR)
-    let has_bounds = prob.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    let has_bounds = prob
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
     assert!(has_bounds, "capri should have non-default bounds");
-    println!("capri: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "capri: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 #[test]
@@ -881,7 +1197,12 @@ fn test_solve_capri_no_presolve() {
     let start = Instant::now();
     let result = solve_with(&prob, &opts);
     let elapsed = start.elapsed();
-    assert_eq!(result.status, SolveStatus::Optimal, "capri (no presolve): expected Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "capri (no presolve): expected Optimal, got {:?}",
+        result.status
+    );
     // capri optimal: 2.6900129138E+03
     let expected = 2690.0129138;
     assert!(
@@ -890,12 +1211,19 @@ fn test_solve_capri_no_presolve() {
         expected,
         result.objective
     );
-    assert!(result.iterations < MAX_NETLIB_ITER, "capri: {} iterations", result.iterations);
+    assert!(
+        result.iterations < MAX_NETLIB_ITER,
+        "capri: {} iterations",
+        result.iterations
+    );
     if !result.solution.is_empty() {
         let viol = max_constraint_violation(&result.solution, &prob);
         assert!(viol < 1e-4, "capri: infeasible solution, max_viol={}", viol);
     }
-    println!("capri (no presolve) solved: obj={}, time={:?}", result.objective, elapsed);
+    println!(
+        "capri (no presolve) solved: obj={}, time={:?}",
+        result.objective, elapsed
+    );
 }
 
 /// BUG REGRESSION: capri with presolve ON incorrectly returned NumericalError.
@@ -919,14 +1247,17 @@ fn test_solve_capri_presolve_bug() {
         result.status,
         SolveStatus::Optimal,
         "capri (presolve ON) must return Optimal, got {:?} obj={:.4}",
-        result.status, result.objective
+        result.status,
+        result.objective
     );
     let expected_obj = 2690.012914;
     let rel = (result.objective - expected_obj).abs() / expected_obj.abs().max(1.0);
     assert!(
         rel < 1e-3,
         "capri (presolve ON) obj={:.4} expected ~{:.4} (rel_err={:.2e})",
-        result.objective, expected_obj, rel
+        result.objective,
+        expected_obj,
+        rel
     );
 }
 
@@ -938,12 +1269,21 @@ fn test_parse_boeing1() {
     assert!(prob.num_constraints > 0);
     assert!(prob.num_vars > 0);
     // boeing1: 351 rows + 90 RANGE splits = 441... but N row excluded = 440 constraints
-    assert_eq!(prob.num_constraints, 440, "boeing1: expected 440 constraints");
+    assert_eq!(
+        prob.num_constraints, 440,
+        "boeing1: expected 440 constraints"
+    );
     assert_eq!(prob.num_vars, 384, "boeing1: expected 384 vars");
     // boeing1 uses BOUNDS (UP/LO)
-    let has_bounds = prob.bounds.iter().any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
+    let has_bounds = prob
+        .bounds
+        .iter()
+        .any(|&(lo, hi)| lo != 0.0 || hi != f64::INFINITY);
     assert!(has_bounds, "boeing1 should have non-default bounds");
-    println!("boeing1: {} constraints, {} vars", prob.num_constraints, prob.num_vars);
+    println!(
+        "boeing1: {} constraints, {} vars",
+        prob.num_constraints, prob.num_vars
+    );
 }
 
 /// BUG REGRESSION: boeing1 solver reports Optimal but solution violates constraint MSLAXTPE
@@ -954,7 +1294,10 @@ fn test_parse_boeing1() {
 fn test_solve_boeing1_feasibility_bug() {
     let prob = parse_mps_file(Path::new("tests/netlib/boeing1.mps")).expect("parse failed");
     let result = solve(&prob);
-    println!("boeing1: status={:?}, obj={:.4} [expected Optimal ~-335.21]", result.status, result.objective);
+    println!(
+        "boeing1: status={:?}, obj={:.4} [expected Optimal ~-335.21]",
+        result.status, result.objective
+    );
 
     if !result.solution.is_empty() {
         let viol = max_constraint_violation(&result.solution, &prob);
@@ -994,7 +1337,10 @@ fn test_qbore3d_optimal() {
     );
     let problem = parse_qps(path).expect("Failed to parse QBORE3D.QPS");
     assert_eq!(problem.num_vars, 315, "QBORE3D: expected 315 vars");
-    assert_eq!(problem.num_constraints, 233, "QBORE3D: expected 233 constraints");
+    assert_eq!(
+        problem.num_constraints, 233,
+        "QBORE3D: expected 233 constraints"
+    );
 
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(60.0);

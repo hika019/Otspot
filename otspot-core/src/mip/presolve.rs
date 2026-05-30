@@ -136,7 +136,10 @@ mod tests {
         )
         .unwrap();
         let result = tighten_integer_bounds(&lp, &[true]);
-        assert!(result.is_none(), "x ≤ 3.7 ∧ x ≥ 3.5 integer → empty domain → None");
+        assert!(
+            result.is_none(),
+            "x ≤ 3.7 ∧ x ≥ 3.5 integer → empty domain → None"
+        );
     }
 
     /// Continuous variables are not rounded.
@@ -181,8 +184,16 @@ mod tests {
         )
         .unwrap();
         let bounds = tighten_integer_bounds(&lp, &[true, true]).expect("feasible");
-        assert!((bounds[0].1 - 5.0).abs() < 1e-9, "x ub must be 5, got {}", bounds[0].1);
-        assert!((bounds[1].1 - 5.0).abs() < 1e-9, "y ub must be 5, got {}", bounds[1].1);
+        assert!(
+            (bounds[0].1 - 5.0).abs() < 1e-9,
+            "x ub must be 5, got {}",
+            bounds[0].1
+        );
+        assert!(
+            (bounds[1].1 - 5.0).abs() < 1e-9,
+            "y ub must be 5, got {}",
+            bounds[1].1
+        );
     }
 
     /// Eq constraint tightens both lb and ub.
@@ -222,7 +233,8 @@ mod tests {
     #[test]
     fn tolerance_aware_floor_retains_boundary_integer() {
         let lp = single_var_lp(0.1, 0.3, ConstraintType::Le, (0.0, 5.0));
-        let bounds = tighten_integer_bounds(&lp, &[true]).expect("feasible: x=3 satisfies 0.1*3=0.3");
+        let bounds =
+            tighten_integer_bounds(&lp, &[true]).expect("feasible: x=3 satisfies 0.1*3=0.3");
         assert!(
             (bounds[0].1 - 3.0).abs() < 1e-9,
             "integer ub from 0.1*x<=0.3 must be 3 (not 2 from raw floor), got {}",
@@ -268,7 +280,10 @@ mod tests {
     fn eq_non_integer_rhs_integer_var_crossed_bounds_is_infeasible() {
         let lp = single_var_lp(1.0, 3.5, ConstraintType::Eq, (0.0, 10.0));
         let result = tighten_integer_bounds(&lp, &[true]);
-        assert!(result.is_none(), "x=3.5 integer → floor(3.5)=3 < ceil(3.5)=4 → infeasible");
+        assert!(
+            result.is_none(),
+            "x=3.5 integer → floor(3.5)=3 < ceil(3.5)=4 → infeasible"
+        );
     }
 
     /// Infinite upper bound of a variable blocks Ge-direction propagation.
@@ -293,6 +308,9 @@ mod tests {
         .unwrap();
         let bounds = tighten_integer_bounds(&lp, &[true, false]).expect("feasible");
         // x: rest_ub infinite (y_ub=∞) → skip → x lb stays 0
-        assert_eq!(bounds[0].0, 0.0, "x lb must stay 0 (Ge propagation skipped, y_ub=∞)");
+        assert_eq!(
+            bounds[0].0, 0.0,
+            "x lb must stay 0 (Ge propagation skipped, y_ub=∞)"
+        );
     }
 }

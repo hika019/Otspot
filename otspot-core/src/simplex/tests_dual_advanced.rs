@@ -134,4 +134,3 @@ fn test_dual_advanced_warm_start_larger_rhs() {
         result2_cold.objective
     );
 }
-

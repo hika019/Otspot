@@ -46,7 +46,10 @@ pub(crate) fn solve_ippmm_inner(
     }
 
     if problem.num_constraints == 0
-        && problem.bounds.iter().all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
+        && problem
+            .bounds
+            .iter()
+            .all(|&(lb, ub)| lb.is_infinite() && ub.is_infinite())
     {
         return solve_unconstrained(problem, &timeout_ctx);
     }
@@ -61,8 +64,15 @@ pub(crate) fn solve_ippmm_inner(
     let m_ineq = m_ext - eq_count;
 
     let init = build_initial_point(
-        problem, options, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext,
-        &timeout_ctx, par,
+        problem,
+        options,
+        &a_ext,
+        &b_ext,
+        &is_eq_ext,
+        m_orig,
+        m_ext,
+        &timeout_ctx,
+        par,
     );
     let (mut x, mut s, mut y, warm_mu) = (init.x, init.s, init.y, init.warm_mu);
 
@@ -168,10 +178,13 @@ pub(crate) fn solve_ippmm_inner(
 
         // μ = sᵀy / m_ineq (等式行除外)
         let mu: f64 = if m_ineq > 0 {
-            s.iter().zip(y.iter()).zip(is_eq_ext.iter())
+            s.iter()
+                .zip(y.iter())
+                .zip(is_eq_ext.iter())
                 .filter(|&(_, &eq)| !eq)
                 .map(|((&si, &yi), _)| si * yi)
-                .sum::<f64>() / m_ineq as f64
+                .sum::<f64>()
+                / m_ineq as f64
         } else {
             0.0
         };
@@ -197,9 +210,8 @@ pub(crate) fn solve_ippmm_inner(
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
         let norm_b_bs = norm_inf(&b_ext).max(1.0);
         if nr_p.is_finite() && nr_d.is_finite() && mu.is_finite() {
-            let score = nr_p / (1.0 + norm_b_bs)
-                + nr_d / (1.0 + norm_c_bs)
-                + mu.abs() / (1.0 + norm_c_bs);
+            let score =
+                nr_p / (1.0 + norm_b_bs) + nr_d / (1.0 + norm_c_bs) + mu.abs() / (1.0 + norm_c_bs);
             if score < best_score {
                 best_score = score;
                 best_x.copy_from_slice(&x);
@@ -225,7 +237,9 @@ pub(crate) fn solve_ippmm_inner(
             for i in 0..m_ext {
                 let denom_i = 1.0 + ax[i].abs() + b_ext[i].abs();
                 let rel_i = r_p[i].abs() / denom_i;
-                if rel_i > m { m = rel_i; }
+                if rel_i > m {
+                    m = rel_i;
+                }
             }
             m
         };
@@ -234,7 +248,9 @@ pub(crate) fn solve_ippmm_inner(
             for j in 0..n {
                 let denom_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs();
                 let rel_j = r_d[j].abs() / denom_j;
-                if rel_j > m { m = rel_j; }
+                if rel_j > m {
+                    m = rel_j;
+                }
             }
             m
         };
@@ -300,8 +316,15 @@ pub(crate) fn solve_ippmm_inner(
         };
         let factorize_outcome = factorize_kkt_with_retry(&fact_ctx, &mut factor_caches);
         let (mut fac, aug_mat, d_inv_opt, rho_retry) = match factorize_outcome {
-            FactorizeOutcome::Ok { factor, aug_mat, d_inv, rho_used,
-                                   retry_count, used_iterative, factorize_ns } => {
+            FactorizeOutcome::Ok {
+                factor,
+                aug_mat,
+                d_inv,
+                rho_used,
+                retry_count,
+                used_iterative,
+                factorize_ns,
+            } => {
                 total_factorize_ns += factorize_ns;
                 total_reg_retries += retry_count;
                 any_iterative |= used_iterative;
@@ -319,33 +342,50 @@ pub(crate) fn solve_ippmm_inner(
 
         let t_solve = std::time::Instant::now();
         let (pred, alpha, r_c_corr) = if use_schur {
-            let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
+            let d_inv = d_inv_opt
+                .as_ref()
+                .expect("d_inv must be set when use_schur");
             let pred = predictor_step_schur(
-                &s, &y, &is_eq_ext, m_ineq,
-                &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, d_inv, &a_ext, m_ext, mu,
+                &s, &y, &is_eq_ext, m_ineq, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
+                m_ext, mu,
             );
             let (alpha, r_c_corr) = corrector_step_schur(
-                &s, &y, &is_eq_ext,
-                &pred, mu,
-                &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, d_inv, &a_ext, m_ext,
-                &mut dx, &mut dy, &mut ds,
+                &s, &y, &is_eq_ext, &pred, mu, &r_d_pmm, &r_p_pmm, &sigma_vec, &fac, d_inv, &a_ext,
+                m_ext, &mut dx, &mut dy, &mut ds,
             );
             (pred, alpha, r_c_corr)
         } else {
             let pred = predictor_step(
-                &s, &y, &is_eq_ext, m_ineq,
-                &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, &aug_mat, n, m_ext, mu,
+                &s,
+                &y,
+                &is_eq_ext,
+                m_ineq,
+                &r_d_pmm,
+                &r_p_pmm,
+                &sigma_vec,
+                &fac,
+                &aug_mat,
+                n,
+                m_ext,
+                mu,
                 timeout_ctx.deadline,
             );
             let (alpha, r_c_corr) = corrector_step(
-                &s, &y, &is_eq_ext,
-                &pred, mu,
-                &r_d_pmm, &r_p_pmm,
-                &sigma_vec, &fac, &aug_mat, n, m_ext,
-                &mut dx, &mut dy, &mut ds,
+                &s,
+                &y,
+                &is_eq_ext,
+                &pred,
+                mu,
+                &r_d_pmm,
+                &r_p_pmm,
+                &sigma_vec,
+                &fac,
+                &aug_mat,
+                n,
+                m_ext,
+                &mut dx,
+                &mut dy,
+                &mut ds,
                 timeout_ctx.deadline,
             );
             (pred, alpha, r_c_corr)
@@ -354,22 +394,48 @@ pub(crate) fn solve_ippmm_inner(
         let mut alpha = alpha;
         if alpha < GONDZIO_ALPHA_TRIGGER {
             alpha = if use_schur {
-                let d_inv = d_inv_opt.as_ref().expect("d_inv must be set when use_schur");
+                let d_inv = d_inv_opt
+                    .as_ref()
+                    .expect("d_inv must be set when use_schur");
                 gondzio_correctors_schur(
-                    &s, &y, &is_eq_ext, m_ineq,
-                    &r_d_pmm, &r_p_pmm,
-                    &r_c_corr, &sigma_vec, &fac, d_inv, &a_ext, m_ext,
-                    options.ipm.max_correctors, alpha,
-                    &mut dx, &mut dy, &mut ds,
+                    &s,
+                    &y,
+                    &is_eq_ext,
+                    m_ineq,
+                    &r_d_pmm,
+                    &r_p_pmm,
+                    &r_c_corr,
+                    &sigma_vec,
+                    &fac,
+                    d_inv,
+                    &a_ext,
+                    m_ext,
+                    options.ipm.max_correctors,
+                    alpha,
+                    &mut dx,
+                    &mut dy,
+                    &mut ds,
                     timeout_ctx.deadline,
                 )
             } else {
                 gondzio_correctors(
-                    &s, &y, &is_eq_ext, m_ineq,
-                    &r_d_pmm, &r_p_pmm,
-                    &r_c_corr, &sigma_vec, &fac, &aug_mat, n, m_ext,
-                    options.ipm.max_correctors, alpha,
-                    &mut dx, &mut dy, &mut ds,
+                    &s,
+                    &y,
+                    &is_eq_ext,
+                    m_ineq,
+                    &r_d_pmm,
+                    &r_p_pmm,
+                    &r_c_corr,
+                    &sigma_vec,
+                    &fac,
+                    &aug_mat,
+                    n,
+                    m_ext,
+                    options.ipm.max_correctors,
+                    alpha,
+                    &mut dx,
+                    &mut dy,
+                    &mut ds,
                     timeout_ctx.deadline,
                 )
             };
@@ -378,7 +444,10 @@ pub(crate) fn solve_ippmm_inner(
         let _ = pred;
 
         // NaN/Inf または finite-but-huge は LDL blow-up とみなし best-so-far で復帰。
-        let direction_finite_but_huge = dx.iter().chain(dy.iter()).chain(ds.iter())
+        let direction_finite_but_huge = dx
+            .iter()
+            .chain(dy.iter())
+            .chain(ds.iter())
             .any(|v| v.is_finite() && v.abs() > DIRECTION_BLOWUP_THRESHOLD);
         if any_nonfinite(&dx)
             || any_nonfinite(&dy)
@@ -392,10 +461,9 @@ pub(crate) fn solve_ippmm_inner(
                 final_iter = best_iter;
                 final_residuals = Some(best_residuals);
                 let quality_threshold = 10.0 * eps_orig;
-                let combined_quasi = best_score < quality_threshold
-                    && best_rel_gap.abs() < DUALITY_GAP_TOL;
-                let feasibility_quasi = best_residuals.0 < eps_orig
-                    && best_residuals.1 < eps_orig;
+                let combined_quasi =
+                    best_score < quality_threshold && best_rel_gap.abs() < DUALITY_GAP_TOL;
+                let feasibility_quasi = best_residuals.0 < eps_orig && best_residuals.1 < eps_orig;
                 let is_quasi_optimal = combined_quasi || feasibility_quasi;
                 let exit_status = if is_quasi_optimal {
                     SolveStatus::Optimal
@@ -413,9 +481,9 @@ pub(crate) fn solve_ippmm_inner(
         // check_infeasible_or_unbounded は Newton 方向の Farkas-like 近似なので
         // PMM floor 起因の false-positive がありうる。best-so-far がある間は信用せず、
         // best が無い時のみ Infeasible/Unbounded を確定とみなす。
-        if let Some(infeas_status) = check_infeasible_or_unbounded(
-            &dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry,
-        ) {
+        if let Some(infeas_status) =
+            check_infeasible_or_unbounded(&dx, &dy, problem, &a_ext, m_orig, m_ext, iter, rho_retry)
+        {
             consecutive_infeas_triggers += 1;
             let quality_threshold = 10.0 * eps_orig;
             if best_score.is_finite()
@@ -460,9 +528,21 @@ pub(crate) fn solve_ippmm_inner(
         let nx_safe = x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ny_safe = y.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
         let ns_safe = s.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1.0);
-        let alpha_x_cap = if ndx > 0.0 { (STEP_REL_CAP * nx_safe / ndx).min(1.0) } else { 1.0 };
-        let alpha_y_cap = if ndy > 0.0 { (STEP_REL_CAP * ny_safe / ndy).min(1.0) } else { 1.0 };
-        let alpha_s_cap = if nds > 0.0 { (STEP_REL_CAP * ns_safe / nds).min(1.0) } else { 1.0 };
+        let alpha_x_cap = if ndx > 0.0 {
+            (STEP_REL_CAP * nx_safe / ndx).min(1.0)
+        } else {
+            1.0
+        };
+        let alpha_y_cap = if ndy > 0.0 {
+            (STEP_REL_CAP * ny_safe / ndy).min(1.0)
+        } else {
+            1.0
+        };
+        let alpha_s_cap = if nds > 0.0 {
+            (STEP_REL_CAP * ns_safe / nds).min(1.0)
+        } else {
+            1.0
+        };
         let alpha_tr = alpha_x_cap.min(alpha_y_cap).min(alpha_s_cap);
         let alpha = alpha.min(alpha_tr);
 
@@ -483,9 +563,7 @@ pub(crate) fn solve_ippmm_inner(
             && best_score.is_finite()
             && pmm.rho <= reg_limit * 1.01
             && pmm.delta <= reg_limit * 1.01;
-        if alpha_stall_count >= ALPHA_STALL_N
-            && (alpha_stall_converged || alpha_stall_deadlock)
-        {
+        if alpha_stall_count >= ALPHA_STALL_N && (alpha_stall_converged || alpha_stall_deadlock) {
             x.copy_from_slice(&best_x);
             y.copy_from_slice(&best_y);
             s.copy_from_slice(&best_s);
@@ -511,10 +589,13 @@ pub(crate) fn solve_ippmm_inner(
 
         // Algorithm PEU Step 0: r = |μ_k − μ_{k+1}| / μ_k (corrector + line search 後の実 μ)。
         let mu_new: f64 = if m_ineq > 0 {
-            s.iter().zip(y.iter()).zip(is_eq_ext.iter())
+            s.iter()
+                .zip(y.iter())
+                .zip(is_eq_ext.iter())
                 .filter(|&(_, &eq)| !eq)
                 .map(|((&si, &yi), _)| si * yi)
-                .sum::<f64>() / m_ineq as f64
+                .sum::<f64>()
+                / m_ineq as f64
         } else {
             0.0
         };
@@ -529,7 +610,11 @@ pub(crate) fn solve_ippmm_inner(
         const MU_RATE_EQ: f64 = 0.9;
         const MU_RATE_MIN: f64 = 0.2;
         const MU_RATE_MAX: f64 = 0.9;
-        let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD { MU_RATE_EQ } else { r };
+        let mu_rate_raw = if mu < MU_ZERO_THRESHOLD && mu_new < MU_ZERO_THRESHOLD {
+            MU_RATE_EQ
+        } else {
+            r
+        };
         let mu_rate = mu_rate_raw.clamp(MU_RATE_MIN, MU_RATE_MAX);
 
         pf_history.push(nr_p);
@@ -541,7 +626,9 @@ pub(crate) fn solve_ippmm_inner(
         if (pmm.rho - reg_limit).abs() < reg_limit * 0.01 && reg_limit > REG_LIMIT_MIN {
             let mut should_lower = false;
             if allow_adaptive_reg {
-                let prox_d_inf = x.iter().zip(pmm.x_ref.iter())
+                let prox_d_inf = x
+                    .iter()
+                    .zip(pmm.x_ref.iter())
                     .map(|(&xi, &xref)| (pmm.rho * (xi - xref)).abs())
                     .fold(0.0_f64, f64::max);
                 if prox_d_inf > nr_d * PROX_DOMINATE_RATIO && nr_d > 0.0 {
@@ -574,7 +661,11 @@ pub(crate) fn solve_ippmm_inner(
         let box_only = m_orig == 0;
         let both_improved = primal_improved && dual_improved;
         let either_improved = primal_improved || dual_improved;
-        let use_fast_rate = if box_only { both_improved } else { either_improved };
+        let use_fast_rate = if box_only {
+            both_improved
+        } else {
+            either_improved
+        };
         // Update reference point whenever at least one residual improved.
         if either_improved {
             pmm.y_ref.copy_from_slice(&y);
@@ -582,10 +673,10 @@ pub(crate) fn solve_ippmm_inner(
         }
         if use_fast_rate {
             pmm.delta = (pmm.delta * (1.0 - mu_rate)).max(reg_limit);
-            pmm.rho   = (pmm.rho   * (1.0 - mu_rate)).max(reg_limit);
+            pmm.rho = (pmm.rho * (1.0 - mu_rate)).max(reg_limit);
         } else {
             pmm.delta = (pmm.delta * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
-            pmm.rho   = (pmm.rho   * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
+            pmm.rho = (pmm.rho * (1.0 - PMM_SLOW_RATE * mu_rate)).max(reg_limit);
         }
 
         pmm.prev_nr_p = nr_p;
@@ -595,8 +686,7 @@ pub(crate) fn solve_ippmm_inner(
     let status = status.unwrap_or(SolveStatus::Timeout);
 
     // 素の Timeout 経路は発散 x をそのまま返してしまうので best-so-far で上書き。
-    if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations)
-        && best_score.is_finite()
+    if matches!(status, SolveStatus::Timeout | SolveStatus::MaxIterations) && best_score.is_finite()
     {
         let norm_b_bs = norm_inf(&b_ext).max(1.0);
         let norm_c_bs = norm_inf(&problem.c).max(1.0);
@@ -617,8 +707,16 @@ pub(crate) fn solve_ippmm_inner(
 
     spmv(&problem.q, &x, &mut qx);
     let objective = 0.5
-        * qx.iter().zip(x.iter()).map(|(&qi, &xi)| qi * xi).sum::<f64>()
-        + problem.c.iter().zip(x.iter()).map(|(&ci, &xi)| ci * xi).sum::<f64>();
+        * qx.iter()
+            .zip(x.iter())
+            .map(|(&qi, &xi)| qi * xi)
+            .sum::<f64>()
+        + problem
+            .c
+            .iter()
+            .zip(x.iter())
+            .map(|(&ci, &xi)| ci * xi)
+            .sum::<f64>();
 
     let dual_solution = collapse_extended_dual(&y, m_orig, &problem.constraint_types);
     let bound_duals = y[m_orig..].to_vec();
@@ -648,9 +746,12 @@ pub(crate) fn solve_ippmm_inner(
         iterations: final_iter,
         final_residuals,
         // best-so-far の rel gap。unscale_ipm_result の昇格ゲート用。
-        duality_gap_rel: if best_rel_gap.is_finite() { Some(best_rel_gap) } else { None },
+        duality_gap_rel: if best_rel_gap.is_finite() {
+            Some(best_rel_gap)
+        } else {
+            None
+        },
         timing_breakdown: Some(ipm_timing),
         ..Default::default()
     }
 }
-

@@ -31,12 +31,12 @@
 //! - `kkt_sign_convention_mini_qp`: 解析解持ち convex mini QP で kkt < 1e-6 を
 //!   assert。符号規約 (`lb_dual / ub_dual / y / Q*x` の組合せ) を独立検証。
 
-use otspot_dev::bench_utils::compute_qp_kkt_max;
 use otspot::io::qplib::{parse_qplib, QplibProblem};
 use otspot::options::SolverOptions;
 use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::kkt_resid::{self, f64_impl};
 use otspot::qp::{solve_qp_with, QpProblem};
+use otspot_dev::bench_utils::compute_qp_kkt_max;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -150,7 +150,12 @@ fn compute_kkt(prob: &QpProblem, x: &[f64], y: &[f64], bd: &[f64]) -> KktResidua
         }
     }
 
-    KktResidual { stationarity: stat, primal_inf: prim, comp_ineq, comp_bound }
+    KktResidual {
+        stationarity: stat,
+        primal_inf: prim,
+        comp_ineq,
+        comp_bound,
+    }
 }
 
 fn load_global_refs() -> HashMap<String, f64> {
@@ -196,7 +201,10 @@ struct ProbeRecord {
 fn solve_and_log(path: &Path, global_ref: Option<f64>) -> ProbeRecord {
     let prob = match parse_qplib(path).expect("parse") {
         QplibProblem::Qp(p) => p,
-        other => panic!("expected continuous QP for nonconvex benchmark, got {:?}", other),
+        other => panic!(
+            "expected continuous QP for nonconvex benchmark, got {:?}",
+            other
+        ),
     };
     let mut opts = SolverOptions::default();
     opts.timeout_secs = Some(TIMEOUT_PER_PROBLEM_SECS);
@@ -214,33 +222,71 @@ fn solve_and_log(path: &Path, global_ref: Option<f64>) -> ProbeRecord {
         }
     };
     let gap_to_global = global_ref.map(|gr| (res.objective - gr).abs() / (1.0 + gr.abs()));
-    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string();
     let gap_str = gap_to_global
         .map(|g| format!(" gap_to_global={:.3e}", g))
         .unwrap_or_else(|| " gap_to_global=—".into());
     eprintln!(
         "[nonconvex_kkt] {:<32} n={:<5} m={:<5} status={:?} obj={:.6e} \
          kkt(stat={:.2e} prim={:.2e} comp_i={:.2e} comp_b={:.2e}) wall={:.2}s{}",
-        name, prob.num_vars, prob.num_constraints, res.status, res.objective,
-        kkt.stationarity, kkt.primal_inf, kkt.comp_ineq, kkt.comp_bound, wall, gap_str,
+        name,
+        prob.num_vars,
+        prob.num_constraints,
+        res.status,
+        res.objective,
+        kkt.stationarity,
+        kkt.primal_inf,
+        kkt.comp_ineq,
+        kkt.comp_bound,
+        wall,
+        gap_str,
     );
-    ProbeRecord { name, status: res.status, objective: res.objective, kkt, gap_to_global }
+    ProbeRecord {
+        name,
+        status: res.status,
+        objective: res.objective,
+        kkt,
+        gap_to_global,
+    }
 }
 
 fn collect_all() -> Vec<ProbeRecord> {
     let synth = list_qplib(Path::new(SYNTH_DIR));
     let official = list_qplib(Path::new(OFFICIAL_DIR));
-    assert_eq!(synth.len(), 45, "expected 45 synthetic nonconvex (got {})", synth.len());
-    assert_eq!(official.len(), 4, "expected 4 official nonconvex (got {})", official.len());
+    assert_eq!(
+        synth.len(),
+        45,
+        "expected 45 synthetic nonconvex (got {})",
+        synth.len()
+    );
+    assert_eq!(
+        official.len(),
+        4,
+        "expected 4 official nonconvex (got {})",
+        official.len()
+    );
     let refs = load_global_refs();
-    assert_eq!(refs.len(), 4, "expected 4 official global ref entries (got {})", refs.len());
+    assert_eq!(
+        refs.len(),
+        4,
+        "expected 4 official global ref entries (got {})",
+        refs.len()
+    );
 
     let mut records = Vec::with_capacity(synth.len() + official.len());
     for p in &synth {
         records.push(solve_and_log(p, None));
     }
     for p in &official {
-        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         records.push(solve_and_log(p, refs.get(&name).copied()));
     }
     records
@@ -317,12 +363,18 @@ fn nonconvex_kkt_all_49_problems() {
 
     eprintln!(
         "[nonconvex_kkt] summary: Optimal={} LocallyOptimal={} Suboptimal={} other={} (total={})",
-        n_optimal, n_local, n_subopt, n_other, records.len(),
+        n_optimal,
+        n_local,
+        n_subopt,
+        n_other,
+        records.len(),
     );
     if !optimal_stat_warns.is_empty() {
         eprintln!(
             "[nonconvex_kkt] WARN: {} Optimal-claim 解で元空間 stationarity > {:.0e}:\n  {}",
-            optimal_stat_warns.len(), EPS_KKT, optimal_stat_warns.join("\n  ")
+            optimal_stat_warns.len(),
+            EPS_KKT,
+            optimal_stat_warns.join("\n  ")
         );
     }
     // 公式 4 件の gap_to_global を専用 log 行に集約 (Phase 2/3 baseline)。
@@ -374,7 +426,11 @@ fn kkt_perturbation_sentinel() {
     let base = compute_kkt(&prob, &res.solution, &res.dual_solution, &res.bound_duals);
     eprintln!(
         "[sentinel] base kkt: stat={:.2e} prim={:.2e} comp_i={:.2e} comp_b={:.2e} (max={:.2e})",
-        base.stationarity, base.primal_inf, base.comp_ineq, base.comp_bound, base.max(),
+        base.stationarity,
+        base.primal_inf,
+        base.comp_ineq,
+        base.comp_bound,
+        base.max(),
     );
 
     assert!(!res.solution.is_empty(), "solver returned empty solution");
@@ -391,7 +447,8 @@ fn kkt_perturbation_sentinel() {
         max_p >= SENTINEL_MIN_KKT,
         "sentinel broken: perturbed kkt_max={:.3e} < {:.0e}; \
          compute_kkt が no-op 化されていないか確認",
-        max_p, SENTINEL_MIN_KKT,
+        max_p,
+        SENTINEL_MIN_KKT,
     );
 }
 
@@ -413,7 +470,8 @@ fn kkt_consistency_with_bench_utils() {
     let bu_max = compute_qp_kkt_max(&prob, &res.solution, &res.dual_solution, &res.bound_duals);
     let test_max = k.max();
     eprintln!(
-        "[kkt_consistency] test_max={:.3e} bench_utils_max={:.3e}", test_max, bu_max
+        "[kkt_consistency] test_max={:.3e} bench_utils_max={:.3e}",
+        test_max, bu_max
     );
     // 両者は規約等価なので相対差 < 1e-12 (浮動小数 round-off 内)。
     let diff = (test_max - bu_max).abs();
@@ -450,5 +508,9 @@ fn kkt_sign_convention_mini_qp() {
         "[sign-conv] mini convex QP kkt: stat={:.2e} prim={:.2e} comp_i={:.2e} comp_b={:.2e}",
         k.stationarity, k.primal_inf, k.comp_ineq, k.comp_bound,
     );
-    assert!(k.max() < 1e-6, "convex mini QP must give near-zero KKT, got {:.3e}", k.max());
+    assert!(
+        k.max() < 1e-6,
+        "convex mini QP must give near-zero KKT, got {:.3e}",
+        k.max()
+    );
 }

@@ -3,8 +3,8 @@
 //! 基底行列 B の LU 分解を管理し、FTRAN・BTRAN ソルブと
 //! ピボット更新（eta ファイル）および定期的な再因子分解をサポートする。
 
-pub(crate) mod lu;
 pub(crate) mod eta;
+pub(crate) mod lu;
 pub(crate) mod refactor;
 
 #[cfg(test)]
@@ -68,7 +68,12 @@ impl LuBasis {
         Self::new_timed(a, basis, max_etas, None)
     }
 
-    pub fn new_timed(a: &CscMatrix, basis: &[usize], max_etas: usize, deadline: Option<std::time::Instant>) -> Result<Self, SolverError> {
+    pub fn new_timed(
+        a: &CscMatrix,
+        basis: &[usize],
+        max_etas: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Self, SolverError> {
         let lu = lu::LuFactorization::factorize_timed(a, basis, deadline)?;
         // max_etas == 0 を auto と解釈し m から動的計算 (CLAUDE.md 固定値排除)。
         let effective_max_etas = if max_etas == 0 {
@@ -99,7 +104,12 @@ impl LuBasis {
     ///
     /// 数値的に不安定なピボット（|pivot| / max_col が極めて小さい）の場合に
     /// 呼び出し元が使用する。成功すれば eta クリア + LU 更新、失敗は `refactor_failed = true`。
-    pub(crate) fn force_refactor_timed(&mut self, a: &CscMatrix, basis: &[usize], deadline: Option<Instant>) {
+    pub(crate) fn force_refactor_timed(
+        &mut self,
+        a: &CscMatrix,
+        basis: &[usize],
+        deadline: Option<Instant>,
+    ) {
         match refactor::refactor_timed(a, basis, deadline) {
             Ok(new_lu) => {
                 self.lu = new_lu;
@@ -123,7 +133,12 @@ impl LuBasis {
     /// refactor_if_needed の deadline 対応版。O(m²〜m³) の LU 再因子分解に
     /// deadline を渡すことで大規模 Simplex でのハングを防止する。
     /// 特異基底または deadline 超過どちらの場合も `refactor_failed = true` を設定する。
-    pub(crate) fn refactor_if_needed_timed(&mut self, a: &CscMatrix, basis: &[usize], deadline: Option<Instant>) {
+    pub(crate) fn refactor_if_needed_timed(
+        &mut self,
+        a: &CscMatrix,
+        basis: &[usize],
+        deadline: Option<Instant>,
+    ) {
         if self.eta_file.needs_refactor() {
             match refactor::refactor_timed(a, basis, deadline) {
                 Ok(new_lu) => {
@@ -179,8 +194,8 @@ impl BasisManager for LuBasis {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_utils::*;
+    use super::*;
 
     #[test]
     fn test_lu_basis_ftran_btran() {
@@ -268,7 +283,10 @@ mod tests {
         let mut lb = LuBasis::new(&a, &basis, 50).unwrap();
 
         // 初期状態ではrefactor不要
-        assert!(!lb.eta_file.needs_refactor(), "Initially should not need refactor");
+        assert!(
+            !lb.eta_file.needs_refactor(),
+            "Initially should not need refactor"
+        );
 
         // 50個のetaを追加（max_etas=50 → needs_refactor() が true になる）
         for i in 0..50 {
@@ -288,7 +306,11 @@ mod tests {
             !lb.eta_file.needs_refactor(),
             "After refactor, should not need refactor"
         );
-        assert_eq!(lb.eta_file.etas.len(), 0, "Etas should be cleared after refactor");
+        assert_eq!(
+            lb.eta_file.etas.len(),
+            0,
+            "Etas should be cleared after refactor"
+        );
 
         let rhs_orig = vec![3.0, 5.0, 3.0];
         let mut rhs_sv = SparseVec::from_dense(&rhs_orig);

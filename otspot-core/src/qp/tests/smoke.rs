@@ -23,23 +23,32 @@ fn test_qp_timing_breakdown_fields_populated() {
         let result = solve_qp_with(&problem, &opts);
 
         assert_eq!(result.status, SolveStatus::Optimal, "QP should converge");
-        let tb = result.timing_breakdown
+        let tb = result
+            .timing_breakdown
             .expect("timing_breakdown must be Some for QP IPM path");
 
         assert!(result.iterations > 0, "IPM should iterate");
-        assert!(tb.ipm_factorize_us > 0,
-            "ipm_factorize_us must be > 0 when IPM iterated (got {})", tb.ipm_factorize_us);
-        assert!(tb.ipm_solve_us > 0,
-            "ipm_solve_us must be > 0 when IPM iterated (got {})", tb.ipm_solve_us);
+        assert!(
+            tb.ipm_factorize_us > 0,
+            "ipm_factorize_us must be > 0 when IPM iterated (got {})",
+            tb.ipm_factorize_us
+        );
+        assert!(
+            tb.ipm_solve_us > 0,
+            "ipm_solve_us must be > 0 when IPM iterated (got {})",
+            tb.ipm_solve_us
+        );
 
         let postsolve_sum = tb.postsolve_map_us
             + tb.postsolve_lsq_us
             + tb.postsolve_recovery_us
             + tb.postsolve_refine_us
             + tb.postsolve_krylov_ir_us;
-        assert_eq!(tb.postsolve_us, postsolve_sum,
+        assert_eq!(
+            tb.postsolve_us, postsolve_sum,
             "postsolve_us ({}) must equal sum of sub-stages ({})",
-            tb.postsolve_us, postsolve_sum);
+            tb.postsolve_us, postsolve_sum
+        );
     }
 
     // ── ケース2: 境界制約つき QP (bound dual が出る) ─────────────────────────
@@ -49,15 +58,19 @@ fn test_qp_timing_breakdown_fields_populated() {
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         let b = vec![1.0];
         let bounds = vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)];
-        let problem = QpProblem::new(
-            q, c, a, b, bounds, vec![crate::problem::ConstraintType::Le],
-        ).unwrap();
+        let problem =
+            QpProblem::new(q, c, a, b, bounds, vec![crate::problem::ConstraintType::Le]).unwrap();
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
 
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "case 2: well-conditioned 2-var QP must converge to Optimal, got {:?}", result.status);
-        let tb = result.timing_breakdown
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "case 2: well-conditioned 2-var QP must converge to Optimal, got {:?}",
+            result.status
+        );
+        let tb = result
+            .timing_breakdown
             .expect("timing_breakdown must be Some for QP IPM path");
 
         let postsolve_sum = tb.postsolve_map_us
@@ -65,9 +78,11 @@ fn test_qp_timing_breakdown_fields_populated() {
             + tb.postsolve_recovery_us
             + tb.postsolve_refine_us
             + tb.postsolve_krylov_ir_us;
-        assert_eq!(tb.postsolve_us, postsolve_sum,
+        assert_eq!(
+            tb.postsolve_us, postsolve_sum,
             "postsolve_us ({}) must equal sum of sub-stages ({}) in case 2",
-            tb.postsolve_us, postsolve_sum);
+            tb.postsolve_us, postsolve_sum
+        );
     }
 
     // ── ケース3: 20 変数 QP — postsolve_us が μs 解像度で > 0 になることを確認 ─
@@ -81,7 +96,10 @@ fn test_qp_timing_breakdown_fields_populated() {
         let q = CscMatrix::from_triplets(&rows, &rows, &vals, n, n).unwrap();
         let c = vec![-1.0; n];
         // 3 つの不等式制約: sum(x_i) <= 12, x_0+x_1 <= 2, x_3+x_4 <= 2
-        let a_rows = vec![0usize; n].into_iter().chain([1, 1, 2, 2]).collect::<Vec<_>>();
+        let a_rows = vec![0usize; n]
+            .into_iter()
+            .chain([1, 1, 2, 2])
+            .collect::<Vec<_>>();
         let a_cols = (0..n).chain([0, 1, 3, 4]).collect::<Vec<_>>();
         let a_vals = vec![1.0f64; n + 4];
         let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 3, n).unwrap();
@@ -91,15 +109,26 @@ fn test_qp_timing_breakdown_fields_populated() {
         let opts = SolverOptions::default();
         let result = solve_qp_with(&problem, &opts);
 
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "case 3: 20-var well-conditioned QP must be Optimal, got {:?}", result.status);
-        let tb = result.timing_breakdown
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "case 3: 20-var well-conditioned QP must be Optimal, got {:?}",
+            result.status
+        );
+        let tb = result
+            .timing_breakdown
             .expect("timing_breakdown must be Some for 20-var QP");
 
         // IPM 計測が非ゼロ
-        assert!(result.iterations > 0, "IPM should iterate on 20-var problem");
-        assert!(tb.ipm_factorize_us > 0,
-            "ipm_factorize_us must be > 0 for 20-var QP (got {})", tb.ipm_factorize_us);
+        assert!(
+            result.iterations > 0,
+            "IPM should iterate on 20-var problem"
+        );
+        assert!(
+            tb.ipm_factorize_us > 0,
+            "ipm_factorize_us must be > 0 for 20-var QP (got {})",
+            tb.ipm_factorize_us
+        );
 
         // 合計 == 内訳の和
         let postsolve_sum = tb.postsolve_map_us
@@ -107,9 +136,11 @@ fn test_qp_timing_breakdown_fields_populated() {
             + tb.postsolve_recovery_us
             + tb.postsolve_refine_us
             + tb.postsolve_krylov_ir_us;
-        assert_eq!(tb.postsolve_us, postsolve_sum,
+        assert_eq!(
+            tb.postsolve_us, postsolve_sum,
             "postsolve_us ({}) must equal sum of sub-stages ({}) for 20-var QP",
-            tb.postsolve_us, postsolve_sum);
+            tb.postsolve_us, postsolve_sum
+        );
     }
 }
 
@@ -137,9 +168,8 @@ fn test_basic_qp_2vars() {
 fn test_qp_equality_constraint() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
-    let a =
-        CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
-            .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, -1.0, -1.0], 2, 2)
+        .unwrap();
     let b = vec![1.0, -1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -221,7 +251,13 @@ fn test_warm_start_consistency() {
         y: result1.dual_solution.clone(),
         mu: result1.final_residuals.map(|(_, _, g)| g).unwrap_or(1e-6),
     };
-    let result2 = solve_qp_with(&problem2, &crate::options::SolverOptions { warm_start_qp: Some(ws), ..crate::options::SolverOptions::default() });
+    let result2 = solve_qp_with(
+        &problem2,
+        &crate::options::SolverOptions {
+            warm_start_qp: Some(ws),
+            ..crate::options::SolverOptions::default()
+        },
+    );
 
     assert_eq!(result2.status, SolveStatus::Optimal);
     assert_close(result2.solution[0], 0.5, EPS, "x[0]");
@@ -272,9 +308,8 @@ fn test_qp_portfolio_markowitz() {
 /// Least Squares。
 #[test]
 fn test_qp_least_squares() {
-    let q =
-        CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[10.0, 8.0, 8.0, 10.0], 2, 2)
-            .unwrap();
+    let q = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[10.0, 8.0, 8.0, 10.0], 2, 2)
+        .unwrap();
     let c = vec![-28.0, -26.0];
     let a = CscMatrix::new(0, 2);
     let b_vec = vec![];
@@ -352,8 +387,12 @@ fn test_qp_box_constrained_upper_bound() {
     let problem = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
 
     let result = solve_qp(&problem);
-    assert_eq!(result.status, SolveStatus::Optimal,
-        "box-constrained upper-bound QP must be Optimal, got {:?}", result.status);
+    assert_eq!(
+        result.status,
+        SolveStatus::Optimal,
+        "box-constrained upper-bound QP must be Optimal, got {:?}",
+        result.status
+    );
     assert_close(result.solution[0], 1.0, EPS, "x[0]");
     assert_close(result.solution[1], 1.0, EPS, "x[1]");
     assert_close(result.objective, -6.0, EPS, "obj");
@@ -394,7 +433,8 @@ fn test_timeout_returns_timeout_status() {
     let result = solve_qp_with(&problem, &opts);
     assert!(
         result.status == SolveStatus::Timeout || result.status == SolveStatus::Optimal,
-        "got {:?}", result.status
+        "got {:?}",
+        result.status
     );
 }
 
@@ -446,9 +486,8 @@ fn test_qp_mixed_ge_le_defensive() {
     let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[2.0, 2.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
     // Row 0: x+y≥0.5 (Ge), Row 1: x-y≤1 (Le)
-    let a =
-        CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
-            .unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+        .unwrap();
     let b = vec![0.5, 1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
     let problem = QpProblem::new(

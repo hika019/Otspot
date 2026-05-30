@@ -4,27 +4,26 @@
 //! Dual Steepest Edge、Big-M Phase Iを備えたDual Simplexを提供する。
 //!
 
-
-use crate::basis::{BasisManager, LuBasis};
-use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
-use crate::problem::{LpProblem, SolveStatus, SolverResult};
-use crate::presolve::LpEquilibration;
-use crate::sparse::SparseVec;
-use super::{StandardForm, SimplexOutcome, extract_solution, extract_dual_info};
-use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
 use super::dual_common::outcome_to_result;
 use super::pricing::{DualLeavingStrategy, MostInfeasibleLeaving};
+use super::{build_bounded_standard_form, scale_upper_bounds, BoundedStandardForm};
+use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
+use crate::basis::{BasisManager, LuBasis};
+use crate::options::{DualPricing, SolverOptions, WarmStartBasis};
+use crate::presolve::LpEquilibration;
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
+use crate::sparse::SparseVec;
 use bounded_core::{
-    BoundedDualState, BoundedOutcome, extract_solution_bounded, extract_dual_info_bounded,
-    solve_bounded_dual, phase2_primal_bounded, iterate as bounded_iterate,
+    extract_dual_info_bounded, extract_solution_bounded, iterate as bounded_iterate,
+    phase2_primal_bounded, solve_bounded_dual, BoundedDualState, BoundedOutcome,
 };
 
+pub mod bound_flip;
 mod bounded_core;
 mod core;
 mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
-pub mod bound_flip;
 
 /// `options.dual_pricing` から DualLeavingStrategy を組み立てる。
 /// DSE 経路は m 個の重みを new() で初期化する (γ_i = 1, 識別基底想定)。
@@ -51,8 +50,11 @@ fn warm_basis_is_dual_feasible(
     m: usize,
     dual_tol: f64,
 ) -> bool {
-    let rc = super::dual_common::compute_reduced_costs(a, c, basis_mgr, is_basic, n_price, m, basis);
-    rc.iter().enumerate().all(|(j, &r)| is_basic[j] || r >= -dual_tol)
+    let rc =
+        super::dual_common::compute_reduced_costs(a, c, basis_mgr, is_basic, n_price, m, basis);
+    rc.iter()
+        .enumerate()
+        .all(|(j, &r)| is_basic[j] || r >= -dual_tol)
 }
 
 /// Dual Simplex強化版エントリポイント
@@ -67,9 +69,7 @@ pub(crate) fn solve_dual_advanced(
 ) -> SolverResult {
     // Bounded path: problems with finite upper bounds use BFRT-aware iteration.
     // Gate: Le-only (num_artificial == 0) and dispatch not disabled by test hook.
-    if !bounded_dispatch_disabled()
-        && problem.bounds.iter().any(|&(_, ub)| ub.is_finite())
-    {
+    if !bounded_dispatch_disabled() && problem.bounds.iter().any(|&(_, ub)| ub.is_finite()) {
         let bsf = build_bounded_standard_form(problem);
         if bsf.num_artificial == 0 {
             if let Some(result) = try_bounded(&bsf, problem, options) {
@@ -106,15 +106,27 @@ pub(crate) fn solve_dual_advanced(
                         v
                     };
                     if !warm_basis_is_dual_feasible(
-                        &a, &c, &mut basis_mgr, &basis, &is_basic,
-                        sf.n_total, m, options.dual_tol,
+                        &a,
+                        &c,
+                        &mut basis_mgr,
+                        &basis,
+                        &is_basic,
+                        sf.n_total,
+                        m,
+                        options.dual_tol,
                     ) {
                         // dual infeasible under new c → cold start
                     } else {
                         let mut leaving = make_leaving_strategy(options.dual_pricing, m);
                         let mut total_iters: usize = 0;
                         let outcome = core::dual_simplex_core_advanced(
-                            &a, &mut x_b, &c, &mut basis, m, sf.n_total, options,
+                            &a,
+                            &mut x_b,
+                            &c,
+                            &mut basis,
+                            m,
+                            sf.n_total,
+                            options,
                             leaving.as_mut(),
                             &mut total_iters,
                         );
@@ -156,9 +168,8 @@ pub(crate) fn solve_dual_advanced(
     let primal_result = super::dual::two_phase_dual_simplex(sf, problem, options);
     match primal_result.status {
         SolveStatus::Timeout if primal_result.solution.is_empty() => {
-            let bigm_result = phase1::big_m_cold_start(
-                sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
-            );
+            let bigm_result =
+                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {
                 // Both phases timed out: sum iterations for observability.
                 let mut r = primal_result;
@@ -178,9 +189,8 @@ pub(crate) fn solve_dual_advanced(
             //   - Big-M Optimal/feasible → pilot87-class false-Infeasible resolved
             //   - Big-M Infeasible (certified via Farkas) → true infeasible confirmed
             //   - Big-M Timeout → inconclusive; return Timeout, not the unverified Infeasible
-            let bigm_result = phase1::big_m_cold_start(
-                sf, problem, options, &a, &b, &c, &row_scale, &col_scale,
-            );
+            let bigm_result =
+                phase1::big_m_cold_start(sf, problem, options, &a, &b, &c, &row_scale, &col_scale);
             if bigm_result.status == SolveStatus::Timeout {
                 SolverResult {
                     status: SolveStatus::Timeout,
@@ -242,9 +252,7 @@ fn try_bounded(
     // starts from the legacy path have basis.len() == sf.m > bsf.m when UBs
     // are present, so they fall through to cold start automatically.
     if let Some(warm) = &options.warm_start {
-        if warm.basis.len() == bsf.m
-            && warm.basis.iter().all(|&idx| idx < bsf.n_total)
-        {
+        if warm.basis.len() == bsf.m && warm.basis.iter().all(|&idx| idx < bsf.n_total) {
             if let Ok(mut basis_mgr) = LuBasis::new(&a, &warm.basis, options.max_etas) {
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
@@ -267,8 +275,14 @@ fn try_bounded(
                 };
                 if !has_lb_violation
                     && warm_basis_is_dual_feasible(
-                        &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
-                        bsf.n_total, bsf.m, options.dual_tol,
+                        &a,
+                        &c,
+                        &mut basis_mgr,
+                        &warm.basis,
+                        &is_basic_bounded,
+                        bsf.n_total,
+                        bsf.m,
+                        options.dual_tol,
                     )
                 {
                     let state = BoundedDualState {
@@ -284,8 +298,17 @@ fn try_bounded(
                         bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
                     total_iters = dual_state.iterations;
                     let result = finish_bounded(
-                        dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
-                        problem, options, &mut total_iters,
+                        dual_out,
+                        dual_state,
+                        bsf,
+                        &a,
+                        &c,
+                        &row_scale,
+                        &col_scale,
+                        &ubs,
+                        problem,
+                        options,
+                        &mut total_iters,
                     );
                     if result.is_some() {
                         return result;
@@ -303,8 +326,17 @@ fn try_bounded(
         solve_bounded_dual(bsf, &a, &b, &c, options, &ubs, leaving.as_mut());
     total_iters = dual_state.iterations;
     finish_bounded(
-        dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
-        problem, options, &mut total_iters,
+        dual_out,
+        dual_state,
+        bsf,
+        &a,
+        &c,
+        &row_scale,
+        &col_scale,
+        &ubs,
+        problem,
+        options,
+        &mut total_iters,
     )
 }
 
@@ -353,10 +385,17 @@ fn finish_bounded(
         }
         BoundedOutcome::SingularBasis => Some(SolverResult::numerical_error()),
         BoundedOutcome::Optimal(_, _) => {
-            let (p2_out, p2_state) = phase2_primal_bounded(
-                bsf, dual_state, a, c, options, total_iters, ubs,
-            );
-            Some(finish_bounded_phase2(p2_out, p2_state, bsf, col_scale, row_scale, problem, *total_iters))
+            let (p2_out, p2_state) =
+                phase2_primal_bounded(bsf, dual_state, a, c, options, total_iters, ubs);
+            Some(finish_bounded_phase2(
+                p2_out,
+                p2_state,
+                bsf,
+                col_scale,
+                row_scale,
+                problem,
+                *total_iters,
+            ))
         }
     }
 }
@@ -449,7 +488,13 @@ fn cold_start_advanced(
     // Le-onlyでb≥0の場合、x_B=b≥0なので即座に終了（0反復）
     let mut total_iters: usize = 0;
     let phase1_outcome = core::dual_simplex_core_advanced(
-        a, &mut x_b, &c_perturbed, &mut basis, m, sf.n_total, options,
+        a,
+        &mut x_b,
+        &c_perturbed,
+        &mut basis,
+        m,
+        sf.n_total,
+        options,
         leaving.as_mut(),
         &mut total_iters,
     );
@@ -469,7 +514,14 @@ fn cold_start_advanced(
             };
         }
         SimplexOutcome::Timeout(_) => {
-            return super::timeout_result_with_incumbent(sf, problem, &basis, &x_b, col_scale, total_iters);
+            return super::timeout_result_with_incumbent(
+                sf,
+                problem,
+                &basis,
+                &x_b,
+                col_scale,
+                total_iters,
+            );
         }
         SimplexOutcome::SingularBasis => {
             return SolverResult::numerical_error();
@@ -483,8 +535,18 @@ fn cold_start_advanced(
     use super::pricing::SteepestEdgePricing;
     let mut pricing = SteepestEdgePricing::new(sf.n_total);
     let phase2_outcome = super::revised_simplex_core(
-        a, &mut x_b, c, b, &mut basis, m, sf.n_total, sf.n_total, &mut pricing, options,
-        &mut total_iters, false,
+        a,
+        &mut x_b,
+        c,
+        b,
+        &mut basis,
+        m,
+        sf.n_total,
+        sf.n_total,
+        &mut pricing,
+        options,
+        &mut total_iters,
+        false,
     );
 
     // Phase 2はPrimalなのでUnbounded=主非有界
@@ -494,7 +556,10 @@ fn cold_start_advanced(
             let solution = extract_solution(sf, &basis, &x_b, col_scale);
             let (dual_solution, reduced_costs, slack) =
                 extract_dual_info(sf, problem, &y, &solution, row_scale);
-            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
+            let ws = WarmStartBasis {
+                basis: basis.to_vec(),
+                x_b: x_b.to_vec(),
+            };
             SolverResult {
                 status: SolveStatus::Optimal,
                 objective: obj + sf.obj_offset,
@@ -531,9 +596,7 @@ fn cold_start_advanced(
                 ..Default::default()
             }
         }
-        SimplexOutcome::SingularBasis => {
-            SolverResult::numerical_error()
-        }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
     };
     result.iterations = total_iters;
     result
@@ -544,8 +607,8 @@ fn cold_start_advanced(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::options::SolverOptions;
+    use crate::problem::{ConstraintType, LpProblem, SolveStatus};
     use crate::simplex::dual_advanced::bound_flip::{
         bfrt_flip_invocations, reset_bfrt_flip_invocations,
     };
@@ -555,15 +618,18 @@ mod tests {
     /// Known optimal: x0=4, x1=2, obj=-6.
     fn lp_2x2_boxed() -> LpProblem {
         use crate::sparse::CscMatrix;
-        let a = CscMatrix::from_triplets(
-            &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2,
-        ).unwrap();
+        let a =
+            CscMatrix::from_triplets(&[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, -1.0], 2, 2)
+                .unwrap();
         LpProblem::new_general(
-            vec![-1.0, -1.0], a, vec![6.0, 2.0],
+            vec![-1.0, -1.0],
+            a,
+            vec![6.0, 2.0],
             vec![ConstraintType::Le, ConstraintType::Le],
             vec![(0.0, 4.0), (0.0, 4.0)],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// min -x0 - 3*x1, x0+x1 ≤ 5, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 2.
@@ -575,22 +641,28 @@ mod tests {
         use crate::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         LpProblem::new_general(
-            vec![-1.0, -3.0], a, vec![5.0],
+            vec![-1.0, -3.0],
+            a,
+            vec![5.0],
             vec![ConstraintType::Le],
             vec![(0.0, 4.0), (0.0, 2.0)],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn lp_no_ub() -> LpProblem {
         use crate::sparse::CscMatrix;
         let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
         LpProblem::new_general(
-            vec![1.0, 2.0], a, vec![5.0],
+            vec![1.0, 2.0],
+            a,
+            vec![5.0],
             vec![ConstraintType::Le],
             vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
             None,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// **Flip > 0 sentinel**: solving a boxed LP via `solve_dual_advanced`
@@ -606,12 +678,21 @@ mod tests {
         reset_bfrt_flip_invocations();
         let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
         let flips = bfrt_flip_invocations();
-        assert_eq!(result.status, SolveStatus::Optimal,
-            "expected Optimal, got {:?}", result.status);
-        assert!((result.objective - (-9.0)).abs() < 1e-5,
-            "expected obj=-9, got {:.6e}", result.objective);
-        assert!(flips > 0,
-            "bfrt_wiring_flip_count_positive: flip count = 0, bounded path not exercised");
+        assert_eq!(
+            result.status,
+            SolveStatus::Optimal,
+            "expected Optimal, got {:?}",
+            result.status
+        );
+        assert!(
+            (result.objective - (-9.0)).abs() < 1e-5,
+            "expected obj=-9, got {:.6e}",
+            result.objective
+        );
+        assert!(
+            flips > 0,
+            "bfrt_wiring_flip_count_positive: flip count = 0, bounded path not exercised"
+        );
     }
 
     /// **No-op proof**: disabling bounded dispatch causes flip count = 0.
@@ -625,8 +706,10 @@ mod tests {
         let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
         let flips_disabled = bfrt_flip_invocations();
         set_bounded_dispatch_disabled(false);
-        assert_eq!(flips_disabled, 0,
-            "noop proof: expected 0 flips with bounded dispatch disabled, got {flips_disabled}");
+        assert_eq!(
+            flips_disabled, 0,
+            "noop proof: expected 0 flips with bounded dispatch disabled, got {flips_disabled}"
+        );
         assert_eq!(result.status, SolveStatus::Optimal);
     }
 
@@ -641,7 +724,11 @@ mod tests {
             let sf = build_standard_form(&lp);
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 1 status");
-            assert!((r.objective - (-6.0)).abs() < 1e-5, "pattern 1 obj={}", r.objective);
+            assert!(
+                (r.objective - (-6.0)).abs() < 1e-5,
+                "pattern 1 obj={}",
+                r.objective
+            );
         }
         // Pattern 2: flip-trigger LP — entering variable hits its UB before leaving
         // row. Flip count > 0 confirms the BFRT flip path in Phase 2 is reachable.
@@ -652,8 +739,15 @@ mod tests {
             let r = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
             let flips = bfrt_flip_invocations();
             assert_eq!(r.status, SolveStatus::Optimal, "pattern 2 status");
-            assert!((r.objective - (-9.0)).abs() < 1e-5, "pattern 2 obj={}", r.objective);
-            assert!(flips > 0, "pattern 2: flip count = 0, bounded path not exercised");
+            assert!(
+                (r.objective - (-9.0)).abs() < 1e-5,
+                "pattern 2 obj={}",
+                r.objective
+            );
+            assert!(
+                flips > 0,
+                "pattern 2: flip count = 0, bounded path not exercised"
+            );
         }
         // Pattern 3: no UBs → legacy path, no flip assertion.
         {
@@ -688,43 +782,68 @@ mod tests {
         let make_lp = |b: Vec<f64>| {
             LpProblem::new_general(
                 vec![-3.0, -1.0],
-                CscMatrix::from_triplets(
-                    &[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2,
-                ).unwrap(),
+                CscMatrix::from_triplets(&[0, 0, 1, 2], &[0, 1, 0, 1], &[1.0, 1.0, 1.0, 1.0], 3, 2)
+                    .unwrap(),
                 b,
                 vec![ConstraintType::Le, ConstraintType::Le, ConstraintType::Le],
                 vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
                 None,
-            ).unwrap()
+            )
+            .unwrap()
         };
 
         // Cold solve: b=[4,3,2], optimal x0=3, x1=1, obj=-10.
         let lp_orig = make_lp(vec![4.0, 3.0, 2.0]);
         let sf_orig = build_standard_form(&lp_orig);
         let r_cold = solve_dual_advanced(&sf_orig, &lp_orig, &SolverOptions::default());
-        assert_eq!(r_cold.status, SolveStatus::Optimal, "cold: {:?}", r_cold.status);
-        assert!((r_cold.objective - (-10.0)).abs() < OBJ_TOL,
-            "cold obj={:.6e} expected -10", r_cold.objective);
-        let warm = r_cold.warm_start_basis.expect("cold solve must return warm_start_basis");
+        assert_eq!(
+            r_cold.status,
+            SolveStatus::Optimal,
+            "cold: {:?}",
+            r_cold.status
+        );
+        assert!(
+            (r_cold.objective - (-10.0)).abs() < OBJ_TOL,
+            "cold obj={:.6e} expected -10",
+            r_cold.objective
+        );
+        let warm = r_cold
+            .warm_start_basis
+            .expect("cold solve must return warm_start_basis");
 
         // Perturbed LP: b=[1,3,2]. Warm basis has x1=-2 (lb-violation).
         // Dual simplex must repair and converge to x0=1, x1=0, obj=-3.
         let lp_p = make_lp(vec![1.0, 3.0, 2.0]);
         let sf_p = build_standard_form(&lp_p);
         let r_warm = solve_dual_advanced(
-            &sf_p, &lp_p,
-            &SolverOptions { warm_start: Some(warm), ..SolverOptions::default() },
+            &sf_p,
+            &lp_p,
+            &SolverOptions {
+                warm_start: Some(warm),
+                ..SolverOptions::default()
+            },
         );
-        assert_eq!(r_warm.status, SolveStatus::Optimal,
-            "warm re-solve: {:?} — guard still present?", r_warm.status);
-        assert!((r_warm.objective - (-3.0)).abs() < OBJ_TOL,
-            "warm re-solve obj={:.6e} expected -3", r_warm.objective);
+        assert_eq!(
+            r_warm.status,
+            SolveStatus::Optimal,
+            "warm re-solve: {:?} — guard still present?",
+            r_warm.status
+        );
+        assert!(
+            (r_warm.objective - (-3.0)).abs() < OBJ_TOL,
+            "warm re-solve obj={:.6e} expected -3",
+            r_warm.objective
+        );
 
         // Consistency: cold re-solve agrees.
         let r_cold_p = solve_dual_advanced(&sf_p, &lp_p, &SolverOptions::default());
         assert_eq!(r_cold_p.status, SolveStatus::Optimal);
-        assert!((r_cold_p.objective - r_warm.objective).abs() < OBJ_TOL,
-            "warm {:.6e} != cold {:.6e}", r_warm.objective, r_cold_p.objective);
+        assert!(
+            (r_cold_p.objective - r_warm.objective).abs() < OBJ_TOL,
+            "warm {:.6e} != cold {:.6e}",
+            r_warm.objective,
+            r_cold_p.objective
+        );
     }
 
     /// Warm start from a bounded-path solve is accepted and reused.
@@ -738,16 +857,33 @@ mod tests {
         let r1 = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
         let flips = bfrt_flip_invocations();
         assert_eq!(r1.status, SolveStatus::Optimal);
-        assert!(flips > 0,
-            "warm_start_reuse cold solve: flip count = 0, bounded path not exercised");
-        let ws = r1.warm_start_basis.expect("bounded path must return warm_start_basis");
-        let r2 = solve_dual_advanced(
-            &sf, &lp,
-            &SolverOptions { warm_start: Some(ws), ..SolverOptions::default() },
+        assert!(
+            flips > 0,
+            "warm_start_reuse cold solve: flip count = 0, bounded path not exercised"
         );
-        assert_eq!(r2.status, SolveStatus::Optimal, "warm restart: {:?}", r2.status);
-        assert!((r2.objective - r1.objective).abs() < 1e-5,
-            "warm restart obj drift: {} vs {}", r2.objective, r1.objective);
+        let ws = r1
+            .warm_start_basis
+            .expect("bounded path must return warm_start_basis");
+        let r2 = solve_dual_advanced(
+            &sf,
+            &lp,
+            &SolverOptions {
+                warm_start: Some(ws),
+                ..SolverOptions::default()
+            },
+        );
+        assert_eq!(
+            r2.status,
+            SolveStatus::Optimal,
+            "warm restart: {:?}",
+            r2.status
+        );
+        assert!(
+            (r2.objective - r1.objective).abs() < 1e-5,
+            "warm restart obj drift: {} vs {}",
+            r2.objective,
+            r1.objective
+        );
     }
 
     /// **Sentinel**: warm-start with a basis that is dual-infeasible under the
@@ -773,21 +909,34 @@ mod tests {
         let make_lp = |c: Vec<f64>| {
             let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
             LpProblem::new_general(
-                c, a, vec![3.0],
+                c,
+                a,
+                vec![3.0],
                 vec![ConstraintType::Le],
                 vec![(0.0, f64::INFINITY), (0.0, f64::INFINITY)],
                 None,
-            ).unwrap()
+            )
+            .unwrap()
         };
 
         // Cold solve LP1: optimal basis is {slack=col 2}, x_B=[3], obj=0.
         let lp1 = make_lp(vec![1.0, 1.0]);
         let sf1 = build_standard_form(&lp1);
         let r1 = solve_dual_advanced(&sf1, &lp1, &SolverOptions::default());
-        assert_eq!(r1.status, SolveStatus::Optimal, "LP1 cold solve: {:?}", r1.status);
-        assert!(r1.objective.abs() < OBJ_TOL,
-            "LP1 obj={:.6e} expected 0", r1.objective);
-        let ws = r1.warm_start_basis.expect("LP1 must return warm_start_basis");
+        assert_eq!(
+            r1.status,
+            SolveStatus::Optimal,
+            "LP1 cold solve: {:?}",
+            r1.status
+        );
+        assert!(
+            r1.objective.abs() < OBJ_TOL,
+            "LP1 obj={:.6e} expected 0",
+            r1.objective
+        );
+        let ws = r1
+            .warm_start_basis
+            .expect("LP1 must return warm_start_basis");
 
         // Warm-solve LP2: min -x0-x1 (cost flipped). The LP1 optimal warm basis
         // {slack} is dual-infeasible: r_x0=r_x1=-1 < 0 under LP2's cost.
@@ -795,18 +944,111 @@ mod tests {
         let lp2 = make_lp(vec![-1.0, -1.0]);
         let sf2 = build_standard_form(&lp2);
         let r2 = solve_dual_advanced(
-            &sf2, &lp2,
-            &SolverOptions { warm_start: Some(ws), ..SolverOptions::default() },
+            &sf2,
+            &lp2,
+            &SolverOptions {
+                warm_start: Some(ws),
+                ..SolverOptions::default()
+            },
         );
-        assert_eq!(r2.status, SolveStatus::Optimal,
-            "LP2 warm-solve status: {:?} (expected Optimal)", r2.status);
-        assert!((r2.objective - (-3.0)).abs() < OBJ_TOL,
-            "LP2 warm-solve obj={:.6e} expected -3 (got 0 = guard missing)", r2.objective);
+        assert_eq!(
+            r2.status,
+            SolveStatus::Optimal,
+            "LP2 warm-solve status: {:?} (expected Optimal)",
+            r2.status
+        );
+        assert!(
+            (r2.objective - (-3.0)).abs() < OBJ_TOL,
+            "LP2 warm-solve obj={:.6e} expected -3 (got 0 = guard missing)",
+            r2.objective
+        );
 
         // Consistency: cold re-solve of LP2 must agree.
         let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
         assert_eq!(r2_cold.status, SolveStatus::Optimal);
-        assert!((r2_cold.objective - r2.objective).abs() < OBJ_TOL,
-            "cold {:.6e} != warm {:.6e}", r2_cold.objective, r2.objective);
+        assert!(
+            (r2_cold.objective - r2.objective).abs() < OBJ_TOL,
+            "cold {:.6e} != warm {:.6e}",
+            r2_cold.objective,
+            r2.objective
+        );
+    }
+
+    /// **Sentinel**: warm basis from a previously-bounded solve must not mask
+    /// infeasibility when the next LP is genuinely infeasible.
+    ///
+    /// LP1: `min -x0 - 3x1, x0+x1 ≤ 5, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 2` → Optimal via
+    /// bounded dispatch (Le-only, finite UBs).
+    /// LP2: `min -x0 - 3x1, x0+x1 ≤ -1, same UBs` → Infeasible (x0,x1 ≥ 0
+    /// implies x0+x1 ≥ 0, but constraint requires ≤ -1).
+    ///
+    /// LP2 has `num_artificial != 0` (Le with negative RHS → row negation + slack
+    /// coeff = -1 → artificial), so the bounded dispatch gate (`bsf.num_artificial
+    /// == 0`) is bypassed for both cold and warm legs. Infeasibility is detected
+    /// by `two_phase_dual_simplex` returning a Farkas certificate. The warm basis
+    /// is therefore routed through the legacy warm path, and this sentinel guards
+    /// that the handoff does not mask the Farkas-Infeasible return.
+    ///
+    /// no-op proof: replacing the `SolveStatus::Infeasible` return in
+    /// `two_phase_dual_simplex` (the path actually taken for `num_artificial != 0`
+    /// Infeasible LPs) with `SolveStatus::Optimal` would cause this assertion to fail.
+    #[test]
+    fn warm_basis_from_bounded_dispatch_does_not_mask_farkas_infeasibility() {
+        use crate::sparse::CscMatrix;
+        const OBJ_TOL: f64 = 1e-6;
+
+        let make_lp = |b_rhs: f64| {
+            let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+            LpProblem::new_general(
+                vec![-1.0, -3.0],
+                a,
+                vec![b_rhs],
+                vec![ConstraintType::Le],
+                vec![(0.0, 4.0), (0.0, 2.0)],
+                None,
+            )
+            .unwrap()
+        };
+
+        // Cold solve LP1 via bounded dispatch (Le-only, finite UBs).
+        let lp1 = make_lp(5.0);
+        let sf1 = build_standard_form(&lp1);
+        let r1 = solve_dual_advanced(&sf1, &lp1, &SolverOptions::default());
+        assert_eq!(r1.status, SolveStatus::Optimal, "LP1 cold: {:?}", r1.status);
+        assert!(
+            (r1.objective - (-9.0)).abs() < OBJ_TOL,
+            "LP1 obj={:.6e} expected -9",
+            r1.objective
+        );
+        let warm = r1
+            .warm_start_basis
+            .expect("bounded cold solve must return warm_start_basis");
+
+        // LP2: x0+x1 ≤ -1 is infeasible since x0,x1 ≥ 0.
+        let lp2 = make_lp(-1.0);
+        let sf2 = build_standard_form(&lp2);
+        let r2 = solve_dual_advanced(
+            &sf2,
+            &lp2,
+            &SolverOptions {
+                warm_start: Some(warm),
+                ..SolverOptions::default()
+            },
+        );
+        assert_eq!(
+            r2.status,
+            SolveStatus::Infeasible,
+            "LP2 (x0+x1 ≤ -1, finite UBs) must be Infeasible; got {:?}",
+            r2.status
+        );
+
+        // Cold solve of LP2 must also return Infeasible.
+        let r2_cold = solve_dual_advanced(&sf2, &lp2, &SolverOptions::default());
+        assert_eq!(
+            r2_cold.status,
+            SolveStatus::Infeasible,
+            "LP2 cold: expected Infeasible, got {:?}",
+            r2_cold.status
+        );
     }
 }

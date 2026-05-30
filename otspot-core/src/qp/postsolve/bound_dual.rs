@@ -83,10 +83,7 @@ pub(crate) fn remap_bound_duals_to_orig(
 
 /// singleton column の停留性から row dual の feasible interval を作り、現在 y を射影する。
 /// unconstrained LSQ refine では one-sided bound 列で「非負 z で補正不能な y」が出るのを補正。
-pub(crate) fn project_duals_from_singleton_columns(
-    problem: &QpProblem,
-    result: &mut SolverResult,
-) {
+pub(crate) fn project_duals_from_singleton_columns(problem: &QpProblem, result: &mut SolverResult) {
     let Some((lower, upper)) = compute_dual_recovery_row_bounds(problem, &result.solution) else {
         return;
     };
@@ -127,7 +124,8 @@ pub(crate) fn zero_inactive_inequality_duals(problem: &QpProblem, result: &mut S
             crate::problem::ConstraintType::Ge => ax[i] - problem.b[i],
             crate::problem::ConstraintType::Eq => continue,
         };
-        let tol = dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
+        let tol =
+            dual_recovery_row_slack_tol(problem, i, ax[i], row_abs_activity[i], SLACK_TOL_REL);
         if slack > tol {
             result.dual_solution[i] = 0.0;
         }
@@ -309,14 +307,9 @@ mod tests {
         {
             let q = CscMatrix::new(1, 1);
             let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
-            let problem = QpProblem::new_all_le(
-                q,
-                vec![-2.0],
-                a,
-                vec![0.0],
-                vec![(0.0, f64::INFINITY)],
-            )
-            .unwrap();
+            let problem =
+                QpProblem::new_all_le(q, vec![-2.0], a, vec![0.0], vec![(0.0, f64::INFINITY)])
+                    .unwrap();
             let mut result = SolverResult {
                 status: SolveStatus::Optimal,
                 solution: vec![0.0],

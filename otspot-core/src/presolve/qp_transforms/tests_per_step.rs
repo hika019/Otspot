@@ -2,12 +2,14 @@
 //! (`steps_bounds`, `steps_free`, `steps_parallel`) is driven directly via the
 //! `Workspace` so a no-op rewrite of a step body produces an observable FAIL.
 
+use super::helpers::early_infeasibility_check;
 use super::state::{QpPostsolveStep, QpPresolveResult, QpPresolveStatus, Workspace};
 use super::steps_basic::step4_empty;
-use super::steps_bounds::{step9_singleton_ineq_to_bound, step10_implied_bounds, step11_dual_fixing};
+use super::steps_bounds::{
+    step10_implied_bounds, step11_dual_fixing, step9_singleton_ineq_to_bound,
+};
 use super::steps_free::step7_free_var;
 use super::steps_parallel::step8_parallel_row;
-use super::helpers::early_infeasibility_check;
 use crate::options::SolverOptions;
 use crate::presolve::qp_transforms::run_qp_presolve_phase1;
 use crate::problem::ConstraintType;
@@ -317,7 +319,10 @@ fn step8_parallel_le_drops_looser_row() {
     expect_ok(step8_parallel_row(&prob, &mut ws, None), "step8 ok");
     let removed: Vec<usize> = (0..2).filter(|&i| ws.removed_rows[i]).collect();
     assert_eq!(removed.len(), 1, "exactly one parallel row removed");
-    assert_eq!(removed[0], 0, "the looser Le row (#0 with eff_b=5 > 4) is dropped");
+    assert_eq!(
+        removed[0], 0,
+        "the looser Le row (#0 with eff_b=5 > 4) is dropped"
+    );
 }
 
 #[test]
@@ -339,7 +344,10 @@ fn step8_parallel_eq_same_b_removes_second() {
     );
     let mut ws = Workspace::from_problem(&prob);
     expect_ok(step8_parallel_row(&prob, &mut ws, None), "step8 ok");
-    assert!(ws.removed_rows[0] ^ ws.removed_rows[1], "exactly one row removed");
+    assert!(
+        ws.removed_rows[0] ^ ws.removed_rows[1],
+        "exactly one row removed"
+    );
 }
 
 #[test]
@@ -361,7 +369,10 @@ fn step8_parallel_eq_inconsistent_is_infeasible() {
     );
     let mut ws = Workspace::from_problem(&prob);
     let res = step8_parallel_row(&prob, &mut ws, None);
-    assert!(res.is_err(), "inconsistent parallel Eq pair must be Infeasible");
+    assert!(
+        res.is_err(),
+        "inconsistent parallel Eq pair must be Infeasible"
+    );
 }
 
 #[test]
@@ -401,10 +412,14 @@ fn step8_non_parallel_rows_untouched() {
 #[test]
 fn step4_empty_bounded_columns_positive_cost_fix_to_lb() {
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         2,
         vec![1.0, 1.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(0.0, 1.0), (-2.0, 5.0)],
@@ -412,22 +427,38 @@ fn step4_empty_bounded_columns_positive_cost_fix_to_lb() {
     );
     let mut ws = Workspace::from_problem(&prob);
     let res = step4_empty(&prob, &mut ws);
-    assert!(res.is_ok(), "bounded empty cols with c>0 → fix to lb, never Unbounded");
+    assert!(
+        res.is_ok(),
+        "bounded empty cols with c>0 → fix to lb, never Unbounded"
+    );
     assert!(ws.removed_cols[0] && ws.removed_cols[1]);
-    let pushed: Vec<_> = ws.postsolve_stack.steps.iter().filter(|s| matches!(s, QpPostsolveStep::EmptyCol { .. })).collect();
+    let pushed: Vec<_> = ws
+        .postsolve_stack
+        .steps
+        .iter()
+        .filter(|s| matches!(s, QpPostsolveStep::EmptyCol { .. }))
+        .collect();
     assert_eq!(pushed.len(), 2, "two EmptyCol steps pushed");
     // obj_offset = 1*0 + 1*(-2) = -2
-    assert!((ws.obj_offset - (-2.0)).abs() < 1e-12, "obj_offset = c·lb = -2, got {}", ws.obj_offset);
+    assert!(
+        (ws.obj_offset - (-2.0)).abs() < 1e-12,
+        "obj_offset = c·lb = -2, got {}",
+        ws.obj_offset
+    );
 }
 
 /// Negative cost, finite ub → fix to ub.
 #[test]
 fn step4_empty_bounded_columns_negative_cost_fix_to_ub() {
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         1,
         vec![-3.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(-10.0, 2.0)],
@@ -441,7 +472,11 @@ fn step4_empty_bounded_columns_negative_cost_fix_to_ub() {
         ws.postsolve_stack.steps.last(),
         Some(QpPostsolveStep::EmptyCol { idx: 0, val }) if (*val - 2.0).abs() < 1e-12
     );
-    assert!(val_ok, "val must be ub=2, got {:?}", ws.postsolve_stack.steps.last());
+    assert!(
+        val_ok,
+        "val must be ub=2, got {:?}",
+        ws.postsolve_stack.steps.last()
+    );
     assert!((ws.obj_offset - (-6.0)).abs() < 1e-12);
 }
 
@@ -449,10 +484,14 @@ fn step4_empty_bounded_columns_negative_cost_fix_to_ub() {
 #[test]
 fn step4_empty_zero_cost_finite_bounds_uses_lb() {
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         1,
         vec![0.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(3.0, 7.0)],
@@ -473,10 +512,14 @@ fn step4_empty_zero_cost_finite_bounds_uses_lb() {
 #[test]
 fn step4_empty_positive_cost_no_lower_bound_is_unbounded() {
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         1,
         vec![1.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(f64::NEG_INFINITY, 5.0)],
@@ -494,10 +537,14 @@ fn step4_empty_positive_cost_no_lower_bound_is_unbounded() {
 #[test]
 fn step4_empty_negative_cost_no_upper_bound_is_unbounded() {
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         1,
         vec![-2.5],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(0.0, f64::INFINITY)],
@@ -519,10 +566,14 @@ fn step4_empty_skips_when_q_nonzero_even_with_infinite_lb() {
     // Q[0,0]=2, c=+1, lb=-∞.  Quadratic term keeps it bounded;
     // step4_empty must NOT enter the empty-col Unbounded check.
     let prob = make_qp(
-        &[0], &[0], &[2.0],
+        &[0],
+        &[0],
+        &[2.0],
         1,
         vec![1.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
@@ -530,7 +581,10 @@ fn step4_empty_skips_when_q_nonzero_even_with_infinite_lb() {
     );
     let mut ws = Workspace::from_problem(&prob);
     let res = step4_empty(&prob, &mut ws);
-    assert!(res.is_ok(), "Q-coupled col must NOT trip empty-col Unbounded");
+    assert!(
+        res.is_ok(),
+        "Q-coupled col must NOT trip empty-col Unbounded"
+    );
     assert!(!ws.removed_cols[0], "Q-coupled col must remain");
 }
 
@@ -540,17 +594,21 @@ fn step4_empty_skips_when_q_nonzero_even_with_infinite_lb() {
 fn phase1_bounded_empty_cols_are_feasible_not_unbounded() {
     // (cj, lb, ub, expected val pushed)
     let cases: [(f64, f64, f64, f64); 4] = [
-        ( 1.0, 0.0,  1.0, 0.0),  // c>0, both finite → val=lb
-        (-1.0, 0.0,  1.0, 1.0),  // c<0, both finite → val=ub
-        ( 0.0, 2.0,  3.0, 2.0),  // c=0, both finite → val=lb
-        ( 1.0, 4.0, f64::INFINITY, 4.0), // c>0, ub=+∞ but lb finite → val=lb (NOT unbounded)
+        (1.0, 0.0, 1.0, 0.0),           // c>0, both finite → val=lb
+        (-1.0, 0.0, 1.0, 1.0),          // c<0, both finite → val=ub
+        (0.0, 2.0, 3.0, 2.0),           // c=0, both finite → val=lb
+        (1.0, 4.0, f64::INFINITY, 4.0), // c>0, ub=+∞ but lb finite → val=lb (NOT unbounded)
     ];
     for (cj, lb, ub, expected_val) in cases {
         let prob = make_qp(
-            &[], &[], &[],
+            &[],
+            &[],
+            &[],
             1,
             vec![cj],
-            &[], &[], &[],
+            &[],
+            &[],
+            &[],
             0,
             vec![],
             vec![(lb, ub)],
@@ -565,7 +623,8 @@ fn phase1_bounded_empty_cols_are_feasible_not_unbounded() {
         assert!(
             (result.obj_offset - expected_offset).abs() < 1e-12,
             "case cj={cj} lb={lb} ub={ub}: obj_offset={} expected={}",
-            result.obj_offset, expected_offset
+            result.obj_offset,
+            expected_offset
         );
     }
 }
@@ -576,10 +635,14 @@ fn phase1_bounded_empty_cols_are_feasible_not_unbounded() {
 fn phase1_truly_unbounded_empty_cols_still_detected() {
     // Free var (-∞,+∞) with c=+1 is the canonical unbounded case for an empty col.
     let prob = make_qp(
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         1,
         vec![1.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
@@ -602,17 +665,29 @@ fn phase1_truly_unbounded_empty_cols_still_detected() {
 fn step9_le_pos_coeff_tightens_ub() {
     // x <= 3, x in [0, 10] → new ub = 3
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[1.0],
-        1, vec![3.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![3.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Le pos coeff");
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws, None),
+        "Le pos coeff",
+    );
     assert!(ws.removed_rows[0], "row must be absorbed");
-    assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub must be tightened to 3");
+    assert!(
+        (ws.bounds[0].1 - 3.0).abs() < 1e-12,
+        "ub must be tightened to 3"
+    );
 }
 
 /// Le singleton row with negative coefficient: -x <= -2 means x >= 2, tightens lower bound.
@@ -620,17 +695,30 @@ fn step9_le_pos_coeff_tightens_ub() {
 fn step9_le_neg_coeff_tightens_lb() {
     // -x <= -2 ↔ x >= 2, x in [0, 10] → new lb = 2
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[-1.0],
-        1, vec![-2.0],
+        &[0],
+        &[0],
+        &[-1.0],
+        1,
+        vec![-2.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Le neg coeff");
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws, None),
+        "Le neg coeff",
+    );
     assert!(ws.removed_rows[0], "row must be absorbed");
-    assert!((ws.bounds[0].0 - 2.0).abs() < 1e-12, "lb must be tightened to 2, got {}", ws.bounds[0].0);
+    assert!(
+        (ws.bounds[0].0 - 2.0).abs() < 1e-12,
+        "lb must be tightened to 2, got {}",
+        ws.bounds[0].0
+    );
 }
 
 /// Ge singleton row with positive coefficient: x >= 2, tightens lower bound.
@@ -638,17 +726,29 @@ fn step9_le_neg_coeff_tightens_lb() {
 fn step9_ge_pos_coeff_tightens_lb() {
     // x >= 2, x in [0, 10] → new lb = 2
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[1.0],
-        1, vec![2.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![2.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Ge],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Ge pos coeff");
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws, None),
+        "Ge pos coeff",
+    );
     assert!(ws.removed_rows[0], "row must be absorbed");
-    assert!((ws.bounds[0].0 - 2.0).abs() < 1e-12, "lb must be tightened to 2");
+    assert!(
+        (ws.bounds[0].0 - 2.0).abs() < 1e-12,
+        "lb must be tightened to 2"
+    );
 }
 
 /// Ge singleton row with negative coefficient: -x >= -3 ↔ x <= 3, tightens upper bound.
@@ -656,17 +756,30 @@ fn step9_ge_pos_coeff_tightens_lb() {
 fn step9_ge_neg_coeff_tightens_ub() {
     // -x >= -3 ↔ x <= 3, x in [0, 10] → new ub = 3
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[-1.0],
-        1, vec![-3.0],
+        &[0],
+        &[0],
+        &[-1.0],
+        1,
+        vec![-3.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Ge],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "Ge neg coeff");
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws, None),
+        "Ge neg coeff",
+    );
     assert!(ws.removed_rows[0], "row must be absorbed");
-    assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub must be tightened to 3, got {}", ws.bounds[0].1);
+    assert!(
+        (ws.bounds[0].1 - 3.0).abs() < 1e-12,
+        "ub must be tightened to 3, got {}",
+        ws.bounds[0].1
+    );
 }
 
 /// Infeasibility: Le constraint produces lb > ub after absorption.
@@ -674,10 +787,16 @@ fn step9_ge_neg_coeff_tightens_ub() {
 fn step9_le_infeasible_when_new_ub_below_lb() {
     // x <= -1, x in [0, 10] → new ub = -1 < lb = 0 → Infeasible
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[1.0],
-        1, vec![-1.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![-1.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Le],
     );
@@ -691,10 +810,16 @@ fn step9_le_infeasible_when_new_ub_below_lb() {
 fn step9_ge_infeasible_when_new_lb_above_ub() {
     // x >= 15, x in [0, 10] → new lb = 15 > ub = 10 → Infeasible
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0], &[0], &[1.0],
-        1, vec![15.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![15.0],
         vec![(0.0, 10.0)],
         vec![ConstraintType::Ge],
     );
@@ -708,15 +833,24 @@ fn step9_ge_infeasible_when_new_lb_above_ub() {
 fn step9_ignores_non_singleton_rows() {
     // x + y <= 5, x,y in [0, 10]
     let prob = make_qp(
-        &[], &[], &[], 2,
+        &[],
+        &[],
+        &[],
+        2,
         vec![0.0, 0.0],
-        &[0, 0], &[0, 1], &[1.0, 1.0],
-        1, vec![5.0],
+        &[0, 0],
+        &[0, 1],
+        &[1.0, 1.0],
+        1,
+        vec![5.0],
         vec![(0.0, 10.0), (0.0, 10.0)],
         vec![ConstraintType::Le],
     );
     let mut ws = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "non-singleton");
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws, None),
+        "non-singleton",
+    );
     assert!(!ws.removed_rows[0], "2-variable row must not be absorbed");
 }
 
@@ -725,16 +859,25 @@ fn step9_ignores_non_singleton_rows() {
 fn step9_box_constraints_both_absorbed() {
     // 2 rows: x <= 3 (Le) and x >= 1 (Ge), x FR
     let prob = make_qp(
-        &[], &[], &[], 1,
+        &[],
+        &[],
+        &[],
+        1,
         vec![0.0],
-        &[0, 1], &[0, 0], &[1.0, 1.0],
-        2, vec![3.0, 1.0],
+        &[0, 1],
+        &[0, 0],
+        &[1.0, 1.0],
+        2,
+        vec![3.0, 1.0],
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
         vec![ConstraintType::Le, ConstraintType::Ge],
     );
     let mut ws = Workspace::from_problem(&prob);
     expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws, None), "box");
-    assert!(ws.removed_rows[0] && ws.removed_rows[1], "both rows absorbed");
+    assert!(
+        ws.removed_rows[0] && ws.removed_rows[1],
+        "both rows absorbed"
+    );
     assert!((ws.bounds[0].0 - 1.0).abs() < 1e-12, "lb = 1");
     assert!((ws.bounds[0].1 - 3.0).abs() < 1e-12, "ub = 3");
 }
@@ -745,18 +888,30 @@ fn step9_box_constraints_both_absorbed() {
 fn step9_postsolve_stack_pushed_and_noop_proof() {
     // With step9 active: Le x<=3 absorbed → 1 step in stack.
     let prob = make_qp(
-        &[0], &[0], &[2.0], 1,
+        &[0],
+        &[0],
+        &[2.0],
+        1,
         vec![0.0],
-        &[0], &[0], &[1.0],
-        1, vec![3.0],
+        &[0],
+        &[0],
+        &[1.0],
+        1,
+        vec![3.0],
         vec![(f64::NEG_INFINITY, f64::INFINITY)],
         vec![ConstraintType::Le],
     );
 
     // Active run: step9 must absorb
     let mut ws_active = Workspace::from_problem(&prob);
-    expect_ok(step9_singleton_ineq_to_bound(&prob, &mut ws_active, None), "step9 active run");
-    let n_steps = ws_active.postsolve_stack.steps.iter()
+    expect_ok(
+        step9_singleton_ineq_to_bound(&prob, &mut ws_active, None),
+        "step9 active run",
+    );
+    let n_steps = ws_active
+        .postsolve_stack
+        .steps
+        .iter()
         .filter(|s| matches!(s, QpPostsolveStep::SingletonIneqToBound { .. }))
         .count();
     assert_eq!(n_steps, 1, "step9 must push SingletonIneqToBound");
@@ -765,8 +920,10 @@ fn step9_postsolve_stack_pushed_and_noop_proof() {
     std::env::set_var("QP_PRESOLVE_SKIP", "9");
     let result_noop = run_qp_presolve_phase1(&prob, &SolverOptions::default());
     std::env::remove_var("QP_PRESOLVE_SKIP");
-    assert_eq!(result_noop.reduced.num_constraints, 1,
-        "no-op: skip step9 must leave singleton Le row in constraint matrix");
+    assert_eq!(
+        result_noop.reduced.num_constraints, 1,
+        "no-op: skip step9 must leave singleton Le row in constraint matrix"
+    );
 }
 
 /// End-to-end: portfolio-like fixture with N FR variables, each bounded by a
@@ -786,24 +943,44 @@ fn step9_portfolio_fixture_reduces_all_ineq_rows() {
     let mut b = Vec::with_capacity(m);
     let mut cts = Vec::with_capacity(m);
     for i in 0..N {
-        a_rows.push(2 * i);     a_cols.push(i); a_vals.push(1.0);  b.push(1.0);  cts.push(ConstraintType::Le);
-        a_rows.push(2 * i + 1); a_cols.push(i); a_vals.push(-1.0); b.push(-0.1); cts.push(ConstraintType::Le);
+        a_rows.push(2 * i);
+        a_cols.push(i);
+        a_vals.push(1.0);
+        b.push(1.0);
+        cts.push(ConstraintType::Le);
+        a_rows.push(2 * i + 1);
+        a_cols.push(i);
+        a_vals.push(-1.0);
+        b.push(-0.1);
+        cts.push(ConstraintType::Le);
     }
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); N];
     let prob = make_qp(
-        &q_rows, &q_cols, &q_vals, N,
+        &q_rows,
+        &q_cols,
+        &q_vals,
+        N,
         vec![0.0; N],
-        &a_rows, &a_cols, &a_vals,
-        m, b, bounds, cts,
+        &a_rows,
+        &a_cols,
+        &a_vals,
+        m,
+        b,
+        bounds,
+        cts,
     );
     let result = run_qp_presolve_phase1(&prob, &SolverOptions::default());
-    assert_eq!(result.reduced.num_constraints, 0,
+    assert_eq!(
+        result.reduced.num_constraints, 0,
         "all 2N singleton ineq rows must be absorbed by step9, got {} remaining",
-        result.reduced.num_constraints);
+        result.reduced.num_constraints
+    );
     // Bounds must be finite after absorption
     for (lb, ub) in &result.reduced.bounds {
-        assert!(lb.is_finite() && ub.is_finite(),
-            "all bounds must be finite after absorption, got [{lb}, {ub}]");
+        assert!(
+            lb.is_finite() && ub.is_finite(),
+            "all bounds must be finite after absorption, got [{lb}, {ub}]"
+        );
     }
 }
 
@@ -814,15 +991,23 @@ fn step9_portfolio_fixture_reduces_all_ineq_rows() {
 fn early_check_does_not_flag_bounded_empty_cols() {
     // Q diag = -1 on a bounded var; m=0, but lb/ub finite.
     let prob = make_qp(
-        &[0], &[0], &[-1.0],
+        &[0],
+        &[0],
+        &[-1.0],
         1,
         vec![0.0],
-        &[], &[], &[],
+        &[],
+        &[],
+        &[],
         0,
         vec![],
         vec![(0.0, 1.0)],
         vec![],
     );
     let status = early_infeasibility_check(&prob);
-    assert!(status.is_none(), "bounded var must not trigger early Unbounded, got {:?}", status);
+    assert!(
+        status.is_none(),
+        "bounded var must not trigger early Unbounded, got {:?}",
+        status
+    );
 }

@@ -20,10 +20,7 @@ use super::standard_form::{
 const STRUCT_EPS: f64 = 1e-15;
 
 fn vec_close(a: &[f64], b: &[f64], eps: f64) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b.iter())
-            .all(|(&x, &y)| (x - y).abs() <= eps)
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(&x, &y)| (x - y).abs() <= eps)
 }
 
 fn csc_close(a: &CscMatrix, b: &CscMatrix, eps: f64) -> bool {
@@ -39,11 +36,23 @@ fn assert_structurally_equivalent(left: &StandardForm, right: &StandardForm) {
     assert_eq!(left.n_shifted, right.n_shifted, "n_shifted mismatch");
     assert_eq!(left.n_total, right.n_total, "n_total mismatch");
     assert_eq!(left.n_orig, right.n_orig, "n_orig mismatch");
-    assert_eq!(left.num_artificial, right.num_artificial, "num_artificial mismatch");
-    assert_eq!(left.initial_basis, right.initial_basis, "initial_basis mismatch");
-    assert_eq!(left.needs_artificial, right.needs_artificial, "needs_artificial mismatch");
+    assert_eq!(
+        left.num_artificial, right.num_artificial,
+        "num_artificial mismatch"
+    );
+    assert_eq!(
+        left.initial_basis, right.initial_basis,
+        "initial_basis mismatch"
+    );
+    assert_eq!(
+        left.needs_artificial, right.needs_artificial,
+        "needs_artificial mismatch"
+    );
     assert_eq!(left.row_negated, right.row_negated, "row_negated mismatch");
-    assert!((left.obj_offset - right.obj_offset).abs() <= STRUCT_EPS, "obj_offset mismatch");
+    assert!(
+        (left.obj_offset - right.obj_offset).abs() <= STRUCT_EPS,
+        "obj_offset mismatch"
+    );
     assert!(vec_close(&left.b, &right.b, STRUCT_EPS), "b mismatch");
     assert!(vec_close(&left.c, &right.c, STRUCT_EPS), "c mismatch");
     assert!(csc_close(&left.a, &right.a, STRUCT_EPS), "A mismatch");
@@ -53,7 +62,10 @@ fn assert_structurally_equivalent(left: &StandardForm, right: &StandardForm) {
         "orig_var_info len mismatch"
     );
     for (li, ri) in left.orig_var_info.iter().zip(right.orig_var_info.iter()) {
-        assert!((li.offset - ri.offset).abs() <= STRUCT_EPS, "orig_var_info offset");
+        assert!(
+            (li.offset - ri.offset).abs() <= STRUCT_EPS,
+            "orig_var_info offset"
+        );
         assert_eq!(li.new_vars, ri.new_vars, "orig_var_info new_vars");
     }
 }
@@ -163,7 +175,10 @@ fn bounded_form_records_finite_upper_for_boxed_vars() {
     let finite_count = (0..bsf.n_shifted)
         .filter(|&j| bsf.upper_bounds[j].is_finite())
         .count();
-    assert_eq!(finite_count, 2, "boxed + fixed should be the only finite uppers");
+    assert_eq!(
+        finite_count, 2,
+        "boxed + fixed should be the only finite uppers"
+    );
     // slack columns inherit +∞
     for j in bsf.n_shifted..bsf.n_total {
         assert!(bsf.upper_bounds[j].is_infinite());
@@ -184,7 +199,10 @@ fn bounded_form_has_no_ub_rows() {
     let bsf = build_bounded_standard_form(&lp);
     let sf = build_standard_form(&lp);
     assert_eq!(bsf.m, lp.num_constraints, "m must equal original m");
-    assert!(sf.m > bsf.m, "legacy must add UB rows; otherwise BSF brings no value");
+    assert!(
+        sf.m > bsf.m,
+        "legacy must add UB rows; otherwise BSF brings no value"
+    );
 }
 
 // ---------------------------------------------------------------------------

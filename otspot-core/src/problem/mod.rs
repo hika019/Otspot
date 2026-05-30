@@ -355,17 +355,26 @@ impl LpProblem {
         }
         for (i, &v) in c.iter().enumerate() {
             if !v.is_finite() {
-                return Err(SolverError::NonFiniteCoefficient { field: "c", index: i });
+                return Err(SolverError::NonFiniteCoefficient {
+                    field: "c",
+                    index: i,
+                });
             }
         }
         for (i, &v) in b.iter().enumerate() {
             if !v.is_finite() {
-                return Err(SolverError::NonFiniteCoefficient { field: "b", index: i });
+                return Err(SolverError::NonFiniteCoefficient {
+                    field: "b",
+                    index: i,
+                });
             }
         }
         for (i, &v) in a.values.iter().enumerate() {
             if !v.is_finite() {
-                return Err(SolverError::NonFiniteCoefficient { field: "A", index: i });
+                return Err(SolverError::NonFiniteCoefficient {
+                    field: "A",
+                    index: i,
+                });
             }
         }
         for (i, &(lb, ub)) in bounds.iter().enumerate() {
@@ -486,9 +495,12 @@ mod tests {
         assert!(result.solution.is_empty());
     }
 
-    fn make_lp(c: Vec<f64>, b: Vec<f64>, a_vals: Vec<f64>, bounds: Vec<(f64, f64)>)
-        -> Result<LpProblem, SolverError>
-    {
+    fn make_lp(
+        c: Vec<f64>,
+        b: Vec<f64>,
+        a_vals: Vec<f64>,
+        bounds: Vec<(f64, f64)>,
+    ) -> Result<LpProblem, SolverError> {
         let n = c.len();
         let m = b.len();
         let a = if a_vals.is_empty() {
@@ -505,7 +517,9 @@ mod tests {
     #[test]
     fn lp_valid_accepted() {
         let res = make_lp(
-            vec![1.0, 2.0], vec![5.0], vec![1.0, 1.0],
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![1.0, 1.0],
             vec![(0.0, f64::INFINITY), (0.0, 10.0)],
         );
         assert!(res.is_ok());
@@ -515,10 +529,17 @@ mod tests {
     fn lp_nan_in_c_rejected() {
         let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
         for bad in bad_vals {
-            let res = make_lp(vec![bad, 1.0], vec![5.0], vec![1.0, 1.0],
-                              vec![(0.0, f64::INFINITY); 2]);
+            let res = make_lp(
+                vec![bad, 1.0],
+                vec![5.0],
+                vec![1.0, 1.0],
+                vec![(0.0, f64::INFINITY); 2],
+            );
             assert!(
-                matches!(res, Err(SolverError::NonFiniteCoefficient { field: "c", .. })),
+                matches!(
+                    res,
+                    Err(SolverError::NonFiniteCoefficient { field: "c", .. })
+                ),
                 "expected NonFiniteCoefficient for c={bad}"
             );
         }
@@ -528,10 +549,17 @@ mod tests {
     fn lp_nan_in_b_rejected() {
         let bad_vals = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
         for bad in bad_vals {
-            let res = make_lp(vec![1.0, 2.0], vec![bad], vec![1.0, 1.0],
-                              vec![(0.0, f64::INFINITY); 2]);
+            let res = make_lp(
+                vec![1.0, 2.0],
+                vec![bad],
+                vec![1.0, 1.0],
+                vec![(0.0, f64::INFINITY); 2],
+            );
             assert!(
-                matches!(res, Err(SolverError::NonFiniteCoefficient { field: "b", .. })),
+                matches!(
+                    res,
+                    Err(SolverError::NonFiniteCoefficient { field: "b", .. })
+                ),
                 "expected NonFiniteCoefficient for b={bad}"
             );
         }
@@ -546,11 +574,18 @@ mod tests {
             let mut a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
             a.values[0] = bad;
             let res = LpProblem::new_general(
-                vec![1.0, 2.0], a, vec![5.0],
-                vec![ConstraintType::Le], vec![(0.0, f64::INFINITY); n], None,
+                vec![1.0, 2.0],
+                a,
+                vec![5.0],
+                vec![ConstraintType::Le],
+                vec![(0.0, f64::INFINITY); n],
+                None,
             );
             assert!(
-                matches!(res, Err(SolverError::NonFiniteCoefficient { field: "A", .. })),
+                matches!(
+                    res,
+                    Err(SolverError::NonFiniteCoefficient { field: "A", .. })
+                ),
                 "expected NonFiniteCoefficient for A val={bad}"
             );
         }
@@ -558,14 +593,12 @@ mod tests {
 
     #[test]
     fn lp_nan_in_bounds_rejected() {
-        let cases: Vec<(f64, f64)> = vec![
-            (f64::NAN, 1.0),
-            (0.0, f64::NAN),
-            (f64::NAN, f64::NAN),
-        ];
+        let cases: Vec<(f64, f64)> = vec![(f64::NAN, 1.0), (0.0, f64::NAN), (f64::NAN, f64::NAN)];
         for (lb, ub) in cases {
             let res = make_lp(
-                vec![1.0, 2.0], vec![5.0], vec![1.0, 1.0],
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![1.0, 1.0],
                 vec![(lb, ub), (0.0, f64::INFINITY)],
             );
             assert!(
@@ -585,7 +618,9 @@ mod tests {
         ];
         for (lb, ub) in cases {
             let res = make_lp(
-                vec![1.0, 2.0], vec![5.0], vec![1.0, 1.0],
+                vec![1.0, 2.0],
+                vec![5.0],
+                vec![1.0, 1.0],
                 vec![(lb, ub), (0.0, f64::INFINITY)],
             );
             assert!(
@@ -598,7 +633,9 @@ mod tests {
     #[test]
     fn lp_inf_bounds_accepted() {
         let res = make_lp(
-            vec![1.0, 2.0], vec![5.0], vec![1.0, 1.0],
+            vec![1.0, 2.0],
+            vec![5.0],
+            vec![1.0, 1.0],
             vec![(f64::NEG_INFINITY, f64::INFINITY), (0.0, f64::INFINITY)],
         );
         assert!(res.is_ok(), "±inf bounds should be valid");

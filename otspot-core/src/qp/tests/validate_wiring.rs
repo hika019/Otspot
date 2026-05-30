@@ -37,17 +37,65 @@ fn make_trivial_lp_as_qp() -> QpProblem {
 fn invalid_options_rejected_at_qp_entry() {
     let qp = make_trivial_qp();
     let cases: &[(&str, SolverOptions)] = &[
-        ("nan primal_tol", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-        ("zero primal_tol", SolverOptions { primal_tol: 0.0, ..Default::default() }),
-        ("neg dual_tol", SolverOptions { dual_tol: -1e-6, ..Default::default() }),
-        ("inf timeout_secs", SolverOptions { timeout_secs: Some(f64::INFINITY), ..Default::default() }),
-        ("neg timeout_secs", SolverOptions { timeout_secs: Some(-1.0), ..Default::default() }),
-        ("zero threads", SolverOptions { threads: 0, ..Default::default() }),
-        ("custom tol nan", SolverOptions { tolerance: Some(Tolerance::Custom(f64::NAN)), ..Default::default() }),
-        ("ipm eps nan", SolverOptions {
-            ipm: IpmOptions { eps: f64::NAN, ..Default::default() },
-            ..Default::default()
-        }),
+        (
+            "nan primal_tol",
+            SolverOptions {
+                primal_tol: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "zero primal_tol",
+            SolverOptions {
+                primal_tol: 0.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "neg dual_tol",
+            SolverOptions {
+                dual_tol: -1e-6,
+                ..Default::default()
+            },
+        ),
+        (
+            "inf timeout_secs",
+            SolverOptions {
+                timeout_secs: Some(f64::INFINITY),
+                ..Default::default()
+            },
+        ),
+        (
+            "neg timeout_secs",
+            SolverOptions {
+                timeout_secs: Some(-1.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "zero threads",
+            SolverOptions {
+                threads: 0,
+                ..Default::default()
+            },
+        ),
+        (
+            "custom tol nan",
+            SolverOptions {
+                tolerance: Some(Tolerance::Custom(f64::NAN)),
+                ..Default::default()
+            },
+        ),
+        (
+            "ipm eps nan",
+            SolverOptions {
+                ipm: IpmOptions {
+                    eps: f64::NAN,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
     ];
     for (label, opts) in cases {
         let result = solve_qp_with(&qp, opts);
@@ -66,9 +114,27 @@ fn invalid_options_rejected_at_qp_entry() {
 fn invalid_options_rejected_at_qp_entry_lp_path() {
     let lp_as_qp = make_trivial_lp_as_qp();
     let cases: &[(&str, SolverOptions)] = &[
-        ("zero threads lp path", SolverOptions { threads: 0, ..Default::default() }),
-        ("nan primal_tol lp path", SolverOptions { primal_tol: f64::NAN, ..Default::default() }),
-        ("neg timeout lp path", SolverOptions { timeout_secs: Some(-0.1), ..Default::default() }),
+        (
+            "zero threads lp path",
+            SolverOptions {
+                threads: 0,
+                ..Default::default()
+            },
+        ),
+        (
+            "nan primal_tol lp path",
+            SolverOptions {
+                primal_tol: f64::NAN,
+                ..Default::default()
+            },
+        ),
+        (
+            "neg timeout lp path",
+            SolverOptions {
+                timeout_secs: Some(-0.1),
+                ..Default::default()
+            },
+        ),
     ];
     for (label, opts) in cases {
         let result = solve_qp_with(&lp_as_qp, opts);

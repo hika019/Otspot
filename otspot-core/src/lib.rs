@@ -2,10 +2,7 @@
 // where iterator-based rewrites hurt readability or introduce borrow conflicts.
 // Solver and IPM functions legitimately accept many parameters; struct-wrapping
 // would be over-engineering for hot-path internals.
-#![allow(
-    clippy::needless_range_loop,
-    clippy::too_many_arguments,
-)]
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 //! # otspot — 数理最適化ソルバー
@@ -39,40 +36,40 @@
 //! ```
 
 pub mod error;
-pub use error::SolverError;
 pub use error::MpsError;
+pub use error::SolverError;
+pub(crate) mod basis;
+pub mod options;
 #[doc(hidden)]
 pub mod presolve;
-pub mod sparse;
 pub mod problem;
 pub(crate) mod simplex;
-pub(crate) mod basis;
+pub mod sparse;
 pub mod tolerances;
-pub mod options;
 pub use options::{
     BranchingStrategy, DualPricing, GlobalOptimizationConfig, LpWarmStart, MipBranching, MipConfig,
     SolverOptions, Tolerance, WarmStartBasis,
 };
-pub mod qp;
-pub mod mip;
-pub mod lp;
 #[doc(hidden)]
 pub mod linalg;
+pub mod lp;
+pub mod mip;
+pub mod qp;
 
 #[cfg(test)]
 pub(crate) mod test_kkt;
 
 // --- re-export: ユーザーが最も使う型を最短パスで ---
-pub use sparse::CscMatrix;
-pub use problem::{SolveRoute, SolveStats, SolveStatus, SolverResult};
-pub use problem::certificate::{BoundGapCertificate, NotProven, OptimalCertificate};
-pub use qp::certificate::prove_optimal;
-pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, QpWarmStart};
+pub use lp::solve_lp_with;
 pub use mip::{
     solve_milp, solve_milp_with_stats, solve_miqp, solve_miqp_with_stats, MilpProblem,
     MipProblemError, MipStats, MiqpProblem,
 };
-pub use lp::solve_lp_with;
+pub use problem::certificate::{BoundGapCertificate, NotProven, OptimalCertificate};
+pub use problem::{SolveRoute, SolveStats, SolveStatus, SolverResult};
+pub use qp::certificate::prove_optimal;
+pub use qp::{solve_qp, solve_qp_global, solve_qp_with, QpProblem, QpWarmStart};
+pub use sparse::CscMatrix;
 
 /// Solve an LP with default options. Includes `problem.obj_offset` in the returned objective.
 ///
@@ -136,8 +133,8 @@ mod tests {
 #[doc(hidden)]
 pub mod bound_flip {
     pub use crate::simplex::dual_advanced::bound_flip::{
-        bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations,
-        BfrtResult, ColBound,
+        bfrt_flip_invocations, bfrt_select_entering, reset_bfrt_flip_invocations, BfrtResult,
+        ColBound,
     };
 }
 

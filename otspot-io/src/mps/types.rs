@@ -29,7 +29,11 @@ pub(super) fn integer_marker_kind(line: &str) -> Option<IntegerMarker> {
             _ => {}
         }
     }
-    if has_marker { kind } else { None }
+    if has_marker {
+        kind
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -4,8 +4,8 @@
 //! 一致しない問題 (LISWET9 等) は parser/transform のバグの可能性。
 
 use otspot::io::qps::parse_qps;
-use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::options::SolverOptions;
+use otspot::problem::{ConstraintType, SolveStatus};
 use otspot::qp::solve_qp_with;
 use otspot::QpProblem;
 
@@ -18,11 +18,11 @@ fn test_simple_2var_qp_matches_clarabel() {
     // min 0.5(x1^2 + x2^2)  s.t. x1 + x2 >= 1
     // 解: x1 = x2 = 0.5, obj = 0.25
     use otspot::sparse::CscMatrix;
-    let q = CscMatrix::from_triplets(&[0,1], &[0,1], &[1.0, 1.0], 2, 2).unwrap();
+    let q = CscMatrix::from_triplets(&[0, 1], &[0, 1], &[1.0, 1.0], 2, 2).unwrap();
     let c = vec![0.0, 0.0];
     // 本ソルバの new_all_le は Ax <= b。Ge 制約は -Ax <= -b で表現
     // x1 + x2 >= 1  →  -x1 - x2 <= -1
-    let a = CscMatrix::from_triplets(&[0,0], &[0,1], &[-1.0, -1.0], 1, 2).unwrap();
+    let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[-1.0, -1.0], 1, 2).unwrap();
     let b = vec![-1.0];
     let bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); 2];
     let prob = QpProblem::new_all_le(q, c, a, b, bounds).unwrap();
@@ -35,8 +35,16 @@ fn test_simple_2var_qp_matches_clarabel() {
     let cl = solve_clarabel(&prob).expect("Clarabel solved");
     let cl_obj = cl.0;
 
-    println!("simple 2var: ours obj={:.6e}, clarabel obj={:.6e}", our_obj, cl_obj);
-    assert!((our_obj - cl_obj).abs() < 1e-4, "obj differs: ours={}, cl={}", our_obj, cl_obj);
+    println!(
+        "simple 2var: ours obj={:.6e}, clarabel obj={:.6e}",
+        our_obj, cl_obj
+    );
+    assert!(
+        (our_obj - cl_obj).abs() < 1e-4,
+        "obj differs: ours={}, cl={}",
+        our_obj,
+        cl_obj
+    );
     // 期待値 0.25
     assert!((our_obj - 0.25).abs() < 1e-4);
 }
@@ -62,7 +70,9 @@ fn max_violation_dd(prob: &QpProblem, x: &[f64]) -> f64 {
             ConstraintType::Eq => (axi - prob.b[i]).abs(),
             _ => 0.0,
         };
-        if v > mv { mv = v; }
+        if v > mv {
+            mv = v;
+        }
     }
     mv
 }
@@ -89,19 +99,29 @@ fn liswet_family_honest_no_false_optimal() {
     const FEAS_TOL: f64 = 1e-5;
     for name in ["LISWET9", "LISWET12"] {
         let path = std::path::PathBuf::from(format!("data/maros_meszaros/{}.QPS", name));
-        assert!(path.exists(), "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh", path);
+        assert!(
+            path.exists(),
+            "{:?} not found — bench data 未配置。scripts/maros_meszaros_download.sh",
+            path
+        );
         let prob = parse_qps(&path).expect("parse");
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(10.0);
         let res = solve_qp_with(&prob, &opts);
 
-        assert!(!res.solution.is_empty(), "{}: 空解 (solver が解を返さない)", name);
+        assert!(
+            !res.solution.is_empty(),
+            "{}: 空解 (solver が解を返さない)",
+            name
+        );
         // (1) false Optimal を返さない。f64 では tight な optimum に到達不能なので
         //     Optimal を主張したら誤判定 (honest 契約違反)。
         assert_ne!(
-            res.status, SolveStatus::Optimal,
+            res.status,
+            SolveStatus::Optimal,
             "{}: f64 で certify 不能な ill-cond QP を Optimal と誤主張 (status={:?})",
-            name, res.status
+            name,
+            res.status
         );
         // (2) 返却点は feasible。
         let mv = max_violation_dd(&prob, &res.solution);
@@ -109,8 +129,9 @@ fn liswet_family_honest_no_false_optimal() {
         assert!(
             mv <= FEAS_TOL,
             "{}: 返却点が infeasible (DD maxviol={:.3e} > {:.0e})",
-            name, mv, FEAS_TOL
+            name,
+            mv,
+            FEAS_TOL
         );
     }
 }
-

@@ -32,7 +32,9 @@ fn dfeas_rel_bound_aware(prob: &QpProblem, x: &[f64], rc: &[f64]) -> f64 {
     for j in 0..n {
         let (lb, ub) = prob.bounds[j];
         let fixed = lb.is_finite() && ub.is_finite() && (ub - lb).abs() < BOUND_TOL;
-        if fixed { continue; }
+        if fixed {
+            continue;
+        }
         let at_lb = lb.is_finite() && (x[j] - lb).abs() < BOUND_TOL;
         let at_ub = ub.is_finite() && (x[j] - ub).abs() < BOUND_TOL;
         let r = rc[j];
@@ -58,7 +60,11 @@ fn check_postsolve_dual_feasibility(
     timeout_s: f64,
 ) -> Result<String, String> {
     let path = Path::new(qp_path);
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", qp_path);
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        qp_path
+    );
     let prob = parse_qps(path).map_err(|e| format!("parse failed: {:?}", e))?;
     let mut opts = SolverOptions::default();
     opts.presolve = true;
@@ -95,7 +101,11 @@ fn perold_postsolve_dual_feasibility() {
 #[test]
 fn perold_presolve_off_baseline() {
     let path = Path::new("data/lp_problems/perold.QPS");
-    assert!(path.exists(), "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行", path.display());
+    assert!(
+        path.exists(),
+        "{} not found — bench data 未配置。scripts/netlib_lp_download.sh を実行",
+        path.display()
+    );
     let prob = parse_qps(path).expect("parse perold");
     let mut opts = SolverOptions::default();
     opts.presolve = false;
@@ -139,18 +149,38 @@ macro_rules! netlib_postsolve_test {
     };
 }
 
-netlib_postsolve_test!(afiro_postsolve,    "data/lp_problems/afiro.QPS",    1e-6, 30.0);
-netlib_postsolve_test!(sc50a_postsolve,    "data/lp_problems/sc50a.QPS",    1e-6, 30.0);
-netlib_postsolve_test!(sc50b_postsolve,    "data/lp_problems/sc50b.QPS",    1e-6, 30.0);
-netlib_postsolve_test!(sc105_postsolve,    "data/lp_problems/sc105.QPS",    1e-6, 30.0);
-netlib_postsolve_test!(sc205_postsolve,    "data/lp_problems/sc205.QPS",    1e-6, 30.0);
-netlib_postsolve_test!(scagr7_postsolve,   "data/lp_problems/scagr7.QPS",   1e-6, 30.0);
-netlib_postsolve_test!(share1b_postsolve,  "data/lp_problems/share1b.QPS",  1e-6, 30.0);
-netlib_postsolve_test!(scorpion_postsolve, "data/lp_problems/scorpion.QPS", 1e-6, 30.0);
-netlib_postsolve_test!(brandy_postsolve,   "data/lp_problems/brandy.QPS",   1e-6, 30.0);
-netlib_postsolve_test!(agg_postsolve,      "data/lp_problems/agg.QPS",      1e-6, 30.0);
-netlib_postsolve_test!(boeing2_postsolve,  "data/lp_problems/boeing2.QPS",  1e-6, 30.0);
-netlib_postsolve_test!(stocfor1_postsolve, "data/lp_problems/stocfor1.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(afiro_postsolve, "data/lp_problems/afiro.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(sc50a_postsolve, "data/lp_problems/sc50a.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(sc50b_postsolve, "data/lp_problems/sc50b.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(sc105_postsolve, "data/lp_problems/sc105.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(sc205_postsolve, "data/lp_problems/sc205.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(scagr7_postsolve, "data/lp_problems/scagr7.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(
+    share1b_postsolve,
+    "data/lp_problems/share1b.QPS",
+    1e-6,
+    30.0
+);
+netlib_postsolve_test!(
+    scorpion_postsolve,
+    "data/lp_problems/scorpion.QPS",
+    1e-6,
+    30.0
+);
+netlib_postsolve_test!(brandy_postsolve, "data/lp_problems/brandy.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(agg_postsolve, "data/lp_problems/agg.QPS", 1e-6, 30.0);
+netlib_postsolve_test!(
+    boeing2_postsolve,
+    "data/lp_problems/boeing2.QPS",
+    1e-6,
+    30.0
+);
+netlib_postsolve_test!(
+    stocfor1_postsolve,
+    "data/lp_problems/stocfor1.QPS",
+    1e-6,
+    30.0
+);
 
 // 大規模 LP の dfeas_rel assertion (network/重 LP は #[ignore] で default 除外)。
 
@@ -190,4 +220,3 @@ fn pds_10_postsolve_dual_feasibility() {
         Err(e) => panic!("{}", e),
     }
 }
-
