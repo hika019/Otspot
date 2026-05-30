@@ -19,25 +19,13 @@ use crate::sparse::CscMatrix;
 
 /// Verify all KKT conditions and mint an [`OptimalCertificate`] if they all pass.
 ///
-/// Assembles:
-/// 1. **Stationarity** `max_j |Qx+c+Aᵀy+z|_j / scale_j` via DD precision.
-/// 2. **Primal feasibility** `max_i viol_i / scale_i`.
-/// 3. **Bound feasibility** `max_j max(lb−x, x−ub, 0) / scale_j`.
-/// 4. **Complementarity** `max(|y·slack|, |z·(x−bnd)|) / normaliser`.
-/// 5. **Dual-sign feasibility** `max_k viol_k / (1 + |v_k|)`.
-/// 6. **Duality gap** (caller-supplied `duality_gap_rel`).
+/// Assembles stationarity (DD precision), primal/bound feasibility, complementarity,
+/// dual-sign feasibility, and the caller-supplied duality gap. Returns
+/// `Err(NotProven)` listing every condition that exceeded `tol`.
 ///
-/// Returns `Err(NotProven)` listing every condition that exceeded `tol`.
-///
-/// ## Gap threshold
-///
-/// The duality gap is checked against `tol` (= `user_eps`, typically 1e-6), which is
-/// **stricter** than the historic `PROMOTION_GAP_TOL = 1e-1` used in
-/// `IpmOutcome::satisfies_eps`. This is intentional: a solution claiming Optimal must
-/// close the gap to the user-requested precision, not merely to a structural 10 %
-/// tolerance. `satisfies_eps` retains its loose gate to select the *best available*
-/// iterate across retry attempts; `prove_optimal` then acts as the honest Optimal mint,
-/// requiring every KKT condition — including the gap — to meet `tol`.
+/// Gap is checked against `tol` (= user_eps), stricter than `PROMOTION_GAP_TOL = 1e-1`
+/// in `IpmOutcome::satisfies_eps`: the loose gate selects the best iterate across
+/// retries, while `prove_optimal` is the honest Optimal mint.
 pub fn prove_optimal<'a>(
     view: &ProblemView<'a>,
     x: &[f64],

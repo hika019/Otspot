@@ -5,35 +5,10 @@
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-//! # otspot — 数理最適化ソルバー
+//! otspot — LP / QP / MILP / MIQP ソルバー。
 //!
-//! 線形計画法（LP）・二次計画法（QP）と混合整数問題（MILP / MIQP）を解く Rust ソルバークレート。
-//! LP は改訂単体法（Revised Simplex）、QP は内点法（IPM / IP-PMM）を核とし、
-//! 実行不可能・非有界の判定と完全な主双対情報の出力に対応する。
-//!
-//! ## 主要モジュール
-//!
-//! | モジュール | 役割 |
-//! |-----------|------|
-//! | [`sparse`] | CSC 形式の疎行列・疎ベクトル演算 |
-//! | [`problem`] | 問題定義（`LpProblem` / `QpProblem`、`SolveStatus`、`SolverResult`） |
-//! | [`lp`] | LP 求解エントリポイント（`solve_lp_with`） |
-//! | [`qp`] | 内点法ソルバー（QP、IPM / IP-PMM） |
-//! | [`mip`] | 混合整数ソルバー（MILP / MIQP、branch-and-bound） |
-//! | [`options`] | `SolverOptions`、`Tolerance` |
-//!
-//! ## 使用例
-//!
-//! MPS ファイルから LP 問題を読み込んで解く (via the `otspot` facade):
-//!
-//! ```rust,ignore
-//! use std::path::Path;
-//! use otspot::io::mps;
-//!
-//! let prob = mps::parse_mps_file(Path::new("problem.mps")).expect("MPS読み込み失敗");
-//! let result = otspot_core::solve(&prob);
-//! println!("最適値: {:?}", result);
-//! ```
+//! LP は改訂単体法、QP は内点法 (IPM / IP-PMM) を核とし、実行不可能・非有界判定と
+//! 完全な主双対情報出力に対応する。
 
 pub mod error;
 pub use error::MpsError;

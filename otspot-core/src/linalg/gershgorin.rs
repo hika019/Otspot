@@ -1,24 +1,11 @@
 //! Gershgorin 円定理ベースの λ_min(Q) 下界 helper。
 //!
-//! ## 公式
 //! 対称行列 `Q` に対し `λ_min(Q) ≥ min_j (Q[j,j] − R_j)`、
-//! ただし `R_j = Σ_{k≠j} |Q[j,k]|` (j 行非対角絶対値和)。
+//! `R_j = Σ_{k≠j} |Q[j,k]|`。α-BB 凸化と IPM 慣性修正で共有。
 //!
-//! ## 用途
-//! - α-BB 凸化 (`qp::global::bound_alpha_bb::gershgorin_alpha`):
-//!   `α = max(0, max_j(R_j − Q[j,j])) / 2`
-//! - IPM 慣性修正 (`qp::ipm_core::kkt::compute_inertia_correction`):
-//!   `δ_ic = max(0, max_j(R_j − Q[j,j]))`
-//!
-//! どちらも `max(0, max_j(R_j − Q[j,j])) = max(0, −λ_min) の Gershgorin 上界`
-//! を共有するため本 helper に集約する。
-//!
-//! ## CSC 規約
-//! 入力 `Q` は full-symmetric / 上三角 / 下三角 / 非対称 mixed (片側 entry に対称
-//! pair が欠ける) のいずれも許容。各 off-diag entry は `(min(r,c), max(r,c))`
-//! canonical pair に集約 (dedup) され、片側だけ存在しても両側存在しても
-//! 同一の `R_j` を得る。両側 entry で値が異なる場合は `max(|v|)` を採用 (PSD 側に保守的)。
-//! 対角は最後に書き込まれた値を採用 (CSC 慣例で 1 列 1 対角 entry を想定)。
+//! 入力 CSC は full-symmetric / 三角 / mixed いずれも許容。off-diag は
+//! `(min(r,c), max(r,c))` canonical pair に dedup し、両側値が異なる場合は
+//! `max(|v|)` を採用 (PSD 側に保守的)。
 
 use crate::sparse::CscMatrix;
 use std::collections::HashMap;

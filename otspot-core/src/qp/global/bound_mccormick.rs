@@ -1,36 +1,12 @@
 //! McCormick envelope lower bound (Phase 5 非凸 QP 大域最適化)。
 //!
-//! ## 原理
-//! 各 bilinear 項 `x_i · x_j` を新変数 `w_{ij}` に置換し、box `[l, u]` 上の convex
-//! 包絡 (McCormick 1976) を 4 本の線形不等式で表現する:
+//! 各 bilinear 項 `x_i x_j` を新変数 `w_{ij}` に置換し、box 上の convex 包絡
+//! (McCormick 1976) を 4 本の線形不等式で表現する。lifted 空間 `(x, w)` 上で
+//! QP は線形になり、box + 元線形制約 + McCormick の LP 最小値が原問題 lb。
 //!
-//!   w ≥ l_j x_i + l_i x_j − l_i l_j
-//!   w ≥ u_j x_i + u_i x_j − u_i u_j
-//!   w ≤ u_j x_i + l_i x_j − l_i u_j
-//!   w ≤ l_j x_i + u_i x_j − u_i l_j
-//!
-//! 対角項 `x_i²` (= bilinear i==j) では UB が 1 本に縮約され、LB は端点接線 2 本に
-//! なる (凸関数の secant 上界 + 接線下界)。
-//!
-//! 元 QP `0.5 x'Q x + c'x` は lifted 空間 `(x, w)` 上で **線形** となり、box +
-//! 元 `Ax {=,≤,≥} b` + McCormick 制約を満たす LP の最小値が原問題の有効 lower bound。
-//!
-//! ## α-BB との関係
-//! α-BB は box 全体に対し 1 つの保守的 α を取って `Q + 2α·I` PSD 化するため、
-//! bilinear-rich (off-diag 主体) な問題で α が過剰に大きくなり下界が緩む。McCormick
-//! は項ごとに凸包絡を張るため bilinear に対し格段に tight。
-//!
-//! 対角 only / 凸 Q では McCormick 寄与はわずか (= α-BB と同等)。caller は両者の
-//! `max` を取ることで loss なく統合する。
-//!
-//! ## semi-infinite box
-//! l_i / u_i に ±∞ があると w_{ij} bound が定義できないため `None` を返し、caller
-//! は α-BB / interval / `-∞` に fall back する。
-//!
-//! ## Q storage 規約
-//! `QpProblem::q` は full-symmetric storage を前提とする (`crate::qp::global::bound`
-//! のコメント参照)。本実装は full / triangle どちらでも `mat_vec_mul` と整合する
-//! `0.5 * v` 累積で w 係数を算出するため storage 規約に強く依存しない。
+//! α-BB は box 全体に保守的 α を取るため bilinear-rich で緩むが、McCormick は
+//! 項ごとに凸包絡を張るため格段に tight。caller は両者の `max` で統合する。
+//! 半無限 box (l_i / u_i = ±∞) では `None` を返し fall back する。
 
 use std::collections::BTreeMap;
 use std::time::Instant;

@@ -1,23 +1,15 @@
-//! Duplicate-row / duplicate-column / dominated-column / dual-fixing transforms.
+//! Duplicate-row / dominated-column / dual-fixing transforms (LP presolve Step 9-11)。
 //!
-//! These extend the eight-step LP presolve pipeline in `transforms.rs` with
-//! pattern-matching reductions that HiGHS-style solvers apply to shrink netlib
-//! instances. Each transform mutates `PresolveState` only through bound
-//! tightening (which Step 1 then promotes to a `FixedVariable` postsolve step)
-//! or through `RedundantConstraint` (for parallel rows), so no new
-//! `PostsolveStep` variant is required.
+//! `transforms.rs` の 8-step pipeline を HiGHS 流 pattern reduction で拡張する。
+//! 各 transform は bound tightening (Step 1 が `FixedVariable` に昇格) または
+//! `RedundantConstraint` 経由でのみ state を変えるため新 `PostsolveStep` は不要。
 //!
-//! Step 9  Parallel row: two rows share a column pattern with a positive
-//!         scaling α and identical constraint type. Drop the looser row;
-//!         RHS mismatch on Eq rows ⇒ Infeasible.
-//! Step 10 Duplicate / dominated column: two columns share a row pattern with
-//!         a positive scaling α. The column whose per-A-unit cost is strictly
-//!         larger is dual-dominated and can be fixed to its lower bound — but
-//!         only when the other column has unbounded room to absorb any z*.
-//! Step 11 Dual fixing: a column's constraint coefficients agree in sign with
-//!         the dual feasibility direction (all Le with a≥0, all Ge with a≤0,
-//!         no Eq with nonzero coef) and `c_j ≥ 0` ⇒ fix to lb (or Unbounded
-//!         if lb = −∞ and c_j > 0). Symmetric for fix-to-ub.
+//! - Step 9 Parallel row: 同 pattern + 同 type + α>0 で looser row を drop。
+//!   Eq の RHS 不一致は Infeasible。
+//! - Step 10 Duplicate/dominated column: 同 row pattern + α>0、cost per A-unit が
+//!   大きい列を相手列が absorb 可能なら lb に固定。
+//! - Step 11 Dual fixing: 列の係数が dual feasibility 方向と一致 + `c_j ≥ 0` で lb
+//!   固定 (lb=−∞ かつ c_j>0 なら Unbounded)、ub も対称。
 
 use std::collections::HashMap;
 

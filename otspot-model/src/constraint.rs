@@ -28,9 +28,9 @@ pub struct Constraint {
     pub(crate) sense: ConstraintSense,
 }
 
-/// Build a `Constraint` using natural inequality syntax.
+/// Build a `Constraint` using inequality syntax: `constraint!(x <= 5.0)` for a
+/// single variable, `constraint!((expr) <= rhs)` for a parenthesised expression.
 ///
-/// # Examples
 /// ```
 /// use otspot_model::{Model, constraint};
 /// let mut model = Model::new("demo");
@@ -38,27 +38,6 @@ pub struct Constraint {
 /// let y = model.add_var("y", 0.0, 10.0);
 /// model.add_constraint(constraint!((2.0 * x + 3.0 * y) <= 12.0));
 /// model.add_constraint(constraint!((x + y) >= 3.0));
-/// ```
-///
-/// Supported forms:
-/// - `constraint!(x <= 5.0)` — single variable on the left
-/// - `constraint!((expr) <= rhs)` — parenthesised expression on the left
-///
-/// For complex LHS expressions, wrap them in parentheses:
-/// ```rust,no_run
-/// # use otspot_model::{Model, constraint};
-/// # let mut model = Model::new("demo");
-/// # let x = model.add_var("x", 0.0, f64::INFINITY);
-/// # let y = model.add_var("y", 0.0, f64::INFINITY);
-/// model.add_constraint(constraint!((2.0 * x + 3.0 * y) <= 12.0));
-/// ```
-/// or use the method API directly:
-/// ```rust,no_run
-/// # use otspot_model::Model;
-/// # let mut model = Model::new("demo");
-/// # let x = model.add_var("x", 0.0, f64::INFINITY);
-/// # let y = model.add_var("y", 0.0, f64::INFINITY);
-/// model.add_constraint((2.0 * x + 3.0 * y).leq(12.0));
 /// ```
 #[macro_export]
 macro_rules! constraint {

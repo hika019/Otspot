@@ -1,35 +1,14 @@
-//! Bound-Flipping Ratio Test (BFRT, Maros 2003 §3.7).
+//! Bound-Flipping Ratio Test (BFRT, Maros 2003 §3.7 / §7.6).
 //!
-//! Classical Harris ratio test stops at the smallest breakpoint
-//! θ* = min { r_j / α_j : α_j > 0 } and selects the corresponding entering
-//! column. BFRT exploits non-basic variables that carry a *finite* upper bound
-//! u_j: when the dual step θ would push some r_k below 0, the corresponding
-//! variable k can be **flipped to its upper bound** instead of becoming the
-//! entering variable. The basis is unchanged for k (only its non-basic value
-//! switches from 0 to u_k), so the dual step can continue past θ_k to the next
-//! breakpoint. The chosen θ is the one that maximises the cumulative dual
-//! objective improvement.
+//! 古典 Harris は最小 breakpoint で停止するが、BFRT は finite upper bound を持つ
+//! 非基底変数を upper bound に flip することで dual step を次の breakpoint まで
+//! 延長する。基底は変わらず (非基底値が 0 → u_k に切替) 累積 dual obj 改善を
+//! 最大化する θ を選ぶ。bound-rich LP (pilot87, pds-*) で pivot 30-60% 削減。
 //!
-//! References: Maros (2003), "Computational Techniques of the Simplex Method",
-//! §7.6 (dual simplex with bounded variables); HiGHS / CPLEX / Gurobi all use
-//! a variant of this algorithm. Reported pivot reductions: 30-60 % on
-//! bound-rich LPs (pilot87, pds-*).
-//!
-//! ## Sign convention
-//!
-//! Matches `HarrisRatioTest` in `ratio_test.rs`:
-//! - leaving row r has `x_B[r] < 0`
-//! - `trow[j] = (B^{-1} a_j)[r]` (the dual coefficient on column j)
-//! - we look at columns with `trow[j] > pivot_tol` (Harris-compatible)
-//! - reduced cost `r_j ≥ 0` is the dual feasibility margin
-//! - breakpoint `θ_j = r_j / trow[j] ≥ 0`
-//! - dual step magnitude is bounded by the cumulative residual `|x_B[r]|`
-//!   minus the contribution of variables already flipped
-//!   (`u_k * trow[k]` per flip)
-//!
-//! A variable currently at upper bound (`at_upper[j] = true`) participates
-//! symmetrically: its breakpoint comes from `-r_j / -trow[j]` and a flip
-//! returns it to its lower bound.
+//! 符号規約は `HarrisRatioTest` (ratio_test.rs) と同じ: leaving row r で
+//! `x_B[r] < 0`, `trow[j] = (B^{-1} a_j)[r]`, `θ_j = r_j / trow[j] ≥ 0`、
+//! dual step は累積残差 `|x_B[r]|` − Σ flip 寄与 `u_k·trow[k]` で bounded。
+//! `at_upper[j] = true` の変数は `−r_j / −trow[j]` で対称に参加する。
 
 use std::cell::Cell;
 
@@ -87,30 +66,17 @@ pub struct BfrtResult {
     pub flips: Vec<usize>,
 }
 
-/// 4-step BFRT (Maros 2003).
+/// 4-step BFRT (Maros 2003): (1) enumerate breakpoints `θ_j = r_j / α_j` for
+/// compatible columns (at lower with `trow > pivot_tol`, at upper with
+/// `trow < -pivot_tol`); (2) sort by θ ascending; (3) walk while tracking
+/// residual `R = |x_B[r]| − Σ u_k|α_k|`, flipping each crossing and stopping
+/// when R ≤ 0 (entering column = the one that brings R ≤ 0); (4) return
+/// `(entering, θ, flips)`.
 ///
-/// 1. Enumerate breakpoints `θ_j = r_j / α_j` for compatible columns.
-///    A column is *compatible* if it can absorb a positive dual step:
-///    - at lower bound (`at_upper[j] = false`) with `trow[j] > pivot_tol`
-///    - at upper bound (`at_upper[j] = true`) with `trow[j] < -pivot_tol`
-///      (the breakpoint is then `(-r_j) / (-trow[j])` ≥ 0)
-/// 2. Sort breakpoints by θ ascending.
-/// 3. Walk breakpoints; track remaining residual `R = |x_B[r]| − Σ u_k |α_k|`.
-///    Each crossing flips column k and consumes `u_k · |α_k|` of residual.
-///    Stop as soon as R ≤ 0 — the column at which R first becomes ≤ 0 is the
-///    entering column (the basis must pivot here, no flip past).
-/// 4. Return (entering, θ, flips).
-///
-/// **Tie handling** (memo: `feedback_test_multi_data_pattern`): when several
-/// breakpoints fall within `BFRT_TIE_TOL` of the chosen θ, prefer the one
-/// with the largest |pivot| as the entering column for numerical stability
-/// (mirrors Harris pass 2).
-///
-/// Returns `None` when no compatible column exists (dual unbounded → primal
-/// infeasible). Returns `Some(BfrtResult)` with `flips.is_empty()` and a
-/// Harris-equivalent θ when *all* compatible columns have infinite upper bound
-/// (i.e., the LP has no exploitable bounded structure) — this keeps the
-/// wrapper drop-in.
+/// Ties within `BFRT_TIE_TOL` of the chosen θ prefer largest |pivot| (Harris
+/// pass 2). Returns `None` if no compatible column (dual unbounded → primal
+/// infeasible); returns Harris-equivalent θ with empty `flips` when no
+/// finite upper bound exists (drop-in wrapper).
 pub fn bfrt_select_entering(
     trow: &[f64],
     reduced_costs: &[f64],

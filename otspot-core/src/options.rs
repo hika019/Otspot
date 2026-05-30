@@ -285,24 +285,11 @@ pub const TOLERANCE_MEDIUM_EPS: f64 = 1e-6;
 /// IPM eps for [`Tolerance::Fast`]: 100× looser than Medium for faster convergence.
 pub const TOLERANCE_FAST_EPS: f64 = 1e-4;
 
-/// Convergence accuracy level.
+/// Convergence accuracy level. Abstracts `ipm.eps`; the solver derives its
+/// internal threshold from this enum and ignores `ipm.eps`.
 ///
-/// Abstracts the raw `ipm.eps` field.  When set on [`SolverOptions`], the
-/// solver derives its internal convergence threshold from this enum;
-/// `ipm.eps` is ignored.
-///
-/// ## Translation table
-///
-/// | Tolerance | IPM eps                              |
-/// |-----------|--------------------------------------|
-/// | High      | [`TOLERANCE_HIGH_EPS`] = 1e-8        |
-/// | Medium    | [`TOLERANCE_MEDIUM_EPS`] = 1e-6      |
-/// | Fast      | [`TOLERANCE_FAST_EPS`] = 1e-4        |
-/// | Custom(v) | v                                    |
-///
-/// `Medium` is the default (comparable to Gurobi `eps = 1e-6`).
-/// `Fast` accepts solutions 100× less precise than Medium for reduced
-/// iteration counts — appropriate when a coarse objective estimate suffices.
+/// `High = 1e-8`, `Medium = 1e-6` (default, ≈ Gurobi), `Fast = 1e-4` (100× looser
+/// for reduced iter), `Custom(v) = v`. See [`TOLERANCE_HIGH_EPS`] etc.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tolerance {

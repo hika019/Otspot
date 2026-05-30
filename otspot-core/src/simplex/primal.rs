@@ -51,24 +51,13 @@ use super::{extract_dual_info, SimplexOutcome, StandardForm};
 /// near-zero when equilibration shrinks the diagonal below f64 noise.
 const SLACK_DIAG_TOL: f64 = 1e-14;
 
-/// Attempt to extract a verified Farkas infeasibility certificate from a
-/// Phase I basis that could not be driven to feasibility.
+/// Extract a verified Farkas infeasibility certificate from a Phase I basis.
 ///
-/// Constructs `y = B^{-T} e_art` (the Phase I dual, where `e_art[i] = 1` for
-/// artificial basis columns) and checks the Farkas alternative for the
-/// standard-form LP `{Ax = b, x ≥ 0}`:
-///
-///   A^T y ≤ tol  (for all non-artificial columns j < n_original)
-///   b^T y > tol
-///
-/// Returns `y` if both conditions hold, or an empty Vec if the certificate
-/// cannot be verified (LU failure, no artificials in basis, or numeric check
-/// failed). An empty return does NOT mean the LP is feasible — it means this
-/// basis cannot provide a Farkas proof; the caller should re-verify via Big-M
-/// rather than blindly trusting the unverified Infeasible verdict.
-///
-/// Tolerance: `dual_tol * max(1, ‖b‖∞)` — consistent with the Big-M Phase I
-/// Farkas checker so both paths discriminate at the same numeric threshold.
+/// `y = B^{-T} e_art` checked against `{A x = b, x ≥ 0}` Farkas alternative
+/// (`Aᵀy ≤ tol` ∀ non-artificial j, `bᵀy > tol`, `tol = dual_tol·max(1,‖b‖∞)`,
+/// consistent with the Big-M Phase I checker). Empty return = certificate not
+/// verifiable (LU fail / no artificial in basis / numeric fail), NOT feasibility
+/// — caller re-verifies via Big-M instead of trusting an unverified Infeasible.
 fn extract_farkas_certificate(
     a_ext: &CscMatrix,
     b: &[f64],
@@ -1192,35 +1181,18 @@ pub(crate) fn extract_solution(
     solution
 }
 
-/// Primal Phase I cycling early-bail. klein3 observation: with
-/// Ge/Eq constraints, `cold_start_dual` (dual.rs) falls back to Primal
-/// `two_phase_simplex` whose Phase I cycles indefinitely (no Bland switch),
-/// burning the whole `solve_dual_advanced` half-deadline before Big-M can
-/// start. The bail returns `Timeout` with empty solution, which lets
-/// `solve_dual_advanced` invoke Big-M (`dual_simplex_core_advanced` does
-/// have a Bland switch + lex perturbation) with the remaining deadline.
+/// Primal Phase I cycling early-bail (klein3 origin)。`cold_start_dual` の
+/// Primal Phase I は Bland switch を持たず無限 cycle で half-deadline を焼く。
+/// `Timeout` 早期 return で Big-M (`dual_simplex_core_advanced`、Bland + lex
+/// perturbation あり) に残時間を譲る。
 ///
-/// `K = max(BAIL_TRIGGER_FACTOR * m, BAIL_TRIGGER_MIN)`. Tuned so klein3
-/// (m ≈ 88, iter rate ≈ 3300/s) bails in well under 1 s; slow-but-
-/// progressing LPs that decrease the objective at least every K pivots
-/// stay unaffected.
+/// `K = max(BAIL_TRIGGER_FACTOR · m, BAIL_TRIGGER_MIN)`、AND 条件で発火:
+/// (1) Phase I obj `cᵀx_B` が K 連続未改善 + (2) pivot step ≈ 0 が K' 連続。
+/// AND が真 cycling (klein3) と slow-but-progressing (forplan) を切り分ける —
+/// forplan は step > 0 で counter reset、klein3 は step ≈ 0 で両 counter trip。
 ///
-/// The bail fires only when **both** signatures are observed within the
-/// window: the Phase I objective `c^T x_B` does not improve for K
-/// consecutive iters, **and** the pivot step is essentially zero (degenerate)
-/// for K' consecutive iters. The AND condition is what distinguishes true
-/// cycling (klein3) from slow-but-progressing Phase I (forplan): forplan's
-/// Phase I pivots have step > 0 (real basis transitions reducing arts)
-/// even when individual obj decrements fall below `NO_PROGRESS_REL_EPS`,
-/// so the step counter resets and bail does not fire. klein3's degenerate
-/// cycling exhibits step ≈ 0 on every pivot (Charnes-perturbed values are
-/// the only nonzero contribution and they cancel), so both counters trip.
-///
-/// Bail is also gated on `enable_phase1_cycling_bail`. Callers pass `true`
-/// only for Primal Phase I (where Big-M is a meaningful fall-back); Phase II
-/// and all dual-driven Phase II calls pass `false` because at Phase II
-/// entry the primal incumbent is already feasible and an obj plateau there
-/// signals proximity to the optimum, not cycling.
+/// `enable_phase1_cycling_bail` gate: Primal Phase I のみ `true`、Phase II は
+/// obj plateau が optimum 近接の signal なので `false`。
 const BAIL_TRIGGER_FACTOR: usize = 10;
 const BAIL_TRIGGER_MIN: usize = 5_000;
 /// Step-plateau threshold K'. Set to K / `STEP_BAIL_RATIO` so a single

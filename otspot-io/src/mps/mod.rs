@@ -43,29 +43,14 @@ pub fn parse_milp_file(path: &Path) -> Result<MilpProblem, MpsError> {
     parse_milp_reader(std::io::BufReader::new(file))
 }
 
-/// Parse an MPS string, returning an LP relaxation.
-///
-/// MILP files are accepted but integrality is dropped; use [`parse_milp`] to
-/// retain integer variable information.
-///
-/// # Examples
+/// Parse an MPS string, returning an LP relaxation. MILP files are accepted but
+/// integrality is dropped; use [`parse_milp`] to retain integer variable info.
 ///
 /// ```
 /// use otspot_io::mps::parse_mps;
-///
-/// let mps = r"NAME          example
-/// ROWS
-///  N  obj
-///  L  c1
-/// COLUMNS
-///     x1  obj  1.0  c1  2.0
-/// RHS
-///     rhs  c1  10.0
-/// ENDATA
-/// ";
+/// let mps = "NAME ex\nROWS\n N obj\n L c1\nCOLUMNS\n x1 obj 1.0 c1 2.0\nRHS\n rhs c1 10.0\nENDATA\n";
 /// let lp = parse_mps(mps).unwrap();
-/// assert_eq!(lp.num_vars, 1);
-/// assert_eq!(lp.num_constraints, 1);
+/// assert_eq!((lp.num_vars, lp.num_constraints), (1, 1));
 /// ```
 pub fn parse_mps(input: &str) -> Result<LpProblem, MpsError> {
     parse_mps_reader(std::io::Cursor::new(input.as_bytes()))

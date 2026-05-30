@@ -8,28 +8,15 @@ use crate::problem::SolverResult;
 use crate::qp::QpProblem;
 use crate::tolerances::DROP_TOL;
 
-/// Pivot singularity threshold for dual recovery.
+/// Pivot singularity threshold (absolute, `DROP_TOL = 1e-15`)。
 ///
-/// When `|A[row, col]| < SINGULARITY_TOL`, the pivot is treated as numerically
-/// singular and the dual recovery for that singleton row is skipped to prevent
-/// `y_new = target / a_row_col` from blowing up.
+/// `|A[row, col]| < SINGULARITY_TOL` で dual recovery を skip (`y_new = target /
+/// a_row_col` 発散防止)。matrix 構築時 drop 閾値と一致。
 ///
-/// Aligned with `DROP_TOL` (1e-15): entries this small are already discarded
-/// during matrix construction, so treating them as singular is consistent.
-///
-/// **設計判断 (2026-05-30)**: SINGULARITY_TOL は **absolute** (`DROP_TOL = 1e-15`) で固定。
-///
-/// row-relative pivot tolerance (LAPACK xGECON 形式: `PIVOT_REL * row_inf + UNDERFLOW_GUARD`) を
-/// audit#123 で検討・実装したが、qplib_9002 で false-positive Optimal を mint
-/// (status=Optimal、`||x||_inf=7.934e9`、KKT 残差発散) するため撤退済。
-///
-/// 撤退理由: pivot accept 結果を KKT 検証経路で再 validate しない設計のため、
-/// relative pivot で「数値的に valid だが KKT 不能」な解を accept してしまう。
-///
-/// relative 化再開条件: pivot accept 後の numerical refinement (iterative refinement) で
-/// KKT 残差を再検証する経路を追加してから再評価。
-///
-/// 撤退 commit: `0f343f1` (audit-123-p1-relative branch、削除済)
+/// 撤退知見 (audit#123、commit 0f343f1): row-relative pivot tol (LAPACK xGECON 形式)
+/// は qplib_9002 で false-positive Optimal を mint (`||x||_inf=7.9e9`、KKT 発散)。
+/// pivot accept 後に KKT 残差を re-validate する経路 (iterative refinement) を
+/// 追加してから再評価。
 const SINGULARITY_TOL: f64 = DROP_TOL;
 
 /// 縮約後の解を元 QP 問題の解空間に復元する。
@@ -148,30 +135,15 @@ pub fn postsolve_qp(
     }
 }
 
-/// `postsolve_qp` の dual recovery 拡張版。
+/// `postsolve_qp` の dual recovery 拡張。既存版は削除行 `y` と固定変数 `z` を 0
+/// 埋めし KKT を破壊する (Catastrophic 9 件 + QRECIPE 真因) ため、本関数は
+/// postsolve_stack を逆順に各 step の `y[row]` / `z[idx]` を解析復元する。
 ///
-/// 既存 `postsolve_qp` は presolve で削除した行の `y` と固定変数の `z` を 0 で
-/// 埋めるが、これは KKT を破壊する (Catastrophic 9 件 + QRECIPE の真因)。
-/// 本関数は postsolve_stack を逆順に処理しながら、各 step に対応する
-/// `y[row]` / `z[idx]` を解析的に復元する。
-///
-/// # 復元式
-///
-/// **SingletonRow / RedundantRowFix { row, col, val }**:
-///   行 i = row は singleton (Eq) または activity-tightened Eq で削除済。
-///   変数 col は val に固定。元 KKT for col:
-///     Q\[col,:\]·x + c\[col\] + Σ_k A\[k,col\]·y\[k\] - z_lb\[col\] + z_ub\[col\] = 0
-///   col が bound 内部 (lb < val < ub) なら z=0 で確定:
-///     y\[row\] = -(Q\[col,:\]·x + c\[col\] + Σ_{k≠row} A\[k,col\]·y\[k\]) / A\[row, col\]
-///   col が boundary なら z を後段で再計算 (本関数では y\[row\] のみ復元)
-///
-/// **FixedVar { idx, val }**:
-///   変数 idx を val に固定 (lb==ub または activity から)。
-///   z 復元は `core.rs::refit_bound_duals_kkt` が一括で行う (本関数は val のみ書き戻す)。
-///
-/// **EmptyCol { idx, val }**:
-///   Q\[idx,:\]=0, A\[:,idx\]=0 で固定。KKT: c\[idx\] = z_lb\[idx\] - z_ub\[idx\]
-///   c\[idx\] > 0 → val=lb, z_lb=c, c<0 → val=ub, z_ub=-c
+/// - **SingletonRow / RedundantRowFix**: bound 内部なら
+///   `y[row] = -(Q[col,:]·x + c[col] + Σ_{k≠row} A[k,col]·y[k]) / A[row,col]`,
+///   boundary は後段 `refit_bound_duals_kkt` で z 再計算。
+/// - **FixedVar**: val 書き戻しのみ、z は `refit_bound_duals_kkt` 一括復元。
+/// - **EmptyCol**: KKT `c[idx] = z_lb − z_ub` より sign で lb/ub と z を確定。
 pub fn postsolve_qp_with_dual_recovery(
     presolve_result: &QpPresolveResult,
     reduced_sol: &SolverResult,

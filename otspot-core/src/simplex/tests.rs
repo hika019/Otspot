@@ -1141,24 +1141,11 @@ fn pivot_clean_early_exit_fires_when_no_degenerate_artificials() {
     );
 }
 
-/// Complementary sentinel: when a degenerate artificial *is* in the basis the
-/// early-exit must NOT fire, so the LU build + BTRAN cleanup runs.
-///
-/// Construction: linearly **redundant** Eq rows (exact duplicates). Phase I
-/// pivots a real variable into the first copy and leaves the duplicate rows'
-/// artificials basic at value 0 — genuine degenerate artificials. So
-/// `pivot_out_degenerate_artificials` must take the cleanup branch,
-/// incrementing `PIVOT_CLEAN_CLEANUP_RAN_COUNT`.
-///
-/// (Note: a `b = 0` workload does NOT leave degenerate artificials — Phase I
-/// drives them out non-degenerately and the early-exit fires; see the comment
-/// on `lp_minimal_pivot_artificial`.)
-///
-/// This is the inverse of the early-exit sentinel: it guards against the feared
-/// mis-fire where the early-exit strands an artificial in the basis. If the
-/// early-exit condition were widened to fire here (no-op FAIL), the cleanup
-/// counter stagnates and the assertion trips. Table-driven over two redundancy
-/// patterns so the proof does not rest on a single input shape.
+/// Inverse sentinel of the early-exit guard: when a degenerate artificial *is*
+/// in the basis, the early-exit must NOT fire and the BTRAN cleanup must run
+/// (`PIVOT_CLEAN_CLEANUP_RAN_COUNT` increments). Construction uses redundant Eq
+/// rows so Phase I strands duplicates' artificials at value 0. Table-driven over
+/// two redundancy patterns; widening the early-exit causes no-op FAIL here.
 #[test]
 fn pivot_cleanup_runs_when_degenerate_artificial_in_basis() {
     use std::sync::atomic::Ordering;
