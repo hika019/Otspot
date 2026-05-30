@@ -689,6 +689,12 @@ mod tests {
         // Deferred trait/impl context: set when we see `impl Trait for T` or
         // `trait Foo` on a line whose opening brace is on a subsequent line.
         let mut pending_trait_context = false;
+        // Deferred inherent/trait impl header: set when `impl` is seen without
+        // `for` on the same line and without an opening brace (rustfmt may wrap
+        // `impl<T>\n    SomeTrait for Foo<T>\n{`). Cleared when a continuation
+        // line reveals `for` (→ trait impl, upgrades to pending_trait_context) or
+        // when the opening brace arrives without `for` (→ inherent impl).
+        let mut pending_impl_header = false;
 
         // Accumulator for multi-line `fn` signature (fn ... {).
         let mut in_fn_sig = false;
@@ -710,13 +716,18 @@ mod tests {
 
             // Track trait impl blocks (`impl Trait for Type`) and trait
             // definitions (`trait Foo { ... }`) — both need the exemption.
-            // Handle both same-line brace (`impl Trait for Foo {`) and
-            // next-line brace (`impl Trait for Foo\n{`) via a pending flag.
-            let is_trait_impl_line = trimmed.starts_with("impl") && trimmed.contains(" for ");
+            // Handles same-line brace (`impl Trait for Foo {`), next-line brace
+            // (`impl Trait for Foo\n{`), and rustfmt-wrapped headers where `impl`
+            // and `for` appear on separate lines (`impl<T>\n    SomeTrait for Foo<T>\n{`).
+            let is_impl_line =
+                trimmed.starts_with("impl ") || trimmed.starts_with("impl<");
+            let is_trait_impl_line = is_impl_line && trimmed.contains(" for ");
             let is_trait_def_line = trimmed.starts_with("trait ")
                 || trimmed.starts_with("pub trait ")
                 || trimmed.starts_with("pub(crate) trait ");
             if is_trait_impl_line || is_trait_def_line {
+                // Fully-determined trait context on this line.
+                pending_impl_header = false;
                 if opens > 0 {
                     let entry_floor = depth - opens;
                     trait_impl_stack.push(entry_floor);
@@ -724,12 +735,36 @@ mod tests {
                 } else {
                     pending_trait_context = true;
                 }
+            } else if is_impl_line && opens == 0 {
+                // `impl<T>` or `impl Foo` without `for` on the same line and no
+                // opening brace yet — rustfmt may place `SomeTrait for Foo<T>`
+                // on the next line.
+                pending_impl_header = true;
             } else if pending_trait_context && opens > 0 {
                 // Deferred: the opening brace arrived (may be on a `where` clause
                 // continuation line or a standalone `{`).
                 let entry_floor = depth - opens;
                 trait_impl_stack.push(entry_floor);
                 pending_trait_context = false;
+                pending_impl_header = false;
+            } else if pending_impl_header {
+                // Still accumulating a multi-line impl header (no `{` yet).
+                if trimmed.contains(" for ") {
+                    // Continuation line contains `for` → confirmed trait impl.
+                    pending_impl_header = false;
+                    if opens > 0 {
+                        let entry_floor = depth - opens;
+                        trait_impl_stack.push(entry_floor);
+                    } else {
+                        // Opening brace on a later line (e.g. after `where` clause).
+                        pending_trait_context = true;
+                    }
+                } else if opens > 0 {
+                    // Opening brace arrived without ever seeing `for` → inherent impl.
+                    pending_impl_header = false;
+                }
+                // Where-clause and type-bound lines are left intact so that
+                // `impl<T>\n    SomeTrait for Foo<T>\nwhere\n    T: X,\n{` works.
             } else if opens == 0 && pending_trait_context {
                 // Clear pending context only on unambiguous new declaration keywords.
                 // Where-clause continuation lines (`where`, `T: Bound,`) are left
@@ -789,6 +824,16 @@ mod tests {
             if in_fn_sig {
                 fn_sig_buf.push_str(line);
                 fn_sig_buf.push('\n');
+
+                // Bodyless method: `fn required(&self, _unused: f64);` — only
+                // legal inside a trait definition.  Terminate the accumulator
+                // without reporting violations (the `_name` is there to satisfy
+                // a required interface, same exemption as trait-impl methods).
+                if line.contains(';') && !line.contains('{') {
+                    in_fn_sig = false;
+                    fn_sig_buf.clear();
+                    continue;
+                }
 
                 // Once we see `{` the signature is complete.
                 if line.contains('{') {
@@ -1016,6 +1061,72 @@ where
         assert!(
             !names.contains(&"_unused"),
             "multiline trait/impl header must exempt `_unused`; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (P2-1): rustfmt-wrapped `impl<T>\n    SomeTrait for Foo<T>\n{` must
+    /// be recognized as a trait impl block, exempting `_param` inside from flagging.
+    ///
+    /// **No-op failure guarantee**: removing the `pending_impl_header` accumulation
+    /// causes `_param` to be flagged as a violation → `assert!(!names.contains(...))`
+    /// fires.
+    #[test]
+    fn scan_underscore_sig_params_recognizes_rustfmt_wrapped_impl_for() {
+        let content = r#"
+trait MyTrait {
+    fn required(&self, _param: i32) -> i32;
+}
+struct Foo;
+impl<T>
+    MyTrait for Foo
+{
+    fn required(&self, _param: i32) -> i32 {
+        _param
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"_param"),
+            "rustfmt-wrapped `impl<T>\\n    Trait for Foo\\n{{` must exempt `_param`; \
+             violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (P2-2): a bodyless trait method `fn required(&self, _unused: f64);`
+    /// must terminate the signature accumulator at `;`, so the immediately following
+    /// inherent impl block is judged independently and does not inherit trait context.
+    ///
+    /// **No-op failure guarantee**: removing the `;` terminator causes the accumulator
+    /// to bleed into the next `{` (the inherent impl's brace), making `_unused` appear
+    /// as a violation in inherent-impl context → `assert!(!names.contains(...))` fires.
+    #[test]
+    fn scan_underscore_sig_params_terminates_bodyless_trait_sig_at_semicolon() {
+        let content = r#"
+trait MyTrait {
+    fn required(&self, _unused: f64);
+}
+struct Y;
+impl Y {
+    fn other(&self, x: i32) -> i32 {
+        x
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"_unused"),
+            "bodyless trait method `_unused` must not bleed into inherent-impl context; \
+             violations: {:?}",
+            violations
+        );
+        assert!(
+            violations.is_empty(),
+            "no violations expected; violations: {:?}",
             violations
         );
     }
