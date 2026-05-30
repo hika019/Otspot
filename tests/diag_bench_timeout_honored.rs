@@ -1,7 +1,7 @@
 //! bench harness の Timeout→Optimal silent wrap 撤廃 regression sentinel。
 //!
 //! 期待挙動: 収束未達 status (Timeout / MaxIterations / NumericalError / NonConvex) は
-//! 格上げ対象外。QPS benchmark では SuboptimalSolution も未収束として残す。
+//! 格上げ対象外。LocallyOptimal のみ Optimal 化 (KKT 近傍正規 status)。
 
 use otspot::problem::{SolveStatus, SolverResult};
 use otspot_dev::bench_utils::{apply_bench_status_promotion, BenchPromotionPolicy};
@@ -35,21 +35,25 @@ fn timeout_with_solution_stays_timeout_bench_qplib() {
 }
 
 #[test]
-fn suboptimal_with_valid_solution_stays_suboptimal_in_qps_benchmark() {
+fn suboptimal_with_valid_solution_stays_suboptimal_qps_benchmark() {
     let r_in = make(SolveStatus::SuboptimalSolution, vec![1.0; 4], 2.0);
     let r_out = apply_bench_status_promotion(r_in, 4, BenchPromotionPolicy::QpsBenchmark);
     assert_eq!(
         r_out.status,
         SolveStatus::SuboptimalSolution,
-        "QPS benchmark は solver の未収束 status を PASS に隠してはいけない"
+        "SuboptimalSolution は収束証明ではないため QPS bench で偽PASS化してはいけない"
     );
 }
 
 #[test]
-fn suboptimal_with_valid_solution_promoted_to_optimal_in_bench_qplib() {
+fn suboptimal_with_valid_solution_stays_suboptimal_bench_qplib() {
     let r_in = make(SolveStatus::SuboptimalSolution, vec![1.0; 4], 2.0);
     let r_out = apply_bench_status_promotion(r_in, 4, BenchPromotionPolicy::BenchQplib);
-    assert_eq!(r_out.status, SolveStatus::Optimal);
+    assert_eq!(
+        r_out.status,
+        SolveStatus::SuboptimalSolution,
+        "SuboptimalSolution は QPLIB bench でも偽PASS化してはいけない"
+    );
 }
 
 #[test]
