@@ -258,6 +258,14 @@ pub(crate) fn iterate(
         }
     };
 
+    // Early-exit before O(m²) γ init; prevents budget overrun on large warm-start solves.
+    if options.deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        || options.cancel_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+    {
+        let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
+        return (BoundedOutcome::Timeout(obj), state);
+    }
+
     let needs_sigma = leaving.needs_sigma();
     if needs_sigma {
         let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
@@ -1753,6 +1761,66 @@ mod tests {
                 );
             }
             other => panic!("expected Timeout (expired deadline), got {other:?}"),
+        }
+    }
+
+    /// **Sentinel:** expired deadline before O(m²) γ init must return `Timeout`
+    /// immediately without entering the iteration loop.
+    ///
+    /// Uses `DualSteepestEdgeLeaving` (needs_sigma = true) so the pre-loop
+    /// deadline guard is the only early-exit path for `recompute_gamma_truth`.
+    /// No-op proof: with a live deadline the same LP must NOT return Timeout
+    /// (it converges immediately because b ≥ 0 is already primal-feasible).
+    #[test]
+    fn dse_expired_deadline_returns_timeout_before_gamma_init() {
+        use crate::simplex::dual_advanced::steepest_edge::DualSteepestEdgeLeaving;
+        const EPS: f64 = 1e-10;
+
+        let fx = fixture_one_row_two_boxed();
+        let bsf = build_bounded_standard_form(&fx.problem);
+        // Cold-start state: x_B = b ≥ 0 → already primal feasible. Without a
+        // deadline the loop terminates Optimal on the first pricing probe.
+        let state_fresh = || BoundedDualState::cold(&bsf, &bsf.b);
+
+        // ── production run (live deadline) must NOT be Timeout ──────────────
+        let opts_live = SolverOptions {
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(500)),
+            ..SolverOptions::default()
+        };
+        let (live_outcome, _) = iterate(
+            state_fresh(), &bsf, &bsf.a, &bsf.c, &opts_live, &bsf.upper_bounds,
+            &mut DualSteepestEdgeLeaving::new(bsf.m),
+        );
+        match live_outcome {
+            BoundedOutcome::Optimal(_, _) => {}
+            other => panic!("no-op proof: expected Optimal with live deadline, got {other:?}"),
+        }
+
+        // ── sentinel (expired deadline) must return Timeout immediately ─────
+        let expired = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        let opts_expired = SolverOptions { deadline: Some(expired), ..SolverOptions::default() };
+        let (outcome, state_out) = iterate(
+            state_fresh(), &bsf, &bsf.a, &bsf.c, &opts_expired, &bsf.upper_bounds,
+            &mut DualSteepestEdgeLeaving::new(bsf.m),
+        );
+        match outcome {
+            BoundedOutcome::Timeout(obj) => {
+                let exp = bounded_obj(
+                    &bsf.c, &state_out.basis, &state_out.x_b,
+                    &state_out.at_upper, &state_out.is_basic, &bsf.upper_bounds,
+                );
+                assert!(
+                    (obj - exp).abs() < EPS,
+                    "Timeout obj={obj:.6e} ≠ bounded_obj={exp:.6e}; delta={:.3e}",
+                    (obj - exp).abs()
+                );
+                assert_eq!(
+                    state_out.iterations, 0,
+                    "expected 0 iterations (early-exit before loop), got {}",
+                    state_out.iterations
+                );
+            }
+            other => panic!("expected Timeout with expired deadline, got {other:?}"),
         }
     }
 }

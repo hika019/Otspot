@@ -35,9 +35,9 @@ impl MipNode {
 
     /// Creates a child node with an explicit warm-start basis.
     ///
-    /// `warm_start = None` triggers cold start. The simplex also falls back to
-    /// cold start when any basic variable violates its lower bound (typical on
-    /// the up-branch) or when presolve reduces the child LP.
+    /// `warm_start = None` triggers cold start. The simplex falls back to
+    /// cold start when presolve reduces the child LP. (Note: dual_advanced
+    /// legacy path now retains warm-start under lb-violation; see #175.)
     pub fn child_warm(
         &self,
         new_bounds: VarBounds,

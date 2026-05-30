@@ -245,6 +245,21 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
+        // 3d': lb-violation 方向補正。
+        //
+        // 通常の双対 simplex 比率テストは trow[j] > 0 を入基候補とする (ub 違反方向)。
+        // ウォームスタート時の lb 違反 (x_b[r] < 0) を修復するには入基変数の「離基行への
+        // 影響が x_b[r] を増加させる方向」、すなわち trow[j] < 0 を選ばなければならない。
+        // trow を符号反転することで既存の比率テスト実装をそのまま再利用する。
+        //
+        // 被縮小費用更新と離基変数の r 値も整合的に符号反転する (3i 参照)。
+        let lb_violation = x_b[leaving_row] < 0.0;
+        if lb_violation {
+            for t in trow[..n_price].iter_mut() {
+                *t = -*t;
+            }
+        }
+
         // 3e: ratio test → entering_col, theta
         // bland_mode では pure Bland (min ratio + smallest idx tiebreak)。
         let ratio_pick = if bland_mode {
@@ -317,9 +332,10 @@ pub(crate) fn dual_simplex_core_advanced(
                 reduced_costs[j] -= theta * trow[j];
             }
         }
-        // 離基変数の被縮小費用: r_{leaving_col} = -θ
+        // lb-violation: 離基変数は lb で退出 → reduced cost は正 (+theta)。
+        // ub-violation: 離基変数は ub で退出 → reduced cost は負 (-theta)。
         if leaving_col < n_price {
-            reduced_costs[leaving_col] = -theta;
+            reduced_costs[leaving_col] = if lb_violation { theta } else { -theta };
         }
 
         // 3j: DSE 重み更新 (stateless strategies は no-op)。
