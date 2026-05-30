@@ -165,9 +165,9 @@ impl DualLeavingStrategy for DualSteepestEdgeLeaving {
     }
 
     fn after_refactor(&mut self, m: usize) {
-        // Refactor wipes accumulated eta drift; γ accumulates similarly so
-        // we reset to identity for stability. The DSE literature accepts
-        // periodic resets — between resets the rank-1 update is exact.
+        // rank-1 update は exact (Forrest-Goldfarb 1992)、refactor 後の γ は
+        // 前 iteration の累積値を保持する。CEILING-flagged drift
+        // (γ[i] > CEILING) または size mismatch の時のみ identity reset。
         if self.weights.gamma.len() != m {
             self.weights = DseWeights::new(m);
         } else if self.weights.needs_reset {
