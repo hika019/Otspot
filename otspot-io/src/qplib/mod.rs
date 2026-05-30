@@ -1081,6 +1081,77 @@ minimize
         );
     }
 
+    /// Sentinel: objective constant q0 ≠ 0 must propagate to `prob.obj_offset`.
+    ///
+    /// **No-op failure guarantee**: reverting to `let _q0 = ts.read_f64()?;` (discarding q0)
+    /// leaves `prob.obj_offset = 0.0` instead of 42.5 → assertion fires.
+    #[test]
+    fn test_qplib_objective_constant_propagates_to_obj_offset() {
+        let qplib = "\
+Q0_OFFSET
+LCL
+minimize
+1
+1
+0
+0.0
+0
+42.5
+1
+1 1 1.0
+1.0e308
+-1.0e308
+0
+1.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 1);
+        assert!(
+            (prob.obj_offset - 42.5).abs() < 1e-12,
+            "q0=42.5 must propagate to obj_offset; got {}",
+            prob.obj_offset
+        );
+    }
+
+    /// Sentinel: non-finite q0 must return a `ParseError`.
+    ///
+    /// **No-op failure guarantee**: if the NaN guard is removed, `parse_qplib_str`
+    /// would succeed with `obj_offset = NaN` → `is_err()` fails → assertion fires.
+    #[test]
+    fn test_qplib_objective_constant_nan_is_error() {
+        let qplib = "\
+Q0_NAN
+LCL
+minimize
+1
+1
+0
+0.0
+0
+NaN
+1
+1 1 1.0
+1.0e308
+-1.0e308
+0
+1.0
+0
+0.0
+0
+1.0e308
+0
+";
+        assert!(
+            matches!(parse_qplib_str(qplib), Err(QplibError::ParseError(_))),
+            "non-finite q0 must produce ParseError"
+        );
+    }
+
     /// Duplicate linear constraint entries must be accumulated (not double-counted).
     ///
     /// Sentinel: if sort-merge deduplication is broken, the final A matrix will

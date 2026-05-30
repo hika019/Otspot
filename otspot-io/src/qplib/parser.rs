@@ -98,7 +98,14 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         c[i] = v;
     }
 
-    let _q0 = ts.read_f64()?; // objective constant (ignored)
+    let q0_raw = ts.read_f64()?;
+    if !q0_raw.is_finite() {
+        return Err(QplibError::ParseError(format!(
+            "objective constant q0 is not finite: {}",
+            q0_raw
+        )));
+    }
+    let q0 = q0_raw;
 
     // Constraint quadratic terms (QCQ only)
     let mut con_q_triplets: Vec<Vec<(usize, usize, f64)>> = if con_char == 'Q' {
@@ -305,14 +312,17 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
         vec![]
     };
 
+    let q0_offset = if maximize { -q0 } else { q0 };
+
     let mut prob = QpProblem::new(q, c, a_mat, b_vec, bounds, constraint_types)
         .map_err(|e| QplibError::ParseError(e.to_string()))?;
     prob.quadratic_constraints = quadratic_constraints;
+    prob.obj_offset = q0_offset;
 
     if var_binary || var_integer {
         let integer_vars: Vec<usize> = (0..n).collect();
         if prob.q.nnz() == 0 {
-            let lp = LpProblem::new_general(
+            let mut lp = LpProblem::new_general(
                 prob.c,
                 prob.a,
                 prob.b,
@@ -323,6 +333,7 @@ pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, Qp
             .map_err(|e: otspot_core::error::SolverError| {
                 QplibError::ParseError(e.to_string())
             })?;
+            lp.obj_offset = q0_offset;
             let milp = MilpProblem::new(lp, integer_vars).map_err(
                 |e: otspot_core::mip::MipProblemError| QplibError::ParseError(e.to_string()),
             )?;
