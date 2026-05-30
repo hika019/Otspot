@@ -216,9 +216,14 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                // Warm basis is dual-feasible; lb-violations from b perturbation
-                // are repaired by the bounded dual simplex (same logic as the
-                // legacy path; see commit 9597aa2 and issue #175).
+                // `bounded_core::iterate` repairs lb-violations via the BFRT dual
+                // phase, but lacks Bland/lex anti-cycling guards. In MILP B&B the
+                // up-branch raises a variable's lb above its parent-optimal value,
+                // creating an lb-violation in the warm basis that can cause cycling
+                // until the hard-cap Timeout fires. Fall through to cold start
+                // whenever lb-violations are detected; `core.rs` (legacy path)
+                // handles them safely via Bland's rule (see 9597aa2 / #175).
+                if !super::has_lb_violation(&x_b, options.primal_tol) {
                 let mut is_basic = vec![false; bsf.n_total];
                 for &j in &warm.basis {
                     is_basic[j] = true;
@@ -243,6 +248,7 @@ fn try_bounded(
                     return result;
                 }
                 // UbViolationOutOfScope from warm start → cold start
+                } // lb-violation guard: fall through to cold start
             }
             // Singular warm basis → cold start
         }
