@@ -127,6 +127,10 @@ pub(crate) fn refine_dual_projected_gradient(
     const PG_MAX_ITER: usize = 2000;
     /// Gradient ∞-norm below which we declare convergence (no descent direction).
     const PG_GRAD_INF_TOL: f64 = 1e-14;
+    /// Minimum Cauchy step size; guards against underflow when grad²/curvature
+    /// rounds to zero. Distinct from `PG_GRAD_INF_TOL` so changing the
+    /// convergence threshold does not silently alter the step-size floor.
+    const PG_STEP_MIN: f64 = 1e-14;
     /// Squared-norm floor for gradient and curvature; below this the Cauchy step
     /// formula is ill-conditioned and we stop.
     const PG_CURV_FLOOR: f64 = 1e-28;
@@ -176,7 +180,7 @@ pub(crate) fn refine_dual_projected_gradient(
         if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
             break;
         }
-        let base_step = (grad_sq / curvature).clamp(PG_GRAD_INF_TOL, PG_STEP_MAX);
+        let base_step = (grad_sq / curvature).clamp(PG_STEP_MIN, PG_STEP_MAX);
         let mut accepted = false;
         let mut step = base_step;
         while step > 0.0 {

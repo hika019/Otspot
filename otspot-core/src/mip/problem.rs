@@ -12,7 +12,7 @@ use crate::linalg::ldl::is_q_psd_by_cholesky;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
-use crate::tolerances::{COMP_SLACK_REL_TOL, INT_ROUND_TOL};
+use crate::tolerances::{FIXED_POINT_FEAS_TOL, INT_ROUND_TOL};
 
 /// Construction error for [`MilpProblem`] / [`MiqpProblem`].
 #[non_exhaustive]
@@ -178,9 +178,9 @@ fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResu
         };
         for ((&lhs_k, &ct), &b_k) in lhs.iter().zip(&qp.constraint_types).zip(&qp.b) {
             let feasible = match ct {
-                ConstraintType::Le => lhs_k <= b_k + COMP_SLACK_REL_TOL,
-                ConstraintType::Ge => lhs_k >= b_k - COMP_SLACK_REL_TOL,
-                ConstraintType::Eq => (lhs_k - b_k).abs() <= COMP_SLACK_REL_TOL,
+                ConstraintType::Le => lhs_k <= b_k + FIXED_POINT_FEAS_TOL,
+                ConstraintType::Ge => lhs_k >= b_k - FIXED_POINT_FEAS_TOL,
+                ConstraintType::Eq => (lhs_k - b_k).abs() <= FIXED_POINT_FEAS_TOL,
             };
             if !feasible {
                 return Some(SolverResult::infeasible());

@@ -123,6 +123,17 @@ pub const Q_OFFDIAG_ABS: f64 = 1e-10;
 /// `qp/ipm_solver/attempt::try_q_diagonal_scaling`.
 pub const Q_OFFDIAG_REL: f64 = 1e-12;
 
+/// Absolute feasibility tolerance for the MIP fixed-point subproblem.
+///
+/// Used in `solve_fixed_point` when every variable is pinned to a single value
+/// (zero-width box). The check `|Ax_k - b_k| <= FIXED_POINT_FEAS_TOL` is purely
+/// absolute because x is already uniquely determined; there is no free scale.
+///
+/// Intentionally distinct from `COMP_SLACK_REL_TOL` (a relative scale factor
+/// for LP postsolve): conflating them would cause LP postsolve tuning to silently
+/// alter the MIP fixed-point feasibility gate.
+pub const FIXED_POINT_FEAS_TOL: f64 = 1e-6;
+
 /// Size gate shared across expensive post-processing sites.
 ///
 /// Problems above this threshold skip high-cost operations (primal projection,
