@@ -65,7 +65,8 @@ pub(crate) fn refine_kkt_iterative(
         if n_dual > 0 {
             n_dual_total += n_dual;
             outer_made_progress = true;
-            let _ = run_dual_recovery_postprocess(problem, &view, result, deadline);
+            // side-effect refit only; KKT score is reused in the else branch via pre/post diff.
+            let _: f64 = run_dual_recovery_postprocess(problem, &view, result, deadline);
         } else {
             let pre_cleanup_kkt = kkt_residual_rel(
                 &view,
@@ -117,15 +118,14 @@ pub(crate) fn refine_kkt_iterative(
     // K = [Q+δp·I, A^T; A, -δd·I] の対角正則化。十分小さく IR で eps·‖K‖ まで refine 可。
     const DELTA_P_DEFAULT: f64 = 1e-10;
     const DELTA_D_DEFAULT: f64 = 1e-10;
-    let (delta_p, delta_d) = (DELTA_P_DEFAULT, DELTA_D_DEFAULT);
 
     let sigma_zero = vec![0.0_f64; m];
     let mut k_mat = crate::qp::ipm_core::kkt::build_augmented_system(
         &problem.q,
         &problem.a,
         &sigma_zero,
-        delta_p,
-        delta_d,
+        DELTA_P_DEFAULT,
+        DELTA_D_DEFAULT,
     );
 
     // bound-active 変数の dx を K 対角 penalty で抑制 (近似 active set fix)。
@@ -169,8 +169,8 @@ pub(crate) fn refine_kkt_iterative(
     const FACTOR_RETRY_GROWTH: f64 = 10.0;
     const FACTOR_RETRY_MAX: usize = 6;
     let factor = {
-        let mut current_delta_p = delta_p;
-        let mut current_delta_d = delta_d;
+        let mut current_delta_p = DELTA_P_DEFAULT;
+        let mut current_delta_d = DELTA_D_DEFAULT;
         let mut current_k = k_mat.clone();
         let mut result_factor: Option<crate::linalg::ldl::LdlFactorizationAmd> = None;
         let mut retry_count = 0usize;
