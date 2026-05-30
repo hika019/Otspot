@@ -407,6 +407,33 @@ ENDATA\n";
         assert!(!got.q.values().is_empty());
     }
 
+    /// Sentinel: OBJSENSE MAX with an N-row RHS must negate the offset.
+    ///
+    /// **No-op failure guarantee**: removing the `if self.maximize { -raw }` sign-flip
+    /// leaves `obj_offset = 10.0` instead of `-10.0` → assertion fires.
+    #[test]
+    fn test_qps_objsense_max_obj_offset_sign_flip() {
+        let qps = r"NAME  MAX_OFFSET
+OBJSENSE
+    MAX
+ROWS
+ N  obj
+ L  c1
+COLUMNS
+    x1    obj    1.0    c1    1.0
+RHS
+    rhs   obj    10.0
+    rhs   c1    5.0
+ENDATA
+";
+        let prob = parse_qps_str(qps).unwrap();
+        assert!(
+            (prob.obj_offset - (-10.0)).abs() < 1e-12,
+            "OBJSENSE MAX with N-row RHS=10.0 must yield obj_offset=-10.0; got {}",
+            prob.obj_offset
+        );
+    }
+
     use std::io::{self, Read};
 
     struct LineCountingReader<R: std::io::BufRead> {

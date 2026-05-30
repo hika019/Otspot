@@ -677,7 +677,10 @@ impl QpsParser {
         };
 
         let obj_offset = match &self.obj_row {
-            Some(obj_row_name) => self.rhs.get(obj_row_name).copied().unwrap_or(0.0),
+            Some(obj_row_name) => {
+                let raw = self.rhs.get(obj_row_name).copied().unwrap_or(0.0);
+                if self.maximize { -raw } else { raw }
+            }
             None => 0.0,
         };
         if !obj_offset.is_finite() {
