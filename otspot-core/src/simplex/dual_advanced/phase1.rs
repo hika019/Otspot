@@ -244,7 +244,6 @@ fn build_a_aug(
             trip_vals.push(1.0);
         }
     }
-    let _ = m;
     CscMatrix::from_triplets(&trip_rows, &trip_cols, &trip_vals, m, n_aug).ok()
 }
 
