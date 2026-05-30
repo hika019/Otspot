@@ -4,7 +4,7 @@
 use crate::options::SolverOptions;
 use crate::qp::QpProblem;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, ZERO_TOL};
+use crate::tolerances::{DROP_TOL, Q_OFFDIAG_ABS, SCALING_SIGMA_FLOOR, ZERO_TOL};
 use super::qp_transforms::{QpPresolveResult, QpPostsolveStep};
 
 /// Minimum ratio of rows to columns for equality-constraint QR elimination.
@@ -61,9 +61,10 @@ pub fn equality_constraint_qr(
             continue;
         }
         let ch = col_pattern_hash(&row_entries[i]);
-        // Quantise |b| at 1e-9 so rows agreeing within rounding hash together; collisions
-        // are harmless because the real comparison runs below.
-        let bk = (prob.b[i].abs() * 1e9).round() as i64;
+        // Quantise |b| at RHS_HASH_QUANTIZE so rows agreeing within rounding hash together;
+        // collisions are harmless because the real comparison runs below.
+        const RHS_HASH_QUANTIZE: f64 = 1e9;
+        let bk = (prob.b[i].abs() * RHS_HASH_QUANTIZE).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }
 
@@ -223,11 +224,10 @@ pub fn constraint_precond(
         }
     }
 
-    // SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
+    // SCALING_SIGMA_FLOOR caps the per-stage amplification at 1e3 so total
     // amp (phase1·phase2·Ruiz) stays within the IPM's achievable scaled tolerance.
-    const SIGMA_FLOOR: f64 = 1e-3;
     let sigmas: Vec<f64> = row_max.iter().map(|&mx| {
-        if mx > 1.0 + 1e-10 { (1.0 / mx).max(SIGMA_FLOOR) } else { 1.0 }
+        if mx > 1.0 + 1e-10 { (1.0 / mx).max(SCALING_SIGMA_FLOOR) } else { 1.0 }
     }).collect();
 
     let has_any = sigmas.iter().any(|&s| (s - 1.0).abs() > 1e-12);

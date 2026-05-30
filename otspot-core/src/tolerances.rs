@@ -83,6 +83,26 @@ pub const INT_ROUND_TOL: f64 = 1e-9;
 /// (1 / 1e-300 = 1e300 は表現可能だが、値として無意味なスケールを生む)
 pub const UNDERFLOW_GUARD: f64 = 1e-300;
 
+/// Minimum per-row scale factor for large-coefficient rescaling.
+///
+/// When a row contains entries with `|A[i,j]| > LARGE_A_COEFF_TRIGGER`, each
+/// affected row is scaled by `σ_i = 1/√(max|A[i,*]|)`, clamped from below by
+/// this value.  Clamping caps the per-stage amplification at `1/SCALING_SIGMA_FLOOR = 1e3`,
+/// so the composite scaling (phase1 · phase2 · Ruiz) stays within the IPM's
+/// achievable scaled accuracy.
+pub const SCALING_SIGMA_FLOOR: f64 = 1e-3;
+
+/// Absolute entry magnitude at which large-coefficient / large-range rescaling
+/// is triggered.
+///
+/// Used in two independent sites that share the same threshold:
+/// - `presolve::qp_transforms::helpers::apply_large_coeff_rescaling`: fires when any
+///   `|A[i,j]| > LARGE_A_COEFF_TRIGGER` to improve IPM conditioning.
+/// - `qp::ipm_solver::attempt::try_q_diagonal_scaling`: fires when the positive
+///   Q-diagonal range `q_pos_max / q_pos_min >= LARGE_A_COEFF_TRIGGER` to reduce
+///   Q conditioning.
+pub const LARGE_A_COEFF_TRIGGER: f64 = 1e6;
+
 /// Absolute drop threshold for Q off-diagonal pruning in `near_zero_q_removal`.
 ///
 /// Off-diagonal entries `|Q[i,j]| < Q_OFFDIAG_ABS` are removed to improve

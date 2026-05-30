@@ -297,13 +297,13 @@ fn main() {
         detect_csv_path(&data_dir, baseline_override.as_deref(), &root)
     };
     let baseline_csv_str = baseline_csv.to_string_lossy().into_owned();
-    let baseline_objectives = load_baseline_objectives(&baseline_csv, false);
+    let baseline_objectives = load_baseline_objectives(&baseline_csv).unwrap_or_default();
     let expected_statuses = load_expected_statuses(&baseline_csv);
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
-    let n_infeasible_ref = expected_statuses.values().filter(|s| **s == ExpectedStatus::Infeasible).count();
-    let n_unbounded_ref = expected_statuses.values().filter(|s| **s == ExpectedStatus::Unbounded).count();
-    if n_infeasible_ref > 0 || n_unbounded_ref > 0 {
-        eprintln!("  (うち INFEASIBLE: {}, UNBOUNDED: {})", n_infeasible_ref, n_unbounded_ref);
+    let n_infeasible_baseline = expected_statuses.values().filter(|s| **s == ExpectedStatus::Infeasible).count();
+    let n_unbounded_baseline = expected_statuses.values().filter(|s| **s == ExpectedStatus::Unbounded).count();
+    if n_infeasible_baseline > 0 || n_unbounded_baseline > 0 {
+        eprintln!("  (うち INFEASIBLE: {}, UNBOUNDED: {})", n_infeasible_baseline, n_unbounded_baseline);
     }
     if baseline_objectives.is_empty() && expected_statuses.is_empty() {
         eprintln!("WARNING: No known optimal values loaded. All problems will be PASS[no_ref].");
