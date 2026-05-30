@@ -1049,4 +1049,12 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         let err = parse_mps(mps);
         assert!(err.is_err(), "NaN in BOUNDS must error: {:?}", err);
     }
+
+    /// NaN in a constraint-row RHS (3-field format) must error.
+    #[test]
+    fn test_mps_rhs_nan_constraint_row_3field_is_error() {
+        let mps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  NaN\nENDATA\n";
+        let err = parse_mps(mps);
+        assert!(err.is_err(), "NaN in constraint-row RHS (3-field) must error: {:?}", err);
+    }
 }

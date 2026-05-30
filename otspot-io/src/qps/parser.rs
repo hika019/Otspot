@@ -267,7 +267,8 @@ impl QpsParser {
                 line: line_num,
                 message: format!("Invalid value: {}", parts[1]),
             })?;
-            if !value.is_finite() {
+            let is_obj_row = self.obj_row.as_deref() == Some(row_name.as_str());
+            if !is_obj_row && !value.is_finite() {
                 return Err(QpsError::ParseError {
                     line: line_num,
                     message: format!("Non-finite RHS value for row='{}'", row_name),
@@ -292,11 +293,10 @@ impl QpsParser {
             }
             ok
         };
-        // finite check skipped for obj-row RHS (handled as obj_offset at build step)
         let pairs = if is_free {
-            parse_mps_free_pairs(&parts, line_num, "RHS", false)
+            parse_mps_free_pairs(&parts, line_num, "RHS", self.obj_row.as_deref())
         } else {
-            parse_mps_fixed_pairs(line, line_num, "RHS", false)
+            parse_mps_fixed_pairs(line, line_num, "RHS", self.obj_row.as_deref())
         }
         .map_err(|msg| QpsError::ParseError { line: line_num, message: msg })?;
         for (name, value) in pairs {
@@ -342,9 +342,9 @@ impl QpsParser {
             ok
         };
         let pairs = if is_free {
-            parse_mps_free_pairs(&parts, line_num, "RANGES", true)
+            parse_mps_free_pairs(&parts, line_num, "RANGES", None)
         } else {
-            parse_mps_fixed_pairs(line, line_num, "RANGES", true)
+            parse_mps_fixed_pairs(line, line_num, "RANGES", None)
         }
         .map_err(|msg| QpsError::ParseError { line: line_num, message: msg })?;
         for (name, value) in pairs {

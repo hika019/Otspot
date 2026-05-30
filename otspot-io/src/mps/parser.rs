@@ -271,7 +271,7 @@ impl MpsParser {
                 message: "RHS line requires at least 3 fields (rhs_name row value)".to_string(),
             });
         }
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", true)
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", self.obj_row.as_deref())
             .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
         for (name, value) in pairs {
             self.rhs.insert(name, value);
@@ -287,7 +287,7 @@ impl MpsParser {
                 message: "RANGES line requires at least 3 fields (rhs_name row value)".to_string(),
             });
         }
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", true)
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RANGES", None)
             .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
         for (name, value) in pairs {
             self.ranges.insert(name, value);

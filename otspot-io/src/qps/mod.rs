@@ -519,4 +519,28 @@ ENDATA\n";
         let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1 x1 NaN\nENDATA\n";
         assert!(parse_qps_str(qps).is_err(), "NaN in QUADOBJ must error");
     }
+
+    /// NaN in a constraint-row RHS (3-field format) must error.
+    #[test]
+    fn test_qps_rhs_nan_constraint_row_3field_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in constraint-row RHS (3-field) must error");
+    }
+
+    /// Inf in a constraint-row RHS (3-field format) must error.
+    #[test]
+    fn test_qps_rhs_inf_constraint_row_3field_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  Inf\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "Inf in constraint-row RHS (3-field) must error");
+    }
+
+    /// NaN for an undefined (typo) row name in RHS must error, not be silently accepted.
+    #[test]
+    fn test_qps_rhs_nan_named_overwrite_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  typo_row  NaN  c1  1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "NaN for unknown row in named RHS line must error (not silent accept)"
+        );
+    }
 }

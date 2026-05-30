@@ -45,19 +45,20 @@ pub(crate) fn is_fixed_width_format(line: &str) -> bool {
 /// Skips `parts[0]` (the RHS/RANGES section name) and collects adjacent
 /// `(name, f64)` pairs from `parts[1..]`.
 ///
-/// When `check_finite` is `true`, non-finite values (NaN/±∞) are rejected.
-/// Pass `false` for the RHS section; its build step validates objective offsets
-/// via a dedicated error variant.
+/// Non-finite values are rejected for all rows except the optional
+/// `obj_row_name`.  Pass `None` to enforce finite for all rows; pass
+/// `Some(name)` to allow non-finite for the N-row (checked at build time via
+/// a dedicated error variant).
 ///
 /// # Errors
 ///
-/// Returns an error string when a value cannot be parsed or (if `check_finite`)
-/// is non-finite.  The caller maps this string into the appropriate error type.
+/// Returns an error string when a value cannot be parsed or is non-finite
+/// for a constraint row.
 pub(crate) fn parse_mps_free_pairs(
     parts: &[&str],
     line_num: usize,
     section: &str,
-    check_finite: bool,
+    obj_row_name: Option<&str>,
 ) -> Result<Vec<(String, f64)>, String> {
     let mut pairs = Vec::new();
     let mut i = 1;
@@ -67,7 +68,8 @@ pub(crate) fn parse_mps_free_pairs(
         let value = raw.parse::<f64>().map_err(|_| {
             format!("line {}: Invalid {} value '{}'", line_num, section, raw)
         })?;
-        if check_finite && !value.is_finite() {
+        let is_obj_row = obj_row_name == Some(name.as_str());
+        if !is_obj_row && !value.is_finite() {
             return Err(format!(
                 "line {}: Non-finite {} value '{}'",
                 line_num, section, value
@@ -85,17 +87,18 @@ pub(crate) fn parse_mps_free_pairs(
 /// - Pair 1: name at cols 14–21, value at cols 24–35.
 /// - Pair 2: name at cols 39–46, value at cols 49–60.
 ///
-/// When `check_finite` is `true`, non-finite values are rejected.
+/// Non-finite values are rejected unless the row name matches `obj_row_name`.
+/// Pass `None` to enforce finite for all rows.
 ///
 /// # Errors
 ///
-/// Returns an error string when a value cannot be parsed or (if `check_finite`)
-/// is non-finite.
+/// Returns an error string when a value cannot be parsed or is non-finite
+/// for a constraint row.
 pub(crate) fn parse_mps_fixed_pairs(
     line: &str,
     line_num: usize,
     section: &str,
-    check_finite: bool,
+    obj_row_name: Option<&str>,
 ) -> Result<Vec<(String, f64)>, String> {
     let mut pairs = Vec::new();
 
@@ -106,7 +109,8 @@ pub(crate) fn parse_mps_fixed_pairs(
             let value1 = val_str1.parse::<f64>().map_err(|_| {
                 format!("line {}: Invalid {} value '{}'", line_num, section, val_str1)
             })?;
-            if check_finite && !value1.is_finite() {
+            let is_obj_row1 = obj_row_name == Some(name1.as_str());
+            if !is_obj_row1 && !value1.is_finite() {
                 return Err(format!(
                     "line {}: Non-finite {} value '{}'",
                     line_num, section, value1
@@ -123,7 +127,8 @@ pub(crate) fn parse_mps_fixed_pairs(
             let value2 = val_str2.parse::<f64>().map_err(|_| {
                 format!("line {}: Invalid {} value '{}'", line_num, section, val_str2)
             })?;
-            if check_finite && !value2.is_finite() {
+            let is_obj_row2 = obj_row_name == Some(name2.as_str());
+            if !is_obj_row2 && !value2.is_finite() {
                 return Err(format!(
                     "line {}: Non-finite {} value '{}'",
                     line_num, section, value2
