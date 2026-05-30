@@ -52,17 +52,13 @@ impl From<std::io::Error> for MpsError {
 
 /// ソルバー全体の統一エラー型
 ///
-/// 入力検証・数値計算・MPSパースなど、ソルバー操作中に
-/// 発生しうるエラーを統一的に表現する。
+/// 入力検証・数値計算など、ソルバー操作中に発生しうるエラーを統一的に表現する。
 ///
 /// 注意: Infeasible/Unbounded/MaxIterations は数学的結果であり、
 /// エラーではないため [`SolveStatus`](crate::problem::SolveStatus) で表現する。
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum SolverError {
-    /// MPSファイルのパースエラー
-    Mps(MpsError),
-
     /// 次元不一致（配列長・行列サイズの不整合）
     ///
     /// 例: `c.len() != a.ncols`, トリプレット配列の長さ不一致
@@ -126,7 +122,6 @@ pub enum SolverError {
 impl std::fmt::Display for SolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SolverError::Mps(e) => write!(f, "{}", e),
             SolverError::DimensionMismatch { field, expected, got } => {
                 write!(f, "Dimension mismatch: {} expected {} but got {}", field, expected, got)
             }
@@ -153,9 +148,3 @@ impl std::fmt::Display for SolverError {
 }
 
 impl std::error::Error for SolverError {}
-
-impl From<MpsError> for SolverError {
-    fn from(e: MpsError) -> Self {
-        SolverError::Mps(e)
-    }
-}

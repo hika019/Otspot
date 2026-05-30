@@ -52,8 +52,6 @@ pub(crate) struct LuBasis {
     /// 再因子分解が失敗した場合 true（SingularBasis または DeadlineExceeded）。
     /// 呼び出し元はこのフラグを確認してsolverを安全に打ち切ること。
     pub(crate) refactor_failed: bool,
-    /// FTRAN/BTRAN の順列適用で使う一時バッファ（毎回のヒープアロケーションを回避）
-    scratch: Vec<f64>,
 }
 
 impl LuBasis {
@@ -72,7 +70,6 @@ impl LuBasis {
 
     pub fn new_timed(a: &CscMatrix, basis: &[usize], max_etas: usize, deadline: Option<std::time::Instant>) -> Result<Self, SolverError> {
         let lu = lu::LuFactorization::factorize_timed(a, basis, deadline)?;
-        let n = lu.n;
         // max_etas == 0 を auto と解釈し m から動的計算 (CLAUDE.md 固定値排除)。
         let effective_max_etas = if max_etas == 0 {
             crate::options::default_max_etas(basis.len())
@@ -85,7 +82,6 @@ impl LuBasis {
             basis_indices: basis.to_vec(),
             singular_basis: false,
             refactor_failed: false,
-            scratch: Vec::with_capacity(n),
         })
     }
 
@@ -152,7 +148,7 @@ impl LuBasis {
 impl BasisManager for LuBasis {
     fn ftran(&mut self, rhs: &mut SparseVec) {
         let mut dense = rhs.to_dense();
-        lu::solve_ftran(&self.lu, &mut dense, &mut self.scratch);
+        lu::solve_ftran(&self.lu, &mut dense);
         eta::apply_ftran(&self.eta_file.etas, &mut dense);
         *rhs = SparseVec::from_dense(&dense);
     }
@@ -160,18 +156,18 @@ impl BasisManager for LuBasis {
     fn btran(&mut self, rhs: &mut SparseVec) {
         let mut dense = rhs.to_dense();
         eta::apply_btran(&self.eta_file.etas, &mut dense);
-        lu::solve_btran(&self.lu, &mut dense, &mut self.scratch);
+        lu::solve_btran(&self.lu, &mut dense);
         *rhs = SparseVec::from_dense(&dense);
     }
 
     fn ftran_dense(&mut self, rhs: &mut [f64]) {
-        lu::solve_ftran(&self.lu, rhs, &mut self.scratch);
+        lu::solve_ftran(&self.lu, rhs);
         eta::apply_ftran(&self.eta_file.etas, rhs);
     }
 
     fn btran_dense(&mut self, rhs: &mut [f64]) {
         eta::apply_btran(&self.eta_file.etas, rhs);
-        lu::solve_btran(&self.lu, rhs, &mut self.scratch);
+        lu::solve_btran(&self.lu, rhs);
     }
 
     fn update(&mut self, entering_col: usize, leaving_row: usize, pivot_col: &SparseVec) {
