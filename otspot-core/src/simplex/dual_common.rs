@@ -14,7 +14,10 @@
 //! for objective reporting on Optimal/Timeout/SingularBasis exits.
 
 use crate::basis::{BasisManager, LuBasis};
+use crate::options::WarmStartBasis;
+use crate::problem::{LpProblem, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
+use super::{extract_dual_info, extract_solution, SimplexOutcome, StandardForm};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
 /// dimension m; the caller owns the allocation so a hot loop can reuse it.
@@ -92,6 +95,86 @@ pub(super) fn compute_reduced_costs(
         a, c, basis_mgr, is_basic, n_price, basis, &mut y, &mut reduced_costs,
     );
     reduced_costs
+}
+
+/// Convert a `SimplexOutcome` to a `SolverResult`.
+///
+/// Single implementation shared by all three simplex dispatch paths:
+/// - warm-start dual (`dual.rs`): `dual_unbounded_is_infeasible = true`
+/// - cold-start primal phase-II (`dual.rs`): `dual_unbounded_is_infeasible = false`
+/// - advanced dual warm-start (`dual_advanced`): `dual_unbounded_is_infeasible = true`
+///
+/// The only semantic difference between callers is the `Unbounded` arm:
+/// dual simplex yields dual-unbounded ⇒ primal-infeasible; primal simplex
+/// yields a genuinely unbounded objective.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn outcome_to_result(
+    outcome: SimplexOutcome,
+    sf: &StandardForm,
+    problem: &LpProblem,
+    basis: &[usize],
+    x_b: &[f64],
+    col_scale: &[f64],
+    row_scale: &[f64],
+    dual_unbounded_is_infeasible: bool,
+) -> SolverResult {
+    match outcome {
+        SimplexOutcome::Optimal(obj, y) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            let (dual_solution, reduced_costs, slack) =
+                extract_dual_info(sf, problem, &y, &solution, row_scale);
+            let ws = WarmStartBasis { basis: basis.to_vec(), x_b: x_b.to_vec() };
+            SolverResult {
+                status: SolveStatus::Optimal,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution,
+                reduced_costs,
+                slack,
+                warm_start_basis: Some(ws),
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::Unbounded => {
+            if dual_unbounded_is_infeasible {
+                SolverResult {
+                    status: SolveStatus::Infeasible,
+                    objective: 0.0,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            } else {
+                SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    solution: vec![],
+                    dual_solution: vec![],
+                    reduced_costs: vec![],
+                    slack: vec![],
+                    warm_start_basis: None,
+                    ..Default::default()
+                }
+            }
+        }
+        SimplexOutcome::Timeout(obj) => {
+            let solution = extract_solution(sf, basis, x_b, col_scale);
+            SolverResult {
+                status: SolveStatus::Timeout,
+                objective: obj + sf.obj_offset,
+                solution,
+                dual_solution: vec![],
+                reduced_costs: vec![],
+                slack: vec![],
+                warm_start_basis: None,
+                ..Default::default()
+            }
+        }
+        SimplexOutcome::SingularBasis => SolverResult::numerical_error(),
+    }
 }
 
 /// c_B^T x_B = Σ c[basis[i]] · x_B[i]. Shared between primal/dual simplex for
