@@ -175,7 +175,6 @@ pub(crate) fn collect_dual_recovery_cluster_rows(
     candidate_rel: &[f64],
     ax: &[f64],
     row_abs_activity: &[f64],
-    _target_pf: f64,
 ) -> Option<(usize, Vec<usize>)> {
     debug_assert_eq!(candidate_cols.len(), candidate_rel.len());
     if candidate_cols.is_empty() {
@@ -527,7 +526,7 @@ mod free_columns_tests {
 
 #[cfg(test)]
 mod sentinel_tests {
-    use super::compute_dual_recovery_row_activity;
+    use super::{compute_dual_recovery_row_activity, compute_dual_recovery_row_bounds};
     use crate::problem::ConstraintType;
     use crate::qp::problem::QpProblem;
     use crate::sparse::CscMatrix;
@@ -546,8 +545,19 @@ mod sentinel_tests {
     #[should_panic(expected = "dim validated upstream")]
     fn row_activity_dim_mismatch_panics() {
         let problem = make_2var_problem();
-        // problem has n=2; pass solution of length 1 → mat_vec_mul dimension error → expect fires
         let wrong_solution = vec![1.0_f64];
         compute_dual_recovery_row_activity(&problem, &wrong_solution);
+    }
+
+    /// compute_dual_recovery_row_bounds returns None when solution length != num_vars.
+    #[test]
+    fn row_bounds_dim_mismatch_returns_none() {
+        let problem = make_2var_problem();
+        // problem has n=2; pass solution of length 1 → early None
+        let wrong_solution = vec![1.0_f64];
+        assert!(
+            compute_dual_recovery_row_bounds(&problem, &wrong_solution).is_none(),
+            "expected None for mismatched solution length"
+        );
     }
 }

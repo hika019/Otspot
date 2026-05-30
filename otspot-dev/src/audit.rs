@@ -661,6 +661,224 @@ mod tests {
         }
     }
 
+    // ── Layer C extension: underscore-prefixed signature parameters ─────────
+
+    /// Returns `(1-based line number, parameter name)` for every free-function
+    /// parameter of the form `_name: T` (non-trivially underscore-prefixed).
+    ///
+    /// A bare `_: T` (anonymous) is allowed; only named underscore parameters
+    /// like `_target_pf: f64` are reported.  Methods (functions with a `self`
+    /// parameter) are skipped because trait implementations must match the
+    /// trait's signature and may intentionally silence warnings with `_name`.
+    /// Skips test-context blocks.
+    fn scan_underscore_sig_params(content: &str) -> Vec<(usize, String)> {
+        let mut violations = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut depth: i32 = 0;
+        let mut in_str_state = false;
+        let mut skip_stack: Vec<i32> = Vec::new();
+        let mut pending_cfg_test = false;
+        let mut pending_test_attr = false;
+
+        // Accumulator for multi-line `fn` signature (fn ... {).
+        let mut in_fn_sig = false;
+        let mut fn_sig_buf = String::new();
+        let mut fn_start_line: usize = 0;
+
+        for (idx, &line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            let (opens, closes, in_str_next) = count_braces(line, in_str_state);
+            in_str_state = in_str_next;
+            depth += opens - closes;
+            while skip_stack.last().is_some_and(|&d| depth <= d) {
+                skip_stack.pop();
+            }
+
+            if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
+            if trimmed.contains("#[test]") || trimmed.contains("#[tokio::test]") {
+                pending_test_attr = true;
+            }
+            let is_mod_tests = (trimmed.starts_with("mod tests")
+                || trimmed.starts_with("mod test ")
+                || trimmed.starts_with("pub mod tests")
+                || trimmed.starts_with("pub(crate) mod tests"))
+                && opens > 0;
+            if (pending_cfg_test || pending_test_attr || is_mod_tests) && opens > 0 {
+                let entry_floor = depth - opens;
+                skip_stack.push(entry_floor);
+                pending_cfg_test = false;
+                pending_test_attr = false;
+                in_fn_sig = false;
+                fn_sig_buf.clear();
+            }
+            let in_skip = skip_stack.last().is_some_and(|&d| depth > d);
+
+            if in_skip {
+                in_fn_sig = false;
+                fn_sig_buf.clear();
+                continue;
+            }
+            if opens > 0 { pending_cfg_test = false; pending_test_attr = false; }
+            if trimmed.starts_with("//") { continue; }
+
+            // Detect start of a function signature.
+            if !in_fn_sig && line.contains("fn ") && line.contains('(') {
+                in_fn_sig = true;
+                fn_sig_buf.clear();
+                fn_start_line = idx + 1; // 1-based
+            }
+
+            if in_fn_sig {
+                fn_sig_buf.push_str(line);
+                fn_sig_buf.push('\n');
+
+                // Once we see `{` the signature is complete.
+                if line.contains('{') {
+                    let sig = &fn_sig_buf;
+                    if let Some(paren_start) = sig.find('(') {
+                        let brace_end = sig.find('{').unwrap_or(sig.len());
+                        let param_region = &sig[paren_start..brace_end.min(sig.len())];
+                        // Skip methods: trait impls must match the trait's signature and
+                        // may legitimately silence warnings with `_name`.
+                        if param_region.contains("&self")
+                            || param_region.contains("&mut self")
+                            || param_region.contains("self:")
+                            || param_region.contains("mut self")
+                        {
+                            in_fn_sig = false;
+                            fn_sig_buf.clear();
+                            continue;
+                        }
+                        // Detect `_name:` where name has at least one char after `_`.
+                        let mut search = param_region;
+                        while let Some(pos) = search.find("_") {
+                            let rest = &search[pos..];
+                            // Check if this `_` starts an identifier: `_` followed by alphanum/`_`
+                            let after_underscore = &rest[1..];
+                            let name_end = after_underscore
+                                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                                .unwrap_or(after_underscore.len());
+                            let name = &after_underscore[..name_end];
+                            // Must have non-empty name (not bare `_`) and end with `:`
+                            let after_name = &rest[1 + name_end..];
+                            let is_param = !name.is_empty()
+                                && after_name.starts_with(':')
+                                && !after_name.starts_with("::");
+                            // Check that the `_` is preceded by a param delimiter, not part of another ident.
+                            let before_pos = param_region.len() - search.len() + pos;
+                            let before = if before_pos == 0 {
+                                b'('
+                            } else {
+                                *param_region.as_bytes().get(before_pos - 1).unwrap_or(&b'(')
+                            };
+                            let starts_ident = matches!(before, b'(' | b',' | b' ' | b'\t' | b'\n');
+                            if is_param && starts_ident {
+                                let full_name = format!("_{}", name);
+                                violations.push((fn_start_line, full_name));
+                            }
+                            search = &search[pos + 1..];
+                            if search.is_empty() { break; }
+                        }
+                    }
+                    in_fn_sig = false;
+                    fn_sig_buf.clear();
+                }
+            }
+        }
+        violations
+    }
+
+    /// Verifies that production source files contain no `_name: T` function
+    /// parameters (underscore-prefixed named parameters that are never used).
+    /// These mislead callers into thinking the parameter matters.
+    #[test]
+    fn no_underscore_sig_params_in_production() {
+        let root = workspace_root();
+        let prod_dirs = [
+            root.join("otspot-core/src"),
+            root.join("otspot-io/src"),
+            root.join("otspot-model/src"),
+            root.join("src"),
+        ];
+
+        let mut all_violations: Vec<(std::path::PathBuf, usize, String)> = Vec::new();
+
+        for dir in &prod_dirs {
+            for entry in WalkDir::new(dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path().to_path_buf();
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.components().any(|c| c.as_os_str() == "bin") {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if !content.contains("fn ") {
+                    continue;
+                }
+                for (line_no, param) in scan_underscore_sig_params(&content) {
+                    all_violations.push((path.clone(), line_no, param));
+                }
+            }
+        }
+
+        if !all_violations.is_empty() {
+            let mut msg = String::from(
+                "underscore-prefixed named function parameters detected \
+                 (remove from signature or use the value):\n",
+            );
+            for (path, line_no, param) in &all_violations {
+                msg.push_str(&format!("  {}:{}: param `{}`\n", path.display(), line_no, param));
+            }
+            panic!("{msg}");
+        }
+    }
+
+    /// Sentinel: `_name: T` in a function signature must be detected.
+    #[test]
+    fn scan_underscore_sig_params_detects_violation() {
+        let content = r#"
+pub(crate) fn collect_cluster_rows(
+    problem: &str,
+    candidate_cols: &[usize],
+    _target_pf: f64,
+) -> Option<usize> {
+    None
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"_target_pf"),
+            "_target_pf should be detected as underscore-sig param; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: bare `_: T` (anonymous) must NOT be flagged.
+    #[test]
+    fn scan_underscore_sig_params_ignores_anonymous() {
+        let content = r#"
+fn example(_: usize, x: f64) -> f64 {
+    x
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        assert!(
+            violations.is_empty(),
+            "bare `_: T` must not be flagged; violations: {:?}",
+            violations
+        );
+    }
+
     // ── Unit tests for scanner helpers ──────────────────────────────────────
 
     /// Sentinel: `let _ = name;` where name is a function parameter must be detected.

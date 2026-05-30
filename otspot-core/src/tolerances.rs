@@ -134,23 +134,19 @@ pub const Q_OFFDIAG_REL: f64 = 1e-12;
 /// alter the MIP fixed-point feasibility gate.
 pub const FIXED_POINT_FEAS_TOL: f64 = 1e-6;
 
-/// Size gate for `n + m` sum comparison at expensive post-processing sites.
+/// Size gate for expensive post-processing: skip when `n + m > LARGE_PROBLEM_THRESHOLD`
+/// (sum form) or when `num_vars > LARGE_PROBLEM_THRESHOLD || num_constraints > LARGE_PROBLEM_THRESHOLD`
+/// (per-dim form).
 ///
-/// Operations that skip when `n + m > LARGE_PROBLEM_SIZE_SUM`:
-/// - `presolve::postsolve` — kept-perturbation LP
-/// - `qp::postsolve::refine::kkt_iterative` — saddle-point K factorize
-/// - `qp::ipm_solver::core::post_processing` — primal projection LDL
+/// Sites:
+/// - `presolve::postsolve` — kept-perturbation LP (n+m sum)
+/// - `qp::postsolve::refine::kkt_iterative` — saddle-point K factorize (n+m sum)
+/// - `qp::ipm_solver::core::post_processing` — primal projection LDL (n+m sum)
+/// - `qp::ipm_solver::attempt` — presolve skip gate (per-dim)
 ///
-/// Same rationale as `LARGE_PROBLEM_DIM_INDIVIDUAL`; split so `n+m` vs
-/// per-dim semantics are unambiguous at each call-site.
-pub(crate) const LARGE_PROBLEM_SIZE_SUM: usize = 50_000;
-
-/// Size gate for per-dimension comparison at presolve skip sites.
-///
-/// Condition: `num_vars > LARGE_PROBLEM_DIM_INDIVIDUAL || num_constraints > LARGE_PROBLEM_DIM_INDIVIDUAL`
-/// skips QP presolve in `qp::ipm_solver::attempt` to reserve IPM budget.
-/// Same value as `LARGE_PROBLEM_SIZE_SUM`; split so per-dim semantics are explicit.
-pub(crate) const LARGE_PROBLEM_DIM_INDIVIDUAL: usize = 50_000;
+/// 2026-05-30 audit-post-aac2b64: `LARGE_PROBLEM_SIZE_SUM` / `LARGE_PROBLEM_DIM_INDIVIDUAL`
+/// split撤退。値が乖離した実証なく alias 化していたため単一定数に統合。
+pub(crate) const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
 
 /// Relative tolerance for slack-based non-binding row detection in dual recovery.
 ///
