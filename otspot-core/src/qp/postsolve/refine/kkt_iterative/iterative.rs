@@ -131,8 +131,7 @@ pub(crate) fn refine_kkt_iterative(
     // bound-active 変数の dx を K 対角 penalty で抑制 (近似 active set fix)。
     const ACTIVE_TOL: f64 = 1e-8;
     const ACTIVE_PENALTY_RATIO: f64 = 1e8;
-    let active_fix_enabled = true;
-    if active_fix_enabled {
+    {
         let mut k_diag_max = 0.0_f64;
         for j in 0..(n + m) {
             let cs = k_mat.col_ptr[j];
@@ -198,36 +197,34 @@ pub(crate) fn refine_kkt_iterative(
                         current_delta_p,
                         current_delta_d,
                     );
-                    if active_fix_enabled {
-                        let mut k_diag_max_retry = 0.0_f64;
-                        for j in 0..(n + m) {
-                            let cs = current_k.col_ptr[j];
-                            let ce = current_k.col_ptr[j + 1];
-                            for k in cs..ce {
-                                if current_k.row_ind[k] == j {
-                                    k_diag_max_retry =
-                                        k_diag_max_retry.max(current_k.values[k].abs());
-                                    break;
-                                }
+                    let mut k_diag_max_retry = 0.0_f64;
+                    for j in 0..(n + m) {
+                        let cs = current_k.col_ptr[j];
+                        let ce = current_k.col_ptr[j + 1];
+                        for k in cs..ce {
+                            if current_k.row_ind[k] == j {
+                                k_diag_max_retry =
+                                    k_diag_max_retry.max(current_k.values[k].abs());
+                                break;
                             }
                         }
-                        let active_penalty_retry =
-                            (k_diag_max_retry * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
-                        for j in 0..n {
-                            let x = result.solution[j];
-                            let (lb, ub) = problem.bounds[j];
-                            let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
-                                || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
-                            if !is_active {
-                                continue;
-                            }
-                            let cs = current_k.col_ptr[j];
-                            let ce = current_k.col_ptr[j + 1];
-                            for k in cs..ce {
-                                if current_k.row_ind[k] == j {
-                                    current_k.values[k] += active_penalty_retry;
-                                    break;
-                                }
+                    }
+                    let active_penalty_retry =
+                        (k_diag_max_retry * ACTIVE_PENALTY_RATIO).max(ACTIVE_PENALTY_RATIO);
+                    for j in 0..n {
+                        let x = result.solution[j];
+                        let (lb, ub) = problem.bounds[j];
+                        let is_active = (lb.is_finite() && (x - lb).abs() < ACTIVE_TOL)
+                            || (ub.is_finite() && (ub - x).abs() < ACTIVE_TOL);
+                        if !is_active {
+                            continue;
+                        }
+                        let cs = current_k.col_ptr[j];
+                        let ce = current_k.col_ptr[j + 1];
+                        for k in cs..ce {
+                            if current_k.row_ind[k] == j {
+                                current_k.values[k] += active_penalty_retry;
+                                break;
                             }
                         }
                     }
@@ -256,75 +253,10 @@ pub(crate) fn refine_kkt_iterative(
         })
         .collect();
 
-    // (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel) を返す。pf_rel/df_rel は OSQP-style componentwise。
-    let compute_residuals =
-        |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
-            let qx = problem.q.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; n]);
-            let aty = problem
-                .a
-                .transpose()
-                .mat_vec_mul(y)
-                .unwrap_or_else(|_| vec![0.0; n]);
-            let mut r_d = vec![0.0_f64; n];
-            let mut df_rel_componentwise = 0.0_f64;
-            for j in 0..n {
-                if exclude_var[j] {
-                    continue;
-                }
-                let bc = bound_contrib_at_var(&problem.bounds, z, j);
-                r_d[j] = qx[j] + problem.c[j] + aty[j] + bc;
-                let scale_j = 1.0 + qx[j].abs() + problem.c[j].abs() + aty[j].abs() + bc.abs();
-                let rel_j = r_d[j].abs() / scale_j;
-                if rel_j > df_rel_componentwise {
-                    df_rel_componentwise = rel_j;
-                }
-            }
-            let ax = problem.a.mat_vec_mul(x).unwrap_or_else(|_| vec![0.0; m]);
-            let mut r_p = vec![0.0_f64; m];
-            let mut pf_abs = 0.0_f64;
-            let mut pf_rel_componentwise = 0.0_f64;
-            for i in 0..m {
-                let raw = ax[i] - problem.b[i];
-                let v = match problem.constraint_types[i] {
-                    ConstraintType::Eq => raw,
-                    ConstraintType::Ge => {
-                        if raw < 0.0 {
-                            raw
-                        } else {
-                            0.0
-                        }
-                    }
-                    ConstraintType::Le => {
-                        if raw > 0.0 {
-                            raw
-                        } else {
-                            0.0
-                        }
-                    }
-                };
-                r_p[i] = v;
-                pf_abs = pf_abs.max(v.abs());
-                let scale_i = 1.0 + ax[i].abs() + problem.b[i].abs();
-                let rel_i = v.abs() / scale_i;
-                if rel_i > pf_rel_componentwise {
-                    pf_rel_componentwise = rel_i;
-                }
-            }
-            let df_abs = r_d.iter().fold(0.0_f64, |a, &r| a.max(r.abs()));
-            (
-                r_d,
-                r_p,
-                pf_abs,
-                df_abs,
-                pf_rel_componentwise,
-                df_rel_componentwise,
-            )
-        };
-
     // Wilkinson IR の "double the working precision": Qx, A^T y, Ax を TwoFloat (DD) で積算し
     // residual を f64 limit 以下に精密化。LDL solve は f64 のまま。
-    let dd_mode = true;
-    let compute_residuals_dd =
+    // 戻り値: (r_d, r_p, pf_abs, df_abs, pf_rel, df_rel)、pf_rel/df_rel は OSQP-style componentwise。
+    let compute_residuals =
         |x: &[f64], y: &[f64], z: &[f64]| -> (Vec<f64>, Vec<f64>, f64, f64, f64, f64) {
             use twofloat::TwoFloat;
             let zero_dd = TwoFloat::from(0.0);
@@ -428,11 +360,8 @@ pub(crate) fn refine_kkt_iterative(
         };
 
     let pre_z = result.bound_duals.clone();
-    let (_, _, _pre_pf, _pre_df, pre_pf_rel, pre_df_rel) = if dd_mode {
-        compute_residuals_dd(&result.solution, &result.dual_solution, &pre_z)
-    } else {
-        compute_residuals(&result.solution, &result.dual_solution, &pre_z)
-    };
+    let (_, _, _pre_pf, _pre_df, pre_pf_rel, pre_df_rel) =
+        compute_residuals(&result.solution, &result.dual_solution, &pre_z);
     if pre_pf_rel < target_pf && pre_df_rel < target_pf {
         return 0;
     }
@@ -449,11 +378,8 @@ pub(crate) fn refine_kkt_iterative(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) = if dd_mode {
-            compute_residuals_dd(&result.solution, &result.dual_solution, &result.bound_duals)
-        } else {
-            compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals)
-        };
+        let (r_d, r_p, pf_abs_cur, df_abs_cur, pf_cur, df_cur) =
+            compute_residuals(&result.solution, &result.dual_solution, &result.bound_duals);
         if pf_cur < target_pf && df_cur < target_pf {
             break;
         }
@@ -496,11 +422,8 @@ pub(crate) fn refine_kkt_iterative(
         tmp.dual_solution = y_new;
         refit_bound_duals_kkt(problem, &mut tmp);
 
-        let (_, _, _pf_abs_new, _df_abs_new, pf_new, df_new) = if dd_mode {
-            compute_residuals_dd(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
-        } else {
-            compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals)
-        };
+        let (_, _, _pf_abs_new, _df_abs_new, pf_new, df_new) =
+            compute_residuals(&tmp.solution, &tmp.dual_solution, &tmp.bound_duals);
 
         // 採用: max(pf_rel, df_rel) strict 減少 + 両者 guardrail 内。
         let score_cur = pf_cur.max(df_cur);
