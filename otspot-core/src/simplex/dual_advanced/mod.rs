@@ -290,10 +290,16 @@ fn try_bounded(
                         dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
                         problem, options, &mut total_iters,
                     );
-                    if result.is_some() {
+                    // When the warm path started with lb-violations, a
+                    // BoundedOutcome::Unbounded (→Infeasible) may be a BFRT
+                    // numerical failure rather than true primal infeasibility.
+                    // Fall through to cold start for a clean re-solve.
+                    let warm_infeasible_with_lb_viol = has_lb_violation
+                        && result.as_ref().map_or(false, |r| r.status == SolveStatus::Infeasible);
+                    if result.is_some() && !warm_infeasible_with_lb_viol {
                         return result;
                     }
-                    // UbViolationOutOfScope from warm start → cold start
+                    // UbViolationOutOfScope or lb-violation-induced Infeasible → cold start
                 } // dual-infeasibility or unrepairable-lb-violation: fall through to cold start
             }
             // Singular warm basis → cold start
