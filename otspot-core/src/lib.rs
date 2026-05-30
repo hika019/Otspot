@@ -81,12 +81,7 @@ pub fn solve(problem: &crate::problem::LpProblem) -> crate::problem::SolverResul
     lp::solve_lp_with(problem, &SolverOptions::default())
 }
 
-/// Solve an LP with the supplied options. Includes `problem.obj_offset` in the returned objective.
-///
-/// Delegates to [`solve_lp_with`].
-pub fn solve_with(problem: &crate::problem::LpProblem, options: &SolverOptions) -> crate::problem::SolverResult {
-    lp::solve_lp_with(problem, options)
-}
+pub use lp::solve_lp_with as solve_with;
 
 #[cfg(test)]
 mod tests {

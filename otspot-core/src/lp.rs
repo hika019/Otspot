@@ -14,7 +14,9 @@ use crate::problem::{LpProblem, SolveRoute, SolveStatus, SolverResult};
 /// validation is performed by the underlying `simplex::solve_with`.
 pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    result.objective += problem.obj_offset;
+    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+        result.objective += problem.obj_offset;
+    }
     result.stats.route = SolveRoute::LpDirect;
     result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
     result
@@ -23,7 +25,9 @@ pub fn solve_lp_with(problem: &LpProblem, options: &SolverOptions) -> SolverResu
 /// LP entry from `solve_qp_with(Q=0)`. Sets `result.stats.route = SolveRoute::LpForwardedFromQp`.
 pub(crate) fn solve_lp_forwarded_from_qp(problem: &LpProblem, options: &SolverOptions) -> SolverResult {
     let mut result = crate::simplex::solve_with(problem, options);
-    result.objective += problem.obj_offset;
+    if matches!(result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+        result.objective += problem.obj_offset;
+    }
     result.stats.route = SolveRoute::LpForwardedFromQp;
     result.stats.deadline_triggered = matches!(result.status, SolveStatus::Timeout);
     result

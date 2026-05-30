@@ -234,10 +234,8 @@ fn maybe_apply_ruiz(
     if !(opts.use_ruiz_scaling && n_new > 0) {
         return None;
     }
-    let lb_vals: Vec<f64> = reduced.bounds.iter().map(|&(lb, _)| lb).collect();
-    let ub_vals: Vec<f64> = reduced.bounds.iter().map(|&(_, ub)| ub).collect();
     let mut scaler = RuizScaler::new(n_new, m_new);
-    scaler.compute(&reduced.q, &reduced.a, &reduced.c, &lb_vals, &ub_vals);
+    scaler.compute_with_rhs(&reduced.q, &reduced.a, &reduced.c, &[]);
     let (q_s, a_s, c_s, b_s, bounds_s) = scaler.scale_problem(
         &reduced.q,
         &reduced.a,

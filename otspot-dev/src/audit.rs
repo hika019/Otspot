@@ -663,14 +663,15 @@ mod tests {
 
     // ── Layer C extension: underscore-prefixed signature parameters ─────────
 
-    /// Returns `(1-based line number, parameter name)` for every free-function
+    /// Returns `(1-based line number, parameter name)` for every function
     /// parameter of the form `_name: T` (non-trivially underscore-prefixed).
     ///
     /// A bare `_: T` (anonymous) is allowed; only named underscore parameters
     /// like `_target_pf: f64` are reported.  Methods (functions with a `self`
-    /// parameter) are skipped because trait implementations must match the
-    /// trait's signature and may intentionally silence warnings with `_name`.
-    /// Skips test-context blocks.
+    /// parameter) inside `trait` definitions or `impl Trait for Type` blocks are
+    /// skipped: those signatures are part of a required interface and may
+    /// legitimately silence warnings with `_name`.  Inherent-impl methods
+    /// (`impl Foo`) are checked.  Skips test-context blocks.
     fn scan_underscore_sig_params(content: &str) -> Vec<(usize, String)> {
         let mut violations = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
@@ -678,6 +679,11 @@ mod tests {
         let mut depth: i32 = 0;
         let mut in_str_state = false;
         let mut skip_stack: Vec<i32> = Vec::new();
+        // Entry floors of trait impl blocks (`impl Trait for Type`) or trait
+        // definitions (`trait Foo { ... }`).  Methods with `self` in either
+        // context may legitimately use `_name` to silence "unused" warnings
+        // while matching a required interface.
+        let mut trait_impl_stack: Vec<i32> = Vec::new();
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false;
 
@@ -694,6 +700,21 @@ mod tests {
             depth += opens - closes;
             while skip_stack.last().is_some_and(|&d| depth <= d) {
                 skip_stack.pop();
+            }
+            while trait_impl_stack.last().is_some_and(|&d| depth <= d) {
+                trait_impl_stack.pop();
+            }
+
+            // Track trait impl blocks (`impl Trait for Type`) and trait
+            // definitions (`trait Foo { ... }`) — both need the exemption.
+            let is_trait_impl = opens > 0 && trimmed.starts_with("impl") && trimmed.contains(" for ");
+            let is_trait_def = opens > 0
+                && (trimmed.starts_with("trait ")
+                    || trimmed.starts_with("pub trait ")
+                    || trimmed.starts_with("pub(crate) trait "));
+            if is_trait_impl || is_trait_def {
+                let entry_floor = depth - opens;
+                trait_impl_stack.push(entry_floor);
             }
 
             if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
@@ -740,12 +761,15 @@ mod tests {
                     if let Some(paren_start) = sig.find('(') {
                         let brace_end = sig.find('{').unwrap_or(sig.len());
                         let param_region = &sig[paren_start..brace_end.min(sig.len())];
-                        // Skip methods: trait impls must match the trait's signature and
-                        // may legitimately silence warnings with `_name`.
-                        if param_region.contains("&self")
-                            || param_region.contains("&mut self")
-                            || param_region.contains("self:")
-                            || param_region.contains("mut self")
+                        // Skip methods in trait impls: trait implementations must match
+                        // the trait's signature and may intentionally silence warnings
+                        // with `_name`. Inherent methods are still checked.
+                        let in_trait_impl = trait_impl_stack.last().is_some_and(|&d| depth > d);
+                        if in_trait_impl
+                            && (param_region.contains("&self")
+                                || param_region.contains("&mut self")
+                                || param_region.contains("self:")
+                                || param_region.contains("mut self"))
                         {
                             in_fn_sig = false;
                             fn_sig_buf.clear();
@@ -875,6 +899,58 @@ fn example(_: usize, x: f64) -> f64 {
         assert!(
             violations.is_empty(),
             "bare `_: T` must not be flagged; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: `_name: T` in an *inherent* method (`impl Foo`) must still be detected.
+    ///
+    /// **No-op failure guarantee**: if inherent methods were also skipped (old behaviour
+    /// "skip all methods with self"), `_unused_param` would not appear in violations
+    /// → `assert!(names.contains(...))` fires.
+    #[test]
+    fn scan_underscore_sig_params_detects_inherent_method_unused_param() {
+        let content = r#"
+struct Foo;
+impl Foo {
+    fn do_something(&self, _unused_param: f64) -> f64 {
+        42.0
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"_unused_param"),
+            "inherent-method `_unused_param` must be detected; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel: `_name: T` in a *trait-impl* method or trait *default method* must NOT be flagged.
+    ///
+    /// **No-op failure guarantee**: if either exemption is removed, `_unused_param`
+    /// would appear in violations → `assert!(!names.contains(...))` fires.
+    #[test]
+    fn scan_underscore_sig_params_skips_trait_impl_and_trait_default_method() {
+        let content = r#"
+trait MyTrait {
+    fn default_method(&self, _unused_param: f64) -> f64 {
+        0.0
+    }
+}
+struct Bar;
+impl MyTrait for Bar {
+    fn default_method(&self, _unused_param: f64) -> f64 {
+        1.0
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"_unused_param"),
+            "trait-impl and trait-default `_unused_param` must NOT be detected; violations: {:?}",
             violations
         );
     }
