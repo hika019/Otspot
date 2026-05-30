@@ -189,6 +189,25 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
         .sum()
 }
 
+/// Anti-cycling: enter Bland mode after K = `(NO_PROGRESS_TRIGGER_FACTOR * m).max(NO_PROGRESS_MIN)`
+/// consecutive no-progress iterations.
+pub(super) const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
+pub(super) const NO_PROGRESS_MIN: usize = 100;
+
+/// Once in Bland mode, bail after `BLAND_ITER_CAP_FACTOR * n_price` additional iterations.
+pub(super) const BLAND_ITER_CAP_FACTOR: usize = 10;
+
+/// Relative improvement threshold for progress detection:
+/// improvement is counted only when `best - current > |best| * NO_PROGRESS_REL_EPS`.
+pub(super) const NO_PROGRESS_REL_EPS: f64 = 1e-12;
+
+/// Returns `true` when `current` is strictly better than `best_infeas` by more than
+/// the relative noise floor `NO_PROGRESS_REL_EPS * |best_infeas|`.
+/// `best_infeas == 0` ⇒ `false` (no progress possible from zero).
+pub(super) fn made_progress(best_infeas: f64, current: f64) -> bool {
+    best_infeas - current > best_infeas.abs() * NO_PROGRESS_REL_EPS
+}
+
 /// Periodic deadline-check interval inside the m-BTRAN gamma loop.
 /// Checked every `GAMMA_DEADLINE_CHECK_INTERVAL` rows; large enough to
 /// amortize the `Instant::now()` syscall but small enough to catch an
@@ -471,5 +490,37 @@ mod tests {
         // No flag at all: must always succeed.
         let result_no_flag = recompute_gamma_truth(&mut bm, m, None, None);
         assert!(result_no_flag.is_some(), "None cancel_flag must always return Some");
+    }
+
+    /// `made_progress` must return true iff improvement exceeds the relative
+    /// noise floor `|best_infeas| * NO_PROGRESS_REL_EPS`.
+    ///
+    /// no-op proof: stubbing `made_progress` to always return `false` makes the
+    /// second and third assertions fail → test fails.
+    #[test]
+    fn made_progress_threshold_boundary() {
+        // Clear improvement far above noise floor.
+        assert!(
+            made_progress(1.0, 0.0),
+            "1.0 → 0.0 is clear improvement; made_progress must return true"
+        );
+        // Improvement exactly at the noise floor is NOT counted as progress.
+        let eps = NO_PROGRESS_REL_EPS;
+        let best = 1.0_f64;
+        let at_boundary = best - best.abs() * eps;
+        assert!(
+            !made_progress(best, at_boundary),
+            "improvement == eps * |best| is not strictly above threshold; must return false"
+        );
+        // Improvement just above the noise floor IS counted.
+        let above_boundary = best - best.abs() * eps - 1e-15;
+        assert!(
+            made_progress(best, above_boundary),
+            "improvement slightly above eps * |best| must return true"
+        );
+        // No improvement at all.
+        assert!(!made_progress(1.0, 1.0), "no improvement must return false");
+        // best == 0: no progress possible from zero.
+        assert!(!made_progress(0.0, 0.0), "best == 0 must return false");
     }
 }

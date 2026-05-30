@@ -53,7 +53,10 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
-use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into, recompute_gamma_truth};
+use super::super::dual_common::{
+    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress,
+    recompute_gamma_truth, BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+};
 use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
@@ -116,18 +119,6 @@ fn flip_apply_disabled() -> bool {
 /// Hard iteration cap shared by both bounded dual and bounded primal Phase 2 loops.
 /// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
 const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
-
-/// Anti-cycling: enter Bland mode after this many consecutive no-progress iters.
-/// `K = (factor * m).max(MIN)` mirrors the threshold used in `core.rs`.
-const NO_PROGRESS_TRIGGER_FACTOR: usize = 3;
-const NO_PROGRESS_MIN: usize = 100;
-
-/// Once in Bland mode, bail after this many additional iters (× n_total).
-const BLAND_ITER_CAP_FACTOR: usize = 10;
-
-/// Relative improvement threshold: progress only counted when
-/// `best - current > best * REL_EPS`.
-const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 
 
 /// Internal state of the bounded dual simplex iteration. Built from
@@ -545,7 +536,7 @@ pub(crate) fn iterate(
         // Bland mode (smallest-index leaving rule) so the loop terminates finitely.
         if !bland_mode {
             let current = leaving.progress_metric(&state.x_b, &state.basis);
-            if best_infeas - current > best_infeas.abs() * NO_PROGRESS_REL_EPS {
+            if made_progress(best_infeas, current) {
                 best_infeas = current;
                 iters_since_progress = 0;
             } else {

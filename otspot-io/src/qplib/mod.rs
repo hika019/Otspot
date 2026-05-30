@@ -1152,6 +1152,44 @@ NaN
         );
     }
 
+    /// Sentinel: `maximize` sense must negate q0 before storing as `obj_offset`.
+    ///
+    /// **No-op failure guarantee**: changing `let q0_offset = if maximize { -q0 } else { q0 }`
+    /// to `let q0_offset = q0` (removing the sign flip) leaves `obj_offset = +42.5`
+    /// instead of `-42.5` → assertion fires.
+    #[test]
+    fn test_qplib_maximize_negates_obj_offset() {
+        let qplib = "\
+Q0_MAX
+LCL
+maximize
+1
+1
+0
+0.0
+0
+42.5
+1
+1 1 1.0
+1.0e308
+-1.0e308
+0
+1.0
+0
+0.0
+0
+1.0e308
+0
+";
+        let prob = unwrap_qp(parse_qplib_str(qplib).unwrap());
+        assert_eq!(prob.num_vars, 1);
+        assert!(
+            (prob.obj_offset - (-42.5)).abs() < 1e-12,
+            "maximize with q0=42.5 must store obj_offset=-42.5; got {}",
+            prob.obj_offset
+        );
+    }
+
     /// Duplicate linear constraint entries must be accumulated (not double-counted).
     ///
     /// Sentinel: if sort-merge deduplication is broken, the final A matrix will
