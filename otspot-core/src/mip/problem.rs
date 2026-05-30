@@ -12,6 +12,7 @@ use crate::linalg::ldl::is_q_psd_by_cholesky;
 use crate::options::SolverOptions;
 use crate::problem::{ConstraintType, LpProblem, SolveStatus, SolverResult};
 use crate::qp::QpProblem;
+use crate::tolerances::{FIXED_POINT_FEAS_TOL, INT_ROUND_TOL};
 
 /// Construction error for [`MilpProblem`] / [`MiqpProblem`].
 #[non_exhaustive]
@@ -154,25 +155,18 @@ impl Relaxation for MiqpProblem {
     }
 }
 
-// A variable whose bound width is <= this is treated as fixed to a point.
-// Integer branching tightens bounds to exact integers (floor/ceil), so a fixed
-// variable has width 0; the small tolerance only guards float round-off.
-const FIXED_BOX_TOL: f64 = 1e-9;
-// Feasibility tolerance when checking a fully-fixed point against the linear
-// constraints (matches the convex-QP solver's residual tolerance scale).
-const FIXED_POINT_FEAS_TOL: f64 = 1e-6;
-
 /// Solve the relaxation when **every** variable is fixed to a point (zero-width
 /// box). The QP IPM cannot (no interior), so evaluate the single candidate `x`
 /// directly: check linear-constraint feasibility, then return its exact objective
 /// `1/2 x'Qx + c'x + offset`. Returns `None` when any variable is still free
 /// (the IPM handles those, including partially-fixed boxes).
 fn solve_fixed_point(qp: &QpProblem, bounds: &[(f64, f64)]) -> Option<SolverResult> {
-    if !bounds.iter().all(|&(l, u)| u - l <= FIXED_BOX_TOL) {
+    // INT_ROUND_TOL: a fixed variable has width 0; this small tolerance guards float round-off.
+    if !bounds.iter().all(|&(l, u)| u - l <= INT_ROUND_TOL) {
         return None;
     }
     // Empty box (lower meaningfully above upper) → infeasible subproblem.
-    if bounds.iter().any(|&(l, u)| l - u > FIXED_BOX_TOL) {
+    if bounds.iter().any(|&(l, u)| l - u > INT_ROUND_TOL) {
         return Some(SolverResult::infeasible());
     }
     let x: Vec<f64> = bounds.iter().map(|&(l, u)| 0.5 * (l + u)).collect();

@@ -11,6 +11,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
+/// Problems with fewer variables than this threshold are classified as "small"
+/// for the slowness diagnostic check.
+const SMALL_PROBLEM_NVARS: usize = 200;
+/// Wall-clock threshold above which a small problem is reported as unexpectedly slow.
+const SLOWNESS_THRESHOLD_SECS: f64 = 30.0;
+
 /// Classification of a single problem's solve result.
 #[derive(Debug)]
 pub enum ScreenVerdict {
@@ -89,7 +95,7 @@ pub fn screen_single(
                             ScreenVerdict::ObjMismatch { got: r.objective, expected: exp_adj, rel_err }
                         }
                         _ => {
-                            if problem.num_vars < 200 && elapsed > 30.0 {
+                            if problem.num_vars < SMALL_PROBLEM_NVARS && elapsed > SLOWNESS_THRESHOLD_SECS {
                                 eprintln!("[SLOW] {}: small problem took {:.2}s", name, elapsed);
                                 ScreenVerdict::Slow { secs: elapsed }
                             } else {

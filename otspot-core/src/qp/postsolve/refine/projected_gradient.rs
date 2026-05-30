@@ -121,6 +121,23 @@ pub(crate) fn refine_dual_projected_gradient(
         }
     };
 
+    /// Lower bound on the projected-gradient iteration count (clamp min).
+    const PG_MIN_ITER: usize = 200;
+    /// Upper bound on the projected-gradient iteration count (clamp max).
+    const PG_MAX_ITER: usize = 2000;
+    /// Gradient ∞-norm below which we declare convergence (no descent direction).
+    const PG_GRAD_INF_TOL: f64 = 1e-14;
+    /// Minimum Cauchy step size; guards against underflow when grad²/curvature
+    /// rounds to zero. Distinct from `PG_GRAD_INF_TOL` so changing the
+    /// convergence threshold does not silently alter the step-size floor.
+    const PG_STEP_MIN: f64 = 1e-14;
+    /// Squared-norm floor for gradient and curvature; below this the Cauchy step
+    /// formula is ill-conditioned and we stop.
+    const PG_CURV_FLOOR: f64 = 1e-28;
+    /// Maximum Cauchy step size; clamps the gradient-descent step to prevent
+    /// overshooting when curvature is very small.
+    const PG_STEP_MAX: f64 = 1e8;
+
     let mut y_start = result.dual_solution.clone();
     project_feasible(&mut y_start);
     let Some((mut obj_curr, mut residual_curr)) = objective(&y_start) else {
@@ -131,7 +148,7 @@ pub(crate) fn refine_dual_projected_gradient(
     let mut obj_best = obj_curr;
     let mut prev_obj = obj_curr;
 
-    let pg_max_iters = m.saturating_mul(2).clamp(200, 2000);
+    let pg_max_iters = m.saturating_mul(2).clamp(PG_MIN_ITER, PG_MAX_ITER);
     const ACCEPT_TOL_REL: f64 = 1e-12;
     let obj_converge_thresh = 1e-16 * (n as f64).max(1.0);
     const STAGNATE_MIN_RATIO: f64 = 1e-7;
@@ -148,11 +165,11 @@ pub(crate) fn refine_dual_projected_gradient(
             Err(_) => break,
         };
         let grad_inf = grad.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-        if !grad_inf.is_finite() || grad_inf < 1e-14 {
+        if !grad_inf.is_finite() || grad_inf < PG_GRAD_INF_TOL {
             break;
         }
         let grad_sq = grad.iter().map(|v| v * v).sum::<f64>();
-        if !grad_sq.is_finite() || grad_sq < 1e-28 {
+        if !grad_sq.is_finite() || grad_sq < PG_CURV_FLOOR {
             break;
         }
         let aty_grad = match problem.a.transpose().mat_vec_mul(&grad) {
@@ -160,10 +177,10 @@ pub(crate) fn refine_dual_projected_gradient(
             Err(_) => break,
         };
         let curvature = aty_grad.iter().map(|v| v * v).sum::<f64>();
-        if !curvature.is_finite() || curvature < 1e-28 {
+        if !curvature.is_finite() || curvature < PG_CURV_FLOOR {
             break;
         }
-        let base_step = (grad_sq / curvature).clamp(1e-14, 1e8);
+        let base_step = (grad_sq / curvature).clamp(PG_STEP_MIN, PG_STEP_MAX);
         let mut accepted = false;
         let mut step = base_step;
         while step > 0.0 {

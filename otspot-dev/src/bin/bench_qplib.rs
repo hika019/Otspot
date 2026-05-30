@@ -160,7 +160,7 @@ fn main() {
             p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()
         };
         let csv = detect_csv_path(&data_dir, baseline_override.as_deref(), &root);
-        (load_baseline_objectives(&csv, false), load_expected_statuses(&csv))
+        (load_baseline_objectives(&csv).unwrap_or_default(), load_expected_statuses(&csv))
     };
     eprintln!("Baseline objectives loaded: {} problems", baseline_objectives.len());
     eprintln!("Expected statuses loaded: {} problems", expected_statuses.len());
