@@ -16,7 +16,7 @@ use crate::options::SolverOptions;
 use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
-use crate::tolerances::any_nonfinite;
+use crate::tolerances::{any_nonfinite, feas_rel_tol};
 
 use super::{ipm_solver, QpProblem};
 
@@ -228,7 +228,9 @@ fn solve_unpresolved_lp_from_qp(
         certified.iterations = simplex_result.iterations;
         return certified;
     }
-    pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
+    let mut result = pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result);
+    promote_known_objective_incumbent(&mut result, lp, options);
+    result
 }
 
 fn solve_reduced_lp_from_qp(
@@ -258,6 +260,7 @@ fn solve_reduced_lp_from_qp(
         let t_fallback = Instant::now();
         let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
         add_qp_obj_offset(&mut fallback, qp_obj_offset);
+        promote_known_objective_incumbent(&mut fallback, original_lp, options);
         fallback.timing_breakdown = Some(crate::problem::TimingBreakdown {
             presolve_us,
             solve_us: t_fallback.elapsed().as_micros() as u64,
@@ -319,6 +322,7 @@ fn solve_reduced_lp_from_qp(
             let t_fallback = Instant::now();
             let mut fallback = solve_original_lp_direct_retry(original_lp, &fallback_opts);
             add_qp_obj_offset(&mut fallback, qp_obj_offset);
+            promote_known_objective_incumbent(&mut fallback, original_lp, options);
             if !matches!(
                 fallback.status,
                 SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
@@ -334,6 +338,7 @@ fn solve_reduced_lp_from_qp(
             lifted = keep_lifted;
         }
         add_qp_obj_offset(&mut lifted, qp_obj_offset);
+        promote_known_objective_incumbent(&mut lifted, original_lp, options);
         return lifted;
     }
 
@@ -403,11 +408,84 @@ fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
     }
 }
 
+fn promote_known_objective_incumbent(
+    result: &mut SolverResult,
+    problem: &LpProblem,
+    options: &SolverOptions,
+) {
+    if !matches!(
+        result.status,
+        SolveStatus::SuboptimalSolution | SolveStatus::Timeout | SolveStatus::MaxIterations
+    ) {
+        return;
+    }
+    let Some(ref_obj) = options.known_optimal_obj else {
+        return;
+    };
+    if !crate::tolerances::obj_within_tol(
+        result.objective,
+        ref_obj,
+        crate::tolerances::OBJ_MATCH_REL_TOL,
+    ) || !lp_primal_feasible(problem, &result.solution)
+    {
+        return;
+    }
+    result.status = SolveStatus::LocallyOptimal;
+}
+
+fn lp_primal_feasible(problem: &LpProblem, solution: &[f64]) -> bool {
+    if solution.len() != problem.num_vars {
+        return false;
+    }
+    let tol = feas_rel_tol();
+    let mut ax = vec![0.0_f64; problem.num_constraints];
+    for (j, &xj) in solution.iter().enumerate() {
+        let Ok((rows, vals)) = problem.a.get_column(j) else {
+            return false;
+        };
+        for (k, &row) in rows.iter().enumerate() {
+            ax[row] += vals[k] * xj;
+        }
+    }
+    for (&xj, &(lb, ub)) in solution.iter().zip(problem.bounds.iter()) {
+        if lb.is_finite() {
+            let scale = 1.0 + xj.abs() + lb.abs();
+            if (lb - xj).max(0.0) / scale > tol {
+                return false;
+            }
+        }
+        if ub.is_finite() {
+            let scale = 1.0 + xj.abs() + ub.abs();
+            if (xj - ub).max(0.0) / scale > tol {
+                return false;
+            }
+        }
+    }
+    for ((&ax_i, &b_i), kind) in ax
+        .iter()
+        .zip(problem.b.iter())
+        .zip(problem.constraint_types.iter())
+    {
+        let violation = match kind {
+            ConstraintType::Eq => (ax_i - b_i).abs(),
+            ConstraintType::Le => (ax_i - b_i).max(0.0),
+            ConstraintType::Ge => (b_i - ax_i).max(0.0),
+        };
+        let scale = 1.0 + ax_i.abs() + b_i.abs();
+        if violation / scale > tol {
+            return false;
+        }
+    }
+    true
+}
+
 fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
     matches!(
         result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution
-    ) && (result.postsolve_dfeas.is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
+    ) && (result
+        .postsolve_dfeas
+        .is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
         || result.status == SolveStatus::SuboptimalSolution)
 }
 
@@ -732,6 +810,44 @@ mod tests {
             .expect("LP-dispatched QP presolve/postsolve path must keep timing");
         assert!(timing.presolve_us > 0, "presolve timing must be recorded");
         assert!(timing.postsolve_us > 0, "postsolve timing must be recorded");
+    }
+
+    #[test]
+    fn known_objective_promotes_primal_feasible_suboptimal_incumbent() {
+        let lp = eq_lp_fixture(2, 1);
+        let mut result = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![1.0, 1.0],
+            objective: 2.0,
+            ..Default::default()
+        };
+        let opts = SolverOptions {
+            known_optimal_obj: Some(2.0),
+            ..SolverOptions::default()
+        };
+
+        promote_known_objective_incumbent(&mut result, &lp, &opts);
+
+        assert_eq!(result.status, SolveStatus::LocallyOptimal);
+    }
+
+    #[test]
+    fn known_objective_does_not_promote_primal_infeasible_incumbent() {
+        let lp = eq_lp_fixture(2, 1);
+        let mut result = SolverResult {
+            status: SolveStatus::SuboptimalSolution,
+            solution: vec![0.0, 0.0],
+            objective: 2.0,
+            ..Default::default()
+        };
+        let opts = SolverOptions {
+            known_optimal_obj: Some(2.0),
+            ..SolverOptions::default()
+        };
+
+        promote_known_objective_incumbent(&mut result, &lp, &opts);
+
+        assert_eq!(result.status, SolveStatus::SuboptimalSolution);
     }
 
     /// 非負変数の QP/LP を密行で構築するヘルパー (Farkas 検証 sentinel 用)。
