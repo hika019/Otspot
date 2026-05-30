@@ -271,7 +271,9 @@ impl MpsParser {
                 message: "RHS line requires at least 3 fields (rhs_name row value)".to_string(),
             });
         }
-        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", self.obj_row.as_deref())
+        // Pass None: non-finite values are rejected for all rows including the N-row.
+        // The obj_offset (N-row RHS) is extracted in build_lp_problem after all sections parse.
+        let pairs = parse_mps_free_pairs(&parts, line_num, "RHS", None)
             .map_err(|msg| MpsError::ParseError { line: line_num, message: msg })?;
         for (name, value) in pairs {
             self.rhs.insert(name, value);
@@ -438,6 +440,14 @@ impl MpsParser {
             }
         }
 
+        // Extract objective constant (N-row RHS); sign-flip mirrors the MAX→MIN transform above.
+        let obj_offset = if let Some(obj_row_name) = &self.obj_row {
+            let raw = self.rhs.get(obj_row_name.as_str()).copied().unwrap_or(0.0);
+            if self.maximize { -raw } else { raw }
+        } else {
+            0.0
+        };
+
         let mut triplets = Vec::new();
         for (col_name, row_name, value) in &self.columns {
             if Some(row_name) == self.obj_row.as_ref() {
@@ -509,7 +519,7 @@ impl MpsParser {
         }
         integer_vars.sort_unstable();
 
-        let lp = LpProblem::new_general(
+        let mut lp = LpProblem::new_general(
             c,
             a,
             rhs_vec,
@@ -521,6 +531,7 @@ impl MpsParser {
             line: 0,
             message: e.to_string(),
         })?;
+        lp.obj_offset = obj_offset;
 
         Ok((lp, integer_vars))
     }

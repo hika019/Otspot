@@ -1050,12 +1050,23 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         assert!(err.is_err(), "NaN in BOUNDS must error: {:?}", err);
     }
 
-    /// be70df0 で N 行 RHS NaN は silently accepted (LpProblem に obj_offset 概念なし)。
-    /// `obj_row.as_deref()` を `None` に置換すると N 行も constraint 扱い → NaN reject → assertion 失敗。
+    /// N-row RHS with NaN must be a parse error (constraint-row symmetry).
     #[test]
-    fn test_mps_rhs_n_row_nan_is_silently_ok() {
+    fn test_mps_rhs_n_row_nan_is_error() {
         let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs obj NaN\n    rhs c1 1.0\nENDATA\n";
         let result = parse_mps(mps);
-        assert!(result.is_ok(), "N-row RHS NaN must be silently accepted (LpProblem has no obj_offset): {:?}", result);
+        assert!(result.is_err(), "N-row RHS NaN must be rejected: {:?}", result);
+    }
+
+    /// N-row RHS with a finite value must propagate to LpProblem.obj_offset.
+    #[test]
+    fn test_mps_rhs_n_row_finite_propagates_to_obj_offset() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs obj 42.5\n    rhs c1 10.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("valid MPS with N-row RHS");
+        assert!(
+            (lp.obj_offset - 42.5).abs() < 1e-12,
+            "obj_offset must equal N-row RHS 42.5, got {}",
+            lp.obj_offset
+        );
     }
 }

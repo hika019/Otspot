@@ -8,6 +8,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### 変更
 
+- **BREAKING**: `LpProblem` に `obj_offset: f64` フィールド追加 — MPS N-row RHS 定数を正しく求解結果へ反映 (#191)
 - **BREAKING**: `SolverOptions.psd_check_max_n` フィールド削除 — production caller 0 件、soundness 穴 (size-skip) の除去 (#130)
 
 ### 修正
