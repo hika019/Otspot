@@ -167,7 +167,10 @@ pub(crate) fn dual_simplex_core_advanced(
     // to FLOOR within a few pivots (verified on textbook degenerate LP).
     // Cost: O(m²). Acceptable: one-shot per warm-start solve.
     if needs_sigma {
-        match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+        match recompute_gamma_truth(
+            &mut basis_mgr, m, options.deadline,
+            options.cancel_flag.as_deref(),
+        ) {
             None => {
                 let obj = basic_obj(c, basis, x_b);
                 return SimplexOutcome::Timeout(obj);
@@ -385,7 +388,10 @@ pub(crate) fn dual_simplex_core_advanced(
             // refactor 後の真の γ を m BTRAN で再計算 (initial init と同じ理由)。
             leaving.after_refactor(m);
             if needs_sigma {
-                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                match recompute_gamma_truth(
+                    &mut basis_mgr, m, options.deadline,
+                    options.cancel_flag.as_deref(),
+                ) {
                     None => {
                         let obj = basic_obj(c, basis, x_b);
                         return SimplexOutcome::Timeout(obj);
@@ -418,6 +424,43 @@ pub(crate) fn dual_simplex_core_advanced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sparse::CscMatrix;
+    use crate::options::SolverOptions;
+    use super::super::super::pricing::MostInfeasibleLeaving;
+
+    /// Sentinel (P0 proof): lb-violation + sign-flipped ratio test None
+    /// = dual-simplex infeasibility proof → must return `SimplexOutcome::Unbounded`.
+    ///
+    /// LP: min 0, s.t. x + s = -1, x,s ≥ 0. Infeasible (no feasible x,s ≥ 0 with x+s = -1).
+    /// Warm basis {s}: x_b = [-1] → lb-violation at row 0.
+    /// Sign-flip: trow[x] = -1 → no ratio-test candidate → Unbounded (= caller Infeasible).
+    ///
+    /// no-op proof: restoring the fb410eb fallback (trow restore + retry with ub direction)
+    /// finds trow[x]=1 > 0, pivot proceeds with step = -1/1 = -1 → x_b never reaches 0,
+    /// iteration cycles until the hard cap fires → Timeout, not Unbounded → test FAILS.
+    #[test]
+    fn warm_start_infeasible_basis_returns_unbounded_not_cycle() {
+        // A = [[1, 1]] (x, s columns), b = [-1], c = [0, 0], basis = [1] (s basic).
+        // B = [[1]] (s column), B^{-1} = [[1]], x_b = B^{-1} b = [-1].
+        let a = CscMatrix::from_triplets(&[0, 0], &[0, 1], &[1.0, 1.0], 1, 2).unwrap();
+        let c = vec![0.0_f64, 0.0];
+        let mut basis = vec![1usize]; // s in basis
+        let mut x_b = vec![-1.0_f64];  // lb-violation
+        let opts = SolverOptions::default();
+        let mut leaving = MostInfeasibleLeaving;
+        let mut iters = 0usize;
+
+        let outcome = dual_simplex_core_advanced(
+            &a, &mut x_b, &c, &mut basis,
+            1, 2, &opts, &mut leaving, &mut iters,
+        );
+        assert!(
+            matches!(outcome, SimplexOutcome::Unbounded),
+            "warm-start lb-violation with no lb-repair candidate must yield Unbounded \
+             (dual infeasibility proof); got {outcome:?}. \
+             If Timeout: fallback retry was restored — the no-op proof triggered."
+        );
+    }
 
     /// B4 sentinel: `apply_lex_perturbation` の `perturb_x=false` 時は x_b を変更しない。
     ///

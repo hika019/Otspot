@@ -268,7 +268,10 @@ pub(crate) fn iterate(
 
     let needs_sigma = leaving.needs_sigma();
     if needs_sigma {
-        match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+        match recompute_gamma_truth(
+            &mut basis_mgr, m, options.deadline,
+            options.cancel_flag.as_deref(),
+        ) {
             None => {
                 let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                 return (BoundedOutcome::Timeout(obj), state);
@@ -431,7 +434,10 @@ pub(crate) fn iterate(
             }
             leaving.after_refactor(m);
             if needs_sigma {
-                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                match recompute_gamma_truth(
+                    &mut basis_mgr, m, options.deadline,
+                    options.cancel_flag.as_deref(),
+                ) {
                     None => {
                         let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                         return (BoundedOutcome::Timeout(obj), state);
@@ -521,7 +527,10 @@ pub(crate) fn iterate(
             }
             leaving.after_refactor(m);
             if needs_sigma {
-                match recompute_gamma_truth(&mut basis_mgr, m, options.deadline) {
+                match recompute_gamma_truth(
+                    &mut basis_mgr, m, options.deadline,
+                    options.cancel_flag.as_deref(),
+                ) {
                     None => {
                         let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                         return (BoundedOutcome::Timeout(obj), state);
