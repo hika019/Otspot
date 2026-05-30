@@ -53,7 +53,8 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
-use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into};
+use super::super::dual_common::{basic_obj, compute_dual_vars_into, compute_reduced_costs_into, recompute_gamma_truth};
+use super::super::pricing::DualLeavingStrategy;
 use super::super::standard_form::{BoundedStandardForm, SimplexOutcome};
 use super::bound_flip::{bfrt_select_entering, bump_bfrt_flip_invocations, ColBound};
 
@@ -176,6 +177,7 @@ struct IterBuffers {
     trow: Vec<f64>,
     alpha: Vec<f64>,
     alpha_flip: Vec<f64>,
+    sigma: Vec<f64>,
     col_bounds: Vec<ColBound>,
     y: Vec<f64>,
 }
@@ -193,6 +195,7 @@ impl IterBuffers {
             trow: vec![0.0; n_total],
             alpha: vec![0.0; m],
             alpha_flip: vec![0.0; m],
+            sigma: vec![0.0; m],
             col_bounds,
             y: vec![0.0; m],
         }
@@ -214,9 +217,10 @@ pub(crate) fn solve_bounded_dual(
     c: &[f64],
     options: &SolverOptions,
     ubs: &[f64],
+    leaving: &mut dyn DualLeavingStrategy,
 ) -> (BoundedOutcome, BoundedDualState) {
     let state = BoundedDualState::cold(bsf, b);
-    iterate(state, bsf, a, c, options, ubs)
+    iterate(state, bsf, a, c, options, ubs, leaving)
 }
 
 /// Inner iteration loop. Accepts a pre-populated state — tests use this to
@@ -234,6 +238,7 @@ pub(crate) fn iterate(
     c: &[f64],
     options: &SolverOptions,
     ubs: &[f64],
+    leaving: &mut dyn DualLeavingStrategy,
 ) -> (BoundedOutcome, BoundedDualState) {
     let m = bsf.m;
     let n_total = bsf.n_total;
@@ -252,6 +257,12 @@ pub(crate) fn iterate(
             return (BoundedOutcome::Timeout(obj), state);
         }
     };
+
+    let needs_sigma = leaving.needs_sigma();
+    if needs_sigma {
+        let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
+        leaving.set_initial_gamma(&gamma_truth);
+    }
 
     // Cost perturbation: c̃_j = max(c_j, 0). With slack initial basis (y = 0)
     // every reduced cost is ≥ 0 ⇒ dual feasible. The perturbation is local
@@ -288,21 +299,16 @@ pub(crate) fn iterate(
             return (BoundedOutcome::Timeout(obj), state);
         }
 
-        // Pricing: most infeasible row. lb-violation only — see module doc.
-        let mut leaving_row: Option<usize> = None;
-        let mut best_viol = options.primal_tol;
+        // ub-violation scan (separate from lb-violation leaving selection).
         let mut ub_violation_row: Option<usize> = None;
         for i in 0..m {
             let xi = state.x_b[i];
             let ub_i = ubs[state.basis[i]];
-            if xi < -best_viol {
-                best_viol = -xi;
-                leaving_row = Some(i);
-            }
             if ub_i.is_finite() && xi > ub_i + options.primal_tol {
                 ub_violation_row.get_or_insert(i);
             }
         }
+        let leaving_row = leaving.select_leaving(&state.x_b, options.primal_tol, &state.basis);
         if leaving_row.is_none() {
             if let Some(row) = ub_violation_row {
                 // Out-of-scope for this loop: distinct from Timeout so the
@@ -324,6 +330,13 @@ pub(crate) fn iterate(
         let mut rho_sv = SparseVec::from_dense(&buf.rho);
         basis_mgr.btran(&mut rho_sv);
         rho_sv.to_dense_into(&mut buf.rho);
+
+        // σ = B^{-1} ρ (needed by DSE after_pivot weight update).
+        if needs_sigma {
+            let mut sigma_sv = SparseVec::from_dense(&buf.rho);
+            basis_mgr.ftran(&mut sigma_sv);
+            sigma_sv.to_dense_into(&mut buf.sigma);
+        }
 
         // PRICE trow[j] = ρ^T a_j on non-basic columns.
         for j in 0..n_total {
@@ -403,6 +416,11 @@ pub(crate) fn iterate(
                 let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                 return (BoundedOutcome::Timeout(obj), state);
             }
+            leaving.after_refactor(m);
+            if needs_sigma {
+                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
+                leaving.set_initial_gamma(&gamma_truth);
+            }
             compute_reduced_costs_into(
                 a,
                 &c_perturbed,
@@ -471,6 +489,8 @@ pub(crate) fn iterate(
         basis_mgr.update(entering_col, r, &alpha_sv_for_update);
         state.basis[r] = entering_col;
 
+        leaving.after_pivot(r, &buf.alpha, &buf.sigma, pivot_element);
+
         // Refactor + reduced-cost refresh on the LU's request (eta cap).
         if basis_mgr.needs_refactor() {
             basis_mgr.refactor_if_needed_timed(a, &state.basis, options.deadline);
@@ -480,6 +500,11 @@ pub(crate) fn iterate(
                 }
                 let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
                 return (BoundedOutcome::Timeout(obj), state);
+            }
+            leaving.after_refactor(m);
+            if needs_sigma {
+                let gamma_truth = recompute_gamma_truth(&mut basis_mgr, m);
+                leaving.set_initial_gamma(&gamma_truth);
             }
             compute_reduced_costs_into(
                 a,
@@ -846,6 +871,7 @@ mod tests {
     use super::*;
     use crate::options::SolverOptions;
     use crate::problem::{ConstraintType, LpProblem};
+    use crate::simplex::pricing::MostInfeasibleLeaving;
     use crate::simplex::dual_advanced::bound_flip::{
         bfrt_flip_invocations, reset_bfrt_flip_invocations,
     };
@@ -1044,7 +1070,7 @@ mod tests {
         let lp = lp_boxed_2x2_degenerate();
         let bsf = build_bounded_standard_form(&lp);
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         match outcome {
             BoundedOutcome::Optimal(_, _) => {}
             other => panic!("expected Optimal, got {:?}", other),
@@ -1067,7 +1093,7 @@ mod tests {
             deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(500)),
             ..SolverOptions::default()
         };
-        let (outcome, _state) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
+        let (outcome, _state) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         match outcome {
             BoundedOutcome::Optimal(_, _) => {}
             BoundedOutcome::Timeout(_) => {}
@@ -1112,7 +1138,7 @@ mod tests {
         } else {
             None
         };
-        let (_outcome, post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
+        let (_outcome, post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         let post_residual = basis_rhs_residual(&post, &bsf);
         let flips = bfrt_flip_invocations();
         (pre_residual, post_residual, flips)
@@ -1272,7 +1298,7 @@ mod tests {
             deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
             ..SolverOptions::default()
         };
-        let (outcome, _post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
+        let (outcome, _post) = iterate(state, &bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         match outcome {
             BoundedOutcome::UbViolationOutOfScope { row, .. } => {
                 assert_eq!(row, 0);
@@ -1461,7 +1487,7 @@ mod tests {
         let sf = build_standard_form(&fx.problem);
         // Run bounded dual (terminates immediately; no at_upper set).
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         assert!(
             matches!(outcome, BoundedOutcome::Optimal(..)),
             "expected Optimal, got {:?}", outcome
@@ -1528,7 +1554,7 @@ mod tests {
         let bsf = build_bounded_standard_form(&fx.problem);
         let sf = build_standard_form(&fx.problem);
         let opts = SolverOptions::default();
-        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
+        let (outcome, state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         let (_, y_std) = match outcome {
             BoundedOutcome::Optimal(obj, y) => (obj, y),
             other => panic!("expected Optimal, got {:?}", other),
@@ -1577,7 +1603,7 @@ mod tests {
         let bsf = build_bounded_standard_form(&lp);
         let opts = SolverOptions::default();
         // Bounded dual: c̃ = max(c,0) = [0,0] → terminates immediately with slack basis.
-        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
 
         let mut iters = 0usize;
@@ -1608,7 +1634,7 @@ mod tests {
         let fx = fixture_one_row_two_boxed(); // c = [1, 2] (all positive)
         let bsf = build_bounded_standard_form(&fx.problem);
         let opts = SolverOptions::default();
-        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds);
+        let (dual_outcome, dual_state) = solve_bounded_dual(&bsf, &bsf.a, &bsf.b, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
         assert!(matches!(dual_outcome, BoundedOutcome::Optimal(..)));
         let mut iters = 0usize;
         let (p2_outcome, _) = phase2_primal_bounded(
@@ -1666,7 +1692,7 @@ mod tests {
             let deadline = std::time::Instant::now()
                 - std::time::Duration::from_millis(1);
             let opts = SolverOptions { deadline: Some(deadline), ..SolverOptions::default() };
-            let (outcome, _) = iterate(state, bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds);
+            let (outcome, _) = iterate(state, bsf, &bsf.a, &bsf.c, &opts, &bsf.upper_bounds, &mut MostInfeasibleLeaving);
             match outcome {
                 BoundedOutcome::Timeout(obj) => {
                     assert!(

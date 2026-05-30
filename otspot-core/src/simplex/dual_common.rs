@@ -14,7 +14,7 @@
 //! for objective reporting on Optimal/Timeout/SingularBasis exits.
 
 use crate::basis::{BasisManager, LuBasis};
-use crate::sparse::CscMatrix;
+use crate::sparse::{CscMatrix, SparseVec};
 
 /// y = B^{-T} c_B written into the caller's buffer. `y_out.len()` is the basis
 /// dimension m; the caller owns the allocation so a hot loop can reuse it.
@@ -103,6 +103,26 @@ pub(super) fn basic_obj(c: &[f64], basis: &[usize], x_b: &[f64]) -> f64 {
         .zip(x_b.iter())
         .map(|(&j, &v)| c[j] * v)
         .sum()
+}
+
+/// γ_i = ||(B^{-1})_{i,:}||² for each basis row i via m BTRANs.
+///
+/// Used by DSE leaving strategies at warm-start and after refactor to set
+/// the exact initial weights. Cost O(m²); called once per warm-start solve
+/// or refactor boundary.
+pub(super) fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
+    let mut gamma_truth = vec![0.0f64; m];
+    let mut e_i = vec![0.0f64; m];
+    let mut rho_i = vec![0.0f64; m];
+    for i in 0..m {
+        e_i.iter_mut().for_each(|v| *v = 0.0);
+        e_i[i] = 1.0;
+        let mut sv = SparseVec::from_dense(&e_i);
+        basis_mgr.btran(&mut sv);
+        sv.to_dense_into(&mut rho_i);
+        gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
+    }
+    gamma_truth
 }
 
 #[cfg(test)]

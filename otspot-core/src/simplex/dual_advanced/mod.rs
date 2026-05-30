@@ -233,8 +233,9 @@ fn try_bounded(
                         is_basic,
                         iterations: 0,
                     };
+                    let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
                     let (dual_out, dual_state) =
-                        bounded_iterate(state, bsf, &a, &c, options, &ubs);
+                        bounded_iterate(state, bsf, &a, &c, options, &ubs, leaving.as_mut());
                     total_iters = dual_state.iterations;
                     let result = finish_bounded(
                         dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,
@@ -251,8 +252,9 @@ fn try_bounded(
     }
 
     // Cold start.
+    let mut leaving = make_leaving_strategy(options.dual_pricing, bsf.m);
     let (dual_out, dual_state) =
-        solve_bounded_dual(bsf, &a, &b, &c, options, &ubs);
+        solve_bounded_dual(bsf, &a, &b, &c, options, &ubs, leaving.as_mut());
     total_iters = dual_state.iterations;
     finish_bounded(
         dual_out, dual_state, bsf, &a, &c, &row_scale, &col_scale, &ubs,

@@ -15,7 +15,7 @@ use crate::sparse::{CscMatrix, SparseVec};
 use crate::tolerances::PIVOT_TOL;
 use super::ratio_test::{RatioTestStrategy, HarrisRatioTest, bland_ratio_test};
 use super::super::SimplexOutcome;
-use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs};
+use super::super::dual_common::{basic_obj, compute_dual_vars, compute_reduced_costs, recompute_gamma_truth};
 use super::super::pricing::DualLeavingStrategy;
 use std::sync::atomic::Ordering;
 
@@ -58,24 +58,6 @@ const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 /// 1e-6 では cycle 行の reduced_cost diff (~1e-3 オーダー) を上回れず tie 残存。
 /// 1e-3 では Phase 1 の Infeasible 判定境界に影響しうるため間を取った。
 const LEX_PERTURB_REL: f64 = 1e-4;
-
-/// γ_i = ||(B^{-1})_{i,:}||² 真値再計算 (m BTRAN). DSE warm-start init と
-/// refactor 後の drift wipe で同一手順を踏むため、2 caller 重複を helper 化。
-/// O(m²) cost (m BTRAN). Caller は `leaving.set_initial_gamma(...)` に渡す。
-fn recompute_gamma_truth(basis_mgr: &mut LuBasis, m: usize) -> Vec<f64> {
-    let mut gamma_truth = vec![0.0f64; m];
-    let mut e_i = vec![0.0f64; m];
-    let mut rho_i = vec![0.0f64; m];
-    for i in 0..m {
-        e_i.iter_mut().for_each(|v| *v = 0.0);
-        e_i[i] = 1.0;
-        let mut sv = SparseVec::from_dense(&e_i);
-        basis_mgr.btran(&mut sv);
-        sv.to_dense_into(&mut rho_i);
-        gamma_truth[i] = rho_i.iter().map(|&v| v * v).sum();
-    }
-    gamma_truth
-}
 
 /// reduced_costs (non-basic only) と、オプションで x_b に lex 摂動を加える。
 ///
