@@ -14,6 +14,11 @@ use std::time::Instant;
 /// (non-basic candidate) when synthesising the postsolved warm-start basis.
 const WARM_BASIS_BUILD_TOL: f64 = 1e-9;
 
+/// Markowitz threshold for LU factorization stability: a column pivot is accepted only
+/// if its absolute value exceeds this fraction of the column maximum. Prevents tiny
+/// pivots that would inflate the basis matrix condition number.
+const MARKOWITZ_PIVOT_RATIO: f64 = 0.1;
+
 /// Maximum Gauss-Seidel iterations for dual variable recovery.
 const GS_MAX_ITER: usize = 50;
 /// Convergence tolerance for Gauss-Seidel: stops when max per-row change drops below this.
@@ -695,7 +700,7 @@ fn recover_warm_start_basis(
                 if v.abs() > col_max { col_max = v.abs(); }
             }
             if col_max < WARM_BASIS_BUILD_TOL { continue; }
-            let pivot_min = (0.1 * col_max).max(WARM_BASIS_BUILD_TOL);
+            let pivot_min = (MARKOWITZ_PIVOT_RATIO * col_max).max(WARM_BASIS_BUILD_TOL);
 
             let mut best: Option<(f64, usize)> = None;
             for (k, &row) in rows.iter().enumerate() {
