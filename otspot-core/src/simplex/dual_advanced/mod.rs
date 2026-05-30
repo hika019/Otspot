@@ -700,11 +700,13 @@ mod tests {
     fn bfrt_wiring_flip_count_positive_noop_proof() {
         let lp = lp_flip_trigger();
         let sf = build_standard_form(&lp);
-        set_bounded_dispatch_disabled(true);
+        let _guard = crate::ScopedDisable::new(
+            || set_bounded_dispatch_disabled(true),
+            || set_bounded_dispatch_disabled(false),
+        );
         reset_bfrt_flip_invocations();
         let result = solve_dual_advanced(&sf, &lp, &SolverOptions::default());
         let flips_disabled = bfrt_flip_invocations();
-        set_bounded_dispatch_disabled(false);
         assert_eq!(
             flips_disabled, 0,
             "noop proof: expected 0 flips with bounded dispatch disabled, got {flips_disabled}"
