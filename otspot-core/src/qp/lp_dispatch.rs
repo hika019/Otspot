@@ -148,7 +148,10 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
     // QpProblem.obj_offset を別経路で加算する必要がある。
     // Optimal/SuboptimalSolution のみ加算 (Infeasible/Timeout 等は加算しない)。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
-    if matches!(simplex_result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+    if matches!(
+        simplex_result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
         simplex_result.objective += problem.obj_offset;
     }
     if simplex_result.status == SolveStatus::Timeout
@@ -769,6 +772,61 @@ mod tests {
         assert!(
             !verified_farkas_timeout_fallback(&lb_positive, &opts),
             "lb=0.5 must return false (non-nonneg bounds)",
+        );
+    }
+
+    /// zero-Q QpProblem が simplex 経由で Timeout を返した場合、`obj_offset` が
+    /// 加算されることを確認する。
+    ///
+    /// sentinel: `SolveStatus::Timeout` を match から削除すると
+    /// `simplex_result.objective += problem.obj_offset` が実行されず、
+    /// `result.objective == 0.0` のまま → assert FAIL。
+    ///
+    /// `c = [0.0]` により c^T x* = 0 (incumbent 不定でも)。cancel_flag=true で
+    /// 初回イテレーション即キャンセル → Timeout with initial BFS objective = 0。
+    #[test]
+    fn test_qp_simplex_dispatch_timeout_includes_obj_offset() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        const OBJ_OFFSET: f64 = 42.0;
+
+        // min 0·x s.t. x >= 1, x in [0, ∞).  c=0 → c^T x* = 0 for any incumbent.
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, 1).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![0.0],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Ge],
+        )
+        .unwrap();
+        problem.obj_offset = OBJ_OFFSET;
+
+        // cancel_flag=true + presolve=false: simplex fires cancel at first iteration,
+        // returns Timeout with initial BFS (objective = 0.0 before offset).
+        let opts = SolverOptions {
+            cancel_flag: Some(Arc::new(AtomicBool::new(true))),
+            presolve: false,
+            ..SolverOptions::default()
+        };
+
+        let result = solve_as_lp_pub(&problem, &opts);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Timeout,
+            "cancel_flag=true must produce Timeout; got {:?}",
+            result.status,
+        );
+        // c^T x* = 0 (zero cost), so objective must equal obj_offset exactly.
+        // Sentinel: removing SolveStatus::Timeout from the match leaves
+        // objective = 0.0 (no offset added) → assert fails.
+        assert!(
+            (result.objective - OBJ_OFFSET).abs() < 1e-9,
+            "Timeout objective must include obj_offset {OBJ_OFFSET}; got {} \
+             (sentinel: removing Timeout from match yields 0.0 ≠ {OBJ_OFFSET})",
+            result.objective,
         );
     }
 

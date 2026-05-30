@@ -730,16 +730,26 @@ mod tests {
                 let entry_floor = depth - opens;
                 trait_impl_stack.push(entry_floor);
                 pending_trait_context = false;
-            } else if opens == 0
-                && !trimmed.is_empty()
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("where")
-                && !trimmed.starts_with('<')
-            {
-                // A non-blank, non-comment, non-attribute, non-where-clause line
-                // without an opening brace clears any pending trait context.
-                pending_trait_context = false;
+            } else if opens == 0 && pending_trait_context {
+                // Clear pending context only on unambiguous new declaration keywords.
+                // Where-clause continuation lines (`where`, `T: Bound,`) are left
+                // intact so multiline `impl Trait for T where T: X,\n{\n` works.
+                let clears = trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("unsafe fn ")
+                    || trimmed.starts_with("pub(crate) fn ")
+                    || trimmed.starts_with("struct ")
+                    || trimmed.starts_with("pub struct ")
+                    || trimmed.starts_with("enum ")
+                    || trimmed.starts_with("pub enum ")
+                    || trimmed.starts_with("type ")
+                    || trimmed.starts_with("mod ")
+                    || trimmed.starts_with("use ")
+                    || trimmed.starts_with("let ");
+                if clears {
+                    pending_trait_context = false;
+                }
             }
 
             if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
