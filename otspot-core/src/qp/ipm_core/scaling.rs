@@ -359,21 +359,20 @@ pub(crate) fn unscale_ipm_result(
             let bound_duals = scaler.unscale_bound_duals(&result.bound_duals, &problem.bounds);
             let obj_orig = result.objective / scaler.c;
             let status = if problem.num_constraints > 0 {
-                match problem.a.mat_vec_mul(&x) {
-                    Ok(_ax) => {
-                        let pfeas_normalized = compute_pfeas_osqp(problem, &x);
-                        if pfeas_normalized.is_finite() && pfeas_normalized < eps {
-                            let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
-                            if bfeas_status == SolveStatus::Optimal {
-                                check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
-                            } else {
-                                bfeas_status
-                            }
+                if problem.a.mat_vec_mul(&x).is_err() {
+                    SolveStatus::SuboptimalSolution
+                } else {
+                    let pfeas_normalized = compute_pfeas_osqp(problem, &x);
+                    if pfeas_normalized.is_finite() && pfeas_normalized < eps {
+                        let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);
+                        if bfeas_status == SolveStatus::Optimal {
+                            check_dfeas_status_relative(problem, &x, &y, &bound_duals, eps)
                         } else {
-                            SolveStatus::SuboptimalSolution
+                            bfeas_status
                         }
+                    } else {
+                        SolveStatus::SuboptimalSolution
                     }
-                    Err(_) => SolveStatus::SuboptimalSolution,
                 }
             } else {
                 let bfeas_status = check_bfeas_status(&x, &problem.bounds, eps);

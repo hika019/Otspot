@@ -74,7 +74,7 @@ fn yao_objective_self_consistent() {
 }
 
 #[test]
-#[ignore = "known failing: QP local minimum (LP perf #75 未対応); remove ignore when #75 phase X lands"]
+#[ignore = "permanent ignore — known QP local minimum; fix tracked in #88 (local solver hardening) / #89 (multistart)"]
 fn liswet9_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "LISWET9",
@@ -84,7 +84,7 @@ fn liswet9_objective_matches_clarabel() {
 }
 
 #[test]
-#[ignore = "known failing: QP local minimum (LP perf #75 未対応); remove ignore when #75 phase X lands"]
+#[ignore = "permanent ignore — known QP local minimum; fix tracked in #88 (local solver hardening) / #89 (multistart)"]
 fn yao_objective_matches_clarabel() {
     assert_objective_matches_clarabel(
         "YAO",

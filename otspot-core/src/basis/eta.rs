@@ -98,7 +98,10 @@ pub(crate) fn add_eta(pivot_col: &[f64], leaving_row: usize) -> EtaMatrix {
 /// * `pivot_col` - FTRAN済みピボット列（`SparseVec`）
 /// * `leaving_row` - 離基行のインデックス
 pub(crate) fn add_eta_sparse(pivot_col: &SparseVec, leaving_row: usize) -> EtaMatrix {
-    let pivot_element = pivot_col.get(leaving_row);
+    let pivot_element = match pivot_col.indices.binary_search(&leaving_row) {
+        Ok(pos) => pivot_col.values[pos],
+        Err(_) => 0.0,
+    };
     let inv_pivot = 1.0 / pivot_element;
     let mut indices = Vec::new();
     let mut values = Vec::new();

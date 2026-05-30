@@ -227,10 +227,6 @@ fn main() {
     // 非凸 QP で false-positive Optimal を obj-only judge が見逃す穴を埋める。
     let mut n_kkt_fail = 0usize;
 
-    // QPLIBベンチでは実行可能性判定なし → 常に0
-    let n_dfeas_fail: usize = 0;
-    let n_pfeas_fail: usize = 0;
-
     let eps_obj: f64 = 1e-2; // 目的関数照合の相対許容誤差: 1%
 
     let mut opts = SolverOptions::default();
@@ -542,8 +538,6 @@ fn main() {
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  TIMEOUT:           {}", n_timeout);
     println!("  FAIL:              {}", n_fail);
-    println!("  DFEAS_FAIL:        {}", n_dfeas_fail);
-    println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
     println!("  KKT_FAIL:          {}", n_kkt_fail);
     println!("  NONCONVEX:         {}", n_nonconvex);
