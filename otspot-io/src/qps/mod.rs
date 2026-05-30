@@ -472,6 +472,23 @@ ENDATA\n";
         );
     }
 
+    /// P2-1: NaN in constraint RHS (2-field shorthand) must error.
+    #[test]
+    fn test_qps_rhs_nan_constraint_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    c1  NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in constraint RHS must error");
+    }
+
+    /// P2-2: symmetric QUADOBJ entry (x2,x1) when (x1,x2) already present must error.
+    #[test]
+    fn test_qps_quadobj_symmetric_duplicate_is_error() {
+        let qps = "NAME          SYM_DUP\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\n    x2  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nQUADOBJ\n    x1  x2  1.0\n    x2  x1  2.0\nENDATA\n";
+        let err = parse_qps_str(qps);
+        assert!(err.is_err(), "(x1,x2) and (x2,x1) in QUADOBJ must error");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    }
+
     /// B: duplicate (col1, col2) pair in QUADOBJ must be an error.
     #[test]
     fn test_qps_quadobj_duplicate_entry_is_error() {

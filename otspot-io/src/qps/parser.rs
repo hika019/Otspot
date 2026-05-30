@@ -17,7 +17,7 @@ pub(super) struct QpsParser {
     bounds: Vec<(BoundType, String, Option<f64>)>,
     /// QUADOBJ entries: (col1, col2, value) in upper-triangular order.
     quadobj: Vec<(String, String, f64)>,
-    /// Tracks (col1, col2) pairs seen in QUADOBJ to detect duplicates.
+    /// Tracks normalized (min, max) key pairs seen in QUADOBJ to detect symmetric duplicates.
     quadobj_seen: HashSet<(String, String)>,
     obj_row: Option<String>,
     maximize: bool,
@@ -267,6 +267,12 @@ impl QpsParser {
                 line: line_num,
                 message: format!("Invalid value: {}", parts[1]),
             })?;
+            if !value.is_finite() {
+                return Err(QpsError::ParseError {
+                    line: line_num,
+                    message: format!("Non-finite RHS value for row='{}'", row_name),
+                });
+            }
             self.rhs.insert(row_name, value);
             return Ok(());
         }
@@ -448,7 +454,14 @@ impl QpsParser {
                 message: format!("Non-finite QUADOBJ value for ({}, {})", col1, col2),
             });
         }
-        let key = (col1.to_string(), col2.to_string());
+        // Reject duplicate entries in QUADOBJ using a lexicographically normalized key.
+        // This catches both (x1,x2) and (x2,x1) as duplicates, since both represent
+        // the same upper-triangular Q entry after symmetrization.
+        let key = if col1 <= col2 {
+            (col1.to_string(), col2.to_string())
+        } else {
+            (col2.to_string(), col1.to_string())
+        };
         if !self.quadobj_seen.insert(key) {
             return Err(QpsError::ParseError {
                 line: line_num,

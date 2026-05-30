@@ -13,7 +13,9 @@ use super::{QplibError, QplibProblem};
 /// absorbs rounding during file generation without falsely classifying
 /// finite bounds as infinite.
 ///
-/// Source: QPLIB format (Furini et al., *Math. Prog. Computation* 2019, §3).
+/// Source: QPLIB format (Furini et al., *Math. Prog. Computation* 2019, §3) defines the
+/// `inf_val` marker concept; the 1% margin (0.99) is an implementation convention,
+/// not explicitly specified in the paper.
 const QPLIB_INF_REL_TOL: f64 = 0.99;
 
 pub(super) fn parse_token_stream(mut ts: TokenStream) -> Result<QplibProblem, QplibError> {
