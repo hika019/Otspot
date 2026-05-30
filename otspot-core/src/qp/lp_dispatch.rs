@@ -136,7 +136,7 @@ fn solve_unpresolved_lp_from_qp(
             SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible => {
                 // 確定 status は simplex 再試行不要、即返却。
                 // Optimal は primal guard で false-Optimal を除去してから返す。
-                return guard_lp_optimal(ipm_result, &lp);
+                return guard_lp_optimal(ipm_result, lp);
             }
             SolveStatus::Unbounded
             | SolveStatus::Timeout
@@ -163,7 +163,7 @@ fn solve_unpresolved_lp_from_qp(
                             status: SolveStatus::Optimal,
                             ..ipm_result
                         };
-                        return guard_lp_optimal(promoted, &lp);
+                        return guard_lp_optimal(promoted, lp);
                     }
                 }
                 // IPM incumbent を保存して simplex 再試行。simplex が失敗したとき
@@ -185,7 +185,7 @@ fn solve_unpresolved_lp_from_qp(
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
-    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
+    let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(lp, options);
     if matches!(
         simplex_result.status,
         SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
@@ -225,7 +225,7 @@ fn solve_reduced_lp_from_qp(
         fallback_opts.presolve = false;
         fallback_opts.warm_start = None;
         fallback_opts.warm_start_lp = None;
-        let mut fallback = crate::lp::solve_lp_forwarded_from_qp(original_lp, &fallback_opts);
+        let mut fallback = solve_lp_backend_no_presolve(original_lp, &fallback_opts);
         add_qp_obj_offset(&mut fallback, qp_obj_offset);
         return fallback;
     }
@@ -257,7 +257,7 @@ fn solve_reduced_lp_from_qp(
             fallback_opts.presolve = false;
             fallback_opts.warm_start = None;
             fallback_opts.warm_start_lp = None;
-            let mut fallback = crate::lp::solve_lp_forwarded_from_qp(original_lp, &fallback_opts);
+            let mut fallback = solve_lp_backend_no_presolve(original_lp, &fallback_opts);
             add_qp_obj_offset(&mut fallback, qp_obj_offset);
             if !matches!(
                 fallback.status,
