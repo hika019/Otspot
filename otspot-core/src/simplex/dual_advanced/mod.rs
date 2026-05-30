@@ -249,17 +249,14 @@ fn try_bounded(
                 let mut x_b_sv = SparseVec::from_dense(&b);
                 basis_mgr.ftran(&mut x_b_sv);
                 let x_b = x_b_sv.to_dense();
-                // BFRT-based lb-violation repair requires at least one positive
-                // reduced cost (c_perturbed = max(c,0) must be non-zero) so that
-                // the dual step θ = r_j / trow[j] > 0 can make progress. When
-                // all costs are non-positive (c_perturbed ≡ 0), θ = 0 for every
-                // candidate column and the dual loop cannot reduce the violation;
-                // fall through to cold start in that case.
+                // Bounded path warm-start: has_lb_violation 時は cold-start fallback。
+                // Reason: bounded_core::iterate の BFRT は lower-bound 列のみ選択、
+                // sign flip equivalent なし → lb_violation は repair 不可、cycle→timeout (codex review #175)。
+                // 真因対処は #190 (WarmStartBasis.at_upper field 追加 + bounded core repair algorithm)。
                 //
                 // Also fall through when the warm basis is dual-infeasible under
                 // the new cost vector c: the dual simplex would exit immediately as
                 // Optimal with a wrong objective value.
-                let has_positive_c = c.iter().any(|&v| v > 0.0);
                 let has_lb_violation = super::has_lb_violation(&x_b, options.primal_tol);
                 let is_basic_bounded: Vec<bool> = {
                     let mut v = vec![false; bsf.n_total];
@@ -268,7 +265,7 @@ fn try_bounded(
                     }
                     v
                 };
-                if (!has_lb_violation || has_positive_c)
+                if !has_lb_violation
                     && warm_basis_is_dual_feasible(
                         &a, &c, &mut basis_mgr, &warm.basis, &is_basic_bounded,
                         bsf.n_total, bsf.m, options.dual_tol,
@@ -734,55 +731,6 @@ mod tests {
         assert_eq!(r_cold_p.status, SolveStatus::Optimal);
         assert!((r_cold_p.objective - r_warm.objective).abs() < OBJ_TOL,
             "warm {:.6e} != cold {:.6e}", r_warm.objective, r_cold_p.objective);
-    }
-
-    /// **P2-A sentinel**: bounded-path warm-start whose FTRAN yields lb-violations
-    /// converges to Optimal via `bounded_core::iterate` (Bland anti-cycling, added #175).
-    ///
-    /// Warm basis [x0=0, x1=1] on LP with A=[[1,2],[1,1]], b=[1,3] gives
-    /// FTRAN = B^{-1}·b = [[-1,2],[1,-1]]·[1,3] = [5,−2] — genuine lb-violation
-    /// at row 1. `bounded_core::iterate` repairs the violation via BFRT dual pivots;
-    /// Bland's rule prevents cycling.
-    ///
-    /// no-op proof: disabling Bland mode (by setting an impossibly large k_trigger)
-    /// would allow cycling. The 1s timeout confirms the LP converges without relying
-    /// solely on the hard cap.
-    #[test]
-    fn bounded_warm_start_lb_violation_repairs_and_converges() {
-        use crate::sparse::CscMatrix;
-        use crate::options::WarmStartBasis;
-        const OBJ_TOL: f64 = 1e-6;
-
-        // LP: 2 Le rows, 2 structural vars with finite UBs → bounded path.
-        // A = [[1,2],[1,1]], b = [1,3], c = [1,1], 0 ≤ x0,x1 ≤ 4.
-        // Optimal: x0=x1=0, obj=0 (c ≥ 0; trivially optimal at lb).
-        let a = CscMatrix::from_triplets(
-            &[0, 0, 1, 1], &[0, 1, 0, 1], &[1.0, 2.0, 1.0, 1.0], 2, 2,
-        ).unwrap();
-        let lp = LpProblem::new_general(
-            vec![1.0, 1.0], a, vec![1.0, 3.0],
-            vec![ConstraintType::Le, ConstraintType::Le],
-            vec![(0.0, 4.0), (0.0, 4.0)],
-            None,
-        ).unwrap();
-        let sf = build_standard_form(&lp);
-
-        // warm.basis=[0,1]: B=[[1,2],[1,1]], B^{-1}=[[-1,2],[1,-1]].
-        // FTRAN(b=[1,3]) = [5,-2] — lb-violation at row 1.
-        // bounded_core::iterate (with Bland anti-cycling) repairs the violation and
-        // converges to Optimal.
-        let ws = WarmStartBasis { basis: vec![0, 1], x_b: vec![] };
-        let opts = SolverOptions {
-            warm_start: Some(ws),
-            timeout_secs: Some(5.0),
-            ..SolverOptions::default()
-        };
-        let r = solve_dual_advanced(&sf, &lp, &opts);
-        assert_eq!(r.status, SolveStatus::Optimal,
-            "bounded warm-start with lb-violation must repair and converge; \
-             Timeout = Bland anti-cycling not working");
-        assert!(r.objective.abs() < OBJ_TOL,
-            "expected obj=0, got {:.6e}", r.objective);
     }
 
     /// Warm start from a bounded-path solve is accepted and reused.
