@@ -1069,4 +1069,27 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
             lp.obj_offset
         );
     }
+
+    /// MPS N-row RHS (obj_offset) must appear in the solve result objective end-to-end.
+    ///
+    /// Problem: min x  s.t. x <= 5,  x >= 0,  N-row RHS = 10.0
+    /// Optimal: x* = 0,  c^T x* = 0,  result.objective = 0 + 10.0 = 10.0.
+    ///
+    /// Sentinel: removing `result.objective += problem.obj_offset` from
+    /// `lp::solve_lp_with` causes result.objective == 0.0 ≠ 10.0 → FAIL.
+    #[test]
+    fn test_mps_obj_offset_propagates_to_solve_result() {
+        use otspot_core::lp::solve_lp_with;
+        use otspot_core::problem::SolveStatus;
+
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs obj 10.0\n    rhs c1 5.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("valid MPS with N-row RHS=10.0");
+        let result = solve_lp_with(&lp, &Default::default());
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert!(
+            (result.objective - 10.0).abs() < 1e-9,
+            "expected objective 10.0 (c^Tx*=0 + offset 10.0), got {}",
+            result.objective
+        );
+    }
 }
