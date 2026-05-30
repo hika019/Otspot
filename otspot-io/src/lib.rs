@@ -5,6 +5,8 @@ pub mod mps;
 pub mod qps;
 pub mod qplib;
 
+mod common;
+
 /// Thread-local peak-allocation tracker for memory sentinel tests.
 ///
 /// Mirrors the implementation in `otspot-core` so that `otspot-io`'s own

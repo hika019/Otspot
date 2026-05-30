@@ -212,21 +212,6 @@ ENDATA
     }
 
     #[test]
-    fn test_parse_qps_accumulates_duplicate_objective_entries() {
-        let qps = r"NAME          DUP_QP
-ROWS
- N  obj
- L  c1
-COLUMNS
-    x1    obj    1.5    c1    1.0
-    x1    obj    2.5
-ENDATA
-";
-        let prob = parse_qps_str(qps).unwrap();
-        assert_eq!(prob.c, vec![4.0]);
-    }
-
-    #[test]
     fn test_e226_obj_offset() {
         let path = std::path::Path::new("data/lp_problems/e226.QPS");
         if !path.exists() {
@@ -242,6 +227,31 @@ ENDATA
         let qps = "NAME          INF_TEST\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1    obj    1.0    c1    1.0\nRHS\n    rhs   obj    inf\n    rhs   c1    10.0\nENDATA\n";
         let result = parse_qps_str(qps);
         assert!(matches!(result, Err(QpsError::InvalidObjectiveOffset(_))));
+    }
+
+    /// QPS fixed-format (`force_fixed` path) での N 行 RHS NaN が `InvalidObjectiveOffset` を返すことを sentinel 化。
+    /// `obj_row.as_deref()` を `None` に置換すると obj 行 NaN が ParseError 化 →
+    /// `InvalidObjectiveOffset` でなくなる → assertion 失敗 (no-op fail 設計)。
+    ///
+    /// RHS 行: pos 4-11 空 + pos 14-21 "obj" で `force_fixed=true` → `parse_mps_fixed_pairs` 経由。
+    #[test]
+    fn test_qps_fixed_format_obj_row_nan_invalidates_offset() {
+        // Fixed-format RHS line: pos 0-13 spaces, pos 14-16 "obj", pos 24-26 "NaN",
+        // pos 39-40 "c1", pos 49-51 "1.0". mps_field(line,4,12)="" → force_fixed=true.
+        let qps = concat!(
+            "NAME          FIXFMT_NAN\n",
+            "ROWS\n N  obj\n L  c1\n",
+            "COLUMNS\n    x1  c1  1.0\n    x1  obj  1.0\n",
+            "RHS\n",
+            "              obj       NaN            c1        1.0\n",
+            "ENDATA\n",
+        );
+        let result = parse_qps_str(qps);
+        assert!(
+            matches!(result, Err(QpsError::InvalidObjectiveOffset(_))),
+            "fixed-format obj-row NaN must trigger InvalidObjectiveOffset: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -440,6 +450,122 @@ ENDATA\n";
             counter.get() >= expected_lines,
             "streaming must call read_line at least {expected_lines} times, got {}",
             counter.get()
+        );
+    }
+
+    // ── Sentinel tests: audit#141 parser strictness (A/B/C) ──────────────────
+
+    fn minimal_qps_with_columns(col_section: &str) -> String {
+        format!(
+            "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n{}\nRHS\n    rhs c1 10.0\nENDATA\n",
+            col_section
+        )
+    }
+
+    /// A: COLUMNS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_columns_malformed_too_few_fields_is_error() {
+        let qps = minimal_qps_with_columns("    x1  obj");
+        assert!(parse_qps_str(&qps).is_err(), "< 3 fields in COLUMNS must error");
+    }
+
+    /// A: QUADOBJ line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_quadobj_malformed_too_few_fields_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "< 3 fields in QUADOBJ must error");
+    }
+
+    /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_qps_bounds_malformed_too_few_fields_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "< 3 fields in BOUNDS must error");
+    }
+
+    /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
+    /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
+    #[test]
+    fn test_parse_qps_accumulates_duplicate_objective_entries() {
+        let qps = "NAME          DUP_TEST\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\n    x1  obj  2.0\nRHS\n    rhs  c1  10.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("duplicate objective entries must parse OK");
+        assert_eq!(prob.num_vars, 1);
+        assert!(
+            (prob.c[0] - 3.0).abs() < 1e-10,
+            "1.0 + 2.0 = 3.0, got {}",
+            prob.c[0]
+        );
+    }
+
+    /// P2-1: NaN in constraint RHS (2-field shorthand) must error.
+    #[test]
+    fn test_qps_rhs_nan_constraint_row_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    c1  NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in constraint RHS must error");
+    }
+
+    /// P2-2: symmetric QUADOBJ entry (x2,x1) when (x1,x2) already present must error.
+    #[test]
+    fn test_qps_quadobj_symmetric_duplicate_is_error() {
+        let qps = "NAME          SYM_DUP\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\n    x2  obj  1.0  c1  1.0\nRHS\n    rhs  c1  10.0\nQUADOBJ\n    x1  x2  1.0\n    x2  x1  2.0\nENDATA\n";
+        let err = parse_qps_str(qps);
+        assert!(err.is_err(), "(x1,x2) and (x2,x1) in QUADOBJ must error");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    }
+
+    /// B: duplicate (col1, col2) pair in QUADOBJ must be an error.
+    #[test]
+    fn test_qps_quadobj_duplicate_entry_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1 x1 2.0\n    x1 x1 3.0\nENDATA\n";
+        let err = parse_qps_str(qps);
+        assert!(err.is_err(), "duplicate entry in QUADOBJ must error");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    }
+
+    /// C: NaN coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_qps_columns_nan_value_is_error() {
+        let qps = minimal_qps_with_columns("    x1 c1 NaN");
+        assert!(parse_qps_str(&qps).is_err(), "NaN in COLUMNS must error");
+    }
+
+    /// C: Inf coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_qps_columns_inf_value_is_error() {
+        let qps = minimal_qps_with_columns("    x1 c1 Inf");
+        assert!(parse_qps_str(&qps).is_err(), "Inf in COLUMNS must error");
+    }
+
+    /// C: NaN in QUADOBJ must be an error.
+    #[test]
+    fn test_qps_quadobj_nan_value_is_error() {
+        let qps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nQUADOBJ\n    x1 x1 NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in QUADOBJ must error");
+    }
+
+    /// NaN in a constraint-row RHS (3-field format) must error.
+    #[test]
+    fn test_qps_rhs_nan_constraint_row_3field_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  NaN\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "NaN in constraint-row RHS (3-field) must error");
+    }
+
+    /// Inf in a constraint-row RHS (3-field format) must error.
+    #[test]
+    fn test_qps_rhs_inf_constraint_row_3field_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  c1  Inf\nENDATA\n";
+        assert!(parse_qps_str(qps).is_err(), "Inf in constraint-row RHS (3-field) must error");
+    }
+
+    /// NaN for an undefined (typo) row name in RHS must error, not be silently accepted.
+    #[test]
+    fn test_qps_rhs_nan_named_overwrite_is_error() {
+        let qps = "NAME\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  c1  1.0\nRHS\n    rhs  typo_row  NaN  c1  1.0\nENDATA\n";
+        assert!(
+            parse_qps_str(qps).is_err(),
+            "NaN for unknown row in named RHS line must error (not silent accept)"
         );
     }
 }

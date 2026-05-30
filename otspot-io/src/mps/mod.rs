@@ -281,23 +281,6 @@ ENDATA
     }
 
     #[test]
-    fn test_parse_mps_accumulates_duplicate_objective_entries() {
-        let mps = r"NAME dup_obj
-ROWS
- N  obj
- L  c1
-COLUMNS
-    x1  obj  1.5  c1  1.0
-    x1  obj  2.5
-RHS
-    rhs  c1  10.0
-ENDATA
-";
-        let lp = parse_mps(mps).unwrap();
-        assert_eq!(lp.c, vec![4.0]);
-    }
-
-    #[test]
     fn test_parse_multiple_rhs_entries() {
         let mps = r"NAME multi_rhs
 ROWS
@@ -989,5 +972,90 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
             "streaming must call read_line at least {expected_lines} times, got {}",
             counter.get()
         );
+    }
+
+    // ── Sentinel tests: audit#141 parser strictness (A/B/C) ──────────────────
+
+    /// A: COLUMNS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_mps_columns_malformed_too_few_fields_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1  obj\nRHS\n    rhs c1 1.0\nENDATA\n";
+        assert!(parse_mps(mps).is_err(), "< 3 fields in COLUMNS must error");
+    }
+
+    /// A: RHS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_mps_rhs_malformed_too_few_fields_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    c1\nENDATA\n";
+        assert!(parse_mps(mps).is_err(), "< 3 fields in RHS must error");
+    }
+
+    /// A: RANGES line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_mps_ranges_malformed_too_few_fields_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nRANGES\n    c1\nENDATA\n";
+        assert!(parse_mps(mps).is_err(), "< 3 fields in RANGES must error");
+    }
+
+    /// A: BOUNDS line with only 2 fields must be an error, not a silent skip.
+    #[test]
+    fn test_mps_bounds_malformed_too_few_fields_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 5.0\nBOUNDS\n LO\nENDATA\n";
+        assert!(parse_mps(mps).is_err(), "< 3 fields in BOUNDS must error");
+    }
+
+    /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
+    /// MPS spec allows repeated entries; CscMatrix::from_triplets merges them.
+    #[test]
+    fn test_parse_mps_accumulates_duplicate_objective_entries() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\n    x1 obj 2.0\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("duplicate objective entries must parse OK");
+        assert_eq!(lp.num_vars, 1);
+        assert!(
+            (lp.c[0] - 3.0).abs() < 1e-10,
+            "1.0 + 2.0 = 3.0, got {}",
+            lp.c[0]
+        );
+    }
+
+    /// C: NaN coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_mps_columns_nan_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 NaN\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let err = parse_mps(mps);
+        assert!(err.is_err(), "NaN coefficient in COLUMNS must error: {:?}", err);
+    }
+
+    /// C: Inf coefficient in COLUMNS must be an error.
+    #[test]
+    fn test_mps_columns_inf_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 Inf\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let err = parse_mps(mps);
+        assert!(err.is_err(), "Inf coefficient in COLUMNS must error: {:?}", err);
+    }
+
+    /// C: NaN in RHS value must be an error.
+    #[test]
+    fn test_mps_rhs_nan_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs c1 NaN\nENDATA\n";
+        let err = parse_mps(mps);
+        assert!(err.is_err(), "NaN in RHS must error: {:?}", err);
+    }
+
+    /// C: NaN in BOUNDS value must be an error.
+    #[test]
+    fn test_mps_bounds_nan_value_is_error() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\nRHS\n    rhs c1 10.0\nBOUNDS\n UP BND x1 NaN\nENDATA\n";
+        let err = parse_mps(mps);
+        assert!(err.is_err(), "NaN in BOUNDS must error: {:?}", err);
+    }
+
+    /// be70df0 で N 行 RHS NaN は silently accepted (LpProblem に obj_offset 概念なし)。
+    /// `obj_row.as_deref()` を `None` に置換すると N 行も constraint 扱い → NaN reject → assertion 失敗。
+    #[test]
+    fn test_mps_rhs_n_row_nan_is_silently_ok() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 1.0\nRHS\n    rhs obj NaN\n    rhs c1 1.0\nENDATA\n";
+        let result = parse_mps(mps);
+        assert!(result.is_ok(), "N-row RHS NaN must be silently accepted (LpProblem has no obj_offset): {:?}", result);
     }
 }
