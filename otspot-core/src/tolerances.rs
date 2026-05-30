@@ -134,14 +134,29 @@ pub const Q_OFFDIAG_REL: f64 = 1e-12;
 /// alter the MIP fixed-point feasibility gate.
 pub const FIXED_POINT_FEAS_TOL: f64 = 1e-6;
 
-/// Size gate shared across expensive post-processing sites.
+/// Size gate for `n + m` sum comparison at expensive post-processing sites.
 ///
-/// Problems above this threshold skip high-cost operations (primal projection,
-/// KKT refinement, presolve perturbation) to reserve budget for the IPM core.
+/// Operations that skip when `n + m > LARGE_PROBLEM_SIZE_SUM`:
+/// - `presolve::postsolve` — kept-perturbation LP
+/// - `qp::postsolve::refine::kkt_iterative` — saddle-point K factorize
+/// - `qp::ipm_solver::core::post_processing` — primal projection LDL
 ///
-/// Usage varies by site: some compare `n + m` against this value; others
-/// check each dimension individually (`num_vars <= T && num_constraints <= T`).
-pub const LARGE_PROBLEM_THRESHOLD: usize = 50_000;
+/// Same rationale as `LARGE_PROBLEM_DIM_INDIVIDUAL`; split so `n+m` vs
+/// per-dim semantics are unambiguous at each call-site.
+pub(crate) const LARGE_PROBLEM_SIZE_SUM: usize = 50_000;
+
+/// Size gate for per-dimension comparison at presolve skip sites.
+///
+/// Condition: `num_vars > LARGE_PROBLEM_DIM_INDIVIDUAL || num_constraints > LARGE_PROBLEM_DIM_INDIVIDUAL`
+/// skips QP presolve in `qp::ipm_solver::attempt` to reserve IPM budget.
+/// Same value as `LARGE_PROBLEM_SIZE_SUM`; split so per-dim semantics are explicit.
+pub(crate) const LARGE_PROBLEM_DIM_INDIVIDUAL: usize = 50_000;
+
+/// Relative tolerance for slack-based non-binding row detection in dual recovery.
+///
+/// Row i is considered non-binding when
+/// `slack_i <= SLACK_TOL_REL * (1 + |b_i| + |Ax_i| + row_abs_activity_i)`.
+pub(crate) const SLACK_TOL_REL: f64 = 1e-8;
 
 /// Returns `true` if any element of `v` is non-finite (NaN or ±Inf).
 pub(crate) fn any_nonfinite(v: &[f64]) -> bool {

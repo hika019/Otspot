@@ -117,7 +117,7 @@ const MAX_ITER_PER_ATTEMPT: usize = 500;
 /// re-solves the original (non-reduced) problem, bypassing the Ruiz amplification
 /// that can stop the inner IPM from converging tightly enough. The cap bounds the
 /// cost of re-solving without presolve reduction; it sits below
-/// [`LARGE_PROBLEM_THRESHOLD`](crate::tolerances::LARGE_PROBLEM_THRESHOLD) (50_000),
+/// [`LARGE_PROBLEM_DIM_INDIVIDUAL`](crate::tolerances::LARGE_PROBLEM_DIM_INDIVIDUAL) (50_000),
 /// so problems in between still get presolve+Ruiz but are deemed too large to
 /// re-solve from scratch economically.
 const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
@@ -347,8 +347,8 @@ fn solve_ipm_with_runner(
     // 「presolve に予算を配分するか IPM に回すか」の予算配分ガード (時間予算 proxy)。
     // n か m のどちらかが上限超なら presolve を skip し IPM に予算を残す。
     let presolve_result = if opts.presolve
-        && problem.num_vars <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
-        && problem.num_constraints <= crate::tolerances::LARGE_PROBLEM_THRESHOLD
+        && problem.num_vars <= crate::tolerances::LARGE_PROBLEM_DIM_INDIVIDUAL
+        && problem.num_constraints <= crate::tolerances::LARGE_PROBLEM_DIM_INDIVIDUAL
     {
         let phase1 = run_qp_presolve_phase1(problem, &opts);
         if opts.presolve_phase2 {

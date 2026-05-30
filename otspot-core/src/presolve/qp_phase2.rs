@@ -411,14 +411,7 @@ mod tests {
             &[0, 0, 1, 1], &[0, 1, 0, 1], &[2.0, 1e-15, 1e-15, 2.0], 2, 2
         ).unwrap();
         let q_clean = near_zero_q_removal(&q, 2);
-        // 非対角 (0,1)=(1,0) が除去されている
-        let diag_count = q_clean.values.iter().zip(q_clean.row_ind.iter()).filter(|(_, &_r)| {
-            // どの列かは不明なのでゼロ化された数を確認
-            true
-        }).count();
-        // 非対角2要素が除去され対角2要素のみ残る
         assert_eq!(q_clean.values.len(), 2, "off-diag removed");
-        let _ = diag_count;
     }
 
     #[test]

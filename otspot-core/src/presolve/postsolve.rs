@@ -52,7 +52,7 @@ fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bo
 ///
 /// Phase 1 minimises `Σ slack` for feasibility; Phase 2 fixes the Phase-1 slack and
 /// minimises `Σ|y_del| + Σ|dy|` to break ties. Kept-row perturbation is required when
-/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_THRESHOLD`.
+/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_SIZE_SUM`.
 /// Returns an `m`-sized y vector, or `None` on construction/solve failure.
 fn build_and_solve_cleanup_lp(
     orig_problem: &LpProblem,
@@ -81,7 +81,7 @@ fn build_and_solve_cleanup_lp(
         .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
 
     let use_kept_perturbation =
-        allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
+        allow_kept_perturbation && n + m <= LARGE_PROBLEM_SIZE_SUM;
     // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
     // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
     // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
@@ -316,19 +316,18 @@ fn build_and_solve_cleanup_lp(
 
     let a_clean = CscMatrix::from_triplets(
         &tri_rows, &tri_cols, &tri_vals, m_clean, total_vars
-    ).ok()?;
+    ).expect("triplets invariant");
     let b_clean_keep = b_clean.clone();
     let ct_clean_keep = ct_clean.clone();
     let cleanup_lp = LpProblem::new_general(
         c_clean, a_clean, b_clean, ct_clean, bounds_clean, None
-    ).ok()?;
+    ).expect("lp invariant");
 
     // Wire the parent deadline straight through so every inner stage (parse, scale,
     // factorize, simplex iterate) checks the same clock; otherwise large cleanup
     // LPs can spend minutes in setup before any per-call budget kicks in.
     let opts = SolverOptions { presolve: false, warm_start: None, deadline, ..SolverOptions::default() };
     let r1 = crate::simplex::solve_without_presolve(&cleanup_lp, &opts);
-    let _ = (slack_count, m_clean);
     if r1.status != SolveStatus::Optimal || r1.solution.len() != total_vars {
         return None;
     }
@@ -456,7 +455,7 @@ fn build_and_solve_cleanup_lp(
 /// cleanup LP 自体が解けない規模に膨らむ。この上限超でも摂動なしの cleanup LP は
 /// 走るので dual recovery は機能する (品質と可解性のトレードオフ)。
 /// memory/時間予算ではなく LP 列数膨張のガードなので固定 size で妥当。
-use crate::tolerances::LARGE_PROBLEM_THRESHOLD;
+use crate::tolerances::LARGE_PROBLEM_SIZE_SUM;
 
 /// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {

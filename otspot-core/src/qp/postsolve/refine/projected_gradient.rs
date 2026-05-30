@@ -35,7 +35,7 @@ pub(crate) fn refine_dual_projected_gradient(
 
     let objective = |y: &[f64]| -> Option<(f64, Vec<f64>)> {
         let aty = if problem.a.nrows > 0 {
-            problem.a.transpose().mat_vec_mul(y).ok()?
+            problem.a.transpose().mat_vec_mul(y).expect("dim validated upstream")
         } else {
             vec![0.0_f64; n]
         };
