@@ -1004,14 +1004,18 @@ RHS\n    rhs  c1  10.5\nENDATA\n";
         assert!(parse_mps(mps).is_err(), "< 3 fields in BOUNDS must error");
     }
 
-    /// B: duplicate (col, row) pair in COLUMNS must be an error.
+    /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
+    /// MPS spec allows repeated entries; CscMatrix::from_triplets merges them.
     #[test]
-    fn test_mps_columns_duplicate_entry_is_error() {
-        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 c1 2.0\n    x1 c1 3.0\nRHS\n    rhs c1 10.0\nENDATA\n";
-        let err = parse_mps(mps);
-        assert!(err.is_err(), "duplicate (col, row) in COLUMNS must error");
-        let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    fn test_parse_mps_accumulates_duplicate_objective_entries() {
+        let mps = "NAME\nROWS\n N obj\n L c1\nCOLUMNS\n    x1 obj 1.0 c1 1.0\n    x1 obj 2.0\nRHS\n    rhs c1 10.0\nENDATA\n";
+        let lp = parse_mps(mps).expect("duplicate objective entries must parse OK");
+        assert_eq!(lp.num_vars, 1);
+        assert!(
+            (lp.c[0] - 3.0).abs() < 1e-10,
+            "1.0 + 2.0 = 3.0, got {}",
+            lp.c[0]
+        );
     }
 
     /// C: NaN coefficient in COLUMNS must be an error.

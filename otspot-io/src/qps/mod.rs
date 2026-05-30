@@ -458,14 +458,18 @@ ENDATA\n";
         assert!(parse_qps_str(qps).is_err(), "< 3 fields in BOUNDS must error");
     }
 
-    /// B: duplicate (col, row) pair in COLUMNS must be an error.
+    /// Duplicate (col, row) entries in COLUMNS must accumulate (sum), not error.
+    /// QPS inherits MPS spec: repeated entries are summed via CscMatrix triplet merge.
     #[test]
-    fn test_qps_columns_duplicate_entry_is_error() {
-        let qps = minimal_qps_with_columns("    x1 c1 2.0\n    x1 c1 3.0");
-        let err = parse_qps_str(&qps);
-        assert!(err.is_err(), "duplicate (col, row) in COLUMNS must error");
-        let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("Duplicate"), "error should mention 'Duplicate': {}", msg);
+    fn test_parse_qps_accumulates_duplicate_objective_entries() {
+        let qps = "NAME          DUP_TEST\nROWS\n N  obj\n L  c1\nCOLUMNS\n    x1  obj  1.0  c1  1.0\n    x1  obj  2.0\nRHS\n    rhs  c1  10.0\nENDATA\n";
+        let prob = parse_qps_str(qps).expect("duplicate objective entries must parse OK");
+        assert_eq!(prob.num_vars, 1);
+        assert!(
+            (prob.c[0] - 3.0).abs() < 1e-10,
+            "1.0 + 2.0 = 3.0, got {}",
+            prob.c[0]
+        );
     }
 
     /// B: duplicate (col1, col2) pair in QUADOBJ must be an error.

@@ -12,8 +12,6 @@ use super::QpsError;
 pub(super) struct QpsParser {
     rows: Vec<(String, RowType)>,
     columns: Vec<(String, String, f64)>,
-    /// Tracks (col_name, row_name) pairs seen in COLUMNS to detect duplicates.
-    columns_seen: HashSet<(String, String)>,
     rhs: HashMap<String, f64>,
     ranges: HashMap<String, f64>,
     bounds: Vec<(BoundType, String, Option<f64>)>,
@@ -30,7 +28,6 @@ impl QpsParser {
         Self {
             rows: Vec::new(),
             columns: Vec::new(),
-            columns_seen: HashSet::new(),
             rhs: HashMap::new(),
             ranges: HashMap::new(),
             bounds: Vec::new(),
@@ -164,7 +161,6 @@ impl QpsParser {
 
     fn parse_columns_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
             return Err(QpsError::ParseError {
                 line: line_num,
@@ -207,18 +203,10 @@ impl QpsParser {
                         line: line_num,
                         message: format!("Invalid value: {}", val_str1),
                     })?;
-                    // C: reject non-finite coefficient
                     if !value1.is_finite() {
                         return Err(QpsError::ParseError {
                             line: line_num,
                             message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name1),
-                        });
-                    }
-                    // B: reject duplicate (col, row) pair
-                    if !self.columns_seen.insert((col_name.clone(), row_name1.clone())) {
-                        return Err(QpsError::ParseError {
-                            line: line_num,
-                            message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name1),
                         });
                     }
                     self.columns.push((col_name.clone(), row_name1, value1));
@@ -232,18 +220,10 @@ impl QpsParser {
                         line: line_num,
                         message: format!("Invalid value: {}", val_str2),
                     })?;
-                    // C: reject non-finite coefficient
                     if !value2.is_finite() {
                         return Err(QpsError::ParseError {
                             line: line_num,
                             message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name2),
-                        });
-                    }
-                    // B: reject duplicate (col, row) pair
-                    if !self.columns_seen.insert((col_name.clone(), row_name2.clone())) {
-                        return Err(QpsError::ParseError {
-                            line: line_num,
-                            message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name2),
                         });
                     }
                     self.columns.push((col_name, row_name2, value2));
@@ -260,18 +240,10 @@ impl QpsParser {
                 line: line_num,
                 message: format!("Invalid value: {}", parts[i + 1]),
             })?;
-            // C: reject non-finite coefficient
             if !value.is_finite() {
                 return Err(QpsError::ParseError {
                     line: line_num,
                     message: format!("Non-finite COLUMNS value for col='{}' row='{}'", col_name, row_name),
-                });
-            }
-            // B: reject duplicate (col, row) pair
-            if !self.columns_seen.insert((col_name.clone(), row_name.clone())) {
-                return Err(QpsError::ParseError {
-                    line: line_num,
-                    message: format!("Duplicate COLUMNS entry: col='{}' row='{}'", col_name, row_name),
                 });
             }
             self.columns.push((col_name.clone(), row_name, value));
@@ -282,7 +254,6 @@ impl QpsParser {
 
     fn parse_rhs_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // A: malformed line — was silently skipped before
         if parts.len() < 2 {
             return Err(QpsError::ParseError {
                 line: line_num,
@@ -290,7 +261,6 @@ impl QpsParser {
             });
         }
         // 2-field shorthand: (row_name, value) without a preceding rhs_section_name.
-        // Non-finite values are allowed here; the build step emits InvalidObjectiveOffset.
         if parts.len() == 2 {
             let row_name = parts[0].to_string();
             let value = parts[1].parse::<f64>().map_err(|_| QpsError::ParseError {
@@ -316,7 +286,7 @@ impl QpsParser {
             }
             ok
         };
-        // E: shared pair-parsing helpers; finite check skipped (build step handles obj_offset)
+        // finite check skipped for obj-row RHS (handled as obj_offset at build step)
         let pairs = if is_free {
             parse_mps_free_pairs(&parts, line_num, "RHS", false)
         } else {
@@ -331,7 +301,6 @@ impl QpsParser {
 
     fn parse_ranges_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // A: malformed line — was silently skipped before
         if parts.len() < 2 {
             return Err(QpsError::ParseError {
                 line: line_num,
@@ -345,7 +314,6 @@ impl QpsParser {
                 line: line_num,
                 message: format!("Invalid value: {}", parts[1]),
             })?;
-            // C: reject non-finite range value
             if !value.is_finite() {
                 return Err(QpsError::ParseError {
                     line: line_num,
@@ -367,7 +335,6 @@ impl QpsParser {
             }
             ok
         };
-        // E: shared pair-parsing helpers with finite validation (C)
         let pairs = if is_free {
             parse_mps_free_pairs(&parts, line_num, "RANGES", true)
         } else {
@@ -382,7 +349,6 @@ impl QpsParser {
 
     fn parse_bounds_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
             return Err(QpsError::ParseError {
                 line: line_num,
@@ -412,7 +378,6 @@ impl QpsParser {
                     None
                 } else {
                     let parsed = v.parse::<f64>().ok();
-                    // C: reject non-finite bound value
                     if let Some(val) = parsed {
                         if !val.is_finite() {
                             return Err(QpsError::ParseError {
@@ -436,7 +401,6 @@ impl QpsParser {
         } else if parts.len() >= 4 {
             let raw = parts[3];
             let parsed = raw.parse::<f64>().ok();
-            // C: reject non-finite bound value
             if let Some(val) = parsed {
                 if !val.is_finite() {
                     return Err(QpsError::ParseError {
@@ -447,7 +411,6 @@ impl QpsParser {
             }
             (parts[2].to_string(), parsed)
         } else if let Ok(v) = parts[2].parse::<f64>() {
-            // C: reject non-finite bound value
             if !v.is_finite() {
                 return Err(QpsError::ParseError {
                     line: line_num,
@@ -464,7 +427,6 @@ impl QpsParser {
 
     fn parse_quadobj_line(&mut self, line: &str, line_num: usize) -> Result<(), QpsError> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // A: malformed line — was silently skipped before
         if parts.len() < 3 {
             return Err(QpsError::ParseError {
                 line: line_num,
@@ -480,14 +442,12 @@ impl QpsParser {
             line: line_num,
             message: format!("Invalid QUADOBJ value: {}", val_str),
         })?;
-        // C: reject non-finite quadratic coefficient
         if !value.is_finite() {
             return Err(QpsError::ParseError {
                 line: line_num,
                 message: format!("Non-finite QUADOBJ value for ({}, {})", col1, col2),
             });
         }
-        // B: reject duplicate (col1, col2) pair in upper-triangular Q
         let key = (col1.to_string(), col2.to_string());
         if !self.quadobj_seen.insert(key) {
             return Err(QpsError::ParseError {
