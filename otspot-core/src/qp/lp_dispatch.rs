@@ -146,8 +146,11 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
+    // Optimal/SuboptimalSolution のみ加算 (Infeasible/Timeout 等は加算しない)。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
-    simplex_result.objective += problem.obj_offset;
+    if matches!(simplex_result.status, SolveStatus::Optimal | SolveStatus::SuboptimalSolution) {
+        simplex_result.objective += problem.obj_offset;
+    }
     if simplex_result.status == SolveStatus::Timeout
         && simplex_result.solution.is_empty()
         && options.deadline.is_none_or(|d| Instant::now() < d)
@@ -569,6 +572,40 @@ mod tests {
         assert!(
             verify_normalized_farkas(&problem, &cols, &rhs, &y),
             "genuine infeasible must remain certified",
+        );
+    }
+
+    /// `obj_offset` は Optimal/SuboptimalSolution 以外のステータスに加算してはならない。
+    ///
+    /// No-op (removing the status guard) causes Infeasible to return
+    /// `objective = obj_offset` instead of `f64::INFINITY` → FAIL.
+    #[test]
+    fn infeasible_lp_dispatch_obj_offset_not_added() {
+        use crate::options::SolverOptions;
+        use crate::problem::SolveStatus;
+        // Infeasible: 0x1 >= 2 AND 0x1 <= 1 is always false (empty feasible set).
+        let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(1, 1),
+            vec![1.0],
+            a,
+            vec![2.0, 1.0],
+            vec![(0.0, f64::INFINITY)],
+            vec![ConstraintType::Ge, ConstraintType::Le],
+        ).unwrap();
+        problem.obj_offset = 42.5;
+        let result = solve_as_lp_pub(&problem, &SolverOptions::default());
+        assert_eq!(result.status, SolveStatus::Infeasible,
+            "expected Infeasible, got {:?}", result.status);
+        assert!(
+            result.objective != problem.obj_offset,
+            "Infeasible objective must NOT equal obj_offset ({}) — status guard missing",
+            problem.obj_offset,
+        );
+        assert!(
+            result.objective.is_infinite(),
+            "Infeasible objective must be infinite, got {}",
+            result.objective,
         );
     }
 

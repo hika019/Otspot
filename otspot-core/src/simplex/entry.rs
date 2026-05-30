@@ -50,7 +50,7 @@ pub(crate) fn solve_with(problem: &LpProblem, options: &SolverOptions) -> Solver
             Err(presolve::PresolveStatus::Infeasible) => {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],
@@ -199,7 +199,7 @@ pub(crate) fn solve_without_presolve(problem: &LpProblem, options: &SolverOption
             if problem.b[i] < -options.primal_tol {
                 return SolverResult {
                     status: SolveStatus::Infeasible,
-                    objective: 0.0,
+                    objective: f64::INFINITY,
                     solution: vec![],
                     dual_solution: vec![],
                     reduced_costs: vec![],
