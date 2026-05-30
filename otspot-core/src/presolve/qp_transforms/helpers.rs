@@ -164,8 +164,8 @@ pub(super) fn is_diagonal_q(q: &CscMatrix, n: usize) -> bool {
     true
 }
 
-/// If A contains entries `|a_ij| > 1e6`, scale each affected row by
-/// `σ_i = 1/√(max|A[i,*]|)` (capped at `SIGMA_FLOOR`) so subsequent Ruiz / IPM is
+/// If A contains entries `|a_ij| > LARGE_A_COEFF_TRIGGER`, scale each affected row by
+/// `σ_i = 1/√(max|A[i,*]|)` (capped at `SCALING_SIGMA_FLOOR`) so subsequent Ruiz / IPM is
 /// well-conditioned. Returns the per-row scales for dual unscaling.
 pub(super) fn apply_large_coeff_rescaling(a: &mut CscMatrix, b: &mut [f64], n: usize) -> Vec<f64> {
     let m = a.nrows;

@@ -204,7 +204,7 @@ pub fn near_zero_q_removal(q: &CscMatrix, n: usize) -> CscMatrix {
     }
 }
 
-/// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SIGMA_FLOOR`).
+/// Normalise constraint rows by `σ_i = max|A[i,*]|⁻¹` (capped at `SCALING_SIGMA_FLOOR`).
 /// Improves KKT-matrix conditioning. Returns per-row scales for dual unscaling.
 pub fn constraint_precond(
     a: &mut CscMatrix,

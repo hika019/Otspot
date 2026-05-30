@@ -137,6 +137,9 @@ pub(crate) fn refine_dual_projected_gradient(
     /// Maximum Cauchy step size; clamps the gradient-descent step to prevent
     /// overshooting when curvature is very small.
     const PG_STEP_MAX: f64 = 1e8;
+    /// Per-variable base for objective convergence threshold.
+    /// Scaled by `max(n, 1)` to give absolute tolerance in projected gradient refinement.
+    const PG_OBJ_CONVERGE_BASE: f64 = 1e-16;
 
     let mut y_start = result.dual_solution.clone();
     project_feasible(&mut y_start);
@@ -150,7 +153,7 @@ pub(crate) fn refine_dual_projected_gradient(
 
     let pg_max_iters = m.saturating_mul(2).clamp(PG_MIN_ITER, PG_MAX_ITER);
     const ACCEPT_TOL_REL: f64 = 1e-12;
-    let obj_converge_thresh = 1e-16 * (n as f64).max(1.0);
+    let obj_converge_thresh = PG_OBJ_CONVERGE_BASE * (n as f64).max(1.0);
     const STAGNATE_MIN_RATIO: f64 = 1e-7;
 
     for _ in 0..pg_max_iters {
