@@ -210,18 +210,11 @@ pub(super) const NO_PROGRESS_REL_EPS: f64 = 1e-12;
 /// Returns `true` when `current` is strictly better than `best` by more than
 /// the relative noise floor `best.abs().max(floor) * NO_PROGRESS_REL_EPS`.
 ///
-/// - `floor = 0.0` is equivalent to [`made_progress`].
-/// - `floor = 1.0` guards against noise resets when `best ≈ 0`, preventing
-///   sub-eps improvements from counting as real progress (primal Phase I).
+/// `floor = 0.0`: noise floor scales with `|best|` (use in dual anti-cycling).
+/// `floor = 1.0`: guards against noise resets when `best ≈ 0`, preventing
+/// sub-eps improvements from counting as real progress (primal Phase I).
 pub(super) fn made_progress_with_floor(best: f64, current: f64, floor: f64) -> bool {
     best - current > best.abs().max(floor) * NO_PROGRESS_REL_EPS
-}
-
-/// Returns `true` when `current` is strictly better than `best_infeas` by more than
-/// the relative noise floor `NO_PROGRESS_REL_EPS * |best_infeas|`.
-/// `best_infeas == 0` ⇒ `false` (no progress possible from zero).
-pub(super) fn made_progress(best_infeas: f64, current: f64) -> bool {
-    made_progress_with_floor(best_infeas, current, 0.0)
 }
 
 /// Periodic deadline-check interval inside the m-BTRAN gamma loop.
@@ -545,40 +538,46 @@ mod tests {
         );
     }
 
-    /// `made_progress` must return true iff improvement exceeds the relative
-    /// noise floor `|best_infeas| * NO_PROGRESS_REL_EPS`.
+    /// `made_progress_with_floor(_, _, 0.0)` must return true iff improvement
+    /// exceeds the relative noise floor `|best| * NO_PROGRESS_REL_EPS`.
     ///
-    /// no-op proof: stubbing `made_progress` to always return `false` makes the
-    /// second and third assertions fail → test fails.
+    /// no-op proof: stubbing `made_progress_with_floor` to always return `false`
+    /// makes the second and third assertions fail → test fails.
     #[test]
     fn made_progress_threshold_boundary() {
         // Clear improvement far above noise floor.
         assert!(
-            made_progress(1.0, 0.0),
-            "1.0 → 0.0 is clear improvement; made_progress must return true"
+            made_progress_with_floor(1.0, 0.0, 0.0),
+            "1.0 → 0.0 is clear improvement; must return true"
         );
         // Improvement exactly at the noise floor is NOT counted as progress.
         let eps = NO_PROGRESS_REL_EPS;
         let best = 1.0_f64;
         let at_boundary = best - best.abs() * eps;
         assert!(
-            !made_progress(best, at_boundary),
+            !made_progress_with_floor(best, at_boundary, 0.0),
             "improvement == eps * |best| is not strictly above threshold; must return false"
         );
         // Improvement just above the noise floor IS counted.
         let above_boundary = best - best.abs() * eps - 1e-15;
         assert!(
-            made_progress(best, above_boundary),
+            made_progress_with_floor(best, above_boundary, 0.0),
             "improvement slightly above eps * |best| must return true"
         );
         // No improvement at all.
-        assert!(!made_progress(1.0, 1.0), "no improvement must return false");
-        // best == 0: no progress possible from zero.
-        assert!(!made_progress(0.0, 0.0), "best == 0 must return false");
+        assert!(
+            !made_progress_with_floor(1.0, 1.0, 0.0),
+            "no improvement must return false"
+        );
+        // best == 0, current == 0: no improvement → false.
+        assert!(
+            !made_progress_with_floor(0.0, 0.0, 0.0),
+            "best == 0, current == 0: no improvement must return false"
+        );
     }
 
     /// `made_progress_with_floor`: floor=1.0 keeps near-zero `best` from treating
-    /// sub-eps values as noise-free progress; floor=0.0 must equal `made_progress`.
+    /// sub-eps values as noise-free progress; floor=0.0 uses `|best|` as the scale.
     ///
     /// no-op proof: stubbing `made_progress_with_floor` to always return `false`
     /// means `best_obj` in primal Phase I never updates → `OBJ_PROGRESS_RESET_COUNT`
@@ -590,21 +589,22 @@ mod tests {
             !made_progress_with_floor(0.0, -0.5e-12, 1.0),
             "near-zero best, floor=1.0: improvement below floor*eps must be rejected"
         );
-        // floor=0.0 (same as made_progress): 0 − (−0.5e-12) = 0.5e-12 > 0*eps = 0 → accepted.
+        // best=0, current<0 (improvement), floor=0.0:
+        //   0 - (-0.5e-12) = 0.5e-12 > 0.0 * eps = 0 → true.
+        //   Note: best==0 does NOT imply false when floor=0; only best==current==0 gives false.
         assert!(
             made_progress_with_floor(0.0, -0.5e-12, 0.0),
-            "floor=0 must accept any positive improvement (matches made_progress)"
+            "best=0, current=-0.5e-12, floor=0: any positive improvement must return true"
         );
         // floor=1.0 with improvement above the floor*eps threshold.
         assert!(
             made_progress_with_floor(0.0, -1.5e-12, 1.0),
             "floor=1.0, improvement > floor*eps must pass"
         );
-        // floor=0.0 must agree with made_progress on typical values.
-        assert_eq!(
+        // floor=0.0, typical values: improvement above |best|*eps.
+        assert!(
             made_progress_with_floor(1.0, 0.0, 0.0),
-            made_progress(1.0, 0.0),
-            "made_progress_with_floor(x, y, 0.0) must equal made_progress(x, y)"
+            "floor=0.0, best=1.0, current=0.0: clear improvement must return true"
         );
     }
 }
