@@ -233,6 +233,16 @@ pub(crate) trait DualLeavingStrategy {
     /// overrides; stateless strategies ignore. The default no-op means the
     /// core loop may skip the (O(m²)) BTRAN sweep for stateless callers.
     fn set_initial_gamma(&mut self, _gamma_truth: &[f64]) {}
+
+    /// Whether the core may flip `trow` signs to repair an lb-violation
+    /// (x_B[r] < 0) at a warm-start leaving row.  Default `true`: standard
+    /// MI/DSE strategies allow lb-repair pivots. Big-M Phase I overrides to
+    /// `false`: lb-violations there arise from LU eta drift in natural rows,
+    /// not genuine warm-start infeasibilities, and the sign flip routes the
+    /// ratio test into a direction that returns no candidates → false Unbounded.
+    fn allows_lb_repair(&self) -> bool {
+        true
+    }
 }
 
 /// Most Infeasible Rule: 最も負のx_B[i]を選択

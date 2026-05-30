@@ -250,15 +250,20 @@ pub(crate) fn dual_simplex_core_advanced(
             trow[j] = dot;
         }
 
-        // 3d': lb-violation 方向補正。
+        // 3d': lb-violation 方向補正 (warm-start 経路専用)。
         //
         // 通常の双対 simplex 比率テストは trow[j] > 0 を入基候補とする (ub 違反方向)。
         // ウォームスタート時の lb 違反 (x_b[r] < 0) を修復するには入基変数の「離基行への
         // 影響が x_b[r] を増加させる方向」、すなわち trow[j] < 0 を選ばなければならない。
         // trow を符号反転することで既存の比率テスト実装をそのまま再利用する。
         //
+        // `allows_lb_repair()` が false の戦略 (Big-M Phase I) では符号反転を禁止する。
+        // Big-M Phase I で x_b[r] < 0 になるのは LU eta 蓄積による自然行ドリフト
+        // (≈ −primal_tol) であり、sign flip すると有効入基候補が消えて false Unbounded を
+        // 引き起こす。修復対象は「本物の lb 違反ウォームスタート」に限定する。
+        //
         // 被縮小費用更新と離基変数の r 値も整合的に符号反転する (3i 参照)。
-        let lb_violation = x_b[leaving_row] < 0.0;
+        let lb_violation = x_b[leaving_row] < 0.0 && leaving.allows_lb_repair();
         if lb_violation {
             for t in trow[..n_price].iter_mut() {
                 *t = -*t;
@@ -271,28 +276,6 @@ pub(crate) fn dual_simplex_core_advanced(
             bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
         } else {
             ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
-        };
-
-        // lb-violation fallback: if no candidates exist in the sign-flipped
-        // (lb-repair) direction, restore the original trow and retry with the
-        // standard ub-violation direction. This prevents false `Unbounded`
-        // returns during Big-M Phase I where numerical cycling can produce
-        // small lb-violations (≈ −primal_tol) with no valid reverse-direction
-        // entering column. Genuine lb-violations (large negative x_B[r]) always
-        // find candidates in the lb direction; the fallback only fires for the
-        // degenerate numerical-drift case.
-        let (ratio_pick, lb_violation) = if lb_violation && ratio_pick.is_none() {
-            for t in trow[..n_price].iter_mut() {
-                *t = -*t; // restore original direction
-            }
-            let fallback = if bland_mode {
-                bland_ratio_test(&trow, &reduced_costs, &is_basic, n_price, PIVOT_TOL)
-            } else {
-                ratio_tester.select_entering(&trow, &reduced_costs, &is_basic, n_price)
-            };
-            (fallback, false)
-        } else {
-            (ratio_pick, lb_violation)
         };
 
         let (entering_col, theta) = match ratio_pick {
