@@ -1,5 +1,6 @@
 #!/bin/bash
 # run_lp_bench.sh — LP ベンチマーク統合実行スクリプト
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 #
 # 使い方:
 #   bash scripts/run_lp_bench.sh [オプション]
@@ -9,7 +10,7 @@
 #                      all | standard | infeas | hard | extra | canary
 #   --eps <eps>        許容誤差 (デフォルト: 1e-6)
 #                      "all" を指定すると 1e-4, 1e-6, 1e-8 の 3 パターンを順次実行
-#   --jobs <N>         並列数 (デフォルト: 8、canary は single-worker を推奨)
+#   --jobs <N>         並列数 (デフォルト: 6、canary は single-worker を推奨)
 #   --timeout <sec>    タイムアウト秒数 (デフォルト: 1000、canary は 60 を推奨)
 #
 # 機能:
@@ -47,7 +48,7 @@ SOLVER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # デフォルト値
 SUITE="all"
 EPS="1e-6"
-JOBS="8"
+JOBS="${JOBS:-6}"
 TIMEOUT="1000"
 
 # 引数パース

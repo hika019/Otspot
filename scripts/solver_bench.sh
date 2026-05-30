@@ -1,5 +1,6 @@
 #!/bin/bash
 # solver_bench.sh — ベンチマークバイナリのラッパー
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 # --release ビルドを強制する。`--eps` は呼出側 (bench_parallel.sh) から指定する。
 # qps_benchmark と bench_qplib の両方に対応。
 #

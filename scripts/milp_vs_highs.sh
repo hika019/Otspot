@@ -1,9 +1,10 @@
 #!/bin/bash
 # milp_vs_highs.sh — MILP benchmark: otspot vs HiGHS comparison.
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 #
 # 公平性 (Fairness):
 #   Tolerance:  両者 eps=1e-6 (MIP gap + integer feas / HiGHS mip_rel_gap + tol)
-#   Time limit: 両者 timeout (既定 100s)
+#   Time limit: 両者 timeout (既定 1000s)
 #   Threads:    両者 single-thread
 #   Obj match:  |otspot_obj - highs_obj| / max(1, |highs_obj|) <= 1e-6
 #               (HiGHS の最適値を基準とした相対誤差)
@@ -23,7 +24,7 @@ HIGHS_BIN="${HIGHS_BIN:-/opt/homebrew/bin/highs}"
 MILP_SOLVE="$REPO_ROOT/target/release/milp_solve"
 
 DATA_DIR="$REPO_ROOT/data/miplib_small"
-TIMEOUT=100
+TIMEOUT=1000
 JOBS=6
 EPS=1e-6
 
