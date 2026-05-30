@@ -974,23 +974,26 @@ mod tests {
         );
     }
 
-    /// **Sentinel**: genuinely infeasible LP with finite upper bounds must return
-    /// `SolveStatus::Infeasible`, both cold and when given a stale warm basis.
+    /// **Sentinel**: warm basis from a previously-bounded solve must not mask
+    /// infeasibility when the next LP is genuinely infeasible.
     ///
     /// LP1: `min -x0 - 3x1, x0+x1 ≤ 5, 0 ≤ x0 ≤ 4, 0 ≤ x1 ≤ 2` → Optimal via
     /// bounded dispatch (Le-only, finite UBs).
     /// LP2: `min -x0 - 3x1, x0+x1 ≤ -1, same UBs` → Infeasible (x0,x1 ≥ 0
     /// implies x0+x1 ≥ 0, but constraint requires ≤ -1).
     ///
-    /// The warm basis from LP1 has the wrong size for LP2's legacy standard form,
-    /// so the warm path falls through to cold start, which correctly detects
-    /// infeasibility via primal Phase I.
+    /// LP2 has `num_artificial != 0` (Le with negative RHS → row negation + slack
+    /// coeff = -1 → artificial), so the bounded dispatch gate (`bsf.num_artificial
+    /// == 0`) is bypassed for both cold and warm legs. Infeasibility is detected
+    /// by `two_phase_dual_simplex` returning a Farkas certificate. The warm basis
+    /// is therefore routed through the legacy warm path, and this sentinel guards
+    /// that the handoff does not mask the Farkas-Infeasible return.
     ///
-    /// no-op proof: replacing the `SolveStatus::Infeasible` return in `big_m_cold_start`
-    /// or `two_phase_dual_simplex` with `SolveStatus::Optimal` would cause this
-    /// assertion to fail.
+    /// no-op proof: replacing the `SolveStatus::Infeasible` return in
+    /// `two_phase_dual_simplex` (the path actually taken for `num_artificial != 0`
+    /// Infeasible LPs) with `SolveStatus::Optimal` would cause this assertion to fail.
     #[test]
-    fn bounded_warm_start_genuinely_infeasible_returns_infeasible() {
+    fn warm_basis_from_bounded_dispatch_does_not_mask_farkas_infeasibility() {
         use crate::sparse::CscMatrix;
         const OBJ_TOL: f64 = 1e-6;
 
