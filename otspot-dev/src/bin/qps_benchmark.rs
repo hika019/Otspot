@@ -338,7 +338,6 @@ fn main() {
     let mut n_pass_unbounded = 0usize;    // 期待通り Unbounded と判定
     let mut n_pfeas_fail = 0usize;
     let mut n_dfeas_fail = 0usize;
-    let mut n_suboptimal_comp = 0usize;
     let mut n_obj_mismatch = 0usize;
     let mut n_fail = 0usize;
     let mut n_error = 0usize;
@@ -466,38 +465,7 @@ fn main() {
                         )
                     } else {
                         let dfeas = dfeas_abs;
-                        // Step 7-8: 相補性チェック
-                        // Simplex LP: extract_dual_info のポストホック rc は ill-conditioned 基底で
-                        // 浮動小数点誤差が大きく、真に最適な解でも comp >> 0 になる偽陽性を生む。
-                        // DFEAS チェック (max(0, -rc_j) ≤ eps) が LP 最適性の十分条件。
-                        // IPM LP (empty reduced_costs): NaN で自動スキップ。
-                        // QP: is_qp=true でスキップ。
-                        let comp = f64::NAN;
-                        let norm_c = prob
-                            .c
-                            .iter()
-                            .map(|&x| x.abs())
-                            .fold(0.0_f64, f64::max)
-                            .max(1.0);
-                        let norm_x = result
-                            .solution
-                            .iter()
-                            .map(|&x| x.abs())
-                            .fold(0.0_f64, f64::max)
-                            .max(1.0);
-                        let comp_tol = eps * (1.0 + norm_c * norm_x);
-
-                        if !comp.is_nan() && comp > comp_tol {
-                            n_suboptimal_comp += 1;
-                            (
-                                "SUBOPTIMAL".to_string(),
-                                format!(
-                                    "[{}] obj={:.2e} pf={:.1e} comp={:.1e} (comp_tol={:.1e})",
-                                    method_label, result.objective, pfeas, comp, comp_tol
-                                ),
-                            )
-                        } else {
-                            // Step 9: 正解値照合
+                        // Step 9: 正解値照合
                             // netlib_lp.csv のみ CSV 参照値に obj_offset を加算して比較
                             // (solver は result.objective に offset 込みで返すため)。
                             let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
@@ -543,15 +511,10 @@ fn main() {
                                     } else {
                                         format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
                                     };
-                                    let comp_str = if comp.is_nan() {
-                                        "comp=NA".to_string()
-                                    } else {
-                                        format!("comp={:.1e}", comp)
-                                    };
                                     (
                                         "PASS".to_string(),
                                         format!(
-                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {} obj_err={:.3}%",
+                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} obj_err={:.3}%",
                                             method_label,
                                             result.objective,
                                             pfeas,
@@ -559,7 +522,6 @@ fn main() {
                                             pfc,
                                             bfeas,
                                             df_str,
-                                            comp_str,
                                             rel_err * 100.0
                                         ),
                                     )
@@ -579,28 +541,21 @@ fn main() {
                                     } else {
                                         format!("df={:.1e} dfr={:.1e} dfc={:.1e}", dfeas, dfeas_rel, dfc)
                                     };
-                                    let comp_str = if comp.is_nan() {
-                                        "comp=NA".to_string()
-                                    } else {
-                                        format!("comp={:.1e}", comp)
-                                    };
                                     (
                                         "PASS[no_ref]".to_string(),
                                         format!(
-                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {} {}",
+                                            "[{}] obj={:.2e} pf={:.1e} pfn={:.1e} pfc={:.1e} bf={:.1e} {}",
                                             method_label,
                                             result.objective,
                                             pfeas,
                                             pfeas_normalized,
                                             pfc,
                                             bfeas,
-                                            df_str,
-                                            comp_str
+                                            df_str
                                         ),
                                     )
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -745,7 +700,7 @@ fn main() {
     println!("  PASS:Unbounded:    {}", n_pass_unbounded);
     println!("  PFEAS_FAIL:        {}", n_pfeas_fail);
     println!("  DFEAS_FAIL:        {}", n_dfeas_fail);
-    println!("  SUBOPTIMAL:        {}", n_suboptimal + n_suboptimal_comp);
+    println!("  SUBOPTIMAL:        {}", n_suboptimal);
     println!("  OBJ_MISMATCH:      {}", n_obj_mismatch);
     println!("  MAXITER:           {}", n_max_iter);
     println!("  TIMEOUT:           {}", n_timeout);
@@ -760,7 +715,6 @@ fn main() {
             + n_pass_unbounded
             + n_pfeas_fail
             + n_dfeas_fail
-            + n_suboptimal_comp
             + n_obj_mismatch
             + n_fail
             + n_max_iter

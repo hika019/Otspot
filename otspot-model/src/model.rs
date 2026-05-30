@@ -491,7 +491,7 @@ impl Model {
 
         // --- QP path ---
         if let Some(ref q_orig) = self.quadratic_objective.clone() {
-            return self.solve_qp_internal(c, a, b, bounds, q_orig.clone(), num_constraints);
+            return self.solve_qp_internal(c, bounds, q_orig.clone(), num_constraints);
         }
 
         // --- LP path (existing) ---
@@ -650,8 +650,6 @@ impl Model {
     fn solve_qp_internal(
         &self,
         c: Vec<f64>,
-        _lp_a: CscMatrix,
-        _lp_b: Vec<f64>,
         bounds: Vec<(f64, f64)>,
         q_orig: CscMatrix,
         num_model_constraints: usize,
