@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'otspot-*/Cargo.toml'
 
 jobs:
   audit:
@@ -22,3 +18,15 @@ jobs:
       - run: cargo audit
       - name: data coverage sentinel
         run: python3 tests/test_check_data_coverage.py
+
+  comment-hygiene:
+    name: comment-hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Production memo-comment grep gate
+        run: bash scripts/lib/check_memo_grep.sh
+      - name: Comment block size check
+        run: bash scripts/check_comment_block_size.sh
+      - name: Comment ratio check
+        run: bash scripts/check_comment_ratio.sh
