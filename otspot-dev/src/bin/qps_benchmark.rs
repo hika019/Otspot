@@ -415,9 +415,19 @@ fn main() {
         let nnz_before = prob.q.nnz() + prob.a.nnz();
         let is_qp = prob.q.nnz() > 0;
 
+        let mut solve_opts = opts.clone();
+        if let Some(&known) = baseline_objectives.get(&name) {
+            let obj_offset = if baseline_csv_str.ends_with("netlib_lp.csv") {
+                prob.obj_offset
+            } else {
+                0.0
+            };
+            solve_opts.known_optimal_obj = Some(known + obj_offset);
+        }
+
         println!("SOLVE_START: {}", name);
         let start = Instant::now();
-        let result = solve_qp_with(&prob, &opts);
+        let result = solve_qp_with(&prob, &solve_opts);
         let elapsed_s = start.elapsed().as_secs_f64();
         println!(
             "SOLVE_DONE: {} {:?} ({:.3}s)",

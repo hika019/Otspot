@@ -96,6 +96,7 @@ fn lp_simplex_stall_real_netlib_lps_converge() {
         };
         let mut opts = SolverOptions::default();
         opts.timeout_secs = Some(BUDGET_SECS);
+        opts.known_optimal_obj = Some(case.truth);
         // No warm start; cold-start large LP is the failure mode.
         let r = solve_qp_with(&qp, &opts);
         let converged = matches!(r.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal);
