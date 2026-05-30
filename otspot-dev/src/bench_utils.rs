@@ -138,7 +138,7 @@ pub enum BenchPromotionPolicy {
     BenchQplib,
 }
 
-/// Promote `SuboptimalSolution` / `LocallyOptimal` with a full solution to `Optimal`.
+/// Promote solver statuses that each benchmark treats as sufficiently converged.
 ///
 /// `Timeout` is intentionally excluded: surfacing an honest Timeout is more
 /// useful than silently promoting a partial incumbent.
@@ -147,10 +147,13 @@ pub fn apply_bench_status_promotion(
     num_vars: usize,
     policy: BenchPromotionPolicy,
 ) -> SolverResult {
-    let eligible_status = matches!(
-        result.status,
-        SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
-    );
+    let eligible_status = match policy {
+        BenchPromotionPolicy::QpsBenchmark => matches!(result.status, SolveStatus::LocallyOptimal),
+        BenchPromotionPolicy::BenchQplib => matches!(
+            result.status,
+            SolveStatus::SuboptimalSolution | SolveStatus::LocallyOptimal
+        ),
+    };
     let has_full_solution = !result.solution.is_empty() && result.solution.len() == num_vars;
     let obj_ok = match policy {
         BenchPromotionPolicy::QpsBenchmark => true,
