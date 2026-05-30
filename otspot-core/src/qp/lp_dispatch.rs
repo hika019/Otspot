@@ -4,9 +4,8 @@
 //! forward する。`n > LP_IPM_FIRST_N` または `m > LP_IPM_FIRST_M` を満たす大規模 LP は
 //! IPM を先行し、収束しなければ残時間で simplex にフォールバック。
 //!
-//! IPM 呼び出し時は QP presolve を無効化する。Empty-Column 解析が pure LP で
-//! false Unbounded を返す既知バグ (別途追跡) を回避するため。LP の不有界/不可解は
-//! simplex/IPM 本体で判定可能で presolve なしでも検出できる。
+//! QP presolve は Q=0 では使わない。LP presolve を先に通した上で、縮約後の
+//! LP に対して simplex/IPM を選ぶ。
 //!
 //! `LP_DISPATCH_NOOP=1` は sentinel 用 (no-op proof) で IPM 経路を無効化する。
 
@@ -14,6 +13,7 @@ use std::time::Instant;
 
 use super::certificate::guard_lp_optimal;
 use crate::options::SolverOptions;
+use crate::presolve;
 use crate::problem::{ConstraintType, LpProblem, SolveRoute, SolveStatus, SolverResult};
 use crate::sparse::CscMatrix;
 use crate::tolerances::any_nonfinite;
@@ -83,6 +83,31 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         Err(_) => return SolverResult::infeasible(),
     };
 
+    if options.presolve {
+        match presolve::run_presolve(&lp, options.deadline) {
+            Err(presolve::PresolveStatus::Infeasible) => return SolverResult::infeasible(),
+            Err(presolve::PresolveStatus::Unbounded) => {
+                return SolverResult {
+                    status: SolveStatus::Unbounded,
+                    objective: f64::NEG_INFINITY,
+                    ..Default::default()
+                };
+            }
+            Ok(presolve_result) if presolve_result.was_reduced => {
+                return solve_reduced_lp_from_qp(&lp, problem.obj_offset, presolve_result, options);
+            }
+            Ok(_) => {}
+        }
+    }
+
+    solve_unpresolved_lp_from_qp(&lp, problem, options)
+}
+
+fn solve_unpresolved_lp_from_qp(
+    lp: &LpProblem,
+    problem: &QpProblem,
+    options: &SolverOptions,
+) -> SolverResult {
     // 大規模 LP: IPM 先行、Timeout/NumericalError/Unbounded/MaxIter は simplex 再試行。
     // Optimal/LocallyOptimal/Infeasible は確定的 → 即返却。
     // Unbounded は IPM 側 Q=0 数値リスクがあるため simplex で再確認。
@@ -167,6 +192,103 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
         return certified;
     }
     pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex_result)
+}
+
+fn solve_reduced_lp_from_qp(
+    original_lp: &LpProblem,
+    qp_obj_offset: f64,
+    presolve_result: presolve::transforms::PresolveResult,
+    options: &SolverOptions,
+) -> SolverResult {
+    let reduced_lp = &presolve_result.reduced_problem;
+    let mut reduced_opts = options.clone();
+    reduced_opts.presolve = false;
+    reduced_opts.warm_start = None;
+    reduced_opts.warm_start_lp = None;
+
+    let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
+    if matches!(
+        raw.status,
+        SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
+    ) && options.deadline.is_none_or(|d| Instant::now() < d)
+    {
+        let mut fallback_opts = options.clone();
+        fallback_opts.presolve = false;
+        fallback_opts.warm_start = None;
+        fallback_opts.warm_start_lp = None;
+        let mut fallback = crate::lp::solve_lp_forwarded_from_qp(original_lp, &fallback_opts);
+        add_qp_obj_offset(&mut fallback, qp_obj_offset);
+        return fallback;
+    }
+
+    if matches!(
+        raw.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
+    {
+        let mut lifted = presolve::postsolve::run_postsolve(
+            &raw,
+            &presolve_result,
+            original_lp,
+            options.deadline,
+            options.recover_warm_start_basis,
+        );
+        lifted.stats.route = SolveRoute::LpForwardedFromQp;
+        lifted.stats.lp_ipm_path = raw.stats.lp_ipm_path;
+        lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
+        lifted = guard_lp_optimal(lifted, original_lp);
+        add_qp_obj_offset(&mut lifted, qp_obj_offset);
+        return lifted;
+    }
+
+    raw
+}
+
+fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
+    let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
+    if !dispatch_disabled && prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
+        if let Some(qp) = qp_from_lp(lp) {
+            let mut ipm_opts = ipm_opts_for_lp(options);
+            ipm_opts.deadline = ipm_box_deadline(options, Instant::now()).or(ipm_opts.deadline);
+            let mut ipm = ipm_solver::solve_ipm(&qp, &ipm_opts);
+            ipm.stats.route = SolveRoute::LpForwardedFromQp;
+            ipm.stats.lp_ipm_path = true;
+            if matches!(
+                ipm.status,
+                SolveStatus::Optimal | SolveStatus::LocallyOptimal | SolveStatus::Infeasible
+            ) {
+                return guard_lp_optimal(ipm, lp);
+            }
+            if options.deadline.is_some_and(|d| Instant::now() >= d) {
+                return ipm;
+            }
+        }
+    }
+
+    crate::lp::solve_lp_forwarded_from_qp(lp, options)
+}
+
+fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
+    let mut qp = QpProblem::new(
+        CscMatrix::new(lp.num_vars, lp.num_vars),
+        lp.c.clone(),
+        lp.a.clone(),
+        lp.b.clone(),
+        lp.bounds.clone(),
+        lp.constraint_types.clone(),
+    )
+    .ok()?;
+    qp.obj_offset = lp.obj_offset;
+    Some(qp)
+}
+
+fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
+    if matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+    ) {
+        result.objective += qp_obj_offset;
+    }
 }
 
 /// Pick the better of an IPM result and a simplex result.
@@ -443,6 +565,47 @@ mod tests {
             r2.stats.route,
             SolveRoute::LpDirect,
             "r2 route must be LpDirect"
+        );
+    }
+
+    /// Q=0 QP entry must run LP presolve before size-based IPM dispatch.
+    ///
+    /// The unreduced problem has `n > LP_IPM_FIRST_N`, so skipping presolve would
+    /// set `lp_ipm_path=true`. LP presolve fixes the singleton row and empty
+    /// positive-cost columns, leaving a zero-size reduced LP that postsolves back
+    /// to the original space.
+    #[test]
+    fn qp_zero_path_presolve_reduces_before_ipm_dispatch() {
+        use crate::options::SolverOptions;
+        use crate::problem::{SolveRoute, SolveStatus};
+
+        let n = LP_IPM_FIRST_N + 1;
+        let a = CscMatrix::from_triplets(&[0], &[0], &[1.0], 1, n).unwrap();
+        let mut problem = QpProblem::new(
+            CscMatrix::new(n, n),
+            vec![2.0; n],
+            a,
+            vec![1.0],
+            vec![(0.0, f64::INFINITY); n],
+            vec![ConstraintType::Eq],
+        )
+        .unwrap();
+        problem.obj_offset = 5.0;
+
+        let result = solve_as_lp(&problem, &SolverOptions::default());
+
+        assert_eq!(result.status, SolveStatus::Optimal);
+        assert_eq!(result.stats.route, SolveRoute::LpForwardedFromQp);
+        assert!(
+            !result.stats.lp_ipm_path,
+            "presolve must reduce before size-based IPM dispatch"
+        );
+        assert_eq!(result.solution.len(), n);
+        assert!((result.solution[0] - 1.0).abs() < 1e-9);
+        assert!(result.solution[1..].iter().all(|&x| x.abs() < 1e-9));
+        assert!(
+            (result.objective - 7.0).abs() < 1e-9,
+            "objective must include presolve contribution and QP obj_offset"
         );
     }
 
