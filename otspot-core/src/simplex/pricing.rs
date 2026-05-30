@@ -70,31 +70,53 @@ impl PricingStrategy for DantzigPricing {
 ///   γ[other j]  unchanged (approximation; exact update requires per-column FTRAN)
 ///
 /// The numerically exact leaving-column weight is `‖η‖²/pivot²` (Sherman-Morrison
-/// update of B⁻¹).  Three attempts at that formula all produced bench regressions
-/// on the Netlib LP suite (see retreat history below), so we use `γ[entering]`
-/// as the denominator.  When |pivot| is small, γ[entering] tends to be large
-/// (the entering column had high steepest-edge weight), providing implicit damping
+/// update of B⁻¹).  Multiple variants of that formula produced bench regressions
+/// when tested (see retreat history below), so we use `γ[entering]` as the
+/// denominator.  When |pivot| is small, γ[entering] tends to be large (the
+/// entering column had high steepest-edge weight), providing implicit damping
 /// that keeps γ[leaving] finite without any explicit cap.
 ///
-/// **Retreat history — pivot² variants tried in #146 (all rejected):**
+/// **Retreat history — pivot² formula variants:**
 ///
-/// Attempt 1 (pivot² with per-column cap at 1·m): wood1p 14s → 2.7s, but
-/// maros (m=846) DFEAS_FAIL.  Normal pivots produce weights in [m, 100·m];
-/// capping at m distorts pricing for those problems.
+/// **#75 (`‖η‖²/pivot²`, unguarded):** wood1p NumericalError. Mechanism (#178
+/// verified 2026-05-30): pricing distortion → false-Optimal at infeasible vertex
+/// → `check_eq_feasibility` FAIL (wood1p iter 3106, 676 γ-blowup, γ=6.6e17);
+/// Phase 2 LU instability (maros). Prior claim "permanent column exclusion →
+/// SingularBasis" was incorrect.
 ///
-/// Attempt 2 (pivot² with per-column cap at 100·m): wood1p PASS, grow22 PASS,
-/// but maros FAIL:Infeasible (feasible problem declared infeasible in 0.7s).
-/// Large weights under cap-100m altered the pricing sequence enough to trigger
-/// a false infeasibility conclusion in Phase 1.
+/// **#146 (pivot² with DEVEX_WEIGHT_CAP, three variants):**
 ///
-/// Attempt 3 (pivot² with global weight reset when any weight > 100·m): maros
-/// PASS, but grow22 PFEAS_FAIL.  A full reset wipes pricing history for all
-/// columns, causing Dantzig-like selection mid-solve that reaches a different
-/// optimal vertex and exposes a postsolve bound-check failure.
+/// Attempt 1 (per-column cap at 1·m): wood1p 14s → 2.7s, but maros (m=846)
+/// DFEAS_FAIL.  Normal pivots produce weights in [m, 100·m]; capping at m
+/// distorts pricing for those problems.
 ///
-/// All three are mixed (improve some, regress others) and violate the
-/// single-path principle (CLAUDE.md).  Retreat to γ[entering] formula confirmed
-/// on full Netlib LP bench: 109/109 PASS, eps=1e-6, timeout=1000s.
+/// Attempt 2 (per-column cap at 100·m): wood1p PASS, grow22 PASS. Retreat
+/// claim "maros FAIL:Infeasible (0.7s)" **does not reproduce in current codebase**
+/// (post-2026-05-30, #178 Agent C verified). cap-100m is strictly better in
+/// tested 3: wood1p 17.6× faster, grow22 1.66× faster, maros parity, possibly
+/// because Phase 1 / dual_advanced / postsolve / KKT guard improvements since
+/// #146 reduced the perturbation sensitivity (unverified; #182 bisect で特定中).
+/// Full Netlib 109 + Maros 138 validation pending (#182).
+///
+/// Attempt 3 (global weight reset when any weight > 100·m): maros PASS, but
+/// grow22 PFEAS_FAIL.  A full reset wipes pricing history for all columns,
+/// causing Dantzig-like selection mid-solve that reaches a different optimal
+/// vertex and exposes a postsolve bound-check failure.
+///
+/// **#165 (per-row Charnes perturbation with DEGENERATE_ROW_THRESHOLD gate):**
+/// grow22 PFEAS_FAIL. Mechanism (#178 verified 2026-05-30, Agent B): bfeas=1.957e-3,
+/// x_b_neg=4 (basis truly primal-infeasible). ε addition skews ratio test →
+/// ineligible leaving row selected → reconciled basis primal-infeasible. Algorithm
+/// invalid (Scenario D pure); retreat confirmed.
+///
+/// **Future pivot² guard:** A guard `pivot_sq > 1e-16` is f64-boundary weak:
+/// `(1e-8)² = 1.0000000000000001e-16 > 1e-16` passes the guard. wood1p
+/// observation: col=77, pivot=1.48e-8 → γ=2.19e16 (blowup directly above
+/// guard). Stronger guard: `pivot.abs() > PIVOT_TOL` (compare before squaring).
+///
+/// γ[entering] formula confirmed: 109/109 PASS, eps=1e-6, timeout=1000s.
+/// Retreat decisions can become stale as the codebase evolves; re-evaluate
+/// pivot² variants against current main before dismissing.
 ///
 /// Weights start at 1.0 and are non-decreasing per column (the `max` prevents
 /// reducing a weight). Columns that never leave the basis retain γ = 1.0 and
