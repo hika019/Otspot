@@ -85,18 +85,28 @@ pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> Solve
 
     if options.presolve {
         match presolve::run_presolve(&lp, options.deadline) {
-            Err(presolve::PresolveStatus::Infeasible) => return SolverResult::infeasible(),
+            Err(presolve::PresolveStatus::Infeasible) => {
+                let mut result = SolverResult::infeasible();
+                result.stats.route = SolveRoute::LpForwardedFromQp;
+                return result;
+            }
             Err(presolve::PresolveStatus::Unbounded) => {
-                return SolverResult {
+                let mut result = SolverResult {
                     status: SolveStatus::Unbounded,
                     objective: f64::NEG_INFINITY,
                     ..Default::default()
                 };
+                result.stats.route = SolveRoute::LpForwardedFromQp;
+                return result;
             }
             Ok(presolve_result) if presolve_result.was_reduced => {
                 return solve_reduced_lp_from_qp(&lp, problem.obj_offset, presolve_result, options);
             }
-            Ok(_) => {}
+            Ok(_) => {
+                let mut no_presolve_opts = options.clone();
+                no_presolve_opts.presolve = false;
+                return solve_unpresolved_lp_from_qp(&lp, problem, &no_presolve_opts);
+            }
         }
     }
 
@@ -207,10 +217,9 @@ fn solve_reduced_lp_from_qp(
     reduced_opts.warm_start_lp = None;
 
     let raw = solve_lp_backend_no_presolve(reduced_lp, &reduced_opts);
-    if matches!(
-        raw.status,
-        SolveStatus::NumericalError | SolveStatus::SuboptimalSolution
-    ) && options.deadline.is_none_or(|d| Instant::now() < d)
+    if (raw.status == SolveStatus::NumericalError
+        || (raw.status == SolveStatus::SuboptimalSolution && raw.solution.is_empty()))
+        && options.deadline.is_none_or(|d| Instant::now() < d)
     {
         let mut fallback_opts = options.clone();
         fallback_opts.presolve = false;
@@ -223,7 +232,10 @@ fn solve_reduced_lp_from_qp(
 
     if matches!(
         raw.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+        SolveStatus::Optimal
+            | SolveStatus::LocallyOptimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
     ) && (!raw.solution.is_empty() || reduced_lp.num_vars == 0)
     {
         let mut lifted = presolve::postsolve::run_postsolve(
@@ -237,6 +249,24 @@ fn solve_reduced_lp_from_qp(
         lifted.stats.lp_ipm_path = raw.stats.lp_ipm_path;
         lifted.stats.deadline_triggered = matches!(lifted.status, SolveStatus::Timeout);
         lifted = guard_lp_optimal(lifted, original_lp);
+        if postsolved_lp_needs_direct_retry(&lifted)
+            && options.deadline.is_none_or(|d| Instant::now() < d)
+        {
+            let keep_lifted = lifted.clone();
+            let mut fallback_opts = options.clone();
+            fallback_opts.presolve = false;
+            fallback_opts.warm_start = None;
+            fallback_opts.warm_start_lp = None;
+            let mut fallback = crate::lp::solve_lp_forwarded_from_qp(original_lp, &fallback_opts);
+            add_qp_obj_offset(&mut fallback, qp_obj_offset);
+            if !matches!(
+                fallback.status,
+                SolveStatus::Timeout | SolveStatus::NumericalError | SolveStatus::MaxIterations
+            ) {
+                return fallback;
+            }
+            lifted = keep_lifted;
+        }
         add_qp_obj_offset(&mut lifted, qp_obj_offset);
         return lifted;
     }
@@ -246,6 +276,7 @@ fn solve_reduced_lp_from_qp(
 
 fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> SolverResult {
     let dispatch_disabled = std::env::var("LP_DISPATCH_NOOP").ok().as_deref() == Some("1");
+    let mut ipm_subopt_candidate: Option<SolverResult> = None;
     if !dispatch_disabled && prefer_ipm_for_size(lp.num_vars, lp.num_constraints) {
         if let Some(qp) = qp_from_lp(lp) {
             let mut ipm_opts = ipm_opts_for_lp(options);
@@ -262,10 +293,14 @@ fn solve_lp_backend_no_presolve(lp: &LpProblem, options: &SolverOptions) -> Solv
             if options.deadline.is_some_and(|d| Instant::now() >= d) {
                 return ipm;
             }
+            if matches!(ipm.status, SolveStatus::SuboptimalSolution) && !ipm.solution.is_empty() {
+                ipm_subopt_candidate = Some(ipm);
+            }
         }
     }
 
-    crate::lp::solve_lp_forwarded_from_qp(lp, options)
+    let simplex = crate::lp::solve_lp_forwarded_from_qp(lp, options);
+    pick_best_ipm_or_simplex(ipm_subopt_candidate, simplex)
 }
 
 fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
@@ -285,10 +320,21 @@ fn qp_from_lp(lp: &LpProblem) -> Option<QpProblem> {
 fn add_qp_obj_offset(result: &mut SolverResult, qp_obj_offset: f64) {
     if matches!(
         result.status,
-        SolveStatus::Optimal | SolveStatus::SuboptimalSolution | SolveStatus::Timeout
+        SolveStatus::Optimal
+            | SolveStatus::LocallyOptimal
+            | SolveStatus::SuboptimalSolution
+            | SolveStatus::Timeout
     ) {
         result.objective += qp_obj_offset;
     }
+}
+
+fn postsolved_lp_needs_direct_retry(result: &SolverResult) -> bool {
+    matches!(
+        result.status,
+        SolveStatus::Optimal | SolveStatus::SuboptimalSolution
+    ) && (result.postsolve_dfeas.is_some_and(|d| d > crate::tolerances::PIVOT_TOL)
+        || result.status == SolveStatus::SuboptimalSolution)
 }
 
 /// Pick the better of an IPM result and a simplex result.

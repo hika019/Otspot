@@ -59,6 +59,15 @@ done
 
 BASELINE_CSV="$SOLVER_ROOT/data/baseline_objectives/netlib_lp.csv"
 
+qps_count_in_dir() {
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        echo 0
+        return
+    fi
+    find -L "$dir" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' '
+}
+
 if [[ -n "$RESCORE_DIR" ]]; then
     # ── Rescore mode: re-run scoring from existing artifacts, no solve ───
     if [[ ! -d "$RESCORE_DIR" ]]; then
@@ -114,7 +123,7 @@ EOF
     echo "[lp_vs_highs] ============================================"
 
     # ── Step 1: Ensure LP problem data exists ────────────────────────────
-    LP_COUNT=$(find -L "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+    LP_COUNT="$(qps_count_in_dir "$LP_DATA_DIR")"
     if [[ "$LP_COUNT" -eq 0 ]]; then
         echo "[lp_vs_highs] LP data not found — downloading via netlib_lp_download.sh..."
         EMPS="/tmp/emps"
@@ -123,7 +132,7 @@ EOF
             cc -o "$EMPS" /tmp/emps.c
         fi
         EMPS_BIN="$EMPS" bash "$SCRIPT_DIR/netlib_lp_download.sh" "$LP_DATA_DIR" || true
-        LP_COUNT=$(find -L "$LP_DATA_DIR" -maxdepth 1 -iname "*.qps" 2>/dev/null | wc -l | tr -d ' ')
+        LP_COUNT="$(qps_count_in_dir "$LP_DATA_DIR")"
         if [[ "$LP_COUNT" -eq 0 ]]; then
             echo "[lp_vs_highs] Error: download produced 0 files in $LP_DATA_DIR" >&2; exit 1
         fi
