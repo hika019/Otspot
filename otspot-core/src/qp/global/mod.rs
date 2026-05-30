@@ -66,6 +66,12 @@ const POLISH_KKT_ACCEPT_FACTOR: f64 = 100.0;
 /// regression threshold `EPS_KKT_NONCONVEX_LOCAL = 1e-3` を超えないよう制限する。
 const POLISH_KKT_ABS_CAP: f64 = 1e-3;
 
+/// polish solve の independent timeout (秒)。
+///
+/// B&B が全 budget を消費した後でも `polish_incumbent_duals` が実行できるよう、
+/// B&B の deadline とは独立した fresh budget を与える。
+const POLISH_TIMEOUT_SECS: f64 = 5.0;
+
 /// 大域最適化 entry。
 ///
 /// 入力: convex / nonconvex QP (`QpProblem`) + 共通 solver options + 大域設定。
@@ -154,8 +160,8 @@ pub fn solve_qp_global_with_stats(
     stats.nodes_processed = 1;
     let user_eps = shared_opts.ipm_eps();
 
-    // root が ε-optimal なら即終了 (queue 不要)。
     if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+        state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
         return (
             state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
             stats,
@@ -171,17 +177,17 @@ pub fn solve_qp_global_with_stats(
     let root_x = state.incumbent_sol.clone();
     match select_branching_variable(&root_node, &root_x) {
         None => {
-            return if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
-                (
+            if within_gap(state.incumbent_obj, root_lb, cfg.gap_tol) {
+                state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
+                return (
                     state.finalize_proven(problem, root_lb, q_indefinite, cfg.gap_tol, user_eps),
                     stats,
-                )
-            } else {
-                (
-                    state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
-                    stats,
-                )
-            };
+                );
+            }
+            return (
+                state.finalize_unproven(root_lb, stats.nodes_processed, 0, cfg, q_indefinite),
+                stats,
+            );
         }
         Some(j) => {
             let warm = state.build_warm();
@@ -262,9 +268,8 @@ pub fn solve_qp_global_with_stats(
         // 分枝不能 (= node 内で x* が midpoint 一致) → leaf 確定、proof は incumbent 比で取れる
     }
 
-    // incumbent が分枝 node 由来の場合、その双対は sub-box 基準で回収されているため
-    // 元問題に整合させる (interior 変数への分枝境界 dual = 相補性違反を除去)。
-    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol);
+    // B&B incumbent の sub-box dual を元問題に整合させる (bound comp 修復)。
+    state.polish_incumbent_duals(problem, &shared_opts, cfg.gap_tol, q_indefinite);
 
     // 終了条件分岐:
     // - queue 空 AND max_depth 未超過 AND deadline/max_nodes 未到達 → proven
@@ -471,13 +476,74 @@ fn is_polish_suboptimal_acceptable(
     kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
 }
 
+/// 非凸 B&B 向け KKT recovery accept: 目的関数制約なしで IPM 収束 + 全 KKT を確認する。
+///
+/// sub-box incumbent は bound comp を原問題基準で破ることがある。polish が
+/// Optimal/LocallyOptimal で全 KKT を満たせば、目的が悪化していても採用する。
+/// NonconvexLocal セマンティクスでは目的は certified bound でないため適切。
+fn is_polish_kkt_recovery(polished: &SolverResult, problem: &QpProblem, user_eps: f64) -> bool {
+    if !matches!(polished.status, SolveStatus::Optimal | SolveStatus::LocallyOptimal) {
+        return false;
+    }
+    if !polished.objective.is_finite() {
+        return false;
+    }
+    let n_lb = problem
+        .bounds
+        .iter()
+        .filter(|&&(lb, _)| lb.is_finite())
+        .count();
+    let n_ub = problem
+        .bounds
+        .iter()
+        .filter(|&&(_, ub)| ub.is_finite())
+        .count();
+    if polished.solution.len() != problem.num_vars
+        || polished.dual_solution.len() != problem.num_constraints
+        || polished.bound_duals.len() != n_lb + n_ub
+    {
+        return false;
+    }
+    let kkt_tol = (user_eps * POLISH_KKT_ACCEPT_FACTOR).min(POLISH_KKT_ABS_CAP);
+    let eliminated_cols = structural_empty_col_mask(problem);
+    let view = ProblemView {
+        q: &problem.q,
+        a: &problem.a,
+        c: &problem.c,
+        b: &problem.b,
+        bounds: &problem.bounds,
+        constraint_types: &problem.constraint_types,
+        eliminated_cols: &eliminated_cols,
+    };
+    let kkt = kkt_residual_rel(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
+    let pf = kkt_primal_residual(&view, &polished.solution);
+    let bv = kkt_bound_violation(&problem.bounds, &polished.solution);
+    let comp = kkt_comp_residual(
+        &view,
+        &polished.solution,
+        &polished.dual_solution,
+        &polished.bound_duals,
+    );
+    let dsign = kkt_dual_sign_violation(
+        &problem.constraint_types,
+        &polished.dual_solution,
+        &problem.bounds,
+        &polished.bound_duals,
+    );
+    kkt <= kkt_tol && pf <= kkt_tol && bv <= kkt_tol && comp <= kkt_tol && dsign <= kkt_tol
+}
+
 /// search state encapsulation: incumbent + 最終 result の組み立てを 1 箇所に集約。
 struct SearchState {
     incumbent_result: SolverResult,
     incumbent_obj: f64,
     incumbent_sol: Vec<f64>,
-    /// B&B ループで root 以外の incumbent が見つかった場合 true。
-    /// false のまま = root solve の解がそのまま incumbent = 元問題 box で回収済み。
+    /// true when B&B found a sub-box incumbent better than root.
     incumbent_updated: bool,
 }
 
@@ -504,27 +570,23 @@ impl SearchState {
         self.incumbent_updated = true;
     }
 
-    /// 探索終了後の dual recovery polish。
+    /// Dual recovery polish: re-solves on original bounds to fix sub-box-contaminated duals.
     ///
-    /// B&B incumbent の双対は分枝後の sub-box に対して回収されるため、元問題で
-    /// interior な変数にも分枝境界由来の bound dual が残り、元問題基準の相補性
-    /// (`z_j·(x_j − bnd_j) = 0`) を破る。incumbent を warm start に固定して **元問題の
-    /// box** で局所 QP を解き直し、元問題に整合した双対を回収する。
-    ///
-    /// warm を境界張り付きでも採用する点が [`solve_local_upper_bound`] と異なる
-    /// (探索中は saddle 再固着回避のため境界 warm を捨てるが、最終 polish では
-    /// incumbent corner に錨を打つのが目的)。obj は gap_tol 内に保たれ proof 妥当性を
-    /// 維持 (duals を整合化)。収束済み (Optimal/LocallyOptimal) かつ obj が悪化しない
-    /// 場合のみ採用し、未収束 or obj 悪化は棄却して incumbent を保持する。
-    /// root incumbent (分枝なし) は既に元問題 box で回収済みのため skip。
+    /// Skipped only when root already returned Optimal/LocallyOptimal on original bounds.
+    /// SuboptimalSolution root carries barrier-contaminated bound duals and must not be skipped.
     fn polish_incumbent_duals(
         &mut self,
         problem: &QpProblem,
         base_opts: &SolverOptions,
         gap_tol: f64,
+        relax_for_nonconvex: bool,
     ) {
-        if !self.incumbent_updated {
-            // root solve 結果は元問題 box で回収済み; polish は冗長。
+        if !self.incumbent_updated
+            && matches!(
+                self.incumbent_result.status,
+                SolveStatus::Optimal | SolveStatus::LocallyOptimal
+            )
+        {
             return;
         }
         let Some(warm) = build_warm_from(&self.incumbent_result) else {
@@ -537,23 +599,22 @@ impl SearchState {
         opts.warm_start_qp = Some(warm);
         opts.multistart = None;
         opts.global_optimization = None;
+        // Polish は B&B deadline とは独立した fresh timeout を使う。
+        // B&B が budget を使い切った後でも polish IPM が実行できるよう保証する。
+        opts.deadline = Some(Instant::now() + Duration::from_secs_f64(POLISH_TIMEOUT_SECS));
+        opts.timeout_secs = None;
         let user_eps = base_opts.ipm_eps();
         let polished = crate::qp::solve_qp_with(problem, &opts);
-        if is_polish_acceptable(
-            &polished.status,
-            polished.objective,
-            self.incumbent_obj,
-            gap_tol,
-        ) {
-            self.update_incumbent(&polished);
-        } else if is_polish_suboptimal_acceptable(
-            &polished,
-            problem,
-            self.incumbent_obj,
-            gap_tol,
-            user_eps,
-        ) {
-            // SuboptimalSolution でも KKT が十分なら dual recovery として採用。
+        if is_polish_acceptable(&polished.status, polished.objective, self.incumbent_obj, gap_tol)
+            || is_polish_suboptimal_acceptable(
+                &polished,
+                problem,
+                self.incumbent_obj,
+                gap_tol,
+                user_eps,
+            )
+            || (relax_for_nonconvex && is_polish_kkt_recovery(&polished, problem, user_eps))
+        {
             self.update_incumbent(&polished);
         }
     }
@@ -1480,5 +1541,85 @@ mod tests {
             r.status,
         );
         assert!(r.opt_cert.is_some(), "NonconvexGlobal must carry opt_cert");
+    }
+
+    /// Regression: proptest seed a46bde58 — PD Q (Gershgorin false positive) must satisfy KKT.
+    ///
+    /// The a46bde58 problem has a truly PD Q (Cholesky succeeds) but Gershgorin reports
+    /// indefinite (Q[0,0]=0.16 < off-diag sum 0.358). The global solver must return
+    /// complementarity < 1e-3 for NonconvexLocal/NonconvexGlobal status.
+    #[test]
+    fn proptest_seed_a46bde58_kkt_regression() {
+        use crate::problem::ConstraintType;
+
+        let rows = vec![0usize, 1, 2, 0, 1, 2, 0, 1, 2];
+        let cols = vec![0usize, 0, 0, 1, 1, 1, 2, 2, 2];
+        let vals = vec![
+            0.16000000000000003_f64,
+            -0.03915063848637796,
+            0.3192145885469365,
+            -0.03915063848637796,
+            0.460208173753392,
+            -0.17436676978450188,
+            0.3192145885469365,
+            -0.17436676978450188,
+            1.0576743304356357,
+        ];
+        let q = CscMatrix::from_triplets(&rows, &cols, &vals, 3, 3).unwrap();
+        let c = vec![
+            0.653536572287863_f64,
+            -0.010836684577960307,
+            -1.445105979349165,
+        ];
+        let a_rows = vec![1usize];
+        let a_cols = vec![0usize];
+        let a_vals = vec![0.3965134170122774_f64];
+        let a = CscMatrix::from_triplets(&a_rows, &a_cols, &a_vals, 2, 3).unwrap();
+        let b = vec![2.477268994387253_f64, -0.7050675637248502];
+        let bounds = vec![
+            (-0.5_f64, 0.5),
+            (-2.519765539465491, 2.519765539465491),
+            (-0.6799197663837497, 0.6799197663837497),
+        ];
+        let cts = vec![ConstraintType::Le, ConstraintType::Ge];
+        let problem = QpProblem::new(q, c, a, b, bounds, cts).unwrap();
+
+        let mut o = SolverOptions::default();
+        o.timeout_secs = Some(15.0);
+        let cfg = GlobalOptimizationConfig::default();
+        let res = solve_qp_global(&problem, &o, &cfg);
+
+        assert!(
+            matches!(res.status, SolveStatus::NonconvexLocal | SolveStatus::NonconvexGlobal),
+            "expected NonconvexLocal/NonconvexGlobal, got {:?}",
+            res.status
+        );
+
+        let elim = structural_empty_col_mask(&problem);
+        let view = ProblemView {
+            q: &problem.q,
+            a: &problem.a,
+            c: &problem.c,
+            b: &problem.b,
+            bounds: &problem.bounds,
+            constraint_types: &problem.constraint_types,
+            eliminated_cols: &elim,
+        };
+        let comp = kkt_comp_residual(
+            &view,
+            &res.solution,
+            &res.dual_solution,
+            &res.bound_duals,
+        );
+        let stat = kkt_residual_rel(&view, &res.solution, &res.dual_solution, &res.bound_duals);
+        let pf = kkt_primal_residual(&view, &res.solution);
+        assert!(
+            comp < 1e-3,
+            "a46bde58: complementarity={:.3e} >= 1e-3 (status={:?} stat={:.3e} pf={:.3e})",
+            comp,
+            res.status,
+            stat,
+            pf,
+        );
     }
 }
