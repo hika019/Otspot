@@ -124,7 +124,6 @@ const NO_PRESOLVE_FALLBACK_LIMIT: usize = 10_000;
 
 type IpmRunner = fn(&QpProblem, &QpPresolveResult, &SolverOptions) -> IpmOutcome;
 
-/// presolve スケーリング縮小比率の下限 sigma_total。unscale 残差は 1/sigma_total 倍される。
 /// tighten = ceil_pow10(user_eps / 1e-8) ∈ [1, 1000]。上限 1000 は IPM floor 制約。
 ///
 /// `sigma_total` (minimum Ruiz / row-scale factor) was considered as an additional
