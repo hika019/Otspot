@@ -105,7 +105,6 @@ pub(crate) fn try_dual_only_ir(
         &r_d_rel_eval,
         &ax,
         &row_abs_activity,
-        target_pf,
     ) else {
         return 0;
     };

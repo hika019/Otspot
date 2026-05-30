@@ -6,7 +6,7 @@ use crate::options::{SolverOptions, WarmStartBasis};
 use crate::simplex::build_standard_form;
 use crate::simplex::crash::compute_crash_basis;
 use crate::sparse::CscMatrix;
-use crate::tolerances::{COMP_SLACK_REL_TOL, PIVOT_TOL};
+use crate::tolerances::{COMP_SLACK_REL_TOL, LARGE_PROBLEM_THRESHOLD, PIVOT_TOL};
 use super::transforms::{PostsolveStep, PresolveResult};
 use std::time::Instant;
 
@@ -57,7 +57,7 @@ fn is_row_nonbinding(orig_problem: &LpProblem, i: usize, solution: &[f64]) -> bo
 ///
 /// Phase 1 minimises `Σ slack` for feasibility; Phase 2 fixes the Phase-1 slack and
 /// minimises `Σ|y_del| + Σ|dy|` to break ties. Kept-row perturbation is required when
-/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_SIZE_SUM`.
+/// kept↔deleted coupling is strong; it is disabled above `LARGE_PROBLEM_THRESHOLD`.
 /// Returns an `m`-sized y vector, or `None` on construction/solve failure.
 fn build_and_solve_cleanup_lp(
     orig_problem: &LpProblem,
@@ -86,7 +86,7 @@ fn build_and_solve_cleanup_lp(
         .iter().enumerate().map(|(idx, &r)| (r, idx)).collect();
 
     let use_kept_perturbation =
-        allow_kept_perturbation && n + m <= LARGE_PROBLEM_SIZE_SUM;
+        allow_kept_perturbation && n + m <= LARGE_PROBLEM_THRESHOLD;
     // Take the bipartite closure (deleted rows ↔ columns ↔ kept rows) so that any
     // kept row whose `y` is coupled to a deleted row gets a `dy` perturbation variable.
     // A naive 1-pass (only kept rows sharing a column with a deleted row) misses
@@ -457,13 +457,6 @@ fn build_and_solve_cleanup_lp(
         Some(assemble_full_y(&y_del_phase1, &dy_phase1))
     }
 }
-
-/// Cleanup LP の kept-row 摂動 (`dy` 変数) を無効化する規模しきい値。摂動は
-/// deleted↔kept の bipartite closure 全体に `dy` 列を追加するため、大規模では
-/// cleanup LP 自体が解けない規模に膨らむ。この上限超でも摂動なしの cleanup LP は
-/// 走るので dual recovery は機能する (品質と可解性のトレードオフ)。
-/// memory/時間予算ではなく LP 列数膨張のガードなので固定 size で妥当。
-use crate::tolerances::LARGE_PROBLEM_SIZE_SUM;
 
 /// Enumerate row `i`'s entries `(j, A_ij)` from a CSC matrix in O(nnz_total).
 fn collect_row_entries(orig_problem: &LpProblem, i: usize) -> Vec<(usize, f64)> {

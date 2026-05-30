@@ -144,7 +144,8 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
         }
     }
 
-    // simplex (LpProblem) は obj_offset を含まないため明示的に加算。
+    // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
+    // QpProblem.obj_offset を別経路で加算する必要がある。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     simplex_result.objective += problem.obj_offset;
     if simplex_result.status == SolveStatus::Timeout

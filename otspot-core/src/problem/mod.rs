@@ -248,10 +248,13 @@ impl fmt::Display for SolverResult {
     }
 }
 
-/// 線形計画問題: min c^T x  s.t.  Ax {op} b,  x in [lb, ub]
+/// 線形計画問題: min c^T x + obj_offset  s.t.  Ax {op} b,  x in [lb, ub]
 ///
 /// 目的関数・制約行列・右辺ベクトル・変数上下限をまとめて保持する。
 /// 制約種別（`<=`, `>=`, `=`）と変数ごとの上下限を個別に指定できる。
+///
+/// `obj_offset` は MPS/QPS の N 行 RHS (objective constant) に対応する。
+/// `LpProblem::new` / `new_general` では 0.0 に初期化される。
 #[derive(Debug, Clone)]
 pub struct LpProblem {
     /// 目的関数係数ベクトル（長さ: `num_vars`）
@@ -270,6 +273,8 @@ pub struct LpProblem {
     pub bounds: Vec<(f64, f64)>,
     /// 問題名（オプション）
     pub name: Option<String>,
+    /// 目的定数項 (MPS N-row RHS); 最適値 = c^T x* + obj_offset
+    pub obj_offset: f64,
 }
 
 impl LpProblem {
@@ -378,6 +383,7 @@ impl LpProblem {
             constraint_types,
             bounds,
             name,
+            obj_offset: 0.0,
         })
     }
 }

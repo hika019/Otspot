@@ -20,6 +20,22 @@ const PIVOT_CANDIDATE_ZERO_TOL: f64 = 1e-10;
 /// trigger per-row normalisation; rows near 1.0 are left unscaled.
 const SCALE_EXCESS_TOL: f64 = 1e-10;
 
+/// Maximum `m * n` product before equality-constraint QR elimination is skipped.
+///
+/// QR elimination is O(mn²); at 10⁸ the dense multiply already takes ~seconds for
+/// typical n~10³ problems.  Problems this size are unlikely to have large numbers of
+/// Le-Le equality pairs anyway, so the skip is loss-free in practice.
+const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
+
+/// Quantisation factor for RHS hashing in the Le-Le equality pair detector.
+///
+/// `|b[i]| * RHS_HASH_QUANTIZE` is rounded to `i64` so that rows whose RHS values
+/// agree within ~1e-9 relative hash into the same bucket.  Collisions between truly
+/// distinct rows are harmless — the exact comparison below the bucket lookup rejects
+/// non-pairs.  The value 1e9 was chosen so that the quantisation error (~1e-9) is
+/// well below `ZERO_TOL` (1e-12 × scale) for typical RHS magnitudes.
+const RHS_HASH_QUANTIZE: f64 = 1e9;
+
 /// Detect Le-Le pairs that form an equality (A\[j,*\] = -A\[i,*\] and b\[j\] = -b\[i\]) and
 /// drop redundant equality rows via partial-pivot Gaussian elimination. Only runs when
 /// `m > 2n` since the elimination cost is O(mn²).
@@ -34,7 +50,6 @@ fn equality_constraint_qr(
     let n = prob.num_vars;
     let m = prob.num_constraints;
 
-    const QR_SKIP_SIZE_THRESHOLD: usize = 100_000_000;
     if m * n > QR_SKIP_SIZE_THRESHOLD || m <= n * ROW_OVERDETERMINED_RATIO || n == 0 {
         return;
     }
@@ -69,9 +84,6 @@ fn equality_constraint_qr(
             continue;
         }
         let ch = col_pattern_hash(&row_entries[i]);
-        // Quantise |b| at RHS_HASH_QUANTIZE so rows agreeing within rounding hash together;
-        // collisions are harmless because the real comparison runs below.
-        const RHS_HASH_QUANTIZE: f64 = 1e9;
         let bk = (prob.b[i].abs() * RHS_HASH_QUANTIZE).round() as i64;
         groups.entry((row_entries[i].len(), ch, bk)).or_default().push(i);
     }

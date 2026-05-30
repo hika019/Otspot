@@ -11,7 +11,10 @@ use super::dual_advanced;
 use super::primal::two_phase_simplex;
 use super::standard_form::build_standard_form;
 
-/// Solve an LP with default options.
+/// Solve an LP with default options (raw simplex, without obj_offset).
+///
+/// Use [`crate::solve`] for the full pipeline including `obj_offset`.
+#[cfg(test)]
 pub fn solve(problem: &LpProblem) -> SolverResult {
     solve_with(problem, &SolverOptions::default())
 }

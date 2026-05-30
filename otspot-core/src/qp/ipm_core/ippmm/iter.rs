@@ -61,7 +61,7 @@ pub(crate) fn solve_ippmm_inner(
     let m_ineq = m_ext - eq_count;
 
     let init = build_initial_point(
-        problem, options, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext, m_ineq,
+        problem, options, &a_ext, &b_ext, &is_eq_ext, m_orig, m_ext,
         &timeout_ctx, par,
     );
     let (mut x, mut s, mut y, warm_mu) = (init.x, init.s, init.y, init.warm_mu);

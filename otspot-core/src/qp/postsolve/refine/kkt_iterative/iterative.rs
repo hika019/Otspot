@@ -35,7 +35,7 @@ pub(crate) fn refine_kkt_iterative(
     // deadline-aware (下の factorize_quasidefinite_with_amd) だが、巨大問題では
     // 単発 factorize が deadline を空費する。post-processing 段で K factorize を
     // 行うか否かの規模ガード (n+m で判定)。
-    if n + m > crate::tolerances::LARGE_PROBLEM_SIZE_SUM {
+    if n + m > crate::tolerances::LARGE_PROBLEM_THRESHOLD {
         return 0;
     }
 

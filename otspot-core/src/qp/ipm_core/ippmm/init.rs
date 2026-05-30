@@ -28,7 +28,6 @@ pub(super) fn build_initial_point(
     is_eq_ext: &[bool],
     m_orig: usize,
     m_ext: usize,
-    m_ineq: usize,
     timeout_ctx: &TimeoutCtx,
     par: Par,
 ) -> InitialPoint {
@@ -97,7 +96,7 @@ pub(super) fn build_initial_point(
             max_l_nnz: options.ipm.effective_max_l_nnz(),
         };
         mehrotra_cold_init(
-            problem, a_ext, b_ext, is_eq_ext, m_ext, m_ineq,
+            problem, a_ext, b_ext, is_eq_ext, m_ext,
             &ax0, timeout_ctx, par, &kkt_cfg,
             &mut x, &mut s, &mut y,
         );
@@ -114,7 +113,6 @@ fn mehrotra_cold_init(
     b_ext: &[f64],
     is_eq_ext: &[bool],
     m_ext: usize,
-    _m_ineq: usize,
     ax0: &[f64],
     timeout_ctx: &TimeoutCtx,
     par: Par,
