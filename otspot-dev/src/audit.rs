@@ -686,6 +686,9 @@ mod tests {
         let mut trait_impl_stack: Vec<i32> = Vec::new();
         let mut pending_cfg_test = false;
         let mut pending_test_attr = false;
+        // Deferred trait/impl context: set when we see `impl Trait for T` or
+        // `trait Foo` on a line whose opening brace is on a subsequent line.
+        let mut pending_trait_context = false;
 
         // Accumulator for multi-line `fn` signature (fn ... {).
         let mut in_fn_sig = false;
@@ -707,14 +710,36 @@ mod tests {
 
             // Track trait impl blocks (`impl Trait for Type`) and trait
             // definitions (`trait Foo { ... }`) — both need the exemption.
-            let is_trait_impl = opens > 0 && trimmed.starts_with("impl") && trimmed.contains(" for ");
-            let is_trait_def = opens > 0
-                && (trimmed.starts_with("trait ")
-                    || trimmed.starts_with("pub trait ")
-                    || trimmed.starts_with("pub(crate) trait "));
-            if is_trait_impl || is_trait_def {
+            // Handle both same-line brace (`impl Trait for Foo {`) and
+            // next-line brace (`impl Trait for Foo\n{`) via a pending flag.
+            let is_trait_impl_line = trimmed.starts_with("impl") && trimmed.contains(" for ");
+            let is_trait_def_line = trimmed.starts_with("trait ")
+                || trimmed.starts_with("pub trait ")
+                || trimmed.starts_with("pub(crate) trait ");
+            if is_trait_impl_line || is_trait_def_line {
+                if opens > 0 {
+                    let entry_floor = depth - opens;
+                    trait_impl_stack.push(entry_floor);
+                    pending_trait_context = false;
+                } else {
+                    pending_trait_context = true;
+                }
+            } else if pending_trait_context && opens > 0 {
+                // Deferred: the opening brace arrived (may be on a `where` clause
+                // continuation line or a standalone `{`).
                 let entry_floor = depth - opens;
                 trait_impl_stack.push(entry_floor);
+                pending_trait_context = false;
+            } else if opens == 0
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("where")
+                && !trimmed.starts_with('<')
+            {
+                // A non-blank, non-comment, non-attribute, non-where-clause line
+                // without an opening brace clears any pending trait context.
+                pending_trait_context = false;
             }
 
             if trimmed.contains("#[cfg(test)]") { pending_cfg_test = true; }
@@ -951,6 +976,36 @@ impl MyTrait for Bar {
         assert!(
             !names.contains(&"_unused_param"),
             "trait-impl and trait-default `_unused_param` must NOT be detected; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Codex P2: multiline trait/impl header (opening brace on a separate line)
+    /// must still exempt `_param` names inside the block.
+    #[test]
+    fn scan_underscore_sig_params_skips_multiline_trait_header() {
+        let content = r#"
+trait MyTrait
+{
+    fn required(&self, _unused: f64);
+}
+struct Foo;
+impl MyTrait for Foo
+{
+    fn required(&self, _unused: f64) {}
+}
+impl<T> MyTrait for Vec<T>
+where
+    T: Clone,
+{
+    fn required(&self, _unused: f64) {}
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"_unused"),
+            "multiline trait/impl header must exempt `_unused`; violations: {:?}",
             violations
         );
     }
