@@ -729,8 +729,12 @@ mod tests {
                 // Fully-determined trait context on this line.
                 pending_impl_header = false;
                 if opens > 0 {
-                    let entry_floor = depth - opens;
-                    trait_impl_stack.push(entry_floor);
+                    // Single-line completion (`trait Marker {}`, `impl Trait for T {}`)
+                    // has no interior — skip push to avoid polluting the stack.
+                    if opens != closes {
+                        let entry_floor = depth - opens;
+                        trait_impl_stack.push(entry_floor);
+                    }
                     pending_trait_context = false;
                 } else {
                     pending_trait_context = true;
@@ -743,8 +747,10 @@ mod tests {
             } else if pending_trait_context && opens > 0 {
                 // Deferred: the opening brace arrived (may be on a `where` clause
                 // continuation line or a standalone `{`).
-                let entry_floor = depth - opens;
-                trait_impl_stack.push(entry_floor);
+                if opens != closes {
+                    let entry_floor = depth - opens;
+                    trait_impl_stack.push(entry_floor);
+                }
                 pending_trait_context = false;
                 pending_impl_header = false;
             } else if pending_impl_header {
@@ -753,8 +759,10 @@ mod tests {
                     // Continuation line contains `for` → confirmed trait impl.
                     pending_impl_header = false;
                     if opens > 0 {
-                        let entry_floor = depth - opens;
-                        trait_impl_stack.push(entry_floor);
+                        if opens != closes {
+                            let entry_floor = depth - opens;
+                            trait_impl_stack.push(entry_floor);
+                        }
                     } else {
                         // Opening brace on a later line (e.g. after `where` clause).
                         pending_trait_context = true;
@@ -1131,6 +1139,64 @@ impl Y {
         assert!(
             violations.is_empty(),
             "no violations expected; violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (P2-3): a single-line `trait Marker {}` must NOT leave a stale entry
+    /// on the trait-impl stack that causes a subsequent inherent-impl method to be
+    /// incorrectly exempted.
+    ///
+    /// **No-op failure guarantee**: removing the `opens != closes` guard in the
+    /// `is_trait_def_line` branch causes `entry_floor = depth - opens` to push a
+    /// floor of `-1` at top-level depth, making every later `depth > -1` check true.
+    /// `_unused` in the inherent `impl Foo` then appears exempt → `assert!(names.contains(...))`
+    /// fires.
+    #[test]
+    fn scan_underscore_sig_params_does_not_leak_context_from_single_line_trait() {
+        let content = r#"
+trait Marker {}
+impl Foo {
+    fn method(&self, _unused: f64) -> f64 {
+        _unused
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"_unused"),
+            "inherent-method `_unused` after single-line `trait Marker {{}}` must be detected; \
+             violations: {:?}",
+            violations
+        );
+    }
+
+    /// Sentinel (P2-4): a compact one-line `impl Marker for Foo {}` must NOT leave a
+    /// stale entry on the trait-impl stack that exempts a subsequent inherent-impl method.
+    ///
+    /// **No-op failure guarantee**: removing the `opens != closes` guard in the
+    /// `is_trait_impl_line` branch causes `entry_floor = depth - 1 = -1` to be pushed,
+    /// making `in_trait_impl` true for all later code at depth ≥ 0.  `_unused` in the
+    /// inherent `impl Foo` then appears exempt → `assert!(names.contains(...))` fires.
+    #[test]
+    fn scan_underscore_sig_params_does_not_leak_context_from_compact_impl_trait_for() {
+        let content = r#"
+trait Marker {}
+struct Foo;
+impl Marker for Foo {}
+impl Foo {
+    fn method(&self, _unused: f64) -> f64 {
+        _unused
+    }
+}
+"#;
+        let violations = scan_underscore_sig_params(content);
+        let names: Vec<&str> = violations.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            names.contains(&"_unused"),
+            "inherent-method `_unused` after compact `impl Marker for Foo {{}}` must be detected; \
+             violations: {:?}",
             violations
         );
     }
