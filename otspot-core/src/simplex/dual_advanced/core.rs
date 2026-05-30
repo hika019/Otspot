@@ -10,8 +10,8 @@
 //!   を計算し `leaving.after_pivot(...)` で γ を rank-1 更新
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars, compute_reduced_costs, made_progress, recompute_gamma_truth,
-    BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
+    basic_obj, compute_dual_vars, compute_reduced_costs, made_progress_with_floor,
+    recompute_gamma_truth, BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
 use super::super::SimplexOutcome;
@@ -394,7 +394,7 @@ pub(crate) fn dual_simplex_core_advanced(
         // 3m: 進歩観測 → no-progress なら Bland mode へ遷移
         if !bland_mode {
             let current = leaving.progress_metric(x_b, basis);
-            if made_progress(best_infeas, current) {
+            if made_progress_with_floor(best_infeas, current, 0.0) {
                 best_infeas = current;
                 iters_since_progress = 0;
             } else {

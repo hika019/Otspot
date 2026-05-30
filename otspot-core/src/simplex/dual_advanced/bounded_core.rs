@@ -54,7 +54,7 @@ use crate::tolerances::PIVOT_TOL;
 use std::sync::atomic::Ordering;
 
 use super::super::dual_common::{
-    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress,
+    basic_obj, compute_dual_vars_into, compute_reduced_costs_into, made_progress_with_floor,
     recompute_gamma_truth, BLAND_ITER_CAP_FACTOR, NO_PROGRESS_MIN, NO_PROGRESS_TRIGGER_FACTOR,
 };
 use super::super::pricing::DualLeavingStrategy;
@@ -601,7 +601,7 @@ pub(crate) fn iterate(
         // Bland mode (smallest-index leaving rule) so the loop terminates finitely.
         if !bland_mode {
             let current = leaving.progress_metric(&state.x_b, &state.basis);
-            if made_progress(best_infeas, current) {
+            if made_progress_with_floor(best_infeas, current, 0.0) {
                 best_infeas = current;
                 iters_since_progress = 0;
             } else {
@@ -813,6 +813,14 @@ fn bounded_obj(
     is_basic: &[bool],
     ubs: &[f64],
 ) -> f64 {
+    debug_assert_eq!(
+        at_upper.len(),
+        is_basic.len(),
+        "at_upper/is_basic length mismatch"
+    );
+    debug_assert_eq!(at_upper.len(), c.len(), "at_upper/c length mismatch");
+    debug_assert_eq!(at_upper.len(), ubs.len(), "at_upper/ubs length mismatch");
+    debug_assert_eq!(basis.len(), x_b.len(), "basis/x_b length mismatch");
     let basic: f64 = basis.iter().zip(x_b.iter()).map(|(&j, &v)| c[j] * v).sum();
     let at_ub: f64 = at_upper
         .iter()
@@ -820,11 +828,11 @@ fn bounded_obj(
         .filter(|&(_, &flag)| flag)
         .inspect(|&(j, _)| {
             debug_assert!(
-                !is_basic.get(j).copied().unwrap_or(false),
+                !is_basic[j],
                 "invariant at_upper[j] => !is_basic[j] violated at j={j}"
             )
         })
-        .map(|(j, _)| c.get(j).copied().unwrap_or(0.0) * ubs.get(j).copied().unwrap_or(0.0))
+        .map(|(j, _)| c[j] * ubs[j])
         .sum();
     basic + at_ub
 }
@@ -2098,6 +2106,24 @@ mod tests {
             }
             other => panic!("expected Timeout (expired deadline), got {other:?}"),
         }
+    }
+
+    /// Sentinel: `bounded_obj` panics in debug mode when a variable is
+    /// simultaneously in `at_upper` and `is_basic` (invariant violation).
+    ///
+    /// No-op proof: removing the `debug_assert!(!is_basic[j], ...)` inside
+    /// `bounded_obj` makes this test NOT panic → `#[should_panic]` causes FAIL.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "invariant at_upper")]
+    fn bounded_obj_invariant_violation_panics_in_debug() {
+        let c = vec![1.0, 2.0];
+        let basis = vec![0usize];
+        let x_b = vec![0.0];
+        let at_upper = vec![false, true]; // var 1 at upper
+        let is_basic = vec![true, true]; // var 1 ALSO basic → invariant violation
+        let ubs = vec![5.0, 3.0];
+        let _ = bounded_obj(&c, &basis, &x_b, &at_upper, &is_basic, &ubs);
     }
 
     /// **Sentinel:** expired deadline before O(m²) γ init must return `Timeout`
