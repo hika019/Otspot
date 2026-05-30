@@ -81,7 +81,6 @@ DATASETS: list[Dataset] = [
     # QP synthetic (no external reference by design)
     Dataset("osqp_bench_extra", None, None, "synthetic"),
     Dataset("osqp_bench_illscaled", None, None, "synthetic"),
-    Dataset("osqp_bench_xl", None, None, "synthetic"),
     Dataset("qplib_nonconvex", "data/baseline_objectives/qplib_nonconvex_synthetic.csv",
             [".qplib", ".npz", ".mat"], "synthetic"),
     # LP official

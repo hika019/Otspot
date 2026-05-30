@@ -165,7 +165,6 @@ if [[ "$MODE" == "check" ]]; then
   check_dir data/osqp_bench 62         || fail=1
   check_dir data/osqp_bench_extra 238  || fail=1
   check_dir data/osqp_bench_illscaled 126 || fail=1
-  check_dir data/osqp_bench_xl 2       || fail=1
   check_dir data/qp_dense_a 8          || fail=1
   check_dir data/qp_infeasible 12      || fail=1
   check_dir data/qp_unbounded 9        || fail=1
@@ -271,7 +270,6 @@ if [[ "$MODE" == "all" || "$MODE" == "qp" ]]; then
   # gen 系
   run_or_skip data/osqp_bench_extra     238 "python3 scripts/gen_osqp_bench_extra.py"
   run_or_skip data/osqp_bench_illscaled 126 "python3 scripts/gen_osqp_bench_illscaled.py"
-  run_or_skip data/osqp_bench_xl        2   "python3 scripts/gen_osqp_bench_xl.py"
   run_or_skip data/qp_dense_a           8   "python3 scripts/gen_dense_a_qp.py"
   run_or_skip data/qp_infeasible        12  "python3 scripts/gen_infeasible_qp.py"
   run_or_skip data/qp_unbounded         9   "python3 scripts/gen_unbounded_qp.py"
