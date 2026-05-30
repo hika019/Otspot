@@ -53,7 +53,7 @@ fn ipm_box_deadline(options: &SolverOptions, now: Instant) -> Option<Instant> {
     })
 }
 
-pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
+pub(crate) fn solve_as_lp(problem: &QpProblem, options: &SolverOptions) -> SolverResult {
     let opts_with_deadline;
     let options: &SolverOptions = if options.deadline.is_none() {
         if let Some(secs) = options.timeout_secs {
@@ -146,7 +146,8 @@ pub(crate) fn solve_as_lp_pub(problem: &QpProblem, options: &SolverOptions) -> S
 
     // QpProblem → LpProblem 変換時に lp.obj_offset=0.0 になるため、
     // QpProblem.obj_offset を別経路で加算する必要がある。
-    // Optimal/SuboptimalSolution のみ加算 (Infeasible/Timeout 等は加算しない)。
+    // Optimal/SuboptimalSolution/Timeout (incumbent あり) の場合に加算。
+    // Infeasible/NumericalError 等は加算しない。
     let mut simplex_result = crate::lp::solve_lp_forwarded_from_qp(&lp, options);
     if matches!(
         simplex_result.status,
@@ -600,7 +601,7 @@ mod tests {
             vec![ConstraintType::Ge, ConstraintType::Le],
         ).unwrap();
         problem.obj_offset = 42.5;
-        let result = solve_as_lp_pub(&problem, &SolverOptions::default());
+        let result = solve_as_lp(&problem, &SolverOptions::default());
         assert_eq!(result.status, SolveStatus::Infeasible,
             "expected Infeasible, got {:?}", result.status);
         assert!(
@@ -811,7 +812,7 @@ mod tests {
             ..SolverOptions::default()
         };
 
-        let result = solve_as_lp_pub(&problem, &opts);
+        let result = solve_as_lp(&problem, &opts);
 
         assert_eq!(
             result.status,
