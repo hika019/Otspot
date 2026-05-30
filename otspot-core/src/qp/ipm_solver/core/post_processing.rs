@@ -13,14 +13,14 @@ use crate::qp::problem::QpProblem;
 /// 経路が別途見る (max_l_nnz_from_budget) が、予算内に収まっても巨大問題では
 /// 因子化自体が分単位かかり deadline を空費する。これは「分単位 factorize を
 /// post-processing 段で行うか否か」の時間 proxy ガード (n+m で判定)。
-use crate::tolerances::LARGE_PROBLEM_THRESHOLD;
+use crate::tolerances::LARGE_PROBLEM_SIZE_SUM;
 const REFIT_PROGRESS_EPS: f64 = 1e-12;
 const IRLS_INNER_MAX_ITERS: usize = 30;
 const KRYLOV_MAX_ITERS: usize = 400;
 
 pub(super) fn allow_primal_projection(orig_problem: &QpProblem) -> bool {
     let problem_size = orig_problem.num_vars + orig_problem.num_constraints;
-    problem_size <= LARGE_PROBLEM_THRESHOLD
+    problem_size <= LARGE_PROBLEM_SIZE_SUM
 }
 
 /// IPM 出口で既に satisfies_eps の全条件を満たした Optimal なら post-processing skip。

@@ -73,7 +73,6 @@ pub(super) fn step8_free_singleton_col(
             continue;
         }
         let ct = st.constraint_types[i];
-        let cj = st.c[j];
         if orig_lb != f64::NEG_INFINITY || orig_ub != f64::INFINITY {
             continue;
         }
@@ -86,7 +85,6 @@ pub(super) fn step8_free_singleton_col(
         }
         eliminate_variable_via_eq_row(st, i, j)?;
         *new_subst += 1;
-        let _ = cj;
     }
     Ok(())
 }

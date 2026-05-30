@@ -273,5 +273,5 @@ echo "" >&2
 echo "注意: 正解値 CSV は data/baseline_objectives/netlib_lp_hard.csv" >&2
 echo "  ベンチ実行: SOLVER_DIR=. bash scripts/bench_parallel.sh \\" >&2
 echo "    --data-dir data/lp_problems_hard \\" >&2
-echo "    --timeout 1000 --eps 1e-6 --jobs 8 \\" >&2
+echo "    --timeout 1000 --eps 1e-6 --jobs 6 \\" >&2
 echo "    --output /tmp/hard_bench.txt" >&2

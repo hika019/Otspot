@@ -116,10 +116,6 @@ fn flip_apply_disabled() -> bool {
 /// Guarantees termination even when pricing degenerates or deadline is None (unit tests).
 const SIMPLEX_ITER_HARD_CAP: usize = 1_000_000;
 
-/// Hard cap for the bounded dual simplex loop (alias of [`SIMPLEX_ITER_HARD_CAP`]).
-/// Guarantees termination when deadline is absent (unit tests) or pricing degenerates.
-const BOUNDED_DUAL_ITER_HARD_CAP: usize = SIMPLEX_ITER_HARD_CAP;
-
 /// Internal state of the bounded dual simplex iteration. Built from
 /// `BoundedStandardForm` (cold) or hand-populated by tests / warm-start
 /// callers, and consumed by `iterate`.
@@ -274,7 +270,7 @@ pub(crate) fn iterate(
 
     loop {
         state.iterations = state.iterations.saturating_add(1);
-        if state.iterations > BOUNDED_DUAL_ITER_HARD_CAP {
+        if state.iterations > SIMPLEX_ITER_HARD_CAP {
             let obj = bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs);
             return (BoundedOutcome::Timeout(obj), state);
         }
@@ -634,8 +630,6 @@ pub(crate) fn extract_dual_info_bounded(
 
 // ── bounded primal Phase 2 ─────────────────────────────────────────────────
 
-const PHASE2_PRIMAL_ITER_CAP: usize = SIMPLEX_ITER_HARD_CAP;
-
 /// Objective including non-basic at-upper-bound contributions.
 ///
 /// `basic_obj` only sums over basic variables. For the bounded simplex, the
@@ -700,7 +694,7 @@ pub(crate) fn phase2_primal_bounded(
 
     loop {
         *iters = iters.saturating_add(1);
-        if *iters > PHASE2_PRIMAL_ITER_CAP {
+        if *iters > SIMPLEX_ITER_HARD_CAP {
             return (SimplexOutcome::Timeout(bounded_obj(c, &state.basis, &state.x_b, &state.at_upper, &state.is_basic, ubs)), state);
         }
         if options.deadline.is_some_and(|d| std::time::Instant::now() >= d) {

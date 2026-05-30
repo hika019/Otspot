@@ -1,5 +1,7 @@
 #!/bin/bash
 # bench_mini.sh — 開発用 mini bench (代表 14 問、デフォルト timeout=60s)
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
+# L70 default (1000s/1e-6) と差分 (60s/1e-4) は TDD サイクル速度優先のため意図的
 #
 # TDD サイクルで頻繁に走らせる用。bench_parallel.sh を内部で呼び出し、
 # 一時ディレクトリに代表問題の symlink 集合を作って渡す。
@@ -11,7 +13,7 @@
 # 環境変数:
 #   TIMEOUT  問題あたり timeout 秒 (default: 60)
 #   EPS      精度 (default: 1e-4)
-#   JOBS     並列数 (default: 8)
+#   JOBS     並列数 (default: 6)
 #   OUTPUT   出力ファイル (default: logs/bench_mini/mini.txt)
 #
 # 選定基準:
@@ -42,7 +44,7 @@ PROBLEMS=(
 
 TIMEOUT="${TIMEOUT:-60}"
 EPS="${EPS:-1e-4}"
-JOBS="${JOBS:-8}"
+JOBS="${JOBS:-6}"
 OUTPUT="${OUTPUT:-$ROOT/logs/bench_mini/mini_eps${EPS}_t${TIMEOUT}.txt}"
 
 TMPDIR="$(mktemp -d /tmp/bench_mini_XXXXXX)"

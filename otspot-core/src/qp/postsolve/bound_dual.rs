@@ -10,6 +10,7 @@ use crate::qp::postsolve::dual_recovery::{
     dual_recovery_row_slack_tol,
 };
 use crate::qp::problem::QpProblem;
+use crate::tolerances::SLACK_TOL_REL;
 
 /// reduced bound_duals を元問題空間に展開。除去変数の bound_dual は 0.0 で埋める。
 pub(crate) fn remap_bound_duals_to_orig(
@@ -120,7 +121,6 @@ pub(crate) fn zero_inactive_inequality_duals(problem: &QpProblem, result: &mut S
     else {
         return;
     };
-    const SLACK_TOL_REL: f64 = 1e-8;
     for i in 0..problem.num_constraints {
         let slack = match problem.constraint_types[i] {
             crate::problem::ConstraintType::Le => problem.b[i] - ax[i],

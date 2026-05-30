@@ -45,8 +45,6 @@ pub(super) fn step5_redundant(prob: &QpProblem, ws: &mut Workspace) -> Result<()
                 }
             }
         }
-        // Suppress `row_lb` unused warning when only `row_ub` is consulted.
-        let _ = row_lb;
     }
     Ok(())
 }

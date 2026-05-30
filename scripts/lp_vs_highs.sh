@@ -1,5 +1,6 @@
 #!/bin/bash
 # lp_vs_highs.sh — Netlib LP benchmark: self-solver vs HiGHS comparison
+# 他の bench suite と並行実行禁止 (CLAUDE.md L72 PC リソース contention 回避、各 suite 順次実行)
 #
 # METHODOLOGY (公平性 / Fairness):
 #   Tolerance:    Both solvers eps=1e-6 (primal + dual feasibility)
