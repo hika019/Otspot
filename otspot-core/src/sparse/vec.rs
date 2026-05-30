@@ -7,22 +7,13 @@ use crate::tolerances::ZERO_TOL;
 /// ゼロ近傍の値（絶対値が `ZERO_TOL` 以下）は自動的に除去される。
 #[derive(Debug, Clone)]
 pub struct SparseVec {
-    /// 非ゼロ要素のインデックス（昇順ソート済み）
     pub indices: Vec<usize>,
-    /// 非ゼロ要素の値（`indices` と同じ順序）
     pub values: Vec<f64>,
-    /// 論理的な長さ（ゼロ要素を含む全体の次元数）
-    pub len: usize, // logical length
+    pub len: usize,
 }
 
 impl SparseVec {
-    /// 密ベクトルから疎ベクトルを生成する
-    ///
-    /// 絶対値が ZERO_TOL（1e-12）を超える要素のみを保持し、残りは捨てる。
-    /// インデックスは元の配列の位置順（昇順）で格納される。
-    ///
-    /// # 引数
-    /// - `dense`: 変換元の密ベクトル（スライス）
+    /// Creates a `SparseVec` from a dense slice, dropping entries with `|v| ≤ ZERO_TOL`.
     pub fn from_dense(dense: &[f64]) -> Self {
         let mut indices = Vec::new();
         let mut values = Vec::new();
@@ -39,10 +30,6 @@ impl SparseVec {
         }
     }
 
-    /// 疎ベクトルを密ベクトルに変換する
-    ///
-    /// 非ゼロ要素を対応するインデックスに配置し、残りはゼロで埋める。
-    /// 返却ベクトルの長さは `self.len` と等しい。
     pub fn to_dense(&self) -> Vec<f64> {
         let mut dense = vec![0.0; self.len];
         for (k, &idx) in self.indices.iter().enumerate() {
@@ -51,13 +38,7 @@ impl SparseVec {
         dense
     }
 
-    /// 事前確保済みバッファに密ベクトルを書き込む
-    ///
-    /// `buf` を一旦ゼロクリアしてから非ゼロ要素を書き込む。
-    /// ヒープ割り当てを行わないため、反復ループ内での再利用に適する。
-    ///
-    /// # 引数
-    /// - `buf`: 書き込み先バッファ（長さ >= `self.len` であること）
+    /// Writes to a pre-allocated buffer (zero-fills first). Avoids heap allocation in hot loops.
     pub fn to_dense_into(&self, buf: &mut [f64]) {
         for v in buf.iter_mut() {
             *v = 0.0;

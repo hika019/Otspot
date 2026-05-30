@@ -25,8 +25,7 @@ mod phase1;
 pub mod ratio_test;
 mod steepest_edge;
 
-/// `options.dual_pricing` から DualLeavingStrategy を組み立てる。
-/// DSE 経路は m 個の重みを new() で初期化する (γ_i = 1, 識別基底想定)。
+/// Builds a [`DualLeavingStrategy`] from `pricing`; DSE initialises *m* weights to 1.
 fn make_leaving_strategy(pricing: DualPricing, m: usize) -> Box<dyn DualLeavingStrategy> {
     match pricing {
         DualPricing::MostInfeasible => Box::new(MostInfeasibleLeaving),

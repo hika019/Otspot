@@ -555,15 +555,7 @@ pub(crate) fn big_m_cold_start(
     // これにより Big-M Phase I 本来の「人工変数を basis から追い出す」役割を
     // 標準 dual simplex ループ (Harris ratio test 装備) で実現する。
     //
-    // ## Phase I 時間配分
-    //
-    // Phase I は元 deadline を honor する。以前は `remaining / 2` を割り当て
-    // Phase II にも半分を残していたが、外側 `solve_dual_advanced` の Primal-first
-    // halving と二重になり wall = 0.75 × user_budget の bug を生んだ。
-    // - Phase I が Optimal 完走: Phase II は当然残り deadline で動く。
-    // - Phase I が Timeout: Phase II は遅延の起点になっても意味がないので
-    //   そのまま Timeout 返却 (Farkas 検証 fail 時)。元の「half-deadline 到達 →
-    //   Infeasibility 推定」は Farkas 証明書に置き換え済。
+    // Phase I は元 deadline を使用 (外側 split との二重 halving 回避)。
     let mut leaving = ArtificialPriorityLeaving { n_total };
     let mut total_iters: usize = 0;
     let phase1_outcome = dual_simplex_core_advanced(
