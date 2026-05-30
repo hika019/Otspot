@@ -281,7 +281,7 @@ fn finish_bounded(
         BoundedOutcome::UbViolationOutOfScope { .. } => None,
         BoundedOutcome::Unbounded => Some(SolverResult {
             status: SolveStatus::Infeasible,
-            objective: 0.0,
+            objective: f64::INFINITY,
             solution: vec![],
             dual_solution: vec![],
             reduced_costs: vec![],
@@ -411,7 +411,7 @@ fn cold_start_advanced(
             // 双対非有界 = 主実行不可
             return SolverResult {
                 status: SolveStatus::Infeasible,
-                objective: 0.0,
+                objective: f64::INFINITY,
                 solution: vec![],
                 dual_solution: vec![],
                 reduced_costs: vec![],

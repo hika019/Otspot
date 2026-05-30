@@ -575,15 +575,18 @@ mod tests {
         );
     }
 
-    /// `obj_offset` は Optimal/SuboptimalSolution 以外のステータスに加算してはならない。
+    /// Infeasible LP dispatched via QP path must return `f64::INFINITY` as objective,
+    /// regardless of `problem.obj_offset`.
     ///
-    /// No-op (removing the status guard) causes Infeasible to return
-    /// `objective = obj_offset` instead of `f64::INFINITY` → FAIL.
+    /// Sentinel: removing `objective: f64::INFINITY` from any simplex Infeasible arm
+    /// (e.g. reverting to `objective: 0.0`) causes the assert to fail.
+    /// The status guard at lp_dispatch.rs:150-153 ensures the INFINITY value is
+    /// not further modified (INFINITY absorbs, but Timeout/NumericalError are also guarded).
     #[test]
     fn infeasible_lp_dispatch_obj_offset_not_added() {
         use crate::options::SolverOptions;
         use crate::problem::SolveStatus;
-        // Infeasible: 0x1 >= 2 AND 0x1 <= 1 is always false (empty feasible set).
+        // Infeasible: x >= 2 AND x <= 1 (empty feasible set), obj_offset = 42.5
         let a = CscMatrix::from_triplets(&[0, 1], &[0, 0], &[1.0, 1.0], 2, 1).unwrap();
         let mut problem = QpProblem::new(
             CscMatrix::new(1, 1),
@@ -598,14 +601,9 @@ mod tests {
         assert_eq!(result.status, SolveStatus::Infeasible,
             "expected Infeasible, got {:?}", result.status);
         assert!(
-            result.objective != problem.obj_offset,
-            "Infeasible objective must NOT equal obj_offset ({}) — status guard missing",
-            problem.obj_offset,
-        );
-        assert!(
-            result.objective.is_infinite(),
-            "Infeasible objective must be infinite, got {}",
-            result.objective,
+            result.objective.is_infinite() && result.objective.is_sign_positive(),
+            "Infeasible objective must be +INFINITY (convention); got {} (obj_offset={})",
+            result.objective, problem.obj_offset,
         );
     }
 
